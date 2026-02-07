@@ -101,6 +101,8 @@ void App::update(float dt) {
     updateCamera(dt);
     m_simulation.update(dt);
 
+    const CameraRaycastResult raycast = raycastFromCamera();
+
     const bool placePressedThisFrame = m_input.placeBlockDown && !m_wasPlaceBlockDown;
     const bool removePressedThisFrame = m_input.removeBlockDown && !m_wasRemoveBlockDown;
     m_wasPlaceBlockDown = m_input.placeBlockDown;
@@ -120,6 +122,24 @@ void App::update(float dt) {
         }
     }
 
+    render::VoxelPreview preview{};
+    if (raycast.hitSolid) {
+        const bool showRemovePreview = m_input.removeBlockDown || !raycast.hasAdjacentEmpty;
+        if (showRemovePreview) {
+            preview.visible = true;
+            preview.mode = render::VoxelPreview::Mode::Remove;
+            preview.x = raycast.solidX;
+            preview.y = raycast.solidY;
+            preview.z = raycast.solidZ;
+        } else {
+            preview.visible = true;
+            preview.mode = render::VoxelPreview::Mode::Add;
+            preview.x = raycast.adjacentEmptyX;
+            preview.y = raycast.adjacentEmptyY;
+            preview.z = raycast.adjacentEmptyZ;
+        }
+    }
+
     const render::CameraPose cameraPose{
         m_camera.x,
         m_camera.y,
@@ -128,7 +148,7 @@ void App::update(float dt) {
         m_camera.pitchDegrees,
         m_camera.fovDegrees
     };
-    m_renderer.renderFrame(m_chunkGrid, m_simulation, cameraPose);
+    m_renderer.renderFrame(m_chunkGrid, m_simulation, cameraPose, preview);
 }
 
 void App::shutdown() {
@@ -239,12 +259,13 @@ void App::updateCamera(float dt) {
     m_camera.z += m_camera.velocityZ * dt;
 }
 
-bool App::tryPlaceVoxelFromCameraRay() {
+App::CameraRaycastResult App::raycastFromCamera() const {
+    CameraRaycastResult result{};
     if (m_chunkGrid.chunks().empty()) {
-        return false;
+        return result;
     }
 
-    world::Chunk& chunk = m_chunkGrid.chunks().front();
+    const world::Chunk& chunk = m_chunkGrid.chunks().front();
 
     const float yawRadians = math::radians(m_camera.yawDegrees);
     const float pitchRadians = math::radians(m_camera.pitchDegrees);
@@ -255,7 +276,7 @@ bool App::tryPlaceVoxelFromCameraRay() {
         std::sin(yawRadians) * cosPitch
     });
     if (math::lengthSquared(rayDirection) <= 0.0f) {
-        return false;
+        return result;
     }
 
     const math::Vector3 rayOrigin{m_camera.x, m_camera.y, m_camera.z};
@@ -283,11 +304,17 @@ bool App::tryPlaceVoxelFromCameraRay() {
         }
 
         if (chunk.isSolid(vx, vy, vz)) {
-            if (!hasPreviousEmpty || chunk.isSolid(previousX, previousY, previousZ)) {
-                return false;
+            result.hitSolid = true;
+            result.solidX = vx;
+            result.solidY = vy;
+            result.solidZ = vz;
+            if (hasPreviousEmpty && !chunk.isSolid(previousX, previousY, previousZ)) {
+                result.hasAdjacentEmpty = true;
+                result.adjacentEmptyX = previousX;
+                result.adjacentEmptyY = previousY;
+                result.adjacentEmptyZ = previousZ;
             }
-            chunk.setVoxel(previousX, previousY, previousZ, world::Voxel{world::VoxelType::Solid});
-            return true;
+            return result;
         }
 
         hasPreviousEmpty = true;
@@ -296,7 +323,22 @@ bool App::tryPlaceVoxelFromCameraRay() {
         previousZ = vz;
     }
 
-    return false;
+    return result;
+}
+
+bool App::tryPlaceVoxelFromCameraRay() {
+    if (m_chunkGrid.chunks().empty()) {
+        return false;
+    }
+
+    const CameraRaycastResult raycast = raycastFromCamera();
+    if (!raycast.hitSolid || !raycast.hasAdjacentEmpty) {
+        return false;
+    }
+
+    world::Chunk& chunk = m_chunkGrid.chunks().front();
+    chunk.setVoxel(raycast.adjacentEmptyX, raycast.adjacentEmptyY, raycast.adjacentEmptyZ, world::Voxel{world::VoxelType::Solid});
+    return true;
 }
 
 bool App::tryRemoveVoxelFromCameraRay() {
@@ -304,45 +346,14 @@ bool App::tryRemoveVoxelFromCameraRay() {
         return false;
     }
 
-    world::Chunk& chunk = m_chunkGrid.chunks().front();
-
-    const float yawRadians = math::radians(m_camera.yawDegrees);
-    const float pitchRadians = math::radians(m_camera.pitchDegrees);
-    const float cosPitch = std::cos(pitchRadians);
-    const math::Vector3 rayDirection = math::normalize(math::Vector3{
-        std::cos(yawRadians) * cosPitch,
-        std::sin(pitchRadians),
-        std::sin(yawRadians) * cosPitch
-    });
-    if (math::lengthSquared(rayDirection) <= 0.0f) {
+    const CameraRaycastResult raycast = raycastFromCamera();
+    if (!raycast.hitSolid) {
         return false;
     }
 
-    const math::Vector3 rayOrigin{m_camera.x, m_camera.y, m_camera.z};
-    constexpr float kRayStep = 0.05f;
-    constexpr float kRayMaxDistance = 8.0f;
-
-    for (float distance = 0.0f; distance <= kRayMaxDistance; distance += kRayStep) {
-        const math::Vector3 sample = rayOrigin + (rayDirection * distance);
-        const int vx = static_cast<int>(std::floor(sample.x));
-        const int vy = static_cast<int>(std::floor(sample.y));
-        const int vz = static_cast<int>(std::floor(sample.z));
-
-        const bool inBounds =
-            vx >= 0 && vx < world::Chunk::kSizeX &&
-            vy >= 0 && vy < world::Chunk::kSizeY &&
-            vz >= 0 && vz < world::Chunk::kSizeZ;
-        if (!inBounds) {
-            continue;
-        }
-
-        if (chunk.isSolid(vx, vy, vz)) {
-            chunk.setVoxel(vx, vy, vz, world::Voxel{world::VoxelType::Empty});
-            return true;
-        }
-    }
-
-    return false;
+    world::Chunk& chunk = m_chunkGrid.chunks().front();
+    chunk.setVoxel(raycast.solidX, raycast.solidY, raycast.solidZ, world::Voxel{world::VoxelType::Empty});
+    return true;
 }
 
 } // namespace app

@@ -31,6 +31,36 @@ struct alignas(16) CameraUniform {
     float mvp[16];
 };
 
+world::ChunkMeshData buildSingleVoxelPreviewMesh(
+    std::uint32_t x,
+    std::uint32_t y,
+    std::uint32_t z,
+    std::uint32_t ao,
+    std::uint32_t material
+) {
+    world::ChunkMeshData mesh{};
+    mesh.vertices.reserve(24);
+    mesh.indices.reserve(36);
+
+    for (std::uint32_t faceId = 0; faceId < 6; ++faceId) {
+        const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
+        for (std::uint32_t corner = 0; corner < 4; ++corner) {
+            world::PackedVoxelVertex vertex{};
+            vertex.bits = world::PackedVoxelVertex::pack(x, y, z, faceId, corner, ao, material);
+            mesh.vertices.push_back(vertex);
+        }
+
+        mesh.indices.push_back(baseVertex + 0);
+        mesh.indices.push_back(baseVertex + 1);
+        mesh.indices.push_back(baseVertex + 2);
+        mesh.indices.push_back(baseVertex + 0);
+        mesh.indices.push_back(baseVertex + 2);
+        mesh.indices.push_back(baseVertex + 3);
+    }
+
+    return mesh;
+}
+
 math::Matrix4 transpose(const math::Matrix4& matrix) {
     math::Matrix4 result{};
     for (int row = 0; row < 4; ++row) {
@@ -758,6 +788,11 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
+    if (!createPreviewBuffers()) {
+        std::cerr << "[render] init failed at createPreviewBuffers\n";
+        shutdown();
+        return false;
+    }
     if (!createFrameResources()) {
         std::cerr << "[render] init failed at createFrameResources\n";
         shutdown();
@@ -903,17 +938,20 @@ bool Renderer::pickPhysicalDevice() {
             continue;
         }
 
+        const bool supportsWireframe = features2.features.fillModeNonSolid == VK_TRUE;
         m_physicalDevice = candidate;
         m_graphicsQueueFamilyIndex = queueFamily.graphicsAndPresent.value();
         m_graphicsQueueIndex = queueFamily.graphicsQueueIndex;
         m_transferQueueFamilyIndex = queueFamily.transfer.value();
         m_transferQueueIndex = queueFamily.transferQueueIndex;
+        m_supportsWireframePreview = supportsWireframe;
         m_depthFormat = depthFormat;
         std::cerr << "[render] selected GPU: " << properties.deviceName
                   << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
                   << ", graphicsQueueIndex=" << m_graphicsQueueIndex
                   << ", transferQueueFamily=" << m_transferQueueFamilyIndex
-                  << ", transferQueueIndex=" << m_transferQueueIndex << "\n";
+                  << ", transferQueueIndex=" << m_transferQueueIndex
+                  << ", wireframePreview=" << (m_supportsWireframePreview ? "yes" : "no") << "\n";
         return true;
     }
 
@@ -969,6 +1007,9 @@ bool Renderer::createLogicalDevice() {
     createInfo.pNext = &vulkan13Features;
     createInfo.queueCreateInfoCount = queueCreateInfoCount;
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
+    VkPhysicalDeviceFeatures deviceFeatures{};
+    deviceFeatures.fillModeNonSolid = m_supportsWireframePreview ? VK_TRUE : VK_FALSE;
+    createInfo.pEnabledFeatures = &deviceFeatures;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(kDeviceExtensions.size());
     createInfo.ppEnabledExtensionNames = kDeviceExtensions.data();
 
@@ -1064,6 +1105,45 @@ bool Renderer::createTransferResources() {
         return false;
     }
 
+    return true;
+}
+
+bool Renderer::createPreviewBuffers() {
+    if (m_previewVertexBufferHandle != kInvalidBufferHandle && m_previewIndexBufferHandle != kInvalidBufferHandle) {
+        return true;
+    }
+
+    const world::ChunkMeshData mesh = buildSingleVoxelPreviewMesh(0, 0, 0, 3, 1);
+    if (mesh.vertices.empty() || mesh.indices.empty()) {
+        std::cerr << "[render] preview mesh build failed\n";
+        return false;
+    }
+
+    BufferCreateDesc vertexCreateDesc{};
+    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(world::PackedVoxelVertex));
+    vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vertexCreateDesc.initialData = mesh.vertices.data();
+    m_previewVertexBufferHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
+    if (m_previewVertexBufferHandle == kInvalidBufferHandle) {
+        std::cerr << "[render] preview vertex buffer allocation failed\n";
+        return false;
+    }
+
+    BufferCreateDesc indexCreateDesc{};
+    indexCreateDesc.size = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
+    indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    indexCreateDesc.initialData = mesh.indices.data();
+    m_previewIndexBufferHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
+    if (m_previewIndexBufferHandle == kInvalidBufferHandle) {
+        std::cerr << "[render] preview index buffer allocation failed\n";
+        m_bufferAllocator.destroyBuffer(m_previewVertexBufferHandle);
+        m_previewVertexBufferHandle = kInvalidBufferHandle;
+        return false;
+    }
+
+    m_previewIndexCount = static_cast<uint32_t>(mesh.indices.size());
     return true;
 }
 
@@ -1525,29 +1605,76 @@ bool Renderer::createGraphicsPipeline() {
     pipelineCreateInfo.renderPass = VK_NULL_HANDLE;
     pipelineCreateInfo.subpass = 0;
 
-    VkPipeline newPipeline = VK_NULL_HANDLE;
-    const VkResult pipelineResult = vkCreateGraphicsPipelines(
+    VkPipeline worldPipeline = VK_NULL_HANDLE;
+    const VkResult worldPipelineResult = vkCreateGraphicsPipelines(
         m_device,
         VK_NULL_HANDLE,
         1,
         &pipelineCreateInfo,
         nullptr,
-        &newPipeline
+        &worldPipeline
+    );
+    if (worldPipelineResult != VK_SUCCESS) {
+        vkDestroyShaderModule(m_device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, vertShaderModule, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(world)", worldPipelineResult);
+        return false;
+    }
+
+    VkPipelineRasterizationStateCreateInfo previewRasterizer = rasterizer;
+    previewRasterizer.polygonMode = m_supportsWireframePreview ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+    previewRasterizer.cullMode = VK_CULL_MODE_NONE;
+    previewRasterizer.depthBiasEnable = VK_TRUE;
+
+    VkPipelineDepthStencilStateCreateInfo previewDepthStencil = depthStencil;
+    previewDepthStencil.depthWriteEnable = VK_FALSE;
+    previewDepthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    std::array<VkDynamicState, 3> previewDynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_DEPTH_BIAS,
+    };
+    VkPipelineDynamicStateCreateInfo previewDynamicState{};
+    previewDynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    previewDynamicState.dynamicStateCount = static_cast<uint32_t>(previewDynamicStates.size());
+    previewDynamicState.pDynamicStates = previewDynamicStates.data();
+
+    VkGraphicsPipelineCreateInfo previewPipelineCreateInfo = pipelineCreateInfo;
+    previewPipelineCreateInfo.pRasterizationState = &previewRasterizer;
+    previewPipelineCreateInfo.pDepthStencilState = &previewDepthStencil;
+    previewPipelineCreateInfo.pDynamicState = &previewDynamicState;
+
+    VkPipeline previewPipeline = VK_NULL_HANDLE;
+    const VkResult previewPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &previewPipelineCreateInfo,
+        nullptr,
+        &previewPipeline
     );
 
     vkDestroyShaderModule(m_device, fragShaderModule, nullptr);
     vkDestroyShaderModule(m_device, vertShaderModule, nullptr);
 
-    if (pipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateGraphicsPipelines", pipelineResult);
+    if (previewPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(preview)", previewPipelineResult);
         return false;
     }
 
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
     }
-    m_pipeline = newPipeline;
-    std::cerr << "[render] graphics pipeline ready\n";
+    if (m_previewPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_previewPipeline, nullptr);
+    }
+    m_pipeline = worldPipeline;
+    m_previewPipeline = previewPipeline;
+    std::cerr << "[render] graphics pipelines ready (preview="
+              << (m_supportsWireframePreview ? "wireframe" : "ghost")
+              << ")\n";
     return true;
 }
 
@@ -1825,7 +1952,8 @@ void Renderer::collectCompletedBufferReleases() {
 void Renderer::renderFrame(
     const world::ChunkGrid& chunkGrid,
     const sim::Simulation& simulation,
-    const CameraPose& camera
+    const CameraPose& camera,
+    const VoxelPreview& preview
 ) {
     (void)chunkGrid;
     (void)simulation;
@@ -2043,6 +2171,49 @@ void Renderer::renderFrame(
     vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
     vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
+
+    if (preview.visible && m_previewPipeline != VK_NULL_HANDLE) {
+        const uint32_t previewX = static_cast<uint32_t>(std::clamp(preview.x, 0, 31));
+        const uint32_t previewY = static_cast<uint32_t>(std::clamp(preview.y, 0, 31));
+        const uint32_t previewZ = static_cast<uint32_t>(std::clamp(preview.z, 0, 31));
+        const uint32_t previewMaterial = (preview.mode == VoxelPreview::Mode::Add) ? 1u : 0u;
+        const uint32_t previewAo = (preview.mode == VoxelPreview::Mode::Add) ? 3u : 0u;
+        const world::ChunkMeshData previewMesh = buildSingleVoxelPreviewMesh(
+            previewX,
+            previewY,
+            previewZ,
+            previewAo,
+            previewMaterial
+        );
+
+        const VkDeviceSize previewVertexBytes =
+            static_cast<VkDeviceSize>(previewMesh.vertices.size() * sizeof(world::PackedVoxelVertex));
+        void* mappedPreviewVertices = m_bufferAllocator.mapBuffer(m_previewVertexBufferHandle, 0, previewVertexBytes);
+        if (mappedPreviewVertices != nullptr) {
+            std::memcpy(mappedPreviewVertices, previewMesh.vertices.data(), static_cast<size_t>(previewVertexBytes));
+            m_bufferAllocator.unmapBuffer(m_previewVertexBufferHandle);
+
+            const VkBuffer previewVertexBuffer = m_bufferAllocator.getBuffer(m_previewVertexBufferHandle);
+            const VkBuffer previewIndexBuffer = m_bufferAllocator.getBuffer(m_previewIndexBufferHandle);
+            if (previewVertexBuffer != VK_NULL_HANDLE && previewIndexBuffer != VK_NULL_HANDLE) {
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_previewPipeline);
+                vkCmdBindDescriptorSets(
+                    commandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    m_pipelineLayout,
+                    0,
+                    1,
+                    &m_descriptorSets[m_currentFrame],
+                    0,
+                    nullptr
+                );
+                vkCmdSetDepthBias(commandBuffer, -1.0f, 0.0f, -1.0f);
+                vkCmdBindVertexBuffers(commandBuffer, 0, 1, &previewVertexBuffer, &vertexBufferOffset);
+                vkCmdBindIndexBuffer(commandBuffer, previewIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(commandBuffer, m_previewIndexCount, 1, 0, 0, 0);
+            }
+        }
+    }
 
     vkCmdEndRendering(commandBuffer);
 
@@ -2265,6 +2436,18 @@ void Renderer::destroyTransferResources() {
     }
 }
 
+void Renderer::destroyPreviewBuffers() {
+    if (m_previewIndexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_previewIndexBufferHandle);
+        m_previewIndexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_previewVertexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_previewVertexBufferHandle);
+        m_previewVertexBufferHandle = kInvalidBufferHandle;
+    }
+    m_previewIndexCount = 0;
+}
+
 void Renderer::destroyChunkBuffers() {
     if (m_indexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_indexBufferHandle);
@@ -2289,6 +2472,10 @@ void Renderer::destroyChunkBuffers() {
 }
 
 void Renderer::destroyPipeline() {
+    if (m_previewPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_previewPipeline, nullptr);
+        m_previewPipeline = VK_NULL_HANDLE;
+    }
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
         m_pipeline = VK_NULL_HANDLE;
@@ -2313,6 +2500,7 @@ void Renderer::shutdown() {
             m_renderTimelineSemaphore = VK_NULL_HANDLE;
         }
         m_uploadRing.shutdown(&m_bufferAllocator);
+        destroyPreviewBuffers();
         destroyChunkBuffers();
         destroyPipeline();
         if (m_descriptorPool != VK_NULL_HANDLE) {
@@ -2349,6 +2537,7 @@ void Renderer::shutdown() {
     m_transferQueueFamilyIndex = 0;
     m_transferQueueIndex = 0;
     m_depthFormat = VK_FORMAT_UNDEFINED;
+    m_supportsWireframePreview = false;
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;

@@ -20,8 +20,20 @@ public:
     void shutdown();
 
 private:
+    struct CameraRaycastResult {
+        bool hitSolid = false;
+        int solidX = 0;
+        int solidY = 0;
+        int solidZ = 0;
+        bool hasAdjacentEmpty = false;
+        int adjacentEmptyX = 0;
+        int adjacentEmptyY = 0;
+        int adjacentEmptyZ = 0;
+    };
+
     void pollInput();
     void updateCamera(float dt);
+    [[nodiscard]] CameraRaycastResult raycastFromCamera() const;
     [[nodiscard]] bool tryPlaceVoxelFromCameraRay();
     [[nodiscard]] bool tryRemoveVoxelFromCameraRay();
 

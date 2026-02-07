@@ -25,11 +25,29 @@ struct CameraPose {
     float fovDegrees;
 };
 
+struct VoxelPreview {
+    enum class Mode {
+        Add,
+        Remove
+    };
+
+    bool visible = false;
+    int x = 0;
+    int y = 0;
+    int z = 0;
+    Mode mode = Mode::Add;
+};
+
 class Renderer {
 public:
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
-    void renderFrame(const world::ChunkGrid& chunkGrid, const sim::Simulation& simulation, const CameraPose& camera);
+    void renderFrame(
+        const world::ChunkGrid& chunkGrid,
+        const sim::Simulation& simulation,
+        const CameraPose& camera,
+        const VoxelPreview& preview
+    );
     void shutdown();
 
 private:
@@ -54,6 +72,7 @@ private:
     bool createGraphicsPipeline();
     bool createUploadRingBuffer();
     bool createTransferResources();
+    bool createPreviewBuffers();
     bool createDescriptorResources();
     bool createChunkBuffers(const world::ChunkGrid& chunkGrid);
     bool createFrameResources();
@@ -63,6 +82,7 @@ private:
     void destroyDepthTargets();
     void destroyFrameResources();
     void destroyChunkBuffers();
+    void destroyPreviewBuffers();
     void destroyTransferResources();
     void destroyPipeline();
     bool waitForTimelineValue(uint64_t value) const;
@@ -120,9 +140,11 @@ private:
     // Future material systems will replace this single hardcoded pipeline.
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
+    VkPipeline m_previewPipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
+    bool m_supportsWireframePreview = false;
     VkDeviceSize m_uniformBufferAlignment = 256;
 
     // Static mesh buffers for one chunk.
@@ -131,8 +153,11 @@ private:
     FrameRingBuffer m_uploadRing;
     BufferHandle m_vertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_indexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_previewVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_previewIndexBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     uint32_t m_indexCount = 0;
+    uint32_t m_previewIndexCount = 0;
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};
     VkCommandPool m_transferCommandPool = VK_NULL_HANDLE;
