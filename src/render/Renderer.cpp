@@ -1,9 +1,11 @@
 #include "render/Renderer.hpp"
 
 #include <GLFW/glfw3.h>
+#include "math/Math.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -32,13 +34,65 @@ constexpr std::array<Vertex, 6> kGroundQuadVertices = {
     Vertex{-0.8f, 0.2f},
 };
 
+struct alignas(16) CameraUniform {
+    float mvp[16];
+};
+
+math::Matrix4 transpose(const math::Matrix4& matrix) {
+    math::Matrix4 result{};
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            result(row, col) = matrix(col, row);
+        }
+    }
+    return result;
+}
+
+math::Matrix4 perspectiveVulkan(float fovYRadians, float aspectRatio, float nearPlane, float farPlane) {
+    math::Matrix4 result{};
+    for (int i = 0; i < 16; ++i) {
+        result.m[i] = 0.0f;
+    }
+
+    const float f = 1.0f / std::tan(fovYRadians * 0.5f);
+    result(0, 0) = f / aspectRatio;
+    result(1, 1) = -f;
+    result(2, 2) = farPlane / (nearPlane - farPlane);
+    result(2, 3) = (farPlane * nearPlane) / (nearPlane - farPlane);
+    result(3, 2) = -1.0f;
+    return result;
+}
+
+math::Matrix4 lookAt(const math::Vector3& eye, const math::Vector3& target, const math::Vector3& up) {
+    const math::Vector3 forward = math::normalize(target - eye);
+    const math::Vector3 right = math::normalize(math::cross(forward, up));
+    const math::Vector3 cameraUp = math::cross(right, forward);
+
+    math::Matrix4 view = math::Matrix4::identity();
+    view(0, 0) = right.x;
+    view(0, 1) = right.y;
+    view(0, 2) = right.z;
+    view(0, 3) = -math::dot(right, eye);
+
+    view(1, 0) = cameraUp.x;
+    view(1, 1) = cameraUp.y;
+    view(1, 2) = cameraUp.z;
+    view(1, 3) = -math::dot(cameraUp, eye);
+
+    view(2, 0) = -forward.x;
+    view(2, 1) = -forward.y;
+    view(2, 2) = -forward.z;
+    view(2, 3) = math::dot(forward, eye);
+    return view;
+}
+
 // Embedded shaders keep this bootstrap renderer self-contained.
 // Future asset/shader systems can replace this with a shader pipeline.
 static const uint32_t kVertShaderSpirv[] = {
-0x07230203, 0x00010000, 0x000d000b, 0x0000001b, 0x00000000, 0x00020011,
+0x07230203, 0x00010000, 0x000d000b, 0x00000023, 0x00000000, 0x00020011,
 0x00000001, 0x0006000b, 0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e,
 0x00000000, 0x0003000e, 0x00000000, 0x00000001, 0x0007000f, 0x00000000,
-0x00000004, 0x6e69616d, 0x00000000, 0x0000000d, 0x00000012, 0x00030003,
+0x00000004, 0x6e69616d, 0x00000000, 0x0000000d, 0x00000019, 0x00030003,
 0x00000002, 0x000001c2, 0x000a0004, 0x475f4c47, 0x4c474f4f, 0x70635f45,
 0x74735f70, 0x5f656c79, 0x656e696c, 0x7269645f, 0x69746365, 0x00006576,
 0x00080004, 0x475f4c47, 0x4c474f4f, 0x6e695f45, 0x64756c63, 0x69645f65,
@@ -49,30 +103,42 @@ static const uint32_t kVertShaderSpirv[] = {
 0x00000000, 0x00070006, 0x0000000b, 0x00000002, 0x435f6c67, 0x4470696c,
 0x61747369, 0x0065636e, 0x00070006, 0x0000000b, 0x00000003, 0x435f6c67,
 0x446c6c75, 0x61747369, 0x0065636e, 0x00030005, 0x0000000d, 0x00000000,
-0x00050005, 0x00000012, 0x6f506e69, 0x69746973, 0x00006e6f, 0x00050048,
-0x0000000b, 0x00000000, 0x0000000b, 0x00000000, 0x00050048, 0x0000000b,
-0x00000001, 0x0000000b, 0x00000001, 0x00050048, 0x0000000b, 0x00000002,
-0x0000000b, 0x00000003, 0x00050048, 0x0000000b, 0x00000003, 0x0000000b,
-0x00000004, 0x00030047, 0x0000000b, 0x00000002, 0x00040047, 0x00000012,
-0x0000001e, 0x00000000, 0x00020013, 0x00000002, 0x00030021, 0x00000003,
-0x00000002, 0x00030016, 0x00000006, 0x00000020, 0x00040017, 0x00000007,
-0x00000006, 0x00000004, 0x00040015, 0x00000008, 0x00000020, 0x00000000,
-0x0004002b, 0x00000008, 0x00000009, 0x00000001, 0x0004001c, 0x0000000a,
-0x00000006, 0x00000009, 0x0006001e, 0x0000000b, 0x00000007, 0x00000006,
-0x0000000a, 0x0000000a, 0x00040020, 0x0000000c, 0x00000003, 0x0000000b,
-0x0004003b, 0x0000000c, 0x0000000d, 0x00000003, 0x00040015, 0x0000000e,
-0x00000020, 0x00000001, 0x0004002b, 0x0000000e, 0x0000000f, 0x00000000,
-0x00040017, 0x00000010, 0x00000006, 0x00000002, 0x00040020, 0x00000011,
-0x00000001, 0x00000010, 0x0004003b, 0x00000011, 0x00000012, 0x00000001,
-0x0004002b, 0x00000006, 0x00000014, 0x00000000, 0x0004002b, 0x00000006,
-0x00000015, 0x3f800000, 0x00040020, 0x00000019, 0x00000003, 0x00000007,
-0x00050036, 0x00000002, 0x00000004, 0x00000000, 0x00000003, 0x000200f8,
-0x00000005, 0x0004003d, 0x00000010, 0x00000013, 0x00000012, 0x00050051,
-0x00000006, 0x00000016, 0x00000013, 0x00000000, 0x00050051, 0x00000006,
-0x00000017, 0x00000013, 0x00000001, 0x00070050, 0x00000007, 0x00000018,
-0x00000016, 0x00000017, 0x00000014, 0x00000015, 0x00050041, 0x00000019,
-0x0000001a, 0x0000000d, 0x0000000f, 0x0003003e, 0x0000001a, 0x00000018,
-0x000100fd, 0x00010038,
+0x00060005, 0x00000011, 0x656d6143, 0x6e556172, 0x726f6669, 0x0000006d,
+0x00040006, 0x00000011, 0x00000000, 0x0070766d, 0x00040005, 0x00000013,
+0x656d6163, 0x00006172, 0x00050005, 0x00000019, 0x6f506e69, 0x69746973,
+0x00006e6f, 0x00050048, 0x0000000b, 0x00000000, 0x0000000b, 0x00000000,
+0x00050048, 0x0000000b, 0x00000001, 0x0000000b, 0x00000001, 0x00050048,
+0x0000000b, 0x00000002, 0x0000000b, 0x00000003, 0x00050048, 0x0000000b,
+0x00000003, 0x0000000b, 0x00000004, 0x00030047, 0x0000000b, 0x00000002,
+0x00040048, 0x00000011, 0x00000000, 0x00000005, 0x00050048, 0x00000011,
+0x00000000, 0x00000023, 0x00000000, 0x00050048, 0x00000011, 0x00000000,
+0x00000007, 0x00000010, 0x00030047, 0x00000011, 0x00000002, 0x00040047,
+0x00000013, 0x00000022, 0x00000000, 0x00040047, 0x00000013, 0x00000021,
+0x00000000, 0x00040047, 0x00000019, 0x0000001e, 0x00000000, 0x00020013,
+0x00000002, 0x00030021, 0x00000003, 0x00000002, 0x00030016, 0x00000006,
+0x00000020, 0x00040017, 0x00000007, 0x00000006, 0x00000004, 0x00040015,
+0x00000008, 0x00000020, 0x00000000, 0x0004002b, 0x00000008, 0x00000009,
+0x00000001, 0x0004001c, 0x0000000a, 0x00000006, 0x00000009, 0x0006001e,
+0x0000000b, 0x00000007, 0x00000006, 0x0000000a, 0x0000000a, 0x00040020,
+0x0000000c, 0x00000003, 0x0000000b, 0x0004003b, 0x0000000c, 0x0000000d,
+0x00000003, 0x00040015, 0x0000000e, 0x00000020, 0x00000001, 0x0004002b,
+0x0000000e, 0x0000000f, 0x00000000, 0x00040018, 0x00000010, 0x00000007,
+0x00000004, 0x0003001e, 0x00000011, 0x00000010, 0x00040020, 0x00000012,
+0x00000002, 0x00000011, 0x0004003b, 0x00000012, 0x00000013, 0x00000002,
+0x00040020, 0x00000014, 0x00000002, 0x00000010, 0x00040017, 0x00000017,
+0x00000006, 0x00000002, 0x00040020, 0x00000018, 0x00000001, 0x00000017,
+0x0004003b, 0x00000018, 0x00000019, 0x00000001, 0x0004002b, 0x00000006,
+0x0000001b, 0x00000000, 0x0004002b, 0x00000006, 0x0000001c, 0x3f800000,
+0x00040020, 0x00000021, 0x00000003, 0x00000007, 0x00050036, 0x00000002,
+0x00000004, 0x00000000, 0x00000003, 0x000200f8, 0x00000005, 0x00050041,
+0x00000014, 0x00000015, 0x00000013, 0x0000000f, 0x0004003d, 0x00000010,
+0x00000016, 0x00000015, 0x0004003d, 0x00000017, 0x0000001a, 0x00000019,
+0x00050051, 0x00000006, 0x0000001d, 0x0000001a, 0x00000000, 0x00050051,
+0x00000006, 0x0000001e, 0x0000001a, 0x00000001, 0x00070050, 0x00000007,
+0x0000001f, 0x0000001d, 0x0000001e, 0x0000001b, 0x0000001c, 0x00050091,
+0x00000007, 0x00000020, 0x00000016, 0x0000001f, 0x00050041, 0x00000021,
+0x00000022, 0x0000000d, 0x0000000f, 0x0003003e, 0x00000022, 0x00000020,
+0x000100fd, 0x00010038, 
 };
 
 static const uint32_t kFragShaderSpirv[] = {
@@ -315,6 +381,11 @@ bool Renderer::init(GLFWwindow* window) {
         shutdown();
         return false;
     }
+    if (!createDescriptorResources()) {
+        std::cerr << "[render] init failed at createDescriptorResources\n";
+        shutdown();
+        return false;
+    }
     if (!createGraphicsPipeline()) {
         std::cerr << "[render] init failed at createGraphicsPipeline\n";
         shutdown();
@@ -478,6 +549,13 @@ bool Renderer::createLogicalDevice() {
     }
 
     vkGetDeviceQueue(m_device, m_graphicsQueueFamilyIndex, 0, &m_graphicsQueue);
+
+    VkPhysicalDeviceProperties deviceProperties{};
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &deviceProperties);
+    m_uniformBufferAlignment = std::max<VkDeviceSize>(
+        deviceProperties.limits.minUniformBufferOffsetAlignment,
+        static_cast<VkDeviceSize>(16)
+    );
     return true;
 }
 
@@ -488,7 +566,7 @@ bool Renderer::createUploadRingBuffer() {
         &m_bufferAllocator,
         1024 * 64,
         kMaxFramesInFlight,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
     );
     if (!ok) {
         std::cerr << "[render] upload ring buffer init failed\n";
@@ -578,10 +656,69 @@ bool Renderer::createSwapchain() {
     return true;
 }
 
+bool Renderer::createDescriptorResources() {
+    if (m_descriptorSetLayout == VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding mvpBinding{};
+        mvpBinding.binding = 0;
+        mvpBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        mvpBinding.descriptorCount = 1;
+        mvpBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
+        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutCreateInfo.bindingCount = 1;
+        layoutCreateInfo.pBindings = &mvpBinding;
+
+        const VkResult layoutResult =
+            vkCreateDescriptorSetLayout(m_device, &layoutCreateInfo, nullptr, &m_descriptorSetLayout);
+        if (layoutResult != VK_SUCCESS) {
+            logVkFailure("vkCreateDescriptorSetLayout", layoutResult);
+            return false;
+        }
+    }
+
+    if (m_descriptorPool == VK_NULL_HANDLE) {
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSize.descriptorCount = kMaxFramesInFlight;
+
+        VkDescriptorPoolCreateInfo poolCreateInfo{};
+        poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolCreateInfo.maxSets = kMaxFramesInFlight;
+        poolCreateInfo.poolSizeCount = 1;
+        poolCreateInfo.pPoolSizes = &poolSize;
+
+        const VkResult poolResult = vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &m_descriptorPool);
+        if (poolResult != VK_SUCCESS) {
+            logVkFailure("vkCreateDescriptorPool", poolResult);
+            return false;
+        }
+    }
+
+    std::array<VkDescriptorSetLayout, kMaxFramesInFlight> setLayouts{};
+    setLayouts.fill(m_descriptorSetLayout);
+
+    VkDescriptorSetAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo.descriptorPool = m_descriptorPool;
+    allocateInfo.descriptorSetCount = static_cast<uint32_t>(setLayouts.size());
+    allocateInfo.pSetLayouts = setLayouts.data();
+
+    const VkResult allocateResult = vkAllocateDescriptorSets(m_device, &allocateInfo, m_descriptorSets.data());
+    if (allocateResult != VK_SUCCESS) {
+        logVkFailure("vkAllocateDescriptorSets", allocateResult);
+        return false;
+    }
+
+    return true;
+}
+
 bool Renderer::createGraphicsPipeline() {
     if (m_pipelineLayout == VK_NULL_HANDLE) {
         VkPipelineLayoutCreateInfo layoutCreateInfo{};
         layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutCreateInfo.setLayoutCount = 1;
+        layoutCreateInfo.pSetLayouts = &m_descriptorSetLayout;
         const VkResult layoutResult = vkCreatePipelineLayout(m_device, &layoutCreateInfo, nullptr, &m_pipelineLayout);
         if (layoutResult != VK_SUCCESS) {
             logVkFailure("vkCreatePipelineLayout", layoutResult);
@@ -789,7 +926,6 @@ void Renderer::renderFrame(
 ) {
     (void)chunkGrid;
     (void)simulation;
-    (void)camera;
 
     if (m_device == VK_NULL_HANDLE || m_swapchain == VK_NULL_HANDLE) {
         return;
@@ -847,6 +983,46 @@ void Renderer::renderFrame(
         std::cerr << "[render] vkBeginCommandBuffer failed\n";
         return;
     }
+
+    const float aspectRatio = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
+    const float yawRadians = math::radians(camera.yawDegrees);
+    const float pitchRadians = math::radians(camera.pitchDegrees);
+    const float cosPitch = std::cos(pitchRadians);
+    const math::Vector3 eye{camera.x, camera.y, camera.z};
+    const math::Vector3 forward{
+        std::cos(yawRadians) * cosPitch,
+        std::sin(pitchRadians),
+        std::sin(yawRadians) * cosPitch
+    };
+    const math::Matrix4 view = lookAt(eye, eye + forward, math::Vector3{0.0f, 1.0f, 0.0f});
+    const math::Matrix4 projection = perspectiveVulkan(math::radians(camera.fovDegrees), aspectRatio, 0.1f, 500.0f);
+    const math::Matrix4 mvp = projection * view;
+    const math::Matrix4 mvpColumnMajor = transpose(mvp);
+
+    const std::optional<RingBufferSlice> mvpSliceOpt =
+        m_uploadRing.allocate(sizeof(CameraUniform), m_uniformBufferAlignment);
+    if (!mvpSliceOpt.has_value() || mvpSliceOpt->mapped == nullptr) {
+        std::cerr << "[render] failed to allocate MVP uniform slice\n";
+        return;
+    }
+
+    CameraUniform mvpUniform{};
+    std::memcpy(mvpUniform.mvp, mvpColumnMajor.m, sizeof(mvpUniform.mvp));
+    std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = m_bufferAllocator.getBuffer(mvpSliceOpt->buffer);
+    bufferInfo.offset = mvpSliceOpt->offset;
+    bufferInfo.range = mvpSliceOpt->size;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSets[m_currentFrame];
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    write.pBufferInfo = &bufferInfo;
+    vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 
     VkImageMemoryBarrier toColorBarrier{};
     toColorBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -915,6 +1091,16 @@ void Renderer::renderFrame(
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+    vkCmdBindDescriptorSets(
+        commandBuffer,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        m_pipelineLayout,
+        0,
+        1,
+        &m_descriptorSets[m_currentFrame],
+        0,
+        nullptr
+    );
     const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(m_vertexBufferHandle);
     if (vertexBuffer == VK_NULL_HANDLE) {
         std::cerr << "[render] missing vertex buffer for draw\n";
@@ -1101,6 +1287,15 @@ void Renderer::shutdown() {
         m_uploadRing.shutdown(&m_bufferAllocator);
         destroyVertexBuffer();
         destroyPipeline();
+        if (m_descriptorPool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
+            m_descriptorPool = VK_NULL_HANDLE;
+        }
+        if (m_descriptorSetLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
+            m_descriptorSetLayout = VK_NULL_HANDLE;
+        }
+        m_descriptorSets.fill(VK_NULL_HANDLE);
         destroySwapchain();
         m_bufferAllocator.shutdown();
 

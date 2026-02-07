@@ -52,6 +52,7 @@ private:
     bool createSwapchain();
     bool createGraphicsPipeline();
     bool createUploadRingBuffer();
+    bool createDescriptorResources();
     bool createVertexBuffer();
     bool createFrameResources();
     bool recreateSwapchain();
@@ -94,6 +95,10 @@ private:
     // Future material systems will replace this single hardcoded pipeline.
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
+    VkDeviceSize m_uniformBufferAlignment = 256;
 
     // Hardcoded geometry buffer (single flat quad).
     // Future meshing systems will stream chunk meshes instead.
