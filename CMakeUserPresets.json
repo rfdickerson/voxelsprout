@@ -1,0 +1,13 @@
+{
+  "version": 5,
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "vcpkg from $HOME",
+      "inherits": "vcpkg",
+     "environment": {
+       "VCPKG_ROOT": "$env{HOME}/vcpkg"
+     }
+    }
+  ]
+}
