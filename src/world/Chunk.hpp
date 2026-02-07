@@ -19,6 +19,8 @@ public:
     Chunk();
     void setVoxel(int x, int y, int z, Voxel voxel);
     void fillLayer(int y, Voxel voxel);
+    Voxel voxelAt(int x, int y, int z) const;
+    bool isSolid(int x, int y, int z) const;
     const std::vector<Voxel>& voxels() const;
 
 private:
@@ -50,6 +52,17 @@ inline void Chunk::fillLayer(int y, Voxel voxel) {
 
 inline const std::vector<Voxel>& Chunk::voxels() const {
     return m_voxels;
+}
+
+inline Voxel Chunk::voxelAt(int x, int y, int z) const {
+    if (!isInBounds(x, y, z)) {
+        return Voxel{VoxelType::Empty};
+    }
+    return m_voxels[linearIndex(x, y, z)];
+}
+
+inline bool Chunk::isSolid(int x, int y, int z) const {
+    return voxelAt(x, y, z).type != VoxelType::Empty;
 }
 
 inline std::size_t Chunk::linearIndex(int x, int y, int z) {

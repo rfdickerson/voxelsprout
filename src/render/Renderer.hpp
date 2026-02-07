@@ -27,7 +27,7 @@ struct CameraPose {
 
 class Renderer {
 public:
-    bool init(GLFWwindow* window);
+    bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
     void renderFrame(const world::ChunkGrid& chunkGrid, const sim::Simulation& simulation, const CameraPose& camera);
     void shutdown();
 
@@ -48,17 +48,19 @@ private:
     bool createLogicalDevice();
     bool createSwapchain();
     bool createMsaaColorTargets();
+    bool createDepthTargets();
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
     bool createUploadRingBuffer();
     bool createDescriptorResources();
-    bool createVertexBuffer();
+    bool createChunkBuffers(const world::ChunkGrid& chunkGrid);
     bool createFrameResources();
     bool recreateSwapchain();
     void destroySwapchain();
     void destroyMsaaColorTargets();
+    void destroyDepthTargets();
     void destroyFrameResources();
-    void destroyVertexBuffer();
+    void destroyChunkBuffers();
     void destroyPipeline();
 
     GLFWwindow* m_window = nullptr;
@@ -83,6 +85,7 @@ private:
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkFormat m_swapchainFormat = VK_FORMAT_UNDEFINED;
     VkExtent2D m_swapchainExtent{};
+    VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
     std::vector<VkImage> m_swapchainImages;
     std::vector<VkImageView> m_swapchainImageViews;
     std::vector<bool> m_swapchainImageInitialized;
@@ -90,6 +93,9 @@ private:
     std::vector<VkDeviceMemory> m_msaaColorImageMemories;
     std::vector<VkImageView> m_msaaColorImageViews;
     std::vector<bool> m_msaaColorImageInitialized;
+    std::vector<VkImage> m_depthImages;
+    std::vector<VkDeviceMemory> m_depthImageMemories;
+    std::vector<VkImageView> m_depthImageViews;
     std::vector<uint64_t> m_swapchainImageTimelineValues;
     // One render-finished semaphore per swapchain image avoids reusing a semaphore
     // while presentation may still be waiting on it.
@@ -105,12 +111,13 @@ private:
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
     VkDeviceSize m_uniformBufferAlignment = 256;
 
-    // Hardcoded geometry buffer (single flat quad).
-    // Future meshing systems will stream chunk meshes instead.
+    // Static mesh buffers for one chunk.
+    // Future chunk streaming can replace these with per-chunk GPU allocations.
     BufferAllocator m_bufferAllocator;
     FrameRingBuffer m_uploadRing;
     BufferHandle m_vertexBufferHandle = kInvalidBufferHandle;
-    uint32_t m_vertexCount = 0;
+    BufferHandle m_indexBufferHandle = kInvalidBufferHandle;
+    uint32_t m_indexCount = 0;
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};
     std::array<uint64_t, kMaxFramesInFlight> m_frameTimelineValues{};

@@ -62,7 +62,7 @@ bool App::init() {
 
     m_chunkGrid.initializeFlatWorld();
     m_simulation.initializeSingleBelt();
-    const bool rendererOk = m_renderer.init(m_window);
+    const bool rendererOk = m_renderer.init(m_window, m_chunkGrid);
     if (!rendererOk) {
         std::cerr << "[app] renderer init failed\n";
         return false;

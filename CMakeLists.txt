@@ -10,6 +10,7 @@ add_executable(voxel_factory_toy
     src/app/App.cpp
     src/render/BufferHelpers.cpp
     src/render/Renderer.cpp
+    src/world/ChunkMesher.cpp
 )
 
 target_include_directories(voxel_factory_toy PRIVATE src)

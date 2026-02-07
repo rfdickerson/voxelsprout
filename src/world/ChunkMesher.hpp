@@ -1,0 +1,63 @@
+#pragma once
+
+#include "world/ChunkGrid.hpp"
+
+#include <cstdint>
+#include <vector>
+
+namespace world {
+
+// Packed voxel vertex used by the Vulkan vertex fetch stage.
+// We keep this tightly packed so GPU bandwidth stays low when meshes get denser.
+//
+// Bit layout in PackedVoxelVertex::bits (LSB -> MSB):
+// - bits  0.. 4: local x in chunk (0..31)
+// - bits  5.. 9: local y in chunk (0..31)
+// - bits 10..14: local z in chunk (0..31)
+// - bits 15..17: face id (0..5 for +/-X, +/-Y, +/-Z)
+// - bits 18..19: corner id (0..3)
+// - bits 20..21: AO level (0 darkest .. 3 brightest)
+// - bits 22..29: material id (for now voxel type, future palette/material table index)
+// - bits 30..31: reserved for future flags (greedy merge bits, wind, etc.)
+//
+// This format also supports future greedy meshing and instancing:
+// - Greedy meshing can add width/height in reserved or expanded fields.
+// - Instancing can move xyz to an instance buffer and keep face/corner/material per-vertex.
+struct PackedVoxelVertex {
+    std::uint32_t bits = 0;
+
+    static constexpr std::uint32_t kShiftX = 0;
+    static constexpr std::uint32_t kShiftY = 5;
+    static constexpr std::uint32_t kShiftZ = 10;
+    static constexpr std::uint32_t kShiftFace = 15;
+    static constexpr std::uint32_t kShiftCorner = 18;
+    static constexpr std::uint32_t kShiftAo = 20;
+    static constexpr std::uint32_t kShiftMaterial = 22;
+
+    static constexpr std::uint32_t kMask5 = 0x1Fu;
+    static constexpr std::uint32_t kMask3 = 0x7u;
+    static constexpr std::uint32_t kMask2 = 0x3u;
+    static constexpr std::uint32_t kMask8 = 0xFFu;
+
+    static std::uint32_t pack(
+        std::uint32_t x,
+        std::uint32_t y,
+        std::uint32_t z,
+        std::uint32_t face,
+        std::uint32_t corner,
+        std::uint32_t ao,
+        std::uint32_t material
+    );
+};
+
+struct ChunkMeshData {
+    std::vector<PackedVoxelVertex> vertices;
+    std::vector<std::uint32_t> indices;
+};
+
+// Builds a mesh for the first chunk in the grid.
+// This intentionally targets one chunk only for debug clarity.
+ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid);
+
+} // namespace world
+
