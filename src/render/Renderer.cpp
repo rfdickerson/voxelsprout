@@ -49,6 +49,7 @@ math::Matrix4 perspectiveVulkan(float fovYRadians, float aspectRatio, float near
 
     const float f = 1.0f / std::tan(fovYRadians * 0.5f);
     result(0, 0) = f / aspectRatio;
+    // Vulkan viewport space differs from OpenGL; flip clip-space Y here.
     result(1, 1) = -f;
     result(2, 2) = farPlane / (nearPlane - farPlane);
     result(2, 3) = (farPlane * nearPlane) / (nearPlane - farPlane);
@@ -1355,10 +1356,8 @@ bool Renderer::createGraphicsPipeline() {
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
     rasterizer.lineWidth = 1.0f;
-    // We flip Y in the projection matrix for Vulkan clip space, which inverts winding.
-    // With the current index order this makes clockwise triangles front-facing.
     rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;

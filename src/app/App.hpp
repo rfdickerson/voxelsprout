@@ -30,6 +30,7 @@ private:
         float yawDegrees = -90.0f;
         float pitchDegrees = 0.0f;
         float velocityX = 0.0f;
+        float velocityY = 0.0f;
         float velocityZ = 0.0f;
         float smoothedMouseDeltaX = 0.0f;
         float smoothedMouseDeltaY = 0.0f;

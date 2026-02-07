@@ -132,6 +132,10 @@ void App::pollInput() {
     m_input.moveBackward = glfwGetKey(m_window, GLFW_KEY_S) == GLFW_PRESS;
     m_input.moveLeft = glfwGetKey(m_window, GLFW_KEY_A) == GLFW_PRESS;
     m_input.moveRight = glfwGetKey(m_window, GLFW_KEY_D) == GLFW_PRESS;
+    m_input.moveUp = glfwGetKey(m_window, GLFW_KEY_SPACE) == GLFW_PRESS;
+    m_input.moveDown =
+        glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+        glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
 
     double mouseX = 0.0;
     double mouseY = 0.0;
@@ -162,6 +166,7 @@ void App::updateCamera(float dt) {
     const float yawRadians = math::radians(m_camera.yawDegrees);
     const math::Vector3 forward{std::cos(yawRadians), 0.0f, std::sin(yawRadians)};
     const math::Vector3 right{-forward.z, 0.0f, forward.x};
+    const math::Vector3 up{0.0f, 1.0f, 0.0f};
     math::Vector3 moveDirection{};
 
     if (m_input.moveForward) {
@@ -176,15 +181,23 @@ void App::updateCamera(float dt) {
     if (m_input.moveLeft) {
         moveDirection -= right;
     }
+    if (m_input.moveUp) {
+        moveDirection += up;
+    }
+    if (m_input.moveDown) {
+        moveDirection -= up;
+    }
 
     const float moveLengthSq = math::lengthSquared(moveDirection);
     const float moveLength = std::sqrt(moveLengthSq);
     float targetVelocityX = 0.0f;
+    float targetVelocityY = 0.0f;
     float targetVelocityZ = 0.0f;
     if (moveLength > 0.0f) {
         moveDirection /= moveLength;
         const math::Vector3 targetVelocity = moveDirection * kMoveMaxSpeed;
         targetVelocityX = targetVelocity.x;
+        targetVelocityY = targetVelocity.y;
         targetVelocityZ = targetVelocity.z;
     }
 
@@ -192,12 +205,15 @@ void App::updateCamera(float dt) {
     const float decelPerFrame = kMoveDeceleration * dt;
 
     const float maxDeltaX = (std::fabs(targetVelocityX) > std::fabs(m_camera.velocityX)) ? accelPerFrame : decelPerFrame;
+    const float maxDeltaY = (std::fabs(targetVelocityY) > std::fabs(m_camera.velocityY)) ? accelPerFrame : decelPerFrame;
     const float maxDeltaZ = (std::fabs(targetVelocityZ) > std::fabs(m_camera.velocityZ)) ? accelPerFrame : decelPerFrame;
 
     m_camera.velocityX = approach(m_camera.velocityX, targetVelocityX, maxDeltaX);
+    m_camera.velocityY = approach(m_camera.velocityY, targetVelocityY, maxDeltaY);
     m_camera.velocityZ = approach(m_camera.velocityZ, targetVelocityZ, maxDeltaZ);
 
     m_camera.x += m_camera.velocityX * dt;
+    m_camera.y += m_camera.velocityY * dt;
     m_camera.z += m_camera.velocityZ * dt;
 }
 

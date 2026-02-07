@@ -42,31 +42,17 @@ inline void ChunkGrid::initializeFlatWorld() {
 
     Chunk& chunk = m_chunks[0];
 
-    // Procedural one-chunk terrain:
-    // - Base ground uses a deterministic height variation.
-    // - Sparse voxels above ground create corners/overhangs so AO is visible.
+    // Ground + sky setup:
+    // - One flat ground layer at y=0.
+    // - A few deterministic voxels above ground for AO and depth testing.
     for (int z = 0; z < Chunk::kSizeZ; ++z) {
         for (int x = 0; x < Chunk::kSizeX; ++x) {
-            const std::uint32_t groundNoise = hash3(x, 0, z, 0xA341316Cu);
-            const int groundHeight = 2 + static_cast<int>(groundNoise % 4u); // 2..5
+            chunk.setVoxel(x, 0, z, Voxel{VoxelType::Solid});
 
-            for (int y = 0; y <= groundHeight; ++y) {
-                chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
-            }
-
-            // Random rocks/voxels above the ground.
-            for (int y = groundHeight + 1; y < Chunk::kSizeY && y <= groundHeight + 4; ++y) {
-                const std::uint32_t clutterNoise = hash3(x, y, z, 0x1B56C4E9u);
-                if ((clutterNoise & 0xFFu) < 20u) {
-                    chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
-                }
-            }
-
-            // Occasional short pillar to increase AO contrast.
-            const std::uint32_t pillarNoise = hash3(x, 7, z, 0xC8013EA4u);
-            if ((pillarNoise & 0x3Fu) == 0u) {
-                const int pillarTop = std::min(Chunk::kSizeY - 1, groundHeight + 3);
-                for (int y = groundHeight + 1; y <= pillarTop; ++y) {
+            const std::uint32_t clutterNoise = hash3(x, 1, z, 0x1B56C4E9u);
+            if ((clutterNoise & 0xFFu) < 18u) {
+                const int height = 1 + static_cast<int>((clutterNoise >> 8) % 3u); // 1..3
+                for (int y = 1; y <= height; ++y) {
                     chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
                 }
             }
