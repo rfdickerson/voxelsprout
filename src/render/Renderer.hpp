@@ -69,6 +69,7 @@ private:
     bool createHdrResolveTargets();
     bool createMsaaColorTargets();
     bool createDepthTargets();
+    bool createShadowResources();
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
     bool createUploadRingBuffer();
@@ -83,6 +84,7 @@ private:
     void destroyHdrResolveTargets();
     void destroyMsaaColorTargets();
     void destroyDepthTargets();
+    void destroyShadowResources();
     void destroyFrameResources();
     void destroyChunkBuffers();
     void destroyPreviewBuffers();
@@ -132,6 +134,7 @@ private:
     VkFormat m_swapchainFormat = VK_FORMAT_UNDEFINED;
     VkExtent2D m_swapchainExtent{};
     VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
+    VkFormat m_shadowDepthFormat = VK_FORMAT_UNDEFINED;
     std::vector<VkImage> m_swapchainImages;
     std::vector<VkImageView> m_swapchainImageViews;
     std::vector<bool> m_swapchainImageInitialized;
@@ -147,6 +150,11 @@ private:
     std::vector<VkImage> m_depthImages;
     std::vector<VkDeviceMemory> m_depthImageMemories;
     std::vector<VkImageView> m_depthImageViews;
+    VkImage m_shadowDepthImage = VK_NULL_HANDLE;
+    VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;
+    VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
+    VkSampler m_shadowDepthSampler = VK_NULL_HANDLE;
+    bool m_shadowDepthInitialized = false;
     std::vector<uint64_t> m_swapchainImageTimelineValues;
     // One render-finished semaphore per swapchain image avoids reusing a semaphore
     // while presentation may still be waiting on it.
@@ -158,6 +166,7 @@ private:
     // Future material systems will replace this single hardcoded pipeline.
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
+    VkPipeline m_shadowPipeline = VK_NULL_HANDLE;
     VkPipeline m_skyboxPipeline = VK_NULL_HANDLE;
     VkPipeline m_tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewAddPipeline = VK_NULL_HANDLE;

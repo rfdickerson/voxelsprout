@@ -35,6 +35,9 @@ struct alignas(16) CameraUniform {
     float mvp[16];
     float view[16];
     float proj[16];
+    float lightViewProj[16];
+    float sunDirectionIntensity[4];
+    float sunColorShadow[4];
 };
 
 struct alignas(16) ChunkPushConstants {
@@ -94,6 +97,30 @@ math::Matrix4 perspectiveVulkan(float fovYRadians, float aspectRatio, float near
     result(2, 2) = farPlane / (nearPlane - farPlane);
     result(2, 3) = (farPlane * nearPlane) / (nearPlane - farPlane);
     result(3, 2) = -1.0f;
+    return result;
+}
+
+math::Matrix4 orthographicVulkan(
+    float left,
+    float right,
+    float bottom,
+    float top,
+    float nearPlane,
+    float farPlane
+) {
+    math::Matrix4 result{};
+    for (int i = 0; i < 16; ++i) {
+        result.m[i] = 0.0f;
+    }
+
+    result(0, 0) = 2.0f / (right - left);
+    // Match the Vulkan clip-space Y handling used by perspectiveVulkan.
+    result(1, 1) = -2.0f / (top - bottom);
+    result(2, 2) = 1.0f / (nearPlane - farPlane);
+    result(3, 3) = 1.0f;
+    result(0, 3) = -(right + left) / (right - left);
+    result(1, 3) = -(top + bottom) / (top - bottom);
+    result(2, 3) = nearPlane / (nearPlane - farPlane);
     return result;
 }
 
@@ -185,6 +212,24 @@ VkFormat findSupportedDepthFormat(VkPhysicalDevice physicalDevice) {
         VkFormatProperties properties{};
         vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
         if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+            return format;
+        }
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+VkFormat findSupportedShadowDepthFormat(VkPhysicalDevice physicalDevice) {
+    constexpr std::array<VkFormat, 2> kShadowDepthCandidates = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_D16_UNORM
+    };
+
+    for (VkFormat format : kShadowDepthCandidates) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
+        const VkFormatFeatureFlags requiredFeatures =
+            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        if ((properties.optimalTilingFeatures & requiredFeatures) == requiredFeatures) {
             return format;
         }
     }
@@ -997,6 +1042,11 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
+    if (!createShadowResources()) {
+        std::cerr << "[render] init failed at createShadowResources\n";
+        shutdown();
+        return false;
+    }
     if (!createSwapchain()) {
         std::cerr << "[render] init failed at createSwapchain\n";
         shutdown();
@@ -1140,6 +1190,11 @@ bool Renderer::pickPhysicalDevice() {
             std::cerr << "[render] skip GPU: no supported depth format\n";
             continue;
         }
+        const VkFormat shadowDepthFormat = findSupportedShadowDepthFormat(candidate);
+        if (shadowDepthFormat == VK_FORMAT_UNDEFINED) {
+            std::cerr << "[render] skip GPU: no supported shadow depth format\n";
+            continue;
+        }
         const VkFormat hdrColorFormat = findSupportedHdrColorFormat(candidate);
         if (hdrColorFormat == VK_FORMAT_UNDEFINED) {
             std::cerr << "[render] skip GPU: no supported HDR color format\n";
@@ -1180,6 +1235,7 @@ bool Renderer::pickPhysicalDevice() {
         m_transferQueueIndex = queueFamily.transferQueueIndex;
         m_supportsWireframePreview = supportsWireframe;
         m_depthFormat = depthFormat;
+        m_shadowDepthFormat = shadowDepthFormat;
         m_hdrColorFormat = hdrColorFormat;
         std::cerr << "[render] selected GPU: " << properties.deviceName
                   << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
@@ -1187,6 +1243,7 @@ bool Renderer::pickPhysicalDevice() {
                   << ", transferQueueFamily=" << m_transferQueueFamilyIndex
                   << ", transferQueueIndex=" << m_transferQueueIndex
                   << ", wireframePreview=" << (m_supportsWireframePreview ? "yes" : "no")
+                  << ", shadowDepthFormat=" << static_cast<int>(m_shadowDepthFormat)
                   << ", hdrColorFormat=" << static_cast<int>(m_hdrColorFormat)
                   << "\n";
         return true;
@@ -1699,6 +1756,120 @@ bool Renderer::createEnvironmentResources() {
     return true;
 }
 
+bool Renderer::createShadowResources() {
+    if (
+        m_shadowDepthImage != VK_NULL_HANDLE &&
+        m_shadowDepthMemory != VK_NULL_HANDLE &&
+        m_shadowDepthImageView != VK_NULL_HANDLE &&
+        m_shadowDepthSampler != VK_NULL_HANDLE
+    ) {
+        return true;
+    }
+
+    if (m_shadowDepthFormat == VK_FORMAT_UNDEFINED) {
+        std::cerr << "[render] shadow depth format is undefined\n";
+        return false;
+    }
+
+    constexpr uint32_t kShadowMapSize = 2048;
+
+    VkImageCreateInfo imageCreateInfo{};
+    imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageCreateInfo.format = m_shadowDepthFormat;
+    imageCreateInfo.extent.width = kShadowMapSize;
+    imageCreateInfo.extent.height = kShadowMapSize;
+    imageCreateInfo.extent.depth = 1;
+    imageCreateInfo.mipLevels = 1;
+    imageCreateInfo.arrayLayers = 1;
+    imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_shadowDepthImage);
+    if (imageResult != VK_SUCCESS) {
+        logVkFailure("vkCreateImage(shadowDepth)", imageResult);
+        return false;
+    }
+
+    VkMemoryRequirements memoryRequirements{};
+    vkGetImageMemoryRequirements(m_device, m_shadowDepthImage, &memoryRequirements);
+    const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+        m_physicalDevice,
+        memoryRequirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    );
+    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+        std::cerr << "[render] no memory type for shadow depth image\n";
+        destroyShadowResources();
+        return false;
+    }
+
+    VkMemoryAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocateInfo.allocationSize = memoryRequirements.size;
+    allocateInfo.memoryTypeIndex = memoryTypeIndex;
+    const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_shadowDepthMemory);
+    if (allocResult != VK_SUCCESS) {
+        logVkFailure("vkAllocateMemory(shadowDepth)", allocResult);
+        destroyShadowResources();
+        return false;
+    }
+
+    const VkResult bindResult = vkBindImageMemory(m_device, m_shadowDepthImage, m_shadowDepthMemory, 0);
+    if (bindResult != VK_SUCCESS) {
+        logVkFailure("vkBindImageMemory(shadowDepth)", bindResult);
+        destroyShadowResources();
+        return false;
+    }
+
+    VkImageViewCreateInfo viewCreateInfo{};
+    viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCreateInfo.image = m_shadowDepthImage;
+    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewCreateInfo.format = m_shadowDepthFormat;
+    viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    viewCreateInfo.subresourceRange.baseMipLevel = 0;
+    viewCreateInfo.subresourceRange.levelCount = 1;
+    viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+    viewCreateInfo.subresourceRange.layerCount = 1;
+    const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_shadowDepthImageView);
+    if (viewResult != VK_SUCCESS) {
+        logVkFailure("vkCreateImageView(shadowDepth)", viewResult);
+        destroyShadowResources();
+        return false;
+    }
+
+    VkSamplerCreateInfo samplerCreateInfo{};
+    samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    samplerCreateInfo.mipLodBias = 0.0f;
+    samplerCreateInfo.anisotropyEnable = VK_FALSE;
+    samplerCreateInfo.compareEnable = VK_TRUE;
+    samplerCreateInfo.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    samplerCreateInfo.minLod = 0.0f;
+    samplerCreateInfo.maxLod = 0.0f;
+    samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+    const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_shadowDepthSampler);
+    if (samplerResult != VK_SUCCESS) {
+        logVkFailure("vkCreateSampler(shadowDepth)", samplerResult);
+        destroyShadowResources();
+        return false;
+    }
+
+    m_shadowDepthInitialized = false;
+    std::cerr << "[render] shadow resources ready (" << kShadowMapSize << "x" << kShadowMapSize << ")\n";
+    return true;
+}
+
 bool Renderer::createSwapchain() {
     const SwapchainSupport support = querySwapchainSupport(m_physicalDevice, m_surface);
     if (support.formats.empty() || support.presentModes.empty()) {
@@ -2092,11 +2263,18 @@ bool Renderer::createDescriptorResources() {
         hdrSceneBinding.descriptorCount = 1;
         hdrSceneBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 4> bindings = {
+        VkDescriptorSetLayoutBinding shadowMapBinding{};
+        shadowMapBinding.binding = 4;
+        shadowMapBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        shadowMapBinding.descriptorCount = 1;
+        shadowMapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
             mvpBinding,
             irradianceBinding,
             skyboxBinding,
-            hdrSceneBinding
+            hdrSceneBinding,
+            shadowMapBinding
         };
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
@@ -2120,7 +2298,7 @@ bool Renderer::createDescriptorResources() {
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                3 * kMaxFramesInFlight
+                4 * kMaxFramesInFlight
             }
         };
 
@@ -2162,6 +2340,10 @@ bool Renderer::createGraphicsPipeline() {
     }
     if (m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
         std::cerr << "[render] cannot create pipeline: HDR color format undefined\n";
+        return false;
+    }
+    if (m_shadowDepthFormat == VK_FORMAT_UNDEFINED) {
+        std::cerr << "[render] cannot create pipeline: shadow depth format undefined\n";
         return false;
     }
 
@@ -2220,6 +2402,18 @@ bool Renderer::createGraphicsPipeline() {
         "../../src/render/shaders/tone_map.frag.spv",
         "../../../src/render/shaders/tone_map.frag.spv",
     };
+    constexpr std::array<const char*, 4> kShadowVertexShaderPathCandidates = {
+        "src/render/shaders/shadow_depth.vert.spv",
+        "../src/render/shaders/shadow_depth.vert.spv",
+        "../../src/render/shaders/shadow_depth.vert.spv",
+        "../../../src/render/shaders/shadow_depth.vert.spv",
+    };
+    constexpr std::array<const char*, 4> kShadowFragmentShaderPathCandidates = {
+        "src/render/shaders/shadow_depth.frag.spv",
+        "../src/render/shaders/shadow_depth.frag.spv",
+        "../../src/render/shaders/shadow_depth.frag.spv",
+        "../../../src/render/shaders/shadow_depth.frag.spv",
+    };
 
     VkShaderModule worldVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule worldFragShaderModule = VK_NULL_HANDLE;
@@ -2227,6 +2421,8 @@ bool Renderer::createGraphicsPipeline() {
     VkShaderModule skyboxFragShaderModule = VK_NULL_HANDLE;
     VkShaderModule toneMapVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule toneMapFragShaderModule = VK_NULL_HANDLE;
+    VkShaderModule shadowVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule shadowFragShaderModule = VK_NULL_HANDLE;
 
     if (!createShaderModuleFromFileOrFallback(
             m_device,
@@ -2638,14 +2834,13 @@ bool Renderer::createGraphicsPipeline() {
         &toneMapPipeline
     );
 
-    vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
-
     if (toneMapPipelineResult != VK_SUCCESS) {
+        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
@@ -2654,11 +2849,155 @@ bool Renderer::createGraphicsPipeline() {
         return false;
     }
 
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kShadowVertexShaderPathCandidates,
+            nullptr,
+            0,
+            "shadow_depth.vert",
+            shadowVertShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kShadowFragmentShaderPathCandidates,
+            nullptr,
+            0,
+            "shadow_depth.frag",
+            shadowFragShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, shadowVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo shadowVertexShaderStage{};
+    shadowVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shadowVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shadowVertexShaderStage.module = shadowVertShaderModule;
+    shadowVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo shadowFragmentShaderStage{};
+    shadowFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shadowFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    shadowFragmentShaderStage.module = shadowFragShaderModule;
+    shadowFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> shadowShaderStages = {
+        shadowVertexShaderStage,
+        shadowFragmentShaderStage
+    };
+
+    VkPipelineMultisampleStateCreateInfo shadowMultisampling{};
+    shadowMultisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    shadowMultisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineRasterizationStateCreateInfo shadowRasterizer = rasterizer;
+    shadowRasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    shadowRasterizer.depthBiasEnable = VK_TRUE;
+
+    VkPipelineDepthStencilStateCreateInfo shadowDepthStencil = depthStencil;
+    shadowDepthStencil.depthTestEnable = VK_TRUE;
+    shadowDepthStencil.depthWriteEnable = VK_TRUE;
+    shadowDepthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    std::array<VkDynamicState, 3> shadowDynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_DEPTH_BIAS
+    };
+    VkPipelineDynamicStateCreateInfo shadowDynamicState{};
+    shadowDynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    shadowDynamicState.dynamicStateCount = static_cast<uint32_t>(shadowDynamicStates.size());
+    shadowDynamicState.pDynamicStates = shadowDynamicStates.data();
+
+    VkPipelineColorBlendStateCreateInfo shadowColorBlending{};
+    shadowColorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    shadowColorBlending.attachmentCount = 0;
+    shadowColorBlending.pAttachments = nullptr;
+
+    VkPipelineRenderingCreateInfo shadowRenderingCreateInfo{};
+    shadowRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    shadowRenderingCreateInfo.colorAttachmentCount = 0;
+    shadowRenderingCreateInfo.pColorAttachmentFormats = nullptr;
+    shadowRenderingCreateInfo.depthAttachmentFormat = m_shadowDepthFormat;
+
+    VkGraphicsPipelineCreateInfo shadowPipelineCreateInfo{};
+    shadowPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    shadowPipelineCreateInfo.pNext = &shadowRenderingCreateInfo;
+    shadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(shadowShaderStages.size());
+    shadowPipelineCreateInfo.pStages = shadowShaderStages.data();
+    shadowPipelineCreateInfo.pVertexInputState = &vertexInputInfo;
+    shadowPipelineCreateInfo.pInputAssemblyState = &inputAssembly;
+    shadowPipelineCreateInfo.pViewportState = &viewportState;
+    shadowPipelineCreateInfo.pRasterizationState = &shadowRasterizer;
+    shadowPipelineCreateInfo.pMultisampleState = &shadowMultisampling;
+    shadowPipelineCreateInfo.pDepthStencilState = &shadowDepthStencil;
+    shadowPipelineCreateInfo.pColorBlendState = &shadowColorBlending;
+    shadowPipelineCreateInfo.pDynamicState = &shadowDynamicState;
+    shadowPipelineCreateInfo.layout = m_pipelineLayout;
+    shadowPipelineCreateInfo.renderPass = VK_NULL_HANDLE;
+    shadowPipelineCreateInfo.subpass = 0;
+
+    VkPipeline shadowPipeline = VK_NULL_HANDLE;
+    const VkResult shadowPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &shadowPipelineCreateInfo,
+        nullptr,
+        &shadowPipeline
+    );
+
+    vkDestroyShaderModule(m_device, shadowFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, shadowVertShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+
+    if (shadowPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(shadow)", shadowPipelineResult);
+        return false;
+    }
+
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
     }
     if (m_skyboxPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_skyboxPipeline, nullptr);
+    }
+    if (m_shadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);
     }
     if (m_tonemapPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr);
@@ -2671,10 +3010,11 @@ bool Renderer::createGraphicsPipeline() {
     }
     m_pipeline = worldPipeline;
     m_skyboxPipeline = skyboxPipeline;
+    m_shadowPipeline = shadowPipeline;
     m_tonemapPipeline = toneMapPipeline;
     m_previewAddPipeline = previewAddPipeline;
     m_previewRemovePipeline = previewRemovePipeline;
-    std::cerr << "[render] graphics pipelines ready (hdr scene + tonemap + preview="
+    std::cerr << "[render] graphics pipelines ready (shadow + hdr scene + tonemap + preview="
               << (m_supportsWireframePreview ? "wireframe" : "ghost")
               << ")\n";
     return true;
@@ -3035,6 +3375,16 @@ void Renderer::renderFrame(
     const math::Matrix4 viewColumnMajor = transpose(view);
     const math::Matrix4 projectionColumnMajor = transpose(projection);
 
+    const math::Vector3 sunDirection = math::normalize(math::Vector3{-0.55f, -1.0f, -0.35f});
+    const math::Vector3 sceneCenter{16.0f, 6.0f, 16.0f};
+    const math::Vector3 lightPosition = sceneCenter - (sunDirection * 110.0f);
+    const float sunUpDot = std::abs(math::dot(sunDirection, math::Vector3{0.0f, 1.0f, 0.0f}));
+    const math::Vector3 lightUp = (sunUpDot > 0.95f) ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
+    const math::Matrix4 lightView = lookAt(lightPosition, sceneCenter, lightUp);
+    const math::Matrix4 lightProjection = orthographicVulkan(-96.0f, 96.0f, -96.0f, 96.0f, 1.0f, 260.0f);
+    const math::Matrix4 lightViewProj = lightProjection * lightView;
+    const math::Matrix4 lightViewProjColumnMajor = transpose(lightViewProj);
+
     const std::optional<RingBufferSlice> mvpSliceOpt =
         m_uploadRing.allocate(sizeof(CameraUniform), m_uniformBufferAlignment);
     if (!mvpSliceOpt.has_value() || mvpSliceOpt->mapped == nullptr) {
@@ -3046,6 +3396,15 @@ void Renderer::renderFrame(
     std::memcpy(mvpUniform.mvp, mvpColumnMajor.m, sizeof(mvpUniform.mvp));
     std::memcpy(mvpUniform.view, viewColumnMajor.m, sizeof(mvpUniform.view));
     std::memcpy(mvpUniform.proj, projectionColumnMajor.m, sizeof(mvpUniform.proj));
+    std::memcpy(mvpUniform.lightViewProj, lightViewProjColumnMajor.m, sizeof(mvpUniform.lightViewProj));
+    mvpUniform.sunDirectionIntensity[0] = sunDirection.x;
+    mvpUniform.sunDirectionIntensity[1] = sunDirection.y;
+    mvpUniform.sunDirectionIntensity[2] = sunDirection.z;
+    mvpUniform.sunDirectionIntensity[3] = 3.0f;
+    mvpUniform.sunColorShadow[0] = 1.0f;
+    mvpUniform.sunColorShadow[1] = 0.95f;
+    mvpUniform.sunColorShadow[2] = 0.86f;
+    mvpUniform.sunColorShadow[3] = 1.0f;
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     VkDescriptorBufferInfo bufferInfo{};
@@ -3071,7 +3430,12 @@ void Renderer::renderFrame(
     hdrSceneImageInfo.imageView = m_hdrResolveImageViews[imageIndex];
     hdrSceneImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    std::array<VkWriteDescriptorSet, 4> writes{};
+    VkDescriptorImageInfo shadowMapImageInfo{};
+    shadowMapImageInfo.sampler = m_shadowDepthSampler;
+    shadowMapImageInfo.imageView = m_shadowDepthImageView;
+    shadowMapImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+    std::array<VkWriteDescriptorSet, 5> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -3100,7 +3464,127 @@ void Renderer::renderFrame(
     writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[3].pImageInfo = &hdrSceneImageInfo;
 
+    writes[4] = write;
+    writes[4].dstSet = m_descriptorSets[m_currentFrame];
+    writes[4].dstBinding = 4;
+    writes[4].descriptorCount = 1;
+    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[4].pImageInfo = &shadowMapImageInfo;
+
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(m_vertexBufferHandle);
+    if (vertexBuffer == VK_NULL_HANDLE) {
+        std::cerr << "[render] missing vertex buffer for draw\n";
+        return;
+    }
+    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(m_indexBufferHandle);
+    if (indexBuffer == VK_NULL_HANDLE) {
+        std::cerr << "[render] missing index buffer for draw\n";
+        return;
+    }
+    const VkDeviceSize vertexBufferOffset = 0;
+
+    const bool shadowInitialized = m_shadowDepthInitialized;
+    transitionImageLayout(
+        commandBuffer,
+        m_shadowDepthImage,
+        shadowInitialized ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        shadowInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+        shadowInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_ASPECT_DEPTH_BIT
+    );
+
+    constexpr uint32_t kShadowMapSize = 2048;
+    VkClearValue shadowDepthClearValue{};
+    shadowDepthClearValue.depthStencil.depth = 1.0f;
+    shadowDepthClearValue.depthStencil.stencil = 0;
+
+    VkRenderingAttachmentInfo shadowDepthAttachment{};
+    shadowDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    shadowDepthAttachment.imageView = m_shadowDepthImageView;
+    shadowDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    shadowDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    shadowDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    shadowDepthAttachment.clearValue = shadowDepthClearValue;
+
+    VkRenderingInfo shadowRenderingInfo{};
+    shadowRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    shadowRenderingInfo.renderArea.offset = {0, 0};
+    shadowRenderingInfo.renderArea.extent = {kShadowMapSize, kShadowMapSize};
+    shadowRenderingInfo.layerCount = 1;
+    shadowRenderingInfo.colorAttachmentCount = 0;
+    shadowRenderingInfo.pDepthAttachment = &shadowDepthAttachment;
+
+    vkCmdBeginRendering(commandBuffer, &shadowRenderingInfo);
+
+    VkViewport shadowViewport{};
+    shadowViewport.x = 0.0f;
+    shadowViewport.y = 0.0f;
+    shadowViewport.width = static_cast<float>(kShadowMapSize);
+    shadowViewport.height = static_cast<float>(kShadowMapSize);
+    shadowViewport.minDepth = 0.0f;
+    shadowViewport.maxDepth = 1.0f;
+    vkCmdSetViewport(commandBuffer, 0, 1, &shadowViewport);
+
+    VkRect2D shadowScissor{};
+    shadowScissor.offset = {0, 0};
+    shadowScissor.extent = {kShadowMapSize, kShadowMapSize};
+    vkCmdSetScissor(commandBuffer, 0, 1, &shadowScissor);
+
+    if (m_shadowPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            1,
+            &m_descriptorSets[m_currentFrame],
+            0,
+            nullptr
+        );
+        vkCmdSetDepthBias(commandBuffer, 0.75f, 0.0f, 1.0f);
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        constexpr float kChunkSize = static_cast<float>(world::Chunk::kSizeX);
+        for (int chunkZ = -1; chunkZ <= 1; ++chunkZ) {
+            for (int chunkX = -1; chunkX <= 1; ++chunkX) {
+                ChunkPushConstants chunkPushConstants{};
+                chunkPushConstants.chunkOffset[0] = static_cast<float>(chunkX) * kChunkSize;
+                chunkPushConstants.chunkOffset[1] = 0.0f;
+                chunkPushConstants.chunkOffset[2] = static_cast<float>(chunkZ) * kChunkSize;
+                chunkPushConstants.chunkOffset[3] = 0.0f;
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &chunkPushConstants
+                );
+                vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
+            }
+        }
+    }
+
+    vkCmdEndRendering(commandBuffer);
+
+    transitionImageLayout(
+        commandBuffer,
+        m_shadowDepthImage,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        VK_IMAGE_ASPECT_DEPTH_BIT
+    );
 
     if (!m_msaaColorImageInitialized[imageIndex]) {
         transitionImageLayout(
@@ -3219,17 +3703,6 @@ void Renderer::renderFrame(
         0,
         nullptr
     );
-    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(m_vertexBufferHandle);
-    if (vertexBuffer == VK_NULL_HANDLE) {
-        std::cerr << "[render] missing vertex buffer for draw\n";
-        return;
-    }
-    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(m_indexBufferHandle);
-    if (indexBuffer == VK_NULL_HANDLE) {
-        std::cerr << "[render] missing index buffer for draw\n";
-        return;
-    }
-    const VkDeviceSize vertexBufferOffset = 0;
     vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
     vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
@@ -3451,6 +3924,7 @@ void Renderer::renderFrame(
     presentInfo.pImageIndices = &imageIndex;
 
     const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
+    m_shadowDepthInitialized = true;
     m_swapchainImageInitialized[imageIndex] = true;
     m_msaaColorImageInitialized[imageIndex] = true;
     m_hdrResolveImageInitialized[imageIndex] = true;
@@ -3660,6 +4134,26 @@ void Renderer::destroyEnvironmentResources() {
     destroyCubemap(m_irradianceTexture);
 }
 
+void Renderer::destroyShadowResources() {
+    if (m_shadowDepthSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_shadowDepthSampler, nullptr);
+        m_shadowDepthSampler = VK_NULL_HANDLE;
+    }
+    if (m_shadowDepthImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, m_shadowDepthImageView, nullptr);
+        m_shadowDepthImageView = VK_NULL_HANDLE;
+    }
+    if (m_shadowDepthImage != VK_NULL_HANDLE) {
+        vkDestroyImage(m_device, m_shadowDepthImage, nullptr);
+        m_shadowDepthImage = VK_NULL_HANDLE;
+    }
+    if (m_shadowDepthMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, m_shadowDepthMemory, nullptr);
+        m_shadowDepthMemory = VK_NULL_HANDLE;
+    }
+    m_shadowDepthInitialized = false;
+}
+
 void Renderer::destroyChunkBuffers() {
     if (m_indexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_indexBufferHandle);
@@ -3691,6 +4185,10 @@ void Renderer::destroyPipeline() {
     if (m_skyboxPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_skyboxPipeline, nullptr);
         m_skyboxPipeline = VK_NULL_HANDLE;
+    }
+    if (m_shadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);
+        m_shadowPipeline = VK_NULL_HANDLE;
     }
     if (m_previewRemovePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
@@ -3726,6 +4224,7 @@ void Renderer::shutdown() {
         m_uploadRing.shutdown(&m_bufferAllocator);
         destroyPreviewBuffers();
         destroyEnvironmentResources();
+        destroyShadowResources();
         destroyChunkBuffers();
         destroyPipeline();
         if (m_descriptorPool != VK_NULL_HANDLE) {
@@ -3762,6 +4261,7 @@ void Renderer::shutdown() {
     m_transferQueueFamilyIndex = 0;
     m_transferQueueIndex = 0;
     m_depthFormat = VK_FORMAT_UNDEFINED;
+    m_shadowDepthFormat = VK_FORMAT_UNDEFINED;
     m_hdrColorFormat = VK_FORMAT_UNDEFINED;
     m_supportsWireframePreview = false;
     m_frameTimelineValues.fill(0);
