@@ -66,6 +66,7 @@ private:
     bool pickPhysicalDevice();
     bool createLogicalDevice();
     bool createSwapchain();
+    bool createHdrResolveTargets();
     bool createMsaaColorTargets();
     bool createDepthTargets();
     bool createTimelineSemaphore();
@@ -79,6 +80,7 @@ private:
     bool createFrameResources();
     bool recreateSwapchain();
     void destroySwapchain();
+    void destroyHdrResolveTargets();
     void destroyMsaaColorTargets();
     void destroyDepthTargets();
     void destroyFrameResources();
@@ -137,6 +139,11 @@ private:
     std::vector<VkDeviceMemory> m_msaaColorImageMemories;
     std::vector<VkImageView> m_msaaColorImageViews;
     std::vector<bool> m_msaaColorImageInitialized;
+    std::vector<VkImage> m_hdrResolveImages;
+    std::vector<VkDeviceMemory> m_hdrResolveImageMemories;
+    std::vector<VkImageView> m_hdrResolveImageViews;
+    std::vector<bool> m_hdrResolveImageInitialized;
+    VkSampler m_hdrResolveSampler = VK_NULL_HANDLE;
     std::vector<VkImage> m_depthImages;
     std::vector<VkDeviceMemory> m_depthImageMemories;
     std::vector<VkImageView> m_depthImageViews;
@@ -145,12 +152,14 @@ private:
     // while presentation may still be waiting on it.
     std::vector<VkSemaphore> m_renderFinishedSemaphores;
     VkSampleCountFlagBits m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
+    VkFormat m_hdrColorFormat = VK_FORMAT_UNDEFINED;
 
     // Minimal one-pass pipeline using dynamic rendering.
     // Future material systems will replace this single hardcoded pipeline.
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
     VkPipeline m_skyboxPipeline = VK_NULL_HANDLE;
+    VkPipeline m_tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewAddPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewRemovePipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;

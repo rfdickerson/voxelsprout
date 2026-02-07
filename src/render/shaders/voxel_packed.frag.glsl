@@ -33,7 +33,7 @@ vec3 faceNormal(uint face) {
 }
 
 void main() {
-    const float exposure = 1.9;
+    const float exposure = 1.35;
     const float aoBrightness = 0.45 + (clamp(inAo, 0.0, 1.0) * 0.55);
     const vec3 baseColor = faceColor(inFace) * materialTint(inMaterial);
     const vec3 diffuseIrradiance = texture(irradianceMap, faceNormal(inFace)).rgb;

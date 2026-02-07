@@ -187,6 +187,24 @@ VkFormat findSupportedDepthFormat(VkPhysicalDevice physicalDevice) {
     return VK_FORMAT_UNDEFINED;
 }
 
+VkFormat findSupportedHdrColorFormat(VkPhysicalDevice physicalDevice) {
+    constexpr std::array<VkFormat, 2> kHdrCandidates = {
+        VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_FORMAT_B10G11R11_UFLOAT_PACK32
+    };
+
+    for (VkFormat format : kHdrCandidates) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
+        const VkFormatFeatureFlags requiredFeatures =
+            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        if ((properties.optimalTilingFeatures & requiredFeatures) == requiredFeatures) {
+            return format;
+        }
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
 // Embedded shaders keep this bootstrap renderer self-contained.
 // Source references:
 // - src/render/shaders/voxel_packed.vert.glsl
@@ -1118,6 +1136,11 @@ bool Renderer::pickPhysicalDevice() {
             std::cerr << "[render] skip GPU: no supported depth format\n";
             continue;
         }
+        const VkFormat hdrColorFormat = findSupportedHdrColorFormat(candidate);
+        if (hdrColorFormat == VK_FORMAT_UNDEFINED) {
+            std::cerr << "[render] skip GPU: no supported HDR color format\n";
+            continue;
+        }
 
         VkPhysicalDeviceVulkan12Features vulkan12Features{};
         vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
@@ -1153,12 +1176,15 @@ bool Renderer::pickPhysicalDevice() {
         m_transferQueueIndex = queueFamily.transferQueueIndex;
         m_supportsWireframePreview = supportsWireframe;
         m_depthFormat = depthFormat;
+        m_hdrColorFormat = hdrColorFormat;
         std::cerr << "[render] selected GPU: " << properties.deviceName
                   << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
                   << ", graphicsQueueIndex=" << m_graphicsQueueIndex
                   << ", transferQueueFamily=" << m_transferQueueFamilyIndex
                   << ", transferQueueIndex=" << m_transferQueueIndex
-                  << ", wireframePreview=" << (m_supportsWireframePreview ? "yes" : "no") << "\n";
+                  << ", wireframePreview=" << (m_supportsWireframePreview ? "yes" : "no")
+                  << ", hdrColorFormat=" << static_cast<int>(m_hdrColorFormat)
+                  << "\n";
         return true;
     }
 
@@ -1736,6 +1762,10 @@ bool Renderer::createSwapchain() {
               << ", extent=" << m_swapchainExtent.width << "x" << m_swapchainExtent.height << "\n";
     m_swapchainImageInitialized.assign(imageCount, false);
     m_swapchainImageTimelineValues.assign(imageCount, 0);
+    if (!createHdrResolveTargets()) {
+        std::cerr << "[render] HDR resolve target creation failed\n";
+        return false;
+    }
     if (!createMsaaColorTargets()) {
         std::cerr << "[render] MSAA color target creation failed\n";
         return false;
@@ -1843,6 +1873,115 @@ bool Renderer::createDepthTargets() {
     return true;
 }
 
+bool Renderer::createHdrResolveTargets() {
+    if (m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
+        std::cerr << "[render] HDR color format is undefined\n";
+        return false;
+    }
+
+    const uint32_t imageCount = static_cast<uint32_t>(m_swapchainImages.size());
+    m_hdrResolveImages.assign(imageCount, VK_NULL_HANDLE);
+    m_hdrResolveImageMemories.assign(imageCount, VK_NULL_HANDLE);
+    m_hdrResolveImageViews.assign(imageCount, VK_NULL_HANDLE);
+    m_hdrResolveImageInitialized.assign(imageCount, false);
+
+    for (uint32_t i = 0; i < imageCount; ++i) {
+        VkImageCreateInfo imageCreateInfo{};
+        imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageCreateInfo.format = m_hdrColorFormat;
+        imageCreateInfo.extent.width = m_swapchainExtent.width;
+        imageCreateInfo.extent.height = m_swapchainExtent.height;
+        imageCreateInfo.extent.depth = 1;
+        imageCreateInfo.mipLevels = 1;
+        imageCreateInfo.arrayLayers = 1;
+        imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageCreateInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_hdrResolveImages[i]);
+        if (imageResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(hdrResolve)", imageResult);
+            return false;
+        }
+
+        VkMemoryRequirements memoryRequirements{};
+        vkGetImageMemoryRequirements(m_device, m_hdrResolveImages[i], &memoryRequirements);
+
+        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice,
+            memoryRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        );
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "[render] no memory type for HDR resolve image\n";
+            return false;
+        }
+
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+
+        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_hdrResolveImageMemories[i]);
+        if (allocResult != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(hdrResolve)", allocResult);
+            return false;
+        }
+
+        const VkResult bindResult = vkBindImageMemory(m_device, m_hdrResolveImages[i], m_hdrResolveImageMemories[i], 0);
+        if (bindResult != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(hdrResolve)", bindResult);
+            return false;
+        }
+
+        VkImageViewCreateInfo viewCreateInfo{};
+        viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewCreateInfo.image = m_hdrResolveImages[i];
+        viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewCreateInfo.format = m_hdrColorFormat;
+        viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewCreateInfo.subresourceRange.baseMipLevel = 0;
+        viewCreateInfo.subresourceRange.levelCount = 1;
+        viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+        viewCreateInfo.subresourceRange.layerCount = 1;
+
+        const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_hdrResolveImageViews[i]);
+        if (viewResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImageView(hdrResolve)", viewResult);
+            return false;
+        }
+    }
+
+    if (m_hdrResolveSampler == VK_NULL_HANDLE) {
+        VkSamplerCreateInfo samplerCreateInfo{};
+        samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+        samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+        samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.mipLodBias = 0.0f;
+        samplerCreateInfo.anisotropyEnable = VK_FALSE;
+        samplerCreateInfo.compareEnable = VK_FALSE;
+        samplerCreateInfo.minLod = 0.0f;
+        samplerCreateInfo.maxLod = 0.0f;
+        samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+
+        const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_hdrResolveSampler);
+        if (samplerResult != VK_SUCCESS) {
+            logVkFailure("vkCreateSampler(hdrResolve)", samplerResult);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool Renderer::createMsaaColorTargets() {
     const uint32_t imageCount = static_cast<uint32_t>(m_swapchainImages.size());
     m_msaaColorImages.assign(imageCount, VK_NULL_HANDLE);
@@ -1854,7 +1993,7 @@ bool Renderer::createMsaaColorTargets() {
         VkImageCreateInfo imageCreateInfo{};
         imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageCreateInfo.format = m_swapchainFormat;
+        imageCreateInfo.format = m_hdrColorFormat;
         imageCreateInfo.extent.width = m_swapchainExtent.width;
         imageCreateInfo.extent.height = m_swapchainExtent.height;
         imageCreateInfo.extent.depth = 1;
@@ -1906,7 +2045,7 @@ bool Renderer::createMsaaColorTargets() {
         viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         viewCreateInfo.image = m_msaaColorImages[i];
         viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewCreateInfo.format = m_swapchainFormat;
+        viewCreateInfo.format = m_hdrColorFormat;
         viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         viewCreateInfo.subresourceRange.baseMipLevel = 0;
         viewCreateInfo.subresourceRange.levelCount = 1;
@@ -1943,10 +2082,17 @@ bool Renderer::createDescriptorResources() {
         skyboxBinding.descriptorCount = 1;
         skyboxBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+        VkDescriptorSetLayoutBinding hdrSceneBinding{};
+        hdrSceneBinding.binding = 3;
+        hdrSceneBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        hdrSceneBinding.descriptorCount = 1;
+        hdrSceneBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 4> bindings = {
             mvpBinding,
             irradianceBinding,
-            skyboxBinding
+            skyboxBinding,
+            hdrSceneBinding
         };
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
@@ -1970,7 +2116,7 @@ bool Renderer::createDescriptorResources() {
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                2 * kMaxFramesInFlight
+                3 * kMaxFramesInFlight
             }
         };
 
@@ -2010,6 +2156,10 @@ bool Renderer::createGraphicsPipeline() {
         std::cerr << "[render] cannot create pipeline: depth format undefined\n";
         return false;
     }
+    if (m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
+        std::cerr << "[render] cannot create pipeline: HDR color format undefined\n";
+        return false;
+    }
 
     if (m_pipelineLayout == VK_NULL_HANDLE) {
         VkPipelineLayoutCreateInfo layoutCreateInfo{};
@@ -2047,11 +2197,25 @@ bool Renderer::createGraphicsPipeline() {
         "../../src/render/shaders/skybox.frag.spv",
         "../../../src/render/shaders/skybox.frag.spv",
     };
+    constexpr std::array<const char*, 4> kToneMapVertexShaderPathCandidates = {
+        "src/render/shaders/tone_map.vert.spv",
+        "../src/render/shaders/tone_map.vert.spv",
+        "../../src/render/shaders/tone_map.vert.spv",
+        "../../../src/render/shaders/tone_map.vert.spv",
+    };
+    constexpr std::array<const char*, 4> kToneMapFragmentShaderPathCandidates = {
+        "src/render/shaders/tone_map.frag.spv",
+        "../src/render/shaders/tone_map.frag.spv",
+        "../../src/render/shaders/tone_map.frag.spv",
+        "../../../src/render/shaders/tone_map.frag.spv",
+    };
 
     VkShaderModule worldVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule worldFragShaderModule = VK_NULL_HANDLE;
     VkShaderModule skyboxVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule skyboxFragShaderModule = VK_NULL_HANDLE;
+    VkShaderModule toneMapVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule toneMapFragShaderModule = VK_NULL_HANDLE;
 
     if (!createShaderModuleFromFileOrFallback(
             m_device,
@@ -2094,6 +2258,35 @@ bool Renderer::createGraphicsPipeline() {
             "skybox.frag",
             skyboxFragShaderModule
         )) {
+        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kToneMapVertexShaderPathCandidates,
+            nullptr,
+            0,
+            "tone_map.vert",
+            toneMapVertShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kToneMapFragmentShaderPathCandidates,
+            nullptr,
+            0,
+            "tone_map.frag",
+            toneMapFragShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
         vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
         vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
         vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
@@ -2185,7 +2378,7 @@ bool Renderer::createGraphicsPipeline() {
     VkPipelineRenderingCreateInfo renderingCreateInfo{};
     renderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
     renderingCreateInfo.colorAttachmentCount = 1;
-    renderingCreateInfo.pColorAttachmentFormats = &m_swapchainFormat;
+    renderingCreateInfo.pColorAttachmentFormats = &m_hdrColorFormat;
     renderingCreateInfo.depthAttachmentFormat = m_depthFormat;
 
     VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
@@ -2215,6 +2408,8 @@ bool Renderer::createGraphicsPipeline() {
         &worldPipeline
     );
     if (worldPipelineResult != VK_SUCCESS) {
+        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
         vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
         vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
         vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
@@ -2263,6 +2458,8 @@ bool Renderer::createGraphicsPipeline() {
     );
     if (previewAddPipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
         vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
         vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
         vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
@@ -2289,6 +2486,8 @@ bool Renderer::createGraphicsPipeline() {
     if (previewRemovePipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
         vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
         vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
         vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
@@ -2345,16 +2544,102 @@ bool Renderer::createGraphicsPipeline() {
         &skyboxPipeline
     );
 
+    if (skyboxPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(skybox)", skyboxPipelineResult);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo toneMapVertexShaderStage{};
+    toneMapVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    toneMapVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    toneMapVertexShaderStage.module = toneMapVertShaderModule;
+    toneMapVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo toneMapFragmentShaderStage{};
+    toneMapFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    toneMapFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    toneMapFragmentShaderStage.module = toneMapFragShaderModule;
+    toneMapFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> toneMapShaderStages = {
+        toneMapVertexShaderStage,
+        toneMapFragmentShaderStage
+    };
+
+    VkPipelineVertexInputStateCreateInfo toneMapVertexInputInfo{};
+    toneMapVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo toneMapInputAssembly = inputAssembly;
+
+    VkPipelineRasterizationStateCreateInfo toneMapRasterizer = rasterizer;
+    toneMapRasterizer.cullMode = VK_CULL_MODE_NONE;
+
+    VkPipelineMultisampleStateCreateInfo toneMapMultisampling{};
+    toneMapMultisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    toneMapMultisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo toneMapDepthStencil{};
+    toneMapDepthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    toneMapDepthStencil.depthTestEnable = VK_FALSE;
+    toneMapDepthStencil.depthWriteEnable = VK_FALSE;
+    toneMapDepthStencil.depthBoundsTestEnable = VK_FALSE;
+    toneMapDepthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineRenderingCreateInfo toneMapRenderingCreateInfo{};
+    toneMapRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    toneMapRenderingCreateInfo.colorAttachmentCount = 1;
+    toneMapRenderingCreateInfo.pColorAttachmentFormats = &m_swapchainFormat;
+    toneMapRenderingCreateInfo.depthAttachmentFormat = VK_FORMAT_UNDEFINED;
+
+    VkGraphicsPipelineCreateInfo toneMapPipelineCreateInfo{};
+    toneMapPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    toneMapPipelineCreateInfo.pNext = &toneMapRenderingCreateInfo;
+    toneMapPipelineCreateInfo.stageCount = static_cast<uint32_t>(toneMapShaderStages.size());
+    toneMapPipelineCreateInfo.pStages = toneMapShaderStages.data();
+    toneMapPipelineCreateInfo.pVertexInputState = &toneMapVertexInputInfo;
+    toneMapPipelineCreateInfo.pInputAssemblyState = &toneMapInputAssembly;
+    toneMapPipelineCreateInfo.pViewportState = &viewportState;
+    toneMapPipelineCreateInfo.pRasterizationState = &toneMapRasterizer;
+    toneMapPipelineCreateInfo.pMultisampleState = &toneMapMultisampling;
+    toneMapPipelineCreateInfo.pDepthStencilState = &toneMapDepthStencil;
+    toneMapPipelineCreateInfo.pColorBlendState = &colorBlending;
+    toneMapPipelineCreateInfo.pDynamicState = &dynamicState;
+    toneMapPipelineCreateInfo.layout = m_pipelineLayout;
+    toneMapPipelineCreateInfo.renderPass = VK_NULL_HANDLE;
+    toneMapPipelineCreateInfo.subpass = 0;
+
+    VkPipeline toneMapPipeline = VK_NULL_HANDLE;
+    const VkResult toneMapPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &toneMapPipelineCreateInfo,
+        nullptr,
+        &toneMapPipeline
+    );
+
+    vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
     vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
     vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
     vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
     vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
 
-    if (skyboxPipelineResult != VK_SUCCESS) {
+    if (toneMapPipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        logVkFailure("vkCreateGraphicsPipelines(skybox)", skyboxPipelineResult);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(toneMap)", toneMapPipelineResult);
         return false;
     }
 
@@ -2364,6 +2649,9 @@ bool Renderer::createGraphicsPipeline() {
     if (m_skyboxPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_skyboxPipeline, nullptr);
     }
+    if (m_tonemapPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr);
+    }
     if (m_previewAddPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_previewAddPipeline, nullptr);
     }
@@ -2372,9 +2660,10 @@ bool Renderer::createGraphicsPipeline() {
     }
     m_pipeline = worldPipeline;
     m_skyboxPipeline = skyboxPipeline;
+    m_tonemapPipeline = toneMapPipeline;
     m_previewAddPipeline = previewAddPipeline;
     m_previewRemovePipeline = previewRemovePipeline;
-    std::cerr << "[render] graphics pipelines ready (skybox + preview="
+    std::cerr << "[render] graphics pipelines ready (hdr scene + tonemap + preview="
               << (m_supportsWireframePreview ? "wireframe" : "ghost")
               << ")\n";
     return true;
@@ -2766,7 +3055,12 @@ void Renderer::renderFrame(
     skyboxImageInfo.imageView = m_skyboxTexture.view;
     skyboxImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    std::array<VkWriteDescriptorSet, 3> writes{};
+    VkDescriptorImageInfo hdrSceneImageInfo{};
+    hdrSceneImageInfo.sampler = m_hdrResolveSampler;
+    hdrSceneImageInfo.imageView = m_hdrResolveImageViews[imageIndex];
+    hdrSceneImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    std::array<VkWriteDescriptorSet, 4> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -2788,19 +3082,15 @@ void Renderer::renderFrame(
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[2].pImageInfo = &skyboxImageInfo;
 
+    writes[3] = write;
+    writes[3].dstSet = m_descriptorSets[m_currentFrame];
+    writes[3].dstBinding = 3;
+    writes[3].descriptorCount = 1;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[3].pImageInfo = &hdrSceneImageInfo;
+
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
-    transitionImageLayout(
-        commandBuffer,
-        m_swapchainImages[imageIndex],
-        m_swapchainImageInitialized[imageIndex] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_PIPELINE_STAGE_2_NONE,
-        VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT
-    );
     if (!m_msaaColorImageInitialized[imageIndex]) {
         transitionImageLayout(
             commandBuffer,
@@ -2814,6 +3104,18 @@ void Renderer::renderFrame(
             VK_IMAGE_ASPECT_COLOR_BIT
         );
     }
+    const bool hdrResolveInitialized = m_hdrResolveImageInitialized[imageIndex];
+    transitionImageLayout(
+        commandBuffer,
+        m_hdrResolveImages[imageIndex],
+        hdrResolveInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        hdrResolveInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+        hdrResolveInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
     transitionImageLayout(
         commandBuffer,
         m_depthImages[imageIndex],
@@ -2840,7 +3142,7 @@ void Renderer::renderFrame(
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     colorAttachment.clearValue = clearValue;
     colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-    colorAttachment.resolveImageView = m_swapchainImageViews[imageIndex];
+    colorAttachment.resolveImageView = m_hdrResolveImageViews[imageIndex];
     colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     VkClearValue depthClearValue{};
@@ -2970,6 +3272,66 @@ void Renderer::renderFrame(
 
     transitionImageLayout(
         commandBuffer,
+        m_hdrResolveImages[imageIndex],
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    transitionImageLayout(
+        commandBuffer,
+        m_swapchainImages[imageIndex],
+        m_swapchainImageInitialized[imageIndex] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    VkRenderingAttachmentInfo toneMapColorAttachment{};
+    toneMapColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    toneMapColorAttachment.imageView = m_swapchainImageViews[imageIndex];
+    toneMapColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toneMapColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    toneMapColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo toneMapRenderingInfo{};
+    toneMapRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    toneMapRenderingInfo.renderArea.offset = {0, 0};
+    toneMapRenderingInfo.renderArea.extent = m_swapchainExtent;
+    toneMapRenderingInfo.layerCount = 1;
+    toneMapRenderingInfo.colorAttachmentCount = 1;
+    toneMapRenderingInfo.pColorAttachments = &toneMapColorAttachment;
+
+    vkCmdBeginRendering(commandBuffer, &toneMapRenderingInfo);
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+    if (m_tonemapPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_tonemapPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            1,
+            &m_descriptorSets[m_currentFrame],
+            0,
+            nullptr
+        );
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    }
+
+    vkCmdEndRendering(commandBuffer);
+
+    transitionImageLayout(
+        commandBuffer,
         m_swapchainImages[imageIndex],
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -3048,6 +3410,7 @@ void Renderer::renderFrame(
     const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
     m_swapchainImageInitialized[imageIndex] = true;
     m_msaaColorImageInitialized[imageIndex] = true;
+    m_hdrResolveImageInitialized[imageIndex] = true;
 
     if (
         acquireResult == VK_SUBOPTIMAL_KHR ||
@@ -3090,6 +3453,35 @@ bool Renderer::recreateSwapchain() {
     }
     std::cerr << "[render] recreateSwapchain complete\n";
     return true;
+}
+
+void Renderer::destroyHdrResolveTargets() {
+    if (m_hdrResolveSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_hdrResolveSampler, nullptr);
+        m_hdrResolveSampler = VK_NULL_HANDLE;
+    }
+
+    for (VkImageView imageView : m_hdrResolveImageViews) {
+        if (imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, imageView, nullptr);
+        }
+    }
+    m_hdrResolveImageViews.clear();
+
+    for (VkImage image : m_hdrResolveImages) {
+        if (image != VK_NULL_HANDLE) {
+            vkDestroyImage(m_device, image, nullptr);
+        }
+    }
+    m_hdrResolveImages.clear();
+
+    for (VkDeviceMemory memory : m_hdrResolveImageMemories) {
+        if (memory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, memory, nullptr);
+        }
+    }
+    m_hdrResolveImageMemories.clear();
+    m_hdrResolveImageInitialized.clear();
 }
 
 void Renderer::destroyMsaaColorTargets() {
@@ -3140,6 +3532,7 @@ void Renderer::destroyDepthTargets() {
 }
 
 void Renderer::destroySwapchain() {
+    destroyHdrResolveTargets();
     destroyMsaaColorTargets();
     destroyDepthTargets();
 
@@ -3248,6 +3641,10 @@ void Renderer::destroyChunkBuffers() {
 }
 
 void Renderer::destroyPipeline() {
+    if (m_tonemapPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr);
+        m_tonemapPipeline = VK_NULL_HANDLE;
+    }
     if (m_skyboxPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_skyboxPipeline, nullptr);
         m_skyboxPipeline = VK_NULL_HANDLE;
@@ -3322,6 +3719,7 @@ void Renderer::shutdown() {
     m_transferQueueFamilyIndex = 0;
     m_transferQueueIndex = 0;
     m_depthFormat = VK_FORMAT_UNDEFINED;
+    m_hdrColorFormat = VK_FORMAT_UNDEFINED;
     m_supportsWireframePreview = false;
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
