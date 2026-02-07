@@ -18,6 +18,7 @@ constexpr float kMoveAcceleration = 14.0f;
 constexpr float kMoveDeceleration = 18.0f;
 constexpr float kPitchMinDegrees = -89.0f;
 constexpr float kPitchMaxDegrees = 89.0f;
+constexpr float kBlockInteractMaxDistance = 5.0f;
 
 void glfwErrorCallback(int errorCode, const char* description) {
     std::cerr << "[app][glfw] error " << errorCode << ": "
@@ -123,15 +124,15 @@ void App::update(float dt) {
     }
 
     render::VoxelPreview preview{};
-    if (raycast.hitSolid) {
-        const bool showRemovePreview = m_input.removeBlockDown || !raycast.hasAdjacentEmpty;
+    if (raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
+        const bool showRemovePreview = m_input.removeBlockDown;
         if (showRemovePreview) {
             preview.visible = true;
             preview.mode = render::VoxelPreview::Mode::Remove;
             preview.x = raycast.solidX;
             preview.y = raycast.solidY;
             preview.z = raycast.solidZ;
-        } else {
+        } else if (raycast.hasAdjacentEmpty) {
             preview.visible = true;
             preview.mode = render::VoxelPreview::Mode::Add;
             preview.x = raycast.adjacentEmptyX;
@@ -308,6 +309,7 @@ App::CameraRaycastResult App::raycastFromCamera() const {
             result.solidX = vx;
             result.solidY = vy;
             result.solidZ = vz;
+            result.hitDistance = distance;
             if (hasPreviousEmpty && !chunk.isSolid(previousX, previousY, previousZ)) {
                 result.hasAdjacentEmpty = true;
                 result.adjacentEmptyX = previousX;
@@ -332,7 +334,7 @@ bool App::tryPlaceVoxelFromCameraRay() {
     }
 
     const CameraRaycastResult raycast = raycastFromCamera();
-    if (!raycast.hitSolid || !raycast.hasAdjacentEmpty) {
+    if (!raycast.hitSolid || !raycast.hasAdjacentEmpty || raycast.hitDistance > kBlockInteractMaxDistance) {
         return false;
     }
 
@@ -347,7 +349,7 @@ bool App::tryRemoveVoxelFromCameraRay() {
     }
 
     const CameraRaycastResult raycast = raycastFromCamera();
-    if (!raycast.hitSolid) {
+    if (!raycast.hitSolid || raycast.hitDistance > kBlockInteractMaxDistance) {
         return false;
     }
 

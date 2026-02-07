@@ -140,7 +140,8 @@ private:
     // Future material systems will replace this single hardcoded pipeline.
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
-    VkPipeline m_previewPipeline = VK_NULL_HANDLE;
+    VkPipeline m_previewAddPipeline = VK_NULL_HANDLE;
+    VkPipeline m_previewRemovePipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};

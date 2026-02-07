@@ -25,6 +25,7 @@ private:
         int solidX = 0;
         int solidY = 0;
         int solidZ = 0;
+        float hitDistance = 0.0f;
         bool hasAdjacentEmpty = false;
         int adjacentEmptyX = 0;
         int adjacentEmptyY = 0;

@@ -1621,10 +1621,15 @@ bool Renderer::createGraphicsPipeline() {
         return false;
     }
 
-    VkPipelineRasterizationStateCreateInfo previewRasterizer = rasterizer;
-    previewRasterizer.polygonMode = m_supportsWireframePreview ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-    previewRasterizer.cullMode = VK_CULL_MODE_NONE;
-    previewRasterizer.depthBiasEnable = VK_TRUE;
+    VkPipelineRasterizationStateCreateInfo previewAddRasterizer = rasterizer;
+    previewAddRasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    previewAddRasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    previewAddRasterizer.depthBiasEnable = VK_TRUE;
+
+    VkPipelineRasterizationStateCreateInfo previewRemoveRasterizer = rasterizer;
+    previewRemoveRasterizer.polygonMode = m_supportsWireframePreview ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+    previewRemoveRasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    previewRemoveRasterizer.depthBiasEnable = VK_TRUE;
 
     VkPipelineDepthStencilStateCreateInfo previewDepthStencil = depthStencil;
     previewDepthStencil.depthWriteEnable = VK_FALSE;
@@ -1640,38 +1645,63 @@ bool Renderer::createGraphicsPipeline() {
     previewDynamicState.dynamicStateCount = static_cast<uint32_t>(previewDynamicStates.size());
     previewDynamicState.pDynamicStates = previewDynamicStates.data();
 
-    VkGraphicsPipelineCreateInfo previewPipelineCreateInfo = pipelineCreateInfo;
-    previewPipelineCreateInfo.pRasterizationState = &previewRasterizer;
-    previewPipelineCreateInfo.pDepthStencilState = &previewDepthStencil;
-    previewPipelineCreateInfo.pDynamicState = &previewDynamicState;
+    VkGraphicsPipelineCreateInfo previewAddPipelineCreateInfo = pipelineCreateInfo;
+    previewAddPipelineCreateInfo.pRasterizationState = &previewAddRasterizer;
+    previewAddPipelineCreateInfo.pDepthStencilState = &previewDepthStencil;
+    previewAddPipelineCreateInfo.pDynamicState = &previewDynamicState;
 
-    VkPipeline previewPipeline = VK_NULL_HANDLE;
-    const VkResult previewPipelineResult = vkCreateGraphicsPipelines(
+    VkPipeline previewAddPipeline = VK_NULL_HANDLE;
+    const VkResult previewAddPipelineResult = vkCreateGraphicsPipelines(
         m_device,
         VK_NULL_HANDLE,
         1,
-        &previewPipelineCreateInfo,
+        &previewAddPipelineCreateInfo,
         nullptr,
-        &previewPipeline
+        &previewAddPipeline
+    );
+    if (previewAddPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(previewAdd)", previewAddPipelineResult);
+        return false;
+    }
+
+    VkGraphicsPipelineCreateInfo previewRemovePipelineCreateInfo = pipelineCreateInfo;
+    previewRemovePipelineCreateInfo.pRasterizationState = &previewRemoveRasterizer;
+    previewRemovePipelineCreateInfo.pDepthStencilState = &previewDepthStencil;
+    previewRemovePipelineCreateInfo.pDynamicState = &previewDynamicState;
+
+    VkPipeline previewRemovePipeline = VK_NULL_HANDLE;
+    const VkResult previewRemovePipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &previewRemovePipelineCreateInfo,
+        nullptr,
+        &previewRemovePipeline
     );
 
     vkDestroyShaderModule(m_device, fragShaderModule, nullptr);
     vkDestroyShaderModule(m_device, vertShaderModule, nullptr);
 
-    if (previewPipelineResult != VK_SUCCESS) {
+    if (previewRemovePipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        logVkFailure("vkCreateGraphicsPipelines(preview)", previewPipelineResult);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(previewRemove)", previewRemovePipelineResult);
         return false;
     }
 
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
     }
-    if (m_previewPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_previewPipeline, nullptr);
+    if (m_previewAddPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_previewAddPipeline, nullptr);
+    }
+    if (m_previewRemovePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
     }
     m_pipeline = worldPipeline;
-    m_previewPipeline = previewPipeline;
+    m_previewAddPipeline = previewAddPipeline;
+    m_previewRemovePipeline = previewRemovePipeline;
     std::cerr << "[render] graphics pipelines ready (preview="
               << (m_supportsWireframePreview ? "wireframe" : "ghost")
               << ")\n";
@@ -2172,7 +2202,9 @@ void Renderer::renderFrame(
     vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
 
-    if (preview.visible && m_previewPipeline != VK_NULL_HANDLE) {
+    const VkPipeline activePreviewPipeline =
+        (preview.mode == VoxelPreview::Mode::Remove) ? m_previewRemovePipeline : m_previewAddPipeline;
+    if (preview.visible && activePreviewPipeline != VK_NULL_HANDLE) {
         const uint32_t previewX = static_cast<uint32_t>(std::clamp(preview.x, 0, 31));
         const uint32_t previewY = static_cast<uint32_t>(std::clamp(preview.y, 0, 31));
         const uint32_t previewZ = static_cast<uint32_t>(std::clamp(preview.z, 0, 31));
@@ -2196,7 +2228,7 @@ void Renderer::renderFrame(
             const VkBuffer previewVertexBuffer = m_bufferAllocator.getBuffer(m_previewVertexBufferHandle);
             const VkBuffer previewIndexBuffer = m_bufferAllocator.getBuffer(m_previewIndexBufferHandle);
             if (previewVertexBuffer != VK_NULL_HANDLE && previewIndexBuffer != VK_NULL_HANDLE) {
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_previewPipeline);
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, activePreviewPipeline);
                 vkCmdBindDescriptorSets(
                     commandBuffer,
                     VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2472,9 +2504,13 @@ void Renderer::destroyChunkBuffers() {
 }
 
 void Renderer::destroyPipeline() {
-    if (m_previewPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_previewPipeline, nullptr);
-        m_previewPipeline = VK_NULL_HANDLE;
+    if (m_previewRemovePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
+        m_previewRemovePipeline = VK_NULL_HANDLE;
+    }
+    if (m_previewAddPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_previewAddPipeline, nullptr);
+        m_previewAddPipeline = VK_NULL_HANDLE;
     }
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
