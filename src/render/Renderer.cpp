@@ -18,7 +18,13 @@ namespace render {
 namespace {
 
 constexpr std::array<const char*, 1> kValidationLayers = {"VK_LAYER_KHRONOS_validation"};
-constexpr std::array<const char*, 1> kDeviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+constexpr std::array<const char*, 5> kDeviceExtensions = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    VK_KHR_MAINTENANCE_4_EXTENSION_NAME,
+    VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
+    VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+    VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+};
 
 struct Vertex {
     float x;
@@ -84,6 +90,59 @@ math::Matrix4 lookAt(const math::Vector3& eye, const math::Vector3& target, cons
     view(2, 2) = -forward.z;
     view(2, 3) = math::dot(forward, eye);
     return view;
+}
+
+uint32_t findMemoryTypeIndex(
+    VkPhysicalDevice physicalDevice,
+    uint32_t typeBits,
+    VkMemoryPropertyFlags requiredProperties
+) {
+    VkPhysicalDeviceMemoryProperties memoryProperties{};
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
+
+    for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
+        const bool typeMatches = (typeBits & (1u << i)) != 0;
+        const bool propertiesMatch =
+            (memoryProperties.memoryTypes[i].propertyFlags & requiredProperties) == requiredProperties;
+        if (typeMatches && propertiesMatch) {
+            return i;
+        }
+    }
+    return std::numeric_limits<uint32_t>::max();
+}
+
+void transitionImageLayout(
+    VkCommandBuffer commandBuffer,
+    VkImage image,
+    VkImageLayout oldLayout,
+    VkImageLayout newLayout,
+    VkPipelineStageFlags2 srcStageMask,
+    VkAccessFlags2 srcAccessMask,
+    VkPipelineStageFlags2 dstStageMask,
+    VkAccessFlags2 dstAccessMask
+) {
+    VkImageMemoryBarrier2 imageBarrier{};
+    imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    imageBarrier.srcStageMask = srcStageMask;
+    imageBarrier.srcAccessMask = srcAccessMask;
+    imageBarrier.dstStageMask = dstStageMask;
+    imageBarrier.dstAccessMask = dstAccessMask;
+    imageBarrier.oldLayout = oldLayout;
+    imageBarrier.newLayout = newLayout;
+    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.image = image;
+    imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageBarrier.subresourceRange.baseMipLevel = 0;
+    imageBarrier.subresourceRange.levelCount = 1;
+    imageBarrier.subresourceRange.baseArrayLayer = 0;
+    imageBarrier.subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dependencyInfo{};
+    dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependencyInfo.imageMemoryBarrierCount = 1;
+    dependencyInfo.pImageMemoryBarriers = &imageBarrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
 }
 
 // Embedded shaders keep this bootstrap renderer self-contained.
@@ -366,6 +425,11 @@ bool Renderer::init(GLFWwindow* window) {
         shutdown();
         return false;
     }
+    if (!createTimelineSemaphore()) {
+        std::cerr << "[render] init failed at createTimelineSemaphore\n";
+        shutdown();
+        return false;
+    }
     if (!m_bufferAllocator.init(m_physicalDevice, m_device)) {
         std::cerr << "[render] init failed at buffer allocator init\n";
         shutdown();
@@ -482,6 +546,10 @@ bool Renderer::pickPhysicalDevice() {
             std::cerr << "[render] skip GPU: Vulkan 1.3 required\n";
             continue;
         }
+        if ((properties.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) == 0) {
+            std::cerr << "[render] skip GPU: 4x MSAA color attachments not supported\n";
+            continue;
+        }
 
         const QueueFamilyChoice queueFamily = findQueueFamily(candidate, m_surface);
         if (!queueFamily.valid()) {
@@ -499,14 +567,29 @@ bool Renderer::pickPhysicalDevice() {
             continue;
         }
 
+        VkPhysicalDeviceVulkan12Features vulkan12Features{};
+        vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
         VkPhysicalDeviceVulkan13Features vulkan13Features{};
         vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+        vulkan13Features.pNext = &vulkan12Features;
         VkPhysicalDeviceFeatures2 features2{};
         features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         features2.pNext = &vulkan13Features;
         vkGetPhysicalDeviceFeatures2(candidate, &features2);
         if (vulkan13Features.dynamicRendering != VK_TRUE) {
             std::cerr << "[render] skip GPU: dynamicRendering not supported\n";
+            continue;
+        }
+        if (vulkan12Features.timelineSemaphore != VK_TRUE) {
+            std::cerr << "[render] skip GPU: timelineSemaphore not supported\n";
+            continue;
+        }
+        if (vulkan13Features.synchronization2 != VK_TRUE) {
+            std::cerr << "[render] skip GPU: synchronization2 not supported\n";
+            continue;
+        }
+        if (vulkan13Features.maintenance4 != VK_TRUE) {
+            std::cerr << "[render] skip GPU: maintenance4 not supported\n";
             continue;
         }
 
@@ -530,9 +613,16 @@ bool Renderer::createLogicalDevice() {
     queueCreateInfo.queueCount = 1;
     queueCreateInfo.pQueuePriorities = &queuePriority;
 
+    VkPhysicalDeviceVulkan12Features vulkan12Features{};
+    vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vulkan12Features.timelineSemaphore = VK_TRUE;
+
     VkPhysicalDeviceVulkan13Features vulkan13Features{};
     vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    vulkan13Features.pNext = &vulkan12Features;
     vulkan13Features.dynamicRendering = VK_TRUE;
+    vulkan13Features.synchronization2 = VK_TRUE;
+    vulkan13Features.maintenance4 = VK_TRUE;
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -556,6 +646,31 @@ bool Renderer::createLogicalDevice() {
         deviceProperties.limits.minUniformBufferOffsetAlignment,
         static_cast<VkDeviceSize>(16)
     );
+    return true;
+}
+
+bool Renderer::createTimelineSemaphore() {
+    if (m_renderTimelineSemaphore != VK_NULL_HANDLE) {
+        return true;
+    }
+
+    VkSemaphoreTypeCreateInfo timelineCreateInfo{};
+    timelineCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    timelineCreateInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    timelineCreateInfo.initialValue = 0;
+
+    VkSemaphoreCreateInfo semaphoreCreateInfo{};
+    semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    semaphoreCreateInfo.pNext = &timelineCreateInfo;
+
+    const VkResult result = vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &m_renderTimelineSemaphore);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateSemaphore(timeline)", result);
+        return false;
+    }
+
+    m_frameTimelineValues.fill(0);
+    m_nextTimelineValue = 1;
     return true;
 }
 
@@ -640,7 +755,11 @@ bool Renderer::createSwapchain() {
     std::cerr << "[render] swapchain ready: images=" << imageCount
               << ", extent=" << m_swapchainExtent.width << "x" << m_swapchainExtent.height << "\n";
     m_swapchainImageInitialized.assign(imageCount, false);
-    m_imagesInFlight.assign(imageCount, VK_NULL_HANDLE);
+    m_swapchainImageTimelineValues.assign(imageCount, 0);
+    if (!createMsaaColorTargets()) {
+        std::cerr << "[render] MSAA color target creation failed\n";
+        return false;
+    }
     m_renderFinishedSemaphores.resize(imageCount, VK_NULL_HANDLE);
     for (uint32_t i = 0; i < imageCount; ++i) {
         VkSemaphoreCreateInfo semaphoreCreateInfo{};
@@ -649,6 +768,86 @@ bool Renderer::createSwapchain() {
             vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &m_renderFinishedSemaphores[i]);
         if (semaphoreResult != VK_SUCCESS) {
             logVkFailure("vkCreateSemaphore(renderFinishedPerImage)", semaphoreResult);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool Renderer::createMsaaColorTargets() {
+    const uint32_t imageCount = static_cast<uint32_t>(m_swapchainImages.size());
+    m_msaaColorImages.assign(imageCount, VK_NULL_HANDLE);
+    m_msaaColorImageMemories.assign(imageCount, VK_NULL_HANDLE);
+    m_msaaColorImageViews.assign(imageCount, VK_NULL_HANDLE);
+    m_msaaColorImageInitialized.assign(imageCount, false);
+
+    for (uint32_t i = 0; i < imageCount; ++i) {
+        VkImageCreateInfo imageCreateInfo{};
+        imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageCreateInfo.format = m_swapchainFormat;
+        imageCreateInfo.extent.width = m_swapchainExtent.width;
+        imageCreateInfo.extent.height = m_swapchainExtent.height;
+        imageCreateInfo.extent.depth = 1;
+        imageCreateInfo.mipLevels = 1;
+        imageCreateInfo.arrayLayers = 1;
+        imageCreateInfo.samples = m_colorSampleCount;
+        imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageCreateInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+        imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_msaaColorImages[i]);
+        if (imageResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(msaaColor)", imageResult);
+            return false;
+        }
+
+        VkMemoryRequirements memoryRequirements{};
+        vkGetImageMemoryRequirements(m_device, m_msaaColorImages[i], &memoryRequirements);
+
+        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice,
+            memoryRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        );
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "[render] no memory type for MSAA color image\n";
+            return false;
+        }
+
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+
+        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_msaaColorImageMemories[i]);
+        if (allocResult != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(msaaColor)", allocResult);
+            return false;
+        }
+
+        const VkResult bindResult = vkBindImageMemory(m_device, m_msaaColorImages[i], m_msaaColorImageMemories[i], 0);
+        if (bindResult != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(msaaColor)", bindResult);
+            return false;
+        }
+
+        VkImageViewCreateInfo viewCreateInfo{};
+        viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewCreateInfo.image = m_msaaColorImages[i];
+        viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewCreateInfo.format = m_swapchainFormat;
+        viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewCreateInfo.subresourceRange.baseMipLevel = 0;
+        viewCreateInfo.subresourceRange.levelCount = 1;
+        viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+        viewCreateInfo.subresourceRange.layerCount = 1;
+
+        const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_msaaColorImageViews[i]);
+        if (viewResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImageView(msaaColor)", viewResult);
             return false;
         }
     }
@@ -802,7 +1001,7 @@ bool Renderer::createGraphicsPipeline() {
 
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisampling.rasterizationSamples = m_colorSampleCount;
 
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
     colorBlendAttachment.colorWriteMask =
@@ -905,14 +1104,6 @@ bool Renderer::createFrameResources() {
             std::cerr << "[render] failed creating imageAvailable semaphore\n";
             return false;
         }
-        VkFenceCreateInfo fenceCreateInfo{};
-        fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-        if (vkCreateFence(m_device, &fenceCreateInfo, nullptr, &frame.inFlightFence) != VK_SUCCESS) {
-            std::cerr << "[render] failed creating inFlight fence\n";
-            return false;
-        }
     }
 
     std::cerr << "[render] frame resources ready (" << kMaxFramesInFlight << " frames in flight)\n";
@@ -934,7 +1125,19 @@ void Renderer::renderFrame(
     m_uploadRing.beginFrame(m_currentFrame);
 
     FrameResources& frame = m_frames[m_currentFrame];
-    vkWaitForFences(m_device, 1, &frame.inFlightFence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+    if (m_frameTimelineValues[m_currentFrame] > 0) {
+        VkSemaphore waitSemaphore = m_renderTimelineSemaphore;
+        VkSemaphoreWaitInfo waitInfo{};
+        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        waitInfo.semaphoreCount = 1;
+        waitInfo.pSemaphores = &waitSemaphore;
+        waitInfo.pValues = &m_frameTimelineValues[m_currentFrame];
+        const VkResult waitResult = vkWaitSemaphores(m_device, &waitInfo, std::numeric_limits<uint64_t>::max());
+        if (waitResult != VK_SUCCESS) {
+            logVkFailure("vkWaitSemaphores(frame)", waitResult);
+            return;
+        }
+    }
 
     uint32_t imageIndex = 0;
     const VkResult acquireResult = vkAcquireNextImageKHR(
@@ -956,13 +1159,21 @@ void Renderer::renderFrame(
         return;
     }
 
-    if (m_imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
-        vkWaitForFences(m_device, 1, &m_imagesInFlight[imageIndex], VK_TRUE, std::numeric_limits<uint64_t>::max());
+    if (m_swapchainImageTimelineValues[imageIndex] > 0) {
+        VkSemaphore waitSemaphore = m_renderTimelineSemaphore;
+        VkSemaphoreWaitInfo waitInfo{};
+        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+        waitInfo.semaphoreCount = 1;
+        waitInfo.pSemaphores = &waitSemaphore;
+        waitInfo.pValues = &m_swapchainImageTimelineValues[imageIndex];
+        const VkResult waitResult = vkWaitSemaphores(m_device, &waitInfo, std::numeric_limits<uint64_t>::max());
+        if (waitResult != VK_SUCCESS) {
+            logVkFailure("vkWaitSemaphores(image)", waitResult);
+            return;
+        }
     }
-    m_imagesInFlight[imageIndex] = frame.inFlightFence;
     const VkSemaphore renderFinishedSemaphore = m_renderFinishedSemaphores[imageIndex];
 
-    vkResetFences(m_device, 1, &frame.inFlightFence);
     vkResetCommandPool(m_device, frame.commandPool, 0);
 
     VkCommandBufferAllocateInfo allocateInfo{};
@@ -1024,33 +1235,28 @@ void Renderer::renderFrame(
     write.pBufferInfo = &bufferInfo;
     vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 
-    VkImageMemoryBarrier toColorBarrier{};
-    toColorBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toColorBarrier.oldLayout = m_swapchainImageInitialized[imageIndex] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
-    toColorBarrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    toColorBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toColorBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toColorBarrier.image = m_swapchainImages[imageIndex];
-    toColorBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    toColorBarrier.subresourceRange.baseMipLevel = 0;
-    toColorBarrier.subresourceRange.levelCount = 1;
-    toColorBarrier.subresourceRange.baseArrayLayer = 0;
-    toColorBarrier.subresourceRange.layerCount = 1;
-    toColorBarrier.srcAccessMask = 0;
-    toColorBarrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-    vkCmdPipelineBarrier(
+    transitionImageLayout(
         commandBuffer,
-        m_swapchainImageInitialized[imageIndex] ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        0,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        1,
-        &toColorBarrier
+        m_swapchainImages[imageIndex],
+        m_swapchainImageInitialized[imageIndex] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
     );
+    if (!m_msaaColorImageInitialized[imageIndex]) {
+        transitionImageLayout(
+            commandBuffer,
+            m_msaaColorImages[imageIndex],
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_NONE,
+            VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+        );
+    }
 
     VkClearValue clearValue{};
     clearValue.color.float32[0] = 0.06f;
@@ -1060,11 +1266,14 @@ void Renderer::renderFrame(
 
     VkRenderingAttachmentInfo colorAttachment{};
     colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    colorAttachment.imageView = m_swapchainImageViews[imageIndex];
+    colorAttachment.imageView = m_msaaColorImageViews[imageIndex];
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     colorAttachment.clearValue = clearValue;
+    colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+    colorAttachment.resolveImageView = m_swapchainImageViews[imageIndex];
+    colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     VkRenderingInfo renderingInfo{};
     renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -1112,32 +1321,15 @@ void Renderer::renderFrame(
 
     vkCmdEndRendering(commandBuffer);
 
-    VkImageMemoryBarrier toPresentBarrier{};
-    toPresentBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toPresentBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    toPresentBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    toPresentBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toPresentBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toPresentBarrier.image = m_swapchainImages[imageIndex];
-    toPresentBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    toPresentBarrier.subresourceRange.baseMipLevel = 0;
-    toPresentBarrier.subresourceRange.levelCount = 1;
-    toPresentBarrier.subresourceRange.baseArrayLayer = 0;
-    toPresentBarrier.subresourceRange.layerCount = 1;
-    toPresentBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    toPresentBarrier.dstAccessMask = 0;
-
-    vkCmdPipelineBarrier(
+    transitionImageLayout(
         commandBuffer,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        0,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        1,
-        &toPresentBarrier
+        m_swapchainImages[imageIndex],
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_ACCESS_2_NONE
     );
 
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
@@ -1146,21 +1338,40 @@ void Renderer::renderFrame(
     }
 
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const uint64_t signalTimelineValue = m_nextTimelineValue++;
+    std::array<VkSemaphore, 2> signalSemaphores = {
+        renderFinishedSemaphore,
+        m_renderTimelineSemaphore
+    };
+    std::array<uint64_t, 2> signalSemaphoreValues = {
+        0,
+        signalTimelineValue
+    };
+    std::array<uint64_t, 1> waitSemaphoreValues = {0};
+    VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
+    timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineSubmitInfo.waitSemaphoreValueCount = static_cast<uint32_t>(waitSemaphoreValues.size());
+    timelineSubmitInfo.pWaitSemaphoreValues = waitSemaphoreValues.data();
+    timelineSubmitInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalSemaphoreValues.size());
+    timelineSubmitInfo.pSignalSemaphoreValues = signalSemaphoreValues.data();
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext = &timelineSubmitInfo;
     submitInfo.waitSemaphoreCount = 1;
     submitInfo.pWaitSemaphores = &frame.imageAvailable;
     submitInfo.pWaitDstStageMask = &waitStage;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = &renderFinishedSemaphore;
+    submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
+    submitInfo.pSignalSemaphores = signalSemaphores.data();
 
-    if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, frame.inFlightFence) != VK_SUCCESS) {
+    if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
         std::cerr << "[render] vkQueueSubmit failed\n";
         return;
     }
+    m_frameTimelineValues[m_currentFrame] = signalTimelineValue;
+    m_swapchainImageTimelineValues[imageIndex] = signalTimelineValue;
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -1172,6 +1383,7 @@ void Renderer::renderFrame(
 
     const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
     m_swapchainImageInitialized[imageIndex] = true;
+    m_msaaColorImageInitialized[imageIndex] = true;
 
     if (
         acquireResult == VK_SUBOPTIMAL_KHR ||
@@ -1216,7 +1428,33 @@ bool Renderer::recreateSwapchain() {
     return true;
 }
 
+void Renderer::destroyMsaaColorTargets() {
+    for (VkImageView imageView : m_msaaColorImageViews) {
+        if (imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, imageView, nullptr);
+        }
+    }
+    m_msaaColorImageViews.clear();
+
+    for (VkImage image : m_msaaColorImages) {
+        if (image != VK_NULL_HANDLE) {
+            vkDestroyImage(m_device, image, nullptr);
+        }
+    }
+    m_msaaColorImages.clear();
+
+    for (VkDeviceMemory memory : m_msaaColorImageMemories) {
+        if (memory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, memory, nullptr);
+        }
+    }
+    m_msaaColorImageMemories.clear();
+    m_msaaColorImageInitialized.clear();
+}
+
 void Renderer::destroySwapchain() {
+    destroyMsaaColorTargets();
+
     for (VkSemaphore semaphore : m_renderFinishedSemaphores) {
         if (semaphore != VK_NULL_HANDLE) {
             vkDestroySemaphore(m_device, semaphore, nullptr);
@@ -1232,7 +1470,7 @@ void Renderer::destroySwapchain() {
     m_swapchainImageViews.clear();
     m_swapchainImages.clear();
     m_swapchainImageInitialized.clear();
-    m_imagesInFlight.clear();
+    m_swapchainImageTimelineValues.clear();
 
     if (m_swapchain != VK_NULL_HANDLE) {
         vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
@@ -1242,10 +1480,6 @@ void Renderer::destroySwapchain() {
 
 void Renderer::destroyFrameResources() {
     for (FrameResources& frame : m_frames) {
-        if (frame.inFlightFence != VK_NULL_HANDLE) {
-            vkDestroyFence(m_device, frame.inFlightFence, nullptr);
-            frame.inFlightFence = VK_NULL_HANDLE;
-        }
         if (frame.imageAvailable != VK_NULL_HANDLE) {
             vkDestroySemaphore(m_device, frame.imageAvailable, nullptr);
             frame.imageAvailable = VK_NULL_HANDLE;
@@ -1284,6 +1518,10 @@ void Renderer::shutdown() {
 
     if (m_device != VK_NULL_HANDLE) {
         destroyFrameResources();
+        if (m_renderTimelineSemaphore != VK_NULL_HANDLE) {
+            vkDestroySemaphore(m_device, m_renderTimelineSemaphore, nullptr);
+            m_renderTimelineSemaphore = VK_NULL_HANDLE;
+        }
         m_uploadRing.shutdown(&m_bufferAllocator);
         destroyVertexBuffer();
         destroyPipeline();
@@ -1316,6 +1554,8 @@ void Renderer::shutdown() {
     m_physicalDevice = VK_NULL_HANDLE;
     m_graphicsQueue = VK_NULL_HANDLE;
     m_graphicsQueueFamilyIndex = 0;
+    m_frameTimelineValues.fill(0);
+    m_nextTimelineValue = 1;
     m_currentFrame = 0;
     m_window = nullptr;
     std::cerr << "[render] shutdown complete\n";

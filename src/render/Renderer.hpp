@@ -40,9 +40,6 @@ private:
         VkCommandPool commandPool = VK_NULL_HANDLE;
         // Signals when swapchain image acquisition is complete for this frame.
         VkSemaphore imageAvailable = VK_NULL_HANDLE;
-        // CPU-GPU fence for throttling and safe command pool reuse.
-        // Future timeline semaphores can replace this.
-        VkFence inFlightFence = VK_NULL_HANDLE;
     };
 
     bool createInstance();
@@ -50,6 +47,8 @@ private:
     bool pickPhysicalDevice();
     bool createLogicalDevice();
     bool createSwapchain();
+    bool createMsaaColorTargets();
+    bool createTimelineSemaphore();
     bool createGraphicsPipeline();
     bool createUploadRingBuffer();
     bool createDescriptorResources();
@@ -57,6 +56,7 @@ private:
     bool createFrameResources();
     bool recreateSwapchain();
     void destroySwapchain();
+    void destroyMsaaColorTargets();
     void destroyFrameResources();
     void destroyVertexBuffer();
     void destroyPipeline();
@@ -86,10 +86,15 @@ private:
     std::vector<VkImage> m_swapchainImages;
     std::vector<VkImageView> m_swapchainImageViews;
     std::vector<bool> m_swapchainImageInitialized;
-    std::vector<VkFence> m_imagesInFlight;
+    std::vector<VkImage> m_msaaColorImages;
+    std::vector<VkDeviceMemory> m_msaaColorImageMemories;
+    std::vector<VkImageView> m_msaaColorImageViews;
+    std::vector<bool> m_msaaColorImageInitialized;
+    std::vector<uint64_t> m_swapchainImageTimelineValues;
     // One render-finished semaphore per swapchain image avoids reusing a semaphore
     // while presentation may still be waiting on it.
     std::vector<VkSemaphore> m_renderFinishedSemaphores;
+    VkSampleCountFlagBits m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
 
     // Minimal one-pass pipeline using dynamic rendering.
     // Future material systems will replace this single hardcoded pipeline.
@@ -108,6 +113,9 @@ private:
     uint32_t m_vertexCount = 0;
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};
+    std::array<uint64_t, kMaxFramesInFlight> m_frameTimelineValues{};
+    VkSemaphore m_renderTimelineSemaphore = VK_NULL_HANDLE;
+    uint64_t m_nextTimelineValue = 1;
     uint32_t m_currentFrame = 0;
 };
 
