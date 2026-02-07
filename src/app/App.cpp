@@ -102,10 +102,21 @@ void App::update(float dt) {
     m_simulation.update(dt);
 
     const bool placePressedThisFrame = m_input.placeBlockDown && !m_wasPlaceBlockDown;
+    const bool removePressedThisFrame = m_input.removeBlockDown && !m_wasRemoveBlockDown;
     m_wasPlaceBlockDown = m_input.placeBlockDown;
+    m_wasRemoveBlockDown = m_input.removeBlockDown;
+
+    bool chunkEdited = false;
     if (placePressedThisFrame && tryPlaceVoxelFromCameraRay()) {
+        chunkEdited = true;
+    }
+    if (removePressedThisFrame && tryRemoveVoxelFromCameraRay()) {
+        chunkEdited = true;
+    }
+
+    if (chunkEdited) {
         if (!m_renderer.updateChunkMesh(m_chunkGrid)) {
-            std::cerr << "[app] chunk mesh update failed after voxel placement\n";
+            std::cerr << "[app] chunk mesh update failed after voxel edit\n";
         }
     }
 
@@ -146,6 +157,7 @@ void App::pollInput() {
         glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
         glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
     m_input.placeBlockDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    m_input.removeBlockDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
 
     double mouseX = 0.0;
     double mouseY = 0.0;
@@ -282,6 +294,52 @@ bool App::tryPlaceVoxelFromCameraRay() {
         previousX = vx;
         previousY = vy;
         previousZ = vz;
+    }
+
+    return false;
+}
+
+bool App::tryRemoveVoxelFromCameraRay() {
+    if (m_chunkGrid.chunks().empty()) {
+        return false;
+    }
+
+    world::Chunk& chunk = m_chunkGrid.chunks().front();
+
+    const float yawRadians = math::radians(m_camera.yawDegrees);
+    const float pitchRadians = math::radians(m_camera.pitchDegrees);
+    const float cosPitch = std::cos(pitchRadians);
+    const math::Vector3 rayDirection = math::normalize(math::Vector3{
+        std::cos(yawRadians) * cosPitch,
+        std::sin(pitchRadians),
+        std::sin(yawRadians) * cosPitch
+    });
+    if (math::lengthSquared(rayDirection) <= 0.0f) {
+        return false;
+    }
+
+    const math::Vector3 rayOrigin{m_camera.x, m_camera.y, m_camera.z};
+    constexpr float kRayStep = 0.05f;
+    constexpr float kRayMaxDistance = 8.0f;
+
+    for (float distance = 0.0f; distance <= kRayMaxDistance; distance += kRayStep) {
+        const math::Vector3 sample = rayOrigin + (rayDirection * distance);
+        const int vx = static_cast<int>(std::floor(sample.x));
+        const int vy = static_cast<int>(std::floor(sample.y));
+        const int vz = static_cast<int>(std::floor(sample.z));
+
+        const bool inBounds =
+            vx >= 0 && vx < world::Chunk::kSizeX &&
+            vy >= 0 && vy < world::Chunk::kSizeY &&
+            vz >= 0 && vz < world::Chunk::kSizeZ;
+        if (!inBounds) {
+            continue;
+        }
+
+        if (chunk.isSolid(vx, vy, vz)) {
+            chunk.setVoxel(vx, vy, vz, world::Voxel{world::VoxelType::Empty});
+            return true;
+        }
     }
 
     return false;

@@ -23,6 +23,7 @@ private:
     void pollInput();
     void updateCamera(float dt);
     [[nodiscard]] bool tryPlaceVoxelFromCameraRay();
+    [[nodiscard]] bool tryRemoveVoxelFromCameraRay();
 
     struct CameraState {
         float x = 0.0f;
@@ -45,6 +46,7 @@ private:
     double m_lastMouseY = 0.0;
     bool m_hasMouseSample = false;
     bool m_wasPlaceBlockDown = false;
+    bool m_wasRemoveBlockDown = false;
 
     sim::Simulation m_simulation;
     world::ChunkGrid m_chunkGrid;

@@ -14,6 +14,7 @@ struct InputState {
     bool moveUp = false;
     bool moveDown = false;
     bool placeBlockDown = false;
+    bool removeBlockDown = false;
 
     float mouseDeltaX = 0.0f;
     float mouseDeltaY = 0.0f;
