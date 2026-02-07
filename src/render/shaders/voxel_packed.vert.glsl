@@ -3,6 +3,8 @@ layout(location = 0) in uint inPacked;
 
 layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 mvp;
+    mat4 view;
+    mat4 proj;
 } camera;
 
 layout(location = 0) out flat uint outFace;
@@ -72,4 +74,3 @@ void main() {
     outMaterial = material;
     gl_Position = camera.mvp * vec4(worldPosition, 1.0);
 }
-

@@ -73,6 +73,7 @@ private:
     bool createUploadRingBuffer();
     bool createTransferResources();
     bool createPreviewBuffers();
+    bool createEnvironmentResources();
     bool createDescriptorResources();
     bool createChunkBuffers(const world::ChunkGrid& chunkGrid);
     bool createFrameResources();
@@ -83,6 +84,7 @@ private:
     void destroyFrameResources();
     void destroyChunkBuffers();
     void destroyPreviewBuffers();
+    void destroyEnvironmentResources();
     void destroyTransferResources();
     void destroyPipeline();
     bool waitForTimelineValue(uint64_t value) const;
@@ -92,6 +94,14 @@ private:
     struct DeferredBufferRelease {
         BufferHandle handle = kInvalidBufferHandle;
         uint64_t timelineValue = 0;
+    };
+
+    struct CubemapTexture {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+        uint32_t mipLevels = 1;
     };
 
     GLFWwindow* m_window = nullptr;
@@ -140,6 +150,7 @@ private:
     // Future material systems will replace this single hardcoded pipeline.
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
+    VkPipeline m_skyboxPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewAddPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewRemovePipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
@@ -147,6 +158,8 @@ private:
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
     bool m_supportsWireframePreview = false;
     VkDeviceSize m_uniformBufferAlignment = 256;
+    CubemapTexture m_skyboxTexture{};
+    CubemapTexture m_irradianceTexture{};
 
     // Static mesh buffers for one chunk.
     // Future chunk streaming can replace these with per-chunk GPU allocations.

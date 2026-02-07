@@ -7,11 +7,15 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace render {
@@ -29,6 +33,8 @@ constexpr std::array<const char*, 5> kDeviceExtensions = {
 
 struct alignas(16) CameraUniform {
     float mvp[16];
+    float view[16];
+    float proj[16];
 };
 
 world::ChunkMeshData buildSingleVoxelPreviewMesh(
@@ -713,6 +719,202 @@ VkExtent2D chooseExtent(GLFWwindow* window, const VkSurfaceCapabilitiesKHR& capa
     return extent;
 }
 
+std::optional<std::filesystem::path> findFirstExistingPath(std::span<const char* const> candidates) {
+    for (const char* candidate : candidates) {
+        const std::filesystem::path path(candidate);
+        if (std::filesystem::exists(path)) {
+            return path;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::vector<std::uint8_t>> readBinaryFile(std::span<const char* const> candidates) {
+    const std::optional<std::filesystem::path> path = findFirstExistingPath(candidates);
+    if (!path.has_value()) {
+        return std::nullopt;
+    }
+
+    std::ifstream file(path.value(), std::ios::binary | std::ios::ate);
+    if (!file) {
+        return std::nullopt;
+    }
+
+    const std::streamsize size = file.tellg();
+    if (size <= 0) {
+        return std::nullopt;
+    }
+    file.seekg(0, std::ios::beg);
+
+    std::vector<std::uint8_t> data(static_cast<size_t>(size));
+    if (!file.read(reinterpret_cast<char*>(data.data()), size)) {
+        return std::nullopt;
+    }
+    return data;
+}
+
+bool createShaderModuleFromFileOrFallback(
+    VkDevice device,
+    std::span<const char* const> fileCandidates,
+    const std::uint32_t* fallbackCode,
+    size_t fallbackCodeSize,
+    const char* debugName,
+    VkShaderModule& outShaderModule
+) {
+    outShaderModule = VK_NULL_HANDLE;
+
+    const std::optional<std::vector<std::uint8_t>> shaderFileData = readBinaryFile(fileCandidates);
+    const std::uint32_t* code = fallbackCode;
+    size_t codeSize = fallbackCodeSize;
+    if (shaderFileData.has_value()) {
+        if ((shaderFileData->size() % sizeof(std::uint32_t)) != 0) {
+            std::cerr << "[render] invalid SPIR-V byte size for " << debugName << "\n";
+            return false;
+        }
+        code = reinterpret_cast<const std::uint32_t*>(shaderFileData->data());
+        codeSize = shaderFileData->size();
+    } else {
+        if (fallbackCode == nullptr || fallbackCodeSize == 0) {
+            std::cerr << "[render] shader file not found and no fallback available for " << debugName << "\n";
+            return false;
+        }
+        std::cerr << "[render] using embedded fallback shader for " << debugName << "\n";
+    }
+
+    VkShaderModuleCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.codeSize = codeSize;
+    createInfo.pCode = code;
+    const VkResult result = vkCreateShaderModule(device, &createInfo, nullptr, &outShaderModule);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateShaderModule(fileOrFallback)", result);
+        return false;
+    }
+    return true;
+}
+
+uint32_t readLeU32(const std::uint8_t* bytes) {
+    return static_cast<uint32_t>(bytes[0]) |
+        (static_cast<uint32_t>(bytes[1]) << 8u) |
+        (static_cast<uint32_t>(bytes[2]) << 16u) |
+        (static_cast<uint32_t>(bytes[3]) << 24u);
+}
+
+struct DdsCubemapData {
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t mipLevels = 0;
+    std::vector<std::uint8_t> pixelData;
+    std::vector<VkBufferImageCopy> copyRegions;
+};
+
+std::optional<DdsCubemapData> loadDdsCubemap(std::span<const char* const> fileCandidates) {
+    const std::optional<std::vector<std::uint8_t>> fileDataOpt = readBinaryFile(fileCandidates);
+    if (!fileDataOpt.has_value()) {
+        return std::nullopt;
+    }
+    const std::vector<std::uint8_t>& fileData = fileDataOpt.value();
+    if (fileData.size() < 128) {
+        return std::nullopt;
+    }
+    if (std::memcmp(fileData.data(), "DDS ", 4) != 0) {
+        return std::nullopt;
+    }
+
+    const std::uint8_t* header = fileData.data() + 4;
+    const uint32_t height = readLeU32(header + 8);
+    const uint32_t width = readLeU32(header + 12);
+    const uint32_t mipMapCount = std::max(1u, readLeU32(header + 24));
+    const uint32_t ddspfFlags = readLeU32(header + 76);
+    const uint32_t ddspfFourCC = readLeU32(header + 80);
+    const uint32_t caps2 = readLeU32(header + 108);
+
+    constexpr uint32_t kDdsFourCcDxt1 = 0x31545844u;
+    constexpr uint32_t kDdsFourCcDx10 = 0x30315844u;
+    constexpr uint32_t kDdsCaps2Cubemap = 0x00000200u;
+    constexpr uint32_t kDdsCaps2AllFaces = 0x0000FC00u;
+    constexpr uint32_t kDdsPixelFormatFourCc = 0x00000004u;
+    constexpr uint32_t kDxgiFormatBc6hUfloat = 95u;
+    constexpr uint32_t kDxgiResourceDimensionTexture2D = 3u;
+    constexpr uint32_t kD3d11ResourceMiscTextureCube = 0x4u;
+
+    if ((ddspfFlags & kDdsPixelFormatFourCc) == 0) {
+        return std::nullopt;
+    }
+    if ((caps2 & kDdsCaps2Cubemap) == 0 || (caps2 & kDdsCaps2AllFaces) != kDdsCaps2AllFaces) {
+        return std::nullopt;
+    }
+
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    uint32_t blockSizeBytes = 0;
+    size_t payloadOffset = 128;
+
+    if (ddspfFourCC == kDdsFourCcDxt1) {
+        format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+        blockSizeBytes = 8;
+    } else if (ddspfFourCC == kDdsFourCcDx10) {
+        if (fileData.size() < 148) {
+            return std::nullopt;
+        }
+        const std::uint8_t* dx10Header = fileData.data() + 128;
+        const uint32_t dxgiFormat = readLeU32(dx10Header + 0);
+        const uint32_t resourceDimension = readLeU32(dx10Header + 4);
+        const uint32_t miscFlag = readLeU32(dx10Header + 8);
+        if (
+            dxgiFormat != kDxgiFormatBc6hUfloat ||
+            resourceDimension != kDxgiResourceDimensionTexture2D ||
+            (miscFlag & kD3d11ResourceMiscTextureCube) == 0
+        ) {
+            return std::nullopt;
+        }
+        format = VK_FORMAT_BC6H_UFLOAT_BLOCK;
+        blockSizeBytes = 16;
+        payloadOffset = 148;
+    } else {
+        return std::nullopt;
+    }
+
+    DdsCubemapData ddsData{};
+    ddsData.format = format;
+    ddsData.width = width;
+    ddsData.height = height;
+    ddsData.mipLevels = mipMapCount;
+
+    size_t dataCursor = payloadOffset;
+    for (uint32_t face = 0; face < 6; ++face) {
+        for (uint32_t mip = 0; mip < mipMapCount; ++mip) {
+            const uint32_t mipWidth = std::max(1u, width >> mip);
+            const uint32_t mipHeight = std::max(1u, height >> mip);
+            const uint32_t blocksWide = std::max(1u, (mipWidth + 3u) / 4u);
+            const uint32_t blocksHigh = std::max(1u, (mipHeight + 3u) / 4u);
+            const size_t mipSize = static_cast<size_t>(blocksWide) * blocksHigh * blockSizeBytes;
+            if (dataCursor + mipSize > fileData.size()) {
+                return std::nullopt;
+            }
+
+            VkBufferImageCopy copyRegion{};
+            copyRegion.bufferOffset = static_cast<VkDeviceSize>(dataCursor - payloadOffset);
+            copyRegion.bufferRowLength = 0;
+            copyRegion.bufferImageHeight = 0;
+            copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copyRegion.imageSubresource.mipLevel = mip;
+            copyRegion.imageSubresource.baseArrayLayer = face;
+            copyRegion.imageSubresource.layerCount = 1;
+            copyRegion.imageOffset = {0, 0, 0};
+            copyRegion.imageExtent = {mipWidth, mipHeight, 1};
+            ddsData.copyRegions.push_back(copyRegion);
+
+            dataCursor += mipSize;
+        }
+    }
+
+    const size_t pixelByteCount = dataCursor - payloadOffset;
+    ddsData.pixelData.resize(pixelByteCount);
+    std::memcpy(ddsData.pixelData.data(), fileData.data() + payloadOffset, pixelByteCount);
+    return ddsData;
+}
+
 } // namespace
 
 bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
@@ -765,6 +967,11 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
     }
     if (!createTransferResources()) {
         std::cerr << "[render] init failed at createTransferResources\n";
+        shutdown();
+        return false;
+    }
+    if (!createEnvironmentResources()) {
+        std::cerr << "[render] init failed at createEnvironmentResources\n";
         shutdown();
         return false;
     }
@@ -1147,6 +1354,321 @@ bool Renderer::createPreviewBuffers() {
     return true;
 }
 
+bool Renderer::createEnvironmentResources() {
+    if (
+        m_skyboxTexture.image != VK_NULL_HANDLE &&
+        m_skyboxTexture.view != VK_NULL_HANDLE &&
+        m_skyboxTexture.sampler != VK_NULL_HANDLE &&
+        m_irradianceTexture.image != VK_NULL_HANDLE &&
+        m_irradianceTexture.view != VK_NULL_HANDLE &&
+        m_irradianceTexture.sampler != VK_NULL_HANDLE
+    ) {
+        return true;
+    }
+
+    auto createCubemapTexture = [&](std::span<const char* const> fileCandidates, CubemapTexture& outTexture) -> bool {
+        const std::optional<DdsCubemapData> ddsDataOpt = loadDdsCubemap(fileCandidates);
+        if (!ddsDataOpt.has_value()) {
+            std::cerr << "[render] failed to load cubemap DDS\n";
+            return false;
+        }
+        const DdsCubemapData& ddsData = ddsDataOpt.value();
+
+        VkFormatProperties formatProperties{};
+        vkGetPhysicalDeviceFormatProperties(m_physicalDevice, ddsData.format, &formatProperties);
+        const bool supportsSampling =
+            (formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+        const bool supportsTransferDst =
+            (formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) != 0;
+        if (!supportsSampling || !supportsTransferDst) {
+            std::cerr << "[render] cubemap format not supported for sampled+transfer dst\n";
+            return false;
+        }
+
+        BufferCreateDesc stagingCreateDesc{};
+        stagingCreateDesc.size = static_cast<VkDeviceSize>(ddsData.pixelData.size());
+        stagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        stagingCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        stagingCreateDesc.initialData = ddsData.pixelData.data();
+        const BufferHandle stagingHandle = m_bufferAllocator.createBuffer(stagingCreateDesc);
+        if (stagingHandle == kInvalidBufferHandle) {
+            std::cerr << "[render] failed to allocate cubemap staging buffer\n";
+            return false;
+        }
+
+        std::array<uint32_t, 2> queueFamilies = {
+            m_graphicsQueueFamilyIndex,
+            m_transferQueueFamilyIndex
+        };
+        const bool useConcurrentSharing = queueFamilies[0] != queueFamilies[1];
+
+        VkImageCreateInfo imageCreateInfo{};
+        imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageCreateInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+        imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageCreateInfo.format = ddsData.format;
+        imageCreateInfo.extent.width = ddsData.width;
+        imageCreateInfo.extent.height = ddsData.height;
+        imageCreateInfo.extent.depth = 1;
+        imageCreateInfo.mipLevels = ddsData.mipLevels;
+        imageCreateInfo.arrayLayers = 6;
+        imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageCreateInfo.sharingMode = useConcurrentSharing ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
+        imageCreateInfo.queueFamilyIndexCount = useConcurrentSharing ? 2u : 0u;
+        imageCreateInfo.pQueueFamilyIndices = useConcurrentSharing ? queueFamilies.data() : nullptr;
+        imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VkImage image = VK_NULL_HANDLE;
+        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &image);
+        if (imageResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(cubemap)", imageResult);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+
+        VkMemoryRequirements memoryRequirements{};
+        vkGetImageMemoryRequirements(m_device, image, &memoryRequirements);
+        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice,
+            memoryRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        );
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "[render] no memory type for cubemap image\n";
+            vkDestroyImage(m_device, image, nullptr);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &memory);
+        if (allocResult != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(cubemap)", allocResult);
+            vkDestroyImage(m_device, image, nullptr);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+
+        const VkResult bindResult = vkBindImageMemory(m_device, image, memory, 0);
+        if (bindResult != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(cubemap)", bindResult);
+            vkFreeMemory(m_device, memory, nullptr);
+            vkDestroyImage(m_device, image, nullptr);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+
+        if (m_transferCommandBufferInFlightValue > 0 && !waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
+            vkFreeMemory(m_device, memory, nullptr);
+            vkDestroyImage(m_device, image, nullptr);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+        m_transferCommandBufferInFlightValue = 0;
+
+        if (vkResetCommandPool(m_device, m_transferCommandPool, 0) != VK_SUCCESS) {
+            std::cerr << "[render] vkResetCommandPool failed for cubemap upload\n";
+            vkFreeMemory(m_device, memory, nullptr);
+            vkDestroyImage(m_device, image, nullptr);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(m_transferCommandBuffer, &beginInfo) != VK_SUCCESS) {
+            std::cerr << "[render] vkBeginCommandBuffer failed for cubemap upload\n";
+            vkFreeMemory(m_device, memory, nullptr);
+            vkDestroyImage(m_device, image, nullptr);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+
+        VkImageMemoryBarrier2 toTransferBarrier{};
+        toTransferBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        toTransferBarrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+        toTransferBarrier.srcAccessMask = VK_ACCESS_2_NONE;
+        toTransferBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        toTransferBarrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        toTransferBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        toTransferBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toTransferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toTransferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toTransferBarrier.image = image;
+        toTransferBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toTransferBarrier.subresourceRange.baseMipLevel = 0;
+        toTransferBarrier.subresourceRange.levelCount = ddsData.mipLevels;
+        toTransferBarrier.subresourceRange.baseArrayLayer = 0;
+        toTransferBarrier.subresourceRange.layerCount = 6;
+
+        VkDependencyInfo toTransferDependency{};
+        toTransferDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        toTransferDependency.imageMemoryBarrierCount = 1;
+        toTransferDependency.pImageMemoryBarriers = &toTransferBarrier;
+        vkCmdPipelineBarrier2(m_transferCommandBuffer, &toTransferDependency);
+
+        const VkBuffer stagingBuffer = m_bufferAllocator.getBuffer(stagingHandle);
+        vkCmdCopyBufferToImage(
+            m_transferCommandBuffer,
+            stagingBuffer,
+            image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            static_cast<uint32_t>(ddsData.copyRegions.size()),
+            ddsData.copyRegions.data()
+        );
+
+        VkImageMemoryBarrier2 toShaderReadBarrier{};
+        toShaderReadBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        toShaderReadBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        toShaderReadBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        toShaderReadBarrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        toShaderReadBarrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        toShaderReadBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toShaderReadBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        toShaderReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toShaderReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toShaderReadBarrier.image = image;
+        toShaderReadBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toShaderReadBarrier.subresourceRange.baseMipLevel = 0;
+        toShaderReadBarrier.subresourceRange.levelCount = ddsData.mipLevels;
+        toShaderReadBarrier.subresourceRange.baseArrayLayer = 0;
+        toShaderReadBarrier.subresourceRange.layerCount = 6;
+
+        VkDependencyInfo toShaderReadDependency{};
+        toShaderReadDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        toShaderReadDependency.imageMemoryBarrierCount = 1;
+        toShaderReadDependency.pImageMemoryBarriers = &toShaderReadBarrier;
+        vkCmdPipelineBarrier2(m_transferCommandBuffer, &toShaderReadDependency);
+
+        if (vkEndCommandBuffer(m_transferCommandBuffer) != VK_SUCCESS) {
+            std::cerr << "[render] vkEndCommandBuffer failed for cubemap upload\n";
+            vkFreeMemory(m_device, memory, nullptr);
+            vkDestroyImage(m_device, image, nullptr);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+
+        VkFenceCreateInfo fenceCreateInfo{};
+        fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence uploadFence = VK_NULL_HANDLE;
+        if (vkCreateFence(m_device, &fenceCreateInfo, nullptr, &uploadFence) != VK_SUCCESS) {
+            std::cerr << "[render] failed to create fence for cubemap upload\n";
+            vkFreeMemory(m_device, memory, nullptr);
+            vkDestroyImage(m_device, image, nullptr);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &m_transferCommandBuffer;
+        const VkResult submitResult = vkQueueSubmit(m_transferQueue, 1, &submitInfo, uploadFence);
+        if (submitResult != VK_SUCCESS) {
+            logVkFailure("vkQueueSubmit(cubemapUpload)", submitResult);
+            vkDestroyFence(m_device, uploadFence, nullptr);
+            vkFreeMemory(m_device, memory, nullptr);
+            vkDestroyImage(m_device, image, nullptr);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+        const VkResult waitFenceResult = vkWaitForFences(m_device, 1, &uploadFence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+        vkDestroyFence(m_device, uploadFence, nullptr);
+        if (waitFenceResult != VK_SUCCESS) {
+            logVkFailure("vkWaitForFences(cubemapUpload)", waitFenceResult);
+            vkFreeMemory(m_device, memory, nullptr);
+            vkDestroyImage(m_device, image, nullptr);
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+
+        m_bufferAllocator.destroyBuffer(stagingHandle);
+
+        VkImageViewCreateInfo viewCreateInfo{};
+        viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewCreateInfo.image = image;
+        viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+        viewCreateInfo.format = ddsData.format;
+        viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewCreateInfo.subresourceRange.baseMipLevel = 0;
+        viewCreateInfo.subresourceRange.levelCount = ddsData.mipLevels;
+        viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+        viewCreateInfo.subresourceRange.layerCount = 6;
+
+        VkImageView view = VK_NULL_HANDLE;
+        const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &view);
+        if (viewResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImageView(cubemap)", viewResult);
+            vkFreeMemory(m_device, memory, nullptr);
+            vkDestroyImage(m_device, image, nullptr);
+            return false;
+        }
+
+        VkSamplerCreateInfo samplerCreateInfo{};
+        samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+        samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+        samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.mipLodBias = 0.0f;
+        samplerCreateInfo.anisotropyEnable = VK_FALSE;
+        samplerCreateInfo.compareEnable = VK_FALSE;
+        samplerCreateInfo.minLod = 0.0f;
+        samplerCreateInfo.maxLod = static_cast<float>(ddsData.mipLevels - 1);
+        samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+
+        VkSampler sampler = VK_NULL_HANDLE;
+        const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &sampler);
+        if (samplerResult != VK_SUCCESS) {
+            logVkFailure("vkCreateSampler(cubemap)", samplerResult);
+            vkDestroyImageView(m_device, view, nullptr);
+            vkFreeMemory(m_device, memory, nullptr);
+            vkDestroyImage(m_device, image, nullptr);
+            return false;
+        }
+
+        outTexture.image = image;
+        outTexture.memory = memory;
+        outTexture.view = view;
+        outTexture.sampler = sampler;
+        outTexture.mipLevels = ddsData.mipLevels;
+        return true;
+    };
+
+    constexpr std::array<const char*, 3> kSkyboxFileCandidates = {
+        "assets/skybox/skybox.dds",
+        "../assets/skybox/skybox.dds",
+        "../../assets/skybox/skybox.dds",
+    };
+    constexpr std::array<const char*, 3> kIrradianceFileCandidates = {
+        "assets/skybox/irradiance.dds",
+        "../assets/skybox/irradiance.dds",
+        "../../assets/skybox/irradiance.dds",
+    };
+
+    if (!createCubemapTexture(kSkyboxFileCandidates, m_skyboxTexture)) {
+        destroyEnvironmentResources();
+        return false;
+    }
+    if (!createCubemapTexture(kIrradianceFileCandidates, m_irradianceTexture)) {
+        destroyEnvironmentResources();
+        return false;
+    }
+
+    std::cerr << "[render] environment cubemaps ready\n";
+    return true;
+}
+
 bool Renderer::createSwapchain() {
     const SwapchainSupport support = querySwapchainSupport(m_physicalDevice, m_surface);
     if (support.formats.empty() || support.presentModes.empty()) {
@@ -1407,12 +1929,30 @@ bool Renderer::createDescriptorResources() {
         mvpBinding.binding = 0;
         mvpBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         mvpBinding.descriptorCount = 1;
-        mvpBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        mvpBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        VkDescriptorSetLayoutBinding irradianceBinding{};
+        irradianceBinding.binding = 1;
+        irradianceBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        irradianceBinding.descriptorCount = 1;
+        irradianceBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        VkDescriptorSetLayoutBinding skyboxBinding{};
+        skyboxBinding.binding = 2;
+        skyboxBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        skyboxBinding.descriptorCount = 1;
+        skyboxBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+            mvpBinding,
+            irradianceBinding,
+            skyboxBinding
+        };
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
         layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutCreateInfo.bindingCount = 1;
-        layoutCreateInfo.pBindings = &mvpBinding;
+        layoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutCreateInfo.pBindings = bindings.data();
 
         const VkResult layoutResult =
             vkCreateDescriptorSetLayout(m_device, &layoutCreateInfo, nullptr, &m_descriptorSetLayout);
@@ -1423,15 +1963,22 @@ bool Renderer::createDescriptorResources() {
     }
 
     if (m_descriptorPool == VK_NULL_HANDLE) {
-        VkDescriptorPoolSize poolSize{};
-        poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSize.descriptorCount = kMaxFramesInFlight;
+        const std::array<VkDescriptorPoolSize, 2> poolSizes = {
+            VkDescriptorPoolSize{
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                kMaxFramesInFlight
+            },
+            VkDescriptorPoolSize{
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                2 * kMaxFramesInFlight
+            }
+        };
 
         VkDescriptorPoolCreateInfo poolCreateInfo{};
         poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolCreateInfo.maxSets = kMaxFramesInFlight;
-        poolCreateInfo.poolSizeCount = 1;
-        poolCreateInfo.pPoolSizes = &poolSize;
+        poolCreateInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+        poolCreateInfo.pPoolSizes = poolSizes.data();
 
         const VkResult poolResult = vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &m_descriptorPool);
         if (poolResult != VK_SUCCESS) {
@@ -1476,43 +2023,96 @@ bool Renderer::createGraphicsPipeline() {
         }
     }
 
-    VkShaderModule vertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule fragShaderModule = VK_NULL_HANDLE;
+    constexpr std::array<const char*, 4> kWorldVertexShaderPathCandidates = {
+        "src/render/shaders/voxel_packed.vert.spv",
+        "../src/render/shaders/voxel_packed.vert.spv",
+        "../../src/render/shaders/voxel_packed.vert.spv",
+        "../../../src/render/shaders/voxel_packed.vert.spv",
+    };
+    constexpr std::array<const char*, 4> kWorldFragmentShaderPathCandidates = {
+        "src/render/shaders/voxel_packed.frag.spv",
+        "../src/render/shaders/voxel_packed.frag.spv",
+        "../../src/render/shaders/voxel_packed.frag.spv",
+        "../../../src/render/shaders/voxel_packed.frag.spv",
+    };
+    constexpr std::array<const char*, 4> kSkyboxVertexShaderPathCandidates = {
+        "src/render/shaders/skybox.vert.spv",
+        "../src/render/shaders/skybox.vert.spv",
+        "../../src/render/shaders/skybox.vert.spv",
+        "../../../src/render/shaders/skybox.vert.spv",
+    };
+    constexpr std::array<const char*, 4> kSkyboxFragmentShaderPathCandidates = {
+        "src/render/shaders/skybox.frag.spv",
+        "../src/render/shaders/skybox.frag.spv",
+        "../../src/render/shaders/skybox.frag.spv",
+        "../../../src/render/shaders/skybox.frag.spv",
+    };
 
-    VkShaderModuleCreateInfo vertCreateInfo{};
-    vertCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    vertCreateInfo.codeSize = sizeof(kVertShaderSpirv);
-    vertCreateInfo.pCode = kVertShaderSpirv;
-    const VkResult vertModuleResult = vkCreateShaderModule(m_device, &vertCreateInfo, nullptr, &vertShaderModule);
-    if (vertModuleResult != VK_SUCCESS) {
-        logVkFailure("vkCreateShaderModule(vertex)", vertModuleResult);
+    VkShaderModule worldVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule worldFragShaderModule = VK_NULL_HANDLE;
+    VkShaderModule skyboxVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule skyboxFragShaderModule = VK_NULL_HANDLE;
+
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kWorldVertexShaderPathCandidates,
+            kVertShaderSpirv,
+            sizeof(kVertShaderSpirv),
+            "voxel_packed.vert",
+            worldVertShaderModule
+        )) {
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kWorldFragmentShaderPathCandidates,
+            kFragShaderSpirv,
+            sizeof(kFragShaderSpirv),
+            "voxel_packed.frag",
+            worldFragShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kSkyboxVertexShaderPathCandidates,
+            nullptr,
+            0,
+            "skybox.vert",
+            skyboxVertShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kSkyboxFragmentShaderPathCandidates,
+            nullptr,
+            0,
+            "skybox.frag",
+            skyboxFragShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
         return false;
     }
 
-    VkShaderModuleCreateInfo fragCreateInfo{};
-    fragCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    fragCreateInfo.codeSize = sizeof(kFragShaderSpirv);
-    fragCreateInfo.pCode = kFragShaderSpirv;
-    const VkResult fragModuleResult = vkCreateShaderModule(m_device, &fragCreateInfo, nullptr, &fragShaderModule);
-    if (fragModuleResult != VK_SUCCESS) {
-        logVkFailure("vkCreateShaderModule(fragment)", fragModuleResult);
-        vkDestroyShaderModule(m_device, vertShaderModule, nullptr);
-        return false;
-    }
+    VkPipelineShaderStageCreateInfo worldVertexShaderStage{};
+    worldVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    worldVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    worldVertexShaderStage.module = worldVertShaderModule;
+    worldVertexShaderStage.pName = "main";
 
-    VkPipelineShaderStageCreateInfo vertexShaderStage{};
-    vertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    vertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    vertexShaderStage.module = vertShaderModule;
-    vertexShaderStage.pName = "main";
+    VkPipelineShaderStageCreateInfo worldFragmentShaderStage{};
+    worldFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    worldFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    worldFragmentShaderStage.module = worldFragShaderModule;
+    worldFragmentShaderStage.pName = "main";
 
-    VkPipelineShaderStageCreateInfo fragmentShaderStage{};
-    fragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    fragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    fragmentShaderStage.module = fragShaderModule;
-    fragmentShaderStage.pName = "main";
-
-    std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {vertexShaderStage, fragmentShaderStage};
+    std::array<VkPipelineShaderStageCreateInfo, 2> worldShaderStages = {worldVertexShaderStage, worldFragmentShaderStage};
 
     // Vertex fetch reads one packed uint per vertex.
     // The vertex shader unpacks position/face/corner/AO procedurally.
@@ -1591,8 +2191,8 @@ bool Renderer::createGraphicsPipeline() {
     VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
     pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineCreateInfo.pNext = &renderingCreateInfo;
-    pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-    pipelineCreateInfo.pStages = shaderStages.data();
+    pipelineCreateInfo.stageCount = static_cast<uint32_t>(worldShaderStages.size());
+    pipelineCreateInfo.pStages = worldShaderStages.data();
     pipelineCreateInfo.pVertexInputState = &vertexInputInfo;
     pipelineCreateInfo.pInputAssemblyState = &inputAssembly;
     pipelineCreateInfo.pViewportState = &viewportState;
@@ -1615,8 +2215,10 @@ bool Renderer::createGraphicsPipeline() {
         &worldPipeline
     );
     if (worldPipelineResult != VK_SUCCESS) {
-        vkDestroyShaderModule(m_device, fragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, vertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(world)", worldPipelineResult);
         return false;
     }
@@ -1661,6 +2263,10 @@ bool Renderer::createGraphicsPipeline() {
     );
     if (previewAddPipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(previewAdd)", previewAddPipelineResult);
         return false;
     }
@@ -1680,18 +2286,83 @@ bool Renderer::createGraphicsPipeline() {
         &previewRemovePipeline
     );
 
-    vkDestroyShaderModule(m_device, fragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, vertShaderModule, nullptr);
-
     if (previewRemovePipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(previewRemove)", previewRemovePipelineResult);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo skyboxVertexShaderStage{};
+    skyboxVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    skyboxVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    skyboxVertexShaderStage.module = skyboxVertShaderModule;
+    skyboxVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo skyboxFragmentShaderStage{};
+    skyboxFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    skyboxFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    skyboxFragmentShaderStage.module = skyboxFragShaderModule;
+    skyboxFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> skyboxShaderStages = {
+        skyboxVertexShaderStage,
+        skyboxFragmentShaderStage
+    };
+
+    VkPipelineVertexInputStateCreateInfo skyboxVertexInputInfo{};
+    skyboxVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo skyboxInputAssembly = inputAssembly;
+
+    VkPipelineRasterizationStateCreateInfo skyboxRasterizer = rasterizer;
+    skyboxRasterizer.cullMode = VK_CULL_MODE_NONE;
+
+    VkPipelineDepthStencilStateCreateInfo skyboxDepthStencil = depthStencil;
+    skyboxDepthStencil.depthTestEnable = VK_FALSE;
+    skyboxDepthStencil.depthWriteEnable = VK_FALSE;
+    skyboxDepthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+
+    VkGraphicsPipelineCreateInfo skyboxPipelineCreateInfo = pipelineCreateInfo;
+    skyboxPipelineCreateInfo.stageCount = static_cast<uint32_t>(skyboxShaderStages.size());
+    skyboxPipelineCreateInfo.pStages = skyboxShaderStages.data();
+    skyboxPipelineCreateInfo.pVertexInputState = &skyboxVertexInputInfo;
+    skyboxPipelineCreateInfo.pInputAssemblyState = &skyboxInputAssembly;
+    skyboxPipelineCreateInfo.pDepthStencilState = &skyboxDepthStencil;
+    skyboxPipelineCreateInfo.pRasterizationState = &skyboxRasterizer;
+
+    VkPipeline skyboxPipeline = VK_NULL_HANDLE;
+    const VkResult skyboxPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &skyboxPipelineCreateInfo,
+        nullptr,
+        &skyboxPipeline
+    );
+
+    vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+
+    if (skyboxPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(skybox)", skyboxPipelineResult);
         return false;
     }
 
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
+    }
+    if (m_skyboxPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_skyboxPipeline, nullptr);
     }
     if (m_previewAddPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_previewAddPipeline, nullptr);
@@ -1700,9 +2371,10 @@ bool Renderer::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
     }
     m_pipeline = worldPipeline;
+    m_skyboxPipeline = skyboxPipeline;
     m_previewAddPipeline = previewAddPipeline;
     m_previewRemovePipeline = previewRemovePipeline;
-    std::cerr << "[render] graphics pipelines ready (preview="
+    std::cerr << "[render] graphics pipelines ready (skybox + preview="
               << (m_supportsWireframePreview ? "wireframe" : "ghost")
               << ")\n";
     return true;
@@ -2060,6 +2732,8 @@ void Renderer::renderFrame(
     const math::Matrix4 projection = perspectiveVulkan(math::radians(camera.fovDegrees), aspectRatio, 0.1f, 500.0f);
     const math::Matrix4 mvp = projection * view;
     const math::Matrix4 mvpColumnMajor = transpose(mvp);
+    const math::Matrix4 viewColumnMajor = transpose(view);
+    const math::Matrix4 projectionColumnMajor = transpose(projection);
 
     const std::optional<RingBufferSlice> mvpSliceOpt =
         m_uploadRing.allocate(sizeof(CameraUniform), m_uniformBufferAlignment);
@@ -2070,6 +2744,8 @@ void Renderer::renderFrame(
 
     CameraUniform mvpUniform{};
     std::memcpy(mvpUniform.mvp, mvpColumnMajor.m, sizeof(mvpUniform.mvp));
+    std::memcpy(mvpUniform.view, viewColumnMajor.m, sizeof(mvpUniform.view));
+    std::memcpy(mvpUniform.proj, projectionColumnMajor.m, sizeof(mvpUniform.proj));
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     VkDescriptorBufferInfo bufferInfo{};
@@ -2079,12 +2755,40 @@ void Renderer::renderFrame(
 
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSets[m_currentFrame];
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    write.pBufferInfo = &bufferInfo;
-    vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+
+    VkDescriptorImageInfo irradianceImageInfo{};
+    irradianceImageInfo.sampler = m_irradianceTexture.sampler;
+    irradianceImageInfo.imageView = m_irradianceTexture.view;
+    irradianceImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkDescriptorImageInfo skyboxImageInfo{};
+    skyboxImageInfo.sampler = m_skyboxTexture.sampler;
+    skyboxImageInfo.imageView = m_skyboxTexture.view;
+    skyboxImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    std::array<VkWriteDescriptorSet, 3> writes{};
+    writes[0] = write;
+    writes[0].dstSet = m_descriptorSets[m_currentFrame];
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[0].pBufferInfo = &bufferInfo;
+
+    writes[1] = write;
+    writes[1].dstSet = m_descriptorSets[m_currentFrame];
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].pImageInfo = &irradianceImageInfo;
+
+    writes[2] = write;
+    writes[2].dstSet = m_descriptorSets[m_currentFrame];
+    writes[2].dstBinding = 2;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[2].pImageInfo = &skyboxImageInfo;
+
+    vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
     transitionImageLayout(
         commandBuffer,
@@ -2175,6 +2879,21 @@ void Renderer::renderFrame(
     scissor.offset = {0, 0};
     scissor.extent = m_swapchainExtent;
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+    if (m_skyboxPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyboxPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            1,
+            &m_descriptorSets[m_currentFrame],
+            0,
+            nullptr
+        );
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    }
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
     vkCmdBindDescriptorSets(
@@ -2480,6 +3199,31 @@ void Renderer::destroyPreviewBuffers() {
     m_previewIndexCount = 0;
 }
 
+void Renderer::destroyEnvironmentResources() {
+    auto destroyCubemap = [&](CubemapTexture& texture) {
+        if (texture.sampler != VK_NULL_HANDLE) {
+            vkDestroySampler(m_device, texture.sampler, nullptr);
+            texture.sampler = VK_NULL_HANDLE;
+        }
+        if (texture.view != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, texture.view, nullptr);
+            texture.view = VK_NULL_HANDLE;
+        }
+        if (texture.image != VK_NULL_HANDLE) {
+            vkDestroyImage(m_device, texture.image, nullptr);
+            texture.image = VK_NULL_HANDLE;
+        }
+        if (texture.memory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, texture.memory, nullptr);
+            texture.memory = VK_NULL_HANDLE;
+        }
+        texture.mipLevels = 1;
+    };
+
+    destroyCubemap(m_skyboxTexture);
+    destroyCubemap(m_irradianceTexture);
+}
+
 void Renderer::destroyChunkBuffers() {
     if (m_indexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_indexBufferHandle);
@@ -2504,6 +3248,10 @@ void Renderer::destroyChunkBuffers() {
 }
 
 void Renderer::destroyPipeline() {
+    if (m_skyboxPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_skyboxPipeline, nullptr);
+        m_skyboxPipeline = VK_NULL_HANDLE;
+    }
     if (m_previewRemovePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
         m_previewRemovePipeline = VK_NULL_HANDLE;
@@ -2537,6 +3285,7 @@ void Renderer::shutdown() {
         }
         m_uploadRing.shutdown(&m_bufferAllocator);
         destroyPreviewBuffers();
+        destroyEnvironmentResources();
         destroyChunkBuffers();
         destroyPipeline();
         if (m_descriptorPool != VK_NULL_HANDLE) {
