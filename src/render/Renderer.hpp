@@ -28,6 +28,7 @@ struct CameraPose {
 class Renderer {
 public:
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
+    bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
     void renderFrame(const world::ChunkGrid& chunkGrid, const sim::Simulation& simulation, const CameraPose& camera);
     void shutdown();
 
@@ -52,6 +53,7 @@ private:
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
     bool createUploadRingBuffer();
+    bool createTransferResources();
     bool createDescriptorResources();
     bool createChunkBuffers(const world::ChunkGrid& chunkGrid);
     bool createFrameResources();
@@ -61,7 +63,16 @@ private:
     void destroyDepthTargets();
     void destroyFrameResources();
     void destroyChunkBuffers();
+    void destroyTransferResources();
     void destroyPipeline();
+    bool waitForTimelineValue(uint64_t value) const;
+    void scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue);
+    void collectCompletedBufferReleases();
+
+    struct DeferredBufferRelease {
+        BufferHandle handle = kInvalidBufferHandle;
+        uint64_t timelineValue = 0;
+    };
 
     GLFWwindow* m_window = nullptr;
 
@@ -74,11 +85,14 @@ private:
     // Selected GPU used for rendering and present support.
     // Future device selection may become score-based for features/perf tiers.
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
-    // Logical device with one graphics queue for draw+present.
-    // Future systems can add dedicated transfer/compute queues.
+    // Logical device with a graphics queue (draw+present) and a transfer queue.
     VkDevice m_device = VK_NULL_HANDLE;
     uint32_t m_graphicsQueueFamilyIndex = 0;
+    uint32_t m_graphicsQueueIndex = 0;
+    uint32_t m_transferQueueFamilyIndex = 0;
+    uint32_t m_transferQueueIndex = 0;
     VkQueue m_graphicsQueue = VK_NULL_HANDLE;
+    VkQueue m_transferQueue = VK_NULL_HANDLE;
 
     // Presentable image chain for the window.
     // Future render-graph integration can manage this as a backend target.
@@ -117,11 +131,18 @@ private:
     FrameRingBuffer m_uploadRing;
     BufferHandle m_vertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_indexBufferHandle = kInvalidBufferHandle;
+    std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     uint32_t m_indexCount = 0;
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};
+    VkCommandPool m_transferCommandPool = VK_NULL_HANDLE;
+    VkCommandBuffer m_transferCommandBuffer = VK_NULL_HANDLE;
     std::array<uint64_t, kMaxFramesInFlight> m_frameTimelineValues{};
     VkSemaphore m_renderTimelineSemaphore = VK_NULL_HANDLE;
+    uint64_t m_pendingTransferTimelineValue = 0;
+    uint64_t m_currentChunkReadyTimelineValue = 0;
+    uint64_t m_transferCommandBufferInFlightValue = 0;
+    uint64_t m_lastGraphicsTimelineValue = 0;
     uint64_t m_nextTimelineValue = 1;
     uint32_t m_currentFrame = 0;
 };

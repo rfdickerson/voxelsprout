@@ -43,7 +43,13 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
     bufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferCreateInfo.size = desc.size;
     bufferCreateInfo.usage = desc.usage;
-    bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (desc.queueFamilyIndices != nullptr && desc.queueFamilyIndexCount > 1) {
+        bufferCreateInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+        bufferCreateInfo.queueFamilyIndexCount = desc.queueFamilyIndexCount;
+        bufferCreateInfo.pQueueFamilyIndices = desc.queueFamilyIndices;
+    } else {
+        bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    }
 
     VkBuffer buffer = VK_NULL_HANDLE;
     if (vkCreateBuffer(m_device, &bufferCreateInfo, nullptr, &buffer) != VK_SUCCESS) {

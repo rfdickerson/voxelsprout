@@ -17,6 +17,8 @@ struct BufferCreateDesc {
     VkDeviceSize size = 0;
     VkBufferUsageFlags usage = 0;
     VkMemoryPropertyFlags memoryProperties = 0;
+    const uint32_t* queueFamilyIndices = nullptr;
+    uint32_t queueFamilyIndexCount = 0;
     const void* initialData = nullptr;
 };
 

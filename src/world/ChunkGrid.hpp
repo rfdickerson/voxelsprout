@@ -17,6 +17,7 @@ public:
     ChunkGrid() = default;
     void initializeFlatWorld();
     std::size_t chunkCount() const;
+    std::vector<Chunk>& chunks();
     const std::vector<Chunk>& chunks() const;
 
 private:
@@ -62,6 +63,10 @@ inline void ChunkGrid::initializeFlatWorld() {
 
 inline std::size_t ChunkGrid::chunkCount() const {
     return m_chunks.size();
+}
+
+inline std::vector<Chunk>& ChunkGrid::chunks() {
+    return m_chunks;
 }
 
 inline const std::vector<Chunk>& ChunkGrid::chunks() const {

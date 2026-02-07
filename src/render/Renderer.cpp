@@ -483,9 +483,12 @@ static const uint32_t kFragShaderSpirv[] = {
 
 struct QueueFamilyChoice {
     std::optional<uint32_t> graphicsAndPresent;
+    std::optional<uint32_t> transfer;
+    uint32_t graphicsQueueIndex = 0;
+    uint32_t transferQueueIndex = 0;
 
     [[nodiscard]] bool valid() const {
-        return graphicsAndPresent.has_value();
+        return graphicsAndPresent.has_value() && transfer.has_value();
     }
 };
 
@@ -547,17 +550,48 @@ QueueFamilyChoice findQueueFamily(VkPhysicalDevice physicalDevice, VkSurfaceKHR 
     std::vector<VkQueueFamilyProperties> families(familyCount);
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, families.data());
 
+    std::optional<uint32_t> dedicatedTransferFamily;
+    std::optional<uint32_t> anyTransferFamily;
+
     for (uint32_t familyIndex = 0; familyIndex < familyCount; ++familyIndex) {
-        const bool hasGraphics = (families[familyIndex].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
-        if (!hasGraphics) {
-            continue;
+        const VkQueueFlags queueFlags = families[familyIndex].queueFlags;
+        const bool hasGraphics = (queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+        const bool hasTransfer = (queueFlags & VK_QUEUE_TRANSFER_BIT) != 0;
+
+        if (hasGraphics && !choice.graphicsAndPresent.has_value()) {
+            VkBool32 hasPresent = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, familyIndex, surface, &hasPresent);
+            if (hasPresent == VK_TRUE) {
+                choice.graphicsAndPresent = familyIndex;
+            }
         }
 
-        VkBool32 hasPresent = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, familyIndex, surface, &hasPresent);
-        if (hasPresent == VK_TRUE) {
-            choice.graphicsAndPresent = familyIndex;
-            return choice;
+        if (hasTransfer) {
+            if (!anyTransferFamily.has_value()) {
+                anyTransferFamily = familyIndex;
+            }
+            if (!dedicatedTransferFamily.has_value() && !hasGraphics) {
+                dedicatedTransferFamily = familyIndex;
+            }
+        }
+    }
+
+    if (!choice.graphicsAndPresent.has_value()) {
+        return choice;
+    }
+
+    if (dedicatedTransferFamily.has_value()) {
+        choice.transfer = dedicatedTransferFamily.value();
+    } else if (anyTransferFamily.has_value()) {
+        choice.transfer = anyTransferFamily.value();
+    } else {
+        choice.transfer = choice.graphicsAndPresent.value();
+    }
+
+    if (choice.transfer.value() == choice.graphicsAndPresent.value()) {
+        const uint32_t queueCount = families[choice.graphicsAndPresent.value()].queueCount;
+        if (queueCount > 1) {
+            choice.transferQueueIndex = 1;
         }
     }
 
@@ -699,6 +733,11 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
+    if (!createTransferResources()) {
+        std::cerr << "[render] init failed at createTransferResources\n";
+        shutdown();
+        return false;
+    }
     if (!createSwapchain()) {
         std::cerr << "[render] init failed at createSwapchain\n";
         shutdown();
@@ -727,6 +766,13 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
 
     std::cerr << "[render] init complete\n";
     return true;
+}
+
+bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid) {
+    if (m_device == VK_NULL_HANDLE) {
+        return false;
+    }
+    return createChunkBuffers(chunkGrid);
 }
 
 bool Renderer::createInstance() {
@@ -812,7 +858,7 @@ bool Renderer::pickPhysicalDevice() {
 
         const QueueFamilyChoice queueFamily = findQueueFamily(candidate, m_surface);
         if (!queueFamily.valid()) {
-            std::cerr << "[render] skip GPU: no graphics+present queue family\n";
+            std::cerr << "[render] skip GPU: missing graphics/present/transfer queue support\n";
             continue;
         }
         if (!hasRequiredDeviceExtensions(candidate)) {
@@ -859,9 +905,15 @@ bool Renderer::pickPhysicalDevice() {
 
         m_physicalDevice = candidate;
         m_graphicsQueueFamilyIndex = queueFamily.graphicsAndPresent.value();
+        m_graphicsQueueIndex = queueFamily.graphicsQueueIndex;
+        m_transferQueueFamilyIndex = queueFamily.transfer.value();
+        m_transferQueueIndex = queueFamily.transferQueueIndex;
         m_depthFormat = depthFormat;
         std::cerr << "[render] selected GPU: " << properties.deviceName
-                  << ", queueFamily=" << m_graphicsQueueFamilyIndex << "\n";
+                  << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
+                  << ", graphicsQueueIndex=" << m_graphicsQueueIndex
+                  << ", transferQueueFamily=" << m_transferQueueFamilyIndex
+                  << ", transferQueueIndex=" << m_transferQueueIndex << "\n";
         return true;
     }
 
@@ -870,13 +922,36 @@ bool Renderer::pickPhysicalDevice() {
 }
 
 bool Renderer::createLogicalDevice() {
-    float queuePriority = 1.0f;
+    const bool sameFamily = (m_graphicsQueueFamilyIndex == m_transferQueueFamilyIndex);
+    std::array<VkDeviceQueueCreateInfo, 2> queueCreateInfos{};
+    uint32_t queueCreateInfoCount = 0;
+    std::array<float, 2> sharedFamilyPriorities = {1.0f, 1.0f};
+    float graphicsQueuePriority = 1.0f;
+    float transferQueuePriority = 1.0f;
 
-    VkDeviceQueueCreateInfo queueCreateInfo{};
-    queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queueCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
-    queueCreateInfo.queueCount = 1;
-    queueCreateInfo.pQueuePriorities = &queuePriority;
+    if (sameFamily) {
+        const uint32_t queueCount = std::max(m_graphicsQueueIndex, m_transferQueueIndex) + 1;
+        VkDeviceQueueCreateInfo queueCreateInfo{};
+        queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+        queueCreateInfo.queueCount = queueCount;
+        queueCreateInfo.pQueuePriorities = sharedFamilyPriorities.data();
+        queueCreateInfos[queueCreateInfoCount++] = queueCreateInfo;
+    } else {
+        VkDeviceQueueCreateInfo graphicsQueueCreateInfo{};
+        graphicsQueueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        graphicsQueueCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+        graphicsQueueCreateInfo.queueCount = m_graphicsQueueIndex + 1;
+        graphicsQueueCreateInfo.pQueuePriorities = &graphicsQueuePriority;
+        queueCreateInfos[queueCreateInfoCount++] = graphicsQueueCreateInfo;
+
+        VkDeviceQueueCreateInfo transferQueueCreateInfo{};
+        transferQueueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        transferQueueCreateInfo.queueFamilyIndex = m_transferQueueFamilyIndex;
+        transferQueueCreateInfo.queueCount = m_transferQueueIndex + 1;
+        transferQueueCreateInfo.pQueuePriorities = &transferQueuePriority;
+        queueCreateInfos[queueCreateInfoCount++] = transferQueueCreateInfo;
+    }
 
     VkPhysicalDeviceVulkan12Features vulkan12Features{};
     vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
@@ -892,8 +967,8 @@ bool Renderer::createLogicalDevice() {
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.pNext = &vulkan13Features;
-    createInfo.queueCreateInfoCount = 1;
-    createInfo.pQueueCreateInfos = &queueCreateInfo;
+    createInfo.queueCreateInfoCount = queueCreateInfoCount;
+    createInfo.pQueueCreateInfos = queueCreateInfos.data();
     createInfo.enabledExtensionCount = static_cast<uint32_t>(kDeviceExtensions.size());
     createInfo.ppEnabledExtensionNames = kDeviceExtensions.data();
 
@@ -903,7 +978,8 @@ bool Renderer::createLogicalDevice() {
         return false;
     }
 
-    vkGetDeviceQueue(m_device, m_graphicsQueueFamilyIndex, 0, &m_graphicsQueue);
+    vkGetDeviceQueue(m_device, m_graphicsQueueFamilyIndex, m_graphicsQueueIndex, &m_graphicsQueue);
+    vkGetDeviceQueue(m_device, m_transferQueueFamilyIndex, m_transferQueueIndex, &m_transferQueue);
 
     VkPhysicalDeviceProperties deviceProperties{};
     vkGetPhysicalDeviceProperties(m_physicalDevice, &deviceProperties);
@@ -935,6 +1011,10 @@ bool Renderer::createTimelineSemaphore() {
     }
 
     m_frameTimelineValues.fill(0);
+    m_pendingTransferTimelineValue = 0;
+    m_currentChunkReadyTimelineValue = 0;
+    m_transferCommandBufferInFlightValue = 0;
+    m_lastGraphicsTimelineValue = 0;
     m_nextTimelineValue = 1;
     return true;
 }
@@ -952,6 +1032,39 @@ bool Renderer::createUploadRingBuffer() {
         std::cerr << "[render] upload ring buffer init failed\n";
     }
     return ok;
+}
+
+bool Renderer::createTransferResources() {
+    if (m_transferCommandPool != VK_NULL_HANDLE && m_transferCommandBuffer != VK_NULL_HANDLE) {
+        return true;
+    }
+
+    VkCommandPoolCreateInfo poolCreateInfo{};
+    poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolCreateInfo.queueFamilyIndex = m_transferQueueFamilyIndex;
+
+    const VkResult poolResult = vkCreateCommandPool(m_device, &poolCreateInfo, nullptr, &m_transferCommandPool);
+    if (poolResult != VK_SUCCESS) {
+        logVkFailure("vkCreateCommandPool(transfer)", poolResult);
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocateInfo.commandPool = m_transferCommandPool;
+    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocateInfo.commandBufferCount = 1;
+
+    const VkResult commandBufferResult = vkAllocateCommandBuffers(m_device, &allocateInfo, &m_transferCommandBuffer);
+    if (commandBufferResult != VK_SUCCESS) {
+        logVkFailure("vkAllocateCommandBuffers(transfer)", commandBufferResult);
+        vkDestroyCommandPool(m_device, m_transferCommandPool, nullptr);
+        m_transferCommandPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    return true;
 }
 
 bool Renderer::createSwapchain() {
@@ -1439,45 +1552,186 @@ bool Renderer::createGraphicsPipeline() {
 }
 
 bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid) {
-    // Build one static chunk mesh and upload once at startup.
-    // This keeps the path easy to inspect before adding streaming updates.
+    // Build one chunk mesh and upload through the transfer queue.
+    // Future chunk streaming can replace this with region-level mesh patches.
     const world::ChunkMeshData mesh = world::buildSingleChunkMesh(chunkGrid);
     if (mesh.vertices.empty() || mesh.indices.empty()) {
         std::cerr << "[render] chunk mesher produced no geometry\n";
         return false;
     }
 
-    {
-        BufferCreateDesc createDesc{};
-        createDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(world::PackedVoxelVertex));
-        createDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        createDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        createDesc.initialData = mesh.vertices.data();
-        m_vertexBufferHandle = m_bufferAllocator.createBuffer(createDesc);
-        if (m_vertexBufferHandle == kInvalidBufferHandle) {
-            std::cerr << "[render] chunk vertex buffer allocation failed\n";
-            return false;
-        }
+    collectCompletedBufferReleases();
+
+    if (m_transferCommandBufferInFlightValue > 0 && !waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
+        std::cerr << "[render] failed waiting for prior transfer upload\n";
+        return false;
+    }
+    m_transferCommandBufferInFlightValue = 0;
+    collectCompletedBufferReleases();
+
+    const BufferHandle oldVertexHandle = m_vertexBufferHandle;
+    const BufferHandle oldIndexHandle = m_indexBufferHandle;
+    const uint64_t previousChunkReadyTimelineValue = m_currentChunkReadyTimelineValue;
+
+    const VkDeviceSize vertexBufferSize = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(world::PackedVoxelVertex));
+    const VkDeviceSize indexBufferSize = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
+    std::array<uint32_t, 2> meshQueueFamilies = {
+        m_graphicsQueueFamilyIndex,
+        m_transferQueueFamilyIndex
+    };
+    if (meshQueueFamilies[0] == meshQueueFamilies[1]) {
+        meshQueueFamilies[1] = UINT32_MAX;
     }
 
-    {
-        BufferCreateDesc createDesc{};
-        createDesc.size = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
-        createDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-        createDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        createDesc.initialData = mesh.indices.data();
-        m_indexBufferHandle = m_bufferAllocator.createBuffer(createDesc);
-        if (m_indexBufferHandle == kInvalidBufferHandle) {
-            std::cerr << "[render] chunk index buffer allocation failed\n";
-            m_bufferAllocator.destroyBuffer(m_vertexBufferHandle);
-            m_vertexBufferHandle = kInvalidBufferHandle;
-            return false;
-        }
+    BufferCreateDesc vertexCreateDesc{};
+    vertexCreateDesc.size = vertexBufferSize;
+    vertexCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    if (meshQueueFamilies[1] != UINT32_MAX) {
+        vertexCreateDesc.queueFamilyIndices = meshQueueFamilies.data();
+        vertexCreateDesc.queueFamilyIndexCount = 2;
+    }
+    const BufferHandle newVertexHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
+    if (newVertexHandle == kInvalidBufferHandle) {
+        std::cerr << "[render] chunk vertex buffer allocation failed\n";
+        return false;
     }
 
+    BufferCreateDesc indexCreateDesc{};
+    indexCreateDesc.size = indexBufferSize;
+    indexCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    if (meshQueueFamilies[1] != UINT32_MAX) {
+        indexCreateDesc.queueFamilyIndices = meshQueueFamilies.data();
+        indexCreateDesc.queueFamilyIndexCount = 2;
+    }
+    const BufferHandle newIndexHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
+    if (newIndexHandle == kInvalidBufferHandle) {
+        std::cerr << "[render] chunk index buffer allocation failed\n";
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        return false;
+    }
+
+    BufferCreateDesc vertexStagingCreateDesc{};
+    vertexStagingCreateDesc.size = vertexBufferSize;
+    vertexStagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    vertexStagingCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vertexStagingCreateDesc.initialData = mesh.vertices.data();
+    const BufferHandle vertexStagingHandle = m_bufferAllocator.createBuffer(vertexStagingCreateDesc);
+    if (vertexStagingHandle == kInvalidBufferHandle) {
+        std::cerr << "[render] chunk vertex staging buffer allocation failed\n";
+        m_bufferAllocator.destroyBuffer(newIndexHandle);
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        return false;
+    }
+
+    BufferCreateDesc indexStagingCreateDesc{};
+    indexStagingCreateDesc.size = indexBufferSize;
+    indexStagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    indexStagingCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    indexStagingCreateDesc.initialData = mesh.indices.data();
+    const BufferHandle indexStagingHandle = m_bufferAllocator.createBuffer(indexStagingCreateDesc);
+    if (indexStagingHandle == kInvalidBufferHandle) {
+        std::cerr << "[render] chunk index staging buffer allocation failed\n";
+        m_bufferAllocator.destroyBuffer(vertexStagingHandle);
+        m_bufferAllocator.destroyBuffer(newIndexHandle);
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        return false;
+    }
+
+    const VkResult resetResult = vkResetCommandPool(m_device, m_transferCommandPool, 0);
+    if (resetResult != VK_SUCCESS) {
+        logVkFailure("vkResetCommandPool(transfer)", resetResult);
+        m_bufferAllocator.destroyBuffer(indexStagingHandle);
+        m_bufferAllocator.destroyBuffer(vertexStagingHandle);
+        m_bufferAllocator.destroyBuffer(newIndexHandle);
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        return false;
+    }
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(m_transferCommandBuffer, &beginInfo) != VK_SUCCESS) {
+        std::cerr << "[render] vkBeginCommandBuffer (transfer) failed\n";
+        m_bufferAllocator.destroyBuffer(indexStagingHandle);
+        m_bufferAllocator.destroyBuffer(vertexStagingHandle);
+        m_bufferAllocator.destroyBuffer(newIndexHandle);
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        return false;
+    }
+
+    VkBufferCopy vertexCopy{};
+    vertexCopy.size = vertexBufferSize;
+    vkCmdCopyBuffer(
+        m_transferCommandBuffer,
+        m_bufferAllocator.getBuffer(vertexStagingHandle),
+        m_bufferAllocator.getBuffer(newVertexHandle),
+        1,
+        &vertexCopy
+    );
+
+    VkBufferCopy indexCopy{};
+    indexCopy.size = indexBufferSize;
+    vkCmdCopyBuffer(
+        m_transferCommandBuffer,
+        m_bufferAllocator.getBuffer(indexStagingHandle),
+        m_bufferAllocator.getBuffer(newIndexHandle),
+        1,
+        &indexCopy
+    );
+
+    if (vkEndCommandBuffer(m_transferCommandBuffer) != VK_SUCCESS) {
+        std::cerr << "[render] vkEndCommandBuffer (transfer) failed\n";
+        m_bufferAllocator.destroyBuffer(indexStagingHandle);
+        m_bufferAllocator.destroyBuffer(vertexStagingHandle);
+        m_bufferAllocator.destroyBuffer(newIndexHandle);
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        return false;
+    }
+
+    const uint64_t transferSignalValue = m_nextTimelineValue++;
+    VkSemaphore timelineSemaphore = m_renderTimelineSemaphore;
+    VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
+    timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineSubmitInfo.signalSemaphoreValueCount = 1;
+    timelineSubmitInfo.pSignalSemaphoreValues = &transferSignalValue;
+
+    VkSubmitInfo transferSubmitInfo{};
+    transferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    transferSubmitInfo.pNext = &timelineSubmitInfo;
+    transferSubmitInfo.commandBufferCount = 1;
+    transferSubmitInfo.pCommandBuffers = &m_transferCommandBuffer;
+    transferSubmitInfo.signalSemaphoreCount = 1;
+    transferSubmitInfo.pSignalSemaphores = &timelineSemaphore;
+
+    const VkResult submitResult = vkQueueSubmit(m_transferQueue, 1, &transferSubmitInfo, VK_NULL_HANDLE);
+    if (submitResult != VK_SUCCESS) {
+        logVkFailure("vkQueueSubmit(transfer)", submitResult);
+        m_bufferAllocator.destroyBuffer(indexStagingHandle);
+        m_bufferAllocator.destroyBuffer(vertexStagingHandle);
+        m_bufferAllocator.destroyBuffer(newIndexHandle);
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        return false;
+    }
+
+    m_vertexBufferHandle = newVertexHandle;
+    m_indexBufferHandle = newIndexHandle;
     m_indexCount = static_cast<uint32_t>(mesh.indices.size());
-    std::cerr << "[render] chunk buffers ready (vertices=" << mesh.vertices.size()
-              << ", indices=" << mesh.indices.size() << ")\n";
+    m_currentChunkReadyTimelineValue = transferSignalValue;
+    m_pendingTransferTimelineValue = transferSignalValue;
+    m_transferCommandBufferInFlightValue = transferSignalValue;
+
+    scheduleBufferRelease(vertexStagingHandle, transferSignalValue);
+    scheduleBufferRelease(indexStagingHandle, transferSignalValue);
+
+    const uint64_t oldChunkReleaseValue = std::max(m_lastGraphicsTimelineValue, previousChunkReadyTimelineValue);
+    scheduleBufferRelease(oldVertexHandle, oldChunkReleaseValue);
+    scheduleBufferRelease(oldIndexHandle, oldChunkReleaseValue);
+
+    std::cerr << "[render] chunk upload queued (vertices=" << mesh.vertices.size()
+              << ", indices=" << mesh.indices.size()
+              << ", timelineValue=" << transferSignalValue << ")\n";
     return true;
 }
 
@@ -1506,6 +1760,68 @@ bool Renderer::createFrameResources() {
     return true;
 }
 
+bool Renderer::waitForTimelineValue(uint64_t value) const {
+    if (value == 0 || m_renderTimelineSemaphore == VK_NULL_HANDLE) {
+        return true;
+    }
+
+    VkSemaphore waitSemaphore = m_renderTimelineSemaphore;
+    VkSemaphoreWaitInfo waitInfo{};
+    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    waitInfo.semaphoreCount = 1;
+    waitInfo.pSemaphores = &waitSemaphore;
+    waitInfo.pValues = &value;
+    const VkResult waitResult = vkWaitSemaphores(m_device, &waitInfo, std::numeric_limits<uint64_t>::max());
+    if (waitResult != VK_SUCCESS) {
+        logVkFailure("vkWaitSemaphores(timeline)", waitResult);
+        return false;
+    }
+    return true;
+}
+
+void Renderer::scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue) {
+    if (handle == kInvalidBufferHandle) {
+        return;
+    }
+    if (timelineValue == 0 || m_renderTimelineSemaphore == VK_NULL_HANDLE) {
+        m_bufferAllocator.destroyBuffer(handle);
+        return;
+    }
+    m_deferredBufferReleases.push_back({handle, timelineValue});
+}
+
+void Renderer::collectCompletedBufferReleases() {
+    if (m_renderTimelineSemaphore == VK_NULL_HANDLE) {
+        return;
+    }
+
+    uint64_t completedValue = 0;
+    const VkResult counterResult = vkGetSemaphoreCounterValue(m_device, m_renderTimelineSemaphore, &completedValue);
+    if (counterResult != VK_SUCCESS) {
+        logVkFailure("vkGetSemaphoreCounterValue", counterResult);
+        return;
+    }
+
+    for (const DeferredBufferRelease& release : m_deferredBufferReleases) {
+        if (release.timelineValue <= completedValue) {
+            m_bufferAllocator.destroyBuffer(release.handle);
+        }
+    }
+    std::erase_if(
+        m_deferredBufferReleases,
+        [completedValue](const DeferredBufferRelease& release) {
+            return release.timelineValue <= completedValue;
+        }
+    );
+
+    if (m_pendingTransferTimelineValue > 0 && m_pendingTransferTimelineValue <= completedValue) {
+        m_pendingTransferTimelineValue = 0;
+    }
+    if (m_transferCommandBufferInFlightValue > 0 && m_transferCommandBufferInFlightValue <= completedValue) {
+        m_transferCommandBufferInFlightValue = 0;
+    }
+}
+
 void Renderer::renderFrame(
     const world::ChunkGrid& chunkGrid,
     const sim::Simulation& simulation,
@@ -1518,21 +1834,12 @@ void Renderer::renderFrame(
         return;
     }
 
+    collectCompletedBufferReleases();
     m_uploadRing.beginFrame(m_currentFrame);
 
     FrameResources& frame = m_frames[m_currentFrame];
-    if (m_frameTimelineValues[m_currentFrame] > 0) {
-        VkSemaphore waitSemaphore = m_renderTimelineSemaphore;
-        VkSemaphoreWaitInfo waitInfo{};
-        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-        waitInfo.semaphoreCount = 1;
-        waitInfo.pSemaphores = &waitSemaphore;
-        waitInfo.pValues = &m_frameTimelineValues[m_currentFrame];
-        const VkResult waitResult = vkWaitSemaphores(m_device, &waitInfo, std::numeric_limits<uint64_t>::max());
-        if (waitResult != VK_SUCCESS) {
-            logVkFailure("vkWaitSemaphores(frame)", waitResult);
-            return;
-        }
+    if (!waitForTimelineValue(m_frameTimelineValues[m_currentFrame])) {
+        return;
     }
 
     uint32_t imageIndex = 0;
@@ -1555,18 +1862,8 @@ void Renderer::renderFrame(
         return;
     }
 
-    if (m_swapchainImageTimelineValues[imageIndex] > 0) {
-        VkSemaphore waitSemaphore = m_renderTimelineSemaphore;
-        VkSemaphoreWaitInfo waitInfo{};
-        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-        waitInfo.semaphoreCount = 1;
-        waitInfo.pSemaphores = &waitSemaphore;
-        waitInfo.pValues = &m_swapchainImageTimelineValues[imageIndex];
-        const VkResult waitResult = vkWaitSemaphores(m_device, &waitInfo, std::numeric_limits<uint64_t>::max());
-        if (waitResult != VK_SUCCESS) {
-            logVkFailure("vkWaitSemaphores(image)", waitResult);
-            return;
-        }
+    if (!waitForTimelineValue(m_swapchainImageTimelineValues[imageIndex])) {
+        return;
     }
     const VkSemaphore renderFinishedSemaphore = m_renderFinishedSemaphores[imageIndex];
 
@@ -1766,7 +2063,23 @@ void Renderer::renderFrame(
         return;
     }
 
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    std::array<VkSemaphore, 2> waitSemaphores{};
+    std::array<VkPipelineStageFlags, 2> waitStages{};
+    std::array<uint64_t, 2> waitSemaphoreValues{};
+    uint32_t waitSemaphoreCount = 0;
+
+    waitSemaphores[waitSemaphoreCount] = frame.imageAvailable;
+    waitStages[waitSemaphoreCount] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    waitSemaphoreValues[waitSemaphoreCount] = 0;
+    ++waitSemaphoreCount;
+
+    if (m_pendingTransferTimelineValue > 0) {
+        waitSemaphores[waitSemaphoreCount] = m_renderTimelineSemaphore;
+        waitStages[waitSemaphoreCount] = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+        waitSemaphoreValues[waitSemaphoreCount] = m_pendingTransferTimelineValue;
+        ++waitSemaphoreCount;
+    }
+
     const uint64_t signalTimelineValue = m_nextTimelineValue++;
     std::array<VkSemaphore, 2> signalSemaphores = {
         renderFinishedSemaphore,
@@ -1776,10 +2089,9 @@ void Renderer::renderFrame(
         0,
         signalTimelineValue
     };
-    std::array<uint64_t, 1> waitSemaphoreValues = {0};
     VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
     timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    timelineSubmitInfo.waitSemaphoreValueCount = static_cast<uint32_t>(waitSemaphoreValues.size());
+    timelineSubmitInfo.waitSemaphoreValueCount = waitSemaphoreCount;
     timelineSubmitInfo.pWaitSemaphoreValues = waitSemaphoreValues.data();
     timelineSubmitInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalSemaphoreValues.size());
     timelineSubmitInfo.pSignalSemaphoreValues = signalSemaphoreValues.data();
@@ -1787,9 +2099,9 @@ void Renderer::renderFrame(
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.pNext = &timelineSubmitInfo;
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = &frame.imageAvailable;
-    submitInfo.pWaitDstStageMask = &waitStage;
+    submitInfo.waitSemaphoreCount = waitSemaphoreCount;
+    submitInfo.pWaitSemaphores = waitSemaphores.data();
+    submitInfo.pWaitDstStageMask = waitStages.data();
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
     submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
@@ -1801,6 +2113,7 @@ void Renderer::renderFrame(
     }
     m_frameTimelineValues[m_currentFrame] = signalTimelineValue;
     m_swapchainImageTimelineValues[imageIndex] = signalTimelineValue;
+    m_lastGraphicsTimelineValue = signalTimelineValue;
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -1944,6 +2257,14 @@ void Renderer::destroyFrameResources() {
     }
 }
 
+void Renderer::destroyTransferResources() {
+    m_transferCommandBuffer = VK_NULL_HANDLE;
+    if (m_transferCommandPool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(m_device, m_transferCommandPool, nullptr);
+        m_transferCommandPool = VK_NULL_HANDLE;
+    }
+}
+
 void Renderer::destroyChunkBuffers() {
     if (m_indexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_indexBufferHandle);
@@ -1953,7 +2274,18 @@ void Renderer::destroyChunkBuffers() {
         m_bufferAllocator.destroyBuffer(m_vertexBufferHandle);
         m_vertexBufferHandle = kInvalidBufferHandle;
     }
+
+    for (const DeferredBufferRelease& release : m_deferredBufferReleases) {
+        if (release.handle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(release.handle);
+        }
+    }
+    m_deferredBufferReleases.clear();
+
     m_indexCount = 0;
+    m_pendingTransferTimelineValue = 0;
+    m_currentChunkReadyTimelineValue = 0;
+    m_transferCommandBufferInFlightValue = 0;
 }
 
 void Renderer::destroyPipeline() {
@@ -1975,6 +2307,7 @@ void Renderer::shutdown() {
 
     if (m_device != VK_NULL_HANDLE) {
         destroyFrameResources();
+        destroyTransferResources();
         if (m_renderTimelineSemaphore != VK_NULL_HANDLE) {
             vkDestroySemaphore(m_device, m_renderTimelineSemaphore, nullptr);
             m_renderTimelineSemaphore = VK_NULL_HANDLE;
@@ -2010,9 +2343,17 @@ void Renderer::shutdown() {
 
     m_physicalDevice = VK_NULL_HANDLE;
     m_graphicsQueue = VK_NULL_HANDLE;
+    m_transferQueue = VK_NULL_HANDLE;
     m_graphicsQueueFamilyIndex = 0;
+    m_graphicsQueueIndex = 0;
+    m_transferQueueFamilyIndex = 0;
+    m_transferQueueIndex = 0;
     m_depthFormat = VK_FORMAT_UNDEFINED;
     m_frameTimelineValues.fill(0);
+    m_pendingTransferTimelineValue = 0;
+    m_currentChunkReadyTimelineValue = 0;
+    m_transferCommandBufferInFlightValue = 0;
+    m_lastGraphicsTimelineValue = 0;
     m_nextTimelineValue = 1;
     m_currentFrame = 0;
     m_window = nullptr;
