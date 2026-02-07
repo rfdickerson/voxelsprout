@@ -37,6 +37,10 @@ struct alignas(16) CameraUniform {
     float proj[16];
 };
 
+struct alignas(16) ChunkPushConstants {
+    float chunkOffset[4];
+};
+
 world::ChunkMeshData buildSingleVoxelPreviewMesh(
     std::uint32_t x,
     std::uint32_t y,
@@ -2162,10 +2166,17 @@ bool Renderer::createGraphicsPipeline() {
     }
 
     if (m_pipelineLayout == VK_NULL_HANDLE) {
+        VkPushConstantRange chunkPushConstantRange{};
+        chunkPushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        chunkPushConstantRange.offset = 0;
+        chunkPushConstantRange.size = sizeof(ChunkPushConstants);
+
         VkPipelineLayoutCreateInfo layoutCreateInfo{};
         layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         layoutCreateInfo.setLayoutCount = 1;
         layoutCreateInfo.pSetLayouts = &m_descriptorSetLayout;
+        layoutCreateInfo.pushConstantRangeCount = 1;
+        layoutCreateInfo.pPushConstantRanges = &chunkPushConstantRange;
         const VkResult layoutResult = vkCreatePipelineLayout(m_device, &layoutCreateInfo, nullptr, &m_pipelineLayout);
         if (layoutResult != VK_SUCCESS) {
             logVkFailure("vkCreatePipelineLayout", layoutResult);
@@ -3221,7 +3232,26 @@ void Renderer::renderFrame(
     const VkDeviceSize vertexBufferOffset = 0;
     vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
     vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
+
+    constexpr float kChunkSize = static_cast<float>(world::Chunk::kSizeX);
+    for (int chunkZ = -1; chunkZ <= 1; ++chunkZ) {
+        for (int chunkX = -1; chunkX <= 1; ++chunkX) {
+            ChunkPushConstants chunkPushConstants{};
+            chunkPushConstants.chunkOffset[0] = static_cast<float>(chunkX) * kChunkSize;
+            chunkPushConstants.chunkOffset[1] = 0.0f;
+            chunkPushConstants.chunkOffset[2] = static_cast<float>(chunkZ) * kChunkSize;
+            chunkPushConstants.chunkOffset[3] = 0.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &chunkPushConstants
+            );
+            vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
+        }
+    }
 
     const VkPipeline activePreviewPipeline =
         (preview.mode == VoxelPreview::Mode::Remove) ? m_previewRemovePipeline : m_previewAddPipeline;
@@ -3259,6 +3289,19 @@ void Renderer::renderFrame(
                     &m_descriptorSets[m_currentFrame],
                     0,
                     nullptr
+                );
+                ChunkPushConstants previewChunkPushConstants{};
+                previewChunkPushConstants.chunkOffset[0] = 0.0f;
+                previewChunkPushConstants.chunkOffset[1] = 0.0f;
+                previewChunkPushConstants.chunkOffset[2] = 0.0f;
+                previewChunkPushConstants.chunkOffset[3] = 0.0f;
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &previewChunkPushConstants
                 );
                 vkCmdSetDepthBias(commandBuffer, -1.0f, 0.0f, -1.0f);
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, &previewVertexBuffer, &vertexBufferOffset);

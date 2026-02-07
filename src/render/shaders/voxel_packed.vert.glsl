@@ -7,6 +7,10 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 proj;
 } camera;
 
+layout(push_constant) uniform ChunkPushConstants {
+    vec4 chunkOffset;
+} chunkPc;
+
 layout(location = 0) out flat uint outFace;
 layout(location = 1) out float outAo;
 layout(location = 2) out flat uint outMaterial;
@@ -67,7 +71,7 @@ void main() {
     const uint material = (inPacked >> kShiftMaterial) & 0xFFu;
 
     const vec3 basePosition = vec3(float(x), float(y), float(z));
-    const vec3 worldPosition = basePosition + cornerOffset(face, corner);
+    const vec3 worldPosition = basePosition + cornerOffset(face, corner) + chunkPc.chunkOffset.xyz;
 
     outFace = face;
     outAo = float(ao) / 3.0;
