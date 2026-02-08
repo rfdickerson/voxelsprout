@@ -26,7 +26,7 @@ public:
     math::Vector3 axis{0.0f, 1.0f, 0.0f};
     float length = 1.0f;
     float radius = 0.45f;
-    math::Vector3 tint{0.78f, 0.72f, 0.62f};
+    math::Vector3 tint{0.95f, 0.95f, 0.95f};
 };
 
 inline Pipe::Pipe(

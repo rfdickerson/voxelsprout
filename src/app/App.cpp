@@ -57,7 +57,7 @@ constexpr int kHotbarSlotPipe = 1;
 constexpr int kHotbarSlotCount = 2;
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
-constexpr math::Vector3 kDefaultPipeTint{0.74f, 0.70f, 0.62f};
+constexpr math::Vector3 kDefaultPipeTint{0.95f, 0.95f, 0.95f};
 
 std::string appTimestamp();
 
