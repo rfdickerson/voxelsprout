@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <vector>
 
 #include "world/Chunk.hpp"
@@ -27,26 +28,94 @@ private:
 };
 
 inline void ChunkGrid::initializeFlatWorld() {
-    auto hash3 = [](int x, int y, int z, std::uint32_t seed) -> std::uint32_t {
-        std::uint32_t h = seed;
-        h ^= static_cast<std::uint32_t>(x) * 0x9E3779B9u;
-        h ^= static_cast<std::uint32_t>(y) * 0x85EBCA6Bu;
-        h ^= static_cast<std::uint32_t>(z) * 0xC2B2AE35u;
-        h ^= (h >> 16);
-        h *= 0x7FEB352Du;
-        h ^= (h >> 15);
-        h *= 0x846CA68Bu;
-        h ^= (h >> 16);
-        return h;
+    constexpr std::array<std::uint8_t, 256> kPerlinPermutation = {
+        151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
+        140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,
+        247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,
+        57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,
+        74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,
+        60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,
+        65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,
+        200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,
+        52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,
+        207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,
+        119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,
+        129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,
+        218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,
+        81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,
+        184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,
+        222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180
+    };
+
+    auto fade = [](float t) -> float {
+        return t * t * t * (t * ((t * 6.0f) - 15.0f) + 10.0f);
+    };
+    auto lerp = [](float a, float b, float t) -> float {
+        return a + (t * (b - a));
+    };
+    auto grad2 = [](std::uint8_t hash, float x, float z) -> float {
+        switch (hash & 0x7u) {
+        case 0: return x + z;
+        case 1: return -x + z;
+        case 2: return x - z;
+        case 3: return -x - z;
+        case 4: return x;
+        case 5: return -x;
+        case 6: return z;
+        default: return -z;
+        }
+    };
+    auto permAt = [&](int index) -> std::uint8_t {
+        return kPerlinPermutation[static_cast<std::size_t>(index & 255)];
+    };
+    auto perlin2 = [&](float x, float z) -> float {
+        const int xi0 = static_cast<int>(std::floor(x)) & 255;
+        const int zi0 = static_cast<int>(std::floor(z)) & 255;
+        const int xi1 = (xi0 + 1) & 255;
+        const int zi1 = (zi0 + 1) & 255;
+
+        const float xf = x - std::floor(x);
+        const float zf = z - std::floor(z);
+        const float u = fade(xf);
+        const float v = fade(zf);
+
+        const std::uint8_t aa = permAt(static_cast<int>(permAt(xi0)) + zi0);
+        const std::uint8_t ab = permAt(static_cast<int>(permAt(xi0)) + zi1);
+        const std::uint8_t ba = permAt(static_cast<int>(permAt(xi1)) + zi0);
+        const std::uint8_t bb = permAt(static_cast<int>(permAt(xi1)) + zi1);
+
+        const float x0 = lerp(grad2(aa, xf, zf), grad2(ba, xf - 1.0f, zf), u);
+        const float x1 = lerp(grad2(ab, xf, zf - 1.0f), grad2(bb, xf - 1.0f, zf - 1.0f), u);
+        return lerp(x0, x1, v);
     };
 
     auto chunkHeightAt = [&](int worldX, int worldZ) -> int {
-        const std::uint32_t broad = hash3(worldX >> 2, 0, worldZ >> 2, 0x36A17C4Du);
-        const std::uint32_t fine = hash3(worldX, 1, worldZ, 0xA45F23B1u);
-        int height = 4;
-        height += static_cast<int>((broad >> 8) & 0x7u);
-        height += static_cast<int>((fine >> 11) & 0x3u);
-        return std::clamp(height, 2, Chunk::kSizeY - 4);
+        const float wx = static_cast<float>(worldX);
+        const float wz = static_cast<float>(worldZ);
+
+        // Domain warping avoids repetitive grid-aligned noise contours.
+        const float warpX = perlin2((wx * 0.012f) + 13.7f, (wz * 0.012f) - 7.2f) * 18.0f;
+        const float warpZ = perlin2((wx * 0.012f) - 29.1f, (wz * 0.012f) + 22.4f) * 18.0f;
+        const float sampleX = wx + warpX;
+        const float sampleZ = wz + warpZ;
+
+        const float broadHills = perlin2(sampleX * 0.017f, sampleZ * 0.017f) * 7.5f;
+        const float midHills = perlin2(sampleX * 0.038f, sampleZ * 0.038f) * 3.2f;
+
+        // Valleys are carved where low-frequency noise dips negative.
+        const float valleyNoise = perlin2((wx * 0.008f) - 20.0f, (wz * 0.008f) + 42.0f);
+        const float valleyMask = std::pow(std::max(0.0f, -valleyNoise), 1.35f);
+        const float valleyCut = valleyMask * 10.0f;
+
+        // Cliffs appear along sharp high-frequency bands.
+        const float cliffBand = std::abs(perlin2(sampleX * 0.057f, sampleZ * 0.057f));
+        const float cliffMask = std::clamp((cliffBand - 0.52f) * 2.8f, 0.0f, 1.0f);
+        const float cliffNoise = (perlin2((sampleX + 31.0f) * 0.019f, (sampleZ - 17.0f) * 0.019f) * 0.5f) + 0.5f;
+        const float cliffLift = cliffMask * cliffMask * cliffNoise * 11.0f;
+
+        const float heightFloat = 9.0f + broadHills + midHills + cliffLift - valleyCut;
+        const int height = static_cast<int>(std::round(heightFloat));
+        return std::clamp(height, 1, Chunk::kSizeY - 2);
     };
 
     m_chunks.clear();
@@ -79,15 +148,6 @@ inline void ChunkGrid::initializeFlatWorld() {
 
                 for (int y = 0; y <= terrainHeight; ++y) {
                     chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
-                }
-
-                const std::uint32_t clutterNoise = hash3(worldX, 2, worldZ, 0x1B56C4E9u);
-                if ((clutterNoise & 0xFFu) < 20u) {
-                    const int clutterHeight = 2 + static_cast<int>((clutterNoise >> 10) % 7u);
-                    const int top = std::min(terrainHeight + clutterHeight, Chunk::kSizeY - 1);
-                    for (int y = terrainHeight + 1; y <= top; ++y) {
-                        chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
-                    }
                 }
             }
         }
