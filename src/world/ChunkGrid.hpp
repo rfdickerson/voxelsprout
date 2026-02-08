@@ -28,8 +28,6 @@ private:
 };
 
 inline void ChunkGrid::initializeFlatWorld() {
-    constexpr int kTerrainCellSize = 4;
-
     constexpr std::array<std::uint8_t, 256> kPerlinPermutation = {
         151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
         140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,
@@ -96,41 +94,35 @@ inline void ChunkGrid::initializeFlatWorld() {
         const float wz = static_cast<float>(worldZ);
 
         // Domain warping avoids repetitive grid-aligned noise contours.
-        const float warpX = perlin2((wx * 0.012f) + 13.7f, (wz * 0.012f) - 7.2f) * 18.0f;
-        const float warpZ = perlin2((wx * 0.012f) - 29.1f, (wz * 0.012f) + 22.4f) * 18.0f;
+        const float warpX = perlin2((wx * 0.010f) + 13.7f, (wz * 0.010f) - 7.2f) * 22.0f;
+        const float warpZ = perlin2((wx * 0.010f) - 29.1f, (wz * 0.010f) + 22.4f) * 22.0f;
         const float sampleX = wx + warpX;
         const float sampleZ = wz + warpZ;
 
-        const float broadHills = perlin2(sampleX * 0.017f, sampleZ * 0.017f) * 8.6f;
-        const float midHills = perlin2(sampleX * 0.041f, sampleZ * 0.041f) * 4.4f;
+        const float broadHills = perlin2(sampleX * 0.013f, sampleZ * 0.013f) * 7.2f;
+        const float midHills = perlin2(sampleX * 0.031f, sampleZ * 0.031f) * 3.4f;
 
         // Valleys are carved where low-frequency noise dips negative.
-        const float valleyNoise = perlin2((wx * 0.008f) - 20.0f, (wz * 0.008f) + 42.0f);
-        const float valleyMask = std::pow(std::max(0.0f, -valleyNoise), 1.65f);
-        const float valleyCut = valleyMask * 17.0f;
+        const float valleyNoise = perlin2((sampleX * 0.006f) - 20.0f, (sampleZ * 0.006f) + 42.0f);
+        const float valleyMask = std::pow(std::max(0.0f, -valleyNoise), 1.9f);
+        const float valleyCut = valleyMask * 15.0f;
 
-        // Cliffs appear along sharp high-frequency bands.
-        const float cliffBand = std::abs(perlin2(sampleX * 0.063f, sampleZ * 0.063f));
-        const float cliffMask = std::clamp((cliffBand - 0.45f) * 3.9f, 0.0f, 1.0f);
-        const float cliffNoise = (perlin2((sampleX + 31.0f) * 0.022f, (sampleZ - 17.0f) * 0.022f) * 0.5f) + 0.5f;
-        const float cliffLift = cliffMask * cliffMask * cliffNoise * 16.0f;
+        // Build a few strong monolithic massifs with steep cliff walls.
+        const float massifSeed = (perlin2((sampleX * 0.004f) + 87.0f, (sampleZ * 0.004f) - 51.0f) * 0.5f) + 0.5f;
+        const float massifMask = std::pow(std::clamp((massifSeed - 0.50f) * 2.0f, 0.0f, 1.0f), 2.2f);
+        const float ridgeNoise = 1.0f - std::abs(perlin2((sampleX * 0.019f) - 11.0f, (sampleZ * 0.019f) + 5.0f));
+        const float wallMask = std::pow(std::clamp((ridgeNoise - 0.46f) * 3.0f, 0.0f, 1.0f), 1.6f);
+        const float cliffRamp = std::pow(wallMask, 1.35f) * massifMask;
+        const float cliffLift = cliffRamp * 23.0f;
 
-        // Valley-side cliff walls where valley gradients are strongest.
-        const float valleyWallMask = std::clamp((valleyMask - 0.16f) * 2.6f, 0.0f, 1.0f);
-        const float valleyWallLift = valleyWallMask * cliffMask * 7.0f;
+        // Carve deep canyons around cliff zones for dramatic relief.
+        const float canyonNoise = perlin2((sampleX * 0.009f) + 33.0f, (sampleZ * 0.009f) - 71.0f);
+        const float canyonMask = std::pow(std::max(0.0f, -canyonNoise), 1.7f) * (0.45f + (0.55f * (1.0f - massifMask)));
+        const float canyonCut = canyonMask * 10.5f;
 
-        const float heightFloat = 9.0f + broadHills + midHills + cliffLift + valleyWallLift - valleyCut;
+        const float heightFloat = 8.5f + broadHills + midHills + cliffLift - valleyCut - canyonCut;
         const int height = static_cast<int>(std::round(heightFloat));
         return std::clamp(height, 1, Chunk::kSizeY - 2);
-    };
-
-    auto floorDiv = [](int value, int divisor) -> int {
-        const int quotient = value / divisor;
-        const int remainder = value % divisor;
-        if (remainder != 0 && ((remainder < 0) != (divisor < 0))) {
-            return quotient - 1;
-        }
-        return quotient;
     };
 
     m_chunks.clear();
@@ -159,11 +151,7 @@ inline void ChunkGrid::initializeFlatWorld() {
             for (int x = 0; x < Chunk::kSizeX; ++x) {
                 const int worldX = (chunkX * Chunk::kSizeX) + x;
                 const int worldZ = (chunkZ * Chunk::kSizeZ) + z;
-                const int terrainCellX = floorDiv(worldX, kTerrainCellSize);
-                const int terrainCellZ = floorDiv(worldZ, kTerrainCellSize);
-                const int terrainSampleX = (terrainCellX * kTerrainCellSize) + (kTerrainCellSize / 2);
-                const int terrainSampleZ = (terrainCellZ * kTerrainCellSize) + (kTerrainCellSize / 2);
-                const int terrainHeight = chunkHeightAt(terrainSampleX, terrainSampleZ);
+                const int terrainHeight = chunkHeightAt(worldX, worldZ);
 
                 for (int y = 0; y <= terrainHeight; ++y) {
                     chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
