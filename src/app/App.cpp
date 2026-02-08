@@ -113,8 +113,9 @@ void App::update(float dt) {
 
     const CameraRaycastResult raycast = raycastFromCamera();
 
-    const bool placePressedThisFrame = m_input.placeBlockDown && !m_wasPlaceBlockDown;
-    const bool removePressedThisFrame = m_input.removeBlockDown && !m_wasRemoveBlockDown;
+    const bool blockInteractionEnabled = !m_debugUiVisible;
+    const bool placePressedThisFrame = blockInteractionEnabled && m_input.placeBlockDown && !m_wasPlaceBlockDown;
+    const bool removePressedThisFrame = blockInteractionEnabled && m_input.removeBlockDown && !m_wasRemoveBlockDown;
     m_wasPlaceBlockDown = m_input.placeBlockDown;
     m_wasRemoveBlockDown = m_input.removeBlockDown;
 
@@ -133,7 +134,7 @@ void App::update(float dt) {
     }
 
     render::VoxelPreview preview{};
-    if (raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
+    if (!m_debugUiVisible && raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
         const bool showRemovePreview = m_input.removeBlockDown;
         if (showRemovePreview) {
             preview.visible = true;
@@ -177,6 +178,24 @@ void App::shutdown() {
 void App::pollInput() {
     glfwPollEvents();
 
+    bool uiVisibilityChanged = false;
+    const bool toggleUiDown = glfwGetKey(m_window, GLFW_KEY_F1) == GLFW_PRESS;
+    if (toggleUiDown && !m_wasToggleDebugUiDown) {
+        m_debugUiVisible = !m_debugUiVisible;
+        uiVisibilityChanged = true;
+    }
+    m_wasToggleDebugUiDown = toggleUiDown;
+    m_renderer.setDebugUiVisible(m_debugUiVisible);
+    const bool rendererUiVisible = m_renderer.isDebugUiVisible();
+    if (rendererUiVisible != m_debugUiVisible) {
+        m_debugUiVisible = rendererUiVisible;
+        uiVisibilityChanged = true;
+    }
+    if (uiVisibilityChanged) {
+        glfwSetInputMode(m_window, GLFW_CURSOR, m_debugUiVisible ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+        m_hasMouseSample = false;
+    }
+
     m_input.quitRequested = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     m_input.moveForward = glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS;
     m_input.moveBackward = glfwGetKey(m_window, GLFW_KEY_S) == GLFW_PRESS;
@@ -201,6 +220,11 @@ void App::pollInput() {
 
     m_input.mouseDeltaX = static_cast<float>(mouseX - m_lastMouseX);
     m_input.mouseDeltaY = static_cast<float>(mouseY - m_lastMouseY);
+
+    if (m_debugUiVisible) {
+        m_input.mouseDeltaX = 0.0f;
+        m_input.mouseDeltaY = 0.0f;
+    }
 
     m_lastMouseX = mouseX;
     m_lastMouseY = mouseY;

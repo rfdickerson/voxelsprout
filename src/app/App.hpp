@@ -64,6 +64,8 @@ private:
     bool m_hasMouseSample = false;
     bool m_wasPlaceBlockDown = false;
     bool m_wasRemoveBlockDown = false;
+    bool m_debugUiVisible = false;
+    bool m_wasToggleDebugUiDown = false;
 
     sim::Simulation m_simulation;
     world::ChunkGrid m_chunkGrid;

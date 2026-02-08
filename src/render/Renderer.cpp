@@ -4,6 +4,12 @@
 #include "math/Math.hpp"
 #include "world/ChunkMesher.hpp"
 
+#if defined(VOXEL_HAS_IMGUI)
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_vulkan.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -33,6 +39,14 @@ constexpr std::array<const char*, 5> kDeviceExtensions = {
 };
 constexpr uint32_t kShadowCascadeCount = 4;
 
+#if defined(VOXEL_HAS_IMGUI)
+void imguiCheckVkResult(VkResult result) {
+    if (result != VK_SUCCESS) {
+        std::cerr << "[imgui] Vulkan backend error: " << static_cast<int>(result) << "\n";
+    }
+}
+#endif
+
 struct alignas(16) CameraUniform {
     float mvp[16];
     float view[16];
@@ -42,6 +56,12 @@ struct alignas(16) CameraUniform {
     float sunDirectionIntensity[4];
     float sunColorShadow[4];
     float shIrradiance[9][4];
+    float shadowConfig0[4];
+    float shadowConfig1[4];
+    float shadowConfig2[4];
+    float shadowConfig3[4];
+    float shadowVoxelGridOrigin[4];
+    float shadowVoxelGridSize[4];
 };
 
 struct alignas(16) ChunkPushConstants {
@@ -972,6 +992,14 @@ bool createShaderModuleFromFileOrFallback(
 
 } // namespace
 
+void Renderer::setDebugUiVisible(bool visible) {
+    m_debugUiVisible = visible;
+}
+
+bool Renderer::isDebugUiVisible() const {
+    return m_debugUiVisible;
+}
+
 bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
     std::cerr << "[render] init begin\n";
     m_window = window;
@@ -1065,6 +1093,13 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
+#if defined(VOXEL_HAS_IMGUI)
+    if (!createImGuiResources()) {
+        std::cerr << "[render] init failed at createImGuiResources\n";
+        shutdown();
+        return false;
+    }
+#endif
 
     std::cerr << "[render] init complete\n";
     return true;
@@ -1959,10 +1994,17 @@ bool Renderer::createDescriptorResources() {
         shadowMapBinding.descriptorCount = 1;
         shadowMapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+        VkDescriptorSetLayoutBinding shadowVoxelGridBinding{};
+        shadowVoxelGridBinding.binding = 5;
+        shadowVoxelGridBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+        shadowVoxelGridBinding.descriptorCount = 1;
+        shadowVoxelGridBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 4> bindings = {
             mvpBinding,
             hdrSceneBinding,
-            shadowMapBinding
+            shadowMapBinding,
+            shadowVoxelGridBinding
         };
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
@@ -1979,7 +2021,7 @@ bool Renderer::createDescriptorResources() {
     }
 
     if (m_descriptorPool == VK_NULL_HANDLE) {
-        const std::array<VkDescriptorPoolSize, 2> poolSizes = {
+        const std::array<VkDescriptorPoolSize, 3> poolSizes = {
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 kMaxFramesInFlight
@@ -1987,6 +2029,10 @@ bool Renderer::createDescriptorResources() {
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 2 * kMaxFramesInFlight
+            },
+            VkDescriptorPoolSize{
+                VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+                kMaxFramesInFlight
             }
         };
 
@@ -2741,6 +2787,11 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid) {
         return false;
     }
 
+    if (!updateShadowVoxelGrid(chunkGrid)) {
+        std::cerr << "[render] shadow voxel grid update failed\n";
+        return false;
+    }
+
     collectCompletedBufferReleases();
 
     if (m_transferCommandBufferInFlightValue > 0 && !waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
@@ -2917,6 +2968,119 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid) {
     return true;
 }
 
+bool Renderer::updateShadowVoxelGrid(const world::ChunkGrid& chunkGrid) {
+    if (chunkGrid.chunks().empty()) {
+        return false;
+    }
+
+    int minChunkX = std::numeric_limits<int>::max();
+    int minChunkY = std::numeric_limits<int>::max();
+    int minChunkZ = std::numeric_limits<int>::max();
+    int maxChunkX = std::numeric_limits<int>::lowest();
+    int maxChunkY = std::numeric_limits<int>::lowest();
+    int maxChunkZ = std::numeric_limits<int>::lowest();
+    for (const world::Chunk& chunk : chunkGrid.chunks()) {
+        minChunkX = std::min(minChunkX, chunk.chunkX());
+        minChunkY = std::min(minChunkY, chunk.chunkY());
+        minChunkZ = std::min(minChunkZ, chunk.chunkZ());
+        maxChunkX = std::max(maxChunkX, chunk.chunkX());
+        maxChunkY = std::max(maxChunkY, chunk.chunkY());
+        maxChunkZ = std::max(maxChunkZ, chunk.chunkZ());
+    }
+
+    const uint32_t gridSizeX = static_cast<uint32_t>((maxChunkX - minChunkX + 1) * world::Chunk::kSizeX);
+    const uint32_t gridSizeY = static_cast<uint32_t>((maxChunkY - minChunkY + 1) * world::Chunk::kSizeY);
+    const uint32_t gridSizeZ = static_cast<uint32_t>((maxChunkZ - minChunkZ + 1) * world::Chunk::kSizeZ);
+    const size_t voxelCount = static_cast<size_t>(gridSizeX) * gridSizeY * gridSizeZ;
+
+    std::vector<std::uint8_t> occupancy(voxelCount, 0);
+    for (const world::Chunk& chunk : chunkGrid.chunks()) {
+        const uint32_t baseX = static_cast<uint32_t>((chunk.chunkX() - minChunkX) * world::Chunk::kSizeX);
+        const uint32_t baseY = static_cast<uint32_t>((chunk.chunkY() - minChunkY) * world::Chunk::kSizeY);
+        const uint32_t baseZ = static_cast<uint32_t>((chunk.chunkZ() - minChunkZ) * world::Chunk::kSizeZ);
+        for (int y = 0; y < world::Chunk::kSizeY; ++y) {
+            for (int z = 0; z < world::Chunk::kSizeZ; ++z) {
+                for (int x = 0; x < world::Chunk::kSizeX; ++x) {
+                    if (!chunk.isSolid(x, y, z)) {
+                        continue;
+                    }
+                    const uint32_t gx = baseX + static_cast<uint32_t>(x);
+                    const uint32_t gy = baseY + static_cast<uint32_t>(y);
+                    const uint32_t gz = baseZ + static_cast<uint32_t>(z);
+                    const size_t index = static_cast<size_t>(gx + (gridSizeX * (gz + (gridSizeZ * gy))));
+                    occupancy[index] = 255u;
+                }
+            }
+        }
+    }
+
+    const VkDeviceSize occupancyBytes = static_cast<VkDeviceSize>(occupancy.size());
+    const bool needsRecreateBuffer =
+        m_shadowVoxelBufferHandle == kInvalidBufferHandle ||
+        m_shadowVoxelBufferView == VK_NULL_HANDLE ||
+        m_shadowVoxelGridSizeX != gridSizeX ||
+        m_shadowVoxelGridSizeY != gridSizeY ||
+        m_shadowVoxelGridSizeZ != gridSizeZ;
+
+    if (needsRecreateBuffer) {
+        const uint64_t safeReleaseValue = std::max(m_lastGraphicsTimelineValue, m_currentChunkReadyTimelineValue);
+        if (!waitForTimelineValue(safeReleaseValue)) {
+            return false;
+        }
+
+        if (m_shadowVoxelBufferView != VK_NULL_HANDLE) {
+            vkDestroyBufferView(m_device, m_shadowVoxelBufferView, nullptr);
+            m_shadowVoxelBufferView = VK_NULL_HANDLE;
+        }
+        if (m_shadowVoxelBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(m_shadowVoxelBufferHandle);
+            m_shadowVoxelBufferHandle = kInvalidBufferHandle;
+        }
+
+        BufferCreateDesc voxelBufferCreateDesc{};
+        voxelBufferCreateDesc.size = occupancyBytes;
+        voxelBufferCreateDesc.usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
+        voxelBufferCreateDesc.memoryProperties =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        voxelBufferCreateDesc.initialData = occupancy.data();
+        m_shadowVoxelBufferHandle = m_bufferAllocator.createBuffer(voxelBufferCreateDesc);
+        if (m_shadowVoxelBufferHandle == kInvalidBufferHandle) {
+            std::cerr << "[render] failed to allocate shadow voxel buffer\n";
+            return false;
+        }
+
+        VkBufferViewCreateInfo viewCreateInfo{};
+        viewCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
+        viewCreateInfo.buffer = m_bufferAllocator.getBuffer(m_shadowVoxelBufferHandle);
+        viewCreateInfo.format = VK_FORMAT_R8_UINT;
+        viewCreateInfo.offset = 0;
+        viewCreateInfo.range = occupancyBytes;
+        const VkResult viewResult = vkCreateBufferView(m_device, &viewCreateInfo, nullptr, &m_shadowVoxelBufferView);
+        if (viewResult != VK_SUCCESS) {
+            logVkFailure("vkCreateBufferView(shadowVoxelGrid)", viewResult);
+            m_bufferAllocator.destroyBuffer(m_shadowVoxelBufferHandle);
+            m_shadowVoxelBufferHandle = kInvalidBufferHandle;
+            return false;
+        }
+    } else {
+        void* mappedData = m_bufferAllocator.mapBuffer(m_shadowVoxelBufferHandle, 0, occupancyBytes);
+        if (mappedData == nullptr) {
+            std::cerr << "[render] failed to map shadow voxel buffer\n";
+            return false;
+        }
+        std::memcpy(mappedData, occupancy.data(), static_cast<size_t>(occupancyBytes));
+        m_bufferAllocator.unmapBuffer(m_shadowVoxelBufferHandle);
+    }
+
+    m_shadowVoxelGridSizeX = gridSizeX;
+    m_shadowVoxelGridSizeY = gridSizeY;
+    m_shadowVoxelGridSizeZ = gridSizeZ;
+    m_shadowVoxelGridOriginX = minChunkX * world::Chunk::kSizeX;
+    m_shadowVoxelGridOriginY = minChunkY * world::Chunk::kSizeY;
+    m_shadowVoxelGridOriginZ = minChunkZ * world::Chunk::kSizeZ;
+    return true;
+}
+
 bool Renderer::createFrameResources() {
     for (FrameResources& frame : m_frames) {
         VkCommandPoolCreateInfo poolCreateInfo{};
@@ -2941,6 +3105,175 @@ bool Renderer::createFrameResources() {
     std::cerr << "[render] frame resources ready (" << kMaxFramesInFlight << " frames in flight)\n";
     return true;
 }
+
+#if defined(VOXEL_HAS_IMGUI)
+bool Renderer::createImGuiResources() {
+    if (m_imguiInitialized) {
+        return true;
+    }
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    if (!ImGui_ImplGlfw_InitForVulkan(m_window, true)) {
+        std::cerr << "[imgui] ImGui_ImplGlfw_InitForVulkan failed\n";
+        ImGui::DestroyContext();
+        return false;
+    }
+
+    VkDescriptorPoolSize poolSizes[] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 256},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 256},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 256},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 256},
+        {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 256},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 256},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 256},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 256},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 256},
+        {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 256},
+    };
+
+    VkDescriptorPoolCreateInfo poolCreateInfo{};
+    poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolCreateInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolCreateInfo.maxSets = 256;
+    poolCreateInfo.poolSizeCount = static_cast<uint32_t>(sizeof(poolSizes) / sizeof(poolSizes[0]));
+    poolCreateInfo.pPoolSizes = poolSizes;
+    const VkResult poolResult = vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &m_imguiDescriptorPool);
+    if (poolResult != VK_SUCCESS) {
+        logVkFailure("vkCreateDescriptorPool(imgui)", poolResult);
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        return false;
+    }
+
+    ImGui_ImplVulkan_InitInfo initInfo{};
+    initInfo.ApiVersion = VK_API_VERSION_1_3;
+    initInfo.Instance = m_instance;
+    initInfo.PhysicalDevice = m_physicalDevice;
+    initInfo.Device = m_device;
+    initInfo.QueueFamily = m_graphicsQueueFamilyIndex;
+    initInfo.Queue = m_graphicsQueue;
+    initInfo.DescriptorPool = m_imguiDescriptorPool;
+    initInfo.MinImageCount = std::max<uint32_t>(2u, static_cast<uint32_t>(m_swapchainImages.size()));
+    initInfo.ImageCount = static_cast<uint32_t>(m_swapchainImages.size());
+    initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    initInfo.UseDynamicRendering = true;
+    initInfo.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    initInfo.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    initInfo.PipelineRenderingCreateInfo.pColorAttachmentFormats = &m_swapchainFormat;
+    initInfo.PipelineRenderingCreateInfo.depthAttachmentFormat = VK_FORMAT_UNDEFINED;
+    initInfo.CheckVkResultFn = imguiCheckVkResult;
+    if (!ImGui_ImplVulkan_Init(&initInfo)) {
+        std::cerr << "[imgui] ImGui_ImplVulkan_Init failed\n";
+        vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
+        m_imguiDescriptorPool = VK_NULL_HANDLE;
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        return false;
+    }
+
+    if (!ImGui_ImplVulkan_CreateFontsTexture()) {
+        std::cerr << "[imgui] ImGui_ImplVulkan_CreateFontsTexture failed\n";
+        ImGui_ImplVulkan_Shutdown();
+        vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
+        m_imguiDescriptorPool = VK_NULL_HANDLE;
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        return false;
+    }
+
+    m_imguiInitialized = true;
+    return true;
+}
+
+void Renderer::destroyImGuiResources() {
+    if (!m_imguiInitialized) {
+        return;
+    }
+
+    ImGui_ImplVulkan_DestroyFontsTexture();
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
+    if (m_imguiDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
+        m_imguiDescriptorPool = VK_NULL_HANDLE;
+    }
+    m_imguiInitialized = false;
+}
+
+void Renderer::buildShadowDebugUi() {
+    if (!m_debugUiVisible) {
+        return;
+    }
+
+    if (!ImGui::Begin("Shadow Debug", &m_debugUiVisible)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("CSM + Voxel Hybrid");
+    ImGui::Separator();
+    ImGui::Checkbox("Enable RPDB", &m_shadowDebugSettings.enableRpdb);
+    ImGui::Checkbox("Enable Rotated Poisson PCF", &m_shadowDebugSettings.enableRotatedPoissonPcf);
+    ImGui::Checkbox("Enable Hybrid Near Voxel Ray", &m_shadowDebugSettings.enableHybridNearVoxelRay);
+    ImGui::SliderInt("Poisson Sample Count", &m_shadowDebugSettings.poissonSampleCount, 4, 16);
+    ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
+    ImGui::SliderFloat("Cascade Blend Min", &m_shadowDebugSettings.cascadeBlendMin, 1.0f, 20.0f, "%.2f");
+    ImGui::SliderFloat("Cascade Blend Factor", &m_shadowDebugSettings.cascadeBlendFactor, 0.05f, 0.60f, "%.2f");
+
+    ImGui::Separator();
+    ImGui::Text("Receiver Bias");
+    ImGui::SliderFloat("Normal Offset Near", &m_shadowDebugSettings.receiverNormalOffsetNear, 0.0f, 0.20f, "%.3f");
+    ImGui::SliderFloat("Normal Offset Far", &m_shadowDebugSettings.receiverNormalOffsetFar, 0.0f, 0.35f, "%.3f");
+    ImGui::SliderFloat("Base Bias Near (texel)", &m_shadowDebugSettings.receiverBaseBiasNearTexel, 0.0f, 12.0f, "%.2f");
+    ImGui::SliderFloat("Base Bias Far (texel)", &m_shadowDebugSettings.receiverBaseBiasFarTexel, 0.0f, 16.0f, "%.2f");
+    ImGui::SliderFloat("Slope Bias Near (texel)", &m_shadowDebugSettings.receiverSlopeBiasNearTexel, 0.0f, 14.0f, "%.2f");
+    ImGui::SliderFloat("Slope Bias Far (texel)", &m_shadowDebugSettings.receiverSlopeBiasFarTexel, 0.0f, 18.0f, "%.2f");
+    ImGui::SliderFloat("RPDB Scale", &m_shadowDebugSettings.rpdbScale, 0.0f, 8.0f, "%.2f");
+
+    ImGui::Separator();
+    ImGui::Text("Caster Bias");
+    ImGui::SliderFloat("Const Bias Base", &m_shadowDebugSettings.casterConstantBiasBase, 0.0f, 6.0f, "%.2f");
+    ImGui::SliderFloat("Const Bias Cascade Scale", &m_shadowDebugSettings.casterConstantBiasCascadeScale, 0.0f, 3.0f, "%.2f");
+    ImGui::SliderFloat("Slope Bias Base", &m_shadowDebugSettings.casterSlopeBiasBase, 0.0f, 8.0f, "%.2f");
+    ImGui::SliderFloat("Slope Bias Cascade Scale", &m_shadowDebugSettings.casterSlopeBiasCascadeScale, 0.0f, 4.0f, "%.2f");
+
+    ImGui::Separator();
+    ImGui::Text("Hybrid Near-Cascade Ray");
+    ImGui::SliderFloat("Ray Step", &m_shadowDebugSettings.hybridRayStep, 0.05f, 1.0f, "%.3f");
+    ImGui::SliderFloat("Ray Max Distance", &m_shadowDebugSettings.hybridRayMaxDistance, 2.0f, 80.0f, "%.2f");
+
+    ImGui::Separator();
+    ImGui::Text("Cascade Splits: %.1f / %.1f / %.1f / %.1f",
+        m_shadowCascadeSplits[0],
+        m_shadowCascadeSplits[1],
+        m_shadowCascadeSplits[2],
+        m_shadowCascadeSplits[3]
+    );
+    ImGui::Text("Voxel Grid: origin=(%d, %d, %d) size=(%u, %u, %u)",
+        m_shadowVoxelGridOriginX,
+        m_shadowVoxelGridOriginY,
+        m_shadowVoxelGridOriginZ,
+        m_shadowVoxelGridSizeX,
+        m_shadowVoxelGridSizeY,
+        m_shadowVoxelGridSizeZ
+    );
+
+    if (ImGui::Button("Reset Shadow Defaults")) {
+        m_shadowDebugSettings = ShadowDebugSettings{};
+    }
+
+    ImGui::End();
+}
+#endif
 
 bool Renderer::waitForTimelineValue(uint64_t value) const {
     if (value == 0 || m_renderTimelineSemaphore == VK_NULL_HANDLE) {
@@ -3070,6 +3403,15 @@ void Renderer::renderFrame(
         std::cerr << "[render] vkBeginCommandBuffer failed\n";
         return;
     }
+#if defined(VOXEL_HAS_IMGUI)
+    if (m_imguiInitialized) {
+        ImGui_ImplVulkan_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+        buildShadowDebugUi();
+        ImGui::Render();
+    }
+#endif
 
     const float aspectRatio = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
     const float nearPlane = 0.1f;
@@ -3179,6 +3521,35 @@ void Renderer::renderFrame(
         mvpUniform.shIrradiance[i][2] = shIrradiance[i].z;
         mvpUniform.shIrradiance[i][3] = 0.0f;
     }
+    mvpUniform.shadowConfig0[0] = m_shadowDebugSettings.receiverNormalOffsetNear;
+    mvpUniform.shadowConfig0[1] = m_shadowDebugSettings.receiverNormalOffsetFar;
+    mvpUniform.shadowConfig0[2] = m_shadowDebugSettings.receiverBaseBiasNearTexel;
+    mvpUniform.shadowConfig0[3] = m_shadowDebugSettings.receiverBaseBiasFarTexel;
+
+    mvpUniform.shadowConfig1[0] = m_shadowDebugSettings.receiverSlopeBiasNearTexel;
+    mvpUniform.shadowConfig1[1] = m_shadowDebugSettings.receiverSlopeBiasFarTexel;
+    mvpUniform.shadowConfig1[2] = m_shadowDebugSettings.cascadeBlendMin;
+    mvpUniform.shadowConfig1[3] = m_shadowDebugSettings.cascadeBlendFactor;
+
+    mvpUniform.shadowConfig2[0] = m_shadowDebugSettings.enableRpdb ? 1.0f : 0.0f;
+    mvpUniform.shadowConfig2[1] = m_shadowDebugSettings.enableRotatedPoissonPcf ? 1.0f : 0.0f;
+    mvpUniform.shadowConfig2[2] = m_shadowDebugSettings.enableHybridNearVoxelRay ? 1.0f : 0.0f;
+    mvpUniform.shadowConfig2[3] = static_cast<float>(m_shadowDebugSettings.poissonSampleCount);
+
+    mvpUniform.shadowConfig3[0] = m_shadowDebugSettings.hybridRayStep;
+    mvpUniform.shadowConfig3[1] = m_shadowDebugSettings.hybridRayMaxDistance;
+    mvpUniform.shadowConfig3[2] = m_shadowDebugSettings.rpdbScale;
+    mvpUniform.shadowConfig3[3] = m_shadowDebugSettings.pcfRadius;
+
+    mvpUniform.shadowVoxelGridOrigin[0] = static_cast<float>(m_shadowVoxelGridOriginX);
+    mvpUniform.shadowVoxelGridOrigin[1] = static_cast<float>(m_shadowVoxelGridOriginY);
+    mvpUniform.shadowVoxelGridOrigin[2] = static_cast<float>(m_shadowVoxelGridOriginZ);
+    mvpUniform.shadowVoxelGridOrigin[3] = 0.0f;
+
+    mvpUniform.shadowVoxelGridSize[0] = static_cast<float>(m_shadowVoxelGridSizeX);
+    mvpUniform.shadowVoxelGridSize[1] = static_cast<float>(m_shadowVoxelGridSizeY);
+    mvpUniform.shadowVoxelGridSize[2] = static_cast<float>(m_shadowVoxelGridSizeZ);
+    mvpUniform.shadowVoxelGridSize[3] = 0.0f;
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     VkDescriptorBufferInfo bufferInfo{};
@@ -3199,7 +3570,7 @@ void Renderer::renderFrame(
     shadowMapImageInfo.imageView = m_shadowDepthImageView;
     shadowMapImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
-    std::array<VkWriteDescriptorSet, 3> writes{};
+    std::array<VkWriteDescriptorSet, 4> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -3220,6 +3591,13 @@ void Renderer::renderFrame(
     writes[2].descriptorCount = 1;
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[2].pImageInfo = &shadowMapImageInfo;
+
+    writes[3] = write;
+    writes[3].dstSet = m_descriptorSets[m_currentFrame];
+    writes[3].dstBinding = 5;
+    writes[3].descriptorCount = 1;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+    writes[3].pTexelBufferView = &m_shadowVoxelBufferView;
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -3304,8 +3682,12 @@ void Renderer::renderFrame(
             vkCmdSetViewport(commandBuffer, 0, 1, &shadowViewport);
             vkCmdSetScissor(commandBuffer, 0, 1, &shadowScissor);
             const float cascadeF = static_cast<float>(cascadeIndex);
-            const float constantBias = 1.1f + (0.9f * cascadeF);
-            const float slopeBias = 1.7f + (0.85f * cascadeF);
+            const float constantBias =
+                m_shadowDebugSettings.casterConstantBiasBase +
+                (m_shadowDebugSettings.casterConstantBiasCascadeScale * cascadeF);
+            const float slopeBias =
+                m_shadowDebugSettings.casterSlopeBiasBase +
+                (m_shadowDebugSettings.casterSlopeBiasCascadeScale * cascadeF);
             vkCmdSetDepthBias(commandBuffer, constantBias, 0.0f, slopeBias);
 
             for (const ChunkDrawRange& drawRange : m_chunkDrawRanges) {
@@ -3609,6 +3991,11 @@ void Renderer::renderFrame(
         );
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
+#if defined(VOXEL_HAS_IMGUI)
+    if (m_imguiInitialized) {
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
+    }
+#endif
 
     vkCmdEndRendering(commandBuffer);
 
@@ -3734,6 +4121,11 @@ bool Renderer::recreateSwapchain() {
         std::cerr << "[render] recreateSwapchain failed: createGraphicsPipeline\n";
         return false;
     }
+#if defined(VOXEL_HAS_IMGUI)
+    if (m_imguiInitialized) {
+        ImGui_ImplVulkan_SetMinImageCount(std::max<uint32_t>(2u, static_cast<uint32_t>(m_swapchainImages.size())));
+    }
+#endif
     std::cerr << "[render] recreateSwapchain complete\n";
     return true;
 }
@@ -3906,6 +4298,21 @@ void Renderer::destroyShadowResources() {
 }
 
 void Renderer::destroyChunkBuffers() {
+    if (m_shadowVoxelBufferView != VK_NULL_HANDLE) {
+        vkDestroyBufferView(m_device, m_shadowVoxelBufferView, nullptr);
+        m_shadowVoxelBufferView = VK_NULL_HANDLE;
+    }
+    if (m_shadowVoxelBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_shadowVoxelBufferHandle);
+        m_shadowVoxelBufferHandle = kInvalidBufferHandle;
+    }
+    m_shadowVoxelGridSizeX = 0;
+    m_shadowVoxelGridSizeY = 0;
+    m_shadowVoxelGridSizeZ = 0;
+    m_shadowVoxelGridOriginX = 0;
+    m_shadowVoxelGridOriginY = 0;
+    m_shadowVoxelGridOriginZ = 0;
+
     if (m_indexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_indexBufferHandle);
         m_indexBufferHandle = kInvalidBufferHandle;
@@ -3967,6 +4374,9 @@ void Renderer::shutdown() {
     }
 
     if (m_device != VK_NULL_HANDLE) {
+#if defined(VOXEL_HAS_IMGUI)
+        destroyImGuiResources();
+#endif
         destroyFrameResources();
         destroyTransferResources();
         if (m_renderTimelineSemaphore != VK_NULL_HANDLE) {

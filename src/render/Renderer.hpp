@@ -40,6 +40,33 @@ struct VoxelPreview {
 
 class Renderer {
 public:
+    struct ShadowDebugSettings {
+        bool enableRpdb = true;
+        bool enableRotatedPoissonPcf = true;
+        bool enableHybridNearVoxelRay = false;
+
+        float casterConstantBiasBase = 1.1f;
+        float casterConstantBiasCascadeScale = 0.9f;
+        float casterSlopeBiasBase = 1.7f;
+        float casterSlopeBiasCascadeScale = 0.85f;
+
+        float receiverNormalOffsetNear = 0.03f;
+        float receiverNormalOffsetFar = 0.12f;
+        float receiverBaseBiasNearTexel = 2.2f;
+        float receiverBaseBiasFarTexel = 4.6f;
+        float receiverSlopeBiasNearTexel = 3.8f;
+        float receiverSlopeBiasFarTexel = 7.2f;
+
+        float cascadeBlendMin = 6.0f;
+        float cascadeBlendFactor = 0.30f;
+
+        float hybridRayStep = 0.45f;
+        float hybridRayMaxDistance = 28.0f;
+        float rpdbScale = 2.5f;
+        float pcfRadius = 2.0f;
+        int poissonSampleCount = 16;
+    };
+
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
     void renderFrame(
@@ -48,6 +75,8 @@ public:
         const CameraPose& camera,
         const VoxelPreview& preview
     );
+    void setDebugUiVisible(bool visible);
+    bool isDebugUiVisible() const;
     void shutdown();
 
 private:
@@ -80,7 +109,13 @@ private:
     bool createEnvironmentResources();
     bool createDescriptorResources();
     bool createChunkBuffers(const world::ChunkGrid& chunkGrid);
+    bool updateShadowVoxelGrid(const world::ChunkGrid& chunkGrid);
     bool createFrameResources();
+#if defined(VOXEL_HAS_IMGUI)
+    bool createImGuiResources();
+    void destroyImGuiResources();
+    void buildShadowDebugUi();
+#endif
     bool recreateSwapchain();
     void destroySwapchain();
     void destroyHdrResolveTargets();
@@ -188,6 +223,14 @@ private:
     BufferHandle m_indexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_previewVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_previewIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_shadowVoxelBufferHandle = kInvalidBufferHandle;
+    VkBufferView m_shadowVoxelBufferView = VK_NULL_HANDLE;
+    uint32_t m_shadowVoxelGridSizeX = 0;
+    uint32_t m_shadowVoxelGridSizeY = 0;
+    uint32_t m_shadowVoxelGridSizeZ = 0;
+    int32_t m_shadowVoxelGridOriginX = 0;
+    int32_t m_shadowVoxelGridOriginY = 0;
+    int32_t m_shadowVoxelGridOriginZ = 0;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     uint32_t m_indexCount = 0;
@@ -204,6 +247,12 @@ private:
     uint64_t m_lastGraphicsTimelineValue = 0;
     uint64_t m_nextTimelineValue = 1;
     uint32_t m_currentFrame = 0;
+    bool m_debugUiVisible = false;
+    ShadowDebugSettings m_shadowDebugSettings{};
+#if defined(VOXEL_HAS_IMGUI)
+    bool m_imguiInitialized = false;
+    VkDescriptorPool m_imguiDescriptorPool = VK_NULL_HANDLE;
+#endif
     // Dynamic cascade split distances in view-space units.
     // Updated per frame and consumed by shadow rendering + shading.
     std::array<float, kShadowCascadeCount> m_shadowCascadeSplits = {20.0f, 45.0f, 90.0f, 180.0f};

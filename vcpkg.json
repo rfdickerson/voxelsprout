@@ -3,7 +3,13 @@
   "version-string": "0.1.0",
   "dependencies": [
     "glfw3",
-    "imgui",
+    {
+      "name": "imgui",
+      "features": [
+        "vulkan-binding",
+        "glfw-binding"
+      ]
+    },
     "vulkan",
     "vulkan-memory-allocator"
   ]

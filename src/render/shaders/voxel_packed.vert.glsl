@@ -10,6 +10,12 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 sunDirectionIntensity;
     vec4 sunColorShadow;
     vec4 shIrradiance[9];
+    vec4 shadowConfig0;
+    vec4 shadowConfig1;
+    vec4 shadowConfig2;
+    vec4 shadowConfig3;
+    vec4 shadowVoxelGridOrigin;
+    vec4 shadowVoxelGridSize;
 } camera;
 
 layout(push_constant) uniform ChunkPushConstants {
