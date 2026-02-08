@@ -35,6 +35,7 @@ private:
     void pollInput();
     void updateCamera(float dt);
     [[nodiscard]] bool isSolidWorldVoxel(int worldX, int worldY, int worldZ) const;
+    [[nodiscard]] bool findGroundSupportY(float eyeX, float eyeY, float eyeZ, int& outSupportY) const;
     [[nodiscard]] bool doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const;
     void resolvePlayerCollisions(float dt);
     [[nodiscard]] CameraRaycastResult raycastFromCamera() const;
@@ -66,6 +67,8 @@ private:
     bool m_wasRemoveBlockDown = false;
     bool m_debugUiVisible = false;
     bool m_wasToggleDebugUiDown = false;
+    bool m_hoverEnabled = false;
+    bool m_wasToggleHoverDown = false;
 
     sim::Simulation m_simulation;
     world::ChunkGrid m_chunkGrid;

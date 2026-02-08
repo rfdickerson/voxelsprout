@@ -33,6 +33,11 @@ constexpr float kPlayerEyeHeight = kPlayerEyeHeightVoxels;
 constexpr float kPlayerHeight = kPlayerHeightVoxels;
 constexpr float kPlayerTopOffset = kPlayerHeight - kPlayerEyeHeight;
 constexpr float kCollisionEpsilon = 0.001f;
+constexpr float kHoverHeightAboveGround = 2.0f;
+constexpr float kHoverResponse = 8.0f;
+constexpr float kHoverMaxVerticalSpeed = 12.0f;
+constexpr float kHoverManualVerticalSpeed = 8.0f;
+constexpr int kHoverGroundSearchDepth = 96;
 
 void glfwErrorCallback(int errorCode, const char* description) {
     std::cerr << "[app][glfw] error " << errorCode << ": "
@@ -210,6 +215,7 @@ void App::pollInput() {
     m_input.moveDown =
         glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
         glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+    m_input.toggleHoverDown = glfwGetKey(m_window, GLFW_KEY_H) == GLFW_PRESS;
     m_input.placeBlockDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
     m_input.removeBlockDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
 
@@ -236,6 +242,13 @@ void App::pollInput() {
 }
 
 void App::updateCamera(float dt) {
+    if (m_input.toggleHoverDown && !m_wasToggleHoverDown) {
+        m_hoverEnabled = !m_hoverEnabled;
+        m_camera.velocityY = 0.0f;
+        std::cerr << "[app] hover " << (m_hoverEnabled ? "enabled" : "disabled") << " (H)\n";
+    }
+    m_wasToggleHoverDown = m_input.toggleHoverDown;
+
     const float mouseSmoothingAlpha = 1.0f - std::exp(-dt / kMouseSmoothingSeconds);
     m_camera.smoothedMouseDeltaX += (m_input.mouseDeltaX - m_camera.smoothedMouseDeltaX) * mouseSmoothingAlpha;
     m_camera.smoothedMouseDeltaY += (m_input.mouseDeltaY - m_camera.smoothedMouseDeltaY) * mouseSmoothingAlpha;
@@ -282,12 +295,37 @@ void App::updateCamera(float dt) {
     m_camera.velocityX = approach(m_camera.velocityX, targetVelocityX, maxDeltaX);
     m_camera.velocityZ = approach(m_camera.velocityZ, targetVelocityZ, maxDeltaZ);
 
-    if (m_input.moveUp && m_camera.onGround) {
-        m_camera.velocityY = kJumpSpeed;
-        m_camera.onGround = false;
-    }
+    if (m_hoverEnabled) {
+        float hoverVerticalSpeed = 0.0f;
+        int supportY = 0;
+        if (findGroundSupportY(m_camera.x, m_camera.y, m_camera.z, supportY)) {
+            const float targetEyeY = static_cast<float>(supportY + 1) + kPlayerEyeHeight + kHoverHeightAboveGround;
+            const float yError = targetEyeY - m_camera.y;
+            hoverVerticalSpeed = std::clamp(
+                yError * kHoverResponse,
+                -kHoverMaxVerticalSpeed,
+                kHoverMaxVerticalSpeed
+            );
+        } else {
+            hoverVerticalSpeed = 0.0f;
+        }
 
-    m_camera.velocityY = std::max(m_camera.velocityY + (kGravity * dt), kMaxFallSpeed);
+        if (m_input.moveUp) {
+            hoverVerticalSpeed = std::max(hoverVerticalSpeed, kHoverManualVerticalSpeed);
+        }
+        if (m_input.moveDown) {
+            hoverVerticalSpeed = std::min(hoverVerticalSpeed, -kHoverManualVerticalSpeed);
+        }
+
+        m_camera.velocityY = hoverVerticalSpeed;
+        m_camera.onGround = false;
+    } else {
+        if (m_input.moveUp && m_camera.onGround) {
+            m_camera.velocityY = kJumpSpeed;
+            m_camera.onGround = false;
+        }
+        m_camera.velocityY = std::max(m_camera.velocityY + (kGravity * dt), kMaxFallSpeed);
+    }
     resolvePlayerCollisions(dt);
 }
 
@@ -309,6 +347,30 @@ bool App::isSolidWorldVoxel(int worldX, int worldY, int worldZ) const {
             localZ >= 0 && localZ < world::Chunk::kSizeZ;
         if (insideChunk) {
             return chunk.isSolid(localX, localY, localZ);
+        }
+    }
+
+    return false;
+}
+
+bool App::findGroundSupportY(float eyeX, float eyeY, float eyeZ, int& outSupportY) const {
+    const int startX = static_cast<int>(std::floor(eyeX - kPlayerRadius));
+    const int endX = static_cast<int>(std::floor(eyeX + kPlayerRadius - kCollisionEpsilon));
+    const int startZ = static_cast<int>(std::floor(eyeZ - kPlayerRadius));
+    const int endZ = static_cast<int>(std::floor(eyeZ + kPlayerRadius - kCollisionEpsilon));
+
+    const float feetY = eyeY - kPlayerEyeHeight;
+    const int topSupportY = static_cast<int>(std::floor(feetY - kCollisionEpsilon)) - 1;
+    const int minSupportY = std::max(0, topSupportY - kHoverGroundSearchDepth);
+
+    for (int supportY = topSupportY; supportY >= minSupportY; --supportY) {
+        for (int z = startZ; z <= endZ; ++z) {
+            for (int x = startX; x <= endX; ++x) {
+                if (isSolidWorldVoxel(x, supportY, z)) {
+                    outSupportY = supportY;
+                    return true;
+                }
+            }
         }
     }
 
