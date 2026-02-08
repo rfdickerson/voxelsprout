@@ -216,7 +216,7 @@ float sampleShadowPcf(vec3 worldPosition, vec3 normal, int cascadeIndex, float n
         for (int i = 0; i < sampleCount; ++i) {
             const vec2 offset = rot * poisson[i] * float(kernelRadius);
             const vec2 uv = shadowUv + (offset * texelSize);
-            visibility += texture(shadowMap, vec4(uv, float(cascadeIndex), shadowDepthRef - bias));
+            visibility += texture(shadowMap, vec4(uv, float(cascadeIndex), shadowDepthRef + bias));
             weightSum += 1.0;
         }
     } else {
@@ -229,7 +229,7 @@ float sampleShadowPcf(vec3 worldPosition, vec3 normal, int cascadeIndex, float n
                 const float wx = float(kernelRadius + 1 - abs(x));
                 const float wy = float(kernelRadius + 1 - abs(y));
                 const float weight = wx * wy;
-                visibility += texture(shadowMap, vec4(uv, float(cascadeIndex), shadowDepthRef - bias)) * weight;
+                visibility += texture(shadowMap, vec4(uv, float(cascadeIndex), shadowDepthRef + bias)) * weight;
                 weightSum += weight;
             }
         }
@@ -277,7 +277,7 @@ void main() {
     const float shadowVisibility = sampleCascadedShadow(inWorldPosition, normal, viewDepth, ndotl);
 
     const vec3 ambientIrradiance = evaluateShIrradiance(normal);
-    const vec3 ambient = ambientIrradiance * 0.11;
+    const vec3 ambient = ambientIrradiance * 0.075;
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = mix(1.0, shadowVisibility, shadowStrength);
     const float ambientShadowFactor = mix(1.0, shadowVisibility, 0.25 * shadowStrength);

@@ -187,6 +187,86 @@ struct Matrix4 {
     }
 };
 
+// Vulkan perspective with depth range [0, 1], near -> 0, far -> 1.
+inline Matrix4 perspectiveVulkan(float fovYRadians, float aspectRatio, float nearPlane, float farPlane) {
+    Matrix4 result{};
+    for (int i = 0; i < 16; ++i) {
+        result.m[i] = 0.0f;
+    }
+
+    const float f = 1.0f / std::tan(fovYRadians * 0.5f);
+    result(0, 0) = f / aspectRatio;
+    result(1, 1) = -f;
+    result(2, 2) = farPlane / (nearPlane - farPlane);
+    result(2, 3) = (farPlane * nearPlane) / (nearPlane - farPlane);
+    result(3, 2) = -1.0f;
+    return result;
+}
+
+// Vulkan reverse-Z perspective with depth range [0, 1], near -> 1, far -> 0.
+inline Matrix4 perspectiveVulkanReverseZ(float fovYRadians, float aspectRatio, float nearPlane, float farPlane) {
+    Matrix4 result{};
+    for (int i = 0; i < 16; ++i) {
+        result.m[i] = 0.0f;
+    }
+
+    const float f = 1.0f / std::tan(fovYRadians * 0.5f);
+    result(0, 0) = f / aspectRatio;
+    result(1, 1) = -f;
+    result(2, 2) = nearPlane / (farPlane - nearPlane);
+    result(2, 3) = (nearPlane * farPlane) / (farPlane - nearPlane);
+    result(3, 2) = -1.0f;
+    return result;
+}
+
+// Vulkan orthographic with depth range [0, 1], near -> 0, far -> 1.
+inline Matrix4 orthographicVulkan(
+    float left,
+    float right,
+    float bottom,
+    float top,
+    float nearPlane,
+    float farPlane
+) {
+    Matrix4 result{};
+    for (int i = 0; i < 16; ++i) {
+        result.m[i] = 0.0f;
+    }
+
+    result(0, 0) = 2.0f / (right - left);
+    result(1, 1) = -2.0f / (top - bottom);
+    result(2, 2) = 1.0f / (nearPlane - farPlane);
+    result(3, 3) = 1.0f;
+    result(0, 3) = -(right + left) / (right - left);
+    result(1, 3) = -(top + bottom) / (top - bottom);
+    result(2, 3) = nearPlane / (nearPlane - farPlane);
+    return result;
+}
+
+// Vulkan reverse-Z orthographic with depth range [0, 1], near -> 1, far -> 0.
+inline Matrix4 orthographicVulkanReverseZ(
+    float left,
+    float right,
+    float bottom,
+    float top,
+    float nearPlane,
+    float farPlane
+) {
+    Matrix4 result{};
+    for (int i = 0; i < 16; ++i) {
+        result.m[i] = 0.0f;
+    }
+
+    result(0, 0) = 2.0f / (right - left);
+    result(1, 1) = -2.0f / (top - bottom);
+    result(2, 2) = 1.0f / (farPlane - nearPlane);
+    result(3, 3) = 1.0f;
+    result(0, 3) = -(right + left) / (right - left);
+    result(1, 3) = -(top + bottom) / (top - bottom);
+    result(2, 3) = farPlane / (farPlane - nearPlane);
+    return result;
+}
+
 inline Matrix4 multiply(const Matrix4& a, const Matrix4& b) {
     Matrix4 result{};
     for (int i = 0; i < 16; ++i) {

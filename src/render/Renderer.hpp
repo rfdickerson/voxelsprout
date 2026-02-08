@@ -42,7 +42,7 @@ class Renderer {
 public:
     struct ShadowDebugSettings {
         bool enableRpdb = true;
-        bool enableRotatedPoissonPcf = true;
+        bool enableRotatedPoissonPcf = false;
         bool enableHybridNearVoxelRay = false;
 
         float casterConstantBiasBase = 1.1f;

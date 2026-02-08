@@ -110,19 +110,7 @@ math::Matrix4 transpose(const math::Matrix4& matrix) {
 }
 
 math::Matrix4 perspectiveVulkan(float fovYRadians, float aspectRatio, float nearPlane, float farPlane) {
-    math::Matrix4 result{};
-    for (int i = 0; i < 16; ++i) {
-        result.m[i] = 0.0f;
-    }
-
-    const float f = 1.0f / std::tan(fovYRadians * 0.5f);
-    result(0, 0) = f / aspectRatio;
-    // Vulkan viewport space differs from OpenGL; flip clip-space Y here.
-    result(1, 1) = -f;
-    result(2, 2) = farPlane / (nearPlane - farPlane);
-    result(2, 3) = (farPlane * nearPlane) / (nearPlane - farPlane);
-    result(3, 2) = -1.0f;
-    return result;
+    return math::perspectiveVulkanReverseZ(fovYRadians, aspectRatio, nearPlane, farPlane);
 }
 
 math::Matrix4 orthographicVulkan(
@@ -133,20 +121,7 @@ math::Matrix4 orthographicVulkan(
     float nearPlane,
     float farPlane
 ) {
-    math::Matrix4 result{};
-    for (int i = 0; i < 16; ++i) {
-        result.m[i] = 0.0f;
-    }
-
-    result(0, 0) = 2.0f / (right - left);
-    // Match the Vulkan clip-space Y handling used by perspectiveVulkan.
-    result(1, 1) = -2.0f / (top - bottom);
-    result(2, 2) = 1.0f / (nearPlane - farPlane);
-    result(3, 3) = 1.0f;
-    result(0, 3) = -(right + left) / (right - left);
-    result(1, 3) = -(top + bottom) / (top - bottom);
-    result(2, 3) = nearPlane / (nearPlane - farPlane);
-    return result;
+    return math::orthographicVulkanReverseZ(left, right, bottom, top, nearPlane, farPlane);
 }
 
 math::Matrix4 lookAt(const math::Vector3& eye, const math::Vector3& target, const math::Vector3& up) {
@@ -1589,10 +1564,10 @@ bool Renderer::createShadowResources() {
     samplerCreateInfo.mipLodBias = 0.0f;
     samplerCreateInfo.anisotropyEnable = VK_FALSE;
     samplerCreateInfo.compareEnable = VK_TRUE;
-    samplerCreateInfo.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    samplerCreateInfo.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
     samplerCreateInfo.minLod = 0.0f;
     samplerCreateInfo.maxLod = 0.0f;
-    samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
     samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
     const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_shadowDepthSampler);
     if (samplerResult != VK_SUCCESS) {
@@ -2294,7 +2269,7 @@ bool Renderer::createGraphicsPipeline() {
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
     depthStencil.depthWriteEnable = VK_TRUE;
-    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable = VK_FALSE;
 
@@ -2371,7 +2346,7 @@ bool Renderer::createGraphicsPipeline() {
 
     VkPipelineDepthStencilStateCreateInfo previewDepthStencil = depthStencil;
     previewDepthStencil.depthWriteEnable = VK_FALSE;
-    previewDepthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    previewDepthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
 
     std::array<VkDynamicState, 3> previewDynamicStates = {
         VK_DYNAMIC_STATE_VIEWPORT,
@@ -2655,7 +2630,7 @@ bool Renderer::createGraphicsPipeline() {
     VkPipelineDepthStencilStateCreateInfo shadowDepthStencil = depthStencil;
     shadowDepthStencil.depthTestEnable = VK_TRUE;
     shadowDepthStencil.depthWriteEnable = VK_TRUE;
-    shadowDepthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    shadowDepthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
 
     std::array<VkDynamicState, 3> shadowDynamicStates = {
         VK_DYNAMIC_STATE_VIEWPORT,
@@ -3450,37 +3425,80 @@ void Renderer::renderFrame(
 
     std::array<math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
     float previousCascadeDistance = nearPlane;
+    math::Vector3 cameraRight = math::cross(forward, math::Vector3{0.0f, 1.0f, 0.0f});
+    if (math::lengthSquared(cameraRight) < 1e-6f) {
+        cameraRight = math::Vector3{1.0f, 0.0f, 0.0f};
+    } else {
+        cameraRight = math::normalize(cameraRight);
+    }
+    const math::Vector3 cameraUp = math::normalize(math::cross(cameraRight, forward));
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
         const float cascadeNear = previousCascadeDistance;
         const float cascadeFar = cascadeDistances[cascadeIndex];
         previousCascadeDistance = cascadeFar;
-        const float cascadeCenterDistance = (cascadeNear + cascadeFar) * 0.5f;
-        const math::Vector3 frustumCenter = eye + (forward * cascadeCenterDistance);
-        const float horizontalRadius = cascadeFar * tanHalfFov * aspectRatio;
-        const float verticalRadius = cascadeFar * tanHalfFov;
-        float boundingRadius = std::sqrt((horizontalRadius * horizontalRadius) + (verticalRadius * verticalRadius));
-        boundingRadius = std::max(boundingRadius, 24.0f);
-        boundingRadius = std::ceil(boundingRadius * 8.0f) / 8.0f;
+        const float nearHalfHeight = cascadeNear * tanHalfFov;
+        const float nearHalfWidth = nearHalfHeight * aspectRatio;
+        const float farHalfHeight = cascadeFar * tanHalfFov;
+        const float farHalfWidth = farHalfHeight * aspectRatio;
 
-        const math::Vector3 lightPosition = frustumCenter - (sunDirection * (boundingRadius * 2.4f + 80.0f));
+        const math::Vector3 nearCenter = eye + (forward * cascadeNear);
+        const math::Vector3 farCenter = eye + (forward * cascadeFar);
+
+        const std::array<math::Vector3, 8> frustumCorners = {
+            nearCenter + (cameraRight * nearHalfWidth) + (cameraUp * nearHalfHeight),
+            nearCenter - (cameraRight * nearHalfWidth) + (cameraUp * nearHalfHeight),
+            nearCenter + (cameraRight * nearHalfWidth) - (cameraUp * nearHalfHeight),
+            nearCenter - (cameraRight * nearHalfWidth) - (cameraUp * nearHalfHeight),
+            farCenter + (cameraRight * farHalfWidth) + (cameraUp * farHalfHeight),
+            farCenter - (cameraRight * farHalfWidth) + (cameraUp * farHalfHeight),
+            farCenter + (cameraRight * farHalfWidth) - (cameraUp * farHalfHeight),
+            farCenter - (cameraRight * farHalfWidth) - (cameraUp * farHalfHeight),
+        };
+
+        math::Vector3 frustumCenter{};
+        for (const math::Vector3& corner : frustumCorners) {
+            frustumCenter += corner;
+        }
+        frustumCenter /= static_cast<float>(frustumCorners.size());
+
+        float boundingRadius = 0.0f;
+        for (const math::Vector3& corner : frustumCorners) {
+            boundingRadius = std::max(boundingRadius, std::sqrt(math::lengthSquared(corner - frustumCenter)));
+        }
+        boundingRadius = std::max(boundingRadius * 1.04f, 24.0f);
+        boundingRadius = std::ceil(boundingRadius * 16.0f) / 16.0f;
+
+        const math::Vector3 lightPosition = frustumCenter - (sunDirection * (boundingRadius * 2.5f + 120.0f));
         const float sunUpDot = std::abs(math::dot(sunDirection, math::Vector3{0.0f, 1.0f, 0.0f}));
         const math::Vector3 lightUp =
             (sunUpDot > 0.95f) ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
         math::Matrix4 lightView = lookAt(lightPosition, frustumCenter, lightUp);
-        // Snap cascade projection in light-space texel units to reduce shimmer when the camera moves.
+
+        // Snap cascade center in light-space texel units to reduce sub-texel swimming.
         const float worldUnitsPerTexel = (2.0f * boundingRadius) / static_cast<float>(kShadowMapSize);
         const math::Vector4 centerLightSpace = lightView * math::Vector4{frustumCenter, 1.0f};
-        const float snappedCenterX = std::floor(centerLightSpace.x / worldUnitsPerTexel) * worldUnitsPerTexel;
-        const float snappedCenterY = std::floor(centerLightSpace.y / worldUnitsPerTexel) * worldUnitsPerTexel;
-        lightView(0, 3) += snappedCenterX - centerLightSpace.x;
-        lightView(1, 3) += snappedCenterY - centerLightSpace.y;
+        const float snappedCenterX =
+            std::floor((centerLightSpace.x / worldUnitsPerTexel) + 0.5f) * worldUnitsPerTexel;
+        const float snappedCenterY =
+            std::floor((centerLightSpace.y / worldUnitsPerTexel) + 0.5f) * worldUnitsPerTexel;
+
+        const float left = snappedCenterX - boundingRadius;
+        const float right = snappedCenterX + boundingRadius;
+        const float bottom = snappedCenterY - boundingRadius;
+        const float top = snappedCenterY + boundingRadius;
+        // Keep a stable light-space depth range per cascade to avoid temporal pumping
+        // from frame-to-frame min/max z fitting.
+        const float lightDistance = (boundingRadius * 2.5f) + 120.0f;
+        const float casterPadding = std::max(140.0f, boundingRadius * 1.5f);
+        const float lightNear = std::max(0.1f, lightDistance - boundingRadius - casterPadding);
+        const float lightFar = lightDistance + boundingRadius + casterPadding;
         const math::Matrix4 lightProjection = orthographicVulkan(
-            -boundingRadius,
-            boundingRadius,
-            -boundingRadius,
-            boundingRadius,
-            0.1f,
-            (boundingRadius * 8.0f) + 320.0f
+            left,
+            right,
+            bottom,
+            top,
+            lightNear,
+            lightFar
         );
         lightViewProjMatrices[cascadeIndex] = lightProjection * lightView;
     }
@@ -3510,10 +3528,10 @@ void Renderer::renderFrame(
     mvpUniform.sunDirectionIntensity[0] = sunDirection.x;
     mvpUniform.sunDirectionIntensity[1] = sunDirection.y;
     mvpUniform.sunDirectionIntensity[2] = sunDirection.z;
-    mvpUniform.sunDirectionIntensity[3] = 3.5f;
-    mvpUniform.sunColorShadow[0] = 1.0f;
-    mvpUniform.sunColorShadow[1] = 0.95f;
-    mvpUniform.sunColorShadow[2] = 0.86f;
+    mvpUniform.sunDirectionIntensity[3] = 2.2f;
+    mvpUniform.sunColorShadow[0] = 0.92f;
+    mvpUniform.sunColorShadow[1] = 0.88f;
+    mvpUniform.sunColorShadow[2] = 0.80f;
     mvpUniform.sunColorShadow[3] = 1.0f;
     for (uint32_t i = 0; i < shIrradiance.size(); ++i) {
         mvpUniform.shIrradiance[i][0] = shIrradiance[i].x;
@@ -3629,7 +3647,7 @@ void Renderer::renderFrame(
     );
 
     VkClearValue shadowDepthClearValue{};
-    shadowDepthClearValue.depthStencil.depth = 1.0f;
+    shadowDepthClearValue.depthStencil.depth = 0.0f;
     shadowDepthClearValue.depthStencil.stencil = 0;
 
     VkViewport shadowViewport{};
@@ -3688,7 +3706,8 @@ void Renderer::renderFrame(
             const float slopeBias =
                 m_shadowDebugSettings.casterSlopeBiasBase +
                 (m_shadowDebugSettings.casterSlopeBiasCascadeScale * cascadeF);
-            vkCmdSetDepthBias(commandBuffer, constantBias, 0.0f, slopeBias);
+            // Reverse-Z uses GREATER depth tests, so flip bias sign.
+            vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
 
             for (const ChunkDrawRange& drawRange : m_chunkDrawRanges) {
                 ChunkPushConstants chunkPushConstants{};
@@ -3784,7 +3803,7 @@ void Renderer::renderFrame(
     colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     VkClearValue depthClearValue{};
-    depthClearValue.depthStencil.depth = 1.0f;
+    depthClearValue.depthStencil.depth = 0.0f;
     depthClearValue.depthStencil.stencil = 0;
 
     VkRenderingAttachmentInfo depthAttachment{};
