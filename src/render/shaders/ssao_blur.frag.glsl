@@ -35,6 +35,10 @@ void main() {
     const vec4 centerNd = texture(normalDepthTexture, inUv);
     const vec3 centerNormal = decodeViewNormal(centerNd.rgb);
     const float centerDepth = centerNd.a;
+    if (centerDepth <= 0.0001) {
+        outAo = 1.0;
+        return;
+    }
     const float centerAo = texture(ssaoRawTexture, inUv).r;
 
     float weightedAo = centerAo;
@@ -70,6 +74,9 @@ void main() {
             const vec4 sampleNd = texture(normalDepthTexture, suv);
             const vec3 sampleNormal = decodeViewNormal(sampleNd.rgb);
             const float sampleDepth = sampleNd.a;
+            if (sampleDepth <= 0.0001) {
+                continue;
+            }
             const float sampleAo = texture(ssaoRawTexture, suv).r;
 
             const float normalWeight = pow(max(dot(centerNormal, sampleNormal), 0.0), 8.0);

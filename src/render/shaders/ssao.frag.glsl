@@ -111,12 +111,35 @@ void main() {
         }
 
         const vec3 sampleSceneViewPos = reconstructViewPosition(sampleUv, sampleDepth, invProj);
-        const float depthDelta = abs(centerViewPos.z - sampleSceneViewPos.z);
-        const float rangeWeight = smoothstep(0.0, 1.0, radius / max(depthDelta, 1e-4));
-        const float occluded = (sampleSceneViewPos.z > (sampleViewPos.z + bias)) ? 1.0 : 0.0;
+        const vec3 sceneDelta = sampleSceneViewPos - centerViewPos;
+        const float sampleDistance = length(sceneDelta);
+        if (sampleDistance <= 1e-4) {
+            continue;
+        }
 
-        occlusion += occluded * rangeWeight;
-        sampleCount += 1.0;
+        const float rangeWeight = smoothstep(0.0, 1.0, radius / sampleDistance);
+
+        // Project both expected sample position and fetched scene position onto the center normal.
+        // The fetched geometry must be in front of the center point, but still before the expected
+        // sample point, otherwise this is likely a self-hit or unrelated depth sample.
+        const float sampleProj = dot(sampleViewPos - centerViewPos, centerNormal);
+        if (sampleProj <= (bias * 2.0)) {
+            continue;
+        }
+        const float sceneProj = dot(sceneDelta, centerNormal);
+        if (sceneProj <= bias || sceneProj >= (sampleProj - bias)) {
+            continue;
+        }
+
+        const vec3 sceneDir = sceneDelta / sampleDistance;
+        const float directionalWeight = max(dot(centerNormal, sceneDir), 0.0);
+        const float sampleWeight = rangeWeight * directionalWeight;
+        if (sampleWeight <= 1e-4) {
+            continue;
+        }
+
+        occlusion += sampleWeight;
+        sampleCount += sampleWeight;
     }
 
     if (sampleCount <= 0.0) {

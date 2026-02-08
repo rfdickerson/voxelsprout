@@ -28,6 +28,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
 layout(location = 0) out vec3 outWorldPosition;
 layout(location = 1) out vec3 outWorldNormal;
 layout(location = 2) out vec3 outTint;
+layout(location = 3) out float outVertexAo;
 
 void main() {
     vec3 axis = normalize(inAxisRadius.xyz);
@@ -64,5 +65,9 @@ void main() {
     outWorldPosition = worldPosition;
     outWorldNormal = worldNormal;
     outTint = inTint.rgb;
+    const float sideFactor = 1.0 - abs(localNormal.y);
+    const float endFactor = abs((localPos.y * 2.0) - 1.0);
+    const float seamOcclusion = sideFactor * endFactor;
+    outVertexAo = 1.0 - (0.16 * seamOcclusion);
     gl_Position = camera.mvp * vec4(worldPosition, 1.0);
 }

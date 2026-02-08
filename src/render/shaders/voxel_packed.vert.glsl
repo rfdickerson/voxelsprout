@@ -28,12 +28,14 @@ layout(push_constant) uniform ChunkPushConstants {
 layout(location = 0) out flat uint outFace;
 layout(location = 1) out flat uint outMaterial;
 layout(location = 2) out vec3 outWorldPosition;
+layout(location = 3) out float outVertexAo;
 
 const uint kShiftX = 0u;
 const uint kShiftY = 5u;
 const uint kShiftZ = 10u;
 const uint kShiftFace = 15u;
 const uint kShiftCorner = 18u;
+const uint kShiftAo = 20u;
 const uint kShiftMaterial = 22u;
 
 vec3 cornerOffset(uint face, uint corner) {
@@ -80,6 +82,7 @@ void main() {
     const uint z = (inPacked >> kShiftZ) & 0x1Fu;
     const uint face = (inPacked >> kShiftFace) & 0x7u;
     const uint corner = (inPacked >> kShiftCorner) & 0x3u;
+    const uint ao = (inPacked >> kShiftAo) & 0x3u;
     const uint material = (inPacked >> kShiftMaterial) & 0xFFu;
     const vec3 basePosition = vec3(float(x), float(y), float(z));
     const vec3 worldPosition = basePosition + cornerOffset(face, corner) + chunkPc.chunkOffset.xyz;
@@ -87,5 +90,6 @@ void main() {
     outFace = face;
     outMaterial = material;
     outWorldPosition = worldPosition;
+    outVertexAo = mix(0.45, 1.0, float(ao) / 3.0);
     gl_Position = camera.mvp * vec4(worldPosition, 1.0);
 }
