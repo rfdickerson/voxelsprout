@@ -1059,7 +1059,7 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
-    if (!createChunkBuffers(chunkGrid)) {
+    if (!createChunkBuffers(chunkGrid, std::nullopt)) {
         std::cerr << "[render] init failed at createChunkBuffers\n";
         shutdown();
         return false;
@@ -1090,7 +1090,14 @@ bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
-    return createChunkBuffers(chunkGrid);
+    return createChunkBuffers(chunkGrid, std::nullopt);
+}
+
+bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex) {
+    if (m_device == VK_NULL_HANDLE) {
+        return false;
+    }
+    return createChunkBuffers(chunkGrid, chunkIndex);
 }
 
 bool Renderer::createInstance() {
@@ -3055,59 +3062,48 @@ bool Renderer::createGraphicsPipeline() {
     return true;
 }
 
-bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid) {
-    world::ChunkMeshData mesh{};
-    std::vector<ChunkDrawRange> chunkDrawRanges;
-    chunkDrawRanges.reserve(chunkGrid.chunks().size());
+bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::optional<std::size_t> chunkIndex) {
+    if (chunkGrid.chunks().empty()) {
+        return false;
+    }
 
-    for (const world::Chunk& chunk : chunkGrid.chunks()) {
-        const world::ChunkMeshData chunkMesh = world::buildChunkMesh(chunk);
-        if (chunkMesh.vertices.empty() || chunkMesh.indices.empty()) {
-            continue;
+    const std::vector<world::Chunk>& chunks = chunkGrid.chunks();
+    if (chunkIndex.has_value() && *chunkIndex >= chunks.size()) {
+        return false;
+    }
+
+    if (m_chunkDrawRanges.size() != chunks.size()) {
+        const uint64_t resizeReleaseValue = std::max(m_lastGraphicsTimelineValue, m_currentChunkReadyTimelineValue);
+        for (const ChunkDrawRange& drawRange : m_chunkDrawRanges) {
+            scheduleBufferRelease(drawRange.vertexBufferHandle, resizeReleaseValue);
+            scheduleBufferRelease(drawRange.indexBufferHandle, resizeReleaseValue);
         }
+        m_chunkDrawRanges.assign(chunks.size(), ChunkDrawRange{});
+        chunkIndex = std::nullopt;
+    }
 
-        const uint32_t baseVertex = static_cast<uint32_t>(mesh.vertices.size());
-        const uint32_t firstIndex = static_cast<uint32_t>(mesh.indices.size());
-        mesh.vertices.insert(mesh.vertices.end(), chunkMesh.vertices.begin(), chunkMesh.vertices.end());
-        mesh.indices.reserve(mesh.indices.size() + chunkMesh.indices.size());
-        for (uint32_t index : chunkMesh.indices) {
-            mesh.indices.push_back(index + baseVertex);
+    std::vector<std::size_t> chunkIndicesToUpload;
+    if (chunkIndex.has_value()) {
+        chunkIndicesToUpload.push_back(*chunkIndex);
+    } else {
+        chunkIndicesToUpload.resize(chunks.size());
+        for (std::size_t i = 0; i < chunks.size(); ++i) {
+            chunkIndicesToUpload[i] = i;
         }
-
-        ChunkDrawRange drawRange{};
-        drawRange.indexCount = static_cast<uint32_t>(chunkMesh.indices.size());
-        drawRange.firstIndex = firstIndex;
-        drawRange.offsetX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
-        drawRange.offsetY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
-        drawRange.offsetZ = static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ);
-        chunkDrawRanges.push_back(drawRange);
     }
 
-    if (mesh.vertices.empty() || mesh.indices.empty()) {
-        std::cerr << "[render] chunk mesher produced no geometry\n";
-        return false;
-    }
+    struct PendingChunkUpload {
+        std::size_t chunkArrayIndex = 0;
+        ChunkDrawRange oldDrawRange{};
+        ChunkDrawRange newDrawRange{};
+        BufferHandle vertexStagingHandle = kInvalidBufferHandle;
+        BufferHandle indexStagingHandle = kInvalidBufferHandle;
+        bool hasCopy = false;
+    };
 
-    if (!updateShadowVoxelGrid(chunkGrid)) {
-        std::cerr << "[render] shadow voxel grid update failed\n";
-        return false;
-    }
+    std::vector<PendingChunkUpload> pendingUploads;
+    pendingUploads.reserve(chunkIndicesToUpload.size());
 
-    collectCompletedBufferReleases();
-
-    if (m_transferCommandBufferInFlightValue > 0 && !waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
-        std::cerr << "[render] failed waiting for prior transfer upload\n";
-        return false;
-    }
-    m_transferCommandBufferInFlightValue = 0;
-    collectCompletedBufferReleases();
-
-    const BufferHandle oldVertexHandle = m_vertexBufferHandle;
-    const BufferHandle oldIndexHandle = m_indexBufferHandle;
-    const uint64_t previousChunkReadyTimelineValue = m_currentChunkReadyTimelineValue;
-
-    const VkDeviceSize vertexBufferSize = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(world::PackedVoxelVertex));
-    const VkDeviceSize indexBufferSize = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
     std::array<uint32_t, 2> meshQueueFamilies = {
         m_graphicsQueueFamilyIndex,
         m_transferQueueFamilyIndex
@@ -3116,156 +3112,234 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid) {
         meshQueueFamilies[1] = UINT32_MAX;
     }
 
-    BufferCreateDesc vertexCreateDesc{};
-    vertexCreateDesc.size = vertexBufferSize;
-    vertexCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    if (meshQueueFamilies[1] != UINT32_MAX) {
-        vertexCreateDesc.queueFamilyIndices = meshQueueFamilies.data();
-        vertexCreateDesc.queueFamilyIndexCount = 2;
+    auto cleanupPendingAllocations = [&]() {
+        for (const PendingChunkUpload& pending : pendingUploads) {
+            if (pending.vertexStagingHandle != kInvalidBufferHandle) {
+                m_bufferAllocator.destroyBuffer(pending.vertexStagingHandle);
+            }
+            if (pending.indexStagingHandle != kInvalidBufferHandle) {
+                m_bufferAllocator.destroyBuffer(pending.indexStagingHandle);
+            }
+            if (pending.newDrawRange.vertexBufferHandle != kInvalidBufferHandle) {
+                m_bufferAllocator.destroyBuffer(pending.newDrawRange.vertexBufferHandle);
+            }
+            if (pending.newDrawRange.indexBufferHandle != kInvalidBufferHandle) {
+                m_bufferAllocator.destroyBuffer(pending.newDrawRange.indexBufferHandle);
+            }
+        }
+    };
+
+    std::size_t uploadedVertexCount = 0;
+    std::size_t uploadedIndexCount = 0;
+    for (std::size_t chunkArrayIndex : chunkIndicesToUpload) {
+        const world::Chunk& chunk = chunks[chunkArrayIndex];
+        const world::ChunkMeshData chunkMesh = world::buildChunkMesh(chunk);
+
+        PendingChunkUpload pending{};
+        pending.chunkArrayIndex = chunkArrayIndex;
+        pending.oldDrawRange = m_chunkDrawRanges[chunkArrayIndex];
+        pending.newDrawRange.indexCount = static_cast<uint32_t>(chunkMesh.indices.size());
+        pending.newDrawRange.offsetX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
+        pending.newDrawRange.offsetY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
+        pending.newDrawRange.offsetZ = static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ);
+
+        if (!chunkMesh.vertices.empty() && !chunkMesh.indices.empty()) {
+            const VkDeviceSize vertexBufferSize =
+                static_cast<VkDeviceSize>(chunkMesh.vertices.size() * sizeof(world::PackedVoxelVertex));
+            const VkDeviceSize indexBufferSize =
+                static_cast<VkDeviceSize>(chunkMesh.indices.size() * sizeof(std::uint32_t));
+
+            BufferCreateDesc vertexCreateDesc{};
+            vertexCreateDesc.size = vertexBufferSize;
+            vertexCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+            vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            if (meshQueueFamilies[1] != UINT32_MAX) {
+                vertexCreateDesc.queueFamilyIndices = meshQueueFamilies.data();
+                vertexCreateDesc.queueFamilyIndexCount = 2;
+            }
+            pending.newDrawRange.vertexBufferHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
+            if (pending.newDrawRange.vertexBufferHandle == kInvalidBufferHandle) {
+                std::cerr << "[render] chunk vertex buffer allocation failed\n";
+                cleanupPendingAllocations();
+                return false;
+            }
+
+            BufferCreateDesc indexCreateDesc{};
+            indexCreateDesc.size = indexBufferSize;
+            indexCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+            indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            if (meshQueueFamilies[1] != UINT32_MAX) {
+                indexCreateDesc.queueFamilyIndices = meshQueueFamilies.data();
+                indexCreateDesc.queueFamilyIndexCount = 2;
+            }
+            pending.newDrawRange.indexBufferHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
+            if (pending.newDrawRange.indexBufferHandle == kInvalidBufferHandle) {
+                std::cerr << "[render] chunk index buffer allocation failed\n";
+                cleanupPendingAllocations();
+                return false;
+            }
+
+            BufferCreateDesc vertexStagingCreateDesc{};
+            vertexStagingCreateDesc.size = vertexBufferSize;
+            vertexStagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            vertexStagingCreateDesc.memoryProperties =
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            vertexStagingCreateDesc.initialData = chunkMesh.vertices.data();
+            pending.vertexStagingHandle = m_bufferAllocator.createBuffer(vertexStagingCreateDesc);
+            if (pending.vertexStagingHandle == kInvalidBufferHandle) {
+                std::cerr << "[render] chunk vertex staging buffer allocation failed\n";
+                cleanupPendingAllocations();
+                return false;
+            }
+
+            BufferCreateDesc indexStagingCreateDesc{};
+            indexStagingCreateDesc.size = indexBufferSize;
+            indexStagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            indexStagingCreateDesc.memoryProperties =
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            indexStagingCreateDesc.initialData = chunkMesh.indices.data();
+            pending.indexStagingHandle = m_bufferAllocator.createBuffer(indexStagingCreateDesc);
+            if (pending.indexStagingHandle == kInvalidBufferHandle) {
+                std::cerr << "[render] chunk index staging buffer allocation failed\n";
+                cleanupPendingAllocations();
+                return false;
+            }
+
+            pending.hasCopy = true;
+            uploadedVertexCount += chunkMesh.vertices.size();
+            uploadedIndexCount += chunkMesh.indices.size();
+        }
+
+        pendingUploads.push_back(pending);
     }
-    const BufferHandle newVertexHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
-    if (newVertexHandle == kInvalidBufferHandle) {
-        std::cerr << "[render] chunk vertex buffer allocation failed\n";
+
+    if (!updateShadowVoxelGrid(chunkGrid)) {
+        std::cerr << "[render] shadow voxel grid update failed\n";
+        cleanupPendingAllocations();
         return false;
     }
 
-    BufferCreateDesc indexCreateDesc{};
-    indexCreateDesc.size = indexBufferSize;
-    indexCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    if (meshQueueFamilies[1] != UINT32_MAX) {
-        indexCreateDesc.queueFamilyIndices = meshQueueFamilies.data();
-        indexCreateDesc.queueFamilyIndexCount = 2;
-    }
-    const BufferHandle newIndexHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
-    if (newIndexHandle == kInvalidBufferHandle) {
-        std::cerr << "[render] chunk index buffer allocation failed\n";
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
+    collectCompletedBufferReleases();
+
+    if (m_transferCommandBufferInFlightValue > 0 && !waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
+        std::cerr << "[render] failed waiting for prior transfer upload\n";
+        cleanupPendingAllocations();
         return false;
     }
+    m_transferCommandBufferInFlightValue = 0;
+    collectCompletedBufferReleases();
+    const uint64_t previousChunkReadyTimelineValue = m_currentChunkReadyTimelineValue;
 
-    BufferCreateDesc vertexStagingCreateDesc{};
-    vertexStagingCreateDesc.size = vertexBufferSize;
-    vertexStagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    vertexStagingCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    vertexStagingCreateDesc.initialData = mesh.vertices.data();
-    const BufferHandle vertexStagingHandle = m_bufferAllocator.createBuffer(vertexStagingCreateDesc);
-    if (vertexStagingHandle == kInvalidBufferHandle) {
-        std::cerr << "[render] chunk vertex staging buffer allocation failed\n";
-        m_bufferAllocator.destroyBuffer(newIndexHandle);
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
-        return false;
-    }
-
-    BufferCreateDesc indexStagingCreateDesc{};
-    indexStagingCreateDesc.size = indexBufferSize;
-    indexStagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    indexStagingCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    indexStagingCreateDesc.initialData = mesh.indices.data();
-    const BufferHandle indexStagingHandle = m_bufferAllocator.createBuffer(indexStagingCreateDesc);
-    if (indexStagingHandle == kInvalidBufferHandle) {
-        std::cerr << "[render] chunk index staging buffer allocation failed\n";
-        m_bufferAllocator.destroyBuffer(vertexStagingHandle);
-        m_bufferAllocator.destroyBuffer(newIndexHandle);
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
-        return false;
-    }
-
-    const VkResult resetResult = vkResetCommandPool(m_device, m_transferCommandPool, 0);
-    if (resetResult != VK_SUCCESS) {
-        logVkFailure("vkResetCommandPool(transfer)", resetResult);
-        m_bufferAllocator.destroyBuffer(indexStagingHandle);
-        m_bufferAllocator.destroyBuffer(vertexStagingHandle);
-        m_bufferAllocator.destroyBuffer(newIndexHandle);
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
-        return false;
-    }
-
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(m_transferCommandBuffer, &beginInfo) != VK_SUCCESS) {
-        std::cerr << "[render] vkBeginCommandBuffer (transfer) failed\n";
-        m_bufferAllocator.destroyBuffer(indexStagingHandle);
-        m_bufferAllocator.destroyBuffer(vertexStagingHandle);
-        m_bufferAllocator.destroyBuffer(newIndexHandle);
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
-        return false;
-    }
-
-    VkBufferCopy vertexCopy{};
-    vertexCopy.size = vertexBufferSize;
-    vkCmdCopyBuffer(
-        m_transferCommandBuffer,
-        m_bufferAllocator.getBuffer(vertexStagingHandle),
-        m_bufferAllocator.getBuffer(newVertexHandle),
-        1,
-        &vertexCopy
+    const bool hasChunkCopies = std::any_of(
+        pendingUploads.begin(),
+        pendingUploads.end(),
+        [](const PendingChunkUpload& pending) {
+            return pending.hasCopy;
+        }
     );
 
-    VkBufferCopy indexCopy{};
-    indexCopy.size = indexBufferSize;
-    vkCmdCopyBuffer(
-        m_transferCommandBuffer,
-        m_bufferAllocator.getBuffer(indexStagingHandle),
-        m_bufferAllocator.getBuffer(newIndexHandle),
-        1,
-        &indexCopy
-    );
+    uint64_t transferSignalValue = 0;
+    if (hasChunkCopies) {
+        const VkResult resetResult = vkResetCommandPool(m_device, m_transferCommandPool, 0);
+        if (resetResult != VK_SUCCESS) {
+            logVkFailure("vkResetCommandPool(transfer)", resetResult);
+            cleanupPendingAllocations();
+            return false;
+        }
 
-    if (vkEndCommandBuffer(m_transferCommandBuffer) != VK_SUCCESS) {
-        std::cerr << "[render] vkEndCommandBuffer (transfer) failed\n";
-        m_bufferAllocator.destroyBuffer(indexStagingHandle);
-        m_bufferAllocator.destroyBuffer(vertexStagingHandle);
-        m_bufferAllocator.destroyBuffer(newIndexHandle);
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
-        return false;
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(m_transferCommandBuffer, &beginInfo) != VK_SUCCESS) {
+            std::cerr << "[render] vkBeginCommandBuffer (transfer) failed\n";
+            cleanupPendingAllocations();
+            return false;
+        }
+
+        for (const PendingChunkUpload& pending : pendingUploads) {
+            if (!pending.hasCopy) {
+                continue;
+            }
+
+            const VkDeviceSize vertexBufferSize = m_bufferAllocator.getSize(pending.newDrawRange.vertexBufferHandle);
+            const VkDeviceSize indexBufferSize = m_bufferAllocator.getSize(pending.newDrawRange.indexBufferHandle);
+
+            VkBufferCopy vertexCopy{};
+            vertexCopy.size = vertexBufferSize;
+            vkCmdCopyBuffer(
+                m_transferCommandBuffer,
+                m_bufferAllocator.getBuffer(pending.vertexStagingHandle),
+                m_bufferAllocator.getBuffer(pending.newDrawRange.vertexBufferHandle),
+                1,
+                &vertexCopy
+            );
+
+            VkBufferCopy indexCopy{};
+            indexCopy.size = indexBufferSize;
+            vkCmdCopyBuffer(
+                m_transferCommandBuffer,
+                m_bufferAllocator.getBuffer(pending.indexStagingHandle),
+                m_bufferAllocator.getBuffer(pending.newDrawRange.indexBufferHandle),
+                1,
+                &indexCopy
+            );
+        }
+
+        if (vkEndCommandBuffer(m_transferCommandBuffer) != VK_SUCCESS) {
+            std::cerr << "[render] vkEndCommandBuffer (transfer) failed\n";
+            cleanupPendingAllocations();
+            return false;
+        }
+
+        transferSignalValue = m_nextTimelineValue++;
+        VkSemaphore timelineSemaphore = m_renderTimelineSemaphore;
+        VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
+        timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineSubmitInfo.signalSemaphoreValueCount = 1;
+        timelineSubmitInfo.pSignalSemaphoreValues = &transferSignalValue;
+
+        VkSubmitInfo transferSubmitInfo{};
+        transferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        transferSubmitInfo.pNext = &timelineSubmitInfo;
+        transferSubmitInfo.commandBufferCount = 1;
+        transferSubmitInfo.pCommandBuffers = &m_transferCommandBuffer;
+        transferSubmitInfo.signalSemaphoreCount = 1;
+        transferSubmitInfo.pSignalSemaphores = &timelineSemaphore;
+
+        const VkResult submitResult = vkQueueSubmit(m_transferQueue, 1, &transferSubmitInfo, VK_NULL_HANDLE);
+        if (submitResult != VK_SUCCESS) {
+            logVkFailure("vkQueueSubmit(transfer)", submitResult);
+            cleanupPendingAllocations();
+            return false;
+        }
+
+        m_currentChunkReadyTimelineValue = transferSignalValue;
+        m_pendingTransferTimelineValue = transferSignalValue;
+        m_transferCommandBufferInFlightValue = transferSignalValue;
     }
-
-    const uint64_t transferSignalValue = m_nextTimelineValue++;
-    VkSemaphore timelineSemaphore = m_renderTimelineSemaphore;
-    VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
-    timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    timelineSubmitInfo.signalSemaphoreValueCount = 1;
-    timelineSubmitInfo.pSignalSemaphoreValues = &transferSignalValue;
-
-    VkSubmitInfo transferSubmitInfo{};
-    transferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    transferSubmitInfo.pNext = &timelineSubmitInfo;
-    transferSubmitInfo.commandBufferCount = 1;
-    transferSubmitInfo.pCommandBuffers = &m_transferCommandBuffer;
-    transferSubmitInfo.signalSemaphoreCount = 1;
-    transferSubmitInfo.pSignalSemaphores = &timelineSemaphore;
-
-    const VkResult submitResult = vkQueueSubmit(m_transferQueue, 1, &transferSubmitInfo, VK_NULL_HANDLE);
-    if (submitResult != VK_SUCCESS) {
-        logVkFailure("vkQueueSubmit(transfer)", submitResult);
-        m_bufferAllocator.destroyBuffer(indexStagingHandle);
-        m_bufferAllocator.destroyBuffer(vertexStagingHandle);
-        m_bufferAllocator.destroyBuffer(newIndexHandle);
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
-        return false;
-    }
-
-    m_vertexBufferHandle = newVertexHandle;
-    m_indexBufferHandle = newIndexHandle;
-    m_indexCount = static_cast<uint32_t>(mesh.indices.size());
-    m_chunkDrawRanges = std::move(chunkDrawRanges);
-    m_currentChunkReadyTimelineValue = transferSignalValue;
-    m_pendingTransferTimelineValue = transferSignalValue;
-    m_transferCommandBufferInFlightValue = transferSignalValue;
-
-    scheduleBufferRelease(vertexStagingHandle, transferSignalValue);
-    scheduleBufferRelease(indexStagingHandle, transferSignalValue);
 
     const uint64_t oldChunkReleaseValue = std::max(m_lastGraphicsTimelineValue, previousChunkReadyTimelineValue);
-    scheduleBufferRelease(oldVertexHandle, oldChunkReleaseValue);
-    scheduleBufferRelease(oldIndexHandle, oldChunkReleaseValue);
+    for (const PendingChunkUpload& pending : pendingUploads) {
+        m_chunkDrawRanges[pending.chunkArrayIndex] = pending.newDrawRange;
 
-    std::cerr << "[render] chunk upload queued (vertices=" << mesh.vertices.size()
-              << ", indices=" << mesh.indices.size()
-              << ", timelineValue=" << transferSignalValue << ")\n";
+        if (pending.hasCopy) {
+            scheduleBufferRelease(pending.vertexStagingHandle, transferSignalValue);
+            scheduleBufferRelease(pending.indexStagingHandle, transferSignalValue);
+        }
+
+        scheduleBufferRelease(pending.oldDrawRange.vertexBufferHandle, oldChunkReleaseValue);
+        scheduleBufferRelease(pending.oldDrawRange.indexBufferHandle, oldChunkReleaseValue);
+    }
+
+    std::cerr << "[render] chunk upload queued (chunks=" << pendingUploads.size()
+              << ", vertices=" << uploadedVertexCount
+              << ", indices=" << uploadedIndexCount;
+    if (hasChunkCopies) {
+        std::cerr << ", timelineValue=" << transferSignalValue;
+    } else {
+        std::cerr << ", immediate=true";
+    }
+    std::cerr << ")\n";
     return true;
 }
 
@@ -3951,18 +4025,6 @@ void Renderer::renderFrame(
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
-    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(m_vertexBufferHandle);
-    if (vertexBuffer == VK_NULL_HANDLE) {
-        std::cerr << "[render] missing vertex buffer for draw\n";
-        return;
-    }
-    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(m_indexBufferHandle);
-    if (indexBuffer == VK_NULL_HANDLE) {
-        std::cerr << "[render] missing index buffer for draw\n";
-        return;
-    }
-    const VkDeviceSize vertexBufferOffset = 0;
-
     const bool shadowInitialized = m_shadowDepthInitialized;
     transitionImageLayout(
         commandBuffer,
@@ -4008,9 +4070,6 @@ void Renderer::renderFrame(
             nullptr
         );
 
-        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
-        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
             VkRenderingAttachmentInfo shadowDepthAttachment{};
             shadowDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -4042,6 +4101,18 @@ void Renderer::renderFrame(
             vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
 
             for (const ChunkDrawRange& drawRange : m_chunkDrawRanges) {
+                if (drawRange.indexCount == 0) {
+                    continue;
+                }
+                const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(drawRange.vertexBufferHandle);
+                const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(drawRange.indexBufferHandle);
+                if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE) {
+                    continue;
+                }
+                const VkDeviceSize vertexBufferOffset = 0;
+                vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
+                vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
                 ChunkPushConstants chunkPushConstants{};
                 chunkPushConstants.chunkOffset[0] = drawRange.offsetX;
                 chunkPushConstants.chunkOffset[1] = drawRange.offsetY;
@@ -4059,7 +4130,7 @@ void Renderer::renderFrame(
                     sizeof(ChunkPushConstants),
                     &chunkPushConstants
                 );
-                vkCmdDrawIndexed(commandBuffer, drawRange.indexCount, 1, drawRange.firstIndex, 0, 0);
+                vkCmdDrawIndexed(commandBuffer, drawRange.indexCount, 1, 0, 0, 0);
             }
 
             vkCmdEndRendering(commandBuffer);
@@ -4197,10 +4268,19 @@ void Renderer::renderFrame(
         0,
         nullptr
     );
-    vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
-    vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
     for (const ChunkDrawRange& drawRange : m_chunkDrawRanges) {
+        if (drawRange.indexCount == 0) {
+            continue;
+        }
+        const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(drawRange.vertexBufferHandle);
+        const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(drawRange.indexBufferHandle);
+        if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE) {
+            continue;
+        }
+        const VkDeviceSize vertexBufferOffset = 0;
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
         ChunkPushConstants chunkPushConstants{};
         chunkPushConstants.chunkOffset[0] = drawRange.offsetX;
         chunkPushConstants.chunkOffset[1] = drawRange.offsetY;
@@ -4218,7 +4298,7 @@ void Renderer::renderFrame(
             sizeof(ChunkPushConstants),
             &chunkPushConstants
         );
-        vkCmdDrawIndexed(commandBuffer, drawRange.indexCount, 1, drawRange.firstIndex, 0, 0);
+        vkCmdDrawIndexed(commandBuffer, drawRange.indexCount, 1, 0, 0, 0);
     }
 
     const VkPipeline activePreviewPipeline =
@@ -4276,7 +4356,8 @@ void Renderer::renderFrame(
                     &previewChunkPushConstants
                 );
                 vkCmdSetDepthBias(commandBuffer, -1.0f, 0.0f, -1.0f);
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, &previewVertexBuffer, &vertexBufferOffset);
+                const VkDeviceSize previewVertexBufferOffset = 0;
+                vkCmdBindVertexBuffers(commandBuffer, 0, 1, &previewVertexBuffer, &previewVertexBufferOffset);
                 vkCmdBindIndexBuffer(commandBuffer, previewIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
                 vkCmdDrawIndexed(commandBuffer, m_previewIndexCount, 1, 0, 0, 0);
             }
@@ -4683,13 +4764,16 @@ void Renderer::destroyChunkBuffers() {
     m_shadowVoxelGridOriginY = 0;
     m_shadowVoxelGridOriginZ = 0;
 
-    if (m_indexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_indexBufferHandle);
-        m_indexBufferHandle = kInvalidBufferHandle;
-    }
-    if (m_vertexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_vertexBufferHandle);
-        m_vertexBufferHandle = kInvalidBufferHandle;
+    for (ChunkDrawRange& drawRange : m_chunkDrawRanges) {
+        if (drawRange.indexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(drawRange.indexBufferHandle);
+            drawRange.indexBufferHandle = kInvalidBufferHandle;
+        }
+        if (drawRange.vertexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(drawRange.vertexBufferHandle);
+            drawRange.vertexBufferHandle = kInvalidBufferHandle;
+        }
+        drawRange.indexCount = 0;
     }
 
     for (const DeferredBufferRelease& release : m_deferredBufferReleases) {
@@ -4699,7 +4783,6 @@ void Renderer::destroyChunkBuffers() {
     }
     m_deferredBufferReleases.clear();
 
-    m_indexCount = 0;
     m_chunkDrawRanges.clear();
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;

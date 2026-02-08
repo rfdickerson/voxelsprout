@@ -5,6 +5,8 @@
 #include "world/ChunkGrid.hpp"
 
 #include <array>
+#include <cstddef>
+#include <optional>
 #include <vector>
 
 #include <vulkan/vulkan.h>
@@ -69,6 +71,7 @@ public:
 
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
+    bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
     void renderFrame(
         const world::ChunkGrid& chunkGrid,
         const sim::Simulation& simulation,
@@ -109,7 +112,7 @@ private:
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
     bool createDescriptorResources();
-    bool createChunkBuffers(const world::ChunkGrid& chunkGrid);
+    bool createChunkBuffers(const world::ChunkGrid& chunkGrid, std::optional<std::size_t> chunkIndex);
     bool updateShadowVoxelGrid(const world::ChunkGrid& chunkGrid);
     bool createFrameResources();
 #if defined(VOXEL_HAS_IMGUI)
@@ -140,8 +143,9 @@ private:
     };
 
     struct ChunkDrawRange {
+        BufferHandle vertexBufferHandle = kInvalidBufferHandle;
+        BufferHandle indexBufferHandle = kInvalidBufferHandle;
         uint32_t indexCount = 0;
-        uint32_t firstIndex = 0;
         float offsetX = 0.0f;
         float offsetY = 0.0f;
         float offsetZ = 0.0f;
@@ -217,12 +221,10 @@ private:
     bool m_supportsWireframePreview = false;
     VkDeviceSize m_uniformBufferAlignment = 256;
 
-    // Static mesh buffers for one chunk.
-    // Future chunk streaming can replace these with per-chunk GPU allocations.
+    // Static mesh buffers per chunk draw range.
+    // Future chunk streaming can replace this with sparse streaming allocations.
     BufferAllocator m_bufferAllocator;
     FrameRingBuffer m_uploadRing;
-    BufferHandle m_vertexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_indexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_previewVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_previewIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_shadowVoxelBufferHandle = kInvalidBufferHandle;
@@ -235,7 +237,6 @@ private:
     int32_t m_shadowVoxelGridOriginZ = 0;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
-    uint32_t m_indexCount = 0;
     uint32_t m_previewIndexCount = 0;
     VkImage m_diffuseTextureImage = VK_NULL_HANDLE;
     VkDeviceMemory m_diffuseTextureMemory = VK_NULL_HANDLE;

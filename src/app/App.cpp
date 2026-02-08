@@ -138,7 +138,7 @@ void App::update(float dt) {
     }
 
     if (chunkEdited) {
-        if (!m_renderer.updateChunkMesh(m_chunkGrid)) {
+        if (!m_renderer.updateChunkMesh(m_chunkGrid, 0)) {
             std::cerr << "[app] chunk mesh update failed after voxel edit\n";
         }
     }
