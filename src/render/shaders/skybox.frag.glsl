@@ -39,7 +39,11 @@ vec3 proceduralSky(vec3 direction, vec3 sunDirection) {
     sky += sunColor * ((sunDisk * 6.5) + (sunGlow * 1.3));
 
     const vec3 groundColor = vec3(0.05, 0.06, 0.07);
-    const vec3 color = (dir.y >= 0.0) ? sky : (groundColor * (0.45 + (0.55 * (-dir.y))));
+    const float belowHorizon = clamp(-dir.y, 0.0, 1.0);
+    const vec3 horizonGroundColor = horizonColor * 0.32;
+    const vec3 ground = mix(horizonGroundColor, groundColor, pow(belowHorizon, 0.55));
+    const float skyWeight = smoothstep(-0.18, 0.02, dir.y);
+    const vec3 color = mix(ground, sky, skyWeight);
     return max(color, vec3(0.0));
 }
 

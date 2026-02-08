@@ -167,7 +167,13 @@ math::Vector3 proceduralSkyRadiance(const math::Vector3& direction, const math::
         + (sunColor * ((sunDisk * 5.0f) + (sunGlow * 1.2f)));
 
     const math::Vector3 groundColor{0.05f, 0.06f, 0.07f};
-    return (dir.y >= 0.0f) ? sky : (groundColor * (0.45f + (0.55f * (-dir.y))));
+    const float belowHorizon = std::clamp(-dir.y, 0.0f, 1.0f);
+    const math::Vector3 horizonGroundColor = horizonColor * 0.32f;
+    const float groundWeight = std::pow(belowHorizon, 0.55f);
+    const math::Vector3 ground = (horizonGroundColor * (1.0f - groundWeight)) + (groundColor * groundWeight);
+
+    const float skyWeight = std::clamp((dir.y + 0.18f) / 0.20f, 0.0f, 1.0f);
+    return (ground * (1.0f - skyWeight)) + (sky * skyWeight);
 }
 
 float shBasis(int index, const math::Vector3& direction) {
