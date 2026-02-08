@@ -28,6 +28,8 @@ private:
 };
 
 inline void ChunkGrid::initializeFlatWorld() {
+    constexpr int kTerrainCellSize = 4;
+
     constexpr std::array<std::uint8_t, 256> kPerlinPermutation = {
         151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
         140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,
@@ -122,6 +124,15 @@ inline void ChunkGrid::initializeFlatWorld() {
         return std::clamp(height, 1, Chunk::kSizeY - 2);
     };
 
+    auto floorDiv = [](int value, int divisor) -> int {
+        const int quotient = value / divisor;
+        const int remainder = value % divisor;
+        if (remainder != 0 && ((remainder < 0) != (divisor < 0))) {
+            return quotient - 1;
+        }
+        return quotient;
+    };
+
     m_chunks.clear();
 
     // Keep the center chunk first so app-side interaction logic remains valid.
@@ -148,7 +159,11 @@ inline void ChunkGrid::initializeFlatWorld() {
             for (int x = 0; x < Chunk::kSizeX; ++x) {
                 const int worldX = (chunkX * Chunk::kSizeX) + x;
                 const int worldZ = (chunkZ * Chunk::kSizeZ) + z;
-                const int terrainHeight = chunkHeightAt(worldX, worldZ);
+                const int terrainCellX = floorDiv(worldX, kTerrainCellSize);
+                const int terrainCellZ = floorDiv(worldZ, kTerrainCellSize);
+                const int terrainSampleX = (terrainCellX * kTerrainCellSize) + (kTerrainCellSize / 2);
+                const int terrainSampleZ = (terrainCellZ * kTerrainCellSize) + (kTerrainCellSize / 2);
+                const int terrainHeight = chunkHeightAt(terrainSampleX, terrainSampleZ);
 
                 for (int y = 0; y <= terrainHeight; ++y) {
                     chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});

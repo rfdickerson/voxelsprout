@@ -22,7 +22,7 @@ constexpr float kGravity = -24.0f;
 constexpr float kMaxFallSpeed = -35.0f;
 constexpr float kPitchMinDegrees = -89.0f;
 constexpr float kPitchMaxDegrees = 89.0f;
-constexpr float kBlockInteractMaxDistance = 5.0f;
+constexpr float kBlockInteractMaxDistance = 11.0f;
 [[maybe_unused]] constexpr float kVoxelSizeMeters = 0.25f;
 constexpr float kPlayerHeightVoxels = 7.0f;
 constexpr float kPlayerDiameterVoxels = 2.0f;
@@ -145,6 +145,22 @@ void App::update(float dt) {
 
     render::VoxelPreview preview{};
     if (!m_debugUiVisible && raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
+        if (raycast.hasHitFaceNormal) {
+            auto normalToFaceId = [](int nx, int ny, int nz) -> uint32_t {
+                if (nx > 0) { return 0u; }
+                if (nx < 0) { return 1u; }
+                if (ny > 0) { return 2u; }
+                if (ny < 0) { return 3u; }
+                if (nz > 0) { return 4u; }
+                return 5u;
+            };
+            preview.faceVisible = true;
+            preview.faceX = raycast.solidX;
+            preview.faceY = raycast.solidY;
+            preview.faceZ = raycast.solidZ;
+            preview.faceId = normalToFaceId(raycast.hitFaceNormalX, raycast.hitFaceNormalY, raycast.hitFaceNormalZ);
+        }
+
         const bool showRemovePreview = m_input.removeBlockDown;
         if (showRemovePreview) {
             preview.visible = true;
@@ -617,49 +633,132 @@ App::CameraRaycastResult App::raycastFromCamera() const {
         return result;
     }
 
-    const math::Vector3 rayOrigin{m_camera.x, m_camera.y, m_camera.z};
-    constexpr float kRayStep = 0.05f;
-    constexpr float kRayMaxDistance = 8.0f;
+    // Nudge origin slightly forward so close-surface targeting does not start inside solids.
+    const math::Vector3 rayOrigin =
+        math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
+    constexpr float kRayMaxDistance = kBlockInteractMaxDistance + 1.0f;
 
-    bool hasPreviousEmpty = false;
-    int previousX = 0;
-    int previousY = 0;
-    int previousZ = 0;
+    int vx = static_cast<int>(std::floor(rayOrigin.x));
+    int vy = static_cast<int>(std::floor(rayOrigin.y));
+    int vz = static_cast<int>(std::floor(rayOrigin.z));
 
-    for (float distance = 0.0f; distance <= kRayMaxDistance; distance += kRayStep) {
-        const math::Vector3 sample = rayOrigin + (rayDirection * distance);
-        const int vx = static_cast<int>(std::floor(sample.x));
-        const int vy = static_cast<int>(std::floor(sample.y));
-        const int vz = static_cast<int>(std::floor(sample.z));
+    const float kInf = std::numeric_limits<float>::infinity();
 
+    const int stepX = (rayDirection.x > 0.0f) ? 1 : (rayDirection.x < 0.0f ? -1 : 0);
+    const int stepY = (rayDirection.y > 0.0f) ? 1 : (rayDirection.y < 0.0f ? -1 : 0);
+    const int stepZ = (rayDirection.z > 0.0f) ? 1 : (rayDirection.z < 0.0f ? -1 : 0);
+
+    const float invAbsDirX = (stepX != 0) ? (1.0f / std::abs(rayDirection.x)) : kInf;
+    const float invAbsDirY = (stepY != 0) ? (1.0f / std::abs(rayDirection.y)) : kInf;
+    const float invAbsDirZ = (stepZ != 0) ? (1.0f / std::abs(rayDirection.z)) : kInf;
+
+    const float voxelBoundaryX = (stepX > 0) ? static_cast<float>(vx + 1) : static_cast<float>(vx);
+    const float voxelBoundaryY = (stepY > 0) ? static_cast<float>(vy + 1) : static_cast<float>(vy);
+    const float voxelBoundaryZ = (stepZ > 0) ? static_cast<float>(vz + 1) : static_cast<float>(vz);
+
+    float tMaxX = (stepX != 0) ? ((voxelBoundaryX - rayOrigin.x) / rayDirection.x) : kInf;
+    float tMaxY = (stepY != 0) ? ((voxelBoundaryY - rayOrigin.y) / rayDirection.y) : kInf;
+    float tMaxZ = (stepZ != 0) ? ((voxelBoundaryZ - rayOrigin.z) / rayDirection.z) : kInf;
+    float tDeltaX = invAbsDirX;
+    float tDeltaY = invAbsDirY;
+    float tDeltaZ = invAbsDirZ;
+
+    int hitFaceNormalX = 0;
+    int hitFaceNormalY = 0;
+    int hitFaceNormalZ = 0;
+    bool hasHitFaceNormal = false;
+
+    float distance = 0.0f;
+    while (distance <= kRayMaxDistance) {
         const bool inBounds =
             vx >= 0 && vx < world::Chunk::kSizeX &&
             vy >= 0 && vy < world::Chunk::kSizeY &&
             vz >= 0 && vz < world::Chunk::kSizeZ;
-        if (!inBounds) {
-            hasPreviousEmpty = false;
-            continue;
-        }
 
-        if (chunk.isSolid(vx, vy, vz)) {
+        if (inBounds && chunk.isSolid(vx, vy, vz)) {
+            if (!hasHitFaceNormal) {
+                // If we start inside a solid voxel, take one DDA step first so we get a stable face.
+                if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+                    vx += stepX;
+                    distance = tMaxX;
+                    tMaxX += tDeltaX;
+                    hitFaceNormalX = -stepX;
+                    hitFaceNormalY = 0;
+                    hitFaceNormalZ = 0;
+                    hasHitFaceNormal = (stepX != 0);
+                } else if (tMaxY <= tMaxX && tMaxY <= tMaxZ) {
+                    vy += stepY;
+                    distance = tMaxY;
+                    tMaxY += tDeltaY;
+                    hitFaceNormalX = 0;
+                    hitFaceNormalY = -stepY;
+                    hitFaceNormalZ = 0;
+                    hasHitFaceNormal = (stepY != 0);
+                } else {
+                    vz += stepZ;
+                    distance = tMaxZ;
+                    tMaxZ += tDeltaZ;
+                    hitFaceNormalX = 0;
+                    hitFaceNormalY = 0;
+                    hitFaceNormalZ = -stepZ;
+                    hasHitFaceNormal = (stepZ != 0);
+                }
+                continue;
+            }
+
             result.hitSolid = true;
             result.solidX = vx;
             result.solidY = vy;
             result.solidZ = vz;
             result.hitDistance = distance;
-            if (hasPreviousEmpty && !chunk.isSolid(previousX, previousY, previousZ)) {
-                result.hasAdjacentEmpty = true;
-                result.adjacentEmptyX = previousX;
-                result.adjacentEmptyY = previousY;
-                result.adjacentEmptyZ = previousZ;
+            result.hasHitFaceNormal = hasHitFaceNormal;
+            result.hitFaceNormalX = hitFaceNormalX;
+            result.hitFaceNormalY = hitFaceNormalY;
+            result.hitFaceNormalZ = hitFaceNormalZ;
+
+            if (hasHitFaceNormal) {
+                const int adjacentX = vx + hitFaceNormalX;
+                const int adjacentY = vy + hitFaceNormalY;
+                const int adjacentZ = vz + hitFaceNormalZ;
+                const bool adjacentInBounds =
+                    adjacentX >= 0 && adjacentX < world::Chunk::kSizeX &&
+                    adjacentY >= 0 && adjacentY < world::Chunk::kSizeY &&
+                    adjacentZ >= 0 && adjacentZ < world::Chunk::kSizeZ;
+                if (adjacentInBounds && !chunk.isSolid(adjacentX, adjacentY, adjacentZ)) {
+                    result.hasAdjacentEmpty = true;
+                    result.adjacentEmptyX = adjacentX;
+                    result.adjacentEmptyY = adjacentY;
+                    result.adjacentEmptyZ = adjacentZ;
+                }
             }
             return result;
         }
 
-        hasPreviousEmpty = true;
-        previousX = vx;
-        previousY = vy;
-        previousZ = vz;
+        if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+            vx += stepX;
+            distance = tMaxX;
+            tMaxX += tDeltaX;
+            hitFaceNormalX = -stepX;
+            hitFaceNormalY = 0;
+            hitFaceNormalZ = 0;
+            hasHitFaceNormal = (stepX != 0);
+        } else if (tMaxY <= tMaxX && tMaxY <= tMaxZ) {
+            vy += stepY;
+            distance = tMaxY;
+            tMaxY += tDeltaY;
+            hitFaceNormalX = 0;
+            hitFaceNormalY = -stepY;
+            hitFaceNormalZ = 0;
+            hasHitFaceNormal = (stepY != 0);
+        } else {
+            vz += stepZ;
+            distance = tMaxZ;
+            tMaxZ += tDeltaZ;
+            hitFaceNormalX = 0;
+            hitFaceNormalY = 0;
+            hitFaceNormalZ = -stepZ;
+            hasHitFaceNormal = (stepZ != 0);
+        }
     }
 
     return result;

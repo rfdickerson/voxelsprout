@@ -99,6 +99,34 @@ world::ChunkMeshData buildSingleVoxelPreviewMesh(
     return mesh;
 }
 
+world::ChunkMeshData buildSingleVoxelFacePreviewMesh(
+    std::uint32_t x,
+    std::uint32_t y,
+    std::uint32_t z,
+    std::uint32_t faceId,
+    std::uint32_t ao,
+    std::uint32_t material
+) {
+    world::ChunkMeshData mesh{};
+    mesh.vertices.reserve(4);
+    mesh.indices.reserve(6);
+
+    const std::uint32_t clampedFace = std::min(faceId, 5u);
+    for (std::uint32_t corner = 0; corner < 4; ++corner) {
+        world::PackedVoxelVertex vertex{};
+        vertex.bits = world::PackedVoxelVertex::pack(x, y, z, clampedFace, corner, ao, material);
+        mesh.vertices.push_back(vertex);
+    }
+
+    mesh.indices.push_back(0);
+    mesh.indices.push_back(1);
+    mesh.indices.push_back(2);
+    mesh.indices.push_back(0);
+    mesh.indices.push_back(2);
+    mesh.indices.push_back(3);
+    return mesh;
+}
+
 math::Matrix4 transpose(const math::Matrix4& matrix) {
     math::Matrix4 result{};
     for (int row = 0; row < 4; ++row) {
@@ -3658,6 +3686,25 @@ void Renderer::buildShadowDebugUi() {
 
     ImGui::End();
 }
+
+void Renderer::buildAimReticleUi() {
+    ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+    if (drawList == nullptr) {
+        return;
+    }
+
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    const ImVec2 center{displaySize.x * 0.5f, displaySize.y * 0.5f};
+    constexpr float kOuter = 9.0f;
+    constexpr float kInner = 3.0f;
+    constexpr float kThickness = 1.6f;
+    const ImU32 color = IM_COL32(235, 245, 255, 220);
+
+    drawList->AddLine(ImVec2(center.x - kOuter, center.y), ImVec2(center.x - kInner, center.y), color, kThickness);
+    drawList->AddLine(ImVec2(center.x + kInner, center.y), ImVec2(center.x + kOuter, center.y), color, kThickness);
+    drawList->AddLine(ImVec2(center.x, center.y - kOuter), ImVec2(center.x, center.y - kInner), color, kThickness);
+    drawList->AddLine(ImVec2(center.x, center.y + kInner), ImVec2(center.x, center.y + kOuter), color, kThickness);
+}
 #endif
 
 bool Renderer::waitForTimelineValue(uint64_t value) const {
@@ -3794,6 +3841,7 @@ void Renderer::renderFrame(
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         buildShadowDebugUi();
+        buildAimReticleUi();
         ImGui::Render();
     }
 #endif
@@ -4321,6 +4369,62 @@ void Renderer::renderFrame(
         vkCmdDrawIndexed(commandBuffer, drawRange.indexCount, 1, 0, 0, 0);
     }
 
+    auto drawPreviewMesh = [&](const world::ChunkMeshData& mesh, VkPipeline pipeline, float depthBias) {
+        if (pipeline == VK_NULL_HANDLE || mesh.vertices.empty() || mesh.indices.empty()) {
+            return;
+        }
+
+        const VkDeviceSize previewVertexBytes =
+            static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(world::PackedVoxelVertex));
+        void* mappedPreviewVertices = m_bufferAllocator.mapBuffer(m_previewVertexBufferHandle, 0, previewVertexBytes);
+        if (mappedPreviewVertices == nullptr) {
+            return;
+        }
+
+        std::memcpy(mappedPreviewVertices, mesh.vertices.data(), static_cast<size_t>(previewVertexBytes));
+        m_bufferAllocator.unmapBuffer(m_previewVertexBufferHandle);
+
+        const VkBuffer previewVertexBuffer = m_bufferAllocator.getBuffer(m_previewVertexBufferHandle);
+        const VkBuffer previewIndexBuffer = m_bufferAllocator.getBuffer(m_previewIndexBufferHandle);
+        if (previewVertexBuffer == VK_NULL_HANDLE || previewIndexBuffer == VK_NULL_HANDLE) {
+            return;
+        }
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            1,
+            &m_descriptorSets[m_currentFrame],
+            0,
+            nullptr
+        );
+        ChunkPushConstants previewChunkPushConstants{};
+        previewChunkPushConstants.chunkOffset[0] = 0.0f;
+        previewChunkPushConstants.chunkOffset[1] = 0.0f;
+        previewChunkPushConstants.chunkOffset[2] = 0.0f;
+        previewChunkPushConstants.chunkOffset[3] = 0.0f;
+        previewChunkPushConstants.cascadeData[0] = 0.0f;
+        previewChunkPushConstants.cascadeData[1] = 0.0f;
+        previewChunkPushConstants.cascadeData[2] = 0.0f;
+        previewChunkPushConstants.cascadeData[3] = 0.0f;
+        vkCmdPushConstants(
+            commandBuffer,
+            m_pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            sizeof(ChunkPushConstants),
+            &previewChunkPushConstants
+        );
+        vkCmdSetDepthBias(commandBuffer, depthBias, 0.0f, depthBias);
+        const VkDeviceSize previewVertexBufferOffset = 0;
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &previewVertexBuffer, &previewVertexBufferOffset);
+        vkCmdBindIndexBuffer(commandBuffer, previewIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(mesh.indices.size()), 1, 0, 0, 0);
+    };
+
     const VkPipeline activePreviewPipeline =
         (preview.mode == VoxelPreview::Mode::Remove) ? m_previewRemovePipeline : m_previewAddPipeline;
     if (preview.visible && activePreviewPipeline != VK_NULL_HANDLE) {
@@ -4328,60 +4432,17 @@ void Renderer::renderFrame(
         const uint32_t previewY = static_cast<uint32_t>(std::clamp(preview.y, 0, world::Chunk::kSizeY - 1));
         const uint32_t previewZ = static_cast<uint32_t>(std::clamp(preview.z, 0, world::Chunk::kSizeZ - 1));
         const uint32_t previewMaterial = (preview.mode == VoxelPreview::Mode::Add) ? 250u : 251u;
-        const uint32_t previewAo = 3u;
-        const world::ChunkMeshData previewMesh = buildSingleVoxelPreviewMesh(
-            previewX,
-            previewY,
-            previewZ,
-            previewAo,
-            previewMaterial
-        );
+        const world::ChunkMeshData previewMesh = buildSingleVoxelPreviewMesh(previewX, previewY, previewZ, 3u, previewMaterial);
+        drawPreviewMesh(previewMesh, activePreviewPipeline, -1.0f);
+    }
 
-        const VkDeviceSize previewVertexBytes =
-            static_cast<VkDeviceSize>(previewMesh.vertices.size() * sizeof(world::PackedVoxelVertex));
-        void* mappedPreviewVertices = m_bufferAllocator.mapBuffer(m_previewVertexBufferHandle, 0, previewVertexBytes);
-        if (mappedPreviewVertices != nullptr) {
-            std::memcpy(mappedPreviewVertices, previewMesh.vertices.data(), static_cast<size_t>(previewVertexBytes));
-            m_bufferAllocator.unmapBuffer(m_previewVertexBufferHandle);
-
-            const VkBuffer previewVertexBuffer = m_bufferAllocator.getBuffer(m_previewVertexBufferHandle);
-            const VkBuffer previewIndexBuffer = m_bufferAllocator.getBuffer(m_previewIndexBufferHandle);
-            if (previewVertexBuffer != VK_NULL_HANDLE && previewIndexBuffer != VK_NULL_HANDLE) {
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, activePreviewPipeline);
-                vkCmdBindDescriptorSets(
-                    commandBuffer,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_pipelineLayout,
-                    0,
-                    1,
-                    &m_descriptorSets[m_currentFrame],
-                    0,
-                    nullptr
-                );
-                ChunkPushConstants previewChunkPushConstants{};
-                previewChunkPushConstants.chunkOffset[0] = 0.0f;
-                previewChunkPushConstants.chunkOffset[1] = 0.0f;
-                previewChunkPushConstants.chunkOffset[2] = 0.0f;
-                previewChunkPushConstants.chunkOffset[3] = 0.0f;
-                previewChunkPushConstants.cascadeData[0] = 0.0f;
-                previewChunkPushConstants.cascadeData[1] = 0.0f;
-                previewChunkPushConstants.cascadeData[2] = 0.0f;
-                previewChunkPushConstants.cascadeData[3] = 0.0f;
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &previewChunkPushConstants
-                );
-                vkCmdSetDepthBias(commandBuffer, -1.0f, 0.0f, -1.0f);
-                const VkDeviceSize previewVertexBufferOffset = 0;
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, &previewVertexBuffer, &previewVertexBufferOffset);
-                vkCmdBindIndexBuffer(commandBuffer, previewIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(commandBuffer, m_previewIndexCount, 1, 0, 0, 0);
-            }
-        }
+    if (preview.faceVisible && m_previewRemovePipeline != VK_NULL_HANDLE) {
+        const uint32_t faceX = static_cast<uint32_t>(std::clamp(preview.faceX, 0, world::Chunk::kSizeX - 1));
+        const uint32_t faceY = static_cast<uint32_t>(std::clamp(preview.faceY, 0, world::Chunk::kSizeY - 1));
+        const uint32_t faceZ = static_cast<uint32_t>(std::clamp(preview.faceZ, 0, world::Chunk::kSizeZ - 1));
+        const uint32_t faceId = std::min(preview.faceId, 5u);
+        const world::ChunkMeshData faceMesh = buildSingleVoxelFacePreviewMesh(faceX, faceY, faceZ, faceId, 3u, 253u);
+        drawPreviewMesh(faceMesh, m_previewRemovePipeline, -2.0f);
     }
 
     vkCmdEndRendering(commandBuffer);

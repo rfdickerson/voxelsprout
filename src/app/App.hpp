@@ -26,6 +26,10 @@ private:
         int solidY = 0;
         int solidZ = 0;
         float hitDistance = 0.0f;
+        bool hasHitFaceNormal = false;
+        int hitFaceNormalX = 0;
+        int hitFaceNormalY = 0;
+        int hitFaceNormalZ = 0;
         bool hasAdjacentEmpty = false;
         int adjacentEmptyX = 0;
         int adjacentEmptyY = 0;

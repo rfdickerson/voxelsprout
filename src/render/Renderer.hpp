@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -38,6 +39,11 @@ struct VoxelPreview {
     int y = 0;
     int z = 0;
     Mode mode = Mode::Add;
+    bool faceVisible = false;
+    int faceX = 0;
+    int faceY = 0;
+    int faceZ = 0;
+    uint32_t faceId = 0;
 };
 
 class Renderer {
@@ -119,6 +125,7 @@ private:
     bool createImGuiResources();
     void destroyImGuiResources();
     void buildShadowDebugUi();
+    void buildAimReticleUi();
 #endif
     bool recreateSwapchain();
     void destroySwapchain();
