@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <array>
@@ -56,6 +57,7 @@ public:
     void setVoxel(int x, int y, int z, Voxel voxel);
     void setVoxelRefined4(int x, int y, int z, Voxel voxel);
     void setVoxelRefined(int x, int y, int z, Voxel voxel);
+    void setFromSolidBitfield(const std::uint8_t* packedBits, std::size_t packedByteCount);
     void fillLayer(int y, Voxel voxel);
     Voxel voxelAt(int x, int y, int z) const;
     bool isSolid(int x, int y, int z) const;
@@ -127,6 +129,41 @@ inline void Chunk::fillLayer(int y, Voxel voxel) {
 
 inline void Chunk::setVoxelRefined(int x, int y, int z, Voxel voxel) {
     setVoxel(x, y, z, voxel);
+}
+
+inline void Chunk::setFromSolidBitfield(const std::uint8_t* packedBits, std::size_t packedByteCount) {
+    constexpr std::size_t kVoxelCount = static_cast<std::size_t>(kSizeX * kSizeY * kSizeZ);
+    constexpr std::size_t kExpectedBytes = (kVoxelCount + 7u) / 8u;
+
+    std::fill(m_voxels.begin(), m_voxels.end(), Voxel{VoxelType::Empty});
+    std::fill(m_macroCells.begin(), m_macroCells.end(), MacroCell{});
+    m_chunk4Cells.clear();
+    m_chunk1Cells.clear();
+
+    if (packedBits == nullptr || packedByteCount < kExpectedBytes) {
+        return;
+    }
+
+    std::size_t voxelIndex = 0;
+    for (int y = 0; y < kSizeY; ++y) {
+        for (int z = 0; z < kSizeZ; ++z) {
+            for (int x = 0; x < kSizeX; ++x, ++voxelIndex) {
+                const std::size_t byteIndex = voxelIndex >> 3u;
+                const std::uint8_t bitMask = static_cast<std::uint8_t>(1u << (voxelIndex & 7u));
+                if ((packedBits[byteIndex] & bitMask) != 0u) {
+                    m_voxels[linearIndex(x, y, z)] = Voxel{VoxelType::Solid};
+                }
+            }
+        }
+    }
+
+    for (int my = 0; my < kMacroSizeY; ++my) {
+        for (int mz = 0; mz < kMacroSizeZ; ++mz) {
+            for (int mx = 0; mx < kMacroSizeX; ++mx) {
+                syncMacroCellFromDense(mx, my, mz);
+            }
+        }
+    }
 }
 
 inline Voxel Chunk::voxelAt(int x, int y, int z) const {

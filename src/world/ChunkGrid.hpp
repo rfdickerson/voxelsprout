@@ -21,6 +21,7 @@ namespace world {
 class ChunkGrid {
 public:
     ChunkGrid() = default;
+    void initializeEmptyWorld();
     void initializeFlatWorld();
     bool loadFromBinaryFile(const std::filesystem::path& path);
     bool saveToBinaryFile(const std::filesystem::path& path) const;
@@ -130,23 +131,7 @@ inline void ChunkGrid::initializeFlatWorld() {
         return std::clamp(height, 1, Chunk::kSizeY - 2);
     };
 
-    m_chunks.clear();
-
-    // Keep the center chunk first so app-side interaction logic remains valid.
-    constexpr int kChunkRadius = 3;
-    constexpr int kChunkGridWidth = (kChunkRadius * 2) + 1;
-    constexpr int kChunkCount = kChunkGridWidth * kChunkGridWidth;
-
-    m_chunks.reserve(static_cast<std::size_t>(kChunkCount));
-    m_chunks.emplace_back(0, 0, 0);
-    for (int chunkZ = -kChunkRadius; chunkZ <= kChunkRadius; ++chunkZ) {
-        for (int chunkX = -kChunkRadius; chunkX <= kChunkRadius; ++chunkX) {
-            if (chunkX == 0 && chunkZ == 0) {
-                continue;
-            }
-            m_chunks.emplace_back(chunkX, 0, chunkZ);
-        }
-    }
+    initializeEmptyWorld();
 
     for (Chunk& chunk : m_chunks) {
         const int chunkX = chunk.chunkX();
@@ -162,6 +147,26 @@ inline void ChunkGrid::initializeFlatWorld() {
                     chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
                 }
             }
+        }
+    }
+}
+
+inline void ChunkGrid::initializeEmptyWorld() {
+    m_chunks.clear();
+
+    // Keep the center chunk first so app-side interaction logic remains valid.
+    constexpr int kChunkRadius = 3;
+    constexpr int kChunkGridWidth = (kChunkRadius * 2) + 1;
+    constexpr int kChunkCount = kChunkGridWidth * kChunkGridWidth;
+
+    m_chunks.reserve(static_cast<std::size_t>(kChunkCount));
+    m_chunks.emplace_back(0, 0, 0);
+    for (int chunkZ = -kChunkRadius; chunkZ <= kChunkRadius; ++chunkZ) {
+        for (int chunkX = -kChunkRadius; chunkX <= kChunkRadius; ++chunkX) {
+            if (chunkX == 0 && chunkZ == 0) {
+                continue;
+            }
+            m_chunks.emplace_back(chunkX, 0, chunkZ);
         }
     }
 }
@@ -211,18 +216,7 @@ inline bool ChunkGrid::loadFromBinaryFile(const std::filesystem::path& path) {
         }
 
         Chunk chunk(chunkX, chunkY, chunkZ);
-        std::size_t voxelIndex = 0;
-        for (int y = 0; y < Chunk::kSizeY; ++y) {
-            for (int z = 0; z < Chunk::kSizeZ; ++z) {
-                for (int x = 0; x < Chunk::kSizeX; ++x, ++voxelIndex) {
-                    const std::size_t byteIndex = voxelIndex >> 3u;
-                    const std::uint8_t bitMask = static_cast<std::uint8_t>(1u << (voxelIndex & 7u));
-                    if ((packed[byteIndex] & bitMask) != 0u) {
-                        chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
-                    }
-                }
-            }
-        }
+        chunk.setFromSolidBitfield(packed.data(), packed.size());
         loadedChunks.push_back(std::move(chunk));
     }
 

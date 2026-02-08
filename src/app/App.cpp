@@ -6,12 +6,16 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <ctime>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <string>
 
 namespace {
 
@@ -49,9 +53,37 @@ constexpr std::array<world::VoxelType, 1> kPlaceableBlockTypes = {
     world::VoxelType::Solid
 };
 
+std::string appTimestamp();
+
 void glfwErrorCallback(int errorCode, const char* description) {
-    std::cerr << "[app][glfw] error " << errorCode << ": "
+    std::cerr << "[" << appTimestamp() << "][app][glfw] error " << errorCode << ": "
               << (description != nullptr ? description : "(no description)") << "\n";
+}
+
+std::string appTimestamp() {
+    const auto now = std::chrono::system_clock::now();
+    const auto epochMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch());
+    const auto ms = static_cast<int>(epochMs.count() % 1000);
+    const std::time_t timeValue = std::chrono::system_clock::to_time_t(now);
+
+    std::tm localTime{};
+#if defined(_WIN32)
+    localtime_s(&localTime, &timeValue);
+#else
+    localtime_r(&timeValue, &localTime);
+#endif
+
+    char buffer[32]{};
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "%02d:%02d:%02d.%03d",
+        localTime.tm_hour,
+        localTime.tm_min,
+        localTime.tm_sec,
+        ms
+    );
+    return std::string(buffer);
 }
 
 float approach(float current, float target, float maxDelta) {
@@ -70,11 +102,11 @@ float approach(float current, float target, float maxDelta) {
 namespace app {
 
 bool App::init() {
-    std::cerr << "[app] init begin\n";
+    std::cerr << "[" << appTimestamp() << "][app] init begin\n";
     glfwSetErrorCallback(glfwErrorCallback);
 
     if (glfwInit() == GLFW_FALSE) {
-        std::cerr << "[app] glfwInit failed\n";
+        std::cerr << "[" << appTimestamp() << "][app] glfwInit failed\n";
         return false;
     }
 
@@ -82,7 +114,7 @@ bool App::init() {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     m_window = glfwCreateWindow(1280, 720, "voxel_factory_toy", nullptr, nullptr);
     if (m_window == nullptr) {
-        std::cerr << "[app] glfwCreateWindow failed\n";
+        std::cerr << "[" << appTimestamp() << "][app] glfwCreateWindow failed\n";
         glfwTerminate();
         return false;
     }
@@ -90,30 +122,38 @@ bool App::init() {
     // Relative mouse mode for camera look.
     glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
+    const auto worldLoadStart = std::chrono::steady_clock::now();
     const std::filesystem::path worldPath{kWorldFilePath};
     if (m_chunkGrid.loadFromBinaryFile(worldPath)) {
-        std::cerr << "[app] loaded world from " << worldPath.string() << "\n";
+        const auto worldLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - worldLoadStart
+        ).count();
+        std::cerr << "[" << appTimestamp() << "][app] loaded world from "
+                  << std::filesystem::absolute(worldPath).string()
+                  << " in " << worldLoadMs << " ms\n";
     } else {
-        m_chunkGrid.initializeFlatWorld();
-        if (m_chunkGrid.saveToBinaryFile(worldPath)) {
-            std::cerr << "[app] generated new world and saved " << worldPath.string() << "\n";
-        } else {
-            std::cerr << "[app] generated new world, but failed to save " << worldPath.string() << "\n";
-        }
+        m_chunkGrid.initializeEmptyWorld();
+        const auto worldLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - worldLoadStart
+        ).count();
+        std::cerr << "[" << appTimestamp() << "][app] world file missing/invalid at "
+                  << std::filesystem::absolute(worldPath).string()
+                  << "; using empty world (press R to regenerate) in "
+                  << worldLoadMs << " ms\n";
     }
     m_simulation.initializeSingleBelt();
     const bool rendererOk = m_renderer.init(m_window, m_chunkGrid);
     if (!rendererOk) {
-        std::cerr << "[app] renderer init failed\n";
+        std::cerr << "[" << appTimestamp() << "][app] renderer init failed\n";
         return false;
     }
 
-    std::cerr << "[app] init complete\n";
+    std::cerr << "[" << appTimestamp() << "][app] init complete\n";
     return true;
 }
 
 void App::run() {
-    std::cerr << "[app] run begin\n";
+    std::cerr << "[" << appTimestamp() << "][app] run begin\n";
     double previousTime = glfwGetTime();
     uint64_t frameCount = 0;
 
@@ -132,7 +172,7 @@ void App::run() {
         ++frameCount;
     }
 
-    std::cerr << "[app] run exit after " << frameCount
+    std::cerr << "[" << appTimestamp() << "][app] run exit after " << frameCount
               << " frame(s), windowShouldClose="
               << (m_window != nullptr ? glfwWindowShouldClose(m_window) : 1) << "\n";
 }
@@ -166,11 +206,11 @@ void App::update(float dt) {
 
     if (chunkEdited) {
         if (!m_renderer.updateChunkMesh(m_chunkGrid, 0)) {
-            std::cerr << "[app] chunk mesh update failed after voxel edit\n";
+            std::cerr << "[" << appTimestamp() << "][app] chunk mesh update failed after voxel edit\n";
         }
         const std::filesystem::path worldPath{kWorldFilePath};
         if (!m_chunkGrid.saveToBinaryFile(worldPath)) {
-            std::cerr << "[app] failed to save world to " << worldPath.string() << " after voxel edit\n";
+            std::cerr << "[" << appTimestamp() << "][app] failed to save world to " << worldPath.string() << " after voxel edit\n";
         }
     }
 
@@ -229,7 +269,7 @@ void App::update(float dt) {
 }
 
 void App::shutdown() {
-    std::cerr << "[app] shutdown begin\n";
+    std::cerr << "[" << appTimestamp() << "][app] shutdown begin\n";
     m_renderer.shutdown();
 
     if (m_window != nullptr) {
@@ -238,7 +278,7 @@ void App::shutdown() {
     }
 
     glfwTerminate();
-    std::cerr << "[app] shutdown complete\n";
+    std::cerr << "[" << appTimestamp() << "][app] shutdown complete\n";
 }
 
 void App::pollInput() {
@@ -284,9 +324,9 @@ void App::pollInput() {
     if (hasGamepad != m_gamepadConnected) {
         m_gamepadConnected = hasGamepad;
         if (m_gamepadConnected) {
-            std::cerr << "[app] gamepad connected: RT place, LT remove, LB/RB block\n";
+            std::cerr << "[" << appTimestamp() << "][app] gamepad connected: RT place, LT remove, LB/RB block\n";
         } else {
-            std::cerr << "[app] gamepad disconnected\n";
+            std::cerr << "[" << appTimestamp() << "][app] gamepad disconnected\n";
         }
     }
     if (hasGamepad) {
@@ -340,7 +380,7 @@ void App::updateCamera(float dt) {
     if (m_input.toggleHoverDown && !m_wasToggleHoverDown) {
         m_hoverEnabled = !m_hoverEnabled;
         m_camera.velocityY = 0.0f;
-        std::cerr << "[app] hover " << (m_hoverEnabled ? "enabled" : "disabled") << " (H)\n";
+        std::cerr << "[" << appTimestamp() << "][app] hover " << (m_hoverEnabled ? "enabled" : "disabled") << " (H)\n";
     }
     m_wasToggleHoverDown = m_input.toggleHoverDown;
 
@@ -861,7 +901,7 @@ void App::cycleSelectedBlock(int direction) {
     if (m_selectedBlockIndex < 0) {
         m_selectedBlockIndex += count;
     }
-    std::cerr << "[app] selected block " << (m_selectedBlockIndex + 1) << "/" << count << "\n";
+    std::cerr << "[" << appTimestamp() << "][app] selected block " << (m_selectedBlockIndex + 1) << "/" << count << "\n";
 }
 
 world::Voxel App::selectedPlaceVoxel() const {
@@ -908,14 +948,14 @@ bool App::applyVoxelEdit(world::Chunk& chunk, int targetX, int targetY, int targ
 void App::regenerateWorld() {
     m_chunkGrid.initializeFlatWorld();
     if (!m_renderer.updateChunkMesh(m_chunkGrid)) {
-        std::cerr << "[app] world regenerate failed to update chunk meshes\n";
+        std::cerr << "[" << appTimestamp() << "][app] world regenerate failed to update chunk meshes\n";
     }
 
     const std::filesystem::path worldPath{kWorldFilePath};
     if (m_chunkGrid.saveToBinaryFile(worldPath)) {
-        std::cerr << "[app] world regenerated and saved to " << worldPath.string() << " (R)\n";
+        std::cerr << "[" << appTimestamp() << "][app] world regenerated and saved to " << worldPath.string() << " (R)\n";
     } else {
-        std::cerr << "[app] world regenerated, but failed to save " << worldPath.string() << "\n";
+        std::cerr << "[" << appTimestamp() << "][app] world regenerated, but failed to save " << worldPath.string() << "\n";
     }
 }
 

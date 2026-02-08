@@ -61,7 +61,7 @@ public:
 
         float receiverNormalOffsetNear = 0.03f;
         float receiverNormalOffsetFar = 0.12f;
-        float receiverBaseBiasNearTexel = 2.2f;
+        float receiverBaseBiasNearTexel = 0.05f;
         float receiverBaseBiasFarTexel = 4.6f;
         float receiverSlopeBiasNearTexel = 3.8f;
         float receiverSlopeBiasFarTexel = 7.2f;
