@@ -36,6 +36,20 @@ private:
         int adjacentEmptyZ = 0;
     };
 
+    struct InteractionRaycastResult {
+        bool hit = false;
+        bool hitPipe = false;
+        bool hitSolidVoxel = false;
+        int x = 0;
+        int y = 0;
+        int z = 0;
+        float hitDistance = 0.0f;
+        bool hasHitFaceNormal = false;
+        int hitFaceNormalX = 0;
+        int hitFaceNormalY = 0;
+        int hitFaceNormalZ = 0;
+    };
+
     void pollInput();
     void updateCamera(float dt);
     [[nodiscard]] bool isSolidWorldVoxel(int worldX, int worldY, int worldZ) const;
@@ -61,14 +75,29 @@ private:
     [[nodiscard]] bool doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const;
     void resolvePlayerCollisions(float dt);
     [[nodiscard]] CameraRaycastResult raycastFromCamera() const;
+    [[nodiscard]] InteractionRaycastResult raycastInteractionFromCamera(bool includePipes) const;
+    [[nodiscard]] bool computePipePlacementFromInteractionRaycast(
+        const InteractionRaycastResult& raycast,
+        int& outX,
+        int& outY,
+        int& outZ,
+        int& outAxisX,
+        int& outAxisY,
+        int& outAxisZ
+    ) const;
     [[nodiscard]] bool isWorldVoxelInBounds(int x, int y, int z) const;
-    void cycleSelectedBlock(int direction);
+    void cycleSelectedHotbar(int direction);
+    void selectHotbarSlot(int hotbarIndex);
+    [[nodiscard]] bool isPipeHotbarSelected() const;
     [[nodiscard]] world::Voxel selectedPlaceVoxel() const;
     [[nodiscard]] bool computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const;
     [[nodiscard]] bool applyVoxelEdit(int targetX, int targetY, int targetZ, world::Voxel voxel, std::size_t& outEditedChunkIndex);
+    [[nodiscard]] bool isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const;
     void regenerateWorld();
     [[nodiscard]] bool tryPlaceVoxelFromCameraRay(std::size_t& outEditedChunkIndex);
     [[nodiscard]] bool tryRemoveVoxelFromCameraRay(std::size_t& outEditedChunkIndex);
+    [[nodiscard]] bool tryPlacePipeFromCameraRay();
+    [[nodiscard]] bool tryRemovePipeFromCameraRay();
 
     struct CameraState {
         float x = 0.0f;
@@ -98,6 +127,7 @@ private:
     bool m_hoverEnabled = false;
     bool m_wasToggleHoverDown = false;
     bool m_wasRegenerateWorldDown = false;
+    int m_selectedHotbarIndex = 0;
     int m_selectedBlockIndex = 0;
     bool m_wasPrevBlockDown = false;
     bool m_wasNextBlockDown = false;

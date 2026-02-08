@@ -71,6 +71,15 @@ struct alignas(16) ChunkPushConstants {
     float cascadeData[4];
 };
 
+struct PipeMeshData {
+    struct Vertex {
+        float position[3];
+        float normal[3];
+    };
+    std::vector<Vertex> vertices;
+    std::vector<std::uint32_t> indices;
+};
+
 world::ChunkMeshData buildSingleVoxelPreviewMesh(
     std::uint32_t x,
     std::uint32_t y,
@@ -96,6 +105,117 @@ world::ChunkMeshData buildSingleVoxelPreviewMesh(
         mesh.indices.push_back(baseVertex + 0);
         mesh.indices.push_back(baseVertex + 2);
         mesh.indices.push_back(baseVertex + 3);
+    }
+
+    return mesh;
+}
+
+PipeMeshData buildPipeCylinderMesh(std::uint32_t radialSegments) {
+    PipeMeshData mesh{};
+    const std::uint32_t segments = std::max(radialSegments, 3u);
+    mesh.vertices.reserve(static_cast<std::size_t>(segments * 4u + 2u));
+    mesh.indices.reserve(static_cast<std::size_t>(segments * 12u));
+
+    constexpr float kTwoPi = 6.28318530717958647692f;
+
+    // Side wall vertices (y in [0, 1], radius = 1 in local space).
+    for (std::uint32_t i = 0; i < segments; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(segments);
+        const float angle = t * kTwoPi;
+        const float c = std::cos(angle);
+        const float s = std::sin(angle);
+
+        PipeMeshData::Vertex bottom{};
+        bottom.position[0] = c;
+        bottom.position[1] = 0.0f;
+        bottom.position[2] = s;
+        bottom.normal[0] = c;
+        bottom.normal[1] = 0.0f;
+        bottom.normal[2] = s;
+
+        PipeMeshData::Vertex top = bottom;
+        top.position[1] = 1.0f;
+
+        mesh.vertices.push_back(bottom);
+        mesh.vertices.push_back(top);
+    }
+
+    for (std::uint32_t i = 0; i < segments; ++i) {
+        const std::uint32_t next = (i + 1u) % segments;
+        const std::uint32_t i0 = (i * 2u) + 0u;
+        const std::uint32_t i1 = (i * 2u) + 1u;
+        const std::uint32_t i2 = (next * 2u) + 0u;
+        const std::uint32_t i3 = (next * 2u) + 1u;
+        mesh.indices.push_back(i0);
+        mesh.indices.push_back(i1);
+        mesh.indices.push_back(i3);
+        mesh.indices.push_back(i0);
+        mesh.indices.push_back(i3);
+        mesh.indices.push_back(i2);
+    }
+
+    const std::uint32_t capStartCenter = static_cast<std::uint32_t>(mesh.vertices.size());
+    PipeMeshData::Vertex startCenter{};
+    startCenter.position[0] = 0.0f;
+    startCenter.position[1] = 0.0f;
+    startCenter.position[2] = 0.0f;
+    startCenter.normal[0] = 0.0f;
+    startCenter.normal[1] = -1.0f;
+    startCenter.normal[2] = 0.0f;
+    mesh.vertices.push_back(startCenter);
+
+    const std::uint32_t capEndCenter = static_cast<std::uint32_t>(mesh.vertices.size());
+    PipeMeshData::Vertex endCenter = startCenter;
+    endCenter.position[1] = 1.0f;
+    endCenter.normal[1] = 1.0f;
+    mesh.vertices.push_back(endCenter);
+
+    const std::uint32_t capStartRingBase = static_cast<std::uint32_t>(mesh.vertices.size());
+    for (std::uint32_t i = 0; i < segments; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(segments);
+        const float angle = t * kTwoPi;
+        const float c = std::cos(angle);
+        const float s = std::sin(angle);
+
+        PipeMeshData::Vertex startV{};
+        startV.position[0] = c;
+        startV.position[1] = 0.0f;
+        startV.position[2] = s;
+        startV.normal[0] = 0.0f;
+        startV.normal[1] = -1.0f;
+        startV.normal[2] = 0.0f;
+        mesh.vertices.push_back(startV);
+    }
+
+    const std::uint32_t capEndRingBase = static_cast<std::uint32_t>(mesh.vertices.size());
+    for (std::uint32_t i = 0; i < segments; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(segments);
+        const float angle = t * kTwoPi;
+        const float c = std::cos(angle);
+        const float s = std::sin(angle);
+
+        PipeMeshData::Vertex endV{};
+        endV.position[0] = c;
+        endV.position[1] = 1.0f;
+        endV.position[2] = s;
+        endV.normal[0] = 0.0f;
+        endV.normal[1] = 1.0f;
+        endV.normal[2] = 0.0f;
+        mesh.vertices.push_back(endV);
+    }
+
+    for (std::uint32_t i = 0; i < segments; ++i) {
+        const std::uint32_t next = (i + 1u) % segments;
+
+        // Start cap faces negative Y.
+        mesh.indices.push_back(capStartCenter);
+        mesh.indices.push_back(capStartRingBase + next);
+        mesh.indices.push_back(capStartRingBase + i);
+
+        // End cap faces positive Y.
+        mesh.indices.push_back(capEndCenter);
+        mesh.indices.push_back(capEndRingBase + i);
+        mesh.indices.push_back(capEndRingBase + next);
     }
 
     return mesh;
@@ -1099,8 +1219,18 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
+    if (!createPipePipeline()) {
+        std::cerr << "[render] init failed at createPipePipeline\n";
+        shutdown();
+        return false;
+    }
     if (!createChunkBuffers(chunkGrid, std::nullopt)) {
         std::cerr << "[render] init failed at createChunkBuffers\n";
+        shutdown();
+        return false;
+    }
+    if (!createPipeBuffers()) {
+        std::cerr << "[render] init failed at createPipeBuffers\n";
         shutdown();
         return false;
     }
@@ -1463,6 +1593,45 @@ bool Renderer::createTransferResources() {
         return false;
     }
 
+    return true;
+}
+
+bool Renderer::createPipeBuffers() {
+    if (m_pipeVertexBufferHandle != kInvalidBufferHandle && m_pipeIndexBufferHandle != kInvalidBufferHandle) {
+        return true;
+    }
+
+    const PipeMeshData mesh = buildPipeCylinderMesh(18u);
+    if (mesh.vertices.empty() || mesh.indices.empty()) {
+        std::cerr << "[render] pipe mesh build failed\n";
+        return false;
+    }
+
+    BufferCreateDesc vertexCreateDesc{};
+    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(PipeMeshData::Vertex));
+    vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vertexCreateDesc.initialData = mesh.vertices.data();
+    m_pipeVertexBufferHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
+    if (m_pipeVertexBufferHandle == kInvalidBufferHandle) {
+        std::cerr << "[render] pipe vertex buffer allocation failed\n";
+        return false;
+    }
+
+    BufferCreateDesc indexCreateDesc{};
+    indexCreateDesc.size = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
+    indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    indexCreateDesc.initialData = mesh.indices.data();
+    m_pipeIndexBufferHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
+    if (m_pipeIndexBufferHandle == kInvalidBufferHandle) {
+        std::cerr << "[render] pipe index buffer allocation failed\n";
+        m_bufferAllocator.destroyBuffer(m_pipeVertexBufferHandle);
+        m_pipeVertexBufferHandle = kInvalidBufferHandle;
+        return false;
+    }
+
+    m_pipeIndexCount = static_cast<uint32_t>(mesh.indices.size());
     return true;
 }
 
@@ -2517,6 +2686,18 @@ bool Renderer::createGraphicsPipeline() {
         "../../src/render/shaders/shadow_depth.frag.spv",
         "../../../src/render/shaders/shadow_depth.frag.spv",
     };
+    constexpr std::array<const char*, 4> kPipeShadowVertexShaderPathCandidates = {
+        "src/render/shaders/pipe_shadow.vert.spv",
+        "../src/render/shaders/pipe_shadow.vert.spv",
+        "../../src/render/shaders/pipe_shadow.vert.spv",
+        "../../../src/render/shaders/pipe_shadow.vert.spv",
+    };
+    constexpr std::array<const char*, 4> kPipeShadowFragmentShaderPathCandidates = {
+        "src/render/shaders/pipe_shadow.frag.spv",
+        "../src/render/shaders/pipe_shadow.frag.spv",
+        "../../src/render/shaders/pipe_shadow.frag.spv",
+        "../../../src/render/shaders/pipe_shadow.frag.spv",
+    };
 
     VkShaderModule worldVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule worldFragShaderModule = VK_NULL_HANDLE;
@@ -3094,6 +3275,128 @@ bool Renderer::createGraphicsPipeline() {
         return false;
     }
 
+    VkShaderModule pipeShadowVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule pipeShadowFragShaderModule = VK_NULL_HANDLE;
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kPipeShadowVertexShaderPathCandidates,
+            nullptr,
+            0,
+            "pipe_shadow.vert",
+            pipeShadowVertShaderModule
+        )) {
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kPipeShadowFragmentShaderPathCandidates,
+            nullptr,
+            0,
+            "pipe_shadow.frag",
+            pipeShadowFragShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, pipeShadowVertShaderModule, nullptr);
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo pipeShadowVertexShaderStage{};
+    pipeShadowVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeShadowVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    pipeShadowVertexShaderStage.module = pipeShadowVertShaderModule;
+    pipeShadowVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo pipeShadowFragmentShaderStage{};
+    pipeShadowFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeShadowFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pipeShadowFragmentShaderStage.module = pipeShadowFragShaderModule;
+    pipeShadowFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> pipeShadowShaderStages = {
+        pipeShadowVertexShaderStage,
+        pipeShadowFragmentShaderStage
+    };
+
+    VkVertexInputBindingDescription pipeShadowBindings[2]{};
+    pipeShadowBindings[0].binding = 0;
+    pipeShadowBindings[0].stride = sizeof(PipeVertex);
+    pipeShadowBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    pipeShadowBindings[1].binding = 1;
+    pipeShadowBindings[1].stride = sizeof(PipeInstance);
+    pipeShadowBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    VkVertexInputAttributeDescription pipeShadowAttributes[5]{};
+    pipeShadowAttributes[0].location = 0;
+    pipeShadowAttributes[0].binding = 0;
+    pipeShadowAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    pipeShadowAttributes[0].offset = static_cast<uint32_t>(offsetof(PipeVertex, position));
+    pipeShadowAttributes[1].location = 1;
+    pipeShadowAttributes[1].binding = 0;
+    pipeShadowAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    pipeShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(PipeVertex, normal));
+    pipeShadowAttributes[2].location = 2;
+    pipeShadowAttributes[2].binding = 1;
+    pipeShadowAttributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(PipeInstance, originLength));
+    pipeShadowAttributes[3].location = 3;
+    pipeShadowAttributes[3].binding = 1;
+    pipeShadowAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(PipeInstance, axisRadius));
+    pipeShadowAttributes[4].location = 4;
+    pipeShadowAttributes[4].binding = 1;
+    pipeShadowAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(PipeInstance, tint));
+
+    VkPipelineVertexInputStateCreateInfo pipeShadowVertexInputInfo{};
+    pipeShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    pipeShadowVertexInputInfo.vertexBindingDescriptionCount = 2;
+    pipeShadowVertexInputInfo.pVertexBindingDescriptions = pipeShadowBindings;
+    pipeShadowVertexInputInfo.vertexAttributeDescriptionCount = 5;
+    pipeShadowVertexInputInfo.pVertexAttributeDescriptions = pipeShadowAttributes;
+
+    VkGraphicsPipelineCreateInfo pipeShadowPipelineCreateInfo = shadowPipelineCreateInfo;
+    pipeShadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(pipeShadowShaderStages.size());
+    pipeShadowPipelineCreateInfo.pStages = pipeShadowShaderStages.data();
+    pipeShadowPipelineCreateInfo.pVertexInputState = &pipeShadowVertexInputInfo;
+    VkPipelineRasterizationStateCreateInfo pipeShadowRasterizer = shadowRasterizer;
+    pipeShadowRasterizer.cullMode = VK_CULL_MODE_NONE;
+    pipeShadowPipelineCreateInfo.pRasterizationState = &pipeShadowRasterizer;
+
+    VkPipeline pipeShadowPipeline = VK_NULL_HANDLE;
+    const VkResult pipeShadowPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipeShadowPipelineCreateInfo,
+        nullptr,
+        &pipeShadowPipeline
+    );
+
+    vkDestroyShaderModule(m_device, pipeShadowFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, pipeShadowVertShaderModule, nullptr);
+
+    if (pipeShadowPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(pipeShadow)", pipeShadowPipelineResult);
+        return false;
+    }
+
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
     }
@@ -3102,6 +3405,9 @@ bool Renderer::createGraphicsPipeline() {
     }
     if (m_shadowPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);
+    }
+    if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipeShadowPipeline, nullptr);
     }
     if (m_tonemapPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr);
@@ -3115,12 +3421,208 @@ bool Renderer::createGraphicsPipeline() {
     m_pipeline = worldPipeline;
     m_skyboxPipeline = skyboxPipeline;
     m_shadowPipeline = shadowPipeline;
+    m_pipeShadowPipeline = pipeShadowPipeline;
     m_tonemapPipeline = toneMapPipeline;
     m_previewAddPipeline = previewAddPipeline;
     m_previewRemovePipeline = previewRemovePipeline;
     std::cerr << "[render] graphics pipelines ready (shadow + hdr scene + tonemap + preview="
               << (m_supportsWireframePreview ? "wireframe" : "ghost")
               << ")\n";
+    return true;
+}
+
+bool Renderer::createPipePipeline() {
+    if (m_pipelineLayout == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (m_depthFormat == VK_FORMAT_UNDEFINED || m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
+        return false;
+    }
+
+    constexpr std::array<const char*, 4> kPipeVertexShaderPathCandidates = {
+        "src/render/shaders/pipe_instanced.vert.spv",
+        "../src/render/shaders/pipe_instanced.vert.spv",
+        "../../src/render/shaders/pipe_instanced.vert.spv",
+        "../../../src/render/shaders/pipe_instanced.vert.spv",
+    };
+    constexpr std::array<const char*, 4> kPipeFragmentShaderPathCandidates = {
+        "src/render/shaders/pipe_instanced.frag.spv",
+        "../src/render/shaders/pipe_instanced.frag.spv",
+        "../../src/render/shaders/pipe_instanced.frag.spv",
+        "../../../src/render/shaders/pipe_instanced.frag.spv",
+    };
+
+    VkShaderModule pipeVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule pipeFragShaderModule = VK_NULL_HANDLE;
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kPipeVertexShaderPathCandidates,
+            nullptr,
+            0,
+            "pipe_instanced.vert",
+            pipeVertShaderModule
+        )) {
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kPipeFragmentShaderPathCandidates,
+            nullptr,
+            0,
+            "pipe_instanced.frag",
+            pipeFragShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, pipeVertShaderModule, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo pipeVertexShaderStage{};
+    pipeVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    pipeVertexShaderStage.module = pipeVertShaderModule;
+    pipeVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo pipeFragmentShaderStage{};
+    pipeFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pipeFragmentShaderStage.module = pipeFragShaderModule;
+    pipeFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> pipeShaderStages = {
+        pipeVertexShaderStage,
+        pipeFragmentShaderStage
+    };
+
+    VkVertexInputBindingDescription bindings[2]{};
+    bindings[0].binding = 0;
+    bindings[0].stride = sizeof(PipeVertex);
+    bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    bindings[1].binding = 1;
+    bindings[1].stride = sizeof(PipeInstance);
+    bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    VkVertexInputAttributeDescription attributes[5]{};
+    attributes[0].location = 0;
+    attributes[0].binding = 0;
+    attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attributes[0].offset = static_cast<uint32_t>(offsetof(PipeVertex, position));
+    attributes[1].location = 1;
+    attributes[1].binding = 0;
+    attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attributes[1].offset = static_cast<uint32_t>(offsetof(PipeVertex, normal));
+    attributes[2].location = 2;
+    attributes[2].binding = 1;
+    attributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributes[2].offset = static_cast<uint32_t>(offsetof(PipeInstance, originLength));
+    attributes[3].location = 3;
+    attributes[3].binding = 1;
+    attributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributes[3].offset = static_cast<uint32_t>(offsetof(PipeInstance, axisRadius));
+    attributes[4].location = 4;
+    attributes[4].binding = 1;
+    attributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributes[4].offset = static_cast<uint32_t>(offsetof(PipeInstance, tint));
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.vertexBindingDescriptionCount = 2;
+    vertexInputInfo.pVertexBindingDescriptions = bindings;
+    vertexInputInfo.vertexAttributeDescriptionCount = 5;
+    vertexInputInfo.pVertexAttributeDescriptions = attributes;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = m_colorSampleCount;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    std::array<VkDynamicState, 2> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkPipelineRenderingCreateInfo renderingCreateInfo{};
+    renderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderingCreateInfo.colorAttachmentCount = 1;
+    renderingCreateInfo.pColorAttachmentFormats = &m_hdrColorFormat;
+    renderingCreateInfo.depthAttachmentFormat = m_depthFormat;
+
+    VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
+    pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.pNext = &renderingCreateInfo;
+    pipelineCreateInfo.stageCount = static_cast<uint32_t>(pipeShaderStages.size());
+    pipelineCreateInfo.pStages = pipeShaderStages.data();
+    pipelineCreateInfo.pVertexInputState = &vertexInputInfo;
+    pipelineCreateInfo.pInputAssemblyState = &inputAssembly;
+    pipelineCreateInfo.pViewportState = &viewportState;
+    pipelineCreateInfo.pRasterizationState = &rasterizer;
+    pipelineCreateInfo.pMultisampleState = &multisampling;
+    pipelineCreateInfo.pDepthStencilState = &depthStencil;
+    pipelineCreateInfo.pColorBlendState = &colorBlending;
+    pipelineCreateInfo.pDynamicState = &dynamicState;
+    pipelineCreateInfo.layout = m_pipelineLayout;
+    pipelineCreateInfo.renderPass = VK_NULL_HANDLE;
+    pipelineCreateInfo.subpass = 0;
+
+    VkPipeline pipePipeline = VK_NULL_HANDLE;
+    const VkResult pipePipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &pipePipeline
+    );
+
+    vkDestroyShaderModule(m_device, pipeFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, pipeVertShaderModule, nullptr);
+
+    if (pipePipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(pipe)", pipePipelineResult);
+        return false;
+    }
+
+    if (m_pipePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
+    }
+    m_pipePipeline = pipePipeline;
     return true;
 }
 
@@ -4231,6 +4733,42 @@ void Renderer::renderFrame(
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
+    uint32_t pipeInstanceCount = 0;
+    std::optional<RingBufferSlice> pipeInstanceSliceOpt = std::nullopt;
+    if (m_pipeIndexCount > 0 && simulation.pipeCount() > 0) {
+        std::vector<PipeInstance> instances;
+        instances.reserve(simulation.pipeCount());
+        for (const sim::Pipe& pipe : simulation.pipes()) {
+            const math::Vector3 normalizedAxis =
+                (math::lengthSquared(pipe.axis) > 0.0f) ? math::normalize(pipe.axis) : math::Vector3{0.0f, 1.0f, 0.0f};
+            PipeInstance instance{};
+            instance.originLength[0] = static_cast<float>(pipe.x);
+            instance.originLength[1] = static_cast<float>(pipe.y);
+            instance.originLength[2] = static_cast<float>(pipe.z);
+            instance.originLength[3] = std::max(pipe.length, 0.05f);
+            instance.axisRadius[0] = normalizedAxis.x;
+            instance.axisRadius[1] = normalizedAxis.y;
+            instance.axisRadius[2] = normalizedAxis.z;
+            instance.axisRadius[3] = std::clamp(pipe.radius, 0.02f, 0.5f);
+            instance.tint[0] = std::clamp(pipe.tint.x, 0.0f, 1.0f);
+            instance.tint[1] = std::clamp(pipe.tint.y, 0.0f, 1.0f);
+            instance.tint[2] = std::clamp(pipe.tint.z, 0.0f, 1.0f);
+            instance.tint[3] = 1.0f;
+            instances.push_back(instance);
+        }
+
+        if (!instances.empty()) {
+            pipeInstanceSliceOpt = m_uploadRing.allocate(
+                static_cast<VkDeviceSize>(instances.size() * sizeof(PipeInstance)),
+                static_cast<VkDeviceSize>(alignof(PipeInstance))
+            );
+            if (pipeInstanceSliceOpt.has_value() && pipeInstanceSliceOpt->mapped != nullptr) {
+                std::memcpy(pipeInstanceSliceOpt->mapped, instances.data(), static_cast<size_t>(pipeInstanceSliceOpt->size));
+                pipeInstanceCount = static_cast<uint32_t>(instances.size());
+            }
+        }
+    }
+
     const bool shadowInitialized = m_shadowDepthInitialized;
     transitionImageLayout(
         commandBuffer,
@@ -4351,6 +4889,52 @@ void Renderer::renderFrame(
                     &chunkPushConstants
                 );
                 vkCmdDrawIndexed(commandBuffer, drawRange.indexCount, 1, 0, 0, 0);
+            }
+
+            if (m_pipeShadowPipeline != VK_NULL_HANDLE &&
+                pipeInstanceCount > 0 &&
+                pipeInstanceSliceOpt.has_value()) {
+                const VkBuffer pipeVertexBuffer = m_bufferAllocator.getBuffer(m_pipeVertexBufferHandle);
+                const VkBuffer pipeIndexBuffer = m_bufferAllocator.getBuffer(m_pipeIndexBufferHandle);
+                const VkBuffer pipeInstanceBuffer = m_bufferAllocator.getBuffer(pipeInstanceSliceOpt->buffer);
+                if (pipeVertexBuffer != VK_NULL_HANDLE &&
+                    pipeIndexBuffer != VK_NULL_HANDLE &&
+                    pipeInstanceBuffer != VK_NULL_HANDLE) {
+                    const VkBuffer vertexBuffers[2] = {pipeVertexBuffer, pipeInstanceBuffer};
+                    const VkDeviceSize vertexOffsets[2] = {0, pipeInstanceSliceOpt->offset};
+                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeShadowPipeline);
+                    vkCmdBindDescriptorSets(
+                        commandBuffer,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        m_pipelineLayout,
+                        0,
+                        1,
+                        &m_descriptorSets[m_currentFrame],
+                        0,
+                        nullptr
+                    );
+                    vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
+                    vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                    ChunkPushConstants pipeShadowPushConstants{};
+                    pipeShadowPushConstants.chunkOffset[0] = 0.0f;
+                    pipeShadowPushConstants.chunkOffset[1] = 0.0f;
+                    pipeShadowPushConstants.chunkOffset[2] = 0.0f;
+                    pipeShadowPushConstants.chunkOffset[3] = 0.0f;
+                    pipeShadowPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
+                    pipeShadowPushConstants.cascadeData[1] = 0.0f;
+                    pipeShadowPushConstants.cascadeData[2] = 0.0f;
+                    pipeShadowPushConstants.cascadeData[3] = 0.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &pipeShadowPushConstants
+                    );
+                    vkCmdDrawIndexed(commandBuffer, m_pipeIndexCount, pipeInstanceCount, 0, 0, 0);
+                }
             }
 
             vkCmdEndRendering(commandBuffer);
@@ -4542,11 +5126,100 @@ void Renderer::renderFrame(
         }
     }
 
+    if (m_pipePipeline != VK_NULL_HANDLE && pipeInstanceCount > 0 && pipeInstanceSliceOpt.has_value()) {
+        const VkBuffer pipeVertexBuffer = m_bufferAllocator.getBuffer(m_pipeVertexBufferHandle);
+        const VkBuffer pipeIndexBuffer = m_bufferAllocator.getBuffer(m_pipeIndexBufferHandle);
+        const VkBuffer pipeInstanceBuffer = m_bufferAllocator.getBuffer(pipeInstanceSliceOpt->buffer);
+        if (pipeVertexBuffer != VK_NULL_HANDLE &&
+            pipeIndexBuffer != VK_NULL_HANDLE &&
+            pipeInstanceBuffer != VK_NULL_HANDLE) {
+            const VkBuffer vertexBuffers[2] = {
+                pipeVertexBuffer,
+                pipeInstanceBuffer
+            };
+            const VkDeviceSize vertexOffsets[2] = {
+                0,
+                pipeInstanceSliceOpt->offset
+            };
+
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipePipeline);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout,
+                0,
+                1,
+                &m_descriptorSets[m_currentFrame],
+                0,
+                nullptr
+            );
+            vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, m_pipeIndexCount, pipeInstanceCount, 0, 0, 0);
+        }
+    }
+
     const VkPipeline activePreviewPipeline =
         (preview.mode == VoxelPreview::Mode::Remove) ? m_previewRemovePipeline : m_previewAddPipeline;
-    const bool drawCubePreview = preview.visible && activePreviewPipeline != VK_NULL_HANDLE;
+    const bool drawCubePreview = !preview.pipeStyle && preview.visible && activePreviewPipeline != VK_NULL_HANDLE;
     const bool drawFacePreview =
-        preview.faceVisible && preview.brushSize == 1 && m_previewRemovePipeline != VK_NULL_HANDLE;
+        !preview.pipeStyle && preview.faceVisible && preview.brushSize == 1 && m_previewRemovePipeline != VK_NULL_HANDLE;
+
+    if (preview.pipeStyle && preview.visible && m_pipePipeline != VK_NULL_HANDLE && m_pipeIndexCount > 0) {
+        PipeInstance previewInstance{};
+        previewInstance.originLength[0] = static_cast<float>(preview.x);
+        previewInstance.originLength[1] = static_cast<float>(preview.y);
+        previewInstance.originLength[2] = static_cast<float>(preview.z);
+        previewInstance.originLength[3] = 1.0f;
+        math::Vector3 previewAxis = math::normalize(math::Vector3{preview.pipeAxisX, preview.pipeAxisY, preview.pipeAxisZ});
+        if (math::lengthSquared(previewAxis) <= 0.0001f) {
+            previewAxis = math::Vector3{0.0f, 1.0f, 0.0f};
+        }
+        previewInstance.axisRadius[0] = previewAxis.x;
+        previewInstance.axisRadius[1] = previewAxis.y;
+        previewInstance.axisRadius[2] = previewAxis.z;
+        previewInstance.axisRadius[3] = 0.45f;
+        if (preview.mode == VoxelPreview::Mode::Remove) {
+            previewInstance.tint[0] = 1.0f;
+            previewInstance.tint[1] = 0.32f;
+            previewInstance.tint[2] = 0.26f;
+        } else {
+            previewInstance.tint[0] = 0.30f;
+            previewInstance.tint[1] = 0.95f;
+            previewInstance.tint[2] = 1.0f;
+        }
+        previewInstance.tint[3] = 1.0f;
+
+        const std::optional<RingBufferSlice> previewInstanceSlice =
+            m_uploadRing.allocate(sizeof(PipeInstance), static_cast<VkDeviceSize>(alignof(PipeInstance)));
+        if (previewInstanceSlice.has_value() && previewInstanceSlice->mapped != nullptr) {
+            std::memcpy(previewInstanceSlice->mapped, &previewInstance, sizeof(PipeInstance));
+            const VkBuffer pipeVertexBuffer = m_bufferAllocator.getBuffer(m_pipeVertexBufferHandle);
+            const VkBuffer pipeIndexBuffer = m_bufferAllocator.getBuffer(m_pipeIndexBufferHandle);
+            const VkBuffer pipeInstanceBuffer = m_bufferAllocator.getBuffer(previewInstanceSlice->buffer);
+            if (pipeVertexBuffer != VK_NULL_HANDLE &&
+                pipeIndexBuffer != VK_NULL_HANDLE &&
+                pipeInstanceBuffer != VK_NULL_HANDLE) {
+                const VkBuffer vertexBuffers[2] = {pipeVertexBuffer, pipeInstanceBuffer};
+                const VkDeviceSize vertexOffsets[2] = {0, previewInstanceSlice->offset};
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipePipeline);
+                vkCmdBindDescriptorSets(
+                    commandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    m_pipelineLayout,
+                    0,
+                    1,
+                    &m_descriptorSets[m_currentFrame],
+                    0,
+                    nullptr
+                );
+                vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
+                vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(commandBuffer, m_pipeIndexCount, 1, 0, 0, 0);
+            }
+        }
+    }
+
     if (drawCubePreview || drawFacePreview) {
         constexpr uint32_t kPreviewCubeIndexCount = 36u;
         constexpr uint32_t kPreviewFaceIndexCount = 6u;
@@ -4814,6 +5487,10 @@ bool Renderer::recreateSwapchain() {
         std::cerr << "[render] recreateSwapchain failed: createGraphicsPipeline\n";
         return false;
     }
+    if (!createPipePipeline()) {
+        std::cerr << "[render] recreateSwapchain failed: createPipePipeline\n";
+        return false;
+    }
 #if defined(VOXEL_HAS_IMGUI)
     if (m_imguiInitialized) {
         ImGui_ImplVulkan_SetMinImageCount(std::max<uint32_t>(2u, static_cast<uint32_t>(m_swapchainImages.size())));
@@ -4960,6 +5637,18 @@ void Renderer::destroyPreviewBuffers() {
     m_previewIndexCount = 0;
 }
 
+void Renderer::destroyPipeBuffers() {
+    if (m_pipeIndexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_pipeIndexBufferHandle);
+        m_pipeIndexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_pipeVertexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_pipeVertexBufferHandle);
+        m_pipeVertexBufferHandle = kInvalidBufferHandle;
+    }
+    m_pipeIndexCount = 0;
+}
+
 void Renderer::destroyEnvironmentResources() {
     destroyDiffuseTextureResources();
 }
@@ -5063,6 +5752,10 @@ void Renderer::destroyPipeline() {
         vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);
         m_shadowPipeline = VK_NULL_HANDLE;
     }
+    if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipeShadowPipeline, nullptr);
+        m_pipeShadowPipeline = VK_NULL_HANDLE;
+    }
     if (m_previewRemovePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
         m_previewRemovePipeline = VK_NULL_HANDLE;
@@ -5070,6 +5763,10 @@ void Renderer::destroyPipeline() {
     if (m_previewAddPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_previewAddPipeline, nullptr);
         m_previewAddPipeline = VK_NULL_HANDLE;
+    }
+    if (m_pipePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
+        m_pipePipeline = VK_NULL_HANDLE;
     }
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
@@ -5098,6 +5795,7 @@ void Renderer::shutdown() {
             m_renderTimelineSemaphore = VK_NULL_HANDLE;
         }
         m_uploadRing.shutdown(&m_bufferAllocator);
+        destroyPipeBuffers();
         destroyPreviewBuffers();
         destroyEnvironmentResources();
         destroyShadowResources();

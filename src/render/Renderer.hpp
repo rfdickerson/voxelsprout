@@ -45,6 +45,10 @@ struct VoxelPreview {
     int faceY = 0;
     int faceZ = 0;
     uint32_t faceId = 0;
+    bool pipeStyle = false;
+    float pipeAxisX = 0.0f;
+    float pipeAxisY = 1.0f;
+    float pipeAxisZ = 0.0f;
 };
 
 class Renderer {
@@ -124,6 +128,8 @@ private:
     bool createGraphicsPipeline();
     bool createUploadRingBuffer();
     bool createTransferResources();
+    bool createPipeBuffers();
+    bool createPipePipeline();
     bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
@@ -146,6 +152,7 @@ private:
     void destroyShadowResources();
     void destroyFrameResources();
     void destroyChunkBuffers();
+    void destroyPipeBuffers();
     void destroyPreviewBuffers();
     void destroyEnvironmentResources();
     void destroyDiffuseTextureResources();
@@ -167,6 +174,17 @@ private:
         float offsetX = 0.0f;
         float offsetY = 0.0f;
         float offsetZ = 0.0f;
+    };
+
+    struct PipeVertex {
+        float position[3];
+        float normal[3];
+    };
+
+    struct PipeInstance {
+        float originLength[4];
+        float axisRadius[4];
+        float tint[4];
     };
 
     GLFWwindow* m_window = nullptr;
@@ -229,8 +247,10 @@ private:
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
     VkPipeline m_shadowPipeline = VK_NULL_HANDLE;
+    VkPipeline m_pipeShadowPipeline = VK_NULL_HANDLE;
     VkPipeline m_skyboxPipeline = VK_NULL_HANDLE;
     VkPipeline m_tonemapPipeline = VK_NULL_HANDLE;
+    VkPipeline m_pipePipeline = VK_NULL_HANDLE;
     VkPipeline m_previewAddPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewRemovePipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
@@ -247,6 +267,8 @@ private:
     FrameRingBuffer m_uploadRing;
     BufferHandle m_previewVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_previewIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_pipeVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_pipeIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_shadowVoxelBufferHandle = kInvalidBufferHandle;
     VkBufferView m_shadowVoxelBufferView = VK_NULL_HANDLE;
     uint32_t m_shadowVoxelGridSizeX = 0;
@@ -258,6 +280,7 @@ private:
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     uint32_t m_previewIndexCount = 0;
+    uint32_t m_pipeIndexCount = 0;
     VkImage m_diffuseTextureImage = VK_NULL_HANDLE;
     VkDeviceMemory m_diffuseTextureMemory = VK_NULL_HANDLE;
     VkImageView m_diffuseTextureImageView = VK_NULL_HANDLE;

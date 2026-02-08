@@ -52,6 +52,12 @@ constexpr const char* kWorldFilePath = "world.vxw";
 constexpr std::array<world::VoxelType, 1> kPlaceableBlockTypes = {
     world::VoxelType::Solid
 };
+constexpr int kHotbarSlotBlock = 0;
+constexpr int kHotbarSlotPipe = 1;
+constexpr int kHotbarSlotCount = 2;
+constexpr float kDefaultPipeLength = 1.0f;
+constexpr float kDefaultPipeRadius = 0.45f;
+constexpr math::Vector3 kDefaultPipeTint{0.74f, 0.70f, 0.62f};
 
 std::string appTimestamp();
 
@@ -196,16 +202,25 @@ void App::update(float dt) {
     m_wasPlaceBlockDown = m_input.placeBlockDown;
     m_wasRemoveBlockDown = m_input.removeBlockDown;
 
-    bool chunkEdited = false;
+    bool voxelChunkEdited = false;
     std::size_t editedChunkIndex = 0;
-    if (placePressedThisFrame && tryPlaceVoxelFromCameraRay(editedChunkIndex)) {
-        chunkEdited = true;
-    }
-    if (removePressedThisFrame && tryRemoveVoxelFromCameraRay(editedChunkIndex)) {
-        chunkEdited = true;
+    if (isPipeHotbarSelected()) {
+        if (placePressedThisFrame) {
+            (void)tryPlacePipeFromCameraRay();
+        }
+        if (removePressedThisFrame) {
+            (void)tryRemovePipeFromCameraRay();
+        }
+    } else {
+        if (placePressedThisFrame && tryPlaceVoxelFromCameraRay(editedChunkIndex)) {
+            voxelChunkEdited = true;
+        }
+        if (removePressedThisFrame && tryRemoveVoxelFromCameraRay(editedChunkIndex)) {
+            voxelChunkEdited = true;
+        }
     }
 
-    if (chunkEdited) {
+    if (voxelChunkEdited) {
         if (!m_renderer.updateChunkMesh(m_chunkGrid, editedChunkIndex)) {
             std::cerr << "[" << appTimestamp() << "][app] chunk mesh update failed after voxel edit\n";
         }
@@ -216,43 +231,94 @@ void App::update(float dt) {
     }
 
     render::VoxelPreview preview{};
-    if (!m_debugUiVisible && raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
-        if (raycast.hasHitFaceNormal) {
-            auto normalToFaceId = [](int nx, int ny, int nz) -> uint32_t {
-                if (nx > 0) { return 0u; }
-                if (nx < 0) { return 1u; }
-                if (ny > 0) { return 2u; }
-                if (ny < 0) { return 3u; }
-                if (nz > 0) { return 4u; }
-                return 5u;
-            };
-            preview.faceVisible = true;
-            preview.faceX = raycast.solidX;
-            preview.faceY = raycast.solidY;
-            preview.faceZ = raycast.solidZ;
-            preview.faceId = normalToFaceId(raycast.hitFaceNormalX, raycast.hitFaceNormalY, raycast.hitFaceNormalZ);
-        }
-
+    const bool pipeSelected = isPipeHotbarSelected();
+    if (!m_debugUiVisible) {
         const bool showRemovePreview = m_input.removeBlockDown;
-        if (showRemovePreview) {
-            preview.visible = true;
-            preview.mode = render::VoxelPreview::Mode::Remove;
-            preview.x = raycast.solidX;
-            preview.y = raycast.solidY;
-            preview.z = raycast.solidZ;
-            preview.brushSize = 1;
-        } else {
-            int targetX = 0;
-            int targetY = 0;
-            int targetZ = 0;
-            if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
-                if (isWorldVoxelInBounds(targetX, targetY, targetZ)) {
-                    preview.visible = true;
-                    preview.mode = render::VoxelPreview::Mode::Add;
-                    preview.x = targetX;
-                    preview.y = targetY;
-                    preview.z = targetZ;
-                    preview.brushSize = 1;
+        if (pipeSelected) {
+            const InteractionRaycastResult pipeRaycast = raycastInteractionFromCamera(true);
+            if (pipeRaycast.hit && pipeRaycast.hitDistance <= kBlockInteractMaxDistance) {
+                preview.pipeStyle = true;
+                if (showRemovePreview) {
+                    if (pipeRaycast.hitPipe) {
+                        preview.visible = true;
+                        preview.mode = render::VoxelPreview::Mode::Remove;
+                        preview.x = pipeRaycast.x;
+                        preview.y = pipeRaycast.y;
+                        preview.z = pipeRaycast.z;
+                        preview.brushSize = 1;
+                        std::size_t pipeIndex = 0;
+                        if (isPipeAtWorld(pipeRaycast.x, pipeRaycast.y, pipeRaycast.z, &pipeIndex)) {
+                            const sim::Pipe& pipe = m_simulation.pipes()[pipeIndex];
+                            preview.pipeAxisX = pipe.axis.x;
+                            preview.pipeAxisY = pipe.axis.y;
+                            preview.pipeAxisZ = pipe.axis.z;
+                        }
+                    }
+                } else {
+                    int targetX = 0;
+                    int targetY = 0;
+                    int targetZ = 0;
+                    int axisX = 0;
+                    int axisY = 1;
+                    int axisZ = 0;
+                    if (computePipePlacementFromInteractionRaycast(
+                            pipeRaycast,
+                            targetX,
+                            targetY,
+                            targetZ,
+                            axisX,
+                            axisY,
+                            axisZ
+                        )) {
+                        preview.visible = true;
+                        preview.mode = render::VoxelPreview::Mode::Add;
+                        preview.x = targetX;
+                        preview.y = targetY;
+                        preview.z = targetZ;
+                        preview.brushSize = 1;
+                        preview.pipeAxisX = static_cast<float>(axisX);
+                        preview.pipeAxisY = static_cast<float>(axisY);
+                        preview.pipeAxisZ = static_cast<float>(axisZ);
+                    }
+                }
+            }
+        } else if (raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
+            if (raycast.hasHitFaceNormal) {
+                auto normalToFaceId = [](int nx, int ny, int nz) -> uint32_t {
+                    if (nx > 0) { return 0u; }
+                    if (nx < 0) { return 1u; }
+                    if (ny > 0) { return 2u; }
+                    if (ny < 0) { return 3u; }
+                    if (nz > 0) { return 4u; }
+                    return 5u;
+                };
+                preview.faceVisible = true;
+                preview.faceX = raycast.solidX;
+                preview.faceY = raycast.solidY;
+                preview.faceZ = raycast.solidZ;
+                preview.faceId = normalToFaceId(raycast.hitFaceNormalX, raycast.hitFaceNormalY, raycast.hitFaceNormalZ);
+            }
+
+            if (showRemovePreview) {
+                preview.visible = true;
+                preview.mode = render::VoxelPreview::Mode::Remove;
+                preview.x = raycast.solidX;
+                preview.y = raycast.solidY;
+                preview.z = raycast.solidZ;
+                preview.brushSize = 1;
+            } else {
+                int targetX = 0;
+                int targetY = 0;
+                int targetZ = 0;
+                if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
+                    if (isWorldVoxelInBounds(targetX, targetY, targetZ)) {
+                        preview.visible = true;
+                        preview.mode = render::VoxelPreview::Mode::Add;
+                        preview.x = targetX;
+                        preview.y = targetY;
+                        preview.z = targetZ;
+                        preview.brushSize = 1;
+                    }
                 }
             }
         }
@@ -325,7 +391,7 @@ void App::pollInput() {
     if (hasGamepad != m_gamepadConnected) {
         m_gamepadConnected = hasGamepad;
         if (m_gamepadConnected) {
-            std::cerr << "[" << appTimestamp() << "][app] gamepad connected: RT place, LT remove, LB/RB block\n";
+            std::cerr << "[" << appTimestamp() << "][app] gamepad connected: RT place, LT remove, LB/RB hotbar\n";
         } else {
             std::cerr << "[" << appTimestamp() << "][app] gamepad disconnected\n";
         }
@@ -337,16 +403,24 @@ void App::pollInput() {
         controllerNextBlockDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER] == GLFW_PRESS;
     }
 
-    const bool prevBlockDown = controllerPrevBlockDown;
-    const bool nextBlockDown = controllerNextBlockDown;
-    if (!m_debugUiVisible && prevBlockDown && !m_wasPrevBlockDown) {
-        cycleSelectedBlock(-1);
+    const bool prevHotbarDown = controllerPrevBlockDown;
+    const bool nextHotbarDown = controllerNextBlockDown;
+    if (!m_debugUiVisible && prevHotbarDown && !m_wasPrevBlockDown) {
+        cycleSelectedHotbar(-1);
     }
-    if (!m_debugUiVisible && nextBlockDown && !m_wasNextBlockDown) {
-        cycleSelectedBlock(+1);
+    if (!m_debugUiVisible && nextHotbarDown && !m_wasNextBlockDown) {
+        cycleSelectedHotbar(+1);
     }
-    m_wasPrevBlockDown = prevBlockDown;
-    m_wasNextBlockDown = nextBlockDown;
+    m_wasPrevBlockDown = prevHotbarDown;
+    m_wasNextBlockDown = nextHotbarDown;
+
+    if (!m_debugUiVisible) {
+        if (glfwGetKey(m_window, GLFW_KEY_1) == GLFW_PRESS) {
+            selectHotbarSlot(kHotbarSlotBlock);
+        } else if (glfwGetKey(m_window, GLFW_KEY_2) == GLFW_PRESS) {
+            selectHotbarSlot(kHotbarSlotPipe);
+        }
+    }
 
     m_input.placeBlockDown =
         glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS ||
@@ -920,6 +994,135 @@ App::CameraRaycastResult App::raycastFromCamera() const {
     return result;
 }
 
+App::InteractionRaycastResult App::raycastInteractionFromCamera(bool includePipes) const {
+    InteractionRaycastResult result{};
+    if (m_chunkGrid.chunks().empty()) {
+        return result;
+    }
+
+    const float yawRadians = math::radians(m_camera.yawDegrees);
+    const float pitchRadians = math::radians(m_camera.pitchDegrees);
+    const float cosPitch = std::cos(pitchRadians);
+    const math::Vector3 rayDirection = math::normalize(math::Vector3{
+        std::cos(yawRadians) * cosPitch,
+        std::sin(pitchRadians),
+        std::sin(yawRadians) * cosPitch
+    });
+    if (math::lengthSquared(rayDirection) <= 0.0f) {
+        return result;
+    }
+
+    const math::Vector3 rayOrigin =
+        math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
+    constexpr float kRayMaxDistance = kBlockInteractMaxDistance + 1.0f;
+
+    int vx = static_cast<int>(std::floor(rayOrigin.x));
+    int vy = static_cast<int>(std::floor(rayOrigin.y));
+    int vz = static_cast<int>(std::floor(rayOrigin.z));
+
+    const float kInf = std::numeric_limits<float>::infinity();
+    const int stepX = (rayDirection.x > 0.0f) ? 1 : (rayDirection.x < 0.0f ? -1 : 0);
+    const int stepY = (rayDirection.y > 0.0f) ? 1 : (rayDirection.y < 0.0f ? -1 : 0);
+    const int stepZ = (rayDirection.z > 0.0f) ? 1 : (rayDirection.z < 0.0f ? -1 : 0);
+
+    const float invAbsDirX = (stepX != 0) ? (1.0f / std::abs(rayDirection.x)) : kInf;
+    const float invAbsDirY = (stepY != 0) ? (1.0f / std::abs(rayDirection.y)) : kInf;
+    const float invAbsDirZ = (stepZ != 0) ? (1.0f / std::abs(rayDirection.z)) : kInf;
+
+    const float voxelBoundaryX = (stepX > 0) ? static_cast<float>(vx + 1) : static_cast<float>(vx);
+    const float voxelBoundaryY = (stepY > 0) ? static_cast<float>(vy + 1) : static_cast<float>(vy);
+    const float voxelBoundaryZ = (stepZ > 0) ? static_cast<float>(vz + 1) : static_cast<float>(vz);
+
+    float tMaxX = (stepX != 0) ? ((voxelBoundaryX - rayOrigin.x) / rayDirection.x) : kInf;
+    float tMaxY = (stepY != 0) ? ((voxelBoundaryY - rayOrigin.y) / rayDirection.y) : kInf;
+    float tMaxZ = (stepZ != 0) ? ((voxelBoundaryZ - rayOrigin.z) / rayDirection.z) : kInf;
+    float tDeltaX = invAbsDirX;
+    float tDeltaY = invAbsDirY;
+    float tDeltaZ = invAbsDirZ;
+
+    int hitFaceNormalX = 0;
+    int hitFaceNormalY = 0;
+    int hitFaceNormalZ = 0;
+    bool hasHitFaceNormal = false;
+
+    float distance = 0.0f;
+    while (distance <= kRayMaxDistance) {
+        const bool hitSolid = isSolidWorldVoxel(vx, vy, vz);
+        const bool hitPipe = includePipes && isPipeAtWorld(vx, vy, vz, nullptr);
+        if (hitSolid || hitPipe) {
+            if (!hasHitFaceNormal) {
+                if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+                    vx += stepX;
+                    distance = tMaxX;
+                    tMaxX += tDeltaX;
+                    hitFaceNormalX = -stepX;
+                    hitFaceNormalY = 0;
+                    hitFaceNormalZ = 0;
+                    hasHitFaceNormal = (stepX != 0);
+                } else if (tMaxY <= tMaxX && tMaxY <= tMaxZ) {
+                    vy += stepY;
+                    distance = tMaxY;
+                    tMaxY += tDeltaY;
+                    hitFaceNormalX = 0;
+                    hitFaceNormalY = -stepY;
+                    hitFaceNormalZ = 0;
+                    hasHitFaceNormal = (stepY != 0);
+                } else {
+                    vz += stepZ;
+                    distance = tMaxZ;
+                    tMaxZ += tDeltaZ;
+                    hitFaceNormalX = 0;
+                    hitFaceNormalY = 0;
+                    hitFaceNormalZ = -stepZ;
+                    hasHitFaceNormal = (stepZ != 0);
+                }
+                continue;
+            }
+
+            result.hit = true;
+            result.hitPipe = hitPipe;
+            result.hitSolidVoxel = hitSolid;
+            result.x = vx;
+            result.y = vy;
+            result.z = vz;
+            result.hitDistance = distance;
+            result.hasHitFaceNormal = hasHitFaceNormal;
+            result.hitFaceNormalX = hitFaceNormalX;
+            result.hitFaceNormalY = hitFaceNormalY;
+            result.hitFaceNormalZ = hitFaceNormalZ;
+            return result;
+        }
+
+        if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+            vx += stepX;
+            distance = tMaxX;
+            tMaxX += tDeltaX;
+            hitFaceNormalX = -stepX;
+            hitFaceNormalY = 0;
+            hitFaceNormalZ = 0;
+            hasHitFaceNormal = (stepX != 0);
+        } else if (tMaxY <= tMaxX && tMaxY <= tMaxZ) {
+            vy += stepY;
+            distance = tMaxY;
+            tMaxY += tDeltaY;
+            hitFaceNormalX = 0;
+            hitFaceNormalY = -stepY;
+            hitFaceNormalZ = 0;
+            hasHitFaceNormal = (stepY != 0);
+        } else {
+            vz += stepZ;
+            distance = tMaxZ;
+            tMaxZ += tDeltaZ;
+            hitFaceNormalX = 0;
+            hitFaceNormalY = 0;
+            hitFaceNormalZ = -stepZ;
+            hasHitFaceNormal = (stepZ != 0);
+        }
+    }
+
+    return result;
+}
+
 bool App::isWorldVoxelInBounds(int x, int y, int z) const {
     std::size_t chunkIndex = 0;
     int localX = 0;
@@ -928,18 +1131,27 @@ bool App::isWorldVoxelInBounds(int x, int y, int z) const {
     return worldToChunkLocal(x, y, z, chunkIndex, localX, localY, localZ);
 }
 
-void App::cycleSelectedBlock(int direction) {
-    if (kPlaceableBlockTypes.empty()) {
-        m_selectedBlockIndex = 0;
+void App::cycleSelectedHotbar(int direction) {
+    if (kHotbarSlotCount <= 0) {
+        m_selectedHotbarIndex = 0;
         return;
     }
+    const int next = (m_selectedHotbarIndex + direction) % kHotbarSlotCount;
+    selectHotbarSlot(next < 0 ? next + kHotbarSlotCount : next);
+}
 
-    const int count = static_cast<int>(kPlaceableBlockTypes.size());
-    m_selectedBlockIndex = (m_selectedBlockIndex + direction) % count;
-    if (m_selectedBlockIndex < 0) {
-        m_selectedBlockIndex += count;
+void App::selectHotbarSlot(int hotbarIndex) {
+    const int clampedIndex = std::clamp(hotbarIndex, 0, kHotbarSlotCount - 1);
+    if (m_selectedHotbarIndex == clampedIndex) {
+        return;
     }
-    std::cerr << "[" << appTimestamp() << "][app] selected block " << (m_selectedBlockIndex + 1) << "/" << count << "\n";
+    m_selectedHotbarIndex = clampedIndex;
+    const char* label = (m_selectedHotbarIndex == kHotbarSlotPipe) ? "pipe" : "block";
+    std::cerr << "[" << appTimestamp() << "][app] selected hotbar: " << label << "\n";
+}
+
+bool App::isPipeHotbarSelected() const {
+    return m_selectedHotbarIndex == kHotbarSlotPipe;
 }
 
 world::Voxel App::selectedPlaceVoxel() const {
@@ -972,6 +1184,107 @@ bool App::computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, i
     return true;
 }
 
+bool App::computePipePlacementFromInteractionRaycast(
+    const InteractionRaycastResult& raycast,
+    int& outX,
+    int& outY,
+    int& outZ,
+    int& outAxisX,
+    int& outAxisY,
+    int& outAxisZ
+) const {
+    if (!raycast.hit || !raycast.hasHitFaceNormal) {
+        return false;
+    }
+
+    int snappedAxisX = raycast.hitFaceNormalX;
+    int snappedAxisY = raycast.hitFaceNormalY;
+    int snappedAxisZ = raycast.hitFaceNormalZ;
+    int extensionSign = 1;
+
+    if (raycast.hitPipe) {
+        std::size_t pipeIndex = 0;
+        if (!isPipeAtWorld(raycast.x, raycast.y, raycast.z, &pipeIndex)) {
+            return false;
+        }
+
+        const std::vector<sim::Pipe>& pipes = m_simulation.pipes();
+        if (pipeIndex >= pipes.size()) {
+            return false;
+        }
+
+        const math::Vector3 axis = pipes[pipeIndex].axis;
+        const float absX = std::abs(axis.x);
+        const float absY = std::abs(axis.y);
+        const float absZ = std::abs(axis.z);
+        if (absX >= absY && absX >= absZ) {
+            snappedAxisX = (axis.x >= 0.0f) ? 1 : -1;
+            snappedAxisY = 0;
+            snappedAxisZ = 0;
+        } else if (absY >= absX && absY >= absZ) {
+            snappedAxisX = 0;
+            snappedAxisY = (axis.y >= 0.0f) ? 1 : -1;
+            snappedAxisZ = 0;
+        } else {
+            snappedAxisX = 0;
+            snappedAxisY = 0;
+            snappedAxisZ = (axis.z >= 0.0f) ? 1 : -1;
+        }
+
+        const int faceNormalDotAxis = (raycast.hitFaceNormalX * snappedAxisX) +
+                                      (raycast.hitFaceNormalY * snappedAxisY) +
+                                      (raycast.hitFaceNormalZ * snappedAxisZ);
+        if (faceNormalDotAxis > 0) {
+            extensionSign = 1;
+        } else if (faceNormalDotAxis < 0) {
+            extensionSign = -1;
+        } else {
+            const float yawRadians = math::radians(m_camera.yawDegrees);
+            const float pitchRadians = math::radians(m_camera.pitchDegrees);
+            const float cosPitch = std::cos(pitchRadians);
+            const math::Vector3 rayDirection = math::normalize(math::Vector3{
+                std::cos(yawRadians) * cosPitch,
+                std::sin(pitchRadians),
+                std::sin(yawRadians) * cosPitch
+            });
+            const float rayDotAxis = math::dot(
+                rayDirection,
+                math::Vector3{
+                    static_cast<float>(snappedAxisX),
+                    static_cast<float>(snappedAxisY),
+                    static_cast<float>(snappedAxisZ)
+                }
+            );
+            if (rayDotAxis > 0.0001f) {
+                extensionSign = 1;
+            } else if (rayDotAxis < -0.0001f) {
+                extensionSign = -1;
+            }
+        }
+    }
+
+    const int targetX = raycast.x + (snappedAxisX * extensionSign);
+    const int targetY = raycast.y + (snappedAxisY * extensionSign);
+    const int targetZ = raycast.z + (snappedAxisZ * extensionSign);
+    if (!isWorldVoxelInBounds(targetX, targetY, targetZ)) {
+        return false;
+    }
+    if (isSolidWorldVoxel(targetX, targetY, targetZ)) {
+        return false;
+    }
+    if (isPipeAtWorld(targetX, targetY, targetZ, nullptr)) {
+        return false;
+    }
+
+    outX = targetX;
+    outY = targetY;
+    outZ = targetZ;
+    outAxisX = snappedAxisX;
+    outAxisY = snappedAxisY;
+    outAxisZ = snappedAxisZ;
+    return true;
+}
+
 bool App::applyVoxelEdit(
     int targetX,
     int targetY,
@@ -992,6 +1305,20 @@ bool App::applyVoxelEdit(
     }
     chunk.setVoxel(localX, localY, localZ, voxel);
     return true;
+}
+
+bool App::isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const {
+    const std::vector<sim::Pipe>& pipes = m_simulation.pipes();
+    for (std::size_t pipeIndex = 0; pipeIndex < pipes.size(); ++pipeIndex) {
+        const sim::Pipe& pipe = pipes[pipeIndex];
+        if (pipe.x == worldX && pipe.y == worldY && pipe.z == worldZ) {
+            if (outPipeIndex != nullptr) {
+                *outPipeIndex = pipeIndex;
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 void App::regenerateWorld() {
@@ -1045,6 +1372,66 @@ bool App::tryRemoveVoxelFromCameraRay(std::size_t& outEditedChunkIndex) {
         world::Voxel{world::VoxelType::Empty},
         outEditedChunkIndex
     );
+}
+
+bool App::tryPlacePipeFromCameraRay() {
+    const InteractionRaycastResult raycast = raycastInteractionFromCamera(true);
+    if (!raycast.hit || raycast.hitDistance > kBlockInteractMaxDistance) {
+        return false;
+    }
+
+    int targetX = 0;
+    int targetY = 0;
+    int targetZ = 0;
+    int axisX = 0;
+    int axisY = 1;
+    int axisZ = 0;
+    if (!computePipePlacementFromInteractionRaycast(
+            raycast,
+            targetX,
+            targetY,
+            targetZ,
+            axisX,
+            axisY,
+            axisZ
+        )) {
+        return false;
+    }
+
+    const math::Vector3 axis{
+        static_cast<float>(axisX),
+        static_cast<float>(axisY),
+        static_cast<float>(axisZ)
+    };
+    m_simulation.pipes().emplace_back(
+        targetX,
+        targetY,
+        targetZ,
+        axis,
+        kDefaultPipeLength,
+        kDefaultPipeRadius,
+        kDefaultPipeTint
+    );
+    return true;
+}
+
+bool App::tryRemovePipeFromCameraRay() {
+    const InteractionRaycastResult raycast = raycastInteractionFromCamera(true);
+    if (!raycast.hit || !raycast.hitPipe || raycast.hitDistance > kBlockInteractMaxDistance) {
+        return false;
+    }
+
+    std::size_t pipeIndex = 0;
+    if (!isPipeAtWorld(raycast.x, raycast.y, raycast.z, &pipeIndex)) {
+        return false;
+    }
+
+    std::vector<sim::Pipe>& pipes = m_simulation.pipes();
+    if (pipeIndex >= pipes.size()) {
+        return false;
+    }
+    pipes.erase(pipes.begin() + static_cast<std::ptrdiff_t>(pipeIndex));
+    return true;
 }
 
 } // namespace app
