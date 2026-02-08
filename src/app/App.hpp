@@ -43,8 +43,8 @@ private:
 
     struct CameraState {
         float x = 0.0f;
-        float y = 2.0f;
-        float z = 5.0f;
+        float y = 10.0f;
+        float z = 10.0f;
         float yawDegrees = -90.0f;
         float pitchDegrees = 0.0f;
         float velocityX = 0.0f;

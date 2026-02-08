@@ -23,9 +23,14 @@ constexpr float kMaxFallSpeed = -35.0f;
 constexpr float kPitchMinDegrees = -89.0f;
 constexpr float kPitchMaxDegrees = 89.0f;
 constexpr float kBlockInteractMaxDistance = 5.0f;
-constexpr float kPlayerRadius = 0.32f;
-constexpr float kPlayerEyeHeight = 1.62f;
-constexpr float kPlayerHeight = 1.78f;
+[[maybe_unused]] constexpr float kVoxelSizeMeters = 0.25f;
+constexpr float kPlayerHeightVoxels = 7.0f;
+constexpr float kPlayerDiameterVoxels = 2.0f;
+constexpr float kPlayerEyeHeightVoxels = 6.0f;
+
+constexpr float kPlayerRadius = kPlayerDiameterVoxels * 0.5f;
+constexpr float kPlayerEyeHeight = kPlayerEyeHeightVoxels;
+constexpr float kPlayerHeight = kPlayerHeightVoxels;
 constexpr float kPlayerTopOffset = kPlayerHeight - kPlayerEyeHeight;
 constexpr float kCollisionEpsilon = 0.001f;
 

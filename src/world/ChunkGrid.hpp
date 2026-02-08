@@ -43,27 +43,33 @@ inline void ChunkGrid::initializeFlatWorld() {
     auto chunkHeightAt = [&](int worldX, int worldZ) -> int {
         const std::uint32_t broad = hash3(worldX >> 2, 0, worldZ >> 2, 0x36A17C4Du);
         const std::uint32_t fine = hash3(worldX, 1, worldZ, 0xA45F23B1u);
-        int height = 1;
-        height += static_cast<int>((broad >> 8) & 0x3u);
-        height += static_cast<int>((fine >> 11) & 0x1u);
-        return std::clamp(height, 1, Chunk::kSizeY - 2);
+        int height = 4;
+        height += static_cast<int>((broad >> 8) & 0x7u);
+        height += static_cast<int>((fine >> 11) & 0x3u);
+        return std::clamp(height, 2, Chunk::kSizeY - 4);
     };
 
     m_chunks.clear();
 
     // Keep the center chunk first so app-side interaction logic remains valid.
-    constexpr std::array<std::array<int, 2>, 9> kChunkCoords = {{
-        {{0, 0}},
-        {{-1, 0}}, {{1, 0}}, {{0, -1}}, {{0, 1}},
-        {{-1, -1}}, {{1, -1}}, {{-1, 1}}, {{1, 1}}
-    }};
+    constexpr int kChunkRadius = 3;
+    constexpr int kChunkGridWidth = (kChunkRadius * 2) + 1;
+    constexpr int kChunkCount = kChunkGridWidth * kChunkGridWidth;
 
-    m_chunks.reserve(kChunkCoords.size());
-    for (const std::array<int, 2>& coord : kChunkCoords) {
-        const int chunkX = coord[0];
-        const int chunkZ = coord[1];
-        m_chunks.emplace_back(chunkX, 0, chunkZ);
-        Chunk& chunk = m_chunks.back();
+    m_chunks.reserve(static_cast<std::size_t>(kChunkCount));
+    m_chunks.emplace_back(0, 0, 0);
+    for (int chunkZ = -kChunkRadius; chunkZ <= kChunkRadius; ++chunkZ) {
+        for (int chunkX = -kChunkRadius; chunkX <= kChunkRadius; ++chunkX) {
+            if (chunkX == 0 && chunkZ == 0) {
+                continue;
+            }
+            m_chunks.emplace_back(chunkX, 0, chunkZ);
+        }
+    }
+
+    for (Chunk& chunk : m_chunks) {
+        const int chunkX = chunk.chunkX();
+        const int chunkZ = chunk.chunkZ();
 
         for (int z = 0; z < Chunk::kSizeZ; ++z) {
             for (int x = 0; x < Chunk::kSizeX; ++x) {
@@ -77,7 +83,7 @@ inline void ChunkGrid::initializeFlatWorld() {
 
                 const std::uint32_t clutterNoise = hash3(worldX, 2, worldZ, 0x1B56C4E9u);
                 if ((clutterNoise & 0xFFu) < 20u) {
-                    const int clutterHeight = 1 + static_cast<int>((clutterNoise >> 10) % 4u);
+                    const int clutterHeight = 2 + static_cast<int>((clutterNoise >> 10) % 7u);
                     const int top = std::min(terrainHeight + clutterHeight, Chunk::kSizeY - 1);
                     for (int y = terrainHeight + 1; y <= top; ++y) {
                         chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});

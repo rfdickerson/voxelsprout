@@ -12,9 +12,9 @@ namespace world {
 
 class Chunk {
 public:
-    static constexpr int kSizeX = 16;
-    static constexpr int kSizeY = 16;
-    static constexpr int kSizeZ = 16;
+    static constexpr int kSizeX = 32;
+    static constexpr int kSizeY = 32;
+    static constexpr int kSizeZ = 32;
 
     Chunk();
     Chunk(int chunkX, int chunkY, int chunkZ);
