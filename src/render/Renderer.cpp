@@ -3410,6 +3410,15 @@ void Renderer::renderFrame(
     const math::Matrix4 viewColumnMajor = transpose(view);
     const math::Matrix4 projectionColumnMajor = transpose(projection);
 
+    const bool projectionParamsChanged =
+        std::abs(m_shadowStableAspectRatio - aspectRatio) > 0.0001f ||
+        std::abs(m_shadowStableFovDegrees - camera.fovDegrees) > 0.0001f;
+    if (projectionParamsChanged) {
+        m_shadowStableAspectRatio = aspectRatio;
+        m_shadowStableFovDegrees = camera.fovDegrees;
+        m_shadowStableCascadeRadii.fill(0.0f);
+    }
+
     const math::Vector3 sunDirection = math::normalize(math::Vector3{-0.58f, -0.42f, -0.24f});
 
     constexpr float kCascadeLambda = 0.62f;
@@ -3424,74 +3433,45 @@ void Renderer::renderFrame(
     }
 
     std::array<math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
-    float previousCascadeDistance = nearPlane;
-    math::Vector3 cameraRight = math::cross(forward, math::Vector3{0.0f, 1.0f, 0.0f});
-    if (math::lengthSquared(cameraRight) < 1e-6f) {
-        cameraRight = math::Vector3{1.0f, 0.0f, 0.0f};
-    } else {
-        cameraRight = math::normalize(cameraRight);
-    }
-    const math::Vector3 cameraUp = math::normalize(math::cross(cameraRight, forward));
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-        const float cascadeNear = previousCascadeDistance;
         const float cascadeFar = cascadeDistances[cascadeIndex];
-        previousCascadeDistance = cascadeFar;
-        const float nearHalfHeight = cascadeNear * tanHalfFov;
-        const float nearHalfWidth = nearHalfHeight * aspectRatio;
         const float farHalfHeight = cascadeFar * tanHalfFov;
         const float farHalfWidth = farHalfHeight * aspectRatio;
 
-        const math::Vector3 nearCenter = eye + (forward * cascadeNear);
-        const math::Vector3 farCenter = eye + (forward * cascadeFar);
-
-        const std::array<math::Vector3, 8> frustumCorners = {
-            nearCenter + (cameraRight * nearHalfWidth) + (cameraUp * nearHalfHeight),
-            nearCenter - (cameraRight * nearHalfWidth) + (cameraUp * nearHalfHeight),
-            nearCenter + (cameraRight * nearHalfWidth) - (cameraUp * nearHalfHeight),
-            nearCenter - (cameraRight * nearHalfWidth) - (cameraUp * nearHalfHeight),
-            farCenter + (cameraRight * farHalfWidth) + (cameraUp * farHalfHeight),
-            farCenter - (cameraRight * farHalfWidth) + (cameraUp * farHalfHeight),
-            farCenter + (cameraRight * farHalfWidth) - (cameraUp * farHalfHeight),
-            farCenter - (cameraRight * farHalfWidth) - (cameraUp * farHalfHeight),
-        };
-
-        math::Vector3 frustumCenter{};
-        for (const math::Vector3& corner : frustumCorners) {
-            frustumCenter += corner;
-        }
-        frustumCenter /= static_cast<float>(frustumCorners.size());
-
-        float boundingRadius = 0.0f;
-        for (const math::Vector3& corner : frustumCorners) {
-            boundingRadius = std::max(boundingRadius, std::sqrt(math::lengthSquared(corner - frustumCenter)));
-        }
+        // Camera-position-only cascades: only translation moves cascade centers; rotation does not.
+        const math::Vector3 frustumCenter = eye;
+        float boundingRadius =
+            std::sqrt((cascadeFar * cascadeFar) + (farHalfWidth * farHalfWidth) + (farHalfHeight * farHalfHeight));
         boundingRadius = std::max(boundingRadius * 1.04f, 24.0f);
         boundingRadius = std::ceil(boundingRadius * 16.0f) / 16.0f;
+        if (m_shadowStableCascadeRadii[cascadeIndex] <= 0.0f) {
+            m_shadowStableCascadeRadii[cascadeIndex] = boundingRadius;
+        }
+        const float cascadeRadius = m_shadowStableCascadeRadii[cascadeIndex];
 
-        const math::Vector3 lightPosition = frustumCenter - (sunDirection * (boundingRadius * 2.5f + 120.0f));
+        const math::Vector3 lightPosition = frustumCenter - (sunDirection * (cascadeRadius * 2.5f + 120.0f));
         const float sunUpDot = std::abs(math::dot(sunDirection, math::Vector3{0.0f, 1.0f, 0.0f}));
         const math::Vector3 lightUp =
             (sunUpDot > 0.95f) ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
         math::Matrix4 lightView = lookAt(lightPosition, frustumCenter, lightUp);
 
-        // Snap cascade center in light-space texel units to reduce sub-texel swimming.
-        const float worldUnitsPerTexel = (2.0f * boundingRadius) / static_cast<float>(kShadowMapSize);
+        // Snap cascade center in light-space texel units to eliminate sub-texel drift.
+        const float orthoWidth = 2.0f * cascadeRadius;
+        const float texelSize = orthoWidth / static_cast<float>(kShadowMapSize);
         const math::Vector4 centerLightSpace = lightView * math::Vector4{frustumCenter, 1.0f};
-        const float snappedCenterX =
-            std::floor((centerLightSpace.x / worldUnitsPerTexel) + 0.5f) * worldUnitsPerTexel;
-        const float snappedCenterY =
-            std::floor((centerLightSpace.y / worldUnitsPerTexel) + 0.5f) * worldUnitsPerTexel;
+        const float snappedCenterX = std::floor(centerLightSpace.x / texelSize) * texelSize;
+        const float snappedCenterY = std::floor(centerLightSpace.y / texelSize) * texelSize;
 
-        const float left = snappedCenterX - boundingRadius;
-        const float right = snappedCenterX + boundingRadius;
-        const float bottom = snappedCenterY - boundingRadius;
-        const float top = snappedCenterY + boundingRadius;
+        const float left = snappedCenterX - cascadeRadius;
+        const float right = snappedCenterX + cascadeRadius;
+        const float bottom = snappedCenterY - cascadeRadius;
+        const float top = snappedCenterY + cascadeRadius;
         // Keep a stable light-space depth range per cascade to avoid temporal pumping
         // from frame-to-frame min/max z fitting.
-        const float lightDistance = (boundingRadius * 2.5f) + 120.0f;
-        const float casterPadding = std::max(140.0f, boundingRadius * 1.5f);
-        const float lightNear = std::max(0.1f, lightDistance - boundingRadius - casterPadding);
-        const float lightFar = lightDistance + boundingRadius + casterPadding;
+        const float lightDistance = (cascadeRadius * 2.5f) + 120.0f;
+        const float casterPadding = std::max(140.0f, cascadeRadius * 1.5f);
+        const float lightNear = std::max(0.1f, lightDistance - cascadeRadius - casterPadding);
+        const float lightFar = lightDistance + cascadeRadius + casterPadding;
         const math::Matrix4 lightProjection = orthographicVulkan(
             left,
             right,
