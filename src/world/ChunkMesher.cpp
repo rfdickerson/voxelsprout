@@ -135,15 +135,9 @@ std::uint32_t PackedVoxelVertex::pack(
            ((material & kMask8) << kShiftMaterial);
 }
 
-ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid) {
+ChunkMeshData buildChunkMesh(const Chunk& chunk) {
     ChunkMeshData mesh{};
-    if (chunkGrid.chunks().empty()) {
-        return mesh;
-    }
-
     static_assert(Chunk::kSizeX <= 32 && Chunk::kSizeY <= 32 && Chunk::kSizeZ <= 32, "Packed position fields are 5-bit");
-
-    const Chunk& chunk = chunkGrid.chunks().front();
 
     constexpr std::size_t kMaxFaces = static_cast<std::size_t>(Chunk::kSizeX * Chunk::kSizeY * Chunk::kSizeZ * 6);
     mesh.vertices.reserve(kMaxFaces * 4);
@@ -193,6 +187,13 @@ ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid) {
     }
 
     return mesh;
+}
+
+ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid) {
+    if (chunkGrid.chunks().empty()) {
+        return ChunkMeshData{};
+    }
+    return buildChunkMesh(chunkGrid.chunks().front());
 }
 
 } // namespace world

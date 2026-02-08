@@ -34,6 +34,9 @@ private:
 
     void pollInput();
     void updateCamera(float dt);
+    [[nodiscard]] bool isSolidWorldVoxel(int worldX, int worldY, int worldZ) const;
+    [[nodiscard]] bool doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const;
+    void resolvePlayerCollisions(float dt);
     [[nodiscard]] CameraRaycastResult raycastFromCamera() const;
     [[nodiscard]] bool tryPlaceVoxelFromCameraRay();
     [[nodiscard]] bool tryRemoveVoxelFromCameraRay();
@@ -50,6 +53,7 @@ private:
         float smoothedMouseDeltaX = 0.0f;
         float smoothedMouseDeltaY = 0.0f;
         float fovDegrees = 75.0f;
+        bool onGround = false;
     };
 
     GLFWwindow* m_window = nullptr;

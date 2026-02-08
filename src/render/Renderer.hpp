@@ -52,6 +52,8 @@ public:
 
 private:
     static constexpr uint32_t kMaxFramesInFlight = 2;
+    static constexpr uint32_t kShadowCascadeCount = 4;
+    static constexpr uint32_t kShadowMapSize = 2048;
 
     struct FrameResources {
         // Per-frame command pool to allocate fresh command buffers every frame.
@@ -100,12 +102,12 @@ private:
         uint64_t timelineValue = 0;
     };
 
-    struct CubemapTexture {
-        VkImage image = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        VkImageView view = VK_NULL_HANDLE;
-        VkSampler sampler = VK_NULL_HANDLE;
-        uint32_t mipLevels = 1;
+    struct ChunkDrawRange {
+        uint32_t indexCount = 0;
+        uint32_t firstIndex = 0;
+        float offsetX = 0.0f;
+        float offsetY = 0.0f;
+        float offsetZ = 0.0f;
     };
 
     GLFWwindow* m_window = nullptr;
@@ -153,6 +155,7 @@ private:
     VkImage m_shadowDepthImage = VK_NULL_HANDLE;
     VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;
     VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
+    std::array<VkImageView, kShadowCascadeCount> m_shadowDepthLayerViews{};
     VkSampler m_shadowDepthSampler = VK_NULL_HANDLE;
     bool m_shadowDepthInitialized = false;
     std::vector<uint64_t> m_swapchainImageTimelineValues;
@@ -176,8 +179,6 @@ private:
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
     bool m_supportsWireframePreview = false;
     VkDeviceSize m_uniformBufferAlignment = 256;
-    CubemapTexture m_skyboxTexture{};
-    CubemapTexture m_irradianceTexture{};
 
     // Static mesh buffers for one chunk.
     // Future chunk streaming can replace these with per-chunk GPU allocations.
@@ -188,6 +189,7 @@ private:
     BufferHandle m_previewVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_previewIndexBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
+    std::vector<ChunkDrawRange> m_chunkDrawRanges;
     uint32_t m_indexCount = 0;
     uint32_t m_previewIndexCount = 0;
 
@@ -202,6 +204,9 @@ private:
     uint64_t m_lastGraphicsTimelineValue = 0;
     uint64_t m_nextTimelineValue = 1;
     uint32_t m_currentFrame = 0;
+    // Dynamic cascade split distances in view-space units.
+    // Updated per frame and consumed by shadow rendering + shading.
+    std::array<float, kShadowCascadeCount> m_shadowCascadeSplits = {20.0f, 45.0f, 90.0f, 180.0f};
 };
 
 } // namespace render

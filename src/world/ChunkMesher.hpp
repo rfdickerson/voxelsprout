@@ -55,9 +55,10 @@ struct ChunkMeshData {
     std::vector<std::uint32_t> indices;
 };
 
+ChunkMeshData buildChunkMesh(const Chunk& chunk);
+
 // Builds a mesh for the first chunk in the grid.
 // This intentionally targets one chunk only for debug clarity.
 ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid);
 
 } // namespace world
-

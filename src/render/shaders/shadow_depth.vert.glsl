@@ -5,13 +5,16 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 mvp;
     mat4 view;
     mat4 proj;
-    mat4 lightViewProj;
+    mat4 lightViewProj[4];
+    vec4 shadowCascadeSplits;
     vec4 sunDirectionIntensity;
     vec4 sunColorShadow;
+    vec4 shIrradiance[9];
 } camera;
 
 layout(push_constant) uniform ChunkPushConstants {
     vec4 chunkOffset;
+    vec4 cascadeData;
 } chunkPc;
 
 const uint kShiftX = 0u;
@@ -67,5 +70,6 @@ void main() {
 
     const vec3 basePosition = vec3(float(x), float(y), float(z));
     const vec3 worldPosition = basePosition + cornerOffset(face, corner) + chunkPc.chunkOffset.xyz;
-    gl_Position = camera.lightViewProj * vec4(worldPosition, 1.0);
+    const int cascadeIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 3);
+    gl_Position = camera.lightViewProj[cascadeIndex] * vec4(worldPosition, 1.0);
 }

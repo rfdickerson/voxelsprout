@@ -16,6 +16,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace render {
@@ -30,18 +31,22 @@ constexpr std::array<const char*, 5> kDeviceExtensions = {
     VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
     VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
 };
+constexpr uint32_t kShadowCascadeCount = 4;
 
 struct alignas(16) CameraUniform {
     float mvp[16];
     float view[16];
     float proj[16];
-    float lightViewProj[16];
+    float lightViewProj[kShadowCascadeCount][16];
+    float shadowCascadeSplits[4];
     float sunDirectionIntensity[4];
     float sunColorShadow[4];
+    float shIrradiance[9][4];
 };
 
 struct alignas(16) ChunkPushConstants {
     float chunkOffset[4];
+    float cascadeData[4];
 };
 
 world::ChunkMeshData buildSingleVoxelPreviewMesh(
@@ -147,6 +152,107 @@ math::Matrix4 lookAt(const math::Vector3& eye, const math::Vector3& target, cons
     return view;
 }
 
+math::Vector3 proceduralSkyRadiance(const math::Vector3& direction, const math::Vector3& sunDirection) {
+    const math::Vector3 dir = math::normalize(direction);
+    const math::Vector3 toSun = -math::normalize(sunDirection);
+    const float horizonT = std::clamp((dir.y * 0.5f) + 0.5f, 0.0f, 1.0f);
+    const float skyT = std::pow(horizonT, 0.35f);
+
+    const math::Vector3 horizonColor{0.80f, 0.66f, 0.45f};
+    const math::Vector3 zenithColor{0.13f, 0.29f, 0.58f};
+    const math::Vector3 baseSky = (horizonColor * (1.0f - skyT)) + (zenithColor * skyT);
+
+    const float sunDot = std::max(math::dot(dir, toSun), 0.0f);
+    const float sunDisk = std::pow(sunDot, 1100.0f);
+    const float sunGlow = std::pow(sunDot, 24.0f);
+    const math::Vector3 sunColor{1.0f, 0.94f, 0.80f};
+
+    const float aboveHorizon = std::clamp(dir.y * 4.0f + 0.2f, 0.0f, 1.0f);
+    const math::Vector3 sky = (baseSky * aboveHorizon)
+        + (sunColor * ((sunDisk * 5.0f) + (sunGlow * 1.2f)));
+
+    const math::Vector3 groundColor{0.05f, 0.06f, 0.07f};
+    return (dir.y >= 0.0f) ? sky : (groundColor * (0.45f + (0.55f * (-dir.y))));
+}
+
+float shBasis(int index, const math::Vector3& direction) {
+    const float x = direction.x;
+    const float y = direction.y;
+    const float z = direction.z;
+    switch (index) {
+    case 0: return 0.282095f;
+    case 1: return 0.488603f * y;
+    case 2: return 0.488603f * z;
+    case 3: return 0.488603f * x;
+    case 4: return 1.092548f * x * y;
+    case 5: return 1.092548f * y * z;
+    case 6: return 0.315392f * ((3.0f * z * z) - 1.0f);
+    case 7: return 1.092548f * x * z;
+    case 8: return 0.546274f * ((x * x) - (y * y));
+    default: return 0.0f;
+    }
+}
+
+std::array<math::Vector3, 9> computeIrradianceShCoefficients(const math::Vector3& sunDirection) {
+    constexpr uint32_t kThetaSamples = 16;
+    constexpr uint32_t kPhiSamples = 32;
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kTwoPi = 2.0f * kPi;
+
+    std::array<math::Vector3, 9> coefficients{};
+    for (math::Vector3& coefficient : coefficients) {
+        coefficient = math::Vector3{};
+    }
+
+    float weightSum = 0.0f;
+    for (uint32_t thetaIdx = 0; thetaIdx < kThetaSamples; ++thetaIdx) {
+        const float v = (static_cast<float>(thetaIdx) + 0.5f) / static_cast<float>(kThetaSamples);
+        const float theta = v * kPi;
+        const float sinTheta = std::sin(theta);
+        const float cosTheta = std::cos(theta);
+
+        for (uint32_t phiIdx = 0; phiIdx < kPhiSamples; ++phiIdx) {
+            const float u = (static_cast<float>(phiIdx) + 0.5f) / static_cast<float>(kPhiSamples);
+            const float phi = u * kTwoPi;
+            const math::Vector3 dir{
+                std::cos(phi) * sinTheta,
+                cosTheta,
+                std::sin(phi) * sinTheta
+            };
+
+            const math::Vector3 radiance = proceduralSkyRadiance(dir, sunDirection);
+            const float sampleWeight = sinTheta;
+            for (int basisIndex = 0; basisIndex < 9; ++basisIndex) {
+                const float basisValue = shBasis(basisIndex, dir);
+                coefficients[basisIndex] += radiance * (basisValue * sampleWeight);
+            }
+            weightSum += sampleWeight;
+        }
+    }
+
+    if (weightSum <= 0.0f) {
+        return coefficients;
+    }
+
+    const float normalization = (4.0f * kPi) / weightSum;
+    for (math::Vector3& coefficient : coefficients) {
+        coefficient *= normalization;
+    }
+
+    // Convolve SH radiance with Lambert kernel for diffuse irradiance.
+    coefficients[0] *= kPi;
+    coefficients[1] *= (2.0f * kPi / 3.0f);
+    coefficients[2] *= (2.0f * kPi / 3.0f);
+    coefficients[3] *= (2.0f * kPi / 3.0f);
+    coefficients[4] *= (kPi * 0.25f);
+    coefficients[5] *= (kPi * 0.25f);
+    coefficients[6] *= (kPi * 0.25f);
+    coefficients[7] *= (kPi * 0.25f);
+    coefficients[8] *= (kPi * 0.25f);
+
+    return coefficients;
+}
+
 uint32_t findMemoryTypeIndex(
     VkPhysicalDevice physicalDevice,
     uint32_t typeBits,
@@ -175,7 +281,11 @@ void transitionImageLayout(
     VkAccessFlags2 srcAccessMask,
     VkPipelineStageFlags2 dstStageMask,
     VkAccessFlags2 dstAccessMask,
-    VkImageAspectFlags aspectMask
+    VkImageAspectFlags aspectMask,
+    uint32_t baseArrayLayer = 0,
+    uint32_t layerCount = 1,
+    uint32_t baseMipLevel = 0,
+    uint32_t levelCount = 1
 ) {
     VkImageMemoryBarrier2 imageBarrier{};
     imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -189,10 +299,10 @@ void transitionImageLayout(
     imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     imageBarrier.image = image;
     imageBarrier.subresourceRange.aspectMask = aspectMask;
-    imageBarrier.subresourceRange.baseMipLevel = 0;
-    imageBarrier.subresourceRange.levelCount = 1;
-    imageBarrier.subresourceRange.baseArrayLayer = 0;
-    imageBarrier.subresourceRange.layerCount = 1;
+    imageBarrier.subresourceRange.baseMipLevel = baseMipLevel;
+    imageBarrier.subresourceRange.levelCount = levelCount;
+    imageBarrier.subresourceRange.baseArrayLayer = baseArrayLayer;
+    imageBarrier.subresourceRange.layerCount = layerCount;
 
     VkDependencyInfo dependencyInfo{};
     dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
@@ -860,128 +970,6 @@ bool createShaderModuleFromFileOrFallback(
     return true;
 }
 
-uint32_t readLeU32(const std::uint8_t* bytes) {
-    return static_cast<uint32_t>(bytes[0]) |
-        (static_cast<uint32_t>(bytes[1]) << 8u) |
-        (static_cast<uint32_t>(bytes[2]) << 16u) |
-        (static_cast<uint32_t>(bytes[3]) << 24u);
-}
-
-struct DdsCubemapData {
-    VkFormat format = VK_FORMAT_UNDEFINED;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t mipLevels = 0;
-    std::vector<std::uint8_t> pixelData;
-    std::vector<VkBufferImageCopy> copyRegions;
-};
-
-std::optional<DdsCubemapData> loadDdsCubemap(std::span<const char* const> fileCandidates) {
-    const std::optional<std::vector<std::uint8_t>> fileDataOpt = readBinaryFile(fileCandidates);
-    if (!fileDataOpt.has_value()) {
-        return std::nullopt;
-    }
-    const std::vector<std::uint8_t>& fileData = fileDataOpt.value();
-    if (fileData.size() < 128) {
-        return std::nullopt;
-    }
-    if (std::memcmp(fileData.data(), "DDS ", 4) != 0) {
-        return std::nullopt;
-    }
-
-    const std::uint8_t* header = fileData.data() + 4;
-    const uint32_t height = readLeU32(header + 8);
-    const uint32_t width = readLeU32(header + 12);
-    const uint32_t mipMapCount = std::max(1u, readLeU32(header + 24));
-    const uint32_t ddspfFlags = readLeU32(header + 76);
-    const uint32_t ddspfFourCC = readLeU32(header + 80);
-    const uint32_t caps2 = readLeU32(header + 108);
-
-    constexpr uint32_t kDdsFourCcDxt1 = 0x31545844u;
-    constexpr uint32_t kDdsFourCcDx10 = 0x30315844u;
-    constexpr uint32_t kDdsCaps2Cubemap = 0x00000200u;
-    constexpr uint32_t kDdsCaps2AllFaces = 0x0000FC00u;
-    constexpr uint32_t kDdsPixelFormatFourCc = 0x00000004u;
-    constexpr uint32_t kDxgiFormatBc6hUfloat = 95u;
-    constexpr uint32_t kDxgiResourceDimensionTexture2D = 3u;
-    constexpr uint32_t kD3d11ResourceMiscTextureCube = 0x4u;
-
-    if ((ddspfFlags & kDdsPixelFormatFourCc) == 0) {
-        return std::nullopt;
-    }
-    if ((caps2 & kDdsCaps2Cubemap) == 0 || (caps2 & kDdsCaps2AllFaces) != kDdsCaps2AllFaces) {
-        return std::nullopt;
-    }
-
-    VkFormat format = VK_FORMAT_UNDEFINED;
-    uint32_t blockSizeBytes = 0;
-    size_t payloadOffset = 128;
-
-    if (ddspfFourCC == kDdsFourCcDxt1) {
-        format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
-        blockSizeBytes = 8;
-    } else if (ddspfFourCC == kDdsFourCcDx10) {
-        if (fileData.size() < 148) {
-            return std::nullopt;
-        }
-        const std::uint8_t* dx10Header = fileData.data() + 128;
-        const uint32_t dxgiFormat = readLeU32(dx10Header + 0);
-        const uint32_t resourceDimension = readLeU32(dx10Header + 4);
-        const uint32_t miscFlag = readLeU32(dx10Header + 8);
-        if (
-            dxgiFormat != kDxgiFormatBc6hUfloat ||
-            resourceDimension != kDxgiResourceDimensionTexture2D ||
-            (miscFlag & kD3d11ResourceMiscTextureCube) == 0
-        ) {
-            return std::nullopt;
-        }
-        format = VK_FORMAT_BC6H_UFLOAT_BLOCK;
-        blockSizeBytes = 16;
-        payloadOffset = 148;
-    } else {
-        return std::nullopt;
-    }
-
-    DdsCubemapData ddsData{};
-    ddsData.format = format;
-    ddsData.width = width;
-    ddsData.height = height;
-    ddsData.mipLevels = mipMapCount;
-
-    size_t dataCursor = payloadOffset;
-    for (uint32_t face = 0; face < 6; ++face) {
-        for (uint32_t mip = 0; mip < mipMapCount; ++mip) {
-            const uint32_t mipWidth = std::max(1u, width >> mip);
-            const uint32_t mipHeight = std::max(1u, height >> mip);
-            const uint32_t blocksWide = std::max(1u, (mipWidth + 3u) / 4u);
-            const uint32_t blocksHigh = std::max(1u, (mipHeight + 3u) / 4u);
-            const size_t mipSize = static_cast<size_t>(blocksWide) * blocksHigh * blockSizeBytes;
-            if (dataCursor + mipSize > fileData.size()) {
-                return std::nullopt;
-            }
-
-            VkBufferImageCopy copyRegion{};
-            copyRegion.bufferOffset = static_cast<VkDeviceSize>(dataCursor - payloadOffset);
-            copyRegion.bufferRowLength = 0;
-            copyRegion.bufferImageHeight = 0;
-            copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            copyRegion.imageSubresource.mipLevel = mip;
-            copyRegion.imageSubresource.baseArrayLayer = face;
-            copyRegion.imageSubresource.layerCount = 1;
-            copyRegion.imageOffset = {0, 0, 0};
-            copyRegion.imageExtent = {mipWidth, mipHeight, 1};
-            ddsData.copyRegions.push_back(copyRegion);
-
-            dataCursor += mipSize;
-        }
-    }
-
-    const size_t pixelByteCount = dataCursor - payloadOffset;
-    ddsData.pixelData.resize(pixelByteCount);
-    std::memcpy(ddsData.pixelData.data(), fileData.data() + payloadOffset, pixelByteCount);
-    return ddsData;
-}
-
 } // namespace
 
 bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
@@ -1442,325 +1430,20 @@ bool Renderer::createPreviewBuffers() {
 }
 
 bool Renderer::createEnvironmentResources() {
-    if (
-        m_skyboxTexture.image != VK_NULL_HANDLE &&
-        m_skyboxTexture.view != VK_NULL_HANDLE &&
-        m_skyboxTexture.sampler != VK_NULL_HANDLE &&
-        m_irradianceTexture.image != VK_NULL_HANDLE &&
-        m_irradianceTexture.view != VK_NULL_HANDLE &&
-        m_irradianceTexture.sampler != VK_NULL_HANDLE
-    ) {
-        return true;
-    }
-
-    auto createCubemapTexture = [&](std::span<const char* const> fileCandidates, CubemapTexture& outTexture) -> bool {
-        const std::optional<DdsCubemapData> ddsDataOpt = loadDdsCubemap(fileCandidates);
-        if (!ddsDataOpt.has_value()) {
-            std::cerr << "[render] failed to load cubemap DDS\n";
-            return false;
-        }
-        const DdsCubemapData& ddsData = ddsDataOpt.value();
-
-        VkFormatProperties formatProperties{};
-        vkGetPhysicalDeviceFormatProperties(m_physicalDevice, ddsData.format, &formatProperties);
-        const bool supportsSampling =
-            (formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
-        const bool supportsTransferDst =
-            (formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) != 0;
-        if (!supportsSampling || !supportsTransferDst) {
-            std::cerr << "[render] cubemap format not supported for sampled+transfer dst\n";
-            return false;
-        }
-
-        BufferCreateDesc stagingCreateDesc{};
-        stagingCreateDesc.size = static_cast<VkDeviceSize>(ddsData.pixelData.size());
-        stagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        stagingCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        stagingCreateDesc.initialData = ddsData.pixelData.data();
-        const BufferHandle stagingHandle = m_bufferAllocator.createBuffer(stagingCreateDesc);
-        if (stagingHandle == kInvalidBufferHandle) {
-            std::cerr << "[render] failed to allocate cubemap staging buffer\n";
-            return false;
-        }
-
-        std::array<uint32_t, 2> queueFamilies = {
-            m_graphicsQueueFamilyIndex,
-            m_transferQueueFamilyIndex
-        };
-        const bool useConcurrentSharing = queueFamilies[0] != queueFamilies[1];
-
-        VkImageCreateInfo imageCreateInfo{};
-        imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageCreateInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-        imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageCreateInfo.format = ddsData.format;
-        imageCreateInfo.extent.width = ddsData.width;
-        imageCreateInfo.extent.height = ddsData.height;
-        imageCreateInfo.extent.depth = 1;
-        imageCreateInfo.mipLevels = ddsData.mipLevels;
-        imageCreateInfo.arrayLayers = 6;
-        imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        imageCreateInfo.sharingMode = useConcurrentSharing ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE;
-        imageCreateInfo.queueFamilyIndexCount = useConcurrentSharing ? 2u : 0u;
-        imageCreateInfo.pQueueFamilyIndices = useConcurrentSharing ? queueFamilies.data() : nullptr;
-        imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-        VkImage image = VK_NULL_HANDLE;
-        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &image);
-        if (imageResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImage(cubemap)", imageResult);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-
-        VkMemoryRequirements memoryRequirements{};
-        vkGetImageMemoryRequirements(m_device, image, &memoryRequirements);
-        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
-            m_physicalDevice,
-            memoryRequirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-        );
-        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-            std::cerr << "[render] no memory type for cubemap image\n";
-            vkDestroyImage(m_device, image, nullptr);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-
-        VkMemoryAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = memoryRequirements.size;
-        allocateInfo.memoryTypeIndex = memoryTypeIndex;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &memory);
-        if (allocResult != VK_SUCCESS) {
-            logVkFailure("vkAllocateMemory(cubemap)", allocResult);
-            vkDestroyImage(m_device, image, nullptr);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-
-        const VkResult bindResult = vkBindImageMemory(m_device, image, memory, 0);
-        if (bindResult != VK_SUCCESS) {
-            logVkFailure("vkBindImageMemory(cubemap)", bindResult);
-            vkFreeMemory(m_device, memory, nullptr);
-            vkDestroyImage(m_device, image, nullptr);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-
-        if (m_transferCommandBufferInFlightValue > 0 && !waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
-            vkFreeMemory(m_device, memory, nullptr);
-            vkDestroyImage(m_device, image, nullptr);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-        m_transferCommandBufferInFlightValue = 0;
-
-        if (vkResetCommandPool(m_device, m_transferCommandPool, 0) != VK_SUCCESS) {
-            std::cerr << "[render] vkResetCommandPool failed for cubemap upload\n";
-            vkFreeMemory(m_device, memory, nullptr);
-            vkDestroyImage(m_device, image, nullptr);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(m_transferCommandBuffer, &beginInfo) != VK_SUCCESS) {
-            std::cerr << "[render] vkBeginCommandBuffer failed for cubemap upload\n";
-            vkFreeMemory(m_device, memory, nullptr);
-            vkDestroyImage(m_device, image, nullptr);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-
-        VkImageMemoryBarrier2 toTransferBarrier{};
-        toTransferBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        toTransferBarrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-        toTransferBarrier.srcAccessMask = VK_ACCESS_2_NONE;
-        toTransferBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-        toTransferBarrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        toTransferBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        toTransferBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toTransferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toTransferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toTransferBarrier.image = image;
-        toTransferBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        toTransferBarrier.subresourceRange.baseMipLevel = 0;
-        toTransferBarrier.subresourceRange.levelCount = ddsData.mipLevels;
-        toTransferBarrier.subresourceRange.baseArrayLayer = 0;
-        toTransferBarrier.subresourceRange.layerCount = 6;
-
-        VkDependencyInfo toTransferDependency{};
-        toTransferDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        toTransferDependency.imageMemoryBarrierCount = 1;
-        toTransferDependency.pImageMemoryBarriers = &toTransferBarrier;
-        vkCmdPipelineBarrier2(m_transferCommandBuffer, &toTransferDependency);
-
-        const VkBuffer stagingBuffer = m_bufferAllocator.getBuffer(stagingHandle);
-        vkCmdCopyBufferToImage(
-            m_transferCommandBuffer,
-            stagingBuffer,
-            image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            static_cast<uint32_t>(ddsData.copyRegions.size()),
-            ddsData.copyRegions.data()
-        );
-
-        VkImageMemoryBarrier2 toShaderReadBarrier{};
-        toShaderReadBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        toShaderReadBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-        toShaderReadBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        toShaderReadBarrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-        toShaderReadBarrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-        toShaderReadBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        toShaderReadBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        toShaderReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toShaderReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toShaderReadBarrier.image = image;
-        toShaderReadBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        toShaderReadBarrier.subresourceRange.baseMipLevel = 0;
-        toShaderReadBarrier.subresourceRange.levelCount = ddsData.mipLevels;
-        toShaderReadBarrier.subresourceRange.baseArrayLayer = 0;
-        toShaderReadBarrier.subresourceRange.layerCount = 6;
-
-        VkDependencyInfo toShaderReadDependency{};
-        toShaderReadDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        toShaderReadDependency.imageMemoryBarrierCount = 1;
-        toShaderReadDependency.pImageMemoryBarriers = &toShaderReadBarrier;
-        vkCmdPipelineBarrier2(m_transferCommandBuffer, &toShaderReadDependency);
-
-        if (vkEndCommandBuffer(m_transferCommandBuffer) != VK_SUCCESS) {
-            std::cerr << "[render] vkEndCommandBuffer failed for cubemap upload\n";
-            vkFreeMemory(m_device, memory, nullptr);
-            vkDestroyImage(m_device, image, nullptr);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-
-        VkFenceCreateInfo fenceCreateInfo{};
-        fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        VkFence uploadFence = VK_NULL_HANDLE;
-        if (vkCreateFence(m_device, &fenceCreateInfo, nullptr, &uploadFence) != VK_SUCCESS) {
-            std::cerr << "[render] failed to create fence for cubemap upload\n";
-            vkFreeMemory(m_device, memory, nullptr);
-            vkDestroyImage(m_device, image, nullptr);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &m_transferCommandBuffer;
-        const VkResult submitResult = vkQueueSubmit(m_transferQueue, 1, &submitInfo, uploadFence);
-        if (submitResult != VK_SUCCESS) {
-            logVkFailure("vkQueueSubmit(cubemapUpload)", submitResult);
-            vkDestroyFence(m_device, uploadFence, nullptr);
-            vkFreeMemory(m_device, memory, nullptr);
-            vkDestroyImage(m_device, image, nullptr);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-        const VkResult waitFenceResult = vkWaitForFences(m_device, 1, &uploadFence, VK_TRUE, std::numeric_limits<uint64_t>::max());
-        vkDestroyFence(m_device, uploadFence, nullptr);
-        if (waitFenceResult != VK_SUCCESS) {
-            logVkFailure("vkWaitForFences(cubemapUpload)", waitFenceResult);
-            vkFreeMemory(m_device, memory, nullptr);
-            vkDestroyImage(m_device, image, nullptr);
-            m_bufferAllocator.destroyBuffer(stagingHandle);
-            return false;
-        }
-
-        m_bufferAllocator.destroyBuffer(stagingHandle);
-
-        VkImageViewCreateInfo viewCreateInfo{};
-        viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewCreateInfo.image = image;
-        viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
-        viewCreateInfo.format = ddsData.format;
-        viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewCreateInfo.subresourceRange.baseMipLevel = 0;
-        viewCreateInfo.subresourceRange.levelCount = ddsData.mipLevels;
-        viewCreateInfo.subresourceRange.baseArrayLayer = 0;
-        viewCreateInfo.subresourceRange.layerCount = 6;
-
-        VkImageView view = VK_NULL_HANDLE;
-        const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &view);
-        if (viewResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImageView(cubemap)", viewResult);
-            vkFreeMemory(m_device, memory, nullptr);
-            vkDestroyImage(m_device, image, nullptr);
-            return false;
-        }
-
-        VkSamplerCreateInfo samplerCreateInfo{};
-        samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
-        samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
-        samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerCreateInfo.mipLodBias = 0.0f;
-        samplerCreateInfo.anisotropyEnable = VK_FALSE;
-        samplerCreateInfo.compareEnable = VK_FALSE;
-        samplerCreateInfo.minLod = 0.0f;
-        samplerCreateInfo.maxLod = static_cast<float>(ddsData.mipLevels - 1);
-        samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
-        samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
-
-        VkSampler sampler = VK_NULL_HANDLE;
-        const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &sampler);
-        if (samplerResult != VK_SUCCESS) {
-            logVkFailure("vkCreateSampler(cubemap)", samplerResult);
-            vkDestroyImageView(m_device, view, nullptr);
-            vkFreeMemory(m_device, memory, nullptr);
-            vkDestroyImage(m_device, image, nullptr);
-            return false;
-        }
-
-        outTexture.image = image;
-        outTexture.memory = memory;
-        outTexture.view = view;
-        outTexture.sampler = sampler;
-        outTexture.mipLevels = ddsData.mipLevels;
-        return true;
-    };
-
-    constexpr std::array<const char*, 3> kSkyboxFileCandidates = {
-        "assets/skybox/skybox.dds",
-        "../assets/skybox/skybox.dds",
-        "../../assets/skybox/skybox.dds",
-    };
-    constexpr std::array<const char*, 3> kIrradianceFileCandidates = {
-        "assets/skybox/irradiance.dds",
-        "../assets/skybox/irradiance.dds",
-        "../../assets/skybox/irradiance.dds",
-    };
-
-    if (!createCubemapTexture(kSkyboxFileCandidates, m_skyboxTexture)) {
-        destroyEnvironmentResources();
-        return false;
-    }
-    if (!createCubemapTexture(kIrradianceFileCandidates, m_irradianceTexture)) {
-        destroyEnvironmentResources();
-        return false;
-    }
-
-    std::cerr << "[render] environment cubemaps ready\n";
+    std::cerr << "[render] environment uses procedural sky + SH irradiance\n";
     return true;
 }
 
 bool Renderer::createShadowResources() {
+    bool hasAllLayerViews = true;
+    for (VkImageView layerView : m_shadowDepthLayerViews) {
+        hasAllLayerViews = hasAllLayerViews && (layerView != VK_NULL_HANDLE);
+    }
     if (
         m_shadowDepthImage != VK_NULL_HANDLE &&
         m_shadowDepthMemory != VK_NULL_HANDLE &&
         m_shadowDepthImageView != VK_NULL_HANDLE &&
+        hasAllLayerViews &&
         m_shadowDepthSampler != VK_NULL_HANDLE
     ) {
         return true;
@@ -1771,8 +1454,6 @@ bool Renderer::createShadowResources() {
         return false;
     }
 
-    constexpr uint32_t kShadowMapSize = 2048;
-
     VkImageCreateInfo imageCreateInfo{};
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -1781,7 +1462,7 @@ bool Renderer::createShadowResources() {
     imageCreateInfo.extent.height = kShadowMapSize;
     imageCreateInfo.extent.depth = 1;
     imageCreateInfo.mipLevels = 1;
-    imageCreateInfo.arrayLayers = 1;
+    imageCreateInfo.arrayLayers = kShadowCascadeCount;
     imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -1828,18 +1509,32 @@ bool Renderer::createShadowResources() {
     VkImageViewCreateInfo viewCreateInfo{};
     viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewCreateInfo.image = m_shadowDepthImage;
-    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     viewCreateInfo.format = m_shadowDepthFormat;
     viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
     viewCreateInfo.subresourceRange.baseMipLevel = 0;
     viewCreateInfo.subresourceRange.levelCount = 1;
     viewCreateInfo.subresourceRange.baseArrayLayer = 0;
-    viewCreateInfo.subresourceRange.layerCount = 1;
+    viewCreateInfo.subresourceRange.layerCount = kShadowCascadeCount;
     const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_shadowDepthImageView);
     if (viewResult != VK_SUCCESS) {
         logVkFailure("vkCreateImageView(shadowDepth)", viewResult);
         destroyShadowResources();
         return false;
+    }
+
+    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        VkImageViewCreateInfo layerViewCreateInfo = viewCreateInfo;
+        layerViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        layerViewCreateInfo.subresourceRange.baseArrayLayer = cascadeIndex;
+        layerViewCreateInfo.subresourceRange.layerCount = 1;
+        const VkResult layerViewResult =
+            vkCreateImageView(m_device, &layerViewCreateInfo, nullptr, &m_shadowDepthLayerViews[cascadeIndex]);
+        if (layerViewResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImageView(shadowDepthLayer)", layerViewResult);
+            destroyShadowResources();
+            return false;
+        }
     }
 
     VkSamplerCreateInfo samplerCreateInfo{};
@@ -1866,7 +1561,8 @@ bool Renderer::createShadowResources() {
     }
 
     m_shadowDepthInitialized = false;
-    std::cerr << "[render] shadow resources ready (" << kShadowMapSize << "x" << kShadowMapSize << ")\n";
+    std::cerr << "[render] shadow resources ready (" << kShadowMapSize << "x" << kShadowMapSize
+              << ", cascades=" << kShadowCascadeCount << ")\n";
     return true;
 }
 
@@ -2245,18 +1941,6 @@ bool Renderer::createDescriptorResources() {
         mvpBinding.descriptorCount = 1;
         mvpBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        VkDescriptorSetLayoutBinding irradianceBinding{};
-        irradianceBinding.binding = 1;
-        irradianceBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        irradianceBinding.descriptorCount = 1;
-        irradianceBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-        VkDescriptorSetLayoutBinding skyboxBinding{};
-        skyboxBinding.binding = 2;
-        skyboxBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        skyboxBinding.descriptorCount = 1;
-        skyboxBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
         VkDescriptorSetLayoutBinding hdrSceneBinding{};
         hdrSceneBinding.binding = 3;
         hdrSceneBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -2269,10 +1953,8 @@ bool Renderer::createDescriptorResources() {
         shadowMapBinding.descriptorCount = 1;
         shadowMapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
+        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
             mvpBinding,
-            irradianceBinding,
-            skyboxBinding,
             hdrSceneBinding,
             shadowMapBinding
         };
@@ -2298,7 +1980,7 @@ bool Renderer::createDescriptorResources() {
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                4 * kMaxFramesInFlight
+                2 * kMaxFramesInFlight
             }
         };
 
@@ -3021,9 +2703,33 @@ bool Renderer::createGraphicsPipeline() {
 }
 
 bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid) {
-    // Build one chunk mesh and upload through the transfer queue.
-    // Future chunk streaming can replace this with region-level mesh patches.
-    const world::ChunkMeshData mesh = world::buildSingleChunkMesh(chunkGrid);
+    world::ChunkMeshData mesh{};
+    std::vector<ChunkDrawRange> chunkDrawRanges;
+    chunkDrawRanges.reserve(chunkGrid.chunks().size());
+
+    for (const world::Chunk& chunk : chunkGrid.chunks()) {
+        const world::ChunkMeshData chunkMesh = world::buildChunkMesh(chunk);
+        if (chunkMesh.vertices.empty() || chunkMesh.indices.empty()) {
+            continue;
+        }
+
+        const uint32_t baseVertex = static_cast<uint32_t>(mesh.vertices.size());
+        const uint32_t firstIndex = static_cast<uint32_t>(mesh.indices.size());
+        mesh.vertices.insert(mesh.vertices.end(), chunkMesh.vertices.begin(), chunkMesh.vertices.end());
+        mesh.indices.reserve(mesh.indices.size() + chunkMesh.indices.size());
+        for (uint32_t index : chunkMesh.indices) {
+            mesh.indices.push_back(index + baseVertex);
+        }
+
+        ChunkDrawRange drawRange{};
+        drawRange.indexCount = static_cast<uint32_t>(chunkMesh.indices.size());
+        drawRange.firstIndex = firstIndex;
+        drawRange.offsetX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
+        drawRange.offsetY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
+        drawRange.offsetZ = static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ);
+        chunkDrawRanges.push_back(drawRange);
+    }
+
     if (mesh.vertices.empty() || mesh.indices.empty()) {
         std::cerr << "[render] chunk mesher produced no geometry\n";
         return false;
@@ -3187,6 +2893,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid) {
     m_vertexBufferHandle = newVertexHandle;
     m_indexBufferHandle = newIndexHandle;
     m_indexCount = static_cast<uint32_t>(mesh.indices.size());
+    m_chunkDrawRanges = std::move(chunkDrawRanges);
     m_currentChunkReadyTimelineValue = transferSignalValue;
     m_pendingTransferTimelineValue = transferSignalValue;
     m_transferCommandBufferInFlightValue = transferSignalValue;
@@ -3359,8 +3066,12 @@ void Renderer::renderFrame(
     }
 
     const float aspectRatio = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
+    const float nearPlane = 0.1f;
+    const float farPlane = 500.0f;
     const float yawRadians = math::radians(camera.yawDegrees);
     const float pitchRadians = math::radians(camera.pitchDegrees);
+    const float halfFovRadians = math::radians(camera.fovDegrees) * 0.5f;
+    const float tanHalfFov = std::tan(halfFovRadians);
     const float cosPitch = std::cos(pitchRadians);
     const math::Vector3 eye{camera.x, camera.y, camera.z};
     const math::Vector3 forward{
@@ -3368,22 +3079,100 @@ void Renderer::renderFrame(
         std::sin(pitchRadians),
         std::sin(yawRadians) * cosPitch
     };
+    const math::Vector3 right = math::normalize(math::cross(forward, math::Vector3{0.0f, 1.0f, 0.0f}));
+    const math::Vector3 up = math::normalize(math::cross(right, forward));
+
     const math::Matrix4 view = lookAt(eye, eye + forward, math::Vector3{0.0f, 1.0f, 0.0f});
-    const math::Matrix4 projection = perspectiveVulkan(math::radians(camera.fovDegrees), aspectRatio, 0.1f, 500.0f);
+    const math::Matrix4 projection = perspectiveVulkan(math::radians(camera.fovDegrees), aspectRatio, nearPlane, farPlane);
     const math::Matrix4 mvp = projection * view;
     const math::Matrix4 mvpColumnMajor = transpose(mvp);
     const math::Matrix4 viewColumnMajor = transpose(view);
     const math::Matrix4 projectionColumnMajor = transpose(projection);
 
-    const math::Vector3 sunDirection = math::normalize(math::Vector3{-0.55f, -1.0f, -0.35f});
-    const math::Vector3 sceneCenter{16.0f, 6.0f, 16.0f};
-    const math::Vector3 lightPosition = sceneCenter - (sunDirection * 110.0f);
-    const float sunUpDot = std::abs(math::dot(sunDirection, math::Vector3{0.0f, 1.0f, 0.0f}));
-    const math::Vector3 lightUp = (sunUpDot > 0.95f) ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
-    const math::Matrix4 lightView = lookAt(lightPosition, sceneCenter, lightUp);
-    const math::Matrix4 lightProjection = orthographicVulkan(-96.0f, 96.0f, -96.0f, 96.0f, 1.0f, 260.0f);
-    const math::Matrix4 lightViewProj = lightProjection * lightView;
-    const math::Matrix4 lightViewProjColumnMajor = transpose(lightViewProj);
+    const math::Vector3 sunDirection = math::normalize(math::Vector3{-0.18f, -1.85f, -0.12f});
+
+    constexpr float kCascadeLambda = 0.62f;
+    std::array<float, kShadowCascadeCount> cascadeDistances{};
+    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        const float p = static_cast<float>(cascadeIndex + 1) / static_cast<float>(kShadowCascadeCount);
+        const float logarithmicSplit = nearPlane * std::pow(farPlane / nearPlane, p);
+        const float uniformSplit = nearPlane + ((farPlane - nearPlane) * p);
+        cascadeDistances[cascadeIndex] =
+            (kCascadeLambda * logarithmicSplit) + ((1.0f - kCascadeLambda) * uniformSplit);
+        m_shadowCascadeSplits[cascadeIndex] = cascadeDistances[cascadeIndex];
+    }
+
+    std::array<math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
+    float previousCascadeDistance = nearPlane;
+    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        const float cascadeNear = previousCascadeDistance;
+        const float cascadeFar = cascadeDistances[cascadeIndex];
+        previousCascadeDistance = cascadeFar;
+
+        const float nearHalfHeight = cascadeNear * tanHalfFov;
+        const float nearHalfWidth = nearHalfHeight * aspectRatio;
+        const float farHalfHeight = cascadeFar * tanHalfFov;
+        const float farHalfWidth = farHalfHeight * aspectRatio;
+
+        std::array<math::Vector3, 8> frustumCorners = {
+            eye + (forward * cascadeNear) - (right * nearHalfWidth) - (up * nearHalfHeight),
+            eye + (forward * cascadeNear) + (right * nearHalfWidth) - (up * nearHalfHeight),
+            eye + (forward * cascadeNear) - (right * nearHalfWidth) + (up * nearHalfHeight),
+            eye + (forward * cascadeNear) + (right * nearHalfWidth) + (up * nearHalfHeight),
+            eye + (forward * cascadeFar) - (right * farHalfWidth) - (up * farHalfHeight),
+            eye + (forward * cascadeFar) + (right * farHalfWidth) - (up * farHalfHeight),
+            eye + (forward * cascadeFar) - (right * farHalfWidth) + (up * farHalfHeight),
+            eye + (forward * cascadeFar) + (right * farHalfWidth) + (up * farHalfHeight)
+        };
+
+        math::Vector3 frustumCenter{};
+        for (const math::Vector3& corner : frustumCorners) {
+            frustumCenter += corner;
+        }
+        frustumCenter /= 8.0f;
+
+        float boundingRadius = 0.0f;
+        for (const math::Vector3& corner : frustumCorners) {
+            const float distance = std::sqrt(math::lengthSquared(corner - frustumCenter));
+            boundingRadius = std::max(boundingRadius, distance);
+        }
+        boundingRadius = std::ceil(boundingRadius * 16.0f) / 16.0f;
+
+        const math::Vector3 lightPosition = frustumCenter - (sunDirection * (boundingRadius + 160.0f));
+        const float sunUpDot = std::abs(math::dot(sunDirection, math::Vector3{0.0f, 1.0f, 0.0f}));
+        const math::Vector3 lightUp =
+            (sunUpDot > 0.95f) ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
+        const math::Matrix4 lightView = lookAt(lightPosition, frustumCenter, lightUp);
+
+        float minX = std::numeric_limits<float>::max();
+        float maxX = std::numeric_limits<float>::lowest();
+        float minY = std::numeric_limits<float>::max();
+        float maxY = std::numeric_limits<float>::lowest();
+        float minZ = std::numeric_limits<float>::max();
+        float maxZ = std::numeric_limits<float>::lowest();
+        for (const math::Vector3& corner : frustumCorners) {
+            const math::Vector4 lightSpaceCorner = lightView * math::Vector4{corner, 1.0f};
+            minX = std::min(minX, lightSpaceCorner.x);
+            maxX = std::max(maxX, lightSpaceCorner.x);
+            minY = std::min(minY, lightSpaceCorner.y);
+            maxY = std::max(maxY, lightSpaceCorner.y);
+            minZ = std::min(minZ, lightSpaceCorner.z);
+            maxZ = std::max(maxZ, lightSpaceCorner.z);
+        }
+
+        const float zPadding = 220.0f;
+        const math::Matrix4 lightProjection = orthographicVulkan(
+            minX,
+            maxX,
+            minY,
+            maxY,
+            minZ - zPadding,
+            maxZ + zPadding
+        );
+        lightViewProjMatrices[cascadeIndex] = lightProjection * lightView;
+    }
+
+    const std::array<math::Vector3, 9> shIrradiance = computeIrradianceShCoefficients(sunDirection);
 
     const std::optional<RingBufferSlice> mvpSliceOpt =
         m_uploadRing.allocate(sizeof(CameraUniform), m_uniformBufferAlignment);
@@ -3396,15 +3185,29 @@ void Renderer::renderFrame(
     std::memcpy(mvpUniform.mvp, mvpColumnMajor.m, sizeof(mvpUniform.mvp));
     std::memcpy(mvpUniform.view, viewColumnMajor.m, sizeof(mvpUniform.view));
     std::memcpy(mvpUniform.proj, projectionColumnMajor.m, sizeof(mvpUniform.proj));
-    std::memcpy(mvpUniform.lightViewProj, lightViewProjColumnMajor.m, sizeof(mvpUniform.lightViewProj));
+    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        const math::Matrix4 lightViewProjColumnMajor = transpose(lightViewProjMatrices[cascadeIndex]);
+        std::memcpy(
+            mvpUniform.lightViewProj[cascadeIndex],
+            lightViewProjColumnMajor.m,
+            sizeof(mvpUniform.lightViewProj[cascadeIndex])
+        );
+        mvpUniform.shadowCascadeSplits[cascadeIndex] = cascadeDistances[cascadeIndex];
+    }
     mvpUniform.sunDirectionIntensity[0] = sunDirection.x;
     mvpUniform.sunDirectionIntensity[1] = sunDirection.y;
     mvpUniform.sunDirectionIntensity[2] = sunDirection.z;
-    mvpUniform.sunDirectionIntensity[3] = 3.0f;
+    mvpUniform.sunDirectionIntensity[3] = 3.5f;
     mvpUniform.sunColorShadow[0] = 1.0f;
     mvpUniform.sunColorShadow[1] = 0.95f;
     mvpUniform.sunColorShadow[2] = 0.86f;
     mvpUniform.sunColorShadow[3] = 1.0f;
+    for (uint32_t i = 0; i < shIrradiance.size(); ++i) {
+        mvpUniform.shIrradiance[i][0] = shIrradiance[i].x;
+        mvpUniform.shIrradiance[i][1] = shIrradiance[i].y;
+        mvpUniform.shIrradiance[i][2] = shIrradiance[i].z;
+        mvpUniform.shIrradiance[i][3] = 0.0f;
+    }
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     VkDescriptorBufferInfo bufferInfo{};
@@ -3414,16 +3217,6 @@ void Renderer::renderFrame(
 
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-
-    VkDescriptorImageInfo irradianceImageInfo{};
-    irradianceImageInfo.sampler = m_irradianceTexture.sampler;
-    irradianceImageInfo.imageView = m_irradianceTexture.view;
-    irradianceImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    VkDescriptorImageInfo skyboxImageInfo{};
-    skyboxImageInfo.sampler = m_skyboxTexture.sampler;
-    skyboxImageInfo.imageView = m_skyboxTexture.view;
-    skyboxImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo hdrSceneImageInfo{};
     hdrSceneImageInfo.sampler = m_hdrResolveSampler;
@@ -3435,7 +3228,7 @@ void Renderer::renderFrame(
     shadowMapImageInfo.imageView = m_shadowDepthImageView;
     shadowMapImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
-    std::array<VkWriteDescriptorSet, 5> writes{};
+    std::array<VkWriteDescriptorSet, 3> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -3445,31 +3238,17 @@ void Renderer::renderFrame(
 
     writes[1] = write;
     writes[1].dstSet = m_descriptorSets[m_currentFrame];
-    writes[1].dstBinding = 1;
+    writes[1].dstBinding = 3;
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].pImageInfo = &irradianceImageInfo;
+    writes[1].pImageInfo = &hdrSceneImageInfo;
 
     writes[2] = write;
     writes[2].dstSet = m_descriptorSets[m_currentFrame];
-    writes[2].dstBinding = 2;
+    writes[2].dstBinding = 4;
     writes[2].descriptorCount = 1;
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[2].pImageInfo = &skyboxImageInfo;
-
-    writes[3] = write;
-    writes[3].dstSet = m_descriptorSets[m_currentFrame];
-    writes[3].dstBinding = 3;
-    writes[3].descriptorCount = 1;
-    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[3].pImageInfo = &hdrSceneImageInfo;
-
-    writes[4] = write;
-    writes[4].dstSet = m_descriptorSets[m_currentFrame];
-    writes[4].dstBinding = 4;
-    writes[4].descriptorCount = 1;
-    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[4].pImageInfo = &shadowMapImageInfo;
+    writes[2].pImageInfo = &shadowMapImageInfo;
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -3495,31 +3274,14 @@ void Renderer::renderFrame(
         shadowInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT
+        VK_IMAGE_ASPECT_DEPTH_BIT,
+        0,
+        kShadowCascadeCount
     );
 
-    constexpr uint32_t kShadowMapSize = 2048;
     VkClearValue shadowDepthClearValue{};
     shadowDepthClearValue.depthStencil.depth = 1.0f;
     shadowDepthClearValue.depthStencil.stencil = 0;
-
-    VkRenderingAttachmentInfo shadowDepthAttachment{};
-    shadowDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    shadowDepthAttachment.imageView = m_shadowDepthImageView;
-    shadowDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    shadowDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    shadowDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    shadowDepthAttachment.clearValue = shadowDepthClearValue;
-
-    VkRenderingInfo shadowRenderingInfo{};
-    shadowRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    shadowRenderingInfo.renderArea.offset = {0, 0};
-    shadowRenderingInfo.renderArea.extent = {kShadowMapSize, kShadowMapSize};
-    shadowRenderingInfo.layerCount = 1;
-    shadowRenderingInfo.colorAttachmentCount = 0;
-    shadowRenderingInfo.pDepthAttachment = &shadowDepthAttachment;
-
-    vkCmdBeginRendering(commandBuffer, &shadowRenderingInfo);
 
     VkViewport shadowViewport{};
     shadowViewport.x = 0.0f;
@@ -3533,7 +3295,6 @@ void Renderer::renderFrame(
     VkRect2D shadowScissor{};
     shadowScissor.offset = {0, 0};
     shadowScissor.extent = {kShadowMapSize, kShadowMapSize};
-    vkCmdSetScissor(commandBuffer, 0, 1, &shadowScissor);
 
     if (m_shadowPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
@@ -3547,18 +3308,42 @@ void Renderer::renderFrame(
             0,
             nullptr
         );
-        vkCmdSetDepthBias(commandBuffer, 0.75f, 0.0f, 1.0f);
+
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
         vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-        constexpr float kChunkSize = static_cast<float>(world::Chunk::kSizeX);
-        for (int chunkZ = -1; chunkZ <= 1; ++chunkZ) {
-            for (int chunkX = -1; chunkX <= 1; ++chunkX) {
+        for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            VkRenderingAttachmentInfo shadowDepthAttachment{};
+            shadowDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            shadowDepthAttachment.imageView = m_shadowDepthLayerViews[cascadeIndex];
+            shadowDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            shadowDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            shadowDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            shadowDepthAttachment.clearValue = shadowDepthClearValue;
+
+            VkRenderingInfo shadowRenderingInfo{};
+            shadowRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            shadowRenderingInfo.renderArea.offset = {0, 0};
+            shadowRenderingInfo.renderArea.extent = {kShadowMapSize, kShadowMapSize};
+            shadowRenderingInfo.layerCount = 1;
+            shadowRenderingInfo.colorAttachmentCount = 0;
+            shadowRenderingInfo.pDepthAttachment = &shadowDepthAttachment;
+
+            vkCmdBeginRendering(commandBuffer, &shadowRenderingInfo);
+            vkCmdSetViewport(commandBuffer, 0, 1, &shadowViewport);
+            vkCmdSetScissor(commandBuffer, 0, 1, &shadowScissor);
+            vkCmdSetDepthBias(commandBuffer, 0.0f, 0.0f, 1.25f);
+
+            for (const ChunkDrawRange& drawRange : m_chunkDrawRanges) {
                 ChunkPushConstants chunkPushConstants{};
-                chunkPushConstants.chunkOffset[0] = static_cast<float>(chunkX) * kChunkSize;
-                chunkPushConstants.chunkOffset[1] = 0.0f;
-                chunkPushConstants.chunkOffset[2] = static_cast<float>(chunkZ) * kChunkSize;
+                chunkPushConstants.chunkOffset[0] = drawRange.offsetX;
+                chunkPushConstants.chunkOffset[1] = drawRange.offsetY;
+                chunkPushConstants.chunkOffset[2] = drawRange.offsetZ;
                 chunkPushConstants.chunkOffset[3] = 0.0f;
+                chunkPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
+                chunkPushConstants.cascadeData[1] = 0.0f;
+                chunkPushConstants.cascadeData[2] = 0.0f;
+                chunkPushConstants.cascadeData[3] = 0.0f;
                 vkCmdPushConstants(
                     commandBuffer,
                     m_pipelineLayout,
@@ -3567,12 +3352,12 @@ void Renderer::renderFrame(
                     sizeof(ChunkPushConstants),
                     &chunkPushConstants
                 );
-                vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
+                vkCmdDrawIndexed(commandBuffer, drawRange.indexCount, 1, drawRange.firstIndex, 0, 0);
             }
+
+            vkCmdEndRendering(commandBuffer);
         }
     }
-
-    vkCmdEndRendering(commandBuffer);
 
     transitionImageLayout(
         commandBuffer,
@@ -3583,7 +3368,9 @@ void Renderer::renderFrame(
         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT
+        VK_IMAGE_ASPECT_DEPTH_BIT,
+        0,
+        kShadowCascadeCount
     );
 
     if (!m_msaaColorImageInitialized[imageIndex]) {
@@ -3706,34 +3493,35 @@ void Renderer::renderFrame(
     vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
     vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-    constexpr float kChunkSize = static_cast<float>(world::Chunk::kSizeX);
-    for (int chunkZ = -1; chunkZ <= 1; ++chunkZ) {
-        for (int chunkX = -1; chunkX <= 1; ++chunkX) {
-            ChunkPushConstants chunkPushConstants{};
-            chunkPushConstants.chunkOffset[0] = static_cast<float>(chunkX) * kChunkSize;
-            chunkPushConstants.chunkOffset[1] = 0.0f;
-            chunkPushConstants.chunkOffset[2] = static_cast<float>(chunkZ) * kChunkSize;
-            chunkPushConstants.chunkOffset[3] = 0.0f;
-            vkCmdPushConstants(
-                commandBuffer,
-                m_pipelineLayout,
-                VK_SHADER_STAGE_VERTEX_BIT,
-                0,
-                sizeof(ChunkPushConstants),
-                &chunkPushConstants
-            );
-            vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
-        }
+    for (const ChunkDrawRange& drawRange : m_chunkDrawRanges) {
+        ChunkPushConstants chunkPushConstants{};
+        chunkPushConstants.chunkOffset[0] = drawRange.offsetX;
+        chunkPushConstants.chunkOffset[1] = drawRange.offsetY;
+        chunkPushConstants.chunkOffset[2] = drawRange.offsetZ;
+        chunkPushConstants.chunkOffset[3] = 0.0f;
+        chunkPushConstants.cascadeData[0] = 0.0f;
+        chunkPushConstants.cascadeData[1] = 0.0f;
+        chunkPushConstants.cascadeData[2] = 0.0f;
+        chunkPushConstants.cascadeData[3] = 0.0f;
+        vkCmdPushConstants(
+            commandBuffer,
+            m_pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            sizeof(ChunkPushConstants),
+            &chunkPushConstants
+        );
+        vkCmdDrawIndexed(commandBuffer, drawRange.indexCount, 1, drawRange.firstIndex, 0, 0);
     }
 
     const VkPipeline activePreviewPipeline =
         (preview.mode == VoxelPreview::Mode::Remove) ? m_previewRemovePipeline : m_previewAddPipeline;
     if (preview.visible && activePreviewPipeline != VK_NULL_HANDLE) {
-        const uint32_t previewX = static_cast<uint32_t>(std::clamp(preview.x, 0, 31));
-        const uint32_t previewY = static_cast<uint32_t>(std::clamp(preview.y, 0, 31));
-        const uint32_t previewZ = static_cast<uint32_t>(std::clamp(preview.z, 0, 31));
-        const uint32_t previewMaterial = (preview.mode == VoxelPreview::Mode::Add) ? 1u : 0u;
-        const uint32_t previewAo = (preview.mode == VoxelPreview::Mode::Add) ? 3u : 0u;
+        const uint32_t previewX = static_cast<uint32_t>(std::clamp(preview.x, 0, world::Chunk::kSizeX - 1));
+        const uint32_t previewY = static_cast<uint32_t>(std::clamp(preview.y, 0, world::Chunk::kSizeY - 1));
+        const uint32_t previewZ = static_cast<uint32_t>(std::clamp(preview.z, 0, world::Chunk::kSizeZ - 1));
+        const uint32_t previewMaterial = (preview.mode == VoxelPreview::Mode::Add) ? 250u : 251u;
+        const uint32_t previewAo = 3u;
         const world::ChunkMeshData previewMesh = buildSingleVoxelPreviewMesh(
             previewX,
             previewY,
@@ -3768,6 +3556,10 @@ void Renderer::renderFrame(
                 previewChunkPushConstants.chunkOffset[1] = 0.0f;
                 previewChunkPushConstants.chunkOffset[2] = 0.0f;
                 previewChunkPushConstants.chunkOffset[3] = 0.0f;
+                previewChunkPushConstants.cascadeData[0] = 0.0f;
+                previewChunkPushConstants.cascadeData[1] = 0.0f;
+                previewChunkPushConstants.cascadeData[2] = 0.0f;
+                previewChunkPushConstants.cascadeData[3] = 0.0f;
                 vkCmdPushConstants(
                     commandBuffer,
                     m_pipelineLayout,
@@ -4110,34 +3902,19 @@ void Renderer::destroyPreviewBuffers() {
 }
 
 void Renderer::destroyEnvironmentResources() {
-    auto destroyCubemap = [&](CubemapTexture& texture) {
-        if (texture.sampler != VK_NULL_HANDLE) {
-            vkDestroySampler(m_device, texture.sampler, nullptr);
-            texture.sampler = VK_NULL_HANDLE;
-        }
-        if (texture.view != VK_NULL_HANDLE) {
-            vkDestroyImageView(m_device, texture.view, nullptr);
-            texture.view = VK_NULL_HANDLE;
-        }
-        if (texture.image != VK_NULL_HANDLE) {
-            vkDestroyImage(m_device, texture.image, nullptr);
-            texture.image = VK_NULL_HANDLE;
-        }
-        if (texture.memory != VK_NULL_HANDLE) {
-            vkFreeMemory(m_device, texture.memory, nullptr);
-            texture.memory = VK_NULL_HANDLE;
-        }
-        texture.mipLevels = 1;
-    };
-
-    destroyCubemap(m_skyboxTexture);
-    destroyCubemap(m_irradianceTexture);
+    // Environment is procedural; no GPU cubemap resources to release.
 }
 
 void Renderer::destroyShadowResources() {
     if (m_shadowDepthSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device, m_shadowDepthSampler, nullptr);
         m_shadowDepthSampler = VK_NULL_HANDLE;
+    }
+    for (VkImageView& layerView : m_shadowDepthLayerViews) {
+        if (layerView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, layerView, nullptr);
+            layerView = VK_NULL_HANDLE;
+        }
     }
     if (m_shadowDepthImageView != VK_NULL_HANDLE) {
         vkDestroyImageView(m_device, m_shadowDepthImageView, nullptr);
@@ -4172,6 +3949,7 @@ void Renderer::destroyChunkBuffers() {
     m_deferredBufferReleases.clear();
 
     m_indexCount = 0;
+    m_chunkDrawRanges.clear();
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;
     m_transferCommandBufferInFlightValue = 0;

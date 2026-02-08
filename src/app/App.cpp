@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cmath>
 #include <iostream>
+#include <limits>
 
 namespace {
 
@@ -16,9 +17,17 @@ constexpr float kMouseSmoothingSeconds = 0.035f;
 constexpr float kMoveMaxSpeed = 5.0f;
 constexpr float kMoveAcceleration = 14.0f;
 constexpr float kMoveDeceleration = 18.0f;
+constexpr float kJumpSpeed = 7.8f;
+constexpr float kGravity = -24.0f;
+constexpr float kMaxFallSpeed = -35.0f;
 constexpr float kPitchMinDegrees = -89.0f;
 constexpr float kPitchMaxDegrees = 89.0f;
 constexpr float kBlockInteractMaxDistance = 5.0f;
+constexpr float kPlayerRadius = 0.32f;
+constexpr float kPlayerEyeHeight = 1.62f;
+constexpr float kPlayerHeight = 1.78f;
+constexpr float kPlayerTopOffset = kPlayerHeight - kPlayerEyeHeight;
+constexpr float kCollisionEpsilon = 0.001f;
 
 void glfwErrorCallback(int errorCode, const char* description) {
     std::cerr << "[app][glfw] error " << errorCode << ": "
@@ -209,7 +218,6 @@ void App::updateCamera(float dt) {
     const float yawRadians = math::radians(m_camera.yawDegrees);
     const math::Vector3 forward{std::cos(yawRadians), 0.0f, std::sin(yawRadians)};
     const math::Vector3 right{-forward.z, 0.0f, forward.x};
-    const math::Vector3 up{0.0f, 1.0f, 0.0f};
     math::Vector3 moveDirection{};
 
     if (m_input.moveForward) {
@@ -224,23 +232,15 @@ void App::updateCamera(float dt) {
     if (m_input.moveLeft) {
         moveDirection -= right;
     }
-    if (m_input.moveUp) {
-        moveDirection += up;
-    }
-    if (m_input.moveDown) {
-        moveDirection -= up;
-    }
 
     const float moveLengthSq = math::lengthSquared(moveDirection);
     const float moveLength = std::sqrt(moveLengthSq);
     float targetVelocityX = 0.0f;
-    float targetVelocityY = 0.0f;
     float targetVelocityZ = 0.0f;
     if (moveLength > 0.0f) {
         moveDirection /= moveLength;
         const math::Vector3 targetVelocity = moveDirection * kMoveMaxSpeed;
         targetVelocityX = targetVelocity.x;
-        targetVelocityY = targetVelocity.y;
         targetVelocityZ = targetVelocity.z;
     }
 
@@ -248,16 +248,262 @@ void App::updateCamera(float dt) {
     const float decelPerFrame = kMoveDeceleration * dt;
 
     const float maxDeltaX = (std::fabs(targetVelocityX) > std::fabs(m_camera.velocityX)) ? accelPerFrame : decelPerFrame;
-    const float maxDeltaY = (std::fabs(targetVelocityY) > std::fabs(m_camera.velocityY)) ? accelPerFrame : decelPerFrame;
     const float maxDeltaZ = (std::fabs(targetVelocityZ) > std::fabs(m_camera.velocityZ)) ? accelPerFrame : decelPerFrame;
 
     m_camera.velocityX = approach(m_camera.velocityX, targetVelocityX, maxDeltaX);
-    m_camera.velocityY = approach(m_camera.velocityY, targetVelocityY, maxDeltaY);
     m_camera.velocityZ = approach(m_camera.velocityZ, targetVelocityZ, maxDeltaZ);
 
-    m_camera.x += m_camera.velocityX * dt;
-    m_camera.y += m_camera.velocityY * dt;
-    m_camera.z += m_camera.velocityZ * dt;
+    if (m_input.moveUp && m_camera.onGround) {
+        m_camera.velocityY = kJumpSpeed;
+        m_camera.onGround = false;
+    }
+
+    m_camera.velocityY = std::max(m_camera.velocityY + (kGravity * dt), kMaxFallSpeed);
+    resolvePlayerCollisions(dt);
+}
+
+bool App::isSolidWorldVoxel(int worldX, int worldY, int worldZ) const {
+    if (worldY < 0) {
+        return true;
+    }
+
+    for (const world::Chunk& chunk : m_chunkGrid.chunks()) {
+        const int chunkMinX = chunk.chunkX() * world::Chunk::kSizeX;
+        const int chunkMinY = chunk.chunkY() * world::Chunk::kSizeY;
+        const int chunkMinZ = chunk.chunkZ() * world::Chunk::kSizeZ;
+        const int localX = worldX - chunkMinX;
+        const int localY = worldY - chunkMinY;
+        const int localZ = worldZ - chunkMinZ;
+        const bool insideChunk =
+            localX >= 0 && localX < world::Chunk::kSizeX &&
+            localY >= 0 && localY < world::Chunk::kSizeY &&
+            localZ >= 0 && localZ < world::Chunk::kSizeZ;
+        if (insideChunk) {
+            return chunk.isSolid(localX, localY, localZ);
+        }
+    }
+
+    return false;
+}
+
+bool App::doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const {
+    const float minX = eyeX - kPlayerRadius;
+    const float maxX = eyeX + kPlayerRadius;
+    const float minY = eyeY - kPlayerEyeHeight;
+    const float maxY = eyeY + kPlayerTopOffset;
+    const float minZ = eyeZ - kPlayerRadius;
+    const float maxZ = eyeZ + kPlayerRadius;
+
+    const int startX = static_cast<int>(std::floor(minX));
+    const int endX = static_cast<int>(std::floor(maxX - kCollisionEpsilon));
+    const int startY = static_cast<int>(std::floor(minY));
+    const int endY = static_cast<int>(std::floor(maxY - kCollisionEpsilon));
+    const int startZ = static_cast<int>(std::floor(minZ));
+    const int endZ = static_cast<int>(std::floor(maxZ - kCollisionEpsilon));
+
+    for (int y = startY; y <= endY; ++y) {
+        for (int z = startZ; z <= endZ; ++z) {
+            for (int x = startX; x <= endX; ++x) {
+                if (isSolidWorldVoxel(x, y, z)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+void App::resolvePlayerCollisions(float dt) {
+    const float totalDx = m_camera.velocityX * dt;
+    const float totalDy = m_camera.velocityY * dt;
+    const float totalDz = m_camera.velocityZ * dt;
+    const float maxDelta = std::max({std::fabs(totalDx), std::fabs(totalDy), std::fabs(totalDz)});
+    const int steps = std::max(1, static_cast<int>(std::ceil(maxDelta / 0.45f)));
+    const float stepDx = totalDx / static_cast<float>(steps);
+    const float stepDy = totalDy / static_cast<float>(steps);
+    const float stepDz = totalDz / static_cast<float>(steps);
+
+    bool groundedThisFrame = false;
+
+    auto resolveHorizontalX = [&](float deltaX) {
+        if (deltaX == 0.0f) {
+            return;
+        }
+
+        m_camera.x += deltaX;
+        if (!doesPlayerOverlapSolid(m_camera.x, m_camera.y, m_camera.z)) {
+            return;
+        }
+
+        const float minY = m_camera.y - kPlayerEyeHeight;
+        const float maxY = m_camera.y + kPlayerTopOffset;
+        const float minZ = m_camera.z - kPlayerRadius;
+        const float maxZ = m_camera.z + kPlayerRadius;
+        const int startY = static_cast<int>(std::floor(minY));
+        const int endY = static_cast<int>(std::floor(maxY - kCollisionEpsilon));
+        const int startZ = static_cast<int>(std::floor(minZ));
+        const int endZ = static_cast<int>(std::floor(maxZ - kCollisionEpsilon));
+        const int startX = static_cast<int>(std::floor(m_camera.x - kPlayerRadius));
+        const int endX = static_cast<int>(std::floor(m_camera.x + kPlayerRadius - kCollisionEpsilon));
+
+        if (deltaX > 0.0f) {
+            int blockingX = std::numeric_limits<int>::max();
+            for (int y = startY; y <= endY; ++y) {
+                for (int z = startZ; z <= endZ; ++z) {
+                    for (int x = startX; x <= endX; ++x) {
+                        if (isSolidWorldVoxel(x, y, z)) {
+                            blockingX = std::min(blockingX, x);
+                        }
+                    }
+                }
+            }
+            if (blockingX != std::numeric_limits<int>::max()) {
+                m_camera.x = static_cast<float>(blockingX) - kPlayerRadius - kCollisionEpsilon;
+            }
+        } else {
+            int blockingX = std::numeric_limits<int>::lowest();
+            for (int y = startY; y <= endY; ++y) {
+                for (int z = startZ; z <= endZ; ++z) {
+                    for (int x = startX; x <= endX; ++x) {
+                        if (isSolidWorldVoxel(x, y, z)) {
+                            blockingX = std::max(blockingX, x);
+                        }
+                    }
+                }
+            }
+            if (blockingX != std::numeric_limits<int>::lowest()) {
+                m_camera.x = static_cast<float>(blockingX + 1) + kPlayerRadius + kCollisionEpsilon;
+            }
+        }
+
+        if (doesPlayerOverlapSolid(m_camera.x, m_camera.y, m_camera.z)) {
+            m_camera.x -= deltaX;
+        }
+        m_camera.velocityX = 0.0f;
+    };
+
+    auto resolveHorizontalZ = [&](float deltaZ) {
+        if (deltaZ == 0.0f) {
+            return;
+        }
+
+        m_camera.z += deltaZ;
+        if (!doesPlayerOverlapSolid(m_camera.x, m_camera.y, m_camera.z)) {
+            return;
+        }
+
+        const float minX = m_camera.x - kPlayerRadius;
+        const float maxX = m_camera.x + kPlayerRadius;
+        const float minY = m_camera.y - kPlayerEyeHeight;
+        const float maxY = m_camera.y + kPlayerTopOffset;
+        const int startX = static_cast<int>(std::floor(minX));
+        const int endX = static_cast<int>(std::floor(maxX - kCollisionEpsilon));
+        const int startY = static_cast<int>(std::floor(minY));
+        const int endY = static_cast<int>(std::floor(maxY - kCollisionEpsilon));
+        const int startZ = static_cast<int>(std::floor(m_camera.z - kPlayerRadius));
+        const int endZ = static_cast<int>(std::floor(m_camera.z + kPlayerRadius - kCollisionEpsilon));
+
+        if (deltaZ > 0.0f) {
+            int blockingZ = std::numeric_limits<int>::max();
+            for (int y = startY; y <= endY; ++y) {
+                for (int z = startZ; z <= endZ; ++z) {
+                    for (int x = startX; x <= endX; ++x) {
+                        if (isSolidWorldVoxel(x, y, z)) {
+                            blockingZ = std::min(blockingZ, z);
+                        }
+                    }
+                }
+            }
+            if (blockingZ != std::numeric_limits<int>::max()) {
+                m_camera.z = static_cast<float>(blockingZ) - kPlayerRadius - kCollisionEpsilon;
+            }
+        } else {
+            int blockingZ = std::numeric_limits<int>::lowest();
+            for (int y = startY; y <= endY; ++y) {
+                for (int z = startZ; z <= endZ; ++z) {
+                    for (int x = startX; x <= endX; ++x) {
+                        if (isSolidWorldVoxel(x, y, z)) {
+                            blockingZ = std::max(blockingZ, z);
+                        }
+                    }
+                }
+            }
+            if (blockingZ != std::numeric_limits<int>::lowest()) {
+                m_camera.z = static_cast<float>(blockingZ + 1) + kPlayerRadius + kCollisionEpsilon;
+            }
+        }
+
+        if (doesPlayerOverlapSolid(m_camera.x, m_camera.y, m_camera.z)) {
+            m_camera.z -= deltaZ;
+        }
+        m_camera.velocityZ = 0.0f;
+    };
+
+    auto resolveVerticalY = [&](float deltaY) {
+        if (deltaY == 0.0f) {
+            return;
+        }
+
+        m_camera.y += deltaY;
+        if (!doesPlayerOverlapSolid(m_camera.x, m_camera.y, m_camera.z)) {
+            return;
+        }
+
+        const float minX = m_camera.x - kPlayerRadius;
+        const float maxX = m_camera.x + kPlayerRadius;
+        const float minZ = m_camera.z - kPlayerRadius;
+        const float maxZ = m_camera.z + kPlayerRadius;
+        const int startX = static_cast<int>(std::floor(minX));
+        const int endX = static_cast<int>(std::floor(maxX - kCollisionEpsilon));
+        const int startZ = static_cast<int>(std::floor(minZ));
+        const int endZ = static_cast<int>(std::floor(maxZ - kCollisionEpsilon));
+        const int startY = static_cast<int>(std::floor(m_camera.y - kPlayerEyeHeight));
+        const int endY = static_cast<int>(std::floor(m_camera.y + kPlayerTopOffset - kCollisionEpsilon));
+
+        if (deltaY > 0.0f) {
+            int blockingY = std::numeric_limits<int>::max();
+            for (int y = startY; y <= endY; ++y) {
+                for (int z = startZ; z <= endZ; ++z) {
+                    for (int x = startX; x <= endX; ++x) {
+                        if (isSolidWorldVoxel(x, y, z)) {
+                            blockingY = std::min(blockingY, y);
+                        }
+                    }
+                }
+            }
+            if (blockingY != std::numeric_limits<int>::max()) {
+                m_camera.y = static_cast<float>(blockingY) - kPlayerTopOffset - kCollisionEpsilon;
+            }
+        } else {
+            int blockingY = std::numeric_limits<int>::lowest();
+            for (int y = startY; y <= endY; ++y) {
+                for (int z = startZ; z <= endZ; ++z) {
+                    for (int x = startX; x <= endX; ++x) {
+                        if (isSolidWorldVoxel(x, y, z)) {
+                            blockingY = std::max(blockingY, y);
+                        }
+                    }
+                }
+            }
+            if (blockingY != std::numeric_limits<int>::lowest()) {
+                m_camera.y = static_cast<float>(blockingY + 1) + kPlayerEyeHeight + kCollisionEpsilon;
+                groundedThisFrame = true;
+            }
+        }
+
+        if (doesPlayerOverlapSolid(m_camera.x, m_camera.y, m_camera.z)) {
+            m_camera.y -= deltaY;
+        }
+        m_camera.velocityY = 0.0f;
+    };
+
+    for (int step = 0; step < steps; ++step) {
+        resolveHorizontalX(stepDx);
+        resolveHorizontalZ(stepDz);
+        resolveVerticalY(stepDy);
+    }
+
+    m_camera.onGround = groundedThisFrame;
 }
 
 App::CameraRaycastResult App::raycastFromCamera() const {
