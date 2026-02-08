@@ -1243,12 +1243,16 @@ bool Renderer::pickPhysicalDevice() {
         }
 
         const bool supportsWireframe = features2.features.fillModeNonSolid == VK_TRUE;
+        const bool supportsSamplerAnisotropy = features2.features.samplerAnisotropy == VK_TRUE;
+        const float maxSamplerAnisotropy = properties.limits.maxSamplerAnisotropy;
         m_physicalDevice = candidate;
         m_graphicsQueueFamilyIndex = queueFamily.graphicsAndPresent.value();
         m_graphicsQueueIndex = queueFamily.graphicsQueueIndex;
         m_transferQueueFamilyIndex = queueFamily.transfer.value();
         m_transferQueueIndex = queueFamily.transferQueueIndex;
         m_supportsWireframePreview = supportsWireframe;
+        m_supportsSamplerAnisotropy = supportsSamplerAnisotropy;
+        m_maxSamplerAnisotropy = maxSamplerAnisotropy;
         m_depthFormat = depthFormat;
         m_shadowDepthFormat = shadowDepthFormat;
         m_hdrColorFormat = hdrColorFormat;
@@ -1259,6 +1263,8 @@ bool Renderer::pickPhysicalDevice() {
                   << ", transferQueueFamily=" << m_transferQueueFamilyIndex
                   << ", transferQueueIndex=" << m_transferQueueIndex
                   << ", wireframePreview=" << (m_supportsWireframePreview ? "yes" : "no")
+                  << ", samplerAnisotropy=" << (m_supportsSamplerAnisotropy ? "yes" : "no")
+                  << ", maxSamplerAnisotropy=" << m_maxSamplerAnisotropy
                   << ", msaaSamples=" << static_cast<uint32_t>(m_colorSampleCount)
                   << ", shadowDepthFormat=" << static_cast<int>(m_shadowDepthFormat)
                   << ", hdrColorFormat=" << static_cast<int>(m_hdrColorFormat)
@@ -1320,6 +1326,7 @@ bool Renderer::createLogicalDevice() {
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
     VkPhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.fillModeNonSolid = m_supportsWireframePreview ? VK_TRUE : VK_FALSE;
+    deviceFeatures.samplerAnisotropy = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
     createInfo.pEnabledFeatures = &deviceFeatures;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(kDeviceExtensions.size());
     createInfo.ppEnabledExtensionNames = kDeviceExtensions.data();
@@ -1760,7 +1767,10 @@ bool Renderer::createDiffuseTextureResources() {
     samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerCreateInfo.mipLodBias = 0.0f;
-    samplerCreateInfo.anisotropyEnable = VK_FALSE;
+    samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
+    samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
+        ? std::min(8.0f, m_maxSamplerAnisotropy)
+        : 1.0f;
     samplerCreateInfo.compareEnable = VK_FALSE;
     samplerCreateInfo.minLod = 0.0f;
     samplerCreateInfo.maxLod = 0.0f;

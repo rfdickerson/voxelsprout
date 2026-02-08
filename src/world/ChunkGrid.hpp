@@ -99,21 +99,25 @@ inline void ChunkGrid::initializeFlatWorld() {
         const float sampleX = wx + warpX;
         const float sampleZ = wz + warpZ;
 
-        const float broadHills = perlin2(sampleX * 0.017f, sampleZ * 0.017f) * 7.5f;
-        const float midHills = perlin2(sampleX * 0.038f, sampleZ * 0.038f) * 3.2f;
+        const float broadHills = perlin2(sampleX * 0.017f, sampleZ * 0.017f) * 8.6f;
+        const float midHills = perlin2(sampleX * 0.041f, sampleZ * 0.041f) * 4.4f;
 
         // Valleys are carved where low-frequency noise dips negative.
         const float valleyNoise = perlin2((wx * 0.008f) - 20.0f, (wz * 0.008f) + 42.0f);
-        const float valleyMask = std::pow(std::max(0.0f, -valleyNoise), 1.35f);
-        const float valleyCut = valleyMask * 10.0f;
+        const float valleyMask = std::pow(std::max(0.0f, -valleyNoise), 1.65f);
+        const float valleyCut = valleyMask * 17.0f;
 
         // Cliffs appear along sharp high-frequency bands.
-        const float cliffBand = std::abs(perlin2(sampleX * 0.057f, sampleZ * 0.057f));
-        const float cliffMask = std::clamp((cliffBand - 0.52f) * 2.8f, 0.0f, 1.0f);
-        const float cliffNoise = (perlin2((sampleX + 31.0f) * 0.019f, (sampleZ - 17.0f) * 0.019f) * 0.5f) + 0.5f;
-        const float cliffLift = cliffMask * cliffMask * cliffNoise * 11.0f;
+        const float cliffBand = std::abs(perlin2(sampleX * 0.063f, sampleZ * 0.063f));
+        const float cliffMask = std::clamp((cliffBand - 0.45f) * 3.9f, 0.0f, 1.0f);
+        const float cliffNoise = (perlin2((sampleX + 31.0f) * 0.022f, (sampleZ - 17.0f) * 0.022f) * 0.5f) + 0.5f;
+        const float cliffLift = cliffMask * cliffMask * cliffNoise * 16.0f;
 
-        const float heightFloat = 9.0f + broadHills + midHills + cliffLift - valleyCut;
+        // Valley-side cliff walls where valley gradients are strongest.
+        const float valleyWallMask = std::clamp((valleyMask - 0.16f) * 2.6f, 0.0f, 1.0f);
+        const float valleyWallLift = valleyWallMask * cliffMask * 7.0f;
+
+        const float heightFloat = 9.0f + broadHills + midHills + cliffLift + valleyWallLift - valleyCut;
         const int height = static_cast<int>(std::round(heightFloat));
         return std::clamp(height, 1, Chunk::kSizeY - 2);
     };

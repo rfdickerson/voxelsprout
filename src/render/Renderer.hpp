@@ -219,6 +219,8 @@ private:
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
     bool m_supportsWireframePreview = false;
+    bool m_supportsSamplerAnisotropy = false;
+    float m_maxSamplerAnisotropy = 1.0f;
     VkDeviceSize m_uniformBufferAlignment = 256;
 
     // Static mesh buffers per chunk draw range.
