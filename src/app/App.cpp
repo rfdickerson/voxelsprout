@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 
@@ -25,25 +26,24 @@ constexpr float kMaxFallSpeed = -35.0f;
 constexpr float kPitchMinDegrees = -89.0f;
 constexpr float kPitchMaxDegrees = 89.0f;
 [[maybe_unused]] constexpr float kVoxelSizeMeters = 0.25f;
-constexpr float kMacroVoxelSize = static_cast<float>(world::Chunk::kMacroVoxelSize);
-constexpr float kBlockInteractMaxDistance = kMacroVoxelSize * 3.0f;
-// Scale player to macro-block proportions:
-// width ~= one macro block, height ~= two macro blocks.
-constexpr float kPlayerHeightVoxels = kMacroVoxelSize * 2.0f;
-constexpr float kPlayerDiameterVoxels = kMacroVoxelSize;
-constexpr float kPlayerEyeHeightVoxels = kMacroVoxelSize * 1.75f;
+constexpr float kBlockInteractMaxDistance = 6.0f;
+// 1x voxel world scale: roughly Minecraft-like player proportions.
+constexpr float kPlayerHeightVoxels = 1.8f;
+constexpr float kPlayerDiameterVoxels = 0.8f;
+constexpr float kPlayerEyeHeightVoxels = 1.62f;
 
 constexpr float kPlayerRadius = kPlayerDiameterVoxels * 0.5f;
 constexpr float kPlayerEyeHeight = kPlayerEyeHeightVoxels;
 constexpr float kPlayerHeight = kPlayerHeightVoxels;
 constexpr float kPlayerTopOffset = kPlayerHeight - kPlayerEyeHeight;
 constexpr float kCollisionEpsilon = 0.001f;
-constexpr float kHoverHeightAboveGround = 2.0f;
+constexpr float kHoverHeightAboveGround = 0.15f;
 constexpr float kHoverResponse = 8.0f;
 constexpr float kHoverMaxVerticalSpeed = 12.0f;
 constexpr float kHoverManualVerticalSpeed = 8.0f;
 constexpr int kHoverGroundSearchDepth = 96;
 constexpr float kGamepadTriggerPressedThreshold = 0.30f;
+constexpr const char* kWorldFilePath = "world.vxw";
 
 constexpr std::array<world::VoxelType, 1> kPlaceableBlockTypes = {
     world::VoxelType::Solid
@@ -63,16 +63,6 @@ float approach(float current, float target, float maxDelta) {
         return current - maxDelta;
     }
     return target;
-}
-
-int floorDiv(int value, int divisor) {
-    if (divisor <= 0) {
-        return 0;
-    }
-    if (value >= 0) {
-        return value / divisor;
-    }
-    return -(((-value) + divisor - 1) / divisor);
 }
 
 } // namespace
@@ -100,7 +90,17 @@ bool App::init() {
     // Relative mouse mode for camera look.
     glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
-    m_chunkGrid.initializeFlatWorld();
+    const std::filesystem::path worldPath{kWorldFilePath};
+    if (m_chunkGrid.loadFromBinaryFile(worldPath)) {
+        std::cerr << "[app] loaded world from " << worldPath.string() << "\n";
+    } else {
+        m_chunkGrid.initializeFlatWorld();
+        if (m_chunkGrid.saveToBinaryFile(worldPath)) {
+            std::cerr << "[app] generated new world and saved " << worldPath.string() << "\n";
+        } else {
+            std::cerr << "[app] generated new world, but failed to save " << worldPath.string() << "\n";
+        }
+    }
     m_simulation.initializeSingleBelt();
     const bool rendererOk = m_renderer.init(m_window, m_chunkGrid);
     if (!rendererOk) {
@@ -108,7 +108,6 @@ bool App::init() {
         return false;
     }
 
-    std::cerr << "[app] brush size set to 4x4x4 (press B or gamepad Y to cycle 4->2->1)\n";
     std::cerr << "[app] init complete\n";
     return true;
 }
@@ -142,6 +141,13 @@ void App::update(float dt) {
     updateCamera(dt);
     m_simulation.update(dt);
 
+    const bool regeneratePressedThisFrame =
+        !m_debugUiVisible && m_input.regenerateWorldDown && !m_wasRegenerateWorldDown;
+    m_wasRegenerateWorldDown = m_input.regenerateWorldDown;
+    if (regeneratePressedThisFrame) {
+        regenerateWorld();
+    }
+
     const CameraRaycastResult raycast = raycastFromCamera();
 
     const bool blockInteractionEnabled = !m_debugUiVisible;
@@ -161,6 +167,10 @@ void App::update(float dt) {
     if (chunkEdited) {
         if (!m_renderer.updateChunkMesh(m_chunkGrid, 0)) {
             std::cerr << "[app] chunk mesh update failed after voxel edit\n";
+        }
+        const std::filesystem::path worldPath{kWorldFilePath};
+        if (!m_chunkGrid.saveToBinaryFile(worldPath)) {
+            std::cerr << "[app] failed to save world to " << worldPath.string() << " after voxel edit\n";
         }
     }
 
@@ -184,32 +194,24 @@ void App::update(float dt) {
 
         const bool showRemovePreview = m_input.removeBlockDown;
         if (showRemovePreview) {
-            int anchorX = 0;
-            int anchorY = 0;
-            int anchorZ = 0;
-            snapToBrushAnchor(raycast.solidX, raycast.solidY, raycast.solidZ, anchorX, anchorY, anchorZ);
             preview.visible = true;
             preview.mode = render::VoxelPreview::Mode::Remove;
-            preview.x = anchorX;
-            preview.y = anchorY;
-            preview.z = anchorZ;
-            preview.brushSize = activeBrushSize();
+            preview.x = raycast.solidX;
+            preview.y = raycast.solidY;
+            preview.z = raycast.solidZ;
+            preview.brushSize = 1;
         } else {
             int targetX = 0;
             int targetY = 0;
             int targetZ = 0;
             if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
-                int anchorX = 0;
-                int anchorY = 0;
-                int anchorZ = 0;
-                snapToBrushAnchor(targetX, targetY, targetZ, anchorX, anchorY, anchorZ);
-                if (isChunkVoxelInBounds(anchorX, anchorY, anchorZ)) {
+                if (isChunkVoxelInBounds(targetX, targetY, targetZ)) {
                     preview.visible = true;
                     preview.mode = render::VoxelPreview::Mode::Add;
-                    preview.x = anchorX;
-                    preview.y = anchorY;
-                    preview.z = anchorZ;
-                    preview.brushSize = activeBrushSize();
+                    preview.x = targetX;
+                    preview.y = targetY;
+                    preview.z = targetZ;
+                    preview.brushSize = 1;
                 }
             }
         }
@@ -270,9 +272,9 @@ void App::pollInput() {
         glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
         glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
     m_input.toggleHoverDown = glfwGetKey(m_window, GLFW_KEY_H) == GLFW_PRESS;
+    m_input.regenerateWorldDown = glfwGetKey(m_window, GLFW_KEY_R) == GLFW_PRESS;
     bool controllerPlaceDown = false;
     bool controllerRemoveDown = false;
-    bool controllerCycleBrushDown = false;
     bool controllerPrevBlockDown = false;
     bool controllerNextBlockDown = false;
     GLFWgamepadstate gamepadState{};
@@ -282,7 +284,7 @@ void App::pollInput() {
     if (hasGamepad != m_gamepadConnected) {
         m_gamepadConnected = hasGamepad;
         if (m_gamepadConnected) {
-            std::cerr << "[app] gamepad connected: RT place, LT remove, Y brush, LB/RB block\n";
+            std::cerr << "[app] gamepad connected: RT place, LT remove, LB/RB block\n";
         } else {
             std::cerr << "[app] gamepad disconnected\n";
         }
@@ -290,16 +292,9 @@ void App::pollInput() {
     if (hasGamepad) {
         controllerPlaceDown = gamepadState.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > kGamepadTriggerPressedThreshold;
         controllerRemoveDown = gamepadState.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER] > kGamepadTriggerPressedThreshold;
-        controllerCycleBrushDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_Y] == GLFW_PRESS;
         controllerPrevBlockDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_LEFT_BUMPER] == GLFW_PRESS;
         controllerNextBlockDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER] == GLFW_PRESS;
     }
-
-    const bool cycleBrushDown = (glfwGetKey(m_window, GLFW_KEY_B) == GLFW_PRESS) || controllerCycleBrushDown;
-    if (!m_debugUiVisible && cycleBrushDown && !m_wasCycleBrushDown) {
-        cycleBrushSize();
-    }
-    m_wasCycleBrushDown = cycleBrushDown;
 
     const bool prevBlockDown = controllerPrevBlockDown;
     const bool nextBlockDown = controllerNextBlockDown;
@@ -855,27 +850,6 @@ bool App::isChunkVoxelInBounds(int x, int y, int z) const {
         z >= 0 && z < world::Chunk::kSizeZ;
 }
 
-int App::activeBrushSize() const {
-    return static_cast<int>(m_brushSize);
-}
-
-void App::cycleBrushSize() {
-    switch (m_brushSize) {
-    case BrushSize::Size4:
-        m_brushSize = BrushSize::Size2;
-        break;
-    case BrushSize::Size2:
-        m_brushSize = BrushSize::Size1;
-        break;
-    case BrushSize::Size1:
-    default:
-        m_brushSize = BrushSize::Size4;
-        break;
-    }
-    const int size = activeBrushSize();
-    std::cerr << "[app] brush size set to " << size << "x" << size << "x" << size << "\n";
-}
-
 void App::cycleSelectedBlock(int direction) {
     if (kPlaceableBlockTypes.empty()) {
         m_selectedBlockIndex = 0;
@@ -902,13 +876,6 @@ world::Voxel App::selectedPlaceVoxel() const {
     return world::Voxel{kPlaceableBlockTypes[static_cast<std::size_t>(clampedIndex)]};
 }
 
-void App::snapToBrushAnchor(int inX, int inY, int inZ, int& outX, int& outY, int& outZ) const {
-    const int brushSize = activeBrushSize();
-    outX = floorDiv(inX, brushSize) * brushSize;
-    outY = floorDiv(inY, brushSize) * brushSize;
-    outZ = floorDiv(inZ, brushSize) * brushSize;
-}
-
 bool App::computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const {
     if (!raycast.hitSolid || !raycast.hasHitFaceNormal) {
         return false;
@@ -927,69 +894,29 @@ bool App::computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, i
     return true;
 }
 
-bool App::applyBrushEdit(world::Chunk& chunk, int targetX, int targetY, int targetZ, world::Voxel voxel) {
-    const int brushSize = activeBrushSize();
-    int anchorX = 0;
-    int anchorY = 0;
-    int anchorZ = 0;
-    snapToBrushAnchor(targetX, targetY, targetZ, anchorX, anchorY, anchorZ);
+bool App::applyVoxelEdit(world::Chunk& chunk, int targetX, int targetY, int targetZ, world::Voxel voxel) {
+    if (!isChunkVoxelInBounds(targetX, targetY, targetZ)) {
+        return false;
+    }
+    if (chunk.voxelAt(targetX, targetY, targetZ).type == voxel.type) {
+        return false;
+    }
+    chunk.setVoxel(targetX, targetY, targetZ, voxel);
+    return true;
+}
 
-    if (brushSize == world::Chunk::kMacroVoxelSize) {
-        if (!isChunkVoxelInBounds(anchorX, anchorY, anchorZ)) {
-            return false;
-        }
-
-        bool changed = false;
-        for (int localY = 0; localY < brushSize; ++localY) {
-            for (int localZ = 0; localZ < brushSize; ++localZ) {
-                for (int localX = 0; localX < brushSize; ++localX) {
-                    const int x = anchorX + localX;
-                    const int y = anchorY + localY;
-                    const int z = anchorZ + localZ;
-                    if (!isChunkVoxelInBounds(x, y, z)) {
-                        continue;
-                    }
-                    if (chunk.voxelAt(x, y, z).type != voxel.type) {
-                        changed = true;
-                        break;
-                    }
-                }
-                if (changed) {
-                    break;
-                }
-            }
-            if (changed) {
-                break;
-            }
-        }
-
-        if (!changed) {
-            return false;
-        }
-
-        chunk.setVoxel(anchorX, anchorY, anchorZ, voxel);
-        return true;
+void App::regenerateWorld() {
+    m_chunkGrid.initializeFlatWorld();
+    if (!m_renderer.updateChunkMesh(m_chunkGrid)) {
+        std::cerr << "[app] world regenerate failed to update chunk meshes\n";
     }
 
-    bool changed = false;
-    for (int localY = 0; localY < brushSize; ++localY) {
-        for (int localZ = 0; localZ < brushSize; ++localZ) {
-            for (int localX = 0; localX < brushSize; ++localX) {
-                const int x = anchorX + localX;
-                const int y = anchorY + localY;
-                const int z = anchorZ + localZ;
-                if (!isChunkVoxelInBounds(x, y, z)) {
-                    continue;
-                }
-                if (chunk.voxelAt(x, y, z).type == voxel.type) {
-                    continue;
-                }
-                chunk.setVoxelRefined(x, y, z, voxel);
-                changed = true;
-            }
-        }
+    const std::filesystem::path worldPath{kWorldFilePath};
+    if (m_chunkGrid.saveToBinaryFile(worldPath)) {
+        std::cerr << "[app] world regenerated and saved to " << worldPath.string() << " (R)\n";
+    } else {
+        std::cerr << "[app] world regenerated, but failed to save " << worldPath.string() << "\n";
     }
-    return changed;
 }
 
 bool App::tryPlaceVoxelFromCameraRay() {
@@ -1010,7 +937,7 @@ bool App::tryPlaceVoxelFromCameraRay() {
     }
 
     world::Chunk& chunk = m_chunkGrid.chunks().front();
-    return applyBrushEdit(chunk, targetX, targetY, targetZ, selectedPlaceVoxel());
+    return applyVoxelEdit(chunk, targetX, targetY, targetZ, selectedPlaceVoxel());
 }
 
 bool App::tryRemoveVoxelFromCameraRay() {
@@ -1024,7 +951,7 @@ bool App::tryRemoveVoxelFromCameraRay() {
     }
 
     world::Chunk& chunk = m_chunkGrid.chunks().front();
-    return applyBrushEdit(chunk, raycast.solidX, raycast.solidY, raycast.solidZ, world::Voxel{world::VoxelType::Empty});
+    return applyVoxelEdit(chunk, raycast.solidX, raycast.solidY, raycast.solidZ, world::Voxel{world::VoxelType::Empty});
 }
 
 } // namespace app

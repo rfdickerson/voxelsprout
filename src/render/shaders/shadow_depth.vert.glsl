@@ -73,7 +73,6 @@ void main() {
     const uint z = (inPacked >> kShiftZ) & 0x1Fu;
     const uint face = (inPacked >> kShiftFace) & 0x7u;
     const uint corner = (inPacked >> kShiftCorner) & 0x3u;
-
     const vec3 basePosition = vec3(float(x), float(y), float(z));
     const vec3 worldPosition = basePosition + cornerOffset(face, corner) + chunkPc.chunkOffset.xyz;
     const int cascadeIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 3);

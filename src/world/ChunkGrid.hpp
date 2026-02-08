@@ -5,6 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <vector>
 
 #include "world/Chunk.hpp"
@@ -19,6 +22,8 @@ class ChunkGrid {
 public:
     ChunkGrid() = default;
     void initializeFlatWorld();
+    bool loadFromBinaryFile(const std::filesystem::path& path);
+    bool saveToBinaryFile(const std::filesystem::path& path) const;
     std::size_t chunkCount() const;
     std::vector<Chunk>& chunks();
     const std::vector<Chunk>& chunks() const;
@@ -159,6 +164,123 @@ inline void ChunkGrid::initializeFlatWorld() {
             }
         }
     }
+}
+
+inline bool ChunkGrid::loadFromBinaryFile(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        return false;
+    }
+
+    char magic[4]{};
+    std::uint32_t version = 0;
+    std::uint32_t chunkCount = 0;
+    in.read(magic, sizeof(magic));
+    in.read(reinterpret_cast<char*>(&version), sizeof(version));
+    in.read(reinterpret_cast<char*>(&chunkCount), sizeof(chunkCount));
+    if (!in.good()) {
+        return false;
+    }
+
+    constexpr char kExpectedMagic[4] = {'V', 'X', 'W', '1'};
+    if (std::memcmp(magic, kExpectedMagic, sizeof(magic)) != 0 || version != 1u) {
+        return false;
+    }
+    if (chunkCount == 0 || chunkCount > 4096u) {
+        return false;
+    }
+
+    constexpr std::size_t kVoxelsPerChunk =
+        static_cast<std::size_t>(Chunk::kSizeX * Chunk::kSizeY * Chunk::kSizeZ);
+    constexpr std::size_t kBytesPerChunk = (kVoxelsPerChunk + 7u) / 8u;
+    std::vector<std::uint8_t> packed(kBytesPerChunk, 0u);
+
+    std::vector<Chunk> loadedChunks;
+    loadedChunks.reserve(static_cast<std::size_t>(chunkCount));
+
+    for (std::uint32_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+        std::int32_t chunkX = 0;
+        std::int32_t chunkY = 0;
+        std::int32_t chunkZ = 0;
+        in.read(reinterpret_cast<char*>(&chunkX), sizeof(chunkX));
+        in.read(reinterpret_cast<char*>(&chunkY), sizeof(chunkY));
+        in.read(reinterpret_cast<char*>(&chunkZ), sizeof(chunkZ));
+        in.read(reinterpret_cast<char*>(packed.data()), static_cast<std::streamsize>(packed.size()));
+        if (!in.good()) {
+            return false;
+        }
+
+        Chunk chunk(chunkX, chunkY, chunkZ);
+        std::size_t voxelIndex = 0;
+        for (int y = 0; y < Chunk::kSizeY; ++y) {
+            for (int z = 0; z < Chunk::kSizeZ; ++z) {
+                for (int x = 0; x < Chunk::kSizeX; ++x, ++voxelIndex) {
+                    const std::size_t byteIndex = voxelIndex >> 3u;
+                    const std::uint8_t bitMask = static_cast<std::uint8_t>(1u << (voxelIndex & 7u));
+                    if ((packed[byteIndex] & bitMask) != 0u) {
+                        chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
+                    }
+                }
+            }
+        }
+        loadedChunks.push_back(std::move(chunk));
+    }
+
+    m_chunks = std::move(loadedChunks);
+    return true;
+}
+
+inline bool ChunkGrid::saveToBinaryFile(const std::filesystem::path& path) const {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return false;
+    }
+
+    constexpr char kMagic[4] = {'V', 'X', 'W', '1'};
+    constexpr std::uint32_t kVersion = 1u;
+    const std::uint32_t chunkCount = static_cast<std::uint32_t>(m_chunks.size());
+    out.write(kMagic, sizeof(kMagic));
+    out.write(reinterpret_cast<const char*>(&kVersion), sizeof(kVersion));
+    out.write(reinterpret_cast<const char*>(&chunkCount), sizeof(chunkCount));
+    if (!out.good()) {
+        return false;
+    }
+
+    constexpr std::size_t kVoxelsPerChunk =
+        static_cast<std::size_t>(Chunk::kSizeX * Chunk::kSizeY * Chunk::kSizeZ);
+    constexpr std::size_t kBytesPerChunk = (kVoxelsPerChunk + 7u) / 8u;
+    std::vector<std::uint8_t> packed(kBytesPerChunk, 0u);
+
+    for (const Chunk& chunk : m_chunks) {
+        const std::int32_t chunkX = static_cast<std::int32_t>(chunk.chunkX());
+        const std::int32_t chunkY = static_cast<std::int32_t>(chunk.chunkY());
+        const std::int32_t chunkZ = static_cast<std::int32_t>(chunk.chunkZ());
+        out.write(reinterpret_cast<const char*>(&chunkX), sizeof(chunkX));
+        out.write(reinterpret_cast<const char*>(&chunkY), sizeof(chunkY));
+        out.write(reinterpret_cast<const char*>(&chunkZ), sizeof(chunkZ));
+
+        std::fill(packed.begin(), packed.end(), 0u);
+        std::size_t voxelIndex = 0;
+        for (int y = 0; y < Chunk::kSizeY; ++y) {
+            for (int z = 0; z < Chunk::kSizeZ; ++z) {
+                for (int x = 0; x < Chunk::kSizeX; ++x, ++voxelIndex) {
+                    if (!chunk.isSolid(x, y, z)) {
+                        continue;
+                    }
+                    const std::size_t byteIndex = voxelIndex >> 3u;
+                    const std::uint8_t bitMask = static_cast<std::uint8_t>(1u << (voxelIndex & 7u));
+                    packed[byteIndex] = static_cast<std::uint8_t>(packed[byteIndex] | bitMask);
+                }
+            }
+        }
+
+        out.write(reinterpret_cast<const char*>(packed.data()), static_cast<std::streamsize>(packed.size()));
+        if (!out.good()) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 inline std::size_t ChunkGrid::chunkCount() const {

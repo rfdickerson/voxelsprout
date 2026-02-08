@@ -46,7 +46,8 @@ void appendVoxelFace(
     int y,
     int z,
     std::uint32_t faceId,
-    std::uint32_t material
+    std::uint32_t material,
+    std::uint32_t lodLevel
 ) {
     constexpr std::uint32_t kAo = 3u;
     const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
@@ -59,7 +60,8 @@ void appendVoxelFace(
             faceId,
             corner,
             kAo,
-            material
+            material,
+            lodLevel
         );
         mesh.vertices.push_back(vertex);
     }
@@ -72,63 +74,6 @@ void appendVoxelFace(
     mesh.indices.push_back(baseVertex + 3);
 }
 
-void appendUniformMacroCellFace(
-    ChunkMeshData& mesh,
-    const Chunk& chunk,
-    int baseX,
-    int baseY,
-    int baseZ,
-    const FaceNeighbor& face,
-    std::uint32_t material
-) {
-    for (int a = 0; a < Chunk::kMacroVoxelSize; ++a) {
-        for (int b = 0; b < Chunk::kMacroVoxelSize; ++b) {
-            int x = baseX;
-            int y = baseY;
-            int z = baseZ;
-
-            switch (face.faceId) {
-            case 0u: // +X
-                x = baseX + (Chunk::kMacroVoxelSize - 1);
-                y = baseY + a;
-                z = baseZ + b;
-                break;
-            case 1u: // -X
-                x = baseX;
-                y = baseY + a;
-                z = baseZ + b;
-                break;
-            case 2u: // +Y
-                x = baseX + a;
-                y = baseY + (Chunk::kMacroVoxelSize - 1);
-                z = baseZ + b;
-                break;
-            case 3u: // -Y
-                x = baseX + a;
-                y = baseY;
-                z = baseZ + b;
-                break;
-            case 4u: // +Z
-                x = baseX + a;
-                y = baseY + b;
-                z = baseZ + (Chunk::kMacroVoxelSize - 1);
-                break;
-            case 5u: // -Z
-            default:
-                x = baseX + a;
-                y = baseY + b;
-                z = baseZ;
-                break;
-            }
-
-            if (isSolidVoxel(chunk, x + face.nx, y + face.ny, z + face.nz)) {
-                continue;
-            }
-            appendVoxelFace(mesh, x, y, z, face.faceId, material);
-        }
-    }
-}
-
 } // namespace
 
 std::uint32_t PackedVoxelVertex::pack(
@@ -138,7 +83,8 @@ std::uint32_t PackedVoxelVertex::pack(
     std::uint32_t face,
     std::uint32_t corner,
     std::uint32_t ao,
-    std::uint32_t material
+    std::uint32_t material,
+    std::uint32_t lodLevel
 ) {
     return ((x & kMask5) << kShiftX) |
            ((y & kMask5) << kShiftY) |
@@ -146,64 +92,61 @@ std::uint32_t PackedVoxelVertex::pack(
            ((face & kMask3) << kShiftFace) |
            ((corner & kMask2) << kShiftCorner) |
            ((ao & kMask2) << kShiftAo) |
-           ((material & kMask8) << kShiftMaterial);
+           ((material & kMask8) << kShiftMaterial) |
+           ((lodLevel & kMask2) << kShiftLodLevel);
 }
 
-ChunkMeshData buildChunkMesh(const Chunk& chunk) {
-    ChunkMeshData mesh{};
+ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk) {
+    ChunkLodMeshes meshes{};
     static_assert(Chunk::kSizeX <= 32 && Chunk::kSizeY <= 32 && Chunk::kSizeZ <= 32, "Packed position fields are 5-bit");
 
-    constexpr std::size_t kMaxVoxelFaces =
-        static_cast<std::size_t>(Chunk::kSizeX * Chunk::kSizeY * Chunk::kSizeZ * 6);
-    mesh.vertices.reserve(kMaxVoxelFaces * 4);
-    mesh.indices.reserve(kMaxVoxelFaces * 6);
+    ChunkMeshData& baseMesh = meshes.lodMeshes[0];
+    baseMesh.vertices.reserve(static_cast<std::size_t>(Chunk::kSizeX * Chunk::kSizeY * Chunk::kSizeZ * 6 * 4));
+    baseMesh.indices.reserve(static_cast<std::size_t>(Chunk::kSizeX * Chunk::kSizeY * Chunk::kSizeZ * 6 * 6));
 
-    for (int my = 0; my < Chunk::kMacroSizeY; ++my) {
-        for (int mz = 0; mz < Chunk::kMacroSizeZ; ++mz) {
-            for (int mx = 0; mx < Chunk::kMacroSizeX; ++mx) {
-                const Chunk::MacroCell cell = chunk.macroCellAt(mx, my, mz);
-                const int baseX = mx * Chunk::kMacroVoxelSize;
-                const int baseY = my * Chunk::kMacroVoxelSize;
-                const int baseZ = mz * Chunk::kMacroVoxelSize;
-
-                if (cell.resolution == Chunk::CellResolution::Uniform) {
-                    if (cell.voxel.type == VoxelType::Empty) {
-                        continue;
-                    }
-                    const std::uint32_t material = materialForVoxelType(cell.voxel.type);
-                    for (const FaceNeighbor& face : kFaceNeighbors) {
-                        appendUniformMacroCellFace(mesh, chunk, baseX, baseY, baseZ, face, material);
-                    }
+    for (int y = 0; y < Chunk::kSizeY; ++y) {
+        for (int z = 0; z < Chunk::kSizeZ; ++z) {
+            for (int x = 0; x < Chunk::kSizeX; ++x) {
+                const Voxel voxel = chunk.voxelAt(x, y, z);
+                if (voxel.type == VoxelType::Empty) {
                     continue;
                 }
 
-                // Phase 2: refined macro cells emit true per-voxel surfaces.
-                for (int localY = 0; localY < Chunk::kMacroVoxelSize; ++localY) {
-                    for (int localZ = 0; localZ < Chunk::kMacroVoxelSize; ++localZ) {
-                        for (int localX = 0; localX < Chunk::kMacroVoxelSize; ++localX) {
-                            const int x = baseX + localX;
-                            const int y = baseY + localY;
-                            const int z = baseZ + localZ;
-                            const Voxel voxel = chunk.voxelAt(x, y, z);
-                            if (voxel.type == VoxelType::Empty) {
-                                continue;
-                            }
-
-                            const std::uint32_t material = materialForVoxelType(voxel.type);
-                            for (const FaceNeighbor& face : kFaceNeighbors) {
-                                if (isSolidVoxel(chunk, x + face.nx, y + face.ny, z + face.nz)) {
-                                    continue;
-                                }
-                                appendVoxelFace(mesh, x, y, z, face.faceId, material);
-                            }
-                        }
+                const std::uint32_t material = materialForVoxelType(voxel.type);
+                for (const FaceNeighbor& face : kFaceNeighbors) {
+                    if (isSolidVoxel(chunk, x + face.nx, y + face.ny, z + face.nz)) {
+                        continue;
                     }
+                    appendVoxelFace(baseMesh, x, y, z, face.faceId, material, 0u);
                 }
             }
         }
     }
 
-    return mesh;
+    return meshes;
+}
+
+ChunkMeshData buildChunkMesh(const Chunk& chunk) {
+    const ChunkLodMeshes lodMeshes = buildChunkLodMeshes(chunk);
+    ChunkMeshData merged{};
+    std::size_t vertexTotal = 0;
+    std::size_t indexTotal = 0;
+    for (const ChunkMeshData& mesh : lodMeshes.lodMeshes) {
+        vertexTotal += mesh.vertices.size();
+        indexTotal += mesh.indices.size();
+    }
+    merged.vertices.reserve(vertexTotal);
+    merged.indices.reserve(indexTotal);
+
+    for (const ChunkMeshData& mesh : lodMeshes.lodMeshes) {
+        const std::uint32_t baseVertex = static_cast<std::uint32_t>(merged.vertices.size());
+        merged.vertices.insert(merged.vertices.end(), mesh.vertices.begin(), mesh.vertices.end());
+        for (const std::uint32_t index : mesh.indices) {
+            merged.indices.push_back(baseVertex + index);
+        }
+    }
+
+    return merged;
 }
 
 ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid) {

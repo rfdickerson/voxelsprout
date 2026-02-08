@@ -2,10 +2,13 @@
 
 #include "world/ChunkGrid.hpp"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
 namespace world {
+
+constexpr std::uint32_t kChunkMeshLodCount = 3;
 
 // Packed voxel vertex used by the Vulkan vertex fetch stage.
 // We keep this tightly packed so GPU bandwidth stays low when meshes get denser.
@@ -18,7 +21,7 @@ namespace world {
 // - bits 18..19: corner id (0..3)
 // - bits 20..21: AO level (0 darkest .. 3 brightest)
 // - bits 22..29: material id (for now voxel type, future palette/material table index)
-// - bits 30..31: reserved for future flags (greedy merge bits, wind, etc.)
+// - bits 30..31: lod level (0=8x, 1=4x, 2=1x)
 //
 // This format also supports future greedy meshing and instancing:
 // - Greedy meshing can add width/height in reserved or expanded fields.
@@ -33,6 +36,7 @@ struct PackedVoxelVertex {
     static constexpr std::uint32_t kShiftCorner = 18;
     static constexpr std::uint32_t kShiftAo = 20;
     static constexpr std::uint32_t kShiftMaterial = 22;
+    static constexpr std::uint32_t kShiftLodLevel = 30;
 
     static constexpr std::uint32_t kMask5 = 0x1Fu;
     static constexpr std::uint32_t kMask3 = 0x7u;
@@ -46,7 +50,8 @@ struct PackedVoxelVertex {
         std::uint32_t face,
         std::uint32_t corner,
         std::uint32_t ao,
-        std::uint32_t material
+        std::uint32_t material,
+        std::uint32_t lodLevel
     );
 };
 
@@ -55,6 +60,11 @@ struct ChunkMeshData {
     std::vector<std::uint32_t> indices;
 };
 
+struct ChunkLodMeshes {
+    std::array<ChunkMeshData, kChunkMeshLodCount> lodMeshes;
+};
+
+ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk);
 ChunkMeshData buildChunkMesh(const Chunk& chunk);
 
 // Builds a mesh for the first chunk in the grid.

@@ -82,7 +82,6 @@ void main() {
     const uint corner = (inPacked >> kShiftCorner) & 0x3u;
     const uint ao = (inPacked >> kShiftAo) & 0x3u;
     const uint material = (inPacked >> kShiftMaterial) & 0xFFu;
-
     const vec3 basePosition = vec3(float(x), float(y), float(z));
     const vec3 worldPosition = basePosition + cornerOffset(face, corner) + chunkPc.chunkOffset.xyz;
 

@@ -270,6 +270,16 @@ private:
     bool m_imguiInitialized = false;
     VkDescriptorPool m_imguiDescriptorPool = VK_NULL_HANDLE;
 #endif
+    double m_lastFrameTimestampSeconds = 0.0;
+    float m_debugFrameTimeMs = 0.0f;
+    float m_debugFps = 0.0f;
+    std::uint32_t m_debugChunkCount = 0;
+    std::uint32_t m_debugMacroCellUniformCount = 0;
+    std::uint32_t m_debugMacroCellRefined4Count = 0;
+    std::uint32_t m_debugMacroCellRefined1Count = 0;
+    std::uint32_t m_debugDrawnLod0Ranges = 0;
+    std::uint32_t m_debugDrawnLod1Ranges = 0;
+    std::uint32_t m_debugDrawnLod2Ranges = 0;
     // Dynamic cascade split distances in view-space units.
     // Updated per frame and consumed by shadow rendering + shading.
     std::array<float, kShadowCascadeCount> m_shadowCascadeSplits = {20.0f, 45.0f, 90.0f, 180.0f};
