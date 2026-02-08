@@ -362,9 +362,9 @@ float sampleCascadedShadow(vec3 worldPosition, vec3 normal, float viewDepth, flo
 void main() {
     const vec3 normal = faceNormal(inFace);
     const float ao = clamp(inAo, 0.0, 1.0);
-    const float aoCurve = pow(ao, 1.45);
-    const float ambientAo = mix(0.32, 1.0, aoCurve);
-    const float directAo = mix(0.34, 1.0, aoCurve);
+    const float aoCurve = pow(ao, 1.65);
+    const float ambientAo = mix(0.20, 1.0, aoCurve);
+    const float directAo = mix(0.30, 1.0, aoCurve);
     vec3 baseColor = texture(diffuseAlbedo, faceUv(inFace, inWorldPosition)).rgb;
     if (inMaterial == 250u || inMaterial == 251u) {
         baseColor *= materialTint(inMaterial);
@@ -382,12 +382,13 @@ void main() {
     const vec3 shNormalIrradiance = evaluateShIrradiance(normal);
     const vec3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
     const vec3 ambientIrradiance = mix(shNormalIrradiance, shHemisphereIrradiance, 0.70);
-    const vec3 ambient = ambientIrradiance * 0.155;
+    const float shadowOcclusion = 1.0 - shadowVisibility;
+    const float shShadowBoost = 1.0 + (shadowOcclusion * 0.75);
+    const vec3 ambient = ambientIrradiance * (0.26 * shShadowBoost);
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = mix(1.0, shadowVisibility, shadowStrength);
-    const float ambientShadowFactor = mix(1.0, shadowVisibility, 0.25 * shadowStrength);
     vec3 lighting =
-        (ambient * ambientShadowFactor * ambientAo) +
+        (ambient * ambientAo) +
         (directSun * directShadowFactor * directAo);
 
     if (inMaterial == 250u || inMaterial == 251u) {
