@@ -1157,6 +1157,10 @@ bool Renderer::pickPhysicalDevice() {
             std::cerr << "[render] skip GPU: 4x MSAA color attachments not supported\n";
             continue;
         }
+        if ((properties.limits.framebufferDepthSampleCounts & VK_SAMPLE_COUNT_4_BIT) == 0) {
+            std::cerr << "[render] skip GPU: 4x MSAA depth attachments not supported\n";
+            continue;
+        }
 
         const QueueFamilyChoice queueFamily = findQueueFamily(candidate, m_surface);
         if (!queueFamily.valid()) {
@@ -1225,12 +1229,14 @@ bool Renderer::pickPhysicalDevice() {
         m_depthFormat = depthFormat;
         m_shadowDepthFormat = shadowDepthFormat;
         m_hdrColorFormat = hdrColorFormat;
+        m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
         std::cerr << "[render] selected GPU: " << properties.deviceName
                   << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
                   << ", graphicsQueueIndex=" << m_graphicsQueueIndex
                   << ", transferQueueFamily=" << m_transferQueueFamilyIndex
                   << ", transferQueueIndex=" << m_transferQueueIndex
                   << ", wireframePreview=" << (m_supportsWireframePreview ? "yes" : "no")
+                  << ", msaaSamples=" << static_cast<uint32_t>(m_colorSampleCount)
                   << ", shadowDepthFormat=" << static_cast<int>(m_shadowDepthFormat)
                   << ", hdrColorFormat=" << static_cast<int>(m_hdrColorFormat)
                   << "\n";
@@ -3079,8 +3085,6 @@ void Renderer::renderFrame(
         std::sin(pitchRadians),
         std::sin(yawRadians) * cosPitch
     };
-    const math::Vector3 right = math::normalize(math::cross(forward, math::Vector3{0.0f, 1.0f, 0.0f}));
-    const math::Vector3 up = math::normalize(math::cross(right, forward));
 
     const math::Matrix4 view = lookAt(eye, eye + forward, math::Vector3{0.0f, 1.0f, 0.0f});
     const math::Matrix4 projection = perspectiveVulkan(math::radians(camera.fovDegrees), aspectRatio, nearPlane, farPlane);
@@ -3089,7 +3093,7 @@ void Renderer::renderFrame(
     const math::Matrix4 viewColumnMajor = transpose(view);
     const math::Matrix4 projectionColumnMajor = transpose(projection);
 
-    const math::Vector3 sunDirection = math::normalize(math::Vector3{-0.18f, -1.85f, -0.12f});
+    const math::Vector3 sunDirection = math::normalize(math::Vector3{-0.58f, -0.42f, -0.24f});
 
     constexpr float kCascadeLambda = 0.62f;
     std::array<float, kShadowCascadeCount> cascadeDistances{};
@@ -3108,66 +3112,33 @@ void Renderer::renderFrame(
         const float cascadeNear = previousCascadeDistance;
         const float cascadeFar = cascadeDistances[cascadeIndex];
         previousCascadeDistance = cascadeFar;
+        const float cascadeCenterDistance = (cascadeNear + cascadeFar) * 0.5f;
+        const math::Vector3 frustumCenter = eye + (forward * cascadeCenterDistance);
+        const float horizontalRadius = cascadeFar * tanHalfFov * aspectRatio;
+        const float verticalRadius = cascadeFar * tanHalfFov;
+        float boundingRadius = std::sqrt((horizontalRadius * horizontalRadius) + (verticalRadius * verticalRadius));
+        boundingRadius = std::max(boundingRadius, 24.0f);
+        boundingRadius = std::ceil(boundingRadius * 8.0f) / 8.0f;
 
-        const float nearHalfHeight = cascadeNear * tanHalfFov;
-        const float nearHalfWidth = nearHalfHeight * aspectRatio;
-        const float farHalfHeight = cascadeFar * tanHalfFov;
-        const float farHalfWidth = farHalfHeight * aspectRatio;
-
-        std::array<math::Vector3, 8> frustumCorners = {
-            eye + (forward * cascadeNear) - (right * nearHalfWidth) - (up * nearHalfHeight),
-            eye + (forward * cascadeNear) + (right * nearHalfWidth) - (up * nearHalfHeight),
-            eye + (forward * cascadeNear) - (right * nearHalfWidth) + (up * nearHalfHeight),
-            eye + (forward * cascadeNear) + (right * nearHalfWidth) + (up * nearHalfHeight),
-            eye + (forward * cascadeFar) - (right * farHalfWidth) - (up * farHalfHeight),
-            eye + (forward * cascadeFar) + (right * farHalfWidth) - (up * farHalfHeight),
-            eye + (forward * cascadeFar) - (right * farHalfWidth) + (up * farHalfHeight),
-            eye + (forward * cascadeFar) + (right * farHalfWidth) + (up * farHalfHeight)
-        };
-
-        math::Vector3 frustumCenter{};
-        for (const math::Vector3& corner : frustumCorners) {
-            frustumCenter += corner;
-        }
-        frustumCenter /= 8.0f;
-
-        float boundingRadius = 0.0f;
-        for (const math::Vector3& corner : frustumCorners) {
-            const float distance = std::sqrt(math::lengthSquared(corner - frustumCenter));
-            boundingRadius = std::max(boundingRadius, distance);
-        }
-        boundingRadius = std::ceil(boundingRadius * 16.0f) / 16.0f;
-
-        const math::Vector3 lightPosition = frustumCenter - (sunDirection * (boundingRadius + 160.0f));
+        const math::Vector3 lightPosition = frustumCenter - (sunDirection * (boundingRadius * 2.4f + 80.0f));
         const float sunUpDot = std::abs(math::dot(sunDirection, math::Vector3{0.0f, 1.0f, 0.0f}));
         const math::Vector3 lightUp =
             (sunUpDot > 0.95f) ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
-        const math::Matrix4 lightView = lookAt(lightPosition, frustumCenter, lightUp);
-
-        float minX = std::numeric_limits<float>::max();
-        float maxX = std::numeric_limits<float>::lowest();
-        float minY = std::numeric_limits<float>::max();
-        float maxY = std::numeric_limits<float>::lowest();
-        float minZ = std::numeric_limits<float>::max();
-        float maxZ = std::numeric_limits<float>::lowest();
-        for (const math::Vector3& corner : frustumCorners) {
-            const math::Vector4 lightSpaceCorner = lightView * math::Vector4{corner, 1.0f};
-            minX = std::min(minX, lightSpaceCorner.x);
-            maxX = std::max(maxX, lightSpaceCorner.x);
-            minY = std::min(minY, lightSpaceCorner.y);
-            maxY = std::max(maxY, lightSpaceCorner.y);
-            minZ = std::min(minZ, lightSpaceCorner.z);
-            maxZ = std::max(maxZ, lightSpaceCorner.z);
-        }
-
-        const float zPadding = 220.0f;
+        math::Matrix4 lightView = lookAt(lightPosition, frustumCenter, lightUp);
+        // Snap cascade projection in light-space texel units to reduce shimmer when the camera moves.
+        const float worldUnitsPerTexel = (2.0f * boundingRadius) / static_cast<float>(kShadowMapSize);
+        const math::Vector4 centerLightSpace = lightView * math::Vector4{frustumCenter, 1.0f};
+        const float snappedCenterX = std::floor(centerLightSpace.x / worldUnitsPerTexel) * worldUnitsPerTexel;
+        const float snappedCenterY = std::floor(centerLightSpace.y / worldUnitsPerTexel) * worldUnitsPerTexel;
+        lightView(0, 3) += snappedCenterX - centerLightSpace.x;
+        lightView(1, 3) += snappedCenterY - centerLightSpace.y;
         const math::Matrix4 lightProjection = orthographicVulkan(
-            minX,
-            maxX,
-            minY,
-            maxY,
-            minZ - zPadding,
-            maxZ + zPadding
+            -boundingRadius,
+            boundingRadius,
+            -boundingRadius,
+            boundingRadius,
+            0.1f,
+            (boundingRadius * 8.0f) + 320.0f
         );
         lightViewProjMatrices[cascadeIndex] = lightProjection * lightView;
     }
@@ -3332,7 +3303,10 @@ void Renderer::renderFrame(
             vkCmdBeginRendering(commandBuffer, &shadowRenderingInfo);
             vkCmdSetViewport(commandBuffer, 0, 1, &shadowViewport);
             vkCmdSetScissor(commandBuffer, 0, 1, &shadowScissor);
-            vkCmdSetDepthBias(commandBuffer, 0.0f, 0.0f, 1.25f);
+            const float cascadeF = static_cast<float>(cascadeIndex);
+            const float constantBias = 1.1f + (0.9f * cascadeF);
+            const float slopeBias = 1.7f + (0.85f * cascadeF);
+            vkCmdSetDepthBias(commandBuffer, constantBias, 0.0f, slopeBias);
 
             for (const ChunkDrawRange& drawRange : m_chunkDrawRanges) {
                 ChunkPushConstants chunkPushConstants{};

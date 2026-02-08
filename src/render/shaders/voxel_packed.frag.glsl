@@ -86,8 +86,11 @@ int chooseShadowCascade(float viewDepth) {
     return 3;
 }
 
-float sampleShadowPcf(vec3 worldPosition, int cascadeIndex, float ndotl) {
-    const vec4 shadowClip = camera.lightViewProj[cascadeIndex] * vec4(worldPosition, 1.0);
+float sampleShadowPcf(vec3 worldPosition, vec3 normal, int cascadeIndex, float ndotl) {
+    const float cascadeT = float(cascadeIndex) / 3.0;
+    const float normalOffset = mix(0.03, 0.12, cascadeT) * (1.0 + (1.0 - ndotl));
+    const vec3 shadowSamplePosition = worldPosition + (normal * normalOffset);
+    const vec4 shadowClip = camera.lightViewProj[cascadeIndex] * vec4(shadowSamplePosition, 1.0);
     if (shadowClip.w <= 0.0) {
         return 1.0;
     }
@@ -106,16 +109,42 @@ float sampleShadowPcf(vec3 worldPosition, int cascadeIndex, float ndotl) {
 
     const vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0).xy);
     const float texelScale = max(texelSize.x, texelSize.y);
-    const float bias = max(0.38 * texelScale, 2.4 * texelScale * (1.0 - ndotl));
+    const float baseBias = mix(2.2, 4.6, cascadeT) * texelScale;
+    const float slopeBias = mix(3.8, 7.2, cascadeT) * texelScale * (1.0 - ndotl);
+    const float bias = baseBias + slopeBias;
 
     float visibility = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
+    float weightSum = 0.0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
             const vec2 uv = shadowUv + vec2(float(x), float(y)) * texelSize;
-            visibility += texture(shadowMap, vec4(uv, float(cascadeIndex), shadowDepthRef - bias));
+            const float wx = float(3 - abs(x));
+            const float wy = float(3 - abs(y));
+            const float weight = wx * wy;
+            visibility += texture(shadowMap, vec4(uv, float(cascadeIndex), shadowDepthRef - bias)) * weight;
+            weightSum += weight;
         }
     }
-    return visibility / 9.0;
+    return visibility / max(weightSum, 0.0001);
+}
+
+float sampleCascadedShadow(vec3 worldPosition, vec3 normal, float viewDepth, float ndotl) {
+    const int primaryCascade = chooseShadowCascade(viewDepth);
+    float shadow = sampleShadowPcf(worldPosition, normal, primaryCascade, ndotl);
+    if (primaryCascade >= 3) {
+        return shadow;
+    }
+
+    const float prevSplit = (primaryCascade == 0) ? 0.0 : camera.shadowCascadeSplits[primaryCascade - 1];
+    const float split = camera.shadowCascadeSplits[primaryCascade];
+    const float blendRange = max(6.0, (split - prevSplit) * 0.30);
+    const float blendT = smoothstep(split - blendRange, split, viewDepth);
+    if (blendT <= 0.0) {
+        return shadow;
+    }
+
+    const float nextShadow = sampleShadowPcf(worldPosition, normal, primaryCascade + 1, ndotl);
+    return mix(shadow, nextShadow, blendT);
 }
 
 void main() {
@@ -130,14 +159,14 @@ void main() {
 
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
     const float viewDepth = max(-(camera.view * vec4(inWorldPosition, 1.0)).z, 0.0);
-    const int cascadeIndex = chooseShadowCascade(viewDepth);
-    const float shadowVisibility = sampleShadowPcf(inWorldPosition, cascadeIndex, ndotl);
+    const float shadowVisibility = sampleCascadedShadow(inWorldPosition, normal, viewDepth, ndotl);
 
     const vec3 ambientIrradiance = evaluateShIrradiance(normal);
-    const vec3 ambient = ambientIrradiance * 0.17;
+    const vec3 ambient = ambientIrradiance * 0.11;
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = mix(1.0, shadowVisibility, shadowStrength);
-    vec3 lighting = ambient + (directSun * directShadowFactor);
+    const float ambientShadowFactor = mix(1.0, shadowVisibility, 0.25 * shadowStrength);
+    vec3 lighting = (ambient * ambientShadowFactor) + (directSun * directShadowFactor);
 
     if (inMaterial == 250u || inMaterial == 251u) {
         const float stripe = 0.5 + 0.5 * sin((inWorldPosition.x + inWorldPosition.z + inWorldPosition.y) * 6.0);
