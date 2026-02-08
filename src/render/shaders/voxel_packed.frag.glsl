@@ -99,12 +99,38 @@ vec3 proceduralSky(vec3 direction, vec3 sunDirection, vec3 sunColor) {
     return max(color * skyExposure, vec3(0.0));
 }
 
+vec3 proceduralSkyNoSunDisk(vec3 direction, vec3 sunDirection) {
+    const vec3 dir = normalize(direction);
+    const float rayleighStrength = max(camera.skyConfig0.x, 0.01);
+    const float mieStrength = max(camera.skyConfig0.y, 0.01);
+    const float skyExposure = max(camera.skyConfig0.w, 0.01);
+
+    const float horizonT = clamp((dir.y * 0.5) + 0.5, 0.0, 1.0);
+    const float skyT = pow(horizonT, 0.35);
+    const vec3 horizonColor =
+        (vec3(0.55, 0.70, 1.00) * rayleighStrength) +
+        (vec3(1.00, 0.72, 0.42) * (mieStrength * 0.55));
+    const vec3 zenithColor =
+        (vec3(0.06, 0.24, 0.54) * rayleighStrength) +
+        (vec3(0.22, 0.20, 0.15) * (mieStrength * 0.25));
+    const vec3 sky = mix(horizonColor, zenithColor, skyT);
+
+    const vec3 groundColor = vec3(0.05, 0.06, 0.07);
+    const float belowHorizon = clamp(-dir.y, 0.0, 1.0);
+    const vec3 horizonGroundColor = horizonColor * 0.32;
+    const vec3 ground = mix(horizonGroundColor, groundColor, pow(belowHorizon, 0.55));
+    const float skyWeight = smoothstep(-0.18, 0.02, dir.y);
+    const vec3 color = mix(ground, sky, skyWeight);
+    return max(color * skyExposure, vec3(0.0));
+}
+
 vec3 applyAtmosphericFog(vec3 litColor, vec3 worldPosition, float viewDepth, vec3 sunDirection, vec3 sunColor) {
     const mat4 invView = inverse(camera.view);
     const vec3 cameraWorld = invView[3].xyz;
     const vec3 viewDir = normalize(worldPosition - cameraWorld);
 
-    const vec3 skyColor = proceduralSky(viewDir, sunDirection, sunColor);
+    // Exclude the explicit sun disk from fog color so it does not appear to overlay foreground geometry.
+    const vec3 skyColor = proceduralSkyNoSunDisk(viewDir, sunDirection);
 
     // Subtle physically inspired extinction coefficients (world units ~= voxels).
     const vec3 sigmaRayleigh = vec3(0.0012, 0.0023, 0.0048) * max(camera.skyConfig0.x, 0.01);
