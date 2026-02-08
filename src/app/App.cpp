@@ -55,6 +55,16 @@ float approach(float current, float target, float maxDelta) {
     return target;
 }
 
+int floorDiv(int value, int divisor) {
+    if (divisor <= 0) {
+        return 0;
+    }
+    if (value >= 0) {
+        return value / divisor;
+    }
+    return -(((-value) + divisor - 1) / divisor);
+}
+
 } // namespace
 
 namespace app {
@@ -88,6 +98,7 @@ bool App::init() {
         return false;
     }
 
+    std::cerr << "[app] brush size set to 4x4x4 (press B to cycle 4->2->1)\n";
     std::cerr << "[app] init complete\n";
     return true;
 }
@@ -163,17 +174,34 @@ void App::update(float dt) {
 
         const bool showRemovePreview = m_input.removeBlockDown;
         if (showRemovePreview) {
+            int anchorX = 0;
+            int anchorY = 0;
+            int anchorZ = 0;
+            snapToBrushAnchor(raycast.solidX, raycast.solidY, raycast.solidZ, anchorX, anchorY, anchorZ);
             preview.visible = true;
             preview.mode = render::VoxelPreview::Mode::Remove;
-            preview.x = raycast.solidX;
-            preview.y = raycast.solidY;
-            preview.z = raycast.solidZ;
-        } else if (raycast.hasAdjacentEmpty) {
-            preview.visible = true;
-            preview.mode = render::VoxelPreview::Mode::Add;
-            preview.x = raycast.adjacentEmptyX;
-            preview.y = raycast.adjacentEmptyY;
-            preview.z = raycast.adjacentEmptyZ;
+            preview.x = anchorX;
+            preview.y = anchorY;
+            preview.z = anchorZ;
+            preview.brushSize = activeBrushSize();
+        } else {
+            int targetX = 0;
+            int targetY = 0;
+            int targetZ = 0;
+            if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
+                int anchorX = 0;
+                int anchorY = 0;
+                int anchorZ = 0;
+                snapToBrushAnchor(targetX, targetY, targetZ, anchorX, anchorY, anchorZ);
+                if (isChunkVoxelInBounds(anchorX, anchorY, anchorZ)) {
+                    preview.visible = true;
+                    preview.mode = render::VoxelPreview::Mode::Add;
+                    preview.x = anchorX;
+                    preview.y = anchorY;
+                    preview.z = anchorZ;
+                    preview.brushSize = activeBrushSize();
+                }
+            }
         }
     }
 
@@ -232,6 +260,24 @@ void App::pollInput() {
         glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
         glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
     m_input.toggleHoverDown = glfwGetKey(m_window, GLFW_KEY_H) == GLFW_PRESS;
+    const bool cycleBrushDown = glfwGetKey(m_window, GLFW_KEY_B) == GLFW_PRESS;
+    if (!m_debugUiVisible && cycleBrushDown && !m_wasCycleBrushDown) {
+        switch (m_brushSize) {
+        case BrushSize::Size4:
+            m_brushSize = BrushSize::Size2;
+            break;
+        case BrushSize::Size2:
+            m_brushSize = BrushSize::Size1;
+            break;
+        case BrushSize::Size1:
+        default:
+            m_brushSize = BrushSize::Size4;
+            break;
+        }
+        const int size = activeBrushSize();
+        std::cerr << "[app] brush size set to " << size << "x" << size << "x" << size << "\n";
+    }
+    m_wasCycleBrushDown = cycleBrushDown;
     m_input.placeBlockDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
     m_input.removeBlockDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
 
@@ -764,19 +810,126 @@ App::CameraRaycastResult App::raycastFromCamera() const {
     return result;
 }
 
+bool App::isChunkVoxelInBounds(int x, int y, int z) const {
+    return
+        x >= 0 && x < world::Chunk::kSizeX &&
+        y >= 0 && y < world::Chunk::kSizeY &&
+        z >= 0 && z < world::Chunk::kSizeZ;
+}
+
+int App::activeBrushSize() const {
+    return static_cast<int>(m_brushSize);
+}
+
+void App::snapToBrushAnchor(int inX, int inY, int inZ, int& outX, int& outY, int& outZ) const {
+    const int brushSize = activeBrushSize();
+    outX = floorDiv(inX, brushSize) * brushSize;
+    outY = floorDiv(inY, brushSize) * brushSize;
+    outZ = floorDiv(inZ, brushSize) * brushSize;
+}
+
+bool App::computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const {
+    if (!raycast.hitSolid || !raycast.hasHitFaceNormal) {
+        return false;
+    }
+
+    const int candidateX = raycast.solidX + raycast.hitFaceNormalX;
+    const int candidateY = raycast.solidY + raycast.hitFaceNormalY;
+    const int candidateZ = raycast.solidZ + raycast.hitFaceNormalZ;
+    if (!isChunkVoxelInBounds(candidateX, candidateY, candidateZ)) {
+        return false;
+    }
+
+    outX = candidateX;
+    outY = candidateY;
+    outZ = candidateZ;
+    return true;
+}
+
+bool App::applyBrushEdit(world::Chunk& chunk, int targetX, int targetY, int targetZ, world::Voxel voxel) {
+    const int brushSize = activeBrushSize();
+    int anchorX = 0;
+    int anchorY = 0;
+    int anchorZ = 0;
+    snapToBrushAnchor(targetX, targetY, targetZ, anchorX, anchorY, anchorZ);
+
+    if (brushSize == world::Chunk::kMacroVoxelSize) {
+        if (!isChunkVoxelInBounds(anchorX, anchorY, anchorZ)) {
+            return false;
+        }
+
+        bool changed = false;
+        for (int localY = 0; localY < brushSize; ++localY) {
+            for (int localZ = 0; localZ < brushSize; ++localZ) {
+                for (int localX = 0; localX < brushSize; ++localX) {
+                    const int x = anchorX + localX;
+                    const int y = anchorY + localY;
+                    const int z = anchorZ + localZ;
+                    if (!isChunkVoxelInBounds(x, y, z)) {
+                        continue;
+                    }
+                    if (chunk.voxelAt(x, y, z).type != voxel.type) {
+                        changed = true;
+                        break;
+                    }
+                }
+                if (changed) {
+                    break;
+                }
+            }
+            if (changed) {
+                break;
+            }
+        }
+
+        if (!changed) {
+            return false;
+        }
+
+        chunk.setVoxel(anchorX, anchorY, anchorZ, voxel);
+        return true;
+    }
+
+    bool changed = false;
+    for (int localY = 0; localY < brushSize; ++localY) {
+        for (int localZ = 0; localZ < brushSize; ++localZ) {
+            for (int localX = 0; localX < brushSize; ++localX) {
+                const int x = anchorX + localX;
+                const int y = anchorY + localY;
+                const int z = anchorZ + localZ;
+                if (!isChunkVoxelInBounds(x, y, z)) {
+                    continue;
+                }
+                if (chunk.voxelAt(x, y, z).type == voxel.type) {
+                    continue;
+                }
+                chunk.setVoxelRefined(x, y, z, voxel);
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
 bool App::tryPlaceVoxelFromCameraRay() {
     if (m_chunkGrid.chunks().empty()) {
         return false;
     }
 
     const CameraRaycastResult raycast = raycastFromCamera();
-    if (!raycast.hitSolid || !raycast.hasAdjacentEmpty || raycast.hitDistance > kBlockInteractMaxDistance) {
+    if (!raycast.hitSolid || raycast.hitDistance > kBlockInteractMaxDistance) {
+        return false;
+    }
+
+    int targetX = 0;
+    int targetY = 0;
+    int targetZ = 0;
+    if (!computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
         return false;
     }
 
     world::Chunk& chunk = m_chunkGrid.chunks().front();
-    chunk.setVoxel(raycast.adjacentEmptyX, raycast.adjacentEmptyY, raycast.adjacentEmptyZ, world::Voxel{world::VoxelType::Solid});
-    return true;
+    return applyBrushEdit(chunk, targetX, targetY, targetZ, world::Voxel{world::VoxelType::Solid});
 }
 
 bool App::tryRemoveVoxelFromCameraRay() {
@@ -790,8 +943,7 @@ bool App::tryRemoveVoxelFromCameraRay() {
     }
 
     world::Chunk& chunk = m_chunkGrid.chunks().front();
-    chunk.setVoxel(raycast.solidX, raycast.solidY, raycast.solidZ, world::Voxel{world::VoxelType::Empty});
-    return true;
+    return applyBrushEdit(chunk, raycast.solidX, raycast.solidY, raycast.solidZ, world::Voxel{world::VoxelType::Empty});
 }
 
 } // namespace app

@@ -38,6 +38,7 @@ struct VoxelPreview {
     int x = 0;
     int y = 0;
     int z = 0;
+    int brushSize = 1;
     Mode mode = Mode::Add;
     bool faceVisible = false;
     int faceX = 0;

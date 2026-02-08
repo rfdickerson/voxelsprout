@@ -20,6 +20,12 @@ public:
     void shutdown();
 
 private:
+    enum class BrushSize : int {
+        Size1 = 1,
+        Size2 = 2,
+        Size4 = 4
+    };
+
     struct CameraRaycastResult {
         bool hitSolid = false;
         int solidX = 0;
@@ -43,6 +49,11 @@ private:
     [[nodiscard]] bool doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const;
     void resolvePlayerCollisions(float dt);
     [[nodiscard]] CameraRaycastResult raycastFromCamera() const;
+    [[nodiscard]] bool isChunkVoxelInBounds(int x, int y, int z) const;
+    [[nodiscard]] int activeBrushSize() const;
+    void snapToBrushAnchor(int inX, int inY, int inZ, int& outX, int& outY, int& outZ) const;
+    [[nodiscard]] bool computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const;
+    [[nodiscard]] bool applyBrushEdit(world::Chunk& chunk, int targetX, int targetY, int targetZ, world::Voxel voxel);
     [[nodiscard]] bool tryPlaceVoxelFromCameraRay();
     [[nodiscard]] bool tryRemoveVoxelFromCameraRay();
 
@@ -73,6 +84,8 @@ private:
     bool m_wasToggleDebugUiDown = false;
     bool m_hoverEnabled = false;
     bool m_wasToggleHoverDown = false;
+    BrushSize m_brushSize = BrushSize::Size4;
+    bool m_wasCycleBrushDown = false;
 
     sim::Simulation m_simulation;
     world::ChunkGrid m_chunkGrid;

@@ -2690,16 +2690,17 @@ bool Renderer::createGraphicsPipeline() {
 
     VkPipelineRasterizationStateCreateInfo previewAddRasterizer = rasterizer;
     previewAddRasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    previewAddRasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    // Preview draws closed helper geometry; disable culling to avoid face dropouts from winding mismatches.
+    previewAddRasterizer.cullMode = VK_CULL_MODE_NONE;
     previewAddRasterizer.depthBiasEnable = VK_FALSE;
 
     VkPipelineRasterizationStateCreateInfo previewRemoveRasterizer = rasterizer;
     previewRemoveRasterizer.polygonMode = m_supportsWireframePreview ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-    previewRemoveRasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    previewRemoveRasterizer.cullMode = VK_CULL_MODE_NONE;
     previewRemoveRasterizer.depthBiasEnable = VK_FALSE;
 
     VkPipelineDepthStencilStateCreateInfo previewDepthStencil = depthStencil;
-    previewDepthStencil.depthWriteEnable = VK_FALSE;
+    previewDepthStencil.depthWriteEnable = VK_TRUE;
     previewDepthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
 
     std::array<VkDynamicState, 3> previewDynamicStates = {
@@ -4355,7 +4356,8 @@ void Renderer::renderFrame(
     const VkPipeline activePreviewPipeline =
         (preview.mode == VoxelPreview::Mode::Remove) ? m_previewRemovePipeline : m_previewAddPipeline;
     const bool drawCubePreview = preview.visible && activePreviewPipeline != VK_NULL_HANDLE;
-    const bool drawFacePreview = preview.faceVisible && m_previewRemovePipeline != VK_NULL_HANDLE;
+    const bool drawFacePreview =
+        preview.faceVisible && preview.brushSize == 1 && m_previewRemovePipeline != VK_NULL_HANDLE;
     if (drawCubePreview || drawFacePreview) {
         constexpr uint32_t kPreviewCubeIndexCount = 36u;
         constexpr uint32_t kPreviewFaceIndexCount = 6u;
@@ -4410,7 +4412,21 @@ void Renderer::renderFrame(
             if (drawCubePreview) {
                 const uint32_t cubeFirstIndex =
                     (preview.mode == VoxelPreview::Mode::Add) ? kAddCubeFirstIndex : kRemoveCubeFirstIndex;
-                drawPreviewRange(activePreviewPipeline, kPreviewCubeIndexCount, cubeFirstIndex, preview.x, preview.y, preview.z);
+                const int brushSize = std::max(preview.brushSize, 1);
+                for (int localY = 0; localY < brushSize; ++localY) {
+                    for (int localZ = 0; localZ < brushSize; ++localZ) {
+                        for (int localX = 0; localX < brushSize; ++localX) {
+                            drawPreviewRange(
+                                activePreviewPipeline,
+                                kPreviewCubeIndexCount,
+                                cubeFirstIndex,
+                                preview.x + localX,
+                                preview.y + localY,
+                                preview.z + localZ
+                            );
+                        }
+                    }
+                }
             }
 
             if (drawFacePreview) {
