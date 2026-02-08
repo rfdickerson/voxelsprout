@@ -76,6 +76,15 @@ public:
         int poissonSampleCount = 16;
     };
 
+    struct SkyDebugSettings {
+        float sunYawDegrees = -157.5f;
+        float sunPitchDegrees = -24.5f;
+        float rayleighStrength = 1.0f;
+        float mieStrength = 1.0f;
+        float mieAnisotropy = 0.55f;
+        float skyExposure = 1.0f;
+    };
+
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
@@ -125,6 +134,7 @@ private:
 #if defined(VOXEL_HAS_IMGUI)
     bool createImGuiResources();
     void destroyImGuiResources();
+    void buildFrameStatsUi();
     void buildShadowDebugUi();
     void buildAimReticleUi();
 #endif
@@ -265,7 +275,9 @@ private:
     uint64_t m_nextTimelineValue = 1;
     uint32_t m_currentFrame = 0;
     bool m_debugUiVisible = false;
+    bool m_showFrameStatsPanel = true;
     ShadowDebugSettings m_shadowDebugSettings{};
+    SkyDebugSettings m_skyDebugSettings{};
 #if defined(VOXEL_HAS_IMGUI)
     bool m_imguiInitialized = false;
     VkDescriptorPool m_imguiDescriptorPool = VK_NULL_HANDLE;

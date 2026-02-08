@@ -19,6 +19,8 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 shadowConfig3; // hybridStep, hybridMaxDistance, rpdbScale, pcfRadius
     vec4 shadowVoxelGridOrigin;
     vec4 shadowVoxelGridSize;
+    vec4 skyConfig0; // rayleighStrength, mieStrength, mieAnisotropy, skyExposure
+    vec4 skyConfig1; // sunDiskExponent, sunGlowExponent, reserved, reserved
 } camera;
 
 layout(set = 0, binding = 4) uniform sampler2DArrayShadow shadowMap;
@@ -64,18 +66,29 @@ vec3 faceNormal(uint face) {
 vec3 proceduralSky(vec3 direction, vec3 sunDirection, vec3 sunColor) {
     const vec3 dir = normalize(direction);
     const vec3 toSun = -normalize(sunDirection);
+    const float rayleighStrength = max(camera.skyConfig0.x, 0.01);
+    const float mieStrength = max(camera.skyConfig0.y, 0.01);
+    const float mieG = clamp(camera.skyConfig0.z, 0.0, 0.98);
+    const float skyExposure = max(camera.skyConfig0.w, 0.01);
 
     const float horizonT = clamp((dir.y * 0.5) + 0.5, 0.0, 1.0);
     const float skyT = pow(horizonT, 0.35);
-
-    const vec3 horizonColor = vec3(0.83, 0.68, 0.46);
-    const vec3 zenithColor = vec3(0.11, 0.30, 0.62);
+    const vec3 horizonColor =
+        (vec3(0.55, 0.70, 1.00) * rayleighStrength) +
+        (vec3(1.00, 0.72, 0.42) * (mieStrength * 0.55));
+    const vec3 zenithColor =
+        (vec3(0.06, 0.24, 0.54) * rayleighStrength) +
+        (vec3(0.22, 0.20, 0.15) * (mieStrength * 0.25));
     vec3 sky = mix(horizonColor, zenithColor, skyT);
 
     const float sunDot = max(dot(dir, toSun), 0.0);
-    const float sunDisk = pow(sunDot, 1150.0);
-    const float sunGlow = pow(sunDot, 22.0);
-    sky += sunColor * ((sunDisk * 6.5) + (sunGlow * 1.3));
+    const float sunDisk = pow(sunDot, max(camera.skyConfig1.x, 1.0));
+    const float sunGlow = pow(sunDot, max(camera.skyConfig1.y, 1.0));
+    const float phaseRayleigh = 0.0596831 * (1.0 + (sunDot * sunDot));
+    const float phaseMie = 0.0795775 * (1.0 - (mieG * mieG)) /
+        max(0.001, pow(1.0 + (mieG * mieG) - (2.0 * mieG * sunDot), 1.5));
+    const float phaseBoost = (phaseRayleigh * rayleighStrength) + (phaseMie * mieStrength * 1.4);
+    sky += sunColor * ((sunDisk * 6.5) + (sunGlow * 1.3)) * (1.0 + phaseBoost);
 
     const vec3 groundColor = vec3(0.05, 0.06, 0.07);
     const float belowHorizon = clamp(-dir.y, 0.0, 1.0);
@@ -83,7 +96,7 @@ vec3 proceduralSky(vec3 direction, vec3 sunDirection, vec3 sunColor) {
     const vec3 ground = mix(horizonGroundColor, groundColor, pow(belowHorizon, 0.55));
     const float skyWeight = smoothstep(-0.18, 0.02, dir.y);
     const vec3 color = mix(ground, sky, skyWeight);
-    return max(color, vec3(0.0));
+    return max(color * skyExposure, vec3(0.0));
 }
 
 vec3 applyAtmosphericFog(vec3 litColor, vec3 worldPosition, float viewDepth, vec3 sunDirection, vec3 sunColor) {
@@ -94,12 +107,12 @@ vec3 applyAtmosphericFog(vec3 litColor, vec3 worldPosition, float viewDepth, vec
     const vec3 skyColor = proceduralSky(viewDir, sunDirection, sunColor);
 
     // Subtle physically inspired extinction coefficients (world units ~= voxels).
-    const vec3 sigmaRayleigh = vec3(0.0012, 0.0023, 0.0048);
-    const float sigmaMie = 0.0038;
+    const vec3 sigmaRayleigh = vec3(0.0012, 0.0023, 0.0048) * max(camera.skyConfig0.x, 0.01);
+    const float sigmaMie = 0.0038 * max(camera.skyConfig0.y, 0.01);
     const vec3 extinction = sigmaRayleigh + vec3(sigmaMie);
 
     const float sunView = max(dot(viewDir, -sunDirection), 0.0);
-    const float g = 0.55;
+    const float g = clamp(camera.skyConfig0.z, 0.0, 0.98);
     const float phaseMie = (1.0 - (g * g)) / (4.0 * 3.14159265 * pow(1.0 + (g * g) - (2.0 * g * sunView), 1.5));
     const float phaseBoost = 1.0 + (phaseMie * 1.6);
     const vec3 inscatterColor = skyColor * phaseBoost;

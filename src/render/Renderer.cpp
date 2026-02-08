@@ -62,6 +62,8 @@ struct alignas(16) CameraUniform {
     float shadowConfig3[4];
     float shadowVoxelGridOrigin[4];
     float shadowVoxelGridSize[4];
+    float skyConfig0[4];
+    float skyConfig1[4];
 };
 
 struct alignas(16) ChunkPushConstants {
@@ -147,24 +149,57 @@ math::Matrix4 lookAt(const math::Vector3& eye, const math::Vector3& target, cons
     return view;
 }
 
-math::Vector3 proceduralSkyRadiance(const math::Vector3& direction, const math::Vector3& sunDirection) {
+math::Vector3 computeSunColor(
+    const Renderer::SkyDebugSettings& settings,
+    const math::Vector3& sunDirection
+) {
+    const math::Vector3 toSun = -math::normalize(sunDirection);
+    const float sunHeight = std::clamp((toSun.y * 0.5f) + 0.5f, 0.0f, 1.0f);
+    const float rayleigh = std::max(settings.rayleighStrength, 0.01f);
+    const float mie = std::max(settings.mieStrength, 0.01f);
+
+    const math::Vector3 rayleighTint{0.58f, 0.74f, 1.0f};
+    const math::Vector3 mieTint{1.0f, 0.74f, 0.44f};
+    const float warmFactor = std::pow(1.0f - sunHeight, 1.3f);
+    const math::Vector3 rayleighColor = rayleighTint * rayleigh;
+    const math::Vector3 mieColor = mieTint * (mie * (0.55f + (0.45f * warmFactor)));
+    return rayleighColor + mieColor;
+}
+
+math::Vector3 proceduralSkyRadiance(
+    const math::Vector3& direction,
+    const math::Vector3& sunDirection,
+    const math::Vector3& sunColor,
+    const Renderer::SkyDebugSettings& settings
+) {
     const math::Vector3 dir = math::normalize(direction);
     const math::Vector3 toSun = -math::normalize(sunDirection);
     const float horizonT = std::clamp((dir.y * 0.5f) + 0.5f, 0.0f, 1.0f);
     const float skyT = std::pow(horizonT, 0.35f);
 
-    const math::Vector3 horizonColor{0.80f, 0.66f, 0.45f};
-    const math::Vector3 zenithColor{0.13f, 0.29f, 0.58f};
+    const float rayleigh = std::max(settings.rayleighStrength, 0.01f);
+    const float mie = std::max(settings.mieStrength, 0.01f);
+    const math::Vector3 horizonColor =
+        (math::Vector3{0.54f, 0.70f, 1.00f} * rayleigh) +
+        (math::Vector3{1.00f, 0.74f, 0.42f} * (mie * 0.58f));
+    const math::Vector3 zenithColor =
+        (math::Vector3{0.06f, 0.24f, 0.54f} * rayleigh) +
+        (math::Vector3{0.22f, 0.20f, 0.15f} * (mie * 0.25f));
     const math::Vector3 baseSky = (horizonColor * (1.0f - skyT)) + (zenithColor * skyT);
 
     const float sunDot = std::max(math::dot(dir, toSun), 0.0f);
     const float sunDisk = std::pow(sunDot, 1100.0f);
     const float sunGlow = std::pow(sunDot, 24.0f);
-    const math::Vector3 sunColor{1.0f, 0.94f, 0.80f};
+    const float g = std::clamp(settings.mieAnisotropy, 0.0f, 0.98f);
+    constexpr float kInv4Pi = 0.0795774715f;
+    const float phaseRayleigh = kInv4Pi * 0.75f * (1.0f + (sunDot * sunDot));
+    const float phaseMie = kInv4Pi * (1.0f - (g * g)) /
+        std::max(0.001f, std::pow(1.0f + (g * g) - (2.0f * g * sunDot), 1.5f));
+    const float phaseBoost = (phaseRayleigh * rayleigh) + (phaseMie * mie * 1.4f);
 
     const float aboveHorizon = std::clamp(dir.y * 4.0f + 0.2f, 0.0f, 1.0f);
     const math::Vector3 sky = (baseSky * aboveHorizon)
-        + (sunColor * ((sunDisk * 5.0f) + (sunGlow * 1.2f)));
+        + (sunColor * (((sunDisk * 5.0f) + (sunGlow * 1.2f)) * (1.0f + phaseBoost)));
 
     const math::Vector3 groundColor{0.05f, 0.06f, 0.07f};
     const float belowHorizon = std::clamp(-dir.y, 0.0f, 1.0f);
@@ -173,7 +208,8 @@ math::Vector3 proceduralSkyRadiance(const math::Vector3& direction, const math::
     const math::Vector3 ground = (horizonGroundColor * (1.0f - groundWeight)) + (groundColor * groundWeight);
 
     const float skyWeight = std::clamp((dir.y + 0.18f) / 0.20f, 0.0f, 1.0f);
-    return (ground * (1.0f - skyWeight)) + (sky * skyWeight);
+    const float skyExposure = std::max(settings.skyExposure, 0.01f);
+    return ((ground * (1.0f - skyWeight)) + (sky * skyWeight)) * skyExposure;
 }
 
 float shBasis(int index, const math::Vector3& direction) {
@@ -194,7 +230,11 @@ float shBasis(int index, const math::Vector3& direction) {
     }
 }
 
-std::array<math::Vector3, 9> computeIrradianceShCoefficients(const math::Vector3& sunDirection) {
+std::array<math::Vector3, 9> computeIrradianceShCoefficients(
+    const math::Vector3& sunDirection,
+    const math::Vector3& sunColor,
+    const Renderer::SkyDebugSettings& settings
+) {
     constexpr uint32_t kThetaSamples = 16;
     constexpr uint32_t kPhiSamples = 32;
     constexpr float kPi = 3.14159265358979323846f;
@@ -221,7 +261,7 @@ std::array<math::Vector3, 9> computeIrradianceShCoefficients(const math::Vector3
                 std::sin(phi) * sinTheta
             };
 
-            const math::Vector3 radiance = proceduralSkyRadiance(dir, sunDirection);
+            const math::Vector3 radiance = proceduralSkyRadiance(dir, sunDirection, sunColor, settings);
             const float sampleWeight = sinTheta;
             for (int basisIndex = 0; basisIndex < 9; ++basisIndex) {
                 const float basisValue = shBasis(basisIndex, dir);
@@ -3612,6 +3652,27 @@ void Renderer::destroyImGuiResources() {
     m_imguiInitialized = false;
 }
 
+void Renderer::buildFrameStatsUi() {
+    if (!m_showFrameStatsPanel) {
+        return;
+    }
+
+    constexpr ImGuiWindowFlags kPanelFlags =
+        ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoSavedSettings;
+    if (!ImGui::Begin("Frame Stats", &m_showFrameStatsPanel, kPanelFlags)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("Frame: %.2f ms", m_debugFrameTimeMs);
+    ImGui::Text("FPS: %.1f", m_debugFps);
+    ImGui::Text("Chunks: %u", m_debugChunkCount);
+    ImGui::Separator();
+    ImGui::Checkbox("Show Shadow Debug", &m_debugUiVisible);
+    ImGui::End();
+}
+
 void Renderer::buildShadowDebugUi() {
     if (!m_debugUiVisible) {
         return;
@@ -3623,8 +3684,6 @@ void Renderer::buildShadowDebugUi() {
     }
 
     ImGui::Text("CSM + Voxel Hybrid");
-    ImGui::Text("Frame: %.2f ms (%.1f FPS)", m_debugFrameTimeMs, m_debugFps);
-    ImGui::Text("Chunks: %u", m_debugChunkCount);
     ImGui::Text(
         "Macro Cells U/R4/R1: %u / %u / %u",
         m_debugMacroCellUniformCount,
@@ -3669,6 +3728,15 @@ void Renderer::buildShadowDebugUi() {
     ImGui::SliderFloat("Ray Max Distance", &m_shadowDebugSettings.hybridRayMaxDistance, 2.0f, 80.0f, "%.2f");
 
     ImGui::Separator();
+    ImGui::Text("Sun & Sky");
+    ImGui::SliderFloat("Sun Yaw", &m_skyDebugSettings.sunYawDegrees, -180.0f, 180.0f, "%.1f deg");
+    ImGui::SliderFloat("Sun Pitch", &m_skyDebugSettings.sunPitchDegrees, -89.0f, 5.0f, "%.1f deg");
+    ImGui::SliderFloat("Rayleigh Strength", &m_skyDebugSettings.rayleighStrength, 0.1f, 4.0f, "%.2f");
+    ImGui::SliderFloat("Mie Strength", &m_skyDebugSettings.mieStrength, 0.05f, 4.0f, "%.2f");
+    ImGui::SliderFloat("Mie Anisotropy", &m_skyDebugSettings.mieAnisotropy, 0.0f, 0.95f, "%.2f");
+    ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
+
+    ImGui::Separator();
     ImGui::Text("Cascade Splits: %.1f / %.1f / %.1f / %.1f",
         m_shadowCascadeSplits[0],
         m_shadowCascadeSplits[1],
@@ -3686,6 +3754,10 @@ void Renderer::buildShadowDebugUi() {
 
     if (ImGui::Button("Reset Shadow Defaults")) {
         m_shadowDebugSettings = ShadowDebugSettings{};
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset Sun/Sky Defaults")) {
+        m_skyDebugSettings = SkyDebugSettings{};
     }
 
     ImGui::End();
@@ -3880,6 +3952,7 @@ void Renderer::renderFrame(
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        buildFrameStatsUi();
         buildShadowDebugUi();
         buildAimReticleUi();
         ImGui::Render();
@@ -3920,7 +3993,18 @@ void Renderer::renderFrame(
         m_shadowStableCascadeRadii.fill(0.0f);
     }
 
-    const math::Vector3 sunDirection = math::normalize(math::Vector3{-0.58f, -0.42f, -0.24f});
+    const float sunYawRadians = math::radians(m_skyDebugSettings.sunYawDegrees);
+    const float sunPitchRadians = math::radians(m_skyDebugSettings.sunPitchDegrees);
+    const float sunCosPitch = std::cos(sunPitchRadians);
+    math::Vector3 sunDirection = math::normalize(math::Vector3{
+        std::cos(sunYawRadians) * sunCosPitch,
+        std::sin(sunPitchRadians),
+        std::sin(sunYawRadians) * sunCosPitch
+    });
+    if (math::lengthSquared(sunDirection) <= 0.0001f) {
+        sunDirection = math::Vector3{-0.58f, -0.42f, -0.24f};
+    }
+    const math::Vector3 sunColor = computeSunColor(m_skyDebugSettings, sunDirection);
 
     constexpr float kCascadeLambda = 0.62f;
     constexpr float kCascadeSplitQuantization = 0.5f;
@@ -4008,7 +4092,8 @@ void Renderer::renderFrame(
         lightViewProjMatrices[cascadeIndex] = lightProjection * lightView;
     }
 
-    const std::array<math::Vector3, 9> shIrradiance = computeIrradianceShCoefficients(sunDirection);
+    const std::array<math::Vector3, 9> shIrradiance =
+        computeIrradianceShCoefficients(sunDirection, sunColor, m_skyDebugSettings);
 
     const std::optional<RingBufferSlice> mvpSliceOpt =
         m_uploadRing.allocate(sizeof(CameraUniform), m_uniformBufferAlignment);
@@ -4034,9 +4119,9 @@ void Renderer::renderFrame(
     mvpUniform.sunDirectionIntensity[1] = sunDirection.y;
     mvpUniform.sunDirectionIntensity[2] = sunDirection.z;
     mvpUniform.sunDirectionIntensity[3] = 2.2f;
-    mvpUniform.sunColorShadow[0] = 0.92f;
-    mvpUniform.sunColorShadow[1] = 0.88f;
-    mvpUniform.sunColorShadow[2] = 0.80f;
+    mvpUniform.sunColorShadow[0] = sunColor.x;
+    mvpUniform.sunColorShadow[1] = sunColor.y;
+    mvpUniform.sunColorShadow[2] = sunColor.z;
     mvpUniform.sunColorShadow[3] = 1.0f;
     for (uint32_t i = 0; i < shIrradiance.size(); ++i) {
         mvpUniform.shIrradiance[i][0] = shIrradiance[i].x;
@@ -4073,6 +4158,16 @@ void Renderer::renderFrame(
     mvpUniform.shadowVoxelGridSize[1] = static_cast<float>(m_shadowVoxelGridSizeY);
     mvpUniform.shadowVoxelGridSize[2] = static_cast<float>(m_shadowVoxelGridSizeZ);
     mvpUniform.shadowVoxelGridSize[3] = 0.0f;
+
+    mvpUniform.skyConfig0[0] = m_skyDebugSettings.rayleighStrength;
+    mvpUniform.skyConfig0[1] = m_skyDebugSettings.mieStrength;
+    mvpUniform.skyConfig0[2] = m_skyDebugSettings.mieAnisotropy;
+    mvpUniform.skyConfig0[3] = m_skyDebugSettings.skyExposure;
+
+    mvpUniform.skyConfig1[0] = 1150.0f;
+    mvpUniform.skyConfig1[1] = 22.0f;
+    mvpUniform.skyConfig1[2] = 0.0f;
+    mvpUniform.skyConfig1[3] = 0.0f;
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     VkDescriptorBufferInfo bufferInfo{};

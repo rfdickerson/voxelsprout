@@ -16,6 +16,8 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 shadowConfig3;
     vec4 shadowVoxelGridOrigin;
     vec4 shadowVoxelGridSize;
+    vec4 skyConfig0;
+    vec4 skyConfig1;
 } camera;
 
 layout(push_constant) uniform ChunkPushConstants {
