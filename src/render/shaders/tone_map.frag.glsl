@@ -14,9 +14,17 @@ vec3 acesFilmTonemap(vec3 color) {
     return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
 }
 
+vec3 applySaturation(vec3 color, float saturation) {
+    const float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    return mix(vec3(luma), color, saturation);
+}
+
 void main() {
     const vec3 hdrColor = texture(hdrSceneColor, inUv).rgb;
-    const vec3 toneMapped = acesFilmTonemap(hdrColor);
+    const float exposure = 0.58;
+    vec3 toneMapped = acesFilmTonemap(hdrColor * exposure);
+    toneMapped = applySaturation(toneMapped, 1.18);
+    toneMapped = pow(clamp(toneMapped, 0.0, 1.0), vec3(1.06));
     const vec3 ldrSrgb = pow(toneMapped, vec3(1.0 / 2.2));
     outColor = vec4(ldrSrgb, 1.0);
 }

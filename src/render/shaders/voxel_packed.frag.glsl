@@ -264,7 +264,10 @@ float sampleCascadedShadow(vec3 worldPosition, vec3 normal, float viewDepth, flo
 
 void main() {
     const vec3 normal = faceNormal(inFace);
-    const float aoBrightness = 0.42 + (clamp(inAo, 0.0, 1.0) * 0.58);
+    const float ao = clamp(inAo, 0.0, 1.0);
+    const float aoCurve = pow(ao, 1.45);
+    const float ambientAo = mix(0.16, 1.0, aoCurve);
+    const float directAo = mix(0.34, 1.0, aoCurve);
     vec3 baseColor = faceColor(inFace) * materialTint(inMaterial);
 
     const vec3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
@@ -281,7 +284,9 @@ void main() {
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = mix(1.0, shadowVisibility, shadowStrength);
     const float ambientShadowFactor = mix(1.0, shadowVisibility, 0.25 * shadowStrength);
-    vec3 lighting = (ambient * ambientShadowFactor) + (directSun * directShadowFactor);
+    vec3 lighting =
+        (ambient * ambientShadowFactor * ambientAo) +
+        (directSun * directShadowFactor * directAo);
 
     if (inMaterial == 250u || inMaterial == 251u) {
         const float stripe = 0.5 + 0.5 * sin((inWorldPosition.x + inWorldPosition.z + inWorldPosition.y) * 6.0);
@@ -290,5 +295,5 @@ void main() {
         lighting += emissive;
     }
 
-    outColor = vec4(baseColor * aoBrightness * lighting, 1.0);
+    outColor = vec4(baseColor * lighting, 1.0);
 }
