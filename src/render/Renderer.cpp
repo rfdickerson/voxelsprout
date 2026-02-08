@@ -3862,26 +3862,36 @@ void Renderer::renderFrame(
             m_shadowStableCascadeRadii[cascadeIndex] = boundingRadius;
         }
         const float cascadeRadius = m_shadowStableCascadeRadii[cascadeIndex];
+        const float orthoWidth = 2.0f * cascadeRadius;
+        const float texelSize = orthoWidth / static_cast<float>(kShadowMapSize);
 
         // Keep the light farther than the cascade sphere but avoid overly large depth spans.
         const float lightDistance = (cascadeRadius * 1.9f) + 48.0f;
-        const math::Vector3 lightPosition = frustumCenter - (sunDirection * lightDistance);
         const float sunUpDot = std::abs(math::dot(sunDirection, math::Vector3{0.0f, 1.0f, 0.0f}));
-        const math::Vector3 lightUp =
+        const math::Vector3 lightUpHint =
             (sunUpDot > 0.95f) ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
-        math::Matrix4 lightView = lookAt(lightPosition, frustumCenter, lightUp);
+        const math::Vector3 lightForward = math::normalize(sunDirection);
+        const math::Vector3 lightRight = math::normalize(math::cross(lightForward, lightUpHint));
+        const math::Vector3 lightUp = math::cross(lightRight, lightForward);
 
-        // Snap cascade center in light-space texel units to eliminate sub-texel drift.
-        const float orthoWidth = 2.0f * cascadeRadius;
-        const float texelSize = orthoWidth / static_cast<float>(kShadowMapSize);
-        const math::Vector4 centerLightSpace = lightView * math::Vector4{frustumCenter, 1.0f};
-        const float snappedCenterX = std::floor(centerLightSpace.x / texelSize) * texelSize;
-        const float snappedCenterY = std::floor(centerLightSpace.y / texelSize) * texelSize;
+        // Stabilize translation by snapping the cascade center along light-view right/up texel units
+        // before constructing the view matrix.
+        const float centerRight = math::dot(frustumCenter, lightRight);
+        const float centerUp = math::dot(frustumCenter, lightUp);
+        const float snappedCenterRight = std::floor((centerRight / texelSize) + 0.5f) * texelSize;
+        const float snappedCenterUp = std::floor((centerUp / texelSize) + 0.5f) * texelSize;
+        const math::Vector3 snappedFrustumCenter =
+            frustumCenter +
+            (lightRight * (snappedCenterRight - centerRight)) +
+            (lightUp * (snappedCenterUp - centerUp));
 
-        const float left = snappedCenterX - cascadeRadius;
-        const float right = snappedCenterX + cascadeRadius;
-        const float bottom = snappedCenterY - cascadeRadius;
-        const float top = snappedCenterY + cascadeRadius;
+        const math::Vector3 lightPosition = snappedFrustumCenter - (lightForward * lightDistance);
+        const math::Matrix4 lightView = lookAt(lightPosition, snappedFrustumCenter, lightUp);
+
+        const float left = -cascadeRadius;
+        const float right = cascadeRadius;
+        const float bottom = -cascadeRadius;
+        const float top = cascadeRadius;
         // Keep a stable but tighter depth range per cascade to improve depth precision.
         const float casterPadding = std::max(24.0f, cascadeRadius * 0.35f);
         const float lightNear = std::max(0.1f, lightDistance - cascadeRadius - casterPadding);
