@@ -63,7 +63,7 @@ public:
         float hybridRayStep = 0.45f;
         float hybridRayMaxDistance = 28.0f;
         float rpdbScale = 2.5f;
-        float pcfRadius = 2.0f;
+        float pcfRadius = 1.0f;
         int poissonSampleCount = 16;
     };
 

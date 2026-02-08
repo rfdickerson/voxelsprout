@@ -3422,14 +3422,28 @@ void Renderer::renderFrame(
     const math::Vector3 sunDirection = math::normalize(math::Vector3{-0.58f, -0.42f, -0.24f});
 
     constexpr float kCascadeLambda = 0.62f;
+    constexpr float kCascadeSplitQuantization = 0.5f;
+    constexpr float kCascadeSplitUpdateThreshold = 0.5f;
     std::array<float, kShadowCascadeCount> cascadeDistances{};
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
         const float p = static_cast<float>(cascadeIndex + 1) / static_cast<float>(kShadowCascadeCount);
         const float logarithmicSplit = nearPlane * std::pow(farPlane / nearPlane, p);
         const float uniformSplit = nearPlane + ((farPlane - nearPlane) * p);
-        cascadeDistances[cascadeIndex] =
+        const float desiredSplit =
             (kCascadeLambda * logarithmicSplit) + ((1.0f - kCascadeLambda) * uniformSplit);
-        m_shadowCascadeSplits[cascadeIndex] = cascadeDistances[cascadeIndex];
+        const float quantizedSplit =
+            std::round(desiredSplit / kCascadeSplitQuantization) * kCascadeSplitQuantization;
+
+        float split = m_shadowCascadeSplits[cascadeIndex];
+        if (projectionParamsChanged || std::abs(quantizedSplit - split) > kCascadeSplitUpdateThreshold) {
+            split = quantizedSplit;
+        }
+
+        const float previousSplit = (cascadeIndex == 0) ? nearPlane : m_shadowCascadeSplits[cascadeIndex - 1];
+        split = std::max(split, previousSplit + kCascadeSplitQuantization);
+        split = std::min(split, farPlane);
+        m_shadowCascadeSplits[cascadeIndex] = split;
+        cascadeDistances[cascadeIndex] = split;
     }
 
     std::array<math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
@@ -3449,7 +3463,9 @@ void Renderer::renderFrame(
         }
         const float cascadeRadius = m_shadowStableCascadeRadii[cascadeIndex];
 
-        const math::Vector3 lightPosition = frustumCenter - (sunDirection * (cascadeRadius * 2.5f + 120.0f));
+        // Keep the light farther than the cascade sphere but avoid overly large depth spans.
+        const float lightDistance = (cascadeRadius * 1.9f) + 48.0f;
+        const math::Vector3 lightPosition = frustumCenter - (sunDirection * lightDistance);
         const float sunUpDot = std::abs(math::dot(sunDirection, math::Vector3{0.0f, 1.0f, 0.0f}));
         const math::Vector3 lightUp =
             (sunUpDot > 0.95f) ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
@@ -3466,10 +3482,8 @@ void Renderer::renderFrame(
         const float right = snappedCenterX + cascadeRadius;
         const float bottom = snappedCenterY - cascadeRadius;
         const float top = snappedCenterY + cascadeRadius;
-        // Keep a stable light-space depth range per cascade to avoid temporal pumping
-        // from frame-to-frame min/max z fitting.
-        const float lightDistance = (cascadeRadius * 2.5f) + 120.0f;
-        const float casterPadding = std::max(140.0f, cascadeRadius * 1.5f);
+        // Keep a stable but tighter depth range per cascade to improve depth precision.
+        const float casterPadding = std::max(24.0f, cascadeRadius * 0.35f);
         const float lightNear = std::max(0.1f, lightDistance - cascadeRadius - casterPadding);
         const float lightFar = lightDistance + cascadeRadius + casterPadding;
         const math::Matrix4 lightProjection = orthographicVulkan(

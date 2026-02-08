@@ -80,6 +80,13 @@ vec3 evaluateShIrradiance(vec3 normal) {
     return max(irradiance, vec3(0.0));
 }
 
+vec3 evaluateShHemisphereIrradiance(vec3 normal) {
+    const float upT = clamp((normal.y * 0.5) + 0.5, 0.0, 1.0);
+    const vec3 skyIrradiance = evaluateShIrradiance(vec3(0.0, 1.0, 0.0));
+    const vec3 groundIrradiance = evaluateShIrradiance(vec3(0.0, -1.0, 0.0));
+    return mix(groundIrradiance, skyIrradiance, upT);
+}
+
 int chooseShadowCascade(float viewDepth) {
     if (viewDepth <= camera.shadowCascadeSplits.x) {
         return 0;
@@ -266,7 +273,7 @@ void main() {
     const vec3 normal = faceNormal(inFace);
     const float ao = clamp(inAo, 0.0, 1.0);
     const float aoCurve = pow(ao, 1.45);
-    const float ambientAo = mix(0.16, 1.0, aoCurve);
+    const float ambientAo = mix(0.32, 1.0, aoCurve);
     const float directAo = mix(0.34, 1.0, aoCurve);
     vec3 baseColor = faceColor(inFace) * materialTint(inMaterial);
 
@@ -279,8 +286,10 @@ void main() {
     const float viewDepth = max(-(camera.view * vec4(inWorldPosition, 1.0)).z, 0.0);
     const float shadowVisibility = sampleCascadedShadow(inWorldPosition, normal, viewDepth, ndotl);
 
-    const vec3 ambientIrradiance = evaluateShIrradiance(normal);
-    const vec3 ambient = ambientIrradiance * 0.075;
+    const vec3 shNormalIrradiance = evaluateShIrradiance(normal);
+    const vec3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
+    const vec3 ambientIrradiance = mix(shNormalIrradiance, shHemisphereIrradiance, 0.70);
+    const vec3 ambient = ambientIrradiance * 0.155;
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = mix(1.0, shadowVisibility, shadowStrength);
     const float ambientShadowFactor = mix(1.0, shadowVisibility, 0.25 * shadowStrength);
