@@ -47,6 +47,9 @@ constexpr float kHoverMaxVerticalSpeed = 12.0f;
 constexpr float kHoverManualVerticalSpeed = 8.0f;
 constexpr int kHoverGroundSearchDepth = 96;
 constexpr float kGamepadTriggerPressedThreshold = 0.30f;
+constexpr float kGamepadMoveDeadzone = 0.18f;
+constexpr float kGamepadLookDeadzone = 0.14f;
+constexpr float kGamepadLookDegreesPerSecond = 160.0f;
 constexpr const char* kWorldFilePath = "world.vxw";
 
 constexpr std::array<world::VoxelType, 1> kPlaceableBlockTypes = {
@@ -101,6 +104,16 @@ float approach(float current, float target, float maxDelta) {
         return current - maxDelta;
     }
     return target;
+}
+
+float applyStickDeadzone(float value, float deadzone) {
+    const float clampedDeadzone = std::clamp(deadzone, 0.0f, 0.99f);
+    const float magnitude = std::abs(value);
+    if (magnitude <= clampedDeadzone) {
+        return 0.0f;
+    }
+    const float normalized = (magnitude - clampedDeadzone) / (1.0f - clampedDeadzone);
+    return std::copysign(normalized, value);
 }
 
 } // namespace
@@ -384,6 +397,12 @@ void App::pollInput() {
     bool controllerRemoveDown = false;
     bool controllerPrevBlockDown = false;
     bool controllerNextBlockDown = false;
+    bool controllerMoveUpDown = false;
+    bool controllerMoveDownDown = false;
+    float controllerMoveForward = 0.0f;
+    float controllerMoveRight = 0.0f;
+    float controllerLookX = 0.0f;
+    float controllerLookY = 0.0f;
     GLFWgamepadstate gamepadState{};
     const bool hasGamepad =
         glfwJoystickIsGamepad(GLFW_JOYSTICK_1) == GLFW_TRUE &&
@@ -401,6 +420,12 @@ void App::pollInput() {
         controllerRemoveDown = gamepadState.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER] > kGamepadTriggerPressedThreshold;
         controllerPrevBlockDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_LEFT_BUMPER] == GLFW_PRESS;
         controllerNextBlockDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER] == GLFW_PRESS;
+        controllerMoveUpDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_A] == GLFW_PRESS;
+        controllerMoveDownDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_B] == GLFW_PRESS;
+        controllerMoveForward = -applyStickDeadzone(gamepadState.axes[GLFW_GAMEPAD_AXIS_LEFT_Y], kGamepadMoveDeadzone);
+        controllerMoveRight = applyStickDeadzone(gamepadState.axes[GLFW_GAMEPAD_AXIS_LEFT_X], kGamepadMoveDeadzone);
+        controllerLookX = applyStickDeadzone(gamepadState.axes[GLFW_GAMEPAD_AXIS_RIGHT_X], kGamepadLookDeadzone);
+        controllerLookY = -applyStickDeadzone(gamepadState.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y], kGamepadLookDeadzone);
     }
 
     const bool prevHotbarDown = controllerPrevBlockDown;
@@ -428,6 +453,12 @@ void App::pollInput() {
     m_input.removeBlockDown =
         glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS ||
         controllerRemoveDown;
+    m_input.moveUp = m_input.moveUp || controllerMoveUpDown;
+    m_input.moveDown = m_input.moveDown || controllerMoveDownDown;
+    m_input.gamepadMoveForward = controllerMoveForward;
+    m_input.gamepadMoveRight = controllerMoveRight;
+    m_input.gamepadLookX = controllerLookX;
+    m_input.gamepadLookY = controllerLookY;
 
     double mouseX = 0.0;
     double mouseY = 0.0;
@@ -465,6 +496,8 @@ void App::updateCamera(float dt) {
 
     m_camera.yawDegrees += m_camera.smoothedMouseDeltaX * kMouseSensitivity;
     m_camera.pitchDegrees += m_camera.smoothedMouseDeltaY * kMouseSensitivity;
+    m_camera.yawDegrees += m_input.gamepadLookX * kGamepadLookDegreesPerSecond * dt;
+    m_camera.pitchDegrees += m_input.gamepadLookY * kGamepadLookDegreesPerSecond * dt;
     m_camera.pitchDegrees = std::clamp(m_camera.pitchDegrees, kPitchMinDegrees, kPitchMaxDegrees);
 
     const float yawRadians = math::radians(m_camera.yawDegrees);
@@ -472,18 +505,25 @@ void App::updateCamera(float dt) {
     const math::Vector3 right{-forward.z, 0.0f, forward.x};
     math::Vector3 moveDirection{};
 
+    float moveForwardInput = m_input.gamepadMoveForward;
+    float moveRightInput = m_input.gamepadMoveRight;
     if (m_input.moveForward) {
-        moveDirection += forward;
+        moveForwardInput += 1.0f;
     }
     if (m_input.moveBackward) {
-        moveDirection -= forward;
+        moveForwardInput -= 1.0f;
     }
     if (m_input.moveRight) {
-        moveDirection += right;
+        moveRightInput += 1.0f;
     }
     if (m_input.moveLeft) {
-        moveDirection -= right;
+        moveRightInput -= 1.0f;
     }
+    moveForwardInput = std::clamp(moveForwardInput, -1.0f, 1.0f);
+    moveRightInput = std::clamp(moveRightInput, -1.0f, 1.0f);
+
+    moveDirection += forward * moveForwardInput;
+    moveDirection += right * moveRightInput;
 
     const float moveLengthSq = math::lengthSquared(moveDirection);
     const float moveLength = std::sqrt(moveLengthSq);

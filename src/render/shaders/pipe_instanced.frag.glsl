@@ -22,6 +22,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 skyConfig0;
     vec4 skyConfig1;
 } camera;
+layout(set = 0, binding = 7) uniform sampler2D ssaoTexture;
 
 layout(location = 0) out vec4 outColor;
 
@@ -65,7 +66,9 @@ void main() {
     const vec3 shNormalIrradiance = evaluateShIrradiance(normal);
     const vec3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
     const vec3 ambientIrradiance = mix(shNormalIrradiance, shHemisphereIrradiance, 0.70);
-    const vec3 ambient = ambientIrradiance * 0.26;
+    const vec2 ssaoUv = gl_FragCoord.xy / vec2(textureSize(ssaoTexture, 0));
+    const float ssao = clamp(texture(ssaoTexture, ssaoUv).r, 0.0, 1.0);
+    const vec3 ambient = ambientIrradiance * (0.26 * ssao);
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
 
     const vec3 lit = (ambient + directSun) * inTint;

@@ -20,6 +20,10 @@ struct InputState {
 
     float mouseDeltaX = 0.0f;
     float mouseDeltaY = 0.0f;
+    float gamepadMoveForward = 0.0f;
+    float gamepadMoveRight = 0.0f;
+    float gamepadLookX = 0.0f;
+    float gamepadLookY = 0.0f;
 };
 
 } // namespace core

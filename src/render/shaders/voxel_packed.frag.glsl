@@ -1,8 +1,7 @@
 #version 450
 layout(location = 0) in flat uint inFace;
-layout(location = 1) in float inAo;
-layout(location = 2) in flat uint inMaterial;
-layout(location = 3) in vec3 inWorldPosition;
+layout(location = 1) in flat uint inMaterial;
+layout(location = 2) in vec3 inWorldPosition;
 
 layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 mvp;
@@ -26,6 +25,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
 layout(set = 0, binding = 4) uniform sampler2DArrayShadow shadowMap;
 layout(set = 0, binding = 5) uniform usamplerBuffer shadowVoxelGrid;
 layout(set = 0, binding = 1) uniform sampler2D diffuseAlbedo;
+layout(set = 0, binding = 7) uniform sampler2D ssaoTexture;
 
 layout(location = 0) out vec4 outColor;
 
@@ -361,10 +361,6 @@ float sampleCascadedShadow(vec3 worldPosition, vec3 normal, float viewDepth, flo
 
 void main() {
     const vec3 normal = faceNormal(inFace);
-    const float ao = clamp(inAo, 0.0, 1.0);
-    const float aoCurve = pow(ao, 1.65);
-    const float ambientAo = mix(0.20, 1.0, aoCurve);
-    const float directAo = mix(0.30, 1.0, aoCurve);
     vec3 baseColor = texture(diffuseAlbedo, faceUv(inFace, inWorldPosition)).rgb;
     if (inMaterial == 250u || inMaterial == 251u) {
         baseColor *= materialTint(inMaterial);
@@ -384,12 +380,14 @@ void main() {
     const vec3 ambientIrradiance = mix(shNormalIrradiance, shHemisphereIrradiance, 0.70);
     const float shadowOcclusion = 1.0 - shadowVisibility;
     const float shShadowBoost = 1.0 + (shadowOcclusion * 0.75);
-    const vec3 ambient = ambientIrradiance * (0.26 * shShadowBoost);
+    const vec2 ssaoUv = gl_FragCoord.xy / vec2(textureSize(ssaoTexture, 0));
+    const float ssao = clamp(texture(ssaoTexture, ssaoUv).r, 0.0, 1.0);
+    const vec3 ambient = ambientIrradiance * (0.26 * shShadowBoost * ssao);
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = mix(1.0, shadowVisibility, shadowStrength);
     vec3 lighting =
-        (ambient * ambientAo) +
-        (directSun * directShadowFactor * directAo);
+        ambient +
+        (directSun * directShadowFactor);
 
     if (inMaterial == 250u || inMaterial == 251u) {
         const float stripe = 0.5 + 0.5 * sin((inWorldPosition.x + inWorldPosition.z + inWorldPosition.y) * 6.0);

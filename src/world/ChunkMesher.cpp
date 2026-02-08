@@ -82,7 +82,7 @@ void faceAoAxes(std::uint32_t faceId, int& ux, int& uy, int& uz, int& vx, int& v
     }
 }
 
-std::uint32_t cornerAoLevel(
+[[maybe_unused]] std::uint32_t cornerAoLevel(
     const Chunk& chunk,
     int x,
     int y,
@@ -140,9 +140,11 @@ void appendVoxelFace(
     std::uint32_t material,
     std::uint32_t lodLevel
 ) {
+    (void)chunk;
     const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
     for (std::uint32_t corner = 0; corner < 4; ++corner) {
-        const std::uint32_t ao = cornerAoLevel(chunk, x, y, z, faceId, corner);
+        // SSAO now handles ambient occlusion in screen space, so packed per-vertex AO is fixed to max.
+        const std::uint32_t ao = 3u;
         PackedVoxelVertex vertex{};
         vertex.bits = PackedVoxelVertex::pack(
             static_cast<std::uint32_t>(x),
