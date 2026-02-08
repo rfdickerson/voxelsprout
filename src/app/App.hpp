@@ -51,6 +51,9 @@ private:
     [[nodiscard]] CameraRaycastResult raycastFromCamera() const;
     [[nodiscard]] bool isChunkVoxelInBounds(int x, int y, int z) const;
     [[nodiscard]] int activeBrushSize() const;
+    void cycleBrushSize();
+    void cycleSelectedBlock(int direction);
+    [[nodiscard]] world::Voxel selectedPlaceVoxel() const;
     void snapToBrushAnchor(int inX, int inY, int inZ, int& outX, int& outY, int& outZ) const;
     [[nodiscard]] bool computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const;
     [[nodiscard]] bool applyBrushEdit(world::Chunk& chunk, int targetX, int targetY, int targetZ, world::Voxel voxel);
@@ -86,6 +89,10 @@ private:
     bool m_wasToggleHoverDown = false;
     BrushSize m_brushSize = BrushSize::Size4;
     bool m_wasCycleBrushDown = false;
+    int m_selectedBlockIndex = 0;
+    bool m_wasPrevBlockDown = false;
+    bool m_wasNextBlockDown = false;
+    bool m_gamepadConnected = false;
 
     sim::Simulation m_simulation;
     world::ChunkGrid m_chunkGrid;

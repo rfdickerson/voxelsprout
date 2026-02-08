@@ -5,6 +5,8 @@
 #include "math/Math.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cmath>
 #include <iostream>
@@ -22,11 +24,14 @@ constexpr float kGravity = -24.0f;
 constexpr float kMaxFallSpeed = -35.0f;
 constexpr float kPitchMinDegrees = -89.0f;
 constexpr float kPitchMaxDegrees = 89.0f;
-constexpr float kBlockInteractMaxDistance = 11.0f;
 [[maybe_unused]] constexpr float kVoxelSizeMeters = 0.25f;
-constexpr float kPlayerHeightVoxels = 7.0f;
-constexpr float kPlayerDiameterVoxels = 2.0f;
-constexpr float kPlayerEyeHeightVoxels = 6.0f;
+constexpr float kMacroVoxelSize = static_cast<float>(world::Chunk::kMacroVoxelSize);
+constexpr float kBlockInteractMaxDistance = kMacroVoxelSize * 3.0f;
+// Scale player to macro-block proportions:
+// width ~= one macro block, height ~= two macro blocks.
+constexpr float kPlayerHeightVoxels = kMacroVoxelSize * 2.0f;
+constexpr float kPlayerDiameterVoxels = kMacroVoxelSize;
+constexpr float kPlayerEyeHeightVoxels = kMacroVoxelSize * 1.75f;
 
 constexpr float kPlayerRadius = kPlayerDiameterVoxels * 0.5f;
 constexpr float kPlayerEyeHeight = kPlayerEyeHeightVoxels;
@@ -38,6 +43,11 @@ constexpr float kHoverResponse = 8.0f;
 constexpr float kHoverMaxVerticalSpeed = 12.0f;
 constexpr float kHoverManualVerticalSpeed = 8.0f;
 constexpr int kHoverGroundSearchDepth = 96;
+constexpr float kGamepadTriggerPressedThreshold = 0.30f;
+
+constexpr std::array<world::VoxelType, 1> kPlaceableBlockTypes = {
+    world::VoxelType::Solid
+};
 
 void glfwErrorCallback(int errorCode, const char* description) {
     std::cerr << "[app][glfw] error " << errorCode << ": "
@@ -98,7 +108,7 @@ bool App::init() {
         return false;
     }
 
-    std::cerr << "[app] brush size set to 4x4x4 (press B to cycle 4->2->1)\n";
+    std::cerr << "[app] brush size set to 4x4x4 (press B or gamepad Y to cycle 4->2->1)\n";
     std::cerr << "[app] init complete\n";
     return true;
 }
@@ -260,26 +270,54 @@ void App::pollInput() {
         glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
         glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
     m_input.toggleHoverDown = glfwGetKey(m_window, GLFW_KEY_H) == GLFW_PRESS;
-    const bool cycleBrushDown = glfwGetKey(m_window, GLFW_KEY_B) == GLFW_PRESS;
-    if (!m_debugUiVisible && cycleBrushDown && !m_wasCycleBrushDown) {
-        switch (m_brushSize) {
-        case BrushSize::Size4:
-            m_brushSize = BrushSize::Size2;
-            break;
-        case BrushSize::Size2:
-            m_brushSize = BrushSize::Size1;
-            break;
-        case BrushSize::Size1:
-        default:
-            m_brushSize = BrushSize::Size4;
-            break;
+    bool controllerPlaceDown = false;
+    bool controllerRemoveDown = false;
+    bool controllerCycleBrushDown = false;
+    bool controllerPrevBlockDown = false;
+    bool controllerNextBlockDown = false;
+    GLFWgamepadstate gamepadState{};
+    const bool hasGamepad =
+        glfwJoystickIsGamepad(GLFW_JOYSTICK_1) == GLFW_TRUE &&
+        glfwGetGamepadState(GLFW_JOYSTICK_1, &gamepadState) == GLFW_TRUE;
+    if (hasGamepad != m_gamepadConnected) {
+        m_gamepadConnected = hasGamepad;
+        if (m_gamepadConnected) {
+            std::cerr << "[app] gamepad connected: RT place, LT remove, Y brush, LB/RB block\n";
+        } else {
+            std::cerr << "[app] gamepad disconnected\n";
         }
-        const int size = activeBrushSize();
-        std::cerr << "[app] brush size set to " << size << "x" << size << "x" << size << "\n";
+    }
+    if (hasGamepad) {
+        controllerPlaceDown = gamepadState.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > kGamepadTriggerPressedThreshold;
+        controllerRemoveDown = gamepadState.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER] > kGamepadTriggerPressedThreshold;
+        controllerCycleBrushDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_Y] == GLFW_PRESS;
+        controllerPrevBlockDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_LEFT_BUMPER] == GLFW_PRESS;
+        controllerNextBlockDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER] == GLFW_PRESS;
+    }
+
+    const bool cycleBrushDown = (glfwGetKey(m_window, GLFW_KEY_B) == GLFW_PRESS) || controllerCycleBrushDown;
+    if (!m_debugUiVisible && cycleBrushDown && !m_wasCycleBrushDown) {
+        cycleBrushSize();
     }
     m_wasCycleBrushDown = cycleBrushDown;
-    m_input.placeBlockDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-    m_input.removeBlockDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+
+    const bool prevBlockDown = controllerPrevBlockDown;
+    const bool nextBlockDown = controllerNextBlockDown;
+    if (!m_debugUiVisible && prevBlockDown && !m_wasPrevBlockDown) {
+        cycleSelectedBlock(-1);
+    }
+    if (!m_debugUiVisible && nextBlockDown && !m_wasNextBlockDown) {
+        cycleSelectedBlock(+1);
+    }
+    m_wasPrevBlockDown = prevBlockDown;
+    m_wasNextBlockDown = nextBlockDown;
+
+    m_input.placeBlockDown =
+        glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS ||
+        controllerPlaceDown;
+    m_input.removeBlockDown =
+        glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS ||
+        controllerRemoveDown;
 
     double mouseX = 0.0;
     double mouseY = 0.0;
@@ -821,6 +859,49 @@ int App::activeBrushSize() const {
     return static_cast<int>(m_brushSize);
 }
 
+void App::cycleBrushSize() {
+    switch (m_brushSize) {
+    case BrushSize::Size4:
+        m_brushSize = BrushSize::Size2;
+        break;
+    case BrushSize::Size2:
+        m_brushSize = BrushSize::Size1;
+        break;
+    case BrushSize::Size1:
+    default:
+        m_brushSize = BrushSize::Size4;
+        break;
+    }
+    const int size = activeBrushSize();
+    std::cerr << "[app] brush size set to " << size << "x" << size << "x" << size << "\n";
+}
+
+void App::cycleSelectedBlock(int direction) {
+    if (kPlaceableBlockTypes.empty()) {
+        m_selectedBlockIndex = 0;
+        return;
+    }
+
+    const int count = static_cast<int>(kPlaceableBlockTypes.size());
+    m_selectedBlockIndex = (m_selectedBlockIndex + direction) % count;
+    if (m_selectedBlockIndex < 0) {
+        m_selectedBlockIndex += count;
+    }
+    std::cerr << "[app] selected block " << (m_selectedBlockIndex + 1) << "/" << count << "\n";
+}
+
+world::Voxel App::selectedPlaceVoxel() const {
+    if (kPlaceableBlockTypes.empty()) {
+        return world::Voxel{world::VoxelType::Solid};
+    }
+    const int clampedIndex = std::clamp(
+        m_selectedBlockIndex,
+        0,
+        static_cast<int>(kPlaceableBlockTypes.size()) - 1
+    );
+    return world::Voxel{kPlaceableBlockTypes[static_cast<std::size_t>(clampedIndex)]};
+}
+
 void App::snapToBrushAnchor(int inX, int inY, int inZ, int& outX, int& outY, int& outZ) const {
     const int brushSize = activeBrushSize();
     outX = floorDiv(inX, brushSize) * brushSize;
@@ -929,7 +1010,7 @@ bool App::tryPlaceVoxelFromCameraRay() {
     }
 
     world::Chunk& chunk = m_chunkGrid.chunks().front();
-    return applyBrushEdit(chunk, targetX, targetY, targetZ, world::Voxel{world::VoxelType::Solid});
+    return applyBrushEdit(chunk, targetX, targetY, targetZ, selectedPlaceVoxel());
 }
 
 bool App::tryRemoveVoxelFromCameraRay() {
