@@ -39,18 +39,36 @@ private:
     void pollInput();
     void updateCamera(float dt);
     [[nodiscard]] bool isSolidWorldVoxel(int worldX, int worldY, int worldZ) const;
+    [[nodiscard]] bool worldToChunkLocal(
+        int worldX,
+        int worldY,
+        int worldZ,
+        std::size_t& outChunkIndex,
+        int& outLocalX,
+        int& outLocalY,
+        int& outLocalZ
+    ) const;
+    [[nodiscard]] bool worldToChunkLocalConst(
+        int worldX,
+        int worldY,
+        int worldZ,
+        const world::Chunk*& outChunk,
+        int& outLocalX,
+        int& outLocalY,
+        int& outLocalZ
+    ) const;
     [[nodiscard]] bool findGroundSupportY(float eyeX, float eyeY, float eyeZ, int& outSupportY) const;
     [[nodiscard]] bool doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const;
     void resolvePlayerCollisions(float dt);
     [[nodiscard]] CameraRaycastResult raycastFromCamera() const;
-    [[nodiscard]] bool isChunkVoxelInBounds(int x, int y, int z) const;
+    [[nodiscard]] bool isWorldVoxelInBounds(int x, int y, int z) const;
     void cycleSelectedBlock(int direction);
     [[nodiscard]] world::Voxel selectedPlaceVoxel() const;
     [[nodiscard]] bool computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const;
-    [[nodiscard]] bool applyVoxelEdit(world::Chunk& chunk, int targetX, int targetY, int targetZ, world::Voxel voxel);
+    [[nodiscard]] bool applyVoxelEdit(int targetX, int targetY, int targetZ, world::Voxel voxel, std::size_t& outEditedChunkIndex);
     void regenerateWorld();
-    [[nodiscard]] bool tryPlaceVoxelFromCameraRay();
-    [[nodiscard]] bool tryRemoveVoxelFromCameraRay();
+    [[nodiscard]] bool tryPlaceVoxelFromCameraRay(std::size_t& outEditedChunkIndex);
+    [[nodiscard]] bool tryRemoveVoxelFromCameraRay(std::size_t& outEditedChunkIndex);
 
     struct CameraState {
         float x = 0.0f;

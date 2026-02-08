@@ -197,15 +197,16 @@ void App::update(float dt) {
     m_wasRemoveBlockDown = m_input.removeBlockDown;
 
     bool chunkEdited = false;
-    if (placePressedThisFrame && tryPlaceVoxelFromCameraRay()) {
+    std::size_t editedChunkIndex = 0;
+    if (placePressedThisFrame && tryPlaceVoxelFromCameraRay(editedChunkIndex)) {
         chunkEdited = true;
     }
-    if (removePressedThisFrame && tryRemoveVoxelFromCameraRay()) {
+    if (removePressedThisFrame && tryRemoveVoxelFromCameraRay(editedChunkIndex)) {
         chunkEdited = true;
     }
 
     if (chunkEdited) {
-        if (!m_renderer.updateChunkMesh(m_chunkGrid, 0)) {
+        if (!m_renderer.updateChunkMesh(m_chunkGrid, editedChunkIndex)) {
             std::cerr << "[" << appTimestamp() << "][app] chunk mesh update failed after voxel edit\n";
         }
         const std::filesystem::path worldPath{kWorldFilePath};
@@ -245,7 +246,7 @@ void App::update(float dt) {
             int targetY = 0;
             int targetZ = 0;
             if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
-                if (isChunkVoxelInBounds(targetX, targetY, targetZ)) {
+                if (isWorldVoxelInBounds(targetX, targetY, targetZ)) {
                     preview.visible = true;
                     preview.mode = render::VoxelPreview::Mode::Add;
                     preview.x = targetX;
@@ -469,7 +470,29 @@ bool App::isSolidWorldVoxel(int worldX, int worldY, int worldZ) const {
         return true;
     }
 
-    for (const world::Chunk& chunk : m_chunkGrid.chunks()) {
+    const world::Chunk* chunk = nullptr;
+    int localX = 0;
+    int localY = 0;
+    int localZ = 0;
+    if (worldToChunkLocalConst(worldX, worldY, worldZ, chunk, localX, localY, localZ)) {
+        return chunk->isSolid(localX, localY, localZ);
+    }
+
+    return false;
+}
+
+bool App::worldToChunkLocal(
+    int worldX,
+    int worldY,
+    int worldZ,
+    std::size_t& outChunkIndex,
+    int& outLocalX,
+    int& outLocalY,
+    int& outLocalZ
+) const {
+    const std::vector<world::Chunk>& chunks = m_chunkGrid.chunks();
+    for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
+        const world::Chunk& chunk = chunks[chunkIndex];
         const int chunkMinX = chunk.chunkX() * world::Chunk::kSizeX;
         const int chunkMinY = chunk.chunkY() * world::Chunk::kSizeY;
         const int chunkMinZ = chunk.chunkZ() * world::Chunk::kSizeZ;
@@ -480,12 +503,36 @@ bool App::isSolidWorldVoxel(int worldX, int worldY, int worldZ) const {
             localX >= 0 && localX < world::Chunk::kSizeX &&
             localY >= 0 && localY < world::Chunk::kSizeY &&
             localZ >= 0 && localZ < world::Chunk::kSizeZ;
-        if (insideChunk) {
-            return chunk.isSolid(localX, localY, localZ);
+        if (!insideChunk) {
+            continue;
         }
+
+        outChunkIndex = chunkIndex;
+        outLocalX = localX;
+        outLocalY = localY;
+        outLocalZ = localZ;
+        return true;
     }
 
     return false;
+}
+
+bool App::worldToChunkLocalConst(
+    int worldX,
+    int worldY,
+    int worldZ,
+    const world::Chunk*& outChunk,
+    int& outLocalX,
+    int& outLocalY,
+    int& outLocalZ
+) const {
+    std::size_t chunkIndex = 0;
+    if (!worldToChunkLocal(worldX, worldY, worldZ, chunkIndex, outLocalX, outLocalY, outLocalZ)) {
+        return false;
+    }
+
+    outChunk = &m_chunkGrid.chunks()[chunkIndex];
+    return true;
 }
 
 bool App::findGroundSupportY(float eyeX, float eyeY, float eyeZ, int& outSupportY) const {
@@ -738,8 +785,6 @@ App::CameraRaycastResult App::raycastFromCamera() const {
         return result;
     }
 
-    const world::Chunk& chunk = m_chunkGrid.chunks().front();
-
     const float yawRadians = math::radians(m_camera.yawDegrees);
     const float pitchRadians = math::radians(m_camera.pitchDegrees);
     const float cosPitch = std::cos(pitchRadians);
@@ -789,12 +834,7 @@ App::CameraRaycastResult App::raycastFromCamera() const {
 
     float distance = 0.0f;
     while (distance <= kRayMaxDistance) {
-        const bool inBounds =
-            vx >= 0 && vx < world::Chunk::kSizeX &&
-            vy >= 0 && vy < world::Chunk::kSizeY &&
-            vz >= 0 && vz < world::Chunk::kSizeZ;
-
-        if (inBounds && chunk.isSolid(vx, vy, vz)) {
+        if (isSolidWorldVoxel(vx, vy, vz)) {
             if (!hasHitFaceNormal) {
                 // If we start inside a solid voxel, take one DDA step first so we get a stable face.
                 if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
@@ -839,11 +879,8 @@ App::CameraRaycastResult App::raycastFromCamera() const {
                 const int adjacentX = vx + hitFaceNormalX;
                 const int adjacentY = vy + hitFaceNormalY;
                 const int adjacentZ = vz + hitFaceNormalZ;
-                const bool adjacentInBounds =
-                    adjacentX >= 0 && adjacentX < world::Chunk::kSizeX &&
-                    adjacentY >= 0 && adjacentY < world::Chunk::kSizeY &&
-                    adjacentZ >= 0 && adjacentZ < world::Chunk::kSizeZ;
-                if (adjacentInBounds && !chunk.isSolid(adjacentX, adjacentY, adjacentZ)) {
+                if (isWorldVoxelInBounds(adjacentX, adjacentY, adjacentZ) &&
+                    !isSolidWorldVoxel(adjacentX, adjacentY, adjacentZ)) {
                     result.hasAdjacentEmpty = true;
                     result.adjacentEmptyX = adjacentX;
                     result.adjacentEmptyY = adjacentY;
@@ -883,11 +920,12 @@ App::CameraRaycastResult App::raycastFromCamera() const {
     return result;
 }
 
-bool App::isChunkVoxelInBounds(int x, int y, int z) const {
-    return
-        x >= 0 && x < world::Chunk::kSizeX &&
-        y >= 0 && y < world::Chunk::kSizeY &&
-        z >= 0 && z < world::Chunk::kSizeZ;
+bool App::isWorldVoxelInBounds(int x, int y, int z) const {
+    std::size_t chunkIndex = 0;
+    int localX = 0;
+    int localY = 0;
+    int localZ = 0;
+    return worldToChunkLocal(x, y, z, chunkIndex, localX, localY, localZ);
 }
 
 void App::cycleSelectedBlock(int direction) {
@@ -924,7 +962,7 @@ bool App::computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, i
     const int candidateX = raycast.solidX + raycast.hitFaceNormalX;
     const int candidateY = raycast.solidY + raycast.hitFaceNormalY;
     const int candidateZ = raycast.solidZ + raycast.hitFaceNormalZ;
-    if (!isChunkVoxelInBounds(candidateX, candidateY, candidateZ)) {
+    if (!isWorldVoxelInBounds(candidateX, candidateY, candidateZ)) {
         return false;
     }
 
@@ -934,14 +972,25 @@ bool App::computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, i
     return true;
 }
 
-bool App::applyVoxelEdit(world::Chunk& chunk, int targetX, int targetY, int targetZ, world::Voxel voxel) {
-    if (!isChunkVoxelInBounds(targetX, targetY, targetZ)) {
+bool App::applyVoxelEdit(
+    int targetX,
+    int targetY,
+    int targetZ,
+    world::Voxel voxel,
+    std::size_t& outEditedChunkIndex
+) {
+    int localX = 0;
+    int localY = 0;
+    int localZ = 0;
+    if (!worldToChunkLocal(targetX, targetY, targetZ, outEditedChunkIndex, localX, localY, localZ)) {
         return false;
     }
-    if (chunk.voxelAt(targetX, targetY, targetZ).type == voxel.type) {
+
+    world::Chunk& chunk = m_chunkGrid.chunks()[outEditedChunkIndex];
+    if (chunk.voxelAt(localX, localY, localZ).type == voxel.type) {
         return false;
     }
-    chunk.setVoxel(targetX, targetY, targetZ, voxel);
+    chunk.setVoxel(localX, localY, localZ, voxel);
     return true;
 }
 
@@ -959,7 +1008,7 @@ void App::regenerateWorld() {
     }
 }
 
-bool App::tryPlaceVoxelFromCameraRay() {
+bool App::tryPlaceVoxelFromCameraRay(std::size_t& outEditedChunkIndex) {
     if (m_chunkGrid.chunks().empty()) {
         return false;
     }
@@ -976,11 +1025,10 @@ bool App::tryPlaceVoxelFromCameraRay() {
         return false;
     }
 
-    world::Chunk& chunk = m_chunkGrid.chunks().front();
-    return applyVoxelEdit(chunk, targetX, targetY, targetZ, selectedPlaceVoxel());
+    return applyVoxelEdit(targetX, targetY, targetZ, selectedPlaceVoxel(), outEditedChunkIndex);
 }
 
-bool App::tryRemoveVoxelFromCameraRay() {
+bool App::tryRemoveVoxelFromCameraRay(std::size_t& outEditedChunkIndex) {
     if (m_chunkGrid.chunks().empty()) {
         return false;
     }
@@ -990,8 +1038,13 @@ bool App::tryRemoveVoxelFromCameraRay() {
         return false;
     }
 
-    world::Chunk& chunk = m_chunkGrid.chunks().front();
-    return applyVoxelEdit(chunk, raycast.solidX, raycast.solidY, raycast.solidZ, world::Voxel{world::VoxelType::Empty});
+    return applyVoxelEdit(
+        raycast.solidX,
+        raycast.solidY,
+        raycast.solidZ,
+        world::Voxel{world::VoxelType::Empty},
+        outEditedChunkIndex
+    );
 }
 
 } // namespace app
