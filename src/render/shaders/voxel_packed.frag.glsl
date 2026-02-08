@@ -23,17 +23,9 @@ layout(set = 0, binding = 0) uniform CameraUniform {
 
 layout(set = 0, binding = 4) uniform sampler2DArrayShadow shadowMap;
 layout(set = 0, binding = 5) uniform usamplerBuffer shadowVoxelGrid;
+layout(set = 0, binding = 1) uniform sampler2D diffuseAlbedo;
 
 layout(location = 0) out vec4 outColor;
-
-vec3 faceColor(uint face) {
-    if (face == 0u) return vec3(0.90, 0.44, 0.35);
-    if (face == 1u) return vec3(0.70, 0.34, 0.28);
-    if (face == 2u) return vec3(0.40, 0.85, 0.40);
-    if (face == 3u) return vec3(0.28, 0.55, 0.28);
-    if (face == 4u) return vec3(0.35, 0.55, 0.90);
-    return vec3(0.28, 0.42, 0.70);
-}
 
 vec3 materialTint(uint material) {
     if (material == 250u) {
@@ -46,6 +38,18 @@ vec3 materialTint(uint material) {
         return vec3(1.0, 1.0, 1.0);
     }
     return vec3(0.9, 0.9, 0.9);
+}
+
+vec2 faceUv(uint face, vec3 worldPosition) {
+    vec2 uv;
+    if (face == 0u || face == 1u) {
+        uv = worldPosition.zy;
+    } else if (face == 2u || face == 3u) {
+        uv = worldPosition.xz;
+    } else {
+        uv = worldPosition.xy;
+    }
+    return fract(uv);
 }
 
 vec3 faceNormal(uint face) {
@@ -275,7 +279,10 @@ void main() {
     const float aoCurve = pow(ao, 1.45);
     const float ambientAo = mix(0.32, 1.0, aoCurve);
     const float directAo = mix(0.34, 1.0, aoCurve);
-    vec3 baseColor = faceColor(inFace) * materialTint(inMaterial);
+    vec3 baseColor = texture(diffuseAlbedo, faceUv(inFace, inWorldPosition)).rgb;
+    if (inMaterial == 250u || inMaterial == 251u) {
+        baseColor *= materialTint(inMaterial);
+    }
 
     const vec3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);

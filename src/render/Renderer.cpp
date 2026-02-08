@@ -1446,7 +1446,320 @@ bool Renderer::createPreviewBuffers() {
 }
 
 bool Renderer::createEnvironmentResources() {
-    std::cerr << "[render] environment uses procedural sky + SH irradiance\n";
+    if (!createDiffuseTextureResources()) {
+        std::cerr << "[render] diffuse texture creation failed\n";
+        return false;
+    }
+    std::cerr << "[render] environment uses procedural sky + SH irradiance + diffuse albedo texture\n";
+    return true;
+}
+
+bool Renderer::createDiffuseTextureResources() {
+    if (
+        m_diffuseTextureImage != VK_NULL_HANDLE &&
+        m_diffuseTextureMemory != VK_NULL_HANDLE &&
+        m_diffuseTextureImageView != VK_NULL_HANDLE &&
+        m_diffuseTextureSampler != VK_NULL_HANDLE
+    ) {
+        return true;
+    }
+
+    constexpr uint32_t kTextureWidth = 64;
+    constexpr uint32_t kTextureHeight = 64;
+    constexpr VkFormat kTextureFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    constexpr VkDeviceSize kTextureBytes = kTextureWidth * kTextureHeight * 4;
+
+    std::vector<std::uint8_t> pixels(static_cast<size_t>(kTextureBytes), 0);
+    for (uint32_t y = 0; y < kTextureHeight; ++y) {
+        for (uint32_t x = 0; x < kTextureWidth; ++x) {
+            const float fx = static_cast<float>(x) / static_cast<float>(kTextureWidth);
+            const float fy = static_cast<float>(y) / static_cast<float>(kTextureHeight);
+            const bool checker = (((x / 8) + (y / 8)) & 1u) != 0u;
+            const std::uint8_t noise = static_cast<std::uint8_t>(((x * 13u) ^ (y * 29u)) & 15u);
+            const float base = checker ? 0.62f : 0.54f;
+            const float tint = 0.96f + (0.06f * std::sin((fx + fy) * 16.0f));
+            const std::uint8_t r = static_cast<std::uint8_t>(std::clamp((base * 182.0f * tint) + noise, 0.0f, 255.0f));
+            const std::uint8_t g = static_cast<std::uint8_t>(std::clamp((base * 166.0f * tint) + noise, 0.0f, 255.0f));
+            const std::uint8_t b = static_cast<std::uint8_t>(std::clamp((base * 146.0f * tint) + noise, 0.0f, 255.0f));
+            const size_t i = static_cast<size_t>((y * kTextureWidth + x) * 4u);
+            pixels[i + 0] = r;
+            pixels[i + 1] = g;
+            pixels[i + 2] = b;
+            pixels[i + 3] = 255u;
+        }
+    }
+
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    VkBufferCreateInfo stagingCreateInfo{};
+    stagingCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingCreateInfo.size = kTextureBytes;
+    stagingCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkResult result = vkCreateBuffer(m_device, &stagingCreateInfo, nullptr, &stagingBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateBuffer(diffuseStaging)", result);
+        return false;
+    }
+
+    VkMemoryRequirements stagingMemReq{};
+    vkGetBufferMemoryRequirements(m_device, stagingBuffer, &stagingMemReq);
+    uint32_t memoryTypeIndex = findMemoryTypeIndex(
+        m_physicalDevice,
+        stagingMemReq.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
+    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+        std::cerr << "[render] no staging memory type for diffuse texture\n";
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkMemoryAllocateInfo stagingAllocInfo{};
+    stagingAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    stagingAllocInfo.allocationSize = stagingMemReq.size;
+    stagingAllocInfo.memoryTypeIndex = memoryTypeIndex;
+    result = vkAllocateMemory(m_device, &stagingAllocInfo, nullptr, &stagingMemory);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkAllocateMemory(diffuseStaging)", result);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    result = vkBindBufferMemory(m_device, stagingBuffer, stagingMemory, 0);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkBindBufferMemory(diffuseStaging)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    void* mapped = nullptr;
+    result = vkMapMemory(m_device, stagingMemory, 0, kTextureBytes, 0, &mapped);
+    if (result != VK_SUCCESS || mapped == nullptr) {
+        logVkFailure("vkMapMemory(diffuseStaging)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    std::memcpy(mapped, pixels.data(), static_cast<size_t>(kTextureBytes));
+    vkUnmapMemory(m_device, stagingMemory);
+
+    VkImageCreateInfo imageCreateInfo{};
+    imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageCreateInfo.format = kTextureFormat;
+    imageCreateInfo.extent = {kTextureWidth, kTextureHeight, 1};
+    imageCreateInfo.mipLevels = 1;
+    imageCreateInfo.arrayLayers = 1;
+    imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    result = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_diffuseTextureImage);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateImage(diffuseTexture)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkMemoryRequirements imageMemReq{};
+    vkGetImageMemoryRequirements(m_device, m_diffuseTextureImage, &imageMemReq);
+    memoryTypeIndex = findMemoryTypeIndex(m_physicalDevice, imageMemReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+        std::cerr << "[render] no device-local memory for diffuse texture\n";
+        vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
+        m_diffuseTextureImage = VK_NULL_HANDLE;
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkMemoryAllocateInfo imageAllocInfo{};
+    imageAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    imageAllocInfo.allocationSize = imageMemReq.size;
+    imageAllocInfo.memoryTypeIndex = memoryTypeIndex;
+    result = vkAllocateMemory(m_device, &imageAllocInfo, nullptr, &m_diffuseTextureMemory);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkAllocateMemory(diffuseTexture)", result);
+        vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
+        m_diffuseTextureImage = VK_NULL_HANDLE;
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    result = vkBindImageMemory(m_device, m_diffuseTextureImage, m_diffuseTextureMemory, 0);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkBindImageMemory(diffuseTexture)", result);
+        destroyDiffuseTextureResources();
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo poolCreateInfo{};
+    poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    result = vkCreateCommandPool(m_device, &poolCreateInfo, nullptr, &commandPool);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateCommandPool(diffuseUpload)", result);
+        destroyDiffuseTextureResources();
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo cmdAllocInfo{};
+    cmdAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAllocInfo.commandPool = commandPool;
+    cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAllocInfo.commandBufferCount = 1;
+    result = vkAllocateCommandBuffers(m_device, &cmdAllocInfo, &commandBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkAllocateCommandBuffers(diffuseUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        destroyDiffuseTextureResources();
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkBeginCommandBuffer(diffuseUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        destroyDiffuseTextureResources();
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    transitionImageLayout(
+        commandBuffer,
+        m_diffuseTextureImage,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    VkBufferImageCopy copyRegion{};
+    copyRegion.bufferOffset = 0;
+    copyRegion.bufferRowLength = 0;
+    copyRegion.bufferImageHeight = 0;
+    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyRegion.imageSubresource.mipLevel = 0;
+    copyRegion.imageSubresource.baseArrayLayer = 0;
+    copyRegion.imageSubresource.layerCount = 1;
+    copyRegion.imageOffset = {0, 0, 0};
+    copyRegion.imageExtent = {kTextureWidth, kTextureHeight, 1};
+    vkCmdCopyBufferToImage(
+        commandBuffer,
+        stagingBuffer,
+        m_diffuseTextureImage,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &copyRegion
+    );
+
+    transitionImageLayout(
+        commandBuffer,
+        m_diffuseTextureImage,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    result = vkEndCommandBuffer(commandBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkEndCommandBuffer(diffuseUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        destroyDiffuseTextureResources();
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkQueueSubmit(diffuseUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        destroyDiffuseTextureResources();
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    result = vkQueueWaitIdle(m_graphicsQueue);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkQueueWaitIdle(diffuseUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        destroyDiffuseTextureResources();
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    vkDestroyCommandPool(m_device, commandPool, nullptr);
+    vkFreeMemory(m_device, stagingMemory, nullptr);
+    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+
+    VkImageViewCreateInfo viewCreateInfo{};
+    viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCreateInfo.image = m_diffuseTextureImage;
+    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewCreateInfo.format = kTextureFormat;
+    viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCreateInfo.subresourceRange.baseMipLevel = 0;
+    viewCreateInfo.subresourceRange.levelCount = 1;
+    viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+    viewCreateInfo.subresourceRange.layerCount = 1;
+    result = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_diffuseTextureImageView);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateImageView(diffuseTexture)", result);
+        destroyDiffuseTextureResources();
+        return false;
+    }
+
+    VkSamplerCreateInfo samplerCreateInfo{};
+    samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.mipLodBias = 0.0f;
+    samplerCreateInfo.anisotropyEnable = VK_FALSE;
+    samplerCreateInfo.compareEnable = VK_FALSE;
+    samplerCreateInfo.minLod = 0.0f;
+    samplerCreateInfo.maxLod = 0.0f;
+    samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+    result = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_diffuseTextureSampler);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateSampler(diffuseTexture)", result);
+        destroyDiffuseTextureResources();
+        return false;
+    }
+
     return true;
 }
 
@@ -1957,6 +2270,12 @@ bool Renderer::createDescriptorResources() {
         mvpBinding.descriptorCount = 1;
         mvpBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
+        VkDescriptorSetLayoutBinding diffuseTextureBinding{};
+        diffuseTextureBinding.binding = 1;
+        diffuseTextureBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        diffuseTextureBinding.descriptorCount = 1;
+        diffuseTextureBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
         VkDescriptorSetLayoutBinding hdrSceneBinding{};
         hdrSceneBinding.binding = 3;
         hdrSceneBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1975,8 +2294,9 @@ bool Renderer::createDescriptorResources() {
         shadowVoxelGridBinding.descriptorCount = 1;
         shadowVoxelGridBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 4> bindings = {
+        const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
             mvpBinding,
+            diffuseTextureBinding,
             hdrSceneBinding,
             shadowMapBinding,
             shadowVoxelGridBinding
@@ -2003,7 +2323,7 @@ bool Renderer::createDescriptorResources() {
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                2 * kMaxFramesInFlight
+                3 * kMaxFramesInFlight
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
@@ -3577,12 +3897,17 @@ void Renderer::renderFrame(
     hdrSceneImageInfo.imageView = m_hdrResolveImageViews[imageIndex];
     hdrSceneImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+    VkDescriptorImageInfo diffuseTextureImageInfo{};
+    diffuseTextureImageInfo.sampler = m_diffuseTextureSampler;
+    diffuseTextureImageInfo.imageView = m_diffuseTextureImageView;
+    diffuseTextureImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     VkDescriptorImageInfo shadowMapImageInfo{};
     shadowMapImageInfo.sampler = m_shadowDepthSampler;
     shadowMapImageInfo.imageView = m_shadowDepthImageView;
     shadowMapImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
-    std::array<VkWriteDescriptorSet, 4> writes{};
+    std::array<VkWriteDescriptorSet, 5> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -3592,24 +3917,31 @@ void Renderer::renderFrame(
 
     writes[1] = write;
     writes[1].dstSet = m_descriptorSets[m_currentFrame];
-    writes[1].dstBinding = 3;
+    writes[1].dstBinding = 1;
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].pImageInfo = &hdrSceneImageInfo;
+    writes[1].pImageInfo = &diffuseTextureImageInfo;
 
     writes[2] = write;
     writes[2].dstSet = m_descriptorSets[m_currentFrame];
-    writes[2].dstBinding = 4;
+    writes[2].dstBinding = 3;
     writes[2].descriptorCount = 1;
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[2].pImageInfo = &shadowMapImageInfo;
+    writes[2].pImageInfo = &hdrSceneImageInfo;
 
     writes[3] = write;
     writes[3].dstSet = m_descriptorSets[m_currentFrame];
-    writes[3].dstBinding = 5;
+    writes[3].dstBinding = 4;
     writes[3].descriptorCount = 1;
-    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
-    writes[3].pTexelBufferView = &m_shadowVoxelBufferView;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[3].pImageInfo = &shadowMapImageInfo;
+
+    writes[4] = write;
+    writes[4].dstSet = m_descriptorSets[m_currentFrame];
+    writes[4].dstBinding = 5;
+    writes[4].descriptorCount = 1;
+    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+    writes[4].pTexelBufferView = &m_shadowVoxelBufferView;
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -4281,7 +4613,26 @@ void Renderer::destroyPreviewBuffers() {
 }
 
 void Renderer::destroyEnvironmentResources() {
-    // Environment is procedural; no GPU cubemap resources to release.
+    destroyDiffuseTextureResources();
+}
+
+void Renderer::destroyDiffuseTextureResources() {
+    if (m_diffuseTextureSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_diffuseTextureSampler, nullptr);
+        m_diffuseTextureSampler = VK_NULL_HANDLE;
+    }
+    if (m_diffuseTextureImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, m_diffuseTextureImageView, nullptr);
+        m_diffuseTextureImageView = VK_NULL_HANDLE;
+    }
+    if (m_diffuseTextureImage != VK_NULL_HANDLE) {
+        vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
+        m_diffuseTextureImage = VK_NULL_HANDLE;
+    }
+    if (m_diffuseTextureMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, m_diffuseTextureMemory, nullptr);
+        m_diffuseTextureMemory = VK_NULL_HANDLE;
+    }
 }
 
 void Renderer::destroyShadowResources() {

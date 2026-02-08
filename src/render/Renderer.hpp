@@ -107,6 +107,7 @@ private:
     bool createTransferResources();
     bool createPreviewBuffers();
     bool createEnvironmentResources();
+    bool createDiffuseTextureResources();
     bool createDescriptorResources();
     bool createChunkBuffers(const world::ChunkGrid& chunkGrid);
     bool updateShadowVoxelGrid(const world::ChunkGrid& chunkGrid);
@@ -126,6 +127,7 @@ private:
     void destroyChunkBuffers();
     void destroyPreviewBuffers();
     void destroyEnvironmentResources();
+    void destroyDiffuseTextureResources();
     void destroyTransferResources();
     void destroyPipeline();
     bool waitForTimelineValue(uint64_t value) const;
@@ -235,6 +237,10 @@ private:
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     uint32_t m_indexCount = 0;
     uint32_t m_previewIndexCount = 0;
+    VkImage m_diffuseTextureImage = VK_NULL_HANDLE;
+    VkDeviceMemory m_diffuseTextureMemory = VK_NULL_HANDLE;
+    VkImageView m_diffuseTextureImageView = VK_NULL_HANDLE;
+    VkSampler m_diffuseTextureSampler = VK_NULL_HANDLE;
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};
     VkCommandPool m_transferCommandPool = VK_NULL_HANDLE;
