@@ -253,7 +253,7 @@ inline bool ChunkGrid::saveToBinaryFile(const std::filesystem::path& path) const
         out.write(reinterpret_cast<const char*>(&chunkY), sizeof(chunkY));
         out.write(reinterpret_cast<const char*>(&chunkZ), sizeof(chunkZ));
 
-        std::fill(packed.begin(), packed.end(), 0u);
+        std::fill(packed.begin(), packed.end(), std::uint8_t{0});
         std::size_t voxelIndex = 0;
         for (int y = 0; y < Chunk::kSizeY; ++y) {
             for (int z = 0; z < Chunk::kSizeZ; ++z) {
