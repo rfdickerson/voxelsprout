@@ -99,34 +99,6 @@ world::ChunkMeshData buildSingleVoxelPreviewMesh(
     return mesh;
 }
 
-world::ChunkMeshData buildSingleVoxelFacePreviewMesh(
-    std::uint32_t x,
-    std::uint32_t y,
-    std::uint32_t z,
-    std::uint32_t faceId,
-    std::uint32_t ao,
-    std::uint32_t material
-) {
-    world::ChunkMeshData mesh{};
-    mesh.vertices.reserve(4);
-    mesh.indices.reserve(6);
-
-    const std::uint32_t clampedFace = std::min(faceId, 5u);
-    for (std::uint32_t corner = 0; corner < 4; ++corner) {
-        world::PackedVoxelVertex vertex{};
-        vertex.bits = world::PackedVoxelVertex::pack(x, y, z, clampedFace, corner, ao, material);
-        mesh.vertices.push_back(vertex);
-    }
-
-    mesh.indices.push_back(0);
-    mesh.indices.push_back(1);
-    mesh.indices.push_back(2);
-    mesh.indices.push_back(0);
-    mesh.indices.push_back(2);
-    mesh.indices.push_back(3);
-    return mesh;
-}
-
 math::Matrix4 transpose(const math::Matrix4& matrix) {
     math::Matrix4 result{};
     for (int row = 0; row < 4; ++row) {
@@ -1459,18 +1431,21 @@ bool Renderer::createPreviewBuffers() {
         return true;
     }
 
-    world::ChunkMeshData mesh = buildSingleVoxelPreviewMesh(0, 0, 0, 3, 1);
-    const world::ChunkMeshData faceMesh = buildSingleVoxelFacePreviewMesh(0, 0, 0, 0, 3, 1);
-    if (mesh.vertices.empty() || mesh.indices.empty() || faceMesh.vertices.empty() || faceMesh.indices.empty()) {
+    const world::ChunkMeshData addMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 3, 250);
+    const world::ChunkMeshData removeMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 3, 251);
+    if (addMesh.vertices.empty() || addMesh.indices.empty() || removeMesh.vertices.empty() || removeMesh.indices.empty()) {
         std::cerr << "[render] preview mesh build failed\n";
         return false;
     }
 
-    const uint32_t faceBaseVertex = static_cast<uint32_t>(mesh.vertices.size());
-    mesh.vertices.insert(mesh.vertices.end(), faceMesh.vertices.begin(), faceMesh.vertices.end());
-    mesh.indices.reserve(mesh.indices.size() + faceMesh.indices.size());
-    for (const uint32_t index : faceMesh.indices) {
-        mesh.indices.push_back(index + faceBaseVertex);
+    world::ChunkMeshData mesh{};
+    mesh.vertices = addMesh.vertices;
+    mesh.indices = addMesh.indices;
+    mesh.vertices.insert(mesh.vertices.end(), removeMesh.vertices.begin(), removeMesh.vertices.end());
+    mesh.indices.reserve(mesh.indices.size() + removeMesh.indices.size());
+    const uint32_t removeBaseVertex = static_cast<uint32_t>(addMesh.vertices.size());
+    for (const uint32_t index : removeMesh.indices) {
+        mesh.indices.push_back(index + removeBaseVertex);
     }
 
     BufferCreateDesc vertexCreateDesc{};
@@ -4384,100 +4359,63 @@ void Renderer::renderFrame(
     if (drawCubePreview || drawFacePreview) {
         constexpr uint32_t kPreviewCubeIndexCount = 36u;
         constexpr uint32_t kPreviewFaceIndexCount = 6u;
+        constexpr uint32_t kAddCubeFirstIndex = 0u;
+        constexpr uint32_t kRemoveCubeFirstIndex = 36u;
+        constexpr uint32_t kFaceFirstIndexBase = kRemoveCubeFirstIndex;
+        constexpr float kChunkCoordinateScale = 1.0f;
 
-        const uint32_t cubeX = static_cast<uint32_t>(std::clamp(
-            drawCubePreview ? preview.x : preview.faceX,
-            0,
-            world::Chunk::kSizeX - 1
-        ));
-        const uint32_t cubeY = static_cast<uint32_t>(std::clamp(
-            drawCubePreview ? preview.y : preview.faceY,
-            0,
-            world::Chunk::kSizeY - 1
-        ));
-        const uint32_t cubeZ = static_cast<uint32_t>(std::clamp(
-            drawCubePreview ? preview.z : preview.faceZ,
-            0,
-            world::Chunk::kSizeZ - 1
-        ));
-        const uint32_t cubeMaterial = drawCubePreview
-            ? ((preview.mode == VoxelPreview::Mode::Add) ? 250u : 251u)
-            : 252u;
+        const VkBuffer previewVertexBuffer = m_bufferAllocator.getBuffer(m_previewVertexBufferHandle);
+        const VkBuffer previewIndexBuffer = m_bufferAllocator.getBuffer(m_previewIndexBufferHandle);
+        if (previewVertexBuffer != VK_NULL_HANDLE && previewIndexBuffer != VK_NULL_HANDLE) {
+            const VkDeviceSize previewVertexBufferOffset = 0;
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &previewVertexBuffer, &previewVertexBufferOffset);
+            vkCmdBindIndexBuffer(commandBuffer, previewIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-        world::ChunkMeshData combinedPreviewMesh = buildSingleVoxelPreviewMesh(cubeX, cubeY, cubeZ, 3u, cubeMaterial);
-        world::ChunkMeshData facePreviewMesh = buildSingleVoxelFacePreviewMesh(cubeX, cubeY, cubeZ, 0u, 3u, 252u);
-        if (drawFacePreview) {
-            const uint32_t faceX = static_cast<uint32_t>(std::clamp(preview.faceX, 0, world::Chunk::kSizeX - 1));
-            const uint32_t faceY = static_cast<uint32_t>(std::clamp(preview.faceY, 0, world::Chunk::kSizeY - 1));
-            const uint32_t faceZ = static_cast<uint32_t>(std::clamp(preview.faceZ, 0, world::Chunk::kSizeZ - 1));
-            const uint32_t faceId = std::min(preview.faceId, 5u);
-            facePreviewMesh = buildSingleVoxelFacePreviewMesh(faceX, faceY, faceZ, faceId, 3u, 253u);
-        }
-        combinedPreviewMesh.vertices.insert(
-            combinedPreviewMesh.vertices.end(),
-            facePreviewMesh.vertices.begin(),
-            facePreviewMesh.vertices.end()
-        );
-
-        const VkDeviceSize previewVertexBytes =
-            static_cast<VkDeviceSize>(combinedPreviewMesh.vertices.size() * sizeof(world::PackedVoxelVertex));
-        void* mappedPreviewVertices = m_bufferAllocator.mapBuffer(m_previewVertexBufferHandle, 0, previewVertexBytes);
-        if (mappedPreviewVertices != nullptr) {
-            std::memcpy(
-                mappedPreviewVertices,
-                combinedPreviewMesh.vertices.data(),
-                static_cast<size_t>(previewVertexBytes)
-            );
-            m_bufferAllocator.unmapBuffer(m_previewVertexBufferHandle);
-
-            const VkBuffer previewVertexBuffer = m_bufferAllocator.getBuffer(m_previewVertexBufferHandle);
-            const VkBuffer previewIndexBuffer = m_bufferAllocator.getBuffer(m_previewIndexBufferHandle);
-            if (previewVertexBuffer != VK_NULL_HANDLE && previewIndexBuffer != VK_NULL_HANDLE) {
+            auto drawPreviewRange = [&](VkPipeline pipeline, uint32_t indexCount, uint32_t firstIndex, int x, int y, int z) {
+                if (pipeline == VK_NULL_HANDLE || indexCount == 0) {
+                    return;
+                }
                 ChunkPushConstants previewChunkPushConstants{};
-                previewChunkPushConstants.chunkOffset[0] = 0.0f;
-                previewChunkPushConstants.chunkOffset[1] = 0.0f;
-                previewChunkPushConstants.chunkOffset[2] = 0.0f;
+                previewChunkPushConstants.chunkOffset[0] = static_cast<float>(x) * kChunkCoordinateScale;
+                previewChunkPushConstants.chunkOffset[1] = static_cast<float>(y) * kChunkCoordinateScale;
+                previewChunkPushConstants.chunkOffset[2] = static_cast<float>(z) * kChunkCoordinateScale;
                 previewChunkPushConstants.chunkOffset[3] = 0.0f;
                 previewChunkPushConstants.cascadeData[0] = 0.0f;
                 previewChunkPushConstants.cascadeData[1] = 0.0f;
                 previewChunkPushConstants.cascadeData[2] = 0.0f;
                 previewChunkPushConstants.cascadeData[3] = 0.0f;
-                const VkDeviceSize previewVertexBufferOffset = 0;
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, &previewVertexBuffer, &previewVertexBufferOffset);
-                vkCmdBindIndexBuffer(commandBuffer, previewIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-                auto drawPreviewRange = [&](VkPipeline pipeline, uint32_t indexCount, uint32_t firstIndex) {
-                    if (pipeline == VK_NULL_HANDLE || indexCount == 0) {
-                        return;
-                    }
-                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-                    vkCmdBindDescriptorSets(
-                        commandBuffer,
-                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        m_pipelineLayout,
-                        0,
-                        1,
-                        &m_descriptorSets[m_currentFrame],
-                        0,
-                        nullptr
-                    );
-                    vkCmdPushConstants(
-                        commandBuffer,
-                        m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
-                        0,
-                        sizeof(ChunkPushConstants),
-                        &previewChunkPushConstants
-                    );
-                    vkCmdDrawIndexed(commandBuffer, indexCount, 1, firstIndex, 0, 0);
-                };
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                vkCmdBindDescriptorSets(
+                    commandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    m_pipelineLayout,
+                    0,
+                    1,
+                    &m_descriptorSets[m_currentFrame],
+                    0,
+                    nullptr
+                );
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &previewChunkPushConstants
+                );
+                vkCmdDrawIndexed(commandBuffer, indexCount, 1, firstIndex, 0, 0);
+            };
 
-                if (drawCubePreview) {
-                    drawPreviewRange(activePreviewPipeline, kPreviewCubeIndexCount, 0);
-                }
-                if (drawFacePreview) {
-                    drawPreviewRange(m_previewRemovePipeline, kPreviewFaceIndexCount, kPreviewCubeIndexCount);
-                }
+            if (drawCubePreview) {
+                const uint32_t cubeFirstIndex =
+                    (preview.mode == VoxelPreview::Mode::Add) ? kAddCubeFirstIndex : kRemoveCubeFirstIndex;
+                drawPreviewRange(activePreviewPipeline, kPreviewCubeIndexCount, cubeFirstIndex, preview.x, preview.y, preview.z);
+            }
+
+            if (drawFacePreview) {
+                const uint32_t faceFirstIndex = kFaceFirstIndexBase + (std::min(preview.faceId, 5u) * kPreviewFaceIndexCount);
+                drawPreviewRange(m_previewRemovePipeline, kPreviewFaceIndexCount, faceFirstIndex, preview.faceX, preview.faceY, preview.faceZ);
             }
         }
     }
