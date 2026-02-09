@@ -15,6 +15,7 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <span>
 #include <string>
 
 namespace {
@@ -31,6 +32,11 @@ constexpr float kPitchMinDegrees = -89.0f;
 constexpr float kPitchMaxDegrees = 89.0f;
 [[maybe_unused]] constexpr float kVoxelSizeMeters = 0.25f;
 constexpr float kBlockInteractMaxDistance = 6.0f;
+constexpr float kRenderCullNearPlane = 0.1f;
+constexpr float kRenderCullFarPlane = 500.0f;
+constexpr float kRenderFrustumBoundsPadVoxels = 8.0f;
+constexpr float kRenderFrustumPlaneSlackVoxels = 2.5f;
+constexpr float kRenderAspectFallback = 16.0f / 9.0f;
 // 1x voxel world scale: roughly Minecraft-like player proportions.
 constexpr float kPlayerHeightVoxels = 1.8f;
 constexpr float kPlayerDiameterVoxels = 0.8f;
@@ -64,6 +70,173 @@ constexpr int kHotbarSlotCount = 4;
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
 constexpr math::Vector3 kDefaultPipeTint{0.95f, 0.95f, 0.95f};
+
+struct FrustumPlane {
+    math::Vector3 normal{};
+    float d = 0.0f;
+};
+
+struct CameraFrustum {
+    std::array<FrustumPlane, 6> planes{};
+    core::CellAabb broadPhaseBounds{};
+    bool valid = false;
+};
+
+FrustumPlane makePlaneFromPointNormal(const math::Vector3& point, const math::Vector3& normal) {
+    const math::Vector3 normalized = math::normalize(normal);
+    FrustumPlane plane{};
+    plane.normal = normalized;
+    plane.d = -math::dot(normalized, point);
+    return plane;
+}
+
+void orientPlaneTowardForward(FrustumPlane& plane, const math::Vector3& forward) {
+    if (math::dot(plane.normal, forward) < 0.0f) {
+        plane.normal = -plane.normal;
+        plane.d = -plane.d;
+    }
+}
+
+CameraFrustum buildCameraFrustum(
+    const math::Vector3& eye,
+    float yawDegrees,
+    float pitchDegrees,
+    float fovDegrees,
+    float aspectRatio
+) {
+    CameraFrustum frustum{};
+    const float clampedAspect = std::max(aspectRatio, 0.1f);
+    const float clampedFovDegrees = std::clamp(fovDegrees, 20.0f, 120.0f);
+    const float yawRadians = math::radians(yawDegrees);
+    const float pitchRadians = math::radians(pitchDegrees);
+    const float cosPitch = std::cos(pitchRadians);
+    math::Vector3 forward{
+        std::cos(yawRadians) * cosPitch,
+        std::sin(pitchRadians),
+        std::sin(yawRadians) * cosPitch
+    };
+    forward = math::normalize(forward);
+    if (math::lengthSquared(forward) <= 0.0001f) {
+        return frustum;
+    }
+
+    const math::Vector3 worldUp{0.0f, 1.0f, 0.0f};
+    math::Vector3 right = math::normalize(math::cross(forward, worldUp));
+    if (math::lengthSquared(right) <= 0.0001f) {
+        right = math::Vector3{1.0f, 0.0f, 0.0f};
+    }
+    math::Vector3 up = math::normalize(math::cross(right, forward));
+    if (math::lengthSquared(up) <= 0.0001f) {
+        up = worldUp;
+    }
+
+    const float halfFovY = math::radians(clampedFovDegrees) * 0.5f;
+    const float tanHalfY = std::tan(halfFovY);
+    const float tanHalfX = tanHalfY * clampedAspect;
+    const float nearDistance = kRenderCullNearPlane;
+    const float farDistance = kRenderCullFarPlane;
+
+    const math::Vector3 nearCenter = eye + (forward * nearDistance);
+    const math::Vector3 farCenter = eye + (forward * farDistance);
+    const float nearHalfHeight = nearDistance * tanHalfY;
+    const float nearHalfWidth = nearDistance * tanHalfX;
+    const float farHalfHeight = farDistance * tanHalfY;
+    const float farHalfWidth = farDistance * tanHalfX;
+
+    const math::Vector3 nearUp = up * nearHalfHeight;
+    const math::Vector3 nearRight = right * nearHalfWidth;
+    const math::Vector3 farUp = up * farHalfHeight;
+    const math::Vector3 farRight = right * farHalfWidth;
+
+    const std::array<math::Vector3, 8> corners = {
+        nearCenter + nearUp - nearRight,
+        nearCenter + nearUp + nearRight,
+        nearCenter - nearUp - nearRight,
+        nearCenter - nearUp + nearRight,
+        farCenter + farUp - farRight,
+        farCenter + farUp + farRight,
+        farCenter - farUp - farRight,
+        farCenter - farUp + farRight
+    };
+
+    float minX = corners[0].x;
+    float minY = corners[0].y;
+    float minZ = corners[0].z;
+    float maxX = corners[0].x;
+    float maxY = corners[0].y;
+    float maxZ = corners[0].z;
+    for (const math::Vector3& corner : corners) {
+        minX = std::min(minX, corner.x);
+        minY = std::min(minY, corner.y);
+        minZ = std::min(minZ, corner.z);
+        maxX = std::max(maxX, corner.x);
+        maxY = std::max(maxY, corner.y);
+        maxZ = std::max(maxZ, corner.z);
+    }
+
+    core::CellAabb broadPhaseBounds{};
+    broadPhaseBounds.valid = true;
+    broadPhaseBounds.minInclusive = core::Cell3i{
+        static_cast<int>(std::floor(minX - kRenderFrustumBoundsPadVoxels)),
+        static_cast<int>(std::floor(minY - kRenderFrustumBoundsPadVoxels)),
+        static_cast<int>(std::floor(minZ - kRenderFrustumBoundsPadVoxels))
+    };
+    broadPhaseBounds.maxExclusive = core::Cell3i{
+        static_cast<int>(std::floor(maxX + kRenderFrustumBoundsPadVoxels)) + 1,
+        static_cast<int>(std::floor(maxY + kRenderFrustumBoundsPadVoxels)) + 1,
+        static_cast<int>(std::floor(maxZ + kRenderFrustumBoundsPadVoxels)) + 1
+    };
+
+    const math::Vector3 leftDir = math::normalize(forward - (right * tanHalfX));
+    const math::Vector3 rightDir = math::normalize(forward + (right * tanHalfX));
+    const math::Vector3 topDir = math::normalize(forward + (up * tanHalfY));
+    const math::Vector3 bottomDir = math::normalize(forward - (up * tanHalfY));
+
+    std::array<FrustumPlane, 6> planes{};
+    planes[0] = makePlaneFromPointNormal(nearCenter, forward);
+    planes[1] = makePlaneFromPointNormal(farCenter, -forward);
+    planes[2] = makePlaneFromPointNormal(eye, math::cross(up, leftDir));
+    planes[3] = makePlaneFromPointNormal(eye, math::cross(rightDir, up));
+    planes[4] = makePlaneFromPointNormal(eye, math::cross(topDir, right));
+    planes[5] = makePlaneFromPointNormal(eye, math::cross(right, bottomDir));
+    orientPlaneTowardForward(planes[2], forward);
+    orientPlaneTowardForward(planes[3], forward);
+    orientPlaneTowardForward(planes[4], forward);
+    orientPlaneTowardForward(planes[5], forward);
+
+    frustum.planes = planes;
+    frustum.broadPhaseBounds = broadPhaseBounds;
+    frustum.valid = true;
+    return frustum;
+}
+
+bool chunkIntersectsFrustum(
+    const world::Chunk& chunk,
+    const std::array<FrustumPlane, 6>& planes,
+    float planeSlack
+) {
+    const float minX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
+    const float minY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
+    const float minZ = static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ);
+    const float maxX = minX + static_cast<float>(world::Chunk::kSizeX);
+    const float maxY = minY + static_cast<float>(world::Chunk::kSizeY);
+    const float maxZ = minZ + static_cast<float>(world::Chunk::kSizeZ);
+
+    for (const FrustumPlane& plane : planes) {
+        const float positiveX = (plane.normal.x >= 0.0f) ? maxX : minX;
+        const float positiveY = (plane.normal.y >= 0.0f) ? maxY : minY;
+        const float positiveZ = (plane.normal.z >= 0.0f) ? maxZ : minZ;
+        const float distance =
+            (plane.normal.x * positiveX) +
+            (plane.normal.y * positiveY) +
+            (plane.normal.z * positiveZ) +
+            plane.d;
+        if (distance < -planeSlack) {
+            return false;
+        }
+    }
+    return true;
+}
 
 void glfwErrorCallback(int errorCode, const char* description) {
     VOX_LOGE("glfw") << "error " << errorCode << ": "
@@ -268,6 +441,9 @@ bool App::init() {
         VOX_LOGW("app") << "world file missing/invalid at " << std::filesystem::absolute(worldPath).string()
                         << "; using empty world (press R to regenerate) in " << worldLoadMs << " ms";
     }
+    m_chunkSpatialIndex.rebuild(m_chunkGrid);
+    VOX_LOGI("app") << "chunk spatial index rebuilt (" << m_chunkSpatialIndex.chunkCount() << " chunks)";
+
     m_simulation.initializeSingleBelt();
     const bool rendererOk = m_renderer.init(m_window, m_chunkGrid);
     if (!rendererOk) {
@@ -550,7 +726,68 @@ void App::update(float dt) {
         m_camera.pitchDegrees,
         m_camera.fovDegrees
     };
-    m_renderer.renderFrame(m_chunkGrid, m_simulation, cameraPose, preview);
+
+    m_visibleChunkIndices.clear();
+    world::SpatialQueryStats spatialQueryStats{};
+    bool spatialQueriesUsed = false;
+    if (m_renderer.useSpatialPartitioningQueries() && m_chunkSpatialIndex.valid()) {
+        int framebufferWidth = 0;
+        int framebufferHeight = 0;
+        glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+        const float aspectRatio =
+            (framebufferWidth > 0 && framebufferHeight > 0)
+                ? static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight)
+                : kRenderAspectFallback;
+        const CameraFrustum cameraFrustum = buildCameraFrustum(
+            math::Vector3{m_camera.x, m_camera.y, m_camera.z},
+            m_camera.yawDegrees,
+            m_camera.pitchDegrees,
+            m_camera.fovDegrees,
+            aspectRatio
+        );
+        if (cameraFrustum.valid) {
+            std::vector<std::size_t> candidateChunkIndices =
+                m_chunkSpatialIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
+            spatialQueriesUsed = true;
+            m_visibleChunkIndices.reserve(candidateChunkIndices.size());
+            const std::vector<world::Chunk>& chunks = m_chunkGrid.chunks();
+            for (std::size_t chunkIndex : candidateChunkIndices) {
+                if (chunkIndex >= chunks.size()) {
+                    continue;
+                }
+                if (chunkIntersectsFrustum(chunks[chunkIndex], cameraFrustum.planes, kRenderFrustumPlaneSlackVoxels)) {
+                    m_visibleChunkIndices.push_back(chunkIndex);
+                }
+            }
+            std::sort(m_visibleChunkIndices.begin(), m_visibleChunkIndices.end());
+            m_visibleChunkIndices.erase(
+                std::unique(m_visibleChunkIndices.begin(), m_visibleChunkIndices.end()),
+                m_visibleChunkIndices.end()
+            );
+            spatialQueryStats.visibleChunkCount = static_cast<std::uint32_t>(m_visibleChunkIndices.size());
+        }
+    }
+
+    if (m_visibleChunkIndices.empty() && (!spatialQueriesUsed || !m_chunkSpatialIndex.valid())) {
+        const std::size_t chunkCount = m_chunkGrid.chunks().size();
+        m_visibleChunkIndices.resize(chunkCount);
+        for (std::size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+            m_visibleChunkIndices[chunkIndex] = chunkIndex;
+        }
+    }
+    m_renderer.setSpatialQueryStats(
+        spatialQueriesUsed,
+        spatialQueryStats,
+        static_cast<std::uint32_t>(m_visibleChunkIndices.size())
+    );
+
+    m_renderer.renderFrame(
+        m_chunkGrid,
+        m_simulation,
+        cameraPose,
+        preview,
+        std::span<const std::size_t>(m_visibleChunkIndices)
+    );
 }
 
 void App::shutdown() {
@@ -1799,6 +2036,7 @@ bool App::isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTra
 
 void App::regenerateWorld() {
     m_chunkGrid.initializeFlatWorld();
+    m_chunkSpatialIndex.rebuild(m_chunkGrid);
     if (!m_renderer.updateChunkMesh(m_chunkGrid)) {
         VOX_LOGE("app") << "world regenerate failed to update chunk meshes";
     }

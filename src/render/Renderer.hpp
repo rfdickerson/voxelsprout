@@ -4,11 +4,13 @@
 #include "sim/Simulation.hpp"
 #include "world/ChunkGrid.hpp"
 #include "world/ChunkMesher.hpp"
+#include "world/SpatialIndex.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include <vulkan/vulkan.h>
@@ -104,11 +106,14 @@ public:
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
+    bool useSpatialPartitioningQueries() const;
+    void setSpatialQueryStats(bool used, const world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void renderFrame(
         const world::ChunkGrid& chunkGrid,
         const sim::Simulation& simulation,
         const CameraPose& camera,
-        const VoxelPreview& preview
+        const VoxelPreview& preview,
+        std::span<const std::size_t> visibleChunkIndices
     );
     void setDebugUiVisible(bool visible);
     bool isDebugUiVisible() const;
@@ -118,6 +123,22 @@ private:
     static constexpr uint32_t kMaxFramesInFlight = 2;
     static constexpr uint32_t kShadowCascadeCount = 4;
     static constexpr uint32_t kShadowAtlasSize = 8192;
+    static constexpr uint32_t kGpuTimestampQueryFrameStart = 0;
+    static constexpr uint32_t kGpuTimestampQueryShadowStart = 1;
+    static constexpr uint32_t kGpuTimestampQueryShadowEnd = 2;
+    static constexpr uint32_t kGpuTimestampQueryPrepassStart = 3;
+    static constexpr uint32_t kGpuTimestampQueryPrepassEnd = 4;
+    static constexpr uint32_t kGpuTimestampQuerySsaoStart = 5;
+    static constexpr uint32_t kGpuTimestampQuerySsaoEnd = 6;
+    static constexpr uint32_t kGpuTimestampQuerySsaoBlurStart = 7;
+    static constexpr uint32_t kGpuTimestampQuerySsaoBlurEnd = 8;
+    static constexpr uint32_t kGpuTimestampQueryMainStart = 9;
+    static constexpr uint32_t kGpuTimestampQueryMainEnd = 10;
+    static constexpr uint32_t kGpuTimestampQueryPostStart = 11;
+    static constexpr uint32_t kGpuTimestampQueryPostEnd = 12;
+    static constexpr uint32_t kGpuTimestampQueryFrameEnd = 13;
+    static constexpr uint32_t kGpuTimestampQueryCount = 14;
+    static constexpr std::uint32_t kTimingHistorySampleCount = 240;
 
     struct FrameResources {
         // Per-frame command pool to allocate fresh command buffers every frame.
@@ -150,6 +171,7 @@ private:
     bool createDescriptorResources();
     bool createChunkBuffers(const world::ChunkGrid& chunkGrid, std::optional<std::size_t> chunkIndex);
     bool createFrameResources();
+    bool createGpuTimestampResources();
 #if defined(VOXEL_HAS_IMGUI)
     bool createImGuiResources();
     void destroyImGuiResources();
@@ -163,6 +185,7 @@ private:
     void destroyMsaaColorTargets();
     void destroyDepthTargets();
     void destroyAoTargets();
+    void destroyGpuTimestampResources();
     void destroyShadowResources();
     void destroyFrameResources();
     void destroyChunkBuffers();
@@ -178,6 +201,7 @@ private:
     void endDebugLabel(VkCommandBuffer commandBuffer) const;
     void insertDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
     bool waitForTimelineValue(uint64_t value) const;
+    void readGpuTimestampResults(uint32_t frameIndex);
     void scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue);
     void collectCompletedBufferReleases();
 
@@ -324,6 +348,9 @@ private:
     bool m_supportsWireframePreview = false;
     bool m_supportsSamplerAnisotropy = false;
     bool m_supportsMultiDrawIndirect = false;
+    bool m_gpuTimestampsSupported = false;
+    float m_gpuTimestampPeriodNs = 0.0f;
+    std::array<VkQueryPool, kMaxFramesInFlight> m_gpuTimestampQueryPools{};
     float m_maxSamplerAnisotropy = 1.0f;
     VkDeviceSize m_uniformBufferAlignment = 256;
 
@@ -376,6 +403,19 @@ private:
 #endif
     double m_lastFrameTimestampSeconds = 0.0;
     float m_debugFrameTimeMs = 0.0f;
+    float m_debugGpuFrameTimeMs = 0.0f;
+    float m_debugGpuShadowTimeMs = 0.0f;
+    float m_debugGpuPrepassTimeMs = 0.0f;
+    float m_debugGpuSsaoTimeMs = 0.0f;
+    float m_debugGpuSsaoBlurTimeMs = 0.0f;
+    float m_debugGpuMainTimeMs = 0.0f;
+    float m_debugGpuPostTimeMs = 0.0f;
+    std::array<float, kTimingHistorySampleCount> m_debugCpuFrameTimingMsHistory{};
+    std::uint32_t m_debugCpuFrameTimingMsHistoryWrite = 0;
+    std::uint32_t m_debugCpuFrameTimingMsHistoryCount = 0;
+    std::array<float, kTimingHistorySampleCount> m_debugGpuFrameTimingMsHistory{};
+    std::uint32_t m_debugGpuFrameTimingMsHistoryWrite = 0;
+    std::uint32_t m_debugGpuFrameTimingMsHistoryCount = 0;
     float m_debugFps = 0.0f;
     std::uint32_t m_debugChunkCount = 0;
     std::uint32_t m_debugMacroCellUniformCount = 0;
@@ -384,6 +424,16 @@ private:
     std::uint32_t m_debugDrawnLod0Ranges = 0;
     std::uint32_t m_debugDrawnLod1Ranges = 0;
     std::uint32_t m_debugDrawnLod2Ranges = 0;
+    bool m_debugEnableSpatialQueries = true;
+    bool m_debugSpatialQueriesUsed = false;
+    world::SpatialQueryStats m_debugSpatialQueryStats{};
+    std::uint32_t m_debugSpatialVisibleChunkCount = 0;
+    std::uint32_t m_debugChunkIndirectCommandCount = 0;
+    std::uint32_t m_debugDrawCallsTotal = 0;
+    std::uint32_t m_debugDrawCallsShadow = 0;
+    std::uint32_t m_debugDrawCallsPrepass = 0;
+    std::uint32_t m_debugDrawCallsMain = 0;
+    std::uint32_t m_debugDrawCallsPost = 0;
     std::uint64_t m_debugFrameArenaUploadBytes = 0;
     std::uint32_t m_debugFrameArenaUploadAllocs = 0;
     std::uint64_t m_debugFrameArenaTransientBufferBytes = 0;

@@ -1578,6 +1578,11 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
+    if (!createGpuTimestampResources()) {
+        VOX_LOGE("render") << "init failed at createGpuTimestampResources\n";
+        shutdown();
+        return false;
+    }
 #if defined(VOXEL_HAS_IMGUI)
     if (!createImGuiResources()) {
         VOX_LOGE("render") << "init failed at createImGuiResources\n";
@@ -1602,6 +1607,20 @@ bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t ch
         return false;
     }
     return createChunkBuffers(chunkGrid, chunkIndex);
+}
+
+bool Renderer::useSpatialPartitioningQueries() const {
+    return m_debugEnableSpatialQueries;
+}
+
+void Renderer::setSpatialQueryStats(
+    bool used,
+    const world::SpatialQueryStats& stats,
+    std::uint32_t visibleChunkCount
+) {
+    m_debugSpatialQueriesUsed = used;
+    m_debugSpatialQueryStats = stats;
+    m_debugSpatialVisibleChunkCount = visibleChunkCount;
 }
 
 bool Renderer::createInstance() {
@@ -1913,6 +1932,26 @@ bool Renderer::createLogicalDevice() {
         deviceProperties.limits.minUniformBufferOffsetAlignment,
         static_cast<VkDeviceSize>(16)
     );
+    m_gpuTimestampPeriodNs = deviceProperties.limits.timestampPeriod;
+    std::uint32_t queueFamilyPropertyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &queueFamilyPropertyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> queueFamilyProperties(queueFamilyPropertyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(
+        m_physicalDevice,
+        &queueFamilyPropertyCount,
+        queueFamilyProperties.data()
+    );
+    const bool graphicsQueueHasTimestamps =
+        m_graphicsQueueFamilyIndex < queueFamilyProperties.size() &&
+        queueFamilyProperties[m_graphicsQueueFamilyIndex].timestampValidBits > 0;
+    m_gpuTimestampsSupported = graphicsQueueHasTimestamps && m_gpuTimestampPeriodNs > 0.0f;
+    VOX_LOGI("render") << "GPU timestamps: supported=" << (m_gpuTimestampsSupported ? "yes" : "no")
+        << ", periodNs=" << m_gpuTimestampPeriodNs
+        << ", graphicsTimestampBits="
+        << (graphicsQueueHasTimestamps
+                ? queueFamilyProperties[m_graphicsQueueFamilyIndex].timestampValidBits
+                : 0u)
+        << "\n";
 
 #if defined(VOXEL_HAS_VMA)
     if (m_vmaAllocator == VK_NULL_HANDLE) {
@@ -5460,6 +5499,40 @@ bool Renderer::createFrameResources() {
     return true;
 }
 
+bool Renderer::createGpuTimestampResources() {
+    if (!m_gpuTimestampsSupported) {
+        return true;
+    }
+    for (size_t frameIndex = 0; frameIndex < m_gpuTimestampQueryPools.size(); ++frameIndex) {
+        if (m_gpuTimestampQueryPools[frameIndex] != VK_NULL_HANDLE) {
+            continue;
+        }
+        VkQueryPoolCreateInfo queryPoolCreateInfo{};
+        queryPoolCreateInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        queryPoolCreateInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        queryPoolCreateInfo.queryCount = kGpuTimestampQueryCount;
+        const VkResult result = vkCreateQueryPool(
+            m_device,
+            &queryPoolCreateInfo,
+            nullptr,
+            &m_gpuTimestampQueryPools[frameIndex]
+        );
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkCreateQueryPool(gpuTimestamps)", result);
+            return false;
+        }
+        const std::string queryPoolName = "frame." + std::to_string(frameIndex) + ".gpuTimestampQueryPool";
+        setObjectName(
+            VK_OBJECT_TYPE_QUERY_POOL,
+            vkHandleToUint64(m_gpuTimestampQueryPools[frameIndex]),
+            queryPoolName.c_str()
+        );
+    }
+    VOX_LOGI("render") << "GPU timestamp query pools ready (" << m_gpuTimestampQueryPools.size()
+        << " pools, " << kGpuTimestampQueryCount << " queries each)\n";
+    return true;
+}
+
 #if defined(VOXEL_HAS_IMGUI)
 bool Renderer::createImGuiResources() {
     if (m_imguiInitialized) {
@@ -5583,9 +5656,73 @@ void Renderer::buildFrameStatsUi() {
         return;
     }
 
-    ImGui::Text("Frame: %.2f ms", m_debugFrameTimeMs);
+    const float autoScale = std::numeric_limits<float>::max();
+    if (m_debugCpuFrameTimingMsHistoryCount > 0) {
+        const int cpuHistoryCount = static_cast<int>(m_debugCpuFrameTimingMsHistoryCount);
+        const int cpuHistoryOffset =
+            (m_debugCpuFrameTimingMsHistoryCount == kTimingHistorySampleCount)
+                ? static_cast<int>(m_debugCpuFrameTimingMsHistoryWrite)
+                : 0;
+        ImGui::PlotLines(
+            "CPU Frame (ms)",
+            m_debugCpuFrameTimingMsHistory.data(),
+            cpuHistoryCount,
+            cpuHistoryOffset,
+            nullptr,
+            0.0f,
+            autoScale,
+            ImVec2(0.0f, 64.0f)
+        );
+    } else {
+        ImGui::Text("CPU Frame (ms): collecting...");
+    }
+
+    if (m_gpuTimestampsSupported) {
+        if (m_debugGpuFrameTimingMsHistoryCount > 0) {
+            const int gpuHistoryCount = static_cast<int>(m_debugGpuFrameTimingMsHistoryCount);
+            const int gpuHistoryOffset =
+                (m_debugGpuFrameTimingMsHistoryCount == kTimingHistorySampleCount)
+                    ? static_cast<int>(m_debugGpuFrameTimingMsHistoryWrite)
+                    : 0;
+            ImGui::PlotLines(
+                "GPU Frame (ms)",
+                m_debugGpuFrameTimingMsHistory.data(),
+                gpuHistoryCount,
+                gpuHistoryOffset,
+                nullptr,
+                0.0f,
+                autoScale,
+                ImVec2(0.0f, 64.0f)
+            );
+        } else {
+            ImGui::Text("GPU Frame (ms): collecting...");
+        }
+    } else {
+        ImGui::Text("GPU Frame (ms): unavailable");
+    }
+
     ImGui::Text("FPS: %.1f", m_debugFps);
     ImGui::Text("Chunks: %u", m_debugChunkCount);
+    ImGui::Checkbox("Use Spatial Queries", &m_debugEnableSpatialQueries);
+    ImGui::Text("Spatial Query Used: %s", m_debugSpatialQueriesUsed ? "yes" : "no");
+    if (m_debugSpatialQueriesUsed) {
+        ImGui::Text(
+            "Spatial Query Nodes/Candidates/Visible: %u / %u / %u",
+            m_debugSpatialQueryStats.visitedNodeCount,
+            m_debugSpatialQueryStats.candidateChunkCount,
+            m_debugSpatialQueryStats.visibleChunkCount
+        );
+    }
+    ImGui::Text("Visible Chunks (render input): %u", m_debugSpatialVisibleChunkCount);
+    ImGui::Text("Chunk Indirect Draws: %u", m_debugChunkIndirectCommandCount);
+    ImGui::Text(
+        "Draw Calls Total: %u (Shadow %u, Prepass %u, Main %u, Post %u)",
+        m_debugDrawCallsTotal,
+        m_debugDrawCallsShadow,
+        m_debugDrawCallsPrepass,
+        m_debugDrawCallsMain,
+        m_debugDrawCallsPost
+    );
     const bool hasFrameArenaMetrics =
         m_debugFrameArenaUploadBytes > 0 ||
         m_debugFrameArenaUploadAllocs > 0 ||
@@ -5802,6 +5939,58 @@ bool Renderer::waitForTimelineValue(uint64_t value) const {
     return true;
 }
 
+void Renderer::readGpuTimestampResults(uint32_t frameIndex) {
+    if (!m_gpuTimestampsSupported || m_device == VK_NULL_HANDLE || frameIndex >= m_gpuTimestampQueryPools.size()) {
+        return;
+    }
+    const VkQueryPool queryPool = m_gpuTimestampQueryPools[frameIndex];
+    if (queryPool == VK_NULL_HANDLE) {
+        return;
+    }
+
+    std::array<std::uint64_t, kGpuTimestampQueryCount> timestamps{};
+    const VkResult result = vkGetQueryPoolResults(
+        m_device,
+        queryPool,
+        0,
+        kGpuTimestampQueryCount,
+        sizeof(timestamps),
+        timestamps.data(),
+        sizeof(std::uint64_t),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT
+    );
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkGetQueryPoolResults(gpuTimestamps)", result);
+        return;
+    }
+
+    const auto durationMs = [&](uint32_t startIndex, uint32_t endIndex) -> float {
+        if (startIndex >= kGpuTimestampQueryCount || endIndex >= kGpuTimestampQueryCount) {
+            return 0.0f;
+        }
+        const std::uint64_t startTicks = timestamps[startIndex];
+        const std::uint64_t endTicks = timestamps[endIndex];
+        if (endTicks <= startTicks) {
+            return 0.0f;
+        }
+        const double deltaNs = static_cast<double>(endTicks - startTicks) * static_cast<double>(m_gpuTimestampPeriodNs);
+        return static_cast<float>(deltaNs * 1.0e-6);
+    };
+
+    m_debugGpuFrameTimeMs = durationMs(kGpuTimestampQueryFrameStart, kGpuTimestampQueryFrameEnd);
+    m_debugGpuShadowTimeMs = durationMs(kGpuTimestampQueryShadowStart, kGpuTimestampQueryShadowEnd);
+    m_debugGpuPrepassTimeMs = durationMs(kGpuTimestampQueryPrepassStart, kGpuTimestampQueryPrepassEnd);
+    m_debugGpuSsaoTimeMs = durationMs(kGpuTimestampQuerySsaoStart, kGpuTimestampQuerySsaoEnd);
+    m_debugGpuSsaoBlurTimeMs = durationMs(kGpuTimestampQuerySsaoBlurStart, kGpuTimestampQuerySsaoBlurEnd);
+    m_debugGpuMainTimeMs = durationMs(kGpuTimestampQueryMainStart, kGpuTimestampQueryMainEnd);
+    m_debugGpuPostTimeMs = durationMs(kGpuTimestampQueryPostStart, kGpuTimestampQueryPostEnd);
+    m_debugGpuFrameTimingMsHistory[m_debugGpuFrameTimingMsHistoryWrite] = m_debugGpuFrameTimeMs;
+    m_debugGpuFrameTimingMsHistoryWrite =
+        (m_debugGpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
+    m_debugGpuFrameTimingMsHistoryCount =
+        std::min(m_debugGpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
+}
+
 void Renderer::scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue) {
     if (handle == kInvalidBufferHandle) {
         return;
@@ -5849,11 +6038,9 @@ void Renderer::renderFrame(
     const world::ChunkGrid& chunkGrid,
     const sim::Simulation& simulation,
     const CameraPose& camera,
-    const VoxelPreview& preview
+    const VoxelPreview& preview,
+    std::span<const std::size_t> visibleChunkIndices
 ) {
-    (void)chunkGrid;
-    (void)simulation;
-
     if (m_device == VK_NULL_HANDLE || m_swapchain == VK_NULL_HANDLE) {
         return;
     }
@@ -5866,6 +6053,11 @@ void Renderer::renderFrame(
         const double deltaSeconds = std::max(0.0, frameNowSeconds - m_lastFrameTimestampSeconds);
         m_debugFrameTimeMs = static_cast<float>(deltaSeconds * 1000.0);
         m_debugFps = (deltaSeconds > 0.0) ? static_cast<float>(1.0 / deltaSeconds) : 0.0f;
+        m_debugCpuFrameTimingMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugFrameTimeMs;
+        m_debugCpuFrameTimingMsHistoryWrite =
+            (m_debugCpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
+        m_debugCpuFrameTimingMsHistoryCount =
+            std::min(m_debugCpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
     }
     m_lastFrameTimestampSeconds = frameNowSeconds;
 
@@ -5893,15 +6085,14 @@ void Renderer::renderFrame(
             }
         }
     }
-    m_debugDrawnLod0Ranges = 0;
-    m_debugDrawnLod1Ranges = 0;
-    m_debugDrawnLod2Ranges = 0;
-
     collectCompletedBufferReleases();
 
     FrameResources& frame = m_frames[m_currentFrame];
     if (!waitForTimelineValue(m_frameTimelineValues[m_currentFrame])) {
         return;
+    }
+    if (m_frameTimelineValues[m_currentFrame] > 0) {
+        readGpuTimestampResults(m_currentFrame);
     }
     m_frameArena.beginFrame(m_currentFrame);
 
@@ -5955,6 +6146,34 @@ void Renderer::renderFrame(
         VOX_LOGE("render") << "vkBeginCommandBuffer failed\n";
         return;
     }
+    const VkQueryPool gpuTimestampQueryPool =
+        m_gpuTimestampsSupported ? m_gpuTimestampQueryPools[m_currentFrame] : VK_NULL_HANDLE;
+    auto writeGpuTimestampTop = [&](uint32_t queryIndex) {
+        if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
+            return;
+        }
+        vkCmdWriteTimestamp(
+            commandBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            gpuTimestampQueryPool,
+            queryIndex
+        );
+    };
+    auto writeGpuTimestampBottom = [&](uint32_t queryIndex) {
+        if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
+            return;
+        }
+        vkCmdWriteTimestamp(
+            commandBuffer,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            gpuTimestampQueryPool,
+            queryIndex
+        );
+    };
+    if (gpuTimestampQueryPool != VK_NULL_HANDLE) {
+        vkCmdResetQueryPool(commandBuffer, gpuTimestampQueryPool, 0, kGpuTimestampQueryCount);
+        writeGpuTimestampTop(kGpuTimestampQueryFrameStart);
+    }
     beginDebugLabel(commandBuffer, "Frame", 0.22f, 0.22f, 0.26f, 1.0f);
 #if defined(VOXEL_HAS_IMGUI)
     if (m_imguiInitialized) {
@@ -5967,6 +6186,16 @@ void Renderer::renderFrame(
         ImGui::Render();
     }
 #endif
+    // Keep previous frame counters visible in UI, then reset for this frame's capture.
+    m_debugDrawnLod0Ranges = 0;
+    m_debugDrawnLod1Ranges = 0;
+    m_debugDrawnLod2Ranges = 0;
+    m_debugChunkIndirectCommandCount = 0;
+    m_debugDrawCallsTotal = 0;
+    m_debugDrawCallsShadow = 0;
+    m_debugDrawCallsPrepass = 0;
+    m_debugDrawCallsMain = 0;
+    m_debugDrawCallsPost = 0;
 
     const float aspectRatio = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
     const float nearPlane = 0.1f;
@@ -6418,50 +6647,61 @@ void Renderer::renderFrame(
     chunkInstanceData.push_back(ChunkInstanceData{});
     std::vector<VkDrawIndexedIndirectCommand> chunkIndirectCommands;
     chunkIndirectCommands.reserve(m_chunkDrawRanges.size());
-    for (std::size_t drawRangeIndex = 0; drawRangeIndex < m_chunkDrawRanges.size(); ++drawRangeIndex) {
-        const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
-        if (drawRange.indexCount == 0) {
-            continue;
-        }
-        const std::size_t chunkArrayIndex = drawRangeIndex / world::kChunkMeshLodCount;
-        const std::size_t lodIndex = drawRangeIndex % world::kChunkMeshLodCount;
+    const std::vector<world::Chunk>& chunks = chunkGrid.chunks();
+    auto appendChunkLods = [&](std::size_t chunkArrayIndex) {
         if (chunkArrayIndex >= chunkGrid.chunks().size()) {
-            continue;
+            return;
         }
-        const world::Chunk& drawChunk = chunkGrid.chunks()[chunkArrayIndex];
+        const world::Chunk& drawChunk = chunks[chunkArrayIndex];
         const bool allowDetailLods =
             drawChunk.chunkX() == cameraChunkX &&
             drawChunk.chunkY() == cameraChunkY &&
             drawChunk.chunkZ() == cameraChunkZ;
-        if (lodIndex > 0 && !allowDetailLods) {
-            continue;
+        for (std::size_t lodIndex = 0; lodIndex < world::kChunkMeshLodCount; ++lodIndex) {
+            if (lodIndex > 0 && !allowDetailLods) {
+                continue;
+            }
+            const std::size_t drawRangeIndex = (chunkArrayIndex * world::kChunkMeshLodCount) + lodIndex;
+            if (drawRangeIndex >= m_chunkDrawRanges.size()) {
+                continue;
+            }
+            const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
+            if (drawRange.indexCount == 0 || !chunkDrawBuffersReady) {
+                continue;
+            }
+
+            const uint32_t instanceIndex = static_cast<uint32_t>(chunkInstanceData.size());
+            ChunkInstanceData instance{};
+            instance.chunkOffset[0] = drawRange.offsetX;
+            instance.chunkOffset[1] = drawRange.offsetY;
+            instance.chunkOffset[2] = drawRange.offsetZ;
+            instance.chunkOffset[3] = 0.0f;
+            chunkInstanceData.push_back(instance);
+
+            VkDrawIndexedIndirectCommand indirectCommand{};
+            indirectCommand.indexCount = drawRange.indexCount;
+            indirectCommand.instanceCount = 1;
+            indirectCommand.firstIndex = drawRange.firstIndex;
+            indirectCommand.vertexOffset = drawRange.vertexOffset;
+            indirectCommand.firstInstance = instanceIndex;
+            chunkIndirectCommands.push_back(indirectCommand);
+
+            if (lodIndex == 0) {
+                ++m_debugDrawnLod0Ranges;
+            } else if (lodIndex == 1) {
+                ++m_debugDrawnLod1Ranges;
+            } else {
+                ++m_debugDrawnLod2Ranges;
+            }
         }
-        if (!chunkDrawBuffersReady) {
-            continue;
+    };
+    if (!visibleChunkIndices.empty()) {
+        for (const std::size_t chunkArrayIndex : visibleChunkIndices) {
+            appendChunkLods(chunkArrayIndex);
         }
-
-        const uint32_t instanceIndex = static_cast<uint32_t>(chunkInstanceData.size());
-        ChunkInstanceData instance{};
-        instance.chunkOffset[0] = drawRange.offsetX;
-        instance.chunkOffset[1] = drawRange.offsetY;
-        instance.chunkOffset[2] = drawRange.offsetZ;
-        instance.chunkOffset[3] = 0.0f;
-        chunkInstanceData.push_back(instance);
-
-        VkDrawIndexedIndirectCommand indirectCommand{};
-        indirectCommand.indexCount = drawRange.indexCount;
-        indirectCommand.instanceCount = 1;
-        indirectCommand.firstIndex = drawRange.firstIndex;
-        indirectCommand.vertexOffset = drawRange.vertexOffset;
-        indirectCommand.firstInstance = instanceIndex;
-        chunkIndirectCommands.push_back(indirectCommand);
-
-        if (lodIndex == 0) {
-            ++m_debugDrawnLod0Ranges;
-        } else if (lodIndex == 1) {
-            ++m_debugDrawnLod1Ranges;
-        } else {
-            ++m_debugDrawnLod2Ranges;
+    } else {
+        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
+            appendChunkLods(chunkArrayIndex);
         }
     }
 
@@ -6506,6 +6746,7 @@ void Renderer::renderFrame(
     const VkBuffer chunkIndirectBuffer =
         chunkIndirectSliceOpt.has_value() ? m_bufferAllocator.getBuffer(chunkIndirectSliceOpt->buffer) : VK_NULL_HANDLE;
     const uint32_t chunkIndirectDrawCount = static_cast<uint32_t>(chunkIndirectCommands.size());
+    m_debugChunkIndirectCommandCount = chunkIndirectDrawCount;
     const bool canDrawChunksIndirect =
         chunkIndirectDrawCount > 0 &&
         chunkInstanceSliceOpt.has_value() &&
@@ -6513,11 +6754,16 @@ void Renderer::renderFrame(
         chunkInstanceBuffer != VK_NULL_HANDLE &&
         chunkIndirectBuffer != VK_NULL_HANDLE &&
         chunkDrawBuffersReady;
-    const auto drawChunkIndirect = [&]() {
+    auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
+        passCounter += drawCount;
+        m_debugDrawCallsTotal += drawCount;
+    };
+    const auto drawChunkIndirect = [&](std::uint32_t& passCounter) {
         if (!canDrawChunksIndirect) {
             return;
         }
         if (m_supportsMultiDrawIndirect) {
+            countDrawCalls(passCounter, chunkIndirectDrawCount);
             vkCmdDrawIndexedIndirect(
                 commandBuffer,
                 chunkIndirectBuffer,
@@ -6530,6 +6776,7 @@ void Renderer::renderFrame(
         const VkDeviceSize stride = static_cast<VkDeviceSize>(sizeof(VkDrawIndexedIndirectCommand));
         VkDeviceSize drawOffset = chunkIndirectSliceOpt->offset;
         for (uint32_t drawIndex = 0; drawIndex < chunkIndirectDrawCount; ++drawIndex) {
+            countDrawCalls(passCounter, 1);
             vkCmdDrawIndexedIndirect(
                 commandBuffer,
                 chunkIndirectBuffer,
@@ -6541,6 +6788,7 @@ void Renderer::renderFrame(
         }
     };
 
+    writeGpuTimestampTop(kGpuTimestampQueryShadowStart);
     beginDebugLabel(commandBuffer, "Pass: Shadow Atlas", 0.28f, 0.22f, 0.22f, 1.0f);
     const bool shadowInitialized = m_shadowDepthInitialized;
     transitionImageLayout(
@@ -6658,7 +6906,7 @@ void Renderer::renderFrame(
                     sizeof(ChunkPushConstants),
                     &chunkPushConstants
                 );
-                drawChunkIndirect();
+                drawChunkIndirect(m_debugDrawCallsShadow);
             }
 
             if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
@@ -6711,6 +6959,7 @@ void Renderer::renderFrame(
                         sizeof(ChunkPushConstants),
                         &pipeShadowPushConstants
                     );
+                    countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
                 };
                 drawShadowInstances(
@@ -6747,6 +6996,7 @@ void Renderer::renderFrame(
         1
     );
     endDebugLabel(commandBuffer);
+    writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
 
     const VkExtent2D aoExtent = {
         std::max(1u, m_aoExtent.width),
@@ -6854,6 +7104,7 @@ void Renderer::renderFrame(
     normalDepthRenderingInfo.pColorAttachments = &normalDepthColorAttachment;
     normalDepthRenderingInfo.pDepthAttachment = &aoDepthAttachment;
 
+    writeGpuTimestampTop(kGpuTimestampQueryPrepassStart);
     beginDebugLabel(commandBuffer, "Pass: Normal+Depth Prepass", 0.20f, 0.30f, 0.40f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &normalDepthRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
@@ -6894,7 +7145,7 @@ void Renderer::renderFrame(
                 sizeof(ChunkPushConstants),
                 &chunkPushConstants
             );
-            drawChunkIndirect();
+            drawChunkIndirect(m_debugDrawCallsPrepass);
         }
     }
 
@@ -6930,6 +7181,7 @@ void Renderer::renderFrame(
         );
             vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            countDrawCalls(m_debugDrawCallsPrepass, 1);
             vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
         };
         drawNormalDepthInstances(
@@ -6949,6 +7201,7 @@ void Renderer::renderFrame(
     }
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
+    writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);
 
     transitionImageLayout(
         commandBuffer,
@@ -6984,6 +7237,7 @@ void Renderer::renderFrame(
     ssaoRenderingInfo.colorAttachmentCount = 1;
     ssaoRenderingInfo.pColorAttachments = &ssaoRawAttachment;
 
+    writeGpuTimestampTop(kGpuTimestampQuerySsaoStart);
     beginDebugLabel(commandBuffer, "Pass: SSAO", 0.20f, 0.36f, 0.26f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &ssaoRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
@@ -7000,10 +7254,12 @@ void Renderer::renderFrame(
             1,
             &mvpDynamicOffset
         );
+        countDrawCalls(m_debugDrawCallsPrepass, 1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
+    writeGpuTimestampBottom(kGpuTimestampQuerySsaoEnd);
 
     transitionImageLayout(
         commandBuffer,
@@ -7033,6 +7289,7 @@ void Renderer::renderFrame(
     ssaoBlurRenderingInfo.colorAttachmentCount = 1;
     ssaoBlurRenderingInfo.pColorAttachments = &ssaoBlurAttachment;
 
+    writeGpuTimestampTop(kGpuTimestampQuerySsaoBlurStart);
     beginDebugLabel(commandBuffer, "Pass: SSAO Blur", 0.22f, 0.40f, 0.30f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &ssaoBlurRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
@@ -7049,10 +7306,12 @@ void Renderer::renderFrame(
             1,
             &mvpDynamicOffset
         );
+        countDrawCalls(m_debugDrawCallsPrepass, 1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
+    writeGpuTimestampBottom(kGpuTimestampQuerySsaoBlurEnd);
 
     transitionImageLayout(
         commandBuffer,
@@ -7158,6 +7417,7 @@ void Renderer::renderFrame(
     renderingInfo.pColorAttachments = &colorAttachment;
     renderingInfo.pDepthAttachment = &depthAttachment;
 
+    writeGpuTimestampTop(kGpuTimestampQueryMainStart);
     beginDebugLabel(commandBuffer, "Pass: Main Scene", 0.20f, 0.20f, 0.45f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &renderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -7175,6 +7435,7 @@ void Renderer::renderFrame(
             1,
             &mvpDynamicOffset
         );
+        countDrawCalls(m_debugDrawCallsMain, 1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
 
@@ -7212,7 +7473,7 @@ void Renderer::renderFrame(
             sizeof(ChunkPushConstants),
             &chunkPushConstants
         );
-        drawChunkIndirect();
+        drawChunkIndirect(m_debugDrawCallsMain);
     }
 
     if (m_pipePipeline != VK_NULL_HANDLE) {
@@ -7248,6 +7509,7 @@ void Renderer::renderFrame(
         );
             vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            countDrawCalls(m_debugDrawCallsMain, 1);
             vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
         };
         drawLitInstances(
@@ -7348,6 +7610,7 @@ void Renderer::renderFrame(
         );
                 vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexed(commandBuffer, previewIndexCount, 1, 0, 0, 0);
             }
         }
@@ -7405,6 +7668,7 @@ void Renderer::renderFrame(
                     sizeof(ChunkPushConstants),
                     &previewChunkPushConstants
                 );
+                countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexed(commandBuffer, indexCount, 1, firstIndex, 0, 0);
             };
 
@@ -7437,6 +7701,7 @@ void Renderer::renderFrame(
 
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
+    writeGpuTimestampBottom(kGpuTimestampQueryMainEnd);
 
     transitionImageLayout(
         commandBuffer,
@@ -7477,6 +7742,7 @@ void Renderer::renderFrame(
     toneMapRenderingInfo.colorAttachmentCount = 1;
     toneMapRenderingInfo.pColorAttachments = &toneMapColorAttachment;
 
+    writeGpuTimestampTop(kGpuTimestampQueryPostStart);
     beginDebugLabel(commandBuffer, "Pass: Tonemap + UI", 0.24f, 0.24f, 0.24f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &toneMapRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -7494,6 +7760,7 @@ void Renderer::renderFrame(
             1,
             &mvpDynamicOffset
         );
+        countDrawCalls(m_debugDrawCallsPost, 1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
 #if defined(VOXEL_HAS_IMGUI)
@@ -7504,6 +7771,7 @@ void Renderer::renderFrame(
 
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
+    writeGpuTimestampBottom(kGpuTimestampQueryPostEnd);
 
     transitionImageLayout(
         commandBuffer,
@@ -7516,6 +7784,7 @@ void Renderer::renderFrame(
         VK_ACCESS_2_NONE,
         VK_IMAGE_ASPECT_COLOR_BIT
     );
+    writeGpuTimestampBottom(kGpuTimestampQueryFrameEnd);
 
     endDebugLabel(commandBuffer);
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
@@ -7865,6 +8134,15 @@ void Renderer::destroyFrameResources() {
     }
 }
 
+void Renderer::destroyGpuTimestampResources() {
+    for (VkQueryPool& queryPool : m_gpuTimestampQueryPools) {
+        if (queryPool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(m_device, queryPool, nullptr);
+            queryPool = VK_NULL_HANDLE;
+        }
+    }
+}
+
 void Renderer::destroyTransferResources() {
     m_transferCommandBuffer = VK_NULL_HANDLE;
     if (m_transferCommandPool != VK_NULL_HANDLE) {
@@ -8063,6 +8341,7 @@ void Renderer::shutdown() {
         destroyImGuiResources();
 #endif
         destroyFrameResources();
+        destroyGpuTimestampResources();
         destroyTransferResources();
         if (m_renderTimelineSemaphore != VK_NULL_HANDLE) {
             vkDestroySemaphore(m_device, m_renderTimelineSemaphore, nullptr);
@@ -8174,6 +8453,22 @@ void Renderer::shutdown() {
     m_supportsWireframePreview = false;
     m_supportsSamplerAnisotropy = false;
     m_supportsMultiDrawIndirect = false;
+    m_gpuTimestampsSupported = false;
+    m_gpuTimestampPeriodNs = 0.0f;
+    m_gpuTimestampQueryPools.fill(VK_NULL_HANDLE);
+    m_debugGpuFrameTimeMs = 0.0f;
+    m_debugGpuShadowTimeMs = 0.0f;
+    m_debugGpuPrepassTimeMs = 0.0f;
+    m_debugGpuSsaoTimeMs = 0.0f;
+    m_debugGpuSsaoBlurTimeMs = 0.0f;
+    m_debugGpuMainTimeMs = 0.0f;
+    m_debugGpuPostTimeMs = 0.0f;
+    m_debugCpuFrameTimingMsHistory.fill(0.0f);
+    m_debugCpuFrameTimingMsHistoryWrite = 0;
+    m_debugCpuFrameTimingMsHistoryCount = 0;
+    m_debugGpuFrameTimingMsHistory.fill(0.0f);
+    m_debugGpuFrameTimingMsHistoryWrite = 0;
+    m_debugGpuFrameTimingMsHistoryCount = 0;
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;

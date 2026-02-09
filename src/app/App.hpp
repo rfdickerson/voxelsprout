@@ -4,6 +4,9 @@
 #include "render/Renderer.hpp"
 #include "sim/Simulation.hpp"
 #include "world/ChunkGrid.hpp"
+#include "world/SpatialIndex.hpp"
+
+#include <vector>
 
 struct GLFWwindow;
 
@@ -162,9 +165,11 @@ private:
     bool m_gamepadConnected = false;
     bool m_worldDirty = false;
     float m_worldAutosaveElapsedSeconds = 0.0f;
+    std::vector<std::size_t> m_visibleChunkIndices;
 
     sim::Simulation m_simulation;
     world::ChunkGrid m_chunkGrid;
+    world::ChunkSpatialIndex m_chunkSpatialIndex;
     render::Renderer m_renderer;
 };
 

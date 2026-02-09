@@ -14,6 +14,7 @@ add_executable(voxel_factory_toy
     src/render/Renderer.cpp
     src/render/VmaUsage.cpp
     src/world/ChunkMesher.cpp
+    src/world/SpatialIndex.cpp
 )
 
 target_include_directories(voxel_factory_toy PRIVATE src)
