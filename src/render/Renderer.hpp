@@ -3,6 +3,7 @@
 #include "render/BufferHelpers.hpp"
 #include "sim/Simulation.hpp"
 #include "world/ChunkGrid.hpp"
+#include "world/ChunkMesher.hpp"
 
 #include <array>
 #include <cstddef>
@@ -186,8 +187,8 @@ private:
     };
 
     struct ChunkDrawRange {
-        BufferHandle vertexBufferHandle = kInvalidBufferHandle;
-        BufferHandle indexBufferHandle = kInvalidBufferHandle;
+        uint32_t firstIndex = 0;
+        int32_t vertexOffset = 0;
         uint32_t indexCount = 0;
         float offsetX = 0.0f;
         float offsetY = 0.0f;
@@ -322,6 +323,7 @@ private:
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
     bool m_supportsWireframePreview = false;
     bool m_supportsSamplerAnisotropy = false;
+    bool m_supportsMultiDrawIndirect = false;
     float m_maxSamplerAnisotropy = 1.0f;
     VkDeviceSize m_uniformBufferAlignment = 256;
 
@@ -331,12 +333,16 @@ private:
     FrameArena m_frameArena;
     BufferHandle m_previewVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_previewIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_chunkVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_chunkIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_pipeVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_pipeIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_transportVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_transportIndexBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
+    std::vector<world::ChunkLodMeshes> m_chunkLodMeshCache;
+    bool m_chunkLodMeshCacheValid = false;
     uint32_t m_previewIndexCount = 0;
     uint32_t m_pipeIndexCount = 0;
     uint32_t m_transportIndexCount = 0;

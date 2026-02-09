@@ -51,6 +51,7 @@ constexpr float kGamepadMoveDeadzone = 0.18f;
 constexpr float kGamepadLookDeadzone = 0.14f;
 constexpr float kGamepadLookDegreesPerSecond = 160.0f;
 constexpr const char* kWorldFilePath = "world.vxw";
+constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 
 constexpr std::array<world::VoxelType, 1> kPlaceableBlockTypes = {
     world::VoxelType::Solid
@@ -361,9 +362,21 @@ void App::update(float dt) {
         if (!m_renderer.updateChunkMesh(m_chunkGrid, editedChunkIndex)) {
             VOX_LOGE("app") << "chunk mesh update failed after voxel edit";
         }
-        const std::filesystem::path worldPath{kWorldFilePath};
-        if (!m_chunkGrid.saveToBinaryFile(worldPath)) {
-            VOX_LOGE("app") << "failed to save world to " << worldPath.string() << " after voxel edit";
+        m_worldDirty = true;
+        m_worldAutosaveElapsedSeconds = 0.0f;
+    }
+
+    if (m_worldDirty) {
+        m_worldAutosaveElapsedSeconds += std::max(0.0f, dt);
+        if (m_worldAutosaveElapsedSeconds >= kWorldAutosaveDelaySeconds) {
+            const std::filesystem::path worldPath{kWorldFilePath};
+            if (!m_chunkGrid.saveToBinaryFile(worldPath)) {
+                VOX_LOGE("app") << "failed to autosave world to " << worldPath.string();
+            } else {
+                VOX_LOGD("app") << "autosaved world to " << worldPath.string();
+                m_worldDirty = false;
+                m_worldAutosaveElapsedSeconds = 0.0f;
+            }
         }
     }
 
@@ -542,6 +555,18 @@ void App::update(float dt) {
 
 void App::shutdown() {
     VOX_LOGI("app") << "shutdown begin";
+
+    if (m_worldDirty) {
+        const std::filesystem::path worldPath{kWorldFilePath};
+        if (!m_chunkGrid.saveToBinaryFile(worldPath)) {
+            VOX_LOGE("app") << "failed to save dirty world on shutdown to " << worldPath.string();
+        } else {
+            VOX_LOGI("app") << "saved dirty world on shutdown to " << worldPath.string();
+            m_worldDirty = false;
+            m_worldAutosaveElapsedSeconds = 0.0f;
+        }
+    }
+
     m_renderer.shutdown();
 
     if (m_window != nullptr) {
@@ -1781,6 +1806,8 @@ void App::regenerateWorld() {
     const std::filesystem::path worldPath{kWorldFilePath};
     if (m_chunkGrid.saveToBinaryFile(worldPath)) {
         VOX_LOGI("app") << "world regenerated and saved to " << worldPath.string() << " (R)";
+        m_worldDirty = false;
+        m_worldAutosaveElapsedSeconds = 0.0f;
     } else {
         VOX_LOGW("app") << "world regenerated, but failed to save " << worldPath.string();
     }

@@ -1,5 +1,6 @@
 #version 450
 layout(location = 0) in uint inPacked;
+layout(location = 1) in vec4 inChunkOffset;
 
 layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 mvp;
@@ -77,7 +78,7 @@ void main() {
     const uint face = (inPacked >> kShiftFace) & 0x7u;
     const uint corner = (inPacked >> kShiftCorner) & 0x3u;
     const vec3 basePosition = vec3(float(x), float(y), float(z));
-    const vec3 worldPosition = basePosition + cornerOffset(face, corner) + chunkPc.chunkOffset.xyz;
+    const vec3 worldPosition = basePosition + cornerOffset(face, corner) + inChunkOffset.xyz + chunkPc.chunkOffset.xyz;
     const int cascadeIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 3);
     gl_Position = camera.lightViewProj[cascadeIndex] * vec4(worldPosition, 1.0);
 }

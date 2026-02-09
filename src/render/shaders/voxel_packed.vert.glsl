@@ -1,5 +1,6 @@
 #version 450
 layout(location = 0) in uint inPacked;
+layout(location = 1) in vec4 inChunkOffset;
 
 layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 mvp;
@@ -86,7 +87,7 @@ void main() {
     const uint ao = (inPacked >> kShiftAo) & 0x3u;
     const uint material = (inPacked >> kShiftMaterial) & 0xFFu;
     const vec3 basePosition = vec3(float(x), float(y), float(z));
-    const vec3 worldPosition = basePosition + cornerOffset(face, corner) + chunkPc.chunkOffset.xyz;
+    const vec3 worldPosition = basePosition + cornerOffset(face, corner) + inChunkOffset.xyz + chunkPc.chunkOffset.xyz;
 
     outFace = face;
     outMaterial = material;

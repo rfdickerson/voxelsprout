@@ -160,6 +160,8 @@ private:
     bool m_wasPrevBlockDown = false;
     bool m_wasNextBlockDown = false;
     bool m_gamepadConnected = false;
+    bool m_worldDirty = false;
+    float m_worldAutosaveElapsedSeconds = 0.0f;
 
     sim::Simulation m_simulation;
     world::ChunkGrid m_chunkGrid;
