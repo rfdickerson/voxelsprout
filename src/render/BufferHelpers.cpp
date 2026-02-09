@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <limits>
 
 namespace render {
@@ -74,14 +75,21 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
     VkDeviceMemory memory = VK_NULL_HANDLE;
 #if defined(VOXEL_HAS_VMA)
     VmaAllocation allocation = VK_NULL_HANDLE;
+    VmaAllocationInfo allocationInfo{};
+    bool persistentMapped = false;
+    void* persistentMappedData = nullptr;
     if (m_vmaAllocator != VK_NULL_HANDLE) {
         VmaAllocationCreateInfo allocationCreateInfo{};
         allocationCreateInfo.flags = 0;
         allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
-        if ((desc.memoryProperties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) {
+        const bool wantsHostAccess =
+            (desc.memoryProperties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 ||
+            (desc.usage & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) != 0;
+        if (wantsHostAccess) {
             allocationCreateInfo.flags |=
                 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                 VMA_ALLOCATION_CREATE_MAPPED_BIT;
+            persistentMapped = true;
         }
         allocationCreateInfo.requiredFlags = desc.memoryProperties;
         if (vmaCreateBuffer(
@@ -90,10 +98,17 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
                 &allocationCreateInfo,
                 &buffer,
                 &allocation,
-                nullptr
+                &allocationInfo
             ) != VK_SUCCESS) {
             return kInvalidBufferHandle;
         }
+        persistentMappedData = allocationInfo.pMappedData;
+        std::cerr
+            << "[render] alloc buffer (VMA): size=" << static_cast<unsigned long long>(desc.size)
+            << ", usage=0x" << std::hex << static_cast<unsigned int>(desc.usage)
+            << ", memProps=0x" << static_cast<unsigned int>(desc.memoryProperties) << std::dec
+            << ", persistentMapped=" << (persistentMappedData != nullptr ? "yes" : "no")
+            << "\n";
     } else
 #endif
     {
@@ -125,14 +140,26 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
             vkFreeMemory(m_device, memory, nullptr);
             return kInvalidBufferHandle;
         }
+        std::cerr
+            << "[render] alloc buffer (vk): size=" << static_cast<unsigned long long>(desc.size)
+            << ", usage=0x" << std::hex << static_cast<unsigned int>(desc.usage)
+            << ", memProps=0x" << static_cast<unsigned int>(desc.memoryProperties) << std::dec
+            << "\n";
     }
 
     if (desc.initialData != nullptr) {
         void* mappedData = nullptr;
+#if defined(VOXEL_HAS_VMA)
+        bool mappedNeedsUnmap = true;
+#endif
         const bool mapped =
 #if defined(VOXEL_HAS_VMA)
             (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE)
-                ? (vmaMapMemory(m_vmaAllocator, allocation, &mappedData) == VK_SUCCESS)
+                ? (
+                    (persistentMappedData != nullptr)
+                        ? ((mappedData = persistentMappedData), mappedNeedsUnmap = false, true)
+                        : (vmaMapMemory(m_vmaAllocator, allocation, &mappedData) == VK_SUCCESS)
+                )
                 : (vkMapMemory(m_device, memory, 0, desc.size, 0, &mappedData) == VK_SUCCESS);
 #else
             (vkMapMemory(m_device, memory, 0, desc.size, 0, &mappedData) == VK_SUCCESS);
@@ -152,9 +179,13 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
             return kInvalidBufferHandle;
         }
         std::memcpy(mappedData, desc.initialData, static_cast<size_t>(desc.size));
+        std::cerr << "[render] upload initial buffer data: bytes="
+                  << static_cast<unsigned long long>(desc.size) << "\n";
 #if defined(VOXEL_HAS_VMA)
         if (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
-            vmaUnmapMemory(m_vmaAllocator, allocation);
+            if (mappedNeedsUnmap) {
+                vmaUnmapMemory(m_vmaAllocator, allocation);
+            }
         } else {
             vkUnmapMemory(m_device, memory);
         }
@@ -171,6 +202,8 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
             buffer,
 #if defined(VOXEL_HAS_VMA)
             allocation,
+            persistentMappedData,
+            persistentMappedData != nullptr,
 #endif
             memory,
             desc.size,
@@ -182,6 +215,8 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
             buffer,
 #if defined(VOXEL_HAS_VMA)
             allocation,
+            persistentMappedData,
+            persistentMappedData != nullptr,
 #endif
             memory,
             desc.size,
@@ -234,7 +269,11 @@ void* BufferAllocator::mapBuffer(BufferHandle handle, VkDeviceSize offset, VkDev
     const bool mappedOk =
 #if defined(VOXEL_HAS_VMA)
         (m_vmaAllocator != VK_NULL_HANDLE && slot->allocation != VK_NULL_HANDLE)
-            ? (vmaMapMemory(m_vmaAllocator, slot->allocation, &mapped) == VK_SUCCESS)
+            ? (
+                slot->persistentMapped
+                    ? ((mapped = slot->mappedData), true)
+                    : (vmaMapMemory(m_vmaAllocator, slot->allocation, &mapped) == VK_SUCCESS)
+            )
             : (vkMapMemory(m_device, slot->memory, offset, size, 0, &mapped) == VK_SUCCESS);
 #else
         (vkMapMemory(m_device, slot->memory, offset, size, 0, &mapped) == VK_SUCCESS);
@@ -257,6 +296,9 @@ void BufferAllocator::unmapBuffer(BufferHandle handle) {
     }
 #if defined(VOXEL_HAS_VMA)
     if (m_vmaAllocator != VK_NULL_HANDLE && slot->allocation != VK_NULL_HANDLE) {
+        if (slot->persistentMapped) {
+            return;
+        }
         vmaUnmapMemory(m_vmaAllocator, slot->allocation);
     } else {
         vkUnmapMemory(m_device, slot->memory);

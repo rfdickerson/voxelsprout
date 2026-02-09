@@ -49,6 +49,8 @@ private:
         VkBuffer buffer = VK_NULL_HANDLE;
 #if defined(VOXEL_HAS_VMA)
         VmaAllocation allocation = VK_NULL_HANDLE;
+        void* mappedData = nullptr;
+        bool persistentMapped = false;
 #endif
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkDeviceSize size = 0;

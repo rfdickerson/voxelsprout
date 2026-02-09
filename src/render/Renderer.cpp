@@ -33,12 +33,14 @@ namespace render {
 namespace {
 
 constexpr std::array<const char*, 1> kValidationLayers = {"VK_LAYER_KHRONOS_validation"};
-constexpr std::array<const char*, 5> kDeviceExtensions = {
+constexpr std::array<const char*, 7> kDeviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     VK_KHR_MAINTENANCE_4_EXTENSION_NAME,
     VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
     VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
     VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+    VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,
+    VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME,
 };
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {4096u, 2048u, 2048u, 1024u};
@@ -1690,9 +1692,12 @@ bool Renderer::pickPhysicalDevice() {
         VkPhysicalDeviceVulkan13Features vulkan13Features{};
         vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
         vulkan13Features.pNext = &vulkan12Features;
+        VkPhysicalDeviceMemoryPriorityFeaturesEXT memoryPriorityFeatures{};
+        memoryPriorityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT;
+        memoryPriorityFeatures.pNext = &vulkan13Features;
         VkPhysicalDeviceFeatures2 features2{};
         features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features2.pNext = &vulkan13Features;
+        features2.pNext = &memoryPriorityFeatures;
         vkGetPhysicalDeviceFeatures2(candidate, &features2);
         if (vulkan13Features.dynamicRendering != VK_TRUE) {
             std::cerr << "[render] skip GPU: dynamicRendering not supported\n";
@@ -1708,6 +1713,14 @@ bool Renderer::pickPhysicalDevice() {
         }
         if (vulkan13Features.maintenance4 != VK_TRUE) {
             std::cerr << "[render] skip GPU: maintenance4 not supported\n";
+            continue;
+        }
+        if (vulkan12Features.bufferDeviceAddress != VK_TRUE) {
+            std::cerr << "[render] skip GPU: bufferDeviceAddress not supported\n";
+            continue;
+        }
+        if (memoryPriorityFeatures.memoryPriority != VK_TRUE) {
+            std::cerr << "[render] skip GPU: memoryPriority not supported\n";
             continue;
         }
 
@@ -1784,6 +1797,7 @@ bool Renderer::createLogicalDevice() {
     VkPhysicalDeviceVulkan12Features vulkan12Features{};
     vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     vulkan12Features.timelineSemaphore = VK_TRUE;
+    vulkan12Features.bufferDeviceAddress = VK_TRUE;
 
     VkPhysicalDeviceVulkan13Features vulkan13Features{};
     vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -1792,9 +1806,14 @@ bool Renderer::createLogicalDevice() {
     vulkan13Features.synchronization2 = VK_TRUE;
     vulkan13Features.maintenance4 = VK_TRUE;
 
+    VkPhysicalDeviceMemoryPriorityFeaturesEXT memoryPriorityFeatures{};
+    memoryPriorityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT;
+    memoryPriorityFeatures.pNext = &vulkan13Features;
+    memoryPriorityFeatures.memoryPriority = VK_TRUE;
+
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    createInfo.pNext = &vulkan13Features;
+    createInfo.pNext = &memoryPriorityFeatures;
     createInfo.queueCreateInfoCount = queueCreateInfoCount;
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
     VkPhysicalDeviceFeatures deviceFeatures{};
@@ -1809,6 +1828,14 @@ bool Renderer::createLogicalDevice() {
         logVkFailure("vkCreateDevice", result);
         return false;
     }
+    std::cerr
+        << "[render] device features enabled: dynamicRendering=1, synchronization2=1, maintenance4=1, "
+        << "timelineSemaphore=1, bufferDeviceAddress=1, memoryPriority=1\n";
+    std::cerr
+        << "[render] device extensions enabled: "
+        << "VK_KHR_swapchain, VK_KHR_maintenance4, VK_KHR_timeline_semaphore, "
+        << "VK_KHR_synchronization2, VK_KHR_dynamic_rendering, "
+        << "VK_EXT_memory_budget, VK_EXT_memory_priority\n";
 
     vkGetDeviceQueue(m_device, m_graphicsQueueFamilyIndex, m_graphicsQueueIndex, &m_graphicsQueue);
     vkGetDeviceQueue(m_device, m_transferQueueFamilyIndex, m_transferQueueIndex, &m_transferQueue);
@@ -1823,7 +1850,10 @@ bool Renderer::createLogicalDevice() {
 #if defined(VOXEL_HAS_VMA)
     if (m_vmaAllocator == VK_NULL_HANDLE) {
         VmaAllocatorCreateInfo allocatorCreateInfo{};
-        allocatorCreateInfo.flags = 0;
+        allocatorCreateInfo.flags =
+            VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT |
+            VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT |
+            VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
         allocatorCreateInfo.physicalDevice = m_physicalDevice;
         allocatorCreateInfo.device = m_device;
         allocatorCreateInfo.instance = m_instance;
@@ -1833,6 +1863,9 @@ bool Renderer::createLogicalDevice() {
             logVkFailure("vmaCreateAllocator", allocatorResult);
             return false;
         }
+        std::cerr
+            << "[render] VMA allocator created: flags="
+            << "BUFFER_DEVICE_ADDRESS|EXT_MEMORY_BUDGET|EXT_MEMORY_PRIORITY\n";
     }
 #endif
     return true;
@@ -2393,6 +2426,10 @@ bool Renderer::createShadowResources() {
             logVkFailure("vmaCreateImage(shadowDepth)", imageResult);
             return false;
         }
+        std::cerr << "[render] alloc shadow depth atlas (VMA): "
+                  << kShadowAtlasSize << "x" << kShadowAtlasSize
+                  << ", format=" << static_cast<int>(m_shadowDepthFormat)
+                  << ", cascades=" << kShadowCascadeCount << "\n";
     } else
 #endif
     {
@@ -2432,6 +2469,10 @@ bool Renderer::createShadowResources() {
             destroyShadowResources();
             return false;
         }
+        std::cerr << "[render] alloc shadow depth atlas (vk): "
+                  << kShadowAtlasSize << "x" << kShadowAtlasSize
+                  << ", format=" << static_cast<int>(m_shadowDepthFormat)
+                  << ", cascades=" << kShadowCascadeCount << "\n";
     }
 
     VkImageViewCreateInfo viewCreateInfo{};
