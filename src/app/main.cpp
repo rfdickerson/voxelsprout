@@ -1,21 +1,21 @@
 #include "app/App.hpp"
 
-#include <iostream>
+#include "core/Log.hpp"
 
 // Program entry point
 // Responsible for: creating the app and handing control to the app runtime loop.
 // Should NOT do: implement gameplay systems or low-level window/input handling.
 int main() {
-    std::cerr << "[main] startup\n";
+    VOX_LOGI("main") << "startup";
     app::App app;
 
     if (!app.init()) {
-        std::cerr << "[main] app init failed, exiting\n";
+        VOX_LOGE("main") << "app init failed, exiting";
         return 1;
     }
 
     app.run();
     app.shutdown();
-    std::cerr << "[main] exit success\n";
+    VOX_LOGI("main") << "exit success";
     return 0;
 }

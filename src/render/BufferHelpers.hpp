@@ -1,13 +1,28 @@
 #pragma once
 
+#include "render/FrameArenaAlias.hpp"
+
 #include <cstdint>
+#include <limits>
 #include <optional>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include <vulkan/vulkan.h>
 #if defined(VOXEL_HAS_VMA)
+#if defined(__has_include)
+#if __has_include(<vk_mem_alloc.h>)
 #include <vk_mem_alloc.h>
+#elif __has_include(<vma/vk_mem_alloc.h>)
+#include <vma/vk_mem_alloc.h>
+#else
+#error "VOXEL_HAS_VMA is set but vk_mem_alloc.h was not found"
+#endif
+#else
+#include <vk_mem_alloc.h>
+#endif
 #endif
 
 namespace render {
@@ -130,6 +145,14 @@ struct FrameArenaStats {
     uint32_t transientImageAliasReuses = 0;
 };
 
+struct FrameArenaResidentStats {
+    uint64_t bufferBytes = 0;
+    uint32_t bufferCount = 0;
+    uint64_t imageBytes = 0;
+    uint32_t imageCount = 0;
+    uint32_t imageAliasReuses = 0;
+};
+
 struct FrameArenaConfig {
     VkDeviceSize uploadBytesPerFrame = 0;
     uint32_t frameCount = 0;
@@ -142,15 +165,6 @@ constexpr TransientImageHandle kInvalidTransientImageHandle = 0;
 enum class FrameArenaImageLifetime : uint8_t {
     Persistent = 0,
     FrameTransient = 1
-};
-
-enum class FrameArenaPass : uint8_t {
-    Unknown = 0,
-    Ssao = 1,
-    Shadow = 2,
-    Main = 3,
-    Post = 4,
-    Ui = 5
 };
 
 struct TransientImageDesc {
@@ -169,6 +183,7 @@ struct TransientImageDesc {
     FrameArenaPass firstPass = FrameArenaPass::Unknown;
     FrameArenaPass lastPass = FrameArenaPass::Unknown;
     bool aliasEligible = true;
+    std::string debugName;
 };
 
 struct TransientImageInfo {
@@ -176,6 +191,15 @@ struct TransientImageInfo {
     VkImageView view = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkExtent3D extent{};
+};
+
+struct FrameArenaAliasedImageInfo {
+    uint32_t handle = 0;
+    uint32_t aliasBlock = 0;
+    uint32_t aliasBlockRefCount = 0;
+    FrameArenaPass firstPass = FrameArenaPass::Unknown;
+    FrameArenaPass lastPass = FrameArenaPass::Unknown;
+    std::string debugName;
 };
 
 // Per-frame transient allocator foundation.
@@ -207,14 +231,22 @@ public:
     );
     void destroyTransientImage(TransientImageHandle handle);
     [[nodiscard]] const TransientImageInfo* getTransientImage(TransientImageHandle handle) const;
+    void destroyAllImages();
+    [[nodiscard]] uint32_t liveImageCount() const;
 
     [[nodiscard]] BufferHandle uploadBufferHandle() const;
     [[nodiscard]] const FrameArenaStats& activeStats() const;
+    [[nodiscard]] const FrameArenaResidentStats& residentStats() const;
+    void collectAliasedImageDebugInfo(std::vector<FrameArenaAliasedImageInfo>& out) const;
 
 private:
     void clearFrameTransientBuffers(uint32_t frameIndex);
     void clearFrameTransientImages(uint32_t frameIndex);
     void destroyImageSlot(TransientImageHandle handle);
+    void trackCreatedImage(VkImage image, const std::string& debugName);
+    void trackDestroyedImage(VkImage image);
+    void destroyTrackedLiveImages();
+    void forceFreeAliasMemoryBlocks();
     [[nodiscard]] uint32_t findMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredProperties) const;
 
     BufferAllocator* m_allocator = nullptr;
@@ -236,13 +268,27 @@ private:
 #endif
         VkDeviceMemory memory = VK_NULL_HANDLE;
         TransientImageDesc desc{};
-        std::vector<std::pair<FrameArenaPass, FrameArenaPass>> passRanges;
+        std::vector<FrameArenaPassRange> passRanges;
+        uint32_t aliasMemoryBlock = 0;
+        bool usesAliasMemory = false;
+        bool inUse = false;
+    };
+    struct AliasMemoryBlock {
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkDeviceSize size = 0;
+        uint32_t memoryTypeIndex = std::numeric_limits<uint32_t>::max();
+        uint32_t refCount = 0;
+        std::vector<FrameArenaPassRange> passRanges;
         bool inUse = false;
     };
     std::vector<ImageSlot> m_imageSlots;
     std::vector<uint32_t> m_freeImageSlots;
+    std::vector<AliasMemoryBlock> m_aliasMemoryBlocks;
+    std::vector<uint32_t> m_freeAliasMemoryBlocks;
     std::vector<FrameArenaStats> m_frameStats;
     FrameArenaStats m_emptyStats{};
+    FrameArenaResidentStats m_residentStats{};
+    std::unordered_map<uint64_t, std::string> m_liveImageDebugNames;
 };
 
 } // namespace render

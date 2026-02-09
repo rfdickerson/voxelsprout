@@ -9,8 +9,10 @@ include(CTest)
 add_executable(voxel_factory_toy
     src/app/main.cpp
     src/app/App.cpp
+    src/core/Log.cpp
     src/render/BufferHelpers.cpp
     src/render/Renderer.cpp
+    src/render/VmaUsage.cpp
     src/world/ChunkMesher.cpp
 )
 
@@ -89,6 +91,24 @@ endif()
 if(TARGET unofficial::VulkanMemoryAllocator::VulkanMemoryAllocator)
     target_link_libraries(voxel_factory_toy PRIVATE unofficial::VulkanMemoryAllocator::VulkanMemoryAllocator)
     target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VMA=1)
+else()
+    set(VMA_HEADER_HINTS
+        "$ENV{VCPKG_ROOT}/installed/$ENV{VCPKG_DEFAULT_TRIPLET}/include"
+        "$ENV{VCPKG_ROOT}/packages/vulkan-memory-allocator_$ENV{VCPKG_DEFAULT_TRIPLET}/include"
+        "/mnt/c/Users/rfdic/vcpkg/packages/vulkan-memory-allocator_x64-windows/include"
+        "/mnt/c/Users/rfdic/vcpkg/installed/x64-windows/include"
+    )
+    find_path(VMA_INCLUDE_DIR
+        NAMES vk_mem_alloc.h vma/vk_mem_alloc.h
+        HINTS ${VMA_HEADER_HINTS}
+    )
+    if(VMA_INCLUDE_DIR)
+        message(STATUS "Using VMA header-only include path: ${VMA_INCLUDE_DIR}")
+        target_include_directories(voxel_factory_toy PRIVATE "${VMA_INCLUDE_DIR}")
+        target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VMA=1 VOXEL_VMA_HEADER_ONLY=1)
+    else()
+        message(WARNING "VMA not found. Renderer will fall back to raw Vulkan allocations.")
+    endif()
 endif()
 
 if(BUILD_TESTING)

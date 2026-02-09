@@ -3,6 +3,7 @@
 #include <GLFW/glfw3.h>
 
 #include "core/Grid3.hpp"
+#include "core/Log.hpp"
 #include "math/Math.hpp"
 #include "sim/NetworkProcedural.hpp"
 
@@ -12,10 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
-#include <ctime>
-#include <cstdio>
 #include <filesystem>
-#include <iostream>
 #include <limits>
 #include <string>
 
@@ -66,37 +64,9 @@ constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
 constexpr math::Vector3 kDefaultPipeTint{0.95f, 0.95f, 0.95f};
 
-std::string appTimestamp();
-
 void glfwErrorCallback(int errorCode, const char* description) {
-    std::cerr << "[" << appTimestamp() << "][app][glfw] error " << errorCode << ": "
-              << (description != nullptr ? description : "(no description)") << "\n";
-}
-
-std::string appTimestamp() {
-    const auto now = std::chrono::system_clock::now();
-    const auto epochMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch());
-    const auto ms = static_cast<int>(epochMs.count() % 1000);
-    const std::time_t timeValue = std::chrono::system_clock::to_time_t(now);
-
-    std::tm localTime{};
-#if defined(_WIN32)
-    localtime_s(&localTime, &timeValue);
-#else
-    localtime_r(&timeValue, &localTime);
-#endif
-
-    char buffer[32]{};
-    std::snprintf(
-        buffer,
-        sizeof(buffer),
-        "%02d:%02d:%02d.%03d",
-        localTime.tm_hour,
-        localTime.tm_min,
-        localTime.tm_sec,
-        ms
-    );
-    return std::string(buffer);
+    VOX_LOGE("glfw") << "error " << errorCode << ": "
+                     << (description != nullptr ? description : "(no description)");
 }
 
 float approach(float current, float target, float maxDelta) {
@@ -261,11 +231,11 @@ core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, core::Dir6 preferredAx
 namespace app {
 
 bool App::init() {
-    std::cerr << "[" << appTimestamp() << "][app] init begin\n";
+    VOX_LOGI("app") << "init begin";
     glfwSetErrorCallback(glfwErrorCallback);
 
     if (glfwInit() == GLFW_FALSE) {
-        std::cerr << "[" << appTimestamp() << "][app] glfwInit failed\n";
+        VOX_LOGE("app") << "glfwInit failed";
         return false;
     }
 
@@ -273,7 +243,7 @@ bool App::init() {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     m_window = glfwCreateWindow(1280, 720, "voxel_factory_toy", nullptr, nullptr);
     if (m_window == nullptr) {
-        std::cerr << "[" << appTimestamp() << "][app] glfwCreateWindow failed\n";
+        VOX_LOGE("app") << "glfwCreateWindow failed";
         glfwTerminate();
         return false;
     }
@@ -287,32 +257,29 @@ bool App::init() {
         const auto worldLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - worldLoadStart
         ).count();
-        std::cerr << "[" << appTimestamp() << "][app] loaded world from "
-                  << std::filesystem::absolute(worldPath).string()
-                  << " in " << worldLoadMs << " ms\n";
+        VOX_LOGI("app") << "loaded world from " << std::filesystem::absolute(worldPath).string()
+                        << " in " << worldLoadMs << " ms";
     } else {
         m_chunkGrid.initializeEmptyWorld();
         const auto worldLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - worldLoadStart
         ).count();
-        std::cerr << "[" << appTimestamp() << "][app] world file missing/invalid at "
-                  << std::filesystem::absolute(worldPath).string()
-                  << "; using empty world (press R to regenerate) in "
-                  << worldLoadMs << " ms\n";
+        VOX_LOGW("app") << "world file missing/invalid at " << std::filesystem::absolute(worldPath).string()
+                        << "; using empty world (press R to regenerate) in " << worldLoadMs << " ms";
     }
     m_simulation.initializeSingleBelt();
     const bool rendererOk = m_renderer.init(m_window, m_chunkGrid);
     if (!rendererOk) {
-        std::cerr << "[" << appTimestamp() << "][app] renderer init failed\n";
+        VOX_LOGE("app") << "renderer init failed";
         return false;
     }
 
-    std::cerr << "[" << appTimestamp() << "][app] init complete\n";
+    VOX_LOGI("app") << "init complete";
     return true;
 }
 
 void App::run() {
-    std::cerr << "[" << appTimestamp() << "][app] run begin\n";
+    VOX_LOGI("app") << "run begin";
     double previousTime = glfwGetTime();
     uint64_t frameCount = 0;
 
@@ -334,9 +301,9 @@ void App::run() {
         ++frameCount;
     }
 
-    std::cerr << "[" << appTimestamp() << "][app] run exit after " << frameCount
-              << " frame(s), windowShouldClose="
-              << (m_window != nullptr ? glfwWindowShouldClose(m_window) : 1) << "\n";
+    VOX_LOGI("app") << "run exit after " << frameCount
+                    << " frame(s), windowShouldClose="
+                    << (m_window != nullptr ? glfwWindowShouldClose(m_window) : 1);
 }
 
 void App::update(float dt) {
@@ -392,11 +359,11 @@ void App::update(float dt) {
 
     if (voxelChunkEdited) {
         if (!m_renderer.updateChunkMesh(m_chunkGrid, editedChunkIndex)) {
-            std::cerr << "[" << appTimestamp() << "][app] chunk mesh update failed after voxel edit\n";
+            VOX_LOGE("app") << "chunk mesh update failed after voxel edit";
         }
         const std::filesystem::path worldPath{kWorldFilePath};
         if (!m_chunkGrid.saveToBinaryFile(worldPath)) {
-            std::cerr << "[" << appTimestamp() << "][app] failed to save world to " << worldPath.string() << " after voxel edit\n";
+            VOX_LOGE("app") << "failed to save world to " << worldPath.string() << " after voxel edit";
         }
     }
 
@@ -574,7 +541,7 @@ void App::update(float dt) {
 }
 
 void App::shutdown() {
-    std::cerr << "[" << appTimestamp() << "][app] shutdown begin\n";
+    VOX_LOGI("app") << "shutdown begin";
     m_renderer.shutdown();
 
     if (m_window != nullptr) {
@@ -583,7 +550,7 @@ void App::shutdown() {
     }
 
     glfwTerminate();
-    std::cerr << "[" << appTimestamp() << "][app] shutdown complete\n";
+    VOX_LOGI("app") << "shutdown complete";
 }
 
 void App::pollInput() {
@@ -635,9 +602,9 @@ void App::pollInput() {
     if (hasGamepad != m_gamepadConnected) {
         m_gamepadConnected = hasGamepad;
         if (m_gamepadConnected) {
-            std::cerr << "[" << appTimestamp() << "][app] gamepad connected: RT place, LT remove, LB/RB hotbar\n";
+            VOX_LOGI("app") << "gamepad connected: RT place, LT remove, LB/RB hotbar";
         } else {
-            std::cerr << "[" << appTimestamp() << "][app] gamepad disconnected\n";
+            VOX_LOGI("app") << "gamepad disconnected";
         }
     }
     if (hasGamepad) {
@@ -715,7 +682,7 @@ void App::updateCamera(float dt) {
     if (m_input.toggleHoverDown && !m_wasToggleHoverDown) {
         m_hoverEnabled = !m_hoverEnabled;
         m_camera.velocityY = 0.0f;
-        std::cerr << "[" << appTimestamp() << "][app] hover " << (m_hoverEnabled ? "enabled" : "disabled") << " (H)\n";
+        VOX_LOGI("app") << "hover " << (m_hoverEnabled ? "enabled" : "disabled") << " (H)";
     }
     m_wasToggleHoverDown = m_input.toggleHoverDown;
 
@@ -1427,7 +1394,7 @@ void App::selectHotbarSlot(int hotbarIndex) {
     } else if (m_selectedHotbarIndex == kHotbarSlotTrack) {
         label = "track";
     }
-    std::cerr << "[" << appTimestamp() << "][app] selected hotbar: " << label << "\n";
+    VOX_LOGI("app") << "selected hotbar: " << label;
 }
 
 bool App::isPipeHotbarSelected() const {
@@ -1808,14 +1775,14 @@ bool App::isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTra
 void App::regenerateWorld() {
     m_chunkGrid.initializeFlatWorld();
     if (!m_renderer.updateChunkMesh(m_chunkGrid)) {
-        std::cerr << "[" << appTimestamp() << "][app] world regenerate failed to update chunk meshes\n";
+        VOX_LOGE("app") << "world regenerate failed to update chunk meshes";
     }
 
     const std::filesystem::path worldPath{kWorldFilePath};
     if (m_chunkGrid.saveToBinaryFile(worldPath)) {
-        std::cerr << "[" << appTimestamp() << "][app] world regenerated and saved to " << worldPath.string() << " (R)\n";
+        VOX_LOGI("app") << "world regenerated and saved to " << worldPath.string() << " (R)";
     } else {
-        std::cerr << "[" << appTimestamp() << "][app] world regenerated, but failed to save " << worldPath.string() << "\n";
+        VOX_LOGW("app") << "world regenerated, but failed to save " << worldPath.string();
     }
 }
 

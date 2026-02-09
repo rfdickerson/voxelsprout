@@ -7,6 +7,7 @@
 #include "math/Math.hpp"
 #include "sim/NetworkGraph.hpp"
 #include "sim/NetworkProcedural.hpp"
+#include "render/FrameArenaAlias.hpp"
 #include "world/Chunk.hpp"
 #include "world/Csg.hpp"
 
@@ -191,12 +192,48 @@ void testCsgCommands() {
     expectTrue(!chunk.isSolid(2, 2, 2), "Chunk copied carved cell");
 }
 
+void testFrameArenaAliasUtilities() {
+    using render::FrameArenaPass;
+    using render::FrameArenaPassRange;
+
+    const FrameArenaPassRange ssao{FrameArenaPass::Ssao, FrameArenaPass::Ssao};
+    const FrameArenaPassRange mainToPost{FrameArenaPass::Main, FrameArenaPass::Post};
+    const FrameArenaPassRange ui{FrameArenaPass::Ui, FrameArenaPass::Ui};
+    const FrameArenaPassRange invalid{FrameArenaPass::Unknown, FrameArenaPass::Post};
+
+    expectTrue(render::isValidFrameArenaPassRange(ssao), "Pass range valid (SSAO)");
+    expectTrue(render::isValidFrameArenaPassRange(mainToPost), "Pass range valid (Main->Post)");
+    expectTrue(!render::isValidFrameArenaPassRange(invalid), "Pass range invalid (Unknown)");
+
+    expectTrue(render::frameArenaPassRangesOverlap(ssao, ssao), "Overlap on identical range");
+    expectTrue(!render::frameArenaPassRangesOverlap(ssao, mainToPost), "No overlap across disjoint ranges");
+    expectTrue(!render::frameArenaPassRangesOverlap(mainToPost, ui), "No overlap (post vs ui)");
+
+    std::vector<FrameArenaPassRange> reservedRanges;
+    render::addAliasPassRange(reservedRanges, ssao);
+    expectTrue(!render::canAliasWithPassRanges(reservedRanges, ssao), "Cannot alias with overlapping range");
+    expectTrue(render::canAliasWithPassRanges(reservedRanges, mainToPost), "Can alias with disjoint range");
+    render::addAliasPassRange(reservedRanges, mainToPost);
+    expectTrue(!render::canAliasWithPassRanges(reservedRanges, mainToPost), "Cannot alias when reserved already");
+    expectTrue(render::canAliasWithPassRanges(reservedRanges, ui), "Can alias with later disjoint range");
+
+    uint32_t refCount = 0;
+    render::acquireAliasBlockRef(refCount);
+    render::acquireAliasBlockRef(refCount);
+    expectTrue(refCount == 2u, "Alias ref count increments");
+    expectTrue(!render::releaseAliasBlockRef(refCount), "Alias release not zero on first release");
+    expectTrue(refCount == 1u, "Alias ref count decrements");
+    expectTrue(render::releaseAliasBlockRef(refCount), "Alias release returns zero when last ref released");
+    expectTrue(refCount == 0u, "Alias ref count reaches zero");
+}
+
 } // namespace
 
 int main() {
     testGridPrimitives();
     testNetworkGraphAndProceduralUtilities();
     testCsgCommands();
+    testFrameArenaAliasUtilities();
 
     if (g_failures != 0) {
         std::cerr << "[foundation test] " << g_failures << " failures\n";

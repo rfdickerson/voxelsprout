@@ -12,7 +12,17 @@
 
 #include <vulkan/vulkan.h>
 #if defined(VOXEL_HAS_VMA)
+#if defined(__has_include)
+#if __has_include(<vk_mem_alloc.h>)
 #include <vk_mem_alloc.h>
+#elif __has_include(<vma/vk_mem_alloc.h>)
+#include <vma/vk_mem_alloc.h>
+#else
+#error "VOXEL_HAS_VMA is set but vk_mem_alloc.h was not found"
+#endif
+#else
+#include <vk_mem_alloc.h>
+#endif
 #endif
 
 struct GLFWwindow;
@@ -161,6 +171,11 @@ private:
     void destroyDiffuseTextureResources();
     void destroyTransferResources();
     void destroyPipeline();
+    void loadDebugUtilsFunctions();
+    void setObjectName(VkObjectType objectType, uint64_t objectHandle, const char* name) const;
+    void beginDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
+    void endDebugLabel(VkCommandBuffer commandBuffer) const;
+    void insertDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
     bool waitForTimelineValue(uint64_t value) const;
     void scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue);
     void collectCompletedBufferReleases();
@@ -204,6 +219,11 @@ private:
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
     // Logical device with a graphics queue (draw+present) and a transfer queue.
     VkDevice m_device = VK_NULL_HANDLE;
+    bool m_debugUtilsEnabled = false;
+    PFN_vkSetDebugUtilsObjectNameEXT m_setDebugUtilsObjectName = nullptr;
+    PFN_vkCmdBeginDebugUtilsLabelEXT m_cmdBeginDebugUtilsLabel = nullptr;
+    PFN_vkCmdEndDebugUtilsLabelEXT m_cmdEndDebugUtilsLabel = nullptr;
+    PFN_vkCmdInsertDebugUtilsLabelEXT m_cmdInsertDebugUtilsLabel = nullptr;
     uint32_t m_graphicsQueueFamilyIndex = 0;
     uint32_t m_graphicsQueueIndex = 0;
     uint32_t m_transferQueueFamilyIndex = 0;
@@ -228,6 +248,9 @@ private:
     std::vector<VkDeviceMemory> m_msaaColorImageMemories;
     std::vector<VkImageView> m_msaaColorImageViews;
     std::vector<bool> m_msaaColorImageInitialized;
+#if defined(VOXEL_HAS_VMA)
+    std::vector<VmaAllocation> m_msaaColorImageAllocations;
+#endif
     std::vector<VkImage> m_hdrResolveImages;
     std::vector<VkDeviceMemory> m_hdrResolveImageMemories;
     std::vector<VkImageView> m_hdrResolveImageViews;
@@ -237,6 +260,9 @@ private:
     std::vector<VkImage> m_depthImages;
     std::vector<VkDeviceMemory> m_depthImageMemories;
     std::vector<VkImageView> m_depthImageViews;
+#if defined(VOXEL_HAS_VMA)
+    std::vector<VmaAllocation> m_depthImageAllocations;
+#endif
     std::vector<VkImage> m_normalDepthImages;
     std::vector<VkDeviceMemory> m_normalDepthImageMemories;
     std::vector<VkImageView> m_normalDepthImageViews;
@@ -266,6 +292,7 @@ private:
 #if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
+    VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;
 #endif
     VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;
     std::vector<uint64_t> m_swapchainImageTimelineValues;
@@ -351,6 +378,19 @@ private:
     std::uint32_t m_debugDrawnLod0Ranges = 0;
     std::uint32_t m_debugDrawnLod1Ranges = 0;
     std::uint32_t m_debugDrawnLod2Ranges = 0;
+    std::uint64_t m_debugFrameArenaUploadBytes = 0;
+    std::uint32_t m_debugFrameArenaUploadAllocs = 0;
+    std::uint64_t m_debugFrameArenaTransientBufferBytes = 0;
+    std::uint32_t m_debugFrameArenaTransientBufferCount = 0;
+    std::uint64_t m_debugFrameArenaTransientImageBytes = 0;
+    std::uint32_t m_debugFrameArenaTransientImageCount = 0;
+    std::uint32_t m_debugFrameArenaAliasReuses = 0;
+    std::uint64_t m_debugFrameArenaResidentBufferBytes = 0;
+    std::uint32_t m_debugFrameArenaResidentBufferCount = 0;
+    std::uint64_t m_debugFrameArenaResidentImageBytes = 0;
+    std::uint32_t m_debugFrameArenaResidentImageCount = 0;
+    std::uint32_t m_debugFrameArenaResidentAliasReuses = 0;
+    std::vector<FrameArenaAliasedImageInfo> m_debugAliasedImages;
     // Dynamic cascade split distances in view-space units.
     // Updated per frame and consumed by shadow rendering + shading.
     std::array<float, kShadowCascadeCount> m_shadowCascadeSplits = {20.0f, 45.0f, 90.0f, 180.0f};

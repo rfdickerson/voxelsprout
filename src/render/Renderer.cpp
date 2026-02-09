@@ -2,6 +2,7 @@
 
 #include <GLFW/glfw3.h>
 #include "core/Grid3.hpp"
+#include "core/Log.hpp"
 #include "math/Math.hpp"
 #include "sim/NetworkProcedural.hpp"
 #include "world/ChunkMesher.hpp"
@@ -24,6 +25,8 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -69,7 +72,7 @@ constexpr math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
 #if defined(VOXEL_HAS_IMGUI)
 void imguiCheckVkResult(VkResult result) {
     if (result != VK_SUCCESS) {
-        std::cerr << "[imgui] Vulkan backend error: " << static_cast<int>(result) << "\n";
+        VOX_LOGE("imgui") << "Vulkan backend error: " << static_cast<int>(result);
     }
 }
 #endif
@@ -1177,8 +1180,17 @@ const char* vkResultName(VkResult result) {
 }
 
 void logVkFailure(const char* context, VkResult result) {
-    std::cerr << "[render] " << context << " failed: "
-              << vkResultName(result) << " (" << static_cast<int>(result) << ")\n";
+    VOX_LOGE("render") << context << " failed: "
+                       << vkResultName(result) << " (" << static_cast<int>(result) << ")";
+}
+
+template <typename VkHandleT>
+uint64_t vkHandleToUint64(VkHandleT handle) {
+    if constexpr (std::is_pointer_v<VkHandleT>) {
+        return reinterpret_cast<uint64_t>(handle);
+    } else {
+        return static_cast<uint64_t>(handle);
+    }
 }
 
 bool isLayerAvailable(const char* layerName) {
@@ -1193,6 +1205,33 @@ bool isLayerAvailable(const char* layerName) {
         }
     }
     return false;
+}
+
+bool isInstanceExtensionAvailable(const char* extensionName) {
+    uint32_t extensionCount = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
+    std::vector<VkExtensionProperties> extensions(extensionCount);
+    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, extensions.data());
+
+    for (const VkExtensionProperties& extension : extensions) {
+        if (std::strcmp(extension.extensionName, extensionName) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void appendInstanceExtensionIfMissing(std::vector<const char*>& extensions, const char* extensionName) {
+    const auto found = std::find_if(
+        extensions.begin(),
+        extensions.end(),
+        [extensionName](const char* existing) {
+            return std::strcmp(existing, extensionName) == 0;
+        }
+    );
+    if (found == extensions.end()) {
+        extensions.push_back(extensionName);
+    }
 }
 
 QueueFamilyChoice findQueueFamily(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface) {
@@ -1385,17 +1424,17 @@ bool createShaderModuleFromFileOrFallback(
     size_t codeSize = fallbackCodeSize;
     if (shaderFileData.has_value()) {
         if ((shaderFileData->size() % sizeof(std::uint32_t)) != 0) {
-            std::cerr << "[render] invalid SPIR-V byte size for " << debugName << "\n";
+            VOX_LOGE("render") << "invalid SPIR-V byte size for " << debugName << "\n";
             return false;
         }
         code = reinterpret_cast<const std::uint32_t*>(shaderFileData->data());
         codeSize = shaderFileData->size();
     } else {
         if (fallbackCode == nullptr || fallbackCodeSize == 0) {
-            std::cerr << "[render] shader file not found and no fallback available for " << debugName << "\n";
+            VOX_LOGI("render") << "shader file not found and no fallback available for " << debugName << "\n";
             return false;
         }
-        std::cerr << "[render] using embedded fallback shader for " << debugName << "\n";
+        VOX_LOGI("render") << "using embedded fallback shader for " << debugName << "\n";
     }
 
     VkShaderModuleCreateInfo createInfo{};
@@ -1421,40 +1460,40 @@ bool Renderer::isDebugUiVisible() const {
 }
 
 bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
-    std::cerr << "[render] init begin\n";
+    VOX_LOGI("render") << "init begin\n";
     m_window = window;
     if (m_window == nullptr) {
-        std::cerr << "[render] init failed: window is null\n";
+        VOX_LOGE("render") << "init failed: window is null\n";
         return false;
     }
 
     if (glfwVulkanSupported() == GLFW_FALSE) {
-        std::cerr << "[render] init failed: glfwVulkanSupported returned false\n";
+        VOX_LOGE("render") << "init failed: glfwVulkanSupported returned false\n";
         return false;
     }
 
     if (!createInstance()) {
-        std::cerr << "[render] init failed at createInstance\n";
+        VOX_LOGE("render") << "init failed at createInstance\n";
         shutdown();
         return false;
     }
     if (!createSurface()) {
-        std::cerr << "[render] init failed at createSurface\n";
+        VOX_LOGE("render") << "init failed at createSurface\n";
         shutdown();
         return false;
     }
     if (!pickPhysicalDevice()) {
-        std::cerr << "[render] init failed at pickPhysicalDevice\n";
+        VOX_LOGE("render") << "init failed at pickPhysicalDevice\n";
         shutdown();
         return false;
     }
     if (!createLogicalDevice()) {
-        std::cerr << "[render] init failed at createLogicalDevice\n";
+        VOX_LOGE("render") << "init failed at createLogicalDevice\n";
         shutdown();
         return false;
     }
     if (!createTimelineSemaphore()) {
-        std::cerr << "[render] init failed at createTimelineSemaphore\n";
+        VOX_LOGE("render") << "init failed at createTimelineSemaphore\n";
         shutdown();
         return false;
     }
@@ -1466,84 +1505,84 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
             m_vmaAllocator
 #endif
         )) {
-        std::cerr << "[render] init failed at buffer allocator init\n";
+        VOX_LOGE("render") << "init failed at buffer allocator init\n";
         shutdown();
         return false;
     }
     if (!createUploadRingBuffer()) {
-        std::cerr << "[render] init failed at createUploadRingBuffer\n";
+        VOX_LOGE("render") << "init failed at createUploadRingBuffer\n";
         shutdown();
         return false;
     }
     if (!createTransferResources()) {
-        std::cerr << "[render] init failed at createTransferResources\n";
+        VOX_LOGE("render") << "init failed at createTransferResources\n";
         shutdown();
         return false;
     }
     if (!createEnvironmentResources()) {
-        std::cerr << "[render] init failed at createEnvironmentResources\n";
+        VOX_LOGE("render") << "init failed at createEnvironmentResources\n";
         shutdown();
         return false;
     }
     if (!createShadowResources()) {
-        std::cerr << "[render] init failed at createShadowResources\n";
+        VOX_LOGE("render") << "init failed at createShadowResources\n";
         shutdown();
         return false;
     }
     if (!createSwapchain()) {
-        std::cerr << "[render] init failed at createSwapchain\n";
+        VOX_LOGE("render") << "init failed at createSwapchain\n";
         shutdown();
         return false;
     }
     if (!createDescriptorResources()) {
-        std::cerr << "[render] init failed at createDescriptorResources\n";
+        VOX_LOGE("render") << "init failed at createDescriptorResources\n";
         shutdown();
         return false;
     }
     if (!createGraphicsPipeline()) {
-        std::cerr << "[render] init failed at createGraphicsPipeline\n";
+        VOX_LOGE("render") << "init failed at createGraphicsPipeline\n";
         shutdown();
         return false;
     }
     if (!createPipePipeline()) {
-        std::cerr << "[render] init failed at createPipePipeline\n";
+        VOX_LOGE("render") << "init failed at createPipePipeline\n";
         shutdown();
         return false;
     }
     if (!createAoPipelines()) {
-        std::cerr << "[render] init failed at createAoPipelines\n";
+        VOX_LOGE("render") << "init failed at createAoPipelines\n";
         shutdown();
         return false;
     }
     if (!createChunkBuffers(chunkGrid, std::nullopt)) {
-        std::cerr << "[render] init failed at createChunkBuffers\n";
+        VOX_LOGE("render") << "init failed at createChunkBuffers\n";
         shutdown();
         return false;
     }
     if (!createPipeBuffers()) {
-        std::cerr << "[render] init failed at createPipeBuffers\n";
+        VOX_LOGE("render") << "init failed at createPipeBuffers\n";
         shutdown();
         return false;
     }
     if (!createPreviewBuffers()) {
-        std::cerr << "[render] init failed at createPreviewBuffers\n";
+        VOX_LOGE("render") << "init failed at createPreviewBuffers\n";
         shutdown();
         return false;
     }
     if (!createFrameResources()) {
-        std::cerr << "[render] init failed at createFrameResources\n";
+        VOX_LOGE("render") << "init failed at createFrameResources\n";
         shutdown();
         return false;
     }
 #if defined(VOXEL_HAS_IMGUI)
     if (!createImGuiResources()) {
-        std::cerr << "[render] init failed at createImGuiResources\n";
+        VOX_LOGE("render") << "init failed at createImGuiResources\n";
         shutdown();
         return false;
     }
 #endif
 
-    std::cerr << "[render] init complete\n";
+    VOX_LOGI("render") << "init complete\n";
     return true;
 }
 
@@ -1567,17 +1606,24 @@ bool Renderer::createInstance() {
 #else
     const bool enableValidationLayers = false;
 #endif
-    std::cerr << "[render] createInstance (validation="
-              << (enableValidationLayers ? "on" : "off") << ")\n";
-
     uint32_t glfwExtensionCount = 0;
     const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
     if (glfwExtensions == nullptr || glfwExtensionCount == 0) {
-        std::cerr << "[render] no GLFW Vulkan instance extensions available\n";
+        VOX_LOGI("render") << "no GLFW Vulkan instance extensions available\n";
         return false;
     }
 
     std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+    m_debugUtilsEnabled = isInstanceExtensionAvailable(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    if (m_debugUtilsEnabled) {
+        appendInstanceExtensionIfMissing(extensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    } else {
+        VOX_LOGI("render") << "instance extension unavailable: " << VK_EXT_DEBUG_UTILS_EXTENSION_NAME << "\n";
+    }
+    VOX_LOGI("render") << "createInstance (validation="
+              << (enableValidationLayers ? "on" : "off")
+              << ", debugUtils=" << (m_debugUtilsEnabled ? "on" : "off")
+              << ")\n";
 
     VkApplicationInfo applicationInfo{};
     applicationInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -1618,10 +1664,10 @@ bool Renderer::pickPhysicalDevice() {
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
     if (deviceCount == 0) {
-        std::cerr << "[render] no Vulkan physical devices found\n";
+        VOX_LOGI("render") << "no Vulkan physical devices found\n";
         return false;
     }
-    std::cerr << "[render] physical devices found: " << deviceCount << "\n";
+    VOX_LOGI("render") << "physical devices found: " << deviceCount << "\n";
 
     std::vector<VkPhysicalDevice> devices(deviceCount);
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, devices.data());
@@ -1629,61 +1675,61 @@ bool Renderer::pickPhysicalDevice() {
     for (VkPhysicalDevice candidate : devices) {
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(candidate, &properties);
-        std::cerr << "[render] evaluating GPU: " << properties.deviceName
+        VOX_LOGI("render") << "evaluating GPU: " << properties.deviceName
                   << ", apiVersion=" << VK_VERSION_MAJOR(properties.apiVersion) << "."
                   << VK_VERSION_MINOR(properties.apiVersion) << "."
                   << VK_VERSION_PATCH(properties.apiVersion) << "\n";
         if (properties.apiVersion < VK_API_VERSION_1_3) {
-            std::cerr << "[render] skip GPU: Vulkan 1.3 required\n";
+            VOX_LOGI("render") << "skip GPU: Vulkan 1.3 required\n";
             continue;
         }
         if ((properties.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) == 0) {
-            std::cerr << "[render] skip GPU: 4x MSAA color attachments not supported\n";
+            VOX_LOGI("render") << "skip GPU: 4x MSAA color attachments not supported\n";
             continue;
         }
         if ((properties.limits.framebufferDepthSampleCounts & VK_SAMPLE_COUNT_4_BIT) == 0) {
-            std::cerr << "[render] skip GPU: 4x MSAA depth attachments not supported\n";
+            VOX_LOGI("render") << "skip GPU: 4x MSAA depth attachments not supported\n";
             continue;
         }
 
         const QueueFamilyChoice queueFamily = findQueueFamily(candidate, m_surface);
         if (!queueFamily.valid()) {
-            std::cerr << "[render] skip GPU: missing graphics/present/transfer queue support\n";
+            VOX_LOGI("render") << "skip GPU: missing graphics/present/transfer queue support\n";
             continue;
         }
         if (!hasRequiredDeviceExtensions(candidate)) {
-            std::cerr << "[render] skip GPU: missing required device extensions\n";
+            VOX_LOGI("render") << "skip GPU: missing required device extensions\n";
             continue;
         }
 
         const SwapchainSupport swapchainSupport = querySwapchainSupport(candidate, m_surface);
         if (swapchainSupport.formats.empty() || swapchainSupport.presentModes.empty()) {
-            std::cerr << "[render] skip GPU: swapchain support incomplete\n";
+            VOX_LOGI("render") << "skip GPU: swapchain support incomplete\n";
             continue;
         }
         const VkFormat depthFormat = findSupportedDepthFormat(candidate);
         if (depthFormat == VK_FORMAT_UNDEFINED) {
-            std::cerr << "[render] skip GPU: no supported depth format\n";
+            VOX_LOGI("render") << "skip GPU: no supported depth format\n";
             continue;
         }
         const VkFormat shadowDepthFormat = findSupportedShadowDepthFormat(candidate);
         if (shadowDepthFormat == VK_FORMAT_UNDEFINED) {
-            std::cerr << "[render] skip GPU: no supported shadow depth format\n";
+            VOX_LOGI("render") << "skip GPU: no supported shadow depth format\n";
             continue;
         }
         const VkFormat hdrColorFormat = findSupportedHdrColorFormat(candidate);
         if (hdrColorFormat == VK_FORMAT_UNDEFINED) {
-            std::cerr << "[render] skip GPU: no supported HDR color format\n";
+            VOX_LOGI("render") << "skip GPU: no supported HDR color format\n";
             continue;
         }
         const VkFormat normalDepthFormat = findSupportedNormalDepthFormat(candidate);
         if (normalDepthFormat == VK_FORMAT_UNDEFINED) {
-            std::cerr << "[render] skip GPU: no supported normal-depth color format\n";
+            VOX_LOGI("render") << "skip GPU: no supported normal-depth color format\n";
             continue;
         }
         const VkFormat ssaoFormat = findSupportedSsaoFormat(candidate);
         if (ssaoFormat == VK_FORMAT_UNDEFINED) {
-            std::cerr << "[render] skip GPU: no supported SSAO format\n";
+            VOX_LOGI("render") << "skip GPU: no supported SSAO format\n";
             continue;
         }
 
@@ -1700,27 +1746,27 @@ bool Renderer::pickPhysicalDevice() {
         features2.pNext = &memoryPriorityFeatures;
         vkGetPhysicalDeviceFeatures2(candidate, &features2);
         if (vulkan13Features.dynamicRendering != VK_TRUE) {
-            std::cerr << "[render] skip GPU: dynamicRendering not supported\n";
+            VOX_LOGI("render") << "skip GPU: dynamicRendering not supported\n";
             continue;
         }
         if (vulkan12Features.timelineSemaphore != VK_TRUE) {
-            std::cerr << "[render] skip GPU: timelineSemaphore not supported\n";
+            VOX_LOGI("render") << "skip GPU: timelineSemaphore not supported\n";
             continue;
         }
         if (vulkan13Features.synchronization2 != VK_TRUE) {
-            std::cerr << "[render] skip GPU: synchronization2 not supported\n";
+            VOX_LOGI("render") << "skip GPU: synchronization2 not supported\n";
             continue;
         }
         if (vulkan13Features.maintenance4 != VK_TRUE) {
-            std::cerr << "[render] skip GPU: maintenance4 not supported\n";
+            VOX_LOGI("render") << "skip GPU: maintenance4 not supported\n";
             continue;
         }
         if (vulkan12Features.bufferDeviceAddress != VK_TRUE) {
-            std::cerr << "[render] skip GPU: bufferDeviceAddress not supported\n";
+            VOX_LOGI("render") << "skip GPU: bufferDeviceAddress not supported\n";
             continue;
         }
         if (memoryPriorityFeatures.memoryPriority != VK_TRUE) {
-            std::cerr << "[render] skip GPU: memoryPriority not supported\n";
+            VOX_LOGI("render") << "skip GPU: memoryPriority not supported\n";
             continue;
         }
 
@@ -1741,7 +1787,7 @@ bool Renderer::pickPhysicalDevice() {
         m_normalDepthFormat = normalDepthFormat;
         m_ssaoFormat = ssaoFormat;
         m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
-        std::cerr << "[render] selected GPU: " << properties.deviceName
+        VOX_LOGI("render") << "selected GPU: " << properties.deviceName
                   << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
                   << ", graphicsQueueIndex=" << m_graphicsQueueIndex
                   << ", transferQueueFamily=" << m_transferQueueFamilyIndex
@@ -1758,7 +1804,7 @@ bool Renderer::pickPhysicalDevice() {
         return true;
     }
 
-    std::cerr << "[render] no suitable GPU found\n";
+    VOX_LOGI("render") << "no suitable GPU found\n";
     return false;
 }
 
@@ -1828,17 +1874,19 @@ bool Renderer::createLogicalDevice() {
         logVkFailure("vkCreateDevice", result);
         return false;
     }
-    std::cerr
-        << "[render] device features enabled: dynamicRendering=1, synchronization2=1, maintenance4=1, "
+    VOX_LOGI("render") << "device features enabled: dynamicRendering=1, synchronization2=1, maintenance4=1, "
         << "timelineSemaphore=1, bufferDeviceAddress=1, memoryPriority=1\n";
-    std::cerr
-        << "[render] device extensions enabled: "
+    VOX_LOGI("render") << "device extensions enabled: "
         << "VK_KHR_swapchain, VK_KHR_maintenance4, VK_KHR_timeline_semaphore, "
         << "VK_KHR_synchronization2, VK_KHR_dynamic_rendering, "
         << "VK_EXT_memory_budget, VK_EXT_memory_priority\n";
 
     vkGetDeviceQueue(m_device, m_graphicsQueueFamilyIndex, m_graphicsQueueIndex, &m_graphicsQueue);
     vkGetDeviceQueue(m_device, m_transferQueueFamilyIndex, m_transferQueueIndex, &m_transferQueue);
+    loadDebugUtilsFunctions();
+    setObjectName(VK_OBJECT_TYPE_DEVICE, vkHandleToUint64(m_device), "renderer.device");
+    setObjectName(VK_OBJECT_TYPE_QUEUE, vkHandleToUint64(m_graphicsQueue), "renderer.queue.graphics");
+    setObjectName(VK_OBJECT_TYPE_QUEUE, vkHandleToUint64(m_transferQueue), "renderer.queue.transfer");
 
     VkPhysicalDeviceProperties deviceProperties{};
     vkGetPhysicalDeviceProperties(m_physicalDevice, &deviceProperties);
@@ -1863,12 +1911,109 @@ bool Renderer::createLogicalDevice() {
             logVkFailure("vmaCreateAllocator", allocatorResult);
             return false;
         }
-        std::cerr
-            << "[render] VMA allocator created: flags="
+        VOX_LOGI("render") << "VMA allocator created: flags="
             << "BUFFER_DEVICE_ADDRESS|EXT_MEMORY_BUDGET|EXT_MEMORY_PRIORITY\n";
     }
 #endif
     return true;
+}
+
+void Renderer::loadDebugUtilsFunctions() {
+    m_setDebugUtilsObjectName = nullptr;
+    m_cmdBeginDebugUtilsLabel = nullptr;
+    m_cmdEndDebugUtilsLabel = nullptr;
+    m_cmdInsertDebugUtilsLabel = nullptr;
+
+    if (!m_debugUtilsEnabled || m_device == VK_NULL_HANDLE) {
+        return;
+    }
+
+    m_setDebugUtilsObjectName = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+        vkGetDeviceProcAddr(m_device, "vkSetDebugUtilsObjectNameEXT")
+    );
+    m_cmdBeginDebugUtilsLabel = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+        vkGetDeviceProcAddr(m_device, "vkCmdBeginDebugUtilsLabelEXT")
+    );
+    m_cmdEndDebugUtilsLabel = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+        vkGetDeviceProcAddr(m_device, "vkCmdEndDebugUtilsLabelEXT")
+    );
+    m_cmdInsertDebugUtilsLabel = reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(
+        vkGetDeviceProcAddr(m_device, "vkCmdInsertDebugUtilsLabelEXT")
+    );
+
+    const bool namesReady = m_setDebugUtilsObjectName != nullptr;
+    const bool labelsReady = m_cmdBeginDebugUtilsLabel != nullptr && m_cmdEndDebugUtilsLabel != nullptr;
+    if (!namesReady && !labelsReady) {
+        VOX_LOGI("render") << "debug utils extension enabled but debug functions were not loaded\n";
+        m_debugUtilsEnabled = false;
+        return;
+    }
+
+    VOX_LOGI("render") << "debug utils loaded: objectNames=" << (namesReady ? "yes" : "no")
+        << ", cmdLabels=" << (labelsReady ? "yes" : "no")
+        << ", cmdInsertLabel=" << (m_cmdInsertDebugUtilsLabel != nullptr ? "yes" : "no")
+        << "\n";
+}
+
+void Renderer::setObjectName(VkObjectType objectType, uint64_t objectHandle, const char* name) const {
+    if (m_setDebugUtilsObjectName == nullptr || m_device == VK_NULL_HANDLE || objectHandle == 0 || name == nullptr) {
+        return;
+    }
+    VkDebugUtilsObjectNameInfoEXT nameInfo{};
+    nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    nameInfo.objectType = objectType;
+    nameInfo.objectHandle = objectHandle;
+    nameInfo.pObjectName = name;
+    m_setDebugUtilsObjectName(m_device, &nameInfo);
+}
+
+void Renderer::beginDebugLabel(
+    VkCommandBuffer commandBuffer,
+    const char* name,
+    float r,
+    float g,
+    float b,
+    float a
+) const {
+    if (m_cmdBeginDebugUtilsLabel == nullptr || commandBuffer == VK_NULL_HANDLE || name == nullptr) {
+        return;
+    }
+    VkDebugUtilsLabelEXT label{};
+    label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+    label.pLabelName = name;
+    label.color[0] = r;
+    label.color[1] = g;
+    label.color[2] = b;
+    label.color[3] = a;
+    m_cmdBeginDebugUtilsLabel(commandBuffer, &label);
+}
+
+void Renderer::endDebugLabel(VkCommandBuffer commandBuffer) const {
+    if (m_cmdEndDebugUtilsLabel == nullptr || commandBuffer == VK_NULL_HANDLE) {
+        return;
+    }
+    m_cmdEndDebugUtilsLabel(commandBuffer);
+}
+
+void Renderer::insertDebugLabel(
+    VkCommandBuffer commandBuffer,
+    const char* name,
+    float r,
+    float g,
+    float b,
+    float a
+) const {
+    if (m_cmdInsertDebugUtilsLabel == nullptr || commandBuffer == VK_NULL_HANDLE || name == nullptr) {
+        return;
+    }
+    VkDebugUtilsLabelEXT label{};
+    label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+    label.pLabelName = name;
+    label.color[0] = r;
+    label.color[1] = g;
+    label.color[2] = b;
+    label.color[3] = a;
+    m_cmdInsertDebugUtilsLabel(commandBuffer, &label);
 }
 
 bool Renderer::createTimelineSemaphore() {
@@ -1890,6 +2035,11 @@ bool Renderer::createTimelineSemaphore() {
         logVkFailure("vkCreateSemaphore(timeline)", result);
         return false;
     }
+    setObjectName(
+        VK_OBJECT_TYPE_SEMAPHORE,
+        vkHandleToUint64(m_renderTimelineSemaphore),
+        "renderer.timeline.render"
+    );
 
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
@@ -1918,7 +2068,19 @@ bool Renderer::createUploadRingBuffer() {
 #endif
     );
     if (!ok) {
-        std::cerr << "[render] frame arena init failed\n";
+        VOX_LOGE("render") << "frame arena init failed\n";
+    } else {
+        const BufferHandle uploadHandle = m_frameArena.uploadBufferHandle();
+        if (uploadHandle != kInvalidBufferHandle) {
+            const VkBuffer uploadBuffer = m_bufferAllocator.getBuffer(uploadHandle);
+            if (uploadBuffer != VK_NULL_HANDLE) {
+                setObjectName(
+                    VK_OBJECT_TYPE_BUFFER,
+                    vkHandleToUint64(uploadBuffer),
+                    "framearena.uploadRing"
+                );
+            }
+        }
     }
     return ok;
 }
@@ -1938,6 +2100,11 @@ bool Renderer::createTransferResources() {
         logVkFailure("vkCreateCommandPool(transfer)", poolResult);
         return false;
     }
+    setObjectName(
+        VK_OBJECT_TYPE_COMMAND_POOL,
+        vkHandleToUint64(m_transferCommandPool),
+        "renderer.transfer.commandPool"
+    );
 
     VkCommandBufferAllocateInfo allocateInfo{};
     allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -1952,6 +2119,11 @@ bool Renderer::createTransferResources() {
         m_transferCommandPool = VK_NULL_HANDLE;
         return false;
     }
+    setObjectName(
+        VK_OBJECT_TYPE_COMMAND_BUFFER,
+        vkHandleToUint64(m_transferCommandBuffer),
+        "renderer.transfer.commandBuffer"
+    );
 
     return true;
 }
@@ -1967,11 +2139,11 @@ bool Renderer::createPipeBuffers() {
     const PipeMeshData pipeMesh = buildPipeCylinderMesh();
     const PipeMeshData transportMesh = buildTransportBoxMesh();
     if (pipeMesh.vertices.empty() || pipeMesh.indices.empty()) {
-        std::cerr << "[render] pipe cylinder mesh build failed\n";
+        VOX_LOGE("render") << "pipe cylinder mesh build failed\n";
         return false;
     }
     if (transportMesh.vertices.empty() || transportMesh.indices.empty()) {
-        std::cerr << "[render] transport box mesh build failed\n";
+        VOX_LOGE("render") << "transport box mesh build failed\n";
         return false;
     }
 
@@ -1986,8 +2158,13 @@ bool Renderer::createPipeBuffers() {
         vertexCreateDesc.initialData = mesh.vertices.data();
         outVertex = m_bufferAllocator.createBuffer(vertexCreateDesc);
         if (outVertex == kInvalidBufferHandle) {
-            std::cerr << "[render] " << label << " vertex buffer allocation failed\n";
+            VOX_LOGE("render") << label << " vertex buffer allocation failed\n";
             return false;
+        }
+        const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(outVertex);
+        if (vertexBuffer != VK_NULL_HANDLE) {
+            const std::string vertexName = std::string("mesh.") + label + ".vertex";
+            setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(vertexBuffer), vertexName.c_str());
         }
 
         BufferCreateDesc indexCreateDesc{};
@@ -1997,10 +2174,15 @@ bool Renderer::createPipeBuffers() {
         indexCreateDesc.initialData = mesh.indices.data();
         outIndex = m_bufferAllocator.createBuffer(indexCreateDesc);
         if (outIndex == kInvalidBufferHandle) {
-            std::cerr << "[render] " << label << " index buffer allocation failed\n";
+            VOX_LOGE("render") << label << " index buffer allocation failed\n";
             m_bufferAllocator.destroyBuffer(outVertex);
             outVertex = kInvalidBufferHandle;
             return false;
+        }
+        const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(outIndex);
+        if (indexBuffer != VK_NULL_HANDLE) {
+            const std::string indexName = std::string("mesh.") + label + ".index";
+            setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), indexName.c_str());
         }
         return true;
     };
@@ -2014,7 +2196,7 @@ bool Renderer::createPipeBuffers() {
             m_transportIndexBufferHandle,
             "transport"
         )) {
-        std::cerr << "[render] transport mesh buffer setup failed\n";
+        VOX_LOGE("render") << "transport mesh buffer setup failed\n";
         return false;
     }
 
@@ -2031,7 +2213,7 @@ bool Renderer::createPreviewBuffers() {
     const world::ChunkMeshData addMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 3, 250);
     const world::ChunkMeshData removeMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 3, 251);
     if (addMesh.vertices.empty() || addMesh.indices.empty() || removeMesh.vertices.empty() || removeMesh.indices.empty()) {
-        std::cerr << "[render] preview mesh build failed\n";
+        VOX_LOGE("render") << "preview mesh build failed\n";
         return false;
     }
 
@@ -2052,8 +2234,14 @@ bool Renderer::createPreviewBuffers() {
     vertexCreateDesc.initialData = mesh.vertices.data();
     m_previewVertexBufferHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
     if (m_previewVertexBufferHandle == kInvalidBufferHandle) {
-        std::cerr << "[render] preview vertex buffer allocation failed\n";
+        VOX_LOGE("render") << "preview vertex buffer allocation failed\n";
         return false;
+    }
+    {
+        const VkBuffer previewVertexBuffer = m_bufferAllocator.getBuffer(m_previewVertexBufferHandle);
+        if (previewVertexBuffer != VK_NULL_HANDLE) {
+            setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(previewVertexBuffer), "preview.voxel.vertex");
+        }
     }
 
     BufferCreateDesc indexCreateDesc{};
@@ -2063,10 +2251,16 @@ bool Renderer::createPreviewBuffers() {
     indexCreateDesc.initialData = mesh.indices.data();
     m_previewIndexBufferHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
     if (m_previewIndexBufferHandle == kInvalidBufferHandle) {
-        std::cerr << "[render] preview index buffer allocation failed\n";
+        VOX_LOGE("render") << "preview index buffer allocation failed\n";
         m_bufferAllocator.destroyBuffer(m_previewVertexBufferHandle);
         m_previewVertexBufferHandle = kInvalidBufferHandle;
         return false;
+    }
+    {
+        const VkBuffer previewIndexBuffer = m_bufferAllocator.getBuffer(m_previewIndexBufferHandle);
+        if (previewIndexBuffer != VK_NULL_HANDLE) {
+            setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(previewIndexBuffer), "preview.voxel.index");
+        }
     }
 
     m_previewIndexCount = static_cast<uint32_t>(mesh.indices.size());
@@ -2075,17 +2269,23 @@ bool Renderer::createPreviewBuffers() {
 
 bool Renderer::createEnvironmentResources() {
     if (!createDiffuseTextureResources()) {
-        std::cerr << "[render] diffuse texture creation failed\n";
+        VOX_LOGE("render") << "diffuse texture creation failed\n";
         return false;
     }
-    std::cerr << "[render] environment uses procedural sky + SH irradiance + diffuse albedo texture\n";
+    VOX_LOGI("render") << "environment uses procedural sky + SH irradiance + diffuse albedo texture\n";
     return true;
 }
 
 bool Renderer::createDiffuseTextureResources() {
+    bool hasDiffuseAllocation = (m_diffuseTextureMemory != VK_NULL_HANDLE);
+#if defined(VOXEL_HAS_VMA)
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        hasDiffuseAllocation = (m_diffuseTextureAllocation != VK_NULL_HANDLE);
+    }
+#endif
     if (
         m_diffuseTextureImage != VK_NULL_HANDLE &&
-        m_diffuseTextureMemory != VK_NULL_HANDLE &&
+        hasDiffuseAllocation &&
         m_diffuseTextureImageView != VK_NULL_HANDLE &&
         m_diffuseTextureSampler != VK_NULL_HANDLE
     ) {
@@ -2124,6 +2324,7 @@ bool Renderer::createDiffuseTextureResources() {
         logVkFailure("vkCreateBuffer(diffuseStaging)", result);
         return false;
     }
+    setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(stagingBuffer), "diffuse.staging.buffer");
 
     VkMemoryRequirements stagingMemReq{};
     vkGetBufferMemoryRequirements(m_device, stagingBuffer, &stagingMemReq);
@@ -2133,7 +2334,7 @@ bool Renderer::createDiffuseTextureResources() {
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
     );
     if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-        std::cerr << "[render] no staging memory type for diffuse texture\n";
+        VOX_LOGI("render") << "no staging memory type for diffuse texture\n";
         vkDestroyBuffer(m_device, stagingBuffer, nullptr);
         return false;
     }
@@ -2179,47 +2380,77 @@ bool Renderer::createDiffuseTextureResources() {
     imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    result = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_diffuseTextureImage);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkCreateImage(diffuseTexture)", result);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
+    m_diffuseTextureMemory = VK_NULL_HANDLE;
+#if defined(VOXEL_HAS_VMA)
+    m_diffuseTextureAllocation = VK_NULL_HANDLE;
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        VmaAllocationCreateInfo allocationCreateInfo{};
+        allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        result = vmaCreateImage(
+            m_vmaAllocator,
+            &imageCreateInfo,
+            &allocationCreateInfo,
+            &m_diffuseTextureImage,
+            &m_diffuseTextureAllocation,
+            nullptr
+        );
+        if (result != VK_SUCCESS) {
+            logVkFailure("vmaCreateImage(diffuseTexture)", result);
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+    } else
+#endif
+    {
+        result = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_diffuseTextureImage);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(diffuseTexture)", result);
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
 
-    VkMemoryRequirements imageMemReq{};
-    vkGetImageMemoryRequirements(m_device, m_diffuseTextureImage, &imageMemReq);
-    memoryTypeIndex = findMemoryTypeIndex(m_physicalDevice, imageMemReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-        std::cerr << "[render] no device-local memory for diffuse texture\n";
-        vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
-        m_diffuseTextureImage = VK_NULL_HANDLE;
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
+        VkMemoryRequirements imageMemReq{};
+        vkGetImageMemoryRequirements(m_device, m_diffuseTextureImage, &imageMemReq);
+        memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice,
+            imageMemReq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        );
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            VOX_LOGI("render") << "no device-local memory for diffuse texture\n";
+            vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
+            m_diffuseTextureImage = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
 
-    VkMemoryAllocateInfo imageAllocInfo{};
-    imageAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    imageAllocInfo.allocationSize = imageMemReq.size;
-    imageAllocInfo.memoryTypeIndex = memoryTypeIndex;
-    result = vkAllocateMemory(m_device, &imageAllocInfo, nullptr, &m_diffuseTextureMemory);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkAllocateMemory(diffuseTexture)", result);
-        vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
-        m_diffuseTextureImage = VK_NULL_HANDLE;
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
+        VkMemoryAllocateInfo imageAllocInfo{};
+        imageAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        imageAllocInfo.allocationSize = imageMemReq.size;
+        imageAllocInfo.memoryTypeIndex = memoryTypeIndex;
+        result = vkAllocateMemory(m_device, &imageAllocInfo, nullptr, &m_diffuseTextureMemory);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(diffuseTexture)", result);
+            vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
+            m_diffuseTextureImage = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+        result = vkBindImageMemory(m_device, m_diffuseTextureImage, m_diffuseTextureMemory, 0);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(diffuseTexture)", result);
+            destroyDiffuseTextureResources();
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
     }
-    result = vkBindImageMemory(m_device, m_diffuseTextureImage, m_diffuseTextureMemory, 0);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkBindImageMemory(diffuseTexture)", result);
-        destroyDiffuseTextureResources();
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
+    setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_diffuseTextureImage), "diffuse.albedo.image");
 
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandPoolCreateInfo poolCreateInfo{};
@@ -2234,6 +2465,7 @@ bool Renderer::createDiffuseTextureResources() {
         vkDestroyBuffer(m_device, stagingBuffer, nullptr);
         return false;
     }
+    setObjectName(VK_OBJECT_TYPE_COMMAND_POOL, vkHandleToUint64(commandPool), "diffuse.upload.commandPool");
 
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     VkCommandBufferAllocateInfo cmdAllocInfo{};
@@ -2250,6 +2482,7 @@ bool Renderer::createDiffuseTextureResources() {
         vkDestroyBuffer(m_device, stagingBuffer, nullptr);
         return false;
     }
+    setObjectName(VK_OBJECT_TYPE_COMMAND_BUFFER, vkHandleToUint64(commandBuffer), "diffuse.upload.commandBuffer");
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2360,6 +2593,11 @@ bool Renderer::createDiffuseTextureResources() {
         destroyDiffuseTextureResources();
         return false;
     }
+    setObjectName(
+        VK_OBJECT_TYPE_IMAGE_VIEW,
+        vkHandleToUint64(m_diffuseTextureImageView),
+        "diffuse.albedo.imageView"
+    );
 
     VkSamplerCreateInfo samplerCreateInfo{};
     samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -2385,6 +2623,11 @@ bool Renderer::createDiffuseTextureResources() {
         destroyDiffuseTextureResources();
         return false;
     }
+    setObjectName(
+        VK_OBJECT_TYPE_SAMPLER,
+        vkHandleToUint64(m_diffuseTextureSampler),
+        "diffuse.albedo.sampler"
+    );
 
     return true;
 }
@@ -2399,7 +2642,7 @@ bool Renderer::createShadowResources() {
     }
 
     if (m_shadowDepthFormat == VK_FORMAT_UNDEFINED) {
-        std::cerr << "[render] shadow depth format is undefined\n";
+        VOX_LOGE("render") << "shadow depth format is undefined\n";
         return false;
     }
 
@@ -2434,7 +2677,8 @@ bool Renderer::createShadowResources() {
             logVkFailure("vmaCreateImage(shadowDepth)", imageResult);
             return false;
         }
-        std::cerr << "[render] alloc shadow depth atlas (VMA): "
+        setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_shadowDepthImage), "shadow.atlas.image");
+        VOX_LOGI("render") << "alloc shadow depth atlas (VMA): "
                   << kShadowAtlasSize << "x" << kShadowAtlasSize
                   << ", format=" << static_cast<int>(m_shadowDepthFormat)
                   << ", cascades=" << kShadowCascadeCount << "\n";
@@ -2446,6 +2690,7 @@ bool Renderer::createShadowResources() {
             logVkFailure("vkCreateImage(shadowDepth)", imageResult);
             return false;
         }
+        setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_shadowDepthImage), "shadow.atlas.image");
 
         VkMemoryRequirements memoryRequirements{};
         vkGetImageMemoryRequirements(m_device, m_shadowDepthImage, &memoryRequirements);
@@ -2455,7 +2700,7 @@ bool Renderer::createShadowResources() {
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
         );
         if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-            std::cerr << "[render] no memory type for shadow depth image\n";
+            VOX_LOGI("render") << "no memory type for shadow depth image\n";
             destroyShadowResources();
             return false;
         }
@@ -2477,7 +2722,7 @@ bool Renderer::createShadowResources() {
             destroyShadowResources();
             return false;
         }
-        std::cerr << "[render] alloc shadow depth atlas (vk): "
+        VOX_LOGI("render") << "alloc shadow depth atlas (vk): "
                   << kShadowAtlasSize << "x" << kShadowAtlasSize
                   << ", format=" << static_cast<int>(m_shadowDepthFormat)
                   << ", cascades=" << kShadowCascadeCount << "\n";
@@ -2499,6 +2744,11 @@ bool Renderer::createShadowResources() {
         destroyShadowResources();
         return false;
     }
+    setObjectName(
+        VK_OBJECT_TYPE_IMAGE_VIEW,
+        vkHandleToUint64(m_shadowDepthImageView),
+        "shadow.atlas.imageView"
+    );
 
     VkSamplerCreateInfo samplerCreateInfo{};
     samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -2522,9 +2772,14 @@ bool Renderer::createShadowResources() {
         destroyShadowResources();
         return false;
     }
+    setObjectName(
+        VK_OBJECT_TYPE_SAMPLER,
+        vkHandleToUint64(m_shadowDepthSampler),
+        "shadow.atlas.sampler"
+    );
 
     m_shadowDepthInitialized = false;
-    std::cerr << "[render] shadow resources ready (atlas " << kShadowAtlasSize << "x" << kShadowAtlasSize
+    VOX_LOGI("render") << "shadow resources ready (atlas " << kShadowAtlasSize << "x" << kShadowAtlasSize
               << ", cascades=" << kShadowCascadeCount << ")\n";
     return true;
 }
@@ -2532,7 +2787,7 @@ bool Renderer::createShadowResources() {
 bool Renderer::createSwapchain() {
     const SwapchainSupport support = querySwapchainSupport(m_physicalDevice, m_surface);
     if (support.formats.empty() || support.presentModes.empty()) {
-        std::cerr << "[render] swapchain support query returned no formats or present modes\n";
+        VOX_LOGI("render") << "swapchain support query returned no formats or present modes\n";
         return false;
     }
 
@@ -2565,10 +2820,15 @@ bool Renderer::createSwapchain() {
         logVkFailure("vkCreateSwapchainKHR", swapchainResult);
         return false;
     }
+    setObjectName(VK_OBJECT_TYPE_SWAPCHAIN_KHR, vkHandleToUint64(m_swapchain), "swapchain.main");
 
     vkGetSwapchainImagesKHR(m_device, m_swapchain, &imageCount, nullptr);
     m_swapchainImages.resize(imageCount);
     vkGetSwapchainImagesKHR(m_device, m_swapchain, &imageCount, m_swapchainImages.data());
+    for (uint32_t i = 0; i < imageCount; ++i) {
+        const std::string imageName = "swapchain.image." + std::to_string(i);
+        setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_swapchainImages[i]), imageName.c_str());
+    }
 
     m_swapchainFormat = surfaceFormat.format;
     m_swapchainExtent = extent;
@@ -2587,29 +2847,31 @@ bool Renderer::createSwapchain() {
         viewCreateInfo.subresourceRange.layerCount = 1;
 
         if (vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_swapchainImageViews[i]) != VK_SUCCESS) {
-            std::cerr << "[render] failed to create swapchain image view " << i << "\n";
+            VOX_LOGE("render") << "failed to create swapchain image view " << i << "\n";
             return false;
         }
+        const std::string viewName = "swapchain.imageView." + std::to_string(i);
+        setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_swapchainImageViews[i]), viewName.c_str());
     }
 
-    std::cerr << "[render] swapchain ready: images=" << imageCount
+    VOX_LOGI("render") << "swapchain ready: images=" << imageCount
               << ", extent=" << m_swapchainExtent.width << "x" << m_swapchainExtent.height << "\n";
     m_swapchainImageInitialized.assign(imageCount, false);
     m_swapchainImageTimelineValues.assign(imageCount, 0);
     if (!createHdrResolveTargets()) {
-        std::cerr << "[render] HDR resolve target creation failed\n";
+        VOX_LOGE("render") << "HDR resolve target creation failed\n";
         return false;
     }
     if (!createMsaaColorTargets()) {
-        std::cerr << "[render] MSAA color target creation failed\n";
+        VOX_LOGE("render") << "MSAA color target creation failed\n";
         return false;
     }
     if (!createDepthTargets()) {
-        std::cerr << "[render] depth target creation failed\n";
+        VOX_LOGE("render") << "depth target creation failed\n";
         return false;
     }
     if (!createAoTargets()) {
-        std::cerr << "[render] AO target creation failed\n";
+        VOX_LOGE("render") << "AO target creation failed\n";
         return false;
     }
     m_renderFinishedSemaphores.resize(imageCount, VK_NULL_HANDLE);
@@ -2622,6 +2884,8 @@ bool Renderer::createSwapchain() {
             logVkFailure("vkCreateSemaphore(renderFinishedPerImage)", semaphoreResult);
             return false;
         }
+        const std::string semaphoreName = "swapchain.renderFinished." + std::to_string(i);
+        setObjectName(VK_OBJECT_TYPE_SEMAPHORE, vkHandleToUint64(m_renderFinishedSemaphores[i]), semaphoreName.c_str());
     }
 
     return true;
@@ -2629,7 +2893,7 @@ bool Renderer::createSwapchain() {
 
 bool Renderer::createDepthTargets() {
     if (m_depthFormat == VK_FORMAT_UNDEFINED) {
-        std::cerr << "[render] depth format is undefined\n";
+        VOX_LOGE("render") << "depth format is undefined\n";
         return false;
     }
 
@@ -2637,6 +2901,9 @@ bool Renderer::createDepthTargets() {
     m_depthImages.assign(imageCount, VK_NULL_HANDLE);
     m_depthImageMemories.assign(imageCount, VK_NULL_HANDLE);
     m_depthImageViews.assign(imageCount, VK_NULL_HANDLE);
+#if defined(VOXEL_HAS_VMA)
+    m_depthImageAllocations.assign(imageCount, VK_NULL_HANDLE);
+#endif
 
     for (uint32_t i = 0; i < imageCount; ++i) {
         VkImageCreateInfo imageCreateInfo{};
@@ -2654,40 +2921,66 @@ bool Renderer::createDepthTargets() {
         imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_depthImages[i]);
-        if (imageResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImage(depth)", imageResult);
-            return false;
+        VkResult imageResult = VK_ERROR_INITIALIZATION_FAILED;
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE) {
+            VmaAllocationCreateInfo allocationCreateInfo{};
+            allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            imageResult = vmaCreateImage(
+                m_vmaAllocator,
+                &imageCreateInfo,
+                &allocationCreateInfo,
+                &m_depthImages[i],
+                &m_depthImageAllocations[i],
+                nullptr
+            );
+            if (imageResult != VK_SUCCESS) {
+                logVkFailure("vmaCreateImage(depth)", imageResult);
+                return false;
+            }
+        } else
+#endif
+        {
+            imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_depthImages[i]);
+            if (imageResult != VK_SUCCESS) {
+                logVkFailure("vkCreateImage(depth)", imageResult);
+                return false;
+            }
+
+            VkMemoryRequirements memoryRequirements{};
+            vkGetImageMemoryRequirements(m_device, m_depthImages[i], &memoryRequirements);
+
+            const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+                m_physicalDevice,
+                memoryRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+            if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+                VOX_LOGI("render") << "no memory type for depth image\n";
+                return false;
+            }
+
+            VkMemoryAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocateInfo.allocationSize = memoryRequirements.size;
+            allocateInfo.memoryTypeIndex = memoryTypeIndex;
+
+            const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_depthImageMemories[i]);
+            if (allocResult != VK_SUCCESS) {
+                logVkFailure("vkAllocateMemory(depth)", allocResult);
+                return false;
+            }
+
+            const VkResult bindResult = vkBindImageMemory(m_device, m_depthImages[i], m_depthImageMemories[i], 0);
+            if (bindResult != VK_SUCCESS) {
+                logVkFailure("vkBindImageMemory(depth)", bindResult);
+                return false;
+            }
         }
-
-        VkMemoryRequirements memoryRequirements{};
-        vkGetImageMemoryRequirements(m_device, m_depthImages[i], &memoryRequirements);
-
-        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
-            m_physicalDevice,
-            memoryRequirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-        );
-        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-            std::cerr << "[render] no memory type for depth image\n";
-            return false;
-        }
-
-        VkMemoryAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = memoryRequirements.size;
-        allocateInfo.memoryTypeIndex = memoryTypeIndex;
-
-        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_depthImageMemories[i]);
-        if (allocResult != VK_SUCCESS) {
-            logVkFailure("vkAllocateMemory(depth)", allocResult);
-            return false;
-        }
-
-        const VkResult bindResult = vkBindImageMemory(m_device, m_depthImages[i], m_depthImageMemories[i], 0);
-        if (bindResult != VK_SUCCESS) {
-            logVkFailure("vkBindImageMemory(depth)", bindResult);
-            return false;
+        {
+            const std::string imageName = "depth.msaa.image." + std::to_string(i);
+            setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_depthImages[i]), imageName.c_str());
         }
 
         VkImageViewCreateInfo viewCreateInfo{};
@@ -2706,6 +2999,10 @@ bool Renderer::createDepthTargets() {
             logVkFailure("vkCreateImageView(depth)", viewResult);
             return false;
         }
+        {
+            const std::string viewName = "depth.msaa.imageView." + std::to_string(i);
+            setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_depthImageViews[i]), viewName.c_str());
+        }
     }
 
     return true;
@@ -2713,11 +3010,11 @@ bool Renderer::createDepthTargets() {
 
 bool Renderer::createAoTargets() {
     if (m_normalDepthFormat == VK_FORMAT_UNDEFINED || m_ssaoFormat == VK_FORMAT_UNDEFINED) {
-        std::cerr << "[render] AO formats are undefined\n";
+        VOX_LOGE("render") << "AO formats are undefined\n";
         return false;
     }
     if (m_depthFormat == VK_FORMAT_UNDEFINED) {
-        std::cerr << "[render] depth format is undefined for AO targets\n";
+        VOX_LOGE("render") << "depth format is undefined for AO targets\n";
         return false;
     }
 
@@ -2753,23 +3050,29 @@ bool Renderer::createAoTargets() {
             imageDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             imageDesc.firstPass = firstPass;
             imageDesc.lastPass = lastPass;
+            imageDesc.debugName = std::string(debugLabel) + "[" + std::to_string(i) + "]";
             const TransientImageHandle handle = m_frameArena.createTransientImage(
                 imageDesc,
                 FrameArenaImageLifetime::Persistent
             );
             if (handle == kInvalidTransientImageHandle) {
-                std::cerr << "[render] failed creating transient image " << debugLabel << "\n";
+                VOX_LOGE("render") << "failed creating transient image " << debugLabel << "\n";
                 return false;
             }
             const TransientImageInfo* imageInfo = m_frameArena.getTransientImage(handle);
             if (imageInfo == nullptr || imageInfo->image == VK_NULL_HANDLE || imageInfo->view == VK_NULL_HANDLE) {
-                std::cerr << "[render] invalid transient image " << debugLabel << "\n";
+                VOX_LOGE("render") << "invalid transient image " << debugLabel << "\n";
                 return false;
             }
             outHandles[i] = handle;
             outImages[i] = imageInfo->image;
             outViews[i] = imageInfo->view;
             outMemories[i] = VK_NULL_HANDLE;
+            setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(outImages[i]), imageDesc.debugName.c_str());
+            {
+                const std::string viewName = std::string(debugLabel) + ".view[" + std::to_string(i) + "]";
+                setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(outViews[i]), viewName.c_str());
+            }
         }
         return true;
     };
@@ -2785,7 +3088,7 @@ bool Renderer::createAoTargets() {
             m_normalDepthImageMemories,
             m_normalDepthImageViews,
             m_normalDepthTransientHandles,
-            "vkCreateImage(normalDepth)",
+            "ao.normalDepth",
             FrameArenaPass::Ssao,
             FrameArenaPass::Ssao
         )) {
@@ -2811,23 +3114,29 @@ bool Renderer::createAoTargets() {
         depthDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         depthDesc.firstPass = FrameArenaPass::Ssao;
         depthDesc.lastPass = FrameArenaPass::Ssao;
+        depthDesc.debugName = "ao.depth[" + std::to_string(i) + "]";
         const TransientImageHandle depthHandle = m_frameArena.createTransientImage(
             depthDesc,
             FrameArenaImageLifetime::Persistent
         );
         if (depthHandle == kInvalidTransientImageHandle) {
-            std::cerr << "[render] failed creating AO depth transient image\n";
+            VOX_LOGE("render") << "failed creating AO depth transient image\n";
             return false;
         }
         const TransientImageInfo* depthInfo = m_frameArena.getTransientImage(depthHandle);
         if (depthInfo == nullptr || depthInfo->image == VK_NULL_HANDLE || depthInfo->view == VK_NULL_HANDLE) {
-            std::cerr << "[render] invalid AO depth transient image info\n";
+            VOX_LOGE("render") << "invalid AO depth transient image info\n";
             return false;
         }
         m_aoDepthTransientHandles[i] = depthHandle;
         m_aoDepthImages[i] = depthInfo->image;
         m_aoDepthImageViews[i] = depthInfo->view;
         m_aoDepthImageMemories[i] = VK_NULL_HANDLE;
+        setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_aoDepthImages[i]), depthDesc.debugName.c_str());
+        {
+            const std::string viewName = "ao.depth.view[" + std::to_string(i) + "]";
+            setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_aoDepthImageViews[i]), viewName.c_str());
+        }
     }
 
     if (!createColorTargets(
@@ -2836,7 +3145,7 @@ bool Renderer::createAoTargets() {
             m_ssaoRawImageMemories,
             m_ssaoRawImageViews,
             m_ssaoRawTransientHandles,
-            "vkCreateImage(ssaoRaw)",
+            "ao.ssaoRaw",
             FrameArenaPass::Ssao,
             FrameArenaPass::Ssao
         )) {
@@ -2848,7 +3157,7 @@ bool Renderer::createAoTargets() {
             m_ssaoBlurImageMemories,
             m_ssaoBlurImageViews,
             m_ssaoBlurTransientHandles,
-            "vkCreateImage(ssaoBlur)",
+            "ao.ssaoBlur",
             FrameArenaPass::Ssao,
             FrameArenaPass::Main
         )) {
@@ -2876,6 +3185,11 @@ bool Renderer::createAoTargets() {
             logVkFailure("vkCreateSampler(normalDepth)", samplerResult);
             return false;
         }
+        setObjectName(
+            VK_OBJECT_TYPE_SAMPLER,
+            vkHandleToUint64(m_normalDepthSampler),
+            "normalDepth.sampler"
+        );
     }
 
     if (m_ssaoSampler == VK_NULL_HANDLE) {
@@ -2899,6 +3213,11 @@ bool Renderer::createAoTargets() {
             logVkFailure("vkCreateSampler(ssao)", samplerResult);
             return false;
         }
+        setObjectName(
+            VK_OBJECT_TYPE_SAMPLER,
+            vkHandleToUint64(m_ssaoSampler),
+            "ssao.sampler"
+        );
     }
 
     return true;
@@ -2907,7 +3226,7 @@ bool Renderer::createAoTargets() {
 
 bool Renderer::createHdrResolveTargets() {
     if (m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
-        std::cerr << "[render] HDR color format is undefined\n";
+        VOX_LOGE("render") << "HDR color format is undefined\n";
         return false;
     }
 
@@ -2933,23 +3252,33 @@ bool Renderer::createHdrResolveTargets() {
         hdrResolveDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         hdrResolveDesc.firstPass = FrameArenaPass::Main;
         hdrResolveDesc.lastPass = FrameArenaPass::Post;
+        hdrResolveDesc.debugName = "hdr.resolve[" + std::to_string(i) + "]";
         const TransientImageHandle hdrResolveHandle = m_frameArena.createTransientImage(
             hdrResolveDesc,
             FrameArenaImageLifetime::Persistent
         );
         if (hdrResolveHandle == kInvalidTransientImageHandle) {
-            std::cerr << "[render] failed creating HDR resolve transient image\n";
+            VOX_LOGE("render") << "failed creating HDR resolve transient image\n";
             return false;
         }
         const TransientImageInfo* hdrResolveInfo = m_frameArena.getTransientImage(hdrResolveHandle);
         if (hdrResolveInfo == nullptr || hdrResolveInfo->image == VK_NULL_HANDLE || hdrResolveInfo->view == VK_NULL_HANDLE) {
-            std::cerr << "[render] invalid HDR resolve transient image info\n";
+            VOX_LOGE("render") << "invalid HDR resolve transient image info\n";
             return false;
         }
         m_hdrResolveTransientHandles[i] = hdrResolveHandle;
         m_hdrResolveImages[i] = hdrResolveInfo->image;
         m_hdrResolveImageViews[i] = hdrResolveInfo->view;
         m_hdrResolveImageMemories[i] = VK_NULL_HANDLE;
+        setObjectName(
+            VK_OBJECT_TYPE_IMAGE,
+            vkHandleToUint64(m_hdrResolveImages[i]),
+            hdrResolveDesc.debugName.c_str()
+        );
+        {
+            const std::string viewName = "hdr.resolve.view[" + std::to_string(i) + "]";
+            setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_hdrResolveImageViews[i]), viewName.c_str());
+        }
     }
 
     if (m_hdrResolveSampler == VK_NULL_HANDLE) {
@@ -2974,6 +3303,11 @@ bool Renderer::createHdrResolveTargets() {
             logVkFailure("vkCreateSampler(hdrResolve)", samplerResult);
             return false;
         }
+        setObjectName(
+            VK_OBJECT_TYPE_SAMPLER,
+            vkHandleToUint64(m_hdrResolveSampler),
+            "hdrResolve.sampler"
+        );
     }
 
     return true;
@@ -2985,6 +3319,9 @@ bool Renderer::createMsaaColorTargets() {
     m_msaaColorImageMemories.assign(imageCount, VK_NULL_HANDLE);
     m_msaaColorImageViews.assign(imageCount, VK_NULL_HANDLE);
     m_msaaColorImageInitialized.assign(imageCount, false);
+#if defined(VOXEL_HAS_VMA)
+    m_msaaColorImageAllocations.assign(imageCount, VK_NULL_HANDLE);
+#endif
 
     for (uint32_t i = 0; i < imageCount; ++i) {
         VkImageCreateInfo imageCreateInfo{};
@@ -3002,40 +3339,66 @@ bool Renderer::createMsaaColorTargets() {
         imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_msaaColorImages[i]);
-        if (imageResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImage(msaaColor)", imageResult);
-            return false;
+        VkResult imageResult = VK_ERROR_INITIALIZATION_FAILED;
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE) {
+            VmaAllocationCreateInfo allocationCreateInfo{};
+            allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            imageResult = vmaCreateImage(
+                m_vmaAllocator,
+                &imageCreateInfo,
+                &allocationCreateInfo,
+                &m_msaaColorImages[i],
+                &m_msaaColorImageAllocations[i],
+                nullptr
+            );
+            if (imageResult != VK_SUCCESS) {
+                logVkFailure("vmaCreateImage(msaaColor)", imageResult);
+                return false;
+            }
+        } else
+#endif
+        {
+            imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_msaaColorImages[i]);
+            if (imageResult != VK_SUCCESS) {
+                logVkFailure("vkCreateImage(msaaColor)", imageResult);
+                return false;
+            }
+
+            VkMemoryRequirements memoryRequirements{};
+            vkGetImageMemoryRequirements(m_device, m_msaaColorImages[i], &memoryRequirements);
+
+            const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+                m_physicalDevice,
+                memoryRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+            if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+                VOX_LOGI("render") << "no memory type for MSAA color image\n";
+                return false;
+            }
+
+            VkMemoryAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocateInfo.allocationSize = memoryRequirements.size;
+            allocateInfo.memoryTypeIndex = memoryTypeIndex;
+
+            const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_msaaColorImageMemories[i]);
+            if (allocResult != VK_SUCCESS) {
+                logVkFailure("vkAllocateMemory(msaaColor)", allocResult);
+                return false;
+            }
+
+            const VkResult bindResult = vkBindImageMemory(m_device, m_msaaColorImages[i], m_msaaColorImageMemories[i], 0);
+            if (bindResult != VK_SUCCESS) {
+                logVkFailure("vkBindImageMemory(msaaColor)", bindResult);
+                return false;
+            }
         }
-
-        VkMemoryRequirements memoryRequirements{};
-        vkGetImageMemoryRequirements(m_device, m_msaaColorImages[i], &memoryRequirements);
-
-        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
-            m_physicalDevice,
-            memoryRequirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-        );
-        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-            std::cerr << "[render] no memory type for MSAA color image\n";
-            return false;
-        }
-
-        VkMemoryAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = memoryRequirements.size;
-        allocateInfo.memoryTypeIndex = memoryTypeIndex;
-
-        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_msaaColorImageMemories[i]);
-        if (allocResult != VK_SUCCESS) {
-            logVkFailure("vkAllocateMemory(msaaColor)", allocResult);
-            return false;
-        }
-
-        const VkResult bindResult = vkBindImageMemory(m_device, m_msaaColorImages[i], m_msaaColorImageMemories[i], 0);
-        if (bindResult != VK_SUCCESS) {
-            logVkFailure("vkBindImageMemory(msaaColor)", bindResult);
-            return false;
+        {
+            const std::string imageName = "hdr.msaaColor.image." + std::to_string(i);
+            setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_msaaColorImages[i]), imageName.c_str());
         }
 
         VkImageViewCreateInfo viewCreateInfo{};
@@ -3053,6 +3416,10 @@ bool Renderer::createMsaaColorTargets() {
         if (viewResult != VK_SUCCESS) {
             logVkFailure("vkCreateImageView(msaaColor)", viewResult);
             return false;
+        }
+        {
+            const std::string viewName = "hdr.msaaColor.imageView." + std::to_string(i);
+            setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_msaaColorImageViews[i]), viewName.c_str());
         }
     }
 
@@ -3124,6 +3491,11 @@ bool Renderer::createDescriptorResources() {
             logVkFailure("vkCreateDescriptorSetLayout", layoutResult);
             return false;
         }
+        setObjectName(
+            VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+            vkHandleToUint64(m_descriptorSetLayout),
+            "renderer.descriptorSetLayout.main"
+        );
     }
 
     if (m_descriptorPool == VK_NULL_HANDLE) {
@@ -3149,6 +3521,11 @@ bool Renderer::createDescriptorResources() {
             logVkFailure("vkCreateDescriptorPool", poolResult);
             return false;
         }
+        setObjectName(
+            VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+            vkHandleToUint64(m_descriptorPool),
+            "renderer.descriptorPool.main"
+        );
     }
 
     std::array<VkDescriptorSetLayout, kMaxFramesInFlight> setLayouts{};
@@ -3165,21 +3542,25 @@ bool Renderer::createDescriptorResources() {
         logVkFailure("vkAllocateDescriptorSets", allocateResult);
         return false;
     }
+    for (size_t i = 0; i < m_descriptorSets.size(); ++i) {
+        const std::string setName = "renderer.descriptorSet.frame" + std::to_string(i);
+        setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET, vkHandleToUint64(m_descriptorSets[i]), setName.c_str());
+    }
 
     return true;
 }
 
 bool Renderer::createGraphicsPipeline() {
     if (m_depthFormat == VK_FORMAT_UNDEFINED) {
-        std::cerr << "[render] cannot create pipeline: depth format undefined\n";
+        VOX_LOGE("render") << "cannot create pipeline: depth format undefined\n";
         return false;
     }
     if (m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
-        std::cerr << "[render] cannot create pipeline: HDR color format undefined\n";
+        VOX_LOGE("render") << "cannot create pipeline: HDR color format undefined\n";
         return false;
     }
     if (m_shadowDepthFormat == VK_FORMAT_UNDEFINED) {
-        std::cerr << "[render] cannot create pipeline: shadow depth format undefined\n";
+        VOX_LOGE("render") << "cannot create pipeline: shadow depth format undefined\n";
         return false;
     }
 
@@ -3200,6 +3581,11 @@ bool Renderer::createGraphicsPipeline() {
             logVkFailure("vkCreatePipelineLayout", layoutResult);
             return false;
         }
+        setObjectName(
+            VK_OBJECT_TYPE_PIPELINE_LAYOUT,
+            vkHandleToUint64(m_pipelineLayout),
+            "renderer.pipelineLayout.main"
+        );
     }
 
     constexpr std::array<const char*, 4> kWorldVertexShaderPathCandidates = {
@@ -3993,7 +4379,14 @@ bool Renderer::createGraphicsPipeline() {
     m_tonemapPipeline = toneMapPipeline;
     m_previewAddPipeline = previewAddPipeline;
     m_previewRemovePipeline = previewRemovePipeline;
-    std::cerr << "[render] graphics pipelines ready (shadow + hdr scene + tonemap + preview="
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeline), "pipeline.world");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyboxPipeline), "pipeline.skybox");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_shadowPipeline), "pipeline.shadow.voxels");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeShadowPipeline), "pipeline.shadow.pipes");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_tonemapPipeline), "pipeline.tonemap");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewAddPipeline), "pipeline.preview.add");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewRemovePipeline), "pipeline.preview.remove");
+    VOX_LOGI("render") << "graphics pipelines ready (shadow + hdr scene + tonemap + preview="
               << (m_supportsWireframePreview ? "wireframe" : "ghost")
               << ")\n";
     return true;
@@ -4195,6 +4588,7 @@ bool Renderer::createPipePipeline() {
         vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
     }
     m_pipePipeline = pipePipeline;
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipePipeline), "pipeline.pipe.lit");
     return true;
 }
 
@@ -4675,6 +5069,18 @@ bool Renderer::createAoPipelines() {
     m_pipeNormalDepthPipeline = pipeNormalDepthPipeline;
     m_ssaoPipeline = ssaoPipeline;
     m_ssaoBlurPipeline = ssaoBlurPipeline;
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_voxelNormalDepthPipeline),
+        "pipeline.prepass.voxelNormalDepth"
+    );
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_pipeNormalDepthPipeline),
+        "pipeline.prepass.pipeNormalDepth"
+    );
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_ssaoPipeline), "pipeline.ssao");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_ssaoBlurPipeline), "pipeline.ssaoBlur");
     return true;
 }
 
@@ -4780,9 +5186,17 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
                 }
                 pending.newDrawRange.vertexBufferHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
                 if (pending.newDrawRange.vertexBufferHandle == kInvalidBufferHandle) {
-                    std::cerr << "[render] chunk vertex buffer allocation failed\n";
+                    VOX_LOGE("render") << "chunk vertex buffer allocation failed\n";
                     cleanupPendingAllocations();
                     return false;
+                }
+                {
+                    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(pending.newDrawRange.vertexBufferHandle);
+                    if (vertexBuffer != VK_NULL_HANDLE) {
+                        const std::string name =
+                            "chunk[" + std::to_string(chunkArrayIndex) + "].lod" + std::to_string(lodIndex) + ".vertex";
+                        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(vertexBuffer), name.c_str());
+                    }
                 }
 
                 BufferCreateDesc indexCreateDesc{};
@@ -4795,9 +5209,17 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
                 }
                 pending.newDrawRange.indexBufferHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
                 if (pending.newDrawRange.indexBufferHandle == kInvalidBufferHandle) {
-                    std::cerr << "[render] chunk index buffer allocation failed\n";
+                    VOX_LOGE("render") << "chunk index buffer allocation failed\n";
                     cleanupPendingAllocations();
                     return false;
+                }
+                {
+                    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(pending.newDrawRange.indexBufferHandle);
+                    if (indexBuffer != VK_NULL_HANDLE) {
+                        const std::string name =
+                            "chunk[" + std::to_string(chunkArrayIndex) + "].lod" + std::to_string(lodIndex) + ".index";
+                        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), name.c_str());
+                    }
                 }
 
                 BufferCreateDesc vertexStagingCreateDesc{};
@@ -4808,9 +5230,17 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
                 vertexStagingCreateDesc.initialData = chunkMesh.vertices.data();
                 pending.vertexStagingHandle = m_bufferAllocator.createBuffer(vertexStagingCreateDesc);
                 if (pending.vertexStagingHandle == kInvalidBufferHandle) {
-                    std::cerr << "[render] chunk vertex staging buffer allocation failed\n";
+                    VOX_LOGE("render") << "chunk vertex staging buffer allocation failed\n";
                     cleanupPendingAllocations();
                     return false;
+                }
+                {
+                    const VkBuffer stagingBuffer = m_bufferAllocator.getBuffer(pending.vertexStagingHandle);
+                    if (stagingBuffer != VK_NULL_HANDLE) {
+                        const std::string name =
+                            "chunk[" + std::to_string(chunkArrayIndex) + "].lod" + std::to_string(lodIndex) + ".vertex.staging";
+                        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(stagingBuffer), name.c_str());
+                    }
                 }
 
                 BufferCreateDesc indexStagingCreateDesc{};
@@ -4821,9 +5251,17 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
                 indexStagingCreateDesc.initialData = chunkMesh.indices.data();
                 pending.indexStagingHandle = m_bufferAllocator.createBuffer(indexStagingCreateDesc);
                 if (pending.indexStagingHandle == kInvalidBufferHandle) {
-                    std::cerr << "[render] chunk index staging buffer allocation failed\n";
+                    VOX_LOGE("render") << "chunk index staging buffer allocation failed\n";
                     cleanupPendingAllocations();
                     return false;
+                }
+                {
+                    const VkBuffer stagingBuffer = m_bufferAllocator.getBuffer(pending.indexStagingHandle);
+                    if (stagingBuffer != VK_NULL_HANDLE) {
+                        const std::string name =
+                            "chunk[" + std::to_string(chunkArrayIndex) + "].lod" + std::to_string(lodIndex) + ".index.staging";
+                        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(stagingBuffer), name.c_str());
+                    }
                 }
 
                 pending.hasCopy = true;
@@ -4838,7 +5276,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
     collectCompletedBufferReleases();
 
     if (m_transferCommandBufferInFlightValue > 0 && !waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
-        std::cerr << "[render] failed waiting for prior transfer upload\n";
+        VOX_LOGE("render") << "failed waiting for prior transfer upload\n";
         cleanupPendingAllocations();
         return false;
     }
@@ -4867,7 +5305,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (vkBeginCommandBuffer(m_transferCommandBuffer, &beginInfo) != VK_SUCCESS) {
-            std::cerr << "[render] vkBeginCommandBuffer (transfer) failed\n";
+            VOX_LOGE("render") << "vkBeginCommandBuffer (transfer) failed\n";
             cleanupPendingAllocations();
             return false;
         }
@@ -4902,7 +5340,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
         }
 
         if (vkEndCommandBuffer(m_transferCommandBuffer) != VK_SUCCESS) {
-            std::cerr << "[render] vkEndCommandBuffer (transfer) failed\n";
+            VOX_LOGE("render") << "vkEndCommandBuffer (transfer) failed\n";
             cleanupPendingAllocations();
             return false;
         }
@@ -4947,40 +5385,47 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
         scheduleBufferRelease(pending.oldDrawRange.indexBufferHandle, oldChunkReleaseValue);
     }
 
-    std::cerr << "[render] chunk upload queued (ranges=" << pendingUploads.size()
-              << ", vertices=" << uploadedVertexCount
-              << ", indices=" << uploadedIndexCount;
-    if (hasChunkCopies) {
-        std::cerr << ", timelineValue=" << transferSignalValue;
-    } else {
-        std::cerr << ", immediate=true";
-    }
-    std::cerr << ")\n";
+    VOX_LOGD("render") << "chunk upload queued (ranges=" << pendingUploads.size()
+                       << ", vertices=" << uploadedVertexCount
+                       << ", indices=" << uploadedIndexCount
+                       << (hasChunkCopies
+                               ? (", timelineValue=" + std::to_string(transferSignalValue))
+                               : ", immediate=true")
+                       << ")";
     return true;
 }
 
 bool Renderer::createFrameResources() {
-    for (FrameResources& frame : m_frames) {
+    for (size_t frameIndex = 0; frameIndex < m_frames.size(); ++frameIndex) {
+        FrameResources& frame = m_frames[frameIndex];
         VkCommandPoolCreateInfo poolCreateInfo{};
         poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
         poolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
 
         if (vkCreateCommandPool(m_device, &poolCreateInfo, nullptr, &frame.commandPool) != VK_SUCCESS) {
-            std::cerr << "[render] failed creating command pool for frame resource\n";
+            VOX_LOGE("render") << "failed creating command pool for frame resource\n";
             return false;
+        }
+        {
+            const std::string poolName = "frame." + std::to_string(frameIndex) + ".graphics.commandPool";
+            setObjectName(VK_OBJECT_TYPE_COMMAND_POOL, vkHandleToUint64(frame.commandPool), poolName.c_str());
         }
 
         VkSemaphoreCreateInfo semaphoreCreateInfo{};
         semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
         if (vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &frame.imageAvailable) != VK_SUCCESS) {
-            std::cerr << "[render] failed creating imageAvailable semaphore\n";
+            VOX_LOGE("render") << "failed creating imageAvailable semaphore\n";
             return false;
+        }
+        {
+            const std::string semaphoreName = "frame." + std::to_string(frameIndex) + ".imageAvailable";
+            setObjectName(VK_OBJECT_TYPE_SEMAPHORE, vkHandleToUint64(frame.imageAvailable), semaphoreName.c_str());
         }
     }
 
-    std::cerr << "[render] frame resources ready (" << kMaxFramesInFlight << " frames in flight)\n";
+    VOX_LOGI("render") << "frame resources ready (" << kMaxFramesInFlight << " frames in flight)\n";
     return true;
 }
 
@@ -4997,7 +5442,7 @@ bool Renderer::createImGuiResources() {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     if (!ImGui_ImplGlfw_InitForVulkan(m_window, true)) {
-        std::cerr << "[imgui] ImGui_ImplGlfw_InitForVulkan failed\n";
+        VOX_LOGE("imgui") << "ImGui_ImplGlfw_InitForVulkan failed\n";
         ImGui::DestroyContext();
         return false;
     }
@@ -5029,6 +5474,11 @@ bool Renderer::createImGuiResources() {
         ImGui::DestroyContext();
         return false;
     }
+    setObjectName(
+        VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+        vkHandleToUint64(m_imguiDescriptorPool),
+        "imgui.descriptorPool"
+    );
 
     ImGui_ImplVulkan_InitInfo initInfo{};
     initInfo.ApiVersion = VK_API_VERSION_1_3;
@@ -5048,7 +5498,7 @@ bool Renderer::createImGuiResources() {
     initInfo.PipelineRenderingCreateInfo.depthAttachmentFormat = VK_FORMAT_UNDEFINED;
     initInfo.CheckVkResultFn = imguiCheckVkResult;
     if (!ImGui_ImplVulkan_Init(&initInfo)) {
-        std::cerr << "[imgui] ImGui_ImplVulkan_Init failed\n";
+        VOX_LOGE("imgui") << "ImGui_ImplVulkan_Init failed\n";
         vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
         m_imguiDescriptorPool = VK_NULL_HANDLE;
         ImGui_ImplGlfw_Shutdown();
@@ -5057,7 +5507,7 @@ bool Renderer::createImGuiResources() {
     }
 
     if (!ImGui_ImplVulkan_CreateFontsTexture()) {
-        std::cerr << "[imgui] ImGui_ImplVulkan_CreateFontsTexture failed\n";
+        VOX_LOGE("imgui") << "ImGui_ImplVulkan_CreateFontsTexture failed\n";
         ImGui_ImplVulkan_Shutdown();
         vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
         m_imguiDescriptorPool = VK_NULL_HANDLE;
@@ -5075,6 +5525,7 @@ void Renderer::destroyImGuiResources() {
         return;
     }
 
+    VOX_LOGI("imgui") << "destroy begin\n";
     ImGui_ImplVulkan_DestroyFontsTexture();
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
@@ -5085,6 +5536,7 @@ void Renderer::destroyImGuiResources() {
         m_imguiDescriptorPool = VK_NULL_HANDLE;
     }
     m_imguiInitialized = false;
+    VOX_LOGI("imgui") << "destroy complete\n";
 }
 
 void Renderer::buildFrameStatsUi() {
@@ -5103,6 +5555,98 @@ void Renderer::buildFrameStatsUi() {
     ImGui::Text("Frame: %.2f ms", m_debugFrameTimeMs);
     ImGui::Text("FPS: %.1f", m_debugFps);
     ImGui::Text("Chunks: %u", m_debugChunkCount);
+    const bool hasFrameArenaMetrics =
+        m_debugFrameArenaUploadBytes > 0 ||
+        m_debugFrameArenaUploadAllocs > 0 ||
+        m_debugFrameArenaTransientBufferBytes > 0 ||
+        m_debugFrameArenaTransientBufferCount > 0 ||
+        m_debugFrameArenaTransientImageBytes > 0 ||
+        m_debugFrameArenaTransientImageCount > 0 ||
+        m_debugFrameArenaAliasReuses > 0 ||
+        m_debugFrameArenaResidentBufferBytes > 0 ||
+        m_debugFrameArenaResidentBufferCount > 0 ||
+        m_debugFrameArenaResidentImageBytes > 0 ||
+        m_debugFrameArenaResidentImageCount > 0 ||
+        m_debugFrameArenaResidentAliasReuses > 0 ||
+        !m_debugAliasedImages.empty();
+    if (hasFrameArenaMetrics) {
+        ImGui::Separator();
+        ImGui::Text("FrameArena");
+        if (m_debugFrameArenaUploadBytes > 0 || m_debugFrameArenaUploadAllocs > 0) {
+            ImGui::Text(
+                "Upload this frame: %llu B (%u allocs)",
+                static_cast<unsigned long long>(m_debugFrameArenaUploadBytes),
+                m_debugFrameArenaUploadAllocs
+            );
+        }
+        if (m_debugFrameArenaTransientBufferBytes > 0 || m_debugFrameArenaTransientBufferCount > 0) {
+            ImGui::Text(
+                "Transient buffers this frame: %llu B (%u)",
+                static_cast<unsigned long long>(m_debugFrameArenaTransientBufferBytes),
+                m_debugFrameArenaTransientBufferCount
+            );
+        }
+        if (m_debugFrameArenaTransientImageBytes > 0 || m_debugFrameArenaTransientImageCount > 0) {
+            ImGui::Text(
+                "Transient images this frame: %llu B (%u)",
+                static_cast<unsigned long long>(m_debugFrameArenaTransientImageBytes),
+                m_debugFrameArenaTransientImageCount
+            );
+        }
+        if (m_debugFrameArenaAliasReuses > 0) {
+            ImGui::Text("Image alias reuses this frame: %u", m_debugFrameArenaAliasReuses);
+        }
+        if (m_debugFrameArenaResidentAliasReuses > 0) {
+            ImGui::Text("Image alias reuses (live): %u", m_debugFrameArenaResidentAliasReuses);
+        }
+        if (m_debugFrameArenaResidentBufferBytes > 0 || m_debugFrameArenaResidentBufferCount > 0) {
+            ImGui::Text(
+                "Resident buffers (live): %llu B (%u)",
+                static_cast<unsigned long long>(m_debugFrameArenaResidentBufferBytes),
+                m_debugFrameArenaResidentBufferCount
+            );
+        }
+        if (m_debugFrameArenaResidentImageBytes > 0 || m_debugFrameArenaResidentImageCount > 0) {
+            ImGui::Text(
+                "Resident images (live): %llu B (%u)",
+                static_cast<unsigned long long>(m_debugFrameArenaResidentImageBytes),
+                m_debugFrameArenaResidentImageCount
+            );
+        }
+        if (!m_debugAliasedImages.empty() && ImGui::TreeNode("Aliased Images (live)")) {
+            constexpr ImGuiTableFlags kAliasTableFlags =
+                ImGuiTableFlags_Borders |
+                ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_SizingStretchProp;
+            if (ImGui::BeginTable("FrameArenaAliasedImages", 5, kAliasTableFlags)) {
+                ImGui::TableSetupColumn("Name");
+                ImGui::TableSetupColumn("Pass Range");
+                ImGui::TableSetupColumn("Block");
+                ImGui::TableSetupColumn("Refs");
+                ImGui::TableSetupColumn("Handle");
+                ImGui::TableHeadersRow();
+                for (const FrameArenaAliasedImageInfo& imageInfo : m_debugAliasedImages) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(imageInfo.debugName.empty() ? "(unnamed)" : imageInfo.debugName.c_str());
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text(
+                        "%s -> %s",
+                        frameArenaPassName(imageInfo.firstPass),
+                        frameArenaPassName(imageInfo.lastPass)
+                    );
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%u", imageInfo.aliasBlock);
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%u", imageInfo.aliasBlockRefCount);
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::Text("%u", imageInfo.handle);
+                }
+                ImGui::EndTable();
+            }
+            ImGui::TreePop();
+        }
+    }
     ImGui::Separator();
     ImGui::Checkbox("Show Shadow Debug", &m_debugUiVisible);
     ImGui::End();
@@ -5341,7 +5885,7 @@ void Renderer::renderFrame(
     );
 
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
-        std::cerr << "[render] swapchain out of date during acquire, recreating\n";
+        VOX_LOGI("render") << "swapchain out of date during acquire, recreating\n";
         recreateSwapchain();
         return;
     }
@@ -5366,16 +5910,21 @@ void Renderer::renderFrame(
 
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     if (vkAllocateCommandBuffers(m_device, &allocateInfo, &commandBuffer) != VK_SUCCESS) {
-        std::cerr << "[render] vkAllocateCommandBuffers failed\n";
+        VOX_LOGE("render") << "vkAllocateCommandBuffers failed\n";
         return;
+    }
+    {
+        const std::string commandBufferName = "frame." + std::to_string(m_currentFrame) + ".graphics.commandBuffer";
+        setObjectName(VK_OBJECT_TYPE_COMMAND_BUFFER, vkHandleToUint64(commandBuffer), commandBufferName.c_str());
     }
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-        std::cerr << "[render] vkBeginCommandBuffer failed\n";
+        VOX_LOGE("render") << "vkBeginCommandBuffer failed\n";
         return;
     }
+    beginDebugLabel(commandBuffer, "Frame", 0.22f, 0.22f, 0.26f, 1.0f);
 #if defined(VOXEL_HAS_IMGUI)
     if (m_imguiInitialized) {
         ImGui_ImplVulkan_NewFrame();
@@ -5531,7 +6080,7 @@ void Renderer::renderFrame(
             FrameArenaUploadKind::CameraUniform
         );
     if (!mvpSliceOpt.has_value() || mvpSliceOpt->mapped == nullptr) {
-        std::cerr << "[render] failed to allocate MVP uniform slice\n";
+        VOX_LOGE("render") << "failed to allocate MVP uniform slice\n";
         return;
     }
 
@@ -5623,7 +6172,7 @@ void Renderer::renderFrame(
     bufferInfo.offset = 0;
     bufferInfo.range = sizeof(CameraUniform);
     if (mvpSliceOpt->offset > static_cast<VkDeviceSize>(std::numeric_limits<uint32_t>::max())) {
-        std::cerr << "[render] dynamic UBO offset exceeds uint32 range\n";
+        VOX_LOGI("render") << "dynamic UBO offset exceeds uint32 range\n";
         return;
     }
     const uint32_t mvpDynamicOffset = static_cast<uint32_t>(mvpSliceOpt->offset);
@@ -5829,6 +6378,7 @@ void Renderer::renderFrame(
         }
     }
 
+    beginDebugLabel(commandBuffer, "Pass: Shadow Atlas", 0.28f, 0.22f, 0.22f, 1.0f);
     const bool shadowInitialized = m_shadowDepthInitialized;
     transitionImageLayout(
         commandBuffer,
@@ -5862,6 +6412,10 @@ void Renderer::renderFrame(
         );
 
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            if (m_cmdInsertDebugUtilsLabel != nullptr) {
+                const std::string cascadeLabel = "Shadow Cascade " + std::to_string(cascadeIndex);
+                insertDebugLabel(commandBuffer, cascadeLabel.c_str(), 0.48f, 0.32f, 0.32f, 1.0f);
+            }
             const ShadowAtlasRect atlasRect = kShadowAtlasRects[cascadeIndex];
             VkViewport shadowViewport{};
             shadowViewport.x = static_cast<float>(atlasRect.x);
@@ -6039,6 +6593,7 @@ void Renderer::renderFrame(
         0,
         1
     );
+    endDebugLabel(commandBuffer);
 
     const VkExtent2D aoExtent = {
         std::max(1u, m_aoExtent.width),
@@ -6146,6 +6701,7 @@ void Renderer::renderFrame(
     normalDepthRenderingInfo.pColorAttachments = &normalDepthColorAttachment;
     normalDepthRenderingInfo.pDepthAttachment = &aoDepthAttachment;
 
+    beginDebugLabel(commandBuffer, "Pass: Normal+Depth Prepass", 0.20f, 0.30f, 0.40f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &normalDepthRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &aoScissor);
@@ -6261,6 +6817,7 @@ void Renderer::renderFrame(
         );
     }
     vkCmdEndRendering(commandBuffer);
+    endDebugLabel(commandBuffer);
 
     transitionImageLayout(
         commandBuffer,
@@ -6296,6 +6853,7 @@ void Renderer::renderFrame(
     ssaoRenderingInfo.colorAttachmentCount = 1;
     ssaoRenderingInfo.pColorAttachments = &ssaoRawAttachment;
 
+    beginDebugLabel(commandBuffer, "Pass: SSAO", 0.20f, 0.36f, 0.26f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &ssaoRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &aoScissor);
@@ -6314,6 +6872,7 @@ void Renderer::renderFrame(
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
     vkCmdEndRendering(commandBuffer);
+    endDebugLabel(commandBuffer);
 
     transitionImageLayout(
         commandBuffer,
@@ -6343,6 +6902,7 @@ void Renderer::renderFrame(
     ssaoBlurRenderingInfo.colorAttachmentCount = 1;
     ssaoBlurRenderingInfo.pColorAttachments = &ssaoBlurAttachment;
 
+    beginDebugLabel(commandBuffer, "Pass: SSAO Blur", 0.22f, 0.40f, 0.30f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &ssaoBlurRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &aoScissor);
@@ -6361,6 +6921,7 @@ void Renderer::renderFrame(
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
     vkCmdEndRendering(commandBuffer);
+    endDebugLabel(commandBuffer);
 
     transitionImageLayout(
         commandBuffer,
@@ -6466,6 +7027,7 @@ void Renderer::renderFrame(
     renderingInfo.pColorAttachments = &colorAttachment;
     renderingInfo.pDepthAttachment = &depthAttachment;
 
+    beginDebugLabel(commandBuffer, "Pass: Main Scene", 0.20f, 0.20f, 0.45f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &renderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
@@ -6767,6 +7329,7 @@ void Renderer::renderFrame(
     }
 
     vkCmdEndRendering(commandBuffer);
+    endDebugLabel(commandBuffer);
 
     transitionImageLayout(
         commandBuffer,
@@ -6807,6 +7370,7 @@ void Renderer::renderFrame(
     toneMapRenderingInfo.colorAttachmentCount = 1;
     toneMapRenderingInfo.pColorAttachments = &toneMapColorAttachment;
 
+    beginDebugLabel(commandBuffer, "Pass: Tonemap + UI", 0.24f, 0.24f, 0.24f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &toneMapRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
@@ -6832,6 +7396,7 @@ void Renderer::renderFrame(
 #endif
 
     vkCmdEndRendering(commandBuffer);
+    endDebugLabel(commandBuffer);
 
     transitionImageLayout(
         commandBuffer,
@@ -6845,8 +7410,9 @@ void Renderer::renderFrame(
         VK_IMAGE_ASPECT_COLOR_BIT
     );
 
+    endDebugLabel(commandBuffer);
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
-        std::cerr << "[render] vkEndCommandBuffer failed\n";
+        VOX_LOGE("render") << "vkEndCommandBuffer failed\n";
         return;
     }
 
@@ -6895,7 +7461,7 @@ void Renderer::renderFrame(
     submitInfo.pSignalSemaphores = signalSemaphores.data();
 
     if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
-        std::cerr << "[render] vkQueueSubmit failed\n";
+        VOX_LOGE("render") << "vkQueueSubmit failed\n";
         return;
     }
     m_frameTimelineValues[m_currentFrame] = signalTimelineValue;
@@ -6921,17 +7487,33 @@ void Renderer::renderFrame(
         presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
         presentResult == VK_SUBOPTIMAL_KHR
     ) {
-        std::cerr << "[render] swapchain needs recreate after present\n";
+        VOX_LOGI("render") << "swapchain needs recreate after present\n";
         recreateSwapchain();
     } else if (presentResult != VK_SUCCESS) {
         logVkFailure("vkQueuePresentKHR", presentResult);
     }
 
+    const FrameArenaStats& frameArenaStats = m_frameArena.activeStats();
+    m_debugFrameArenaUploadBytes = static_cast<std::uint64_t>(frameArenaStats.uploadBytesAllocated);
+    m_debugFrameArenaUploadAllocs = frameArenaStats.uploadAllocationCount;
+    m_debugFrameArenaTransientBufferBytes = static_cast<std::uint64_t>(frameArenaStats.transientBufferBytes);
+    m_debugFrameArenaTransientBufferCount = frameArenaStats.transientBufferCount;
+    m_debugFrameArenaTransientImageBytes = frameArenaStats.transientImageBytes;
+    m_debugFrameArenaTransientImageCount = frameArenaStats.transientImageCount;
+    m_debugFrameArenaAliasReuses = frameArenaStats.transientImageAliasReuses;
+    const FrameArenaResidentStats& frameArenaResidentStats = m_frameArena.residentStats();
+    m_debugFrameArenaResidentBufferBytes = frameArenaResidentStats.bufferBytes;
+    m_debugFrameArenaResidentBufferCount = frameArenaResidentStats.bufferCount;
+    m_debugFrameArenaResidentImageBytes = frameArenaResidentStats.imageBytes;
+    m_debugFrameArenaResidentImageCount = frameArenaResidentStats.imageCount;
+    m_debugFrameArenaResidentAliasReuses = frameArenaResidentStats.imageAliasReuses;
+    m_frameArena.collectAliasedImageDebugInfo(m_debugAliasedImages);
+
     m_currentFrame = (m_currentFrame + 1) % kMaxFramesInFlight;
 }
 
 bool Renderer::recreateSwapchain() {
-    std::cerr << "[render] recreateSwapchain begin\n";
+    VOX_LOGI("render") << "recreateSwapchain begin\n";
     int width = 0;
     int height = 0;
     glfwGetFramebufferSize(m_window, &width, &height);
@@ -6950,19 +7532,19 @@ bool Renderer::recreateSwapchain() {
     destroySwapchain();
 
     if (!createSwapchain()) {
-        std::cerr << "[render] recreateSwapchain failed: createSwapchain\n";
+        VOX_LOGE("render") << "recreateSwapchain failed: createSwapchain\n";
         return false;
     }
     if (!createGraphicsPipeline()) {
-        std::cerr << "[render] recreateSwapchain failed: createGraphicsPipeline\n";
+        VOX_LOGE("render") << "recreateSwapchain failed: createGraphicsPipeline\n";
         return false;
     }
     if (!createPipePipeline()) {
-        std::cerr << "[render] recreateSwapchain failed: createPipePipeline\n";
+        VOX_LOGE("render") << "recreateSwapchain failed: createPipePipeline\n";
         return false;
     }
     if (!createAoPipelines()) {
-        std::cerr << "[render] recreateSwapchain failed: createAoPipelines\n";
+        VOX_LOGE("render") << "recreateSwapchain failed: createAoPipelines\n";
         return false;
     }
 #if defined(VOXEL_HAS_IMGUI)
@@ -6970,7 +7552,7 @@ bool Renderer::recreateSwapchain() {
         ImGui_ImplVulkan_SetMinImageCount(std::max<uint32_t>(2u, static_cast<uint32_t>(m_swapchainImages.size())));
     }
 #endif
-    std::cerr << "[render] recreateSwapchain complete\n";
+    VOX_LOGI("render") << "recreateSwapchain complete\n";
     return true;
 }
 
@@ -6980,14 +7562,14 @@ void Renderer::destroyHdrResolveTargets() {
         m_hdrResolveSampler = VK_NULL_HANDLE;
     }
 
-    m_hdrResolveImageViews.clear();
-    m_hdrResolveImages.clear();
-    m_hdrResolveImageMemories.clear();
     for (TransientImageHandle handle : m_hdrResolveTransientHandles) {
         if (handle != kInvalidTransientImageHandle) {
             m_frameArena.destroyTransientImage(handle);
         }
     }
+    m_hdrResolveImageViews.clear();
+    m_hdrResolveImages.clear();
+    m_hdrResolveImageMemories.clear();
     m_hdrResolveTransientHandles.clear();
     m_hdrResolveImageInitialized.clear();
 }
@@ -7000,10 +7582,23 @@ void Renderer::destroyMsaaColorTargets() {
     }
     m_msaaColorImageViews.clear();
 
-    for (VkImage image : m_msaaColorImages) {
-        if (image != VK_NULL_HANDLE) {
+    for (size_t i = 0; i < m_msaaColorImages.size(); ++i) {
+        const VkImage image = m_msaaColorImages[i];
+        if (image == VK_NULL_HANDLE) {
+            continue;
+        }
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE &&
+            i < m_msaaColorImageAllocations.size() &&
+            m_msaaColorImageAllocations[i] != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, image, m_msaaColorImageAllocations[i]);
+            m_msaaColorImageAllocations[i] = VK_NULL_HANDLE;
+        } else {
             vkDestroyImage(m_device, image, nullptr);
         }
+#else
+        vkDestroyImage(m_device, image, nullptr);
+#endif
     }
     m_msaaColorImages.clear();
 
@@ -7013,6 +7608,9 @@ void Renderer::destroyMsaaColorTargets() {
         }
     }
     m_msaaColorImageMemories.clear();
+#if defined(VOXEL_HAS_VMA)
+    m_msaaColorImageAllocations.clear();
+#endif
     m_msaaColorImageInitialized.clear();
 }
 
@@ -7024,10 +7622,23 @@ void Renderer::destroyDepthTargets() {
     }
     m_depthImageViews.clear();
 
-    for (VkImage image : m_depthImages) {
-        if (image != VK_NULL_HANDLE) {
+    for (size_t i = 0; i < m_depthImages.size(); ++i) {
+        const VkImage image = m_depthImages[i];
+        if (image == VK_NULL_HANDLE) {
+            continue;
+        }
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE &&
+            i < m_depthImageAllocations.size() &&
+            m_depthImageAllocations[i] != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, image, m_depthImageAllocations[i]);
+            m_depthImageAllocations[i] = VK_NULL_HANDLE;
+        } else {
             vkDestroyImage(m_device, image, nullptr);
         }
+#else
+        vkDestroyImage(m_device, image, nullptr);
+#endif
     }
     m_depthImages.clear();
 
@@ -7037,6 +7648,9 @@ void Renderer::destroyDepthTargets() {
         }
     }
     m_depthImageMemories.clear();
+#if defined(VOXEL_HAS_VMA)
+    m_depthImageAllocations.clear();
+#endif
 }
 
 void Renderer::destroyAoTargets() {
@@ -7049,56 +7663,47 @@ void Renderer::destroyAoTargets() {
         m_normalDepthSampler = VK_NULL_HANDLE;
     }
 
-    m_ssaoBlurImageViews.clear();
-    m_ssaoBlurImages.clear();
-    m_ssaoBlurImageMemories.clear();
     for (TransientImageHandle handle : m_ssaoBlurTransientHandles) {
         if (handle != kInvalidTransientImageHandle) {
             m_frameArena.destroyTransientImage(handle);
         }
     }
+    m_ssaoBlurImageViews.clear();
+    m_ssaoBlurImages.clear();
+    m_ssaoBlurImageMemories.clear();
     m_ssaoBlurTransientHandles.clear();
     m_ssaoBlurImageInitialized.clear();
 
-    m_ssaoRawImageViews.clear();
-    m_ssaoRawImages.clear();
-    m_ssaoRawImageMemories.clear();
     for (TransientImageHandle handle : m_ssaoRawTransientHandles) {
         if (handle != kInvalidTransientImageHandle) {
             m_frameArena.destroyTransientImage(handle);
         }
     }
+    m_ssaoRawImageViews.clear();
+    m_ssaoRawImages.clear();
+    m_ssaoRawImageMemories.clear();
     m_ssaoRawTransientHandles.clear();
     m_ssaoRawImageInitialized.clear();
 
-    for (VkImageView imageView : m_aoDepthImageViews) {
-        (void)imageView;
-    }
-    m_aoDepthImageViews.clear();
-    for (VkImage image : m_aoDepthImages) {
-        (void)image;
-    }
-    m_aoDepthImages.clear();
-    for (VkDeviceMemory memory : m_aoDepthImageMemories) {
-        (void)memory;
-    }
-    m_aoDepthImageMemories.clear();
     for (TransientImageHandle handle : m_aoDepthTransientHandles) {
         if (handle != kInvalidTransientImageHandle) {
             m_frameArena.destroyTransientImage(handle);
         }
     }
+    m_aoDepthImageViews.clear();
+    m_aoDepthImages.clear();
+    m_aoDepthImageMemories.clear();
     m_aoDepthTransientHandles.clear();
     m_aoDepthImageInitialized.clear();
 
-    m_normalDepthImageViews.clear();
-    m_normalDepthImages.clear();
-    m_normalDepthImageMemories.clear();
     for (TransientImageHandle handle : m_normalDepthTransientHandles) {
         if (handle != kInvalidTransientImageHandle) {
             m_frameArena.destroyTransientImage(handle);
         }
     }
+    m_normalDepthImageViews.clear();
+    m_normalDepthImages.clear();
+    m_normalDepthImageMemories.clear();
     m_normalDepthTransientHandles.clear();
     m_normalDepthImageInitialized.clear();
 }
@@ -7108,6 +7713,13 @@ void Renderer::destroySwapchain() {
     destroyMsaaColorTargets();
     destroyDepthTargets();
     destroyAoTargets();
+    const uint32_t orphanedFrameArenaImages = m_frameArena.liveImageCount();
+    if (orphanedFrameArenaImages > 0) {
+        VOX_LOGI("render") << "destroySwapchain: cleaning up "
+            << orphanedFrameArenaImages
+            << " orphaned FrameArena image(s)\n";
+        m_frameArena.destroyAllImages();
+    }
     m_aoExtent = VkExtent2D{};
 
     for (VkSemaphore semaphore : m_renderFinishedSemaphores) {
@@ -7202,13 +7814,25 @@ void Renderer::destroyDiffuseTextureResources() {
         m_diffuseTextureImageView = VK_NULL_HANDLE;
     }
     if (m_diffuseTextureImage != VK_NULL_HANDLE) {
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE && m_diffuseTextureAllocation != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, m_diffuseTextureImage, m_diffuseTextureAllocation);
+            m_diffuseTextureAllocation = VK_NULL_HANDLE;
+        } else {
+            vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
+        }
+#else
         vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
+#endif
         m_diffuseTextureImage = VK_NULL_HANDLE;
     }
     if (m_diffuseTextureMemory != VK_NULL_HANDLE) {
         vkFreeMemory(m_device, m_diffuseTextureMemory, nullptr);
         m_diffuseTextureMemory = VK_NULL_HANDLE;
     }
+#if defined(VOXEL_HAS_VMA)
+    m_diffuseTextureAllocation = VK_NULL_HANDLE;
+#endif
 }
 
 void Renderer::destroyShadowResources() {
@@ -7322,7 +7946,7 @@ void Renderer::destroyPipeline() {
 }
 
 void Renderer::shutdown() {
-    std::cerr << "[render] shutdown begin\n";
+    VOX_LOGI("render") << "shutdown begin\n";
     if (m_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(m_device);
     }
@@ -7337,7 +7961,6 @@ void Renderer::shutdown() {
             vkDestroySemaphore(m_device, m_renderTimelineSemaphore, nullptr);
             m_renderTimelineSemaphore = VK_NULL_HANDLE;
         }
-        m_frameArena.shutdown(&m_bufferAllocator);
         destroyPipeBuffers();
         destroyPreviewBuffers();
         destroyEnvironmentResources();
@@ -7354,7 +7977,54 @@ void Renderer::shutdown() {
         }
         m_descriptorSets.fill(VK_NULL_HANDLE);
         destroySwapchain();
+        const uint32_t liveFrameArenaImagesBeforeShutdown = m_frameArena.liveImageCount();
+        if (liveFrameArenaImagesBeforeShutdown > 0) {
+            VOX_LOGI("render") << "shutdown: forcing cleanup of "
+                << liveFrameArenaImagesBeforeShutdown
+                << " remaining FrameArena image(s) before allocator shutdown\n";
+            m_frameArena.destroyAllImages();
+        }
+        m_frameArena.shutdown(&m_bufferAllocator);
         m_bufferAllocator.shutdown();
+
+        uint32_t rendererOwnedLiveImages = 0;
+        auto logLiveImage = [&](const char* name, VkImage image) {
+            if (image == VK_NULL_HANDLE) {
+                return;
+            }
+            ++rendererOwnedLiveImages;
+            VOX_LOGI("render") << "shutdown leak check: live image '" << name
+                << "' handle=0x" << std::hex
+                << static_cast<unsigned long long>(vkHandleToUint64(image))
+                << std::dec << "\n";
+        };
+        logLiveImage("diffuse.albedo.image", m_diffuseTextureImage);
+        logLiveImage("shadow.atlas.image", m_shadowDepthImage);
+        for (uint32_t i = 0; i < static_cast<uint32_t>(m_depthImages.size()); ++i) {
+            logLiveImage(("depth.msaa.image[" + std::to_string(i) + "]").c_str(), m_depthImages[i]);
+        }
+        for (uint32_t i = 0; i < static_cast<uint32_t>(m_msaaColorImages.size()); ++i) {
+            logLiveImage(("hdr.msaaColor.image[" + std::to_string(i) + "]").c_str(), m_msaaColorImages[i]);
+        }
+        for (uint32_t i = 0; i < static_cast<uint32_t>(m_hdrResolveImages.size()); ++i) {
+            logLiveImage(("hdr.resolve.image[" + std::to_string(i) + "]").c_str(), m_hdrResolveImages[i]);
+        }
+        for (uint32_t i = 0; i < static_cast<uint32_t>(m_normalDepthImages.size()); ++i) {
+            logLiveImage(("ao.normalDepth.image[" + std::to_string(i) + "]").c_str(), m_normalDepthImages[i]);
+        }
+        for (uint32_t i = 0; i < static_cast<uint32_t>(m_aoDepthImages.size()); ++i) {
+            logLiveImage(("ao.depth.image[" + std::to_string(i) + "]").c_str(), m_aoDepthImages[i]);
+        }
+        for (uint32_t i = 0; i < static_cast<uint32_t>(m_ssaoRawImages.size()); ++i) {
+            logLiveImage(("ao.ssaoRaw.image[" + std::to_string(i) + "]").c_str(), m_ssaoRawImages[i]);
+        }
+        for (uint32_t i = 0; i < static_cast<uint32_t>(m_ssaoBlurImages.size()); ++i) {
+            logLiveImage(("ao.ssaoBlur.image[" + std::to_string(i) + "]").c_str(), m_ssaoBlurImages[i]);
+        }
+        if (rendererOwnedLiveImages == 0) {
+            VOX_LOGI("render") << "shutdown leak check: no renderer-owned live VkImage handles\n";
+        }
+
 #if defined(VOXEL_HAS_VMA)
         if (m_vmaAllocator != VK_NULL_HANDLE) {
             vmaDestroyAllocator(m_vmaAllocator);
@@ -7377,6 +8047,11 @@ void Renderer::shutdown() {
     }
 
     m_physicalDevice = VK_NULL_HANDLE;
+    m_debugUtilsEnabled = false;
+    m_setDebugUtilsObjectName = nullptr;
+    m_cmdBeginDebugUtilsLabel = nullptr;
+    m_cmdEndDebugUtilsLabel = nullptr;
+    m_cmdInsertDebugUtilsLabel = nullptr;
     m_graphicsQueue = VK_NULL_HANDLE;
     m_transferQueue = VK_NULL_HANDLE;
     m_graphicsQueueFamilyIndex = 0;
@@ -7398,7 +8073,7 @@ void Renderer::shutdown() {
     m_nextTimelineValue = 1;
     m_currentFrame = 0;
     m_window = nullptr;
-    std::cerr << "[render] shutdown complete\n";
+    VOX_LOGI("render") << "shutdown complete\n";
 }
 
 } // namespace render

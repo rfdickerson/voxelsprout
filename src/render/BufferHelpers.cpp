@@ -1,11 +1,60 @@
 #include "render/BufferHelpers.hpp"
 
+#include "core/Log.hpp"
+
 #include <algorithm>
 #include <cstring>
-#include <iostream>
 #include <limits>
+#include <string>
+#include <type_traits>
+#include <utility>
 
 namespace render {
+
+template <typename VkHandleT>
+uint64_t vkHandleToUint64(VkHandleT handle) {
+    if constexpr (std::is_pointer_v<VkHandleT>) {
+        return reinterpret_cast<uint64_t>(handle);
+    } else {
+        return static_cast<uint64_t>(handle);
+    }
+}
+
+template <typename VkHandleT>
+VkHandleT uint64ToVkHandle(uint64_t handle) {
+    if constexpr (std::is_pointer_v<VkHandleT>) {
+        return reinterpret_cast<VkHandleT>(handle);
+    } else {
+        return static_cast<VkHandleT>(handle);
+    }
+}
+
+void setDebugObjectName(
+    VkDevice device,
+    VkObjectType objectType,
+    uint64_t objectHandle,
+    const std::string& name
+) {
+    if (device == VK_NULL_HANDLE || objectHandle == 0 || name.empty()) {
+        return;
+    }
+    const auto setObjectName = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+        vkGetDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT")
+    );
+    if (setObjectName == nullptr) {
+        return;
+    }
+    VkDebugUtilsObjectNameInfoEXT nameInfo{};
+    nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    nameInfo.objectType = objectType;
+    nameInfo.objectHandle = objectHandle;
+    nameInfo.pObjectName = name.c_str();
+    const VkResult result = setObjectName(device, &nameInfo);
+    if (result != VK_SUCCESS) {
+        VOX_LOGW("render") << "debug name set failed (" << static_cast<int>(result)
+                           << "): " << name;
+    }
+}
 
 bool BufferAllocator::init(VkPhysicalDevice physicalDevice, VkDevice device
 #if defined(VOXEL_HAS_VMA)
@@ -76,7 +125,6 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
 #if defined(VOXEL_HAS_VMA)
     VmaAllocation allocation = VK_NULL_HANDLE;
     VmaAllocationInfo allocationInfo{};
-    bool persistentMapped = false;
     void* persistentMappedData = nullptr;
     if (m_vmaAllocator != VK_NULL_HANDLE) {
         VmaAllocationCreateInfo allocationCreateInfo{};
@@ -89,7 +137,6 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
             allocationCreateInfo.flags |=
                 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                 VMA_ALLOCATION_CREATE_MAPPED_BIT;
-            persistentMapped = true;
         }
         allocationCreateInfo.requiredFlags = desc.memoryProperties;
         if (vmaCreateBuffer(
@@ -103,12 +150,11 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
             return kInvalidBufferHandle;
         }
         persistentMappedData = allocationInfo.pMappedData;
-        std::cerr
-            << "[render] alloc buffer (VMA): size=" << static_cast<unsigned long long>(desc.size)
+        VOX_LOGD("render")
+            << "alloc buffer (VMA): size=" << static_cast<unsigned long long>(desc.size)
             << ", usage=0x" << std::hex << static_cast<unsigned int>(desc.usage)
             << ", memProps=0x" << static_cast<unsigned int>(desc.memoryProperties) << std::dec
-            << ", persistentMapped=" << (persistentMappedData != nullptr ? "yes" : "no")
-            << "\n";
+            << ", persistentMapped=" << (persistentMappedData != nullptr ? "yes" : "no");
     } else
 #endif
     {
@@ -140,11 +186,10 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
             vkFreeMemory(m_device, memory, nullptr);
             return kInvalidBufferHandle;
         }
-        std::cerr
-            << "[render] alloc buffer (vk): size=" << static_cast<unsigned long long>(desc.size)
+        VOX_LOGD("render")
+            << "alloc buffer (vk): size=" << static_cast<unsigned long long>(desc.size)
             << ", usage=0x" << std::hex << static_cast<unsigned int>(desc.usage)
-            << ", memProps=0x" << static_cast<unsigned int>(desc.memoryProperties) << std::dec
-            << "\n";
+            << ", memProps=0x" << static_cast<unsigned int>(desc.memoryProperties) << std::dec;
     }
 
     if (desc.initialData != nullptr) {
@@ -179,8 +224,8 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
             return kInvalidBufferHandle;
         }
         std::memcpy(mappedData, desc.initialData, static_cast<size_t>(desc.size));
-        std::cerr << "[render] upload initial buffer data: bytes="
-                  << static_cast<unsigned long long>(desc.size) << "\n";
+        VOX_LOGT("render") << "upload initial buffer data: bytes="
+                           << static_cast<unsigned long long>(desc.size);
 #if defined(VOXEL_HAS_VMA)
         if (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
             if (mappedNeedsUnmap) {
@@ -454,6 +499,8 @@ bool FrameArena::init(
     m_device = device;
 #if defined(VOXEL_HAS_VMA)
     m_vmaAllocator = vmaAllocator;
+    VOX_LOGI("render")
+        << "FrameArena init: VMA=" << (m_vmaAllocator != VK_NULL_HANDLE ? "enabled" : "disabled");
 #endif
     m_frameCount = config.frameCount;
     m_activeFrame = 0;
@@ -462,14 +509,22 @@ bool FrameArena::init(
     m_imageSlots.clear();
     m_freeImageSlots.clear();
     m_imageSlots.push_back({});
+    m_aliasMemoryBlocks.clear();
+    m_freeAliasMemoryBlocks.clear();
+    m_aliasMemoryBlocks.push_back({});
     m_frameStats.assign(m_frameCount, {});
+    m_residentStats = {};
+    m_liveImageDebugNames.clear();
 
     if (!m_uploadRing.init(allocator, config.uploadBytesPerFrame, config.frameCount, config.uploadUsage)) {
         m_frameTransientBuffers.clear();
         m_frameTransientImages.clear();
         m_imageSlots.clear();
         m_freeImageSlots.clear();
+        m_aliasMemoryBlocks.clear();
+        m_freeAliasMemoryBlocks.clear();
         m_frameStats.clear();
+        m_residentStats = {};
         m_frameCount = 0;
         m_allocator = nullptr;
         m_physicalDevice = VK_NULL_HANDLE;
@@ -498,17 +553,17 @@ void FrameArena::shutdown(BufferAllocator* allocator) {
         }
     }
 
-    for (size_t i = 1; i < m_imageSlots.size(); ++i) {
-        if (m_imageSlots[i].inUse) {
-            destroyImageSlot(static_cast<TransientImageHandle>(i));
-        }
-    }
+    destroyAllImages();
 
     m_frameTransientBuffers.clear();
     m_frameTransientImages.clear();
     m_imageSlots.clear();
     m_freeImageSlots.clear();
+    m_aliasMemoryBlocks.clear();
+    m_freeAliasMemoryBlocks.clear();
     m_frameStats.clear();
+    m_residentStats = {};
+    m_liveImageDebugNames.clear();
     m_uploadRing.shutdown(activeAllocator);
     m_allocator = nullptr;
     m_physicalDevice = VK_NULL_HANDLE;
@@ -577,6 +632,8 @@ BufferHandle FrameArena::createTransientBuffer(const BufferCreateDesc& desc) {
         stats.transientBufferBytes += desc.size;
         ++stats.transientBufferCount;
     }
+    m_residentStats.bufferBytes += static_cast<uint64_t>(desc.size);
+    ++m_residentStats.bufferCount;
     return handle;
 }
 
@@ -591,77 +648,19 @@ TransientImageHandle FrameArena::createTransientImage(
         return kInvalidTransientImageHandle;
     }
 
-    auto passIndex = [](FrameArenaPass pass) -> int {
-        return static_cast<int>(pass);
-    };
-    auto validPassRange = [&](FrameArenaPass first, FrameArenaPass last) -> bool {
-        if (first == FrameArenaPass::Unknown || last == FrameArenaPass::Unknown) {
-            return false;
-        }
-        return passIndex(first) <= passIndex(last);
-    };
-    auto rangesOverlap = [&](FrameArenaPass firstA, FrameArenaPass lastA, FrameArenaPass firstB, FrameArenaPass lastB) -> bool {
-        return passIndex(firstA) <= passIndex(lastB) && passIndex(firstB) <= passIndex(lastA);
-    };
-    const bool hasPassRange = validPassRange(desc.firstPass, desc.lastPass);
-
-    auto imageDescMatches = [](const TransientImageDesc& lhs, const TransientImageDesc& rhs) -> bool {
-        return lhs.imageType == rhs.imageType &&
-               lhs.viewType == rhs.viewType &&
-               lhs.format == rhs.format &&
-               lhs.extent.width == rhs.extent.width &&
-               lhs.extent.height == rhs.extent.height &&
-               lhs.extent.depth == rhs.extent.depth &&
-               lhs.usage == rhs.usage &&
-               lhs.aspectMask == rhs.aspectMask &&
-               lhs.flags == rhs.flags &&
-               lhs.mipLevels == rhs.mipLevels &&
-               lhs.arrayLayers == rhs.arrayLayers &&
-               lhs.samples == rhs.samples &&
-               lhs.tiling == rhs.tiling;
-    };
-
-    if (desc.aliasEligible && hasPassRange) {
-        for (uint32_t i = 1; i < m_imageSlots.size(); ++i) {
-            ImageSlot& slot = m_imageSlots[i];
-            if (!slot.inUse || !slot.desc.aliasEligible) {
-                continue;
-            }
-            if (!imageDescMatches(slot.desc, desc)) {
-                continue;
-            }
-
-            bool overlapsExistingRange = false;
-            for (const auto& reservedRange : slot.passRanges) {
-                if (rangesOverlap(desc.firstPass, desc.lastPass, reservedRange.first, reservedRange.second)) {
-                    overlapsExistingRange = true;
-                    break;
-                }
-            }
-            if (overlapsExistingRange) {
-                continue;
-            }
-
-            slot.passRanges.emplace_back(desc.firstPass, desc.lastPass);
-            if (lifetime == FrameArenaImageLifetime::FrameTransient && m_activeFrame < m_frameTransientImages.size()) {
-                auto& frameImages = m_frameTransientImages[m_activeFrame];
-                if (std::find(frameImages.begin(), frameImages.end(), i) == frameImages.end()) {
-                    frameImages.push_back(i);
-                }
-            }
-            if (m_activeFrame < m_frameStats.size()) {
-                ++m_frameStats[m_activeFrame].transientImageAliasReuses;
-            }
-            std::cerr
-                << "[render] alias image (FrameArena): handle=" << i
-                << ", passRange=[" << passIndex(desc.firstPass) << "," << passIndex(desc.lastPass) << "]\n";
-            return i;
-        }
-    }
+    const FrameArenaPassRange candidatePassRange{desc.firstPass, desc.lastPass};
+    const bool hasPassRange = isValidFrameArenaPassRange(candidatePassRange);
+#if defined(VOXEL_HAS_VMA)
+    const bool canUseVmaImages = (m_vmaAllocator != VK_NULL_HANDLE);
+#else
+    const bool canUseVmaImages = false;
+#endif
+    const bool enableAliasMemory = (!canUseVmaImages) && desc.aliasEligible && hasPassRange;
 
     VkImageCreateInfo imageCreateInfo{};
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageCreateInfo.flags = desc.flags;
+    imageCreateInfo.flags = desc.flags |
+        (enableAliasMemory ? static_cast<VkImageCreateFlags>(VK_IMAGE_CREATE_ALIAS_BIT) : static_cast<VkImageCreateFlags>(0));
     imageCreateInfo.imageType = desc.imageType;
     imageCreateInfo.format = desc.format;
     imageCreateInfo.extent = desc.extent;
@@ -675,12 +674,108 @@ TransientImageHandle FrameArena::createTransientImage(
 
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    uint32_t aliasMemoryBlock = 0;
+    bool aliasMemoryReused = false;
 #if defined(VOXEL_HAS_VMA)
     VmaAllocation allocation = VK_NULL_HANDLE;
 #endif
 
+    if (enableAliasMemory) {
+        if (vkCreateImage(m_device, &imageCreateInfo, nullptr, &image) != VK_SUCCESS) {
+            return kInvalidTransientImageHandle;
+        }
+        trackCreatedImage(image, desc.debugName);
+
+        VkMemoryRequirements memoryRequirements{};
+        vkGetImageMemoryRequirements(m_device, image, &memoryRequirements);
+
+        for (uint32_t i = 1; i < m_aliasMemoryBlocks.size(); ++i) {
+            AliasMemoryBlock& block = m_aliasMemoryBlocks[i];
+            if (!block.inUse || block.memory == VK_NULL_HANDLE) {
+                continue;
+            }
+            if ((memoryRequirements.memoryTypeBits & (1u << block.memoryTypeIndex)) == 0u) {
+                continue;
+            }
+            if (memoryRequirements.size > block.size) {
+                continue;
+            }
+            if (!canAliasWithPassRanges(block.passRanges, candidatePassRange)) {
+                continue;
+            }
+
+            aliasMemoryBlock = i;
+            aliasMemoryReused = true;
+            break;
+        }
+
+        if (aliasMemoryBlock == 0) {
+            const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+                memoryRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+            if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+                trackDestroyedImage(image);
+                vkDestroyImage(m_device, image, nullptr);
+                return kInvalidTransientImageHandle;
+            }
+
+            VkMemoryAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocateInfo.allocationSize = memoryRequirements.size;
+            allocateInfo.memoryTypeIndex = memoryTypeIndex;
+            if (vkAllocateMemory(m_device, &allocateInfo, nullptr, &memory) != VK_SUCCESS) {
+                trackDestroyedImage(image);
+                vkDestroyImage(m_device, image, nullptr);
+                return kInvalidTransientImageHandle;
+            }
+
+            if (!m_freeAliasMemoryBlocks.empty()) {
+                aliasMemoryBlock = m_freeAliasMemoryBlocks.back();
+                m_freeAliasMemoryBlocks.pop_back();
+            } else {
+                aliasMemoryBlock = static_cast<uint32_t>(m_aliasMemoryBlocks.size());
+                m_aliasMemoryBlocks.push_back({});
+            }
+
+            AliasMemoryBlock& block = m_aliasMemoryBlocks[aliasMemoryBlock];
+            block.memory = memory;
+            block.size = memoryRequirements.size;
+            block.memoryTypeIndex = memoryTypeIndex;
+            block.refCount = 0;
+            block.passRanges.clear();
+            block.inUse = true;
+            setDebugObjectName(
+                m_device,
+                VK_OBJECT_TYPE_DEVICE_MEMORY,
+                vkHandleToUint64(block.memory),
+                desc.debugName.empty()
+                    ? ("frameArena.aliasMemory[" + std::to_string(aliasMemoryBlock) + "]")
+                    : (desc.debugName + ".aliasMemory")
+            );
+        }
+
+        AliasMemoryBlock& block = m_aliasMemoryBlocks[aliasMemoryBlock];
+        if (vkBindImageMemory(m_device, image, block.memory, 0) != VK_SUCCESS) {
+            trackDestroyedImage(image);
+            vkDestroyImage(m_device, image, nullptr);
+            if (!aliasMemoryReused) {
+                if (block.memory != VK_NULL_HANDLE) {
+                    vkFreeMemory(m_device, block.memory, nullptr);
+                }
+                block = {};
+                m_freeAliasMemoryBlocks.push_back(aliasMemoryBlock);
+            }
+            return kInvalidTransientImageHandle;
+        }
+        acquireAliasBlockRef(block.refCount);
+        addAliasPassRange(block.passRanges, candidatePassRange);
+        if (aliasMemoryReused) {
+            ++m_residentStats.imageAliasReuses;
+        }
+    }
 #if defined(VOXEL_HAS_VMA)
-    if (m_vmaAllocator != VK_NULL_HANDLE) {
+    else if (m_vmaAllocator != VK_NULL_HANDLE) {
         VmaAllocationCreateInfo allocationCreateInfo{};
         allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
         allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -694,12 +789,14 @@ TransientImageHandle FrameArena::createTransientImage(
             ) != VK_SUCCESS) {
             return kInvalidTransientImageHandle;
         }
+        trackCreatedImage(image, desc.debugName);
     } else
 #endif
     {
         if (vkCreateImage(m_device, &imageCreateInfo, nullptr, &image) != VK_SUCCESS) {
             return kInvalidTransientImageHandle;
         }
+        trackCreatedImage(image, desc.debugName);
 
         VkMemoryRequirements memoryRequirements{};
         vkGetImageMemoryRequirements(m_device, image, &memoryRequirements);
@@ -708,6 +805,7 @@ TransientImageHandle FrameArena::createTransientImage(
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
         );
         if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            trackDestroyedImage(image);
             vkDestroyImage(m_device, image, nullptr);
             return kInvalidTransientImageHandle;
         }
@@ -717,10 +815,12 @@ TransientImageHandle FrameArena::createTransientImage(
         allocateInfo.allocationSize = memoryRequirements.size;
         allocateInfo.memoryTypeIndex = memoryTypeIndex;
         if (vkAllocateMemory(m_device, &allocateInfo, nullptr, &memory) != VK_SUCCESS) {
+            trackDestroyedImage(image);
             vkDestroyImage(m_device, image, nullptr);
             return kInvalidTransientImageHandle;
         }
         if (vkBindImageMemory(m_device, image, memory, 0) != VK_SUCCESS) {
+            trackDestroyedImage(image);
             vkDestroyImage(m_device, image, nullptr);
             vkFreeMemory(m_device, memory, nullptr);
             return kInvalidTransientImageHandle;
@@ -740,16 +840,33 @@ TransientImageHandle FrameArena::createTransientImage(
 
     VkImageView view = VK_NULL_HANDLE;
     if (vkCreateImageView(m_device, &viewCreateInfo, nullptr, &view) != VK_SUCCESS) {
+        if (enableAliasMemory && aliasMemoryBlock != 0 && aliasMemoryBlock < m_aliasMemoryBlocks.size()) {
+            AliasMemoryBlock& block = m_aliasMemoryBlocks[aliasMemoryBlock];
+            if (releaseAliasBlockRef(block.refCount)) {
+                if (block.memory != VK_NULL_HANDLE) {
+                    vkFreeMemory(m_device, block.memory, nullptr);
+                }
+                block = {};
+                m_freeAliasMemoryBlocks.push_back(aliasMemoryBlock);
+            }
+        }
 #if defined(VOXEL_HAS_VMA)
-        if (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
+        if (!enableAliasMemory && m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
+            trackDestroyedImage(image);
             vmaDestroyImage(m_vmaAllocator, image, allocation);
         } else {
+            trackDestroyedImage(image);
             vkDestroyImage(m_device, image, nullptr);
-            vkFreeMemory(m_device, memory, nullptr);
+            if (!enableAliasMemory) {
+                vkFreeMemory(m_device, memory, nullptr);
+            }
         }
 #else
+        trackDestroyedImage(image);
         vkDestroyImage(m_device, image, nullptr);
-        vkFreeMemory(m_device, memory, nullptr);
+        if (!enableAliasMemory) {
+            vkFreeMemory(m_device, memory, nullptr);
+        }
 #endif
         return kInvalidTransientImageHandle;
     }
@@ -774,10 +891,21 @@ TransientImageHandle FrameArena::createTransientImage(
     slot.memory = memory;
     slot.desc = desc;
     slot.passRanges.clear();
-    if (hasPassRange) {
-        slot.passRanges.emplace_back(desc.firstPass, desc.lastPass);
-    }
+    addAliasPassRange(slot.passRanges, candidatePassRange);
+    slot.aliasMemoryBlock = aliasMemoryBlock;
+    slot.usesAliasMemory = enableAliasMemory;
     slot.inUse = true;
+
+    const std::string imageDebugName = desc.debugName.empty()
+        ? ("frameArena.image[" + std::to_string(slotIndex) + "]")
+        : desc.debugName;
+    setDebugObjectName(m_device, VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(image), imageDebugName);
+    setDebugObjectName(
+        m_device,
+        VK_OBJECT_TYPE_IMAGE_VIEW,
+        vkHandleToUint64(view),
+        imageDebugName + ".view"
+    );
 
     if (lifetime == FrameArenaImageLifetime::FrameTransient && m_activeFrame < m_frameTransientImages.size()) {
         m_frameTransientImages[m_activeFrame].push_back(slotIndex);
@@ -789,14 +917,27 @@ TransientImageHandle FrameArena::createTransientImage(
             static_cast<uint64_t>(desc.extent.height) *
             static_cast<uint64_t>(std::max(1u, desc.extent.depth));
         ++stats.transientImageCount;
+        if (aliasMemoryReused) {
+            ++stats.transientImageAliasReuses;
+        }
     }
-    std::cerr
-        << "[render] alloc image (FrameArena): extent="
+    m_residentStats.imageBytes +=
+        static_cast<uint64_t>(desc.extent.width) *
+        static_cast<uint64_t>(desc.extent.height) *
+        static_cast<uint64_t>(std::max(1u, desc.extent.depth));
+    ++m_residentStats.imageCount;
+    VOX_LOGD("render")
+        << "alloc image (FrameArena): extent="
         << desc.extent.width << "x" << desc.extent.height << "x" << desc.extent.depth
         << ", format=" << static_cast<int>(desc.format)
         << ", usage=0x" << std::hex << static_cast<unsigned int>(desc.usage) << std::dec
-        << ", lifetime=" << (lifetime == FrameArenaImageLifetime::FrameTransient ? "frame" : "persistent")
-        << "\n";
+        << ", vkImage=0x" << std::hex << static_cast<unsigned long long>(vkHandleToUint64(image)) << std::dec
+        << ", name=" << imageDebugName
+        << ", backend=" << (enableAliasMemory ? "alias" : (canUseVmaImages ? "vma" : "vk"))
+        << ", aliasBlock=" << aliasMemoryBlock
+        << ", aliasReused=" << (aliasMemoryReused ? "yes" : "no")
+        << ", passRange=[" << frameArenaPassName(desc.firstPass) << "->" << frameArenaPassName(desc.lastPass) << "]"
+        << ", lifetime=" << (lifetime == FrameArenaImageLifetime::FrameTransient ? "frame" : "persistent");
     return slotIndex;
 }
 
@@ -815,6 +956,114 @@ const TransientImageInfo* FrameArena::getTransientImage(TransientImageHandle han
     return &slot.info;
 }
 
+void FrameArena::destroyAllImages() {
+    for (size_t i = 1; i < m_imageSlots.size(); ++i) {
+        if (m_imageSlots[i].inUse) {
+            destroyImageSlot(static_cast<TransientImageHandle>(i));
+        }
+    }
+
+    uint32_t forcedZombieImageCount = 0;
+    for (size_t i = 1; i < m_imageSlots.size(); ++i) {
+        ImageSlot& slot = m_imageSlots[i];
+        const bool hasZombieResources =
+            !slot.inUse &&
+            (slot.info.image != VK_NULL_HANDLE ||
+             slot.info.view != VK_NULL_HANDLE ||
+             slot.memory != VK_NULL_HANDLE
+#if defined(VOXEL_HAS_VMA)
+             || slot.allocation != VK_NULL_HANDLE
+#endif
+            );
+        if (!hasZombieResources) {
+            continue;
+        }
+
+        ++forcedZombieImageCount;
+        VOX_LOGW("render")
+            << "FrameArena zombie image slot cleanup: handle=" << i
+            << ", vkImage=0x" << std::hex << static_cast<unsigned long long>(vkHandleToUint64(slot.info.image)) << std::dec
+            << ", usesAliasMemory=" << (slot.usesAliasMemory ? "yes" : "no");
+
+        if (slot.info.view != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, slot.info.view, nullptr);
+        }
+
+        if (slot.usesAliasMemory) {
+            if (slot.info.image != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
+                trackDestroyedImage(slot.info.image);
+                vkDestroyImage(m_device, slot.info.image, nullptr);
+            }
+            if (slot.aliasMemoryBlock != 0 && slot.aliasMemoryBlock < m_aliasMemoryBlocks.size()) {
+                AliasMemoryBlock& block = m_aliasMemoryBlocks[slot.aliasMemoryBlock];
+                if (block.inUse) {
+                    if (block.refCount > 0) {
+                        --block.refCount;
+                    }
+                    if (block.refCount == 0) {
+                        if (block.memory != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
+                            vkFreeMemory(m_device, block.memory, nullptr);
+                        }
+                        block = {};
+                        if (std::find(
+                                m_freeAliasMemoryBlocks.begin(),
+                                m_freeAliasMemoryBlocks.end(),
+                                slot.aliasMemoryBlock
+                            ) == m_freeAliasMemoryBlocks.end()) {
+                            m_freeAliasMemoryBlocks.push_back(slot.aliasMemoryBlock);
+                        }
+                    }
+                }
+            }
+        } else {
+#if defined(VOXEL_HAS_VMA)
+            if (m_vmaAllocator != VK_NULL_HANDLE && slot.allocation != VK_NULL_HANDLE) {
+                trackDestroyedImage(slot.info.image);
+                vmaDestroyImage(m_vmaAllocator, slot.info.image, slot.allocation);
+            } else
+#endif
+            if (m_device != VK_NULL_HANDLE) {
+                if (slot.info.image != VK_NULL_HANDLE) {
+                    trackDestroyedImage(slot.info.image);
+                    vkDestroyImage(m_device, slot.info.image, nullptr);
+                }
+                if (slot.memory != VK_NULL_HANDLE) {
+                    vkFreeMemory(m_device, slot.memory, nullptr);
+                }
+            }
+        }
+
+        slot = {};
+        if (std::find(m_freeImageSlots.begin(), m_freeImageSlots.end(), static_cast<uint32_t>(i)) == m_freeImageSlots.end()) {
+            m_freeImageSlots.push_back(static_cast<uint32_t>(i));
+        }
+    }
+
+    if (forcedZombieImageCount > 0) {
+        VOX_LOGW("render")
+            << "FrameArena forced cleanup destroyed "
+            << forcedZombieImageCount
+            << " zombie image slot(s)";
+    }
+
+    for (std::vector<TransientImageHandle>& frameHandles : m_frameTransientImages) {
+        frameHandles.clear();
+    }
+
+    destroyTrackedLiveImages();
+    forceFreeAliasMemoryBlocks();
+}
+
+uint32_t FrameArena::liveImageCount() const {
+    uint32_t count = 0;
+    for (size_t i = 1; i < m_imageSlots.size(); ++i) {
+        if (m_imageSlots[i].inUse) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 BufferHandle FrameArena::uploadBufferHandle() const {
     return m_uploadRing.handle();
 }
@@ -826,11 +1075,51 @@ const FrameArenaStats& FrameArena::activeStats() const {
     return m_emptyStats;
 }
 
+const FrameArenaResidentStats& FrameArena::residentStats() const {
+    return m_residentStats;
+}
+
+void FrameArena::collectAliasedImageDebugInfo(std::vector<FrameArenaAliasedImageInfo>& out) const {
+    out.clear();
+    for (uint32_t i = 1; i < m_imageSlots.size(); ++i) {
+        const ImageSlot& slot = m_imageSlots[i];
+        if (!slot.inUse || !slot.usesAliasMemory || slot.aliasMemoryBlock == 0) {
+            continue;
+        }
+        const uint32_t aliasBlock = slot.aliasMemoryBlock;
+        if (aliasBlock >= m_aliasMemoryBlocks.size()) {
+            continue;
+        }
+        const AliasMemoryBlock& block = m_aliasMemoryBlocks[aliasBlock];
+        if (!block.inUse) {
+            continue;
+        }
+
+        FrameArenaAliasedImageInfo info{};
+        info.handle = i;
+        info.aliasBlock = aliasBlock;
+        info.aliasBlockRefCount = block.refCount;
+        info.firstPass = slot.desc.firstPass;
+        info.lastPass = slot.desc.lastPass;
+        info.debugName = slot.desc.debugName;
+        out.push_back(std::move(info));
+    }
+}
+
 void FrameArena::clearFrameTransientBuffers(uint32_t frameIndex) {
     if (m_allocator == nullptr || frameIndex >= m_frameTransientBuffers.size()) {
         return;
     }
     for (const BufferHandle handle : m_frameTransientBuffers[frameIndex]) {
+        const VkDeviceSize bufferSize = m_allocator->getSize(handle);
+        if (m_residentStats.bufferBytes >= static_cast<uint64_t>(bufferSize)) {
+            m_residentStats.bufferBytes -= static_cast<uint64_t>(bufferSize);
+        } else {
+            m_residentStats.bufferBytes = 0;
+        }
+        if (m_residentStats.bufferCount > 0) {
+            --m_residentStats.bufferCount;
+        }
         m_allocator->destroyBuffer(handle);
     }
     m_frameTransientBuffers[frameIndex].clear();
@@ -846,6 +1135,89 @@ void FrameArena::clearFrameTransientImages(uint32_t frameIndex) {
     m_frameTransientImages[frameIndex].clear();
 }
 
+void FrameArena::trackCreatedImage(VkImage image, const std::string& debugName) {
+    if (image == VK_NULL_HANDLE) {
+        return;
+    }
+    const std::string resolvedName = debugName.empty() ? "frameArena.image.unnamed" : debugName;
+    m_liveImageDebugNames[vkHandleToUint64(image)] = resolvedName;
+}
+
+void FrameArena::trackDestroyedImage(VkImage image) {
+    if (image == VK_NULL_HANDLE) {
+        return;
+    }
+    m_liveImageDebugNames.erase(vkHandleToUint64(image));
+}
+
+void FrameArena::destroyTrackedLiveImages() {
+    if (m_liveImageDebugNames.empty()) {
+        return;
+    }
+
+    VOX_LOGW("render")
+        << "FrameArena tracked image cleanup: forcing destroy of "
+        << m_liveImageDebugNames.size()
+        << " image(s) that were not released via slots";
+
+    if (m_device == VK_NULL_HANDLE) {
+        m_liveImageDebugNames.clear();
+        return;
+    }
+
+    for (const auto& entry : m_liveImageDebugNames) {
+        const uint64_t imageHandle = entry.first;
+        const std::string& imageName = entry.second;
+        const VkImage image = uint64ToVkHandle<VkImage>(imageHandle);
+        if (image == VK_NULL_HANDLE) {
+            continue;
+        }
+        VOX_LOGW("render")
+            << "FrameArena force-destroy tracked image: vkImage=0x"
+            << std::hex << static_cast<unsigned long long>(imageHandle) << std::dec
+            << ", name=" << imageName;
+        vkDestroyImage(m_device, image, nullptr);
+    }
+
+    m_liveImageDebugNames.clear();
+}
+
+void FrameArena::forceFreeAliasMemoryBlocks() {
+    uint32_t freedBlocks = 0;
+    for (uint32_t i = 1; i < m_aliasMemoryBlocks.size(); ++i) {
+        AliasMemoryBlock& block = m_aliasMemoryBlocks[i];
+        if (block.memory != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
+            VOX_LOGW("render")
+                << "FrameArena force-free alias memory block: block=" << i
+                << ", vkMemory=0x" << std::hex
+                << static_cast<unsigned long long>(vkHandleToUint64(block.memory))
+                << std::dec
+                << ", refCount=" << block.refCount;
+            vkFreeMemory(m_device, block.memory, nullptr);
+            ++freedBlocks;
+        }
+
+        const bool hadState =
+            block.inUse ||
+            block.memory != VK_NULL_HANDLE ||
+            block.refCount != 0 ||
+            !block.passRanges.empty() ||
+            block.size != 0;
+        block = {};
+        if (hadState &&
+            std::find(m_freeAliasMemoryBlocks.begin(), m_freeAliasMemoryBlocks.end(), i) == m_freeAliasMemoryBlocks.end()) {
+            m_freeAliasMemoryBlocks.push_back(i);
+        }
+    }
+
+    if (freedBlocks > 0) {
+        VOX_LOGW("render")
+            << "FrameArena force-free released "
+            << freedBlocks
+            << " alias memory block(s)";
+    }
+}
+
 void FrameArena::destroyImageSlot(TransientImageHandle handle) {
     if (handle == kInvalidTransientImageHandle || handle >= m_imageSlots.size()) {
         return;
@@ -854,26 +1226,70 @@ void FrameArena::destroyImageSlot(TransientImageHandle handle) {
     if (!slot.inUse) {
         return;
     }
+    const uint32_t aliasMemoryBlock = slot.aliasMemoryBlock;
+    const bool usesAliasMemory = slot.usesAliasMemory;
+    const uint64_t imageHandleValue = vkHandleToUint64(slot.info.image);
+    const std::string imageName = slot.desc.debugName.empty()
+        ? ("frameArena.image[" + std::to_string(handle) + "]")
+        : slot.desc.debugName;
+    VOX_LOGD("render")
+        << "destroy image (FrameArena): handle=" << handle
+        << ", vkImage=0x" << std::hex << static_cast<unsigned long long>(imageHandleValue) << std::dec
+        << ", name=" << imageName
+        << ", aliasMemory=" << (usesAliasMemory ? "yes" : "no");
 
     if (slot.info.view != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
         vkDestroyImageView(m_device, slot.info.view, nullptr);
     }
-#if defined(VOXEL_HAS_VMA)
-    if (m_vmaAllocator != VK_NULL_HANDLE && slot.allocation != VK_NULL_HANDLE) {
-        vmaDestroyImage(m_vmaAllocator, slot.info.image, slot.allocation);
-    } else
-#endif
-    if (m_device != VK_NULL_HANDLE) {
-        if (slot.info.image != VK_NULL_HANDLE) {
+    if (usesAliasMemory) {
+        if (m_device != VK_NULL_HANDLE && slot.info.image != VK_NULL_HANDLE) {
+            trackDestroyedImage(slot.info.image);
             vkDestroyImage(m_device, slot.info.image, nullptr);
         }
-        if (slot.memory != VK_NULL_HANDLE) {
-            vkFreeMemory(m_device, slot.memory, nullptr);
+        if (aliasMemoryBlock != 0 && aliasMemoryBlock < m_aliasMemoryBlocks.size()) {
+            AliasMemoryBlock& block = m_aliasMemoryBlocks[aliasMemoryBlock];
+            if (block.inUse) {
+                if (releaseAliasBlockRef(block.refCount)) {
+                    if (m_device != VK_NULL_HANDLE && block.memory != VK_NULL_HANDLE) {
+                        vkFreeMemory(m_device, block.memory, nullptr);
+                    }
+                    block = {};
+                    m_freeAliasMemoryBlocks.push_back(aliasMemoryBlock);
+                }
+            }
+        }
+    } else {
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE && slot.allocation != VK_NULL_HANDLE) {
+            trackDestroyedImage(slot.info.image);
+            vmaDestroyImage(m_vmaAllocator, slot.info.image, slot.allocation);
+        } else
+#endif
+        if (m_device != VK_NULL_HANDLE) {
+            if (slot.info.image != VK_NULL_HANDLE) {
+                trackDestroyedImage(slot.info.image);
+                vkDestroyImage(m_device, slot.info.image, nullptr);
+            }
+            if (slot.memory != VK_NULL_HANDLE) {
+                vkFreeMemory(m_device, slot.memory, nullptr);
+            }
         }
     }
 
+    const uint64_t imageBytes =
+        static_cast<uint64_t>(slot.desc.extent.width) *
+        static_cast<uint64_t>(slot.desc.extent.height) *
+        static_cast<uint64_t>(std::max(1u, slot.desc.extent.depth));
     slot = {};
     m_freeImageSlots.push_back(handle);
+    if (m_residentStats.imageBytes >= imageBytes) {
+        m_residentStats.imageBytes -= imageBytes;
+    } else {
+        m_residentStats.imageBytes = 0;
+    }
+    if (m_residentStats.imageCount > 0) {
+        --m_residentStats.imageCount;
+    }
 }
 
 uint32_t FrameArena::findMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredProperties) const {

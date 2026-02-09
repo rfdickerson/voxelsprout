@@ -1,4 +1,4 @@
-# FrameArena Design (Renderer Foundation)
+ # FrameArena Design (Renderer Foundation)
 
 ## Purpose
 FrameArena provides deterministic, per-frame transient allocation for the Vulkan renderer pass chain:
@@ -79,12 +79,14 @@ This keeps reclamation deterministic and avoids freeing resources still in use b
 - AO intermediate targets are now per-frame-in-flight resources instead of swapchain-image-count resources.
 - Added pass lifetime tags and simple image alias reuse for non-overlapping pass ranges.
 - Migrated AO depth targets and HDR resolve post intermediate to `FrameArena` image allocation.
+- Exposed FrameArena stats in ImGui frame panel (per-frame allocations + resident arena usage + alias reuse count).
+- Upgraded image aliasing to memory-block aliasing (shared `VkDeviceMemory` across non-overlapping pass ranges).
+- Added a live ImGui alias table (resource name, pass range, alias block id, ref count, handle).
+- Added foundation tests for pass-range overlap and alias block refcount utilities.
 
 ### Next
-- Add pass lifetime tags (`SSAO`, `Shadow`, `Main`, `Post`, `UI`) for finer reuse.
-- Add alias planning for non-overlapping transient image lifetimes.
+- Expand alias planning beyond descriptor-match reuse to explicit virtual-resource scheduling.
 - Add resize-aware rebuild path for transient image pools.
-- Add debug counters to ImGui/frame logs for arena pressure.
 
 ## Why This Helps
 - Eliminates repetitive allocation/free patterns from frame code.
