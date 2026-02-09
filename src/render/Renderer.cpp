@@ -5812,8 +5812,8 @@ void Renderer::renderFrame(
             instance.tint[3] = 0.0f; // style 0 = pipe
             instance.extensions[0] = endpointState.startExtension;
             instance.extensions[1] = endpointState.endExtension;
-            instance.extensions[2] = 0.0f;
-            instance.extensions[3] = 0.0f;
+            instance.extensions[2] = 1.0f;
+            instance.extensions[3] = 1.0f;
             instances.push_back(instance);
         }
 
@@ -5834,8 +5834,9 @@ void Renderer::renderFrame(
             instance.tint[3] = 1.0f; // style 1 = conveyor
             instance.extensions[0] = 0.0f;
             instance.extensions[1] = 0.0f;
-            instance.extensions[2] = 0.0f;
-            instance.extensions[3] = 0.0f;
+            // Conveyors: 2x wider cross-span, 0.25x height.
+            instance.extensions[2] = 2.0f;
+            instance.extensions[3] = 0.25f;
             instances.push_back(instance);
         }
 
@@ -5856,8 +5857,9 @@ void Renderer::renderFrame(
             instance.tint[3] = 2.0f; // style 2 = track
             instance.extensions[0] = 0.0f;
             instance.extensions[1] = 0.0f;
-            instance.extensions[2] = 0.0f;
-            instance.extensions[3] = 0.0f;
+            // Tracks: 2x wider cross-span, 0.25x height.
+            instance.extensions[2] = 2.0f;
+            instance.extensions[3] = 0.25f;
             instances.push_back(instance);
         }
 
@@ -6610,8 +6612,16 @@ void Renderer::renderFrame(
         previewInstance.tint[3] = std::clamp(preview.pipeStyleId, 0.0f, 2.0f);
         previewInstance.extensions[0] = 0.0f;
         previewInstance.extensions[1] = 0.0f;
-        previewInstance.extensions[2] = 0.0f;
-        previewInstance.extensions[3] = 0.0f;
+        previewInstance.extensions[2] = 1.0f;
+        previewInstance.extensions[3] = 1.0f;
+        if (preview.pipeStyleId > 0.5f && preview.pipeStyleId < 1.5f) {
+            previewInstance.extensions[2] = 2.0f;
+            previewInstance.extensions[3] = 0.25f;
+        }
+        if (preview.pipeStyleId > 1.5f) {
+            previewInstance.extensions[2] = 2.0f;
+            previewInstance.extensions[3] = 0.25f;
+        }
 
         const std::optional<RingBufferSlice> previewInstanceSlice =
             m_uploadRing.allocate(sizeof(PipeInstance), static_cast<VkDeviceSize>(alignof(PipeInstance)));

@@ -5,7 +5,7 @@ layout(location = 1) in vec3 inLocalNormal;
 layout(location = 2) in vec4 inOriginLength; // xyz origin, w length
 layout(location = 3) in vec4 inAxisRadius;   // xyz axis, w radius
 layout(location = 4) in vec4 inTint;
-layout(location = 5) in vec4 inExtensions;   // x start extension, y end extension
+layout(location = 5) in vec4 inExtensions;   // x start extension, y end extension, z tangent scale, w bitangent scale
 
 layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 mvp;
@@ -49,6 +49,8 @@ void main() {
     const float pipeRadius = max(inAxisRadius.w, 0.02);
     const float startExtension = max(inExtensions.x, 0.0);
     const float endExtension = max(inExtensions.y, 0.0);
+    const float tangentScale = max(inExtensions.z, 0.01);
+    const float bitangentScale = max(inExtensions.w, 0.01);
     const float renderedLength = max(pipeLength + startExtension + endExtension, 0.05);
     const vec3 voxelCenter = inOriginLength.xyz + vec3(0.5);
     const vec3 segmentStart = voxelCenter - (axis * ((pipeLength * 0.5) + startExtension));
@@ -58,8 +60,8 @@ void main() {
     const vec3 worldPosition =
         segmentStart +
         (axis * worldAlong) +
-        (tangent * (inLocalPosition.x * pipeRadius)) +
-        (bitangent * (inLocalPosition.z * pipeRadius));
+        (tangent * (inLocalPosition.x * pipeRadius * tangentScale)) +
+        (bitangent * (inLocalPosition.z * pipeRadius * bitangentScale));
 
     const int cascadeIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 3);
     gl_Position = camera.lightViewProj[cascadeIndex] * vec4(worldPosition, 1.0);

@@ -5,7 +5,7 @@ layout(location = 1) in vec3 inLocalNormal;
 layout(location = 2) in vec4 inOriginLength; // xyz origin, w length
 layout(location = 3) in vec4 inAxisRadius;   // xyz axis, w radius
 layout(location = 4) in vec4 inTint;
-layout(location = 5) in vec4 inExtensions;   // x start extension, y end extension
+layout(location = 5) in vec4 inExtensions;   // x start extension, y end extension, z tangent scale, w bitangent scale
 
 layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 mvp;
@@ -51,6 +51,8 @@ void main() {
     const float pipeRadius = max(inAxisRadius.w, 0.02);
     const float startExtension = max(inExtensions.x, 0.0);
     const float endExtension = max(inExtensions.y, 0.0);
+    const float tangentScale = max(inExtensions.z, 0.01);
+    const float bitangentScale = max(inExtensions.w, 0.01);
     const float renderedLength = max(pipeLength + startExtension + endExtension, 0.05);
 
     const vec3 localPos = inLocalPosition;
@@ -64,12 +66,17 @@ void main() {
     const vec3 worldPosition =
         segmentStart +
         (axis * worldAlong) +
-        (tangent * (localPos.x * pipeRadius)) +
-        (bitangent * (localPos.z * pipeRadius));
+        (tangent * (localPos.x * pipeRadius * tangentScale)) +
+        (bitangent * (localPos.z * pipeRadius * bitangentScale));
+    const vec3 anisotropicLocalNormal = normalize(vec3(
+        localNormal.x / tangentScale,
+        localNormal.y,
+        localNormal.z / bitangentScale
+    ));
     const vec3 worldNormal = normalize(
-        (axis * localNormal.y) +
-        (tangent * localNormal.x) +
-        (bitangent * localNormal.z)
+        (axis * anisotropicLocalNormal.y) +
+        (tangent * anisotropicLocalNormal.x) +
+        (bitangent * anisotropicLocalNormal.z)
     );
 
     outWorldPosition = worldPosition;
