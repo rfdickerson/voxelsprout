@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <vulkan/vulkan.h>
@@ -126,6 +127,7 @@ struct FrameArenaStats {
     uint32_t transientBufferCount = 0;
     uint64_t transientImageBytes = 0;
     uint32_t transientImageCount = 0;
+    uint32_t transientImageAliasReuses = 0;
 };
 
 struct FrameArenaConfig {
@@ -142,6 +144,15 @@ enum class FrameArenaImageLifetime : uint8_t {
     FrameTransient = 1
 };
 
+enum class FrameArenaPass : uint8_t {
+    Unknown = 0,
+    Ssao = 1,
+    Shadow = 2,
+    Main = 3,
+    Post = 4,
+    Ui = 5
+};
+
 struct TransientImageDesc {
     VkImageType imageType = VK_IMAGE_TYPE_2D;
     VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -155,6 +166,9 @@ struct TransientImageDesc {
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
     VkImageTiling tiling = VK_IMAGE_TILING_OPTIMAL;
     VkImageLayout initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    FrameArenaPass firstPass = FrameArenaPass::Unknown;
+    FrameArenaPass lastPass = FrameArenaPass::Unknown;
+    bool aliasEligible = true;
 };
 
 struct TransientImageInfo {
@@ -221,6 +235,8 @@ private:
         VmaAllocation allocation = VK_NULL_HANDLE;
 #endif
         VkDeviceMemory memory = VK_NULL_HANDLE;
+        TransientImageDesc desc{};
+        std::vector<std::pair<FrameArenaPass, FrameArenaPass>> passRanges;
         bool inUse = false;
     };
     std::vector<ImageSlot> m_imageSlots;

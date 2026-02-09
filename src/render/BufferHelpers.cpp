@@ -591,6 +591,74 @@ TransientImageHandle FrameArena::createTransientImage(
         return kInvalidTransientImageHandle;
     }
 
+    auto passIndex = [](FrameArenaPass pass) -> int {
+        return static_cast<int>(pass);
+    };
+    auto validPassRange = [&](FrameArenaPass first, FrameArenaPass last) -> bool {
+        if (first == FrameArenaPass::Unknown || last == FrameArenaPass::Unknown) {
+            return false;
+        }
+        return passIndex(first) <= passIndex(last);
+    };
+    auto rangesOverlap = [&](FrameArenaPass firstA, FrameArenaPass lastA, FrameArenaPass firstB, FrameArenaPass lastB) -> bool {
+        return passIndex(firstA) <= passIndex(lastB) && passIndex(firstB) <= passIndex(lastA);
+    };
+    const bool hasPassRange = validPassRange(desc.firstPass, desc.lastPass);
+
+    auto imageDescMatches = [](const TransientImageDesc& lhs, const TransientImageDesc& rhs) -> bool {
+        return lhs.imageType == rhs.imageType &&
+               lhs.viewType == rhs.viewType &&
+               lhs.format == rhs.format &&
+               lhs.extent.width == rhs.extent.width &&
+               lhs.extent.height == rhs.extent.height &&
+               lhs.extent.depth == rhs.extent.depth &&
+               lhs.usage == rhs.usage &&
+               lhs.aspectMask == rhs.aspectMask &&
+               lhs.flags == rhs.flags &&
+               lhs.mipLevels == rhs.mipLevels &&
+               lhs.arrayLayers == rhs.arrayLayers &&
+               lhs.samples == rhs.samples &&
+               lhs.tiling == rhs.tiling;
+    };
+
+    if (desc.aliasEligible && hasPassRange) {
+        for (uint32_t i = 1; i < m_imageSlots.size(); ++i) {
+            ImageSlot& slot = m_imageSlots[i];
+            if (!slot.inUse || !slot.desc.aliasEligible) {
+                continue;
+            }
+            if (!imageDescMatches(slot.desc, desc)) {
+                continue;
+            }
+
+            bool overlapsExistingRange = false;
+            for (const auto& reservedRange : slot.passRanges) {
+                if (rangesOverlap(desc.firstPass, desc.lastPass, reservedRange.first, reservedRange.second)) {
+                    overlapsExistingRange = true;
+                    break;
+                }
+            }
+            if (overlapsExistingRange) {
+                continue;
+            }
+
+            slot.passRanges.emplace_back(desc.firstPass, desc.lastPass);
+            if (lifetime == FrameArenaImageLifetime::FrameTransient && m_activeFrame < m_frameTransientImages.size()) {
+                auto& frameImages = m_frameTransientImages[m_activeFrame];
+                if (std::find(frameImages.begin(), frameImages.end(), i) == frameImages.end()) {
+                    frameImages.push_back(i);
+                }
+            }
+            if (m_activeFrame < m_frameStats.size()) {
+                ++m_frameStats[m_activeFrame].transientImageAliasReuses;
+            }
+            std::cerr
+                << "[render] alias image (FrameArena): handle=" << i
+                << ", passRange=[" << passIndex(desc.firstPass) << "," << passIndex(desc.lastPass) << "]\n";
+            return i;
+        }
+    }
+
     VkImageCreateInfo imageCreateInfo{};
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageCreateInfo.flags = desc.flags;
@@ -704,6 +772,11 @@ TransientImageHandle FrameArena::createTransientImage(
     slot.allocation = allocation;
 #endif
     slot.memory = memory;
+    slot.desc = desc;
+    slot.passRanges.clear();
+    if (hasPassRange) {
+        slot.passRanges.emplace_back(desc.firstPass, desc.lastPass);
+    }
     slot.inUse = true;
 
     if (lifetime == FrameArenaImageLifetime::FrameTransient && m_activeFrame < m_frameTransientImages.size()) {

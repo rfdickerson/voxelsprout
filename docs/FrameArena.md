@@ -54,6 +54,8 @@ Implemented in `src/render/BufferHelpers.hpp` and `src/render/BufferHelpers.cpp`
 - `FrameArena::shutdown(...)`
 - `FrameArena::activeStats()`
 
+`TransientImageDesc` now includes pass tags (`firstPass`, `lastPass`) and alias eligibility.
+
 The renderer now uses `FrameArena` for upload allocations.
 
 ## Lifetime Contract
@@ -75,6 +77,8 @@ This keeps reclamation deterministic and avoids freeing resources still in use b
 - Added transient image API in `FrameArena` (VMA-backed when available).
 - Migrated AO normal-depth + SSAO raw/blur targets to `FrameArena` image allocation.
 - AO intermediate targets are now per-frame-in-flight resources instead of swapchain-image-count resources.
+- Added pass lifetime tags and simple image alias reuse for non-overlapping pass ranges.
+- Migrated AO depth targets and HDR resolve post intermediate to `FrameArena` image allocation.
 
 ### Next
 - Add pass lifetime tags (`SSAO`, `Shadow`, `Main`, `Post`, `UI`) for finer reuse.

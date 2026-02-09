@@ -231,6 +231,7 @@ private:
     std::vector<VkImage> m_hdrResolveImages;
     std::vector<VkDeviceMemory> m_hdrResolveImageMemories;
     std::vector<VkImageView> m_hdrResolveImageViews;
+    std::vector<TransientImageHandle> m_hdrResolveTransientHandles;
     std::vector<bool> m_hdrResolveImageInitialized;
     VkSampler m_hdrResolveSampler = VK_NULL_HANDLE;
     std::vector<VkImage> m_depthImages;
@@ -244,6 +245,7 @@ private:
     std::vector<VkImage> m_aoDepthImages;
     std::vector<VkDeviceMemory> m_aoDepthImageMemories;
     std::vector<VkImageView> m_aoDepthImageViews;
+    std::vector<TransientImageHandle> m_aoDepthTransientHandles;
     std::vector<bool> m_aoDepthImageInitialized;
     std::vector<VkImage> m_ssaoRawImages;
     std::vector<VkDeviceMemory> m_ssaoRawImageMemories;

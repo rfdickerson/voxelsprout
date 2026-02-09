@@ -2731,7 +2731,9 @@ bool Renderer::createAoTargets() {
                                   std::vector<VkDeviceMemory>& outMemories,
                                   std::vector<VkImageView>& outViews,
                                   std::vector<TransientImageHandle>& outHandles,
-                                  const char* debugLabel) -> bool {
+                                  const char* debugLabel,
+                                  FrameArenaPass firstPass,
+                                  FrameArenaPass lastPass) -> bool {
         outImages.assign(frameTargetCount, VK_NULL_HANDLE);
         outMemories.assign(frameTargetCount, VK_NULL_HANDLE);
         outViews.assign(frameTargetCount, VK_NULL_HANDLE);
@@ -2749,6 +2751,8 @@ bool Renderer::createAoTargets() {
             imageDesc.samples = VK_SAMPLE_COUNT_1_BIT;
             imageDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
             imageDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            imageDesc.firstPass = firstPass;
+            imageDesc.lastPass = lastPass;
             const TransientImageHandle handle = m_frameArena.createTransientImage(
                 imageDesc,
                 FrameArenaImageLifetime::Persistent
@@ -2781,7 +2785,9 @@ bool Renderer::createAoTargets() {
             m_normalDepthImageMemories,
             m_normalDepthImageViews,
             m_normalDepthTransientHandles,
-            "vkCreateImage(normalDepth)"
+            "vkCreateImage(normalDepth)",
+            FrameArenaPass::Ssao,
+            FrameArenaPass::Ssao
         )) {
         return false;
     }
@@ -2789,70 +2795,39 @@ bool Renderer::createAoTargets() {
     m_aoDepthImages.assign(imageCount, VK_NULL_HANDLE);
     m_aoDepthImageMemories.assign(imageCount, VK_NULL_HANDLE);
     m_aoDepthImageViews.assign(imageCount, VK_NULL_HANDLE);
+    m_aoDepthTransientHandles.assign(imageCount, kInvalidTransientImageHandle);
     for (uint32_t i = 0; i < imageCount; ++i) {
-        VkImageCreateInfo imageCreateInfo{};
-        imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageCreateInfo.format = m_depthFormat;
-        imageCreateInfo.extent.width = m_aoExtent.width;
-        imageCreateInfo.extent.height = m_aoExtent.height;
-        imageCreateInfo.extent.depth = 1;
-        imageCreateInfo.mipLevels = 1;
-        imageCreateInfo.arrayLayers = 1;
-        imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_aoDepthImages[i]);
-        if (imageResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImage(aoDepth)", imageResult);
-            return false;
-        }
-
-        VkMemoryRequirements memoryRequirements{};
-        vkGetImageMemoryRequirements(m_device, m_aoDepthImages[i], &memoryRequirements);
-        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
-            m_physicalDevice,
-            memoryRequirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        TransientImageDesc depthDesc{};
+        depthDesc.imageType = VK_IMAGE_TYPE_2D;
+        depthDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        depthDesc.format = m_depthFormat;
+        depthDesc.extent = {m_aoExtent.width, m_aoExtent.height, 1u};
+        depthDesc.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        depthDesc.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        depthDesc.mipLevels = 1;
+        depthDesc.arrayLayers = 1;
+        depthDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+        depthDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
+        depthDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depthDesc.firstPass = FrameArenaPass::Ssao;
+        depthDesc.lastPass = FrameArenaPass::Ssao;
+        const TransientImageHandle depthHandle = m_frameArena.createTransientImage(
+            depthDesc,
+            FrameArenaImageLifetime::Persistent
         );
-        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-            std::cerr << "[render] no memory type for AO depth image\n";
+        if (depthHandle == kInvalidTransientImageHandle) {
+            std::cerr << "[render] failed creating AO depth transient image\n";
             return false;
         }
-
-        VkMemoryAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = memoryRequirements.size;
-        allocateInfo.memoryTypeIndex = memoryTypeIndex;
-        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_aoDepthImageMemories[i]);
-        if (allocResult != VK_SUCCESS) {
-            logVkFailure("vkAllocateMemory(aoDepth)", allocResult);
+        const TransientImageInfo* depthInfo = m_frameArena.getTransientImage(depthHandle);
+        if (depthInfo == nullptr || depthInfo->image == VK_NULL_HANDLE || depthInfo->view == VK_NULL_HANDLE) {
+            std::cerr << "[render] invalid AO depth transient image info\n";
             return false;
         }
-
-        const VkResult bindResult = vkBindImageMemory(m_device, m_aoDepthImages[i], m_aoDepthImageMemories[i], 0);
-        if (bindResult != VK_SUCCESS) {
-            logVkFailure("vkBindImageMemory(aoDepth)", bindResult);
-            return false;
-        }
-
-        VkImageViewCreateInfo viewCreateInfo{};
-        viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewCreateInfo.image = m_aoDepthImages[i];
-        viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewCreateInfo.format = m_depthFormat;
-        viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        viewCreateInfo.subresourceRange.baseMipLevel = 0;
-        viewCreateInfo.subresourceRange.levelCount = 1;
-        viewCreateInfo.subresourceRange.baseArrayLayer = 0;
-        viewCreateInfo.subresourceRange.layerCount = 1;
-        const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_aoDepthImageViews[i]);
-        if (viewResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImageView(aoDepth)", viewResult);
-            return false;
-        }
+        m_aoDepthTransientHandles[i] = depthHandle;
+        m_aoDepthImages[i] = depthInfo->image;
+        m_aoDepthImageViews[i] = depthInfo->view;
+        m_aoDepthImageMemories[i] = VK_NULL_HANDLE;
     }
 
     if (!createColorTargets(
@@ -2861,7 +2836,9 @@ bool Renderer::createAoTargets() {
             m_ssaoRawImageMemories,
             m_ssaoRawImageViews,
             m_ssaoRawTransientHandles,
-            "vkCreateImage(ssaoRaw)"
+            "vkCreateImage(ssaoRaw)",
+            FrameArenaPass::Ssao,
+            FrameArenaPass::Ssao
         )) {
         return false;
     }
@@ -2871,7 +2848,9 @@ bool Renderer::createAoTargets() {
             m_ssaoBlurImageMemories,
             m_ssaoBlurImageViews,
             m_ssaoBlurTransientHandles,
-            "vkCreateImage(ssaoBlur)"
+            "vkCreateImage(ssaoBlur)",
+            FrameArenaPass::Ssao,
+            FrameArenaPass::Main
         )) {
         return false;
     }
@@ -2932,80 +2911,45 @@ bool Renderer::createHdrResolveTargets() {
         return false;
     }
 
-    const uint32_t imageCount = static_cast<uint32_t>(m_swapchainImages.size());
-    m_hdrResolveImages.assign(imageCount, VK_NULL_HANDLE);
-    m_hdrResolveImageMemories.assign(imageCount, VK_NULL_HANDLE);
-    m_hdrResolveImageViews.assign(imageCount, VK_NULL_HANDLE);
-    m_hdrResolveImageInitialized.assign(imageCount, false);
+    const uint32_t frameTargetCount = kMaxFramesInFlight;
+    m_hdrResolveImages.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_hdrResolveImageMemories.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_hdrResolveImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_hdrResolveTransientHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
+    m_hdrResolveImageInitialized.assign(frameTargetCount, false);
 
-    for (uint32_t i = 0; i < imageCount; ++i) {
-        VkImageCreateInfo imageCreateInfo{};
-        imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageCreateInfo.format = m_hdrColorFormat;
-        imageCreateInfo.extent.width = m_swapchainExtent.width;
-        imageCreateInfo.extent.height = m_swapchainExtent.height;
-        imageCreateInfo.extent.depth = 1;
-        imageCreateInfo.mipLevels = 1;
-        imageCreateInfo.arrayLayers = 1;
-        imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageCreateInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_hdrResolveImages[i]);
-        if (imageResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImage(hdrResolve)", imageResult);
-            return false;
-        }
-
-        VkMemoryRequirements memoryRequirements{};
-        vkGetImageMemoryRequirements(m_device, m_hdrResolveImages[i], &memoryRequirements);
-
-        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
-            m_physicalDevice,
-            memoryRequirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+    for (uint32_t i = 0; i < frameTargetCount; ++i) {
+        TransientImageDesc hdrResolveDesc{};
+        hdrResolveDesc.imageType = VK_IMAGE_TYPE_2D;
+        hdrResolveDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        hdrResolveDesc.format = m_hdrColorFormat;
+        hdrResolveDesc.extent = {m_swapchainExtent.width, m_swapchainExtent.height, 1u};
+        hdrResolveDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        hdrResolveDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        hdrResolveDesc.mipLevels = 1;
+        hdrResolveDesc.arrayLayers = 1;
+        hdrResolveDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+        hdrResolveDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
+        hdrResolveDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        hdrResolveDesc.firstPass = FrameArenaPass::Main;
+        hdrResolveDesc.lastPass = FrameArenaPass::Post;
+        const TransientImageHandle hdrResolveHandle = m_frameArena.createTransientImage(
+            hdrResolveDesc,
+            FrameArenaImageLifetime::Persistent
         );
-        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-            std::cerr << "[render] no memory type for HDR resolve image\n";
+        if (hdrResolveHandle == kInvalidTransientImageHandle) {
+            std::cerr << "[render] failed creating HDR resolve transient image\n";
             return false;
         }
-
-        VkMemoryAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = memoryRequirements.size;
-        allocateInfo.memoryTypeIndex = memoryTypeIndex;
-
-        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_hdrResolveImageMemories[i]);
-        if (allocResult != VK_SUCCESS) {
-            logVkFailure("vkAllocateMemory(hdrResolve)", allocResult);
+        const TransientImageInfo* hdrResolveInfo = m_frameArena.getTransientImage(hdrResolveHandle);
+        if (hdrResolveInfo == nullptr || hdrResolveInfo->image == VK_NULL_HANDLE || hdrResolveInfo->view == VK_NULL_HANDLE) {
+            std::cerr << "[render] invalid HDR resolve transient image info\n";
             return false;
         }
-
-        const VkResult bindResult = vkBindImageMemory(m_device, m_hdrResolveImages[i], m_hdrResolveImageMemories[i], 0);
-        if (bindResult != VK_SUCCESS) {
-            logVkFailure("vkBindImageMemory(hdrResolve)", bindResult);
-            return false;
-        }
-
-        VkImageViewCreateInfo viewCreateInfo{};
-        viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewCreateInfo.image = m_hdrResolveImages[i];
-        viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewCreateInfo.format = m_hdrColorFormat;
-        viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewCreateInfo.subresourceRange.baseMipLevel = 0;
-        viewCreateInfo.subresourceRange.levelCount = 1;
-        viewCreateInfo.subresourceRange.baseArrayLayer = 0;
-        viewCreateInfo.subresourceRange.layerCount = 1;
-
-        const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_hdrResolveImageViews[i]);
-        if (viewResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImageView(hdrResolve)", viewResult);
-            return false;
-        }
+        m_hdrResolveTransientHandles[i] = hdrResolveHandle;
+        m_hdrResolveImages[i] = hdrResolveInfo->image;
+        m_hdrResolveImageViews[i] = hdrResolveInfo->view;
+        m_hdrResolveImageMemories[i] = VK_NULL_HANDLE;
     }
 
     if (m_hdrResolveSampler == VK_NULL_HANDLE) {
@@ -5689,7 +5633,7 @@ void Renderer::renderFrame(
 
     VkDescriptorImageInfo hdrSceneImageInfo{};
     hdrSceneImageInfo.sampler = m_hdrResolveSampler;
-    hdrSceneImageInfo.imageView = m_hdrResolveImageViews[imageIndex];
+    hdrSceneImageInfo.imageView = m_hdrResolveImageViews[aoFrameIndex];
     hdrSceneImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo diffuseTextureImageInfo{};
@@ -6460,10 +6404,10 @@ void Renderer::renderFrame(
             VK_IMAGE_ASPECT_COLOR_BIT
         );
     }
-    const bool hdrResolveInitialized = m_hdrResolveImageInitialized[imageIndex];
+    const bool hdrResolveInitialized = m_hdrResolveImageInitialized[aoFrameIndex];
     transitionImageLayout(
         commandBuffer,
-        m_hdrResolveImages[imageIndex],
+        m_hdrResolveImages[aoFrameIndex],
         hdrResolveInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         hdrResolveInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
@@ -6498,7 +6442,7 @@ void Renderer::renderFrame(
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     colorAttachment.clearValue = clearValue;
     colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-    colorAttachment.resolveImageView = m_hdrResolveImageViews[imageIndex];
+    colorAttachment.resolveImageView = m_hdrResolveImageViews[aoFrameIndex];
     colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     VkClearValue depthClearValue{};
@@ -6826,7 +6770,7 @@ void Renderer::renderFrame(
 
     transitionImageLayout(
         commandBuffer,
-        m_hdrResolveImages[imageIndex],
+        m_hdrResolveImages[aoFrameIndex],
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -6970,7 +6914,7 @@ void Renderer::renderFrame(
     m_shadowDepthInitialized = true;
     m_swapchainImageInitialized[imageIndex] = true;
     m_msaaColorImageInitialized[imageIndex] = true;
-    m_hdrResolveImageInitialized[imageIndex] = true;
+    m_hdrResolveImageInitialized[aoFrameIndex] = true;
 
     if (
         acquireResult == VK_SUBOPTIMAL_KHR ||
@@ -7036,26 +6980,15 @@ void Renderer::destroyHdrResolveTargets() {
         m_hdrResolveSampler = VK_NULL_HANDLE;
     }
 
-    for (VkImageView imageView : m_hdrResolveImageViews) {
-        if (imageView != VK_NULL_HANDLE) {
-            vkDestroyImageView(m_device, imageView, nullptr);
-        }
-    }
     m_hdrResolveImageViews.clear();
-
-    for (VkImage image : m_hdrResolveImages) {
-        if (image != VK_NULL_HANDLE) {
-            vkDestroyImage(m_device, image, nullptr);
-        }
-    }
     m_hdrResolveImages.clear();
-
-    for (VkDeviceMemory memory : m_hdrResolveImageMemories) {
-        if (memory != VK_NULL_HANDLE) {
-            vkFreeMemory(m_device, memory, nullptr);
+    m_hdrResolveImageMemories.clear();
+    for (TransientImageHandle handle : m_hdrResolveTransientHandles) {
+        if (handle != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(handle);
         }
     }
-    m_hdrResolveImageMemories.clear();
+    m_hdrResolveTransientHandles.clear();
     m_hdrResolveImageInitialized.clear();
 }
 
@@ -7139,23 +7072,23 @@ void Renderer::destroyAoTargets() {
     m_ssaoRawImageInitialized.clear();
 
     for (VkImageView imageView : m_aoDepthImageViews) {
-        if (imageView != VK_NULL_HANDLE) {
-            vkDestroyImageView(m_device, imageView, nullptr);
-        }
+        (void)imageView;
     }
     m_aoDepthImageViews.clear();
     for (VkImage image : m_aoDepthImages) {
-        if (image != VK_NULL_HANDLE) {
-            vkDestroyImage(m_device, image, nullptr);
-        }
+        (void)image;
     }
     m_aoDepthImages.clear();
     for (VkDeviceMemory memory : m_aoDepthImageMemories) {
-        if (memory != VK_NULL_HANDLE) {
-            vkFreeMemory(m_device, memory, nullptr);
-        }
+        (void)memory;
     }
     m_aoDepthImageMemories.clear();
+    for (TransientImageHandle handle : m_aoDepthTransientHandles) {
+        if (handle != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(handle);
+        }
+    }
+    m_aoDepthTransientHandles.clear();
     m_aoDepthImageInitialized.clear();
 
     m_normalDepthImageViews.clear();
