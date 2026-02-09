@@ -300,6 +300,8 @@ private:
     BufferHandle m_previewIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_pipeVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_pipeIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_transportVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_transportIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_shadowVoxelBufferHandle = kInvalidBufferHandle;
     VkBufferView m_shadowVoxelBufferView = VK_NULL_HANDLE;
     uint32_t m_shadowVoxelGridSizeX = 0;
@@ -312,6 +314,7 @@ private:
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     uint32_t m_previewIndexCount = 0;
     uint32_t m_pipeIndexCount = 0;
+    uint32_t m_transportIndexCount = 0;
     VkImage m_diffuseTextureImage = VK_NULL_HANDLE;
     VkDeviceMemory m_diffuseTextureMemory = VK_NULL_HANDLE;
     VkImageView m_diffuseTextureImageView = VK_NULL_HANDLE;

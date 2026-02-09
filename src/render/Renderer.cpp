@@ -122,11 +122,15 @@ world::ChunkMeshData buildSingleVoxelPreviewMesh(
     return mesh;
 }
 
-PipeMeshData buildPipeVoxelMesh() {
-    PipeMeshData mesh{};
-    mesh.vertices.reserve(24u);
-    mesh.indices.reserve(36u);
-
+void appendBoxMesh(
+    PipeMeshData& mesh,
+    float minX,
+    float minY,
+    float minZ,
+    float maxX,
+    float maxY,
+    float maxZ
+) {
     auto appendFace = [&mesh](
                           const std::array<std::array<float, 3>, 4>& corners,
                           const std::array<float, 3>& normal
@@ -150,105 +154,140 @@ PipeMeshData buildPipeVoxelMesh() {
         mesh.indices.push_back(base + 3u);
     };
 
-    struct BoxFaceMask {
-        bool posX = true;
-        bool negX = true;
-        bool posY = true;
-        bool negY = true;
-        bool posZ = true;
-        bool negZ = true;
-    };
+    appendFace(
+        {{
+            {{maxX, minY, minZ}},
+            {{maxX, maxY, minZ}},
+            {{maxX, maxY, maxZ}},
+            {{maxX, minY, maxZ}},
+        }},
+        {{1.0f, 0.0f, 0.0f}}
+    );
+    appendFace(
+        {{
+            {{minX, minY, maxZ}},
+            {{minX, maxY, maxZ}},
+            {{minX, maxY, minZ}},
+            {{minX, minY, minZ}},
+        }},
+        {{-1.0f, 0.0f, 0.0f}}
+    );
+    appendFace(
+        {{
+            {{minX, maxY, minZ}},
+            {{minX, maxY, maxZ}},
+            {{maxX, maxY, maxZ}},
+            {{maxX, maxY, minZ}},
+        }},
+        {{0.0f, 1.0f, 0.0f}}
+    );
+    appendFace(
+        {{
+            {{minX, minY, maxZ}},
+            {{minX, minY, minZ}},
+            {{maxX, minY, minZ}},
+            {{maxX, minY, maxZ}},
+        }},
+        {{0.0f, -1.0f, 0.0f}}
+    );
+    appendFace(
+        {{
+            {{minX, minY, maxZ}},
+            {{maxX, minY, maxZ}},
+            {{maxX, maxY, maxZ}},
+            {{minX, maxY, maxZ}},
+        }},
+        {{0.0f, 0.0f, 1.0f}}
+    );
+    appendFace(
+        {{
+            {{maxX, minY, minZ}},
+            {{minX, minY, minZ}},
+            {{minX, maxY, minZ}},
+            {{maxX, maxY, minZ}},
+        }},
+        {{0.0f, 0.0f, -1.0f}}
+    );
+}
 
-    auto appendBox = [&appendFace](
-                         float minX,
-                         float minY,
-                         float minZ,
-                         float maxX,
-                         float maxY,
-                         float maxZ,
-                         const BoxFaceMask& faceMask
-                     ) {
-        if (faceMask.posX) {
-            appendFace(
-                {{
-                    {{maxX, minY, minZ}},
-                    {{maxX, maxY, minZ}},
-                    {{maxX, maxY, maxZ}},
-                    {{maxX, minY, maxZ}},
-                }},
-                {{1.0f, 0.0f, 0.0f}}
-            );
-        }
-        if (faceMask.negX) {
-            appendFace(
-                {{
-                    {{minX, minY, maxZ}},
-                    {{minX, maxY, maxZ}},
-                    {{minX, maxY, minZ}},
-                    {{minX, minY, minZ}},
-                }},
-                {{-1.0f, 0.0f, 0.0f}}
-            );
-        }
-        if (faceMask.posY) {
-            appendFace(
-                {{
-                    {{minX, maxY, minZ}},
-                    {{minX, maxY, maxZ}},
-                    {{maxX, maxY, maxZ}},
-                    {{maxX, maxY, minZ}},
-                }},
-                {{0.0f, 1.0f, 0.0f}}
-            );
-        }
-        if (faceMask.negY) {
-            appendFace(
-                {{
-                    {{minX, minY, maxZ}},
-                    {{minX, minY, minZ}},
-                    {{maxX, minY, minZ}},
-                    {{maxX, minY, maxZ}},
-                }},
-                {{0.0f, -1.0f, 0.0f}}
-            );
-        }
-        if (faceMask.posZ) {
-            appendFace(
-                {{
-                    {{minX, minY, maxZ}},
-                    {{maxX, minY, maxZ}},
-                    {{maxX, maxY, maxZ}},
-                    {{minX, maxY, maxZ}},
-                }},
-                {{0.0f, 0.0f, 1.0f}}
-            );
-        }
-        if (faceMask.negZ) {
-            appendFace(
-                {{
-                    {{maxX, minY, minZ}},
-                    {{minX, minY, minZ}},
-                    {{minX, maxY, minZ}},
-                    {{maxX, maxY, minZ}},
-                }},
-                {{0.0f, 0.0f, -1.0f}}
-            );
-        }
-    };
-
-    // Local pipe space:
-    // - y: segment start (0.0) to segment end (1.0)
-    // - x/z: radial extent, scaled by per-instance pipe radius in shader.
-    // Each segment is a single cuboid body; no per-segment endcaps.
-    appendBox(
+PipeMeshData buildTransportBoxMesh() {
+    PipeMeshData mesh{};
+    mesh.vertices.reserve(24u);
+    mesh.indices.reserve(36u);
+    appendBoxMesh(
+        mesh,
         -kPipeTransferHalfExtent,
         0.0f,
         -kPipeTransferHalfExtent,
         kPipeTransferHalfExtent,
         1.0f,
-        kPipeTransferHalfExtent,
-        BoxFaceMask{}
+        kPipeTransferHalfExtent
     );
+    return mesh;
+}
+
+PipeMeshData buildPipeCylinderMesh() {
+    PipeMeshData mesh{};
+    constexpr std::uint32_t kSegments = 16u;
+    mesh.vertices.reserve(static_cast<std::size_t>(kSegments * 4u + 2u));
+    mesh.indices.reserve(static_cast<std::size_t>(kSegments * 12u));
+
+    const float radius = kPipeTransferHalfExtent;
+    const float twoPi = 6.28318530718f;
+
+    for (std::uint32_t i = 0; i < kSegments; ++i) {
+        const float t0 = (static_cast<float>(i) / static_cast<float>(kSegments)) * twoPi;
+        const float t1 = (static_cast<float>(i + 1u) / static_cast<float>(kSegments)) * twoPi;
+        const float x0 = std::cos(t0) * radius;
+        const float z0 = std::sin(t0) * radius;
+        const float x1 = std::cos(t1) * radius;
+        const float z1 = std::sin(t1) * radius;
+
+        // Side quad
+        const std::uint32_t sideBase = static_cast<std::uint32_t>(mesh.vertices.size());
+        PipeMeshData::Vertex v0{{x0, 0.0f, z0}, {std::cos(t0), 0.0f, std::sin(t0)}};
+        PipeMeshData::Vertex v1{{x0, 1.0f, z0}, {std::cos(t0), 0.0f, std::sin(t0)}};
+        PipeMeshData::Vertex v2{{x1, 1.0f, z1}, {std::cos(t1), 0.0f, std::sin(t1)}};
+        PipeMeshData::Vertex v3{{x1, 0.0f, z1}, {std::cos(t1), 0.0f, std::sin(t1)}};
+        mesh.vertices.push_back(v0);
+        mesh.vertices.push_back(v1);
+        mesh.vertices.push_back(v2);
+        mesh.vertices.push_back(v3);
+        mesh.indices.push_back(sideBase + 0u);
+        mesh.indices.push_back(sideBase + 1u);
+        mesh.indices.push_back(sideBase + 2u);
+        mesh.indices.push_back(sideBase + 0u);
+        mesh.indices.push_back(sideBase + 2u);
+        mesh.indices.push_back(sideBase + 3u);
+    }
+
+    const std::uint32_t bottomCenter = static_cast<std::uint32_t>(mesh.vertices.size());
+    mesh.vertices.push_back(PipeMeshData::Vertex{{0.0f, 0.0f, 0.0f}, {0.0f, -1.0f, 0.0f}});
+    const std::uint32_t topCenter = static_cast<std::uint32_t>(mesh.vertices.size());
+    mesh.vertices.push_back(PipeMeshData::Vertex{{0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}});
+
+    for (std::uint32_t i = 0; i < kSegments; ++i) {
+        const float t0 = (static_cast<float>(i) / static_cast<float>(kSegments)) * twoPi;
+        const float t1 = (static_cast<float>(i + 1u) / static_cast<float>(kSegments)) * twoPi;
+        const float x0 = std::cos(t0) * radius;
+        const float z0 = std::sin(t0) * radius;
+        const float x1 = std::cos(t1) * radius;
+        const float z1 = std::sin(t1) * radius;
+
+        const std::uint32_t bottomBase = static_cast<std::uint32_t>(mesh.vertices.size());
+        mesh.vertices.push_back(PipeMeshData::Vertex{{x0, 0.0f, z0}, {0.0f, -1.0f, 0.0f}});
+        mesh.vertices.push_back(PipeMeshData::Vertex{{x1, 0.0f, z1}, {0.0f, -1.0f, 0.0f}});
+        mesh.indices.push_back(bottomCenter);
+        mesh.indices.push_back(bottomBase + 1u);
+        mesh.indices.push_back(bottomBase + 0u);
+
+        const std::uint32_t topBase = static_cast<std::uint32_t>(mesh.vertices.size());
+        mesh.vertices.push_back(PipeMeshData::Vertex{{x0, 1.0f, z0}, {0.0f, 1.0f, 0.0f}});
+        mesh.vertices.push_back(PipeMeshData::Vertex{{x1, 1.0f, z1}, {0.0f, 1.0f, 0.0f}});
+        mesh.indices.push_back(topCenter);
+        mesh.indices.push_back(topBase + 0u);
+        mesh.indices.push_back(topBase + 1u);
+    }
 
     return mesh;
 }
@@ -1840,41 +1879,69 @@ bool Renderer::createTransferResources() {
 }
 
 bool Renderer::createPipeBuffers() {
-    if (m_pipeVertexBufferHandle != kInvalidBufferHandle && m_pipeIndexBufferHandle != kInvalidBufferHandle) {
+    if (m_pipeVertexBufferHandle != kInvalidBufferHandle &&
+        m_pipeIndexBufferHandle != kInvalidBufferHandle &&
+        m_transportVertexBufferHandle != kInvalidBufferHandle &&
+        m_transportIndexBufferHandle != kInvalidBufferHandle) {
         return true;
     }
 
-    const PipeMeshData mesh = buildPipeVoxelMesh();
-    if (mesh.vertices.empty() || mesh.indices.empty()) {
-        std::cerr << "[render] pipe mesh build failed\n";
+    const PipeMeshData pipeMesh = buildPipeCylinderMesh();
+    const PipeMeshData transportMesh = buildTransportBoxMesh();
+    if (pipeMesh.vertices.empty() || pipeMesh.indices.empty()) {
+        std::cerr << "[render] pipe cylinder mesh build failed\n";
+        return false;
+    }
+    if (transportMesh.vertices.empty() || transportMesh.indices.empty()) {
+        std::cerr << "[render] transport box mesh build failed\n";
         return false;
     }
 
-    BufferCreateDesc vertexCreateDesc{};
-    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(PipeMeshData::Vertex));
-    vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    vertexCreateDesc.initialData = mesh.vertices.data();
-    m_pipeVertexBufferHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
-    if (m_pipeVertexBufferHandle == kInvalidBufferHandle) {
-        std::cerr << "[render] pipe vertex buffer allocation failed\n";
+    auto createMeshBuffers = [&](const PipeMeshData& mesh, BufferHandle& outVertex, BufferHandle& outIndex, const char* label) -> bool {
+        if (outVertex != kInvalidBufferHandle || outIndex != kInvalidBufferHandle) {
+            return true;
+        }
+        BufferCreateDesc vertexCreateDesc{};
+        vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(PipeMeshData::Vertex));
+        vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        vertexCreateDesc.initialData = mesh.vertices.data();
+        outVertex = m_bufferAllocator.createBuffer(vertexCreateDesc);
+        if (outVertex == kInvalidBufferHandle) {
+            std::cerr << "[render] " << label << " vertex buffer allocation failed\n";
+            return false;
+        }
+
+        BufferCreateDesc indexCreateDesc{};
+        indexCreateDesc.size = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
+        indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+        indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        indexCreateDesc.initialData = mesh.indices.data();
+        outIndex = m_bufferAllocator.createBuffer(indexCreateDesc);
+        if (outIndex == kInvalidBufferHandle) {
+            std::cerr << "[render] " << label << " index buffer allocation failed\n";
+            m_bufferAllocator.destroyBuffer(outVertex);
+            outVertex = kInvalidBufferHandle;
+            return false;
+        }
+        return true;
+    };
+
+    if (!createMeshBuffers(pipeMesh, m_pipeVertexBufferHandle, m_pipeIndexBufferHandle, "pipe")) {
+        return false;
+    }
+    if (!createMeshBuffers(
+            transportMesh,
+            m_transportVertexBufferHandle,
+            m_transportIndexBufferHandle,
+            "transport"
+        )) {
+        std::cerr << "[render] transport mesh buffer setup failed\n";
         return false;
     }
 
-    BufferCreateDesc indexCreateDesc{};
-    indexCreateDesc.size = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
-    indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    indexCreateDesc.initialData = mesh.indices.data();
-    m_pipeIndexBufferHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
-    if (m_pipeIndexBufferHandle == kInvalidBufferHandle) {
-        std::cerr << "[render] pipe index buffer allocation failed\n";
-        m_bufferAllocator.destroyBuffer(m_pipeVertexBufferHandle);
-        m_pipeVertexBufferHandle = kInvalidBufferHandle;
-        return false;
-    }
-
-    m_pipeIndexCount = static_cast<uint32_t>(mesh.indices.size());
+    m_pipeIndexCount = static_cast<uint32_t>(pipeMesh.indices.size());
+    m_transportIndexCount = static_cast<uint32_t>(transportMesh.indices.size());
     return true;
 }
 
@@ -5786,14 +5853,16 @@ void Renderer::renderFrame(
 
     uint32_t pipeInstanceCount = 0;
     std::optional<RingBufferSlice> pipeInstanceSliceOpt = std::nullopt;
-    if (m_pipeIndexCount > 0) {
+    uint32_t transportInstanceCount = 0;
+    std::optional<RingBufferSlice> transportInstanceSliceOpt = std::nullopt;
+    if (m_pipeIndexCount > 0 || m_transportIndexCount > 0) {
         const std::vector<sim::Pipe>& pipes = simulation.pipes();
         const std::vector<sim::Belt>& belts = simulation.belts();
         const std::vector<sim::Track>& tracks = simulation.tracks();
         const std::vector<PipeEndpointState> endpointStates =
             pipes.empty() ? std::vector<PipeEndpointState>{} : buildPipeEndpointStates(pipes);
-        std::vector<PipeInstance> instances;
-        instances.reserve(pipes.size() + belts.size() + tracks.size());
+        std::vector<PipeInstance> pipeInstances;
+        pipeInstances.reserve(pipes.size());
         for (std::size_t pipeIndex = 0; pipeIndex < pipes.size(); ++pipeIndex) {
             const sim::Pipe& pipe = pipes[pipeIndex];
             const PipeEndpointState& endpointState = endpointStates[pipeIndex];
@@ -5814,9 +5883,11 @@ void Renderer::renderFrame(
             instance.extensions[1] = endpointState.endExtension;
             instance.extensions[2] = 1.0f;
             instance.extensions[3] = 1.0f;
-            instances.push_back(instance);
+            pipeInstances.push_back(instance);
         }
 
+        std::vector<PipeInstance> transportInstances;
+        transportInstances.reserve(belts.size() + tracks.size());
         for (const sim::Belt& belt : belts) {
             PipeInstance instance{};
             instance.originLength[0] = static_cast<float>(belt.x);
@@ -5837,7 +5908,7 @@ void Renderer::renderFrame(
             // Conveyors: 2x wider cross-span, 0.25x height.
             instance.extensions[2] = 2.0f;
             instance.extensions[3] = 0.25f;
-            instances.push_back(instance);
+            transportInstances.push_back(instance);
         }
 
         for (const sim::Track& track : tracks) {
@@ -5860,17 +5931,36 @@ void Renderer::renderFrame(
             // Tracks: 2x wider cross-span, 0.25x height.
             instance.extensions[2] = 2.0f;
             instance.extensions[3] = 0.25f;
-            instances.push_back(instance);
+            transportInstances.push_back(instance);
         }
 
-        if (!instances.empty()) {
+        if (!pipeInstances.empty() && m_pipeIndexCount > 0) {
             pipeInstanceSliceOpt = m_uploadRing.allocate(
-                static_cast<VkDeviceSize>(instances.size() * sizeof(PipeInstance)),
+                static_cast<VkDeviceSize>(pipeInstances.size() * sizeof(PipeInstance)),
                 static_cast<VkDeviceSize>(alignof(PipeInstance))
             );
             if (pipeInstanceSliceOpt.has_value() && pipeInstanceSliceOpt->mapped != nullptr) {
-                std::memcpy(pipeInstanceSliceOpt->mapped, instances.data(), static_cast<size_t>(pipeInstanceSliceOpt->size));
-                pipeInstanceCount = static_cast<uint32_t>(instances.size());
+                std::memcpy(
+                    pipeInstanceSliceOpt->mapped,
+                    pipeInstances.data(),
+                    static_cast<size_t>(pipeInstanceSliceOpt->size)
+                );
+                pipeInstanceCount = static_cast<uint32_t>(pipeInstances.size());
+            }
+        }
+
+        if (!transportInstances.empty() && m_transportIndexCount > 0) {
+            transportInstanceSliceOpt = m_uploadRing.allocate(
+                static_cast<VkDeviceSize>(transportInstances.size() * sizeof(PipeInstance)),
+                static_cast<VkDeviceSize>(alignof(PipeInstance))
+            );
+            if (transportInstanceSliceOpt.has_value() && transportInstanceSliceOpt->mapped != nullptr) {
+                std::memcpy(
+                    transportInstanceSliceOpt->mapped,
+                    transportInstances.data(),
+                    static_cast<size_t>(transportInstanceSliceOpt->size)
+                );
+                transportInstanceCount = static_cast<uint32_t>(transportInstances.size());
             }
         }
     }
@@ -5997,17 +6087,25 @@ void Renderer::renderFrame(
                 vkCmdDrawIndexed(commandBuffer, drawRange.indexCount, 1, 0, 0, 0);
             }
 
-            if (m_pipeShadowPipeline != VK_NULL_HANDLE &&
-                pipeInstanceCount > 0 &&
-                pipeInstanceSliceOpt.has_value()) {
-                const VkBuffer pipeVertexBuffer = m_bufferAllocator.getBuffer(m_pipeVertexBufferHandle);
-                const VkBuffer pipeIndexBuffer = m_bufferAllocator.getBuffer(m_pipeIndexBufferHandle);
-                const VkBuffer pipeInstanceBuffer = m_bufferAllocator.getBuffer(pipeInstanceSliceOpt->buffer);
-                if (pipeVertexBuffer != VK_NULL_HANDLE &&
-                    pipeIndexBuffer != VK_NULL_HANDLE &&
-                    pipeInstanceBuffer != VK_NULL_HANDLE) {
-                    const VkBuffer vertexBuffers[2] = {pipeVertexBuffer, pipeInstanceBuffer};
-                    const VkDeviceSize vertexOffsets[2] = {0, pipeInstanceSliceOpt->offset};
+            if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
+                auto drawShadowInstances = [&](
+                                               BufferHandle vertexHandle,
+                                               BufferHandle indexHandle,
+                                               uint32_t indexCount,
+                                               uint32_t instanceCount,
+                                               const std::optional<RingBufferSlice>& instanceSlice
+                                           ) {
+                    if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
+                        return;
+                    }
+                    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
+                    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
+                    const VkBuffer instanceBuffer = m_bufferAllocator.getBuffer(instanceSlice->buffer);
+                    if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE || instanceBuffer == VK_NULL_HANDLE) {
+                        return;
+                    }
+                    const VkBuffer vertexBuffers[2] = {vertexBuffer, instanceBuffer};
+                    const VkDeviceSize vertexOffsets[2] = {0, instanceSlice->offset};
                     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeShadowPipeline);
                     vkCmdBindDescriptorSets(
                         commandBuffer,
@@ -6020,7 +6118,7 @@ void Renderer::renderFrame(
                         nullptr
                     );
                     vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-                    vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                    vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
                     ChunkPushConstants pipeShadowPushConstants{};
                     pipeShadowPushConstants.chunkOffset[0] = 0.0f;
@@ -6039,8 +6137,22 @@ void Renderer::renderFrame(
                         sizeof(ChunkPushConstants),
                         &pipeShadowPushConstants
                     );
-                    vkCmdDrawIndexed(commandBuffer, m_pipeIndexCount, pipeInstanceCount, 0, 0, 0);
-                }
+                    vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
+                };
+                drawShadowInstances(
+                    m_pipeVertexBufferHandle,
+                    m_pipeIndexBufferHandle,
+                    m_pipeIndexCount,
+                    pipeInstanceCount,
+                    pipeInstanceSliceOpt
+                );
+                drawShadowInstances(
+                    m_transportVertexBufferHandle,
+                    m_transportIndexBufferHandle,
+                    m_transportIndexCount,
+                    transportInstanceCount,
+                    transportInstanceSliceOpt
+                );
             }
 
             vkCmdEndRendering(commandBuffer);
@@ -6232,15 +6344,25 @@ void Renderer::renderFrame(
         }
     }
 
-    if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE && pipeInstanceCount > 0 && pipeInstanceSliceOpt.has_value()) {
-        const VkBuffer pipeVertexBuffer = m_bufferAllocator.getBuffer(m_pipeVertexBufferHandle);
-        const VkBuffer pipeIndexBuffer = m_bufferAllocator.getBuffer(m_pipeIndexBufferHandle);
-        const VkBuffer pipeInstanceBuffer = m_bufferAllocator.getBuffer(pipeInstanceSliceOpt->buffer);
-        if (pipeVertexBuffer != VK_NULL_HANDLE &&
-            pipeIndexBuffer != VK_NULL_HANDLE &&
-            pipeInstanceBuffer != VK_NULL_HANDLE) {
-            const VkBuffer vertexBuffers[2] = {pipeVertexBuffer, pipeInstanceBuffer};
-            const VkDeviceSize vertexOffsets[2] = {0, pipeInstanceSliceOpt->offset};
+    if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
+        auto drawNormalDepthInstances = [&](
+                                            BufferHandle vertexHandle,
+                                            BufferHandle indexHandle,
+                                            uint32_t indexCount,
+                                            uint32_t instanceCount,
+                                            const std::optional<RingBufferSlice>& instanceSlice
+                                        ) {
+            if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
+                return;
+            }
+            const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
+            const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
+            const VkBuffer instanceBuffer = m_bufferAllocator.getBuffer(instanceSlice->buffer);
+            if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE || instanceBuffer == VK_NULL_HANDLE) {
+                return;
+            }
+            const VkBuffer vertexBuffers[2] = {vertexBuffer, instanceBuffer};
+            const VkDeviceSize vertexOffsets[2] = {0, instanceSlice->offset};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeNormalDepthPipeline);
             vkCmdBindDescriptorSets(
                 commandBuffer,
@@ -6253,9 +6375,23 @@ void Renderer::renderFrame(
                 nullptr
             );
             vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(commandBuffer, m_pipeIndexCount, pipeInstanceCount, 0, 0, 0);
-        }
+            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
+        };
+        drawNormalDepthInstances(
+            m_pipeVertexBufferHandle,
+            m_pipeIndexBufferHandle,
+            m_pipeIndexCount,
+            pipeInstanceCount,
+            pipeInstanceSliceOpt
+        );
+        drawNormalDepthInstances(
+            m_transportVertexBufferHandle,
+            m_transportIndexBufferHandle,
+            m_transportIndexCount,
+            transportInstanceCount,
+            transportInstanceSliceOpt
+        );
     }
     vkCmdEndRendering(commandBuffer);
 
@@ -6547,21 +6683,25 @@ void Renderer::renderFrame(
         }
     }
 
-    if (m_pipePipeline != VK_NULL_HANDLE && pipeInstanceCount > 0 && pipeInstanceSliceOpt.has_value()) {
-        const VkBuffer pipeVertexBuffer = m_bufferAllocator.getBuffer(m_pipeVertexBufferHandle);
-        const VkBuffer pipeIndexBuffer = m_bufferAllocator.getBuffer(m_pipeIndexBufferHandle);
-        const VkBuffer pipeInstanceBuffer = m_bufferAllocator.getBuffer(pipeInstanceSliceOpt->buffer);
-        if (pipeVertexBuffer != VK_NULL_HANDLE &&
-            pipeIndexBuffer != VK_NULL_HANDLE &&
-            pipeInstanceBuffer != VK_NULL_HANDLE) {
-            const VkBuffer vertexBuffers[2] = {
-                pipeVertexBuffer,
-                pipeInstanceBuffer
-            };
-            const VkDeviceSize vertexOffsets[2] = {
-                0,
-                pipeInstanceSliceOpt->offset
-            };
+    if (m_pipePipeline != VK_NULL_HANDLE) {
+        auto drawLitInstances = [&](
+                                    BufferHandle vertexHandle,
+                                    BufferHandle indexHandle,
+                                    uint32_t indexCount,
+                                    uint32_t instanceCount,
+                                    const std::optional<RingBufferSlice>& instanceSlice
+                                ) {
+            if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
+                return;
+            }
+            const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
+            const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
+            const VkBuffer instanceBuffer = m_bufferAllocator.getBuffer(instanceSlice->buffer);
+            if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE || instanceBuffer == VK_NULL_HANDLE) {
+                return;
+            }
+            const VkBuffer vertexBuffers[2] = {vertexBuffer, instanceBuffer};
+            const VkDeviceSize vertexOffsets[2] = {0, instanceSlice->offset};
 
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipePipeline);
             vkCmdBindDescriptorSets(
@@ -6575,9 +6715,23 @@ void Renderer::renderFrame(
                 nullptr
             );
             vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(commandBuffer, m_pipeIndexCount, pipeInstanceCount, 0, 0, 0);
-        }
+            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
+        };
+        drawLitInstances(
+            m_pipeVertexBufferHandle,
+            m_pipeIndexBufferHandle,
+            m_pipeIndexCount,
+            pipeInstanceCount,
+            pipeInstanceSliceOpt
+        );
+        drawLitInstances(
+            m_transportVertexBufferHandle,
+            m_transportIndexBufferHandle,
+            m_transportIndexCount,
+            transportInstanceCount,
+            transportInstanceSliceOpt
+        );
     }
 
     const VkPipeline activePreviewPipeline =
@@ -6586,7 +6740,7 @@ void Renderer::renderFrame(
     const bool drawFacePreview =
         !preview.pipeStyle && preview.faceVisible && preview.brushSize == 1 && m_previewRemovePipeline != VK_NULL_HANDLE;
 
-    if (preview.pipeStyle && preview.visible && m_pipePipeline != VK_NULL_HANDLE && m_pipeIndexCount > 0) {
+    if (preview.pipeStyle && preview.visible && m_pipePipeline != VK_NULL_HANDLE) {
         PipeInstance previewInstance{};
         previewInstance.originLength[0] = static_cast<float>(preview.x);
         previewInstance.originLength[1] = static_cast<float>(preview.y);
@@ -6627,12 +6781,22 @@ void Renderer::renderFrame(
             m_uploadRing.allocate(sizeof(PipeInstance), static_cast<VkDeviceSize>(alignof(PipeInstance)));
         if (previewInstanceSlice.has_value() && previewInstanceSlice->mapped != nullptr) {
             std::memcpy(previewInstanceSlice->mapped, &previewInstance, sizeof(PipeInstance));
-            const VkBuffer pipeVertexBuffer = m_bufferAllocator.getBuffer(m_pipeVertexBufferHandle);
-            const VkBuffer pipeIndexBuffer = m_bufferAllocator.getBuffer(m_pipeIndexBufferHandle);
+            const bool previewUsesPipeMesh = preview.pipeStyleId < 0.5f;
+            const BufferHandle previewVertexHandle =
+                previewUsesPipeMesh ? m_pipeVertexBufferHandle : m_transportVertexBufferHandle;
+            const BufferHandle previewIndexHandle =
+                previewUsesPipeMesh ? m_pipeIndexBufferHandle : m_transportIndexBufferHandle;
+            const uint32_t previewIndexCount = previewUsesPipeMesh ? m_pipeIndexCount : m_transportIndexCount;
+            if (previewIndexCount == 0) {
+                // No mesh data allocated for this preview style.
+            }
+            const VkBuffer pipeVertexBuffer = m_bufferAllocator.getBuffer(previewVertexHandle);
+            const VkBuffer pipeIndexBuffer = m_bufferAllocator.getBuffer(previewIndexHandle);
             const VkBuffer pipeInstanceBuffer = m_bufferAllocator.getBuffer(previewInstanceSlice->buffer);
             if (pipeVertexBuffer != VK_NULL_HANDLE &&
                 pipeIndexBuffer != VK_NULL_HANDLE &&
-                pipeInstanceBuffer != VK_NULL_HANDLE) {
+                pipeInstanceBuffer != VK_NULL_HANDLE &&
+                previewIndexCount > 0) {
                 const VkBuffer vertexBuffers[2] = {pipeVertexBuffer, pipeInstanceBuffer};
                 const VkDeviceSize vertexOffsets[2] = {0, previewInstanceSlice->offset};
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipePipeline);
@@ -6648,7 +6812,7 @@ void Renderer::renderFrame(
                 );
                 vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(commandBuffer, m_pipeIndexCount, 1, 0, 0, 0);
+                vkCmdDrawIndexed(commandBuffer, previewIndexCount, 1, 0, 0, 0);
             }
         }
     }
@@ -7170,6 +7334,16 @@ void Renderer::destroyPreviewBuffers() {
 }
 
 void Renderer::destroyPipeBuffers() {
+    if (m_transportIndexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_transportIndexBufferHandle);
+        m_transportIndexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_transportVertexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_transportVertexBufferHandle);
+        m_transportVertexBufferHandle = kInvalidBufferHandle;
+    }
+    m_transportIndexCount = 0;
+
     if (m_pipeIndexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_pipeIndexBufferHandle);
         m_pipeIndexBufferHandle = kInvalidBufferHandle;
