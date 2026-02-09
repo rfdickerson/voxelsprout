@@ -1901,16 +1901,24 @@ bool Renderer::createTimelineSemaphore() {
 }
 
 bool Renderer::createUploadRingBuffer() {
-    // Minimal per-frame ring buffer used for small CPU uploads.
-    // Future streaming code can replace this with dedicated staging allocators.
-    const bool ok = m_uploadRing.init(
+    // FrameArena layer A foundation: one persistently mapped upload arena per frame-in-flight.
+    FrameArenaConfig config{};
+    config.uploadBytesPerFrame = 1024 * 64;
+    config.frameCount = kMaxFramesInFlight;
+    config.uploadUsage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    const bool ok = m_frameArena.init(
         &m_bufferAllocator,
-        1024 * 64,
-        kMaxFramesInFlight,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+        m_physicalDevice,
+        m_device,
+        config
+#if defined(VOXEL_HAS_VMA)
+        , m_vmaAllocator
+#endif
     );
     if (!ok) {
-        std::cerr << "[render] upload ring buffer init failed\n";
+        std::cerr << "[render] frame arena init failed\n";
     }
     return ok;
 }
@@ -2714,6 +2722,7 @@ bool Renderer::createAoTargets() {
     }
 
     const uint32_t imageCount = static_cast<uint32_t>(m_swapchainImages.size());
+    const uint32_t frameTargetCount = kMaxFramesInFlight;
     m_aoExtent.width = std::max(1u, m_swapchainExtent.width / 2u);
     m_aoExtent.height = std::max(1u, m_swapchainExtent.height / 2u);
 
@@ -2721,89 +2730,57 @@ bool Renderer::createAoTargets() {
                                   std::vector<VkImage>& outImages,
                                   std::vector<VkDeviceMemory>& outMemories,
                                   std::vector<VkImageView>& outViews,
+                                  std::vector<TransientImageHandle>& outHandles,
                                   const char* debugLabel) -> bool {
-        outImages.assign(imageCount, VK_NULL_HANDLE);
-        outMemories.assign(imageCount, VK_NULL_HANDLE);
-        outViews.assign(imageCount, VK_NULL_HANDLE);
-        for (uint32_t i = 0; i < imageCount; ++i) {
-            VkImageCreateInfo imageCreateInfo{};
-            imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-            imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-            imageCreateInfo.format = format;
-            imageCreateInfo.extent.width = m_aoExtent.width;
-            imageCreateInfo.extent.height = m_aoExtent.height;
-            imageCreateInfo.extent.depth = 1;
-            imageCreateInfo.mipLevels = 1;
-            imageCreateInfo.arrayLayers = 1;
-            imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-            imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-            imageCreateInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-            imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-            const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &outImages[i]);
-            if (imageResult != VK_SUCCESS) {
-                logVkFailure(debugLabel, imageResult);
-                return false;
-            }
-
-            VkMemoryRequirements memoryRequirements{};
-            vkGetImageMemoryRequirements(m_device, outImages[i], &memoryRequirements);
-            const uint32_t memoryTypeIndex = findMemoryTypeIndex(
-                m_physicalDevice,
-                memoryRequirements.memoryTypeBits,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        outImages.assign(frameTargetCount, VK_NULL_HANDLE);
+        outMemories.assign(frameTargetCount, VK_NULL_HANDLE);
+        outViews.assign(frameTargetCount, VK_NULL_HANDLE);
+        outHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
+        for (uint32_t i = 0; i < frameTargetCount; ++i) {
+            TransientImageDesc imageDesc{};
+            imageDesc.imageType = VK_IMAGE_TYPE_2D;
+            imageDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            imageDesc.format = format;
+            imageDesc.extent = {m_aoExtent.width, m_aoExtent.height, 1u};
+            imageDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            imageDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            imageDesc.mipLevels = 1;
+            imageDesc.arrayLayers = 1;
+            imageDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+            imageDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            const TransientImageHandle handle = m_frameArena.createTransientImage(
+                imageDesc,
+                FrameArenaImageLifetime::Persistent
             );
-            if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-                std::cerr << "[render] no memory type for " << debugLabel << "\n";
+            if (handle == kInvalidTransientImageHandle) {
+                std::cerr << "[render] failed creating transient image " << debugLabel << "\n";
                 return false;
             }
-
-            VkMemoryAllocateInfo allocateInfo{};
-            allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            allocateInfo.allocationSize = memoryRequirements.size;
-            allocateInfo.memoryTypeIndex = memoryTypeIndex;
-            const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &outMemories[i]);
-            if (allocResult != VK_SUCCESS) {
-                logVkFailure("vkAllocateMemory(aoColor)", allocResult);
+            const TransientImageInfo* imageInfo = m_frameArena.getTransientImage(handle);
+            if (imageInfo == nullptr || imageInfo->image == VK_NULL_HANDLE || imageInfo->view == VK_NULL_HANDLE) {
+                std::cerr << "[render] invalid transient image " << debugLabel << "\n";
                 return false;
             }
-
-            const VkResult bindResult = vkBindImageMemory(m_device, outImages[i], outMemories[i], 0);
-            if (bindResult != VK_SUCCESS) {
-                logVkFailure("vkBindImageMemory(aoColor)", bindResult);
-                return false;
-            }
-
-            VkImageViewCreateInfo viewCreateInfo{};
-            viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            viewCreateInfo.image = outImages[i];
-            viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            viewCreateInfo.format = format;
-            viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            viewCreateInfo.subresourceRange.baseMipLevel = 0;
-            viewCreateInfo.subresourceRange.levelCount = 1;
-            viewCreateInfo.subresourceRange.baseArrayLayer = 0;
-            viewCreateInfo.subresourceRange.layerCount = 1;
-            const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &outViews[i]);
-            if (viewResult != VK_SUCCESS) {
-                logVkFailure("vkCreateImageView(aoColor)", viewResult);
-                return false;
-            }
+            outHandles[i] = handle;
+            outImages[i] = imageInfo->image;
+            outViews[i] = imageInfo->view;
+            outMemories[i] = VK_NULL_HANDLE;
         }
         return true;
     };
 
-    m_normalDepthImageInitialized.assign(imageCount, false);
+    m_normalDepthImageInitialized.assign(frameTargetCount, false);
     m_aoDepthImageInitialized.assign(imageCount, false);
-    m_ssaoRawImageInitialized.assign(imageCount, false);
-    m_ssaoBlurImageInitialized.assign(imageCount, false);
+    m_ssaoRawImageInitialized.assign(frameTargetCount, false);
+    m_ssaoBlurImageInitialized.assign(frameTargetCount, false);
 
     if (!createColorTargets(
             m_normalDepthFormat,
             m_normalDepthImages,
             m_normalDepthImageMemories,
             m_normalDepthImageViews,
+            m_normalDepthTransientHandles,
             "vkCreateImage(normalDepth)"
         )) {
         return false;
@@ -2883,6 +2860,7 @@ bool Renderer::createAoTargets() {
             m_ssaoRawImages,
             m_ssaoRawImageMemories,
             m_ssaoRawImageViews,
+            m_ssaoRawTransientHandles,
             "vkCreateImage(ssaoRaw)"
         )) {
         return false;
@@ -2892,6 +2870,7 @@ bool Renderer::createAoTargets() {
             m_ssaoBlurImages,
             m_ssaoBlurImageMemories,
             m_ssaoBlurImageViews,
+            m_ssaoBlurTransientHandles,
             "vkCreateImage(ssaoBlur)"
         )) {
         return false;
@@ -5400,12 +5379,12 @@ void Renderer::renderFrame(
     m_debugDrawnLod2Ranges = 0;
 
     collectCompletedBufferReleases();
-    m_uploadRing.beginFrame(m_currentFrame);
 
     FrameResources& frame = m_frames[m_currentFrame];
     if (!waitForTimelineValue(m_frameTimelineValues[m_currentFrame])) {
         return;
     }
+    m_frameArena.beginFrame(m_currentFrame);
 
     uint32_t imageIndex = 0;
     const VkResult acquireResult = vkAcquireNextImageKHR(
@@ -5431,6 +5410,7 @@ void Renderer::renderFrame(
         return;
     }
     const VkSemaphore renderFinishedSemaphore = m_renderFinishedSemaphores[imageIndex];
+    const uint32_t aoFrameIndex = m_currentFrame % kMaxFramesInFlight;
 
     vkResetCommandPool(m_device, frame.commandPool, 0);
 
@@ -5600,8 +5580,12 @@ void Renderer::renderFrame(
     const std::array<math::Vector3, 9> shIrradiance =
         computeIrradianceShCoefficients(sunDirection, sunColor, m_skyDebugSettings);
 
-    const std::optional<RingBufferSlice> mvpSliceOpt =
-        m_uploadRing.allocate(sizeof(CameraUniform), m_uniformBufferAlignment);
+    const std::optional<FrameArenaSlice> mvpSliceOpt =
+        m_frameArena.allocateUpload(
+            sizeof(CameraUniform),
+            m_uniformBufferAlignment,
+            FrameArenaUploadKind::CameraUniform
+        );
     if (!mvpSliceOpt.has_value() || mvpSliceOpt->mapped == nullptr) {
         std::cerr << "[render] failed to allocate MVP uniform slice\n";
         return;
@@ -5720,17 +5704,17 @@ void Renderer::renderFrame(
 
     VkDescriptorImageInfo normalDepthImageInfo{};
     normalDepthImageInfo.sampler = m_normalDepthSampler;
-    normalDepthImageInfo.imageView = m_normalDepthImageViews[imageIndex];
+    normalDepthImageInfo.imageView = m_normalDepthImageViews[aoFrameIndex];
     normalDepthImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo ssaoBlurImageInfo{};
     ssaoBlurImageInfo.sampler = m_ssaoSampler;
-    ssaoBlurImageInfo.imageView = m_ssaoBlurImageViews[imageIndex];
+    ssaoBlurImageInfo.imageView = m_ssaoBlurImageViews[aoFrameIndex];
     ssaoBlurImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo ssaoRawImageInfo{};
     ssaoRawImageInfo.sampler = m_ssaoSampler;
-    ssaoRawImageInfo.imageView = m_ssaoRawImageViews[imageIndex];
+    ssaoRawImageInfo.imageView = m_ssaoRawImageViews[aoFrameIndex];
     ssaoRawImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     std::array<VkWriteDescriptorSet, 7> writes{};
@@ -5786,9 +5770,9 @@ void Renderer::renderFrame(
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
     uint32_t pipeInstanceCount = 0;
-    std::optional<RingBufferSlice> pipeInstanceSliceOpt = std::nullopt;
+    std::optional<FrameArenaSlice> pipeInstanceSliceOpt = std::nullopt;
     uint32_t transportInstanceCount = 0;
-    std::optional<RingBufferSlice> transportInstanceSliceOpt = std::nullopt;
+    std::optional<FrameArenaSlice> transportInstanceSliceOpt = std::nullopt;
     if (m_pipeIndexCount > 0 || m_transportIndexCount > 0) {
         const std::vector<sim::Pipe>& pipes = simulation.pipes();
         const std::vector<sim::Belt>& belts = simulation.belts();
@@ -5869,9 +5853,10 @@ void Renderer::renderFrame(
         }
 
         if (!pipeInstances.empty() && m_pipeIndexCount > 0) {
-            pipeInstanceSliceOpt = m_uploadRing.allocate(
+            pipeInstanceSliceOpt = m_frameArena.allocateUpload(
                 static_cast<VkDeviceSize>(pipeInstances.size() * sizeof(PipeInstance)),
-                static_cast<VkDeviceSize>(alignof(PipeInstance))
+                static_cast<VkDeviceSize>(alignof(PipeInstance)),
+                FrameArenaUploadKind::InstanceData
             );
             if (pipeInstanceSliceOpt.has_value() && pipeInstanceSliceOpt->mapped != nullptr) {
                 std::memcpy(
@@ -5884,9 +5869,10 @@ void Renderer::renderFrame(
         }
 
         if (!transportInstances.empty() && m_transportIndexCount > 0) {
-            transportInstanceSliceOpt = m_uploadRing.allocate(
+            transportInstanceSliceOpt = m_frameArena.allocateUpload(
                 static_cast<VkDeviceSize>(transportInstances.size() * sizeof(PipeInstance)),
-                static_cast<VkDeviceSize>(alignof(PipeInstance))
+                static_cast<VkDeviceSize>(alignof(PipeInstance)),
+                FrameArenaUploadKind::InstanceData
             );
             if (transportInstanceSliceOpt.has_value() && transportInstanceSliceOpt->mapped != nullptr) {
                 std::memcpy(
@@ -6030,7 +6016,7 @@ void Renderer::renderFrame(
                                                BufferHandle indexHandle,
                                                uint32_t indexCount,
                                                uint32_t instanceCount,
-                                               const std::optional<RingBufferSlice>& instanceSlice
+                                           const std::optional<FrameArenaSlice>& instanceSlice
                                            ) {
                     if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
                         return;
@@ -6115,10 +6101,10 @@ void Renderer::renderFrame(
         std::max(1u, m_aoExtent.height)
     };
 
-    const bool normalDepthInitialized = m_normalDepthImageInitialized[imageIndex];
+    const bool normalDepthInitialized = m_normalDepthImageInitialized[aoFrameIndex];
     transitionImageLayout(
         commandBuffer,
-        m_normalDepthImages[imageIndex],
+        m_normalDepthImages[aoFrameIndex],
         normalDepthInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         normalDepthInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
@@ -6143,10 +6129,10 @@ void Renderer::renderFrame(
         VK_IMAGE_ASPECT_DEPTH_BIT
     );
 
-    const bool ssaoRawInitialized = m_ssaoRawImageInitialized[imageIndex];
+    const bool ssaoRawInitialized = m_ssaoRawImageInitialized[aoFrameIndex];
     transitionImageLayout(
         commandBuffer,
-        m_ssaoRawImages[imageIndex],
+        m_ssaoRawImages[aoFrameIndex],
         ssaoRawInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         ssaoRawInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
@@ -6156,10 +6142,10 @@ void Renderer::renderFrame(
         VK_IMAGE_ASPECT_COLOR_BIT
     );
 
-    const bool ssaoBlurInitialized = m_ssaoBlurImageInitialized[imageIndex];
+    const bool ssaoBlurInitialized = m_ssaoBlurImageInitialized[aoFrameIndex];
     transitionImageLayout(
         commandBuffer,
-        m_ssaoBlurImages[imageIndex],
+        m_ssaoBlurImages[aoFrameIndex],
         ssaoBlurInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         ssaoBlurInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
@@ -6193,7 +6179,7 @@ void Renderer::renderFrame(
 
     VkRenderingAttachmentInfo normalDepthColorAttachment{};
     normalDepthColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    normalDepthColorAttachment.imageView = m_normalDepthImageViews[imageIndex];
+    normalDepthColorAttachment.imageView = m_normalDepthImageViews[aoFrameIndex];
     normalDepthColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     normalDepthColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     normalDepthColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -6287,7 +6273,7 @@ void Renderer::renderFrame(
                                             BufferHandle indexHandle,
                                             uint32_t indexCount,
                                             uint32_t instanceCount,
-                                            const std::optional<RingBufferSlice>& instanceSlice
+                                        const std::optional<FrameArenaSlice>& instanceSlice
                                         ) {
             if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
                 return;
@@ -6334,7 +6320,7 @@ void Renderer::renderFrame(
 
     transitionImageLayout(
         commandBuffer,
-        m_normalDepthImages[imageIndex],
+        m_normalDepthImages[aoFrameIndex],
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -6352,7 +6338,7 @@ void Renderer::renderFrame(
 
     VkRenderingAttachmentInfo ssaoRawAttachment{};
     ssaoRawAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    ssaoRawAttachment.imageView = m_ssaoRawImageViews[imageIndex];
+    ssaoRawAttachment.imageView = m_ssaoRawImageViews[aoFrameIndex];
     ssaoRawAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     ssaoRawAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     ssaoRawAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -6387,7 +6373,7 @@ void Renderer::renderFrame(
 
     transitionImageLayout(
         commandBuffer,
-        m_ssaoRawImages[imageIndex],
+        m_ssaoRawImages[aoFrameIndex],
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -6399,7 +6385,7 @@ void Renderer::renderFrame(
 
     VkRenderingAttachmentInfo ssaoBlurAttachment{};
     ssaoBlurAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    ssaoBlurAttachment.imageView = m_ssaoBlurImageViews[imageIndex];
+    ssaoBlurAttachment.imageView = m_ssaoBlurImageViews[aoFrameIndex];
     ssaoBlurAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     ssaoBlurAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     ssaoBlurAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -6434,7 +6420,7 @@ void Renderer::renderFrame(
 
     transitionImageLayout(
         commandBuffer,
-        m_ssaoBlurImages[imageIndex],
+        m_ssaoBlurImages[aoFrameIndex],
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -6444,10 +6430,10 @@ void Renderer::renderFrame(
         VK_IMAGE_ASPECT_COLOR_BIT
     );
 
-    m_normalDepthImageInitialized[imageIndex] = true;
+    m_normalDepthImageInitialized[aoFrameIndex] = true;
     m_aoDepthImageInitialized[imageIndex] = true;
-    m_ssaoRawImageInitialized[imageIndex] = true;
-    m_ssaoBlurImageInitialized[imageIndex] = true;
+    m_ssaoRawImageInitialized[aoFrameIndex] = true;
+    m_ssaoBlurImageInitialized[aoFrameIndex] = true;
 
     VkViewport viewport{};
     viewport.x = 0.0f;
@@ -6626,7 +6612,7 @@ void Renderer::renderFrame(
                                     BufferHandle indexHandle,
                                     uint32_t indexCount,
                                     uint32_t instanceCount,
-                                    const std::optional<RingBufferSlice>& instanceSlice
+                                const std::optional<FrameArenaSlice>& instanceSlice
                                 ) {
             if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
                 return;
@@ -6714,8 +6700,12 @@ void Renderer::renderFrame(
             previewInstance.extensions[3] = 0.25f;
         }
 
-        const std::optional<RingBufferSlice> previewInstanceSlice =
-            m_uploadRing.allocate(sizeof(PipeInstance), static_cast<VkDeviceSize>(alignof(PipeInstance)));
+        const std::optional<FrameArenaSlice> previewInstanceSlice =
+            m_frameArena.allocateUpload(
+                sizeof(PipeInstance),
+                static_cast<VkDeviceSize>(alignof(PipeInstance)),
+                FrameArenaUploadKind::PreviewData
+            );
         if (previewInstanceSlice.has_value() && previewInstanceSlice->mapped != nullptr) {
             std::memcpy(previewInstanceSlice->mapped, &previewInstance, sizeof(PipeInstance));
             const bool previewUsesPipeMesh = preview.pipeStyleId < 0.5f;
@@ -7126,44 +7116,26 @@ void Renderer::destroyAoTargets() {
         m_normalDepthSampler = VK_NULL_HANDLE;
     }
 
-    for (VkImageView imageView : m_ssaoBlurImageViews) {
-        if (imageView != VK_NULL_HANDLE) {
-            vkDestroyImageView(m_device, imageView, nullptr);
-        }
-    }
     m_ssaoBlurImageViews.clear();
-    for (VkImage image : m_ssaoBlurImages) {
-        if (image != VK_NULL_HANDLE) {
-            vkDestroyImage(m_device, image, nullptr);
-        }
-    }
     m_ssaoBlurImages.clear();
-    for (VkDeviceMemory memory : m_ssaoBlurImageMemories) {
-        if (memory != VK_NULL_HANDLE) {
-            vkFreeMemory(m_device, memory, nullptr);
+    m_ssaoBlurImageMemories.clear();
+    for (TransientImageHandle handle : m_ssaoBlurTransientHandles) {
+        if (handle != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(handle);
         }
     }
-    m_ssaoBlurImageMemories.clear();
+    m_ssaoBlurTransientHandles.clear();
     m_ssaoBlurImageInitialized.clear();
 
-    for (VkImageView imageView : m_ssaoRawImageViews) {
-        if (imageView != VK_NULL_HANDLE) {
-            vkDestroyImageView(m_device, imageView, nullptr);
-        }
-    }
     m_ssaoRawImageViews.clear();
-    for (VkImage image : m_ssaoRawImages) {
-        if (image != VK_NULL_HANDLE) {
-            vkDestroyImage(m_device, image, nullptr);
-        }
-    }
     m_ssaoRawImages.clear();
-    for (VkDeviceMemory memory : m_ssaoRawImageMemories) {
-        if (memory != VK_NULL_HANDLE) {
-            vkFreeMemory(m_device, memory, nullptr);
+    m_ssaoRawImageMemories.clear();
+    for (TransientImageHandle handle : m_ssaoRawTransientHandles) {
+        if (handle != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(handle);
         }
     }
-    m_ssaoRawImageMemories.clear();
+    m_ssaoRawTransientHandles.clear();
     m_ssaoRawImageInitialized.clear();
 
     for (VkImageView imageView : m_aoDepthImageViews) {
@@ -7186,24 +7158,15 @@ void Renderer::destroyAoTargets() {
     m_aoDepthImageMemories.clear();
     m_aoDepthImageInitialized.clear();
 
-    for (VkImageView imageView : m_normalDepthImageViews) {
-        if (imageView != VK_NULL_HANDLE) {
-            vkDestroyImageView(m_device, imageView, nullptr);
-        }
-    }
     m_normalDepthImageViews.clear();
-    for (VkImage image : m_normalDepthImages) {
-        if (image != VK_NULL_HANDLE) {
-            vkDestroyImage(m_device, image, nullptr);
-        }
-    }
     m_normalDepthImages.clear();
-    for (VkDeviceMemory memory : m_normalDepthImageMemories) {
-        if (memory != VK_NULL_HANDLE) {
-            vkFreeMemory(m_device, memory, nullptr);
+    m_normalDepthImageMemories.clear();
+    for (TransientImageHandle handle : m_normalDepthTransientHandles) {
+        if (handle != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(handle);
         }
     }
-    m_normalDepthImageMemories.clear();
+    m_normalDepthTransientHandles.clear();
     m_normalDepthImageInitialized.clear();
 }
 
@@ -7441,7 +7404,7 @@ void Renderer::shutdown() {
             vkDestroySemaphore(m_device, m_renderTimelineSemaphore, nullptr);
             m_renderTimelineSemaphore = VK_NULL_HANDLE;
         }
-        m_uploadRing.shutdown(&m_bufferAllocator);
+        m_frameArena.shutdown(&m_bufferAllocator);
         destroyPipeBuffers();
         destroyPreviewBuffers();
         destroyEnvironmentResources();

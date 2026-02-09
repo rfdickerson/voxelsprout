@@ -239,6 +239,7 @@ private:
     std::vector<VkImage> m_normalDepthImages;
     std::vector<VkDeviceMemory> m_normalDepthImageMemories;
     std::vector<VkImageView> m_normalDepthImageViews;
+    std::vector<TransientImageHandle> m_normalDepthTransientHandles;
     std::vector<bool> m_normalDepthImageInitialized;
     std::vector<VkImage> m_aoDepthImages;
     std::vector<VkDeviceMemory> m_aoDepthImageMemories;
@@ -247,10 +248,12 @@ private:
     std::vector<VkImage> m_ssaoRawImages;
     std::vector<VkDeviceMemory> m_ssaoRawImageMemories;
     std::vector<VkImageView> m_ssaoRawImageViews;
+    std::vector<TransientImageHandle> m_ssaoRawTransientHandles;
     std::vector<bool> m_ssaoRawImageInitialized;
     std::vector<VkImage> m_ssaoBlurImages;
     std::vector<VkDeviceMemory> m_ssaoBlurImageMemories;
     std::vector<VkImageView> m_ssaoBlurImageViews;
+    std::vector<TransientImageHandle> m_ssaoBlurTransientHandles;
     std::vector<bool> m_ssaoBlurImageInitialized;
     VkSampler m_normalDepthSampler = VK_NULL_HANDLE;
     VkSampler m_ssaoSampler = VK_NULL_HANDLE;
@@ -296,7 +299,7 @@ private:
     // Static mesh buffers per chunk draw range.
     // Future chunk streaming can replace this with sparse streaming allocations.
     BufferAllocator m_bufferAllocator;
-    FrameRingBuffer m_uploadRing;
+    FrameArena m_frameArena;
     BufferHandle m_previewVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_previewIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_pipeVertexBufferHandle = kInvalidBufferHandle;
