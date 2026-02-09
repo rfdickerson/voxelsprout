@@ -58,13 +58,12 @@ void main() {
         return;
     }
     if (ssaoMode > 1.5) {
-        const float occlusion = clamp(1.0 - ssao, 0.0, 1.0);
-        const float vis = pow(clamp(occlusion * 4.5, 0.0, 1.0), 0.75);
-        outColor = vec4(vec3(vis), 1.0);
+        outColor = vec4(vec3(ssao * geometryMask), 1.0);
         return;
     }
     const float ssaoEnable = step(0.5, ssaoMode);
-    const float ssaoContribution = mix(1.0, ssao, 0.45);
+    const float ssaoIntensity = clamp(camera.shadowConfig2.z, 0.0, 2.0);
+    const float ssaoContribution = mix(1.0, ssao, ssaoIntensity);
     const float aoFactor = mix(1.0, ssaoContribution, ssaoEnable);
     hdrColor *= mix(1.0, aoFactor, geometryMask);
 

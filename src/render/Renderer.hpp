@@ -72,6 +72,10 @@ public:
         float cascadeBlendFactor = 0.30f;
 
         float pcfRadius = 1.0f;
+
+        float ssaoRadius = 0.55f;
+        float ssaoBias = 0.03f;
+        float ssaoIntensity = 0.60f;
     };
 
     struct SkyDebugSettings {

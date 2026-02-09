@@ -15,7 +15,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 shIrradiance[9];
     vec4 shadowConfig0; // normalOffsetNear, normalOffsetFar, baseBiasNearTexel, baseBiasFarTexel
     vec4 shadowConfig1; // slopeBiasNearTexel, slopeBiasFarTexel, blendMin, blendFactor
-    vec4 shadowConfig2; // reserved
+    vec4 shadowConfig2; // ssaoRadius, ssaoBias, ssaoIntensity, reserved
     vec4 shadowConfig3; // reserved, reserved, reserved, pcfRadius
     vec4 shadowVoxelGridOrigin;
     vec4 shadowVoxelGridSize;

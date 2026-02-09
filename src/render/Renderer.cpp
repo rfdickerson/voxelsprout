@@ -5165,6 +5165,9 @@ void Renderer::buildShadowDebugUi() {
     ImGui::Checkbox("Enable SSAO", &m_debugEnableSsao);
     ImGui::Checkbox("Visualize SSAO", &m_debugVisualizeSsao);
     ImGui::Checkbox("Visualize AO Normals", &m_debugVisualizeAoNormals);
+    ImGui::SliderFloat("SSAO Radius", &m_shadowDebugSettings.ssaoRadius, 0.10f, 2.00f, "%.2f");
+    ImGui::SliderFloat("SSAO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 0.20f, "%.3f");
+    ImGui::SliderFloat("SSAO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 1.50f, "%.2f");
 
     ImGui::Separator();
     ImGui::Text("Cascade Splits: %.1f / %.1f / %.1f / %.1f",
@@ -5563,9 +5566,9 @@ void Renderer::renderFrame(
     mvpUniform.shadowConfig1[2] = m_shadowDebugSettings.cascadeBlendMin;
     mvpUniform.shadowConfig1[3] = m_shadowDebugSettings.cascadeBlendFactor;
 
-    mvpUniform.shadowConfig2[0] = 0.0f;
-    mvpUniform.shadowConfig2[1] = 0.0f;
-    mvpUniform.shadowConfig2[2] = 0.0f;
+    mvpUniform.shadowConfig2[0] = m_shadowDebugSettings.ssaoRadius;
+    mvpUniform.shadowConfig2[1] = m_shadowDebugSettings.ssaoBias;
+    mvpUniform.shadowConfig2[2] = m_shadowDebugSettings.ssaoIntensity;
     mvpUniform.shadowConfig2[3] = 0.0f;
 
     mvpUniform.shadowConfig3[0] = 0.0f;

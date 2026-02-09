@@ -41,10 +41,10 @@ void main() {
     }
     const float centerAo = texture(ssaoRawTexture, inUv).r;
 
-    float weightedAo = centerAo * 2.0;
-    float weightSum = 2.0;
-    const float sigma = 1.8;
-    const int blurRadius = 3;
+    float weightedAo = centerAo;
+    float weightSum = 1.0;
+    const float sigma = 3.0;
+    const int blurRadius = 6;
 
     for (int i = 1; i <= blurRadius; ++i) {
         const float fi = float(i);
@@ -77,18 +77,10 @@ void main() {
             if (sampleDepth <= 0.0001) {
                 continue;
             }
-            const float depthDelta = abs(sampleDepth - centerDepth);
-            if (depthDelta > 0.45) {
-                continue;
-            }
-            const float normalDot = max(dot(centerNormal, sampleNormal), 0.0);
-            if (normalDot <= 0.25) {
-                continue;
-            }
             const float sampleAo = texture(ssaoRawTexture, suv).r;
 
-            const float normalWeight = pow(normalDot, 12.0);
-            const float depthWeight = exp(-depthDelta * 12.0);
+            const float normalWeight = pow(max(dot(centerNormal, sampleNormal), 0.0), 8.0);
+            const float depthWeight = exp(-abs(sampleDepth - centerDepth) * 1.5);
             const float weight = spatialWeight * normalWeight * depthWeight;
 
             weightedAo += sampleAo * weight;
@@ -96,6 +88,5 @@ void main() {
         }
     }
 
-    const float ao = clamp(weightedAo / max(weightSum, 1e-4), 0.0, 1.0);
-    outAo = clamp(pow(mix(1.0, ao, 0.90), 1.05), 0.0, 1.0);
+    outAo = clamp(weightedAo / max(weightSum, 1e-4), 0.0, 1.0);
 }
