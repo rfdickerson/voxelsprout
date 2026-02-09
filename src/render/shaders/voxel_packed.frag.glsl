@@ -380,7 +380,9 @@ void main() {
     const vec3 ambientIrradiance = mix(shNormalIrradiance, shHemisphereIrradiance, 0.70);
     const float shadowOcclusion = 1.0 - shadowVisibility;
     const float shShadowBoost = 1.0 + (shadowOcclusion * 0.75);
-    const vec3 ambient = ambientIrradiance * (0.26 * shShadowBoost * clamp(inVertexAo, 0.0, 1.0));
+    const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
+    const float vertexAo = mix(1.0, clamp(inVertexAo, 0.0, 1.0), vertexAoEnable);
+    const vec3 ambient = ambientIrradiance * (0.26 * shShadowBoost * vertexAo);
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = mix(1.0, shadowVisibility, shadowStrength);
     vec3 lighting =

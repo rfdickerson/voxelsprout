@@ -24,12 +24,6 @@ layout(set = 0, binding = 6) uniform sampler2D normalDepthTexture;
 layout(location = 0) in vec2 inUv;
 layout(location = 0) out float outAo;
 
-float hash12(vec2 p) {
-    const vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    const vec3 q3 = p3 + dot(p3, p3.yzx + 33.33);
-    return fract((q3.x + q3.y) * q3.z);
-}
-
 vec3 decodeViewNormal(vec3 encodedNormal) {
     return normalize((encodedNormal * 2.0) - 1.0);
 }
@@ -64,35 +58,29 @@ void main() {
     }
     const vec3 bitangent = normalize(cross(centerNormal, tangent));
 
-    const vec2 noiseScale = vec2(textureSize(normalDepthTexture, 0));
-    const float randomAngle = hash12(inUv * noiseScale) * 6.2831853;
-    const float s = sin(randomAngle);
-    const float c = cos(randomAngle);
-    const mat2 rot = mat2(c, -s, s, c);
-
-    const float radius = 1.4;
-    const float bias = 0.03;
-    float occlusion = 0.0;
-    float sampleCount = 0.0;
-    const int kSampleCount = 32;
+    // Keep the sample pattern deterministic (no per-pixel random rotation) so AO
+    // remains stable when the camera moves.
+    const float radius = 0.55;
+    const float bias = 0.04;
+    float occlusionWeight = 0.0;
+    float totalWeight = 0.0;
+    const int kSampleCount = 20;
     const float kGoldenAngle = 2.39996323;
 
     for (int i = 0; i < kSampleCount; ++i) {
         const float fi = float(i);
         const float t = (fi + 0.5) / float(kSampleCount);
         const float r = sqrt(t);
-        const float angle = (fi * kGoldenAngle) + randomAngle;
-        const vec2 disk = rot * vec2(cos(angle), sin(angle)) * r;
+        const float angle = fi * kGoldenAngle;
+        const vec2 disk = vec2(cos(angle), sin(angle)) * r;
         const float z = sqrt(max(1.0 - dot(disk, disk), 0.0));
-        vec3 k = vec3(disk, z);
-        const float scale = mix(0.15, 1.0, t * t);
-        k *= scale;
+        const float sampleRadius = radius * mix(0.20, 1.0, t * t);
 
         const vec3 sampleOffset =
-            (tangent * k.x) +
-            (bitangent * k.y) +
-            (centerNormal * abs(k.z));
-        const vec3 sampleViewPos = centerViewPos + (sampleOffset * radius);
+            (tangent * disk.x) +
+            (bitangent * disk.y) +
+            (centerNormal * abs(z));
+        const vec3 sampleViewPos = centerViewPos + (sampleOffset * sampleRadius);
 
         const vec4 sampleClip = camera.proj * vec4(sampleViewPos, 1.0);
         if (sampleClip.w <= 1e-4) {
@@ -105,10 +93,12 @@ void main() {
             continue;
         }
 
-        const float sampleDepth = texture(normalDepthTexture, sampleUv).a;
+        const vec4 sampleData = texture(normalDepthTexture, sampleUv);
+        const float sampleDepth = sampleData.a;
         if (sampleDepth <= 0.0001) {
             continue;
         }
+        const vec3 sampleNormal = decodeViewNormal(sampleData.rgb);
 
         const vec3 sampleSceneViewPos = reconstructViewPosition(sampleUv, sampleDepth, invProj);
         const vec3 sceneDelta = sampleSceneViewPos - centerViewPos;
@@ -117,7 +107,10 @@ void main() {
             continue;
         }
 
-        const float rangeWeight = smoothstep(0.0, 1.0, radius / sampleDistance);
+        if (sampleDistance > (radius * 1.25)) {
+            continue;
+        }
+        const float rangeWeight = 1.0 - smoothstep(0.0, radius * 1.25, sampleDistance);
 
         // Project both expected sample position and fetched scene position onto the center normal.
         // The fetched geometry must be in front of the center point, but still before the expected
@@ -127,26 +120,33 @@ void main() {
             continue;
         }
         const float sceneProj = dot(sceneDelta, centerNormal);
-        if (sceneProj <= bias || sceneProj >= (sampleProj - bias)) {
-            continue;
-        }
+        const float occlusionEnter = smoothstep(bias, bias + 0.08, sceneProj);
+        const float occlusionExit =
+            1.0 - smoothstep(sampleProj - 0.08, sampleProj + 0.02, sceneProj);
+        const float occlusionAmount = occlusionEnter * occlusionExit;
 
         const vec3 sceneDir = sceneDelta / sampleDistance;
         const float directionalWeight = max(dot(centerNormal, sceneDir), 0.0);
-        const float sampleWeight = rangeWeight * directionalWeight;
+        const float normalDot = max(dot(centerNormal, sampleNormal), 0.0);
+        if (normalDot <= 0.15) {
+            continue;
+        }
+        const float normalWeight = mix(0.35, 1.0, normalDot * normalDot);
+        const float sampleWeight = rangeWeight * directionalWeight * normalWeight;
         if (sampleWeight <= 1e-4) {
             continue;
         }
 
-        occlusion += sampleWeight;
-        sampleCount += sampleWeight;
+        totalWeight += sampleWeight;
+        occlusionWeight += sampleWeight * occlusionAmount;
     }
 
-    if (sampleCount <= 0.0) {
+    if (totalWeight <= 0.0) {
         outAo = 1.0;
         return;
     }
 
-    const float rawAo = 1.0 - (occlusion / sampleCount);
-    outAo = pow(clamp(rawAo, 0.0, 1.0), 1.4);
+    const float rawAo = clamp(1.0 - (occlusionWeight / totalWeight), 0.0, 1.0);
+    const float softenedAo = mix(1.0, rawAo, 0.65);
+    outAo = pow(clamp(softenedAo, 0.0, 1.0), 1.10);
 }

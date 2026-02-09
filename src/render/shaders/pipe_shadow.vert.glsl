@@ -5,6 +5,7 @@ layout(location = 1) in vec3 inLocalNormal;
 layout(location = 2) in vec4 inOriginLength; // xyz origin, w length
 layout(location = 3) in vec4 inAxisRadius;   // xyz axis, w radius
 layout(location = 4) in vec4 inTint;
+layout(location = 5) in vec4 inExtensions;   // x start extension, y end extension
 
 layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 mvp;
@@ -46,11 +47,17 @@ void main() {
 
     const float pipeLength = max(inOriginLength.w, 0.05);
     const float pipeRadius = max(inAxisRadius.w, 0.02);
+    const float startExtension = max(inExtensions.x, 0.0);
+    const float endExtension = max(inExtensions.y, 0.0);
+    const float renderedLength = max(pipeLength + startExtension + endExtension, 0.05);
     const vec3 voxelCenter = inOriginLength.xyz + vec3(0.5);
-    const vec3 segmentStart = voxelCenter - (axis * (pipeLength * 0.5));
+    const vec3 segmentStart = voxelCenter - (axis * ((pipeLength * 0.5) + startExtension));
+    const float alongClamped = clamp(inLocalPosition.y, 0.0, 1.0);
+    const float alongCapOffset = inLocalPosition.y - alongClamped;
+    const float worldAlong = (alongClamped * renderedLength) + alongCapOffset;
     const vec3 worldPosition =
         segmentStart +
-        (axis * (inLocalPosition.y * pipeLength)) +
+        (axis * worldAlong) +
         (tangent * (inLocalPosition.x * pipeRadius)) +
         (bitangent * (inLocalPosition.z * pipeRadius));
 

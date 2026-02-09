@@ -2,7 +2,9 @@
 
 #include <GLFW/glfw3.h>
 
+#include "core/Grid3.hpp"
 #include "math/Math.hpp"
+#include "sim/NetworkProcedural.hpp"
 
 #include <algorithm>
 #include <array>
@@ -116,6 +118,76 @@ float applyStickDeadzone(float value, float deadzone) {
     return std::copysign(normalized, value);
 }
 
+core::Dir6 axisToDir6(const math::Vector3& axis) {
+    const math::Vector3 normalized = math::normalize(axis);
+    const float absX = std::abs(normalized.x);
+    const float absY = std::abs(normalized.y);
+    const float absZ = std::abs(normalized.z);
+    if (absX >= absY && absX >= absZ) {
+        return normalized.x >= 0.0f ? core::Dir6::PosX : core::Dir6::NegX;
+    }
+    if (absY >= absX && absY >= absZ) {
+        return normalized.y >= 0.0f ? core::Dir6::PosY : core::Dir6::NegY;
+    }
+    return normalized.z >= 0.0f ? core::Dir6::PosZ : core::Dir6::NegZ;
+}
+
+core::Dir6 faceNormalToDir6(int nx, int ny, int nz) {
+    if (nx > 0) {
+        return core::Dir6::PosX;
+    }
+    if (nx < 0) {
+        return core::Dir6::NegX;
+    }
+    if (ny > 0) {
+        return core::Dir6::PosY;
+    }
+    if (ny < 0) {
+        return core::Dir6::NegY;
+    }
+    if (nz > 0) {
+        return core::Dir6::PosZ;
+    }
+    return core::Dir6::NegZ;
+}
+
+void dir6ToAxisInts(core::Dir6 dir, int& outX, int& outY, int& outZ) {
+    const core::Cell3i offset = core::dirToOffset(dir);
+    outX = static_cast<int>(offset.x);
+    outY = static_cast<int>(offset.y);
+    outZ = static_cast<int>(offset.z);
+}
+
+bool dirSharesAxis(core::Dir6 lhs, core::Dir6 rhs) {
+    return lhs == rhs || core::areOpposite(lhs, rhs);
+}
+
+core::Dir6 firstDirFromMask(std::uint8_t mask) {
+    for (const core::Dir6 dir : core::kAllDir6) {
+        if ((mask & core::dirBit(dir)) != 0u) {
+            return dir;
+        }
+    }
+    return core::Dir6::PosY;
+}
+
+core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, core::Dir6 preferredAxis) {
+    for (const core::Dir6 dir : core::kAllDir6) {
+        if ((mask & core::dirBit(dir)) == 0u) {
+            continue;
+        }
+        const core::Dir6 opposite = core::oppositeDir(dir);
+        if ((mask & core::dirBit(opposite)) == 0u) {
+            continue;
+        }
+        if (dirSharesAxis(preferredAxis, dir)) {
+            return preferredAxis;
+        }
+        return dir;
+    }
+    return preferredAxis;
+}
+
 } // namespace
 
 namespace app {
@@ -184,6 +256,9 @@ void App::run() {
         pollInput();
         if (m_input.quitRequested) {
             glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+            break;
+        }
+        if (glfwWindowShouldClose(m_window) == GLFW_TRUE) {
             break;
         }
 
@@ -1237,10 +1312,14 @@ bool App::computePipePlacementFromInteractionRaycast(
         return false;
     }
 
-    int snappedAxisX = raycast.hitFaceNormalX;
-    int snappedAxisY = raycast.hitFaceNormalY;
-    int snappedAxisZ = raycast.hitFaceNormalZ;
+    const core::Dir6 faceDir = faceNormalToDir6(
+        raycast.hitFaceNormalX,
+        raycast.hitFaceNormalY,
+        raycast.hitFaceNormalZ
+    );
+    core::Dir6 selectedAxis = faceDir;
     int extensionSign = 1;
+    core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
 
     if (raycast.hitPipe) {
         std::size_t pipeIndex = 0;
@@ -1253,59 +1332,51 @@ bool App::computePipePlacementFromInteractionRaycast(
             return false;
         }
 
-        const math::Vector3 axis = pipes[pipeIndex].axis;
-        const float absX = std::abs(axis.x);
-        const float absY = std::abs(axis.y);
-        const float absZ = std::abs(axis.z);
-        if (absX >= absY && absX >= absZ) {
-            snappedAxisX = (axis.x >= 0.0f) ? 1 : -1;
-            snappedAxisY = 0;
-            snappedAxisZ = 0;
-        } else if (absY >= absX && absY >= absZ) {
-            snappedAxisX = 0;
-            snappedAxisY = (axis.y >= 0.0f) ? 1 : -1;
-            snappedAxisZ = 0;
-        } else {
-            snappedAxisX = 0;
-            snappedAxisY = 0;
-            snappedAxisZ = (axis.z >= 0.0f) ? 1 : -1;
-        }
-
-        const int faceNormalDotAxis = (raycast.hitFaceNormalX * snappedAxisX) +
-                                      (raycast.hitFaceNormalY * snappedAxisY) +
-                                      (raycast.hitFaceNormalZ * snappedAxisZ);
-        if (faceNormalDotAxis > 0) {
+        selectedAxis = axisToDir6(pipes[pipeIndex].axis);
+        const core::Cell3i axisOffset = core::dirToOffset(selectedAxis);
+        const int faceNormalDotAxis =
+            (raycast.hitFaceNormalX * axisOffset.x) +
+            (raycast.hitFaceNormalY * axisOffset.y) +
+            (raycast.hitFaceNormalZ * axisOffset.z);
+        const bool sideSplitPlacement = (faceNormalDotAxis == 0);
+        if (sideSplitPlacement) {
+            // Side hits place a perpendicular branch from the clicked pipe cell.
+            selectedAxis = faceDir;
             extensionSign = 1;
-        } else if (faceNormalDotAxis < 0) {
-            extensionSign = -1;
         } else {
-            const float yawRadians = math::radians(m_camera.yawDegrees);
-            const float pitchRadians = math::radians(m_camera.pitchDegrees);
-            const float cosPitch = std::cos(pitchRadians);
-            const math::Vector3 rayDirection = math::normalize(math::Vector3{
-                std::cos(yawRadians) * cosPitch,
-                std::sin(pitchRadians),
-                std::sin(yawRadians) * cosPitch
-            });
-            const float rayDotAxis = math::dot(
-                rayDirection,
-                math::Vector3{
-                    static_cast<float>(snappedAxisX),
-                    static_cast<float>(snappedAxisY),
-                    static_cast<float>(snappedAxisZ)
-                }
-            );
-            if (rayDotAxis > 0.0001f) {
+            if (faceNormalDotAxis > 0) {
                 extensionSign = 1;
-            } else if (rayDotAxis < -0.0001f) {
+            } else {
                 extensionSign = -1;
+            }
+
+            // If a chain already exists, extend from its far end instead of failing at an internal segment.
+            const core::Dir6 extensionDir =
+                extensionSign >= 0 ? selectedAxis : core::oppositeDir(selectedAxis);
+            while (true) {
+                const core::Cell3i nextCell = core::neighborCell(extensionAnchor, extensionDir);
+                std::size_t nextPipeIndex = 0;
+                if (!isPipeAtWorld(nextCell.x, nextCell.y, nextCell.z, &nextPipeIndex)) {
+                    break;
+                }
+                if (nextPipeIndex >= pipes.size()) {
+                    break;
+                }
+                const core::Dir6 nextAxis = axisToDir6(pipes[nextPipeIndex].axis);
+                if (!dirSharesAxis(nextAxis, selectedAxis)) {
+                    break;
+                }
+                extensionAnchor = nextCell;
             }
         }
     }
 
-    const int targetX = raycast.x + (snappedAxisX * extensionSign);
-    const int targetY = raycast.y + (snappedAxisY * extensionSign);
-    const int targetZ = raycast.z + (snappedAxisZ * extensionSign);
+    const core::Dir6 extensionDir =
+        extensionSign >= 0 ? selectedAxis : core::oppositeDir(selectedAxis);
+    const core::Cell3i targetCell = core::neighborCell(extensionAnchor, extensionDir);
+    const int targetX = targetCell.x;
+    const int targetY = targetCell.y;
+    const int targetZ = targetCell.z;
     if (!isWorldVoxelInBounds(targetX, targetY, targetZ)) {
         return false;
     }
@@ -1316,12 +1387,24 @@ bool App::computePipePlacementFromInteractionRaycast(
         return false;
     }
 
+    const std::uint8_t neighborMask = sim::neighborMask6(targetCell, [this](const core::Cell3i& cell) {
+        return isPipeAtWorld(cell.x, cell.y, cell.z, nullptr);
+    });
+    const std::uint32_t neighborCount = sim::connectionCount(neighborMask);
+    const sim::JoinPiece joinPiece = sim::classifyJoinPiece(neighborMask);
+
+    core::Dir6 resolvedAxis = selectedAxis;
+    if (neighborCount == 1u) {
+        const core::Dir6 neighborDir = firstDirFromMask(neighborMask);
+        resolvedAxis = core::oppositeDir(neighborDir);
+    } else if (joinPiece == sim::JoinPiece::Straight) {
+        resolvedAxis = resolveStraightAxisFromMask(neighborMask, selectedAxis);
+    }
+
     outX = targetX;
     outY = targetY;
     outZ = targetZ;
-    outAxisX = snappedAxisX;
-    outAxisY = snappedAxisY;
-    outAxisZ = snappedAxisZ;
+    dir6ToAxisInts(resolvedAxis, outAxisX, outAxisY, outAxisZ);
     return true;
 }
 

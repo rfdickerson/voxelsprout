@@ -36,8 +36,8 @@ inline void Simulation::initializeSingleBelt() {
     m_belts.emplace_back(0, 1, 0, BeltDirection::East);
 
     // Pipe toy seed used by the dedicated pipe render pass.
-    m_pipes.emplace_back(2, 1, 2, math::Vector3{1.0f, 0.0f, 0.0f}, 2.0f, 0.45f, math::Vector3{0.95f, 0.95f, 0.95f});
-    m_pipes.emplace_back(2, 1, 3, math::Vector3{0.0f, 1.0f, 0.0f}, 1.0f, 0.45f, math::Vector3{0.95f, 0.95f, 0.95f});
+    m_pipes.emplace_back(2, 1, 2, math::Vector3{1.0f, 0.0f, 0.0f}, 1.0f, 0.45f, math::Vector3{0.95f, 0.95f, 0.95f});
+    m_pipes.emplace_back(3, 1, 2, math::Vector3{1.0f, 0.0f, 0.0f}, 1.0f, 0.45f, math::Vector3{0.95f, 0.95f, 0.95f});
 }
 
 inline void Simulation::update(float dt) {

@@ -123,6 +123,7 @@ private:
     bool createHdrResolveTargets();
     bool createMsaaColorTargets();
     bool createDepthTargets();
+    bool createAoTargets();
     bool createShadowResources();
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
@@ -130,6 +131,7 @@ private:
     bool createTransferResources();
     bool createPipeBuffers();
     bool createPipePipeline();
+    bool createAoPipelines();
     bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
@@ -149,6 +151,7 @@ private:
     void destroyHdrResolveTargets();
     void destroyMsaaColorTargets();
     void destroyDepthTargets();
+    void destroyAoTargets();
     void destroyShadowResources();
     void destroyFrameResources();
     void destroyChunkBuffers();
@@ -185,6 +188,7 @@ private:
         float originLength[4];
         float axisRadius[4];
         float tint[4];
+        float extensions[4];
     };
 
     GLFWwindow* m_window = nullptr;
@@ -212,8 +216,11 @@ private:
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkFormat m_swapchainFormat = VK_FORMAT_UNDEFINED;
     VkExtent2D m_swapchainExtent{};
+    VkExtent2D m_aoExtent{};
     VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
     VkFormat m_shadowDepthFormat = VK_FORMAT_UNDEFINED;
+    VkFormat m_normalDepthFormat = VK_FORMAT_UNDEFINED;
+    VkFormat m_ssaoFormat = VK_FORMAT_UNDEFINED;
     std::vector<VkImage> m_swapchainImages;
     std::vector<VkImageView> m_swapchainImageViews;
     std::vector<bool> m_swapchainImageInitialized;
@@ -229,6 +236,24 @@ private:
     std::vector<VkImage> m_depthImages;
     std::vector<VkDeviceMemory> m_depthImageMemories;
     std::vector<VkImageView> m_depthImageViews;
+    std::vector<VkImage> m_normalDepthImages;
+    std::vector<VkDeviceMemory> m_normalDepthImageMemories;
+    std::vector<VkImageView> m_normalDepthImageViews;
+    std::vector<bool> m_normalDepthImageInitialized;
+    std::vector<VkImage> m_aoDepthImages;
+    std::vector<VkDeviceMemory> m_aoDepthImageMemories;
+    std::vector<VkImageView> m_aoDepthImageViews;
+    std::vector<bool> m_aoDepthImageInitialized;
+    std::vector<VkImage> m_ssaoRawImages;
+    std::vector<VkDeviceMemory> m_ssaoRawImageMemories;
+    std::vector<VkImageView> m_ssaoRawImageViews;
+    std::vector<bool> m_ssaoRawImageInitialized;
+    std::vector<VkImage> m_ssaoBlurImages;
+    std::vector<VkDeviceMemory> m_ssaoBlurImageMemories;
+    std::vector<VkImageView> m_ssaoBlurImageViews;
+    std::vector<bool> m_ssaoBlurImageInitialized;
+    VkSampler m_normalDepthSampler = VK_NULL_HANDLE;
+    VkSampler m_ssaoSampler = VK_NULL_HANDLE;
     VkImage m_shadowDepthImage = VK_NULL_HANDLE;
     VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;
     VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
@@ -251,6 +276,10 @@ private:
     VkPipeline m_skyboxPipeline = VK_NULL_HANDLE;
     VkPipeline m_tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline m_pipePipeline = VK_NULL_HANDLE;
+    VkPipeline m_voxelNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline m_ssaoPipeline = VK_NULL_HANDLE;
+    VkPipeline m_ssaoBlurPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewAddPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewRemovePipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
@@ -299,6 +328,10 @@ private:
     uint32_t m_currentFrame = 0;
     bool m_debugUiVisible = false;
     bool m_showFrameStatsPanel = true;
+    bool m_debugEnableVertexAo = true;
+    bool m_debugEnableSsao = true;
+    bool m_debugVisualizeSsao = false;
+    bool m_debugVisualizeAoNormals = false;
     ShadowDebugSettings m_shadowDebugSettings{};
     SkyDebugSettings m_skyDebugSettings{};
 #if defined(VOXEL_HAS_IMGUI)

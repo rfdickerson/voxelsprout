@@ -1,7 +1,9 @@
 #include "render/Renderer.hpp"
 
 #include <GLFW/glfw3.h>
+#include "core/Grid3.hpp"
 #include "math/Math.hpp"
+#include "sim/NetworkProcedural.hpp"
 #include "world/ChunkMesher.hpp"
 
 #if defined(VOXEL_HAS_IMGUI)
@@ -22,6 +24,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -38,6 +41,11 @@ constexpr std::array<const char*, 5> kDeviceExtensions = {
     VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
 };
 constexpr uint32_t kShadowCascadeCount = 4;
+constexpr float kPipeTransferHalfExtent = 0.58f;
+constexpr float kPipeMinRadius = 0.02f;
+constexpr float kPipeMaxRadius = 0.5f;
+constexpr float kPipeBranchRadiusBoost = 0.05f;
+constexpr float kPipeMaxEndExtension = 0.49f;
 
 #if defined(VOXEL_HAS_IMGUI)
 void imguiCheckVkResult(VkResult result) {
@@ -110,115 +118,263 @@ world::ChunkMeshData buildSingleVoxelPreviewMesh(
     return mesh;
 }
 
-PipeMeshData buildPipeCylinderMesh(std::uint32_t radialSegments) {
+PipeMeshData buildPipeVoxelMesh() {
     PipeMeshData mesh{};
-    const std::uint32_t segments = std::max(radialSegments, 3u);
-    mesh.vertices.reserve(static_cast<std::size_t>(segments * 4u + 2u));
-    mesh.indices.reserve(static_cast<std::size_t>(segments * 12u));
+    mesh.vertices.reserve(24u);
+    mesh.indices.reserve(36u);
 
-    constexpr float kTwoPi = 6.28318530717958647692f;
+    auto appendFace = [&mesh](
+                          const std::array<std::array<float, 3>, 4>& corners,
+                          const std::array<float, 3>& normal
+                      ) {
+        const std::uint32_t base = static_cast<std::uint32_t>(mesh.vertices.size());
+        for (const std::array<float, 3>& corner : corners) {
+            PipeMeshData::Vertex vertex{};
+            vertex.position[0] = corner[0];
+            vertex.position[1] = corner[1];
+            vertex.position[2] = corner[2];
+            vertex.normal[0] = normal[0];
+            vertex.normal[1] = normal[1];
+            vertex.normal[2] = normal[2];
+            mesh.vertices.push_back(vertex);
+        }
+        mesh.indices.push_back(base + 0u);
+        mesh.indices.push_back(base + 1u);
+        mesh.indices.push_back(base + 2u);
+        mesh.indices.push_back(base + 0u);
+        mesh.indices.push_back(base + 2u);
+        mesh.indices.push_back(base + 3u);
+    };
 
-    // Side wall vertices (y in [0, 1], radius = 1 in local space).
-    for (std::uint32_t i = 0; i < segments; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(segments);
-        const float angle = t * kTwoPi;
-        const float c = std::cos(angle);
-        const float s = std::sin(angle);
+    struct BoxFaceMask {
+        bool posX = true;
+        bool negX = true;
+        bool posY = true;
+        bool negY = true;
+        bool posZ = true;
+        bool negZ = true;
+    };
 
-        PipeMeshData::Vertex bottom{};
-        bottom.position[0] = c;
-        bottom.position[1] = 0.0f;
-        bottom.position[2] = s;
-        bottom.normal[0] = c;
-        bottom.normal[1] = 0.0f;
-        bottom.normal[2] = s;
+    auto appendBox = [&appendFace](
+                         float minX,
+                         float minY,
+                         float minZ,
+                         float maxX,
+                         float maxY,
+                         float maxZ,
+                         const BoxFaceMask& faceMask
+                     ) {
+        if (faceMask.posX) {
+            appendFace(
+                {{
+                    {{maxX, minY, minZ}},
+                    {{maxX, maxY, minZ}},
+                    {{maxX, maxY, maxZ}},
+                    {{maxX, minY, maxZ}},
+                }},
+                {{1.0f, 0.0f, 0.0f}}
+            );
+        }
+        if (faceMask.negX) {
+            appendFace(
+                {{
+                    {{minX, minY, maxZ}},
+                    {{minX, maxY, maxZ}},
+                    {{minX, maxY, minZ}},
+                    {{minX, minY, minZ}},
+                }},
+                {{-1.0f, 0.0f, 0.0f}}
+            );
+        }
+        if (faceMask.posY) {
+            appendFace(
+                {{
+                    {{minX, maxY, minZ}},
+                    {{minX, maxY, maxZ}},
+                    {{maxX, maxY, maxZ}},
+                    {{maxX, maxY, minZ}},
+                }},
+                {{0.0f, 1.0f, 0.0f}}
+            );
+        }
+        if (faceMask.negY) {
+            appendFace(
+                {{
+                    {{minX, minY, maxZ}},
+                    {{minX, minY, minZ}},
+                    {{maxX, minY, minZ}},
+                    {{maxX, minY, maxZ}},
+                }},
+                {{0.0f, -1.0f, 0.0f}}
+            );
+        }
+        if (faceMask.posZ) {
+            appendFace(
+                {{
+                    {{minX, minY, maxZ}},
+                    {{maxX, minY, maxZ}},
+                    {{maxX, maxY, maxZ}},
+                    {{minX, maxY, maxZ}},
+                }},
+                {{0.0f, 0.0f, 1.0f}}
+            );
+        }
+        if (faceMask.negZ) {
+            appendFace(
+                {{
+                    {{maxX, minY, minZ}},
+                    {{minX, minY, minZ}},
+                    {{minX, maxY, minZ}},
+                    {{maxX, maxY, minZ}},
+                }},
+                {{0.0f, 0.0f, -1.0f}}
+            );
+        }
+    };
 
-        PipeMeshData::Vertex top = bottom;
-        top.position[1] = 1.0f;
-
-        mesh.vertices.push_back(bottom);
-        mesh.vertices.push_back(top);
-    }
-
-    for (std::uint32_t i = 0; i < segments; ++i) {
-        const std::uint32_t next = (i + 1u) % segments;
-        const std::uint32_t i0 = (i * 2u) + 0u;
-        const std::uint32_t i1 = (i * 2u) + 1u;
-        const std::uint32_t i2 = (next * 2u) + 0u;
-        const std::uint32_t i3 = (next * 2u) + 1u;
-        mesh.indices.push_back(i0);
-        mesh.indices.push_back(i1);
-        mesh.indices.push_back(i3);
-        mesh.indices.push_back(i0);
-        mesh.indices.push_back(i3);
-        mesh.indices.push_back(i2);
-    }
-
-    const std::uint32_t capStartCenter = static_cast<std::uint32_t>(mesh.vertices.size());
-    PipeMeshData::Vertex startCenter{};
-    startCenter.position[0] = 0.0f;
-    startCenter.position[1] = 0.0f;
-    startCenter.position[2] = 0.0f;
-    startCenter.normal[0] = 0.0f;
-    startCenter.normal[1] = -1.0f;
-    startCenter.normal[2] = 0.0f;
-    mesh.vertices.push_back(startCenter);
-
-    const std::uint32_t capEndCenter = static_cast<std::uint32_t>(mesh.vertices.size());
-    PipeMeshData::Vertex endCenter = startCenter;
-    endCenter.position[1] = 1.0f;
-    endCenter.normal[1] = 1.0f;
-    mesh.vertices.push_back(endCenter);
-
-    const std::uint32_t capStartRingBase = static_cast<std::uint32_t>(mesh.vertices.size());
-    for (std::uint32_t i = 0; i < segments; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(segments);
-        const float angle = t * kTwoPi;
-        const float c = std::cos(angle);
-        const float s = std::sin(angle);
-
-        PipeMeshData::Vertex startV{};
-        startV.position[0] = c;
-        startV.position[1] = 0.0f;
-        startV.position[2] = s;
-        startV.normal[0] = 0.0f;
-        startV.normal[1] = -1.0f;
-        startV.normal[2] = 0.0f;
-        mesh.vertices.push_back(startV);
-    }
-
-    const std::uint32_t capEndRingBase = static_cast<std::uint32_t>(mesh.vertices.size());
-    for (std::uint32_t i = 0; i < segments; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(segments);
-        const float angle = t * kTwoPi;
-        const float c = std::cos(angle);
-        const float s = std::sin(angle);
-
-        PipeMeshData::Vertex endV{};
-        endV.position[0] = c;
-        endV.position[1] = 1.0f;
-        endV.position[2] = s;
-        endV.normal[0] = 0.0f;
-        endV.normal[1] = 1.0f;
-        endV.normal[2] = 0.0f;
-        mesh.vertices.push_back(endV);
-    }
-
-    for (std::uint32_t i = 0; i < segments; ++i) {
-        const std::uint32_t next = (i + 1u) % segments;
-
-        // Start cap faces negative Y.
-        mesh.indices.push_back(capStartCenter);
-        mesh.indices.push_back(capStartRingBase + next);
-        mesh.indices.push_back(capStartRingBase + i);
-
-        // End cap faces positive Y.
-        mesh.indices.push_back(capEndCenter);
-        mesh.indices.push_back(capEndRingBase + i);
-        mesh.indices.push_back(capEndRingBase + next);
-    }
+    // Local pipe space:
+    // - y: segment start (0.0) to segment end (1.0)
+    // - x/z: radial extent, scaled by per-instance pipe radius in shader.
+    // Each segment is a single cuboid body; no per-segment endcaps.
+    appendBox(
+        -kPipeTransferHalfExtent,
+        0.0f,
+        -kPipeTransferHalfExtent,
+        kPipeTransferHalfExtent,
+        1.0f,
+        kPipeTransferHalfExtent,
+        BoxFaceMask{}
+    );
 
     return mesh;
+}
+
+struct PipeEndpointState {
+    math::Vector3 axis{0.0f, 1.0f, 0.0f};
+    float renderedRadius = 0.45f;
+    float startExtension = 0.0f;
+    float endExtension = 0.0f;
+};
+
+core::Dir6 dominantAxisDir6(const math::Vector3& direction) {
+    if (math::lengthSquared(direction) <= 0.000001f) {
+        return core::Dir6::PosY;
+    }
+    const math::Vector3 normalized = math::normalize(direction);
+    const float absX = std::abs(normalized.x);
+    const float absY = std::abs(normalized.y);
+    const float absZ = std::abs(normalized.z);
+    if (absX >= absY && absX >= absZ) {
+        return normalized.x >= 0.0f ? core::Dir6::PosX : core::Dir6::NegX;
+    }
+    if (absY >= absX && absY >= absZ) {
+        return normalized.y >= 0.0f ? core::Dir6::PosY : core::Dir6::NegY;
+    }
+    return normalized.z >= 0.0f ? core::Dir6::PosZ : core::Dir6::NegZ;
+}
+
+bool dirSharesAxis(core::Dir6 lhs, core::Dir6 rhs) {
+    return lhs == rhs || core::areOpposite(lhs, rhs);
+}
+
+float computeRenderedPipeRadius(float baseRadius, bool hasBranchConnection) {
+    float renderedRadius = std::clamp(baseRadius, kPipeMinRadius, kPipeMaxRadius);
+    if (hasBranchConnection) {
+        renderedRadius = std::min(kPipeMaxRadius, renderedRadius + kPipeBranchRadiusBoost);
+    }
+    return renderedRadius;
+}
+
+std::uint64_t pipeCellKey(const core::Cell3i& cell) {
+    constexpr std::uint64_t kMask = (1ull << 21u) - 1ull;
+    const std::uint64_t x = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.x) & kMask);
+    const std::uint64_t y = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.y) & kMask);
+    const std::uint64_t z = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.z) & kMask);
+    return x | (y << 21u) | (z << 42u);
+}
+
+std::vector<PipeEndpointState> buildPipeEndpointStates(
+    const std::vector<sim::Pipe>& pipes
+) {
+    std::unordered_map<std::uint64_t, std::size_t> pipeCellToIndex;
+    pipeCellToIndex.reserve(pipes.size() * 2u);
+    for (std::size_t i = 0; i < pipes.size(); ++i) {
+        const core::Cell3i cell{
+            pipes[i].x,
+            pipes[i].y,
+            pipes[i].z
+        };
+        pipeCellToIndex.emplace(pipeCellKey(cell), i);
+    }
+
+    auto hasPipeAtCell = [&pipeCellToIndex](const core::Cell3i& cell) -> bool {
+        return pipeCellToIndex.find(pipeCellKey(cell)) != pipeCellToIndex.end();
+    };
+
+    std::vector<core::Dir6> axisDirections(pipes.size(), core::Dir6::PosY);
+    std::vector<float> renderedRadii(pipes.size(), 0.45f);
+    std::vector<bool> hasBranchConnections(pipes.size(), false);
+    for (std::size_t i = 0; i < pipes.size(); ++i) {
+        const sim::Pipe& pipe = pipes[i];
+        const core::Cell3i cell{
+            pipe.x,
+            pipe.y,
+            pipe.z
+        };
+        const core::Dir6 axisDir = dominantAxisDir6(pipe.axis);
+        const core::Dir6 startDir = core::oppositeDir(axisDir);
+        const core::Dir6 endDir = axisDir;
+        const std::uint8_t neighborMask = sim::neighborMask6(cell, hasPipeAtCell);
+        const std::uint8_t axialMask = static_cast<std::uint8_t>(core::dirBit(startDir) | core::dirBit(endDir));
+        const bool hasBranchConnection = (neighborMask & static_cast<std::uint8_t>(~axialMask & 0x3Fu)) != 0u;
+
+        axisDirections[i] = axisDir;
+        hasBranchConnections[i] = hasBranchConnection;
+        renderedRadii[i] = computeRenderedPipeRadius(pipe.radius, hasBranchConnection);
+    }
+
+    auto endExtensionForDirection = [&](
+                                        std::size_t pipeIndex,
+                                        const core::Cell3i& cell,
+                                        core::Dir6 endDirection
+                                    ) -> float {
+        const core::Cell3i neighborCell = core::neighborCell(cell, endDirection);
+        const auto neighborIt = pipeCellToIndex.find(pipeCellKey(neighborCell));
+        if (neighborIt == pipeCellToIndex.end()) {
+            return 0.0f;
+        }
+
+        const std::size_t neighborIndex = neighborIt->second;
+        if (neighborIndex >= pipes.size()) {
+            return 0.0f;
+        }
+
+        if (dirSharesAxis(axisDirections[pipeIndex], axisDirections[neighborIndex])) {
+            return 0.0f;
+        }
+
+        const float neighborHalfExtent = kPipeTransferHalfExtent * renderedRadii[neighborIndex];
+        return std::clamp(0.5f - neighborHalfExtent, 0.0f, kPipeMaxEndExtension);
+    };
+
+    std::vector<PipeEndpointState> states(pipes.size());
+    for (std::size_t i = 0; i < pipes.size(); ++i) {
+        const sim::Pipe& pipe = pipes[i];
+        const core::Cell3i cell{
+            pipe.x,
+            pipe.y,
+            pipe.z
+        };
+        const core::Dir6 axisDir = axisDirections[i];
+        const core::Dir6 startDir = core::oppositeDir(axisDir);
+        const core::Dir6 endDir = axisDir;
+        states[i].axis = core::dirToUnitVector(axisDir);
+        states[i].renderedRadius = renderedRadii[i];
+        states[i].startExtension = endExtensionForDirection(i, cell, startDir);
+        states[i].endExtension = endExtensionForDirection(i, cell, endDir);
+    }
+
+    return states;
 }
 
 math::Matrix4 transpose(const math::Matrix4& matrix) {
@@ -514,6 +670,42 @@ VkFormat findSupportedHdrColorFormat(VkPhysicalDevice physicalDevice) {
     };
 
     for (VkFormat format : kHdrCandidates) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
+        const VkFormatFeatureFlags requiredFeatures =
+            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        if ((properties.optimalTilingFeatures & requiredFeatures) == requiredFeatures) {
+            return format;
+        }
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+VkFormat findSupportedNormalDepthFormat(VkPhysicalDevice physicalDevice) {
+    constexpr std::array<VkFormat, 2> kNormalDepthCandidates = {
+        VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_FORMAT_R32G32B32A32_SFLOAT
+    };
+
+    for (VkFormat format : kNormalDepthCandidates) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
+        const VkFormatFeatureFlags requiredFeatures =
+            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        if ((properties.optimalTilingFeatures & requiredFeatures) == requiredFeatures) {
+            return format;
+        }
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+VkFormat findSupportedSsaoFormat(VkPhysicalDevice physicalDevice) {
+    constexpr std::array<VkFormat, 2> kSsaoCandidates = {
+        VK_FORMAT_R16_SFLOAT,
+        VK_FORMAT_R8_UNORM
+    };
+
+    for (VkFormat format : kSsaoCandidates) {
         VkFormatProperties properties{};
         vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
         const VkFormatFeatureFlags requiredFeatures =
@@ -1224,6 +1416,11 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
+    if (!createAoPipelines()) {
+        std::cerr << "[render] init failed at createAoPipelines\n";
+        shutdown();
+        return false;
+    }
     if (!createChunkBuffers(chunkGrid, std::nullopt)) {
         std::cerr << "[render] init failed at createChunkBuffers\n";
         shutdown();
@@ -1385,6 +1582,16 @@ bool Renderer::pickPhysicalDevice() {
             std::cerr << "[render] skip GPU: no supported HDR color format\n";
             continue;
         }
+        const VkFormat normalDepthFormat = findSupportedNormalDepthFormat(candidate);
+        if (normalDepthFormat == VK_FORMAT_UNDEFINED) {
+            std::cerr << "[render] skip GPU: no supported normal-depth color format\n";
+            continue;
+        }
+        const VkFormat ssaoFormat = findSupportedSsaoFormat(candidate);
+        if (ssaoFormat == VK_FORMAT_UNDEFINED) {
+            std::cerr << "[render] skip GPU: no supported SSAO format\n";
+            continue;
+        }
 
         VkPhysicalDeviceVulkan12Features vulkan12Features{};
         vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
@@ -1426,6 +1633,8 @@ bool Renderer::pickPhysicalDevice() {
         m_depthFormat = depthFormat;
         m_shadowDepthFormat = shadowDepthFormat;
         m_hdrColorFormat = hdrColorFormat;
+        m_normalDepthFormat = normalDepthFormat;
+        m_ssaoFormat = ssaoFormat;
         m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
         std::cerr << "[render] selected GPU: " << properties.deviceName
                   << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
@@ -1438,6 +1647,8 @@ bool Renderer::pickPhysicalDevice() {
                   << ", msaaSamples=" << static_cast<uint32_t>(m_colorSampleCount)
                   << ", shadowDepthFormat=" << static_cast<int>(m_shadowDepthFormat)
                   << ", hdrColorFormat=" << static_cast<int>(m_hdrColorFormat)
+                  << ", normalDepthFormat=" << static_cast<int>(m_normalDepthFormat)
+                  << ", ssaoFormat=" << static_cast<int>(m_ssaoFormat)
                   << "\n";
         return true;
     }
@@ -1601,7 +1812,7 @@ bool Renderer::createPipeBuffers() {
         return true;
     }
 
-    const PipeMeshData mesh = buildPipeCylinderMesh(18u);
+    const PipeMeshData mesh = buildPipeVoxelMesh();
     if (mesh.vertices.empty() || mesh.indices.empty()) {
         std::cerr << "[render] pipe mesh build failed\n";
         return false;
@@ -1709,22 +1920,17 @@ bool Renderer::createDiffuseTextureResources() {
     constexpr VkFormat kTextureFormat = VK_FORMAT_R8G8B8A8_UNORM;
     constexpr VkDeviceSize kTextureBytes = kTextureWidth * kTextureHeight * 4;
 
+    // Keep base albedo uniform so AO diagnostics are not confused with per-tile texture contrast.
     std::vector<std::uint8_t> pixels(static_cast<size_t>(kTextureBytes), 0);
+    constexpr std::uint8_t kBaseR = 112u;
+    constexpr std::uint8_t kBaseG = 103u;
+    constexpr std::uint8_t kBaseB = 92u;
     for (uint32_t y = 0; y < kTextureHeight; ++y) {
         for (uint32_t x = 0; x < kTextureWidth; ++x) {
-            const float fx = static_cast<float>(x) / static_cast<float>(kTextureWidth);
-            const float fy = static_cast<float>(y) / static_cast<float>(kTextureHeight);
-            const bool checker = (((x / 8) + (y / 8)) & 1u) != 0u;
-            const std::uint8_t noise = static_cast<std::uint8_t>(((x * 13u) ^ (y * 29u)) & 15u);
-            const float base = checker ? 0.62f : 0.54f;
-            const float tint = 0.96f + (0.06f * std::sin((fx + fy) * 16.0f));
-            const std::uint8_t r = static_cast<std::uint8_t>(std::clamp((base * 182.0f * tint) + noise, 0.0f, 255.0f));
-            const std::uint8_t g = static_cast<std::uint8_t>(std::clamp((base * 166.0f * tint) + noise, 0.0f, 255.0f));
-            const std::uint8_t b = static_cast<std::uint8_t>(std::clamp((base * 146.0f * tint) + noise, 0.0f, 255.0f));
             const size_t i = static_cast<size_t>((y * kTextureWidth + x) * 4u);
-            pixels[i + 0] = r;
-            pixels[i + 1] = g;
-            pixels[i + 2] = b;
+            pixels[i + 0] = kBaseR;
+            pixels[i + 1] = kBaseG;
+            pixels[i + 2] = kBaseB;
             pixels[i + 3] = 255u;
         }
     }
@@ -2217,6 +2423,10 @@ bool Renderer::createSwapchain() {
         std::cerr << "[render] depth target creation failed\n";
         return false;
     }
+    if (!createAoTargets()) {
+        std::cerr << "[render] AO target creation failed\n";
+        return false;
+    }
     m_renderFinishedSemaphores.resize(imageCount, VK_NULL_HANDLE);
     for (uint32_t i = 0; i < imageCount; ++i) {
         VkSemaphoreCreateInfo semaphoreCreateInfo{};
@@ -2309,6 +2519,249 @@ bool Renderer::createDepthTargets() {
         const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_depthImageViews[i]);
         if (viewResult != VK_SUCCESS) {
             logVkFailure("vkCreateImageView(depth)", viewResult);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool Renderer::createAoTargets() {
+    if (m_normalDepthFormat == VK_FORMAT_UNDEFINED || m_ssaoFormat == VK_FORMAT_UNDEFINED) {
+        std::cerr << "[render] AO formats are undefined\n";
+        return false;
+    }
+    if (m_depthFormat == VK_FORMAT_UNDEFINED) {
+        std::cerr << "[render] depth format is undefined for AO targets\n";
+        return false;
+    }
+
+    const uint32_t imageCount = static_cast<uint32_t>(m_swapchainImages.size());
+    m_aoExtent.width = std::max(1u, m_swapchainExtent.width / 2u);
+    m_aoExtent.height = std::max(1u, m_swapchainExtent.height / 2u);
+
+    auto createColorTargets = [&](VkFormat format,
+                                  std::vector<VkImage>& outImages,
+                                  std::vector<VkDeviceMemory>& outMemories,
+                                  std::vector<VkImageView>& outViews,
+                                  const char* debugLabel) -> bool {
+        outImages.assign(imageCount, VK_NULL_HANDLE);
+        outMemories.assign(imageCount, VK_NULL_HANDLE);
+        outViews.assign(imageCount, VK_NULL_HANDLE);
+        for (uint32_t i = 0; i < imageCount; ++i) {
+            VkImageCreateInfo imageCreateInfo{};
+            imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+            imageCreateInfo.format = format;
+            imageCreateInfo.extent.width = m_aoExtent.width;
+            imageCreateInfo.extent.height = m_aoExtent.height;
+            imageCreateInfo.extent.depth = 1;
+            imageCreateInfo.mipLevels = 1;
+            imageCreateInfo.arrayLayers = 1;
+            imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+            imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageCreateInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+            const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &outImages[i]);
+            if (imageResult != VK_SUCCESS) {
+                logVkFailure(debugLabel, imageResult);
+                return false;
+            }
+
+            VkMemoryRequirements memoryRequirements{};
+            vkGetImageMemoryRequirements(m_device, outImages[i], &memoryRequirements);
+            const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+                m_physicalDevice,
+                memoryRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+            if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+                std::cerr << "[render] no memory type for " << debugLabel << "\n";
+                return false;
+            }
+
+            VkMemoryAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocateInfo.allocationSize = memoryRequirements.size;
+            allocateInfo.memoryTypeIndex = memoryTypeIndex;
+            const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &outMemories[i]);
+            if (allocResult != VK_SUCCESS) {
+                logVkFailure("vkAllocateMemory(aoColor)", allocResult);
+                return false;
+            }
+
+            const VkResult bindResult = vkBindImageMemory(m_device, outImages[i], outMemories[i], 0);
+            if (bindResult != VK_SUCCESS) {
+                logVkFailure("vkBindImageMemory(aoColor)", bindResult);
+                return false;
+            }
+
+            VkImageViewCreateInfo viewCreateInfo{};
+            viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewCreateInfo.image = outImages[i];
+            viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewCreateInfo.format = format;
+            viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewCreateInfo.subresourceRange.baseMipLevel = 0;
+            viewCreateInfo.subresourceRange.levelCount = 1;
+            viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+            viewCreateInfo.subresourceRange.layerCount = 1;
+            const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &outViews[i]);
+            if (viewResult != VK_SUCCESS) {
+                logVkFailure("vkCreateImageView(aoColor)", viewResult);
+                return false;
+            }
+        }
+        return true;
+    };
+
+    m_normalDepthImageInitialized.assign(imageCount, false);
+    m_aoDepthImageInitialized.assign(imageCount, false);
+    m_ssaoRawImageInitialized.assign(imageCount, false);
+    m_ssaoBlurImageInitialized.assign(imageCount, false);
+
+    if (!createColorTargets(
+            m_normalDepthFormat,
+            m_normalDepthImages,
+            m_normalDepthImageMemories,
+            m_normalDepthImageViews,
+            "vkCreateImage(normalDepth)"
+        )) {
+        return false;
+    }
+
+    m_aoDepthImages.assign(imageCount, VK_NULL_HANDLE);
+    m_aoDepthImageMemories.assign(imageCount, VK_NULL_HANDLE);
+    m_aoDepthImageViews.assign(imageCount, VK_NULL_HANDLE);
+    for (uint32_t i = 0; i < imageCount; ++i) {
+        VkImageCreateInfo imageCreateInfo{};
+        imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageCreateInfo.format = m_depthFormat;
+        imageCreateInfo.extent.width = m_aoExtent.width;
+        imageCreateInfo.extent.height = m_aoExtent.height;
+        imageCreateInfo.extent.depth = 1;
+        imageCreateInfo.mipLevels = 1;
+        imageCreateInfo.arrayLayers = 1;
+        imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_aoDepthImages[i]);
+        if (imageResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(aoDepth)", imageResult);
+            return false;
+        }
+
+        VkMemoryRequirements memoryRequirements{};
+        vkGetImageMemoryRequirements(m_device, m_aoDepthImages[i], &memoryRequirements);
+        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice,
+            memoryRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        );
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "[render] no memory type for AO depth image\n";
+            return false;
+        }
+
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_aoDepthImageMemories[i]);
+        if (allocResult != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(aoDepth)", allocResult);
+            return false;
+        }
+
+        const VkResult bindResult = vkBindImageMemory(m_device, m_aoDepthImages[i], m_aoDepthImageMemories[i], 0);
+        if (bindResult != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(aoDepth)", bindResult);
+            return false;
+        }
+
+        VkImageViewCreateInfo viewCreateInfo{};
+        viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewCreateInfo.image = m_aoDepthImages[i];
+        viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewCreateInfo.format = m_depthFormat;
+        viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        viewCreateInfo.subresourceRange.baseMipLevel = 0;
+        viewCreateInfo.subresourceRange.levelCount = 1;
+        viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+        viewCreateInfo.subresourceRange.layerCount = 1;
+        const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_aoDepthImageViews[i]);
+        if (viewResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImageView(aoDepth)", viewResult);
+            return false;
+        }
+    }
+
+    if (!createColorTargets(
+            m_ssaoFormat,
+            m_ssaoRawImages,
+            m_ssaoRawImageMemories,
+            m_ssaoRawImageViews,
+            "vkCreateImage(ssaoRaw)"
+        )) {
+        return false;
+    }
+    if (!createColorTargets(
+            m_ssaoFormat,
+            m_ssaoBlurImages,
+            m_ssaoBlurImageMemories,
+            m_ssaoBlurImageViews,
+            "vkCreateImage(ssaoBlur)"
+        )) {
+        return false;
+    }
+
+    if (m_normalDepthSampler == VK_NULL_HANDLE) {
+        VkSamplerCreateInfo samplerCreateInfo{};
+        samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerCreateInfo.magFilter = VK_FILTER_NEAREST;
+        samplerCreateInfo.minFilter = VK_FILTER_NEAREST;
+        samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.minLod = 0.0f;
+        samplerCreateInfo.maxLod = 0.0f;
+        samplerCreateInfo.maxAnisotropy = 1.0f;
+        samplerCreateInfo.anisotropyEnable = VK_FALSE;
+        samplerCreateInfo.compareEnable = VK_FALSE;
+        samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+        const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_normalDepthSampler);
+        if (samplerResult != VK_SUCCESS) {
+            logVkFailure("vkCreateSampler(normalDepth)", samplerResult);
+            return false;
+        }
+    }
+
+    if (m_ssaoSampler == VK_NULL_HANDLE) {
+        VkSamplerCreateInfo samplerCreateInfo{};
+        samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+        samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+        samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.minLod = 0.0f;
+        samplerCreateInfo.maxLod = 0.0f;
+        samplerCreateInfo.maxAnisotropy = 1.0f;
+        samplerCreateInfo.anisotropyEnable = VK_FALSE;
+        samplerCreateInfo.compareEnable = VK_FALSE;
+        samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+        const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_ssaoSampler);
+        if (samplerResult != VK_SUCCESS) {
+            logVkFailure("vkCreateSampler(ssao)", samplerResult);
             return false;
         }
     }
@@ -2538,12 +2991,33 @@ bool Renderer::createDescriptorResources() {
         shadowVoxelGridBinding.descriptorCount = 1;
         shadowVoxelGridBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
+        VkDescriptorSetLayoutBinding normalDepthBinding{};
+        normalDepthBinding.binding = 6;
+        normalDepthBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        normalDepthBinding.descriptorCount = 1;
+        normalDepthBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        VkDescriptorSetLayoutBinding ssaoBlurBinding{};
+        ssaoBlurBinding.binding = 7;
+        ssaoBlurBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        ssaoBlurBinding.descriptorCount = 1;
+        ssaoBlurBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        VkDescriptorSetLayoutBinding ssaoRawBinding{};
+        ssaoRawBinding.binding = 8;
+        ssaoRawBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        ssaoRawBinding.descriptorCount = 1;
+        ssaoRawBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 8> bindings = {
             mvpBinding,
             diffuseTextureBinding,
             hdrSceneBinding,
             shadowMapBinding,
-            shadowVoxelGridBinding
+            shadowVoxelGridBinding,
+            normalDepthBinding,
+            ssaoBlurBinding,
+            ssaoRawBinding
         };
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
@@ -2567,7 +3041,7 @@ bool Renderer::createDescriptorResources() {
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                3 * kMaxFramesInFlight
+                6 * kMaxFramesInFlight
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
@@ -3337,7 +3811,7 @@ bool Renderer::createGraphicsPipeline() {
     pipeShadowBindings[1].stride = sizeof(PipeInstance);
     pipeShadowBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-    VkVertexInputAttributeDescription pipeShadowAttributes[5]{};
+    VkVertexInputAttributeDescription pipeShadowAttributes[6]{};
     pipeShadowAttributes[0].location = 0;
     pipeShadowAttributes[0].binding = 0;
     pipeShadowAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -3358,12 +3832,16 @@ bool Renderer::createGraphicsPipeline() {
     pipeShadowAttributes[4].binding = 1;
     pipeShadowAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
     pipeShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(PipeInstance, tint));
+    pipeShadowAttributes[5].location = 5;
+    pipeShadowAttributes[5].binding = 1;
+    pipeShadowAttributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeShadowAttributes[5].offset = static_cast<uint32_t>(offsetof(PipeInstance, extensions));
 
     VkPipelineVertexInputStateCreateInfo pipeShadowVertexInputInfo{};
     pipeShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     pipeShadowVertexInputInfo.vertexBindingDescriptionCount = 2;
     pipeShadowVertexInputInfo.pVertexBindingDescriptions = pipeShadowBindings;
-    pipeShadowVertexInputInfo.vertexAttributeDescriptionCount = 5;
+    pipeShadowVertexInputInfo.vertexAttributeDescriptionCount = 6;
     pipeShadowVertexInputInfo.pVertexAttributeDescriptions = pipeShadowAttributes;
 
     VkGraphicsPipelineCreateInfo pipeShadowPipelineCreateInfo = shadowPipelineCreateInfo;
@@ -3502,7 +3980,7 @@ bool Renderer::createPipePipeline() {
     bindings[1].stride = sizeof(PipeInstance);
     bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-    VkVertexInputAttributeDescription attributes[5]{};
+    VkVertexInputAttributeDescription attributes[6]{};
     attributes[0].location = 0;
     attributes[0].binding = 0;
     attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -3523,12 +4001,16 @@ bool Renderer::createPipePipeline() {
     attributes[4].binding = 1;
     attributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
     attributes[4].offset = static_cast<uint32_t>(offsetof(PipeInstance, tint));
+    attributes[5].location = 5;
+    attributes[5].binding = 1;
+    attributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributes[5].offset = static_cast<uint32_t>(offsetof(PipeInstance, extensions));
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInputInfo.vertexBindingDescriptionCount = 2;
     vertexInputInfo.pVertexBindingDescriptions = bindings;
-    vertexInputInfo.vertexAttributeDescriptionCount = 5;
+    vertexInputInfo.vertexAttributeDescriptionCount = 6;
     vertexInputInfo.pVertexAttributeDescriptions = attributes;
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
@@ -3624,6 +4106,486 @@ bool Renderer::createPipePipeline() {
         vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
     }
     m_pipePipeline = pipePipeline;
+    return true;
+}
+
+bool Renderer::createAoPipelines() {
+    if (m_pipelineLayout == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (
+        m_normalDepthFormat == VK_FORMAT_UNDEFINED ||
+        m_ssaoFormat == VK_FORMAT_UNDEFINED ||
+        m_depthFormat == VK_FORMAT_UNDEFINED
+    ) {
+        return false;
+    }
+
+    constexpr std::array<const char*, 4> kVoxelVertShaderPathCandidates = {
+        "src/render/shaders/voxel_packed.vert.spv",
+        "../src/render/shaders/voxel_packed.vert.spv",
+        "../../src/render/shaders/voxel_packed.vert.spv",
+        "../../../src/render/shaders/voxel_packed.vert.spv",
+    };
+    constexpr std::array<const char*, 4> kVoxelNormalDepthFragShaderPathCandidates = {
+        "src/render/shaders/voxel_normaldepth.frag.spv",
+        "../src/render/shaders/voxel_normaldepth.frag.spv",
+        "../../src/render/shaders/voxel_normaldepth.frag.spv",
+        "../../../src/render/shaders/voxel_normaldepth.frag.spv",
+    };
+    constexpr std::array<const char*, 4> kPipeVertShaderPathCandidates = {
+        "src/render/shaders/pipe_instanced.vert.spv",
+        "../src/render/shaders/pipe_instanced.vert.spv",
+        "../../src/render/shaders/pipe_instanced.vert.spv",
+        "../../../src/render/shaders/pipe_instanced.vert.spv",
+    };
+    constexpr std::array<const char*, 4> kPipeNormalDepthFragShaderPathCandidates = {
+        "src/render/shaders/pipe_normaldepth.frag.spv",
+        "../src/render/shaders/pipe_normaldepth.frag.spv",
+        "../../src/render/shaders/pipe_normaldepth.frag.spv",
+        "../../../src/render/shaders/pipe_normaldepth.frag.spv",
+    };
+    constexpr std::array<const char*, 4> kFullscreenVertShaderPathCandidates = {
+        "src/render/shaders/tone_map.vert.spv",
+        "../src/render/shaders/tone_map.vert.spv",
+        "../../src/render/shaders/tone_map.vert.spv",
+        "../../../src/render/shaders/tone_map.vert.spv",
+    };
+    constexpr std::array<const char*, 4> kSsaoFragShaderPathCandidates = {
+        "src/render/shaders/ssao.frag.spv",
+        "../src/render/shaders/ssao.frag.spv",
+        "../../src/render/shaders/ssao.frag.spv",
+        "../../../src/render/shaders/ssao.frag.spv",
+    };
+    constexpr std::array<const char*, 4> kSsaoBlurFragShaderPathCandidates = {
+        "src/render/shaders/ssao_blur.frag.spv",
+        "../src/render/shaders/ssao_blur.frag.spv",
+        "../../src/render/shaders/ssao_blur.frag.spv",
+        "../../../src/render/shaders/ssao_blur.frag.spv",
+    };
+
+    VkShaderModule voxelVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule voxelNormalDepthFragShaderModule = VK_NULL_HANDLE;
+    VkShaderModule pipeVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule pipeNormalDepthFragShaderModule = VK_NULL_HANDLE;
+    VkShaderModule fullscreenVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule ssaoFragShaderModule = VK_NULL_HANDLE;
+    VkShaderModule ssaoBlurFragShaderModule = VK_NULL_HANDLE;
+
+    auto destroyShaderModules = [&]() {
+        if (ssaoBlurFragShaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(m_device, ssaoBlurFragShaderModule, nullptr);
+            ssaoBlurFragShaderModule = VK_NULL_HANDLE;
+        }
+        if (ssaoFragShaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(m_device, ssaoFragShaderModule, nullptr);
+            ssaoFragShaderModule = VK_NULL_HANDLE;
+        }
+        if (fullscreenVertShaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(m_device, fullscreenVertShaderModule, nullptr);
+            fullscreenVertShaderModule = VK_NULL_HANDLE;
+        }
+        if (pipeNormalDepthFragShaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(m_device, pipeNormalDepthFragShaderModule, nullptr);
+            pipeNormalDepthFragShaderModule = VK_NULL_HANDLE;
+        }
+        if (pipeVertShaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(m_device, pipeVertShaderModule, nullptr);
+            pipeVertShaderModule = VK_NULL_HANDLE;
+        }
+        if (voxelNormalDepthFragShaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(m_device, voxelNormalDepthFragShaderModule, nullptr);
+            voxelNormalDepthFragShaderModule = VK_NULL_HANDLE;
+        }
+        if (voxelVertShaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(m_device, voxelVertShaderModule, nullptr);
+            voxelVertShaderModule = VK_NULL_HANDLE;
+        }
+    };
+
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kVoxelVertShaderPathCandidates,
+            kVertShaderSpirv,
+            sizeof(kVertShaderSpirv),
+            "voxel_packed.vert",
+            voxelVertShaderModule
+        )) {
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kVoxelNormalDepthFragShaderPathCandidates,
+            nullptr,
+            0,
+            "voxel_normaldepth.frag",
+            voxelNormalDepthFragShaderModule
+        )) {
+        destroyShaderModules();
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kPipeVertShaderPathCandidates,
+            nullptr,
+            0,
+            "pipe_instanced.vert",
+            pipeVertShaderModule
+        )) {
+        destroyShaderModules();
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kPipeNormalDepthFragShaderPathCandidates,
+            nullptr,
+            0,
+            "pipe_normaldepth.frag",
+            pipeNormalDepthFragShaderModule
+        )) {
+        destroyShaderModules();
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kFullscreenVertShaderPathCandidates,
+            nullptr,
+            0,
+            "tone_map.vert",
+            fullscreenVertShaderModule
+        )) {
+        destroyShaderModules();
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kSsaoFragShaderPathCandidates,
+            nullptr,
+            0,
+            "ssao.frag",
+            ssaoFragShaderModule
+        )) {
+        destroyShaderModules();
+        return false;
+    }
+    if (!createShaderModuleFromFileOrFallback(
+            m_device,
+            kSsaoBlurFragShaderPathCandidates,
+            nullptr,
+            0,
+            "ssao_blur.frag",
+            ssaoBlurFragShaderModule
+        )) {
+        destroyShaderModules();
+        return false;
+    }
+
+    VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline ssaoPipeline = VK_NULL_HANDLE;
+    VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
+    auto destroyNewPipelines = [&]() {
+        if (ssaoBlurPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, ssaoBlurPipeline, nullptr);
+            ssaoBlurPipeline = VK_NULL_HANDLE;
+        }
+        if (ssaoPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, ssaoPipeline, nullptr);
+            ssaoPipeline = VK_NULL_HANDLE;
+        }
+        if (pipeNormalDepthPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, pipeNormalDepthPipeline, nullptr);
+            pipeNormalDepthPipeline = VK_NULL_HANDLE;
+        }
+        if (voxelNormalDepthPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, voxelNormalDepthPipeline, nullptr);
+            voxelNormalDepthPipeline = VK_NULL_HANDLE;
+        }
+    };
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    std::array<VkDynamicState, 2> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkPipelineRenderingCreateInfo normalDepthRenderingCreateInfo{};
+    normalDepthRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    normalDepthRenderingCreateInfo.colorAttachmentCount = 1;
+    normalDepthRenderingCreateInfo.pColorAttachmentFormats = &m_normalDepthFormat;
+    normalDepthRenderingCreateInfo.depthAttachmentFormat = m_depthFormat;
+
+    VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
+    pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.pNext = &normalDepthRenderingCreateInfo;
+    pipelineCreateInfo.pInputAssemblyState = &inputAssembly;
+    pipelineCreateInfo.pViewportState = &viewportState;
+    pipelineCreateInfo.pRasterizationState = &rasterizer;
+    pipelineCreateInfo.pMultisampleState = &multisampling;
+    pipelineCreateInfo.pDepthStencilState = &depthStencil;
+    pipelineCreateInfo.pColorBlendState = &colorBlending;
+    pipelineCreateInfo.pDynamicState = &dynamicState;
+    pipelineCreateInfo.layout = m_pipelineLayout;
+    pipelineCreateInfo.renderPass = VK_NULL_HANDLE;
+    pipelineCreateInfo.subpass = 0;
+
+    // Voxel normal-depth pipeline.
+    VkPipelineShaderStageCreateInfo voxelStageInfos[2]{};
+    voxelStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    voxelStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    voxelStageInfos[0].module = voxelVertShaderModule;
+    voxelStageInfos[0].pName = "main";
+    voxelStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    voxelStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    voxelStageInfos[1].module = voxelNormalDepthFragShaderModule;
+    voxelStageInfos[1].pName = "main";
+
+    VkVertexInputBindingDescription voxelBinding{};
+    voxelBinding.binding = 0;
+    voxelBinding.stride = sizeof(world::PackedVoxelVertex);
+    voxelBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription voxelAttribute{};
+    voxelAttribute.location = 0;
+    voxelAttribute.binding = 0;
+    voxelAttribute.format = VK_FORMAT_R32_UINT;
+    voxelAttribute.offset = 0;
+    VkPipelineVertexInputStateCreateInfo voxelVertexInputInfo{};
+    voxelVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    voxelVertexInputInfo.vertexBindingDescriptionCount = 1;
+    voxelVertexInputInfo.pVertexBindingDescriptions = &voxelBinding;
+    voxelVertexInputInfo.vertexAttributeDescriptionCount = 1;
+    voxelVertexInputInfo.pVertexAttributeDescriptions = &voxelAttribute;
+
+    pipelineCreateInfo.stageCount = 2;
+    pipelineCreateInfo.pStages = voxelStageInfos;
+    pipelineCreateInfo.pVertexInputState = &voxelVertexInputInfo;
+    const VkResult voxelPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &voxelNormalDepthPipeline
+    );
+    if (voxelPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(voxelNormalDepth)", voxelPipelineResult);
+        destroyNewPipelines();
+        destroyShaderModules();
+        return false;
+    }
+
+    // Pipe normal-depth pipeline.
+    VkPipelineShaderStageCreateInfo pipeStageInfos[2]{};
+    pipeStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    pipeStageInfos[0].module = pipeVertShaderModule;
+    pipeStageInfos[0].pName = "main";
+    pipeStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pipeStageInfos[1].module = pipeNormalDepthFragShaderModule;
+    pipeStageInfos[1].pName = "main";
+
+    VkVertexInputBindingDescription pipeBindings[2]{};
+    pipeBindings[0].binding = 0;
+    pipeBindings[0].stride = sizeof(PipeVertex);
+    pipeBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    pipeBindings[1].binding = 1;
+    pipeBindings[1].stride = sizeof(PipeInstance);
+    pipeBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    VkVertexInputAttributeDescription pipeAttributes[6]{};
+    pipeAttributes[0].location = 0;
+    pipeAttributes[0].binding = 0;
+    pipeAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    pipeAttributes[0].offset = static_cast<uint32_t>(offsetof(PipeVertex, position));
+    pipeAttributes[1].location = 1;
+    pipeAttributes[1].binding = 0;
+    pipeAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    pipeAttributes[1].offset = static_cast<uint32_t>(offsetof(PipeVertex, normal));
+    pipeAttributes[2].location = 2;
+    pipeAttributes[2].binding = 1;
+    pipeAttributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeAttributes[2].offset = static_cast<uint32_t>(offsetof(PipeInstance, originLength));
+    pipeAttributes[3].location = 3;
+    pipeAttributes[3].binding = 1;
+    pipeAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeAttributes[3].offset = static_cast<uint32_t>(offsetof(PipeInstance, axisRadius));
+    pipeAttributes[4].location = 4;
+    pipeAttributes[4].binding = 1;
+    pipeAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeAttributes[4].offset = static_cast<uint32_t>(offsetof(PipeInstance, tint));
+    pipeAttributes[5].location = 5;
+    pipeAttributes[5].binding = 1;
+    pipeAttributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeAttributes[5].offset = static_cast<uint32_t>(offsetof(PipeInstance, extensions));
+
+    VkPipelineVertexInputStateCreateInfo pipeVertexInputInfo{};
+    pipeVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    pipeVertexInputInfo.vertexBindingDescriptionCount = 2;
+    pipeVertexInputInfo.pVertexBindingDescriptions = pipeBindings;
+    pipeVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    pipeVertexInputInfo.pVertexAttributeDescriptions = pipeAttributes;
+
+    VkPipelineRasterizationStateCreateInfo pipeRasterizer = rasterizer;
+    pipeRasterizer.cullMode = VK_CULL_MODE_NONE;
+
+    pipelineCreateInfo.pStages = pipeStageInfos;
+    pipelineCreateInfo.pVertexInputState = &pipeVertexInputInfo;
+    pipelineCreateInfo.pRasterizationState = &pipeRasterizer;
+    const VkResult pipePipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &pipeNormalDepthPipeline
+    );
+    if (pipePipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(pipeNormalDepth)", pipePipelineResult);
+        destroyNewPipelines();
+        destroyShaderModules();
+        return false;
+    }
+
+    // SSAO fullscreen pipelines.
+    VkPipelineShaderStageCreateInfo ssaoStageInfos[2]{};
+    ssaoStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    ssaoStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    ssaoStageInfos[0].module = fullscreenVertShaderModule;
+    ssaoStageInfos[0].pName = "main";
+    ssaoStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    ssaoStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    ssaoStageInfos[1].module = ssaoFragShaderModule;
+    ssaoStageInfos[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo fullscreenVertexInputInfo{};
+    fullscreenVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineRasterizationStateCreateInfo fullscreenRasterizer = rasterizer;
+    fullscreenRasterizer.cullMode = VK_CULL_MODE_NONE;
+
+    VkPipelineDepthStencilStateCreateInfo fullscreenDepthStencil{};
+    fullscreenDepthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    fullscreenDepthStencil.depthTestEnable = VK_FALSE;
+    fullscreenDepthStencil.depthWriteEnable = VK_FALSE;
+    fullscreenDepthStencil.depthBoundsTestEnable = VK_FALSE;
+    fullscreenDepthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineRenderingCreateInfo ssaoRenderingCreateInfo{};
+    ssaoRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    ssaoRenderingCreateInfo.colorAttachmentCount = 1;
+    ssaoRenderingCreateInfo.pColorAttachmentFormats = &m_ssaoFormat;
+    ssaoRenderingCreateInfo.depthAttachmentFormat = VK_FORMAT_UNDEFINED;
+
+    VkGraphicsPipelineCreateInfo ssaoPipelineCreateInfo{};
+    ssaoPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    ssaoPipelineCreateInfo.pNext = &ssaoRenderingCreateInfo;
+    ssaoPipelineCreateInfo.stageCount = 2;
+    ssaoPipelineCreateInfo.pStages = ssaoStageInfos;
+    ssaoPipelineCreateInfo.pVertexInputState = &fullscreenVertexInputInfo;
+    ssaoPipelineCreateInfo.pInputAssemblyState = &inputAssembly;
+    ssaoPipelineCreateInfo.pViewportState = &viewportState;
+    ssaoPipelineCreateInfo.pRasterizationState = &fullscreenRasterizer;
+    ssaoPipelineCreateInfo.pMultisampleState = &multisampling;
+    ssaoPipelineCreateInfo.pDepthStencilState = &fullscreenDepthStencil;
+    ssaoPipelineCreateInfo.pColorBlendState = &colorBlending;
+    ssaoPipelineCreateInfo.pDynamicState = &dynamicState;
+    ssaoPipelineCreateInfo.layout = m_pipelineLayout;
+    ssaoPipelineCreateInfo.renderPass = VK_NULL_HANDLE;
+    ssaoPipelineCreateInfo.subpass = 0;
+
+    const VkResult ssaoPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &ssaoPipelineCreateInfo,
+        nullptr,
+        &ssaoPipeline
+    );
+    if (ssaoPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(ssao)", ssaoPipelineResult);
+        destroyNewPipelines();
+        destroyShaderModules();
+        return false;
+    }
+
+    ssaoStageInfos[1].module = ssaoBlurFragShaderModule;
+    const VkResult ssaoBlurPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &ssaoPipelineCreateInfo,
+        nullptr,
+        &ssaoBlurPipeline
+    );
+    if (ssaoBlurPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(ssaoBlur)", ssaoBlurPipelineResult);
+        destroyNewPipelines();
+        destroyShaderModules();
+        return false;
+    }
+
+    destroyShaderModules();
+
+    if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_voxelNormalDepthPipeline, nullptr);
+    }
+    if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipeNormalDepthPipeline, nullptr);
+    }
+    if (m_ssaoPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_ssaoPipeline, nullptr);
+    }
+    if (m_ssaoBlurPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_ssaoBlurPipeline, nullptr);
+    }
+
+    m_voxelNormalDepthPipeline = voxelNormalDepthPipeline;
+    m_pipeNormalDepthPipeline = pipeNormalDepthPipeline;
+    m_ssaoPipeline = ssaoPipeline;
+    m_ssaoBlurPipeline = ssaoBlurPipeline;
     return true;
 }
 
@@ -4240,6 +5202,13 @@ void Renderer::buildShadowDebugUi() {
     ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
 
     ImGui::Separator();
+    ImGui::Text("Ambient Occlusion");
+    ImGui::Checkbox("Enable Vertex AO", &m_debugEnableVertexAo);
+    ImGui::Checkbox("Enable SSAO", &m_debugEnableSsao);
+    ImGui::Checkbox("Visualize SSAO", &m_debugVisualizeSsao);
+    ImGui::Checkbox("Visualize AO Normals", &m_debugVisualizeAoNormals);
+
+    ImGui::Separator();
     ImGui::Text("Cascade Splits: %.1f / %.1f / %.1f / %.1f",
         m_shadowCascadeSplits[0],
         m_shadowCascadeSplits[1],
@@ -4358,6 +5327,9 @@ void Renderer::renderFrame(
     (void)simulation;
 
     if (m_device == VK_NULL_HANDLE || m_swapchain == VK_NULL_HANDLE) {
+        return;
+    }
+    if (m_window != nullptr && glfwWindowShouldClose(m_window) == GLFW_TRUE) {
         return;
     }
 
@@ -4655,22 +5627,32 @@ void Renderer::renderFrame(
     mvpUniform.shadowVoxelGridOrigin[0] = static_cast<float>(m_shadowVoxelGridOriginX);
     mvpUniform.shadowVoxelGridOrigin[1] = static_cast<float>(m_shadowVoxelGridOriginY);
     mvpUniform.shadowVoxelGridOrigin[2] = static_cast<float>(m_shadowVoxelGridOriginZ);
-    mvpUniform.shadowVoxelGridOrigin[3] = 0.0f;
+    // Reuse unused W channel for AO debug: 1.0 enables vertex AO, 0.0 disables.
+    mvpUniform.shadowVoxelGridOrigin[3] = m_debugEnableVertexAo ? 1.0f : 0.0f;
 
     mvpUniform.shadowVoxelGridSize[0] = static_cast<float>(m_shadowVoxelGridSizeX);
     mvpUniform.shadowVoxelGridSize[1] = static_cast<float>(m_shadowVoxelGridSizeY);
     mvpUniform.shadowVoxelGridSize[2] = static_cast<float>(m_shadowVoxelGridSizeZ);
-    mvpUniform.shadowVoxelGridSize[3] = 0.0f;
+    // Reuse unused W channel for AO debug mode:
+    // 0.0 = SSAO off, 1.0 = SSAO on, 2.0 = visualize SSAO, 3.0 = visualize AO normals.
+    if (m_debugVisualizeAoNormals) {
+        mvpUniform.shadowVoxelGridSize[3] = 3.0f;
+    } else if (m_debugVisualizeSsao) {
+        mvpUniform.shadowVoxelGridSize[3] = 2.0f;
+    } else {
+        mvpUniform.shadowVoxelGridSize[3] = m_debugEnableSsao ? 1.0f : 0.0f;
+    }
 
     mvpUniform.skyConfig0[0] = m_skyDebugSettings.rayleighStrength;
     mvpUniform.skyConfig0[1] = m_skyDebugSettings.mieStrength;
     mvpUniform.skyConfig0[2] = m_skyDebugSettings.mieAnisotropy;
     mvpUniform.skyConfig0[3] = m_skyDebugSettings.skyExposure;
 
+    const float flowTimeSeconds = static_cast<float>(std::fmod(frameNowSeconds, 4096.0));
     mvpUniform.skyConfig1[0] = 1150.0f;
     mvpUniform.skyConfig1[1] = 22.0f;
-    mvpUniform.skyConfig1[2] = 0.0f;
-    mvpUniform.skyConfig1[3] = 0.0f;
+    mvpUniform.skyConfig1[2] = flowTimeSeconds;
+    mvpUniform.skyConfig1[3] = 1.85f;
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     VkDescriptorBufferInfo bufferInfo{};
@@ -4696,7 +5678,22 @@ void Renderer::renderFrame(
     shadowMapImageInfo.imageView = m_shadowDepthImageView;
     shadowMapImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
-    std::array<VkWriteDescriptorSet, 5> writes{};
+    VkDescriptorImageInfo normalDepthImageInfo{};
+    normalDepthImageInfo.sampler = m_normalDepthSampler;
+    normalDepthImageInfo.imageView = m_normalDepthImageViews[imageIndex];
+    normalDepthImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkDescriptorImageInfo ssaoBlurImageInfo{};
+    ssaoBlurImageInfo.sampler = m_ssaoSampler;
+    ssaoBlurImageInfo.imageView = m_ssaoBlurImageViews[imageIndex];
+    ssaoBlurImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkDescriptorImageInfo ssaoRawImageInfo{};
+    ssaoRawImageInfo.sampler = m_ssaoSampler;
+    ssaoRawImageInfo.imageView = m_ssaoRawImageViews[imageIndex];
+    ssaoRawImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    std::array<VkWriteDescriptorSet, 8> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -4732,29 +5729,56 @@ void Renderer::renderFrame(
     writes[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
     writes[4].pTexelBufferView = &m_shadowVoxelBufferView;
 
+    writes[5] = write;
+    writes[5].dstSet = m_descriptorSets[m_currentFrame];
+    writes[5].dstBinding = 6;
+    writes[5].descriptorCount = 1;
+    writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[5].pImageInfo = &normalDepthImageInfo;
+
+    writes[6] = write;
+    writes[6].dstSet = m_descriptorSets[m_currentFrame];
+    writes[6].dstBinding = 7;
+    writes[6].descriptorCount = 1;
+    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[6].pImageInfo = &ssaoBlurImageInfo;
+
+    writes[7] = write;
+    writes[7].dstSet = m_descriptorSets[m_currentFrame];
+    writes[7].dstBinding = 8;
+    writes[7].descriptorCount = 1;
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[7].pImageInfo = &ssaoRawImageInfo;
+
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
     uint32_t pipeInstanceCount = 0;
     std::optional<RingBufferSlice> pipeInstanceSliceOpt = std::nullopt;
     if (m_pipeIndexCount > 0 && simulation.pipeCount() > 0) {
+        const std::vector<sim::Pipe>& pipes = simulation.pipes();
+        const std::vector<PipeEndpointState> endpointStates = buildPipeEndpointStates(pipes);
         std::vector<PipeInstance> instances;
-        instances.reserve(simulation.pipeCount());
-        for (const sim::Pipe& pipe : simulation.pipes()) {
-            const math::Vector3 normalizedAxis =
-                (math::lengthSquared(pipe.axis) > 0.0f) ? math::normalize(pipe.axis) : math::Vector3{0.0f, 1.0f, 0.0f};
+        instances.reserve(pipes.size());
+        for (std::size_t pipeIndex = 0; pipeIndex < pipes.size(); ++pipeIndex) {
+            const sim::Pipe& pipe = pipes[pipeIndex];
+            const PipeEndpointState& endpointState = endpointStates[pipeIndex];
             PipeInstance instance{};
             instance.originLength[0] = static_cast<float>(pipe.x);
             instance.originLength[1] = static_cast<float>(pipe.y);
             instance.originLength[2] = static_cast<float>(pipe.z);
             instance.originLength[3] = std::max(pipe.length, 0.05f);
-            instance.axisRadius[0] = normalizedAxis.x;
-            instance.axisRadius[1] = normalizedAxis.y;
-            instance.axisRadius[2] = normalizedAxis.z;
-            instance.axisRadius[3] = std::clamp(pipe.radius, 0.02f, 0.5f);
+            instance.axisRadius[0] = endpointState.axis.x;
+            instance.axisRadius[1] = endpointState.axis.y;
+            instance.axisRadius[2] = endpointState.axis.z;
+            instance.axisRadius[3] = endpointState.renderedRadius;
             instance.tint[0] = std::clamp(pipe.tint.x, 0.0f, 1.0f);
             instance.tint[1] = std::clamp(pipe.tint.y, 0.0f, 1.0f);
             instance.tint[2] = std::clamp(pipe.tint.z, 0.0f, 1.0f);
-            instance.tint[3] = 1.0f;
+            instance.tint[3] = 0.0f;
+            instance.extensions[0] = endpointState.startExtension;
+            instance.extensions[1] = endpointState.endExtension;
+            instance.extensions[2] = 0.0f;
+            instance.extensions[3] = 0.0f;
             instances.push_back(instance);
         }
 
@@ -4955,6 +5979,321 @@ void Renderer::renderFrame(
         0,
         kShadowCascadeCount
     );
+
+    const VkExtent2D aoExtent = {
+        std::max(1u, m_aoExtent.width),
+        std::max(1u, m_aoExtent.height)
+    };
+
+    const bool normalDepthInitialized = m_normalDepthImageInitialized[imageIndex];
+    transitionImageLayout(
+        commandBuffer,
+        m_normalDepthImages[imageIndex],
+        normalDepthInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        normalDepthInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+        normalDepthInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    const bool aoDepthInitialized = m_aoDepthImageInitialized[imageIndex];
+    transitionImageLayout(
+        commandBuffer,
+        m_aoDepthImages[imageIndex],
+        aoDepthInitialized ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        aoDepthInitialized
+            ? (VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT)
+            : VK_PIPELINE_STAGE_2_NONE,
+        aoDepthInitialized ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_ASPECT_DEPTH_BIT
+    );
+
+    const bool ssaoRawInitialized = m_ssaoRawImageInitialized[imageIndex];
+    transitionImageLayout(
+        commandBuffer,
+        m_ssaoRawImages[imageIndex],
+        ssaoRawInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        ssaoRawInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+        ssaoRawInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    const bool ssaoBlurInitialized = m_ssaoBlurImageInitialized[imageIndex];
+    transitionImageLayout(
+        commandBuffer,
+        m_ssaoBlurImages[imageIndex],
+        ssaoBlurInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        ssaoBlurInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+        ssaoBlurInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    VkViewport aoViewport{};
+    aoViewport.x = 0.0f;
+    aoViewport.y = 0.0f;
+    aoViewport.width = static_cast<float>(aoExtent.width);
+    aoViewport.height = static_cast<float>(aoExtent.height);
+    aoViewport.minDepth = 0.0f;
+    aoViewport.maxDepth = 1.0f;
+
+    VkRect2D aoScissor{};
+    aoScissor.offset = {0, 0};
+    aoScissor.extent = aoExtent;
+
+    VkClearValue normalDepthClearValue{};
+    normalDepthClearValue.color.float32[0] = 0.5f;
+    normalDepthClearValue.color.float32[1] = 0.5f;
+    normalDepthClearValue.color.float32[2] = 0.5f;
+    normalDepthClearValue.color.float32[3] = 0.0f;
+
+    VkClearValue aoDepthClearValue{};
+    aoDepthClearValue.depthStencil.depth = 0.0f;
+    aoDepthClearValue.depthStencil.stencil = 0;
+
+    VkRenderingAttachmentInfo normalDepthColorAttachment{};
+    normalDepthColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    normalDepthColorAttachment.imageView = m_normalDepthImageViews[imageIndex];
+    normalDepthColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    normalDepthColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    normalDepthColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    normalDepthColorAttachment.clearValue = normalDepthClearValue;
+
+    VkRenderingAttachmentInfo aoDepthAttachment{};
+    aoDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    aoDepthAttachment.imageView = m_aoDepthImageViews[imageIndex];
+    aoDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    aoDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    aoDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    aoDepthAttachment.clearValue = aoDepthClearValue;
+
+    VkRenderingInfo normalDepthRenderingInfo{};
+    normalDepthRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    normalDepthRenderingInfo.renderArea.offset = {0, 0};
+    normalDepthRenderingInfo.renderArea.extent = aoExtent;
+    normalDepthRenderingInfo.layerCount = 1;
+    normalDepthRenderingInfo.colorAttachmentCount = 1;
+    normalDepthRenderingInfo.pColorAttachments = &normalDepthColorAttachment;
+    normalDepthRenderingInfo.pDepthAttachment = &aoDepthAttachment;
+
+    vkCmdBeginRendering(commandBuffer, &normalDepthRenderingInfo);
+    vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
+    vkCmdSetScissor(commandBuffer, 0, 1, &aoScissor);
+
+    if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_voxelNormalDepthPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            1,
+            &m_descriptorSets[m_currentFrame],
+            0,
+            nullptr
+        );
+        for (std::size_t drawRangeIndex = 0; drawRangeIndex < m_chunkDrawRanges.size(); ++drawRangeIndex) {
+            const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
+            if (drawRange.indexCount == 0) {
+                continue;
+            }
+            const std::size_t chunkArrayIndex = drawRangeIndex / world::kChunkMeshLodCount;
+            const std::size_t lodIndex = drawRangeIndex % world::kChunkMeshLodCount;
+            if (chunkArrayIndex >= chunkGrid.chunks().size()) {
+                continue;
+            }
+            const world::Chunk& drawChunk = chunkGrid.chunks()[chunkArrayIndex];
+            const bool allowDetailLods =
+                drawChunk.chunkX() == cameraChunkX &&
+                drawChunk.chunkY() == cameraChunkY &&
+                drawChunk.chunkZ() == cameraChunkZ;
+            if (lodIndex > 0 && !allowDetailLods) {
+                continue;
+            }
+
+            const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(drawRange.vertexBufferHandle);
+            const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(drawRange.indexBufferHandle);
+            if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE) {
+                continue;
+            }
+            const VkDeviceSize vertexBufferOffset = 0;
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &vertexBufferOffset);
+            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+            ChunkPushConstants chunkPushConstants{};
+            chunkPushConstants.chunkOffset[0] = drawRange.offsetX;
+            chunkPushConstants.chunkOffset[1] = drawRange.offsetY;
+            chunkPushConstants.chunkOffset[2] = drawRange.offsetZ;
+            chunkPushConstants.chunkOffset[3] = 0.0f;
+            chunkPushConstants.cascadeData[0] = 0.0f;
+            chunkPushConstants.cascadeData[1] = 0.0f;
+            chunkPushConstants.cascadeData[2] = 0.0f;
+            chunkPushConstants.cascadeData[3] = 0.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &chunkPushConstants
+            );
+            vkCmdDrawIndexed(commandBuffer, drawRange.indexCount, 1, 0, 0, 0);
+        }
+    }
+
+    if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE && pipeInstanceCount > 0 && pipeInstanceSliceOpt.has_value()) {
+        const VkBuffer pipeVertexBuffer = m_bufferAllocator.getBuffer(m_pipeVertexBufferHandle);
+        const VkBuffer pipeIndexBuffer = m_bufferAllocator.getBuffer(m_pipeIndexBufferHandle);
+        const VkBuffer pipeInstanceBuffer = m_bufferAllocator.getBuffer(pipeInstanceSliceOpt->buffer);
+        if (pipeVertexBuffer != VK_NULL_HANDLE &&
+            pipeIndexBuffer != VK_NULL_HANDLE &&
+            pipeInstanceBuffer != VK_NULL_HANDLE) {
+            const VkBuffer vertexBuffers[2] = {pipeVertexBuffer, pipeInstanceBuffer};
+            const VkDeviceSize vertexOffsets[2] = {0, pipeInstanceSliceOpt->offset};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeNormalDepthPipeline);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout,
+                0,
+                1,
+                &m_descriptorSets[m_currentFrame],
+                0,
+                nullptr
+            );
+            vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, m_pipeIndexCount, pipeInstanceCount, 0, 0, 0);
+        }
+    }
+    vkCmdEndRendering(commandBuffer);
+
+    transitionImageLayout(
+        commandBuffer,
+        m_normalDepthImages[imageIndex],
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    VkClearValue ssaoClearValue{};
+    ssaoClearValue.color.float32[0] = 1.0f;
+    ssaoClearValue.color.float32[1] = 1.0f;
+    ssaoClearValue.color.float32[2] = 1.0f;
+    ssaoClearValue.color.float32[3] = 1.0f;
+
+    VkRenderingAttachmentInfo ssaoRawAttachment{};
+    ssaoRawAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    ssaoRawAttachment.imageView = m_ssaoRawImageViews[imageIndex];
+    ssaoRawAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    ssaoRawAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    ssaoRawAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    ssaoRawAttachment.clearValue = ssaoClearValue;
+
+    VkRenderingInfo ssaoRenderingInfo{};
+    ssaoRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    ssaoRenderingInfo.renderArea.offset = {0, 0};
+    ssaoRenderingInfo.renderArea.extent = aoExtent;
+    ssaoRenderingInfo.layerCount = 1;
+    ssaoRenderingInfo.colorAttachmentCount = 1;
+    ssaoRenderingInfo.pColorAttachments = &ssaoRawAttachment;
+
+    vkCmdBeginRendering(commandBuffer, &ssaoRenderingInfo);
+    vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
+    vkCmdSetScissor(commandBuffer, 0, 1, &aoScissor);
+    if (m_ssaoPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ssaoPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            1,
+            &m_descriptorSets[m_currentFrame],
+            0,
+            nullptr
+        );
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    }
+    vkCmdEndRendering(commandBuffer);
+
+    transitionImageLayout(
+        commandBuffer,
+        m_ssaoRawImages[imageIndex],
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    VkRenderingAttachmentInfo ssaoBlurAttachment{};
+    ssaoBlurAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    ssaoBlurAttachment.imageView = m_ssaoBlurImageViews[imageIndex];
+    ssaoBlurAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    ssaoBlurAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    ssaoBlurAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    ssaoBlurAttachment.clearValue = ssaoClearValue;
+
+    VkRenderingInfo ssaoBlurRenderingInfo{};
+    ssaoBlurRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    ssaoBlurRenderingInfo.renderArea.offset = {0, 0};
+    ssaoBlurRenderingInfo.renderArea.extent = aoExtent;
+    ssaoBlurRenderingInfo.layerCount = 1;
+    ssaoBlurRenderingInfo.colorAttachmentCount = 1;
+    ssaoBlurRenderingInfo.pColorAttachments = &ssaoBlurAttachment;
+
+    vkCmdBeginRendering(commandBuffer, &ssaoBlurRenderingInfo);
+    vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
+    vkCmdSetScissor(commandBuffer, 0, 1, &aoScissor);
+    if (m_ssaoBlurPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ssaoBlurPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            1,
+            &m_descriptorSets[m_currentFrame],
+            0,
+            nullptr
+        );
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    }
+    vkCmdEndRendering(commandBuffer);
+
+    transitionImageLayout(
+        commandBuffer,
+        m_ssaoBlurImages[imageIndex],
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
+
+    m_normalDepthImageInitialized[imageIndex] = true;
+    m_aoDepthImageInitialized[imageIndex] = true;
+    m_ssaoRawImageInitialized[imageIndex] = true;
+    m_ssaoBlurImageInitialized[imageIndex] = true;
 
     VkViewport viewport{};
     viewport.x = 0.0f;
@@ -5189,7 +6528,11 @@ void Renderer::renderFrame(
             previewInstance.tint[1] = 0.95f;
             previewInstance.tint[2] = 1.0f;
         }
-        previewInstance.tint[3] = 1.0f;
+        previewInstance.tint[3] = 0.0f;
+        previewInstance.extensions[0] = 0.0f;
+        previewInstance.extensions[1] = 0.0f;
+        previewInstance.extensions[2] = 0.0f;
+        previewInstance.extensions[3] = 0.0f;
 
         const std::optional<RingBufferSlice> previewInstanceSlice =
             m_uploadRing.allocate(sizeof(PipeInstance), static_cast<VkDeviceSize>(alignof(PipeInstance)));
@@ -5467,12 +6810,14 @@ bool Renderer::recreateSwapchain() {
     std::cerr << "[render] recreateSwapchain begin\n";
     int width = 0;
     int height = 0;
-    while (width == 0 || height == 0) {
+    glfwGetFramebufferSize(m_window, &width, &height);
+    while ((width == 0 || height == 0) && glfwWindowShouldClose(m_window) == GLFW_FALSE) {
+        // Keep swapchain recreation responsive when minimized without hard-blocking shutdown.
+        glfwWaitEventsTimeout(0.05);
         glfwGetFramebufferSize(m_window, &width, &height);
-        if (glfwWindowShouldClose(m_window) == GLFW_TRUE) {
-            return false;
-        }
-        glfwWaitEvents();
+    }
+    if (glfwWindowShouldClose(m_window) == GLFW_TRUE) {
+        return false;
     }
 
     vkDeviceWaitIdle(m_device);
@@ -5490,6 +6835,10 @@ bool Renderer::recreateSwapchain() {
     }
     if (!createPipePipeline()) {
         std::cerr << "[render] recreateSwapchain failed: createPipePipeline\n";
+        return false;
+    }
+    if (!createAoPipelines()) {
+        std::cerr << "[render] recreateSwapchain failed: createAoPipelines\n";
         return false;
     }
 #if defined(VOXEL_HAS_IMGUI)
@@ -5577,10 +6926,103 @@ void Renderer::destroyDepthTargets() {
     m_depthImageMemories.clear();
 }
 
+void Renderer::destroyAoTargets() {
+    if (m_ssaoSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_ssaoSampler, nullptr);
+        m_ssaoSampler = VK_NULL_HANDLE;
+    }
+    if (m_normalDepthSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_normalDepthSampler, nullptr);
+        m_normalDepthSampler = VK_NULL_HANDLE;
+    }
+
+    for (VkImageView imageView : m_ssaoBlurImageViews) {
+        if (imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, imageView, nullptr);
+        }
+    }
+    m_ssaoBlurImageViews.clear();
+    for (VkImage image : m_ssaoBlurImages) {
+        if (image != VK_NULL_HANDLE) {
+            vkDestroyImage(m_device, image, nullptr);
+        }
+    }
+    m_ssaoBlurImages.clear();
+    for (VkDeviceMemory memory : m_ssaoBlurImageMemories) {
+        if (memory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, memory, nullptr);
+        }
+    }
+    m_ssaoBlurImageMemories.clear();
+    m_ssaoBlurImageInitialized.clear();
+
+    for (VkImageView imageView : m_ssaoRawImageViews) {
+        if (imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, imageView, nullptr);
+        }
+    }
+    m_ssaoRawImageViews.clear();
+    for (VkImage image : m_ssaoRawImages) {
+        if (image != VK_NULL_HANDLE) {
+            vkDestroyImage(m_device, image, nullptr);
+        }
+    }
+    m_ssaoRawImages.clear();
+    for (VkDeviceMemory memory : m_ssaoRawImageMemories) {
+        if (memory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, memory, nullptr);
+        }
+    }
+    m_ssaoRawImageMemories.clear();
+    m_ssaoRawImageInitialized.clear();
+
+    for (VkImageView imageView : m_aoDepthImageViews) {
+        if (imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, imageView, nullptr);
+        }
+    }
+    m_aoDepthImageViews.clear();
+    for (VkImage image : m_aoDepthImages) {
+        if (image != VK_NULL_HANDLE) {
+            vkDestroyImage(m_device, image, nullptr);
+        }
+    }
+    m_aoDepthImages.clear();
+    for (VkDeviceMemory memory : m_aoDepthImageMemories) {
+        if (memory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, memory, nullptr);
+        }
+    }
+    m_aoDepthImageMemories.clear();
+    m_aoDepthImageInitialized.clear();
+
+    for (VkImageView imageView : m_normalDepthImageViews) {
+        if (imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, imageView, nullptr);
+        }
+    }
+    m_normalDepthImageViews.clear();
+    for (VkImage image : m_normalDepthImages) {
+        if (image != VK_NULL_HANDLE) {
+            vkDestroyImage(m_device, image, nullptr);
+        }
+    }
+    m_normalDepthImages.clear();
+    for (VkDeviceMemory memory : m_normalDepthImageMemories) {
+        if (memory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, memory, nullptr);
+        }
+    }
+    m_normalDepthImageMemories.clear();
+    m_normalDepthImageInitialized.clear();
+}
+
 void Renderer::destroySwapchain() {
     destroyHdrResolveTargets();
     destroyMsaaColorTargets();
     destroyDepthTargets();
+    destroyAoTargets();
+    m_aoExtent = VkExtent2D{};
 
     for (VkSemaphore semaphore : m_renderFinishedSemaphores) {
         if (semaphore != VK_NULL_HANDLE) {
@@ -5741,6 +7183,22 @@ void Renderer::destroyChunkBuffers() {
 }
 
 void Renderer::destroyPipeline() {
+    if (m_ssaoBlurPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_ssaoBlurPipeline, nullptr);
+        m_ssaoBlurPipeline = VK_NULL_HANDLE;
+    }
+    if (m_ssaoPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_ssaoPipeline, nullptr);
+        m_ssaoPipeline = VK_NULL_HANDLE;
+    }
+    if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipeNormalDepthPipeline, nullptr);
+        m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
+    }
+    if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_voxelNormalDepthPipeline, nullptr);
+        m_voxelNormalDepthPipeline = VK_NULL_HANDLE;
+    }
     if (m_tonemapPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr);
         m_tonemapPipeline = VK_NULL_HANDLE;
@@ -5835,9 +7293,12 @@ void Renderer::shutdown() {
     m_graphicsQueueIndex = 0;
     m_transferQueueFamilyIndex = 0;
     m_transferQueueIndex = 0;
+    m_aoExtent = VkExtent2D{};
     m_depthFormat = VK_FORMAT_UNDEFINED;
     m_shadowDepthFormat = VK_FORMAT_UNDEFINED;
     m_hdrColorFormat = VK_FORMAT_UNDEFINED;
+    m_normalDepthFormat = VK_FORMAT_UNDEFINED;
+    m_ssaoFormat = VK_FORMAT_UNDEFINED;
     m_supportsWireframePreview = false;
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;

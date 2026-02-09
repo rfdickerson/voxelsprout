@@ -4,6 +4,7 @@ project(voxel_factory_toy VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+include(CTest)
 
 add_executable(voxel_factory_toy
     src/app/main.cpp
@@ -88,4 +89,41 @@ endif()
 if(TARGET unofficial::VulkanMemoryAllocator::VulkanMemoryAllocator)
     target_link_libraries(voxel_factory_toy PRIVATE unofficial::VulkanMemoryAllocator::VulkanMemoryAllocator)
     target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VMA=1)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(voxel_foundation_tests
+        tests/FoundationTests.cpp
+    )
+    target_include_directories(voxel_foundation_tests PRIVATE src)
+
+    if(MSVC)
+        target_compile_options(voxel_foundation_tests PRIVATE
+            /W4
+            /permissive-
+            /w14242
+            /w14254
+            /w14263
+            /w14265
+            /w14287
+            /we4289
+            /w14296
+            /w14311
+            /w14545
+            /w14546
+            /w14547
+            /w14549
+            /w14555
+            /w14619
+            /w14640
+            /w14826
+            /w14905
+            /w14906
+            /w14928
+        )
+    else()
+        target_compile_options(voxel_foundation_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_test(NAME voxel_foundation_tests COMMAND voxel_foundation_tests)
 endif()
