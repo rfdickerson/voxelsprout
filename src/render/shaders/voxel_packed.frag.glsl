@@ -373,16 +373,17 @@ void main() {
 
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
     const float viewDepth = max(-(camera.view * vec4(inWorldPosition, 1.0)).z, 0.0);
-    const float shadowVisibility = sampleCascadedShadow(inWorldPosition, normal, viewDepth, ndotl);
+    float shadowVisibility = 1.0;
+    if (ndotl > 0.0001) {
+        shadowVisibility = sampleCascadedShadow(inWorldPosition, normal, viewDepth, ndotl);
+    }
 
     const vec3 shNormalIrradiance = evaluateShIrradiance(normal);
     const vec3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
     const vec3 ambientIrradiance = mix(shNormalIrradiance, shHemisphereIrradiance, 0.70);
-    const float shadowOcclusion = 1.0 - shadowVisibility;
-    const float shShadowBoost = 1.0 + (shadowOcclusion * 0.75);
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = mix(1.0, clamp(inVertexAo, 0.0, 1.0), vertexAoEnable);
-    const vec3 ambient = ambientIrradiance * (0.26 * shShadowBoost * vertexAo);
+    const vec3 ambient = ambientIrradiance * (0.26 * vertexAo);
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = mix(1.0, shadowVisibility, shadowStrength);
     vec3 lighting =
