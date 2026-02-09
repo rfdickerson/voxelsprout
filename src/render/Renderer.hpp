@@ -56,10 +56,6 @@ struct VoxelPreview {
 class Renderer {
 public:
     struct ShadowDebugSettings {
-        bool enableRpdb = true;
-        bool enableRotatedPoissonPcf = false;
-        bool enableHybridNearVoxelRay = false;
-
         float casterConstantBiasBase = 1.1f;
         float casterConstantBiasCascadeScale = 0.9f;
         float casterSlopeBiasBase = 1.7f;
@@ -75,11 +71,7 @@ public:
         float cascadeBlendMin = 6.0f;
         float cascadeBlendFactor = 0.30f;
 
-        float hybridRayStep = 0.45f;
-        float hybridRayMaxDistance = 28.0f;
-        float rpdbScale = 2.5f;
         float pcfRadius = 1.0f;
-        int poissonSampleCount = 16;
     };
 
     struct SkyDebugSettings {
@@ -139,7 +131,6 @@ private:
     bool createDiffuseTextureResources();
     bool createDescriptorResources();
     bool createChunkBuffers(const world::ChunkGrid& chunkGrid, std::optional<std::size_t> chunkIndex);
-    bool updateShadowVoxelGrid(const world::ChunkGrid& chunkGrid);
     bool createFrameResources();
 #if defined(VOXEL_HAS_IMGUI)
     bool createImGuiResources();
@@ -302,14 +293,6 @@ private:
     BufferHandle m_pipeIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_transportVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_transportIndexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_shadowVoxelBufferHandle = kInvalidBufferHandle;
-    VkBufferView m_shadowVoxelBufferView = VK_NULL_HANDLE;
-    uint32_t m_shadowVoxelGridSizeX = 0;
-    uint32_t m_shadowVoxelGridSizeY = 0;
-    uint32_t m_shadowVoxelGridSizeZ = 0;
-    int32_t m_shadowVoxelGridOriginX = 0;
-    int32_t m_shadowVoxelGridOriginY = 0;
-    int32_t m_shadowVoxelGridOriginZ = 0;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     uint32_t m_previewIndexCount = 0;

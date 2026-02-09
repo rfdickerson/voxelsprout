@@ -3084,12 +3084,6 @@ bool Renderer::createDescriptorResources() {
         shadowMapBinding.descriptorCount = 1;
         shadowMapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        VkDescriptorSetLayoutBinding shadowVoxelGridBinding{};
-        shadowVoxelGridBinding.binding = 5;
-        shadowVoxelGridBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
-        shadowVoxelGridBinding.descriptorCount = 1;
-        shadowVoxelGridBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
         VkDescriptorSetLayoutBinding normalDepthBinding{};
         normalDepthBinding.binding = 6;
         normalDepthBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -3108,12 +3102,11 @@ bool Renderer::createDescriptorResources() {
         ssaoRawBinding.descriptorCount = 1;
         ssaoRawBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 8> bindings = {
+        const std::array<VkDescriptorSetLayoutBinding, 7> bindings = {
             mvpBinding,
             diffuseTextureBinding,
             hdrSceneBinding,
             shadowMapBinding,
-            shadowVoxelGridBinding,
             normalDepthBinding,
             ssaoBlurBinding,
             ssaoRawBinding
@@ -3133,7 +3126,7 @@ bool Renderer::createDescriptorResources() {
     }
 
     if (m_descriptorPool == VK_NULL_HANDLE) {
-        const std::array<VkDescriptorPoolSize, 3> poolSizes = {
+        const std::array<VkDescriptorPoolSize, 2> poolSizes = {
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 kMaxFramesInFlight
@@ -3141,10 +3134,6 @@ bool Renderer::createDescriptorResources() {
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 6 * kMaxFramesInFlight
-            },
-            VkDescriptorPoolSize{
-                VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
-                kMaxFramesInFlight
             }
         };
 
@@ -4845,12 +4834,6 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
         }
     }
 
-    if (!updateShadowVoxelGrid(chunkGrid)) {
-        std::cerr << "[render] shadow voxel grid update failed\n";
-        cleanupPendingAllocations();
-        return false;
-    }
-
     collectCompletedBufferReleases();
 
     if (m_transferCommandBufferInFlightValue > 0 && !waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
@@ -4972,119 +4955,6 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
         std::cerr << ", immediate=true";
     }
     std::cerr << ")\n";
-    return true;
-}
-
-bool Renderer::updateShadowVoxelGrid(const world::ChunkGrid& chunkGrid) {
-    if (chunkGrid.chunks().empty()) {
-        return false;
-    }
-
-    int minChunkX = std::numeric_limits<int>::max();
-    int minChunkY = std::numeric_limits<int>::max();
-    int minChunkZ = std::numeric_limits<int>::max();
-    int maxChunkX = std::numeric_limits<int>::lowest();
-    int maxChunkY = std::numeric_limits<int>::lowest();
-    int maxChunkZ = std::numeric_limits<int>::lowest();
-    for (const world::Chunk& chunk : chunkGrid.chunks()) {
-        minChunkX = std::min(minChunkX, chunk.chunkX());
-        minChunkY = std::min(minChunkY, chunk.chunkY());
-        minChunkZ = std::min(minChunkZ, chunk.chunkZ());
-        maxChunkX = std::max(maxChunkX, chunk.chunkX());
-        maxChunkY = std::max(maxChunkY, chunk.chunkY());
-        maxChunkZ = std::max(maxChunkZ, chunk.chunkZ());
-    }
-
-    const uint32_t gridSizeX = static_cast<uint32_t>((maxChunkX - minChunkX + 1) * world::Chunk::kSizeX);
-    const uint32_t gridSizeY = static_cast<uint32_t>((maxChunkY - minChunkY + 1) * world::Chunk::kSizeY);
-    const uint32_t gridSizeZ = static_cast<uint32_t>((maxChunkZ - minChunkZ + 1) * world::Chunk::kSizeZ);
-    const size_t voxelCount = static_cast<size_t>(gridSizeX) * gridSizeY * gridSizeZ;
-
-    std::vector<std::uint8_t> occupancy(voxelCount, 0);
-    for (const world::Chunk& chunk : chunkGrid.chunks()) {
-        const uint32_t baseX = static_cast<uint32_t>((chunk.chunkX() - minChunkX) * world::Chunk::kSizeX);
-        const uint32_t baseY = static_cast<uint32_t>((chunk.chunkY() - minChunkY) * world::Chunk::kSizeY);
-        const uint32_t baseZ = static_cast<uint32_t>((chunk.chunkZ() - minChunkZ) * world::Chunk::kSizeZ);
-        for (int y = 0; y < world::Chunk::kSizeY; ++y) {
-            for (int z = 0; z < world::Chunk::kSizeZ; ++z) {
-                for (int x = 0; x < world::Chunk::kSizeX; ++x) {
-                    if (!chunk.isSolid(x, y, z)) {
-                        continue;
-                    }
-                    const uint32_t gx = baseX + static_cast<uint32_t>(x);
-                    const uint32_t gy = baseY + static_cast<uint32_t>(y);
-                    const uint32_t gz = baseZ + static_cast<uint32_t>(z);
-                    const size_t index = static_cast<size_t>(gx + (gridSizeX * (gz + (gridSizeZ * gy))));
-                    occupancy[index] = 255u;
-                }
-            }
-        }
-    }
-
-    const VkDeviceSize occupancyBytes = static_cast<VkDeviceSize>(occupancy.size());
-    const bool needsRecreateBuffer =
-        m_shadowVoxelBufferHandle == kInvalidBufferHandle ||
-        m_shadowVoxelBufferView == VK_NULL_HANDLE ||
-        m_shadowVoxelGridSizeX != gridSizeX ||
-        m_shadowVoxelGridSizeY != gridSizeY ||
-        m_shadowVoxelGridSizeZ != gridSizeZ;
-
-    if (needsRecreateBuffer) {
-        const uint64_t safeReleaseValue = std::max(m_lastGraphicsTimelineValue, m_currentChunkReadyTimelineValue);
-        if (!waitForTimelineValue(safeReleaseValue)) {
-            return false;
-        }
-
-        if (m_shadowVoxelBufferView != VK_NULL_HANDLE) {
-            vkDestroyBufferView(m_device, m_shadowVoxelBufferView, nullptr);
-            m_shadowVoxelBufferView = VK_NULL_HANDLE;
-        }
-        if (m_shadowVoxelBufferHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(m_shadowVoxelBufferHandle);
-            m_shadowVoxelBufferHandle = kInvalidBufferHandle;
-        }
-
-        BufferCreateDesc voxelBufferCreateDesc{};
-        voxelBufferCreateDesc.size = occupancyBytes;
-        voxelBufferCreateDesc.usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
-        voxelBufferCreateDesc.memoryProperties =
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        voxelBufferCreateDesc.initialData = occupancy.data();
-        m_shadowVoxelBufferHandle = m_bufferAllocator.createBuffer(voxelBufferCreateDesc);
-        if (m_shadowVoxelBufferHandle == kInvalidBufferHandle) {
-            std::cerr << "[render] failed to allocate shadow voxel buffer\n";
-            return false;
-        }
-
-        VkBufferViewCreateInfo viewCreateInfo{};
-        viewCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
-        viewCreateInfo.buffer = m_bufferAllocator.getBuffer(m_shadowVoxelBufferHandle);
-        viewCreateInfo.format = VK_FORMAT_R8_UINT;
-        viewCreateInfo.offset = 0;
-        viewCreateInfo.range = occupancyBytes;
-        const VkResult viewResult = vkCreateBufferView(m_device, &viewCreateInfo, nullptr, &m_shadowVoxelBufferView);
-        if (viewResult != VK_SUCCESS) {
-            logVkFailure("vkCreateBufferView(shadowVoxelGrid)", viewResult);
-            m_bufferAllocator.destroyBuffer(m_shadowVoxelBufferHandle);
-            m_shadowVoxelBufferHandle = kInvalidBufferHandle;
-            return false;
-        }
-    } else {
-        void* mappedData = m_bufferAllocator.mapBuffer(m_shadowVoxelBufferHandle, 0, occupancyBytes);
-        if (mappedData == nullptr) {
-            std::cerr << "[render] failed to map shadow voxel buffer\n";
-            return false;
-        }
-        std::memcpy(mappedData, occupancy.data(), static_cast<size_t>(occupancyBytes));
-        m_bufferAllocator.unmapBuffer(m_shadowVoxelBufferHandle);
-    }
-
-    m_shadowVoxelGridSizeX = gridSizeX;
-    m_shadowVoxelGridSizeY = gridSizeY;
-    m_shadowVoxelGridSizeZ = gridSizeZ;
-    m_shadowVoxelGridOriginX = minChunkX * world::Chunk::kSizeX;
-    m_shadowVoxelGridOriginY = minChunkY * world::Chunk::kSizeY;
-    m_shadowVoxelGridOriginZ = minChunkZ * world::Chunk::kSizeZ;
     return true;
 }
 
@@ -5247,7 +5117,7 @@ void Renderer::buildShadowDebugUi() {
         return;
     }
 
-    ImGui::Text("CSM + Voxel Hybrid");
+    ImGui::Text("Cascaded Shadow Maps");
     ImGui::Text(
         "Macro Cells U/R4/R1: %u / %u / %u",
         m_debugMacroCellUniformCount,
@@ -5261,10 +5131,6 @@ void Renderer::buildShadowDebugUi() {
         m_debugDrawnLod2Ranges
     );
     ImGui::Separator();
-    ImGui::Checkbox("Enable RPDB", &m_shadowDebugSettings.enableRpdb);
-    ImGui::Checkbox("Enable Rotated Poisson PCF", &m_shadowDebugSettings.enableRotatedPoissonPcf);
-    ImGui::Checkbox("Enable Hybrid Near Voxel Ray", &m_shadowDebugSettings.enableHybridNearVoxelRay);
-    ImGui::SliderInt("Poisson Sample Count", &m_shadowDebugSettings.poissonSampleCount, 4, 16);
     ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
     ImGui::SliderFloat("Cascade Blend Min", &m_shadowDebugSettings.cascadeBlendMin, 1.0f, 20.0f, "%.2f");
     ImGui::SliderFloat("Cascade Blend Factor", &m_shadowDebugSettings.cascadeBlendFactor, 0.05f, 0.60f, "%.2f");
@@ -5277,19 +5143,12 @@ void Renderer::buildShadowDebugUi() {
     ImGui::SliderFloat("Base Bias Far (texel)", &m_shadowDebugSettings.receiverBaseBiasFarTexel, 0.0f, 16.0f, "%.2f");
     ImGui::SliderFloat("Slope Bias Near (texel)", &m_shadowDebugSettings.receiverSlopeBiasNearTexel, 0.0f, 14.0f, "%.2f");
     ImGui::SliderFloat("Slope Bias Far (texel)", &m_shadowDebugSettings.receiverSlopeBiasFarTexel, 0.0f, 18.0f, "%.2f");
-    ImGui::SliderFloat("RPDB Scale", &m_shadowDebugSettings.rpdbScale, 0.0f, 8.0f, "%.2f");
-
     ImGui::Separator();
     ImGui::Text("Caster Bias");
     ImGui::SliderFloat("Const Bias Base", &m_shadowDebugSettings.casterConstantBiasBase, 0.0f, 6.0f, "%.2f");
     ImGui::SliderFloat("Const Bias Cascade Scale", &m_shadowDebugSettings.casterConstantBiasCascadeScale, 0.0f, 3.0f, "%.2f");
     ImGui::SliderFloat("Slope Bias Base", &m_shadowDebugSettings.casterSlopeBiasBase, 0.0f, 8.0f, "%.2f");
     ImGui::SliderFloat("Slope Bias Cascade Scale", &m_shadowDebugSettings.casterSlopeBiasCascadeScale, 0.0f, 4.0f, "%.2f");
-
-    ImGui::Separator();
-    ImGui::Text("Hybrid Near-Cascade Ray");
-    ImGui::SliderFloat("Ray Step", &m_shadowDebugSettings.hybridRayStep, 0.05f, 1.0f, "%.3f");
-    ImGui::SliderFloat("Ray Max Distance", &m_shadowDebugSettings.hybridRayMaxDistance, 2.0f, 80.0f, "%.2f");
 
     ImGui::Separator();
     ImGui::Text("Sun & Sky");
@@ -5314,15 +5173,6 @@ void Renderer::buildShadowDebugUi() {
         m_shadowCascadeSplits[2],
         m_shadowCascadeSplits[3]
     );
-    ImGui::Text("Voxel Grid: origin=(%d, %d, %d) size=(%u, %u, %u)",
-        m_shadowVoxelGridOriginX,
-        m_shadowVoxelGridOriginY,
-        m_shadowVoxelGridOriginZ,
-        m_shadowVoxelGridSizeX,
-        m_shadowVoxelGridSizeY,
-        m_shadowVoxelGridSizeZ
-    );
-
     if (ImGui::Button("Reset Shadow Defaults")) {
         m_shadowDebugSettings = ShadowDebugSettings{};
     }
@@ -5713,25 +5563,25 @@ void Renderer::renderFrame(
     mvpUniform.shadowConfig1[2] = m_shadowDebugSettings.cascadeBlendMin;
     mvpUniform.shadowConfig1[3] = m_shadowDebugSettings.cascadeBlendFactor;
 
-    mvpUniform.shadowConfig2[0] = m_shadowDebugSettings.enableRpdb ? 1.0f : 0.0f;
-    mvpUniform.shadowConfig2[1] = m_shadowDebugSettings.enableRotatedPoissonPcf ? 1.0f : 0.0f;
-    mvpUniform.shadowConfig2[2] = m_shadowDebugSettings.enableHybridNearVoxelRay ? 1.0f : 0.0f;
-    mvpUniform.shadowConfig2[3] = static_cast<float>(m_shadowDebugSettings.poissonSampleCount);
+    mvpUniform.shadowConfig2[0] = 0.0f;
+    mvpUniform.shadowConfig2[1] = 0.0f;
+    mvpUniform.shadowConfig2[2] = 0.0f;
+    mvpUniform.shadowConfig2[3] = 0.0f;
 
-    mvpUniform.shadowConfig3[0] = m_shadowDebugSettings.hybridRayStep;
-    mvpUniform.shadowConfig3[1] = m_shadowDebugSettings.hybridRayMaxDistance;
-    mvpUniform.shadowConfig3[2] = m_shadowDebugSettings.rpdbScale;
+    mvpUniform.shadowConfig3[0] = 0.0f;
+    mvpUniform.shadowConfig3[1] = 0.0f;
+    mvpUniform.shadowConfig3[2] = 0.0f;
     mvpUniform.shadowConfig3[3] = m_shadowDebugSettings.pcfRadius;
 
-    mvpUniform.shadowVoxelGridOrigin[0] = static_cast<float>(m_shadowVoxelGridOriginX);
-    mvpUniform.shadowVoxelGridOrigin[1] = static_cast<float>(m_shadowVoxelGridOriginY);
-    mvpUniform.shadowVoxelGridOrigin[2] = static_cast<float>(m_shadowVoxelGridOriginZ);
+    mvpUniform.shadowVoxelGridOrigin[0] = 0.0f;
+    mvpUniform.shadowVoxelGridOrigin[1] = 0.0f;
+    mvpUniform.shadowVoxelGridOrigin[2] = 0.0f;
     // Reuse unused W channel for AO debug: 1.0 enables vertex AO, 0.0 disables.
     mvpUniform.shadowVoxelGridOrigin[3] = m_debugEnableVertexAo ? 1.0f : 0.0f;
 
-    mvpUniform.shadowVoxelGridSize[0] = static_cast<float>(m_shadowVoxelGridSizeX);
-    mvpUniform.shadowVoxelGridSize[1] = static_cast<float>(m_shadowVoxelGridSizeY);
-    mvpUniform.shadowVoxelGridSize[2] = static_cast<float>(m_shadowVoxelGridSizeZ);
+    mvpUniform.shadowVoxelGridSize[0] = 0.0f;
+    mvpUniform.shadowVoxelGridSize[1] = 0.0f;
+    mvpUniform.shadowVoxelGridSize[2] = 0.0f;
     // Reuse unused W channel for AO debug mode:
     // 0.0 = SSAO off, 1.0 = SSAO on, 2.0 = visualize SSAO, 3.0 = visualize AO normals.
     if (m_debugVisualizeAoNormals) {
@@ -5792,7 +5642,7 @@ void Renderer::renderFrame(
     ssaoRawImageInfo.imageView = m_ssaoRawImageViews[imageIndex];
     ssaoRawImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    std::array<VkWriteDescriptorSet, 8> writes{};
+    std::array<VkWriteDescriptorSet, 7> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -5823,31 +5673,24 @@ void Renderer::renderFrame(
 
     writes[4] = write;
     writes[4].dstSet = m_descriptorSets[m_currentFrame];
-    writes[4].dstBinding = 5;
+    writes[4].dstBinding = 6;
     writes[4].descriptorCount = 1;
-    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
-    writes[4].pTexelBufferView = &m_shadowVoxelBufferView;
+    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[4].pImageInfo = &normalDepthImageInfo;
 
     writes[5] = write;
     writes[5].dstSet = m_descriptorSets[m_currentFrame];
-    writes[5].dstBinding = 6;
+    writes[5].dstBinding = 7;
     writes[5].descriptorCount = 1;
     writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[5].pImageInfo = &normalDepthImageInfo;
+    writes[5].pImageInfo = &ssaoBlurImageInfo;
 
     writes[6] = write;
     writes[6].dstSet = m_descriptorSets[m_currentFrame];
-    writes[6].dstBinding = 7;
+    writes[6].dstBinding = 8;
     writes[6].descriptorCount = 1;
     writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[6].pImageInfo = &ssaoBlurImageInfo;
-
-    writes[7] = write;
-    writes[7].dstSet = m_descriptorSets[m_currentFrame];
-    writes[7].dstBinding = 8;
-    writes[7].descriptorCount = 1;
-    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[7].pImageInfo = &ssaoRawImageInfo;
+    writes[6].pImageInfo = &ssaoRawImageInfo;
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -7405,21 +7248,6 @@ void Renderer::destroyShadowResources() {
 }
 
 void Renderer::destroyChunkBuffers() {
-    if (m_shadowVoxelBufferView != VK_NULL_HANDLE) {
-        vkDestroyBufferView(m_device, m_shadowVoxelBufferView, nullptr);
-        m_shadowVoxelBufferView = VK_NULL_HANDLE;
-    }
-    if (m_shadowVoxelBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_shadowVoxelBufferHandle);
-        m_shadowVoxelBufferHandle = kInvalidBufferHandle;
-    }
-    m_shadowVoxelGridSizeX = 0;
-    m_shadowVoxelGridSizeY = 0;
-    m_shadowVoxelGridSizeZ = 0;
-    m_shadowVoxelGridOriginX = 0;
-    m_shadowVoxelGridOriginY = 0;
-    m_shadowVoxelGridOriginZ = 0;
-
     for (ChunkDrawRange& drawRange : m_chunkDrawRanges) {
         if (drawRange.indexBufferHandle != kInvalidBufferHandle) {
             m_bufferAllocator.destroyBuffer(drawRange.indexBufferHandle);
