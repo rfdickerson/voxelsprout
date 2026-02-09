@@ -106,6 +106,7 @@ public:
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
+    bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
     bool useSpatialPartitioningQueries() const;
     void setSpatialQueryStats(bool used, const world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void renderFrame(
@@ -169,7 +170,7 @@ private:
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
     bool createDescriptorResources();
-    bool createChunkBuffers(const world::ChunkGrid& chunkGrid, std::optional<std::size_t> chunkIndex);
+    bool createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
     bool createFrameResources();
     bool createGpuTimestampResources();
 #if defined(VOXEL_HAS_IMGUI)
@@ -372,6 +373,7 @@ private:
     bool m_chunkLodMeshCacheValid = false;
     world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;
+    std::vector<std::size_t> m_pendingChunkRemeshIndices;
     uint32_t m_previewIndexCount = 0;
     uint32_t m_pipeIndexCount = 0;
     uint32_t m_transportIndexCount = 0;
@@ -438,6 +440,13 @@ private:
     std::uint32_t m_debugDrawCallsPost = 0;
     std::uint32_t m_debugChunkMeshVertexCount = 0;
     std::uint32_t m_debugChunkMeshIndexCount = 0;
+    std::uint32_t m_debugChunkLastRemeshedChunkCount = 0;
+    std::uint32_t m_debugChunkLastRemeshActiveVertexCount = 0;
+    std::uint32_t m_debugChunkLastRemeshActiveIndexCount = 0;
+    std::uint32_t m_debugChunkLastRemeshNaiveVertexCount = 0;
+    std::uint32_t m_debugChunkLastRemeshNaiveIndexCount = 0;
+    float m_debugChunkLastRemeshReductionPercent = 0.0f;
+    float m_debugChunkLastRemeshMs = 0.0f;
     float m_debugChunkLastFullRemeshMs = 0.0f;
     std::uint64_t m_debugFrameArenaUploadBytes = 0;
     std::uint32_t m_debugFrameArenaUploadAllocs = 0;

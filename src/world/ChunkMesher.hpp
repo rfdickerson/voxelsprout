@@ -16,7 +16,7 @@ enum class MeshingMode : std::uint8_t {
 };
 
 struct MeshingOptions {
-    MeshingMode mode = MeshingMode::Naive;
+    MeshingMode mode = MeshingMode::Greedy;
 };
 
 // Packed voxel vertex used by the Vulkan vertex fetch stage.

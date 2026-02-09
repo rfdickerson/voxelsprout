@@ -503,7 +503,7 @@ void App::update(float dt) {
     m_wasRemoveBlockDown = m_input.removeBlockDown;
 
     bool voxelChunkEdited = false;
-    std::size_t editedChunkIndex = 0;
+    std::vector<std::size_t> editedChunkIndices;
     if (isPipeHotbarSelected()) {
         if (placePressedThisFrame) {
             (void)tryPlacePipeFromCameraRay();
@@ -526,16 +526,16 @@ void App::update(float dt) {
             (void)tryRemoveTrackFromCameraRay();
         }
     } else {
-        if (placePressedThisFrame && tryPlaceVoxelFromCameraRay(editedChunkIndex)) {
+        if (placePressedThisFrame && tryPlaceVoxelFromCameraRay(editedChunkIndices)) {
             voxelChunkEdited = true;
         }
-        if (removePressedThisFrame && tryRemoveVoxelFromCameraRay(editedChunkIndex)) {
+        if (removePressedThisFrame && tryRemoveVoxelFromCameraRay(editedChunkIndices)) {
             voxelChunkEdited = true;
         }
     }
 
     if (voxelChunkEdited) {
-        if (!m_renderer.updateChunkMesh(m_chunkGrid, editedChunkIndex)) {
+        if (!m_renderer.updateChunkMesh(m_chunkGrid, std::span<const std::size_t>(editedChunkIndices))) {
             VOX_LOGE("app") << "chunk mesh update failed after voxel edit";
         }
         m_worldDirty = true;
@@ -1975,20 +1975,59 @@ bool App::applyVoxelEdit(
     int targetY,
     int targetZ,
     world::Voxel voxel,
-    std::size_t& outEditedChunkIndex
+    std::vector<std::size_t>& outDirtyChunkIndices
 ) {
     int localX = 0;
     int localY = 0;
     int localZ = 0;
-    if (!worldToChunkLocal(targetX, targetY, targetZ, outEditedChunkIndex, localX, localY, localZ)) {
+    std::size_t editedChunkIndex = 0;
+    if (!worldToChunkLocal(targetX, targetY, targetZ, editedChunkIndex, localX, localY, localZ)) {
         return false;
     }
 
-    world::Chunk& chunk = m_chunkGrid.chunks()[outEditedChunkIndex];
+    world::Chunk& chunk = m_chunkGrid.chunks()[editedChunkIndex];
     if (chunk.voxelAt(localX, localY, localZ).type == voxel.type) {
         return false;
     }
     chunk.setVoxel(localX, localY, localZ, voxel);
+
+    auto appendUniqueChunkIndex = [&outDirtyChunkIndices](std::size_t chunkIndex) {
+        if (std::find(outDirtyChunkIndices.begin(), outDirtyChunkIndices.end(), chunkIndex) != outDirtyChunkIndices.end()) {
+            return;
+        }
+        outDirtyChunkIndices.push_back(chunkIndex);
+    };
+    appendUniqueChunkIndex(editedChunkIndex);
+
+    auto appendNeighborChunkForWorldVoxel = [this, &appendUniqueChunkIndex](int worldX, int worldY, int worldZ) {
+        std::size_t chunkIndex = 0;
+        int neighborLocalX = 0;
+        int neighborLocalY = 0;
+        int neighborLocalZ = 0;
+        if (worldToChunkLocal(worldX, worldY, worldZ, chunkIndex, neighborLocalX, neighborLocalY, neighborLocalZ)) {
+            appendUniqueChunkIndex(chunkIndex);
+        }
+    };
+
+    if (localX == 0) {
+        appendNeighborChunkForWorldVoxel(targetX - 1, targetY, targetZ);
+    }
+    if (localX == (world::Chunk::kSizeX - 1)) {
+        appendNeighborChunkForWorldVoxel(targetX + 1, targetY, targetZ);
+    }
+    if (localY == 0) {
+        appendNeighborChunkForWorldVoxel(targetX, targetY - 1, targetZ);
+    }
+    if (localY == (world::Chunk::kSizeY - 1)) {
+        appendNeighborChunkForWorldVoxel(targetX, targetY + 1, targetZ);
+    }
+    if (localZ == 0) {
+        appendNeighborChunkForWorldVoxel(targetX, targetY, targetZ - 1);
+    }
+    if (localZ == (world::Chunk::kSizeZ - 1)) {
+        appendNeighborChunkForWorldVoxel(targetX, targetY, targetZ + 1);
+    }
+
     return true;
 }
 
@@ -2051,7 +2090,7 @@ void App::regenerateWorld() {
     }
 }
 
-bool App::tryPlaceVoxelFromCameraRay(std::size_t& outEditedChunkIndex) {
+bool App::tryPlaceVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices) {
     if (m_chunkGrid.chunks().empty()) {
         return false;
     }
@@ -2068,10 +2107,10 @@ bool App::tryPlaceVoxelFromCameraRay(std::size_t& outEditedChunkIndex) {
         return false;
     }
 
-    return applyVoxelEdit(targetX, targetY, targetZ, selectedPlaceVoxel(), outEditedChunkIndex);
+    return applyVoxelEdit(targetX, targetY, targetZ, selectedPlaceVoxel(), outDirtyChunkIndices);
 }
 
-bool App::tryRemoveVoxelFromCameraRay(std::size_t& outEditedChunkIndex) {
+bool App::tryRemoveVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices) {
     if (m_chunkGrid.chunks().empty()) {
         return false;
     }
@@ -2086,7 +2125,7 @@ bool App::tryRemoveVoxelFromCameraRay(std::size_t& outEditedChunkIndex) {
         raycast.solidY,
         raycast.solidZ,
         world::Voxel{world::VoxelType::Empty},
-        outEditedChunkIndex
+        outDirtyChunkIndices
     );
 }
 

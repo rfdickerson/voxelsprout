@@ -116,13 +116,19 @@ private:
     [[nodiscard]] bool isTrackHotbarSelected() const;
     [[nodiscard]] world::Voxel selectedPlaceVoxel() const;
     [[nodiscard]] bool computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const;
-    [[nodiscard]] bool applyVoxelEdit(int targetX, int targetY, int targetZ, world::Voxel voxel, std::size_t& outEditedChunkIndex);
+    [[nodiscard]] bool applyVoxelEdit(
+        int targetX,
+        int targetY,
+        int targetZ,
+        world::Voxel voxel,
+        std::vector<std::size_t>& outDirtyChunkIndices
+    );
     [[nodiscard]] bool isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const;
     [[nodiscard]] bool isBeltAtWorld(int worldX, int worldY, int worldZ, std::size_t* outBeltIndex) const;
     [[nodiscard]] bool isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTrackIndex) const;
     void regenerateWorld();
-    [[nodiscard]] bool tryPlaceVoxelFromCameraRay(std::size_t& outEditedChunkIndex);
-    [[nodiscard]] bool tryRemoveVoxelFromCameraRay(std::size_t& outEditedChunkIndex);
+    [[nodiscard]] bool tryPlaceVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices);
+    [[nodiscard]] bool tryRemoveVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices);
     [[nodiscard]] bool tryPlacePipeFromCameraRay();
     [[nodiscard]] bool tryRemovePipeFromCameraRay();
     [[nodiscard]] bool tryPlaceBeltFromCameraRay();

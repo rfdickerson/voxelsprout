@@ -1558,7 +1558,8 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
-    if (!createChunkBuffers(chunkGrid, std::nullopt)) {
+    m_frameArena.beginFrame(0);
+    if (!createChunkBuffers(chunkGrid, {})) {
         VOX_LOGE("render") << "init failed at createChunkBuffers\n";
         shutdown();
         return false;
@@ -1599,14 +1600,49 @@ bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
-    return createChunkBuffers(chunkGrid, std::nullopt);
+    (void)chunkGrid;
+    m_chunkMeshRebuildRequested = true;
+    m_pendingChunkRemeshIndices.clear();
+    return true;
 }
 
 bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
-    return createChunkBuffers(chunkGrid, chunkIndex);
+    if (chunkIndex >= chunkGrid.chunks().size()) {
+        return false;
+    }
+    if (m_chunkMeshRebuildRequested) {
+        return true;
+    }
+    if (std::find(m_pendingChunkRemeshIndices.begin(), m_pendingChunkRemeshIndices.end(), chunkIndex) ==
+        m_pendingChunkRemeshIndices.end()) {
+        m_pendingChunkRemeshIndices.push_back(chunkIndex);
+    }
+    return true;
+}
+
+bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices) {
+    if (m_device == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (chunkIndices.empty()) {
+        return true;
+    }
+    if (m_chunkMeshRebuildRequested) {
+        return true;
+    }
+    for (const std::size_t chunkIndex : chunkIndices) {
+        if (chunkIndex >= chunkGrid.chunks().size()) {
+            return false;
+        }
+        if (std::find(m_pendingChunkRemeshIndices.begin(), m_pendingChunkRemeshIndices.end(), chunkIndex) ==
+            m_pendingChunkRemeshIndices.end()) {
+            m_pendingChunkRemeshIndices.push_back(chunkIndex);
+        }
+    }
+    return true;
 }
 
 bool Renderer::useSpatialPartitioningQueries() const {
@@ -2111,7 +2147,7 @@ bool Renderer::createTimelineSemaphore() {
 bool Renderer::createUploadRingBuffer() {
     // FrameArena layer A foundation: one persistently mapped upload arena per frame-in-flight.
     FrameArenaConfig config{};
-    config.uploadBytesPerFrame = 1024 * 64;
+    config.uploadBytesPerFrame = 1024ull * 1024ull * 64ull;
     config.frameCount = kMaxFramesInFlight;
     config.uploadUsage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                          VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
@@ -5156,15 +5192,12 @@ bool Renderer::createAoPipelines() {
     return true;
 }
 
-bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::optional<std::size_t> chunkIndex) {
+bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices) {
     if (chunkGrid.chunks().empty()) {
         return false;
     }
 
     const std::vector<world::Chunk>& chunks = chunkGrid.chunks();
-    if (chunkIndex.has_value() && *chunkIndex >= chunks.size()) {
-        return false;
-    }
     const std::size_t expectedDrawRangeCount = chunks.size() * world::kChunkMeshLodCount;
     if (m_chunkDrawRanges.size() != expectedDrawRangeCount) {
         m_chunkDrawRanges.assign(expectedDrawRangeCount, ChunkDrawRange{});
@@ -5175,23 +5208,87 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
     }
 
     std::size_t remeshedChunkCount = 0;
-    const bool fullRemesh = !m_chunkLodMeshCacheValid || !chunkIndex.has_value();
+    std::size_t remeshedActiveVertexCount = 0;
+    std::size_t remeshedActiveIndexCount = 0;
+    std::size_t remeshedNaiveVertexCount = 0;
+    std::size_t remeshedNaiveIndexCount = 0;
+    const auto countMeshGeometry = [](const world::ChunkLodMeshes& lodMeshes, std::size_t& outVertices, std::size_t& outIndices) {
+        for (const world::ChunkMeshData& lodMesh : lodMeshes.lodMeshes) {
+            outVertices += lodMesh.vertices.size();
+            outIndices += lodMesh.indices.size();
+        }
+    };
+    const bool fullRemesh = !m_chunkLodMeshCacheValid || remeshChunkIndices.empty();
     const auto remeshStart = std::chrono::steady_clock::now();
-    if (!m_chunkLodMeshCacheValid || !chunkIndex.has_value()) {
+    if (fullRemesh) {
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
             m_chunkLodMeshCache[chunkArrayIndex] =
                 world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
+            countMeshGeometry(
+                m_chunkLodMeshCache[chunkArrayIndex],
+                remeshedActiveVertexCount,
+                remeshedActiveIndexCount
+            );
+            if (m_chunkMeshingOptions.mode == world::MeshingMode::Naive) {
+                remeshedNaiveVertexCount = remeshedActiveVertexCount;
+                remeshedNaiveIndexCount = remeshedActiveIndexCount;
+            } else {
+                const world::ChunkLodMeshes naiveLodMeshes =
+                    world::buildChunkLodMeshes(chunks[chunkArrayIndex], world::MeshingOptions{world::MeshingMode::Naive});
+                countMeshGeometry(naiveLodMeshes, remeshedNaiveVertexCount, remeshedNaiveIndexCount);
+            }
         }
         remeshedChunkCount = chunks.size();
         m_chunkLodMeshCacheValid = true;
     } else {
-        m_chunkLodMeshCache[*chunkIndex] =
-            world::buildChunkLodMeshes(chunks[*chunkIndex], m_chunkMeshingOptions);
-        remeshedChunkCount = 1;
+        std::vector<std::uint8_t> remeshMask(chunks.size(), 0u);
+        std::vector<std::size_t> uniqueRemeshChunkIndices;
+        uniqueRemeshChunkIndices.reserve(remeshChunkIndices.size());
+        for (const std::size_t chunkArrayIndex : remeshChunkIndices) {
+            if (chunkArrayIndex >= chunks.size()) {
+                return false;
+            }
+            if (remeshMask[chunkArrayIndex] != 0u) {
+                continue;
+            }
+            remeshMask[chunkArrayIndex] = 1u;
+            uniqueRemeshChunkIndices.push_back(chunkArrayIndex);
+        }
+
+        for (const std::size_t chunkArrayIndex : uniqueRemeshChunkIndices) {
+            m_chunkLodMeshCache[chunkArrayIndex] =
+                world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
+            countMeshGeometry(
+                m_chunkLodMeshCache[chunkArrayIndex],
+                remeshedActiveVertexCount,
+                remeshedActiveIndexCount
+            );
+            if (m_chunkMeshingOptions.mode == world::MeshingMode::Naive) {
+                remeshedNaiveVertexCount = remeshedActiveVertexCount;
+                remeshedNaiveIndexCount = remeshedActiveIndexCount;
+            } else {
+                const world::ChunkLodMeshes naiveLodMeshes =
+                    world::buildChunkLodMeshes(chunks[chunkArrayIndex], world::MeshingOptions{world::MeshingMode::Naive});
+                countMeshGeometry(naiveLodMeshes, remeshedNaiveVertexCount, remeshedNaiveIndexCount);
+            }
+        }
+        remeshedChunkCount = uniqueRemeshChunkIndices.size();
+    }
+    const auto remeshEnd = std::chrono::steady_clock::now();
+    const std::chrono::duration<float, std::milli> remeshMs = remeshEnd - remeshStart;
+    m_debugChunkLastRemeshedChunkCount = static_cast<std::uint32_t>(remeshedChunkCount);
+    m_debugChunkLastRemeshActiveVertexCount = static_cast<std::uint32_t>(remeshedActiveVertexCount);
+    m_debugChunkLastRemeshActiveIndexCount = static_cast<std::uint32_t>(remeshedActiveIndexCount);
+    m_debugChunkLastRemeshNaiveVertexCount = static_cast<std::uint32_t>(remeshedNaiveVertexCount);
+    m_debugChunkLastRemeshNaiveIndexCount = static_cast<std::uint32_t>(remeshedNaiveIndexCount);
+    m_debugChunkLastRemeshMs = remeshMs.count();
+    if (remeshedNaiveIndexCount > 0) {
+        const float ratio = static_cast<float>(remeshedActiveIndexCount) / static_cast<float>(remeshedNaiveIndexCount);
+        m_debugChunkLastRemeshReductionPercent = std::clamp(100.0f * (1.0f - ratio), 0.0f, 100.0f);
+    } else {
+        m_debugChunkLastRemeshReductionPercent = 0.0f;
     }
     if (fullRemesh) {
-        const auto remeshEnd = std::chrono::steady_clock::now();
-        const std::chrono::duration<float, std::milli> remeshMs = remeshEnd - remeshStart;
         m_debugChunkLastFullRemeshMs = remeshMs.count();
     }
 
@@ -5255,17 +5352,9 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
 
     BufferHandle newChunkVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle newChunkIndexBufferHandle = kInvalidBufferHandle;
-    BufferHandle chunkVertexStagingHandle = kInvalidBufferHandle;
-    BufferHandle chunkIndexStagingHandle = kInvalidBufferHandle;
+    std::optional<FrameArenaSlice> chunkVertexUploadSliceOpt = std::nullopt;
+    std::optional<FrameArenaSlice> chunkIndexUploadSliceOpt = std::nullopt;
     auto cleanupPendingAllocations = [&]() {
-        if (chunkVertexStagingHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(chunkVertexStagingHandle);
-            chunkVertexStagingHandle = kInvalidBufferHandle;
-        }
-        if (chunkIndexStagingHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(chunkIndexStagingHandle);
-            chunkIndexStagingHandle = kInvalidBufferHandle;
-        }
         if (newChunkVertexBufferHandle != kInvalidBufferHandle) {
             m_bufferAllocator.destroyBuffer(newChunkVertexBufferHandle);
             newChunkVertexBufferHandle = kInvalidBufferHandle;
@@ -5336,43 +5425,37 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
             }
         }
 
-        BufferCreateDesc vertexStagingCreateDesc{};
-        vertexStagingCreateDesc.size = vertexBufferSize;
-        vertexStagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        vertexStagingCreateDesc.memoryProperties =
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        vertexStagingCreateDesc.initialData = combinedVertices.data();
-        chunkVertexStagingHandle = m_bufferAllocator.createBuffer(vertexStagingCreateDesc);
-        if (chunkVertexStagingHandle == kInvalidBufferHandle) {
-            VOX_LOGE("render") << "chunk global vertex staging allocation failed";
+        chunkVertexUploadSliceOpt = m_frameArena.allocateUpload(
+            vertexBufferSize,
+            static_cast<VkDeviceSize>(alignof(world::PackedVoxelVertex)),
+            FrameArenaUploadKind::Unknown
+        );
+        if (!chunkVertexUploadSliceOpt.has_value() || chunkVertexUploadSliceOpt->mapped == nullptr) {
+            VOX_LOGE("render") << "chunk global vertex upload slice allocation failed";
             cleanupPendingAllocations();
             return false;
         }
-        {
-            const VkBuffer stagingBuffer = m_bufferAllocator.getBuffer(chunkVertexStagingHandle);
-            if (stagingBuffer != VK_NULL_HANDLE) {
-                setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(stagingBuffer), "chunk.global.vertex.staging");
-            }
-        }
+        std::memcpy(
+            chunkVertexUploadSliceOpt->mapped,
+            combinedVertices.data(),
+            static_cast<size_t>(vertexBufferSize)
+        );
 
-        BufferCreateDesc indexStagingCreateDesc{};
-        indexStagingCreateDesc.size = indexBufferSize;
-        indexStagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        indexStagingCreateDesc.memoryProperties =
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        indexStagingCreateDesc.initialData = combinedIndices.data();
-        chunkIndexStagingHandle = m_bufferAllocator.createBuffer(indexStagingCreateDesc);
-        if (chunkIndexStagingHandle == kInvalidBufferHandle) {
-            VOX_LOGE("render") << "chunk global index staging allocation failed";
+        chunkIndexUploadSliceOpt = m_frameArena.allocateUpload(
+            indexBufferSize,
+            static_cast<VkDeviceSize>(alignof(std::uint32_t)),
+            FrameArenaUploadKind::Unknown
+        );
+        if (!chunkIndexUploadSliceOpt.has_value() || chunkIndexUploadSliceOpt->mapped == nullptr) {
+            VOX_LOGE("render") << "chunk global index upload slice allocation failed";
             cleanupPendingAllocations();
             return false;
         }
-        {
-            const VkBuffer stagingBuffer = m_bufferAllocator.getBuffer(chunkIndexStagingHandle);
-            if (stagingBuffer != VK_NULL_HANDLE) {
-                setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(stagingBuffer), "chunk.global.index.staging");
-            }
-        }
+        std::memcpy(
+            chunkIndexUploadSliceOpt->mapped,
+            combinedIndices.data(),
+            static_cast<size_t>(indexBufferSize)
+        );
     }
 
     uint64_t transferSignalValue = 0;
@@ -5398,20 +5481,22 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
             const VkDeviceSize indexBufferSize = m_bufferAllocator.getSize(newChunkIndexBufferHandle);
 
             VkBufferCopy vertexCopy{};
+            vertexCopy.srcOffset = chunkVertexUploadSliceOpt->offset;
             vertexCopy.size = vertexBufferSize;
             vkCmdCopyBuffer(
                 m_transferCommandBuffer,
-                m_bufferAllocator.getBuffer(chunkVertexStagingHandle),
+                m_bufferAllocator.getBuffer(chunkVertexUploadSliceOpt->buffer),
                 m_bufferAllocator.getBuffer(newChunkVertexBufferHandle),
                 1,
                 &vertexCopy
             );
 
             VkBufferCopy indexCopy{};
+            indexCopy.srcOffset = chunkIndexUploadSliceOpt->offset;
             indexCopy.size = indexBufferSize;
             vkCmdCopyBuffer(
                 m_transferCommandBuffer,
-                m_bufferAllocator.getBuffer(chunkIndexStagingHandle),
+                m_bufferAllocator.getBuffer(chunkIndexUploadSliceOpt->buffer),
                 m_bufferAllocator.getBuffer(newChunkIndexBufferHandle),
                 1,
                 &indexCopy
@@ -5452,12 +5537,6 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
     }
 
     const uint64_t oldChunkReleaseValue = std::max(m_lastGraphicsTimelineValue, previousChunkReadyTimelineValue);
-    if (hasChunkCopies) {
-        scheduleBufferRelease(chunkVertexStagingHandle, transferSignalValue);
-        scheduleBufferRelease(chunkIndexStagingHandle, transferSignalValue);
-        chunkVertexStagingHandle = kInvalidBufferHandle;
-        chunkIndexStagingHandle = kInvalidBufferHandle;
-    }
     scheduleBufferRelease(m_chunkVertexBufferHandle, oldChunkReleaseValue);
     scheduleBufferRelease(m_chunkIndexBufferHandle, oldChunkReleaseValue);
     m_chunkVertexBufferHandle = newChunkVertexBufferHandle;
@@ -5744,12 +5823,30 @@ void Renderer::buildFrameStatsUi() {
             m_chunkMeshingOptions.mode = nextMode;
             m_chunkLodMeshCacheValid = false;
             m_chunkMeshRebuildRequested = true;
+            m_pendingChunkRemeshIndices.clear();
             VOX_LOGI("render") << "chunk meshing mode changed to "
                 << (nextMode == world::MeshingMode::Greedy ? "Greedy" : "Naive")
                 << ", scheduling full remesh";
         }
     }
     ImGui::Text("Chunk Mesh Vert/Idx: %u / %u", m_debugChunkMeshVertexCount, m_debugChunkMeshIndexCount);
+    ImGui::Text(
+        "Last Chunk Remesh: %.2f ms (%u chunk%s)",
+        m_debugChunkLastRemeshMs,
+        m_debugChunkLastRemeshedChunkCount,
+        m_debugChunkLastRemeshedChunkCount == 1 ? "" : "s"
+    );
+    ImGui::Text(
+        "Last Remesh Vert/Idx (active): %u / %u",
+        m_debugChunkLastRemeshActiveVertexCount,
+        m_debugChunkLastRemeshActiveIndexCount
+    );
+    ImGui::Text(
+        "Last Remesh Vert/Idx (naive): %u / %u",
+        m_debugChunkLastRemeshNaiveVertexCount,
+        m_debugChunkLastRemeshNaiveIndexCount
+    );
+    ImGui::Text("Greedy Reduction vs Naive: %.1f%%", m_debugChunkLastRemeshReductionPercent);
     ImGui::Text("Last Full Chunk Remesh: %.2f ms", m_debugChunkLastFullRemeshMs);
     const bool hasFrameArenaMetrics =
         m_debugFrameArenaUploadBytes > 0 ||
@@ -6113,13 +6210,6 @@ void Renderer::renderFrame(
             }
         }
     }
-    if (m_chunkMeshRebuildRequested) {
-        if (createChunkBuffers(chunkGrid, std::nullopt)) {
-            m_chunkMeshRebuildRequested = false;
-        } else {
-            VOX_LOGE("render") << "failed chunk remesh after meshing mode toggle";
-        }
-    }
     collectCompletedBufferReleases();
 
     FrameResources& frame = m_frames[m_currentFrame];
@@ -6129,7 +6219,28 @@ void Renderer::renderFrame(
     if (m_frameTimelineValues[m_currentFrame] > 0) {
         readGpuTimestampResults(m_currentFrame);
     }
+    if (m_transferCommandBufferInFlightValue > 0) {
+        if (!waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
+            return;
+        }
+        m_transferCommandBufferInFlightValue = 0;
+        m_pendingTransferTimelineValue = 0;
+        collectCompletedBufferReleases();
+    }
     m_frameArena.beginFrame(m_currentFrame);
+
+    if (m_chunkMeshRebuildRequested || !m_pendingChunkRemeshIndices.empty()) {
+        const std::span<const std::size_t> pendingRemeshIndices =
+            m_chunkMeshRebuildRequested
+                ? std::span<const std::size_t>{}
+                : std::span<const std::size_t>(m_pendingChunkRemeshIndices.data(), m_pendingChunkRemeshIndices.size());
+        if (createChunkBuffers(chunkGrid, pendingRemeshIndices)) {
+            m_chunkMeshRebuildRequested = false;
+            m_pendingChunkRemeshIndices.clear();
+        } else {
+            VOX_LOGE("render") << "failed deferred chunk remesh";
+        }
+    }
 
     uint32_t imageIndex = 0;
     const VkResult acquireResult = vkAcquireNextImageKHR(
@@ -8490,6 +8601,7 @@ void Renderer::shutdown() {
     m_supportsMultiDrawIndirect = false;
     m_chunkMeshingOptions = world::MeshingOptions{};
     m_chunkMeshRebuildRequested = false;
+    m_pendingChunkRemeshIndices.clear();
     m_gpuTimestampsSupported = false;
     m_gpuTimestampPeriodNs = 0.0f;
     m_gpuTimestampQueryPools.fill(VK_NULL_HANDLE);
@@ -8502,6 +8614,13 @@ void Renderer::shutdown() {
     m_debugGpuPostTimeMs = 0.0f;
     m_debugChunkMeshVertexCount = 0;
     m_debugChunkMeshIndexCount = 0;
+    m_debugChunkLastRemeshedChunkCount = 0;
+    m_debugChunkLastRemeshActiveVertexCount = 0;
+    m_debugChunkLastRemeshActiveIndexCount = 0;
+    m_debugChunkLastRemeshNaiveVertexCount = 0;
+    m_debugChunkLastRemeshNaiveIndexCount = 0;
+    m_debugChunkLastRemeshReductionPercent = 0.0f;
+    m_debugChunkLastRemeshMs = 0.0f;
     m_debugChunkLastFullRemeshMs = 0.0f;
     m_debugCpuFrameTimingMsHistory.fill(0.0f);
     m_debugCpuFrameTimingMsHistoryWrite = 0;
