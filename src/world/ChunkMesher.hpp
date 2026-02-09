@@ -10,6 +10,15 @@ namespace world {
 
 constexpr std::uint32_t kChunkMeshLodCount = 3;
 
+enum class MeshingMode : std::uint8_t {
+    Naive = 0,
+    Greedy = 1
+};
+
+struct MeshingOptions {
+    MeshingMode mode = MeshingMode::Naive;
+};
+
 // Packed voxel vertex used by the Vulkan vertex fetch stage.
 // We keep this tightly packed so GPU bandwidth stays low when meshes get denser.
 //
@@ -64,11 +73,11 @@ struct ChunkLodMeshes {
     std::array<ChunkMeshData, kChunkMeshLodCount> lodMeshes;
 };
 
-ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk);
-ChunkMeshData buildChunkMesh(const Chunk& chunk);
+ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk, MeshingOptions options = {});
+ChunkMeshData buildChunkMesh(const Chunk& chunk, MeshingOptions options = {});
 
 // Builds a mesh for the first chunk in the grid.
 // This intentionally targets one chunk only for debug clarity.
-ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid);
+ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid, MeshingOptions options = {});
 
 } // namespace world

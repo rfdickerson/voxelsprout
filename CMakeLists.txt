@@ -115,6 +115,7 @@ endif()
 if(BUILD_TESTING)
     add_executable(voxel_foundation_tests
         tests/FoundationTests.cpp
+        src/world/ChunkMesher.cpp
     )
     target_include_directories(voxel_foundation_tests PRIVATE src)
 

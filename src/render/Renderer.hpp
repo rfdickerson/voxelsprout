@@ -370,6 +370,8 @@ private:
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     std::vector<world::ChunkLodMeshes> m_chunkLodMeshCache;
     bool m_chunkLodMeshCacheValid = false;
+    world::MeshingOptions m_chunkMeshingOptions{};
+    bool m_chunkMeshRebuildRequested = false;
     uint32_t m_previewIndexCount = 0;
     uint32_t m_pipeIndexCount = 0;
     uint32_t m_transportIndexCount = 0;
@@ -434,6 +436,9 @@ private:
     std::uint32_t m_debugDrawCallsPrepass = 0;
     std::uint32_t m_debugDrawCallsMain = 0;
     std::uint32_t m_debugDrawCallsPost = 0;
+    std::uint32_t m_debugChunkMeshVertexCount = 0;
+    std::uint32_t m_debugChunkMeshIndexCount = 0;
+    float m_debugChunkLastFullRemeshMs = 0.0f;
     std::uint64_t m_debugFrameArenaUploadBytes = 0;
     std::uint32_t m_debugFrameArenaUploadAllocs = 0;
     std::uint64_t m_debugFrameArenaTransientBufferBytes = 0;

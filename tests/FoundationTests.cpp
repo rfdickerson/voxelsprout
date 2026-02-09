@@ -9,6 +9,7 @@
 #include "sim/NetworkProcedural.hpp"
 #include "render/FrameArenaAlias.hpp"
 #include "world/Chunk.hpp"
+#include "world/ChunkMesher.hpp"
 #include "world/Csg.hpp"
 
 namespace {
@@ -227,6 +228,72 @@ void testFrameArenaAliasUtilities() {
     expectTrue(refCount == 0u, "Alias ref count reaches zero");
 }
 
+void testChunkMeshingModes() {
+    using world::Chunk;
+    using world::MeshingMode;
+    using world::MeshingOptions;
+    using world::Voxel;
+    using world::VoxelType;
+
+    const MeshingOptions naiveOptions{MeshingMode::Naive};
+    const MeshingOptions greedyOptions{MeshingMode::Greedy};
+
+    {
+        Chunk chunk(0, 0, 0);
+        const world::ChunkMeshData naive = world::buildChunkMesh(chunk, naiveOptions);
+        const world::ChunkMeshData greedy = world::buildChunkMesh(chunk, greedyOptions);
+        expectTrue(naive.vertices.empty() && naive.indices.empty(), "Naive empty chunk has no geometry");
+        expectTrue(greedy.vertices.empty() && greedy.indices.empty(), "Greedy empty chunk has no geometry");
+    }
+
+    {
+        Chunk chunk(0, 0, 0);
+        chunk.setVoxel(3, 3, 3, Voxel{VoxelType::Solid});
+        const world::ChunkMeshData naive = world::buildChunkMesh(chunk, naiveOptions);
+        const world::ChunkMeshData greedy = world::buildChunkMesh(chunk, greedyOptions);
+        expectTrue(naive.vertices.size() == 24u, "Naive single voxel vertex count");
+        expectTrue(naive.indices.size() == 36u, "Naive single voxel index count");
+        expectTrue(greedy.vertices.size() == naive.vertices.size(), "Greedy single voxel matches naive vertices");
+        expectTrue(greedy.indices.size() == naive.indices.size(), "Greedy single voxel matches naive indices");
+    }
+
+    {
+        Chunk chunk(0, 0, 0);
+        for (int y = 0; y < Chunk::kSizeY; ++y) {
+            for (int z = 0; z < Chunk::kSizeZ; ++z) {
+                for (int x = 0; x < Chunk::kSizeX; ++x) {
+                    chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
+                }
+            }
+        }
+        const world::ChunkMeshData naive = world::buildChunkMesh(chunk, naiveOptions);
+        const world::ChunkMeshData greedy = world::buildChunkMesh(chunk, greedyOptions);
+
+        const std::size_t expectedNaiveVisibleQuads = static_cast<std::size_t>(6 * Chunk::kSizeX * Chunk::kSizeY);
+        expectTrue(naive.vertices.size() == expectedNaiveVisibleQuads * 4u, "Naive full chunk visible vertex count");
+        expectTrue(naive.indices.size() == expectedNaiveVisibleQuads * 6u, "Naive full chunk visible index count");
+        expectTrue(greedy.vertices.size() == 24u, "Greedy full chunk collapses to 6 quads");
+        expectTrue(greedy.indices.size() == 36u, "Greedy full chunk collapses to 6 quads indices");
+    }
+
+    {
+        Chunk chunk(0, 0, 0);
+        const int y = 8;
+        for (int z = 0; z < Chunk::kSizeZ; ++z) {
+            for (int x = 0; x < Chunk::kSizeX; ++x) {
+                chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
+            }
+        }
+
+        const world::ChunkMeshData naive = world::buildChunkMesh(chunk, naiveOptions);
+        const world::ChunkMeshData greedy = world::buildChunkMesh(chunk, greedyOptions);
+        expectTrue(!naive.vertices.empty(), "Naive slab produces geometry");
+        expectTrue(!greedy.vertices.empty(), "Greedy slab produces geometry");
+        expectTrue(greedy.vertices.size() < naive.vertices.size(), "Greedy slab reduces vertex count");
+        expectTrue(greedy.indices.size() < naive.indices.size(), "Greedy slab reduces index count");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -234,6 +301,7 @@ int main() {
     testNetworkGraphAndProceduralUtilities();
     testCsgCommands();
     testFrameArenaAliasUtilities();
+    testChunkMeshingModes();
 
     if (g_failures != 0) {
         std::cerr << "[foundation test] " << g_failures << " failures\n";

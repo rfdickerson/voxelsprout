@@ -5175,15 +5175,24 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
     }
 
     std::size_t remeshedChunkCount = 0;
+    const bool fullRemesh = !m_chunkLodMeshCacheValid || !chunkIndex.has_value();
+    const auto remeshStart = std::chrono::steady_clock::now();
     if (!m_chunkLodMeshCacheValid || !chunkIndex.has_value()) {
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-            m_chunkLodMeshCache[chunkArrayIndex] = world::buildChunkLodMeshes(chunks[chunkArrayIndex]);
+            m_chunkLodMeshCache[chunkArrayIndex] =
+                world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
         }
         remeshedChunkCount = chunks.size();
         m_chunkLodMeshCacheValid = true;
     } else {
-        m_chunkLodMeshCache[*chunkIndex] = world::buildChunkLodMeshes(chunks[*chunkIndex]);
+        m_chunkLodMeshCache[*chunkIndex] =
+            world::buildChunkLodMeshes(chunks[*chunkIndex], m_chunkMeshingOptions);
         remeshedChunkCount = 1;
+    }
+    if (fullRemesh) {
+        const auto remeshEnd = std::chrono::steady_clock::now();
+        const std::chrono::duration<float, std::milli> remeshMs = remeshEnd - remeshStart;
+        m_debugChunkLastFullRemeshMs = remeshMs.count();
     }
 
     std::vector<world::PackedVoxelVertex> combinedVertices;
@@ -5233,6 +5242,8 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
             uploadedIndexCount += chunkMesh.indices.size();
         }
     }
+    m_debugChunkMeshVertexCount = static_cast<std::uint32_t>(uploadedVertexCount);
+    m_debugChunkMeshIndexCount = static_cast<std::uint32_t>(uploadedIndexCount);
 
     std::array<uint32_t, 2> meshQueueFamilies = {
         m_graphicsQueueFamilyIndex,
@@ -5456,6 +5467,8 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::option
 
     VOX_LOGD("render") << "chunk upload queued (ranges=" << m_chunkDrawRanges.size()
                        << ", remeshedChunks=" << remeshedChunkCount
+                       << ", meshingMode="
+                       << (m_chunkMeshingOptions.mode == world::MeshingMode::Greedy ? "greedy" : "naive")
                        << ", vertices=" << uploadedVertexCount
                        << ", indices=" << uploadedIndexCount
                        << (hasChunkCopies
@@ -5723,6 +5736,21 @@ void Renderer::buildFrameStatsUi() {
         m_debugDrawCallsMain,
         m_debugDrawCallsPost
     );
+    int meshingModeSelection = (m_chunkMeshingOptions.mode == world::MeshingMode::Greedy) ? 1 : 0;
+    if (ImGui::Combo("Chunk Meshing", &meshingModeSelection, "Naive\0Greedy\0")) {
+        const world::MeshingMode nextMode =
+            (meshingModeSelection == 1) ? world::MeshingMode::Greedy : world::MeshingMode::Naive;
+        if (nextMode != m_chunkMeshingOptions.mode) {
+            m_chunkMeshingOptions.mode = nextMode;
+            m_chunkLodMeshCacheValid = false;
+            m_chunkMeshRebuildRequested = true;
+            VOX_LOGI("render") << "chunk meshing mode changed to "
+                << (nextMode == world::MeshingMode::Greedy ? "Greedy" : "Naive")
+                << ", scheduling full remesh";
+        }
+    }
+    ImGui::Text("Chunk Mesh Vert/Idx: %u / %u", m_debugChunkMeshVertexCount, m_debugChunkMeshIndexCount);
+    ImGui::Text("Last Full Chunk Remesh: %.2f ms", m_debugChunkLastFullRemeshMs);
     const bool hasFrameArenaMetrics =
         m_debugFrameArenaUploadBytes > 0 ||
         m_debugFrameArenaUploadAllocs > 0 ||
@@ -6083,6 +6111,13 @@ void Renderer::renderFrame(
                     }
                 }
             }
+        }
+    }
+    if (m_chunkMeshRebuildRequested) {
+        if (createChunkBuffers(chunkGrid, std::nullopt)) {
+            m_chunkMeshRebuildRequested = false;
+        } else {
+            VOX_LOGE("render") << "failed chunk remesh after meshing mode toggle";
         }
     }
     collectCompletedBufferReleases();
@@ -8453,6 +8488,8 @@ void Renderer::shutdown() {
     m_supportsWireframePreview = false;
     m_supportsSamplerAnisotropy = false;
     m_supportsMultiDrawIndirect = false;
+    m_chunkMeshingOptions = world::MeshingOptions{};
+    m_chunkMeshRebuildRequested = false;
     m_gpuTimestampsSupported = false;
     m_gpuTimestampPeriodNs = 0.0f;
     m_gpuTimestampQueryPools.fill(VK_NULL_HANDLE);
@@ -8463,6 +8500,9 @@ void Renderer::shutdown() {
     m_debugGpuSsaoBlurTimeMs = 0.0f;
     m_debugGpuMainTimeMs = 0.0f;
     m_debugGpuPostTimeMs = 0.0f;
+    m_debugChunkMeshVertexCount = 0;
+    m_debugChunkMeshIndexCount = 0;
+    m_debugChunkLastFullRemeshMs = 0.0f;
     m_debugCpuFrameTimingMsHistory.fill(0.0f);
     m_debugCpuFrameTimingMsHistoryWrite = 0;
     m_debugCpuFrameTimingMsHistoryCount = 0;
