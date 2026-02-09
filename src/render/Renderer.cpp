@@ -3140,7 +3140,7 @@ bool Renderer::createDescriptorResources() {
     if (m_descriptorSetLayout == VK_NULL_HANDLE) {
         VkDescriptorSetLayoutBinding mvpBinding{};
         mvpBinding.binding = 0;
-        mvpBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        mvpBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         mvpBinding.descriptorCount = 1;
         mvpBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
@@ -3206,7 +3206,7 @@ bool Renderer::createDescriptorResources() {
     if (m_descriptorPool == VK_NULL_HANDLE) {
         const std::array<VkDescriptorPoolSize, 2> poolSizes = {
             VkDescriptorPoolSize{
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                 kMaxFramesInFlight
             },
             VkDescriptorPoolSize{
@@ -5692,8 +5692,13 @@ void Renderer::renderFrame(
 
     VkDescriptorBufferInfo bufferInfo{};
     bufferInfo.buffer = m_bufferAllocator.getBuffer(mvpSliceOpt->buffer);
-    bufferInfo.offset = mvpSliceOpt->offset;
-    bufferInfo.range = mvpSliceOpt->size;
+    bufferInfo.offset = 0;
+    bufferInfo.range = sizeof(CameraUniform);
+    if (mvpSliceOpt->offset > static_cast<VkDeviceSize>(std::numeric_limits<uint32_t>::max())) {
+        std::cerr << "[render] dynamic UBO offset exceeds uint32 range\n";
+        return;
+    }
+    const uint32_t mvpDynamicOffset = static_cast<uint32_t>(mvpSliceOpt->offset);
 
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -5733,7 +5738,7 @@ void Renderer::renderFrame(
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
     writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     writes[0].pBufferInfo = &bufferInfo;
 
     writes[1] = write;
@@ -5922,8 +5927,8 @@ void Renderer::renderFrame(
             0,
             1,
             &m_descriptorSets[m_currentFrame],
-            0,
-            nullptr
+            1,
+            &mvpDynamicOffset
         );
 
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
@@ -6046,9 +6051,9 @@ void Renderer::renderFrame(
                         0,
                         1,
                         &m_descriptorSets[m_currentFrame],
-                        0,
-                        nullptr
-                    );
+            1,
+            &mvpDynamicOffset
+        );
                     vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
                     vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
@@ -6224,8 +6229,8 @@ void Renderer::renderFrame(
             0,
             1,
             &m_descriptorSets[m_currentFrame],
-            0,
-            nullptr
+            1,
+            &mvpDynamicOffset
         );
         for (std::size_t drawRangeIndex = 0; drawRangeIndex < m_chunkDrawRanges.size(); ++drawRangeIndex) {
             const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
@@ -6303,9 +6308,9 @@ void Renderer::renderFrame(
                 0,
                 1,
                 &m_descriptorSets[m_currentFrame],
-                0,
-                nullptr
-            );
+            1,
+            &mvpDynamicOffset
+        );
             vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
@@ -6373,8 +6378,8 @@ void Renderer::renderFrame(
             0,
             1,
             &m_descriptorSets[m_currentFrame],
-            0,
-            nullptr
+            1,
+            &mvpDynamicOffset
         );
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
@@ -6420,8 +6425,8 @@ void Renderer::renderFrame(
             0,
             1,
             &m_descriptorSets[m_currentFrame],
-            0,
-            nullptr
+            1,
+            &mvpDynamicOffset
         );
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
@@ -6544,8 +6549,8 @@ void Renderer::renderFrame(
             0,
             1,
             &m_descriptorSets[m_currentFrame],
-            0,
-            nullptr
+            1,
+            &mvpDynamicOffset
         );
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
@@ -6558,9 +6563,9 @@ void Renderer::renderFrame(
         0,
         1,
         &m_descriptorSets[m_currentFrame],
-        0,
-        nullptr
-    );
+            1,
+            &mvpDynamicOffset
+        );
     for (std::size_t drawRangeIndex = 0; drawRangeIndex < m_chunkDrawRanges.size(); ++drawRangeIndex) {
         const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
         if (drawRange.indexCount == 0) {
@@ -6643,9 +6648,9 @@ void Renderer::renderFrame(
                 0,
                 1,
                 &m_descriptorSets[m_currentFrame],
-                0,
-                nullptr
-            );
+            1,
+            &mvpDynamicOffset
+        );
             vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
@@ -6739,9 +6744,9 @@ void Renderer::renderFrame(
                     0,
                     1,
                     &m_descriptorSets[m_currentFrame],
-                    0,
-                    nullptr
-                );
+            1,
+            &mvpDynamicOffset
+        );
                 vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
                 vkCmdDrawIndexed(commandBuffer, previewIndexCount, 1, 0, 0, 0);
@@ -6786,9 +6791,9 @@ void Renderer::renderFrame(
                     0,
                     1,
                     &m_descriptorSets[m_currentFrame],
-                    0,
-                    nullptr
-                );
+            1,
+            &mvpDynamicOffset
+        );
                 vkCmdPushConstants(
                     commandBuffer,
                     m_pipelineLayout,
@@ -6881,8 +6886,8 @@ void Renderer::renderFrame(
             0,
             1,
             &m_descriptorSets[m_currentFrame],
-            0,
-            nullptr
+            1,
+            &mvpDynamicOffset
         );
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
