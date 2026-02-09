@@ -5,6 +5,9 @@
 #include <vector>
 
 #include <vulkan/vulkan.h>
+#if defined(VOXEL_HAS_VMA)
+#include <vk_mem_alloc.h>
+#endif
 
 namespace render {
 
@@ -26,7 +29,11 @@ struct BufferCreateDesc {
 // Future memory allocators (VMA or custom arenas) can replace this implementation.
 class BufferAllocator {
 public:
-    bool init(VkPhysicalDevice physicalDevice, VkDevice device);
+    bool init(VkPhysicalDevice physicalDevice, VkDevice device
+#if defined(VOXEL_HAS_VMA)
+        , VmaAllocator vmaAllocator
+#endif
+    );
     void shutdown();
 
     [[nodiscard]] BufferHandle createBuffer(const BufferCreateDesc& desc);
@@ -40,6 +47,9 @@ public:
 private:
     struct BufferSlot {
         VkBuffer buffer = VK_NULL_HANDLE;
+#if defined(VOXEL_HAS_VMA)
+        VmaAllocation allocation = VK_NULL_HANDLE;
+#endif
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkDeviceSize size = 0;
         bool inUse = false;
@@ -51,6 +61,9 @@ private:
 
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
     VkDevice m_device = VK_NULL_HANDLE;
+#if defined(VOXEL_HAS_VMA)
+    VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
+#endif
     std::vector<BufferSlot> m_slots;
     std::vector<uint32_t> m_freeSlots;
 };

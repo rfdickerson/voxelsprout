@@ -10,6 +10,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 proj;
     mat4 lightViewProj[4];
     vec4 shadowCascadeSplits;
+    vec4 shadowAtlasUvRects[4];
     vec4 sunDirectionIntensity;
     vec4 sunColorShadow;
     vec4 shIrradiance[9];
@@ -23,7 +24,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 skyConfig1; // sunDiskExponent, sunGlowExponent, reserved, reserved
 } camera;
 
-layout(set = 0, binding = 4) uniform sampler2DArrayShadow shadowMap;
+layout(set = 0, binding = 4) uniform sampler2DShadow shadowMap;
 layout(set = 0, binding = 1) uniform sampler2D diffuseAlbedo;
 
 layout(location = 0) out vec4 outColor;
@@ -199,18 +200,21 @@ float sampleShadowPcf(vec3 worldPosition, vec3 normal, int cascadeIndex, float n
     }
 
     const vec3 shadowNdc = shadowClip.xyz / shadowClip.w;
-    const vec2 shadowUv = (shadowNdc.xy * 0.5) + 0.5;
+    const vec2 shadowUvLocal = (shadowNdc.xy * 0.5) + 0.5;
+    const vec4 atlasUvRect = camera.shadowAtlasUvRects[cascadeIndex];
+    const vec2 shadowUv = atlasUvRect.xy + (shadowUvLocal * atlasUvRect.zw);
     const float shadowDepthRef = shadowNdc.z;
 
     if (
-        shadowUv.x <= 0.0 || shadowUv.x >= 1.0 ||
-        shadowUv.y <= 0.0 || shadowUv.y >= 1.0 ||
+        shadowUvLocal.x <= 0.0 || shadowUvLocal.x >= 1.0 ||
+        shadowUvLocal.y <= 0.0 || shadowUvLocal.y >= 1.0 ||
         shadowDepthRef <= 0.0 || shadowDepthRef >= 1.0
     ) {
         return 1.0;
     }
 
-    const vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0).xy);
+    const vec2 atlasTexelSize = 1.0 / vec2(textureSize(shadowMap, 0));
+    const vec2 texelSize = atlasTexelSize;
     const float texelScale = max(texelSize.x, texelSize.y);
 
     float bias =
@@ -230,7 +234,7 @@ float sampleShadowPcf(vec3 worldPosition, vec3 normal, int cascadeIndex, float n
             const float wx = float(kernelRadius + 1 - abs(x));
             const float wy = float(kernelRadius + 1 - abs(y));
             const float weight = wx * wy;
-            visibility += texture(shadowMap, vec4(uv, float(cascadeIndex), shadowDepthRef + bias)) * weight;
+            visibility += texture(shadowMap, vec3(uv, shadowDepthRef + bias)) * weight;
             weightSum += weight;
         }
     }

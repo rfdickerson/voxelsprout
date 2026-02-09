@@ -6,9 +6,16 @@
 
 namespace render {
 
-bool BufferAllocator::init(VkPhysicalDevice physicalDevice, VkDevice device) {
+bool BufferAllocator::init(VkPhysicalDevice physicalDevice, VkDevice device
+#if defined(VOXEL_HAS_VMA)
+    , VmaAllocator vmaAllocator
+#endif
+) {
     m_physicalDevice = physicalDevice;
     m_device = device;
+#if defined(VOXEL_HAS_VMA)
+    m_vmaAllocator = vmaAllocator;
+#endif
     m_slots.clear();
     m_freeSlots.clear();
 
@@ -21,8 +28,17 @@ void BufferAllocator::shutdown() {
     if (m_device != VK_NULL_HANDLE) {
         for (size_t i = 1; i < m_slots.size(); ++i) {
             if (m_slots[i].inUse) {
+#if defined(VOXEL_HAS_VMA)
+                if (m_vmaAllocator != VK_NULL_HANDLE && m_slots[i].allocation != VK_NULL_HANDLE) {
+                    vmaDestroyBuffer(m_vmaAllocator, m_slots[i].buffer, m_slots[i].allocation);
+                } else {
+                    vkDestroyBuffer(m_device, m_slots[i].buffer, nullptr);
+                    vkFreeMemory(m_device, m_slots[i].memory, nullptr);
+                }
+#else
                 vkDestroyBuffer(m_device, m_slots[i].buffer, nullptr);
                 vkFreeMemory(m_device, m_slots[i].memory, nullptr);
+#endif
                 m_slots[i] = {};
             }
         }
@@ -32,6 +48,9 @@ void BufferAllocator::shutdown() {
     m_freeSlots.clear();
     m_physicalDevice = VK_NULL_HANDLE;
     m_device = VK_NULL_HANDLE;
+#if defined(VOXEL_HAS_VMA)
+    m_vmaAllocator = VK_NULL_HANDLE;
+#endif
 }
 
 BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
@@ -52,55 +71,122 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
     }
 
     VkBuffer buffer = VK_NULL_HANDLE;
-    if (vkCreateBuffer(m_device, &bufferCreateInfo, nullptr, &buffer) != VK_SUCCESS) {
-        return kInvalidBufferHandle;
-    }
-
-    VkMemoryRequirements memoryRequirements{};
-    vkGetBufferMemoryRequirements(m_device, buffer, &memoryRequirements);
-
-    const uint32_t memoryTypeIndex = findMemoryTypeIndex(memoryRequirements.memoryTypeBits, desc.memoryProperties);
-    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-        vkDestroyBuffer(m_device, buffer, nullptr);
-        return kInvalidBufferHandle;
-    }
-
-    VkMemoryAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocateInfo.allocationSize = memoryRequirements.size;
-    allocateInfo.memoryTypeIndex = memoryTypeIndex;
-
     VkDeviceMemory memory = VK_NULL_HANDLE;
-    if (vkAllocateMemory(m_device, &allocateInfo, nullptr, &memory) != VK_SUCCESS) {
-        vkDestroyBuffer(m_device, buffer, nullptr);
-        return kInvalidBufferHandle;
-    }
+#if defined(VOXEL_HAS_VMA)
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        VmaAllocationCreateInfo allocationCreateInfo{};
+        allocationCreateInfo.flags = 0;
+        allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        if ((desc.memoryProperties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) {
+            allocationCreateInfo.flags |=
+                VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        }
+        allocationCreateInfo.requiredFlags = desc.memoryProperties;
+        if (vmaCreateBuffer(
+                m_vmaAllocator,
+                &bufferCreateInfo,
+                &allocationCreateInfo,
+                &buffer,
+                &allocation,
+                nullptr
+            ) != VK_SUCCESS) {
+            return kInvalidBufferHandle;
+        }
+    } else
+#endif
+    {
+        if (vkCreateBuffer(m_device, &bufferCreateInfo, nullptr, &buffer) != VK_SUCCESS) {
+            return kInvalidBufferHandle;
+        }
 
-    if (vkBindBufferMemory(m_device, buffer, memory, 0) != VK_SUCCESS) {
-        vkDestroyBuffer(m_device, buffer, nullptr);
-        vkFreeMemory(m_device, memory, nullptr);
-        return kInvalidBufferHandle;
-    }
+        VkMemoryRequirements memoryRequirements{};
+        vkGetBufferMemoryRequirements(m_device, buffer, &memoryRequirements);
 
-    if (desc.initialData != nullptr) {
-        void* mappedData = nullptr;
-        if (vkMapMemory(m_device, memory, 0, desc.size, 0, &mappedData) != VK_SUCCESS) {
+        const uint32_t memoryTypeIndex = findMemoryTypeIndex(memoryRequirements.memoryTypeBits, desc.memoryProperties);
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            vkDestroyBuffer(m_device, buffer, nullptr);
+            return kInvalidBufferHandle;
+        }
+
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+
+        if (vkAllocateMemory(m_device, &allocateInfo, nullptr, &memory) != VK_SUCCESS) {
+            vkDestroyBuffer(m_device, buffer, nullptr);
+            return kInvalidBufferHandle;
+        }
+
+        if (vkBindBufferMemory(m_device, buffer, memory, 0) != VK_SUCCESS) {
             vkDestroyBuffer(m_device, buffer, nullptr);
             vkFreeMemory(m_device, memory, nullptr);
             return kInvalidBufferHandle;
         }
+    }
+
+    if (desc.initialData != nullptr) {
+        void* mappedData = nullptr;
+        const bool mapped =
+#if defined(VOXEL_HAS_VMA)
+            (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE)
+                ? (vmaMapMemory(m_vmaAllocator, allocation, &mappedData) == VK_SUCCESS)
+                : (vkMapMemory(m_device, memory, 0, desc.size, 0, &mappedData) == VK_SUCCESS);
+#else
+            (vkMapMemory(m_device, memory, 0, desc.size, 0, &mappedData) == VK_SUCCESS);
+#endif
+        if (!mapped) {
+#if defined(VOXEL_HAS_VMA)
+            if (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
+                vmaDestroyBuffer(m_vmaAllocator, buffer, allocation);
+            } else {
+                vkDestroyBuffer(m_device, buffer, nullptr);
+                vkFreeMemory(m_device, memory, nullptr);
+            }
+#else
+            vkDestroyBuffer(m_device, buffer, nullptr);
+            vkFreeMemory(m_device, memory, nullptr);
+#endif
+            return kInvalidBufferHandle;
+        }
         std::memcpy(mappedData, desc.initialData, static_cast<size_t>(desc.size));
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
+            vmaUnmapMemory(m_vmaAllocator, allocation);
+        } else {
+            vkUnmapMemory(m_device, memory);
+        }
+#else
         vkUnmapMemory(m_device, memory);
+#endif
     }
 
     uint32_t slotIndex = 0;
     if (!m_freeSlots.empty()) {
         slotIndex = m_freeSlots.back();
         m_freeSlots.pop_back();
-        m_slots[slotIndex] = {buffer, memory, desc.size, true};
+        m_slots[slotIndex] = {
+            buffer,
+#if defined(VOXEL_HAS_VMA)
+            allocation,
+#endif
+            memory,
+            desc.size,
+            true
+        };
     } else {
         slotIndex = static_cast<uint32_t>(m_slots.size());
-        m_slots.push_back({buffer, memory, desc.size, true});
+        m_slots.push_back({
+            buffer,
+#if defined(VOXEL_HAS_VMA)
+            allocation,
+#endif
+            memory,
+            desc.size,
+            true
+        });
     }
 
     return slotIndex;
@@ -112,8 +198,17 @@ void BufferAllocator::destroyBuffer(BufferHandle handle) {
         return;
     }
 
+#if defined(VOXEL_HAS_VMA)
+    if (m_vmaAllocator != VK_NULL_HANDLE && slot->allocation != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(m_vmaAllocator, slot->buffer, slot->allocation);
+    } else {
+        vkDestroyBuffer(m_device, slot->buffer, nullptr);
+        vkFreeMemory(m_device, slot->memory, nullptr);
+    }
+#else
     vkDestroyBuffer(m_device, slot->buffer, nullptr);
     vkFreeMemory(m_device, slot->memory, nullptr);
+#endif
 
     *slot = {};
     m_freeSlots.push_back(handle);
@@ -136,9 +231,22 @@ void* BufferAllocator::mapBuffer(BufferHandle handle, VkDeviceSize offset, VkDev
     }
 
     void* mapped = nullptr;
-    if (vkMapMemory(m_device, slot->memory, offset, size, 0, &mapped) != VK_SUCCESS) {
+    const bool mappedOk =
+#if defined(VOXEL_HAS_VMA)
+        (m_vmaAllocator != VK_NULL_HANDLE && slot->allocation != VK_NULL_HANDLE)
+            ? (vmaMapMemory(m_vmaAllocator, slot->allocation, &mapped) == VK_SUCCESS)
+            : (vkMapMemory(m_device, slot->memory, offset, size, 0, &mapped) == VK_SUCCESS);
+#else
+        (vkMapMemory(m_device, slot->memory, offset, size, 0, &mapped) == VK_SUCCESS);
+#endif
+    if (!mappedOk) {
         return nullptr;
     }
+#if defined(VOXEL_HAS_VMA)
+    if (m_vmaAllocator != VK_NULL_HANDLE && slot->allocation != VK_NULL_HANDLE) {
+        return static_cast<uint8_t*>(mapped) + offset;
+    }
+#endif
     return mapped;
 }
 
@@ -147,7 +255,15 @@ void BufferAllocator::unmapBuffer(BufferHandle handle) {
     if (slot == nullptr) {
         return;
     }
+#if defined(VOXEL_HAS_VMA)
+    if (m_vmaAllocator != VK_NULL_HANDLE && slot->allocation != VK_NULL_HANDLE) {
+        vmaUnmapMemory(m_vmaAllocator, slot->allocation);
+    } else {
+        vkUnmapMemory(m_device, slot->memory);
+    }
+#else
     vkUnmapMemory(m_device, slot->memory);
+#endif
 }
 
 uint32_t BufferAllocator::findMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredProperties) const {

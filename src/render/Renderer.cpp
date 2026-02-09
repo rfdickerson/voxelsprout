@@ -41,6 +41,19 @@ constexpr std::array<const char*, 5> kDeviceExtensions = {
     VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
 };
 constexpr uint32_t kShadowCascadeCount = 4;
+constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {4096u, 2048u, 2048u, 1024u};
+struct ShadowAtlasRect {
+    uint32_t x;
+    uint32_t y;
+    uint32_t size;
+};
+constexpr std::array<ShadowAtlasRect, kShadowCascadeCount> kShadowAtlasRects = {
+    ShadowAtlasRect{0u, 0u, 4096u},
+    ShadowAtlasRect{4096u, 0u, 2048u},
+    ShadowAtlasRect{6144u, 0u, 2048u},
+    ShadowAtlasRect{4096u, 2048u, 1024u}
+};
+constexpr uint32_t kShadowAtlasSize = 8192u;
 constexpr float kPipeTransferHalfExtent = 0.58f;
 constexpr float kPipeMinRadius = 0.02f;
 constexpr float kPipeMaxRadius = 0.5f;
@@ -65,6 +78,7 @@ struct alignas(16) CameraUniform {
     float proj[16];
     float lightViewProj[kShadowCascadeCount][16];
     float shadowCascadeSplits[4];
+    float shadowAtlasUvRects[kShadowCascadeCount][4];
     float sunDirectionIntensity[4];
     float sunColorShadow[4];
     float shIrradiance[9][4];
@@ -1442,7 +1456,14 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
-    if (!m_bufferAllocator.init(m_physicalDevice, m_device)) {
+    if (!m_bufferAllocator.init(
+            m_physicalDevice,
+            m_device
+#if defined(VOXEL_HAS_VMA)
+            ,
+            m_vmaAllocator
+#endif
+        )) {
         std::cerr << "[render] init failed at buffer allocator init\n";
         shutdown();
         return false;
@@ -1798,6 +1819,22 @@ bool Renderer::createLogicalDevice() {
         deviceProperties.limits.minUniformBufferOffsetAlignment,
         static_cast<VkDeviceSize>(16)
     );
+
+#if defined(VOXEL_HAS_VMA)
+    if (m_vmaAllocator == VK_NULL_HANDLE) {
+        VmaAllocatorCreateInfo allocatorCreateInfo{};
+        allocatorCreateInfo.flags = 0;
+        allocatorCreateInfo.physicalDevice = m_physicalDevice;
+        allocatorCreateInfo.device = m_device;
+        allocatorCreateInfo.instance = m_instance;
+        allocatorCreateInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+        const VkResult allocatorResult = vmaCreateAllocator(&allocatorCreateInfo, &m_vmaAllocator);
+        if (allocatorResult != VK_SUCCESS) {
+            logVkFailure("vmaCreateAllocator", allocatorResult);
+            return false;
+        }
+    }
+#endif
     return true;
 }
 
@@ -2312,15 +2349,9 @@ bool Renderer::createDiffuseTextureResources() {
 }
 
 bool Renderer::createShadowResources() {
-    bool hasAllLayerViews = true;
-    for (VkImageView layerView : m_shadowDepthLayerViews) {
-        hasAllLayerViews = hasAllLayerViews && (layerView != VK_NULL_HANDLE);
-    }
     if (
         m_shadowDepthImage != VK_NULL_HANDLE &&
-        m_shadowDepthMemory != VK_NULL_HANDLE &&
         m_shadowDepthImageView != VK_NULL_HANDLE &&
-        hasAllLayerViews &&
         m_shadowDepthSampler != VK_NULL_HANDLE
     ) {
         return true;
@@ -2335,83 +2366,89 @@ bool Renderer::createShadowResources() {
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
     imageCreateInfo.format = m_shadowDepthFormat;
-    imageCreateInfo.extent.width = kShadowMapSize;
-    imageCreateInfo.extent.height = kShadowMapSize;
+    imageCreateInfo.extent.width = kShadowAtlasSize;
+    imageCreateInfo.extent.height = kShadowAtlasSize;
     imageCreateInfo.extent.depth = 1;
     imageCreateInfo.mipLevels = 1;
-    imageCreateInfo.arrayLayers = kShadowCascadeCount;
+    imageCreateInfo.arrayLayers = 1;
     imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+#if defined(VOXEL_HAS_VMA)
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        VmaAllocationCreateInfo allocationCreateInfo{};
+        allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        const VkResult imageResult = vmaCreateImage(
+            m_vmaAllocator,
+            &imageCreateInfo,
+            &allocationCreateInfo,
+            &m_shadowDepthImage,
+            &m_shadowDepthAllocation,
+            nullptr
+        );
+        if (imageResult != VK_SUCCESS) {
+            logVkFailure("vmaCreateImage(shadowDepth)", imageResult);
+            return false;
+        }
+    } else
+#endif
+    {
+        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_shadowDepthImage);
+        if (imageResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(shadowDepth)", imageResult);
+            return false;
+        }
 
-    const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_shadowDepthImage);
-    if (imageResult != VK_SUCCESS) {
-        logVkFailure("vkCreateImage(shadowDepth)", imageResult);
-        return false;
-    }
+        VkMemoryRequirements memoryRequirements{};
+        vkGetImageMemoryRequirements(m_device, m_shadowDepthImage, &memoryRequirements);
+        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice,
+            memoryRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        );
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            std::cerr << "[render] no memory type for shadow depth image\n";
+            destroyShadowResources();
+            return false;
+        }
 
-    VkMemoryRequirements memoryRequirements{};
-    vkGetImageMemoryRequirements(m_device, m_shadowDepthImage, &memoryRequirements);
-    const uint32_t memoryTypeIndex = findMemoryTypeIndex(
-        m_physicalDevice,
-        memoryRequirements.memoryTypeBits,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    );
-    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-        std::cerr << "[render] no memory type for shadow depth image\n";
-        destroyShadowResources();
-        return false;
-    }
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_shadowDepthMemory);
+        if (allocResult != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(shadowDepth)", allocResult);
+            destroyShadowResources();
+            return false;
+        }
 
-    VkMemoryAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocateInfo.allocationSize = memoryRequirements.size;
-    allocateInfo.memoryTypeIndex = memoryTypeIndex;
-    const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_shadowDepthMemory);
-    if (allocResult != VK_SUCCESS) {
-        logVkFailure("vkAllocateMemory(shadowDepth)", allocResult);
-        destroyShadowResources();
-        return false;
-    }
-
-    const VkResult bindResult = vkBindImageMemory(m_device, m_shadowDepthImage, m_shadowDepthMemory, 0);
-    if (bindResult != VK_SUCCESS) {
-        logVkFailure("vkBindImageMemory(shadowDepth)", bindResult);
-        destroyShadowResources();
-        return false;
+        const VkResult bindResult = vkBindImageMemory(m_device, m_shadowDepthImage, m_shadowDepthMemory, 0);
+        if (bindResult != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(shadowDepth)", bindResult);
+            destroyShadowResources();
+            return false;
+        }
     }
 
     VkImageViewCreateInfo viewCreateInfo{};
     viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewCreateInfo.image = m_shadowDepthImage;
-    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewCreateInfo.format = m_shadowDepthFormat;
     viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
     viewCreateInfo.subresourceRange.baseMipLevel = 0;
     viewCreateInfo.subresourceRange.levelCount = 1;
     viewCreateInfo.subresourceRange.baseArrayLayer = 0;
-    viewCreateInfo.subresourceRange.layerCount = kShadowCascadeCount;
+    viewCreateInfo.subresourceRange.layerCount = 1;
     const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_shadowDepthImageView);
     if (viewResult != VK_SUCCESS) {
         logVkFailure("vkCreateImageView(shadowDepth)", viewResult);
         destroyShadowResources();
         return false;
-    }
-
-    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-        VkImageViewCreateInfo layerViewCreateInfo = viewCreateInfo;
-        layerViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        layerViewCreateInfo.subresourceRange.baseArrayLayer = cascadeIndex;
-        layerViewCreateInfo.subresourceRange.layerCount = 1;
-        const VkResult layerViewResult =
-            vkCreateImageView(m_device, &layerViewCreateInfo, nullptr, &m_shadowDepthLayerViews[cascadeIndex]);
-        if (layerViewResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImageView(shadowDepthLayer)", layerViewResult);
-            destroyShadowResources();
-            return false;
-        }
     }
 
     VkSamplerCreateInfo samplerCreateInfo{};
@@ -2438,7 +2475,7 @@ bool Renderer::createShadowResources() {
     }
 
     m_shadowDepthInitialized = false;
-    std::cerr << "[render] shadow resources ready (" << kShadowMapSize << "x" << kShadowMapSize
+    std::cerr << "[render] shadow resources ready (atlas " << kShadowAtlasSize << "x" << kShadowAtlasSize
               << ", cascades=" << kShadowCascadeCount << ")\n";
     return true;
 }
@@ -5433,7 +5470,7 @@ void Renderer::renderFrame(
     }
     const math::Vector3 sunColor = computeSunColor(m_skyDebugSettings, sunDirection);
 
-    constexpr float kCascadeLambda = 0.62f;
+    constexpr float kCascadeLambda = 0.70f;
     constexpr float kCascadeSplitQuantization = 0.5f;
     constexpr float kCascadeSplitUpdateThreshold = 0.5f;
     std::array<float, kShadowCascadeCount> cascadeDistances{};
@@ -5475,7 +5512,7 @@ void Renderer::renderFrame(
         }
         const float cascadeRadius = m_shadowStableCascadeRadii[cascadeIndex];
         const float orthoWidth = 2.0f * cascadeRadius;
-        const float texelSize = orthoWidth / static_cast<float>(kShadowMapSize);
+        const float texelSize = orthoWidth / static_cast<float>(kShadowCascadeResolution[cascadeIndex]);
 
         // Keep the light farther than the cascade sphere but avoid overly large depth spans.
         const float lightDistance = (cascadeRadius * 1.9f) + 48.0f;
@@ -5541,6 +5578,11 @@ void Renderer::renderFrame(
             sizeof(mvpUniform.lightViewProj[cascadeIndex])
         );
         mvpUniform.shadowCascadeSplits[cascadeIndex] = cascadeDistances[cascadeIndex];
+        const ShadowAtlasRect atlasRect = kShadowAtlasRects[cascadeIndex];
+        mvpUniform.shadowAtlasUvRects[cascadeIndex][0] = static_cast<float>(atlasRect.x) / static_cast<float>(kShadowAtlasSize);
+        mvpUniform.shadowAtlasUvRects[cascadeIndex][1] = static_cast<float>(atlasRect.y) / static_cast<float>(kShadowAtlasSize);
+        mvpUniform.shadowAtlasUvRects[cascadeIndex][2] = static_cast<float>(atlasRect.size) / static_cast<float>(kShadowAtlasSize);
+        mvpUniform.shadowAtlasUvRects[cascadeIndex][3] = static_cast<float>(atlasRect.size) / static_cast<float>(kShadowAtlasSize);
     }
     mvpUniform.sunDirectionIntensity[0] = sunDirection.x;
     mvpUniform.sunDirectionIntensity[1] = sunDirection.y;
@@ -5823,25 +5865,12 @@ void Renderer::renderFrame(
         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_ASPECT_DEPTH_BIT,
         0,
-        kShadowCascadeCount
+        1
     );
 
     VkClearValue shadowDepthClearValue{};
     shadowDepthClearValue.depthStencil.depth = 0.0f;
     shadowDepthClearValue.depthStencil.stencil = 0;
-
-    VkViewport shadowViewport{};
-    shadowViewport.x = 0.0f;
-    shadowViewport.y = 0.0f;
-    shadowViewport.width = static_cast<float>(kShadowMapSize);
-    shadowViewport.height = static_cast<float>(kShadowMapSize);
-    shadowViewport.minDepth = 0.0f;
-    shadowViewport.maxDepth = 1.0f;
-    vkCmdSetViewport(commandBuffer, 0, 1, &shadowViewport);
-
-    VkRect2D shadowScissor{};
-    shadowScissor.offset = {0, 0};
-    shadowScissor.extent = {kShadowMapSize, kShadowMapSize};
 
     if (m_shadowPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
@@ -5857,9 +5886,25 @@ void Renderer::renderFrame(
         );
 
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            const ShadowAtlasRect atlasRect = kShadowAtlasRects[cascadeIndex];
+            VkViewport shadowViewport{};
+            shadowViewport.x = static_cast<float>(atlasRect.x);
+            shadowViewport.y = static_cast<float>(atlasRect.y);
+            shadowViewport.width = static_cast<float>(atlasRect.size);
+            shadowViewport.height = static_cast<float>(atlasRect.size);
+            shadowViewport.minDepth = 0.0f;
+            shadowViewport.maxDepth = 1.0f;
+
+            VkRect2D shadowScissor{};
+            shadowScissor.offset = {
+                static_cast<int32_t>(atlasRect.x),
+                static_cast<int32_t>(atlasRect.y)
+            };
+            shadowScissor.extent = {atlasRect.size, atlasRect.size};
+
             VkRenderingAttachmentInfo shadowDepthAttachment{};
             shadowDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            shadowDepthAttachment.imageView = m_shadowDepthLayerViews[cascadeIndex];
+            shadowDepthAttachment.imageView = m_shadowDepthImageView;
             shadowDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
             shadowDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             shadowDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -5867,8 +5912,8 @@ void Renderer::renderFrame(
 
             VkRenderingInfo shadowRenderingInfo{};
             shadowRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-            shadowRenderingInfo.renderArea.offset = {0, 0};
-            shadowRenderingInfo.renderArea.extent = {kShadowMapSize, kShadowMapSize};
+            shadowRenderingInfo.renderArea.offset = shadowScissor.offset;
+            shadowRenderingInfo.renderArea.extent = shadowScissor.extent;
             shadowRenderingInfo.layerCount = 1;
             shadowRenderingInfo.colorAttachmentCount = 0;
             shadowRenderingInfo.pDepthAttachment = &shadowDepthAttachment;
@@ -6016,7 +6061,7 @@ void Renderer::renderFrame(
         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
         VK_IMAGE_ASPECT_DEPTH_BIT,
         0,
-        kShadowCascadeCount
+        1
     );
 
     const VkExtent2D aoExtent = {
@@ -7229,18 +7274,21 @@ void Renderer::destroyShadowResources() {
         vkDestroySampler(m_device, m_shadowDepthSampler, nullptr);
         m_shadowDepthSampler = VK_NULL_HANDLE;
     }
-    for (VkImageView& layerView : m_shadowDepthLayerViews) {
-        if (layerView != VK_NULL_HANDLE) {
-            vkDestroyImageView(m_device, layerView, nullptr);
-            layerView = VK_NULL_HANDLE;
-        }
-    }
     if (m_shadowDepthImageView != VK_NULL_HANDLE) {
         vkDestroyImageView(m_device, m_shadowDepthImageView, nullptr);
         m_shadowDepthImageView = VK_NULL_HANDLE;
     }
     if (m_shadowDepthImage != VK_NULL_HANDLE) {
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE && m_shadowDepthAllocation != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, m_shadowDepthImage, m_shadowDepthAllocation);
+            m_shadowDepthAllocation = VK_NULL_HANDLE;
+        } else {
+            vkDestroyImage(m_device, m_shadowDepthImage, nullptr);
+        }
+#else
         vkDestroyImage(m_device, m_shadowDepthImage, nullptr);
+#endif
         m_shadowDepthImage = VK_NULL_HANDLE;
     }
     if (m_shadowDepthMemory != VK_NULL_HANDLE) {
@@ -7365,6 +7413,12 @@ void Renderer::shutdown() {
         m_descriptorSets.fill(VK_NULL_HANDLE);
         destroySwapchain();
         m_bufferAllocator.shutdown();
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE) {
+            vmaDestroyAllocator(m_vmaAllocator);
+            m_vmaAllocator = VK_NULL_HANDLE;
+        }
+#endif
 
         vkDestroyDevice(m_device, nullptr);
         m_device = VK_NULL_HANDLE;

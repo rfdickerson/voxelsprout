@@ -11,6 +11,9 @@
 #include <vector>
 
 #include <vulkan/vulkan.h>
+#if defined(VOXEL_HAS_VMA)
+#include <vk_mem_alloc.h>
+#endif
 
 struct GLFWwindow;
 
@@ -103,7 +106,7 @@ public:
 private:
     static constexpr uint32_t kMaxFramesInFlight = 2;
     static constexpr uint32_t kShadowCascadeCount = 4;
-    static constexpr uint32_t kShadowMapSize = 2048;
+    static constexpr uint32_t kShadowAtlasSize = 8192;
 
     struct FrameResources {
         // Per-frame command pool to allocate fresh command buffers every frame.
@@ -252,11 +255,14 @@ private:
     VkSampler m_normalDepthSampler = VK_NULL_HANDLE;
     VkSampler m_ssaoSampler = VK_NULL_HANDLE;
     VkImage m_shadowDepthImage = VK_NULL_HANDLE;
-    VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;
     VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
-    std::array<VkImageView, kShadowCascadeCount> m_shadowDepthLayerViews{};
     VkSampler m_shadowDepthSampler = VK_NULL_HANDLE;
     bool m_shadowDepthInitialized = false;
+#if defined(VOXEL_HAS_VMA)
+    VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
+    VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
+#endif
+    VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;
     std::vector<uint64_t> m_swapchainImageTimelineValues;
     // One render-finished semaphore per swapchain image avoids reusing a semaphore
     // while presentation may still be waiting on it.
