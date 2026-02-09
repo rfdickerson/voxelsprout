@@ -39,6 +39,8 @@ private:
     struct InteractionRaycastResult {
         bool hit = false;
         bool hitPipe = false;
+        bool hitBelt = false;
+        bool hitTrack = false;
         bool hitSolidVoxel = false;
         int x = 0;
         int y = 0;
@@ -85,19 +87,45 @@ private:
         int& outAxisY,
         int& outAxisZ
     ) const;
+    [[nodiscard]] bool computeBeltPlacementFromInteractionRaycast(
+        const InteractionRaycastResult& raycast,
+        int& outX,
+        int& outY,
+        int& outZ,
+        int& outAxisX,
+        int& outAxisY,
+        int& outAxisZ
+    ) const;
+    [[nodiscard]] bool computeTrackPlacementFromInteractionRaycast(
+        const InteractionRaycastResult& raycast,
+        int& outX,
+        int& outY,
+        int& outZ,
+        int& outAxisX,
+        int& outAxisY,
+        int& outAxisZ
+    ) const;
     [[nodiscard]] bool isWorldVoxelInBounds(int x, int y, int z) const;
     void cycleSelectedHotbar(int direction);
     void selectHotbarSlot(int hotbarIndex);
     [[nodiscard]] bool isPipeHotbarSelected() const;
+    [[nodiscard]] bool isConveyorHotbarSelected() const;
+    [[nodiscard]] bool isTrackHotbarSelected() const;
     [[nodiscard]] world::Voxel selectedPlaceVoxel() const;
     [[nodiscard]] bool computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const;
     [[nodiscard]] bool applyVoxelEdit(int targetX, int targetY, int targetZ, world::Voxel voxel, std::size_t& outEditedChunkIndex);
     [[nodiscard]] bool isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const;
+    [[nodiscard]] bool isBeltAtWorld(int worldX, int worldY, int worldZ, std::size_t* outBeltIndex) const;
+    [[nodiscard]] bool isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTrackIndex) const;
     void regenerateWorld();
     [[nodiscard]] bool tryPlaceVoxelFromCameraRay(std::size_t& outEditedChunkIndex);
     [[nodiscard]] bool tryRemoveVoxelFromCameraRay(std::size_t& outEditedChunkIndex);
     [[nodiscard]] bool tryPlacePipeFromCameraRay();
     [[nodiscard]] bool tryRemovePipeFromCameraRay();
+    [[nodiscard]] bool tryPlaceBeltFromCameraRay();
+    [[nodiscard]] bool tryRemoveBeltFromCameraRay();
+    [[nodiscard]] bool tryPlaceTrackFromCameraRay();
+    [[nodiscard]] bool tryRemoveTrackFromCameraRay();
 
     struct CameraState {
         float x = 0.0f;

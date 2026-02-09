@@ -46,6 +46,10 @@ constexpr float kPipeMinRadius = 0.02f;
 constexpr float kPipeMaxRadius = 0.5f;
 constexpr float kPipeBranchRadiusBoost = 0.05f;
 constexpr float kPipeMaxEndExtension = 0.49f;
+constexpr float kBeltRadius = 0.49f;
+constexpr float kTrackRadius = 0.38f;
+constexpr math::Vector3 kBeltTint{0.78f, 0.62f, 0.18f};
+constexpr math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
 
 #if defined(VOXEL_HAS_IMGUI)
 void imguiCheckVkResult(VkResult result) {
@@ -271,6 +275,34 @@ core::Dir6 dominantAxisDir6(const math::Vector3& direction) {
         return normalized.y >= 0.0f ? core::Dir6::PosY : core::Dir6::NegY;
     }
     return normalized.z >= 0.0f ? core::Dir6::PosZ : core::Dir6::NegZ;
+}
+
+math::Vector3 beltDirectionAxis(sim::BeltDirection direction) {
+    switch (direction) {
+    case sim::BeltDirection::East:
+        return math::Vector3{1.0f, 0.0f, 0.0f};
+    case sim::BeltDirection::West:
+        return math::Vector3{-1.0f, 0.0f, 0.0f};
+    case sim::BeltDirection::South:
+        return math::Vector3{0.0f, 0.0f, 1.0f};
+    case sim::BeltDirection::North:
+    default:
+        return math::Vector3{0.0f, 0.0f, -1.0f};
+    }
+}
+
+math::Vector3 trackDirectionAxis(sim::TrackDirection direction) {
+    switch (direction) {
+    case sim::TrackDirection::East:
+        return math::Vector3{1.0f, 0.0f, 0.0f};
+    case sim::TrackDirection::West:
+        return math::Vector3{-1.0f, 0.0f, 0.0f};
+    case sim::TrackDirection::South:
+        return math::Vector3{0.0f, 0.0f, 1.0f};
+    case sim::TrackDirection::North:
+    default:
+        return math::Vector3{0.0f, 0.0f, -1.0f};
+    }
 }
 
 bool dirSharesAxis(core::Dir6 lhs, core::Dir6 rhs) {
@@ -5754,11 +5786,14 @@ void Renderer::renderFrame(
 
     uint32_t pipeInstanceCount = 0;
     std::optional<RingBufferSlice> pipeInstanceSliceOpt = std::nullopt;
-    if (m_pipeIndexCount > 0 && simulation.pipeCount() > 0) {
+    if (m_pipeIndexCount > 0) {
         const std::vector<sim::Pipe>& pipes = simulation.pipes();
-        const std::vector<PipeEndpointState> endpointStates = buildPipeEndpointStates(pipes);
+        const std::vector<sim::Belt>& belts = simulation.belts();
+        const std::vector<sim::Track>& tracks = simulation.tracks();
+        const std::vector<PipeEndpointState> endpointStates =
+            pipes.empty() ? std::vector<PipeEndpointState>{} : buildPipeEndpointStates(pipes);
         std::vector<PipeInstance> instances;
-        instances.reserve(pipes.size());
+        instances.reserve(pipes.size() + belts.size() + tracks.size());
         for (std::size_t pipeIndex = 0; pipeIndex < pipes.size(); ++pipeIndex) {
             const sim::Pipe& pipe = pipes[pipeIndex];
             const PipeEndpointState& endpointState = endpointStates[pipeIndex];
@@ -5774,9 +5809,53 @@ void Renderer::renderFrame(
             instance.tint[0] = std::clamp(pipe.tint.x, 0.0f, 1.0f);
             instance.tint[1] = std::clamp(pipe.tint.y, 0.0f, 1.0f);
             instance.tint[2] = std::clamp(pipe.tint.z, 0.0f, 1.0f);
-            instance.tint[3] = 0.0f;
+            instance.tint[3] = 0.0f; // style 0 = pipe
             instance.extensions[0] = endpointState.startExtension;
             instance.extensions[1] = endpointState.endExtension;
+            instance.extensions[2] = 0.0f;
+            instance.extensions[3] = 0.0f;
+            instances.push_back(instance);
+        }
+
+        for (const sim::Belt& belt : belts) {
+            PipeInstance instance{};
+            instance.originLength[0] = static_cast<float>(belt.x);
+            instance.originLength[1] = static_cast<float>(belt.y);
+            instance.originLength[2] = static_cast<float>(belt.z);
+            instance.originLength[3] = 1.0f;
+            const math::Vector3 axis = beltDirectionAxis(belt.direction);
+            instance.axisRadius[0] = axis.x;
+            instance.axisRadius[1] = axis.y;
+            instance.axisRadius[2] = axis.z;
+            instance.axisRadius[3] = kBeltRadius;
+            instance.tint[0] = kBeltTint.x;
+            instance.tint[1] = kBeltTint.y;
+            instance.tint[2] = kBeltTint.z;
+            instance.tint[3] = 1.0f; // style 1 = conveyor
+            instance.extensions[0] = 0.0f;
+            instance.extensions[1] = 0.0f;
+            instance.extensions[2] = 0.0f;
+            instance.extensions[3] = 0.0f;
+            instances.push_back(instance);
+        }
+
+        for (const sim::Track& track : tracks) {
+            PipeInstance instance{};
+            instance.originLength[0] = static_cast<float>(track.x);
+            instance.originLength[1] = static_cast<float>(track.y);
+            instance.originLength[2] = static_cast<float>(track.z);
+            instance.originLength[3] = 1.0f;
+            const math::Vector3 axis = trackDirectionAxis(track.direction);
+            instance.axisRadius[0] = axis.x;
+            instance.axisRadius[1] = axis.y;
+            instance.axisRadius[2] = axis.z;
+            instance.axisRadius[3] = kTrackRadius;
+            instance.tint[0] = kTrackTint.x;
+            instance.tint[1] = kTrackTint.y;
+            instance.tint[2] = kTrackTint.z;
+            instance.tint[3] = 2.0f; // style 2 = track
+            instance.extensions[0] = 0.0f;
+            instance.extensions[1] = 0.0f;
             instance.extensions[2] = 0.0f;
             instance.extensions[3] = 0.0f;
             instances.push_back(instance);
@@ -6518,7 +6597,7 @@ void Renderer::renderFrame(
         previewInstance.axisRadius[0] = previewAxis.x;
         previewInstance.axisRadius[1] = previewAxis.y;
         previewInstance.axisRadius[2] = previewAxis.z;
-        previewInstance.axisRadius[3] = 0.45f;
+        previewInstance.axisRadius[3] = std::clamp(preview.pipeRadius, 0.02f, 0.5f);
         if (preview.mode == VoxelPreview::Mode::Remove) {
             previewInstance.tint[0] = 1.0f;
             previewInstance.tint[1] = 0.32f;
@@ -6528,7 +6607,7 @@ void Renderer::renderFrame(
             previewInstance.tint[1] = 0.95f;
             previewInstance.tint[2] = 1.0f;
         }
-        previewInstance.tint[3] = 0.0f;
+        previewInstance.tint[3] = std::clamp(preview.pipeStyleId, 0.0f, 2.0f);
         previewInstance.extensions[0] = 0.0f;
         previewInstance.extensions[1] = 0.0f;
         previewInstance.extensions[2] = 0.0f;

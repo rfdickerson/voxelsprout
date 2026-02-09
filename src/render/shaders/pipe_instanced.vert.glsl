@@ -31,6 +31,7 @@ layout(location = 1) out vec3 outWorldNormal;
 layout(location = 2) out vec3 outTint;
 layout(location = 3) out float outVertexAo;
 layout(location = 4) out float outLocalAlong;
+layout(location = 5) out float outStyle;
 
 void main() {
     vec3 axis = normalize(inAxisRadius.xyz);
@@ -75,6 +76,7 @@ void main() {
     outWorldNormal = worldNormal;
     outTint = inTint.rgb;
     outLocalAlong = localPos.y;
+    outStyle = inTint.w;
     const float sideFactor = 1.0 - abs(localNormal.y);
     const float endFactor = abs((localPos.y * 2.0) - 1.0);
     const float seamOcclusion = sideFactor * endFactor;

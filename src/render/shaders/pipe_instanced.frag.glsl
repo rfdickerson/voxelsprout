@@ -5,6 +5,7 @@ layout(location = 1) in vec3 inWorldNormal;
 layout(location = 2) in vec3 inTint;
 layout(location = 3) in float inVertexAo;
 layout(location = 4) in float inLocalAlong;
+layout(location = 5) in float inStyle;
 
 layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 mvp;
@@ -72,22 +73,44 @@ void main() {
     const vec3 ambient = ambientIrradiance * (0.26 * vertexAo);
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
 
-    // Keep endcaps metal-tinted while the narrow transfer segment reads as bright liquid.
-    const float transferStart = 0.26;
-    const float transferEnd = 0.74;
-    const float transferEdge = 0.03;
-    const float liquidMask =
-        smoothstep(transferStart, transferStart + transferEdge, inLocalAlong) *
-        (1.0 - smoothstep(transferEnd - transferEdge, transferEnd, inLocalAlong));
-    const vec3 liquidBaseColor = vec3(1.0, 0.08, 0.78);
     const float flowTime = camera.skyConfig1.z;
     const float flowSpeed = max(camera.skyConfig1.w, 0.0);
     const float flowCoord = (inLocalAlong * 6.5) - (flowTime * flowSpeed);
     const float flowBand = 1.0 - abs((fract(flowCoord) * 2.0) - 1.0);
     const float flowHighlight = pow(clamp(flowBand, 0.0, 1.0), 3.0);
-    const vec3 liquidColor = liquidBaseColor * (0.82 + (0.48 * flowHighlight));
-    const vec3 surfaceTint = mix(inTint, liquidColor, liquidMask);
 
-    const vec3 lit = ((ambient + directSun) * surfaceTint) + (liquidColor * ((0.24 + (0.42 * flowHighlight)) * liquidMask));
+    const float stylePipe = 1.0 - step(0.5, inStyle);
+    const float styleConveyor = step(0.5, inStyle) * (1.0 - step(1.5, inStyle));
+    const float styleTrack = step(1.5, inStyle);
+
+    // Pipe style: bright moving liquid through the center with endcaps left as solid shell.
+    const float transferStart = 0.26;
+    const float transferEnd = 0.74;
+    const float transferEdge = 0.03;
+    const float pipeLiquidMask =
+        smoothstep(transferStart, transferStart + transferEdge, inLocalAlong) *
+        (1.0 - smoothstep(transferEnd - transferEdge, transferEnd, inLocalAlong));
+    const vec3 liquidBaseColor = vec3(1.0, 0.08, 0.78);
+    const vec3 liquidColor = liquidBaseColor * (0.82 + (0.48 * flowHighlight));
+    const float liquidMask = pipeLiquidMask * stylePipe;
+
+    // Conveyor style: simple moving highlight stripe along belt direction.
+    const float conveyorBand = 1.0 - abs((fract((inLocalAlong * 4.0) - (flowTime * flowSpeed * 0.8)) * 2.0) - 1.0);
+    const float conveyorHighlight = pow(clamp(conveyorBand, 0.0, 1.0), 2.2) * styleConveyor;
+    const vec3 conveyorColor = inTint * (1.0 + (0.30 * conveyorHighlight));
+
+    // Track style: subtle tie rhythm.
+    const float tiePulse = step(0.68, fract(inLocalAlong * 6.0));
+    const float tieDarken = mix(1.0, 0.82, tiePulse * styleTrack);
+    const vec3 trackColor = inTint * tieDarken;
+
+    vec3 surfaceTint = inTint;
+    surfaceTint = mix(surfaceTint, conveyorColor, styleConveyor);
+    surfaceTint = mix(surfaceTint, trackColor, styleTrack);
+    surfaceTint = mix(surfaceTint, liquidColor, liquidMask);
+
+    const vec3 lit =
+        ((ambient + directSun) * surfaceTint) +
+        (liquidColor * ((0.24 + (0.42 * flowHighlight)) * liquidMask));
     outColor = vec4(lit, 1.0);
 }

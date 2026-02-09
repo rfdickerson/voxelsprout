@@ -49,6 +49,8 @@ struct VoxelPreview {
     float pipeAxisX = 0.0f;
     float pipeAxisY = 1.0f;
     float pipeAxisZ = 0.0f;
+    float pipeRadius = 0.45f;
+    float pipeStyleId = 0.0f;
 };
 
 class Renderer {

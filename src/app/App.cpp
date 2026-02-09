@@ -59,7 +59,9 @@ constexpr std::array<world::VoxelType, 1> kPlaceableBlockTypes = {
 };
 constexpr int kHotbarSlotBlock = 0;
 constexpr int kHotbarSlotPipe = 1;
-constexpr int kHotbarSlotCount = 2;
+constexpr int kHotbarSlotConveyor = 2;
+constexpr int kHotbarSlotTrack = 3;
+constexpr int kHotbarSlotCount = 4;
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
 constexpr math::Vector3 kDefaultPipeTint{0.95f, 0.95f, 0.95f};
@@ -160,6 +162,72 @@ void dir6ToAxisInts(core::Dir6 dir, int& outX, int& outY, int& outZ) {
 
 bool dirSharesAxis(core::Dir6 lhs, core::Dir6 rhs) {
     return lhs == rhs || core::areOpposite(lhs, rhs);
+}
+
+core::Dir6 horizontalDirFromYaw(float yawDegrees) {
+    const float yawRadians = math::radians(yawDegrees);
+    const float x = std::cos(yawRadians);
+    const float z = std::sin(yawRadians);
+    if (std::abs(x) >= std::abs(z)) {
+        return x >= 0.0f ? core::Dir6::PosX : core::Dir6::NegX;
+    }
+    return z >= 0.0f ? core::Dir6::PosZ : core::Dir6::NegZ;
+}
+
+sim::BeltDirection dir6ToBeltDirection(core::Dir6 dir) {
+    switch (dir) {
+    case core::Dir6::PosX:
+        return sim::BeltDirection::East;
+    case core::Dir6::NegX:
+        return sim::BeltDirection::West;
+    case core::Dir6::PosZ:
+        return sim::BeltDirection::South;
+    case core::Dir6::NegZ:
+    default:
+        return sim::BeltDirection::North;
+    }
+}
+
+core::Dir6 beltDirectionToDir6(sim::BeltDirection direction) {
+    switch (direction) {
+    case sim::BeltDirection::East:
+        return core::Dir6::PosX;
+    case sim::BeltDirection::West:
+        return core::Dir6::NegX;
+    case sim::BeltDirection::South:
+        return core::Dir6::PosZ;
+    case sim::BeltDirection::North:
+    default:
+        return core::Dir6::NegZ;
+    }
+}
+
+sim::TrackDirection dir6ToTrackDirection(core::Dir6 dir) {
+    switch (dir) {
+    case core::Dir6::PosX:
+        return sim::TrackDirection::East;
+    case core::Dir6::NegX:
+        return sim::TrackDirection::West;
+    case core::Dir6::PosZ:
+        return sim::TrackDirection::South;
+    case core::Dir6::NegZ:
+    default:
+        return sim::TrackDirection::North;
+    }
+}
+
+core::Dir6 trackDirectionToDir6(sim::TrackDirection direction) {
+    switch (direction) {
+    case sim::TrackDirection::East:
+        return core::Dir6::PosX;
+    case sim::TrackDirection::West:
+        return core::Dir6::NegX;
+    case sim::TrackDirection::South:
+        return core::Dir6::PosZ;
+    case sim::TrackDirection::North:
+    default:
+        return core::Dir6::NegZ;
+    }
 }
 
 core::Dir6 firstDirFromMask(std::uint8_t mask) {
@@ -299,6 +367,20 @@ void App::update(float dt) {
         if (removePressedThisFrame) {
             (void)tryRemovePipeFromCameraRay();
         }
+    } else if (isConveyorHotbarSelected()) {
+        if (placePressedThisFrame) {
+            (void)tryPlaceBeltFromCameraRay();
+        }
+        if (removePressedThisFrame) {
+            (void)tryRemoveBeltFromCameraRay();
+        }
+    } else if (isTrackHotbarSelected()) {
+        if (placePressedThisFrame) {
+            (void)tryPlaceTrackFromCameraRay();
+        }
+        if (removePressedThisFrame) {
+            (void)tryRemoveTrackFromCameraRay();
+        }
     } else {
         if (placePressedThisFrame && tryPlaceVoxelFromCameraRay(editedChunkIndex)) {
             voxelChunkEdited = true;
@@ -320,14 +402,26 @@ void App::update(float dt) {
 
     render::VoxelPreview preview{};
     const bool pipeSelected = isPipeHotbarSelected();
+    const bool conveyorSelected = isConveyorHotbarSelected();
+    const bool trackSelected = isTrackHotbarSelected();
     if (!m_debugUiVisible) {
         const bool showRemovePreview = m_input.removeBlockDown;
-        if (pipeSelected) {
+        if (pipeSelected || conveyorSelected || trackSelected) {
             const InteractionRaycastResult pipeRaycast = raycastInteractionFromCamera(true);
             if (pipeRaycast.hit && pipeRaycast.hitDistance <= kBlockInteractMaxDistance) {
                 preview.pipeStyle = true;
+                if (pipeSelected) {
+                    preview.pipeRadius = 0.45f;
+                    preview.pipeStyleId = 0.0f;
+                } else if (conveyorSelected) {
+                    preview.pipeRadius = 0.49f;
+                    preview.pipeStyleId = 1.0f;
+                } else {
+                    preview.pipeRadius = 0.38f;
+                    preview.pipeStyleId = 2.0f;
+                }
                 if (showRemovePreview) {
-                    if (pipeRaycast.hitPipe) {
+                    if (pipeSelected && pipeRaycast.hitPipe) {
                         preview.visible = true;
                         preview.mode = render::VoxelPreview::Mode::Remove;
                         preview.x = pipeRaycast.x;
@@ -341,6 +435,38 @@ void App::update(float dt) {
                             preview.pipeAxisY = pipe.axis.y;
                             preview.pipeAxisZ = pipe.axis.z;
                         }
+                    } else if (conveyorSelected && pipeRaycast.hitBelt) {
+                        preview.visible = true;
+                        preview.mode = render::VoxelPreview::Mode::Remove;
+                        preview.x = pipeRaycast.x;
+                        preview.y = pipeRaycast.y;
+                        preview.z = pipeRaycast.z;
+                        preview.brushSize = 1;
+                        std::size_t beltIndex = 0;
+                        if (isBeltAtWorld(pipeRaycast.x, pipeRaycast.y, pipeRaycast.z, &beltIndex)) {
+                            const sim::Belt& belt = m_simulation.belts()[beltIndex];
+                            const core::Dir6 beltDir = beltDirectionToDir6(belt.direction);
+                            const core::Cell3i axis = core::dirToOffset(beltDir);
+                            preview.pipeAxisX = static_cast<float>(axis.x);
+                            preview.pipeAxisY = static_cast<float>(axis.y);
+                            preview.pipeAxisZ = static_cast<float>(axis.z);
+                        }
+                    } else if (trackSelected && pipeRaycast.hitTrack) {
+                        preview.visible = true;
+                        preview.mode = render::VoxelPreview::Mode::Remove;
+                        preview.x = pipeRaycast.x;
+                        preview.y = pipeRaycast.y;
+                        preview.z = pipeRaycast.z;
+                        preview.brushSize = 1;
+                        std::size_t trackIndex = 0;
+                        if (isTrackAtWorld(pipeRaycast.x, pipeRaycast.y, pipeRaycast.z, &trackIndex)) {
+                            const sim::Track& track = m_simulation.tracks()[trackIndex];
+                            const core::Dir6 trackDir = trackDirectionToDir6(track.direction);
+                            const core::Cell3i axis = core::dirToOffset(trackDir);
+                            preview.pipeAxisX = static_cast<float>(axis.x);
+                            preview.pipeAxisY = static_cast<float>(axis.y);
+                            preview.pipeAxisZ = static_cast<float>(axis.z);
+                        }
                     }
                 } else {
                     int targetX = 0;
@@ -349,7 +475,9 @@ void App::update(float dt) {
                     int axisX = 0;
                     int axisY = 1;
                     int axisZ = 0;
-                    if (computePipePlacementFromInteractionRaycast(
+                    bool hasPlacement = false;
+                    if (pipeSelected) {
+                        hasPlacement = computePipePlacementFromInteractionRaycast(
                             pipeRaycast,
                             targetX,
                             targetY,
@@ -357,7 +485,29 @@ void App::update(float dt) {
                             axisX,
                             axisY,
                             axisZ
-                        )) {
+                        );
+                    } else if (conveyorSelected) {
+                        hasPlacement = computeBeltPlacementFromInteractionRaycast(
+                            pipeRaycast,
+                            targetX,
+                            targetY,
+                            targetZ,
+                            axisX,
+                            axisY,
+                            axisZ
+                        );
+                    } else if (trackSelected) {
+                        hasPlacement = computeTrackPlacementFromInteractionRaycast(
+                            pipeRaycast,
+                            targetX,
+                            targetY,
+                            targetZ,
+                            axisX,
+                            axisY,
+                            axisZ
+                        );
+                    }
+                    if (hasPlacement) {
                         preview.visible = true;
                         preview.mode = render::VoxelPreview::Mode::Add;
                         preview.x = targetX;
@@ -519,6 +669,10 @@ void App::pollInput() {
             selectHotbarSlot(kHotbarSlotBlock);
         } else if (glfwGetKey(m_window, GLFW_KEY_2) == GLFW_PRESS) {
             selectHotbarSlot(kHotbarSlotPipe);
+        } else if (glfwGetKey(m_window, GLFW_KEY_3) == GLFW_PRESS) {
+            selectHotbarSlot(kHotbarSlotConveyor);
+        } else if (glfwGetKey(m_window, GLFW_KEY_4) == GLFW_PRESS) {
+            selectHotbarSlot(kHotbarSlotTrack);
         }
     }
 
@@ -1164,7 +1318,9 @@ App::InteractionRaycastResult App::raycastInteractionFromCamera(bool includePipe
     while (distance <= kRayMaxDistance) {
         const bool hitSolid = isSolidWorldVoxel(vx, vy, vz);
         const bool hitPipe = includePipes && isPipeAtWorld(vx, vy, vz, nullptr);
-        if (hitSolid || hitPipe) {
+        const bool hitBelt = includePipes && isBeltAtWorld(vx, vy, vz, nullptr);
+        const bool hitTrack = includePipes && isTrackAtWorld(vx, vy, vz, nullptr);
+        if (hitSolid || hitPipe || hitBelt || hitTrack) {
             if (!hasHitFaceNormal) {
                 if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
                     vx += stepX;
@@ -1196,6 +1352,8 @@ App::InteractionRaycastResult App::raycastInteractionFromCamera(bool includePipe
 
             result.hit = true;
             result.hitPipe = hitPipe;
+            result.hitBelt = hitBelt;
+            result.hitTrack = hitTrack;
             result.hitSolidVoxel = hitSolid;
             result.x = vx;
             result.y = vy;
@@ -1261,12 +1419,27 @@ void App::selectHotbarSlot(int hotbarIndex) {
         return;
     }
     m_selectedHotbarIndex = clampedIndex;
-    const char* label = (m_selectedHotbarIndex == kHotbarSlotPipe) ? "pipe" : "block";
+    const char* label = "block";
+    if (m_selectedHotbarIndex == kHotbarSlotPipe) {
+        label = "pipe";
+    } else if (m_selectedHotbarIndex == kHotbarSlotConveyor) {
+        label = "conveyor";
+    } else if (m_selectedHotbarIndex == kHotbarSlotTrack) {
+        label = "track";
+    }
     std::cerr << "[" << appTimestamp() << "][app] selected hotbar: " << label << "\n";
 }
 
 bool App::isPipeHotbarSelected() const {
     return m_selectedHotbarIndex == kHotbarSlotPipe;
+}
+
+bool App::isConveyorHotbarSelected() const {
+    return m_selectedHotbarIndex == kHotbarSlotConveyor;
+}
+
+bool App::isTrackHotbarSelected() const {
+    return m_selectedHotbarIndex == kHotbarSlotTrack;
 }
 
 world::Voxel App::selectedPlaceVoxel() const {
@@ -1383,7 +1556,9 @@ bool App::computePipePlacementFromInteractionRaycast(
     if (isSolidWorldVoxel(targetX, targetY, targetZ)) {
         return false;
     }
-    if (isPipeAtWorld(targetX, targetY, targetZ, nullptr)) {
+    if (isPipeAtWorld(targetX, targetY, targetZ, nullptr) ||
+        isBeltAtWorld(targetX, targetY, targetZ, nullptr) ||
+        isTrackAtWorld(targetX, targetY, targetZ, nullptr)) {
         return false;
     }
 
@@ -1405,6 +1580,164 @@ bool App::computePipePlacementFromInteractionRaycast(
     outY = targetY;
     outZ = targetZ;
     dir6ToAxisInts(resolvedAxis, outAxisX, outAxisY, outAxisZ);
+    return true;
+}
+
+bool App::computeBeltPlacementFromInteractionRaycast(
+    const InteractionRaycastResult& raycast,
+    int& outX,
+    int& outY,
+    int& outZ,
+    int& outAxisX,
+    int& outAxisY,
+    int& outAxisZ
+) const {
+    if (!raycast.hit || !raycast.hasHitFaceNormal) {
+        return false;
+    }
+
+    core::Dir6 selectedAxis = faceNormalToDir6(
+        raycast.hitFaceNormalX,
+        raycast.hitFaceNormalY,
+        raycast.hitFaceNormalZ
+    );
+    if (selectedAxis == core::Dir6::PosY || selectedAxis == core::Dir6::NegY) {
+        selectedAxis = horizontalDirFromYaw(m_camera.yawDegrees);
+    }
+    int extensionSign = 1;
+    core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
+
+    if (raycast.hitBelt) {
+        std::size_t beltIndex = 0;
+        if (!isBeltAtWorld(raycast.x, raycast.y, raycast.z, &beltIndex)) {
+            return false;
+        }
+        const std::vector<sim::Belt>& belts = m_simulation.belts();
+        if (beltIndex >= belts.size()) {
+            return false;
+        }
+
+        selectedAxis = beltDirectionToDir6(belts[beltIndex].direction);
+        const core::Cell3i axisOffset = core::dirToOffset(selectedAxis);
+        const int faceNormalDotAxis =
+            (raycast.hitFaceNormalX * axisOffset.x) +
+            (raycast.hitFaceNormalY * axisOffset.y) +
+            (raycast.hitFaceNormalZ * axisOffset.z);
+        if (faceNormalDotAxis == 0) {
+            core::Dir6 faceDir = faceNormalToDir6(
+                raycast.hitFaceNormalX,
+                raycast.hitFaceNormalY,
+                raycast.hitFaceNormalZ
+            );
+            if (faceDir == core::Dir6::PosY || faceDir == core::Dir6::NegY) {
+                faceDir = horizontalDirFromYaw(m_camera.yawDegrees);
+            }
+            selectedAxis = faceDir;
+            extensionSign = 1;
+        } else {
+            extensionSign = (faceNormalDotAxis > 0) ? 1 : -1;
+        }
+    }
+
+    const core::Dir6 extensionDir =
+        extensionSign >= 0 ? selectedAxis : core::oppositeDir(selectedAxis);
+    const core::Cell3i targetCell = core::neighborCell(extensionAnchor, extensionDir);
+    const int targetX = targetCell.x;
+    const int targetY = targetCell.y;
+    const int targetZ = targetCell.z;
+    if (!isWorldVoxelInBounds(targetX, targetY, targetZ) ||
+        isSolidWorldVoxel(targetX, targetY, targetZ)) {
+        return false;
+    }
+    if (isPipeAtWorld(targetX, targetY, targetZ, nullptr) ||
+        isBeltAtWorld(targetX, targetY, targetZ, nullptr) ||
+        isTrackAtWorld(targetX, targetY, targetZ, nullptr)) {
+        return false;
+    }
+
+    outX = targetX;
+    outY = targetY;
+    outZ = targetZ;
+    dir6ToAxisInts(selectedAxis, outAxisX, outAxisY, outAxisZ);
+    return true;
+}
+
+bool App::computeTrackPlacementFromInteractionRaycast(
+    const InteractionRaycastResult& raycast,
+    int& outX,
+    int& outY,
+    int& outZ,
+    int& outAxisX,
+    int& outAxisY,
+    int& outAxisZ
+) const {
+    if (!raycast.hit || !raycast.hasHitFaceNormal) {
+        return false;
+    }
+
+    core::Dir6 selectedAxis = faceNormalToDir6(
+        raycast.hitFaceNormalX,
+        raycast.hitFaceNormalY,
+        raycast.hitFaceNormalZ
+    );
+    if (selectedAxis == core::Dir6::PosY || selectedAxis == core::Dir6::NegY) {
+        selectedAxis = horizontalDirFromYaw(m_camera.yawDegrees);
+    }
+    int extensionSign = 1;
+    core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
+
+    if (raycast.hitTrack) {
+        std::size_t trackIndex = 0;
+        if (!isTrackAtWorld(raycast.x, raycast.y, raycast.z, &trackIndex)) {
+            return false;
+        }
+        const std::vector<sim::Track>& tracks = m_simulation.tracks();
+        if (trackIndex >= tracks.size()) {
+            return false;
+        }
+
+        selectedAxis = trackDirectionToDir6(tracks[trackIndex].direction);
+        const core::Cell3i axisOffset = core::dirToOffset(selectedAxis);
+        const int faceNormalDotAxis =
+            (raycast.hitFaceNormalX * axisOffset.x) +
+            (raycast.hitFaceNormalY * axisOffset.y) +
+            (raycast.hitFaceNormalZ * axisOffset.z);
+        if (faceNormalDotAxis == 0) {
+            core::Dir6 faceDir = faceNormalToDir6(
+                raycast.hitFaceNormalX,
+                raycast.hitFaceNormalY,
+                raycast.hitFaceNormalZ
+            );
+            if (faceDir == core::Dir6::PosY || faceDir == core::Dir6::NegY) {
+                faceDir = horizontalDirFromYaw(m_camera.yawDegrees);
+            }
+            selectedAxis = faceDir;
+            extensionSign = 1;
+        } else {
+            extensionSign = (faceNormalDotAxis > 0) ? 1 : -1;
+        }
+    }
+
+    const core::Dir6 extensionDir =
+        extensionSign >= 0 ? selectedAxis : core::oppositeDir(selectedAxis);
+    const core::Cell3i targetCell = core::neighborCell(extensionAnchor, extensionDir);
+    const int targetX = targetCell.x;
+    const int targetY = targetCell.y;
+    const int targetZ = targetCell.z;
+    if (!isWorldVoxelInBounds(targetX, targetY, targetZ) ||
+        isSolidWorldVoxel(targetX, targetY, targetZ)) {
+        return false;
+    }
+    if (isPipeAtWorld(targetX, targetY, targetZ, nullptr) ||
+        isBeltAtWorld(targetX, targetY, targetZ, nullptr) ||
+        isTrackAtWorld(targetX, targetY, targetZ, nullptr)) {
+        return false;
+    }
+
+    outX = targetX;
+    outY = targetY;
+    outZ = targetZ;
+    dir6ToAxisInts(selectedAxis, outAxisX, outAxisY, outAxisZ);
     return true;
 }
 
@@ -1437,6 +1770,34 @@ bool App::isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipe
         if (pipe.x == worldX && pipe.y == worldY && pipe.z == worldZ) {
             if (outPipeIndex != nullptr) {
                 *outPipeIndex = pipeIndex;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool App::isBeltAtWorld(int worldX, int worldY, int worldZ, std::size_t* outBeltIndex) const {
+    const std::vector<sim::Belt>& belts = m_simulation.belts();
+    for (std::size_t beltIndex = 0; beltIndex < belts.size(); ++beltIndex) {
+        const sim::Belt& belt = belts[beltIndex];
+        if (belt.x == worldX && belt.y == worldY && belt.z == worldZ) {
+            if (outBeltIndex != nullptr) {
+                *outBeltIndex = beltIndex;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool App::isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTrackIndex) const {
+    const std::vector<sim::Track>& tracks = m_simulation.tracks();
+    for (std::size_t trackIndex = 0; trackIndex < tracks.size(); ++trackIndex) {
+        const sim::Track& track = tracks[trackIndex];
+        if (track.x == worldX && track.y == worldY && track.z == worldZ) {
+            if (outTrackIndex != nullptr) {
+                *outTrackIndex = trackIndex;
             }
             return true;
         }
@@ -1554,6 +1915,108 @@ bool App::tryRemovePipeFromCameraRay() {
         return false;
     }
     pipes.erase(pipes.begin() + static_cast<std::ptrdiff_t>(pipeIndex));
+    return true;
+}
+
+bool App::tryPlaceBeltFromCameraRay() {
+    const InteractionRaycastResult raycast = raycastInteractionFromCamera(true);
+    if (!raycast.hit || raycast.hitDistance > kBlockInteractMaxDistance) {
+        return false;
+    }
+
+    int targetX = 0;
+    int targetY = 0;
+    int targetZ = 0;
+    int axisX = 0;
+    int axisY = 0;
+    int axisZ = 1;
+    if (!computeBeltPlacementFromInteractionRaycast(
+            raycast,
+            targetX,
+            targetY,
+            targetZ,
+            axisX,
+            axisY,
+            axisZ
+        )) {
+        return false;
+    }
+
+    core::Dir6 axisDir = faceNormalToDir6(axisX, axisY, axisZ);
+    if (axisDir == core::Dir6::PosY || axisDir == core::Dir6::NegY) {
+        axisDir = horizontalDirFromYaw(m_camera.yawDegrees);
+    }
+    m_simulation.belts().emplace_back(targetX, targetY, targetZ, dir6ToBeltDirection(axisDir));
+    return true;
+}
+
+bool App::tryRemoveBeltFromCameraRay() {
+    const InteractionRaycastResult raycast = raycastInteractionFromCamera(true);
+    if (!raycast.hit || !raycast.hitBelt || raycast.hitDistance > kBlockInteractMaxDistance) {
+        return false;
+    }
+
+    std::size_t beltIndex = 0;
+    if (!isBeltAtWorld(raycast.x, raycast.y, raycast.z, &beltIndex)) {
+        return false;
+    }
+
+    std::vector<sim::Belt>& belts = m_simulation.belts();
+    if (beltIndex >= belts.size()) {
+        return false;
+    }
+    belts.erase(belts.begin() + static_cast<std::ptrdiff_t>(beltIndex));
+    return true;
+}
+
+bool App::tryPlaceTrackFromCameraRay() {
+    const InteractionRaycastResult raycast = raycastInteractionFromCamera(true);
+    if (!raycast.hit || raycast.hitDistance > kBlockInteractMaxDistance) {
+        return false;
+    }
+
+    int targetX = 0;
+    int targetY = 0;
+    int targetZ = 0;
+    int axisX = 0;
+    int axisY = 0;
+    int axisZ = 1;
+    if (!computeTrackPlacementFromInteractionRaycast(
+            raycast,
+            targetX,
+            targetY,
+            targetZ,
+            axisX,
+            axisY,
+            axisZ
+        )) {
+        return false;
+    }
+
+    core::Dir6 axisDir = faceNormalToDir6(axisX, axisY, axisZ);
+    if (axisDir == core::Dir6::PosY || axisDir == core::Dir6::NegY) {
+        axisDir = horizontalDirFromYaw(m_camera.yawDegrees);
+    }
+    m_simulation.tracks().emplace_back(targetX, targetY, targetZ, dir6ToTrackDirection(axisDir));
+    return true;
+}
+
+bool App::tryRemoveTrackFromCameraRay() {
+    const InteractionRaycastResult raycast = raycastInteractionFromCamera(true);
+    if (!raycast.hit || !raycast.hitTrack || raycast.hitDistance > kBlockInteractMaxDistance) {
+        return false;
+    }
+
+    std::size_t trackIndex = 0;
+    if (!isTrackAtWorld(raycast.x, raycast.y, raycast.z, &trackIndex)) {
+        return false;
+    }
+
+    std::vector<sim::Track>& tracks = m_simulation.tracks();
+    if (trackIndex >= tracks.size()) {
+        return false;
+    }
+    tracks.erase(tracks.begin() + static_cast<std::ptrdiff_t>(trackIndex));
     return true;
 }
 
