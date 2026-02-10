@@ -2152,6 +2152,10 @@ bool Renderer::createDiffuseTextureResources() {
     constexpr uint32_t kTextureWidth = kTileSize * kTextureTilesX;
     constexpr uint32_t kTextureHeight = kTileSize * kTextureTilesY;
     constexpr VkFormat kTextureFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    uint32_t diffuseMipLevels = 1u;
+    for (uint32_t tileExtent = kTileSize; tileExtent > 1u; tileExtent >>= 1u) {
+        ++diffuseMipLevels;
+    }
     constexpr VkDeviceSize kTextureBytes = kTextureWidth * kTextureHeight * 4;
 
     std::vector<std::uint8_t> pixels(static_cast<size_t>(kTextureBytes), 0);
@@ -2274,11 +2278,11 @@ bool Renderer::createDiffuseTextureResources() {
     imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
     imageCreateInfo.format = kTextureFormat;
     imageCreateInfo.extent = {kTextureWidth, kTextureHeight, 1};
-    imageCreateInfo.mipLevels = 1;
+    imageCreateInfo.mipLevels = diffuseMipLevels;
     imageCreateInfo.arrayLayers = 1;
     imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     m_diffuseTextureMemory = VK_NULL_HANDLE;
@@ -2407,7 +2411,11 @@ bool Renderer::createDiffuseTextureResources() {
         VK_ACCESS_2_NONE,
         VK_PIPELINE_STAGE_2_TRANSFER_BIT,
         VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        0u,
+        1u,
+        0u,
+        diffuseMipLevels
     );
 
     VkBufferImageCopy copyRegion{};
@@ -2429,6 +2437,94 @@ bool Renderer::createDiffuseTextureResources() {
         &copyRegion
     );
 
+    for (uint32_t mipLevel = 1u; mipLevel < diffuseMipLevels; ++mipLevel) {
+        const uint32_t srcMip = mipLevel - 1u;
+        transitionImageLayout(
+            commandBuffer,
+            m_diffuseTextureImage,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0u,
+            1u,
+            srcMip,
+            1u
+        );
+
+        const int32_t srcTileWidth = static_cast<int32_t>(std::max(1u, kTileSize >> srcMip));
+        const int32_t srcTileHeight = static_cast<int32_t>(std::max(1u, kTileSize >> srcMip));
+        const int32_t dstTileWidth = static_cast<int32_t>(std::max(1u, kTileSize >> mipLevel));
+        const int32_t dstTileHeight = static_cast<int32_t>(std::max(1u, kTileSize >> mipLevel));
+
+        for (uint32_t tileY = 0; tileY < kTextureTilesY; ++tileY) {
+            for (uint32_t tileX = 0; tileX < kTextureTilesX; ++tileX) {
+                VkImageBlit blitRegion{};
+                blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                blitRegion.srcSubresource.mipLevel = srcMip;
+                blitRegion.srcSubresource.baseArrayLayer = 0;
+                blitRegion.srcSubresource.layerCount = 1;
+                blitRegion.srcOffsets[0] = {
+                    static_cast<int32_t>(tileX) * srcTileWidth,
+                    static_cast<int32_t>(tileY) * srcTileHeight,
+                    0
+                };
+                blitRegion.srcOffsets[1] = {
+                    blitRegion.srcOffsets[0].x + srcTileWidth,
+                    blitRegion.srcOffsets[0].y + srcTileHeight,
+                    1
+                };
+
+                blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                blitRegion.dstSubresource.mipLevel = mipLevel;
+                blitRegion.dstSubresource.baseArrayLayer = 0;
+                blitRegion.dstSubresource.layerCount = 1;
+                blitRegion.dstOffsets[0] = {
+                    static_cast<int32_t>(tileX) * dstTileWidth,
+                    static_cast<int32_t>(tileY) * dstTileHeight,
+                    0
+                };
+                blitRegion.dstOffsets[1] = {
+                    blitRegion.dstOffsets[0].x + dstTileWidth,
+                    blitRegion.dstOffsets[0].y + dstTileHeight,
+                    1
+                };
+
+                vkCmdBlitImage(
+                    commandBuffer,
+                    m_diffuseTextureImage,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    m_diffuseTextureImage,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    1,
+                    &blitRegion,
+                    VK_FILTER_LINEAR
+                );
+            }
+        }
+    }
+
+    if (diffuseMipLevels > 1u) {
+        transitionImageLayout(
+            commandBuffer,
+            m_diffuseTextureImage,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0u,
+            1u,
+            0u,
+            diffuseMipLevels - 1u
+        );
+    }
+
     transitionImageLayout(
         commandBuffer,
         m_diffuseTextureImage,
@@ -2438,7 +2534,11 @@ bool Renderer::createDiffuseTextureResources() {
         VK_ACCESS_2_TRANSFER_WRITE_BIT,
         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        0u,
+        1u,
+        diffuseMipLevels - 1u,
+        1u
     );
 
     result = vkEndCommandBuffer(commandBuffer);
@@ -2485,7 +2585,7 @@ bool Renderer::createDiffuseTextureResources() {
     viewCreateInfo.format = kTextureFormat;
     viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     viewCreateInfo.subresourceRange.baseMipLevel = 0;
-    viewCreateInfo.subresourceRange.levelCount = 1;
+    viewCreateInfo.subresourceRange.levelCount = diffuseMipLevels;
     viewCreateInfo.subresourceRange.baseArrayLayer = 0;
     viewCreateInfo.subresourceRange.layerCount = 1;
     result = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_diffuseTextureImageView);
@@ -2515,7 +2615,7 @@ bool Renderer::createDiffuseTextureResources() {
         : 1.0f;
     samplerCreateInfo.compareEnable = VK_FALSE;
     samplerCreateInfo.minLod = 0.0f;
-    samplerCreateInfo.maxLod = 0.0f;
+    samplerCreateInfo.maxLod = static_cast<float>(diffuseMipLevels - 1u);
     samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
     result = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_diffuseTextureSampler);
@@ -2529,6 +2629,9 @@ bool Renderer::createDiffuseTextureResources() {
         vkHandleToUint64(m_diffuseTextureSampler),
         "diffuse.albedo.sampler"
     );
+
+    VOX_LOGI("render") << "diffuse atlas mipmaps generated: levels=" << diffuseMipLevels
+                       << ", tileSize=" << kTileSize << ", atlas=" << kTextureWidth << "x" << kTextureHeight << "\n";
 
     return true;
 }
