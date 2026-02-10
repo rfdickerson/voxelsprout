@@ -5091,7 +5091,7 @@ bool Renderer::createPipePipeline() {
     grassBindings[1].stride = sizeof(GrassBillboardInstance);
     grassBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-    VkVertexInputAttributeDescription grassAttributes[5]{};
+    VkVertexInputAttributeDescription grassAttributes[6]{};
     grassAttributes[0].location = 0;
     grassAttributes[0].binding = 0;
     grassAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
@@ -5112,12 +5112,16 @@ bool Renderer::createPipePipeline() {
     grassAttributes[4].binding = 1;
     grassAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
     grassAttributes[4].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, colorTint));
+    grassAttributes[5].location = 5;
+    grassAttributes[5].binding = 1;
+    grassAttributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    grassAttributes[5].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, lightingParams));
 
     VkPipelineVertexInputStateCreateInfo grassVertexInputInfo{};
     grassVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     grassVertexInputInfo.vertexBindingDescriptionCount = 2;
     grassVertexInputInfo.pVertexBindingDescriptions = grassBindings;
-    grassVertexInputInfo.vertexAttributeDescriptionCount = 5;
+    grassVertexInputInfo.vertexAttributeDescriptionCount = 6;
     grassVertexInputInfo.pVertexAttributeDescriptions = grassAttributes;
 
     VkGraphicsPipelineCreateInfo grassPipelineCreateInfo = pipelineCreateInfo;
@@ -5690,6 +5694,108 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         m_chunkGrassInstanceCache.assign(chunks.size(), std::vector<GrassBillboardInstance>{});
     }
 
+    auto floorDivInt = [](int value, int divisor) -> int {
+        int q = value / divisor;
+        const int r = value % divisor;
+        if (r != 0 && ((r > 0) != (divisor > 0))) {
+            --q;
+        }
+        return q;
+    };
+    auto packChunkXZ = [](int chunkX, int chunkZ) -> std::uint64_t {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunkX)) << 32u) |
+               static_cast<std::uint32_t>(chunkZ);
+    };
+    std::unordered_map<std::uint64_t, const world::Chunk*> chunkLookup;
+    chunkLookup.reserve(chunks.size());
+    for (const world::Chunk& chunk : chunks) {
+        if (chunk.chunkY() == 0) {
+            chunkLookup.emplace(packChunkXZ(chunk.chunkX(), chunk.chunkZ()), &chunk);
+        }
+    }
+    auto sampleSolidWorld = [&](int worldX, int worldY, int worldZ) -> bool {
+        const int chunkY = floorDivInt(worldY, world::Chunk::kSizeY);
+        if (chunkY != 0) {
+            return false;
+        }
+        const int chunkX = floorDivInt(worldX, world::Chunk::kSizeX);
+        const int chunkZ = floorDivInt(worldZ, world::Chunk::kSizeZ);
+        const auto it = chunkLookup.find(packChunkXZ(chunkX, chunkZ));
+        if (it == chunkLookup.end() || it->second == nullptr) {
+            return false;
+        }
+        const int localX = worldX - (chunkX * world::Chunk::kSizeX);
+        const int localY = worldY - (chunkY * world::Chunk::kSizeY);
+        const int localZ = worldZ - (chunkZ * world::Chunk::kSizeZ);
+        if (localX < 0 || localX >= world::Chunk::kSizeX ||
+            localY < 0 || localY >= world::Chunk::kSizeY ||
+            localZ < 0 || localZ >= world::Chunk::kSizeZ) {
+            return false;
+        }
+        return it->second->voxelAt(localX, localY, localZ).type != world::VoxelType::Empty;
+    };
+
+    const float sunYawRadians = math::radians(m_skyDebugSettings.sunYawDegrees);
+    const float sunPitchRadians = math::radians(m_skyDebugSettings.sunPitchDegrees);
+    const float sunCosPitch = std::cos(sunPitchRadians);
+    math::Vector3 sunDirection = math::normalize(math::Vector3{
+        std::cos(sunYawRadians) * sunCosPitch,
+        std::sin(sunPitchRadians),
+        std::sin(sunYawRadians) * sunCosPitch
+    });
+    if (math::lengthSquared(sunDirection) <= 0.0001f) {
+        sunDirection = math::Vector3{-0.58f, -0.42f, -0.24f};
+    }
+    const math::Vector3 toSun = -math::normalize(sunDirection);
+    const int clipmapCellSize = std::max(1, m_debugClipmapConfig.baseVoxelSize);
+    const float clipmapStep = std::max(1.0f, static_cast<float>(clipmapCellSize) * 2.0f);
+    const float clipmapMaxDistance = std::clamp(
+        static_cast<float>(m_debugClipmapConfig.gridResolution * clipmapCellSize) * 0.28f,
+        10.0f,
+        96.0f
+    );
+    auto approximatePlantClipmapShadowFactor = [&](const math::Vector3& worldPosition, std::uint32_t seed) -> float {
+        // Sun below horizon: do not apply extra occlusion darkening.
+        if (toSun.y <= 0.02f) {
+            return 1.0f;
+        }
+
+        const float jitter = static_cast<float>((seed >> 20u) & 0xFFu) / 255.0f;
+        const math::Vector3 start =
+            worldPosition +
+            math::Vector3{0.0f, 0.65f, 0.0f} +
+            (toSun * (clipmapStep * (0.35f + (jitter * 0.9f))));
+
+        int blockers = 0;
+        int samples = 0;
+        for (float distance = 0.0f; distance < clipmapMaxDistance; distance += clipmapStep) {
+            const math::Vector3 samplePosition = start + (toSun * distance);
+            const int snappedX =
+                static_cast<int>(std::floor(samplePosition.x / static_cast<float>(clipmapCellSize))) * clipmapCellSize;
+            const int snappedY =
+                static_cast<int>(std::floor(samplePosition.y / static_cast<float>(clipmapCellSize))) * clipmapCellSize;
+            const int snappedZ =
+                static_cast<int>(std::floor(samplePosition.z / static_cast<float>(clipmapCellSize))) * clipmapCellSize;
+
+            if (sampleSolidWorld(snappedX, snappedY, snappedZ)) {
+                ++blockers;
+                if (blockers >= 3) {
+                    break;
+                }
+            }
+            ++samples;
+            if (samples >= 48) {
+                break;
+            }
+        }
+
+        if (blockers <= 0) {
+            return 1.0f;
+        }
+        // Coarse occlusion: retain some light for thin/translucent leaves.
+        return std::clamp(1.0f - (static_cast<float>(blockers) * 0.24f), 0.28f, 0.88f);
+    };
+
     auto rebuildGrassInstancesForChunk = [&](std::size_t chunkArrayIndex) {
         if (chunkArrayIndex >= chunks.size()) {
             return;
@@ -5780,6 +5886,15 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
                             instance.colorTint[2] = blueBase * brightness;
                             instance.colorTint[3] = 4.0f;
                         }
+                        const math::Vector3 plantWorldPosition{
+                            instance.worldPosYaw[0],
+                            instance.worldPosYaw[1],
+                            instance.worldPosYaw[2]
+                        };
+                        instance.lightingParams[0] = approximatePlantClipmapShadowFactor(plantWorldPosition, clumpHash);
+                        instance.lightingParams[1] = 0.0f;
+                        instance.lightingParams[2] = 0.0f;
+                        instance.lightingParams[3] = 0.0f;
                         grassInstances.push_back(instance);
                     }
                 }

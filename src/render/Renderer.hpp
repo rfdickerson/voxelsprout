@@ -250,6 +250,7 @@ private:
     struct GrassBillboardInstance {
         float worldPosYaw[4];
         float colorTint[4];
+        float lightingParams[4];
     };
 
     GLFWwindow* m_window = nullptr;

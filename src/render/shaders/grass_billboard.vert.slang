@@ -7,6 +7,7 @@ struct VertexInput
     [[vk::location(2)]] float inPlane : TEXCOORD2;
     [[vk::location(3)]] float4 inWorldPosYaw : TEXCOORD3;
     [[vk::location(4)]] float4 inColorTint : TEXCOORD4;
+    [[vk::location(5)]] float4 inLightingParams : TEXCOORD5;
 };
 
 struct VertexOutput
@@ -16,6 +17,7 @@ struct VertexOutput
     float4 outColorTint : TEXCOORD1;
     float3 outWorldPosition : TEXCOORD2;
     float3 outQuadNormal : TEXCOORD3;
+    float outShadowFactor : TEXCOORD4;
 };
 
 VertexOutput main(VertexInput input)
@@ -45,5 +47,6 @@ VertexOutput main(VertexInput input)
     output.outColorTint = input.inColorTint;
     output.outWorldPosition = worldPosition;
     output.outQuadNormal = normalize(cross(up, right));
+    output.outShadowFactor = input.inLightingParams.x;
     return output;
 }

@@ -14,6 +14,7 @@ struct FragmentInput
     float4 inColorTint : TEXCOORD1;
     float3 inWorldPosition : TEXCOORD2;
     float3 inQuadNormal : TEXCOORD3;
+    float inShadowFactor : TEXCOORD4;
 };
 
 float3 proceduralSkyNoSunDisk(float3 direction)
@@ -123,7 +124,8 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 skyAmbient = evaluateShIrradiance(float3(0.0, 1.0, 0.0)) * 0.33;
     const float3 groundAmbient = evaluateShIrradiance(float3(0.0, -1.0, 0.0)) * 0.14;
     const float3 ambient = lerp(groundAmbient, skyAmbient, canopyT);
-    const float3 direct = sunColor * (sunIntensity * (wrappedNdotL + transmission) * 0.70);
+    const float shadowFactor = clamp(input.inShadowFactor, 0.0, 1.0);
+    const float3 direct = sunColor * (sunIntensity * (wrappedNdotL + transmission) * 0.70 * shadowFactor);
 
     const float3 tint = clamp(input.inColorTint.xyz, float3(0.10, 0.10, 0.10), float3(2.50, 2.50, 2.50));
     const bool isFlower = spriteTile >= 5u;
