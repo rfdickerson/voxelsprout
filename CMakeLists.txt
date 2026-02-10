@@ -6,6 +6,38 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 
+# Optional Slang shader compilation (to SPIR-V for Vulkan).
+# Produces .slang.spv files next to the source shaders so runtime file lookup can prefer them.
+find_program(SLANGC_EXECUTABLE NAMES slangc)
+if(SLANGC_EXECUTABLE)
+    set(SLANG_SHADER_SOURCES
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/skybox.frag.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/tone_map.frag.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang"
+    )
+    set(SLANG_SHADER_OUTPUTS "")
+    foreach(SLANG_SHADER ${SLANG_SHADER_SOURCES})
+        set(SLANG_OUTPUT "${SLANG_SHADER}.spv")
+        add_custom_command(
+            OUTPUT "${SLANG_OUTPUT}"
+            COMMAND "${SLANGC_EXECUTABLE}"
+                -target spirv
+                -entry main
+                -stage fragment
+                -matrix-layout-column-major
+                "${SLANG_SHADER}"
+                -o "${SLANG_OUTPUT}"
+            DEPENDS "${SLANG_SHADER}"
+            COMMENT "Compiling Slang shader ${SLANG_SHADER}"
+            VERBATIM
+        )
+        list(APPEND SLANG_SHADER_OUTPUTS "${SLANG_OUTPUT}")
+    endforeach()
+    add_custom_target(slang_shaders DEPENDS ${SLANG_SHADER_OUTPUTS})
+else()
+    message(STATUS "slangc not found; skipping Slang shader target")
+endif()
+
 add_executable(voxel_factory_toy
     src/app/main.cpp
     src/app/App.cpp
@@ -16,6 +48,10 @@ add_executable(voxel_factory_toy
     src/world/ChunkMesher.cpp
     src/world/ClipmapIndex.cpp
 )
+
+if(TARGET slang_shaders)
+    add_dependencies(voxel_factory_toy slang_shaders)
+endif()
 
 target_include_directories(voxel_factory_toy PRIVATE src)
 

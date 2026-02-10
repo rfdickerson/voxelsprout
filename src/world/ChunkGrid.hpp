@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <vector>
 
 #include "world/Chunk.hpp"
@@ -99,39 +100,105 @@ inline void ChunkGrid::initializeFlatWorld() {
         const float wx = static_cast<float>(worldX);
         const float wz = static_cast<float>(worldZ);
 
-        // Domain warping avoids repetitive grid-aligned noise contours.
-        const float warpX = perlin2((wx * 0.010f) + 13.7f, (wz * 0.010f) - 7.2f) * 22.0f;
-        const float warpZ = perlin2((wx * 0.010f) - 29.1f, (wz * 0.010f) + 22.4f) * 22.0f;
+        // Domain warping breaks up repetitive contour bands.
+        const float warpX = perlin2((wx * 0.011f) + 17.3f, (wz * 0.011f) - 9.1f) * 18.0f;
+        const float warpZ = perlin2((wx * 0.011f) - 23.4f, (wz * 0.011f) + 31.7f) * 18.0f;
         const float sampleX = wx + warpX;
         const float sampleZ = wz + warpZ;
 
-        const float broadHills = perlin2(sampleX * 0.013f, sampleZ * 0.013f) * 7.2f;
-        const float midHills = perlin2(sampleX * 0.031f, sampleZ * 0.031f) * 3.4f;
-
-        // Valleys are carved where low-frequency noise dips negative.
-        const float valleyNoise = perlin2((sampleX * 0.006f) - 20.0f, (sampleZ * 0.006f) + 42.0f);
-        const float valleyMask = std::pow(std::max(0.0f, -valleyNoise), 1.9f);
-        const float valleyCut = valleyMask * 15.0f;
-
-        // Build a few strong monolithic massifs with steep cliff walls.
-        const float massifSeed = (perlin2((sampleX * 0.004f) + 87.0f, (sampleZ * 0.004f) - 51.0f) * 0.5f) + 0.5f;
-        const float massifMask = std::pow(std::clamp((massifSeed - 0.50f) * 2.0f, 0.0f, 1.0f), 2.2f);
-        const float ridgeNoise = 1.0f - std::abs(perlin2((sampleX * 0.019f) - 11.0f, (sampleZ * 0.019f) + 5.0f));
-        const float wallMask = std::pow(std::clamp((ridgeNoise - 0.46f) * 3.0f, 0.0f, 1.0f), 1.6f);
-        const float cliffRamp = std::pow(wallMask, 1.35f) * massifMask;
-        const float cliffLift = cliffRamp * 23.0f;
-
-        // Carve deep canyons around cliff zones for dramatic relief.
-        const float canyonNoise = perlin2((sampleX * 0.009f) + 33.0f, (sampleZ * 0.009f) - 71.0f);
-        const float canyonMask = std::pow(std::max(0.0f, -canyonNoise), 1.7f) * (0.45f + (0.55f * (1.0f - massifMask)));
-        const float canyonCut = canyonMask * 10.5f;
-
-        const float heightFloat = 8.5f + broadHills + midHills + cliffLift - valleyCut - canyonCut;
+        // Keep the in-between terrain as rolling desert hills.
+        const float duneBroad = perlin2(sampleX * 0.018f, sampleZ * 0.018f) * 4.2f;
+        const float duneDetail = perlin2(sampleX * 0.047f, sampleZ * 0.047f) * 1.9f;
+        const float ridgeSeed = std::abs(perlin2((sampleX * 0.026f) + 41.0f, (sampleZ * 0.026f) - 57.0f));
+        const float duneRidge = std::pow(std::clamp((ridgeSeed - 0.35f) * 1.538f, 0.0f, 1.0f), 1.6f) * 3.8f;
+        const float heightFloat = 7.0f + duneBroad + duneDetail + duneRidge;
         const int height = static_cast<int>(std::round(heightFloat));
         return std::clamp(height, 1, Chunk::kSizeY - 2);
     };
 
     initializeEmptyWorld();
+
+    struct CityCenter {
+        int x = 0;
+        int z = 0;
+    };
+
+    int worldMinX = std::numeric_limits<int>::max();
+    int worldMaxX = std::numeric_limits<int>::min();
+    int worldMinZ = std::numeric_limits<int>::max();
+    int worldMaxZ = std::numeric_limits<int>::min();
+    for (const Chunk& chunk : m_chunks) {
+        const int chunkWorldMinX = chunk.chunkX() * Chunk::kSizeX;
+        const int chunkWorldMaxX = chunkWorldMinX + (Chunk::kSizeX - 1);
+        const int chunkWorldMinZ = chunk.chunkZ() * Chunk::kSizeZ;
+        const int chunkWorldMaxZ = chunkWorldMinZ + (Chunk::kSizeZ - 1);
+        worldMinX = std::min(worldMinX, chunkWorldMinX);
+        worldMaxX = std::max(worldMaxX, chunkWorldMaxX);
+        worldMinZ = std::min(worldMinZ, chunkWorldMinZ);
+        worldMaxZ = std::max(worldMaxZ, chunkWorldMaxZ);
+    }
+
+    const int worldSpanX = (worldMaxX - worldMinX) + 1;
+    const int worldSpanZ = (worldMaxZ - worldMinZ) + 1;
+    const int quarterX = worldMinX + (worldSpanX / 4);
+    const int threeQuarterX = worldMinX + ((worldSpanX * 3) / 4);
+    const int quarterZ = worldMinZ + (worldSpanZ / 4);
+    const int threeQuarterZ = worldMinZ + ((worldSpanZ * 3) / 4);
+    const std::array<CityCenter, 4> cityCenters = {{
+        {quarterX, quarterZ},
+        {threeQuarterX, quarterZ},
+        {quarterX, threeQuarterZ},
+        {threeQuarterX, threeQuarterZ}
+    }};
+
+    constexpr float kCityRadius = 14.0f;
+    constexpr float kCityRadiusSq = kCityRadius * kCityRadius;
+    constexpr int kStreetPeriod = 9;
+    constexpr int kStreetWidth = 2;
+
+    auto positiveMod = [](int value, int modulus) -> int {
+        const int m = value % modulus;
+        return (m < 0) ? (m + modulus) : m;
+    };
+
+    auto cityHeightAt = [&](int worldX, int worldZ, int terrainHeight) -> int {
+        int targetHeight = terrainHeight;
+        for (const CityCenter& city : cityCenters) {
+            const float dx = static_cast<float>(worldX - city.x);
+            const float dz = static_cast<float>(worldZ - city.z);
+            const float distSq = (dx * dx) + (dz * dz);
+            if (distSq > kCityRadiusSq) {
+                continue;
+            }
+
+            const float cityT = 1.0f - std::sqrt(distSq) / kCityRadius;
+            const int localX = worldX - city.x;
+            const int localZ = worldZ - city.z;
+
+            // Coarse roads keep dense blocks readable while preserving city mass.
+            const int streetX = positiveMod(localX, kStreetPeriod);
+            const int streetZ = positiveMod(localZ, kStreetPeriod);
+            const bool isStreet = (streetX < kStreetWidth) || (streetZ < kStreetWidth);
+
+            const float lotSeed = (perlin2((static_cast<float>(localX) * 0.61f) + 91.0f,
+                                           (static_cast<float>(localZ) * 0.61f) - 47.0f) * 0.5f) + 0.5f;
+            const float lotMask = std::pow(std::clamp((lotSeed - 0.18f) * 1.22f, 0.0f, 1.0f), 0.85f);
+            if (lotMask <= 0.0f) {
+                continue;
+            }
+
+            int buildingLift = 0;
+            if (isStreet) {
+                buildingLift = 1 + static_cast<int>(std::round(cityT * 2.0f));
+            } else {
+                const float towerCore = (8.0f + (lotMask * 26.0f)) * std::pow(cityT, 0.65f);
+                buildingLift = 4 + static_cast<int>(std::round(towerCore));
+            }
+            targetHeight = std::max(targetHeight, terrainHeight + buildingLift);
+        }
+
+        return std::clamp(targetHeight, 1, Chunk::kSizeY - 2);
+    };
 
     for (Chunk& chunk : m_chunks) {
         const int chunkX = chunk.chunkX();
@@ -142,8 +209,9 @@ inline void ChunkGrid::initializeFlatWorld() {
                 const int worldX = (chunkX * Chunk::kSizeX) + x;
                 const int worldZ = (chunkZ * Chunk::kSizeZ) + z;
                 const int terrainHeight = chunkHeightAt(worldX, worldZ);
+                const int structureHeight = cityHeightAt(worldX, worldZ, terrainHeight);
 
-                for (int y = 0; y <= terrainHeight; ++y) {
+                for (int y = 0; y <= structureHeight; ++y) {
                     chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
                 }
             }

@@ -1,0 +1,28 @@
+#ifndef VOXEL_CAMERA_UNIFORM_SLANGINC
+#define VOXEL_CAMERA_UNIFORM_SLANGINC
+
+struct CameraUniform
+{
+    float4x4 mvp;
+    float4x4 view;
+    float4x4 proj;
+    float4x4 lightViewProj[4];
+    float4 shadowCascadeSplits;
+    float4 shadowAtlasUvRects[4];
+    float4 sunDirectionIntensity;
+    float4 sunColorShadow;
+    float4 shIrradiance[9];
+    float4 shadowConfig0;
+    float4 shadowConfig1;
+    float4 shadowConfig2;
+    float4 shadowConfig3;
+    float4 shadowVoxelGridOrigin;
+    float4 shadowVoxelGridSize;
+    float4 skyConfig0;
+    float4 skyConfig1;
+};
+
+[[vk::binding(0, 0)]]
+ConstantBuffer<CameraUniform> camera;
+
+#endif

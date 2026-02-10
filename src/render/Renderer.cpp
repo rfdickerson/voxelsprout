@@ -1379,23 +1379,13 @@ VkExtent2D chooseExtent(GLFWwindow* window, const VkSurfaceCapabilitiesKHR& capa
     return extent;
 }
 
-std::optional<std::filesystem::path> findFirstExistingPath(std::span<const char* const> candidates) {
-    for (const char* candidate : candidates) {
-        const std::filesystem::path path(candidate);
-        if (std::filesystem::exists(path)) {
-            return path;
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::vector<std::uint8_t>> readBinaryFile(std::span<const char* const> candidates) {
-    const std::optional<std::filesystem::path> path = findFirstExistingPath(candidates);
-    if (!path.has_value()) {
+std::optional<std::vector<std::uint8_t>> readBinaryFile(const char* filePath) {
+    if (filePath == nullptr) {
         return std::nullopt;
     }
 
-    std::ifstream file(path.value(), std::ios::binary | std::ios::ate);
+    const std::filesystem::path path(filePath);
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
         return std::nullopt;
     }
@@ -1413,33 +1403,25 @@ std::optional<std::vector<std::uint8_t>> readBinaryFile(std::span<const char* co
     return data;
 }
 
-bool createShaderModuleFromFileOrFallback(
+bool createShaderModuleFromFile(
     VkDevice device,
-    std::span<const char* const> fileCandidates,
-    const std::uint32_t* fallbackCode,
-    size_t fallbackCodeSize,
+    const char* filePath,
     const char* debugName,
     VkShaderModule& outShaderModule
 ) {
     outShaderModule = VK_NULL_HANDLE;
 
-    const std::optional<std::vector<std::uint8_t>> shaderFileData = readBinaryFile(fileCandidates);
-    const std::uint32_t* code = fallbackCode;
-    size_t codeSize = fallbackCodeSize;
-    if (shaderFileData.has_value()) {
-        if ((shaderFileData->size() % sizeof(std::uint32_t)) != 0) {
-            VOX_LOGE("render") << "invalid SPIR-V byte size for " << debugName << "\n";
-            return false;
-        }
-        code = reinterpret_cast<const std::uint32_t*>(shaderFileData->data());
-        codeSize = shaderFileData->size();
-    } else {
-        if (fallbackCode == nullptr || fallbackCodeSize == 0) {
-            VOX_LOGI("render") << "shader file not found and no fallback available for " << debugName << "\n";
-            return false;
-        }
-        VOX_LOGI("render") << "using embedded fallback shader for " << debugName << "\n";
+    const std::optional<std::vector<std::uint8_t>> shaderFileData = readBinaryFile(filePath);
+    if (!shaderFileData.has_value()) {
+        VOX_LOGE("render") << "missing shader file for " << debugName << ": " << (filePath != nullptr ? filePath : "<null>") << "\n";
+        return false;
     }
+    if ((shaderFileData->size() % sizeof(std::uint32_t)) != 0) {
+        VOX_LOGE("render") << "invalid SPIR-V byte size for " << debugName << ": " << filePath << "\n";
+        return false;
+    }
+    const std::uint32_t* code = reinterpret_cast<const std::uint32_t*>(shaderFileData->data());
+    const size_t codeSize = shaderFileData->size();
 
     VkShaderModuleCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -3700,66 +3682,16 @@ bool Renderer::createGraphicsPipeline() {
         );
     }
 
-    constexpr std::array<const char*, 4> kWorldVertexShaderPathCandidates = {
-        "src/render/shaders/voxel_packed.vert.spv",
-        "../src/render/shaders/voxel_packed.vert.spv",
-        "../../src/render/shaders/voxel_packed.vert.spv",
-        "../../../src/render/shaders/voxel_packed.vert.spv",
-    };
-    constexpr std::array<const char*, 4> kWorldFragmentShaderPathCandidates = {
-        "src/render/shaders/voxel_packed.frag.spv",
-        "../src/render/shaders/voxel_packed.frag.spv",
-        "../../src/render/shaders/voxel_packed.frag.spv",
-        "../../../src/render/shaders/voxel_packed.frag.spv",
-    };
-    constexpr std::array<const char*, 4> kSkyboxVertexShaderPathCandidates = {
-        "src/render/shaders/skybox.vert.spv",
-        "../src/render/shaders/skybox.vert.spv",
-        "../../src/render/shaders/skybox.vert.spv",
-        "../../../src/render/shaders/skybox.vert.spv",
-    };
-    constexpr std::array<const char*, 4> kSkyboxFragmentShaderPathCandidates = {
-        "src/render/shaders/skybox.frag.spv",
-        "../src/render/shaders/skybox.frag.spv",
-        "../../src/render/shaders/skybox.frag.spv",
-        "../../../src/render/shaders/skybox.frag.spv",
-    };
-    constexpr std::array<const char*, 4> kToneMapVertexShaderPathCandidates = {
-        "src/render/shaders/tone_map.vert.spv",
-        "../src/render/shaders/tone_map.vert.spv",
-        "../../src/render/shaders/tone_map.vert.spv",
-        "../../../src/render/shaders/tone_map.vert.spv",
-    };
-    constexpr std::array<const char*, 4> kToneMapFragmentShaderPathCandidates = {
-        "src/render/shaders/tone_map.frag.spv",
-        "../src/render/shaders/tone_map.frag.spv",
-        "../../src/render/shaders/tone_map.frag.spv",
-        "../../../src/render/shaders/tone_map.frag.spv",
-    };
-    constexpr std::array<const char*, 4> kShadowVertexShaderPathCandidates = {
-        "src/render/shaders/shadow_depth.vert.spv",
-        "../src/render/shaders/shadow_depth.vert.spv",
-        "../../src/render/shaders/shadow_depth.vert.spv",
-        "../../../src/render/shaders/shadow_depth.vert.spv",
-    };
-    constexpr std::array<const char*, 4> kShadowFragmentShaderPathCandidates = {
-        "src/render/shaders/shadow_depth.frag.spv",
-        "../src/render/shaders/shadow_depth.frag.spv",
-        "../../src/render/shaders/shadow_depth.frag.spv",
-        "../../../src/render/shaders/shadow_depth.frag.spv",
-    };
-    constexpr std::array<const char*, 4> kPipeShadowVertexShaderPathCandidates = {
-        "src/render/shaders/pipe_shadow.vert.spv",
-        "../src/render/shaders/pipe_shadow.vert.spv",
-        "../../src/render/shaders/pipe_shadow.vert.spv",
-        "../../../src/render/shaders/pipe_shadow.vert.spv",
-    };
-    constexpr std::array<const char*, 4> kPipeShadowFragmentShaderPathCandidates = {
-        "src/render/shaders/pipe_shadow.frag.spv",
-        "../src/render/shaders/pipe_shadow.frag.spv",
-        "../../src/render/shaders/pipe_shadow.frag.spv",
-        "../../../src/render/shaders/pipe_shadow.frag.spv",
-    };
+    constexpr const char* kWorldVertexShaderPath = "../src/render/shaders/voxel_packed.vert.spv";
+    constexpr const char* kWorldFragmentShaderPath = "../src/render/shaders/voxel_packed.frag.slang.spv";
+    constexpr const char* kSkyboxVertexShaderPath = "../src/render/shaders/skybox.vert.spv";
+    constexpr const char* kSkyboxFragmentShaderPath = "../src/render/shaders/skybox.frag.slang.spv";
+    constexpr const char* kToneMapVertexShaderPath = "../src/render/shaders/tone_map.vert.spv";
+    constexpr const char* kToneMapFragmentShaderPath = "../src/render/shaders/tone_map.frag.slang.spv";
+    constexpr const char* kShadowVertexShaderPath = "../src/render/shaders/shadow_depth.vert.spv";
+    constexpr const char* kShadowFragmentShaderPath = "../src/render/shaders/shadow_depth.frag.spv";
+    constexpr const char* kPipeShadowVertexShaderPath = "../src/render/shaders/pipe_shadow.vert.spv";
+    constexpr const char* kPipeShadowFragmentShaderPath = "../src/render/shaders/pipe_shadow.frag.spv";
 
     VkShaderModule worldVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule worldFragShaderModule = VK_NULL_HANDLE;
@@ -3770,32 +3702,26 @@ bool Renderer::createGraphicsPipeline() {
     VkShaderModule shadowVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule shadowFragShaderModule = VK_NULL_HANDLE;
 
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kWorldVertexShaderPathCandidates,
-            kVertShaderSpirv,
-            sizeof(kVertShaderSpirv),
+            kWorldVertexShaderPath,
             "voxel_packed.vert",
             worldVertShaderModule
         )) {
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kWorldFragmentShaderPathCandidates,
-            kFragShaderSpirv,
-            sizeof(kFragShaderSpirv),
+            kWorldFragmentShaderPath,
             "voxel_packed.frag",
             worldFragShaderModule
         )) {
         vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kSkyboxVertexShaderPathCandidates,
-            nullptr,
-            0,
+            kSkyboxVertexShaderPath,
             "skybox.vert",
             skyboxVertShaderModule
         )) {
@@ -3803,11 +3729,9 @@ bool Renderer::createGraphicsPipeline() {
         vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kSkyboxFragmentShaderPathCandidates,
-            nullptr,
-            0,
+            kSkyboxFragmentShaderPath,
             "skybox.frag",
             skyboxFragShaderModule
         )) {
@@ -3816,11 +3740,9 @@ bool Renderer::createGraphicsPipeline() {
         vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kToneMapVertexShaderPathCandidates,
-            nullptr,
-            0,
+            kToneMapVertexShaderPath,
             "tone_map.vert",
             toneMapVertShaderModule
         )) {
@@ -3830,11 +3752,9 @@ bool Renderer::createGraphicsPipeline() {
         vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kToneMapFragmentShaderPathCandidates,
-            nullptr,
-            0,
+            kToneMapFragmentShaderPath,
             "tone_map.frag",
             toneMapFragShaderModule
         )) {
@@ -4202,11 +4122,9 @@ bool Renderer::createGraphicsPipeline() {
         return false;
     }
 
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kShadowVertexShaderPathCandidates,
-            nullptr,
-            0,
+            kShadowVertexShaderPath,
             "shadow_depth.vert",
             shadowVertShaderModule
         )) {
@@ -4223,11 +4141,9 @@ bool Renderer::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kShadowFragmentShaderPathCandidates,
-            nullptr,
-            0,
+            kShadowFragmentShaderPath,
             "shadow_depth.frag",
             shadowFragShaderModule
         )) {
@@ -4345,11 +4261,9 @@ bool Renderer::createGraphicsPipeline() {
 
     VkShaderModule pipeShadowVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule pipeShadowFragShaderModule = VK_NULL_HANDLE;
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kPipeShadowVertexShaderPathCandidates,
-            nullptr,
-            0,
+            kPipeShadowVertexShaderPath,
             "pipe_shadow.vert",
             pipeShadowVertShaderModule
         )) {
@@ -4361,11 +4275,9 @@ bool Renderer::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kPipeShadowFragmentShaderPathCandidates,
-            nullptr,
-            0,
+            kPipeShadowFragmentShaderPath,
             "pipe_shadow.frag",
             pipeShadowFragShaderModule
         )) {
@@ -4518,36 +4430,22 @@ bool Renderer::createPipePipeline() {
         return false;
     }
 
-    constexpr std::array<const char*, 4> kPipeVertexShaderPathCandidates = {
-        "src/render/shaders/pipe_instanced.vert.spv",
-        "../src/render/shaders/pipe_instanced.vert.spv",
-        "../../src/render/shaders/pipe_instanced.vert.spv",
-        "../../../src/render/shaders/pipe_instanced.vert.spv",
-    };
-    constexpr std::array<const char*, 4> kPipeFragmentShaderPathCandidates = {
-        "src/render/shaders/pipe_instanced.frag.spv",
-        "../src/render/shaders/pipe_instanced.frag.spv",
-        "../../src/render/shaders/pipe_instanced.frag.spv",
-        "../../../src/render/shaders/pipe_instanced.frag.spv",
-    };
+    constexpr const char* kPipeVertexShaderPath = "../src/render/shaders/pipe_instanced.vert.spv";
+    constexpr const char* kPipeFragmentShaderPath = "../src/render/shaders/pipe_instanced.frag.spv";
 
     VkShaderModule pipeVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule pipeFragShaderModule = VK_NULL_HANDLE;
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kPipeVertexShaderPathCandidates,
-            nullptr,
-            0,
+            kPipeVertexShaderPath,
             "pipe_instanced.vert",
             pipeVertShaderModule
         )) {
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kPipeFragmentShaderPathCandidates,
-            nullptr,
-            0,
+            kPipeFragmentShaderPath,
             "pipe_instanced.frag",
             pipeFragShaderModule
         )) {
@@ -4722,48 +4620,13 @@ bool Renderer::createAoPipelines() {
         return false;
     }
 
-    constexpr std::array<const char*, 4> kVoxelVertShaderPathCandidates = {
-        "src/render/shaders/voxel_packed.vert.spv",
-        "../src/render/shaders/voxel_packed.vert.spv",
-        "../../src/render/shaders/voxel_packed.vert.spv",
-        "../../../src/render/shaders/voxel_packed.vert.spv",
-    };
-    constexpr std::array<const char*, 4> kVoxelNormalDepthFragShaderPathCandidates = {
-        "src/render/shaders/voxel_normaldepth.frag.spv",
-        "../src/render/shaders/voxel_normaldepth.frag.spv",
-        "../../src/render/shaders/voxel_normaldepth.frag.spv",
-        "../../../src/render/shaders/voxel_normaldepth.frag.spv",
-    };
-    constexpr std::array<const char*, 4> kPipeVertShaderPathCandidates = {
-        "src/render/shaders/pipe_instanced.vert.spv",
-        "../src/render/shaders/pipe_instanced.vert.spv",
-        "../../src/render/shaders/pipe_instanced.vert.spv",
-        "../../../src/render/shaders/pipe_instanced.vert.spv",
-    };
-    constexpr std::array<const char*, 4> kPipeNormalDepthFragShaderPathCandidates = {
-        "src/render/shaders/pipe_normaldepth.frag.spv",
-        "../src/render/shaders/pipe_normaldepth.frag.spv",
-        "../../src/render/shaders/pipe_normaldepth.frag.spv",
-        "../../../src/render/shaders/pipe_normaldepth.frag.spv",
-    };
-    constexpr std::array<const char*, 4> kFullscreenVertShaderPathCandidates = {
-        "src/render/shaders/tone_map.vert.spv",
-        "../src/render/shaders/tone_map.vert.spv",
-        "../../src/render/shaders/tone_map.vert.spv",
-        "../../../src/render/shaders/tone_map.vert.spv",
-    };
-    constexpr std::array<const char*, 4> kSsaoFragShaderPathCandidates = {
-        "src/render/shaders/ssao.frag.spv",
-        "../src/render/shaders/ssao.frag.spv",
-        "../../src/render/shaders/ssao.frag.spv",
-        "../../../src/render/shaders/ssao.frag.spv",
-    };
-    constexpr std::array<const char*, 4> kSsaoBlurFragShaderPathCandidates = {
-        "src/render/shaders/ssao_blur.frag.spv",
-        "../src/render/shaders/ssao_blur.frag.spv",
-        "../../src/render/shaders/ssao_blur.frag.spv",
-        "../../../src/render/shaders/ssao_blur.frag.spv",
-    };
+    constexpr const char* kVoxelVertShaderPath = "../src/render/shaders/voxel_packed.vert.spv";
+    constexpr const char* kVoxelNormalDepthFragShaderPath = "../src/render/shaders/voxel_normaldepth.frag.spv";
+    constexpr const char* kPipeVertShaderPath = "../src/render/shaders/pipe_instanced.vert.spv";
+    constexpr const char* kPipeNormalDepthFragShaderPath = "../src/render/shaders/pipe_normaldepth.frag.spv";
+    constexpr const char* kFullscreenVertShaderPath = "../src/render/shaders/tone_map.vert.spv";
+    constexpr const char* kSsaoFragShaderPath = "../src/render/shaders/ssao.frag.spv";
+    constexpr const char* kSsaoBlurFragShaderPath = "../src/render/shaders/ssao_blur.frag.spv";
 
     VkShaderModule voxelVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule voxelNormalDepthFragShaderModule = VK_NULL_HANDLE;
@@ -4804,76 +4667,62 @@ bool Renderer::createAoPipelines() {
         }
     };
 
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kVoxelVertShaderPathCandidates,
-            kVertShaderSpirv,
-            sizeof(kVertShaderSpirv),
+            kVoxelVertShaderPath,
             "voxel_packed.vert",
             voxelVertShaderModule
         )) {
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kVoxelNormalDepthFragShaderPathCandidates,
-            nullptr,
-            0,
+            kVoxelNormalDepthFragShaderPath,
             "voxel_normaldepth.frag",
             voxelNormalDepthFragShaderModule
         )) {
         destroyShaderModules();
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kPipeVertShaderPathCandidates,
-            nullptr,
-            0,
+            kPipeVertShaderPath,
             "pipe_instanced.vert",
             pipeVertShaderModule
         )) {
         destroyShaderModules();
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kPipeNormalDepthFragShaderPathCandidates,
-            nullptr,
-            0,
+            kPipeNormalDepthFragShaderPath,
             "pipe_normaldepth.frag",
             pipeNormalDepthFragShaderModule
         )) {
         destroyShaderModules();
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kFullscreenVertShaderPathCandidates,
-            nullptr,
-            0,
+            kFullscreenVertShaderPath,
             "tone_map.vert",
             fullscreenVertShaderModule
         )) {
         destroyShaderModules();
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kSsaoFragShaderPathCandidates,
-            nullptr,
-            0,
+            kSsaoFragShaderPath,
             "ssao.frag",
             ssaoFragShaderModule
         )) {
         destroyShaderModules();
         return false;
     }
-    if (!createShaderModuleFromFileOrFallback(
+    if (!createShaderModuleFromFile(
             m_device,
-            kSsaoBlurFragShaderPathCandidates,
-            nullptr,
-            0,
+            kSsaoBlurFragShaderPath,
             "ssao_blur.frag",
             ssaoBlurFragShaderModule
         )) {
