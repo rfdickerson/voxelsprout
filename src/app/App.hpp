@@ -164,6 +164,9 @@ private:
     bool m_debugUiVisible = false;
     bool m_wasToggleConfigUiDown = false;
     bool m_wasToggleFrameStatsDown = false;
+    bool m_dayCycleEnabled = false;
+    bool m_wasToggleDayCycleDown = false;
+    float m_dayCyclePhase = 0.0f;
     bool m_hoverEnabled = false;
     bool m_wasToggleHoverDown = false;
     bool m_wasRegenerateWorldDown = false;

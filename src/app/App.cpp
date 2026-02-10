@@ -52,6 +52,11 @@ constexpr float kHoverResponse = 8.0f;
 constexpr float kHoverMaxVerticalSpeed = 12.0f;
 constexpr float kHoverManualVerticalSpeed = 8.0f;
 constexpr int kHoverGroundSearchDepth = 96;
+constexpr float kDayCycleSpeedCyclesPerSecond = 0.05f;
+constexpr float kDayCycleLatitudeDegrees = 52.0f;
+constexpr float kDayCycleWinterDeclinationDegrees = -23.0f;
+constexpr float kDayCycleAzimuthOffsetDegrees = 0.0f;
+constexpr float kTwoPi = 6.28318530718f;
 constexpr float kGamepadTriggerPressedThreshold = 0.30f;
 constexpr float kGamepadMoveDeadzone = 0.18f;
 constexpr float kGamepadLookDeadzone = 0.14f;
@@ -384,6 +389,16 @@ bool dirSharesAxis(core::Dir6 lhs, core::Dir6 rhs) {
     return lhs == rhs || core::areOpposite(lhs, rhs);
 }
 
+float wrapDegreesSigned(float degrees) {
+    float wrapped = std::fmod(degrees, 360.0f);
+    if (wrapped <= -180.0f) {
+        wrapped += 360.0f;
+    } else if (wrapped > 180.0f) {
+        wrapped -= 360.0f;
+    }
+    return wrapped;
+}
+
 core::Dir6 horizontalDirFromYaw(float yawDegrees) {
     const float yawRadians = math::radians(yawDegrees);
     const float x = std::cos(yawRadians);
@@ -648,6 +663,42 @@ void App::update(float dt) {
                 m_worldAutosaveElapsedSeconds = 0.0f;
             }
         }
+    }
+
+    if (m_dayCycleEnabled) {
+        m_dayCyclePhase += std::max(dt, 0.0f) * kDayCycleSpeedCyclesPerSecond;
+        m_dayCyclePhase -= std::floor(m_dayCyclePhase);
+        // Winter solar arc model:
+        // - fixed latitude + declination
+        // - hour angle advances through a full day
+        // - yields low sun altitude and modest azimuth drift (SE -> S -> SW)
+        const float latitudeRadians = math::radians(kDayCycleLatitudeDegrees);
+        const float declinationRadians = math::radians(kDayCycleWinterDeclinationDegrees);
+        const float hourAngleRadians = ((m_dayCyclePhase * 360.0f) - 180.0f) * (kTwoPi / 360.0f);
+
+        const float sinLat = std::sin(latitudeRadians);
+        const float cosLat = std::cos(latitudeRadians);
+        const float sinDec = std::sin(declinationRadians);
+        const float cosDec = std::cos(declinationRadians);
+        const float sinHour = std::sin(hourAngleRadians);
+        const float cosHour = std::cos(hourAngleRadians);
+
+        // Local ENU components of sun direction.
+        // Solar convention: negative hour angle = morning (east), positive = afternoon (west).
+        const float sunEast = -cosDec * sinHour;
+        const float sunNorth = (cosLat * sinDec) - (sinLat * cosDec * cosHour);
+        const float sunUp = (sinLat * sinDec) + (cosLat * cosDec * cosHour);
+
+        const float sunPitchDegrees = math::degrees(std::asin(std::clamp(sunUp, -1.0f, 1.0f)));
+        float sunAzimuthDegrees = math::degrees(std::atan2(sunEast, sunNorth));
+        if (sunAzimuthDegrees < 0.0f) {
+            sunAzimuthDegrees += 360.0f;
+        }
+
+        // Convert azimuth (north=0, east=90, south=180) to engine yaw
+        // where yaw 0 = +X (east), yaw 90 = +Z (south), yaw -90 = -Z (north).
+        const float sunYawDegrees = wrapDegreesSigned((sunAzimuthDegrees - 90.0f) + kDayCycleAzimuthOffsetDegrees);
+        m_renderer.setSunAngles(sunYawDegrees, sunPitchDegrees);
     }
 
     render::VoxelPreview preview{};
@@ -945,6 +996,16 @@ void App::pollInput() {
         uiVisibilityChanged = true;
     }
     m_wasToggleConfigUiDown = toggleConfigUiDown;
+
+    const bool toggleDayCycleDown = glfwGetKey(m_window, GLFW_KEY_T) == GLFW_PRESS;
+    if (toggleDayCycleDown && !m_wasToggleDayCycleDown) {
+        m_dayCycleEnabled = !m_dayCycleEnabled;
+        VOX_LOGI("app") << "day cycle " << (m_dayCycleEnabled ? "enabled" : "disabled")
+                        << " (T, winter arc lat=" << kDayCycleLatitudeDegrees
+                        << " decl=" << kDayCycleWinterDeclinationDegrees << ")";
+    }
+    m_wasToggleDayCycleDown = toggleDayCycleDown;
+
     m_renderer.setDebugUiVisible(m_debugUiVisible);
     const bool rendererUiVisible = m_renderer.isDebugUiVisible();
     if (rendererUiVisible != m_debugUiVisible) {

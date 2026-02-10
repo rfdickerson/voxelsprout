@@ -1235,6 +1235,11 @@ bool Renderer::isFrameStatsVisible() const {
     return m_showFrameStatsPanel;
 }
 
+void Renderer::setSunAngles(float yawDegrees, float pitchDegrees) {
+    m_skyDebugSettings.sunYawDegrees = yawDegrees;
+    m_skyDebugSettings.sunPitchDegrees = std::clamp(pitchDegrees, -89.0f, 5.0f);
+}
+
 float Renderer::cameraFovDegrees() const {
     return m_debugCameraFovDegrees;
 }
@@ -7350,8 +7355,19 @@ void Renderer::renderFrame(
     effectiveSkySettings.sunHaloIntensity = m_skyTuningRuntime.sunHaloIntensity;
     effectiveSkySettings.sunDiskSize = m_skyTuningRuntime.sunDiskSize;
     effectiveSkySettings.sunHazeFalloff = m_skyTuningRuntime.sunHazeFalloff;
+    const bool isNight = sunElevationDegrees <= 0.0f;
+    if (isNight) {
+        // Hard night mode: low, cool ambient sky and no direct sun disk/halo.
+        effectiveSkySettings.rayleighStrength = 0.12f;
+        effectiveSkySettings.mieStrength = 0.015f;
+        effectiveSkySettings.skyExposure = 0.14f;
+        effectiveSkySettings.sunDiskIntensity = 0.0f;
+        effectiveSkySettings.sunHaloIntensity = 0.0f;
+    }
 
-    const math::Vector3 sunColor = computeSunColor(effectiveSkySettings, sunDirection);
+    const math::Vector3 sunColor = isNight
+        ? math::Vector3{0.0f, 0.0f, 0.0f}
+        : computeSunColor(effectiveSkySettings, sunDirection);
 
     constexpr float kCascadeLambda = 0.70f;
     constexpr float kCascadeSplitQuantization = 0.5f;
@@ -7439,8 +7455,18 @@ void Renderer::renderFrame(
         lightViewProjMatrices[cascadeIndex] = lightProjection * lightView;
     }
 
-    const std::array<math::Vector3, 9> shIrradiance =
-        computeIrradianceShCoefficients(sunDirection, sunColor, effectiveSkySettings);
+    std::array<math::Vector3, 9> shIrradiance{};
+    if (!isNight) {
+        shIrradiance = computeIrradianceShCoefficients(sunDirection, sunColor, effectiveSkySettings);
+    } else {
+        for (math::Vector3& coefficient : shIrradiance) {
+            coefficient = math::Vector3{0.0f, 0.0f, 0.0f};
+        }
+        // Constant dark-blue ambient irradiance for night.
+        constexpr float kShY00 = 0.282095f;
+        const math::Vector3 nightAmbientIrradiance{0.050f, 0.078f, 0.155f};
+        shIrradiance[0] = nightAmbientIrradiance * (1.0f / kShY00);
+    }
 
     const std::optional<FrameArenaSlice> mvpSliceOpt =
         m_frameArena.allocateUpload(
@@ -7474,7 +7500,7 @@ void Renderer::renderFrame(
     mvpUniform.sunDirectionIntensity[0] = sunDirection.x;
     mvpUniform.sunDirectionIntensity[1] = sunDirection.y;
     mvpUniform.sunDirectionIntensity[2] = sunDirection.z;
-    mvpUniform.sunDirectionIntensity[3] = 2.2f;
+    mvpUniform.sunDirectionIntensity[3] = isNight ? 0.0f : 2.2f;
     mvpUniform.sunColorShadow[0] = sunColor.x;
     mvpUniform.sunColorShadow[1] = sunColor.y;
     mvpUniform.sunColorShadow[2] = sunColor.z;

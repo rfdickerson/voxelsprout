@@ -131,6 +131,7 @@ public:
     bool isDebugUiVisible() const;
     void setFrameStatsVisible(bool visible);
     bool isFrameStatsVisible() const;
+    void setSunAngles(float yawDegrees, float pitchDegrees);
     float cameraFovDegrees() const;
     void shutdown();
 
