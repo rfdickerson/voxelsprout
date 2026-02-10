@@ -89,6 +89,7 @@ public:
         float cascadeBlendFactor = 0.30f;
 
         float pcfRadius = 1.0f;
+        int grassShadowCascadeCount = 1;
 
         float ssaoRadius = 0.55f;
         float ssaoBias = 0.03f;
@@ -250,7 +251,6 @@ private:
     struct GrassBillboardInstance {
         float worldPosYaw[4];
         float colorTint[4];
-        float lightingParams[4];
     };
 
     GLFWwindow* m_window = nullptr;
@@ -415,6 +415,7 @@ private:
     VkDeviceMemory m_diffuseTextureMemory = VK_NULL_HANDLE;
     VkImageView m_diffuseTextureImageView = VK_NULL_HANDLE;
     VkSampler m_diffuseTextureSampler = VK_NULL_HANDLE;
+    VkSampler m_diffuseTexturePlantSampler = VK_NULL_HANDLE;
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};
     VkCommandPool m_transferCommandPool = VK_NULL_HANDLE;
