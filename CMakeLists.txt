@@ -7,32 +7,52 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 
 # Optional Slang shader compilation (to SPIR-V for Vulkan).
-# Produces .slang.spv files next to the source shaders so runtime file lookup can prefer them.
+# Produces .slang.spv files next to the source shaders.
 find_program(SLANGC_EXECUTABLE NAMES slangc)
 if(SLANGC_EXECUTABLE)
-    set(SLANG_SHADER_SOURCES
-        "${CMAKE_SOURCE_DIR}/src/render/shaders/skybox.frag.slang"
-        "${CMAKE_SOURCE_DIR}/src/render/shaders/tone_map.frag.slang"
-        "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang"
+    set(SLANG_SHARED_INCLUDES
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/camera_uniform.slanginc"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/chunk_push_constants.slanginc"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/fullscreen_triangle.slanginc"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/sh_lighting.slanginc"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_decode.slanginc"
     )
     set(SLANG_SHADER_OUTPUTS "")
-    foreach(SLANG_SHADER ${SLANG_SHADER_SOURCES})
+    function(add_slang_shader SLANG_SHADER SLANG_STAGE)
         set(SLANG_OUTPUT "${SLANG_SHADER}.spv")
         add_custom_command(
             OUTPUT "${SLANG_OUTPUT}"
             COMMAND "${SLANGC_EXECUTABLE}"
                 -target spirv
                 -entry main
-                -stage fragment
+                -stage "${SLANG_STAGE}"
                 -matrix-layout-column-major
                 "${SLANG_SHADER}"
                 -o "${SLANG_OUTPUT}"
-            DEPENDS "${SLANG_SHADER}"
+            DEPENDS "${SLANG_SHADER}" ${SLANG_SHARED_INCLUDES}
             COMMENT "Compiling Slang shader ${SLANG_SHADER}"
             VERBATIM
         )
         list(APPEND SLANG_SHADER_OUTPUTS "${SLANG_OUTPUT}")
-    endforeach()
+        set(SLANG_SHADER_OUTPUTS "${SLANG_SHADER_OUTPUTS}" PARENT_SCOPE)
+    endfunction()
+
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_normaldepth.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/skybox.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/skybox.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/tone_map.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/tone_map.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/shadow_depth.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/shadow_depth.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_shadow.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_shadow.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_instanced.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_instanced.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_normaldepth.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao_blur.frag.slang" fragment)
     add_custom_target(slang_shaders DEPENDS ${SLANG_SHADER_OUTPUTS})
 else()
     message(STATUS "slangc not found; skipping Slang shader target")

@@ -1,0 +1,56 @@
+#ifndef VOXEL_DECODE_SLANGINC
+#define VOXEL_DECODE_SLANGINC
+
+static const uint kShiftX = 0u;
+static const uint kShiftY = 5u;
+static const uint kShiftZ = 10u;
+static const uint kShiftFace = 15u;
+static const uint kShiftCorner = 18u;
+static const uint kShiftAo = 20u;
+static const uint kShiftMaterial = 22u;
+
+float3 cornerOffset(uint face, uint corner)
+{
+    if (face == 0u)
+    {
+        if (corner == 0u) return float3(1.0, 0.0, 0.0);
+        if (corner == 1u) return float3(1.0, 1.0, 0.0);
+        if (corner == 2u) return float3(1.0, 1.0, 1.0);
+        return float3(1.0, 0.0, 1.0);
+    }
+    if (face == 1u)
+    {
+        if (corner == 0u) return float3(0.0, 0.0, 1.0);
+        if (corner == 1u) return float3(0.0, 1.0, 1.0);
+        if (corner == 2u) return float3(0.0, 1.0, 0.0);
+        return float3(0.0, 0.0, 0.0);
+    }
+    if (face == 2u)
+    {
+        if (corner == 0u) return float3(0.0, 1.0, 0.0);
+        if (corner == 1u) return float3(0.0, 1.0, 1.0);
+        if (corner == 2u) return float3(1.0, 1.0, 1.0);
+        return float3(1.0, 1.0, 0.0);
+    }
+    if (face == 3u)
+    {
+        if (corner == 0u) return float3(0.0, 0.0, 1.0);
+        if (corner == 1u) return float3(0.0, 0.0, 0.0);
+        if (corner == 2u) return float3(1.0, 0.0, 0.0);
+        return float3(1.0, 0.0, 1.0);
+    }
+    if (face == 4u)
+    {
+        if (corner == 0u) return float3(1.0, 0.0, 1.0);
+        if (corner == 1u) return float3(1.0, 1.0, 1.0);
+        if (corner == 2u) return float3(0.0, 1.0, 1.0);
+        return float3(0.0, 0.0, 1.0);
+    }
+
+    if (corner == 0u) return float3(0.0, 0.0, 0.0);
+    if (corner == 1u) return float3(0.0, 1.0, 0.0);
+    if (corner == 2u) return float3(1.0, 1.0, 0.0);
+    return float3(1.0, 0.0, 0.0);
+}
+
+#endif
