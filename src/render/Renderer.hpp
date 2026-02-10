@@ -97,7 +97,7 @@ public:
 
     struct SkyDebugSettings {
         float sunYawDegrees = -157.5f;
-        float sunPitchDegrees = -24.5f;
+        float sunPitchDegrees = -13.0f;
         float rayleighStrength = 1.0f;
         float mieStrength = 1.0f;
         float mieAnisotropy = 0.55f;

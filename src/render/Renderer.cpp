@@ -2257,7 +2257,7 @@ bool Renderer::createDiffuseTextureResources() {
     }
 
     constexpr uint32_t kTileSize = 16;
-    constexpr uint32_t kTextureTilesX = 5;
+    constexpr uint32_t kTextureTilesX = 9;
     constexpr uint32_t kTextureTilesY = 1;
     constexpr uint32_t kTextureWidth = kTileSize * kTextureTilesX;
     constexpr uint32_t kTextureHeight = kTileSize * kTextureTilesY;
@@ -2314,65 +2314,156 @@ bool Renderer::createDiffuseTextureResources() {
                 r = static_cast<std::uint8_t>(std::clamp(52 + static_cast<int>(noiseB % 18u) - 9, 34, 74));
                 g = static_cast<std::uint8_t>(std::clamp(green, 82, 154));
                 b = static_cast<std::uint8_t>(std::clamp(44 + static_cast<int>(noiseA % 14u) - 7, 26, 64));
-            } else {
-                if (tileIndex == 3u) {
-                    // Wood.
-                    const int stripe = ((localX / 3u) + (localY / 5u)) % 3u;
-                    const int base = (stripe == 0) ? 112 : (stripe == 1 ? 96 : 84);
-                    const int grain = static_cast<int>(noiseA % 16u) - 8;
-                    r = static_cast<std::uint8_t>(std::clamp(base + 34 + grain, 78, 168));
-                    g = static_cast<std::uint8_t>(std::clamp(base + 12 + grain, 56, 136));
-                    b = static_cast<std::uint8_t>(std::clamp(base - 6 + (grain / 2), 36, 110));
-                } else {
-                    // Billboard grass-bush sprite (transparent background).
-                    const int ix = static_cast<int>(localX);
-                    const int iy = static_cast<int>(localY);
-                    const int rowFromBottom = static_cast<int>(kTileSize - 1u - localY);
+            } else if (tileIndex == 3u) {
+                // Wood.
+                const int stripe = ((localX / 3u) + (localY / 5u)) % 3u;
+                const int base = (stripe == 0) ? 112 : (stripe == 1 ? 96 : 84);
+                const int grain = static_cast<int>(noiseA % 16u) - 8;
+                r = static_cast<std::uint8_t>(std::clamp(base + 34 + grain, 78, 168));
+                g = static_cast<std::uint8_t>(std::clamp(base + 12 + grain, 56, 136));
+                b = static_cast<std::uint8_t>(std::clamp(base - 6 + (grain / 2), 36, 110));
+            } else if (tileIndex == 4u) {
+                // Billboard grass-bush sprite (transparent background).
+                const int ix = static_cast<int>(localX);
+                const int iy = static_cast<int>(localY);
+                const int rowFromBottom = static_cast<int>(kTileSize - 1u - localY);
 
-                    auto circleWeight = [&](int cx, int cy, int r) -> float {
-                        const int dx = ix - cx;
-                        const int dy = iy - cy;
-                        const int distSq = (dx * dx) + (dy * dy);
-                        const int radiusSq = r * r;
-                        if (distSq >= radiusSq) {
-                            return 0.0f;
-                        }
-                        return 1.0f - (static_cast<float>(distSq) / static_cast<float>(radiusSq));
-                    };
-
-                    float leafWeight = 0.0f;
-                    leafWeight = std::max(leafWeight, circleWeight(4, 8, 5));
-                    leafWeight = std::max(leafWeight, circleWeight(8, 7, 6));
-                    leafWeight = std::max(leafWeight, circleWeight(11, 8, 5));
-                    leafWeight = std::max(leafWeight, circleWeight(8, 4, 4));
-
-                    const bool stemA = (std::abs(ix - 7) <= 1) && rowFromBottom <= 7;
-                    const bool stemB = (std::abs(ix - 9) <= 1) && rowFromBottom <= 6;
-                    const bool baseTuft = (rowFromBottom <= 3) && (std::abs(ix - 8) <= 5);
-                    const float stemWeight = (stemA || stemB || baseTuft) ? 0.75f : 0.0f;
-                    const float bushWeight = std::max(leafWeight, stemWeight);
-                    if (bushWeight <= 0.02f) {
-                        writePixel(x, y, 0u, 0u, 0u, 0u);
-                        continue;
+                auto circleWeight = [&](int cx, int cy, int radius) -> float {
+                    const int dx = ix - cx;
+                    const int dy = iy - cy;
+                    const int distSq = (dx * dx) + (dy * dy);
+                    const int radiusSq = radius * radius;
+                    if (distSq >= radiusSq) {
+                        return 0.0f;
                     }
+                    return 1.0f - (static_cast<float>(distSq) / static_cast<float>(radiusSq));
+                };
 
-                    const float edgeNoise = static_cast<float>(noiseA % 100u) / 100.0f;
-                    if (bushWeight < (0.22f + (edgeNoise * 0.24f))) {
-                        writePixel(x, y, 0u, 0u, 0u, 0u);
-                        continue;
-                    }
+                float leafWeight = 0.0f;
+                leafWeight = std::max(leafWeight, circleWeight(4, 8, 5));
+                leafWeight = std::max(leafWeight, circleWeight(8, 7, 6));
+                leafWeight = std::max(leafWeight, circleWeight(11, 8, 5));
+                leafWeight = std::max(leafWeight, circleWeight(8, 4, 4));
 
-                    const int green = 122 + static_cast<int>(noiseA % 66u) - 22;
-                    const int red = 42 + static_cast<int>(noiseB % 26u) - 9;
-                    const int blue = 30 + static_cast<int>(noiseA % 16u) - 5;
-                    r = static_cast<std::uint8_t>(std::clamp(red, 22, 88));
-                    g = static_cast<std::uint8_t>(std::clamp(green, 82, 200));
-                    b = static_cast<std::uint8_t>(std::clamp(blue, 16, 84));
-                    const int alphaBase = static_cast<int>(120.0f + (bushWeight * 140.0f));
-                    const std::uint8_t alpha = static_cast<std::uint8_t>(std::clamp(alphaBase + static_cast<int>(noiseB % 28u) - 10, 120, 250));
-                    writePixel(x, y, r, g, b, alpha);
+                const bool stemA = (std::abs(ix - 7) <= 1) && rowFromBottom <= 7;
+                const bool stemB = (std::abs(ix - 9) <= 1) && rowFromBottom <= 6;
+                const bool baseTuft = (rowFromBottom <= 3) && (std::abs(ix - 8) <= 5);
+                const float stemWeight = (stemA || stemB || baseTuft) ? 0.75f : 0.0f;
+                const float bushWeight = std::max(leafWeight, stemWeight);
+                if (bushWeight <= 0.02f) {
+                    writePixel(x, y, 0u, 0u, 0u, 0u);
                     continue;
                 }
+
+                const float edgeNoise = static_cast<float>(noiseA % 100u) / 100.0f;
+                if (bushWeight < (0.22f + (edgeNoise * 0.24f))) {
+                    writePixel(x, y, 0u, 0u, 0u, 0u);
+                    continue;
+                }
+
+                const int green = 122 + static_cast<int>(noiseA % 66u) - 22;
+                const int red = 42 + static_cast<int>(noiseB % 26u) - 9;
+                const int blue = 30 + static_cast<int>(noiseA % 16u) - 5;
+                r = static_cast<std::uint8_t>(std::clamp(red, 22, 88));
+                g = static_cast<std::uint8_t>(std::clamp(green, 82, 200));
+                b = static_cast<std::uint8_t>(std::clamp(blue, 16, 84));
+                const int alphaBase = static_cast<int>(120.0f + (bushWeight * 140.0f));
+                const std::uint8_t alpha = static_cast<std::uint8_t>(std::clamp(alphaBase + static_cast<int>(noiseB % 28u) - 10, 120, 250));
+                writePixel(x, y, r, g, b, alpha);
+                continue;
+            } else {
+                // Procedural flower sprites (tiles 5..8):
+                // 5-6 = poppies (red/orange-red), 7-8 = light wildflowers.
+                const int ix = static_cast<int>(localX);
+                const int iy = static_cast<int>(localY);
+                const int rowFromBottom = static_cast<int>(kTileSize - 1u - localY);
+                const uint32_t flowerVariant = (tileIndex - 5u) & 3u;
+                const bool poppyVariant = flowerVariant < 2u;
+
+                constexpr std::array<std::array<int, 3>, 4> kPetalPalette = {{
+                    {226, 42, 28},   // poppy red
+                    {242, 88, 34},   // poppy orange-red
+                    {236, 212, 244}, // lavender
+                    {246, 232, 198}  // cream
+                }};
+
+                auto circleWeight = [&](int cx, int cy, int radius) -> float {
+                    const int dx = ix - cx;
+                    const int dy = iy - cy;
+                    const int distSq = (dx * dx) + (dy * dy);
+                    const int radiusSq = radius * radius;
+                    if (distSq >= radiusSq) {
+                        return 0.0f;
+                    }
+                    return 1.0f - (static_cast<float>(distSq) / static_cast<float>(radiusSq));
+                };
+
+                const bool stem = (std::abs(ix - (7 + static_cast<int>(flowerVariant & 1u))) <= 0) && rowFromBottom <= 9;
+                const bool leafA = (rowFromBottom >= 2 && rowFromBottom <= 5) && (ix >= 5 && ix <= 7);
+                const bool leafB = (rowFromBottom >= 3 && rowFromBottom <= 6) && (ix >= 8 && ix <= 10);
+                float stemWeight = (stem || leafA || leafB) ? 0.75f : 0.0f;
+                stemWeight += circleWeight(6, 11, 2) * 0.5f;
+                stemWeight += circleWeight(10, 10, 2) * 0.5f;
+                stemWeight = std::clamp(stemWeight, 0.0f, 1.0f);
+
+                const int flowerCenterX = 8 + ((flowerVariant == 1u) ? 1 : (flowerVariant == 2u ? -1 : 0));
+                const int flowerCenterY = 6 + ((flowerVariant >= 2u) ? 1 : 0);
+                float petalWeight = 0.0f;
+                petalWeight = std::max(petalWeight, circleWeight(flowerCenterX, flowerCenterY, 3));
+                petalWeight = std::max(petalWeight, circleWeight(flowerCenterX - 2, flowerCenterY, 3));
+                petalWeight = std::max(petalWeight, circleWeight(flowerCenterX + 2, flowerCenterY, 3));
+                petalWeight = std::max(petalWeight, circleWeight(flowerCenterX, flowerCenterY - 2, 3));
+                petalWeight = std::max(petalWeight, circleWeight(flowerCenterX, flowerCenterY + 2, 3));
+                const float centerWeight = circleWeight(flowerCenterX, flowerCenterY, 2);
+
+                if (petalWeight <= 0.04f && stemWeight <= 0.03f) {
+                    writePixel(x, y, 0u, 0u, 0u, 0u);
+                    continue;
+                }
+
+                const float edgeNoise = static_cast<float>(noiseA % 100u) / 100.0f;
+                if (petalWeight > 0.0f && petalWeight < (0.20f + (edgeNoise * 0.18f)) && stemWeight < 0.45f) {
+                    writePixel(x, y, 0u, 0u, 0u, 0u);
+                    continue;
+                }
+
+                const std::array<int, 3> petalColor = kPetalPalette[flowerVariant];
+                if (petalWeight > stemWeight) {
+                    const int petalShade = static_cast<int>(noiseB % 22u) - 10;
+                    r = static_cast<std::uint8_t>(std::clamp(petalColor[0] + petalShade, 80, 255));
+                    g = static_cast<std::uint8_t>(std::clamp(petalColor[1] + petalShade, 80, 255));
+                    b = static_cast<std::uint8_t>(std::clamp(petalColor[2] + petalShade, 80, 255));
+                    if (centerWeight > 0.42f) {
+                        if (poppyVariant) {
+                            // Dark poppy center.
+                            r = static_cast<std::uint8_t>(std::clamp(34 + static_cast<int>(noiseA % 14u) - 7, 14, 58));
+                            g = static_cast<std::uint8_t>(std::clamp(24 + static_cast<int>(noiseB % 14u) - 7, 10, 46));
+                            b = static_cast<std::uint8_t>(std::clamp(24 + static_cast<int>(noiseA % 12u) - 6, 10, 44));
+                        } else {
+                            r = static_cast<std::uint8_t>(std::clamp(246 + static_cast<int>(noiseA % 16u) - 8, 200, 255));
+                            g = static_cast<std::uint8_t>(std::clamp(212 + static_cast<int>(noiseB % 22u) - 11, 150, 248));
+                            b = static_cast<std::uint8_t>(std::clamp(94 + static_cast<int>(noiseA % 16u) - 8, 52, 140));
+                        }
+                    }
+                    const int alphaBase = static_cast<int>(130.0f + (petalWeight * 120.0f));
+                    const std::uint8_t alpha = static_cast<std::uint8_t>(
+                        std::clamp(alphaBase + static_cast<int>(noiseA % 24u) - 12, 128, 250)
+                    );
+                    writePixel(x, y, r, g, b, alpha);
+                } else {
+                    const int green = 116 + static_cast<int>(noiseA % 36u) - 14;
+                    const int red = 62 + static_cast<int>(noiseB % 24u) - 10;
+                    const int blue = 40 + static_cast<int>(noiseA % 20u) - 10;
+                    r = static_cast<std::uint8_t>(std::clamp(red, 34, 104));
+                    g = static_cast<std::uint8_t>(std::clamp(green, 74, 176));
+                    b = static_cast<std::uint8_t>(std::clamp(blue, 18, 90));
+                    const int alphaBase = static_cast<int>(112.0f + (stemWeight * 122.0f));
+                    const std::uint8_t alpha = static_cast<std::uint8_t>(
+                        std::clamp(alphaBase + static_cast<int>(noiseB % 20u) - 8, 108, 240)
+                    );
+                    writePixel(x, y, r, g, b, alpha);
+                }
+                continue;
             }
             writePixel(x, y, r, g, b);
         }
@@ -5656,12 +5747,39 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
                         instance.worldPosYaw[1] = chunkWorldY + static_cast<float>(y) + 1.02f + yJitter;
                         instance.worldPosYaw[2] = chunkWorldZ + static_cast<float>(z) + 0.5f + jitterZ;
                         instance.worldPosYaw[3] = yawRadians;
-                        // Deterministic but visible per-instance tint variation (hue + value).
-                        const float valueJitter = 0.86f + (rand3 * 0.24f);
-                        instance.colorTint[0] = (0.80f + (tintRand0 * 0.30f)) * valueJitter;
-                        instance.colorTint[1] = (0.90f + (tintRand1 * 0.38f)) * valueJitter;
-                        instance.colorTint[2] = (0.68f + (tintRand2 * 0.26f)) * valueJitter;
-                        instance.colorTint[3] = 1.0f;
+                        // Mostly green bushes, with some flowers.
+                        const bool placeFlower = ((clumpHash >> 5u) % 100u) < 18u;
+                        if (placeFlower) {
+                            // Bias strongly toward poppies (tiles 5-6), with rarer lighter wildflowers (7-8).
+                            const bool choosePoppy = ((clumpHash >> 13u) % 100u) < 74u;
+                            const std::uint32_t flowerTile = choosePoppy
+                                ? (5u + ((clumpHash >> 9u) & 0x1u))
+                                : (7u + ((clumpHash >> 10u) & 0x1u));
+                            if (choosePoppy) {
+                                const float poppyBoost = 0.92f + (tintRand1 * 0.30f);
+                                instance.colorTint[0] = (1.05f + (tintRand0 * 0.55f)) * poppyBoost;
+                                instance.colorTint[1] = (0.58f + (tintRand2 * 0.38f)) * poppyBoost;
+                                instance.colorTint[2] = (0.40f + (tintRand1 * 0.24f)) * poppyBoost;
+                            } else {
+                                const float flowerBoost = 0.88f + (tintRand1 * 0.30f);
+                                instance.colorTint[0] = (0.96f + (tintRand0 * 0.42f)) * flowerBoost;
+                                instance.colorTint[1] = (0.96f + (tintRand2 * 0.42f)) * flowerBoost;
+                                instance.colorTint[2] = (0.96f + (tintRand1 * 0.42f)) * flowerBoost;
+                            }
+                            instance.colorTint[3] = static_cast<float>(flowerTile);
+                        } else {
+                            // Golden grass variation.
+                            const float warmBias = 0.50f + (0.50f * tintRand0);
+                            const float dryBias = tintRand2;
+                            const float brightness = 0.82f + (tintRand1 * 0.32f);
+                            const float redBase = std::lerp(0.90f, 1.28f, warmBias);
+                            const float greenBase = std::lerp(0.98f, 1.36f, (warmBias * 0.70f) + (dryBias * 0.30f));
+                            const float blueBase = std::lerp(0.56f, 0.20f, warmBias);
+                            instance.colorTint[0] = redBase * brightness;
+                            instance.colorTint[1] = greenBase * brightness;
+                            instance.colorTint[2] = blueBase * brightness;
+                            instance.colorTint[3] = 4.0f;
+                        }
                         grassInstances.push_back(instance);
                     }
                 }

@@ -11,7 +11,7 @@ static const uint kGrassSpriteTile = 4u;
 struct FragmentInput
 {
     float2 inUv : TEXCOORD0;
-    float3 inColorTint : TEXCOORD1;
+    float4 inColorTint : TEXCOORD1;
     float3 inWorldPosition : TEXCOORD2;
 };
 
@@ -78,15 +78,17 @@ float3 applyAtmosphericFog(float3 litColor, float3 worldPosition, float viewDept
     return (litColor * transmittance) + (inscatterColor * (float3(1.0, 1.0, 1.0) - transmittance));
 }
 
-float4 sampleGrassSprite(float2 uv)
+float4 sampleGrassSprite(float2 uv, uint tileIndex)
 {
     uint texW = 0u;
     uint texH = 0u;
     bindlessTextures[kBindlessTextureIndexDiffuseAtlas].GetDimensions(texW, texH);
     const uint tilesX = max(texW / kVoxelAtlasTileSize, 1u);
     const uint tilesY = max(texH / kVoxelAtlasTileSize, 1u);
-    const uint tileX = kGrassSpriteTile % tilesX;
-    const uint tileY = kGrassSpriteTile / tilesX;
+    const uint tileCount = max(tilesX * tilesY, 1u);
+    const uint clampedTile = min(tileIndex, tileCount - 1u);
+    const uint tileX = clampedTile % tilesX;
+    const uint tileY = clampedTile / tilesX;
     const float inset = 0.5 / float(kVoxelAtlasTileSize);
     const float2 uvInset = lerp(float2(inset, inset), float2(1.0 - inset, 1.0 - inset), saturate(uv));
     const float2 atlasUv = (float2(float(tileX), float(tileY)) + uvInset) / float2(float(tilesX), float(tilesY));
@@ -95,7 +97,8 @@ float4 sampleGrassSprite(float2 uv)
 
 float4 main(FragmentInput input) : SV_Target0
 {
-    const float4 sprite = sampleGrassSprite(input.inUv);
+    const uint spriteTile = uint(clamp(input.inColorTint.w, 0.0, 255.0) + 0.5);
+    const float4 sprite = sampleGrassSprite(input.inUv, (spriteTile == 0u) ? kGrassSpriteTile : spriteTile);
     if (sprite.a < 0.50)
     {
         discard;
@@ -113,7 +116,10 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 ambient = lerp(groundAmbient, skyAmbient, canopyT);
     const float3 direct = sunColor * (sunIntensity * (wrappedNdotL + transmission) * 0.70);
 
-    const float3 variedSprite = sprite.rgb * clamp(input.inColorTint, float3(0.5, 0.5, 0.5), float3(1.5, 1.5, 1.5));
+    const float3 tint = clamp(input.inColorTint.xyz, float3(0.10, 0.10, 0.10), float3(2.50, 2.50, 2.50));
+    const bool isFlower = spriteTile >= 5u;
+    const float flowerTintStrength = isFlower ? 1.0 : 0.68;
+    const float3 variedSprite = lerp(sprite.rgb, sprite.rgb * tint, flowerTintStrength);
     const float3 lit = variedSprite * (ambient + direct);
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
     const float3 fogged = applyAtmosphericFog(lit, input.inWorldPosition, viewDepth, sunDirection);
