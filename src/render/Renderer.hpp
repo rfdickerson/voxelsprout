@@ -211,10 +211,10 @@ private:
     void beginDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
     void endDebugLabel(VkCommandBuffer commandBuffer) const;
     void insertDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
-    bool waitForTimelineValue(uint64_t value) const;
     void readGpuTimestampResults(uint32_t frameIndex);
     void scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue);
     void collectCompletedBufferReleases();
+    bool isTimelineValueReached(uint64_t value) const;
 
     struct DeferredBufferRelease {
         BufferHandle handle = kInvalidBufferHandle;

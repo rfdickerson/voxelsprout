@@ -5980,10 +5980,11 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
 
     collectCompletedBufferReleases();
 
-    if (m_transferCommandBufferInFlightValue > 0 && !waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
-        VOX_LOGE("render") << "failed waiting for prior transfer upload\n";
-        cleanupPendingAllocations();
-        return false;
+    if (m_transferCommandBufferInFlightValue > 0) {
+        if (!isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
+            cleanupPendingAllocations();
+            return false;
+        }
     }
     m_transferCommandBufferInFlightValue = 0;
     collectCompletedBufferReleases();
@@ -6661,23 +6662,17 @@ void Renderer::buildAimReticleUi() {
 }
 #endif
 
-bool Renderer::waitForTimelineValue(uint64_t value) const {
+bool Renderer::isTimelineValueReached(uint64_t value) const {
     if (value == 0 || m_renderTimelineSemaphore == VK_NULL_HANDLE) {
         return true;
     }
-
-    VkSemaphore waitSemaphore = m_renderTimelineSemaphore;
-    VkSemaphoreWaitInfo waitInfo{};
-    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-    waitInfo.semaphoreCount = 1;
-    waitInfo.pSemaphores = &waitSemaphore;
-    waitInfo.pValues = &value;
-    const VkResult waitResult = vkWaitSemaphores(m_device, &waitInfo, std::numeric_limits<uint64_t>::max());
-    if (waitResult != VK_SUCCESS) {
-        logVkFailure("vkWaitSemaphores(timeline)", waitResult);
+    uint64_t completedValue = 0;
+    const VkResult result = vkGetSemaphoreCounterValue(m_device, m_renderTimelineSemaphore, &completedValue);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkGetSemaphoreCounterValue(timeline)", result);
         return false;
     }
-    return true;
+    return completedValue >= value;
 }
 
 void Renderer::readGpuTimestampResults(uint32_t frameIndex) {
@@ -6829,32 +6824,35 @@ void Renderer::renderFrame(
     collectCompletedBufferReleases();
 
     FrameResources& frame = m_frames[m_currentFrame];
-    if (!waitForTimelineValue(m_frameTimelineValues[m_currentFrame])) {
+    if (!isTimelineValueReached(m_frameTimelineValues[m_currentFrame])) {
         return;
     }
     if (m_frameTimelineValues[m_currentFrame] > 0) {
         readGpuTimestampResults(m_currentFrame);
     }
     if (m_transferCommandBufferInFlightValue > 0) {
-        if (!waitForTimelineValue(m_transferCommandBufferInFlightValue)) {
-            return;
+        if (isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
+            m_transferCommandBufferInFlightValue = 0;
+            m_pendingTransferTimelineValue = 0;
+            collectCompletedBufferReleases();
         }
-        m_transferCommandBufferInFlightValue = 0;
-        m_pendingTransferTimelineValue = 0;
-        collectCompletedBufferReleases();
     }
     m_frameArena.beginFrame(m_currentFrame);
 
     if (m_chunkMeshRebuildRequested || !m_pendingChunkRemeshIndices.empty()) {
-        const std::span<const std::size_t> pendingRemeshIndices =
-            m_chunkMeshRebuildRequested
-                ? std::span<const std::size_t>{}
-                : std::span<const std::size_t>(m_pendingChunkRemeshIndices.data(), m_pendingChunkRemeshIndices.size());
-        if (createChunkBuffers(chunkGrid, pendingRemeshIndices)) {
-            m_chunkMeshRebuildRequested = false;
-            m_pendingChunkRemeshIndices.clear();
-        } else {
-            VOX_LOGE("render") << "failed deferred chunk remesh";
+        // Avoid CPU stalls when async transfer is still in flight.
+        if (m_transferCommandBufferInFlightValue == 0 ||
+            isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
+            const std::span<const std::size_t> pendingRemeshIndices =
+                m_chunkMeshRebuildRequested
+                    ? std::span<const std::size_t>{}
+                    : std::span<const std::size_t>(m_pendingChunkRemeshIndices.data(), m_pendingChunkRemeshIndices.size());
+            if (createChunkBuffers(chunkGrid, pendingRemeshIndices)) {
+                m_chunkMeshRebuildRequested = false;
+                m_pendingChunkRemeshIndices.clear();
+            } else {
+                VOX_LOGE("render") << "failed deferred chunk remesh";
+            }
         }
     }
 
@@ -6878,9 +6876,6 @@ void Renderer::renderFrame(
         return;
     }
 
-    if (!waitForTimelineValue(m_swapchainImageTimelineValues[imageIndex])) {
-        return;
-    }
     const VkSemaphore renderFinishedSemaphore = m_renderFinishedSemaphores[imageIndex];
     const uint32_t aoFrameIndex = m_currentFrame % kMaxFramesInFlight;
 
