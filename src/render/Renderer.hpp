@@ -104,6 +104,7 @@ public:
         float skyExposure = 1.0f;
         float sunDiskSize = 2.0f;
         float sunHazeFalloff = 0.35f;
+        float plantQuadDirectionality = 0.34f;
     };
 
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);

@@ -15,6 +15,7 @@ struct VertexOutput
     float2 outUv : TEXCOORD0;
     float4 outColorTint : TEXCOORD1;
     float3 outWorldPosition : TEXCOORD2;
+    float3 outQuadNormal : TEXCOORD3;
 };
 
 VertexOutput main(VertexInput input)
@@ -43,5 +44,6 @@ VertexOutput main(VertexInput input)
     output.outUv = input.inUv;
     output.outColorTint = input.inColorTint;
     output.outWorldPosition = worldPosition;
+    output.outQuadNormal = normalize(cross(up, right));
     return output;
 }

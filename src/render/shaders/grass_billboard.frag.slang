@@ -13,6 +13,7 @@ struct FragmentInput
     float2 inUv : TEXCOORD0;
     float4 inColorTint : TEXCOORD1;
     float3 inWorldPosition : TEXCOORD2;
+    float3 inQuadNormal : TEXCOORD3;
 };
 
 float3 proceduralSkyNoSunDisk(float3 direction)
@@ -108,8 +109,16 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
     const float3 sunColor = camera.sunColorShadow.xyz;
-    const float wrappedNdotL = saturate((dot(plantNormal, -sunDirection) + 0.40) / 1.40);
-    const float transmission = saturate(dot(plantNormal, sunDirection)) * 0.18;
+    float3 quadNormal = normalize(input.inQuadNormal);
+    if (dot(quadNormal, -sunDirection) < 0.0) {
+        quadNormal = -quadNormal;
+    }
+    const float directionalWeight = clamp(camera.skyConfig2.z, 0.0, 1.0);
+    const float3 lightingNormal = normalize(lerp(plantNormal, quadNormal, directionalWeight));
+    const float wrappedNdotL = saturate((dot(lightingNormal, -sunDirection) + 0.40) / 1.40);
+    const float transmission =
+        (saturate(dot(plantNormal, sunDirection)) * 0.12) +
+        (saturate(dot(-quadNormal, sunDirection)) * 0.10 * directionalWeight);
     const float canopyT = smoothstep(0.05, 0.95, saturate(input.inUv.y));
     const float3 skyAmbient = evaluateShIrradiance(float3(0.0, 1.0, 0.0)) * 0.33;
     const float3 groundAmbient = evaluateShIrradiance(float3(0.0, -1.0, 0.0)) * 0.14;

@@ -6669,6 +6669,9 @@ void Renderer::buildSunDebugUi() {
     ImGui::Text("Sun Disk");
     ImGui::SliderFloat("Sun Disk Size", &m_skyDebugSettings.sunDiskSize, 0.5f, 6.0f, "%.2f");
     ImGui::SliderFloat("Sun Haze Falloff", &m_skyDebugSettings.sunHazeFalloff, 0.10f, 1.20f, "%.2f");
+    ImGui::Separator();
+    ImGui::Text("Plants");
+    ImGui::SliderFloat("Plant Quad Directionality", &m_skyDebugSettings.plantQuadDirectionality, 0.0f, 1.0f, "%.2f");
     if (ImGui::Button("Reset Sun/Sky Defaults")) {
         m_skyDebugSettings = SkyDebugSettings{};
     }
@@ -7227,7 +7230,7 @@ void Renderer::renderFrame(
     mvpUniform.skyConfig1[3] = 1.85f;
     mvpUniform.skyConfig2[0] = m_skyDebugSettings.sunDiskSize;
     mvpUniform.skyConfig2[1] = m_skyDebugSettings.sunHazeFalloff;
-    mvpUniform.skyConfig2[2] = 0.0f;
+    mvpUniform.skyConfig2[2] = m_skyDebugSettings.plantQuadDirectionality;
     mvpUniform.skyConfig2[3] = 0.0f;
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
