@@ -1,5 +1,16 @@
 import camera_uniform;
 
+float saturate01(float value)
+{
+    return clamp(value, 0.0, 1.0);
+}
+
+float smoothStep(float edge0, float edge1, float x)
+{
+    const float t = saturate01((x - edge0) / max(edge1 - edge0, 1e-6));
+    return t * t * (3.0 - (2.0 * t));
+}
+
 float3 proceduralSky(float3 direction, float3 sunDirection)
 {
     const float3 dir = normalize(direction);
@@ -9,14 +20,31 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
     const float mieG = clamp(camera.skyConfig0.z, 0.0, 0.98);
     const float skyExposure = max(camera.skyConfig0.w, 0.01);
 
-    const float horizonT = clamp((dir.y * 0.5) + 0.5, 0.0, 1.0);
+    const float sunAltitude = clamp(toSun.y, -1.0, 1.0);
+    const float dayFactor = smoothStep(0.05, 0.65, sunAltitude);
+    const float twilightFactor = 1.0 - dayFactor;
+    const float horizonBand = saturate01(1.0 - (abs(sunAltitude) / 0.35));
+    const float warmAmount = twilightFactor * pow(horizonBand, 1.2);
+    const float pinkAmount = warmAmount * saturate01((0.10 - sunAltitude) / 0.30);
+
+    const float horizonT = saturate01((dir.y * 0.5) + 0.5);
     const float skyT = pow(horizonT, 0.35);
+
+    float3 horizonRayleigh = lerp(float3(0.54, 0.70, 1.00), float3(0.74, 0.44, 0.52), warmAmount);
+    float3 horizonMie = lerp(float3(1.00, 0.74, 0.42), float3(1.18, 0.54, 0.30), warmAmount);
+    horizonRayleigh = lerp(horizonRayleigh, float3(0.70, 0.36, 0.68), pinkAmount * 0.70);
+    horizonMie = lerp(horizonMie, float3(1.08, 0.46, 0.72), pinkAmount * 0.85);
+
+    const float zenithWarm = twilightFactor * 0.58;
+    const float3 zenithRayleigh = lerp(float3(0.06, 0.24, 0.54), float3(0.16, 0.12, 0.30), zenithWarm);
+    const float3 zenithMie = lerp(float3(0.22, 0.20, 0.15), float3(0.30, 0.18, 0.24), zenithWarm);
+
     const float3 horizonColor =
-        (float3(0.55, 0.70, 1.00) * rayleighStrength) +
-        (float3(1.00, 0.72, 0.42) * (mieStrength * 0.55));
+        (horizonRayleigh * rayleighStrength) +
+        (horizonMie * (mieStrength * 0.58));
     const float3 zenithColor =
-        (float3(0.06, 0.24, 0.54) * rayleighStrength) +
-        (float3(0.22, 0.20, 0.15) * (mieStrength * 0.25));
+        (zenithRayleigh * rayleighStrength) +
+        (zenithMie * (mieStrength * 0.25));
     float3 sky = lerp(horizonColor, zenithColor, skyT);
 
     const float sunDot = max(dot(dir, toSun), 0.0);
@@ -31,7 +59,7 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
     sky += sunColor * ((sunDisk * 6.5) + (sunGlow * 1.3)) * (1.0 + phaseBoost);
 
     const float3 groundColor = float3(0.05, 0.06, 0.07);
-    const float belowHorizon = clamp(-dir.y, 0.0, 1.0);
+    const float belowHorizon = saturate01(-dir.y);
     const float3 horizonGroundColor = horizonColor * 0.32;
     const float3 ground = lerp(horizonGroundColor, groundColor, pow(belowHorizon, 0.55));
     const float skyWeight = smoothstep(-0.18, 0.02, dir.y);

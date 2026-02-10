@@ -529,21 +529,43 @@ math::Matrix4 lookAt(const math::Vector3& eye, const math::Vector3& target, cons
     return view;
 }
 
+float saturate(float value) {
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+float smoothStep(float edge0, float edge1, float x) {
+    const float t = saturate((x - edge0) / std::max(edge1 - edge0, 1e-6f));
+    return t * t * (3.0f - (2.0f * t));
+}
+
+math::Vector3 lerpVec3(const math::Vector3& a, const math::Vector3& b, float t) {
+    return (a * (1.0f - t)) + (b * t);
+}
+
 math::Vector3 computeSunColor(
     const Renderer::SkyDebugSettings& settings,
     const math::Vector3& sunDirection
 ) {
     const math::Vector3 toSun = -math::normalize(sunDirection);
-    const float sunHeight = std::clamp((toSun.y * 0.5f) + 0.5f, 0.0f, 1.0f);
+    const float sunAltitude = std::clamp(toSun.y, -1.0f, 1.0f);
+    const float dayFactor = smoothStep(0.05f, 0.65f, sunAltitude);
+    const float twilightFactor = 1.0f - dayFactor;
+    const float horizonBand = saturate(1.0f - (std::abs(sunAltitude) / 0.35f));
+    const float warmAmount = twilightFactor * std::pow(horizonBand, 1.2f);
+    const float pinkAmount = warmAmount * saturate((0.10f - sunAltitude) / 0.30f);
+
     const float rayleigh = std::max(settings.rayleighStrength, 0.01f);
     const float mie = std::max(settings.mieStrength, 0.01f);
+    const math::Vector3 dayTint{1.00f, 0.98f, 0.94f};
+    const math::Vector3 goldenTint{1.18f, 0.72f, 0.34f};
+    const math::Vector3 pinkTint{1.08f, 0.56f, 0.74f};
 
-    const math::Vector3 rayleighTint{0.58f, 0.74f, 1.0f};
-    const math::Vector3 mieTint{1.0f, 0.74f, 0.44f};
-    const float warmFactor = std::pow(1.0f - sunHeight, 1.3f);
-    const math::Vector3 rayleighColor = rayleighTint * rayleigh;
-    const math::Vector3 mieColor = mieTint * (mie * (0.55f + (0.45f * warmFactor)));
-    return rayleighColor + mieColor;
+    math::Vector3 sunTint = lerpVec3(dayTint, goldenTint, warmAmount);
+    sunTint = lerpVec3(sunTint, pinkTint, pinkAmount * 0.45f);
+
+    const float scatteringScale = (rayleigh * 0.55f) + (mie * 0.80f);
+    const float twilightBoost = 0.85f + (warmAmount * 0.45f);
+    return sunTint * (scatteringScale * twilightBoost);
 }
 
 math::Vector3 proceduralSkyRadiance(
@@ -554,17 +576,45 @@ math::Vector3 proceduralSkyRadiance(
 ) {
     const math::Vector3 dir = math::normalize(direction);
     const math::Vector3 toSun = -math::normalize(sunDirection);
-    const float horizonT = std::clamp((dir.y * 0.5f) + 0.5f, 0.0f, 1.0f);
+    const float horizonT = saturate((dir.y * 0.5f) + 0.5f);
     const float skyT = std::pow(horizonT, 0.35f);
+    const float sunAltitude = std::clamp(toSun.y, -1.0f, 1.0f);
+    const float dayFactor = smoothStep(0.05f, 0.65f, sunAltitude);
+    const float twilightFactor = 1.0f - dayFactor;
+    const float horizonBand = saturate(1.0f - (std::abs(sunAltitude) / 0.35f));
+    const float warmAmount = twilightFactor * std::pow(horizonBand, 1.2f);
+    const float pinkAmount = warmAmount * saturate((0.10f - sunAltitude) / 0.30f);
 
     const float rayleigh = std::max(settings.rayleighStrength, 0.01f);
     const float mie = std::max(settings.mieStrength, 0.01f);
+
+    const math::Vector3 dayHorizonRayleigh{0.54f, 0.70f, 1.00f};
+    const math::Vector3 dayHorizonMie{1.00f, 0.74f, 0.42f};
+    const math::Vector3 sunsetHorizonRayleigh{0.74f, 0.44f, 0.52f};
+    const math::Vector3 sunsetHorizonMie{1.18f, 0.54f, 0.30f};
+    const math::Vector3 pinkHorizonRayleigh{0.70f, 0.36f, 0.68f};
+    const math::Vector3 pinkHorizonMie{1.08f, 0.46f, 0.72f};
+
+    const float zenithWarm = twilightFactor * 0.58f;
+    const math::Vector3 dayZenithRayleigh{0.06f, 0.24f, 0.54f};
+    const math::Vector3 dayZenithMie{0.22f, 0.20f, 0.15f};
+    const math::Vector3 duskZenithRayleigh{0.16f, 0.12f, 0.30f};
+    const math::Vector3 duskZenithMie{0.30f, 0.18f, 0.24f};
+
+    math::Vector3 horizonRayleigh = lerpVec3(dayHorizonRayleigh, sunsetHorizonRayleigh, warmAmount);
+    math::Vector3 horizonMie = lerpVec3(dayHorizonMie, sunsetHorizonMie, warmAmount);
+    horizonRayleigh = lerpVec3(horizonRayleigh, pinkHorizonRayleigh, pinkAmount * 0.70f);
+    horizonMie = lerpVec3(horizonMie, pinkHorizonMie, pinkAmount * 0.85f);
+
+    const math::Vector3 zenithRayleigh = lerpVec3(dayZenithRayleigh, duskZenithRayleigh, zenithWarm);
+    const math::Vector3 zenithMie = lerpVec3(dayZenithMie, duskZenithMie, zenithWarm);
+
     const math::Vector3 horizonColor =
-        (math::Vector3{0.54f, 0.70f, 1.00f} * rayleigh) +
-        (math::Vector3{1.00f, 0.74f, 0.42f} * (mie * 0.58f));
+        (horizonRayleigh * rayleigh) +
+        (horizonMie * (mie * 0.58f));
     const math::Vector3 zenithColor =
-        (math::Vector3{0.06f, 0.24f, 0.54f} * rayleigh) +
-        (math::Vector3{0.22f, 0.20f, 0.15f} * (mie * 0.25f));
+        (zenithRayleigh * rayleigh) +
+        (zenithMie * (mie * 0.25f));
     const math::Vector3 baseSky = (horizonColor * (1.0f - skyT)) + (zenithColor * skyT);
 
     const float sunDot = std::max(math::dot(dir, toSun), 0.0f);
@@ -577,17 +627,17 @@ math::Vector3 proceduralSkyRadiance(
         std::max(0.001f, std::pow(1.0f + (g * g) - (2.0f * g * sunDot), 1.5f));
     const float phaseBoost = (phaseRayleigh * rayleigh) + (phaseMie * mie * 1.4f);
 
-    const float aboveHorizon = std::clamp(dir.y * 4.0f + 0.2f, 0.0f, 1.0f);
+    const float aboveHorizon = saturate(dir.y * 4.0f + 0.2f);
     const math::Vector3 sky = (baseSky * aboveHorizon)
         + (sunColor * (((sunDisk * 5.0f) + (sunGlow * 1.2f)) * (1.0f + phaseBoost)));
 
     const math::Vector3 groundColor{0.05f, 0.06f, 0.07f};
-    const float belowHorizon = std::clamp(-dir.y, 0.0f, 1.0f);
+    const float belowHorizon = saturate(-dir.y);
     const math::Vector3 horizonGroundColor = horizonColor * 0.32f;
     const float groundWeight = std::pow(belowHorizon, 0.55f);
     const math::Vector3 ground = (horizonGroundColor * (1.0f - groundWeight)) + (groundColor * groundWeight);
 
-    const float skyWeight = std::clamp((dir.y + 0.18f) / 0.20f, 0.0f, 1.0f);
+    const float skyWeight = saturate((dir.y + 0.18f) / 0.20f);
     const float skyExposure = std::max(settings.skyExposure, 0.01f);
     return ((ground * (1.0f - skyWeight)) + (sky * skyWeight)) * skyExposure;
 }

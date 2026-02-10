@@ -89,18 +89,35 @@ float3 sampleMaterialAlbedo(uint material, uint face, float3 worldPosition)
 float3 proceduralSkyNoSunDisk(float3 direction)
 {
     const float3 dir = normalize(direction);
+    const float3 toSun = -normalize(camera.sunDirectionIntensity.xyz);
     const float rayleighStrength = max(camera.skyConfig0.x, 0.01);
     const float mieStrength = max(camera.skyConfig0.y, 0.01);
     const float skyExposure = max(camera.skyConfig0.w, 0.01);
+    const float sunAltitude = clamp(toSun.y, -1.0, 1.0);
+    const float dayFactor = smoothstep(0.05, 0.65, sunAltitude);
+    const float twilightFactor = 1.0 - dayFactor;
+    const float horizonBand = clamp(1.0 - (abs(sunAltitude) / 0.35), 0.0, 1.0);
+    const float warmAmount = twilightFactor * pow(horizonBand, 1.2);
+    const float pinkAmount = warmAmount * clamp((0.10 - sunAltitude) / 0.30, 0.0, 1.0);
 
     const float horizonT = clamp((dir.y * 0.5) + 0.5, 0.0, 1.0);
     const float skyT = pow(horizonT, 0.35);
+
+    float3 horizonRayleigh = lerp(float3(0.54, 0.70, 1.00), float3(0.74, 0.44, 0.52), warmAmount);
+    float3 horizonMie = lerp(float3(1.00, 0.74, 0.42), float3(1.18, 0.54, 0.30), warmAmount);
+    horizonRayleigh = lerp(horizonRayleigh, float3(0.70, 0.36, 0.68), pinkAmount * 0.70);
+    horizonMie = lerp(horizonMie, float3(1.08, 0.46, 0.72), pinkAmount * 0.85);
+
+    const float zenithWarm = twilightFactor * 0.58;
+    const float3 zenithRayleigh = lerp(float3(0.06, 0.24, 0.54), float3(0.16, 0.12, 0.30), zenithWarm);
+    const float3 zenithMie = lerp(float3(0.22, 0.20, 0.15), float3(0.30, 0.18, 0.24), zenithWarm);
+
     const float3 horizonColor =
-        (float3(0.55, 0.70, 1.00) * rayleighStrength) +
-        (float3(1.00, 0.72, 0.42) * (mieStrength * 0.55));
+        (horizonRayleigh * rayleighStrength) +
+        (horizonMie * (mieStrength * 0.58));
     const float3 zenithColor =
-        (float3(0.06, 0.24, 0.54) * rayleighStrength) +
-        (float3(0.22, 0.20, 0.15) * (mieStrength * 0.25));
+        (zenithRayleigh * rayleighStrength) +
+        (zenithMie * (mieStrength * 0.25));
     const float3 sky = lerp(horizonColor, zenithColor, skyT);
 
     const float3 groundColor = float3(0.05, 0.06, 0.07);
