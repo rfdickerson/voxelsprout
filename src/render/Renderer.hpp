@@ -103,8 +103,13 @@ public:
         float mieStrength = 1.0f;
         float mieAnisotropy = 0.55f;
         float skyExposure = 1.0f;
+        float sunDiskIntensity = 1150.0f;
+        float sunHaloIntensity = 22.0f;
         float sunDiskSize = 2.0f;
         float sunHazeFalloff = 0.35f;
+        bool autoSunriseTuning = true;
+        float autoSunriseBlend = 1.0f;
+        float autoSunriseAdaptSpeed = 4.0f;
         float plantQuadDirectionality = 0.34f;
     };
 
@@ -451,6 +456,17 @@ private:
     bool m_debugVisualizeAoNormals = false;
     ShadowDebugSettings m_shadowDebugSettings{};
     SkyDebugSettings m_skyDebugSettings{};
+    struct SkyTuningRuntimeState {
+        bool initialized = false;
+        float rayleighStrength = 1.0f;
+        float mieStrength = 1.0f;
+        float mieAnisotropy = 0.55f;
+        float skyExposure = 1.0f;
+        float sunDiskIntensity = 1150.0f;
+        float sunHaloIntensity = 22.0f;
+        float sunDiskSize = 2.0f;
+        float sunHazeFalloff = 0.35f;
+    } m_skyTuningRuntime{};
 #if defined(VOXEL_HAS_IMGUI)
     bool m_imguiInitialized = false;
     VkDescriptorPool m_imguiDescriptorPool = VK_NULL_HANDLE;

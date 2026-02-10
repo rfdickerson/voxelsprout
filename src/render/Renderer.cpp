@@ -544,6 +544,47 @@ math::Vector3 lerpVec3(const math::Vector3& a, const math::Vector3& b, float t) 
     return (a * (1.0f - t)) + (b * t);
 }
 
+struct SkyTuningSample {
+    float rayleighStrength = 1.0f;
+    float mieStrength = 1.0f;
+    float mieAnisotropy = 0.55f;
+    float skyExposure = 1.0f;
+    float sunDiskIntensity = 1150.0f;
+    float sunHaloIntensity = 22.0f;
+    float sunDiskSize = 2.0f;
+    float sunHazeFalloff = 0.35f;
+};
+
+SkyTuningSample evaluateSunriseSkyTuning(float sunElevationDegrees) {
+    const float h = saturate((sunElevationDegrees + 12.0f) / 32.0f);
+    const float day = smoothStep(0.15f, 0.85f, h);
+
+    SkyTuningSample sample{};
+    sample.rayleighStrength = std::lerp(1.20f, 1.00f, day);
+    sample.mieStrength = std::lerp(1.85f, 0.75f, day);
+    sample.mieAnisotropy = std::lerp(0.87f, 0.78f, day);
+    sample.skyExposure = std::lerp(1.35f, 1.00f, day);
+    sample.sunDiskIntensity = std::lerp(1450.0f, 1150.0f, day);
+    sample.sunHaloIntensity = std::lerp(36.0f, 22.0f, day);
+    sample.sunDiskSize = std::lerp(3.2f, 1.8f, day);
+    sample.sunHazeFalloff = std::lerp(0.62f, 0.34f, day);
+    return sample;
+}
+
+SkyTuningSample blendSkyTuningSample(const SkyTuningSample& base, const SkyTuningSample& target, float blend) {
+    const float t = std::clamp(blend, 0.0f, 1.0f);
+    SkyTuningSample result{};
+    result.rayleighStrength = std::lerp(base.rayleighStrength, target.rayleighStrength, t);
+    result.mieStrength = std::lerp(base.mieStrength, target.mieStrength, t);
+    result.mieAnisotropy = std::lerp(base.mieAnisotropy, target.mieAnisotropy, t);
+    result.skyExposure = std::lerp(base.skyExposure, target.skyExposure, t);
+    result.sunDiskIntensity = std::lerp(base.sunDiskIntensity, target.sunDiskIntensity, t);
+    result.sunHaloIntensity = std::lerp(base.sunHaloIntensity, target.sunHaloIntensity, t);
+    result.sunDiskSize = std::lerp(base.sunDiskSize, target.sunDiskSize, t);
+    result.sunHazeFalloff = std::lerp(base.sunHazeFalloff, target.sunHazeFalloff, t);
+    return result;
+}
+
 math::Vector3 computeSunColor(
     const Renderer::SkyDebugSettings& settings,
     const math::Vector3& sunDirection
@@ -6771,19 +6812,33 @@ void Renderer::buildSunDebugUi() {
     ImGui::SliderFloat("Sun Yaw", &m_skyDebugSettings.sunYawDegrees, -180.0f, 180.0f, "%.1f deg");
     ImGui::SliderFloat("Sun Pitch", &m_skyDebugSettings.sunPitchDegrees, -89.0f, 5.0f, "%.1f deg");
     ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
+    ImGui::Checkbox("Auto Sunrise Tuning", &m_skyDebugSettings.autoSunriseTuning);
+    ImGui::SliderFloat("Auto Sunrise Blend", &m_skyDebugSettings.autoSunriseBlend, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Auto Adapt Speed", &m_skyDebugSettings.autoSunriseAdaptSpeed, 0.5f, 12.0f, "%.2f");
+    ImGui::Separator();
+    ImGui::Text("Atmosphere");
     ImGui::SliderFloat("Rayleigh Strength", &m_skyDebugSettings.rayleighStrength, 0.1f, 4.0f, "%.2f");
     ImGui::SliderFloat("Mie Strength", &m_skyDebugSettings.mieStrength, 0.05f, 4.0f, "%.2f");
     ImGui::SliderFloat("Mie Anisotropy", &m_skyDebugSettings.mieAnisotropy, 0.0f, 0.95f, "%.2f");
     ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
     ImGui::Separator();
     ImGui::Text("Sun Disk");
+    ImGui::SliderFloat("Sun Disk Intensity", &m_skyDebugSettings.sunDiskIntensity, 300.0f, 2200.0f, "%.0f");
+    ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");
     ImGui::SliderFloat("Sun Disk Size", &m_skyDebugSettings.sunDiskSize, 0.5f, 6.0f, "%.2f");
     ImGui::SliderFloat("Sun Haze Falloff", &m_skyDebugSettings.sunHazeFalloff, 0.10f, 1.20f, "%.2f");
+    ImGui::Text("Active: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",
+        m_skyTuningRuntime.rayleighStrength,
+        m_skyTuningRuntime.mieStrength,
+        m_skyTuningRuntime.skyExposure,
+        m_skyTuningRuntime.sunDiskSize
+    );
     ImGui::Separator();
     ImGui::Text("Plants");
     ImGui::SliderFloat("Plant Quad Directionality", &m_skyDebugSettings.plantQuadDirectionality, 0.0f, 1.0f, "%.2f");
     if (ImGui::Button("Reset Sun/Sky Defaults")) {
         m_skyDebugSettings = SkyDebugSettings{};
+        m_skyTuningRuntime = Renderer::SkyTuningRuntimeState{};
     }
     ImGui::End();
 }
@@ -7004,8 +7059,10 @@ void Renderer::renderFrame(
     }
 
     const double frameNowSeconds = glfwGetTime();
+    float frameDeltaSeconds = 1.0f / 60.0f;
     if (m_lastFrameTimestampSeconds > 0.0) {
         const double deltaSeconds = std::max(0.0, frameNowSeconds - m_lastFrameTimestampSeconds);
+        frameDeltaSeconds = static_cast<float>(deltaSeconds);
         m_debugFrameTimeMs = static_cast<float>(deltaSeconds * 1000.0);
         m_debugFps = (deltaSeconds > 0.0) ? static_cast<float>(1.0 / deltaSeconds) : 0.0f;
         m_debugCpuFrameTimingMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugFrameTimeMs;
@@ -7227,7 +7284,74 @@ void Renderer::renderFrame(
     if (math::lengthSquared(sunDirection) <= 0.0001f) {
         sunDirection = math::Vector3{-0.58f, -0.42f, -0.24f};
     }
-    const math::Vector3 sunColor = computeSunColor(m_skyDebugSettings, sunDirection);
+    const math::Vector3 toSun = -math::normalize(sunDirection);
+    const float sunElevationDegrees = math::degrees(std::asin(std::clamp(toSun.y, -1.0f, 1.0f)));
+
+    SkyTuningSample manualTuning{};
+    manualTuning.rayleighStrength = m_skyDebugSettings.rayleighStrength;
+    manualTuning.mieStrength = m_skyDebugSettings.mieStrength;
+    manualTuning.mieAnisotropy = m_skyDebugSettings.mieAnisotropy;
+    manualTuning.skyExposure = m_skyDebugSettings.skyExposure;
+    manualTuning.sunDiskIntensity = m_skyDebugSettings.sunDiskIntensity;
+    manualTuning.sunHaloIntensity = m_skyDebugSettings.sunHaloIntensity;
+    manualTuning.sunDiskSize = m_skyDebugSettings.sunDiskSize;
+    manualTuning.sunHazeFalloff = m_skyDebugSettings.sunHazeFalloff;
+
+    SkyTuningSample targetTuning = manualTuning;
+    if (m_skyDebugSettings.autoSunriseTuning) {
+        const SkyTuningSample autoTuning = evaluateSunriseSkyTuning(sunElevationDegrees);
+        targetTuning = blendSkyTuningSample(manualTuning, autoTuning, m_skyDebugSettings.autoSunriseBlend);
+    }
+
+    if (!m_skyDebugSettings.autoSunriseTuning || m_skyDebugSettings.autoSunriseBlend <= 0.0f) {
+        m_skyTuningRuntime.initialized = true;
+        m_skyTuningRuntime.rayleighStrength = targetTuning.rayleighStrength;
+        m_skyTuningRuntime.mieStrength = targetTuning.mieStrength;
+        m_skyTuningRuntime.mieAnisotropy = targetTuning.mieAnisotropy;
+        m_skyTuningRuntime.skyExposure = targetTuning.skyExposure;
+        m_skyTuningRuntime.sunDiskIntensity = targetTuning.sunDiskIntensity;
+        m_skyTuningRuntime.sunHaloIntensity = targetTuning.sunHaloIntensity;
+        m_skyTuningRuntime.sunDiskSize = targetTuning.sunDiskSize;
+        m_skyTuningRuntime.sunHazeFalloff = targetTuning.sunHazeFalloff;
+    } else if (!m_skyTuningRuntime.initialized) {
+        m_skyTuningRuntime.initialized = true;
+        m_skyTuningRuntime.rayleighStrength = targetTuning.rayleighStrength;
+        m_skyTuningRuntime.mieStrength = targetTuning.mieStrength;
+        m_skyTuningRuntime.mieAnisotropy = targetTuning.mieAnisotropy;
+        m_skyTuningRuntime.skyExposure = targetTuning.skyExposure;
+        m_skyTuningRuntime.sunDiskIntensity = targetTuning.sunDiskIntensity;
+        m_skyTuningRuntime.sunHaloIntensity = targetTuning.sunHaloIntensity;
+        m_skyTuningRuntime.sunDiskSize = targetTuning.sunDiskSize;
+        m_skyTuningRuntime.sunHazeFalloff = targetTuning.sunHazeFalloff;
+    } else {
+        const float adaptSpeed = std::max(m_skyDebugSettings.autoSunriseAdaptSpeed, 0.01f);
+        const float alpha = 1.0f - std::exp(-std::max(frameDeltaSeconds, 0.0f) * adaptSpeed);
+        m_skyTuningRuntime.rayleighStrength =
+            std::lerp(m_skyTuningRuntime.rayleighStrength, targetTuning.rayleighStrength, alpha);
+        m_skyTuningRuntime.mieStrength = std::lerp(m_skyTuningRuntime.mieStrength, targetTuning.mieStrength, alpha);
+        m_skyTuningRuntime.mieAnisotropy =
+            std::lerp(m_skyTuningRuntime.mieAnisotropy, targetTuning.mieAnisotropy, alpha);
+        m_skyTuningRuntime.skyExposure = std::lerp(m_skyTuningRuntime.skyExposure, targetTuning.skyExposure, alpha);
+        m_skyTuningRuntime.sunDiskIntensity =
+            std::lerp(m_skyTuningRuntime.sunDiskIntensity, targetTuning.sunDiskIntensity, alpha);
+        m_skyTuningRuntime.sunHaloIntensity =
+            std::lerp(m_skyTuningRuntime.sunHaloIntensity, targetTuning.sunHaloIntensity, alpha);
+        m_skyTuningRuntime.sunDiskSize = std::lerp(m_skyTuningRuntime.sunDiskSize, targetTuning.sunDiskSize, alpha);
+        m_skyTuningRuntime.sunHazeFalloff =
+            std::lerp(m_skyTuningRuntime.sunHazeFalloff, targetTuning.sunHazeFalloff, alpha);
+    }
+
+    SkyDebugSettings effectiveSkySettings = m_skyDebugSettings;
+    effectiveSkySettings.rayleighStrength = m_skyTuningRuntime.rayleighStrength;
+    effectiveSkySettings.mieStrength = m_skyTuningRuntime.mieStrength;
+    effectiveSkySettings.mieAnisotropy = m_skyTuningRuntime.mieAnisotropy;
+    effectiveSkySettings.skyExposure = m_skyTuningRuntime.skyExposure;
+    effectiveSkySettings.sunDiskIntensity = m_skyTuningRuntime.sunDiskIntensity;
+    effectiveSkySettings.sunHaloIntensity = m_skyTuningRuntime.sunHaloIntensity;
+    effectiveSkySettings.sunDiskSize = m_skyTuningRuntime.sunDiskSize;
+    effectiveSkySettings.sunHazeFalloff = m_skyTuningRuntime.sunHazeFalloff;
+
+    const math::Vector3 sunColor = computeSunColor(effectiveSkySettings, sunDirection);
 
     constexpr float kCascadeLambda = 0.70f;
     constexpr float kCascadeSplitQuantization = 0.5f;
@@ -7316,7 +7440,7 @@ void Renderer::renderFrame(
     }
 
     const std::array<math::Vector3, 9> shIrradiance =
-        computeIrradianceShCoefficients(sunDirection, sunColor, m_skyDebugSettings);
+        computeIrradianceShCoefficients(sunDirection, sunColor, effectiveSkySettings);
 
     const std::optional<FrameArenaSlice> mvpSliceOpt =
         m_frameArena.allocateUpload(
@@ -7401,19 +7525,19 @@ void Renderer::renderFrame(
         mvpUniform.shadowVoxelGridSize[3] = m_debugEnableSsao ? 1.0f : 0.0f;
     }
 
-    mvpUniform.skyConfig0[0] = m_skyDebugSettings.rayleighStrength;
-    mvpUniform.skyConfig0[1] = m_skyDebugSettings.mieStrength;
-    mvpUniform.skyConfig0[2] = m_skyDebugSettings.mieAnisotropy;
-    mvpUniform.skyConfig0[3] = m_skyDebugSettings.skyExposure;
+    mvpUniform.skyConfig0[0] = effectiveSkySettings.rayleighStrength;
+    mvpUniform.skyConfig0[1] = effectiveSkySettings.mieStrength;
+    mvpUniform.skyConfig0[2] = effectiveSkySettings.mieAnisotropy;
+    mvpUniform.skyConfig0[3] = effectiveSkySettings.skyExposure;
 
     const float flowTimeSeconds = static_cast<float>(std::fmod(frameNowSeconds, 4096.0));
-    mvpUniform.skyConfig1[0] = 1150.0f;
-    mvpUniform.skyConfig1[1] = 22.0f;
+    mvpUniform.skyConfig1[0] = effectiveSkySettings.sunDiskIntensity;
+    mvpUniform.skyConfig1[1] = effectiveSkySettings.sunHaloIntensity;
     mvpUniform.skyConfig1[2] = flowTimeSeconds;
     mvpUniform.skyConfig1[3] = 1.85f;
-    mvpUniform.skyConfig2[0] = m_skyDebugSettings.sunDiskSize;
-    mvpUniform.skyConfig2[1] = m_skyDebugSettings.sunHazeFalloff;
-    mvpUniform.skyConfig2[2] = m_skyDebugSettings.plantQuadDirectionality;
+    mvpUniform.skyConfig2[0] = effectiveSkySettings.sunDiskSize;
+    mvpUniform.skyConfig2[1] = effectiveSkySettings.sunHazeFalloff;
+    mvpUniform.skyConfig2[2] = effectiveSkySettings.plantQuadDirectionality;
     mvpUniform.skyConfig2[3] = 0.0f;
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
