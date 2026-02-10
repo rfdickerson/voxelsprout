@@ -1169,6 +1169,9 @@ bool createShaderModuleFromFile(
 
 } // namespace
 
+bool isDeviceExtensionAvailable(VkPhysicalDevice physicalDevice, const char* extensionName);
+void appendDeviceExtensionIfMissing(std::vector<const char*>& extensions, const char* extensionName);
+
 void Renderer::setDebugUiVisible(bool visible) {
     if (m_debugUiVisible == visible) {
         return;
@@ -1472,6 +1475,45 @@ bool Renderer::createSurface() {
 bool Renderer::pickPhysicalDevice() {
     m_supportsBindlessDescriptors = false;
     m_bindlessTextureCapacity = 0;
+    m_supportsDisplayTiming = false;
+    m_hasDisplayTimingExtension = false;
+
+    struct CandidateSelection {
+        VkPhysicalDevice device = VK_NULL_HANDLE;
+        VkPhysicalDeviceProperties properties{};
+        uint32_t graphicsQueueFamilyIndex = 0;
+        uint32_t graphicsQueueIndex = 0;
+        uint32_t transferQueueFamilyIndex = 0;
+        uint32_t transferQueueIndex = 0;
+        bool supportsWireframe = false;
+        bool supportsSamplerAnisotropy = false;
+        bool supportsMultiDrawIndirect = false;
+        bool supportsDrawIndirectFirstInstance = false;
+        bool supportsDisplayTiming = false;
+        bool hasDisplayTimingExtension = false;
+        uint32_t bindlessTextureCapacity = 0;
+        float maxSamplerAnisotropy = 1.0f;
+        VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+        VkFormat shadowDepthFormat = VK_FORMAT_UNDEFINED;
+        VkFormat hdrColorFormat = VK_FORMAT_UNDEFINED;
+        VkFormat normalDepthFormat = VK_FORMAT_UNDEFINED;
+        VkFormat ssaoFormat = VK_FORMAT_UNDEFINED;
+    };
+    auto scoreCandidate = [](const CandidateSelection& candidate) -> int {
+        int score = 0;
+        if (candidate.supportsDisplayTiming) {
+            score += 8;
+        }
+        if (candidate.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+            score += 2;
+        }
+        if (candidate.supportsMultiDrawIndirect) {
+            score += 1;
+        }
+        return score;
+    };
+    std::optional<CandidateSelection> bestCandidate;
+    bool anyCandidateSupportsDisplayTiming = false;
 
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
@@ -1618,46 +1660,93 @@ bool Renderer::pickPhysicalDevice() {
             continue;
         }
 
-        const bool supportsWireframe = features2.features.fillModeNonSolid == VK_TRUE;
-        const bool supportsSamplerAnisotropy = features2.features.samplerAnisotropy == VK_TRUE;
-        const bool supportsDrawIndirectFirstInstance = features2.features.drawIndirectFirstInstance == VK_TRUE;
-        const bool supportsMultiDrawIndirect = features2.features.multiDrawIndirect == VK_TRUE;
-        const float maxSamplerAnisotropy = properties.limits.maxSamplerAnisotropy;
-        m_physicalDevice = candidate;
-        m_graphicsQueueFamilyIndex = queueFamily.graphicsAndPresent.value();
-        m_graphicsQueueIndex = queueFamily.graphicsQueueIndex;
-        m_transferQueueFamilyIndex = queueFamily.transfer.value();
-        m_transferQueueIndex = queueFamily.transferQueueIndex;
-        m_supportsWireframePreview = supportsWireframe;
-        m_supportsSamplerAnisotropy = supportsSamplerAnisotropy;
-        m_supportsMultiDrawIndirect = supportsMultiDrawIndirect;
+        const bool displayTimingExtensionAvailable =
+            isDeviceExtensionAvailable(candidate, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+        const bool supportsDisplayTiming = displayTimingExtensionAvailable;
+
+        CandidateSelection candidateSelection{};
+        candidateSelection.device = candidate;
+        candidateSelection.properties = properties;
+        candidateSelection.graphicsQueueFamilyIndex = queueFamily.graphicsAndPresent.value();
+        candidateSelection.graphicsQueueIndex = queueFamily.graphicsQueueIndex;
+        candidateSelection.transferQueueFamilyIndex = queueFamily.transfer.value();
+        candidateSelection.transferQueueIndex = queueFamily.transferQueueIndex;
+        candidateSelection.supportsWireframe = features2.features.fillModeNonSolid == VK_TRUE;
+        candidateSelection.supportsSamplerAnisotropy = features2.features.samplerAnisotropy == VK_TRUE;
+        candidateSelection.supportsDrawIndirectFirstInstance = features2.features.drawIndirectFirstInstance == VK_TRUE;
+        candidateSelection.supportsMultiDrawIndirect = features2.features.multiDrawIndirect == VK_TRUE;
+        candidateSelection.supportsDisplayTiming = supportsDisplayTiming;
+        candidateSelection.hasDisplayTimingExtension = displayTimingExtensionAvailable;
+        if (supportsDisplayTiming) {
+            anyCandidateSupportsDisplayTiming = true;
+        }
+        candidateSelection.bindlessTextureCapacity = bindlessTextureCapacity;
+        candidateSelection.maxSamplerAnisotropy = properties.limits.maxSamplerAnisotropy;
+        candidateSelection.depthFormat = depthFormat;
+        candidateSelection.shadowDepthFormat = shadowDepthFormat;
+        candidateSelection.hdrColorFormat = hdrColorFormat;
+        candidateSelection.normalDepthFormat = normalDepthFormat;
+        candidateSelection.ssaoFormat = ssaoFormat;
+
+        VOX_LOGI("render") << "candidate presentation timing: gpu=" << properties.deviceName
+                           << ", displayTimingSupport=" << (candidateSelection.supportsDisplayTiming ? "yes" : "no")
+                           << "(ext=" << (candidateSelection.hasDisplayTimingExtension ? "yes" : "no") << ")\n";
+
+        if (!bestCandidate.has_value() ||
+            scoreCandidate(candidateSelection) > scoreCandidate(bestCandidate.value())) {
+            bestCandidate = candidateSelection;
+        }
+    }
+
+    if (bestCandidate.has_value()) {
+        const CandidateSelection& selected = bestCandidate.value();
+        m_physicalDevice = selected.device;
+        m_graphicsQueueFamilyIndex = selected.graphicsQueueFamilyIndex;
+        m_graphicsQueueIndex = selected.graphicsQueueIndex;
+        m_transferQueueFamilyIndex = selected.transferQueueFamilyIndex;
+        m_transferQueueIndex = selected.transferQueueIndex;
+        m_supportsWireframePreview = selected.supportsWireframe;
+        m_supportsSamplerAnisotropy = selected.supportsSamplerAnisotropy;
+        m_supportsMultiDrawIndirect = selected.supportsMultiDrawIndirect;
         m_supportsBindlessDescriptors = true;
-        m_bindlessTextureCapacity = bindlessTextureCapacity;
-        m_maxSamplerAnisotropy = maxSamplerAnisotropy;
-        m_depthFormat = depthFormat;
-        m_shadowDepthFormat = shadowDepthFormat;
-        m_hdrColorFormat = hdrColorFormat;
-        m_normalDepthFormat = normalDepthFormat;
-        m_ssaoFormat = ssaoFormat;
+        m_supportsDisplayTiming = selected.supportsDisplayTiming;
+        m_hasDisplayTimingExtension = selected.hasDisplayTimingExtension;
+        m_enableDisplayTiming = m_supportsDisplayTiming;
+        m_bindlessTextureCapacity = selected.bindlessTextureCapacity;
+        m_maxSamplerAnisotropy = selected.maxSamplerAnisotropy;
+        m_depthFormat = selected.depthFormat;
+        m_shadowDepthFormat = selected.shadowDepthFormat;
+        m_hdrColorFormat = selected.hdrColorFormat;
+        m_normalDepthFormat = selected.normalDepthFormat;
+        m_ssaoFormat = selected.ssaoFormat;
         m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
-        VOX_LOGI("render") << "selected GPU: " << properties.deviceName
-                  << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
-                  << ", graphicsQueueIndex=" << m_graphicsQueueIndex
-                  << ", transferQueueFamily=" << m_transferQueueFamilyIndex
-                  << ", transferQueueIndex=" << m_transferQueueIndex
-                  << ", wireframePreview=" << (m_supportsWireframePreview ? "yes" : "no")
-                  << ", samplerAnisotropy=" << (m_supportsSamplerAnisotropy ? "yes" : "no")
-                  << ", drawIndirectFirstInstance=" << (supportsDrawIndirectFirstInstance ? "yes" : "no")
-                  << ", multiDrawIndirect=" << (m_supportsMultiDrawIndirect ? "yes" : "no")
-                  << ", bindlessDescriptors=" << (m_supportsBindlessDescriptors ? "yes" : "no")
-                  << ", bindlessTextureCapacity=" << m_bindlessTextureCapacity
-                  << ", maxSamplerAnisotropy=" << m_maxSamplerAnisotropy
-                  << ", msaaSamples=" << static_cast<uint32_t>(m_colorSampleCount)
-                  << ", shadowDepthFormat=" << static_cast<int>(m_shadowDepthFormat)
-                  << ", hdrColorFormat=" << static_cast<int>(m_hdrColorFormat)
-                  << ", normalDepthFormat=" << static_cast<int>(m_normalDepthFormat)
-                  << ", ssaoFormat=" << static_cast<int>(m_ssaoFormat)
-                  << "\n";
+
+        VOX_LOGI("render") << "selected GPU: " << selected.properties.deviceName
+                           << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
+                           << ", graphicsQueueIndex=" << m_graphicsQueueIndex
+                           << ", transferQueueFamily=" << m_transferQueueFamilyIndex
+                           << ", transferQueueIndex=" << m_transferQueueIndex
+                           << ", wireframePreview=" << (m_supportsWireframePreview ? "yes" : "no")
+                           << ", samplerAnisotropy=" << (m_supportsSamplerAnisotropy ? "yes" : "no")
+                           << ", drawIndirectFirstInstance="
+                           << (selected.supportsDrawIndirectFirstInstance ? "yes" : "no")
+                           << ", multiDrawIndirect=" << (m_supportsMultiDrawIndirect ? "yes" : "no")
+                           << ", bindlessDescriptors=" << (m_supportsBindlessDescriptors ? "yes" : "no")
+                           << ", bindlessTextureCapacity=" << m_bindlessTextureCapacity
+                           << ", displayTiming=" << (m_supportsDisplayTiming ? "yes" : "no")
+                           << "(ext=" << (selected.hasDisplayTimingExtension ? "yes" : "no") << ")"
+                           << ", maxSamplerAnisotropy=" << m_maxSamplerAnisotropy
+                           << ", msaaSamples=" << static_cast<uint32_t>(m_colorSampleCount)
+                           << ", shadowDepthFormat=" << static_cast<int>(m_shadowDepthFormat)
+                           << ", hdrColorFormat=" << static_cast<int>(m_hdrColorFormat)
+                           << ", normalDepthFormat=" << static_cast<int>(m_normalDepthFormat)
+                           << ", ssaoFormat=" << static_cast<int>(m_ssaoFormat)
+                           << "\n";
+        if (!anyCandidateSupportsDisplayTiming) {
+            VOX_LOGI("render")
+                << "display timing unavailable: no enumerated physical device exposes "
+                << VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME << "\n";
+        }
         return true;
     }
 
@@ -1733,14 +1822,19 @@ bool Renderer::createLogicalDevice() {
     memoryPriorityFeatures.memoryPriority = VK_TRUE;
     enabledFeatures2.pNext = &memoryPriorityFeatures;
 
+    std::vector<const char*> enabledDeviceExtensions(kDeviceExtensions.begin(), kDeviceExtensions.end());
+    if (m_supportsDisplayTiming && m_hasDisplayTimingExtension) {
+        appendDeviceExtensionIfMissing(enabledDeviceExtensions, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+    }
+
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.pNext = &enabledFeatures2;
     createInfo.queueCreateInfoCount = queueCreateInfoCount;
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
     createInfo.pEnabledFeatures = nullptr;
-    createInfo.enabledExtensionCount = static_cast<uint32_t>(kDeviceExtensions.size());
-    createInfo.ppEnabledExtensionNames = kDeviceExtensions.data();
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledDeviceExtensions.size());
+    createInfo.ppEnabledExtensionNames = enabledDeviceExtensions.data();
 
     const VkResult result = vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_device);
     if (result != VK_SUCCESS) {
@@ -1754,11 +1848,18 @@ bool Renderer::createLogicalDevice() {
         << ", runtimeDescriptorArray=" << (m_supportsBindlessDescriptors ? 1 : 0)
         << ", sampledImageArrayNonUniformIndexing=" << (m_supportsBindlessDescriptors ? 1 : 0)
         << ", descriptorBindingPartiallyBound=" << (m_supportsBindlessDescriptors ? 1 : 0)
+        << ", displayTiming=" << (m_supportsDisplayTiming ? 1 : 0)
         << "\n";
-    VOX_LOGI("render") << "device extensions enabled: "
-        << "VK_KHR_swapchain, VK_KHR_maintenance4, VK_KHR_timeline_semaphore, "
-        << "VK_KHR_synchronization2, VK_KHR_dynamic_rendering, "
-        << "VK_EXT_memory_budget, VK_EXT_memory_priority\n";
+    {
+        std::string extensionLog;
+        for (std::size_t i = 0; i < enabledDeviceExtensions.size(); ++i) {
+            if (i > 0) {
+                extensionLog += ", ";
+            }
+            extensionLog += enabledDeviceExtensions[i];
+        }
+        VOX_LOGI("render") << "device extensions enabled: " << extensionLog << "\n";
+    }
     if (m_supportsBindlessDescriptors) {
         VOX_LOGI("render") << "bindless descriptor support enabled (capacity="
             << m_bindlessTextureCapacity << ")\n";
@@ -1768,6 +1869,22 @@ bool Renderer::createLogicalDevice() {
 
     vkGetDeviceQueue(m_device, m_graphicsQueueFamilyIndex, m_graphicsQueueIndex, &m_graphicsQueue);
     vkGetDeviceQueue(m_device, m_transferQueueFamilyIndex, m_transferQueueIndex, &m_transferQueue);
+    m_getRefreshCycleDurationGoogle = reinterpret_cast<PFN_vkGetRefreshCycleDurationGOOGLE>(
+        vkGetDeviceProcAddr(m_device, "vkGetRefreshCycleDurationGOOGLE")
+    );
+    m_getPastPresentationTimingGoogle = reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
+        vkGetDeviceProcAddr(m_device, "vkGetPastPresentationTimingGOOGLE")
+    );
+    if (m_supportsDisplayTiming &&
+        (m_getRefreshCycleDurationGoogle == nullptr || m_getPastPresentationTimingGoogle == nullptr)) {
+        VOX_LOGI("render") << "display_timing extension enabled but function pointers were not loaded; disabling display timing\n";
+        m_supportsDisplayTiming = false;
+        m_enableDisplayTiming = false;
+    }
+    VOX_LOGI("render") << "present runtime: displayTimingSupport=" << (m_supportsDisplayTiming ? "yes" : "no")
+        << ", displayTimingExtension=" << (m_hasDisplayTimingExtension ? "yes" : "no")
+        << ", displayTimingEnabled=" << (m_enableDisplayTiming ? "yes" : "no")
+        << "\n";
     loadDebugUtilsFunctions();
     setObjectName(VK_OBJECT_TYPE_DEVICE, vkHandleToUint64(m_device), "renderer.device");
     setObjectName(VK_OBJECT_TYPE_QUEUE, vkHandleToUint64(m_graphicsQueue), "renderer.queue.graphics");
@@ -6423,6 +6540,17 @@ void Renderer::buildFrameStatsUi() {
     } else {
         ImGui::Text("Frame (CPU/GPU): %.2f / n/a ms", m_debugFrameTimeMs);
     }
+    if (m_supportsDisplayTiming) {
+        ImGui::Text(
+            "Display Timing Present ID submit/presented: %u / %u",
+            m_lastSubmittedDisplayTimingPresentId,
+            m_lastPresentedDisplayTimingPresentId
+        );
+        ImGui::Text("Display Refresh: %.3f ms", m_debugDisplayRefreshMs);
+        ImGui::Text("Display Present Margin: %.3f ms", m_debugDisplayPresentMarginMs);
+        ImGui::Text("Display Actual-Earliest: %.3f ms", m_debugDisplayActualEarliestDeltaMs);
+        ImGui::Text("Display Timing Samples: %u", m_debugDisplayTimingSampleCount);
+    }
     if (ImGui::TreeNodeEx("Draw Calls", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("Total: %u", m_debugDrawCallsTotal);
         ImGui::Text("Shadow: %u", m_debugDrawCallsShadow);
@@ -6610,6 +6738,15 @@ void Renderer::buildShadowDebugUi() {
         m_shadowDebugSettings = ShadowDebugSettings{};
     }
 
+    ImGui::Separator();
+    ImGui::Text("Presentation");
+    if (m_supportsDisplayTiming) {
+        ImGui::Checkbox("Use Display Timing", &m_enableDisplayTiming);
+    } else {
+        ImGui::TextDisabled("Display Timing: unsupported");
+        m_enableDisplayTiming = false;
+    }
+
     ImGui::End();
 }
 
@@ -6675,6 +6812,33 @@ bool Renderer::isTimelineValueReached(uint64_t value) const {
     return completedValue >= value;
 }
 
+bool isDeviceExtensionAvailable(VkPhysicalDevice physicalDevice, const char* extensionName) {
+    uint32_t extensionCount = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, nullptr);
+    std::vector<VkExtensionProperties> extensions(extensionCount);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, extensions.data());
+
+    for (const VkExtensionProperties& extension : extensions) {
+        if (std::strcmp(extension.extensionName, extensionName) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void appendDeviceExtensionIfMissing(std::vector<const char*>& extensions, const char* extensionName) {
+    const auto found = std::find_if(
+        extensions.begin(),
+        extensions.end(),
+        [extensionName](const char* existing) {
+            return std::strcmp(existing, extensionName) == 0;
+        }
+    );
+    if (found == extensions.end()) {
+        extensions.push_back(extensionName);
+    }
+}
+
 void Renderer::readGpuTimestampResults(uint32_t frameIndex) {
     if (!m_gpuTimestampsSupported || m_device == VK_NULL_HANDLE || frameIndex >= m_gpuTimestampQueryPools.size()) {
         return;
@@ -6725,6 +6889,52 @@ void Renderer::readGpuTimestampResults(uint32_t frameIndex) {
         (m_debugGpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
     m_debugGpuFrameTimingMsHistoryCount =
         std::min(m_debugGpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
+}
+
+void Renderer::updateDisplayTimingStats() {
+    if (!m_supportsDisplayTiming || !m_enableDisplayTiming || m_swapchain == VK_NULL_HANDLE) {
+        return;
+    }
+    if (m_getRefreshCycleDurationGoogle != nullptr) {
+        VkRefreshCycleDurationGOOGLE refreshCycle{};
+        const VkResult refreshResult = m_getRefreshCycleDurationGoogle(m_device, m_swapchain, &refreshCycle);
+        if (refreshResult == VK_SUCCESS) {
+            m_debugDisplayRefreshMs = static_cast<float>(refreshCycle.refreshDuration * 1.0e-6);
+        }
+    }
+    if (m_getPastPresentationTimingGoogle == nullptr) {
+        return;
+    }
+
+    uint32_t timingCount = 0;
+    VkResult timingResult = m_getPastPresentationTimingGoogle(m_device, m_swapchain, &timingCount, nullptr);
+    if (timingResult != VK_SUCCESS || timingCount == 0) {
+        return;
+    }
+    std::vector<VkPastPresentationTimingGOOGLE> timings(timingCount);
+    timingResult = m_getPastPresentationTimingGoogle(m_device, m_swapchain, &timingCount, timings.data());
+    if (timingResult != VK_SUCCESS || timingCount == 0) {
+        return;
+    }
+    m_debugDisplayTimingSampleCount = timingCount;
+
+    const VkPastPresentationTimingGOOGLE* latest = nullptr;
+    for (const VkPastPresentationTimingGOOGLE& timing : timings) {
+        if (latest == nullptr || timing.presentID > latest->presentID) {
+            latest = &timing;
+        }
+    }
+    if (latest == nullptr) {
+        return;
+    }
+    m_lastPresentedDisplayTimingPresentId = latest->presentID;
+    m_debugDisplayPresentMarginMs = static_cast<float>(latest->presentMargin * 1.0e-6);
+    if (latest->actualPresentTime >= latest->earliestPresentTime) {
+        m_debugDisplayActualEarliestDeltaMs =
+            static_cast<float>((latest->actualPresentTime - latest->earliestPresentTime) * 1.0e-6);
+    } else {
+        m_debugDisplayActualEarliestDeltaMs = 0.0f;
+    }
 }
 
 void Renderer::scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue) {
@@ -8732,8 +8942,29 @@ void Renderer::renderFrame(
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = &m_swapchain;
     presentInfo.pImageIndices = &imageIndex;
+    VkPresentTimesInfoGOOGLE presentTimesInfo{};
+    VkPresentTimeGOOGLE presentTime{};
+    const bool useDisplayTiming =
+        m_supportsDisplayTiming &&
+        m_enableDisplayTiming &&
+        m_getPastPresentationTimingGoogle != nullptr;
+    if (useDisplayTiming) {
+        const uint32_t submittedPresentId = m_nextDisplayTimingPresentId++;
+        presentTime.presentID = submittedPresentId;
+        presentTime.desiredPresentTime = 0;
+        presentTimesInfo.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE;
+        presentTimesInfo.swapchainCount = 1;
+        presentTimesInfo.pTimes = &presentTime;
+        presentInfo.pNext = &presentTimesInfo;
+        m_lastSubmittedDisplayTimingPresentId = submittedPresentId;
+    } else {
+        m_lastSubmittedDisplayTimingPresentId = 0;
+    }
 
     const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
+    if (useDisplayTiming && (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR)) {
+        updateDisplayTimingStats();
+    }
     m_shadowDepthInitialized = true;
     m_swapchainImageInitialized[imageIndex] = true;
     m_msaaColorImageInitialized[imageIndex] = true;
@@ -9371,6 +9602,9 @@ void Renderer::shutdown() {
     m_supportsWireframePreview = false;
     m_supportsSamplerAnisotropy = false;
     m_supportsMultiDrawIndirect = false;
+    m_supportsDisplayTiming = false;
+    m_hasDisplayTimingExtension = false;
+    m_enableDisplayTiming = false;
     m_chunkMeshingOptions = world::MeshingOptions{};
     m_chunkMeshRebuildRequested = false;
     m_pendingChunkRemeshIndices.clear();
@@ -9384,6 +9618,10 @@ void Renderer::shutdown() {
     m_debugGpuSsaoBlurTimeMs = 0.0f;
     m_debugGpuMainTimeMs = 0.0f;
     m_debugGpuPostTimeMs = 0.0f;
+    m_debugDisplayRefreshMs = 0.0f;
+    m_debugDisplayPresentMarginMs = 0.0f;
+    m_debugDisplayActualEarliestDeltaMs = 0.0f;
+    m_debugDisplayTimingSampleCount = 0;
     m_debugChunkMeshVertexCount = 0;
     m_debugChunkMeshIndexCount = 0;
     m_debugChunkLastRemeshedChunkCount = 0;
@@ -9411,6 +9649,11 @@ void Renderer::shutdown() {
     m_transferCommandBufferInFlightValue = 0;
     m_lastGraphicsTimelineValue = 0;
     m_nextTimelineValue = 1;
+    m_nextDisplayTimingPresentId = 1;
+    m_lastSubmittedDisplayTimingPresentId = 0;
+    m_lastPresentedDisplayTimingPresentId = 0;
+    m_getRefreshCycleDurationGoogle = nullptr;
+    m_getPastPresentationTimingGoogle = nullptr;
     m_currentFrame = 0;
     m_window = nullptr;
     VOX_LOGI("render") << "shutdown complete\n";

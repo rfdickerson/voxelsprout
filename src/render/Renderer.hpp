@@ -214,6 +214,7 @@ private:
     void readGpuTimestampResults(uint32_t frameIndex);
     void scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue);
     void collectCompletedBufferReleases();
+    void updateDisplayTimingStats();
     bool isTimelineValueReached(uint64_t value) const;
 
     struct DeferredBufferRelease {
@@ -376,6 +377,9 @@ private:
     bool m_supportsSamplerAnisotropy = false;
     bool m_supportsMultiDrawIndirect = false;
     bool m_supportsBindlessDescriptors = false;
+    bool m_supportsDisplayTiming = false;
+    bool m_hasDisplayTimingExtension = false;
+    bool m_enableDisplayTiming = false;
     uint32_t m_bindlessTextureCapacity = 0;
     bool m_gpuTimestampsSupported = false;
     float m_gpuTimestampPeriodNs = 0.0f;
@@ -422,11 +426,16 @@ private:
     VkCommandBuffer m_transferCommandBuffer = VK_NULL_HANDLE;
     std::array<uint64_t, kMaxFramesInFlight> m_frameTimelineValues{};
     VkSemaphore m_renderTimelineSemaphore = VK_NULL_HANDLE;
+    PFN_vkGetRefreshCycleDurationGOOGLE m_getRefreshCycleDurationGoogle = nullptr;
+    PFN_vkGetPastPresentationTimingGOOGLE m_getPastPresentationTimingGoogle = nullptr;
     uint64_t m_pendingTransferTimelineValue = 0;
     uint64_t m_currentChunkReadyTimelineValue = 0;
     uint64_t m_transferCommandBufferInFlightValue = 0;
     uint64_t m_lastGraphicsTimelineValue = 0;
     uint64_t m_nextTimelineValue = 1;
+    uint32_t m_nextDisplayTimingPresentId = 1;
+    uint32_t m_lastSubmittedDisplayTimingPresentId = 0;
+    uint32_t m_lastPresentedDisplayTimingPresentId = 0;
     uint32_t m_currentFrame = 0;
     bool m_debugUiVisible = false;
     bool m_showFrameStatsPanel = false;
@@ -452,6 +461,10 @@ private:
     float m_debugGpuSsaoBlurTimeMs = 0.0f;
     float m_debugGpuMainTimeMs = 0.0f;
     float m_debugGpuPostTimeMs = 0.0f;
+    float m_debugDisplayRefreshMs = 0.0f;
+    float m_debugDisplayPresentMarginMs = 0.0f;
+    float m_debugDisplayActualEarliestDeltaMs = 0.0f;
+    std::uint32_t m_debugDisplayTimingSampleCount = 0;
     std::array<float, kTimingHistorySampleCount> m_debugCpuFrameTimingMsHistory{};
     std::uint32_t m_debugCpuFrameTimingMsHistoryWrite = 0;
     std::uint32_t m_debugCpuFrameTimingMsHistoryCount = 0;

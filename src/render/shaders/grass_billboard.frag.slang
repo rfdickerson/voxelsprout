@@ -107,29 +107,27 @@ float4 main(FragmentInput input) : SV_Target0
 
     const float3 plantNormal = float3(0.0, 1.0, 0.0);
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
-    const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
-    const float3 sunColor = camera.sunColorShadow.xyz;
-    float3 quadNormal = normalize(input.inQuadNormal);
-    if (dot(quadNormal, -sunDirection) < 0.0) {
-        quadNormal = -quadNormal;
-    }
-    const float directionalWeight = clamp(camera.skyConfig2.z, 0.0, 1.0);
-    const float3 lightingNormal = normalize(lerp(plantNormal, quadNormal, directionalWeight));
-    const float wrappedNdotL = saturate((dot(lightingNormal, -sunDirection) + 0.40) / 1.40);
-    const float transmission =
-        (saturate(dot(plantNormal, sunDirection)) * 0.12) +
-        (saturate(dot(-quadNormal, sunDirection)) * 0.10 * directionalWeight);
+    const float3 toSun = -sunDirection;
+    const float sunAltitude = clamp(toSun.y, -1.0, 1.0);
+    const float dayFactor = smoothstep(0.10, 0.60, sunAltitude);
+    const float twilightFactor = 1.0 - dayFactor;
+    const float horizonBand = saturate(1.0 - (abs(sunAltitude) / 0.30));
+    const float twilightStrength = twilightFactor * pow(horizonBand, 0.65);
+    const float3 twilightOrange = float3(1.25, 0.70, 0.36);
+    const float3 twilightPurple = float3(0.78, 0.50, 1.12);
     const float canopyT = smoothstep(0.05, 0.95, saturate(input.inUv.y));
-    const float3 skyAmbient = evaluateShIrradiance(float3(0.0, 1.0, 0.0)) * 0.33;
-    const float3 groundAmbient = evaluateShIrradiance(float3(0.0, -1.0, 0.0)) * 0.14;
-    const float3 ambient = lerp(groundAmbient, skyAmbient, canopyT);
-    const float3 direct = sunColor * (sunIntensity * (wrappedNdotL + transmission) * 0.70);
+    const float3 skyAmbientTint = lerp(float3(1.0, 1.0, 1.0), twilightPurple, twilightStrength * 0.60);
+    const float3 groundAmbientTint = lerp(float3(1.0, 1.0, 1.0), twilightOrange, twilightStrength * 0.52);
+    const float3 skyAmbient = (evaluateShIrradiance(float3(0.0, 1.0, 0.0)) * 0.38) * skyAmbientTint;
+    const float3 groundAmbient = (evaluateShIrradiance(float3(0.0, -1.0, 0.0)) * 0.18) * groundAmbientTint;
+    const float3 sideAmbient = evaluateShIrradiance(float3(0.0, 0.0, 1.0)) * 0.08;
+    const float3 ambient = lerp(groundAmbient, skyAmbient, canopyT) + sideAmbient;
 
     const float3 tint = clamp(input.inColorTint.xyz, float3(0.10, 0.10, 0.10), float3(2.50, 2.50, 2.50));
     const bool isFlower = spriteTile >= 5u;
     const float flowerTintStrength = isFlower ? 1.0 : 0.68;
     const float3 variedSprite = lerp(sprite.rgb, sprite.rgb * tint, flowerTintStrength);
-    const float3 lit = variedSprite * (ambient + direct);
+    const float3 lit = variedSprite * ambient;
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
     const float3 fogged = applyAtmosphericFog(lit, input.inWorldPosition, viewDepth, sunDirection);
     return float4(fogged, 1.0);
