@@ -26,7 +26,6 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 skyConfig0;
     vec4 skyConfig1;
 } camera;
-layout(set = 0, binding = 9) uniform sampler3D clipmapRadianceTex;
 
 layout(location = 0) out vec4 outColor;
 
@@ -60,28 +59,6 @@ vec3 evaluateShHemisphereIrradiance(vec3 normal) {
     return mix(groundIrradiance, skyIrradiance, upT);
 }
 
-vec3 sampleClipmapRadiance(vec3 worldPosition, vec3 normal) {
-    const float voxelSize = max(camera.shadowVoxelGridSize.x, 1.0);
-    const float resolution = max(camera.shadowVoxelGridSize.y, 1.0);
-    const float invExtent = max(camera.shadowVoxelGridSize.z, 1e-6);
-    const vec3 samplePos = worldPosition + (normal * (0.12 * voxelSize));
-    vec3 uvw = (samplePos - camera.shadowVoxelGridOrigin.xyz) * invExtent;
-    const float halfTexel = 0.5 / resolution;
-    uvw = clamp(uvw, vec3(halfTexel), vec3(1.0 - halfTexel));
-    const vec3 texel = vec3(1.0 / resolution);
-    const vec3 tx = vec3(texel.x, 0.0, 0.0);
-    const vec3 ty = vec3(0.0, texel.y, 0.0);
-    const vec3 tz = vec3(0.0, 0.0, texel.z);
-    vec3 r = texture(clipmapRadianceTex, uvw).rgb * 0.40;
-    r += texture(clipmapRadianceTex, clamp(uvw + tx, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    r += texture(clipmapRadianceTex, clamp(uvw - tx, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    r += texture(clipmapRadianceTex, clamp(uvw + ty, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    r += texture(clipmapRadianceTex, clamp(uvw - ty, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    r += texture(clipmapRadianceTex, clamp(uvw + tz, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    r += texture(clipmapRadianceTex, clamp(uvw - tz, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    return r;
-}
-
 void main() {
     const vec3 normal = normalize(inWorldNormal);
     const vec3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
@@ -94,17 +71,7 @@ void main() {
     const vec3 ambientIrradiance = mix(shNormalIrradiance, shHemisphereIrradiance, 0.70);
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = mix(1.0, clamp(inVertexAo, 0.0, 1.0), vertexAoEnable);
-    const float clipmapGiEnable = step(0.5, camera.shadowConfig3.z);
-    const float clipmapOcclusion = clamp(camera.shadowConfig3.x, 0.0, 1.0) * clipmapGiEnable;
-    const float clipmapBounce = clamp(camera.shadowConfig3.y, 0.0, 2.0) * clipmapGiEnable;
-    const float ambientOcclusion = 1.0 - (0.55 * clipmapOcclusion);
-    const vec3 ambientBase = ambientIrradiance * (0.26 * vertexAo * ambientOcclusion);
-    vec3 clipmapRadiance = vec3(0.0);
-    if (clipmapGiEnable > 0.5) {
-        clipmapRadiance = sampleClipmapRadiance(inWorldPosition, normal);
-    }
-    const vec3 clipmapBounceLight = clipmapRadiance * (1.00 * clipmapBounce);
-    const vec3 ambient = ambientBase;
+    const vec3 ambient = ambientIrradiance * (0.26 * vertexAo);
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
 
     const float flowTime = camera.skyConfig1.z;
@@ -145,7 +112,6 @@ void main() {
 
     const vec3 lit =
         ((ambient + directSun) * surfaceTint) +
-        (liquidColor * ((0.24 + (0.42 * flowHighlight)) * liquidMask)) +
-        (clipmapBounceLight * (0.35 + (0.65 * surfaceTint)));
+        (liquidColor * ((0.24 + (0.42 * flowHighlight)) * liquidMask));
     outColor = vec4(lit, 1.0);
 }

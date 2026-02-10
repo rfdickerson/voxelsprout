@@ -35,16 +35,19 @@ vec3 decodeViewNormal(vec3 encodedNormal) {
     return normalize((encodedNormal * 2.0) - 1.0);
 }
 
-vec3 reconstructViewPosition(vec2 uv, float viewDepth, mat4 invProj) {
-    const float a = camera.proj[2][2];
-    const float b = camera.proj[3][2];
-    const float ndcZ = -a + (b / max(viewDepth, 1e-4));
+vec3 reconstructViewPosition(vec2 uv, float viewDepth) {
     const vec2 ndcXY = (uv * 2.0) - 1.0;
-    vec4 view = invProj * vec4(ndcXY, ndcZ, 1.0);
-    if (abs(view.w) > 1e-4) {
-        view.xyz /= view.w;
+    float projX = camera.proj[0][0];
+    float projY = camera.proj[1][1];
+    if (abs(projX) < 1e-6) {
+        projX = (projX < 0.0) ? -1e-6 : 1e-6;
     }
-    return view.xyz;
+    if (abs(projY) < 1e-6) {
+        projY = (projY < 0.0) ? -1e-6 : 1e-6;
+    }
+    const float viewX = (ndcXY.x * viewDepth) / projX;
+    const float viewY = (ndcXY.y * viewDepth) / projY;
+    return vec3(viewX, viewY, -viewDepth);
 }
 
 void main() {
@@ -56,8 +59,7 @@ void main() {
     }
 
     const vec3 centerNormal = decodeViewNormal(centerSample.rgb);
-    const mat4 invProj = inverse(camera.proj);
-    const vec3 centerViewPos = reconstructViewPosition(inUv, centerDepth, invProj);
+    const vec3 centerViewPos = reconstructViewPosition(inUv, centerDepth);
 
     vec3 tangent = normalize(cross(centerNormal, vec3(0.0, 1.0, 0.0)));
     if (dot(tangent, tangent) <= 0.0001) {
@@ -111,7 +113,7 @@ void main() {
             continue;
         }
 
-        const vec3 sampleSceneViewPos = reconstructViewPosition(sampleUv, sampleDepth, invProj);
+        const vec3 sampleSceneViewPos = reconstructViewPosition(sampleUv, sampleDepth);
         const float depthDelta = abs(centerViewPos.z - sampleSceneViewPos.z);
         const float rangeWeight = smoothstep(0.0, 1.0, radius / max(depthDelta, 1e-4));
         const float occluded = (sampleSceneViewPos.z > (sampleViewPos.z + bias)) ? 1.0 : 0.0;

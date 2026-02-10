@@ -841,12 +841,18 @@ void App::pollInput() {
     glfwPollEvents();
 
     bool uiVisibilityChanged = false;
-    const bool toggleUiDown = glfwGetKey(m_window, GLFW_KEY_F1) == GLFW_PRESS;
-    if (toggleUiDown && !m_wasToggleDebugUiDown) {
+    const bool toggleFrameStatsDown = glfwGetKey(m_window, GLFW_KEY_F) == GLFW_PRESS;
+    if (toggleFrameStatsDown && !m_wasToggleFrameStatsDown) {
+        m_renderer.setFrameStatsVisible(!m_renderer.isFrameStatsVisible());
+    }
+    m_wasToggleFrameStatsDown = toggleFrameStatsDown;
+
+    const bool toggleConfigUiDown = glfwGetKey(m_window, GLFW_KEY_C) == GLFW_PRESS;
+    if (toggleConfigUiDown && !m_wasToggleConfigUiDown) {
         m_debugUiVisible = !m_debugUiVisible;
         uiVisibilityChanged = true;
     }
-    m_wasToggleDebugUiDown = toggleUiDown;
+    m_wasToggleConfigUiDown = toggleConfigUiDown;
     m_renderer.setDebugUiVisible(m_debugUiVisible);
     const bool rendererUiVisible = m_renderer.isDebugUiVisible();
     if (rendererUiVisible != m_debugUiVisible) {

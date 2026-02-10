@@ -62,8 +62,15 @@ vec3 proceduralSky(vec3 direction, vec3 sunDirection) {
 }
 
 void main() {
-    const vec4 viewSpace = inverse(camera.proj) * vec4(inNdc, 1.0, 1.0);
-    const vec3 viewDir = normalize(viewSpace.xyz / max(abs(viewSpace.w), 1e-6));
+    float projX = camera.proj[0][0];
+    float projY = camera.proj[1][1];
+    if (abs(projX) < 1e-6) {
+        projX = (projX < 0.0) ? -1e-6 : 1e-6;
+    }
+    if (abs(projY) < 1e-6) {
+        projY = (projY < 0.0) ? -1e-6 : 1e-6;
+    }
+    const vec3 viewDir = normalize(vec3(inNdc.x / projX, inNdc.y / projY, -1.0));
     const mat3 invViewRotation = transpose(mat3(camera.view));
     const vec3 worldDir = normalize(invViewRotation * viewDir);
 

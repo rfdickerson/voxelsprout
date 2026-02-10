@@ -160,7 +160,8 @@ private:
     bool m_wasPlaceBlockDown = false;
     bool m_wasRemoveBlockDown = false;
     bool m_debugUiVisible = false;
-    bool m_wasToggleDebugUiDown = false;
+    bool m_wasToggleConfigUiDown = false;
+    bool m_wasToggleFrameStatsDown = false;
     bool m_hoverEnabled = false;
     bool m_wasToggleHoverDown = false;
     bool m_wasRegenerateWorldDown = false;

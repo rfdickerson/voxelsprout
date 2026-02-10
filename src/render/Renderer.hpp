@@ -120,6 +120,8 @@ public:
     );
     void setDebugUiVisible(bool visible);
     bool isDebugUiVisible() const;
+    void setFrameStatsVisible(bool visible);
+    bool isFrameStatsVisible() const;
     void shutdown();
 
 private:
@@ -142,8 +144,6 @@ private:
     static constexpr uint32_t kGpuTimestampQueryFrameEnd = 13;
     static constexpr uint32_t kGpuTimestampQueryCount = 14;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
-    static constexpr std::uint32_t kClipmapGiResolution = 16;
-    static constexpr std::int32_t kClipmapGiVoxelSize = 2;
 
     struct FrameResources {
         // Per-frame command pool to allocate fresh command buffers every frame.
@@ -170,7 +170,6 @@ private:
     bool createPipeBuffers();
     bool createPipePipeline();
     bool createAoPipelines();
-    bool createClipmapGiResources();
     bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
@@ -182,7 +181,9 @@ private:
     bool createImGuiResources();
     void destroyImGuiResources();
     void buildFrameStatsUi();
+    void buildMeshingDebugUi();
     void buildShadowDebugUi();
+    void buildSunDebugUi();
     void buildAimReticleUi();
 #endif
     bool recreateSwapchain();
@@ -197,7 +198,6 @@ private:
     void destroyChunkBuffers();
     void destroyPipeBuffers();
     void destroyPreviewBuffers();
-    void destroyClipmapGiResources();
     void destroyEnvironmentResources();
     void destroyDiffuseTextureResources();
     void destroyTransferResources();
@@ -315,14 +315,6 @@ private:
     std::vector<VkImageView> m_ssaoBlurImageViews;
     std::vector<TransientImageHandle> m_ssaoBlurTransientHandles;
     std::vector<bool> m_ssaoBlurImageInitialized;
-    VkImage m_clipmapGiImage = VK_NULL_HANDLE;
-    VkDeviceMemory m_clipmapGiImageMemory = VK_NULL_HANDLE;
-    VkImageView m_clipmapGiImageView = VK_NULL_HANDLE;
-    VkSampler m_clipmapGiSampler = VK_NULL_HANDLE;
-    bool m_clipmapGiImageInitialized = false;
-    std::int32_t m_clipmapGiOriginX = 0;
-    std::int32_t m_clipmapGiOriginY = 0;
-    std::int32_t m_clipmapGiOriginZ = 0;
     VkSampler m_normalDepthSampler = VK_NULL_HANDLE;
     VkSampler m_ssaoSampler = VK_NULL_HANDLE;
     VkImage m_shadowDepthImage = VK_NULL_HANDLE;
@@ -331,7 +323,6 @@ private:
     bool m_shadowDepthInitialized = false;
 #if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
-    VmaAllocation m_clipmapGiAllocation = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;
 #endif
@@ -409,14 +400,14 @@ private:
     uint64_t m_nextTimelineValue = 1;
     uint32_t m_currentFrame = 0;
     bool m_debugUiVisible = false;
-    bool m_showFrameStatsPanel = true;
+    bool m_showFrameStatsPanel = false;
+    bool m_showMeshingPanel = false;
+    bool m_showShadowPanel = false;
+    bool m_showSunPanel = false;
     bool m_debugEnableVertexAo = true;
     bool m_debugEnableSsao = true;
     bool m_debugVisualizeSsao = false;
     bool m_debugVisualizeAoNormals = false;
-    bool m_debugEnableClipmapGi = true;
-    float m_debugClipmapGiOcclusionStrength = 0.40f;
-    float m_debugClipmapGiBounceStrength = 0.55f;
     ShadowDebugSettings m_shadowDebugSettings{};
     SkyDebugSettings m_skyDebugSettings{};
 #if defined(VOXEL_HAS_IMGUI)

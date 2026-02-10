@@ -17,7 +17,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 shadowConfig0; // normalOffsetNear, normalOffsetFar, baseBiasNearTexel, baseBiasFarTexel
     vec4 shadowConfig1; // slopeBiasNearTexel, slopeBiasFarTexel, blendMin, blendFactor
     vec4 shadowConfig2; // ssaoRadius, ssaoBias, ssaoIntensity, reserved
-    vec4 shadowConfig3; // clipmapOcclusion, clipmapBounce, clipmapGiEnable, pcfRadius
+    vec4 shadowConfig3; // reserved, reserved, reserved, pcfRadius
     vec4 shadowVoxelGridOrigin;
     vec4 shadowVoxelGridSize;
     vec4 skyConfig0; // rayleighStrength, mieStrength, mieAnisotropy, skyExposure
@@ -26,7 +26,6 @@ layout(set = 0, binding = 0) uniform CameraUniform {
 
 layout(set = 0, binding = 4) uniform sampler2DShadow shadowMap;
 layout(set = 0, binding = 1) uniform sampler2D diffuseAlbedo;
-layout(set = 0, binding = 9) uniform sampler3D clipmapRadianceTex;
 
 layout(location = 0) out vec4 outColor;
 
@@ -64,43 +63,7 @@ vec3 faceNormal(uint face) {
     return vec3(0.0, 0.0, -1.0);
 }
 
-vec3 proceduralSky(vec3 direction, vec3 sunDirection, vec3 sunColor) {
-    const vec3 dir = normalize(direction);
-    const vec3 toSun = -normalize(sunDirection);
-    const float rayleighStrength = max(camera.skyConfig0.x, 0.01);
-    const float mieStrength = max(camera.skyConfig0.y, 0.01);
-    const float mieG = clamp(camera.skyConfig0.z, 0.0, 0.98);
-    const float skyExposure = max(camera.skyConfig0.w, 0.01);
-
-    const float horizonT = clamp((dir.y * 0.5) + 0.5, 0.0, 1.0);
-    const float skyT = pow(horizonT, 0.35);
-    const vec3 horizonColor =
-        (vec3(0.55, 0.70, 1.00) * rayleighStrength) +
-        (vec3(1.00, 0.72, 0.42) * (mieStrength * 0.55));
-    const vec3 zenithColor =
-        (vec3(0.06, 0.24, 0.54) * rayleighStrength) +
-        (vec3(0.22, 0.20, 0.15) * (mieStrength * 0.25));
-    vec3 sky = mix(horizonColor, zenithColor, skyT);
-
-    const float sunDot = max(dot(dir, toSun), 0.0);
-    const float sunDisk = pow(sunDot, max(camera.skyConfig1.x, 1.0));
-    const float sunGlow = pow(sunDot, max(camera.skyConfig1.y, 1.0));
-    const float phaseRayleigh = 0.0596831 * (1.0 + (sunDot * sunDot));
-    const float phaseMie = 0.0795775 * (1.0 - (mieG * mieG)) /
-        max(0.001, pow(1.0 + (mieG * mieG) - (2.0 * mieG * sunDot), 1.5));
-    const float phaseBoost = (phaseRayleigh * rayleighStrength) + (phaseMie * mieStrength * 1.4);
-    sky += sunColor * ((sunDisk * 6.5) + (sunGlow * 1.3)) * (1.0 + phaseBoost);
-
-    const vec3 groundColor = vec3(0.05, 0.06, 0.07);
-    const float belowHorizon = clamp(-dir.y, 0.0, 1.0);
-    const vec3 horizonGroundColor = horizonColor * 0.32;
-    const vec3 ground = mix(horizonGroundColor, groundColor, pow(belowHorizon, 0.55));
-    const float skyWeight = smoothstep(-0.18, 0.02, dir.y);
-    const vec3 color = mix(ground, sky, skyWeight);
-    return max(color * skyExposure, vec3(0.0));
-}
-
-vec3 proceduralSkyNoSunDisk(vec3 direction, vec3 sunDirection) {
+vec3 proceduralSkyNoSunDisk(vec3 direction) {
     const vec3 dir = normalize(direction);
     const float rayleighStrength = max(camera.skyConfig0.x, 0.01);
     const float mieStrength = max(camera.skyConfig0.y, 0.01);
@@ -125,13 +88,12 @@ vec3 proceduralSkyNoSunDisk(vec3 direction, vec3 sunDirection) {
     return max(color * skyExposure, vec3(0.0));
 }
 
-vec3 applyAtmosphericFog(vec3 litColor, vec3 worldPosition, float viewDepth, vec3 sunDirection, vec3 sunColor) {
-    const mat4 invView = inverse(camera.view);
-    const vec3 cameraWorld = invView[3].xyz;
+vec3 applyAtmosphericFog(vec3 litColor, vec3 worldPosition, float viewDepth, vec3 sunDirection) {
+    const vec3 cameraWorld = camera.shadowVoxelGridSize.xyz;
     const vec3 viewDir = normalize(worldPosition - cameraWorld);
 
     // Exclude the explicit sun disk from fog color so it does not appear to overlay foreground geometry.
-    const vec3 skyColor = proceduralSkyNoSunDisk(viewDir, sunDirection);
+    const vec3 skyColor = proceduralSkyNoSunDisk(viewDir);
 
     // Subtle physically inspired extinction coefficients (world units ~= voxels).
     const vec3 sigmaRayleigh = vec3(0.0012, 0.0023, 0.0048) * max(camera.skyConfig0.x, 0.01);
@@ -176,28 +138,6 @@ vec3 evaluateShHemisphereIrradiance(vec3 normal) {
     const vec3 skyIrradiance = evaluateShIrradiance(vec3(0.0, 1.0, 0.0));
     const vec3 groundIrradiance = evaluateShIrradiance(vec3(0.0, -1.0, 0.0));
     return mix(groundIrradiance, skyIrradiance, upT);
-}
-
-vec3 sampleClipmapRadiance(vec3 worldPosition, vec3 normal) {
-    const float voxelSize = max(camera.shadowVoxelGridSize.x, 1.0);
-    const float resolution = max(camera.shadowVoxelGridSize.y, 1.0);
-    const float invExtent = max(camera.shadowVoxelGridSize.z, 1e-6);
-    const vec3 samplePos = worldPosition + (normal * (0.12 * voxelSize));
-    vec3 uvw = (samplePos - camera.shadowVoxelGridOrigin.xyz) * invExtent;
-    const float halfTexel = 0.5 / resolution;
-    uvw = clamp(uvw, vec3(halfTexel), vec3(1.0 - halfTexel));
-    const vec3 texel = vec3(1.0 / resolution);
-    const vec3 tx = vec3(texel.x, 0.0, 0.0);
-    const vec3 ty = vec3(0.0, texel.y, 0.0);
-    const vec3 tz = vec3(0.0, 0.0, texel.z);
-    vec3 r = texture(clipmapRadianceTex, uvw).rgb * 0.40;
-    r += texture(clipmapRadianceTex, clamp(uvw + tx, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    r += texture(clipmapRadianceTex, clamp(uvw - tx, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    r += texture(clipmapRadianceTex, clamp(uvw + ty, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    r += texture(clipmapRadianceTex, clamp(uvw - ty, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    r += texture(clipmapRadianceTex, clamp(uvw + tz, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    r += texture(clipmapRadianceTex, clamp(uvw - tz, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
-    return r;
 }
 
 int chooseShadowCascade(float viewDepth) {
@@ -287,6 +227,7 @@ float sampleCascadedShadow(vec3 worldPosition, vec3 normal, float viewDepth, flo
 
 void main() {
     const vec3 normal = faceNormal(inFace);
+
     vec3 baseColor = texture(diffuseAlbedo, faceUv(inFace, inWorldPosition)).rgb;
     if (inMaterial == 250u || inMaterial == 251u) {
         baseColor *= materialTint(inMaterial);
@@ -309,18 +250,7 @@ void main() {
     const vec3 ambientIrradiance = mix(shNormalIrradiance, shHemisphereIrradiance, 0.70);
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = mix(1.0, clamp(inVertexAo, 0.0, 1.0), vertexAoEnable);
-    const float clipmapGiEnable = step(0.5, camera.shadowConfig3.z);
-    const float clipmapOcclusion = clamp(camera.shadowConfig3.x, 0.0, 1.0) * clipmapGiEnable;
-    const float clipmapBounce = clamp(camera.shadowConfig3.y, 0.0, 2.0) * clipmapGiEnable;
-    const float ambientOcclusion = 1.0 - (0.55 * clipmapOcclusion);
-    const vec3 ambientBase = ambientIrradiance * (0.26 * vertexAo * ambientOcclusion);
-    const float selfGiReceive = (inMaterial == 251u || inMaterial == 250u) ? 0.0 : 1.0;
-    vec3 clipmapRadiance = vec3(0.0);
-    if (clipmapGiEnable > 0.5) {
-        clipmapRadiance = sampleClipmapRadiance(inWorldPosition, normal) * selfGiReceive;
-    }
-    const vec3 clipmapBounceLight = clipmapRadiance * (1.10 * clipmapBounce);
-    const vec3 ambient = ambientBase;
+    const vec3 ambient = ambientIrradiance * (0.26 * vertexAo);
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = mix(1.0, shadowVisibility, shadowStrength);
     vec3 lighting =
@@ -331,8 +261,7 @@ void main() {
         baseColor = materialTint(inMaterial);
     }
 
-    const vec3 colorBleed = clipmapBounceLight * (0.35 + (0.65 * baseColor));
-    const vec3 shaded = (baseColor * lighting) + colorBleed;
-    const vec3 fogged = applyAtmosphericFog(shaded, inWorldPosition, viewDepth, sunDirection, sunColor);
+    const vec3 shaded = baseColor * lighting;
+    const vec3 fogged = applyAtmosphericFog(shaded, inWorldPosition, viewDepth, sunDirection);
     outColor = vec4(fogged, 1.0);
 }
