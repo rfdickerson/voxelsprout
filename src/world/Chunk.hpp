@@ -58,6 +58,7 @@ public:
     void setVoxelRefined4(int x, int y, int z, Voxel voxel);
     void setVoxelRefined(int x, int y, int z, Voxel voxel);
     void setFromSolidBitfield(const std::uint8_t* packedBits, std::size_t packedByteCount);
+    void setFromTypedVoxelBytes(const std::uint8_t* typeBytes, std::size_t byteCount);
     void fillLayer(int y, Voxel voxel);
     Voxel voxelAt(int x, int y, int z) const;
     bool isSolid(int x, int y, int z) const;
@@ -75,9 +76,11 @@ private:
     static bool isMacroInBounds(int mx, int my, int mz);
     static std::size_t refined4LinearIndex(int sx, int sy, int sz);
     static std::size_t refined1LinearIndex(int lx, int ly, int lz);
+    static VoxelType voxelTypeFromSerializedByte(std::uint8_t raw);
     std::size_t ensureChunk4IndexForCell(MacroCell& cell);
     std::size_t ensureChunk1IndexForCell(MacroCell& cell, int mx, int my, int mz);
     static bool isUniformChunk4(const Chunk4Cell& chunk4Cell);
+    void rebuildMacroHierarchyFromDense();
     void syncMacroCellFromDense(int mx, int my, int mz);
     std::vector<Voxel> m_voxels;
     std::vector<MacroCell> m_macroCells;
@@ -151,19 +154,37 @@ inline void Chunk::setFromSolidBitfield(const std::uint8_t* packedBits, std::siz
                 const std::size_t byteIndex = voxelIndex >> 3u;
                 const std::uint8_t bitMask = static_cast<std::uint8_t>(1u << (voxelIndex & 7u));
                 if ((packedBits[byteIndex] & bitMask) != 0u) {
-                    m_voxels[linearIndex(x, y, z)] = Voxel{VoxelType::Solid};
+                    m_voxels[voxelIndex] = Voxel{VoxelType::Solid};
                 }
             }
         }
     }
 
-    for (int my = 0; my < kMacroSizeY; ++my) {
-        for (int mz = 0; mz < kMacroSizeZ; ++mz) {
-            for (int mx = 0; mx < kMacroSizeX; ++mx) {
-                syncMacroCellFromDense(mx, my, mz);
+    rebuildMacroHierarchyFromDense();
+}
+
+inline void Chunk::setFromTypedVoxelBytes(const std::uint8_t* typeBytes, std::size_t byteCount) {
+    constexpr std::size_t kVoxelCount = static_cast<std::size_t>(kSizeX * kSizeY * kSizeZ);
+
+    std::fill(m_voxels.begin(), m_voxels.end(), Voxel{VoxelType::Empty});
+    std::fill(m_macroCells.begin(), m_macroCells.end(), MacroCell{});
+    m_chunk4Cells.clear();
+    m_chunk1Cells.clear();
+
+    if (typeBytes == nullptr || byteCount < kVoxelCount) {
+        return;
+    }
+
+    std::size_t voxelIndex = 0;
+    for (int y = 0; y < kSizeY; ++y) {
+        for (int z = 0; z < kSizeZ; ++z) {
+            for (int x = 0; x < kSizeX; ++x, ++voxelIndex) {
+                m_voxels[voxelIndex] = Voxel{voxelTypeFromSerializedByte(typeBytes[voxelIndex])};
             }
         }
     }
+
+    rebuildMacroHierarchyFromDense();
 }
 
 inline Voxel Chunk::voxelAt(int x, int y, int z) const {
@@ -218,6 +239,25 @@ inline std::size_t Chunk::refined4LinearIndex(int sx, int sy, int sz) {
 
 inline std::size_t Chunk::refined1LinearIndex(int lx, int ly, int lz) {
     return static_cast<std::size_t>(lx + (kMacroVoxelSize * (lz + (kMacroVoxelSize * ly))));
+}
+
+inline VoxelType Chunk::voxelTypeFromSerializedByte(std::uint8_t raw) {
+    switch (raw) {
+    case static_cast<std::uint8_t>(VoxelType::Empty):
+        return VoxelType::Empty;
+    case static_cast<std::uint8_t>(VoxelType::Solid):
+        return VoxelType::Stone;
+    case static_cast<std::uint8_t>(VoxelType::SolidRed):
+        return VoxelType::SolidRed;
+    case static_cast<std::uint8_t>(VoxelType::Dirt):
+        return VoxelType::Dirt;
+    case static_cast<std::uint8_t>(VoxelType::Grass):
+        return VoxelType::Grass;
+    case static_cast<std::uint8_t>(VoxelType::Wood):
+        return VoxelType::Wood;
+    default:
+        return VoxelType::Stone;
+    }
 }
 
 inline bool Chunk::isInBounds(int x, int y, int z) {
@@ -275,6 +315,16 @@ inline bool Chunk::isUniformChunk4(const Chunk4Cell& chunk4Cell) {
         }
     }
     return true;
+}
+
+inline void Chunk::rebuildMacroHierarchyFromDense() {
+    for (int my = 0; my < kMacroSizeY; ++my) {
+        for (int mz = 0; mz < kMacroSizeZ; ++mz) {
+            for (int mx = 0; mx < kMacroSizeX; ++mx) {
+                syncMacroCellFromDense(mx, my, mz);
+            }
+        }
+    }
 }
 
 inline void Chunk::syncMacroCellFromDense(int mx, int my, int mz) {

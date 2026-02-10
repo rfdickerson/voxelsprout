@@ -1140,6 +1140,18 @@ bool Renderer::isFrameStatsVisible() const {
 }
 
 bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
+    using Clock = std::chrono::steady_clock;
+    const auto initStart = Clock::now();
+    auto elapsedMs = [](const Clock::time_point& start) -> std::int64_t {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
+    };
+    auto runStep = [&](const char* stepName, auto&& stepFn) -> bool {
+        const auto stepStart = Clock::now();
+        const bool ok = stepFn();
+        VOX_LOGI("render") << "init step " << stepName << " took " << elapsedMs(stepStart) << " ms\n";
+        return ok;
+    };
+
     VOX_LOGI("render") << "init begin\n";
     m_window = window;
     if (m_window == nullptr) {
@@ -1152,123 +1164,129 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         return false;
     }
 
-    if (!createInstance()) {
+    if (!runStep("createInstance", [&] { return createInstance(); })) {
         VOX_LOGE("render") << "init failed at createInstance\n";
         shutdown();
         return false;
     }
-    if (!createSurface()) {
+    if (!runStep("createSurface", [&] { return createSurface(); })) {
         VOX_LOGE("render") << "init failed at createSurface\n";
         shutdown();
         return false;
     }
-    if (!pickPhysicalDevice()) {
+    if (!runStep("pickPhysicalDevice", [&] { return pickPhysicalDevice(); })) {
         VOX_LOGE("render") << "init failed at pickPhysicalDevice\n";
         shutdown();
         return false;
     }
-    if (!createLogicalDevice()) {
+    if (!runStep("createLogicalDevice", [&] { return createLogicalDevice(); })) {
         VOX_LOGE("render") << "init failed at createLogicalDevice\n";
         shutdown();
         return false;
     }
-    if (!createTimelineSemaphore()) {
+    if (!runStep("createTimelineSemaphore", [&] { return createTimelineSemaphore(); })) {
         VOX_LOGE("render") << "init failed at createTimelineSemaphore\n";
         shutdown();
         return false;
     }
-    if (!m_bufferAllocator.init(
-            m_physicalDevice,
-            m_device
+    if (!runStep("bufferAllocator.init", [&] {
+            return m_bufferAllocator.init(
+                m_physicalDevice,
+                m_device
 #if defined(VOXEL_HAS_VMA)
-            ,
-            m_vmaAllocator
+                ,
+                m_vmaAllocator
 #endif
-        )) {
+            );
+        })) {
         VOX_LOGE("render") << "init failed at buffer allocator init\n";
         shutdown();
         return false;
     }
-    if (!createUploadRingBuffer()) {
+    if (!runStep("createUploadRingBuffer", [&] { return createUploadRingBuffer(); })) {
         VOX_LOGE("render") << "init failed at createUploadRingBuffer\n";
         shutdown();
         return false;
     }
-    if (!createTransferResources()) {
+    if (!runStep("createTransferResources", [&] { return createTransferResources(); })) {
         VOX_LOGE("render") << "init failed at createTransferResources\n";
         shutdown();
         return false;
     }
-    if (!createEnvironmentResources()) {
+    if (!runStep("createEnvironmentResources", [&] { return createEnvironmentResources(); })) {
         VOX_LOGE("render") << "init failed at createEnvironmentResources\n";
         shutdown();
         return false;
     }
-    if (!createShadowResources()) {
+    if (!runStep("createShadowResources", [&] { return createShadowResources(); })) {
         VOX_LOGE("render") << "init failed at createShadowResources\n";
         shutdown();
         return false;
     }
-    if (!createSwapchain()) {
+    if (!runStep("createSwapchain", [&] { return createSwapchain(); })) {
         VOX_LOGE("render") << "init failed at createSwapchain\n";
         shutdown();
         return false;
     }
-    if (!createDescriptorResources()) {
+    if (!runStep("createDescriptorResources", [&] { return createDescriptorResources(); })) {
         VOX_LOGE("render") << "init failed at createDescriptorResources\n";
         shutdown();
         return false;
     }
-    if (!createGraphicsPipeline()) {
+    if (!runStep("createGraphicsPipeline", [&] { return createGraphicsPipeline(); })) {
         VOX_LOGE("render") << "init failed at createGraphicsPipeline\n";
         shutdown();
         return false;
     }
-    if (!createPipePipeline()) {
+    if (!runStep("createPipePipeline", [&] { return createPipePipeline(); })) {
         VOX_LOGE("render") << "init failed at createPipePipeline\n";
         shutdown();
         return false;
     }
-    if (!createAoPipelines()) {
+    if (!runStep("createAoPipelines", [&] { return createAoPipelines(); })) {
         VOX_LOGE("render") << "init failed at createAoPipelines\n";
         shutdown();
         return false;
     }
-    m_frameArena.beginFrame(0);
-    if (!createChunkBuffers(chunkGrid, {})) {
+    {
+        const auto frameArenaStart = Clock::now();
+        m_frameArena.beginFrame(0);
+        VOX_LOGI("render") << "init step frameArena.beginFrame(0) took " << elapsedMs(frameArenaStart) << " ms\n";
+    }
+    if (!runStep("createChunkBuffers", [&] { return createChunkBuffers(chunkGrid, {}); })) {
         VOX_LOGE("render") << "init failed at createChunkBuffers\n";
         shutdown();
         return false;
     }
-    if (!createPipeBuffers()) {
+    if (!runStep("createPipeBuffers", [&] { return createPipeBuffers(); })) {
         VOX_LOGE("render") << "init failed at createPipeBuffers\n";
         shutdown();
         return false;
     }
-    if (!createPreviewBuffers()) {
+    if (!runStep("createPreviewBuffers", [&] { return createPreviewBuffers(); })) {
         VOX_LOGE("render") << "init failed at createPreviewBuffers\n";
         shutdown();
         return false;
     }
-    if (!createFrameResources()) {
+    if (!runStep("createFrameResources", [&] { return createFrameResources(); })) {
         VOX_LOGE("render") << "init failed at createFrameResources\n";
         shutdown();
         return false;
     }
-    if (!createGpuTimestampResources()) {
+    if (!runStep("createGpuTimestampResources", [&] { return createGpuTimestampResources(); })) {
         VOX_LOGE("render") << "init failed at createGpuTimestampResources\n";
         shutdown();
         return false;
     }
 #if defined(VOXEL_HAS_IMGUI)
-    if (!createImGuiResources()) {
+    if (!runStep("createImGuiResources", [&] { return createImGuiResources(); })) {
         VOX_LOGE("render") << "init failed at createImGuiResources\n";
         shutdown();
         return false;
     }
 #endif
 
-    VOX_LOGI("render") << "init complete\n";
+    VOX_LOGI("render") << "init complete in " << elapsedMs(initStart) << " ms\n";
     return true;
 }
 

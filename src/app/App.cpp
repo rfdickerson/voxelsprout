@@ -481,15 +481,24 @@ core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, core::Dir6 preferredAx
 namespace app {
 
 bool App::init() {
+    using Clock = std::chrono::steady_clock;
+    const auto initStart = Clock::now();
+    auto elapsedMs = [](const Clock::time_point& start) -> std::int64_t {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
+    };
+
     VOX_LOGI("app") << "init begin";
     glfwSetErrorCallback(glfwErrorCallback);
 
+    const auto glfwStart = Clock::now();
     if (glfwInit() == GLFW_FALSE) {
         VOX_LOGE("app") << "glfwInit failed";
         return false;
     }
+    VOX_LOGI("app") << "init step glfwInit took " << elapsedMs(glfwStart) << " ms";
 
     // Vulkan renderer path requires no OpenGL context.
+    const auto windowStart = Clock::now();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     m_window = glfwCreateWindow(1280, 720, "voxel_factory_toy", nullptr, nullptr);
     if (m_window == nullptr) {
@@ -497,40 +506,46 @@ bool App::init() {
         glfwTerminate();
         return false;
     }
+    VOX_LOGI("app") << "init step createWindow took " << elapsedMs(windowStart) << " ms";
 
     // Relative mouse mode for camera look.
     glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
-    const auto worldLoadStart = std::chrono::steady_clock::now();
+    const auto worldLoadStart = Clock::now();
     const std::filesystem::path worldPath{kWorldFilePath};
     if (m_chunkGrid.loadFromBinaryFile(worldPath)) {
-        const auto worldLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - worldLoadStart
-        ).count();
+        const auto worldLoadMs = elapsedMs(worldLoadStart);
         VOX_LOGI("app") << "loaded world from " << std::filesystem::absolute(worldPath).string()
                         << " in " << worldLoadMs << " ms";
     } else {
         m_chunkGrid.initializeEmptyWorld();
-        const auto worldLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - worldLoadStart
-        ).count();
+        const auto worldLoadMs = elapsedMs(worldLoadStart);
         VOX_LOGW("app") << "world file missing/invalid at " << std::filesystem::absolute(worldPath).string()
                         << "; using empty world (press R to regenerate) in " << worldLoadMs << " ms";
     }
+
+    const auto clipmapStart = Clock::now();
     m_appliedClipmapConfig = m_renderer.clipmapQueryConfig();
     m_hasAppliedClipmapConfig = true;
     m_chunkClipmapIndex.setConfig(m_appliedClipmapConfig);
     m_chunkClipmapIndex.rebuild(m_chunkGrid);
-    VOX_LOGI("app") << "chunk clipmap index rebuilt (" << m_chunkClipmapIndex.chunkCount() << " chunks)";
+    VOX_LOGI("app") << "chunk clipmap index rebuilt (" << m_chunkClipmapIndex.chunkCount()
+                    << " chunks) in " << elapsedMs(clipmapStart) << " ms";
 
+    const auto simInitStart = Clock::now();
     m_simulation.initializeSingleBelt();
+    VOX_LOGI("app") << "init step simulation initialize took " << elapsedMs(simInitStart) << " ms";
+
+    const auto rendererInitStart = Clock::now();
     const bool rendererOk = m_renderer.init(m_window, m_chunkGrid);
+    const auto rendererInitMs = elapsedMs(rendererInitStart);
+    VOX_LOGI("app") << "init step renderer init took " << rendererInitMs << " ms";
     if (!rendererOk) {
         VOX_LOGE("app") << "renderer init failed";
         return false;
     }
 
-    VOX_LOGI("app") << "init complete";
+    VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms";
     return true;
 }
 

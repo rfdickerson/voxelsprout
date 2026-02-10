@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <vector>
 
+#include "core/Log.hpp"
 #include "world/Chunk.hpp"
 #include "world/Voxel.hpp"
 
@@ -255,6 +257,8 @@ inline void ChunkGrid::initializeEmptyWorld() {
 }
 
 inline bool ChunkGrid::loadFromBinaryFile(const std::filesystem::path& path) {
+    using Clock = std::chrono::steady_clock;
+    const auto loadStart = Clock::now();
     std::ifstream in(path, std::ios::binary);
     if (!in.is_open()) {
         return false;
@@ -286,30 +290,14 @@ inline bool ChunkGrid::loadFromBinaryFile(const std::filesystem::path& path) {
     constexpr std::size_t kBytesPerChunk = (kVoxelsPerChunk + 7u) / 8u;
     std::vector<std::uint8_t> typeBytes(kVoxelsPerChunk, 0u);
     std::vector<std::uint8_t> packed(kBytesPerChunk, 0u);
-
-    auto voxelTypeFromByte = [](std::uint8_t raw) -> VoxelType {
-        switch (raw) {
-        case static_cast<std::uint8_t>(VoxelType::Empty):
-            return VoxelType::Empty;
-        case static_cast<std::uint8_t>(VoxelType::Solid):
-            return VoxelType::Stone;
-        case static_cast<std::uint8_t>(VoxelType::SolidRed):
-            return VoxelType::SolidRed;
-        case static_cast<std::uint8_t>(VoxelType::Dirt):
-            return VoxelType::Dirt;
-        case static_cast<std::uint8_t>(VoxelType::Grass):
-            return VoxelType::Grass;
-        case static_cast<std::uint8_t>(VoxelType::Wood):
-            return VoxelType::Wood;
-        default:
-            return VoxelType::Stone;
-        }
-    };
+    std::int64_t ioMicros = 0;
+    std::int64_t decodeMicros = 0;
 
     std::vector<Chunk> loadedChunks;
     loadedChunks.reserve(static_cast<std::size_t>(chunkCount));
 
     for (std::uint32_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+        const auto ioStart = Clock::now();
         std::int32_t chunkX = 0;
         std::int32_t chunkY = 0;
         std::int32_t chunkZ = 0;
@@ -322,25 +310,33 @@ inline bool ChunkGrid::loadFromBinaryFile(const std::filesystem::path& path) {
             if (!in.good()) {
                 return false;
             }
+            ioMicros += std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - ioStart).count();
+            const auto decodeStart = Clock::now();
             chunk.setFromSolidBitfield(packed.data(), packed.size());
+            decodeMicros += std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - decodeStart).count();
         } else {
             in.read(reinterpret_cast<char*>(typeBytes.data()), static_cast<std::streamsize>(typeBytes.size()));
             if (!in.good()) {
                 return false;
             }
-            std::size_t voxelIndex = 0;
-            for (int y = 0; y < Chunk::kSizeY; ++y) {
-                for (int z = 0; z < Chunk::kSizeZ; ++z) {
-                    for (int x = 0; x < Chunk::kSizeX; ++x, ++voxelIndex) {
-                        chunk.setVoxel(x, y, z, Voxel{voxelTypeFromByte(typeBytes[voxelIndex])});
-                    }
-                }
-            }
+            ioMicros += std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - ioStart).count();
+            const auto decodeStart = Clock::now();
+            chunk.setFromTypedVoxelBytes(typeBytes.data(), typeBytes.size());
+            decodeMicros += std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - decodeStart).count();
         }
         loadedChunks.push_back(std::move(chunk));
     }
 
     m_chunks = std::move(loadedChunks);
+    const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - loadStart).count();
+    const double ioMs = static_cast<double>(ioMicros) / 1000.0;
+    const double decodeMs = static_cast<double>(decodeMicros) / 1000.0;
+    VOX_LOGI("world") << "load binary '" << path.string() << "'"
+                      << " version=" << version
+                      << ", chunks=" << chunkCount
+                      << ", ioMs=" << ioMs
+                      << ", decodeMs=" << decodeMs
+                      << ", totalMs=" << totalMs;
     return true;
 }
 
