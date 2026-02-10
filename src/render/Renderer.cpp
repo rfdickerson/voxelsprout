@@ -6411,26 +6411,26 @@ void Renderer::buildFrameStatsUi() {
     ImGui::Text("Chunks (visible/total): %u / %u", m_debugSpatialVisibleChunkCount, m_debugChunkCount);
     if (m_gpuTimestampsSupported) {
         ImGui::Text("Frame (CPU/GPU): %.2f / %.2f ms", m_debugFrameTimeMs, m_debugGpuFrameTimeMs);
-        ImGui::Text(
-            "GPU Stages (ms): Shadow %.2f, Prepass %.2f, SSAO %.2f, Blur %.2f, Main %.2f, Post %.2f",
-            m_debugGpuShadowTimeMs,
-            m_debugGpuPrepassTimeMs,
-            m_debugGpuSsaoTimeMs,
-            m_debugGpuSsaoBlurTimeMs,
-            m_debugGpuMainTimeMs,
-            m_debugGpuPostTimeMs
-        );
+        if (ImGui::TreeNodeEx("GPU Stages (ms)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
+            ImGui::Text("Prepass: %.2f", m_debugGpuPrepassTimeMs);
+            ImGui::Text("SSAO: %.2f", m_debugGpuSsaoTimeMs);
+            ImGui::Text("SSAO Blur: %.2f", m_debugGpuSsaoBlurTimeMs);
+            ImGui::Text("Main: %.2f", m_debugGpuMainTimeMs);
+            ImGui::Text("Post: %.2f", m_debugGpuPostTimeMs);
+            ImGui::TreePop();
+        }
     } else {
         ImGui::Text("Frame (CPU/GPU): %.2f / n/a ms", m_debugFrameTimeMs);
     }
-    ImGui::Text(
-        "Draw Calls Total: %u (Shadow %u, Prepass %u, Main %u, Post %u)",
-        m_debugDrawCallsTotal,
-        m_debugDrawCallsShadow,
-        m_debugDrawCallsPrepass,
-        m_debugDrawCallsMain,
-        m_debugDrawCallsPost
-    );
+    if (ImGui::TreeNodeEx("Draw Calls", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Total: %u", m_debugDrawCallsTotal);
+        ImGui::Text("Shadow: %u", m_debugDrawCallsShadow);
+        ImGui::Text("Prepass: %u", m_debugDrawCallsPrepass);
+        ImGui::Text("Main: %u", m_debugDrawCallsMain);
+        ImGui::Text("Post: %u", m_debugDrawCallsPost);
+        ImGui::TreePop();
+    }
     ImGui::Text("Chunk Indirect Commands: %u", m_debugChunkIndirectCommandCount);
     ImGui::Text(
         "Spatial Query N/C/V: %u / %u / %u",
