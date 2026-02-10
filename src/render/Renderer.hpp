@@ -71,6 +71,11 @@ struct VoxelPreview {
 
 class Renderer {
 public:
+    enum class SpatialQueryBackend : std::uint8_t {
+        Clipmap = 0,
+        Octree = 1
+    };
+
     struct ShadowDebugSettings {
         float casterConstantBiasBase = 1.1f;
         float casterConstantBiasCascadeScale = 0.9f;
@@ -108,6 +113,7 @@ public:
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
     bool useSpatialPartitioningQueries() const;
+    SpatialQueryBackend spatialQueryBackend() const;
     void setSpatialQueryStats(bool used, const world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void renderFrame(
         const world::ChunkGrid& chunkGrid,
@@ -429,6 +435,7 @@ private:
     std::uint32_t m_debugDrawnLod1Ranges = 0;
     std::uint32_t m_debugDrawnLod2Ranges = 0;
     bool m_debugEnableSpatialQueries = true;
+    SpatialQueryBackend m_debugSpatialQueryBackend = SpatialQueryBackend::Clipmap;
     bool m_debugSpatialQueriesUsed = false;
     world::SpatialQueryStats m_debugSpatialQueryStats{};
     std::uint32_t m_debugSpatialVisibleChunkCount = 0;

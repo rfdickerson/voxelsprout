@@ -1649,6 +1649,10 @@ bool Renderer::useSpatialPartitioningQueries() const {
     return m_debugEnableSpatialQueries;
 }
 
+Renderer::SpatialQueryBackend Renderer::spatialQueryBackend() const {
+    return m_debugSpatialQueryBackend;
+}
+
 void Renderer::setSpatialQueryStats(
     bool used,
     const world::SpatialQueryStats& stats,
@@ -5796,6 +5800,11 @@ void Renderer::buildFrameStatsUi() {
     ImGui::Text("FPS: %.1f", m_debugFps);
     ImGui::Text("Chunks: %u", m_debugChunkCount);
     ImGui::Checkbox("Use Spatial Queries", &m_debugEnableSpatialQueries);
+    int spatialBackendSelection = (m_debugSpatialQueryBackend == SpatialQueryBackend::Clipmap) ? 0 : 1;
+    if (ImGui::Combo("Spatial Backend", &spatialBackendSelection, "Clipmap\0Octree\0")) {
+        m_debugSpatialQueryBackend =
+            (spatialBackendSelection == 0) ? SpatialQueryBackend::Clipmap : SpatialQueryBackend::Octree;
+    }
     ImGui::Text("Spatial Query Used: %s", m_debugSpatialQueriesUsed ? "yes" : "no");
     if (m_debugSpatialQueriesUsed) {
         ImGui::Text(
@@ -5804,6 +5813,14 @@ void Renderer::buildFrameStatsUi() {
             m_debugSpatialQueryStats.candidateChunkCount,
             m_debugSpatialQueryStats.visibleChunkCount
         );
+        if (m_debugSpatialQueryStats.clipmapActiveLevelCount > 0) {
+            ImGui::Text(
+                "Clipmap Levels/UpdatedLevels/UpdatedSlabs: %u / %u / %u",
+                m_debugSpatialQueryStats.clipmapActiveLevelCount,
+                m_debugSpatialQueryStats.clipmapUpdatedLevelCount,
+                m_debugSpatialQueryStats.clipmapUpdatedSlabCount
+            );
+        }
     }
     ImGui::Text("Visible Chunks (render input): %u", m_debugSpatialVisibleChunkCount);
     ImGui::Text("Chunk Indirect Draws: %u", m_debugChunkIndirectCommandCount);
@@ -8622,6 +8639,11 @@ void Renderer::shutdown() {
     m_debugChunkLastRemeshReductionPercent = 0.0f;
     m_debugChunkLastRemeshMs = 0.0f;
     m_debugChunkLastFullRemeshMs = 0.0f;
+    m_debugEnableSpatialQueries = true;
+    m_debugSpatialQueryBackend = SpatialQueryBackend::Clipmap;
+    m_debugSpatialQueriesUsed = false;
+    m_debugSpatialQueryStats = {};
+    m_debugSpatialVisibleChunkCount = 0;
     m_debugCpuFrameTimingMsHistory.fill(0.0f);
     m_debugCpuFrameTimingMsHistoryWrite = 0;
     m_debugCpuFrameTimingMsHistoryCount = 0;

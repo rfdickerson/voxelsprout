@@ -3,6 +3,7 @@
 #include "core/Input.hpp"
 #include "render/Renderer.hpp"
 #include "sim/Simulation.hpp"
+#include "world/ClipmapIndex.hpp"
 #include "world/ChunkGrid.hpp"
 #include "world/SpatialIndex.hpp"
 
@@ -176,6 +177,7 @@ private:
     sim::Simulation m_simulation;
     world::ChunkGrid m_chunkGrid;
     world::ChunkSpatialIndex m_chunkSpatialIndex;
+    world::ChunkClipmapIndex m_chunkClipmapIndex;
     render::Renderer m_renderer;
 };
 

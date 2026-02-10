@@ -14,6 +14,7 @@ add_executable(voxel_factory_toy
     src/render/Renderer.cpp
     src/render/VmaUsage.cpp
     src/world/ChunkMesher.cpp
+    src/world/ClipmapIndex.cpp
     src/world/SpatialIndex.cpp
 )
 
@@ -116,6 +117,7 @@ if(BUILD_TESTING)
     add_executable(voxel_foundation_tests
         tests/FoundationTests.cpp
         src/world/ChunkMesher.cpp
+        src/world/ClipmapIndex.cpp
     )
     target_include_directories(voxel_foundation_tests PRIVATE src)
 

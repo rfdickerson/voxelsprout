@@ -442,7 +442,9 @@ bool App::init() {
                         << "; using empty world (press R to regenerate) in " << worldLoadMs << " ms";
     }
     m_chunkSpatialIndex.rebuild(m_chunkGrid);
+    m_chunkClipmapIndex.rebuild(m_chunkGrid);
     VOX_LOGI("app") << "chunk spatial index rebuilt (" << m_chunkSpatialIndex.chunkCount() << " chunks)";
+    VOX_LOGI("app") << "chunk clipmap index rebuilt (" << m_chunkClipmapIndex.chunkCount() << " chunks)";
 
     m_simulation.initializeSingleBelt();
     const bool rendererOk = m_renderer.init(m_window, m_chunkGrid);
@@ -730,7 +732,7 @@ void App::update(float dt) {
     m_visibleChunkIndices.clear();
     world::SpatialQueryStats spatialQueryStats{};
     bool spatialQueriesUsed = false;
-    if (m_renderer.useSpatialPartitioningQueries() && m_chunkSpatialIndex.valid()) {
+    if (m_renderer.useSpatialPartitioningQueries()) {
         int framebufferWidth = 0;
         int framebufferHeight = 0;
         glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
@@ -746,9 +748,20 @@ void App::update(float dt) {
             aspectRatio
         );
         if (cameraFrustum.valid) {
-            std::vector<std::size_t> candidateChunkIndices =
-                m_chunkSpatialIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
-            spatialQueriesUsed = true;
+            std::vector<std::size_t> candidateChunkIndices;
+            if (m_renderer.spatialQueryBackend() == render::Renderer::SpatialQueryBackend::Clipmap &&
+                m_chunkClipmapIndex.valid()) {
+                m_chunkClipmapIndex.updateCamera(m_camera.x, m_camera.y, m_camera.z, &spatialQueryStats);
+                candidateChunkIndices =
+                    m_chunkClipmapIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
+                spatialQueriesUsed = true;
+            } else if (m_renderer.spatialQueryBackend() == render::Renderer::SpatialQueryBackend::Octree &&
+                       m_chunkSpatialIndex.valid()) {
+                candidateChunkIndices =
+                    m_chunkSpatialIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
+                spatialQueriesUsed = true;
+            }
+
             m_visibleChunkIndices.reserve(candidateChunkIndices.size());
             const std::vector<world::Chunk>& chunks = m_chunkGrid.chunks();
             for (std::size_t chunkIndex : candidateChunkIndices) {
@@ -768,7 +781,11 @@ void App::update(float dt) {
         }
     }
 
-    if (m_visibleChunkIndices.empty() && (!spatialQueriesUsed || !m_chunkSpatialIndex.valid())) {
+    const bool spatialBackendValid =
+        (m_renderer.spatialQueryBackend() == render::Renderer::SpatialQueryBackend::Clipmap)
+            ? m_chunkClipmapIndex.valid()
+            : m_chunkSpatialIndex.valid();
+    if (m_visibleChunkIndices.empty() && (!spatialQueriesUsed || !spatialBackendValid)) {
         const std::size_t chunkCount = m_chunkGrid.chunks().size();
         m_visibleChunkIndices.resize(chunkCount);
         for (std::size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
@@ -2076,6 +2093,7 @@ bool App::isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTra
 void App::regenerateWorld() {
     m_chunkGrid.initializeFlatWorld();
     m_chunkSpatialIndex.rebuild(m_chunkGrid);
+    m_chunkClipmapIndex.rebuild(m_chunkGrid);
     if (!m_renderer.updateChunkMesh(m_chunkGrid)) {
         VOX_LOGE("app") << "world regenerate failed to update chunk meshes";
     }

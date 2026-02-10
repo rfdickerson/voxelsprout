@@ -8,6 +8,7 @@
 #include "sim/NetworkGraph.hpp"
 #include "sim/NetworkProcedural.hpp"
 #include "render/FrameArenaAlias.hpp"
+#include "world/ClipmapIndex.hpp"
 #include "world/Chunk.hpp"
 #include "world/ChunkMesher.hpp"
 #include "world/Csg.hpp"
@@ -294,6 +295,38 @@ void testChunkMeshingModes() {
     }
 }
 
+void testClipmapIndex() {
+    world::ChunkGrid grid;
+    grid.initializeEmptyWorld();
+
+    world::ChunkClipmapIndex clipmapIndex;
+    clipmapIndex.rebuild(grid);
+    expectTrue(clipmapIndex.valid(), "Clipmap index valid after rebuild");
+    expectTrue(clipmapIndex.chunkCount() == grid.chunkCount(), "Clipmap chunk count matches grid");
+
+    world::SpatialQueryStats updateStats{};
+    clipmapIndex.updateCamera(0.0f, 0.0f, 0.0f, &updateStats);
+    expectTrue(updateStats.clipmapActiveLevelCount > 0u, "Clipmap level count populated");
+    expectTrue(updateStats.clipmapUpdatedLevelCount > 0u, "Clipmap updates levels on first camera update");
+
+    core::CellAabb broadPhase{};
+    broadPhase.valid = true;
+    broadPhase.minInclusive = core::Cell3i{-96, -96, -96};
+    broadPhase.maxExclusive = core::Cell3i{96, 96, 96};
+    world::SpatialQueryStats queryStats{};
+    const std::vector<std::size_t> visibleChunks = clipmapIndex.queryChunksIntersecting(broadPhase, &queryStats);
+    expectTrue(!visibleChunks.empty(), "Clipmap query returns visible chunks near camera");
+    expectTrue(queryStats.candidateChunkCount >= queryStats.visibleChunkCount, "Clipmap candidates >= visible");
+
+    world::SpatialQueryStats stableUpdateStats{};
+    clipmapIndex.updateCamera(0.2f, 0.2f, 0.2f, &stableUpdateStats);
+    expectTrue(stableUpdateStats.clipmapUpdatedLevelCount == 0u, "Clipmap stays stable within same snapped cell");
+
+    world::SpatialQueryStats movedUpdateStats{};
+    clipmapIndex.updateCamera(33.0f, 0.0f, 0.0f, &movedUpdateStats);
+    expectTrue(movedUpdateStats.clipmapUpdatedLevelCount > 0u, "Clipmap updates when camera crosses snapped boundary");
+}
+
 } // namespace
 
 int main() {
@@ -302,6 +335,7 @@ int main() {
     testCsgCommands();
     testFrameArenaAliasUtilities();
     testChunkMeshingModes();
+    testClipmapIndex();
 
     if (g_failures != 0) {
         std::cerr << "[foundation test] " << g_failures << " failures\n";
