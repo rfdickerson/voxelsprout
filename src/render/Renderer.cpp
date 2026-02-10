@@ -2036,7 +2036,9 @@ bool Renderer::createPipeBuffers() {
     if (m_pipeVertexBufferHandle != kInvalidBufferHandle &&
         m_pipeIndexBufferHandle != kInvalidBufferHandle &&
         m_transportVertexBufferHandle != kInvalidBufferHandle &&
-        m_transportIndexBufferHandle != kInvalidBufferHandle) {
+        m_transportIndexBufferHandle != kInvalidBufferHandle &&
+        m_grassBillboardVertexBufferHandle != kInvalidBufferHandle &&
+        m_grassBillboardIndexBufferHandle != kInvalidBufferHandle) {
         return true;
     }
 
@@ -2102,6 +2104,63 @@ bool Renderer::createPipeBuffers() {
         )) {
         VOX_LOGE("render") << "transport mesh buffer setup failed\n";
         return false;
+    }
+
+    if (m_grassBillboardVertexBufferHandle == kInvalidBufferHandle ||
+        m_grassBillboardIndexBufferHandle == kInvalidBufferHandle) {
+        constexpr std::array<GrassBillboardVertex, 8> kGrassBillboardVertices = {{
+            // Plane 0 (X axis).
+            GrassBillboardVertex{{-0.38f, 0.0f}, {0.0f, 1.0f}, 0.0f},
+            GrassBillboardVertex{{ 0.38f, 0.0f}, {1.0f, 1.0f}, 0.0f},
+            GrassBillboardVertex{{-0.38f, 0.88f}, {0.0f, 0.0f}, 0.0f},
+            GrassBillboardVertex{{ 0.38f, 0.88f}, {1.0f, 0.0f}, 0.0f},
+            // Plane 1 (Z axis).
+            GrassBillboardVertex{{-0.38f, 0.0f}, {0.0f, 1.0f}, 1.0f},
+            GrassBillboardVertex{{ 0.38f, 0.0f}, {1.0f, 1.0f}, 1.0f},
+            GrassBillboardVertex{{-0.38f, 0.88f}, {0.0f, 0.0f}, 1.0f},
+            GrassBillboardVertex{{ 0.38f, 0.88f}, {1.0f, 0.0f}, 1.0f},
+        }};
+        constexpr std::array<std::uint32_t, 12> kGrassBillboardIndices = {{
+            0u, 1u, 2u, 2u, 1u, 3u,
+            4u, 5u, 6u, 6u, 5u, 7u
+        }};
+
+        BufferCreateDesc grassVertexCreateDesc{};
+        grassVertexCreateDesc.size = static_cast<VkDeviceSize>(kGrassBillboardVertices.size() * sizeof(GrassBillboardVertex));
+        grassVertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        grassVertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        grassVertexCreateDesc.initialData = kGrassBillboardVertices.data();
+        m_grassBillboardVertexBufferHandle = m_bufferAllocator.createBuffer(grassVertexCreateDesc);
+        if (m_grassBillboardVertexBufferHandle == kInvalidBufferHandle) {
+            VOX_LOGE("render") << "grass billboard vertex buffer allocation failed\n";
+            return false;
+        }
+        {
+            const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
+            if (grassVertexBuffer != VK_NULL_HANDLE) {
+                setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(grassVertexBuffer), "mesh.grassBillboard.vertex");
+            }
+        }
+
+        BufferCreateDesc grassIndexCreateDesc{};
+        grassIndexCreateDesc.size = static_cast<VkDeviceSize>(kGrassBillboardIndices.size() * sizeof(std::uint32_t));
+        grassIndexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+        grassIndexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        grassIndexCreateDesc.initialData = kGrassBillboardIndices.data();
+        m_grassBillboardIndexBufferHandle = m_bufferAllocator.createBuffer(grassIndexCreateDesc);
+        if (m_grassBillboardIndexBufferHandle == kInvalidBufferHandle) {
+            VOX_LOGE("render") << "grass billboard index buffer allocation failed\n";
+            m_bufferAllocator.destroyBuffer(m_grassBillboardVertexBufferHandle);
+            m_grassBillboardVertexBufferHandle = kInvalidBufferHandle;
+            return false;
+        }
+        {
+            const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
+            if (grassIndexBuffer != VK_NULL_HANDLE) {
+                setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(grassIndexBuffer), "mesh.grassBillboard.index");
+            }
+        }
+        m_grassBillboardIndexCount = static_cast<uint32_t>(kGrassBillboardIndices.size());
     }
 
     m_pipeIndexCount = static_cast<uint32_t>(pipeMesh.indices.size());
@@ -2197,7 +2256,7 @@ bool Renderer::createDiffuseTextureResources() {
     }
 
     constexpr uint32_t kTileSize = 16;
-    constexpr uint32_t kTextureTilesX = 4;
+    constexpr uint32_t kTextureTilesX = 5;
     constexpr uint32_t kTextureTilesY = 1;
     constexpr uint32_t kTextureWidth = kTileSize * kTextureTilesX;
     constexpr uint32_t kTextureHeight = kTileSize * kTextureTilesY;
@@ -2216,12 +2275,12 @@ bool Renderer::createDiffuseTextureResources() {
         h = (h ^ (h >> 13u)) * 1274126177u;
         return static_cast<std::uint8_t>((h >> 24u) & 0xFFu);
     };
-    auto writePixel = [&](uint32_t px, uint32_t py, std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+    auto writePixel = [&](uint32_t px, uint32_t py, std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a = 255u) {
         const size_t i = static_cast<size_t>((py * kTextureWidth + px) * 4u);
         pixels[i + 0] = r;
         pixels[i + 1] = g;
         pixels[i + 2] = b;
-        pixels[i + 3] = 255u;
+        pixels[i + 3] = a;
     };
 
     for (uint32_t y = 0; y < kTextureHeight; ++y) {
@@ -2255,13 +2314,41 @@ bool Renderer::createDiffuseTextureResources() {
                 g = static_cast<std::uint8_t>(std::clamp(green, 82, 154));
                 b = static_cast<std::uint8_t>(std::clamp(44 + static_cast<int>(noiseA % 14u) - 7, 26, 64));
             } else {
-                // Wood.
-                const int stripe = ((localX / 3u) + (localY / 5u)) % 3u;
-                const int base = (stripe == 0) ? 112 : (stripe == 1 ? 96 : 84);
-                const int grain = static_cast<int>(noiseA % 16u) - 8;
-                r = static_cast<std::uint8_t>(std::clamp(base + 34 + grain, 78, 168));
-                g = static_cast<std::uint8_t>(std::clamp(base + 12 + grain, 56, 136));
-                b = static_cast<std::uint8_t>(std::clamp(base - 6 + (grain / 2), 36, 110));
+                if (tileIndex == 3u) {
+                    // Wood.
+                    const int stripe = ((localX / 3u) + (localY / 5u)) % 3u;
+                    const int base = (stripe == 0) ? 112 : (stripe == 1 ? 96 : 84);
+                    const int grain = static_cast<int>(noiseA % 16u) - 8;
+                    r = static_cast<std::uint8_t>(std::clamp(base + 34 + grain, 78, 168));
+                    g = static_cast<std::uint8_t>(std::clamp(base + 12 + grain, 56, 136));
+                    b = static_cast<std::uint8_t>(std::clamp(base - 6 + (grain / 2), 36, 110));
+                } else {
+                    // Billboard grass sprite (transparent background).
+                    const int rowFromBottom = static_cast<int>(kTileSize - 1u - localY);
+                    const float growthT = std::clamp(static_cast<float>(rowFromBottom) / static_cast<float>(kTileSize - 1u), 0.0f, 1.0f);
+                    const int center = static_cast<int>(kTileSize / 2u);
+                    const int leftBlade = center - 3 + static_cast<int>(growthT * 2.0f);
+                    const int rightBlade = center + 2 - static_cast<int>(growthT * 2.0f);
+                    const bool centerBlade = (std::abs(static_cast<int>(localX) - center) <= 1) && rowFromBottom <= 13;
+                    const bool bladeL = (std::abs(static_cast<int>(localX) - leftBlade) <= 1) && rowFromBottom <= 10;
+                    const bool bladeR = (std::abs(static_cast<int>(localX) - rightBlade) <= 1) && rowFromBottom <= 11;
+                    const bool baseTuft = (rowFromBottom <= 3) && (std::abs(static_cast<int>(localX) - center) <= 4);
+                    const bool isBlade = centerBlade || bladeL || bladeR || baseTuft;
+                    if (!isBlade) {
+                        writePixel(x, y, 0u, 0u, 0u, 0u);
+                        continue;
+                    }
+
+                    const int green = 132 + static_cast<int>(noiseA % 52u) - 18;
+                    const int red = 48 + static_cast<int>(noiseB % 28u) - 10;
+                    const int blue = 34 + static_cast<int>(noiseA % 18u) - 6;
+                    r = static_cast<std::uint8_t>(std::clamp(red, 22, 88));
+                    g = static_cast<std::uint8_t>(std::clamp(green, 92, 196));
+                    b = static_cast<std::uint8_t>(std::clamp(blue, 16, 84));
+                    const std::uint8_t alpha = static_cast<std::uint8_t>(std::clamp(160 + static_cast<int>(noiseB % 72u), 140, 240));
+                    writePixel(x, y, r, g, b, alpha);
+                    continue;
+                }
             }
             writePixel(x, y, r, g, b);
         }
@@ -3749,6 +3836,8 @@ bool Renderer::createGraphicsPipeline() {
     constexpr const char* kShadowFragmentShaderPath = "../src/render/shaders/shadow_depth.frag.slang.spv";
     constexpr const char* kPipeShadowVertexShaderPath = "../src/render/shaders/pipe_shadow.vert.slang.spv";
     constexpr const char* kPipeShadowFragmentShaderPath = "../src/render/shaders/pipe_shadow.frag.slang.spv";
+    constexpr const char* kGrassShadowVertexShaderPath = "../src/render/shaders/grass_billboard_shadow.vert.slang.spv";
+    constexpr const char* kGrassShadowFragmentShaderPath = "../src/render/shaders/grass_billboard_shadow.frag.slang.spv";
 
     VkShaderModule worldVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule worldFragShaderModule = VK_NULL_HANDLE;
@@ -4485,6 +4574,127 @@ bool Renderer::createGraphicsPipeline() {
               << ", depthBias=" << (pipeShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
               << "\n";
 
+    VkShaderModule grassShadowVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule grassShadowFragShaderModule = VK_NULL_HANDLE;
+    if (!createShaderModuleFromFile(
+            m_device,
+            kGrassShadowVertexShaderPath,
+            "grass_billboard_shadow.vert",
+            grassShadowVertShaderModule
+        )) {
+        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        return false;
+    }
+    if (!createShaderModuleFromFile(
+            m_device,
+            kGrassShadowFragmentShaderPath,
+            "grass_billboard_shadow.frag",
+            grassShadowFragShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, grassShadowVertShaderModule, nullptr);
+        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo grassShadowVertexShaderStage{};
+    grassShadowVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    grassShadowVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    grassShadowVertexShaderStage.module = grassShadowVertShaderModule;
+    grassShadowVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo grassShadowFragmentShaderStage{};
+    grassShadowFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    grassShadowFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    grassShadowFragmentShaderStage.module = grassShadowFragShaderModule;
+    grassShadowFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> grassShadowShaderStages = {
+        grassShadowVertexShaderStage,
+        grassShadowFragmentShaderStage
+    };
+
+    VkVertexInputBindingDescription grassShadowBindings[2]{};
+    grassShadowBindings[0].binding = 0;
+    grassShadowBindings[0].stride = sizeof(GrassBillboardVertex);
+    grassShadowBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    grassShadowBindings[1].binding = 1;
+    grassShadowBindings[1].stride = sizeof(GrassBillboardInstance);
+    grassShadowBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    VkVertexInputAttributeDescription grassShadowAttributes[4]{};
+    grassShadowAttributes[0].location = 0;
+    grassShadowAttributes[0].binding = 0;
+    grassShadowAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
+    grassShadowAttributes[0].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, corner));
+    grassShadowAttributes[1].location = 1;
+    grassShadowAttributes[1].binding = 0;
+    grassShadowAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+    grassShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, uv));
+    grassShadowAttributes[2].location = 2;
+    grassShadowAttributes[2].binding = 0;
+    grassShadowAttributes[2].format = VK_FORMAT_R32_SFLOAT;
+    grassShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, plane));
+    grassShadowAttributes[3].location = 3;
+    grassShadowAttributes[3].binding = 1;
+    grassShadowAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    grassShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, worldPosYaw));
+
+    VkPipelineVertexInputStateCreateInfo grassShadowVertexInputInfo{};
+    grassShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    grassShadowVertexInputInfo.vertexBindingDescriptionCount = 2;
+    grassShadowVertexInputInfo.pVertexBindingDescriptions = grassShadowBindings;
+    grassShadowVertexInputInfo.vertexAttributeDescriptionCount = 4;
+    grassShadowVertexInputInfo.pVertexAttributeDescriptions = grassShadowAttributes;
+
+    VkGraphicsPipelineCreateInfo grassShadowPipelineCreateInfo = shadowPipelineCreateInfo;
+    grassShadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(grassShadowShaderStages.size());
+    grassShadowPipelineCreateInfo.pStages = grassShadowShaderStages.data();
+    grassShadowPipelineCreateInfo.pVertexInputState = &grassShadowVertexInputInfo;
+    VkPipelineRasterizationStateCreateInfo grassShadowRasterizer = shadowRasterizer;
+    grassShadowRasterizer.cullMode = VK_CULL_MODE_NONE;
+    grassShadowPipelineCreateInfo.pRasterizationState = &grassShadowRasterizer;
+
+    VkPipeline grassShadowPipeline = VK_NULL_HANDLE;
+    const VkResult grassShadowPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &grassShadowPipelineCreateInfo,
+        nullptr,
+        &grassShadowPipeline
+    );
+
+    vkDestroyShaderModule(m_device, grassShadowFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, grassShadowVertShaderModule, nullptr);
+
+    if (grassShadowPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(grassShadow)", grassShadowPipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (grassShadow): cullMode="
+              << static_cast<uint32_t>(grassShadowRasterizer.cullMode)
+              << ", depthBias=" << (grassShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
+              << "\n";
+
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
     }
@@ -4496,6 +4706,9 @@ bool Renderer::createGraphicsPipeline() {
     }
     if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeShadowPipeline, nullptr);
+    }
+    if (m_grassBillboardShadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_grassBillboardShadowPipeline, nullptr);
     }
     if (m_tonemapPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr);
@@ -4510,6 +4723,7 @@ bool Renderer::createGraphicsPipeline() {
     m_skyboxPipeline = skyboxPipeline;
     m_shadowPipeline = shadowPipeline;
     m_pipeShadowPipeline = pipeShadowPipeline;
+    m_grassBillboardShadowPipeline = grassShadowPipeline;
     m_tonemapPipeline = toneMapPipeline;
     m_previewAddPipeline = previewAddPipeline;
     m_previewRemovePipeline = previewRemovePipeline;
@@ -4517,6 +4731,11 @@ bool Renderer::createGraphicsPipeline() {
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyboxPipeline), "pipeline.skybox");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_shadowPipeline), "pipeline.shadow.voxels");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeShadowPipeline), "pipeline.shadow.pipes");
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_grassBillboardShadowPipeline),
+        "pipeline.shadow.grass"
+    );
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_tonemapPipeline), "pipeline.tonemap");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewAddPipeline), "pipeline.preview.add");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewRemovePipeline), "pipeline.preview.remove");
@@ -4708,11 +4927,125 @@ bool Renderer::createPipePipeline() {
               << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
               << "\n";
 
+    constexpr const char* kGrassBillboardVertexShaderPath = "../src/render/shaders/grass_billboard.vert.slang.spv";
+    constexpr const char* kGrassBillboardFragmentShaderPath = "../src/render/shaders/grass_billboard.frag.slang.spv";
+    VkShaderModule grassVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule grassFragShaderModule = VK_NULL_HANDLE;
+    if (!createShaderModuleFromFile(
+            m_device,
+            kGrassBillboardVertexShaderPath,
+            "grass_billboard.vert",
+            grassVertShaderModule
+        )) {
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        return false;
+    }
+    if (!createShaderModuleFromFile(
+            m_device,
+            kGrassBillboardFragmentShaderPath,
+            "grass_billboard.frag",
+            grassFragShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, grassVertShaderModule, nullptr);
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo grassVertexShaderStage{};
+    grassVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    grassVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    grassVertexShaderStage.module = grassVertShaderModule;
+    grassVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo grassFragmentShaderStage{};
+    grassFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    grassFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    grassFragmentShaderStage.module = grassFragShaderModule;
+    grassFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> grassShaderStages = {
+        grassVertexShaderStage,
+        grassFragmentShaderStage
+    };
+
+    VkVertexInputBindingDescription grassBindings[2]{};
+    grassBindings[0].binding = 0;
+    grassBindings[0].stride = sizeof(GrassBillboardVertex);
+    grassBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    grassBindings[1].binding = 1;
+    grassBindings[1].stride = sizeof(GrassBillboardInstance);
+    grassBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    VkVertexInputAttributeDescription grassAttributes[4]{};
+    grassAttributes[0].location = 0;
+    grassAttributes[0].binding = 0;
+    grassAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
+    grassAttributes[0].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, corner));
+    grassAttributes[1].location = 1;
+    grassAttributes[1].binding = 0;
+    grassAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+    grassAttributes[1].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, uv));
+    grassAttributes[2].location = 2;
+    grassAttributes[2].binding = 0;
+    grassAttributes[2].format = VK_FORMAT_R32_SFLOAT;
+    grassAttributes[2].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, plane));
+    grassAttributes[3].location = 3;
+    grassAttributes[3].binding = 1;
+    grassAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    grassAttributes[3].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, worldPosYaw));
+
+    VkPipelineVertexInputStateCreateInfo grassVertexInputInfo{};
+    grassVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    grassVertexInputInfo.vertexBindingDescriptionCount = 2;
+    grassVertexInputInfo.pVertexBindingDescriptions = grassBindings;
+    grassVertexInputInfo.vertexAttributeDescriptionCount = 4;
+    grassVertexInputInfo.pVertexAttributeDescriptions = grassAttributes;
+
+    VkGraphicsPipelineCreateInfo grassPipelineCreateInfo = pipelineCreateInfo;
+    grassPipelineCreateInfo.stageCount = static_cast<uint32_t>(grassShaderStages.size());
+    grassPipelineCreateInfo.pStages = grassShaderStages.data();
+    grassPipelineCreateInfo.pVertexInputState = &grassVertexInputInfo;
+    VkPipelineRasterizationStateCreateInfo grassRasterizer = rasterizer;
+    grassRasterizer.cullMode = VK_CULL_MODE_NONE;
+    grassPipelineCreateInfo.pRasterizationState = &grassRasterizer;
+    VkPipelineDepthStencilStateCreateInfo grassDepthStencil = depthStencil;
+    grassDepthStencil.depthWriteEnable = VK_TRUE;
+    grassPipelineCreateInfo.pDepthStencilState = &grassDepthStencil;
+    VkPipelineMultisampleStateCreateInfo grassMultisampling = multisampling;
+    grassMultisampling.alphaToCoverageEnable = VK_FALSE;
+    grassPipelineCreateInfo.pMultisampleState = &grassMultisampling;
+
+    VkPipeline grassBillboardPipeline = VK_NULL_HANDLE;
+    const VkResult grassPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &grassPipelineCreateInfo,
+        nullptr,
+        &grassBillboardPipeline
+    );
+    vkDestroyShaderModule(m_device, grassFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, grassVertShaderModule, nullptr);
+    if (grassPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(grassBillboard)", grassPipelineResult);
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (grassBillboard): samples=" << static_cast<uint32_t>(m_colorSampleCount)
+              << ", cullMode=" << static_cast<uint32_t>(grassRasterizer.cullMode)
+              << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
+              << "\n";
+
     if (m_pipePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
     }
+    if (m_grassBillboardPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_grassBillboardPipeline, nullptr);
+    }
     m_pipePipeline = pipePipeline;
+    m_grassBillboardPipeline = grassBillboardPipeline;
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipePipeline), "pipeline.pipe.lit");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_grassBillboardPipeline), "pipeline.grass.billboard");
     return true;
 }
 
@@ -5234,6 +5567,61 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         m_chunkLodMeshCache.assign(chunks.size(), world::ChunkLodMeshes{});
         m_chunkLodMeshCacheValid = false;
     }
+    if (m_chunkGrassInstanceCache.size() != chunks.size()) {
+        m_chunkGrassInstanceCache.assign(chunks.size(), std::vector<GrassBillboardInstance>{});
+    }
+
+    auto rebuildGrassInstancesForChunk = [&](std::size_t chunkArrayIndex) {
+        if (chunkArrayIndex >= chunks.size()) {
+            return;
+        }
+        const world::Chunk& chunk = chunks[chunkArrayIndex];
+        std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
+        grassInstances.clear();
+        grassInstances.reserve(192);
+
+        const float chunkWorldX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
+        const float chunkWorldY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
+        const float chunkWorldZ = static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ);
+
+        for (int y = 0; y < world::Chunk::kSizeY - 1; ++y) {
+            for (int z = 0; z < world::Chunk::kSizeZ; ++z) {
+                for (int x = 0; x < world::Chunk::kSizeX; ++x) {
+                    if (chunk.voxelAt(x, y, z).type != world::VoxelType::Grass) {
+                        continue;
+                    }
+                    if (chunk.voxelAt(x, y + 1, z).type != world::VoxelType::Empty) {
+                        continue;
+                    }
+
+                    const std::uint32_t hash =
+                        static_cast<std::uint32_t>(x * 73856093) ^
+                        static_cast<std::uint32_t>(y * 19349663) ^
+                        static_cast<std::uint32_t>(z * 83492791) ^
+                        static_cast<std::uint32_t>((chunk.chunkX() + 101) * 2654435761u) ^
+                        static_cast<std::uint32_t>((chunk.chunkZ() + 193) * 2246822519u);
+                    // Keep grass sparse and deterministic so placement feels natural and stable.
+                    if ((hash % 100u) >= 36u) {
+                        continue;
+                    }
+                    const float rand0 = static_cast<float>(hash & 0xFFu) / 255.0f;
+                    const float rand1 = static_cast<float>((hash >> 8u) & 0xFFu) / 255.0f;
+                    const float rand2 = static_cast<float>((hash >> 16u) & 0xFFu) / 255.0f;
+                    const float jitterX = (rand0 - 0.5f) * 0.20f;
+                    const float jitterZ = (rand1 - 0.5f) * 0.20f;
+                    const float yawRadians = rand2 * (2.0f * 3.14159265f);
+
+                    GrassBillboardInstance instance{};
+                    instance.worldPosYaw[0] = chunkWorldX + static_cast<float>(x) + 0.5f + jitterX;
+                    // Lift slightly above the supporting voxel top to avoid depth tie flicker.
+                    instance.worldPosYaw[1] = chunkWorldY + static_cast<float>(y) + 1.02f;
+                    instance.worldPosYaw[2] = chunkWorldZ + static_cast<float>(z) + 0.5f + jitterZ;
+                    instance.worldPosYaw[3] = yawRadians;
+                    grassInstances.push_back(instance);
+                }
+            }
+        }
+    };
 
     std::size_t remeshedChunkCount = 0;
     std::size_t remeshedActiveVertexCount = 0;
@@ -5252,6 +5640,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
             m_chunkLodMeshCache[chunkArrayIndex] =
                 world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
+            rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
                 remeshedActiveVertexCount,
@@ -5286,6 +5675,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         for (const std::size_t chunkArrayIndex : uniqueRemeshChunkIndices) {
             m_chunkLodMeshCache[chunkArrayIndex] =
                 world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
+            rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
                 remeshedActiveVertexCount,
@@ -5318,6 +5708,51 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
     }
     if (fullRemesh) {
         m_debugChunkLastFullRemeshMs = remeshMs.count();
+    }
+
+    std::vector<GrassBillboardInstance> combinedGrassInstances;
+    {
+        std::size_t totalGrassInstanceCount = 0;
+        for (const std::vector<GrassBillboardInstance>& chunkGrass : m_chunkGrassInstanceCache) {
+            totalGrassInstanceCount += chunkGrass.size();
+        }
+        combinedGrassInstances.reserve(totalGrassInstanceCount);
+        for (const std::vector<GrassBillboardInstance>& chunkGrass : m_chunkGrassInstanceCache) {
+            combinedGrassInstances.insert(combinedGrassInstances.end(), chunkGrass.begin(), chunkGrass.end());
+        }
+    }
+
+    if (combinedGrassInstances.empty()) {
+        if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(m_grassBillboardInstanceBufferHandle);
+            m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
+        }
+        m_grassBillboardInstanceCount = 0;
+    } else {
+        BufferCreateDesc grassInstanceCreateDesc{};
+        grassInstanceCreateDesc.size = static_cast<VkDeviceSize>(combinedGrassInstances.size() * sizeof(GrassBillboardInstance));
+        grassInstanceCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        grassInstanceCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        grassInstanceCreateDesc.initialData = combinedGrassInstances.data();
+
+        const BufferHandle newGrassInstanceBufferHandle = m_bufferAllocator.createBuffer(grassInstanceCreateDesc);
+        if (newGrassInstanceBufferHandle != kInvalidBufferHandle) {
+            const VkBuffer grassInstanceBuffer = m_bufferAllocator.getBuffer(newGrassInstanceBufferHandle);
+            if (grassInstanceBuffer != VK_NULL_HANDLE) {
+                setObjectName(
+                    VK_OBJECT_TYPE_BUFFER,
+                    vkHandleToUint64(grassInstanceBuffer),
+                    "mesh.grassBillboard.instances"
+                );
+            }
+            if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
+                m_bufferAllocator.destroyBuffer(m_grassBillboardInstanceBufferHandle);
+            }
+            m_grassBillboardInstanceBufferHandle = newGrassInstanceBufferHandle;
+            m_grassBillboardInstanceCount = static_cast<uint32_t>(combinedGrassInstances.size());
+        } else {
+            VOX_LOGE("render") << "grass billboard instance buffer allocation failed";
+        }
     }
 
     std::vector<world::PackedVoxelVertex> combinedVertices;
@@ -7177,6 +7612,54 @@ void Renderer::renderFrame(
                 );
             }
 
+            if (m_grassBillboardShadowPipeline != VK_NULL_HANDLE &&
+                m_grassBillboardIndexCount > 0 &&
+                m_grassBillboardInstanceCount > 0 &&
+                m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
+                const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
+                const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
+                const VkBuffer grassInstanceBuffer = m_bufferAllocator.getBuffer(m_grassBillboardInstanceBufferHandle);
+                if (grassVertexBuffer != VK_NULL_HANDLE &&
+                    grassIndexBuffer != VK_NULL_HANDLE &&
+                    grassInstanceBuffer != VK_NULL_HANDLE) {
+                    const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
+                    const VkDeviceSize vertexOffsets[2] = {0, 0};
+                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardShadowPipeline);
+                    vkCmdBindDescriptorSets(
+                        commandBuffer,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        m_pipelineLayout,
+                        0,
+                        boundDescriptorSetCount,
+                        boundDescriptorSets.data(),
+                        1,
+                        &mvpDynamicOffset
+                    );
+                    vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
+                    vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                    ChunkPushConstants grassShadowPushConstants{};
+                    grassShadowPushConstants.chunkOffset[0] = 0.0f;
+                    grassShadowPushConstants.chunkOffset[1] = 0.0f;
+                    grassShadowPushConstants.chunkOffset[2] = 0.0f;
+                    grassShadowPushConstants.chunkOffset[3] = 0.0f;
+                    grassShadowPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
+                    grassShadowPushConstants.cascadeData[1] = 0.0f;
+                    grassShadowPushConstants.cascadeData[2] = 0.0f;
+                    grassShadowPushConstants.cascadeData[3] = 0.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &grassShadowPushConstants
+                    );
+                    countDrawCalls(m_debugDrawCallsShadow, 1);
+                    vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
+                }
+            }
+
             vkCmdEndRendering(commandBuffer);
         }
     }
@@ -7725,6 +8208,36 @@ void Renderer::renderFrame(
             transportInstanceCount,
             transportInstanceSliceOpt
         );
+    }
+
+    if (m_grassBillboardPipeline != VK_NULL_HANDLE &&
+        m_grassBillboardIndexCount > 0 &&
+        m_grassBillboardInstanceCount > 0 &&
+        m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
+        const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
+        const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
+        const VkBuffer grassInstanceBuffer = m_bufferAllocator.getBuffer(m_grassBillboardInstanceBufferHandle);
+        if (grassVertexBuffer != VK_NULL_HANDLE &&
+            grassIndexBuffer != VK_NULL_HANDLE &&
+            grassInstanceBuffer != VK_NULL_HANDLE) {
+            const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
+            const VkDeviceSize vertexOffsets[2] = {0, 0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardPipeline);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout,
+                0,
+                boundDescriptorSetCount,
+                boundDescriptorSets.data(),
+                1,
+                &mvpDynamicOffset
+            );
+            vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
+        }
     }
 
     const VkPipeline activePreviewPipeline =
@@ -8363,6 +8876,16 @@ void Renderer::destroyPreviewBuffers() {
 }
 
 void Renderer::destroyPipeBuffers() {
+    if (m_grassBillboardIndexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_grassBillboardIndexBufferHandle);
+        m_grassBillboardIndexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_grassBillboardVertexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_grassBillboardVertexBufferHandle);
+        m_grassBillboardVertexBufferHandle = kInvalidBufferHandle;
+    }
+    m_grassBillboardIndexCount = 0;
+
     if (m_transportIndexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_transportIndexBufferHandle);
         m_transportIndexBufferHandle = kInvalidBufferHandle;
@@ -8464,7 +8987,13 @@ void Renderer::destroyChunkBuffers() {
 
     m_chunkDrawRanges.clear();
     m_chunkLodMeshCache.clear();
+    m_chunkGrassInstanceCache.clear();
     m_chunkLodMeshCacheValid = false;
+    if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_grassBillboardInstanceBufferHandle);
+        m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
+    }
+    m_grassBillboardInstanceCount = 0;
     m_bufferAllocator.destroyBuffer(m_chunkVertexBufferHandle);
     m_chunkVertexBufferHandle = kInvalidBufferHandle;
     m_bufferAllocator.destroyBuffer(m_chunkIndexBufferHandle);
@@ -8507,6 +9036,10 @@ void Renderer::destroyPipeline() {
         vkDestroyPipeline(m_device, m_pipeShadowPipeline, nullptr);
         m_pipeShadowPipeline = VK_NULL_HANDLE;
     }
+    if (m_grassBillboardShadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_grassBillboardShadowPipeline, nullptr);
+        m_grassBillboardShadowPipeline = VK_NULL_HANDLE;
+    }
     if (m_previewRemovePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
         m_previewRemovePipeline = VK_NULL_HANDLE;
@@ -8518,6 +9051,10 @@ void Renderer::destroyPipeline() {
     if (m_pipePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
         m_pipePipeline = VK_NULL_HANDLE;
+    }
+    if (m_grassBillboardPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_grassBillboardPipeline, nullptr);
+        m_grassBillboardPipeline = VK_NULL_HANDLE;
     }
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);

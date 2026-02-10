@@ -238,6 +238,16 @@ private:
         float extensions[4];
     };
 
+    struct GrassBillboardVertex {
+        float corner[2];
+        float uv[2];
+        float plane;
+    };
+
+    struct GrassBillboardInstance {
+        float worldPosYaw[4];
+    };
+
     GLFWwindow* m_window = nullptr;
 
     // Global Vulkan API root object.
@@ -340,9 +350,11 @@ private:
     VkPipeline m_pipeline = VK_NULL_HANDLE;
     VkPipeline m_shadowPipeline = VK_NULL_HANDLE;
     VkPipeline m_pipeShadowPipeline = VK_NULL_HANDLE;
+    VkPipeline m_grassBillboardShadowPipeline = VK_NULL_HANDLE;
     VkPipeline m_skyboxPipeline = VK_NULL_HANDLE;
     VkPipeline m_tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline m_pipePipeline = VK_NULL_HANDLE;
+    VkPipeline m_grassBillboardPipeline = VK_NULL_HANDLE;
     VkPipeline m_voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline m_ssaoPipeline = VK_NULL_HANDLE;
@@ -378,9 +390,13 @@ private:
     BufferHandle m_pipeIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_transportVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_transportIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_grassBillboardVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_grassBillboardIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     std::vector<world::ChunkLodMeshes> m_chunkLodMeshCache;
+    std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     bool m_chunkLodMeshCacheValid = false;
     world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;
@@ -388,6 +404,8 @@ private:
     uint32_t m_previewIndexCount = 0;
     uint32_t m_pipeIndexCount = 0;
     uint32_t m_transportIndexCount = 0;
+    uint32_t m_grassBillboardIndexCount = 0;
+    uint32_t m_grassBillboardInstanceCount = 0;
     VkImage m_diffuseTextureImage = VK_NULL_HANDLE;
     VkDeviceMemory m_diffuseTextureMemory = VK_NULL_HANDLE;
     VkImageView m_diffuseTextureImageView = VK_NULL_HANDLE;
