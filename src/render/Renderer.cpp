@@ -69,6 +69,183 @@ constexpr float kTrackRadius = 0.38f;
 constexpr math::Vector3 kBeltTint{0.78f, 0.62f, 0.18f};
 constexpr math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
 
+bool voxelHasRadianceSource(world::VoxelType type, math::Vector3& outColor, float& outStrength) {
+    switch (type) {
+    case world::VoxelType::SolidRed:
+        outColor = math::Vector3{1.00f, 0.12f, 0.10f};
+        outStrength = 1.10f;
+        return true;
+    case world::VoxelType::Empty:
+    case world::VoxelType::Solid:
+    default:
+        break;
+    }
+    return false;
+}
+
+std::size_t clipmapGiLinearIndex(std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t resolution) {
+    return static_cast<std::size_t>(x) +
+           (static_cast<std::size_t>(resolution) *
+            (static_cast<std::size_t>(z) + (static_cast<std::size_t>(resolution) * static_cast<std::size_t>(y))));
+}
+
+void buildClipmapGiRadianceVolume(
+    const world::ChunkGrid& chunkGrid,
+    const render::CameraPose& camera,
+    std::int32_t voxelSize,
+    std::uint32_t resolution,
+    std::int32_t& outOriginX,
+    std::int32_t& outOriginY,
+    std::int32_t& outOriginZ,
+    std::vector<float>& outRgba
+) {
+    const std::int32_t res = static_cast<std::int32_t>(resolution);
+    const std::int32_t halfCoverage = (res * voxelSize) / 2;
+    const std::int32_t snappedCameraX = (static_cast<std::int32_t>(std::floor(camera.x)) / voxelSize) * voxelSize;
+    const std::int32_t snappedCameraY = (static_cast<std::int32_t>(std::floor(camera.y)) / voxelSize) * voxelSize;
+    const std::int32_t snappedCameraZ = (static_cast<std::int32_t>(std::floor(camera.z)) / voxelSize) * voxelSize;
+    outOriginX = snappedCameraX - halfCoverage;
+    outOriginY = snappedCameraY - halfCoverage;
+    outOriginZ = snappedCameraZ - halfCoverage;
+
+    const std::int32_t worldMinX = outOriginX;
+    const std::int32_t worldMinY = outOriginY;
+    const std::int32_t worldMinZ = outOriginZ;
+    const std::int32_t worldMaxX = outOriginX + (res * voxelSize);
+    const std::int32_t worldMaxY = outOriginY + (res * voxelSize);
+    const std::int32_t worldMaxZ = outOriginZ + (res * voxelSize);
+
+    const std::size_t voxelCount =
+        static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    std::vector<math::Vector3> source(voxelCount, math::Vector3{});
+    std::vector<math::Vector3> radiance(voxelCount, math::Vector3{});
+    std::vector<math::Vector3> scratch(voxelCount, math::Vector3{});
+
+    const std::array<core::Cell3i, 6> kNeighborOffsets = {
+        core::Cell3i{1, 0, 0},
+        core::Cell3i{-1, 0, 0},
+        core::Cell3i{0, 1, 0},
+        core::Cell3i{0, -1, 0},
+        core::Cell3i{0, 0, 1},
+        core::Cell3i{0, 0, -1}
+    };
+
+    for (const world::Chunk& chunk : chunkGrid.chunks()) {
+        const std::int32_t chunkBaseX = chunk.chunkX() * world::Chunk::kSizeX;
+        const std::int32_t chunkBaseY = chunk.chunkY() * world::Chunk::kSizeY;
+        const std::int32_t chunkBaseZ = chunk.chunkZ() * world::Chunk::kSizeZ;
+        const std::int32_t chunkMaxX = chunkBaseX + world::Chunk::kSizeX;
+        const std::int32_t chunkMaxY = chunkBaseY + world::Chunk::kSizeY;
+        const std::int32_t chunkMaxZ = chunkBaseZ + world::Chunk::kSizeZ;
+
+        const std::int32_t beginX = std::max(worldMinX, chunkBaseX);
+        const std::int32_t beginY = std::max(worldMinY, chunkBaseY);
+        const std::int32_t beginZ = std::max(worldMinZ, chunkBaseZ);
+        const std::int32_t endX = std::min(worldMaxX, chunkMaxX);
+        const std::int32_t endY = std::min(worldMaxY, chunkMaxY);
+        const std::int32_t endZ = std::min(worldMaxZ, chunkMaxZ);
+        if (beginX >= endX || beginY >= endY || beginZ >= endZ) {
+            continue;
+        }
+
+        for (std::int32_t y = beginY; y < endY; ++y) {
+            const std::int32_t localY = y - chunkBaseY;
+            for (std::int32_t z = beginZ; z < endZ; ++z) {
+                const std::int32_t localZ = z - chunkBaseZ;
+                for (std::int32_t x = beginX; x < endX; ++x) {
+                    const std::int32_t localX = x - chunkBaseX;
+                    const world::Voxel voxel = chunk.voxelAt(localX, localY, localZ);
+                    math::Vector3 sourceColor{};
+                    float sourceStrength = 0.0f;
+                    if (!voxelHasRadianceSource(voxel.type, sourceColor, sourceStrength)) {
+                        continue;
+                    }
+
+                    const std::uint32_t gx = static_cast<std::uint32_t>((x - outOriginX) / voxelSize);
+                    const std::uint32_t gy = static_cast<std::uint32_t>((y - outOriginY) / voxelSize);
+                    const std::uint32_t gz = static_cast<std::uint32_t>((z - outOriginZ) / voxelSize);
+                    if (gx >= resolution || gy >= resolution || gz >= resolution) {
+                        continue;
+                    }
+
+                    const std::size_t centerIndex = clipmapGiLinearIndex(gx, gy, gz, resolution);
+                    source[centerIndex] += sourceColor * sourceStrength;
+
+                    const math::Vector3 neighborInjection = sourceColor * (sourceStrength * 0.36f);
+                    for (const core::Cell3i& neighborOffset : kNeighborOffsets) {
+                        const std::int32_t ngx = static_cast<std::int32_t>(gx) + neighborOffset.x;
+                        const std::int32_t ngy = static_cast<std::int32_t>(gy) + neighborOffset.y;
+                        const std::int32_t ngz = static_cast<std::int32_t>(gz) + neighborOffset.z;
+                        if (ngx < 0 || ngy < 0 || ngz < 0 ||
+                            ngx >= res || ngy >= res || ngz >= res) {
+                            continue;
+                        }
+                        const std::size_t neighborIndex = clipmapGiLinearIndex(
+                            static_cast<std::uint32_t>(ngx),
+                            static_cast<std::uint32_t>(ngy),
+                            static_cast<std::uint32_t>(ngz),
+                            resolution
+                        );
+                        source[neighborIndex] += neighborInjection;
+                    }
+                }
+            }
+        }
+    }
+
+    radiance = source;
+    constexpr int kBlurPasses = 4;
+    for (int pass = 0; pass < kBlurPasses; ++pass) {
+        for (std::uint32_t y = 0; y < resolution; ++y) {
+            for (std::uint32_t z = 0; z < resolution; ++z) {
+                for (std::uint32_t x = 0; x < resolution; ++x) {
+                    const std::size_t centerIndex = clipmapGiLinearIndex(x, y, z, resolution);
+                    const math::Vector3 center = radiance[centerIndex];
+                    math::Vector3 neighborSum{};
+                    std::uint32_t neighborCount = 0;
+                    if (x > 0) {
+                        neighborSum += radiance[clipmapGiLinearIndex(x - 1, y, z, resolution)];
+                        ++neighborCount;
+                    }
+                    if (x + 1 < resolution) {
+                        neighborSum += radiance[clipmapGiLinearIndex(x + 1, y, z, resolution)];
+                        ++neighborCount;
+                    }
+                    if (y > 0) {
+                        neighborSum += radiance[clipmapGiLinearIndex(x, y - 1, z, resolution)];
+                        ++neighborCount;
+                    }
+                    if (y + 1 < resolution) {
+                        neighborSum += radiance[clipmapGiLinearIndex(x, y + 1, z, resolution)];
+                        ++neighborCount;
+                    }
+                    if (z > 0) {
+                        neighborSum += radiance[clipmapGiLinearIndex(x, y, z - 1, resolution)];
+                        ++neighborCount;
+                    }
+                    if (z + 1 < resolution) {
+                        neighborSum += radiance[clipmapGiLinearIndex(x, y, z + 1, resolution)];
+                        ++neighborCount;
+                    }
+                    const math::Vector3 neighborAverage =
+                        neighborCount > 0 ? (neighborSum / static_cast<float>(neighborCount)) : center;
+                    scratch[centerIndex] = (center * 0.34f) + (neighborAverage * 0.66f);
+                }
+            }
+        }
+        radiance.swap(scratch);
+    }
+
+    outRgba.assign(voxelCount * 4u, 0.0f);
+    for (std::size_t i = 0; i < voxelCount; ++i) {
+        const math::Vector3 c = radiance[i];
+        outRgba[(i * 4u) + 0u] = std::clamp(c.x, 0.0f, 6.0f);
+        outRgba[(i * 4u) + 1u] = std::clamp(c.y, 0.0f, 6.0f);
+        outRgba[(i * 4u) + 2u] = std::clamp(c.z, 0.0f, 6.0f);
+        outRgba[(i * 4u) + 3u] = 1.0f;
+    }
+}
+
 #if defined(VOXEL_HAS_IMGUI)
 void imguiCheckVkResult(VkResult result) {
     if (result != VK_SUCCESS) {
@@ -1528,6 +1705,11 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
+    if (!createClipmapGiResources()) {
+        VOX_LOGE("render") << "init failed at createClipmapGiResources\n";
+        shutdown();
+        return false;
+    }
     if (!createShadowResources()) {
         VOX_LOGE("render") << "init failed at createShadowResources\n";
         shutdown();
@@ -1649,8 +1831,8 @@ bool Renderer::useSpatialPartitioningQueries() const {
     return m_debugEnableSpatialQueries;
 }
 
-Renderer::SpatialQueryBackend Renderer::spatialQueryBackend() const {
-    return m_debugSpatialQueryBackend;
+world::ClipmapConfig Renderer::clipmapQueryConfig() const {
+    return m_debugClipmapConfig;
 }
 
 void Renderer::setSpatialQueryStats(
@@ -3322,6 +3504,133 @@ bool Renderer::createAoTargets() {
     return true;
 }
 
+bool Renderer::createClipmapGiResources() {
+    if (m_clipmapGiImage != VK_NULL_HANDLE &&
+        m_clipmapGiImageView != VK_NULL_HANDLE &&
+        m_clipmapGiSampler != VK_NULL_HANDLE) {
+        return true;
+    }
+
+    VkImageCreateInfo imageCreateInfo{};
+    imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCreateInfo.imageType = VK_IMAGE_TYPE_3D;
+    imageCreateInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    imageCreateInfo.extent.width = kClipmapGiResolution;
+    imageCreateInfo.extent.height = kClipmapGiResolution;
+    imageCreateInfo.extent.depth = kClipmapGiResolution;
+    imageCreateInfo.mipLevels = 1;
+    imageCreateInfo.arrayLayers = 1;
+    imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageCreateInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+#if defined(VOXEL_HAS_VMA)
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        VmaAllocationCreateInfo allocationCreateInfo{};
+        allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        const VkResult imageResult = vmaCreateImage(
+            m_vmaAllocator,
+            &imageCreateInfo,
+            &allocationCreateInfo,
+            &m_clipmapGiImage,
+            &m_clipmapGiAllocation,
+            nullptr
+        );
+        if (imageResult != VK_SUCCESS) {
+            logVkFailure("vmaCreateImage(clipmapGi)", imageResult);
+            return false;
+        }
+    } else
+#endif
+    {
+        const VkResult imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_clipmapGiImage);
+        if (imageResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(clipmapGi)", imageResult);
+            return false;
+        }
+
+        VkMemoryRequirements memoryRequirements{};
+        vkGetImageMemoryRequirements(m_device, m_clipmapGiImage, &memoryRequirements);
+        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice,
+            memoryRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        );
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            VOX_LOGE("render") << "no memory type for clipmap GI image\n";
+            destroyClipmapGiResources();
+            return false;
+        }
+
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        const VkResult allocResult = vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_clipmapGiImageMemory);
+        if (allocResult != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(clipmapGi)", allocResult);
+            destroyClipmapGiResources();
+            return false;
+        }
+
+        const VkResult bindResult = vkBindImageMemory(m_device, m_clipmapGiImage, m_clipmapGiImageMemory, 0);
+        if (bindResult != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(clipmapGi)", bindResult);
+            destroyClipmapGiResources();
+            return false;
+        }
+    }
+    setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_clipmapGiImage), "clipmapGi.image");
+
+    VkImageViewCreateInfo viewCreateInfo{};
+    viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCreateInfo.image = m_clipmapGiImage;
+    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    viewCreateInfo.format = imageCreateInfo.format;
+    viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCreateInfo.subresourceRange.baseMipLevel = 0;
+    viewCreateInfo.subresourceRange.levelCount = 1;
+    viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+    viewCreateInfo.subresourceRange.layerCount = 1;
+    const VkResult viewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_clipmapGiImageView);
+    if (viewResult != VK_SUCCESS) {
+        logVkFailure("vkCreateImageView(clipmapGi)", viewResult);
+        destroyClipmapGiResources();
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_clipmapGiImageView), "clipmapGi.imageView");
+
+    VkSamplerCreateInfo samplerCreateInfo{};
+    samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.minLod = 0.0f;
+    samplerCreateInfo.maxLod = 0.0f;
+    samplerCreateInfo.maxAnisotropy = 1.0f;
+    samplerCreateInfo.anisotropyEnable = VK_FALSE;
+    samplerCreateInfo.compareEnable = VK_FALSE;
+    samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+    const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_clipmapGiSampler);
+    if (samplerResult != VK_SUCCESS) {
+        logVkFailure("vkCreateSampler(clipmapGi)", samplerResult);
+        destroyClipmapGiResources();
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_SAMPLER, vkHandleToUint64(m_clipmapGiSampler), "clipmapGi.sampler");
+    m_clipmapGiImageInitialized = false;
+    VOX_LOGI("render") << "clipmap GI volume ready: " << kClipmapGiResolution
+                       << "^3, voxelSize=" << kClipmapGiVoxelSize << "\n";
+    return true;
+}
+
 
 bool Renderer::createHdrResolveTargets() {
     if (m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
@@ -3569,14 +3878,21 @@ bool Renderer::createDescriptorResources() {
         ssaoRawBinding.descriptorCount = 1;
         ssaoRawBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 7> bindings = {
+        VkDescriptorSetLayoutBinding clipmapGiBinding{};
+        clipmapGiBinding.binding = 9;
+        clipmapGiBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        clipmapGiBinding.descriptorCount = 1;
+        clipmapGiBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 8> bindings = {
             mvpBinding,
             diffuseTextureBinding,
             hdrSceneBinding,
             shadowMapBinding,
             normalDepthBinding,
             ssaoBlurBinding,
-            ssaoRawBinding
+            ssaoRawBinding,
+            clipmapGiBinding
         };
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
@@ -3605,7 +3921,7 @@ bool Renderer::createDescriptorResources() {
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                6 * kMaxFramesInFlight
+                7 * kMaxFramesInFlight
             }
         };
 
@@ -5798,32 +6114,12 @@ void Renderer::buildFrameStatsUi() {
     }
 
     ImGui::Text("FPS: %.1f", m_debugFps);
-    ImGui::Text("Chunks: %u", m_debugChunkCount);
-    ImGui::Checkbox("Use Spatial Queries", &m_debugEnableSpatialQueries);
-    int spatialBackendSelection = (m_debugSpatialQueryBackend == SpatialQueryBackend::Clipmap) ? 0 : 1;
-    if (ImGui::Combo("Spatial Backend", &spatialBackendSelection, "Clipmap\0Octree\0")) {
-        m_debugSpatialQueryBackend =
-            (spatialBackendSelection == 0) ? SpatialQueryBackend::Clipmap : SpatialQueryBackend::Octree;
+    ImGui::Text("Chunks (visible/total): %u / %u", m_debugSpatialVisibleChunkCount, m_debugChunkCount);
+    if (m_gpuTimestampsSupported) {
+        ImGui::Text("Frame (CPU/GPU): %.2f / %.2f ms", m_debugFrameTimeMs, m_debugGpuFrameTimeMs);
+    } else {
+        ImGui::Text("Frame (CPU/GPU): %.2f / n/a ms", m_debugFrameTimeMs);
     }
-    ImGui::Text("Spatial Query Used: %s", m_debugSpatialQueriesUsed ? "yes" : "no");
-    if (m_debugSpatialQueriesUsed) {
-        ImGui::Text(
-            "Spatial Query Nodes/Candidates/Visible: %u / %u / %u",
-            m_debugSpatialQueryStats.visitedNodeCount,
-            m_debugSpatialQueryStats.candidateChunkCount,
-            m_debugSpatialQueryStats.visibleChunkCount
-        );
-        if (m_debugSpatialQueryStats.clipmapActiveLevelCount > 0) {
-            ImGui::Text(
-                "Clipmap Levels/UpdatedLevels/UpdatedSlabs: %u / %u / %u",
-                m_debugSpatialQueryStats.clipmapActiveLevelCount,
-                m_debugSpatialQueryStats.clipmapUpdatedLevelCount,
-                m_debugSpatialQueryStats.clipmapUpdatedSlabCount
-            );
-        }
-    }
-    ImGui::Text("Visible Chunks (render input): %u", m_debugSpatialVisibleChunkCount);
-    ImGui::Text("Chunk Indirect Draws: %u", m_debugChunkIndirectCommandCount);
     ImGui::Text(
         "Draw Calls Total: %u (Shadow %u, Prepass %u, Main %u, Post %u)",
         m_debugDrawCallsTotal,
@@ -5832,6 +6128,43 @@ void Renderer::buildFrameStatsUi() {
         m_debugDrawCallsMain,
         m_debugDrawCallsPost
     );
+    ImGui::Text("Chunk Indirect Commands: %u", m_debugChunkIndirectCommandCount);
+
+    if (ImGui::CollapsingHeader("Spatial Query", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Use Spatial Queries", &m_debugEnableSpatialQueries);
+        int clipmapLevels = static_cast<int>(m_debugClipmapConfig.levelCount);
+        int clipmapGridResolution = m_debugClipmapConfig.gridResolution;
+        int clipmapBaseVoxelSize = m_debugClipmapConfig.baseVoxelSize;
+        int clipmapBrickResolution = m_debugClipmapConfig.brickResolution;
+        if (ImGui::SliderInt("Clipmap Levels", &clipmapLevels, 1, 8)) {
+            m_debugClipmapConfig.levelCount = static_cast<std::uint32_t>(clipmapLevels);
+        }
+        if (ImGui::SliderInt("Clipmap Grid Res", &clipmapGridResolution, 32, 256)) {
+            m_debugClipmapConfig.gridResolution = clipmapGridResolution;
+        }
+        if (ImGui::SliderInt("Clipmap Base Voxel", &clipmapBaseVoxelSize, 1, 8)) {
+            m_debugClipmapConfig.baseVoxelSize = clipmapBaseVoxelSize;
+        }
+        if (ImGui::SliderInt("Clipmap Brick Res", &clipmapBrickResolution, 2, 32)) {
+            m_debugClipmapConfig.brickResolution = clipmapBrickResolution;
+        }
+        ImGui::Text(
+            "Query N/C/V: %u / %u / %u",
+            m_debugSpatialQueryStats.visitedNodeCount,
+            m_debugSpatialQueryStats.candidateChunkCount,
+            m_debugSpatialQueryStats.visibleChunkCount
+        );
+        if (m_debugSpatialQueryStats.clipmapActiveLevelCount > 0) {
+            ImGui::Text(
+                "Clipmap L/U/S/B: %u / %u / %u / %u",
+                m_debugSpatialQueryStats.clipmapActiveLevelCount,
+                m_debugSpatialQueryStats.clipmapUpdatedLevelCount,
+                m_debugSpatialQueryStats.clipmapUpdatedSlabCount,
+                m_debugSpatialQueryStats.clipmapUpdatedBrickCount
+            );
+        }
+    }
+
     int meshingModeSelection = (m_chunkMeshingOptions.mode == world::MeshingMode::Greedy) ? 1 : 0;
     if (ImGui::Combo("Chunk Meshing", &meshingModeSelection, "Naive\0Greedy\0")) {
         const world::MeshingMode nextMode =
@@ -5847,24 +6180,8 @@ void Renderer::buildFrameStatsUi() {
         }
     }
     ImGui::Text("Chunk Mesh Vert/Idx: %u / %u", m_debugChunkMeshVertexCount, m_debugChunkMeshIndexCount);
-    ImGui::Text(
-        "Last Chunk Remesh: %.2f ms (%u chunk%s)",
-        m_debugChunkLastRemeshMs,
-        m_debugChunkLastRemeshedChunkCount,
-        m_debugChunkLastRemeshedChunkCount == 1 ? "" : "s"
-    );
-    ImGui::Text(
-        "Last Remesh Vert/Idx (active): %u / %u",
-        m_debugChunkLastRemeshActiveVertexCount,
-        m_debugChunkLastRemeshActiveIndexCount
-    );
-    ImGui::Text(
-        "Last Remesh Vert/Idx (naive): %u / %u",
-        m_debugChunkLastRemeshNaiveVertexCount,
-        m_debugChunkLastRemeshNaiveIndexCount
-    );
+    ImGui::Text("Last Chunk Remesh: %.2f ms (%u)", m_debugChunkLastRemeshMs, m_debugChunkLastRemeshedChunkCount);
     ImGui::Text("Greedy Reduction vs Naive: %.1f%%", m_debugChunkLastRemeshReductionPercent);
-    ImGui::Text("Last Full Chunk Remesh: %.2f ms", m_debugChunkLastFullRemeshMs);
     const bool hasFrameArenaMetrics =
         m_debugFrameArenaUploadBytes > 0 ||
         m_debugFrameArenaUploadAllocs > 0 ||
@@ -5889,73 +6206,8 @@ void Renderer::buildFrameStatsUi() {
                 m_debugFrameArenaUploadAllocs
             );
         }
-        if (m_debugFrameArenaTransientBufferBytes > 0 || m_debugFrameArenaTransientBufferCount > 0) {
-            ImGui::Text(
-                "Transient buffers this frame: %llu B (%u)",
-                static_cast<unsigned long long>(m_debugFrameArenaTransientBufferBytes),
-                m_debugFrameArenaTransientBufferCount
-            );
-        }
-        if (m_debugFrameArenaTransientImageBytes > 0 || m_debugFrameArenaTransientImageCount > 0) {
-            ImGui::Text(
-                "Transient images this frame: %llu B (%u)",
-                static_cast<unsigned long long>(m_debugFrameArenaTransientImageBytes),
-                m_debugFrameArenaTransientImageCount
-            );
-        }
-        if (m_debugFrameArenaAliasReuses > 0) {
-            ImGui::Text("Image alias reuses this frame: %u", m_debugFrameArenaAliasReuses);
-        }
-        if (m_debugFrameArenaResidentAliasReuses > 0) {
-            ImGui::Text("Image alias reuses (live): %u", m_debugFrameArenaResidentAliasReuses);
-        }
-        if (m_debugFrameArenaResidentBufferBytes > 0 || m_debugFrameArenaResidentBufferCount > 0) {
-            ImGui::Text(
-                "Resident buffers (live): %llu B (%u)",
-                static_cast<unsigned long long>(m_debugFrameArenaResidentBufferBytes),
-                m_debugFrameArenaResidentBufferCount
-            );
-        }
-        if (m_debugFrameArenaResidentImageBytes > 0 || m_debugFrameArenaResidentImageCount > 0) {
-            ImGui::Text(
-                "Resident images (live): %llu B (%u)",
-                static_cast<unsigned long long>(m_debugFrameArenaResidentImageBytes),
-                m_debugFrameArenaResidentImageCount
-            );
-        }
-        if (!m_debugAliasedImages.empty() && ImGui::TreeNode("Aliased Images (live)")) {
-            constexpr ImGuiTableFlags kAliasTableFlags =
-                ImGuiTableFlags_Borders |
-                ImGuiTableFlags_RowBg |
-                ImGuiTableFlags_SizingStretchProp;
-            if (ImGui::BeginTable("FrameArenaAliasedImages", 5, kAliasTableFlags)) {
-                ImGui::TableSetupColumn("Name");
-                ImGui::TableSetupColumn("Pass Range");
-                ImGui::TableSetupColumn("Block");
-                ImGui::TableSetupColumn("Refs");
-                ImGui::TableSetupColumn("Handle");
-                ImGui::TableHeadersRow();
-                for (const FrameArenaAliasedImageInfo& imageInfo : m_debugAliasedImages) {
-                    ImGui::TableNextRow();
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::TextUnformatted(imageInfo.debugName.empty() ? "(unnamed)" : imageInfo.debugName.c_str());
-                    ImGui::TableSetColumnIndex(1);
-                    ImGui::Text(
-                        "%s -> %s",
-                        frameArenaPassName(imageInfo.firstPass),
-                        frameArenaPassName(imageInfo.lastPass)
-                    );
-                    ImGui::TableSetColumnIndex(2);
-                    ImGui::Text("%u", imageInfo.aliasBlock);
-                    ImGui::TableSetColumnIndex(3);
-                    ImGui::Text("%u", imageInfo.aliasBlockRefCount);
-                    ImGui::TableSetColumnIndex(4);
-                    ImGui::Text("%u", imageInfo.handle);
-                }
-                ImGui::EndTable();
-            }
-            ImGui::TreePop();
-        }
+        ImGui::Text("Image alias reuses (frame/live): %u / %u", m_debugFrameArenaAliasReuses, m_debugFrameArenaResidentAliasReuses);
+        ImGui::Text("Resident images (live): %u", m_debugFrameArenaResidentImageCount);
     }
     ImGui::Separator();
     ImGui::Checkbox("Show Shadow Debug", &m_debugUiVisible);
@@ -6015,7 +6267,7 @@ void Renderer::buildShadowDebugUi() {
     ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
 
     ImGui::Separator();
-    ImGui::Text("Ambient Occlusion");
+    ImGui::Text("Ambient Occlusion & GI");
     ImGui::Checkbox("Enable Vertex AO", &m_debugEnableVertexAo);
     ImGui::Checkbox("Enable SSAO", &m_debugEnableSsao);
     ImGui::Checkbox("Visualize SSAO", &m_debugVisualizeSsao);
@@ -6023,6 +6275,9 @@ void Renderer::buildShadowDebugUi() {
     ImGui::SliderFloat("SSAO Radius", &m_shadowDebugSettings.ssaoRadius, 0.10f, 2.00f, "%.2f");
     ImGui::SliderFloat("SSAO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 0.20f, "%.3f");
     ImGui::SliderFloat("SSAO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 1.50f, "%.2f");
+    ImGui::Checkbox("Enable Clipmap GI (step 1)", &m_debugEnableClipmapGi);
+    ImGui::SliderFloat("Clipmap GI Occlusion", &m_debugClipmapGiOcclusionStrength, 0.0f, 1.2f, "%.2f");
+    ImGui::SliderFloat("Clipmap GI Bounce", &m_debugClipmapGiBounceStrength, 0.0f, 1.2f, "%.2f");
 
     ImGui::Separator();
     ImGui::Text("Cascade Splits: %.1f / %.1f / %.1f / %.1f",
@@ -6407,6 +6662,49 @@ void Renderer::renderFrame(
     }
     const math::Vector3 sunColor = computeSunColor(m_skyDebugSettings, sunDirection);
 
+    std::int32_t clipmapGiOriginX = m_clipmapGiOriginX;
+    std::int32_t clipmapGiOriginY = m_clipmapGiOriginY;
+    std::int32_t clipmapGiOriginZ = m_clipmapGiOriginZ;
+    std::optional<FrameArenaSlice> clipmapGiUploadSliceOpt = std::nullopt;
+    VkBuffer clipmapGiUploadBuffer = VK_NULL_HANDLE;
+    if (m_debugEnableClipmapGi &&
+        m_clipmapGiImage != VK_NULL_HANDLE &&
+        m_clipmapGiImageView != VK_NULL_HANDLE &&
+        m_clipmapGiSampler != VK_NULL_HANDLE) {
+        std::vector<float> clipmapGiRgba;
+        buildClipmapGiRadianceVolume(
+            chunkGrid,
+            camera,
+            kClipmapGiVoxelSize,
+            kClipmapGiResolution,
+            clipmapGiOriginX,
+            clipmapGiOriginY,
+            clipmapGiOriginZ,
+            clipmapGiRgba
+        );
+        const VkDeviceSize clipmapGiUploadBytes =
+            static_cast<VkDeviceSize>(clipmapGiRgba.size() * sizeof(float));
+        clipmapGiUploadSliceOpt = m_frameArena.allocateUpload(
+            clipmapGiUploadBytes,
+            static_cast<VkDeviceSize>(sizeof(float) * 4u),
+            FrameArenaUploadKind::Unknown
+        );
+        if (clipmapGiUploadSliceOpt.has_value() && clipmapGiUploadSliceOpt->mapped != nullptr) {
+            std::memcpy(
+                clipmapGiUploadSliceOpt->mapped,
+                clipmapGiRgba.data(),
+                static_cast<std::size_t>(clipmapGiUploadBytes)
+            );
+            clipmapGiUploadBuffer = m_bufferAllocator.getBuffer(clipmapGiUploadSliceOpt->buffer);
+            m_clipmapGiOriginX = clipmapGiOriginX;
+            m_clipmapGiOriginY = clipmapGiOriginY;
+            m_clipmapGiOriginZ = clipmapGiOriginZ;
+        } else {
+            clipmapGiUploadSliceOpt.reset();
+            VOX_LOGD("render") << "clipmap GI upload slice allocation failed\n";
+        }
+    }
+
     constexpr float kCascadeLambda = 0.70f;
     constexpr float kCascadeSplitQuantization = 0.5f;
     constexpr float kCascadeSplitUpdateThreshold = 0.5f;
@@ -6554,20 +6852,35 @@ void Renderer::renderFrame(
     mvpUniform.shadowConfig2[2] = m_shadowDebugSettings.ssaoIntensity;
     mvpUniform.shadowConfig2[3] = 0.0f;
 
-    mvpUniform.shadowConfig3[0] = 0.0f;
-    mvpUniform.shadowConfig3[1] = 0.0f;
-    mvpUniform.shadowConfig3[2] = 0.0f;
+    const float worldChunkCount = static_cast<float>(std::max<std::uint32_t>(1u, m_debugChunkCount));
+    const float visibleChunkRatio = std::clamp(
+        static_cast<float>(m_debugSpatialVisibleChunkCount) / worldChunkCount,
+        0.0f,
+        1.0f
+    );
+    const float clipmapGiEnable = m_debugEnableClipmapGi ? 1.0f : 0.0f;
+    const float clipmapOcclusion = std::clamp(
+        ((0.35f + (0.65f * visibleChunkRatio)) * m_debugClipmapGiOcclusionStrength),
+        0.0f,
+        1.0f
+    );
+    const float clipmapBounce = std::clamp(m_debugClipmapGiBounceStrength, 0.0f, 2.0f);
+
+    mvpUniform.shadowConfig3[0] = clipmapOcclusion;
+    mvpUniform.shadowConfig3[1] = clipmapBounce;
+    mvpUniform.shadowConfig3[2] = clipmapGiEnable;
     mvpUniform.shadowConfig3[3] = m_shadowDebugSettings.pcfRadius;
 
-    mvpUniform.shadowVoxelGridOrigin[0] = 0.0f;
-    mvpUniform.shadowVoxelGridOrigin[1] = 0.0f;
-    mvpUniform.shadowVoxelGridOrigin[2] = 0.0f;
+    mvpUniform.shadowVoxelGridOrigin[0] = static_cast<float>(clipmapGiOriginX);
+    mvpUniform.shadowVoxelGridOrigin[1] = static_cast<float>(clipmapGiOriginY);
+    mvpUniform.shadowVoxelGridOrigin[2] = static_cast<float>(clipmapGiOriginZ);
     // Reuse unused W channel for AO debug: 1.0 enables vertex AO, 0.0 disables.
     mvpUniform.shadowVoxelGridOrigin[3] = m_debugEnableVertexAo ? 1.0f : 0.0f;
 
-    mvpUniform.shadowVoxelGridSize[0] = 0.0f;
-    mvpUniform.shadowVoxelGridSize[1] = 0.0f;
-    mvpUniform.shadowVoxelGridSize[2] = 0.0f;
+    mvpUniform.shadowVoxelGridSize[0] = static_cast<float>(kClipmapGiVoxelSize);
+    mvpUniform.shadowVoxelGridSize[1] = static_cast<float>(kClipmapGiResolution);
+    mvpUniform.shadowVoxelGridSize[2] =
+        1.0f / std::max(1.0f, static_cast<float>(kClipmapGiVoxelSize * static_cast<std::int32_t>(kClipmapGiResolution)));
     // Reuse unused W channel for AO debug mode:
     // 0.0 = SSAO off, 1.0 = SSAO on, 2.0 = visualize SSAO, 3.0 = visualize AO normals.
     if (m_debugVisualizeAoNormals) {
@@ -6633,7 +6946,12 @@ void Renderer::renderFrame(
     ssaoRawImageInfo.imageView = m_ssaoRawImageViews[aoFrameIndex];
     ssaoRawImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    std::array<VkWriteDescriptorSet, 7> writes{};
+    VkDescriptorImageInfo clipmapGiImageInfo{};
+    clipmapGiImageInfo.sampler = m_clipmapGiSampler;
+    clipmapGiImageInfo.imageView = m_clipmapGiImageView;
+    clipmapGiImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    std::array<VkWriteDescriptorSet, 8> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -6682,6 +7000,13 @@ void Renderer::renderFrame(
     writes[6].descriptorCount = 1;
     writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[6].pImageInfo = &ssaoRawImageInfo;
+
+    writes[7] = write;
+    writes[7].dstSet = m_descriptorSets[m_currentFrame];
+    writes[7].dstBinding = 9;
+    writes[7].descriptorCount = 1;
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[7].pImageInfo = &clipmapGiImageInfo;
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -6950,6 +7275,119 @@ void Renderer::renderFrame(
             drawOffset += stride;
         }
     };
+
+    if (m_clipmapGiImage != VK_NULL_HANDLE) {
+        if (clipmapGiUploadSliceOpt.has_value() && clipmapGiUploadBuffer != VK_NULL_HANDLE) {
+            transitionImageLayout(
+                commandBuffer,
+                m_clipmapGiImage,
+                m_clipmapGiImageInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                m_clipmapGiImageInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+                m_clipmapGiImageInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,
+                1,
+                0,
+                1
+            );
+
+            VkBufferImageCopy clipmapGiCopy{};
+            clipmapGiCopy.bufferOffset = clipmapGiUploadSliceOpt->offset;
+            clipmapGiCopy.bufferRowLength = 0;
+            clipmapGiCopy.bufferImageHeight = 0;
+            clipmapGiCopy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            clipmapGiCopy.imageSubresource.mipLevel = 0;
+            clipmapGiCopy.imageSubresource.baseArrayLayer = 0;
+            clipmapGiCopy.imageSubresource.layerCount = 1;
+            clipmapGiCopy.imageOffset = {0, 0, 0};
+            clipmapGiCopy.imageExtent = {
+                kClipmapGiResolution,
+                kClipmapGiResolution,
+                kClipmapGiResolution
+            };
+            vkCmdCopyBufferToImage(
+                commandBuffer,
+                clipmapGiUploadBuffer,
+                m_clipmapGiImage,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &clipmapGiCopy
+            );
+
+            transitionImageLayout(
+                commandBuffer,
+                m_clipmapGiImage,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,
+                1,
+                0,
+                1
+            );
+            m_clipmapGiImageInitialized = true;
+        } else if (!m_clipmapGiImageInitialized) {
+            transitionImageLayout(
+                commandBuffer,
+                m_clipmapGiImage,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_PIPELINE_STAGE_2_NONE,
+                VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,
+                1,
+                0,
+                1
+            );
+
+            VkClearColorValue clearValue{};
+            clearValue.float32[0] = 0.0f;
+            clearValue.float32[1] = 0.0f;
+            clearValue.float32[2] = 0.0f;
+            clearValue.float32[3] = 1.0f;
+            VkImageSubresourceRange clearRange{};
+            clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            clearRange.baseMipLevel = 0;
+            clearRange.levelCount = 1;
+            clearRange.baseArrayLayer = 0;
+            clearRange.layerCount = 1;
+            vkCmdClearColorImage(
+                commandBuffer,
+                m_clipmapGiImage,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                &clearValue,
+                1,
+                &clearRange
+            );
+
+            transitionImageLayout(
+                commandBuffer,
+                m_clipmapGiImage,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,
+                1,
+                0,
+                1
+            );
+            m_clipmapGiImageInitialized = true;
+        }
+    }
 
     writeGpuTimestampTop(kGpuTimestampQueryShadowStart);
     beginDebugLabel(commandBuffer, "Pass: Shadow Atlas", 0.28f, 0.22f, 0.22f, 1.0f);
@@ -8247,6 +8685,35 @@ void Renderer::destroyAoTargets() {
     m_normalDepthImageInitialized.clear();
 }
 
+void Renderer::destroyClipmapGiResources() {
+    if (m_clipmapGiSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_clipmapGiSampler, nullptr);
+        m_clipmapGiSampler = VK_NULL_HANDLE;
+    }
+    if (m_clipmapGiImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, m_clipmapGiImageView, nullptr);
+        m_clipmapGiImageView = VK_NULL_HANDLE;
+    }
+    if (m_clipmapGiImage != VK_NULL_HANDLE) {
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE && m_clipmapGiAllocation != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, m_clipmapGiImage, m_clipmapGiAllocation);
+            m_clipmapGiAllocation = VK_NULL_HANDLE;
+        } else {
+            vkDestroyImage(m_device, m_clipmapGiImage, nullptr);
+        }
+#else
+        vkDestroyImage(m_device, m_clipmapGiImage, nullptr);
+#endif
+        m_clipmapGiImage = VK_NULL_HANDLE;
+    }
+    if (m_clipmapGiImageMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, m_clipmapGiImageMemory, nullptr);
+        m_clipmapGiImageMemory = VK_NULL_HANDLE;
+    }
+    m_clipmapGiImageInitialized = false;
+}
+
 void Renderer::destroySwapchain() {
     destroyHdrResolveTargets();
     destroyMsaaColorTargets();
@@ -8513,6 +8980,7 @@ void Renderer::shutdown() {
         destroyPipeBuffers();
         destroyPreviewBuffers();
         destroyEnvironmentResources();
+        destroyClipmapGiResources();
         destroyShadowResources();
         destroyChunkBuffers();
         destroyPipeline();
@@ -8548,6 +9016,7 @@ void Renderer::shutdown() {
                 << std::dec << "\n";
         };
         logLiveImage("diffuse.albedo.image", m_diffuseTextureImage);
+        logLiveImage("clipmapGi.image", m_clipmapGiImage);
         logLiveImage("shadow.atlas.image", m_shadowDepthImage);
         for (uint32_t i = 0; i < static_cast<uint32_t>(m_depthImages.size()); ++i) {
             logLiveImage(("depth.msaa.image[" + std::to_string(i) + "]").c_str(), m_depthImages[i]);
@@ -8613,6 +9082,10 @@ void Renderer::shutdown() {
     m_hdrColorFormat = VK_FORMAT_UNDEFINED;
     m_normalDepthFormat = VK_FORMAT_UNDEFINED;
     m_ssaoFormat = VK_FORMAT_UNDEFINED;
+    m_clipmapGiImageInitialized = false;
+    m_clipmapGiOriginX = 0;
+    m_clipmapGiOriginY = 0;
+    m_clipmapGiOriginZ = 0;
     m_supportsWireframePreview = false;
     m_supportsSamplerAnisotropy = false;
     m_supportsMultiDrawIndirect = false;
@@ -8640,7 +9113,10 @@ void Renderer::shutdown() {
     m_debugChunkLastRemeshMs = 0.0f;
     m_debugChunkLastFullRemeshMs = 0.0f;
     m_debugEnableSpatialQueries = true;
-    m_debugSpatialQueryBackend = SpatialQueryBackend::Clipmap;
+    m_debugEnableClipmapGi = true;
+    m_debugClipmapGiOcclusionStrength = 0.40f;
+    m_debugClipmapGiBounceStrength = 0.55f;
+    m_debugClipmapConfig = world::ClipmapConfig{};
     m_debugSpatialQueriesUsed = false;
     m_debugSpatialQueryStats = {};
     m_debugSpatialVisibleChunkCount = 0;

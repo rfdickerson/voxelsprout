@@ -17,7 +17,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 shadowConfig0; // normalOffsetNear, normalOffsetFar, baseBiasNearTexel, baseBiasFarTexel
     vec4 shadowConfig1; // slopeBiasNearTexel, slopeBiasFarTexel, blendMin, blendFactor
     vec4 shadowConfig2; // ssaoRadius, ssaoBias, ssaoIntensity, reserved
-    vec4 shadowConfig3; // reserved, reserved, reserved, pcfRadius
+    vec4 shadowConfig3; // clipmapOcclusion, clipmapBounce, clipmapGiEnable, pcfRadius
     vec4 shadowVoxelGridOrigin;
     vec4 shadowVoxelGridSize;
     vec4 skyConfig0; // rayleighStrength, mieStrength, mieAnisotropy, skyExposure
@@ -26,6 +26,7 @@ layout(set = 0, binding = 0) uniform CameraUniform {
 
 layout(set = 0, binding = 4) uniform sampler2DShadow shadowMap;
 layout(set = 0, binding = 1) uniform sampler2D diffuseAlbedo;
+layout(set = 0, binding = 9) uniform sampler3D clipmapRadianceTex;
 
 layout(location = 0) out vec4 outColor;
 
@@ -177,6 +178,28 @@ vec3 evaluateShHemisphereIrradiance(vec3 normal) {
     return mix(groundIrradiance, skyIrradiance, upT);
 }
 
+vec3 sampleClipmapRadiance(vec3 worldPosition, vec3 normal) {
+    const float voxelSize = max(camera.shadowVoxelGridSize.x, 1.0);
+    const float resolution = max(camera.shadowVoxelGridSize.y, 1.0);
+    const float invExtent = max(camera.shadowVoxelGridSize.z, 1e-6);
+    const vec3 samplePos = worldPosition + (normal * (0.12 * voxelSize));
+    vec3 uvw = (samplePos - camera.shadowVoxelGridOrigin.xyz) * invExtent;
+    const float halfTexel = 0.5 / resolution;
+    uvw = clamp(uvw, vec3(halfTexel), vec3(1.0 - halfTexel));
+    const vec3 texel = vec3(1.0 / resolution);
+    const vec3 tx = vec3(texel.x, 0.0, 0.0);
+    const vec3 ty = vec3(0.0, texel.y, 0.0);
+    const vec3 tz = vec3(0.0, 0.0, texel.z);
+    vec3 r = texture(clipmapRadianceTex, uvw).rgb * 0.40;
+    r += texture(clipmapRadianceTex, clamp(uvw + tx, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
+    r += texture(clipmapRadianceTex, clamp(uvw - tx, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
+    r += texture(clipmapRadianceTex, clamp(uvw + ty, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
+    r += texture(clipmapRadianceTex, clamp(uvw - ty, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
+    r += texture(clipmapRadianceTex, clamp(uvw + tz, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
+    r += texture(clipmapRadianceTex, clamp(uvw - tz, vec3(halfTexel), vec3(1.0 - halfTexel))).rgb * 0.10;
+    return r;
+}
+
 int chooseShadowCascade(float viewDepth) {
     if (viewDepth <= camera.shadowCascadeSplits.x) {
         return 0;
@@ -286,7 +309,18 @@ void main() {
     const vec3 ambientIrradiance = mix(shNormalIrradiance, shHemisphereIrradiance, 0.70);
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = mix(1.0, clamp(inVertexAo, 0.0, 1.0), vertexAoEnable);
-    const vec3 ambient = ambientIrradiance * (0.26 * vertexAo);
+    const float clipmapGiEnable = step(0.5, camera.shadowConfig3.z);
+    const float clipmapOcclusion = clamp(camera.shadowConfig3.x, 0.0, 1.0) * clipmapGiEnable;
+    const float clipmapBounce = clamp(camera.shadowConfig3.y, 0.0, 2.0) * clipmapGiEnable;
+    const float ambientOcclusion = 1.0 - (0.55 * clipmapOcclusion);
+    const vec3 ambientBase = ambientIrradiance * (0.26 * vertexAo * ambientOcclusion);
+    const float selfGiReceive = (inMaterial == 251u || inMaterial == 250u) ? 0.0 : 1.0;
+    vec3 clipmapRadiance = vec3(0.0);
+    if (clipmapGiEnable > 0.5) {
+        clipmapRadiance = sampleClipmapRadiance(inWorldPosition, normal) * selfGiReceive;
+    }
+    const vec3 clipmapBounceLight = clipmapRadiance * (1.10 * clipmapBounce);
+    const vec3 ambient = ambientBase;
     const vec3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = mix(1.0, shadowVisibility, shadowStrength);
     vec3 lighting =
@@ -294,13 +328,11 @@ void main() {
         (directSun * directShadowFactor);
 
     if (inMaterial == 250u || inMaterial == 251u) {
-        const float stripe = 0.5 + 0.5 * sin((inWorldPosition.x + inWorldPosition.z + inWorldPosition.y) * 6.0);
-        const vec3 emissive = materialTint(inMaterial) * mix(0.35, 0.85, stripe);
         baseColor = materialTint(inMaterial);
-        lighting += emissive;
     }
 
-    const vec3 shaded = baseColor * lighting;
+    const vec3 colorBleed = clipmapBounceLight * (0.35 + (0.65 * baseColor));
+    const vec3 shaded = (baseColor * lighting) + colorBleed;
     const vec3 fogged = applyAtmosphericFog(shaded, inWorldPosition, viewDepth, sunDirection, sunColor);
     outColor = vec4(fogged, 1.0);
 }

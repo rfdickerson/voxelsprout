@@ -30,6 +30,8 @@ std::uint8_t materialForVoxelType(VoxelType type) {
     switch (type) {
     case VoxelType::Solid:
         return 1;
+    case VoxelType::SolidRed:
+        return 251;
     case VoxelType::Empty:
     default:
         return 0;

@@ -2,6 +2,7 @@
 
 #include "render/BufferHelpers.hpp"
 #include "sim/Simulation.hpp"
+#include "world/ClipmapIndex.hpp"
 #include "world/ChunkGrid.hpp"
 #include "world/ChunkMesher.hpp"
 #include "world/SpatialIndex.hpp"
@@ -71,11 +72,6 @@ struct VoxelPreview {
 
 class Renderer {
 public:
-    enum class SpatialQueryBackend : std::uint8_t {
-        Clipmap = 0,
-        Octree = 1
-    };
-
     struct ShadowDebugSettings {
         float casterConstantBiasBase = 1.1f;
         float casterConstantBiasCascadeScale = 0.9f;
@@ -113,7 +109,7 @@ public:
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
     bool useSpatialPartitioningQueries() const;
-    SpatialQueryBackend spatialQueryBackend() const;
+    world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void renderFrame(
         const world::ChunkGrid& chunkGrid,
@@ -146,6 +142,8 @@ private:
     static constexpr uint32_t kGpuTimestampQueryFrameEnd = 13;
     static constexpr uint32_t kGpuTimestampQueryCount = 14;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
+    static constexpr std::uint32_t kClipmapGiResolution = 16;
+    static constexpr std::int32_t kClipmapGiVoxelSize = 2;
 
     struct FrameResources {
         // Per-frame command pool to allocate fresh command buffers every frame.
@@ -172,6 +170,7 @@ private:
     bool createPipeBuffers();
     bool createPipePipeline();
     bool createAoPipelines();
+    bool createClipmapGiResources();
     bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
@@ -198,6 +197,7 @@ private:
     void destroyChunkBuffers();
     void destroyPipeBuffers();
     void destroyPreviewBuffers();
+    void destroyClipmapGiResources();
     void destroyEnvironmentResources();
     void destroyDiffuseTextureResources();
     void destroyTransferResources();
@@ -315,6 +315,14 @@ private:
     std::vector<VkImageView> m_ssaoBlurImageViews;
     std::vector<TransientImageHandle> m_ssaoBlurTransientHandles;
     std::vector<bool> m_ssaoBlurImageInitialized;
+    VkImage m_clipmapGiImage = VK_NULL_HANDLE;
+    VkDeviceMemory m_clipmapGiImageMemory = VK_NULL_HANDLE;
+    VkImageView m_clipmapGiImageView = VK_NULL_HANDLE;
+    VkSampler m_clipmapGiSampler = VK_NULL_HANDLE;
+    bool m_clipmapGiImageInitialized = false;
+    std::int32_t m_clipmapGiOriginX = 0;
+    std::int32_t m_clipmapGiOriginY = 0;
+    std::int32_t m_clipmapGiOriginZ = 0;
     VkSampler m_normalDepthSampler = VK_NULL_HANDLE;
     VkSampler m_ssaoSampler = VK_NULL_HANDLE;
     VkImage m_shadowDepthImage = VK_NULL_HANDLE;
@@ -323,6 +331,7 @@ private:
     bool m_shadowDepthInitialized = false;
 #if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
+    VmaAllocation m_clipmapGiAllocation = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;
 #endif
@@ -405,6 +414,9 @@ private:
     bool m_debugEnableSsao = true;
     bool m_debugVisualizeSsao = false;
     bool m_debugVisualizeAoNormals = false;
+    bool m_debugEnableClipmapGi = true;
+    float m_debugClipmapGiOcclusionStrength = 0.40f;
+    float m_debugClipmapGiBounceStrength = 0.55f;
     ShadowDebugSettings m_shadowDebugSettings{};
     SkyDebugSettings m_skyDebugSettings{};
 #if defined(VOXEL_HAS_IMGUI)
@@ -435,7 +447,7 @@ private:
     std::uint32_t m_debugDrawnLod1Ranges = 0;
     std::uint32_t m_debugDrawnLod2Ranges = 0;
     bool m_debugEnableSpatialQueries = true;
-    SpatialQueryBackend m_debugSpatialQueryBackend = SpatialQueryBackend::Clipmap;
+    world::ClipmapConfig m_debugClipmapConfig{};
     bool m_debugSpatialQueriesUsed = false;
     world::SpatialQueryStats m_debugSpatialQueryStats{};
     std::uint32_t m_debugSpatialVisibleChunkCount = 0;

@@ -9,7 +9,8 @@ namespace world {
 
 enum class VoxelType : std::uint8_t {
     Empty = 0,
-    Solid = 1
+    Solid = 1,
+    SolidRed = 2
 };
 
 struct Voxel {

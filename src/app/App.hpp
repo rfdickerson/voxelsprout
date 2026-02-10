@@ -5,7 +5,6 @@
 #include "sim/Simulation.hpp"
 #include "world/ClipmapIndex.hpp"
 #include "world/ChunkGrid.hpp"
-#include "world/SpatialIndex.hpp"
 
 #include <vector>
 
@@ -173,10 +172,11 @@ private:
     bool m_worldDirty = false;
     float m_worldAutosaveElapsedSeconds = 0.0f;
     std::vector<std::size_t> m_visibleChunkIndices;
+    world::ClipmapConfig m_appliedClipmapConfig{};
+    bool m_hasAppliedClipmapConfig = false;
 
     sim::Simulation m_simulation;
     world::ChunkGrid m_chunkGrid;
-    world::ChunkSpatialIndex m_chunkSpatialIndex;
     world::ChunkClipmapIndex m_chunkClipmapIndex;
     render::Renderer m_renderer;
 };

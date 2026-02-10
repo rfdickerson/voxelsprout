@@ -60,7 +60,7 @@ constexpr const char* kWorldFilePath = "world.vxw";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 
 constexpr std::array<world::VoxelType, 1> kPlaceableBlockTypes = {
-    world::VoxelType::Solid
+    world::VoxelType::SolidRed
 };
 constexpr int kHotbarSlotBlock = 0;
 constexpr int kHotbarSlotPipe = 1;
@@ -441,9 +441,10 @@ bool App::init() {
         VOX_LOGW("app") << "world file missing/invalid at " << std::filesystem::absolute(worldPath).string()
                         << "; using empty world (press R to regenerate) in " << worldLoadMs << " ms";
     }
-    m_chunkSpatialIndex.rebuild(m_chunkGrid);
+    m_appliedClipmapConfig = m_renderer.clipmapQueryConfig();
+    m_hasAppliedClipmapConfig = true;
+    m_chunkClipmapIndex.setConfig(m_appliedClipmapConfig);
     m_chunkClipmapIndex.rebuild(m_chunkGrid);
-    VOX_LOGI("app") << "chunk spatial index rebuilt (" << m_chunkSpatialIndex.chunkCount() << " chunks)";
     VOX_LOGI("app") << "chunk clipmap index rebuilt (" << m_chunkClipmapIndex.chunkCount() << " chunks)";
 
     m_simulation.initializeSingleBelt();
@@ -729,6 +730,24 @@ void App::update(float dt) {
         m_camera.fovDegrees
     };
 
+    const world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
+    if (!m_hasAppliedClipmapConfig ||
+        requestedClipmapConfig.levelCount != m_appliedClipmapConfig.levelCount ||
+        requestedClipmapConfig.gridResolution != m_appliedClipmapConfig.gridResolution ||
+        requestedClipmapConfig.baseVoxelSize != m_appliedClipmapConfig.baseVoxelSize ||
+        requestedClipmapConfig.brickResolution != m_appliedClipmapConfig.brickResolution) {
+        m_appliedClipmapConfig = requestedClipmapConfig;
+        m_hasAppliedClipmapConfig = true;
+        m_chunkClipmapIndex.setConfig(m_appliedClipmapConfig);
+        m_chunkClipmapIndex.rebuild(m_chunkGrid);
+        VOX_LOGI("app") << "clipmap config changed, rebuilt clipmap index (levels="
+                        << m_appliedClipmapConfig.levelCount
+                        << ", grid=" << m_appliedClipmapConfig.gridResolution
+                        << ", baseVoxel=" << m_appliedClipmapConfig.baseVoxelSize
+                        << ", brick=" << m_appliedClipmapConfig.brickResolution
+                        << ")";
+    }
+
     m_visibleChunkIndices.clear();
     world::SpatialQueryStats spatialQueryStats{};
     bool spatialQueriesUsed = false;
@@ -747,21 +766,11 @@ void App::update(float dt) {
             m_camera.fovDegrees,
             aspectRatio
         );
-        if (cameraFrustum.valid) {
-            std::vector<std::size_t> candidateChunkIndices;
-            if (m_renderer.spatialQueryBackend() == render::Renderer::SpatialQueryBackend::Clipmap &&
-                m_chunkClipmapIndex.valid()) {
-                m_chunkClipmapIndex.updateCamera(m_camera.x, m_camera.y, m_camera.z, &spatialQueryStats);
-                candidateChunkIndices =
-                    m_chunkClipmapIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
-                spatialQueriesUsed = true;
-            } else if (m_renderer.spatialQueryBackend() == render::Renderer::SpatialQueryBackend::Octree &&
-                       m_chunkSpatialIndex.valid()) {
-                candidateChunkIndices =
-                    m_chunkSpatialIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
-                spatialQueriesUsed = true;
-            }
-
+        if (cameraFrustum.valid && m_chunkClipmapIndex.valid()) {
+            m_chunkClipmapIndex.updateCamera(m_camera.x, m_camera.y, m_camera.z, &spatialQueryStats);
+            std::vector<std::size_t> candidateChunkIndices =
+                m_chunkClipmapIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
+            spatialQueriesUsed = true;
             m_visibleChunkIndices.reserve(candidateChunkIndices.size());
             const std::vector<world::Chunk>& chunks = m_chunkGrid.chunks();
             for (std::size_t chunkIndex : candidateChunkIndices) {
@@ -781,11 +790,7 @@ void App::update(float dt) {
         }
     }
 
-    const bool spatialBackendValid =
-        (m_renderer.spatialQueryBackend() == render::Renderer::SpatialQueryBackend::Clipmap)
-            ? m_chunkClipmapIndex.valid()
-            : m_chunkSpatialIndex.valid();
-    if (m_visibleChunkIndices.empty() && (!spatialQueriesUsed || !spatialBackendValid)) {
+    if (m_visibleChunkIndices.empty() && (!spatialQueriesUsed || !m_chunkClipmapIndex.valid())) {
         const std::size_t chunkCount = m_chunkGrid.chunks().size();
         m_visibleChunkIndices.resize(chunkCount);
         for (std::size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
@@ -1690,7 +1695,7 @@ bool App::isTrackHotbarSelected() const {
 
 world::Voxel App::selectedPlaceVoxel() const {
     if (kPlaceableBlockTypes.empty()) {
-        return world::Voxel{world::VoxelType::Solid};
+        return world::Voxel{world::VoxelType::SolidRed};
     }
     const int clampedIndex = std::clamp(
         m_selectedBlockIndex,
@@ -2092,7 +2097,10 @@ bool App::isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTra
 
 void App::regenerateWorld() {
     m_chunkGrid.initializeFlatWorld();
-    m_chunkSpatialIndex.rebuild(m_chunkGrid);
+    const world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
+    m_chunkClipmapIndex.setConfig(requestedClipmapConfig);
+    m_appliedClipmapConfig = requestedClipmapConfig;
+    m_hasAppliedClipmapConfig = true;
     m_chunkClipmapIndex.rebuild(m_chunkGrid);
     if (!m_renderer.updateChunkMesh(m_chunkGrid)) {
         VOX_LOGE("app") << "world regenerate failed to update chunk meshes";

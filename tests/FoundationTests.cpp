@@ -308,6 +308,8 @@ void testClipmapIndex() {
     clipmapIndex.updateCamera(0.0f, 0.0f, 0.0f, &updateStats);
     expectTrue(updateStats.clipmapActiveLevelCount > 0u, "Clipmap level count populated");
     expectTrue(updateStats.clipmapUpdatedLevelCount > 0u, "Clipmap updates levels on first camera update");
+    expectTrue(updateStats.clipmapUpdatedBrickCount > 0u, "Clipmap updates bricks on first camera update");
+    expectTrue(updateStats.clipmapResidentBrickCount > 0u, "Clipmap resident brick count populated");
 
     core::CellAabb broadPhase{};
     broadPhase.valid = true;
@@ -325,6 +327,7 @@ void testClipmapIndex() {
     world::SpatialQueryStats movedUpdateStats{};
     clipmapIndex.updateCamera(33.0f, 0.0f, 0.0f, &movedUpdateStats);
     expectTrue(movedUpdateStats.clipmapUpdatedLevelCount > 0u, "Clipmap updates when camera crosses snapped boundary");
+    expectTrue(movedUpdateStats.clipmapUpdatedBrickCount > 0u, "Clipmap updates bricks when crossing snapped boundary");
 }
 
 } // namespace

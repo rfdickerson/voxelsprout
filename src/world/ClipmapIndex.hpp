@@ -17,6 +17,7 @@ struct ClipmapConfig {
     std::uint32_t levelCount = 5;
     std::int32_t gridResolution = 128;
     std::int32_t baseVoxelSize = 1;
+    std::int32_t brickResolution = 8;
 };
 
 class ChunkClipmapIndex {
@@ -40,16 +41,34 @@ public:
     ) const;
 
 private:
+    struct BrickCoord {
+        std::int32_t x = 0;
+        std::int32_t y = 0;
+        std::int32_t z = 0;
+    };
+
     struct ClipmapLevel {
         std::int32_t voxelSize = 1;
         std::int32_t gridResolution = 1;
+        std::int32_t brickResolution = 1;
+        std::int32_t brickGridResolution = 1;
         core::Cell3i originMin{};
+        BrickCoord originBrickMin{};
         core::CellAabb bounds{};
+        std::vector<std::uint32_t> brickVersions;
+        std::vector<std::uint8_t> brickDirtyMask;
+        std::vector<core::Cell3i> dirtyBrickRingQueue;
     };
 
     void rebuildLevels();
+    static std::int32_t positiveModulo(std::int32_t value, std::int32_t modulus);
+    static std::size_t brickLinearIndex(std::int32_t x, std::int32_t y, std::int32_t z, std::int32_t brickGridResolution);
+    static BrickCoord worldToBrickCoord(const core::Cell3i& worldCell, std::int32_t brickWorldSize);
     static std::int32_t snapDownToMultiple(std::int32_t value, std::int32_t multiple);
     static core::CellAabb makeLevelBounds(const core::Cell3i& originMin, std::int32_t gridResolution, std::int32_t voxelSize);
+    void markAllBricksDirty(ClipmapLevel& level);
+    void markBrickDirtyAbsolute(ClipmapLevel& level, const BrickCoord& absoluteBrickCoord);
+    std::uint32_t processDirtyBricks(ClipmapLevel& level);
 
     std::vector<core::CellAabb> m_chunkBounds;
     std::vector<std::size_t> m_allChunkIndices;
@@ -60,7 +79,7 @@ private:
     bool m_levelsInitialized = false;
     std::uint32_t m_lastUpdatedLevelCount = 0;
     std::uint32_t m_lastUpdatedSlabCount = 0;
+    std::uint32_t m_lastUpdatedBrickCount = 0;
 };
 
 } // namespace world
-
