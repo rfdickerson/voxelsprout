@@ -55,30 +55,45 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
         max(0.001, pow(1.0 + (mieG * mieG) - (2.0 * mieG * sunDot), 1.5));
     const float phaseBoost = (phaseRayleigh * rayleighStrength) + (phaseMie * mieStrength * 1.4);
 
-    // Analytic sun disk in angular space with antialiased edge and limb darkening.
+    // Analytic sun disk in angular space with altitude-dependent haze bloom.
+    // Low sun: larger, hazier bloom. High sun: tighter, more discrete disk.
     const float sunAngle = acos(sunDotRaw);
     const float diskSizeScale = clamp(camera.skyConfig2.x, 0.5, 6.0);
     const float hazeFalloffScale = clamp(camera.skyConfig2.y, 0.10, 1.20);
-    const float radiusDay = 0.0065;
-    const float radiusTwilight = 0.0095;
+    const float lowSunHaze =
+        (1.0 - smoothStep(0.08, 0.55, sunAltitude)) *
+        smoothStep(-0.18, 0.12, sunAltitude);
+    const float highSunCrisp = smoothStep(0.35, 0.85, sunAltitude);
+
+    const float radiusDay = 0.0056;
+    const float radiusTwilight = 0.0108;
     const float sunRadius = lerp(radiusTwilight, radiusDay, dayFactor) * diskSizeScale;
-    const float sunAa = max(fwidth(sunAngle), 0.00015);
-    const float diskMask = 1.0 - smoothStep(sunRadius - sunAa, sunRadius + sunAa, sunAngle);
+    const float sunAaBase = max(fwidth(sunAngle), 0.00010);
+    const float sunEdgeWidth = sunAaBase * lerp(2.30, 0.85, highSunCrisp);
+    const float diskMask = 1.0 - smoothStep(sunRadius - sunEdgeWidth, sunRadius + sunEdgeWidth, sunAngle);
     const float centerT = saturate01(1.0 - (sunAngle / max(sunRadius, 1e-5)));
-    const float limbDarkening = 0.55 + (0.45 * pow(centerT, 0.35));
+    const float limbDarkening = 0.52 + (0.48 * pow(centerT, lerp(0.50, 0.24, highSunCrisp)));
 
     const float diskIntensity = max(camera.skyConfig1.x / 1150.0, 0.01);
-    const float disk = diskMask * limbDarkening * (6.5 * diskIntensity);
+    const float disk = diskMask * limbDarkening * (6.8 * diskIntensity) * lerp(0.95, 1.15, highSunCrisp);
 
-    // Forward-scattering halo to avoid a flat "sticker" sun.
-    const float haloRadius = sunRadius * 8.0;
-    const float haloFalloff = max(haloRadius * hazeFalloffScale, 1e-5);
-    const float haloCore = exp(-sunAngle / haloFalloff);
-    const float haloMask = 1.0 - smoothStep(haloRadius * 0.6, haloRadius, sunAngle);
     const float haloIntensity = max(camera.skyConfig1.y / 22.0, 0.01);
-    const float halo = haloCore * haloMask * (1.3 * haloIntensity) * (0.7 + (0.5 * twilightFactor));
 
-    sky += sunColor * (disk + halo) * (1.0 + phaseBoost);
+    // Mid/near halo component.
+    const float haloRadius = sunRadius * lerp(18.0, 6.0, highSunCrisp);
+    const float haloFalloff = max(haloRadius * hazeFalloffScale * lerp(1.45, 0.55, highSunCrisp), 1e-5);
+    const float haloCore = exp(-sunAngle / haloFalloff);
+    const float haloMask = 1.0 - smoothStep(haloRadius * lerp(0.45, 0.72, highSunCrisp), haloRadius, sunAngle);
+    const float halo = haloCore * haloMask * (1.2 * haloIntensity) * (0.35 + (1.35 * lowSunHaze));
+
+    // Broad low-sun haze bloom component.
+    const float hazeRadius = sunRadius * lerp(34.0, 10.0, highSunCrisp);
+    const float hazeFalloff = max(hazeRadius * hazeFalloffScale * 0.85, 1e-5);
+    const float hazeCore = exp(-sunAngle / hazeFalloff);
+    const float hazeMask = 1.0 - smoothStep(hazeRadius * 0.55, hazeRadius, sunAngle);
+    const float hazeBloom = hazeCore * hazeMask * (1.6 * haloIntensity * lowSunHaze);
+
+    sky += sunColor * (disk + halo + hazeBloom) * (1.0 + phaseBoost);
 
     const float3 groundColor = float3(0.05, 0.06, 0.07);
     const float belowHorizon = saturate01(-dir.y);

@@ -14,6 +14,7 @@ struct VertexOutput
     float4 position : SV_Position;
     float2 outUv : TEXCOORD0;
     float3 outColorTint : TEXCOORD1;
+    float3 outWorldPosition : TEXCOORD2;
 };
 
 VertexOutput main(VertexInput input)
@@ -41,5 +42,6 @@ VertexOutput main(VertexInput input)
     output.position = mul(camera.mvp, float4(worldPosition, 1.0));
     output.outUv = input.inUv;
     output.outColorTint = input.inColorTint.xyz;
+    output.outWorldPosition = worldPosition;
     return output;
 }

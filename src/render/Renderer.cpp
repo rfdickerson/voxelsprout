@@ -5656,10 +5656,11 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
                         instance.worldPosYaw[1] = chunkWorldY + static_cast<float>(y) + 1.02f + yJitter;
                         instance.worldPosYaw[2] = chunkWorldZ + static_cast<float>(z) + 0.5f + jitterZ;
                         instance.worldPosYaw[3] = yawRadians;
-                        // Subtle deterministic tint variation to avoid uniform grass color.
-                        instance.colorTint[0] = 0.93f + (tintRand0 * 0.14f);
-                        instance.colorTint[1] = 0.92f + (tintRand1 * 0.18f);
-                        instance.colorTint[2] = 0.88f + (tintRand2 * 0.16f);
+                        // Deterministic but visible per-instance tint variation (hue + value).
+                        const float valueJitter = 0.86f + (rand3 * 0.24f);
+                        instance.colorTint[0] = (0.80f + (tintRand0 * 0.30f)) * valueJitter;
+                        instance.colorTint[1] = (0.90f + (tintRand1 * 0.38f)) * valueJitter;
+                        instance.colorTint[2] = (0.68f + (tintRand2 * 0.26f)) * valueJitter;
                         instance.colorTint[3] = 1.0f;
                         grassInstances.push_back(instance);
                     }
@@ -5775,6 +5776,28 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         }
         m_grassBillboardInstanceCount = 0;
     } else {
+        if (fullRemesh) {
+            float minR = std::numeric_limits<float>::max();
+            float minG = std::numeric_limits<float>::max();
+            float minB = std::numeric_limits<float>::max();
+            float maxR = std::numeric_limits<float>::lowest();
+            float maxG = std::numeric_limits<float>::lowest();
+            float maxB = std::numeric_limits<float>::lowest();
+            for (const GrassBillboardInstance& instance : combinedGrassInstances) {
+                minR = std::min(minR, instance.colorTint[0]);
+                minG = std::min(minG, instance.colorTint[1]);
+                minB = std::min(minB, instance.colorTint[2]);
+                maxR = std::max(maxR, instance.colorTint[0]);
+                maxG = std::max(maxG, instance.colorTint[1]);
+                maxB = std::max(maxB, instance.colorTint[2]);
+            }
+            VOX_LOGI("render") << "grass tint range rgb min=("
+                              << minR << ", " << minG << ", " << minB
+                              << "), max=("
+                              << maxR << ", " << maxG << ", " << maxB
+                              << "), instances=" << combinedGrassInstances.size() << "\n";
+        }
+
         BufferCreateDesc grassInstanceCreateDesc{};
         grassInstanceCreateDesc.size = static_cast<VkDeviceSize>(combinedGrassInstances.size() * sizeof(GrassBillboardInstance));
         grassInstanceCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
