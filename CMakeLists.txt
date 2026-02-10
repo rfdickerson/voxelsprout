@@ -11,11 +11,11 @@ include(CTest)
 find_program(SLANGC_EXECUTABLE NAMES slangc)
 if(SLANGC_EXECUTABLE)
     set(SLANG_SHARED_INCLUDES
-        "${CMAKE_SOURCE_DIR}/src/render/shaders/camera_uniform.slanginc"
-        "${CMAKE_SOURCE_DIR}/src/render/shaders/chunk_push_constants.slanginc"
-        "${CMAKE_SOURCE_DIR}/src/render/shaders/fullscreen_triangle.slanginc"
-        "${CMAKE_SOURCE_DIR}/src/render/shaders/sh_lighting.slanginc"
-        "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_decode.slanginc"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/camera_uniform.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/chunk_push_constants.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/fullscreen_triangle.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/sh_lighting.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_decode.slang"
     )
     set(SLANG_SHADER_OUTPUTS "")
     function(add_slang_shader SLANG_SHADER SLANG_STAGE)
@@ -27,6 +27,7 @@ if(SLANGC_EXECUTABLE)
                 -entry main
                 -stage "${SLANG_STAGE}"
                 -matrix-layout-column-major
+                -I "${CMAKE_SOURCE_DIR}/src/render/shaders"
                 "${SLANG_SHADER}"
                 -o "${SLANG_OUTPUT}"
             DEPENDS "${SLANG_SHADER}" ${SLANG_SHARED_INCLUDES}

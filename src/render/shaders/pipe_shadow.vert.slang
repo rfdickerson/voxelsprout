@@ -1,5 +1,5 @@
-#include "camera_uniform.slanginc"
-#include "chunk_push_constants.slanginc"
+import camera_uniform;
+import chunk_push_constants;
 
 struct VertexInput
 {

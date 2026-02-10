@@ -1,15 +1,14 @@
-#ifndef VOXEL_DECODE_SLANGINC
-#define VOXEL_DECODE_SLANGINC
+module voxel_decode;
 
-static const uint kShiftX = 0u;
-static const uint kShiftY = 5u;
-static const uint kShiftZ = 10u;
-static const uint kShiftFace = 15u;
-static const uint kShiftCorner = 18u;
-static const uint kShiftAo = 20u;
-static const uint kShiftMaterial = 22u;
+public static const uint kShiftX = 0u;
+public static const uint kShiftY = 5u;
+public static const uint kShiftZ = 10u;
+public static const uint kShiftFace = 15u;
+public static const uint kShiftCorner = 18u;
+public static const uint kShiftAo = 20u;
+public static const uint kShiftMaterial = 22u;
 
-float3 cornerOffset(uint face, uint corner)
+public float3 cornerOffset(uint face, uint corner)
 {
     if (face == 0u)
     {
@@ -52,5 +51,3 @@ float3 cornerOffset(uint face, uint corner)
     if (corner == 2u) return float3(1.0, 1.0, 0.0);
     return float3(1.0, 0.0, 0.0);
 }
-
-#endif

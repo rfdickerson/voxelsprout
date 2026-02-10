@@ -1,7 +1,7 @@
 // Compile for Vulkan SPIR-V with column-major matrices:
 // slangc -target spirv -entry main -stage fragment -matrix-layout-column-major src/render/shaders/tone_map.frag.slang -o src/render/shaders/tone_map.frag.slang.spv
 
-#include "camera_uniform.slanginc"
+import camera_uniform;
 
 [[vk::binding(3, 0)]]
 Sampler2D<float4> hdrSceneColor;

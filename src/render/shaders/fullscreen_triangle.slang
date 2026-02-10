@@ -1,0 +1,8 @@
+module fullscreen_triangle;
+
+public float2 fullscreenTriangleNdc(uint vertexId)
+{
+    if (vertexId == 0u) return float2(-1.0, -1.0);
+    if (vertexId == 1u) return float2(3.0, -1.0);
+    return float2(-1.0, 3.0);
+}

@@ -1,7 +1,7 @@
 // Compile for Vulkan SPIR-V with column-major matrices to match Renderer.cpp uniform layout:
 // slangc -target spirv -entry main -stage fragment -matrix-layout-column-major src/render/shaders/voxel_packed.frag.slang -o src/render/shaders/voxel_packed.frag.slang.spv
 
-#include "camera_uniform.slanginc"
+import camera_uniform;
 
 [[vk::binding(4, 0)]]
 Sampler2DShadow shadowMap;

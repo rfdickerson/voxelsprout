@@ -1,4 +1,4 @@
-#include "camera_uniform.slanginc"
+import camera_uniform;
 
 float3 proceduralSky(float3 direction, float3 sunDirection)
 {

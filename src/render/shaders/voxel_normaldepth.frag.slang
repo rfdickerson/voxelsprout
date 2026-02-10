@@ -1,4 +1,4 @@
-#include "camera_uniform.slanginc"
+import camera_uniform;
 
 float3 faceNormal(uint face)
 {

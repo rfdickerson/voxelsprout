@@ -1,9 +1,14 @@
-#include "camera_uniform.slanginc"
+import camera_uniform;
 
 [[vk::binding(6, 0)]]
 Sampler2D<float4> normalDepthTexture;
 [[vk::binding(8, 0)]]
 Sampler2D<float4> ssaoRawTexture;
+
+[[vk::constant_id(2)]]
+const int kSsaoBlurRadius = 6;
+[[vk::constant_id(3)]]
+const float kSsaoBlurSigma = 3.0;
 
 float3 decodeViewNormal(float3 encodedNormal)
 {
@@ -31,13 +36,11 @@ float main(FragmentInput input) : SV_Target0
 
     float weightedAo = centerAo;
     float weightSum = 1.0;
-    const float sigma = 3.0;
-    const int blurRadius = 6;
 
-    for (int i = 1; i <= blurRadius; ++i)
+    for (int i = 1; i <= kSsaoBlurRadius; ++i)
     {
         const float fi = float(i);
-        const float spatialWeight = exp(-(fi * fi) / (2.0 * sigma * sigma));
+        const float spatialWeight = exp(-(fi * fi) / (2.0 * kSsaoBlurSigma * kSsaoBlurSigma));
 
         const float2 offsetX = float2(texelSize.x * fi, 0.0);
         const float2 offsetY = float2(0.0, texelSize.y * fi);

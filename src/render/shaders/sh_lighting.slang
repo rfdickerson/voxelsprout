@@ -1,7 +1,7 @@
-#ifndef VOXEL_SH_LIGHTING_SLANGINC
-#define VOXEL_SH_LIGHTING_SLANGINC
+module sh_lighting;
+import camera_uniform;
 
-float3 evaluateShIrradiance(float3 normal)
+public float3 evaluateShIrradiance(float3 normal)
 {
     const float x = normal.x;
     const float y = normal.y;
@@ -26,12 +26,10 @@ float3 evaluateShIrradiance(float3 normal)
     return max(irradiance, float3(0.0, 0.0, 0.0));
 }
 
-float3 evaluateShHemisphereIrradiance(float3 normal)
+public float3 evaluateShHemisphereIrradiance(float3 normal)
 {
     const float upT = clamp((normal.y * 0.5) + 0.5, 0.0, 1.0);
     const float3 skyIrradiance = evaluateShIrradiance(float3(0.0, 1.0, 0.0));
     const float3 groundIrradiance = evaluateShIrradiance(float3(0.0, -1.0, 0.0));
     return lerp(groundIrradiance, skyIrradiance, upT);
 }
-
-#endif

@@ -1,4 +1,4 @@
-#include "fullscreen_triangle.slanginc"
+import fullscreen_triangle;
 
 struct VertexOutput
 {

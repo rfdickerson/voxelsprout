@@ -1,4 +1,4 @@
-#include "camera_uniform.slanginc"
+import camera_uniform;
 
 struct FragmentInput
 {

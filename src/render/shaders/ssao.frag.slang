@@ -1,7 +1,12 @@
-#include "camera_uniform.slanginc"
+import camera_uniform;
 
 [[vk::binding(6, 0)]]
 Sampler2D<float4> normalDepthTexture;
+
+[[vk::constant_id(0)]]
+const int kSsaoSampleCount = 32;
+[[vk::constant_id(1)]]
+const float kSsaoPower = 1.4;
 
 float hash12(float2 p)
 {
@@ -62,13 +67,12 @@ float main(FragmentInput input) : SV_Target0
     const float bias = clamp(camera.shadowConfig2.y, 0.0, 0.20);
     float occlusion = 0.0;
     float sampleCount = 0.0;
-    const int kSampleCount = 32;
     const float kGoldenAngle = 2.39996323;
 
-    for (int i = 0; i < kSampleCount; ++i)
+    for (int i = 0; i < kSsaoSampleCount; ++i)
     {
         const float fi = float(i);
-        const float t = (fi + 0.5) / float(kSampleCount);
+        const float t = (fi + 0.5) / float(kSsaoSampleCount);
         const float r = sqrt(t);
         const float angle = (fi * kGoldenAngle) + randomAngle;
         const float2 disk = mul(rot, float2(cos(angle), sin(angle)) * r);
@@ -105,5 +109,5 @@ float main(FragmentInput input) : SV_Target0
     if (sampleCount <= 0.0) return 1.0;
 
     const float rawAo = 1.0 - (occlusion / sampleCount);
-    return pow(clamp(rawAo, 0.0, 1.0), 1.4);
+    return pow(clamp(rawAo, 0.0, 1.0), kSsaoPower);
 }

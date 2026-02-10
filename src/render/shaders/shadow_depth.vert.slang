@@ -1,6 +1,6 @@
-#include "camera_uniform.slanginc"
-#include "chunk_push_constants.slanginc"
-#include "voxel_decode.slanginc"
+import camera_uniform;
+import chunk_push_constants;
+import voxel_decode;
 
 struct VertexInput
 {

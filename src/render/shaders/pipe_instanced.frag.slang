@@ -1,5 +1,5 @@
-#include "camera_uniform.slanginc"
-#include "sh_lighting.slanginc"
+import camera_uniform;
+import sh_lighting;
 
 interface ITransportStyle
 {
