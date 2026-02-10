@@ -350,11 +350,16 @@ private:
     VkPipeline m_previewAddPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewRemovePipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_bindlessDescriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+    VkDescriptorPool m_bindlessDescriptorPool = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
+    VkDescriptorSet m_bindlessDescriptorSet = VK_NULL_HANDLE;
     bool m_supportsWireframePreview = false;
     bool m_supportsSamplerAnisotropy = false;
     bool m_supportsMultiDrawIndirect = false;
+    bool m_supportsBindlessDescriptors = false;
+    uint32_t m_bindlessTextureCapacity = 0;
     bool m_gpuTimestampsSupported = false;
     float m_gpuTimestampPeriodNs = 0.0f;
     std::array<VkQueryPool, kMaxFramesInFlight> m_gpuTimestampQueryPools{};

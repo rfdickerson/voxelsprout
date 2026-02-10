@@ -7,14 +7,20 @@ import sh_lighting;
 [[vk::binding(4, 0)]]
 Sampler2DShadow shadowMap;
 
-[[vk::binding(1, 0)]]
-Sampler2D<float4> diffuseAlbedo;
+[[vk::binding(0, 1)]]
+Sampler2D<float4> bindlessTextures[];
+
+static const uint kBindlessTextureIndexDiffuseAtlas = 0u;
+static const uint kVoxelAtlasTileSize = 16u;
+static const uint kMaterialStone = 1u;
+static const uint kMaterialDirt = 2u;
+static const uint kMaterialGrass = 3u;
+static const uint kMaterialWood = 4u;
+static const uint kMaterialRed = 251u;
 
 float3 materialTint(uint material)
 {
-    if (material == 250u) return float3(0.30, 0.95, 1.00);
-    if (material == 251u) return float3(1.00, 0.28, 0.22);
-    if (material == 1u) return float3(1.0, 1.0, 1.0);
+    if (material == kMaterialRed) return float3(1.00, 0.28, 0.22);
     return float3(0.9, 0.9, 0.9);
 }
 
@@ -35,6 +41,49 @@ float3 faceNormal(uint face)
     if (face == 3u) return float3(0.0, -1.0, 0.0);
     if (face == 4u) return float3(0.0, 0.0, 1.0);
     return float3(0.0, 0.0, -1.0);
+}
+
+bool materialUsesAtlas(uint material)
+{
+    return
+        material == kMaterialStone ||
+        material == kMaterialDirt ||
+        material == kMaterialGrass ||
+        material == kMaterialWood;
+}
+
+uint materialAtlasTile(uint material, uint face)
+{
+    if (material == kMaterialStone) return 0u;
+    if (material == kMaterialDirt) return 1u;
+    if (material == kMaterialGrass)
+    {
+        if (face == 3u) return 1u;
+        return 2u;
+    }
+    if (material == kMaterialWood) return 3u;
+    return 0u;
+}
+
+float3 sampleMaterialAlbedo(uint material, uint face, float3 worldPosition)
+{
+    if (!materialUsesAtlas(material))
+    {
+        return materialTint(material);
+    }
+
+    const uint tileIndex = materialAtlasTile(material, face);
+    const float2 uv = faceUv(face, worldPosition);
+
+    uint texW = 0u;
+    uint texH = 0u;
+    bindlessTextures[kBindlessTextureIndexDiffuseAtlas].GetDimensions(texW, texH);
+    const uint tilesX = max(texW / kVoxelAtlasTileSize, 1u);
+    const uint tilesY = max(texH / kVoxelAtlasTileSize, 1u);
+    const uint tileX = tileIndex % tilesX;
+    const uint tileY = tileIndex / tilesX;
+    const float2 atlasUv = (float2(float(tileX), float(tileY)) + uv) / float2(float(tilesX), float(tilesY));
+    return bindlessTextures[kBindlessTextureIndexDiffuseAtlas].Sample(atlasUv).xyz;
 }
 
 float3 proceduralSkyNoSunDisk(float3 direction)
@@ -289,11 +338,7 @@ struct FragmentInput
 float4 main(FragmentInput input) : SV_Target0
 {
     const float3 normal = faceNormal(input.inFace);
-    float3 baseColor = diffuseAlbedo.Sample(faceUv(input.inFace, input.inWorldPosition)).xyz;
-    if (input.inMaterial == 250u || input.inMaterial == 251u)
-    {
-        baseColor *= materialTint(input.inMaterial);
-    }
+    float3 baseColor = sampleMaterialAlbedo(input.inMaterial, input.inFace, input.inWorldPosition);
 
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
@@ -314,11 +359,6 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);
     float3 lighting = ambient + (directSun * directShadowFactor);
-
-    if (input.inMaterial == 250u || input.inMaterial == 251u)
-    {
-        baseColor = materialTint(input.inMaterial);
-    }
 
     const float3 shaded = baseColor * lighting;
     const float3 fogged = applyAtmosphericFog(shaded, input.inWorldPosition, viewDepth, sunDirection);

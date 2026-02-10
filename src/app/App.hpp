@@ -112,6 +112,7 @@ private:
     [[nodiscard]] bool isWorldVoxelInBounds(int x, int y, int z) const;
     void cycleSelectedHotbar(int direction);
     void selectHotbarSlot(int hotbarIndex);
+    void selectPlaceableBlock(int blockIndex);
     [[nodiscard]] bool isPipeHotbarSelected() const;
     [[nodiscard]] bool isConveyorHotbarSelected() const;
     [[nodiscard]] bool isTrackHotbarSelected() const;

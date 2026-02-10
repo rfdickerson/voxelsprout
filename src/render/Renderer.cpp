@@ -45,6 +45,16 @@ constexpr std::array<const char*, 7> kDeviceExtensions = {
     VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,
     VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME,
 };
+constexpr uint32_t kBindlessTargetTextureCapacity = 1024;
+constexpr uint32_t kBindlessMinTextureCapacity = 64;
+constexpr uint32_t kBindlessReservedSampledDescriptors = 16;
+constexpr uint32_t kBindlessTextureIndexDiffuse = 0;
+constexpr uint32_t kBindlessTextureIndexHdrResolved = 1;
+constexpr uint32_t kBindlessTextureIndexShadowAtlas = 2;
+constexpr uint32_t kBindlessTextureIndexNormalDepth = 3;
+constexpr uint32_t kBindlessTextureIndexSsaoBlur = 4;
+constexpr uint32_t kBindlessTextureIndexSsaoRaw = 5;
+constexpr uint32_t kBindlessTextureStaticCount = 6;
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {4096u, 2048u, 2048u, 1024u};
 struct ShadowAtlasRect {
@@ -1390,6 +1400,9 @@ bool Renderer::createSurface() {
 }
 
 bool Renderer::pickPhysicalDevice() {
+    m_supportsBindlessDescriptors = false;
+    m_bindlessTextureCapacity = 0;
+
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
     if (deviceCount == 0) {
@@ -1509,6 +1522,31 @@ bool Renderer::pickPhysicalDevice() {
             VOX_LOGI("render") << "skip GPU: shaderDrawParameters not supported\n";
             continue;
         }
+        const bool supportsBindlessDescriptors =
+            vulkan12Features.descriptorIndexing == VK_TRUE &&
+            vulkan12Features.runtimeDescriptorArray == VK_TRUE &&
+            vulkan12Features.shaderSampledImageArrayNonUniformIndexing == VK_TRUE &&
+            vulkan12Features.descriptorBindingPartiallyBound == VK_TRUE;
+        if (!supportsBindlessDescriptors) {
+            VOX_LOGI("render") << "skip GPU: bindless descriptor indexing not supported\n";
+            continue;
+        }
+
+        uint32_t bindlessTextureCapacity = 0;
+        const uint32_t perStageSamplerLimit = properties.limits.maxPerStageDescriptorSamplers;
+        const uint32_t perStageSampledLimit = properties.limits.maxPerStageDescriptorSampledImages;
+        const uint32_t descriptorSetSampledLimit = properties.limits.maxDescriptorSetSampledImages;
+        uint32_t safeBudget = std::min({perStageSamplerLimit, perStageSampledLimit, descriptorSetSampledLimit});
+        if (safeBudget > kBindlessReservedSampledDescriptors) {
+            safeBudget -= kBindlessReservedSampledDescriptors;
+        } else {
+            safeBudget = 0;
+        }
+        bindlessTextureCapacity = std::min(kBindlessTargetTextureCapacity, safeBudget);
+        if (bindlessTextureCapacity < kBindlessMinTextureCapacity) {
+            VOX_LOGI("render") << "skip GPU: bindless descriptor budget too small\n";
+            continue;
+        }
 
         const bool supportsWireframe = features2.features.fillModeNonSolid == VK_TRUE;
         const bool supportsSamplerAnisotropy = features2.features.samplerAnisotropy == VK_TRUE;
@@ -1523,6 +1561,8 @@ bool Renderer::pickPhysicalDevice() {
         m_supportsWireframePreview = supportsWireframe;
         m_supportsSamplerAnisotropy = supportsSamplerAnisotropy;
         m_supportsMultiDrawIndirect = supportsMultiDrawIndirect;
+        m_supportsBindlessDescriptors = true;
+        m_bindlessTextureCapacity = bindlessTextureCapacity;
         m_maxSamplerAnisotropy = maxSamplerAnisotropy;
         m_depthFormat = depthFormat;
         m_shadowDepthFormat = shadowDepthFormat;
@@ -1539,6 +1579,8 @@ bool Renderer::pickPhysicalDevice() {
                   << ", samplerAnisotropy=" << (m_supportsSamplerAnisotropy ? "yes" : "no")
                   << ", drawIndirectFirstInstance=" << (supportsDrawIndirectFirstInstance ? "yes" : "no")
                   << ", multiDrawIndirect=" << (m_supportsMultiDrawIndirect ? "yes" : "no")
+                  << ", bindlessDescriptors=" << (m_supportsBindlessDescriptors ? "yes" : "no")
+                  << ", bindlessTextureCapacity=" << m_bindlessTextureCapacity
                   << ", maxSamplerAnisotropy=" << m_maxSamplerAnisotropy
                   << ", msaaSamples=" << static_cast<uint32_t>(m_colorSampleCount)
                   << ", shadowDepthFormat=" << static_cast<int>(m_shadowDepthFormat)
@@ -1601,6 +1643,12 @@ bool Renderer::createLogicalDevice() {
     vulkan12Features.pNext = &vulkan11Features;
     vulkan12Features.timelineSemaphore = VK_TRUE;
     vulkan12Features.bufferDeviceAddress = VK_TRUE;
+    if (m_supportsBindlessDescriptors) {
+        vulkan12Features.descriptorIndexing = VK_TRUE;
+        vulkan12Features.runtimeDescriptorArray = VK_TRUE;
+        vulkan12Features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        vulkan12Features.descriptorBindingPartiallyBound = VK_TRUE;
+    }
 
     VkPhysicalDeviceVulkan13Features vulkan13Features{};
     vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -1631,11 +1679,22 @@ bool Renderer::createLogicalDevice() {
     }
     VOX_LOGI("render") << "device features enabled: dynamicRendering=1, synchronization2=1, maintenance4=1, "
         << "timelineSemaphore=1, bufferDeviceAddress=1, memoryPriority=1, shaderDrawParameters=1, drawIndirectFirstInstance=1, "
-        << "multiDrawIndirect=" << (m_supportsMultiDrawIndirect ? 1 : 0) << "\n";
+        << "multiDrawIndirect=" << (m_supportsMultiDrawIndirect ? 1 : 0)
+        << ", descriptorIndexing=" << (m_supportsBindlessDescriptors ? 1 : 0)
+        << ", runtimeDescriptorArray=" << (m_supportsBindlessDescriptors ? 1 : 0)
+        << ", sampledImageArrayNonUniformIndexing=" << (m_supportsBindlessDescriptors ? 1 : 0)
+        << ", descriptorBindingPartiallyBound=" << (m_supportsBindlessDescriptors ? 1 : 0)
+        << "\n";
     VOX_LOGI("render") << "device extensions enabled: "
         << "VK_KHR_swapchain, VK_KHR_maintenance4, VK_KHR_timeline_semaphore, "
         << "VK_KHR_synchronization2, VK_KHR_dynamic_rendering, "
         << "VK_EXT_memory_budget, VK_EXT_memory_priority\n";
+    if (m_supportsBindlessDescriptors) {
+        VOX_LOGI("render") << "bindless descriptor support enabled (capacity="
+            << m_bindlessTextureCapacity << ")\n";
+    } else {
+        VOX_LOGI("render") << "bindless descriptor support disabled (missing descriptor-indexing features)\n";
+    }
 
     vkGetDeviceQueue(m_device, m_graphicsQueueFamilyIndex, m_graphicsQueueIndex, &m_graphicsQueue);
     vkGetDeviceQueue(m_device, m_transferQueueFamilyIndex, m_transferQueueIndex, &m_transferQueue);
@@ -2069,23 +2128,70 @@ bool Renderer::createDiffuseTextureResources() {
         return true;
     }
 
-    constexpr uint32_t kTextureWidth = 64;
-    constexpr uint32_t kTextureHeight = 64;
+    constexpr uint32_t kTileSize = 16;
+    constexpr uint32_t kTextureTilesX = 4;
+    constexpr uint32_t kTextureTilesY = 1;
+    constexpr uint32_t kTextureWidth = kTileSize * kTextureTilesX;
+    constexpr uint32_t kTextureHeight = kTileSize * kTextureTilesY;
     constexpr VkFormat kTextureFormat = VK_FORMAT_R8G8B8A8_UNORM;
     constexpr VkDeviceSize kTextureBytes = kTextureWidth * kTextureHeight * 4;
 
-    // Keep base albedo uniform so AO diagnostics are not confused with per-tile texture contrast.
     std::vector<std::uint8_t> pixels(static_cast<size_t>(kTextureBytes), 0);
-    constexpr std::uint8_t kBaseR = 112u;
-    constexpr std::uint8_t kBaseG = 103u;
-    constexpr std::uint8_t kBaseB = 92u;
+    auto hash8 = [](uint32_t x, uint32_t y, uint32_t seed) -> std::uint8_t {
+        uint32_t h = x * 374761393u;
+        h += y * 668265263u;
+        h += seed * 2246822519u;
+        h = (h ^ (h >> 13u)) * 1274126177u;
+        return static_cast<std::uint8_t>((h >> 24u) & 0xFFu);
+    };
+    auto writePixel = [&](uint32_t px, uint32_t py, std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+        const size_t i = static_cast<size_t>((py * kTextureWidth + px) * 4u);
+        pixels[i + 0] = r;
+        pixels[i + 1] = g;
+        pixels[i + 2] = b;
+        pixels[i + 3] = 255u;
+    };
+
     for (uint32_t y = 0; y < kTextureHeight; ++y) {
         for (uint32_t x = 0; x < kTextureWidth; ++x) {
-            const size_t i = static_cast<size_t>((y * kTextureWidth + x) * 4u);
-            pixels[i + 0] = kBaseR;
-            pixels[i + 1] = kBaseG;
-            pixels[i + 2] = kBaseB;
-            pixels[i + 3] = 255u;
+            const uint32_t tileIndex = x / kTileSize;
+            const uint32_t localX = x % kTileSize;
+            const uint32_t localY = y % kTileSize;
+            const std::uint8_t noiseA = hash8(localX, localY, tileIndex + 11u);
+            const std::uint8_t noiseB = hash8(localX, localY, tileIndex + 37u);
+
+            std::uint8_t r = 128u;
+            std::uint8_t g = 128u;
+            std::uint8_t b = 128u;
+            if (tileIndex == 0u) {
+                // Stone.
+                const int tone = 108 + static_cast<int>(noiseA % 34u) - 17;
+                r = static_cast<std::uint8_t>(std::clamp(tone, 72, 146));
+                g = static_cast<std::uint8_t>(std::clamp(tone - 5, 66, 140));
+                b = static_cast<std::uint8_t>(std::clamp(tone - 10, 58, 132));
+            } else if (tileIndex == 1u) {
+                // Dirt.
+                const int warm = 94 + static_cast<int>(noiseA % 28u) - 14;
+                const int cool = 68 + static_cast<int>(noiseB % 20u) - 10;
+                r = static_cast<std::uint8_t>(std::clamp(warm + 20, 70, 138));
+                g = static_cast<std::uint8_t>(std::clamp(warm - 2, 48, 112));
+                b = static_cast<std::uint8_t>(std::clamp(cool - 8, 26, 84));
+            } else if (tileIndex == 2u) {
+                // Grass.
+                const int green = 118 + static_cast<int>(noiseA % 32u) - 16;
+                r = static_cast<std::uint8_t>(std::clamp(52 + static_cast<int>(noiseB % 18u) - 9, 34, 74));
+                g = static_cast<std::uint8_t>(std::clamp(green, 82, 154));
+                b = static_cast<std::uint8_t>(std::clamp(44 + static_cast<int>(noiseA % 14u) - 7, 26, 64));
+            } else {
+                // Wood.
+                const int stripe = ((localX / 3u) + (localY / 5u)) % 3u;
+                const int base = (stripe == 0) ? 112 : (stripe == 1 ? 96 : 84);
+                const int grain = static_cast<int>(noiseA % 16u) - 8;
+                r = static_cast<std::uint8_t>(std::clamp(base + 34 + grain, 78, 168));
+                g = static_cast<std::uint8_t>(std::clamp(base + 12 + grain, 56, 136));
+                b = static_cast<std::uint8_t>(std::clamp(base - 6 + (grain / 2), 36, 110));
+            }
+            writePixel(x, y, r, g, b);
         }
     }
 
@@ -2378,9 +2484,9 @@ bool Renderer::createDiffuseTextureResources() {
 
     VkSamplerCreateInfo samplerCreateInfo{};
     samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
-    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
-    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerCreateInfo.magFilter = VK_FILTER_NEAREST;
+    samplerCreateInfo.minFilter = VK_FILTER_NEAREST;
+    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
@@ -3323,6 +3429,95 @@ bool Renderer::createDescriptorResources() {
         setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET, vkHandleToUint64(m_descriptorSets[i]), setName.c_str());
     }
 
+    if (m_supportsBindlessDescriptors && m_bindlessTextureCapacity > 0) {
+        if (m_bindlessDescriptorSetLayout == VK_NULL_HANDLE) {
+            VkDescriptorSetLayoutBinding bindlessTexturesBinding{};
+            bindlessTexturesBinding.binding = 0;
+            bindlessTexturesBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindlessTexturesBinding.descriptorCount = m_bindlessTextureCapacity;
+            bindlessTexturesBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+            const VkDescriptorBindingFlags bindlessBindingFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+            VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsCreateInfo{};
+            bindingFlagsCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+            bindingFlagsCreateInfo.bindingCount = 1;
+            bindingFlagsCreateInfo.pBindingFlags = &bindlessBindingFlags;
+
+            VkDescriptorSetLayoutCreateInfo bindlessLayoutCreateInfo{};
+            bindlessLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            bindlessLayoutCreateInfo.pNext = &bindingFlagsCreateInfo;
+            bindlessLayoutCreateInfo.bindingCount = 1;
+            bindlessLayoutCreateInfo.pBindings = &bindlessTexturesBinding;
+
+            const VkResult bindlessLayoutResult = vkCreateDescriptorSetLayout(
+                m_device,
+                &bindlessLayoutCreateInfo,
+                nullptr,
+                &m_bindlessDescriptorSetLayout
+            );
+            if (bindlessLayoutResult != VK_SUCCESS) {
+                logVkFailure("vkCreateDescriptorSetLayout(bindless)", bindlessLayoutResult);
+                return false;
+            }
+            setObjectName(
+                VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+                vkHandleToUint64(m_bindlessDescriptorSetLayout),
+                "renderer.descriptorSetLayout.bindless"
+            );
+        }
+
+        if (m_bindlessDescriptorPool == VK_NULL_HANDLE) {
+            const VkDescriptorPoolSize bindlessPoolSize{
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                m_bindlessTextureCapacity
+            };
+
+            VkDescriptorPoolCreateInfo bindlessPoolCreateInfo{};
+            bindlessPoolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            bindlessPoolCreateInfo.maxSets = 1;
+            bindlessPoolCreateInfo.poolSizeCount = 1;
+            bindlessPoolCreateInfo.pPoolSizes = &bindlessPoolSize;
+
+            const VkResult bindlessPoolResult = vkCreateDescriptorPool(
+                m_device,
+                &bindlessPoolCreateInfo,
+                nullptr,
+                &m_bindlessDescriptorPool
+            );
+            if (bindlessPoolResult != VK_SUCCESS) {
+                logVkFailure("vkCreateDescriptorPool(bindless)", bindlessPoolResult);
+                return false;
+            }
+            setObjectName(
+                VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+                vkHandleToUint64(m_bindlessDescriptorPool),
+                "renderer.descriptorPool.bindless"
+            );
+        }
+
+        if (m_bindlessDescriptorSet == VK_NULL_HANDLE) {
+            VkDescriptorSetAllocateInfo bindlessAllocateInfo{};
+            bindlessAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            bindlessAllocateInfo.descriptorPool = m_bindlessDescriptorPool;
+            bindlessAllocateInfo.descriptorSetCount = 1;
+            bindlessAllocateInfo.pSetLayouts = &m_bindlessDescriptorSetLayout;
+            const VkResult bindlessAllocateResult = vkAllocateDescriptorSets(
+                m_device,
+                &bindlessAllocateInfo,
+                &m_bindlessDescriptorSet
+            );
+            if (bindlessAllocateResult != VK_SUCCESS) {
+                logVkFailure("vkAllocateDescriptorSets(bindless)", bindlessAllocateResult);
+                return false;
+            }
+            setObjectName(
+                VK_OBJECT_TYPE_DESCRIPTOR_SET,
+                vkHandleToUint64(m_bindlessDescriptorSet),
+                "renderer.descriptorSet.bindless"
+            );
+        }
+    }
+
     return true;
 }
 
@@ -3348,8 +3543,17 @@ bool Renderer::createGraphicsPipeline() {
 
         VkPipelineLayoutCreateInfo layoutCreateInfo{};
         layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        layoutCreateInfo.setLayoutCount = 1;
-        layoutCreateInfo.pSetLayouts = &m_descriptorSetLayout;
+        std::array<VkDescriptorSetLayout, 2> pipelineSetLayouts = {
+            m_descriptorSetLayout,
+            m_bindlessDescriptorSetLayout
+        };
+        if (m_supportsBindlessDescriptors && m_bindlessDescriptorSetLayout != VK_NULL_HANDLE) {
+            layoutCreateInfo.setLayoutCount = 2;
+            layoutCreateInfo.pSetLayouts = pipelineSetLayouts.data();
+        } else {
+            layoutCreateInfo.setLayoutCount = 1;
+            layoutCreateInfo.pSetLayouts = &m_descriptorSetLayout;
+        }
         layoutCreateInfo.pushConstantRangeCount = 1;
         layoutCreateInfo.pPushConstantRanges = &chunkPushConstantRange;
         const VkResult layoutResult = vkCreatePipelineLayout(m_device, &layoutCreateInfo, nullptr, &m_pipelineLayout);
@@ -6320,6 +6524,32 @@ void Renderer::renderFrame(
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
+    if (m_bindlessDescriptorSet != VK_NULL_HANDLE && m_bindlessTextureCapacity >= kBindlessTextureStaticCount) {
+        std::array<VkDescriptorImageInfo, kBindlessTextureStaticCount> bindlessImageInfos{};
+        bindlessImageInfos[kBindlessTextureIndexDiffuse] = diffuseTextureImageInfo;
+        bindlessImageInfos[kBindlessTextureIndexHdrResolved] = hdrSceneImageInfo;
+        bindlessImageInfos[kBindlessTextureIndexShadowAtlas] = shadowMapImageInfo;
+        bindlessImageInfos[kBindlessTextureIndexNormalDepth] = normalDepthImageInfo;
+        bindlessImageInfos[kBindlessTextureIndexSsaoBlur] = ssaoBlurImageInfo;
+        bindlessImageInfos[kBindlessTextureIndexSsaoRaw] = ssaoRawImageInfo;
+
+        VkWriteDescriptorSet bindlessWrite{};
+        bindlessWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        bindlessWrite.dstSet = m_bindlessDescriptorSet;
+        bindlessWrite.dstBinding = 0;
+        bindlessWrite.dstArrayElement = 0;
+        bindlessWrite.descriptorCount = kBindlessTextureStaticCount;
+        bindlessWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindlessWrite.pImageInfo = bindlessImageInfos.data();
+        vkUpdateDescriptorSets(m_device, 1, &bindlessWrite, 0, nullptr);
+    }
+    std::array<VkDescriptorSet, 2> boundDescriptorSets = {
+        m_descriptorSets[m_currentFrame],
+        m_bindlessDescriptorSet
+    };
+    const uint32_t boundDescriptorSetCount =
+        (m_bindlessDescriptorSet != VK_NULL_HANDLE) ? 2u : 1u;
+
     uint32_t pipeInstanceCount = 0;
     std::optional<FrameArenaSlice> pipeInstanceSliceOpt = std::nullopt;
     uint32_t transportInstanceCount = 0;
@@ -6614,8 +6844,8 @@ void Renderer::renderFrame(
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             m_pipelineLayout,
             0,
-            1,
-            &m_descriptorSets[m_currentFrame],
+            boundDescriptorSetCount,
+            boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -6677,8 +6907,8 @@ void Renderer::renderFrame(
                     VK_PIPELINE_BIND_POINT_GRAPHICS,
                     m_pipelineLayout,
                     0,
-                    1,
-                    &m_descriptorSets[m_currentFrame],
+                    boundDescriptorSetCount,
+                    boundDescriptorSets.data(),
                     1,
                     &mvpDynamicOffset
                 );
@@ -6732,8 +6962,8 @@ void Renderer::renderFrame(
                         VK_PIPELINE_BIND_POINT_GRAPHICS,
                         m_pipelineLayout,
                         0,
-                        1,
-                        &m_descriptorSets[m_currentFrame],
+                        boundDescriptorSetCount,
+                        boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -6915,8 +7145,8 @@ void Renderer::renderFrame(
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             m_pipelineLayout,
             0,
-            1,
-            &m_descriptorSets[m_currentFrame],
+            boundDescriptorSetCount,
+            boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -6972,8 +7202,8 @@ void Renderer::renderFrame(
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 m_pipelineLayout,
                 0,
-                1,
-                &m_descriptorSets[m_currentFrame],
+                boundDescriptorSetCount,
+                boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -7047,8 +7277,8 @@ void Renderer::renderFrame(
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             m_pipelineLayout,
             0,
-            1,
-            &m_descriptorSets[m_currentFrame],
+            boundDescriptorSetCount,
+            boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -7099,8 +7329,8 @@ void Renderer::renderFrame(
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             m_pipelineLayout,
             0,
-            1,
-            &m_descriptorSets[m_currentFrame],
+            boundDescriptorSetCount,
+            boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -7228,8 +7458,8 @@ void Renderer::renderFrame(
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             m_pipelineLayout,
             0,
-            1,
-            &m_descriptorSets[m_currentFrame],
+            boundDescriptorSetCount,
+            boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -7243,8 +7473,8 @@ void Renderer::renderFrame(
         VK_PIPELINE_BIND_POINT_GRAPHICS,
         m_pipelineLayout,
         0,
-        1,
-        &m_descriptorSets[m_currentFrame],
+        boundDescriptorSetCount,
+        boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -7300,8 +7530,8 @@ void Renderer::renderFrame(
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 m_pipelineLayout,
                 0,
-                1,
-                &m_descriptorSets[m_currentFrame],
+                boundDescriptorSetCount,
+                boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -7401,8 +7631,8 @@ void Renderer::renderFrame(
                     VK_PIPELINE_BIND_POINT_GRAPHICS,
                     m_pipelineLayout,
                     0,
-                    1,
-                    &m_descriptorSets[m_currentFrame],
+                    boundDescriptorSetCount,
+                    boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -7453,8 +7683,8 @@ void Renderer::renderFrame(
                     VK_PIPELINE_BIND_POINT_GRAPHICS,
                     m_pipelineLayout,
                     0,
-                    1,
-                    &m_descriptorSets[m_currentFrame],
+                    boundDescriptorSetCount,
+                    boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -7553,8 +7783,8 @@ void Renderer::renderFrame(
             VK_PIPELINE_BIND_POINT_GRAPHICS,
             m_pipelineLayout,
             0,
-            1,
-            &m_descriptorSets[m_currentFrame],
+            boundDescriptorSetCount,
+            boundDescriptorSets.data(),
             1,
             &mvpDynamicOffset
         );
@@ -8155,11 +8385,20 @@ void Renderer::shutdown() {
             vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
             m_descriptorPool = VK_NULL_HANDLE;
         }
+        if (m_bindlessDescriptorPool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(m_device, m_bindlessDescriptorPool, nullptr);
+            m_bindlessDescriptorPool = VK_NULL_HANDLE;
+        }
         if (m_descriptorSetLayout != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
             m_descriptorSetLayout = VK_NULL_HANDLE;
         }
+        if (m_bindlessDescriptorSetLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(m_device, m_bindlessDescriptorSetLayout, nullptr);
+            m_bindlessDescriptorSetLayout = VK_NULL_HANDLE;
+        }
         m_descriptorSets.fill(VK_NULL_HANDLE);
+        m_bindlessDescriptorSet = VK_NULL_HANDLE;
         destroySwapchain();
         const uint32_t liveFrameArenaImagesBeforeShutdown = m_frameArena.liveImageCount();
         if (liveFrameArenaImagesBeforeShutdown > 0) {

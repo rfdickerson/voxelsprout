@@ -59,7 +59,11 @@ constexpr float kGamepadLookDegreesPerSecond = 160.0f;
 constexpr const char* kWorldFilePath = "world.vxw";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 
-constexpr std::array<world::VoxelType, 1> kPlaceableBlockTypes = {
+constexpr std::array<world::VoxelType, 5> kPlaceableBlockTypes = {
+    world::VoxelType::Stone,
+    world::VoxelType::Dirt,
+    world::VoxelType::Grass,
+    world::VoxelType::Wood,
     world::VoxelType::SolidRed
 };
 constexpr int kHotbarSlotBlock = 0;
@@ -123,6 +127,24 @@ bool aabbOverlaps(const Aabb3f& lhs, const Aabb3f& rhs) {
         lhs.minY < (rhs.maxY - kCollisionEpsilon) &&
         lhs.maxZ > (rhs.minZ + kCollisionEpsilon) &&
         lhs.minZ < (rhs.maxZ - kCollisionEpsilon);
+}
+
+const char* placeableBlockLabel(world::VoxelType type) {
+    switch (type) {
+    case world::VoxelType::Solid:
+        return "stone";
+    case world::VoxelType::Dirt:
+        return "dirt";
+    case world::VoxelType::Grass:
+        return "grass";
+    case world::VoxelType::Wood:
+        return "wood";
+    case world::VoxelType::SolidRed:
+        return "red";
+    case world::VoxelType::Empty:
+    default:
+        return "empty";
+    }
 }
 
 struct FrustumPlane {
@@ -985,6 +1007,19 @@ void App::pollInput() {
         } else if (glfwGetKey(m_window, GLFW_KEY_4) == GLFW_PRESS) {
             selectHotbarSlot(kHotbarSlotTrack);
         }
+        if (m_selectedHotbarIndex == kHotbarSlotBlock) {
+            if (glfwGetKey(m_window, GLFW_KEY_5) == GLFW_PRESS) {
+                selectPlaceableBlock(0);
+            } else if (glfwGetKey(m_window, GLFW_KEY_6) == GLFW_PRESS) {
+                selectPlaceableBlock(1);
+            } else if (glfwGetKey(m_window, GLFW_KEY_7) == GLFW_PRESS) {
+                selectPlaceableBlock(2);
+            } else if (glfwGetKey(m_window, GLFW_KEY_8) == GLFW_PRESS) {
+                selectPlaceableBlock(3);
+            } else if (glfwGetKey(m_window, GLFW_KEY_9) == GLFW_PRESS) {
+                selectPlaceableBlock(4);
+            }
+        }
     }
 
     m_input.placeBlockDown =
@@ -1774,6 +1809,20 @@ void App::selectHotbarSlot(int hotbarIndex) {
     VOX_LOGI("app") << "selected hotbar: " << label;
 }
 
+void App::selectPlaceableBlock(int blockIndex) {
+    if (kPlaceableBlockTypes.empty()) {
+        m_selectedBlockIndex = 0;
+        return;
+    }
+    const int clampedIndex = std::clamp(blockIndex, 0, static_cast<int>(kPlaceableBlockTypes.size()) - 1);
+    if (m_selectedBlockIndex == clampedIndex) {
+        return;
+    }
+    m_selectedBlockIndex = clampedIndex;
+    VOX_LOGI("app") << "selected block material: "
+                    << placeableBlockLabel(kPlaceableBlockTypes[static_cast<std::size_t>(m_selectedBlockIndex)]);
+}
+
 bool App::isPipeHotbarSelected() const {
     return m_selectedHotbarIndex == kHotbarSlotPipe;
 }
@@ -1788,7 +1837,7 @@ bool App::isTrackHotbarSelected() const {
 
 world::Voxel App::selectedPlaceVoxel() const {
     if (kPlaceableBlockTypes.empty()) {
-        return world::Voxel{world::VoxelType::SolidRed};
+        return world::Voxel{world::VoxelType::Stone};
     }
     const int clampedIndex = std::clamp(
         m_selectedBlockIndex,

@@ -210,9 +210,24 @@ inline void ChunkGrid::initializeFlatWorld() {
                 const int worldZ = (chunkZ * Chunk::kSizeZ) + z;
                 const int terrainHeight = chunkHeightAt(worldX, worldZ);
                 const int structureHeight = cityHeightAt(worldX, worldZ, terrainHeight);
+                const bool hasCityStructure = structureHeight > terrainHeight;
+                const float structureSeed =
+                    (perlin2((static_cast<float>(worldX) * 0.21f) + 13.0f, (static_cast<float>(worldZ) * 0.21f) - 29.0f) * 0.5f)
+                    + 0.5f;
+                const bool structureUsesWood = structureSeed > 0.58f;
 
                 for (int y = 0; y <= structureHeight; ++y) {
-                    chunk.setVoxel(x, y, z, Voxel{VoxelType::Solid});
+                    VoxelType voxelType = VoxelType::Stone;
+                    if (y <= (terrainHeight - 4)) {
+                        voxelType = VoxelType::Stone;
+                    } else if (y < terrainHeight) {
+                        voxelType = VoxelType::Dirt;
+                    } else if (y == terrainHeight) {
+                        voxelType = VoxelType::Grass;
+                    } else if (hasCityStructure) {
+                        voxelType = structureUsesWood ? VoxelType::Wood : VoxelType::Stone;
+                    }
+                    chunk.setVoxel(x, y, z, Voxel{voxelType});
                 }
             }
         }
@@ -256,7 +271,10 @@ inline bool ChunkGrid::loadFromBinaryFile(const std::filesystem::path& path) {
     }
 
     constexpr char kExpectedMagic[4] = {'V', 'X', 'W', '1'};
-    if (std::memcmp(magic, kExpectedMagic, sizeof(magic)) != 0 || version != 1u) {
+    if (std::memcmp(magic, kExpectedMagic, sizeof(magic)) != 0) {
+        return false;
+    }
+    if (version != 1u && version != 2u) {
         return false;
     }
     if (chunkCount == 0 || chunkCount > 4096u) {
@@ -266,7 +284,27 @@ inline bool ChunkGrid::loadFromBinaryFile(const std::filesystem::path& path) {
     constexpr std::size_t kVoxelsPerChunk =
         static_cast<std::size_t>(Chunk::kSizeX * Chunk::kSizeY * Chunk::kSizeZ);
     constexpr std::size_t kBytesPerChunk = (kVoxelsPerChunk + 7u) / 8u;
+    std::vector<std::uint8_t> typeBytes(kVoxelsPerChunk, 0u);
     std::vector<std::uint8_t> packed(kBytesPerChunk, 0u);
+
+    auto voxelTypeFromByte = [](std::uint8_t raw) -> VoxelType {
+        switch (raw) {
+        case static_cast<std::uint8_t>(VoxelType::Empty):
+            return VoxelType::Empty;
+        case static_cast<std::uint8_t>(VoxelType::Solid):
+            return VoxelType::Stone;
+        case static_cast<std::uint8_t>(VoxelType::SolidRed):
+            return VoxelType::SolidRed;
+        case static_cast<std::uint8_t>(VoxelType::Dirt):
+            return VoxelType::Dirt;
+        case static_cast<std::uint8_t>(VoxelType::Grass):
+            return VoxelType::Grass;
+        case static_cast<std::uint8_t>(VoxelType::Wood):
+            return VoxelType::Wood;
+        default:
+            return VoxelType::Stone;
+        }
+    };
 
     std::vector<Chunk> loadedChunks;
     loadedChunks.reserve(static_cast<std::size_t>(chunkCount));
@@ -278,13 +316,27 @@ inline bool ChunkGrid::loadFromBinaryFile(const std::filesystem::path& path) {
         in.read(reinterpret_cast<char*>(&chunkX), sizeof(chunkX));
         in.read(reinterpret_cast<char*>(&chunkY), sizeof(chunkY));
         in.read(reinterpret_cast<char*>(&chunkZ), sizeof(chunkZ));
-        in.read(reinterpret_cast<char*>(packed.data()), static_cast<std::streamsize>(packed.size()));
-        if (!in.good()) {
-            return false;
-        }
-
         Chunk chunk(chunkX, chunkY, chunkZ);
-        chunk.setFromSolidBitfield(packed.data(), packed.size());
+        if (version == 1u) {
+            in.read(reinterpret_cast<char*>(packed.data()), static_cast<std::streamsize>(packed.size()));
+            if (!in.good()) {
+                return false;
+            }
+            chunk.setFromSolidBitfield(packed.data(), packed.size());
+        } else {
+            in.read(reinterpret_cast<char*>(typeBytes.data()), static_cast<std::streamsize>(typeBytes.size()));
+            if (!in.good()) {
+                return false;
+            }
+            std::size_t voxelIndex = 0;
+            for (int y = 0; y < Chunk::kSizeY; ++y) {
+                for (int z = 0; z < Chunk::kSizeZ; ++z) {
+                    for (int x = 0; x < Chunk::kSizeX; ++x, ++voxelIndex) {
+                        chunk.setVoxel(x, y, z, Voxel{voxelTypeFromByte(typeBytes[voxelIndex])});
+                    }
+                }
+            }
+        }
         loadedChunks.push_back(std::move(chunk));
     }
 
@@ -299,7 +351,7 @@ inline bool ChunkGrid::saveToBinaryFile(const std::filesystem::path& path) const
     }
 
     constexpr char kMagic[4] = {'V', 'X', 'W', '1'};
-    constexpr std::uint32_t kVersion = 1u;
+    constexpr std::uint32_t kVersion = 2u;
     const std::uint32_t chunkCount = static_cast<std::uint32_t>(m_chunks.size());
     out.write(kMagic, sizeof(kMagic));
     out.write(reinterpret_cast<const char*>(&kVersion), sizeof(kVersion));
@@ -310,8 +362,7 @@ inline bool ChunkGrid::saveToBinaryFile(const std::filesystem::path& path) const
 
     constexpr std::size_t kVoxelsPerChunk =
         static_cast<std::size_t>(Chunk::kSizeX * Chunk::kSizeY * Chunk::kSizeZ);
-    constexpr std::size_t kBytesPerChunk = (kVoxelsPerChunk + 7u) / 8u;
-    std::vector<std::uint8_t> packed(kBytesPerChunk, 0u);
+    std::vector<std::uint8_t> typeBytes(kVoxelsPerChunk, 0u);
 
     for (const Chunk& chunk : m_chunks) {
         const std::int32_t chunkX = static_cast<std::int32_t>(chunk.chunkX());
@@ -321,22 +372,16 @@ inline bool ChunkGrid::saveToBinaryFile(const std::filesystem::path& path) const
         out.write(reinterpret_cast<const char*>(&chunkY), sizeof(chunkY));
         out.write(reinterpret_cast<const char*>(&chunkZ), sizeof(chunkZ));
 
-        std::fill(packed.begin(), packed.end(), std::uint8_t{0});
         std::size_t voxelIndex = 0;
         for (int y = 0; y < Chunk::kSizeY; ++y) {
             for (int z = 0; z < Chunk::kSizeZ; ++z) {
                 for (int x = 0; x < Chunk::kSizeX; ++x, ++voxelIndex) {
-                    if (!chunk.isSolid(x, y, z)) {
-                        continue;
-                    }
-                    const std::size_t byteIndex = voxelIndex >> 3u;
-                    const std::uint8_t bitMask = static_cast<std::uint8_t>(1u << (voxelIndex & 7u));
-                    packed[byteIndex] = static_cast<std::uint8_t>(packed[byteIndex] | bitMask);
+                    typeBytes[voxelIndex] = static_cast<std::uint8_t>(chunk.voxelAt(x, y, z).type);
                 }
             }
         }
 
-        out.write(reinterpret_cast<const char*>(packed.data()), static_cast<std::streamsize>(packed.size()));
+        out.write(reinterpret_cast<const char*>(typeBytes.data()), static_cast<std::streamsize>(typeBytes.size()));
         if (!out.good()) {
             return false;
         }

@@ -28,8 +28,14 @@ constexpr std::array<FaceNeighbor, 6> kFaceNeighbors = {
 
 std::uint8_t materialForVoxelType(VoxelType type) {
     switch (type) {
-    case VoxelType::Solid:
+    case VoxelType::Stone:
         return 1;
+    case VoxelType::Dirt:
+        return 2;
+    case VoxelType::Grass:
+        return 3;
+    case VoxelType::Wood:
+        return 4;
     case VoxelType::SolidRed:
         return 251;
     case VoxelType::Empty:
