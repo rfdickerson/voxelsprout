@@ -32,3 +32,34 @@ jobs:
 
       - name: Run CTest
         run: ctest --test-dir build --output-on-failure
+
+  clang-tidy-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config clang-tidy \
+            libglfw3-dev libvulkan-dev mesa-common-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libgtest-dev
+
+      - name: Configure (compile commands)
+        run: |
+          cmake -S . -B build-tidy -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Show clang-tidy version
+        run: clang-tidy --version
+
+      - name: Run clang-tidy
+        run: |
+          find src tests -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) -print0 \
+            | xargs -0 -r -n 8 clang-tidy -p build-tidy
