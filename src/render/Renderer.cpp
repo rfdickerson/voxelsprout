@@ -105,6 +105,7 @@ struct alignas(16) CameraUniform {
     float shadowVoxelGridSize[4];
     float skyConfig0[4];
     float skyConfig1[4];
+    float skyConfig2[4];
 };
 
 struct alignas(16) ChunkPushConstants {
@@ -2323,29 +2324,52 @@ bool Renderer::createDiffuseTextureResources() {
                     g = static_cast<std::uint8_t>(std::clamp(base + 12 + grain, 56, 136));
                     b = static_cast<std::uint8_t>(std::clamp(base - 6 + (grain / 2), 36, 110));
                 } else {
-                    // Billboard grass sprite (transparent background).
+                    // Billboard grass-bush sprite (transparent background).
+                    const int ix = static_cast<int>(localX);
+                    const int iy = static_cast<int>(localY);
                     const int rowFromBottom = static_cast<int>(kTileSize - 1u - localY);
-                    const float growthT = std::clamp(static_cast<float>(rowFromBottom) / static_cast<float>(kTileSize - 1u), 0.0f, 1.0f);
-                    const int center = static_cast<int>(kTileSize / 2u);
-                    const int leftBlade = center - 3 + static_cast<int>(growthT * 2.0f);
-                    const int rightBlade = center + 2 - static_cast<int>(growthT * 2.0f);
-                    const bool centerBlade = (std::abs(static_cast<int>(localX) - center) <= 1) && rowFromBottom <= 13;
-                    const bool bladeL = (std::abs(static_cast<int>(localX) - leftBlade) <= 1) && rowFromBottom <= 10;
-                    const bool bladeR = (std::abs(static_cast<int>(localX) - rightBlade) <= 1) && rowFromBottom <= 11;
-                    const bool baseTuft = (rowFromBottom <= 3) && (std::abs(static_cast<int>(localX) - center) <= 4);
-                    const bool isBlade = centerBlade || bladeL || bladeR || baseTuft;
-                    if (!isBlade) {
+
+                    auto circleWeight = [&](int cx, int cy, int r) -> float {
+                        const int dx = ix - cx;
+                        const int dy = iy - cy;
+                        const int distSq = (dx * dx) + (dy * dy);
+                        const int radiusSq = r * r;
+                        if (distSq >= radiusSq) {
+                            return 0.0f;
+                        }
+                        return 1.0f - (static_cast<float>(distSq) / static_cast<float>(radiusSq));
+                    };
+
+                    float leafWeight = 0.0f;
+                    leafWeight = std::max(leafWeight, circleWeight(4, 8, 5));
+                    leafWeight = std::max(leafWeight, circleWeight(8, 7, 6));
+                    leafWeight = std::max(leafWeight, circleWeight(11, 8, 5));
+                    leafWeight = std::max(leafWeight, circleWeight(8, 4, 4));
+
+                    const bool stemA = (std::abs(ix - 7) <= 1) && rowFromBottom <= 7;
+                    const bool stemB = (std::abs(ix - 9) <= 1) && rowFromBottom <= 6;
+                    const bool baseTuft = (rowFromBottom <= 3) && (std::abs(ix - 8) <= 5);
+                    const float stemWeight = (stemA || stemB || baseTuft) ? 0.75f : 0.0f;
+                    const float bushWeight = std::max(leafWeight, stemWeight);
+                    if (bushWeight <= 0.02f) {
                         writePixel(x, y, 0u, 0u, 0u, 0u);
                         continue;
                     }
 
-                    const int green = 132 + static_cast<int>(noiseA % 52u) - 18;
-                    const int red = 48 + static_cast<int>(noiseB % 28u) - 10;
-                    const int blue = 34 + static_cast<int>(noiseA % 18u) - 6;
+                    const float edgeNoise = static_cast<float>(noiseA % 100u) / 100.0f;
+                    if (bushWeight < (0.22f + (edgeNoise * 0.24f))) {
+                        writePixel(x, y, 0u, 0u, 0u, 0u);
+                        continue;
+                    }
+
+                    const int green = 122 + static_cast<int>(noiseA % 66u) - 22;
+                    const int red = 42 + static_cast<int>(noiseB % 26u) - 9;
+                    const int blue = 30 + static_cast<int>(noiseA % 16u) - 5;
                     r = static_cast<std::uint8_t>(std::clamp(red, 22, 88));
-                    g = static_cast<std::uint8_t>(std::clamp(green, 92, 196));
+                    g = static_cast<std::uint8_t>(std::clamp(green, 82, 200));
                     b = static_cast<std::uint8_t>(std::clamp(blue, 16, 84));
-                    const std::uint8_t alpha = static_cast<std::uint8_t>(std::clamp(160 + static_cast<int>(noiseB % 72u), 140, 240));
+                    const int alphaBase = static_cast<int>(120.0f + (bushWeight * 140.0f));
+                    const std::uint8_t alpha = static_cast<std::uint8_t>(std::clamp(alphaBase + static_cast<int>(noiseB % 28u) - 10, 120, 250));
                     writePixel(x, y, r, g, b, alpha);
                     continue;
                 }
@@ -4976,7 +5000,7 @@ bool Renderer::createPipePipeline() {
     grassBindings[1].stride = sizeof(GrassBillboardInstance);
     grassBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-    VkVertexInputAttributeDescription grassAttributes[4]{};
+    VkVertexInputAttributeDescription grassAttributes[5]{};
     grassAttributes[0].location = 0;
     grassAttributes[0].binding = 0;
     grassAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
@@ -4993,12 +5017,16 @@ bool Renderer::createPipePipeline() {
     grassAttributes[3].binding = 1;
     grassAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
     grassAttributes[3].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, worldPosYaw));
+    grassAttributes[4].location = 4;
+    grassAttributes[4].binding = 1;
+    grassAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    grassAttributes[4].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, colorTint));
 
     VkPipelineVertexInputStateCreateInfo grassVertexInputInfo{};
     grassVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     grassVertexInputInfo.vertexBindingDescriptionCount = 2;
     grassVertexInputInfo.pVertexBindingDescriptions = grassBindings;
-    grassVertexInputInfo.vertexAttributeDescriptionCount = 4;
+    grassVertexInputInfo.vertexAttributeDescriptionCount = 5;
     grassVertexInputInfo.pVertexAttributeDescriptions = grassAttributes;
 
     VkGraphicsPipelineCreateInfo grassPipelineCreateInfo = pipelineCreateInfo;
@@ -5578,7 +5606,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         const world::Chunk& chunk = chunks[chunkArrayIndex];
         std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
         grassInstances.clear();
-        grassInstances.reserve(192);
+        grassInstances.reserve(448);
 
         const float chunkWorldX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
         const float chunkWorldY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
@@ -5601,23 +5629,40 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
                         static_cast<std::uint32_t>((chunk.chunkX() + 101) * 2654435761u) ^
                         static_cast<std::uint32_t>((chunk.chunkZ() + 193) * 2246822519u);
                     // Keep grass sparse and deterministic so placement feels natural and stable.
-                    if ((hash % 100u) >= 36u) {
+                    if ((hash % 100u) >= 22u) {
                         continue;
                     }
-                    const float rand0 = static_cast<float>(hash & 0xFFu) / 255.0f;
-                    const float rand1 = static_cast<float>((hash >> 8u) & 0xFFu) / 255.0f;
-                    const float rand2 = static_cast<float>((hash >> 16u) & 0xFFu) / 255.0f;
-                    const float jitterX = (rand0 - 0.5f) * 0.20f;
-                    const float jitterZ = (rand1 - 0.5f) * 0.20f;
-                    const float yawRadians = rand2 * (2.0f * 3.14159265f);
+                    const int clumpCount = 2 + static_cast<int>((hash >> 24u) & 0x1u);
+                    for (int clumpIndex = 0; clumpIndex < clumpCount; ++clumpIndex) {
+                        const std::uint32_t clumpHash = hash ^ (0x9E3779B9u * static_cast<std::uint32_t>(clumpIndex + 1));
+                        const float rand0 = static_cast<float>(clumpHash & 0xFFu) / 255.0f;
+                        const float rand1 = static_cast<float>((clumpHash >> 8u) & 0xFFu) / 255.0f;
+                        const float rand2 = static_cast<float>((clumpHash >> 16u) & 0xFFu) / 255.0f;
+                        const float rand3 = static_cast<float>((clumpHash >> 24u) & 0xFFu) / 255.0f;
+                        const std::uint32_t tintHash = clumpHash ^ 0x85EBCA6Bu;
+                        const float tintRand0 = static_cast<float>(tintHash & 0xFFu) / 255.0f;
+                        const float tintRand1 = static_cast<float>((tintHash >> 8u) & 0xFFu) / 255.0f;
+                        const float tintRand2 = static_cast<float>((tintHash >> 16u) & 0xFFu) / 255.0f;
+                        const float radial = 0.06f + (0.18f * rand2);
+                        const float angle = rand1 * (2.0f * 3.14159265f);
+                        const float jitterX = std::cos(angle) * radial;
+                        const float jitterZ = std::sin(angle) * radial;
+                        const float yawRadians = rand0 * (2.0f * 3.14159265f);
+                        const float yJitter = rand3 * 0.08f;
 
-                    GrassBillboardInstance instance{};
-                    instance.worldPosYaw[0] = chunkWorldX + static_cast<float>(x) + 0.5f + jitterX;
-                    // Lift slightly above the supporting voxel top to avoid depth tie flicker.
-                    instance.worldPosYaw[1] = chunkWorldY + static_cast<float>(y) + 1.02f;
-                    instance.worldPosYaw[2] = chunkWorldZ + static_cast<float>(z) + 0.5f + jitterZ;
-                    instance.worldPosYaw[3] = yawRadians;
-                    grassInstances.push_back(instance);
+                        GrassBillboardInstance instance{};
+                        instance.worldPosYaw[0] = chunkWorldX + static_cast<float>(x) + 0.5f + jitterX;
+                        // Lift slightly above the supporting voxel top to avoid depth tie flicker.
+                        instance.worldPosYaw[1] = chunkWorldY + static_cast<float>(y) + 1.02f + yJitter;
+                        instance.worldPosYaw[2] = chunkWorldZ + static_cast<float>(z) + 0.5f + jitterZ;
+                        instance.worldPosYaw[3] = yawRadians;
+                        // Subtle deterministic tint variation to avoid uniform grass color.
+                        instance.colorTint[0] = 0.93f + (tintRand0 * 0.14f);
+                        instance.colorTint[1] = 0.92f + (tintRand1 * 0.18f);
+                        instance.colorTint[2] = 0.88f + (tintRand2 * 0.16f);
+                        instance.colorTint[3] = 1.0f;
+                        grassInstances.push_back(instance);
+                    }
                 }
             }
         }
@@ -5724,7 +5769,8 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
 
     if (combinedGrassInstances.empty()) {
         if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(m_grassBillboardInstanceBufferHandle);
+            const uint64_t grassReleaseValue = m_lastGraphicsTimelineValue;
+            scheduleBufferRelease(m_grassBillboardInstanceBufferHandle, grassReleaseValue);
             m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
         }
         m_grassBillboardInstanceCount = 0;
@@ -5746,7 +5792,8 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
                 );
             }
             if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-                m_bufferAllocator.destroyBuffer(m_grassBillboardInstanceBufferHandle);
+                const uint64_t grassReleaseValue = m_lastGraphicsTimelineValue;
+                scheduleBufferRelease(m_grassBillboardInstanceBufferHandle, grassReleaseValue);
             }
             m_grassBillboardInstanceBufferHandle = newGrassInstanceBufferHandle;
             m_grassBillboardInstanceCount = static_cast<uint32_t>(combinedGrassInstances.size());
@@ -6477,6 +6524,10 @@ void Renderer::buildSunDebugUi() {
     ImGui::SliderFloat("Mie Strength", &m_skyDebugSettings.mieStrength, 0.05f, 4.0f, "%.2f");
     ImGui::SliderFloat("Mie Anisotropy", &m_skyDebugSettings.mieAnisotropy, 0.0f, 0.95f, "%.2f");
     ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
+    ImGui::Separator();
+    ImGui::Text("Sun Disk");
+    ImGui::SliderFloat("Sun Disk Size", &m_skyDebugSettings.sunDiskSize, 0.5f, 6.0f, "%.2f");
+    ImGui::SliderFloat("Sun Haze Falloff", &m_skyDebugSettings.sunHazeFalloff, 0.10f, 1.20f, "%.2f");
     if (ImGui::Button("Reset Sun/Sky Defaults")) {
         m_skyDebugSettings = SkyDebugSettings{};
     }
@@ -7033,6 +7084,10 @@ void Renderer::renderFrame(
     mvpUniform.skyConfig1[1] = 22.0f;
     mvpUniform.skyConfig1[2] = flowTimeSeconds;
     mvpUniform.skyConfig1[3] = 1.85f;
+    mvpUniform.skyConfig2[0] = m_skyDebugSettings.sunDiskSize;
+    mvpUniform.skyConfig2[1] = m_skyDebugSettings.sunHazeFalloff;
+    mvpUniform.skyConfig2[2] = 0.0f;
+    mvpUniform.skyConfig2[3] = 0.0f;
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     VkDescriptorBufferInfo bufferInfo{};

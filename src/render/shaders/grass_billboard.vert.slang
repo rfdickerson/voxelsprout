@@ -6,13 +6,14 @@ struct VertexInput
     [[vk::location(1)]] float2 inUv : TEXCOORD1;
     [[vk::location(2)]] float inPlane : TEXCOORD2;
     [[vk::location(3)]] float4 inWorldPosYaw : TEXCOORD3;
+    [[vk::location(4)]] float4 inColorTint : TEXCOORD4;
 };
 
 struct VertexOutput
 {
     float4 position : SV_Position;
     float2 outUv : TEXCOORD0;
-    float3 outWorldPosition : TEXCOORD1;
+    float3 outColorTint : TEXCOORD1;
 };
 
 VertexOutput main(VertexInput input)
@@ -32,7 +33,6 @@ VertexOutput main(VertexInput input)
         (baseRight.x * s) + (baseRight.z * c)
     ));
     const float3 up = float3(0.0, 1.0, 0.0);
-
     const float3 worldPosition =
         basePosition +
         (right * (input.inCorner.x * scale)) +
@@ -40,6 +40,6 @@ VertexOutput main(VertexInput input)
 
     output.position = mul(camera.mvp, float4(worldPosition, 1.0));
     output.outUv = input.inUv;
-    output.outWorldPosition = worldPosition;
+    output.outColorTint = input.inColorTint.xyz;
     return output;
 }

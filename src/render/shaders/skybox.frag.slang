@@ -47,16 +47,38 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
         (zenithMie * (mieStrength * 0.25));
     float3 sky = lerp(horizonColor, zenithColor, skyT);
 
-    const float sunDot = max(dot(dir, toSun), 0.0);
-    const float sunDisk = pow(sunDot, max(camera.skyConfig1.x, 1.0));
-    const float sunGlow = pow(sunDot, max(camera.skyConfig1.y, 1.0));
+    const float sunDotRaw = clamp(dot(dir, toSun), -1.0, 1.0);
+    const float sunDot = max(sunDotRaw, 0.0);
     const float3 sunColor = camera.sunColorShadow.xyz;
     const float phaseRayleigh = 0.0596831 * (1.0 + (sunDot * sunDot));
     const float phaseMie = 0.0795775 * (1.0 - (mieG * mieG)) /
         max(0.001, pow(1.0 + (mieG * mieG) - (2.0 * mieG * sunDot), 1.5));
     const float phaseBoost = (phaseRayleigh * rayleighStrength) + (phaseMie * mieStrength * 1.4);
 
-    sky += sunColor * ((sunDisk * 6.5) + (sunGlow * 1.3)) * (1.0 + phaseBoost);
+    // Analytic sun disk in angular space with antialiased edge and limb darkening.
+    const float sunAngle = acos(sunDotRaw);
+    const float diskSizeScale = clamp(camera.skyConfig2.x, 0.5, 6.0);
+    const float hazeFalloffScale = clamp(camera.skyConfig2.y, 0.10, 1.20);
+    const float radiusDay = 0.0065;
+    const float radiusTwilight = 0.0095;
+    const float sunRadius = lerp(radiusTwilight, radiusDay, dayFactor) * diskSizeScale;
+    const float sunAa = max(fwidth(sunAngle), 0.00015);
+    const float diskMask = 1.0 - smoothStep(sunRadius - sunAa, sunRadius + sunAa, sunAngle);
+    const float centerT = saturate01(1.0 - (sunAngle / max(sunRadius, 1e-5)));
+    const float limbDarkening = 0.55 + (0.45 * pow(centerT, 0.35));
+
+    const float diskIntensity = max(camera.skyConfig1.x / 1150.0, 0.01);
+    const float disk = diskMask * limbDarkening * (6.5 * diskIntensity);
+
+    // Forward-scattering halo to avoid a flat "sticker" sun.
+    const float haloRadius = sunRadius * 8.0;
+    const float haloFalloff = max(haloRadius * hazeFalloffScale, 1e-5);
+    const float haloCore = exp(-sunAngle / haloFalloff);
+    const float haloMask = 1.0 - smoothStep(haloRadius * 0.6, haloRadius, sunAngle);
+    const float haloIntensity = max(camera.skyConfig1.y / 22.0, 0.01);
+    const float halo = haloCore * haloMask * (1.3 * haloIntensity) * (0.7 + (0.5 * twilightFactor));
+
+    sky += sunColor * (disk + halo) * (1.0 + phaseBoost);
 
     const float3 groundColor = float3(0.05, 0.06, 0.07);
     const float belowHorizon = saturate01(-dir.y);

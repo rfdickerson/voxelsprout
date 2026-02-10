@@ -102,6 +102,8 @@ public:
         float mieStrength = 1.0f;
         float mieAnisotropy = 0.55f;
         float skyExposure = 1.0f;
+        float sunDiskSize = 2.0f;
+        float sunHazeFalloff = 0.35f;
     };
 
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
@@ -246,6 +248,7 @@ private:
 
     struct GrassBillboardInstance {
         float worldPosYaw[4];
+        float colorTint[4];
     };
 
     GLFWwindow* m_window = nullptr;
