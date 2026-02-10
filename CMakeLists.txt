@@ -154,12 +154,27 @@ if(TARGET unofficial::VulkanMemoryAllocator::VulkanMemoryAllocator)
     target_link_libraries(voxel_factory_toy PRIVATE unofficial::VulkanMemoryAllocator::VulkanMemoryAllocator)
     target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VMA=1)
 else()
+    if(DEFINED VCPKG_TARGET_TRIPLET AND NOT "${VCPKG_TARGET_TRIPLET}" STREQUAL "")
+        set(VOXEL_VCPKG_TRIPLET "${VCPKG_TARGET_TRIPLET}")
+    elseif(WIN32)
+        set(VOXEL_VCPKG_TRIPLET "x64-windows")
+    else()
+        set(VOXEL_VCPKG_TRIPLET "x64-linux")
+    endif()
+
     set(VMA_HEADER_HINTS
-        "$ENV{VCPKG_ROOT}/installed/$ENV{VCPKG_DEFAULT_TRIPLET}/include"
-        "$ENV{VCPKG_ROOT}/packages/vulkan-memory-allocator_$ENV{VCPKG_DEFAULT_TRIPLET}/include"
-        "/mnt/c/Users/rfdic/vcpkg/packages/vulkan-memory-allocator_x64-windows/include"
-        "/mnt/c/Users/rfdic/vcpkg/installed/x64-windows/include"
+        "${CMAKE_BINARY_DIR}/vcpkg_installed/${VOXEL_VCPKG_TRIPLET}/include"
+        "$ENV{VCPKG_INSTALLED_DIR}/${VOXEL_VCPKG_TRIPLET}/include"
+        "$ENV{VCPKG_ROOT}/installed/${VOXEL_VCPKG_TRIPLET}/include"
+        "$ENV{VCPKG_ROOT}/packages/vulkan-memory-allocator_${VOXEL_VCPKG_TRIPLET}/include"
     )
+    if(WIN32)
+        list(APPEND VMA_HEADER_HINTS
+            "/mnt/c/Users/rfdic/vcpkg/packages/vulkan-memory-allocator_x64-windows/include"
+            "/mnt/c/Users/rfdic/vcpkg/installed/x64-windows/include"
+        )
+    endif()
+    unset(VMA_INCLUDE_DIR CACHE)
     find_path(VMA_INCLUDE_DIR
         NAMES vk_mem_alloc.h vma/vk_mem_alloc.h
         HINTS ${VMA_HEADER_HINTS}
@@ -210,4 +225,52 @@ if(BUILD_TESTING)
     endif()
 
     add_test(NAME voxel_foundation_tests COMMAND voxel_foundation_tests)
+
+    find_package(GTest CONFIG QUIET)
+    if(NOT GTest_FOUND)
+        find_package(GTest QUIET)
+    endif()
+    if(GTest_FOUND)
+        add_executable(voxel_stability_gtests
+            tests/StabilityGTests.cpp
+            src/core/Log.cpp
+            src/world/ChunkMesher.cpp
+            src/world/ClipmapIndex.cpp
+        )
+        target_include_directories(voxel_stability_gtests PRIVATE src)
+        target_link_libraries(voxel_stability_gtests PRIVATE GTest::gtest_main)
+
+        if(MSVC)
+            target_compile_options(voxel_stability_gtests PRIVATE
+                /W4
+                /permissive-
+                /w14242
+                /w14254
+                /w14263
+                /w14265
+                /w14287
+                /we4289
+                /w14296
+                /w14311
+                /w14545
+                /w14546
+                /w14547
+                /w14549
+                /w14555
+                /w14619
+                /w14640
+                /w14826
+                /w14905
+                /w14906
+                /w14928
+            )
+        else()
+            target_compile_options(voxel_stability_gtests PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
+        include(GoogleTest)
+        gtest_discover_tests(voxel_stability_gtests DISCOVERY_TIMEOUT 60)
+    else()
+        message(STATUS "GTest not found; skipping voxel_stability_gtests target (install gtest for your active triplet)")
+    endif()
 endif()

@@ -3,11 +3,12 @@
   "version-string": "0.1.0",
   "dependencies": [
     "glfw3",
+    "gtest",
     {
       "name": "imgui",
       "features": [
-        "vulkan-binding",
-        "glfw-binding"
+        "glfw-binding",
+        "vulkan-binding"
       ]
     },
     "vulkan",
