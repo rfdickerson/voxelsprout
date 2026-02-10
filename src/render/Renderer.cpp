@@ -1194,6 +1194,10 @@ bool Renderer::isFrameStatsVisible() const {
     return m_showFrameStatsPanel;
 }
 
+float Renderer::cameraFovDegrees() const {
+    return m_debugCameraFovDegrees;
+}
+
 bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
     using Clock = std::chrono::steady_clock;
     const auto initStart = Clock::now();
@@ -4828,7 +4832,7 @@ bool Renderer::createGraphicsPipeline() {
     grassShadowBindings[1].stride = sizeof(GrassBillboardInstance);
     grassShadowBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-    VkVertexInputAttributeDescription grassShadowAttributes[4]{};
+    VkVertexInputAttributeDescription grassShadowAttributes[5]{};
     grassShadowAttributes[0].location = 0;
     grassShadowAttributes[0].binding = 0;
     grassShadowAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
@@ -4845,12 +4849,16 @@ bool Renderer::createGraphicsPipeline() {
     grassShadowAttributes[3].binding = 1;
     grassShadowAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
     grassShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, worldPosYaw));
+    grassShadowAttributes[4].location = 4;
+    grassShadowAttributes[4].binding = 1;
+    grassShadowAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    grassShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, colorTint));
 
     VkPipelineVertexInputStateCreateInfo grassShadowVertexInputInfo{};
     grassShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     grassShadowVertexInputInfo.vertexBindingDescriptionCount = 2;
     grassShadowVertexInputInfo.pVertexBindingDescriptions = grassShadowBindings;
-    grassShadowVertexInputInfo.vertexAttributeDescriptionCount = 4;
+    grassShadowVertexInputInfo.vertexAttributeDescriptionCount = 5;
     grassShadowVertexInputInfo.pVertexAttributeDescriptions = grassShadowAttributes;
 
     VkGraphicsPipelineCreateInfo grassShadowPipelineCreateInfo = shadowPipelineCreateInfo;
@@ -6762,6 +6770,7 @@ void Renderer::buildSunDebugUi() {
 
     ImGui::SliderFloat("Sun Yaw", &m_skyDebugSettings.sunYawDegrees, -180.0f, 180.0f, "%.1f deg");
     ImGui::SliderFloat("Sun Pitch", &m_skyDebugSettings.sunPitchDegrees, -89.0f, 5.0f, "%.1f deg");
+    ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
     ImGui::SliderFloat("Rayleigh Strength", &m_skyDebugSettings.rayleighStrength, 0.1f, 4.0f, "%.2f");
     ImGui::SliderFloat("Mie Strength", &m_skyDebugSettings.mieStrength, 0.05f, 4.0f, "%.2f");
     ImGui::SliderFloat("Mie Anisotropy", &m_skyDebugSettings.mieAnisotropy, 0.0f, 0.95f, "%.2f");
@@ -7006,6 +7015,12 @@ void Renderer::renderFrame(
             std::min(m_debugCpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
     }
     m_lastFrameTimestampSeconds = frameNowSeconds;
+    if (!m_debugCameraFovInitialized) {
+        m_debugCameraFovDegrees = camera.fovDegrees;
+        m_debugCameraFovInitialized = true;
+    }
+    m_debugCameraFovDegrees = std::clamp(m_debugCameraFovDegrees, 20.0f, 120.0f);
+    const float activeFovDegrees = m_debugCameraFovDegrees;
 
     m_debugChunkCount = static_cast<std::uint32_t>(chunkGrid.chunks().size());
     m_debugMacroCellUniformCount = 0;
@@ -7172,7 +7187,7 @@ void Renderer::renderFrame(
     const float farPlane = 500.0f;
     const float yawRadians = math::radians(camera.yawDegrees);
     const float pitchRadians = math::radians(camera.pitchDegrees);
-    const float halfFovRadians = math::radians(camera.fovDegrees) * 0.5f;
+    const float halfFovRadians = math::radians(activeFovDegrees) * 0.5f;
     const float tanHalfFov = std::tan(halfFovRadians);
     const float cosPitch = std::cos(pitchRadians);
     const math::Vector3 eye{camera.x, camera.y, camera.z};
@@ -7186,7 +7201,7 @@ void Renderer::renderFrame(
     };
 
     const math::Matrix4 view = lookAt(eye, eye + forward, math::Vector3{0.0f, 1.0f, 0.0f});
-    const math::Matrix4 projection = perspectiveVulkan(math::radians(camera.fovDegrees), aspectRatio, nearPlane, farPlane);
+    const math::Matrix4 projection = perspectiveVulkan(math::radians(activeFovDegrees), aspectRatio, nearPlane, farPlane);
     const math::Matrix4 mvp = projection * view;
     const math::Matrix4 mvpColumnMajor = transpose(mvp);
     const math::Matrix4 viewColumnMajor = transpose(view);
@@ -7194,10 +7209,10 @@ void Renderer::renderFrame(
 
     const bool projectionParamsChanged =
         std::abs(m_shadowStableAspectRatio - aspectRatio) > 0.0001f ||
-        std::abs(m_shadowStableFovDegrees - camera.fovDegrees) > 0.0001f;
+        std::abs(m_shadowStableFovDegrees - activeFovDegrees) > 0.0001f;
     if (projectionParamsChanged) {
         m_shadowStableAspectRatio = aspectRatio;
-        m_shadowStableFovDegrees = camera.fovDegrees;
+        m_shadowStableFovDegrees = activeFovDegrees;
         m_shadowStableCascadeRadii.fill(0.0f);
     }
 

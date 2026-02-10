@@ -149,7 +149,7 @@ private:
         float velocityZ = 0.0f;
         float smoothedMouseDeltaX = 0.0f;
         float smoothedMouseDeltaY = 0.0f;
-        float fovDegrees = 75.0f;
+        float fovDegrees = 90.0f;
         bool onGround = false;
     };
 

@@ -126,6 +126,7 @@ public:
     bool isDebugUiVisible() const;
     void setFrameStatsVisible(bool visible);
     bool isFrameStatsVisible() const;
+    float cameraFovDegrees() const;
     void shutdown();
 
 private:
@@ -442,6 +443,8 @@ private:
     bool m_showMeshingPanel = false;
     bool m_showShadowPanel = false;
     bool m_showSunPanel = false;
+    float m_debugCameraFovDegrees = 90.0f;
+    bool m_debugCameraFovInitialized = false;
     bool m_debugEnableVertexAo = true;
     bool m_debugEnableSsao = true;
     bool m_debugVisualizeSsao = false;

@@ -9,6 +9,9 @@ struct VertexInput
     [[vk::location(4)]] float4 inColorTint : TEXCOORD4;
 };
 
+static const uint kPoppySpriteTileRed = 5u;
+static const uint kPoppySpriteTileOrangeRed = 6u;
+
 struct VertexOutput
 {
     float4 position : SV_Position;
@@ -24,7 +27,9 @@ VertexOutput main(VertexInput input)
 
     const float3 basePosition = input.inWorldPosYaw.xyz;
     const float yawRadians = input.inWorldPosYaw.w;
-    const float scale = 1.0;
+    const uint spriteTile = uint(clamp(input.inColorTint.w, 0.0, 255.0) + 0.5);
+    const bool isRedFlower = (spriteTile == kPoppySpriteTileRed) || (spriteTile == kPoppySpriteTileOrangeRed);
+    const float scale = isRedFlower ? 0.46 : 1.0;
     const float planeSelect = step(0.5, input.inPlane);
     const float3 baseRight = normalize(lerp(float3(1.0, 0.0, 0.0), float3(0.0, 0.0, 1.0), planeSelect));
     const float s = sin(yawRadians);

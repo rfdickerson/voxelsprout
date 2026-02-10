@@ -901,6 +901,7 @@ void App::update(float dt) {
         preview,
         std::span<const std::size_t>(m_visibleChunkIndices)
     );
+    m_camera.fovDegrees = m_renderer.cameraFovDegrees();
 }
 
 void App::shutdown() {
