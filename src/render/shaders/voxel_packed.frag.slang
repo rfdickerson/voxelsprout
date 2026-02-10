@@ -2,6 +2,7 @@
 // slangc -target spirv -entry main -stage fragment -matrix-layout-column-major src/render/shaders/voxel_packed.frag.slang -o src/render/shaders/voxel_packed.frag.slang.spv
 
 import camera_uniform;
+import sh_lighting;
 
 [[vk::binding(4, 0)]]
 Sampler2DShadow shadowMap;
@@ -82,39 +83,6 @@ float3 applyAtmosphericFog(float3 litColor, float3 worldPosition, float viewDept
     return (litColor * transmittance) + (inscatterColor * (float3(1.0, 1.0, 1.0) - transmittance));
 }
 
-float3 evaluateShIrradiance(float3 normal)
-{
-    const float x = normal.x;
-    const float y = normal.y;
-    const float z = normal.z;
-
-    float basis[9];
-    basis[0] = 0.282095;
-    basis[1] = 0.488603 * y;
-    basis[2] = 0.488603 * z;
-    basis[3] = 0.488603 * x;
-    basis[4] = 1.092548 * x * y;
-    basis[5] = 1.092548 * y * z;
-    basis[6] = 0.315392 * ((3.0 * z * z) - 1.0);
-    basis[7] = 1.092548 * x * z;
-    basis[8] = 0.546274 * ((x * x) - (y * y));
-
-    float3 irradiance = float3(0.0, 0.0, 0.0);
-    for (int i = 0; i < 9; ++i)
-    {
-        irradiance += camera.shIrradiance[i].xyz * basis[i];
-    }
-    return max(irradiance, float3(0.0, 0.0, 0.0));
-}
-
-float3 evaluateShHemisphereIrradiance(float3 normal)
-{
-    const float upT = clamp((normal.y * 0.5) + 0.5, 0.0, 1.0);
-    const float3 skyIrradiance = evaluateShIrradiance(float3(0.0, 1.0, 0.0));
-    const float3 groundIrradiance = evaluateShIrradiance(float3(0.0, -1.0, 0.0));
-    return lerp(groundIrradiance, skyIrradiance, upT);
-}
-
 int chooseShadowCascade(float viewDepth)
 {
     if (viewDepth <= camera.shadowCascadeSplits.x) return 0;
@@ -193,6 +161,123 @@ float sampleCascadedShadow(float3 worldPosition, float3 normal, float viewDepth,
     return lerp(shadow, nextShadow, blendT);
 }
 
+interface IShadowPolicy
+{
+    float visibility(float3 worldPosition, float3 normal, float viewDepth, float ndotl);
+};
+
+struct NoShadowPolicy : IShadowPolicy
+{
+    float visibility(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
+    {
+        return 1.0;
+    }
+};
+
+struct PrimaryCascadePcfShadowPolicy : IShadowPolicy
+{
+    float visibility(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
+    {
+        const int cascadeIndex = chooseShadowCascade(viewDepth);
+        return sampleShadowPcf(worldPosition, normal, cascadeIndex, ndotl);
+    }
+};
+
+struct CascadedBlendPcfShadowPolicy : IShadowPolicy
+{
+    float visibility(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
+    {
+        return sampleCascadedShadow(worldPosition, normal, viewDepth, ndotl);
+    }
+};
+
+float evaluateShadow<TShadowPolicy : IShadowPolicy>(
+    TShadowPolicy policy,
+    float3 worldPosition,
+    float3 normal,
+    float viewDepth,
+    float ndotl
+)
+{
+    return policy.visibility(worldPosition, normal, viewDepth, ndotl);
+}
+
+interface IAmbientPolicy
+{
+    float3 ambient(float3 normal, float vertexAo);
+};
+
+struct ShOnlyAmbientPolicy : IAmbientPolicy
+{
+    float3 ambient(float3 normal, float vertexAo)
+    {
+        const float3 shIrradiance = evaluateShIrradiance(normal);
+        return shIrradiance * 0.26;
+    }
+};
+
+struct ShHemisphereAmbientPolicy : IAmbientPolicy
+{
+    float3 ambient(float3 normal, float vertexAo)
+    {
+        const float3 shNormalIrradiance = evaluateShIrradiance(normal);
+        const float3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
+        const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.70);
+        return ambientIrradiance * 0.26;
+    }
+};
+
+struct ShHemisphereVertexAoAmbientPolicy : IAmbientPolicy
+{
+    float3 ambient(float3 normal, float vertexAo)
+    {
+        const float3 shNormalIrradiance = evaluateShIrradiance(normal);
+        const float3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
+        const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.70);
+        return ambientIrradiance * (0.26 * vertexAo);
+    }
+};
+
+float3 evaluateAmbient<TAmbientPolicy : IAmbientPolicy>(
+    TAmbientPolicy policy,
+    float3 normal,
+    float vertexAo
+)
+{
+    return policy.ambient(normal, vertexAo);
+}
+
+[[vk::constant_id(6)]]
+const int kShadowPolicyMode = 2;
+[[vk::constant_id(7)]]
+const int kAmbientPolicyMode = 2;
+
+float selectShadowVisibility(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
+{
+    if (kShadowPolicyMode <= 0)
+    {
+        return evaluateShadow(NoShadowPolicy(), worldPosition, normal, viewDepth, ndotl);
+    }
+    if (kShadowPolicyMode == 1)
+    {
+        return evaluateShadow(PrimaryCascadePcfShadowPolicy(), worldPosition, normal, viewDepth, ndotl);
+    }
+    return evaluateShadow(CascadedBlendPcfShadowPolicy(), worldPosition, normal, viewDepth, ndotl);
+}
+
+float3 selectAmbient(float3 normal, float vertexAo)
+{
+    if (kAmbientPolicyMode <= 0)
+    {
+        return evaluateAmbient(ShOnlyAmbientPolicy(), normal, vertexAo);
+    }
+    if (kAmbientPolicyMode == 1)
+    {
+        return evaluateAmbient(ShHemisphereAmbientPolicy(), normal, vertexAo);
+    }
+    return evaluateAmbient(ShHemisphereVertexAoAmbientPolicy(), normal, vertexAo);
+}
+
 struct FragmentInput
 {
     nointerpolation uint inFace : TEXCOORD0;
@@ -220,15 +305,12 @@ float4 main(FragmentInput input) : SV_Target0
     float shadowVisibility = 1.0;
     if (ndotl > 0.0001)
     {
-        shadowVisibility = sampleCascadedShadow(input.inWorldPosition, normal, viewDepth, ndotl);
+        shadowVisibility = selectShadowVisibility(input.inWorldPosition, normal, viewDepth, ndotl);
     }
 
-    const float3 shNormalIrradiance = evaluateShIrradiance(normal);
-    const float3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
-    const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.70);
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = lerp(1.0, clamp(input.inVertexAo, 0.0, 1.0), vertexAoEnable);
-    const float3 ambient = ambientIrradiance * (0.26 * vertexAo);
+    const float3 ambient = selectAmbient(normal, vertexAo);
     const float3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);
     float3 lighting = ambient + (directSun * directShadowFactor);

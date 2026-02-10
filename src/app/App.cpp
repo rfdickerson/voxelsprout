@@ -70,6 +70,60 @@ constexpr int kHotbarSlotCount = 4;
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
 constexpr math::Vector3 kDefaultPipeTint{0.95f, 0.95f, 0.95f};
+constexpr float kConveyorCollisionRadius = 0.49f;
+constexpr float kConveyorAlongHalfExtent = 0.5f;
+constexpr float kConveyorCrossAxisScale = 2.0f;
+constexpr float kConveyorVerticalScale = 0.25f;
+
+struct Aabb3f {
+    float minX = 0.0f;
+    float maxX = 0.0f;
+    float minY = 0.0f;
+    float maxY = 0.0f;
+    float minZ = 0.0f;
+    float maxZ = 0.0f;
+};
+
+Aabb3f makePlayerCollisionAabb(float eyeX, float eyeY, float eyeZ) {
+    Aabb3f bounds{};
+    bounds.minX = eyeX - kPlayerRadius;
+    bounds.maxX = eyeX + kPlayerRadius;
+    bounds.minY = eyeY - kPlayerEyeHeight;
+    bounds.maxY = eyeY + kPlayerTopOffset;
+    bounds.minZ = eyeZ - kPlayerRadius;
+    bounds.maxZ = eyeZ + kPlayerRadius;
+    return bounds;
+}
+
+Aabb3f makeConveyorBeltAabb(const sim::Belt& belt) {
+    const float centerX = static_cast<float>(belt.x) + 0.5f;
+    const float centerY = static_cast<float>(belt.y) + 0.5f;
+    const float centerZ = static_cast<float>(belt.z) + 0.5f;
+    const bool alongX = belt.direction == sim::BeltDirection::East || belt.direction == sim::BeltDirection::West;
+    const float halfHeight = kConveyorVerticalScale * kConveyorCollisionRadius;
+    const float halfCrossAxis = kConveyorCrossAxisScale * kConveyorCollisionRadius;
+    const float halfExtentX = alongX ? kConveyorAlongHalfExtent : halfCrossAxis;
+    const float halfExtentZ = alongX ? halfCrossAxis : kConveyorAlongHalfExtent;
+
+    Aabb3f bounds{};
+    bounds.minX = centerX - halfExtentX;
+    bounds.maxX = centerX + halfExtentX;
+    bounds.minY = centerY - halfHeight;
+    bounds.maxY = centerY + halfHeight;
+    bounds.minZ = centerZ - halfExtentZ;
+    bounds.maxZ = centerZ + halfExtentZ;
+    return bounds;
+}
+
+bool aabbOverlaps(const Aabb3f& lhs, const Aabb3f& rhs) {
+    return
+        lhs.maxX > (rhs.minX + kCollisionEpsilon) &&
+        lhs.minX < (rhs.maxX - kCollisionEpsilon) &&
+        lhs.maxY > (rhs.minY + kCollisionEpsilon) &&
+        lhs.minY < (rhs.maxY - kCollisionEpsilon) &&
+        lhs.maxZ > (rhs.minZ + kCollisionEpsilon) &&
+        lhs.minZ < (rhs.maxZ - kCollisionEpsilon);
+}
 
 struct FrustumPlane {
     math::Vector3 normal{};
@@ -1160,19 +1214,14 @@ bool App::findGroundSupportY(float eyeX, float eyeY, float eyeZ, int& outSupport
 }
 
 bool App::doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const {
-    const float minX = eyeX - kPlayerRadius;
-    const float maxX = eyeX + kPlayerRadius;
-    const float minY = eyeY - kPlayerEyeHeight;
-    const float maxY = eyeY + kPlayerTopOffset;
-    const float minZ = eyeZ - kPlayerRadius;
-    const float maxZ = eyeZ + kPlayerRadius;
+    const Aabb3f playerBounds = makePlayerCollisionAabb(eyeX, eyeY, eyeZ);
 
-    const int startX = static_cast<int>(std::floor(minX));
-    const int endX = static_cast<int>(std::floor(maxX - kCollisionEpsilon));
-    const int startY = static_cast<int>(std::floor(minY));
-    const int endY = static_cast<int>(std::floor(maxY - kCollisionEpsilon));
-    const int startZ = static_cast<int>(std::floor(minZ));
-    const int endZ = static_cast<int>(std::floor(maxZ - kCollisionEpsilon));
+    const int startX = static_cast<int>(std::floor(playerBounds.minX));
+    const int endX = static_cast<int>(std::floor(playerBounds.maxX - kCollisionEpsilon));
+    const int startY = static_cast<int>(std::floor(playerBounds.minY));
+    const int endY = static_cast<int>(std::floor(playerBounds.maxY - kCollisionEpsilon));
+    const int startZ = static_cast<int>(std::floor(playerBounds.minZ));
+    const int endZ = static_cast<int>(std::floor(playerBounds.maxZ - kCollisionEpsilon));
 
     for (int y = startY; y <= endY; ++y) {
         for (int z = startZ; z <= endZ; ++z) {
@@ -1181,6 +1230,17 @@ bool App::doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const {
                     return true;
                 }
             }
+        }
+    }
+    return doesPlayerOverlapConveyorBelt(eyeX, eyeY, eyeZ);
+}
+
+bool App::doesPlayerOverlapConveyorBelt(float eyeX, float eyeY, float eyeZ) const {
+    const Aabb3f playerBounds = makePlayerCollisionAabb(eyeX, eyeY, eyeZ);
+    for (const sim::Belt& belt : m_simulation.belts()) {
+        const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
+        if (aabbOverlaps(playerBounds, beltBounds)) {
+            return true;
         }
     }
     return false;
@@ -1208,44 +1268,53 @@ void App::resolvePlayerCollisions(float dt) {
             return;
         }
 
-        const float minY = m_camera.y - kPlayerEyeHeight;
-        const float maxY = m_camera.y + kPlayerTopOffset;
-        const float minZ = m_camera.z - kPlayerRadius;
-        const float maxZ = m_camera.z + kPlayerRadius;
-        const int startY = static_cast<int>(std::floor(minY));
-        const int endY = static_cast<int>(std::floor(maxY - kCollisionEpsilon));
-        const int startZ = static_cast<int>(std::floor(minZ));
-        const int endZ = static_cast<int>(std::floor(maxZ - kCollisionEpsilon));
-        const int startX = static_cast<int>(std::floor(m_camera.x - kPlayerRadius));
-        const int endX = static_cast<int>(std::floor(m_camera.x + kPlayerRadius - kCollisionEpsilon));
+        const Aabb3f playerBounds = makePlayerCollisionAabb(m_camera.x, m_camera.y, m_camera.z);
+        const int startY = static_cast<int>(std::floor(playerBounds.minY));
+        const int endY = static_cast<int>(std::floor(playerBounds.maxY - kCollisionEpsilon));
+        const int startZ = static_cast<int>(std::floor(playerBounds.minZ));
+        const int endZ = static_cast<int>(std::floor(playerBounds.maxZ - kCollisionEpsilon));
+        const int startX = static_cast<int>(std::floor(playerBounds.minX));
+        const int endX = static_cast<int>(std::floor(playerBounds.maxX - kCollisionEpsilon));
 
         if (deltaX > 0.0f) {
-            int blockingX = std::numeric_limits<int>::max();
+            float blockingMinX = std::numeric_limits<float>::infinity();
             for (int y = startY; y <= endY; ++y) {
                 for (int z = startZ; z <= endZ; ++z) {
                     for (int x = startX; x <= endX; ++x) {
                         if (isSolidWorldVoxel(x, y, z)) {
-                            blockingX = std::min(blockingX, x);
+                            blockingMinX = std::min(blockingMinX, static_cast<float>(x));
                         }
                     }
                 }
             }
-            if (blockingX != std::numeric_limits<int>::max()) {
-                m_camera.x = static_cast<float>(blockingX) - kPlayerRadius - kCollisionEpsilon;
+            for (const sim::Belt& belt : m_simulation.belts()) {
+                const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
+                if (aabbOverlaps(playerBounds, beltBounds)) {
+                    blockingMinX = std::min(blockingMinX, beltBounds.minX);
+                }
+            }
+            if (std::isfinite(blockingMinX)) {
+                m_camera.x = blockingMinX - kPlayerRadius - kCollisionEpsilon;
             }
         } else {
-            int blockingX = std::numeric_limits<int>::lowest();
+            float blockingMaxX = -std::numeric_limits<float>::infinity();
             for (int y = startY; y <= endY; ++y) {
                 for (int z = startZ; z <= endZ; ++z) {
                     for (int x = startX; x <= endX; ++x) {
                         if (isSolidWorldVoxel(x, y, z)) {
-                            blockingX = std::max(blockingX, x);
+                            blockingMaxX = std::max(blockingMaxX, static_cast<float>(x + 1));
                         }
                     }
                 }
             }
-            if (blockingX != std::numeric_limits<int>::lowest()) {
-                m_camera.x = static_cast<float>(blockingX + 1) + kPlayerRadius + kCollisionEpsilon;
+            for (const sim::Belt& belt : m_simulation.belts()) {
+                const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
+                if (aabbOverlaps(playerBounds, beltBounds)) {
+                    blockingMaxX = std::max(blockingMaxX, beltBounds.maxX);
+                }
+            }
+            if (std::isfinite(blockingMaxX)) {
+                m_camera.x = blockingMaxX + kPlayerRadius + kCollisionEpsilon;
             }
         }
 
@@ -1265,44 +1334,53 @@ void App::resolvePlayerCollisions(float dt) {
             return;
         }
 
-        const float minX = m_camera.x - kPlayerRadius;
-        const float maxX = m_camera.x + kPlayerRadius;
-        const float minY = m_camera.y - kPlayerEyeHeight;
-        const float maxY = m_camera.y + kPlayerTopOffset;
-        const int startX = static_cast<int>(std::floor(minX));
-        const int endX = static_cast<int>(std::floor(maxX - kCollisionEpsilon));
-        const int startY = static_cast<int>(std::floor(minY));
-        const int endY = static_cast<int>(std::floor(maxY - kCollisionEpsilon));
-        const int startZ = static_cast<int>(std::floor(m_camera.z - kPlayerRadius));
-        const int endZ = static_cast<int>(std::floor(m_camera.z + kPlayerRadius - kCollisionEpsilon));
+        const Aabb3f playerBounds = makePlayerCollisionAabb(m_camera.x, m_camera.y, m_camera.z);
+        const int startX = static_cast<int>(std::floor(playerBounds.minX));
+        const int endX = static_cast<int>(std::floor(playerBounds.maxX - kCollisionEpsilon));
+        const int startY = static_cast<int>(std::floor(playerBounds.minY));
+        const int endY = static_cast<int>(std::floor(playerBounds.maxY - kCollisionEpsilon));
+        const int startZ = static_cast<int>(std::floor(playerBounds.minZ));
+        const int endZ = static_cast<int>(std::floor(playerBounds.maxZ - kCollisionEpsilon));
 
         if (deltaZ > 0.0f) {
-            int blockingZ = std::numeric_limits<int>::max();
+            float blockingMinZ = std::numeric_limits<float>::infinity();
             for (int y = startY; y <= endY; ++y) {
                 for (int z = startZ; z <= endZ; ++z) {
                     for (int x = startX; x <= endX; ++x) {
                         if (isSolidWorldVoxel(x, y, z)) {
-                            blockingZ = std::min(blockingZ, z);
+                            blockingMinZ = std::min(blockingMinZ, static_cast<float>(z));
                         }
                     }
                 }
             }
-            if (blockingZ != std::numeric_limits<int>::max()) {
-                m_camera.z = static_cast<float>(blockingZ) - kPlayerRadius - kCollisionEpsilon;
+            for (const sim::Belt& belt : m_simulation.belts()) {
+                const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
+                if (aabbOverlaps(playerBounds, beltBounds)) {
+                    blockingMinZ = std::min(blockingMinZ, beltBounds.minZ);
+                }
+            }
+            if (std::isfinite(blockingMinZ)) {
+                m_camera.z = blockingMinZ - kPlayerRadius - kCollisionEpsilon;
             }
         } else {
-            int blockingZ = std::numeric_limits<int>::lowest();
+            float blockingMaxZ = -std::numeric_limits<float>::infinity();
             for (int y = startY; y <= endY; ++y) {
                 for (int z = startZ; z <= endZ; ++z) {
                     for (int x = startX; x <= endX; ++x) {
                         if (isSolidWorldVoxel(x, y, z)) {
-                            blockingZ = std::max(blockingZ, z);
+                            blockingMaxZ = std::max(blockingMaxZ, static_cast<float>(z + 1));
                         }
                     }
                 }
             }
-            if (blockingZ != std::numeric_limits<int>::lowest()) {
-                m_camera.z = static_cast<float>(blockingZ + 1) + kPlayerRadius + kCollisionEpsilon;
+            for (const sim::Belt& belt : m_simulation.belts()) {
+                const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
+                if (aabbOverlaps(playerBounds, beltBounds)) {
+                    blockingMaxZ = std::max(blockingMaxZ, beltBounds.maxZ);
+                }
+            }
+            if (std::isfinite(blockingMaxZ)) {
+                m_camera.z = blockingMaxZ + kPlayerRadius + kCollisionEpsilon;
             }
         }
 
@@ -1322,44 +1400,53 @@ void App::resolvePlayerCollisions(float dt) {
             return;
         }
 
-        const float minX = m_camera.x - kPlayerRadius;
-        const float maxX = m_camera.x + kPlayerRadius;
-        const float minZ = m_camera.z - kPlayerRadius;
-        const float maxZ = m_camera.z + kPlayerRadius;
-        const int startX = static_cast<int>(std::floor(minX));
-        const int endX = static_cast<int>(std::floor(maxX - kCollisionEpsilon));
-        const int startZ = static_cast<int>(std::floor(minZ));
-        const int endZ = static_cast<int>(std::floor(maxZ - kCollisionEpsilon));
-        const int startY = static_cast<int>(std::floor(m_camera.y - kPlayerEyeHeight));
-        const int endY = static_cast<int>(std::floor(m_camera.y + kPlayerTopOffset - kCollisionEpsilon));
+        const Aabb3f playerBounds = makePlayerCollisionAabb(m_camera.x, m_camera.y, m_camera.z);
+        const int startX = static_cast<int>(std::floor(playerBounds.minX));
+        const int endX = static_cast<int>(std::floor(playerBounds.maxX - kCollisionEpsilon));
+        const int startZ = static_cast<int>(std::floor(playerBounds.minZ));
+        const int endZ = static_cast<int>(std::floor(playerBounds.maxZ - kCollisionEpsilon));
+        const int startY = static_cast<int>(std::floor(playerBounds.minY));
+        const int endY = static_cast<int>(std::floor(playerBounds.maxY - kCollisionEpsilon));
 
         if (deltaY > 0.0f) {
-            int blockingY = std::numeric_limits<int>::max();
+            float blockingMinY = std::numeric_limits<float>::infinity();
             for (int y = startY; y <= endY; ++y) {
                 for (int z = startZ; z <= endZ; ++z) {
                     for (int x = startX; x <= endX; ++x) {
                         if (isSolidWorldVoxel(x, y, z)) {
-                            blockingY = std::min(blockingY, y);
+                            blockingMinY = std::min(blockingMinY, static_cast<float>(y));
                         }
                     }
                 }
             }
-            if (blockingY != std::numeric_limits<int>::max()) {
-                m_camera.y = static_cast<float>(blockingY) - kPlayerTopOffset - kCollisionEpsilon;
+            for (const sim::Belt& belt : m_simulation.belts()) {
+                const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
+                if (aabbOverlaps(playerBounds, beltBounds)) {
+                    blockingMinY = std::min(blockingMinY, beltBounds.minY);
+                }
+            }
+            if (std::isfinite(blockingMinY)) {
+                m_camera.y = blockingMinY - kPlayerTopOffset - kCollisionEpsilon;
             }
         } else {
-            int blockingY = std::numeric_limits<int>::lowest();
+            float blockingMaxY = -std::numeric_limits<float>::infinity();
             for (int y = startY; y <= endY; ++y) {
                 for (int z = startZ; z <= endZ; ++z) {
                     for (int x = startX; x <= endX; ++x) {
                         if (isSolidWorldVoxel(x, y, z)) {
-                            blockingY = std::max(blockingY, y);
+                            blockingMaxY = std::max(blockingMaxY, static_cast<float>(y + 1));
                         }
                     }
                 }
             }
-            if (blockingY != std::numeric_limits<int>::lowest()) {
-                m_camera.y = static_cast<float>(blockingY + 1) + kPlayerEyeHeight + kCollisionEpsilon;
+            for (const sim::Belt& belt : m_simulation.belts()) {
+                const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
+                if (aabbOverlaps(playerBounds, beltBounds)) {
+                    blockingMaxY = std::max(blockingMaxY, beltBounds.maxY);
+                }
+            }
+            if (std::isfinite(blockingMaxY)) {
+                m_camera.y = blockingMaxY + kPlayerEyeHeight + kCollisionEpsilon;
                 groundedThisFrame = true;
             }
         }

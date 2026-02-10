@@ -3459,6 +3459,30 @@ bool Renderer::createGraphicsPipeline() {
     worldFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     worldFragmentShaderStage.module = worldFragShaderModule;
     worldFragmentShaderStage.pName = "main";
+    struct WorldFragmentSpecializationData {
+        std::int32_t shadowPolicyMode = 2;  // 0=no shadows, 1=single-cascade PCF, 2=cascade-blended PCF
+        std::int32_t ambientPolicyMode = 2; // 0=SH only, 1=SH hemisphere, 2=SH hemisphere + vertex AO
+    };
+    const WorldFragmentSpecializationData worldFragmentSpecializationData{};
+    const std::array<VkSpecializationMapEntry, 2> worldFragmentSpecializationMapEntries = {{
+        VkSpecializationMapEntry{
+            6u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, shadowPolicyMode)),
+            sizeof(std::int32_t)
+        },
+        VkSpecializationMapEntry{
+            7u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, ambientPolicyMode)),
+            sizeof(std::int32_t)
+        }
+    }};
+    const VkSpecializationInfo worldFragmentSpecializationInfo{
+        static_cast<uint32_t>(worldFragmentSpecializationMapEntries.size()),
+        worldFragmentSpecializationMapEntries.data(),
+        sizeof(worldFragmentSpecializationData),
+        &worldFragmentSpecializationData
+    };
+    worldFragmentShaderStage.pSpecializationInfo = &worldFragmentSpecializationInfo;
 
     std::array<VkPipelineShaderStageCreateInfo, 2> worldShaderStages = {worldVertexShaderStage, worldFragmentShaderStage};
 
@@ -3578,6 +3602,12 @@ bool Renderer::createGraphicsPipeline() {
         logVkFailure("vkCreateGraphicsPipelines(world)", worldPipelineResult);
         return false;
     }
+    VOX_LOGI("render") << "pipeline config (world): samples=" << static_cast<uint32_t>(m_colorSampleCount)
+              << ", cullMode=" << static_cast<uint32_t>(rasterizer.cullMode)
+              << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
+              << ", shadowPolicyMode=" << worldFragmentSpecializationData.shadowPolicyMode
+              << ", ambientPolicyMode=" << worldFragmentSpecializationData.ambientPolicyMode
+              << "\n";
 
     VkPipelineRasterizationStateCreateInfo previewAddRasterizer = rasterizer;
     previewAddRasterizer.polygonMode = VK_POLYGON_MODE_FILL;
@@ -3719,6 +3749,10 @@ bool Renderer::createGraphicsPipeline() {
         logVkFailure("vkCreateGraphicsPipelines(skybox)", skyboxPipelineResult);
         return false;
     }
+    VOX_LOGI("render") << "pipeline config (skybox): cullMode=" << static_cast<uint32_t>(skyboxRasterizer.cullMode)
+              << ", depthTest=" << (skyboxDepthStencil.depthTestEnable == VK_TRUE ? 1 : 0)
+              << ", depthWrite=" << (skyboxDepthStencil.depthWriteEnable == VK_TRUE ? 1 : 0)
+              << "\n";
 
     VkPipelineShaderStageCreateInfo toneMapVertexShaderStage{};
     toneMapVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -3803,6 +3837,10 @@ bool Renderer::createGraphicsPipeline() {
         logVkFailure("vkCreateGraphicsPipelines(toneMap)", toneMapPipelineResult);
         return false;
     }
+    VOX_LOGI("render") << "pipeline config (tonemap): samples="
+              << static_cast<uint32_t>(toneMapMultisampling.rasterizationSamples)
+              << ", swapchainFormat=" << static_cast<int>(m_swapchainFormat)
+              << "\n";
 
     if (!createShaderModuleFromFile(
             m_device,
@@ -3940,6 +3978,11 @@ bool Renderer::createGraphicsPipeline() {
         logVkFailure("vkCreateGraphicsPipelines(shadow)", shadowPipelineResult);
         return false;
     }
+    VOX_LOGI("render") << "pipeline config (shadow): depthFormat=" << static_cast<int>(m_shadowDepthFormat)
+              << ", depthBias=" << (shadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
+              << ", cullMode=" << static_cast<uint32_t>(shadowRasterizer.cullMode)
+              << ", samples=" << static_cast<uint32_t>(shadowMultisampling.rasterizationSamples)
+              << "\n";
 
     VkShaderModule pipeShadowVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule pipeShadowFragShaderModule = VK_NULL_HANDLE;
@@ -4062,6 +4105,10 @@ bool Renderer::createGraphicsPipeline() {
         logVkFailure("vkCreateGraphicsPipelines(pipeShadow)", pipeShadowPipelineResult);
         return false;
     }
+    VOX_LOGI("render") << "pipeline config (pipeShadow): cullMode="
+              << static_cast<uint32_t>(pipeShadowRasterizer.cullMode)
+              << ", depthBias=" << (pipeShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
+              << "\n";
 
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
@@ -4281,6 +4328,10 @@ bool Renderer::createPipePipeline() {
         logVkFailure("vkCreateGraphicsPipelines(pipe)", pipePipelineResult);
         return false;
     }
+    VOX_LOGI("render") << "pipeline config (pipeLit): samples=" << static_cast<uint32_t>(m_colorSampleCount)
+              << ", cullMode=" << static_cast<uint32_t>(rasterizer.cullMode)
+              << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
+              << "\n";
 
     if (m_pipePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
@@ -4639,6 +4690,51 @@ bool Renderer::createAoPipelines() {
     ssaoStageInfos[1].module = ssaoFragShaderModule;
     ssaoStageInfos[1].pName = "main";
 
+    struct SsaoSpecializationData {
+        std::int32_t sampleCount = 32; // constant_id 0
+        float power = 1.4f;            // constant_id 1
+        std::int32_t blurRadius = 6;   // constant_id 2
+        float blurSigma = 3.0f;        // constant_id 3
+    };
+    const SsaoSpecializationData ssaoSpecializationData{};
+    const std::array<VkSpecializationMapEntry, 2> ssaoSpecializationMapEntries = {{
+        VkSpecializationMapEntry{
+            0u,
+            static_cast<uint32_t>(offsetof(SsaoSpecializationData, sampleCount)),
+            sizeof(std::int32_t)
+        },
+        VkSpecializationMapEntry{
+            1u,
+            static_cast<uint32_t>(offsetof(SsaoSpecializationData, power)),
+            sizeof(float)
+        }
+    }};
+    const VkSpecializationInfo ssaoSpecializationInfo{
+        static_cast<uint32_t>(ssaoSpecializationMapEntries.size()),
+        ssaoSpecializationMapEntries.data(),
+        sizeof(ssaoSpecializationData),
+        &ssaoSpecializationData
+    };
+    const std::array<VkSpecializationMapEntry, 2> ssaoBlurSpecializationMapEntries = {{
+        VkSpecializationMapEntry{
+            2u,
+            static_cast<uint32_t>(offsetof(SsaoSpecializationData, blurRadius)),
+            sizeof(std::int32_t)
+        },
+        VkSpecializationMapEntry{
+            3u,
+            static_cast<uint32_t>(offsetof(SsaoSpecializationData, blurSigma)),
+            sizeof(float)
+        }
+    }};
+    const VkSpecializationInfo ssaoBlurSpecializationInfo{
+        static_cast<uint32_t>(ssaoBlurSpecializationMapEntries.size()),
+        ssaoBlurSpecializationMapEntries.data(),
+        sizeof(ssaoSpecializationData),
+        &ssaoSpecializationData
+    };
+    ssaoStageInfos[1].pSpecializationInfo = &ssaoSpecializationInfo;
+
     VkPipelineVertexInputStateCreateInfo fullscreenVertexInputInfo{};
     fullscreenVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 
@@ -4689,8 +4785,13 @@ bool Renderer::createAoPipelines() {
         destroyShaderModules();
         return false;
     }
+    VOX_LOGI("render") << "pipeline config (ssao): sampleCount=" << ssaoSpecializationData.sampleCount
+              << ", power=" << ssaoSpecializationData.power
+              << ", format=" << static_cast<int>(m_ssaoFormat)
+              << "\n";
 
     ssaoStageInfos[1].module = ssaoBlurFragShaderModule;
+    ssaoStageInfos[1].pSpecializationInfo = &ssaoBlurSpecializationInfo;
     const VkResult ssaoBlurPipelineResult = vkCreateGraphicsPipelines(
         m_device,
         VK_NULL_HANDLE,
@@ -4705,6 +4806,10 @@ bool Renderer::createAoPipelines() {
         destroyShaderModules();
         return false;
     }
+    VOX_LOGI("render") << "pipeline config (ssaoBlur): radius=" << ssaoSpecializationData.blurRadius
+              << ", sigma=" << ssaoSpecializationData.blurSigma
+              << ", format=" << static_cast<int>(m_ssaoFormat)
+              << "\n";
 
     destroyShaderModules();
 
