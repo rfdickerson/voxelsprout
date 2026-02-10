@@ -107,7 +107,10 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 sunColor = camera.sunColorShadow.xyz;
     const float wrappedNdotL = saturate((dot(plantNormal, -sunDirection) + 0.40) / 1.40);
     const float transmission = saturate(dot(plantNormal, sunDirection)) * 0.18;
-    const float3 ambient = evaluateShIrradiance(plantNormal) * 0.30;
+    const float canopyT = smoothstep(0.05, 0.95, saturate(input.inUv.y));
+    const float3 skyAmbient = evaluateShIrradiance(float3(0.0, 1.0, 0.0)) * 0.33;
+    const float3 groundAmbient = evaluateShIrradiance(float3(0.0, -1.0, 0.0)) * 0.14;
+    const float3 ambient = lerp(groundAmbient, skyAmbient, canopyT);
     const float3 direct = sunColor * (sunIntensity * (wrappedNdotL + transmission) * 0.70);
 
     const float3 variedSprite = sprite.rgb * clamp(input.inColorTint, float3(0.5, 0.5, 0.5), float3(1.5, 1.5, 1.5));
