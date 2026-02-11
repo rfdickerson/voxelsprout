@@ -80,9 +80,19 @@ constexpr float kBeltRadius = 0.49f;
 constexpr float kTrackRadius = 0.38f;
 constexpr math::Vector3 kBeltTint{0.78f, 0.62f, 0.18f};
 constexpr math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
+constexpr float kBeltCargoLength = 0.30f;
+constexpr float kBeltCargoRadius = 0.30f;
+constexpr std::array<math::Vector3, 5> kBeltCargoTints = {
+    math::Vector3{0.92f, 0.31f, 0.31f},
+    math::Vector3{0.31f, 0.71f, 0.96f},
+    math::Vector3{0.95f, 0.84f, 0.32f},
+    math::Vector3{0.56f, 0.88f, 0.48f},
+    math::Vector3{0.84f, 0.54f, 0.92f},
+};
 constexpr uint64_t kAcquireNextImageTimeoutNs = 100000000ull; // 100 ms
 constexpr uint64_t kFrameTimelineWarnLagThreshold = 6u;
 constexpr double kFrameTimelineWarnCooldownSeconds = 2.0;
+constexpr float kCpuFrameEwmaAlpha = 0.08f;
 
 #if defined(VOXEL_HAS_IMGUI)
 void imguiCheckVkResult(VkResult result) {
@@ -6550,8 +6560,8 @@ void Renderer::buildFrameStatsUi() {
                 ? static_cast<int>(m_debugCpuFrameTimingMsHistoryWrite)
                 : 0;
         ImGui::PlotLines(
-            "CPU Frame (ms)",
-            m_debugCpuFrameTimingMsHistory.data(),
+            "CPU Work (ms)",
+            m_debugCpuFrameWorkMsHistory.data(),
             cpuHistoryCount,
             cpuHistoryOffset,
             nullptr,
@@ -6560,7 +6570,7 @@ void Renderer::buildFrameStatsUi() {
             ImVec2(0.0f, 64.0f)
         );
     } else {
-        ImGui::Text("CPU Frame (ms): collecting...");
+        ImGui::Text("CPU Timing (ms): collecting...");
     }
 
     if (m_gpuTimestampsSupported) {
@@ -6590,7 +6600,13 @@ void Renderer::buildFrameStatsUi() {
     ImGui::Text("FPS: %.1f", m_debugFps);
     ImGui::Text("Chunks (visible/total): %u / %u", m_debugSpatialVisibleChunkCount, m_debugChunkCount);
     if (m_gpuTimestampsSupported) {
-        ImGui::Text("Frame (CPU/GPU): %.2f / %.2f ms", m_debugFrameTimeMs, m_debugGpuFrameTimeMs);
+        ImGui::Text(
+            "Frame CPU (total/work/ewma): %.2f / %.2f / %.2f ms",
+            m_debugFrameTimeMs,
+            m_debugCpuFrameWorkMs,
+            m_debugCpuFrameEwmaMs
+        );
+        ImGui::Text("Frame GPU: %.2f ms", m_debugGpuFrameTimeMs);
         if (ImGui::TreeNodeEx("GPU Stages (ms)", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
             ImGui::Text("Prepass: %.2f", m_debugGpuPrepassTimeMs);
@@ -6601,7 +6617,13 @@ void Renderer::buildFrameStatsUi() {
             ImGui::TreePop();
         }
     } else {
-        ImGui::Text("Frame (CPU/GPU): %.2f / n/a ms", m_debugFrameTimeMs);
+        ImGui::Text(
+            "Frame CPU (total/work/ewma): %.2f / %.2f / %.2f ms",
+            m_debugFrameTimeMs,
+            m_debugCpuFrameWorkMs,
+            m_debugCpuFrameEwmaMs
+        );
+        ImGui::Text("Frame GPU: n/a");
     }
     if (m_supportsDisplayTiming) {
         ImGui::Text(
@@ -7063,8 +7085,12 @@ void Renderer::renderFrame(
     const sim::Simulation& simulation,
     const CameraPose& camera,
     const VoxelPreview& preview,
+    float simulationAlpha,
     std::span<const std::size_t> visibleChunkIndices
 ) {
+    const auto cpuFrameStartTime = std::chrono::steady_clock::now();
+    float cpuWaitMs = 0.0f;
+
     if (m_device == VK_NULL_HANDLE || m_swapchain == VK_NULL_HANDLE) {
         return;
     }
@@ -7077,13 +7103,7 @@ void Renderer::renderFrame(
     if (m_lastFrameTimestampSeconds > 0.0) {
         const double deltaSeconds = std::max(0.0, frameNowSeconds - m_lastFrameTimestampSeconds);
         frameDeltaSeconds = static_cast<float>(deltaSeconds);
-        m_debugFrameTimeMs = static_cast<float>(deltaSeconds * 1000.0);
         m_debugFps = (deltaSeconds > 0.0) ? static_cast<float>(1.0 / deltaSeconds) : 0.0f;
-        m_debugCpuFrameTimingMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugFrameTimeMs;
-        m_debugCpuFrameTimingMsHistoryWrite =
-            (m_debugCpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
-        m_debugCpuFrameTimingMsHistoryCount =
-            std::min(m_debugCpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
     }
     m_lastFrameTimestampSeconds = frameNowSeconds;
     if (!m_debugCameraFovInitialized) {
@@ -7175,6 +7195,7 @@ void Renderer::renderFrame(
     }
 
     uint32_t imageIndex = 0;
+    const auto acquireStartTime = std::chrono::steady_clock::now();
     const VkResult acquireResult = vkAcquireNextImageKHR(
         m_device,
         m_swapchain,
@@ -7182,6 +7203,9 @@ void Renderer::renderFrame(
         frame.imageAvailable,
         VK_NULL_HANDLE,
         &imageIndex
+    );
+    cpuWaitMs += static_cast<float>(
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - acquireStartTime).count()
     );
 
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -7733,10 +7757,14 @@ void Renderer::renderFrame(
     std::optional<FrameArenaSlice> pipeInstanceSliceOpt = std::nullopt;
     uint32_t transportInstanceCount = 0;
     std::optional<FrameArenaSlice> transportInstanceSliceOpt = std::nullopt;
+    uint32_t beltCargoInstanceCount = 0;
+    std::optional<FrameArenaSlice> beltCargoInstanceSliceOpt = std::nullopt;
     if (m_pipeIndexCount > 0 || m_transportIndexCount > 0) {
         const std::vector<sim::Pipe>& pipes = simulation.pipes();
         const std::vector<sim::Belt>& belts = simulation.belts();
         const std::vector<sim::Track>& tracks = simulation.tracks();
+        const std::vector<sim::BeltCargo>& beltCargoes = simulation.beltCargoes();
+        const float clampedSimulationAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
         const std::vector<PipeEndpointState> endpointStates =
             pipes.empty() ? std::vector<PipeEndpointState>{} : buildPipeEndpointStates(pipes);
         std::vector<PipeInstance> pipeInstances;
@@ -7812,6 +7840,39 @@ void Renderer::renderFrame(
             transportInstances.push_back(instance);
         }
 
+        std::vector<PipeInstance> beltCargoInstances;
+        beltCargoInstances.reserve(beltCargoes.size());
+        for (const sim::BeltCargo& cargo : beltCargoes) {
+            if (cargo.beltIndex < 0 || static_cast<std::size_t>(cargo.beltIndex) >= belts.size()) {
+                continue;
+            }
+            const float worldX = std::lerp(cargo.prevWorldPos[0], cargo.currWorldPos[0], clampedSimulationAlpha);
+            const float worldY = std::lerp(cargo.prevWorldPos[1], cargo.currWorldPos[1], clampedSimulationAlpha);
+            const float worldZ = std::lerp(cargo.prevWorldPos[2], cargo.currWorldPos[2], clampedSimulationAlpha);
+            const sim::Belt& belt = belts[static_cast<std::size_t>(cargo.beltIndex)];
+            const math::Vector3 axis = beltDirectionAxis(belt.direction);
+            const math::Vector3 tint = kBeltCargoTints[static_cast<std::size_t>(cargo.typeId % kBeltCargoTints.size())];
+
+            PipeInstance instance{};
+            instance.originLength[0] = worldX - 0.5f;
+            instance.originLength[1] = worldY - 0.5f;
+            instance.originLength[2] = worldZ - 0.5f;
+            instance.originLength[3] = kBeltCargoLength;
+            instance.axisRadius[0] = axis.x;
+            instance.axisRadius[1] = axis.y;
+            instance.axisRadius[2] = axis.z;
+            instance.axisRadius[3] = kBeltCargoRadius;
+            instance.tint[0] = tint.x;
+            instance.tint[1] = tint.y;
+            instance.tint[2] = tint.z;
+            instance.tint[3] = 2.0f; // style 2 = neutral solid transport block
+            instance.extensions[0] = 0.0f;
+            instance.extensions[1] = 0.0f;
+            instance.extensions[2] = 1.0f;
+            instance.extensions[3] = 1.0f;
+            beltCargoInstances.push_back(instance);
+        }
+
         if (!pipeInstances.empty() && m_pipeIndexCount > 0) {
             pipeInstanceSliceOpt = m_frameArena.allocateUpload(
                 static_cast<VkDeviceSize>(pipeInstances.size() * sizeof(PipeInstance)),
@@ -7841,6 +7902,22 @@ void Renderer::renderFrame(
                     static_cast<size_t>(transportInstanceSliceOpt->size)
                 );
                 transportInstanceCount = static_cast<uint32_t>(transportInstances.size());
+            }
+        }
+
+        if (!beltCargoInstances.empty() && m_transportIndexCount > 0) {
+            beltCargoInstanceSliceOpt = m_frameArena.allocateUpload(
+                static_cast<VkDeviceSize>(beltCargoInstances.size() * sizeof(PipeInstance)),
+                static_cast<VkDeviceSize>(alignof(PipeInstance)),
+                FrameArenaUploadKind::InstanceData
+            );
+            if (beltCargoInstanceSliceOpt.has_value() && beltCargoInstanceSliceOpt->mapped != nullptr) {
+                std::memcpy(
+                    beltCargoInstanceSliceOpt->mapped,
+                    beltCargoInstances.data(),
+                    static_cast<size_t>(beltCargoInstanceSliceOpt->size)
+                );
+                beltCargoInstanceCount = static_cast<uint32_t>(beltCargoInstances.size());
             }
         }
     }
@@ -8183,6 +8260,13 @@ void Renderer::renderFrame(
                     transportInstanceCount,
                     transportInstanceSliceOpt
                 );
+                drawShadowInstances(
+                    m_transportVertexBufferHandle,
+                    m_transportIndexBufferHandle,
+                    m_transportIndexCount,
+                    beltCargoInstanceCount,
+                    beltCargoInstanceSliceOpt
+                );
             }
 
             const uint32_t grassShadowCascadeCount = static_cast<uint32_t>(std::clamp(
@@ -8458,6 +8542,13 @@ void Renderer::renderFrame(
             m_transportIndexCount,
             transportInstanceCount,
             transportInstanceSliceOpt
+        );
+        drawNormalDepthInstances(
+            m_transportVertexBufferHandle,
+            m_transportIndexBufferHandle,
+            m_transportIndexCount,
+            beltCargoInstanceCount,
+            beltCargoInstanceSliceOpt
         );
     }
     vkCmdEndRendering(commandBuffer);
@@ -8786,6 +8877,13 @@ void Renderer::renderFrame(
             m_transportIndexCount,
             transportInstanceCount,
             transportInstanceSliceOpt
+        );
+        drawLitInstances(
+            m_transportVertexBufferHandle,
+            m_transportIndexBufferHandle,
+            m_transportIndexCount,
+            beltCargoInstanceCount,
+            beltCargoInstanceSliceOpt
         );
     }
 
@@ -9161,7 +9259,11 @@ void Renderer::renderFrame(
         m_lastSubmittedDisplayTimingPresentId = 0;
     }
 
+    const auto presentStartTime = std::chrono::steady_clock::now();
     const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
+    cpuWaitMs += static_cast<float>(
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - presentStartTime).count()
+    );
     if (useDisplayTiming && (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR)) {
         updateDisplayTimingStats();
     }
@@ -9180,6 +9282,25 @@ void Renderer::renderFrame(
     } else if (presentResult != VK_SUCCESS) {
         logVkFailure("vkQueuePresentKHR", presentResult);
     }
+
+    const float cpuTotalMs = static_cast<float>(
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cpuFrameStartTime).count()
+    );
+    m_debugFrameTimeMs = cpuTotalMs;
+    m_debugCpuFrameWorkMs = std::max(0.0f, cpuTotalMs - cpuWaitMs);
+    if (!m_debugCpuFrameEwmaInitialized) {
+        m_debugCpuFrameEwmaMs = m_debugFrameTimeMs;
+        m_debugCpuFrameEwmaInitialized = true;
+    } else {
+        m_debugCpuFrameEwmaMs += kCpuFrameEwmaAlpha * (m_debugFrameTimeMs - m_debugCpuFrameEwmaMs);
+    }
+    m_debugCpuFrameTotalMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugFrameTimeMs;
+    m_debugCpuFrameWorkMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugCpuFrameWorkMs;
+    m_debugCpuFrameEwmaMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugCpuFrameEwmaMs;
+    m_debugCpuFrameTimingMsHistoryWrite =
+        (m_debugCpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
+    m_debugCpuFrameTimingMsHistoryCount =
+        std::min(m_debugCpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
 
     const FrameArenaStats& frameArenaStats = m_frameArena.activeStats();
     m_debugFrameArenaUploadBytes = static_cast<std::uint64_t>(frameArenaStats.uploadBytesAllocated);
@@ -9837,9 +9958,14 @@ void Renderer::shutdown() {
     m_debugSpatialQueriesUsed = false;
     m_debugSpatialQueryStats = {};
     m_debugSpatialVisibleChunkCount = 0;
-    m_debugCpuFrameTimingMsHistory.fill(0.0f);
+    m_debugCpuFrameTotalMsHistory.fill(0.0f);
+    m_debugCpuFrameWorkMsHistory.fill(0.0f);
+    m_debugCpuFrameEwmaMsHistory.fill(0.0f);
     m_debugCpuFrameTimingMsHistoryWrite = 0;
     m_debugCpuFrameTimingMsHistoryCount = 0;
+    m_debugCpuFrameWorkMs = 0.0f;
+    m_debugCpuFrameEwmaMs = 0.0f;
+    m_debugCpuFrameEwmaInitialized = false;
     m_debugGpuFrameTimingMsHistory.fill(0.0f);
     m_debugGpuFrameTimingMsHistoryWrite = 0;
     m_debugGpuFrameTimingMsHistoryCount = 0;

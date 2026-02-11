@@ -604,7 +604,10 @@ void App::run() {
             simulationAccumulatorSeconds = std::fmod(simulationAccumulatorSeconds, kSimulationFixedStepSeconds);
         }
 
-        update(dt);
+        const float simulationAlpha = static_cast<float>(
+            std::clamp(simulationAccumulatorSeconds / kSimulationFixedStepSeconds, 0.0, 1.0)
+        );
+        update(dt, simulationAlpha);
         ++frameCount;
     }
 
@@ -613,7 +616,7 @@ void App::run() {
                     << (m_window != nullptr ? glfwWindowShouldClose(m_window) : 1);
 }
 
-void App::update(float dt) {
+void App::update(float dt, float simulationAlpha) {
     updateCamera(dt);
 
     const bool regeneratePressedThisFrame =
@@ -970,6 +973,7 @@ void App::update(float dt) {
         m_simulation,
         cameraPose,
         preview,
+        simulationAlpha,
         std::span<const std::size_t>(m_visibleChunkIndices)
     );
     m_camera.fovDegrees = m_renderer.cameraFovDegrees();

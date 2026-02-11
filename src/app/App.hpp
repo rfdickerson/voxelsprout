@@ -19,7 +19,7 @@ class App {
 public:
     bool init();
     void run();
-    void update(float dt);
+    void update(float dt, float simulationAlpha);
     void shutdown();
 
 private:

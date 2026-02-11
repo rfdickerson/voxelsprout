@@ -125,6 +125,7 @@ public:
         const sim::Simulation& simulation,
         const CameraPose& camera,
         const VoxelPreview& preview,
+        float simulationAlpha,
         std::span<const std::size_t> visibleChunkIndices
     );
     void setDebugUiVisible(bool visible);
@@ -485,9 +486,14 @@ private:
     float m_debugDisplayPresentMarginMs = 0.0f;
     float m_debugDisplayActualEarliestDeltaMs = 0.0f;
     std::uint32_t m_debugDisplayTimingSampleCount = 0;
-    std::array<float, kTimingHistorySampleCount> m_debugCpuFrameTimingMsHistory{};
+    std::array<float, kTimingHistorySampleCount> m_debugCpuFrameTotalMsHistory{};
+    std::array<float, kTimingHistorySampleCount> m_debugCpuFrameWorkMsHistory{};
+    std::array<float, kTimingHistorySampleCount> m_debugCpuFrameEwmaMsHistory{};
     std::uint32_t m_debugCpuFrameTimingMsHistoryWrite = 0;
     std::uint32_t m_debugCpuFrameTimingMsHistoryCount = 0;
+    float m_debugCpuFrameWorkMs = 0.0f;
+    float m_debugCpuFrameEwmaMs = 0.0f;
+    bool m_debugCpuFrameEwmaInitialized = false;
     std::array<float, kTimingHistorySampleCount> m_debugGpuFrameTimingMsHistory{};
     std::uint32_t m_debugGpuFrameTimingMsHistoryWrite = 0;
     std::uint32_t m_debugGpuFrameTimingMsHistoryCount = 0;
