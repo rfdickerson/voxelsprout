@@ -70,6 +70,7 @@ add_executable(voxel_factory_toy
     src/render/BufferHelpers.cpp
     src/render/Renderer.cpp
     src/render/VmaUsage.cpp
+    src/world/MagicaVoxel.cpp
     src/world/ChunkMesher.cpp
     src/world/ClipmapIndex.cpp
 )
@@ -79,6 +80,7 @@ if(TARGET slang_shaders)
 endif()
 
 target_include_directories(voxel_factory_toy PRIVATE src)
+target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\")
 
 if(MSVC)
     target_compile_options(voxel_factory_toy PRIVATE
@@ -188,6 +190,7 @@ endif()
 if(BUILD_TESTING)
     add_executable(voxel_foundation_tests
         tests/FoundationTests.cpp
+        src/world/MagicaVoxel.cpp
         src/world/ChunkMesher.cpp
         src/world/ClipmapIndex.cpp
     )
@@ -231,6 +234,7 @@ if(BUILD_TESTING)
         add_executable(voxel_stability_gtests
             tests/StabilityGTests.cpp
             src/core/Log.cpp
+            src/world/MagicaVoxel.cpp
             src/world/ChunkMesher.cpp
             src/world/ClipmapIndex.cpp
         )
