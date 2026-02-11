@@ -6,6 +6,7 @@
 #include "core/Log.hpp"
 #include "math/Math.hpp"
 #include "sim/NetworkProcedural.hpp"
+#include "world/MagicaVoxel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,6 +18,7 @@
 #include <limits>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -62,7 +64,176 @@ constexpr float kGamepadMoveDeadzone = 0.18f;
 constexpr float kGamepadLookDeadzone = 0.14f;
 constexpr float kGamepadLookDegreesPerSecond = 160.0f;
 constexpr const char* kWorldFilePath = "world.vxw";
+constexpr const char* kMagicaCastlePath = "assets/magicka/castle.vox";
+constexpr const char* kMagicaTeapotPath = "assets/magicka/teapot.vox";
+constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
+
+std::filesystem::path resolveAssetPath(const std::filesystem::path& relativePath) {
+    std::vector<std::filesystem::path> baseCandidates;
+    baseCandidates.reserve(6);
+
+#if defined(VOXEL_PROJECT_SOURCE_DIR)
+    baseCandidates.emplace_back(std::filesystem::path{VOXEL_PROJECT_SOURCE_DIR});
+#endif
+
+    std::error_code cwdError;
+    const std::filesystem::path cwd = std::filesystem::current_path(cwdError);
+    if (!cwdError) {
+        baseCandidates.push_back(cwd);
+        baseCandidates.push_back(cwd / "..");
+        baseCandidates.push_back(cwd / ".." / "..");
+        baseCandidates.push_back(cwd / ".." / ".." / "..");
+    }
+
+    for (const std::filesystem::path& base : baseCandidates) {
+        const std::filesystem::path candidate = base / relativePath;
+        std::error_code existsError;
+        if (!std::filesystem::exists(candidate, existsError) || existsError) {
+            continue;
+        }
+
+        std::error_code canonicalError;
+        const std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(candidate, canonicalError);
+        if (!canonicalError) {
+            return canonicalPath;
+        }
+        return candidate;
+    }
+
+    return relativePath;
+}
+
+world::MagicaVoxelModel downscaleMagicaModel(const world::MagicaVoxelModel& source, float scale) {
+    if (scale <= 0.0f || scale >= 0.999f) {
+        return source;
+    }
+
+    world::MagicaVoxelModel scaled = source;
+    scaled.voxels.clear();
+
+    const int scaledSizeX = std::max(1, static_cast<int>(std::ceil(static_cast<float>(source.sizeX) * scale)));
+    const int scaledSizeY = std::max(1, static_cast<int>(std::ceil(static_cast<float>(source.sizeY) * scale)));
+    const int scaledSizeZ = std::max(1, static_cast<int>(std::ceil(static_cast<float>(source.sizeZ) * scale)));
+    scaled.sizeX = scaledSizeX;
+    scaled.sizeY = scaledSizeY;
+    scaled.sizeZ = scaledSizeZ;
+
+    const std::size_t cellCount =
+        static_cast<std::size_t>(scaledSizeX) * static_cast<std::size_t>(scaledSizeY) * static_cast<std::size_t>(scaledSizeZ);
+    std::vector<std::uint8_t> densePalette(cellCount, 0u);
+    auto denseIndex = [&](int x, int y, int z) -> std::size_t {
+        return static_cast<std::size_t>(x + (y * scaledSizeX) + (z * scaledSizeX * scaledSizeY));
+    };
+
+    for (const world::MagicaVoxel& voxel : source.voxels) {
+        const int scaledX = std::clamp(static_cast<int>(std::floor(static_cast<float>(voxel.x) * scale)), 0, scaledSizeX - 1);
+        const int scaledY = std::clamp(static_cast<int>(std::floor(static_cast<float>(voxel.y) * scale)), 0, scaledSizeY - 1);
+        const int scaledZ = std::clamp(static_cast<int>(std::floor(static_cast<float>(voxel.z) * scale)), 0, scaledSizeZ - 1);
+        const std::size_t index = denseIndex(scaledX, scaledY, scaledZ);
+        if (densePalette[index] == 0u) {
+            densePalette[index] = voxel.paletteIndex;
+        }
+    }
+
+    for (int z = 0; z < scaledSizeZ; ++z) {
+        for (int y = 0; y < scaledSizeY; ++y) {
+            for (int x = 0; x < scaledSizeX; ++x) {
+                const std::uint8_t paletteIndex = densePalette[denseIndex(x, y, z)];
+                if (paletteIndex == 0u) {
+                    continue;
+                }
+                scaled.voxels.push_back(world::MagicaVoxel{
+                    static_cast<std::uint8_t>(x),
+                    static_cast<std::uint8_t>(y),
+                    static_cast<std::uint8_t>(z),
+                    paletteIndex
+                });
+            }
+        }
+    }
+
+    return scaled;
+}
+
+world::VoxelType voxelTypeForMagicaRgba(std::uint32_t rgba) {
+    const int r = static_cast<int>(rgba & 0xFFu);
+    const int g = static_cast<int>((rgba >> 8u) & 0xFFu);
+    const int b = static_cast<int>((rgba >> 16u) & 0xFFu);
+    const int a = static_cast<int>((rgba >> 24u) & 0xFFu);
+    if (a <= 8) {
+        return world::VoxelType::Empty;
+    }
+
+    struct VoxelRef {
+        world::VoxelType type = world::VoxelType::Empty;
+        int r = 0;
+        int g = 0;
+        int b = 0;
+    };
+    constexpr std::array<VoxelRef, 5> kVoxelRefs = {
+        VoxelRef{world::VoxelType::Stone, 168, 168, 168},
+        VoxelRef{world::VoxelType::Dirt, 134, 93, 52},
+        VoxelRef{world::VoxelType::Grass, 96, 164, 80},
+        VoxelRef{world::VoxelType::Wood, 154, 121, 84},
+        VoxelRef{world::VoxelType::SolidRed, 228, 84, 66},
+    };
+
+    world::VoxelType closest = kVoxelRefs.front().type;
+    int bestDistance = std::numeric_limits<int>::max();
+    for (const VoxelRef& reference : kVoxelRefs) {
+        const int dr = r - reference.r;
+        const int dg = g - reference.g;
+        const int db = b - reference.b;
+        const int distance = (dr * dr) + (dg * dg) + (db * db);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            closest = reference.type;
+        }
+    }
+    return closest;
+}
+
+std::uint8_t quantizeBaseColorIndex(
+    std::uint32_t rgba,
+    std::array<std::uint32_t, 16>& paletteSlots,
+    std::uint8_t& paletteSlotCount
+) {
+    for (std::uint8_t i = 0; i < paletteSlotCount; ++i) {
+        if (paletteSlots[i] == rgba) {
+            return i;
+        }
+    }
+
+    if (paletteSlotCount < static_cast<std::uint8_t>(paletteSlots.size())) {
+        const std::uint8_t slot = paletteSlotCount;
+        paletteSlots[slot] = rgba;
+        ++paletteSlotCount;
+        return slot;
+    }
+
+    const int r = static_cast<int>(rgba & 0xFFu);
+    const int g = static_cast<int>((rgba >> 8u) & 0xFFu);
+    const int b = static_cast<int>((rgba >> 16u) & 0xFFu);
+
+    std::uint8_t nearestSlot = 0u;
+    int bestDistance = std::numeric_limits<int>::max();
+    for (std::uint8_t i = 0; i < static_cast<std::uint8_t>(paletteSlots.size()); ++i) {
+        const std::uint32_t slotRgba = paletteSlots[i];
+        const int slotR = static_cast<int>(slotRgba & 0xFFu);
+        const int slotG = static_cast<int>((slotRgba >> 8u) & 0xFFu);
+        const int slotB = static_cast<int>((slotRgba >> 16u) & 0xFFu);
+        const int dr = r - slotR;
+        const int dg = g - slotG;
+        const int db = b - slotB;
+        const int distance = (dr * dr) + (dg * dg) + (db * db);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            nearestSlot = i;
+        }
+    }
+    return nearestSlot;
+}
 
 constexpr std::array<world::VoxelType, 5> kPlaceableBlockTypes = {
     world::VoxelType::Stone,
@@ -542,6 +713,95 @@ bool App::init() {
         VOX_LOGW("app") << "world file missing/invalid at " << std::filesystem::absolute(worldPath).string()
                         << "; using empty world (press R to regenerate) in " << worldLoadMs << " ms";
     }
+
+    const auto magicaStampStart = Clock::now();
+    struct MagicaLoadSpec {
+        const char* relativePath = nullptr;
+        float placementX = 0.0f;
+        float placementY = 0.0f;
+        float placementZ = 0.0f;
+        float uniformScale = 1.0f;
+    };
+    constexpr std::array<MagicaLoadSpec, 3> kMagicaLoadSpecs = {
+        MagicaLoadSpec{kMagicaCastlePath, 0.0f, 0.0f, 0.0f, 1.0f},
+        MagicaLoadSpec{kMagicaTeapotPath, 64.0f, 0.0f, 0.0f, 0.36f},
+        MagicaLoadSpec{kMagicaMonu2Path, -72.0f, 0.0f, 16.0f, 0.25f},
+    };
+    std::array<std::uint32_t, 16> magicaBaseColorPalette{};
+    std::uint8_t magicaBaseColorPaletteCount = 0u;
+
+    std::uint32_t stampedMagicaResourceCount = 0;
+    std::uint64_t stampedMagicaVoxelCount = 0;
+    std::uint64_t clippedMagicaVoxelCount = 0;
+    for (const MagicaLoadSpec& loadSpec : kMagicaLoadSpecs) {
+        const std::filesystem::path magicaPath = resolveAssetPath(std::filesystem::path{loadSpec.relativePath});
+        world::MagicaVoxelModel loadedModel{};
+        if (!world::loadMagicaVoxelModel(magicaPath, loadedModel)) {
+            std::error_code cwdError;
+            const std::filesystem::path cwd = std::filesystem::current_path(cwdError);
+            VOX_LOGW("app") << "failed to load magica resource at " << std::filesystem::absolute(magicaPath).string()
+                            << " (cwd=" << (cwdError ? std::string{"<unavailable>"} : cwd.string()) << ")";
+            continue;
+        }
+
+        const world::MagicaVoxelModel magicaModel = downscaleMagicaModel(loadedModel, loadSpec.uniformScale);
+        const int transformedSizeX = magicaModel.sizeX;
+        const int transformedSizeZ = magicaModel.sizeY;
+        const int worldOriginX = static_cast<int>(std::lround(loadSpec.placementX - (0.5f * static_cast<float>(transformedSizeX))));
+        const int worldOriginY = static_cast<int>(std::lround(loadSpec.placementY));
+        const int worldOriginZ = static_cast<int>(std::lround(loadSpec.placementZ - (0.5f * static_cast<float>(transformedSizeZ))));
+
+        std::uint64_t resourceStamped = 0;
+        std::uint64_t resourceClipped = 0;
+        for (const world::MagicaVoxel& voxel : magicaModel.voxels) {
+            const std::uint32_t paletteRgba = magicaModel.paletteRgba[voxel.paletteIndex];
+            const world::VoxelType voxelType = voxelTypeForMagicaRgba(paletteRgba);
+            if (voxelType == world::VoxelType::Empty) {
+                continue;
+            }
+
+            const int worldX = worldOriginX + static_cast<int>(voxel.x);
+            const int worldY = worldOriginY + static_cast<int>(voxel.z);
+            const int worldZ = worldOriginZ + static_cast<int>(voxel.y);
+            std::size_t chunkIndex = 0;
+            int localX = 0;
+            int localY = 0;
+            int localZ = 0;
+            if (!worldToChunkLocal(worldX, worldY, worldZ, chunkIndex, localX, localY, localZ)) {
+                ++resourceClipped;
+                continue;
+            }
+
+            world::Chunk& chunk = m_chunkGrid.chunks()[chunkIndex];
+            const std::uint8_t baseColorIndex = quantizeBaseColorIndex(
+                paletteRgba,
+                magicaBaseColorPalette,
+                magicaBaseColorPaletteCount
+            );
+            chunk.setVoxel(localX, localY, localZ, world::Voxel{voxelType, baseColorIndex});
+            ++resourceStamped;
+        }
+
+        if (resourceStamped == 0) {
+            VOX_LOGW("app") << "magica resource stamped no world voxels: "
+                            << std::filesystem::absolute(magicaPath).string()
+                            << " (clipped=" << resourceClipped << ")";
+            continue;
+        }
+
+        ++stampedMagicaResourceCount;
+        stampedMagicaVoxelCount += resourceStamped;
+        clippedMagicaVoxelCount += resourceClipped;
+        VOX_LOGI("app") << "stamped magica resource " << std::filesystem::absolute(magicaPath).string()
+                        << " (" << resourceStamped << " voxels, clipped=" << resourceClipped
+                        << ", scale=" << loadSpec.uniformScale << ")";
+    }
+    VOX_LOGI("app") << "stamped " << stampedMagicaResourceCount << "/" << kMagicaLoadSpecs.size()
+                    << " magica resources into world (voxels=" << stampedMagicaVoxelCount
+                    << ", clipped=" << clippedMagicaVoxelCount
+                    << ", paletteColors=" << static_cast<std::uint32_t>(magicaBaseColorPaletteCount)
+                    << ") in " << elapsedMs(magicaStampStart) << " ms";
+    m_renderer.setVoxelBaseColorPalette(magicaBaseColorPalette);
 
     const auto clipmapStart = Clock::now();
     m_appliedClipmapConfig = m_renderer.clipmapQueryConfig();

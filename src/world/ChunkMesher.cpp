@@ -26,22 +26,43 @@ constexpr std::array<FaceNeighbor, 6> kFaceNeighbors = {
     FaceNeighbor{0, 0, -1, 5u},
 };
 
+constexpr std::uint8_t kMaterialStone = 1u;
+constexpr std::uint8_t kMaterialDirt = 2u;
+constexpr std::uint8_t kMaterialGrass = 3u;
+constexpr std::uint8_t kMaterialWood = 4u;
+constexpr std::uint8_t kMaterialRed = 5u;
+constexpr std::uint8_t kMaterialPalette = 6u;
+
 std::uint8_t materialForVoxelType(VoxelType type) {
     switch (type) {
     case VoxelType::Stone:
-        return 1;
+        return kMaterialStone;
     case VoxelType::Dirt:
-        return 2;
+        return kMaterialDirt;
     case VoxelType::Grass:
-        return 3;
+        return kMaterialGrass;
     case VoxelType::Wood:
-        return 4;
+        return kMaterialWood;
     case VoxelType::SolidRed:
-        return 251;
+        return kMaterialRed;
     case VoxelType::Empty:
     default:
         return 0;
     }
+}
+
+std::uint8_t packedBaseColorIndexForVoxel(const Voxel& voxel) {
+    return (voxel.baseColorIndex <= PackedVoxelVertex::kMask4) ? voxel.baseColorIndex : 0u;
+}
+
+std::uint8_t materialForVoxel(const Voxel& voxel) {
+    if (voxel.type == VoxelType::Empty) {
+        return 0u;
+    }
+    if (voxel.baseColorIndex <= PackedVoxelVertex::kMask4) {
+        return kMaterialPalette;
+    }
+    return materialForVoxelType(voxel.type);
 }
 
 bool isSolidVoxel(const Chunk& chunk, int x, int y, int z) {
@@ -146,6 +167,7 @@ void appendVoxelFace(
     int z,
     std::uint32_t faceId,
     std::uint32_t material,
+    std::uint32_t baseColorIndex,
     std::uint32_t lodLevel
 ) {
     const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
@@ -160,6 +182,7 @@ void appendVoxelFace(
             corner,
             ao,
             material,
+            baseColorIndex,
             lodLevel
         );
         mesh.vertices.push_back(vertex);
@@ -173,7 +196,7 @@ void appendVoxelFace(
     mesh.indices.push_back(baseVertex + 3);
 }
 
-constexpr std::uint32_t kEmptyMaskKey = 0xFFFFFFFFu;
+constexpr std::uint16_t kEmptyMaskKey = 0xFFFFu;
 
 void faceSliceDimensions(std::uint32_t faceId, int& outSliceCount, int& outUCount, int& outVCount) {
     switch (faceId) {
@@ -285,8 +308,16 @@ std::uint8_t faceCornerAoSignature(
     return signature;
 }
 
-std::uint32_t makeMaskKey(std::uint8_t material, std::uint8_t aoSignature) {
-    return (static_cast<std::uint32_t>(material) << 8u) | static_cast<std::uint32_t>(aoSignature);
+std::uint16_t makeMaskKey(std::uint8_t material, std::uint8_t aoSignature, std::uint8_t baseColorIndex) {
+    // 16-bit greedy mask key layout:
+    // bits 12..15: material (4 bits)
+    // bits  4..11: AO signature (8 bits; 4 corners x 2 bits)
+    // bits  0.. 3: base color index (4 bits)
+    return static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(material & PackedVoxelVertex::kMask4) << 12u) |
+        (static_cast<std::uint16_t>(aoSignature) << 4u) |
+        static_cast<std::uint16_t>(baseColorIndex & PackedVoxelVertex::kMask4)
+    );
 }
 
 bool appendGreedyFaceQuad(
@@ -299,6 +330,7 @@ bool appendGreedyFaceQuad(
     int height,
     std::uint8_t material,
     std::uint8_t aoSignature,
+    std::uint32_t baseColorIndex,
     std::uint32_t lodLevel
 ) {
     const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
@@ -326,6 +358,7 @@ bool appendGreedyFaceQuad(
             corner,
             ao,
             material,
+            baseColorIndex,
             lodLevel
         );
         mesh.vertices.push_back(vertex);
@@ -350,7 +383,7 @@ ChunkLodMeshes buildChunkLodMeshesGreedy(const Chunk& chunk) {
         int uCount = 0;
         int vCount = 0;
         faceSliceDimensions(faceId, sliceCount, uCount, vCount);
-        std::vector<std::uint32_t> mask(static_cast<std::size_t>(uCount * vCount), kEmptyMaskKey);
+        std::vector<std::uint16_t> mask(static_cast<std::size_t>(uCount * vCount), kEmptyMaskKey);
 
         for (int slice = 0; slice < sliceCount; ++slice) {
             std::fill(mask.begin(), mask.end(), kEmptyMaskKey);
@@ -372,17 +405,18 @@ ChunkLodMeshes buildChunkLodMeshesGreedy(const Chunk& chunk) {
                         continue;
                     }
 
-                    const std::uint8_t material = materialForVoxelType(voxel.type);
+                    const std::uint8_t material = materialForVoxel(voxel);
+                    const std::uint8_t baseColorIndex = packedBaseColorIndexForVoxel(voxel);
                     const std::uint8_t aoSignature = faceCornerAoSignature(chunk, x, y, z, faceId);
                     const std::size_t maskIndex = static_cast<std::size_t>(u + (v * uCount));
-                    mask[maskIndex] = makeMaskKey(material, aoSignature);
+                    mask[maskIndex] = makeMaskKey(material, aoSignature, baseColorIndex);
                 }
             }
 
             for (int v = 0; v < vCount; ++v) {
                 for (int u = 0; u < uCount;) {
                     const std::size_t startIndex = static_cast<std::size_t>(u + (v * uCount));
-                    const std::uint32_t key = mask[startIndex];
+                    const std::uint16_t key = mask[startIndex];
                     if (key == kEmptyMaskKey) {
                         ++u;
                         continue;
@@ -413,10 +447,25 @@ ChunkLodMeshes buildChunkLodMeshesGreedy(const Chunk& chunk) {
                         }
                     }
 
-                    const std::uint8_t material = static_cast<std::uint8_t>((key >> 8u) & 0xFFu);
-                    const std::uint8_t aoSignature = static_cast<std::uint8_t>(key & 0xFFu);
+                    const std::uint8_t material =
+                        static_cast<std::uint8_t>((key >> 12u) & PackedVoxelVertex::kMask4);
+                    const std::uint8_t aoSignature = static_cast<std::uint8_t>((key >> 4u) & 0xFFu);
+                    const std::uint8_t baseColorIndex =
+                        static_cast<std::uint8_t>(key & PackedVoxelVertex::kMask4);
                     const bool mergedQuadAppended =
-                        appendGreedyFaceQuad(baseMesh, faceId, slice, u, v, width, height, material, aoSignature, 0u);
+                        appendGreedyFaceQuad(
+                            baseMesh,
+                            faceId,
+                            slice,
+                            u,
+                            v,
+                            width,
+                            height,
+                            material,
+                            aoSignature,
+                            baseColorIndex,
+                            0u
+                        );
                     if (!mergedQuadAppended) {
                         // Fallback path: preserve correctness if a merged quad cannot be encoded.
                         for (int emitV = 0; emitV < height; ++emitV) {
@@ -425,7 +474,20 @@ ChunkLodMeshes buildChunkLodMeshesGreedy(const Chunk& chunk) {
                                 int y = 0;
                                 int z = 0;
                                 faceSliceCellToVoxel(faceId, slice, u + emitU, v + emitV, x, y, z);
-                                appendVoxelFace(chunk, baseMesh, x, y, z, faceId, material, 0u);
+                                const Voxel voxel = chunk.voxelAt(x, y, z);
+                                const std::uint8_t fallbackMaterial = materialForVoxel(voxel);
+                                const std::uint8_t fallbackBaseColorIndex = packedBaseColorIndexForVoxel(voxel);
+                                appendVoxelFace(
+                                    chunk,
+                                    baseMesh,
+                                    x,
+                                    y,
+                                    z,
+                                    faceId,
+                                    fallbackMaterial,
+                                    fallbackBaseColorIndex,
+                                    0u
+                                );
                             }
                         }
                     }
@@ -457,6 +519,7 @@ std::uint32_t PackedVoxelVertex::pack(
     std::uint32_t corner,
     std::uint32_t ao,
     std::uint32_t material,
+    std::uint32_t baseColorIndex,
     std::uint32_t lodLevel
 ) {
     return ((x & kMask5) << kShiftX) |
@@ -465,7 +528,8 @@ std::uint32_t PackedVoxelVertex::pack(
            ((face & kMask3) << kShiftFace) |
            ((corner & kMask2) << kShiftCorner) |
            ((ao & kMask2) << kShiftAo) |
-           ((material & kMask8) << kShiftMaterial) |
+           ((material & kMask4) << kShiftMaterial) |
+           ((baseColorIndex & kMask4) << kShiftBaseColor) |
            ((lodLevel & kMask2) << kShiftLodLevel);
 }
 
@@ -485,12 +549,13 @@ ChunkLodMeshes buildChunkLodMeshesNaive(const Chunk& chunk) {
                     continue;
                 }
 
-                const std::uint32_t material = materialForVoxelType(voxel.type);
+                const std::uint8_t material = materialForVoxel(voxel);
+                const std::uint8_t baseColorIndex = packedBaseColorIndexForVoxel(voxel);
                 for (const FaceNeighbor& face : kFaceNeighbors) {
                     if (isSolidVoxel(chunk, x + face.nx, y + face.ny, z + face.nz)) {
                         continue;
                     }
-                    appendVoxelFace(chunk, baseMesh, x, y, z, face.faceId, material, 0u);
+                    appendVoxelFace(chunk, baseMesh, x, y, z, face.faceId, material, baseColorIndex, 0u);
                 }
             }
         }

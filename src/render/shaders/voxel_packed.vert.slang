@@ -15,6 +15,7 @@ struct VertexOutput
     nointerpolation uint outMaterial : TEXCOORD1;
     float3 outWorldPosition : TEXCOORD2;
     float outVertexAo : TEXCOORD3;
+    nointerpolation uint outBaseColorIndex : TEXCOORD4;
 };
 
 VertexOutput main(VertexInput input)
@@ -27,7 +28,8 @@ VertexOutput main(VertexInput input)
     const uint face = (input.inPacked >> kShiftFace) & 0x7u;
     const uint corner = (input.inPacked >> kShiftCorner) & 0x3u;
     const uint ao = (input.inPacked >> kShiftAo) & 0x3u;
-    const uint material = (input.inPacked >> kShiftMaterial) & 0xFFu;
+    const uint material = (input.inPacked >> kShiftMaterial) & 0xFu;
+    const uint baseColorIndex = (input.inPacked >> kShiftBaseColor) & 0xFu;
 
     const float3 basePosition = float3(float(x), float(y), float(z));
     const float3 worldPosition =
@@ -40,6 +42,7 @@ VertexOutput main(VertexInput input)
     output.outMaterial = material;
     output.outWorldPosition = worldPosition;
     output.outVertexAo = lerp(0.45, 1.0, float(ao) / 3.0);
+    output.outBaseColorIndex = baseColorIndex;
     output.position = mul(camera.mvp, float4(worldPosition, 1.0));
     return output;
 }

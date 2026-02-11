@@ -20,6 +20,7 @@ public struct CameraUniform
     public float4 skyConfig0;
     public float4 skyConfig1;
     public float4 skyConfig2;
+    public float4 voxelBaseColorPalette[16];
 };
 
 [[vk::binding(0, 0)]]

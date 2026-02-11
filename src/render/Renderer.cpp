@@ -121,6 +121,7 @@ struct alignas(16) CameraUniform {
     float skyConfig0[4];
     float skyConfig1[4];
     float skyConfig2[4];
+    float voxelBaseColorPalette[16][4];
 };
 
 struct alignas(16) ChunkPushConstants {
@@ -156,7 +157,7 @@ world::ChunkMeshData buildSingleVoxelPreviewMesh(
         const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
         for (std::uint32_t corner = 0; corner < 4; ++corner) {
             world::PackedVoxelVertex vertex{};
-            vertex.bits = world::PackedVoxelVertex::pack(x, y, z, faceId, corner, ao, material, 2u);
+            vertex.bits = world::PackedVoxelVertex::pack(x, y, z, faceId, corner, ao, material, 0u, 2u);
             mesh.vertices.push_back(vertex);
         }
 
@@ -1282,6 +1283,23 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         VOX_LOGE("render") << "init failed: window is null\n";
         return false;
     }
+    bool hasPaletteOverride = false;
+    for (const std::uint32_t rgba : m_voxelBaseColorPaletteRgba) {
+        if (rgba != 0u) {
+            hasPaletteOverride = true;
+            break;
+        }
+    }
+    if (!hasPaletteOverride) {
+        for (std::size_t i = 0; i < m_voxelBaseColorPaletteRgba.size(); ++i) {
+            const std::uint8_t shade = static_cast<std::uint8_t>((255u * static_cast<std::uint32_t>(i)) / 15u);
+            m_voxelBaseColorPaletteRgba[i] =
+                static_cast<std::uint32_t>(shade) |
+                (static_cast<std::uint32_t>(shade) << 8u) |
+                (static_cast<std::uint32_t>(shade) << 16u) |
+                (0xFFu << 24u);
+        }
+    }
 
     if (glfwVulkanSupported() == GLFW_FALSE) {
         VOX_LOGE("render") << "init failed: glfwVulkanSupported returned false\n";
@@ -1411,6 +1429,82 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
 #endif
 
     VOX_LOGI("render") << "init complete in " << elapsedMs(initStart) << " ms\n";
+    return true;
+}
+
+void Renderer::clearMagicaVoxelMeshes() {
+    for (MagicaMeshDraw& draw : m_magicaMeshDraws) {
+        if (draw.vertexBufferHandle != kInvalidBufferHandle) {
+            scheduleBufferRelease(draw.vertexBufferHandle, m_lastGraphicsTimelineValue);
+            draw.vertexBufferHandle = kInvalidBufferHandle;
+        }
+        if (draw.indexBufferHandle != kInvalidBufferHandle) {
+            scheduleBufferRelease(draw.indexBufferHandle, m_lastGraphicsTimelineValue);
+            draw.indexBufferHandle = kInvalidBufferHandle;
+        }
+        draw.indexCount = 0;
+    }
+    m_magicaMeshDraws.clear();
+}
+
+void Renderer::setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba) {
+    m_voxelBaseColorPaletteRgba = paletteRgba;
+}
+
+bool Renderer::uploadMagicaVoxelMesh(
+    const world::ChunkMeshData& mesh,
+    float worldOffsetX,
+    float worldOffsetY,
+    float worldOffsetZ
+) {
+    if (m_device == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    if (mesh.vertices.empty() || mesh.indices.empty()) {
+        return false;
+    }
+
+    BufferCreateDesc vertexCreateDesc{};
+    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(world::PackedVoxelVertex));
+    vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vertexCreateDesc.initialData = mesh.vertices.data();
+    const BufferHandle newVertexHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
+    if (newVertexHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "magica voxel vertex buffer allocation failed";
+        return false;
+    }
+
+    BufferCreateDesc indexCreateDesc{};
+    indexCreateDesc.size = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
+    indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    indexCreateDesc.initialData = mesh.indices.data();
+    const BufferHandle newIndexHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
+    if (newIndexHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "magica voxel index buffer allocation failed";
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        return false;
+    }
+
+    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(newVertexHandle);
+    if (vertexBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(vertexBuffer), "mesh.magicaVoxel.vertex");
+    }
+    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(newIndexHandle);
+    if (indexBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "mesh.magicaVoxel.index");
+    }
+
+    MagicaMeshDraw draw{};
+    draw.vertexBufferHandle = newVertexHandle;
+    draw.indexBufferHandle = newIndexHandle;
+    draw.indexCount = static_cast<uint32_t>(mesh.indices.size());
+    draw.offsetX = worldOffsetX;
+    draw.offsetY = worldOffsetY;
+    draw.offsetZ = worldOffsetZ;
+    m_magicaMeshDraws.push_back(draw);
     return true;
 }
 
@@ -4244,9 +4338,10 @@ bool Renderer::createGraphicsPipeline() {
     struct WorldFragmentSpecializationData {
         std::int32_t shadowPolicyMode = 2;  // 0=no shadows, 1=single-cascade PCF, 2=cascade-blended PCF
         std::int32_t ambientPolicyMode = 2; // 0=SH only, 1=SH hemisphere, 2=SH hemisphere + vertex AO
+        std::int32_t forceTintOnly = 0;     // 0=atlas sampling enabled, 1=tint-only shading
     };
     const WorldFragmentSpecializationData worldFragmentSpecializationData{};
-    const std::array<VkSpecializationMapEntry, 2> worldFragmentSpecializationMapEntries = {{
+    const std::array<VkSpecializationMapEntry, 3> worldFragmentSpecializationMapEntries = {{
         VkSpecializationMapEntry{
             6u,
             static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, shadowPolicyMode)),
@@ -4255,6 +4350,11 @@ bool Renderer::createGraphicsPipeline() {
         VkSpecializationMapEntry{
             7u,
             static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, ambientPolicyMode)),
+            sizeof(std::int32_t)
+        },
+        VkSpecializationMapEntry{
+            8u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, forceTintOnly)),
             sizeof(std::int32_t)
         }
     }};
@@ -5010,6 +5110,210 @@ bool Renderer::createGraphicsPipeline() {
     VOX_LOGI("render") << "graphics pipelines ready (shadow + hdr scene + tonemap + preview="
               << (m_supportsWireframePreview ? "wireframe" : "ghost")
               << ")\n";
+    return true;
+}
+
+bool Renderer::createMagicaPipeline() {
+    if (m_pipelineLayout == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (m_depthFormat == VK_FORMAT_UNDEFINED || m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
+        return false;
+    }
+
+    constexpr const char* kWorldVertexShaderPath = "../src/render/shaders/voxel_packed.vert.slang.spv";
+    constexpr const char* kWorldFragmentShaderPath = "../src/render/shaders/voxel_packed.frag.slang.spv";
+
+    VkShaderModule magicaVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule magicaFragShaderModule = VK_NULL_HANDLE;
+    if (!createShaderModuleFromFile(
+            m_device,
+            kWorldVertexShaderPath,
+            "magica.voxel_packed.vert",
+            magicaVertShaderModule
+        )) {
+        return false;
+    }
+    if (!createShaderModuleFromFile(
+            m_device,
+            kWorldFragmentShaderPath,
+            "magica.voxel_packed.frag",
+            magicaFragShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, magicaVertShaderModule, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo vertexShaderStage{};
+    vertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertexShaderStage.module = magicaVertShaderModule;
+    vertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo fragmentShaderStage{};
+    fragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragmentShaderStage.module = magicaFragShaderModule;
+    fragmentShaderStage.pName = "main";
+    struct WorldFragmentSpecializationData {
+        std::int32_t shadowPolicyMode = 2;
+        std::int32_t ambientPolicyMode = 2;
+        std::int32_t forceTintOnly = 1;
+    };
+    const WorldFragmentSpecializationData fragmentSpecializationData{};
+    const std::array<VkSpecializationMapEntry, 3> specializationMapEntries = {{
+        VkSpecializationMapEntry{
+            6u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, shadowPolicyMode)),
+            sizeof(std::int32_t)
+        },
+        VkSpecializationMapEntry{
+            7u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, ambientPolicyMode)),
+            sizeof(std::int32_t)
+        },
+        VkSpecializationMapEntry{
+            8u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, forceTintOnly)),
+            sizeof(std::int32_t)
+        }
+    }};
+    const VkSpecializationInfo specializationInfo{
+        static_cast<uint32_t>(specializationMapEntries.size()),
+        specializationMapEntries.data(),
+        sizeof(fragmentSpecializationData),
+        &fragmentSpecializationData
+    };
+    fragmentShaderStage.pSpecializationInfo = &specializationInfo;
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
+        vertexShaderStage,
+        fragmentShaderStage
+    };
+
+    VkVertexInputBindingDescription bindingDescriptions[2]{};
+    bindingDescriptions[0].binding = 0;
+    bindingDescriptions[0].stride = sizeof(world::PackedVoxelVertex);
+    bindingDescriptions[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    bindingDescriptions[1].binding = 1;
+    bindingDescriptions[1].stride = sizeof(ChunkInstanceData);
+    bindingDescriptions[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    VkVertexInputAttributeDescription attributeDescriptions[2]{};
+    attributeDescriptions[0].location = 0;
+    attributeDescriptions[0].binding = 0;
+    attributeDescriptions[0].format = VK_FORMAT_R32_UINT;
+    attributeDescriptions[0].offset = 0;
+    attributeDescriptions[1].location = 1;
+    attributeDescriptions[1].binding = 1;
+    attributeDescriptions[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[1].offset = 0;
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.vertexBindingDescriptionCount = 2;
+    vertexInputInfo.pVertexBindingDescriptions = bindingDescriptions;
+    vertexInputInfo.vertexAttributeDescriptionCount = 2;
+    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = m_colorSampleCount;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    std::array<VkDynamicState, 2> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkPipelineRenderingCreateInfo renderingCreateInfo{};
+    renderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderingCreateInfo.colorAttachmentCount = 1;
+    renderingCreateInfo.pColorAttachmentFormats = &m_hdrColorFormat;
+    renderingCreateInfo.depthAttachmentFormat = m_depthFormat;
+
+    VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
+    pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.pNext = &renderingCreateInfo;
+    pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+    pipelineCreateInfo.pStages = shaderStages.data();
+    pipelineCreateInfo.pVertexInputState = &vertexInputInfo;
+    pipelineCreateInfo.pInputAssemblyState = &inputAssembly;
+    pipelineCreateInfo.pViewportState = &viewportState;
+    pipelineCreateInfo.pRasterizationState = &rasterizer;
+    pipelineCreateInfo.pMultisampleState = &multisampling;
+    pipelineCreateInfo.pDepthStencilState = &depthStencil;
+    pipelineCreateInfo.pColorBlendState = &colorBlending;
+    pipelineCreateInfo.pDynamicState = &dynamicState;
+    pipelineCreateInfo.layout = m_pipelineLayout;
+    pipelineCreateInfo.renderPass = VK_NULL_HANDLE;
+    pipelineCreateInfo.subpass = 0;
+
+    VkPipeline magicaPipeline = VK_NULL_HANDLE;
+    const VkResult pipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &magicaPipeline
+    );
+
+    vkDestroyShaderModule(m_device, magicaFragShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, magicaVertShaderModule, nullptr);
+
+    if (pipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(magica)", pipelineResult);
+        return false;
+    }
+
+    if (m_magicaPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_magicaPipeline, nullptr);
+    }
+    m_magicaPipeline = magicaPipeline;
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_magicaPipeline), "pipeline.magicaVoxel");
+    VOX_LOGI("render") << "pipeline config (magica): samples=" << static_cast<uint32_t>(m_colorSampleCount)
+                       << ", cullMode=" << static_cast<uint32_t>(rasterizer.cullMode)
+                       << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
+                       << "\n";
     return true;
 }
 
@@ -5830,6 +6134,14 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
     }
 
     const std::vector<world::Chunk>& chunks = chunkGrid.chunks();
+    const std::vector<ChunkDrawRange> previousChunkDrawRanges = m_chunkDrawRanges;
+    const std::uint32_t previousDebugChunkMeshVertexCount = m_debugChunkMeshVertexCount;
+    const std::uint32_t previousDebugChunkMeshIndexCount = m_debugChunkMeshIndexCount;
+    auto rollbackChunkDrawState = [&]() {
+        m_chunkDrawRanges = previousChunkDrawRanges;
+        m_debugChunkMeshVertexCount = previousDebugChunkMeshVertexCount;
+        m_debugChunkMeshIndexCount = previousDebugChunkMeshIndexCount;
+    };
     const std::size_t expectedDrawRangeCount = chunks.size() * world::kChunkMeshLodCount;
     if (m_chunkDrawRanges.size() != expectedDrawRangeCount) {
         m_chunkDrawRanges.assign(expectedDrawRangeCount, ChunkDrawRange{});
@@ -5979,6 +6291,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         uniqueRemeshChunkIndices.reserve(remeshChunkIndices.size());
         for (const std::size_t chunkArrayIndex : remeshChunkIndices) {
             if (chunkArrayIndex >= chunks.size()) {
+                rollbackChunkDrawState();
                 return false;
             }
             if (remeshMask[chunkArrayIndex] != 0u) {
@@ -6123,6 +6436,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
             const std::size_t baseVertexSize = combinedVertices.size();
             if (baseVertexSize > static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
                 VOX_LOGE("render") << "chunk mesh vertex offset exceeds int32 range";
+                rollbackChunkDrawState();
                 return false;
             }
             const uint32_t baseVertex = static_cast<uint32_t>(baseVertexSize);
@@ -6173,6 +6487,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
     if (m_transferCommandBufferInFlightValue > 0) {
         if (!isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
     }
@@ -6199,6 +6514,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (newChunkVertexBufferHandle == kInvalidBufferHandle) {
             VOX_LOGE("render") << "chunk global vertex buffer allocation failed";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
         {
@@ -6220,6 +6536,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (newChunkIndexBufferHandle == kInvalidBufferHandle) {
             VOX_LOGE("render") << "chunk global index buffer allocation failed";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
         {
@@ -6237,6 +6554,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (!chunkVertexUploadSliceOpt.has_value() || chunkVertexUploadSliceOpt->mapped == nullptr) {
             VOX_LOGE("render") << "chunk global vertex upload slice allocation failed";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
         std::memcpy(
@@ -6253,6 +6571,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (!chunkIndexUploadSliceOpt.has_value() || chunkIndexUploadSliceOpt->mapped == nullptr) {
             VOX_LOGE("render") << "chunk global index upload slice allocation failed";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
         std::memcpy(
@@ -6268,6 +6587,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (resetResult != VK_SUCCESS) {
             logVkFailure("vkResetCommandPool(transfer)", resetResult);
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
 
@@ -6277,6 +6597,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (vkBeginCommandBuffer(m_transferCommandBuffer, &beginInfo) != VK_SUCCESS) {
             VOX_LOGE("render") << "vkBeginCommandBuffer (transfer) failed\n";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
 
@@ -6310,19 +6631,39 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (vkEndCommandBuffer(m_transferCommandBuffer) != VK_SUCCESS) {
             VOX_LOGE("render") << "vkEndCommandBuffer (transfer) failed\n";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
 
         transferSignalValue = m_nextTimelineValue++;
+        std::array<VkSemaphore, 1> transferWaitSemaphores{};
+        std::array<VkPipelineStageFlags, 1> transferWaitStages{};
+        std::array<uint64_t, 1> transferWaitValues{};
+        uint32_t transferWaitCount = 0;
+        if (m_lastGraphicsTimelineValue > 0) {
+            transferWaitSemaphores[0] = m_renderTimelineSemaphore;
+            transferWaitStages[0] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            transferWaitValues[0] = m_lastGraphicsTimelineValue;
+            transferWaitCount = 1;
+        }
+
         VkSemaphore timelineSemaphore = m_renderTimelineSemaphore;
         VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
         timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineSubmitInfo.waitSemaphoreValueCount = transferWaitCount;
+        timelineSubmitInfo.pWaitSemaphoreValues =
+            transferWaitCount > 0 ? transferWaitValues.data() : nullptr;
         timelineSubmitInfo.signalSemaphoreValueCount = 1;
         timelineSubmitInfo.pSignalSemaphoreValues = &transferSignalValue;
 
         VkSubmitInfo transferSubmitInfo{};
         transferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         transferSubmitInfo.pNext = &timelineSubmitInfo;
+        transferSubmitInfo.waitSemaphoreCount = transferWaitCount;
+        transferSubmitInfo.pWaitSemaphores =
+            transferWaitCount > 0 ? transferWaitSemaphores.data() : nullptr;
+        transferSubmitInfo.pWaitDstStageMask =
+            transferWaitCount > 0 ? transferWaitStages.data() : nullptr;
         transferSubmitInfo.commandBufferCount = 1;
         transferSubmitInfo.pCommandBuffers = &m_transferCommandBuffer;
         transferSubmitInfo.signalSemaphoreCount = 1;
@@ -6332,6 +6673,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (submitResult != VK_SUCCESS) {
             logVkFailure("vkQueueSubmit(transfer)", submitResult);
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
 
@@ -7624,6 +7966,13 @@ void Renderer::renderFrame(
     mvpUniform.skyConfig2[1] = effectiveSkySettings.sunHazeFalloff;
     mvpUniform.skyConfig2[2] = effectiveSkySettings.plantQuadDirectionality;
     mvpUniform.skyConfig2[3] = 0.0f;
+    for (std::size_t colorIndex = 0; colorIndex < m_voxelBaseColorPaletteRgba.size(); ++colorIndex) {
+        const std::uint32_t rgba = m_voxelBaseColorPaletteRgba[colorIndex];
+        mvpUniform.voxelBaseColorPalette[colorIndex][0] = static_cast<float>(rgba & 0xFFu) / 255.0f;
+        mvpUniform.voxelBaseColorPalette[colorIndex][1] = static_cast<float>((rgba >> 8u) & 0xFFu) / 255.0f;
+        mvpUniform.voxelBaseColorPalette[colorIndex][2] = static_cast<float>((rgba >> 16u) & 0xFFu) / 255.0f;
+        mvpUniform.voxelBaseColorPalette[colorIndex][3] = static_cast<float>((rgba >> 24u) & 0xFFu) / 255.0f;
+    }
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     VkDescriptorBufferInfo bufferInfo{};
@@ -8029,6 +8378,39 @@ void Renderer::renderFrame(
         chunkInstanceSliceOpt.has_value() ? m_bufferAllocator.getBuffer(chunkInstanceSliceOpt->buffer) : VK_NULL_HANDLE;
     const VkBuffer chunkIndirectBuffer =
         chunkIndirectSliceOpt.has_value() ? m_bufferAllocator.getBuffer(chunkIndirectSliceOpt->buffer) : VK_NULL_HANDLE;
+    struct ReadyMagicaDraw {
+        VkBuffer vertexBuffer = VK_NULL_HANDLE;
+        VkBuffer indexBuffer = VK_NULL_HANDLE;
+        std::uint32_t indexCount = 0;
+        float offsetX = 0.0f;
+        float offsetY = 0.0f;
+        float offsetZ = 0.0f;
+    };
+    std::vector<ReadyMagicaDraw> readyMagicaDraws;
+    if (chunkInstanceSliceOpt.has_value() && chunkInstanceBuffer != VK_NULL_HANDLE) {
+        readyMagicaDraws.reserve(m_magicaMeshDraws.size());
+        for (const MagicaMeshDraw& draw : m_magicaMeshDraws) {
+            if (draw.indexCount == 0 ||
+                draw.vertexBufferHandle == kInvalidBufferHandle ||
+                draw.indexBufferHandle == kInvalidBufferHandle) {
+                continue;
+            }
+            const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(draw.vertexBufferHandle);
+            const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(draw.indexBufferHandle);
+            if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE) {
+                continue;
+            }
+            readyMagicaDraws.push_back(ReadyMagicaDraw{
+                vertexBuffer,
+                indexBuffer,
+                draw.indexCount,
+                draw.offsetX,
+                draw.offsetY,
+                draw.offsetZ
+            });
+        }
+    }
+    const bool canDrawMagica = !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
     const uint32_t chunkIndirectDrawCount = static_cast<uint32_t>(chunkIndirectCommands.size());
     m_debugChunkIndirectCommandCount = chunkIndirectDrawCount;
     const bool canDrawChunksIndirect =
@@ -8191,6 +8573,34 @@ void Renderer::renderFrame(
                     &chunkPushConstants
                 );
                 drawChunkIndirect(m_debugDrawCallsShadow);
+            }
+            if (canDrawMagica) {
+                for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
+                    const VkBuffer magicaVertexBuffers[2] = {magicaDraw.vertexBuffer, chunkInstanceBuffer};
+                    const VkDeviceSize magicaVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
+                    vkCmdBindVertexBuffers(commandBuffer, 0, 2, magicaVertexBuffers, magicaVertexOffsets);
+                    vkCmdBindIndexBuffer(commandBuffer, magicaDraw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                    ChunkPushConstants magicaPushConstants{};
+                    magicaPushConstants.chunkOffset[0] = magicaDraw.offsetX;
+                    magicaPushConstants.chunkOffset[1] = magicaDraw.offsetY;
+                    magicaPushConstants.chunkOffset[2] = magicaDraw.offsetZ;
+                    magicaPushConstants.chunkOffset[3] = 0.0f;
+                    magicaPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
+                    magicaPushConstants.cascadeData[1] = 0.0f;
+                    magicaPushConstants.cascadeData[2] = 0.0f;
+                    magicaPushConstants.cascadeData[3] = 0.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &magicaPushConstants
+                    );
+                    countDrawCalls(m_debugDrawCallsShadow, 1);
+                    vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
+                }
             }
 
             if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
@@ -8491,6 +8901,34 @@ void Renderer::renderFrame(
                 &chunkPushConstants
             );
             drawChunkIndirect(m_debugDrawCallsPrepass);
+        }
+        if (canDrawMagica) {
+            for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
+                const VkBuffer magicaVertexBuffers[2] = {magicaDraw.vertexBuffer, chunkInstanceBuffer};
+                const VkDeviceSize magicaVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
+                vkCmdBindVertexBuffers(commandBuffer, 0, 2, magicaVertexBuffers, magicaVertexOffsets);
+                vkCmdBindIndexBuffer(commandBuffer, magicaDraw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                ChunkPushConstants magicaPushConstants{};
+                magicaPushConstants.chunkOffset[0] = magicaDraw.offsetX;
+                magicaPushConstants.chunkOffset[1] = magicaDraw.offsetY;
+                magicaPushConstants.chunkOffset[2] = magicaDraw.offsetZ;
+                magicaPushConstants.chunkOffset[3] = 0.0f;
+                magicaPushConstants.cascadeData[0] = 0.0f;
+                magicaPushConstants.cascadeData[1] = 0.0f;
+                magicaPushConstants.cascadeData[2] = 0.0f;
+                magicaPushConstants.cascadeData[3] = 0.0f;
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &magicaPushConstants
+                );
+                countDrawCalls(m_debugDrawCallsPrepass, 1);
+                vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
+            }
         }
     }
 
@@ -8826,6 +9264,45 @@ void Renderer::renderFrame(
             &chunkPushConstants
         );
         drawChunkIndirect(m_debugDrawCallsMain);
+    }
+    if (canDrawMagica) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_magicaPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            boundDescriptorSetCount,
+            boundDescriptorSets.data(),
+            1,
+            &mvpDynamicOffset
+        );
+        for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
+            const VkBuffer magicaVertexBuffers[2] = {magicaDraw.vertexBuffer, chunkInstanceBuffer};
+            const VkDeviceSize magicaVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
+            vkCmdBindVertexBuffers(commandBuffer, 0, 2, magicaVertexBuffers, magicaVertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, magicaDraw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+            ChunkPushConstants magicaPushConstants{};
+            magicaPushConstants.chunkOffset[0] = magicaDraw.offsetX;
+            magicaPushConstants.chunkOffset[1] = magicaDraw.offsetY;
+            magicaPushConstants.chunkOffset[2] = magicaDraw.offsetZ;
+            magicaPushConstants.chunkOffset[3] = 0.0f;
+            magicaPushConstants.cascadeData[0] = 0.0f;
+            magicaPushConstants.cascadeData[1] = 0.0f;
+            magicaPushConstants.cascadeData[2] = 0.0f;
+            magicaPushConstants.cascadeData[3] = 0.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &magicaPushConstants
+            );
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
+        }
     }
 
     if (m_pipePipeline != VK_NULL_HANDLE) {
@@ -9596,6 +10073,24 @@ void Renderer::destroyPreviewBuffers() {
     m_previewIndexCount = 0;
 }
 
+void Renderer::destroyMagicaBuffers() {
+    for (MagicaMeshDraw& draw : m_magicaMeshDraws) {
+        if (draw.indexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(draw.indexBufferHandle);
+            draw.indexBufferHandle = kInvalidBufferHandle;
+        }
+        if (draw.vertexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(draw.vertexBufferHandle);
+            draw.vertexBufferHandle = kInvalidBufferHandle;
+        }
+        draw.indexCount = 0;
+        draw.offsetX = 0.0f;
+        draw.offsetY = 0.0f;
+        draw.offsetZ = 0.0f;
+    }
+    m_magicaMeshDraws.clear();
+}
+
 void Renderer::destroyPipeBuffers() {
     if (m_grassBillboardIndexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_grassBillboardIndexBufferHandle);
@@ -9781,6 +10276,10 @@ void Renderer::destroyPipeline() {
         vkDestroyPipeline(m_device, m_grassBillboardPipeline, nullptr);
         m_grassBillboardPipeline = VK_NULL_HANDLE;
     }
+    if (m_magicaPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_magicaPipeline, nullptr);
+        m_magicaPipeline = VK_NULL_HANDLE;
+    }
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
         m_pipeline = VK_NULL_HANDLE;
@@ -9810,6 +10309,7 @@ void Renderer::shutdown() {
         }
         destroyPipeBuffers();
         destroyPreviewBuffers();
+        destroyMagicaBuffers();
         destroyEnvironmentResources();
         destroyShadowResources();
         destroyChunkBuffers();
