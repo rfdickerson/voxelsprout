@@ -81,6 +81,8 @@ constexpr float kTrackRadius = 0.38f;
 constexpr math::Vector3 kBeltTint{0.78f, 0.62f, 0.18f};
 constexpr math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
 constexpr uint64_t kAcquireNextImageTimeoutNs = 100000000ull; // 100 ms
+constexpr uint64_t kFrameTimelineWarnLagThreshold = 6u;
+constexpr double kFrameTimelineWarnCooldownSeconds = 2.0;
 
 #if defined(VOXEL_HAS_IMGUI)
 void imguiCheckVkResult(VkResult result) {
@@ -7127,7 +7129,8 @@ void Renderer::renderFrame(
             const uint64_t targetValue = m_frameTimelineValues[m_currentFrame];
             const uint64_t lag = (targetValue > completedValue) ? (targetValue - completedValue) : 0u;
             const double nowSeconds = glfwGetTime();
-            if (lag > 1u && (nowSeconds - lastStallLogTimeSeconds) >= 0.5) {
+            if (lag >= kFrameTimelineWarnLagThreshold &&
+                (nowSeconds - lastStallLogTimeSeconds) >= kFrameTimelineWarnCooldownSeconds) {
                 VOX_LOGW("render")
                     << "frame slot stalled on timeline value "
                     << targetValue

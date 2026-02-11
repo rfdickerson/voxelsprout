@@ -164,3 +164,23 @@ Presentation extensions are platform/driver-path dependent. Build robust fallbac
 - Keep systems readable and small.
 - Continue profiling with concrete metrics before each major optimization.
 
+## 13) Frame Pacing + FIFO Sync Cleanup
+
+### Problem
+- Uncapped rendering (MAILBOX path) drove very high FPS and coil whine.
+- Switching to FIFO exposed timing jitter and occasional apparent "stalls" when editing voxels.
+- Main loop could spin too fast when render submission was temporarily blocked.
+
+### What I changed
+- Added fixed-step simulation accumulator in `App::run()` and decoupled simulation from variable render dt.
+- Tuned simulation tick rate to 60 Hz.
+- Switched present mode preference to FIFO (MAILBOX fallback).
+- Added finite `vkAcquireNextImageKHR` timeout handling to avoid indefinite waits.
+- Widened timeline wait stage for transfer dependency to reduce cross-queue sync sensitivity.
+- Added and then tuned frame timeline stall logging:
+  - warn only for meaningful lag (`>= 6`) with cooldown (`2s`).
+- Added a small backoff sleep on non-progress render paths to prevent CPU busy-spinning.
+- Increased frames-in-flight from 2 to 3 to smooth bursty workloads.
+
+### Lesson
+FIFO often reveals synchronization and pacing assumptions that MAILBOX masks. Deterministic simulation + bounded waits + conservative sync stages + small non-progress backoff gives smoother behavior and cleaner diagnostics.
