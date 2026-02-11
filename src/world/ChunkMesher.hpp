@@ -29,7 +29,8 @@ struct MeshingOptions {
 // - bits 15..17: face id (0..5 for +/-X, +/-Y, +/-Z)
 // - bits 18..19: corner id (0..3)
 // - bits 20..21: AO level (0 darkest .. 3 brightest)
-// - bits 22..29: material id (for now voxel type, future palette/material table index)
+// - bits 22..25: material id (0..15)
+// - bits 26..29: base color index (0..15)
 // - bits 30..31: lod level (0=8x, 1=4x, 2=1x)
 //
 // This format also supports future greedy meshing and instancing:
@@ -45,12 +46,13 @@ struct PackedVoxelVertex {
     static constexpr std::uint32_t kShiftCorner = 18;
     static constexpr std::uint32_t kShiftAo = 20;
     static constexpr std::uint32_t kShiftMaterial = 22;
+    static constexpr std::uint32_t kShiftBaseColor = 26;
     static constexpr std::uint32_t kShiftLodLevel = 30;
 
     static constexpr std::uint32_t kMask5 = 0x1Fu;
     static constexpr std::uint32_t kMask3 = 0x7u;
+    static constexpr std::uint32_t kMask4 = 0xFu;
     static constexpr std::uint32_t kMask2 = 0x3u;
-    static constexpr std::uint32_t kMask8 = 0xFFu;
 
     static std::uint32_t pack(
         std::uint32_t x,
@@ -60,6 +62,7 @@ struct PackedVoxelVertex {
         std::uint32_t corner,
         std::uint32_t ao,
         std::uint32_t material,
+        std::uint32_t baseColorIndex,
         std::uint32_t lodLevel
     );
 };

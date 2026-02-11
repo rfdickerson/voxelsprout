@@ -116,6 +116,7 @@ public:
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
+    void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
@@ -438,6 +439,7 @@ private:
     uint32_t m_transportIndexCount = 0;
     uint32_t m_grassBillboardIndexCount = 0;
     uint32_t m_grassBillboardInstanceCount = 0;
+    std::array<std::uint32_t, 16> m_voxelBaseColorPaletteRgba{};
     VkImage m_diffuseTextureImage = VK_NULL_HANDLE;
     VkDeviceMemory m_diffuseTextureMemory = VK_NULL_HANDLE;
     VkImageView m_diffuseTextureImageView = VK_NULL_HANDLE;

@@ -19,6 +19,8 @@ enum class VoxelType : std::uint8_t {
 
 struct Voxel {
     VoxelType type = VoxelType::Empty;
+    // Optional 4-bit base-color index (0..15). 0xFF means "use material defaults".
+    std::uint8_t baseColorIndex = 0xFFu;
 };
 
 } // namespace world

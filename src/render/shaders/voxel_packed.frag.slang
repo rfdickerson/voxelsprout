@@ -16,7 +16,8 @@ static const uint kMaterialStone = 1u;
 static const uint kMaterialDirt = 2u;
 static const uint kMaterialGrass = 3u;
 static const uint kMaterialWood = 4u;
-static const uint kMaterialRed = 251u;
+static const uint kMaterialRed = 5u;
+static const uint kMaterialPalette = 6u;
 
 [[vk::constant_id(6)]]
 const int kShadowPolicyMode = 2;
@@ -29,6 +30,11 @@ float3 materialTint(uint material)
 {
     if (material == kMaterialRed) return float3(1.00, 0.28, 0.22);
     return float3(0.9, 0.9, 0.9);
+}
+
+float3 baseColorFromPalette(uint baseColorIndex)
+{
+    return camera.voxelBaseColorPalette[baseColorIndex & 0xFu].xyz;
 }
 
 float2 faceUv(uint face, float3 worldPosition)
@@ -357,12 +363,17 @@ struct FragmentInput
     nointerpolation uint inMaterial : TEXCOORD1;
     float3 inWorldPosition : TEXCOORD2;
     float inVertexAo : TEXCOORD3;
+    nointerpolation uint inBaseColorIndex : TEXCOORD4;
 };
 
 float4 main(FragmentInput input) : SV_Target0
 {
     const float3 normal = faceNormal(input.inFace);
     float3 baseColor = sampleMaterialAlbedo(input.inMaterial, input.inFace, input.inWorldPosition);
+    if (input.inMaterial == kMaterialPalette)
+    {
+        baseColor = baseColorFromPalette(input.inBaseColorIndex);
+    }
 
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);

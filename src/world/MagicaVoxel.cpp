@@ -203,45 +203,50 @@ std::uint32_t cornerAoLevel(
     return static_cast<std::uint32_t>(3 - occlusion);
 }
 
-std::uint8_t materialForRgba(std::uint32_t rgba) {
+constexpr std::uint8_t kMaterialPalette = 6u;
+
+std::uint8_t quantizeBaseColorIndex(
+    std::uint32_t rgba,
+    std::array<std::uint32_t, 16>& paletteSlots,
+    std::uint8_t& paletteSlotCount
+) {
+    for (std::uint8_t i = 0; i < paletteSlotCount; ++i) {
+        if (paletteSlots[i] == rgba) {
+            return i;
+        }
+    }
+
+    if (paletteSlotCount < static_cast<std::uint8_t>(paletteSlots.size())) {
+        const std::uint8_t slot = paletteSlotCount;
+        paletteSlots[slot] = rgba;
+        ++paletteSlotCount;
+        return slot;
+    }
+
     const int r = static_cast<int>(rgba & 0xFFu);
     const int g = static_cast<int>((rgba >> 8u) & 0xFFu);
     const int b = static_cast<int>((rgba >> 16u) & 0xFFu);
-    const int a = static_cast<int>((rgba >> 24u) & 0xFFu);
-    if (a <= 8) {
-        return 0u;
-    }
 
-    struct MaterialRef {
-        std::uint8_t id;
-        int r;
-        int g;
-        int b;
-    };
-    constexpr std::array<MaterialRef, 5> kMaterialRefs = {
-        MaterialRef{1u, 168, 168, 168},
-        MaterialRef{2u, 134, 93, 52},
-        MaterialRef{3u, 96, 164, 80},
-        MaterialRef{4u, 154, 121, 84},
-        MaterialRef{251u, 228, 84, 66}
-    };
-
-    std::uint8_t closest = kMaterialRefs.front().id;
+    std::uint8_t nearest = 0u;
     int bestDistance = std::numeric_limits<int>::max();
-    for (const MaterialRef& reference : kMaterialRefs) {
-        const int dr = r - reference.r;
-        const int dg = g - reference.g;
-        const int db = b - reference.b;
+    for (std::uint8_t i = 0; i < static_cast<std::uint8_t>(paletteSlots.size()); ++i) {
+        const std::uint32_t candidate = paletteSlots[i];
+        const int cr = static_cast<int>(candidate & 0xFFu);
+        const int cg = static_cast<int>((candidate >> 8u) & 0xFFu);
+        const int cb = static_cast<int>((candidate >> 16u) & 0xFFu);
+        const int dr = r - cr;
+        const int dg = g - cg;
+        const int db = b - cb;
         const int distance = (dr * dr) + (dg * dg) + (db * db);
         if (distance < bestDistance) {
             bestDistance = distance;
-            closest = reference.id;
+            nearest = i;
         }
     }
-    return closest;
+    return nearest;
 }
 
-constexpr std::uint32_t kEmptyMaskKey = 0xFFFFFFFFu;
+constexpr std::uint16_t kEmptyMaskKey = 0xFFFFu;
 
 void faceSliceDimensionsForVolume(
     std::uint32_t faceId,
@@ -364,8 +369,16 @@ std::uint8_t faceCornerAoSignatureDense(
     return signature;
 }
 
-std::uint32_t makeMaskKey(std::uint8_t material, std::uint8_t aoSignature) {
-    return (static_cast<std::uint32_t>(material) << 8u) | static_cast<std::uint32_t>(aoSignature);
+std::uint16_t makeMaskKey(std::uint8_t material, std::uint8_t aoSignature, std::uint8_t baseColorIndex) {
+    // 16-bit greedy mask key layout:
+    // bits 12..15: material (4 bits)
+    // bits  4..11: AO signature (8 bits; 4 corners x 2 bits)
+    // bits  0.. 3: base color index (4 bits)
+    return static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(material & PackedVoxelVertex::kMask4) << 12u) |
+        (static_cast<std::uint16_t>(aoSignature) << 4u) |
+        static_cast<std::uint16_t>(baseColorIndex & PackedVoxelVertex::kMask4)
+    );
 }
 
 bool appendGreedyFaceQuadLocal(
@@ -378,6 +391,7 @@ bool appendGreedyFaceQuadLocal(
     int height,
     std::uint8_t material,
     std::uint8_t aoSignature,
+    std::uint8_t baseColorIndex,
     std::uint32_t lodLevel,
     int sizeX,
     int sizeY,
@@ -408,6 +422,7 @@ bool appendGreedyFaceQuadLocal(
             corner,
             ao,
             material,
+            baseColorIndex,
             lodLevel
         );
         mesh.vertices.push_back(vertex);
@@ -435,7 +450,8 @@ void appendDenseVoxelFaceLocal(
     int localY,
     int localZ,
     std::uint32_t faceId,
-    std::uint8_t material
+    std::uint8_t material,
+    std::uint8_t baseColorIndex
 ) {
     const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
     for (std::uint32_t corner = 0; corner < 4u; ++corner) {
@@ -459,6 +475,7 @@ void appendDenseVoxelFaceLocal(
             corner,
             ao,
             material,
+            baseColorIndex,
             0u
         );
         mesh.vertices.push_back(vertex);
@@ -632,6 +649,8 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
         static_cast<std::size_t>(transformedSizeX * transformedSizeY * transformedSizeZ),
         0u
     );
+    std::array<std::uint32_t, 16> baseColorPaletteSlots{};
+    std::uint8_t baseColorPaletteSlotCount = 0u;
 
     for (const MagicaVoxel& voxel : model.voxels) {
         const int transformedX = static_cast<int>(voxel.x);
@@ -681,7 +700,7 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                         uCount,
                         vCount
                     );
-                    std::vector<std::uint32_t> mask(static_cast<std::size_t>(uCount * vCount), kEmptyMaskKey);
+                    std::vector<std::uint16_t> mask(static_cast<std::size_t>(uCount * vCount), kEmptyMaskKey);
 
                     for (int slice = 0; slice < sliceCount; ++slice) {
                         std::fill(mask.begin(), mask.end(), kEmptyMaskKey);
@@ -720,7 +739,13 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                                     continue;
                                 }
 
-                                const std::uint8_t material = materialForRgba(model.paletteRgba[paletteIndex]);
+                                const std::uint32_t baseColorRgba = model.paletteRgba[paletteIndex];
+                                const std::uint8_t baseColorIndex = quantizeBaseColorIndex(
+                                    baseColorRgba,
+                                    baseColorPaletteSlots,
+                                    baseColorPaletteSlotCount
+                                );
+                                const std::uint8_t material = kMaterialPalette;
                                 const std::uint8_t aoSignature = faceCornerAoSignatureDense(
                                     densePalette,
                                     transformedSizeX,
@@ -732,14 +757,14 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                                     faceId
                                 );
                                 const std::size_t maskIndex = static_cast<std::size_t>(u + (v * uCount));
-                                mask[maskIndex] = makeMaskKey(material, aoSignature);
+                                mask[maskIndex] = makeMaskKey(material, aoSignature, baseColorIndex);
                             }
                         }
 
                         for (int v = 0; v < vCount; ++v) {
                             for (int u = 0; u < uCount;) {
                                 const std::size_t startIndex = static_cast<std::size_t>(u + (v * uCount));
-                                const std::uint32_t key = mask[startIndex];
+                                const std::uint16_t key = mask[startIndex];
                                 if (key == kEmptyMaskKey) {
                                     ++u;
                                     continue;
@@ -770,8 +795,11 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                                     }
                                 }
 
-                                const std::uint8_t material = static_cast<std::uint8_t>((key >> 8u) & 0xFFu);
-                                const std::uint8_t aoSignature = static_cast<std::uint8_t>(key & 0xFFu);
+                                const std::uint8_t material =
+                                    static_cast<std::uint8_t>((key >> 12u) & PackedVoxelVertex::kMask4);
+                                const std::uint8_t aoSignature = static_cast<std::uint8_t>((key >> 4u) & 0xFFu);
+                                const std::uint8_t baseColorIndex =
+                                    static_cast<std::uint8_t>(key & PackedVoxelVertex::kMask4);
                                 const bool mergedQuadAppended = appendGreedyFaceQuadLocal(
                                     mesh,
                                     faceId,
@@ -782,6 +810,7 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                                     height,
                                     material,
                                     aoSignature,
+                                    baseColorIndex,
                                     0u,
                                     localSizeX,
                                     localSizeY,
@@ -794,6 +823,21 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                                             int localY = 0;
                                             int localZ = 0;
                                             faceSliceCellToVoxel(faceId, slice, u + emitU, v + emitV, localX, localY, localZ);
+                                            const std::uint8_t paletteIndex = densePalette[denseIndex(
+                                                tileX + localX,
+                                                tileY + localY,
+                                                tileZ + localZ,
+                                                transformedSizeX,
+                                                transformedSizeY
+                                            )];
+                                            std::uint8_t fallbackBaseColorIndex = 0u;
+                                            if (paletteIndex != 0u) {
+                                                fallbackBaseColorIndex = quantizeBaseColorIndex(
+                                                    model.paletteRgba[paletteIndex],
+                                                    baseColorPaletteSlots,
+                                                    baseColorPaletteSlotCount
+                                                );
+                                            }
                                             appendDenseVoxelFaceLocal(
                                                 mesh,
                                                 densePalette,
@@ -807,7 +851,8 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                                                 localY,
                                                 localZ,
                                                 faceId,
-                                                material
+                                                material,
+                                                fallbackBaseColorIndex
                                             );
                                         }
                                     }

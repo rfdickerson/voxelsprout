@@ -66,6 +66,7 @@ constexpr float kGamepadLookDegreesPerSecond = 160.0f;
 constexpr const char* kWorldFilePath = "world.vxw";
 constexpr const char* kMagicaCastlePath = "assets/magicka/castle.vox";
 constexpr const char* kMagicaTeapotPath = "assets/magicka/teapot.vox";
+constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 
 std::filesystem::path resolveAssetPath(const std::filesystem::path& relativePath) {
@@ -191,6 +192,47 @@ world::VoxelType voxelTypeForMagicaRgba(std::uint32_t rgba) {
         }
     }
     return closest;
+}
+
+std::uint8_t quantizeBaseColorIndex(
+    std::uint32_t rgba,
+    std::array<std::uint32_t, 16>& paletteSlots,
+    std::uint8_t& paletteSlotCount
+) {
+    for (std::uint8_t i = 0; i < paletteSlotCount; ++i) {
+        if (paletteSlots[i] == rgba) {
+            return i;
+        }
+    }
+
+    if (paletteSlotCount < static_cast<std::uint8_t>(paletteSlots.size())) {
+        const std::uint8_t slot = paletteSlotCount;
+        paletteSlots[slot] = rgba;
+        ++paletteSlotCount;
+        return slot;
+    }
+
+    const int r = static_cast<int>(rgba & 0xFFu);
+    const int g = static_cast<int>((rgba >> 8u) & 0xFFu);
+    const int b = static_cast<int>((rgba >> 16u) & 0xFFu);
+
+    std::uint8_t nearestSlot = 0u;
+    int bestDistance = std::numeric_limits<int>::max();
+    for (std::uint8_t i = 0; i < static_cast<std::uint8_t>(paletteSlots.size()); ++i) {
+        const std::uint32_t slotRgba = paletteSlots[i];
+        const int slotR = static_cast<int>(slotRgba & 0xFFu);
+        const int slotG = static_cast<int>((slotRgba >> 8u) & 0xFFu);
+        const int slotB = static_cast<int>((slotRgba >> 16u) & 0xFFu);
+        const int dr = r - slotR;
+        const int dg = g - slotG;
+        const int db = b - slotB;
+        const int distance = (dr * dr) + (dg * dg) + (db * db);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            nearestSlot = i;
+        }
+    }
+    return nearestSlot;
 }
 
 constexpr std::array<world::VoxelType, 5> kPlaceableBlockTypes = {
@@ -680,10 +722,13 @@ bool App::init() {
         float placementZ = 0.0f;
         float uniformScale = 1.0f;
     };
-    constexpr std::array<MagicaLoadSpec, 2> kMagicaLoadSpecs = {
+    constexpr std::array<MagicaLoadSpec, 3> kMagicaLoadSpecs = {
         MagicaLoadSpec{kMagicaCastlePath, 0.0f, 0.0f, 0.0f, 1.0f},
         MagicaLoadSpec{kMagicaTeapotPath, 64.0f, 0.0f, 0.0f, 0.36f},
+        MagicaLoadSpec{kMagicaMonu2Path, -72.0f, 0.0f, 16.0f, 0.25f},
     };
+    std::array<std::uint32_t, 16> magicaBaseColorPalette{};
+    std::uint8_t magicaBaseColorPaletteCount = 0u;
 
     std::uint32_t stampedMagicaResourceCount = 0;
     std::uint64_t stampedMagicaVoxelCount = 0;
@@ -709,7 +754,8 @@ bool App::init() {
         std::uint64_t resourceStamped = 0;
         std::uint64_t resourceClipped = 0;
         for (const world::MagicaVoxel& voxel : magicaModel.voxels) {
-            const world::VoxelType voxelType = voxelTypeForMagicaRgba(magicaModel.paletteRgba[voxel.paletteIndex]);
+            const std::uint32_t paletteRgba = magicaModel.paletteRgba[voxel.paletteIndex];
+            const world::VoxelType voxelType = voxelTypeForMagicaRgba(paletteRgba);
             if (voxelType == world::VoxelType::Empty) {
                 continue;
             }
@@ -727,7 +773,12 @@ bool App::init() {
             }
 
             world::Chunk& chunk = m_chunkGrid.chunks()[chunkIndex];
-            chunk.setVoxel(localX, localY, localZ, world::Voxel{voxelType});
+            const std::uint8_t baseColorIndex = quantizeBaseColorIndex(
+                paletteRgba,
+                magicaBaseColorPalette,
+                magicaBaseColorPaletteCount
+            );
+            chunk.setVoxel(localX, localY, localZ, world::Voxel{voxelType, baseColorIndex});
             ++resourceStamped;
         }
 
@@ -748,7 +799,9 @@ bool App::init() {
     VOX_LOGI("app") << "stamped " << stampedMagicaResourceCount << "/" << kMagicaLoadSpecs.size()
                     << " magica resources into world (voxels=" << stampedMagicaVoxelCount
                     << ", clipped=" << clippedMagicaVoxelCount
+                    << ", paletteColors=" << static_cast<std::uint32_t>(magicaBaseColorPaletteCount)
                     << ") in " << elapsedMs(magicaStampStart) << " ms";
+    m_renderer.setVoxelBaseColorPalette(magicaBaseColorPalette);
 
     const auto clipmapStart = Clock::now();
     m_appliedClipmapConfig = m_renderer.clipmapQueryConfig();
