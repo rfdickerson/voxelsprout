@@ -110,7 +110,6 @@ endif()
 
 # GLFW is required for the minimal window + input runtime.
 find_package(glfw3 CONFIG QUIET)
-find_package(OpenGL REQUIRED)
 
 # Optional third-party dependencies for future rendering integration.
 find_package(Vulkan QUIET)
@@ -142,8 +141,6 @@ else()
         message(FATAL_ERROR "GLFW is required. Install via vcpkg or provide glfw3 to CMake.")
     endif()
 endif()
-
-target_link_libraries(voxel_factory_toy PRIVATE OpenGL::GL)
 
 if(TARGET imgui::imgui)
     target_link_libraries(voxel_factory_toy PRIVATE imgui::imgui)

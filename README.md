@@ -1,3 +1,5 @@
+![Voxel Factory Toy Screenshot](assets/screenshots/voxel-screen.png)
+
 # Voxel Factory Toy
 
 Experimental voxel-based factory toy game focused on emergent discovery, deterministic simulation, and readable systems.
@@ -99,4 +101,3 @@ Current test target: `voxel_foundation_tests`.
 - `Space` / `Shift` vertical movement
 - `C` config panels
 - `F` frame stats panel
-
