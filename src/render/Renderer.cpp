@@ -83,6 +83,7 @@ constexpr math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
 constexpr uint64_t kAcquireNextImageTimeoutNs = 100000000ull; // 100 ms
 constexpr uint64_t kFrameTimelineWarnLagThreshold = 6u;
 constexpr double kFrameTimelineWarnCooldownSeconds = 2.0;
+constexpr float kCpuFrameEwmaAlpha = 0.08f;
 
 #if defined(VOXEL_HAS_IMGUI)
 void imguiCheckVkResult(VkResult result) {
@@ -6550,8 +6551,8 @@ void Renderer::buildFrameStatsUi() {
                 ? static_cast<int>(m_debugCpuFrameTimingMsHistoryWrite)
                 : 0;
         ImGui::PlotLines(
-            "CPU Frame (ms)",
-            m_debugCpuFrameTimingMsHistory.data(),
+            "CPU Work (ms)",
+            m_debugCpuFrameWorkMsHistory.data(),
             cpuHistoryCount,
             cpuHistoryOffset,
             nullptr,
@@ -6560,7 +6561,7 @@ void Renderer::buildFrameStatsUi() {
             ImVec2(0.0f, 64.0f)
         );
     } else {
-        ImGui::Text("CPU Frame (ms): collecting...");
+        ImGui::Text("CPU Timing (ms): collecting...");
     }
 
     if (m_gpuTimestampsSupported) {
@@ -6590,7 +6591,13 @@ void Renderer::buildFrameStatsUi() {
     ImGui::Text("FPS: %.1f", m_debugFps);
     ImGui::Text("Chunks (visible/total): %u / %u", m_debugSpatialVisibleChunkCount, m_debugChunkCount);
     if (m_gpuTimestampsSupported) {
-        ImGui::Text("Frame (CPU/GPU): %.2f / %.2f ms", m_debugFrameTimeMs, m_debugGpuFrameTimeMs);
+        ImGui::Text(
+            "Frame CPU (total/work/ewma): %.2f / %.2f / %.2f ms",
+            m_debugFrameTimeMs,
+            m_debugCpuFrameWorkMs,
+            m_debugCpuFrameEwmaMs
+        );
+        ImGui::Text("Frame GPU: %.2f ms", m_debugGpuFrameTimeMs);
         if (ImGui::TreeNodeEx("GPU Stages (ms)", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
             ImGui::Text("Prepass: %.2f", m_debugGpuPrepassTimeMs);
@@ -6601,7 +6608,13 @@ void Renderer::buildFrameStatsUi() {
             ImGui::TreePop();
         }
     } else {
-        ImGui::Text("Frame (CPU/GPU): %.2f / n/a ms", m_debugFrameTimeMs);
+        ImGui::Text(
+            "Frame CPU (total/work/ewma): %.2f / %.2f / %.2f ms",
+            m_debugFrameTimeMs,
+            m_debugCpuFrameWorkMs,
+            m_debugCpuFrameEwmaMs
+        );
+        ImGui::Text("Frame GPU: n/a");
     }
     if (m_supportsDisplayTiming) {
         ImGui::Text(
@@ -7065,6 +7078,9 @@ void Renderer::renderFrame(
     const VoxelPreview& preview,
     std::span<const std::size_t> visibleChunkIndices
 ) {
+    const auto cpuFrameStartTime = std::chrono::steady_clock::now();
+    float cpuWaitMs = 0.0f;
+
     if (m_device == VK_NULL_HANDLE || m_swapchain == VK_NULL_HANDLE) {
         return;
     }
@@ -7077,13 +7093,7 @@ void Renderer::renderFrame(
     if (m_lastFrameTimestampSeconds > 0.0) {
         const double deltaSeconds = std::max(0.0, frameNowSeconds - m_lastFrameTimestampSeconds);
         frameDeltaSeconds = static_cast<float>(deltaSeconds);
-        m_debugFrameTimeMs = static_cast<float>(deltaSeconds * 1000.0);
         m_debugFps = (deltaSeconds > 0.0) ? static_cast<float>(1.0 / deltaSeconds) : 0.0f;
-        m_debugCpuFrameTimingMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugFrameTimeMs;
-        m_debugCpuFrameTimingMsHistoryWrite =
-            (m_debugCpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
-        m_debugCpuFrameTimingMsHistoryCount =
-            std::min(m_debugCpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
     }
     m_lastFrameTimestampSeconds = frameNowSeconds;
     if (!m_debugCameraFovInitialized) {
@@ -7175,6 +7185,7 @@ void Renderer::renderFrame(
     }
 
     uint32_t imageIndex = 0;
+    const auto acquireStartTime = std::chrono::steady_clock::now();
     const VkResult acquireResult = vkAcquireNextImageKHR(
         m_device,
         m_swapchain,
@@ -7182,6 +7193,9 @@ void Renderer::renderFrame(
         frame.imageAvailable,
         VK_NULL_HANDLE,
         &imageIndex
+    );
+    cpuWaitMs += static_cast<float>(
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - acquireStartTime).count()
     );
 
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -9161,7 +9175,11 @@ void Renderer::renderFrame(
         m_lastSubmittedDisplayTimingPresentId = 0;
     }
 
+    const auto presentStartTime = std::chrono::steady_clock::now();
     const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
+    cpuWaitMs += static_cast<float>(
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - presentStartTime).count()
+    );
     if (useDisplayTiming && (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR)) {
         updateDisplayTimingStats();
     }
@@ -9180,6 +9198,25 @@ void Renderer::renderFrame(
     } else if (presentResult != VK_SUCCESS) {
         logVkFailure("vkQueuePresentKHR", presentResult);
     }
+
+    const float cpuTotalMs = static_cast<float>(
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cpuFrameStartTime).count()
+    );
+    m_debugFrameTimeMs = cpuTotalMs;
+    m_debugCpuFrameWorkMs = std::max(0.0f, cpuTotalMs - cpuWaitMs);
+    if (!m_debugCpuFrameEwmaInitialized) {
+        m_debugCpuFrameEwmaMs = m_debugFrameTimeMs;
+        m_debugCpuFrameEwmaInitialized = true;
+    } else {
+        m_debugCpuFrameEwmaMs += kCpuFrameEwmaAlpha * (m_debugFrameTimeMs - m_debugCpuFrameEwmaMs);
+    }
+    m_debugCpuFrameTotalMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugFrameTimeMs;
+    m_debugCpuFrameWorkMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugCpuFrameWorkMs;
+    m_debugCpuFrameEwmaMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugCpuFrameEwmaMs;
+    m_debugCpuFrameTimingMsHistoryWrite =
+        (m_debugCpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
+    m_debugCpuFrameTimingMsHistoryCount =
+        std::min(m_debugCpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
 
     const FrameArenaStats& frameArenaStats = m_frameArena.activeStats();
     m_debugFrameArenaUploadBytes = static_cast<std::uint64_t>(frameArenaStats.uploadBytesAllocated);
@@ -9837,9 +9874,14 @@ void Renderer::shutdown() {
     m_debugSpatialQueriesUsed = false;
     m_debugSpatialQueryStats = {};
     m_debugSpatialVisibleChunkCount = 0;
-    m_debugCpuFrameTimingMsHistory.fill(0.0f);
+    m_debugCpuFrameTotalMsHistory.fill(0.0f);
+    m_debugCpuFrameWorkMsHistory.fill(0.0f);
+    m_debugCpuFrameEwmaMsHistory.fill(0.0f);
     m_debugCpuFrameTimingMsHistoryWrite = 0;
     m_debugCpuFrameTimingMsHistoryCount = 0;
+    m_debugCpuFrameWorkMs = 0.0f;
+    m_debugCpuFrameEwmaMs = 0.0f;
+    m_debugCpuFrameEwmaInitialized = false;
     m_debugGpuFrameTimingMsHistory.fill(0.0f);
     m_debugGpuFrameTimingMsHistoryWrite = 0;
     m_debugGpuFrameTimingMsHistoryCount = 0;
