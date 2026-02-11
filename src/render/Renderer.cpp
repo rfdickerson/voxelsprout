@@ -121,6 +121,7 @@ struct alignas(16) CameraUniform {
     float skyConfig0[4];
     float skyConfig1[4];
     float skyConfig2[4];
+    float voxelBaseColorPalette[16][4];
 };
 
 struct alignas(16) ChunkPushConstants {
@@ -156,7 +157,7 @@ world::ChunkMeshData buildSingleVoxelPreviewMesh(
         const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
         for (std::uint32_t corner = 0; corner < 4; ++corner) {
             world::PackedVoxelVertex vertex{};
-            vertex.bits = world::PackedVoxelVertex::pack(x, y, z, faceId, corner, ao, material, 2u);
+            vertex.bits = world::PackedVoxelVertex::pack(x, y, z, faceId, corner, ao, material, 0u, 2u);
             mesh.vertices.push_back(vertex);
         }
 
@@ -1282,6 +1283,23 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         VOX_LOGE("render") << "init failed: window is null\n";
         return false;
     }
+    bool hasPaletteOverride = false;
+    for (const std::uint32_t rgba : m_voxelBaseColorPaletteRgba) {
+        if (rgba != 0u) {
+            hasPaletteOverride = true;
+            break;
+        }
+    }
+    if (!hasPaletteOverride) {
+        for (std::size_t i = 0; i < m_voxelBaseColorPaletteRgba.size(); ++i) {
+            const std::uint8_t shade = static_cast<std::uint8_t>((255u * static_cast<std::uint32_t>(i)) / 15u);
+            m_voxelBaseColorPaletteRgba[i] =
+                static_cast<std::uint32_t>(shade) |
+                (static_cast<std::uint32_t>(shade) << 8u) |
+                (static_cast<std::uint32_t>(shade) << 16u) |
+                (0xFFu << 24u);
+        }
+    }
 
     if (glfwVulkanSupported() == GLFW_FALSE) {
         VOX_LOGE("render") << "init failed: glfwVulkanSupported returned false\n";
@@ -1427,6 +1445,10 @@ void Renderer::clearMagicaVoxelMeshes() {
         draw.indexCount = 0;
     }
     m_magicaMeshDraws.clear();
+}
+
+void Renderer::setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba) {
+    m_voxelBaseColorPaletteRgba = paletteRgba;
 }
 
 bool Renderer::uploadMagicaVoxelMesh(
@@ -7944,6 +7966,13 @@ void Renderer::renderFrame(
     mvpUniform.skyConfig2[1] = effectiveSkySettings.sunHazeFalloff;
     mvpUniform.skyConfig2[2] = effectiveSkySettings.plantQuadDirectionality;
     mvpUniform.skyConfig2[3] = 0.0f;
+    for (std::size_t colorIndex = 0; colorIndex < m_voxelBaseColorPaletteRgba.size(); ++colorIndex) {
+        const std::uint32_t rgba = m_voxelBaseColorPaletteRgba[colorIndex];
+        mvpUniform.voxelBaseColorPalette[colorIndex][0] = static_cast<float>(rgba & 0xFFu) / 255.0f;
+        mvpUniform.voxelBaseColorPalette[colorIndex][1] = static_cast<float>((rgba >> 8u) & 0xFFu) / 255.0f;
+        mvpUniform.voxelBaseColorPalette[colorIndex][2] = static_cast<float>((rgba >> 16u) & 0xFFu) / 255.0f;
+        mvpUniform.voxelBaseColorPalette[colorIndex][3] = static_cast<float>((rgba >> 24u) & 0xFFu) / 255.0f;
+    }
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     VkDescriptorBufferInfo bufferInfo{};

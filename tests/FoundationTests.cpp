@@ -395,18 +395,26 @@ void testMagicaVoxelMeshing() {
     }
     expectTrue(vertexArraysEqual, "Magica mesher deterministic vertices");
 
-    bool foundRedMaterial = false;
-    bool foundNonRedMaterial = false;
+    bool foundPaletteMaterial = false;
+    bool foundBaseColorIndex0 = false;
+    bool foundBaseColorIndex1 = false;
     for (const world::PackedVoxelVertex& vertex : meshA.vertices) {
-        const std::uint32_t material = (vertex.bits >> world::PackedVoxelVertex::kShiftMaterial) & world::PackedVoxelVertex::kMask8;
-        if (material == 251u) {
-            foundRedMaterial = true;
-        } else if (material > 0u) {
-            foundNonRedMaterial = true;
+        const std::uint32_t material =
+            (vertex.bits >> world::PackedVoxelVertex::kShiftMaterial) & world::PackedVoxelVertex::kMask4;
+        const std::uint32_t baseColorIndex =
+            (vertex.bits >> world::PackedVoxelVertex::kShiftBaseColor) & world::PackedVoxelVertex::kMask4;
+        if (material == 6u) {
+            foundPaletteMaterial = true;
+        }
+        if (baseColorIndex == 0u) {
+            foundBaseColorIndex0 = true;
+        }
+        if (baseColorIndex == 1u) {
+            foundBaseColorIndex1 = true;
         }
     }
-    expectTrue(foundRedMaterial, "Magica mesher maps bright red to red material");
-    expectTrue(foundNonRedMaterial, "Magica mesher maps non-red palette colors");
+    expectTrue(foundPaletteMaterial, "Magica mesher uses palette material");
+    expectTrue(foundBaseColorIndex0 && foundBaseColorIndex1, "Magica mesher packs 4-bit base color indices");
 
     world::MagicaVoxelModel greedyModel{};
     greedyModel.sizeX = 4;
