@@ -1,3 +1,8 @@
+---
+layout: default
+title: DevLog
+---
+
 # DevLog: Building a Voxel Factory Toy
 
 This is a running engineering log of what worked, what broke, and what changed.
