@@ -6112,6 +6112,14 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
     }
 
     const std::vector<world::Chunk>& chunks = chunkGrid.chunks();
+    const std::vector<ChunkDrawRange> previousChunkDrawRanges = m_chunkDrawRanges;
+    const std::uint32_t previousDebugChunkMeshVertexCount = m_debugChunkMeshVertexCount;
+    const std::uint32_t previousDebugChunkMeshIndexCount = m_debugChunkMeshIndexCount;
+    auto rollbackChunkDrawState = [&]() {
+        m_chunkDrawRanges = previousChunkDrawRanges;
+        m_debugChunkMeshVertexCount = previousDebugChunkMeshVertexCount;
+        m_debugChunkMeshIndexCount = previousDebugChunkMeshIndexCount;
+    };
     const std::size_t expectedDrawRangeCount = chunks.size() * world::kChunkMeshLodCount;
     if (m_chunkDrawRanges.size() != expectedDrawRangeCount) {
         m_chunkDrawRanges.assign(expectedDrawRangeCount, ChunkDrawRange{});
@@ -6261,6 +6269,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         uniqueRemeshChunkIndices.reserve(remeshChunkIndices.size());
         for (const std::size_t chunkArrayIndex : remeshChunkIndices) {
             if (chunkArrayIndex >= chunks.size()) {
+                rollbackChunkDrawState();
                 return false;
             }
             if (remeshMask[chunkArrayIndex] != 0u) {
@@ -6405,6 +6414,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
             const std::size_t baseVertexSize = combinedVertices.size();
             if (baseVertexSize > static_cast<std::size_t>(std::numeric_limits<int32_t>::max())) {
                 VOX_LOGE("render") << "chunk mesh vertex offset exceeds int32 range";
+                rollbackChunkDrawState();
                 return false;
             }
             const uint32_t baseVertex = static_cast<uint32_t>(baseVertexSize);
@@ -6455,6 +6465,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
     if (m_transferCommandBufferInFlightValue > 0) {
         if (!isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
     }
@@ -6481,6 +6492,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (newChunkVertexBufferHandle == kInvalidBufferHandle) {
             VOX_LOGE("render") << "chunk global vertex buffer allocation failed";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
         {
@@ -6502,6 +6514,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (newChunkIndexBufferHandle == kInvalidBufferHandle) {
             VOX_LOGE("render") << "chunk global index buffer allocation failed";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
         {
@@ -6519,6 +6532,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (!chunkVertexUploadSliceOpt.has_value() || chunkVertexUploadSliceOpt->mapped == nullptr) {
             VOX_LOGE("render") << "chunk global vertex upload slice allocation failed";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
         std::memcpy(
@@ -6535,6 +6549,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (!chunkIndexUploadSliceOpt.has_value() || chunkIndexUploadSliceOpt->mapped == nullptr) {
             VOX_LOGE("render") << "chunk global index upload slice allocation failed";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
         std::memcpy(
@@ -6550,6 +6565,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (resetResult != VK_SUCCESS) {
             logVkFailure("vkResetCommandPool(transfer)", resetResult);
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
 
@@ -6559,6 +6575,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (vkBeginCommandBuffer(m_transferCommandBuffer, &beginInfo) != VK_SUCCESS) {
             VOX_LOGE("render") << "vkBeginCommandBuffer (transfer) failed\n";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
 
@@ -6592,19 +6609,39 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (vkEndCommandBuffer(m_transferCommandBuffer) != VK_SUCCESS) {
             VOX_LOGE("render") << "vkEndCommandBuffer (transfer) failed\n";
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
 
         transferSignalValue = m_nextTimelineValue++;
+        std::array<VkSemaphore, 1> transferWaitSemaphores{};
+        std::array<VkPipelineStageFlags, 1> transferWaitStages{};
+        std::array<uint64_t, 1> transferWaitValues{};
+        uint32_t transferWaitCount = 0;
+        if (m_lastGraphicsTimelineValue > 0) {
+            transferWaitSemaphores[0] = m_renderTimelineSemaphore;
+            transferWaitStages[0] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            transferWaitValues[0] = m_lastGraphicsTimelineValue;
+            transferWaitCount = 1;
+        }
+
         VkSemaphore timelineSemaphore = m_renderTimelineSemaphore;
         VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
         timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineSubmitInfo.waitSemaphoreValueCount = transferWaitCount;
+        timelineSubmitInfo.pWaitSemaphoreValues =
+            transferWaitCount > 0 ? transferWaitValues.data() : nullptr;
         timelineSubmitInfo.signalSemaphoreValueCount = 1;
         timelineSubmitInfo.pSignalSemaphoreValues = &transferSignalValue;
 
         VkSubmitInfo transferSubmitInfo{};
         transferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         transferSubmitInfo.pNext = &timelineSubmitInfo;
+        transferSubmitInfo.waitSemaphoreCount = transferWaitCount;
+        transferSubmitInfo.pWaitSemaphores =
+            transferWaitCount > 0 ? transferWaitSemaphores.data() : nullptr;
+        transferSubmitInfo.pWaitDstStageMask =
+            transferWaitCount > 0 ? transferWaitStages.data() : nullptr;
         transferSubmitInfo.commandBufferCount = 1;
         transferSubmitInfo.pCommandBuffers = &m_transferCommandBuffer;
         transferSubmitInfo.signalSemaphoreCount = 1;
@@ -6614,6 +6651,7 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
         if (submitResult != VK_SUCCESS) {
             logVkFailure("vkQueueSubmit(transfer)", submitResult);
             cleanupPendingAllocations();
+            rollbackChunkDrawState();
             return false;
         }
 
