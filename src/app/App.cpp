@@ -155,6 +155,44 @@ world::MagicaVoxelModel downscaleMagicaModel(const world::MagicaVoxelModel& sour
     return scaled;
 }
 
+world::VoxelType voxelTypeForMagicaRgba(std::uint32_t rgba) {
+    const int r = static_cast<int>(rgba & 0xFFu);
+    const int g = static_cast<int>((rgba >> 8u) & 0xFFu);
+    const int b = static_cast<int>((rgba >> 16u) & 0xFFu);
+    const int a = static_cast<int>((rgba >> 24u) & 0xFFu);
+    if (a <= 8) {
+        return world::VoxelType::Empty;
+    }
+
+    struct VoxelRef {
+        world::VoxelType type = world::VoxelType::Empty;
+        int r = 0;
+        int g = 0;
+        int b = 0;
+    };
+    constexpr std::array<VoxelRef, 5> kVoxelRefs = {
+        VoxelRef{world::VoxelType::Stone, 168, 168, 168},
+        VoxelRef{world::VoxelType::Dirt, 134, 93, 52},
+        VoxelRef{world::VoxelType::Grass, 96, 164, 80},
+        VoxelRef{world::VoxelType::Wood, 154, 121, 84},
+        VoxelRef{world::VoxelType::SolidRed, 228, 84, 66},
+    };
+
+    world::VoxelType closest = kVoxelRefs.front().type;
+    int bestDistance = std::numeric_limits<int>::max();
+    for (const VoxelRef& reference : kVoxelRefs) {
+        const int dr = r - reference.r;
+        const int dg = g - reference.g;
+        const int db = b - reference.b;
+        const int distance = (dr * dr) + (dg * dg) + (db * db);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            closest = reference.type;
+        }
+    }
+    return closest;
+}
+
 constexpr std::array<world::VoxelType, 5> kPlaceableBlockTypes = {
     world::VoxelType::Stone,
     world::VoxelType::Dirt,
@@ -634,6 +672,84 @@ bool App::init() {
                         << "; using empty world (press R to regenerate) in " << worldLoadMs << " ms";
     }
 
+    const auto magicaStampStart = Clock::now();
+    struct MagicaLoadSpec {
+        const char* relativePath = nullptr;
+        float placementX = 0.0f;
+        float placementY = 0.0f;
+        float placementZ = 0.0f;
+        float uniformScale = 1.0f;
+    };
+    constexpr std::array<MagicaLoadSpec, 2> kMagicaLoadSpecs = {
+        MagicaLoadSpec{kMagicaCastlePath, 0.0f, 0.0f, 0.0f, 1.0f},
+        MagicaLoadSpec{kMagicaTeapotPath, 64.0f, 0.0f, 0.0f, 0.36f},
+    };
+
+    std::uint32_t stampedMagicaResourceCount = 0;
+    std::uint64_t stampedMagicaVoxelCount = 0;
+    std::uint64_t clippedMagicaVoxelCount = 0;
+    for (const MagicaLoadSpec& loadSpec : kMagicaLoadSpecs) {
+        const std::filesystem::path magicaPath = resolveAssetPath(std::filesystem::path{loadSpec.relativePath});
+        world::MagicaVoxelModel loadedModel{};
+        if (!world::loadMagicaVoxelModel(magicaPath, loadedModel)) {
+            std::error_code cwdError;
+            const std::filesystem::path cwd = std::filesystem::current_path(cwdError);
+            VOX_LOGW("app") << "failed to load magica resource at " << std::filesystem::absolute(magicaPath).string()
+                            << " (cwd=" << (cwdError ? std::string{"<unavailable>"} : cwd.string()) << ")";
+            continue;
+        }
+
+        const world::MagicaVoxelModel magicaModel = downscaleMagicaModel(loadedModel, loadSpec.uniformScale);
+        const int transformedSizeX = magicaModel.sizeX;
+        const int transformedSizeZ = magicaModel.sizeY;
+        const int worldOriginX = static_cast<int>(std::lround(loadSpec.placementX - (0.5f * static_cast<float>(transformedSizeX))));
+        const int worldOriginY = static_cast<int>(std::lround(loadSpec.placementY));
+        const int worldOriginZ = static_cast<int>(std::lround(loadSpec.placementZ - (0.5f * static_cast<float>(transformedSizeZ))));
+
+        std::uint64_t resourceStamped = 0;
+        std::uint64_t resourceClipped = 0;
+        for (const world::MagicaVoxel& voxel : magicaModel.voxels) {
+            const world::VoxelType voxelType = voxelTypeForMagicaRgba(magicaModel.paletteRgba[voxel.paletteIndex]);
+            if (voxelType == world::VoxelType::Empty) {
+                continue;
+            }
+
+            const int worldX = worldOriginX + static_cast<int>(voxel.x);
+            const int worldY = worldOriginY + static_cast<int>(voxel.z);
+            const int worldZ = worldOriginZ + static_cast<int>(voxel.y);
+            std::size_t chunkIndex = 0;
+            int localX = 0;
+            int localY = 0;
+            int localZ = 0;
+            if (!worldToChunkLocal(worldX, worldY, worldZ, chunkIndex, localX, localY, localZ)) {
+                ++resourceClipped;
+                continue;
+            }
+
+            world::Chunk& chunk = m_chunkGrid.chunks()[chunkIndex];
+            chunk.setVoxel(localX, localY, localZ, world::Voxel{voxelType});
+            ++resourceStamped;
+        }
+
+        if (resourceStamped == 0) {
+            VOX_LOGW("app") << "magica resource stamped no world voxels: "
+                            << std::filesystem::absolute(magicaPath).string()
+                            << " (clipped=" << resourceClipped << ")";
+            continue;
+        }
+
+        ++stampedMagicaResourceCount;
+        stampedMagicaVoxelCount += resourceStamped;
+        clippedMagicaVoxelCount += resourceClipped;
+        VOX_LOGI("app") << "stamped magica resource " << std::filesystem::absolute(magicaPath).string()
+                        << " (" << resourceStamped << " voxels, clipped=" << resourceClipped
+                        << ", scale=" << loadSpec.uniformScale << ")";
+    }
+    VOX_LOGI("app") << "stamped " << stampedMagicaResourceCount << "/" << kMagicaLoadSpecs.size()
+                    << " magica resources into world (voxels=" << stampedMagicaVoxelCount
+                    << ", clipped=" << clippedMagicaVoxelCount
+                    << ") in " << elapsedMs(magicaStampStart) << " ms";
+
     const auto clipmapStart = Clock::now();
     m_appliedClipmapConfig = m_renderer.clipmapQueryConfig();
     m_hasAppliedClipmapConfig = true;
@@ -654,78 +770,6 @@ bool App::init() {
         VOX_LOGE("app") << "renderer init failed";
         return false;
     }
-
-    const auto magicaLoadStart = Clock::now();
-    m_renderer.clearMagicaVoxelMeshes();
-    struct MagicaLoadSpec {
-        const char* relativePath = nullptr;
-        float placementX = 0.0f;
-        float placementY = 0.0f;
-        float placementZ = 0.0f;
-        float uniformScale = 1.0f;
-    };
-    constexpr std::array<MagicaLoadSpec, 2> kMagicaLoadSpecs = {
-        MagicaLoadSpec{kMagicaCastlePath, 0.0f, 0.0f, 0.0f, 1.0f},
-        MagicaLoadSpec{kMagicaTeapotPath, 96.0f, 0.0f, 0.0f, 0.72f},
-    };
-
-    std::uint32_t loadedMagicaResourceCount = 0;
-    for (const MagicaLoadSpec& loadSpec : kMagicaLoadSpecs) {
-        const std::filesystem::path magicaPath = resolveAssetPath(std::filesystem::path{loadSpec.relativePath});
-        world::MagicaVoxelModel loadedModel{};
-        if (!world::loadMagicaVoxelModel(magicaPath, loadedModel)) {
-            std::error_code cwdError;
-            const std::filesystem::path cwd = std::filesystem::current_path(cwdError);
-            VOX_LOGW("app") << "failed to load magica resource at " << std::filesystem::absolute(magicaPath).string()
-                            << " (cwd=" << (cwdError ? std::string{"<unavailable>"} : cwd.string()) << ")";
-            continue;
-        }
-
-        const world::MagicaVoxelModel magicaModel = downscaleMagicaModel(loadedModel, loadSpec.uniformScale);
-        const std::vector<world::MagicaVoxelMeshChunk> magicaChunks = world::buildMagicaVoxelMeshChunks(magicaModel);
-        if (magicaChunks.empty()) {
-            VOX_LOGW("app") << "magica resource produced empty mesh: " << std::filesystem::absolute(magicaPath).string();
-            continue;
-        }
-
-        const float transformedSizeX = static_cast<float>(magicaModel.sizeX);
-        const float transformedSizeZ = static_cast<float>(magicaModel.sizeY);
-        const float modelBaseOffsetX = loadSpec.placementX - (0.5f * transformedSizeX);
-        const float modelBaseOffsetY = loadSpec.placementY;
-        const float modelBaseOffsetZ = loadSpec.placementZ - (0.5f * transformedSizeZ);
-
-        std::size_t totalVertices = 0;
-        std::size_t totalIndices = 0;
-        bool uploadFailed = false;
-        for (std::size_t chunkIndex = 0; chunkIndex < magicaChunks.size(); ++chunkIndex) {
-            const world::MagicaVoxelMeshChunk& magicaChunk = magicaChunks[chunkIndex];
-            const float worldOffsetX = modelBaseOffsetX + static_cast<float>(magicaChunk.originX);
-            const float worldOffsetY = modelBaseOffsetY + static_cast<float>(magicaChunk.originY);
-            const float worldOffsetZ = modelBaseOffsetZ + static_cast<float>(magicaChunk.originZ);
-            totalVertices += magicaChunk.mesh.vertices.size();
-            totalIndices += magicaChunk.mesh.indices.size();
-            if (!m_renderer.uploadMagicaVoxelMesh(magicaChunk.mesh, worldOffsetX, worldOffsetY, worldOffsetZ)) {
-                VOX_LOGE("app") << "failed to upload magica resource "
-                                << std::filesystem::absolute(magicaPath).string()
-                                << " chunk " << chunkIndex << "/" << magicaChunks.size();
-                uploadFailed = true;
-                break;
-            }
-        }
-        if (uploadFailed) {
-            continue;
-        }
-
-        ++loadedMagicaResourceCount;
-        VOX_LOGI("app") << "loaded magica resource " << std::filesystem::absolute(magicaPath).string()
-                        << " (" << magicaModel.voxels.size() << " voxels, "
-                        << totalVertices << " vertices, "
-                        << totalIndices << " indices, "
-                        << magicaChunks.size() << " chunk mesh(es), "
-                        << "scale=" << loadSpec.uniformScale << ")";
-    }
-    VOX_LOGI("app") << "loaded " << loadedMagicaResourceCount << "/" << kMagicaLoadSpecs.size()
-                    << " magica resources in " << elapsedMs(magicaLoadStart) << " ms";
 
     VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms";
     return true;
