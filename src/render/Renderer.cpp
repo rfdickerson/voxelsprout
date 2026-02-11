@@ -80,6 +80,15 @@ constexpr float kBeltRadius = 0.49f;
 constexpr float kTrackRadius = 0.38f;
 constexpr math::Vector3 kBeltTint{0.78f, 0.62f, 0.18f};
 constexpr math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
+constexpr float kBeltCargoLength = 0.30f;
+constexpr float kBeltCargoRadius = 0.30f;
+constexpr std::array<math::Vector3, 5> kBeltCargoTints = {
+    math::Vector3{0.92f, 0.31f, 0.31f},
+    math::Vector3{0.31f, 0.71f, 0.96f},
+    math::Vector3{0.95f, 0.84f, 0.32f},
+    math::Vector3{0.56f, 0.88f, 0.48f},
+    math::Vector3{0.84f, 0.54f, 0.92f},
+};
 constexpr uint64_t kAcquireNextImageTimeoutNs = 100000000ull; // 100 ms
 constexpr uint64_t kFrameTimelineWarnLagThreshold = 6u;
 constexpr double kFrameTimelineWarnCooldownSeconds = 2.0;
@@ -7076,6 +7085,7 @@ void Renderer::renderFrame(
     const sim::Simulation& simulation,
     const CameraPose& camera,
     const VoxelPreview& preview,
+    float simulationAlpha,
     std::span<const std::size_t> visibleChunkIndices
 ) {
     const auto cpuFrameStartTime = std::chrono::steady_clock::now();
@@ -7747,10 +7757,14 @@ void Renderer::renderFrame(
     std::optional<FrameArenaSlice> pipeInstanceSliceOpt = std::nullopt;
     uint32_t transportInstanceCount = 0;
     std::optional<FrameArenaSlice> transportInstanceSliceOpt = std::nullopt;
+    uint32_t beltCargoInstanceCount = 0;
+    std::optional<FrameArenaSlice> beltCargoInstanceSliceOpt = std::nullopt;
     if (m_pipeIndexCount > 0 || m_transportIndexCount > 0) {
         const std::vector<sim::Pipe>& pipes = simulation.pipes();
         const std::vector<sim::Belt>& belts = simulation.belts();
         const std::vector<sim::Track>& tracks = simulation.tracks();
+        const std::vector<sim::BeltCargo>& beltCargoes = simulation.beltCargoes();
+        const float clampedSimulationAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
         const std::vector<PipeEndpointState> endpointStates =
             pipes.empty() ? std::vector<PipeEndpointState>{} : buildPipeEndpointStates(pipes);
         std::vector<PipeInstance> pipeInstances;
@@ -7826,6 +7840,39 @@ void Renderer::renderFrame(
             transportInstances.push_back(instance);
         }
 
+        std::vector<PipeInstance> beltCargoInstances;
+        beltCargoInstances.reserve(beltCargoes.size());
+        for (const sim::BeltCargo& cargo : beltCargoes) {
+            if (cargo.beltIndex < 0 || static_cast<std::size_t>(cargo.beltIndex) >= belts.size()) {
+                continue;
+            }
+            const float worldX = std::lerp(cargo.prevWorldPos[0], cargo.currWorldPos[0], clampedSimulationAlpha);
+            const float worldY = std::lerp(cargo.prevWorldPos[1], cargo.currWorldPos[1], clampedSimulationAlpha);
+            const float worldZ = std::lerp(cargo.prevWorldPos[2], cargo.currWorldPos[2], clampedSimulationAlpha);
+            const sim::Belt& belt = belts[static_cast<std::size_t>(cargo.beltIndex)];
+            const math::Vector3 axis = beltDirectionAxis(belt.direction);
+            const math::Vector3 tint = kBeltCargoTints[static_cast<std::size_t>(cargo.typeId % kBeltCargoTints.size())];
+
+            PipeInstance instance{};
+            instance.originLength[0] = worldX - 0.5f;
+            instance.originLength[1] = worldY - 0.5f;
+            instance.originLength[2] = worldZ - 0.5f;
+            instance.originLength[3] = kBeltCargoLength;
+            instance.axisRadius[0] = axis.x;
+            instance.axisRadius[1] = axis.y;
+            instance.axisRadius[2] = axis.z;
+            instance.axisRadius[3] = kBeltCargoRadius;
+            instance.tint[0] = tint.x;
+            instance.tint[1] = tint.y;
+            instance.tint[2] = tint.z;
+            instance.tint[3] = 2.0f; // style 2 = neutral solid transport block
+            instance.extensions[0] = 0.0f;
+            instance.extensions[1] = 0.0f;
+            instance.extensions[2] = 1.0f;
+            instance.extensions[3] = 1.0f;
+            beltCargoInstances.push_back(instance);
+        }
+
         if (!pipeInstances.empty() && m_pipeIndexCount > 0) {
             pipeInstanceSliceOpt = m_frameArena.allocateUpload(
                 static_cast<VkDeviceSize>(pipeInstances.size() * sizeof(PipeInstance)),
@@ -7855,6 +7902,22 @@ void Renderer::renderFrame(
                     static_cast<size_t>(transportInstanceSliceOpt->size)
                 );
                 transportInstanceCount = static_cast<uint32_t>(transportInstances.size());
+            }
+        }
+
+        if (!beltCargoInstances.empty() && m_transportIndexCount > 0) {
+            beltCargoInstanceSliceOpt = m_frameArena.allocateUpload(
+                static_cast<VkDeviceSize>(beltCargoInstances.size() * sizeof(PipeInstance)),
+                static_cast<VkDeviceSize>(alignof(PipeInstance)),
+                FrameArenaUploadKind::InstanceData
+            );
+            if (beltCargoInstanceSliceOpt.has_value() && beltCargoInstanceSliceOpt->mapped != nullptr) {
+                std::memcpy(
+                    beltCargoInstanceSliceOpt->mapped,
+                    beltCargoInstances.data(),
+                    static_cast<size_t>(beltCargoInstanceSliceOpt->size)
+                );
+                beltCargoInstanceCount = static_cast<uint32_t>(beltCargoInstances.size());
             }
         }
     }
@@ -8197,6 +8260,13 @@ void Renderer::renderFrame(
                     transportInstanceCount,
                     transportInstanceSliceOpt
                 );
+                drawShadowInstances(
+                    m_transportVertexBufferHandle,
+                    m_transportIndexBufferHandle,
+                    m_transportIndexCount,
+                    beltCargoInstanceCount,
+                    beltCargoInstanceSliceOpt
+                );
             }
 
             const uint32_t grassShadowCascadeCount = static_cast<uint32_t>(std::clamp(
@@ -8472,6 +8542,13 @@ void Renderer::renderFrame(
             m_transportIndexCount,
             transportInstanceCount,
             transportInstanceSliceOpt
+        );
+        drawNormalDepthInstances(
+            m_transportVertexBufferHandle,
+            m_transportIndexBufferHandle,
+            m_transportIndexCount,
+            beltCargoInstanceCount,
+            beltCargoInstanceSliceOpt
         );
     }
     vkCmdEndRendering(commandBuffer);
@@ -8800,6 +8877,13 @@ void Renderer::renderFrame(
             m_transportIndexCount,
             transportInstanceCount,
             transportInstanceSliceOpt
+        );
+        drawLitInstances(
+            m_transportVertexBufferHandle,
+            m_transportIndexBufferHandle,
+            m_transportIndexCount,
+            beltCargoInstanceCount,
+            beltCargoInstanceSliceOpt
         );
     }
 

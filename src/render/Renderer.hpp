@@ -125,6 +125,7 @@ public:
         const sim::Simulation& simulation,
         const CameraPose& camera,
         const VoxelPreview& preview,
+        float simulationAlpha,
         std::span<const std::size_t> visibleChunkIndices
     );
     void setDebugUiVisible(bool visible);

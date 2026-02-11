@@ -7,6 +7,7 @@
 #include "math/Math.hpp"
 #include "sim/NetworkGraph.hpp"
 #include "sim/NetworkProcedural.hpp"
+#include "sim/Simulation.hpp"
 #include "render/FrameArenaAlias.hpp"
 #include "world/ClipmapIndex.hpp"
 #include "world/Chunk.hpp"
@@ -330,6 +331,39 @@ void testClipmapIndex() {
     expectTrue(movedUpdateStats.clipmapUpdatedBrickCount > 0u, "Clipmap updates bricks when crossing snapped boundary");
 }
 
+void testSimulationBeltCargoDeterminism() {
+    sim::Simulation simA;
+    sim::Simulation simB;
+    simA.initializeSingleBelt();
+    simB.initializeSingleBelt();
+
+    // Extend the seed with a second belt to exercise cross-segment handoff.
+    simA.belts().emplace_back(1, 1, 0, sim::BeltDirection::East);
+    simB.belts().emplace_back(1, 1, 0, sim::BeltDirection::East);
+
+    constexpr float kFixedDt = 1.0f / 60.0f;
+    for (int tick = 0; tick < 300; ++tick) {
+        simA.update(kFixedDt);
+        simB.update(kFixedDt);
+    }
+
+    const std::vector<sim::BeltCargo>& cargoA = simA.beltCargoes();
+    const std::vector<sim::BeltCargo>& cargoB = simB.beltCargoes();
+    expectTrue(!cargoA.empty(), "Simulation spawns belt cargo");
+    expectTrue(cargoA.size() == cargoB.size(), "Simulation cargo count deterministic");
+
+    if (!cargoA.empty() && cargoA.size() == cargoB.size()) {
+        for (std::size_t i = 0; i < cargoA.size(); ++i) {
+            expectTrue(cargoA[i].itemId == cargoB[i].itemId, "Cargo id deterministic");
+            expectTrue(cargoA[i].beltIndex == cargoB[i].beltIndex, "Cargo belt assignment deterministic");
+            expectTrue(cargoA[i].alongQ16 == cargoB[i].alongQ16, "Cargo fixed-step progress deterministic");
+            expectNear(cargoA[i].currWorldPos[0], cargoB[i].currWorldPos[0], 0.0001f, "Cargo world X deterministic");
+            expectNear(cargoA[i].currWorldPos[1], cargoB[i].currWorldPos[1], 0.0001f, "Cargo world Y deterministic");
+            expectNear(cargoA[i].currWorldPos[2], cargoB[i].currWorldPos[2], 0.0001f, "Cargo world Z deterministic");
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -339,6 +373,7 @@ int main() {
     testFrameArenaAliasUtilities();
     testChunkMeshingModes();
     testClipmapIndex();
+    testSimulationBeltCargoDeterminism();
 
     if (g_failures != 0) {
         std::cerr << "[foundation test] " << g_failures << " failures\n";
