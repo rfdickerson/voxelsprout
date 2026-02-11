@@ -151,6 +151,15 @@ float3 applyAtmosphericFog(float3 litColor, float3 worldPosition, float viewDept
 
 int chooseShadowCascade(float viewDepth)
 {
+    int forcedCascade = -1;
+    if (camera.shadowConfig3.y >= -0.5)
+    {
+        forcedCascade = clamp(int(camera.shadowConfig3.y + 0.5), 0, 3);
+    }
+    if (forcedCascade >= 0)
+    {
+        return forcedCascade;
+    }
     if (viewDepth <= camera.shadowCascadeSplits.x) return 0;
     if (viewDepth <= camera.shadowCascadeSplits.y) return 1;
     if (viewDepth <= camera.shadowCascadeSplits.z) return 2;
@@ -185,10 +194,16 @@ float sampleShadowPcf(float3 worldPosition, float3 normal, int cascadeIndex, flo
     const float2 atlasTexelSize = 1.0 / float2(float(texW), float(texH));
     const float2 texelSize = atlasTexelSize;
     const float texelScale = max(texelSize.x, texelSize.y);
+    // Keep PCF taps inside the current cascade tile to avoid bleeding/flicker from
+    // neighboring atlas regions (especially visible with multi-cascade blending).
+    const float2 cascadeUvMin = atlasUvRect.xy + (texelSize * 0.5);
+    const float2 cascadeUvMax = atlasUvRect.xy + atlasUvRect.zw - (texelSize * 0.5);
 
     const float bias =
         lerp(camera.shadowConfig0.z, camera.shadowConfig0.w, cascadeT) * texelScale +
         lerp(camera.shadowConfig1.x, camera.shadowConfig1.y, cascadeT) * texelScale * (1.0 - ndotl);
+    // Reverse-Z + GREATER compare: move receiver reference farther (toward 0) to reduce acne.
+    const float shadowDepthCompareRef = saturate(shadowDepthRef - bias);
 
     const int kernelRadius = clamp(int(camera.shadowConfig3.w + 0.5), 1, 3);
     float visibility = 0.0;
@@ -199,11 +214,15 @@ float sampleShadowPcf(float3 worldPosition, float3 normal, int cascadeIndex, flo
         for (int x = -3; x <= 3; ++x)
         {
             if (abs(x) > kernelRadius || abs(y) > kernelRadius) continue;
-            const float2 uv = shadowUv + float2(float(x), float(y)) * texelSize;
+            const float2 uv = clamp(
+                shadowUv + float2(float(x), float(y)) * texelSize,
+                cascadeUvMin,
+                cascadeUvMax
+            );
             const float wx = float(kernelRadius + 1 - abs(x));
             const float wy = float(kernelRadius + 1 - abs(y));
             const float weight = wx * wy;
-            visibility += shadowMap.SampleCmpLevelZero(uv, shadowDepthRef + bias) * weight;
+            visibility += shadowMap.SampleCmpLevelZero(uv, shadowDepthCompareRef) * weight;
             weightSum += weight;
         }
     }
@@ -215,7 +234,9 @@ float sampleCascadedShadow(float3 worldPosition, float3 normal, float viewDepth,
 {
     const int primaryCascade = chooseShadowCascade(viewDepth);
     float shadow = sampleShadowPcf(worldPosition, normal, primaryCascade, ndotl);
-    if (primaryCascade >= 3) return shadow;
+    const uint shadowDebugFlags = uint(clamp(camera.shadowConfig3.z, 0.0, 255.0) + 0.5);
+    const bool disableCascadeBlending = (shadowDebugFlags & 0x2u) != 0u;
+    if (primaryCascade >= 3 || disableCascadeBlending) return shadow;
 
     const float prevSplit = (primaryCascade == 0) ? 0.0 : camera.shadowCascadeSplits[primaryCascade - 1];
     const float split = camera.shadowCascadeSplits[primaryCascade];
@@ -320,6 +341,12 @@ const int kAmbientPolicyMode = 2;
 
 float selectShadowVisibility(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
 {
+    const uint shadowDebugFlags = uint(clamp(camera.shadowConfig3.z, 0.0, 255.0) + 0.5);
+    const bool disableShadowSampling = (shadowDebugFlags & 0x1u) != 0u;
+    if (disableShadowSampling)
+    {
+        return 1.0;
+    }
     if (kShadowPolicyMode <= 0)
     {
         return evaluateShadow(NoShadowPolicy(), worldPosition, normal, viewDepth, ndotl);
@@ -356,6 +383,7 @@ float4 main(FragmentInput input) : SV_Target0
 {
     const float3 normal = faceNormal(input.inFace);
     float3 baseColor = sampleMaterialAlbedo(input.inMaterial, input.inFace, input.inWorldPosition);
+    const int shadowDebugViewMode = clamp(int(camera.shadowConfig3.x + 0.5), 0, 2);
 
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
@@ -364,10 +392,29 @@ float4 main(FragmentInput input) : SV_Target0
 
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
+    const int shadowCascade = chooseShadowCascade(viewDepth);
     float shadowVisibility = 1.0;
-    if (ndotl > 0.0001)
+    const bool shadowDebugViewActive = shadowDebugViewMode != 0;
+    if (shadowDebugViewActive)
+    {
+        // Debug isolation: remove sun-angle-dependent receiver bias/gating.
+        shadowVisibility = selectShadowVisibility(input.inWorldPosition, normal, viewDepth, 1.0);
+    }
+    else if (ndotl > 0.0001)
     {
         shadowVisibility = selectShadowVisibility(input.inWorldPosition, normal, viewDepth, ndotl);
+    }
+    if (shadowDebugViewMode == 1)
+    {
+        return float4(shadowVisibility.xxx, 1.0);
+    }
+    if (shadowDebugViewMode == 2)
+    {
+        float3 cascadeColor = float3(0.98, 0.30, 0.24);
+        if (shadowCascade == 1) cascadeColor = float3(0.22, 0.92, 0.38);
+        else if (shadowCascade == 2) cascadeColor = float3(0.24, 0.58, 0.98);
+        else if (shadowCascade == 3) cascadeColor = float3(0.97, 0.88, 0.24);
+        return float4(cascadeColor, 1.0);
     }
 
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);

@@ -90,6 +90,14 @@ public:
 
         float pcfRadius = 1.0f;
         int grassShadowCascadeCount = 1;
+        bool freezeShadowAtlasUpdates = false;
+        bool visualizeShadowVisibility = false;
+        bool visualizeShadowCascades = false;
+        int forceCascadeIndex = -1;
+        bool useAllChunkLod0Casters = false;
+        bool forceDirectShadowChunkDraws = true;
+        bool disableShadowSampling = false;
+        bool disableCascadeBlending = false;
 
         float ssaoRadius = 0.55f;
         float ssaoBias = 0.03f;
@@ -341,16 +349,16 @@ private:
     std::vector<bool> m_ssaoBlurImageInitialized;
     VkSampler m_normalDepthSampler = VK_NULL_HANDLE;
     VkSampler m_ssaoSampler = VK_NULL_HANDLE;
-    VkImage m_shadowDepthImage = VK_NULL_HANDLE;
-    VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
+    std::array<VkImage, kMaxFramesInFlight> m_shadowDepthImages{};
+    std::array<VkImageView, kMaxFramesInFlight> m_shadowDepthImageViews{};
     VkSampler m_shadowDepthSampler = VK_NULL_HANDLE;
-    bool m_shadowDepthInitialized = false;
+    std::array<bool, kMaxFramesInFlight> m_shadowDepthInitialized{};
 #if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
-    VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
+    std::array<VmaAllocation, kMaxFramesInFlight> m_shadowDepthAllocations{};
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;
 #endif
-    VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;
+    std::array<VkDeviceMemory, kMaxFramesInFlight> m_shadowDepthMemories{};
     std::vector<uint64_t> m_swapchainImageTimelineValues;
     // One render-finished semaphore per swapchain image avoids reusing a semaphore
     // while presentation may still be waiting on it.
@@ -380,7 +388,7 @@ private:
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorPool m_bindlessDescriptorPool = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
-    VkDescriptorSet m_bindlessDescriptorSet = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kMaxFramesInFlight> m_bindlessDescriptorSets{};
     bool m_supportsWireframePreview = false;
     bool m_supportsSamplerAnisotropy = false;
     bool m_supportsMultiDrawIndirect = false;
@@ -440,6 +448,7 @@ private:
     uint64_t m_currentChunkReadyTimelineValue = 0;
     uint64_t m_transferCommandBufferInFlightValue = 0;
     uint64_t m_lastGraphicsTimelineValue = 0;
+    uint64_t m_shadowStaggerFrameCounter = 0;
     uint64_t m_nextTimelineValue = 1;
     uint32_t m_nextDisplayTimingPresentId = 1;
     uint32_t m_lastSubmittedDisplayTimingPresentId = 0;
@@ -542,6 +551,9 @@ private:
     // Dynamic cascade split distances in view-space units.
     // Updated per frame and consumed by shadow rendering + shading.
     std::array<float, kShadowCascadeCount> m_shadowCascadeSplits = {20.0f, 45.0f, 90.0f, 180.0f};
+    std::array<float, kShadowCascadeCount> m_shadowFrozenCascadeSplits = {20.0f, 45.0f, 90.0f, 180.0f};
+    std::array<std::array<float, 16>, kShadowCascadeCount> m_shadowFrozenLightViewProjColumnMajor{};
+    bool m_shadowFrozenStateValid = false;
     std::array<float, kShadowCascadeCount> m_shadowStableCascadeRadii = {0.0f, 0.0f, 0.0f, 0.0f};
     float m_shadowStableAspectRatio = -1.0f;
     float m_shadowStableFovDegrees = -1.0f;
