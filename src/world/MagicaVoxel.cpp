@@ -241,6 +241,236 @@ std::uint8_t materialForRgba(std::uint32_t rgba) {
     return closest;
 }
 
+constexpr std::uint32_t kEmptyMaskKey = 0xFFFFFFFFu;
+
+void faceSliceDimensionsForVolume(
+    std::uint32_t faceId,
+    int sizeX,
+    int sizeY,
+    int sizeZ,
+    int& outSliceCount,
+    int& outUCount,
+    int& outVCount
+) {
+    switch (faceId) {
+    case 0u:
+    case 1u:
+        outSliceCount = sizeX;
+        outUCount = sizeY;
+        outVCount = sizeZ;
+        break;
+    case 2u:
+    case 3u:
+        outSliceCount = sizeY;
+        outUCount = sizeX;
+        outVCount = sizeZ;
+        break;
+    case 4u:
+    case 5u:
+    default:
+        outSliceCount = sizeZ;
+        outUCount = sizeX;
+        outVCount = sizeY;
+        break;
+    }
+}
+
+void faceSliceCellToVoxel(std::uint32_t faceId, int slice, int u, int v, int& outX, int& outY, int& outZ) {
+    switch (faceId) {
+    case 0u:
+    case 1u:
+        outX = slice;
+        outY = u;
+        outZ = v;
+        break;
+    case 2u:
+    case 3u:
+        outX = u;
+        outY = slice;
+        outZ = v;
+        break;
+    case 4u:
+    case 5u:
+    default:
+        outX = u;
+        outY = v;
+        outZ = slice;
+        break;
+    }
+}
+
+void faceRectCornerGrid(
+    std::uint32_t faceId,
+    int slice,
+    int u,
+    int v,
+    int width,
+    int height,
+    std::uint32_t corner,
+    int& outX,
+    int& outY,
+    int& outZ
+) {
+    switch (faceId) {
+    case 0u: // +X
+        if (corner == 0u) { outX = slice + 1; outY = u; outZ = v; return; }
+        if (corner == 1u) { outX = slice + 1; outY = u + width; outZ = v; return; }
+        if (corner == 2u) { outX = slice + 1; outY = u + width; outZ = v + height; return; }
+        outX = slice + 1; outY = u; outZ = v + height; return;
+    case 1u: // -X
+        if (corner == 0u) { outX = slice; outY = u; outZ = v + height; return; }
+        if (corner == 1u) { outX = slice; outY = u + width; outZ = v + height; return; }
+        if (corner == 2u) { outX = slice; outY = u + width; outZ = v; return; }
+        outX = slice; outY = u; outZ = v; return;
+    case 2u: // +Y
+        if (corner == 0u) { outX = u; outY = slice + 1; outZ = v; return; }
+        if (corner == 1u) { outX = u; outY = slice + 1; outZ = v + height; return; }
+        if (corner == 2u) { outX = u + width; outY = slice + 1; outZ = v + height; return; }
+        outX = u + width; outY = slice + 1; outZ = v; return;
+    case 3u: // -Y
+        if (corner == 0u) { outX = u; outY = slice; outZ = v + height; return; }
+        if (corner == 1u) { outX = u; outY = slice; outZ = v; return; }
+        if (corner == 2u) { outX = u + width; outY = slice; outZ = v; return; }
+        outX = u + width; outY = slice; outZ = v + height; return;
+    case 4u: // +Z
+        if (corner == 0u) { outX = u + width; outY = v; outZ = slice + 1; return; }
+        if (corner == 1u) { outX = u + width; outY = v + height; outZ = slice + 1; return; }
+        if (corner == 2u) { outX = u; outY = v + height; outZ = slice + 1; return; }
+        outX = u; outY = v; outZ = slice + 1; return;
+    case 5u: // -Z
+    default:
+        if (corner == 0u) { outX = u; outY = v; outZ = slice; return; }
+        if (corner == 1u) { outX = u; outY = v + height; outZ = slice; return; }
+        if (corner == 2u) { outX = u + width; outY = v + height; outZ = slice; return; }
+        outX = u + width; outY = v; outZ = slice; return;
+    }
+}
+
+std::uint8_t faceCornerAoSignatureDense(
+    const std::vector<std::uint8_t>& densePalette,
+    int sizeX,
+    int sizeY,
+    int sizeZ,
+    int x,
+    int y,
+    int z,
+    std::uint32_t faceId
+) {
+    std::uint8_t signature = 0;
+    for (std::uint32_t corner = 0; corner < 4u; ++corner) {
+        const std::uint32_t ao = cornerAoLevel(densePalette, sizeX, sizeY, sizeZ, x, y, z, faceId, corner) & 0x3u;
+        signature |= static_cast<std::uint8_t>(ao << (corner * 2u));
+    }
+    return signature;
+}
+
+std::uint32_t makeMaskKey(std::uint8_t material, std::uint8_t aoSignature) {
+    return (static_cast<std::uint32_t>(material) << 8u) | static_cast<std::uint32_t>(aoSignature);
+}
+
+bool appendGreedyFaceQuadLocal(
+    ChunkMeshData& mesh,
+    std::uint32_t faceId,
+    int slice,
+    int u,
+    int v,
+    int width,
+    int height,
+    std::uint8_t material,
+    std::uint8_t aoSignature,
+    std::uint32_t lodLevel,
+    int sizeX,
+    int sizeY,
+    int sizeZ
+) {
+    const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
+    for (std::uint32_t corner = 0; corner < 4u; ++corner) {
+        int gridX = 0;
+        int gridY = 0;
+        int gridZ = 0;
+        faceRectCornerGrid(faceId, slice, u, v, width, height, corner, gridX, gridY, gridZ);
+        const CornerAxes& offset = kFaceCornerAxes[faceId][corner];
+        const int baseX = gridX - offset.x;
+        const int baseY = gridY - offset.y;
+        const int baseZ = gridZ - offset.z;
+        if (baseX < 0 || baseX >= sizeX ||
+            baseY < 0 || baseY >= sizeY ||
+            baseZ < 0 || baseZ >= sizeZ) {
+            return false;
+        }
+        const std::uint32_t ao = (aoSignature >> (corner * 2u)) & 0x3u;
+        PackedVoxelVertex vertex{};
+        vertex.bits = PackedVoxelVertex::pack(
+            static_cast<std::uint32_t>(baseX),
+            static_cast<std::uint32_t>(baseY),
+            static_cast<std::uint32_t>(baseZ),
+            faceId,
+            corner,
+            ao,
+            material,
+            lodLevel
+        );
+        mesh.vertices.push_back(vertex);
+    }
+
+    mesh.indices.push_back(baseVertex + 0u);
+    mesh.indices.push_back(baseVertex + 1u);
+    mesh.indices.push_back(baseVertex + 2u);
+    mesh.indices.push_back(baseVertex + 0u);
+    mesh.indices.push_back(baseVertex + 2u);
+    mesh.indices.push_back(baseVertex + 3u);
+    return true;
+}
+
+void appendDenseVoxelFaceLocal(
+    ChunkMeshData& mesh,
+    const std::vector<std::uint8_t>& densePalette,
+    int sizeX,
+    int sizeY,
+    int sizeZ,
+    int globalX,
+    int globalY,
+    int globalZ,
+    int localX,
+    int localY,
+    int localZ,
+    std::uint32_t faceId,
+    std::uint8_t material
+) {
+    const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
+    for (std::uint32_t corner = 0; corner < 4u; ++corner) {
+        const std::uint32_t ao = cornerAoLevel(
+            densePalette,
+            sizeX,
+            sizeY,
+            sizeZ,
+            globalX,
+            globalY,
+            globalZ,
+            faceId,
+            corner
+        );
+        PackedVoxelVertex vertex{};
+        vertex.bits = PackedVoxelVertex::pack(
+            static_cast<std::uint32_t>(localX),
+            static_cast<std::uint32_t>(localY),
+            static_cast<std::uint32_t>(localZ),
+            faceId,
+            corner,
+            ao,
+            material,
+            0u
+        );
+        mesh.vertices.push_back(vertex);
+    }
+    mesh.indices.push_back(baseVertex + 0u);
+    mesh.indices.push_back(baseVertex + 1u);
+    mesh.indices.push_back(baseVertex + 2u);
+    mesh.indices.push_back(baseVertex + 0u);
+    mesh.indices.push_back(baseVertex + 2u);
+    mesh.indices.push_back(baseVertex + 3u);
+}
+
 } // namespace
 
 bool loadMagicaVoxelModel(const std::filesystem::path& path, MagicaVoxelModel& outModel) {
@@ -435,68 +665,163 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                 chunk.originY = tileY;
                 chunk.originZ = tileZ;
                 ChunkMeshData& mesh = chunk.mesh;
+                const int localSizeX = tileEndX - tileX;
+                const int localSizeY = tileEndY - tileY;
+                const int localSizeZ = tileEndZ - tileZ;
+                for (std::uint32_t faceId = 0; faceId < kFaceNeighbors.size(); ++faceId) {
+                    int sliceCount = 0;
+                    int uCount = 0;
+                    int vCount = 0;
+                    faceSliceDimensionsForVolume(
+                        faceId,
+                        localSizeX,
+                        localSizeY,
+                        localSizeZ,
+                        sliceCount,
+                        uCount,
+                        vCount
+                    );
+                    std::vector<std::uint32_t> mask(static_cast<std::size_t>(uCount * vCount), kEmptyMaskKey);
 
-                for (int z = tileZ; z < tileEndZ; ++z) {
-                    for (int y = tileY; y < tileEndY; ++y) {
-                        for (int x = tileX; x < tileEndX; ++x) {
-                            const std::uint8_t paletteIndex =
-                                densePalette[denseIndex(x, y, z, transformedSizeX, transformedSizeY)];
-                            if (paletteIndex == 0u) {
-                                continue;
-                            }
+                    for (int slice = 0; slice < sliceCount; ++slice) {
+                        std::fill(mask.begin(), mask.end(), kEmptyMaskKey);
 
-                            const std::uint32_t rgba = model.paletteRgba[paletteIndex];
-                            const std::uint32_t material = materialForRgba(rgba);
+                        for (int v = 0; v < vCount; ++v) {
+                            for (int u = 0; u < uCount; ++u) {
+                                int localX = 0;
+                                int localY = 0;
+                                int localZ = 0;
+                                faceSliceCellToVoxel(faceId, slice, u, v, localX, localY, localZ);
+                                const int globalX = tileX + localX;
+                                const int globalY = tileY + localY;
+                                const int globalZ = tileZ + localZ;
 
-                            for (const FaceNeighbor& face : kFaceNeighbors) {
+                                const std::uint8_t paletteIndex = densePalette[denseIndex(
+                                    globalX,
+                                    globalY,
+                                    globalZ,
+                                    transformedSizeX,
+                                    transformedSizeY
+                                )];
+                                if (paletteIndex == 0u) {
+                                    continue;
+                                }
+
+                                const FaceNeighbor& face = kFaceNeighbors[faceId];
                                 if (isSolid(
                                         densePalette,
                                         transformedSizeX,
                                         transformedSizeY,
                                         transformedSizeZ,
-                                        x + face.nx,
-                                        y + face.ny,
-                                        z + face.nz
+                                        globalX + face.nx,
+                                        globalY + face.ny,
+                                        globalZ + face.nz
                                     )) {
                                     continue;
                                 }
 
-                                const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
-                                const std::uint32_t localX = static_cast<std::uint32_t>(x - tileX);
-                                const std::uint32_t localY = static_cast<std::uint32_t>(y - tileY);
-                                const std::uint32_t localZ = static_cast<std::uint32_t>(z - tileZ);
-                                for (std::uint32_t corner = 0; corner < 4u; ++corner) {
-                                    const std::uint32_t ao = cornerAoLevel(
-                                        densePalette,
-                                        transformedSizeX,
-                                        transformedSizeY,
-                                        transformedSizeZ,
-                                        x,
-                                        y,
-                                        z,
-                                        face.faceId,
-                                        corner
-                                    );
-                                    PackedVoxelVertex vertex{};
-                                    vertex.bits = PackedVoxelVertex::pack(
-                                        localX,
-                                        localY,
-                                        localZ,
-                                        face.faceId,
-                                        corner,
-                                        ao,
-                                        material,
-                                        0u
-                                    );
-                                    mesh.vertices.push_back(vertex);
+                                const std::uint8_t material = materialForRgba(model.paletteRgba[paletteIndex]);
+                                const std::uint8_t aoSignature = faceCornerAoSignatureDense(
+                                    densePalette,
+                                    transformedSizeX,
+                                    transformedSizeY,
+                                    transformedSizeZ,
+                                    globalX,
+                                    globalY,
+                                    globalZ,
+                                    faceId
+                                );
+                                const std::size_t maskIndex = static_cast<std::size_t>(u + (v * uCount));
+                                mask[maskIndex] = makeMaskKey(material, aoSignature);
+                            }
+                        }
+
+                        for (int v = 0; v < vCount; ++v) {
+                            for (int u = 0; u < uCount;) {
+                                const std::size_t startIndex = static_cast<std::size_t>(u + (v * uCount));
+                                const std::uint32_t key = mask[startIndex];
+                                if (key == kEmptyMaskKey) {
+                                    ++u;
+                                    continue;
                                 }
 
-                                mesh.indices.push_back(baseVertex + 0u);
-                                mesh.indices.push_back(baseVertex + 1u);
-                                mesh.indices.push_back(baseVertex + 2u);
-                                mesh.indices.push_back(baseVertex + 0u);
-                                mesh.indices.push_back(baseVertex + 2u);
-                                mesh.indices.push_back(baseVertex + 3u);
+                                int width = 1;
+                                while ((u + width) < uCount) {
+                                    const std::size_t widthIndex = static_cast<std::size_t>((u + width) + (v * uCount));
+                                    if (mask[widthIndex] != key) {
+                                        break;
+                                    }
+                                    ++width;
+                                }
+
+                                int height = 1;
+                                bool canGrow = true;
+                                while ((v + height) < vCount && canGrow) {
+                                    for (int offsetU = 0; offsetU < width; ++offsetU) {
+                                        const std::size_t growIndex =
+                                            static_cast<std::size_t>((u + offsetU) + ((v + height) * uCount));
+                                        if (mask[growIndex] != key) {
+                                            canGrow = false;
+                                            break;
+                                        }
+                                    }
+                                    if (canGrow) {
+                                        ++height;
+                                    }
+                                }
+
+                                const std::uint8_t material = static_cast<std::uint8_t>((key >> 8u) & 0xFFu);
+                                const std::uint8_t aoSignature = static_cast<std::uint8_t>(key & 0xFFu);
+                                const bool mergedQuadAppended = appendGreedyFaceQuadLocal(
+                                    mesh,
+                                    faceId,
+                                    slice,
+                                    u,
+                                    v,
+                                    width,
+                                    height,
+                                    material,
+                                    aoSignature,
+                                    0u,
+                                    localSizeX,
+                                    localSizeY,
+                                    localSizeZ
+                                );
+                                if (!mergedQuadAppended) {
+                                    for (int emitV = 0; emitV < height; ++emitV) {
+                                        for (int emitU = 0; emitU < width; ++emitU) {
+                                            int localX = 0;
+                                            int localY = 0;
+                                            int localZ = 0;
+                                            faceSliceCellToVoxel(faceId, slice, u + emitU, v + emitV, localX, localY, localZ);
+                                            appendDenseVoxelFaceLocal(
+                                                mesh,
+                                                densePalette,
+                                                transformedSizeX,
+                                                transformedSizeY,
+                                                transformedSizeZ,
+                                                tileX + localX,
+                                                tileY + localY,
+                                                tileZ + localZ,
+                                                localX,
+                                                localY,
+                                                localZ,
+                                                faceId,
+                                                material
+                                            );
+                                        }
+                                    }
+                                }
+
+                                for (int clearV = 0; clearV < height; ++clearV) {
+                                    for (int clearU = 0; clearU < width; ++clearU) {
+                                        const std::size_t clearIndex =
+                                            static_cast<std::size_t>((u + clearU) + ((v + clearV) * uCount));
+                                        mask[clearIndex] = kEmptyMaskKey;
+                                    }
+                                }
+
+                                u += width;
                             }
                         }
                     }

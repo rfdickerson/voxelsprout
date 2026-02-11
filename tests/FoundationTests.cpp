@@ -407,6 +407,21 @@ void testMagicaVoxelMeshing() {
     }
     expectTrue(foundRedMaterial, "Magica mesher maps bright red to red material");
     expectTrue(foundNonRedMaterial, "Magica mesher maps non-red palette colors");
+
+    world::MagicaVoxelModel greedyModel{};
+    greedyModel.sizeX = 4;
+    greedyModel.sizeY = 4;
+    greedyModel.sizeZ = 4;
+    greedyModel.hasPalette = true;
+    greedyModel.paletteRgba.fill(0u);
+    greedyModel.paletteRgba[1] = 0xFF808080u;
+    greedyModel.voxels = {
+        world::MagicaVoxel{1u, 1u, 1u, 1u},
+        world::MagicaVoxel{2u, 1u, 1u, 1u}
+    };
+    const world::ChunkMeshData greedyMesh = world::buildMagicaVoxelMesh(greedyModel);
+    expectTrue(greedyMesh.vertices.size() == 24u, "Magica greedy mesher merges coplanar same-material faces");
+    expectTrue(greedyMesh.indices.size() == 36u, "Magica greedy mesher index count");
 }
 
 void testMagicaVoxelChunkedMeshing() {
