@@ -4321,9 +4321,10 @@ bool Renderer::createGraphicsPipeline() {
     struct WorldFragmentSpecializationData {
         std::int32_t shadowPolicyMode = 2;  // 0=no shadows, 1=single-cascade PCF, 2=cascade-blended PCF
         std::int32_t ambientPolicyMode = 2; // 0=SH only, 1=SH hemisphere, 2=SH hemisphere + vertex AO
+        std::int32_t forceTintOnly = 0;     // 0=atlas sampling enabled, 1=tint-only shading
     };
     const WorldFragmentSpecializationData worldFragmentSpecializationData{};
-    const std::array<VkSpecializationMapEntry, 2> worldFragmentSpecializationMapEntries = {{
+    const std::array<VkSpecializationMapEntry, 3> worldFragmentSpecializationMapEntries = {{
         VkSpecializationMapEntry{
             6u,
             static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, shadowPolicyMode)),
@@ -4332,6 +4333,11 @@ bool Renderer::createGraphicsPipeline() {
         VkSpecializationMapEntry{
             7u,
             static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, ambientPolicyMode)),
+            sizeof(std::int32_t)
+        },
+        VkSpecializationMapEntry{
+            8u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, forceTintOnly)),
             sizeof(std::int32_t)
         }
     }};
@@ -5135,9 +5141,10 @@ bool Renderer::createMagicaPipeline() {
     struct WorldFragmentSpecializationData {
         std::int32_t shadowPolicyMode = 2;
         std::int32_t ambientPolicyMode = 2;
+        std::int32_t forceTintOnly = 1;
     };
     const WorldFragmentSpecializationData fragmentSpecializationData{};
-    const std::array<VkSpecializationMapEntry, 2> specializationMapEntries = {{
+    const std::array<VkSpecializationMapEntry, 3> specializationMapEntries = {{
         VkSpecializationMapEntry{
             6u,
             static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, shadowPolicyMode)),
@@ -5146,6 +5153,11 @@ bool Renderer::createMagicaPipeline() {
         VkSpecializationMapEntry{
             7u,
             static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, ambientPolicyMode)),
+            sizeof(std::int32_t)
+        },
+        VkSpecializationMapEntry{
+            8u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, forceTintOnly)),
             sizeof(std::int32_t)
         }
     }};

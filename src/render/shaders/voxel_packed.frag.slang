@@ -18,6 +18,13 @@ static const uint kMaterialGrass = 3u;
 static const uint kMaterialWood = 4u;
 static const uint kMaterialRed = 251u;
 
+[[vk::constant_id(6)]]
+const int kShadowPolicyMode = 2;
+[[vk::constant_id(7)]]
+const int kAmbientPolicyMode = 2;
+[[vk::constant_id(8)]]
+const int kForceTintOnly = 0;
+
 float3 materialTint(uint material)
 {
     if (material == kMaterialRed) return float3(1.00, 0.28, 0.22);
@@ -67,6 +74,11 @@ uint materialAtlasTile(uint material, uint face)
 
 float3 sampleMaterialAlbedo(uint material, uint face, float3 worldPosition)
 {
+    if (kForceTintOnly != 0)
+    {
+        return materialTint(material);
+    }
+
     if (!materialUsesAtlas(material))
     {
         return materialTint(material);
@@ -312,11 +324,6 @@ float3 evaluateAmbient<TAmbientPolicy : IAmbientPolicy>(
 {
     return policy.ambient(normal, vertexAo);
 }
-
-[[vk::constant_id(6)]]
-const int kShadowPolicyMode = 2;
-[[vk::constant_id(7)]]
-const int kAmbientPolicyMode = 2;
 
 float selectShadowVisibility(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
 {
