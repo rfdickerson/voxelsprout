@@ -1362,11 +1362,6 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
         shutdown();
         return false;
     }
-    if (!runStep("createMagicaPipeline", [&] { return createMagicaPipeline(); })) {
-        VOX_LOGE("render") << "init failed at createMagicaPipeline\n";
-        shutdown();
-        return false;
-    }
     if (!runStep("createPipePipeline", [&] { return createPipePipeline(); })) {
         VOX_LOGE("render") << "init failed at createPipePipeline\n";
         shutdown();
@@ -9761,10 +9756,6 @@ bool Renderer::recreateSwapchain() {
     }
     if (!createGraphicsPipeline()) {
         VOX_LOGE("render") << "recreateSwapchain failed: createGraphicsPipeline\n";
-        return false;
-    }
-    if (!createMagicaPipeline()) {
-        VOX_LOGE("render") << "recreateSwapchain failed: createMagicaPipeline\n";
         return false;
     }
     if (!createPipePipeline()) {
