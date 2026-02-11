@@ -26,6 +26,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -79,6 +80,7 @@ constexpr float kBeltRadius = 0.49f;
 constexpr float kTrackRadius = 0.38f;
 constexpr math::Vector3 kBeltTint{0.78f, 0.62f, 0.18f};
 constexpr math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
+constexpr uint64_t kAcquireNextImageTimeoutNs = 100000000ull; // 100 ms
 
 #if defined(VOXEL_HAS_IMGUI)
 void imguiCheckVkResult(VkResult result) {
@@ -1122,11 +1124,16 @@ VkSurfaceFormatKHR chooseSwapchainFormat(const std::vector<VkSurfaceFormatKHR>& 
 
 VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR>& presentModes) {
     for (const VkPresentModeKHR presentMode : presentModes) {
+        if (presentMode == VK_PRESENT_MODE_FIFO_KHR) {
+            return presentMode;
+        }
+    }
+    for (const VkPresentModeKHR presentMode : presentModes) {
         if (presentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
             return presentMode;
         }
     }
-    return VK_PRESENT_MODE_FIFO_KHR;
+    return presentModes.front();
 }
 
 VkExtent2D chooseExtent(GLFWwindow* window, const VkSurfaceCapabilitiesKHR& capabilities) {
@@ -7112,6 +7119,27 @@ void Renderer::renderFrame(
 
     FrameResources& frame = m_frames[m_currentFrame];
     if (!isTimelineValueReached(m_frameTimelineValues[m_currentFrame])) {
+        static double lastStallLogTimeSeconds = 0.0;
+        uint64_t completedValue = 0;
+        const VkResult counterResult =
+            vkGetSemaphoreCounterValue(m_device, m_renderTimelineSemaphore, &completedValue);
+        if (counterResult == VK_SUCCESS) {
+            const uint64_t targetValue = m_frameTimelineValues[m_currentFrame];
+            const uint64_t lag = (targetValue > completedValue) ? (targetValue - completedValue) : 0u;
+            const double nowSeconds = glfwGetTime();
+            if (lag > 1u && (nowSeconds - lastStallLogTimeSeconds) >= 0.5) {
+                VOX_LOGW("render")
+                    << "frame slot stalled on timeline value "
+                    << targetValue
+                    << ", completed=" << completedValue
+                    << ", lag=" << lag
+                    << ", frameIndex=" << m_currentFrame;
+                lastStallLogTimeSeconds = nowSeconds;
+            }
+        } else {
+            logVkFailure("vkGetSemaphoreCounterValue(stuckFrame)", counterResult);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
     }
     if (m_frameTimelineValues[m_currentFrame] > 0) {
@@ -7147,7 +7175,7 @@ void Renderer::renderFrame(
     const VkResult acquireResult = vkAcquireNextImageKHR(
         m_device,
         m_swapchain,
-        std::numeric_limits<uint64_t>::max(),
+        kAcquireNextImageTimeoutNs,
         frame.imageAvailable,
         VK_NULL_HANDLE,
         &imageIndex
@@ -7156,6 +7184,10 @@ void Renderer::renderFrame(
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
         VOX_LOGI("render") << "swapchain out of date during acquire, recreating\n";
         recreateSwapchain();
+        return;
+    }
+    if (acquireResult == VK_TIMEOUT) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
     }
     if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
@@ -9060,7 +9092,7 @@ void Renderer::renderFrame(
 
     if (m_pendingTransferTimelineValue > 0) {
         waitSemaphores[waitSemaphoreCount] = m_renderTimelineSemaphore;
-        waitStages[waitSemaphoreCount] = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+        waitStages[waitSemaphoreCount] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         waitSemaphoreValues[waitSemaphoreCount] = m_pendingTransferTimelineValue;
         ++waitSemaphoreCount;
     }

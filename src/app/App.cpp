@@ -83,6 +83,10 @@ constexpr float kConveyorCollisionRadius = 0.49f;
 constexpr float kConveyorAlongHalfExtent = 0.5f;
 constexpr float kConveyorCrossAxisScale = 2.0f;
 constexpr float kConveyorVerticalScale = 0.25f;
+constexpr double kSimulationFixedHz = 60.0;
+constexpr double kSimulationFixedStepSeconds = 1.0 / kSimulationFixedHz;
+constexpr double kFrameDeltaClampSeconds = 0.25;
+constexpr int kMaxSimulationStepsPerFrame = 8;
 
 struct Aabb3f {
     float minX = 0.0f;
@@ -567,12 +571,16 @@ bool App::init() {
 void App::run() {
     VOX_LOGI("app") << "run begin";
     double previousTime = glfwGetTime();
+    double simulationAccumulatorSeconds = 0.0;
     uint64_t frameCount = 0;
 
     while (m_window != nullptr && glfwWindowShouldClose(m_window) == GLFW_FALSE) {
         const double currentTime = glfwGetTime();
-        const float dt = static_cast<float>(currentTime - previousTime);
+        const double rawFrameSeconds = std::max(0.0, currentTime - previousTime);
         previousTime = currentTime;
+        const double frameSeconds = std::min(rawFrameSeconds, kFrameDeltaClampSeconds);
+        const float dt = static_cast<float>(frameSeconds);
+        simulationAccumulatorSeconds += frameSeconds;
 
         pollInput();
         if (m_input.quitRequested) {
@@ -581,6 +589,19 @@ void App::run() {
         }
         if (glfwWindowShouldClose(m_window) == GLFW_TRUE) {
             break;
+        }
+
+        int simulationStepCount = 0;
+        while (simulationAccumulatorSeconds >= kSimulationFixedStepSeconds &&
+               simulationStepCount < kMaxSimulationStepsPerFrame) {
+            m_simulation.update(static_cast<float>(kSimulationFixedStepSeconds));
+            simulationAccumulatorSeconds -= kSimulationFixedStepSeconds;
+            ++simulationStepCount;
+        }
+        if (simulationStepCount == kMaxSimulationStepsPerFrame &&
+            simulationAccumulatorSeconds >= kSimulationFixedStepSeconds) {
+            // Drop excess backlog to keep simulation responsive after long stalls.
+            simulationAccumulatorSeconds = std::fmod(simulationAccumulatorSeconds, kSimulationFixedStepSeconds);
         }
 
         update(dt);
@@ -594,7 +615,6 @@ void App::run() {
 
 void App::update(float dt) {
     updateCamera(dt);
-    m_simulation.update(dt);
 
     const bool regeneratePressedThisFrame =
         !m_debugUiVisible && m_input.regenerateWorldDown && !m_wasRegenerateWorldDown;
