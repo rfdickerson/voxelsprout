@@ -114,6 +114,8 @@ public:
     };
 
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
+    void clearMagicaVoxelMeshes();
+    bool uploadMagicaVoxelMesh(const world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
     bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
@@ -177,6 +179,7 @@ private:
     bool createShadowResources();
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
+    bool createMagicaPipeline();
     bool createUploadRingBuffer();
     bool createTransferResources();
     bool createPipeBuffers();
@@ -208,6 +211,7 @@ private:
     void destroyShadowResources();
     void destroyFrameResources();
     void destroyChunkBuffers();
+    void destroyMagicaBuffers();
     void destroyPipeBuffers();
     void destroyPreviewBuffers();
     void destroyEnvironmentResources();
@@ -260,6 +264,15 @@ private:
     struct GrassBillboardInstance {
         float worldPosYaw[4];
         float colorTint[4];
+    };
+
+    struct MagicaMeshDraw {
+        BufferHandle vertexBufferHandle = kInvalidBufferHandle;
+        BufferHandle indexBufferHandle = kInvalidBufferHandle;
+        std::uint32_t indexCount = 0;
+        float offsetX = 0.0f;
+        float offsetY = 0.0f;
+        float offsetZ = 0.0f;
     };
 
     GLFWwindow* m_window = nullptr;
@@ -371,6 +384,7 @@ private:
     VkPipeline m_grassBillboardPipeline = VK_NULL_HANDLE;
     VkPipeline m_voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline m_magicaPipeline = VK_NULL_HANDLE;
     VkPipeline m_ssaoPipeline = VK_NULL_HANDLE;
     VkPipeline m_ssaoBlurPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewAddPipeline = VK_NULL_HANDLE;
@@ -414,6 +428,7 @@ private:
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     std::vector<world::ChunkLodMeshes> m_chunkLodMeshCache;
     std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
+    std::vector<MagicaMeshDraw> m_magicaMeshDraws;
     bool m_chunkLodMeshCacheValid = false;
     world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;

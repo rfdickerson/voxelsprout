@@ -12,6 +12,7 @@
 #include "world/ClipmapIndex.hpp"
 #include "world/Chunk.hpp"
 #include "world/ChunkMesher.hpp"
+#include "world/MagicaVoxel.hpp"
 #include "world/Csg.hpp"
 
 namespace {
@@ -364,6 +365,104 @@ void testSimulationBeltCargoDeterminism() {
     }
 }
 
+void testMagicaVoxelMeshing() {
+    world::MagicaVoxelModel model{};
+    model.sizeX = 4;
+    model.sizeY = 4;
+    model.sizeZ = 4;
+    model.hasPalette = true;
+    model.paletteRgba.fill(0u);
+    model.paletteRgba[1] = 0xFF4444FFu;
+    model.paletteRgba[2] = 0xFF44FF44u;
+    model.voxels = {
+        world::MagicaVoxel{1u, 1u, 1u, 1u},
+        world::MagicaVoxel{2u, 1u, 1u, 2u}
+    };
+
+    const world::ChunkMeshData meshA = world::buildMagicaVoxelMesh(model);
+    const world::ChunkMeshData meshB = world::buildMagicaVoxelMesh(model);
+    expectTrue(meshA.vertices.size() == 40u, "Magica mesher adjacent voxel vertex count");
+    expectTrue(meshA.indices.size() == 60u, "Magica mesher adjacent voxel index count");
+    expectTrue(meshA.indices == meshB.indices, "Magica mesher deterministic indices");
+    bool vertexArraysEqual = (meshA.vertices.size() == meshB.vertices.size());
+    if (vertexArraysEqual) {
+        for (std::size_t i = 0; i < meshA.vertices.size(); ++i) {
+            if (meshA.vertices[i].bits != meshB.vertices[i].bits) {
+                vertexArraysEqual = false;
+                break;
+            }
+        }
+    }
+    expectTrue(vertexArraysEqual, "Magica mesher deterministic vertices");
+
+    bool foundRedMaterial = false;
+    bool foundNonRedMaterial = false;
+    for (const world::PackedVoxelVertex& vertex : meshA.vertices) {
+        const std::uint32_t material = (vertex.bits >> world::PackedVoxelVertex::kShiftMaterial) & world::PackedVoxelVertex::kMask8;
+        if (material == 251u) {
+            foundRedMaterial = true;
+        } else if (material > 0u) {
+            foundNonRedMaterial = true;
+        }
+    }
+    expectTrue(foundRedMaterial, "Magica mesher maps bright red to red material");
+    expectTrue(foundNonRedMaterial, "Magica mesher maps non-red palette colors");
+}
+
+void testMagicaVoxelChunkedMeshing() {
+    world::MagicaVoxelModel model{};
+    model.sizeX = 40;
+    model.sizeY = 8;
+    model.sizeZ = 8;
+    model.hasPalette = true;
+    model.paletteRgba.fill(0u);
+    model.paletteRgba[1] = 0xFF808080u;
+    model.voxels = {
+        world::MagicaVoxel{31u, 1u, 1u, 1u},
+        world::MagicaVoxel{32u, 1u, 1u, 1u}
+    };
+
+    const std::vector<world::MagicaVoxelMeshChunk> chunksA = world::buildMagicaVoxelMeshChunks(model);
+    const std::vector<world::MagicaVoxelMeshChunk> chunksB = world::buildMagicaVoxelMeshChunks(model);
+    expectTrue(chunksA.size() == 2u, "Magica chunk mesher splits large model along X");
+    expectTrue(chunksA.size() == chunksB.size(), "Magica chunk mesher deterministic chunk count");
+    if (chunksA.size() == 2u) {
+        expectTrue(chunksA[0].originX == 0 && chunksA[1].originX == 32, "Magica chunk mesher chunk origins");
+    }
+
+    std::size_t totalVertices = 0;
+    std::size_t totalIndices = 0;
+    bool chunkMeshesEqual = (chunksA.size() == chunksB.size());
+    for (std::size_t i = 0; i < chunksA.size(); ++i) {
+        const world::MagicaVoxelMeshChunk& chunkA = chunksA[i];
+        const world::MagicaVoxelMeshChunk& chunkB = chunksB[i];
+        totalVertices += chunkA.mesh.vertices.size();
+        totalIndices += chunkA.mesh.indices.size();
+        if (chunkA.originX != chunkB.originX || chunkA.originY != chunkB.originY || chunkA.originZ != chunkB.originZ) {
+            chunkMeshesEqual = false;
+            break;
+        }
+        if (chunkA.mesh.indices != chunkB.mesh.indices ||
+            chunkA.mesh.vertices.size() != chunkB.mesh.vertices.size()) {
+            chunkMeshesEqual = false;
+            break;
+        }
+        for (std::size_t vertexIndex = 0; vertexIndex < chunkA.mesh.vertices.size(); ++vertexIndex) {
+            if (chunkA.mesh.vertices[vertexIndex].bits != chunkB.mesh.vertices[vertexIndex].bits) {
+                chunkMeshesEqual = false;
+                break;
+            }
+        }
+        if (!chunkMeshesEqual) {
+            break;
+        }
+    }
+
+    expectTrue(totalVertices == 40u, "Magica chunk mesher hides shared faces across chunk boundaries (vertices)");
+    expectTrue(totalIndices == 60u, "Magica chunk mesher hides shared faces across chunk boundaries (indices)");
+    expectTrue(chunkMeshesEqual, "Magica chunk mesher deterministic output");
+}
+
 } // namespace
 
 int main() {
@@ -374,6 +473,8 @@ int main() {
     testChunkMeshingModes();
     testClipmapIndex();
     testSimulationBeltCargoDeterminism();
+    testMagicaVoxelMeshing();
+    testMagicaVoxelChunkedMeshing();
 
     if (g_failures != 0) {
         std::cerr << "[foundation test] " << g_failures << " failures\n";
