@@ -6687,6 +6687,8 @@ bool Renderer::createAoPipelines() {
     constexpr const char* kVoxelNormalDepthFragShaderPath = "../src/render/shaders/voxel_normaldepth.frag.slang.spv";
     constexpr const char* kPipeVertShaderPath = "../src/render/shaders/pipe_instanced.vert.slang.spv";
     constexpr const char* kPipeNormalDepthFragShaderPath = "../src/render/shaders/pipe_normaldepth.frag.slang.spv";
+    constexpr const char* kGrassBillboardVertShaderPath = "../src/render/shaders/grass_billboard.vert.slang.spv";
+    constexpr const char* kGrassBillboardNormalDepthFragShaderPath = "../src/render/shaders/grass_billboard_normaldepth.frag.slang.spv";
     constexpr const char* kFullscreenVertShaderPath = "../src/render/shaders/tone_map.vert.slang.spv";
     constexpr const char* kSsaoFragShaderPath = "../src/render/shaders/ssao.frag.slang.spv";
     constexpr const char* kSsaoBlurFragShaderPath = "../src/render/shaders/ssao_blur.frag.slang.spv";
@@ -6695,6 +6697,8 @@ bool Renderer::createAoPipelines() {
     VkShaderModule voxelNormalDepthFragShaderModule = VK_NULL_HANDLE;
     VkShaderModule pipeVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule pipeNormalDepthFragShaderModule = VK_NULL_HANDLE;
+    VkShaderModule grassBillboardVertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule grassBillboardNormalDepthFragShaderModule = VK_NULL_HANDLE;
     VkShaderModule fullscreenVertShaderModule = VK_NULL_HANDLE;
     VkShaderModule ssaoFragShaderModule = VK_NULL_HANDLE;
     VkShaderModule ssaoBlurFragShaderModule = VK_NULL_HANDLE;
@@ -6711,6 +6715,14 @@ bool Renderer::createAoPipelines() {
         if (fullscreenVertShaderModule != VK_NULL_HANDLE) {
             vkDestroyShaderModule(m_device, fullscreenVertShaderModule, nullptr);
             fullscreenVertShaderModule = VK_NULL_HANDLE;
+        }
+        if (grassBillboardNormalDepthFragShaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(m_device, grassBillboardNormalDepthFragShaderModule, nullptr);
+            grassBillboardNormalDepthFragShaderModule = VK_NULL_HANDLE;
+        }
+        if (grassBillboardVertShaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(m_device, grassBillboardVertShaderModule, nullptr);
+            grassBillboardVertShaderModule = VK_NULL_HANDLE;
         }
         if (pipeNormalDepthFragShaderModule != VK_NULL_HANDLE) {
             vkDestroyShaderModule(m_device, pipeNormalDepthFragShaderModule, nullptr);
@@ -6767,6 +6779,24 @@ bool Renderer::createAoPipelines() {
     }
     if (!createShaderModuleFromFile(
             m_device,
+            kGrassBillboardVertShaderPath,
+            "grass_billboard.vert",
+            grassBillboardVertShaderModule
+        )) {
+        destroyShaderModules();
+        return false;
+    }
+    if (!createShaderModuleFromFile(
+            m_device,
+            kGrassBillboardNormalDepthFragShaderPath,
+            "grass_billboard_normaldepth.frag",
+            grassBillboardNormalDepthFragShaderModule
+        )) {
+        destroyShaderModules();
+        return false;
+    }
+    if (!createShaderModuleFromFile(
+            m_device,
             kFullscreenVertShaderPath,
             "tone_map.vert",
             fullscreenVertShaderModule
@@ -6795,6 +6825,7 @@ bool Renderer::createAoPipelines() {
 
     VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     auto destroyNewPipelines = [&]() {
@@ -6809,6 +6840,10 @@ bool Renderer::createAoPipelines() {
         if (pipeNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, pipeNormalDepthPipeline, nullptr);
             pipeNormalDepthPipeline = VK_NULL_HANDLE;
+        }
+        if (grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, grassBillboardNormalDepthPipeline, nullptr);
+            grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
         }
         if (voxelNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, voxelNormalDepthPipeline, nullptr);
@@ -7009,6 +7044,75 @@ bool Renderer::createAoPipelines() {
         return false;
     }
 
+    // Grass billboard normal-depth pipeline.
+    VkPipelineShaderStageCreateInfo grassNormalDepthStageInfos[2]{};
+    grassNormalDepthStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    grassNormalDepthStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    grassNormalDepthStageInfos[0].module = grassBillboardVertShaderModule;
+    grassNormalDepthStageInfos[0].pName = "main";
+    grassNormalDepthStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    grassNormalDepthStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    grassNormalDepthStageInfos[1].module = grassBillboardNormalDepthFragShaderModule;
+    grassNormalDepthStageInfos[1].pName = "main";
+
+    VkVertexInputBindingDescription grassBindings[2]{};
+    grassBindings[0].binding = 0;
+    grassBindings[0].stride = sizeof(GrassBillboardVertex);
+    grassBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    grassBindings[1].binding = 1;
+    grassBindings[1].stride = sizeof(GrassBillboardInstance);
+    grassBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    VkVertexInputAttributeDescription grassAttributes[5]{};
+    grassAttributes[0].location = 0;
+    grassAttributes[0].binding = 0;
+    grassAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
+    grassAttributes[0].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, corner));
+    grassAttributes[1].location = 1;
+    grassAttributes[1].binding = 0;
+    grassAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+    grassAttributes[1].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, uv));
+    grassAttributes[2].location = 2;
+    grassAttributes[2].binding = 0;
+    grassAttributes[2].format = VK_FORMAT_R32_SFLOAT;
+    grassAttributes[2].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, plane));
+    grassAttributes[3].location = 3;
+    grassAttributes[3].binding = 1;
+    grassAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    grassAttributes[3].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, worldPosYaw));
+    grassAttributes[4].location = 4;
+    grassAttributes[4].binding = 1;
+    grassAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    grassAttributes[4].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, colorTint));
+
+    VkPipelineVertexInputStateCreateInfo grassVertexInputInfo{};
+    grassVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    grassVertexInputInfo.vertexBindingDescriptionCount = 2;
+    grassVertexInputInfo.pVertexBindingDescriptions = grassBindings;
+    grassVertexInputInfo.vertexAttributeDescriptionCount = 5;
+    grassVertexInputInfo.pVertexAttributeDescriptions = grassAttributes;
+
+    VkPipelineRasterizationStateCreateInfo grassRasterizer = rasterizer;
+    grassRasterizer.cullMode = VK_CULL_MODE_NONE;
+
+    pipelineCreateInfo.pStages = grassNormalDepthStageInfos;
+    pipelineCreateInfo.pVertexInputState = &grassVertexInputInfo;
+    pipelineCreateInfo.pRasterizationState = &grassRasterizer;
+    const VkResult grassNormalDepthPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &grassBillboardNormalDepthPipeline
+    );
+    if (grassNormalDepthPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(grassBillboardNormalDepth)", grassNormalDepthPipelineResult);
+        destroyNewPipelines();
+        destroyShaderModules();
+        return false;
+    }
+
     // SSAO fullscreen pipelines.
     VkPipelineShaderStageCreateInfo ssaoStageInfos[2]{};
     ssaoStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -7149,6 +7253,9 @@ bool Renderer::createAoPipelines() {
     if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeNormalDepthPipeline, nullptr);
     }
+    if (m_grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_grassBillboardNormalDepthPipeline, nullptr);
+    }
     if (m_ssaoPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_ssaoPipeline, nullptr);
     }
@@ -7158,6 +7265,7 @@ bool Renderer::createAoPipelines() {
 
     m_voxelNormalDepthPipeline = voxelNormalDepthPipeline;
     m_pipeNormalDepthPipeline = pipeNormalDepthPipeline;
+    m_grassBillboardNormalDepthPipeline = grassBillboardNormalDepthPipeline;
     m_ssaoPipeline = ssaoPipeline;
     m_ssaoBlurPipeline = ssaoBlurPipeline;
     setObjectName(
@@ -7169,6 +7277,11 @@ bool Renderer::createAoPipelines() {
         VK_OBJECT_TYPE_PIPELINE,
         vkHandleToUint64(m_pipeNormalDepthPipeline),
         "pipeline.prepass.pipeNormalDepth"
+    );
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_grassBillboardNormalDepthPipeline),
+        "pipeline.prepass.grassBillboardNormalDepth"
     );
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_ssaoPipeline), "pipeline.ssao");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_ssaoBlurPipeline), "pipeline.ssaoBlur");
@@ -10724,6 +10837,35 @@ void Renderer::renderFrame(
             beltCargoInstanceSliceOpt
         );
     }
+    if (m_grassBillboardNormalDepthPipeline != VK_NULL_HANDLE &&
+        m_grassBillboardIndexCount > 0 &&
+        m_grassBillboardInstanceCount > 0 &&
+        m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
+        const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
+        const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
+        const VkBuffer grassInstanceBuffer = m_bufferAllocator.getBuffer(m_grassBillboardInstanceBufferHandle);
+        if (grassVertexBuffer != VK_NULL_HANDLE &&
+            grassIndexBuffer != VK_NULL_HANDLE &&
+            grassInstanceBuffer != VK_NULL_HANDLE) {
+            const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
+            const VkDeviceSize vertexOffsets[2] = {0, 0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardNormalDepthPipeline);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout,
+                0,
+                boundDescriptorSetCount,
+                boundDescriptorSets.data(),
+                1,
+                &mvpDynamicOffset
+            );
+            vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            countDrawCalls(m_debugDrawCallsPrepass, 1);
+            vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
+        }
+    }
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);
@@ -12362,6 +12504,10 @@ void Renderer::destroyPipeline() {
     if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeNormalDepthPipeline, nullptr);
         m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
+    }
+    if (m_grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_grassBillboardNormalDepthPipeline, nullptr);
+        m_grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
     }
     if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_voxelNormalDepthPipeline, nullptr);
