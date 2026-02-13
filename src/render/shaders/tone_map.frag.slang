@@ -36,20 +36,26 @@ float luminance709(float3 color)
     return dot(color, float3(0.2126, 0.7152, 0.0722));
 }
 
+float bloomBrightness(float3 hdrColor)
+{
+    const float peakChannel = max(hdrColor.x, max(hdrColor.y, hdrColor.z));
+    return max(luminance709(hdrColor), peakChannel);
+}
+
 float3 extractBloom(float3 hdrColor, float threshold, float softKnee)
 {
-    const float luma = max(luminance709(hdrColor), 0.0);
+    const float brightness = max(bloomBrightness(hdrColor), 0.0);
     const float knee = max(threshold * softKnee, 1e-5);
-    const float soft = clamp((luma - threshold + knee) / (2.0 * knee), 0.0, 1.0);
-    const float contribution = max(luma - threshold, 0.0) + (soft * soft * knee);
-    if (contribution <= 1e-5 || luma <= 1e-5)
+    const float soft = clamp((brightness - threshold + knee) / (2.0 * knee), 0.0, 1.0);
+    const float contribution = max(brightness - threshold, 0.0) + (soft * soft * knee);
+    if (contribution <= 1e-5 || brightness <= 1e-5)
     {
         return float3(0.0, 0.0, 0.0);
     }
-    return hdrColor * (contribution / luma);
+    return hdrColor * (contribution / brightness);
 }
 
-float3 sampleMipChainBloom(float2 uv, float sunFacing)
+float3 sampleMipChainBloom(float2 uv)
 {
     const float bloomThreshold = max(camera.skyConfig3.x, 0.0);
     const float bloomSoftKnee = clamp(camera.skyConfig3.y, 0.0, 1.0);
@@ -65,44 +71,69 @@ float3 sampleMipChainBloom(float2 uv, float sunFacing)
         (bloomMip3 * 0.14) +
         (bloomMip4 * 0.06) +
         (bloomMip5 * 0.03);
-    const float sunFacingScale = lerp(0.85, 1.35, clamp(sunFacing, 0.0, 1.0));
-    return bloom * sunFacingScale;
+    return bloom;
 }
 
 float sampleSunVisibility(float2 sunUv)
 {
-    uint texWidth = 0u;
-    uint texHeight = 0u;
-    normalDepthTexture.GetDimensions(texWidth, texHeight);
-    const float2 texelSize =
-        1.0 / max(float2(float(texWidth), float(texHeight)), float2(1.0, 1.0));
-
-    const float2 sampleOffsets[9] = {
-        float2(0.0, 0.0),
-        float2(1.0, 0.0),
-        float2(-1.0, 0.0),
-        float2(0.0, 1.0),
-        float2(0.0, -1.0),
-        float2(0.7071, 0.7071),
-        float2(-0.7071, 0.7071),
-        float2(0.7071, -0.7071),
-        float2(-0.7071, -0.7071)
-    };
-
-    float visibility = 0.0;
-    for (int i = 0; i < 9; ++i)
+    if (any(sunUv < float2(0.0, 0.0)) || any(sunUv > float2(1.0, 1.0)))
     {
-        const float2 sampleUv = sunUv + (sampleOffsets[i] * texelSize * 1.5);
-        if (any(sampleUv < float2(0.0, 0.0)) || any(sampleUv > float2(1.0, 1.0)))
-        {
-            continue;
-        }
-        const float sampleViewDepth = normalDepthTexture.SampleLevel(sampleUv, 0.0).w;
-        const float skyMask = 1.0 - step(0.0001, sampleViewDepth);
-        visibility += skyMask;
+        return 0.0;
     }
-    visibility /= 9.0;
-    return smoothstep(0.12, 0.88, clamp(visibility, 0.0, 1.0));
+    const float sampleViewDepth = normalDepthTexture.SampleLevel(sunUv, 0.0).w;
+    return 1.0 - step(0.0001, sampleViewDepth);
+}
+
+float sampleSkyMask(float2 uv)
+{
+    if (any(uv < float2(0.0, 0.0)) || any(uv > float2(1.0, 1.0)))
+    {
+        return 0.0;
+    }
+    const float viewDepth = normalDepthTexture.SampleLevel(uv, 0.0).w;
+    return 1.0 - step(0.0001, viewDepth);
+}
+
+float sampleScreenSpaceSunShafts(float2 uv, float2 sunUv, float sunVisibility, float sunFacing)
+{
+    if (sunVisibility <= 1e-5 || sunFacing <= 1e-5)
+    {
+        return 0.0;
+    }
+
+    const float2 deltaToSun = sunUv - uv;
+    const float radialDistance = length(deltaToSun);
+    if (radialDistance <= 1e-5)
+    {
+        return sunVisibility;
+    }
+
+    const float rangeMask = 1.0 - smoothstep(0.03, 0.26, radialDistance);
+    if (rangeMask <= 1e-5)
+    {
+        return 0.0;
+    }
+
+    const int sampleCount = 7;
+    const float2 stepUv = deltaToSun / float(sampleCount);
+    float2 sampleUv = uv + (stepUv * 0.5);
+    float decay = 1.0;
+    float shaftAccum = 0.0;
+    float weightAccum = 0.0;
+    for (int i = 0; i < sampleCount; ++i)
+    {
+        const float skyMask = sampleSkyMask(sampleUv);
+        shaftAccum += skyMask * decay;
+        weightAccum += decay;
+        decay *= 0.86;
+        sampleUv += stepUv;
+    }
+
+    const float shaftOcclusion = shaftAccum / max(weightAccum, 1e-5);
+    const float localSkyMask = sampleSkyMask(uv);
+    // Keep shafts mostly in the sky to avoid "image copies" over foreground geometry.
+    const float geometryAttenuation = localSkyMask;
+    return shaftOcclusion * rangeMask * sunVisibility * geometryAttenuation;
 }
 
 float3 analyticSunBloom(float2 uv, float2 sunUv, float sunVisibility)
@@ -126,6 +157,54 @@ float3 analyticSunBloom(float2 uv, float2 sunUv, float sunVisibility)
     const float wide = exp(-radialDistance * 3.0);
     const float glow = (1.75 * core) + (0.95 * halo) + (0.35 * wide);
     return camera.sunColorShadow.xyz * (glow * clamp(sunVisibility, 0.0, 1.0));
+}
+
+float hgPhase(float cosTheta, float anisotropy)
+{
+    const float g = clamp(anisotropy, 0.0, 0.95);
+    const float g2 = g * g;
+    const float denom = max(pow(1.0 + g2 - (2.0 * g * cosTheta), 1.5), 1e-4);
+    return (1.0 - g2) / denom;
+}
+
+float3 applyVolumetricHeightFog(
+    float3 litColor,
+    float3 cameraWorld,
+    float3 worldPosition,
+    float travelDistance,
+    float3 worldViewDir,
+    float3 toSun
+)
+{
+    const float fogDensity = max(camera.skyConfig4.x, 0.0);
+    if (fogDensity <= 1e-6 || travelDistance <= 1e-4)
+    {
+        return litColor;
+    }
+
+    const float heightFalloff = max(camera.skyConfig4.y, 0.0);
+    const float fogBaseHeight = camera.skyConfig4.z;
+    const float sunScatterStrength = max(camera.skyConfig4.w, 0.0);
+
+    const float averageHeight = 0.5 * (cameraWorld.y + worldPosition.y);
+    const float heightDensity = exp(clamp((fogBaseHeight - averageHeight) * heightFalloff, -8.0, 8.0));
+    const float opticalDepth = fogDensity * travelDistance * heightDensity;
+    const float transmittance = exp(-opticalDepth);
+
+    const float sunAltitude = clamp(toSun.y, -1.0, 1.0);
+    const float dayFactor = smoothstep(0.04, 0.70, sunAltitude);
+    const float twilightFactor = 1.0 - dayFactor;
+    const float skyT = clamp((worldViewDir.y * 0.5) + 0.5, 0.0, 1.0);
+    const float3 fogHorizon = lerp(float3(0.46, 0.58, 0.76), float3(0.80, 0.54, 0.48), twilightFactor * 0.62);
+    const float3 fogZenith = lerp(float3(0.24, 0.32, 0.48), float3(0.36, 0.25, 0.34), twilightFactor * 0.52);
+    const float3 ambientFogColor = lerp(fogHorizon, fogZenith, pow(skyT, 0.36));
+
+    const float cosTheta = clamp(dot(worldViewDir, toSun), -1.0, 1.0);
+    const float sunPhase = hgPhase(cosTheta, camera.skyConfig0.z) * 0.10;
+    const float3 sunScatterColor = camera.sunColorShadow.xyz * (sunPhase * sunScatterStrength);
+    const float3 fogColor = ambientFogColor + sunScatterColor;
+
+    return (litColor * transmittance) + (fogColor * (1.0 - transmittance));
 }
 
 struct FragmentInput
@@ -170,6 +249,31 @@ float4 main(FragmentInput input) : SV_Target0
     hdrColor *= lerp(1.0, aoFactor, geometryMask);
 
     const float3x3 invViewRotation = transpose((float3x3)camera.view);
+    if (geometryMask > 0.5)
+    {
+        const float projX = (abs(camera.proj[0][0]) < 1e-6)
+            ? ((camera.proj[0][0] < 0.0) ? -1e-6 : 1e-6)
+            : camera.proj[0][0];
+        const float projY = (abs(camera.proj[1][1]) < 1e-6)
+            ? ((camera.proj[1][1] < 0.0) ? -1e-6 : 1e-6)
+            : camera.proj[1][1];
+        const float2 ndc = (input.inUv * 2.0) - 1.0;
+        const float3 viewRay = normalize(float3(ndc.x / projX, ndc.y / projY, -1.0));
+        const float travelDistance = viewDepth / max(-viewRay.z, 1e-4);
+        const float3 worldViewDir = normalize(mul(invViewRotation, viewRay));
+        const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
+        const float3 worldPos = cameraWorld + (worldViewDir * travelDistance);
+        const float3 toSunForFog = normalize(-camera.sunDirectionIntensity.xyz);
+        hdrColor = applyVolumetricHeightFog(
+            hdrColor,
+            cameraWorld,
+            worldPos,
+            travelDistance,
+            worldViewDir,
+            toSunForFog
+        );
+    }
+
     const float3 cameraForward = normalize(mul(invViewRotation, float3(0.0, 0.0, -1.0)));
     const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
     const float sunForwardDot = dot(cameraForward, toSun);
@@ -197,15 +301,30 @@ float4 main(FragmentInput input) : SV_Target0
     }
 
     const float sunBloomFactor = sunFacing * sunVisibility;
-
-    const float bloomBaseIntensity = max(camera.skyConfig3.z, 0.0);
-    const float bloomSunFacingBoost = max(camera.skyConfig3.w, 0.0);
-    const float bloomIntensity = bloomBaseIntensity + (sunBloomFactor * bloomSunFacingBoost);
-    if (bloomIntensity > 1e-5)
+    const float bloomGlobalIntensity = max(camera.skyConfig3.z, 0.0);
+    if (bloomGlobalIntensity > 1e-5)
     {
-        const float3 sampledBloom = sampleMipChainBloom(input.inUv, sunBloomFactor);
+        const float3 sampledBloom = sampleMipChainBloom(input.inUv);
+        hdrColor += sampledBloom * bloomGlobalIntensity;
+    }
+
+    const float bloomSunFacingBoost = max(camera.skyConfig3.w, 0.0);
+    const float sunBloomIntensity = sunBloomFactor * bloomSunFacingBoost;
+    if (sunBloomIntensity > 1e-5)
+    {
         const float3 sunBloom = analyticSunBloom(input.inUv, sunUv, sunBloomFactor);
-        hdrColor += (sampledBloom + sunBloom) * bloomIntensity;
+        hdrColor += sunBloom * sunBloomIntensity;
+    }
+
+    if (geometryMask < 0.5)
+    {
+        const float shaftFactor = sampleScreenSpaceSunShafts(input.inUv, sunUv, sunVisibility, sunFacing);
+        if (shaftFactor > 1e-5)
+        {
+            const float shaftStrength = (camera.skyConfig4.x * 8.0) + (camera.skyConfig4.w * 0.04);
+            const float3 shaftTint = lerp(camera.sunColorShadow.xyz, float3(1.0, 0.95, 0.90), 0.25);
+            hdrColor += shaftTint * (shaftFactor * shaftStrength);
+        }
     }
 
     const float exposure = 0.58;

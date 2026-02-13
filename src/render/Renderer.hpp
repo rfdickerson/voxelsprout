@@ -111,6 +111,10 @@ public:
         float bloomSoftKnee = 0.5f;
         float bloomBaseIntensity = 0.08f;
         float bloomSunFacingBoost = 0.28f;
+        float volumetricFogDensity = 0.0045f;
+        float volumetricFogHeightFalloff = 0.075f;
+        float volumetricFogBaseHeight = 6.0f;
+        float volumetricSunScattering = 1.25f;
         bool autoSunriseTuning = true;
         float autoSunriseBlend = 1.0f;
         float autoSunriseAdaptSpeed = 4.0f;
