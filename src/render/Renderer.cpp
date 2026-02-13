@@ -127,6 +127,7 @@ struct alignas(16) CameraUniform {
     float skyConfig1[4];
     float skyConfig2[4];
     float skyConfig3[4];
+    float skyConfig4[4];
     float voxelBaseColorPalette[16][4];
     float voxelGiGridOriginCellSize[4];
     float voxelGiGridExtentStrength[4];
@@ -7923,9 +7924,15 @@ void Renderer::buildSunDebugUi() {
     ImGui::Text("Bloom");
     ImGui::SliderFloat("Bloom Threshold", &m_skyDebugSettings.bloomThreshold, 0.25f, 4.0f, "%.2f");
     ImGui::SliderFloat("Bloom Soft Knee", &m_skyDebugSettings.bloomSoftKnee, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Bloom Base Intensity", &m_skyDebugSettings.bloomBaseIntensity, 0.0f, 0.20f, "%.3f");
+    ImGui::SliderFloat("Bloom Global Intensity", &m_skyDebugSettings.bloomBaseIntensity, 0.0f, 0.35f, "%.3f");
     ImGui::SliderFloat("Bloom Sun Boost", &m_skyDebugSettings.bloomSunFacingBoost, 0.0f, 0.40f, "%.3f");
     ImGui::TextDisabled("Bloom is hidden in GI/SSAO debug visualization modes.");
+    ImGui::Separator();
+    ImGui::Text("Volumetric Fog");
+    ImGui::SliderFloat("Fog Density", &m_skyDebugSettings.volumetricFogDensity, 0.0f, 0.03f, "%.4f");
+    ImGui::SliderFloat("Fog Height Falloff", &m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 0.30f, "%.3f");
+    ImGui::SliderFloat("Fog Base Height", &m_skyDebugSettings.volumetricFogBaseHeight, -32.0f, 64.0f, "%.1f");
+    ImGui::SliderFloat("Fog Sun Scatter", &m_skyDebugSettings.volumetricSunScattering, 0.0f, 3.0f, "%.2f");
     ImGui::Text("Active: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",
         m_skyTuningRuntime.rayleighStrength,
         m_skyTuningRuntime.mieStrength,
@@ -8695,6 +8702,10 @@ void Renderer::renderFrame(
     mvpUniform.skyConfig3[1] = std::clamp(m_skyDebugSettings.bloomSoftKnee, 0.0f, 1.0f);
     mvpUniform.skyConfig3[2] = std::clamp(m_skyDebugSettings.bloomBaseIntensity, 0.0f, 2.0f);
     mvpUniform.skyConfig3[3] = std::clamp(m_skyDebugSettings.bloomSunFacingBoost, 0.0f, 2.0f);
+    mvpUniform.skyConfig4[0] = std::clamp(m_skyDebugSettings.volumetricFogDensity, 0.0f, 1.0f);
+    mvpUniform.skyConfig4[1] = std::clamp(m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 1.0f);
+    mvpUniform.skyConfig4[2] = m_skyDebugSettings.volumetricFogBaseHeight;
+    mvpUniform.skyConfig4[3] = std::clamp(m_skyDebugSettings.volumetricSunScattering, 0.0f, 8.0f);
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
     const float voxelGiOriginX = std::floor((camera.x - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
