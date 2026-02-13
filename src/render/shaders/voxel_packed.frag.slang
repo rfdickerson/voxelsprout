@@ -123,6 +123,15 @@ float3 sampleVoxelGi(float3 worldPosition, float3 normal)
     return giRadiance * max(camera.voxelGiGridExtentStrength.w, 0.0);
 }
 
+float3 voxelGiFalseColor(float t)
+{
+    const float x = clamp(t, 0.0, 1.0);
+    if (x < 0.25) return lerp(float3(0.02, 0.02, 0.10), float3(0.00, 0.42, 1.00), x / 0.25);
+    if (x < 0.50) return lerp(float3(0.00, 0.42, 1.00), float3(0.00, 0.95, 0.45), (x - 0.25) / 0.25);
+    if (x < 0.75) return lerp(float3(0.00, 0.95, 0.45), float3(1.00, 0.92, 0.12), (x - 0.50) / 0.25);
+    return lerp(float3(1.00, 0.92, 0.12), float3(1.00, 0.16, 0.12), (x - 0.75) / 0.25);
+}
+
 float3 proceduralSkyNoSunDisk(float3 direction)
 {
     const float3 dir = normalize(direction);
@@ -409,8 +418,25 @@ float4 main(FragmentInput input) : SV_Target0
 
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = lerp(1.0, clamp(input.inVertexAo, 0.0, 1.0), vertexAoEnable);
-    const float3 ambient = selectAmbient(normal, vertexAo);
     const float3 voxelGi = sampleVoxelGi(input.inWorldPosition, normal) * vertexAo;
+    const int voxelGiDebugMode = int(camera.shadowVoxelGridOrigin.z + 0.5);
+    if (voxelGiDebugMode == 1)
+    {
+        const float3 giVis = max(voxelGi * 2.5, float3(0.0, 0.0, 0.0));
+        return float4(giVis, 1.0);
+    }
+    if (voxelGiDebugMode == 2)
+    {
+        const float giLuma = dot(voxelGi, float3(0.2126, 0.7152, 0.0722));
+        const float giMapped = clamp(log2(1.0 + (giLuma * 6.0)) / 3.0, 0.0, 1.0);
+        return float4(voxelGiFalseColor(giMapped), 1.0);
+    }
+
+    const float voxelGiLuma = dot(voxelGi, float3(0.2126, 0.7152, 0.0722));
+    const float ambientRebalanceStrength = max(camera.shadowVoxelGridOrigin.x, 0.0);
+    const float ambientFloor = clamp(camera.shadowVoxelGridOrigin.y, 0.0, 1.0);
+    const float ambientScale = clamp(1.0 / (1.0 + (voxelGiLuma * ambientRebalanceStrength)), ambientFloor, 1.0);
+    const float3 ambient = selectAmbient(normal, vertexAo) * ambientScale;
     const float3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);
     float3 lighting = ambient + voxelGi + (directSun * directShadowFactor);

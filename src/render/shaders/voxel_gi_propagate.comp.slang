@@ -1,6 +1,8 @@
 // Compile for Vulkan SPIR-V with column-major matrices to match Renderer.cpp uniform layout:
 // slangc -target spirv -entry main -stage compute -matrix-layout-column-major src/render/shaders/voxel_gi_propagate.comp.slang -o src/render/shaders/voxel_gi_propagate.comp.slang.spv
 
+import camera_uniform;
+
 [[vk::binding(3, 0)]]
 RWTexture3D<float4> voxelGiPropagateIn;
 
@@ -31,6 +33,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const int3 dims = int3(int(gridW), int(gridH), int(gridD));
     const int3 cell = int3(dispatchThreadId);
+    const float propagateBlend = clamp(camera.shadowConfig3.z, 0.0, 1.0);
+    const float propagateDecay = clamp(camera.skyConfig2.w, 0.0, 1.0);
     const float3 occupancyUv =
         (float3(dispatchThreadId) + 0.5) / float3(float(gridW), float(gridH), float(gridD));
     const float occupancy = voxelGiOccupancy.SampleLevel(occupancyUv, 0.0).x;
@@ -72,7 +76,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     const float3 neighborAverage = (neighborCount > 0) ? (neighborSum / float(neighborCount)) : center;
-    const float3 mixed = lerp(center, neighborAverage, 0.62);
-    const float3 propagated = max(mixed * 0.93, float3(0.0, 0.0, 0.0));
+    const float3 mixed = lerp(center, neighborAverage, propagateBlend);
+    const float3 propagated = max(mixed * propagateDecay, float3(0.0, 0.0, 0.0));
     voxelGiPropagateOut[dispatchThreadId] = float4(propagated, 1.0);
 }

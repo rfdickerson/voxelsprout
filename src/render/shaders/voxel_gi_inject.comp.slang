@@ -2,6 +2,7 @@
 // slangc -target spirv -entry main -stage compute -matrix-layout-column-major src/render/shaders/voxel_gi_inject.comp.slang -o src/render/shaders/voxel_gi_inject.comp.slang.spv
 
 import camera_uniform;
+import sh_lighting;
 
 [[vk::binding(1, 0)]]
 Sampler2DShadow shadowMap;
@@ -87,8 +88,9 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 worldPosition = gridOrigin + ((float3(dispatchThreadId) + 0.5) * cellSize);
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
-    const float3 skyAmbient = max(camera.shIrradiance[0].xyz, float3(0.0, 0.0, 0.0)) * 0.10;
-
+    const float injectSunScale = clamp(camera.shadowConfig2.w, 0.0, 4.0);
+    const float injectShScale = clamp(camera.shadowConfig3.x, 0.0, 4.0);
+    const float injectBounceScale = clamp(camera.shadowConfig3.y, 0.0, 4.0);
     const int3 offsets[6] = {
         int3(1, 0, 0),
         int3(-1, 0, 0),
@@ -117,20 +119,21 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
 
         const float3 surfaceAlbedo = saturate(neighborSample.yzw);
-        const float3 faceNormal = -float3(offsets[i]);
+        const float3 faceNormal = normalize(-float3(offsets[i]));
+        const float3 skyIrradiance = evaluateShIrradiance(faceNormal) * injectShScale;
         const float ndotl = max(dot(faceNormal, -sunDirection), 0.0);
         const float3 faceWorldPosition = worldPosition + (faceNormal * (cellSize * 0.5));
         const float shadowVisibility =
             (ndotl > 0.0001) ? sampleShadowVisibility(faceWorldPosition + (faceNormal * (cellSize * 0.05))) : 0.0;
         const float3 directOnSurface =
-            camera.sunColorShadow.xyz * (sunIntensity * ndotl * shadowVisibility * 0.50);
-        bouncedLightSum += (directOnSurface + skyAmbient) * surfaceAlbedo;
+            camera.sunColorShadow.xyz * (sunIntensity * ndotl * shadowVisibility * injectSunScale);
+        bouncedLightSum += (directOnSurface + skyIrradiance) * surfaceAlbedo;
         bouncedLightCount += 1;
     }
 
     const float3 injected =
         (bouncedLightCount > 0)
-            ? max((bouncedLightSum / float(bouncedLightCount)) * 0.85, float3(0.0, 0.0, 0.0))
+            ? max((bouncedLightSum / float(bouncedLightCount)) * injectBounceScale, float3(0.0, 0.0, 0.0))
             : float3(0.0, 0.0, 0.0);
     voxelGiInjectOut[dispatchThreadId] = float4(injected, 1.0);
 }

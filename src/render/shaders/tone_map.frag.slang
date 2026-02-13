@@ -44,6 +44,16 @@ float4 main(FragmentInput input) : SV_Target0
     const float geometryMask = step(0.0001, viewDepth);
     const float ssao = clamp(ssaoTexture.Sample(input.inUv).x, 0.0, 1.0);
     const float ssaoMode = camera.shadowVoxelGridSize.w;
+    const float giDebugMode = camera.shadowVoxelGridOrigin.z;
+
+    if (giDebugMode > 0.5)
+    {
+        const float exposure = 0.75;
+        float3 toneMapped = acesFilmTonemap(hdrColor * exposure);
+        toneMapped = applySaturation(toneMapped, 1.0);
+        const float3 ldrSrgb = pow(clamp(toneMapped, 0.0, 1.0), float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
+        return float4(ldrSrgb, 1.0);
+    }
 
     if (ssaoMode > 2.5)
     {
