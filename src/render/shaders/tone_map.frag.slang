@@ -11,6 +11,8 @@ Sampler2D<float4> hdrSceneColor;
 Sampler2D<float4> normalDepthTexture;
 [[vk::binding(7, 0)]]
 Sampler2D<float4> ssaoTexture;
+[[vk::binding(10, 0)]]
+Sampler2D<float4> sunShaftTexture;
 
 float3 acesFilmTonemap(float3 color)
 {
@@ -384,7 +386,7 @@ float4 main(FragmentInput input) : SV_Target0
 
     if (geometryMask < 0.5)
     {
-        const float shaftFactor = sampleScreenSpaceSunShafts(input.inUv, sunUv, sunVisibility, sunFacing);
+        const float shaftFactor = sunShaftTexture.Sample(input.inUv).x;
         if (shaftFactor > 1e-5)
         {
             const float shaftStrength = (camera.skyConfig4.x * 8.0) + (camera.skyConfig4.w * 0.04);

@@ -77,6 +77,7 @@ constexpr uint32_t kVoxelGiPropagationIterations = 4u;
 constexpr uint32_t kHdrResolveBloomMipCount = 6u;
 constexpr uint32_t kAutoExposureHistogramBins = 64u;
 constexpr uint32_t kAutoExposureWorkgroupSize = 16u;
+constexpr uint32_t kSunShaftWorkgroupSize = 8u;
 constexpr float kVoxelGiCellSize = 1.0f;
 constexpr float kPipeTransferHalfExtent = 0.58f;
 constexpr float kPipeMinRadius = 0.02f;
@@ -173,6 +174,13 @@ struct alignas(16) AutoExposureUpdatePushConstants {
     float deltaTimeSeconds = 0.016f;
     float _pad1 = 0.0f;
     float _pad2 = 0.0f;
+};
+
+struct alignas(16) SunShaftPushConstants {
+    uint32_t width = 1u;
+    uint32_t height = 1u;
+    uint32_t sampleCount = 10u;
+    uint32_t _pad0 = 0u;
 };
 
 struct PipeMeshData {
@@ -1538,6 +1546,11 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
     }
     if (!runStep("createAutoExposureResources", [&] { return createAutoExposureResources(); })) {
         VOX_LOGE("render") << "init failed at createAutoExposureResources\n";
+        shutdown();
+        return false;
+    }
+    if (!runStep("createSunShaftResources", [&] { return createSunShaftResources(); })) {
+        VOX_LOGE("render") << "init failed at createSunShaftResources\n";
         shutdown();
         return false;
     }
@@ -4310,6 +4323,181 @@ bool Renderer::createAutoExposureResources() {
     return true;
 }
 
+bool Renderer::createSunShaftResources() {
+    constexpr const char* kSunShaftShaderPath = "../src/render/shaders/sun_shafts.comp.slang.spv";
+    const bool hasSunShaftShader = readBinaryFile(kSunShaftShaderPath).has_value();
+    if (!hasSunShaftShader) {
+        VOX_LOGI("render")
+            << "sun shafts compute shader not found; disabling dedicated pass (expected: "
+            << kSunShaftShaderPath << ")\n";
+        m_sunShaftShaderAvailable = false;
+        m_sunShaftComputeAvailable = false;
+        return true;
+    }
+
+    m_sunShaftShaderAvailable = true;
+
+    if (m_sunShaftDescriptorSetLayout == VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding cameraBinding{};
+        cameraBinding.binding = 0;
+        cameraBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        cameraBinding.descriptorCount = 1;
+        cameraBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding normalDepthBinding{};
+        normalDepthBinding.binding = 1;
+        normalDepthBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        normalDepthBinding.descriptorCount = 1;
+        normalDepthBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding outputBinding{};
+        outputBinding.binding = 2;
+        outputBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        outputBinding.descriptorCount = 1;
+        outputBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+            cameraBinding,
+            normalDepthBinding,
+            outputBinding
+        };
+
+        VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
+        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutCreateInfo.pBindings = bindings.data();
+        const VkResult layoutResult = vkCreateDescriptorSetLayout(
+            m_device,
+            &layoutCreateInfo,
+            nullptr,
+            &m_sunShaftDescriptorSetLayout
+        );
+        if (layoutResult != VK_SUCCESS) {
+            logVkFailure("vkCreateDescriptorSetLayout(sunShaft)", layoutResult);
+            destroySunShaftResources();
+            return false;
+        }
+        setObjectName(
+            VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+            vkHandleToUint64(m_sunShaftDescriptorSetLayout),
+            "renderer.descriptorSetLayout.sunShaft"
+        );
+    }
+
+    if (m_sunShaftDescriptorPool == VK_NULL_HANDLE) {
+        const std::array<VkDescriptorPoolSize, 3> poolSizes = {
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kMaxFramesInFlight},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxFramesInFlight}
+        };
+        VkDescriptorPoolCreateInfo poolCreateInfo{};
+        poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolCreateInfo.maxSets = kMaxFramesInFlight;
+        poolCreateInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+        poolCreateInfo.pPoolSizes = poolSizes.data();
+        const VkResult poolResult = vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &m_sunShaftDescriptorPool);
+        if (poolResult != VK_SUCCESS) {
+            logVkFailure("vkCreateDescriptorPool(sunShaft)", poolResult);
+            destroySunShaftResources();
+            return false;
+        }
+        setObjectName(
+            VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+            vkHandleToUint64(m_sunShaftDescriptorPool),
+            "renderer.descriptorPool.sunShaft"
+        );
+    }
+
+    std::array<VkDescriptorSetLayout, kMaxFramesInFlight> setLayouts{};
+    setLayouts.fill(m_sunShaftDescriptorSetLayout);
+    VkDescriptorSetAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo.descriptorPool = m_sunShaftDescriptorPool;
+    allocateInfo.descriptorSetCount = static_cast<uint32_t>(setLayouts.size());
+    allocateInfo.pSetLayouts = setLayouts.data();
+    const VkResult allocateResult =
+        vkAllocateDescriptorSets(m_device, &allocateInfo, m_sunShaftDescriptorSets.data());
+    if (allocateResult != VK_SUCCESS) {
+        logVkFailure("vkAllocateDescriptorSets(sunShaft)", allocateResult);
+        destroySunShaftResources();
+        return false;
+    }
+    for (std::size_t frameIndex = 0; frameIndex < m_sunShaftDescriptorSets.size(); ++frameIndex) {
+        const std::string setName = "renderer.descriptorSet.sunShaft.frame" + std::to_string(frameIndex);
+        setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET, vkHandleToUint64(m_sunShaftDescriptorSets[frameIndex]), setName.c_str());
+    }
+
+    VkShaderModule sunShaftShaderModule = VK_NULL_HANDLE;
+    if (!createShaderModuleFromFile(
+            m_device,
+            kSunShaftShaderPath,
+            "sun_shafts.comp",
+            sunShaftShaderModule
+        )) {
+        destroySunShaftResources();
+        return false;
+    }
+
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(SunShaftPushConstants);
+
+    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
+    pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutCreateInfo.setLayoutCount = 1;
+    pipelineLayoutCreateInfo.pSetLayouts = &m_sunShaftDescriptorSetLayout;
+    pipelineLayoutCreateInfo.pushConstantRangeCount = 1;
+    pipelineLayoutCreateInfo.pPushConstantRanges = &pushConstantRange;
+    const VkResult pipelineLayoutResult = vkCreatePipelineLayout(
+        m_device,
+        &pipelineLayoutCreateInfo,
+        nullptr,
+        &m_sunShaftPipelineLayout
+    );
+    if (pipelineLayoutResult != VK_SUCCESS) {
+        logVkFailure("vkCreatePipelineLayout(sunShaft)", pipelineLayoutResult);
+        vkDestroyShaderModule(m_device, sunShaftShaderModule, nullptr);
+        destroySunShaftResources();
+        return false;
+    }
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE_LAYOUT,
+        vkHandleToUint64(m_sunShaftPipelineLayout),
+        "renderer.pipelineLayout.sunShaft"
+    );
+
+    VkPipelineShaderStageCreateInfo stage{};
+    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = sunShaftShaderModule;
+    stage.pName = "main";
+
+    VkComputePipelineCreateInfo pipelineCreateInfo{};
+    pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.stage = stage;
+    pipelineCreateInfo.layout = m_sunShaftPipelineLayout;
+    const VkResult pipelineResult = vkCreateComputePipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &m_sunShaftPipeline
+    );
+    vkDestroyShaderModule(m_device, sunShaftShaderModule, nullptr);
+    if (pipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateComputePipelines(sunShaft)", pipelineResult);
+        destroySunShaftResources();
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_sunShaftPipeline), "pipeline.sunShaft.compute");
+
+    m_sunShaftComputeAvailable = true;
+    VOX_LOGI("render") << "sun shafts compute resources ready\n";
+    return true;
+}
+
 bool Renderer::createSwapchain() {
     const SwapchainSupport support = querySwapchainSupport(m_physicalDevice, m_surface);
     if (support.formats.empty() || support.presentModes.empty()) {
@@ -4535,7 +4723,7 @@ bool Renderer::createDepthTargets() {
 }
 
 bool Renderer::createAoTargets() {
-    if (m_normalDepthFormat == VK_FORMAT_UNDEFINED || m_ssaoFormat == VK_FORMAT_UNDEFINED) {
+    if (m_normalDepthFormat == VK_FORMAT_UNDEFINED || m_ssaoFormat == VK_FORMAT_UNDEFINED || m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
         VOX_LOGE("render") << "AO formats are undefined\n";
         return false;
     }
@@ -4607,6 +4795,7 @@ bool Renderer::createAoTargets() {
     m_aoDepthImageInitialized.assign(imageCount, false);
     m_ssaoRawImageInitialized.assign(frameTargetCount, false);
     m_ssaoBlurImageInitialized.assign(frameTargetCount, false);
+    m_sunShaftImageInitialized.assign(frameTargetCount, false);
 
     if (!createColorTargets(
             m_normalDepthFormat,
@@ -4690,6 +4879,50 @@ bool Renderer::createAoTargets() {
         return false;
     }
 
+    m_sunShaftImages.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_sunShaftImageMemories.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_sunShaftImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_sunShaftTransientHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
+    for (uint32_t i = 0; i < frameTargetCount; ++i) {
+        TransientImageDesc sunShaftDesc{};
+        sunShaftDesc.imageType = VK_IMAGE_TYPE_2D;
+        sunShaftDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        sunShaftDesc.format = m_hdrColorFormat;
+        sunShaftDesc.extent = {m_aoExtent.width, m_aoExtent.height, 1u};
+        sunShaftDesc.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        sunShaftDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        sunShaftDesc.mipLevels = 1;
+        sunShaftDesc.arrayLayers = 1;
+        sunShaftDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+        sunShaftDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
+        sunShaftDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        sunShaftDesc.firstPass = FrameArenaPass::Post;
+        sunShaftDesc.lastPass = FrameArenaPass::Post;
+        sunShaftDesc.debugName = "post.sunShaft[" + std::to_string(i) + "]";
+        const TransientImageHandle sunShaftHandle = m_frameArena.createTransientImage(
+            sunShaftDesc,
+            FrameArenaImageLifetime::Persistent
+        );
+        if (sunShaftHandle == kInvalidTransientImageHandle) {
+            VOX_LOGE("render") << "failed creating sun shaft transient image\n";
+            return false;
+        }
+        const TransientImageInfo* sunShaftInfo = m_frameArena.getTransientImage(sunShaftHandle);
+        if (sunShaftInfo == nullptr || sunShaftInfo->image == VK_NULL_HANDLE || sunShaftInfo->view == VK_NULL_HANDLE) {
+            VOX_LOGE("render") << "invalid sun shaft transient image info\n";
+            return false;
+        }
+        m_sunShaftTransientHandles[i] = sunShaftHandle;
+        m_sunShaftImages[i] = sunShaftInfo->image;
+        m_sunShaftImageViews[i] = sunShaftInfo->view;
+        m_sunShaftImageMemories[i] = VK_NULL_HANDLE;
+        setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_sunShaftImages[i]), sunShaftDesc.debugName.c_str());
+        {
+            const std::string viewName = "post.sunShaft.view[" + std::to_string(i) + "]";
+            setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_sunShaftImageViews[i]), viewName.c_str());
+        }
+    }
+
     if (m_normalDepthSampler == VK_NULL_HANDLE) {
         VkSamplerCreateInfo samplerCreateInfo{};
         samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -4743,6 +4976,34 @@ bool Renderer::createAoTargets() {
             VK_OBJECT_TYPE_SAMPLER,
             vkHandleToUint64(m_ssaoSampler),
             "ssao.sampler"
+        );
+    }
+
+    if (m_sunShaftSampler == VK_NULL_HANDLE) {
+        VkSamplerCreateInfo samplerCreateInfo{};
+        samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+        samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+        samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.minLod = 0.0f;
+        samplerCreateInfo.maxLod = 0.0f;
+        samplerCreateInfo.maxAnisotropy = 1.0f;
+        samplerCreateInfo.anisotropyEnable = VK_FALSE;
+        samplerCreateInfo.compareEnable = VK_FALSE;
+        samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+        const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_sunShaftSampler);
+        if (samplerResult != VK_SUCCESS) {
+            logVkFailure("vkCreateSampler(sunShaft)", samplerResult);
+            return false;
+        }
+        setObjectName(
+            VK_OBJECT_TYPE_SAMPLER,
+            vkHandleToUint64(m_sunShaftSampler),
+            "sunShaft.sampler"
         );
     }
 
@@ -5066,7 +5327,13 @@ bool Renderer::createDescriptorResources() {
         voxelGiBinding.descriptorCount = 1;
         voxelGiBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 9> bindings = {
+        VkDescriptorSetLayoutBinding sunShaftBinding{};
+        sunShaftBinding.binding = 10;
+        sunShaftBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sunShaftBinding.descriptorCount = 1;
+        sunShaftBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 10> bindings = {
             mvpBinding,
             diffuseTextureBinding,
             exposureStateBinding,
@@ -5075,7 +5342,8 @@ bool Renderer::createDescriptorResources() {
             normalDepthBinding,
             ssaoBlurBinding,
             ssaoRawBinding,
-            voxelGiBinding
+            voxelGiBinding,
+            sunShaftBinding
         };
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
@@ -5104,7 +5372,7 @@ bool Renderer::createDescriptorResources() {
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                7 * kMaxFramesInFlight
+                8 * kMaxFramesInFlight
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -9342,12 +9610,18 @@ void Renderer::renderFrame(
     voxelGiVolumeImageInfo.imageView = m_voxelGiImageViews[1];
     voxelGiVolumeImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+    VkDescriptorImageInfo sunShaftImageInfo{};
+    sunShaftImageInfo.sampler = m_sunShaftSampler;
+    sunShaftImageInfo.imageView =
+        (aoFrameIndex < m_sunShaftImageViews.size()) ? m_sunShaftImageViews[aoFrameIndex] : VK_NULL_HANDLE;
+    sunShaftImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     VkDescriptorBufferInfo autoExposureStateBufferInfo{};
     autoExposureStateBufferInfo.buffer = autoExposureStateBuffer;
     autoExposureStateBufferInfo.offset = 0;
     autoExposureStateBufferInfo.range = sizeof(float) * 4u;
 
-    std::array<VkWriteDescriptorSet, 9> writes{};
+    std::array<VkWriteDescriptorSet, 10> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -9410,6 +9684,13 @@ void Renderer::renderFrame(
     writes[8].descriptorCount = 1;
     writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[8].pImageInfo = &voxelGiVolumeImageInfo;
+
+    writes[9] = write;
+    writes[9].dstSet = m_descriptorSets[m_currentFrame];
+    writes[9].dstBinding = 10;
+    writes[9].descriptorCount = 1;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[9].pImageInfo = &sunShaftImageInfo;
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -9526,6 +9807,46 @@ void Renderer::renderFrame(
             m_device,
             static_cast<uint32_t>(autoExposureWrites.size()),
             autoExposureWrites.data(),
+            0,
+            nullptr
+        );
+    }
+
+    if (m_sunShaftComputeAvailable &&
+        m_sunShaftDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
+        aoFrameIndex < m_sunShaftImageViews.size() &&
+        m_sunShaftImageViews[aoFrameIndex] != VK_NULL_HANDLE) {
+        VkDescriptorImageInfo sunShaftOutputImageInfo{};
+        sunShaftOutputImageInfo.sampler = VK_NULL_HANDLE;
+        sunShaftOutputImageInfo.imageView = m_sunShaftImageViews[aoFrameIndex];
+        sunShaftOutputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        std::array<VkWriteDescriptorSet, 3> sunShaftWrites{};
+        sunShaftWrites[0] = write;
+        sunShaftWrites[0].dstSet = m_sunShaftDescriptorSets[m_currentFrame];
+        sunShaftWrites[0].dstBinding = 0;
+        sunShaftWrites[0].descriptorCount = 1;
+        sunShaftWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        sunShaftWrites[0].pBufferInfo = &bufferInfo;
+
+        sunShaftWrites[1] = write;
+        sunShaftWrites[1].dstSet = m_sunShaftDescriptorSets[m_currentFrame];
+        sunShaftWrites[1].dstBinding = 1;
+        sunShaftWrites[1].descriptorCount = 1;
+        sunShaftWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sunShaftWrites[1].pImageInfo = &normalDepthImageInfo;
+
+        sunShaftWrites[2] = write;
+        sunShaftWrites[2].dstSet = m_sunShaftDescriptorSets[m_currentFrame];
+        sunShaftWrites[2].dstBinding = 2;
+        sunShaftWrites[2].descriptorCount = 1;
+        sunShaftWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        sunShaftWrites[2].pImageInfo = &sunShaftOutputImageInfo;
+
+        vkUpdateDescriptorSets(
+            m_device,
+            static_cast<uint32_t>(sunShaftWrites.size()),
+            sunShaftWrites.data(),
             0,
             nullptr
         );
@@ -10877,7 +11198,7 @@ void Renderer::renderFrame(
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT
     );
@@ -11716,6 +12037,123 @@ void Renderer::renderFrame(
         m_autoExposureHistoryValid = false;
     }
 
+    if (aoFrameIndex < m_sunShaftImages.size() &&
+        m_sunShaftImages[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_sunShaftImageViews[aoFrameIndex] != VK_NULL_HANDLE) {
+        const bool sunShaftInitialized = m_sunShaftImageInitialized[aoFrameIndex];
+        if (m_sunShaftComputeAvailable &&
+            m_sunShaftPipelineLayout != VK_NULL_HANDLE &&
+            m_sunShaftPipeline != VK_NULL_HANDLE &&
+            m_sunShaftDescriptorSets[m_currentFrame] != VK_NULL_HANDLE) {
+            beginDebugLabel(commandBuffer, "Pass: Sun Shafts", 0.26f, 0.24f, 0.16f, 1.0f);
+            transitionImageLayout(
+                commandBuffer,
+                m_normalDepthImages[aoFrameIndex],
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT
+            );
+            transitionImageLayout(
+                commandBuffer,
+                m_sunShaftImages[aoFrameIndex],
+                sunShaftInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_GENERAL,
+                sunShaftInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+                sunShaftInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT
+            );
+
+            SunShaftPushConstants sunShaftPushConstants{};
+            sunShaftPushConstants.width = std::max(1u, m_aoExtent.width);
+            sunShaftPushConstants.height = std::max(1u, m_aoExtent.height);
+            sunShaftPushConstants.sampleCount = 10u;
+
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_sunShaftPipeline);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                m_sunShaftPipelineLayout,
+                0,
+                1,
+                &m_sunShaftDescriptorSets[m_currentFrame],
+                1,
+                &mvpDynamicOffset
+            );
+            vkCmdPushConstants(
+                commandBuffer,
+                m_sunShaftPipelineLayout,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                sizeof(SunShaftPushConstants),
+                &sunShaftPushConstants
+            );
+            const uint32_t dispatchX =
+                (sunShaftPushConstants.width + (kSunShaftWorkgroupSize - 1u)) / kSunShaftWorkgroupSize;
+            const uint32_t dispatchY =
+                (sunShaftPushConstants.height + (kSunShaftWorkgroupSize - 1u)) / kSunShaftWorkgroupSize;
+            vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1u);
+
+            transitionImageLayout(
+                commandBuffer,
+                m_sunShaftImages[aoFrameIndex],
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT
+            );
+            m_sunShaftImageInitialized[aoFrameIndex] = true;
+            endDebugLabel(commandBuffer);
+        } else {
+            transitionImageLayout(
+                commandBuffer,
+                m_sunShaftImages[aoFrameIndex],
+                sunShaftInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                sunShaftInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+                sunShaftInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT
+            );
+            const VkClearColorValue clearValue = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            VkImageSubresourceRange clearRange{};
+            clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            clearRange.baseMipLevel = 0u;
+            clearRange.levelCount = 1u;
+            clearRange.baseArrayLayer = 0u;
+            clearRange.layerCount = 1u;
+            vkCmdClearColorImage(
+                commandBuffer,
+                m_sunShaftImages[aoFrameIndex],
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                &clearValue,
+                1,
+                &clearRange
+            );
+            transitionImageLayout(
+                commandBuffer,
+                m_sunShaftImages[aoFrameIndex],
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT
+            );
+            m_sunShaftImageInitialized[aoFrameIndex] = true;
+        }
+    }
+
     transitionImageLayout(
         commandBuffer,
         m_swapchainImages[imageIndex],
@@ -12083,6 +12521,10 @@ void Renderer::destroyDepthTargets() {
 }
 
 void Renderer::destroyAoTargets() {
+    if (m_sunShaftSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_sunShaftSampler, nullptr);
+        m_sunShaftSampler = VK_NULL_HANDLE;
+    }
     if (m_ssaoSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device, m_ssaoSampler, nullptr);
         m_ssaoSampler = VK_NULL_HANDLE;
@@ -12102,6 +12544,17 @@ void Renderer::destroyAoTargets() {
     m_ssaoBlurImageMemories.clear();
     m_ssaoBlurTransientHandles.clear();
     m_ssaoBlurImageInitialized.clear();
+
+    for (TransientImageHandle handle : m_sunShaftTransientHandles) {
+        if (handle != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(handle);
+        }
+    }
+    m_sunShaftImageViews.clear();
+    m_sunShaftImages.clear();
+    m_sunShaftImageMemories.clear();
+    m_sunShaftTransientHandles.clear();
+    m_sunShaftImageInitialized.clear();
 
     for (TransientImageHandle handle : m_ssaoRawTransientHandles) {
         if (handle != kInvalidTransientImageHandle) {
@@ -12460,6 +12913,28 @@ void Renderer::destroyAutoExposureResources() {
     m_autoExposureHistoryValid = false;
 }
 
+void Renderer::destroySunShaftResources() {
+    if (m_sunShaftPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_sunShaftPipeline, nullptr);
+        m_sunShaftPipeline = VK_NULL_HANDLE;
+    }
+    if (m_sunShaftPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device, m_sunShaftPipelineLayout, nullptr);
+        m_sunShaftPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (m_sunShaftDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_device, m_sunShaftDescriptorPool, nullptr);
+        m_sunShaftDescriptorPool = VK_NULL_HANDLE;
+    }
+    if (m_sunShaftDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device, m_sunShaftDescriptorSetLayout, nullptr);
+        m_sunShaftDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+    m_sunShaftDescriptorSets.fill(VK_NULL_HANDLE);
+    m_sunShaftComputeAvailable = false;
+    m_sunShaftShaderAvailable = false;
+}
+
 void Renderer::destroyChunkBuffers() {
     for (ChunkDrawRange& drawRange : m_chunkDrawRanges) {
         drawRange.firstIndex = 0;
@@ -12587,6 +13062,7 @@ void Renderer::shutdown() {
         destroyShadowResources();
         destroyVoxelGiResources();
         destroyAutoExposureResources();
+        destroySunShaftResources();
         destroyChunkBuffers();
         destroyPipeline();
         if (m_descriptorPool != VK_NULL_HANDLE) {
@@ -12716,6 +13192,8 @@ void Renderer::shutdown() {
     m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     m_autoExposureComputeAvailable = false;
     m_autoExposureHistoryValid = false;
+    m_sunShaftComputeAvailable = false;
+    m_sunShaftShaderAvailable = false;
     m_supportsWireframePreview = false;
     m_supportsSamplerAnisotropy = false;
     m_supportsMultiDrawIndirect = false;
