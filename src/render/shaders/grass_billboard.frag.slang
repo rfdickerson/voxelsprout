@@ -72,7 +72,7 @@ float3 applyAtmosphericFog(float3 litColor, float3 worldPosition, float viewDept
     const float sunView = max(dot(viewDir, -sunDirection), 0.0);
     const float g = clamp(camera.skyConfig0.z, 0.0, 0.98);
     const float phaseMie = (1.0 - (g * g)) / (4.0 * 3.14159265 * pow(1.0 + (g * g) - (2.0 * g * sunView), 1.5));
-    const float phaseBoost = 1.0 + (phaseMie * 1.6);
+    const float phaseBoost = 1.0 + (phaseMie * 1.6 * sunView);
     const float3 inscatterColor = skyColor * phaseBoost;
 
     const float3 transmittance = exp(-extinction * max(viewDepth, 0.0));

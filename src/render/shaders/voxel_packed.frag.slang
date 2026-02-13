@@ -199,7 +199,7 @@ float3 applyAtmosphericFog(float3 litColor, float3 worldPosition, float viewDept
     const float sunView = max(dot(viewDir, -sunDirection), 0.0);
     const float g = clamp(camera.skyConfig0.z, 0.0, 0.98);
     const float phaseMie = (1.0 - (g * g)) / (4.0 * 3.14159265 * pow(1.0 + (g * g) - (2.0 * g * sunView), 1.5));
-    const float phaseBoost = 1.0 + (phaseMie * 1.6);
+    const float phaseBoost = 1.0 + (phaseMie * 1.6 * sunView);
     const float3 inscatterColor = skyColor * phaseBoost;
 
     const float3 transmittance = exp(-extinction * max(viewDepth, 0.0));
@@ -460,13 +460,14 @@ float4 main(FragmentInput input) : SV_Target0
     const float smoothness = materialSmoothness(input.inMaterial);
     const float f0 = 0.028;
     const float fresnelTerm = f0 + ((1.0 - f0) * fresnel);
-    const float specularStrength = lerp(0.05, 0.30, smoothness);
+    const float specularStrength = lerp(0.03, 0.14, smoothness);
     const float sunSpecExponent = lerp(20.0, 144.0, smoothness);
-    const float sunGlint = pow(max(dot(reflectDir, -sunDirection), 0.0), sunSpecExponent);
+    const float sunGlint = pow(max(dot(reflectDir, -sunDirection), 0.0), sunSpecExponent) * step(0.0001, ndotl);
+    const float sunSpecVisibility = directShadowFactor;
     const float3 skyReflection = proceduralSkyNoSunDisk(reflectDir);
     const float3 specular =
-        (skyReflection * (fresnelTerm * specularStrength)) +
-        (sunColor * (sunIntensity * sunGlint * fresnelTerm * specularStrength * 0.32));
+        (skyReflection * (fresnelTerm * specularStrength * 0.55)) +
+        (sunColor * (sunIntensity * sunGlint * fresnelTerm * specularStrength * 0.20 * sunSpecVisibility));
 
     const float3 shaded = (baseColor * lighting) + specular;
     const float3 fogged = applyAtmosphericFog(shaded, input.inWorldPosition, viewDepth, sunDirection);

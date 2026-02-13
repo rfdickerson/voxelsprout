@@ -244,7 +244,8 @@ float3 applyVolumetricHeightFog(
     ambientFogColor = lerp(ambientFogColor, coolAerialColor, dayFactor * 0.45);
 
     const float cosTheta = clamp(dot(worldViewDir, toSun), -1.0, 1.0);
-    const float sunPhase = hgPhase(cosTheta, camera.skyConfig0.z) * 0.10;
+    const float forwardScatter = saturate(cosTheta);
+    const float sunPhase = hgPhase(forwardScatter, camera.skyConfig0.z) * 0.10 * forwardScatter;
     const float3 sunScatterColor = camera.sunColorShadow.xyz * (sunPhase * sunScatterStrength * clamp(sunVisibility, 0.0, 1.0));
     const float3 fogColor = ambientFogColor + sunScatterColor;
 
