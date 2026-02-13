@@ -172,7 +172,12 @@ float4 main(FragmentInput input) : SV_Target0
     const float3x3 invViewRotation = transpose((float3x3)camera.view);
     const float3 cameraForward = normalize(mul(invViewRotation, float3(0.0, 0.0, -1.0)));
     const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
-    const float sunFacing = smoothstep(cos(radians(20.0)), cos(radians(3.0)), dot(cameraForward, toSun));
+    const float sunForwardDot = dot(cameraForward, toSun);
+    // Wide falloff keeps some bloom when the sun is off-center.
+    const float sunFacingWide = smoothstep(cos(radians(72.0)), cos(radians(10.0)), sunForwardDot);
+    // Tight falloff keeps a strong kick when looking close to the sun.
+    const float sunFacingTight = smoothstep(cos(radians(20.0)), cos(radians(3.0)), sunForwardDot);
+    const float sunFacing = max(sunFacingTight, sunFacingWide * 0.65);
 
     const float3 sunView = mul((float3x3)camera.view, toSun);
     float2 sunUv = float2(-1.0, -1.0);
