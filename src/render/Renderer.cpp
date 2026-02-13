@@ -596,6 +596,53 @@ math::Matrix4 lookAt(const math::Vector3& eye, const math::Vector3& target, cons
     return view;
 }
 
+bool chunkIntersectsShadowCascadeClip(
+    const world::Chunk& chunk,
+    const math::Matrix4& lightViewProj,
+    float clipMargin
+) {
+    const float chunkMinX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
+    const float chunkMinY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
+    const float chunkMinZ = static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ);
+    const float chunkMaxX = chunkMinX + static_cast<float>(world::Chunk::kSizeX);
+    const float chunkMaxY = chunkMinY + static_cast<float>(world::Chunk::kSizeY);
+    const float chunkMaxZ = chunkMinZ + static_cast<float>(world::Chunk::kSizeZ);
+
+    std::array<math::Vector3, 8> corners = {
+        math::Vector3{chunkMinX, chunkMinY, chunkMinZ},
+        math::Vector3{chunkMaxX, chunkMinY, chunkMinZ},
+        math::Vector3{chunkMinX, chunkMaxY, chunkMinZ},
+        math::Vector3{chunkMaxX, chunkMaxY, chunkMinZ},
+        math::Vector3{chunkMinX, chunkMinY, chunkMaxZ},
+        math::Vector3{chunkMaxX, chunkMinY, chunkMaxZ},
+        math::Vector3{chunkMinX, chunkMaxY, chunkMaxZ},
+        math::Vector3{chunkMaxX, chunkMaxY, chunkMaxZ},
+    };
+
+    float ndcMinX = std::numeric_limits<float>::max();
+    float ndcMinY = std::numeric_limits<float>::max();
+    float ndcMinZ = std::numeric_limits<float>::max();
+    float ndcMaxX = std::numeric_limits<float>::lowest();
+    float ndcMaxY = std::numeric_limits<float>::lowest();
+    float ndcMaxZ = std::numeric_limits<float>::lowest();
+    for (const math::Vector3& corner : corners) {
+        const math::Vector3 clip = math::transformPoint(lightViewProj, corner);
+        ndcMinX = std::min(ndcMinX, clip.x);
+        ndcMinY = std::min(ndcMinY, clip.y);
+        ndcMinZ = std::min(ndcMinZ, clip.z);
+        ndcMaxX = std::max(ndcMaxX, clip.x);
+        ndcMaxY = std::max(ndcMaxY, clip.y);
+        ndcMaxZ = std::max(ndcMaxZ, clip.z);
+    }
+
+    return !(ndcMaxX < (-1.0f - clipMargin) ||
+             ndcMinX > (1.0f + clipMargin) ||
+             ndcMaxY < (-1.0f - clipMargin) ||
+             ndcMinY > (1.0f + clipMargin) ||
+             ndcMaxZ < (0.0f - clipMargin) ||
+             ndcMinZ > (1.0f + clipMargin));
+}
+
 float saturate(float value) {
     return std::clamp(value, 0.0f, 1.0f);
 }
@@ -5911,9 +5958,9 @@ bool Renderer::createGraphicsPipeline() {
     skyboxRasterizer.cullMode = VK_CULL_MODE_NONE;
 
     VkPipelineDepthStencilStateCreateInfo skyboxDepthStencil = depthStencil;
-    skyboxDepthStencil.depthTestEnable = VK_FALSE;
+    skyboxDepthStencil.depthTestEnable = VK_TRUE;
     skyboxDepthStencil.depthWriteEnable = VK_FALSE;
-    skyboxDepthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    skyboxDepthStencil.depthCompareOp = VK_COMPARE_OP_EQUAL;
 
     VkGraphicsPipelineCreateInfo skyboxPipelineCreateInfo = pipelineCreateInfo;
     skyboxPipelineCreateInfo.stageCount = static_cast<uint32_t>(skyboxShaderStages.size());
@@ -10147,8 +10194,18 @@ void Renderer::renderFrame(
     chunkInstanceData.push_back(ChunkInstanceData{});
     std::vector<VkDrawIndexedIndirectCommand> chunkIndirectCommands;
     chunkIndirectCommands.reserve(m_chunkDrawRanges.size());
+    std::vector<ChunkInstanceData> shadowChunkInstanceData;
+    shadowChunkInstanceData.reserve(m_chunkDrawRanges.size() + 1);
+    shadowChunkInstanceData.push_back(ChunkInstanceData{});
+    std::vector<VkDrawIndexedIndirectCommand> shadowChunkIndirectCommands;
+    shadowChunkIndirectCommands.reserve(m_chunkDrawRanges.size());
     const std::vector<world::Chunk>& chunks = chunkGrid.chunks();
-    auto appendChunkLods = [&](std::size_t chunkArrayIndex) {
+    auto appendChunkLods = [&](
+                               std::size_t chunkArrayIndex,
+                               std::vector<ChunkInstanceData>& outInstanceData,
+                               std::vector<VkDrawIndexedIndirectCommand>& outIndirectCommands,
+                               bool countVisibleLodStats
+                           ) {
         if (chunkArrayIndex >= chunkGrid.chunks().size()) {
             return;
         }
@@ -10170,13 +10227,13 @@ void Renderer::renderFrame(
                 continue;
             }
 
-            const uint32_t instanceIndex = static_cast<uint32_t>(chunkInstanceData.size());
+            const uint32_t instanceIndex = static_cast<uint32_t>(outInstanceData.size());
             ChunkInstanceData instance{};
             instance.chunkOffset[0] = drawRange.offsetX;
             instance.chunkOffset[1] = drawRange.offsetY;
             instance.chunkOffset[2] = drawRange.offsetZ;
             instance.chunkOffset[3] = 0.0f;
-            chunkInstanceData.push_back(instance);
+            outInstanceData.push_back(instance);
 
             VkDrawIndexedIndirectCommand indirectCommand{};
             indirectCommand.indexCount = drawRange.indexCount;
@@ -10184,24 +10241,42 @@ void Renderer::renderFrame(
             indirectCommand.firstIndex = drawRange.firstIndex;
             indirectCommand.vertexOffset = drawRange.vertexOffset;
             indirectCommand.firstInstance = instanceIndex;
-            chunkIndirectCommands.push_back(indirectCommand);
+            outIndirectCommands.push_back(indirectCommand);
 
-            if (lodIndex == 0) {
-                ++m_debugDrawnLod0Ranges;
-            } else if (lodIndex == 1) {
-                ++m_debugDrawnLod1Ranges;
-            } else {
-                ++m_debugDrawnLod2Ranges;
+            if (countVisibleLodStats) {
+                if (lodIndex == 0) {
+                    ++m_debugDrawnLod0Ranges;
+                } else if (lodIndex == 1) {
+                    ++m_debugDrawnLod1Ranges;
+                } else {
+                    ++m_debugDrawnLod2Ranges;
+                }
             }
         }
     };
     if (!visibleChunkIndices.empty()) {
         for (const std::size_t chunkArrayIndex : visibleChunkIndices) {
-            appendChunkLods(chunkArrayIndex);
+            appendChunkLods(chunkArrayIndex, chunkInstanceData, chunkIndirectCommands, true);
         }
     } else {
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-            appendChunkLods(chunkArrayIndex);
+            appendChunkLods(chunkArrayIndex, chunkInstanceData, chunkIndirectCommands, true);
+        }
+    }
+
+    // Shadow casting must be culled against cascade coverage, not camera view frustum.
+    constexpr float kShadowCasterClipMargin = 0.08f;
+    for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
+        const world::Chunk& chunk = chunks[chunkArrayIndex];
+        bool intersectsAnyCascade = false;
+        for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            if (chunkIntersectsShadowCascadeClip(chunk, lightViewProjMatrices[cascadeIndex], kShadowCasterClipMargin)) {
+                intersectsAnyCascade = true;
+                break;
+            }
+        }
+        if (intersectsAnyCascade) {
+            appendChunkLods(chunkArrayIndex, shadowChunkInstanceData, shadowChunkIndirectCommands, false);
         }
     }
 
@@ -10241,10 +10316,56 @@ void Renderer::renderFrame(
         }
     }
 
+    const VkDeviceSize shadowChunkInstanceBytes =
+        static_cast<VkDeviceSize>(shadowChunkInstanceData.size() * sizeof(ChunkInstanceData));
+    std::optional<FrameArenaSlice> shadowChunkInstanceSliceOpt = std::nullopt;
+    if (shadowChunkInstanceBytes > 0) {
+        shadowChunkInstanceSliceOpt = m_frameArena.allocateUpload(
+            shadowChunkInstanceBytes,
+            static_cast<VkDeviceSize>(alignof(ChunkInstanceData)),
+            FrameArenaUploadKind::InstanceData
+        );
+        if (shadowChunkInstanceSliceOpt.has_value() && shadowChunkInstanceSliceOpt->mapped != nullptr) {
+            std::memcpy(
+                shadowChunkInstanceSliceOpt->mapped,
+                shadowChunkInstanceData.data(),
+                static_cast<size_t>(shadowChunkInstanceBytes)
+            );
+        } else {
+            shadowChunkInstanceSliceOpt.reset();
+        }
+    }
+
+    const VkDeviceSize shadowChunkIndirectBytes =
+        static_cast<VkDeviceSize>(shadowChunkIndirectCommands.size() * sizeof(VkDrawIndexedIndirectCommand));
+    std::optional<FrameArenaSlice> shadowChunkIndirectSliceOpt = std::nullopt;
+    if (shadowChunkIndirectBytes > 0) {
+        shadowChunkIndirectSliceOpt = m_frameArena.allocateUpload(
+            shadowChunkIndirectBytes,
+            static_cast<VkDeviceSize>(alignof(VkDrawIndexedIndirectCommand)),
+            FrameArenaUploadKind::Unknown
+        );
+        if (shadowChunkIndirectSliceOpt.has_value() && shadowChunkIndirectSliceOpt->mapped != nullptr) {
+            std::memcpy(
+                shadowChunkIndirectSliceOpt->mapped,
+                shadowChunkIndirectCommands.data(),
+                static_cast<size_t>(shadowChunkIndirectBytes)
+            );
+        } else {
+            shadowChunkIndirectSliceOpt.reset();
+        }
+    }
+
     const VkBuffer chunkInstanceBuffer =
         chunkInstanceSliceOpt.has_value() ? m_bufferAllocator.getBuffer(chunkInstanceSliceOpt->buffer) : VK_NULL_HANDLE;
     const VkBuffer chunkIndirectBuffer =
         chunkIndirectSliceOpt.has_value() ? m_bufferAllocator.getBuffer(chunkIndirectSliceOpt->buffer) : VK_NULL_HANDLE;
+    const VkBuffer shadowChunkInstanceBuffer =
+        shadowChunkInstanceSliceOpt.has_value() ? m_bufferAllocator.getBuffer(shadowChunkInstanceSliceOpt->buffer)
+                                                : VK_NULL_HANDLE;
+    const VkBuffer shadowChunkIndirectBuffer =
+        shadowChunkIndirectSliceOpt.has_value() ? m_bufferAllocator.getBuffer(shadowChunkIndirectSliceOpt->buffer)
+                                                : VK_NULL_HANDLE;
     struct ReadyMagicaDraw {
         VkBuffer vertexBuffer = VK_NULL_HANDLE;
         VkBuffer indexBuffer = VK_NULL_HANDLE;
@@ -10287,6 +10408,14 @@ void Renderer::renderFrame(
         chunkInstanceBuffer != VK_NULL_HANDLE &&
         chunkIndirectBuffer != VK_NULL_HANDLE &&
         chunkDrawBuffersReady;
+    const uint32_t shadowChunkIndirectDrawCount = static_cast<uint32_t>(shadowChunkIndirectCommands.size());
+    const bool canDrawShadowChunksIndirect =
+        shadowChunkIndirectDrawCount > 0 &&
+        shadowChunkInstanceSliceOpt.has_value() &&
+        shadowChunkIndirectSliceOpt.has_value() &&
+        shadowChunkInstanceBuffer != VK_NULL_HANDLE &&
+        shadowChunkIndirectBuffer != VK_NULL_HANDLE &&
+        chunkDrawBuffersReady;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
         m_debugDrawCallsTotal += drawCount;
@@ -10313,6 +10442,35 @@ void Renderer::renderFrame(
             vkCmdDrawIndexedIndirect(
                 commandBuffer,
                 chunkIndirectBuffer,
+                drawOffset,
+                1,
+                static_cast<uint32_t>(stride)
+            );
+            drawOffset += stride;
+        }
+    };
+    const auto drawShadowChunkIndirect = [&](std::uint32_t& passCounter) {
+        if (!canDrawShadowChunksIndirect) {
+            return;
+        }
+        if (m_supportsMultiDrawIndirect) {
+            countDrawCalls(passCounter, shadowChunkIndirectDrawCount);
+            vkCmdDrawIndexedIndirect(
+                commandBuffer,
+                shadowChunkIndirectBuffer,
+                shadowChunkIndirectSliceOpt->offset,
+                shadowChunkIndirectDrawCount,
+                sizeof(VkDrawIndexedIndirectCommand)
+            );
+            return;
+        }
+        const VkDeviceSize stride = static_cast<VkDeviceSize>(sizeof(VkDrawIndexedIndirectCommand));
+        VkDeviceSize drawOffset = shadowChunkIndirectSliceOpt->offset;
+        for (uint32_t drawIndex = 0; drawIndex < shadowChunkIndirectDrawCount; ++drawIndex) {
+            countDrawCalls(passCounter, 1);
+            vkCmdDrawIndexedIndirect(
+                commandBuffer,
+                shadowChunkIndirectBuffer,
                 drawOffset,
                 1,
                 static_cast<uint32_t>(stride)
@@ -10405,7 +10563,7 @@ void Renderer::renderFrame(
             // Reverse-Z uses GREATER depth tests, so flip bias sign.
             vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
 
-            if (canDrawChunksIndirect) {
+            if (canDrawShadowChunksIndirect) {
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
                 vkCmdBindDescriptorSets(
                     commandBuffer,
@@ -10417,8 +10575,8 @@ void Renderer::renderFrame(
                     1,
                     &mvpDynamicOffset
                 );
-                const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, chunkInstanceBuffer};
-                const VkDeviceSize voxelVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
+                const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, shadowChunkInstanceBuffer};
+                const VkDeviceSize voxelVertexOffsets[2] = {0, shadowChunkInstanceSliceOpt->offset};
                 vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
@@ -10439,7 +10597,7 @@ void Renderer::renderFrame(
                     sizeof(ChunkPushConstants),
                     &chunkPushConstants
                 );
-                drawChunkIndirect(m_debugDrawCallsShadow);
+                drawShadowChunkIndirect(m_debugDrawCallsShadow);
             }
             if (canDrawMagica) {
                 for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
@@ -11411,22 +11569,6 @@ void Renderer::renderFrame(
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    if (m_skyboxPipeline != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyboxPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.data(),
-            1,
-            &mvpDynamicOffset
-        );
-        countDrawCalls(m_debugDrawCallsMain, 1);
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-    }
-
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
     vkCmdBindDescriptorSets(
         commandBuffer,
@@ -11761,6 +11903,23 @@ void Renderer::renderFrame(
                 drawPreviewRange(m_previewRemovePipeline, kPreviewFaceIndexCount, faceFirstIndex, preview.faceX, preview.faceY, preview.faceZ);
             }
         }
+    }
+
+    // Draw skybox last with depth-test so sun/sky only appears where no geometry wrote depth.
+    if (m_skyboxPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyboxPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            boundDescriptorSetCount,
+            boundDescriptorSets.data(),
+            1,
+            &mvpDynamicOffset
+        );
+        countDrawCalls(m_debugDrawCallsMain, 1);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
 
     vkCmdEndRendering(commandBuffer);
