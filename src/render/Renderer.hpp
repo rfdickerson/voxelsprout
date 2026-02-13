@@ -158,18 +158,22 @@ private:
     static constexpr uint32_t kGpuTimestampQueryFrameStart = 0;
     static constexpr uint32_t kGpuTimestampQueryShadowStart = 1;
     static constexpr uint32_t kGpuTimestampQueryShadowEnd = 2;
-    static constexpr uint32_t kGpuTimestampQueryPrepassStart = 3;
-    static constexpr uint32_t kGpuTimestampQueryPrepassEnd = 4;
-    static constexpr uint32_t kGpuTimestampQuerySsaoStart = 5;
-    static constexpr uint32_t kGpuTimestampQuerySsaoEnd = 6;
-    static constexpr uint32_t kGpuTimestampQuerySsaoBlurStart = 7;
-    static constexpr uint32_t kGpuTimestampQuerySsaoBlurEnd = 8;
-    static constexpr uint32_t kGpuTimestampQueryMainStart = 9;
-    static constexpr uint32_t kGpuTimestampQueryMainEnd = 10;
-    static constexpr uint32_t kGpuTimestampQueryPostStart = 11;
-    static constexpr uint32_t kGpuTimestampQueryPostEnd = 12;
-    static constexpr uint32_t kGpuTimestampQueryFrameEnd = 13;
-    static constexpr uint32_t kGpuTimestampQueryCount = 14;
+    static constexpr uint32_t kGpuTimestampQueryGiInjectStart = 3;
+    static constexpr uint32_t kGpuTimestampQueryGiInjectEnd = 4;
+    static constexpr uint32_t kGpuTimestampQueryGiPropagateStart = 5;
+    static constexpr uint32_t kGpuTimestampQueryGiPropagateEnd = 6;
+    static constexpr uint32_t kGpuTimestampQueryPrepassStart = 7;
+    static constexpr uint32_t kGpuTimestampQueryPrepassEnd = 8;
+    static constexpr uint32_t kGpuTimestampQuerySsaoStart = 9;
+    static constexpr uint32_t kGpuTimestampQuerySsaoEnd = 10;
+    static constexpr uint32_t kGpuTimestampQuerySsaoBlurStart = 11;
+    static constexpr uint32_t kGpuTimestampQuerySsaoBlurEnd = 12;
+    static constexpr uint32_t kGpuTimestampQueryMainStart = 13;
+    static constexpr uint32_t kGpuTimestampQueryMainEnd = 14;
+    static constexpr uint32_t kGpuTimestampQueryPostStart = 15;
+    static constexpr uint32_t kGpuTimestampQueryPostEnd = 16;
+    static constexpr uint32_t kGpuTimestampQueryFrameEnd = 17;
+    static constexpr uint32_t kGpuTimestampQueryCount = 18;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
 
     struct FrameResources {
@@ -530,6 +534,8 @@ private:
     float m_debugFrameTimeMs = 0.0f;
     float m_debugGpuFrameTimeMs = 0.0f;
     float m_debugGpuShadowTimeMs = 0.0f;
+    float m_debugGpuGiInjectTimeMs = 0.0f;
+    float m_debugGpuGiPropagateTimeMs = 0.0f;
     float m_debugGpuPrepassTimeMs = 0.0f;
     float m_debugGpuSsaoTimeMs = 0.0f;
     float m_debugGpuSsaoBlurTimeMs = 0.0f;

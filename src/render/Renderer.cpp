@@ -7578,6 +7578,8 @@ void Renderer::buildFrameStatsUi() {
         ImGui::Text("Frame GPU: %.2f ms", m_debugGpuFrameTimeMs);
         if (ImGui::TreeNodeEx("GPU Stages (ms)", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
+            ImGui::Text("GI Inject (compute): %.2f", m_debugGpuGiInjectTimeMs);
+            ImGui::Text("GI Propagate (compute): %.2f", m_debugGpuGiPropagateTimeMs);
             ImGui::Text("Prepass: %.2f", m_debugGpuPrepassTimeMs);
             ImGui::Text("SSAO: %.2f", m_debugGpuSsaoTimeMs);
             ImGui::Text("SSAO Blur: %.2f", m_debugGpuSsaoBlurTimeMs);
@@ -7969,6 +7971,8 @@ void Renderer::readGpuTimestampResults(uint32_t frameIndex) {
 
     m_debugGpuFrameTimeMs = durationMs(kGpuTimestampQueryFrameStart, kGpuTimestampQueryFrameEnd);
     m_debugGpuShadowTimeMs = durationMs(kGpuTimestampQueryShadowStart, kGpuTimestampQueryShadowEnd);
+    m_debugGpuGiInjectTimeMs = durationMs(kGpuTimestampQueryGiInjectStart, kGpuTimestampQueryGiInjectEnd);
+    m_debugGpuGiPropagateTimeMs = durationMs(kGpuTimestampQueryGiPropagateStart, kGpuTimestampQueryGiPropagateEnd);
     m_debugGpuPrepassTimeMs = durationMs(kGpuTimestampQueryPrepassStart, kGpuTimestampQueryPrepassEnd);
     m_debugGpuSsaoTimeMs = durationMs(kGpuTimestampQuerySsaoStart, kGpuTimestampQuerySsaoEnd);
     m_debugGpuSsaoBlurTimeMs = durationMs(kGpuTimestampQuerySsaoBlurStart, kGpuTimestampQuerySsaoBlurEnd);
@@ -9587,6 +9591,7 @@ void Renderer::renderFrame(
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
 
+    bool wroteVoxelGiTimestamps = false;
     if (m_voxelGiComputeAvailable &&
         m_voxelGiInjectPipeline != VK_NULL_HANDLE &&
         m_voxelGiPropagatePipeline != VK_NULL_HANDLE &&
@@ -9595,6 +9600,7 @@ void Renderer::renderFrame(
         m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
         voxelGiOccupancySliceOpt.has_value() &&
         voxelGiOccupancyUploadBuffer != VK_NULL_HANDLE) {
+        wroteVoxelGiTimestamps = true;
         beginDebugLabel(commandBuffer, "Pass: Voxel GI", 0.38f, 0.28f, 0.12f, 1.0f);
 
         transitionImageLayout(
@@ -9666,6 +9672,7 @@ void Renderer::renderFrame(
             VK_IMAGE_ASPECT_COLOR_BIT
         );
 
+        writeGpuTimestampTop(kGpuTimestampQueryGiInjectStart);
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_voxelGiInjectPipeline);
         vkCmdBindDescriptorSets(
             commandBuffer,
@@ -9681,6 +9688,7 @@ void Renderer::renderFrame(
         const uint32_t voxelGiDispatchY = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
         const uint32_t voxelGiDispatchZ = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
         vkCmdDispatch(commandBuffer, voxelGiDispatchX, voxelGiDispatchY, voxelGiDispatchZ);
+        writeGpuTimestampBottom(kGpuTimestampQueryGiInjectEnd);
 
         transitionImageLayout(
             commandBuffer,
@@ -9693,6 +9701,7 @@ void Renderer::renderFrame(
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT
         );
+        writeGpuTimestampTop(kGpuTimestampQueryGiPropagateStart);
         for (uint32_t propagateIteration = 0; propagateIteration < kVoxelGiPropagationIterations; ++propagateIteration) {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_voxelGiPropagatePipeline);
             vkCmdBindDescriptorSets(
@@ -9781,6 +9790,7 @@ void Renderer::renderFrame(
                 );
             }
         }
+        writeGpuTimestampBottom(kGpuTimestampQueryGiPropagateEnd);
 
         transitionImageLayout(
             commandBuffer,
@@ -9872,6 +9882,12 @@ void Renderer::renderFrame(
             VK_IMAGE_ASPECT_COLOR_BIT
         );
         m_voxelGiInitialized = true;
+    }
+    if (!wroteVoxelGiTimestamps) {
+        writeGpuTimestampTop(kGpuTimestampQueryGiInjectStart);
+        writeGpuTimestampBottom(kGpuTimestampQueryGiInjectEnd);
+        writeGpuTimestampTop(kGpuTimestampQueryGiPropagateStart);
+        writeGpuTimestampBottom(kGpuTimestampQueryGiPropagateEnd);
     }
 
     const VkExtent2D aoExtent = {
@@ -11646,6 +11662,8 @@ void Renderer::shutdown() {
     m_gpuTimestampQueryPools.fill(VK_NULL_HANDLE);
     m_debugGpuFrameTimeMs = 0.0f;
     m_debugGpuShadowTimeMs = 0.0f;
+    m_debugGpuGiInjectTimeMs = 0.0f;
+    m_debugGpuGiPropagateTimeMs = 0.0f;
     m_debugGpuPrepassTimeMs = 0.0f;
     m_debugGpuSsaoTimeMs = 0.0f;
     m_debugGpuSsaoBlurTimeMs = 0.0f;
