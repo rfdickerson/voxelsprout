@@ -460,6 +460,7 @@ private:
     VkPipeline m_grassBillboardPipeline = VK_NULL_HANDLE;
     VkPipeline m_voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline m_grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline m_magicaPipeline = VK_NULL_HANDLE;
     VkPipeline m_ssaoPipeline = VK_NULL_HANDLE;
     VkPipeline m_ssaoBlurPipeline = VK_NULL_HANDLE;
