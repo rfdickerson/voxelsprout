@@ -178,6 +178,7 @@ private:
     bool createDepthTargets();
     bool createAoTargets();
     bool createShadowResources();
+    bool createVoxelGiResources();
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
     bool createMagicaPipeline();
@@ -210,6 +211,7 @@ private:
     void destroyAoTargets();
     void destroyGpuTimestampResources();
     void destroyShadowResources();
+    void destroyVoxelGiResources();
     void destroyFrameResources();
     void destroyChunkBuffers();
     void destroyMagicaBuffers();
@@ -311,6 +313,8 @@ private:
     VkFormat m_shadowDepthFormat = VK_FORMAT_UNDEFINED;
     VkFormat m_normalDepthFormat = VK_FORMAT_UNDEFINED;
     VkFormat m_ssaoFormat = VK_FORMAT_UNDEFINED;
+    VkFormat m_voxelGiFormat = VK_FORMAT_UNDEFINED;
+    VkFormat m_voxelGiOccupancyFormat = VK_FORMAT_UNDEFINED;
     std::vector<VkImage> m_swapchainImages;
     std::vector<VkImageView> m_swapchainImageViews;
     std::vector<bool> m_swapchainImageInitialized;
@@ -359,10 +363,23 @@ private:
     VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
     VkSampler m_shadowDepthSampler = VK_NULL_HANDLE;
     bool m_shadowDepthInitialized = false;
+    std::array<VkImage, 2> m_voxelGiImages{};
+    std::array<VkImageView, 2> m_voxelGiImageViews{};
+    std::array<VkDeviceMemory, 2> m_voxelGiImageMemories{};
+    VkSampler m_voxelGiSampler = VK_NULL_HANDLE;
+    bool m_voxelGiInitialized = false;
+    bool m_voxelGiComputeAvailable = false;
+    VkImage m_voxelGiOccupancyImage = VK_NULL_HANDLE;
+    VkImageView m_voxelGiOccupancyImageView = VK_NULL_HANDLE;
+    VkDeviceMemory m_voxelGiOccupancyMemory = VK_NULL_HANDLE;
+    VkSampler m_voxelGiOccupancySampler = VK_NULL_HANDLE;
+    bool m_voxelGiOccupancyInitialized = false;
 #if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;
+    std::array<VmaAllocation, 2> m_voxelGiImageAllocations{};
+    VmaAllocation m_voxelGiOccupancyAllocation = VK_NULL_HANDLE;
 #endif
     VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;
     std::vector<uint64_t> m_swapchainImageTimelineValues;
@@ -390,11 +407,17 @@ private:
     VkPipeline m_ssaoBlurPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewAddPipeline = VK_NULL_HANDLE;
     VkPipeline m_previewRemovePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_voxelGiPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_voxelGiInjectPipeline = VK_NULL_HANDLE;
+    VkPipeline m_voxelGiPropagatePipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_bindlessDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_voxelGiDescriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorPool m_bindlessDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorPool m_voxelGiDescriptorPool = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
+    std::array<VkDescriptorSet, kMaxFramesInFlight> m_voxelGiDescriptorSets{};
     VkDescriptorSet m_bindlessDescriptorSet = VK_NULL_HANDLE;
     bool m_supportsWireframePreview = false;
     bool m_supportsSamplerAnisotropy = false;

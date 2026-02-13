@@ -7,6 +7,9 @@ import sh_lighting;
 [[vk::binding(4, 0)]]
 Sampler2DShadow shadowMap;
 
+[[vk::binding(9, 0)]]
+Sampler3D<float4> voxelGiVolume;
+
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
 
@@ -102,6 +105,22 @@ float3 sampleMaterialAlbedo(uint material, uint face, float3 worldPosition)
     const uint tileY = tileIndex / tilesX;
     const float2 atlasUv = (float2(float(tileX), float(tileY)) + uv) / float2(float(tilesX), float(tilesY));
     return bindlessTextures[kBindlessTextureIndexDiffuseAtlas].Sample(atlasUv).xyz;
+}
+
+float3 sampleVoxelGi(float3 worldPosition, float3 normal)
+{
+    const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
+    const float3 gridOrigin = camera.voxelGiGridOriginCellSize.xyz;
+    const float3 gridExtent = max(camera.voxelGiGridExtentStrength.xyz, float3(cellSize, cellSize, cellSize));
+    const float3 sampleWorld = worldPosition + (normal * (cellSize * 0.5));
+    const float3 uvw = (sampleWorld - gridOrigin) / gridExtent;
+    if (any(uvw < float3(0.0, 0.0, 0.0)) || any(uvw > float3(1.0, 1.0, 1.0)))
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+
+    const float3 giRadiance = voxelGiVolume.SampleLevel(uvw, 0.0).xyz;
+    return giRadiance * max(camera.voxelGiGridExtentStrength.w, 0.0);
 }
 
 float3 proceduralSkyNoSunDisk(float3 direction)
@@ -391,9 +410,10 @@ float4 main(FragmentInput input) : SV_Target0
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = lerp(1.0, clamp(input.inVertexAo, 0.0, 1.0), vertexAoEnable);
     const float3 ambient = selectAmbient(normal, vertexAo);
+    const float3 voxelGi = sampleVoxelGi(input.inWorldPosition, normal) * vertexAo;
     const float3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);
-    float3 lighting = ambient + (directSun * directShadowFactor);
+    float3 lighting = ambient + voxelGi + (directSun * directShadowFactor);
 
     const float3 shaded = baseColor * lighting;
     const float3 fogged = applyAtmosphericFog(shaded, input.inWorldPosition, viewDepth, sunDirection);
