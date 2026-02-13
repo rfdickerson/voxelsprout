@@ -75,6 +75,8 @@ constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
 constexpr uint32_t kVoxelGiPropagationIterations = 4u;
 constexpr uint32_t kHdrResolveBloomMipCount = 6u;
+constexpr uint32_t kAutoExposureHistogramBins = 64u;
+constexpr uint32_t kAutoExposureWorkgroupSize = 16u;
 constexpr float kVoxelGiCellSize = 1.0f;
 constexpr float kPipeTransferHalfExtent = 0.58f;
 constexpr float kPipeMinRadius = 0.02f;
@@ -128,6 +130,7 @@ struct alignas(16) CameraUniform {
     float skyConfig2[4];
     float skyConfig3[4];
     float skyConfig4[4];
+    float skyConfig5[4];
     float voxelBaseColorPalette[16][4];
     float voxelGiGridOriginCellSize[4];
     float voxelGiGridExtentStrength[4];
@@ -140,6 +143,36 @@ struct alignas(16) ChunkPushConstants {
 
 struct alignas(16) ChunkInstanceData {
     float chunkOffset[4];
+};
+
+struct alignas(16) AutoExposureHistogramPushConstants {
+    uint32_t width = 1u;
+    uint32_t height = 1u;
+    uint32_t totalPixels = 1u;
+    uint32_t binCount = kAutoExposureHistogramBins;
+    float minLogLuminance = -10.0f;
+    float maxLogLuminance = 4.0f;
+    float _pad0 = 0.0f;
+    float _pad1 = 0.0f;
+};
+
+struct alignas(16) AutoExposureUpdatePushConstants {
+    uint32_t totalPixels = 1u;
+    uint32_t binCount = kAutoExposureHistogramBins;
+    uint32_t resetHistory = 1u;
+    uint32_t _pad0 = 0u;
+    float minLogLuminance = -10.0f;
+    float maxLogLuminance = 4.0f;
+    float lowPercentile = 0.5f;
+    float highPercentile = 0.98f;
+    float keyValue = 0.18f;
+    float minExposure = 0.25f;
+    float maxExposure = 2.2f;
+    float adaptUpRate = 3.0f;
+    float adaptDownRate = 1.4f;
+    float deltaTimeSeconds = 0.016f;
+    float _pad1 = 0.0f;
+    float _pad2 = 0.0f;
 };
 
 struct PipeMeshData {
@@ -849,6 +882,35 @@ void transitionImageLayout(
     vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
 }
 
+void transitionBufferAccess(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkDeviceSize size,
+    VkPipelineStageFlags2 srcStageMask,
+    VkAccessFlags2 srcAccessMask,
+    VkPipelineStageFlags2 dstStageMask,
+    VkAccessFlags2 dstAccessMask
+) {
+    VkBufferMemoryBarrier2 bufferBarrier{};
+    bufferBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+    bufferBarrier.srcStageMask = srcStageMask;
+    bufferBarrier.srcAccessMask = srcAccessMask;
+    bufferBarrier.dstStageMask = dstStageMask;
+    bufferBarrier.dstAccessMask = dstAccessMask;
+    bufferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufferBarrier.buffer = buffer;
+    bufferBarrier.offset = offset;
+    bufferBarrier.size = size;
+
+    VkDependencyInfo dependencyInfo{};
+    dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependencyInfo.bufferMemoryBarrierCount = 1;
+    dependencyInfo.pBufferMemoryBarriers = &bufferBarrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+}
+
 VkFormat findSupportedDepthFormat(VkPhysicalDevice physicalDevice) {
     constexpr std::array<VkFormat, 3> kDepthCandidates = {
         VK_FORMAT_D32_SFLOAT,
@@ -1471,6 +1533,11 @@ bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
     }
     if (!runStep("createVoxelGiResources", [&] { return createVoxelGiResources(); })) {
         VOX_LOGE("render") << "init failed at createVoxelGiResources\n";
+        shutdown();
+        return false;
+    }
+    if (!runStep("createAutoExposureResources", [&] { return createAutoExposureResources(); })) {
+        VOX_LOGE("render") << "init failed at createAutoExposureResources\n";
         shutdown();
         return false;
     }
@@ -3966,6 +4033,283 @@ bool Renderer::createVoxelGiResources() {
     return true;
 }
 
+bool Renderer::createAutoExposureResources() {
+    const float initialExposure = std::clamp(m_skyDebugSettings.manualExposure, 0.05f, 8.0f);
+    if (m_autoExposureStateBufferHandle == kInvalidBufferHandle) {
+        const std::array<float, 4> initialState = {initialExposure, initialExposure, 1.0f, 0.0f};
+        BufferCreateDesc exposureStateBufferDesc{};
+        exposureStateBufferDesc.size = sizeof(initialState);
+        exposureStateBufferDesc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        exposureStateBufferDesc.memoryProperties =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        exposureStateBufferDesc.initialData = initialState.data();
+        m_autoExposureStateBufferHandle = m_bufferAllocator.createBuffer(exposureStateBufferDesc);
+        if (m_autoExposureStateBufferHandle == kInvalidBufferHandle) {
+            VOX_LOGE("render") << "failed to create auto exposure state buffer";
+            destroyAutoExposureResources();
+            return false;
+        }
+        const VkBuffer autoExposureStateBuffer = m_bufferAllocator.getBuffer(m_autoExposureStateBufferHandle);
+        setObjectName(
+            VK_OBJECT_TYPE_BUFFER,
+            vkHandleToUint64(autoExposureStateBuffer),
+            "autoExposure.stateBuffer"
+        );
+    }
+
+    if (m_autoExposureHistogramBufferHandle == kInvalidBufferHandle) {
+        BufferCreateDesc histogramBufferDesc{};
+        histogramBufferDesc.size = static_cast<VkDeviceSize>(kAutoExposureHistogramBins * sizeof(uint32_t));
+        histogramBufferDesc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        histogramBufferDesc.memoryProperties =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        m_autoExposureHistogramBufferHandle = m_bufferAllocator.createBuffer(histogramBufferDesc);
+        if (m_autoExposureHistogramBufferHandle == kInvalidBufferHandle) {
+            VOX_LOGE("render") << "failed to create auto exposure histogram buffer";
+            destroyAutoExposureResources();
+            return false;
+        }
+        const VkBuffer autoExposureHistogramBuffer = m_bufferAllocator.getBuffer(m_autoExposureHistogramBufferHandle);
+        setObjectName(
+            VK_OBJECT_TYPE_BUFFER,
+            vkHandleToUint64(autoExposureHistogramBuffer),
+            "autoExposure.histogramBuffer"
+        );
+    }
+
+    constexpr const char* kHistogramShaderPath = "../src/render/shaders/auto_exposure_histogram.comp.slang.spv";
+    constexpr const char* kUpdateShaderPath = "../src/render/shaders/auto_exposure_update.comp.slang.spv";
+    const bool hasHistogramShader = readBinaryFile(kHistogramShaderPath).has_value();
+    const bool hasUpdateShader = readBinaryFile(kUpdateShaderPath).has_value();
+    if (!hasHistogramShader || !hasUpdateShader) {
+        VOX_LOGI("render")
+            << "auto exposure compute shaders not found; using manual exposure fallback (expected: "
+            << kHistogramShaderPath << ", " << kUpdateShaderPath << ")\n";
+        m_autoExposureComputeAvailable = false;
+        m_autoExposureHistoryValid = false;
+        return true;
+    }
+
+    if (m_autoExposureDescriptorSetLayout == VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding hdrSceneBinding{};
+        hdrSceneBinding.binding = 0;
+        hdrSceneBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        hdrSceneBinding.descriptorCount = 1;
+        hdrSceneBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding histogramBinding{};
+        histogramBinding.binding = 1;
+        histogramBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        histogramBinding.descriptorCount = 1;
+        histogramBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding exposureStateBinding{};
+        exposureStateBinding.binding = 2;
+        exposureStateBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        exposureStateBinding.descriptorCount = 1;
+        exposureStateBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+            hdrSceneBinding,
+            histogramBinding,
+            exposureStateBinding
+        };
+
+        VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
+        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutCreateInfo.pBindings = bindings.data();
+        const VkResult layoutResult = vkCreateDescriptorSetLayout(
+            m_device,
+            &layoutCreateInfo,
+            nullptr,
+            &m_autoExposureDescriptorSetLayout
+        );
+        if (layoutResult != VK_SUCCESS) {
+            logVkFailure("vkCreateDescriptorSetLayout(autoExposure)", layoutResult);
+            destroyAutoExposureResources();
+            return false;
+        }
+        setObjectName(
+            VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+            vkHandleToUint64(m_autoExposureDescriptorSetLayout),
+            "renderer.descriptorSetLayout.autoExposure"
+        );
+    }
+
+    if (m_autoExposureDescriptorPool == VK_NULL_HANDLE) {
+        const std::array<VkDescriptorPoolSize, 2> poolSizes = {
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kMaxFramesInFlight}
+        };
+        VkDescriptorPoolCreateInfo poolCreateInfo{};
+        poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolCreateInfo.maxSets = kMaxFramesInFlight;
+        poolCreateInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+        poolCreateInfo.pPoolSizes = poolSizes.data();
+        const VkResult poolResult =
+            vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &m_autoExposureDescriptorPool);
+        if (poolResult != VK_SUCCESS) {
+            logVkFailure("vkCreateDescriptorPool(autoExposure)", poolResult);
+            destroyAutoExposureResources();
+            return false;
+        }
+        setObjectName(
+            VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+            vkHandleToUint64(m_autoExposureDescriptorPool),
+            "renderer.descriptorPool.autoExposure"
+        );
+    }
+
+    std::array<VkDescriptorSetLayout, kMaxFramesInFlight> setLayouts{};
+    setLayouts.fill(m_autoExposureDescriptorSetLayout);
+    VkDescriptorSetAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo.descriptorPool = m_autoExposureDescriptorPool;
+    allocateInfo.descriptorSetCount = static_cast<uint32_t>(setLayouts.size());
+    allocateInfo.pSetLayouts = setLayouts.data();
+    const VkResult allocateResult =
+        vkAllocateDescriptorSets(m_device, &allocateInfo, m_autoExposureDescriptorSets.data());
+    if (allocateResult != VK_SUCCESS) {
+        logVkFailure("vkAllocateDescriptorSets(autoExposure)", allocateResult);
+        destroyAutoExposureResources();
+        return false;
+    }
+    for (std::size_t frameIndex = 0; frameIndex < m_autoExposureDescriptorSets.size(); ++frameIndex) {
+        const std::string setName = "renderer.descriptorSet.autoExposure.frame" + std::to_string(frameIndex);
+        setObjectName(
+            VK_OBJECT_TYPE_DESCRIPTOR_SET,
+            vkHandleToUint64(m_autoExposureDescriptorSets[frameIndex]),
+            setName.c_str()
+        );
+    }
+
+    VkShaderModule histogramShaderModule = VK_NULL_HANDLE;
+    VkShaderModule updateShaderModule = VK_NULL_HANDLE;
+    if (!createShaderModuleFromFile(
+            m_device,
+            kHistogramShaderPath,
+            "auto_exposure_histogram.comp",
+            histogramShaderModule
+        )) {
+        destroyAutoExposureResources();
+        return false;
+    }
+    if (!createShaderModuleFromFile(
+            m_device,
+            kUpdateShaderPath,
+            "auto_exposure_update.comp",
+            updateShaderModule
+        )) {
+        vkDestroyShaderModule(m_device, histogramShaderModule, nullptr);
+        destroyAutoExposureResources();
+        return false;
+    }
+
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = static_cast<uint32_t>(std::max(
+        sizeof(AutoExposureHistogramPushConstants),
+        sizeof(AutoExposureUpdatePushConstants)
+    ));
+
+    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
+    pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutCreateInfo.setLayoutCount = 1;
+    pipelineLayoutCreateInfo.pSetLayouts = &m_autoExposureDescriptorSetLayout;
+    pipelineLayoutCreateInfo.pushConstantRangeCount = 1;
+    pipelineLayoutCreateInfo.pPushConstantRanges = &pushConstantRange;
+    const VkResult pipelineLayoutResult = vkCreatePipelineLayout(
+        m_device,
+        &pipelineLayoutCreateInfo,
+        nullptr,
+        &m_autoExposurePipelineLayout
+    );
+    if (pipelineLayoutResult != VK_SUCCESS) {
+        logVkFailure("vkCreatePipelineLayout(autoExposure)", pipelineLayoutResult);
+        vkDestroyShaderModule(m_device, updateShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, histogramShaderModule, nullptr);
+        destroyAutoExposureResources();
+        return false;
+    }
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE_LAYOUT,
+        vkHandleToUint64(m_autoExposurePipelineLayout),
+        "renderer.pipelineLayout.autoExposure"
+    );
+
+    VkPipelineShaderStageCreateInfo histogramStage{};
+    histogramStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    histogramStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    histogramStage.module = histogramShaderModule;
+    histogramStage.pName = "main";
+
+    VkComputePipelineCreateInfo histogramPipelineCreateInfo{};
+    histogramPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    histogramPipelineCreateInfo.stage = histogramStage;
+    histogramPipelineCreateInfo.layout = m_autoExposurePipelineLayout;
+    const VkResult histogramPipelineResult = vkCreateComputePipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &histogramPipelineCreateInfo,
+        nullptr,
+        &m_autoExposureHistogramPipeline
+    );
+    if (histogramPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateComputePipelines(autoExposureHistogram)", histogramPipelineResult);
+        vkDestroyShaderModule(m_device, updateShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, histogramShaderModule, nullptr);
+        destroyAutoExposureResources();
+        return false;
+    }
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_autoExposureHistogramPipeline),
+        "pipeline.autoExposure.histogram"
+    );
+
+    VkPipelineShaderStageCreateInfo updateStage{};
+    updateStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    updateStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    updateStage.module = updateShaderModule;
+    updateStage.pName = "main";
+
+    VkComputePipelineCreateInfo updatePipelineCreateInfo{};
+    updatePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    updatePipelineCreateInfo.stage = updateStage;
+    updatePipelineCreateInfo.layout = m_autoExposurePipelineLayout;
+    const VkResult updatePipelineResult = vkCreateComputePipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &updatePipelineCreateInfo,
+        nullptr,
+        &m_autoExposureUpdatePipeline
+    );
+
+    vkDestroyShaderModule(m_device, updateShaderModule, nullptr);
+    vkDestroyShaderModule(m_device, histogramShaderModule, nullptr);
+    if (updatePipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateComputePipelines(autoExposureUpdate)", updatePipelineResult);
+        destroyAutoExposureResources();
+        return false;
+    }
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_autoExposureUpdatePipeline),
+        "pipeline.autoExposure.update"
+    );
+
+    m_autoExposureComputeAvailable = true;
+    m_autoExposureHistoryValid = false;
+    VOX_LOGI("render")
+        << "auto exposure resources ready: bins=" << kAutoExposureHistogramBins
+        << ", compute=enabled\n";
+    return true;
+}
+
 bool Renderer::createSwapchain() {
     const SwapchainSupport support = querySwapchainSupport(m_physicalDevice, m_surface);
     if (support.formats.empty() || support.presentModes.empty()) {
@@ -4680,6 +5024,12 @@ bool Renderer::createDescriptorResources() {
         diffuseTextureBinding.descriptorCount = 1;
         diffuseTextureBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+        VkDescriptorSetLayoutBinding exposureStateBinding{};
+        exposureStateBinding.binding = 2;
+        exposureStateBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        exposureStateBinding.descriptorCount = 1;
+        exposureStateBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
         VkDescriptorSetLayoutBinding hdrSceneBinding{};
         hdrSceneBinding.binding = 3;
         hdrSceneBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -4716,9 +5066,10 @@ bool Renderer::createDescriptorResources() {
         voxelGiBinding.descriptorCount = 1;
         voxelGiBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 8> bindings = {
+        const std::array<VkDescriptorSetLayoutBinding, 9> bindings = {
             mvpBinding,
             diffuseTextureBinding,
+            exposureStateBinding,
             hdrSceneBinding,
             shadowMapBinding,
             normalDepthBinding,
@@ -4746,7 +5097,7 @@ bool Renderer::createDescriptorResources() {
     }
 
     if (m_descriptorPool == VK_NULL_HANDLE) {
-        const std::array<VkDescriptorPoolSize, 2> poolSizes = {
+        const std::array<VkDescriptorPoolSize, 3> poolSizes = {
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                 kMaxFramesInFlight
@@ -4754,6 +5105,10 @@ bool Renderer::createDescriptorResources() {
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 7 * kMaxFramesInFlight
+            },
+            VkDescriptorPoolSize{
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                kMaxFramesInFlight
             }
         };
 
@@ -7928,6 +8283,22 @@ void Renderer::buildSunDebugUi() {
     ImGui::SliderFloat("Bloom Sun Boost", &m_skyDebugSettings.bloomSunFacingBoost, 0.0f, 0.40f, "%.3f");
     ImGui::TextDisabled("Bloom is hidden in GI/SSAO debug visualization modes.");
     ImGui::Separator();
+    ImGui::Text("Eye Adaptation");
+    ImGui::Checkbox("Auto Exposure", &m_skyDebugSettings.autoExposureEnabled);
+    ImGui::SliderFloat("Manual Exposure", &m_skyDebugSettings.manualExposure, 0.05f, 4.0f, "%.3f");
+    if (m_skyDebugSettings.autoExposureEnabled) {
+        ImGui::SliderFloat("AE Key Value", &m_skyDebugSettings.autoExposureKeyValue, 0.05f, 0.50f, "%.3f");
+        ImGui::SliderFloat("AE Min Exposure", &m_skyDebugSettings.autoExposureMin, 0.05f, 2.50f, "%.3f");
+        ImGui::SliderFloat("AE Max Exposure", &m_skyDebugSettings.autoExposureMax, 0.20f, 8.00f, "%.3f");
+        ImGui::SliderFloat("AE Adapt Up", &m_skyDebugSettings.autoExposureAdaptUp, 0.10f, 12.00f, "%.2f");
+        ImGui::SliderFloat("AE Adapt Down", &m_skyDebugSettings.autoExposureAdaptDown, 0.10f, 12.00f, "%.2f");
+        ImGui::SliderFloat("AE Low Percentile", &m_skyDebugSettings.autoExposureLowPercentile, 0.00f, 0.95f, "%.2f");
+        ImGui::SliderFloat("AE High Percentile", &m_skyDebugSettings.autoExposureHighPercentile, 0.05f, 1.00f, "%.2f");
+    }
+    if (!m_autoExposureComputeAvailable) {
+        ImGui::TextDisabled("Auto exposure compute unavailable; manual exposure is active.");
+    }
+    ImGui::Separator();
     ImGui::Text("Volumetric Fog");
     ImGui::SliderFloat("Fog Density", &m_skyDebugSettings.volumetricFogDensity, 0.0f, 0.03f, "%.4f");
     ImGui::SliderFloat("Fog Height Falloff", &m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 0.30f, "%.3f");
@@ -8706,6 +9077,11 @@ void Renderer::renderFrame(
     mvpUniform.skyConfig4[1] = std::clamp(m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 1.0f);
     mvpUniform.skyConfig4[2] = m_skyDebugSettings.volumetricFogBaseHeight;
     mvpUniform.skyConfig4[3] = std::clamp(m_skyDebugSettings.volumetricSunScattering, 0.0f, 8.0f);
+    const bool autoExposureEnabled = m_skyDebugSettings.autoExposureEnabled && m_autoExposureComputeAvailable;
+    mvpUniform.skyConfig5[0] = autoExposureEnabled ? 1.0f : 0.0f;
+    mvpUniform.skyConfig5[1] = std::clamp(m_skyDebugSettings.manualExposure, 0.05f, 8.0f);
+    mvpUniform.skyConfig5[2] = 0.0f;
+    mvpUniform.skyConfig5[3] = 0.0f;
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
     const float voxelGiOriginX = std::floor((camera.x - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
@@ -8803,6 +9179,12 @@ void Renderer::renderFrame(
         return;
     }
     const uint32_t mvpDynamicOffset = static_cast<uint32_t>(mvpSliceOpt->offset);
+    const VkBuffer autoExposureStateBuffer = m_bufferAllocator.getBuffer(m_autoExposureStateBufferHandle);
+    const VkBuffer autoExposureHistogramBuffer = m_bufferAllocator.getBuffer(m_autoExposureHistogramBufferHandle);
+    if (autoExposureStateBuffer == VK_NULL_HANDLE) {
+        VOX_LOGE("render") << "auto exposure state buffer unavailable";
+        return;
+    }
 
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -8847,7 +9229,12 @@ void Renderer::renderFrame(
     voxelGiVolumeImageInfo.imageView = m_voxelGiImageViews[1];
     voxelGiVolumeImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    std::array<VkWriteDescriptorSet, 8> writes{};
+    VkDescriptorBufferInfo autoExposureStateBufferInfo{};
+    autoExposureStateBufferInfo.buffer = autoExposureStateBuffer;
+    autoExposureStateBufferInfo.offset = 0;
+    autoExposureStateBufferInfo.range = sizeof(float) * 4u;
+
+    std::array<VkWriteDescriptorSet, 9> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -8864,45 +9251,52 @@ void Renderer::renderFrame(
 
     writes[2] = write;
     writes[2].dstSet = m_descriptorSets[m_currentFrame];
-    writes[2].dstBinding = 3;
+    writes[2].dstBinding = 2;
     writes[2].descriptorCount = 1;
-    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[2].pImageInfo = &hdrSceneImageInfo;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[2].pBufferInfo = &autoExposureStateBufferInfo;
 
     writes[3] = write;
     writes[3].dstSet = m_descriptorSets[m_currentFrame];
-    writes[3].dstBinding = 4;
+    writes[3].dstBinding = 3;
     writes[3].descriptorCount = 1;
     writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[3].pImageInfo = &shadowMapImageInfo;
+    writes[3].pImageInfo = &hdrSceneImageInfo;
 
     writes[4] = write;
     writes[4].dstSet = m_descriptorSets[m_currentFrame];
-    writes[4].dstBinding = 6;
+    writes[4].dstBinding = 4;
     writes[4].descriptorCount = 1;
     writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[4].pImageInfo = &normalDepthImageInfo;
+    writes[4].pImageInfo = &shadowMapImageInfo;
 
     writes[5] = write;
     writes[5].dstSet = m_descriptorSets[m_currentFrame];
-    writes[5].dstBinding = 7;
+    writes[5].dstBinding = 6;
     writes[5].descriptorCount = 1;
     writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[5].pImageInfo = &ssaoBlurImageInfo;
+    writes[5].pImageInfo = &normalDepthImageInfo;
 
     writes[6] = write;
     writes[6].dstSet = m_descriptorSets[m_currentFrame];
-    writes[6].dstBinding = 8;
+    writes[6].dstBinding = 7;
     writes[6].descriptorCount = 1;
     writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[6].pImageInfo = &ssaoRawImageInfo;
+    writes[6].pImageInfo = &ssaoBlurImageInfo;
 
     writes[7] = write;
     writes[7].dstSet = m_descriptorSets[m_currentFrame];
-    writes[7].dstBinding = 9;
+    writes[7].dstBinding = 8;
     writes[7].descriptorCount = 1;
     writes[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[7].pImageInfo = &voxelGiVolumeImageInfo;
+    writes[7].pImageInfo = &ssaoRawImageInfo;
+
+    writes[8] = write;
+    writes[8].dstSet = m_descriptorSets[m_currentFrame];
+    writes[8].dstBinding = 9;
+    writes[8].descriptorCount = 1;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[8].pImageInfo = &voxelGiVolumeImageInfo;
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -8974,6 +9368,51 @@ void Renderer::renderFrame(
             m_device,
             static_cast<uint32_t>(voxelGiWrites.size()),
             voxelGiWrites.data(),
+            0,
+            nullptr
+        );
+    }
+
+    if (m_autoExposureComputeAvailable &&
+        m_autoExposureDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
+        autoExposureHistogramBuffer != VK_NULL_HANDLE &&
+        autoExposureStateBuffer != VK_NULL_HANDLE) {
+        VkDescriptorBufferInfo autoExposureHistogramBufferInfo{};
+        autoExposureHistogramBufferInfo.buffer = autoExposureHistogramBuffer;
+        autoExposureHistogramBufferInfo.offset = 0;
+        autoExposureHistogramBufferInfo.range = static_cast<VkDeviceSize>(kAutoExposureHistogramBins * sizeof(uint32_t));
+
+        VkDescriptorBufferInfo autoExposureStateComputeBufferInfo{};
+        autoExposureStateComputeBufferInfo.buffer = autoExposureStateBuffer;
+        autoExposureStateComputeBufferInfo.offset = 0;
+        autoExposureStateComputeBufferInfo.range = sizeof(float) * 4u;
+
+        std::array<VkWriteDescriptorSet, 3> autoExposureWrites{};
+        autoExposureWrites[0] = write;
+        autoExposureWrites[0].dstSet = m_autoExposureDescriptorSets[m_currentFrame];
+        autoExposureWrites[0].dstBinding = 0;
+        autoExposureWrites[0].descriptorCount = 1;
+        autoExposureWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        autoExposureWrites[0].pImageInfo = &hdrSceneImageInfo;
+
+        autoExposureWrites[1] = write;
+        autoExposureWrites[1].dstSet = m_autoExposureDescriptorSets[m_currentFrame];
+        autoExposureWrites[1].dstBinding = 1;
+        autoExposureWrites[1].descriptorCount = 1;
+        autoExposureWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        autoExposureWrites[1].pBufferInfo = &autoExposureHistogramBufferInfo;
+
+        autoExposureWrites[2] = write;
+        autoExposureWrites[2].dstSet = m_autoExposureDescriptorSets[m_currentFrame];
+        autoExposureWrites[2].dstBinding = 2;
+        autoExposureWrites[2].descriptorCount = 1;
+        autoExposureWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        autoExposureWrites[2].pBufferInfo = &autoExposureStateComputeBufferInfo;
+
+        vkUpdateDescriptorSets(
+            m_device,
+            static_cast<uint32_t>(autoExposureWrites.size()),
+            autoExposureWrites.data(),
             0,
             nullptr
         );
@@ -10989,6 +11428,152 @@ void Renderer::renderFrame(
         );
     }
 
+    if (autoExposureEnabled &&
+        m_autoExposureComputeAvailable &&
+        m_autoExposurePipelineLayout != VK_NULL_HANDLE &&
+        m_autoExposureHistogramPipeline != VK_NULL_HANDLE &&
+        m_autoExposureUpdatePipeline != VK_NULL_HANDLE &&
+        m_autoExposureDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
+        autoExposureHistogramBuffer != VK_NULL_HANDLE &&
+        autoExposureStateBuffer != VK_NULL_HANDLE) {
+        beginDebugLabel(commandBuffer, "Pass: Auto Exposure", 0.30f, 0.30f, 0.20f, 1.0f);
+        const VkPipelineStageFlags2 exposureSrcStage =
+            m_autoExposureHistoryValid ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE;
+        const VkAccessFlags2 exposureSrcAccess =
+            m_autoExposureHistoryValid ? VK_ACCESS_2_SHADER_STORAGE_READ_BIT : VK_ACCESS_2_NONE;
+        transitionBufferAccess(
+            commandBuffer,
+            autoExposureStateBuffer,
+            0,
+            sizeof(float) * 4u,
+            exposureSrcStage,
+            exposureSrcAccess,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
+        );
+        vkCmdFillBuffer(
+            commandBuffer,
+            autoExposureHistogramBuffer,
+            0,
+            static_cast<VkDeviceSize>(kAutoExposureHistogramBins * sizeof(uint32_t)),
+            0u
+        );
+        transitionBufferAccess(
+            commandBuffer,
+            autoExposureHistogramBuffer,
+            0,
+            static_cast<VkDeviceSize>(kAutoExposureHistogramBins * sizeof(uint32_t)),
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
+        );
+
+        const uint32_t hdrWidth = std::max(1u, m_swapchainExtent.width);
+        const uint32_t hdrHeight = std::max(1u, m_swapchainExtent.height);
+        AutoExposureHistogramPushConstants histogramPushConstants{};
+        histogramPushConstants.width = hdrWidth;
+        histogramPushConstants.height = hdrHeight;
+        histogramPushConstants.totalPixels = hdrWidth * hdrHeight;
+        histogramPushConstants.binCount = kAutoExposureHistogramBins;
+        histogramPushConstants.minLogLuminance = -10.0f;
+        histogramPushConstants.maxLogLuminance = 4.0f;
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_autoExposureHistogramPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            m_autoExposurePipelineLayout,
+            0,
+            1,
+            &m_autoExposureDescriptorSets[m_currentFrame],
+            0,
+            nullptr
+        );
+        vkCmdPushConstants(
+            commandBuffer,
+            m_autoExposurePipelineLayout,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            sizeof(AutoExposureHistogramPushConstants),
+            &histogramPushConstants
+        );
+        const uint32_t histogramDispatchX = (hdrWidth + (kAutoExposureWorkgroupSize - 1u)) / kAutoExposureWorkgroupSize;
+        const uint32_t histogramDispatchY = (hdrHeight + (kAutoExposureWorkgroupSize - 1u)) / kAutoExposureWorkgroupSize;
+        vkCmdDispatch(commandBuffer, histogramDispatchX, histogramDispatchY, 1u);
+
+        transitionBufferAccess(
+            commandBuffer,
+            autoExposureHistogramBuffer,
+            0,
+            static_cast<VkDeviceSize>(kAutoExposureHistogramBins * sizeof(uint32_t)),
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+        );
+
+        AutoExposureUpdatePushConstants updatePushConstants{};
+        updatePushConstants.totalPixels = histogramPushConstants.totalPixels;
+        updatePushConstants.binCount = kAutoExposureHistogramBins;
+        updatePushConstants.resetHistory = m_autoExposureHistoryValid ? 0u : 1u;
+        updatePushConstants.minLogLuminance = histogramPushConstants.minLogLuminance;
+        updatePushConstants.maxLogLuminance = histogramPushConstants.maxLogLuminance;
+        const float clampedLowPercentile = std::clamp(m_skyDebugSettings.autoExposureLowPercentile, 0.0f, 0.98f);
+        const float clampedHighPercentile = std::clamp(
+            m_skyDebugSettings.autoExposureHighPercentile,
+            clampedLowPercentile + 0.01f,
+            1.0f
+        );
+        updatePushConstants.lowPercentile = clampedLowPercentile;
+        updatePushConstants.highPercentile = clampedHighPercentile;
+        updatePushConstants.keyValue = std::clamp(m_skyDebugSettings.autoExposureKeyValue, 0.01f, 1.0f);
+        const float minExposure = std::clamp(m_skyDebugSettings.autoExposureMin, 0.05f, 32.0f);
+        const float maxExposure = std::clamp(m_skyDebugSettings.autoExposureMax, minExposure, 32.0f);
+        updatePushConstants.minExposure = minExposure;
+        updatePushConstants.maxExposure = maxExposure;
+        updatePushConstants.adaptUpRate = std::clamp(m_skyDebugSettings.autoExposureAdaptUp, 0.05f, 20.0f);
+        updatePushConstants.adaptDownRate = std::clamp(m_skyDebugSettings.autoExposureAdaptDown, 0.05f, 20.0f);
+        updatePushConstants.deltaTimeSeconds = std::clamp(frameDeltaSeconds, 0.0f, 0.25f);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_autoExposureUpdatePipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            m_autoExposurePipelineLayout,
+            0,
+            1,
+            &m_autoExposureDescriptorSets[m_currentFrame],
+            0,
+            nullptr
+        );
+        vkCmdPushConstants(
+            commandBuffer,
+            m_autoExposurePipelineLayout,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            sizeof(AutoExposureUpdatePushConstants),
+            &updatePushConstants
+        );
+        vkCmdDispatch(commandBuffer, 1u, 1u, 1u);
+
+        transitionBufferAccess(
+            commandBuffer,
+            autoExposureStateBuffer,
+            0,
+            sizeof(float) * 4u,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+        );
+
+        m_autoExposureHistoryValid = true;
+        endDebugLabel(commandBuffer);
+    } else {
+        m_autoExposureHistoryValid = false;
+    }
+
     transitionImageLayout(
         commandBuffer,
         m_swapchainImages[imageIndex],
@@ -11698,6 +12283,41 @@ void Renderer::destroyVoxelGiResources() {
     m_voxelGiPreviousPropagateDecay = 0.0f;
 }
 
+void Renderer::destroyAutoExposureResources() {
+    if (m_autoExposureHistogramPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_autoExposureHistogramPipeline, nullptr);
+        m_autoExposureHistogramPipeline = VK_NULL_HANDLE;
+    }
+    if (m_autoExposureUpdatePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_autoExposureUpdatePipeline, nullptr);
+        m_autoExposureUpdatePipeline = VK_NULL_HANDLE;
+    }
+    if (m_autoExposurePipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device, m_autoExposurePipelineLayout, nullptr);
+        m_autoExposurePipelineLayout = VK_NULL_HANDLE;
+    }
+    if (m_autoExposureDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_device, m_autoExposureDescriptorPool, nullptr);
+        m_autoExposureDescriptorPool = VK_NULL_HANDLE;
+    }
+    if (m_autoExposureDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device, m_autoExposureDescriptorSetLayout, nullptr);
+        m_autoExposureDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+    m_autoExposureDescriptorSets.fill(VK_NULL_HANDLE);
+
+    if (m_autoExposureHistogramBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_autoExposureHistogramBufferHandle);
+        m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_autoExposureStateBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_autoExposureStateBufferHandle);
+        m_autoExposureStateBufferHandle = kInvalidBufferHandle;
+    }
+    m_autoExposureComputeAvailable = false;
+    m_autoExposureHistoryValid = false;
+}
+
 void Renderer::destroyChunkBuffers() {
     for (ChunkDrawRange& drawRange : m_chunkDrawRanges) {
         drawRange.firstIndex = 0;
@@ -11820,6 +12440,7 @@ void Renderer::shutdown() {
         destroyEnvironmentResources();
         destroyShadowResources();
         destroyVoxelGiResources();
+        destroyAutoExposureResources();
         destroyChunkBuffers();
         destroyPipeline();
         if (m_descriptorPool != VK_NULL_HANDLE) {
@@ -11945,6 +12566,10 @@ void Renderer::shutdown() {
     m_voxelGiPreviousInjectBounceScale = 0.0f;
     m_voxelGiPreviousPropagateBlend = 0.0f;
     m_voxelGiPreviousPropagateDecay = 0.0f;
+    m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
+    m_autoExposureStateBufferHandle = kInvalidBufferHandle;
+    m_autoExposureComputeAvailable = false;
+    m_autoExposureHistoryValid = false;
     m_supportsWireframePreview = false;
     m_supportsSamplerAnisotropy = false;
     m_supportsMultiDrawIndirect = false;

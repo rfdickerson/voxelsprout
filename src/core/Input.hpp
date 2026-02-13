@@ -14,6 +14,7 @@ struct InputState {
     bool moveUp = false;
     bool moveDown = false;
     bool toggleHoverDown = false;
+    bool toggleVoxelEditModeDown = false;
     bool regenerateWorldDown = false;
     bool placeBlockDown = false;
     bool removeBlockDown = false;

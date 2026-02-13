@@ -22,6 +22,7 @@ public struct CameraUniform
     public float4 skyConfig2;
     public float4 skyConfig3;
     public float4 skyConfig4;
+    public float4 skyConfig5;
     public float4 voxelBaseColorPalette[16];
     public float4 voxelGiGridOriginCellSize;
     public float4 voxelGiGridExtentStrength;

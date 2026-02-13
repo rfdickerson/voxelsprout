@@ -111,6 +111,15 @@ public:
         float bloomSoftKnee = 0.5f;
         float bloomBaseIntensity = 0.08f;
         float bloomSunFacingBoost = 0.28f;
+        bool autoExposureEnabled = true;
+        float manualExposure = 0.58f;
+        float autoExposureKeyValue = 0.18f;
+        float autoExposureMin = 0.25f;
+        float autoExposureMax = 2.20f;
+        float autoExposureAdaptUp = 3.0f;
+        float autoExposureAdaptDown = 1.4f;
+        float autoExposureLowPercentile = 0.50f;
+        float autoExposureHighPercentile = 0.98f;
         float volumetricFogDensity = 0.0045f;
         float volumetricFogHeightFalloff = 0.075f;
         float volumetricFogBaseHeight = 6.0f;
@@ -203,6 +212,7 @@ private:
     bool createAoTargets();
     bool createShadowResources();
     bool createVoxelGiResources();
+    bool createAutoExposureResources();
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
     bool createMagicaPipeline();
@@ -236,6 +246,7 @@ private:
     void destroyGpuTimestampResources();
     void destroyShadowResources();
     void destroyVoxelGiResources();
+    void destroyAutoExposureResources();
     void destroyFrameResources();
     void destroyChunkBuffers();
     void destroyMagicaBuffers();
@@ -411,6 +422,16 @@ private:
     float m_voxelGiPreviousInjectBounceScale = 0.0f;
     float m_voxelGiPreviousPropagateBlend = 0.0f;
     float m_voxelGiPreviousPropagateDecay = 0.0f;
+    BufferHandle m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
+    bool m_autoExposureComputeAvailable = false;
+    bool m_autoExposureHistoryValid = false;
+    VkDescriptorSetLayout m_autoExposureDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_autoExposureDescriptorPool = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kMaxFramesInFlight> m_autoExposureDescriptorSets{};
+    VkPipelineLayout m_autoExposurePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_autoExposureHistogramPipeline = VK_NULL_HANDLE;
+    VkPipeline m_autoExposureUpdatePipeline = VK_NULL_HANDLE;
 #if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;

@@ -830,6 +830,7 @@ bool App::init() {
 
 void App::run() {
     VOX_LOGI("app") << "run begin";
+    VOX_LOGI("app") << "voxel edit mode disabled by default (press V to toggle)";
     double previousTime = glfwGetTime();
     double simulationAccumulatorSeconds = 0.0;
     uint64_t frameCount = 0;
@@ -879,6 +880,14 @@ void App::run() {
 void App::update(float dt, float simulationAlpha) {
     updateCamera(dt);
 
+    if (!m_debugUiVisible && m_input.toggleVoxelEditModeDown && !m_wasToggleVoxelEditModeDown) {
+        m_voxelEditModeEnabled = !m_voxelEditModeEnabled;
+        VOX_LOGI("app") << "voxel edit mode "
+                        << (m_voxelEditModeEnabled ? "enabled" : "disabled")
+                        << " (V)";
+    }
+    m_wasToggleVoxelEditModeDown = m_input.toggleVoxelEditModeDown;
+
     const bool regeneratePressedThisFrame =
         !m_debugUiVisible && m_input.regenerateWorldDown && !m_wasRegenerateWorldDown;
     m_wasRegenerateWorldDown = m_input.regenerateWorldDown;
@@ -888,7 +897,7 @@ void App::update(float dt, float simulationAlpha) {
 
     const CameraRaycastResult raycast = raycastFromCamera();
 
-    const bool blockInteractionEnabled = !m_debugUiVisible;
+    const bool blockInteractionEnabled = !m_debugUiVisible && m_voxelEditModeEnabled;
     const bool placePressedThisFrame = blockInteractionEnabled && m_input.placeBlockDown && !m_wasPlaceBlockDown;
     const bool removePressedThisFrame = blockInteractionEnabled && m_input.removeBlockDown && !m_wasRemoveBlockDown;
     m_wasPlaceBlockDown = m_input.placeBlockDown;
@@ -988,7 +997,7 @@ void App::update(float dt, float simulationAlpha) {
     const bool pipeSelected = isPipeHotbarSelected();
     const bool conveyorSelected = isConveyorHotbarSelected();
     const bool trackSelected = isTrackHotbarSelected();
-    if (!m_debugUiVisible) {
+    if (!m_debugUiVisible && m_voxelEditModeEnabled) {
         const bool showRemovePreview = m_input.removeBlockDown;
         if (pipeSelected || conveyorSelected || trackSelected) {
             const InteractionRaycastResult pipeRaycast = raycastInteractionFromCamera(true);
@@ -1289,6 +1298,8 @@ void App::pollInput() {
                         << " decl=" << kDayCycleWinterDeclinationDegrees << ")";
     }
     m_wasToggleDayCycleDown = toggleDayCycleDown;
+
+    m_input.toggleVoxelEditModeDown = glfwGetKey(m_window, GLFW_KEY_V) == GLFW_PRESS;
 
     m_renderer.setDebugUiVisible(m_debugUiVisible);
     const bool rendererUiVisible = m_renderer.isDebugUiVisible();
