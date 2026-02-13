@@ -213,6 +213,7 @@ private:
     bool createShadowResources();
     bool createVoxelGiResources();
     bool createAutoExposureResources();
+    bool createSunShaftResources();
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
     bool createMagicaPipeline();
@@ -247,6 +248,7 @@ private:
     void destroyShadowResources();
     void destroyVoxelGiResources();
     void destroyAutoExposureResources();
+    void destroySunShaftResources();
     void destroyFrameResources();
     void destroyChunkBuffers();
     void destroyMagicaBuffers();
@@ -394,8 +396,14 @@ private:
     std::vector<VkImageView> m_ssaoBlurImageViews;
     std::vector<TransientImageHandle> m_ssaoBlurTransientHandles;
     std::vector<bool> m_ssaoBlurImageInitialized;
+    std::vector<VkImage> m_sunShaftImages;
+    std::vector<VkDeviceMemory> m_sunShaftImageMemories;
+    std::vector<VkImageView> m_sunShaftImageViews;
+    std::vector<TransientImageHandle> m_sunShaftTransientHandles;
+    std::vector<bool> m_sunShaftImageInitialized;
     VkSampler m_normalDepthSampler = VK_NULL_HANDLE;
     VkSampler m_ssaoSampler = VK_NULL_HANDLE;
+    VkSampler m_sunShaftSampler = VK_NULL_HANDLE;
     VkImage m_shadowDepthImage = VK_NULL_HANDLE;
     VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
     VkSampler m_shadowDepthSampler = VK_NULL_HANDLE;
@@ -426,12 +434,19 @@ private:
     BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     bool m_autoExposureComputeAvailable = false;
     bool m_autoExposureHistoryValid = false;
+    bool m_sunShaftComputeAvailable = false;
+    bool m_sunShaftShaderAvailable = false;
     VkDescriptorSetLayout m_autoExposureDescriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_autoExposureDescriptorPool = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_autoExposureDescriptorSets{};
     VkPipelineLayout m_autoExposurePipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_autoExposureHistogramPipeline = VK_NULL_HANDLE;
     VkPipeline m_autoExposureUpdatePipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_sunShaftDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_sunShaftDescriptorPool = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kMaxFramesInFlight> m_sunShaftDescriptorSets{};
+    VkPipelineLayout m_sunShaftPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_sunShaftPipeline = VK_NULL_HANDLE;
 #if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
