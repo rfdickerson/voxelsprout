@@ -390,6 +390,17 @@ private:
     VkDeviceMemory m_voxelGiOccupancyMemory = VK_NULL_HANDLE;
     VkSampler m_voxelGiOccupancySampler = VK_NULL_HANDLE;
     bool m_voxelGiOccupancyInitialized = false;
+    bool m_voxelGiWorldDirty = true;
+    bool m_voxelGiHasPreviousFrameState = false;
+    std::array<float, 3> m_voxelGiPreviousGridOrigin{0.0f, 0.0f, 0.0f};
+    std::array<float, 3> m_voxelGiPreviousSunDirection{0.0f, 0.0f, 0.0f};
+    std::array<float, 3> m_voxelGiPreviousSunColor{0.0f, 0.0f, 0.0f};
+    std::array<std::array<float, 3>, 9> m_voxelGiPreviousShIrradiance{};
+    float m_voxelGiPreviousInjectSunScale = 0.0f;
+    float m_voxelGiPreviousInjectShScale = 0.0f;
+    float m_voxelGiPreviousInjectBounceScale = 0.0f;
+    float m_voxelGiPreviousPropagateBlend = 0.0f;
+    float m_voxelGiPreviousPropagateDecay = 0.0f;
 #if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
