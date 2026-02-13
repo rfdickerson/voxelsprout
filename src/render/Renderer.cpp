@@ -1621,6 +1621,7 @@ bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid) {
     (void)chunkGrid;
     m_chunkMeshRebuildRequested = true;
     m_pendingChunkRemeshIndices.clear();
+    m_voxelGiWorldDirty = true;
     return true;
 }
 
@@ -1638,6 +1639,7 @@ bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t ch
         m_pendingChunkRemeshIndices.end()) {
         m_pendingChunkRemeshIndices.push_back(chunkIndex);
     }
+    m_voxelGiWorldDirty = true;
     return true;
 }
 
@@ -1660,6 +1662,7 @@ bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<cons
             m_pendingChunkRemeshIndices.push_back(chunkIndex);
         }
     }
+    m_voxelGiWorldDirty = true;
     return true;
 }
 
@@ -8625,6 +8628,72 @@ void Renderer::renderFrame(
     const float voxelGiOriginX = std::floor((camera.x - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
     const float voxelGiOriginY = std::floor((camera.y - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
     const float voxelGiOriginZ = std::floor((camera.z - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
+    constexpr float kVoxelGiGridMoveThreshold = 0.001f;
+    constexpr float kVoxelGiLightingChangeThreshold = 0.001f;
+    constexpr float kVoxelGiTuningChangeThreshold = 0.001f;
+    const bool voxelGiGridMoved =
+        !m_voxelGiHasPreviousFrameState ||
+        std::abs(voxelGiOriginX - m_voxelGiPreviousGridOrigin[0]) > kVoxelGiGridMoveThreshold ||
+        std::abs(voxelGiOriginY - m_voxelGiPreviousGridOrigin[1]) > kVoxelGiGridMoveThreshold ||
+        std::abs(voxelGiOriginZ - m_voxelGiPreviousGridOrigin[2]) > kVoxelGiGridMoveThreshold;
+    const bool voxelGiSunDirectionChanged =
+        !m_voxelGiHasPreviousFrameState ||
+        std::abs(sunDirection.x - m_voxelGiPreviousSunDirection[0]) > kVoxelGiLightingChangeThreshold ||
+        std::abs(sunDirection.y - m_voxelGiPreviousSunDirection[1]) > kVoxelGiLightingChangeThreshold ||
+        std::abs(sunDirection.z - m_voxelGiPreviousSunDirection[2]) > kVoxelGiLightingChangeThreshold;
+    const bool voxelGiSunColorChanged =
+        !m_voxelGiHasPreviousFrameState ||
+        std::abs(sunColor.x - m_voxelGiPreviousSunColor[0]) > kVoxelGiLightingChangeThreshold ||
+        std::abs(sunColor.y - m_voxelGiPreviousSunColor[1]) > kVoxelGiLightingChangeThreshold ||
+        std::abs(sunColor.z - m_voxelGiPreviousSunColor[2]) > kVoxelGiLightingChangeThreshold;
+    bool voxelGiShChanged = !m_voxelGiHasPreviousFrameState;
+    if (!voxelGiShChanged) {
+        for (std::size_t coeffIndex = 0; coeffIndex < shIrradiance.size(); ++coeffIndex) {
+            const std::array<float, 3>& previousCoeff = m_voxelGiPreviousShIrradiance[coeffIndex];
+            const math::Vector3& currentCoeff = shIrradiance[coeffIndex];
+            if (std::abs(currentCoeff.x - previousCoeff[0]) > kVoxelGiLightingChangeThreshold ||
+                std::abs(currentCoeff.y - previousCoeff[1]) > kVoxelGiLightingChangeThreshold ||
+                std::abs(currentCoeff.z - previousCoeff[2]) > kVoxelGiLightingChangeThreshold) {
+                voxelGiShChanged = true;
+                break;
+            }
+        }
+    }
+    const bool voxelGiComputeSettingsChanged =
+        !m_voxelGiHasPreviousFrameState ||
+        std::abs(m_voxelGiDebugSettings.injectSunScale - m_voxelGiPreviousInjectSunScale) >
+            kVoxelGiTuningChangeThreshold ||
+        std::abs(m_voxelGiDebugSettings.injectShScale - m_voxelGiPreviousInjectShScale) >
+            kVoxelGiTuningChangeThreshold ||
+        std::abs(m_voxelGiDebugSettings.injectBounceScale - m_voxelGiPreviousInjectBounceScale) >
+            kVoxelGiTuningChangeThreshold ||
+        std::abs(m_voxelGiDebugSettings.propagateBlend - m_voxelGiPreviousPropagateBlend) >
+            kVoxelGiTuningChangeThreshold ||
+        std::abs(m_voxelGiDebugSettings.propagateDecay - m_voxelGiPreviousPropagateDecay) >
+            kVoxelGiTuningChangeThreshold;
+    const bool voxelGiLightingChanged = voxelGiSunDirectionChanged || voxelGiSunColorChanged || voxelGiShChanged;
+    const bool voxelGiNeedsOccupancyUpload =
+        m_voxelGiWorldDirty ||
+        voxelGiGridMoved ||
+        !m_voxelGiOccupancyInitialized;
+    const bool voxelGiNeedsComputeUpdate =
+        voxelGiNeedsOccupancyUpload ||
+        voxelGiLightingChanged ||
+        voxelGiComputeSettingsChanged ||
+        !m_voxelGiInitialized;
+    m_voxelGiHasPreviousFrameState = true;
+    m_voxelGiPreviousGridOrigin = {voxelGiOriginX, voxelGiOriginY, voxelGiOriginZ};
+    m_voxelGiPreviousSunDirection = {sunDirection.x, sunDirection.y, sunDirection.z};
+    m_voxelGiPreviousSunColor = {sunColor.x, sunColor.y, sunColor.z};
+    for (std::size_t coeffIndex = 0; coeffIndex < shIrradiance.size(); ++coeffIndex) {
+        const math::Vector3& coeff = shIrradiance[coeffIndex];
+        m_voxelGiPreviousShIrradiance[coeffIndex] = {coeff.x, coeff.y, coeff.z};
+    }
+    m_voxelGiPreviousInjectSunScale = m_voxelGiDebugSettings.injectSunScale;
+    m_voxelGiPreviousInjectShScale = m_voxelGiDebugSettings.injectShScale;
+    m_voxelGiPreviousInjectBounceScale = m_voxelGiDebugSettings.injectBounceScale;
+    m_voxelGiPreviousPropagateBlend = m_voxelGiDebugSettings.propagateBlend;
+    m_voxelGiPreviousPropagateDecay = m_voxelGiDebugSettings.propagateDecay;
     mvpUniform.voxelGiGridOriginCellSize[0] = voxelGiOriginX;
     mvpUniform.voxelGiGridOriginCellSize[1] = voxelGiOriginY;
     mvpUniform.voxelGiGridOriginCellSize[2] = voxelGiOriginZ;
@@ -8858,7 +8927,8 @@ void Renderer::renderFrame(
     VkBuffer voxelGiOccupancyUploadBuffer = VK_NULL_HANDLE;
     if (m_voxelGiComputeAvailable &&
         m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
-        m_voxelGiOccupancyImageView != VK_NULL_HANDLE) {
+        m_voxelGiOccupancyImageView != VK_NULL_HANDLE &&
+        voxelGiNeedsOccupancyUpload) {
         const std::size_t voxelGiCellCount =
             static_cast<std::size_t>(kVoxelGiGridResolution) *
             static_cast<std::size_t>(kVoxelGiGridResolution) *
@@ -8939,6 +9009,9 @@ void Renderer::renderFrame(
             VOX_LOGW("render") << "voxel GI occupancy upload allocation failed";
         }
     }
+    const bool voxelGiHasOccupancyUpload =
+        voxelGiOccupancySliceOpt.has_value() &&
+        voxelGiOccupancyUploadBuffer != VK_NULL_HANDLE;
 
     uint32_t pipeInstanceCount = 0;
     std::optional<FrameArenaSlice> pipeInstanceSliceOpt = std::nullopt;
@@ -9598,56 +9671,58 @@ void Renderer::renderFrame(
         m_voxelGiPipelineLayout != VK_NULL_HANDLE &&
         m_voxelGiDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
         m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
-        voxelGiOccupancySliceOpt.has_value() &&
-        voxelGiOccupancyUploadBuffer != VK_NULL_HANDLE) {
+        voxelGiNeedsComputeUpdate &&
+        (!voxelGiNeedsOccupancyUpload || voxelGiHasOccupancyUpload)) {
         wroteVoxelGiTimestamps = true;
         beginDebugLabel(commandBuffer, "Pass: Voxel GI", 0.38f, 0.28f, 0.12f, 1.0f);
 
-        transitionImageLayout(
-            commandBuffer,
-            m_voxelGiOccupancyImage,
-            m_voxelGiOccupancyInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            m_voxelGiOccupancyInitialized ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
-            m_voxelGiOccupancyInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT
-        );
-        VkBufferImageCopy occupancyCopyRegion{};
-        occupancyCopyRegion.bufferOffset = voxelGiOccupancySliceOpt->offset;
-        occupancyCopyRegion.bufferRowLength = 0;
-        occupancyCopyRegion.bufferImageHeight = 0;
-        occupancyCopyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        occupancyCopyRegion.imageSubresource.mipLevel = 0;
-        occupancyCopyRegion.imageSubresource.baseArrayLayer = 0;
-        occupancyCopyRegion.imageSubresource.layerCount = 1;
-        occupancyCopyRegion.imageOffset = {0, 0, 0};
-        occupancyCopyRegion.imageExtent = {
-            kVoxelGiGridResolution,
-            kVoxelGiGridResolution,
-            kVoxelGiGridResolution
-        };
-        vkCmdCopyBufferToImage(
-            commandBuffer,
-            voxelGiOccupancyUploadBuffer,
-            m_voxelGiOccupancyImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1,
-            &occupancyCopyRegion
-        );
-        transitionImageLayout(
-            commandBuffer,
-            m_voxelGiOccupancyImage,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT
-        );
-        m_voxelGiOccupancyInitialized = true;
+        if (voxelGiNeedsOccupancyUpload) {
+            transitionImageLayout(
+                commandBuffer,
+                m_voxelGiOccupancyImage,
+                m_voxelGiOccupancyInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                m_voxelGiOccupancyInitialized ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+                m_voxelGiOccupancyInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT
+            );
+            VkBufferImageCopy occupancyCopyRegion{};
+            occupancyCopyRegion.bufferOffset = voxelGiOccupancySliceOpt->offset;
+            occupancyCopyRegion.bufferRowLength = 0;
+            occupancyCopyRegion.bufferImageHeight = 0;
+            occupancyCopyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            occupancyCopyRegion.imageSubresource.mipLevel = 0;
+            occupancyCopyRegion.imageSubresource.baseArrayLayer = 0;
+            occupancyCopyRegion.imageSubresource.layerCount = 1;
+            occupancyCopyRegion.imageOffset = {0, 0, 0};
+            occupancyCopyRegion.imageExtent = {
+                kVoxelGiGridResolution,
+                kVoxelGiGridResolution,
+                kVoxelGiGridResolution
+            };
+            vkCmdCopyBufferToImage(
+                commandBuffer,
+                voxelGiOccupancyUploadBuffer,
+                m_voxelGiOccupancyImage,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &occupancyCopyRegion
+            );
+            transitionImageLayout(
+                commandBuffer,
+                m_voxelGiOccupancyImage,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT
+            );
+            m_voxelGiOccupancyInitialized = true;
+        }
 
         transitionImageLayout(
             commandBuffer,
@@ -9804,6 +9879,7 @@ void Renderer::renderFrame(
             VK_IMAGE_ASPECT_COLOR_BIT
         );
         m_voxelGiInitialized = true;
+        m_voxelGiWorldDirty = false;
         endDebugLabel(commandBuffer);
     } else if (!m_voxelGiInitialized &&
                m_voxelGiImages[0] != VK_NULL_HANDLE &&
@@ -11410,6 +11486,13 @@ void Renderer::destroyVoxelGiResources() {
     m_voxelGiInitialized = false;
     m_voxelGiOccupancyInitialized = false;
     m_voxelGiComputeAvailable = false;
+    m_voxelGiWorldDirty = true;
+    m_voxelGiHasPreviousFrameState = false;
+    m_voxelGiPreviousInjectSunScale = 0.0f;
+    m_voxelGiPreviousInjectShScale = 0.0f;
+    m_voxelGiPreviousInjectBounceScale = 0.0f;
+    m_voxelGiPreviousPropagateBlend = 0.0f;
+    m_voxelGiPreviousPropagateDecay = 0.0f;
 }
 
 void Renderer::destroyChunkBuffers() {
@@ -11648,6 +11731,17 @@ void Renderer::shutdown() {
     m_ssaoFormat = VK_FORMAT_UNDEFINED;
     m_voxelGiFormat = VK_FORMAT_UNDEFINED;
     m_voxelGiOccupancyFormat = VK_FORMAT_UNDEFINED;
+    m_voxelGiWorldDirty = true;
+    m_voxelGiHasPreviousFrameState = false;
+    m_voxelGiPreviousGridOrigin = {0.0f, 0.0f, 0.0f};
+    m_voxelGiPreviousSunDirection = {0.0f, 0.0f, 0.0f};
+    m_voxelGiPreviousSunColor = {0.0f, 0.0f, 0.0f};
+    m_voxelGiPreviousShIrradiance = {};
+    m_voxelGiPreviousInjectSunScale = 0.0f;
+    m_voxelGiPreviousInjectShScale = 0.0f;
+    m_voxelGiPreviousInjectBounceScale = 0.0f;
+    m_voxelGiPreviousPropagateBlend = 0.0f;
+    m_voxelGiPreviousPropagateDecay = 0.0f;
     m_supportsWireframePreview = false;
     m_supportsSamplerAnisotropy = false;
     m_supportsMultiDrawIndirect = false;
