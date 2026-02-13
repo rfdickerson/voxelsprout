@@ -35,6 +35,17 @@ float3 materialTint(uint material)
     return float3(0.9, 0.9, 0.9);
 }
 
+float materialSmoothness(uint material)
+{
+    if (material == kMaterialStone) return 0.18;
+    if (material == kMaterialDirt) return 0.05;
+    if (material == kMaterialGrass) return 0.08;
+    if (material == kMaterialWood) return 0.14;
+    if (material == kMaterialRed) return 0.24;
+    if (material == kMaterialPalette) return 0.18;
+    return 0.12;
+}
+
 float3 baseColorFromPalette(uint baseColorIndex)
 {
     return camera.voxelBaseColorPalette[baseColorIndex & 0xFu].xyz;
@@ -441,7 +452,23 @@ float4 main(FragmentInput input) : SV_Target0
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);
     float3 lighting = ambient + voxelGi + (directSun * directShadowFactor);
 
-    const float3 shaded = baseColor * lighting;
+    const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
+    const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
+    const float3 reflectDir = reflect(-viewDir, normal);
+    const float nDotV = clamp(dot(normal, viewDir), 0.0, 1.0);
+    const float fresnel = pow(1.0 - nDotV, 5.0);
+    const float smoothness = materialSmoothness(input.inMaterial);
+    const float f0 = 0.028;
+    const float fresnelTerm = f0 + ((1.0 - f0) * fresnel);
+    const float specularStrength = lerp(0.05, 0.30, smoothness);
+    const float sunSpecExponent = lerp(20.0, 144.0, smoothness);
+    const float sunGlint = pow(max(dot(reflectDir, -sunDirection), 0.0), sunSpecExponent);
+    const float3 skyReflection = proceduralSkyNoSunDisk(reflectDir);
+    const float3 specular =
+        (skyReflection * (fresnelTerm * specularStrength)) +
+        (sunColor * (sunIntensity * sunGlint * fresnelTerm * specularStrength * 0.32));
+
+    const float3 shaded = (baseColor * lighting) + specular;
     const float3 fogged = applyAtmosphericFog(shaded, input.inWorldPosition, viewDepth, sunDirection);
     return float4(fogged, 1.0);
 }

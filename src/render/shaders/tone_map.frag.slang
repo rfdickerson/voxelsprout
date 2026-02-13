@@ -72,6 +72,7 @@ float3 sampleMipChainBloom(float2 uv, float exposureScale)
 {
     const float bloomThreshold = max(camera.skyConfig3.x / max(exposureScale, 1e-4), 0.0);
     const float bloomSoftKnee = clamp(camera.skyConfig3.y, 0.0, 1.0);
+    const float3 bloomMip0 = extractBloom(hdrSceneColor.SampleLevel(uv, 0.0).xyz, bloomThreshold, bloomSoftKnee);
     const float3 bloomMip1 = extractBloom(hdrSceneColor.SampleLevel(uv, 1.0).xyz, bloomThreshold, bloomSoftKnee);
     const float3 bloomMip2 = extractBloom(hdrSceneColor.SampleLevel(uv, 2.0).xyz, bloomThreshold, bloomSoftKnee);
     const float3 bloomMip3 = extractBloom(hdrSceneColor.SampleLevel(uv, 3.0).xyz, bloomThreshold, bloomSoftKnee);
@@ -79,11 +80,12 @@ float3 sampleMipChainBloom(float2 uv, float exposureScale)
     const float3 bloomMip5 = extractBloom(hdrSceneColor.SampleLevel(uv, 5.0).xyz, bloomThreshold, bloomSoftKnee);
 
     float3 bloom =
-        (bloomMip1 * 0.50) +
-        (bloomMip2 * 0.28) +
-        (bloomMip3 * 0.14) +
-        (bloomMip4 * 0.06) +
-        (bloomMip5 * 0.03);
+        (bloomMip0 * 0.20) +
+        (bloomMip1 * 0.40) +
+        (bloomMip2 * 0.24) +
+        (bloomMip3 * 0.11) +
+        (bloomMip4 * 0.05) +
+        (bloomMip5 * 0.02);
     return bloom;
 }
 
@@ -186,7 +188,8 @@ float3 applyVolumetricHeightFog(
     float3 worldPosition,
     float travelDistance,
     float3 worldViewDir,
-    float3 toSun
+    float3 toSun,
+    float sunVisibility
 )
 {
     const float fogDensity = max(camera.skyConfig4.x, 0.0);
@@ -214,7 +217,7 @@ float3 applyVolumetricHeightFog(
 
     const float cosTheta = clamp(dot(worldViewDir, toSun), -1.0, 1.0);
     const float sunPhase = hgPhase(cosTheta, camera.skyConfig0.z) * 0.10;
-    const float3 sunScatterColor = camera.sunColorShadow.xyz * (sunPhase * sunScatterStrength);
+    const float3 sunScatterColor = camera.sunColorShadow.xyz * (sunPhase * sunScatterStrength * clamp(sunVisibility, 0.0, 1.0));
     const float3 fogColor = ambientFogColor + sunScatterColor;
 
     return (litColor * transmittance) + (fogColor * (1.0 - transmittance));
@@ -262,40 +265,7 @@ float4 main(FragmentInput input) : SV_Target0
     hdrColor *= lerp(1.0, aoFactor, geometryMask);
 
     const float3x3 invViewRotation = transpose((float3x3)camera.view);
-    if (geometryMask > 0.5)
-    {
-        const float projX = (abs(camera.proj[0][0]) < 1e-6)
-            ? ((camera.proj[0][0] < 0.0) ? -1e-6 : 1e-6)
-            : camera.proj[0][0];
-        const float projY = (abs(camera.proj[1][1]) < 1e-6)
-            ? ((camera.proj[1][1] < 0.0) ? -1e-6 : 1e-6)
-            : camera.proj[1][1];
-        const float2 ndc = (input.inUv * 2.0) - 1.0;
-        const float3 viewRay = normalize(float3(ndc.x / projX, ndc.y / projY, -1.0));
-        const float travelDistance = viewDepth / max(-viewRay.z, 1e-4);
-        const float3 worldViewDir = normalize(mul(invViewRotation, viewRay));
-        const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
-        const float3 worldPos = cameraWorld + (worldViewDir * travelDistance);
-        const float3 toSunForFog = normalize(-camera.sunDirectionIntensity.xyz);
-        hdrColor = applyVolumetricHeightFog(
-            hdrColor,
-            cameraWorld,
-            worldPos,
-            travelDistance,
-            worldViewDir,
-            toSunForFog
-        );
-    }
-
-    const float3 cameraForward = normalize(mul(invViewRotation, float3(0.0, 0.0, -1.0)));
     const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
-    const float sunForwardDot = dot(cameraForward, toSun);
-    // Wide falloff keeps some bloom when the sun is off-center.
-    const float sunFacingWide = smoothstep(cos(radians(72.0)), cos(radians(10.0)), sunForwardDot);
-    // Tight falloff keeps a strong kick when looking close to the sun.
-    const float sunFacingTight = smoothstep(cos(radians(20.0)), cos(radians(3.0)), sunForwardDot);
-    const float sunFacing = max(sunFacingTight, sunFacingWide * 0.65);
-
     const float3 sunView = mul((float3x3)camera.view, toSun);
     float2 sunUv = float2(-1.0, -1.0);
     float sunVisibility = 0.0;
@@ -312,6 +282,39 @@ float4 main(FragmentInput input) : SV_Target0
             sunVisibility = sampleSunVisibility(sunUv);
         }
     }
+
+    if (geometryMask > 0.5)
+    {
+        const float projX = (abs(camera.proj[0][0]) < 1e-6)
+            ? ((camera.proj[0][0] < 0.0) ? -1e-6 : 1e-6)
+            : camera.proj[0][0];
+        const float projY = (abs(camera.proj[1][1]) < 1e-6)
+            ? ((camera.proj[1][1] < 0.0) ? -1e-6 : 1e-6)
+            : camera.proj[1][1];
+        const float2 ndc = (input.inUv * 2.0) - 1.0;
+        const float3 viewRay = normalize(float3(ndc.x / projX, ndc.y / projY, -1.0));
+        const float travelDistance = viewDepth / max(-viewRay.z, 1e-4);
+        const float3 worldViewDir = normalize(mul(invViewRotation, viewRay));
+        const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
+        const float3 worldPos = cameraWorld + (worldViewDir * travelDistance);
+        hdrColor = applyVolumetricHeightFog(
+            hdrColor,
+            cameraWorld,
+            worldPos,
+            travelDistance,
+            worldViewDir,
+            toSun,
+            sunVisibility
+        );
+    }
+
+    const float3 cameraForward = normalize(mul(invViewRotation, float3(0.0, 0.0, -1.0)));
+    const float sunForwardDot = dot(cameraForward, toSun);
+    // Wide falloff keeps some bloom when the sun is off-center.
+    const float sunFacingWide = smoothstep(cos(radians(72.0)), cos(radians(10.0)), sunForwardDot);
+    // Tight falloff keeps a strong kick when looking close to the sun.
+    const float sunFacingTight = smoothstep(cos(radians(20.0)), cos(radians(3.0)), sunForwardDot);
+    const float sunFacing = max(sunFacingTight, sunFacingWide * 0.65);
 
     const float sunBloomFactor = sunFacing * sunVisibility;
     const float exposureScale = resolveExposure();
