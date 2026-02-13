@@ -113,6 +113,18 @@ public:
         float plantQuadDirectionality = 0.34f;
     };
 
+    struct VoxelGiDebugSettings {
+        float strength = 0.45f;
+        float injectSunScale = 0.50f;
+        float injectShScale = 0.45f;
+        float injectBounceScale = 0.85f;
+        float propagateBlend = 0.62f;
+        float propagateDecay = 0.93f;
+        float ambientRebalanceStrength = 1.35f;
+        float ambientFloor = 0.45f;
+        int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance
+    };
+
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
@@ -498,6 +510,7 @@ private:
     bool m_debugVisualizeAoNormals = false;
     ShadowDebugSettings m_shadowDebugSettings{};
     SkyDebugSettings m_skyDebugSettings{};
+    VoxelGiDebugSettings m_voxelGiDebugSettings{};
     struct SkyTuningRuntimeState {
         bool initialized = false;
         float rayleighStrength = 1.0f;

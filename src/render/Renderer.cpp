@@ -75,7 +75,6 @@ constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
 constexpr uint32_t kVoxelGiPropagationIterations = 4u;
 constexpr float kVoxelGiCellSize = 1.0f;
-constexpr float kVoxelGiStrength = 0.45f;
 constexpr float kPipeTransferHalfExtent = 0.58f;
 constexpr float kPipeMinRadius = 0.02f;
 constexpr float kPipeMaxRadius = 0.5f;
@@ -7783,6 +7782,27 @@ void Renderer::buildShadowDebugUi() {
     ImGui::SliderFloat("SSAO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 1.50f, "%.2f");
 
     ImGui::Separator();
+    ImGui::Text("Voxel GI");
+    ImGui::Text("Compute: %s", m_voxelGiComputeAvailable ? "on" : "fallback");
+    ImGui::SliderFloat("GI Strength", &m_voxelGiDebugSettings.strength, 0.0f, 1.50f, "%.2f");
+    ImGui::SliderFloat("GI Inject Sun", &m_voxelGiDebugSettings.injectSunScale, 0.0f, 2.50f, "%.2f");
+    ImGui::SliderFloat("GI Inject SH", &m_voxelGiDebugSettings.injectShScale, 0.0f, 2.50f, "%.2f");
+    ImGui::SliderFloat("GI Inject Bounce", &m_voxelGiDebugSettings.injectBounceScale, 0.0f, 2.50f, "%.2f");
+    ImGui::SliderFloat("GI Propagate Blend", &m_voxelGiDebugSettings.propagateBlend, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("GI Propagate Decay", &m_voxelGiDebugSettings.propagateDecay, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("GI Ambient Balance", &m_voxelGiDebugSettings.ambientRebalanceStrength, 0.0f, 4.0f, "%.2f");
+    ImGui::SliderFloat("GI Ambient Floor", &m_voxelGiDebugSettings.ambientFloor, 0.0f, 1.0f, "%.2f");
+    const char* giVisualizationModes = "Off\0Radiance\0False Color Luma\0";
+    ImGui::Combo("GI Visualize", &m_voxelGiDebugSettings.visualizationMode, giVisualizationModes);
+    if (m_voxelGiDebugSettings.visualizationMode > 0) {
+        m_debugVisualizeSsao = false;
+        m_debugVisualizeAoNormals = false;
+    }
+    if (ImGui::Button("Reset GI Defaults")) {
+        m_voxelGiDebugSettings = VoxelGiDebugSettings{};
+    }
+
+    ImGui::Separator();
     ImGui::Text("Cascade Splits: %.1f / %.1f / %.1f / %.1f",
         m_shadowCascadeSplits[0],
         m_shadowCascadeSplits[1],
@@ -8553,17 +8573,19 @@ void Renderer::renderFrame(
     mvpUniform.shadowConfig2[0] = m_shadowDebugSettings.ssaoRadius;
     mvpUniform.shadowConfig2[1] = m_shadowDebugSettings.ssaoBias;
     mvpUniform.shadowConfig2[2] = m_shadowDebugSettings.ssaoIntensity;
-    mvpUniform.shadowConfig2[3] = 0.0f;
+    mvpUniform.shadowConfig2[3] = std::clamp(m_voxelGiDebugSettings.injectSunScale, 0.0f, 4.0f);
 
-    mvpUniform.shadowConfig3[0] = 0.0f;
-    mvpUniform.shadowConfig3[1] = 0.0f;
-    mvpUniform.shadowConfig3[2] = 0.0f;
+    mvpUniform.shadowConfig3[0] = std::clamp(m_voxelGiDebugSettings.injectShScale, 0.0f, 4.0f);
+    mvpUniform.shadowConfig3[1] = std::clamp(m_voxelGiDebugSettings.injectBounceScale, 0.0f, 4.0f);
+    mvpUniform.shadowConfig3[2] = std::clamp(m_voxelGiDebugSettings.propagateBlend, 0.0f, 1.0f);
     mvpUniform.shadowConfig3[3] = m_shadowDebugSettings.pcfRadius;
 
-    mvpUniform.shadowVoxelGridOrigin[0] = 0.0f;
-    mvpUniform.shadowVoxelGridOrigin[1] = 0.0f;
-    mvpUniform.shadowVoxelGridOrigin[2] = 0.0f;
-    // Reuse unused W channel for AO debug: 1.0 enables vertex AO, 0.0 disables.
+    // Reuse origin XYZ for GI tuning + debug mode to avoid enlarging camera UBO.
+    mvpUniform.shadowVoxelGridOrigin[0] = std::clamp(m_voxelGiDebugSettings.ambientRebalanceStrength, 0.0f, 8.0f);
+    mvpUniform.shadowVoxelGridOrigin[1] = std::clamp(m_voxelGiDebugSettings.ambientFloor, 0.0f, 1.0f);
+    mvpUniform.shadowVoxelGridOrigin[2] =
+        static_cast<float>(std::clamp(m_voxelGiDebugSettings.visualizationMode, 0, 2));
+    // W channel remains AO enable: 1.0 enables vertex AO, 0.0 disables.
     mvpUniform.shadowVoxelGridOrigin[3] = m_debugEnableVertexAo ? 1.0f : 0.0f;
 
     // Reuse currently-unused XYZ channels to provide camera world position to shaders.
@@ -8593,7 +8615,7 @@ void Renderer::renderFrame(
     mvpUniform.skyConfig2[0] = effectiveSkySettings.sunDiskSize;
     mvpUniform.skyConfig2[1] = effectiveSkySettings.sunHazeFalloff;
     mvpUniform.skyConfig2[2] = effectiveSkySettings.plantQuadDirectionality;
-    mvpUniform.skyConfig2[3] = 0.0f;
+    mvpUniform.skyConfig2[3] = std::clamp(m_voxelGiDebugSettings.propagateDecay, 0.0f, 1.0f);
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
     const float voxelGiOriginX = std::floor((camera.x - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
@@ -8606,7 +8628,7 @@ void Renderer::renderFrame(
     mvpUniform.voxelGiGridExtentStrength[0] = voxelGiGridSpan;
     mvpUniform.voxelGiGridExtentStrength[1] = voxelGiGridSpan;
     mvpUniform.voxelGiGridExtentStrength[2] = voxelGiGridSpan;
-    mvpUniform.voxelGiGridExtentStrength[3] = kVoxelGiStrength;
+    mvpUniform.voxelGiGridExtentStrength[3] = std::clamp(m_voxelGiDebugSettings.strength, 0.0f, 4.0f);
     for (std::size_t colorIndex = 0; colorIndex < m_voxelBaseColorPaletteRgba.size(); ++colorIndex) {
         const std::uint32_t rgba = m_voxelBaseColorPaletteRgba[colorIndex];
         mvpUniform.voxelBaseColorPalette[colorIndex][0] = static_cast<float>(rgba & 0xFFu) / 255.0f;
