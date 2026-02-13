@@ -69,21 +69,48 @@ float3 sampleMipChainBloom(float2 uv, float sunFacing)
     return bloom * sunFacingScale;
 }
 
-float3 analyticSunBloom(float2 uv, float sunFacing)
+float sampleSunVisibility(float2 sunUv)
 {
-    const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
-    const float3 sunView = mul((float3x3)camera.view, toSun);
-    if (sunView.z >= -1e-4)
+    uint texWidth = 0u;
+    uint texHeight = 0u;
+    normalDepthTexture.GetDimensions(texWidth, texHeight);
+    const float2 texelSize =
+        1.0 / max(float2(float(texWidth), float(texHeight)), float2(1.0, 1.0));
+
+    const float2 sampleOffsets[9] = {
+        float2(0.0, 0.0),
+        float2(1.0, 0.0),
+        float2(-1.0, 0.0),
+        float2(0.0, 1.0),
+        float2(0.0, -1.0),
+        float2(0.7071, 0.7071),
+        float2(-0.7071, 0.7071),
+        float2(0.7071, -0.7071),
+        float2(-0.7071, -0.7071)
+    };
+
+    float visibility = 0.0;
+    for (int i = 0; i < 9; ++i)
+    {
+        const float2 sampleUv = sunUv + (sampleOffsets[i] * texelSize * 1.5);
+        if (any(sampleUv < float2(0.0, 0.0)) || any(sampleUv > float2(1.0, 1.0)))
+        {
+            continue;
+        }
+        const float sampleViewDepth = normalDepthTexture.SampleLevel(sampleUv, 0.0).w;
+        const float skyMask = 1.0 - step(0.0001, sampleViewDepth);
+        visibility += skyMask;
+    }
+    visibility /= 9.0;
+    return smoothstep(0.12, 0.88, clamp(visibility, 0.0, 1.0));
+}
+
+float3 analyticSunBloom(float2 uv, float2 sunUv, float sunVisibility)
+{
+    if (sunVisibility <= 1e-5)
     {
         return float3(0.0, 0.0, 0.0);
     }
-
-    const float invDepth = 1.0 / max(-sunView.z, 1e-4);
-    const float2 sunNdc = float2(
-        sunView.x * camera.proj[0][0] * invDepth,
-        sunView.y * camera.proj[1][1] * invDepth
-    );
-    const float2 sunUv = (sunNdc * 0.5) + 0.5;
 
     float2 delta = uv - sunUv;
     const float aspect = clamp(
@@ -98,7 +125,7 @@ float3 analyticSunBloom(float2 uv, float sunFacing)
     const float halo = exp(-radialDistance * 12.0);
     const float wide = exp(-radialDistance * 3.0);
     const float glow = (1.75 * core) + (0.95 * halo) + (0.35 * wide);
-    return camera.sunColorShadow.xyz * (glow * clamp(sunFacing, 0.0, 1.0));
+    return camera.sunColorShadow.xyz * (glow * clamp(sunVisibility, 0.0, 1.0));
 }
 
 struct FragmentInput
@@ -147,13 +174,32 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
     const float sunFacing = smoothstep(cos(radians(20.0)), cos(radians(3.0)), dot(cameraForward, toSun));
 
+    const float3 sunView = mul((float3x3)camera.view, toSun);
+    float2 sunUv = float2(-1.0, -1.0);
+    float sunVisibility = 0.0;
+    if (sunView.z < -1e-4)
+    {
+        const float invDepth = 1.0 / max(-sunView.z, 1e-4);
+        const float2 sunNdc = float2(
+            sunView.x * camera.proj[0][0] * invDepth,
+            sunView.y * camera.proj[1][1] * invDepth
+        );
+        sunUv = (sunNdc * 0.5) + 0.5;
+        if (!any(sunUv < float2(0.0, 0.0)) && !any(sunUv > float2(1.0, 1.0)))
+        {
+            sunVisibility = sampleSunVisibility(sunUv);
+        }
+    }
+
+    const float sunBloomFactor = sunFacing * sunVisibility;
+
     const float bloomBaseIntensity = max(camera.skyConfig3.z, 0.0);
     const float bloomSunFacingBoost = max(camera.skyConfig3.w, 0.0);
-    const float bloomIntensity = bloomBaseIntensity + (sunFacing * bloomSunFacingBoost);
+    const float bloomIntensity = bloomBaseIntensity + (sunBloomFactor * bloomSunFacingBoost);
     if (bloomIntensity > 1e-5)
     {
-        const float3 sampledBloom = sampleMipChainBloom(input.inUv, sunFacing);
-        const float3 sunBloom = analyticSunBloom(input.inUv, sunFacing);
+        const float3 sampledBloom = sampleMipChainBloom(input.inUv, sunBloomFactor);
+        const float3 sunBloom = analyticSunBloom(input.inUv, sunUv, sunBloomFactor);
         hdrColor += (sampledBloom + sunBloom) * bloomIntensity;
     }
 
