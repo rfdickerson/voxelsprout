@@ -168,7 +168,9 @@ private:
     bool m_wasToggleDayCycleDown = false;
     float m_dayCyclePhase = 0.0f;
     bool m_hoverEnabled = false;
+    bool m_voxelEditModeEnabled = false;
     bool m_wasToggleHoverDown = false;
+    bool m_wasToggleVoxelEditModeDown = false;
     bool m_wasRegenerateWorldDown = false;
     int m_selectedHotbarIndex = 0;
     int m_selectedBlockIndex = 0;

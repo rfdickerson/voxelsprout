@@ -3,6 +3,8 @@
 
 import camera_uniform;
 
+[[vk::binding(2, 0)]]
+StructuredBuffer<float4> exposureStateBuffer;
 [[vk::binding(3, 0)]]
 Sampler2D<float4> hdrSceneColor;
 [[vk::binding(6, 0)]]
@@ -55,9 +57,20 @@ float3 extractBloom(float3 hdrColor, float threshold, float softKnee)
     return hdrColor * (contribution / brightness);
 }
 
-float3 sampleMipChainBloom(float2 uv)
+float resolveExposure()
 {
-    const float bloomThreshold = max(camera.skyConfig3.x, 0.0);
+    const float manualExposure = max(camera.skyConfig5.y, 0.001);
+    if (camera.skyConfig5.x <= 0.5)
+    {
+        return manualExposure;
+    }
+    const float dynamicExposure = max(exposureStateBuffer[0].x, 0.001);
+    return dynamicExposure;
+}
+
+float3 sampleMipChainBloom(float2 uv, float exposureScale)
+{
+    const float bloomThreshold = max(camera.skyConfig3.x / max(exposureScale, 1e-4), 0.0);
     const float bloomSoftKnee = clamp(camera.skyConfig3.y, 0.0, 1.0);
     const float3 bloomMip1 = extractBloom(hdrSceneColor.SampleLevel(uv, 1.0).xyz, bloomThreshold, bloomSoftKnee);
     const float3 bloomMip2 = extractBloom(hdrSceneColor.SampleLevel(uv, 2.0).xyz, bloomThreshold, bloomSoftKnee);
@@ -301,10 +314,11 @@ float4 main(FragmentInput input) : SV_Target0
     }
 
     const float sunBloomFactor = sunFacing * sunVisibility;
+    const float exposureScale = resolveExposure();
     const float bloomGlobalIntensity = max(camera.skyConfig3.z, 0.0);
     if (bloomGlobalIntensity > 1e-5)
     {
-        const float3 sampledBloom = sampleMipChainBloom(input.inUv);
+        const float3 sampledBloom = sampleMipChainBloom(input.inUv, exposureScale);
         hdrColor += sampledBloom * bloomGlobalIntensity;
     }
 
@@ -327,8 +341,7 @@ float4 main(FragmentInput input) : SV_Target0
         }
     }
 
-    const float exposure = 0.58;
-    float3 toneMapped = acesFilmTonemap(hdrColor * exposure);
+    float3 toneMapped = acesFilmTonemap(hdrColor * exposureScale);
     toneMapped = applySaturation(toneMapped, 1.18);
     toneMapped = pow(clamp(toneMapped, 0.0, 1.0), float3(1.06, 1.06, 1.06));
     const float3 ldrSrgb = pow(toneMapped, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
