@@ -102,18 +102,23 @@ inline void ChunkGrid::initializeFlatWorld() {
         const float wx = static_cast<float>(worldX);
         const float wz = static_cast<float>(worldZ);
 
-        // Domain warping breaks up repetitive contour bands.
-        const float warpX = perlin2((wx * 0.011f) + 17.3f, (wz * 0.011f) - 9.1f) * 18.0f;
-        const float warpZ = perlin2((wx * 0.011f) - 23.4f, (wz * 0.011f) + 31.7f) * 18.0f;
+        // A little stronger domain warp makes contours feel less grid-like.
+        const float warpX = perlin2((wx * 0.009f) + 17.3f, (wz * 0.009f) - 9.1f) * 22.0f;
+        const float warpZ = perlin2((wx * 0.009f) - 23.4f, (wz * 0.009f) + 31.7f) * 22.0f;
         const float sampleX = wx + warpX;
         const float sampleZ = wz + warpZ;
 
-        // Keep the in-between terrain as rolling desert hills.
-        const float duneBroad = perlin2(sampleX * 0.018f, sampleZ * 0.018f) * 4.2f;
-        const float duneDetail = perlin2(sampleX * 0.047f, sampleZ * 0.047f) * 1.9f;
-        const float ridgeSeed = std::abs(perlin2((sampleX * 0.026f) + 41.0f, (sampleZ * 0.026f) - 57.0f));
-        const float duneRidge = std::pow(std::clamp((ridgeSeed - 0.35f) * 1.538f, 0.0f, 1.0f), 1.6f) * 3.8f;
-        const float heightFloat = 7.0f + duneBroad + duneDetail + duneRidge;
+        // Multi-band rolling hills.
+        const float hillsMacro = perlin2(sampleX * 0.010f, sampleZ * 0.010f) * 6.0f;
+        const float hillsMid = perlin2(sampleX * 0.022f, sampleZ * 0.022f) * 3.2f;
+        const float hillsDetail = perlin2(sampleX * 0.052f, sampleZ * 0.052f) * 1.2f;
+
+        // Valley mask carves broad lowlands where the low-frequency signal dips.
+        const float valleyNoise =
+            (perlin2((sampleX * 0.006f) + 83.0f, (sampleZ * 0.006f) - 54.0f) * 0.5f) + 0.5f;
+        const float valleyDepth = std::pow(std::clamp((0.56f - valleyNoise) / 0.56f, 0.0f, 1.0f), 1.55f) * 7.0f;
+
+        const float heightFloat = 9.0f + hillsMacro + hillsMid + hillsDetail - valleyDepth;
         const int height = static_cast<int>(std::round(heightFloat));
         return std::clamp(height, 1, Chunk::kSizeY - 2);
     };
