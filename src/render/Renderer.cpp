@@ -74,6 +74,7 @@ constexpr uint32_t kShadowAtlasSize = 8192u;
 constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
 constexpr uint32_t kVoxelGiPropagationIterations = 4u;
+constexpr uint32_t kHdrResolveBloomMipCount = 6u;
 constexpr float kVoxelGiCellSize = 1.0f;
 constexpr float kPipeTransferHalfExtent = 0.58f;
 constexpr float kPipeMinRadius = 0.02f;
@@ -125,6 +126,7 @@ struct alignas(16) CameraUniform {
     float skyConfig0[4];
     float skyConfig1[4];
     float skyConfig2[4];
+    float skyConfig3[4];
     float voxelBaseColorPalette[16][4];
     float voxelGiGridOriginCellSize[4];
     float voxelGiGridExtentStrength[4];
@@ -4408,10 +4410,32 @@ bool Renderer::createHdrResolveTargets() {
         return false;
     }
 
+    VkFormatProperties hdrFormatProperties{};
+    vkGetPhysicalDeviceFormatProperties(m_physicalDevice, m_hdrColorFormat, &hdrFormatProperties);
+    const VkFormatFeatureFlags bloomMipFeatures =
+        VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+        VK_FORMAT_FEATURE_BLIT_DST_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    const bool supportsBloomMipBlit =
+        (hdrFormatProperties.optimalTilingFeatures & bloomMipFeatures) == bloomMipFeatures;
+
+    const uint32_t maxDimension = std::max(m_swapchainExtent.width, m_swapchainExtent.height);
+    uint32_t preferredMipLevels = 1u;
+    for (uint32_t mipDimension = maxDimension;
+         mipDimension > 1u && preferredMipLevels < kHdrResolveBloomMipCount;
+         mipDimension >>= 1u) {
+        ++preferredMipLevels;
+    }
+    m_hdrResolveMipLevels = supportsBloomMipBlit ? std::max(1u, preferredMipLevels) : 1u;
+    if (!supportsBloomMipBlit) {
+        VOX_LOGW("render") << "HDR format lacks linear blit mip support; bloom mip chain disabled";
+    }
+
     const uint32_t frameTargetCount = kMaxFramesInFlight;
     m_hdrResolveImages.assign(frameTargetCount, VK_NULL_HANDLE);
     m_hdrResolveImageMemories.assign(frameTargetCount, VK_NULL_HANDLE);
     m_hdrResolveImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_hdrResolveSampleImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
     m_hdrResolveTransientHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
     m_hdrResolveImageInitialized.assign(frameTargetCount, false);
 
@@ -4421,9 +4445,13 @@ bool Renderer::createHdrResolveTargets() {
         hdrResolveDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
         hdrResolveDesc.format = m_hdrColorFormat;
         hdrResolveDesc.extent = {m_swapchainExtent.width, m_swapchainExtent.height, 1u};
-        hdrResolveDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        hdrResolveDesc.usage =
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         hdrResolveDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        hdrResolveDesc.mipLevels = 1;
+        hdrResolveDesc.mipLevels = m_hdrResolveMipLevels;
         hdrResolveDesc.arrayLayers = 1;
         hdrResolveDesc.samples = VK_SAMPLE_COUNT_1_BIT;
         hdrResolveDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -4446,47 +4474,80 @@ bool Renderer::createHdrResolveTargets() {
         }
         m_hdrResolveTransientHandles[i] = hdrResolveHandle;
         m_hdrResolveImages[i] = hdrResolveInfo->image;
-        m_hdrResolveImageViews[i] = hdrResolveInfo->view;
+        m_hdrResolveSampleImageViews[i] = hdrResolveInfo->view;
         m_hdrResolveImageMemories[i] = VK_NULL_HANDLE;
         setObjectName(
             VK_OBJECT_TYPE_IMAGE,
             vkHandleToUint64(m_hdrResolveImages[i]),
             hdrResolveDesc.debugName.c_str()
         );
-        {
-            const std::string viewName = "hdr.resolve.view[" + std::to_string(i) + "]";
-            setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_hdrResolveImageViews[i]), viewName.c_str());
-        }
-    }
 
-    if (m_hdrResolveSampler == VK_NULL_HANDLE) {
-        VkSamplerCreateInfo samplerCreateInfo{};
-        samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
-        samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
-        samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerCreateInfo.mipLodBias = 0.0f;
-        samplerCreateInfo.anisotropyEnable = VK_FALSE;
-        samplerCreateInfo.compareEnable = VK_FALSE;
-        samplerCreateInfo.minLod = 0.0f;
-        samplerCreateInfo.maxLod = 0.0f;
-        samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
-        samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
-
-        const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_hdrResolveSampler);
-        if (samplerResult != VK_SUCCESS) {
-            logVkFailure("vkCreateSampler(hdrResolve)", samplerResult);
+        VkImageViewCreateInfo baseMipViewCreateInfo{};
+        baseMipViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        baseMipViewCreateInfo.image = m_hdrResolveImages[i];
+        baseMipViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        baseMipViewCreateInfo.format = m_hdrColorFormat;
+        baseMipViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        baseMipViewCreateInfo.subresourceRange.baseMipLevel = 0;
+        baseMipViewCreateInfo.subresourceRange.levelCount = 1;
+        baseMipViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+        baseMipViewCreateInfo.subresourceRange.layerCount = 1;
+        const VkResult baseMipViewResult = vkCreateImageView(
+            m_device,
+            &baseMipViewCreateInfo,
+            nullptr,
+            &m_hdrResolveImageViews[i]
+        );
+        if (baseMipViewResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImageView(hdrResolveBaseMip)", baseMipViewResult);
             return false;
         }
-        setObjectName(
-            VK_OBJECT_TYPE_SAMPLER,
-            vkHandleToUint64(m_hdrResolveSampler),
-            "hdrResolve.sampler"
-        );
+        {
+            const std::string resolveViewName = "hdr.resolve.baseMip.view[" + std::to_string(i) + "]";
+            const std::string sampleViewName = "hdr.resolve.sample.view[" + std::to_string(i) + "]";
+            setObjectName(
+                VK_OBJECT_TYPE_IMAGE_VIEW,
+                vkHandleToUint64(m_hdrResolveImageViews[i]),
+                resolveViewName.c_str()
+            );
+            setObjectName(
+                VK_OBJECT_TYPE_IMAGE_VIEW,
+                vkHandleToUint64(m_hdrResolveSampleImageViews[i]),
+                sampleViewName.c_str()
+            );
+        }
     }
+
+    if (m_hdrResolveSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_hdrResolveSampler, nullptr);
+        m_hdrResolveSampler = VK_NULL_HANDLE;
+    }
+    VkSamplerCreateInfo samplerCreateInfo{};
+    samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCreateInfo.mipLodBias = 0.0f;
+    samplerCreateInfo.anisotropyEnable = VK_FALSE;
+    samplerCreateInfo.compareEnable = VK_FALSE;
+    samplerCreateInfo.minLod = 0.0f;
+    samplerCreateInfo.maxLod = static_cast<float>(std::max(1u, m_hdrResolveMipLevels) - 1u);
+    samplerCreateInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+
+    const VkResult samplerResult = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_hdrResolveSampler);
+    if (samplerResult != VK_SUCCESS) {
+        logVkFailure("vkCreateSampler(hdrResolve)", samplerResult);
+        return false;
+    }
+    setObjectName(
+        VK_OBJECT_TYPE_SAMPLER,
+        vkHandleToUint64(m_hdrResolveSampler),
+        "hdrResolve.sampler"
+    );
 
     return true;
 }
@@ -7858,6 +7919,13 @@ void Renderer::buildSunDebugUi() {
     ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");
     ImGui::SliderFloat("Sun Disk Size", &m_skyDebugSettings.sunDiskSize, 0.5f, 6.0f, "%.2f");
     ImGui::SliderFloat("Sun Haze Falloff", &m_skyDebugSettings.sunHazeFalloff, 0.10f, 1.20f, "%.2f");
+    ImGui::Separator();
+    ImGui::Text("Bloom");
+    ImGui::SliderFloat("Bloom Threshold", &m_skyDebugSettings.bloomThreshold, 0.25f, 4.0f, "%.2f");
+    ImGui::SliderFloat("Bloom Soft Knee", &m_skyDebugSettings.bloomSoftKnee, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Bloom Base Intensity", &m_skyDebugSettings.bloomBaseIntensity, 0.0f, 0.20f, "%.3f");
+    ImGui::SliderFloat("Bloom Sun Boost", &m_skyDebugSettings.bloomSunFacingBoost, 0.0f, 0.40f, "%.3f");
+    ImGui::TextDisabled("Bloom is hidden in GI/SSAO debug visualization modes.");
     ImGui::Text("Active: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",
         m_skyTuningRuntime.rayleighStrength,
         m_skyTuningRuntime.mieStrength,
@@ -8623,6 +8691,10 @@ void Renderer::renderFrame(
     mvpUniform.skyConfig2[1] = effectiveSkySettings.sunHazeFalloff;
     mvpUniform.skyConfig2[2] = effectiveSkySettings.plantQuadDirectionality;
     mvpUniform.skyConfig2[3] = std::clamp(m_voxelGiDebugSettings.propagateDecay, 0.0f, 1.0f);
+    mvpUniform.skyConfig3[0] = std::clamp(m_skyDebugSettings.bloomThreshold, 0.0f, 16.0f);
+    mvpUniform.skyConfig3[1] = std::clamp(m_skyDebugSettings.bloomSoftKnee, 0.0f, 1.0f);
+    mvpUniform.skyConfig3[2] = std::clamp(m_skyDebugSettings.bloomBaseIntensity, 0.0f, 2.0f);
+    mvpUniform.skyConfig3[3] = std::clamp(m_skyDebugSettings.bloomSunFacingBoost, 0.0f, 2.0f);
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
     const float voxelGiOriginX = std::floor((camera.x - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
@@ -8726,7 +8798,7 @@ void Renderer::renderFrame(
 
     VkDescriptorImageInfo hdrSceneImageInfo{};
     hdrSceneImageInfo.sampler = m_hdrResolveSampler;
-    hdrSceneImageInfo.imageView = m_hdrResolveImageViews[aoFrameIndex];
+    hdrSceneImageInfo.imageView = m_hdrResolveSampleImageViews[aoFrameIndex];
     hdrSceneImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo diffuseTextureImageInfo{};
@@ -10782,17 +10854,129 @@ void Renderer::renderFrame(
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQueryMainEnd);
 
-    transitionImageLayout(
-        commandBuffer,
-        m_hdrResolveImages[aoFrameIndex],
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT
-    );
+    if (m_hdrResolveMipLevels > 1u) {
+        transitionImageLayout(
+            commandBuffer,
+            m_hdrResolveImages[aoFrameIndex],
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0u,
+            1u,
+            0u,
+            1u
+        );
+
+        const uint32_t bloomMipCount = std::max(1u, m_hdrResolveMipLevels);
+        const bool hdrResolveInitialized = m_hdrResolveImageInitialized[aoFrameIndex];
+        for (uint32_t mipLevel = 1u; mipLevel < bloomMipCount; ++mipLevel) {
+            transitionImageLayout(
+                commandBuffer,
+                m_hdrResolveImages[aoFrameIndex],
+                hdrResolveInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                hdrResolveInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+                hdrResolveInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0u,
+                1u,
+                mipLevel,
+                1u
+            );
+
+            const uint32_t srcWidth = std::max(1u, m_swapchainExtent.width >> (mipLevel - 1u));
+            const uint32_t srcHeight = std::max(1u, m_swapchainExtent.height >> (mipLevel - 1u));
+            const uint32_t dstWidth = std::max(1u, m_swapchainExtent.width >> mipLevel);
+            const uint32_t dstHeight = std::max(1u, m_swapchainExtent.height >> mipLevel);
+
+            VkImageBlit mipBlit{};
+            mipBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            mipBlit.srcSubresource.mipLevel = mipLevel - 1u;
+            mipBlit.srcSubresource.baseArrayLayer = 0;
+            mipBlit.srcSubresource.layerCount = 1;
+            mipBlit.srcOffsets[0] = {0, 0, 0};
+            mipBlit.srcOffsets[1] = {
+                static_cast<int32_t>(srcWidth),
+                static_cast<int32_t>(srcHeight),
+                1
+            };
+            mipBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            mipBlit.dstSubresource.mipLevel = mipLevel;
+            mipBlit.dstSubresource.baseArrayLayer = 0;
+            mipBlit.dstSubresource.layerCount = 1;
+            mipBlit.dstOffsets[0] = {0, 0, 0};
+            mipBlit.dstOffsets[1] = {
+                static_cast<int32_t>(dstWidth),
+                static_cast<int32_t>(dstHeight),
+                1
+            };
+            vkCmdBlitImage(
+                commandBuffer,
+                m_hdrResolveImages[aoFrameIndex],
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                m_hdrResolveImages[aoFrameIndex],
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &mipBlit,
+                VK_FILTER_LINEAR
+            );
+
+            const bool hasNextMip = (mipLevel + 1u) < bloomMipCount;
+            transitionImageLayout(
+                commandBuffer,
+                m_hdrResolveImages[aoFrameIndex],
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                hasNextMip ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                hasNextMip ? VK_PIPELINE_STAGE_2_TRANSFER_BIT : VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                hasNextMip ? VK_ACCESS_2_TRANSFER_READ_BIT : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0u,
+                1u,
+                mipLevel,
+                1u
+            );
+        }
+
+        transitionImageLayout(
+            commandBuffer,
+            m_hdrResolveImages[aoFrameIndex],
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0u,
+            1u,
+            0u,
+            bloomMipCount - 1u
+        );
+    } else {
+        transitionImageLayout(
+            commandBuffer,
+            m_hdrResolveImages[aoFrameIndex],
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0u,
+            1u,
+            0u,
+            1u
+        );
+    }
 
     transitionImageLayout(
         commandBuffer,
@@ -11061,16 +11245,24 @@ void Renderer::destroyHdrResolveTargets() {
         m_hdrResolveSampler = VK_NULL_HANDLE;
     }
 
+    for (VkImageView imageView : m_hdrResolveImageViews) {
+        if (imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, imageView, nullptr);
+        }
+    }
+
     for (TransientImageHandle handle : m_hdrResolveTransientHandles) {
         if (handle != kInvalidTransientImageHandle) {
             m_frameArena.destroyTransientImage(handle);
         }
     }
     m_hdrResolveImageViews.clear();
+    m_hdrResolveSampleImageViews.clear();
     m_hdrResolveImages.clear();
     m_hdrResolveImageMemories.clear();
     m_hdrResolveTransientHandles.clear();
     m_hdrResolveImageInitialized.clear();
+    m_hdrResolveMipLevels = 1;
 }
 
 void Renderer::destroyMsaaColorTargets() {

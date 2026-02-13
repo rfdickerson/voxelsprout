@@ -107,6 +107,10 @@ public:
         float sunHaloIntensity = 22.0f;
         float sunDiskSize = 2.0f;
         float sunHazeFalloff = 0.35f;
+        float bloomThreshold = 0.75f;
+        float bloomSoftKnee = 0.5f;
+        float bloomBaseIntensity = 0.08f;
+        float bloomSunFacingBoost = 0.28f;
         bool autoSunriseTuning = true;
         float autoSunriseBlend = 1.0f;
         float autoSunriseAdaptSpeed = 4.0f;
@@ -344,8 +348,10 @@ private:
     std::vector<VkImage> m_hdrResolveImages;
     std::vector<VkDeviceMemory> m_hdrResolveImageMemories;
     std::vector<VkImageView> m_hdrResolveImageViews;
+    std::vector<VkImageView> m_hdrResolveSampleImageViews;
     std::vector<TransientImageHandle> m_hdrResolveTransientHandles;
     std::vector<bool> m_hdrResolveImageInitialized;
+    uint32_t m_hdrResolveMipLevels = 1;
     VkSampler m_hdrResolveSampler = VK_NULL_HANDLE;
     std::vector<VkImage> m_depthImages;
     std::vector<VkDeviceMemory> m_depthImageMemories;

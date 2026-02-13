@@ -31,6 +31,76 @@ float3 decodeViewNormal(float3 encodedNormal)
     return normalize((encodedNormal * 2.0) - 1.0);
 }
 
+float luminance709(float3 color)
+{
+    return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
+
+float3 extractBloom(float3 hdrColor, float threshold, float softKnee)
+{
+    const float luma = max(luminance709(hdrColor), 0.0);
+    const float knee = max(threshold * softKnee, 1e-5);
+    const float soft = clamp((luma - threshold + knee) / (2.0 * knee), 0.0, 1.0);
+    const float contribution = max(luma - threshold, 0.0) + (soft * soft * knee);
+    if (contribution <= 1e-5 || luma <= 1e-5)
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+    return hdrColor * (contribution / luma);
+}
+
+float3 sampleMipChainBloom(float2 uv, float sunFacing)
+{
+    const float bloomThreshold = max(camera.skyConfig3.x, 0.0);
+    const float bloomSoftKnee = clamp(camera.skyConfig3.y, 0.0, 1.0);
+    const float3 bloomMip1 = extractBloom(hdrSceneColor.SampleLevel(uv, 1.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip2 = extractBloom(hdrSceneColor.SampleLevel(uv, 2.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip3 = extractBloom(hdrSceneColor.SampleLevel(uv, 3.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip4 = extractBloom(hdrSceneColor.SampleLevel(uv, 4.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip5 = extractBloom(hdrSceneColor.SampleLevel(uv, 5.0).xyz, bloomThreshold, bloomSoftKnee);
+
+    float3 bloom =
+        (bloomMip1 * 0.50) +
+        (bloomMip2 * 0.28) +
+        (bloomMip3 * 0.14) +
+        (bloomMip4 * 0.06) +
+        (bloomMip5 * 0.03);
+    const float sunFacingScale = lerp(0.85, 1.35, clamp(sunFacing, 0.0, 1.0));
+    return bloom * sunFacingScale;
+}
+
+float3 analyticSunBloom(float2 uv, float sunFacing)
+{
+    const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
+    const float3 sunView = mul((float3x3)camera.view, toSun);
+    if (sunView.z >= -1e-4)
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+
+    const float invDepth = 1.0 / max(-sunView.z, 1e-4);
+    const float2 sunNdc = float2(
+        sunView.x * camera.proj[0][0] * invDepth,
+        sunView.y * camera.proj[1][1] * invDepth
+    );
+    const float2 sunUv = (sunNdc * 0.5) + 0.5;
+
+    float2 delta = uv - sunUv;
+    const float aspect = clamp(
+        abs(camera.proj[1][1]) / max(abs(camera.proj[0][0]), 1e-4),
+        0.25,
+        4.0
+    );
+    delta.x *= aspect;
+    const float radialDistance = length(delta);
+
+    const float core = exp(-radialDistance * 62.0);
+    const float halo = exp(-radialDistance * 12.0);
+    const float wide = exp(-radialDistance * 3.0);
+    const float glow = (1.75 * core) + (0.95 * halo) + (0.35 * wide);
+    return camera.sunColorShadow.xyz * (glow * clamp(sunFacing, 0.0, 1.0));
+}
+
 struct FragmentInput
 {
     float2 inUv : TEXCOORD0;
@@ -71,6 +141,21 @@ float4 main(FragmentInput input) : SV_Target0
     const float ssaoContribution = lerp(1.0, ssao, ssaoIntensity);
     const float aoFactor = lerp(1.0, ssaoContribution, ssaoEnable);
     hdrColor *= lerp(1.0, aoFactor, geometryMask);
+
+    const float3x3 invViewRotation = transpose((float3x3)camera.view);
+    const float3 cameraForward = normalize(mul(invViewRotation, float3(0.0, 0.0, -1.0)));
+    const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
+    const float sunFacing = smoothstep(cos(radians(20.0)), cos(radians(3.0)), dot(cameraForward, toSun));
+
+    const float bloomBaseIntensity = max(camera.skyConfig3.z, 0.0);
+    const float bloomSunFacingBoost = max(camera.skyConfig3.w, 0.0);
+    const float bloomIntensity = bloomBaseIntensity + (sunFacing * bloomSunFacingBoost);
+    if (bloomIntensity > 1e-5)
+    {
+        const float3 sampledBloom = sampleMipChainBloom(input.inUv, sunFacing);
+        const float3 sunBloom = analyticSunBloom(input.inUv, sunFacing);
+        hdrColor += (sampledBloom + sunBloom) * bloomIntensity;
+    }
 
     const float exposure = 0.58;
     float3 toneMapped = acesFilmTonemap(hdrColor * exposure);
