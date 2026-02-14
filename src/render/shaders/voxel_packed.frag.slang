@@ -228,15 +228,16 @@ float sampleVoxelSkyExposure(float3 worldPosition)
         return 0.0;
     }
 
-    // March upward in voxel-sized steps; reaching outside the top means open sky.
+    // March upward in voxel-sized steps, but only inside LPV bounds.
+    // Reaching outside the LPV is treated as unknown (not open-sky proof).
     const float uvStepY = cellSize / max(gridExtent.y, cellSize);
-    const uint maxSteps = 32u;
+    const uint maxSteps = 64u;
     uvw.y += uvStepY * 0.5;
     for (uint i = 0u; i < maxSteps; ++i)
     {
         if (uvw.y >= 1.0)
         {
-            return 1.0;
+            return 0.0;
         }
         if (uvw.y < 0.0)
         {
@@ -560,8 +561,7 @@ float4 main(FragmentInput input) : SV_Target0
         const float skyProbeNdotL = max(dot(skyProbeNormal, -sunDirection), 0.25);
         skyOcclusion = selectShadowVisibility(input.inWorldPosition, skyProbeNormal, viewDepth, skyProbeNdotL);
     }
-    const float skyVisibilityFloor = 0.18;
-    const float skyVisibility = lerp(skyVisibilityFloor, 1.0, clamp(skyOcclusion, 0.0, 1.0));
+    const float skyVisibility = clamp(skyOcclusion, 0.0, 1.0);
 
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = lerp(1.0, clamp(input.inVertexAo, 0.0, 1.0), vertexAoEnable);
@@ -599,7 +599,7 @@ float4 main(FragmentInput input) : SV_Target0
     const float ambientFloor = clamp(camera.shadowVoxelGridOrigin.y, 0.0, 1.0);
     const float ambientScale = clamp(1.0 / (1.0 + (voxelGiLumaValue * ambientRebalanceStrength)), ambientFloor, 1.0);
     const float skyExposureFromVoxel = sampleVoxelSkyExposure(input.inWorldPosition + (normal * 0.08));
-    const float ambientSkyVisibility = max(lerp(0.45, 1.0, skyVisibility), lerp(0.45, 1.0, skyExposureFromVoxel));
+    const float ambientSkyVisibility = max(skyVisibility * lerp(0.20, 1.0, skyExposureFromVoxel), skyExposureFromVoxel);
     const float3 ambient = selectAmbient(normal, vertexAo) * ambientScale * ambientSkyVisibility;
     const float3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);

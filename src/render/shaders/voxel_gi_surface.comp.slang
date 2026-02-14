@@ -65,14 +65,14 @@ bool inBounds(int3 cell, int3 dims)
 
 float sampleSkyColumnExposure(int3 cell, int3 dims)
 {
-    // March upward; if we exit the volume without hitting solids, this cell is sky-open.
+    // March upward within LPV bounds. Exiting the LPV is treated as unknown (not guaranteed open sky).
     int3 probe = cell + int3(0, 1, 0);
     const int maxSteps = 64;
     for (int step = 0; step < maxSteps; ++step)
     {
         if (!inBounds(probe, dims))
         {
-            return 1.0;
+            return 0.0;
         }
         const float occupancy = voxelGiOccupancy.Load(int4(probe, 0)).x;
         if (occupancy > 0.5)
@@ -205,8 +205,9 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                 skyVisibility *= skyBlockedStepVisibility;
             }
         }
-        const float boostedSkyVisibility = max(skyVisibility, skyColumnExposure);
-        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * boostedSkyVisibility);
+        // Soft gate: keep enclosed spaces dark, but avoid over-darkening near open sky.
+        const float skyVisibilityFromOccupancy = skyVisibility * lerp(0.12, 1.0, skyColumnExposure);
+        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyVisibilityFromOccupancy);
         const float ndotl = max(dot(normal, -sunDirection), 0.0);
         const float3 faceCenterOffset = normal * (cellSize * 0.51);
         const float3 receiverBiasOffset = normal * (cellSize * 0.02);
