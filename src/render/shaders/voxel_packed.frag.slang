@@ -132,18 +132,24 @@ float3 sampleVoxelGi(float3 worldPosition, float3 normal)
         return float3(0.0, 0.0, 0.0);
     }
 
-    const float3 uvwForward = (worldPosition + (normal * (cellSize * 0.35)) - gridOrigin) / gridExtent;
-    const float3 uvwBack = (worldPosition - (normal * (cellSize * 0.20)) - gridOrigin) / gridExtent;
+    // Sample only toward open air to reduce wall-edge bleed from opposite-side interpolation.
+    const float3 uvwForward = (worldPosition + (normal * (cellSize * 0.55)) - gridOrigin) / gridExtent;
+    const float3 uvwInterior = (worldPosition - (normal * (cellSize * 0.35)) - gridOrigin) / gridExtent;
     const float3 giCenter = voxelGiVolume.SampleLevel(uvwCenter, 0.0).xyz;
     const float3 giForward =
         (any(uvwForward < float3(0.0, 0.0, 0.0)) || any(uvwForward > float3(1.0, 1.0, 1.0)))
             ? giCenter
             : voxelGiVolume.SampleLevel(uvwForward, 0.0).xyz;
-    const float3 giBack =
-        (any(uvwBack < float3(0.0, 0.0, 0.0)) || any(uvwBack > float3(1.0, 1.0, 1.0)))
-            ? giCenter
-            : voxelGiVolume.SampleLevel(uvwBack, 0.0).xyz;
-    const float3 giRadiance = (giCenter * 0.50) + (giForward * 0.35) + (giBack * 0.15);
+
+    // If interior side is occupied, trust outward sample only (prevents through-wall pull).
+    const float interiorOccupancy =
+        (any(uvwInterior < float3(0.0, 0.0, 0.0)) || any(uvwInterior > float3(1.0, 1.0, 1.0)))
+            ? 0.0
+            : voxelGiOccupancyVolume.SampleLevel(uvwInterior, 0.0).x;
+    const float oneSidedBlend = (interiorOccupancy > 0.5) ? 1.0 : 0.0;
+    const float3 baseBlend = (giCenter * 0.70) + (giForward * 0.30);
+    const float3 oneSidedBlendTarget = (giCenter * 0.20) + (giForward * 0.80);
+    const float3 giRadiance = lerp(baseBlend, oneSidedBlendTarget, oneSidedBlend);
     return giRadiance * max(camera.voxelGiGridExtentStrength.w, 0.0);
 }
 

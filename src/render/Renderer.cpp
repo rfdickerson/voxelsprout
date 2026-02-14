@@ -9742,12 +9742,12 @@ void Renderer::renderFrame(
     mvpUniform.shadowConfig2[0] = m_shadowDebugSettings.ssaoRadius;
     mvpUniform.shadowConfig2[1] = m_shadowDebugSettings.ssaoBias;
     mvpUniform.shadowConfig2[2] = m_shadowDebugSettings.ssaoIntensity;
-    constexpr float kVoxelGiInjectSunScale = 0.80f;
-    constexpr float kVoxelGiInjectShScale = 0.70f;
-    constexpr float kVoxelGiPropagateFrameDecay = 0.94f;
-    constexpr float kVoxelGiAmbientRebalanceStrength = 0.90f;
-    constexpr float kVoxelGiAmbientFloor = 0.55f;
-    constexpr float kVoxelGiStrength = 0.95f;
+    constexpr float kVoxelGiInjectSunScale = 1.10f;
+    constexpr float kVoxelGiInjectShScale = 1.00f;
+    constexpr float kVoxelGiPropagateFrameDecay = 0.96f;
+    constexpr float kVoxelGiAmbientRebalanceStrength = 0.60f;
+    constexpr float kVoxelGiAmbientFloor = 0.72f;
+    constexpr float kVoxelGiStrength = 1.35f;
     const float kVoxelGiPropagateDecay = std::pow(
         std::clamp(kVoxelGiPropagateFrameDecay, 0.0f, 1.0f),
         1.0f / static_cast<float>(kVoxelGiPropagationIterations)

@@ -69,7 +69,7 @@ float sampleSunVoxelVisibility(int3 cell, int3 faceOffset, int3 dims, float3 sun
     float3 rayPos = float3(cell) + 0.5 + (float3(faceOffset) * 0.51);
     const float rayStepCells = 1.0;
     const int maxRaySteps = 8;
-    const float blockerStepTransmission = 0.55;
+    const float blockerStepTransmission = 0.78;
     float visibility = 1.0;
     for (int step = 0; step < maxRaySteps; ++step)
     {
@@ -84,9 +84,9 @@ float sampleSunVoxelVisibility(int3 cell, int3 faceOffset, int3 dims, float3 sun
         if (sampleOccupancy > 0.5)
         {
             visibility *= blockerStepTransmission;
-            if (visibility <= 0.08)
+            if (visibility <= 0.20)
             {
-                return 0.08;
+                return 0.20;
             }
         }
     }
@@ -151,7 +151,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float3 cachedSurfaceIrradiancePos = float3(0.0, 0.0, 0.0);
     float3 cachedSurfaceIrradianceNeg = float3(0.0, 0.0, 0.0);
     const int skyOcclusionSteps = 2;
-    const float skyBlockedStepVisibility = 0.60;
+    const float skyBlockedStepVisibility = 0.78;
     for (int i = 0; i < 6; ++i)
     {
         const float3 normal = normals[i];
