@@ -599,7 +599,8 @@ float4 main(FragmentInput input) : SV_Target0
     const float ambientFloor = clamp(camera.shadowVoxelGridOrigin.y, 0.0, 1.0);
     const float ambientScale = clamp(1.0 / (1.0 + (voxelGiLumaValue * ambientRebalanceStrength)), ambientFloor, 1.0);
     const float skyExposureFromVoxel = sampleVoxelSkyExposure(input.inWorldPosition + (normal * 0.08));
-    const float ambientSkyVisibility = max(skyVisibility * lerp(0.20, 1.0, skyExposureFromVoxel), skyExposureFromVoxel);
+    const float ambientSkyVisibility =
+        max(skyVisibility * lerp(0.20, 1.0, skyExposureFromVoxel), 0.40 * skyExposureFromVoxel);
     const float3 ambient = selectAmbient(normal, vertexAo) * ambientScale * ambientSkyVisibility;
     const float3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);
