@@ -86,8 +86,9 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     // Occupied boundary cells are persistent colored sources; boost their influence slightly
     // so local bleed reads more clearly without adding extra directional storage yet.
     const float occupiedBoundaryWeight = 1.35;
+    const float diffusionScale = (1.0 / 6.0);
+    const float thinWallTransmission = 0.25;
     float3 neighborWeightedSum = float3(0.0, 0.0, 0.0);
-    float neighborWeightSum = 0.0;
     for (int i = 0; i < 6; ++i)
     {
         const int3 neighborCell = cell + offsets[i];
@@ -102,15 +103,23 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             const float boundaryIrradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i]);
             const float3 boundaryRadiance = boundaryAlbedo * boundaryIrradiance;
             neighborWeightedSum += boundaryRadiance * occupiedBoundaryWeight;
-            neighborWeightSum += occupiedBoundaryWeight;
             continue;
         }
-        neighborWeightedSum += voxelGiPropagateIn[uint3(neighborCell)].xyz;
-        neighborWeightSum += 1.0;
+        float neighborWeight = 1.0;
+        const int3 blockerCell = cell + (offsets[i] * 2);
+        if (inBounds(blockerCell, dims))
+        {
+            const float blockerOccupancy = voxelGiOccupancy.Load(int4(blockerCell, 0)).x;
+            if (blockerOccupancy > 0.5)
+            {
+                neighborWeight = thinWallTransmission;
+            }
+        }
+        neighborWeightedSum += voxelGiPropagateIn[uint3(neighborCell)].xyz * neighborWeight;
     }
 
-    const float3 neighborAverage = (neighborWeightSum > 0.0) ? (neighborWeightedSum / neighborWeightSum) : center;
-    const float3 mixed = lerp(center, neighborAverage, propagateBlend);
+    const float3 diffusion = neighborWeightedSum * diffusionScale;
+    const float3 mixed = lerp(center, diffusion, propagateBlend);
     const float3 propagated = max(mixed * propagateDecay, float3(0.0, 0.0, 0.0));
     voxelGiPropagateOut[dispatchThreadId] = float4(propagated, 1.0);
 }
