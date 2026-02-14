@@ -73,7 +73,7 @@ constexpr std::array<ShadowAtlasRect, kShadowCascadeCount> kShadowAtlasRects = {
 constexpr uint32_t kShadowAtlasSize = 8192u;
 constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
-constexpr uint32_t kVoxelGiPropagationIterations = 6u;
+constexpr uint32_t kVoxelGiPropagationIterations = 8u;
 constexpr uint32_t kHdrResolveBloomMipCount = 6u;
 constexpr uint32_t kAutoExposureHistogramBins = 64u;
 constexpr uint32_t kAutoExposureWorkgroupSize = 16u;
@@ -10724,20 +10724,28 @@ void Renderer::renderFrame(
         }
     }
 
+    constexpr bool kDisableShadowCasterCulling = true;
     constexpr float kShadowCasterClipMargin = 0.08f;
-    for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-        if (!shadowCandidateMask.empty() && shadowCandidateMask[chunkArrayIndex] == 0u) {
-            continue;
+    if (kDisableShadowCasterCulling) {
+        const uint32_t allCascadeMask = (1u << kShadowCascadeCount) - 1u;
+        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
+            appendShadowChunkLods(chunkArrayIndex, allCascadeMask);
         }
-        const world::Chunk& chunk = chunks[chunkArrayIndex];
-        uint32_t cascadeMask = 0u;
-        for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-            if (chunkIntersectsShadowCascadeClip(chunk, lightViewProjMatrices[cascadeIndex], kShadowCasterClipMargin)) {
-                cascadeMask |= (1u << cascadeIndex);
+    } else {
+        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
+            if (!shadowCandidateMask.empty() && shadowCandidateMask[chunkArrayIndex] == 0u) {
+                continue;
             }
-        }
-        if (cascadeMask != 0u) {
-            appendShadowChunkLods(chunkArrayIndex, cascadeMask);
+            const world::Chunk& chunk = chunks[chunkArrayIndex];
+            uint32_t cascadeMask = 0u;
+            for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+                if (chunkIntersectsShadowCascadeClip(chunk, lightViewProjMatrices[cascadeIndex], kShadowCasterClipMargin)) {
+                    cascadeMask |= (1u << cascadeIndex);
+                }
+            }
+            if (cascadeMask != 0u) {
+                appendShadowChunkLods(chunkArrayIndex, cascadeMask);
+            }
         }
     }
 
