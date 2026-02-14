@@ -9755,7 +9755,7 @@ void Renderer::renderFrame(
     mvpUniform.shadowConfig2[1] = m_shadowDebugSettings.ssaoBias;
     mvpUniform.shadowConfig2[2] = m_shadowDebugSettings.ssaoIntensity;
     constexpr float kVoxelGiInjectSunScale = 0.70f;
-    constexpr float kVoxelGiInjectShScale = 0.60f;
+    constexpr float kVoxelGiInjectShScale = 0.95f;
     constexpr float kVoxelGiPropagateFrameDecay = 0.93f;
     constexpr float kVoxelGiAmbientRebalanceStrength = 0.95f;
     constexpr float kVoxelGiAmbientFloor = 0.55f;
