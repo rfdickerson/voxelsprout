@@ -9000,7 +9000,7 @@ void Renderer::buildSunDebugUi() {
     ImGui::Checkbox("Auto Exposure", &m_skyDebugSettings.autoExposureEnabled);
     ImGui::SliderFloat("Manual Exposure", &m_skyDebugSettings.manualExposure, 0.05f, 4.0f, "%.3f");
     if (m_skyDebugSettings.autoExposureEnabled) {
-        ImGui::SliderInt("AE Update Interval", &m_skyDebugSettings.autoExposureUpdateIntervalFrames, 1, 8);
+        ImGui::TextDisabled("AE Update Interval: fixed to every frame");
         ImGui::SliderFloat("AE Key Value", &m_skyDebugSettings.autoExposureKeyValue, 0.05f, 0.50f, "%.3f");
         ImGui::SliderFloat("AE Min Exposure", &m_skyDebugSettings.autoExposureMin, 0.05f, 2.50f, "%.3f");
         ImGui::SliderFloat("AE Max Exposure", &m_skyDebugSettings.autoExposureMax, 0.20f, 8.00f, "%.3f");
@@ -12573,12 +12573,7 @@ void Renderer::renderFrame(
         m_autoExposureDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
         autoExposureHistogramBuffer != VK_NULL_HANDLE &&
         autoExposureStateBuffer != VK_NULL_HANDLE;
-    const uint32_t autoExposureUpdateIntervalFrames = static_cast<uint32_t>(
-        std::max(1, m_skyDebugSettings.autoExposureUpdateIntervalFrames)
-    );
-    const bool autoExposureWantsUpdate =
-        (m_autoExposureFrameCounter % autoExposureUpdateIntervalFrames) == 0u;
-    if (autoExposureEnabled && autoExposurePassResourcesReady && autoExposureWantsUpdate) {
+    if (autoExposureEnabled && autoExposurePassResourcesReady) {
         wroteAutoExposureTimestamps = true;
         writeGpuTimestampTop(kGpuTimestampQueryAutoExposureStart);
         beginDebugLabel(commandBuffer, "Pass: Auto Exposure", 0.30f, 0.30f, 0.20f, 1.0f);
@@ -12614,7 +12609,8 @@ void Renderer::renderFrame(
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
         );
 
-        constexpr uint32_t kAutoExposureTargetDownsampleMip = 2u;
+        // Use a smaller source mip for histogram construction to keep auto-exposure cheaper than heavy fullscreen passes.
+        constexpr uint32_t kAutoExposureTargetDownsampleMip = 3u;
         const uint32_t availableHdrMipLevels = std::max(1u, m_hdrResolveMipLevels);
         const uint32_t histogramSourceMip = std::min(
             kAutoExposureTargetDownsampleMip,
@@ -13071,7 +13067,6 @@ void Renderer::renderFrame(
     m_debugFrameArenaResidentAliasReuses = frameArenaResidentStats.imageAliasReuses;
     m_frameArena.collectAliasedImageDebugInfo(m_debugAliasedImages);
 
-    ++m_autoExposureFrameCounter;
     m_currentFrame = (m_currentFrame + 1) % kMaxFramesInFlight;
 }
 
@@ -13940,7 +13935,6 @@ void Renderer::shutdown() {
     m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     m_autoExposureComputeAvailable = false;
     m_autoExposureHistoryValid = false;
-    m_autoExposureFrameCounter = 0;
     m_sunShaftComputeAvailable = false;
     m_sunShaftShaderAvailable = false;
     m_supportsWireframePreview = false;
