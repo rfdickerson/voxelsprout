@@ -10,13 +10,43 @@ RWTexture3D<float4> voxelGiPropagateIn;
 RWTexture3D<float4> voxelGiPropagateOut;
 
 [[vk::binding(5, 0)]]
-Sampler3D<float4> voxelGiOccupancy;
+Texture3D<float4> voxelGiOccupancy;
+
+[[vk::binding(6, 0)]]
+RWTexture3D<float4> voxelGiSurfacePosCache;
+
+[[vk::binding(7, 0)]]
+RWTexture3D<float4> voxelGiSurfaceNegCache;
 
 bool inBounds(int3 cell, int3 dims)
 {
     return
         cell.x >= 0 && cell.y >= 0 && cell.z >= 0 &&
         cell.x < dims.x && cell.y < dims.y && cell.z < dims.z;
+}
+
+float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver)
+{
+    const float3 surfacePos = max(voxelGiSurfacePosCache[uint3(cell)].xyz, float3(0.0, 0.0, 0.0));
+    const float3 surfaceNeg = max(voxelGiSurfaceNegCache[uint3(cell)].xyz, float3(0.0, 0.0, 0.0));
+
+    const float3 dir = float3(directionToReceiver);
+    const float3 absDir = abs(dir);
+    if ((absDir.x + absDir.y + absDir.z) <= 0.0)
+    {
+        return 0.0;
+    }
+
+    // Pick the face from the dominant axis; ties resolve deterministically (X, then Y, then Z).
+    if (absDir.x >= absDir.y && absDir.x >= absDir.z)
+    {
+        return (dir.x >= 0.0) ? surfacePos.x : surfaceNeg.x;
+    }
+    if (absDir.y >= absDir.z)
+    {
+        return (dir.y >= 0.0) ? surfacePos.y : surfaceNeg.y;
+    }
+    return (dir.z >= 0.0) ? surfacePos.z : surfaceNeg.z;
 }
 
 [numthreads(4, 4, 4)]
@@ -35,9 +65,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const int3 cell = int3(dispatchThreadId);
     const float propagateBlend = clamp(camera.shadowConfig3.z, 0.0, 1.0);
     const float propagateDecay = clamp(camera.skyConfig2.w, 0.0, 1.0);
-    const float3 occupancyUv =
-        (float3(dispatchThreadId) + 0.5) / float3(float(gridW), float(gridH), float(gridD));
-    const float occupancy = voxelGiOccupancy.SampleLevel(occupancyUv, 0.0).x;
+    const float occupancy = voxelGiOccupancy.Load(int4(int3(dispatchThreadId), 0)).x;
     if (occupancy > 0.5)
     {
         voxelGiPropagateOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
@@ -55,8 +83,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         int3(0, 0, -1)
     };
 
-    float3 neighborSum = float3(0.0, 0.0, 0.0);
-    int neighborCount = 0;
+    // Occupied boundary cells are persistent colored sources; boost their influence slightly
+    // so local bleed reads more clearly without adding extra directional storage yet.
+    const float occupiedBoundaryWeight = 1.35;
+    float3 neighborWeightedSum = float3(0.0, 0.0, 0.0);
+    float neighborWeightSum = 0.0;
     for (int i = 0; i < 6; ++i)
     {
         const int3 neighborCell = cell + offsets[i];
@@ -64,18 +95,21 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         {
             continue;
         }
-        const float3 neighborUv =
-            (float3(neighborCell) + 0.5) / float3(float(gridW), float(gridH), float(gridD));
-        const float neighborOccupancy = voxelGiOccupancy.SampleLevel(neighborUv, 0.0).x;
-        if (neighborOccupancy > 0.5)
+        const float4 neighborOccupancySample = voxelGiOccupancy.Load(int4(neighborCell, 0));
+        if (neighborOccupancySample.x > 0.5)
         {
+            const float3 boundaryAlbedo = saturate(neighborOccupancySample.yzw);
+            const float boundaryIrradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i]);
+            const float3 boundaryRadiance = boundaryAlbedo * boundaryIrradiance;
+            neighborWeightedSum += boundaryRadiance * occupiedBoundaryWeight;
+            neighborWeightSum += occupiedBoundaryWeight;
             continue;
         }
-        neighborSum += voxelGiPropagateIn[uint3(neighborCell)].xyz;
-        neighborCount += 1;
+        neighborWeightedSum += voxelGiPropagateIn[uint3(neighborCell)].xyz;
+        neighborWeightSum += 1.0;
     }
 
-    const float3 neighborAverage = (neighborCount > 0) ? (neighborSum / float(neighborCount)) : center;
+    const float3 neighborAverage = (neighborWeightSum > 0.0) ? (neighborWeightedSum / neighborWeightSum) : center;
     const float3 mixed = lerp(center, neighborAverage, propagateBlend);
     const float3 propagated = max(mixed * propagateDecay, float3(0.0, 0.0, 0.0));
     voxelGiPropagateOut[dispatchThreadId] = float4(propagated, 1.0);

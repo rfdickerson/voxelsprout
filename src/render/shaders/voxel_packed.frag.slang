@@ -433,8 +433,11 @@ float4 main(FragmentInput input) : SV_Target0
     const int voxelGiDebugMode = int(camera.shadowVoxelGridOrigin.z + 0.5);
     if (voxelGiDebugMode == 1)
     {
-        const float3 giVis = max(voxelGi * 2.5, float3(0.0, 0.0, 0.0));
-        return float4(giVis, 1.0);
+        const float3 giClamped = max(voxelGi, float3(0.0, 0.0, 0.0));
+        const float peak = max(max(giClamped.x, giClamped.y), giClamped.z);
+        const float3 hue = (peak > 0.0001) ? (giClamped / peak) : float3(0.0, 0.0, 0.0);
+        const float intensity = clamp(log2(1.0 + (peak * 8.0)) / 4.0, 0.0, 1.0);
+        return float4(hue * intensity, 1.0);
     }
     if (voxelGiDebugMode == 2)
     {
