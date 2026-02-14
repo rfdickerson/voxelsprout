@@ -10,6 +10,9 @@ Sampler2DShadow shadowMap;
 [[vk::binding(9, 0)]]
 Sampler3D<float4> voxelGiVolume;
 
+[[vk::binding(11, 0)]]
+Sampler3D<float4> voxelGiOccupancyVolume;
+
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
 
@@ -142,6 +145,70 @@ float3 sampleVoxelGi(float3 worldPosition, float3 normal)
             : voxelGiVolume.SampleLevel(uvwBack, 0.0).xyz;
     const float3 giRadiance = (giCenter * 0.50) + (giForward * 0.35) + (giBack * 0.15);
     return giRadiance * max(camera.voxelGiGridExtentStrength.w, 0.0);
+}
+
+float giLumaFromColor(float3 color)
+{
+    return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
+
+float3 sampleVoxelGiDebug(float3 worldPosition, float3 normal)
+{
+    const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
+    const float3 gridOrigin = camera.voxelGiGridOriginCellSize.xyz;
+    const float3 gridExtent = max(camera.voxelGiGridExtentStrength.xyz, float3(cellSize, cellSize, cellSize));
+    const float3 uvwCenter = (worldPosition - gridOrigin) / gridExtent;
+    if (any(uvwCenter < float3(0.0, 0.0, 0.0)) || any(uvwCenter > float3(1.0, 1.0, 1.0)))
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+
+    const float occupancyCenter = voxelGiOccupancyVolume.SampleLevel(uvwCenter, 0.0).x;
+    if (occupancyCenter > 0.5)
+    {
+        // For solid voxels, sample just outside the face into air where GI radiance exists.
+        const float probeDistance = cellSize * 0.90;
+        return sampleVoxelGi(worldPosition + (normal * probeDistance), normal);
+    }
+
+    // For empty cells, center is already representative.
+    return sampleVoxelGi(worldPosition, normal);
+}
+
+float3 sampleVoxelGiOccupancyAlbedo(float3 worldPosition, float3 normal)
+{
+    const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
+    const float3 gridOrigin = camera.voxelGiGridOriginCellSize.xyz;
+    const float3 gridExtent = max(camera.voxelGiGridExtentStrength.xyz, float3(cellSize, cellSize, cellSize));
+    const float3 uvwCenter = (worldPosition - gridOrigin) / gridExtent;
+    if (any(uvwCenter < float3(0.0, 0.0, 0.0)) || any(uvwCenter > float3(1.0, 1.0, 1.0)))
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+
+    const float probeDistance = cellSize * 0.90;
+    const float3 uvwForward = (worldPosition + (normal * probeDistance) - gridOrigin) / gridExtent;
+    const float3 uvwBack = (worldPosition - (normal * probeDistance) - gridOrigin) / gridExtent;
+    const float4 center = voxelGiOccupancyVolume.SampleLevel(uvwCenter, 0.0);
+    const float4 forward =
+        (any(uvwForward < float3(0.0, 0.0, 0.0)) || any(uvwForward > float3(1.0, 1.0, 1.0)))
+            ? center
+            : voxelGiOccupancyVolume.SampleLevel(uvwForward, 0.0);
+    const float4 back =
+        (any(uvwBack < float3(0.0, 0.0, 0.0)) || any(uvwBack > float3(1.0, 1.0, 1.0)))
+            ? center
+            : voxelGiOccupancyVolume.SampleLevel(uvwBack, 0.0);
+
+    float4 best = center;
+    if (forward.x > best.x)
+    {
+        best = forward;
+    }
+    if (back.x > best.x)
+    {
+        best = back;
+    }
+    return (best.x > 0.5) ? saturate(best.yzw) : float3(0.0, 0.0, 0.0);
 }
 
 float3 voxelGiFalseColor(float t)
@@ -456,10 +523,11 @@ float4 main(FragmentInput input) : SV_Target0
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = lerp(1.0, clamp(input.inVertexAo, 0.0, 1.0), vertexAoEnable);
     const float3 voxelGi = sampleVoxelGi(input.inWorldPosition, normal) * vertexAo;
+    const float3 voxelGiDebug = sampleVoxelGiDebug(input.inWorldPosition, normal) * vertexAo;
     const int voxelGiDebugMode = int(camera.shadowVoxelGridOrigin.z + 0.5);
     if (voxelGiDebugMode == 1)
     {
-        const float3 giClamped = max(voxelGi, float3(0.0, 0.0, 0.0));
+        const float3 giClamped = max(voxelGiDebug, float3(0.0, 0.0, 0.0));
         const float peak = max(max(giClamped.x, giClamped.y), giClamped.z);
         const float3 hue = (peak > 0.0001) ? (giClamped / peak) : float3(0.0, 0.0, 0.0);
         const float intensity = clamp(log2(1.0 + (peak * 8.0)) / 4.0, 0.0, 1.0);
@@ -467,15 +535,26 @@ float4 main(FragmentInput input) : SV_Target0
     }
     if (voxelGiDebugMode == 2)
     {
-        const float giLuma = dot(voxelGi, float3(0.2126, 0.7152, 0.0722));
+        const float giLuma = giLumaFromColor(voxelGiDebug);
         const float giMapped = clamp(log2(1.0 + (giLuma * 6.0)) / 3.0, 0.0, 1.0);
         return float4(voxelGiFalseColor(giMapped), 1.0);
     }
+    if (voxelGiDebugMode == 3)
+    {
+        const float giLuma = giLumaFromColor(voxelGiDebug);
+        const float giMapped = clamp(log2(1.0 + (giLuma * 4.0)) / 3.0, 0.0, 1.0);
+        return float4(giMapped, giMapped, giMapped, 1.0);
+    }
+    if (voxelGiDebugMode == 4)
+    {
+        const float3 occupancyAlbedo = sampleVoxelGiOccupancyAlbedo(input.inWorldPosition, normal);
+        return float4(occupancyAlbedo, 1.0);
+    }
 
-    const float voxelGiLuma = dot(voxelGi, float3(0.2126, 0.7152, 0.0722));
+    const float voxelGiLumaValue = giLumaFromColor(voxelGi);
     const float ambientRebalanceStrength = max(camera.shadowVoxelGridOrigin.x, 0.0);
     const float ambientFloor = clamp(camera.shadowVoxelGridOrigin.y, 0.0, 1.0);
-    const float ambientScale = clamp(1.0 / (1.0 + (voxelGiLuma * ambientRebalanceStrength)), ambientFloor, 1.0);
+    const float ambientScale = clamp(1.0 / (1.0 + (voxelGiLumaValue * ambientRebalanceStrength)), ambientFloor, 1.0);
     const float ambientSkyVisibility = lerp(0.45, 1.0, skyVisibility);
     const float3 ambient = selectAmbient(normal, vertexAo) * ambientScale * ambientSkyVisibility;
     const float3 directSun = sunColor * (sunIntensity * ndotl);

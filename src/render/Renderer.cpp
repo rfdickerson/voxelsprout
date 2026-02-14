@@ -5662,7 +5662,13 @@ bool Renderer::createDescriptorResources() {
         sunShaftBinding.descriptorCount = 1;
         sunShaftBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 10> bindings = {
+        VkDescriptorSetLayoutBinding voxelGiOccupancyDebugBinding{};
+        voxelGiOccupancyDebugBinding.binding = 11;
+        voxelGiOccupancyDebugBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        voxelGiOccupancyDebugBinding.descriptorCount = 1;
+        voxelGiOccupancyDebugBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 11> bindings = {
             mvpBinding,
             diffuseTextureBinding,
             exposureStateBinding,
@@ -5672,7 +5678,8 @@ bool Renderer::createDescriptorResources() {
             ssaoBlurBinding,
             ssaoRawBinding,
             voxelGiBinding,
-            sunShaftBinding
+            sunShaftBinding,
+            voxelGiOccupancyDebugBinding
         };
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
@@ -5701,7 +5708,7 @@ bool Renderer::createDescriptorResources() {
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                8 * kMaxFramesInFlight
+                9 * kMaxFramesInFlight
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -8918,15 +8925,9 @@ void Renderer::buildShadowDebugUi() {
     ImGui::Separator();
     ImGui::Text("Voxel GI");
     ImGui::Text("Compute: %s", m_voxelGiComputeAvailable ? "on" : "fallback");
-    ImGui::SliderFloat("GI Strength", &m_voxelGiDebugSettings.strength, 0.0f, 1.50f, "%.2f");
-    ImGui::SliderFloat("GI Inject Sun", &m_voxelGiDebugSettings.injectSunScale, 0.0f, 2.50f, "%.2f");
-    ImGui::SliderFloat("GI Inject SH", &m_voxelGiDebugSettings.injectShScale, 0.0f, 2.50f, "%.2f");
-    ImGui::SliderFloat("GI Inject Bounce", &m_voxelGiDebugSettings.injectBounceScale, 0.0f, 2.50f, "%.2f");
-    ImGui::SliderFloat("GI Propagate Blend", &m_voxelGiDebugSettings.propagateBlend, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("GI Propagate Decay", &m_voxelGiDebugSettings.propagateDecay, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("GI Ambient Balance", &m_voxelGiDebugSettings.ambientRebalanceStrength, 0.0f, 4.0f, "%.2f");
-    ImGui::SliderFloat("GI Ambient Floor", &m_voxelGiDebugSettings.ambientFloor, 0.0f, 1.0f, "%.2f");
-    const char* giVisualizationModes = "Off\0Radiance\0False Color Luma\0";
+    ImGui::SliderFloat("Bounce Strength", &m_voxelGiDebugSettings.bounceStrength, 0.0f, 2.50f, "%.2f");
+    ImGui::SliderFloat("Diffusion Softness", &m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f, "%.2f");
+    const char* giVisualizationModes = "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0";
     ImGui::Combo("GI Visualize", &m_voxelGiDebugSettings.visualizationMode, giVisualizationModes);
     if (m_voxelGiDebugSettings.visualizationMode > 0) {
         m_debugVisualizeSsao = false;
@@ -9741,18 +9742,28 @@ void Renderer::renderFrame(
     mvpUniform.shadowConfig2[0] = m_shadowDebugSettings.ssaoRadius;
     mvpUniform.shadowConfig2[1] = m_shadowDebugSettings.ssaoBias;
     mvpUniform.shadowConfig2[2] = m_shadowDebugSettings.ssaoIntensity;
-    mvpUniform.shadowConfig2[3] = std::clamp(m_voxelGiDebugSettings.injectSunScale, 0.0f, 4.0f);
+    constexpr float kVoxelGiInjectSunScale = 0.80f;
+    constexpr float kVoxelGiInjectShScale = 0.70f;
+    constexpr float kVoxelGiPropagateFrameDecay = 0.94f;
+    constexpr float kVoxelGiAmbientRebalanceStrength = 0.90f;
+    constexpr float kVoxelGiAmbientFloor = 0.55f;
+    constexpr float kVoxelGiStrength = 0.95f;
+    const float kVoxelGiPropagateDecay = std::pow(
+        std::clamp(kVoxelGiPropagateFrameDecay, 0.0f, 1.0f),
+        1.0f / static_cast<float>(kVoxelGiPropagationIterations)
+    );
+    mvpUniform.shadowConfig2[3] = kVoxelGiInjectSunScale;
 
-    mvpUniform.shadowConfig3[0] = std::clamp(m_voxelGiDebugSettings.injectShScale, 0.0f, 4.0f);
-    mvpUniform.shadowConfig3[1] = std::clamp(m_voxelGiDebugSettings.injectBounceScale, 0.0f, 4.0f);
-    mvpUniform.shadowConfig3[2] = std::clamp(m_voxelGiDebugSettings.propagateBlend, 0.0f, 1.0f);
+    mvpUniform.shadowConfig3[0] = kVoxelGiInjectShScale;
+    mvpUniform.shadowConfig3[1] = std::clamp(m_voxelGiDebugSettings.bounceStrength, 0.0f, 4.0f);
+    mvpUniform.shadowConfig3[2] = std::clamp(m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f);
     mvpUniform.shadowConfig3[3] = m_shadowDebugSettings.pcfRadius;
 
-    // Reuse origin XYZ for GI tuning + debug mode to avoid enlarging camera UBO.
-    mvpUniform.shadowVoxelGridOrigin[0] = std::clamp(m_voxelGiDebugSettings.ambientRebalanceStrength, 0.0f, 8.0f);
-    mvpUniform.shadowVoxelGridOrigin[1] = std::clamp(m_voxelGiDebugSettings.ambientFloor, 0.0f, 1.0f);
+    // Reuse origin XYZ for fixed GI rebalance + debug mode to avoid enlarging camera UBO.
+    mvpUniform.shadowVoxelGridOrigin[0] = kVoxelGiAmbientRebalanceStrength;
+    mvpUniform.shadowVoxelGridOrigin[1] = kVoxelGiAmbientFloor;
     mvpUniform.shadowVoxelGridOrigin[2] =
-        static_cast<float>(std::clamp(m_voxelGiDebugSettings.visualizationMode, 0, 2));
+        static_cast<float>(std::clamp(m_voxelGiDebugSettings.visualizationMode, 0, 4));
     // W channel remains AO enable: 1.0 enables vertex AO, 0.0 disables.
     mvpUniform.shadowVoxelGridOrigin[3] = m_debugEnableVertexAo ? 1.0f : 0.0f;
 
@@ -9783,7 +9794,7 @@ void Renderer::renderFrame(
     mvpUniform.skyConfig2[0] = effectiveSkySettings.sunDiskSize;
     mvpUniform.skyConfig2[1] = effectiveSkySettings.sunHazeFalloff;
     mvpUniform.skyConfig2[2] = effectiveSkySettings.plantQuadDirectionality;
-    mvpUniform.skyConfig2[3] = std::clamp(m_voxelGiDebugSettings.propagateDecay, 0.0f, 1.0f);
+    mvpUniform.skyConfig2[3] = kVoxelGiPropagateDecay;
     mvpUniform.skyConfig3[0] = std::clamp(m_skyDebugSettings.bloomThreshold, 0.0f, 16.0f);
     mvpUniform.skyConfig3[1] = std::clamp(m_skyDebugSettings.bloomSoftKnee, 0.0f, 1.0f);
     mvpUniform.skyConfig3[2] = std::clamp(m_skyDebugSettings.bloomBaseIntensity, 0.0f, 2.0f);
@@ -9835,15 +9846,9 @@ void Renderer::renderFrame(
     }
     const bool voxelGiComputeSettingsChanged =
         !m_voxelGiHasPreviousFrameState ||
-        std::abs(m_voxelGiDebugSettings.injectSunScale - m_voxelGiPreviousInjectSunScale) >
+        std::abs(m_voxelGiDebugSettings.bounceStrength - m_voxelGiPreviousBounceStrength) >
             kVoxelGiTuningChangeThreshold ||
-        std::abs(m_voxelGiDebugSettings.injectShScale - m_voxelGiPreviousInjectShScale) >
-            kVoxelGiTuningChangeThreshold ||
-        std::abs(m_voxelGiDebugSettings.injectBounceScale - m_voxelGiPreviousInjectBounceScale) >
-            kVoxelGiTuningChangeThreshold ||
-        std::abs(m_voxelGiDebugSettings.propagateBlend - m_voxelGiPreviousPropagateBlend) >
-            kVoxelGiTuningChangeThreshold ||
-        std::abs(m_voxelGiDebugSettings.propagateDecay - m_voxelGiPreviousPropagateDecay) >
+        std::abs(m_voxelGiDebugSettings.diffusionSoftness - m_voxelGiPreviousDiffusionSoftness) >
             kVoxelGiTuningChangeThreshold;
     const bool voxelGiLightingChanged = voxelGiSunDirectionChanged || voxelGiSunColorChanged || voxelGiShChanged;
     const bool voxelGiNeedsOccupancyUpload =
@@ -9863,11 +9868,8 @@ void Renderer::renderFrame(
         const math::Vector3& coeff = shIrradiance[coeffIndex];
         m_voxelGiPreviousShIrradiance[coeffIndex] = {coeff.x, coeff.y, coeff.z};
     }
-    m_voxelGiPreviousInjectSunScale = m_voxelGiDebugSettings.injectSunScale;
-    m_voxelGiPreviousInjectShScale = m_voxelGiDebugSettings.injectShScale;
-    m_voxelGiPreviousInjectBounceScale = m_voxelGiDebugSettings.injectBounceScale;
-    m_voxelGiPreviousPropagateBlend = m_voxelGiDebugSettings.propagateBlend;
-    m_voxelGiPreviousPropagateDecay = m_voxelGiDebugSettings.propagateDecay;
+    m_voxelGiPreviousBounceStrength = m_voxelGiDebugSettings.bounceStrength;
+    m_voxelGiPreviousDiffusionSoftness = m_voxelGiDebugSettings.diffusionSoftness;
     mvpUniform.voxelGiGridOriginCellSize[0] = voxelGiOriginX;
     mvpUniform.voxelGiGridOriginCellSize[1] = voxelGiOriginY;
     mvpUniform.voxelGiGridOriginCellSize[2] = voxelGiOriginZ;
@@ -9875,7 +9877,7 @@ void Renderer::renderFrame(
     mvpUniform.voxelGiGridExtentStrength[0] = voxelGiGridSpan;
     mvpUniform.voxelGiGridExtentStrength[1] = voxelGiGridSpan;
     mvpUniform.voxelGiGridExtentStrength[2] = voxelGiGridSpan;
-    mvpUniform.voxelGiGridExtentStrength[3] = std::clamp(m_voxelGiDebugSettings.strength, 0.0f, 4.0f);
+    mvpUniform.voxelGiGridExtentStrength[3] = kVoxelGiStrength;
     for (std::size_t colorIndex = 0; colorIndex < m_voxelBaseColorPaletteRgba.size(); ++colorIndex) {
         const std::uint32_t rgba = m_voxelBaseColorPaletteRgba[colorIndex];
         mvpUniform.voxelBaseColorPalette[colorIndex][0] = static_cast<float>(rgba & 0xFFu) / 255.0f;
@@ -9944,6 +9946,11 @@ void Renderer::renderFrame(
     voxelGiVolumeImageInfo.imageView = m_voxelGiImageViews[1];
     voxelGiVolumeImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+    VkDescriptorImageInfo voxelGiOccupancyDebugImageInfo{};
+    voxelGiOccupancyDebugImageInfo.sampler = m_voxelGiOccupancySampler;
+    voxelGiOccupancyDebugImageInfo.imageView = m_voxelGiOccupancyImageView;
+    voxelGiOccupancyDebugImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     VkDescriptorImageInfo sunShaftImageInfo{};
     sunShaftImageInfo.sampler = m_sunShaftSampler;
     sunShaftImageInfo.imageView =
@@ -9955,7 +9962,7 @@ void Renderer::renderFrame(
     autoExposureStateBufferInfo.offset = 0;
     autoExposureStateBufferInfo.range = sizeof(float) * 4u;
 
-    std::array<VkWriteDescriptorSet, 10> writes{};
+    std::array<VkWriteDescriptorSet, 11> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -10025,6 +10032,13 @@ void Renderer::renderFrame(
     writes[9].descriptorCount = 1;
     writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[9].pImageInfo = &sunShaftImageInfo;
+
+    writes[10] = write;
+    writes[10].dstSet = m_descriptorSets[m_currentFrame];
+    writes[10].dstBinding = 11;
+    writes[10].descriptorCount = 1;
+    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[10].pImageInfo = &voxelGiOccupancyDebugImageInfo;
 
     vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
@@ -13609,11 +13623,8 @@ void Renderer::destroyVoxelGiResources() {
     m_voxelGiComputeAvailable = false;
     m_voxelGiWorldDirty = true;
     m_voxelGiHasPreviousFrameState = false;
-    m_voxelGiPreviousInjectSunScale = 0.0f;
-    m_voxelGiPreviousInjectShScale = 0.0f;
-    m_voxelGiPreviousInjectBounceScale = 0.0f;
-    m_voxelGiPreviousPropagateBlend = 0.0f;
-    m_voxelGiPreviousPropagateDecay = 0.0f;
+    m_voxelGiPreviousBounceStrength = 0.0f;
+    m_voxelGiPreviousDiffusionSoftness = 0.0f;
 }
 
 void Renderer::destroyAutoExposureResources() {
@@ -13923,11 +13934,8 @@ void Renderer::shutdown() {
     m_voxelGiPreviousSunDirection = {0.0f, 0.0f, 0.0f};
     m_voxelGiPreviousSunColor = {0.0f, 0.0f, 0.0f};
     m_voxelGiPreviousShIrradiance = {};
-    m_voxelGiPreviousInjectSunScale = 0.0f;
-    m_voxelGiPreviousInjectShScale = 0.0f;
-    m_voxelGiPreviousInjectBounceScale = 0.0f;
-    m_voxelGiPreviousPropagateBlend = 0.0f;
-    m_voxelGiPreviousPropagateDecay = 0.0f;
+    m_voxelGiPreviousBounceStrength = 0.0f;
+    m_voxelGiPreviousDiffusionSoftness = 0.0f;
     m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     m_autoExposureComputeAvailable = false;
