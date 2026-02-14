@@ -26,6 +26,8 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, in
 {
     const float3 surfacePos = max(voxelGiSurfacePosCache[uint3(cell)].xyz, float3(0.0, 0.0, 0.0));
     const float3 surfaceNeg = max(voxelGiSurfaceNegCache[uint3(cell)].xyz, float3(0.0, 0.0, 0.0));
+    const float isotropicIrradiance =
+        (surfacePos.x + surfacePos.y + surfacePos.z + surfaceNeg.x + surfaceNeg.y + surfaceNeg.z) / 6.0;
 
     const float3 dir = float3(directionToReceiver);
     const float3 absDir = abs(dir);
@@ -69,8 +71,10 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, in
         }
     }
     // Keep a small floor so convex 90-degree corners are not starved by strict face gating.
-    const float facing = max(dot(normalize(dir), selectedFaceNormal), 0.25);
-    return selectedIrradiance * facing;
+    const float facing = max(dot(normalize(dir), selectedFaceNormal), 0.35);
+    const float directional = selectedIrradiance * facing;
+    // Isotropic floor lets sunlit surfaces scatter into nearby backfacing receivers.
+    return max(directional, isotropicIrradiance * 0.28);
 }
 
 [numthreads(4, 4, 4)]
@@ -107,6 +111,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         int3(0, 0, -1)
     };
 
+    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
     float3 bouncedLightSum = float3(0.0, 0.0, 0.0);
     for (int i = 0; i < 6; ++i)
     {
@@ -123,8 +128,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
 
         const float3 surfaceAlbedo = saturate(neighborSample.yzw);
+        const float surfaceLuma = dot(surfaceAlbedo, lumaWeights);
+        // Compress bounce chroma so highly saturated voxels do not over-tint distant surfaces.
+        const float3 bounceAlbedo = lerp(float3(surfaceLuma, surfaceLuma, surfaceLuma), surfaceAlbedo, 0.40);
         const float neighborIrradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i], dims);
-        bouncedLightSum += surfaceAlbedo * neighborIrradiance;
+        bouncedLightSum += bounceAlbedo * neighborIrradiance;
     }
 
     const float3 injected =

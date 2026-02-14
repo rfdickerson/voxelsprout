@@ -140,8 +140,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float albedoPeak = max(max(surfaceAlbedo.x, surfaceAlbedo.y), surfaceAlbedo.z);
     const float albedoMin = min(min(surfaceAlbedo.x, surfaceAlbedo.y), surfaceAlbedo.z);
     const float albedoSaturation = (albedoPeak > 0.0001) ? ((albedoPeak - albedoMin) / albedoPeak) : 0.0;
-    // Small art-directed boost so saturated materials (like red blocks) bleed color more visibly.
-    const float colorBleedBoost = lerp(1.0, 1.45, clamp(albedoSaturation, 0.0, 1.0));
+    // Keep a mild saturation boost, but avoid over-driving chroma bleed (e.g. grass walls turning green).
+    const float colorBleedBoost = lerp(1.0, 1.12, clamp(albedoSaturation, 0.0, 1.0));
     const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
     const float3 gridOrigin = camera.voxelGiGridOriginCellSize.xyz;
     const float3 worldPosition = gridOrigin + ((float3(dispatchThreadId) + 0.5) * cellSize);
@@ -206,10 +206,6 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                 skyLocalOcclusion *= skyBlockedStepVisibility;
             }
         }
-        const float skyFactor = lerp(0.25, 1.0, skyColumnExposure) * skyLocalOcclusion;
-        const float upFactor = saturate((normal.y * 0.5) + 0.5);
-        const float ambientBoost = lerp(0.6, 1.2, upFactor);
-        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyFactor * ambientBoost);
         const float ndotl = max(dot(normal, -sunDirection), 0.0);
         const float3 faceCenterOffset = normal * (cellSize * 0.51);
         const float3 receiverBiasOffset = normal * (cellSize * 0.02);
@@ -218,6 +214,15 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float voxelSunVisibility =
             (ndotl > 0.0001) ? sampleSunVoxelVisibility(cell, faceOffsets[i], dims, sunDirection) : 0.0;
         const float directVisibility = shadowVisibility * voxelSunVisibility;
+        if (directVisibility <= 0.001)
+        {
+            // Requested temporary behavior: shadowed faces do not inject GI energy.
+            continue;
+        }
+        const float skyFactor = lerp(0.25, 1.0, skyColumnExposure) * skyLocalOcclusion;
+        const float upFactor = saturate((normal.y * 0.5) + 0.5);
+        const float ambientBoost = lerp(0.6, 1.2, upFactor);
+        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyFactor * ambientBoost);
         const float3 directIrradiance =
             camera.sunColorShadow.xyz * (sunIntensity * ndotl * directVisibility * injectSunScale);
         const float3 faceIrradianceColor = max(directIrradiance + skyIrradiance, float3(0.0, 0.0, 0.0));
