@@ -65,14 +65,15 @@ bool inBounds(int3 cell, int3 dims)
 
 float sampleSkyColumnExposure(int3 cell, int3 dims)
 {
-    // March upward within LPV bounds. Exiting the LPV is treated as unknown (not guaranteed open sky).
+    // March upward and classify sky access as binary:
+    // 0 = blocked by occupancy, 1 = open to LPV top/out of bounds.
     int3 probe = cell + int3(0, 1, 0);
     const int maxSteps = 64;
     for (int step = 0; step < maxSteps; ++step)
     {
         if (!inBounds(probe, dims))
         {
-            return 0.0;
+            return 1.0;
         }
         const float occupancy = voxelGiOccupancy.Load(int4(probe, 0)).x;
         if (occupancy > 0.5)
@@ -81,7 +82,7 @@ float sampleSkyColumnExposure(int3 cell, int3 dims)
         }
         probe.y += 1;
     }
-    return 0.0;
+    return 1.0;
 }
 
 float sampleSunVoxelVisibility(int3 cell, int3 faceOffset, int3 dims, float3 sunDirection)
@@ -189,7 +190,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             continue;
         }
 
-        float skyVisibility = 1.0;
+        float skyLocalOcclusion = 1.0;
         for (int step = 1; step <= skyOcclusionSteps; ++step)
         {
             const int3 sampleCell = cell + (faceOffsets[i] * step);
@@ -202,14 +203,13 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             if (sampleOccupancy > 0.5)
             {
                 // Multiple blocked steps quickly darken enclosed spaces.
-                skyVisibility *= skyBlockedStepVisibility;
+                skyLocalOcclusion *= skyBlockedStepVisibility;
             }
         }
-        // Soft gate: keep enclosed spaces dark, but preserve skylight on sky-open faces even in direct-sun shadow.
-        const float skyOpenFactor = lerp(0.12, 1.0, skyColumnExposure);
-        const float skyVisibilityWithFloor = max(skyVisibility, 0.35 * skyColumnExposure);
-        const float skyVisibilityFromOccupancy = skyOpenFactor * skyVisibilityWithFloor;
-        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyVisibilityFromOccupancy);
+        const float skyFactor = lerp(0.25, 1.0, skyColumnExposure) * skyLocalOcclusion;
+        const float upFactor = saturate((normal.y * 0.5) + 0.5);
+        const float ambientBoost = lerp(0.6, 1.2, upFactor);
+        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyFactor * ambientBoost);
         const float ndotl = max(dot(normal, -sunDirection), 0.0);
         const float3 faceCenterOffset = normal * (cellSize * 0.51);
         const float3 receiverBiasOffset = normal * (cellSize * 0.02);
