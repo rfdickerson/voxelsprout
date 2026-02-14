@@ -22,7 +22,7 @@ bool inBounds(int3 cell, int3 dims)
         cell.x < dims.x && cell.y < dims.y && cell.z < dims.z;
 }
 
-float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver)
+float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, int3 dims)
 {
     const float3 surfacePos = max(voxelGiSurfacePosCache[uint3(cell)].xyz, float3(0.0, 0.0, 0.0));
     const float3 surfaceNeg = max(voxelGiSurfaceNegCache[uint3(cell)].xyz, float3(0.0, 0.0, 0.0));
@@ -35,15 +35,42 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver)
     }
 
     // Pick the face from the dominant axis; ties resolve deterministically (X, then Y, then Z).
+    int3 selectedFaceOffset = int3(0, 0, 0);
+    float3 selectedFaceNormal = float3(0.0, 0.0, 0.0);
+    float selectedIrradiance = 0.0;
     if (absDir.x >= absDir.y && absDir.x >= absDir.z)
     {
-        return (dir.x >= 0.0) ? surfacePos.x : surfaceNeg.x;
+        selectedFaceOffset = (dir.x >= 0.0) ? int3(1, 0, 0) : int3(-1, 0, 0);
+        selectedFaceNormal = float3(selectedFaceOffset);
+        selectedIrradiance = (dir.x >= 0.0) ? surfacePos.x : surfaceNeg.x;
     }
-    if (absDir.y >= absDir.z)
+    else if (absDir.y >= absDir.z)
     {
-        return (dir.y >= 0.0) ? surfacePos.y : surfaceNeg.y;
+        selectedFaceOffset = (dir.y >= 0.0) ? int3(0, 1, 0) : int3(0, -1, 0);
+        selectedFaceNormal = float3(selectedFaceOffset);
+        selectedIrradiance = (dir.y >= 0.0) ? surfacePos.y : surfaceNeg.y;
     }
-    return (dir.z >= 0.0) ? surfacePos.z : surfaceNeg.z;
+    else
+    {
+        selectedFaceOffset = (dir.z >= 0.0) ? int3(0, 0, 1) : int3(0, 0, -1);
+        selectedFaceNormal = float3(selectedFaceOffset);
+        selectedIrradiance = (dir.z >= 0.0) ? surfacePos.z : surfaceNeg.z;
+    }
+
+    // Geometric gate: only emit through a face that is actually open to empty space.
+    // This prevents wraparound/leak when face data exists but the face is now blocked.
+    const int3 adjacentCell = cell + selectedFaceOffset;
+    if (inBounds(adjacentCell, dims))
+    {
+        const float adjacentOccupancy = voxelGiOccupancy.Load(int4(adjacentCell, 0)).x;
+        if (adjacentOccupancy > 0.5)
+        {
+            return 0.0;
+        }
+    }
+    // Keep a small floor so convex 90-degree corners are not starved by strict face gating.
+    const float facing = max(dot(normalize(dir), selectedFaceNormal), 0.25);
+    return selectedIrradiance * facing;
 }
 
 [numthreads(4, 4, 4)]
@@ -96,7 +123,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
 
         const float3 surfaceAlbedo = saturate(neighborSample.yzw);
-        const float neighborIrradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i]);
+        const float neighborIrradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i], dims);
         bouncedLightSum += surfaceAlbedo * neighborIrradiance;
     }
 
