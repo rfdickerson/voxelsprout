@@ -63,6 +63,37 @@ bool inBounds(int3 cell, int3 dims)
         cell.x < dims.x && cell.y < dims.y && cell.z < dims.z;
 }
 
+float sampleSunVoxelVisibility(int3 cell, int3 faceOffset, int3 dims, float3 sunDirection)
+{
+    const float3 toSun = normalize(-sunDirection);
+    float3 rayPos = float3(cell) + 0.5 + (float3(faceOffset) * 0.51);
+    const float rayStepCells = 1.0;
+    const int maxRaySteps = 8;
+    const float blockerStepTransmission = 0.55;
+    float visibility = 1.0;
+    for (int step = 0; step < maxRaySteps; ++step)
+    {
+        rayPos += toSun * rayStepCells;
+        const int3 sampleCell = int3(floor(rayPos));
+        if (!inBounds(sampleCell, dims))
+        {
+            return visibility;
+        }
+
+        const float sampleOccupancy = voxelGiOccupancy.Load(int4(sampleCell, 0)).x;
+        if (sampleOccupancy > 0.5)
+        {
+            visibility *= blockerStepTransmission;
+            if (visibility <= 0.08)
+            {
+                return 0.08;
+            }
+        }
+    }
+
+    return visibility;
+}
+
 [numthreads(4, 4, 4)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -119,28 +150,50 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
     float3 cachedSurfaceIrradiancePos = float3(0.0, 0.0, 0.0);
     float3 cachedSurfaceIrradianceNeg = float3(0.0, 0.0, 0.0);
+    const int skyOcclusionSteps = 2;
+    const float skyBlockedStepVisibility = 0.60;
     for (int i = 0; i < 6; ++i)
     {
         const float3 normal = normals[i];
-        float skyOcclusion = 1.0;
         const int3 adjacentCell = cell + faceOffsets[i];
+        bool faceExposed = true;
         if (inBounds(adjacentCell, dims))
         {
             const float adjacentOccupancy = voxelGiOccupancy.Load(int4(adjacentCell, 0)).x;
-            if (adjacentOccupancy > 0.5)
+            faceExposed = adjacentOccupancy <= 0.5;
+        }
+        if (!faceExposed)
+        {
+            continue;
+        }
+
+        float skyVisibility = 1.0;
+        for (int step = 1; step <= skyOcclusionSteps; ++step)
+        {
+            const int3 sampleCell = cell + (faceOffsets[i] * step);
+            if (!inBounds(sampleCell, dims))
             {
-                // Interior/cavity faces should receive less infinite-sky ambient.
-                skyOcclusion = 0.22;
+                break;
+            }
+
+            const float sampleOccupancy = voxelGiOccupancy.Load(int4(sampleCell, 0)).x;
+            if (sampleOccupancy > 0.5)
+            {
+                // Multiple blocked steps quickly darken enclosed spaces.
+                skyVisibility *= skyBlockedStepVisibility;
             }
         }
-        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyOcclusion);
+        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyVisibility);
         const float ndotl = max(dot(normal, -sunDirection), 0.0);
         const float3 faceCenterOffset = normal * (cellSize * 0.51);
         const float3 receiverBiasOffset = normal * (cellSize * 0.02);
         const float shadowVisibility =
             (ndotl > 0.0001) ? sampleShadowVisibility(worldPosition + faceCenterOffset + receiverBiasOffset) : 0.0;
+        const float voxelSunVisibility =
+            (ndotl > 0.0001) ? sampleSunVoxelVisibility(cell, faceOffsets[i], dims, sunDirection) : 0.0;
+        const float directVisibility = shadowVisibility * voxelSunVisibility;
         const float3 directIrradiance =
-            camera.sunColorShadow.xyz * (sunIntensity * ndotl * shadowVisibility * injectSunScale);
+            camera.sunColorShadow.xyz * (sunIntensity * ndotl * directVisibility * injectSunScale);
         const float3 faceIrradianceColor = max(directIrradiance + skyIrradiance, float3(0.0, 0.0, 0.0));
         const float faceIrradiance = max(dot(faceIrradianceColor, lumaWeights) * colorBleedBoost, 0.0);
         if (i == 0) cachedSurfaceIrradiancePos.x = faceIrradiance;
