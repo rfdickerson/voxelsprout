@@ -72,11 +72,11 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.70);
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = lerp(1.0, clamp(input.inVertexAo, 0.0, 1.0), vertexAoEnable);
-    float3 ambient = (ambientIrradiance * kSkyCoolTint) * (0.26 * vertexAo);
+    float3 ambient = (ambientIrradiance * kSkyCoolTint) * (0.36 * vertexAo);
     const float ambientVertical = lerp(0.85, 1.1, (normal.y * 0.5) + 0.5);
     ambient *= ambientVertical;
     const float3 directSun = sunColor * (sunIntensity * ndotl);
-    const float indirectScale = 0.80;
+    const float indirectScale = 0.92;
     const float directScale = 1.10;
 
     const float flowTime = camera.skyConfig1.z;
