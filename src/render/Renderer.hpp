@@ -120,7 +120,7 @@ public:
         float autoExposureAdaptDown = 1.4f;
         float autoExposureLowPercentile = 0.50f;
         float autoExposureHighPercentile = 0.98f;
-        int autoExposureUpdateIntervalFrames = 2;
+        int autoExposureUpdateIntervalFrames = 1;
         float volumetricFogDensity = 0.0045f;
         float volumetricFogHeightFalloff = 0.075f;
         float volumetricFogBaseHeight = 6.0f;
@@ -436,7 +436,6 @@ private:
     BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     bool m_autoExposureComputeAvailable = false;
     bool m_autoExposureHistoryValid = false;
-    uint64_t m_autoExposureFrameCounter = 0;
     bool m_sunShaftComputeAvailable = false;
     bool m_sunShaftShaderAvailable = false;
     VkDescriptorSetLayout m_autoExposureDescriptorSetLayout = VK_NULL_HANDLE;
