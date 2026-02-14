@@ -153,7 +153,7 @@ struct alignas(16) AutoExposureHistogramPushConstants {
     uint32_t binCount = kAutoExposureHistogramBins;
     float minLogLuminance = -10.0f;
     float maxLogLuminance = 4.0f;
-    float _pad0 = 0.0f;
+    float sourceMipLevel = 0.0f;
     float _pad1 = 0.0f;
 };
 
@@ -3620,6 +3620,7 @@ bool Renderer::createVoxelGiResources() {
         imageCreateInfo.usage =
             VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_STORAGE_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
             VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -8709,6 +8710,8 @@ void Renderer::buildFrameStatsUi() {
             ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
             ImGui::Text("GI Inject (compute): %.2f", m_debugGpuGiInjectTimeMs);
             ImGui::Text("GI Propagate (compute): %.2f", m_debugGpuGiPropagateTimeMs);
+            ImGui::Text("Auto Exposure (compute): %.2f", m_debugGpuAutoExposureTimeMs);
+            ImGui::Text("Sun Shafts (compute): %.2f", m_debugGpuSunShaftTimeMs);
             ImGui::Text("Prepass: %.2f", m_debugGpuPrepassTimeMs);
             ImGui::Text("SSAO: %.2f", m_debugGpuSsaoTimeMs);
             ImGui::Text("SSAO Blur: %.2f", m_debugGpuSsaoBlurTimeMs);
@@ -8996,6 +8999,7 @@ void Renderer::buildSunDebugUi() {
     ImGui::Checkbox("Auto Exposure", &m_skyDebugSettings.autoExposureEnabled);
     ImGui::SliderFloat("Manual Exposure", &m_skyDebugSettings.manualExposure, 0.05f, 4.0f, "%.3f");
     if (m_skyDebugSettings.autoExposureEnabled) {
+        ImGui::SliderInt("AE Update Interval", &m_skyDebugSettings.autoExposureUpdateIntervalFrames, 1, 8);
         ImGui::SliderFloat("AE Key Value", &m_skyDebugSettings.autoExposureKeyValue, 0.05f, 0.50f, "%.3f");
         ImGui::SliderFloat("AE Min Exposure", &m_skyDebugSettings.autoExposureMin, 0.05f, 2.50f, "%.3f");
         ImGui::SliderFloat("AE Max Exposure", &m_skyDebugSettings.autoExposureMax, 0.20f, 8.00f, "%.3f");
@@ -9131,6 +9135,8 @@ void Renderer::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuShadowTimeMs = durationMs(kGpuTimestampQueryShadowStart, kGpuTimestampQueryShadowEnd);
     m_debugGpuGiInjectTimeMs = durationMs(kGpuTimestampQueryGiInjectStart, kGpuTimestampQueryGiInjectEnd);
     m_debugGpuGiPropagateTimeMs = durationMs(kGpuTimestampQueryGiPropagateStart, kGpuTimestampQueryGiPropagateEnd);
+    m_debugGpuAutoExposureTimeMs = durationMs(kGpuTimestampQueryAutoExposureStart, kGpuTimestampQueryAutoExposureEnd);
+    m_debugGpuSunShaftTimeMs = durationMs(kGpuTimestampQuerySunShaftStart, kGpuTimestampQuerySunShaftEnd);
     m_debugGpuPrepassTimeMs = durationMs(kGpuTimestampQueryPrepassStart, kGpuTimestampQueryPrepassEnd);
     m_debugGpuSsaoTimeMs = durationMs(kGpuTimestampQuerySsaoStart, kGpuTimestampQuerySsaoEnd);
     m_debugGpuSsaoBlurTimeMs = durationMs(kGpuTimestampQuerySsaoBlurStart, kGpuTimestampQuerySsaoBlurEnd);
@@ -11084,6 +11090,8 @@ void Renderer::renderFrame(
     writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
 
     bool wroteVoxelGiTimestamps = false;
+    bool wroteAutoExposureTimestamps = false;
+    bool wroteSunShaftTimestamps = false;
     if (m_voxelGiComputeAvailable &&
         m_voxelGiSurfacePipeline != VK_NULL_HANDLE &&
         m_voxelGiInjectPipeline != VK_NULL_HANDLE &&
@@ -12415,14 +12423,22 @@ void Renderer::renderFrame(
         );
     }
 
-    if (autoExposureEnabled &&
+    const bool autoExposurePassResourcesReady =
         m_autoExposureComputeAvailable &&
         m_autoExposurePipelineLayout != VK_NULL_HANDLE &&
         m_autoExposureHistogramPipeline != VK_NULL_HANDLE &&
         m_autoExposureUpdatePipeline != VK_NULL_HANDLE &&
         m_autoExposureDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
         autoExposureHistogramBuffer != VK_NULL_HANDLE &&
-        autoExposureStateBuffer != VK_NULL_HANDLE) {
+        autoExposureStateBuffer != VK_NULL_HANDLE;
+    const uint32_t autoExposureUpdateIntervalFrames = static_cast<uint32_t>(
+        std::max(1, m_skyDebugSettings.autoExposureUpdateIntervalFrames)
+    );
+    const bool autoExposureWantsUpdate =
+        (m_autoExposureFrameCounter % autoExposureUpdateIntervalFrames) == 0u;
+    if (autoExposureEnabled && autoExposurePassResourcesReady && autoExposureWantsUpdate) {
+        wroteAutoExposureTimestamps = true;
+        writeGpuTimestampTop(kGpuTimestampQueryAutoExposureStart);
         beginDebugLabel(commandBuffer, "Pass: Auto Exposure", 0.30f, 0.30f, 0.20f, 1.0f);
         const VkPipelineStageFlags2 exposureSrcStage =
             m_autoExposureHistoryValid ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE;
@@ -12456,8 +12472,14 @@ void Renderer::renderFrame(
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
         );
 
-        const uint32_t hdrWidth = std::max(1u, m_swapchainExtent.width);
-        const uint32_t hdrHeight = std::max(1u, m_swapchainExtent.height);
+        constexpr uint32_t kAutoExposureTargetDownsampleMip = 2u;
+        const uint32_t availableHdrMipLevels = std::max(1u, m_hdrResolveMipLevels);
+        const uint32_t histogramSourceMip = std::min(
+            kAutoExposureTargetDownsampleMip,
+            availableHdrMipLevels - 1u
+        );
+        const uint32_t hdrWidth = std::max(1u, m_swapchainExtent.width >> histogramSourceMip);
+        const uint32_t hdrHeight = std::max(1u, m_swapchainExtent.height >> histogramSourceMip);
         AutoExposureHistogramPushConstants histogramPushConstants{};
         histogramPushConstants.width = hdrWidth;
         histogramPushConstants.height = hdrHeight;
@@ -12465,6 +12487,7 @@ void Renderer::renderFrame(
         histogramPushConstants.binCount = kAutoExposureHistogramBins;
         histogramPushConstants.minLogLuminance = -10.0f;
         histogramPushConstants.maxLogLuminance = 4.0f;
+        histogramPushConstants.sourceMipLevel = static_cast<float>(histogramSourceMip);
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_autoExposureHistogramPipeline);
         vkCmdBindDescriptorSets(
@@ -12557,13 +12580,22 @@ void Renderer::renderFrame(
 
         m_autoExposureHistoryValid = true;
         endDebugLabel(commandBuffer);
+        writeGpuTimestampBottom(kGpuTimestampQueryAutoExposureEnd);
     } else {
-        m_autoExposureHistoryValid = false;
+        if (!autoExposureEnabled || !autoExposurePassResourcesReady) {
+            m_autoExposureHistoryValid = false;
+        }
+    }
+    if (!wroteAutoExposureTimestamps) {
+        writeGpuTimestampTop(kGpuTimestampQueryAutoExposureStart);
+        writeGpuTimestampBottom(kGpuTimestampQueryAutoExposureEnd);
     }
 
     if (aoFrameIndex < m_sunShaftImages.size() &&
         m_sunShaftImages[aoFrameIndex] != VK_NULL_HANDLE &&
         m_sunShaftImageViews[aoFrameIndex] != VK_NULL_HANDLE) {
+        wroteSunShaftTimestamps = true;
+        writeGpuTimestampTop(kGpuTimestampQuerySunShaftStart);
         const bool sunShaftInitialized = m_sunShaftImageInitialized[aoFrameIndex];
         if (m_sunShaftComputeAvailable &&
             m_sunShaftPipelineLayout != VK_NULL_HANDLE &&
@@ -12676,6 +12708,11 @@ void Renderer::renderFrame(
             );
             m_sunShaftImageInitialized[aoFrameIndex] = true;
         }
+        writeGpuTimestampBottom(kGpuTimestampQuerySunShaftEnd);
+    }
+    if (!wroteSunShaftTimestamps) {
+        writeGpuTimestampTop(kGpuTimestampQuerySunShaftStart);
+        writeGpuTimestampBottom(kGpuTimestampQuerySunShaftEnd);
     }
 
     transitionImageLayout(
@@ -12892,6 +12929,7 @@ void Renderer::renderFrame(
     m_debugFrameArenaResidentAliasReuses = frameArenaResidentStats.imageAliasReuses;
     m_frameArena.collectAliasedImageDebugInfo(m_debugAliasedImages);
 
+    ++m_autoExposureFrameCounter;
     m_currentFrame = (m_currentFrame + 1) % kMaxFramesInFlight;
 }
 
@@ -13766,6 +13804,7 @@ void Renderer::shutdown() {
     m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     m_autoExposureComputeAvailable = false;
     m_autoExposureHistoryValid = false;
+    m_autoExposureFrameCounter = 0;
     m_sunShaftComputeAvailable = false;
     m_sunShaftShaderAvailable = false;
     m_supportsWireframePreview = false;
@@ -13784,6 +13823,8 @@ void Renderer::shutdown() {
     m_debugGpuShadowTimeMs = 0.0f;
     m_debugGpuGiInjectTimeMs = 0.0f;
     m_debugGpuGiPropagateTimeMs = 0.0f;
+    m_debugGpuAutoExposureTimeMs = 0.0f;
+    m_debugGpuSunShaftTimeMs = 0.0f;
     m_debugGpuPrepassTimeMs = 0.0f;
     m_debugGpuSsaoTimeMs = 0.0f;
     m_debugGpuSsaoBlurTimeMs = 0.0f;

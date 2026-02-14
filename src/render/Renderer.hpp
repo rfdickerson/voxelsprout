@@ -120,6 +120,7 @@ public:
         float autoExposureAdaptDown = 1.4f;
         float autoExposureLowPercentile = 0.50f;
         float autoExposureHighPercentile = 0.98f;
+        int autoExposureUpdateIntervalFrames = 2;
         float volumetricFogDensity = 0.0045f;
         float volumetricFogHeightFalloff = 0.075f;
         float volumetricFogBaseHeight = 6.0f;
@@ -169,7 +170,7 @@ public:
     void shutdown();
 
 private:
-    static constexpr uint32_t kMaxFramesInFlight = 3;
+    static constexpr uint32_t kMaxFramesInFlight = 2;
     static constexpr uint32_t kShadowCascadeCount = 4;
     static constexpr uint32_t kShadowAtlasSize = 8192;
     static constexpr uint32_t kGpuTimestampQueryFrameStart = 0;
@@ -179,18 +180,22 @@ private:
     static constexpr uint32_t kGpuTimestampQueryGiInjectEnd = 4;
     static constexpr uint32_t kGpuTimestampQueryGiPropagateStart = 5;
     static constexpr uint32_t kGpuTimestampQueryGiPropagateEnd = 6;
-    static constexpr uint32_t kGpuTimestampQueryPrepassStart = 7;
-    static constexpr uint32_t kGpuTimestampQueryPrepassEnd = 8;
-    static constexpr uint32_t kGpuTimestampQuerySsaoStart = 9;
-    static constexpr uint32_t kGpuTimestampQuerySsaoEnd = 10;
-    static constexpr uint32_t kGpuTimestampQuerySsaoBlurStart = 11;
-    static constexpr uint32_t kGpuTimestampQuerySsaoBlurEnd = 12;
-    static constexpr uint32_t kGpuTimestampQueryMainStart = 13;
-    static constexpr uint32_t kGpuTimestampQueryMainEnd = 14;
-    static constexpr uint32_t kGpuTimestampQueryPostStart = 15;
-    static constexpr uint32_t kGpuTimestampQueryPostEnd = 16;
-    static constexpr uint32_t kGpuTimestampQueryFrameEnd = 17;
-    static constexpr uint32_t kGpuTimestampQueryCount = 18;
+    static constexpr uint32_t kGpuTimestampQueryAutoExposureStart = 7;
+    static constexpr uint32_t kGpuTimestampQueryAutoExposureEnd = 8;
+    static constexpr uint32_t kGpuTimestampQuerySunShaftStart = 9;
+    static constexpr uint32_t kGpuTimestampQuerySunShaftEnd = 10;
+    static constexpr uint32_t kGpuTimestampQueryPrepassStart = 11;
+    static constexpr uint32_t kGpuTimestampQueryPrepassEnd = 12;
+    static constexpr uint32_t kGpuTimestampQuerySsaoStart = 13;
+    static constexpr uint32_t kGpuTimestampQuerySsaoEnd = 14;
+    static constexpr uint32_t kGpuTimestampQuerySsaoBlurStart = 15;
+    static constexpr uint32_t kGpuTimestampQuerySsaoBlurEnd = 16;
+    static constexpr uint32_t kGpuTimestampQueryMainStart = 17;
+    static constexpr uint32_t kGpuTimestampQueryMainEnd = 18;
+    static constexpr uint32_t kGpuTimestampQueryPostStart = 19;
+    static constexpr uint32_t kGpuTimestampQueryPostEnd = 20;
+    static constexpr uint32_t kGpuTimestampQueryFrameEnd = 21;
+    static constexpr uint32_t kGpuTimestampQueryCount = 22;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
 
     struct FrameResources {
@@ -440,6 +445,7 @@ private:
     BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     bool m_autoExposureComputeAvailable = false;
     bool m_autoExposureHistoryValid = false;
+    uint64_t m_autoExposureFrameCounter = 0;
     bool m_sunShaftComputeAvailable = false;
     bool m_sunShaftShaderAvailable = false;
     VkDescriptorSetLayout m_autoExposureDescriptorSetLayout = VK_NULL_HANDLE;
@@ -603,6 +609,8 @@ private:
     float m_debugGpuShadowTimeMs = 0.0f;
     float m_debugGpuGiInjectTimeMs = 0.0f;
     float m_debugGpuGiPropagateTimeMs = 0.0f;
+    float m_debugGpuAutoExposureTimeMs = 0.0f;
+    float m_debugGpuSunShaftTimeMs = 0.0f;
     float m_debugGpuPrepassTimeMs = 0.0f;
     float m_debugGpuSsaoTimeMs = 0.0f;
     float m_debugGpuSsaoBlurTimeMs = 0.0f;
