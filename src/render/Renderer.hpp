@@ -132,7 +132,7 @@ public:
     };
 
     struct VoxelGiDebugSettings {
-        float bounceStrength = 1.80f;
+        float bounceStrength = 1.10f;
         float diffusionSoftness = 0.72f;
         int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo
     };
