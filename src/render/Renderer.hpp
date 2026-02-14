@@ -132,15 +132,9 @@ public:
     };
 
     struct VoxelGiDebugSettings {
-        float strength = 0.45f;
-        float injectSunScale = 0.50f;
-        float injectShScale = 0.45f;
-        float injectBounceScale = 0.80f;
-        float propagateBlend = 0.65f;
-        float propagateDecay = 0.82f;
-        float ambientRebalanceStrength = 1.35f;
-        float ambientFloor = 0.45f;
-        int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance
+        float bounceStrength = 1.20f;
+        float diffusionSoftness = 0.72f;
+        int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo
     };
 
     bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
@@ -436,11 +430,8 @@ private:
     std::array<float, 3> m_voxelGiPreviousSunDirection{0.0f, 0.0f, 0.0f};
     std::array<float, 3> m_voxelGiPreviousSunColor{0.0f, 0.0f, 0.0f};
     std::array<std::array<float, 3>, 9> m_voxelGiPreviousShIrradiance{};
-    float m_voxelGiPreviousInjectSunScale = 0.0f;
-    float m_voxelGiPreviousInjectShScale = 0.0f;
-    float m_voxelGiPreviousInjectBounceScale = 0.0f;
-    float m_voxelGiPreviousPropagateBlend = 0.0f;
-    float m_voxelGiPreviousPropagateDecay = 0.0f;
+    float m_voxelGiPreviousBounceStrength = 0.0f;
+    float m_voxelGiPreviousDiffusionSoftness = 0.0f;
     BufferHandle m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     bool m_autoExposureComputeAvailable = false;
