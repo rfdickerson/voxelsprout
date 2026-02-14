@@ -9,7 +9,7 @@ struct AutoExposureHistogramPushConstants
     uint binCount;
     float minLogLuminance;
     float maxLogLuminance;
-    float _pad0;
+    float sourceMipLevel;
     float _pad1;
 };
 
@@ -38,7 +38,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     const float2 uv = (float2(dispatchThreadId.xy) + 0.5) / float2(width, height);
-    const float3 hdrColor = max(hdrSceneColor.SampleLevel(uv, 0.0).xyz, float3(0.0, 0.0, 0.0));
+    const float3 hdrColor = max(
+        hdrSceneColor.SampleLevel(uv, histogramPc.sourceMipLevel).xyz,
+        float3(0.0, 0.0, 0.0)
+    );
     const float luminance = max(luminance709(hdrColor), 1e-6);
     const float logLuminance = log2(luminance);
 
