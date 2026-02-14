@@ -4679,15 +4679,22 @@ bool Renderer::createSunShaftResources() {
         normalDepthBinding.descriptorCount = 1;
         normalDepthBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+        VkDescriptorSetLayoutBinding shadowBinding{};
+        shadowBinding.binding = 2;
+        shadowBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        shadowBinding.descriptorCount = 1;
+        shadowBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
         VkDescriptorSetLayoutBinding outputBinding{};
-        outputBinding.binding = 2;
+        outputBinding.binding = 3;
         outputBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         outputBinding.descriptorCount = 1;
         outputBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+        const std::array<VkDescriptorSetLayoutBinding, 4> bindings = {
             cameraBinding,
             normalDepthBinding,
+            shadowBinding,
             outputBinding
         };
 
@@ -4716,7 +4723,7 @@ bool Renderer::createSunShaftResources() {
     if (m_sunShaftDescriptorPool == VK_NULL_HANDLE) {
         const std::array<VkDescriptorPoolSize, 3> poolSizes = {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxFramesInFlight}
         };
         VkDescriptorPoolCreateInfo poolCreateInfo{};
@@ -10193,7 +10200,7 @@ void Renderer::renderFrame(
         sunShaftOutputImageInfo.imageView = m_sunShaftImageViews[aoFrameIndex];
         sunShaftOutputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        std::array<VkWriteDescriptorSet, 3> sunShaftWrites{};
+        std::array<VkWriteDescriptorSet, 4> sunShaftWrites{};
         sunShaftWrites[0] = write;
         sunShaftWrites[0].dstSet = m_sunShaftDescriptorSets[m_currentFrame];
         sunShaftWrites[0].dstBinding = 0;
@@ -10212,8 +10219,15 @@ void Renderer::renderFrame(
         sunShaftWrites[2].dstSet = m_sunShaftDescriptorSets[m_currentFrame];
         sunShaftWrites[2].dstBinding = 2;
         sunShaftWrites[2].descriptorCount = 1;
-        sunShaftWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        sunShaftWrites[2].pImageInfo = &sunShaftOutputImageInfo;
+        sunShaftWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sunShaftWrites[2].pImageInfo = &shadowMapImageInfo;
+
+        sunShaftWrites[3] = write;
+        sunShaftWrites[3].dstSet = m_sunShaftDescriptorSets[m_currentFrame];
+        sunShaftWrites[3].dstBinding = 3;
+        sunShaftWrites[3].descriptorCount = 1;
+        sunShaftWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        sunShaftWrites[3].pImageInfo = &sunShaftOutputImageInfo;
 
         vkUpdateDescriptorSets(
             m_device,
@@ -12766,7 +12780,7 @@ void Renderer::renderFrame(
             SunShaftPushConstants sunShaftPushConstants{};
             sunShaftPushConstants.width = std::max(1u, m_aoExtent.width);
             sunShaftPushConstants.height = std::max(1u, m_aoExtent.height);
-            sunShaftPushConstants.sampleCount = 10u;
+            sunShaftPushConstants.sampleCount = 20u;
 
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_sunShaftPipeline);
             vkCmdBindDescriptorSets(

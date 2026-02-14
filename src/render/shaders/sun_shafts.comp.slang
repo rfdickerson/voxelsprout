@@ -4,6 +4,9 @@ import camera_uniform;
 Sampler2D<float4> normalDepthTexture;
 
 [[vk::binding(2, 0)]]
+Sampler2DShadow shadowMap;
+
+[[vk::binding(3, 0)]]
 RWTexture2D<float4> sunShaftTexture;
 
 struct PushConstants
@@ -17,47 +20,52 @@ struct PushConstants
 [[vk::push_constant]]
 PushConstants pushConstants;
 
-float sampleSkyMask(float2 uv)
+int chooseShadowCascade(float viewDepth)
 {
-    if (any(uv < float2(0.0, 0.0)) || any(uv > float2(1.0, 1.0)))
-    {
-        return 0.0;
-    }
-    const float viewDepth = normalDepthTexture.SampleLevel(uv, 0.0).w;
-    return 1.0 - step(0.0001, viewDepth);
+    if (viewDepth <= camera.shadowCascadeSplits.x) return 0;
+    if (viewDepth <= camera.shadowCascadeSplits.y) return 1;
+    if (viewDepth <= camera.shadowCascadeSplits.z) return 2;
+    return 3;
 }
 
-float sampleSunVisibility(float2 sunUv)
+float sampleShadowVisibility(float3 worldPosition)
 {
-    if (any(sunUv < float2(0.0, 0.0)) || any(sunUv > float2(1.0, 1.0)))
+    const float viewDepth = max(-mul(camera.view, float4(worldPosition, 1.0)).z, 0.0);
+    const int cascadeIndex = chooseShadowCascade(viewDepth);
+    const float4 shadowClip = mul(camera.lightViewProj[cascadeIndex], float4(worldPosition, 1.0));
+    if (shadowClip.w <= 0.0) return 1.0;
+
+    const float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    const float2 shadowUvLocal = (shadowNdc.xy * 0.5) + 0.5;
+    if (any(shadowUvLocal <= float2(0.0, 0.0)) || any(shadowUvLocal >= float2(1.0, 1.0)))
     {
-        return 0.0;
+        return 1.0;
+    }
+
+    const float4 atlasRect = camera.shadowAtlasUvRects[cascadeIndex];
+    const float2 shadowUv = atlasRect.xy + (shadowUvLocal * atlasRect.zw);
+    const float shadowDepthRef = shadowNdc.z;
+    if (shadowDepthRef <= 0.0 || shadowDepthRef >= 1.0)
+    {
+        return 1.0;
     }
 
     uint texW = 0u;
     uint texH = 0u;
-    normalDepthTexture.GetDimensions(texW, texH);
-    const float2 texelSize = 1.0 / float2(float(max(texW, 1u)), float(max(texH, 1u)));
-    const float2 occlusionRadius = texelSize * 2.0;
+    shadowMap.GetDimensions(texW, texH);
+    const float texelSize = 1.0 / max(float(max(texW, texH)), 1.0);
+    const float cascadeT = float(cascadeIndex) / 3.0;
+    const float baseBias = lerp(camera.shadowConfig0.z, camera.shadowConfig0.w, cascadeT);
+    const float bias = baseBias * texelSize;
+    return shadowMap.SampleCmpLevelZero(shadowUv, shadowDepthRef + bias);
+}
 
-    float minSkyVisibility = 1.0;
-    const float2 offsets[5] = {
-        float2(0.0, 0.0),
-        float2(1.0, 0.0),
-        float2(-1.0, 0.0),
-        float2(0.0, 1.0),
-        float2(0.0, -1.0)
-    };
-
-    for (int i = 0; i < 5; ++i)
-    {
-        const float2 sampleUv = clamp(sunUv + (offsets[i] * occlusionRadius), float2(0.0, 0.0), float2(1.0, 1.0));
-        const float sampleViewDepth = normalDepthTexture.SampleLevel(sampleUv, 0.0).w;
-        const float skyVisibility = 1.0 - step(0.0001, sampleViewDepth);
-        minSkyVisibility = min(minSkyVisibility, skyVisibility);
-    }
-
-    return minSkyVisibility;
+float hgPhase(float cosTheta, float anisotropy)
+{
+    const float g = clamp(anisotropy, 0.0, 0.95);
+    const float g2 = g * g;
+    const float denom = max(pow(1.0 + g2 - (2.0 * g * cosTheta), 1.5), 1e-4);
+    return (1.0 - g2) / (4.0 * 3.14159265 * denom);
 }
 
 [numthreads(8, 8, 1)]
@@ -69,66 +77,60 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     const float2 uv = (float2(dispatchThreadId.xy) + 0.5) / float2(float(pushConstants.width), float(pushConstants.height));
+    const float sceneDepth = normalDepthTexture.SampleLevel(uv, 0.0).w;
+    const bool hasGeometry = sceneDepth > 0.0001;
 
+    const float2 ndc = (uv * 2.0) - 1.0;
+    const float3 viewDir = normalize(float3(ndc.x / camera.proj[0][0], ndc.y / camera.proj[1][1], -1.0));
     const float3x3 invViewRotation = transpose((float3x3)camera.view);
-    const float3 cameraForward = normalize(mul(invViewRotation, float3(0.0, 0.0, -1.0)));
+    const float3 worldDir = normalize(mul(invViewRotation, viewDir));
+    const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
+
+    const float maxDistance = hasGeometry ? min(sceneDepth, 96.0) : 96.0;
+    if (maxDistance <= 0.05)
+    {
+        sunShaftTexture[dispatchThreadId.xy] = float4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
     const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
-    const float sunForwardDot = dot(cameraForward, toSun);
-    const float sunFacingWide = smoothstep(cos(radians(72.0)), cos(radians(10.0)), sunForwardDot);
-    const float sunFacingTight = smoothstep(cos(radians(20.0)), cos(radians(3.0)), sunForwardDot);
-    const float sunFacing = max(sunFacingTight, sunFacingWide * 0.65);
-    if (sunFacing <= 1e-5)
+    const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
+    if (sunIntensity <= 1e-4)
     {
         sunShaftTexture[dispatchThreadId.xy] = float4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
-    const float3 sunView = mul((float3x3)camera.view, toSun);
-    if (sunView.z >= -1e-4)
-    {
-        sunShaftTexture[dispatchThreadId.xy] = float4(0.0, 0.0, 0.0, 1.0);
-        return;
-    }
-
-    const float invDepth = 1.0 / max(-sunView.z, 1e-4);
-    const float2 sunNdc = float2(
-        sunView.x * camera.proj[0][0] * invDepth,
-        sunView.y * camera.proj[1][1] * invDepth
-    );
-    const float2 sunUv = (sunNdc * 0.5) + 0.5;
-    const float sunVisibility = sampleSunVisibility(sunUv);
-    if (sunVisibility <= 1e-5)
-    {
-        sunShaftTexture[dispatchThreadId.xy] = float4(0.0, 0.0, 0.0, 1.0);
-        return;
-    }
-
-    const float2 deltaToSun = sunUv - uv;
-    const float radialDistance = length(deltaToSun);
-    const float rangeMask = 1.0 - smoothstep(0.03, 0.26, radialDistance);
-    if (rangeMask <= 1e-5)
-    {
-        sunShaftTexture[dispatchThreadId.xy] = float4(0.0, 0.0, 0.0, 1.0);
-        return;
-    }
-
+    const float fogDensityBase = max(camera.skyConfig4.x, 0.0);
+    const float fogHeightFalloff = max(camera.skyConfig4.y, 0.0);
+    const float fogBaseHeight = camera.skyConfig4.z;
+    const float sunScatter = max(camera.skyConfig4.w, 0.0);
     const uint sampleCount = max(pushConstants.sampleCount, 1u);
-    const float2 stepUv = deltaToSun / float(sampleCount);
-    float2 sampleUv = uv + (stepUv * 0.5);
-    float decay = 1.0;
-    float shaftAccum = 0.0;
-    float weightAccum = 0.0;
+    const float stepLength = maxDistance / float(sampleCount);
+    const float phase = hgPhase(dot(worldDir, toSun), 0.72);
+
+    float transmittance = 1.0;
+    float inscatter = 0.0;
     for (uint i = 0; i < sampleCount; ++i)
     {
-        const float skyMask = sampleSkyMask(sampleUv);
-        shaftAccum += skyMask * decay;
-        weightAccum += decay;
-        decay *= 0.86;
-        sampleUv += stepUv;
+        const float t = (float(i) + 0.5) * stepLength;
+        const float3 worldPos = cameraWorld + (worldDir * t);
+        const float relativeHeight = worldPos.y - fogBaseHeight;
+        const float localDensity = fogDensityBase * exp(-relativeHeight * fogHeightFalloff);
+        if (localDensity <= 1e-6)
+        {
+            continue;
+        }
+
+        const float shadowVisibility = sampleShadowVisibility(worldPos);
+        const float segmentExtinction = localDensity * stepLength;
+        const float segmentTransmittance = exp(-segmentExtinction);
+        const float segmentInscatter =
+            transmittance * (1.0 - segmentTransmittance) * shadowVisibility * phase * sunScatter;
+        inscatter += segmentInscatter;
+        transmittance *= segmentTransmittance;
     }
 
-    const float shaftOcclusion = shaftAccum / max(weightAccum, 1e-5);
-    const float localSkyMask = sampleSkyMask(uv);
-    const float shaft = shaftOcclusion * rangeMask * sunVisibility * sunFacing * localSkyMask;
+    const float shaft = max(inscatter * sunIntensity, 0.0);
     sunShaftTexture[dispatchThreadId.xy] = float4(shaft, shaft, shaft, 1.0);
 }
