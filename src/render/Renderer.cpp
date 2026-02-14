@@ -8121,6 +8121,11 @@ bool Renderer::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<c
             combinedGrassInstances.insert(combinedGrassInstances.end(), chunkGrass.begin(), chunkGrass.end());
         }
     }
+    // Temporary toggle: disable plant rendering by forcing zero grass billboard instances.
+    constexpr bool kDisablePlantRendering = true;
+    if (kDisablePlantRendering) {
+        combinedGrassInstances.clear();
+    }
 
     if (combinedGrassInstances.empty()) {
         if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
