@@ -10510,6 +10510,10 @@ void Renderer::renderFrame(
     shadowChunkInstanceData.push_back(ChunkInstanceData{});
     std::vector<VkDrawIndexedIndirectCommand> shadowChunkIndirectCommands;
     shadowChunkIndirectCommands.reserve(m_chunkDrawRanges.size());
+    std::array<std::vector<VkDrawIndexedIndirectCommand>, kShadowCascadeCount> shadowCascadeIndirectCommands{};
+    for (auto& cascadeCommands : shadowCascadeIndirectCommands) {
+        cascadeCommands.reserve((m_chunkDrawRanges.size() / kShadowCascadeCount) + 1u);
+    }
     const std::vector<world::Chunk>& chunks = chunkGrid.chunks();
     auto appendChunkLods = [&](
                                std::size_t chunkArrayIndex,
@@ -10574,6 +10578,51 @@ void Renderer::renderFrame(
             appendChunkLods(chunkArrayIndex, chunkInstanceData, chunkIndirectCommands, true);
         }
     }
+
+    const auto appendShadowChunkLods = [&](std::size_t chunkArrayIndex, uint32_t cascadeMask) {
+        if (chunkArrayIndex >= chunkGrid.chunks().size()) {
+            return;
+        }
+        const world::Chunk& drawChunk = chunks[chunkArrayIndex];
+        const bool allowDetailLods =
+            drawChunk.chunkX() == cameraChunkX &&
+            drawChunk.chunkY() == cameraChunkY &&
+            drawChunk.chunkZ() == cameraChunkZ;
+        for (std::size_t lodIndex = 0; lodIndex < world::kChunkMeshLodCount; ++lodIndex) {
+            if (lodIndex > 0 && !allowDetailLods) {
+                continue;
+            }
+            const std::size_t drawRangeIndex = (chunkArrayIndex * world::kChunkMeshLodCount) + lodIndex;
+            if (drawRangeIndex >= m_chunkDrawRanges.size()) {
+                continue;
+            }
+            const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
+            if (drawRange.indexCount == 0 || !chunkDrawBuffersReady) {
+                continue;
+            }
+
+            const uint32_t instanceIndex = static_cast<uint32_t>(shadowChunkInstanceData.size());
+            ChunkInstanceData instance{};
+            instance.chunkOffset[0] = drawRange.offsetX;
+            instance.chunkOffset[1] = drawRange.offsetY;
+            instance.chunkOffset[2] = drawRange.offsetZ;
+            instance.chunkOffset[3] = 0.0f;
+            shadowChunkInstanceData.push_back(instance);
+
+            VkDrawIndexedIndirectCommand indirectCommand{};
+            indirectCommand.indexCount = drawRange.indexCount;
+            indirectCommand.instanceCount = 1;
+            indirectCommand.firstIndex = drawRange.firstIndex;
+            indirectCommand.vertexOffset = drawRange.vertexOffset;
+            indirectCommand.firstInstance = instanceIndex;
+            shadowChunkIndirectCommands.push_back(indirectCommand);
+            for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+                if ((cascadeMask & (1u << cascadeIndex)) != 0u) {
+                    shadowCascadeIndirectCommands[cascadeIndex].push_back(indirectCommand);
+                }
+            }
+        }
+    };
 
     // Shadow casting must be culled against cascade coverage, not camera view frustum.
     // Start from receiver-visible chunks, then conservatively march upstream along -sunDirection
@@ -10640,15 +10689,14 @@ void Renderer::renderFrame(
             continue;
         }
         const world::Chunk& chunk = chunks[chunkArrayIndex];
-        bool intersectsAnyCascade = false;
+        uint32_t cascadeMask = 0u;
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
             if (chunkIntersectsShadowCascadeClip(chunk, lightViewProjMatrices[cascadeIndex], kShadowCasterClipMargin)) {
-                intersectsAnyCascade = true;
-                break;
+                cascadeMask |= (1u << cascadeIndex);
             }
         }
-        if (intersectsAnyCascade) {
-            appendChunkLods(chunkArrayIndex, shadowChunkInstanceData, shadowChunkIndirectCommands, false);
+        if (cascadeMask != 0u) {
+            appendShadowChunkLods(chunkArrayIndex, cascadeMask);
         }
     }
 
@@ -10708,24 +10756,37 @@ void Renderer::renderFrame(
         }
     }
 
-    const VkDeviceSize shadowChunkIndirectBytes =
-        static_cast<VkDeviceSize>(shadowChunkIndirectCommands.size() * sizeof(VkDrawIndexedIndirectCommand));
-    std::optional<FrameArenaSlice> shadowChunkIndirectSliceOpt = std::nullopt;
-    if (shadowChunkIndirectBytes > 0) {
-        shadowChunkIndirectSliceOpt = m_frameArena.allocateUpload(
-            shadowChunkIndirectBytes,
+    std::array<std::optional<FrameArenaSlice>, kShadowCascadeCount> shadowCascadeIndirectSliceOpts{};
+    std::array<VkBuffer, kShadowCascadeCount> shadowCascadeIndirectBuffers{};
+    shadowCascadeIndirectBuffers.fill(VK_NULL_HANDLE);
+    std::array<uint32_t, kShadowCascadeCount> shadowCascadeIndirectDrawCounts{};
+    shadowCascadeIndirectDrawCounts.fill(0u);
+    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        const VkDeviceSize shadowCascadeIndirectBytes = static_cast<VkDeviceSize>(
+            shadowCascadeIndirectCommands[cascadeIndex].size() * sizeof(VkDrawIndexedIndirectCommand)
+        );
+        if (shadowCascadeIndirectBytes == 0) {
+            continue;
+        }
+        shadowCascadeIndirectSliceOpts[cascadeIndex] = m_frameArena.allocateUpload(
+            shadowCascadeIndirectBytes,
             static_cast<VkDeviceSize>(alignof(VkDrawIndexedIndirectCommand)),
             FrameArenaUploadKind::Unknown
         );
-        if (shadowChunkIndirectSliceOpt.has_value() && shadowChunkIndirectSliceOpt->mapped != nullptr) {
-            std::memcpy(
-                shadowChunkIndirectSliceOpt->mapped,
-                shadowChunkIndirectCommands.data(),
-                static_cast<size_t>(shadowChunkIndirectBytes)
-            );
-        } else {
-            shadowChunkIndirectSliceOpt.reset();
+        if (!shadowCascadeIndirectSliceOpts[cascadeIndex].has_value() ||
+            shadowCascadeIndirectSliceOpts[cascadeIndex]->mapped == nullptr) {
+            shadowCascadeIndirectSliceOpts[cascadeIndex].reset();
+            continue;
         }
+        std::memcpy(
+            shadowCascadeIndirectSliceOpts[cascadeIndex]->mapped,
+            shadowCascadeIndirectCommands[cascadeIndex].data(),
+            static_cast<size_t>(shadowCascadeIndirectBytes)
+        );
+        shadowCascadeIndirectBuffers[cascadeIndex] =
+            m_bufferAllocator.getBuffer(shadowCascadeIndirectSliceOpts[cascadeIndex]->buffer);
+        shadowCascadeIndirectDrawCounts[cascadeIndex] =
+            static_cast<uint32_t>(shadowCascadeIndirectCommands[cascadeIndex].size());
     }
 
     const VkBuffer chunkInstanceBuffer =
@@ -10734,9 +10795,6 @@ void Renderer::renderFrame(
         chunkIndirectSliceOpt.has_value() ? m_bufferAllocator.getBuffer(chunkIndirectSliceOpt->buffer) : VK_NULL_HANDLE;
     const VkBuffer shadowChunkInstanceBuffer =
         shadowChunkInstanceSliceOpt.has_value() ? m_bufferAllocator.getBuffer(shadowChunkInstanceSliceOpt->buffer)
-                                                : VK_NULL_HANDLE;
-    const VkBuffer shadowChunkIndirectBuffer =
-        shadowChunkIndirectSliceOpt.has_value() ? m_bufferAllocator.getBuffer(shadowChunkIndirectSliceOpt->buffer)
                                                 : VK_NULL_HANDLE;
     struct ReadyMagicaDraw {
         VkBuffer vertexBuffer = VK_NULL_HANDLE;
@@ -10780,14 +10838,17 @@ void Renderer::renderFrame(
         chunkInstanceBuffer != VK_NULL_HANDLE &&
         chunkIndirectBuffer != VK_NULL_HANDLE &&
         chunkDrawBuffersReady;
-    const uint32_t shadowChunkIndirectDrawCount = static_cast<uint32_t>(shadowChunkIndirectCommands.size());
-    const bool canDrawShadowChunksIndirect =
-        shadowChunkIndirectDrawCount > 0 &&
-        shadowChunkInstanceSliceOpt.has_value() &&
-        shadowChunkIndirectSliceOpt.has_value() &&
-        shadowChunkInstanceBuffer != VK_NULL_HANDLE &&
-        shadowChunkIndirectBuffer != VK_NULL_HANDLE &&
-        chunkDrawBuffersReady;
+    std::array<bool, kShadowCascadeCount> canDrawShadowChunksIndirectByCascade{};
+    canDrawShadowChunksIndirectByCascade.fill(false);
+    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        canDrawShadowChunksIndirectByCascade[cascadeIndex] =
+            shadowCascadeIndirectDrawCounts[cascadeIndex] > 0 &&
+            shadowChunkInstanceSliceOpt.has_value() &&
+            shadowCascadeIndirectSliceOpts[cascadeIndex].has_value() &&
+            shadowChunkInstanceBuffer != VK_NULL_HANDLE &&
+            shadowCascadeIndirectBuffers[cascadeIndex] != VK_NULL_HANDLE &&
+            chunkDrawBuffersReady;
+    }
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
         m_debugDrawCallsTotal += drawCount;
@@ -10821,28 +10882,34 @@ void Renderer::renderFrame(
             drawOffset += stride;
         }
     };
-    const auto drawShadowChunkIndirect = [&](std::uint32_t& passCounter) {
-        if (!canDrawShadowChunksIndirect) {
+    const auto drawShadowChunkIndirect = [&](std::uint32_t& passCounter, uint32_t cascadeIndex) {
+        if (cascadeIndex >= kShadowCascadeCount || !canDrawShadowChunksIndirectByCascade[cascadeIndex]) {
+            return;
+        }
+        const uint32_t cascadeDrawCount = shadowCascadeIndirectDrawCounts[cascadeIndex];
+        const VkBuffer cascadeIndirectBuffer = shadowCascadeIndirectBuffers[cascadeIndex];
+        const std::optional<FrameArenaSlice>& cascadeIndirectSlice = shadowCascadeIndirectSliceOpts[cascadeIndex];
+        if (!cascadeIndirectSlice.has_value()) {
             return;
         }
         if (m_supportsMultiDrawIndirect) {
-            countDrawCalls(passCounter, shadowChunkIndirectDrawCount);
+            countDrawCalls(passCounter, cascadeDrawCount);
             vkCmdDrawIndexedIndirect(
                 commandBuffer,
-                shadowChunkIndirectBuffer,
-                shadowChunkIndirectSliceOpt->offset,
-                shadowChunkIndirectDrawCount,
+                cascadeIndirectBuffer,
+                cascadeIndirectSlice->offset,
+                cascadeDrawCount,
                 sizeof(VkDrawIndexedIndirectCommand)
             );
             return;
         }
         const VkDeviceSize stride = static_cast<VkDeviceSize>(sizeof(VkDrawIndexedIndirectCommand));
-        VkDeviceSize drawOffset = shadowChunkIndirectSliceOpt->offset;
-        for (uint32_t drawIndex = 0; drawIndex < shadowChunkIndirectDrawCount; ++drawIndex) {
+        VkDeviceSize drawOffset = cascadeIndirectSlice->offset;
+        for (uint32_t drawIndex = 0; drawIndex < cascadeDrawCount; ++drawIndex) {
             countDrawCalls(passCounter, 1);
             vkCmdDrawIndexedIndirect(
                 commandBuffer,
-                shadowChunkIndirectBuffer,
+                cascadeIndirectBuffer,
                 drawOffset,
                 1,
                 static_cast<uint32_t>(stride)
@@ -10935,7 +11002,7 @@ void Renderer::renderFrame(
             // Reverse-Z uses GREATER depth tests, so flip bias sign.
             vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
 
-            if (canDrawShadowChunksIndirect) {
+            if (cascadeIndex < kShadowCascadeCount && canDrawShadowChunksIndirectByCascade[cascadeIndex]) {
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
                 vkCmdBindDescriptorSets(
                     commandBuffer,
@@ -10969,7 +11036,7 @@ void Renderer::renderFrame(
                     sizeof(ChunkPushConstants),
                     &chunkPushConstants
                 );
-                drawShadowChunkIndirect(m_debugDrawCallsShadow);
+                drawShadowChunkIndirect(m_debugDrawCallsShadow, cascadeIndex);
             }
             if (canDrawMagica) {
                 for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
