@@ -123,14 +123,24 @@ float3 sampleVoxelGi(float3 worldPosition, float3 normal)
     const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
     const float3 gridOrigin = camera.voxelGiGridOriginCellSize.xyz;
     const float3 gridExtent = max(camera.voxelGiGridExtentStrength.xyz, float3(cellSize, cellSize, cellSize));
-    const float3 sampleWorld = worldPosition + (normal * (cellSize * 0.5));
-    const float3 uvw = (sampleWorld - gridOrigin) / gridExtent;
-    if (any(uvw < float3(0.0, 0.0, 0.0)) || any(uvw > float3(1.0, 1.0, 1.0)))
+    const float3 uvwCenter = (worldPosition - gridOrigin) / gridExtent;
+    if (any(uvwCenter < float3(0.0, 0.0, 0.0)) || any(uvwCenter > float3(1.0, 1.0, 1.0)))
     {
         return float3(0.0, 0.0, 0.0);
     }
 
-    const float3 giRadiance = voxelGiVolume.SampleLevel(uvw, 0.0).xyz;
+    const float3 uvwForward = (worldPosition + (normal * (cellSize * 0.35)) - gridOrigin) / gridExtent;
+    const float3 uvwBack = (worldPosition - (normal * (cellSize * 0.20)) - gridOrigin) / gridExtent;
+    const float3 giCenter = voxelGiVolume.SampleLevel(uvwCenter, 0.0).xyz;
+    const float3 giForward =
+        (any(uvwForward < float3(0.0, 0.0, 0.0)) || any(uvwForward > float3(1.0, 1.0, 1.0)))
+            ? giCenter
+            : voxelGiVolume.SampleLevel(uvwForward, 0.0).xyz;
+    const float3 giBack =
+        (any(uvwBack < float3(0.0, 0.0, 0.0)) || any(uvwBack > float3(1.0, 1.0, 1.0)))
+            ? giCenter
+            : voxelGiVolume.SampleLevel(uvwBack, 0.0).xyz;
+    const float3 giRadiance = (giCenter * 0.50) + (giForward * 0.35) + (giBack * 0.15);
     return giRadiance * max(camera.voxelGiGridExtentStrength.w, 0.0);
 }
 
@@ -186,7 +196,12 @@ float3 proceduralSkyNoSunDisk(float3 direction)
     return max(color * skyExposure, float3(0.0, 0.0, 0.0));
 }
 
-float3 applyAtmosphericFog(float3 litColor, float3 worldPosition, float viewDepth, float3 sunDirection)
+float3 applyAtmosphericFog(
+    float3 litColor,
+    float3 worldPosition,
+    float viewDepth,
+    float3 sunDirection,
+    float skyVisibility)
 {
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
     const float3 viewDir = normalize(worldPosition - cameraWorld);
@@ -200,7 +215,7 @@ float3 applyAtmosphericFog(float3 litColor, float3 worldPosition, float viewDept
     const float g = clamp(camera.skyConfig0.z, 0.0, 0.98);
     const float phaseMie = (1.0 - (g * g)) / (4.0 * 3.14159265 * pow(1.0 + (g * g) - (2.0 * g * sunView), 1.5));
     const float phaseBoost = 1.0 + (phaseMie * 1.6 * sunView);
-    const float3 inscatterColor = skyColor * phaseBoost;
+    const float3 inscatterColor = skyColor * phaseBoost * clamp(skyVisibility, 0.0, 1.0);
 
     const float3 transmittance = exp(-extinction * max(viewDepth, 0.0));
     return (litColor * transmittance) + (inscatterColor * (float3(1.0, 1.0, 1.0) - transmittance));
@@ -427,6 +442,17 @@ float4 main(FragmentInput input) : SV_Target0
         shadowVisibility = selectShadowVisibility(input.inWorldPosition, normal, viewDepth, ndotl);
     }
 
+    float skyOcclusion = 1.0;
+    if (sunIntensity > 0.0001)
+    {
+        // Use the directional shadow map as a cheap sky-visibility proxy for enclosed spaces.
+        const float3 skyProbeNormal = float3(0.0, 1.0, 0.0);
+        const float skyProbeNdotL = max(dot(skyProbeNormal, -sunDirection), 0.25);
+        skyOcclusion = selectShadowVisibility(input.inWorldPosition, skyProbeNormal, viewDepth, skyProbeNdotL);
+    }
+    const float skyVisibilityFloor = 0.18;
+    const float skyVisibility = lerp(skyVisibilityFloor, 1.0, clamp(skyOcclusion, 0.0, 1.0));
+
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = lerp(1.0, clamp(input.inVertexAo, 0.0, 1.0), vertexAoEnable);
     const float3 voxelGi = sampleVoxelGi(input.inWorldPosition, normal) * vertexAo;
@@ -450,7 +476,8 @@ float4 main(FragmentInput input) : SV_Target0
     const float ambientRebalanceStrength = max(camera.shadowVoxelGridOrigin.x, 0.0);
     const float ambientFloor = clamp(camera.shadowVoxelGridOrigin.y, 0.0, 1.0);
     const float ambientScale = clamp(1.0 / (1.0 + (voxelGiLuma * ambientRebalanceStrength)), ambientFloor, 1.0);
-    const float3 ambient = selectAmbient(normal, vertexAo) * ambientScale;
+    const float ambientSkyVisibility = lerp(0.45, 1.0, skyVisibility);
+    const float3 ambient = selectAmbient(normal, vertexAo) * ambientScale * ambientSkyVisibility;
     const float3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);
     float3 lighting = ambient + voxelGi + (directSun * directShadowFactor);
@@ -468,11 +495,13 @@ float4 main(FragmentInput input) : SV_Target0
     const float sunGlint = pow(max(dot(reflectDir, -sunDirection), 0.0), sunSpecExponent) * step(0.0001, ndotl);
     const float sunSpecVisibility = directShadowFactor;
     const float3 skyReflection = proceduralSkyNoSunDisk(reflectDir);
+    const float reflectionSkyVisibility = lerp(0.30, 1.0, skyVisibility);
     const float3 specular =
-        (skyReflection * (fresnelTerm * specularStrength * 0.55)) +
+        (skyReflection * (fresnelTerm * specularStrength * 0.55 * reflectionSkyVisibility)) +
         (sunColor * (sunIntensity * sunGlint * fresnelTerm * specularStrength * 0.20 * sunSpecVisibility));
 
     const float3 shaded = (baseColor * lighting) + specular;
-    const float3 fogged = applyAtmosphericFog(shaded, input.inWorldPosition, viewDepth, sunDirection);
+    const float3 fogged =
+        applyAtmosphericFog(shaded, input.inWorldPosition, viewDepth, sunDirection, skyVisibility);
     return float4(fogged, 1.0);
 }

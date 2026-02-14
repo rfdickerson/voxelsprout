@@ -136,7 +136,7 @@ public:
         float injectShScale = 0.45f;
         float injectBounceScale = 0.80f;
         float propagateBlend = 0.65f;
-        float propagateDecay = 0.98f;
+        float propagateDecay = 0.82f;
         float ambientRebalanceStrength = 1.35f;
         float ambientFloor = 0.45f;
         int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance
