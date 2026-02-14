@@ -205,8 +205,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                 skyVisibility *= skyBlockedStepVisibility;
             }
         }
-        // Soft gate: keep enclosed spaces dark, but avoid over-darkening near open sky.
-        const float skyVisibilityFromOccupancy = skyVisibility * lerp(0.12, 1.0, skyColumnExposure);
+        // Soft gate: keep enclosed spaces dark, but preserve skylight on sky-open faces even in direct-sun shadow.
+        const float skyOpenFactor = lerp(0.12, 1.0, skyColumnExposure);
+        const float skyVisibilityWithFloor = max(skyVisibility, 0.35 * skyColumnExposure);
+        const float skyVisibilityFromOccupancy = skyOpenFactor * skyVisibilityWithFloor;
         const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyVisibilityFromOccupancy);
         const float ndotl = max(dot(normal, -sunDirection), 0.0);
         const float3 faceCenterOffset = normal * (cellSize * 0.51);
