@@ -533,6 +533,9 @@ struct FragmentInput
 
 float4 main(FragmentInput input) : SV_Target0
 {
+    // Keep warm/cool separation in final lighting (not GI solve) for cleaner material contrast.
+    const float3 kSunWarmTint = float3(1.05, 0.95, 0.88);
+    const float3 kSkyCoolTint = float3(0.78, 0.86, 1.08);
     const float3 normal = faceNormal(input.inFace);
     float3 baseColor = sampleMaterialAlbedo(input.inMaterial, input.inFace, input.inWorldPosition);
     if (input.inMaterial == kMaterialPalette)
@@ -542,7 +545,7 @@ float4 main(FragmentInput input) : SV_Target0
 
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
-    const float3 sunColor = camera.sunColorShadow.xyz;
+    const float3 sunColor = camera.sunColorShadow.xyz * kSunWarmTint;
     const float shadowStrength = clamp(camera.sunColorShadow.w, 0.0, 1.0);
 
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
@@ -601,10 +604,14 @@ float4 main(FragmentInput input) : SV_Target0
     const float skyExposureFromVoxel = sampleVoxelSkyExposure(input.inWorldPosition + (normal * 0.08));
     const float ambientSkyVisibility =
         max(skyVisibility * lerp(0.20, 1.0, skyExposureFromVoxel), 0.40 * skyExposureFromVoxel);
-    const float3 ambient = selectAmbient(normal, vertexAo) * ambientScale * ambientSkyVisibility;
+    float3 ambient = (selectAmbient(normal, vertexAo) * kSkyCoolTint) * ambientScale * ambientSkyVisibility;
+    const float ambientVertical = lerp(0.85, 1.1, (normal.y * 0.5) + 0.5);
+    ambient *= ambientVertical;
     const float3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);
-    float3 lighting = ambient + voxelGi + (directSun * directShadowFactor);
+    const float indirectScale = 0.80;
+    const float directScale = 1.10;
+    float3 lighting = ((ambient + voxelGi) * indirectScale) + ((directSun * directShadowFactor) * directScale);
 
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
     const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
@@ -624,7 +631,10 @@ float4 main(FragmentInput input) : SV_Target0
         (skyReflection * (fresnelTerm * specularStrength * 0.55 * reflectionSkyVisibility)) +
         (sunColor * (sunIntensity * sunGlint * fresnelTerm * specularStrength * 0.20 * sunSpecVisibility));
 
-    const float3 shaded = (baseColor * lighting) + specular;
+    const float rim = pow(1.0 - nDotV, 2.0);
+    const float3 rimTint = float3(1.06, 0.94, 0.84);
+    const float3 rimLight = rimTint * (rim * 0.05);
+    const float3 shaded = (baseColor * lighting) + specular + rimLight;
     const float3 fogged =
         applyAtmosphericFog(shaded, input.inWorldPosition, viewDepth, sunDirection, skyVisibility);
     return float4(fogged, 1.0);

@@ -59,10 +59,12 @@ struct FragmentInput
 
 float4 main(FragmentInput input) : SV_Target0
 {
+    const float3 kSunWarmTint = float3(1.05, 0.95, 0.88);
+    const float3 kSkyCoolTint = float3(0.78, 0.86, 1.08);
     const float3 normal = normalize(input.inWorldNormal);
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
-    const float3 sunColor = camera.sunColorShadow.xyz;
+    const float3 sunColor = camera.sunColorShadow.xyz * kSunWarmTint;
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
 
     const float3 shNormalIrradiance = evaluateShIrradiance(normal);
@@ -70,8 +72,12 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.70);
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = lerp(1.0, clamp(input.inVertexAo, 0.0, 1.0), vertexAoEnable);
-    const float3 ambient = ambientIrradiance * (0.26 * vertexAo);
+    float3 ambient = (ambientIrradiance * kSkyCoolTint) * (0.26 * vertexAo);
+    const float ambientVertical = lerp(0.85, 1.1, (normal.y * 0.5) + 0.5);
+    ambient *= ambientVertical;
     const float3 directSun = sunColor * (sunIntensity * ndotl);
+    const float indirectScale = 0.80;
+    const float directScale = 1.10;
 
     const float flowTime = camera.skyConfig1.z;
     const float flowSpeed = max(camera.skyConfig1.w, 0.0);
@@ -103,8 +109,14 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 liquidColor = liquidBaseColor * (0.82 + (0.48 * flowHighlight));
 
     const float3 lit =
-        ((ambient + directSun) * surfaceTint) +
+        ((((ambient * indirectScale) + (directSun * directScale))) * surfaceTint) +
         (liquidColor * ((0.24 + (0.42 * flowHighlight)) * liquidMask));
+    const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
+    const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
+    const float nDotV = saturate(dot(normal, viewDir));
+    const float rim = pow(1.0 - nDotV, 2.0);
+    const float3 rimTint = float3(1.06, 0.94, 0.84);
+    const float3 shaded = lit + (rimTint * (rim * 0.04));
 
-    return float4(lit, 1.0);
+    return float4(shaded, 1.0);
 }
