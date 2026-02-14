@@ -9823,7 +9823,15 @@ void Renderer::renderFrame(
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
     const float voxelGiOriginX = std::floor((camera.x - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
-    const float voxelGiOriginY = std::floor((camera.y - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
+    const float voxelGiDesiredOriginY = std::floor((camera.y - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
+    float voxelGiOriginY = voxelGiDesiredOriginY;
+    if (m_voxelGiHasPreviousFrameState) {
+        // Keep GI vertically stable through small jump/bob motion to avoid color popping.
+        constexpr float kVoxelGiVerticalFollowThreshold = kVoxelGiCellSize * 4.0f;
+        if (std::abs(voxelGiDesiredOriginY - m_voxelGiPreviousGridOrigin[1]) < kVoxelGiVerticalFollowThreshold) {
+            voxelGiOriginY = m_voxelGiPreviousGridOrigin[1];
+        }
+    }
     const float voxelGiOriginZ = std::floor((camera.z - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
     constexpr float kVoxelGiGridMoveThreshold = 0.001f;
     constexpr float kVoxelGiLightingChangeThreshold = 0.001f;
