@@ -63,6 +63,27 @@ bool inBounds(int3 cell, int3 dims)
         cell.x < dims.x && cell.y < dims.y && cell.z < dims.z;
 }
 
+float sampleSkyColumnExposure(int3 cell, int3 dims)
+{
+    // March upward; if we exit the volume without hitting solids, this cell is sky-open.
+    int3 probe = cell + int3(0, 1, 0);
+    const int maxSteps = 64;
+    for (int step = 0; step < maxSteps; ++step)
+    {
+        if (!inBounds(probe, dims))
+        {
+            return 1.0;
+        }
+        const float occupancy = voxelGiOccupancy.Load(int4(probe, 0)).x;
+        if (occupancy > 0.5)
+        {
+            return 0.0;
+        }
+        probe.y += 1;
+    }
+    return 0.0;
+}
+
 float sampleSunVoxelVisibility(int3 cell, int3 faceOffset, int3 dims, float3 sunDirection)
 {
     const float3 toSun = normalize(-sunDirection);
@@ -146,6 +167,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     };
     const int3 cell = int3(dispatchThreadId);
     const int3 dims = int3(int(gridW), int(gridH), int(gridD));
+    const float skyColumnExposure = sampleSkyColumnExposure(cell, dims);
 
     const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
     float3 cachedSurfaceIrradiancePos = float3(0.0, 0.0, 0.0);
@@ -183,7 +205,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                 skyVisibility *= skyBlockedStepVisibility;
             }
         }
-        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyVisibility);
+        const float boostedSkyVisibility = max(skyVisibility, skyColumnExposure);
+        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * boostedSkyVisibility);
         const float ndotl = max(dot(normal, -sunDirection), 0.0);
         const float3 faceCenterOffset = normal * (cellSize * 0.51);
         const float3 receiverBiasOffset = normal * (cellSize * 0.02);

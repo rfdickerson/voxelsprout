@@ -217,6 +217,43 @@ float3 sampleVoxelGiOccupancyAlbedo(float3 worldPosition, float3 normal)
     return (best.x > 0.5) ? saturate(best.yzw) : float3(0.0, 0.0, 0.0);
 }
 
+float sampleVoxelSkyExposure(float3 worldPosition)
+{
+    const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
+    const float3 gridOrigin = camera.voxelGiGridOriginCellSize.xyz;
+    const float3 gridExtent = max(camera.voxelGiGridExtentStrength.xyz, float3(cellSize, cellSize, cellSize));
+    float3 uvw = (worldPosition - gridOrigin) / gridExtent;
+    if (any(uvw < float3(0.0, 0.0, 0.0)) || any(uvw > float3(1.0, 1.0, 1.0)))
+    {
+        return 0.0;
+    }
+
+    // March upward in voxel-sized steps; reaching outside the top means open sky.
+    const float uvStepY = cellSize / max(gridExtent.y, cellSize);
+    const uint maxSteps = 32u;
+    uvw.y += uvStepY * 0.5;
+    for (uint i = 0u; i < maxSteps; ++i)
+    {
+        if (uvw.y >= 1.0)
+        {
+            return 1.0;
+        }
+        if (uvw.y < 0.0)
+        {
+            return 0.0;
+        }
+        const float occupancy = voxelGiOccupancyVolume.SampleLevel(uvw, 0.0).x;
+        if (occupancy > 0.5)
+        {
+            return 0.0;
+        }
+        uvw.y += uvStepY;
+    }
+
+    // Conservative fallback if we ran out of steps while still inside the grid.
+    return 0.0;
+}
+
 float3 voxelGiFalseColor(float t)
 {
     const float x = clamp(t, 0.0, 1.0);
@@ -561,7 +598,8 @@ float4 main(FragmentInput input) : SV_Target0
     const float ambientRebalanceStrength = max(camera.shadowVoxelGridOrigin.x, 0.0);
     const float ambientFloor = clamp(camera.shadowVoxelGridOrigin.y, 0.0, 1.0);
     const float ambientScale = clamp(1.0 / (1.0 + (voxelGiLumaValue * ambientRebalanceStrength)), ambientFloor, 1.0);
-    const float ambientSkyVisibility = lerp(0.45, 1.0, skyVisibility);
+    const float skyExposureFromVoxel = sampleVoxelSkyExposure(input.inWorldPosition + (normal * 0.08));
+    const float ambientSkyVisibility = max(lerp(0.45, 1.0, skyVisibility), lerp(0.45, 1.0, skyExposureFromVoxel));
     const float3 ambient = selectAmbient(normal, vertexAo) * ambientScale * ambientSkyVisibility;
     const float3 directSun = sunColor * (sunIntensity * ndotl);
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);
