@@ -105,7 +105,7 @@ float4 main(FragmentInput input) : SV_Target0
         discard;
     }
 
-    const float3 plantNormal = float3(0.0, 1.0, 0.0);
+    const float3 plantNormal = normalize(input.inQuadNormal);
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float3 toSun = -sunDirection;
     const float sunAltitude = clamp(toSun.y, -1.0, 1.0);
@@ -122,12 +122,22 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 groundAmbient = (evaluateShIrradiance(float3(0.0, -1.0, 0.0)) * 0.18) * groundAmbientTint;
     const float3 sideAmbient = evaluateShIrradiance(float3(0.0, 0.0, 1.0)) * 0.08;
     const float3 ambient = lerp(groundAmbient, skyAmbient, canopyT) + sideAmbient;
+    const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
+    const float plantDirectionality = saturate(camera.skyConfig2.z);
+    // Keep billboard translucency tied to GI mood so foliage doesn't outshine GI radiance.
+    const float giMatch = lerp(0.35, 1.0, saturate(camera.voxelGiGridExtentStrength.w));
+    const float twoSidedNdotL = abs(dot(plantNormal, toSun));
+    const float frontSunStrength = lerp(0.04, 0.12, plantDirectionality) * giMatch;
+    const float3 frontSun = camera.sunColorShadow.xyz * (sunIntensity * twoSidedNdotL * frontSunStrength);
+    const float backScatter = pow(saturate(dot(-plantNormal, toSun)), 2.1);
+    const float transmissionStrength = lerp(0.03, 0.16, plantDirectionality) * giMatch;
 
     const float3 tint = clamp(input.inColorTint.xyz, float3(0.10, 0.10, 0.10), float3(2.50, 2.50, 2.50));
     const bool isFlower = spriteTile >= 5u;
     const float flowerTintStrength = isFlower ? 1.0 : 0.68;
     const float3 variedSprite = lerp(sprite.rgb, sprite.rgb * tint, flowerTintStrength);
-    const float3 lit = variedSprite * ambient;
+    const float3 transmission = variedSprite * camera.sunColorShadow.xyz * (sunIntensity * backScatter * transmissionStrength);
+    const float3 lit = (variedSprite * (ambient + frontSun)) + transmission;
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
     const float3 fogged = applyAtmosphericFog(lit, input.inWorldPosition, viewDepth, sunDirection);
     return float4(fogged, 1.0);
