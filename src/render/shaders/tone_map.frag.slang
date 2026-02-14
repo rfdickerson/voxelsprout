@@ -385,15 +385,14 @@ float4 main(FragmentInput input) : SV_Target0
         hdrColor += sunBloom * sunBloomIntensity;
     }
 
-    if (geometryMask < 0.5)
+    const float shaftFactor = sunShaftTexture.Sample(input.inUv).x;
+    if (shaftFactor > 1e-5)
     {
-        const float shaftFactor = sunShaftTexture.Sample(input.inUv).x;
-        if (shaftFactor > 1e-5)
-        {
-            const float shaftStrength = (camera.skyConfig4.x * 8.0) + (camera.skyConfig4.w * 0.04);
-            const float3 shaftTint = lerp(camera.sunColorShadow.xyz, float3(1.0, 0.95, 0.90), 0.25);
-            hdrColor += shaftTint * (shaftFactor * shaftStrength);
-        }
+        const float shaftStrength = (camera.skyConfig4.x * 8.0) + (camera.skyConfig4.w * 0.04);
+        const float3 shaftTint = lerp(camera.sunColorShadow.xyz, float3(1.0, 0.95, 0.90), 0.25);
+        // Let shafts affect geometry too (window beams), but attenuate by scene depth for plausibility.
+        const float geometryAttenuation = lerp(1.0, exp(-viewDepth * 0.030), geometryMask);
+        hdrColor += shaftTint * (shaftFactor * shaftStrength * geometryAttenuation);
     }
 
     float3 toneMapped = acesFilmTonemap(hdrColor * exposureScale);

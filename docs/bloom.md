@@ -19,7 +19,7 @@ Render order is:
    - volumetric fog composite
    - mip-chain bloom
    - analytic sun bloom boost
-   - sun shafts composite
+   - sun shafts / froxel volumetric light composite
    - ACES filmic tonemap + saturation + gamma
 
 ## Mip-Chain Bloom
@@ -57,7 +57,43 @@ In addition to global mip-chain bloom, tonemap adds:
 
 - Analytic sun bloom term (screen-space radial glow around sun direction).
 - Occlusion attenuation near sun UV to reduce bloom leaking through occluders.
-- Optional sun shafts texture composite (mostly sky-only mask).
+- Sun shafts / volumetric light texture composite (applies to sky and geometry with depth attenuation).
+
+## Sun Shafts + Froxel Volumetric Pass
+
+Sun-light shafts are produced in a dedicated compute pass (`sun_shafts.comp.slang`) before tonemapping.
+
+### Inputs
+
+- Camera UBO (`camera_uniform`)
+- `normalDepthTexture` (view-space depth in `.w`)
+- Cascaded shadow atlas (`shadowMap`)
+- Push constants:
+  - output `width/height`
+  - ray-march `sampleCount`
+
+### Core Method
+
+This pass now behaves as a froxel-style per-pixel volume march:
+
+1. Reconstruct per-pixel view ray from UV + projection.
+2. Convert to world ray using inverse view rotation.
+3. March from camera to scene depth (or max range for sky).
+4. At each step:
+   - evaluate fog density from height-fog params (`skyConfig4`)
+   - sample cascaded shadow visibility at world position
+   - accumulate in-scattering and transmittance
+5. Write shaft intensity to `sunShaftTexture`.
+
+This is participating-media integration, not just a radial blur mask.
+
+### Composition in Tonemap
+
+`tone_map.frag.slang` samples `sunShaftTexture` and adds it in HDR with:
+
+- sun-tinted color
+- shaft strength derived from fog density/scattering
+- depth-based geometry attenuation (so shafts can appear on interior geometry, e.g. through windows, without full-screen haze)
 
 ## User Controls
 
@@ -72,13 +108,15 @@ Related controls that affect perceived bloom:
 
 - Auto exposure enable/manual exposure.
 - Volumetric fog density/scattering.
+- Fog height falloff/base height (strongly affects shaft visibility indoors).
 
 ## Current Limitations
 
 - No dirt mask or lens texture response.
 - Fixed per-mip weights (not artist curve-driven yet).
 - No temporal anti-flicker specifically for bloom extraction.
-- Bloom and fog interplay is tuned heuristically, not camera/lens physically based.
+- Bloom and volumetric shaft interplay is tuned heuristically, not full atmospheric multiple-scattering.
+- No temporal reprojection for froxel shafts yet (can shimmer under motion).
 
 ## Good Next Steps
 
