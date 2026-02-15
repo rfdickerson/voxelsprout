@@ -413,9 +413,13 @@ private:
     std::array<VkImage, 6> m_voxelGiSurfaceFaceImages{};
     std::array<VkImageView, 6> m_voxelGiSurfaceFaceImageViews{};
     std::array<VkDeviceMemory, 6> m_voxelGiSurfaceFaceMemories{};
+    VkImage m_voxelGiSkyExposureImage = VK_NULL_HANDLE;
+    VkImageView m_voxelGiSkyExposureImageView = VK_NULL_HANDLE;
+    VkDeviceMemory m_voxelGiSkyExposureMemory = VK_NULL_HANDLE;
     VkSampler m_voxelGiSampler = VK_NULL_HANDLE;
     bool m_voxelGiInitialized = false;
     bool m_voxelGiComputeAvailable = false;
+    bool m_voxelGiSkyExposureInitialized = false;
     VkImage m_voxelGiOccupancyImage = VK_NULL_HANDLE;
     VkImageView m_voxelGiOccupancyImageView = VK_NULL_HANDLE;
     VkDeviceMemory m_voxelGiOccupancyMemory = VK_NULL_HANDLE;
@@ -452,6 +456,7 @@ private:
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;
     std::array<VmaAllocation, 2> m_voxelGiImageAllocations{};
     std::array<VmaAllocation, 6> m_voxelGiSurfaceFaceAllocations{};
+    VmaAllocation m_voxelGiSkyExposureAllocation = VK_NULL_HANDLE;
     VmaAllocation m_voxelGiOccupancyAllocation = VK_NULL_HANDLE;
 #endif
     VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;
@@ -483,6 +488,7 @@ private:
     VkPipeline m_previewRemovePipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_voxelGiPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_voxelGiSurfacePipeline = VK_NULL_HANDLE;
+    VkPipeline m_voxelGiSkyExposurePipeline = VK_NULL_HANDLE;
     VkPipeline m_voxelGiInjectPipeline = VK_NULL_HANDLE;
     VkPipeline m_voxelGiPropagatePipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;

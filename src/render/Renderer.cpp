@@ -3589,6 +3589,7 @@ bool Renderer::createVoxelGiResources() {
         m_voxelGiImageViews[0] != VK_NULL_HANDLE &&
         m_voxelGiImageViews[1] != VK_NULL_HANDLE &&
         surfaceFacesReady &&
+        m_voxelGiSkyExposureImageView != VK_NULL_HANDLE &&
         m_voxelGiOccupancySampler != VK_NULL_HANDLE &&
         m_voxelGiOccupancyImageView != VK_NULL_HANDLE) {
         return true;
@@ -3836,6 +3837,115 @@ bool Renderer::createVoxelGiResources() {
     }
 
     {
+        VkImageCreateInfo skyExposureImageCreateInfo{};
+        skyExposureImageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        skyExposureImageCreateInfo.imageType = VK_IMAGE_TYPE_3D;
+        skyExposureImageCreateInfo.format = m_voxelGiFormat;
+        skyExposureImageCreateInfo.extent.width = kVoxelGiGridResolution;
+        skyExposureImageCreateInfo.extent.height = kVoxelGiGridResolution;
+        skyExposureImageCreateInfo.extent.depth = kVoxelGiGridResolution;
+        skyExposureImageCreateInfo.mipLevels = 1;
+        skyExposureImageCreateInfo.arrayLayers = 1;
+        skyExposureImageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        skyExposureImageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        skyExposureImageCreateInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+        skyExposureImageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        skyExposureImageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE) {
+            VmaAllocationCreateInfo skyExposureAllocCreateInfo{};
+            skyExposureAllocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            skyExposureAllocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            const VkResult skyExposureImageResult = vmaCreateImage(
+                m_vmaAllocator,
+                &skyExposureImageCreateInfo,
+                &skyExposureAllocCreateInfo,
+                &m_voxelGiSkyExposureImage,
+                &m_voxelGiSkyExposureAllocation,
+                nullptr
+            );
+            if (skyExposureImageResult != VK_SUCCESS) {
+                logVkFailure("vmaCreateImage(voxelGiSkyExposure)", skyExposureImageResult);
+                destroyVoxelGiResources();
+                return false;
+            }
+        } else
+#endif
+        {
+            const VkResult skyExposureImageResult =
+                vkCreateImage(m_device, &skyExposureImageCreateInfo, nullptr, &m_voxelGiSkyExposureImage);
+            if (skyExposureImageResult != VK_SUCCESS) {
+                logVkFailure("vkCreateImage(voxelGiSkyExposure)", skyExposureImageResult);
+                destroyVoxelGiResources();
+                return false;
+            }
+
+            VkMemoryRequirements skyExposureMemoryRequirements{};
+            vkGetImageMemoryRequirements(m_device, m_voxelGiSkyExposureImage, &skyExposureMemoryRequirements);
+            const uint32_t skyExposureMemoryTypeIndex = findMemoryTypeIndex(
+                m_physicalDevice,
+                skyExposureMemoryRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+            if (skyExposureMemoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+                VOX_LOGE("render") << "no memory type for voxel GI sky exposure image\n";
+                destroyVoxelGiResources();
+                return false;
+            }
+
+            VkMemoryAllocateInfo skyExposureAllocateInfo{};
+            skyExposureAllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            skyExposureAllocateInfo.allocationSize = skyExposureMemoryRequirements.size;
+            skyExposureAllocateInfo.memoryTypeIndex = skyExposureMemoryTypeIndex;
+            const VkResult skyExposureAllocResult =
+                vkAllocateMemory(m_device, &skyExposureAllocateInfo, nullptr, &m_voxelGiSkyExposureMemory);
+            if (skyExposureAllocResult != VK_SUCCESS) {
+                logVkFailure("vkAllocateMemory(voxelGiSkyExposure)", skyExposureAllocResult);
+                destroyVoxelGiResources();
+                return false;
+            }
+
+            const VkResult skyExposureBindResult =
+                vkBindImageMemory(m_device, m_voxelGiSkyExposureImage, m_voxelGiSkyExposureMemory, 0);
+            if (skyExposureBindResult != VK_SUCCESS) {
+                logVkFailure("vkBindImageMemory(voxelGiSkyExposure)", skyExposureBindResult);
+                destroyVoxelGiResources();
+                return false;
+            }
+        }
+
+        setObjectName(
+            VK_OBJECT_TYPE_IMAGE,
+            vkHandleToUint64(m_voxelGiSkyExposureImage),
+            "voxelGi.skyExposure.image"
+        );
+
+        VkImageViewCreateInfo skyExposureViewCreateInfo{};
+        skyExposureViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        skyExposureViewCreateInfo.image = m_voxelGiSkyExposureImage;
+        skyExposureViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
+        skyExposureViewCreateInfo.format = m_voxelGiFormat;
+        skyExposureViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        skyExposureViewCreateInfo.subresourceRange.baseMipLevel = 0;
+        skyExposureViewCreateInfo.subresourceRange.levelCount = 1;
+        skyExposureViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+        skyExposureViewCreateInfo.subresourceRange.layerCount = 1;
+        const VkResult skyExposureViewResult =
+            vkCreateImageView(m_device, &skyExposureViewCreateInfo, nullptr, &m_voxelGiSkyExposureImageView);
+        if (skyExposureViewResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImageView(voxelGiSkyExposure)", skyExposureViewResult);
+            destroyVoxelGiResources();
+            return false;
+        }
+        setObjectName(
+            VK_OBJECT_TYPE_IMAGE_VIEW,
+            vkHandleToUint64(m_voxelGiSkyExposureImageView),
+            "voxelGi.skyExposure.imageView"
+        );
+    }
+
+    {
         VkImageCreateInfo occupancyImageCreateInfo{};
         occupancyImageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         occupancyImageCreateInfo.imageType = VK_IMAGE_TYPE_3D;
@@ -3987,19 +4097,22 @@ bool Renderer::createVoxelGiResources() {
         "voxelGi.occupancy.sampler"
     );
 
+    constexpr const char* kVoxelGiSkyExposureShaderPath = "../src/render/shaders/voxel_gi_sky_exposure.comp.slang.spv";
     constexpr const char* kVoxelGiSurfaceShaderPath = "../src/render/shaders/voxel_gi_surface.comp.slang.spv";
     constexpr const char* kVoxelGiInjectShaderPath = "../src/render/shaders/voxel_gi_inject.comp.slang.spv";
     constexpr const char* kVoxelGiPropagateShaderPath = "../src/render/shaders/voxel_gi_propagate.comp.slang.spv";
+    const bool hasSkyExposureShader = readBinaryFile(kVoxelGiSkyExposureShaderPath).has_value();
     const bool hasSurfaceShader = readBinaryFile(kVoxelGiSurfaceShaderPath).has_value();
     const bool hasInjectShader = readBinaryFile(kVoxelGiInjectShaderPath).has_value();
     const bool hasPropagateShader = readBinaryFile(kVoxelGiPropagateShaderPath).has_value();
-    if (!hasSurfaceShader || !hasInjectShader || !hasPropagateShader) {
+    if (!hasSkyExposureShader || !hasSurfaceShader || !hasInjectShader || !hasPropagateShader) {
         VOX_LOGI("render")
             << "voxel GI compute shaders not found; keeping static volume fallback (expected: "
-            << kVoxelGiSurfaceShaderPath << ", " << kVoxelGiInjectShaderPath
+            << kVoxelGiSkyExposureShaderPath << ", " << kVoxelGiSurfaceShaderPath << ", " << kVoxelGiInjectShaderPath
             << ", " << kVoxelGiPropagateShaderPath << ")\n";
         m_voxelGiComputeAvailable = false;
         m_voxelGiInitialized = false;
+        m_voxelGiSkyExposureInitialized = false;
         m_voxelGiOccupancyInitialized = false;
         return true;
     }
@@ -4077,7 +4190,13 @@ bool Renderer::createVoxelGiResources() {
         surfaceNegZBinding.descriptorCount = 1;
         surfaceNegZBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 12> bindings = {
+        VkDescriptorSetLayoutBinding skyExposureBinding{};
+        skyExposureBinding.binding = 12;
+        skyExposureBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        skyExposureBinding.descriptorCount = 1;
+        skyExposureBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 13> bindings = {
             cameraBinding,
             shadowBinding,
             injectWriteBinding,
@@ -4089,7 +4208,8 @@ bool Renderer::createVoxelGiResources() {
             surfacePosYBinding,
             surfaceNegYBinding,
             surfacePosZBinding,
-            surfaceNegZBinding
+            surfaceNegZBinding,
+            skyExposureBinding
         };
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
@@ -4119,7 +4239,7 @@ bool Renderer::createVoxelGiResources() {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8 * kMaxFramesInFlight}
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 9 * kMaxFramesInFlight}
         };
         VkDescriptorPoolCreateInfo poolCreateInfo{};
         poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -4158,15 +4278,26 @@ bool Renderer::createVoxelGiResources() {
         setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET, vkHandleToUint64(m_voxelGiDescriptorSets[frameIndex]), setName.c_str());
     }
 
+    VkShaderModule skyExposureShaderModule = VK_NULL_HANDLE;
     VkShaderModule surfaceShaderModule = VK_NULL_HANDLE;
     VkShaderModule injectShaderModule = VK_NULL_HANDLE;
     VkShaderModule propagateShaderModule = VK_NULL_HANDLE;
+    if (!createShaderModuleFromFile(
+            m_device,
+            kVoxelGiSkyExposureShaderPath,
+            "voxel_gi_sky_exposure.comp",
+            skyExposureShaderModule
+        )) {
+        destroyVoxelGiResources();
+        return false;
+    }
     if (!createShaderModuleFromFile(
             m_device,
             kVoxelGiSurfaceShaderPath,
             "voxel_gi_surface.comp",
             surfaceShaderModule
         )) {
+        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
         destroyVoxelGiResources();
         return false;
     }
@@ -4176,6 +4307,7 @@ bool Renderer::createVoxelGiResources() {
             "voxel_gi_inject.comp",
             injectShaderModule
         )) {
+        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
         vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
         destroyVoxelGiResources();
         return false;
@@ -4186,6 +4318,7 @@ bool Renderer::createVoxelGiResources() {
             "voxel_gi_propagate.comp",
             propagateShaderModule
         )) {
+        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
         vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
         vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
         destroyVoxelGiResources();
@@ -4204,6 +4337,7 @@ bool Renderer::createVoxelGiResources() {
     );
     if (pipelineLayoutResult != VK_SUCCESS) {
         logVkFailure("vkCreatePipelineLayout(voxelGi)", pipelineLayoutResult);
+        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
         vkDestroyShaderModule(m_device, propagateShaderModule, nullptr);
         vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
         vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
@@ -4214,6 +4348,39 @@ bool Renderer::createVoxelGiResources() {
         VK_OBJECT_TYPE_PIPELINE_LAYOUT,
         vkHandleToUint64(m_voxelGiPipelineLayout),
         "renderer.pipelineLayout.voxelGi"
+    );
+
+    VkPipelineShaderStageCreateInfo skyExposureStage{};
+    skyExposureStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    skyExposureStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    skyExposureStage.module = skyExposureShaderModule;
+    skyExposureStage.pName = "main";
+
+    VkComputePipelineCreateInfo skyExposurePipelineCreateInfo{};
+    skyExposurePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    skyExposurePipelineCreateInfo.stage = skyExposureStage;
+    skyExposurePipelineCreateInfo.layout = m_voxelGiPipelineLayout;
+    const VkResult skyExposurePipelineResult = vkCreateComputePipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &skyExposurePipelineCreateInfo,
+        nullptr,
+        &m_voxelGiSkyExposurePipeline
+    );
+    if (skyExposurePipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateComputePipelines(voxelGiSkyExposure)", skyExposurePipelineResult);
+        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, propagateShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
+        vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
+        destroyVoxelGiResources();
+        return false;
+    }
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_voxelGiSkyExposurePipeline),
+        "pipeline.voxelGi.skyExposure"
     );
 
     VkPipelineShaderStageCreateInfo surfaceStage{};
@@ -4236,6 +4403,7 @@ bool Renderer::createVoxelGiResources() {
     );
     if (surfacePipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateComputePipelines(voxelGiSurface)", surfacePipelineResult);
+        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
         vkDestroyShaderModule(m_device, propagateShaderModule, nullptr);
         vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
         vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
@@ -4264,6 +4432,7 @@ bool Renderer::createVoxelGiResources() {
     );
     if (injectPipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateComputePipelines(voxelGiInject)", injectPipelineResult);
+        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
         vkDestroyShaderModule(m_device, propagateShaderModule, nullptr);
         vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
         vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
@@ -4290,6 +4459,7 @@ bool Renderer::createVoxelGiResources() {
         nullptr,
         &m_voxelGiPropagatePipeline
     );
+    vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
     vkDestroyShaderModule(m_device, propagateShaderModule, nullptr);
     vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
     vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
@@ -4302,6 +4472,7 @@ bool Renderer::createVoxelGiResources() {
 
     m_voxelGiComputeAvailable = true;
     m_voxelGiInitialized = false;
+    m_voxelGiSkyExposureInitialized = false;
     m_voxelGiOccupancyInitialized = false;
     VOX_LOGI("render") << "voxel GI resources ready: "
                        << kVoxelGiGridResolution << "^3, format=" << static_cast<int>(m_voxelGiFormat)
@@ -10024,8 +10195,12 @@ void Renderer::renderFrame(
             voxelGiSurfaceFaceInfos[faceIndex].imageView = m_voxelGiSurfaceFaceImageViews[faceIndex];
             voxelGiSurfaceFaceInfos[faceIndex].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         }
+        VkDescriptorImageInfo voxelGiSkyExposureInfo{};
+        voxelGiSkyExposureInfo.sampler = VK_NULL_HANDLE;
+        voxelGiSkyExposureInfo.imageView = m_voxelGiSkyExposureImageView;
+        voxelGiSkyExposureInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        std::array<VkWriteDescriptorSet, 12> voxelGiWrites{};
+        std::array<VkWriteDescriptorSet, 13> voxelGiWrites{};
         voxelGiWrites[0] = write;
         voxelGiWrites[0].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
         voxelGiWrites[0].dstBinding = 0;
@@ -10109,6 +10284,13 @@ void Renderer::renderFrame(
         voxelGiWrites[11].descriptorCount = 1;
         voxelGiWrites[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         voxelGiWrites[11].pImageInfo = &voxelGiSurfaceFaceInfos[5];
+
+        voxelGiWrites[12] = write;
+        voxelGiWrites[12].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+        voxelGiWrites[12].dstBinding = 12;
+        voxelGiWrites[12].descriptorCount = 1;
+        voxelGiWrites[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        voxelGiWrites[12].pImageInfo = &voxelGiSkyExposureInfo;
 
         vkUpdateDescriptorSets(
             m_device,
@@ -11235,12 +11417,14 @@ void Renderer::renderFrame(
         [](VkImage image) { return image != VK_NULL_HANDLE; }
     );
     if (m_voxelGiComputeAvailable &&
+        m_voxelGiSkyExposurePipeline != VK_NULL_HANDLE &&
         m_voxelGiSurfacePipeline != VK_NULL_HANDLE &&
         m_voxelGiInjectPipeline != VK_NULL_HANDLE &&
         m_voxelGiPropagatePipeline != VK_NULL_HANDLE &&
         m_voxelGiPipelineLayout != VK_NULL_HANDLE &&
         m_voxelGiDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
         voxelGiSurfaceFacesReady &&
+        m_voxelGiSkyExposureImage != VK_NULL_HANDLE &&
         m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
         voxelGiNeedsComputeUpdate &&
         (!voxelGiNeedsOccupancyUpload || voxelGiHasOccupancyUpload)) {
@@ -11312,6 +11496,17 @@ void Renderer::renderFrame(
         }
         transitionImageLayout(
             commandBuffer,
+            m_voxelGiSkyExposureImage,
+            m_voxelGiSkyExposureInitialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL,
+            m_voxelGiSkyExposureInitialized ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+            m_voxelGiSkyExposureInitialized ? VK_ACCESS_2_SHADER_STORAGE_READ_BIT : VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT
+        );
+        transitionImageLayout(
+            commandBuffer,
             m_voxelGiImages[0],
             m_voxelGiInitialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_GENERAL,
@@ -11336,6 +11531,32 @@ void Renderer::renderFrame(
         const uint32_t voxelGiDispatchX = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
         const uint32_t voxelGiDispatchY = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
         const uint32_t voxelGiDispatchZ = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
+        const uint32_t voxelGiSkyDispatchX = (kVoxelGiGridResolution + 7u) / 8u;
+        const uint32_t voxelGiSkyDispatchY = (kVoxelGiGridResolution + 7u) / 8u;
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_voxelGiSkyExposurePipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            m_voxelGiPipelineLayout,
+            0,
+            1,
+            &m_voxelGiDescriptorSets[m_currentFrame],
+            1,
+            &mvpDynamicOffset
+        );
+        vkCmdDispatch(commandBuffer, voxelGiSkyDispatchX, voxelGiSkyDispatchY, 1);
+        transitionImageLayout(
+            commandBuffer,
+            m_voxelGiSkyExposureImage,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT
+        );
+        m_voxelGiSkyExposureInitialized = true;
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_voxelGiSurfacePipeline);
         vkCmdBindDescriptorSets(
             commandBuffer,
@@ -13470,6 +13691,10 @@ void Renderer::destroyShadowResources() {
 }
 
 void Renderer::destroyVoxelGiResources() {
+    if (m_voxelGiSkyExposurePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_voxelGiSkyExposurePipeline, nullptr);
+        m_voxelGiSkyExposurePipeline = VK_NULL_HANDLE;
+    }
     if (m_voxelGiSurfacePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_voxelGiSurfacePipeline, nullptr);
         m_voxelGiSurfacePipeline = VK_NULL_HANDLE;
@@ -13508,6 +13733,10 @@ void Renderer::destroyVoxelGiResources() {
         vkDestroyImageView(m_device, m_voxelGiOccupancyImageView, nullptr);
         m_voxelGiOccupancyImageView = VK_NULL_HANDLE;
     }
+    if (m_voxelGiSkyExposureImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, m_voxelGiSkyExposureImageView, nullptr);
+        m_voxelGiSkyExposureImageView = VK_NULL_HANDLE;
+    }
     for (std::size_t faceIndex = 0; faceIndex < m_voxelGiSurfaceFaceImageViews.size(); ++faceIndex) {
         if (m_voxelGiSurfaceFaceImageViews[faceIndex] != VK_NULL_HANDLE) {
             vkDestroyImageView(m_device, m_voxelGiSurfaceFaceImageViews[faceIndex], nullptr);
@@ -13526,6 +13755,19 @@ void Renderer::destroyVoxelGiResources() {
         vkDestroyImage(m_device, m_voxelGiOccupancyImage, nullptr);
 #endif
         m_voxelGiOccupancyImage = VK_NULL_HANDLE;
+    }
+    if (m_voxelGiSkyExposureImage != VK_NULL_HANDLE) {
+#if defined(VOXEL_HAS_VMA)
+        if (m_vmaAllocator != VK_NULL_HANDLE && m_voxelGiSkyExposureAllocation != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, m_voxelGiSkyExposureImage, m_voxelGiSkyExposureAllocation);
+            m_voxelGiSkyExposureAllocation = VK_NULL_HANDLE;
+        } else {
+            vkDestroyImage(m_device, m_voxelGiSkyExposureImage, nullptr);
+        }
+#else
+        vkDestroyImage(m_device, m_voxelGiSkyExposureImage, nullptr);
+#endif
+        m_voxelGiSkyExposureImage = VK_NULL_HANDLE;
     }
     for (std::size_t faceIndex = 0; faceIndex < m_voxelGiSurfaceFaceImages.size(); ++faceIndex) {
         if (m_voxelGiSurfaceFaceImages[faceIndex] != VK_NULL_HANDLE) {
@@ -13549,6 +13791,10 @@ void Renderer::destroyVoxelGiResources() {
     if (m_voxelGiOccupancyMemory != VK_NULL_HANDLE) {
         vkFreeMemory(m_device, m_voxelGiOccupancyMemory, nullptr);
         m_voxelGiOccupancyMemory = VK_NULL_HANDLE;
+    }
+    if (m_voxelGiSkyExposureMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, m_voxelGiSkyExposureMemory, nullptr);
+        m_voxelGiSkyExposureMemory = VK_NULL_HANDLE;
     }
     for (std::size_t faceIndex = 0; faceIndex < m_voxelGiSurfaceFaceMemories.size(); ++faceIndex) {
         if (m_voxelGiSurfaceFaceMemories[faceIndex] != VK_NULL_HANDLE) {
@@ -13582,9 +13828,11 @@ void Renderer::destroyVoxelGiResources() {
 #if defined(VOXEL_HAS_VMA)
     m_voxelGiImageAllocations = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     m_voxelGiSurfaceFaceAllocations.fill(VK_NULL_HANDLE);
+    m_voxelGiSkyExposureAllocation = VK_NULL_HANDLE;
     m_voxelGiOccupancyAllocation = VK_NULL_HANDLE;
 #endif
     m_voxelGiInitialized = false;
+    m_voxelGiSkyExposureInitialized = false;
     m_voxelGiOccupancyInitialized = false;
     m_voxelGiComputeAvailable = false;
     m_voxelGiWorldDirty = true;
@@ -13831,6 +14079,7 @@ void Renderer::shutdown() {
                 m_voxelGiSurfaceFaceImages[faceIndex]
             );
         }
+        logLiveImage("voxelGi.skyExposure.image", m_voxelGiSkyExposureImage);
         logLiveImage("voxelGi.occupancy.image", m_voxelGiOccupancyImage);
         for (uint32_t i = 0; i < static_cast<uint32_t>(m_depthImages.size()); ++i) {
             logLiveImage(("depth.msaa.image[" + std::to_string(i) + "]").c_str(), m_depthImages[i]);
