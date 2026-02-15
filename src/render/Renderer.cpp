@@ -10871,7 +10871,7 @@ void Renderer::renderFrame(
 
     // Shadow casting must be culled against cascade coverage and receiver visibility.
     // Use camera-frustum visible chunks as receivers, and assume casters only affect
-    // immediate neighboring chunks in upstream sun direction.
+    // immediate neighboring chunks (1-ring neighborhood).
     std::vector<std::uint8_t> shadowCandidateMask;
     if (m_shadowDebugSettings.enableOccluderCulling && !visibleChunkIndices.empty()) {
         shadowCandidateMask.assign(chunks.size(), 0u);
@@ -10889,11 +10889,6 @@ void Renderer::renderFrame(
             }
         };
 
-        const math::Vector3 upstreamDirection = -math::normalize(sunDirection);
-        const int upstreamStepX = (upstreamDirection.x > 0.15f) ? 1 : ((upstreamDirection.x < -0.15f) ? -1 : 0);
-        const int upstreamStepY = (upstreamDirection.y > 0.15f) ? 1 : ((upstreamDirection.y < -0.15f) ? -1 : 0);
-        const int upstreamStepZ = (upstreamDirection.z > 0.15f) ? 1 : ((upstreamDirection.z < -0.15f) ? -1 : 0);
-
         for (const std::size_t visibleChunkIndex : visibleChunkIndices) {
             if (visibleChunkIndex >= chunks.size()) {
                 continue;
@@ -10908,15 +10903,6 @@ void Renderer::renderFrame(
                 for (int dy = -1; dy <= 1; ++dy) {
                     for (int dz = -1; dz <= 1; ++dz) {
                         if (dx == 0 && dy == 0 && dz == 0) {
-                            continue;
-                        }
-                        if (upstreamStepX != 0 && dx != upstreamStepX) {
-                            continue;
-                        }
-                        if (upstreamStepY != 0 && dy != upstreamStepY) {
-                            continue;
-                        }
-                        if (upstreamStepZ != 0 && dz != upstreamStepZ) {
                             continue;
                         }
                         markCandidateChunk(baseChunkX + dx, baseChunkY + dy, baseChunkZ + dz);
