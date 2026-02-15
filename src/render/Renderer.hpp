@@ -90,6 +90,7 @@ public:
 
         float pcfRadius = 1.0f;
         int grassShadowCascadeCount = 1;
+        bool enableOccluderCulling = true;
 
         float ssaoRadius = 0.55f;
         float ssaoBias = 0.03f;
