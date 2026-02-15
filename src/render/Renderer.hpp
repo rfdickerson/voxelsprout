@@ -121,6 +121,12 @@ public:
         float autoExposureLowPercentile = 0.50f;
         float autoExposureHighPercentile = 0.98f;
         int autoExposureUpdateIntervalFrames = 1;
+        float colorGradingWhiteBalanceTemp = 0.0f;
+        float colorGradingWhiteBalanceTint = 0.0f;
+        float colorGradingContrast = 1.06f;
+        float colorGradingVibrance = 0.14f;
+        float colorGradingSplitToneAmount = 0.10f;
+        float colorGradingSplitToneBalance = 0.0f;
         float volumetricFogDensity = 0.0045f;
         float volumetricFogHeightFalloff = 0.075f;
         float volumetricFogBaseHeight = 6.0f;

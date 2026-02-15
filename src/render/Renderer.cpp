@@ -132,6 +132,8 @@ struct alignas(16) CameraUniform {
     float skyConfig3[4];
     float skyConfig4[4];
     float skyConfig5[4];
+    float colorGrading0[4];
+    float colorGrading1[4];
     float voxelBaseColorPalette[16][4];
     float voxelGiGridOriginCellSize[4];
     float voxelGiGridExtentStrength[4];
@@ -9131,6 +9133,15 @@ void Renderer::buildSunDebugUi() {
         ImGui::TextDisabled("Auto exposure compute unavailable; manual exposure is active.");
     }
     ImGui::Separator();
+    ImGui::Text("Color Grading");
+    ImGui::SliderFloat("White Balance Temp", &m_skyDebugSettings.colorGradingWhiteBalanceTemp, -1.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("White Balance Tint", &m_skyDebugSettings.colorGradingWhiteBalanceTint, -1.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Contrast", &m_skyDebugSettings.colorGradingContrast, 0.70f, 1.40f, "%.2f");
+    ImGui::SliderFloat("Vibrance", &m_skyDebugSettings.colorGradingVibrance, -1.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Split Tone Amount", &m_skyDebugSettings.colorGradingSplitToneAmount, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Split Tone Balance", &m_skyDebugSettings.colorGradingSplitToneBalance, -1.0f, 1.0f, "%.2f");
+    ImGui::TextDisabled("Cool shadows / warm highlights grading.");
+    ImGui::Separator();
     ImGui::Text("Volumetric Fog");
     ImGui::SliderFloat("Fog Density", &m_skyDebugSettings.volumetricFogDensity, 0.0f, 0.03f, "%.4f");
     ImGui::SliderFloat("Fog Height Falloff", &m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 0.30f, "%.3f");
@@ -9926,6 +9937,14 @@ void Renderer::renderFrame(
     mvpUniform.skyConfig5[1] = std::clamp(m_skyDebugSettings.manualExposure, 0.05f, 8.0f);
     mvpUniform.skyConfig5[2] = 0.0f;
     mvpUniform.skyConfig5[3] = 0.0f;
+    mvpUniform.colorGrading0[0] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceTemp, -1.0f, 1.0f);
+    mvpUniform.colorGrading0[1] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceTint, -1.0f, 1.0f);
+    mvpUniform.colorGrading0[2] = std::clamp(m_skyDebugSettings.colorGradingContrast, 0.70f, 1.40f);
+    mvpUniform.colorGrading0[3] = std::clamp(m_skyDebugSettings.colorGradingVibrance, -1.0f, 1.0f);
+    mvpUniform.colorGrading1[0] = std::clamp(m_skyDebugSettings.colorGradingSplitToneAmount, 0.0f, 1.0f);
+    mvpUniform.colorGrading1[1] = std::clamp(m_skyDebugSettings.colorGradingSplitToneBalance, -1.0f, 1.0f);
+    mvpUniform.colorGrading1[2] = 0.0f;
+    mvpUniform.colorGrading1[3] = 0.0f;
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
     const float voxelGiOriginX = std::floor((camera.x - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;

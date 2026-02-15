@@ -2,6 +2,7 @@
 // slangc -target spirv -entry main -stage compute -matrix-layout-column-major src/render/shaders/voxel_gi_inject.comp.slang -o src/render/shaders/voxel_gi_inject.comp.slang.spv
 
 import camera_uniform;
+import sh_lighting;
 [[vk::binding(2, 0)]]
 RWTexture3D<float4> voxelGiInjectOut;
 
@@ -25,6 +26,9 @@ RWTexture3D<float4> voxelGiSurfacePosZCache;
 
 [[vk::binding(11, 0)]]
 RWTexture3D<float4> voxelGiSurfaceNegZCache;
+
+[[vk::binding(12, 0)]]
+RWTexture3D<float4> voxelGiSkyExposure;
 
 bool inBounds(int3 cell, int3 dims)
 {
@@ -175,6 +179,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     const float injectBounceScale = clamp(camera.shadowConfig3.y, 0.0, 4.0);
+    const float injectShScale = clamp(camera.shadowConfig3.x, 0.0, 4.0);
     // Lambertian conversion from irradiance to radiance.
     const float lambertInvPi = 0.31830988618;
     const int3 offsets[6] = {
@@ -212,7 +217,30 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         bouncedLightSum += bounceAlbedo * (neighborIrradiance * colorBleedBoost);
     }
 
+    int openNeighborFaces = 0;
+    for (int i = 0; i < 6; ++i)
+    {
+        const int3 neighborCell = cell + offsets[i];
+        if (!inBounds(neighborCell, dims))
+        {
+            openNeighborFaces += 1;
+            continue;
+        }
+        const float neighborOccupancy = voxelGiOccupancy.Load(int4(neighborCell, 0)).x;
+        if (neighborOccupancy <= 0.5)
+        {
+            openNeighborFaces += 1;
+        }
+    }
+    const float localOpenRatio = float(openNeighborFaces) / 6.0;
+    const float skyExposure = clamp(voxelGiSkyExposure[dispatchThreadId].x, 0.0, 1.0);
+    const float ambientGate = skyExposure * lerp(0.20, 1.0, localOpenRatio);
+    // Small SH inject term keeps sky-shadowed outdoor regions from going unnaturally black.
+    const float ambientInjectScale = injectShScale * 0.20;
+    const float3 ambientIrradiance =
+        evaluateShHemisphereIrradiance(float3(0.0, 1.0, 0.0)) * (ambientInjectScale * ambientGate);
+
     const float3 injected =
-        max(bouncedLightSum * (injectBounceScale * lambertInvPi), float3(0.0, 0.0, 0.0));
+        max((bouncedLightSum * injectBounceScale + ambientIrradiance) * lambertInvPi, float3(0.0, 0.0, 0.0));
     voxelGiInjectOut[dispatchThreadId] = float4(injected, 1.0);
 }
