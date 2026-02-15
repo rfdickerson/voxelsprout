@@ -38,11 +38,38 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, in
         return 0.0;
     }
 
+    // Estimate local openness around the emitter cell to modulate isotropic fallback.
+    int openNeighborFaces = 0;
+    const int3 neighborOffsets[6] = {
+        int3(1, 0, 0),
+        int3(-1, 0, 0),
+        int3(0, 1, 0),
+        int3(0, -1, 0),
+        int3(0, 0, 1),
+        int3(0, 0, -1)
+    };
+    for (int n = 0; n < 6; ++n)
+    {
+        const int3 adjacent = cell + neighborOffsets[n];
+        if (!inBounds(adjacent, dims))
+        {
+            openNeighborFaces += 1;
+            continue;
+        }
+        const float adjacentOccupancy = voxelGiOccupancy.Load(int4(adjacent, 0)).x;
+        if (adjacentOccupancy <= 0.5)
+        {
+            openNeighborFaces += 1;
+        }
+    }
+    const float openRatio = float(openNeighborFaces) / 6.0;
+
     // Blend +/- axis faces by direction magnitudes (cubemap-style) to avoid dominant-axis aliasing.
     const float weightDenom = absDir.x + absDir.y + absDir.z;
     const float3 axisWeights = absDir / weightDenom;
     float directional = 0.0;
     float3 blendedFaceNormal = float3(0.0, 0.0, 0.0);
+    bool receiverFacingSideOpen = false;
     if (axisWeights.x > 0.0001)
     {
         const int3 faceOffsetX = (dir.x >= 0.0) ? int3(1, 0, 0) : int3(-1, 0, 0);
@@ -59,6 +86,7 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, in
         }
         if (opennessX > 0.0)
         {
+            receiverFacingSideOpen = true;
             directional += faceIrradianceX * axisWeights.x;
             blendedFaceNormal += float3(faceOffsetX) * axisWeights.x;
         }
@@ -79,6 +107,7 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, in
         }
         if (opennessY > 0.0)
         {
+            receiverFacingSideOpen = true;
             directional += faceIrradianceY * axisWeights.y;
             blendedFaceNormal += float3(faceOffsetY) * axisWeights.y;
         }
@@ -99,20 +128,26 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, in
         }
         if (opennessZ > 0.0)
         {
+            receiverFacingSideOpen = true;
             directional += faceIrradianceZ * axisWeights.z;
             blendedFaceNormal += float3(faceOffsetZ) * axisWeights.z;
         }
     }
 
+    const float isotropicFloorScaleOpen = lerp(0.04, 0.18, openRatio);
+    const float isotropicFloorScaleBlocked = lerp(0.01, 0.06, openRatio);
+    const float isotropicFloorScale =
+        receiverFacingSideOpen ? isotropicFloorScaleOpen : isotropicFloorScaleBlocked;
+
     if (dot(blendedFaceNormal, blendedFaceNormal) <= 0.0001)
     {
         selectedFaceNormalOut = normalize(dir);
-        return isotropicIrradiance * 0.20;
+        return isotropicIrradiance * isotropicFloorScale;
     }
 
     selectedFaceNormalOut = normalize(blendedFaceNormal);
-    // Isotropic floor lets sunlit surfaces scatter into nearby backfacing receivers.
-    return max(directional, isotropicIrradiance * 0.20);
+    // Openness-driven isotropic floor reduces starvation while limiting wraparound in tight spaces.
+    return max(directional, isotropicIrradiance * isotropicFloorScale);
 }
 
 float3 sampleIncidentLightTint(float3 faceNormal)
