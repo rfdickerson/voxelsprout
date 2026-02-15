@@ -19,6 +19,49 @@ bool inBounds(int3 cell, int3 dims)
         cell.x < dims.x && cell.y < dims.y && cell.z < dims.z;
 }
 
+float sampleOpenCell(int3 cell, int3 dims)
+{
+    if (!inBounds(cell, dims))
+    {
+        return 1.0;
+    }
+    const float occupancy = voxelGiOccupancy.Load(int4(cell, 0)).x;
+    return (occupancy <= 0.5) ? 1.0 : 0.0;
+}
+
+float transportOpenRatio(int3 cell, int3 direction, int3 dims)
+{
+    int3 orthoA = int3(1, 0, 0);
+    int3 orthoB = int3(0, 1, 0);
+    if (abs(direction.x) > 0)
+    {
+        orthoA = int3(0, 1, 0);
+        orthoB = int3(0, 0, 1);
+    }
+    else if (abs(direction.y) > 0)
+    {
+        orthoA = int3(1, 0, 0);
+        orthoB = int3(0, 0, 1);
+    }
+    else
+    {
+        orthoA = int3(1, 0, 0);
+        orthoB = int3(0, 1, 0);
+    }
+
+    const int3 neighbor = cell + direction;
+    float openSamples = 0.0;
+    openSamples += sampleOpenCell(cell + orthoA, dims);
+    openSamples += sampleOpenCell(cell - orthoA, dims);
+    openSamples += sampleOpenCell(cell + orthoB, dims);
+    openSamples += sampleOpenCell(cell - orthoB, dims);
+    openSamples += sampleOpenCell(neighbor + orthoA, dims);
+    openSamples += sampleOpenCell(neighbor - orthoA, dims);
+    openSamples += sampleOpenCell(neighbor + orthoB, dims);
+    openSamples += sampleOpenCell(neighbor - orthoB, dims);
+    return openSamples * (1.0 / 8.0);
+}
+
 [numthreads(4, 4, 4)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -55,7 +98,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     };
 
     float3 neighborSum = float3(0.0, 0.0, 0.0);
-    float neighborCount = 0.0;
+    float neighborWeight = 0.0;
     for (int i = 0; i < 6; ++i)
     {
         const int3 neighborCell = cell + offsets[i];
@@ -68,11 +111,13 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         {
             continue;
         }
-        neighborSum += voxelGiPropagateIn[uint3(neighborCell)].xyz;
-        neighborCount += 1.0;
+        const float openRatio = transportOpenRatio(cell, offsets[i], dims);
+        const float transportWeight = lerp(0.10, 1.0, openRatio);
+        neighborSum += voxelGiPropagateIn[uint3(neighborCell)].xyz * transportWeight;
+        neighborWeight += transportWeight;
     }
 
-    const float3 diffusion = (neighborCount > 0.0) ? (neighborSum / neighborCount) : center;
+    const float3 diffusion = (neighborWeight > 0.0) ? (neighborSum / neighborWeight) : center;
     const float3 mixed = lerp(center, diffusion, propagateBlend);
     const float3 propagated = max(mixed * propagateDecay, float3(0.0, 0.0, 0.0));
     voxelGiPropagateOut[dispatchThreadId] = float4(propagated, 1.0);
