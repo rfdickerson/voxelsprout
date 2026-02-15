@@ -186,7 +186,6 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         int3(0, 0, -1)
     };
 
-    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
     float3 bouncedLightSum = float3(0.0, 0.0, 0.0);
     for (int i = 0; i < 6; ++i)
     {
@@ -203,13 +202,12 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
 
         const float3 surfaceAlbedo = saturate(neighborSample.yzw);
-        const float surfaceLuma = dot(surfaceAlbedo, lumaWeights);
         const float albedoPeak = max(max(surfaceAlbedo.x, surfaceAlbedo.y), surfaceAlbedo.z);
         const float albedoMin = min(min(surfaceAlbedo.x, surfaceAlbedo.y), surfaceAlbedo.z);
         const float albedoSaturation = (albedoPeak > 0.0001) ? ((albedoPeak - albedoMin) / albedoPeak) : 0.0;
         const float colorBleedBoost = lerp(1.0, 1.12, clamp(albedoSaturation, 0.0, 1.0));
-        // Compress bounce chroma so highly saturated voxels do not over-tint distant surfaces.
-        const float3 bounceAlbedo = lerp(float3(surfaceLuma, surfaceLuma, surfaceLuma), surfaceAlbedo, 0.40);
+        // Keep near-field bounce color faithful to the source surface albedo.
+        const float3 bounceAlbedo = surfaceAlbedo;
         const float3 neighborIrradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i], dims);
         bouncedLightSum += bounceAlbedo * (neighborIrradiance * colorBleedBoost);
     }
