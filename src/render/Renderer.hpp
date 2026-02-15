@@ -410,12 +410,9 @@ private:
     std::array<VkImage, 2> m_voxelGiImages{};
     std::array<VkImageView, 2> m_voxelGiImageViews{};
     std::array<VkDeviceMemory, 2> m_voxelGiImageMemories{};
-    VkImage m_voxelGiSurfaceImage = VK_NULL_HANDLE;
-    VkImageView m_voxelGiSurfaceImageView = VK_NULL_HANDLE;
-    VkDeviceMemory m_voxelGiSurfaceMemory = VK_NULL_HANDLE;
-    VkImage m_voxelGiSurfaceNegImage = VK_NULL_HANDLE;
-    VkImageView m_voxelGiSurfaceNegImageView = VK_NULL_HANDLE;
-    VkDeviceMemory m_voxelGiSurfaceNegMemory = VK_NULL_HANDLE;
+    std::array<VkImage, 6> m_voxelGiSurfaceFaceImages{};
+    std::array<VkImageView, 6> m_voxelGiSurfaceFaceImageViews{};
+    std::array<VkDeviceMemory, 6> m_voxelGiSurfaceFaceMemories{};
     VkSampler m_voxelGiSampler = VK_NULL_HANDLE;
     bool m_voxelGiInitialized = false;
     bool m_voxelGiComputeAvailable = false;
@@ -454,8 +451,7 @@ private:
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;
     std::array<VmaAllocation, 2> m_voxelGiImageAllocations{};
-    VmaAllocation m_voxelGiSurfaceAllocation = VK_NULL_HANDLE;
-    VmaAllocation m_voxelGiSurfaceNegAllocation = VK_NULL_HANDLE;
+    std::array<VmaAllocation, 6> m_voxelGiSurfaceFaceAllocations{};
     VmaAllocation m_voxelGiOccupancyAllocation = VK_NULL_HANDLE;
 #endif
     VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;

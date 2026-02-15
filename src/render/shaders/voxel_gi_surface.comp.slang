@@ -11,10 +11,22 @@ Sampler2DShadow shadowMap;
 Texture3D<float4> voxelGiOccupancy;
 
 [[vk::binding(6, 0)]]
-RWTexture3D<float4> voxelGiSurfacePosOut;
+RWTexture3D<float4> voxelGiSurfacePosXOut;
 
 [[vk::binding(7, 0)]]
-RWTexture3D<float4> voxelGiSurfaceNegOut;
+RWTexture3D<float4> voxelGiSurfaceNegXOut;
+
+[[vk::binding(8, 0)]]
+RWTexture3D<float4> voxelGiSurfacePosYOut;
+
+[[vk::binding(9, 0)]]
+RWTexture3D<float4> voxelGiSurfaceNegYOut;
+
+[[vk::binding(10, 0)]]
+RWTexture3D<float4> voxelGiSurfacePosZOut;
+
+[[vk::binding(11, 0)]]
+RWTexture3D<float4> voxelGiSurfaceNegZOut;
 
 int chooseShadowCascade(float viewDepth)
 {
@@ -126,7 +138,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     uint gridW = 0u;
     uint gridH = 0u;
     uint gridD = 0u;
-    voxelGiSurfacePosOut.GetDimensions(gridW, gridH, gridD);
+    voxelGiSurfacePosXOut.GetDimensions(gridW, gridH, gridD);
     if (dispatchThreadId.x >= gridW || dispatchThreadId.y >= gridH || dispatchThreadId.z >= gridD)
     {
         return;
@@ -135,17 +147,15 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float4 occupancySample = voxelGiOccupancy.Load(int4(int3(dispatchThreadId), 0));
     if (occupancySample.x <= 0.5)
     {
-        voxelGiSurfacePosOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
-        voxelGiSurfaceNegOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
+        voxelGiSurfacePosXOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
+        voxelGiSurfaceNegXOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
+        voxelGiSurfacePosYOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
+        voxelGiSurfaceNegYOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
+        voxelGiSurfacePosZOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
+        voxelGiSurfaceNegZOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
-    const float3 surfaceAlbedo = saturate(occupancySample.yzw);
-    const float albedoPeak = max(max(surfaceAlbedo.x, surfaceAlbedo.y), surfaceAlbedo.z);
-    const float albedoMin = min(min(surfaceAlbedo.x, surfaceAlbedo.y), surfaceAlbedo.z);
-    const float albedoSaturation = (albedoPeak > 0.0001) ? ((albedoPeak - albedoMin) / albedoPeak) : 0.0;
-    // Keep a mild saturation boost, but avoid over-driving chroma bleed (e.g. grass walls turning green).
-    const float colorBleedBoost = lerp(1.0, 1.12, clamp(albedoSaturation, 0.0, 1.0));
     const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
     const float3 gridOrigin = camera.voxelGiGridOriginCellSize.xyz;
     const float3 worldPosition = gridOrigin + ((float3(dispatchThreadId) + 0.5) * cellSize);
@@ -174,9 +184,12 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const int3 dims = int3(int(gridW), int(gridH), int(gridD));
     const float skyColumnExposure = sampleSkyColumnExposure(cell, dims);
 
-    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
-    float3 cachedSurfaceIrradiancePos = float3(0.0, 0.0, 0.0);
-    float3 cachedSurfaceIrradianceNeg = float3(0.0, 0.0, 0.0);
+    float3 cachedSurfaceIrradiancePosX = float3(0.0, 0.0, 0.0);
+    float3 cachedSurfaceIrradianceNegX = float3(0.0, 0.0, 0.0);
+    float3 cachedSurfaceIrradiancePosY = float3(0.0, 0.0, 0.0);
+    float3 cachedSurfaceIrradianceNegY = float3(0.0, 0.0, 0.0);
+    float3 cachedSurfaceIrradiancePosZ = float3(0.0, 0.0, 0.0);
+    float3 cachedSurfaceIrradianceNegZ = float3(0.0, 0.0, 0.0);
     const float skyBlockedStepVisibility = 0.78;
     for (int i = 0; i < 6; ++i)
     {
@@ -224,13 +237,12 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float3 directIrradiance =
             camera.sunColorShadow.xyz * (sunIntensity * ndotl * directVisibility * injectSunScale);
         const float3 faceIrradianceColor = max(directIrradiance + skyIrradiance, float3(0.0, 0.0, 0.0));
-        const float faceIrradiance = max(dot(faceIrradianceColor, lumaWeights) * colorBleedBoost, 0.0);
-        if (i == 0) cachedSurfaceIrradiancePos.x = faceIrradiance;
-        if (i == 1) cachedSurfaceIrradianceNeg.x = faceIrradiance;
-        if (i == 2) cachedSurfaceIrradiancePos.y = faceIrradiance;
-        if (i == 3) cachedSurfaceIrradianceNeg.y = faceIrradiance;
-        if (i == 4) cachedSurfaceIrradiancePos.z = faceIrradiance;
-        if (i == 5) cachedSurfaceIrradianceNeg.z = faceIrradiance;
+        if (i == 0) cachedSurfaceIrradiancePosX = faceIrradianceColor;
+        if (i == 1) cachedSurfaceIrradianceNegX = faceIrradianceColor;
+        if (i == 2) cachedSurfaceIrradiancePosY = faceIrradianceColor;
+        if (i == 3) cachedSurfaceIrradianceNegY = faceIrradianceColor;
+        if (i == 4) cachedSurfaceIrradiancePosZ = faceIrradianceColor;
+        if (i == 5) cachedSurfaceIrradianceNegZ = faceIrradianceColor;
     }
     const float maxCachedSurfaceIrradiance = 8.0;
     const float3 maxIrradiance = float3(
@@ -238,6 +250,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         maxCachedSurfaceIrradiance,
         maxCachedSurfaceIrradiance
     );
-    voxelGiSurfacePosOut[dispatchThreadId] = float4(min(cachedSurfaceIrradiancePos, maxIrradiance), 1.0);
-    voxelGiSurfaceNegOut[dispatchThreadId] = float4(min(cachedSurfaceIrradianceNeg, maxIrradiance), 1.0);
+    voxelGiSurfacePosXOut[dispatchThreadId] = float4(min(cachedSurfaceIrradiancePosX, maxIrradiance), 1.0);
+    voxelGiSurfaceNegXOut[dispatchThreadId] = float4(min(cachedSurfaceIrradianceNegX, maxIrradiance), 1.0);
+    voxelGiSurfacePosYOut[dispatchThreadId] = float4(min(cachedSurfaceIrradiancePosY, maxIrradiance), 1.0);
+    voxelGiSurfaceNegYOut[dispatchThreadId] = float4(min(cachedSurfaceIrradianceNegY, maxIrradiance), 1.0);
+    voxelGiSurfacePosZOut[dispatchThreadId] = float4(min(cachedSurfaceIrradiancePosZ, maxIrradiance), 1.0);
+    voxelGiSurfaceNegZOut[dispatchThreadId] = float4(min(cachedSurfaceIrradianceNegZ, maxIrradiance), 1.0);
 }

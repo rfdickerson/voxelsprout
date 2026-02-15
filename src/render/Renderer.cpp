@@ -3580,11 +3580,15 @@ bool Renderer::createShadowResources() {
 }
 
 bool Renderer::createVoxelGiResources() {
+    const bool surfaceFacesReady = std::all_of(
+        m_voxelGiSurfaceFaceImageViews.begin(),
+        m_voxelGiSurfaceFaceImageViews.end(),
+        [](VkImageView view) { return view != VK_NULL_HANDLE; }
+    );
     if (m_voxelGiSampler != VK_NULL_HANDLE &&
         m_voxelGiImageViews[0] != VK_NULL_HANDLE &&
         m_voxelGiImageViews[1] != VK_NULL_HANDLE &&
-        m_voxelGiSurfaceImageView != VK_NULL_HANDLE &&
-        m_voxelGiSurfaceNegImageView != VK_NULL_HANDLE &&
+        surfaceFacesReady &&
         m_voxelGiOccupancySampler != VK_NULL_HANDLE &&
         m_voxelGiOccupancyImageView != VK_NULL_HANDLE) {
         return true;
@@ -3711,221 +3715,124 @@ bool Renderer::createVoxelGiResources() {
     }
 
     {
-        VkImageCreateInfo surfaceImageCreateInfo{};
-        surfaceImageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        surfaceImageCreateInfo.imageType = VK_IMAGE_TYPE_3D;
-        surfaceImageCreateInfo.format = m_voxelGiFormat;
-        surfaceImageCreateInfo.extent.width = kVoxelGiGridResolution;
-        surfaceImageCreateInfo.extent.height = kVoxelGiGridResolution;
-        surfaceImageCreateInfo.extent.depth = kVoxelGiGridResolution;
-        surfaceImageCreateInfo.mipLevels = 1;
-        surfaceImageCreateInfo.arrayLayers = 1;
-        surfaceImageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        surfaceImageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        surfaceImageCreateInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
-        surfaceImageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        surfaceImageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        static constexpr std::array<const char*, 6> kSurfaceFaceNames = {
+            "posX",
+            "negX",
+            "posY",
+            "negY",
+            "posZ",
+            "negZ"
+        };
+        for (std::size_t faceIndex = 0; faceIndex < kSurfaceFaceNames.size(); ++faceIndex) {
+            VkImageCreateInfo surfaceFaceImageCreateInfo{};
+            surfaceFaceImageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            surfaceFaceImageCreateInfo.imageType = VK_IMAGE_TYPE_3D;
+            surfaceFaceImageCreateInfo.format = m_voxelGiFormat;
+            surfaceFaceImageCreateInfo.extent.width = kVoxelGiGridResolution;
+            surfaceFaceImageCreateInfo.extent.height = kVoxelGiGridResolution;
+            surfaceFaceImageCreateInfo.extent.depth = kVoxelGiGridResolution;
+            surfaceFaceImageCreateInfo.mipLevels = 1;
+            surfaceFaceImageCreateInfo.arrayLayers = 1;
+            surfaceFaceImageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+            surfaceFaceImageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            surfaceFaceImageCreateInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+            surfaceFaceImageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            surfaceFaceImageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 #if defined(VOXEL_HAS_VMA)
-        if (m_vmaAllocator != VK_NULL_HANDLE) {
-            VmaAllocationCreateInfo surfaceAllocCreateInfo{};
-            surfaceAllocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-            surfaceAllocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-            const VkResult surfaceImageResult = vmaCreateImage(
-                m_vmaAllocator,
-                &surfaceImageCreateInfo,
-                &surfaceAllocCreateInfo,
-                &m_voxelGiSurfaceImage,
-                &m_voxelGiSurfaceAllocation,
-                nullptr
-            );
-            if (surfaceImageResult != VK_SUCCESS) {
-                logVkFailure("vmaCreateImage(voxelGiSurface)", surfaceImageResult);
-                destroyVoxelGiResources();
-                return false;
-            }
-        } else
+            if (m_vmaAllocator != VK_NULL_HANDLE) {
+                VmaAllocationCreateInfo surfaceFaceAllocCreateInfo{};
+                surfaceFaceAllocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+                surfaceFaceAllocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                const VkResult surfaceFaceImageResult = vmaCreateImage(
+                    m_vmaAllocator,
+                    &surfaceFaceImageCreateInfo,
+                    &surfaceFaceAllocCreateInfo,
+                    &m_voxelGiSurfaceFaceImages[faceIndex],
+                    &m_voxelGiSurfaceFaceAllocations[faceIndex],
+                    nullptr
+                );
+                if (surfaceFaceImageResult != VK_SUCCESS) {
+                    logVkFailure("vmaCreateImage(voxelGiSurfaceFace)", surfaceFaceImageResult);
+                    destroyVoxelGiResources();
+                    return false;
+                }
+            } else
 #endif
-        {
-            const VkResult surfaceImageResult =
-                vkCreateImage(m_device, &surfaceImageCreateInfo, nullptr, &m_voxelGiSurfaceImage);
-            if (surfaceImageResult != VK_SUCCESS) {
-                logVkFailure("vkCreateImage(voxelGiSurface)", surfaceImageResult);
-                destroyVoxelGiResources();
-                return false;
+            {
+                const VkResult surfaceFaceImageResult =
+                    vkCreateImage(m_device, &surfaceFaceImageCreateInfo, nullptr, &m_voxelGiSurfaceFaceImages[faceIndex]);
+                if (surfaceFaceImageResult != VK_SUCCESS) {
+                    logVkFailure("vkCreateImage(voxelGiSurfaceFace)", surfaceFaceImageResult);
+                    destroyVoxelGiResources();
+                    return false;
+                }
+
+                VkMemoryRequirements surfaceFaceMemoryRequirements{};
+                vkGetImageMemoryRequirements(m_device, m_voxelGiSurfaceFaceImages[faceIndex], &surfaceFaceMemoryRequirements);
+                const uint32_t surfaceFaceMemoryTypeIndex = findMemoryTypeIndex(
+                    m_physicalDevice,
+                    surfaceFaceMemoryRequirements.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                );
+                if (surfaceFaceMemoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+                    VOX_LOGE("render") << "no memory type for voxel GI surface face image\n";
+                    destroyVoxelGiResources();
+                    return false;
+                }
+
+                VkMemoryAllocateInfo surfaceFaceAllocateInfo{};
+                surfaceFaceAllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                surfaceFaceAllocateInfo.allocationSize = surfaceFaceMemoryRequirements.size;
+                surfaceFaceAllocateInfo.memoryTypeIndex = surfaceFaceMemoryTypeIndex;
+                const VkResult surfaceFaceAllocResult =
+                    vkAllocateMemory(m_device, &surfaceFaceAllocateInfo, nullptr, &m_voxelGiSurfaceFaceMemories[faceIndex]);
+                if (surfaceFaceAllocResult != VK_SUCCESS) {
+                    logVkFailure("vkAllocateMemory(voxelGiSurfaceFace)", surfaceFaceAllocResult);
+                    destroyVoxelGiResources();
+                    return false;
+                }
+
+                const VkResult surfaceFaceBindResult =
+                    vkBindImageMemory(m_device, m_voxelGiSurfaceFaceImages[faceIndex], m_voxelGiSurfaceFaceMemories[faceIndex], 0);
+                if (surfaceFaceBindResult != VK_SUCCESS) {
+                    logVkFailure("vkBindImageMemory(voxelGiSurfaceFace)", surfaceFaceBindResult);
+                    destroyVoxelGiResources();
+                    return false;
+                }
             }
 
-            VkMemoryRequirements surfaceMemoryRequirements{};
-            vkGetImageMemoryRequirements(m_device, m_voxelGiSurfaceImage, &surfaceMemoryRequirements);
-            const uint32_t surfaceMemoryTypeIndex = findMemoryTypeIndex(
-                m_physicalDevice,
-                surfaceMemoryRequirements.memoryTypeBits,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            const std::string faceImageName = "voxelGi.surfaceFace." + std::string(kSurfaceFaceNames[faceIndex]) + ".image";
+            setObjectName(
+                VK_OBJECT_TYPE_IMAGE,
+                vkHandleToUint64(m_voxelGiSurfaceFaceImages[faceIndex]),
+                faceImageName.c_str()
             );
-            if (surfaceMemoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-                VOX_LOGE("render") << "no memory type for voxel GI surface image\n";
+
+            VkImageViewCreateInfo surfaceFaceViewCreateInfo{};
+            surfaceFaceViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            surfaceFaceViewCreateInfo.image = m_voxelGiSurfaceFaceImages[faceIndex];
+            surfaceFaceViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
+            surfaceFaceViewCreateInfo.format = m_voxelGiFormat;
+            surfaceFaceViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            surfaceFaceViewCreateInfo.subresourceRange.baseMipLevel = 0;
+            surfaceFaceViewCreateInfo.subresourceRange.levelCount = 1;
+            surfaceFaceViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+            surfaceFaceViewCreateInfo.subresourceRange.layerCount = 1;
+            const VkResult surfaceFaceViewResult =
+                vkCreateImageView(m_device, &surfaceFaceViewCreateInfo, nullptr, &m_voxelGiSurfaceFaceImageViews[faceIndex]);
+            if (surfaceFaceViewResult != VK_SUCCESS) {
+                logVkFailure("vkCreateImageView(voxelGiSurfaceFace)", surfaceFaceViewResult);
                 destroyVoxelGiResources();
                 return false;
             }
-
-            VkMemoryAllocateInfo surfaceAllocateInfo{};
-            surfaceAllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            surfaceAllocateInfo.allocationSize = surfaceMemoryRequirements.size;
-            surfaceAllocateInfo.memoryTypeIndex = surfaceMemoryTypeIndex;
-            const VkResult surfaceAllocResult =
-                vkAllocateMemory(m_device, &surfaceAllocateInfo, nullptr, &m_voxelGiSurfaceMemory);
-            if (surfaceAllocResult != VK_SUCCESS) {
-                logVkFailure("vkAllocateMemory(voxelGiSurface)", surfaceAllocResult);
-                destroyVoxelGiResources();
-                return false;
-            }
-
-            const VkResult surfaceBindResult =
-                vkBindImageMemory(m_device, m_voxelGiSurfaceImage, m_voxelGiSurfaceMemory, 0);
-            if (surfaceBindResult != VK_SUCCESS) {
-                logVkFailure("vkBindImageMemory(voxelGiSurface)", surfaceBindResult);
-                destroyVoxelGiResources();
-                return false;
-            }
-        }
-
-        setObjectName(
-            VK_OBJECT_TYPE_IMAGE,
-            vkHandleToUint64(m_voxelGiSurfaceImage),
-            "voxelGi.surface.image"
-        );
-
-        VkImageViewCreateInfo surfaceViewCreateInfo{};
-        surfaceViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        surfaceViewCreateInfo.image = m_voxelGiSurfaceImage;
-        surfaceViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
-        surfaceViewCreateInfo.format = m_voxelGiFormat;
-        surfaceViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        surfaceViewCreateInfo.subresourceRange.baseMipLevel = 0;
-        surfaceViewCreateInfo.subresourceRange.levelCount = 1;
-        surfaceViewCreateInfo.subresourceRange.baseArrayLayer = 0;
-        surfaceViewCreateInfo.subresourceRange.layerCount = 1;
-        const VkResult surfaceViewResult =
-            vkCreateImageView(m_device, &surfaceViewCreateInfo, nullptr, &m_voxelGiSurfaceImageView);
-        if (surfaceViewResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImageView(voxelGiSurface)", surfaceViewResult);
-            destroyVoxelGiResources();
-            return false;
-        }
-        setObjectName(
-            VK_OBJECT_TYPE_IMAGE_VIEW,
-            vkHandleToUint64(m_voxelGiSurfaceImageView),
-            "voxelGi.surface.imageView"
-        );
-    }
-
-    {
-        VkImageCreateInfo surfaceNegImageCreateInfo{};
-        surfaceNegImageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        surfaceNegImageCreateInfo.imageType = VK_IMAGE_TYPE_3D;
-        surfaceNegImageCreateInfo.format = m_voxelGiFormat;
-        surfaceNegImageCreateInfo.extent.width = kVoxelGiGridResolution;
-        surfaceNegImageCreateInfo.extent.height = kVoxelGiGridResolution;
-        surfaceNegImageCreateInfo.extent.depth = kVoxelGiGridResolution;
-        surfaceNegImageCreateInfo.mipLevels = 1;
-        surfaceNegImageCreateInfo.arrayLayers = 1;
-        surfaceNegImageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        surfaceNegImageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        surfaceNegImageCreateInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
-        surfaceNegImageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        surfaceNegImageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-#if defined(VOXEL_HAS_VMA)
-        if (m_vmaAllocator != VK_NULL_HANDLE) {
-            VmaAllocationCreateInfo surfaceNegAllocCreateInfo{};
-            surfaceNegAllocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-            surfaceNegAllocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-            const VkResult surfaceNegImageResult = vmaCreateImage(
-                m_vmaAllocator,
-                &surfaceNegImageCreateInfo,
-                &surfaceNegAllocCreateInfo,
-                &m_voxelGiSurfaceNegImage,
-                &m_voxelGiSurfaceNegAllocation,
-                nullptr
+            const std::string faceImageViewName = "voxelGi.surfaceFace." + std::string(kSurfaceFaceNames[faceIndex]) + ".imageView";
+            setObjectName(
+                VK_OBJECT_TYPE_IMAGE_VIEW,
+                vkHandleToUint64(m_voxelGiSurfaceFaceImageViews[faceIndex]),
+                faceImageViewName.c_str()
             );
-            if (surfaceNegImageResult != VK_SUCCESS) {
-                logVkFailure("vmaCreateImage(voxelGiSurfaceNeg)", surfaceNegImageResult);
-                destroyVoxelGiResources();
-                return false;
-            }
-        } else
-#endif
-        {
-            const VkResult surfaceNegImageResult =
-                vkCreateImage(m_device, &surfaceNegImageCreateInfo, nullptr, &m_voxelGiSurfaceNegImage);
-            if (surfaceNegImageResult != VK_SUCCESS) {
-                logVkFailure("vkCreateImage(voxelGiSurfaceNeg)", surfaceNegImageResult);
-                destroyVoxelGiResources();
-                return false;
-            }
-
-            VkMemoryRequirements surfaceNegMemoryRequirements{};
-            vkGetImageMemoryRequirements(m_device, m_voxelGiSurfaceNegImage, &surfaceNegMemoryRequirements);
-            const uint32_t surfaceNegMemoryTypeIndex = findMemoryTypeIndex(
-                m_physicalDevice,
-                surfaceNegMemoryRequirements.memoryTypeBits,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-            );
-            if (surfaceNegMemoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-                VOX_LOGE("render") << "no memory type for voxel GI surface neg image\n";
-                destroyVoxelGiResources();
-                return false;
-            }
-
-            VkMemoryAllocateInfo surfaceNegAllocateInfo{};
-            surfaceNegAllocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            surfaceNegAllocateInfo.allocationSize = surfaceNegMemoryRequirements.size;
-            surfaceNegAllocateInfo.memoryTypeIndex = surfaceNegMemoryTypeIndex;
-            const VkResult surfaceNegAllocResult =
-                vkAllocateMemory(m_device, &surfaceNegAllocateInfo, nullptr, &m_voxelGiSurfaceNegMemory);
-            if (surfaceNegAllocResult != VK_SUCCESS) {
-                logVkFailure("vkAllocateMemory(voxelGiSurfaceNeg)", surfaceNegAllocResult);
-                destroyVoxelGiResources();
-                return false;
-            }
-
-            const VkResult surfaceNegBindResult =
-                vkBindImageMemory(m_device, m_voxelGiSurfaceNegImage, m_voxelGiSurfaceNegMemory, 0);
-            if (surfaceNegBindResult != VK_SUCCESS) {
-                logVkFailure("vkBindImageMemory(voxelGiSurfaceNeg)", surfaceNegBindResult);
-                destroyVoxelGiResources();
-                return false;
-            }
         }
-
-        setObjectName(
-            VK_OBJECT_TYPE_IMAGE,
-            vkHandleToUint64(m_voxelGiSurfaceNegImage),
-            "voxelGi.surfaceNeg.image"
-        );
-
-        VkImageViewCreateInfo surfaceNegViewCreateInfo{};
-        surfaceNegViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        surfaceNegViewCreateInfo.image = m_voxelGiSurfaceNegImage;
-        surfaceNegViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
-        surfaceNegViewCreateInfo.format = m_voxelGiFormat;
-        surfaceNegViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        surfaceNegViewCreateInfo.subresourceRange.baseMipLevel = 0;
-        surfaceNegViewCreateInfo.subresourceRange.levelCount = 1;
-        surfaceNegViewCreateInfo.subresourceRange.baseArrayLayer = 0;
-        surfaceNegViewCreateInfo.subresourceRange.layerCount = 1;
-        const VkResult surfaceNegViewResult =
-            vkCreateImageView(m_device, &surfaceNegViewCreateInfo, nullptr, &m_voxelGiSurfaceNegImageView);
-        if (surfaceNegViewResult != VK_SUCCESS) {
-            logVkFailure("vkCreateImageView(voxelGiSurfaceNeg)", surfaceNegViewResult);
-            destroyVoxelGiResources();
-            return false;
-        }
-        setObjectName(
-            VK_OBJECT_TYPE_IMAGE_VIEW,
-            vkHandleToUint64(m_voxelGiSurfaceNegImageView),
-            "voxelGi.surfaceNeg.imageView"
-        );
     }
 
     {
@@ -4146,7 +4053,31 @@ bool Renderer::createVoxelGiResources() {
         surfaceNegBinding.descriptorCount = 1;
         surfaceNegBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 8> bindings = {
+        VkDescriptorSetLayoutBinding surfacePosYBinding{};
+        surfacePosYBinding.binding = 8;
+        surfacePosYBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        surfacePosYBinding.descriptorCount = 1;
+        surfacePosYBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding surfaceNegYBinding{};
+        surfaceNegYBinding.binding = 9;
+        surfaceNegYBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        surfaceNegYBinding.descriptorCount = 1;
+        surfaceNegYBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding surfacePosZBinding{};
+        surfacePosZBinding.binding = 10;
+        surfacePosZBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        surfacePosZBinding.descriptorCount = 1;
+        surfacePosZBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding surfaceNegZBinding{};
+        surfaceNegZBinding.binding = 11;
+        surfaceNegZBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        surfaceNegZBinding.descriptorCount = 1;
+        surfaceNegZBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 12> bindings = {
             cameraBinding,
             shadowBinding,
             injectWriteBinding,
@@ -4154,7 +4085,11 @@ bool Renderer::createVoxelGiResources() {
             propagateWriteBinding,
             occupancyBinding,
             surfaceBinding,
-            surfaceNegBinding
+            surfaceNegBinding,
+            surfacePosYBinding,
+            surfaceNegYBinding,
+            surfacePosZBinding,
+            surfaceNegZBinding
         };
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
@@ -4184,7 +4119,7 @@ bool Renderer::createVoxelGiResources() {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4 * kMaxFramesInFlight}
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8 * kMaxFramesInFlight}
         };
         VkDescriptorPoolCreateInfo poolCreateInfo{};
         poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -10083,17 +10018,14 @@ void Renderer::renderFrame(
         voxelGiOccupancyInfo.imageView = m_voxelGiOccupancyImageView;
         voxelGiOccupancyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        VkDescriptorImageInfo voxelGiSurfaceInfo{};
-        voxelGiSurfaceInfo.sampler = VK_NULL_HANDLE;
-        voxelGiSurfaceInfo.imageView = m_voxelGiSurfaceImageView;
-        voxelGiSurfaceInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        std::array<VkDescriptorImageInfo, 6> voxelGiSurfaceFaceInfos{};
+        for (std::size_t faceIndex = 0; faceIndex < voxelGiSurfaceFaceInfos.size(); ++faceIndex) {
+            voxelGiSurfaceFaceInfos[faceIndex].sampler = VK_NULL_HANDLE;
+            voxelGiSurfaceFaceInfos[faceIndex].imageView = m_voxelGiSurfaceFaceImageViews[faceIndex];
+            voxelGiSurfaceFaceInfos[faceIndex].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        }
 
-        VkDescriptorImageInfo voxelGiSurfaceNegInfo{};
-        voxelGiSurfaceNegInfo.sampler = VK_NULL_HANDLE;
-        voxelGiSurfaceNegInfo.imageView = m_voxelGiSurfaceNegImageView;
-        voxelGiSurfaceNegInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        std::array<VkWriteDescriptorSet, 8> voxelGiWrites{};
+        std::array<VkWriteDescriptorSet, 12> voxelGiWrites{};
         voxelGiWrites[0] = write;
         voxelGiWrites[0].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
         voxelGiWrites[0].dstBinding = 0;
@@ -10141,14 +10073,42 @@ void Renderer::renderFrame(
         voxelGiWrites[6].dstBinding = 6;
         voxelGiWrites[6].descriptorCount = 1;
         voxelGiWrites[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[6].pImageInfo = &voxelGiSurfaceInfo;
+        voxelGiWrites[6].pImageInfo = &voxelGiSurfaceFaceInfos[0];
 
         voxelGiWrites[7] = write;
         voxelGiWrites[7].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
         voxelGiWrites[7].dstBinding = 7;
         voxelGiWrites[7].descriptorCount = 1;
         voxelGiWrites[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[7].pImageInfo = &voxelGiSurfaceNegInfo;
+        voxelGiWrites[7].pImageInfo = &voxelGiSurfaceFaceInfos[1];
+
+        voxelGiWrites[8] = write;
+        voxelGiWrites[8].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+        voxelGiWrites[8].dstBinding = 8;
+        voxelGiWrites[8].descriptorCount = 1;
+        voxelGiWrites[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        voxelGiWrites[8].pImageInfo = &voxelGiSurfaceFaceInfos[2];
+
+        voxelGiWrites[9] = write;
+        voxelGiWrites[9].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+        voxelGiWrites[9].dstBinding = 9;
+        voxelGiWrites[9].descriptorCount = 1;
+        voxelGiWrites[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        voxelGiWrites[9].pImageInfo = &voxelGiSurfaceFaceInfos[3];
+
+        voxelGiWrites[10] = write;
+        voxelGiWrites[10].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+        voxelGiWrites[10].dstBinding = 10;
+        voxelGiWrites[10].descriptorCount = 1;
+        voxelGiWrites[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        voxelGiWrites[10].pImageInfo = &voxelGiSurfaceFaceInfos[4];
+
+        voxelGiWrites[11] = write;
+        voxelGiWrites[11].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+        voxelGiWrites[11].dstBinding = 11;
+        voxelGiWrites[11].descriptorCount = 1;
+        voxelGiWrites[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        voxelGiWrites[11].pImageInfo = &voxelGiSurfaceFaceInfos[5];
 
         vkUpdateDescriptorSets(
             m_device,
@@ -11269,14 +11229,18 @@ void Renderer::renderFrame(
     bool wroteVoxelGiTimestamps = false;
     bool wroteAutoExposureTimestamps = false;
     bool wroteSunShaftTimestamps = false;
+    const bool voxelGiSurfaceFacesReady = std::all_of(
+        m_voxelGiSurfaceFaceImages.begin(),
+        m_voxelGiSurfaceFaceImages.end(),
+        [](VkImage image) { return image != VK_NULL_HANDLE; }
+    );
     if (m_voxelGiComputeAvailable &&
         m_voxelGiSurfacePipeline != VK_NULL_HANDLE &&
         m_voxelGiInjectPipeline != VK_NULL_HANDLE &&
         m_voxelGiPropagatePipeline != VK_NULL_HANDLE &&
         m_voxelGiPipelineLayout != VK_NULL_HANDLE &&
         m_voxelGiDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
-        m_voxelGiSurfaceImage != VK_NULL_HANDLE &&
-        m_voxelGiSurfaceNegImage != VK_NULL_HANDLE &&
+        voxelGiSurfaceFacesReady &&
         m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
         voxelGiNeedsComputeUpdate &&
         (!voxelGiNeedsOccupancyUpload || voxelGiHasOccupancyUpload)) {
@@ -11331,28 +11295,21 @@ void Renderer::renderFrame(
             m_voxelGiOccupancyInitialized = true;
         }
 
-        transitionImageLayout(
-            commandBuffer,
-            m_voxelGiSurfaceImage,
-            m_voxelGiInitialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_GENERAL,
-            m_voxelGiInitialized ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
-            m_voxelGiInitialized ? (VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT) : VK_ACCESS_2_NONE,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT
-        );
-        transitionImageLayout(
-            commandBuffer,
-            m_voxelGiSurfaceNegImage,
-            m_voxelGiInitialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_GENERAL,
-            m_voxelGiInitialized ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
-            m_voxelGiInitialized ? (VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT) : VK_ACCESS_2_NONE,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT
-        );
+        for (std::size_t faceIndex = 0; faceIndex < m_voxelGiSurfaceFaceImages.size(); ++faceIndex) {
+            transitionImageLayout(
+                commandBuffer,
+                m_voxelGiSurfaceFaceImages[faceIndex],
+                m_voxelGiInitialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_GENERAL,
+                m_voxelGiInitialized ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
+                m_voxelGiInitialized
+                    ? (VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)
+                    : VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT
+            );
+        }
         transitionImageLayout(
             commandBuffer,
             m_voxelGiImages[0],
@@ -11391,28 +11348,19 @@ void Renderer::renderFrame(
             &mvpDynamicOffset
         );
         vkCmdDispatch(commandBuffer, voxelGiDispatchX, voxelGiDispatchY, voxelGiDispatchZ);
-        transitionImageLayout(
-            commandBuffer,
-            m_voxelGiSurfaceImage,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT
-        );
-        transitionImageLayout(
-            commandBuffer,
-            m_voxelGiSurfaceNegImage,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT
-        );
+        for (std::size_t faceIndex = 0; faceIndex < m_voxelGiSurfaceFaceImages.size(); ++faceIndex) {
+            transitionImageLayout(
+                commandBuffer,
+                m_voxelGiSurfaceFaceImages[faceIndex],
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT
+            );
+        }
 
         writeGpuTimestampTop(kGpuTimestampQueryGiInjectStart);
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_voxelGiInjectPipeline);
@@ -13560,13 +13508,11 @@ void Renderer::destroyVoxelGiResources() {
         vkDestroyImageView(m_device, m_voxelGiOccupancyImageView, nullptr);
         m_voxelGiOccupancyImageView = VK_NULL_HANDLE;
     }
-    if (m_voxelGiSurfaceImageView != VK_NULL_HANDLE) {
-        vkDestroyImageView(m_device, m_voxelGiSurfaceImageView, nullptr);
-        m_voxelGiSurfaceImageView = VK_NULL_HANDLE;
-    }
-    if (m_voxelGiSurfaceNegImageView != VK_NULL_HANDLE) {
-        vkDestroyImageView(m_device, m_voxelGiSurfaceNegImageView, nullptr);
-        m_voxelGiSurfaceNegImageView = VK_NULL_HANDLE;
+    for (std::size_t faceIndex = 0; faceIndex < m_voxelGiSurfaceFaceImageViews.size(); ++faceIndex) {
+        if (m_voxelGiSurfaceFaceImageViews[faceIndex] != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, m_voxelGiSurfaceFaceImageViews[faceIndex], nullptr);
+            m_voxelGiSurfaceFaceImageViews[faceIndex] = VK_NULL_HANDLE;
+        }
     }
     if (m_voxelGiOccupancyImage != VK_NULL_HANDLE) {
 #if defined(VOXEL_HAS_VMA)
@@ -13581,43 +13527,34 @@ void Renderer::destroyVoxelGiResources() {
 #endif
         m_voxelGiOccupancyImage = VK_NULL_HANDLE;
     }
-    if (m_voxelGiSurfaceImage != VK_NULL_HANDLE) {
+    for (std::size_t faceIndex = 0; faceIndex < m_voxelGiSurfaceFaceImages.size(); ++faceIndex) {
+        if (m_voxelGiSurfaceFaceImages[faceIndex] != VK_NULL_HANDLE) {
 #if defined(VOXEL_HAS_VMA)
-        if (m_vmaAllocator != VK_NULL_HANDLE && m_voxelGiSurfaceAllocation != VK_NULL_HANDLE) {
-            vmaDestroyImage(m_vmaAllocator, m_voxelGiSurfaceImage, m_voxelGiSurfaceAllocation);
-            m_voxelGiSurfaceAllocation = VK_NULL_HANDLE;
-        } else {
-            vkDestroyImage(m_device, m_voxelGiSurfaceImage, nullptr);
-        }
+            if (m_vmaAllocator != VK_NULL_HANDLE && m_voxelGiSurfaceFaceAllocations[faceIndex] != VK_NULL_HANDLE) {
+                vmaDestroyImage(
+                    m_vmaAllocator,
+                    m_voxelGiSurfaceFaceImages[faceIndex],
+                    m_voxelGiSurfaceFaceAllocations[faceIndex]
+                );
+                m_voxelGiSurfaceFaceAllocations[faceIndex] = VK_NULL_HANDLE;
+            } else {
+                vkDestroyImage(m_device, m_voxelGiSurfaceFaceImages[faceIndex], nullptr);
+            }
 #else
-        vkDestroyImage(m_device, m_voxelGiSurfaceImage, nullptr);
+            vkDestroyImage(m_device, m_voxelGiSurfaceFaceImages[faceIndex], nullptr);
 #endif
-        m_voxelGiSurfaceImage = VK_NULL_HANDLE;
-    }
-    if (m_voxelGiSurfaceNegImage != VK_NULL_HANDLE) {
-#if defined(VOXEL_HAS_VMA)
-        if (m_vmaAllocator != VK_NULL_HANDLE && m_voxelGiSurfaceNegAllocation != VK_NULL_HANDLE) {
-            vmaDestroyImage(m_vmaAllocator, m_voxelGiSurfaceNegImage, m_voxelGiSurfaceNegAllocation);
-            m_voxelGiSurfaceNegAllocation = VK_NULL_HANDLE;
-        } else {
-            vkDestroyImage(m_device, m_voxelGiSurfaceNegImage, nullptr);
+            m_voxelGiSurfaceFaceImages[faceIndex] = VK_NULL_HANDLE;
         }
-#else
-        vkDestroyImage(m_device, m_voxelGiSurfaceNegImage, nullptr);
-#endif
-        m_voxelGiSurfaceNegImage = VK_NULL_HANDLE;
     }
     if (m_voxelGiOccupancyMemory != VK_NULL_HANDLE) {
         vkFreeMemory(m_device, m_voxelGiOccupancyMemory, nullptr);
         m_voxelGiOccupancyMemory = VK_NULL_HANDLE;
     }
-    if (m_voxelGiSurfaceMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(m_device, m_voxelGiSurfaceMemory, nullptr);
-        m_voxelGiSurfaceMemory = VK_NULL_HANDLE;
-    }
-    if (m_voxelGiSurfaceNegMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(m_device, m_voxelGiSurfaceNegMemory, nullptr);
-        m_voxelGiSurfaceNegMemory = VK_NULL_HANDLE;
+    for (std::size_t faceIndex = 0; faceIndex < m_voxelGiSurfaceFaceMemories.size(); ++faceIndex) {
+        if (m_voxelGiSurfaceFaceMemories[faceIndex] != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, m_voxelGiSurfaceFaceMemories[faceIndex], nullptr);
+            m_voxelGiSurfaceFaceMemories[faceIndex] = VK_NULL_HANDLE;
+        }
     }
     for (std::size_t volumeIndex = 0; volumeIndex < m_voxelGiImageViews.size(); ++volumeIndex) {
         if (m_voxelGiImageViews[volumeIndex] != VK_NULL_HANDLE) {
@@ -13644,8 +13581,7 @@ void Renderer::destroyVoxelGiResources() {
     }
 #if defined(VOXEL_HAS_VMA)
     m_voxelGiImageAllocations = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    m_voxelGiSurfaceAllocation = VK_NULL_HANDLE;
-    m_voxelGiSurfaceNegAllocation = VK_NULL_HANDLE;
+    m_voxelGiSurfaceFaceAllocations.fill(VK_NULL_HANDLE);
     m_voxelGiOccupancyAllocation = VK_NULL_HANDLE;
 #endif
     m_voxelGiInitialized = false;
@@ -13889,8 +13825,12 @@ void Renderer::shutdown() {
         for (uint32_t i = 0; i < static_cast<uint32_t>(m_voxelGiImages.size()); ++i) {
             logLiveImage(("voxelGi.radiance.image[" + std::to_string(i) + "]").c_str(), m_voxelGiImages[i]);
         }
-        logLiveImage("voxelGi.surface.image", m_voxelGiSurfaceImage);
-        logLiveImage("voxelGi.surfaceNeg.image", m_voxelGiSurfaceNegImage);
+        for (std::size_t faceIndex = 0; faceIndex < m_voxelGiSurfaceFaceImages.size(); ++faceIndex) {
+            logLiveImage(
+                ("voxelGi.surfaceFace.image[" + std::to_string(faceIndex) + "]").c_str(),
+                m_voxelGiSurfaceFaceImages[faceIndex]
+            );
+        }
         logLiveImage("voxelGi.occupancy.image", m_voxelGiOccupancyImage);
         for (uint32_t i = 0; i < static_cast<uint32_t>(m_depthImages.size()); ++i) {
             logLiveImage(("depth.msaa.image[" + std::to_string(i) + "]").c_str(), m_depthImages[i]);
