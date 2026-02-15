@@ -49,10 +49,14 @@ float sampleShadowVisibility(float3 worldPosition)
     uint texW = 0u;
     uint texH = 0u;
     shadowMap.GetDimensions(texW, texH);
-    const float texelSize = 1.0 / max(float(max(texW, texH)), 1.0);
+    const float2 atlasTexelSize = float2(
+        1.0 / max(float(texW), 1.0),
+        1.0 / max(float(texH), 1.0)
+    );
+    const float2 localTexelSize = atlasTexelSize / max(atlasRect.zw, float2(1e-6, 1e-6));
     const float cascadeT = float(cascadeIndex) / 3.0;
     const float baseBias = lerp(camera.shadowConfig0.z, camera.shadowConfig0.w, cascadeT);
-    const float bias = baseBias * texelSize;
+    const float bias = baseBias * max(localTexelSize.x, localTexelSize.y);
     return shadowMap.SampleCmpLevelZero(shadowUv, shadowDepthRef + bias);
 }
 
