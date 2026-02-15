@@ -4,13 +4,20 @@
 import camera_uniform;
 
 [[vk::binding(3, 0)]]
-RWTexture3D<float4> voxelGiPropagateIn;
+Texture3D<float4> voxelGiPropagateIn;
 
 [[vk::binding(4, 0)]]
 RWTexture3D<float4> voxelGiPropagateOut;
 
 [[vk::binding(5, 0)]]
 Texture3D<float4> voxelGiOccupancy;
+
+static const int kGroupDim = 4;
+static const int kHalo = 1;
+static const int kSharedDim = kGroupDim + (2 * kHalo);
+static const int kSharedVoxelCount = kSharedDim * kSharedDim * kSharedDim;
+groupshared float4 sRadiance[kSharedDim][kSharedDim][kSharedDim];
+groupshared float sOpen[kSharedDim][kSharedDim][kSharedDim];
 
 bool inBounds(int3 cell, int3 dims)
 {
@@ -29,7 +36,23 @@ float sampleOpenCell(int3 cell, int3 dims)
     return (occupancy <= 0.5) ? 1.0 : 0.0;
 }
 
-float transportOpenRatio(int3 cell, int3 direction, int3 dims)
+bool inSharedBounds(int3 localCell)
+{
+    return
+        localCell.x >= 0 && localCell.y >= 0 && localCell.z >= 0 &&
+        localCell.x < kSharedDim && localCell.y < kSharedDim && localCell.z < kSharedDim;
+}
+
+float sampleOpenCellCached(int3 localCell, int3 globalCell, int3 dims)
+{
+    if (inSharedBounds(localCell))
+    {
+        return sOpen[localCell.x][localCell.y][localCell.z];
+    }
+    return sampleOpenCell(globalCell, dims);
+}
+
+float transportOpenRatio(int3 localCell, int3 cell, int3 direction, int3 dims)
 {
     int3 orthoA = int3(1, 0, 0);
     int3 orthoB = int3(0, 1, 0);
@@ -50,20 +73,26 @@ float transportOpenRatio(int3 cell, int3 direction, int3 dims)
     }
 
     const int3 neighbor = cell + direction;
+    const int3 neighborLocal = localCell + direction;
     float openSamples = 0.0;
-    openSamples += sampleOpenCell(cell + orthoA, dims);
-    openSamples += sampleOpenCell(cell - orthoA, dims);
-    openSamples += sampleOpenCell(cell + orthoB, dims);
-    openSamples += sampleOpenCell(cell - orthoB, dims);
-    openSamples += sampleOpenCell(neighbor + orthoA, dims);
-    openSamples += sampleOpenCell(neighbor - orthoA, dims);
-    openSamples += sampleOpenCell(neighbor + orthoB, dims);
-    openSamples += sampleOpenCell(neighbor - orthoB, dims);
+    openSamples += sampleOpenCellCached(localCell + orthoA, cell + orthoA, dims);
+    openSamples += sampleOpenCellCached(localCell - orthoA, cell - orthoA, dims);
+    openSamples += sampleOpenCellCached(localCell + orthoB, cell + orthoB, dims);
+    openSamples += sampleOpenCellCached(localCell - orthoB, cell - orthoB, dims);
+    openSamples += sampleOpenCellCached(neighborLocal + orthoA, neighbor + orthoA, dims);
+    openSamples += sampleOpenCellCached(neighborLocal - orthoA, neighbor - orthoA, dims);
+    openSamples += sampleOpenCellCached(neighborLocal + orthoB, neighbor + orthoB, dims);
+    openSamples += sampleOpenCellCached(neighborLocal - orthoB, neighbor - orthoB, dims);
     return openSamples * (1.0 / 8.0);
 }
 
 [numthreads(4, 4, 4)]
-void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+void main(
+    uint3 dispatchThreadId : SV_DispatchThreadID,
+    uint3 groupThreadId : SV_GroupThreadID,
+    uint3 groupId : SV_GroupID,
+    uint groupIndex : SV_GroupIndex
+)
 {
     uint gridW = 0u;
     uint gridH = 0u;
@@ -78,7 +107,30 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const int3 cell = int3(dispatchThreadId);
     const float propagateBlend = clamp(camera.shadowConfig3.z, 0.0, 1.0);
     const float propagateDecay = clamp(camera.skyConfig2.w, 0.0, 1.0);
-    const float occupancy = voxelGiOccupancy.Load(int4(int3(dispatchThreadId), 0)).x;
+    const int3 localCell = int3(groupThreadId) + int3(kHalo, kHalo, kHalo);
+
+    const int3 sharedBaseCell = (int3(groupId) * kGroupDim) - int3(kHalo, kHalo, kHalo);
+    for (uint sharedIndex = groupIndex; sharedIndex < kSharedVoxelCount; sharedIndex += (kGroupDim * kGroupDim * kGroupDim))
+    {
+        const int sx = int(sharedIndex % kSharedDim);
+        const int sy = int((sharedIndex / kSharedDim) % kSharedDim);
+        const int sz = int(sharedIndex / (kSharedDim * kSharedDim));
+        const int3 localSharedCell = int3(sx, sy, sz);
+        const int3 globalSharedCell = sharedBaseCell + localSharedCell;
+
+        float occupancySample = 1.0;
+        float4 radianceSample = float4(0.0, 0.0, 0.0, 1.0);
+        if (inBounds(globalSharedCell, dims))
+        {
+            occupancySample = voxelGiOccupancy.Load(int4(globalSharedCell, 0)).x;
+            radianceSample = voxelGiPropagateIn.Load(int4(globalSharedCell, 0));
+        }
+        sOpen[sx][sy][sz] = (occupancySample <= 0.5) ? 1.0 : 0.0;
+        sRadiance[sx][sy][sz] = radianceSample;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    const float occupancy = 1.0 - sOpen[localCell.x][localCell.y][localCell.z];
 
     if (occupancy > 0.5)
     {
@@ -86,7 +138,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    const float3 center = voxelGiPropagateIn[dispatchThreadId].xyz;
+    const float3 center = sRadiance[localCell.x][localCell.y][localCell.z].xyz;
 
     const int3 offsets[6] = {
         int3(1, 0, 0),
@@ -106,14 +158,18 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         {
             continue;
         }
-        const float4 neighborOccupancySample = voxelGiOccupancy.Load(int4(neighborCell, 0));
-        if (neighborOccupancySample.x > 0.5)
+        const int3 neighborLocalCell = localCell + offsets[i];
+        const float neighborOpen = sampleOpenCellCached(neighborLocalCell, neighborCell, dims);
+        if (neighborOpen < 0.5)
         {
             continue;
         }
-        const float openRatio = transportOpenRatio(cell, offsets[i], dims);
+        const float openRatio = transportOpenRatio(localCell, cell, offsets[i], dims);
         const float transportWeight = lerp(0.10, 1.0, openRatio);
-        neighborSum += voxelGiPropagateIn[uint3(neighborCell)].xyz * transportWeight;
+        const float3 neighborRadiance = inSharedBounds(neighborLocalCell)
+            ? sRadiance[neighborLocalCell.x][neighborLocalCell.y][neighborLocalCell.z].xyz
+            : voxelGiPropagateIn.Load(int4(neighborCell, 0)).xyz;
+        neighborSum += neighborRadiance * transportWeight;
         neighborWeight += transportWeight;
     }
 

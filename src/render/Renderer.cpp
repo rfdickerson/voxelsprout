@@ -4118,7 +4118,7 @@ bool Renderer::createVoxelGiResources() {
 
         VkDescriptorSetLayoutBinding propagateReadBinding{};
         propagateReadBinding.binding = 3;
-        propagateReadBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        propagateReadBinding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         propagateReadBinding.descriptorCount = 1;
         propagateReadBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
@@ -4183,8 +4183,8 @@ bool Renderer::createVoxelGiResources() {
         const std::array<VkDescriptorPoolSize, 4> poolSizes = {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5 * kMaxFramesInFlight}
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * kMaxFramesInFlight},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4 * kMaxFramesInFlight}
         };
         VkDescriptorPoolCreateInfo poolCreateInfo{};
         poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -10119,7 +10119,7 @@ void Renderer::renderFrame(
         voxelGiWrites[3].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
         voxelGiWrites[3].dstBinding = 3;
         voxelGiWrites[3].descriptorCount = 1;
-        voxelGiWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        voxelGiWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         voxelGiWrites[3].pImageInfo = &voxelGiStorageReadInfo;
 
         voxelGiWrites[4] = write;
@@ -11437,7 +11437,7 @@ void Renderer::renderFrame(
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT
         );
         writeGpuTimestampTop(kGpuTimestampQueryGiPropagateStart);
