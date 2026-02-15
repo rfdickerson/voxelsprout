@@ -10,6 +10,9 @@ Experimental voxel-based factory toy game focused on emergent discovery, determi
 - Procedural transport content: pipes, conveyors, rails, vegetation billboards.
 - Slang shader pipeline (`.slang -> SPIR-V`) for Vulkan.
 - Lightweight in-game debug UI for frame stats and graphics tuning.
+- Voxel GI using compute surface/inject/propagate passes with occupancy/albedo volume.
+- Froxel-based volumetric fog + sun shafts integration.
+- Tunable color grading and post pipeline (exposure, ACES, vibrance, split tints).
 
 ## Vulkan + Graphics Techniques
 
@@ -20,11 +23,14 @@ This renderer currently uses:
 - VMA-backed buffer/image allocation (with memory budget/priority flags).
 - Optional bindless sampled-image descriptor array for texture atlas indexing.
 - Reverse-Z projection and cascaded shadow mapping (atlas layout).
+- Shadow occluder culling (toggleable) driven by camera-visible receivers + neighboring chunk casters.
 - SSAO path with normal/depth prepass + blur.
 - Vertex AO contribution for voxel shading.
 - SH-based ambient lighting from a procedural sky model.
-- HDR scene path with tone mapping to LDR swapchain.
+- HDR scene path with bloom + tone mapping to LDR swapchain.
+- Post stack: auto/manual exposure, ACES fitted tonemap, white balance, contrast, saturation, vibrance, shadow/highlight tinting.
 - Instanced crossed-billboard vegetation rendering.
+- Volumetric height fog and sun-shaft post lighting.
 - GPU timestamp profiling and frame timing plots in ImGui.
 - Spatial clipmap-based chunk query/culling and greedy meshing support.
 - Optional `VK_GOOGLE_display_timing` integration when supported by the active driver.
@@ -101,3 +107,14 @@ Current test target: `voxel_foundation_tests`.
 - `Space` / `Shift` vertical movement
 - `C` config panels
 - `F` frame stats panel
+
+## Debug UI (Current)
+
+- `Frame Stats`:
+  - CPU/GPU timing history, per-stage GPU breakdown, draw-call counters.
+- `Shadows`:
+  - Tabbed layout for shadow tuning, AO/GI tuning, and display timing options.
+  - Includes `Shadow Occluder Culling` toggle for on/off benchmarking.
+- `Sun/Sky`:
+  - Tabbed layout for sun/atmosphere, post controls, and fog/foliage.
+  - Advanced controls are hidden behind collapsible sections.
