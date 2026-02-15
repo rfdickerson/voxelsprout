@@ -9021,6 +9021,7 @@ void Renderer::buildShadowDebugUi() {
                 m_shadowCascadeSplits[3]
             );
             ImGui::Separator();
+            ImGui::Checkbox("Shadow Occluder Culling", &m_shadowDebugSettings.enableOccluderCulling);
             ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
             ImGui::SliderFloat("Cascade Blend Min", &m_shadowDebugSettings.cascadeBlendMin, 1.0f, 20.0f, "%.2f");
             ImGui::SliderFloat("Cascade Blend Factor", &m_shadowDebugSettings.cascadeBlendFactor, 0.05f, 0.60f, "%.2f");
@@ -10868,11 +10869,11 @@ void Renderer::renderFrame(
         }
     };
 
-    // Shadow casting must be culled against cascade coverage, not camera view frustum.
-    // Start from receiver-visible chunks, then conservatively march upstream along -sunDirection
-    // to include offscreen casters that can project into the camera-visible receiver region.
+    // Shadow casting must be culled against cascade coverage and receiver visibility.
+    // Use camera-frustum visible chunks as receivers, and assume casters only affect
+    // immediate neighboring chunks in upstream sun direction.
     std::vector<std::uint8_t> shadowCandidateMask;
-    if (!visibleChunkIndices.empty()) {
+    if (m_shadowDebugSettings.enableOccluderCulling && !visibleChunkIndices.empty()) {
         shadowCandidateMask.assign(chunks.size(), 0u);
         std::unordered_map<ChunkCoordKey, std::size_t, ChunkCoordKeyHash> chunkIndexByCoord;
         chunkIndexByCoord.reserve(chunks.size() * 2u);
@@ -10888,17 +10889,10 @@ void Renderer::renderFrame(
             }
         };
 
-        const float halfChunkSizeX = static_cast<float>(world::Chunk::kSizeX) * 0.5f;
-        const float halfChunkSizeY = static_cast<float>(world::Chunk::kSizeY) * 0.5f;
-        const float halfChunkSizeZ = static_cast<float>(world::Chunk::kSizeZ) * 0.5f;
-        const float maxCascadeDistance = std::max(m_shadowCascadeSplits[kShadowCascadeCount - 1u], 1.0f);
-        constexpr float kShadowCasterExtrusionOverscan = 48.0f;
-        const float extrusionDistance = maxCascadeDistance + kShadowCasterExtrusionOverscan;
-        const float sampleStepWorld = static_cast<float>(
-            std::min({world::Chunk::kSizeX, world::Chunk::kSizeY, world::Chunk::kSizeZ})
-        ) * 0.5f;
-        const int sampleCount = std::max(1, static_cast<int>(std::ceil(extrusionDistance / sampleStepWorld)));
         const math::Vector3 upstreamDirection = -math::normalize(sunDirection);
+        const int upstreamStepX = (upstreamDirection.x > 0.15f) ? 1 : ((upstreamDirection.x < -0.15f) ? -1 : 0);
+        const int upstreamStepY = (upstreamDirection.y > 0.15f) ? 1 : ((upstreamDirection.y < -0.15f) ? -1 : 0);
+        const int upstreamStepZ = (upstreamDirection.z > 0.15f) ? 1 : ((upstreamDirection.z < -0.15f) ? -1 : 0);
 
         for (const std::size_t visibleChunkIndex : visibleChunkIndices) {
             if (visibleChunkIndex >= chunks.size()) {
@@ -10906,30 +10900,34 @@ void Renderer::renderFrame(
             }
             const world::Chunk& chunk = chunks[visibleChunkIndex];
             shadowCandidateMask[visibleChunkIndex] = 1u;
+            const int baseChunkX = chunk.chunkX();
+            const int baseChunkY = chunk.chunkY();
+            const int baseChunkZ = chunk.chunkZ();
 
-            const math::Vector3 chunkCenter{
-                static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX) + halfChunkSizeX,
-                static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY) + halfChunkSizeY,
-                static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ) + halfChunkSizeZ
-            };
-            for (int sampleIndex = 1; sampleIndex <= sampleCount; ++sampleIndex) {
-                const float distance = static_cast<float>(sampleIndex) * sampleStepWorld;
-                const math::Vector3 samplePosition = chunkCenter + (upstreamDirection * distance);
-                const int sampleWorldX = static_cast<int>(std::floor(samplePosition.x));
-                const int sampleWorldY = static_cast<int>(std::floor(samplePosition.y));
-                const int sampleWorldZ = static_cast<int>(std::floor(samplePosition.z));
-                markCandidateChunk(
-                    floorDiv(sampleWorldX, world::Chunk::kSizeX),
-                    floorDiv(sampleWorldY, world::Chunk::kSizeY),
-                    floorDiv(sampleWorldZ, world::Chunk::kSizeZ)
-                );
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        if (dx == 0 && dy == 0 && dz == 0) {
+                            continue;
+                        }
+                        if (upstreamStepX != 0 && dx != upstreamStepX) {
+                            continue;
+                        }
+                        if (upstreamStepY != 0 && dy != upstreamStepY) {
+                            continue;
+                        }
+                        if (upstreamStepZ != 0 && dz != upstreamStepZ) {
+                            continue;
+                        }
+                        markCandidateChunk(baseChunkX + dx, baseChunkY + dy, baseChunkZ + dz);
+                    }
+                }
             }
         }
     }
 
-    constexpr bool kDisableShadowCasterCulling = true;
     constexpr float kShadowCasterClipMargin = 0.08f;
-    if (kDisableShadowCasterCulling) {
+    if (!m_shadowDebugSettings.enableOccluderCulling) {
         const uint32_t allCascadeMask = (1u << kShadowCascadeCount) - 1u;
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
             appendShadowChunkLods(chunkArrayIndex, allCascadeMask);
