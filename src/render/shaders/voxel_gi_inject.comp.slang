@@ -33,7 +33,7 @@ bool inBounds(int3 cell, int3 dims)
         cell.x < dims.x && cell.y < dims.y && cell.z < dims.z;
 }
 
-float3 sampleDirectionalSurfaceRadiance(int3 cell, int3 directionToReceiver, int3 dims)
+float3 sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, int3 dims)
 {
     const float3 surfacePosX = max(voxelGiSurfacePosXCache[uint3(cell)].xyz, float3(0.0, 0.0, 0.0));
     const float3 surfaceNegX = max(voxelGiSurfaceNegXCache[uint3(cell)].xyz, float3(0.0, 0.0, 0.0));
@@ -210,8 +210,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float colorBleedBoost = lerp(1.0, 1.12, clamp(albedoSaturation, 0.0, 1.0));
         // Compress bounce chroma so highly saturated voxels do not over-tint distant surfaces.
         const float3 bounceAlbedo = lerp(float3(surfaceLuma, surfaceLuma, surfaceLuma), surfaceAlbedo, 0.40);
-        const float3 neighborRadiance = sampleDirectionalSurfaceRadiance(neighborCell, -offsets[i], dims);
-        bouncedLightSum += bounceAlbedo * (neighborRadiance * colorBleedBoost);
+        const float3 neighborIrradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i], dims);
+        bouncedLightSum += bounceAlbedo * (neighborIrradiance * colorBleedBoost);
     }
 
     const float3 injected =
