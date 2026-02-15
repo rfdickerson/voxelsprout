@@ -98,10 +98,7 @@ void main(
     uint gridH = 0u;
     uint gridD = 0u;
     voxelGiPropagateIn.GetDimensions(gridW, gridH, gridD);
-    if (dispatchThreadId.x >= gridW || dispatchThreadId.y >= gridH || dispatchThreadId.z >= gridD)
-    {
-        return;
-    }
+    const bool inDispatchBounds = dispatchThreadId.x < gridW && dispatchThreadId.y < gridH && dispatchThreadId.z < gridD;
 
     const int3 dims = int3(int(gridW), int(gridH), int(gridD));
     const int3 cell = int3(dispatchThreadId);
@@ -129,6 +126,11 @@ void main(
         sRadiance[sx][sy][sz] = radianceSample;
     }
     GroupMemoryBarrierWithGroupSync();
+
+    if (!inDispatchBounds)
+    {
+        return;
+    }
 
     const float occupancy = 1.0 - sOpen[localCell.x][localCell.y][localCell.z];
 

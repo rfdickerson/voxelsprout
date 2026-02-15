@@ -28,6 +28,9 @@ RWTexture3D<float4> voxelGiSurfacePosZOut;
 [[vk::binding(11, 0)]]
 RWTexture3D<float4> voxelGiSurfaceNegZOut;
 
+[[vk::binding(12, 0)]]
+RWTexture3D<float4> voxelGiSkyExposure;
+
 int chooseShadowCascade(float viewDepth)
 {
     if (viewDepth <= camera.shadowCascadeSplits.x) return 0;
@@ -77,28 +80,6 @@ bool inBounds(int3 cell, int3 dims)
     return
         cell.x >= 0 && cell.y >= 0 && cell.z >= 0 &&
         cell.x < dims.x && cell.y < dims.y && cell.z < dims.z;
-}
-
-float sampleSkyColumnExposure(int3 cell, int3 dims)
-{
-    // March upward and classify sky access as binary:
-    // 0 = blocked by occupancy, 1 = open to LPV top/out of bounds.
-    int3 probe = cell + int3(0, 1, 0);
-    const int maxSteps = 64;
-    for (int step = 0; step < maxSteps; ++step)
-    {
-        if (!inBounds(probe, dims))
-        {
-            return 1.0;
-        }
-        const float occupancy = voxelGiOccupancy.Load(int4(probe, 0)).x;
-        if (occupancy > 0.5)
-        {
-            return 0.0;
-        }
-        probe.y += 1;
-    }
-    return 1.0;
 }
 
 float sampleSunVoxelVisibility(int3 cell, int3 faceOffset, int3 dims, float3 sunDirection)
@@ -182,7 +163,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     };
     const int3 cell = int3(dispatchThreadId);
     const int3 dims = int3(int(gridW), int(gridH), int(gridD));
-    const float skyColumnExposure = sampleSkyColumnExposure(cell, dims);
+    const float skyColumnExposure = clamp(voxelGiSkyExposure[dispatchThreadId].x, 0.0, 1.0);
 
     float3 cachedSurfaceIrradiancePosX = float3(0.0, 0.0, 0.0);
     float3 cachedSurfaceIrradianceNegX = float3(0.0, 0.0, 0.0);
