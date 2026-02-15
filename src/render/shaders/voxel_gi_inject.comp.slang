@@ -38,46 +38,81 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, in
         return 0.0;
     }
 
-    // Pick the face from the dominant axis; ties resolve deterministically (X, then Y, then Z).
-    int3 selectedFaceOffset = int3(0, 0, 0);
-    float3 selectedFaceNormal = float3(0.0, 0.0, 0.0);
-    float selectedIrradiance = 0.0;
-    if (absDir.x >= absDir.y && absDir.x >= absDir.z)
+    // Blend +/- axis faces by direction magnitudes (cubemap-style) to avoid dominant-axis aliasing.
+    const float weightDenom = absDir.x + absDir.y + absDir.z;
+    const float3 axisWeights = absDir / weightDenom;
+    float directional = 0.0;
+    float3 blendedFaceNormal = float3(0.0, 0.0, 0.0);
+    if (axisWeights.x > 0.0001)
     {
-        selectedFaceOffset = (dir.x >= 0.0) ? int3(1, 0, 0) : int3(-1, 0, 0);
-        selectedFaceNormal = float3(selectedFaceOffset);
-        selectedIrradiance = (dir.x >= 0.0) ? surfacePos.x : surfaceNeg.x;
-    }
-    else if (absDir.y >= absDir.z)
-    {
-        selectedFaceOffset = (dir.y >= 0.0) ? int3(0, 1, 0) : int3(0, -1, 0);
-        selectedFaceNormal = float3(selectedFaceOffset);
-        selectedIrradiance = (dir.y >= 0.0) ? surfacePos.y : surfaceNeg.y;
-    }
-    else
-    {
-        selectedFaceOffset = (dir.z >= 0.0) ? int3(0, 0, 1) : int3(0, 0, -1);
-        selectedFaceNormal = float3(selectedFaceOffset);
-        selectedIrradiance = (dir.z >= 0.0) ? surfacePos.z : surfaceNeg.z;
-    }
-    selectedFaceNormalOut = selectedFaceNormal;
-
-    // Geometric gate: only emit through a face that is actually open to empty space.
-    // This prevents wraparound/leak when face data exists but the face is now blocked.
-    const int3 adjacentCell = cell + selectedFaceOffset;
-    if (inBounds(adjacentCell, dims))
-    {
-        const float adjacentOccupancy = voxelGiOccupancy.Load(int4(adjacentCell, 0)).x;
-        if (adjacentOccupancy > 0.5)
+        const int3 faceOffsetX = (dir.x >= 0.0) ? int3(1, 0, 0) : int3(-1, 0, 0);
+        const float faceIrradianceX = (dir.x >= 0.0) ? surfacePos.x : surfaceNeg.x;
+        float opennessX = 1.0;
+        const int3 adjacentCellX = cell + faceOffsetX;
+        if (inBounds(adjacentCellX, dims))
         {
-            return 0.0;
+            const float adjacentOccupancyX = voxelGiOccupancy.Load(int4(adjacentCellX, 0)).x;
+            if (adjacentOccupancyX > 0.5)
+            {
+                opennessX = 0.0;
+            }
+        }
+        if (opennessX > 0.0)
+        {
+            directional += faceIrradianceX * axisWeights.x;
+            blendedFaceNormal += float3(faceOffsetX) * axisWeights.x;
         }
     }
-    // Keep a small floor so convex 90-degree corners are not starved by strict face gating.
-    const float facing = max(dot(normalize(dir), selectedFaceNormal), 0.35);
-    const float directional = selectedIrradiance * facing;
+    if (axisWeights.y > 0.0001)
+    {
+        const int3 faceOffsetY = (dir.y >= 0.0) ? int3(0, 1, 0) : int3(0, -1, 0);
+        const float faceIrradianceY = (dir.y >= 0.0) ? surfacePos.y : surfaceNeg.y;
+        float opennessY = 1.0;
+        const int3 adjacentCellY = cell + faceOffsetY;
+        if (inBounds(adjacentCellY, dims))
+        {
+            const float adjacentOccupancyY = voxelGiOccupancy.Load(int4(adjacentCellY, 0)).x;
+            if (adjacentOccupancyY > 0.5)
+            {
+                opennessY = 0.0;
+            }
+        }
+        if (opennessY > 0.0)
+        {
+            directional += faceIrradianceY * axisWeights.y;
+            blendedFaceNormal += float3(faceOffsetY) * axisWeights.y;
+        }
+    }
+    if (axisWeights.z > 0.0001)
+    {
+        const int3 faceOffsetZ = (dir.z >= 0.0) ? int3(0, 0, 1) : int3(0, 0, -1);
+        const float faceIrradianceZ = (dir.z >= 0.0) ? surfacePos.z : surfaceNeg.z;
+        float opennessZ = 1.0;
+        const int3 adjacentCellZ = cell + faceOffsetZ;
+        if (inBounds(adjacentCellZ, dims))
+        {
+            const float adjacentOccupancyZ = voxelGiOccupancy.Load(int4(adjacentCellZ, 0)).x;
+            if (adjacentOccupancyZ > 0.5)
+            {
+                opennessZ = 0.0;
+            }
+        }
+        if (opennessZ > 0.0)
+        {
+            directional += faceIrradianceZ * axisWeights.z;
+            blendedFaceNormal += float3(faceOffsetZ) * axisWeights.z;
+        }
+    }
+
+    if (dot(blendedFaceNormal, blendedFaceNormal) <= 0.0001)
+    {
+        selectedFaceNormalOut = normalize(dir);
+        return isotropicIrradiance * 0.20;
+    }
+
+    selectedFaceNormalOut = normalize(blendedFaceNormal);
     // Isotropic floor lets sunlit surfaces scatter into nearby backfacing receivers.
-    return max(directional, isotropicIrradiance * 0.28);
+    return max(directional, isotropicIrradiance * 0.20);
 }
 
 float3 sampleIncidentLightTint(float3 faceNormal)
