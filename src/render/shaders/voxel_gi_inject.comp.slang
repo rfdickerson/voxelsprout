@@ -2,6 +2,7 @@
 // slangc -target spirv -entry main -stage compute -matrix-layout-column-major src/render/shaders/voxel_gi_inject.comp.slang -o src/render/shaders/voxel_gi_inject.comp.slang.spv
 
 import camera_uniform;
+import sh_lighting;
 
 [[vk::binding(2, 0)]]
 RWTexture3D<float4> voxelGiInjectOut;
@@ -22,7 +23,7 @@ bool inBounds(int3 cell, int3 dims)
         cell.x < dims.x && cell.y < dims.y && cell.z < dims.z;
 }
 
-float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, int3 dims)
+float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, int3 dims, out float3 selectedFaceNormalOut)
 {
     const float3 surfacePos = max(voxelGiSurfacePosCache[uint3(cell)].xyz, float3(0.0, 0.0, 0.0));
     const float3 surfaceNeg = max(voxelGiSurfaceNegCache[uint3(cell)].xyz, float3(0.0, 0.0, 0.0));
@@ -33,6 +34,7 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, in
     const float3 absDir = abs(dir);
     if ((absDir.x + absDir.y + absDir.z) <= 0.0)
     {
+        selectedFaceNormalOut = float3(0.0, 1.0, 0.0);
         return 0.0;
     }
 
@@ -58,6 +60,7 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, in
         selectedFaceNormal = float3(selectedFaceOffset);
         selectedIrradiance = (dir.z >= 0.0) ? surfacePos.z : surfaceNeg.z;
     }
+    selectedFaceNormalOut = selectedFaceNormal;
 
     // Geometric gate: only emit through a face that is actually open to empty space.
     // This prevents wraparound/leak when face data exists but the face is now blocked.
@@ -75,6 +78,24 @@ float sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, in
     const float directional = selectedIrradiance * facing;
     // Isotropic floor lets sunlit surfaces scatter into nearby backfacing receivers.
     return max(directional, isotropicIrradiance * 0.28);
+}
+
+float3 sampleIncidentLightTint(float3 faceNormal)
+{
+    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
+    const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
+    const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
+    const float ndotl = max(dot(faceNormal, -sunDirection), 0.0);
+    const float3 sunLight = camera.sunColorShadow.xyz * (sunIntensity * ndotl);
+    const float3 skyLight = evaluateShIrradiance(faceNormal);
+    const float3 incident = max(sunLight + skyLight, float3(0.0, 0.0, 0.0));
+    const float incidentLuma = dot(incident, lumaWeights);
+    if (incidentLuma <= 0.0001)
+    {
+        return float3(1.0, 1.0, 1.0);
+    }
+    // Normalize by luminance so tint affects hue/chroma while scalar irradiance controls energy.
+    return incident / incidentLuma;
 }
 
 [numthreads(4, 4, 4)]
@@ -131,8 +152,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float surfaceLuma = dot(surfaceAlbedo, lumaWeights);
         // Compress bounce chroma so highly saturated voxels do not over-tint distant surfaces.
         const float3 bounceAlbedo = lerp(float3(surfaceLuma, surfaceLuma, surfaceLuma), surfaceAlbedo, 0.40);
-        const float neighborIrradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i], dims);
-        bouncedLightSum += bounceAlbedo * neighborIrradiance;
+        float3 emitterFaceNormal = float3(0.0, 1.0, 0.0);
+        const float neighborIrradiance =
+            sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i], dims, emitterFaceNormal);
+        const float3 incidentTint = sampleIncidentLightTint(emitterFaceNormal);
+        bouncedLightSum += bounceAlbedo * (neighborIrradiance * incidentTint);
     }
 
     const float3 injected =
