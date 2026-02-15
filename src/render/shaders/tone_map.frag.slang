@@ -30,17 +30,9 @@ float3 applySaturation(float3 color, float saturation)
     return lerp(float3(luma, luma, luma), color, saturation);
 }
 
-float3 applyWhiteBalance(float3 color, float temperature, float tint)
+float3 applyWhiteBalance(float3 color, float3 whiteBalance)
 {
-    const float t = clamp(temperature, -1.0, 1.0);
-    const float g = clamp(tint, -1.0, 1.0);
-    // Lightweight grading controls: temperature shifts R/B, tint shifts G vs magenta.
-    const float3 gains = float3(
-        1.0 + (0.18 * t) - (0.08 * g),
-        1.0 + (0.12 * g),
-        1.0 - (0.18 * t) - (0.08 * g)
-    );
-    return max(color * gains, float3(0.0, 0.0, 0.0));
+    return max(color * max(whiteBalance, float3(0.0, 0.0, 0.0)), float3(0.0, 0.0, 0.0));
 }
 
 float3 applyContrastCurve(float3 color, float contrast)
@@ -60,19 +52,15 @@ float3 applyVibrance(float3 color, float vibrance)
     return saturate(lerp(float3(luma, luma, luma), color, boost));
 }
 
-float3 applySplitTone(float3 color, float amount, float balance)
+float3 applySplitTone(float3 color, float3 shadowTint, float3 highlightTint)
 {
-    const float splitAmount = clamp(amount, 0.0, 1.0);
-    const float splitBalance = clamp(balance, -1.0, 1.0);
     const float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
-    const float pivot = 0.50 + (splitBalance * 0.20);
+    const float pivot = 0.50;
     const float shadowWeight = saturate((pivot - luma) / max(pivot, 1e-3));
     const float highlightWeight = saturate((luma - pivot) / max(1.0 - pivot, 1e-3));
-    const float3 coolShadowTint = float3(0.92, 0.97, 1.08);
-    const float3 warmHighlightTint = float3(1.08, 1.00, 0.92);
     float3 result = color;
-    result *= lerp(float3(1.0, 1.0, 1.0), coolShadowTint, shadowWeight * splitAmount);
-    result *= lerp(float3(1.0, 1.0, 1.0), warmHighlightTint, highlightWeight * splitAmount);
+    result *= lerp(float3(1.0, 1.0, 1.0), float3(1.0, 1.0, 1.0) + shadowTint, shadowWeight);
+    result *= lerp(float3(1.0, 1.0, 1.0), float3(1.0, 1.0, 1.0) + highlightTint, highlightWeight);
     return saturate(result);
 }
 
@@ -444,15 +432,15 @@ float4 main(FragmentInput input) : SV_Target0
     float3 toneMapped = acesFilmTonemap(hdrColor * exposureScale);
     toneMapped = applyWhiteBalance(
         toneMapped,
-        camera.colorGrading0.x,
-        camera.colorGrading0.y
+        camera.colorGrading0.xyz
     );
-    toneMapped = applyContrastCurve(toneMapped, camera.colorGrading0.z);
-    toneMapped = applyVibrance(toneMapped, camera.colorGrading0.w);
+    toneMapped = applyContrastCurve(toneMapped, camera.colorGrading0.w);
+    toneMapped = applySaturation(toneMapped, camera.colorGrading1.x);
+    toneMapped = applyVibrance(toneMapped, camera.colorGrading1.y);
     toneMapped = applySplitTone(
         toneMapped,
-        camera.colorGrading1.x,
-        camera.colorGrading1.y
+        camera.colorGrading2.xyz,
+        camera.colorGrading3.xyz
     );
     toneMapped = pow(clamp(toneMapped, 0.0, 1.0), float3(1.06, 1.06, 1.06));
     const float3 ldrSrgb = pow(toneMapped, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
