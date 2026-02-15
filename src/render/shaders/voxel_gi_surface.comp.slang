@@ -177,7 +177,6 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
     float3 cachedSurfaceIrradiancePos = float3(0.0, 0.0, 0.0);
     float3 cachedSurfaceIrradianceNeg = float3(0.0, 0.0, 0.0);
-    const int skyOcclusionSteps = 2;
     const float skyBlockedStepVisibility = 0.78;
     for (int i = 0; i < 6; ++i)
     {
@@ -194,20 +193,15 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             continue;
         }
 
+        // Cheap local occlusion heuristic: one additional probe beyond the face-open check.
         float skyLocalOcclusion = 1.0;
-        for (int step = 1; step <= skyOcclusionSteps; ++step)
+        const int3 forwardCell = adjacentCell + faceOffsets[i];
+        if (inBounds(forwardCell, dims))
         {
-            const int3 sampleCell = cell + (faceOffsets[i] * step);
-            if (!inBounds(sampleCell, dims))
-            {
-                break;
-            }
-
-            const float sampleOccupancy = voxelGiOccupancy.Load(int4(sampleCell, 0)).x;
+            const float sampleOccupancy = voxelGiOccupancy.Load(int4(forwardCell, 0)).x;
             if (sampleOccupancy > 0.5)
             {
-                // Multiple blocked steps quickly darken enclosed spaces.
-                skyLocalOcclusion *= skyBlockedStepVisibility;
+                skyLocalOcclusion = skyBlockedStepVisibility;
             }
         }
         const float ndotl = max(dot(normal, -sunDirection), 0.0);
