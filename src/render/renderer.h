@@ -4,19 +4,19 @@
 #include "world/chunk_grid.h"
 #include "world/chunk_mesher.h"
 #include "world/clipmap_index.h"
-#include "render/renderer_types.h"
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
 
-#include "render/backend/render_backend_selector.h"
+#include "render/renderer_types.h"
 
 struct GLFWwindow;
 
 namespace voxelsprout::render {
+
+class RendererBackend;
 
 class Renderer {
 public:

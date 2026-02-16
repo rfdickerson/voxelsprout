@@ -10,6 +10,7 @@
 #include "world/chunk_grid.h"
 #include "world/chunk_mesher.h"
 #include "world/spatial_index.h"
+#include "math/math.h"
 
 #include <array>
 #include <cstddef>
@@ -121,8 +122,8 @@ public:
     void renderFrame(
         const voxelsprout::world::ChunkGrid& chunkGrid,
         const voxelsprout::sim::Simulation& simulation,
-        const CameraPose& camera,
-        const VoxelPreview& preview,
+        const voxelsprout::render::CameraPose& camera,
+        const voxelsprout::render::VoxelPreview& preview,
         float simulationAlpha,
         std::span<const std::size_t> visibleChunkIndices
     );
@@ -315,6 +316,25 @@ private:
         float extensions[4];
     };
 
+    struct ReadyMagicaDraw {
+        VkBuffer vertexBuffer = VK_NULL_HANDLE;
+        VkBuffer indexBuffer = VK_NULL_HANDLE;
+        std::uint32_t indexCount = 0;
+        float offsetX = 0.0f;
+        float offsetY = 0.0f;
+        float offsetZ = 0.0f;
+    };
+
+    struct FrameInstanceDrawData {
+        uint32_t pipeInstanceCount = 0;
+        std::optional<FrameArenaSlice> pipeInstanceSliceOpt = std::nullopt;
+        uint32_t transportInstanceCount = 0;
+        std::optional<FrameArenaSlice> transportInstanceSliceOpt = std::nullopt;
+        uint32_t beltCargoInstanceCount = 0;
+        std::optional<FrameArenaSlice> beltCargoInstanceSliceOpt = std::nullopt;
+        std::vector<ReadyMagicaDraw> readyMagicaDraws;
+    };
+
     struct GrassBillboardVertex {
         float corner[2];
         float uv[2];
@@ -334,6 +354,11 @@ private:
         float offsetY = 0.0f;
         float offsetZ = 0.0f;
     };
+
+    FrameInstanceDrawData prepareFrameInstanceDrawData(
+        const voxelsprout::sim::Simulation& simulation,
+        float simulationAlpha
+    );
 
     GLFWwindow* m_window = nullptr;
 

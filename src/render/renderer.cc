@@ -1,5 +1,7 @@
 #include "render/renderer.h"
 
+#include "render/backend/render_backend_selector.h"
+
 #include <memory>
 #include <utility>
 
