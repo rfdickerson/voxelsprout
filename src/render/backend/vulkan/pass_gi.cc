@@ -156,6 +156,8 @@ void recordVoxelGiOccupancyPass(
     uint32_t occupancyDispatchZ
 ) {
     if (occupancyDispatchZ == 0u) {
+        writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.occupancyStart);
+        writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.occupancyEnd);
         return;
     }
     writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.occupancyStart);
