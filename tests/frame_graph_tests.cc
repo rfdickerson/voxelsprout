@@ -2,6 +2,7 @@
 
 #include <vector>
 
+#include "render/backend/vulkan/frame_graph_runtime.h"
 #include "render/frame_graph.h"
 
 namespace {
@@ -36,6 +37,23 @@ TEST(FrameGraphTest, BuildExecutionOrderDetectsCycle) {
 
     std::vector<voxelsprout::render::FrameGraph::PassId> order;
     EXPECT_FALSE(frameGraph.buildExecutionOrder(&order));
+}
+
+TEST(FrameGraphTest, CoreFrameGraphOrderValidatorTracksMonotonicPassOrder) {
+    voxelsprout::render::CoreFrameGraphPlan plan{};
+    plan.shadow = 0u;
+    plan.prepass = 1u;
+    plan.main = 2u;
+    plan.post = 3u;
+    plan.passOrderById = {0u, 1u, 2u, 3u};
+
+    voxelsprout::render::CoreFrameGraphOrderValidator validator(plan);
+    validator.markPassEntered(plan.shadow, "shadow");
+    validator.markPassEntered(plan.prepass, "prepass");
+    validator.markPassEntered(plan.main, "main");
+    validator.markPassEntered(plan.post, "post");
+
+    SUCCEED();
 }
 
 }  // namespace
