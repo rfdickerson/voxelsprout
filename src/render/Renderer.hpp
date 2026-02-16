@@ -1,6 +1,8 @@
 #pragma once
 
 #include "render/BufferHelpers.hpp"
+#include "render/DescriptorManager.hpp"
+#include "render/PipelineManager.hpp"
 #include "sim/Simulation.hpp"
 #include "world/ClipmapIndex.hpp"
 #include "world/ChunkGrid.hpp"
@@ -238,6 +240,13 @@ private:
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
     bool createDescriptorResources();
+    using BoundDescriptorSets = DescriptorManager<kMaxFramesInFlight>::BoundDescriptorSets;
+    BoundDescriptorSets updateFrameDescriptorSets(
+        uint32_t aoFrameIndex,
+        const VkDescriptorBufferInfo& cameraBufferInfo,
+        VkBuffer autoExposureHistogramBuffer,
+        VkBuffer autoExposureStateBuffer
+    );
     bool createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
     bool createFrameResources();
     bool createGpuTimestampResources();
@@ -525,39 +534,42 @@ private:
     VkSampleCountFlagBits m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
     VkFormat m_hdrColorFormat = VK_FORMAT_UNDEFINED;
 
-    // Minimal one-pass pipeline using dynamic rendering.
-    // Future material systems will replace this single hardcoded pipeline.
-    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline m_pipeline = VK_NULL_HANDLE;
-    VkPipeline m_shadowPipeline = VK_NULL_HANDLE;
-    VkPipeline m_pipeShadowPipeline = VK_NULL_HANDLE;
-    VkPipeline m_grassBillboardShadowPipeline = VK_NULL_HANDLE;
-    VkPipeline m_skyboxPipeline = VK_NULL_HANDLE;
-    VkPipeline m_tonemapPipeline = VK_NULL_HANDLE;
-    VkPipeline m_pipePipeline = VK_NULL_HANDLE;
-    VkPipeline m_grassBillboardPipeline = VK_NULL_HANDLE;
-    VkPipeline m_voxelNormalDepthPipeline = VK_NULL_HANDLE;
-    VkPipeline m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
-    VkPipeline m_grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
-    VkPipeline m_magicaPipeline = VK_NULL_HANDLE;
-    VkPipeline m_ssaoPipeline = VK_NULL_HANDLE;
-    VkPipeline m_ssaoBlurPipeline = VK_NULL_HANDLE;
-    VkPipeline m_previewAddPipeline = VK_NULL_HANDLE;
-    VkPipeline m_previewRemovePipeline = VK_NULL_HANDLE;
-    VkPipelineLayout m_voxelGiPipelineLayout = VK_NULL_HANDLE;
-    VkPipeline m_voxelGiSurfacePipeline = VK_NULL_HANDLE;
-    VkPipeline m_voxelGiSkyExposurePipeline = VK_NULL_HANDLE;
-    VkPipeline m_voxelGiInjectPipeline = VK_NULL_HANDLE;
-    VkPipeline m_voxelGiPropagatePipeline = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_bindlessDescriptorSetLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout m_voxelGiDescriptorSetLayout = VK_NULL_HANDLE;
-    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
-    VkDescriptorPool m_bindlessDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorPool m_voxelGiDescriptorPool = VK_NULL_HANDLE;
-    std::array<VkDescriptorSet, kMaxFramesInFlight> m_descriptorSets{};
-    std::array<VkDescriptorSet, kMaxFramesInFlight> m_voxelGiDescriptorSets{};
-    VkDescriptorSet m_bindlessDescriptorSet = VK_NULL_HANDLE;
+    // Pipeline and descriptor lifetimes are owned by focused managers.
+    PipelineManager m_pipelineManager{};
+    DescriptorManager<kMaxFramesInFlight> m_descriptorManager{};
+
+    // Existing Renderer call sites use these aliases while ownership lives in managers.
+    VkPipelineLayout& m_pipelineLayout = m_pipelineManager.pipelineLayout;
+    VkPipeline& m_pipeline = m_pipelineManager.pipeline;
+    VkPipeline& m_shadowPipeline = m_pipelineManager.shadowPipeline;
+    VkPipeline& m_pipeShadowPipeline = m_pipelineManager.pipeShadowPipeline;
+    VkPipeline& m_grassBillboardShadowPipeline = m_pipelineManager.grassBillboardShadowPipeline;
+    VkPipeline& m_skyboxPipeline = m_pipelineManager.skyboxPipeline;
+    VkPipeline& m_tonemapPipeline = m_pipelineManager.tonemapPipeline;
+    VkPipeline& m_pipePipeline = m_pipelineManager.pipePipeline;
+    VkPipeline& m_grassBillboardPipeline = m_pipelineManager.grassBillboardPipeline;
+    VkPipeline& m_voxelNormalDepthPipeline = m_pipelineManager.voxelNormalDepthPipeline;
+    VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
+    VkPipeline& m_grassBillboardNormalDepthPipeline = m_pipelineManager.grassBillboardNormalDepthPipeline;
+    VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
+    VkPipeline& m_ssaoPipeline = m_pipelineManager.ssaoPipeline;
+    VkPipeline& m_ssaoBlurPipeline = m_pipelineManager.ssaoBlurPipeline;
+    VkPipeline& m_previewAddPipeline = m_pipelineManager.previewAddPipeline;
+    VkPipeline& m_previewRemovePipeline = m_pipelineManager.previewRemovePipeline;
+    VkPipelineLayout& m_voxelGiPipelineLayout = m_pipelineManager.voxelGiPipelineLayout;
+    VkPipeline& m_voxelGiSurfacePipeline = m_pipelineManager.voxelGiSurfacePipeline;
+    VkPipeline& m_voxelGiSkyExposurePipeline = m_pipelineManager.voxelGiSkyExposurePipeline;
+    VkPipeline& m_voxelGiInjectPipeline = m_pipelineManager.voxelGiInjectPipeline;
+    VkPipeline& m_voxelGiPropagatePipeline = m_pipelineManager.voxelGiPropagatePipeline;
+    VkDescriptorSetLayout& m_descriptorSetLayout = m_descriptorManager.descriptorSetLayout;
+    VkDescriptorSetLayout& m_bindlessDescriptorSetLayout = m_descriptorManager.bindlessDescriptorSetLayout;
+    VkDescriptorSetLayout& m_voxelGiDescriptorSetLayout = m_descriptorManager.voxelGiDescriptorSetLayout;
+    VkDescriptorPool& m_descriptorPool = m_descriptorManager.descriptorPool;
+    VkDescriptorPool& m_bindlessDescriptorPool = m_descriptorManager.bindlessDescriptorPool;
+    VkDescriptorPool& m_voxelGiDescriptorPool = m_descriptorManager.voxelGiDescriptorPool;
+    std::array<VkDescriptorSet, kMaxFramesInFlight>& m_descriptorSets = m_descriptorManager.descriptorSets;
+    std::array<VkDescriptorSet, kMaxFramesInFlight>& m_voxelGiDescriptorSets = m_descriptorManager.voxelGiDescriptorSets;
+    VkDescriptorSet& m_bindlessDescriptorSet = m_descriptorManager.bindlessDescriptorSet;
     bool m_supportsWireframePreview = false;
     bool m_supportsSamplerAnisotropy = false;
     bool m_supportsMultiDrawIndirect = false;
