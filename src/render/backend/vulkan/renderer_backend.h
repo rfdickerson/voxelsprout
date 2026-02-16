@@ -289,7 +289,6 @@ private:
     void collectCompletedBufferReleases();
     void updateDisplayTimingStats();
     bool isTimelineValueReached(uint64_t value) const;
-
     struct DeferredBufferRelease {
         BufferHandle handle = kInvalidBufferHandle;
         uint64_t timelineValue = 0;
@@ -382,6 +381,17 @@ private:
         int cameraChunkX,
         int cameraChunkY,
         int cameraChunkZ
+    );
+    void drawIndirectChunkRanges(
+        VkCommandBuffer commandBuffer,
+        std::uint32_t& passDrawCounter,
+        const FrameChunkDrawData& frameChunkDrawData
+    );
+    void drawIndirectShadowChunkRanges(
+        VkCommandBuffer commandBuffer,
+        std::uint32_t& passDrawCounter,
+        std::uint32_t cascadeIndex,
+        const FrameChunkDrawData& frameChunkDrawData
     );
 
     GLFWwindow* m_window = nullptr;
