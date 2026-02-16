@@ -888,6 +888,52 @@ void RendererBackend::renderFrame(
     const bool voxelGiHasOccupancyUpload =
         voxelGiOccupancySliceOpt.has_value() &&
         voxelGiOccupancyUploadBuffer != VK_NULL_HANDLE;
+    if (m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
+        !m_voxelGiOccupancyInitialized &&
+        !voxelGiHasOccupancyUpload) {
+        transitionImageLayout(
+            commandBuffer,
+            m_voxelGiOccupancyImage,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_PIPELINE_STAGE_2_NONE,
+            VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT
+        );
+        VkClearColorValue occupancyClearColor{};
+        occupancyClearColor.float32[0] = 0.0f;
+        occupancyClearColor.float32[1] = 0.0f;
+        occupancyClearColor.float32[2] = 0.0f;
+        occupancyClearColor.float32[3] = 0.0f;
+        VkImageSubresourceRange occupancyClearRange{};
+        occupancyClearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        occupancyClearRange.baseMipLevel = 0;
+        occupancyClearRange.levelCount = 1;
+        occupancyClearRange.baseArrayLayer = 0;
+        occupancyClearRange.layerCount = 1;
+        vkCmdClearColorImage(
+            commandBuffer,
+            m_voxelGiOccupancyImage,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            &occupancyClearColor,
+            1,
+            &occupancyClearRange
+        );
+        transitionImageLayout(
+            commandBuffer,
+            m_voxelGiOccupancyImage,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT
+        );
+        m_voxelGiOccupancyInitialized = true;
+    }
 
     const FrameInstanceDrawData frameInstanceDrawData = prepareFrameInstanceDrawData(simulation, simulationAlpha);
     const uint32_t pipeInstanceCount = frameInstanceDrawData.pipeInstanceCount;
