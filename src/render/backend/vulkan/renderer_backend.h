@@ -166,6 +166,10 @@ private:
     static constexpr uint32_t kGpuTimestampQueryFrameEnd = 21;
     static constexpr uint32_t kGpuTimestampQueryCount = 22;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
+    static constexpr std::size_t kMainDescriptorWriteKeyWordCount = 23;
+    static constexpr std::size_t kVoxelGiDescriptorWriteKeyWordCount = 16;
+    static constexpr std::size_t kAutoExposureDescriptorWriteKeyWordCount = 6;
+    static constexpr std::size_t kSunShaftDescriptorWriteKeyWordCount = 10;
 
     struct FrameResources {
         // Per-frame command pool to allocate fresh command buffers every frame.
@@ -662,6 +666,16 @@ private:
     std::array<VkDescriptorSet, kMaxFramesInFlight>& m_descriptorSets = m_descriptorManager.descriptorSets;
     std::array<VkDescriptorSet, kMaxFramesInFlight>& m_voxelGiDescriptorSets = m_descriptorManager.voxelGiDescriptorSets;
     VkDescriptorSet& m_bindlessDescriptorSet = m_descriptorManager.bindlessDescriptorSet;
+    std::array<std::array<std::uint64_t, kMainDescriptorWriteKeyWordCount>, kMaxFramesInFlight> m_mainDescriptorWriteKeys{};
+    std::array<bool, kMaxFramesInFlight> m_mainDescriptorWriteKeyValid{};
+    std::array<std::array<std::uint64_t, kVoxelGiDescriptorWriteKeyWordCount>, kMaxFramesInFlight> m_voxelGiDescriptorWriteKeys{};
+    std::array<bool, kMaxFramesInFlight> m_voxelGiDescriptorWriteKeyValid{};
+    std::array<std::array<std::uint64_t, kAutoExposureDescriptorWriteKeyWordCount>, kMaxFramesInFlight>
+        m_autoExposureDescriptorWriteKeys{};
+    std::array<bool, kMaxFramesInFlight> m_autoExposureDescriptorWriteKeyValid{};
+    std::array<std::array<std::uint64_t, kSunShaftDescriptorWriteKeyWordCount>, kMaxFramesInFlight>
+        m_sunShaftDescriptorWriteKeys{};
+    std::array<bool, kMaxFramesInFlight> m_sunShaftDescriptorWriteKeyValid{};
     bool m_supportsWireframePreview = false;
     bool m_supportsSamplerAnisotropy = false;
     bool m_supportsMultiDrawIndirect = false;

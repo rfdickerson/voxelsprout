@@ -190,6 +190,7 @@ bool RendererBackend::createDescriptorResources() {
         )) {
         return false;
     }
+    m_mainDescriptorWriteKeyValid.fill(false);
 
     if (m_supportsBindlessDescriptors && m_bindlessTextureCapacity > 0) {
         if (m_bindlessDescriptorSetLayout == VK_NULL_HANDLE) {
@@ -265,8 +266,17 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     VkBuffer autoExposureHistogramBuffer,
     VkBuffer autoExposureStateBuffer
 ) {
+    const uint32_t frameIndex = m_currentFrame;
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    auto descriptorWriteKeyChanged = [](auto& cachedKey, bool& cachedValid, const auto& nextKey) {
+        if (cachedValid && cachedKey == nextKey) {
+            return false;
+        }
+        cachedKey = nextKey;
+        cachedValid = true;
+        return true;
+    };
 
     VkDescriptorImageInfo hdrSceneImageInfo{};
     hdrSceneImageInfo.sampler = m_hdrResolveSampler;
@@ -402,7 +412,42 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     writes[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[10].pImageInfo = &voxelGiOccupancyDebugImageInfo;
 
-    vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    if (m_descriptorSets[frameIndex] != VK_NULL_HANDLE) {
+        const std::array<std::uint64_t, kMainDescriptorWriteKeyWordCount> mainDescriptorWriteKey = {
+            vkHandleToUint64(m_descriptorSets[frameIndex]),
+            static_cast<std::uint64_t>(aoFrameIndex),
+            vkHandleToUint64(cameraBufferInfo.buffer),
+            static_cast<std::uint64_t>(cameraBufferInfo.offset),
+            static_cast<std::uint64_t>(cameraBufferInfo.range),
+            vkHandleToUint64(autoExposureStateBufferInfo.buffer),
+            vkHandleToUint64(diffuseTextureImageInfo.sampler),
+            vkHandleToUint64(diffuseTextureImageInfo.imageView),
+            vkHandleToUint64(hdrSceneImageInfo.sampler),
+            vkHandleToUint64(hdrSceneImageInfo.imageView),
+            vkHandleToUint64(shadowMapImageInfo.sampler),
+            vkHandleToUint64(shadowMapImageInfo.imageView),
+            vkHandleToUint64(normalDepthImageInfo.sampler),
+            vkHandleToUint64(normalDepthImageInfo.imageView),
+            vkHandleToUint64(ssaoBlurImageInfo.sampler),
+            vkHandleToUint64(ssaoBlurImageInfo.imageView),
+            vkHandleToUint64(ssaoRawImageInfo.imageView),
+            vkHandleToUint64(voxelGiVolumeImageInfo.sampler),
+            vkHandleToUint64(voxelGiVolumeImageInfo.imageView),
+            vkHandleToUint64(sunShaftImageInfo.sampler),
+            vkHandleToUint64(sunShaftImageInfo.imageView),
+            vkHandleToUint64(voxelGiOccupancyDebugImageInfo.sampler),
+            vkHandleToUint64(voxelGiOccupancyDebugImageInfo.imageView)
+        };
+        if (descriptorWriteKeyChanged(
+                m_mainDescriptorWriteKeys[frameIndex],
+                m_mainDescriptorWriteKeyValid[frameIndex],
+                mainDescriptorWriteKey
+            )) {
+            vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        }
+    } else {
+        m_mainDescriptorWriteKeyValid[frameIndex] = false;
+    }
 
     if (m_voxelGiComputeAvailable && m_voxelGiDescriptorSets[m_currentFrame] != VK_NULL_HANDLE) {
         VkDescriptorImageInfo voxelGiStorageAInfo{};
@@ -529,13 +574,39 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         voxelGiWrites[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         voxelGiWrites[12].pImageInfo = &voxelGiSkyExposureInfo;
 
-        vkUpdateDescriptorSets(
-            m_device,
-            static_cast<uint32_t>(voxelGiWrites.size()),
-            voxelGiWrites.data(),
-            0,
-            nullptr
-        );
+        const std::array<std::uint64_t, kVoxelGiDescriptorWriteKeyWordCount> voxelGiDescriptorWriteKey = {
+            vkHandleToUint64(m_voxelGiDescriptorSets[frameIndex]),
+            vkHandleToUint64(cameraBufferInfo.buffer),
+            static_cast<std::uint64_t>(cameraBufferInfo.offset),
+            static_cast<std::uint64_t>(cameraBufferInfo.range),
+            vkHandleToUint64(shadowMapImageInfo.sampler),
+            vkHandleToUint64(shadowMapImageInfo.imageView),
+            vkHandleToUint64(voxelGiStorageAInfo.imageView),
+            vkHandleToUint64(voxelGiStorageBInfo.imageView),
+            vkHandleToUint64(voxelGiOccupancyInfo.imageView),
+            vkHandleToUint64(voxelGiSurfaceFaceInfos[0].imageView),
+            vkHandleToUint64(voxelGiSurfaceFaceInfos[1].imageView),
+            vkHandleToUint64(voxelGiSurfaceFaceInfos[2].imageView),
+            vkHandleToUint64(voxelGiSurfaceFaceInfos[3].imageView),
+            vkHandleToUint64(voxelGiSurfaceFaceInfos[4].imageView),
+            vkHandleToUint64(voxelGiSurfaceFaceInfos[5].imageView),
+            vkHandleToUint64(voxelGiSkyExposureInfo.imageView)
+        };
+        if (descriptorWriteKeyChanged(
+                m_voxelGiDescriptorWriteKeys[frameIndex],
+                m_voxelGiDescriptorWriteKeyValid[frameIndex],
+                voxelGiDescriptorWriteKey
+            )) {
+            vkUpdateDescriptorSets(
+                m_device,
+                static_cast<uint32_t>(voxelGiWrites.size()),
+                voxelGiWrites.data(),
+                0,
+                nullptr
+            );
+        }
+    } else {
+        m_voxelGiDescriptorWriteKeyValid[frameIndex] = false;
     }
 
     if (m_autoExposureComputeAvailable &&
@@ -574,13 +645,29 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         autoExposureWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         autoExposureWrites[2].pBufferInfo = &autoExposureStateComputeBufferInfo;
 
-        vkUpdateDescriptorSets(
-            m_device,
-            static_cast<uint32_t>(autoExposureWrites.size()),
-            autoExposureWrites.data(),
-            0,
-            nullptr
-        );
+        const std::array<std::uint64_t, kAutoExposureDescriptorWriteKeyWordCount> autoExposureDescriptorWriteKey = {
+            vkHandleToUint64(m_autoExposureDescriptorSets[frameIndex]),
+            static_cast<std::uint64_t>(aoFrameIndex),
+            vkHandleToUint64(hdrSceneImageInfo.sampler),
+            vkHandleToUint64(hdrSceneImageInfo.imageView),
+            vkHandleToUint64(autoExposureHistogramBufferInfo.buffer),
+            vkHandleToUint64(autoExposureStateComputeBufferInfo.buffer)
+        };
+        if (descriptorWriteKeyChanged(
+                m_autoExposureDescriptorWriteKeys[frameIndex],
+                m_autoExposureDescriptorWriteKeyValid[frameIndex],
+                autoExposureDescriptorWriteKey
+            )) {
+            vkUpdateDescriptorSets(
+                m_device,
+                static_cast<uint32_t>(autoExposureWrites.size()),
+                autoExposureWrites.data(),
+                0,
+                nullptr
+            );
+        }
+    } else {
+        m_autoExposureDescriptorWriteKeyValid[frameIndex] = false;
     }
 
     if (m_sunShaftComputeAvailable &&
@@ -621,13 +708,33 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         sunShaftWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         sunShaftWrites[3].pImageInfo = &sunShaftOutputImageInfo;
 
-        vkUpdateDescriptorSets(
-            m_device,
-            static_cast<uint32_t>(sunShaftWrites.size()),
-            sunShaftWrites.data(),
-            0,
-            nullptr
-        );
+        const std::array<std::uint64_t, kSunShaftDescriptorWriteKeyWordCount> sunShaftDescriptorWriteKey = {
+            vkHandleToUint64(m_sunShaftDescriptorSets[frameIndex]),
+            static_cast<std::uint64_t>(aoFrameIndex),
+            vkHandleToUint64(cameraBufferInfo.buffer),
+            static_cast<std::uint64_t>(cameraBufferInfo.offset),
+            static_cast<std::uint64_t>(cameraBufferInfo.range),
+            vkHandleToUint64(normalDepthImageInfo.sampler),
+            vkHandleToUint64(normalDepthImageInfo.imageView),
+            vkHandleToUint64(shadowMapImageInfo.sampler),
+            vkHandleToUint64(shadowMapImageInfo.imageView),
+            vkHandleToUint64(sunShaftOutputImageInfo.imageView)
+        };
+        if (descriptorWriteKeyChanged(
+                m_sunShaftDescriptorWriteKeys[frameIndex],
+                m_sunShaftDescriptorWriteKeyValid[frameIndex],
+                sunShaftDescriptorWriteKey
+            )) {
+            vkUpdateDescriptorSets(
+                m_device,
+                static_cast<uint32_t>(sunShaftWrites.size()),
+                sunShaftWrites.data(),
+                0,
+                nullptr
+            );
+        }
+    } else {
+        m_sunShaftDescriptorWriteKeyValid[frameIndex] = false;
     }
 
     if (m_bindlessDescriptorSet != VK_NULL_HANDLE && m_bindlessTextureCapacity >= kBindlessTextureStaticCount) {

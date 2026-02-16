@@ -281,6 +281,7 @@ bool RendererBackend::createAutoExposureResources() {
         destroyAutoExposureResources();
         return false;
     }
+    m_autoExposureDescriptorWriteKeyValid.fill(false);
 
     std::array<VkShaderModule, 2> shaderModules = {
         VK_NULL_HANDLE,
@@ -449,6 +450,7 @@ bool RendererBackend::createSunShaftResources() {
         destroySunShaftResources();
         return false;
     }
+    m_sunShaftDescriptorWriteKeyValid.fill(false);
 
     VkShaderModule sunShaftShaderModule = VK_NULL_HANDLE;
     if (!createShaderModuleFromFile(
@@ -519,6 +521,7 @@ void RendererBackend::destroyAutoExposureResources() {
         m_autoExposureDescriptorSetLayout = VK_NULL_HANDLE;
     }
     m_autoExposureDescriptorSets.fill(VK_NULL_HANDLE);
+    m_autoExposureDescriptorWriteKeyValid.fill(false);
 
     if (m_autoExposureHistogramBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_autoExposureHistogramBufferHandle);
@@ -550,6 +553,7 @@ void RendererBackend::destroySunShaftResources() {
         m_sunShaftDescriptorSetLayout = VK_NULL_HANDLE;
     }
     m_sunShaftDescriptorSets.fill(VK_NULL_HANDLE);
+    m_sunShaftDescriptorWriteKeyValid.fill(false);
     m_sunShaftComputeAvailable = false;
     m_sunShaftShaderAvailable = false;
 }
