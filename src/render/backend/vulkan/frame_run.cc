@@ -839,90 +839,15 @@ void RendererBackend::renderFrame(
         cameraChunkZ
     );
     const auto& chunkInstanceSliceOpt = frameChunkDrawData.chunkInstanceSliceOpt;
-    const auto& chunkIndirectSliceOpt = frameChunkDrawData.chunkIndirectSliceOpt;
     const auto& shadowChunkInstanceSliceOpt = frameChunkDrawData.shadowChunkInstanceSliceOpt;
-    const auto& shadowCascadeIndirectSliceOpts = frameChunkDrawData.shadowCascadeIndirectSliceOpts;
     const VkBuffer chunkInstanceBuffer = frameChunkDrawData.chunkInstanceBuffer;
-    const VkBuffer chunkIndirectBuffer = frameChunkDrawData.chunkIndirectBuffer;
     const VkBuffer shadowChunkInstanceBuffer = frameChunkDrawData.shadowChunkInstanceBuffer;
     const VkBuffer chunkVertexBuffer = m_bufferAllocator.getBuffer(m_chunkVertexBufferHandle);
     const VkBuffer chunkIndexBuffer = m_bufferAllocator.getBuffer(m_chunkIndexBufferHandle);
-    const std::array<bool, kShadowCascadeCount>& canDrawShadowChunksIndirectByCascade =
-        frameChunkDrawData.canDrawShadowChunksIndirectByCascade;
-    const std::array<VkBuffer, kShadowCascadeCount>& shadowCascadeIndirectBuffers =
-        frameChunkDrawData.shadowCascadeIndirectBuffers;
-    const std::array<uint32_t, kShadowCascadeCount>& shadowCascadeIndirectDrawCounts =
-        frameChunkDrawData.shadowCascadeIndirectDrawCounts;
-    const bool canDrawChunksIndirect = frameChunkDrawData.canDrawChunksIndirect;
     const bool canDrawMagica = !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
-    const uint32_t chunkIndirectDrawCount = frameChunkDrawData.chunkIndirectDrawCount;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
         m_debugDrawCallsTotal += drawCount;
-    };
-    const auto drawChunkIndirect = [&](std::uint32_t& passCounter) {
-        if (!canDrawChunksIndirect) {
-            return;
-        }
-        if (m_supportsMultiDrawIndirect) {
-            countDrawCalls(passCounter, chunkIndirectDrawCount);
-            vkCmdDrawIndexedIndirect(
-                commandBuffer,
-                chunkIndirectBuffer,
-                chunkIndirectSliceOpt->offset,
-                chunkIndirectDrawCount,
-                sizeof(VkDrawIndexedIndirectCommand)
-            );
-            return;
-        }
-        const VkDeviceSize stride = static_cast<VkDeviceSize>(sizeof(VkDrawIndexedIndirectCommand));
-        VkDeviceSize drawOffset = chunkIndirectSliceOpt->offset;
-        for (uint32_t drawIndex = 0; drawIndex < chunkIndirectDrawCount; ++drawIndex) {
-            countDrawCalls(passCounter, 1);
-            vkCmdDrawIndexedIndirect(
-                commandBuffer,
-                chunkIndirectBuffer,
-                drawOffset,
-                1,
-                static_cast<uint32_t>(stride)
-            );
-            drawOffset += stride;
-        }
-    };
-    const auto drawShadowChunkIndirect = [&](std::uint32_t& passCounter, uint32_t cascadeIndex) {
-        if (cascadeIndex >= kShadowCascadeCount || !canDrawShadowChunksIndirectByCascade[cascadeIndex]) {
-            return;
-        }
-        const uint32_t cascadeDrawCount = shadowCascadeIndirectDrawCounts[cascadeIndex];
-        const VkBuffer cascadeIndirectBuffer = shadowCascadeIndirectBuffers[cascadeIndex];
-        const std::optional<FrameArenaSlice>& cascadeIndirectSlice = shadowCascadeIndirectSliceOpts[cascadeIndex];
-        if (!cascadeIndirectSlice.has_value()) {
-            return;
-        }
-        if (m_supportsMultiDrawIndirect) {
-            countDrawCalls(passCounter, cascadeDrawCount);
-            vkCmdDrawIndexedIndirect(
-                commandBuffer,
-                cascadeIndirectBuffer,
-                cascadeIndirectSlice->offset,
-                cascadeDrawCount,
-                sizeof(VkDrawIndexedIndirectCommand)
-            );
-            return;
-        }
-        const VkDeviceSize stride = static_cast<VkDeviceSize>(sizeof(VkDrawIndexedIndirectCommand));
-        VkDeviceSize drawOffset = cascadeIndirectSlice->offset;
-        for (uint32_t drawIndex = 0; drawIndex < cascadeDrawCount; ++drawIndex) {
-            countDrawCalls(passCounter, 1);
-            vkCmdDrawIndexedIndirect(
-                commandBuffer,
-                cascadeIndirectBuffer,
-                drawOffset,
-                1,
-                static_cast<uint32_t>(stride)
-            );
-            drawOffset += stride;
-        }
     };
 
     writeGpuTimestampTop(kGpuTimestampQueryShadowStart);
@@ -1009,7 +934,7 @@ void RendererBackend::renderFrame(
             // Reverse-Z uses GREATER depth tests, so flip bias sign.
             vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
 
-            if (cascadeIndex < kShadowCascadeCount && canDrawShadowChunksIndirectByCascade[cascadeIndex]) {
+            if (cascadeIndex < kShadowCascadeCount) {
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
                 vkCmdBindDescriptorSets(
                     commandBuffer,
@@ -1043,7 +968,7 @@ void RendererBackend::renderFrame(
                     sizeof(ChunkPushConstants),
                     &chunkPushConstants
                 );
-                drawShadowChunkIndirect(m_debugDrawCallsShadow, cascadeIndex);
+                drawIndirectShadowChunkRanges(commandBuffer, m_debugDrawCallsShadow, cascadeIndex, frameChunkDrawData);
             }
             if (canDrawMagica) {
                 for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
@@ -1555,7 +1480,7 @@ void RendererBackend::renderFrame(
             1,
             &mvpDynamicOffset
         );
-        if (canDrawChunksIndirect) {
+        if (frameChunkDrawData.canDrawChunksIndirect) {
             const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, chunkInstanceBuffer};
             const VkDeviceSize voxelVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
             vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
@@ -1578,7 +1503,7 @@ void RendererBackend::renderFrame(
                 sizeof(ChunkPushConstants),
                 &chunkPushConstants
             );
-            drawChunkIndirect(m_debugDrawCallsPrepass);
+            drawIndirectChunkRanges(commandBuffer, m_debugDrawCallsPrepass, frameChunkDrawData);
         }
         if (canDrawMagica) {
             for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
@@ -1931,7 +1856,7 @@ void RendererBackend::renderFrame(
             1,
             &mvpDynamicOffset
         );
-    if (canDrawChunksIndirect) {
+    if (frameChunkDrawData.canDrawChunksIndirect) {
         const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, chunkInstanceBuffer};
         const VkDeviceSize voxelVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
         vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
@@ -1954,7 +1879,7 @@ void RendererBackend::renderFrame(
             sizeof(ChunkPushConstants),
             &chunkPushConstants
         );
-        drawChunkIndirect(m_debugDrawCallsMain);
+        drawIndirectChunkRanges(commandBuffer, m_debugDrawCallsMain, frameChunkDrawData);
     }
     if (canDrawMagica) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_magicaPipeline);

@@ -96,10 +96,12 @@ if(VOXEL_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
         src/render/backend/vulkan/frame.cc
         src/render/backend/vulkan/frame_run.cc
         src/render/backend/vulkan/frame_chunks.cc
+        src/render/backend/vulkan/frame_draws.cc
         src/render/backend/vulkan/frame_instances.cc
         src/render/backend/vulkan/init.cc
         src/render/backend/vulkan/init_resources.cc
         src/render/backend/vulkan/chunk_upload.cc
+        src/render/backend/vulkan/shadow_culling_utils.cc
         src/render/backend/vulkan/descriptors.cc
         src/render/backend/vulkan/ui_panels.cc
         src/render/backend/vulkan/pass_pipelines.cc
@@ -242,7 +244,9 @@ if(BUILD_TESTING)
         add_executable(voxel_stability_gtests
             tests/stability_g_tests.cc
             tests/frame_math_tests.cc
+            tests/frame_render_tests.cc
             tests/sim_network_tests.cc
+            src/render/backend/vulkan/shadow_culling_utils.cc
             src/core/log.cc
             src/world/magica_voxel.cc
             src/world/chunk_mesher.cc
