@@ -139,7 +139,7 @@ public:
     void shutdown();
 
 private:
-    static constexpr uint32_t kMaxFramesInFlight = 3;
+    static constexpr uint32_t kMaxFramesInFlight = 2;
     static constexpr uint32_t kShadowCascadeCount = 4;
     static constexpr uint32_t kShadowAtlasSize = 8192;
     static constexpr uint32_t kGpuTimestampQueryFrameStart = 0;
