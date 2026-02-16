@@ -23,7 +23,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake ninja-build pkg-config \
-            git curl zip unzip tar
+            git curl zip unzip tar \
+            libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev
 
       - name: Bootstrap vcpkg
         run: |
@@ -41,6 +42,14 @@ jobs:
           key: vcpkg-installed-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
           restore-keys: |
             vcpkg-installed-${{ runner.os }}-
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/vcpkg/archives
+          key: vcpkg-archives-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-archives-${{ runner.os }}-
 
       - name: Configure
         env:
