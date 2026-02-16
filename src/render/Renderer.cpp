@@ -1453,12 +1453,40 @@ bool createShaderModuleFromFile(
     return true;
 }
 
+struct ShaderModuleLoadSpec {
+    const char* filePath = nullptr;
+    const char* debugName = nullptr;
+};
+
 void destroyShaderModules(VkDevice device, std::span<const VkShaderModule> shaderModules) {
     for (const VkShaderModule shaderModule : shaderModules) {
         if (shaderModule != VK_NULL_HANDLE) {
             vkDestroyShaderModule(device, shaderModule, nullptr);
         }
     }
+}
+
+bool createShaderModulesFromFiles(
+    VkDevice device,
+    std::span<const ShaderModuleLoadSpec> loadSpecs,
+    std::span<VkShaderModule> outShaderModules
+) {
+    if (loadSpecs.size() != outShaderModules.size()) {
+        VOX_LOGE("render") << "createShaderModulesFromFiles argument mismatch: specs=" << loadSpecs.size()
+                           << ", outputs=" << outShaderModules.size();
+        return false;
+    }
+
+    std::fill(outShaderModules.begin(), outShaderModules.end(), VK_NULL_HANDLE);
+    for (std::size_t i = 0; i < loadSpecs.size(); ++i) {
+        const ShaderModuleLoadSpec& spec = loadSpecs[i];
+        if (!createShaderModuleFromFile(device, spec.filePath, spec.debugName, outShaderModules[i])) {
+            destroyShaderModules(device, outShaderModules);
+            std::fill(outShaderModules.begin(), outShaderModules.end(), VK_NULL_HANDLE);
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -5902,77 +5930,41 @@ bool Renderer::createGraphicsPipeline() {
     constexpr const char* kGrassShadowVertexShaderPath = "../src/render/shaders/grass_billboard_shadow.vert.slang.spv";
     constexpr const char* kGrassShadowFragmentShaderPath = "../src/render/shaders/grass_billboard_shadow.frag.slang.spv";
 
-    VkShaderModule worldVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule worldFragShaderModule = VK_NULL_HANDLE;
-    VkShaderModule skyboxVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule skyboxFragShaderModule = VK_NULL_HANDLE;
-    VkShaderModule toneMapVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule toneMapFragShaderModule = VK_NULL_HANDLE;
-    VkShaderModule shadowVertShaderModule = VK_NULL_HANDLE;
+    std::array<VkShaderModule, 7> sceneShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& worldVertShaderModule = sceneShaderModules[0];
+    VkShaderModule& worldFragShaderModule = sceneShaderModules[1];
+    VkShaderModule& skyboxVertShaderModule = sceneShaderModules[2];
+    VkShaderModule& skyboxFragShaderModule = sceneShaderModules[3];
+    VkShaderModule& toneMapVertShaderModule = sceneShaderModules[4];
+    VkShaderModule& toneMapFragShaderModule = sceneShaderModules[5];
+    VkShaderModule& shadowVertShaderModule = sceneShaderModules[6];
 
-    if (!createShaderModuleFromFile(
+    const std::array<ShaderModuleLoadSpec, 6> sceneShaderLoadSpecs = {{
+        {kWorldVertexShaderPath, "voxel_packed.vert"},
+        {kWorldFragmentShaderPath, "voxel_packed.frag"},
+        {kSkyboxVertexShaderPath, "skybox.vert"},
+        {kSkyboxFragmentShaderPath, "skybox.frag"},
+        {kToneMapVertexShaderPath, "tone_map.vert"},
+        {kToneMapFragmentShaderPath, "tone_map.frag"},
+    }};
+    if (!createShaderModulesFromFiles(
             m_device,
-            kWorldVertexShaderPath,
-            "voxel_packed.vert",
-            worldVertShaderModule
+            sceneShaderLoadSpecs,
+            std::span<VkShaderModule>(sceneShaderModules).first(sceneShaderLoadSpecs.size())
         )) {
         return false;
     }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kWorldFragmentShaderPath,
-            "voxel_packed.frag",
-            worldFragShaderModule
-        )) {
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kSkyboxVertexShaderPath,
-            "skybox.vert",
-            skyboxVertShaderModule
-        )) {
-        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kSkyboxFragmentShaderPath,
-            "skybox.frag",
-            skyboxFragShaderModule
-        )) {
-        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kToneMapVertexShaderPath,
-            "tone_map.vert",
-            toneMapVertShaderModule
-        )) {
-        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kToneMapFragmentShaderPath,
-            "tone_map.frag",
-            toneMapFragShaderModule
-        )) {
-        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
-        return false;
-    }
+    auto destroySceneShaderModules = [&]() {
+        destroyShaderModules(m_device, sceneShaderModules);
+    };
 
     VkPipelineShaderStageCreateInfo worldVertexShaderStage{};
     worldVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -6125,12 +6117,7 @@ bool Renderer::createGraphicsPipeline() {
         &worldPipeline
     );
     if (worldPipelineResult != VK_SUCCESS) {
-        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        destroySceneShaderModules();
         logVkFailure("vkCreateGraphicsPipelines(world)", worldPipelineResult);
         return false;
     }
@@ -6182,12 +6169,7 @@ bool Renderer::createGraphicsPipeline() {
     );
     if (previewAddPipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        destroySceneShaderModules();
         logVkFailure("vkCreateGraphicsPipelines(previewAdd)", previewAddPipelineResult);
         return false;
     }
@@ -6210,12 +6192,7 @@ bool Renderer::createGraphicsPipeline() {
     if (previewRemovePipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        destroySceneShaderModules();
         logVkFailure("vkCreateGraphicsPipelines(previewRemove)", previewRemovePipelineResult);
         return false;
     }
@@ -6272,12 +6249,7 @@ bool Renderer::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        destroySceneShaderModules();
         logVkFailure("vkCreateGraphicsPipelines(skybox)", skyboxPipelineResult);
         return false;
     }
@@ -6356,12 +6328,7 @@ bool Renderer::createGraphicsPipeline() {
     );
 
     if (toneMapPipelineResult != VK_SUCCESS) {
-        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+        destroySceneShaderModules();
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
@@ -6374,18 +6341,14 @@ bool Renderer::createGraphicsPipeline() {
               << ", swapchainFormat=" << static_cast<int>(m_swapchainFormat)
               << "\n";
 
-    if (!createShaderModuleFromFile(
+    const std::array<ShaderModuleLoadSpec, 1> shadowShaderLoadSpecs = {{
+        {kShadowVertexShaderPath, "shadow_depth.vert"},
+    }};
+    if (!createShaderModulesFromFiles(
             m_device,
-            kShadowVertexShaderPath,
-            "shadow_depth.vert",
-            shadowVertShaderModule
+            shadowShaderLoadSpecs,
+            std::span<VkShaderModule>(sceneShaderModules).subspan(6, 1)
         )) {
-        vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
@@ -6464,13 +6427,7 @@ bool Renderer::createGraphicsPipeline() {
         &shadowPipeline
     );
 
-    vkDestroyShaderModule(m_device, shadowVertShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, toneMapFragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, toneMapVertShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, skyboxFragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, skyboxVertShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, worldFragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, worldVertShaderModule, nullptr);
+    destroySceneShaderModules();
 
     if (shadowPipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
@@ -6487,13 +6444,12 @@ bool Renderer::createGraphicsPipeline() {
               << ", samples=" << static_cast<uint32_t>(shadowMultisampling.rasterizationSamples)
               << "\n";
 
-    VkShaderModule pipeShadowVertShaderModule = VK_NULL_HANDLE;
-    if (!createShaderModuleFromFile(
-            m_device,
-            kPipeShadowVertexShaderPath,
-            "pipe_shadow.vert",
-            pipeShadowVertShaderModule
-        )) {
+    std::array<VkShaderModule, 1> pipeShadowShaderModules = {VK_NULL_HANDLE};
+    VkShaderModule& pipeShadowVertShaderModule = pipeShadowShaderModules[0];
+    const std::array<ShaderModuleLoadSpec, 1> pipeShadowShaderLoadSpecs = {{
+        {kPipeShadowVertexShaderPath, "pipe_shadow.vert"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, pipeShadowShaderLoadSpecs, pipeShadowShaderModules)) {
         vkDestroyPipeline(m_device, shadowPipeline, nullptr);
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
@@ -6571,7 +6527,7 @@ bool Renderer::createGraphicsPipeline() {
         &pipeShadowPipeline
     );
 
-    vkDestroyShaderModule(m_device, pipeShadowVertShaderModule, nullptr);
+    destroyShaderModules(m_device, pipeShadowShaderModules);
 
     if (pipeShadowPipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, shadowPipeline, nullptr);
@@ -6588,30 +6544,17 @@ bool Renderer::createGraphicsPipeline() {
               << ", depthBias=" << (pipeShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
               << "\n";
 
-    VkShaderModule grassShadowVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule grassShadowFragShaderModule = VK_NULL_HANDLE;
-    if (!createShaderModuleFromFile(
-            m_device,
-            kGrassShadowVertexShaderPath,
-            "grass_billboard_shadow.vert",
-            grassShadowVertShaderModule
-        )) {
-        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
-        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kGrassShadowFragmentShaderPath,
-            "grass_billboard_shadow.frag",
-            grassShadowFragShaderModule
-        )) {
-        vkDestroyShaderModule(m_device, grassShadowVertShaderModule, nullptr);
+    std::array<VkShaderModule, 2> grassShadowShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& grassShadowVertShaderModule = grassShadowShaderModules[0];
+    VkShaderModule& grassShadowFragShaderModule = grassShadowShaderModules[1];
+    const std::array<ShaderModuleLoadSpec, 2> grassShadowShaderLoadSpecs = {{
+        {kGrassShadowVertexShaderPath, "grass_billboard_shadow.vert"},
+        {kGrassShadowFragmentShaderPath, "grass_billboard_shadow.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, grassShadowShaderLoadSpecs, grassShadowShaderModules)) {
         vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
         vkDestroyPipeline(m_device, shadowPipeline, nullptr);
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
@@ -6694,8 +6637,7 @@ bool Renderer::createGraphicsPipeline() {
         &grassShadowPipeline
     );
 
-    vkDestroyShaderModule(m_device, grassShadowFragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, grassShadowVertShaderModule, nullptr);
+    destroyShaderModules(m_device, grassShadowShaderModules);
 
     if (grassShadowPipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
@@ -6774,23 +6716,17 @@ bool Renderer::createMagicaPipeline() {
     constexpr const char* kWorldVertexShaderPath = "../src/render/shaders/voxel_packed.vert.slang.spv";
     constexpr const char* kWorldFragmentShaderPath = "../src/render/shaders/voxel_packed.frag.slang.spv";
 
-    VkShaderModule magicaVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule magicaFragShaderModule = VK_NULL_HANDLE;
-    if (!createShaderModuleFromFile(
-            m_device,
-            kWorldVertexShaderPath,
-            "magica.voxel_packed.vert",
-            magicaVertShaderModule
-        )) {
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kWorldFragmentShaderPath,
-            "magica.voxel_packed.frag",
-            magicaFragShaderModule
-        )) {
-        vkDestroyShaderModule(m_device, magicaVertShaderModule, nullptr);
+    std::array<VkShaderModule, 2> shaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& magicaVertShaderModule = shaderModules[0];
+    VkShaderModule& magicaFragShaderModule = shaderModules[1];
+    const std::array<ShaderModuleLoadSpec, 2> shaderLoadSpecs = {{
+        {kWorldVertexShaderPath, "magica.voxel_packed.vert"},
+        {kWorldFragmentShaderPath, "magica.voxel_packed.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, shaderLoadSpecs, shaderModules)) {
         return false;
     }
 
@@ -6947,8 +6883,7 @@ bool Renderer::createMagicaPipeline() {
         &magicaPipeline
     );
 
-    vkDestroyShaderModule(m_device, magicaFragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, magicaVertShaderModule, nullptr);
+    destroyShaderModules(m_device, shaderModules);
 
     if (pipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateGraphicsPipelines(magica)", pipelineResult);
@@ -6978,23 +6913,17 @@ bool Renderer::createPipePipeline() {
     constexpr const char* kPipeVertexShaderPath = "../src/render/shaders/pipe_instanced.vert.slang.spv";
     constexpr const char* kPipeFragmentShaderPath = "../src/render/shaders/pipe_instanced.frag.slang.spv";
 
-    VkShaderModule pipeVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule pipeFragShaderModule = VK_NULL_HANDLE;
-    if (!createShaderModuleFromFile(
-            m_device,
-            kPipeVertexShaderPath,
-            "pipe_instanced.vert",
-            pipeVertShaderModule
-        )) {
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kPipeFragmentShaderPath,
-            "pipe_instanced.frag",
-            pipeFragShaderModule
-        )) {
-        vkDestroyShaderModule(m_device, pipeVertShaderModule, nullptr);
+    std::array<VkShaderModule, 2> pipeShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& pipeVertShaderModule = pipeShaderModules[0];
+    VkShaderModule& pipeFragShaderModule = pipeShaderModules[1];
+    const std::array<ShaderModuleLoadSpec, 2> pipeShaderLoadSpecs = {{
+        {kPipeVertexShaderPath, "pipe_instanced.vert"},
+        {kPipeFragmentShaderPath, "pipe_instanced.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, pipeShaderLoadSpecs, pipeShaderModules)) {
         return false;
     }
 
@@ -7137,8 +7066,7 @@ bool Renderer::createPipePipeline() {
         &pipePipeline
     );
 
-    vkDestroyShaderModule(m_device, pipeFragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, pipeVertShaderModule, nullptr);
+    destroyShaderModules(m_device, pipeShaderModules);
 
     if (pipePipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateGraphicsPipelines(pipe)", pipePipelineResult);
@@ -7151,24 +7079,17 @@ bool Renderer::createPipePipeline() {
 
     constexpr const char* kGrassBillboardVertexShaderPath = "../src/render/shaders/grass_billboard.vert.slang.spv";
     constexpr const char* kGrassBillboardFragmentShaderPath = "../src/render/shaders/grass_billboard.frag.slang.spv";
-    VkShaderModule grassVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule grassFragShaderModule = VK_NULL_HANDLE;
-    if (!createShaderModuleFromFile(
-            m_device,
-            kGrassBillboardVertexShaderPath,
-            "grass_billboard.vert",
-            grassVertShaderModule
-        )) {
-        vkDestroyPipeline(m_device, pipePipeline, nullptr);
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kGrassBillboardFragmentShaderPath,
-            "grass_billboard.frag",
-            grassFragShaderModule
-        )) {
-        vkDestroyShaderModule(m_device, grassVertShaderModule, nullptr);
+    std::array<VkShaderModule, 2> grassShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& grassVertShaderModule = grassShaderModules[0];
+    VkShaderModule& grassFragShaderModule = grassShaderModules[1];
+    const std::array<ShaderModuleLoadSpec, 2> grassShaderLoadSpecs = {{
+        {kGrassBillboardVertexShaderPath, "grass_billboard.vert"},
+        {kGrassBillboardFragmentShaderPath, "grass_billboard.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, grassShaderLoadSpecs, grassShaderModules)) {
         vkDestroyPipeline(m_device, pipePipeline, nullptr);
         return false;
     }
@@ -7249,8 +7170,7 @@ bool Renderer::createPipePipeline() {
         nullptr,
         &grassBillboardPipeline
     );
-    vkDestroyShaderModule(m_device, grassFragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, grassVertShaderModule, nullptr);
+    destroyShaderModules(m_device, grassShaderModules);
     if (grassPipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateGraphicsPipelines(grassBillboard)", grassPipelineResult);
         vkDestroyPipeline(m_device, pipePipeline, nullptr);
@@ -7296,133 +7216,39 @@ bool Renderer::createAoPipelines() {
     constexpr const char* kSsaoFragShaderPath = "../src/render/shaders/ssao.frag.slang.spv";
     constexpr const char* kSsaoBlurFragShaderPath = "../src/render/shaders/ssao_blur.frag.slang.spv";
 
-    VkShaderModule voxelVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule voxelNormalDepthFragShaderModule = VK_NULL_HANDLE;
-    VkShaderModule pipeVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule pipeNormalDepthFragShaderModule = VK_NULL_HANDLE;
-    VkShaderModule grassBillboardVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule grassBillboardNormalDepthFragShaderModule = VK_NULL_HANDLE;
-    VkShaderModule fullscreenVertShaderModule = VK_NULL_HANDLE;
-    VkShaderModule ssaoFragShaderModule = VK_NULL_HANDLE;
-    VkShaderModule ssaoBlurFragShaderModule = VK_NULL_HANDLE;
-
-    auto destroyShaderModules = [&]() {
-        if (ssaoBlurFragShaderModule != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(m_device, ssaoBlurFragShaderModule, nullptr);
-            ssaoBlurFragShaderModule = VK_NULL_HANDLE;
-        }
-        if (ssaoFragShaderModule != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(m_device, ssaoFragShaderModule, nullptr);
-            ssaoFragShaderModule = VK_NULL_HANDLE;
-        }
-        if (fullscreenVertShaderModule != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(m_device, fullscreenVertShaderModule, nullptr);
-            fullscreenVertShaderModule = VK_NULL_HANDLE;
-        }
-        if (grassBillboardNormalDepthFragShaderModule != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(m_device, grassBillboardNormalDepthFragShaderModule, nullptr);
-            grassBillboardNormalDepthFragShaderModule = VK_NULL_HANDLE;
-        }
-        if (grassBillboardVertShaderModule != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(m_device, grassBillboardVertShaderModule, nullptr);
-            grassBillboardVertShaderModule = VK_NULL_HANDLE;
-        }
-        if (pipeNormalDepthFragShaderModule != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(m_device, pipeNormalDepthFragShaderModule, nullptr);
-            pipeNormalDepthFragShaderModule = VK_NULL_HANDLE;
-        }
-        if (pipeVertShaderModule != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(m_device, pipeVertShaderModule, nullptr);
-            pipeVertShaderModule = VK_NULL_HANDLE;
-        }
-        if (voxelNormalDepthFragShaderModule != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(m_device, voxelNormalDepthFragShaderModule, nullptr);
-            voxelNormalDepthFragShaderModule = VK_NULL_HANDLE;
-        }
-        if (voxelVertShaderModule != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(m_device, voxelVertShaderModule, nullptr);
-            voxelVertShaderModule = VK_NULL_HANDLE;
-        }
+    std::array<VkShaderModule, 9> shaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
     };
+    VkShaderModule& voxelVertShaderModule = shaderModules[0];
+    VkShaderModule& voxelNormalDepthFragShaderModule = shaderModules[1];
+    VkShaderModule& pipeVertShaderModule = shaderModules[2];
+    VkShaderModule& pipeNormalDepthFragShaderModule = shaderModules[3];
+    VkShaderModule& grassBillboardVertShaderModule = shaderModules[4];
+    VkShaderModule& grassBillboardNormalDepthFragShaderModule = shaderModules[5];
+    VkShaderModule& fullscreenVertShaderModule = shaderModules[6];
+    VkShaderModule& ssaoFragShaderModule = shaderModules[7];
+    VkShaderModule& ssaoBlurFragShaderModule = shaderModules[8];
 
-    if (!createShaderModuleFromFile(
-            m_device,
-            kVoxelVertShaderPath,
-            "voxel_packed.vert",
-            voxelVertShaderModule
-        )) {
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kVoxelNormalDepthFragShaderPath,
-            "voxel_normaldepth.frag",
-            voxelNormalDepthFragShaderModule
-        )) {
-        destroyShaderModules();
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kPipeVertShaderPath,
-            "pipe_instanced.vert",
-            pipeVertShaderModule
-        )) {
-        destroyShaderModules();
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kPipeNormalDepthFragShaderPath,
-            "pipe_normaldepth.frag",
-            pipeNormalDepthFragShaderModule
-        )) {
-        destroyShaderModules();
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kGrassBillboardVertShaderPath,
-            "grass_billboard.vert",
-            grassBillboardVertShaderModule
-        )) {
-        destroyShaderModules();
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kGrassBillboardNormalDepthFragShaderPath,
-            "grass_billboard_normaldepth.frag",
-            grassBillboardNormalDepthFragShaderModule
-        )) {
-        destroyShaderModules();
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kFullscreenVertShaderPath,
-            "tone_map.vert",
-            fullscreenVertShaderModule
-        )) {
-        destroyShaderModules();
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kSsaoFragShaderPath,
-            "ssao.frag",
-            ssaoFragShaderModule
-        )) {
-        destroyShaderModules();
-        return false;
-    }
-    if (!createShaderModuleFromFile(
-            m_device,
-            kSsaoBlurFragShaderPath,
-            "ssao_blur.frag",
-            ssaoBlurFragShaderModule
-        )) {
-        destroyShaderModules();
+    const std::array<ShaderModuleLoadSpec, 9> shaderLoadSpecs = {{
+        {kVoxelVertShaderPath, "voxel_packed.vert"},
+        {kVoxelNormalDepthFragShaderPath, "voxel_normaldepth.frag"},
+        {kPipeVertShaderPath, "pipe_instanced.vert"},
+        {kPipeNormalDepthFragShaderPath, "pipe_normaldepth.frag"},
+        {kGrassBillboardVertShaderPath, "grass_billboard.vert"},
+        {kGrassBillboardNormalDepthFragShaderPath, "grass_billboard_normaldepth.frag"},
+        {kFullscreenVertShaderPath, "tone_map.vert"},
+        {kSsaoFragShaderPath, "ssao.frag"},
+        {kSsaoBlurFragShaderPath, "ssao_blur.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, shaderLoadSpecs, shaderModules)) {
         return false;
     }
 
@@ -7570,7 +7396,7 @@ bool Renderer::createAoPipelines() {
     if (voxelPipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateGraphicsPipelines(voxelNormalDepth)", voxelPipelineResult);
         destroyNewPipelines();
-        destroyShaderModules();
+        destroyShaderModules(m_device, shaderModules);
         return false;
     }
 
@@ -7643,7 +7469,7 @@ bool Renderer::createAoPipelines() {
     if (pipePipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateGraphicsPipelines(pipeNormalDepth)", pipePipelineResult);
         destroyNewPipelines();
-        destroyShaderModules();
+        destroyShaderModules(m_device, shaderModules);
         return false;
     }
 
@@ -7712,7 +7538,7 @@ bool Renderer::createAoPipelines() {
     if (grassNormalDepthPipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateGraphicsPipelines(grassBillboardNormalDepth)", grassNormalDepthPipelineResult);
         destroyNewPipelines();
-        destroyShaderModules();
+        destroyShaderModules(m_device, shaderModules);
         return false;
     }
 
@@ -7819,7 +7645,7 @@ bool Renderer::createAoPipelines() {
     if (ssaoPipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateGraphicsPipelines(ssao)", ssaoPipelineResult);
         destroyNewPipelines();
-        destroyShaderModules();
+        destroyShaderModules(m_device, shaderModules);
         return false;
     }
     VOX_LOGI("render") << "pipeline config (ssao): sampleCount=" << ssaoSpecializationData.sampleCount
@@ -7840,7 +7666,7 @@ bool Renderer::createAoPipelines() {
     if (ssaoBlurPipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateGraphicsPipelines(ssaoBlur)", ssaoBlurPipelineResult);
         destroyNewPipelines();
-        destroyShaderModules();
+        destroyShaderModules(m_device, shaderModules);
         return false;
     }
     VOX_LOGI("render") << "pipeline config (ssaoBlur): radius=" << ssaoSpecializationData.blurRadius
@@ -7848,7 +7674,7 @@ bool Renderer::createAoPipelines() {
               << ", format=" << static_cast<int>(m_ssaoFormat)
               << "\n";
 
-    destroyShaderModules();
+    destroyShaderModules(m_device, shaderModules);
 
     if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_voxelNormalDepthPipeline, nullptr);
