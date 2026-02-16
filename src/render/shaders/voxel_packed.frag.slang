@@ -461,7 +461,7 @@ struct ShOnlyAmbientPolicy : IAmbientPolicy
     float3 ambient(float3 normal, float vertexAo)
     {
         const float3 shIrradiance = evaluateShIrradiance(normal);
-        return shIrradiance * 0.26;
+        return shIrradiance * 0.70;
     }
 };
 
@@ -472,7 +472,7 @@ struct ShHemisphereAmbientPolicy : IAmbientPolicy
         const float3 shNormalIrradiance = evaluateShIrradiance(normal);
         const float3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
         const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.70);
-        return ambientIrradiance * 0.26;
+        return ambientIrradiance * 0.70;
     }
 };
 
@@ -483,7 +483,7 @@ struct ShHemisphereVertexAoAmbientPolicy : IAmbientPolicy
         const float3 shNormalIrradiance = evaluateShIrradiance(normal);
         const float3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
         const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.70);
-        return ambientIrradiance * (0.26 * vertexAo);
+        return ambientIrradiance * (0.70 * vertexAo);
     }
 };
 
@@ -609,7 +609,9 @@ float4 main(FragmentInput input) : SV_Target0
     const float skyOpenToSh = max(skyVisibility, skyExposureFromVoxel);
     const float shadowOpenBlend = clamp(1.0 - shadowVisibility, 0.0, 1.0);
     const float shadowSkyGate = shadowOpenBlend * skyOpenToSh;
+    const float3 skyOpenShFloor = shAmbient * 0.14 * ambientSkyVisibility * skyOpenToSh;
     float3 ambient = (selectAmbient(normal, vertexAo) * kSkyCoolTint) * ambientScale * ambientSkyVisibility;
+    ambient = max(ambient, skyOpenShFloor);
     ambient = lerp(ambient, shAmbient * ambientScale, shadowSkyGate);
     const float ambientVertical = lerp(0.85, 1.1, (normal.y * 0.5) + 0.5);
     ambient *= ambientVertical;
@@ -617,16 +619,23 @@ float4 main(FragmentInput input) : SV_Target0
     const float directShadowFactor = lerp(1.0, shadowVisibility, shadowStrength);
     const float indirectScale = 0.92;
     const float directScale = 1.10;
+    const float temporaryAmbientBoost = 2.00;
+    ambient *= temporaryAmbientBoost;
     float3 lighting = ((ambient + voxelGi) * indirectScale) + ((directSun * directShadowFactor) * directScale);
     // Post-GI ambient fill: stable because this is shading-only and never re-injected into the GI volume.
     const float3 shFillBase = selectAmbient(normal, 1.0) * kSkyCoolTint;
-    const float skyFillStrength = 0.45;
+    const float skyFillStrength = 0.80;
     const float skyFillEnclosure = lerp(0.35, 1.0, skyExposureFromVoxel);
     const float skyFillVertical = lerp(0.85, 1.15, (normal.y * 0.5) + 0.5);
     const float3 postGiShFill =
         shFillBase * (skyFillStrength * ambientSkyVisibility * skyFillEnclosure * skyFillVertical);
-    const float3 shadowSkyBoost = shFillBase * (0.45 * shadowSkyGate * ambientSkyVisibility * skyFillVertical);
-    lighting += postGiShFill;
+    const float3 shadowSkyBoost =
+        shFillBase *
+        (0.45 * shadowSkyGate * ambientSkyVisibility * skyFillVertical +
+         0.40 * shadowOpenBlend * skyOpenToSh * skyFillVertical) *
+        temporaryAmbientBoost;
+    const float3 boostedPostGiShFill = postGiShFill * temporaryAmbientBoost;
+    lighting += boostedPostGiShFill;
     lighting += shadowSkyBoost;
 
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
