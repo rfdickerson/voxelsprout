@@ -445,6 +445,42 @@ private:
         uint32_t beltCargoInstanceCount,
         const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt
     );
+    void recordSsaoPasses(
+        VkCommandBuffer commandBuffer,
+        VkQueryPool gpuTimestampQueryPool,
+        uint32_t aoFrameIndex,
+        VkExtent2D aoExtent,
+        const VkViewport& aoViewport,
+        const VkRect2D& aoScissor,
+        const BoundDescriptorSets& boundDescriptorSets,
+        uint32_t mvpDynamicOffset
+    );
+    void recordMainScenePass(
+        VkCommandBuffer commandBuffer,
+        VkQueryPool gpuTimestampQueryPool,
+        CoreFrameGraphOrderValidator& coreFramePassOrderValidator,
+        const CoreFrameGraphPlan& coreFrameGraphPlan,
+        uint32_t aoFrameIndex,
+        uint32_t imageIndex,
+        const VkViewport& viewport,
+        const VkRect2D& scissor,
+        const BoundDescriptorSets& boundDescriptorSets,
+        uint32_t mvpDynamicOffset,
+        const FrameChunkDrawData& frameChunkDrawData,
+        const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt,
+        VkBuffer chunkInstanceBuffer,
+        VkBuffer chunkVertexBuffer,
+        VkBuffer chunkIndexBuffer,
+        bool canDrawMagica,
+        std::span<const ReadyMagicaDraw> readyMagicaDraws,
+        uint32_t pipeInstanceCount,
+        const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt,
+        uint32_t transportInstanceCount,
+        const std::optional<FrameArenaSlice>& transportInstanceSliceOpt,
+        uint32_t beltCargoInstanceCount,
+        const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt,
+        const VoxelPreview& preview
+    );
 
     GLFWwindow* m_window = nullptr;
 
