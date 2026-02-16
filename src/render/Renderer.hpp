@@ -287,6 +287,21 @@ private:
         const char* failureContext,
         const char* debugNamePrefix
     );
+    bool createDescriptorSetLayout(
+        std::span<const VkDescriptorSetLayoutBinding> bindings,
+        VkDescriptorSetLayout& outDescriptorSetLayout,
+        const char* failureContext,
+        const char* debugName,
+        const void* pNext = nullptr
+    );
+    bool createDescriptorPool(
+        std::span<const VkDescriptorPoolSize> poolSizes,
+        uint32_t maxSets,
+        VkDescriptorPool& outDescriptorPool,
+        const char* failureContext,
+        const char* debugName,
+        VkDescriptorPoolCreateFlags flags = 0
+    );
     bool createComputePipelineLayout(
         VkDescriptorSetLayout descriptorSetLayout,
         std::span<const VkPushConstantRange> pushConstantRanges,

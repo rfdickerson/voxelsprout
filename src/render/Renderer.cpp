@@ -2429,6 +2429,59 @@ bool Renderer::allocatePerFrameDescriptorSets(
     return true;
 }
 
+bool Renderer::createDescriptorSetLayout(
+    std::span<const VkDescriptorSetLayoutBinding> bindings,
+    VkDescriptorSetLayout& outDescriptorSetLayout,
+    const char* failureContext,
+    const char* debugName,
+    const void* pNext
+) {
+    VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
+    layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutCreateInfo.pNext = pNext;
+    layoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+    layoutCreateInfo.pBindings = bindings.empty() ? nullptr : bindings.data();
+
+    const VkResult layoutResult =
+        vkCreateDescriptorSetLayout(m_device, &layoutCreateInfo, nullptr, &outDescriptorSetLayout);
+    if (layoutResult != VK_SUCCESS) {
+        logVkFailure(failureContext, layoutResult);
+        return false;
+    }
+
+    if (debugName != nullptr) {
+        setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, vkHandleToUint64(outDescriptorSetLayout), debugName);
+    }
+    return true;
+}
+
+bool Renderer::createDescriptorPool(
+    std::span<const VkDescriptorPoolSize> poolSizes,
+    uint32_t maxSets,
+    VkDescriptorPool& outDescriptorPool,
+    const char* failureContext,
+    const char* debugName,
+    VkDescriptorPoolCreateFlags flags
+) {
+    VkDescriptorPoolCreateInfo poolCreateInfo{};
+    poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolCreateInfo.flags = flags;
+    poolCreateInfo.maxSets = maxSets;
+    poolCreateInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolCreateInfo.pPoolSizes = poolSizes.empty() ? nullptr : poolSizes.data();
+
+    const VkResult poolResult = vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &outDescriptorPool);
+    if (poolResult != VK_SUCCESS) {
+        logVkFailure(failureContext, poolResult);
+        return false;
+    }
+
+    if (debugName != nullptr) {
+        setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_POOL, vkHandleToUint64(outDescriptorPool), debugName);
+    }
+    return true;
+}
+
 bool Renderer::createComputePipelineLayout(
     VkDescriptorSetLayout descriptorSetLayout,
     std::span<const VkPushConstantRange> pushConstantRanges,
@@ -4325,26 +4378,15 @@ bool Renderer::createVoxelGiResources() {
             skyExposureBinding
         };
 
-        VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
-        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-        layoutCreateInfo.pBindings = bindings.data();
-        const VkResult layoutResult = vkCreateDescriptorSetLayout(
-            m_device,
-            &layoutCreateInfo,
-            nullptr,
-            &m_voxelGiDescriptorSetLayout
-        );
-        if (layoutResult != VK_SUCCESS) {
-            logVkFailure("vkCreateDescriptorSetLayout(voxelGi)", layoutResult);
+        if (!createDescriptorSetLayout(
+                bindings,
+                m_voxelGiDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout(voxelGi)",
+                "renderer.descriptorSetLayout.voxelGi"
+            )) {
             destroyVoxelGiResources();
             return false;
         }
-        setObjectName(
-            VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
-            vkHandleToUint64(m_voxelGiDescriptorSetLayout),
-            "renderer.descriptorSetLayout.voxelGi"
-        );
     }
 
     if (m_voxelGiDescriptorPool == VK_NULL_HANDLE) {
@@ -4354,22 +4396,16 @@ bool Renderer::createVoxelGiResources() {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 9 * kMaxFramesInFlight}
         };
-        VkDescriptorPoolCreateInfo poolCreateInfo{};
-        poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolCreateInfo.maxSets = kMaxFramesInFlight;
-        poolCreateInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-        poolCreateInfo.pPoolSizes = poolSizes.data();
-        const VkResult poolResult = vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &m_voxelGiDescriptorPool);
-        if (poolResult != VK_SUCCESS) {
-            logVkFailure("vkCreateDescriptorPool(voxelGi)", poolResult);
+        if (!createDescriptorPool(
+                poolSizes,
+                kMaxFramesInFlight,
+                m_voxelGiDescriptorPool,
+                "vkCreateDescriptorPool(voxelGi)",
+                "renderer.descriptorPool.voxelGi"
+            )) {
             destroyVoxelGiResources();
             return false;
         }
-        setObjectName(
-            VK_OBJECT_TYPE_DESCRIPTOR_POOL,
-            vkHandleToUint64(m_voxelGiDescriptorPool),
-            "renderer.descriptorPool.voxelGi"
-        );
     }
 
     if (!allocatePerFrameDescriptorSets(
@@ -4584,26 +4620,15 @@ bool Renderer::createAutoExposureResources() {
             exposureStateBinding
         };
 
-        VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
-        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-        layoutCreateInfo.pBindings = bindings.data();
-        const VkResult layoutResult = vkCreateDescriptorSetLayout(
-            m_device,
-            &layoutCreateInfo,
-            nullptr,
-            &m_autoExposureDescriptorSetLayout
-        );
-        if (layoutResult != VK_SUCCESS) {
-            logVkFailure("vkCreateDescriptorSetLayout(autoExposure)", layoutResult);
+        if (!createDescriptorSetLayout(
+                bindings,
+                m_autoExposureDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout(autoExposure)",
+                "renderer.descriptorSetLayout.autoExposure"
+            )) {
             destroyAutoExposureResources();
             return false;
         }
-        setObjectName(
-            VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
-            vkHandleToUint64(m_autoExposureDescriptorSetLayout),
-            "renderer.descriptorSetLayout.autoExposure"
-        );
     }
 
     if (m_autoExposureDescriptorPool == VK_NULL_HANDLE) {
@@ -4611,23 +4636,16 @@ bool Renderer::createAutoExposureResources() {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kMaxFramesInFlight}
         };
-        VkDescriptorPoolCreateInfo poolCreateInfo{};
-        poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolCreateInfo.maxSets = kMaxFramesInFlight;
-        poolCreateInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-        poolCreateInfo.pPoolSizes = poolSizes.data();
-        const VkResult poolResult =
-            vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &m_autoExposureDescriptorPool);
-        if (poolResult != VK_SUCCESS) {
-            logVkFailure("vkCreateDescriptorPool(autoExposure)", poolResult);
+        if (!createDescriptorPool(
+                poolSizes,
+                kMaxFramesInFlight,
+                m_autoExposureDescriptorPool,
+                "vkCreateDescriptorPool(autoExposure)",
+                "renderer.descriptorPool.autoExposure"
+            )) {
             destroyAutoExposureResources();
             return false;
         }
-        setObjectName(
-            VK_OBJECT_TYPE_DESCRIPTOR_POOL,
-            vkHandleToUint64(m_autoExposureDescriptorPool),
-            "renderer.descriptorPool.autoExposure"
-        );
     }
 
     if (!allocatePerFrameDescriptorSets(
@@ -4769,26 +4787,15 @@ bool Renderer::createSunShaftResources() {
             outputBinding
         };
 
-        VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
-        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-        layoutCreateInfo.pBindings = bindings.data();
-        const VkResult layoutResult = vkCreateDescriptorSetLayout(
-            m_device,
-            &layoutCreateInfo,
-            nullptr,
-            &m_sunShaftDescriptorSetLayout
-        );
-        if (layoutResult != VK_SUCCESS) {
-            logVkFailure("vkCreateDescriptorSetLayout(sunShaft)", layoutResult);
+        if (!createDescriptorSetLayout(
+                bindings,
+                m_sunShaftDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout(sunShaft)",
+                "renderer.descriptorSetLayout.sunShaft"
+            )) {
             destroySunShaftResources();
             return false;
         }
-        setObjectName(
-            VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
-            vkHandleToUint64(m_sunShaftDescriptorSetLayout),
-            "renderer.descriptorSetLayout.sunShaft"
-        );
     }
 
     if (m_sunShaftDescriptorPool == VK_NULL_HANDLE) {
@@ -4797,22 +4804,16 @@ bool Renderer::createSunShaftResources() {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxFramesInFlight}
         };
-        VkDescriptorPoolCreateInfo poolCreateInfo{};
-        poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolCreateInfo.maxSets = kMaxFramesInFlight;
-        poolCreateInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-        poolCreateInfo.pPoolSizes = poolSizes.data();
-        const VkResult poolResult = vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &m_sunShaftDescriptorPool);
-        if (poolResult != VK_SUCCESS) {
-            logVkFailure("vkCreateDescriptorPool(sunShaft)", poolResult);
+        if (!createDescriptorPool(
+                poolSizes,
+                kMaxFramesInFlight,
+                m_sunShaftDescriptorPool,
+                "vkCreateDescriptorPool(sunShaft)",
+                "renderer.descriptorPool.sunShaft"
+            )) {
             destroySunShaftResources();
             return false;
         }
-        setObjectName(
-            VK_OBJECT_TYPE_DESCRIPTOR_POOL,
-            vkHandleToUint64(m_sunShaftDescriptorPool),
-            "renderer.descriptorPool.sunShaft"
-        );
     }
 
     if (!allocatePerFrameDescriptorSets(
@@ -5728,22 +5729,14 @@ bool Renderer::createDescriptorResources() {
             voxelGiOccupancyDebugBinding
         };
 
-        VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
-        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-        layoutCreateInfo.pBindings = bindings.data();
-
-        const VkResult layoutResult =
-            vkCreateDescriptorSetLayout(m_device, &layoutCreateInfo, nullptr, &m_descriptorSetLayout);
-        if (layoutResult != VK_SUCCESS) {
-            logVkFailure("vkCreateDescriptorSetLayout", layoutResult);
+        if (!createDescriptorSetLayout(
+                bindings,
+                m_descriptorSetLayout,
+                "vkCreateDescriptorSetLayout",
+                "renderer.descriptorSetLayout.main"
+            )) {
             return false;
         }
-        setObjectName(
-            VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
-            vkHandleToUint64(m_descriptorSetLayout),
-            "renderer.descriptorSetLayout.main"
-        );
     }
 
     if (m_descriptorPool == VK_NULL_HANDLE) {
@@ -5762,22 +5755,15 @@ bool Renderer::createDescriptorResources() {
             }
         };
 
-        VkDescriptorPoolCreateInfo poolCreateInfo{};
-        poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolCreateInfo.maxSets = kMaxFramesInFlight;
-        poolCreateInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-        poolCreateInfo.pPoolSizes = poolSizes.data();
-
-        const VkResult poolResult = vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &m_descriptorPool);
-        if (poolResult != VK_SUCCESS) {
-            logVkFailure("vkCreateDescriptorPool", poolResult);
+        if (!createDescriptorPool(
+                poolSizes,
+                kMaxFramesInFlight,
+                m_descriptorPool,
+                "vkCreateDescriptorPool",
+                "renderer.descriptorPool.main"
+            )) {
             return false;
         }
-        setObjectName(
-            VK_OBJECT_TYPE_DESCRIPTOR_POOL,
-            vkHandleToUint64(m_descriptorPool),
-            "renderer.descriptorPool.main"
-        );
     }
 
     if (!allocatePerFrameDescriptorSets(
@@ -5804,56 +5790,32 @@ bool Renderer::createDescriptorResources() {
             bindingFlagsCreateInfo.bindingCount = 1;
             bindingFlagsCreateInfo.pBindingFlags = &bindlessBindingFlags;
 
-            VkDescriptorSetLayoutCreateInfo bindlessLayoutCreateInfo{};
-            bindlessLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            bindlessLayoutCreateInfo.pNext = &bindingFlagsCreateInfo;
-            bindlessLayoutCreateInfo.bindingCount = 1;
-            bindlessLayoutCreateInfo.pBindings = &bindlessTexturesBinding;
-
-            const VkResult bindlessLayoutResult = vkCreateDescriptorSetLayout(
-                m_device,
-                &bindlessLayoutCreateInfo,
-                nullptr,
-                &m_bindlessDescriptorSetLayout
-            );
-            if (bindlessLayoutResult != VK_SUCCESS) {
-                logVkFailure("vkCreateDescriptorSetLayout(bindless)", bindlessLayoutResult);
+            const std::array<VkDescriptorSetLayoutBinding, 1> bindlessBindings = {bindlessTexturesBinding};
+            if (!createDescriptorSetLayout(
+                    bindlessBindings,
+                    m_bindlessDescriptorSetLayout,
+                    "vkCreateDescriptorSetLayout(bindless)",
+                    "renderer.descriptorSetLayout.bindless",
+                    &bindingFlagsCreateInfo
+                )) {
                 return false;
             }
-            setObjectName(
-                VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
-                vkHandleToUint64(m_bindlessDescriptorSetLayout),
-                "renderer.descriptorSetLayout.bindless"
-            );
         }
 
         if (m_bindlessDescriptorPool == VK_NULL_HANDLE) {
-            const VkDescriptorPoolSize bindlessPoolSize{
+            const std::array<VkDescriptorPoolSize, 1> bindlessPoolSizes = {VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 m_bindlessTextureCapacity
-            };
-
-            VkDescriptorPoolCreateInfo bindlessPoolCreateInfo{};
-            bindlessPoolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-            bindlessPoolCreateInfo.maxSets = 1;
-            bindlessPoolCreateInfo.poolSizeCount = 1;
-            bindlessPoolCreateInfo.pPoolSizes = &bindlessPoolSize;
-
-            const VkResult bindlessPoolResult = vkCreateDescriptorPool(
-                m_device,
-                &bindlessPoolCreateInfo,
-                nullptr,
-                &m_bindlessDescriptorPool
-            );
-            if (bindlessPoolResult != VK_SUCCESS) {
-                logVkFailure("vkCreateDescriptorPool(bindless)", bindlessPoolResult);
+            }};
+            if (!createDescriptorPool(
+                    bindlessPoolSizes,
+                    1,
+                    m_bindlessDescriptorPool,
+                    "vkCreateDescriptorPool(bindless)",
+                    "renderer.descriptorPool.bindless"
+                )) {
                 return false;
             }
-            setObjectName(
-                VK_OBJECT_TYPE_DESCRIPTOR_POOL,
-                vkHandleToUint64(m_bindlessDescriptorPool),
-                "renderer.descriptorPool.bindless"
-            );
         }
 
         if (m_bindlessDescriptorSet == VK_NULL_HANDLE) {
@@ -8609,24 +8571,18 @@ bool Renderer::createImGuiResources() {
         {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 256},
     };
 
-    VkDescriptorPoolCreateInfo poolCreateInfo{};
-    poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolCreateInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolCreateInfo.maxSets = 256;
-    poolCreateInfo.poolSizeCount = static_cast<uint32_t>(sizeof(poolSizes) / sizeof(poolSizes[0]));
-    poolCreateInfo.pPoolSizes = poolSizes;
-    const VkResult poolResult = vkCreateDescriptorPool(m_device, &poolCreateInfo, nullptr, &m_imguiDescriptorPool);
-    if (poolResult != VK_SUCCESS) {
-        logVkFailure("vkCreateDescriptorPool(imgui)", poolResult);
+    if (!createDescriptorPool(
+            poolSizes,
+            256,
+            m_imguiDescriptorPool,
+            "vkCreateDescriptorPool(imgui)",
+            "imgui.descriptorPool",
+            VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
+        )) {
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
         return false;
     }
-    setObjectName(
-        VK_OBJECT_TYPE_DESCRIPTOR_POOL,
-        vkHandleToUint64(m_imguiDescriptorPool),
-        "imgui.descriptorPool"
-    );
 
     ImGui_ImplVulkan_InitInfo initInfo{};
     initInfo.ApiVersion = VK_API_VERSION_1_3;
