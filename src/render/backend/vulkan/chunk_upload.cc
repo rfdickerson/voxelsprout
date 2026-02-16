@@ -129,6 +129,10 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
     m_pendingChunkRemeshIndices.clear();
     m_voxelGiWorldDirty = true;
     ++m_voxelGiWorldVersion;
+    m_voxelGiOccupancyFullRebuildInProgress = true;
+    m_voxelGiOccupancyFullRebuildNeedsClear = true;
+    m_voxelGiOccupancyFullRebuildCursor = 0;
+    m_voxelGiDirtyChunkIndices.clear();
     return true;
 }
 
@@ -146,6 +150,11 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
     if (std::find(m_pendingChunkRemeshIndices.begin(), m_pendingChunkRemeshIndices.end(), chunkIndex) ==
         m_pendingChunkRemeshIndices.end()) {
         m_pendingChunkRemeshIndices.push_back(chunkIndex);
+    }
+    if (!m_voxelGiOccupancyFullRebuildInProgress &&
+        std::find(m_voxelGiDirtyChunkIndices.begin(), m_voxelGiDirtyChunkIndices.end(), chunkIndex) ==
+            m_voxelGiDirtyChunkIndices.end()) {
+        m_voxelGiDirtyChunkIndices.push_back(chunkIndex);
     }
     m_voxelGiWorldDirty = true;
     ++m_voxelGiWorldVersion;
@@ -170,6 +179,11 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
         if (std::find(m_pendingChunkRemeshIndices.begin(), m_pendingChunkRemeshIndices.end(), chunkIndex) ==
             m_pendingChunkRemeshIndices.end()) {
             m_pendingChunkRemeshIndices.push_back(chunkIndex);
+        }
+        if (!m_voxelGiOccupancyFullRebuildInProgress &&
+            std::find(m_voxelGiDirtyChunkIndices.begin(), m_voxelGiDirtyChunkIndices.end(), chunkIndex) ==
+                m_voxelGiDirtyChunkIndices.end()) {
+            m_voxelGiDirtyChunkIndices.push_back(chunkIndex);
         }
     }
     m_voxelGiWorldDirty = true;

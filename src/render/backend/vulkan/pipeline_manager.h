@@ -25,6 +25,7 @@ public:
     VkPipeline previewRemovePipeline = VK_NULL_HANDLE;
     VkPipelineLayout voxelGiPipelineLayout = VK_NULL_HANDLE;
     VkPipeline voxelGiSurfacePipeline = VK_NULL_HANDLE;
+    VkPipeline voxelGiOccupancyPipeline = VK_NULL_HANDLE;
     VkPipeline voxelGiSkyExposurePipeline = VK_NULL_HANDLE;
     VkPipeline voxelGiInjectPipeline = VK_NULL_HANDLE;
     VkPipeline voxelGiPropagatePipeline = VK_NULL_HANDLE;
@@ -104,6 +105,10 @@ public:
         if (voxelGiSkyExposurePipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, voxelGiSkyExposurePipeline, nullptr);
             voxelGiSkyExposurePipeline = VK_NULL_HANDLE;
+        }
+        if (voxelGiOccupancyPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, voxelGiOccupancyPipeline, nullptr);
+            voxelGiOccupancyPipeline = VK_NULL_HANDLE;
         }
         if (voxelGiSurfacePipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, voxelGiSurfacePipeline, nullptr);

@@ -7,6 +7,8 @@ namespace {
 constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
 constexpr uint32_t kVoxelGiPropagationIterations = 8u;
+constexpr uint32_t kVoxelGiChunkResolution = 32u;
+constexpr uint32_t kVoxelGiOccupancyWorkgroupXY = 8u;
 
 void transitionImageLayout(
     VkCommandBuffer commandBuffer,
@@ -50,6 +52,8 @@ struct VoxelGiDispatchDims {
     uint32_t volumeX = 1u;
     uint32_t volumeY = 1u;
     uint32_t volumeZ = 1u;
+    uint32_t occupancyX = 1u;
+    uint32_t occupancyY = 1u;
     uint32_t skyX = 1u;
     uint32_t skyY = 1u;
 };
@@ -59,10 +63,12 @@ struct VoxelGiPassContext {
     uint32_t mvpDynamicOffset = 0u;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    VkPipeline occupancyPipeline = VK_NULL_HANDLE;
     VkPipeline skyExposurePipeline = VK_NULL_HANDLE;
     VkPipeline surfacePipeline = VK_NULL_HANDLE;
     VkPipeline injectPipeline = VK_NULL_HANDLE;
     VkPipeline propagatePipeline = VK_NULL_HANDLE;
+    VkImage occupancyImage = VK_NULL_HANDLE;
     std::array<VkImage, 6> surfaceFaceImages{};
     std::array<VkImage, 2> voxelGiImages{};
     VkImage skyExposureImage = VK_NULL_HANDLE;
@@ -87,6 +93,8 @@ VoxelGiDispatchDims computeVoxelGiDispatchDims() {
     dims.volumeX = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
     dims.volumeY = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
     dims.volumeZ = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
+    dims.occupancyX = (kVoxelGiChunkResolution + (kVoxelGiOccupancyWorkgroupXY - 1u)) / kVoxelGiOccupancyWorkgroupXY;
+    dims.occupancyY = (kVoxelGiChunkResolution + (kVoxelGiOccupancyWorkgroupXY - 1u)) / kVoxelGiOccupancyWorkgroupXY;
     dims.skyX = (kVoxelGiGridResolution + 7u) / 8u;
     dims.skyY = (kVoxelGiGridResolution + 7u) / 8u;
     return dims;
@@ -137,6 +145,29 @@ void recordVoxelGiSkyExposurePass(
         VK_IMAGE_ASPECT_COLOR_BIT
     );
     *state.skyExposureInitialized = true;
+}
+
+void recordVoxelGiOccupancyPass(
+    const VoxelGiPassContext& context,
+    const VoxelGiDispatchDims& dims,
+    uint32_t occupancyDispatchZ
+) {
+    if (occupancyDispatchZ == 0u) {
+        return;
+    }
+    bindVoxelGiComputePass(context, context.occupancyPipeline);
+    vkCmdDispatch(context.commandBuffer, dims.occupancyX, dims.occupancyY, occupancyDispatchZ);
+    transitionImageLayout(
+        context.commandBuffer,
+        context.occupancyImage,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT
+    );
 }
 
 void recordVoxelGiSurfacePass(
@@ -298,7 +329,8 @@ void finalizeVoxelGiPass(
 void RendererBackend::recordVoxelGiDispatchSequence(
     VkCommandBuffer commandBuffer,
     uint32_t mvpDynamicOffset,
-    VkQueryPool gpuTimestampQueryPool
+    VkQueryPool gpuTimestampQueryPool,
+    uint32_t occupancyDispatchZ
 ) {
     const VoxelGiDispatchDims dispatchDims = computeVoxelGiDispatchDims();
     const VoxelGiPassContext passContext{
@@ -306,10 +338,12 @@ void RendererBackend::recordVoxelGiDispatchSequence(
         mvpDynamicOffset,
         m_voxelGiPipelineLayout,
         m_voxelGiDescriptorSets[m_currentFrame],
+        m_voxelGiOccupancyPipeline,
         m_voxelGiSkyExposurePipeline,
         m_voxelGiSurfacePipeline,
         m_voxelGiInjectPipeline,
         m_voxelGiPropagatePipeline,
+        m_voxelGiOccupancyImage,
         m_voxelGiSurfaceFaceImages,
         m_voxelGiImages,
         m_voxelGiSkyExposureImage,
@@ -327,6 +361,7 @@ void RendererBackend::recordVoxelGiDispatchSequence(
         kGpuTimestampQueryGiPropagateEnd
     };
 
+    recordVoxelGiOccupancyPass(passContext, dispatchDims, occupancyDispatchZ);
     recordVoxelGiSkyExposurePass(passContext, dispatchDims, passState);
     recordVoxelGiSurfacePass(passContext, dispatchDims);
     recordVoxelGiInjectPass(passContext, dispatchDims, timestampQueries);

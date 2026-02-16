@@ -876,7 +876,8 @@ bool RendererBackend::createUploadRingBuffer() {
     config.uploadUsage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                          VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     const bool ok = m_frameArena.init(
         &m_bufferAllocator,
         m_physicalDevice,
@@ -1694,12 +1695,11 @@ void RendererBackend::shutdown() {
     m_voxelGiPreviousShIrradiance = {};
     m_voxelGiPreviousBounceStrength = 0.0f;
     m_voxelGiPreviousDiffusionSoftness = 0.0f;
-    m_voxelGiOccupancyStagingRgba.clear();
     m_voxelGiOccupancyBuildOrigin = {0.0f, 0.0f, 0.0f};
-    m_voxelGiOccupancyBuildWorldVersion = 0;
-    m_voxelGiOccupancyBuildNextZ = 0;
-    m_voxelGiOccupancyBuildInProgress = false;
-    m_voxelGiOccupancyUploadPending = false;
+    m_voxelGiOccupancyFullRebuildCursor = 0;
+    m_voxelGiOccupancyFullRebuildInProgress = false;
+    m_voxelGiOccupancyFullRebuildNeedsClear = false;
+    m_voxelGiDirtyChunkIndices.clear();
     m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     m_autoExposureComputeAvailable = false;
