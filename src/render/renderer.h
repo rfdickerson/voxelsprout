@@ -4,6 +4,7 @@
 #include "world/chunk_grid.h"
 #include "world/chunk_mesher.h"
 #include "world/clipmap_index.h"
+#include "render/renderer_types.h"
 
 #include <array>
 #include <cstddef>
@@ -11,50 +12,11 @@
 #include <memory>
 #include <span>
 
+#include "render/backend/render_backend_selector.h"
+
 struct GLFWwindow;
 
 namespace voxelsprout::render {
-
-struct CameraPose {
-    float x;
-    float y;
-    float z;
-    float yawDegrees;
-    float pitchDegrees;
-    float fovDegrees;
-};
-
-struct VoxelPreview {
-    enum class Mode {
-        Add,
-        Remove
-    };
-
-    bool visible = false;
-    int x = 0;
-    int y = 0;
-    int z = 0;
-    int brushSize = 1;
-    Mode mode = Mode::Add;
-    bool faceVisible = false;
-    int faceX = 0;
-    int faceY = 0;
-    int faceZ = 0;
-    uint32_t faceId = 0;
-    bool pipeStyle = false;
-    float pipeAxisX = 0.0f;
-    float pipeAxisY = 1.0f;
-    float pipeAxisZ = 0.0f;
-    float pipeRadius = 0.45f;
-    float pipeStyleId = 0.0f;
-};
-
-class RendererBackend;
-#if defined(VOXEL_RENDER_BACKEND_VULKAN)
-using RendererBackendType = RendererBackend;
-#else
-#error "VOXEL_RENDER_BACKEND is not configured to a supported backend"
-#endif
 
 class Renderer {
 public:
@@ -92,7 +54,7 @@ public:
     void shutdown();
 
 private:
-    std::unique_ptr<RendererBackendType> m_backend;
+    std::unique_ptr<RendererBackend> m_backend;
 };
 
 } // namespace voxelsprout::render
