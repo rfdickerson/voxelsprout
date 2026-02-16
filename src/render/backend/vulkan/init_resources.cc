@@ -1531,6 +1531,7 @@ bool RendererBackend::createVoxelGiResources() {
         destroyVoxelGiResources();
         return false;
     }
+    m_voxelGiDescriptorWriteKeyValid.fill(false);
 
     std::array<VkShaderModule, 4> shaderModules = {
         VK_NULL_HANDLE,
@@ -1717,6 +1718,7 @@ void RendererBackend::destroyShadowResources() {
 void RendererBackend::destroyVoxelGiResources() {
     m_pipelineManager.destroyVoxelGiPipelines(m_device);
     m_descriptorManager.destroyVoxelGi(m_device);
+    m_voxelGiDescriptorWriteKeyValid.fill(false);
 
     if (m_voxelGiOccupancySampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device, m_voxelGiOccupancySampler, nullptr);

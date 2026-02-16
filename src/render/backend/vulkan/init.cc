@@ -1718,6 +1718,10 @@ void RendererBackend::shutdown() {
     m_gpuTimestampsSupported = false;
     m_gpuTimestampPeriodNs = 0.0f;
     m_gpuTimestampQueryPools.fill(VK_NULL_HANDLE);
+    m_mainDescriptorWriteKeyValid.fill(false);
+    m_voxelGiDescriptorWriteKeyValid.fill(false);
+    m_autoExposureDescriptorWriteKeyValid.fill(false);
+    m_sunShaftDescriptorWriteKeyValid.fill(false);
     m_debugGpuFrameTimeMs = 0.0f;
     m_debugGpuShadowTimeMs = 0.0f;
     m_debugGpuGiInjectTimeMs = 0.0f;
