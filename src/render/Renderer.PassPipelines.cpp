@@ -3,6 +3,7 @@
 #include "core/Log.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -148,6 +149,11 @@ bool createShaderModulesFromFiles(
 
 struct alignas(16) ChunkInstanceData {
     float chunkOffset[4];
+};
+
+struct alignas(16) ChunkPushConstants {
+    float chunkOffset[4];
+    float cascadeData[4];
 };
 
 } // namespace
@@ -1164,5 +1170,839 @@ bool Renderer::createAoPipelines() {
     return true;
 }
 
+
+
+bool Renderer::createGraphicsPipeline() {
+    if (m_depthFormat == VK_FORMAT_UNDEFINED) {
+        VOX_LOGE("render") << "cannot create pipeline: depth format undefined\n";
+        return false;
+    }
+    if (m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
+        VOX_LOGE("render") << "cannot create pipeline: HDR color format undefined\n";
+        return false;
+    }
+    if (m_shadowDepthFormat == VK_FORMAT_UNDEFINED) {
+        VOX_LOGE("render") << "cannot create pipeline: shadow depth format undefined\n";
+        return false;
+    }
+
+    if (m_pipelineLayout == VK_NULL_HANDLE) {
+        VkPushConstantRange chunkPushConstantRange{};
+        chunkPushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        chunkPushConstantRange.offset = 0;
+        chunkPushConstantRange.size = sizeof(ChunkPushConstants);
+
+        VkPipelineLayoutCreateInfo layoutCreateInfo{};
+        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        std::array<VkDescriptorSetLayout, 2> pipelineSetLayouts = {
+            m_descriptorSetLayout,
+            m_bindlessDescriptorSetLayout
+        };
+        if (m_supportsBindlessDescriptors && m_bindlessDescriptorSetLayout != VK_NULL_HANDLE) {
+            layoutCreateInfo.setLayoutCount = 2;
+            layoutCreateInfo.pSetLayouts = pipelineSetLayouts.data();
+        } else {
+            layoutCreateInfo.setLayoutCount = 1;
+            layoutCreateInfo.pSetLayouts = &m_descriptorSetLayout;
+        }
+        layoutCreateInfo.pushConstantRangeCount = 1;
+        layoutCreateInfo.pPushConstantRanges = &chunkPushConstantRange;
+        const VkResult layoutResult = vkCreatePipelineLayout(m_device, &layoutCreateInfo, nullptr, &m_pipelineLayout);
+        if (layoutResult != VK_SUCCESS) {
+            logVkFailure("vkCreatePipelineLayout", layoutResult);
+            return false;
+        }
+        setObjectName(
+            VK_OBJECT_TYPE_PIPELINE_LAYOUT,
+            vkHandleToUint64(m_pipelineLayout),
+            "renderer.pipelineLayout.main"
+        );
+    }
+
+    constexpr const char* kWorldVertexShaderPath = "../src/render/shaders/voxel_packed.vert.slang.spv";
+    constexpr const char* kWorldFragmentShaderPath = "../src/render/shaders/voxel_packed.frag.slang.spv";
+    constexpr const char* kSkyboxVertexShaderPath = "../src/render/shaders/skybox.vert.slang.spv";
+    constexpr const char* kSkyboxFragmentShaderPath = "../src/render/shaders/skybox.frag.slang.spv";
+    constexpr const char* kToneMapVertexShaderPath = "../src/render/shaders/tone_map.vert.slang.spv";
+    constexpr const char* kToneMapFragmentShaderPath = "../src/render/shaders/tone_map.frag.slang.spv";
+    constexpr const char* kShadowVertexShaderPath = "../src/render/shaders/shadow_depth.vert.slang.spv";
+    constexpr const char* kPipeShadowVertexShaderPath = "../src/render/shaders/pipe_shadow.vert.slang.spv";
+    constexpr const char* kGrassShadowVertexShaderPath = "../src/render/shaders/grass_billboard_shadow.vert.slang.spv";
+    constexpr const char* kGrassShadowFragmentShaderPath = "../src/render/shaders/grass_billboard_shadow.frag.slang.spv";
+
+    std::array<VkShaderModule, 7> sceneShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& worldVertShaderModule = sceneShaderModules[0];
+    VkShaderModule& worldFragShaderModule = sceneShaderModules[1];
+    VkShaderModule& skyboxVertShaderModule = sceneShaderModules[2];
+    VkShaderModule& skyboxFragShaderModule = sceneShaderModules[3];
+    VkShaderModule& toneMapVertShaderModule = sceneShaderModules[4];
+    VkShaderModule& toneMapFragShaderModule = sceneShaderModules[5];
+    VkShaderModule& shadowVertShaderModule = sceneShaderModules[6];
+
+    const std::array<ShaderModuleLoadSpec, 6> sceneShaderLoadSpecs = {{
+        {kWorldVertexShaderPath, "voxel_packed.vert"},
+        {kWorldFragmentShaderPath, "voxel_packed.frag"},
+        {kSkyboxVertexShaderPath, "skybox.vert"},
+        {kSkyboxFragmentShaderPath, "skybox.frag"},
+        {kToneMapVertexShaderPath, "tone_map.vert"},
+        {kToneMapFragmentShaderPath, "tone_map.frag"},
+    }};
+    if (!createShaderModulesFromFiles(
+            m_device,
+            sceneShaderLoadSpecs,
+            std::span<VkShaderModule>(sceneShaderModules).first(sceneShaderLoadSpecs.size())
+        )) {
+        return false;
+    }
+    auto destroySceneShaderModules = [&]() {
+        destroyShaderModules(m_device, sceneShaderModules);
+    };
+
+    VkPipelineShaderStageCreateInfo worldVertexShaderStage{};
+    worldVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    worldVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    worldVertexShaderStage.module = worldVertShaderModule;
+    worldVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo worldFragmentShaderStage{};
+    worldFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    worldFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    worldFragmentShaderStage.module = worldFragShaderModule;
+    worldFragmentShaderStage.pName = "main";
+    struct WorldFragmentSpecializationData {
+        std::int32_t shadowPolicyMode = 2;  // 0=no shadows, 1=single-cascade PCF, 2=cascade-blended PCF
+        std::int32_t ambientPolicyMode = 2; // 0=SH only, 1=SH hemisphere, 2=SH hemisphere + vertex AO
+        std::int32_t forceTintOnly = 0;     // 0=atlas sampling enabled, 1=tint-only shading
+    };
+    const WorldFragmentSpecializationData worldFragmentSpecializationData{};
+    const std::array<VkSpecializationMapEntry, 3> worldFragmentSpecializationMapEntries = {{
+        VkSpecializationMapEntry{
+            6u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, shadowPolicyMode)),
+            sizeof(std::int32_t)
+        },
+        VkSpecializationMapEntry{
+            7u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, ambientPolicyMode)),
+            sizeof(std::int32_t)
+        },
+        VkSpecializationMapEntry{
+            8u,
+            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, forceTintOnly)),
+            sizeof(std::int32_t)
+        }
+    }};
+    const VkSpecializationInfo worldFragmentSpecializationInfo{
+        static_cast<uint32_t>(worldFragmentSpecializationMapEntries.size()),
+        worldFragmentSpecializationMapEntries.data(),
+        sizeof(worldFragmentSpecializationData),
+        &worldFragmentSpecializationData
+    };
+    worldFragmentShaderStage.pSpecializationInfo = &worldFragmentSpecializationInfo;
+
+    std::array<VkPipelineShaderStageCreateInfo, 2> worldShaderStages = {worldVertexShaderStage, worldFragmentShaderStage};
+
+    // Binding 0: packed voxel vertices. Binding 1: per-draw chunk origin.
+    VkVertexInputBindingDescription bindingDescriptions[2]{};
+    bindingDescriptions[0].binding = 0;
+    bindingDescriptions[0].stride = sizeof(world::PackedVoxelVertex);
+    bindingDescriptions[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    bindingDescriptions[1].binding = 1;
+    bindingDescriptions[1].stride = sizeof(ChunkInstanceData);
+    bindingDescriptions[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    VkVertexInputAttributeDescription attributeDescriptions[2]{};
+    attributeDescriptions[0].location = 0;
+    attributeDescriptions[0].binding = 0;
+    attributeDescriptions[0].format = VK_FORMAT_R32_UINT;
+    attributeDescriptions[0].offset = 0;
+    attributeDescriptions[1].location = 1;
+    attributeDescriptions[1].binding = 1;
+    attributeDescriptions[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[1].offset = 0;
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.vertexBindingDescriptionCount = 2;
+    vertexInputInfo.pVertexBindingDescriptions = bindingDescriptions;
+    vertexInputInfo.vertexAttributeDescriptionCount = 2;
+    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = m_colorSampleCount;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    std::array<VkDynamicState, 2> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkPipelineRenderingCreateInfo renderingCreateInfo{};
+    renderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    renderingCreateInfo.colorAttachmentCount = 1;
+    renderingCreateInfo.pColorAttachmentFormats = &m_hdrColorFormat;
+    renderingCreateInfo.depthAttachmentFormat = m_depthFormat;
+
+    VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
+    pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.pNext = &renderingCreateInfo;
+    pipelineCreateInfo.stageCount = static_cast<uint32_t>(worldShaderStages.size());
+    pipelineCreateInfo.pStages = worldShaderStages.data();
+    pipelineCreateInfo.pVertexInputState = &vertexInputInfo;
+    pipelineCreateInfo.pInputAssemblyState = &inputAssembly;
+    pipelineCreateInfo.pViewportState = &viewportState;
+    pipelineCreateInfo.pRasterizationState = &rasterizer;
+    pipelineCreateInfo.pMultisampleState = &multisampling;
+    pipelineCreateInfo.pDepthStencilState = &depthStencil;
+    pipelineCreateInfo.pColorBlendState = &colorBlending;
+    pipelineCreateInfo.pDynamicState = &dynamicState;
+    pipelineCreateInfo.layout = m_pipelineLayout;
+    pipelineCreateInfo.renderPass = VK_NULL_HANDLE;
+    pipelineCreateInfo.subpass = 0;
+
+    VkPipeline worldPipeline = VK_NULL_HANDLE;
+    const VkResult worldPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &worldPipeline
+    );
+    if (worldPipelineResult != VK_SUCCESS) {
+        destroySceneShaderModules();
+        logVkFailure("vkCreateGraphicsPipelines(world)", worldPipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (world): samples=" << static_cast<uint32_t>(m_colorSampleCount)
+              << ", cullMode=" << static_cast<uint32_t>(rasterizer.cullMode)
+              << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
+              << ", shadowPolicyMode=" << worldFragmentSpecializationData.shadowPolicyMode
+              << ", ambientPolicyMode=" << worldFragmentSpecializationData.ambientPolicyMode
+              << "\n";
+
+    VkPipelineRasterizationStateCreateInfo previewAddRasterizer = rasterizer;
+    previewAddRasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    // Preview draws closed helper geometry; disable culling to avoid face dropouts from winding mismatches.
+    previewAddRasterizer.cullMode = VK_CULL_MODE_NONE;
+    previewAddRasterizer.depthBiasEnable = VK_FALSE;
+
+    VkPipelineRasterizationStateCreateInfo previewRemoveRasterizer = rasterizer;
+    previewRemoveRasterizer.polygonMode = m_supportsWireframePreview ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+    previewRemoveRasterizer.cullMode = VK_CULL_MODE_NONE;
+    previewRemoveRasterizer.depthBiasEnable = VK_FALSE;
+
+    VkPipelineDepthStencilStateCreateInfo previewDepthStencil = depthStencil;
+    previewDepthStencil.depthWriteEnable = VK_TRUE;
+    previewDepthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+
+    std::array<VkDynamicState, 3> previewDynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_DEPTH_BIAS,
+    };
+    VkPipelineDynamicStateCreateInfo previewDynamicState{};
+    previewDynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    previewDynamicState.dynamicStateCount = static_cast<uint32_t>(previewDynamicStates.size());
+    previewDynamicState.pDynamicStates = previewDynamicStates.data();
+
+    VkGraphicsPipelineCreateInfo previewAddPipelineCreateInfo = pipelineCreateInfo;
+    previewAddPipelineCreateInfo.pRasterizationState = &previewAddRasterizer;
+    previewAddPipelineCreateInfo.pDepthStencilState = &previewDepthStencil;
+    previewAddPipelineCreateInfo.pDynamicState = &previewDynamicState;
+
+    VkPipeline previewAddPipeline = VK_NULL_HANDLE;
+    const VkResult previewAddPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &previewAddPipelineCreateInfo,
+        nullptr,
+        &previewAddPipeline
+    );
+    if (previewAddPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        destroySceneShaderModules();
+        logVkFailure("vkCreateGraphicsPipelines(previewAdd)", previewAddPipelineResult);
+        return false;
+    }
+
+    VkGraphicsPipelineCreateInfo previewRemovePipelineCreateInfo = pipelineCreateInfo;
+    previewRemovePipelineCreateInfo.pRasterizationState = &previewRemoveRasterizer;
+    previewRemovePipelineCreateInfo.pDepthStencilState = &previewDepthStencil;
+    previewRemovePipelineCreateInfo.pDynamicState = &previewDynamicState;
+
+    VkPipeline previewRemovePipeline = VK_NULL_HANDLE;
+    const VkResult previewRemovePipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &previewRemovePipelineCreateInfo,
+        nullptr,
+        &previewRemovePipeline
+    );
+
+    if (previewRemovePipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        destroySceneShaderModules();
+        logVkFailure("vkCreateGraphicsPipelines(previewRemove)", previewRemovePipelineResult);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo skyboxVertexShaderStage{};
+    skyboxVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    skyboxVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    skyboxVertexShaderStage.module = skyboxVertShaderModule;
+    skyboxVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo skyboxFragmentShaderStage{};
+    skyboxFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    skyboxFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    skyboxFragmentShaderStage.module = skyboxFragShaderModule;
+    skyboxFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> skyboxShaderStages = {
+        skyboxVertexShaderStage,
+        skyboxFragmentShaderStage
+    };
+
+    VkPipelineVertexInputStateCreateInfo skyboxVertexInputInfo{};
+    skyboxVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo skyboxInputAssembly = inputAssembly;
+
+    VkPipelineRasterizationStateCreateInfo skyboxRasterizer = rasterizer;
+    skyboxRasterizer.cullMode = VK_CULL_MODE_NONE;
+
+    VkPipelineDepthStencilStateCreateInfo skyboxDepthStencil = depthStencil;
+    skyboxDepthStencil.depthTestEnable = VK_TRUE;
+    skyboxDepthStencil.depthWriteEnable = VK_FALSE;
+    skyboxDepthStencil.depthCompareOp = VK_COMPARE_OP_EQUAL;
+
+    VkGraphicsPipelineCreateInfo skyboxPipelineCreateInfo = pipelineCreateInfo;
+    skyboxPipelineCreateInfo.stageCount = static_cast<uint32_t>(skyboxShaderStages.size());
+    skyboxPipelineCreateInfo.pStages = skyboxShaderStages.data();
+    skyboxPipelineCreateInfo.pVertexInputState = &skyboxVertexInputInfo;
+    skyboxPipelineCreateInfo.pInputAssemblyState = &skyboxInputAssembly;
+    skyboxPipelineCreateInfo.pDepthStencilState = &skyboxDepthStencil;
+    skyboxPipelineCreateInfo.pRasterizationState = &skyboxRasterizer;
+
+    VkPipeline skyboxPipeline = VK_NULL_HANDLE;
+    const VkResult skyboxPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &skyboxPipelineCreateInfo,
+        nullptr,
+        &skyboxPipeline
+    );
+
+    if (skyboxPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        destroySceneShaderModules();
+        logVkFailure("vkCreateGraphicsPipelines(skybox)", skyboxPipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (skybox): cullMode=" << static_cast<uint32_t>(skyboxRasterizer.cullMode)
+              << ", depthTest=" << (skyboxDepthStencil.depthTestEnable == VK_TRUE ? 1 : 0)
+              << ", depthWrite=" << (skyboxDepthStencil.depthWriteEnable == VK_TRUE ? 1 : 0)
+              << "\n";
+
+    VkPipelineShaderStageCreateInfo toneMapVertexShaderStage{};
+    toneMapVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    toneMapVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    toneMapVertexShaderStage.module = toneMapVertShaderModule;
+    toneMapVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo toneMapFragmentShaderStage{};
+    toneMapFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    toneMapFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    toneMapFragmentShaderStage.module = toneMapFragShaderModule;
+    toneMapFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> toneMapShaderStages = {
+        toneMapVertexShaderStage,
+        toneMapFragmentShaderStage
+    };
+
+    VkPipelineVertexInputStateCreateInfo toneMapVertexInputInfo{};
+    toneMapVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo toneMapInputAssembly = inputAssembly;
+
+    VkPipelineRasterizationStateCreateInfo toneMapRasterizer = rasterizer;
+    toneMapRasterizer.cullMode = VK_CULL_MODE_NONE;
+
+    VkPipelineMultisampleStateCreateInfo toneMapMultisampling{};
+    toneMapMultisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    toneMapMultisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo toneMapDepthStencil{};
+    toneMapDepthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    toneMapDepthStencil.depthTestEnable = VK_FALSE;
+    toneMapDepthStencil.depthWriteEnable = VK_FALSE;
+    toneMapDepthStencil.depthBoundsTestEnable = VK_FALSE;
+    toneMapDepthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineRenderingCreateInfo toneMapRenderingCreateInfo{};
+    toneMapRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    toneMapRenderingCreateInfo.colorAttachmentCount = 1;
+    toneMapRenderingCreateInfo.pColorAttachmentFormats = &m_swapchainFormat;
+    toneMapRenderingCreateInfo.depthAttachmentFormat = VK_FORMAT_UNDEFINED;
+
+    VkGraphicsPipelineCreateInfo toneMapPipelineCreateInfo{};
+    toneMapPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    toneMapPipelineCreateInfo.pNext = &toneMapRenderingCreateInfo;
+    toneMapPipelineCreateInfo.stageCount = static_cast<uint32_t>(toneMapShaderStages.size());
+    toneMapPipelineCreateInfo.pStages = toneMapShaderStages.data();
+    toneMapPipelineCreateInfo.pVertexInputState = &toneMapVertexInputInfo;
+    toneMapPipelineCreateInfo.pInputAssemblyState = &toneMapInputAssembly;
+    toneMapPipelineCreateInfo.pViewportState = &viewportState;
+    toneMapPipelineCreateInfo.pRasterizationState = &toneMapRasterizer;
+    toneMapPipelineCreateInfo.pMultisampleState = &toneMapMultisampling;
+    toneMapPipelineCreateInfo.pDepthStencilState = &toneMapDepthStencil;
+    toneMapPipelineCreateInfo.pColorBlendState = &colorBlending;
+    toneMapPipelineCreateInfo.pDynamicState = &dynamicState;
+    toneMapPipelineCreateInfo.layout = m_pipelineLayout;
+    toneMapPipelineCreateInfo.renderPass = VK_NULL_HANDLE;
+    toneMapPipelineCreateInfo.subpass = 0;
+
+    VkPipeline toneMapPipeline = VK_NULL_HANDLE;
+    const VkResult toneMapPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &toneMapPipelineCreateInfo,
+        nullptr,
+        &toneMapPipeline
+    );
+
+    if (toneMapPipelineResult != VK_SUCCESS) {
+        destroySceneShaderModules();
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(toneMap)", toneMapPipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (tonemap): samples="
+              << static_cast<uint32_t>(toneMapMultisampling.rasterizationSamples)
+              << ", swapchainFormat=" << static_cast<int>(m_swapchainFormat)
+              << "\n";
+
+    const std::array<ShaderModuleLoadSpec, 1> shadowShaderLoadSpecs = {{
+        {kShadowVertexShaderPath, "shadow_depth.vert"},
+    }};
+    if (!createShaderModulesFromFiles(
+            m_device,
+            shadowShaderLoadSpecs,
+            std::span<VkShaderModule>(sceneShaderModules).subspan(6, 1)
+        )) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        return false;
+    }
+    VkPipelineShaderStageCreateInfo shadowVertexShaderStage{};
+    shadowVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shadowVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shadowVertexShaderStage.module = shadowVertShaderModule;
+    shadowVertexShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 1> shadowShaderStages = {
+        shadowVertexShaderStage
+    };
+
+    VkPipelineMultisampleStateCreateInfo shadowMultisampling{};
+    shadowMultisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    shadowMultisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineRasterizationStateCreateInfo shadowRasterizer = rasterizer;
+    shadowRasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    shadowRasterizer.depthBiasEnable = VK_TRUE;
+
+    VkPipelineDepthStencilStateCreateInfo shadowDepthStencil = depthStencil;
+    shadowDepthStencil.depthTestEnable = VK_TRUE;
+    shadowDepthStencil.depthWriteEnable = VK_TRUE;
+    shadowDepthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+
+    std::array<VkDynamicState, 3> shadowDynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_DEPTH_BIAS
+    };
+    VkPipelineDynamicStateCreateInfo shadowDynamicState{};
+    shadowDynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    shadowDynamicState.dynamicStateCount = static_cast<uint32_t>(shadowDynamicStates.size());
+    shadowDynamicState.pDynamicStates = shadowDynamicStates.data();
+
+    VkPipelineColorBlendStateCreateInfo shadowColorBlending{};
+    shadowColorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    shadowColorBlending.attachmentCount = 0;
+    shadowColorBlending.pAttachments = nullptr;
+
+    VkPipelineRenderingCreateInfo shadowRenderingCreateInfo{};
+    shadowRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    shadowRenderingCreateInfo.colorAttachmentCount = 0;
+    shadowRenderingCreateInfo.pColorAttachmentFormats = nullptr;
+    shadowRenderingCreateInfo.depthAttachmentFormat = m_shadowDepthFormat;
+
+    VkGraphicsPipelineCreateInfo shadowPipelineCreateInfo{};
+    shadowPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    shadowPipelineCreateInfo.pNext = &shadowRenderingCreateInfo;
+    shadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(shadowShaderStages.size());
+    shadowPipelineCreateInfo.pStages = shadowShaderStages.data();
+    shadowPipelineCreateInfo.pVertexInputState = &vertexInputInfo;
+    shadowPipelineCreateInfo.pInputAssemblyState = &inputAssembly;
+    shadowPipelineCreateInfo.pViewportState = &viewportState;
+    shadowPipelineCreateInfo.pRasterizationState = &shadowRasterizer;
+    shadowPipelineCreateInfo.pMultisampleState = &shadowMultisampling;
+    shadowPipelineCreateInfo.pDepthStencilState = &shadowDepthStencil;
+    shadowPipelineCreateInfo.pColorBlendState = &shadowColorBlending;
+    shadowPipelineCreateInfo.pDynamicState = &shadowDynamicState;
+    shadowPipelineCreateInfo.layout = m_pipelineLayout;
+    shadowPipelineCreateInfo.renderPass = VK_NULL_HANDLE;
+    shadowPipelineCreateInfo.subpass = 0;
+
+    VkPipeline shadowPipeline = VK_NULL_HANDLE;
+    const VkResult shadowPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &shadowPipelineCreateInfo,
+        nullptr,
+        &shadowPipeline
+    );
+
+    destroySceneShaderModules();
+
+    if (shadowPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(shadow)", shadowPipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (shadow): depthFormat=" << static_cast<int>(m_shadowDepthFormat)
+              << ", depthBias=" << (shadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
+              << ", cullMode=" << static_cast<uint32_t>(shadowRasterizer.cullMode)
+              << ", samples=" << static_cast<uint32_t>(shadowMultisampling.rasterizationSamples)
+              << "\n";
+
+    std::array<VkShaderModule, 1> pipeShadowShaderModules = {VK_NULL_HANDLE};
+    VkShaderModule& pipeShadowVertShaderModule = pipeShadowShaderModules[0];
+    const std::array<ShaderModuleLoadSpec, 1> pipeShadowShaderLoadSpecs = {{
+        {kPipeShadowVertexShaderPath, "pipe_shadow.vert"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, pipeShadowShaderLoadSpecs, pipeShadowShaderModules)) {
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        return false;
+    }
+    VkPipelineShaderStageCreateInfo pipeShadowVertexShaderStage{};
+    pipeShadowVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeShadowVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    pipeShadowVertexShaderStage.module = pipeShadowVertShaderModule;
+    pipeShadowVertexShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 1> pipeShadowShaderStages = {
+        pipeShadowVertexShaderStage
+    };
+
+    VkVertexInputBindingDescription pipeShadowBindings[2]{};
+    pipeShadowBindings[0].binding = 0;
+    pipeShadowBindings[0].stride = sizeof(PipeVertex);
+    pipeShadowBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    pipeShadowBindings[1].binding = 1;
+    pipeShadowBindings[1].stride = sizeof(PipeInstance);
+    pipeShadowBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    VkVertexInputAttributeDescription pipeShadowAttributes[6]{};
+    pipeShadowAttributes[0].location = 0;
+    pipeShadowAttributes[0].binding = 0;
+    pipeShadowAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    pipeShadowAttributes[0].offset = static_cast<uint32_t>(offsetof(PipeVertex, position));
+    pipeShadowAttributes[1].location = 1;
+    pipeShadowAttributes[1].binding = 0;
+    pipeShadowAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    pipeShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(PipeVertex, normal));
+    pipeShadowAttributes[2].location = 2;
+    pipeShadowAttributes[2].binding = 1;
+    pipeShadowAttributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(PipeInstance, originLength));
+    pipeShadowAttributes[3].location = 3;
+    pipeShadowAttributes[3].binding = 1;
+    pipeShadowAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(PipeInstance, axisRadius));
+    pipeShadowAttributes[4].location = 4;
+    pipeShadowAttributes[4].binding = 1;
+    pipeShadowAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(PipeInstance, tint));
+    pipeShadowAttributes[5].location = 5;
+    pipeShadowAttributes[5].binding = 1;
+    pipeShadowAttributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    pipeShadowAttributes[5].offset = static_cast<uint32_t>(offsetof(PipeInstance, extensions));
+
+    VkPipelineVertexInputStateCreateInfo pipeShadowVertexInputInfo{};
+    pipeShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    pipeShadowVertexInputInfo.vertexBindingDescriptionCount = 2;
+    pipeShadowVertexInputInfo.pVertexBindingDescriptions = pipeShadowBindings;
+    pipeShadowVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    pipeShadowVertexInputInfo.pVertexAttributeDescriptions = pipeShadowAttributes;
+
+    VkGraphicsPipelineCreateInfo pipeShadowPipelineCreateInfo = shadowPipelineCreateInfo;
+    pipeShadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(pipeShadowShaderStages.size());
+    pipeShadowPipelineCreateInfo.pStages = pipeShadowShaderStages.data();
+    pipeShadowPipelineCreateInfo.pVertexInputState = &pipeShadowVertexInputInfo;
+    VkPipelineRasterizationStateCreateInfo pipeShadowRasterizer = shadowRasterizer;
+    pipeShadowRasterizer.cullMode = VK_CULL_MODE_NONE;
+    pipeShadowPipelineCreateInfo.pRasterizationState = &pipeShadowRasterizer;
+
+    VkPipeline pipeShadowPipeline = VK_NULL_HANDLE;
+    const VkResult pipeShadowPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipeShadowPipelineCreateInfo,
+        nullptr,
+        &pipeShadowPipeline
+    );
+
+    destroyShaderModules(m_device, pipeShadowShaderModules);
+
+    if (pipeShadowPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(pipeShadow)", pipeShadowPipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (pipeShadow): cullMode="
+              << static_cast<uint32_t>(pipeShadowRasterizer.cullMode)
+              << ", depthBias=" << (pipeShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
+              << "\n";
+
+    std::array<VkShaderModule, 2> grassShadowShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& grassShadowVertShaderModule = grassShadowShaderModules[0];
+    VkShaderModule& grassShadowFragShaderModule = grassShadowShaderModules[1];
+    const std::array<ShaderModuleLoadSpec, 2> grassShadowShaderLoadSpecs = {{
+        {kGrassShadowVertexShaderPath, "grass_billboard_shadow.vert"},
+        {kGrassShadowFragmentShaderPath, "grass_billboard_shadow.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, grassShadowShaderLoadSpecs, grassShadowShaderModules)) {
+        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo grassShadowVertexShaderStage{};
+    grassShadowVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    grassShadowVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    grassShadowVertexShaderStage.module = grassShadowVertShaderModule;
+    grassShadowVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo grassShadowFragmentShaderStage{};
+    grassShadowFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    grassShadowFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    grassShadowFragmentShaderStage.module = grassShadowFragShaderModule;
+    grassShadowFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> grassShadowShaderStages = {
+        grassShadowVertexShaderStage,
+        grassShadowFragmentShaderStage
+    };
+
+    VkVertexInputBindingDescription grassShadowBindings[2]{};
+    grassShadowBindings[0].binding = 0;
+    grassShadowBindings[0].stride = sizeof(GrassBillboardVertex);
+    grassShadowBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    grassShadowBindings[1].binding = 1;
+    grassShadowBindings[1].stride = sizeof(GrassBillboardInstance);
+    grassShadowBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+    VkVertexInputAttributeDescription grassShadowAttributes[5]{};
+    grassShadowAttributes[0].location = 0;
+    grassShadowAttributes[0].binding = 0;
+    grassShadowAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
+    grassShadowAttributes[0].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, corner));
+    grassShadowAttributes[1].location = 1;
+    grassShadowAttributes[1].binding = 0;
+    grassShadowAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+    grassShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, uv));
+    grassShadowAttributes[2].location = 2;
+    grassShadowAttributes[2].binding = 0;
+    grassShadowAttributes[2].format = VK_FORMAT_R32_SFLOAT;
+    grassShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, plane));
+    grassShadowAttributes[3].location = 3;
+    grassShadowAttributes[3].binding = 1;
+    grassShadowAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    grassShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, worldPosYaw));
+    grassShadowAttributes[4].location = 4;
+    grassShadowAttributes[4].binding = 1;
+    grassShadowAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    grassShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, colorTint));
+
+    VkPipelineVertexInputStateCreateInfo grassShadowVertexInputInfo{};
+    grassShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    grassShadowVertexInputInfo.vertexBindingDescriptionCount = 2;
+    grassShadowVertexInputInfo.pVertexBindingDescriptions = grassShadowBindings;
+    grassShadowVertexInputInfo.vertexAttributeDescriptionCount = 5;
+    grassShadowVertexInputInfo.pVertexAttributeDescriptions = grassShadowAttributes;
+
+    VkGraphicsPipelineCreateInfo grassShadowPipelineCreateInfo = shadowPipelineCreateInfo;
+    grassShadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(grassShadowShaderStages.size());
+    grassShadowPipelineCreateInfo.pStages = grassShadowShaderStages.data();
+    grassShadowPipelineCreateInfo.pVertexInputState = &grassShadowVertexInputInfo;
+    VkPipelineRasterizationStateCreateInfo grassShadowRasterizer = shadowRasterizer;
+    grassShadowRasterizer.cullMode = VK_CULL_MODE_NONE;
+    grassShadowPipelineCreateInfo.pRasterizationState = &grassShadowRasterizer;
+
+    VkPipeline grassShadowPipeline = VK_NULL_HANDLE;
+    const VkResult grassShadowPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &grassShadowPipelineCreateInfo,
+        nullptr,
+        &grassShadowPipeline
+    );
+
+    destroyShaderModules(m_device, grassShadowShaderModules);
+
+    if (grassShadowPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(grassShadow)", grassShadowPipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (grassShadow): cullMode="
+              << static_cast<uint32_t>(grassShadowRasterizer.cullMode)
+              << ", depthBias=" << (grassShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
+              << "\n";
+
+    if (m_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipeline, nullptr);
+    }
+    if (m_skyboxPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_skyboxPipeline, nullptr);
+    }
+    if (m_shadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);
+    }
+    if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipeShadowPipeline, nullptr);
+    }
+    if (m_grassBillboardShadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_grassBillboardShadowPipeline, nullptr);
+    }
+    if (m_tonemapPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr);
+    }
+    if (m_previewAddPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_previewAddPipeline, nullptr);
+    }
+    if (m_previewRemovePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
+    }
+    m_pipeline = worldPipeline;
+    m_skyboxPipeline = skyboxPipeline;
+    m_shadowPipeline = shadowPipeline;
+    m_pipeShadowPipeline = pipeShadowPipeline;
+    m_grassBillboardShadowPipeline = grassShadowPipeline;
+    m_tonemapPipeline = toneMapPipeline;
+    m_previewAddPipeline = previewAddPipeline;
+    m_previewRemovePipeline = previewRemovePipeline;
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeline), "pipeline.world");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyboxPipeline), "pipeline.skybox");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_shadowPipeline), "pipeline.shadow.voxels");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeShadowPipeline), "pipeline.shadow.pipes");
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_grassBillboardShadowPipeline),
+        "pipeline.shadow.grass"
+    );
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_tonemapPipeline), "pipeline.tonemap");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewAddPipeline), "pipeline.preview.add");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewRemovePipeline), "pipeline.preview.remove");
+    VOX_LOGI("render") << "graphics pipelines ready (shadow + hdr scene + tonemap + preview="
+              << (m_supportsWireframePreview ? "wireframe" : "ghost")
+              << ")\n";
+    return true;
+}
 
 } // namespace render
