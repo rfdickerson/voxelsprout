@@ -1377,18 +1377,21 @@ bool RendererBackend::createVoxelGiResources() {
     );
 
     constexpr const char* kVoxelGiSkyExposureShaderPath = "../src/render/shaders/voxel_gi_sky_exposure.comp.slang.spv";
+    constexpr const char* kVoxelGiOccupancyShaderPath = "../src/render/shaders/voxel_gi_occupancy.comp.slang.spv";
     constexpr const char* kVoxelGiSurfaceShaderPath = "../src/render/shaders/voxel_gi_surface.comp.slang.spv";
     constexpr const char* kVoxelGiInjectShaderPath = "../src/render/shaders/voxel_gi_inject.comp.slang.spv";
     constexpr const char* kVoxelGiPropagateShaderPath = "../src/render/shaders/voxel_gi_propagate.comp.slang.spv";
     const bool hasSkyExposureShader = readBinaryFile(kVoxelGiSkyExposureShaderPath).has_value();
+    const bool hasOccupancyShader = readBinaryFile(kVoxelGiOccupancyShaderPath).has_value();
     const bool hasSurfaceShader = readBinaryFile(kVoxelGiSurfaceShaderPath).has_value();
     const bool hasInjectShader = readBinaryFile(kVoxelGiInjectShaderPath).has_value();
     const bool hasPropagateShader = readBinaryFile(kVoxelGiPropagateShaderPath).has_value();
-    if (!hasSkyExposureShader || !hasSurfaceShader || !hasInjectShader || !hasPropagateShader) {
+    if (!hasSkyExposureShader || !hasOccupancyShader || !hasSurfaceShader || !hasInjectShader || !hasPropagateShader) {
         VOX_LOGI("render")
             << "voxel GI compute shaders not found; keeping static volume fallback (expected: "
-            << kVoxelGiSkyExposureShaderPath << ", " << kVoxelGiSurfaceShaderPath << ", " << kVoxelGiInjectShaderPath
-            << ", " << kVoxelGiPropagateShaderPath << ")\n";
+            << kVoxelGiSkyExposureShaderPath << ", " << kVoxelGiOccupancyShaderPath << ", "
+            << kVoxelGiSurfaceShaderPath << ", " << kVoxelGiInjectShaderPath << ", "
+            << kVoxelGiPropagateShaderPath << ")\n";
         m_voxelGiComputeAvailable = false;
         m_voxelGiInitialized = false;
         m_voxelGiSkyExposureInitialized = false;
@@ -1475,7 +1478,25 @@ bool RendererBackend::createVoxelGiResources() {
         skyExposureBinding.descriptorCount = 1;
         skyExposureBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 13> bindings = {
+        VkDescriptorSetLayoutBinding occupancyWriteBinding{};
+        occupancyWriteBinding.binding = 13;
+        occupancyWriteBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        occupancyWriteBinding.descriptorCount = 1;
+        occupancyWriteBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding chunkMetaBinding{};
+        chunkMetaBinding.binding = 14;
+        chunkMetaBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        chunkMetaBinding.descriptorCount = 1;
+        chunkMetaBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding chunkVoxelBinding{};
+        chunkVoxelBinding.binding = 15;
+        chunkVoxelBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        chunkVoxelBinding.descriptorCount = 1;
+        chunkVoxelBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 16> bindings = {
             cameraBinding,
             shadowBinding,
             injectWriteBinding,
@@ -1488,7 +1509,10 @@ bool RendererBackend::createVoxelGiResources() {
             surfaceNegYBinding,
             surfacePosZBinding,
             surfaceNegZBinding,
-            skyExposureBinding
+            skyExposureBinding,
+            occupancyWriteBinding,
+            chunkMetaBinding,
+            chunkVoxelBinding
         };
 
         if (!createDescriptorSetLayout(
@@ -1503,11 +1527,12 @@ bool RendererBackend::createVoxelGiResources() {
     }
 
     if (m_voxelGiDescriptorPool == VK_NULL_HANDLE) {
-        const std::array<VkDescriptorPoolSize, 4> poolSizes = {
+        const std::array<VkDescriptorPoolSize, 5> poolSizes = {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 9 * kMaxFramesInFlight}
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10 * kMaxFramesInFlight},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kMaxFramesInFlight}
         };
         if (!createDescriptorPool(
                 poolSizes,
@@ -1533,21 +1558,33 @@ bool RendererBackend::createVoxelGiResources() {
     }
     m_voxelGiDescriptorWriteKeyValid.fill(false);
 
-    std::array<VkShaderModule, 4> shaderModules = {
+    std::array<VkShaderModule, 5> shaderModules = {
+        VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE
     };
     VkShaderModule& skyExposureShaderModule = shaderModules[0];
-    VkShaderModule& surfaceShaderModule = shaderModules[1];
-    VkShaderModule& injectShaderModule = shaderModules[2];
-    VkShaderModule& propagateShaderModule = shaderModules[3];
+    VkShaderModule& occupancyShaderModule = shaderModules[1];
+    VkShaderModule& surfaceShaderModule = shaderModules[2];
+    VkShaderModule& injectShaderModule = shaderModules[3];
+    VkShaderModule& propagateShaderModule = shaderModules[4];
     if (!createShaderModuleFromFile(
             m_device,
             kVoxelGiSkyExposureShaderPath,
             "voxel_gi_sky_exposure.comp",
             skyExposureShaderModule
+        )) {
+        destroyShaderModules(m_device, shaderModules);
+        destroyVoxelGiResources();
+        return false;
+    }
+    if (!createShaderModuleFromFile(
+            m_device,
+            kVoxelGiOccupancyShaderPath,
+            "voxel_gi_occupancy.comp",
+            occupancyShaderModule
         )) {
         destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
@@ -1601,6 +1638,17 @@ bool RendererBackend::createVoxelGiResources() {
             m_voxelGiSkyExposurePipeline,
             "vkCreateComputePipelines(voxelGiSkyExposure)",
             "pipeline.voxelGi.skyExposure"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
+        destroyVoxelGiResources();
+        return false;
+    }
+    if (!createComputePipeline(
+            m_voxelGiPipelineLayout,
+            occupancyShaderModule,
+            m_voxelGiOccupancyPipeline,
+            "vkCreateComputePipelines(voxelGiOccupancy)",
+            "pipeline.voxelGi.occupancy"
         )) {
         destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
@@ -1821,12 +1869,11 @@ void RendererBackend::destroyVoxelGiResources() {
     m_voxelGiHasPreviousFrameState = false;
     m_voxelGiPreviousBounceStrength = 0.0f;
     m_voxelGiPreviousDiffusionSoftness = 0.0f;
-    m_voxelGiOccupancyStagingRgba.clear();
     m_voxelGiOccupancyBuildOrigin = {0.0f, 0.0f, 0.0f};
-    m_voxelGiOccupancyBuildWorldVersion = 0;
-    m_voxelGiOccupancyBuildNextZ = 0;
-    m_voxelGiOccupancyBuildInProgress = false;
-    m_voxelGiOccupancyUploadPending = false;
+    m_voxelGiOccupancyFullRebuildCursor = 0;
+    m_voxelGiOccupancyFullRebuildInProgress = false;
+    m_voxelGiOccupancyFullRebuildNeedsClear = false;
+    m_voxelGiDirtyChunkIndices.clear();
 }
 
 

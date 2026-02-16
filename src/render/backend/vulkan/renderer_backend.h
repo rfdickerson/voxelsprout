@@ -167,7 +167,7 @@ private:
     static constexpr uint32_t kGpuTimestampQueryCount = 22;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
     static constexpr std::size_t kMainDescriptorWriteKeyWordCount = 23;
-    static constexpr std::size_t kVoxelGiDescriptorWriteKeyWordCount = 16;
+    static constexpr std::size_t kVoxelGiDescriptorWriteKeyWordCount = 23;
     static constexpr std::size_t kAutoExposureDescriptorWriteKeyWordCount = 6;
     static constexpr std::size_t kSunShaftDescriptorWriteKeyWordCount = 10;
 
@@ -209,7 +209,9 @@ private:
         uint32_t aoFrameIndex,
         const VkDescriptorBufferInfo& cameraBufferInfo,
         VkBuffer autoExposureHistogramBuffer,
-        VkBuffer autoExposureStateBuffer
+        VkBuffer autoExposureStateBuffer,
+        const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo = nullptr,
+        const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo = nullptr
     );
     bool createChunkBuffers(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
     bool createFrameResources();
@@ -228,7 +230,8 @@ private:
     void recordVoxelGiDispatchSequence(
         VkCommandBuffer commandBuffer,
         uint32_t mvpDynamicOffset,
-        VkQueryPool gpuTimestampQueryPool
+        VkQueryPool gpuTimestampQueryPool,
+        uint32_t occupancyDispatchZ
     );
     bool recreateSwapchain();
     void destroySwapchain();
@@ -591,12 +594,11 @@ private:
     std::array<std::array<float, 3>, 9> m_voxelGiPreviousShIrradiance{};
     float m_voxelGiPreviousBounceStrength = 0.0f;
     float m_voxelGiPreviousDiffusionSoftness = 0.0f;
-    std::vector<std::uint8_t> m_voxelGiOccupancyStagingRgba;
     std::array<float, 3> m_voxelGiOccupancyBuildOrigin{0.0f, 0.0f, 0.0f};
-    std::uint64_t m_voxelGiOccupancyBuildWorldVersion = 0;
-    std::uint32_t m_voxelGiOccupancyBuildNextZ = 0;
-    bool m_voxelGiOccupancyBuildInProgress = false;
-    bool m_voxelGiOccupancyUploadPending = false;
+    std::size_t m_voxelGiOccupancyFullRebuildCursor = 0;
+    bool m_voxelGiOccupancyFullRebuildInProgress = false;
+    bool m_voxelGiOccupancyFullRebuildNeedsClear = false;
+    std::vector<std::size_t> m_voxelGiDirtyChunkIndices;
     BufferHandle m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     bool m_autoExposureComputeAvailable = false;
@@ -654,6 +656,7 @@ private:
     VkPipeline& m_previewRemovePipeline = m_pipelineManager.previewRemovePipeline;
     VkPipelineLayout& m_voxelGiPipelineLayout = m_pipelineManager.voxelGiPipelineLayout;
     VkPipeline& m_voxelGiSurfacePipeline = m_pipelineManager.voxelGiSurfacePipeline;
+    VkPipeline& m_voxelGiOccupancyPipeline = m_pipelineManager.voxelGiOccupancyPipeline;
     VkPipeline& m_voxelGiSkyExposurePipeline = m_pipelineManager.voxelGiSkyExposurePipeline;
     VkPipeline& m_voxelGiInjectPipeline = m_pipelineManager.voxelGiInjectPipeline;
     VkPipeline& m_voxelGiPropagatePipeline = m_pipelineManager.voxelGiPropagatePipeline;

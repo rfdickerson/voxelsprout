@@ -264,7 +264,9 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     uint32_t aoFrameIndex,
     const VkDescriptorBufferInfo& cameraBufferInfo,
     VkBuffer autoExposureHistogramBuffer,
-    VkBuffer autoExposureStateBuffer
+    VkBuffer autoExposureStateBuffer,
+    const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo,
+    const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo
 ) {
     const uint32_t frameIndex = m_currentFrame;
     VkWriteDescriptorSet write{};
@@ -470,6 +472,11 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         voxelGiOccupancyInfo.imageView = m_voxelGiOccupancyImageView;
         voxelGiOccupancyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+        VkDescriptorImageInfo voxelGiOccupancyStorageInfo{};
+        voxelGiOccupancyStorageInfo.sampler = VK_NULL_HANDLE;
+        voxelGiOccupancyStorageInfo.imageView = m_voxelGiOccupancyImageView;
+        voxelGiOccupancyStorageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
         std::array<VkDescriptorImageInfo, 6> voxelGiSurfaceFaceInfos{};
         for (std::size_t faceIndex = 0; faceIndex < voxelGiSurfaceFaceInfos.size(); ++faceIndex) {
             voxelGiSurfaceFaceInfos[faceIndex].sampler = VK_NULL_HANDLE;
@@ -482,7 +489,16 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         voxelGiSkyExposureInfo.imageView = m_voxelGiSkyExposureImageView;
         voxelGiSkyExposureInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-        std::array<VkWriteDescriptorSet, 13> voxelGiWrites{};
+        VkDescriptorBufferInfo voxelGiFallbackStorageInfo{};
+        voxelGiFallbackStorageInfo.buffer = autoExposureStateBufferInfo.buffer;
+        voxelGiFallbackStorageInfo.offset = 0;
+        voxelGiFallbackStorageInfo.range = autoExposureStateBufferInfo.range;
+        const VkDescriptorBufferInfo& voxelGiChunkMetaInfo =
+            (voxelGiChunkMetaBufferInfo != nullptr) ? *voxelGiChunkMetaBufferInfo : voxelGiFallbackStorageInfo;
+        const VkDescriptorBufferInfo& voxelGiChunkVoxelInfo =
+            (voxelGiChunkVoxelBufferInfo != nullptr) ? *voxelGiChunkVoxelBufferInfo : voxelGiFallbackStorageInfo;
+
+        std::array<VkWriteDescriptorSet, 16> voxelGiWrites{};
         voxelGiWrites[0] = write;
         voxelGiWrites[0].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
         voxelGiWrites[0].dstBinding = 0;
@@ -574,6 +590,27 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         voxelGiWrites[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         voxelGiWrites[12].pImageInfo = &voxelGiSkyExposureInfo;
 
+        voxelGiWrites[13] = write;
+        voxelGiWrites[13].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+        voxelGiWrites[13].dstBinding = 13;
+        voxelGiWrites[13].descriptorCount = 1;
+        voxelGiWrites[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        voxelGiWrites[13].pImageInfo = &voxelGiOccupancyStorageInfo;
+
+        voxelGiWrites[14] = write;
+        voxelGiWrites[14].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+        voxelGiWrites[14].dstBinding = 14;
+        voxelGiWrites[14].descriptorCount = 1;
+        voxelGiWrites[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        voxelGiWrites[14].pBufferInfo = &voxelGiChunkMetaInfo;
+
+        voxelGiWrites[15] = write;
+        voxelGiWrites[15].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+        voxelGiWrites[15].dstBinding = 15;
+        voxelGiWrites[15].descriptorCount = 1;
+        voxelGiWrites[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        voxelGiWrites[15].pBufferInfo = &voxelGiChunkVoxelInfo;
+
         const std::array<std::uint64_t, kVoxelGiDescriptorWriteKeyWordCount> voxelGiDescriptorWriteKey = {
             vkHandleToUint64(m_voxelGiDescriptorSets[frameIndex]),
             vkHandleToUint64(cameraBufferInfo.buffer),
@@ -590,7 +627,14 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             vkHandleToUint64(voxelGiSurfaceFaceInfos[3].imageView),
             vkHandleToUint64(voxelGiSurfaceFaceInfos[4].imageView),
             vkHandleToUint64(voxelGiSurfaceFaceInfos[5].imageView),
-            vkHandleToUint64(voxelGiSkyExposureInfo.imageView)
+            vkHandleToUint64(voxelGiSkyExposureInfo.imageView),
+            vkHandleToUint64(voxelGiOccupancyStorageInfo.imageView),
+            vkHandleToUint64(voxelGiChunkMetaInfo.buffer),
+            static_cast<std::uint64_t>(voxelGiChunkMetaInfo.offset),
+            static_cast<std::uint64_t>(voxelGiChunkMetaInfo.range),
+            vkHandleToUint64(voxelGiChunkVoxelInfo.buffer),
+            static_cast<std::uint64_t>(voxelGiChunkVoxelInfo.offset),
+            static_cast<std::uint64_t>(voxelGiChunkVoxelInfo.range)
         };
         if (descriptorWriteKeyChanged(
                 m_voxelGiDescriptorWriteKeys[frameIndex],
