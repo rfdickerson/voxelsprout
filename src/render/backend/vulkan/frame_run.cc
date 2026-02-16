@@ -830,277 +830,32 @@ void RendererBackend::renderFrame(
     const auto& beltCargoInstanceSliceOpt = frameInstanceDrawData.beltCargoInstanceSliceOpt;
     const std::vector<ReadyMagicaDraw>& readyMagicaDraws = frameInstanceDrawData.readyMagicaDraws;
 
+    const FrameChunkDrawData frameChunkDrawData = prepareFrameChunkDrawData(
+        chunkGrid.chunks(),
+        visibleChunkIndices,
+        lightViewProjMatrices,
+        cameraChunkX,
+        cameraChunkY,
+        cameraChunkZ
+    );
+    const auto& chunkInstanceSliceOpt = frameChunkDrawData.chunkInstanceSliceOpt;
+    const auto& chunkIndirectSliceOpt = frameChunkDrawData.chunkIndirectSliceOpt;
+    const auto& shadowChunkInstanceSliceOpt = frameChunkDrawData.shadowChunkInstanceSliceOpt;
+    const auto& shadowCascadeIndirectSliceOpts = frameChunkDrawData.shadowCascadeIndirectSliceOpts;
+    const VkBuffer chunkInstanceBuffer = frameChunkDrawData.chunkInstanceBuffer;
+    const VkBuffer chunkIndirectBuffer = frameChunkDrawData.chunkIndirectBuffer;
+    const VkBuffer shadowChunkInstanceBuffer = frameChunkDrawData.shadowChunkInstanceBuffer;
     const VkBuffer chunkVertexBuffer = m_bufferAllocator.getBuffer(m_chunkVertexBufferHandle);
     const VkBuffer chunkIndexBuffer = m_bufferAllocator.getBuffer(m_chunkIndexBufferHandle);
-    const bool chunkDrawBuffersReady = chunkVertexBuffer != VK_NULL_HANDLE && chunkIndexBuffer != VK_NULL_HANDLE;
-
-    std::vector<ChunkInstanceData> chunkInstanceData;
-    chunkInstanceData.reserve(m_chunkDrawRanges.size() + 1);
-    chunkInstanceData.push_back(ChunkInstanceData{});
-    std::vector<VkDrawIndexedIndirectCommand> chunkIndirectCommands;
-    chunkIndirectCommands.reserve(m_chunkDrawRanges.size());
-    std::vector<ChunkInstanceData> shadowChunkInstanceData;
-    shadowChunkInstanceData.reserve(m_chunkDrawRanges.size() + 1);
-    shadowChunkInstanceData.push_back(ChunkInstanceData{});
-    std::vector<VkDrawIndexedIndirectCommand> shadowChunkIndirectCommands;
-    shadowChunkIndirectCommands.reserve(m_chunkDrawRanges.size());
-    std::array<std::vector<VkDrawIndexedIndirectCommand>, kShadowCascadeCount> shadowCascadeIndirectCommands{};
-    for (auto& cascadeCommands : shadowCascadeIndirectCommands) {
-        cascadeCommands.reserve((m_chunkDrawRanges.size() / kShadowCascadeCount) + 1u);
-    }
-    const std::vector<voxelsprout::world::Chunk>& chunks = chunkGrid.chunks();
-    auto appendChunkLods = [&](
-                               std::size_t chunkArrayIndex,
-                               std::vector<ChunkInstanceData>& outInstanceData,
-                               std::vector<VkDrawIndexedIndirectCommand>& outIndirectCommands,
-                               bool countVisibleLodStats
-                           ) {
-        if (chunkArrayIndex >= chunkGrid.chunks().size()) {
-            return;
-        }
-        const voxelsprout::world::Chunk& drawChunk = chunks[chunkArrayIndex];
-        const bool allowDetailLods =
-            drawChunk.chunkX() == cameraChunkX &&
-            drawChunk.chunkY() == cameraChunkY &&
-            drawChunk.chunkZ() == cameraChunkZ;
-        for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
-            if (lodIndex > 0 && !allowDetailLods) {
-                continue;
-            }
-            const std::size_t drawRangeIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
-            if (drawRangeIndex >= m_chunkDrawRanges.size()) {
-                continue;
-            }
-            const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
-            if (drawRange.indexCount == 0 || !chunkDrawBuffersReady) {
-                continue;
-            }
-
-            const uint32_t instanceIndex = static_cast<uint32_t>(outInstanceData.size());
-            ChunkInstanceData instance{};
-            instance.chunkOffset[0] = drawRange.offsetX;
-            instance.chunkOffset[1] = drawRange.offsetY;
-            instance.chunkOffset[2] = drawRange.offsetZ;
-            instance.chunkOffset[3] = 0.0f;
-            outInstanceData.push_back(instance);
-
-            VkDrawIndexedIndirectCommand indirectCommand{};
-            indirectCommand.indexCount = drawRange.indexCount;
-            indirectCommand.instanceCount = 1;
-            indirectCommand.firstIndex = drawRange.firstIndex;
-            indirectCommand.vertexOffset = drawRange.vertexOffset;
-            indirectCommand.firstInstance = instanceIndex;
-            outIndirectCommands.push_back(indirectCommand);
-
-            if (countVisibleLodStats) {
-                if (lodIndex == 0) {
-                    ++m_debugDrawnLod0Ranges;
-                } else if (lodIndex == 1) {
-                    ++m_debugDrawnLod1Ranges;
-                } else {
-                    ++m_debugDrawnLod2Ranges;
-                }
-            }
-        }
-    };
-    if (!visibleChunkIndices.empty()) {
-        for (const std::size_t chunkArrayIndex : visibleChunkIndices) {
-            appendChunkLods(chunkArrayIndex, chunkInstanceData, chunkIndirectCommands, true);
-        }
-    } else {
-        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-            appendChunkLods(chunkArrayIndex, chunkInstanceData, chunkIndirectCommands, true);
-        }
-    }
-
-    const auto appendShadowChunkLods = [&](std::size_t chunkArrayIndex, uint32_t cascadeMask) {
-        if (chunkArrayIndex >= chunkGrid.chunks().size()) {
-            return;
-        }
-        const voxelsprout::world::Chunk& drawChunk = chunks[chunkArrayIndex];
-        const bool allowDetailLods =
-            drawChunk.chunkX() == cameraChunkX &&
-            drawChunk.chunkY() == cameraChunkY &&
-            drawChunk.chunkZ() == cameraChunkZ;
-        for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
-            if (lodIndex > 0 && !allowDetailLods) {
-                continue;
-            }
-            const std::size_t drawRangeIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
-            if (drawRangeIndex >= m_chunkDrawRanges.size()) {
-                continue;
-            }
-            const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
-            if (drawRange.indexCount == 0 || !chunkDrawBuffersReady) {
-                continue;
-            }
-
-            const uint32_t instanceIndex = static_cast<uint32_t>(shadowChunkInstanceData.size());
-            ChunkInstanceData instance{};
-            instance.chunkOffset[0] = drawRange.offsetX;
-            instance.chunkOffset[1] = drawRange.offsetY;
-            instance.chunkOffset[2] = drawRange.offsetZ;
-            instance.chunkOffset[3] = 0.0f;
-            shadowChunkInstanceData.push_back(instance);
-
-            VkDrawIndexedIndirectCommand indirectCommand{};
-            indirectCommand.indexCount = drawRange.indexCount;
-            indirectCommand.instanceCount = 1;
-            indirectCommand.firstIndex = drawRange.firstIndex;
-            indirectCommand.vertexOffset = drawRange.vertexOffset;
-            indirectCommand.firstInstance = instanceIndex;
-            shadowChunkIndirectCommands.push_back(indirectCommand);
-            for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-                if ((cascadeMask & (1u << cascadeIndex)) != 0u) {
-                    shadowCascadeIndirectCommands[cascadeIndex].push_back(indirectCommand);
-                }
-            }
-        }
-    };
-
-    const std::vector<std::uint8_t> shadowCandidateMask = buildShadowCandidateMask(chunks, visibleChunkIndices);
-
-    constexpr float kShadowCasterClipMargin = 0.08f;
-    if (!m_shadowDebugSettings.enableOccluderCulling) {
-        const uint32_t allCascadeMask = (1u << kShadowCascadeCount) - 1u;
-        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-            appendShadowChunkLods(chunkArrayIndex, allCascadeMask);
-        }
-    } else {
-        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-            if (!shadowCandidateMask.empty() && shadowCandidateMask[chunkArrayIndex] == 0u) {
-                continue;
-            }
-            const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
-            uint32_t cascadeMask = 0u;
-            for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-                if (chunkIntersectsShadowCascadeClip(chunk, lightViewProjMatrices[cascadeIndex], kShadowCasterClipMargin)) {
-                    cascadeMask |= (1u << cascadeIndex);
-                }
-            }
-            if (cascadeMask != 0u) {
-                appendShadowChunkLods(chunkArrayIndex, cascadeMask);
-            }
-        }
-    }
-
-    const VkDeviceSize chunkInstanceBytes =
-        static_cast<VkDeviceSize>(chunkInstanceData.size() * sizeof(ChunkInstanceData));
-    std::optional<FrameArenaSlice> chunkInstanceSliceOpt = std::nullopt;
-    if (chunkInstanceBytes > 0) {
-        chunkInstanceSliceOpt = m_frameArena.allocateUpload(
-            chunkInstanceBytes,
-            static_cast<VkDeviceSize>(alignof(ChunkInstanceData)),
-            FrameArenaUploadKind::InstanceData
-        );
-        if (chunkInstanceSliceOpt.has_value() && chunkInstanceSliceOpt->mapped != nullptr) {
-            std::memcpy(chunkInstanceSliceOpt->mapped, chunkInstanceData.data(), static_cast<size_t>(chunkInstanceBytes));
-        } else {
-            chunkInstanceSliceOpt.reset();
-        }
-    }
-
-    const VkDeviceSize chunkIndirectBytes =
-        static_cast<VkDeviceSize>(chunkIndirectCommands.size() * sizeof(VkDrawIndexedIndirectCommand));
-    std::optional<FrameArenaSlice> chunkIndirectSliceOpt = std::nullopt;
-    if (chunkIndirectBytes > 0) {
-        chunkIndirectSliceOpt = m_frameArena.allocateUpload(
-            chunkIndirectBytes,
-            static_cast<VkDeviceSize>(alignof(VkDrawIndexedIndirectCommand)),
-            FrameArenaUploadKind::Unknown
-        );
-        if (chunkIndirectSliceOpt.has_value() && chunkIndirectSliceOpt->mapped != nullptr) {
-            std::memcpy(
-                chunkIndirectSliceOpt->mapped,
-                chunkIndirectCommands.data(),
-                static_cast<size_t>(chunkIndirectBytes)
-            );
-        } else {
-            chunkIndirectSliceOpt.reset();
-        }
-    }
-
-    const VkDeviceSize shadowChunkInstanceBytes =
-        static_cast<VkDeviceSize>(shadowChunkInstanceData.size() * sizeof(ChunkInstanceData));
-    std::optional<FrameArenaSlice> shadowChunkInstanceSliceOpt = std::nullopt;
-    if (shadowChunkInstanceBytes > 0) {
-        shadowChunkInstanceSliceOpt = m_frameArena.allocateUpload(
-            shadowChunkInstanceBytes,
-            static_cast<VkDeviceSize>(alignof(ChunkInstanceData)),
-            FrameArenaUploadKind::InstanceData
-        );
-        if (shadowChunkInstanceSliceOpt.has_value() && shadowChunkInstanceSliceOpt->mapped != nullptr) {
-            std::memcpy(
-                shadowChunkInstanceSliceOpt->mapped,
-                shadowChunkInstanceData.data(),
-                static_cast<size_t>(shadowChunkInstanceBytes)
-            );
-        } else {
-            shadowChunkInstanceSliceOpt.reset();
-        }
-    }
-
-    std::array<std::optional<FrameArenaSlice>, kShadowCascadeCount> shadowCascadeIndirectSliceOpts{};
-    std::array<VkBuffer, kShadowCascadeCount> shadowCascadeIndirectBuffers{};
-    shadowCascadeIndirectBuffers.fill(VK_NULL_HANDLE);
-    std::array<uint32_t, kShadowCascadeCount> shadowCascadeIndirectDrawCounts{};
-    shadowCascadeIndirectDrawCounts.fill(0u);
-    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-        const VkDeviceSize shadowCascadeIndirectBytes = static_cast<VkDeviceSize>(
-            shadowCascadeIndirectCommands[cascadeIndex].size() * sizeof(VkDrawIndexedIndirectCommand)
-        );
-        if (shadowCascadeIndirectBytes == 0) {
-            continue;
-        }
-        shadowCascadeIndirectSliceOpts[cascadeIndex] = m_frameArena.allocateUpload(
-            shadowCascadeIndirectBytes,
-            static_cast<VkDeviceSize>(alignof(VkDrawIndexedIndirectCommand)),
-            FrameArenaUploadKind::Unknown
-        );
-        if (!shadowCascadeIndirectSliceOpts[cascadeIndex].has_value() ||
-            shadowCascadeIndirectSliceOpts[cascadeIndex]->mapped == nullptr) {
-            shadowCascadeIndirectSliceOpts[cascadeIndex].reset();
-            continue;
-        }
-        std::memcpy(
-            shadowCascadeIndirectSliceOpts[cascadeIndex]->mapped,
-            shadowCascadeIndirectCommands[cascadeIndex].data(),
-            static_cast<size_t>(shadowCascadeIndirectBytes)
-        );
-        shadowCascadeIndirectBuffers[cascadeIndex] =
-            m_bufferAllocator.getBuffer(shadowCascadeIndirectSliceOpts[cascadeIndex]->buffer);
-        shadowCascadeIndirectDrawCounts[cascadeIndex] =
-            static_cast<uint32_t>(shadowCascadeIndirectCommands[cascadeIndex].size());
-    }
-
-    const VkBuffer chunkInstanceBuffer =
-        chunkInstanceSliceOpt.has_value() ? m_bufferAllocator.getBuffer(chunkInstanceSliceOpt->buffer) : VK_NULL_HANDLE;
-    const VkBuffer chunkIndirectBuffer =
-        chunkIndirectSliceOpt.has_value() ? m_bufferAllocator.getBuffer(chunkIndirectSliceOpt->buffer) : VK_NULL_HANDLE;
-    const VkBuffer shadowChunkInstanceBuffer =
-        shadowChunkInstanceSliceOpt.has_value() ? m_bufferAllocator.getBuffer(shadowChunkInstanceSliceOpt->buffer)
-                                                : VK_NULL_HANDLE;
+    const std::array<bool, kShadowCascadeCount>& canDrawShadowChunksIndirectByCascade =
+        frameChunkDrawData.canDrawShadowChunksIndirectByCascade;
+    const std::array<VkBuffer, kShadowCascadeCount>& shadowCascadeIndirectBuffers =
+        frameChunkDrawData.shadowCascadeIndirectBuffers;
+    const std::array<uint32_t, kShadowCascadeCount>& shadowCascadeIndirectDrawCounts =
+        frameChunkDrawData.shadowCascadeIndirectDrawCounts;
+    const bool canDrawChunksIndirect = frameChunkDrawData.canDrawChunksIndirect;
     const bool canDrawMagica = !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
-    const uint32_t chunkIndirectDrawCount = static_cast<uint32_t>(chunkIndirectCommands.size());
-    m_debugChunkIndirectCommandCount = chunkIndirectDrawCount;
-    const bool canDrawChunksIndirect =
-        chunkIndirectDrawCount > 0 &&
-        chunkInstanceSliceOpt.has_value() &&
-        chunkIndirectSliceOpt.has_value() &&
-        chunkInstanceBuffer != VK_NULL_HANDLE &&
-        chunkIndirectBuffer != VK_NULL_HANDLE &&
-        chunkDrawBuffersReady;
-    std::array<bool, kShadowCascadeCount> canDrawShadowChunksIndirectByCascade{};
-    canDrawShadowChunksIndirectByCascade.fill(false);
-    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-        canDrawShadowChunksIndirectByCascade[cascadeIndex] =
-            shadowCascadeIndirectDrawCounts[cascadeIndex] > 0 &&
-            shadowChunkInstanceSliceOpt.has_value() &&
-            shadowCascadeIndirectSliceOpts[cascadeIndex].has_value() &&
-            shadowChunkInstanceBuffer != VK_NULL_HANDLE &&
-            shadowCascadeIndirectBuffers[cascadeIndex] != VK_NULL_HANDLE &&
-            chunkDrawBuffersReady;
-    }
+    const uint32_t chunkIndirectDrawCount = frameChunkDrawData.chunkIndirectDrawCount;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
         m_debugDrawCallsTotal += drawCount;

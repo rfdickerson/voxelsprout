@@ -346,3 +346,9 @@ Protects deterministic simulation
 Prevents AI from “engine-ifying” the project
 
 Keeps it scalable without losing identity
+
+Linux builds should use
+cmake-build-linux
+
+Windows builds use:
+cmake-build-release
