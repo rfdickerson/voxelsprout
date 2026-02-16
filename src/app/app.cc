@@ -407,6 +407,11 @@ float wrapDegreesSigned(float degrees) {
     return wrapped;
 }
 
+float lerpWrappedDegrees(float fromDegrees, float toDegrees, float alpha) {
+    const float delta = wrapDegreesSigned(toDegrees - fromDegrees);
+    return wrapDegreesSigned(fromDegrees + (delta * alpha));
+}
+
 voxelsprout::core::Dir6 horizontalDirFromYaw(float yawDegrees) {
     const float yawRadians = voxelsprout::math::radians(yawDegrees);
     const float x = std::cos(yawRadians);
@@ -591,6 +596,7 @@ void App::run() {
     VOX_LOGI("app") << "voxel edit mode disabled by default (press V to toggle)";
     double previousTime = glfwGetTime();
     double simulationAccumulatorSeconds = 0.0;
+    m_cameraPrevious = m_camera;
     uint64_t frameCount = 0;
 
     while (m_window != nullptr && glfwWindowShouldClose(m_window) == GLFW_FALSE) {
@@ -613,6 +619,8 @@ void App::run() {
         int simulationStepCount = 0;
         while (simulationAccumulatorSeconds >= kSimulationFixedStepSeconds &&
                simulationStepCount < kMaxSimulationStepsPerFrame) {
+            m_cameraPrevious = m_camera;
+            updateCamera(static_cast<float>(kSimulationFixedStepSeconds));
             m_simulation.update(static_cast<float>(kSimulationFixedStepSeconds));
             simulationAccumulatorSeconds -= kSimulationFixedStepSeconds;
             ++simulationStepCount;
@@ -636,8 +644,6 @@ void App::run() {
 }
 
 void App::update(float dt, float simulationAlpha) {
-    updateCamera(dt);
-
     if (!m_debugUiVisible && m_input.toggleVoxelEditModeDown && !m_wasToggleVoxelEditModeDown) {
         m_voxelEditModeEnabled = !m_voxelEditModeEnabled;
         VOX_LOGI("app") << "voxel edit mode "
@@ -750,6 +756,15 @@ void App::update(float dt, float simulationAlpha) {
         const float sunYawDegrees = wrapDegreesSigned((sunAzimuthDegrees - 90.0f) + kDayCycleAzimuthOffsetDegrees);
         m_renderer.setSunAngles(sunYawDegrees, sunPitchDegrees);
     }
+
+    const float renderAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
+    const float renderCameraX = m_cameraPrevious.x + ((m_camera.x - m_cameraPrevious.x) * renderAlpha);
+    const float renderCameraY = m_cameraPrevious.y + ((m_camera.y - m_cameraPrevious.y) * renderAlpha);
+    const float renderCameraZ = m_cameraPrevious.z + ((m_camera.z - m_cameraPrevious.z) * renderAlpha);
+    const float renderCameraYawDegrees =
+        lerpWrappedDegrees(m_cameraPrevious.yawDegrees, m_camera.yawDegrees, renderAlpha);
+    const float renderCameraPitchDegrees =
+        m_cameraPrevious.pitchDegrees + ((m_camera.pitchDegrees - m_cameraPrevious.pitchDegrees) * renderAlpha);
 
     voxelsprout::render::VoxelPreview preview{};
     const bool pipeSelected = isPipeHotbarSelected();
@@ -914,11 +929,11 @@ void App::update(float dt, float simulationAlpha) {
     }
 
     const voxelsprout::render::CameraPose cameraPose{
-        m_camera.x,
-        m_camera.y,
-        m_camera.z,
-        m_camera.yawDegrees,
-        m_camera.pitchDegrees,
+        renderCameraX,
+        renderCameraY,
+        renderCameraZ,
+        renderCameraYawDegrees,
+        renderCameraPitchDegrees,
         m_camera.fovDegrees
     };
 
@@ -952,14 +967,14 @@ void App::update(float dt, float simulationAlpha) {
                 ? static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight)
                 : kRenderAspectFallback;
         const CameraFrustum cameraFrustum = buildCameraFrustum(
-            voxelsprout::math::Vector3{m_camera.x, m_camera.y, m_camera.z},
-            m_camera.yawDegrees,
-            m_camera.pitchDegrees,
+            voxelsprout::math::Vector3{renderCameraX, renderCameraY, renderCameraZ},
+            renderCameraYawDegrees,
+            renderCameraPitchDegrees,
             m_camera.fovDegrees,
             aspectRatio
         );
         if (cameraFrustum.valid && m_chunkClipmapIndex.valid()) {
-            m_chunkClipmapIndex.updateCamera(m_camera.x, m_camera.y, m_camera.z, &spatialQueryStats);
+            m_chunkClipmapIndex.updateCamera(renderCameraX, renderCameraY, renderCameraZ, &spatialQueryStats);
             std::vector<std::size_t> candidateChunkIndices =
                 m_chunkClipmapIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
             spatialQueriesUsed = true;
@@ -1183,6 +1198,9 @@ void App::pollInput() {
         m_input.mouseDeltaY = 0.0f;
     }
 
+    m_pendingMouseDeltaX += m_input.mouseDeltaX;
+    m_pendingMouseDeltaY += m_input.mouseDeltaY;
+
     m_lastMouseX = mouseX;
     m_lastMouseY = mouseY;
 }
@@ -1195,9 +1213,14 @@ void App::updateCamera(float dt) {
     }
     m_wasToggleHoverDown = m_input.toggleHoverDown;
 
+    const float mouseDeltaX = m_pendingMouseDeltaX;
+    const float mouseDeltaY = m_pendingMouseDeltaY;
+    m_pendingMouseDeltaX = 0.0f;
+    m_pendingMouseDeltaY = 0.0f;
+
     const float mouseSmoothingAlpha = 1.0f - std::exp(-dt / kMouseSmoothingSeconds);
-    m_camera.smoothedMouseDeltaX += (m_input.mouseDeltaX - m_camera.smoothedMouseDeltaX) * mouseSmoothingAlpha;
-    m_camera.smoothedMouseDeltaY += (m_input.mouseDeltaY - m_camera.smoothedMouseDeltaY) * mouseSmoothingAlpha;
+    m_camera.smoothedMouseDeltaX += (mouseDeltaX - m_camera.smoothedMouseDeltaX) * mouseSmoothingAlpha;
+    m_camera.smoothedMouseDeltaY += (mouseDeltaY - m_camera.smoothedMouseDeltaY) * mouseSmoothingAlpha;
 
     m_camera.yawDegrees += m_camera.smoothedMouseDeltaX * kMouseSensitivity;
     m_camera.pitchDegrees += m_camera.smoothedMouseDeltaY * kMouseSensitivity;

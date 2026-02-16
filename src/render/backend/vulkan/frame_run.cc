@@ -624,16 +624,42 @@ void RendererBackend::renderFrame(
     mvpUniform.colorGrading3[3] = 0.0f;
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
-    const float voxelGiOriginX = computeVoxelGiAxisOrigin(camera.x, voxelGiHalfSpan, kVoxelGiCellSize);
+    const float voxelGiDesiredOriginX = computeVoxelGiAxisOrigin(camera.x, voxelGiHalfSpan, kVoxelGiCellSize);
     const float voxelGiDesiredOriginY = computeVoxelGiAxisOrigin(camera.y, voxelGiHalfSpan, kVoxelGiCellSize);
+    const float voxelGiDesiredOriginZ = computeVoxelGiAxisOrigin(camera.z, voxelGiHalfSpan, kVoxelGiCellSize);
+    const float kVoxelGiHorizontalFollowThreshold = kVoxelGiCellSize * 8.0f;
     const float kVoxelGiVerticalFollowThreshold = kVoxelGiCellSize * 4.0f;
-    const float voxelGiOriginY = computeVoxelGiStableOriginY(
-        voxelGiDesiredOriginY,
-        m_voxelGiPreviousGridOrigin[1],
-        m_voxelGiHasPreviousFrameState,
-        kVoxelGiVerticalFollowThreshold
-    );
-    const float voxelGiOriginZ = computeVoxelGiAxisOrigin(camera.z, voxelGiHalfSpan, kVoxelGiCellSize);
+    float voxelGiOriginX = voxelGiDesiredOriginX;
+    float voxelGiOriginY = voxelGiDesiredOriginY;
+    float voxelGiOriginZ = voxelGiDesiredOriginZ;
+    const bool keepVoxelGiGridAnchored =
+        m_voxelGiHasPreviousFrameState &&
+        m_voxelGiOccupancyInitialized &&
+        !m_voxelGiWorldDirty;
+    if (keepVoxelGiGridAnchored) {
+        voxelGiOriginX = m_voxelGiPreviousGridOrigin[0];
+        voxelGiOriginY = m_voxelGiPreviousGridOrigin[1];
+        voxelGiOriginZ = m_voxelGiPreviousGridOrigin[2];
+    } else {
+        voxelGiOriginX = computeVoxelGiStableOriginY(
+            voxelGiDesiredOriginX,
+            m_voxelGiPreviousGridOrigin[0],
+            m_voxelGiHasPreviousFrameState,
+            kVoxelGiHorizontalFollowThreshold
+        );
+        voxelGiOriginY = computeVoxelGiStableOriginY(
+            voxelGiDesiredOriginY,
+            m_voxelGiPreviousGridOrigin[1],
+            m_voxelGiHasPreviousFrameState,
+            kVoxelGiVerticalFollowThreshold
+        );
+        voxelGiOriginZ = computeVoxelGiStableOriginY(
+            voxelGiDesiredOriginZ,
+            m_voxelGiPreviousGridOrigin[2],
+            m_voxelGiHasPreviousFrameState,
+            kVoxelGiHorizontalFollowThreshold
+        );
+    }
     constexpr float kVoxelGiGridMoveThreshold = 0.001f;
     constexpr float kVoxelGiLightingChangeThreshold = 0.001f;
     constexpr float kVoxelGiTuningChangeThreshold = 0.001f;
@@ -713,17 +739,20 @@ void RendererBackend::renderFrame(
 
     std::optional<FrameArenaSlice> voxelGiOccupancySliceOpt = std::nullopt;
     VkBuffer voxelGiOccupancyUploadBuffer = VK_NULL_HANDLE;
+    float voxelGiOccupancyCpuMs = 0.0f;
     if (m_voxelGiComputeAvailable &&
         m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
         m_voxelGiOccupancyImageView != VK_NULL_HANDLE &&
         voxelGiNeedsOccupancyUpload) {
+        const auto occupancyCpuStartTime = std::chrono::steady_clock::now();
         const std::size_t voxelGiCellCount =
             static_cast<std::size_t>(kVoxelGiGridResolution) *
             static_cast<std::size_t>(kVoxelGiGridResolution) *
             static_cast<std::size_t>(kVoxelGiGridResolution);
         // RGBA8 payload for GI occupancy:
         // R = occupancy, GBA = albedo RGB for solid cells.
-        std::vector<std::uint8_t> occupancyData(voxelGiCellCount * 4u, 0u);
+        static thread_local std::vector<std::uint8_t> occupancyDataScratch;
+        occupancyDataScratch.assign(voxelGiCellCount * 4u, 0u);
 
         std::array<int, kVoxelGiGridResolution> worldXCoords{};
         std::array<int, kVoxelGiGridResolution> worldYCoords{};
@@ -735,10 +764,12 @@ void RendererBackend::renderFrame(
             worldZCoords[i] = static_cast<int>(std::floor(voxelGiOriginZ + offset));
         }
 
-        std::unordered_map<ChunkCoordKey, const voxelsprout::world::Chunk*, ChunkCoordKeyHash> chunkByCoord;
-        chunkByCoord.reserve(chunkGrid.chunkCount() * 2u);
+        static thread_local std::unordered_map<ChunkCoordKey, const voxelsprout::world::Chunk*, ChunkCoordKeyHash>
+            chunkByCoordScratch;
+        chunkByCoordScratch.clear();
+        chunkByCoordScratch.reserve(chunkGrid.chunkCount() * 2u);
         for (const voxelsprout::world::Chunk& chunk : chunkGrid.chunks()) {
-            chunkByCoord[ChunkCoordKey{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()}] = &chunk;
+            chunkByCoordScratch[ChunkCoordKey{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()}] = &chunk;
         }
 
         for (uint32_t z = 0; z < kVoxelGiGridResolution; ++z) {
@@ -754,8 +785,8 @@ void RendererBackend::renderFrame(
                     const int chunkX = floorDiv(worldX, voxelsprout::world::Chunk::kSizeX);
                     const int localX = worldX - (chunkX * voxelsprout::world::Chunk::kSizeX);
                     const ChunkCoordKey key{chunkX, chunkY, chunkZ};
-                    const auto chunkIt = chunkByCoord.find(key);
-                    if (chunkIt == chunkByCoord.end()) {
+                    const auto chunkIt = chunkByCoordScratch.find(key);
+                    if (chunkIt == chunkByCoordScratch.end()) {
                         continue;
                     }
                     const voxelsprout::world::Chunk* chunk = chunkIt->second;
@@ -771,15 +802,15 @@ void RendererBackend::renderFrame(
                          (static_cast<std::size_t>(y) +
                           (static_cast<std::size_t>(kVoxelGiGridResolution) * static_cast<std::size_t>(z))));
                     const std::size_t rgbaIndex = index * 4u;
-                    occupancyData[rgbaIndex + 0u] = 255u;
-                    occupancyData[rgbaIndex + 1u] = albedoRgb[0];
-                    occupancyData[rgbaIndex + 2u] = albedoRgb[1];
-                    occupancyData[rgbaIndex + 3u] = albedoRgb[2];
+                    occupancyDataScratch[rgbaIndex + 0u] = 255u;
+                    occupancyDataScratch[rgbaIndex + 1u] = albedoRgb[0];
+                    occupancyDataScratch[rgbaIndex + 2u] = albedoRgb[1];
+                    occupancyDataScratch[rgbaIndex + 3u] = albedoRgb[2];
                 }
             }
         }
 
-        const VkDeviceSize occupancyBytes = static_cast<VkDeviceSize>(occupancyData.size());
+        const VkDeviceSize occupancyBytes = static_cast<VkDeviceSize>(occupancyDataScratch.size());
         voxelGiOccupancySliceOpt = m_frameArena.allocateUpload(
             occupancyBytes,
             static_cast<VkDeviceSize>(4u),
@@ -788,7 +819,7 @@ void RendererBackend::renderFrame(
         if (voxelGiOccupancySliceOpt.has_value() && voxelGiOccupancySliceOpt->mapped != nullptr) {
             std::memcpy(
                 voxelGiOccupancySliceOpt->mapped,
-                occupancyData.data(),
+                occupancyDataScratch.data(),
                 static_cast<std::size_t>(occupancyBytes)
             );
             voxelGiOccupancyUploadBuffer = m_bufferAllocator.getBuffer(voxelGiOccupancySliceOpt->buffer);
@@ -796,7 +827,12 @@ void RendererBackend::renderFrame(
             voxelGiOccupancySliceOpt.reset();
             VOX_LOGW("render") << "voxel GI occupancy upload allocation failed";
         }
+
+        voxelGiOccupancyCpuMs = static_cast<float>(
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - occupancyCpuStartTime).count()
+        );
     }
+    m_debugCpuGiOccupancyBuildMs = voxelGiOccupancyCpuMs;
     const bool voxelGiHasOccupancyUpload =
         voxelGiOccupancySliceOpt.has_value() &&
         voxelGiOccupancyUploadBuffer != VK_NULL_HANDLE;

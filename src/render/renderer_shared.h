@@ -1323,17 +1323,15 @@ VkSurfaceFormatKHR chooseSwapchainFormat(const std::vector<VkSurfaceFormatKHR>& 
 }
 
 VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR>& presentModes) {
-    for (const VkPresentModeKHR presentMode : presentModes) {
-        if (presentMode == VK_PRESENT_MODE_FIFO_KHR) {
-            return presentMode;
-        }
+    const bool fifoAdvertised = std::find(
+        presentModes.begin(),
+        presentModes.end(),
+        VK_PRESENT_MODE_FIFO_KHR
+    ) != presentModes.end();
+    if (!fifoAdvertised) {
+        VOX_LOGW("render") << "surface did not advertise FIFO present mode; forcing VK_PRESENT_MODE_FIFO_KHR";
     }
-    for (const VkPresentModeKHR presentMode : presentModes) {
-        if (presentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
-            return presentMode;
-        }
-    }
-    return presentModes.front();
+    return VK_PRESENT_MODE_FIFO_KHR;
 }
 
 VkExtent2D chooseExtent(GLFWwindow* window, const VkSurfaceCapabilitiesKHR& capabilities) {
