@@ -1697,6 +1697,7 @@ void RendererBackend::shutdown() {
     m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     m_autoExposureComputeAvailable = false;
     m_autoExposureHistoryValid = false;
+    m_autoExposureUpdateFrameIndex = 0u;
     m_sunShaftComputeAvailable = false;
     m_sunShaftShaderAvailable = false;
     m_supportsWireframePreview = false;

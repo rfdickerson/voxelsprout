@@ -593,6 +593,10 @@ void RendererBackend::renderFrame(
     mvpUniform.skyConfig4[1] = std::clamp(m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 1.0f);
     mvpUniform.skyConfig4[2] = m_skyDebugSettings.volumetricFogBaseHeight;
     mvpUniform.skyConfig4[3] = std::clamp(m_skyDebugSettings.volumetricSunScattering, 0.0f, 8.0f);
+    const uint32_t autoExposureUpdateIntervalFrames = std::max(
+        1u,
+        static_cast<uint32_t>(std::max(1, m_skyDebugSettings.autoExposureUpdateIntervalFrames))
+    );
     const bool autoExposureEnabled = m_skyDebugSettings.autoExposureEnabled && m_autoExposureComputeAvailable;
     mvpUniform.skyConfig5[0] = autoExposureEnabled ? 1.0f : 0.0f;
     mvpUniform.skyConfig5[1] = std::clamp(m_skyDebugSettings.manualExposure, 0.05f, 8.0f);
@@ -1525,7 +1529,11 @@ void RendererBackend::renderFrame(
         m_autoExposureDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
         autoExposureHistogramBuffer != VK_NULL_HANDLE &&
         autoExposureStateBuffer != VK_NULL_HANDLE;
-    if (autoExposureEnabled && autoExposurePassResourcesReady) {
+    const bool shouldRunAutoExposureThisFrame =
+        autoExposureEnabled &&
+        autoExposurePassResourcesReady &&
+        (m_autoExposureUpdateFrameIndex % autoExposureUpdateIntervalFrames) == 0u;
+    if (shouldRunAutoExposureThisFrame) {
         wroteAutoExposureTimestamps = true;
         writeGpuTimestampTop(kGpuTimestampQueryAutoExposureStart);
         beginDebugLabel(commandBuffer, "Pass: Auto Exposure", 0.30f, 0.30f, 0.20f, 1.0f);
@@ -1561,8 +1569,8 @@ void RendererBackend::renderFrame(
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
         );
 
-        // Use a smaller source mip for histogram construction to keep auto-exposure cheaper than heavy fullscreen passes.
-        constexpr uint32_t kAutoExposureTargetDownsampleMip = 3u;
+        // Use a smaller source mip for histogram construction to keep auto-exposure cheaper than SSAO.
+        constexpr uint32_t kAutoExposureTargetDownsampleMip = 4u;
         const uint32_t availableHdrMipLevels = std::max(1u, m_hdrResolveMipLevels);
         const uint32_t histogramSourceMip = std::min(
             kAutoExposureTargetDownsampleMip,
@@ -1673,8 +1681,12 @@ void RendererBackend::renderFrame(
         writeGpuTimestampBottom(kGpuTimestampQueryAutoExposureEnd);
     } else {
         if (!autoExposureEnabled || !autoExposurePassResourcesReady) {
+            m_autoExposureUpdateFrameIndex = 0u;
             m_autoExposureHistoryValid = false;
         }
+    }
+    if (autoExposureEnabled && autoExposurePassResourcesReady) {
+        ++m_autoExposureUpdateFrameIndex;
     }
     if (!wroteAutoExposureTimestamps) {
         writeGpuTimestampTop(kGpuTimestampQueryAutoExposureStart);

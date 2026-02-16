@@ -143,10 +143,10 @@ void RendererBackend::buildSunDebugUi() {
             ImGui::Checkbox("Auto Exposure", &m_skyDebugSettings.autoExposureEnabled);
             ImGui::SliderFloat("Manual Exposure", &m_skyDebugSettings.manualExposure, 0.05f, 4.0f, "%.3f");
             if (m_skyDebugSettings.autoExposureEnabled && ImGui::CollapsingHeader("Advanced Exposure")) {
-                ImGui::TextDisabled("AE Update Interval: fixed to every frame");
+                ImGui::SliderInt("AE Update Interval", &m_skyDebugSettings.autoExposureUpdateIntervalFrames, 1, 16);
                 ImGui::SliderFloat("AE Key Value", &m_skyDebugSettings.autoExposureKeyValue, 0.05f, 0.50f, "%.3f");
                 ImGui::SliderFloat("AE Min Exposure", &m_skyDebugSettings.autoExposureMin, 0.05f, 2.50f, "%.3f");
-                ImGui::SliderFloat("AE Max Exposure", &m_skyDebugSettings.autoExposureMax, 0.20f, 8.00f, "%.3f");
+                ImGui::SliderFloat("AE Max Exposure", &m_skyDebugSettings.autoExposureMax, 0.20f, 12.00f, "%.3f");
                 ImGui::SliderFloat("AE Adapt Up", &m_skyDebugSettings.autoExposureAdaptUp, 0.10f, 12.00f, "%.2f");
                 ImGui::SliderFloat("AE Adapt Down", &m_skyDebugSettings.autoExposureAdaptDown, 0.10f, 12.00f, "%.2f");
                 ImGui::SliderFloat("AE Low Percentile", &m_skyDebugSettings.autoExposureLowPercentile, 0.00f, 0.95f, "%.2f");
@@ -213,4 +213,3 @@ void RendererBackend::buildSunDebugUi() {
 }
 
 } // namespace voxelsprout::render
-
