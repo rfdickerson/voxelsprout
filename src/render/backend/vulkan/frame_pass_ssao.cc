@@ -6,14 +6,7 @@
 
 namespace voxelsprout::render {
 
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-#endif
 #include "render/renderer_shared.h"
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 
 void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
     VkCommandBuffer commandBuffer = context.commandBuffer;

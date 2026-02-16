@@ -12,14 +12,7 @@
 
 namespace voxelsprout::render {
 
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-#endif
 #include "render/renderer_shared.h"
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 
 RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
     const std::vector<voxelsprout::world::Chunk>& chunks,
