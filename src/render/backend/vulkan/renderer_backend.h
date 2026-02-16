@@ -372,6 +372,73 @@ private:
         float offsetZ = 0.0f;
     };
 
+    struct FrameExecutionContext {
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        VkQueryPool gpuTimestampQueryPool = VK_NULL_HANDLE;
+        CoreFrameGraphOrderValidator* frameOrderValidator = nullptr;
+        const CoreFrameGraphPlan* frameGraphPlan = nullptr;
+        const BoundDescriptorSets* boundDescriptorSets = nullptr;
+        uint32_t mvpDynamicOffset = 0;
+        uint32_t aoFrameIndex = 0;
+        uint32_t imageIndex = 0;
+        VkExtent2D aoExtent{};
+        VkViewport aoViewport{};
+        VkRect2D aoScissor{};
+        VkViewport viewport{};
+        VkRect2D scissor{};
+    };
+
+    struct ShadowPassInputs {
+        const FrameChunkDrawData* frameChunkDrawData = nullptr;
+        const std::optional<FrameArenaSlice>* chunkInstanceSliceOpt = nullptr;
+        const std::optional<FrameArenaSlice>* shadowChunkInstanceSliceOpt = nullptr;
+        VkBuffer chunkInstanceBuffer = VK_NULL_HANDLE;
+        VkBuffer shadowChunkInstanceBuffer = VK_NULL_HANDLE;
+        VkBuffer chunkVertexBuffer = VK_NULL_HANDLE;
+        VkBuffer chunkIndexBuffer = VK_NULL_HANDLE;
+        bool canDrawMagica = false;
+        std::span<const ReadyMagicaDraw> readyMagicaDraws;
+        uint32_t pipeInstanceCount = 0;
+        const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
+        uint32_t transportInstanceCount = 0;
+        const std::optional<FrameArenaSlice>* transportInstanceSliceOpt = nullptr;
+        uint32_t beltCargoInstanceCount = 0;
+        const std::optional<FrameArenaSlice>* beltCargoInstanceSliceOpt = nullptr;
+    };
+
+    struct PrepassInputs {
+        const FrameChunkDrawData* frameChunkDrawData = nullptr;
+        const std::optional<FrameArenaSlice>* chunkInstanceSliceOpt = nullptr;
+        VkBuffer chunkInstanceBuffer = VK_NULL_HANDLE;
+        VkBuffer chunkVertexBuffer = VK_NULL_HANDLE;
+        VkBuffer chunkIndexBuffer = VK_NULL_HANDLE;
+        bool canDrawMagica = false;
+        std::span<const ReadyMagicaDraw> readyMagicaDraws;
+        uint32_t pipeInstanceCount = 0;
+        const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
+        uint32_t transportInstanceCount = 0;
+        const std::optional<FrameArenaSlice>* transportInstanceSliceOpt = nullptr;
+        uint32_t beltCargoInstanceCount = 0;
+        const std::optional<FrameArenaSlice>* beltCargoInstanceSliceOpt = nullptr;
+    };
+
+    struct MainPassInputs {
+        const FrameChunkDrawData* frameChunkDrawData = nullptr;
+        const std::optional<FrameArenaSlice>* chunkInstanceSliceOpt = nullptr;
+        VkBuffer chunkInstanceBuffer = VK_NULL_HANDLE;
+        VkBuffer chunkVertexBuffer = VK_NULL_HANDLE;
+        VkBuffer chunkIndexBuffer = VK_NULL_HANDLE;
+        bool canDrawMagica = false;
+        std::span<const ReadyMagicaDraw> readyMagicaDraws;
+        uint32_t pipeInstanceCount = 0;
+        const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
+        uint32_t transportInstanceCount = 0;
+        const std::optional<FrameArenaSlice>* transportInstanceSliceOpt = nullptr;
+        uint32_t beltCargoInstanceCount = 0;
+        const std::optional<FrameArenaSlice>* beltCargoInstanceSliceOpt = nullptr;
+        const VoxelPreview* preview = nullptr;
+    };
+
     FrameInstanceDrawData prepareFrameInstanceDrawData(
         const voxelsprout::sim::Simulation& simulation,
         float simulationAlpha
@@ -396,91 +463,12 @@ private:
         std::uint32_t cascadeIndex,
         const FrameChunkDrawData& frameChunkDrawData
     );
-    void recordShadowAtlasPass(
-        VkCommandBuffer commandBuffer,
-        VkQueryPool gpuTimestampQueryPool,
-        CoreFrameGraphOrderValidator& coreFramePassOrderValidator,
-        const CoreFrameGraphPlan& coreFrameGraphPlan,
-        const BoundDescriptorSets& boundDescriptorSets,
-        uint32_t mvpDynamicOffset,
-        const FrameChunkDrawData& frameChunkDrawData,
-        const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt,
-        const std::optional<FrameArenaSlice>& shadowChunkInstanceSliceOpt,
-        VkBuffer chunkInstanceBuffer,
-        VkBuffer shadowChunkInstanceBuffer,
-        VkBuffer chunkVertexBuffer,
-        VkBuffer chunkIndexBuffer,
-        bool canDrawMagica,
-        std::span<const ReadyMagicaDraw> readyMagicaDraws,
-        uint32_t pipeInstanceCount,
-        const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt,
-        uint32_t transportInstanceCount,
-        const std::optional<FrameArenaSlice>& transportInstanceSliceOpt,
-        uint32_t beltCargoInstanceCount,
-        const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt
-    );
-    void recordNormalDepthPrepass(
-        VkCommandBuffer commandBuffer,
-        VkQueryPool gpuTimestampQueryPool,
-        CoreFrameGraphOrderValidator& coreFramePassOrderValidator,
-        const CoreFrameGraphPlan& coreFrameGraphPlan,
-        uint32_t aoFrameIndex,
-        uint32_t imageIndex,
-        VkExtent2D aoExtent,
-        const VkViewport& aoViewport,
-        const VkRect2D& aoScissor,
-        const BoundDescriptorSets& boundDescriptorSets,
-        uint32_t mvpDynamicOffset,
-        const FrameChunkDrawData& frameChunkDrawData,
-        const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt,
-        VkBuffer chunkInstanceBuffer,
-        VkBuffer chunkVertexBuffer,
-        VkBuffer chunkIndexBuffer,
-        bool canDrawMagica,
-        std::span<const ReadyMagicaDraw> readyMagicaDraws,
-        uint32_t pipeInstanceCount,
-        const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt,
-        uint32_t transportInstanceCount,
-        const std::optional<FrameArenaSlice>& transportInstanceSliceOpt,
-        uint32_t beltCargoInstanceCount,
-        const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt
-    );
+    void recordShadowAtlasPass(const FrameExecutionContext& context, const ShadowPassInputs& inputs);
+    void recordNormalDepthPrepass(const FrameExecutionContext& context, const PrepassInputs& inputs);
     void recordSsaoPasses(
-        VkCommandBuffer commandBuffer,
-        VkQueryPool gpuTimestampQueryPool,
-        uint32_t aoFrameIndex,
-        VkExtent2D aoExtent,
-        const VkViewport& aoViewport,
-        const VkRect2D& aoScissor,
-        const BoundDescriptorSets& boundDescriptorSets,
-        uint32_t mvpDynamicOffset
+        const FrameExecutionContext& context
     );
-    void recordMainScenePass(
-        VkCommandBuffer commandBuffer,
-        VkQueryPool gpuTimestampQueryPool,
-        CoreFrameGraphOrderValidator& coreFramePassOrderValidator,
-        const CoreFrameGraphPlan& coreFrameGraphPlan,
-        uint32_t aoFrameIndex,
-        uint32_t imageIndex,
-        const VkViewport& viewport,
-        const VkRect2D& scissor,
-        const BoundDescriptorSets& boundDescriptorSets,
-        uint32_t mvpDynamicOffset,
-        const FrameChunkDrawData& frameChunkDrawData,
-        const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt,
-        VkBuffer chunkInstanceBuffer,
-        VkBuffer chunkVertexBuffer,
-        VkBuffer chunkIndexBuffer,
-        bool canDrawMagica,
-        std::span<const ReadyMagicaDraw> readyMagicaDraws,
-        uint32_t pipeInstanceCount,
-        const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt,
-        uint32_t transportInstanceCount,
-        const std::optional<FrameArenaSlice>& transportInstanceSliceOpt,
-        uint32_t beltCargoInstanceCount,
-        const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt,
-        const VoxelPreview& preview
-    );
+    void recordMainScenePass(const FrameExecutionContext& context, const MainPassInputs& inputs);
 
     GLFWwindow* m_window = nullptr;
 

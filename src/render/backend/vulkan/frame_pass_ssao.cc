@@ -15,16 +15,16 @@ namespace voxelsprout::render {
 #pragma GCC diagnostic pop
 #endif
 
-void RendererBackend::recordSsaoPasses(
-    VkCommandBuffer commandBuffer,
-    VkQueryPool gpuTimestampQueryPool,
-    uint32_t aoFrameIndex,
-    VkExtent2D aoExtent,
-    const VkViewport& aoViewport,
-    const VkRect2D& aoScissor,
-    const BoundDescriptorSets& boundDescriptorSets,
-    uint32_t mvpDynamicOffset
-) {
+void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
+    VkCommandBuffer commandBuffer = context.commandBuffer;
+    VkQueryPool gpuTimestampQueryPool = context.gpuTimestampQueryPool;
+    const uint32_t aoFrameIndex = context.aoFrameIndex;
+    const VkExtent2D aoExtent = context.aoExtent;
+    const VkViewport& aoViewport = context.aoViewport;
+    const VkRect2D& aoScissor = context.aoScissor;
+    const BoundDescriptorSets& boundDescriptorSets = *context.boundDescriptorSets;
+    const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
+
     const uint32_t boundDescriptorSetCount = boundDescriptorSets.count;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
