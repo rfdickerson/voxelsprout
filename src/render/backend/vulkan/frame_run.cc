@@ -43,6 +43,49 @@ namespace voxelsprout::render {
 #pragma GCC diagnostic pop
 #endif
 
+namespace {
+
+struct CoreFrameGraphPassIds {
+    FrameGraph::PassId shadow = 0;
+    FrameGraph::PassId prepass = 0;
+    FrameGraph::PassId main = 0;
+    FrameGraph::PassId post = 0;
+};
+
+CoreFrameGraphPassIds buildCoreFrameGraph(FrameGraph* frameGraph) {
+    CoreFrameGraphPassIds ids{};
+    if (frameGraph == nullptr) {
+        return ids;
+    }
+
+    frameGraph->reset();
+    ids.shadow = frameGraph->addPass({"shadow", FrameGraphQueue::Graphics});
+    ids.prepass = frameGraph->addPass({"prepass", FrameGraphQueue::Graphics});
+    ids.main = frameGraph->addPass({"main", FrameGraphQueue::Graphics});
+    ids.post = frameGraph->addPass({"post", FrameGraphQueue::Graphics});
+
+    const FrameGraph::ResourceId shadowAtlas = frameGraph->addResource({"shadow_atlas_depth"});
+    const FrameGraph::ResourceId sceneDepth = frameGraph->addResource({"scene_depth"});
+    const FrameGraph::ResourceId hdrColor = frameGraph->addResource({"scene_hdr_color"});
+    const FrameGraph::ResourceId swapchainColor = frameGraph->addResource({"swapchain_color"});
+
+    frameGraph->addDependency(ids.shadow, ids.prepass);
+    frameGraph->addDependency(ids.prepass, ids.main);
+    frameGraph->addDependency(ids.main, ids.post);
+
+    frameGraph->addResourceUse(ids.shadow, shadowAtlas, FrameGraphResourceAccess::Write);
+    frameGraph->addResourceUse(ids.prepass, shadowAtlas, FrameGraphResourceAccess::Read);
+    frameGraph->addResourceUse(ids.prepass, sceneDepth, FrameGraphResourceAccess::Write);
+    frameGraph->addResourceUse(ids.main, shadowAtlas, FrameGraphResourceAccess::Read);
+    frameGraph->addResourceUse(ids.main, sceneDepth, FrameGraphResourceAccess::Read);
+    frameGraph->addResourceUse(ids.main, hdrColor, FrameGraphResourceAccess::Write);
+    frameGraph->addResourceUse(ids.post, hdrColor, FrameGraphResourceAccess::Read);
+    frameGraph->addResourceUse(ids.post, swapchainColor, FrameGraphResourceAccess::Write);
+    return ids;
+}
+
+}  // namespace
+
 void RendererBackend::renderFrame(
     const voxelsprout::world::ChunkGrid& chunkGrid,
     const voxelsprout::sim::Simulation& simulation,
@@ -100,34 +143,33 @@ void RendererBackend::renderFrame(
             }
         }
     }
-    // FrameGraph scaffold: record the pass DAG now, then replace direct sequencing incrementally.
-    m_frameGraph.reset();
-    const FrameGraph::PassId fgShadow = m_frameGraph.addPass({"shadow", FrameGraphQueue::Graphics});
-    const FrameGraph::PassId fgGiSurface = m_frameGraph.addPass({"gi_surface", FrameGraphQueue::Compute});
-    const FrameGraph::PassId fgGiInject = m_frameGraph.addPass({"gi_inject", FrameGraphQueue::Compute});
-    const FrameGraph::PassId fgGiPropagate = m_frameGraph.addPass({"gi_propagate", FrameGraphQueue::Compute});
-    const FrameGraph::PassId fgAutoExposure = m_frameGraph.addPass({"auto_exposure", FrameGraphQueue::Compute});
-    const FrameGraph::PassId fgSunShafts = m_frameGraph.addPass({"sun_shafts", FrameGraphQueue::Compute});
-    const FrameGraph::PassId fgPrepass = m_frameGraph.addPass({"prepass", FrameGraphQueue::Graphics});
-    const FrameGraph::PassId fgSsao = m_frameGraph.addPass({"ssao", FrameGraphQueue::Graphics});
-    const FrameGraph::PassId fgSsaoBlur = m_frameGraph.addPass({"ssao_blur", FrameGraphQueue::Graphics});
-    const FrameGraph::PassId fgMain = m_frameGraph.addPass({"main", FrameGraphQueue::Graphics});
-    const FrameGraph::PassId fgPost = m_frameGraph.addPass({"post", FrameGraphQueue::Graphics});
-    const FrameGraph::PassId fgUi = m_frameGraph.addPass({"imgui", FrameGraphQueue::Graphics});
-    const FrameGraph::PassId fgPresent = m_frameGraph.addPass({"present", FrameGraphQueue::Graphics});
-
-    m_frameGraph.addDependency(fgShadow, fgPrepass);
-    m_frameGraph.addDependency(fgGiSurface, fgGiInject);
-    m_frameGraph.addDependency(fgGiInject, fgGiPropagate);
-    m_frameGraph.addDependency(fgGiPropagate, fgMain);
-    m_frameGraph.addDependency(fgAutoExposure, fgPost);
-    m_frameGraph.addDependency(fgSunShafts, fgPost);
-    m_frameGraph.addDependency(fgPrepass, fgSsao);
-    m_frameGraph.addDependency(fgSsao, fgSsaoBlur);
-    m_frameGraph.addDependency(fgSsaoBlur, fgMain);
-    m_frameGraph.addDependency(fgMain, fgPost);
-    m_frameGraph.addDependency(fgPost, fgUi);
-    m_frameGraph.addDependency(fgUi, fgPresent);
+    const CoreFrameGraphPassIds corePassIds = buildCoreFrameGraph(&m_frameGraph);
+    std::vector<FrameGraph::PassId> frameGraphExecutionOrder;
+    if (!m_frameGraph.buildExecutionOrder(&frameGraphExecutionOrder)) {
+        VOX_LOGE("render") << "frame graph has a cycle; refusing to render frame";
+        return;
+    }
+    std::vector<std::uint32_t> frameGraphPassOrderById(m_frameGraph.passes().size(), 0u);
+    for (std::uint32_t executionIndex = 0; executionIndex < frameGraphExecutionOrder.size(); ++executionIndex) {
+        const FrameGraph::PassId passId = frameGraphExecutionOrder[executionIndex];
+        if (passId < frameGraphPassOrderById.size()) {
+            frameGraphPassOrderById[passId] = executionIndex;
+        }
+    }
+    std::optional<std::uint32_t> lastCorePassOrderIndex = std::nullopt;
+    const auto markCorePassEntered = [&](FrameGraph::PassId passId, const char* passName) {
+        if (passId >= frameGraphPassOrderById.size()) {
+            return;
+        }
+        const std::uint32_t passOrderIndex = frameGraphPassOrderById[passId];
+        if (lastCorePassOrderIndex.has_value() && passOrderIndex < *lastCorePassOrderIndex) {
+            VOX_LOGE("render")
+                << "core frame pass executed out of graph order: " << passName
+                << ", orderIndex=" << passOrderIndex
+                << ", previousOrderIndex=" << *lastCorePassOrderIndex;
+        }
+        lastCorePassOrderIndex = passOrderIndex;
+    };
 
     collectCompletedBufferReleases();
 
@@ -851,6 +893,7 @@ void RendererBackend::renderFrame(
     };
 
     writeGpuTimestampTop(kGpuTimestampQueryShadowStart);
+    markCorePassEntered(corePassIds.shadow, "shadow");
     beginDebugLabel(commandBuffer, "Pass: Shadow Atlas", 0.28f, 0.22f, 0.22f, 1.0f);
     const bool shadowInitialized = m_shadowDepthInitialized;
     transitionImageLayout(
@@ -1463,6 +1506,7 @@ void RendererBackend::renderFrame(
     normalDepthRenderingInfo.pDepthAttachment = &aoDepthAttachment;
 
     writeGpuTimestampTop(kGpuTimestampQueryPrepassStart);
+    markCorePassEntered(corePassIds.prepass, "prepass");
     beginDebugLabel(commandBuffer, "Pass: Normal+Depth Prepass", 0.20f, 0.30f, 0.40f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &normalDepthRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
@@ -1840,6 +1884,7 @@ void RendererBackend::renderFrame(
     renderingInfo.pDepthAttachment = &depthAttachment;
 
     writeGpuTimestampTop(kGpuTimestampQueryMainStart);
+    markCorePassEntered(corePassIds.main, "main");
     beginDebugLabel(commandBuffer, "Pass: Main Scene", 0.20f, 0.20f, 0.45f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &renderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -2642,6 +2687,7 @@ void RendererBackend::renderFrame(
     toneMapRenderingInfo.pColorAttachments = &toneMapColorAttachment;
 
     writeGpuTimestampTop(kGpuTimestampQueryPostStart);
+    markCorePassEntered(corePassIds.post, "post");
     beginDebugLabel(commandBuffer, "Pass: Tonemap + UI", 0.24f, 0.24f, 0.24f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &toneMapRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
