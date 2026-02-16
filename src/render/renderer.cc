@@ -1,6 +1,10 @@
 #include "render/renderer.h"
 
+#if defined(VOXEL_RENDER_BACKEND_VULKAN)
 #include "render/backend/vulkan/renderer_backend.h"
+#else
+#error "VOXEL_RENDER_BACKEND is not configured to a supported backend"
+#endif
 
 #include <memory>
 #include <utility>
