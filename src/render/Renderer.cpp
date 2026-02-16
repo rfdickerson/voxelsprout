@@ -1453,6 +1453,14 @@ bool createShaderModuleFromFile(
     return true;
 }
 
+void destroyShaderModules(VkDevice device, std::span<const VkShaderModule> shaderModules) {
+    for (const VkShaderModule shaderModule : shaderModules) {
+        if (shaderModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device, shaderModule, nullptr);
+        }
+    }
+}
+
 } // namespace
 
 bool isDeviceExtensionAvailable(VkPhysicalDevice physicalDevice, const char* extensionName);
@@ -2381,6 +2389,107 @@ void Renderer::loadDebugUtilsFunctions() {
         << ", cmdLabels=" << (labelsReady ? "yes" : "no")
         << ", cmdInsertLabel=" << (m_cmdInsertDebugUtilsLabel != nullptr ? "yes" : "no")
         << "\n";
+}
+
+bool Renderer::allocatePerFrameDescriptorSets(
+    VkDescriptorPool descriptorPool,
+    VkDescriptorSetLayout descriptorSetLayout,
+    std::span<VkDescriptorSet> outDescriptorSets,
+    const char* failureContext,
+    const char* debugNamePrefix
+) {
+    if (outDescriptorSets.empty()) {
+        return true;
+    }
+
+    std::vector<VkDescriptorSetLayout> setLayouts(outDescriptorSets.size(), descriptorSetLayout);
+    VkDescriptorSetAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo.descriptorPool = descriptorPool;
+    allocateInfo.descriptorSetCount = static_cast<uint32_t>(setLayouts.size());
+    allocateInfo.pSetLayouts = setLayouts.data();
+
+    const VkResult allocateResult = vkAllocateDescriptorSets(m_device, &allocateInfo, outDescriptorSets.data());
+    if (allocateResult != VK_SUCCESS) {
+        logVkFailure(failureContext, allocateResult);
+        return false;
+    }
+
+    if (debugNamePrefix != nullptr) {
+        for (std::size_t frameIndex = 0; frameIndex < outDescriptorSets.size(); ++frameIndex) {
+            const std::string setName = std::string(debugNamePrefix) + std::to_string(frameIndex);
+            setObjectName(
+                VK_OBJECT_TYPE_DESCRIPTOR_SET,
+                vkHandleToUint64(outDescriptorSets[frameIndex]),
+                setName.c_str()
+            );
+        }
+    }
+
+    return true;
+}
+
+bool Renderer::createComputePipelineLayout(
+    VkDescriptorSetLayout descriptorSetLayout,
+    std::span<const VkPushConstantRange> pushConstantRanges,
+    VkPipelineLayout& outPipelineLayout,
+    const char* failureContext,
+    const char* debugName
+) {
+    outPipelineLayout = VK_NULL_HANDLE;
+
+    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
+    pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutCreateInfo.setLayoutCount = 1;
+    pipelineLayoutCreateInfo.pSetLayouts = &descriptorSetLayout;
+    pipelineLayoutCreateInfo.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size());
+    pipelineLayoutCreateInfo.pPushConstantRanges = pushConstantRanges.empty() ? nullptr : pushConstantRanges.data();
+
+    const VkResult pipelineLayoutResult =
+        vkCreatePipelineLayout(m_device, &pipelineLayoutCreateInfo, nullptr, &outPipelineLayout);
+    if (pipelineLayoutResult != VK_SUCCESS) {
+        logVkFailure(failureContext, pipelineLayoutResult);
+        return false;
+    }
+
+    if (debugName != nullptr) {
+        setObjectName(VK_OBJECT_TYPE_PIPELINE_LAYOUT, vkHandleToUint64(outPipelineLayout), debugName);
+    }
+
+    return true;
+}
+
+bool Renderer::createComputePipeline(
+    VkPipelineLayout pipelineLayout,
+    VkShaderModule shaderModule,
+    VkPipeline& outPipeline,
+    const char* failureContext,
+    const char* debugName
+) {
+    outPipeline = VK_NULL_HANDLE;
+
+    VkPipelineShaderStageCreateInfo stage{};
+    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = shaderModule;
+    stage.pName = "main";
+
+    VkComputePipelineCreateInfo pipelineCreateInfo{};
+    pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.stage = stage;
+    pipelineCreateInfo.layout = pipelineLayout;
+    const VkResult pipelineResult =
+        vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &outPipeline);
+    if (pipelineResult != VK_SUCCESS) {
+        logVkFailure(failureContext, pipelineResult);
+        return false;
+    }
+
+    if (debugName != nullptr) {
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(outPipeline), debugName);
+    }
+
+    return true;
 }
 
 void Renderer::setObjectName(VkObjectType objectType, uint64_t objectHandle, const char* name) const {
@@ -4263,35 +4372,34 @@ bool Renderer::createVoxelGiResources() {
         );
     }
 
-    std::array<VkDescriptorSetLayout, kMaxFramesInFlight> setLayouts{};
-    setLayouts.fill(m_voxelGiDescriptorSetLayout);
-    VkDescriptorSetAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocateInfo.descriptorPool = m_voxelGiDescriptorPool;
-    allocateInfo.descriptorSetCount = static_cast<uint32_t>(setLayouts.size());
-    allocateInfo.pSetLayouts = setLayouts.data();
-    const VkResult allocateResult =
-        vkAllocateDescriptorSets(m_device, &allocateInfo, m_voxelGiDescriptorSets.data());
-    if (allocateResult != VK_SUCCESS) {
-        logVkFailure("vkAllocateDescriptorSets(voxelGi)", allocateResult);
+    if (!allocatePerFrameDescriptorSets(
+            m_voxelGiDescriptorPool,
+            m_voxelGiDescriptorSetLayout,
+            std::span<VkDescriptorSet>(m_voxelGiDescriptorSets),
+            "vkAllocateDescriptorSets(voxelGi)",
+            "renderer.descriptorSet.voxelGi.frame"
+        )) {
         destroyVoxelGiResources();
         return false;
     }
-    for (std::size_t frameIndex = 0; frameIndex < m_voxelGiDescriptorSets.size(); ++frameIndex) {
-        const std::string setName = "renderer.descriptorSet.voxelGi.frame" + std::to_string(frameIndex);
-        setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET, vkHandleToUint64(m_voxelGiDescriptorSets[frameIndex]), setName.c_str());
-    }
 
-    VkShaderModule skyExposureShaderModule = VK_NULL_HANDLE;
-    VkShaderModule surfaceShaderModule = VK_NULL_HANDLE;
-    VkShaderModule injectShaderModule = VK_NULL_HANDLE;
-    VkShaderModule propagateShaderModule = VK_NULL_HANDLE;
+    std::array<VkShaderModule, 4> shaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& skyExposureShaderModule = shaderModules[0];
+    VkShaderModule& surfaceShaderModule = shaderModules[1];
+    VkShaderModule& injectShaderModule = shaderModules[2];
+    VkShaderModule& propagateShaderModule = shaderModules[3];
     if (!createShaderModuleFromFile(
             m_device,
             kVoxelGiSkyExposureShaderPath,
             "voxel_gi_sky_exposure.comp",
             skyExposureShaderModule
         )) {
+        destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
         return false;
     }
@@ -4301,7 +4409,7 @@ bool Renderer::createVoxelGiResources() {
             "voxel_gi_surface.comp",
             surfaceShaderModule
         )) {
-        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
+        destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
         return false;
     }
@@ -4311,8 +4419,7 @@ bool Renderer::createVoxelGiResources() {
             "voxel_gi_inject.comp",
             injectShaderModule
         )) {
-        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
+        destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
         return false;
     }
@@ -4322,157 +4429,67 @@ bool Renderer::createVoxelGiResources() {
             "voxel_gi_propagate.comp",
             propagateShaderModule
         )) {
-        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
+        destroyShaderModules(m_device, shaderModules);
+        destroyVoxelGiResources();
+        return false;
+    }
+    if (!createComputePipelineLayout(
+            m_voxelGiDescriptorSetLayout,
+            std::span<const VkPushConstantRange>{},
+            m_voxelGiPipelineLayout,
+            "vkCreatePipelineLayout(voxelGi)",
+            "renderer.pipelineLayout.voxelGi"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
         return false;
     }
 
-    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
-    pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutCreateInfo.setLayoutCount = 1;
-    pipelineLayoutCreateInfo.pSetLayouts = &m_voxelGiDescriptorSetLayout;
-    const VkResult pipelineLayoutResult = vkCreatePipelineLayout(
-        m_device,
-        &pipelineLayoutCreateInfo,
-        nullptr,
-        &m_voxelGiPipelineLayout
-    );
-    if (pipelineLayoutResult != VK_SUCCESS) {
-        logVkFailure("vkCreatePipelineLayout(voxelGi)", pipelineLayoutResult);
-        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, propagateShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
+    if (!createComputePipeline(
+            m_voxelGiPipelineLayout,
+            skyExposureShaderModule,
+            m_voxelGiSkyExposurePipeline,
+            "vkCreateComputePipelines(voxelGiSkyExposure)",
+            "pipeline.voxelGi.skyExposure"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
         return false;
     }
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE_LAYOUT,
-        vkHandleToUint64(m_voxelGiPipelineLayout),
-        "renderer.pipelineLayout.voxelGi"
-    );
-
-    VkPipelineShaderStageCreateInfo skyExposureStage{};
-    skyExposureStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    skyExposureStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    skyExposureStage.module = skyExposureShaderModule;
-    skyExposureStage.pName = "main";
-
-    VkComputePipelineCreateInfo skyExposurePipelineCreateInfo{};
-    skyExposurePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    skyExposurePipelineCreateInfo.stage = skyExposureStage;
-    skyExposurePipelineCreateInfo.layout = m_voxelGiPipelineLayout;
-    const VkResult skyExposurePipelineResult = vkCreateComputePipelines(
-        m_device,
-        VK_NULL_HANDLE,
-        1,
-        &skyExposurePipelineCreateInfo,
-        nullptr,
-        &m_voxelGiSkyExposurePipeline
-    );
-    if (skyExposurePipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateComputePipelines(voxelGiSkyExposure)", skyExposurePipelineResult);
-        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, propagateShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
+    if (!createComputePipeline(
+            m_voxelGiPipelineLayout,
+            surfaceShaderModule,
+            m_voxelGiSurfacePipeline,
+            "vkCreateComputePipelines(voxelGiSurface)",
+            "pipeline.voxelGi.surface"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
         return false;
     }
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE,
-        vkHandleToUint64(m_voxelGiSkyExposurePipeline),
-        "pipeline.voxelGi.skyExposure"
-    );
-
-    VkPipelineShaderStageCreateInfo surfaceStage{};
-    surfaceStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    surfaceStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    surfaceStage.module = surfaceShaderModule;
-    surfaceStage.pName = "main";
-
-    VkComputePipelineCreateInfo surfacePipelineCreateInfo{};
-    surfacePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    surfacePipelineCreateInfo.stage = surfaceStage;
-    surfacePipelineCreateInfo.layout = m_voxelGiPipelineLayout;
-    const VkResult surfacePipelineResult = vkCreateComputePipelines(
-        m_device,
-        VK_NULL_HANDLE,
-        1,
-        &surfacePipelineCreateInfo,
-        nullptr,
-        &m_voxelGiSurfacePipeline
-    );
-    if (surfacePipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateComputePipelines(voxelGiSurface)", surfacePipelineResult);
-        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, propagateShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
+    if (!createComputePipeline(
+            m_voxelGiPipelineLayout,
+            injectShaderModule,
+            m_voxelGiInjectPipeline,
+            "vkCreateComputePipelines(voxelGiInject)",
+            "pipeline.voxelGi.inject"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
         return false;
     }
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_voxelGiSurfacePipeline), "pipeline.voxelGi.surface");
-
-    VkPipelineShaderStageCreateInfo injectStage{};
-    injectStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    injectStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    injectStage.module = injectShaderModule;
-    injectStage.pName = "main";
-
-    VkComputePipelineCreateInfo injectPipelineCreateInfo{};
-    injectPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    injectPipelineCreateInfo.stage = injectStage;
-    injectPipelineCreateInfo.layout = m_voxelGiPipelineLayout;
-    const VkResult injectPipelineResult = vkCreateComputePipelines(
-        m_device,
-        VK_NULL_HANDLE,
-        1,
-        &injectPipelineCreateInfo,
-        nullptr,
-        &m_voxelGiInjectPipeline
-    );
-    if (injectPipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateComputePipelines(voxelGiInject)", injectPipelineResult);
-        vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, propagateShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
+    if (!createComputePipeline(
+            m_voxelGiPipelineLayout,
+            propagateShaderModule,
+            m_voxelGiPropagatePipeline,
+            "vkCreateComputePipelines(voxelGiPropagate)",
+            "pipeline.voxelGi.propagate"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
         return false;
     }
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_voxelGiInjectPipeline), "pipeline.voxelGi.inject");
-
-    VkPipelineShaderStageCreateInfo propagateStage{};
-    propagateStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    propagateStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    propagateStage.module = propagateShaderModule;
-    propagateStage.pName = "main";
-
-    VkComputePipelineCreateInfo propagatePipelineCreateInfo{};
-    propagatePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    propagatePipelineCreateInfo.stage = propagateStage;
-    propagatePipelineCreateInfo.layout = m_voxelGiPipelineLayout;
-    const VkResult propagatePipelineResult = vkCreateComputePipelines(
-        m_device,
-        VK_NULL_HANDLE,
-        1,
-        &propagatePipelineCreateInfo,
-        nullptr,
-        &m_voxelGiPropagatePipeline
-    );
-    vkDestroyShaderModule(m_device, skyExposureShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, propagateShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, injectShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, surfaceShaderModule, nullptr);
-    if (propagatePipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateComputePipelines(voxelGiPropagate)", propagatePipelineResult);
-        destroyVoxelGiResources();
-        return false;
-    }
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_voxelGiPropagatePipeline), "pipeline.voxelGi.propagate");
+    destroyShaderModules(m_device, shaderModules);
 
     m_voxelGiComputeAvailable = true;
     m_voxelGiInitialized = false;
@@ -4613,37 +4630,30 @@ bool Renderer::createAutoExposureResources() {
         );
     }
 
-    std::array<VkDescriptorSetLayout, kMaxFramesInFlight> setLayouts{};
-    setLayouts.fill(m_autoExposureDescriptorSetLayout);
-    VkDescriptorSetAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocateInfo.descriptorPool = m_autoExposureDescriptorPool;
-    allocateInfo.descriptorSetCount = static_cast<uint32_t>(setLayouts.size());
-    allocateInfo.pSetLayouts = setLayouts.data();
-    const VkResult allocateResult =
-        vkAllocateDescriptorSets(m_device, &allocateInfo, m_autoExposureDescriptorSets.data());
-    if (allocateResult != VK_SUCCESS) {
-        logVkFailure("vkAllocateDescriptorSets(autoExposure)", allocateResult);
+    if (!allocatePerFrameDescriptorSets(
+            m_autoExposureDescriptorPool,
+            m_autoExposureDescriptorSetLayout,
+            std::span<VkDescriptorSet>(m_autoExposureDescriptorSets),
+            "vkAllocateDescriptorSets(autoExposure)",
+            "renderer.descriptorSet.autoExposure.frame"
+        )) {
         destroyAutoExposureResources();
         return false;
     }
-    for (std::size_t frameIndex = 0; frameIndex < m_autoExposureDescriptorSets.size(); ++frameIndex) {
-        const std::string setName = "renderer.descriptorSet.autoExposure.frame" + std::to_string(frameIndex);
-        setObjectName(
-            VK_OBJECT_TYPE_DESCRIPTOR_SET,
-            vkHandleToUint64(m_autoExposureDescriptorSets[frameIndex]),
-            setName.c_str()
-        );
-    }
 
-    VkShaderModule histogramShaderModule = VK_NULL_HANDLE;
-    VkShaderModule updateShaderModule = VK_NULL_HANDLE;
+    std::array<VkShaderModule, 2> shaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& histogramShaderModule = shaderModules[0];
+    VkShaderModule& updateShaderModule = shaderModules[1];
     if (!createShaderModuleFromFile(
             m_device,
             kHistogramShaderPath,
             "auto_exposure_histogram.comp",
             histogramShaderModule
         )) {
+        destroyShaderModules(m_device, shaderModules);
         destroyAutoExposureResources();
         return false;
     }
@@ -4653,7 +4663,7 @@ bool Renderer::createAutoExposureResources() {
             "auto_exposure_update.comp",
             updateShaderModule
         )) {
-        vkDestroyShaderModule(m_device, histogramShaderModule, nullptr);
+        destroyShaderModules(m_device, shaderModules);
         destroyAutoExposureResources();
         return false;
     }
@@ -4666,93 +4676,44 @@ bool Renderer::createAutoExposureResources() {
         sizeof(AutoExposureUpdatePushConstants)
     ));
 
-    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
-    pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutCreateInfo.setLayoutCount = 1;
-    pipelineLayoutCreateInfo.pSetLayouts = &m_autoExposureDescriptorSetLayout;
-    pipelineLayoutCreateInfo.pushConstantRangeCount = 1;
-    pipelineLayoutCreateInfo.pPushConstantRanges = &pushConstantRange;
-    const VkResult pipelineLayoutResult = vkCreatePipelineLayout(
-        m_device,
-        &pipelineLayoutCreateInfo,
-        nullptr,
-        &m_autoExposurePipelineLayout
-    );
-    if (pipelineLayoutResult != VK_SUCCESS) {
-        logVkFailure("vkCreatePipelineLayout(autoExposure)", pipelineLayoutResult);
-        vkDestroyShaderModule(m_device, updateShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, histogramShaderModule, nullptr);
+    const std::array<VkPushConstantRange, 1> pushConstantRanges = {pushConstantRange};
+    if (!createComputePipelineLayout(
+            m_autoExposureDescriptorSetLayout,
+            pushConstantRanges,
+            m_autoExposurePipelineLayout,
+            "vkCreatePipelineLayout(autoExposure)",
+            "renderer.pipelineLayout.autoExposure"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
         destroyAutoExposureResources();
         return false;
     }
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE_LAYOUT,
-        vkHandleToUint64(m_autoExposurePipelineLayout),
-        "renderer.pipelineLayout.autoExposure"
-    );
 
-    VkPipelineShaderStageCreateInfo histogramStage{};
-    histogramStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    histogramStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    histogramStage.module = histogramShaderModule;
-    histogramStage.pName = "main";
-
-    VkComputePipelineCreateInfo histogramPipelineCreateInfo{};
-    histogramPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    histogramPipelineCreateInfo.stage = histogramStage;
-    histogramPipelineCreateInfo.layout = m_autoExposurePipelineLayout;
-    const VkResult histogramPipelineResult = vkCreateComputePipelines(
-        m_device,
-        VK_NULL_HANDLE,
-        1,
-        &histogramPipelineCreateInfo,
-        nullptr,
-        &m_autoExposureHistogramPipeline
-    );
-    if (histogramPipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateComputePipelines(autoExposureHistogram)", histogramPipelineResult);
-        vkDestroyShaderModule(m_device, updateShaderModule, nullptr);
-        vkDestroyShaderModule(m_device, histogramShaderModule, nullptr);
+    if (!createComputePipeline(
+            m_autoExposurePipelineLayout,
+            histogramShaderModule,
+            m_autoExposureHistogramPipeline,
+            "vkCreateComputePipelines(autoExposureHistogram)",
+            "pipeline.autoExposure.histogram"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
         destroyAutoExposureResources();
         return false;
     }
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE,
-        vkHandleToUint64(m_autoExposureHistogramPipeline),
-        "pipeline.autoExposure.histogram"
-    );
 
-    VkPipelineShaderStageCreateInfo updateStage{};
-    updateStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    updateStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    updateStage.module = updateShaderModule;
-    updateStage.pName = "main";
-
-    VkComputePipelineCreateInfo updatePipelineCreateInfo{};
-    updatePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    updatePipelineCreateInfo.stage = updateStage;
-    updatePipelineCreateInfo.layout = m_autoExposurePipelineLayout;
-    const VkResult updatePipelineResult = vkCreateComputePipelines(
-        m_device,
-        VK_NULL_HANDLE,
-        1,
-        &updatePipelineCreateInfo,
-        nullptr,
-        &m_autoExposureUpdatePipeline
-    );
-
-    vkDestroyShaderModule(m_device, updateShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, histogramShaderModule, nullptr);
-    if (updatePipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateComputePipelines(autoExposureUpdate)", updatePipelineResult);
+    if (!createComputePipeline(
+            m_autoExposurePipelineLayout,
+            updateShaderModule,
+            m_autoExposureUpdatePipeline,
+            "vkCreateComputePipelines(autoExposureUpdate)",
+            "pipeline.autoExposure.update"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
         destroyAutoExposureResources();
         return false;
     }
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE,
-        vkHandleToUint64(m_autoExposureUpdatePipeline),
-        "pipeline.autoExposure.update"
-    );
+
+    destroyShaderModules(m_device, shaderModules);
 
     m_autoExposureComputeAvailable = true;
     m_autoExposureHistoryValid = false;
@@ -4854,23 +4815,15 @@ bool Renderer::createSunShaftResources() {
         );
     }
 
-    std::array<VkDescriptorSetLayout, kMaxFramesInFlight> setLayouts{};
-    setLayouts.fill(m_sunShaftDescriptorSetLayout);
-    VkDescriptorSetAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocateInfo.descriptorPool = m_sunShaftDescriptorPool;
-    allocateInfo.descriptorSetCount = static_cast<uint32_t>(setLayouts.size());
-    allocateInfo.pSetLayouts = setLayouts.data();
-    const VkResult allocateResult =
-        vkAllocateDescriptorSets(m_device, &allocateInfo, m_sunShaftDescriptorSets.data());
-    if (allocateResult != VK_SUCCESS) {
-        logVkFailure("vkAllocateDescriptorSets(sunShaft)", allocateResult);
+    if (!allocatePerFrameDescriptorSets(
+            m_sunShaftDescriptorPool,
+            m_sunShaftDescriptorSetLayout,
+            std::span<VkDescriptorSet>(m_sunShaftDescriptorSets),
+            "vkAllocateDescriptorSets(sunShaft)",
+            "renderer.descriptorSet.sunShaft.frame"
+        )) {
         destroySunShaftResources();
         return false;
-    }
-    for (std::size_t frameIndex = 0; frameIndex < m_sunShaftDescriptorSets.size(); ++frameIndex) {
-        const std::string setName = "renderer.descriptorSet.sunShaft.frame" + std::to_string(frameIndex);
-        setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET, vkHandleToUint64(m_sunShaftDescriptorSets[frameIndex]), setName.c_str());
     }
 
     VkShaderModule sunShaftShaderModule = VK_NULL_HANDLE;
@@ -4889,55 +4842,31 @@ bool Renderer::createSunShaftResources() {
     pushConstantRange.offset = 0;
     pushConstantRange.size = sizeof(SunShaftPushConstants);
 
-    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo{};
-    pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutCreateInfo.setLayoutCount = 1;
-    pipelineLayoutCreateInfo.pSetLayouts = &m_sunShaftDescriptorSetLayout;
-    pipelineLayoutCreateInfo.pushConstantRangeCount = 1;
-    pipelineLayoutCreateInfo.pPushConstantRanges = &pushConstantRange;
-    const VkResult pipelineLayoutResult = vkCreatePipelineLayout(
-        m_device,
-        &pipelineLayoutCreateInfo,
-        nullptr,
-        &m_sunShaftPipelineLayout
-    );
-    if (pipelineLayoutResult != VK_SUCCESS) {
-        logVkFailure("vkCreatePipelineLayout(sunShaft)", pipelineLayoutResult);
+    const std::array<VkPushConstantRange, 1> pushConstantRanges = {pushConstantRange};
+    if (!createComputePipelineLayout(
+            m_sunShaftDescriptorSetLayout,
+            pushConstantRanges,
+            m_sunShaftPipelineLayout,
+            "vkCreatePipelineLayout(sunShaft)",
+            "renderer.pipelineLayout.sunShaft"
+        )) {
         vkDestroyShaderModule(m_device, sunShaftShaderModule, nullptr);
         destroySunShaftResources();
         return false;
     }
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE_LAYOUT,
-        vkHandleToUint64(m_sunShaftPipelineLayout),
-        "renderer.pipelineLayout.sunShaft"
-    );
 
-    VkPipelineShaderStageCreateInfo stage{};
-    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    stage.module = sunShaftShaderModule;
-    stage.pName = "main";
-
-    VkComputePipelineCreateInfo pipelineCreateInfo{};
-    pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    pipelineCreateInfo.stage = stage;
-    pipelineCreateInfo.layout = m_sunShaftPipelineLayout;
-    const VkResult pipelineResult = vkCreateComputePipelines(
-        m_device,
-        VK_NULL_HANDLE,
-        1,
-        &pipelineCreateInfo,
-        nullptr,
-        &m_sunShaftPipeline
-    );
-    vkDestroyShaderModule(m_device, sunShaftShaderModule, nullptr);
-    if (pipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateComputePipelines(sunShaft)", pipelineResult);
+    if (!createComputePipeline(
+            m_sunShaftPipelineLayout,
+            sunShaftShaderModule,
+            m_sunShaftPipeline,
+            "vkCreateComputePipelines(sunShaft)",
+            "pipeline.sunShaft.compute"
+        )) {
+        vkDestroyShaderModule(m_device, sunShaftShaderModule, nullptr);
         destroySunShaftResources();
         return false;
     }
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_sunShaftPipeline), "pipeline.sunShaft.compute");
+    vkDestroyShaderModule(m_device, sunShaftShaderModule, nullptr);
 
     m_sunShaftComputeAvailable = true;
     VOX_LOGI("render") << "sun shafts compute resources ready\n";
@@ -5851,23 +5780,14 @@ bool Renderer::createDescriptorResources() {
         );
     }
 
-    std::array<VkDescriptorSetLayout, kMaxFramesInFlight> setLayouts{};
-    setLayouts.fill(m_descriptorSetLayout);
-
-    VkDescriptorSetAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocateInfo.descriptorPool = m_descriptorPool;
-    allocateInfo.descriptorSetCount = static_cast<uint32_t>(setLayouts.size());
-    allocateInfo.pSetLayouts = setLayouts.data();
-
-    const VkResult allocateResult = vkAllocateDescriptorSets(m_device, &allocateInfo, m_descriptorSets.data());
-    if (allocateResult != VK_SUCCESS) {
-        logVkFailure("vkAllocateDescriptorSets", allocateResult);
+    if (!allocatePerFrameDescriptorSets(
+            m_descriptorPool,
+            m_descriptorSetLayout,
+            std::span<VkDescriptorSet>(m_descriptorSets),
+            "vkAllocateDescriptorSets",
+            "renderer.descriptorSet.frame"
+        )) {
         return false;
-    }
-    for (size_t i = 0; i < m_descriptorSets.size(); ++i) {
-        const std::string setName = "renderer.descriptorSet.frame" + std::to_string(i);
-        setObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET, vkHandleToUint64(m_descriptorSets[i]), setName.c_str());
     }
 
     if (m_supportsBindlessDescriptors && m_bindlessTextureCapacity > 0) {
@@ -8990,214 +8910,6 @@ void Renderer::buildMeshingDebugUi() {
     ImGui::End();
 }
 
-void Renderer::buildShadowDebugUi() {
-    if (!m_debugUiVisible || !m_showShadowPanel) {
-        return;
-    }
-
-    if (!ImGui::Begin("Shadows", &m_showShadowPanel)) {
-        ImGui::End();
-        return;
-    }
-
-    if (ImGui::BeginTabBar("ShadowsTabs")) {
-        if (ImGui::BeginTabItem("Shadows")) {
-            ImGui::Text(
-                "Macro Cells U/R4/R1: %u / %u / %u",
-                m_debugMacroCellUniformCount,
-                m_debugMacroCellRefined4Count,
-                m_debugMacroCellRefined1Count
-            );
-            ImGui::Text(
-                "Drawn LOD ranges 0/1/2: %u / %u / %u",
-                m_debugDrawnLod0Ranges,
-                m_debugDrawnLod1Ranges,
-                m_debugDrawnLod2Ranges
-            );
-            ImGui::Text("Cascade Splits: %.1f / %.1f / %.1f / %.1f",
-                m_shadowCascadeSplits[0],
-                m_shadowCascadeSplits[1],
-                m_shadowCascadeSplits[2],
-                m_shadowCascadeSplits[3]
-            );
-            ImGui::Separator();
-            ImGui::Checkbox("Shadow Occluder Culling", &m_shadowDebugSettings.enableOccluderCulling);
-            ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
-            ImGui::SliderFloat("Cascade Blend Min", &m_shadowDebugSettings.cascadeBlendMin, 1.0f, 20.0f, "%.2f");
-            ImGui::SliderFloat("Cascade Blend Factor", &m_shadowDebugSettings.cascadeBlendFactor, 0.05f, 0.60f, "%.2f");
-            ImGui::SliderInt("Grass Shadow Cascades", &m_shadowDebugSettings.grassShadowCascadeCount, 0, static_cast<int>(kShadowCascadeCount));
-            if (ImGui::CollapsingHeader("Advanced Bias Controls")) {
-                ImGui::Text("Receiver Bias");
-                ImGui::SliderFloat("Normal Offset Near", &m_shadowDebugSettings.receiverNormalOffsetNear, 0.0f, 0.20f, "%.3f");
-                ImGui::SliderFloat("Normal Offset Far", &m_shadowDebugSettings.receiverNormalOffsetFar, 0.0f, 0.35f, "%.3f");
-                ImGui::SliderFloat("Base Bias Near (texel)", &m_shadowDebugSettings.receiverBaseBiasNearTexel, 0.0f, 12.0f, "%.2f");
-                ImGui::SliderFloat("Base Bias Far (texel)", &m_shadowDebugSettings.receiverBaseBiasFarTexel, 0.0f, 16.0f, "%.2f");
-                ImGui::SliderFloat("Slope Bias Near (texel)", &m_shadowDebugSettings.receiverSlopeBiasNearTexel, 0.0f, 14.0f, "%.2f");
-                ImGui::SliderFloat("Slope Bias Far (texel)", &m_shadowDebugSettings.receiverSlopeBiasFarTexel, 0.0f, 18.0f, "%.2f");
-                ImGui::Separator();
-                ImGui::Text("Caster Bias");
-                ImGui::SliderFloat("Const Bias Base", &m_shadowDebugSettings.casterConstantBiasBase, 0.0f, 6.0f, "%.2f");
-                ImGui::SliderFloat("Const Bias Cascade Scale", &m_shadowDebugSettings.casterConstantBiasCascadeScale, 0.0f, 3.0f, "%.2f");
-                ImGui::SliderFloat("Slope Bias Base", &m_shadowDebugSettings.casterSlopeBiasBase, 0.0f, 8.0f, "%.2f");
-                ImGui::SliderFloat("Slope Bias Cascade Scale", &m_shadowDebugSettings.casterSlopeBiasCascadeScale, 0.0f, 4.0f, "%.2f");
-            }
-            if (ImGui::Button("Reset Shadow Defaults")) {
-                m_shadowDebugSettings = ShadowDebugSettings{};
-            }
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("AO + GI")) {
-            ImGui::Checkbox("Enable Vertex AO", &m_debugEnableVertexAo);
-            ImGui::Checkbox("Enable SSAO", &m_debugEnableSsao);
-            ImGui::SliderFloat("SSAO Radius", &m_shadowDebugSettings.ssaoRadius, 0.10f, 2.00f, "%.2f");
-            ImGui::SliderFloat("SSAO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 0.20f, "%.3f");
-            ImGui::SliderFloat("SSAO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 1.50f, "%.2f");
-            if (ImGui::CollapsingHeader("Advanced AO Debug")) {
-                ImGui::Checkbox("Visualize SSAO", &m_debugVisualizeSsao);
-                ImGui::Checkbox("Visualize AO Normals", &m_debugVisualizeAoNormals);
-            }
-
-            ImGui::Separator();
-            ImGui::Text("Voxel GI");
-            ImGui::Text("Compute: %s", m_voxelGiComputeAvailable ? "on" : "fallback");
-            ImGui::SliderFloat("Bounce Strength", &m_voxelGiDebugSettings.bounceStrength, 0.0f, 2.50f, "%.2f");
-            ImGui::SliderFloat("Diffusion Softness", &m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f, "%.2f");
-            if (ImGui::CollapsingHeader("Advanced GI Debug")) {
-                const char* giVisualizationModes = "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0";
-                ImGui::Combo("GI Visualize", &m_voxelGiDebugSettings.visualizationMode, giVisualizationModes);
-                if (m_voxelGiDebugSettings.visualizationMode > 0) {
-                    m_debugVisualizeSsao = false;
-                    m_debugVisualizeAoNormals = false;
-                }
-            }
-            if (ImGui::Button("Reset GI Defaults")) {
-                m_voxelGiDebugSettings = VoxelGiDebugSettings{};
-            }
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Display")) {
-            if (m_supportsDisplayTiming) {
-                ImGui::Checkbox("Use Display Timing", &m_enableDisplayTiming);
-            } else {
-                ImGui::TextDisabled("Display Timing: unsupported");
-                m_enableDisplayTiming = false;
-            }
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
-    }
-
-    ImGui::End();
-}
-
-void Renderer::buildSunDebugUi() {
-    if (!m_debugUiVisible || !m_showSunPanel) {
-        return;
-    }
-
-    if (!ImGui::Begin("Sun/Sky", &m_showSunPanel)) {
-        ImGui::End();
-        return;
-    }
-
-    if (ImGui::BeginTabBar("SunSkyTabs")) {
-        if (ImGui::BeginTabItem("Sun & Atmosphere")) {
-            ImGui::SliderFloat("Sun Yaw", &m_skyDebugSettings.sunYawDegrees, -180.0f, 180.0f, "%.1f deg");
-            ImGui::SliderFloat("Sun Pitch", &m_skyDebugSettings.sunPitchDegrees, -89.0f, 5.0f, "%.1f deg");
-            ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
-            ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
-            ImGui::SliderFloat("Sun Disk Intensity", &m_skyDebugSettings.sunDiskIntensity, 300.0f, 2200.0f, "%.0f");
-            ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");
-            if (ImGui::CollapsingHeader("Advanced Atmosphere")) {
-                ImGui::Checkbox("Auto Sunrise Tuning", &m_skyDebugSettings.autoSunriseTuning);
-                ImGui::SliderFloat("Auto Sunrise Blend", &m_skyDebugSettings.autoSunriseBlend, 0.0f, 1.0f, "%.2f");
-                ImGui::SliderFloat("Auto Adapt Speed", &m_skyDebugSettings.autoSunriseAdaptSpeed, 0.5f, 12.0f, "%.2f");
-                ImGui::Separator();
-                ImGui::SliderFloat("Rayleigh Strength", &m_skyDebugSettings.rayleighStrength, 0.1f, 4.0f, "%.2f");
-                ImGui::SliderFloat("Mie Strength", &m_skyDebugSettings.mieStrength, 0.05f, 4.0f, "%.2f");
-                ImGui::SliderFloat("Mie Anisotropy", &m_skyDebugSettings.mieAnisotropy, 0.0f, 0.95f, "%.2f");
-                ImGui::SliderFloat("Sun Disk Size", &m_skyDebugSettings.sunDiskSize, 0.5f, 6.0f, "%.2f");
-                ImGui::SliderFloat("Sun Haze Falloff", &m_skyDebugSettings.sunHazeFalloff, 0.10f, 1.20f, "%.2f");
-            }
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Post")) {
-            ImGui::Text("Eye Adaptation");
-            ImGui::Checkbox("Auto Exposure", &m_skyDebugSettings.autoExposureEnabled);
-            ImGui::SliderFloat("Manual Exposure", &m_skyDebugSettings.manualExposure, 0.05f, 4.0f, "%.3f");
-            if (m_skyDebugSettings.autoExposureEnabled && ImGui::CollapsingHeader("Advanced Exposure")) {
-                ImGui::TextDisabled("AE Update Interval: fixed to every frame");
-                ImGui::SliderFloat("AE Key Value", &m_skyDebugSettings.autoExposureKeyValue, 0.05f, 0.50f, "%.3f");
-                ImGui::SliderFloat("AE Min Exposure", &m_skyDebugSettings.autoExposureMin, 0.05f, 2.50f, "%.3f");
-                ImGui::SliderFloat("AE Max Exposure", &m_skyDebugSettings.autoExposureMax, 0.20f, 8.00f, "%.3f");
-                ImGui::SliderFloat("AE Adapt Up", &m_skyDebugSettings.autoExposureAdaptUp, 0.10f, 12.00f, "%.2f");
-                ImGui::SliderFloat("AE Adapt Down", &m_skyDebugSettings.autoExposureAdaptDown, 0.10f, 12.00f, "%.2f");
-                ImGui::SliderFloat("AE Low Percentile", &m_skyDebugSettings.autoExposureLowPercentile, 0.00f, 0.95f, "%.2f");
-                ImGui::SliderFloat("AE High Percentile", &m_skyDebugSettings.autoExposureHighPercentile, 0.05f, 1.00f, "%.2f");
-            }
-            if (!m_autoExposureComputeAvailable) {
-                ImGui::TextDisabled("Auto exposure compute unavailable; manual exposure is active.");
-            }
-
-            ImGui::Separator();
-            ImGui::Text("Bloom");
-            ImGui::SliderFloat("Bloom Global Intensity", &m_skyDebugSettings.bloomBaseIntensity, 0.0f, 0.35f, "%.3f");
-            if (ImGui::CollapsingHeader("Advanced Bloom")) {
-                ImGui::SliderFloat("Bloom Threshold", &m_skyDebugSettings.bloomThreshold, 0.25f, 4.0f, "%.2f");
-                ImGui::SliderFloat("Bloom Soft Knee", &m_skyDebugSettings.bloomSoftKnee, 0.0f, 1.0f, "%.2f");
-                ImGui::SliderFloat("Bloom Sun Boost", &m_skyDebugSettings.bloomSunFacingBoost, 0.0f, 0.40f, "%.3f");
-                ImGui::TextDisabled("Bloom is hidden in GI/SSAO debug visualization modes.");
-            }
-
-            ImGui::Separator();
-            ImGui::Text("Color Grading");
-            ImGui::SliderFloat("Contrast", &m_skyDebugSettings.colorGradingContrast, 0.70f, 1.40f, "%.2f");
-            ImGui::SliderFloat("Saturation", &m_skyDebugSettings.colorGradingSaturation, 0.0f, 2.0f, "%.2f");
-            ImGui::SliderFloat("Vibrance", &m_skyDebugSettings.colorGradingVibrance, -1.0f, 1.0f, "%.2f");
-            if (ImGui::CollapsingHeader("Advanced Color Grading")) {
-                ImGui::SliderFloat("White Balance R", &m_skyDebugSettings.colorGradingWhiteBalanceR, 0.80f, 1.20f, "%.2f");
-                ImGui::SliderFloat("White Balance G", &m_skyDebugSettings.colorGradingWhiteBalanceG, 0.80f, 1.20f, "%.2f");
-                ImGui::SliderFloat("White Balance B", &m_skyDebugSettings.colorGradingWhiteBalanceB, 0.80f, 1.20f, "%.2f");
-                ImGui::SliderFloat("Shadow Tint R", &m_skyDebugSettings.colorGradingShadowTintR, -0.20f, 0.20f, "%.2f");
-                ImGui::SliderFloat("Shadow Tint G", &m_skyDebugSettings.colorGradingShadowTintG, -0.20f, 0.20f, "%.2f");
-                ImGui::SliderFloat("Shadow Tint B", &m_skyDebugSettings.colorGradingShadowTintB, -0.20f, 0.20f, "%.2f");
-                ImGui::SliderFloat("Highlight Tint R", &m_skyDebugSettings.colorGradingHighlightTintR, -0.20f, 0.20f, "%.2f");
-                ImGui::SliderFloat("Highlight Tint G", &m_skyDebugSettings.colorGradingHighlightTintG, -0.20f, 0.20f, "%.2f");
-                ImGui::SliderFloat("Highlight Tint B", &m_skyDebugSettings.colorGradingHighlightTintB, -0.20f, 0.20f, "%.2f");
-            }
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Fog & Foliage")) {
-            ImGui::SliderFloat("Fog Density", &m_skyDebugSettings.volumetricFogDensity, 0.0f, 0.03f, "%.4f");
-            ImGui::SliderFloat("Fog Sun Scatter", &m_skyDebugSettings.volumetricSunScattering, 0.0f, 3.0f, "%.2f");
-            if (ImGui::CollapsingHeader("Advanced Fog")) {
-                ImGui::SliderFloat("Fog Height Falloff", &m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 0.30f, "%.3f");
-                ImGui::SliderFloat("Fog Base Height", &m_skyDebugSettings.volumetricFogBaseHeight, -32.0f, 64.0f, "%.1f");
-            }
-            ImGui::Separator();
-            ImGui::SliderFloat("Plant Quad Directionality", &m_skyDebugSettings.plantQuadDirectionality, 0.0f, 1.0f, "%.2f");
-            ImGui::Text("Active: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",
-                m_skyTuningRuntime.rayleighStrength,
-                m_skyTuningRuntime.mieStrength,
-                m_skyTuningRuntime.skyExposure,
-                m_skyTuningRuntime.sunDiskSize
-            );
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
-    }
-
-    if (ImGui::Button("Reset Sun/Sky Defaults")) {
-        m_skyDebugSettings = SkyDebugSettings{};
-        m_skyTuningRuntime = Renderer::SkyTuningRuntimeState{};
-    }
-    ImGui::End();
-}
-
 void Renderer::buildAimReticleUi() {
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
     if (drawList == nullptr) {
@@ -10869,48 +10581,7 @@ void Renderer::renderFrame(
         }
     };
 
-    // Shadow casting must be culled against cascade coverage and receiver visibility.
-    // Use camera-frustum visible chunks as receivers, and assume casters only affect
-    // immediate neighboring chunks (1-ring neighborhood).
-    std::vector<std::uint8_t> shadowCandidateMask;
-    if (m_shadowDebugSettings.enableOccluderCulling && !visibleChunkIndices.empty()) {
-        shadowCandidateMask.assign(chunks.size(), 0u);
-        std::unordered_map<ChunkCoordKey, std::size_t, ChunkCoordKeyHash> chunkIndexByCoord;
-        chunkIndexByCoord.reserve(chunks.size() * 2u);
-        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-            const world::Chunk& chunk = chunks[chunkArrayIndex];
-            chunkIndexByCoord[ChunkCoordKey{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()}] = chunkArrayIndex;
-        }
-
-        const auto markCandidateChunk = [&](int chunkX, int chunkY, int chunkZ) {
-            const auto it = chunkIndexByCoord.find(ChunkCoordKey{chunkX, chunkY, chunkZ});
-            if (it != chunkIndexByCoord.end()) {
-                shadowCandidateMask[it->second] = 1u;
-            }
-        };
-
-        for (const std::size_t visibleChunkIndex : visibleChunkIndices) {
-            if (visibleChunkIndex >= chunks.size()) {
-                continue;
-            }
-            const world::Chunk& chunk = chunks[visibleChunkIndex];
-            shadowCandidateMask[visibleChunkIndex] = 1u;
-            const int baseChunkX = chunk.chunkX();
-            const int baseChunkY = chunk.chunkY();
-            const int baseChunkZ = chunk.chunkZ();
-
-            for (int dx = -1; dx <= 1; ++dx) {
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dz = -1; dz <= 1; ++dz) {
-                        if (dx == 0 && dy == 0 && dz == 0) {
-                            continue;
-                        }
-                        markCandidateChunk(baseChunkX + dx, baseChunkY + dy, baseChunkZ + dz);
-                    }
-                }
-            }
-        }
-    }
+    const std::vector<std::uint8_t> shadowCandidateMask = buildShadowCandidateMask(chunks, visibleChunkIndices);
 
     constexpr float kShadowCasterClipMargin = 0.08f;
     if (!m_shadowDebugSettings.enableOccluderCulling) {
@@ -11573,191 +11244,7 @@ void Renderer::renderFrame(
             VK_IMAGE_ASPECT_COLOR_BIT
         );
 
-        const uint32_t voxelGiDispatchX = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
-        const uint32_t voxelGiDispatchY = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
-        const uint32_t voxelGiDispatchZ = (kVoxelGiGridResolution + (kVoxelGiWorkgroupSize - 1u)) / kVoxelGiWorkgroupSize;
-        const uint32_t voxelGiSkyDispatchX = (kVoxelGiGridResolution + 7u) / 8u;
-        const uint32_t voxelGiSkyDispatchY = (kVoxelGiGridResolution + 7u) / 8u;
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_voxelGiSkyExposurePipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_COMPUTE,
-            m_voxelGiPipelineLayout,
-            0,
-            1,
-            &m_voxelGiDescriptorSets[m_currentFrame],
-            1,
-            &mvpDynamicOffset
-        );
-        vkCmdDispatch(commandBuffer, voxelGiSkyDispatchX, voxelGiSkyDispatchY, 1);
-        transitionImageLayout(
-            commandBuffer,
-            m_voxelGiSkyExposureImage,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT
-        );
-        m_voxelGiSkyExposureInitialized = true;
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_voxelGiSurfacePipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_COMPUTE,
-            m_voxelGiPipelineLayout,
-            0,
-            1,
-            &m_voxelGiDescriptorSets[m_currentFrame],
-            1,
-            &mvpDynamicOffset
-        );
-        vkCmdDispatch(commandBuffer, voxelGiDispatchX, voxelGiDispatchY, voxelGiDispatchZ);
-        for (std::size_t faceIndex = 0; faceIndex < m_voxelGiSurfaceFaceImages.size(); ++faceIndex) {
-            transitionImageLayout(
-                commandBuffer,
-                m_voxelGiSurfaceFaceImages[faceIndex],
-                VK_IMAGE_LAYOUT_GENERAL,
-                VK_IMAGE_LAYOUT_GENERAL,
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT
-            );
-        }
-
-        writeGpuTimestampTop(kGpuTimestampQueryGiInjectStart);
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_voxelGiInjectPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_COMPUTE,
-            m_voxelGiPipelineLayout,
-            0,
-            1,
-            &m_voxelGiDescriptorSets[m_currentFrame],
-            1,
-            &mvpDynamicOffset
-        );
-        vkCmdDispatch(commandBuffer, voxelGiDispatchX, voxelGiDispatchY, voxelGiDispatchZ);
-        writeGpuTimestampBottom(kGpuTimestampQueryGiInjectEnd);
-
-        transitionImageLayout(
-            commandBuffer,
-            m_voxelGiImages[0],
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT
-        );
-        writeGpuTimestampTop(kGpuTimestampQueryGiPropagateStart);
-        for (uint32_t propagateIteration = 0; propagateIteration < kVoxelGiPropagationIterations; ++propagateIteration) {
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_voxelGiPropagatePipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                m_voxelGiPipelineLayout,
-                0,
-                1,
-                &m_voxelGiDescriptorSets[m_currentFrame],
-                1,
-                &mvpDynamicOffset
-            );
-            vkCmdDispatch(commandBuffer, voxelGiDispatchX, voxelGiDispatchY, voxelGiDispatchZ);
-
-            if ((propagateIteration + 1u) < kVoxelGiPropagationIterations) {
-                transitionImageLayout(
-                    commandBuffer,
-                    m_voxelGiImages[1],
-                    VK_IMAGE_LAYOUT_GENERAL,
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                    VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    VK_ACCESS_2_TRANSFER_READ_BIT,
-                    VK_IMAGE_ASPECT_COLOR_BIT
-                );
-                transitionImageLayout(
-                    commandBuffer,
-                    m_voxelGiImages[0],
-                    VK_IMAGE_LAYOUT_GENERAL,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                    VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                    VK_IMAGE_ASPECT_COLOR_BIT
-                );
-
-                VkImageCopy copyRegion{};
-                copyRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                copyRegion.srcSubresource.mipLevel = 0;
-                copyRegion.srcSubresource.baseArrayLayer = 0;
-                copyRegion.srcSubresource.layerCount = 1;
-                copyRegion.srcOffset = {0, 0, 0};
-                copyRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                copyRegion.dstSubresource.mipLevel = 0;
-                copyRegion.dstSubresource.baseArrayLayer = 0;
-                copyRegion.dstSubresource.layerCount = 1;
-                copyRegion.dstOffset = {0, 0, 0};
-                copyRegion.extent = {
-                    kVoxelGiGridResolution,
-                    kVoxelGiGridResolution,
-                    kVoxelGiGridResolution
-                };
-                vkCmdCopyImage(
-                    commandBuffer,
-                    m_voxelGiImages[1],
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    m_voxelGiImages[0],
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    1,
-                    &copyRegion
-                );
-
-                transitionImageLayout(
-                    commandBuffer,
-                    m_voxelGiImages[1],
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    VK_IMAGE_LAYOUT_GENERAL,
-                    VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    VK_ACCESS_2_TRANSFER_READ_BIT,
-                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                    VK_IMAGE_ASPECT_COLOR_BIT
-                );
-                transitionImageLayout(
-                    commandBuffer,
-                    m_voxelGiImages[0],
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    VK_IMAGE_LAYOUT_GENERAL,
-                    VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                    VK_IMAGE_ASPECT_COLOR_BIT
-                );
-            }
-        }
-        writeGpuTimestampBottom(kGpuTimestampQueryGiPropagateEnd);
-
-        transitionImageLayout(
-            commandBuffer,
-            m_voxelGiImages[1],
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-            VK_IMAGE_ASPECT_COLOR_BIT
-        );
-        m_voxelGiInitialized = true;
-        m_voxelGiWorldDirty = false;
+        recordVoxelGiDispatchSequence(commandBuffer, mvpDynamicOffset, gpuTimestampQueryPool);
         endDebugLabel(commandBuffer);
     } else if (!m_voxelGiInitialized &&
                m_voxelGiImages[0] != VK_NULL_HANDLE &&
