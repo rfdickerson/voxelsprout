@@ -163,7 +163,6 @@ void RendererBackend::buildFrameStatsUi() {
             m_debugCpuFrameEwmaMs
         );
         ImGui::Text("Frame CPU P50/P95/P99: %.2f / %.2f / %.2f ms", m_debugCpuFrameP50Ms, m_debugCpuFrameP95Ms, m_debugCpuFrameP99Ms);
-        ImGui::Text("GI Occupancy CPU (chunk pack): %.2f ms", m_debugCpuGiOccupancyBuildMs);
         ImGui::Text("Frame GPU: %.2f ms", m_debugGpuFrameTimeMs);
         ImGui::Text("Frame GPU P50/P95/P99: %.2f / %.2f / %.2f ms", m_debugGpuFrameP50Ms, m_debugGpuFrameP95Ms, m_debugGpuFrameP99Ms);
         if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
@@ -177,6 +176,7 @@ void RendererBackend::buildFrameStatsUi() {
         }
         if (ImGui::TreeNodeEx("GPU Stages (ms)", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
+            ImGui::Text("GI Occupancy (compute): %.2f", m_debugGpuGiOccupancyTimeMs);
             ImGui::Text("GI Inject (compute): %.2f", m_debugGpuGiInjectTimeMs);
             ImGui::Text("GI Propagate (compute): %.2f", m_debugGpuGiPropagateTimeMs);
             ImGui::Text("Auto Exposure (compute): %.2f", m_debugGpuAutoExposureTimeMs);
@@ -196,7 +196,6 @@ void RendererBackend::buildFrameStatsUi() {
             m_debugCpuFrameEwmaMs
         );
         ImGui::Text("Frame CPU P50/P95/P99: %.2f / %.2f / %.2f ms", m_debugCpuFrameP50Ms, m_debugCpuFrameP95Ms, m_debugCpuFrameP99Ms);
-        ImGui::Text("GI Occupancy CPU (chunk pack): %.2f ms", m_debugCpuGiOccupancyBuildMs);
         ImGui::Text("Frame GPU: n/a");
         if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
             ImGui::Text(

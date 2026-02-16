@@ -1048,7 +1048,8 @@ VkFormat findSupportedVoxelGiOccupancyFormat(VkPhysicalDevice physicalDevice) {
     for (VkFormat format : kOccupancyCandidates) {
         VkFormatProperties properties{};
         vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
-        const VkFormatFeatureFlags requiredFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        const VkFormatFeatureFlags requiredFeatures =
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
         if ((properties.optimalTilingFeatures & requiredFeatures) == requiredFeatures) {
             return format;
         }

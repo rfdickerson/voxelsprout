@@ -82,6 +82,8 @@ struct VoxelGiPassState {
 };
 
 struct VoxelGiTimestampQueryIndices {
+    uint32_t occupancyStart = 0u;
+    uint32_t occupancyEnd = 0u;
     uint32_t injectStart = 0u;
     uint32_t injectEnd = 0u;
     uint32_t propagateStart = 0u;
@@ -150,13 +152,16 @@ void recordVoxelGiSkyExposurePass(
 void recordVoxelGiOccupancyPass(
     const VoxelGiPassContext& context,
     const VoxelGiDispatchDims& dims,
+    const VoxelGiTimestampQueryIndices& timestampQueries,
     uint32_t occupancyDispatchZ
 ) {
     if (occupancyDispatchZ == 0u) {
         return;
     }
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.occupancyStart);
     bindVoxelGiComputePass(context, context.occupancyPipeline);
     vkCmdDispatch(context.commandBuffer, dims.occupancyX, dims.occupancyY, occupancyDispatchZ);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.occupancyEnd);
     transitionImageLayout(
         context.commandBuffer,
         context.occupancyImage,
@@ -355,13 +360,15 @@ void RendererBackend::recordVoxelGiDispatchSequence(
         &m_voxelGiWorldDirty
     };
     const VoxelGiTimestampQueryIndices timestampQueries{
+        kGpuTimestampQueryGiOccupancyStart,
+        kGpuTimestampQueryGiOccupancyEnd,
         kGpuTimestampQueryGiInjectStart,
         kGpuTimestampQueryGiInjectEnd,
         kGpuTimestampQueryGiPropagateStart,
         kGpuTimestampQueryGiPropagateEnd
     };
 
-    recordVoxelGiOccupancyPass(passContext, dispatchDims, occupancyDispatchZ);
+    recordVoxelGiOccupancyPass(passContext, dispatchDims, timestampQueries, occupancyDispatchZ);
     recordVoxelGiSkyExposurePass(passContext, dispatchDims, passState);
     recordVoxelGiSurfacePass(passContext, dispatchDims);
     recordVoxelGiInjectPass(passContext, dispatchDims, timestampQueries);

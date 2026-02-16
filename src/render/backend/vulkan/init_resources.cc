@@ -893,7 +893,7 @@ bool RendererBackend::createVoxelGiResources() {
         m_voxelGiOccupancyFormat = findSupportedVoxelGiOccupancyFormat(m_physicalDevice);
     }
     if (m_voxelGiOccupancyFormat == VK_FORMAT_UNDEFINED) {
-        VOX_LOGE("render") << "voxel GI occupancy format unsupported (requires sampled 3D image)\n";
+        VOX_LOGE("render") << "voxel GI occupancy format unsupported (requires sampled+storage 3D image)\n";
         return false;
     }
 
@@ -1238,7 +1238,10 @@ bool RendererBackend::createVoxelGiResources() {
         occupancyImageCreateInfo.arrayLayers = 1;
         occupancyImageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
         occupancyImageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        occupancyImageCreateInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        occupancyImageCreateInfo.usage =
+            VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            VK_IMAGE_USAGE_STORAGE_BIT;
         occupancyImageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         occupancyImageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
