@@ -291,6 +291,7 @@ private:
     void scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue);
     void collectCompletedBufferReleases();
     void updateDisplayTimingStats();
+    void updateFrameTimingPercentiles();
     bool isTimelineValueReached(uint64_t value) const;
     struct DeferredBufferRelease {
         BufferHandle handle = kInvalidBufferHandle;
@@ -578,6 +579,7 @@ private:
     VkSampler m_voxelGiOccupancySampler = VK_NULL_HANDLE;
     bool m_voxelGiOccupancyInitialized = false;
     bool m_voxelGiWorldDirty = true;
+    std::uint64_t m_voxelGiWorldVersion = 1;
     bool m_voxelGiHasPreviousFrameState = false;
     std::array<float, 3> m_voxelGiPreviousGridOrigin{0.0f, 0.0f, 0.0f};
     std::array<float, 3> m_voxelGiPreviousSunDirection{0.0f, 0.0f, 0.0f};
@@ -585,6 +587,12 @@ private:
     std::array<std::array<float, 3>, 9> m_voxelGiPreviousShIrradiance{};
     float m_voxelGiPreviousBounceStrength = 0.0f;
     float m_voxelGiPreviousDiffusionSoftness = 0.0f;
+    std::vector<std::uint8_t> m_voxelGiOccupancyStagingRgba;
+    std::array<float, 3> m_voxelGiOccupancyBuildOrigin{0.0f, 0.0f, 0.0f};
+    std::uint64_t m_voxelGiOccupancyBuildWorldVersion = 0;
+    std::uint32_t m_voxelGiOccupancyBuildNextZ = 0;
+    bool m_voxelGiOccupancyBuildInProgress = false;
+    bool m_voxelGiOccupancyUploadPending = false;
     BufferHandle m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     bool m_autoExposureComputeAvailable = false;
@@ -719,6 +727,8 @@ private:
     uint32_t m_nextDisplayTimingPresentId = 1;
     uint32_t m_lastSubmittedDisplayTimingPresentId = 0;
     uint32_t m_lastPresentedDisplayTimingPresentId = 0;
+    uint32_t m_lastProcessedDisplayTimingPresentId = 0;
+    std::uint64_t m_lastDisplayTimingActualPresentTimeNs = 0;
     uint32_t m_currentFrame = 0;
     bool m_debugUiVisible = false;
     bool m_showFrameStatsPanel = false;
@@ -764,6 +774,17 @@ private:
     float m_debugDisplayRefreshMs = 0.0f;
     float m_debugDisplayPresentMarginMs = 0.0f;
     float m_debugDisplayActualEarliestDeltaMs = 0.0f;
+    float m_debugPresentedFrameTimeMs = 0.0f;
+    float m_debugPresentedFps = 0.0f;
+    float m_debugCpuFrameP50Ms = 0.0f;
+    float m_debugCpuFrameP95Ms = 0.0f;
+    float m_debugCpuFrameP99Ms = 0.0f;
+    float m_debugGpuFrameP50Ms = 0.0f;
+    float m_debugGpuFrameP95Ms = 0.0f;
+    float m_debugGpuFrameP99Ms = 0.0f;
+    float m_debugPresentedFrameP50Ms = 0.0f;
+    float m_debugPresentedFrameP95Ms = 0.0f;
+    float m_debugPresentedFrameP99Ms = 0.0f;
     std::uint32_t m_debugDisplayTimingSampleCount = 0;
     std::array<float, kTimingHistorySampleCount> m_debugCpuFrameTotalMsHistory{};
     std::array<float, kTimingHistorySampleCount> m_debugCpuFrameWorkMsHistory{};
@@ -776,6 +797,9 @@ private:
     std::array<float, kTimingHistorySampleCount> m_debugGpuFrameTimingMsHistory{};
     std::uint32_t m_debugGpuFrameTimingMsHistoryWrite = 0;
     std::uint32_t m_debugGpuFrameTimingMsHistoryCount = 0;
+    std::array<float, kTimingHistorySampleCount> m_debugPresentedFrameTimingMsHistory{};
+    std::uint32_t m_debugPresentedFrameTimingMsHistoryWrite = 0;
+    std::uint32_t m_debugPresentedFrameTimingMsHistoryCount = 0;
     float m_debugFps = 0.0f;
     std::uint32_t m_debugChunkCount = 0;
     std::uint32_t m_debugMacroCellUniformCount = 0;

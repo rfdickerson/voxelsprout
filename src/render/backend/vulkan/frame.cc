@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <type_traits>
@@ -50,6 +51,38 @@ const char* vkResultName(VkResult result) {
 void logVkFailure(const char* context, VkResult result) {
     VOX_LOGE("render") << context << " failed: "
                        << vkResultName(result) << " (" << static_cast<int>(result) << ")";
+}
+
+template <std::size_t N>
+float percentileFromRingBuffer(
+    const std::array<float, N>& history,
+    std::uint32_t sampleCount,
+    std::uint32_t writeIndex,
+    float percentile
+) {
+    if (sampleCount == 0) {
+        return 0.0f;
+    }
+
+    const std::uint32_t clampedSampleCount = std::min(sampleCount, static_cast<std::uint32_t>(N));
+    std::array<float, N> scratch{};
+    for (std::uint32_t i = 0; i < clampedSampleCount; ++i) {
+        const std::uint32_t historyIndex =
+            (clampedSampleCount == static_cast<std::uint32_t>(N))
+                ? ((writeIndex + i) % static_cast<std::uint32_t>(N))
+                : i;
+        scratch[i] = history[historyIndex];
+    }
+
+    const float clampedPercentile = std::clamp(percentile, 0.0f, 1.0f);
+    const std::uint32_t targetIndex = static_cast<std::uint32_t>(
+        std::ceil(clampedPercentile * static_cast<float>(clampedSampleCount - 1u))
+    );
+    auto first = scratch.begin();
+    auto nth = first + targetIndex;
+    auto last = first + clampedSampleCount;
+    std::nth_element(first, nth, last);
+    return *nth;
 }
 
 } // namespace
@@ -189,6 +222,7 @@ void RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         (m_debugGpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
     m_debugGpuFrameTimingMsHistoryCount =
         std::min(m_debugGpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
+    updateFrameTimingPercentiles();
 }
 
 void RendererBackend::updateDisplayTimingStats() {
@@ -218,23 +252,104 @@ void RendererBackend::updateDisplayTimingStats() {
     }
     m_debugDisplayTimingSampleCount = timingCount;
 
-    const VkPastPresentationTimingGOOGLE* latest = nullptr;
-    for (const VkPastPresentationTimingGOOGLE& timing : timings) {
-        if (latest == nullptr || timing.presentID > latest->presentID) {
-            latest = &timing;
+    std::sort(
+        timings.begin(),
+        timings.end(),
+        [](const VkPastPresentationTimingGOOGLE& a, const VkPastPresentationTimingGOOGLE& b) {
+            return a.presentID < b.presentID;
         }
-    }
-    if (latest == nullptr) {
-        return;
-    }
-    m_lastPresentedDisplayTimingPresentId = latest->presentID;
-    m_debugDisplayPresentMarginMs = static_cast<float>(latest->presentMargin * 1.0e-6);
-    if (latest->actualPresentTime >= latest->earliestPresentTime) {
+    );
+    const VkPastPresentationTimingGOOGLE& latest = timings.back();
+    m_lastPresentedDisplayTimingPresentId = latest.presentID;
+    m_debugDisplayPresentMarginMs = static_cast<float>(latest.presentMargin * 1.0e-6);
+    if (latest.actualPresentTime >= latest.earliestPresentTime) {
         m_debugDisplayActualEarliestDeltaMs =
-            static_cast<float>((latest->actualPresentTime - latest->earliestPresentTime) * 1.0e-6);
+            static_cast<float>((latest.actualPresentTime - latest.earliestPresentTime) * 1.0e-6);
     } else {
         m_debugDisplayActualEarliestDeltaMs = 0.0f;
     }
+
+    for (const VkPastPresentationTimingGOOGLE& timing : timings) {
+        if (timing.presentID <= m_lastProcessedDisplayTimingPresentId) {
+            continue;
+        }
+        if (m_lastDisplayTimingActualPresentTimeNs > 0 && timing.actualPresentTime > m_lastDisplayTimingActualPresentTimeNs) {
+            const float presentFrameMs = static_cast<float>(
+                (timing.actualPresentTime - m_lastDisplayTimingActualPresentTimeNs) * 1.0e-6
+            );
+            if (presentFrameMs > 0.0f) {
+                m_debugPresentedFrameTimingMsHistory[m_debugPresentedFrameTimingMsHistoryWrite] = presentFrameMs;
+                m_debugPresentedFrameTimingMsHistoryWrite =
+                    (m_debugPresentedFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
+                m_debugPresentedFrameTimingMsHistoryCount =
+                    std::min(m_debugPresentedFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
+                m_debugPresentedFrameTimeMs = presentFrameMs;
+                m_debugPresentedFps = 1000.0f / presentFrameMs;
+            }
+        }
+        m_lastDisplayTimingActualPresentTimeNs = timing.actualPresentTime;
+        m_lastProcessedDisplayTimingPresentId = timing.presentID;
+    }
+    updateFrameTimingPercentiles();
+}
+
+void RendererBackend::updateFrameTimingPercentiles() {
+    m_debugCpuFrameP50Ms = percentileFromRingBuffer(
+        m_debugCpuFrameTotalMsHistory,
+        m_debugCpuFrameTimingMsHistoryCount,
+        m_debugCpuFrameTimingMsHistoryWrite,
+        0.50f
+    );
+    m_debugCpuFrameP95Ms = percentileFromRingBuffer(
+        m_debugCpuFrameTotalMsHistory,
+        m_debugCpuFrameTimingMsHistoryCount,
+        m_debugCpuFrameTimingMsHistoryWrite,
+        0.95f
+    );
+    m_debugCpuFrameP99Ms = percentileFromRingBuffer(
+        m_debugCpuFrameTotalMsHistory,
+        m_debugCpuFrameTimingMsHistoryCount,
+        m_debugCpuFrameTimingMsHistoryWrite,
+        0.99f
+    );
+
+    m_debugGpuFrameP50Ms = percentileFromRingBuffer(
+        m_debugGpuFrameTimingMsHistory,
+        m_debugGpuFrameTimingMsHistoryCount,
+        m_debugGpuFrameTimingMsHistoryWrite,
+        0.50f
+    );
+    m_debugGpuFrameP95Ms = percentileFromRingBuffer(
+        m_debugGpuFrameTimingMsHistory,
+        m_debugGpuFrameTimingMsHistoryCount,
+        m_debugGpuFrameTimingMsHistoryWrite,
+        0.95f
+    );
+    m_debugGpuFrameP99Ms = percentileFromRingBuffer(
+        m_debugGpuFrameTimingMsHistory,
+        m_debugGpuFrameTimingMsHistoryCount,
+        m_debugGpuFrameTimingMsHistoryWrite,
+        0.99f
+    );
+
+    m_debugPresentedFrameP50Ms = percentileFromRingBuffer(
+        m_debugPresentedFrameTimingMsHistory,
+        m_debugPresentedFrameTimingMsHistoryCount,
+        m_debugPresentedFrameTimingMsHistoryWrite,
+        0.50f
+    );
+    m_debugPresentedFrameP95Ms = percentileFromRingBuffer(
+        m_debugPresentedFrameTimingMsHistory,
+        m_debugPresentedFrameTimingMsHistoryCount,
+        m_debugPresentedFrameTimingMsHistoryWrite,
+        0.95f
+    );
+    m_debugPresentedFrameP99Ms = percentileFromRingBuffer(
+        m_debugPresentedFrameTimingMsHistory,
+        m_debugPresentedFrameTimingMsHistoryCount,
+        m_debugPresentedFrameTimingMsHistoryWrite,
+        0.99f
+    );
 }
 
 void RendererBackend::scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue) {

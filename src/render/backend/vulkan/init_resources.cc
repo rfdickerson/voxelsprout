@@ -1815,9 +1815,16 @@ void RendererBackend::destroyVoxelGiResources() {
     m_voxelGiOccupancyInitialized = false;
     m_voxelGiComputeAvailable = false;
     m_voxelGiWorldDirty = true;
+    ++m_voxelGiWorldVersion;
     m_voxelGiHasPreviousFrameState = false;
     m_voxelGiPreviousBounceStrength = 0.0f;
     m_voxelGiPreviousDiffusionSoftness = 0.0f;
+    m_voxelGiOccupancyStagingRgba.clear();
+    m_voxelGiOccupancyBuildOrigin = {0.0f, 0.0f, 0.0f};
+    m_voxelGiOccupancyBuildWorldVersion = 0;
+    m_voxelGiOccupancyBuildNextZ = 0;
+    m_voxelGiOccupancyBuildInProgress = false;
+    m_voxelGiOccupancyUploadPending = false;
 }
 
 

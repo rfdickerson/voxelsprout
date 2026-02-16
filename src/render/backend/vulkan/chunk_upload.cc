@@ -128,6 +128,7 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
     m_chunkMeshRebuildRequested = true;
     m_pendingChunkRemeshIndices.clear();
     m_voxelGiWorldDirty = true;
+    ++m_voxelGiWorldVersion;
     return true;
 }
 
@@ -147,6 +148,7 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
         m_pendingChunkRemeshIndices.push_back(chunkIndex);
     }
     m_voxelGiWorldDirty = true;
+    ++m_voxelGiWorldVersion;
     return true;
 }
 
@@ -171,6 +173,7 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
         }
     }
     m_voxelGiWorldDirty = true;
+    ++m_voxelGiWorldVersion;
     return true;
 }
 
