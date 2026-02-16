@@ -32,14 +32,7 @@
 
 namespace voxelsprout::render {
 
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-#endif
 #include "render/renderer_shared.h"
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 
 bool isDeviceExtensionAvailable(VkPhysicalDevice physicalDevice, const char* extensionName) {
     if (physicalDevice == VK_NULL_HANDLE || extensionName == nullptr || extensionName[0] == '\0') {
