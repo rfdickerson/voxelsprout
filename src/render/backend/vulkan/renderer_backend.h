@@ -29,6 +29,9 @@ struct GLFWwindow;
 // Should NOT do: gameplay simulation, world editing rules, or graphics API specifics yet.
 namespace voxelsprout::render {
 
+class CoreFrameGraphOrderValidator;
+struct CoreFrameGraphPlan;
+
 class RendererBackend {
 public:
     struct ShadowDebugSettings {
@@ -392,6 +395,55 @@ private:
         std::uint32_t& passDrawCounter,
         std::uint32_t cascadeIndex,
         const FrameChunkDrawData& frameChunkDrawData
+    );
+    void recordShadowAtlasPass(
+        VkCommandBuffer commandBuffer,
+        VkQueryPool gpuTimestampQueryPool,
+        CoreFrameGraphOrderValidator& coreFramePassOrderValidator,
+        const CoreFrameGraphPlan& coreFrameGraphPlan,
+        const BoundDescriptorSets& boundDescriptorSets,
+        uint32_t mvpDynamicOffset,
+        const FrameChunkDrawData& frameChunkDrawData,
+        const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt,
+        const std::optional<FrameArenaSlice>& shadowChunkInstanceSliceOpt,
+        VkBuffer chunkInstanceBuffer,
+        VkBuffer shadowChunkInstanceBuffer,
+        VkBuffer chunkVertexBuffer,
+        VkBuffer chunkIndexBuffer,
+        bool canDrawMagica,
+        std::span<const ReadyMagicaDraw> readyMagicaDraws,
+        uint32_t pipeInstanceCount,
+        const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt,
+        uint32_t transportInstanceCount,
+        const std::optional<FrameArenaSlice>& transportInstanceSliceOpt,
+        uint32_t beltCargoInstanceCount,
+        const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt
+    );
+    void recordNormalDepthPrepass(
+        VkCommandBuffer commandBuffer,
+        VkQueryPool gpuTimestampQueryPool,
+        CoreFrameGraphOrderValidator& coreFramePassOrderValidator,
+        const CoreFrameGraphPlan& coreFrameGraphPlan,
+        uint32_t aoFrameIndex,
+        uint32_t imageIndex,
+        VkExtent2D aoExtent,
+        const VkViewport& aoViewport,
+        const VkRect2D& aoScissor,
+        const BoundDescriptorSets& boundDescriptorSets,
+        uint32_t mvpDynamicOffset,
+        const FrameChunkDrawData& frameChunkDrawData,
+        const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt,
+        VkBuffer chunkInstanceBuffer,
+        VkBuffer chunkVertexBuffer,
+        VkBuffer chunkIndexBuffer,
+        bool canDrawMagica,
+        std::span<const ReadyMagicaDraw> readyMagicaDraws,
+        uint32_t pipeInstanceCount,
+        const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt,
+        uint32_t transportInstanceCount,
+        const std::optional<FrameArenaSlice>& transportInstanceSliceOpt,
+        uint32_t beltCargoInstanceCount,
+        const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt
     );
 
     GLFWwindow* m_window = nullptr;

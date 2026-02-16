@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "render/backend/vulkan/frame_graph_core.h"
+#include "render/backend/vulkan/frame_graph_runtime.h"
 #include "render/backend/vulkan/frame_math.h"
 
 namespace voxelsprout::render {
@@ -106,20 +107,7 @@ void RendererBackend::renderFrame(
         VOX_LOGE("render") << "frame graph has a cycle; refusing to render frame";
         return;
     }
-    std::optional<std::uint32_t> lastCorePassOrderIndex = std::nullopt;
-    const auto markCorePassEntered = [&](FrameGraph::PassId passId, const char* passName) {
-        if (passId >= coreFrameGraphPlan->passOrderById.size()) {
-            return;
-        }
-        const std::uint32_t passOrderIndex = coreFrameGraphPlan->passOrderById[passId];
-        if (lastCorePassOrderIndex.has_value() && passOrderIndex < *lastCorePassOrderIndex) {
-            VOX_LOGE("render")
-                << "core frame pass executed out of graph order: " << passName
-                << ", orderIndex=" << passOrderIndex
-                << ", previousOrderIndex=" << *lastCorePassOrderIndex;
-        }
-        lastCorePassOrderIndex = passOrderIndex;
-    };
+    CoreFrameGraphOrderValidator coreFramePassOrderValidator(*coreFrameGraphPlan);
 
     collectCompletedBufferReleases();
 
@@ -842,305 +830,29 @@ void RendererBackend::renderFrame(
         m_debugDrawCallsTotal += drawCount;
     };
 
-    writeGpuTimestampTop(kGpuTimestampQueryShadowStart);
-    markCorePassEntered(coreFrameGraphPlan->shadow, "shadow");
-    beginDebugLabel(commandBuffer, "Pass: Shadow Atlas", 0.28f, 0.22f, 0.22f, 1.0f);
-    const bool shadowInitialized = m_shadowDepthInitialized;
-    transitionImageLayout(
+    recordShadowAtlasPass(
         commandBuffer,
-        m_shadowDepthImage,
-        shadowInitialized ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        shadowInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
-        shadowInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT,
-        0,
-        1
+        gpuTimestampQueryPool,
+        coreFramePassOrderValidator,
+        *coreFrameGraphPlan,
+        boundDescriptorSets,
+        mvpDynamicOffset,
+        frameChunkDrawData,
+        chunkInstanceSliceOpt,
+        shadowChunkInstanceSliceOpt,
+        chunkInstanceBuffer,
+        shadowChunkInstanceBuffer,
+        chunkVertexBuffer,
+        chunkIndexBuffer,
+        canDrawMagica,
+        readyMagicaDraws,
+        pipeInstanceCount,
+        pipeInstanceSliceOpt,
+        transportInstanceCount,
+        transportInstanceSliceOpt,
+        beltCargoInstanceCount,
+        beltCargoInstanceSliceOpt
     );
-
-    VkClearValue shadowDepthClearValue{};
-    shadowDepthClearValue.depthStencil.depth = 0.0f;
-    shadowDepthClearValue.depthStencil.stencil = 0;
-
-    if (m_shadowPipeline != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
-
-        for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-            if (m_cmdInsertDebugUtilsLabel != nullptr) {
-                const std::string cascadeLabel = "Shadow Cascade " + std::to_string(cascadeIndex);
-                insertDebugLabel(commandBuffer, cascadeLabel.c_str(), 0.48f, 0.32f, 0.32f, 1.0f);
-            }
-            const ShadowAtlasRect atlasRect = kShadowAtlasRects[cascadeIndex];
-            VkViewport shadowViewport{};
-            shadowViewport.x = static_cast<float>(atlasRect.x);
-            shadowViewport.y = static_cast<float>(atlasRect.y);
-            shadowViewport.width = static_cast<float>(atlasRect.size);
-            shadowViewport.height = static_cast<float>(atlasRect.size);
-            shadowViewport.minDepth = 0.0f;
-            shadowViewport.maxDepth = 1.0f;
-
-            VkRect2D shadowScissor{};
-            shadowScissor.offset = {
-                static_cast<int32_t>(atlasRect.x),
-                static_cast<int32_t>(atlasRect.y)
-            };
-            shadowScissor.extent = {atlasRect.size, atlasRect.size};
-
-            VkRenderingAttachmentInfo shadowDepthAttachment{};
-            shadowDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            shadowDepthAttachment.imageView = m_shadowDepthImageView;
-            shadowDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-            shadowDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            shadowDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            shadowDepthAttachment.clearValue = shadowDepthClearValue;
-
-            VkRenderingInfo shadowRenderingInfo{};
-            shadowRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-            shadowRenderingInfo.renderArea.offset = shadowScissor.offset;
-            shadowRenderingInfo.renderArea.extent = shadowScissor.extent;
-            shadowRenderingInfo.layerCount = 1;
-            shadowRenderingInfo.colorAttachmentCount = 0;
-            shadowRenderingInfo.pDepthAttachment = &shadowDepthAttachment;
-
-            vkCmdBeginRendering(commandBuffer, &shadowRenderingInfo);
-            vkCmdSetViewport(commandBuffer, 0, 1, &shadowViewport);
-            vkCmdSetScissor(commandBuffer, 0, 1, &shadowScissor);
-            const float cascadeF = static_cast<float>(cascadeIndex);
-            const float constantBias =
-                m_shadowDebugSettings.casterConstantBiasBase +
-                (m_shadowDebugSettings.casterConstantBiasCascadeScale * cascadeF);
-            const float slopeBias =
-                m_shadowDebugSettings.casterSlopeBiasBase +
-                (m_shadowDebugSettings.casterSlopeBiasCascadeScale * cascadeF);
-            // Reverse-Z uses GREATER depth tests, so flip bias sign.
-            vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
-
-            if (cascadeIndex < kShadowCascadeCount) {
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
-                vkCmdBindDescriptorSets(
-                    commandBuffer,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_pipelineLayout,
-                    0,
-                    boundDescriptorSetCount,
-                    boundDescriptorSets.sets.data(),
-                    1,
-                    &mvpDynamicOffset
-                );
-                const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, shadowChunkInstanceBuffer};
-                const VkDeviceSize voxelVertexOffsets[2] = {0, shadowChunkInstanceSliceOpt->offset};
-                vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
-                vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                ChunkPushConstants chunkPushConstants{};
-                chunkPushConstants.chunkOffset[0] = 0.0f;
-                chunkPushConstants.chunkOffset[1] = 0.0f;
-                chunkPushConstants.chunkOffset[2] = 0.0f;
-                chunkPushConstants.chunkOffset[3] = 0.0f;
-                chunkPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                chunkPushConstants.cascadeData[1] = 0.0f;
-                chunkPushConstants.cascadeData[2] = 0.0f;
-                chunkPushConstants.cascadeData[3] = 0.0f;
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &chunkPushConstants
-                );
-                drawIndirectShadowChunkRanges(commandBuffer, m_debugDrawCallsShadow, cascadeIndex, frameChunkDrawData);
-            }
-            if (canDrawMagica) {
-                for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
-                    const VkBuffer magicaVertexBuffers[2] = {magicaDraw.vertexBuffer, chunkInstanceBuffer};
-                    const VkDeviceSize magicaVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-                    vkCmdBindVertexBuffers(commandBuffer, 0, 2, magicaVertexBuffers, magicaVertexOffsets);
-                    vkCmdBindIndexBuffer(commandBuffer, magicaDraw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                    ChunkPushConstants magicaPushConstants{};
-                    magicaPushConstants.chunkOffset[0] = magicaDraw.offsetX;
-                    magicaPushConstants.chunkOffset[1] = magicaDraw.offsetY;
-                    magicaPushConstants.chunkOffset[2] = magicaDraw.offsetZ;
-                    magicaPushConstants.chunkOffset[3] = 0.0f;
-                    magicaPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                    magicaPushConstants.cascadeData[1] = 0.0f;
-                    magicaPushConstants.cascadeData[2] = 0.0f;
-                    magicaPushConstants.cascadeData[3] = 0.0f;
-                    vkCmdPushConstants(
-                        commandBuffer,
-                        m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
-                        0,
-                        sizeof(ChunkPushConstants),
-                        &magicaPushConstants
-                    );
-                    countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
-                }
-            }
-
-            if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
-                auto drawShadowInstances = [&](
-                                               BufferHandle vertexHandle,
-                                               BufferHandle indexHandle,
-                                               uint32_t indexCount,
-                                               uint32_t instanceCount,
-                                           const std::optional<FrameArenaSlice>& instanceSlice
-                                           ) {
-                    if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
-                        return;
-                    }
-                    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
-                    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
-                    const VkBuffer instanceBuffer = m_bufferAllocator.getBuffer(instanceSlice->buffer);
-                    if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE || instanceBuffer == VK_NULL_HANDLE) {
-                        return;
-                    }
-                    const VkBuffer vertexBuffers[2] = {vertexBuffer, instanceBuffer};
-                    const VkDeviceSize vertexOffsets[2] = {0, instanceSlice->offset};
-                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeShadowPipeline);
-                    vkCmdBindDescriptorSets(
-                        commandBuffer,
-                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        m_pipelineLayout,
-                        0,
-                        boundDescriptorSetCount,
-                        boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
-                    vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-                    vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                    ChunkPushConstants pipeShadowPushConstants{};
-                    pipeShadowPushConstants.chunkOffset[0] = 0.0f;
-                    pipeShadowPushConstants.chunkOffset[1] = 0.0f;
-                    pipeShadowPushConstants.chunkOffset[2] = 0.0f;
-                    pipeShadowPushConstants.chunkOffset[3] = 0.0f;
-                    pipeShadowPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                    pipeShadowPushConstants.cascadeData[1] = 0.0f;
-                    pipeShadowPushConstants.cascadeData[2] = 0.0f;
-                    pipeShadowPushConstants.cascadeData[3] = 0.0f;
-                    vkCmdPushConstants(
-                        commandBuffer,
-                        m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
-                        0,
-                        sizeof(ChunkPushConstants),
-                        &pipeShadowPushConstants
-                    );
-                    countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
-                };
-                drawShadowInstances(
-                    m_pipeVertexBufferHandle,
-                    m_pipeIndexBufferHandle,
-                    m_pipeIndexCount,
-                    pipeInstanceCount,
-                    pipeInstanceSliceOpt
-                );
-                drawShadowInstances(
-                    m_transportVertexBufferHandle,
-                    m_transportIndexBufferHandle,
-                    m_transportIndexCount,
-                    transportInstanceCount,
-                    transportInstanceSliceOpt
-                );
-                drawShadowInstances(
-                    m_transportVertexBufferHandle,
-                    m_transportIndexBufferHandle,
-                    m_transportIndexCount,
-                    beltCargoInstanceCount,
-                    beltCargoInstanceSliceOpt
-                );
-            }
-
-            const uint32_t grassShadowCascadeCount = static_cast<uint32_t>(std::clamp(
-                m_shadowDebugSettings.grassShadowCascadeCount,
-                0,
-                static_cast<int>(kShadowCascadeCount)
-            ));
-            if (cascadeIndex < grassShadowCascadeCount &&
-                m_grassBillboardShadowPipeline != VK_NULL_HANDLE &&
-                m_grassBillboardIndexCount > 0 &&
-                m_grassBillboardInstanceCount > 0 &&
-                m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-                const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
-                const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
-                const VkBuffer grassInstanceBuffer = m_bufferAllocator.getBuffer(m_grassBillboardInstanceBufferHandle);
-                if (grassVertexBuffer != VK_NULL_HANDLE &&
-                    grassIndexBuffer != VK_NULL_HANDLE &&
-                    grassInstanceBuffer != VK_NULL_HANDLE) {
-                    const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
-                    const VkDeviceSize vertexOffsets[2] = {0, 0};
-                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardShadowPipeline);
-                    vkCmdBindDescriptorSets(
-                        commandBuffer,
-                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        m_pipelineLayout,
-                        0,
-                        boundDescriptorSetCount,
-                        boundDescriptorSets.sets.data(),
-                        1,
-                        &mvpDynamicOffset
-                    );
-                    vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-                    vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                    ChunkPushConstants grassShadowPushConstants{};
-                    grassShadowPushConstants.chunkOffset[0] = 0.0f;
-                    grassShadowPushConstants.chunkOffset[1] = 0.0f;
-                    grassShadowPushConstants.chunkOffset[2] = 0.0f;
-                    grassShadowPushConstants.chunkOffset[3] = 0.0f;
-                    grassShadowPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                    grassShadowPushConstants.cascadeData[1] = 0.0f;
-                    grassShadowPushConstants.cascadeData[2] = 0.0f;
-                    grassShadowPushConstants.cascadeData[3] = 0.0f;
-                    vkCmdPushConstants(
-                        commandBuffer,
-                        m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
-                        0,
-                        sizeof(ChunkPushConstants),
-                        &grassShadowPushConstants
-                    );
-                    countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
-                }
-            }
-
-            vkCmdEndRendering(commandBuffer);
-        }
-    }
-
-    transitionImageLayout(
-        commandBuffer,
-        m_shadowDepthImage,
-        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT,
-        0,
-        1
-    );
-    endDebugLabel(commandBuffer);
-    writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
 
     bool wroteVoxelGiTimestamps = false;
     bool wroteAutoExposureTimestamps = false;
@@ -1420,215 +1132,31 @@ void RendererBackend::renderFrame(
     aoScissor.offset = {0, 0};
     aoScissor.extent = aoExtent;
 
-    VkClearValue normalDepthClearValue{};
-    normalDepthClearValue.color.float32[0] = 0.5f;
-    normalDepthClearValue.color.float32[1] = 0.5f;
-    normalDepthClearValue.color.float32[2] = 0.5f;
-    normalDepthClearValue.color.float32[3] = 0.0f;
-
-    VkClearValue aoDepthClearValue{};
-    aoDepthClearValue.depthStencil.depth = 0.0f;
-    aoDepthClearValue.depthStencil.stencil = 0;
-
-    VkRenderingAttachmentInfo normalDepthColorAttachment{};
-    normalDepthColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    normalDepthColorAttachment.imageView = m_normalDepthImageViews[aoFrameIndex];
-    normalDepthColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    normalDepthColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    normalDepthColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    normalDepthColorAttachment.clearValue = normalDepthClearValue;
-
-    VkRenderingAttachmentInfo aoDepthAttachment{};
-    aoDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    aoDepthAttachment.imageView = m_aoDepthImageViews[imageIndex];
-    aoDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    aoDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    aoDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    aoDepthAttachment.clearValue = aoDepthClearValue;
-
-    VkRenderingInfo normalDepthRenderingInfo{};
-    normalDepthRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    normalDepthRenderingInfo.renderArea.offset = {0, 0};
-    normalDepthRenderingInfo.renderArea.extent = aoExtent;
-    normalDepthRenderingInfo.layerCount = 1;
-    normalDepthRenderingInfo.colorAttachmentCount = 1;
-    normalDepthRenderingInfo.pColorAttachments = &normalDepthColorAttachment;
-    normalDepthRenderingInfo.pDepthAttachment = &aoDepthAttachment;
-
-    writeGpuTimestampTop(kGpuTimestampQueryPrepassStart);
-    markCorePassEntered(coreFrameGraphPlan->prepass, "prepass");
-    beginDebugLabel(commandBuffer, "Pass: Normal+Depth Prepass", 0.20f, 0.30f, 0.40f, 1.0f);
-    vkCmdBeginRendering(commandBuffer, &normalDepthRenderingInfo);
-    vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
-    vkCmdSetScissor(commandBuffer, 0, 1, &aoScissor);
-
-    if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_voxelNormalDepthPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
-        if (frameChunkDrawData.canDrawChunksIndirect) {
-            const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, chunkInstanceBuffer};
-            const VkDeviceSize voxelVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-            ChunkPushConstants chunkPushConstants{};
-            chunkPushConstants.chunkOffset[0] = 0.0f;
-            chunkPushConstants.chunkOffset[1] = 0.0f;
-            chunkPushConstants.chunkOffset[2] = 0.0f;
-            chunkPushConstants.chunkOffset[3] = 0.0f;
-            chunkPushConstants.cascadeData[0] = 0.0f;
-            chunkPushConstants.cascadeData[1] = 0.0f;
-            chunkPushConstants.cascadeData[2] = 0.0f;
-            chunkPushConstants.cascadeData[3] = 0.0f;
-            vkCmdPushConstants(
-                commandBuffer,
-                m_pipelineLayout,
-                VK_SHADER_STAGE_VERTEX_BIT,
-                0,
-                sizeof(ChunkPushConstants),
-                &chunkPushConstants
-            );
-            drawIndirectChunkRanges(commandBuffer, m_debugDrawCallsPrepass, frameChunkDrawData);
-        }
-        if (canDrawMagica) {
-            for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
-                const VkBuffer magicaVertexBuffers[2] = {magicaDraw.vertexBuffer, chunkInstanceBuffer};
-                const VkDeviceSize magicaVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-                vkCmdBindVertexBuffers(commandBuffer, 0, 2, magicaVertexBuffers, magicaVertexOffsets);
-                vkCmdBindIndexBuffer(commandBuffer, magicaDraw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                ChunkPushConstants magicaPushConstants{};
-                magicaPushConstants.chunkOffset[0] = magicaDraw.offsetX;
-                magicaPushConstants.chunkOffset[1] = magicaDraw.offsetY;
-                magicaPushConstants.chunkOffset[2] = magicaDraw.offsetZ;
-                magicaPushConstants.chunkOffset[3] = 0.0f;
-                magicaPushConstants.cascadeData[0] = 0.0f;
-                magicaPushConstants.cascadeData[1] = 0.0f;
-                magicaPushConstants.cascadeData[2] = 0.0f;
-                magicaPushConstants.cascadeData[3] = 0.0f;
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &magicaPushConstants
-                );
-                countDrawCalls(m_debugDrawCallsPrepass, 1);
-                vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
-            }
-        }
-    }
-
-    if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
-        auto drawNormalDepthInstances = [&](
-                                            BufferHandle vertexHandle,
-                                            BufferHandle indexHandle,
-                                            uint32_t indexCount,
-                                            uint32_t instanceCount,
-                                        const std::optional<FrameArenaSlice>& instanceSlice
-                                        ) {
-            if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
-                return;
-            }
-            const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
-            const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
-            const VkBuffer instanceBuffer = m_bufferAllocator.getBuffer(instanceSlice->buffer);
-            if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE || instanceBuffer == VK_NULL_HANDLE) {
-                return;
-            }
-            const VkBuffer vertexBuffers[2] = {vertexBuffer, instanceBuffer};
-            const VkDeviceSize vertexOffsets[2] = {0, instanceSlice->offset};
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeNormalDepthPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            countDrawCalls(m_debugDrawCallsPrepass, 1);
-            vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
-        };
-        drawNormalDepthInstances(
-            m_pipeVertexBufferHandle,
-            m_pipeIndexBufferHandle,
-            m_pipeIndexCount,
-            pipeInstanceCount,
-            pipeInstanceSliceOpt
-        );
-        drawNormalDepthInstances(
-            m_transportVertexBufferHandle,
-            m_transportIndexBufferHandle,
-            m_transportIndexCount,
-            transportInstanceCount,
-            transportInstanceSliceOpt
-        );
-        drawNormalDepthInstances(
-            m_transportVertexBufferHandle,
-            m_transportIndexBufferHandle,
-            m_transportIndexCount,
-            beltCargoInstanceCount,
-            beltCargoInstanceSliceOpt
-        );
-    }
-    if (m_grassBillboardNormalDepthPipeline != VK_NULL_HANDLE &&
-        m_grassBillboardIndexCount > 0 &&
-        m_grassBillboardInstanceCount > 0 &&
-        m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-        const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
-        const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
-        const VkBuffer grassInstanceBuffer = m_bufferAllocator.getBuffer(m_grassBillboardInstanceBufferHandle);
-        if (grassVertexBuffer != VK_NULL_HANDLE &&
-            grassIndexBuffer != VK_NULL_HANDLE &&
-            grassInstanceBuffer != VK_NULL_HANDLE) {
-            const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
-            const VkDeviceSize vertexOffsets[2] = {0, 0};
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardNormalDepthPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-                1,
-                &mvpDynamicOffset
-            );
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            countDrawCalls(m_debugDrawCallsPrepass, 1);
-            vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
-        }
-    }
-    vkCmdEndRendering(commandBuffer);
-    endDebugLabel(commandBuffer);
-    writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);
-
-    transitionImageLayout(
+    recordNormalDepthPrepass(
         commandBuffer,
-        m_normalDepthImages[aoFrameIndex],
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT
+        gpuTimestampQueryPool,
+        coreFramePassOrderValidator,
+        *coreFrameGraphPlan,
+        aoFrameIndex,
+        imageIndex,
+        aoExtent,
+        aoViewport,
+        aoScissor,
+        boundDescriptorSets,
+        mvpDynamicOffset,
+        frameChunkDrawData,
+        chunkInstanceSliceOpt,
+        chunkInstanceBuffer,
+        chunkVertexBuffer,
+        chunkIndexBuffer,
+        canDrawMagica,
+        readyMagicaDraws,
+        pipeInstanceCount,
+        pipeInstanceSliceOpt,
+        transportInstanceCount,
+        transportInstanceSliceOpt,
+        beltCargoInstanceCount,
+        beltCargoInstanceSliceOpt
     );
 
     VkClearValue ssaoClearValue{};
@@ -1834,7 +1362,7 @@ void RendererBackend::renderFrame(
     renderingInfo.pDepthAttachment = &depthAttachment;
 
     writeGpuTimestampTop(kGpuTimestampQueryMainStart);
-    markCorePassEntered(coreFrameGraphPlan->main, "main");
+    coreFramePassOrderValidator.markPassEntered(coreFrameGraphPlan->main, "main");
     beginDebugLabel(commandBuffer, "Pass: Main Scene", 0.20f, 0.20f, 0.45f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &renderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -2637,7 +2165,7 @@ void RendererBackend::renderFrame(
     toneMapRenderingInfo.pColorAttachments = &toneMapColorAttachment;
 
     writeGpuTimestampTop(kGpuTimestampQueryPostStart);
-    markCorePassEntered(coreFrameGraphPlan->post, "post");
+    coreFramePassOrderValidator.markPassEntered(coreFrameGraphPlan->post, "post");
     beginDebugLabel(commandBuffer, "Pass: Tonemap + UI", 0.24f, 0.24f, 0.24f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &toneMapRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);

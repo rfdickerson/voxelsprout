@@ -96,6 +96,9 @@ if(VOXEL_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
         src/render/backend/vulkan/frame.cc
         src/render/backend/vulkan/frame_run.cc
         src/render/backend/vulkan/frame_graph_core.cc
+        src/render/backend/vulkan/frame_graph_runtime.cc
+        src/render/backend/vulkan/frame_pass_shadow.cc
+        src/render/backend/vulkan/frame_pass_prepass.cc
         src/render/backend/vulkan/frame_chunks.cc
         src/render/backend/vulkan/frame_draws.cc
         src/render/backend/vulkan/frame_instances.cc
@@ -249,6 +252,7 @@ if(BUILD_TESTING)
             tests/frame_render_tests.cc
             tests/sim_network_tests.cc
             src/render/frame_graph.cc
+            src/render/backend/vulkan/frame_graph_runtime.cc
             src/render/backend/vulkan/shadow_culling_utils.cc
             src/core/log.cc
             src/world/magica_voxel.cc
