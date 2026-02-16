@@ -18,29 +18,29 @@ namespace voxelsprout::render {
 #pragma GCC diagnostic pop
 #endif
 
-void RendererBackend::recordShadowAtlasPass(
-    VkCommandBuffer commandBuffer,
-    VkQueryPool gpuTimestampQueryPool,
-    CoreFrameGraphOrderValidator& coreFramePassOrderValidator,
-    const CoreFrameGraphPlan& coreFrameGraphPlan,
-    const BoundDescriptorSets& boundDescriptorSets,
-    uint32_t mvpDynamicOffset,
-    const FrameChunkDrawData& frameChunkDrawData,
-    const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt,
-    const std::optional<FrameArenaSlice>& shadowChunkInstanceSliceOpt,
-    VkBuffer chunkInstanceBuffer,
-    VkBuffer shadowChunkInstanceBuffer,
-    VkBuffer chunkVertexBuffer,
-    VkBuffer chunkIndexBuffer,
-    bool canDrawMagica,
-    std::span<const ReadyMagicaDraw> readyMagicaDraws,
-    uint32_t pipeInstanceCount,
-    const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt,
-    uint32_t transportInstanceCount,
-    const std::optional<FrameArenaSlice>& transportInstanceSliceOpt,
-    uint32_t beltCargoInstanceCount,
-    const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt
-) {
+void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context, const ShadowPassInputs& inputs) {
+    VkCommandBuffer commandBuffer = context.commandBuffer;
+    VkQueryPool gpuTimestampQueryPool = context.gpuTimestampQueryPool;
+    const BoundDescriptorSets& boundDescriptorSets = *context.boundDescriptorSets;
+    const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
+    CoreFrameGraphOrderValidator& coreFramePassOrderValidator = *context.frameOrderValidator;
+    const CoreFrameGraphPlan& coreFrameGraphPlan = *context.frameGraphPlan;
+    const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
+    const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt = *inputs.chunkInstanceSliceOpt;
+    const std::optional<FrameArenaSlice>& shadowChunkInstanceSliceOpt = *inputs.shadowChunkInstanceSliceOpt;
+    const VkBuffer chunkInstanceBuffer = inputs.chunkInstanceBuffer;
+    const VkBuffer shadowChunkInstanceBuffer = inputs.shadowChunkInstanceBuffer;
+    const VkBuffer chunkVertexBuffer = inputs.chunkVertexBuffer;
+    const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
+    const bool canDrawMagica = inputs.canDrawMagica;
+    const std::span<const ReadyMagicaDraw> readyMagicaDraws = inputs.readyMagicaDraws;
+    const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
+    const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
+    const uint32_t transportInstanceCount = inputs.transportInstanceCount;
+    const std::optional<FrameArenaSlice>& transportInstanceSliceOpt = *inputs.transportInstanceSliceOpt;
+    const uint32_t beltCargoInstanceCount = inputs.beltCargoInstanceCount;
+    const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt = *inputs.beltCargoInstanceSliceOpt;
+
     const uint32_t boundDescriptorSetCount = boundDescriptorSets.count;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;

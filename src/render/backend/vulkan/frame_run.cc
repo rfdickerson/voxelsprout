@@ -829,30 +829,31 @@ void RendererBackend::renderFrame(
         passCounter += drawCount;
         m_debugDrawCallsTotal += drawCount;
     };
+    FrameExecutionContext frameExecutionContext{};
+    frameExecutionContext.commandBuffer = commandBuffer;
+    frameExecutionContext.gpuTimestampQueryPool = gpuTimestampQueryPool;
+    frameExecutionContext.frameOrderValidator = &coreFramePassOrderValidator;
+    frameExecutionContext.frameGraphPlan = &(*coreFrameGraphPlan);
+    frameExecutionContext.boundDescriptorSets = &boundDescriptorSets;
+    frameExecutionContext.mvpDynamicOffset = mvpDynamicOffset;
 
-    recordShadowAtlasPass(
-        commandBuffer,
-        gpuTimestampQueryPool,
-        coreFramePassOrderValidator,
-        *coreFrameGraphPlan,
-        boundDescriptorSets,
-        mvpDynamicOffset,
-        frameChunkDrawData,
-        chunkInstanceSliceOpt,
-        shadowChunkInstanceSliceOpt,
-        chunkInstanceBuffer,
-        shadowChunkInstanceBuffer,
-        chunkVertexBuffer,
-        chunkIndexBuffer,
-        canDrawMagica,
-        readyMagicaDraws,
-        pipeInstanceCount,
-        pipeInstanceSliceOpt,
-        transportInstanceCount,
-        transportInstanceSliceOpt,
-        beltCargoInstanceCount,
-        beltCargoInstanceSliceOpt
-    );
+    ShadowPassInputs shadowPassInputs{};
+    shadowPassInputs.frameChunkDrawData = &frameChunkDrawData;
+    shadowPassInputs.chunkInstanceSliceOpt = &chunkInstanceSliceOpt;
+    shadowPassInputs.shadowChunkInstanceSliceOpt = &shadowChunkInstanceSliceOpt;
+    shadowPassInputs.chunkInstanceBuffer = chunkInstanceBuffer;
+    shadowPassInputs.shadowChunkInstanceBuffer = shadowChunkInstanceBuffer;
+    shadowPassInputs.chunkVertexBuffer = chunkVertexBuffer;
+    shadowPassInputs.chunkIndexBuffer = chunkIndexBuffer;
+    shadowPassInputs.canDrawMagica = canDrawMagica;
+    shadowPassInputs.readyMagicaDraws = readyMagicaDraws;
+    shadowPassInputs.pipeInstanceCount = pipeInstanceCount;
+    shadowPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
+    shadowPassInputs.transportInstanceCount = transportInstanceCount;
+    shadowPassInputs.transportInstanceSliceOpt = &transportInstanceSliceOpt;
+    shadowPassInputs.beltCargoInstanceCount = beltCargoInstanceCount;
+    shadowPassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
+    recordShadowAtlasPass(frameExecutionContext, shadowPassInputs);
 
     bool wroteVoxelGiTimestamps = false;
     bool wroteAutoExposureTimestamps = false;
@@ -1131,44 +1132,29 @@ void RendererBackend::renderFrame(
     VkRect2D aoScissor{};
     aoScissor.offset = {0, 0};
     aoScissor.extent = aoExtent;
+    frameExecutionContext.aoFrameIndex = aoFrameIndex;
+    frameExecutionContext.imageIndex = imageIndex;
+    frameExecutionContext.aoExtent = aoExtent;
+    frameExecutionContext.aoViewport = aoViewport;
+    frameExecutionContext.aoScissor = aoScissor;
 
-    recordNormalDepthPrepass(
-        commandBuffer,
-        gpuTimestampQueryPool,
-        coreFramePassOrderValidator,
-        *coreFrameGraphPlan,
-        aoFrameIndex,
-        imageIndex,
-        aoExtent,
-        aoViewport,
-        aoScissor,
-        boundDescriptorSets,
-        mvpDynamicOffset,
-        frameChunkDrawData,
-        chunkInstanceSliceOpt,
-        chunkInstanceBuffer,
-        chunkVertexBuffer,
-        chunkIndexBuffer,
-        canDrawMagica,
-        readyMagicaDraws,
-        pipeInstanceCount,
-        pipeInstanceSliceOpt,
-        transportInstanceCount,
-        transportInstanceSliceOpt,
-        beltCargoInstanceCount,
-        beltCargoInstanceSliceOpt
-    );
+    PrepassInputs prepassInputs{};
+    prepassInputs.frameChunkDrawData = &frameChunkDrawData;
+    prepassInputs.chunkInstanceSliceOpt = &chunkInstanceSliceOpt;
+    prepassInputs.chunkInstanceBuffer = chunkInstanceBuffer;
+    prepassInputs.chunkVertexBuffer = chunkVertexBuffer;
+    prepassInputs.chunkIndexBuffer = chunkIndexBuffer;
+    prepassInputs.canDrawMagica = canDrawMagica;
+    prepassInputs.readyMagicaDraws = readyMagicaDraws;
+    prepassInputs.pipeInstanceCount = pipeInstanceCount;
+    prepassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
+    prepassInputs.transportInstanceCount = transportInstanceCount;
+    prepassInputs.transportInstanceSliceOpt = &transportInstanceSliceOpt;
+    prepassInputs.beltCargoInstanceCount = beltCargoInstanceCount;
+    prepassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
+    recordNormalDepthPrepass(frameExecutionContext, prepassInputs);
 
-    recordSsaoPasses(
-        commandBuffer,
-        gpuTimestampQueryPool,
-        aoFrameIndex,
-        aoExtent,
-        aoViewport,
-        aoScissor,
-        boundDescriptorSets,
-        mvpDynamicOffset
-    );
+    recordSsaoPasses(frameExecutionContext);
 
     m_normalDepthImageInitialized[aoFrameIndex] = true;
     m_aoDepthImageInitialized[imageIndex] = true;
@@ -1186,33 +1172,25 @@ void RendererBackend::renderFrame(
     VkRect2D scissor{};
     scissor.offset = {0, 0};
     scissor.extent = m_swapchainExtent;
+    frameExecutionContext.viewport = viewport;
+    frameExecutionContext.scissor = scissor;
 
-    recordMainScenePass(
-        commandBuffer,
-        gpuTimestampQueryPool,
-        coreFramePassOrderValidator,
-        *coreFrameGraphPlan,
-        aoFrameIndex,
-        imageIndex,
-        viewport,
-        scissor,
-        boundDescriptorSets,
-        mvpDynamicOffset,
-        frameChunkDrawData,
-        chunkInstanceSliceOpt,
-        chunkInstanceBuffer,
-        chunkVertexBuffer,
-        chunkIndexBuffer,
-        canDrawMagica,
-        readyMagicaDraws,
-        pipeInstanceCount,
-        pipeInstanceSliceOpt,
-        transportInstanceCount,
-        transportInstanceSliceOpt,
-        beltCargoInstanceCount,
-        beltCargoInstanceSliceOpt,
-        preview
-    );
+    MainPassInputs mainPassInputs{};
+    mainPassInputs.frameChunkDrawData = &frameChunkDrawData;
+    mainPassInputs.chunkInstanceSliceOpt = &chunkInstanceSliceOpt;
+    mainPassInputs.chunkInstanceBuffer = chunkInstanceBuffer;
+    mainPassInputs.chunkVertexBuffer = chunkVertexBuffer;
+    mainPassInputs.chunkIndexBuffer = chunkIndexBuffer;
+    mainPassInputs.canDrawMagica = canDrawMagica;
+    mainPassInputs.readyMagicaDraws = readyMagicaDraws;
+    mainPassInputs.pipeInstanceCount = pipeInstanceCount;
+    mainPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
+    mainPassInputs.transportInstanceCount = transportInstanceCount;
+    mainPassInputs.transportInstanceSliceOpt = &transportInstanceSliceOpt;
+    mainPassInputs.beltCargoInstanceCount = beltCargoInstanceCount;
+    mainPassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
+    mainPassInputs.preview = &preview;
+    recordMainScenePass(frameExecutionContext, mainPassInputs);
 
     if (m_hdrResolveMipLevels > 1u) {
         transitionImageLayout(
