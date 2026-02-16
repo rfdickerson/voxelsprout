@@ -81,8 +81,10 @@ add_executable(voxel_factory_toy
     src/render/device.cpp
     src/render/frame.cpp
     src/render/init.cpp
+    src/render/init_resources.cpp
     src/render/chunk_upload.cpp
-    src/render/frame_render.cpp
+    src/render/frame_ui.cpp
+    src/render/frame_run.cpp
     src/render/Renderer.Descriptors.cpp
     src/render/Renderer.PassPipelines.cpp
     src/render/Renderer.SwapchainTargets.cpp
@@ -92,6 +94,7 @@ add_executable(voxel_factory_toy
     src/render/Renderer.UiPanels.cpp
     src/render/VmaUsage.cpp
     src/world/MagicaVoxel.cpp
+    src/world/World.cpp
     src/world/ChunkMesher.cpp
     src/world/ClipmapIndex.cpp
 )

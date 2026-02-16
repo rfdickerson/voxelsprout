@@ -4,7 +4,7 @@
 #include "render/Renderer.hpp"
 #include "sim/Simulation.hpp"
 #include "world/ClipmapIndex.hpp"
-#include "world/ChunkGrid.hpp"
+#include "world/World.hpp"
 
 #include <vector>
 
@@ -184,7 +184,7 @@ private:
     bool m_hasAppliedClipmapConfig = false;
 
     sim::Simulation m_simulation;
-    world::ChunkGrid m_chunkGrid;
+    world::World m_world;
     world::ChunkClipmapIndex m_chunkClipmapIndex;
     render::Renderer m_renderer;
 };
