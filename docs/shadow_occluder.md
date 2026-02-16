@@ -104,4 +104,4 @@ If you need further reduction:
 
 ## File Location
 
-Primary implementation is in `src/render/Renderer.cpp` inside `Renderer::renderFrame`, around shadow candidate generation and shadow indirect command building.
+Primary implementation is in `src/render/renderer.cc` inside `Renderer::renderFrame`, around shadow candidate generation and shadow indirect command building.

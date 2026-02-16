@@ -9,7 +9,7 @@
 #include <limits>
 #include <utility>
 
-namespace world {
+namespace voxelsprout::world {
 
 namespace {
 
@@ -902,4 +902,4 @@ ChunkMeshData buildMagicaVoxelMesh(const MagicaVoxelModel& model) {
     return mesh;
 }
 
-} // namespace world
+} // namespace voxelsprout::world

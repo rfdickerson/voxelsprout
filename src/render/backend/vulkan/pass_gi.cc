@@ -1,6 +1,6 @@
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
-namespace render {
+namespace voxelsprout::render {
 
 namespace {
 // Keep these in sync with renderer.cc GI constants.
@@ -334,4 +334,4 @@ void RendererBackend::recordVoxelGiDispatchSequence(
     finalizeVoxelGiPass(passContext, passState);
 }
 
-} // namespace render
+} // namespace voxelsprout::render

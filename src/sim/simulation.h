@@ -16,7 +16,7 @@
 // Simulation subsystem
 // Responsible for: providing a single high-level update entry point for factory simulation.
 // Should NOT do: world storage ownership, rendering, or OS-level app concerns.
-namespace sim {
+namespace voxelsprout::sim {
 
 class Simulation {
 public:
@@ -44,14 +44,14 @@ private:
     static constexpr std::size_t kMaxCargoPerBelt = 3u;
 
     struct BeltTopologyNode {
-        core::Cell3i cell{};
+        voxelsprout::core::Cell3i cell{};
         BeltDirection direction = BeltDirection::North;
         std::int32_t nextBeltIndex = -1;
         std::uint32_t incomingCount = 0;
     };
 
-    static core::Cell3i beltDirectionOffset(BeltDirection direction);
-    static std::uint64_t beltCellKey(const core::Cell3i& cell);
+    static voxelsprout::core::Cell3i beltDirectionOffset(BeltDirection direction);
+    static std::uint64_t beltCellKey(const voxelsprout::core::Cell3i& cell);
     std::uint64_t computeBeltLayoutSignature() const;
     void rebuildBeltTopology();
     void seedBeltCargo();
@@ -80,8 +80,8 @@ inline void Simulation::initializeSingleBelt() {
     m_belts.emplace_back(0, 1, 0, BeltDirection::East);
 
     // Pipe toy seed used by the dedicated pipe render pass.
-    m_pipes.emplace_back(2, 1, 2, math::Vector3{1.0f, 0.0f, 0.0f}, 1.0f, 0.45f, math::Vector3{0.95f, 0.95f, 0.95f});
-    m_pipes.emplace_back(3, 1, 2, math::Vector3{1.0f, 0.0f, 0.0f}, 1.0f, 0.45f, math::Vector3{0.95f, 0.95f, 0.95f});
+    m_pipes.emplace_back(2, 1, 2, voxelsprout::math::Vector3{1.0f, 0.0f, 0.0f}, 1.0f, 0.45f, voxelsprout::math::Vector3{0.95f, 0.95f, 0.95f});
+    m_pipes.emplace_back(3, 1, 2, voxelsprout::math::Vector3{1.0f, 0.0f, 0.0f}, 1.0f, 0.45f, voxelsprout::math::Vector3{0.95f, 0.95f, 0.95f});
 
     // Track toy seed for primitive rail rendering.
     m_tracks.emplace_back(0, 1, 2, TrackDirection::East);
@@ -144,21 +144,21 @@ inline const std::vector<BeltCargo>& Simulation::beltCargoes() const {
     return m_beltCargoes;
 }
 
-inline core::Cell3i Simulation::beltDirectionOffset(BeltDirection direction) {
+inline voxelsprout::core::Cell3i Simulation::beltDirectionOffset(BeltDirection direction) {
     switch (direction) {
     case BeltDirection::East:
-        return core::Cell3i{1, 0, 0};
+        return voxelsprout::core::Cell3i{1, 0, 0};
     case BeltDirection::West:
-        return core::Cell3i{-1, 0, 0};
+        return voxelsprout::core::Cell3i{-1, 0, 0};
     case BeltDirection::South:
-        return core::Cell3i{0, 0, 1};
+        return voxelsprout::core::Cell3i{0, 0, 1};
     case BeltDirection::North:
     default:
-        return core::Cell3i{0, 0, -1};
+        return voxelsprout::core::Cell3i{0, 0, -1};
     }
 }
 
-inline std::uint64_t Simulation::beltCellKey(const core::Cell3i& cell) {
+inline std::uint64_t Simulation::beltCellKey(const voxelsprout::core::Cell3i& cell) {
     constexpr std::uint64_t kMask = (1ull << 21u) - 1ull;
     const std::uint64_t x = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.x) & kMask);
     const std::uint64_t y = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.y) & kMask);
@@ -195,7 +195,7 @@ inline void Simulation::rebuildBeltTopology() {
     for (std::size_t beltIndex = 0; beltIndex < m_belts.size(); ++beltIndex) {
         const Belt& belt = m_belts[beltIndex];
         BeltTopologyNode& node = m_beltTopology[beltIndex];
-        node.cell = core::Cell3i{belt.x, belt.y, belt.z};
+        node.cell = voxelsprout::core::Cell3i{belt.x, belt.y, belt.z};
         node.direction = belt.direction;
         node.nextBeltIndex = -1;
         node.incomingCount = 0;
@@ -204,7 +204,7 @@ inline void Simulation::rebuildBeltTopology() {
 
     for (std::size_t beltIndex = 0; beltIndex < m_belts.size(); ++beltIndex) {
         BeltTopologyNode& node = m_beltTopology[beltIndex];
-        const core::Cell3i nextCell = node.cell + beltDirectionOffset(node.direction);
+        const voxelsprout::core::Cell3i nextCell = node.cell + beltDirectionOffset(node.direction);
         const auto found = m_beltCellToIndex.find(beltCellKey(nextCell));
         if (found != m_beltCellToIndex.end()) {
             node.nextBeltIndex = static_cast<std::int32_t>(found->second);
@@ -227,7 +227,7 @@ inline void Simulation::updateCargoWorldPosition(BeltCargo& cargo) {
         return;
     }
     const BeltTopologyNode& node = m_beltTopology[static_cast<std::size_t>(cargo.beltIndex)];
-    const core::Cell3i axis = beltDirectionOffset(node.direction);
+    const voxelsprout::core::Cell3i axis = beltDirectionOffset(node.direction);
     const float along01 = static_cast<float>(cargo.alongQ16) / static_cast<float>(kSpanQ16);
     const float alongCentered = along01 - 0.5f;
     cargo.currWorldPos[0] = static_cast<float>(node.cell.x) + 0.5f + (static_cast<float>(axis.x) * alongCentered);
@@ -348,4 +348,4 @@ inline void Simulation::updateBeltCargo(float dt) {
     trySpawnBeltCargo();
 }
 
-} // namespace sim
+} // namespace voxelsprout::sim

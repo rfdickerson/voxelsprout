@@ -10,18 +10,10 @@
 #include <utility>
 #include <vector>
 
+#include <vk_mem_alloc.h>
 #include <vulkan/vulkan.h>
-#if defined(__has_include)
-#if __has_include(<vk_mem_alloc.h>)
-#include <vk_mem_alloc.h>
-#elif __has_include(<vma/vk_mem_alloc.h>)
-#include <vma/vk_mem_alloc.h>
-#else
-#include <vk_mem_alloc.h>
-#endif
-#endif
 
-namespace render {
+namespace voxelsprout::render {
 
 // Opaque buffer handle so the renderer can refer to buffers without exposing Vulkan objects.
 // Future resource systems can replace this with generation-based handles or IDs from an asset DB.
@@ -275,4 +267,4 @@ private:
     std::unordered_map<uint64_t, std::string> m_liveImageDebugNames;
 };
 
-} // namespace render
+} // namespace voxelsprout::render

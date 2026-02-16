@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-namespace render {
+namespace voxelsprout::render {
 
 enum class FrameGraphQueue : std::uint8_t {
     Graphics,
@@ -40,4 +40,4 @@ private:
     std::vector<std::pair<PassId, PassId>> m_dependencies;
 };
 
-} // namespace render
+} // namespace voxelsprout::render

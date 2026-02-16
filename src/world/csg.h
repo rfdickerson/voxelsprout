@@ -12,7 +12,7 @@
 // World CSG subsystem
 // Responsible for: deterministic voxel-space CSG commands for building and carving toy-world structures.
 // Should NOT do: chunk streaming, rendering, or simulation tick scheduling.
-namespace world {
+namespace voxelsprout::world {
 
 enum class BrushKind : std::uint8_t {
     Box = 0,
@@ -32,9 +32,9 @@ inline constexpr std::uint16_t kCsgAffectAll = 0xFFFFu;
 
 struct Brush {
     BrushKind kind = BrushKind::Box;
-    core::Cell3i minCell{};
-    core::Cell3i maxCell{};
-    core::Dir6 axis = core::Dir6::PosY;
+    voxelsprout::core::Cell3i minCell{};
+    voxelsprout::core::Cell3i maxCell{};
+    voxelsprout::core::Dir6 axis = voxelsprout::core::Dir6::PosY;
     std::uint16_t radiusQ8 = 128;
 };
 
@@ -57,33 +57,33 @@ struct CsgCell {
 class CsgVolume {
 public:
     CsgVolume() = default;
-    CsgVolume(std::int32_t sizeX, std::int32_t sizeY, std::int32_t sizeZ, core::Cell3i originCell = {});
+    CsgVolume(std::int32_t sizeX, std::int32_t sizeY, std::int32_t sizeZ, voxelsprout::core::Cell3i originCell = {});
 
     bool isValid() const;
-    core::Cell3i origin() const;
+    voxelsprout::core::Cell3i origin() const;
     std::int32_t sizeX() const;
     std::int32_t sizeY() const;
     std::int32_t sizeZ() const;
-    core::CellAabb worldBounds() const;
+    voxelsprout::core::CellAabb worldBounds() const;
 
-    bool containsWorldCell(const core::Cell3i& worldCell) const;
-    CsgCell cellAtWorld(const core::Cell3i& worldCell) const;
-    void setCellAtWorld(const core::Cell3i& worldCell, const CsgCell& cell);
+    bool containsWorldCell(const voxelsprout::core::Cell3i& worldCell) const;
+    CsgCell cellAtWorld(const voxelsprout::core::Cell3i& worldCell) const;
+    void setCellAtWorld(const voxelsprout::core::Cell3i& worldCell, const CsgCell& cell);
 
     const std::vector<CsgCell>& cells() const;
     std::vector<CsgCell>& cells();
 
 private:
-    std::size_t linearIndexFromWorld(const core::Cell3i& worldCell) const;
+    std::size_t linearIndexFromWorld(const voxelsprout::core::Cell3i& worldCell) const;
 
-    core::Cell3i m_origin{};
+    voxelsprout::core::Cell3i m_origin{};
     std::int32_t m_sizeX = 0;
     std::int32_t m_sizeY = 0;
     std::int32_t m_sizeZ = 0;
     std::vector<CsgCell> m_cells;
 };
 
-inline CsgVolume::CsgVolume(std::int32_t sizeX, std::int32_t sizeY, std::int32_t sizeZ, core::Cell3i originCell)
+inline CsgVolume::CsgVolume(std::int32_t sizeX, std::int32_t sizeY, std::int32_t sizeZ, voxelsprout::core::Cell3i originCell)
     : m_origin(originCell),
       m_sizeX(std::max<std::int32_t>(sizeX, 0)),
       m_sizeY(std::max<std::int32_t>(sizeY, 0)),
@@ -94,7 +94,7 @@ inline bool CsgVolume::isValid() const {
     return m_sizeX > 0 && m_sizeY > 0 && m_sizeZ > 0;
 }
 
-inline core::Cell3i CsgVolume::origin() const {
+inline voxelsprout::core::Cell3i CsgVolume::origin() const {
     return m_origin;
 }
 
@@ -110,29 +110,29 @@ inline std::int32_t CsgVolume::sizeZ() const {
     return m_sizeZ;
 }
 
-inline core::CellAabb CsgVolume::worldBounds() const {
+inline voxelsprout::core::CellAabb CsgVolume::worldBounds() const {
     if (!isValid()) {
-        return core::CellAabb{};
+        return voxelsprout::core::CellAabb{};
     }
-    core::CellAabb bounds{};
+    voxelsprout::core::CellAabb bounds{};
     bounds.valid = true;
     bounds.minInclusive = m_origin;
-    bounds.maxExclusive = m_origin + core::Cell3i{m_sizeX, m_sizeY, m_sizeZ};
+    bounds.maxExclusive = m_origin + voxelsprout::core::Cell3i{m_sizeX, m_sizeY, m_sizeZ};
     return bounds;
 }
 
-inline bool CsgVolume::containsWorldCell(const core::Cell3i& worldCell) const {
+inline bool CsgVolume::containsWorldCell(const voxelsprout::core::Cell3i& worldCell) const {
     return worldBounds().contains(worldCell);
 }
 
-inline CsgCell CsgVolume::cellAtWorld(const core::Cell3i& worldCell) const {
+inline CsgCell CsgVolume::cellAtWorld(const voxelsprout::core::Cell3i& worldCell) const {
     if (!containsWorldCell(worldCell)) {
         return CsgCell{};
     }
     return m_cells[linearIndexFromWorld(worldCell)];
 }
 
-inline void CsgVolume::setCellAtWorld(const core::Cell3i& worldCell, const CsgCell& cell) {
+inline void CsgVolume::setCellAtWorld(const voxelsprout::core::Cell3i& worldCell, const CsgCell& cell) {
     if (!containsWorldCell(worldCell)) {
         return;
     }
@@ -147,30 +147,30 @@ inline std::vector<CsgCell>& CsgVolume::cells() {
     return m_cells;
 }
 
-inline std::size_t CsgVolume::linearIndexFromWorld(const core::Cell3i& worldCell) const {
-    const core::Cell3i local = worldCell - m_origin;
+inline std::size_t CsgVolume::linearIndexFromWorld(const voxelsprout::core::Cell3i& worldCell) const {
+    const voxelsprout::core::Cell3i local = worldCell - m_origin;
     return static_cast<std::size_t>(
         local.x + (m_sizeX * (local.z + (m_sizeZ * local.y)))
     );
 }
 
-inline core::CellAabb brushBounds(const Brush& brush) {
-    const core::Cell3i minCell{
+inline voxelsprout::core::CellAabb brushBounds(const Brush& brush) {
+    const voxelsprout::core::Cell3i minCell{
         std::min(brush.minCell.x, brush.maxCell.x),
         std::min(brush.minCell.y, brush.maxCell.y),
         std::min(brush.minCell.z, brush.maxCell.z)
     };
-    const core::Cell3i maxCell{
+    const voxelsprout::core::Cell3i maxCell{
         std::max(brush.minCell.x, brush.maxCell.x),
         std::max(brush.minCell.y, brush.maxCell.y),
         std::max(brush.minCell.z, brush.maxCell.z)
     };
 
     if (maxCell.x <= minCell.x || maxCell.y <= minCell.y || maxCell.z <= minCell.z) {
-        return core::CellAabb{};
+        return voxelsprout::core::CellAabb{};
     }
 
-    core::CellAabb bounds{};
+    voxelsprout::core::CellAabb bounds{};
     bounds.valid = true;
     bounds.minInclusive = minCell;
     bounds.maxExclusive = maxCell;
@@ -179,7 +179,7 @@ inline core::CellAabb brushBounds(const Brush& brush) {
 
 namespace detail {
 
-inline bool brushContainsPrismPipeCell(const Brush& brush, const core::CellAabb& bounds, const core::Cell3i& cell) {
+inline bool brushContainsPrismPipeCell(const Brush& brush, const voxelsprout::core::CellAabb& bounds, const voxelsprout::core::Cell3i& cell) {
     if (!bounds.contains(cell)) {
         return false;
     }
@@ -193,20 +193,20 @@ inline bool brushContainsPrismPipeCell(const Brush& brush, const core::CellAabb&
     const std::int32_t centerZQ8 = (bounds.minInclusive.z + bounds.maxExclusive.z) * 128;
 
     switch (brush.axis) {
-    case core::Dir6::PosX:
-    case core::Dir6::NegX:
+    case voxelsprout::core::Dir6::PosX:
+    case voxelsprout::core::Dir6::NegX:
         return std::max(std::abs(cellYQ8 - centerYQ8), std::abs(cellZQ8 - centerZQ8)) <= radiusQ8;
-    case core::Dir6::PosY:
-    case core::Dir6::NegY:
+    case voxelsprout::core::Dir6::PosY:
+    case voxelsprout::core::Dir6::NegY:
         return std::max(std::abs(cellXQ8 - centerXQ8), std::abs(cellZQ8 - centerZQ8)) <= radiusQ8;
-    case core::Dir6::PosZ:
-    case core::Dir6::NegZ:
+    case voxelsprout::core::Dir6::PosZ:
+    case voxelsprout::core::Dir6::NegZ:
         return std::max(std::abs(cellXQ8 - centerXQ8), std::abs(cellYQ8 - centerYQ8)) <= radiusQ8;
     }
     return false;
 }
 
-inline bool brushContainsRampCell(const Brush& brush, const core::CellAabb& bounds, const core::Cell3i& cell) {
+inline bool brushContainsRampCell(const Brush& brush, const voxelsprout::core::CellAabb& bounds, const voxelsprout::core::Cell3i& cell) {
     if (!bounds.contains(cell)) {
         return false;
     }
@@ -225,38 +225,38 @@ inline bool brushContainsRampCell(const Brush& brush, const core::CellAabb& boun
     };
 
     switch (brush.axis) {
-    case core::Dir6::PosX:
-    case core::Dir6::NegX: {
+    case voxelsprout::core::Dir6::PosX:
+    case voxelsprout::core::Dir6::NegX: {
         const std::int32_t runLength = bounds.maxExclusive.x - bounds.minInclusive.x;
         if (runLength <= 0) {
             return false;
         }
-        const std::int32_t step = brush.axis == core::Dir6::PosX
+        const std::int32_t step = brush.axis == voxelsprout::core::Dir6::PosX
             ? cell.x - bounds.minInclusive.x
             : (bounds.maxExclusive.x - 1) - cell.x;
         const std::int32_t rise = std::clamp(riseForStep(step, runLength), 0, height);
         return cell.y < (bounds.minInclusive.y + rise);
     }
-    case core::Dir6::PosZ:
-    case core::Dir6::NegZ: {
+    case voxelsprout::core::Dir6::PosZ:
+    case voxelsprout::core::Dir6::NegZ: {
         const std::int32_t runLength = bounds.maxExclusive.z - bounds.minInclusive.z;
         if (runLength <= 0) {
             return false;
         }
-        const std::int32_t step = brush.axis == core::Dir6::PosZ
+        const std::int32_t step = brush.axis == voxelsprout::core::Dir6::PosZ
             ? cell.z - bounds.minInclusive.z
             : (bounds.maxExclusive.z - 1) - cell.z;
         const std::int32_t rise = std::clamp(riseForStep(step, runLength), 0, height);
         return cell.y < (bounds.minInclusive.y + rise);
     }
-    case core::Dir6::PosY:
-    case core::Dir6::NegY:
+    case voxelsprout::core::Dir6::PosY:
+    case voxelsprout::core::Dir6::NegY:
         return true;
     }
     return false;
 }
 
-inline bool brushContainsCell(const Brush& brush, const core::CellAabb& bounds, const core::Cell3i& cell) {
+inline bool brushContainsCell(const Brush& brush, const voxelsprout::core::CellAabb& bounds, const voxelsprout::core::Cell3i& cell) {
     switch (brush.kind) {
     case BrushKind::Box:
         return bounds.contains(cell);
@@ -281,13 +281,13 @@ inline bool affectMaskAllowsCell(const CsgCell& current, std::uint16_t affectMas
 
 } // namespace detail
 
-inline core::CellAabb applyCsgCommand(CsgVolume& volume, const CsgCommand& command) {
-    core::CellAabb touched{};
+inline voxelsprout::core::CellAabb applyCsgCommand(CsgVolume& volume, const CsgCommand& command) {
+    voxelsprout::core::CellAabb touched{};
     if (!volume.isValid()) {
         return touched;
     }
 
-    const core::CellAabb bounds = core::intersectAabb(volume.worldBounds(), brushBounds(command.brush));
+    const voxelsprout::core::CellAabb bounds = voxelsprout::core::intersectAabb(volume.worldBounds(), brushBounds(command.brush));
     if (!bounds.valid || bounds.empty()) {
         return touched;
     }
@@ -295,7 +295,7 @@ inline core::CellAabb applyCsgCommand(CsgVolume& volume, const CsgCommand& comma
     for (std::int32_t y = bounds.minInclusive.y; y < bounds.maxExclusive.y; ++y) {
         for (std::int32_t z = bounds.minInclusive.z; z < bounds.maxExclusive.z; ++z) {
             for (std::int32_t x = bounds.minInclusive.x; x < bounds.maxExclusive.x; ++x) {
-                const core::Cell3i worldCell{x, y, z};
+                const voxelsprout::core::Cell3i worldCell{x, y, z};
                 if (!detail::brushContainsCell(command.brush, bounds, worldCell)) {
                     continue;
                 }
@@ -348,31 +348,31 @@ inline core::CellAabb applyCsgCommand(CsgVolume& volume, const CsgCommand& comma
     return touched;
 }
 
-inline core::CellAabb applyCsgCommands(CsgVolume& volume, const std::vector<CsgCommand>& commands) {
-    core::CellAabb touched{};
+inline voxelsprout::core::CellAabb applyCsgCommands(CsgVolume& volume, const std::vector<CsgCommand>& commands) {
+    voxelsprout::core::CellAabb touched{};
     for (const CsgCommand& command : commands) {
         touched.includeAabb(applyCsgCommand(volume, command));
     }
     return touched;
 }
 
-inline core::CellAabb copyVolumeSolidsToChunk(const CsgVolume& volume, Chunk& chunk) {
-    core::CellAabb touched{};
+inline voxelsprout::core::CellAabb copyVolumeSolidsToChunk(const CsgVolume& volume, Chunk& chunk) {
+    voxelsprout::core::CellAabb touched{};
     if (!volume.isValid()) {
         return touched;
     }
 
-    const core::Cell3i chunkOrigin{
+    const voxelsprout::core::Cell3i chunkOrigin{
         chunk.chunkX() * Chunk::kSizeX,
         chunk.chunkY() * Chunk::kSizeY,
         chunk.chunkZ() * Chunk::kSizeZ
     };
-    core::CellAabb chunkBounds{};
+    voxelsprout::core::CellAabb chunkBounds{};
     chunkBounds.valid = true;
     chunkBounds.minInclusive = chunkOrigin;
-    chunkBounds.maxExclusive = chunkOrigin + core::Cell3i{Chunk::kSizeX, Chunk::kSizeY, Chunk::kSizeZ};
+    chunkBounds.maxExclusive = chunkOrigin + voxelsprout::core::Cell3i{Chunk::kSizeX, Chunk::kSizeY, Chunk::kSizeZ};
 
-    const core::CellAabb overlap = core::intersectAabb(volume.worldBounds(), chunkBounds);
+    const voxelsprout::core::CellAabb overlap = voxelsprout::core::intersectAabb(volume.worldBounds(), chunkBounds);
     if (!overlap.valid || overlap.empty()) {
         return touched;
     }
@@ -380,7 +380,7 @@ inline core::CellAabb copyVolumeSolidsToChunk(const CsgVolume& volume, Chunk& ch
     for (std::int32_t y = overlap.minInclusive.y; y < overlap.maxExclusive.y; ++y) {
         for (std::int32_t z = overlap.minInclusive.z; z < overlap.maxExclusive.z; ++z) {
             for (std::int32_t x = overlap.minInclusive.x; x < overlap.maxExclusive.x; ++x) {
-                const core::Cell3i worldCell{x, y, z};
+                const voxelsprout::core::Cell3i worldCell{x, y, z};
                 const CsgCell source = volume.cellAtWorld(worldCell);
                 const std::int32_t localX = worldCell.x - chunkOrigin.x;
                 const std::int32_t localY = worldCell.y - chunkOrigin.y;
@@ -400,4 +400,4 @@ inline core::CellAabb copyVolumeSolidsToChunk(const CsgVolume& volume, Chunk& ch
     return touched;
 }
 
-} // namespace world
+} // namespace voxelsprout::world

@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace render {
+namespace voxelsprout::render {
 
 enum class FrameArenaPass : uint8_t {
     Unknown = 0,
@@ -90,4 +90,4 @@ inline const char* frameArenaPassName(FrameArenaPass pass) {
     }
 }
 
-} // namespace render
+} // namespace voxelsprout::render

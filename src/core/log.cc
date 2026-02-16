@@ -10,7 +10,7 @@
 #include <iostream>
 #include <mutex>
 
-namespace core {
+namespace voxelsprout::core {
 
 namespace {
 
@@ -142,4 +142,4 @@ std::ostream& LogLine::stream() {
     return m_stream;
 }
 
-} // namespace core
+} // namespace voxelsprout::core

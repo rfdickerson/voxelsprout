@@ -13,28 +13,28 @@
 // Simulation NetworkProcedural subsystem
 // Responsible for: deterministic helper utilities to build and classify transport topology.
 // Should NOT do: global world edits, chunk meshing, or renderer-specific math.
-namespace sim {
+namespace voxelsprout::sim {
 
 template <typename OccupancyFn>
-std::uint8_t neighborMask6(const core::Cell3i& cell, OccupancyFn&& isOccupied) {
+std::uint8_t neighborMask6(const voxelsprout::core::Cell3i& cell, OccupancyFn&& isOccupied) {
     std::uint8_t mask = 0;
-    for (const core::Dir6 dir : core::kAllDir6) {
-        if (isOccupied(core::neighborCell(cell, dir))) {
-            mask = static_cast<std::uint8_t>(mask | core::dirBit(dir));
+    for (const voxelsprout::core::Dir6 dir : voxelsprout::core::kAllDir6) {
+        if (isOccupied(voxelsprout::core::neighborCell(cell, dir))) {
+            mask = static_cast<std::uint8_t>(mask | voxelsprout::core::dirBit(dir));
         }
     }
     return mask;
 }
 
-inline std::vector<core::Cell3i> rasterizeSpan(const EdgeSpan& span) {
-    std::vector<core::Cell3i> cells;
+inline std::vector<voxelsprout::core::Cell3i> rasterizeSpan(const EdgeSpan& span) {
+    std::vector<voxelsprout::core::Cell3i> cells;
     if (!isValidEdgeSpan(span)) {
         return cells;
     }
 
     cells.reserve(static_cast<std::size_t>(span.lengthVoxels));
-    core::Cell3i cursor = span.start;
-    const core::Cell3i step = core::dirToOffset(span.dir);
+    voxelsprout::core::Cell3i cursor = span.start;
+    const voxelsprout::core::Cell3i step = voxelsprout::core::dirToOffset(span.dir);
     for (std::uint16_t i = 0; i < span.lengthVoxels; ++i) {
         cells.push_back(cursor);
         cursor += step;
@@ -65,11 +65,11 @@ inline JoinPiece classifyJoinPiece(std::uint8_t neighborMask) {
         return JoinPiece::EndCap;
     }
     if (degree == 2u) {
-        core::Dir6 first = core::Dir6::PosX;
-        core::Dir6 second = core::Dir6::PosX;
+        voxelsprout::core::Dir6 first = voxelsprout::core::Dir6::PosX;
+        voxelsprout::core::Dir6 second = voxelsprout::core::Dir6::PosX;
         std::uint32_t found = 0;
-        for (const core::Dir6 dir : core::kAllDir6) {
-            if ((mask & core::dirBit(dir)) == 0u) {
+        for (const voxelsprout::core::Dir6 dir : voxelsprout::core::kAllDir6) {
+            if ((mask & voxelsprout::core::dirBit(dir)) == 0u) {
                 continue;
             }
             if (found == 0u) {
@@ -79,7 +79,7 @@ inline JoinPiece classifyJoinPiece(std::uint8_t neighborMask) {
             }
             ++found;
         }
-        return core::areOpposite(first, second) ? JoinPiece::Straight : JoinPiece::Elbow;
+        return voxelsprout::core::areOpposite(first, second) ? JoinPiece::Straight : JoinPiece::Elbow;
     }
     if (degree == 3u) {
         return JoinPiece::Tee;
@@ -127,7 +127,7 @@ struct QuantizedTransform {
     std::int16_t rollDegQ10 = 0;
 };
 
-inline QuantizedTransform quantizeTransform(const math::Vector3& positionMeters, const math::Vector3& eulerDegrees) {
+inline QuantizedTransform quantizeTransform(const voxelsprout::math::Vector3& positionMeters, const voxelsprout::math::Vector3& eulerDegrees) {
     QuantizedTransform output{};
     output.txQ12 = quantizeFixed(positionMeters.x, 12);
     output.tyQ12 = quantizeFixed(positionMeters.y, 12);
@@ -138,20 +138,20 @@ inline QuantizedTransform quantizeTransform(const math::Vector3& positionMeters,
     return output;
 }
 
-inline math::Vector3 dequantizePosition(const QuantizedTransform& transform) {
-    return math::Vector3{
+inline voxelsprout::math::Vector3 dequantizePosition(const QuantizedTransform& transform) {
+    return voxelsprout::math::Vector3{
         dequantizeFixed(transform.txQ12, 12),
         dequantizeFixed(transform.tyQ12, 12),
         dequantizeFixed(transform.tzQ12, 12)
     };
 }
 
-inline math::Vector3 dequantizeEulerDegrees(const QuantizedTransform& transform) {
-    return math::Vector3{
+inline voxelsprout::math::Vector3 dequantizeEulerDegrees(const QuantizedTransform& transform) {
+    return voxelsprout::math::Vector3{
         dequantizeAngleDegQ10(transform.pitchDegQ10),
         dequantizeAngleDegQ10(transform.yawDegQ10),
         dequantizeAngleDegQ10(transform.rollDegQ10)
     };
 }
 
-} // namespace sim
+} // namespace voxelsprout::sim

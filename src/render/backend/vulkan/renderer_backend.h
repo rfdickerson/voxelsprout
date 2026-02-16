@@ -1,10 +1,10 @@
 #pragma once
 
 #include "render/renderer.h"
-#include "render/buffer_helpers.h"
-#include "render/descriptor_manager.h"
+#include "render/backend/vulkan/buffer_helpers.h"
+#include "render/backend/vulkan/descriptor_manager.h"
 #include "render/frame_graph.h"
-#include "render/pipeline_manager.h"
+#include "render/backend/vulkan/pipeline_manager.h"
 #include "sim/simulation.h"
 #include "world/clipmap_index.h"
 #include "world/chunk_grid.h"
@@ -18,25 +18,15 @@
 #include <span>
 #include <vector>
 
+#include <vk_mem_alloc.h>
 #include <vulkan/vulkan.h>
-#if defined(__has_include)
-#if __has_include(<vk_mem_alloc.h>)
-#include <vk_mem_alloc.h>
-#elif __has_include(<vma/vk_mem_alloc.h>)
-#include <vma/vk_mem_alloc.h>
-#else
-#error "vk_mem_alloc.h was not found"
-#endif
-#else
-#include <vk_mem_alloc.h>
-#endif
 
 struct GLFWwindow;
 
 // Render subsystem
 // Responsible for: owning the rendering interface used by the app.
 // Should NOT do: gameplay simulation, world editing rules, or graphics API specifics yet.
-namespace render {
+namespace voxelsprout::render {
 
 class RendererBackend {
 public:
@@ -118,19 +108,19 @@ public:
         int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo
     };
 
-    bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
+    bool init(GLFWwindow* window, const voxelsprout::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
-    bool uploadMagicaVoxelMesh(const world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
+    bool uploadMagicaVoxelMesh(const voxelsprout::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
-    bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
-    bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
-    bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
+    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid);
+    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
+    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
     bool useSpatialPartitioningQueries() const;
-    world::ClipmapConfig clipmapQueryConfig() const;
-    void setSpatialQueryStats(bool used, const world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
+    voxelsprout::world::ClipmapConfig clipmapQueryConfig() const;
+    void setSpatialQueryStats(bool used, const voxelsprout::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void renderFrame(
-        const world::ChunkGrid& chunkGrid,
-        const sim::Simulation& simulation,
+        const voxelsprout::world::ChunkGrid& chunkGrid,
+        const voxelsprout::sim::Simulation& simulation,
         const CameraPose& camera,
         const VoxelPreview& preview,
         float simulationAlpha,
@@ -213,7 +203,7 @@ private:
         VkBuffer autoExposureHistogramBuffer,
         VkBuffer autoExposureStateBuffer
     );
-    bool createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
+    bool createChunkBuffers(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
     bool createFrameResources();
     bool createGpuTimestampResources();
     bool createImGuiResources();
@@ -224,7 +214,7 @@ private:
     void buildSunDebugUi();
     void buildAimReticleUi();
     std::vector<std::uint8_t> buildShadowCandidateMask(
-        std::span<const world::Chunk> chunks,
+        std::span<const voxelsprout::world::Chunk> chunks,
         std::span<const std::size_t> visibleChunkIndices
     ) const;
     void recordVoxelGiDispatchSequence(
@@ -560,11 +550,11 @@ private:
     BufferHandle m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
-    std::vector<world::ChunkLodMeshes> m_chunkLodMeshCache;
+    std::vector<voxelsprout::world::ChunkLodMeshes> m_chunkLodMeshCache;
     std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
     bool m_chunkLodMeshCacheValid = false;
-    world::MeshingOptions m_chunkMeshingOptions{};
+    voxelsprout::world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;
     std::vector<std::size_t> m_pendingChunkRemeshIndices;
     uint32_t m_previewIndexCount = 0;
@@ -659,9 +649,9 @@ private:
     std::uint32_t m_debugDrawnLod1Ranges = 0;
     std::uint32_t m_debugDrawnLod2Ranges = 0;
     bool m_debugEnableSpatialQueries = true;
-    world::ClipmapConfig m_debugClipmapConfig{};
+    voxelsprout::world::ClipmapConfig m_debugClipmapConfig{};
     bool m_debugSpatialQueriesUsed = false;
-    world::SpatialQueryStats m_debugSpatialQueryStats{};
+    voxelsprout::world::SpatialQueryStats m_debugSpatialQueryStats{};
     std::uint32_t m_debugSpatialVisibleChunkCount = 0;
     std::uint32_t m_debugChunkIndirectCommandCount = 0;
     std::uint32_t m_debugDrawCallsTotal = 0;
@@ -700,4 +690,4 @@ private:
     float m_shadowStableFovDegrees = -1.0f;
 };
 
-} // namespace render
+} // namespace voxelsprout::render

@@ -11,7 +11,7 @@
 // World ClipmapIndex subsystem
 // Responsible for: deterministic camera-centered clipmap bounds + chunk broad-phase lookup.
 // Should NOT do: voxel storage, meshing, rendering, or simulation stepping.
-namespace world {
+namespace voxelsprout::world {
 
 struct ClipmapConfig {
     std::uint32_t levelCount = 5;
@@ -29,14 +29,14 @@ public:
     [[nodiscard]] const ClipmapConfig& config() const;
     [[nodiscard]] bool valid() const;
     [[nodiscard]] std::size_t chunkCount() const;
-    [[nodiscard]] const core::CellAabb& worldBounds() const;
+    [[nodiscard]] const voxelsprout::core::CellAabb& worldBounds() const;
     [[nodiscard]] const std::vector<std::size_t>& allChunkIndices() const;
 
     void updateCamera(float cameraX, float cameraY, float cameraZ, SpatialQueryStats* outStats = nullptr);
 
     // Query chunks intersecting the frustum broad-phase bounds and inside the active clipmap extents.
     [[nodiscard]] std::vector<std::size_t> queryChunksIntersecting(
-        const core::CellAabb& bounds,
+        const voxelsprout::core::CellAabb& bounds,
         SpatialQueryStats* outStats = nullptr
     ) const;
 
@@ -52,27 +52,27 @@ private:
         std::int32_t gridResolution = 1;
         std::int32_t brickResolution = 1;
         std::int32_t brickGridResolution = 1;
-        core::Cell3i originMin{};
+        voxelsprout::core::Cell3i originMin{};
         BrickCoord originBrickMin{};
-        core::CellAabb bounds{};
+        voxelsprout::core::CellAabb bounds{};
         std::vector<std::uint32_t> brickVersions;
         std::vector<std::uint8_t> brickDirtyMask;
-        std::vector<core::Cell3i> dirtyBrickRingQueue;
+        std::vector<voxelsprout::core::Cell3i> dirtyBrickRingQueue;
     };
 
     void rebuildLevels();
     static std::int32_t positiveModulo(std::int32_t value, std::int32_t modulus);
     static std::size_t brickLinearIndex(std::int32_t x, std::int32_t y, std::int32_t z, std::int32_t brickGridResolution);
-    static BrickCoord worldToBrickCoord(const core::Cell3i& worldCell, std::int32_t brickWorldSize);
+    static BrickCoord worldToBrickCoord(const voxelsprout::core::Cell3i& worldCell, std::int32_t brickWorldSize);
     static std::int32_t snapDownToMultiple(std::int32_t value, std::int32_t multiple);
-    static core::CellAabb makeLevelBounds(const core::Cell3i& originMin, std::int32_t gridResolution, std::int32_t voxelSize);
+    static voxelsprout::core::CellAabb makeLevelBounds(const voxelsprout::core::Cell3i& originMin, std::int32_t gridResolution, std::int32_t voxelSize);
     void markAllBricksDirty(ClipmapLevel& level);
     void markBrickDirtyAbsolute(ClipmapLevel& level, const BrickCoord& absoluteBrickCoord);
     std::uint32_t processDirtyBricks(ClipmapLevel& level);
 
-    std::vector<core::CellAabb> m_chunkBounds;
+    std::vector<voxelsprout::core::CellAabb> m_chunkBounds;
     std::vector<std::size_t> m_allChunkIndices;
-    core::CellAabb m_worldBounds{};
+    voxelsprout::core::CellAabb m_worldBounds{};
     ClipmapConfig m_config{};
     std::vector<ClipmapLevel> m_levels;
     bool m_valid = false;
@@ -82,4 +82,4 @@ private:
     std::uint32_t m_lastUpdatedBrickCount = 0;
 };
 
-} // namespace world
+} // namespace voxelsprout::world

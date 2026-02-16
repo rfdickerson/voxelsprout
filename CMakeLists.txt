@@ -75,24 +75,24 @@ add_executable(voxel_factory_toy
     src/app/main.cc
     src/app/app.cc
     src/core/log.cc
-    src/render/buffer_helpers.cc
+    src/render/backend/vulkan/buffer_helpers.cc
     src/render/frame_graph.cc
     src/render/renderer.cc
-    src/render/device.cc
-    src/render/frame.cc
-    src/render/init.cc
-    src/render/init_resources.cc
-    src/render/chunk_upload.cc
+    src/render/backend/vulkan/device.cc
+    src/render/backend/vulkan/frame.cc
+    src/render/backend/vulkan/init.cc
+    src/render/backend/vulkan/init_resources.cc
+    src/render/backend/vulkan/chunk_upload.cc
     src/render/frame_ui.cc
     src/render/frame_run.cc
-    src/render/descriptors.cc
-    src/render/pass_pipelines.cc
-    src/render/swapchain_targets.cc
-    src/render/post_compute.cc
-    src/render/pass_gi.cc
-    src/render/shadow_culling.cc
+    src/render/backend/vulkan/descriptors.cc
+    src/render/backend/vulkan/pass_pipelines.cc
+    src/render/backend/vulkan/swapchain_targets.cc
+    src/render/backend/vulkan/post_compute.cc
+    src/render/backend/vulkan/pass_gi.cc
+    src/render/backend/vulkan/shadow_culling.cc
     src/render/ui_panels.cc
-    src/render/vma_usage.cc
+    src/render/backend/vulkan/vma_usage.cc
     src/world/magica_voxel.cc
     src/world/world.cc
     src/world/chunk_mesher.cc

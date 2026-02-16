@@ -1,4 +1,4 @@
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace render {
+namespace voxelsprout::render {
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
@@ -63,7 +63,7 @@ void RendererBackend::setVoxelBaseColorPalette(const std::array<std::uint32_t, 1
 
 
 bool RendererBackend::uploadMagicaVoxelMesh(
-    const world::ChunkMeshData& mesh,
+    const voxelsprout::world::ChunkMeshData& mesh,
     float worldOffsetX,
     float worldOffsetY,
     float worldOffsetZ
@@ -77,7 +77,7 @@ bool RendererBackend::uploadMagicaVoxelMesh(
     }
 
     BufferCreateDesc vertexCreateDesc{};
-    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(world::PackedVoxelVertex));
+    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(voxelsprout::world::PackedVoxelVertex));
     vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     vertexCreateDesc.initialData = mesh.vertices.data();
@@ -120,7 +120,7 @@ bool RendererBackend::uploadMagicaVoxelMesh(
 }
 
 
-bool RendererBackend::updateChunkMesh(const world::ChunkGrid& chunkGrid) {
+bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
@@ -132,7 +132,7 @@ bool RendererBackend::updateChunkMesh(const world::ChunkGrid& chunkGrid) {
 }
 
 
-bool RendererBackend::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex) {
+bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::size_t chunkIndex) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
@@ -151,7 +151,7 @@ bool RendererBackend::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::si
 }
 
 
-bool RendererBackend::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices) {
+bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
@@ -179,14 +179,14 @@ bool RendererBackend::useSpatialPartitioningQueries() const {
     return m_debugEnableSpatialQueries;
 }
 
-world::ClipmapConfig RendererBackend::clipmapQueryConfig() const {
+voxelsprout::world::ClipmapConfig RendererBackend::clipmapQueryConfig() const {
     return m_debugClipmapConfig;
 }
 
 
 void RendererBackend::setSpatialQueryStats(
     bool used,
-    const world::SpatialQueryStats& stats,
+    const voxelsprout::world::SpatialQueryStats& stats,
     std::uint32_t visibleChunkCount
 ) {
     m_debugSpatialQueriesUsed = used;
@@ -195,12 +195,12 @@ void RendererBackend::setSpatialQueryStats(
 }
 
 
-bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices) {
+bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices) {
     if (chunkGrid.chunks().empty()) {
         return false;
     }
 
-    const std::vector<world::Chunk>& chunks = chunkGrid.chunks();
+    const std::vector<voxelsprout::world::Chunk>& chunks = chunkGrid.chunks();
     const std::vector<ChunkDrawRange> previousChunkDrawRanges = m_chunkDrawRanges;
     const std::uint32_t previousDebugChunkMeshVertexCount = m_debugChunkMeshVertexCount;
     const std::uint32_t previousDebugChunkMeshIndexCount = m_debugChunkMeshIndexCount;
@@ -209,12 +209,12 @@ bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std:
         m_debugChunkMeshVertexCount = previousDebugChunkMeshVertexCount;
         m_debugChunkMeshIndexCount = previousDebugChunkMeshIndexCount;
     };
-    const std::size_t expectedDrawRangeCount = chunks.size() * world::kChunkMeshLodCount;
+    const std::size_t expectedDrawRangeCount = chunks.size() * voxelsprout::world::kChunkMeshLodCount;
     if (m_chunkDrawRanges.size() != expectedDrawRangeCount) {
         m_chunkDrawRanges.assign(expectedDrawRangeCount, ChunkDrawRange{});
     }
     if (m_chunkLodMeshCache.size() != chunks.size()) {
-        m_chunkLodMeshCache.assign(chunks.size(), world::ChunkLodMeshes{});
+        m_chunkLodMeshCache.assign(chunks.size(), voxelsprout::world::ChunkLodMeshes{});
         m_chunkLodMeshCacheValid = false;
     }
     if (m_chunkGrassInstanceCache.size() != chunks.size()) {
@@ -225,22 +225,22 @@ bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std:
         if (chunkArrayIndex >= chunks.size()) {
             return;
         }
-        const world::Chunk& chunk = chunks[chunkArrayIndex];
+        const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
         std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
         grassInstances.clear();
         grassInstances.reserve(448);
 
-        const float chunkWorldX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
-        const float chunkWorldY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
-        const float chunkWorldZ = static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ);
+        const float chunkWorldX = static_cast<float>(chunk.chunkX() * voxelsprout::world::Chunk::kSizeX);
+        const float chunkWorldY = static_cast<float>(chunk.chunkY() * voxelsprout::world::Chunk::kSizeY);
+        const float chunkWorldZ = static_cast<float>(chunk.chunkZ() * voxelsprout::world::Chunk::kSizeZ);
 
-        for (int y = 0; y < world::Chunk::kSizeY - 1; ++y) {
-            for (int z = 0; z < world::Chunk::kSizeZ; ++z) {
-                for (int x = 0; x < world::Chunk::kSizeX; ++x) {
-                    if (chunk.voxelAt(x, y, z).type != world::VoxelType::Grass) {
+        for (int y = 0; y < voxelsprout::world::Chunk::kSizeY - 1; ++y) {
+            for (int z = 0; z < voxelsprout::world::Chunk::kSizeZ; ++z) {
+                for (int x = 0; x < voxelsprout::world::Chunk::kSizeX; ++x) {
+                    if (chunk.voxelAt(x, y, z).type != voxelsprout::world::VoxelType::Grass) {
                         continue;
                     }
-                    if (chunk.voxelAt(x, y + 1, z).type != world::VoxelType::Empty) {
+                    if (chunk.voxelAt(x, y + 1, z).type != voxelsprout::world::VoxelType::Empty) {
                         continue;
                     }
 
@@ -323,8 +323,8 @@ bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std:
     std::size_t remeshedActiveIndexCount = 0;
     std::size_t remeshedNaiveVertexCount = 0;
     std::size_t remeshedNaiveIndexCount = 0;
-    const auto countMeshGeometry = [](const world::ChunkLodMeshes& lodMeshes, std::size_t& outVertices, std::size_t& outIndices) {
-        for (const world::ChunkMeshData& lodMesh : lodMeshes.lodMeshes) {
+    const auto countMeshGeometry = [](const voxelsprout::world::ChunkLodMeshes& lodMeshes, std::size_t& outVertices, std::size_t& outIndices) {
+        for (const voxelsprout::world::ChunkMeshData& lodMesh : lodMeshes.lodMeshes) {
             outVertices += lodMesh.vertices.size();
             outIndices += lodMesh.indices.size();
         }
@@ -334,19 +334,19 @@ bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std:
     if (fullRemesh) {
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
             m_chunkLodMeshCache[chunkArrayIndex] =
-                world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
+                voxelsprout::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
             rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
                 remeshedActiveVertexCount,
                 remeshedActiveIndexCount
             );
-            if (m_chunkMeshingOptions.mode == world::MeshingMode::Naive) {
+            if (m_chunkMeshingOptions.mode == voxelsprout::world::MeshingMode::Naive) {
                 remeshedNaiveVertexCount = remeshedActiveVertexCount;
                 remeshedNaiveIndexCount = remeshedActiveIndexCount;
             } else {
-                const world::ChunkLodMeshes naiveLodMeshes =
-                    world::buildChunkLodMeshes(chunks[chunkArrayIndex], world::MeshingOptions{world::MeshingMode::Naive});
+                const voxelsprout::world::ChunkLodMeshes naiveLodMeshes =
+                    voxelsprout::world::buildChunkLodMeshes(chunks[chunkArrayIndex], voxelsprout::world::MeshingOptions{voxelsprout::world::MeshingMode::Naive});
                 countMeshGeometry(naiveLodMeshes, remeshedNaiveVertexCount, remeshedNaiveIndexCount);
             }
         }
@@ -370,19 +370,19 @@ bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std:
 
         for (const std::size_t chunkArrayIndex : uniqueRemeshChunkIndices) {
             m_chunkLodMeshCache[chunkArrayIndex] =
-                world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
+                voxelsprout::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
             rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
                 remeshedActiveVertexCount,
                 remeshedActiveIndexCount
             );
-            if (m_chunkMeshingOptions.mode == world::MeshingMode::Naive) {
+            if (m_chunkMeshingOptions.mode == voxelsprout::world::MeshingMode::Naive) {
                 remeshedNaiveVertexCount = remeshedActiveVertexCount;
                 remeshedNaiveIndexCount = remeshedActiveIndexCount;
             } else {
-                const world::ChunkLodMeshes naiveLodMeshes =
-                    world::buildChunkLodMeshes(chunks[chunkArrayIndex], world::MeshingOptions{world::MeshingMode::Naive});
+                const voxelsprout::world::ChunkLodMeshes naiveLodMeshes =
+                    voxelsprout::world::buildChunkLodMeshes(chunks[chunkArrayIndex], voxelsprout::world::MeshingOptions{voxelsprout::world::MeshingMode::Naive});
                 countMeshGeometry(naiveLodMeshes, remeshedNaiveVertexCount, remeshedNaiveIndexCount);
             }
         }
@@ -480,23 +480,23 @@ bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std:
         }
     }
 
-    std::vector<world::PackedVoxelVertex> combinedVertices;
+    std::vector<voxelsprout::world::PackedVoxelVertex> combinedVertices;
     std::vector<std::uint32_t> combinedIndices;
     std::size_t uploadedVertexCount = 0;
     std::size_t uploadedIndexCount = 0;
 
     for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-        const world::Chunk& chunk = chunks[chunkArrayIndex];
-        const world::ChunkLodMeshes& chunkLodMeshes = m_chunkLodMeshCache[chunkArrayIndex];
+        const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
+        const voxelsprout::world::ChunkLodMeshes& chunkLodMeshes = m_chunkLodMeshCache[chunkArrayIndex];
 
-        for (std::size_t lodIndex = 0; lodIndex < world::kChunkMeshLodCount; ++lodIndex) {
-            const world::ChunkMeshData& chunkMesh = chunkLodMeshes.lodMeshes[lodIndex];
-            const std::size_t drawRangeArrayIndex = (chunkArrayIndex * world::kChunkMeshLodCount) + lodIndex;
+        for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
+            const voxelsprout::world::ChunkMeshData& chunkMesh = chunkLodMeshes.lodMeshes[lodIndex];
+            const std::size_t drawRangeArrayIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
             ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeArrayIndex];
 
-            drawRange.offsetX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
-            drawRange.offsetY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
-            drawRange.offsetZ = static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ);
+            drawRange.offsetX = static_cast<float>(chunk.chunkX() * voxelsprout::world::Chunk::kSizeX);
+            drawRange.offsetY = static_cast<float>(chunk.chunkY() * voxelsprout::world::Chunk::kSizeY);
+            drawRange.offsetZ = static_cast<float>(chunk.chunkZ() * voxelsprout::world::Chunk::kSizeZ);
             drawRange.firstIndex = 0;
             drawRange.vertexOffset = 0;
             drawRange.indexCount = 0;
@@ -570,7 +570,7 @@ bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std:
 
     if (hasChunkCopies) {
         const VkDeviceSize vertexBufferSize =
-            static_cast<VkDeviceSize>(combinedVertices.size() * sizeof(world::PackedVoxelVertex));
+            static_cast<VkDeviceSize>(combinedVertices.size() * sizeof(voxelsprout::world::PackedVoxelVertex));
         const VkDeviceSize indexBufferSize =
             static_cast<VkDeviceSize>(combinedIndices.size() * sizeof(std::uint32_t));
 
@@ -620,7 +620,7 @@ bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std:
 
         chunkVertexUploadSliceOpt = m_frameArena.allocateUpload(
             vertexBufferSize,
-            static_cast<VkDeviceSize>(alignof(world::PackedVoxelVertex)),
+            static_cast<VkDeviceSize>(alignof(voxelsprout::world::PackedVoxelVertex)),
             FrameArenaUploadKind::Unknown
         );
         if (!chunkVertexUploadSliceOpt.has_value() || chunkVertexUploadSliceOpt->mapped == nullptr) {
@@ -765,7 +765,7 @@ bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std:
     VOX_LOGD("render") << "chunk upload queued (ranges=" << m_chunkDrawRanges.size()
                        << ", remeshedChunks=" << remeshedChunkCount
                        << ", meshingMode="
-                       << (m_chunkMeshingOptions.mode == world::MeshingMode::Greedy ? "greedy" : "naive")
+                       << (m_chunkMeshingOptions.mode == voxelsprout::world::MeshingMode::Greedy ? "greedy" : "naive")
                        << ", vertices=" << uploadedVertexCount
                        << ", indices=" << uploadedIndexCount
                        << (hasChunkCopies
@@ -774,4 +774,4 @@ bool RendererBackend::createChunkBuffers(const world::ChunkGrid& chunkGrid, std:
                        << ")";
     return true;
 }
-} // namespace render
+} // namespace voxelsprout::render

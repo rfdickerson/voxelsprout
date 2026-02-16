@@ -1,4 +1,4 @@
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace render {
+namespace voxelsprout::render {
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
@@ -265,4 +265,4 @@ void RendererBackend::insertDebugLabel(
 }
 
 
-} // namespace render
+} // namespace voxelsprout::render

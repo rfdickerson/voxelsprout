@@ -1,11 +1,11 @@
 #include "render/renderer.h"
 
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include <memory>
 #include <utility>
 
-namespace render {
+namespace voxelsprout::render {
 
 Renderer::Renderer()
     : m_backend(std::make_unique<RendererBackend>()) {}
@@ -15,7 +15,7 @@ Renderer::~Renderer() = default;
 Renderer::Renderer(Renderer&&) noexcept = default;
 Renderer& Renderer::operator=(Renderer&&) noexcept = default;
 
-bool Renderer::init(GLFWwindow* window, const world::ChunkGrid& chunkGrid) {
+bool Renderer::init(GLFWwindow* window, const voxelsprout::world::ChunkGrid& chunkGrid) {
     return m_backend->init(window, chunkGrid);
 }
 
@@ -24,7 +24,7 @@ void Renderer::clearMagicaVoxelMeshes() {
 }
 
 bool Renderer::uploadMagicaVoxelMesh(
-    const world::ChunkMeshData& mesh,
+    const voxelsprout::world::ChunkMeshData& mesh,
     float worldOffsetX,
     float worldOffsetY,
     float worldOffsetZ
@@ -36,15 +36,15 @@ void Renderer::setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& pal
     m_backend->setVoxelBaseColorPalette(paletteRgba);
 }
 
-bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid) {
+bool Renderer::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid) {
     return m_backend->updateChunkMesh(chunkGrid);
 }
 
-bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex) {
+bool Renderer::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::size_t chunkIndex) {
     return m_backend->updateChunkMesh(chunkGrid, chunkIndex);
 }
 
-bool Renderer::updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices) {
+bool Renderer::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices) {
     return m_backend->updateChunkMesh(chunkGrid, chunkIndices);
 }
 
@@ -52,17 +52,17 @@ bool Renderer::useSpatialPartitioningQueries() const {
     return m_backend->useSpatialPartitioningQueries();
 }
 
-world::ClipmapConfig Renderer::clipmapQueryConfig() const {
+voxelsprout::world::ClipmapConfig Renderer::clipmapQueryConfig() const {
     return m_backend->clipmapQueryConfig();
 }
 
-void Renderer::setSpatialQueryStats(bool used, const world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount) {
+void Renderer::setSpatialQueryStats(bool used, const voxelsprout::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount) {
     m_backend->setSpatialQueryStats(used, stats, visibleChunkCount);
 }
 
 void Renderer::renderFrame(
-    const world::ChunkGrid& chunkGrid,
-    const sim::Simulation& simulation,
+    const voxelsprout::world::ChunkGrid& chunkGrid,
+    const voxelsprout::sim::Simulation& simulation,
     const CameraPose& camera,
     const VoxelPreview& preview,
     float simulationAlpha,
@@ -99,4 +99,4 @@ void Renderer::shutdown() {
     m_backend->shutdown();
 }
 
-} // namespace render
+} // namespace voxelsprout::render

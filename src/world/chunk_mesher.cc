@@ -6,7 +6,7 @@
 #include <array>
 #include <cstddef>
 
-namespace world {
+namespace voxelsprout::world {
 
 namespace {
 
@@ -604,4 +604,4 @@ ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid, MeshingOptions op
     return buildChunkMesh(chunkGrid.chunks().front(), options);
 }
 
-} // namespace world
+} // namespace voxelsprout::world

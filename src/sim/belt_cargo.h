@@ -5,7 +5,7 @@
 // Simulation Belt Cargo subsystem
 // Responsible for: deterministic per-item belt movement state used by simulation and rendering.
 // Should NOT do: rendering, random effects, or gameplay authoring logic.
-namespace sim {
+namespace voxelsprout::sim {
 
 struct BeltCargo {
     std::uint32_t itemId = 0;
@@ -16,4 +16,4 @@ struct BeltCargo {
     float currWorldPos[3] = {0.0f, 0.0f, 0.0f};
 };
 
-} // namespace sim
+} // namespace voxelsprout::sim

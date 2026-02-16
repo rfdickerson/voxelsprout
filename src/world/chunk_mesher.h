@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace world {
+namespace voxelsprout::world {
 
 constexpr std::uint32_t kChunkMeshLodCount = 3;
 
@@ -83,4 +83,4 @@ ChunkMeshData buildChunkMesh(const Chunk& chunk, MeshingOptions options = {});
 // This intentionally targets one chunk only for debug clarity.
 ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid, MeshingOptions options = {});
 
-} // namespace world
+} // namespace voxelsprout::world
