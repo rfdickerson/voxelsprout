@@ -1,10 +1,10 @@
 #pragma once
 
-#include "render/renderer.h"
 #include "render/backend/vulkan/buffer_helpers.h"
 #include "render/backend/vulkan/descriptor_manager.h"
 #include "render/frame_graph.h"
 #include "render/backend/vulkan/pipeline_manager.h"
+#include "render/renderer_types.h"
 #include "sim/simulation.h"
 #include "world/clipmap_index.h"
 #include "world/chunk_grid.h"
