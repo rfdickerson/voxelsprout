@@ -135,8 +135,25 @@ void RendererBackend::buildFrameStatsUi() {
     } else {
         ImGui::Text("GPU Frame (ms): unavailable");
     }
+    if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
+        const int presentHistoryCount = static_cast<int>(m_debugPresentedFrameTimingMsHistoryCount);
+        const int presentHistoryOffset =
+            (m_debugPresentedFrameTimingMsHistoryCount == kTimingHistorySampleCount)
+                ? static_cast<int>(m_debugPresentedFrameTimingMsHistoryWrite)
+                : 0;
+        ImGui::PlotLines(
+            "Presented Frame (ms)",
+            m_debugPresentedFrameTimingMsHistory.data(),
+            presentHistoryCount,
+            presentHistoryOffset,
+            nullptr,
+            0.0f,
+            autoScale,
+            ImVec2(0.0f, 64.0f)
+        );
+    }
 
-    ImGui::Text("FPS: %.1f", m_debugFps);
+    ImGui::Text("FPS (submit/presented): %.1f / %.1f", m_debugFps, m_debugPresentedFps);
     ImGui::Text("Chunks (visible/total): %u / %u", m_debugSpatialVisibleChunkCount, m_debugChunkCount);
     if (m_gpuTimestampsSupported) {
         ImGui::Text(
@@ -145,8 +162,19 @@ void RendererBackend::buildFrameStatsUi() {
             m_debugCpuFrameWorkMs,
             m_debugCpuFrameEwmaMs
         );
+        ImGui::Text("Frame CPU P50/P95/P99: %.2f / %.2f / %.2f ms", m_debugCpuFrameP50Ms, m_debugCpuFrameP95Ms, m_debugCpuFrameP99Ms);
         ImGui::Text("GI Occupancy CPU (build+stage): %.2f ms", m_debugCpuGiOccupancyBuildMs);
         ImGui::Text("Frame GPU: %.2f ms", m_debugGpuFrameTimeMs);
+        ImGui::Text("Frame GPU P50/P95/P99: %.2f / %.2f / %.2f ms", m_debugGpuFrameP50Ms, m_debugGpuFrameP95Ms, m_debugGpuFrameP99Ms);
+        if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
+            ImGui::Text(
+                "Presented Frame (last/P50/P95/P99): %.2f / %.2f / %.2f / %.2f ms",
+                m_debugPresentedFrameTimeMs,
+                m_debugPresentedFrameP50Ms,
+                m_debugPresentedFrameP95Ms,
+                m_debugPresentedFrameP99Ms
+            );
+        }
         if (ImGui::TreeNodeEx("GPU Stages (ms)", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
             ImGui::Text("GI Inject (compute): %.2f", m_debugGpuGiInjectTimeMs);
@@ -167,8 +195,18 @@ void RendererBackend::buildFrameStatsUi() {
             m_debugCpuFrameWorkMs,
             m_debugCpuFrameEwmaMs
         );
+        ImGui::Text("Frame CPU P50/P95/P99: %.2f / %.2f / %.2f ms", m_debugCpuFrameP50Ms, m_debugCpuFrameP95Ms, m_debugCpuFrameP99Ms);
         ImGui::Text("GI Occupancy CPU (build+stage): %.2f ms", m_debugCpuGiOccupancyBuildMs);
         ImGui::Text("Frame GPU: n/a");
+        if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
+            ImGui::Text(
+                "Presented Frame (last/P50/P95/P99): %.2f / %.2f / %.2f / %.2f ms",
+                m_debugPresentedFrameTimeMs,
+                m_debugPresentedFrameP50Ms,
+                m_debugPresentedFrameP95Ms,
+                m_debugPresentedFrameP99Ms
+            );
+        }
     }
     if (m_supportsDisplayTiming) {
         ImGui::Text(

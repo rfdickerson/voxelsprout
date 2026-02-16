@@ -632,11 +632,16 @@ void RendererBackend::renderFrame(
     float voxelGiOriginX = voxelGiDesiredOriginX;
     float voxelGiOriginY = voxelGiDesiredOriginY;
     float voxelGiOriginZ = voxelGiDesiredOriginZ;
+    const bool keepVoxelGiBuildAnchor = m_voxelGiOccupancyBuildInProgress || m_voxelGiOccupancyUploadPending;
     const bool keepVoxelGiGridAnchored =
         m_voxelGiHasPreviousFrameState &&
         m_voxelGiOccupancyInitialized &&
         !m_voxelGiWorldDirty;
-    if (keepVoxelGiGridAnchored) {
+    if (keepVoxelGiBuildAnchor) {
+        voxelGiOriginX = m_voxelGiOccupancyBuildOrigin[0];
+        voxelGiOriginY = m_voxelGiOccupancyBuildOrigin[1];
+        voxelGiOriginZ = m_voxelGiOccupancyBuildOrigin[2];
+    } else if (keepVoxelGiGridAnchored) {
         voxelGiOriginX = m_voxelGiPreviousGridOrigin[0];
         voxelGiOriginY = m_voxelGiPreviousGridOrigin[1];
         voxelGiOriginZ = m_voxelGiPreviousGridOrigin[2];
@@ -740,92 +745,139 @@ void RendererBackend::renderFrame(
     std::optional<FrameArenaSlice> voxelGiOccupancySliceOpt = std::nullopt;
     VkBuffer voxelGiOccupancyUploadBuffer = VK_NULL_HANDLE;
     float voxelGiOccupancyCpuMs = 0.0f;
-    if (m_voxelGiComputeAvailable &&
-        m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
-        m_voxelGiOccupancyImageView != VK_NULL_HANDLE &&
-        voxelGiNeedsOccupancyUpload) {
+    if (!voxelGiNeedsOccupancyUpload) {
+        m_voxelGiOccupancyBuildInProgress = false;
+        m_voxelGiOccupancyUploadPending = false;
+        m_voxelGiOccupancyBuildNextZ = 0;
+        m_voxelGiOccupancyBuildWorldVersion = 0;
+        m_voxelGiOccupancyStagingRgba.clear();
+    } else if (m_voxelGiComputeAvailable &&
+               m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
+               m_voxelGiOccupancyImageView != VK_NULL_HANDLE) {
         const auto occupancyCpuStartTime = std::chrono::steady_clock::now();
+        constexpr uint32_t kVoxelGiOccupancyBuildZLayersPerFrame = 4u;
+        constexpr float kVoxelGiOccupancyOriginRebuildThreshold = 0.001f;
+
         const std::size_t voxelGiCellCount =
             static_cast<std::size_t>(kVoxelGiGridResolution) *
             static_cast<std::size_t>(kVoxelGiGridResolution) *
             static_cast<std::size_t>(kVoxelGiGridResolution);
-        // RGBA8 payload for GI occupancy:
-        // R = occupancy, GBA = albedo RGB for solid cells.
-        static thread_local std::vector<std::uint8_t> occupancyDataScratch;
-        occupancyDataScratch.assign(voxelGiCellCount * 4u, 0u);
-
-        std::array<int, kVoxelGiGridResolution> worldXCoords{};
-        std::array<int, kVoxelGiGridResolution> worldYCoords{};
-        std::array<int, kVoxelGiGridResolution> worldZCoords{};
-        for (uint32_t i = 0; i < kVoxelGiGridResolution; ++i) {
-            const float offset = (static_cast<float>(i) + 0.5f) * kVoxelGiCellSize;
-            worldXCoords[i] = static_cast<int>(std::floor(voxelGiOriginX + offset));
-            worldYCoords[i] = static_cast<int>(std::floor(voxelGiOriginY + offset));
-            worldZCoords[i] = static_cast<int>(std::floor(voxelGiOriginZ + offset));
-        }
+        const std::size_t occupancyBytesCount = voxelGiCellCount * 4u;
+        const std::array<float, 3> voxelGiBuildOrigin = {voxelGiOriginX, voxelGiOriginY, voxelGiOriginZ};
+        const bool occupancyBuildOriginChanged =
+            std::abs(m_voxelGiOccupancyBuildOrigin[0] - voxelGiBuildOrigin[0]) > kVoxelGiOccupancyOriginRebuildThreshold ||
+            std::abs(m_voxelGiOccupancyBuildOrigin[1] - voxelGiBuildOrigin[1]) > kVoxelGiOccupancyOriginRebuildThreshold ||
+            std::abs(m_voxelGiOccupancyBuildOrigin[2] - voxelGiBuildOrigin[2]) > kVoxelGiOccupancyOriginRebuildThreshold;
+        const bool occupancyBuildWorldChanged = m_voxelGiOccupancyBuildWorldVersion != m_voxelGiWorldVersion;
+        const bool occupancyBuildInvalidSize = m_voxelGiOccupancyStagingRgba.size() != occupancyBytesCount;
+        const bool restartOccupancyBuild =
+            (!m_voxelGiOccupancyBuildInProgress && !m_voxelGiOccupancyUploadPending) ||
+            occupancyBuildOriginChanged ||
+            occupancyBuildWorldChanged ||
+            occupancyBuildInvalidSize;
 
         static thread_local std::unordered_map<ChunkCoordKey, const voxelsprout::world::Chunk*, ChunkCoordKeyHash>
             chunkByCoordScratch;
-        chunkByCoordScratch.clear();
-        chunkByCoordScratch.reserve(chunkGrid.chunkCount() * 2u);
-        for (const voxelsprout::world::Chunk& chunk : chunkGrid.chunks()) {
-            chunkByCoordScratch[ChunkCoordKey{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()}] = &chunk;
+        static thread_local std::uint64_t chunkByCoordWorldVersion = 0;
+        if (restartOccupancyBuild) {
+            m_voxelGiOccupancyStagingRgba.assign(occupancyBytesCount, 0u);
+            m_voxelGiOccupancyBuildOrigin = voxelGiBuildOrigin;
+            m_voxelGiOccupancyBuildWorldVersion = m_voxelGiWorldVersion;
+            m_voxelGiOccupancyBuildNextZ = 0;
+            m_voxelGiOccupancyBuildInProgress = true;
+            m_voxelGiOccupancyUploadPending = false;
+
+            chunkByCoordScratch.clear();
+            chunkByCoordScratch.reserve(chunkGrid.chunkCount() * 2u);
+            for (const voxelsprout::world::Chunk& chunk : chunkGrid.chunks()) {
+                chunkByCoordScratch[ChunkCoordKey{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()}] = &chunk;
+            }
+            chunkByCoordWorldVersion = m_voxelGiOccupancyBuildWorldVersion;
+        } else if (chunkByCoordWorldVersion != m_voxelGiOccupancyBuildWorldVersion) {
+            chunkByCoordScratch.clear();
+            chunkByCoordScratch.reserve(chunkGrid.chunkCount() * 2u);
+            for (const voxelsprout::world::Chunk& chunk : chunkGrid.chunks()) {
+                chunkByCoordScratch[ChunkCoordKey{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()}] = &chunk;
+            }
+            chunkByCoordWorldVersion = m_voxelGiOccupancyBuildWorldVersion;
         }
 
-        for (uint32_t z = 0; z < kVoxelGiGridResolution; ++z) {
-            const int worldZ = worldZCoords[z];
-            const int chunkZ = floorDiv(worldZ, voxelsprout::world::Chunk::kSizeZ);
-            const int localZ = worldZ - (chunkZ * voxelsprout::world::Chunk::kSizeZ);
-            for (uint32_t y = 0; y < kVoxelGiGridResolution; ++y) {
-                const int worldY = worldYCoords[y];
-                const int chunkY = floorDiv(worldY, voxelsprout::world::Chunk::kSizeY);
-                const int localY = worldY - (chunkY * voxelsprout::world::Chunk::kSizeY);
-                for (uint32_t x = 0; x < kVoxelGiGridResolution; ++x) {
-                    const int worldX = worldXCoords[x];
-                    const int chunkX = floorDiv(worldX, voxelsprout::world::Chunk::kSizeX);
-                    const int localX = worldX - (chunkX * voxelsprout::world::Chunk::kSizeX);
-                    const ChunkCoordKey key{chunkX, chunkY, chunkZ};
-                    const auto chunkIt = chunkByCoordScratch.find(key);
-                    if (chunkIt == chunkByCoordScratch.end()) {
-                        continue;
+        if (m_voxelGiOccupancyBuildInProgress) {
+            std::array<int, kVoxelGiGridResolution> worldXCoords{};
+            std::array<int, kVoxelGiGridResolution> worldYCoords{};
+            for (uint32_t i = 0; i < kVoxelGiGridResolution; ++i) {
+                const float offset = (static_cast<float>(i) + 0.5f) * kVoxelGiCellSize;
+                worldXCoords[i] = static_cast<int>(std::floor(m_voxelGiOccupancyBuildOrigin[0] + offset));
+                worldYCoords[i] = static_cast<int>(std::floor(m_voxelGiOccupancyBuildOrigin[1] + offset));
+            }
+
+            const uint32_t zStart = m_voxelGiOccupancyBuildNextZ;
+            const uint32_t zEnd = std::min(zStart + kVoxelGiOccupancyBuildZLayersPerFrame, kVoxelGiGridResolution);
+            for (uint32_t z = zStart; z < zEnd; ++z) {
+                const float zOffset = (static_cast<float>(z) + 0.5f) * kVoxelGiCellSize;
+                const int worldZ = static_cast<int>(std::floor(m_voxelGiOccupancyBuildOrigin[2] + zOffset));
+                const int chunkZ = floorDiv(worldZ, voxelsprout::world::Chunk::kSizeZ);
+                const int localZ = worldZ - (chunkZ * voxelsprout::world::Chunk::kSizeZ);
+                for (uint32_t y = 0; y < kVoxelGiGridResolution; ++y) {
+                    const int worldY = worldYCoords[y];
+                    const int chunkY = floorDiv(worldY, voxelsprout::world::Chunk::kSizeY);
+                    const int localY = worldY - (chunkY * voxelsprout::world::Chunk::kSizeY);
+                    for (uint32_t x = 0; x < kVoxelGiGridResolution; ++x) {
+                        const int worldX = worldXCoords[x];
+                        const int chunkX = floorDiv(worldX, voxelsprout::world::Chunk::kSizeX);
+                        const int localX = worldX - (chunkX * voxelsprout::world::Chunk::kSizeX);
+                        const ChunkCoordKey key{chunkX, chunkY, chunkZ};
+                        const auto chunkIt = chunkByCoordScratch.find(key);
+                        if (chunkIt == chunkByCoordScratch.end()) {
+                            continue;
+                        }
+                        const voxelsprout::world::Chunk* chunk = chunkIt->second;
+                        if (chunk == nullptr || !chunk->isSolid(localX, localY, localZ)) {
+                            continue;
+                        }
+                        const voxelsprout::world::Voxel voxel = chunk->voxelAt(localX, localY, localZ);
+                        const std::array<std::uint8_t, 3> albedoRgb =
+                            voxelGiAlbedoRgb(voxel, m_voxelBaseColorPaletteRgba);
+                        const std::size_t index =
+                            static_cast<std::size_t>(x) +
+                            (static_cast<std::size_t>(kVoxelGiGridResolution) *
+                             (static_cast<std::size_t>(y) +
+                              (static_cast<std::size_t>(kVoxelGiGridResolution) * static_cast<std::size_t>(z))));
+                        const std::size_t rgbaIndex = index * 4u;
+                        m_voxelGiOccupancyStagingRgba[rgbaIndex + 0u] = 255u;
+                        m_voxelGiOccupancyStagingRgba[rgbaIndex + 1u] = albedoRgb[0];
+                        m_voxelGiOccupancyStagingRgba[rgbaIndex + 2u] = albedoRgb[1];
+                        m_voxelGiOccupancyStagingRgba[rgbaIndex + 3u] = albedoRgb[2];
                     }
-                    const voxelsprout::world::Chunk* chunk = chunkIt->second;
-                    if (chunk == nullptr || !chunk->isSolid(localX, localY, localZ)) {
-                        continue;
-                    }
-                    const voxelsprout::world::Voxel voxel = chunk->voxelAt(localX, localY, localZ);
-                    const std::array<std::uint8_t, 3> albedoRgb =
-                        voxelGiAlbedoRgb(voxel, m_voxelBaseColorPaletteRgba);
-                    const std::size_t index =
-                        static_cast<std::size_t>(x) +
-                        (static_cast<std::size_t>(kVoxelGiGridResolution) *
-                         (static_cast<std::size_t>(y) +
-                          (static_cast<std::size_t>(kVoxelGiGridResolution) * static_cast<std::size_t>(z))));
-                    const std::size_t rgbaIndex = index * 4u;
-                    occupancyDataScratch[rgbaIndex + 0u] = 255u;
-                    occupancyDataScratch[rgbaIndex + 1u] = albedoRgb[0];
-                    occupancyDataScratch[rgbaIndex + 2u] = albedoRgb[1];
-                    occupancyDataScratch[rgbaIndex + 3u] = albedoRgb[2];
                 }
+            }
+
+            m_voxelGiOccupancyBuildNextZ = zEnd;
+            if (zEnd >= kVoxelGiGridResolution) {
+                m_voxelGiOccupancyBuildInProgress = false;
+                m_voxelGiOccupancyUploadPending = true;
             }
         }
 
-        const VkDeviceSize occupancyBytes = static_cast<VkDeviceSize>(occupancyDataScratch.size());
-        voxelGiOccupancySliceOpt = m_frameArena.allocateUpload(
-            occupancyBytes,
-            static_cast<VkDeviceSize>(4u),
-            FrameArenaUploadKind::Unknown
-        );
-        if (voxelGiOccupancySliceOpt.has_value() && voxelGiOccupancySliceOpt->mapped != nullptr) {
-            std::memcpy(
-                voxelGiOccupancySliceOpt->mapped,
-                occupancyDataScratch.data(),
-                static_cast<std::size_t>(occupancyBytes)
+        if (m_voxelGiOccupancyUploadPending) {
+            const VkDeviceSize occupancyBytes = static_cast<VkDeviceSize>(m_voxelGiOccupancyStagingRgba.size());
+            voxelGiOccupancySliceOpt = m_frameArena.allocateUpload(
+                occupancyBytes,
+                static_cast<VkDeviceSize>(4u),
+                FrameArenaUploadKind::Unknown
             );
-            voxelGiOccupancyUploadBuffer = m_bufferAllocator.getBuffer(voxelGiOccupancySliceOpt->buffer);
-        } else {
-            voxelGiOccupancySliceOpt.reset();
-            VOX_LOGW("render") << "voxel GI occupancy upload allocation failed";
+            if (voxelGiOccupancySliceOpt.has_value() && voxelGiOccupancySliceOpt->mapped != nullptr) {
+                std::memcpy(
+                    voxelGiOccupancySliceOpt->mapped,
+                    m_voxelGiOccupancyStagingRgba.data(),
+                    static_cast<std::size_t>(occupancyBytes)
+                );
+                voxelGiOccupancyUploadBuffer = m_bufferAllocator.getBuffer(voxelGiOccupancySliceOpt->buffer);
+                m_voxelGiOccupancyUploadPending = false;
+            } else {
+                voxelGiOccupancySliceOpt.reset();
+                VOX_LOGW("render") << "voxel GI occupancy upload allocation failed";
+            }
         }
 
         voxelGiOccupancyCpuMs = static_cast<float>(
@@ -1836,6 +1888,7 @@ void RendererBackend::renderFrame(
         (m_debugCpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
     m_debugCpuFrameTimingMsHistoryCount =
         std::min(m_debugCpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
+    updateFrameTimingPercentiles();
 
     const FrameArenaStats& frameArenaStats = m_frameArena.activeStats();
     m_debugFrameArenaUploadBytes = static_cast<std::uint64_t>(frameArenaStats.uploadBytesAllocated);

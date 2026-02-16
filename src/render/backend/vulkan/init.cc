@@ -1686,6 +1686,7 @@ void RendererBackend::shutdown() {
     m_voxelGiFormat = VK_FORMAT_UNDEFINED;
     m_voxelGiOccupancyFormat = VK_FORMAT_UNDEFINED;
     m_voxelGiWorldDirty = true;
+    m_voxelGiWorldVersion = 1;
     m_voxelGiHasPreviousFrameState = false;
     m_voxelGiPreviousGridOrigin = {0.0f, 0.0f, 0.0f};
     m_voxelGiPreviousSunDirection = {0.0f, 0.0f, 0.0f};
@@ -1693,6 +1694,12 @@ void RendererBackend::shutdown() {
     m_voxelGiPreviousShIrradiance = {};
     m_voxelGiPreviousBounceStrength = 0.0f;
     m_voxelGiPreviousDiffusionSoftness = 0.0f;
+    m_voxelGiOccupancyStagingRgba.clear();
+    m_voxelGiOccupancyBuildOrigin = {0.0f, 0.0f, 0.0f};
+    m_voxelGiOccupancyBuildWorldVersion = 0;
+    m_voxelGiOccupancyBuildNextZ = 0;
+    m_voxelGiOccupancyBuildInProgress = false;
+    m_voxelGiOccupancyUploadPending = false;
     m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     m_autoExposureComputeAvailable = false;
@@ -1725,6 +1732,17 @@ void RendererBackend::shutdown() {
     m_debugDisplayRefreshMs = 0.0f;
     m_debugDisplayPresentMarginMs = 0.0f;
     m_debugDisplayActualEarliestDeltaMs = 0.0f;
+    m_debugPresentedFrameTimeMs = 0.0f;
+    m_debugPresentedFps = 0.0f;
+    m_debugCpuFrameP50Ms = 0.0f;
+    m_debugCpuFrameP95Ms = 0.0f;
+    m_debugCpuFrameP99Ms = 0.0f;
+    m_debugGpuFrameP50Ms = 0.0f;
+    m_debugGpuFrameP95Ms = 0.0f;
+    m_debugGpuFrameP99Ms = 0.0f;
+    m_debugPresentedFrameP50Ms = 0.0f;
+    m_debugPresentedFrameP95Ms = 0.0f;
+    m_debugPresentedFrameP99Ms = 0.0f;
     m_debugDisplayTimingSampleCount = 0;
     m_debugChunkMeshVertexCount = 0;
     m_debugChunkMeshIndexCount = 0;
@@ -1752,6 +1770,9 @@ void RendererBackend::shutdown() {
     m_debugGpuFrameTimingMsHistory.fill(0.0f);
     m_debugGpuFrameTimingMsHistoryWrite = 0;
     m_debugGpuFrameTimingMsHistoryCount = 0;
+    m_debugPresentedFrameTimingMsHistory.fill(0.0f);
+    m_debugPresentedFrameTimingMsHistoryWrite = 0;
+    m_debugPresentedFrameTimingMsHistoryCount = 0;
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;
@@ -1761,6 +1782,8 @@ void RendererBackend::shutdown() {
     m_nextDisplayTimingPresentId = 1;
     m_lastSubmittedDisplayTimingPresentId = 0;
     m_lastPresentedDisplayTimingPresentId = 0;
+    m_lastProcessedDisplayTimingPresentId = 0;
+    m_lastDisplayTimingActualPresentTimeNs = 0;
     m_getRefreshCycleDurationGoogle = nullptr;
     m_getPastPresentationTimingGoogle = nullptr;
     m_currentFrame = 0;
