@@ -13,7 +13,7 @@ struct GLFWwindow;
 // App subsystem
 // Responsible for: coordinating startup, per-frame update flow, and shutdown.
 // Should NOT do: contain gameplay rules, low-level rendering internals, or thread management.
-namespace app {
+namespace voxelsprout::app {
 
 class App {
 public:
@@ -71,7 +71,7 @@ private:
         int worldX,
         int worldY,
         int worldZ,
-        const world::Chunk*& outChunk,
+        const voxelsprout::world::Chunk*& outChunk,
         int& outLocalX,
         int& outLocalY,
         int& outLocalZ
@@ -116,13 +116,13 @@ private:
     [[nodiscard]] bool isPipeHotbarSelected() const;
     [[nodiscard]] bool isConveyorHotbarSelected() const;
     [[nodiscard]] bool isTrackHotbarSelected() const;
-    [[nodiscard]] world::Voxel selectedPlaceVoxel() const;
+    [[nodiscard]] voxelsprout::world::Voxel selectedPlaceVoxel() const;
     [[nodiscard]] bool computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const;
     [[nodiscard]] bool applyVoxelEdit(
         int targetX,
         int targetY,
         int targetZ,
-        world::Voxel voxel,
+        voxelsprout::world::Voxel voxel,
         std::vector<std::size_t>& outDirtyChunkIndices
     );
     [[nodiscard]] bool isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const;
@@ -154,7 +154,7 @@ private:
     };
 
     GLFWwindow* m_window = nullptr;
-    core::InputState m_input{};
+    voxelsprout::core::InputState m_input{};
     CameraState m_camera{};
     double m_lastMouseX = 0.0;
     double m_lastMouseY = 0.0;
@@ -180,13 +180,13 @@ private:
     bool m_worldDirty = false;
     float m_worldAutosaveElapsedSeconds = 0.0f;
     std::vector<std::size_t> m_visibleChunkIndices;
-    world::ClipmapConfig m_appliedClipmapConfig{};
+    voxelsprout::world::ClipmapConfig m_appliedClipmapConfig{};
     bool m_hasAppliedClipmapConfig = false;
 
-    sim::Simulation m_simulation;
-    world::World m_world;
-    world::ChunkClipmapIndex m_chunkClipmapIndex;
-    render::Renderer m_renderer;
+    voxelsprout::sim::Simulation m_simulation;
+    voxelsprout::world::World m_world;
+    voxelsprout::world::ChunkClipmapIndex m_chunkClipmapIndex;
+    voxelsprout::render::Renderer m_renderer;
 };
 
-} // namespace app
+} // namespace voxelsprout::app

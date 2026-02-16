@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace world {
+namespace voxelsprout::world {
 
 namespace {
 
@@ -332,4 +332,4 @@ bool World::worldToChunkLocal(
     return false;
 }
 
-} // namespace world
+} // namespace voxelsprout::world

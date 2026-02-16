@@ -19,7 +19,7 @@
 // World ChunkGrid subsystem
 // Responsible for: owning a collection of chunks that represent world space.
 // Should NOT do: pathfinding, factory simulation, or rendering API calls.
-namespace world {
+namespace voxelsprout::world {
 
 class ChunkGrid {
 public:
@@ -403,4 +403,4 @@ inline const std::vector<Chunk>& ChunkGrid::chunks() const {
     return m_chunks;
 }
 
-} // namespace world
+} // namespace voxelsprout::world

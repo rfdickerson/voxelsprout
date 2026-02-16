@@ -1,6 +1,6 @@
 #include "render/frame_graph.h"
 
-namespace render {
+namespace voxelsprout::render {
 
 void FrameGraph::reset() {
     m_passes.clear();
@@ -31,4 +31,4 @@ std::span<const std::pair<FrameGraph::PassId, FrameGraph::PassId>> FrameGraph::d
     return std::span<const std::pair<PassId, PassId>>(m_dependencies.data(), m_dependencies.size());
 }
 
-} // namespace render
+} // namespace voxelsprout::render

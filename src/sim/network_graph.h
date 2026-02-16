@@ -10,7 +10,7 @@
 // Simulation NetworkGraph subsystem
 // Responsible for: storing deterministic transport graphs used by pipes, belts, and rails.
 // Should NOT do: tick-based simulation, path search heuristics, or rendering.
-namespace sim {
+namespace voxelsprout::sim {
 
 using NodeId = std::uint32_t;
 using EdgeId = std::uint32_t;
@@ -25,16 +25,16 @@ enum class NetworkKind : std::uint8_t {
 };
 
 struct Socket {
-    core::Cell3i cell{};
-    core::Dir6 face = core::Dir6::PosY;
+    voxelsprout::core::Cell3i cell{};
+    voxelsprout::core::Dir6 face = voxelsprout::core::Dir6::PosY;
     std::uint8_t lane = 0;
 
     constexpr bool operator==(const Socket&) const = default;
 };
 
 struct EdgeSpan {
-    core::Cell3i start{};
-    core::Dir6 dir = core::Dir6::PosY;
+    voxelsprout::core::Cell3i start{};
+    voxelsprout::core::Dir6 dir = voxelsprout::core::Dir6::PosY;
     std::uint16_t lengthVoxels = 1;
 
     constexpr bool operator==(const EdgeSpan&) const = default;
@@ -44,12 +44,12 @@ inline constexpr bool isValidEdgeSpan(const EdgeSpan& span) {
     return span.lengthVoxels > 0;
 }
 
-inline constexpr core::Cell3i spanEndCell(const EdgeSpan& span) {
+inline constexpr voxelsprout::core::Cell3i spanEndCell(const EdgeSpan& span) {
     if (!isValidEdgeSpan(span)) {
         return span.start;
     }
     const std::int32_t steps = static_cast<std::int32_t>(span.lengthVoxels) - 1;
-    return span.start + (core::dirToOffset(span.dir) * steps);
+    return span.start + (voxelsprout::core::dirToOffset(span.dir) * steps);
 }
 
 struct NetworkNode {
@@ -199,4 +199,4 @@ struct RailBlockState {
     bool reserved = false;
 };
 
-} // namespace sim
+} // namespace voxelsprout::sim

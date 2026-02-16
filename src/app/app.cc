@@ -68,12 +68,12 @@ constexpr const char* kMagicaTeapotPath = "assets/magicka/teapot.vox";
 constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 
-constexpr std::array<world::VoxelType, 5> kPlaceableBlockTypes = {
-    world::VoxelType::Stone,
-    world::VoxelType::Dirt,
-    world::VoxelType::Grass,
-    world::VoxelType::Wood,
-    world::VoxelType::SolidRed
+constexpr std::array<voxelsprout::world::VoxelType, 5> kPlaceableBlockTypes = {
+    voxelsprout::world::VoxelType::Stone,
+    voxelsprout::world::VoxelType::Dirt,
+    voxelsprout::world::VoxelType::Grass,
+    voxelsprout::world::VoxelType::Wood,
+    voxelsprout::world::VoxelType::SolidRed
 };
 constexpr int kHotbarSlotBlock = 0;
 constexpr int kHotbarSlotPipe = 1;
@@ -82,7 +82,7 @@ constexpr int kHotbarSlotTrack = 3;
 constexpr int kHotbarSlotCount = 4;
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
-constexpr math::Vector3 kDefaultPipeTint{0.95f, 0.95f, 0.95f};
+constexpr voxelsprout::math::Vector3 kDefaultPipeTint{0.95f, 0.95f, 0.95f};
 constexpr float kConveyorCollisionRadius = 0.49f;
 constexpr float kConveyorAlongHalfExtent = 0.5f;
 constexpr float kConveyorCrossAxisScale = 2.0f;
@@ -112,11 +112,11 @@ Aabb3f makePlayerCollisionAabb(float eyeX, float eyeY, float eyeZ) {
     return bounds;
 }
 
-Aabb3f makeConveyorBeltAabb(const sim::Belt& belt) {
+Aabb3f makeConveyorBeltAabb(const voxelsprout::sim::Belt& belt) {
     const float centerX = static_cast<float>(belt.x) + 0.5f;
     const float centerY = static_cast<float>(belt.y) + 0.5f;
     const float centerZ = static_cast<float>(belt.z) + 0.5f;
-    const bool alongX = belt.direction == sim::BeltDirection::East || belt.direction == sim::BeltDirection::West;
+    const bool alongX = belt.direction == voxelsprout::sim::BeltDirection::East || belt.direction == voxelsprout::sim::BeltDirection::West;
     const float halfHeight = kConveyorVerticalScale * kConveyorCollisionRadius;
     const float halfCrossAxis = kConveyorCrossAxisScale * kConveyorCollisionRadius;
     const float halfExtentX = alongX ? kConveyorAlongHalfExtent : halfCrossAxis;
@@ -142,52 +142,52 @@ bool aabbOverlaps(const Aabb3f& lhs, const Aabb3f& rhs) {
         lhs.minZ < (rhs.maxZ - kCollisionEpsilon);
 }
 
-const char* placeableBlockLabel(world::VoxelType type) {
+const char* placeableBlockLabel(voxelsprout::world::VoxelType type) {
     switch (type) {
-    case world::VoxelType::Solid:
+    case voxelsprout::world::VoxelType::Solid:
         return "stone";
-    case world::VoxelType::Dirt:
+    case voxelsprout::world::VoxelType::Dirt:
         return "dirt";
-    case world::VoxelType::Grass:
+    case voxelsprout::world::VoxelType::Grass:
         return "grass";
-    case world::VoxelType::Wood:
+    case voxelsprout::world::VoxelType::Wood:
         return "wood";
-    case world::VoxelType::SolidRed:
+    case voxelsprout::world::VoxelType::SolidRed:
         return "red";
-    case world::VoxelType::Empty:
+    case voxelsprout::world::VoxelType::Empty:
     default:
         return "empty";
     }
 }
 
 struct FrustumPlane {
-    math::Vector3 normal{};
+    voxelsprout::math::Vector3 normal{};
     float d = 0.0f;
 };
 
 struct CameraFrustum {
     std::array<FrustumPlane, 6> planes{};
-    core::CellAabb broadPhaseBounds{};
+    voxelsprout::core::CellAabb broadPhaseBounds{};
     bool valid = false;
 };
 
-FrustumPlane makePlaneFromPointNormal(const math::Vector3& point, const math::Vector3& normal) {
-    const math::Vector3 normalized = math::normalize(normal);
+FrustumPlane makePlaneFromPointNormal(const voxelsprout::math::Vector3& point, const voxelsprout::math::Vector3& normal) {
+    const voxelsprout::math::Vector3 normalized = voxelsprout::math::normalize(normal);
     FrustumPlane plane{};
     plane.normal = normalized;
-    plane.d = -math::dot(normalized, point);
+    plane.d = -voxelsprout::math::dot(normalized, point);
     return plane;
 }
 
-void orientPlaneTowardForward(FrustumPlane& plane, const math::Vector3& forward) {
-    if (math::dot(plane.normal, forward) < 0.0f) {
+void orientPlaneTowardForward(FrustumPlane& plane, const voxelsprout::math::Vector3& forward) {
+    if (voxelsprout::math::dot(plane.normal, forward) < 0.0f) {
         plane.normal = -plane.normal;
         plane.d = -plane.d;
     }
 }
 
 CameraFrustum buildCameraFrustum(
-    const math::Vector3& eye,
+    const voxelsprout::math::Vector3& eye,
     float yawDegrees,
     float pitchDegrees,
     float fovDegrees,
@@ -196,48 +196,48 @@ CameraFrustum buildCameraFrustum(
     CameraFrustum frustum{};
     const float clampedAspect = std::max(aspectRatio, 0.1f);
     const float clampedFovDegrees = std::clamp(fovDegrees, 20.0f, 120.0f);
-    const float yawRadians = math::radians(yawDegrees);
-    const float pitchRadians = math::radians(pitchDegrees);
+    const float yawRadians = voxelsprout::math::radians(yawDegrees);
+    const float pitchRadians = voxelsprout::math::radians(pitchDegrees);
     const float cosPitch = std::cos(pitchRadians);
-    math::Vector3 forward{
+    voxelsprout::math::Vector3 forward{
         std::cos(yawRadians) * cosPitch,
         std::sin(pitchRadians),
         std::sin(yawRadians) * cosPitch
     };
-    forward = math::normalize(forward);
-    if (math::lengthSquared(forward) <= 0.0001f) {
+    forward = voxelsprout::math::normalize(forward);
+    if (voxelsprout::math::lengthSquared(forward) <= 0.0001f) {
         return frustum;
     }
 
-    const math::Vector3 worldUp{0.0f, 1.0f, 0.0f};
-    math::Vector3 right = math::normalize(math::cross(forward, worldUp));
-    if (math::lengthSquared(right) <= 0.0001f) {
-        right = math::Vector3{1.0f, 0.0f, 0.0f};
+    const voxelsprout::math::Vector3 worldUp{0.0f, 1.0f, 0.0f};
+    voxelsprout::math::Vector3 right = voxelsprout::math::normalize(voxelsprout::math::cross(forward, worldUp));
+    if (voxelsprout::math::lengthSquared(right) <= 0.0001f) {
+        right = voxelsprout::math::Vector3{1.0f, 0.0f, 0.0f};
     }
-    math::Vector3 up = math::normalize(math::cross(right, forward));
-    if (math::lengthSquared(up) <= 0.0001f) {
+    voxelsprout::math::Vector3 up = voxelsprout::math::normalize(voxelsprout::math::cross(right, forward));
+    if (voxelsprout::math::lengthSquared(up) <= 0.0001f) {
         up = worldUp;
     }
 
-    const float halfFovY = math::radians(clampedFovDegrees) * 0.5f;
+    const float halfFovY = voxelsprout::math::radians(clampedFovDegrees) * 0.5f;
     const float tanHalfY = std::tan(halfFovY);
     const float tanHalfX = tanHalfY * clampedAspect;
     const float nearDistance = kRenderCullNearPlane;
     const float farDistance = kRenderCullFarPlane;
 
-    const math::Vector3 nearCenter = eye + (forward * nearDistance);
-    const math::Vector3 farCenter = eye + (forward * farDistance);
+    const voxelsprout::math::Vector3 nearCenter = eye + (forward * nearDistance);
+    const voxelsprout::math::Vector3 farCenter = eye + (forward * farDistance);
     const float nearHalfHeight = nearDistance * tanHalfY;
     const float nearHalfWidth = nearDistance * tanHalfX;
     const float farHalfHeight = farDistance * tanHalfY;
     const float farHalfWidth = farDistance * tanHalfX;
 
-    const math::Vector3 nearUp = up * nearHalfHeight;
-    const math::Vector3 nearRight = right * nearHalfWidth;
-    const math::Vector3 farUp = up * farHalfHeight;
-    const math::Vector3 farRight = right * farHalfWidth;
+    const voxelsprout::math::Vector3 nearUp = up * nearHalfHeight;
+    const voxelsprout::math::Vector3 nearRight = right * nearHalfWidth;
+    const voxelsprout::math::Vector3 farUp = up * farHalfHeight;
+    const voxelsprout::math::Vector3 farRight = right * farHalfWidth;
 
-    const std::array<math::Vector3, 8> corners = {
+    const std::array<voxelsprout::math::Vector3, 8> corners = {
         nearCenter + nearUp - nearRight,
         nearCenter + nearUp + nearRight,
         nearCenter - nearUp - nearRight,
@@ -254,7 +254,7 @@ CameraFrustum buildCameraFrustum(
     float maxX = corners[0].x;
     float maxY = corners[0].y;
     float maxZ = corners[0].z;
-    for (const math::Vector3& corner : corners) {
+    for (const voxelsprout::math::Vector3& corner : corners) {
         minX = std::min(minX, corner.x);
         minY = std::min(minY, corner.y);
         minZ = std::min(minZ, corner.z);
@@ -263,31 +263,31 @@ CameraFrustum buildCameraFrustum(
         maxZ = std::max(maxZ, corner.z);
     }
 
-    core::CellAabb broadPhaseBounds{};
+    voxelsprout::core::CellAabb broadPhaseBounds{};
     broadPhaseBounds.valid = true;
-    broadPhaseBounds.minInclusive = core::Cell3i{
+    broadPhaseBounds.minInclusive = voxelsprout::core::Cell3i{
         static_cast<int>(std::floor(minX - kRenderFrustumBoundsPadVoxels)),
         static_cast<int>(std::floor(minY - kRenderFrustumBoundsPadVoxels)),
         static_cast<int>(std::floor(minZ - kRenderFrustumBoundsPadVoxels))
     };
-    broadPhaseBounds.maxExclusive = core::Cell3i{
+    broadPhaseBounds.maxExclusive = voxelsprout::core::Cell3i{
         static_cast<int>(std::floor(maxX + kRenderFrustumBoundsPadVoxels)) + 1,
         static_cast<int>(std::floor(maxY + kRenderFrustumBoundsPadVoxels)) + 1,
         static_cast<int>(std::floor(maxZ + kRenderFrustumBoundsPadVoxels)) + 1
     };
 
-    const math::Vector3 leftDir = math::normalize(forward - (right * tanHalfX));
-    const math::Vector3 rightDir = math::normalize(forward + (right * tanHalfX));
-    const math::Vector3 topDir = math::normalize(forward + (up * tanHalfY));
-    const math::Vector3 bottomDir = math::normalize(forward - (up * tanHalfY));
+    const voxelsprout::math::Vector3 leftDir = voxelsprout::math::normalize(forward - (right * tanHalfX));
+    const voxelsprout::math::Vector3 rightDir = voxelsprout::math::normalize(forward + (right * tanHalfX));
+    const voxelsprout::math::Vector3 topDir = voxelsprout::math::normalize(forward + (up * tanHalfY));
+    const voxelsprout::math::Vector3 bottomDir = voxelsprout::math::normalize(forward - (up * tanHalfY));
 
     std::array<FrustumPlane, 6> planes{};
     planes[0] = makePlaneFromPointNormal(nearCenter, forward);
     planes[1] = makePlaneFromPointNormal(farCenter, -forward);
-    planes[2] = makePlaneFromPointNormal(eye, math::cross(up, leftDir));
-    planes[3] = makePlaneFromPointNormal(eye, math::cross(rightDir, up));
-    planes[4] = makePlaneFromPointNormal(eye, math::cross(topDir, right));
-    planes[5] = makePlaneFromPointNormal(eye, math::cross(right, bottomDir));
+    planes[2] = makePlaneFromPointNormal(eye, voxelsprout::math::cross(up, leftDir));
+    planes[3] = makePlaneFromPointNormal(eye, voxelsprout::math::cross(rightDir, up));
+    planes[4] = makePlaneFromPointNormal(eye, voxelsprout::math::cross(topDir, right));
+    planes[5] = makePlaneFromPointNormal(eye, voxelsprout::math::cross(right, bottomDir));
     orientPlaneTowardForward(planes[2], forward);
     orientPlaneTowardForward(planes[3], forward);
     orientPlaneTowardForward(planes[4], forward);
@@ -300,16 +300,16 @@ CameraFrustum buildCameraFrustum(
 }
 
 bool chunkIntersectsFrustum(
-    const world::Chunk& chunk,
+    const voxelsprout::world::Chunk& chunk,
     const std::array<FrustumPlane, 6>& planes,
     float planeSlack
 ) {
-    const float minX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
-    const float minY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
-    const float minZ = static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ);
-    const float maxX = minX + static_cast<float>(world::Chunk::kSizeX);
-    const float maxY = minY + static_cast<float>(world::Chunk::kSizeY);
-    const float maxZ = minZ + static_cast<float>(world::Chunk::kSizeZ);
+    const float minX = static_cast<float>(chunk.chunkX() * voxelsprout::world::Chunk::kSizeX);
+    const float minY = static_cast<float>(chunk.chunkY() * voxelsprout::world::Chunk::kSizeY);
+    const float minZ = static_cast<float>(chunk.chunkZ() * voxelsprout::world::Chunk::kSizeZ);
+    const float maxX = minX + static_cast<float>(voxelsprout::world::Chunk::kSizeX);
+    const float maxY = minY + static_cast<float>(voxelsprout::world::Chunk::kSizeY);
+    const float maxZ = minZ + static_cast<float>(voxelsprout::world::Chunk::kSizeZ);
 
     for (const FrustumPlane& plane : planes) {
         const float positiveX = (plane.normal.x >= 0.0f) ? maxX : minX;
@@ -353,48 +353,48 @@ float applyStickDeadzone(float value, float deadzone) {
     return std::copysign(normalized, value);
 }
 
-core::Dir6 axisToDir6(const math::Vector3& axis) {
-    const math::Vector3 normalized = math::normalize(axis);
+voxelsprout::core::Dir6 axisToDir6(const voxelsprout::math::Vector3& axis) {
+    const voxelsprout::math::Vector3 normalized = voxelsprout::math::normalize(axis);
     const float absX = std::abs(normalized.x);
     const float absY = std::abs(normalized.y);
     const float absZ = std::abs(normalized.z);
     if (absX >= absY && absX >= absZ) {
-        return normalized.x >= 0.0f ? core::Dir6::PosX : core::Dir6::NegX;
+        return normalized.x >= 0.0f ? voxelsprout::core::Dir6::PosX : voxelsprout::core::Dir6::NegX;
     }
     if (absY >= absX && absY >= absZ) {
-        return normalized.y >= 0.0f ? core::Dir6::PosY : core::Dir6::NegY;
+        return normalized.y >= 0.0f ? voxelsprout::core::Dir6::PosY : voxelsprout::core::Dir6::NegY;
     }
-    return normalized.z >= 0.0f ? core::Dir6::PosZ : core::Dir6::NegZ;
+    return normalized.z >= 0.0f ? voxelsprout::core::Dir6::PosZ : voxelsprout::core::Dir6::NegZ;
 }
 
-core::Dir6 faceNormalToDir6(int nx, int ny, int nz) {
+voxelsprout::core::Dir6 faceNormalToDir6(int nx, int ny, int nz) {
     if (nx > 0) {
-        return core::Dir6::PosX;
+        return voxelsprout::core::Dir6::PosX;
     }
     if (nx < 0) {
-        return core::Dir6::NegX;
+        return voxelsprout::core::Dir6::NegX;
     }
     if (ny > 0) {
-        return core::Dir6::PosY;
+        return voxelsprout::core::Dir6::PosY;
     }
     if (ny < 0) {
-        return core::Dir6::NegY;
+        return voxelsprout::core::Dir6::NegY;
     }
     if (nz > 0) {
-        return core::Dir6::PosZ;
+        return voxelsprout::core::Dir6::PosZ;
     }
-    return core::Dir6::NegZ;
+    return voxelsprout::core::Dir6::NegZ;
 }
 
-void dir6ToAxisInts(core::Dir6 dir, int& outX, int& outY, int& outZ) {
-    const core::Cell3i offset = core::dirToOffset(dir);
+void dir6ToAxisInts(voxelsprout::core::Dir6 dir, int& outX, int& outY, int& outZ) {
+    const voxelsprout::core::Cell3i offset = voxelsprout::core::dirToOffset(dir);
     outX = static_cast<int>(offset.x);
     outY = static_cast<int>(offset.y);
     outZ = static_cast<int>(offset.z);
 }
 
-bool dirSharesAxis(core::Dir6 lhs, core::Dir6 rhs) {
-    return lhs == rhs || core::areOpposite(lhs, rhs);
+bool dirSharesAxis(voxelsprout::core::Dir6 lhs, voxelsprout::core::Dir6 rhs) {
+    return lhs == rhs || voxelsprout::core::areOpposite(lhs, rhs);
 }
 
 float wrapDegreesSigned(float degrees) {
@@ -407,88 +407,88 @@ float wrapDegreesSigned(float degrees) {
     return wrapped;
 }
 
-core::Dir6 horizontalDirFromYaw(float yawDegrees) {
-    const float yawRadians = math::radians(yawDegrees);
+voxelsprout::core::Dir6 horizontalDirFromYaw(float yawDegrees) {
+    const float yawRadians = voxelsprout::math::radians(yawDegrees);
     const float x = std::cos(yawRadians);
     const float z = std::sin(yawRadians);
     if (std::abs(x) >= std::abs(z)) {
-        return x >= 0.0f ? core::Dir6::PosX : core::Dir6::NegX;
+        return x >= 0.0f ? voxelsprout::core::Dir6::PosX : voxelsprout::core::Dir6::NegX;
     }
-    return z >= 0.0f ? core::Dir6::PosZ : core::Dir6::NegZ;
+    return z >= 0.0f ? voxelsprout::core::Dir6::PosZ : voxelsprout::core::Dir6::NegZ;
 }
 
-sim::BeltDirection dir6ToBeltDirection(core::Dir6 dir) {
+voxelsprout::sim::BeltDirection dir6ToBeltDirection(voxelsprout::core::Dir6 dir) {
     switch (dir) {
-    case core::Dir6::PosX:
-        return sim::BeltDirection::East;
-    case core::Dir6::NegX:
-        return sim::BeltDirection::West;
-    case core::Dir6::PosZ:
-        return sim::BeltDirection::South;
-    case core::Dir6::NegZ:
+    case voxelsprout::core::Dir6::PosX:
+        return voxelsprout::sim::BeltDirection::East;
+    case voxelsprout::core::Dir6::NegX:
+        return voxelsprout::sim::BeltDirection::West;
+    case voxelsprout::core::Dir6::PosZ:
+        return voxelsprout::sim::BeltDirection::South;
+    case voxelsprout::core::Dir6::NegZ:
     default:
-        return sim::BeltDirection::North;
+        return voxelsprout::sim::BeltDirection::North;
     }
 }
 
-core::Dir6 beltDirectionToDir6(sim::BeltDirection direction) {
+voxelsprout::core::Dir6 beltDirectionToDir6(voxelsprout::sim::BeltDirection direction) {
     switch (direction) {
-    case sim::BeltDirection::East:
-        return core::Dir6::PosX;
-    case sim::BeltDirection::West:
-        return core::Dir6::NegX;
-    case sim::BeltDirection::South:
-        return core::Dir6::PosZ;
-    case sim::BeltDirection::North:
+    case voxelsprout::sim::BeltDirection::East:
+        return voxelsprout::core::Dir6::PosX;
+    case voxelsprout::sim::BeltDirection::West:
+        return voxelsprout::core::Dir6::NegX;
+    case voxelsprout::sim::BeltDirection::South:
+        return voxelsprout::core::Dir6::PosZ;
+    case voxelsprout::sim::BeltDirection::North:
     default:
-        return core::Dir6::NegZ;
+        return voxelsprout::core::Dir6::NegZ;
     }
 }
 
-sim::TrackDirection dir6ToTrackDirection(core::Dir6 dir) {
+voxelsprout::sim::TrackDirection dir6ToTrackDirection(voxelsprout::core::Dir6 dir) {
     switch (dir) {
-    case core::Dir6::PosX:
-        return sim::TrackDirection::East;
-    case core::Dir6::NegX:
-        return sim::TrackDirection::West;
-    case core::Dir6::PosZ:
-        return sim::TrackDirection::South;
-    case core::Dir6::NegZ:
+    case voxelsprout::core::Dir6::PosX:
+        return voxelsprout::sim::TrackDirection::East;
+    case voxelsprout::core::Dir6::NegX:
+        return voxelsprout::sim::TrackDirection::West;
+    case voxelsprout::core::Dir6::PosZ:
+        return voxelsprout::sim::TrackDirection::South;
+    case voxelsprout::core::Dir6::NegZ:
     default:
-        return sim::TrackDirection::North;
+        return voxelsprout::sim::TrackDirection::North;
     }
 }
 
-core::Dir6 trackDirectionToDir6(sim::TrackDirection direction) {
+voxelsprout::core::Dir6 trackDirectionToDir6(voxelsprout::sim::TrackDirection direction) {
     switch (direction) {
-    case sim::TrackDirection::East:
-        return core::Dir6::PosX;
-    case sim::TrackDirection::West:
-        return core::Dir6::NegX;
-    case sim::TrackDirection::South:
-        return core::Dir6::PosZ;
-    case sim::TrackDirection::North:
+    case voxelsprout::sim::TrackDirection::East:
+        return voxelsprout::core::Dir6::PosX;
+    case voxelsprout::sim::TrackDirection::West:
+        return voxelsprout::core::Dir6::NegX;
+    case voxelsprout::sim::TrackDirection::South:
+        return voxelsprout::core::Dir6::PosZ;
+    case voxelsprout::sim::TrackDirection::North:
     default:
-        return core::Dir6::NegZ;
+        return voxelsprout::core::Dir6::NegZ;
     }
 }
 
-core::Dir6 firstDirFromMask(std::uint8_t mask) {
-    for (const core::Dir6 dir : core::kAllDir6) {
-        if ((mask & core::dirBit(dir)) != 0u) {
+voxelsprout::core::Dir6 firstDirFromMask(std::uint8_t mask) {
+    for (const voxelsprout::core::Dir6 dir : voxelsprout::core::kAllDir6) {
+        if ((mask & voxelsprout::core::dirBit(dir)) != 0u) {
             return dir;
         }
     }
-    return core::Dir6::PosY;
+    return voxelsprout::core::Dir6::PosY;
 }
 
-core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, core::Dir6 preferredAxis) {
-    for (const core::Dir6 dir : core::kAllDir6) {
-        if ((mask & core::dirBit(dir)) == 0u) {
+voxelsprout::core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, voxelsprout::core::Dir6 preferredAxis) {
+    for (const voxelsprout::core::Dir6 dir : voxelsprout::core::kAllDir6) {
+        if ((mask & voxelsprout::core::dirBit(dir)) == 0u) {
             continue;
         }
-        const core::Dir6 opposite = core::oppositeDir(dir);
-        if ((mask & core::dirBit(opposite)) == 0u) {
+        const voxelsprout::core::Dir6 opposite = voxelsprout::core::oppositeDir(dir);
+        if ((mask & voxelsprout::core::dirBit(opposite)) == 0u) {
             continue;
         }
         if (dirSharesAxis(preferredAxis, dir)) {
@@ -501,7 +501,7 @@ core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, core::Dir6 preferredAx
 
 } // namespace
 
-namespace app {
+namespace voxelsprout::app {
 
 bool App::init() {
     using Clock = std::chrono::steady_clock;
@@ -536,7 +536,7 @@ bool App::init() {
 
     const auto worldLoadStart = Clock::now();
     const std::filesystem::path worldPath{kWorldFilePath};
-    world::World::LoadResult worldLoadResult{};
+    voxelsprout::world::World::LoadResult worldLoadResult{};
     if (m_world.loadOrInitialize(worldPath, &worldLoadResult)) {
         const auto worldLoadMs = elapsedMs(worldLoadStart);
         VOX_LOGI("app") << "loaded world from " << std::filesystem::absolute(worldPath).string()
@@ -548,12 +548,12 @@ bool App::init() {
     }
 
     const auto magicaStampStart = Clock::now();
-    constexpr std::array<world::World::MagicaStampSpec, 3> kMagicaLoadSpecs = {
-        world::World::MagicaStampSpec{kMagicaCastlePath, 0.0f, 0.0f, 0.0f, 1.0f},
-        world::World::MagicaStampSpec{kMagicaTeapotPath, 64.0f, 0.0f, 0.0f, 0.36f},
-        world::World::MagicaStampSpec{kMagicaMonu2Path, -72.0f, 0.0f, 16.0f, 0.25f},
+    constexpr std::array<voxelsprout::world::World::MagicaStampSpec, 3> kMagicaLoadSpecs = {
+        voxelsprout::world::World::MagicaStampSpec{kMagicaCastlePath, 0.0f, 0.0f, 0.0f, 1.0f},
+        voxelsprout::world::World::MagicaStampSpec{kMagicaTeapotPath, 64.0f, 0.0f, 0.0f, 0.36f},
+        voxelsprout::world::World::MagicaStampSpec{kMagicaMonu2Path, -72.0f, 0.0f, 16.0f, 0.25f},
     };
-    const world::World::MagicaStampResult stampResult = m_world.stampMagicaResources(kMagicaLoadSpecs);
+    const voxelsprout::world::World::MagicaStampResult stampResult = m_world.stampMagicaResources(kMagicaLoadSpecs);
     VOX_LOGI("app") << "stamped " << stampResult.stampedResourceCount << "/" << kMagicaLoadSpecs.size()
                     << " magica resources into world (voxels=" << stampResult.stampedVoxelCount
                     << ", clipped=" << stampResult.clippedVoxelCount
@@ -722,8 +722,8 @@ void App::update(float dt, float simulationAlpha) {
         // - fixed latitude + declination
         // - hour angle advances through a full day
         // - yields low sun altitude and modest azimuth drift (SE -> S -> SW)
-        const float latitudeRadians = math::radians(kDayCycleLatitudeDegrees);
-        const float declinationRadians = math::radians(kDayCycleWinterDeclinationDegrees);
+        const float latitudeRadians = voxelsprout::math::radians(kDayCycleLatitudeDegrees);
+        const float declinationRadians = voxelsprout::math::radians(kDayCycleWinterDeclinationDegrees);
         const float hourAngleRadians = ((m_dayCyclePhase * 360.0f) - 180.0f) * (kTwoPi / 360.0f);
 
         const float sinLat = std::sin(latitudeRadians);
@@ -739,8 +739,8 @@ void App::update(float dt, float simulationAlpha) {
         const float sunNorth = (cosLat * sinDec) - (sinLat * cosDec * cosHour);
         const float sunUp = (sinLat * sinDec) + (cosLat * cosDec * cosHour);
 
-        const float sunPitchDegrees = math::degrees(std::asin(std::clamp(sunUp, -1.0f, 1.0f)));
-        float sunAzimuthDegrees = math::degrees(std::atan2(sunEast, sunNorth));
+        const float sunPitchDegrees = voxelsprout::math::degrees(std::asin(std::clamp(sunUp, -1.0f, 1.0f)));
+        float sunAzimuthDegrees = voxelsprout::math::degrees(std::atan2(sunEast, sunNorth));
         if (sunAzimuthDegrees < 0.0f) {
             sunAzimuthDegrees += 360.0f;
         }
@@ -751,7 +751,7 @@ void App::update(float dt, float simulationAlpha) {
         m_renderer.setSunAngles(sunYawDegrees, sunPitchDegrees);
     }
 
-    render::VoxelPreview preview{};
+    voxelsprout::render::VoxelPreview preview{};
     const bool pipeSelected = isPipeHotbarSelected();
     const bool conveyorSelected = isConveyorHotbarSelected();
     const bool trackSelected = isTrackHotbarSelected();
@@ -774,46 +774,46 @@ void App::update(float dt, float simulationAlpha) {
                 if (showRemovePreview) {
                     if (pipeSelected && pipeRaycast.hitPipe) {
                         preview.visible = true;
-                        preview.mode = render::VoxelPreview::Mode::Remove;
+                        preview.mode = voxelsprout::render::VoxelPreview::Mode::Remove;
                         preview.x = pipeRaycast.x;
                         preview.y = pipeRaycast.y;
                         preview.z = pipeRaycast.z;
                         preview.brushSize = 1;
                         std::size_t pipeIndex = 0;
                         if (isPipeAtWorld(pipeRaycast.x, pipeRaycast.y, pipeRaycast.z, &pipeIndex)) {
-                            const sim::Pipe& pipe = m_simulation.pipes()[pipeIndex];
+                            const voxelsprout::sim::Pipe& pipe = m_simulation.pipes()[pipeIndex];
                             preview.pipeAxisX = pipe.axis.x;
                             preview.pipeAxisY = pipe.axis.y;
                             preview.pipeAxisZ = pipe.axis.z;
                         }
                     } else if (conveyorSelected && pipeRaycast.hitBelt) {
                         preview.visible = true;
-                        preview.mode = render::VoxelPreview::Mode::Remove;
+                        preview.mode = voxelsprout::render::VoxelPreview::Mode::Remove;
                         preview.x = pipeRaycast.x;
                         preview.y = pipeRaycast.y;
                         preview.z = pipeRaycast.z;
                         preview.brushSize = 1;
                         std::size_t beltIndex = 0;
                         if (isBeltAtWorld(pipeRaycast.x, pipeRaycast.y, pipeRaycast.z, &beltIndex)) {
-                            const sim::Belt& belt = m_simulation.belts()[beltIndex];
-                            const core::Dir6 beltDir = beltDirectionToDir6(belt.direction);
-                            const core::Cell3i axis = core::dirToOffset(beltDir);
+                            const voxelsprout::sim::Belt& belt = m_simulation.belts()[beltIndex];
+                            const voxelsprout::core::Dir6 beltDir = beltDirectionToDir6(belt.direction);
+                            const voxelsprout::core::Cell3i axis = voxelsprout::core::dirToOffset(beltDir);
                             preview.pipeAxisX = static_cast<float>(axis.x);
                             preview.pipeAxisY = static_cast<float>(axis.y);
                             preview.pipeAxisZ = static_cast<float>(axis.z);
                         }
                     } else if (trackSelected && pipeRaycast.hitTrack) {
                         preview.visible = true;
-                        preview.mode = render::VoxelPreview::Mode::Remove;
+                        preview.mode = voxelsprout::render::VoxelPreview::Mode::Remove;
                         preview.x = pipeRaycast.x;
                         preview.y = pipeRaycast.y;
                         preview.z = pipeRaycast.z;
                         preview.brushSize = 1;
                         std::size_t trackIndex = 0;
                         if (isTrackAtWorld(pipeRaycast.x, pipeRaycast.y, pipeRaycast.z, &trackIndex)) {
-                            const sim::Track& track = m_simulation.tracks()[trackIndex];
-                            const core::Dir6 trackDir = trackDirectionToDir6(track.direction);
-                            const core::Cell3i axis = core::dirToOffset(trackDir);
+                            const voxelsprout::sim::Track& track = m_simulation.tracks()[trackIndex];
+                            const voxelsprout::core::Dir6 trackDir = trackDirectionToDir6(track.direction);
+                            const voxelsprout::core::Cell3i axis = voxelsprout::core::dirToOffset(trackDir);
                             preview.pipeAxisX = static_cast<float>(axis.x);
                             preview.pipeAxisY = static_cast<float>(axis.y);
                             preview.pipeAxisZ = static_cast<float>(axis.z);
@@ -860,7 +860,7 @@ void App::update(float dt, float simulationAlpha) {
                     }
                     if (hasPlacement) {
                         preview.visible = true;
-                        preview.mode = render::VoxelPreview::Mode::Add;
+                        preview.mode = voxelsprout::render::VoxelPreview::Mode::Add;
                         preview.x = targetX;
                         preview.y = targetY;
                         preview.z = targetZ;
@@ -890,7 +890,7 @@ void App::update(float dt, float simulationAlpha) {
 
             if (showRemovePreview) {
                 preview.visible = true;
-                preview.mode = render::VoxelPreview::Mode::Remove;
+                preview.mode = voxelsprout::render::VoxelPreview::Mode::Remove;
                 preview.x = raycast.solidX;
                 preview.y = raycast.solidY;
                 preview.z = raycast.solidZ;
@@ -902,7 +902,7 @@ void App::update(float dt, float simulationAlpha) {
                 if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
                     if (isWorldVoxelInBounds(targetX, targetY, targetZ)) {
                         preview.visible = true;
-                        preview.mode = render::VoxelPreview::Mode::Add;
+                        preview.mode = voxelsprout::render::VoxelPreview::Mode::Add;
                         preview.x = targetX;
                         preview.y = targetY;
                         preview.z = targetZ;
@@ -913,7 +913,7 @@ void App::update(float dt, float simulationAlpha) {
         }
     }
 
-    const render::CameraPose cameraPose{
+    const voxelsprout::render::CameraPose cameraPose{
         m_camera.x,
         m_camera.y,
         m_camera.z,
@@ -922,7 +922,7 @@ void App::update(float dt, float simulationAlpha) {
         m_camera.fovDegrees
     };
 
-    const world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
+    const voxelsprout::world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
     if (!m_hasAppliedClipmapConfig ||
         requestedClipmapConfig.levelCount != m_appliedClipmapConfig.levelCount ||
         requestedClipmapConfig.gridResolution != m_appliedClipmapConfig.gridResolution ||
@@ -941,7 +941,7 @@ void App::update(float dt, float simulationAlpha) {
     }
 
     m_visibleChunkIndices.clear();
-    world::SpatialQueryStats spatialQueryStats{};
+    voxelsprout::world::SpatialQueryStats spatialQueryStats{};
     bool spatialQueriesUsed = false;
     if (m_renderer.useSpatialPartitioningQueries()) {
         int framebufferWidth = 0;
@@ -952,7 +952,7 @@ void App::update(float dt, float simulationAlpha) {
                 ? static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight)
                 : kRenderAspectFallback;
         const CameraFrustum cameraFrustum = buildCameraFrustum(
-            math::Vector3{m_camera.x, m_camera.y, m_camera.z},
+            voxelsprout::math::Vector3{m_camera.x, m_camera.y, m_camera.z},
             m_camera.yawDegrees,
             m_camera.pitchDegrees,
             m_camera.fovDegrees,
@@ -964,7 +964,7 @@ void App::update(float dt, float simulationAlpha) {
                 m_chunkClipmapIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
             spatialQueriesUsed = true;
             m_visibleChunkIndices.reserve(candidateChunkIndices.size());
-            const std::vector<world::Chunk>& chunks = m_world.chunkGrid().chunks();
+            const std::vector<voxelsprout::world::Chunk>& chunks = m_world.chunkGrid().chunks();
             for (std::size_t chunkIndex : candidateChunkIndices) {
                 if (chunkIndex >= chunks.size()) {
                     continue;
@@ -1205,10 +1205,10 @@ void App::updateCamera(float dt) {
     m_camera.pitchDegrees += m_input.gamepadLookY * kGamepadLookDegreesPerSecond * dt;
     m_camera.pitchDegrees = std::clamp(m_camera.pitchDegrees, kPitchMinDegrees, kPitchMaxDegrees);
 
-    const float yawRadians = math::radians(m_camera.yawDegrees);
-    const math::Vector3 forward{std::cos(yawRadians), 0.0f, std::sin(yawRadians)};
-    const math::Vector3 right{-forward.z, 0.0f, forward.x};
-    math::Vector3 moveDirection{};
+    const float yawRadians = voxelsprout::math::radians(m_camera.yawDegrees);
+    const voxelsprout::math::Vector3 forward{std::cos(yawRadians), 0.0f, std::sin(yawRadians)};
+    const voxelsprout::math::Vector3 right{-forward.z, 0.0f, forward.x};
+    voxelsprout::math::Vector3 moveDirection{};
 
     float moveForwardInput = m_input.gamepadMoveForward;
     float moveRightInput = m_input.gamepadMoveRight;
@@ -1230,13 +1230,13 @@ void App::updateCamera(float dt) {
     moveDirection += forward * moveForwardInput;
     moveDirection += right * moveRightInput;
 
-    const float moveLengthSq = math::lengthSquared(moveDirection);
+    const float moveLengthSq = voxelsprout::math::lengthSquared(moveDirection);
     const float moveLength = std::sqrt(moveLengthSq);
     float targetVelocityX = 0.0f;
     float targetVelocityZ = 0.0f;
     if (moveLength > 0.0f) {
         moveDirection /= moveLength;
-        const math::Vector3 targetVelocity = moveDirection * kMoveMaxSpeed;
+        const voxelsprout::math::Vector3 targetVelocity = moveDirection * kMoveMaxSpeed;
         targetVelocityX = targetVelocity.x;
         targetVelocityZ = targetVelocity.z;
     }
@@ -1289,7 +1289,7 @@ bool App::isSolidWorldVoxel(int worldX, int worldY, int worldZ) const {
         return true;
     }
 
-    const world::Chunk* chunk = nullptr;
+    const voxelsprout::world::Chunk* chunk = nullptr;
     int localX = 0;
     int localY = 0;
     int localZ = 0;
@@ -1309,19 +1309,19 @@ bool App::worldToChunkLocal(
     int& outLocalY,
     int& outLocalZ
 ) const {
-    const std::vector<world::Chunk>& chunks = m_world.chunkGrid().chunks();
+    const std::vector<voxelsprout::world::Chunk>& chunks = m_world.chunkGrid().chunks();
     for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
-        const world::Chunk& chunk = chunks[chunkIndex];
-        const int chunkMinX = chunk.chunkX() * world::Chunk::kSizeX;
-        const int chunkMinY = chunk.chunkY() * world::Chunk::kSizeY;
-        const int chunkMinZ = chunk.chunkZ() * world::Chunk::kSizeZ;
+        const voxelsprout::world::Chunk& chunk = chunks[chunkIndex];
+        const int chunkMinX = chunk.chunkX() * voxelsprout::world::Chunk::kSizeX;
+        const int chunkMinY = chunk.chunkY() * voxelsprout::world::Chunk::kSizeY;
+        const int chunkMinZ = chunk.chunkZ() * voxelsprout::world::Chunk::kSizeZ;
         const int localX = worldX - chunkMinX;
         const int localY = worldY - chunkMinY;
         const int localZ = worldZ - chunkMinZ;
         const bool insideChunk =
-            localX >= 0 && localX < world::Chunk::kSizeX &&
-            localY >= 0 && localY < world::Chunk::kSizeY &&
-            localZ >= 0 && localZ < world::Chunk::kSizeZ;
+            localX >= 0 && localX < voxelsprout::world::Chunk::kSizeX &&
+            localY >= 0 && localY < voxelsprout::world::Chunk::kSizeY &&
+            localZ >= 0 && localZ < voxelsprout::world::Chunk::kSizeZ;
         if (!insideChunk) {
             continue;
         }
@@ -1340,7 +1340,7 @@ bool App::worldToChunkLocalConst(
     int worldX,
     int worldY,
     int worldZ,
-    const world::Chunk*& outChunk,
+    const voxelsprout::world::Chunk*& outChunk,
     int& outLocalX,
     int& outLocalY,
     int& outLocalZ
@@ -1402,7 +1402,7 @@ bool App::doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const {
 
 bool App::doesPlayerOverlapConveyorBelt(float eyeX, float eyeY, float eyeZ) const {
     const Aabb3f playerBounds = makePlayerCollisionAabb(eyeX, eyeY, eyeZ);
-    for (const sim::Belt& belt : m_simulation.belts()) {
+    for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
         const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
         if (aabbOverlaps(playerBounds, beltBounds)) {
             return true;
@@ -1452,7 +1452,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const sim::Belt& belt : m_simulation.belts()) {
+            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMinX = std::min(blockingMinX, beltBounds.minX);
@@ -1472,7 +1472,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const sim::Belt& belt : m_simulation.belts()) {
+            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMaxX = std::max(blockingMaxX, beltBounds.maxX);
@@ -1518,7 +1518,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const sim::Belt& belt : m_simulation.belts()) {
+            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMinZ = std::min(blockingMinZ, beltBounds.minZ);
@@ -1538,7 +1538,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const sim::Belt& belt : m_simulation.belts()) {
+            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMaxZ = std::max(blockingMaxZ, beltBounds.maxZ);
@@ -1584,7 +1584,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const sim::Belt& belt : m_simulation.belts()) {
+            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMinY = std::min(blockingMinY, beltBounds.minY);
@@ -1604,7 +1604,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const sim::Belt& belt : m_simulation.belts()) {
+            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMaxY = std::max(blockingMaxY, beltBounds.maxY);
@@ -1637,21 +1637,21 @@ App::CameraRaycastResult App::raycastFromCamera() const {
         return result;
     }
 
-    const float yawRadians = math::radians(m_camera.yawDegrees);
-    const float pitchRadians = math::radians(m_camera.pitchDegrees);
+    const float yawRadians = voxelsprout::math::radians(m_camera.yawDegrees);
+    const float pitchRadians = voxelsprout::math::radians(m_camera.pitchDegrees);
     const float cosPitch = std::cos(pitchRadians);
-    const math::Vector3 rayDirection = math::normalize(math::Vector3{
+    const voxelsprout::math::Vector3 rayDirection = voxelsprout::math::normalize(voxelsprout::math::Vector3{
         std::cos(yawRadians) * cosPitch,
         std::sin(pitchRadians),
         std::sin(yawRadians) * cosPitch
     });
-    if (math::lengthSquared(rayDirection) <= 0.0f) {
+    if (voxelsprout::math::lengthSquared(rayDirection) <= 0.0f) {
         return result;
     }
 
     // Nudge origin slightly forward so close-surface targeting does not start inside solids.
-    const math::Vector3 rayOrigin =
-        math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
+    const voxelsprout::math::Vector3 rayOrigin =
+        voxelsprout::math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
     constexpr float kRayMaxDistance = kBlockInteractMaxDistance + 1.0f;
 
     int vx = static_cast<int>(std::floor(rayOrigin.x));
@@ -1778,20 +1778,20 @@ App::InteractionRaycastResult App::raycastInteractionFromCamera(bool includePipe
         return result;
     }
 
-    const float yawRadians = math::radians(m_camera.yawDegrees);
-    const float pitchRadians = math::radians(m_camera.pitchDegrees);
+    const float yawRadians = voxelsprout::math::radians(m_camera.yawDegrees);
+    const float pitchRadians = voxelsprout::math::radians(m_camera.pitchDegrees);
     const float cosPitch = std::cos(pitchRadians);
-    const math::Vector3 rayDirection = math::normalize(math::Vector3{
+    const voxelsprout::math::Vector3 rayDirection = voxelsprout::math::normalize(voxelsprout::math::Vector3{
         std::cos(yawRadians) * cosPitch,
         std::sin(pitchRadians),
         std::sin(yawRadians) * cosPitch
     });
-    if (math::lengthSquared(rayDirection) <= 0.0f) {
+    if (voxelsprout::math::lengthSquared(rayDirection) <= 0.0f) {
         return result;
     }
 
-    const math::Vector3 rayOrigin =
-        math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
+    const voxelsprout::math::Vector3 rayOrigin =
+        voxelsprout::math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
     constexpr float kRayMaxDistance = kBlockInteractMaxDistance + 1.0f;
 
     int vx = static_cast<int>(std::floor(rayOrigin.x));
@@ -1965,16 +1965,16 @@ bool App::isTrackHotbarSelected() const {
     return m_selectedHotbarIndex == kHotbarSlotTrack;
 }
 
-world::Voxel App::selectedPlaceVoxel() const {
+voxelsprout::world::Voxel App::selectedPlaceVoxel() const {
     if (kPlaceableBlockTypes.empty()) {
-        return world::Voxel{world::VoxelType::Stone};
+        return voxelsprout::world::Voxel{voxelsprout::world::VoxelType::Stone};
     }
     const int clampedIndex = std::clamp(
         m_selectedBlockIndex,
         0,
         static_cast<int>(kPlaceableBlockTypes.size()) - 1
     );
-    return world::Voxel{kPlaceableBlockTypes[static_cast<std::size_t>(clampedIndex)]};
+    return voxelsprout::world::Voxel{kPlaceableBlockTypes[static_cast<std::size_t>(clampedIndex)]};
 }
 
 bool App::computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const {
@@ -2008,14 +2008,14 @@ bool App::computePipePlacementFromInteractionRaycast(
         return false;
     }
 
-    const core::Dir6 faceDir = faceNormalToDir6(
+    const voxelsprout::core::Dir6 faceDir = faceNormalToDir6(
         raycast.hitFaceNormalX,
         raycast.hitFaceNormalY,
         raycast.hitFaceNormalZ
     );
-    core::Dir6 selectedAxis = faceDir;
+    voxelsprout::core::Dir6 selectedAxis = faceDir;
     int extensionSign = 1;
-    core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
+    voxelsprout::core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
 
     if (raycast.hitPipe) {
         std::size_t pipeIndex = 0;
@@ -2023,13 +2023,13 @@ bool App::computePipePlacementFromInteractionRaycast(
             return false;
         }
 
-        const std::vector<sim::Pipe>& pipes = m_simulation.pipes();
+        const std::vector<voxelsprout::sim::Pipe>& pipes = m_simulation.pipes();
         if (pipeIndex >= pipes.size()) {
             return false;
         }
 
         selectedAxis = axisToDir6(pipes[pipeIndex].axis);
-        const core::Cell3i axisOffset = core::dirToOffset(selectedAxis);
+        const voxelsprout::core::Cell3i axisOffset = voxelsprout::core::dirToOffset(selectedAxis);
         const int faceNormalDotAxis =
             (raycast.hitFaceNormalX * axisOffset.x) +
             (raycast.hitFaceNormalY * axisOffset.y) +
@@ -2047,10 +2047,10 @@ bool App::computePipePlacementFromInteractionRaycast(
             }
 
             // If a chain already exists, extend from its far end instead of failing at an internal segment.
-            const core::Dir6 extensionDir =
-                extensionSign >= 0 ? selectedAxis : core::oppositeDir(selectedAxis);
+            const voxelsprout::core::Dir6 extensionDir =
+                extensionSign >= 0 ? selectedAxis : voxelsprout::core::oppositeDir(selectedAxis);
             while (true) {
-                const core::Cell3i nextCell = core::neighborCell(extensionAnchor, extensionDir);
+                const voxelsprout::core::Cell3i nextCell = voxelsprout::core::neighborCell(extensionAnchor, extensionDir);
                 std::size_t nextPipeIndex = 0;
                 if (!isPipeAtWorld(nextCell.x, nextCell.y, nextCell.z, &nextPipeIndex)) {
                     break;
@@ -2058,7 +2058,7 @@ bool App::computePipePlacementFromInteractionRaycast(
                 if (nextPipeIndex >= pipes.size()) {
                     break;
                 }
-                const core::Dir6 nextAxis = axisToDir6(pipes[nextPipeIndex].axis);
+                const voxelsprout::core::Dir6 nextAxis = axisToDir6(pipes[nextPipeIndex].axis);
                 if (!dirSharesAxis(nextAxis, selectedAxis)) {
                     break;
                 }
@@ -2067,9 +2067,9 @@ bool App::computePipePlacementFromInteractionRaycast(
         }
     }
 
-    const core::Dir6 extensionDir =
-        extensionSign >= 0 ? selectedAxis : core::oppositeDir(selectedAxis);
-    const core::Cell3i targetCell = core::neighborCell(extensionAnchor, extensionDir);
+    const voxelsprout::core::Dir6 extensionDir =
+        extensionSign >= 0 ? selectedAxis : voxelsprout::core::oppositeDir(selectedAxis);
+    const voxelsprout::core::Cell3i targetCell = voxelsprout::core::neighborCell(extensionAnchor, extensionDir);
     const int targetX = targetCell.x;
     const int targetY = targetCell.y;
     const int targetZ = targetCell.z;
@@ -2085,17 +2085,17 @@ bool App::computePipePlacementFromInteractionRaycast(
         return false;
     }
 
-    const std::uint8_t neighborMask = sim::neighborMask6(targetCell, [this](const core::Cell3i& cell) {
+    const std::uint8_t neighborMask = voxelsprout::sim::neighborMask6(targetCell, [this](const voxelsprout::core::Cell3i& cell) {
         return isPipeAtWorld(cell.x, cell.y, cell.z, nullptr);
     });
-    const std::uint32_t neighborCount = sim::connectionCount(neighborMask);
-    const sim::JoinPiece joinPiece = sim::classifyJoinPiece(neighborMask);
+    const std::uint32_t neighborCount = voxelsprout::sim::connectionCount(neighborMask);
+    const voxelsprout::sim::JoinPiece joinPiece = voxelsprout::sim::classifyJoinPiece(neighborMask);
 
-    core::Dir6 resolvedAxis = selectedAxis;
+    voxelsprout::core::Dir6 resolvedAxis = selectedAxis;
     if (neighborCount == 1u) {
-        const core::Dir6 neighborDir = firstDirFromMask(neighborMask);
-        resolvedAxis = core::oppositeDir(neighborDir);
-    } else if (joinPiece == sim::JoinPiece::Straight) {
+        const voxelsprout::core::Dir6 neighborDir = firstDirFromMask(neighborMask);
+        resolvedAxis = voxelsprout::core::oppositeDir(neighborDir);
+    } else if (joinPiece == voxelsprout::sim::JoinPiece::Straight) {
         resolvedAxis = resolveStraightAxisFromMask(neighborMask, selectedAxis);
     }
 
@@ -2119,40 +2119,40 @@ bool App::computeBeltPlacementFromInteractionRaycast(
         return false;
     }
 
-    core::Dir6 selectedAxis = faceNormalToDir6(
+    voxelsprout::core::Dir6 selectedAxis = faceNormalToDir6(
         raycast.hitFaceNormalX,
         raycast.hitFaceNormalY,
         raycast.hitFaceNormalZ
     );
-    if (selectedAxis == core::Dir6::PosY || selectedAxis == core::Dir6::NegY) {
+    if (selectedAxis == voxelsprout::core::Dir6::PosY || selectedAxis == voxelsprout::core::Dir6::NegY) {
         selectedAxis = horizontalDirFromYaw(m_camera.yawDegrees);
     }
     int extensionSign = 1;
-    core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
+    voxelsprout::core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
 
     if (raycast.hitBelt) {
         std::size_t beltIndex = 0;
         if (!isBeltAtWorld(raycast.x, raycast.y, raycast.z, &beltIndex)) {
             return false;
         }
-        const std::vector<sim::Belt>& belts = m_simulation.belts();
+        const std::vector<voxelsprout::sim::Belt>& belts = m_simulation.belts();
         if (beltIndex >= belts.size()) {
             return false;
         }
 
         selectedAxis = beltDirectionToDir6(belts[beltIndex].direction);
-        const core::Cell3i axisOffset = core::dirToOffset(selectedAxis);
+        const voxelsprout::core::Cell3i axisOffset = voxelsprout::core::dirToOffset(selectedAxis);
         const int faceNormalDotAxis =
             (raycast.hitFaceNormalX * axisOffset.x) +
             (raycast.hitFaceNormalY * axisOffset.y) +
             (raycast.hitFaceNormalZ * axisOffset.z);
         if (faceNormalDotAxis == 0) {
-            core::Dir6 faceDir = faceNormalToDir6(
+            voxelsprout::core::Dir6 faceDir = faceNormalToDir6(
                 raycast.hitFaceNormalX,
                 raycast.hitFaceNormalY,
                 raycast.hitFaceNormalZ
             );
-            if (faceDir == core::Dir6::PosY || faceDir == core::Dir6::NegY) {
+            if (faceDir == voxelsprout::core::Dir6::PosY || faceDir == voxelsprout::core::Dir6::NegY) {
                 faceDir = horizontalDirFromYaw(m_camera.yawDegrees);
             }
             selectedAxis = faceDir;
@@ -2162,9 +2162,9 @@ bool App::computeBeltPlacementFromInteractionRaycast(
         }
     }
 
-    const core::Dir6 extensionDir =
-        extensionSign >= 0 ? selectedAxis : core::oppositeDir(selectedAxis);
-    const core::Cell3i targetCell = core::neighborCell(extensionAnchor, extensionDir);
+    const voxelsprout::core::Dir6 extensionDir =
+        extensionSign >= 0 ? selectedAxis : voxelsprout::core::oppositeDir(selectedAxis);
+    const voxelsprout::core::Cell3i targetCell = voxelsprout::core::neighborCell(extensionAnchor, extensionDir);
     const int targetX = targetCell.x;
     const int targetY = targetCell.y;
     const int targetZ = targetCell.z;
@@ -2198,40 +2198,40 @@ bool App::computeTrackPlacementFromInteractionRaycast(
         return false;
     }
 
-    core::Dir6 selectedAxis = faceNormalToDir6(
+    voxelsprout::core::Dir6 selectedAxis = faceNormalToDir6(
         raycast.hitFaceNormalX,
         raycast.hitFaceNormalY,
         raycast.hitFaceNormalZ
     );
-    if (selectedAxis == core::Dir6::PosY || selectedAxis == core::Dir6::NegY) {
+    if (selectedAxis == voxelsprout::core::Dir6::PosY || selectedAxis == voxelsprout::core::Dir6::NegY) {
         selectedAxis = horizontalDirFromYaw(m_camera.yawDegrees);
     }
     int extensionSign = 1;
-    core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
+    voxelsprout::core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
 
     if (raycast.hitTrack) {
         std::size_t trackIndex = 0;
         if (!isTrackAtWorld(raycast.x, raycast.y, raycast.z, &trackIndex)) {
             return false;
         }
-        const std::vector<sim::Track>& tracks = m_simulation.tracks();
+        const std::vector<voxelsprout::sim::Track>& tracks = m_simulation.tracks();
         if (trackIndex >= tracks.size()) {
             return false;
         }
 
         selectedAxis = trackDirectionToDir6(tracks[trackIndex].direction);
-        const core::Cell3i axisOffset = core::dirToOffset(selectedAxis);
+        const voxelsprout::core::Cell3i axisOffset = voxelsprout::core::dirToOffset(selectedAxis);
         const int faceNormalDotAxis =
             (raycast.hitFaceNormalX * axisOffset.x) +
             (raycast.hitFaceNormalY * axisOffset.y) +
             (raycast.hitFaceNormalZ * axisOffset.z);
         if (faceNormalDotAxis == 0) {
-            core::Dir6 faceDir = faceNormalToDir6(
+            voxelsprout::core::Dir6 faceDir = faceNormalToDir6(
                 raycast.hitFaceNormalX,
                 raycast.hitFaceNormalY,
                 raycast.hitFaceNormalZ
             );
-            if (faceDir == core::Dir6::PosY || faceDir == core::Dir6::NegY) {
+            if (faceDir == voxelsprout::core::Dir6::PosY || faceDir == voxelsprout::core::Dir6::NegY) {
                 faceDir = horizontalDirFromYaw(m_camera.yawDegrees);
             }
             selectedAxis = faceDir;
@@ -2241,9 +2241,9 @@ bool App::computeTrackPlacementFromInteractionRaycast(
         }
     }
 
-    const core::Dir6 extensionDir =
-        extensionSign >= 0 ? selectedAxis : core::oppositeDir(selectedAxis);
-    const core::Cell3i targetCell = core::neighborCell(extensionAnchor, extensionDir);
+    const voxelsprout::core::Dir6 extensionDir =
+        extensionSign >= 0 ? selectedAxis : voxelsprout::core::oppositeDir(selectedAxis);
+    const voxelsprout::core::Cell3i targetCell = voxelsprout::core::neighborCell(extensionAnchor, extensionDir);
     const int targetX = targetCell.x;
     const int targetY = targetCell.y;
     const int targetZ = targetCell.z;
@@ -2268,7 +2268,7 @@ bool App::applyVoxelEdit(
     int targetX,
     int targetY,
     int targetZ,
-    world::Voxel voxel,
+    voxelsprout::world::Voxel voxel,
     std::vector<std::size_t>& outDirtyChunkIndices
 ) {
     int localX = 0;
@@ -2279,7 +2279,7 @@ bool App::applyVoxelEdit(
         return false;
     }
 
-    world::Chunk& chunk = m_world.chunkGrid().chunks()[editedChunkIndex];
+    voxelsprout::world::Chunk& chunk = m_world.chunkGrid().chunks()[editedChunkIndex];
     if (chunk.voxelAt(localX, localY, localZ).type == voxel.type) {
         return false;
     }
@@ -2306,19 +2306,19 @@ bool App::applyVoxelEdit(
     if (localX == 0) {
         appendNeighborChunkForWorldVoxel(targetX - 1, targetY, targetZ);
     }
-    if (localX == (world::Chunk::kSizeX - 1)) {
+    if (localX == (voxelsprout::world::Chunk::kSizeX - 1)) {
         appendNeighborChunkForWorldVoxel(targetX + 1, targetY, targetZ);
     }
     if (localY == 0) {
         appendNeighborChunkForWorldVoxel(targetX, targetY - 1, targetZ);
     }
-    if (localY == (world::Chunk::kSizeY - 1)) {
+    if (localY == (voxelsprout::world::Chunk::kSizeY - 1)) {
         appendNeighborChunkForWorldVoxel(targetX, targetY + 1, targetZ);
     }
     if (localZ == 0) {
         appendNeighborChunkForWorldVoxel(targetX, targetY, targetZ - 1);
     }
-    if (localZ == (world::Chunk::kSizeZ - 1)) {
+    if (localZ == (voxelsprout::world::Chunk::kSizeZ - 1)) {
         appendNeighborChunkForWorldVoxel(targetX, targetY, targetZ + 1);
     }
 
@@ -2326,9 +2326,9 @@ bool App::applyVoxelEdit(
 }
 
 bool App::isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const {
-    const std::vector<sim::Pipe>& pipes = m_simulation.pipes();
+    const std::vector<voxelsprout::sim::Pipe>& pipes = m_simulation.pipes();
     for (std::size_t pipeIndex = 0; pipeIndex < pipes.size(); ++pipeIndex) {
-        const sim::Pipe& pipe = pipes[pipeIndex];
+        const voxelsprout::sim::Pipe& pipe = pipes[pipeIndex];
         if (pipe.x == worldX && pipe.y == worldY && pipe.z == worldZ) {
             if (outPipeIndex != nullptr) {
                 *outPipeIndex = pipeIndex;
@@ -2340,9 +2340,9 @@ bool App::isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipe
 }
 
 bool App::isBeltAtWorld(int worldX, int worldY, int worldZ, std::size_t* outBeltIndex) const {
-    const std::vector<sim::Belt>& belts = m_simulation.belts();
+    const std::vector<voxelsprout::sim::Belt>& belts = m_simulation.belts();
     for (std::size_t beltIndex = 0; beltIndex < belts.size(); ++beltIndex) {
-        const sim::Belt& belt = belts[beltIndex];
+        const voxelsprout::sim::Belt& belt = belts[beltIndex];
         if (belt.x == worldX && belt.y == worldY && belt.z == worldZ) {
             if (outBeltIndex != nullptr) {
                 *outBeltIndex = beltIndex;
@@ -2354,9 +2354,9 @@ bool App::isBeltAtWorld(int worldX, int worldY, int worldZ, std::size_t* outBelt
 }
 
 bool App::isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTrackIndex) const {
-    const std::vector<sim::Track>& tracks = m_simulation.tracks();
+    const std::vector<voxelsprout::sim::Track>& tracks = m_simulation.tracks();
     for (std::size_t trackIndex = 0; trackIndex < tracks.size(); ++trackIndex) {
-        const sim::Track& track = tracks[trackIndex];
+        const voxelsprout::sim::Track& track = tracks[trackIndex];
         if (track.x == worldX && track.y == worldY && track.z == worldZ) {
             if (outTrackIndex != nullptr) {
                 *outTrackIndex = trackIndex;
@@ -2369,7 +2369,7 @@ bool App::isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTra
 
 void App::regenerateWorld() {
     m_world.regenerateFlatWorld();
-    const world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
+    const voxelsprout::world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
     m_chunkClipmapIndex.setConfig(requestedClipmapConfig);
     m_appliedClipmapConfig = requestedClipmapConfig;
     m_hasAppliedClipmapConfig = true;
@@ -2422,7 +2422,7 @@ bool App::tryRemoveVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkInd
         raycast.solidX,
         raycast.solidY,
         raycast.solidZ,
-        world::Voxel{world::VoxelType::Empty},
+        voxelsprout::world::Voxel{voxelsprout::world::VoxelType::Empty},
         outDirtyChunkIndices
     );
 }
@@ -2451,7 +2451,7 @@ bool App::tryPlacePipeFromCameraRay() {
         return false;
     }
 
-    const math::Vector3 axis{
+    const voxelsprout::math::Vector3 axis{
         static_cast<float>(axisX),
         static_cast<float>(axisY),
         static_cast<float>(axisZ)
@@ -2479,7 +2479,7 @@ bool App::tryRemovePipeFromCameraRay() {
         return false;
     }
 
-    std::vector<sim::Pipe>& pipes = m_simulation.pipes();
+    std::vector<voxelsprout::sim::Pipe>& pipes = m_simulation.pipes();
     if (pipeIndex >= pipes.size()) {
         return false;
     }
@@ -2511,8 +2511,8 @@ bool App::tryPlaceBeltFromCameraRay() {
         return false;
     }
 
-    core::Dir6 axisDir = faceNormalToDir6(axisX, axisY, axisZ);
-    if (axisDir == core::Dir6::PosY || axisDir == core::Dir6::NegY) {
+    voxelsprout::core::Dir6 axisDir = faceNormalToDir6(axisX, axisY, axisZ);
+    if (axisDir == voxelsprout::core::Dir6::PosY || axisDir == voxelsprout::core::Dir6::NegY) {
         axisDir = horizontalDirFromYaw(m_camera.yawDegrees);
     }
     m_simulation.belts().emplace_back(targetX, targetY, targetZ, dir6ToBeltDirection(axisDir));
@@ -2530,7 +2530,7 @@ bool App::tryRemoveBeltFromCameraRay() {
         return false;
     }
 
-    std::vector<sim::Belt>& belts = m_simulation.belts();
+    std::vector<voxelsprout::sim::Belt>& belts = m_simulation.belts();
     if (beltIndex >= belts.size()) {
         return false;
     }
@@ -2562,8 +2562,8 @@ bool App::tryPlaceTrackFromCameraRay() {
         return false;
     }
 
-    core::Dir6 axisDir = faceNormalToDir6(axisX, axisY, axisZ);
-    if (axisDir == core::Dir6::PosY || axisDir == core::Dir6::NegY) {
+    voxelsprout::core::Dir6 axisDir = faceNormalToDir6(axisX, axisY, axisZ);
+    if (axisDir == voxelsprout::core::Dir6::PosY || axisDir == voxelsprout::core::Dir6::NegY) {
         axisDir = horizontalDirFromYaw(m_camera.yawDegrees);
     }
     m_simulation.tracks().emplace_back(targetX, targetY, targetZ, dir6ToTrackDirection(axisDir));
@@ -2581,7 +2581,7 @@ bool App::tryRemoveTrackFromCameraRay() {
         return false;
     }
 
-    std::vector<sim::Track>& tracks = m_simulation.tracks();
+    std::vector<voxelsprout::sim::Track>& tracks = m_simulation.tracks();
     if (trackIndex >= tracks.size()) {
         return false;
     }
@@ -2589,4 +2589,4 @@ bool App::tryRemoveTrackFromCameraRay() {
     return true;
 }
 
-} // namespace app
+} // namespace voxelsprout::app

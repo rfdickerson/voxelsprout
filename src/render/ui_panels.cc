@@ -1,8 +1,8 @@
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include <imgui.h>
 
-namespace render {
+namespace voxelsprout::render {
 
 void RendererBackend::buildShadowDebugUi() {
     if (!m_debugUiVisible || !m_showShadowPanel) {
@@ -212,5 +212,5 @@ void RendererBackend::buildSunDebugUi() {
     ImGui::End();
 }
 
-} // namespace render
+} // namespace voxelsprout::render
 

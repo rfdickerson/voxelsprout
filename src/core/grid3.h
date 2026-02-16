@@ -9,7 +9,7 @@
 // Core Grid subsystem
 // Responsible for: defining deterministic integer-grid primitives shared by world and simulation code.
 // Should NOT do: simulation state ownership, rendering behavior, or file serialization.
-namespace core {
+namespace voxelsprout::core {
 
 struct Cell3i {
     std::int32_t x = 0;
@@ -189,37 +189,37 @@ inline constexpr Cell3i neighborCell(const Cell3i& cell, Dir6 dir) {
     return cell + dirToOffset(dir);
 }
 
-inline constexpr math::Vector3 dirToUnitVector(Dir6 dir) {
+inline constexpr voxelsprout::math::Vector3 dirToUnitVector(Dir6 dir) {
     switch (dir) {
-    case Dir6::PosX: return math::Vector3{1.0f, 0.0f, 0.0f};
-    case Dir6::NegX: return math::Vector3{-1.0f, 0.0f, 0.0f};
-    case Dir6::PosY: return math::Vector3{0.0f, 1.0f, 0.0f};
-    case Dir6::NegY: return math::Vector3{0.0f, -1.0f, 0.0f};
-    case Dir6::PosZ: return math::Vector3{0.0f, 0.0f, 1.0f};
-    case Dir6::NegZ: return math::Vector3{0.0f, 0.0f, -1.0f};
+    case Dir6::PosX: return voxelsprout::math::Vector3{1.0f, 0.0f, 0.0f};
+    case Dir6::NegX: return voxelsprout::math::Vector3{-1.0f, 0.0f, 0.0f};
+    case Dir6::PosY: return voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f};
+    case Dir6::NegY: return voxelsprout::math::Vector3{0.0f, -1.0f, 0.0f};
+    case Dir6::PosZ: return voxelsprout::math::Vector3{0.0f, 0.0f, 1.0f};
+    case Dir6::NegZ: return voxelsprout::math::Vector3{0.0f, 0.0f, -1.0f};
     }
-    return math::Vector3{0.0f, 1.0f, 0.0f};
+    return voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f};
 }
 
 struct AxisFrame {
-    math::Vector3 forward{0.0f, 1.0f, 0.0f};
-    math::Vector3 right{1.0f, 0.0f, 0.0f};
-    math::Vector3 up{0.0f, 0.0f, 1.0f};
+    voxelsprout::math::Vector3 forward{0.0f, 1.0f, 0.0f};
+    voxelsprout::math::Vector3 right{1.0f, 0.0f, 0.0f};
+    voxelsprout::math::Vector3 up{0.0f, 0.0f, 1.0f};
 };
 
 inline AxisFrame buildAxisFrame(Dir6 forwardDir) {
     AxisFrame frame{};
     frame.forward = dirToUnitVector(forwardDir);
 
-    const math::Vector3 fallbackUp = std::abs(frame.forward.y) > 0.99f
-        ? math::Vector3{0.0f, 0.0f, 1.0f}
-        : math::Vector3{0.0f, 1.0f, 0.0f};
-    frame.right = math::normalize(math::cross(frame.forward, fallbackUp));
-    if (math::lengthSquared(frame.right) <= 0.000001f) {
-        frame.right = math::Vector3{1.0f, 0.0f, 0.0f};
+    const voxelsprout::math::Vector3 fallbackUp = std::abs(frame.forward.y) > 0.99f
+        ? voxelsprout::math::Vector3{0.0f, 0.0f, 1.0f}
+        : voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f};
+    frame.right = voxelsprout::math::normalize(voxelsprout::math::cross(frame.forward, fallbackUp));
+    if (voxelsprout::math::lengthSquared(frame.right) <= 0.000001f) {
+        frame.right = voxelsprout::math::Vector3{1.0f, 0.0f, 0.0f};
     }
-    frame.up = math::normalize(math::cross(frame.right, frame.forward));
+    frame.up = voxelsprout::math::normalize(voxelsprout::math::cross(frame.right, frame.forward));
     return frame;
 }
 
-} // namespace core
+} // namespace voxelsprout::core

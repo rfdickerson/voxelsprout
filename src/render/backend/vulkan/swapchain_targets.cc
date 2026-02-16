@@ -1,4 +1,4 @@
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include "core/log.h"
 
@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace render {
+namespace voxelsprout::render {
 
 namespace {
 
@@ -896,4 +896,4 @@ void RendererBackend::destroyAoTargets() {
     m_normalDepthImageInitialized.clear();
 }
 
-} // namespace render
+} // namespace voxelsprout::render

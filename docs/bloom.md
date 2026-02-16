@@ -26,7 +26,7 @@ Render order is:
 
 Bloom uses the same HDR scene texture sampled at multiple mip levels.
 
-- Mips are generated in `Renderer.cpp` using `vkCmdBlitImage`.
+- Mips are generated in `renderer.cc` using `vkCmdBlitImage`.
 - Tonemap shader samples mips 0..5 and applies bright-pass extraction per mip.
 - Weighted sum (current defaults):
   - mip0 `0.20`

@@ -7,7 +7,7 @@
 // Should NOT do: implement gameplay systems or low-level window/input handling.
 int main() {
     VOX_LOGI("main") << "startup";
-    app::App app;
+    voxelsprout::app::App app;
 
     if (!app.init()) {
         VOX_LOGE("main") << "app init failed, exiting";

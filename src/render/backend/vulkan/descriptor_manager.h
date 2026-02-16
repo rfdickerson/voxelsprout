@@ -6,7 +6,7 @@
 
 #include <vulkan/vulkan.h>
 
-namespace render {
+namespace voxelsprout::render {
 
 template <std::size_t FrameCount>
 class DescriptorManager {
@@ -70,4 +70,4 @@ public:
     }
 };
 
-} // namespace render
+} // namespace voxelsprout::render

@@ -3,7 +3,7 @@
 // Simulation Belt subsystem
 // Responsible for: representing a transport machine placeholder in the simulation.
 // Should NOT do: move items, resolve collisions, or interact with rendering yet.
-namespace sim {
+namespace voxelsprout::sim {
 
 enum class BeltDirection {
     North,
@@ -26,4 +26,4 @@ public:
 inline Belt::Belt(int xIn, int yIn, int zIn, BeltDirection directionIn)
     : x(xIn), y(yIn), z(zIn), direction(directionIn) {}
 
-} // namespace sim
+} // namespace voxelsprout::sim

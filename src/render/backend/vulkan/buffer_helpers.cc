@@ -1,4 +1,4 @@
-#include "render/buffer_helpers.h"
+#include "render/backend/vulkan/buffer_helpers.h"
 
 #include "core/log.h"
 
@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace render {
+namespace voxelsprout::render {
 
 template <typename VkHandleT>
 uint64_t vkHandleToUint64(VkHandleT handle) {
@@ -1231,4 +1231,4 @@ uint32_t FrameArena::findMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlag
     return std::numeric_limits<uint32_t>::max();
 }
 
-} // namespace render
+} // namespace voxelsprout::render

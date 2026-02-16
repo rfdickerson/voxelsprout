@@ -3,7 +3,7 @@
 // Simulation Track subsystem
 // Responsible for: representing simple rail track segments for rendering and placement.
 // Should NOT do: train routing, signaling, or rendering API details.
-namespace sim {
+namespace voxelsprout::sim {
 
 enum class TrackDirection {
     North,
@@ -26,4 +26,4 @@ public:
 inline Track::Track(int xIn, int yIn, int zIn, TrackDirection directionIn)
     : x(xIn), y(yIn), z(zIn), direction(directionIn) {}
 
-} // namespace sim
+} // namespace voxelsprout::sim

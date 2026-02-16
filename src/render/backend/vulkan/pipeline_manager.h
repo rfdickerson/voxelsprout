@@ -2,7 +2,7 @@
 
 #include <vulkan/vulkan.h>
 
-namespace render {
+namespace voxelsprout::render {
 
 class PipelineManager {
 public:
@@ -124,4 +124,4 @@ public:
     }
 };
 
-} // namespace render
+} // namespace voxelsprout::render

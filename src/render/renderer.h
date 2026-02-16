@@ -13,7 +13,7 @@
 
 struct GLFWwindow;
 
-namespace render {
+namespace voxelsprout::render {
 
 struct CameraPose {
     float x;
@@ -60,19 +60,19 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    bool init(GLFWwindow* window, const world::ChunkGrid& chunkGrid);
+    bool init(GLFWwindow* window, const voxelsprout::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
-    bool uploadMagicaVoxelMesh(const world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
+    bool uploadMagicaVoxelMesh(const voxelsprout::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
-    bool updateChunkMesh(const world::ChunkGrid& chunkGrid);
-    bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
-    bool updateChunkMesh(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
+    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid);
+    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
+    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
     bool useSpatialPartitioningQueries() const;
-    world::ClipmapConfig clipmapQueryConfig() const;
-    void setSpatialQueryStats(bool used, const world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
+    voxelsprout::world::ClipmapConfig clipmapQueryConfig() const;
+    void setSpatialQueryStats(bool used, const voxelsprout::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void renderFrame(
-        const world::ChunkGrid& chunkGrid,
-        const sim::Simulation& simulation,
+        const voxelsprout::world::ChunkGrid& chunkGrid,
+        const voxelsprout::sim::Simulation& simulation,
         const CameraPose& camera,
         const VoxelPreview& preview,
         float simulationAlpha,
@@ -90,4 +90,4 @@ private:
     std::unique_ptr<RendererBackend> m_backend;
 };
 
-} // namespace render
+} // namespace voxelsprout::render

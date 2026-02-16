@@ -1,4 +1,4 @@
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace render {
+namespace voxelsprout::render {
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
@@ -42,8 +42,8 @@ namespace render {
 #endif
 
 void RendererBackend::renderFrame(
-    const world::ChunkGrid& chunkGrid,
-    const sim::Simulation& simulation,
+    const voxelsprout::world::ChunkGrid& chunkGrid,
+    const voxelsprout::sim::Simulation& simulation,
     const CameraPose& camera,
     const VoxelPreview& preview,
     float simulationAlpha,
@@ -78,19 +78,19 @@ void RendererBackend::renderFrame(
     m_debugMacroCellUniformCount = 0;
     m_debugMacroCellRefined4Count = 0;
     m_debugMacroCellRefined1Count = 0;
-    for (const world::Chunk& chunk : chunkGrid.chunks()) {
-        for (int my = 0; my < world::Chunk::kMacroSizeY; ++my) {
-            for (int mz = 0; mz < world::Chunk::kMacroSizeZ; ++mz) {
-                for (int mx = 0; mx < world::Chunk::kMacroSizeX; ++mx) {
-                    const world::Chunk::MacroCell cell = chunk.macroCellAt(mx, my, mz);
+    for (const voxelsprout::world::Chunk& chunk : chunkGrid.chunks()) {
+        for (int my = 0; my < voxelsprout::world::Chunk::kMacroSizeY; ++my) {
+            for (int mz = 0; mz < voxelsprout::world::Chunk::kMacroSizeZ; ++mz) {
+                for (int mx = 0; mx < voxelsprout::world::Chunk::kMacroSizeX; ++mx) {
+                    const voxelsprout::world::Chunk::MacroCell cell = chunk.macroCellAt(mx, my, mz);
                     switch (cell.resolution) {
-                    case world::Chunk::CellResolution::Uniform:
+                    case voxelsprout::world::Chunk::CellResolution::Uniform:
                         ++m_debugMacroCellUniformCount;
                         break;
-                    case world::Chunk::CellResolution::Refined4:
+                    case voxelsprout::world::Chunk::CellResolution::Refined4:
                         ++m_debugMacroCellRefined4Count;
                         break;
-                    case world::Chunk::CellResolution::Refined1:
+                    case voxelsprout::world::Chunk::CellResolution::Refined1:
                         ++m_debugMacroCellRefined1Count;
                         break;
                     }
@@ -294,27 +294,27 @@ void RendererBackend::renderFrame(
     const float aspectRatio = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
     const float nearPlane = 0.1f;
     const float farPlane = 500.0f;
-    const float yawRadians = math::radians(camera.yawDegrees);
-    const float pitchRadians = math::radians(camera.pitchDegrees);
-    const float halfFovRadians = math::radians(activeFovDegrees) * 0.5f;
+    const float yawRadians = voxelsprout::math::radians(camera.yawDegrees);
+    const float pitchRadians = voxelsprout::math::radians(camera.pitchDegrees);
+    const float halfFovRadians = voxelsprout::math::radians(activeFovDegrees) * 0.5f;
     const float tanHalfFov = std::tan(halfFovRadians);
     const float cosPitch = std::cos(pitchRadians);
-    const math::Vector3 eye{camera.x, camera.y, camera.z};
-    const int cameraChunkX = static_cast<int>(std::floor(camera.x / static_cast<float>(world::Chunk::kSizeX)));
-    const int cameraChunkY = static_cast<int>(std::floor(camera.y / static_cast<float>(world::Chunk::kSizeY)));
-    const int cameraChunkZ = static_cast<int>(std::floor(camera.z / static_cast<float>(world::Chunk::kSizeZ)));
-    const math::Vector3 forward{
+    const voxelsprout::math::Vector3 eye{camera.x, camera.y, camera.z};
+    const int cameraChunkX = static_cast<int>(std::floor(camera.x / static_cast<float>(voxelsprout::world::Chunk::kSizeX)));
+    const int cameraChunkY = static_cast<int>(std::floor(camera.y / static_cast<float>(voxelsprout::world::Chunk::kSizeY)));
+    const int cameraChunkZ = static_cast<int>(std::floor(camera.z / static_cast<float>(voxelsprout::world::Chunk::kSizeZ)));
+    const voxelsprout::math::Vector3 forward{
         std::cos(yawRadians) * cosPitch,
         std::sin(pitchRadians),
         std::sin(yawRadians) * cosPitch
     };
 
-    const math::Matrix4 view = lookAt(eye, eye + forward, math::Vector3{0.0f, 1.0f, 0.0f});
-    const math::Matrix4 projection = perspectiveVulkan(math::radians(activeFovDegrees), aspectRatio, nearPlane, farPlane);
-    const math::Matrix4 mvp = projection * view;
-    const math::Matrix4 mvpColumnMajor = transpose(mvp);
-    const math::Matrix4 viewColumnMajor = transpose(view);
-    const math::Matrix4 projectionColumnMajor = transpose(projection);
+    const voxelsprout::math::Matrix4 view = lookAt(eye, eye + forward, voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f});
+    const voxelsprout::math::Matrix4 projection = perspectiveVulkan(voxelsprout::math::radians(activeFovDegrees), aspectRatio, nearPlane, farPlane);
+    const voxelsprout::math::Matrix4 mvp = projection * view;
+    const voxelsprout::math::Matrix4 mvpColumnMajor = transpose(mvp);
+    const voxelsprout::math::Matrix4 viewColumnMajor = transpose(view);
+    const voxelsprout::math::Matrix4 projectionColumnMajor = transpose(projection);
 
     const bool projectionParamsChanged =
         std::abs(m_shadowStableAspectRatio - aspectRatio) > 0.0001f ||
@@ -325,19 +325,19 @@ void RendererBackend::renderFrame(
         m_shadowStableCascadeRadii.fill(0.0f);
     }
 
-    const float sunYawRadians = math::radians(m_skyDebugSettings.sunYawDegrees);
-    const float sunPitchRadians = math::radians(m_skyDebugSettings.sunPitchDegrees);
+    const float sunYawRadians = voxelsprout::math::radians(m_skyDebugSettings.sunYawDegrees);
+    const float sunPitchRadians = voxelsprout::math::radians(m_skyDebugSettings.sunPitchDegrees);
     const float sunCosPitch = std::cos(sunPitchRadians);
-    math::Vector3 sunDirection = math::normalize(math::Vector3{
+    voxelsprout::math::Vector3 sunDirection = voxelsprout::math::normalize(voxelsprout::math::Vector3{
         std::cos(sunYawRadians) * sunCosPitch,
         std::sin(sunPitchRadians),
         std::sin(sunYawRadians) * sunCosPitch
     });
-    if (math::lengthSquared(sunDirection) <= 0.0001f) {
-        sunDirection = math::Vector3{-0.58f, -0.42f, -0.24f};
+    if (voxelsprout::math::lengthSquared(sunDirection) <= 0.0001f) {
+        sunDirection = voxelsprout::math::Vector3{-0.58f, -0.42f, -0.24f};
     }
-    const math::Vector3 toSun = -math::normalize(sunDirection);
-    const float sunElevationDegrees = math::degrees(std::asin(std::clamp(toSun.y, -1.0f, 1.0f)));
+    const voxelsprout::math::Vector3 toSun = -voxelsprout::math::normalize(sunDirection);
+    const float sunElevationDegrees = voxelsprout::math::degrees(std::asin(std::clamp(toSun.y, -1.0f, 1.0f)));
 
     SkyTuningSample manualTuning{};
     manualTuning.rayleighStrength = m_skyDebugSettings.rayleighStrength;
@@ -412,8 +412,8 @@ void RendererBackend::renderFrame(
         effectiveSkySettings.sunHaloIntensity = 0.0f;
     }
 
-    const math::Vector3 sunColor = isNight
-        ? math::Vector3{0.0f, 0.0f, 0.0f}
+    const voxelsprout::math::Vector3 sunColor = isNight
+        ? voxelsprout::math::Vector3{0.0f, 0.0f, 0.0f}
         : computeSunColor(effectiveSkySettings, sunDirection);
 
     constexpr float kCascadeLambda = 0.70f;
@@ -441,14 +441,14 @@ void RendererBackend::renderFrame(
         cascadeDistances[cascadeIndex] = split;
     }
 
-    std::array<math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
+    std::array<voxelsprout::math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
         const float cascadeFar = cascadeDistances[cascadeIndex];
         const float farHalfHeight = cascadeFar * tanHalfFov;
         const float farHalfWidth = farHalfHeight * aspectRatio;
 
         // Camera-position-only cascades: only translation moves cascade centers; rotation does not.
-        const math::Vector3 frustumCenter = eye;
+        const voxelsprout::math::Vector3 frustumCenter = eye;
         float boundingRadius =
             std::sqrt((cascadeFar * cascadeFar) + (farHalfWidth * farHalfWidth) + (farHalfHeight * farHalfHeight));
         boundingRadius = std::max(boundingRadius * 1.04f, 24.0f);
@@ -462,26 +462,26 @@ void RendererBackend::renderFrame(
 
         // Keep the light farther than the cascade sphere but avoid overly large depth spans.
         const float lightDistance = (cascadeRadius * 1.9f) + 48.0f;
-        const float sunUpDot = std::abs(math::dot(sunDirection, math::Vector3{0.0f, 1.0f, 0.0f}));
-        const math::Vector3 lightUpHint =
-            (sunUpDot > 0.95f) ? math::Vector3{0.0f, 0.0f, 1.0f} : math::Vector3{0.0f, 1.0f, 0.0f};
-        const math::Vector3 lightForward = math::normalize(sunDirection);
-        const math::Vector3 lightRight = math::normalize(math::cross(lightForward, lightUpHint));
-        const math::Vector3 lightUp = math::cross(lightRight, lightForward);
+        const float sunUpDot = std::abs(voxelsprout::math::dot(sunDirection, voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f}));
+        const voxelsprout::math::Vector3 lightUpHint =
+            (sunUpDot > 0.95f) ? voxelsprout::math::Vector3{0.0f, 0.0f, 1.0f} : voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f};
+        const voxelsprout::math::Vector3 lightForward = voxelsprout::math::normalize(sunDirection);
+        const voxelsprout::math::Vector3 lightRight = voxelsprout::math::normalize(voxelsprout::math::cross(lightForward, lightUpHint));
+        const voxelsprout::math::Vector3 lightUp = voxelsprout::math::cross(lightRight, lightForward);
 
         // Stabilize translation by snapping the cascade center along light-view right/up texel units
         // before constructing the view matrix.
-        const float centerRight = math::dot(frustumCenter, lightRight);
-        const float centerUp = math::dot(frustumCenter, lightUp);
+        const float centerRight = voxelsprout::math::dot(frustumCenter, lightRight);
+        const float centerUp = voxelsprout::math::dot(frustumCenter, lightUp);
         const float snappedCenterRight = std::floor((centerRight / texelSize) + 0.5f) * texelSize;
         const float snappedCenterUp = std::floor((centerUp / texelSize) + 0.5f) * texelSize;
-        const math::Vector3 snappedFrustumCenter =
+        const voxelsprout::math::Vector3 snappedFrustumCenter =
             frustumCenter +
             (lightRight * (snappedCenterRight - centerRight)) +
             (lightUp * (snappedCenterUp - centerUp));
 
-        const math::Vector3 lightPosition = snappedFrustumCenter - (lightForward * lightDistance);
-        const math::Matrix4 lightView = lookAt(lightPosition, snappedFrustumCenter, lightUp);
+        const voxelsprout::math::Vector3 lightPosition = snappedFrustumCenter - (lightForward * lightDistance);
+        const voxelsprout::math::Matrix4 lightView = lookAt(lightPosition, snappedFrustumCenter, lightUp);
 
         const float left = -cascadeRadius;
         const float right = cascadeRadius;
@@ -491,7 +491,7 @@ void RendererBackend::renderFrame(
         const float casterPadding = std::max(24.0f, cascadeRadius * 0.35f);
         const float lightNear = std::max(0.1f, lightDistance - cascadeRadius - casterPadding);
         const float lightFar = lightDistance + cascadeRadius + casterPadding;
-        const math::Matrix4 lightProjection = orthographicVulkan(
+        const voxelsprout::math::Matrix4 lightProjection = orthographicVulkan(
             left,
             right,
             bottom,
@@ -502,16 +502,16 @@ void RendererBackend::renderFrame(
         lightViewProjMatrices[cascadeIndex] = lightProjection * lightView;
     }
 
-    std::array<math::Vector3, 9> shIrradiance{};
+    std::array<voxelsprout::math::Vector3, 9> shIrradiance{};
     if (!isNight) {
         shIrradiance = computeIrradianceShCoefficients(sunDirection, sunColor, effectiveSkySettings);
     } else {
-        for (math::Vector3& coefficient : shIrradiance) {
-            coefficient = math::Vector3{0.0f, 0.0f, 0.0f};
+        for (voxelsprout::math::Vector3& coefficient : shIrradiance) {
+            coefficient = voxelsprout::math::Vector3{0.0f, 0.0f, 0.0f};
         }
         // Constant dark-blue ambient irradiance for night.
         constexpr float kShY00 = 0.282095f;
-        const math::Vector3 nightAmbientIrradiance{0.050f, 0.078f, 0.155f};
+        const voxelsprout::math::Vector3 nightAmbientIrradiance{0.050f, 0.078f, 0.155f};
         shIrradiance[0] = nightAmbientIrradiance * (1.0f / kShY00);
     }
 
@@ -531,7 +531,7 @@ void RendererBackend::renderFrame(
     std::memcpy(mvpUniform.view, viewColumnMajor.m, sizeof(mvpUniform.view));
     std::memcpy(mvpUniform.proj, projectionColumnMajor.m, sizeof(mvpUniform.proj));
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-        const math::Matrix4 lightViewProjColumnMajor = transpose(lightViewProjMatrices[cascadeIndex]);
+        const voxelsprout::math::Matrix4 lightViewProjColumnMajor = transpose(lightViewProjMatrices[cascadeIndex]);
         std::memcpy(
             mvpUniform.lightViewProj[cascadeIndex],
             lightViewProjColumnMajor.m,
@@ -688,7 +688,7 @@ void RendererBackend::renderFrame(
     if (!voxelGiShChanged) {
         for (std::size_t coeffIndex = 0; coeffIndex < shIrradiance.size(); ++coeffIndex) {
             const std::array<float, 3>& previousCoeff = m_voxelGiPreviousShIrradiance[coeffIndex];
-            const math::Vector3& currentCoeff = shIrradiance[coeffIndex];
+            const voxelsprout::math::Vector3& currentCoeff = shIrradiance[coeffIndex];
             if (std::abs(currentCoeff.x - previousCoeff[0]) > kVoxelGiLightingChangeThreshold ||
                 std::abs(currentCoeff.y - previousCoeff[1]) > kVoxelGiLightingChangeThreshold ||
                 std::abs(currentCoeff.z - previousCoeff[2]) > kVoxelGiLightingChangeThreshold) {
@@ -718,7 +718,7 @@ void RendererBackend::renderFrame(
     m_voxelGiPreviousSunDirection = {sunDirection.x, sunDirection.y, sunDirection.z};
     m_voxelGiPreviousSunColor = {sunColor.x, sunColor.y, sunColor.z};
     for (std::size_t coeffIndex = 0; coeffIndex < shIrradiance.size(); ++coeffIndex) {
-        const math::Vector3& coeff = shIrradiance[coeffIndex];
+        const voxelsprout::math::Vector3& coeff = shIrradiance[coeffIndex];
         m_voxelGiPreviousShIrradiance[coeffIndex] = {coeff.x, coeff.y, coeff.z};
     }
     m_voxelGiPreviousBounceStrength = m_voxelGiDebugSettings.bounceStrength;
@@ -1171,34 +1171,34 @@ void RendererBackend::renderFrame(
             worldZCoords[i] = static_cast<int>(std::floor(voxelGiOriginZ + offset));
         }
 
-        std::unordered_map<ChunkCoordKey, const world::Chunk*, ChunkCoordKeyHash> chunkByCoord;
+        std::unordered_map<ChunkCoordKey, const voxelsprout::world::Chunk*, ChunkCoordKeyHash> chunkByCoord;
         chunkByCoord.reserve(chunkGrid.chunkCount() * 2u);
-        for (const world::Chunk& chunk : chunkGrid.chunks()) {
+        for (const voxelsprout::world::Chunk& chunk : chunkGrid.chunks()) {
             chunkByCoord[ChunkCoordKey{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()}] = &chunk;
         }
 
         for (uint32_t z = 0; z < kVoxelGiGridResolution; ++z) {
             const int worldZ = worldZCoords[z];
-            const int chunkZ = floorDiv(worldZ, world::Chunk::kSizeZ);
-            const int localZ = worldZ - (chunkZ * world::Chunk::kSizeZ);
+            const int chunkZ = floorDiv(worldZ, voxelsprout::world::Chunk::kSizeZ);
+            const int localZ = worldZ - (chunkZ * voxelsprout::world::Chunk::kSizeZ);
             for (uint32_t y = 0; y < kVoxelGiGridResolution; ++y) {
                 const int worldY = worldYCoords[y];
-                const int chunkY = floorDiv(worldY, world::Chunk::kSizeY);
-                const int localY = worldY - (chunkY * world::Chunk::kSizeY);
+                const int chunkY = floorDiv(worldY, voxelsprout::world::Chunk::kSizeY);
+                const int localY = worldY - (chunkY * voxelsprout::world::Chunk::kSizeY);
                 for (uint32_t x = 0; x < kVoxelGiGridResolution; ++x) {
                     const int worldX = worldXCoords[x];
-                    const int chunkX = floorDiv(worldX, world::Chunk::kSizeX);
-                    const int localX = worldX - (chunkX * world::Chunk::kSizeX);
+                    const int chunkX = floorDiv(worldX, voxelsprout::world::Chunk::kSizeX);
+                    const int localX = worldX - (chunkX * voxelsprout::world::Chunk::kSizeX);
                     const ChunkCoordKey key{chunkX, chunkY, chunkZ};
                     const auto chunkIt = chunkByCoord.find(key);
                     if (chunkIt == chunkByCoord.end()) {
                         continue;
                     }
-                    const world::Chunk* chunk = chunkIt->second;
+                    const voxelsprout::world::Chunk* chunk = chunkIt->second;
                     if (chunk == nullptr || !chunk->isSolid(localX, localY, localZ)) {
                         continue;
                     }
-                    const world::Voxel voxel = chunk->voxelAt(localX, localY, localZ);
+                    const voxelsprout::world::Voxel voxel = chunk->voxelAt(localX, localY, localZ);
                     const std::array<std::uint8_t, 3> albedoRgb =
                         voxelGiAlbedoRgb(voxel, m_voxelBaseColorPaletteRgba);
                     const std::size_t index =
@@ -1244,17 +1244,17 @@ void RendererBackend::renderFrame(
     uint32_t beltCargoInstanceCount = 0;
     std::optional<FrameArenaSlice> beltCargoInstanceSliceOpt = std::nullopt;
     if (m_pipeIndexCount > 0 || m_transportIndexCount > 0) {
-        const std::vector<sim::Pipe>& pipes = simulation.pipes();
-        const std::vector<sim::Belt>& belts = simulation.belts();
-        const std::vector<sim::Track>& tracks = simulation.tracks();
-        const std::vector<sim::BeltCargo>& beltCargoes = simulation.beltCargoes();
+        const std::vector<voxelsprout::sim::Pipe>& pipes = simulation.pipes();
+        const std::vector<voxelsprout::sim::Belt>& belts = simulation.belts();
+        const std::vector<voxelsprout::sim::Track>& tracks = simulation.tracks();
+        const std::vector<voxelsprout::sim::BeltCargo>& beltCargoes = simulation.beltCargoes();
         const float clampedSimulationAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
         const std::vector<PipeEndpointState> endpointStates =
             pipes.empty() ? std::vector<PipeEndpointState>{} : buildPipeEndpointStates(pipes);
         std::vector<PipeInstance> pipeInstances;
         pipeInstances.reserve(pipes.size());
         for (std::size_t pipeIndex = 0; pipeIndex < pipes.size(); ++pipeIndex) {
-            const sim::Pipe& pipe = pipes[pipeIndex];
+            const voxelsprout::sim::Pipe& pipe = pipes[pipeIndex];
             const PipeEndpointState& endpointState = endpointStates[pipeIndex];
             PipeInstance instance{};
             instance.originLength[0] = static_cast<float>(pipe.x);
@@ -1278,13 +1278,13 @@ void RendererBackend::renderFrame(
 
         std::vector<PipeInstance> transportInstances;
         transportInstances.reserve(belts.size() + tracks.size());
-        for (const sim::Belt& belt : belts) {
+        for (const voxelsprout::sim::Belt& belt : belts) {
             PipeInstance instance{};
             instance.originLength[0] = static_cast<float>(belt.x);
             instance.originLength[1] = static_cast<float>(belt.y);
             instance.originLength[2] = static_cast<float>(belt.z);
             instance.originLength[3] = 1.0f;
-            const math::Vector3 axis = beltDirectionAxis(belt.direction);
+            const voxelsprout::math::Vector3 axis = beltDirectionAxis(belt.direction);
             instance.axisRadius[0] = axis.x;
             instance.axisRadius[1] = axis.y;
             instance.axisRadius[2] = axis.z;
@@ -1301,13 +1301,13 @@ void RendererBackend::renderFrame(
             transportInstances.push_back(instance);
         }
 
-        for (const sim::Track& track : tracks) {
+        for (const voxelsprout::sim::Track& track : tracks) {
             PipeInstance instance{};
             instance.originLength[0] = static_cast<float>(track.x);
             instance.originLength[1] = static_cast<float>(track.y);
             instance.originLength[2] = static_cast<float>(track.z);
             instance.originLength[3] = 1.0f;
-            const math::Vector3 axis = trackDirectionAxis(track.direction);
+            const voxelsprout::math::Vector3 axis = trackDirectionAxis(track.direction);
             instance.axisRadius[0] = axis.x;
             instance.axisRadius[1] = axis.y;
             instance.axisRadius[2] = axis.z;
@@ -1326,16 +1326,16 @@ void RendererBackend::renderFrame(
 
         std::vector<PipeInstance> beltCargoInstances;
         beltCargoInstances.reserve(beltCargoes.size());
-        for (const sim::BeltCargo& cargo : beltCargoes) {
+        for (const voxelsprout::sim::BeltCargo& cargo : beltCargoes) {
             if (cargo.beltIndex < 0 || static_cast<std::size_t>(cargo.beltIndex) >= belts.size()) {
                 continue;
             }
             const float worldX = std::lerp(cargo.prevWorldPos[0], cargo.currWorldPos[0], clampedSimulationAlpha);
             const float worldY = std::lerp(cargo.prevWorldPos[1], cargo.currWorldPos[1], clampedSimulationAlpha);
             const float worldZ = std::lerp(cargo.prevWorldPos[2], cargo.currWorldPos[2], clampedSimulationAlpha);
-            const sim::Belt& belt = belts[static_cast<std::size_t>(cargo.beltIndex)];
-            const math::Vector3 axis = beltDirectionAxis(belt.direction);
-            const math::Vector3 tint = kBeltCargoTints[static_cast<std::size_t>(cargo.typeId % kBeltCargoTints.size())];
+            const voxelsprout::sim::Belt& belt = belts[static_cast<std::size_t>(cargo.beltIndex)];
+            const voxelsprout::math::Vector3 axis = beltDirectionAxis(belt.direction);
+            const voxelsprout::math::Vector3 tint = kBeltCargoTints[static_cast<std::size_t>(cargo.typeId % kBeltCargoTints.size())];
 
             PipeInstance instance{};
             instance.originLength[0] = worldX - 0.5f;
@@ -1424,7 +1424,7 @@ void RendererBackend::renderFrame(
     for (auto& cascadeCommands : shadowCascadeIndirectCommands) {
         cascadeCommands.reserve((m_chunkDrawRanges.size() / kShadowCascadeCount) + 1u);
     }
-    const std::vector<world::Chunk>& chunks = chunkGrid.chunks();
+    const std::vector<voxelsprout::world::Chunk>& chunks = chunkGrid.chunks();
     auto appendChunkLods = [&](
                                std::size_t chunkArrayIndex,
                                std::vector<ChunkInstanceData>& outInstanceData,
@@ -1434,16 +1434,16 @@ void RendererBackend::renderFrame(
         if (chunkArrayIndex >= chunkGrid.chunks().size()) {
             return;
         }
-        const world::Chunk& drawChunk = chunks[chunkArrayIndex];
+        const voxelsprout::world::Chunk& drawChunk = chunks[chunkArrayIndex];
         const bool allowDetailLods =
             drawChunk.chunkX() == cameraChunkX &&
             drawChunk.chunkY() == cameraChunkY &&
             drawChunk.chunkZ() == cameraChunkZ;
-        for (std::size_t lodIndex = 0; lodIndex < world::kChunkMeshLodCount; ++lodIndex) {
+        for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
             if (lodIndex > 0 && !allowDetailLods) {
                 continue;
             }
-            const std::size_t drawRangeIndex = (chunkArrayIndex * world::kChunkMeshLodCount) + lodIndex;
+            const std::size_t drawRangeIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
             if (drawRangeIndex >= m_chunkDrawRanges.size()) {
                 continue;
             }
@@ -1493,16 +1493,16 @@ void RendererBackend::renderFrame(
         if (chunkArrayIndex >= chunkGrid.chunks().size()) {
             return;
         }
-        const world::Chunk& drawChunk = chunks[chunkArrayIndex];
+        const voxelsprout::world::Chunk& drawChunk = chunks[chunkArrayIndex];
         const bool allowDetailLods =
             drawChunk.chunkX() == cameraChunkX &&
             drawChunk.chunkY() == cameraChunkY &&
             drawChunk.chunkZ() == cameraChunkZ;
-        for (std::size_t lodIndex = 0; lodIndex < world::kChunkMeshLodCount; ++lodIndex) {
+        for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
             if (lodIndex > 0 && !allowDetailLods) {
                 continue;
             }
-            const std::size_t drawRangeIndex = (chunkArrayIndex * world::kChunkMeshLodCount) + lodIndex;
+            const std::size_t drawRangeIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
             if (drawRangeIndex >= m_chunkDrawRanges.size()) {
                 continue;
             }
@@ -1547,7 +1547,7 @@ void RendererBackend::renderFrame(
             if (!shadowCandidateMask.empty() && shadowCandidateMask[chunkArrayIndex] == 0u) {
                 continue;
             }
-            const world::Chunk& chunk = chunks[chunkArrayIndex];
+            const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
             uint32_t cascadeMask = 0u;
             for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
                 if (chunkIntersectsShadowCascadeClip(chunk, lightViewProjMatrices[cascadeIndex], kShadowCasterClipMargin)) {
@@ -2950,9 +2950,9 @@ void RendererBackend::renderFrame(
         previewInstance.originLength[1] = static_cast<float>(preview.y);
         previewInstance.originLength[2] = static_cast<float>(preview.z);
         previewInstance.originLength[3] = 1.0f;
-        math::Vector3 previewAxis = math::normalize(math::Vector3{preview.pipeAxisX, preview.pipeAxisY, preview.pipeAxisZ});
-        if (math::lengthSquared(previewAxis) <= 0.0001f) {
-            previewAxis = math::Vector3{0.0f, 1.0f, 0.0f};
+        voxelsprout::math::Vector3 previewAxis = voxelsprout::math::normalize(voxelsprout::math::Vector3{preview.pipeAxisX, preview.pipeAxisY, preview.pipeAxisZ});
+        if (voxelsprout::math::lengthSquared(previewAxis) <= 0.0001f) {
+            previewAxis = voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f};
         }
         previewInstance.axisRadius[0] = previewAxis.x;
         previewInstance.axisRadius[1] = previewAxis.y;
@@ -3758,4 +3758,4 @@ void RendererBackend::renderFrame(
 }
 
 
-} // namespace render
+} // namespace voxelsprout::render

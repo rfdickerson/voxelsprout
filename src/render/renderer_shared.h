@@ -50,16 +50,16 @@ constexpr float kPipeBranchRadiusBoost = 0.05f;
 constexpr float kPipeMaxEndExtension = 0.49f;
 constexpr float kBeltRadius = 0.49f;
 constexpr float kTrackRadius = 0.38f;
-constexpr math::Vector3 kBeltTint{0.78f, 0.62f, 0.18f};
-constexpr math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
+constexpr voxelsprout::math::Vector3 kBeltTint{0.78f, 0.62f, 0.18f};
+constexpr voxelsprout::math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
 constexpr float kBeltCargoLength = 0.30f;
 constexpr float kBeltCargoRadius = 0.30f;
-constexpr std::array<math::Vector3, 5> kBeltCargoTints = {
-    math::Vector3{0.92f, 0.31f, 0.31f},
-    math::Vector3{0.31f, 0.71f, 0.96f},
-    math::Vector3{0.95f, 0.84f, 0.32f},
-    math::Vector3{0.56f, 0.88f, 0.48f},
-    math::Vector3{0.84f, 0.54f, 0.92f},
+constexpr std::array<voxelsprout::math::Vector3, 5> kBeltCargoTints = {
+    voxelsprout::math::Vector3{0.92f, 0.31f, 0.31f},
+    voxelsprout::math::Vector3{0.31f, 0.71f, 0.96f},
+    voxelsprout::math::Vector3{0.95f, 0.84f, 0.32f},
+    voxelsprout::math::Vector3{0.56f, 0.88f, 0.48f},
+    voxelsprout::math::Vector3{0.84f, 0.54f, 0.92f},
 };
 constexpr uint64_t kAcquireNextImageTimeoutNs = 100000000ull; // 100 ms
 constexpr uint64_t kFrameTimelineWarnLagThreshold = 6u;
@@ -158,22 +158,22 @@ struct PipeMeshData {
     std::vector<std::uint32_t> indices;
 };
 
-world::ChunkMeshData buildSingleVoxelPreviewMesh(
+voxelsprout::world::ChunkMeshData buildSingleVoxelPreviewMesh(
     std::uint32_t x,
     std::uint32_t y,
     std::uint32_t z,
     std::uint32_t ao,
     std::uint32_t material
 ) {
-    world::ChunkMeshData mesh{};
+    voxelsprout::world::ChunkMeshData mesh{};
     mesh.vertices.reserve(24);
     mesh.indices.reserve(36);
 
     for (std::uint32_t faceId = 0; faceId < 6; ++faceId) {
         const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
         for (std::uint32_t corner = 0; corner < 4; ++corner) {
-            world::PackedVoxelVertex vertex{};
-            vertex.bits = world::PackedVoxelVertex::pack(x, y, z, faceId, corner, ao, material, 0u, 2u);
+            voxelsprout::world::PackedVoxelVertex vertex{};
+            vertex.bits = voxelsprout::world::PackedVoxelVertex::pack(x, y, z, faceId, corner, ao, material, 0u, 2u);
             mesh.vertices.push_back(vertex);
         }
 
@@ -359,59 +359,59 @@ PipeMeshData buildPipeCylinderMesh() {
 }
 
 struct PipeEndpointState {
-    math::Vector3 axis{0.0f, 1.0f, 0.0f};
+    voxelsprout::math::Vector3 axis{0.0f, 1.0f, 0.0f};
     float renderedRadius = 0.45f;
     float startExtension = 0.0f;
     float endExtension = 0.0f;
 };
 
-core::Dir6 dominantAxisDir6(const math::Vector3& direction) {
-    if (math::lengthSquared(direction) <= 0.000001f) {
-        return core::Dir6::PosY;
+voxelsprout::core::Dir6 dominantAxisDir6(const voxelsprout::math::Vector3& direction) {
+    if (voxelsprout::math::lengthSquared(direction) <= 0.000001f) {
+        return voxelsprout::core::Dir6::PosY;
     }
-    const math::Vector3 normalized = math::normalize(direction);
+    const voxelsprout::math::Vector3 normalized = voxelsprout::math::normalize(direction);
     const float absX = std::abs(normalized.x);
     const float absY = std::abs(normalized.y);
     const float absZ = std::abs(normalized.z);
     if (absX >= absY && absX >= absZ) {
-        return normalized.x >= 0.0f ? core::Dir6::PosX : core::Dir6::NegX;
+        return normalized.x >= 0.0f ? voxelsprout::core::Dir6::PosX : voxelsprout::core::Dir6::NegX;
     }
     if (absY >= absX && absY >= absZ) {
-        return normalized.y >= 0.0f ? core::Dir6::PosY : core::Dir6::NegY;
+        return normalized.y >= 0.0f ? voxelsprout::core::Dir6::PosY : voxelsprout::core::Dir6::NegY;
     }
-    return normalized.z >= 0.0f ? core::Dir6::PosZ : core::Dir6::NegZ;
+    return normalized.z >= 0.0f ? voxelsprout::core::Dir6::PosZ : voxelsprout::core::Dir6::NegZ;
 }
 
-math::Vector3 beltDirectionAxis(sim::BeltDirection direction) {
+voxelsprout::math::Vector3 beltDirectionAxis(voxelsprout::sim::BeltDirection direction) {
     switch (direction) {
-    case sim::BeltDirection::East:
-        return math::Vector3{1.0f, 0.0f, 0.0f};
-    case sim::BeltDirection::West:
-        return math::Vector3{-1.0f, 0.0f, 0.0f};
-    case sim::BeltDirection::South:
-        return math::Vector3{0.0f, 0.0f, 1.0f};
-    case sim::BeltDirection::North:
+    case voxelsprout::sim::BeltDirection::East:
+        return voxelsprout::math::Vector3{1.0f, 0.0f, 0.0f};
+    case voxelsprout::sim::BeltDirection::West:
+        return voxelsprout::math::Vector3{-1.0f, 0.0f, 0.0f};
+    case voxelsprout::sim::BeltDirection::South:
+        return voxelsprout::math::Vector3{0.0f, 0.0f, 1.0f};
+    case voxelsprout::sim::BeltDirection::North:
     default:
-        return math::Vector3{0.0f, 0.0f, -1.0f};
+        return voxelsprout::math::Vector3{0.0f, 0.0f, -1.0f};
     }
 }
 
-math::Vector3 trackDirectionAxis(sim::TrackDirection direction) {
+voxelsprout::math::Vector3 trackDirectionAxis(voxelsprout::sim::TrackDirection direction) {
     switch (direction) {
-    case sim::TrackDirection::East:
-        return math::Vector3{1.0f, 0.0f, 0.0f};
-    case sim::TrackDirection::West:
-        return math::Vector3{-1.0f, 0.0f, 0.0f};
-    case sim::TrackDirection::South:
-        return math::Vector3{0.0f, 0.0f, 1.0f};
-    case sim::TrackDirection::North:
+    case voxelsprout::sim::TrackDirection::East:
+        return voxelsprout::math::Vector3{1.0f, 0.0f, 0.0f};
+    case voxelsprout::sim::TrackDirection::West:
+        return voxelsprout::math::Vector3{-1.0f, 0.0f, 0.0f};
+    case voxelsprout::sim::TrackDirection::South:
+        return voxelsprout::math::Vector3{0.0f, 0.0f, 1.0f};
+    case voxelsprout::sim::TrackDirection::North:
     default:
-        return math::Vector3{0.0f, 0.0f, -1.0f};
+        return voxelsprout::math::Vector3{0.0f, 0.0f, -1.0f};
     }
 }
 
-bool dirSharesAxis(core::Dir6 lhs, core::Dir6 rhs) {
-    return lhs == rhs || core::areOpposite(lhs, rhs);
+bool dirSharesAxis(voxelsprout::core::Dir6 lhs, voxelsprout::core::Dir6 rhs) {
+    return lhs == rhs || voxelsprout::core::areOpposite(lhs, rhs);
 }
 
 float computeRenderedPipeRadius(float baseRadius, bool hasBranchConnection) {
@@ -422,7 +422,7 @@ float computeRenderedPipeRadius(float baseRadius, bool hasBranchConnection) {
     return renderedRadius;
 }
 
-std::uint64_t pipeCellKey(const core::Cell3i& cell) {
+std::uint64_t pipeCellKey(const voxelsprout::core::Cell3i& cell) {
     constexpr std::uint64_t kMask = (1ull << 21u) - 1ull;
     const std::uint64_t x = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.x) & kMask);
     const std::uint64_t y = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.y) & kMask);
@@ -431,12 +431,12 @@ std::uint64_t pipeCellKey(const core::Cell3i& cell) {
 }
 
 std::vector<PipeEndpointState> buildPipeEndpointStates(
-    const std::vector<sim::Pipe>& pipes
+    const std::vector<voxelsprout::sim::Pipe>& pipes
 ) {
     std::unordered_map<std::uint64_t, std::size_t> pipeCellToIndex;
     pipeCellToIndex.reserve(pipes.size() * 2u);
     for (std::size_t i = 0; i < pipes.size(); ++i) {
-        const core::Cell3i cell{
+        const voxelsprout::core::Cell3i cell{
             pipes[i].x,
             pipes[i].y,
             pipes[i].z
@@ -444,25 +444,25 @@ std::vector<PipeEndpointState> buildPipeEndpointStates(
         pipeCellToIndex.emplace(pipeCellKey(cell), i);
     }
 
-    auto hasPipeAtCell = [&pipeCellToIndex](const core::Cell3i& cell) -> bool {
+    auto hasPipeAtCell = [&pipeCellToIndex](const voxelsprout::core::Cell3i& cell) -> bool {
         return pipeCellToIndex.find(pipeCellKey(cell)) != pipeCellToIndex.end();
     };
 
-    std::vector<core::Dir6> axisDirections(pipes.size(), core::Dir6::PosY);
+    std::vector<voxelsprout::core::Dir6> axisDirections(pipes.size(), voxelsprout::core::Dir6::PosY);
     std::vector<float> renderedRadii(pipes.size(), 0.45f);
     std::vector<bool> hasBranchConnections(pipes.size(), false);
     for (std::size_t i = 0; i < pipes.size(); ++i) {
-        const sim::Pipe& pipe = pipes[i];
-        const core::Cell3i cell{
+        const voxelsprout::sim::Pipe& pipe = pipes[i];
+        const voxelsprout::core::Cell3i cell{
             pipe.x,
             pipe.y,
             pipe.z
         };
-        const core::Dir6 axisDir = dominantAxisDir6(pipe.axis);
-        const core::Dir6 startDir = core::oppositeDir(axisDir);
-        const core::Dir6 endDir = axisDir;
-        const std::uint8_t neighborMask = sim::neighborMask6(cell, hasPipeAtCell);
-        const std::uint8_t axialMask = static_cast<std::uint8_t>(core::dirBit(startDir) | core::dirBit(endDir));
+        const voxelsprout::core::Dir6 axisDir = dominantAxisDir6(pipe.axis);
+        const voxelsprout::core::Dir6 startDir = voxelsprout::core::oppositeDir(axisDir);
+        const voxelsprout::core::Dir6 endDir = axisDir;
+        const std::uint8_t neighborMask = voxelsprout::sim::neighborMask6(cell, hasPipeAtCell);
+        const std::uint8_t axialMask = static_cast<std::uint8_t>(voxelsprout::core::dirBit(startDir) | voxelsprout::core::dirBit(endDir));
         const bool hasBranchConnection = (neighborMask & static_cast<std::uint8_t>(~axialMask & 0x3Fu)) != 0u;
 
         axisDirections[i] = axisDir;
@@ -472,10 +472,10 @@ std::vector<PipeEndpointState> buildPipeEndpointStates(
 
     auto endExtensionForDirection = [&](
                                         std::size_t pipeIndex,
-                                        const core::Cell3i& cell,
-                                        core::Dir6 endDirection
+                                        const voxelsprout::core::Cell3i& cell,
+                                        voxelsprout::core::Dir6 endDirection
                                     ) -> float {
-        const core::Cell3i neighborCell = core::neighborCell(cell, endDirection);
+        const voxelsprout::core::Cell3i neighborCell = voxelsprout::core::neighborCell(cell, endDirection);
         const auto neighborIt = pipeCellToIndex.find(pipeCellKey(neighborCell));
         if (neighborIt == pipeCellToIndex.end()) {
             return 0.0f;
@@ -496,16 +496,16 @@ std::vector<PipeEndpointState> buildPipeEndpointStates(
 
     std::vector<PipeEndpointState> states(pipes.size());
     for (std::size_t i = 0; i < pipes.size(); ++i) {
-        const sim::Pipe& pipe = pipes[i];
-        const core::Cell3i cell{
+        const voxelsprout::sim::Pipe& pipe = pipes[i];
+        const voxelsprout::core::Cell3i cell{
             pipe.x,
             pipe.y,
             pipe.z
         };
-        const core::Dir6 axisDir = axisDirections[i];
-        const core::Dir6 startDir = core::oppositeDir(axisDir);
-        const core::Dir6 endDir = axisDir;
-        states[i].axis = core::dirToUnitVector(axisDir);
+        const voxelsprout::core::Dir6 axisDir = axisDirections[i];
+        const voxelsprout::core::Dir6 startDir = voxelsprout::core::oppositeDir(axisDir);
+        const voxelsprout::core::Dir6 endDir = axisDir;
+        states[i].axis = voxelsprout::core::dirToUnitVector(axisDir);
         states[i].renderedRadius = renderedRadii[i];
         states[i].startExtension = endExtensionForDirection(i, cell, startDir);
         states[i].endExtension = endExtensionForDirection(i, cell, endDir);
@@ -514,8 +514,8 @@ std::vector<PipeEndpointState> buildPipeEndpointStates(
     return states;
 }
 
-math::Matrix4 transpose(const math::Matrix4& matrix) {
-    math::Matrix4 result{};
+voxelsprout::math::Matrix4 transpose(const voxelsprout::math::Matrix4& matrix) {
+    voxelsprout::math::Matrix4 result{};
     for (int row = 0; row < 4; ++row) {
         for (int col = 0; col < 4; ++col) {
             result(row, col) = matrix(col, row);
@@ -524,11 +524,11 @@ math::Matrix4 transpose(const math::Matrix4& matrix) {
     return result;
 }
 
-math::Matrix4 perspectiveVulkan(float fovYRadians, float aspectRatio, float nearPlane, float farPlane) {
-    return math::perspectiveVulkanReverseZ(fovYRadians, aspectRatio, nearPlane, farPlane);
+voxelsprout::math::Matrix4 perspectiveVulkan(float fovYRadians, float aspectRatio, float nearPlane, float farPlane) {
+    return voxelsprout::math::perspectiveVulkanReverseZ(fovYRadians, aspectRatio, nearPlane, farPlane);
 }
 
-math::Matrix4 orthographicVulkan(
+voxelsprout::math::Matrix4 orthographicVulkan(
     float left,
     float right,
     float bottom,
@@ -536,53 +536,53 @@ math::Matrix4 orthographicVulkan(
     float nearPlane,
     float farPlane
 ) {
-    return math::orthographicVulkanReverseZ(left, right, bottom, top, nearPlane, farPlane);
+    return voxelsprout::math::orthographicVulkanReverseZ(left, right, bottom, top, nearPlane, farPlane);
 }
 
-math::Matrix4 lookAt(const math::Vector3& eye, const math::Vector3& target, const math::Vector3& up) {
-    const math::Vector3 forward = math::normalize(target - eye);
-    const math::Vector3 right = math::normalize(math::cross(forward, up));
-    const math::Vector3 cameraUp = math::cross(right, forward);
+voxelsprout::math::Matrix4 lookAt(const voxelsprout::math::Vector3& eye, const voxelsprout::math::Vector3& target, const voxelsprout::math::Vector3& up) {
+    const voxelsprout::math::Vector3 forward = voxelsprout::math::normalize(target - eye);
+    const voxelsprout::math::Vector3 right = voxelsprout::math::normalize(voxelsprout::math::cross(forward, up));
+    const voxelsprout::math::Vector3 cameraUp = voxelsprout::math::cross(right, forward);
 
-    math::Matrix4 view = math::Matrix4::identity();
+    voxelsprout::math::Matrix4 view = voxelsprout::math::Matrix4::identity();
     view(0, 0) = right.x;
     view(0, 1) = right.y;
     view(0, 2) = right.z;
-    view(0, 3) = -math::dot(right, eye);
+    view(0, 3) = -voxelsprout::math::dot(right, eye);
 
     view(1, 0) = cameraUp.x;
     view(1, 1) = cameraUp.y;
     view(1, 2) = cameraUp.z;
-    view(1, 3) = -math::dot(cameraUp, eye);
+    view(1, 3) = -voxelsprout::math::dot(cameraUp, eye);
 
     view(2, 0) = -forward.x;
     view(2, 1) = -forward.y;
     view(2, 2) = -forward.z;
-    view(2, 3) = math::dot(forward, eye);
+    view(2, 3) = voxelsprout::math::dot(forward, eye);
     return view;
 }
 
 bool chunkIntersectsShadowCascadeClip(
-    const world::Chunk& chunk,
-    const math::Matrix4& lightViewProj,
+    const voxelsprout::world::Chunk& chunk,
+    const voxelsprout::math::Matrix4& lightViewProj,
     float clipMargin
 ) {
-    const float chunkMinX = static_cast<float>(chunk.chunkX() * world::Chunk::kSizeX);
-    const float chunkMinY = static_cast<float>(chunk.chunkY() * world::Chunk::kSizeY);
-    const float chunkMinZ = static_cast<float>(chunk.chunkZ() * world::Chunk::kSizeZ);
-    const float chunkMaxX = chunkMinX + static_cast<float>(world::Chunk::kSizeX);
-    const float chunkMaxY = chunkMinY + static_cast<float>(world::Chunk::kSizeY);
-    const float chunkMaxZ = chunkMinZ + static_cast<float>(world::Chunk::kSizeZ);
+    const float chunkMinX = static_cast<float>(chunk.chunkX() * voxelsprout::world::Chunk::kSizeX);
+    const float chunkMinY = static_cast<float>(chunk.chunkY() * voxelsprout::world::Chunk::kSizeY);
+    const float chunkMinZ = static_cast<float>(chunk.chunkZ() * voxelsprout::world::Chunk::kSizeZ);
+    const float chunkMaxX = chunkMinX + static_cast<float>(voxelsprout::world::Chunk::kSizeX);
+    const float chunkMaxY = chunkMinY + static_cast<float>(voxelsprout::world::Chunk::kSizeY);
+    const float chunkMaxZ = chunkMinZ + static_cast<float>(voxelsprout::world::Chunk::kSizeZ);
 
-    std::array<math::Vector3, 8> corners = {
-        math::Vector3{chunkMinX, chunkMinY, chunkMinZ},
-        math::Vector3{chunkMaxX, chunkMinY, chunkMinZ},
-        math::Vector3{chunkMinX, chunkMaxY, chunkMinZ},
-        math::Vector3{chunkMaxX, chunkMaxY, chunkMinZ},
-        math::Vector3{chunkMinX, chunkMinY, chunkMaxZ},
-        math::Vector3{chunkMaxX, chunkMinY, chunkMaxZ},
-        math::Vector3{chunkMinX, chunkMaxY, chunkMaxZ},
-        math::Vector3{chunkMaxX, chunkMaxY, chunkMaxZ},
+    std::array<voxelsprout::math::Vector3, 8> corners = {
+        voxelsprout::math::Vector3{chunkMinX, chunkMinY, chunkMinZ},
+        voxelsprout::math::Vector3{chunkMaxX, chunkMinY, chunkMinZ},
+        voxelsprout::math::Vector3{chunkMinX, chunkMaxY, chunkMinZ},
+        voxelsprout::math::Vector3{chunkMaxX, chunkMaxY, chunkMinZ},
+        voxelsprout::math::Vector3{chunkMinX, chunkMinY, chunkMaxZ},
+        voxelsprout::math::Vector3{chunkMaxX, chunkMinY, chunkMaxZ},
+        voxelsprout::math::Vector3{chunkMinX, chunkMaxY, chunkMaxZ},
+        voxelsprout::math::Vector3{chunkMaxX, chunkMaxY, chunkMaxZ},
     };
 
     float ndcMinX = std::numeric_limits<float>::max();
@@ -591,8 +591,8 @@ bool chunkIntersectsShadowCascadeClip(
     float ndcMaxX = std::numeric_limits<float>::lowest();
     float ndcMaxY = std::numeric_limits<float>::lowest();
     float ndcMaxZ = std::numeric_limits<float>::lowest();
-    for (const math::Vector3& corner : corners) {
-        const math::Vector3 clip = math::transformPoint(lightViewProj, corner);
+    for (const voxelsprout::math::Vector3& corner : corners) {
+        const voxelsprout::math::Vector3 clip = voxelsprout::math::transformPoint(lightViewProj, corner);
         ndcMinX = std::min(ndcMinX, clip.x);
         ndcMinY = std::min(ndcMinY, clip.y);
         ndcMinZ = std::min(ndcMinZ, clip.z);
@@ -618,7 +618,7 @@ float smoothStep(float edge0, float edge1, float x) {
     return t * t * (3.0f - (2.0f * t));
 }
 
-math::Vector3 lerpVec3(const math::Vector3& a, const math::Vector3& b, float t) {
+voxelsprout::math::Vector3 lerpVec3(const voxelsprout::math::Vector3& a, const voxelsprout::math::Vector3& b, float t) {
     return (a * (1.0f - t)) + (b * t);
 }
 
@@ -663,11 +663,11 @@ SkyTuningSample blendSkyTuningSample(const SkyTuningSample& base, const SkyTunin
     return result;
 }
 
-math::Vector3 computeSunColor(
+voxelsprout::math::Vector3 computeSunColor(
     const RendererBackend::SkyDebugSettings& settings,
-    const math::Vector3& sunDirection
+    const voxelsprout::math::Vector3& sunDirection
 ) {
-    const math::Vector3 toSun = -math::normalize(sunDirection);
+    const voxelsprout::math::Vector3 toSun = -voxelsprout::math::normalize(sunDirection);
     const float sunAltitude = std::clamp(toSun.y, -1.0f, 1.0f);
     const float dayFactor = smoothStep(0.05f, 0.65f, sunAltitude);
     const float twilightFactor = 1.0f - dayFactor;
@@ -677,11 +677,11 @@ math::Vector3 computeSunColor(
 
     const float rayleigh = std::max(settings.rayleighStrength, 0.01f);
     const float mie = std::max(settings.mieStrength, 0.01f);
-    const math::Vector3 dayTint{1.00f, 0.98f, 0.94f};
-    const math::Vector3 goldenTint{1.18f, 0.72f, 0.34f};
-    const math::Vector3 pinkTint{1.08f, 0.56f, 0.74f};
+    const voxelsprout::math::Vector3 dayTint{1.00f, 0.98f, 0.94f};
+    const voxelsprout::math::Vector3 goldenTint{1.18f, 0.72f, 0.34f};
+    const voxelsprout::math::Vector3 pinkTint{1.08f, 0.56f, 0.74f};
 
-    math::Vector3 sunTint = lerpVec3(dayTint, goldenTint, warmAmount);
+    voxelsprout::math::Vector3 sunTint = lerpVec3(dayTint, goldenTint, warmAmount);
     sunTint = lerpVec3(sunTint, pinkTint, pinkAmount * 0.45f);
 
     const float scatteringScale = (rayleigh * 0.55f) + (mie * 0.80f);
@@ -689,14 +689,14 @@ math::Vector3 computeSunColor(
     return sunTint * (scatteringScale * twilightBoost);
 }
 
-math::Vector3 proceduralSkyRadiance(
-    const math::Vector3& direction,
-    const math::Vector3& sunDirection,
-    const math::Vector3& sunColor,
+voxelsprout::math::Vector3 proceduralSkyRadiance(
+    const voxelsprout::math::Vector3& direction,
+    const voxelsprout::math::Vector3& sunDirection,
+    const voxelsprout::math::Vector3& sunColor,
     const RendererBackend::SkyDebugSettings& settings
 ) {
-    const math::Vector3 dir = math::normalize(direction);
-    const math::Vector3 toSun = -math::normalize(sunDirection);
+    const voxelsprout::math::Vector3 dir = voxelsprout::math::normalize(direction);
+    const voxelsprout::math::Vector3 toSun = -voxelsprout::math::normalize(sunDirection);
     const float horizonT = saturate((dir.y * 0.5f) + 0.5f);
     const float skyT = std::pow(horizonT, 0.35f);
     const float sunAltitude = std::clamp(toSun.y, -1.0f, 1.0f);
@@ -709,36 +709,36 @@ math::Vector3 proceduralSkyRadiance(
     const float rayleigh = std::max(settings.rayleighStrength, 0.01f);
     const float mie = std::max(settings.mieStrength, 0.01f);
 
-    const math::Vector3 dayHorizonRayleigh{0.54f, 0.70f, 1.00f};
-    const math::Vector3 dayHorizonMie{1.00f, 0.74f, 0.42f};
-    const math::Vector3 sunsetHorizonRayleigh{0.74f, 0.44f, 0.52f};
-    const math::Vector3 sunsetHorizonMie{1.18f, 0.54f, 0.30f};
-    const math::Vector3 pinkHorizonRayleigh{0.70f, 0.36f, 0.68f};
-    const math::Vector3 pinkHorizonMie{1.08f, 0.46f, 0.72f};
+    const voxelsprout::math::Vector3 dayHorizonRayleigh{0.54f, 0.70f, 1.00f};
+    const voxelsprout::math::Vector3 dayHorizonMie{1.00f, 0.74f, 0.42f};
+    const voxelsprout::math::Vector3 sunsetHorizonRayleigh{0.74f, 0.44f, 0.52f};
+    const voxelsprout::math::Vector3 sunsetHorizonMie{1.18f, 0.54f, 0.30f};
+    const voxelsprout::math::Vector3 pinkHorizonRayleigh{0.70f, 0.36f, 0.68f};
+    const voxelsprout::math::Vector3 pinkHorizonMie{1.08f, 0.46f, 0.72f};
 
     const float zenithWarm = twilightFactor * 0.58f;
-    const math::Vector3 dayZenithRayleigh{0.06f, 0.24f, 0.54f};
-    const math::Vector3 dayZenithMie{0.22f, 0.20f, 0.15f};
-    const math::Vector3 duskZenithRayleigh{0.16f, 0.12f, 0.30f};
-    const math::Vector3 duskZenithMie{0.30f, 0.18f, 0.24f};
+    const voxelsprout::math::Vector3 dayZenithRayleigh{0.06f, 0.24f, 0.54f};
+    const voxelsprout::math::Vector3 dayZenithMie{0.22f, 0.20f, 0.15f};
+    const voxelsprout::math::Vector3 duskZenithRayleigh{0.16f, 0.12f, 0.30f};
+    const voxelsprout::math::Vector3 duskZenithMie{0.30f, 0.18f, 0.24f};
 
-    math::Vector3 horizonRayleigh = lerpVec3(dayHorizonRayleigh, sunsetHorizonRayleigh, warmAmount);
-    math::Vector3 horizonMie = lerpVec3(dayHorizonMie, sunsetHorizonMie, warmAmount);
+    voxelsprout::math::Vector3 horizonRayleigh = lerpVec3(dayHorizonRayleigh, sunsetHorizonRayleigh, warmAmount);
+    voxelsprout::math::Vector3 horizonMie = lerpVec3(dayHorizonMie, sunsetHorizonMie, warmAmount);
     horizonRayleigh = lerpVec3(horizonRayleigh, pinkHorizonRayleigh, pinkAmount * 0.70f);
     horizonMie = lerpVec3(horizonMie, pinkHorizonMie, pinkAmount * 0.85f);
 
-    const math::Vector3 zenithRayleigh = lerpVec3(dayZenithRayleigh, duskZenithRayleigh, zenithWarm);
-    const math::Vector3 zenithMie = lerpVec3(dayZenithMie, duskZenithMie, zenithWarm);
+    const voxelsprout::math::Vector3 zenithRayleigh = lerpVec3(dayZenithRayleigh, duskZenithRayleigh, zenithWarm);
+    const voxelsprout::math::Vector3 zenithMie = lerpVec3(dayZenithMie, duskZenithMie, zenithWarm);
 
-    const math::Vector3 horizonColor =
+    const voxelsprout::math::Vector3 horizonColor =
         (horizonRayleigh * rayleigh) +
         (horizonMie * (mie * 0.58f));
-    const math::Vector3 zenithColor =
+    const voxelsprout::math::Vector3 zenithColor =
         (zenithRayleigh * rayleigh) +
         (zenithMie * (mie * 0.25f));
-    const math::Vector3 baseSky = (horizonColor * (1.0f - skyT)) + (zenithColor * skyT);
+    const voxelsprout::math::Vector3 baseSky = (horizonColor * (1.0f - skyT)) + (zenithColor * skyT);
 
-    const float sunDot = std::max(math::dot(dir, toSun), 0.0f);
+    const float sunDot = std::max(voxelsprout::math::dot(dir, toSun), 0.0f);
     const float sunDisk = std::pow(sunDot, 1100.0f);
     const float sunGlow = std::pow(sunDot, 24.0f);
     const float g = std::clamp(settings.mieAnisotropy, 0.0f, 0.98f);
@@ -749,21 +749,21 @@ math::Vector3 proceduralSkyRadiance(
     const float phaseBoost = (phaseRayleigh * rayleigh) + (phaseMie * mie * 1.4f);
 
     const float aboveHorizon = saturate(dir.y * 4.0f + 0.2f);
-    const math::Vector3 sky = (baseSky * aboveHorizon)
+    const voxelsprout::math::Vector3 sky = (baseSky * aboveHorizon)
         + (sunColor * (((sunDisk * 5.0f) + (sunGlow * 1.2f)) * (1.0f + phaseBoost)));
 
-    const math::Vector3 groundColor{0.05f, 0.06f, 0.07f};
+    const voxelsprout::math::Vector3 groundColor{0.05f, 0.06f, 0.07f};
     const float belowHorizon = saturate(-dir.y);
-    const math::Vector3 horizonGroundColor = horizonColor * 0.32f;
+    const voxelsprout::math::Vector3 horizonGroundColor = horizonColor * 0.32f;
     const float groundWeight = std::pow(belowHorizon, 0.55f);
-    const math::Vector3 ground = (horizonGroundColor * (1.0f - groundWeight)) + (groundColor * groundWeight);
+    const voxelsprout::math::Vector3 ground = (horizonGroundColor * (1.0f - groundWeight)) + (groundColor * groundWeight);
 
     const float skyWeight = saturate((dir.y + 0.18f) / 0.20f);
     const float skyExposure = std::max(settings.skyExposure, 0.01f);
     return ((ground * (1.0f - skyWeight)) + (sky * skyWeight)) * skyExposure;
 }
 
-float shBasis(int index, const math::Vector3& direction) {
+float shBasis(int index, const voxelsprout::math::Vector3& direction) {
     const float x = direction.x;
     const float y = direction.y;
     const float z = direction.z;
@@ -781,9 +781,9 @@ float shBasis(int index, const math::Vector3& direction) {
     }
 }
 
-std::array<math::Vector3, 9> computeIrradianceShCoefficients(
-    const math::Vector3& sunDirection,
-    const math::Vector3& sunColor,
+std::array<voxelsprout::math::Vector3, 9> computeIrradianceShCoefficients(
+    const voxelsprout::math::Vector3& sunDirection,
+    const voxelsprout::math::Vector3& sunColor,
     const RendererBackend::SkyDebugSettings& settings
 ) {
     constexpr uint32_t kThetaSamples = 16;
@@ -791,9 +791,9 @@ std::array<math::Vector3, 9> computeIrradianceShCoefficients(
     constexpr float kPi = 3.14159265358979323846f;
     constexpr float kTwoPi = 2.0f * kPi;
 
-    std::array<math::Vector3, 9> coefficients{};
-    for (math::Vector3& coefficient : coefficients) {
-        coefficient = math::Vector3{};
+    std::array<voxelsprout::math::Vector3, 9> coefficients{};
+    for (voxelsprout::math::Vector3& coefficient : coefficients) {
+        coefficient = voxelsprout::math::Vector3{};
     }
 
     float weightSum = 0.0f;
@@ -806,13 +806,13 @@ std::array<math::Vector3, 9> computeIrradianceShCoefficients(
         for (uint32_t phiIdx = 0; phiIdx < kPhiSamples; ++phiIdx) {
             const float u = (static_cast<float>(phiIdx) + 0.5f) / static_cast<float>(kPhiSamples);
             const float phi = u * kTwoPi;
-            const math::Vector3 dir{
+            const voxelsprout::math::Vector3 dir{
                 std::cos(phi) * sinTheta,
                 cosTheta,
                 std::sin(phi) * sinTheta
             };
 
-            const math::Vector3 radiance = proceduralSkyRadiance(dir, sunDirection, sunColor, settings);
+            const voxelsprout::math::Vector3 radiance = proceduralSkyRadiance(dir, sunDirection, sunColor, settings);
             const float sampleWeight = sinTheta;
             for (int basisIndex = 0; basisIndex < 9; ++basisIndex) {
                 const float basisValue = shBasis(basisIndex, dir);
@@ -827,7 +827,7 @@ std::array<math::Vector3, 9> computeIrradianceShCoefficients(
     }
 
     const float normalization = (4.0f * kPi) / weightSum;
-    for (math::Vector3& coefficient : coefficients) {
+    for (voxelsprout::math::Vector3& coefficient : coefficients) {
         coefficient *= normalization;
     }
 
@@ -1057,26 +1057,26 @@ VkFormat findSupportedVoxelGiOccupancyFormat(VkPhysicalDevice physicalDevice) {
     return VK_FORMAT_UNDEFINED;
 }
 
-std::array<std::uint8_t, 3> voxelTypeAlbedoRgb(world::VoxelType type) {
+std::array<std::uint8_t, 3> voxelTypeAlbedoRgb(voxelsprout::world::VoxelType type) {
     switch (type) {
-    case world::VoxelType::Stone:
+    case voxelsprout::world::VoxelType::Stone:
         return {150u, 154u, 160u};
-    case world::VoxelType::Dirt:
+    case voxelsprout::world::VoxelType::Dirt:
         return {122u, 93u, 58u};
-    case world::VoxelType::Grass:
+    case voxelsprout::world::VoxelType::Grass:
         return {80u, 142u, 63u};
-    case world::VoxelType::Wood:
+    case voxelsprout::world::VoxelType::Wood:
         return {141u, 106u, 64u};
-    case world::VoxelType::SolidRed:
+    case voxelsprout::world::VoxelType::SolidRed:
         return {255u, 71u, 56u};
-    case world::VoxelType::Empty:
+    case voxelsprout::world::VoxelType::Empty:
     default:
         return {0u, 0u, 0u};
     }
 }
 
 std::array<std::uint8_t, 3> voxelGiAlbedoRgb(
-    const world::Voxel& voxel,
+    const voxelsprout::world::Voxel& voxel,
     const std::array<std::uint32_t, 16>& palette
 ) {
     if (voxel.baseColorIndex <= 0x0Fu) {

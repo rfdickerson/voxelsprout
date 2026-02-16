@@ -1,4 +1,4 @@
-// Compile for Vulkan SPIR-V with column-major matrices to match Renderer.cpp uniform layout:
+// Compile for Vulkan SPIR-V with column-major matrices to match renderer.cc uniform layout:
 // slangc -target spirv -entry main -stage compute -matrix-layout-column-major src/render/shaders/voxel_gi_sky_exposure.comp.slang -o src/render/shaders/voxel_gi_sky_exposure.comp.slang.spv
 
 import camera_uniform;

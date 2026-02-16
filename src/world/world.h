@@ -7,7 +7,7 @@
 #include <filesystem>
 #include <span>
 
-namespace world {
+namespace voxelsprout::world {
 
 class World {
 public:
@@ -56,4 +56,4 @@ private:
     ChunkGrid m_chunkGrid;
 };
 
-} // namespace world
+} // namespace voxelsprout::world

@@ -38,7 +38,7 @@ Characteristics:
 - Automatically reclaimed when that frame slot is reused (after timeline wait).
 
 ## Current API (Implemented Foundation)
-Implemented in `src/render/BufferHelpers.hpp` and `src/render/BufferHelpers.cpp`.
+Implemented in `src/render/buffer_helpers.h` and `src/render/buffer_helpers.cc`.
 
 - `FrameArenaConfig`
   - `uploadBytesPerFrame`

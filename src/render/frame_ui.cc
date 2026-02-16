@@ -1,4 +1,4 @@
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace render {
+namespace voxelsprout::render {
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
@@ -265,17 +265,17 @@ void RendererBackend::buildMeshingDebugUi() {
         m_debugClipmapConfig.brickResolution = clipmapBrickResolution;
     }
 
-    int meshingModeSelection = (m_chunkMeshingOptions.mode == world::MeshingMode::Greedy) ? 1 : 0;
+    int meshingModeSelection = (m_chunkMeshingOptions.mode == voxelsprout::world::MeshingMode::Greedy) ? 1 : 0;
     if (ImGui::Combo("Chunk Meshing", &meshingModeSelection, "Naive\0Greedy\0")) {
-        const world::MeshingMode nextMode =
-            (meshingModeSelection == 1) ? world::MeshingMode::Greedy : world::MeshingMode::Naive;
+        const voxelsprout::world::MeshingMode nextMode =
+            (meshingModeSelection == 1) ? voxelsprout::world::MeshingMode::Greedy : voxelsprout::world::MeshingMode::Naive;
         if (nextMode != m_chunkMeshingOptions.mode) {
             m_chunkMeshingOptions.mode = nextMode;
             m_chunkLodMeshCacheValid = false;
             m_chunkMeshRebuildRequested = true;
             m_pendingChunkRemeshIndices.clear();
             VOX_LOGI("render") << "chunk meshing mode changed to "
-                               << (nextMode == world::MeshingMode::Greedy ? "Greedy" : "Naive")
+                               << (nextMode == voxelsprout::world::MeshingMode::Greedy ? "Greedy" : "Naive")
                                << ", scheduling full remesh";
         }
     }
@@ -323,4 +323,4 @@ void RendererBackend::buildAimReticleUi() {
 }
 
 
-} // namespace render
+} // namespace voxelsprout::render

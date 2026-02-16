@@ -1,4 +1,4 @@
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include "core/log.h"
 
@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <type_traits>
 
-namespace render {
+namespace voxelsprout::render {
 
 namespace {
 
@@ -654,4 +654,4 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     return m_descriptorManager.buildBoundDescriptorSets(m_currentFrame);
 }
 
-} // namespace render
+} // namespace voxelsprout::render

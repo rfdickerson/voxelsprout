@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-namespace core {
+namespace voxelsprout::core {
 
 enum class LogLevel : uint8_t {
     Error = 0,
@@ -34,13 +34,13 @@ private:
     std::ostringstream m_stream;
 };
 
-} // namespace core
+} // namespace voxelsprout::core
 
 #define VOX_LOG_STREAM(level, category) \
-    if (!::core::shouldLog(level)) {} else ::core::LogLine((level), (category)).stream()
+    if (!::voxelsprout::core::shouldLog(level)) {} else ::voxelsprout::core::LogLine((level), (category)).stream()
 
-#define VOX_LOGE(category) VOX_LOG_STREAM(::core::LogLevel::Error, (category))
-#define VOX_LOGW(category) VOX_LOG_STREAM(::core::LogLevel::Warn, (category))
-#define VOX_LOGI(category) VOX_LOG_STREAM(::core::LogLevel::Info, (category))
-#define VOX_LOGD(category) VOX_LOG_STREAM(::core::LogLevel::Debug, (category))
-#define VOX_LOGT(category) VOX_LOG_STREAM(::core::LogLevel::Trace, (category))
+#define VOX_LOGE(category) VOX_LOG_STREAM(::voxelsprout::core::LogLevel::Error, (category))
+#define VOX_LOGW(category) VOX_LOG_STREAM(::voxelsprout::core::LogLevel::Warn, (category))
+#define VOX_LOGI(category) VOX_LOG_STREAM(::voxelsprout::core::LogLevel::Info, (category))
+#define VOX_LOGD(category) VOX_LOG_STREAM(::voxelsprout::core::LogLevel::Debug, (category))
+#define VOX_LOGT(category) VOX_LOG_STREAM(::voxelsprout::core::LogLevel::Trace, (category))

@@ -1,9 +1,9 @@
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include <tuple>
 #include <unordered_map>
 
-namespace render {
+namespace voxelsprout::render {
 
 namespace {
 struct ChunkCoordHash {
@@ -17,7 +17,7 @@ struct ChunkCoordHash {
 } // namespace
 
 std::vector<std::uint8_t> RendererBackend::buildShadowCandidateMask(
-    std::span<const world::Chunk> chunks,
+    std::span<const voxelsprout::world::Chunk> chunks,
     std::span<const std::size_t> visibleChunkIndices
 ) const {
     std::vector<std::uint8_t> shadowCandidateMask;
@@ -29,7 +29,7 @@ std::vector<std::uint8_t> RendererBackend::buildShadowCandidateMask(
     std::unordered_map<std::tuple<int, int, int>, std::size_t, ChunkCoordHash> chunkIndexByCoord;
     chunkIndexByCoord.reserve(chunks.size() * 2u);
     for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-        const world::Chunk& chunk = chunks[chunkArrayIndex];
+        const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
         chunkIndexByCoord.emplace(
             std::tuple<int, int, int>{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()},
             chunkArrayIndex
@@ -47,7 +47,7 @@ std::vector<std::uint8_t> RendererBackend::buildShadowCandidateMask(
         if (visibleChunkIndex >= chunks.size()) {
             continue;
         }
-        const world::Chunk& chunk = chunks[visibleChunkIndex];
+        const voxelsprout::world::Chunk& chunk = chunks[visibleChunkIndex];
         shadowCandidateMask[visibleChunkIndex] = 1u;
         const int baseChunkX = chunk.chunkX();
         const int baseChunkY = chunk.chunkY();
@@ -68,4 +68,4 @@ std::vector<std::uint8_t> RendererBackend::buildShadowCandidateMask(
     return shadowCandidateMask;
 }
 
-} // namespace render
+} // namespace voxelsprout::render

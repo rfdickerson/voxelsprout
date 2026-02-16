@@ -1,4 +1,4 @@
-#include "render/renderer_backend.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include "core/log.h"
 
@@ -11,7 +11,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace render {
+namespace voxelsprout::render {
 
 namespace {
 
@@ -232,7 +232,7 @@ bool RendererBackend::createMagicaPipeline() {
 
     VkVertexInputBindingDescription bindingDescriptions[2]{};
     bindingDescriptions[0].binding = 0;
-    bindingDescriptions[0].stride = sizeof(world::PackedVoxelVertex);
+    bindingDescriptions[0].stride = sizeof(voxelsprout::world::PackedVoxelVertex);
     bindingDescriptions[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
     bindingDescriptions[1].binding = 1;
     bindingDescriptions[1].stride = sizeof(ChunkInstanceData);
@@ -814,7 +814,7 @@ bool RendererBackend::createAoPipelines() {
 
     VkVertexInputBindingDescription voxelBindings[2]{};
     voxelBindings[0].binding = 0;
-    voxelBindings[0].stride = sizeof(world::PackedVoxelVertex);
+    voxelBindings[0].stride = sizeof(voxelsprout::world::PackedVoxelVertex);
     voxelBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
     voxelBindings[1].binding = 1;
     voxelBindings[1].stride = sizeof(ChunkInstanceData);
@@ -1313,7 +1313,7 @@ bool RendererBackend::createGraphicsPipeline() {
     // Binding 0: packed voxel vertices. Binding 1: per-draw chunk origin.
     VkVertexInputBindingDescription bindingDescriptions[2]{};
     bindingDescriptions[0].binding = 0;
-    bindingDescriptions[0].stride = sizeof(world::PackedVoxelVertex);
+    bindingDescriptions[0].stride = sizeof(voxelsprout::world::PackedVoxelVertex);
     bindingDescriptions[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
     bindingDescriptions[1].binding = 1;
     bindingDescriptions[1].stride = sizeof(ChunkInstanceData);
@@ -2005,4 +2005,4 @@ bool RendererBackend::createGraphicsPipeline() {
     return true;
 }
 
-} // namespace render
+} // namespace voxelsprout::render

@@ -2,7 +2,7 @@
 
 #include <cmath>
 
-namespace math {
+namespace voxelsprout::math {
 
 constexpr float kPi = 3.14159265358979323846f;
 
@@ -316,4 +316,4 @@ inline Vector3 transformDirection(const Matrix4& m, const Vector3& d) {
     return Vector3{result.x, result.y, result.z};
 }
 
-} // namespace math
+} // namespace voxelsprout::math

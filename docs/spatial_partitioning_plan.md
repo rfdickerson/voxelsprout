@@ -86,10 +86,9 @@ Track in debug UI:
 
 ## Current Status
 - Added foundational `ChunkSpatialIndex` subsystem:
-  - `src/world/SpatialIndex.hpp`
-  - `src/world/SpatialIndex.cpp`
+  - `src/world/spatial_index.h`
 - Rebuilt at app world load/regenerate:
-  - `src/app/App.cpp`
+  - `src/app/app.cc`
 
 Renderer still uses existing visibility loop for now. Next step is Phase 1 integration.
 
