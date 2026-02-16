@@ -1,6 +1,5 @@
 #include "render/Renderer.hpp"
 
-#if defined(VOXEL_HAS_IMGUI)
 #include <imgui.h>
 
 namespace render {
@@ -215,4 +214,3 @@ void Renderer::buildSunDebugUi() {
 
 } // namespace render
 
-#endif
