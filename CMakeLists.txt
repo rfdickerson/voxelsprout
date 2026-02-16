@@ -244,8 +244,10 @@ if(BUILD_TESTING)
         add_executable(voxel_stability_gtests
             tests/stability_g_tests.cc
             tests/frame_math_tests.cc
+            tests/frame_graph_tests.cc
             tests/frame_render_tests.cc
             tests/sim_network_tests.cc
+            src/render/frame_graph.cc
             src/render/backend/vulkan/shadow_culling_utils.cc
             src/core/log.cc
             src/world/magica_voxel.cc
