@@ -602,9 +602,15 @@ float4 main(FragmentInput input) : SV_Target0
     const float ambientFloor = clamp(camera.shadowVoxelGridOrigin.y, 0.0, 1.0);
     const float ambientScale = clamp(1.0 / (1.0 + (voxelGiLumaValue * ambientRebalanceStrength)), ambientFloor, 1.0);
     const float skyExposureFromVoxel = sampleVoxelSkyExposure(input.inWorldPosition + (normal * 0.08));
-    // Keep SH ambient independent from direct-sun shadowing so shadowed faces still receive skylight fill.
+    // Keep SH ambient independent from direct-sun shadowing so sky-facing open surfaces
+    // keep useful fill, and bias toward full SH when they are actually in shadow.
     const float ambientSkyVisibility = lerp(0.55, 1.0, skyExposureFromVoxel);
+    const float3 shAmbient = selectAmbient(normal, 1.0) * kSkyCoolTint;
+    const float skyOpenToSh = max(skyVisibility, skyExposureFromVoxel);
+    const float shadowOpenBlend = clamp(1.0 - shadowVisibility, 0.0, 1.0);
+    const float shadowSkyGate = shadowOpenBlend * skyOpenToSh;
     float3 ambient = (selectAmbient(normal, vertexAo) * kSkyCoolTint) * ambientScale * ambientSkyVisibility;
+    ambient = lerp(ambient, shAmbient * ambientScale, shadowSkyGate);
     const float ambientVertical = lerp(0.85, 1.1, (normal.y * 0.5) + 0.5);
     ambient *= ambientVertical;
     const float3 directSun = sunColor * (sunIntensity * ndotl);
@@ -619,7 +625,9 @@ float4 main(FragmentInput input) : SV_Target0
     const float skyFillVertical = lerp(0.85, 1.15, (normal.y * 0.5) + 0.5);
     const float3 postGiShFill =
         shFillBase * (skyFillStrength * ambientSkyVisibility * skyFillEnclosure * skyFillVertical);
+    const float3 shadowSkyBoost = shFillBase * (0.45 * shadowSkyGate * ambientSkyVisibility * skyFillVertical);
     lighting += postGiShFill;
+    lighting += shadowSkyBoost;
 
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
     const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
