@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "render/backend/vulkan/frame_graph_core.h"
 #include "render/backend/vulkan/frame_math.h"
 
 namespace voxelsprout::render {
@@ -42,49 +43,6 @@ namespace voxelsprout::render {
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
-
-namespace {
-
-struct CoreFrameGraphPassIds {
-    FrameGraph::PassId shadow = 0;
-    FrameGraph::PassId prepass = 0;
-    FrameGraph::PassId main = 0;
-    FrameGraph::PassId post = 0;
-};
-
-CoreFrameGraphPassIds buildCoreFrameGraph(FrameGraph* frameGraph) {
-    CoreFrameGraphPassIds ids{};
-    if (frameGraph == nullptr) {
-        return ids;
-    }
-
-    frameGraph->reset();
-    ids.shadow = frameGraph->addPass({"shadow", FrameGraphQueue::Graphics});
-    ids.prepass = frameGraph->addPass({"prepass", FrameGraphQueue::Graphics});
-    ids.main = frameGraph->addPass({"main", FrameGraphQueue::Graphics});
-    ids.post = frameGraph->addPass({"post", FrameGraphQueue::Graphics});
-
-    const FrameGraph::ResourceId shadowAtlas = frameGraph->addResource({"shadow_atlas_depth"});
-    const FrameGraph::ResourceId sceneDepth = frameGraph->addResource({"scene_depth"});
-    const FrameGraph::ResourceId hdrColor = frameGraph->addResource({"scene_hdr_color"});
-    const FrameGraph::ResourceId swapchainColor = frameGraph->addResource({"swapchain_color"});
-
-    frameGraph->addDependency(ids.shadow, ids.prepass);
-    frameGraph->addDependency(ids.prepass, ids.main);
-    frameGraph->addDependency(ids.main, ids.post);
-
-    frameGraph->addResourceUse(ids.shadow, shadowAtlas, FrameGraphResourceAccess::Write);
-    frameGraph->addResourceUse(ids.prepass, shadowAtlas, FrameGraphResourceAccess::Read);
-    frameGraph->addResourceUse(ids.prepass, sceneDepth, FrameGraphResourceAccess::Write);
-    frameGraph->addResourceUse(ids.main, shadowAtlas, FrameGraphResourceAccess::Read);
-    frameGraph->addResourceUse(ids.main, sceneDepth, FrameGraphResourceAccess::Read);
-    frameGraph->addResourceUse(ids.main, hdrColor, FrameGraphResourceAccess::Write);
-    frameGraph->addResourceUse(ids.post, hdrColor, FrameGraphResourceAccess::Read);
-    frameGraph->addResourceUse(ids.post, swapchainColor, FrameGraphResourceAccess::Write);
-    return ids;
-}
-
-}  // namespace
 
 void RendererBackend::renderFrame(
     const voxelsprout::world::ChunkGrid& chunkGrid,
@@ -143,25 +101,17 @@ void RendererBackend::renderFrame(
             }
         }
     }
-    const CoreFrameGraphPassIds corePassIds = buildCoreFrameGraph(&m_frameGraph);
-    std::vector<FrameGraph::PassId> frameGraphExecutionOrder;
-    if (!m_frameGraph.buildExecutionOrder(&frameGraphExecutionOrder)) {
+    const std::optional<CoreFrameGraphPlan> coreFrameGraphPlan = buildCoreFrameGraphPlan(&m_frameGraph);
+    if (!coreFrameGraphPlan.has_value()) {
         VOX_LOGE("render") << "frame graph has a cycle; refusing to render frame";
         return;
     }
-    std::vector<std::uint32_t> frameGraphPassOrderById(m_frameGraph.passes().size(), 0u);
-    for (std::uint32_t executionIndex = 0; executionIndex < frameGraphExecutionOrder.size(); ++executionIndex) {
-        const FrameGraph::PassId passId = frameGraphExecutionOrder[executionIndex];
-        if (passId < frameGraphPassOrderById.size()) {
-            frameGraphPassOrderById[passId] = executionIndex;
-        }
-    }
     std::optional<std::uint32_t> lastCorePassOrderIndex = std::nullopt;
     const auto markCorePassEntered = [&](FrameGraph::PassId passId, const char* passName) {
-        if (passId >= frameGraphPassOrderById.size()) {
+        if (passId >= coreFrameGraphPlan->passOrderById.size()) {
             return;
         }
-        const std::uint32_t passOrderIndex = frameGraphPassOrderById[passId];
+        const std::uint32_t passOrderIndex = coreFrameGraphPlan->passOrderById[passId];
         if (lastCorePassOrderIndex.has_value() && passOrderIndex < *lastCorePassOrderIndex) {
             VOX_LOGE("render")
                 << "core frame pass executed out of graph order: " << passName
@@ -893,7 +843,7 @@ void RendererBackend::renderFrame(
     };
 
     writeGpuTimestampTop(kGpuTimestampQueryShadowStart);
-    markCorePassEntered(corePassIds.shadow, "shadow");
+    markCorePassEntered(coreFrameGraphPlan->shadow, "shadow");
     beginDebugLabel(commandBuffer, "Pass: Shadow Atlas", 0.28f, 0.22f, 0.22f, 1.0f);
     const bool shadowInitialized = m_shadowDepthInitialized;
     transitionImageLayout(
@@ -1506,7 +1456,7 @@ void RendererBackend::renderFrame(
     normalDepthRenderingInfo.pDepthAttachment = &aoDepthAttachment;
 
     writeGpuTimestampTop(kGpuTimestampQueryPrepassStart);
-    markCorePassEntered(corePassIds.prepass, "prepass");
+    markCorePassEntered(coreFrameGraphPlan->prepass, "prepass");
     beginDebugLabel(commandBuffer, "Pass: Normal+Depth Prepass", 0.20f, 0.30f, 0.40f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &normalDepthRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
@@ -1884,7 +1834,7 @@ void RendererBackend::renderFrame(
     renderingInfo.pDepthAttachment = &depthAttachment;
 
     writeGpuTimestampTop(kGpuTimestampQueryMainStart);
-    markCorePassEntered(corePassIds.main, "main");
+    markCorePassEntered(coreFrameGraphPlan->main, "main");
     beginDebugLabel(commandBuffer, "Pass: Main Scene", 0.20f, 0.20f, 0.45f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &renderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -2687,7 +2637,7 @@ void RendererBackend::renderFrame(
     toneMapRenderingInfo.pColorAttachments = &toneMapColorAttachment;
 
     writeGpuTimestampTop(kGpuTimestampQueryPostStart);
-    markCorePassEntered(corePassIds.post, "post");
+    markCorePassEntered(coreFrameGraphPlan->post, "post");
     beginDebugLabel(commandBuffer, "Pass: Tonemap + UI", 0.24f, 0.24f, 0.24f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &toneMapRenderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);

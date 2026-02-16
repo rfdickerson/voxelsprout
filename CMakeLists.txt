@@ -95,6 +95,7 @@ if(VOXEL_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
         src/render/backend/vulkan/device.cc
         src/render/backend/vulkan/frame.cc
         src/render/backend/vulkan/frame_run.cc
+        src/render/backend/vulkan/frame_graph_core.cc
         src/render/backend/vulkan/frame_chunks.cc
         src/render/backend/vulkan/frame_draws.cc
         src/render/backend/vulkan/frame_instances.cc
