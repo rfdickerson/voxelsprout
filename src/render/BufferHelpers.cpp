@@ -57,15 +57,11 @@ void setDebugObjectName(
 }
 
 bool BufferAllocator::init(VkPhysicalDevice physicalDevice, VkDevice device
-#if defined(VOXEL_HAS_VMA)
     , VmaAllocator vmaAllocator
-#endif
 ) {
     m_physicalDevice = physicalDevice;
     m_device = device;
-#if defined(VOXEL_HAS_VMA)
     m_vmaAllocator = vmaAllocator;
-#endif
     m_slots.clear();
     m_freeSlots.clear();
 
@@ -78,17 +74,12 @@ void BufferAllocator::shutdown() {
     if (m_device != VK_NULL_HANDLE) {
         for (size_t i = 1; i < m_slots.size(); ++i) {
             if (m_slots[i].inUse) {
-#if defined(VOXEL_HAS_VMA)
                 if (m_vmaAllocator != VK_NULL_HANDLE && m_slots[i].allocation != VK_NULL_HANDLE) {
                     vmaDestroyBuffer(m_vmaAllocator, m_slots[i].buffer, m_slots[i].allocation);
                 } else {
                     vkDestroyBuffer(m_device, m_slots[i].buffer, nullptr);
                     vkFreeMemory(m_device, m_slots[i].memory, nullptr);
                 }
-#else
-                vkDestroyBuffer(m_device, m_slots[i].buffer, nullptr);
-                vkFreeMemory(m_device, m_slots[i].memory, nullptr);
-#endif
                 m_slots[i] = {};
             }
         }
@@ -98,9 +89,7 @@ void BufferAllocator::shutdown() {
     m_freeSlots.clear();
     m_physicalDevice = VK_NULL_HANDLE;
     m_device = VK_NULL_HANDLE;
-#if defined(VOXEL_HAS_VMA)
     m_vmaAllocator = VK_NULL_HANDLE;
-#endif
 }
 
 BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
@@ -122,7 +111,6 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
 
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
-#if defined(VOXEL_HAS_VMA)
     VmaAllocation allocation = VK_NULL_HANDLE;
     VmaAllocationInfo allocationInfo{};
     void* persistentMappedData = nullptr;
@@ -156,7 +144,6 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
             << ", memProps=0x" << static_cast<unsigned int>(desc.memoryProperties) << std::dec
             << ", persistentMapped=" << (persistentMappedData != nullptr ? "yes" : "no");
     } else
-#endif
     {
         if (vkCreateBuffer(m_device, &bufferCreateInfo, nullptr, &buffer) != VK_SUCCESS) {
             return kInvalidBufferHandle;
@@ -194,11 +181,8 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
 
     if (desc.initialData != nullptr) {
         void* mappedData = nullptr;
-#if defined(VOXEL_HAS_VMA)
         bool mappedNeedsUnmap = true;
-#endif
         const bool mapped =
-#if defined(VOXEL_HAS_VMA)
             (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE)
                 ? (
                     (persistentMappedData != nullptr)
@@ -206,27 +190,18 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
                         : (vmaMapMemory(m_vmaAllocator, allocation, &mappedData) == VK_SUCCESS)
                 )
                 : (vkMapMemory(m_device, memory, 0, desc.size, 0, &mappedData) == VK_SUCCESS);
-#else
-            (vkMapMemory(m_device, memory, 0, desc.size, 0, &mappedData) == VK_SUCCESS);
-#endif
         if (!mapped) {
-#if defined(VOXEL_HAS_VMA)
             if (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
                 vmaDestroyBuffer(m_vmaAllocator, buffer, allocation);
             } else {
                 vkDestroyBuffer(m_device, buffer, nullptr);
                 vkFreeMemory(m_device, memory, nullptr);
             }
-#else
-            vkDestroyBuffer(m_device, buffer, nullptr);
-            vkFreeMemory(m_device, memory, nullptr);
-#endif
             return kInvalidBufferHandle;
         }
         std::memcpy(mappedData, desc.initialData, static_cast<size_t>(desc.size));
         VOX_LOGT("render") << "upload initial buffer data: bytes="
                            << static_cast<unsigned long long>(desc.size);
-#if defined(VOXEL_HAS_VMA)
         if (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
             if (mappedNeedsUnmap) {
                 vmaUnmapMemory(m_vmaAllocator, allocation);
@@ -234,9 +209,6 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
         } else {
             vkUnmapMemory(m_device, memory);
         }
-#else
-        vkUnmapMemory(m_device, memory);
-#endif
     }
 
     uint32_t slotIndex = 0;
@@ -245,11 +217,9 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
         m_freeSlots.pop_back();
         m_slots[slotIndex] = {
             buffer,
-#if defined(VOXEL_HAS_VMA)
             allocation,
             persistentMappedData,
             persistentMappedData != nullptr,
-#endif
             memory,
             desc.size,
             true
@@ -258,11 +228,9 @@ BufferHandle BufferAllocator::createBuffer(const BufferCreateDesc& desc) {
         slotIndex = static_cast<uint32_t>(m_slots.size());
         m_slots.push_back({
             buffer,
-#if defined(VOXEL_HAS_VMA)
             allocation,
             persistentMappedData,
             persistentMappedData != nullptr,
-#endif
             memory,
             desc.size,
             true
@@ -278,17 +246,12 @@ void BufferAllocator::destroyBuffer(BufferHandle handle) {
         return;
     }
 
-#if defined(VOXEL_HAS_VMA)
     if (m_vmaAllocator != VK_NULL_HANDLE && slot->allocation != VK_NULL_HANDLE) {
         vmaDestroyBuffer(m_vmaAllocator, slot->buffer, slot->allocation);
     } else {
         vkDestroyBuffer(m_device, slot->buffer, nullptr);
         vkFreeMemory(m_device, slot->memory, nullptr);
     }
-#else
-    vkDestroyBuffer(m_device, slot->buffer, nullptr);
-    vkFreeMemory(m_device, slot->memory, nullptr);
-#endif
 
     *slot = {};
     m_freeSlots.push_back(handle);
@@ -312,7 +275,6 @@ void* BufferAllocator::mapBuffer(BufferHandle handle, VkDeviceSize offset, VkDev
 
     void* mapped = nullptr;
     const bool mappedOk =
-#if defined(VOXEL_HAS_VMA)
         (m_vmaAllocator != VK_NULL_HANDLE && slot->allocation != VK_NULL_HANDLE)
             ? (
                 slot->persistentMapped
@@ -320,17 +282,12 @@ void* BufferAllocator::mapBuffer(BufferHandle handle, VkDeviceSize offset, VkDev
                     : (vmaMapMemory(m_vmaAllocator, slot->allocation, &mapped) == VK_SUCCESS)
             )
             : (vkMapMemory(m_device, slot->memory, offset, size, 0, &mapped) == VK_SUCCESS);
-#else
-        (vkMapMemory(m_device, slot->memory, offset, size, 0, &mapped) == VK_SUCCESS);
-#endif
     if (!mappedOk) {
         return nullptr;
     }
-#if defined(VOXEL_HAS_VMA)
     if (m_vmaAllocator != VK_NULL_HANDLE && slot->allocation != VK_NULL_HANDLE) {
         return static_cast<uint8_t*>(mapped) + offset;
     }
-#endif
     return mapped;
 }
 
@@ -339,7 +296,6 @@ void BufferAllocator::unmapBuffer(BufferHandle handle) {
     if (slot == nullptr) {
         return;
     }
-#if defined(VOXEL_HAS_VMA)
     if (m_vmaAllocator != VK_NULL_HANDLE && slot->allocation != VK_NULL_HANDLE) {
         if (slot->persistentMapped) {
             return;
@@ -348,9 +304,6 @@ void BufferAllocator::unmapBuffer(BufferHandle handle) {
     } else {
         vkUnmapMemory(m_device, slot->memory);
     }
-#else
-    vkUnmapMemory(m_device, slot->memory);
-#endif
 }
 
 uint32_t BufferAllocator::findMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredProperties) const {
@@ -482,9 +435,7 @@ bool FrameArena::init(
     VkPhysicalDevice physicalDevice,
     VkDevice device,
     const FrameArenaConfig& config
-#if defined(VOXEL_HAS_VMA)
     , VmaAllocator vmaAllocator
-#endif
 ) {
     if (allocator == nullptr ||
         physicalDevice == VK_NULL_HANDLE ||
@@ -497,11 +448,9 @@ bool FrameArena::init(
     m_allocator = allocator;
     m_physicalDevice = physicalDevice;
     m_device = device;
-#if defined(VOXEL_HAS_VMA)
     m_vmaAllocator = vmaAllocator;
     VOX_LOGI("render")
         << "FrameArena init: VMA=" << (m_vmaAllocator != VK_NULL_HANDLE ? "enabled" : "disabled");
-#endif
     m_frameCount = config.frameCount;
     m_activeFrame = 0;
     m_frameTransientBuffers.assign(m_frameCount, {});
@@ -529,9 +478,7 @@ bool FrameArena::init(
         m_allocator = nullptr;
         m_physicalDevice = VK_NULL_HANDLE;
         m_device = VK_NULL_HANDLE;
-#if defined(VOXEL_HAS_VMA)
         m_vmaAllocator = VK_NULL_HANDLE;
-#endif
         return false;
     }
 
@@ -568,9 +515,7 @@ void FrameArena::shutdown(BufferAllocator* allocator) {
     m_allocator = nullptr;
     m_physicalDevice = VK_NULL_HANDLE;
     m_device = VK_NULL_HANDLE;
-#if defined(VOXEL_HAS_VMA)
     m_vmaAllocator = VK_NULL_HANDLE;
-#endif
     m_frameCount = 0;
     m_activeFrame = 0;
 }
@@ -650,11 +595,7 @@ TransientImageHandle FrameArena::createTransientImage(
 
     const FrameArenaPassRange candidatePassRange{desc.firstPass, desc.lastPass};
     const bool hasPassRange = isValidFrameArenaPassRange(candidatePassRange);
-#if defined(VOXEL_HAS_VMA)
     const bool canUseVmaImages = (m_vmaAllocator != VK_NULL_HANDLE);
-#else
-    const bool canUseVmaImages = false;
-#endif
     const bool enableAliasMemory = (!canUseVmaImages) && desc.aliasEligible && hasPassRange;
 
     VkImageCreateInfo imageCreateInfo{};
@@ -676,9 +617,7 @@ TransientImageHandle FrameArena::createTransientImage(
     VkDeviceMemory memory = VK_NULL_HANDLE;
     uint32_t aliasMemoryBlock = 0;
     bool aliasMemoryReused = false;
-#if defined(VOXEL_HAS_VMA)
     VmaAllocation allocation = VK_NULL_HANDLE;
-#endif
 
     if (enableAliasMemory) {
         if (vkCreateImage(m_device, &imageCreateInfo, nullptr, &image) != VK_SUCCESS) {
@@ -774,7 +713,6 @@ TransientImageHandle FrameArena::createTransientImage(
             ++m_residentStats.imageAliasReuses;
         }
     }
-#if defined(VOXEL_HAS_VMA)
     else if (m_vmaAllocator != VK_NULL_HANDLE) {
         VmaAllocationCreateInfo allocationCreateInfo{};
         allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
@@ -791,7 +729,6 @@ TransientImageHandle FrameArena::createTransientImage(
         }
         trackCreatedImage(image, desc.debugName);
     } else
-#endif
     {
         if (vkCreateImage(m_device, &imageCreateInfo, nullptr, &image) != VK_SUCCESS) {
             return kInvalidTransientImageHandle;
@@ -850,7 +787,6 @@ TransientImageHandle FrameArena::createTransientImage(
                 m_freeAliasMemoryBlocks.push_back(aliasMemoryBlock);
             }
         }
-#if defined(VOXEL_HAS_VMA)
         if (!enableAliasMemory && m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
             trackDestroyedImage(image);
             vmaDestroyImage(m_vmaAllocator, image, allocation);
@@ -861,13 +797,6 @@ TransientImageHandle FrameArena::createTransientImage(
                 vkFreeMemory(m_device, memory, nullptr);
             }
         }
-#else
-        trackDestroyedImage(image);
-        vkDestroyImage(m_device, image, nullptr);
-        if (!enableAliasMemory) {
-            vkFreeMemory(m_device, memory, nullptr);
-        }
-#endif
         return kInvalidTransientImageHandle;
     }
 
@@ -885,9 +814,7 @@ TransientImageHandle FrameArena::createTransientImage(
     slot.info.view = view;
     slot.info.format = desc.format;
     slot.info.extent = desc.extent;
-#if defined(VOXEL_HAS_VMA)
     slot.allocation = allocation;
-#endif
     slot.memory = memory;
     slot.desc = desc;
     slot.passRanges.clear();
@@ -971,9 +898,7 @@ void FrameArena::destroyAllImages() {
             (slot.info.image != VK_NULL_HANDLE ||
              slot.info.view != VK_NULL_HANDLE ||
              slot.memory != VK_NULL_HANDLE
-#if defined(VOXEL_HAS_VMA)
              || slot.allocation != VK_NULL_HANDLE
-#endif
             );
         if (!hasZombieResources) {
             continue;
@@ -1016,12 +941,10 @@ void FrameArena::destroyAllImages() {
                 }
             }
         } else {
-#if defined(VOXEL_HAS_VMA)
             if (m_vmaAllocator != VK_NULL_HANDLE && slot.allocation != VK_NULL_HANDLE) {
                 trackDestroyedImage(slot.info.image);
                 vmaDestroyImage(m_vmaAllocator, slot.info.image, slot.allocation);
             } else
-#endif
             if (m_device != VK_NULL_HANDLE) {
                 if (slot.info.image != VK_NULL_HANDLE) {
                     trackDestroyedImage(slot.info.image);
@@ -1259,12 +1182,10 @@ void FrameArena::destroyImageSlot(TransientImageHandle handle) {
             }
         }
     } else {
-#if defined(VOXEL_HAS_VMA)
         if (m_vmaAllocator != VK_NULL_HANDLE && slot.allocation != VK_NULL_HANDLE) {
             trackDestroyedImage(slot.info.image);
             vmaDestroyImage(m_vmaAllocator, slot.info.image, slot.allocation);
         } else
-#endif
         if (m_device != VK_NULL_HANDLE) {
             if (slot.info.image != VK_NULL_HANDLE) {
                 trackDestroyedImage(slot.info.image);

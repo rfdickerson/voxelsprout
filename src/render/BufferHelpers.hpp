@@ -11,15 +11,11 @@
 #include <vector>
 
 #include <vulkan/vulkan.h>
-#if defined(VOXEL_HAS_VMA)
 #if defined(__has_include)
 #if __has_include(<vk_mem_alloc.h>)
 #include <vk_mem_alloc.h>
 #elif __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
-#else
-#error "VOXEL_HAS_VMA is set but vk_mem_alloc.h was not found"
-#endif
 #else
 #include <vk_mem_alloc.h>
 #endif
@@ -46,9 +42,7 @@ struct BufferCreateDesc {
 class BufferAllocator {
 public:
     bool init(VkPhysicalDevice physicalDevice, VkDevice device
-#if defined(VOXEL_HAS_VMA)
         , VmaAllocator vmaAllocator
-#endif
     );
     void shutdown();
 
@@ -63,11 +57,9 @@ public:
 private:
     struct BufferSlot {
         VkBuffer buffer = VK_NULL_HANDLE;
-#if defined(VOXEL_HAS_VMA)
         VmaAllocation allocation = VK_NULL_HANDLE;
         void* mappedData = nullptr;
         bool persistentMapped = false;
-#endif
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkDeviceSize size = 0;
         bool inUse = false;
@@ -79,9 +71,7 @@ private:
 
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
     VkDevice m_device = VK_NULL_HANDLE;
-#if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
-#endif
     std::vector<BufferSlot> m_slots;
     std::vector<uint32_t> m_freeSlots;
 };
@@ -212,9 +202,7 @@ public:
         VkPhysicalDevice physicalDevice,
         VkDevice device,
         const FrameArenaConfig& config
-#if defined(VOXEL_HAS_VMA)
         , VmaAllocator vmaAllocator
-#endif
     );
     void shutdown(BufferAllocator* allocator);
 
@@ -252,9 +240,7 @@ private:
     BufferAllocator* m_allocator = nullptr;
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
     VkDevice m_device = VK_NULL_HANDLE;
-#if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
-#endif
     FrameRingBuffer m_uploadRing;
     uint32_t m_frameCount = 0;
     uint32_t m_activeFrame = 0;
@@ -263,9 +249,7 @@ private:
 
     struct ImageSlot {
         TransientImageInfo info{};
-#if defined(VOXEL_HAS_VMA)
         VmaAllocation allocation = VK_NULL_HANDLE;
-#endif
         VkDeviceMemory memory = VK_NULL_HANDLE;
         TransientImageDesc desc{};
         std::vector<FrameArenaPassRange> passRanges;

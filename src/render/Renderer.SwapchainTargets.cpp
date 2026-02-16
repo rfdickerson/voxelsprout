@@ -85,9 +85,7 @@ bool Renderer::createDepthTargets() {
     m_depthImages.assign(imageCount, VK_NULL_HANDLE);
     m_depthImageMemories.assign(imageCount, VK_NULL_HANDLE);
     m_depthImageViews.assign(imageCount, VK_NULL_HANDLE);
-#if defined(VOXEL_HAS_VMA)
     m_depthImageAllocations.assign(imageCount, VK_NULL_HANDLE);
-#endif
 
     for (uint32_t i = 0; i < imageCount; ++i) {
         VkImageCreateInfo imageCreateInfo{};
@@ -106,7 +104,6 @@ bool Renderer::createDepthTargets() {
         imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
         VkResult imageResult = VK_ERROR_INITIALIZATION_FAILED;
-#if defined(VOXEL_HAS_VMA)
         if (m_vmaAllocator != VK_NULL_HANDLE) {
             VmaAllocationCreateInfo allocationCreateInfo{};
             allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -124,7 +121,6 @@ bool Renderer::createDepthTargets() {
                 return false;
             }
         } else
-#endif
         {
             imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_depthImages[i]);
             if (imageResult != VK_SUCCESS) {
@@ -634,9 +630,7 @@ bool Renderer::createMsaaColorTargets() {
     m_msaaColorImageMemories.assign(imageCount, VK_NULL_HANDLE);
     m_msaaColorImageViews.assign(imageCount, VK_NULL_HANDLE);
     m_msaaColorImageInitialized.assign(imageCount, false);
-#if defined(VOXEL_HAS_VMA)
     m_msaaColorImageAllocations.assign(imageCount, VK_NULL_HANDLE);
-#endif
 
     for (uint32_t i = 0; i < imageCount; ++i) {
         VkImageCreateInfo imageCreateInfo{};
@@ -655,7 +649,6 @@ bool Renderer::createMsaaColorTargets() {
         imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
         VkResult imageResult = VK_ERROR_INITIALIZATION_FAILED;
-#if defined(VOXEL_HAS_VMA)
         if (m_vmaAllocator != VK_NULL_HANDLE) {
             VmaAllocationCreateInfo allocationCreateInfo{};
             allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -673,7 +666,6 @@ bool Renderer::createMsaaColorTargets() {
                 return false;
             }
         } else
-#endif
         {
             imageResult = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_msaaColorImages[i]);
             if (imageResult != VK_SUCCESS) {
@@ -780,7 +772,6 @@ void Renderer::destroyMsaaColorTargets() {
         if (image == VK_NULL_HANDLE) {
             continue;
         }
-#if defined(VOXEL_HAS_VMA)
         if (m_vmaAllocator != VK_NULL_HANDLE &&
             i < m_msaaColorImageAllocations.size() &&
             m_msaaColorImageAllocations[i] != VK_NULL_HANDLE) {
@@ -789,9 +780,6 @@ void Renderer::destroyMsaaColorTargets() {
         } else {
             vkDestroyImage(m_device, image, nullptr);
         }
-#else
-        vkDestroyImage(m_device, image, nullptr);
-#endif
     }
     m_msaaColorImages.clear();
 
@@ -801,9 +789,7 @@ void Renderer::destroyMsaaColorTargets() {
         }
     }
     m_msaaColorImageMemories.clear();
-#if defined(VOXEL_HAS_VMA)
     m_msaaColorImageAllocations.clear();
-#endif
     m_msaaColorImageInitialized.clear();
 }
 
@@ -820,7 +806,6 @@ void Renderer::destroyDepthTargets() {
         if (image == VK_NULL_HANDLE) {
             continue;
         }
-#if defined(VOXEL_HAS_VMA)
         if (m_vmaAllocator != VK_NULL_HANDLE &&
             i < m_depthImageAllocations.size() &&
             m_depthImageAllocations[i] != VK_NULL_HANDLE) {
@@ -829,9 +814,6 @@ void Renderer::destroyDepthTargets() {
         } else {
             vkDestroyImage(m_device, image, nullptr);
         }
-#else
-        vkDestroyImage(m_device, image, nullptr);
-#endif
     }
     m_depthImages.clear();
 
@@ -841,9 +823,7 @@ void Renderer::destroyDepthTargets() {
         }
     }
     m_depthImageMemories.clear();
-#if defined(VOXEL_HAS_VMA)
     m_depthImageAllocations.clear();
-#endif
 }
 
 void Renderer::destroyAoTargets() {

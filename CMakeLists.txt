@@ -76,10 +76,17 @@ add_executable(voxel_factory_toy
     src/app/App.cpp
     src/core/Log.cpp
     src/render/BufferHelpers.cpp
+    src/render/FrameGraph.cpp
     src/render/Renderer.cpp
+    src/render/device.cpp
+    src/render/frame.cpp
+    src/render/init.cpp
+    src/render/chunk_upload.cpp
+    src/render/frame_render.cpp
     src/render/Renderer.Descriptors.cpp
     src/render/Renderer.PassPipelines.cpp
     src/render/Renderer.SwapchainTargets.cpp
+    src/render/Renderer.PostCompute.cpp
     src/render/Renderer.PassGi.cpp
     src/render/Renderer.ShadowCulling.cpp
     src/render/Renderer.UiPanels.cpp
@@ -127,15 +134,12 @@ endif()
 # GLFW is required for the minimal window + input runtime.
 find_package(glfw3 CONFIG QUIET)
 
-# Optional third-party dependencies for future rendering integration.
-find_package(Vulkan QUIET)
-find_package(imgui CONFIG QUIET)
-find_package(unofficial-vulkan-memory-allocator CONFIG QUIET)
-
-if(Vulkan_FOUND)
-    target_link_libraries(voxel_factory_toy PRIVATE Vulkan::Vulkan)
-    target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VULKAN=1)
-endif()
+# Required renderer dependencies.
+find_package(Vulkan REQUIRED)
+find_package(imgui CONFIG REQUIRED)
+find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+target_link_libraries(voxel_factory_toy PRIVATE Vulkan::Vulkan)
+target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VULKAN=1)
 
 if(TARGET glfw)
     target_link_libraries(voxel_factory_toy PRIVATE glfw)
@@ -158,48 +162,8 @@ else()
     endif()
 endif()
 
-if(TARGET imgui::imgui)
-    target_link_libraries(voxel_factory_toy PRIVATE imgui::imgui)
-    target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_IMGUI=1)
-endif()
-
-if(TARGET unofficial::VulkanMemoryAllocator::VulkanMemoryAllocator)
-    target_link_libraries(voxel_factory_toy PRIVATE unofficial::VulkanMemoryAllocator::VulkanMemoryAllocator)
-    target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VMA=1)
-else()
-    if(DEFINED VCPKG_TARGET_TRIPLET AND NOT "${VCPKG_TARGET_TRIPLET}" STREQUAL "")
-        set(VOXEL_VCPKG_TRIPLET "${VCPKG_TARGET_TRIPLET}")
-    elseif(WIN32)
-        set(VOXEL_VCPKG_TRIPLET "x64-windows")
-    else()
-        set(VOXEL_VCPKG_TRIPLET "x64-linux")
-    endif()
-
-    set(VMA_HEADER_HINTS
-        "${CMAKE_BINARY_DIR}/vcpkg_installed/${VOXEL_VCPKG_TRIPLET}/include"
-        "$ENV{VCPKG_INSTALLED_DIR}/${VOXEL_VCPKG_TRIPLET}/include"
-        "$ENV{VCPKG_ROOT}/installed/${VOXEL_VCPKG_TRIPLET}/include"
-        "$ENV{VCPKG_ROOT}/packages/vulkan-memory-allocator_${VOXEL_VCPKG_TRIPLET}/include"
-    )
-    if(WIN32)
-        list(APPEND VMA_HEADER_HINTS
-            "/mnt/c/Users/rfdic/vcpkg/packages/vulkan-memory-allocator_x64-windows/include"
-            "/mnt/c/Users/rfdic/vcpkg/installed/x64-windows/include"
-        )
-    endif()
-    unset(VMA_INCLUDE_DIR CACHE)
-    find_path(VMA_INCLUDE_DIR
-        NAMES vk_mem_alloc.h vma/vk_mem_alloc.h
-        HINTS ${VMA_HEADER_HINTS}
-    )
-    if(VMA_INCLUDE_DIR)
-        message(STATUS "Using VMA header-only include path: ${VMA_INCLUDE_DIR}")
-        target_include_directories(voxel_factory_toy PRIVATE "${VMA_INCLUDE_DIR}")
-        target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VMA=1 VOXEL_VMA_HEADER_ONLY=1)
-    else()
-        message(WARNING "VMA not found. Renderer will fall back to raw Vulkan allocations.")
-    endif()
-endif()
+target_link_libraries(voxel_factory_toy PRIVATE imgui::imgui)
+target_link_libraries(voxel_factory_toy PRIVATE GPUOpen::VulkanMemoryAllocator)
 
 if(BUILD_TESTING)
     add_executable(voxel_foundation_tests

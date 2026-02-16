@@ -2,6 +2,7 @@
 
 #include "render/BufferHelpers.hpp"
 #include "render/DescriptorManager.hpp"
+#include "render/FrameGraph.hpp"
 #include "render/PipelineManager.hpp"
 #include "sim/Simulation.hpp"
 #include "world/ClipmapIndex.hpp"
@@ -17,18 +18,16 @@
 #include <vector>
 
 #include <vulkan/vulkan.h>
-#if defined(VOXEL_HAS_VMA)
 #if defined(__has_include)
 #if __has_include(<vk_mem_alloc.h>)
 #include <vk_mem_alloc.h>
 #elif __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
 #else
-#error "VOXEL_HAS_VMA is set but vk_mem_alloc.h was not found"
+#error "vk_mem_alloc.h was not found"
 #endif
 #else
 #include <vk_mem_alloc.h>
-#endif
 #endif
 
 struct GLFWwindow;
@@ -250,7 +249,6 @@ private:
     bool createChunkBuffers(const world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
     bool createFrameResources();
     bool createGpuTimestampResources();
-#if defined(VOXEL_HAS_IMGUI)
     bool createImGuiResources();
     void destroyImGuiResources();
     void buildFrameStatsUi();
@@ -258,7 +256,6 @@ private:
     void buildShadowDebugUi();
     void buildSunDebugUi();
     void buildAimReticleUi();
-#endif
     std::vector<std::uint8_t> buildShadowCandidateMask(
         std::span<const world::Chunk> chunks,
         std::span<const std::size_t> visibleChunkIndices
@@ -425,9 +422,7 @@ private:
     std::vector<VkDeviceMemory> m_msaaColorImageMemories;
     std::vector<VkImageView> m_msaaColorImageViews;
     std::vector<bool> m_msaaColorImageInitialized;
-#if defined(VOXEL_HAS_VMA)
     std::vector<VmaAllocation> m_msaaColorImageAllocations;
-#endif
     std::vector<VkImage> m_hdrResolveImages;
     std::vector<VkDeviceMemory> m_hdrResolveImageMemories;
     std::vector<VkImageView> m_hdrResolveImageViews;
@@ -439,9 +434,7 @@ private:
     std::vector<VkImage> m_depthImages;
     std::vector<VkDeviceMemory> m_depthImageMemories;
     std::vector<VkImageView> m_depthImageViews;
-#if defined(VOXEL_HAS_VMA)
     std::vector<VmaAllocation> m_depthImageAllocations;
-#endif
     std::vector<VkImage> m_normalDepthImages;
     std::vector<VkDeviceMemory> m_normalDepthImageMemories;
     std::vector<VkImageView> m_normalDepthImageViews;
@@ -517,7 +510,6 @@ private:
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_sunShaftDescriptorSets{};
     VkPipelineLayout m_sunShaftPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_sunShaftPipeline = VK_NULL_HANDLE;
-#if defined(VOXEL_HAS_VMA)
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;
@@ -525,7 +517,6 @@ private:
     std::array<VmaAllocation, 6> m_voxelGiSurfaceFaceAllocations{};
     VmaAllocation m_voxelGiSkyExposureAllocation = VK_NULL_HANDLE;
     VmaAllocation m_voxelGiOccupancyAllocation = VK_NULL_HANDLE;
-#endif
     VkDeviceMemory m_shadowDepthMemory = VK_NULL_HANDLE;
     std::vector<uint64_t> m_swapchainImageTimelineValues;
     // One render-finished semaphore per swapchain image avoids reusing a semaphore
@@ -537,6 +528,7 @@ private:
     // Pipeline and descriptor lifetimes are owned by focused managers.
     PipelineManager m_pipelineManager{};
     DescriptorManager<kMaxFramesInFlight> m_descriptorManager{};
+    FrameGraph m_frameGraph{};
 
     // Existing Renderer call sites use these aliases while ownership lives in managers.
     VkPipelineLayout& m_pipelineLayout = m_pipelineManager.pipelineLayout;
@@ -661,10 +653,8 @@ private:
         float sunDiskSize = 2.0f;
         float sunHazeFalloff = 0.35f;
     } m_skyTuningRuntime{};
-#if defined(VOXEL_HAS_IMGUI)
     bool m_imguiInitialized = false;
     VkDescriptorPool m_imguiDescriptorPool = VK_NULL_HANDLE;
-#endif
     double m_lastFrameTimestampSeconds = 0.0;
     float m_debugFrameTimeMs = 0.0f;
     float m_debugGpuFrameTimeMs = 0.0f;
