@@ -335,6 +335,21 @@ private:
         std::vector<ReadyMagicaDraw> readyMagicaDraws;
     };
 
+    struct FrameChunkDrawData {
+        bool canDrawChunksIndirect = false;
+        std::array<bool, kShadowCascadeCount> canDrawShadowChunksIndirectByCascade{};
+        std::optional<FrameArenaSlice> chunkInstanceSliceOpt = std::nullopt;
+        std::optional<FrameArenaSlice> chunkIndirectSliceOpt = std::nullopt;
+        std::optional<FrameArenaSlice> shadowChunkInstanceSliceOpt = std::nullopt;
+        std::array<std::optional<FrameArenaSlice>, kShadowCascadeCount> shadowCascadeIndirectSliceOpts{};
+        VkBuffer chunkInstanceBuffer = VK_NULL_HANDLE;
+        VkBuffer chunkIndirectBuffer = VK_NULL_HANDLE;
+        VkBuffer shadowChunkInstanceBuffer = VK_NULL_HANDLE;
+        std::array<VkBuffer, kShadowCascadeCount> shadowCascadeIndirectBuffers{};
+        std::array<uint32_t, kShadowCascadeCount> shadowCascadeIndirectDrawCounts{};
+        uint32_t chunkIndirectDrawCount = 0;
+    };
+
     struct GrassBillboardVertex {
         float corner[2];
         float uv[2];
@@ -358,6 +373,15 @@ private:
     FrameInstanceDrawData prepareFrameInstanceDrawData(
         const voxelsprout::sim::Simulation& simulation,
         float simulationAlpha
+    );
+
+    FrameChunkDrawData prepareFrameChunkDrawData(
+        const std::vector<voxelsprout::world::Chunk>& chunks,
+        std::span<const std::size_t> visibleChunkIndices,
+        const std::array<voxelsprout::math::Matrix4, kShadowCascadeCount>& lightViewProjMatrices,
+        int cameraChunkX,
+        int cameraChunkY,
+        int cameraChunkZ
     );
 
     GLFWwindow* m_window = nullptr;
