@@ -99,6 +99,8 @@ if(VOXEL_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
         src/render/backend/vulkan/frame_graph_runtime.cc
         src/render/backend/vulkan/frame_pass_shadow.cc
         src/render/backend/vulkan/frame_pass_prepass.cc
+        src/render/backend/vulkan/frame_pass_ssao.cc
+        src/render/backend/vulkan/frame_pass_main.cc
         src/render/backend/vulkan/frame_chunks.cc
         src/render/backend/vulkan/frame_draws.cc
         src/render/backend/vulkan/frame_instances.cc
