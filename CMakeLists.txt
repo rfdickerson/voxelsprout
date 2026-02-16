@@ -77,6 +77,7 @@ add_executable(voxel_factory_toy
     src/core/Log.cpp
     src/render/BufferHelpers.cpp
     src/render/Renderer.cpp
+    src/render/Renderer.PassPipelines.cpp
     src/render/Renderer.PassGi.cpp
     src/render/Renderer.ShadowCulling.cpp
     src/render/Renderer.UiPanels.cpp
