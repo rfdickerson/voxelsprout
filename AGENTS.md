@@ -269,6 +269,8 @@ Prefer
 
 Clear C++20
 
+Google C++ style
+
 Small functions
 
 Explicit lifetime
