@@ -1262,6 +1262,8 @@ void RendererBackend::renderFrame(
         m_voxelGiInitialized = true;
     }
     if (!wroteVoxelGiTimestamps) {
+        writeGpuTimestampTop(kGpuTimestampQueryGiOccupancyStart);
+        writeGpuTimestampBottom(kGpuTimestampQueryGiOccupancyEnd);
         writeGpuTimestampTop(kGpuTimestampQueryGiInjectStart);
         writeGpuTimestampBottom(kGpuTimestampQueryGiInjectEnd);
         writeGpuTimestampTop(kGpuTimestampQueryGiPropagateStart);
