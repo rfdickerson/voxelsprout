@@ -72,31 +72,31 @@ else()
 endif()
 
 add_executable(voxel_factory_toy
-    src/app/main.cpp
-    src/app/App.cpp
-    src/core/Log.cpp
-    src/render/BufferHelpers.cpp
-    src/render/FrameGraph.cpp
-    src/render/Renderer.cpp
-    src/render/device.cpp
-    src/render/frame.cpp
-    src/render/init.cpp
-    src/render/init_resources.cpp
-    src/render/chunk_upload.cpp
-    src/render/frame_ui.cpp
-    src/render/frame_run.cpp
-    src/render/Renderer.Descriptors.cpp
-    src/render/Renderer.PassPipelines.cpp
-    src/render/Renderer.SwapchainTargets.cpp
-    src/render/Renderer.PostCompute.cpp
-    src/render/Renderer.PassGi.cpp
-    src/render/Renderer.ShadowCulling.cpp
-    src/render/Renderer.UiPanels.cpp
-    src/render/VmaUsage.cpp
-    src/world/MagicaVoxel.cpp
-    src/world/World.cpp
-    src/world/ChunkMesher.cpp
-    src/world/ClipmapIndex.cpp
+    src/app/main.cc
+    src/app/app.cc
+    src/core/log.cc
+    src/render/buffer_helpers.cc
+    src/render/frame_graph.cc
+    src/render/renderer.cc
+    src/render/device.cc
+    src/render/frame.cc
+    src/render/init.cc
+    src/render/init_resources.cc
+    src/render/chunk_upload.cc
+    src/render/frame_ui.cc
+    src/render/frame_run.cc
+    src/render/descriptors.cc
+    src/render/pass_pipelines.cc
+    src/render/swapchain_targets.cc
+    src/render/post_compute.cc
+    src/render/pass_gi.cc
+    src/render/shadow_culling.cc
+    src/render/ui_panels.cc
+    src/render/vma_usage.cc
+    src/world/magica_voxel.cc
+    src/world/world.cc
+    src/world/chunk_mesher.cc
+    src/world/clipmap_index.cc
 )
 
 if(TARGET slang_shaders)
@@ -170,10 +170,10 @@ target_link_libraries(voxel_factory_toy PRIVATE GPUOpen::VulkanMemoryAllocator)
 
 if(BUILD_TESTING)
     add_executable(voxel_foundation_tests
-        tests/FoundationTests.cpp
-        src/world/MagicaVoxel.cpp
-        src/world/ChunkMesher.cpp
-        src/world/ClipmapIndex.cpp
+        tests/foundation_tests.cc
+        src/world/magica_voxel.cc
+        src/world/chunk_mesher.cc
+        src/world/clipmap_index.cc
     )
     target_include_directories(voxel_foundation_tests PRIVATE src)
 
@@ -213,11 +213,11 @@ if(BUILD_TESTING)
     endif()
     if(GTest_FOUND)
         add_executable(voxel_stability_gtests
-            tests/StabilityGTests.cpp
-            src/core/Log.cpp
-            src/world/MagicaVoxel.cpp
-            src/world/ChunkMesher.cpp
-            src/world/ClipmapIndex.cpp
+            tests/stability_g_tests.cc
+            src/core/log.cc
+            src/world/magica_voxel.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
         )
         target_include_directories(voxel_stability_gtests PRIVATE src)
         target_link_libraries(voxel_stability_gtests PRIVATE GTest::gtest_main)
