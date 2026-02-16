@@ -50,6 +50,11 @@ struct VoxelPreview {
 };
 
 class RendererBackend;
+#if defined(VOXEL_RENDER_BACKEND_VULKAN)
+using RendererBackendType = RendererBackend;
+#else
+#error "VOXEL_RENDER_BACKEND is not configured to a supported backend"
+#endif
 
 class Renderer {
 public:
@@ -87,7 +92,7 @@ public:
     void shutdown();
 
 private:
-    std::unique_ptr<RendererBackend> m_backend;
+    std::unique_ptr<RendererBackendType> m_backend;
 };
 
 } // namespace voxelsprout::render

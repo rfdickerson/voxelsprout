@@ -75,29 +75,54 @@ add_executable(voxel_factory_toy
     src/app/main.cc
     src/app/app.cc
     src/core/log.cc
-    src/render/backend/vulkan/buffer_helpers.cc
     src/render/frame_graph.cc
     src/render/renderer.cc
-    src/render/backend/vulkan/device.cc
-    src/render/backend/vulkan/frame.cc
-    src/render/backend/vulkan/init.cc
-    src/render/backend/vulkan/init_resources.cc
-    src/render/backend/vulkan/chunk_upload.cc
     src/render/frame_ui.cc
     src/render/frame_run.cc
-    src/render/backend/vulkan/descriptors.cc
-    src/render/backend/vulkan/pass_pipelines.cc
-    src/render/backend/vulkan/swapchain_targets.cc
-    src/render/backend/vulkan/post_compute.cc
-    src/render/backend/vulkan/pass_gi.cc
-    src/render/backend/vulkan/shadow_culling.cc
     src/render/ui_panels.cc
-    src/render/backend/vulkan/vma_usage.cc
     src/world/magica_voxel.cc
     src/world/world.cc
     src/world/chunk_mesher.cc
     src/world/clipmap_index.cc
 )
+set(VOXEL_RENDER_BACKEND "VULKAN" CACHE STRING "Render backend to build. Supported values: VULKAN, DX12, METAL.")
+set_property(CACHE VOXEL_RENDER_BACKEND PROPERTY STRINGS VULKAN DX12 METAL)
+string(TOUPPER "${VOXEL_RENDER_BACKEND}" VOXEL_RENDER_BACKEND_UPPER)
+
+set(RENDER_BACKEND_SOURCES)
+
+if(VOXEL_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
+    list(APPEND RENDER_BACKEND_SOURCES
+        src/render/backend/vulkan/buffer_helpers.cc
+        src/render/backend/vulkan/device.cc
+        src/render/backend/vulkan/frame.cc
+        src/render/backend/vulkan/init.cc
+        src/render/backend/vulkan/init_resources.cc
+        src/render/backend/vulkan/chunk_upload.cc
+        src/render/backend/vulkan/descriptors.cc
+        src/render/backend/vulkan/pass_pipelines.cc
+        src/render/backend/vulkan/swapchain_targets.cc
+        src/render/backend/vulkan/post_compute.cc
+        src/render/backend/vulkan/pass_gi.cc
+        src/render/backend/vulkan/shadow_culling.cc
+        src/render/backend/vulkan/vma_usage.cc
+    )
+    target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_RENDER_BACKEND_VULKAN=1)
+    target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VULKAN=1)
+    set(VULKAN_RENDER_BACKEND "ON")
+elseif(VOXEL_RENDER_BACKEND_UPPER STREQUAL "DX12")
+    message(FATAL_ERROR "DX12 backend is not implemented yet.")
+elseif(VOXEL_RENDER_BACKEND_UPPER STREQUAL "METAL")
+    message(FATAL_ERROR "Metal backend is not implemented yet.")
+else()
+    message(
+        FATAL_ERROR
+        "Unsupported VOXEL_RENDER_BACKEND value '${VOXEL_RENDER_BACKEND}'."
+        " Expected VULKAN, DX12, or METAL."
+    )
+endif()
+
+target_sources(voxel_factory_toy PRIVATE ${RENDER_BACKEND_SOURCES})
 
 if(TARGET slang_shaders)
     add_dependencies(voxel_factory_toy slang_shaders)
@@ -138,11 +163,14 @@ endif()
 find_package(glfw3 CONFIG QUIET)
 
 # Required renderer dependencies.
-find_package(Vulkan REQUIRED)
-find_package(imgui CONFIG REQUIRED)
-find_package(VulkanMemoryAllocator CONFIG REQUIRED)
-target_link_libraries(voxel_factory_toy PRIVATE Vulkan::Vulkan)
-target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VULKAN=1)
+if(VULKAN_RENDER_BACKEND)
+    find_package(Vulkan REQUIRED)
+    find_package(imgui CONFIG REQUIRED)
+    find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+    target_link_libraries(voxel_factory_toy PRIVATE Vulkan::Vulkan)
+    target_link_libraries(voxel_factory_toy PRIVATE GPUOpen::VulkanMemoryAllocator)
+    target_link_libraries(voxel_factory_toy PRIVATE imgui::imgui)
+endif()
 
 if(TARGET glfw)
     target_link_libraries(voxel_factory_toy PRIVATE glfw)
@@ -164,9 +192,6 @@ else()
         message(FATAL_ERROR "GLFW is required. Install via vcpkg or provide glfw3 to CMake.")
     endif()
 endif()
-
-target_link_libraries(voxel_factory_toy PRIVATE imgui::imgui)
-target_link_libraries(voxel_factory_toy PRIVATE GPUOpen::VulkanMemoryAllocator)
 
 if(BUILD_TESTING)
     add_executable(voxel_foundation_tests
