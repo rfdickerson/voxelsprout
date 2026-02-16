@@ -239,6 +239,7 @@ if(BUILD_TESTING)
     if(GTest_FOUND)
         add_executable(voxel_stability_gtests
             tests/stability_g_tests.cc
+            tests/frame_math_tests.cc
             src/core/log.cc
             src/world/magica_voxel.cc
             src/world/chunk_mesher.cc

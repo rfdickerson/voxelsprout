@@ -30,6 +30,8 @@
 #include <utility>
 #include <vector>
 
+#include "render/backend/vulkan/frame_math.h"
+
 namespace voxelsprout::render {
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -294,20 +296,14 @@ void RendererBackend::renderFrame(
     const float aspectRatio = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
     const float nearPlane = 0.1f;
     const float farPlane = 500.0f;
-    const float yawRadians = voxelsprout::math::radians(camera.yawDegrees);
-    const float pitchRadians = voxelsprout::math::radians(camera.pitchDegrees);
     const float halfFovRadians = voxelsprout::math::radians(activeFovDegrees) * 0.5f;
     const float tanHalfFov = std::tan(halfFovRadians);
-    const float cosPitch = std::cos(pitchRadians);
     const voxelsprout::math::Vector3 eye{camera.x, camera.y, camera.z};
-    const int cameraChunkX = static_cast<int>(std::floor(camera.x / static_cast<float>(voxelsprout::world::Chunk::kSizeX)));
-    const int cameraChunkY = static_cast<int>(std::floor(camera.y / static_cast<float>(voxelsprout::world::Chunk::kSizeY)));
-    const int cameraChunkZ = static_cast<int>(std::floor(camera.z / static_cast<float>(voxelsprout::world::Chunk::kSizeZ)));
-    const voxelsprout::math::Vector3 forward{
-        std::cos(yawRadians) * cosPitch,
-        std::sin(pitchRadians),
-        std::sin(yawRadians) * cosPitch
-    };
+    const CameraFrameDerived cameraFrame = ComputeCameraFrame(camera);
+    const int cameraChunkX = cameraFrame.chunkX;
+    const int cameraChunkY = cameraFrame.chunkY;
+    const int cameraChunkZ = cameraFrame.chunkZ;
+    const voxelsprout::math::Vector3 forward = cameraFrame.forward;
 
     const voxelsprout::math::Matrix4 view = lookAt(eye, eye + forward, voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f});
     const voxelsprout::math::Matrix4 projection = perspectiveVulkan(voxelsprout::math::radians(activeFovDegrees), aspectRatio, nearPlane, farPlane);
@@ -325,17 +321,10 @@ void RendererBackend::renderFrame(
         m_shadowStableCascadeRadii.fill(0.0f);
     }
 
-    const float sunYawRadians = voxelsprout::math::radians(m_skyDebugSettings.sunYawDegrees);
-    const float sunPitchRadians = voxelsprout::math::radians(m_skyDebugSettings.sunPitchDegrees);
-    const float sunCosPitch = std::cos(sunPitchRadians);
-    voxelsprout::math::Vector3 sunDirection = voxelsprout::math::normalize(voxelsprout::math::Vector3{
-        std::cos(sunYawRadians) * sunCosPitch,
-        std::sin(sunPitchRadians),
-        std::sin(sunYawRadians) * sunCosPitch
-    });
-    if (voxelsprout::math::lengthSquared(sunDirection) <= 0.0001f) {
-        sunDirection = voxelsprout::math::Vector3{-0.58f, -0.42f, -0.24f};
-    }
+    voxelsprout::math::Vector3 sunDirection = voxelsprout::math::normalize(ComputeSunDirection(
+        m_skyDebugSettings.sunYawDegrees,
+        m_skyDebugSettings.sunPitchDegrees
+    ));
     const voxelsprout::math::Vector3 toSun = -voxelsprout::math::normalize(sunDirection);
     const float sunElevationDegrees = voxelsprout::math::degrees(std::asin(std::clamp(toSun.y, -1.0f, 1.0f)));
 
@@ -655,17 +644,16 @@ void RendererBackend::renderFrame(
     mvpUniform.colorGrading3[3] = 0.0f;
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
-    const float voxelGiOriginX = std::floor((camera.x - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
-    const float voxelGiDesiredOriginY = std::floor((camera.y - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
-    float voxelGiOriginY = voxelGiDesiredOriginY;
-    if (m_voxelGiHasPreviousFrameState) {
-        // Keep GI vertically stable through small jump/bob motion to avoid color popping.
-        constexpr float kVoxelGiVerticalFollowThreshold = kVoxelGiCellSize * 4.0f;
-        if (std::abs(voxelGiDesiredOriginY - m_voxelGiPreviousGridOrigin[1]) < kVoxelGiVerticalFollowThreshold) {
-            voxelGiOriginY = m_voxelGiPreviousGridOrigin[1];
-        }
-    }
-    const float voxelGiOriginZ = std::floor((camera.z - voxelGiHalfSpan) / kVoxelGiCellSize) * kVoxelGiCellSize;
+    const float voxelGiOriginX = ComputeVoxelGiAxisOrigin(camera.x, voxelGiHalfSpan, kVoxelGiCellSize);
+    const float voxelGiDesiredOriginY = ComputeVoxelGiAxisOrigin(camera.y, voxelGiHalfSpan, kVoxelGiCellSize);
+    const float kVoxelGiVerticalFollowThreshold = kVoxelGiCellSize * 4.0f;
+    const float voxelGiOriginY = ComputeVoxelGiStableOriginY(
+        voxelGiDesiredOriginY,
+        m_voxelGiPreviousGridOrigin[1],
+        m_voxelGiHasPreviousFrameState,
+        kVoxelGiVerticalFollowThreshold
+    );
+    const float voxelGiOriginZ = ComputeVoxelGiAxisOrigin(camera.z, voxelGiHalfSpan, kVoxelGiCellSize);
     constexpr float kVoxelGiGridMoveThreshold = 0.001f;
     constexpr float kVoxelGiLightingChangeThreshold = 0.001f;
     constexpr float kVoxelGiTuningChangeThreshold = 0.001f;
