@@ -250,6 +250,15 @@ private:
     void buildSunDebugUi();
     void buildAimReticleUi();
 #endif
+    std::vector<std::uint8_t> buildShadowCandidateMask(
+        std::span<const world::Chunk> chunks,
+        std::span<const std::size_t> visibleChunkIndices
+    ) const;
+    void recordVoxelGiDispatchSequence(
+        VkCommandBuffer commandBuffer,
+        uint32_t mvpDynamicOffset,
+        VkQueryPool gpuTimestampQueryPool
+    );
     bool recreateSwapchain();
     void destroySwapchain();
     void destroyHdrResolveTargets();
@@ -271,6 +280,27 @@ private:
     void destroyTransferResources();
     void destroyPipeline();
     void loadDebugUtilsFunctions();
+    bool allocatePerFrameDescriptorSets(
+        VkDescriptorPool descriptorPool,
+        VkDescriptorSetLayout descriptorSetLayout,
+        std::span<VkDescriptorSet> outDescriptorSets,
+        const char* failureContext,
+        const char* debugNamePrefix
+    );
+    bool createComputePipelineLayout(
+        VkDescriptorSetLayout descriptorSetLayout,
+        std::span<const VkPushConstantRange> pushConstantRanges,
+        VkPipelineLayout& outPipelineLayout,
+        const char* failureContext,
+        const char* debugName
+    );
+    bool createComputePipeline(
+        VkPipelineLayout pipelineLayout,
+        VkShaderModule shaderModule,
+        VkPipeline& outPipeline,
+        const char* failureContext,
+        const char* debugName
+    );
     void setObjectName(VkObjectType objectType, uint64_t objectHandle, const char* name) const;
     void beginDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
     void endDebugLabel(VkCommandBuffer commandBuffer) const;

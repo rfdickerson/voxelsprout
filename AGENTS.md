@@ -1,198 +1,346 @@
-# AGENTS.md
+🎯 Project Vision
 
-This project is an experimental **voxel-based factory toy game** focused on *emergent discovery*, *mechanical intuition*, and *kid-friendly play*.
-It is intentionally small, readable, and system-driven.
+Voxel Factory Toy is:
 
-This document defines how **humans and AI agents (Codex / ChatGPT)** should contribute to the codebase.
+A playable systems sandbox
 
----
+A graphics R&D playground
 
-## 🎯 Project Goals
+A deterministic simulation testbed
 
-* Build a **playable toy** quickly, not a generic engine
-* Favor **systems and rules** over authored content
-* Encourage **emergent discovery** (Maxis-style)
-* Keep the game **non-violent** (traps, hazards, environmental challenges only)
-* Maintain **smooth frame pacing** and deterministic simulation
-* Keep architecture understandable by a single person in one sitting
+A modern Vulkan renderer built for clarity
 
-If a change does not support these goals, it likely does not belong (yet).
+It is not:
 
----
+A generic engine framework
 
-## 🧠 Core Design Philosophy
+A tech demo without gameplay
 
-1. **Systems > Features**
-   Add simple rules that interact, not complex one-off mechanics.
+A content-heavy authored experience
 
-2. **Data-first, not framework-first**
-   Plain structs, vectors, and clear ownership beat abstraction layers.
+An enterprise architecture experiment
 
-3. **Discovery over instruction**
-   The game should explain itself through behavior and visuals.
+🧠 Core Principles
+1️⃣ Systems Over Features
 
-4. **No punishment loops**
-   Failure should be interesting, reversible, or funny—never harsh.
+Add small composable rules.
+Avoid large feature drops.
 
-5. **Elegance beats realism**
-   This is a toy world, not a simulator.
+2️⃣ Determinism First
 
----
+Simulation must:
 
-## 🧩 High-Level Architecture
+Run at fixed timestep
 
-The codebase is intentionally divided into a few clear subsystems:
+Be order-stable
 
-```
-app/     – Application bootstrap & main loop
-core/    – Time, input, math, and grid primitives (Cell3i / Dir6 / AABB)
-world/   – Voxels, chunks, meshing, and CSG command application
-sim/     – Deterministic simulation + transport network graph utilities
-render/  – Rendering only (Vulkan); shading/composition only
-assets/  – Textures and shaders
-tests/   – CTests for deterministic utility and foundation behavior
-```
+Be independent of rendering
 
-### Key Rule
+Produce identical results across runs
 
-**Only `render/` knows about Vulkan.**
-All other systems must be renderer-agnostic.
+Rendering is allowed to be non-deterministic. Simulation is not.
 
----
+3️⃣ Renderer Isolation
 
-## 🧱 Current Baseline (Latest)
+Only render/ may include Vulkan headers.
 
-This section tracks current foundations so contributors build on the same assumptions.
+No Vulkan types may leak into:
 
-* Ambient shading currently uses **vertex AO only**. SSAO passes are intentionally removed for performance.
-* Pipes are currently **voxel-style cuboids** (thicker endcaps, narrower transfer section).
-* Pipe endpoints show endcaps only when attaching to voxels; pipe-to-pipe continuation should not add extra endcaps.
-* Pipe meshes avoid coplanar seam faces to prevent z-fighting/flickering between connected segments.
-* The transfer section is visually emphasized as bright fluid (pink tint) to improve readability.
-* Core transport/world modeling now has shared foundation headers:
-  * `core/Grid3.hpp`
-  * `sim/NetworkGraph.hpp`
-  * `sim/NetworkProcedural.hpp`
-  * `world/Csg.hpp`
+sim/
 
----
+world/
 
-## 🔁 Data Flow (One Direction Only)
+core/
 
-```
+Rendering consumes data. It does not control simulation.
+
+4️⃣ Performance Is a Feature
+
+Maintain:
+
+Smooth frame pacing
+
+Stable GPU timing
+
+Predictable memory behavior
+
+Clear synchronization boundaries
+
+Avoid hidden work or implicit allocations in hot paths.
+
+5️⃣ Readability Over Abstraction
+
+Prefer:
+
+Clear structs
+
+Explicit ownership
+
+Flat data
+
+Small focused files
+
+Avoid:
+
+Deep inheritance
+
+Over-generalization
+
+Framework layering
+
+Indirection for its own sake
+
+🧩 Architecture Overview
+app/      – Main loop, lifecycle
+core/     – Math, time, input, grid primitives
+world/    – Voxels, chunk storage, CSG
+sim/      – Deterministic simulation + networks
+render/   – Vulkan renderer + shaders
+assets/   – Textures, SPIR-V, materials
+tests/    – Deterministic unit tests
+
+Data Flow (Strictly One Direction)
 Input
-  ↓
-Game rules
-  ↓
+↓
 Simulation (fixed tick)
-  ↓
-World (voxel changes)
-  ↓
+↓
+World mutation
+↓
 Meshing
-  ↓
+↓
 Renderer
-```
+↓
+Post-processing
 
-* No circular dependencies
-* No callbacks upward
-* Systems communicate via data, not control flow
 
----
+No upward callbacks.
+No render → sim dependencies.
 
-## 🧱 Voxels & Scale
+🧱 Rendering Architecture Guidelines
 
-* Voxels are **smaller than the character** (~0.25m per voxel)
-* Voxels are the **construction unit**, not the body unit
-* Early game uses **full voxels only** (no slabs initially)
-* Shape variants (ramps/stairs) may be added later as block metadata
+The renderer currently includes:
 
-Structural logic must remain grid-aligned and deterministic.
+Vulkan 1.3 dynamic rendering
 
----
+Synchronization2
 
-## ⚙️ Simulation Rules
+Timeline semaphores
 
-* Simulation runs at a **fixed timestep** (e.g. 30 Hz)
-* Rendering may run faster or slower
-* Simulation must be:
+Reverse-Z projection
 
-    * Deterministic
-    * Order-independent where possible
-    * Independent of rendering
+Cascaded shadow maps (atlas)
 
-Belts, machines, and mechanical systems are modeled as **graphs**, not physics.
+SH-based ambient
 
----
+Voxel GI (surface → inject → propagate)
 
-## 🧰 Procedural + CSG Foundations
+Froxel volumetrics
 
-When adding belts, pipes, rails, and trains, prefer extending these foundations instead of creating parallel systems.
+SSAO
 
-* Use `Cell3i` + `Dir6` for all grid-aligned placement/connectivity logic.
-* Use `NetworkGraph` (`Socket`, `EdgeSpan`, nodes/edges) as the base structure for transport networks.
-* Use deterministic helper utilities (`neighborMask6`, span rasterization, join classification, transform quantization).
-* Use CSG commands (`AddSolid`, `SubtractSolid`, `PaintMaterial`) to stamp world edits in bounded regions.
-* Preserve and propagate touched AABBs so chunk remeshing remains minimal.
+HDR + bloom + ACES
 
----
+GPU timestamp profiling
 
-## 🏭 Factories & Discovery
+Rendering Rules
+1️⃣ Render passes must be explicit.
 
-* Machines should be **built from parts**, not dropped as prefabs
-* Prefer **properties** (hot, heavy, color, rotation) over hard recipes
-* Machines do not “fail” — they *behave*
-* Visual feedback replaces error messages
+No hidden side effects between passes.
 
-If a child can predict what will happen by watching, the design is correct.
+2️⃣ Storage image reads/writes require explicit barriers.
 
----
+Agents must not assume implicit synchronization.
 
-## 🚫 Explicit Non-Goals (for now)
+3️⃣ GPU work must be measurable.
 
-Do **not** add unless there is a clear, immediate need:
+When adding passes:
 
-* ECS frameworks
-* Job systems
-* Plugin architectures
-* Render graphs
-* Asset pipelines
-* Save/load systems
-* Networking
-* Combat systems
+Integrate into GPU timestamp system
 
-These can be revisited later if the toy proves fun.
+Expose tuning in debug UI
 
----
+4️⃣ Post-processing must occur after tone mapping.
 
-## 🤖 Guidelines for AI Agents (Codex / ChatGPT)
+Color grading operates in LDR unless explicitly justified.
 
-When generating or modifying code:
+🌍 World & Simulation Rules
+Voxels
 
-* Prefer **simple, readable C++** over clever abstractions
-* Keep files **small and focused** (<500 lines)
-* Avoid introducing new subsystems without explicit instruction
-* Do not refactor unrelated code
-* Add comments explaining *intent*, not implementation trivia
-* Preserve deterministic behavior
-* Add/update CTests when introducing new deterministic utilities
+Grid-aligned
 
-If unsure, ask or generate the **simplest possible version**.
+Deterministic
 
----
+Small (~0.25m scale)
 
-## 🧪 Definition of Progress
+No floating geometry
+
+No physics-driven placement
+
+Simulation
+
+Fixed timestep
+
+Graph-based transport
+
+No dependency on rendering
+
+No variable-rate tick logic
+
+World Editing
+
+Use CSG commands
+
+Propagate AABB of changes
+
+Minimize chunk remeshing
+
+⚙️ Voxel GI Guidelines
+
+Voxel GI uses:
+
+Surface cache (RGB per face)
+
+Inject pass (bounce albedo weighted)
+
+Transport-aware propagation
+
+Shared memory tiled compute
+
+Openness-based bleed control
+
+When modifying GI:
+
+Preserve energy stability
+
+Avoid increasing light bleed
+
+Keep memory access coherent
+
+Maintain fixed iteration count
+
+If adding directional basis (e.g. SH), document memory impact.
+
+🧪 Testing Expectations
+
+Add tests when:
+
+Introducing deterministic math utilities
+
+Modifying grid/graph logic
+
+Adding transport behavior
+
+Rendering features do not require unit tests,
+but must be:
+
+Measurable
+
+Toggleable
+
+Stable under GPU timing panel
+
+🚫 Non-Goals (Unless Explicitly Requested)
+
+Do not introduce:
+
+ECS frameworks
+
+Job schedulers
+
+Plugin systems
+
+Script engines
+
+Asset pipelines
+
+Networking
+
+Serialization layers
+
+Editor frameworks
+
+This project is intentionally single-binary and self-contained.
+
+🤖 AI Agent Guidelines
+
+When generating code:
+
+Prefer
+
+Clear C++20
+
+Small functions
+
+Explicit lifetime
+
+Value semantics
+
+Stack allocation where reasonable
+
+Avoid
+
+Refactoring unrelated files
+
+Introducing new abstraction layers
+
+Changing architecture without request
+
+Over-optimizing prematurely
+
+Adding new subsystems
+
+Rendering Changes
+
+Respect existing pass structure
+
+Do not merge passes unless requested
+
+Maintain explicit synchronization
+
+Keep debug UI hooks intact
+
+Simulation Changes
+
+Preserve determinism
+
+Avoid floating-point drift when possible
+
+Keep tick logic separate from rendering
+
+If uncertain: generate the simplest correct implementation.
+
+📊 Definition of Progress
 
 A change is successful if:
 
-* The game is more *playable* than before
-* A new interaction can be *discovered*, not explained
-* Frame pacing remains smooth
-* The codebase is still easy to reason about
+The toy is more interactive
 
-If the project feels boring internally but delightful to play, that’s ideal.
+Systems are more emergent
 
----
+Rendering is more stable or expressive
 
-## 🧭 Final Principle
+Frame pacing is unaffected
 
-> **If the code feels like a toy box instead of a toolbox, we’re doing it right.**
+The codebase remains readable
+
+🧭 Final Principle
+
+This is a small, serious engine.
+
+Add power carefully.
+
+If complexity increases, clarity must increase with it.
+
+Why This Version Is Better
+
+It:
+
+Matches your renderer’s maturity
+
+Establishes synchronization rules
+
+Protects deterministic simulation
+
+Prevents AI from “engine-ifying” the project
+
+Keeps it scalable without losing identity
