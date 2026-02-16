@@ -139,7 +139,7 @@ public:
     void shutdown();
 
 private:
-    static constexpr uint32_t kMaxFramesInFlight = 2;
+    static constexpr uint32_t kMaxFramesInFlight = 3;
     static constexpr uint32_t kShadowCascadeCount = 4;
     static constexpr uint32_t kShadowAtlasSize = 8192;
     static constexpr uint32_t kGpuTimestampQueryFrameStart = 0;
@@ -760,6 +760,7 @@ private:
     float m_debugGpuSsaoBlurTimeMs = 0.0f;
     float m_debugGpuMainTimeMs = 0.0f;
     float m_debugGpuPostTimeMs = 0.0f;
+    float m_debugCpuGiOccupancyBuildMs = 0.0f;
     float m_debugDisplayRefreshMs = 0.0f;
     float m_debugDisplayPresentMarginMs = 0.0f;
     float m_debugDisplayActualEarliestDeltaMs = 0.0f;

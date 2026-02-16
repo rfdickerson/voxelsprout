@@ -1159,9 +1159,14 @@ bool RendererBackend::createSwapchain() {
     const VkPresentModeKHR presentMode = choosePresentMode(support.presentModes);
     const VkExtent2D extent = chooseExtent(m_window, support.capabilities);
 
-    uint32_t imageCount = support.capabilities.minImageCount + 1;
+    uint32_t imageCount = std::max(support.capabilities.minImageCount + 1, kMaxFramesInFlight);
     if (support.capabilities.maxImageCount > 0 && imageCount > support.capabilities.maxImageCount) {
         imageCount = support.capabilities.maxImageCount;
+    }
+    if (imageCount < kMaxFramesInFlight) {
+        VOX_LOGI("render") << "swapchain limits only allow " << imageCount
+                  << " images; renderer will reuse frame resources with "
+                  << kMaxFramesInFlight << " frames in flight\n";
     }
 
     VkSwapchainCreateInfoKHR createInfo{};
@@ -1219,7 +1224,8 @@ bool RendererBackend::createSwapchain() {
     }
 
     VOX_LOGI("render") << "swapchain ready: images=" << imageCount
-              << ", extent=" << m_swapchainExtent.width << "x" << m_swapchainExtent.height << "\n";
+              << ", extent=" << m_swapchainExtent.width << "x" << m_swapchainExtent.height
+              << ", presentMode=FIFO\n";
     m_swapchainImageInitialized.assign(imageCount, false);
     m_swapchainImageTimelineValues.assign(imageCount, 0);
     if (!createHdrResolveTargets()) {

@@ -156,8 +156,11 @@ private:
     GLFWwindow* m_window = nullptr;
     voxelsprout::core::InputState m_input{};
     CameraState m_camera{};
+    CameraState m_cameraPrevious{};
     double m_lastMouseX = 0.0;
     double m_lastMouseY = 0.0;
+    float m_pendingMouseDeltaX = 0.0f;
+    float m_pendingMouseDeltaY = 0.0f;
     bool m_hasMouseSample = false;
     bool m_wasPlaceBlockDown = false;
     bool m_wasRemoveBlockDown = false;

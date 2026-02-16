@@ -145,6 +145,7 @@ void RendererBackend::buildFrameStatsUi() {
             m_debugCpuFrameWorkMs,
             m_debugCpuFrameEwmaMs
         );
+        ImGui::Text("GI Occupancy CPU (build+stage): %.2f ms", m_debugCpuGiOccupancyBuildMs);
         ImGui::Text("Frame GPU: %.2f ms", m_debugGpuFrameTimeMs);
         if (ImGui::TreeNodeEx("GPU Stages (ms)", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
@@ -166,6 +167,7 @@ void RendererBackend::buildFrameStatsUi() {
             m_debugCpuFrameWorkMs,
             m_debugCpuFrameEwmaMs
         );
+        ImGui::Text("GI Occupancy CPU (build+stage): %.2f ms", m_debugCpuGiOccupancyBuildMs);
         ImGui::Text("Frame GPU: n/a");
     }
     if (m_supportsDisplayTiming) {
