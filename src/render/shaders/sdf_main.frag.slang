@@ -1,0 +1,118 @@
+import camera_uniform;
+import sh_lighting;
+import sdf_scene;
+
+[[vk::binding(4, 0)]]
+Sampler2DShadow shadowMap;
+
+struct FragmentInput
+{
+    float2 inUv : TEXCOORD0;
+};
+
+struct FragmentOutput
+{
+    float4 color : SV_Target0;
+    float depth : SV_Depth;
+};
+
+int chooseShadowCascade(float viewDepth)
+{
+    if (viewDepth <= camera.shadowCascadeSplits.x) return 0;
+    if (viewDepth <= camera.shadowCascadeSplits.y) return 1;
+    if (viewDepth <= camera.shadowCascadeSplits.z) return 2;
+    return 3;
+}
+
+float sampleShadowVisibility(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
+{
+    const int cascadeIndex = chooseShadowCascade(viewDepth);
+    const float cascadeT = float(cascadeIndex) / 3.0;
+    const float normalOffset = lerp(camera.shadowConfig0.x, camera.shadowConfig0.y, cascadeT) * (1.0 + (1.0 - ndotl));
+    const float3 samplePosition = worldPosition + (normal * normalOffset);
+    const float4 shadowClip = mul(camera.lightViewProj[cascadeIndex], float4(samplePosition, 1.0));
+    if (abs(shadowClip.w) < 1e-6) return 1.0;
+
+    const float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    const float2 shadowUvLocal = (shadowNdc.xy * 0.5) + 0.5;
+    if (shadowUvLocal.x <= 0.0 || shadowUvLocal.x >= 1.0 || shadowUvLocal.y <= 0.0 || shadowUvLocal.y >= 1.0)
+    {
+        return 1.0;
+    }
+    if (shadowNdc.z <= 0.0 || shadowNdc.z >= 1.0)
+    {
+        return 1.0;
+    }
+
+    const float4 atlasRect = camera.shadowAtlasUvRects[cascadeIndex];
+    const float2 shadowUv = atlasRect.xy + (shadowUvLocal * atlasRect.zw);
+
+    uint texW = 0u;
+    uint texH = 0u;
+    shadowMap.GetDimensions(texW, texH);
+    const float texelScale = 1.0 / max(float(min(texW, texH)), 1.0);
+    const float baseBias =
+        lerp(camera.shadowConfig0.z, camera.shadowConfig0.w, cascadeT) * texelScale +
+        lerp(camera.shadowConfig1.x, camera.shadowConfig1.y, cascadeT) * texelScale * (1.0 - ndotl);
+    const int kernelRadius = clamp(int(camera.shadowConfig3.w + 0.5), 1, 3);
+    const float2 texelSize = float2(1.0 / max(float(texW), 1.0), 1.0 / max(float(texH), 1.0));
+
+    float visibility = 0.0;
+    float weightSum = 0.0;
+    for (int y = -kernelRadius; y <= kernelRadius; ++y)
+    {
+        for (int x = -kernelRadius; x <= kernelRadius; ++x)
+        {
+            const float2 uv = shadowUv + (float2(float(x), float(y)) * texelSize);
+            const float weight = 1.0;
+            visibility += shadowMap.SampleCmpLevelZero(uv, shadowNdc.z + baseBias) * weight;
+            weightSum += weight;
+        }
+    }
+    return visibility / max(weightSum, 1e-4);
+}
+
+FragmentOutput main(FragmentInput input)
+{
+    FragmentOutput output;
+    output.color = float4(0.0, 0.0, 0.0, 1.0);
+    output.depth = 0.0;
+
+    const float blend = sdfBlendFromTime(camera.skyConfig1.z);
+    const float3 objectCenter = sdfObjectCenter();
+    const float3 rayOrigin = camera.shadowVoxelGridSize.xyz;
+    const float3 rayDirection = viewToWorldDirection(reconstructViewRay(input.inUv));
+
+    float tHit = 0.0;
+    float3 hitWorld = rayOrigin;
+    if (!raymarchScene(rayOrigin, rayDirection, 0.0, kSdfMaxDistance, objectCenter, blend, tHit, hitWorld))
+    {
+        discard;
+    }
+
+    const float3 normal = sdfSceneNormal(hitWorld, objectCenter, blend);
+    const float4 viewPosition = mul(camera.view, float4(hitWorld, 1.0));
+    const float viewDepth = max(-viewPosition.z, 0.0);
+    const float4 clipPosition = mul(camera.proj, viewPosition);
+    if (abs(clipPosition.w) < 1e-6)
+    {
+        discard;
+    }
+    output.depth = clipPosition.z / clipPosition.w;
+
+    const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
+    const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
+    const float3 sunColor = camera.sunColorShadow.xyz;
+    const float ndotl = max(dot(normal, -sunDirection), 0.0);
+    const float shadowVisibility = (ndotl > 0.0001) ? sampleShadowVisibility(hitWorld, normal, viewDepth, ndotl) : 1.0;
+    const float3 ambient = evaluateShHemisphereIrradiance(normal) * 0.78;
+    const float3 direct = sunColor * (sunIntensity * ndotl * shadowVisibility);
+    const float3 baseSphere = float3(0.96, 0.36, 0.22);
+    const float3 baseBox = float3(0.22, 0.72, 0.94);
+    const float3 baseColor = lerp(baseSphere, baseBox, blend);
+    const float3 viewDir = normalize(rayOrigin - hitWorld);
+    const float3 halfVec = normalize((-sunDirection) + viewDir);
+    const float specular = pow(max(dot(normal, halfVec), 0.0), 48.0) * 0.18 * shadowVisibility;
+    output.color = float4(baseColor * (ambient + direct) + specular, 1.0);
+    return output;
+}

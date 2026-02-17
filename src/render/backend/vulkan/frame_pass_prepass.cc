@@ -256,6 +256,21 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
         }
     }
+    if (m_sdfPrepassPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_sdfPrepassPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            boundDescriptorSetCount,
+            boundDescriptorSets.sets.data(),
+            1,
+            &mvpDynamicOffset
+        );
+        countDrawCalls(m_debugDrawCallsPrepass, 1);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    }
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);

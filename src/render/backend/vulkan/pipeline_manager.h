@@ -11,6 +11,7 @@ public:
     VkPipeline shadowPipeline = VK_NULL_HANDLE;
     VkPipeline pipeShadowPipeline = VK_NULL_HANDLE;
     VkPipeline grassBillboardShadowPipeline = VK_NULL_HANDLE;
+    VkPipeline sdfShadowPipeline = VK_NULL_HANDLE;
     VkPipeline skyboxPipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline pipePipeline = VK_NULL_HANDLE;
@@ -18,6 +19,8 @@ public:
     VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline sdfPrepassPipeline = VK_NULL_HANDLE;
+    VkPipeline sdfMainPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
@@ -34,6 +37,18 @@ public:
         if (ssaoBlurPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, ssaoBlurPipeline, nullptr);
             ssaoBlurPipeline = VK_NULL_HANDLE;
+        }
+        if (sdfMainPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, sdfMainPipeline, nullptr);
+            sdfMainPipeline = VK_NULL_HANDLE;
+        }
+        if (sdfPrepassPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, sdfPrepassPipeline, nullptr);
+            sdfPrepassPipeline = VK_NULL_HANDLE;
+        }
+        if (sdfShadowPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, sdfShadowPipeline, nullptr);
+            sdfShadowPipeline = VK_NULL_HANDLE;
         }
         if (ssaoPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, ssaoPipeline, nullptr);

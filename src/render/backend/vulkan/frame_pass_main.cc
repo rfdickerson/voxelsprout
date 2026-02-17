@@ -310,6 +310,21 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
         }
     }
+    if (m_sdfMainPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_sdfMainPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            boundDescriptorSetCount,
+            boundDescriptorSets.sets.data(),
+            1,
+            &mvpDynamicOffset
+        );
+        countDrawCalls(m_debugDrawCallsMain, 1);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    }
 
     const VkPipeline activePreviewPipeline =
         (preview.mode == VoxelPreview::Mode::Remove) ? m_previewRemovePipeline : m_previewAddPipeline;
