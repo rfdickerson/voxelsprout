@@ -202,6 +202,7 @@ private:
     bool createPipeBuffers();
     bool createPipePipeline();
     bool createAoPipelines();
+    bool createSdfPipelines();
     bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
@@ -645,6 +646,7 @@ private:
     VkPipeline& m_shadowPipeline = m_pipelineManager.shadowPipeline;
     VkPipeline& m_pipeShadowPipeline = m_pipelineManager.pipeShadowPipeline;
     VkPipeline& m_grassBillboardShadowPipeline = m_pipelineManager.grassBillboardShadowPipeline;
+    VkPipeline& m_sdfShadowPipeline = m_pipelineManager.sdfShadowPipeline;
     VkPipeline& m_skyboxPipeline = m_pipelineManager.skyboxPipeline;
     VkPipeline& m_tonemapPipeline = m_pipelineManager.tonemapPipeline;
     VkPipeline& m_pipePipeline = m_pipelineManager.pipePipeline;
@@ -652,6 +654,8 @@ private:
     VkPipeline& m_voxelNormalDepthPipeline = m_pipelineManager.voxelNormalDepthPipeline;
     VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
     VkPipeline& m_grassBillboardNormalDepthPipeline = m_pipelineManager.grassBillboardNormalDepthPipeline;
+    VkPipeline& m_sdfPrepassPipeline = m_pipelineManager.sdfPrepassPipeline;
+    VkPipeline& m_sdfMainPipeline = m_pipelineManager.sdfMainPipeline;
     VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
     VkPipeline& m_ssaoPipeline = m_pipelineManager.ssaoPipeline;
     VkPipeline& m_ssaoBlurPipeline = m_pipelineManager.ssaoBlurPipeline;

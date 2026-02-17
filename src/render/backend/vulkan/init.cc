@@ -218,6 +218,11 @@ bool RendererBackend::init(GLFWwindow* window, const voxelsprout::world::ChunkGr
         shutdown();
         return false;
     }
+    if (!runStep("createSdfPipelines", [&] { return createSdfPipelines(); })) {
+        VOX_LOGE("render") << "init failed at createSdfPipelines\n";
+        shutdown();
+        return false;
+    }
     {
         const auto frameArenaStart = Clock::now();
         m_frameArena.beginFrame(0);
@@ -1393,6 +1398,10 @@ bool RendererBackend::recreateSwapchain() {
     }
     if (!createAoPipelines()) {
         VOX_LOGE("render") << "recreateSwapchain failed: createAoPipelines\n";
+        return false;
+    }
+    if (!createSdfPipelines()) {
+        VOX_LOGE("render") << "recreateSwapchain failed: createSdfPipelines\n";
         return false;
     }
     if (m_imguiInitialized) {

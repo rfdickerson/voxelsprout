@@ -339,6 +339,38 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
                 }
             }
+            if (m_sdfShadowPipeline != VK_NULL_HANDLE) {
+                ChunkPushConstants sdfShadowPushConstants{};
+                sdfShadowPushConstants.chunkOffset[0] = 0.0f;
+                sdfShadowPushConstants.chunkOffset[1] = 0.0f;
+                sdfShadowPushConstants.chunkOffset[2] = 0.0f;
+                sdfShadowPushConstants.chunkOffset[3] = 0.0f;
+                sdfShadowPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
+                sdfShadowPushConstants.cascadeData[1] = 0.0f;
+                sdfShadowPushConstants.cascadeData[2] = 0.0f;
+                sdfShadowPushConstants.cascadeData[3] = 0.0f;
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_sdfShadowPipeline);
+                vkCmdBindDescriptorSets(
+                    commandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    m_pipelineLayout,
+                    0,
+                    boundDescriptorSetCount,
+                    boundDescriptorSets.sets.data(),
+                    1,
+                    &mvpDynamicOffset
+                );
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &sdfShadowPushConstants
+                );
+                countDrawCalls(m_debugDrawCallsShadow, 1);
+                vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+            }
 
             vkCmdEndRendering(commandBuffer);
         }

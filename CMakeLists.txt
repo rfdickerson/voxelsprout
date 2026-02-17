@@ -14,6 +14,7 @@ if(SLANGC_EXECUTABLE)
         "${CMAKE_SOURCE_DIR}/src/render/shaders/camera_uniform.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/chunk_push_constants.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/fullscreen_triangle.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/sdf_scene.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/sh_lighting.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_decode.slang"
     )
@@ -59,6 +60,12 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_normaldepth.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao_blur.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sdf_main.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sdf_main.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sdf_prepass.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sdf_prepass.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sdf_shadow.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sdf_shadow.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_sky_exposure.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_inject.comp.slang" compute)

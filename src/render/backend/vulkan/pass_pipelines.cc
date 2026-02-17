@@ -2005,4 +2005,287 @@ bool RendererBackend::createGraphicsPipeline() {
     return true;
 }
 
+bool RendererBackend::createSdfPipelines() {
+    if (m_pipelineLayout == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (m_depthFormat == VK_FORMAT_UNDEFINED ||
+        m_hdrColorFormat == VK_FORMAT_UNDEFINED ||
+        m_shadowDepthFormat == VK_FORMAT_UNDEFINED ||
+        m_normalDepthFormat == VK_FORMAT_UNDEFINED) {
+        return false;
+    }
+
+    constexpr const char* kSdfMainVertexShaderPath = "../src/render/shaders/sdf_main.vert.slang.spv";
+    constexpr const char* kSdfMainFragmentShaderPath = "../src/render/shaders/sdf_main.frag.slang.spv";
+    constexpr const char* kSdfPrepassVertexShaderPath = "../src/render/shaders/sdf_prepass.vert.slang.spv";
+    constexpr const char* kSdfPrepassFragmentShaderPath = "../src/render/shaders/sdf_prepass.frag.slang.spv";
+    constexpr const char* kSdfShadowVertexShaderPath = "../src/render/shaders/sdf_shadow.vert.slang.spv";
+    constexpr const char* kSdfShadowFragmentShaderPath = "../src/render/shaders/sdf_shadow.frag.slang.spv";
+
+    std::array<VkShaderModule, 6> shaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& sdfMainVertShaderModule = shaderModules[0];
+    VkShaderModule& sdfMainFragShaderModule = shaderModules[1];
+    VkShaderModule& sdfPrepassVertShaderModule = shaderModules[2];
+    VkShaderModule& sdfPrepassFragShaderModule = shaderModules[3];
+    VkShaderModule& sdfShadowVertShaderModule = shaderModules[4];
+    VkShaderModule& sdfShadowFragShaderModule = shaderModules[5];
+    const std::array<ShaderModuleLoadSpec, 6> shaderLoadSpecs = {{
+        {kSdfMainVertexShaderPath, "sdf_main.vert"},
+        {kSdfMainFragmentShaderPath, "sdf_main.frag"},
+        {kSdfPrepassVertexShaderPath, "sdf_prepass.vert"},
+        {kSdfPrepassFragmentShaderPath, "sdf_prepass.frag"},
+        {kSdfShadowVertexShaderPath, "sdf_shadow.vert"},
+        {kSdfShadowFragmentShaderPath, "sdf_shadow.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, shaderLoadSpecs, shaderModules)) {
+        return false;
+    }
+
+    VkPipeline sdfMainPipeline = VK_NULL_HANDLE;
+    VkPipeline sdfPrepassPipeline = VK_NULL_HANDLE;
+    VkPipeline sdfShadowPipeline = VK_NULL_HANDLE;
+    auto destroyNewPipelines = [&]() {
+        if (sdfShadowPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, sdfShadowPipeline, nullptr);
+            sdfShadowPipeline = VK_NULL_HANDLE;
+        }
+        if (sdfPrepassPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, sdfPrepassPipeline, nullptr);
+            sdfPrepassPipeline = VK_NULL_HANDLE;
+        }
+        if (sdfMainPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, sdfMainPipeline, nullptr);
+            sdfMainPipeline = VK_NULL_HANDLE;
+        }
+    };
+
+    VkPipelineVertexInputStateCreateInfo fullscreenVertexInputInfo{};
+    fullscreenVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    std::array<VkDynamicState, 2> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkPipelineMultisampleStateCreateInfo mainMultisampling{};
+    mainMultisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    mainMultisampling.rasterizationSamples = m_colorSampleCount;
+
+    VkPipelineRenderingCreateInfo mainRenderingCreateInfo{};
+    mainRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    mainRenderingCreateInfo.colorAttachmentCount = 1;
+    mainRenderingCreateInfo.pColorAttachmentFormats = &m_hdrColorFormat;
+    mainRenderingCreateInfo.depthAttachmentFormat = m_depthFormat;
+
+    VkPipelineShaderStageCreateInfo mainStageInfos[2]{};
+    mainStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    mainStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    mainStageInfos[0].module = sdfMainVertShaderModule;
+    mainStageInfos[0].pName = "main";
+    mainStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    mainStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    mainStageInfos[1].module = sdfMainFragShaderModule;
+    mainStageInfos[1].pName = "main";
+
+    VkGraphicsPipelineCreateInfo mainPipelineCreateInfo{};
+    mainPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    mainPipelineCreateInfo.pNext = &mainRenderingCreateInfo;
+    mainPipelineCreateInfo.stageCount = 2;
+    mainPipelineCreateInfo.pStages = mainStageInfos;
+    mainPipelineCreateInfo.pVertexInputState = &fullscreenVertexInputInfo;
+    mainPipelineCreateInfo.pInputAssemblyState = &inputAssembly;
+    mainPipelineCreateInfo.pViewportState = &viewportState;
+    mainPipelineCreateInfo.pRasterizationState = &rasterizer;
+    mainPipelineCreateInfo.pMultisampleState = &mainMultisampling;
+    mainPipelineCreateInfo.pDepthStencilState = &depthStencil;
+    mainPipelineCreateInfo.pColorBlendState = &colorBlending;
+    mainPipelineCreateInfo.pDynamicState = &dynamicState;
+    mainPipelineCreateInfo.layout = m_pipelineLayout;
+    mainPipelineCreateInfo.renderPass = VK_NULL_HANDLE;
+    mainPipelineCreateInfo.subpass = 0;
+
+    const VkResult mainPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &mainPipelineCreateInfo,
+        nullptr,
+        &sdfMainPipeline
+    );
+    if (mainPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(sdfMain)", mainPipelineResult);
+        destroyNewPipelines();
+        destroyShaderModules(m_device, shaderModules);
+        return false;
+    }
+
+    VkPipelineMultisampleStateCreateInfo prepassMultisampling{};
+    prepassMultisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    prepassMultisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineRenderingCreateInfo prepassRenderingCreateInfo{};
+    prepassRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    prepassRenderingCreateInfo.colorAttachmentCount = 1;
+    prepassRenderingCreateInfo.pColorAttachmentFormats = &m_normalDepthFormat;
+    prepassRenderingCreateInfo.depthAttachmentFormat = m_depthFormat;
+
+    VkPipelineShaderStageCreateInfo prepassStageInfos[2]{};
+    prepassStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    prepassStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    prepassStageInfos[0].module = sdfPrepassVertShaderModule;
+    prepassStageInfos[0].pName = "main";
+    prepassStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    prepassStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    prepassStageInfos[1].module = sdfPrepassFragShaderModule;
+    prepassStageInfos[1].pName = "main";
+
+    VkGraphicsPipelineCreateInfo prepassPipelineCreateInfo = mainPipelineCreateInfo;
+    prepassPipelineCreateInfo.pNext = &prepassRenderingCreateInfo;
+    prepassPipelineCreateInfo.pStages = prepassStageInfos;
+    prepassPipelineCreateInfo.pMultisampleState = &prepassMultisampling;
+
+    const VkResult prepassPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &prepassPipelineCreateInfo,
+        nullptr,
+        &sdfPrepassPipeline
+    );
+    if (prepassPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(sdfPrepass)", prepassPipelineResult);
+        destroyNewPipelines();
+        destroyShaderModules(m_device, shaderModules);
+        return false;
+    }
+
+    VkPipelineMultisampleStateCreateInfo shadowMultisampling{};
+    shadowMultisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    shadowMultisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineRasterizationStateCreateInfo shadowRasterizer = rasterizer;
+    shadowRasterizer.depthBiasEnable = VK_TRUE;
+
+    std::array<VkDynamicState, 3> shadowDynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_DEPTH_BIAS
+    };
+    VkPipelineDynamicStateCreateInfo shadowDynamicState{};
+    shadowDynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    shadowDynamicState.dynamicStateCount = static_cast<uint32_t>(shadowDynamicStates.size());
+    shadowDynamicState.pDynamicStates = shadowDynamicStates.data();
+
+    VkPipelineColorBlendStateCreateInfo shadowColorBlending{};
+    shadowColorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    shadowColorBlending.attachmentCount = 0;
+    shadowColorBlending.pAttachments = nullptr;
+
+    VkPipelineRenderingCreateInfo shadowRenderingCreateInfo{};
+    shadowRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    shadowRenderingCreateInfo.colorAttachmentCount = 0;
+    shadowRenderingCreateInfo.pColorAttachmentFormats = nullptr;
+    shadowRenderingCreateInfo.depthAttachmentFormat = m_shadowDepthFormat;
+
+    VkPipelineShaderStageCreateInfo shadowStageInfos[2]{};
+    shadowStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shadowStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shadowStageInfos[0].module = sdfShadowVertShaderModule;
+    shadowStageInfos[0].pName = "main";
+    shadowStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shadowStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    shadowStageInfos[1].module = sdfShadowFragShaderModule;
+    shadowStageInfos[1].pName = "main";
+
+    VkGraphicsPipelineCreateInfo shadowPipelineCreateInfo = mainPipelineCreateInfo;
+    shadowPipelineCreateInfo.pNext = &shadowRenderingCreateInfo;
+    shadowPipelineCreateInfo.pStages = shadowStageInfos;
+    shadowPipelineCreateInfo.pMultisampleState = &shadowMultisampling;
+    shadowPipelineCreateInfo.pRasterizationState = &shadowRasterizer;
+    shadowPipelineCreateInfo.pColorBlendState = &shadowColorBlending;
+    shadowPipelineCreateInfo.pDynamicState = &shadowDynamicState;
+
+    const VkResult shadowPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &shadowPipelineCreateInfo,
+        nullptr,
+        &sdfShadowPipeline
+    );
+
+    destroyShaderModules(m_device, shaderModules);
+
+    if (shadowPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(sdfShadow)", shadowPipelineResult);
+        destroyNewPipelines();
+        return false;
+    }
+
+    if (m_sdfMainPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_sdfMainPipeline, nullptr);
+    }
+    if (m_sdfPrepassPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_sdfPrepassPipeline, nullptr);
+    }
+    if (m_sdfShadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_sdfShadowPipeline, nullptr);
+    }
+    m_sdfMainPipeline = sdfMainPipeline;
+    m_sdfPrepassPipeline = sdfPrepassPipeline;
+    m_sdfShadowPipeline = sdfShadowPipeline;
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_sdfMainPipeline), "pipeline.sdf.main");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_sdfPrepassPipeline), "pipeline.sdf.prepass");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_sdfShadowPipeline), "pipeline.sdf.shadow");
+    VOX_LOGI("render") << "SDF pipelines ready (main + prepass + shadow)\n";
+    return true;
+}
+
 } // namespace voxelsprout::render
