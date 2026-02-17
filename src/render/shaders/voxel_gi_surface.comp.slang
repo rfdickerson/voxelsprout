@@ -206,11 +206,6 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float voxelSunVisibility =
             (ndotl > 0.0001) ? sampleSunVoxelVisibility(cell, faceOffsets[i], dims, sunDirection) : 0.0;
         const float directVisibility = shadowVisibility * voxelSunVisibility;
-        if (directVisibility <= 0.001)
-        {
-            // Requested temporary behavior: shadowed faces do not inject GI energy.
-            continue;
-        }
         const float skyFactor = lerp(0.25, 1.0, skyColumnExposure) * skyLocalOcclusion;
         const float upFactor = saturate((normal.y * 0.5) + 0.5);
         const float ambientBoost = lerp(0.6, 1.2, upFactor);

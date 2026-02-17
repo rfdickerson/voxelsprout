@@ -210,9 +210,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float albedoPeak = max(max(surfaceAlbedo.x, surfaceAlbedo.y), surfaceAlbedo.z);
         const float albedoMin = min(min(surfaceAlbedo.x, surfaceAlbedo.y), surfaceAlbedo.z);
         const float albedoSaturation = (albedoPeak > 0.0001) ? ((albedoPeak - albedoMin) / albedoPeak) : 0.0;
-        const float colorBleedBoost = lerp(1.0, 1.12, clamp(albedoSaturation, 0.0, 1.0));
-        // Keep near-field bounce color faithful to the source surface albedo.
-        const float3 bounceAlbedo = surfaceAlbedo;
+        const float3 albedoLuma = float3(dot(surfaceAlbedo, float3(0.2126, 0.7152, 0.0722)));
+        // Keep color bleed expressive: preserve source hue and mildly boost saturation.
+        const float3 bounceAlbedo = saturate(lerp(albedoLuma, surfaceAlbedo, 1.35));
+        const float colorBleedBoost = lerp(1.08, 1.60, clamp(albedoSaturation, 0.0, 1.0));
         const float3 neighborIrradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i], dims);
         bouncedLightSum += bounceAlbedo * (neighborIrradiance * colorBleedBoost);
     }
@@ -236,11 +237,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float skyExposure = clamp(voxelGiSkyExposure[dispatchThreadId].x, 0.0, 1.0);
     const float ambientGate = skyExposure * lerp(0.20, 1.0, localOpenRatio);
     // Small SH inject term keeps sky-shadowed outdoor regions from going unnaturally black.
-    const float ambientInjectScale = injectShScale * 0.20;
+    const float ambientInjectScale = injectShScale * 0.08;
     const float3 ambientIrradiance =
         evaluateShHemisphereIrradiance(float3(0.0, 1.0, 0.0)) * (ambientInjectScale * ambientGate);
 
     const float3 injected =
-        max((bouncedLightSum * injectBounceScale + ambientIrradiance) * lambertInvPi, float3(0.0, 0.0, 0.0));
+        max((bouncedLightSum * (injectBounceScale * 1.55) + ambientIrradiance) * lambertInvPi, float3(0.0, 0.0, 0.0));
     voxelGiInjectOut[dispatchThreadId] = float4(injected, 1.0);
 }
