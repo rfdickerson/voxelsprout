@@ -106,6 +106,20 @@ float3 sampleVoxelGi(float3 worldPosition, float3 normal)
     return giRadiance * max(camera.voxelGiGridExtentStrength.w, 0.0);
 }
 
+float giLumaFromColor(float3 color)
+{
+    return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
+
+float3 voxelGiFalseColor(float t)
+{
+    const float x = clamp(t, 0.0, 1.0);
+    if (x < 0.25) return lerp(float3(0.02, 0.02, 0.10), float3(0.00, 0.42, 1.00), x / 0.25);
+    if (x < 0.50) return lerp(float3(0.00, 0.42, 1.00), float3(0.00, 0.95, 0.45), (x - 0.25) / 0.25);
+    if (x < 0.75) return lerp(float3(0.00, 0.95, 0.45), float3(1.00, 0.92, 0.12), (x - 0.50) / 0.25);
+    return lerp(float3(1.00, 0.92, 0.12), float3(1.00, 0.16, 0.12), (x - 0.75) / 0.25);
+}
+
 FragmentOutput main(FragmentInput input)
 {
     FragmentOutput output;
@@ -140,12 +154,43 @@ FragmentOutput main(FragmentInput input)
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
     const float shadowVisibility = (ndotl > 0.0001) ? sampleShadowVisibility(hitWorld, normal, viewDepth, ndotl) : 1.0;
     const float3 ambientSh = evaluateShHemisphereIrradiance(normal) * 0.78;
-    const float3 ambientGi = sampleVoxelGi(hitWorld, normal);
+    const float3 ambientGi = sampleVoxelGi(hitWorld + (normal * 0.08), normal);
+    const int voxelGiDebugMode = int(camera.shadowVoxelGridOrigin.z + 0.5);
+    if (voxelGiDebugMode == 1)
+    {
+        const float3 giClamped = max(ambientGi, float3(0.0, 0.0, 0.0));
+        const float peak = max(max(giClamped.x, giClamped.y), giClamped.z);
+        const float3 hue = (peak > 0.0001) ? (giClamped / peak) : float3(0.0, 0.0, 0.0);
+        const float intensity = clamp(log2(1.0 + (peak * 8.0)) / 4.0, 0.0, 1.0);
+        output.color = float4(hue * intensity, 1.0);
+        return output;
+    }
+    if (voxelGiDebugMode == 2)
+    {
+        const float giLuma = giLumaFromColor(ambientGi);
+        const float giMapped = clamp(log2(1.0 + (giLuma * 6.0)) / 3.0, 0.0, 1.0);
+        output.color = float4(voxelGiFalseColor(giMapped), 1.0);
+        return output;
+    }
+    if (voxelGiDebugMode == 3)
+    {
+        const float giLuma = giLumaFromColor(ambientGi);
+        const float giMapped = clamp(log2(1.0 + (giLuma * 4.0)) / 3.0, 0.0, 1.0);
+        output.color = float4(giMapped, giMapped, giMapped, 1.0);
+        return output;
+    }
+
+    const float ambientRebalanceStrength = max(camera.shadowVoxelGridOrigin.x, 0.0);
+    const float ambientFloor = clamp(camera.shadowVoxelGridOrigin.y, 0.0, 1.0);
+    const float giLuma = giLumaFromColor(ambientGi);
+    const float ambientScale = clamp(1.0 / (1.0 + (giLuma * ambientRebalanceStrength)), ambientFloor, 1.0);
     const float3 direct = sunColor * (sunIntensity * ndotl * shadowVisibility);
     const float3 baseColor = float3(0.82, 0.82, 0.82);
     const float3 viewDir = normalize(rayOrigin - hitWorld);
     const float3 halfVec = normalize((-sunDirection) + viewDir);
     const float specular = pow(max(dot(normal, halfVec), 0.0), 48.0) * 0.18 * shadowVisibility;
-    output.color = float4(baseColor * (ambientSh + ambientGi + direct) + specular, 1.0);
+    const float3 indirectLit = ((ambientSh * ambientScale * 2.0) + ambientGi) * 0.92;
+    const float3 directLit = direct * 1.10;
+    output.color = float4(baseColor * (indirectLit + directLit) + specular, 1.0);
     return output;
 }
