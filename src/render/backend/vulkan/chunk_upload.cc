@@ -427,12 +427,6 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
             combinedGrassInstances.insert(combinedGrassInstances.end(), chunkGrass.begin(), chunkGrass.end());
         }
     }
-    // Temporary toggle: disable plant rendering by forcing zero grass billboard instances.
-    constexpr bool kDisablePlantRendering = true;
-    if (kDisablePlantRendering) {
-        combinedGrassInstances.clear();
-    }
-
     if (combinedGrassInstances.empty()) {
         if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
             const uint64_t grassReleaseValue = m_lastGraphicsTimelineValue;
