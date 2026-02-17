@@ -59,6 +59,11 @@ public:
     void setVoxelRefined(int x, int y, int z, Voxel voxel);
     void setFromSolidBitfield(const std::uint8_t* packedBits, std::size_t packedByteCount);
     void setFromTypedVoxelBytes(const std::uint8_t* typeBytes, std::size_t byteCount);
+    void setFromTypedVoxelAndBaseColorBytes(
+        const std::uint8_t* typeBytes,
+        const std::uint8_t* baseColorBytes,
+        std::size_t byteCount
+    );
     void fillLayer(int y, Voxel voxel);
     Voxel voxelAt(int x, int y, int z) const;
     bool isSolid(int x, int y, int z) const;
@@ -164,6 +169,14 @@ inline void Chunk::setFromSolidBitfield(const std::uint8_t* packedBits, std::siz
 }
 
 inline void Chunk::setFromTypedVoxelBytes(const std::uint8_t* typeBytes, std::size_t byteCount) {
+    setFromTypedVoxelAndBaseColorBytes(typeBytes, nullptr, byteCount);
+}
+
+inline void Chunk::setFromTypedVoxelAndBaseColorBytes(
+    const std::uint8_t* typeBytes,
+    const std::uint8_t* baseColorBytes,
+    std::size_t byteCount
+) {
     constexpr std::size_t kVoxelCount = static_cast<std::size_t>(kSizeX * kSizeY * kSizeZ);
 
     std::fill(m_voxels.begin(), m_voxels.end(), Voxel{VoxelType::Empty});
@@ -179,7 +192,10 @@ inline void Chunk::setFromTypedVoxelBytes(const std::uint8_t* typeBytes, std::si
     for (int y = 0; y < kSizeY; ++y) {
         for (int z = 0; z < kSizeZ; ++z) {
             for (int x = 0; x < kSizeX; ++x, ++voxelIndex) {
-                m_voxels[voxelIndex] = Voxel{voxelTypeFromSerializedByte(typeBytes[voxelIndex])};
+                Voxel voxel{};
+                voxel.type = voxelTypeFromSerializedByte(typeBytes[voxelIndex]);
+                voxel.baseColorIndex = (baseColorBytes != nullptr) ? baseColorBytes[voxelIndex] : 0xFFu;
+                m_voxels[voxelIndex] = voxel;
             }
         }
     }

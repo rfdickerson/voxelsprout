@@ -34,7 +34,15 @@ float3 resolveVoxelAlbedo(uint voxelType, uint baseColorIndex)
 {
     if (baseColorIndex <= 15u)
     {
-        return saturate(camera.voxelBaseColorPalette[baseColorIndex].xyz);
+        const float3 paletteColor = saturate(camera.voxelBaseColorPalette[baseColorIndex].xyz);
+        const float peak = max(max(paletteColor.x, paletteColor.y), paletteColor.z);
+        const float floorValue = min(min(paletteColor.x, paletteColor.y), paletteColor.z);
+        const float saturation = (peak > 1e-4) ? ((peak - floorValue) / peak) : 0.0;
+        // If palette entry is effectively grayscale, fall back to stable material albedo for GI chroma.
+        if (saturation > 0.06)
+        {
+            return paletteColor;
+        }
     }
     return voxelTypeDefaultAlbedo(voxelType);
 }
