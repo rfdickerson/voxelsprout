@@ -316,4 +316,51 @@ inline Vector3 transformDirection(const Matrix4& m, const Vector3& d) {
     return Vector3{result.x, result.y, result.z};
 }
 
+inline Matrix4 inverse(const Matrix4& matrix) {
+    const float a00 = matrix(0, 0), a01 = matrix(0, 1), a02 = matrix(0, 2), a03 = matrix(0, 3);
+    const float a10 = matrix(1, 0), a11 = matrix(1, 1), a12 = matrix(1, 2), a13 = matrix(1, 3);
+    const float a20 = matrix(2, 0), a21 = matrix(2, 1), a22 = matrix(2, 2), a23 = matrix(2, 3);
+    const float a30 = matrix(3, 0), a31 = matrix(3, 1), a32 = matrix(3, 2), a33 = matrix(3, 3);
+
+    const float b00 = a00 * a11 - a01 * a10;
+    const float b01 = a00 * a12 - a02 * a10;
+    const float b02 = a00 * a13 - a03 * a10;
+    const float b03 = a01 * a12 - a02 * a11;
+    const float b04 = a01 * a13 - a03 * a11;
+    const float b05 = a02 * a13 - a03 * a12;
+    const float b06 = a20 * a31 - a21 * a30;
+    const float b07 = a20 * a32 - a22 * a30;
+    const float b08 = a20 * a33 - a23 * a30;
+    const float b09 = a21 * a32 - a22 * a31;
+    const float b10 = a21 * a33 - a23 * a31;
+    const float b11 = a22 * a33 - a23 * a32;
+
+    const float determinant =
+        (b00 * b11) - (b01 * b10) + (b02 * b09) +
+        (b03 * b08) - (b04 * b07) + (b05 * b06);
+    if (std::abs(determinant) <= 1e-8f) {
+        return Matrix4::identity();
+    }
+    const float invDeterminant = 1.0f / determinant;
+
+    Matrix4 inverseMatrix{};
+    inverseMatrix(0, 0) = (a11 * b11 - a12 * b10 + a13 * b09) * invDeterminant;
+    inverseMatrix(0, 1) = (a02 * b10 - a01 * b11 - a03 * b09) * invDeterminant;
+    inverseMatrix(0, 2) = (a31 * b05 - a32 * b04 + a33 * b03) * invDeterminant;
+    inverseMatrix(0, 3) = (a22 * b04 - a21 * b05 - a23 * b03) * invDeterminant;
+    inverseMatrix(1, 0) = (a12 * b08 - a10 * b11 - a13 * b07) * invDeterminant;
+    inverseMatrix(1, 1) = (a00 * b11 - a02 * b08 + a03 * b07) * invDeterminant;
+    inverseMatrix(1, 2) = (a32 * b02 - a30 * b05 - a33 * b01) * invDeterminant;
+    inverseMatrix(1, 3) = (a20 * b05 - a22 * b02 + a23 * b01) * invDeterminant;
+    inverseMatrix(2, 0) = (a10 * b10 - a11 * b08 + a13 * b06) * invDeterminant;
+    inverseMatrix(2, 1) = (a01 * b08 - a00 * b10 - a03 * b06) * invDeterminant;
+    inverseMatrix(2, 2) = (a30 * b04 - a31 * b02 + a33 * b00) * invDeterminant;
+    inverseMatrix(2, 3) = (a21 * b02 - a20 * b04 - a23 * b00) * invDeterminant;
+    inverseMatrix(3, 0) = (a11 * b07 - a10 * b09 - a12 * b06) * invDeterminant;
+    inverseMatrix(3, 1) = (a00 * b09 - a01 * b07 + a02 * b06) * invDeterminant;
+    inverseMatrix(3, 2) = (a31 * b01 - a30 * b03 - a32 * b00) * invDeterminant;
+    inverseMatrix(3, 3) = (a20 * b03 - a21 * b01 + a22 * b00) * invDeterminant;
+    return inverseMatrix;
+}
+
 } // namespace voxelsprout::math

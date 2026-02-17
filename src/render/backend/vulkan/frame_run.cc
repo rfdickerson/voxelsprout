@@ -493,10 +493,17 @@ void RendererBackend::renderFrame(
     std::memcpy(mvpUniform.proj, projectionColumnMajor.m, sizeof(mvpUniform.proj));
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
         const voxelsprout::math::Matrix4 lightViewProjColumnMajor = transpose(lightViewProjMatrices[cascadeIndex]);
+        const voxelsprout::math::Matrix4 inverseLightViewProjColumnMajor =
+            transpose(voxelsprout::math::inverse(lightViewProjMatrices[cascadeIndex]));
         std::memcpy(
             mvpUniform.lightViewProj[cascadeIndex],
             lightViewProjColumnMajor.m,
             sizeof(mvpUniform.lightViewProj[cascadeIndex])
+        );
+        std::memcpy(
+            mvpUniform.invLightViewProj[cascadeIndex],
+            inverseLightViewProjColumnMajor.m,
+            sizeof(mvpUniform.invLightViewProj[cascadeIndex])
         );
         mvpUniform.shadowCascadeSplits[cascadeIndex] = cascadeDistances[cascadeIndex];
         const ShadowAtlasRect atlasRect = kShadowAtlasRects[cascadeIndex];
