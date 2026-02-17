@@ -6,6 +6,7 @@ public struct CameraUniform
     public float4x4 view;
     public float4x4 proj;
     public float4x4 lightViewProj[4];
+    public float4x4 invLightViewProj[4];
     public float4 shadowCascadeSplits;
     public float4 shadowAtlasUvRects[4];
     public float4 sunDirectionIntensity;

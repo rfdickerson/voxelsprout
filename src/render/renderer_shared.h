@@ -77,6 +77,7 @@ struct alignas(16) CameraUniform {
     float view[16];
     float proj[16];
     float lightViewProj[kShadowCascadeCount][16];
+    float invLightViewProj[kShadowCascadeCount][16];
     float shadowCascadeSplits[4];
     float shadowAtlasUvRects[kShadowCascadeCount][4];
     float sunDirectionIntensity[4];

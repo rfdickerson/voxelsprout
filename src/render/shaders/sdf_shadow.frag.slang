@@ -11,7 +11,7 @@ float main(FragmentInput input) : SV_Depth
 {
     const int cascadeIndex = clamp(input.cascadeIndex, 0, 3);
     const float2 ndcXY = (input.inUv * 2.0) - 1.0;
-    const float4x4 invLightViewProj = inverse4x4(camera.lightViewProj[cascadeIndex]);
+    const float4x4 invLightViewProj = camera.invLightViewProj[cascadeIndex];
 
     float4 nearWorldH = mul(invLightViewProj, float4(ndcXY.x, ndcXY.y, 1.0, 1.0));
     float4 farWorldH = mul(invLightViewProj, float4(ndcXY.x, ndcXY.y, 0.0, 1.0));
