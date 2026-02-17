@@ -154,7 +154,8 @@ FragmentOutput main(FragmentInput input)
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
     const float shadowVisibility = (ndotl > 0.0001) ? sampleShadowVisibility(hitWorld, normal, viewDepth, ndotl) : 1.0;
     const float3 ambientSh = evaluateShHemisphereIrradiance(normal) * 0.78;
-    const float3 ambientGi = sampleVoxelGi(hitWorld + (normal * 0.08), normal);
+    const float giProbeDistance = max(camera.voxelGiGridOriginCellSize.w * 0.90, 0.08);
+    const float3 ambientGi = sampleVoxelGi(hitWorld + (normal * giProbeDistance), normal);
     const int voxelGiDebugMode = int(camera.shadowVoxelGridOrigin.z + 0.5);
     if (voxelGiDebugMode == 1)
     {
@@ -189,8 +190,8 @@ FragmentOutput main(FragmentInput input)
     const float3 viewDir = normalize(rayOrigin - hitWorld);
     const float3 halfVec = normalize((-sunDirection) + viewDir);
     const float specular = pow(max(dot(normal, halfVec), 0.0), 48.0) * 0.18 * shadowVisibility;
-    const float3 indirectLit = ((ambientSh * ambientScale * 2.0) + ambientGi) * 0.92;
-    const float3 directLit = direct * 1.10;
+    const float3 indirectLit = ((ambientSh * ambientScale * 1.55) + (ambientGi * 2.35)) * 0.98;
+    const float3 directLit = direct * 0.90;
     output.color = float4(baseColor * (indirectLit + directLit) + specular, 1.0);
     return output;
 }
