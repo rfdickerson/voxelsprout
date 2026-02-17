@@ -5,6 +5,12 @@ import sdf_scene;
 [[vk::binding(4, 0)]]
 Sampler2DShadow shadowMap;
 
+[[vk::binding(9, 0)]]
+Sampler3D<float4> voxelGiVolume;
+
+[[vk::binding(11, 0)]]
+Sampler3D<float4> voxelGiOccupancyVolume;
+
 struct FragmentInput
 {
     float2 inUv : TEXCOORD0;
@@ -72,6 +78,34 @@ float sampleShadowVisibility(float3 worldPosition, float3 normal, float viewDept
     return visibility / max(weightSum, 1e-4);
 }
 
+float3 sampleVoxelGi(float3 worldPosition, float3 normal)
+{
+    const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
+    const float3 gridOrigin = camera.voxelGiGridOriginCellSize.xyz;
+    const float3 gridExtent = max(camera.voxelGiGridExtentStrength.xyz, float3(cellSize, cellSize, cellSize));
+    const float3 uvwCenter = (worldPosition - gridOrigin) / gridExtent;
+    if (any(uvwCenter < float3(0.0, 0.0, 0.0)) || any(uvwCenter > float3(1.0, 1.0, 1.0)))
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+
+    const float3 uvwForward = (worldPosition + (normal * (cellSize * 0.55)) - gridOrigin) / gridExtent;
+    const float3 uvwInterior = (worldPosition - (normal * (cellSize * 0.35)) - gridOrigin) / gridExtent;
+    const float3 giCenter = voxelGiVolume.SampleLevel(uvwCenter, 0.0).xyz;
+    const float3 giForward =
+        (any(uvwForward < float3(0.0, 0.0, 0.0)) || any(uvwForward > float3(1.0, 1.0, 1.0)))
+            ? giCenter
+            : voxelGiVolume.SampleLevel(uvwForward, 0.0).xyz;
+
+    const float interiorOccupancy =
+        (any(uvwInterior < float3(0.0, 0.0, 0.0)) || any(uvwInterior > float3(1.0, 1.0, 1.0)))
+            ? 0.0
+            : voxelGiOccupancyVolume.SampleLevel(uvwInterior, 0.0).x;
+    const float oneSidedBlend = (interiorOccupancy > 0.5) ? 1.0 : 0.0;
+    const float3 giRadiance = lerp((giCenter * 0.70) + (giForward * 0.30), (giCenter * 0.20) + (giForward * 0.80), oneSidedBlend);
+    return giRadiance * max(camera.voxelGiGridExtentStrength.w, 0.0);
+}
+
 FragmentOutput main(FragmentInput input)
 {
     FragmentOutput output;
@@ -105,14 +139,13 @@ FragmentOutput main(FragmentInput input)
     const float3 sunColor = camera.sunColorShadow.xyz;
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
     const float shadowVisibility = (ndotl > 0.0001) ? sampleShadowVisibility(hitWorld, normal, viewDepth, ndotl) : 1.0;
-    const float3 ambient = evaluateShHemisphereIrradiance(normal) * 0.78;
+    const float3 ambientSh = evaluateShHemisphereIrradiance(normal) * 0.78;
+    const float3 ambientGi = sampleVoxelGi(hitWorld, normal);
     const float3 direct = sunColor * (sunIntensity * ndotl * shadowVisibility);
-    const float3 baseSphere = float3(0.96, 0.36, 0.22);
-    const float3 baseBox = float3(0.22, 0.72, 0.94);
-    const float3 baseColor = lerp(baseSphere, baseBox, blend);
+    const float3 baseColor = float3(0.82, 0.82, 0.82);
     const float3 viewDir = normalize(rayOrigin - hitWorld);
     const float3 halfVec = normalize((-sunDirection) + viewDir);
     const float specular = pow(max(dot(normal, halfVec), 0.0), 48.0) * 0.18 * shadowVisibility;
-    output.color = float4(baseColor * (ambient + direct) + specular, 1.0);
+    output.color = float4(baseColor * (ambientSh + ambientGi + direct) + specular, 1.0);
     return output;
 }

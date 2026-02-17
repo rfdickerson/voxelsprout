@@ -39,7 +39,7 @@ public float sdfSceneDistance(float3 worldPosition, float3 objectCenter, float b
     const float sphereTravel = lerp(2.9, 0.0, blend);
     const float3 sphereCenter = cubeCenter + float3(0.0, sphereTravel, 0.0);
 
-    const float sphereDistance = sdfSphere(worldPosition - sphereCenter, 1.45);
+    const float sphereDistance = sdfSphere(worldPosition - sphereCenter, 1.30);
     const float boxDistance = sdfBox(worldPosition - cubeCenter, float3(1.25, 1.25, 1.25));
     return smoothMin(sphereDistance, boxDistance, 0.34);
 }
