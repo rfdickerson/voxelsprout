@@ -13,6 +13,9 @@
 namespace voxelsprout::app {
 namespace {
 
+constexpr int kInteractivePreviewMaxBounces = 2;
+constexpr int kInteractivePreviewCooldownFrames = 8;
+
 void applyCloudPreset(int presetIndex, voxelsprout::render::RenderParameters& params) {
     auto& volume = params.scene.volume;
     switch (presetIndex) {
@@ -202,6 +205,7 @@ void App::pollInput() {
 }
 
 void App::buildUi() {
+    m_uiInteracting = false;
     if (!m_showUi) {
         return;
     }
@@ -286,6 +290,10 @@ void App::buildUi() {
     ImGui::Text("GPU total: %.3f ms", timings.totalMs);
 
     ImGui::Text("Camera locked for parameter tuning. ESC quit.");
+    m_uiInteracting = ImGui::IsAnyItemActive();
+    if (m_uiInteracting) {
+        ImGui::Text("Interactive preview: ON");
+    }
     ImGui::End();
 }
 
@@ -306,7 +314,24 @@ void App::run() {
         m_renderer.beginUiFrame();
         buildUi();
 
-        if (!m_renderer.renderFrame(m_renderParams)) {
+        if (m_uiInteracting) {
+            m_interactionCooldownFrames = kInteractivePreviewCooldownFrames;
+        } else if (m_interactionCooldownFrames > 0) {
+            m_interactionCooldownFrames -= 1;
+        }
+
+        const bool interactivePreview = m_uiInteracting || (m_interactionCooldownFrames > 0);
+        voxelsprout::render::RenderParameters frameParams = m_renderParams;
+        if (interactivePreview) {
+            frameParams.scene.volume.maxBounces = std::min(frameParams.scene.volume.maxBounces, kInteractivePreviewMaxBounces);
+            frameParams.cloudUpdateInterval = 1;
+            if (m_uiInteracting) {
+                frameParams.enableAccumulation = false;
+                frameParams.forceReset = true;
+            }
+        }
+
+        if (!m_renderer.renderFrame(frameParams)) {
             VOX_LOGE("app") << "render frame failed";
             break;
         }

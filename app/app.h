@@ -24,6 +24,8 @@ private:
 
     bool m_showUi = true;
     bool m_tabWasDown = false;
+    bool m_uiInteracting = false;
+    int m_interactionCooldownFrames = 0;
     int m_cloudUpdateIntervalUi = 2;
     int m_maxAccumulationSamplesUi = 256;
     int m_cloudPresetUi = 1;
