@@ -199,39 +199,37 @@ float densityField(float3 p) {
     const float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
     const float detailScale = max(gPush.cloudShapeParams.y, 0.08f);
     const float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
-    const float densityScale = max(gPush.mediumParams.x, 0.01f);
 
     if (p.y < cloudBase || p.y > cloudTop) {
         return 0.0f;
     }
 
-    const float3 center = float3(0.0f, cloudBase + 2.5f, 0.0f);
-    const float3 localP = p - center;
-    const float maxRadius = 4.5f;
-    const float distFromCenter = length(localP);
+    const float densityScale = max(gPush.mediumParams.x, 0.01f);
 
-    const float radialMask = 1.0f - smoothstep(maxRadius * 0.3f, maxRadius, distFromCenter);
+    // 1. Sculpting falloff.
+    const float3 center = float3(0.0f, cloudBase, 0.0f);
+    const float distXZ = length(p.xz - center.xz);
+    const float maxRadius = 6.0f;
+    const float radialFalloff = smoothstep(2.0f, maxRadius, distXZ);
+
     const float normalizedY = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
-    const float bottomRamp = smoothstep(0.0f, 0.15f, normalizedY);
-    const float topTaper = 1.0f - smoothstep(0.4f, 1.0f, normalizedY);
+    const float heightFalloff = 1.0f - (smoothstep(0.0f, 0.15f, normalizedY) * smoothstep(1.0f, 0.4f, normalizedY));
+    const float structuralFalloff = max(radialFalloff, heightFalloff);
 
-    const float structuralMask = radialMask * bottomRamp * topTaper;
-    if (structuralMask <= 0.0f) {
-        return 0.0f;
-    }
-
-    const float3 baseUvw = p * macroScale * 0.12f;
+    // 2. Base shape from low-frequency noise.
+    const float3 baseUvw = p * macroScale * 0.15f;
     const float baseNoise = sampleCloudNoise(baseUvw).r;
-    const float baseDensity = saturate(remap(baseNoise, 1.0f - structuralMask, 1.0f, 0.0f, 1.0f));
+    const float baseDensity = saturate(baseNoise - structuralFalloff);
     if (baseDensity <= 0.0f) {
         return 0.0f;
     }
 
-    const float3 detailUvw = p * detailScale * 0.45f;
+    // 3. Cauliflower edge carving from Worley channels.
+    const float3 detailUvw = p * detailScale * 0.5f;
     const float4 detailNoise = sampleCloudNoise(detailUvw);
     const float highFreqFbm = detailNoise.g * 0.625f + detailNoise.b * 0.25f + detailNoise.w * 0.125f;
     const float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity);
-    const float finalDensity = remap(baseDensity, erosionModifier * erosionStrength, 1.0f, 0.0f, 1.0f);
+    const float finalDensity = saturate(baseDensity - (erosionModifier * erosionStrength));
 
     return saturate(finalDensity) * densityScale;
 }
@@ -595,6 +593,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             float3 wo = -rayDir;
             float3 sunDirSample = sampleUniformCone(sunDir, sunCosThetaMax, rngState);
             float trSun = estimateSunTransmittance(scatterPos, sunDirSample, densityScale);
+            const float localDensity = densityField(scatterPos) * densityScale;
+            const float powderEffect = 1.0f - exp(-localDensity * 2.0f);
+            trSun *= powderEffect;
             // Conventions:
             // - viewDir points from previous vertex/camera toward the scattering point.
             // - lightDir points from sun toward the scattering point.
