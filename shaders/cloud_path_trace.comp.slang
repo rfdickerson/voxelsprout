@@ -4,7 +4,6 @@ static const float3 kCloudAabbMax = float3(10.0f, 10.0f, 10.0f);
 static const uint kMaxBouncesHardLimit = 12u;
 static const uint kSunTrMaxSteps = 32u;
 static const float kSunAngularRadiusRadians = 0.004f; // ~0.23 degrees
-static const int kCloudNoiseVolumeDim = 128;
 
 struct CameraPush {
     float4 cameraPositionFov;
@@ -31,6 +30,8 @@ RWTexture2D<uint> gRngState;
 Texture2D<float4> gBlueNoise;
 [[vk::binding(3, 0)]]
 Texture3D<float4> gCloudNoiseVolume;
+[[vk::binding(4, 0)]]
+SamplerState gVolumeSampler;
 
 uint hash3(uint3 p) {
     uint h = p.x * 747796405u;
@@ -177,43 +178,8 @@ float3 curlNoise(float3 p) {
     return (len > 1e-4f) ? (curl / len) : float3(0.0f, 0.0f, 0.0f);
 }
 
-int wrapNoiseCoord(int v) {
-    int m = v % kCloudNoiseVolumeDim;
-    return (m < 0) ? (m + kCloudNoiseVolumeDim) : m;
-}
-
-float4 cloudNoiseLoad(int3 coord) {
-    int3 wrapped = int3(
-        wrapNoiseCoord(coord.x),
-        wrapNoiseCoord(coord.y),
-        wrapNoiseCoord(coord.z));
-    return gCloudNoiseVolume.Load(int4(wrapped, 0));
-}
-
 float4 sampleCloudNoise(float3 p) {
-    float3 uvw = frac(p);
-    float3 coord = uvw * float(kCloudNoiseVolumeDim) - 0.5f;
-
-    int3 i0 = int3(floor(coord));
-    int3 i1 = i0 + int3(1, 1, 1);
-    float3 f = coord - float3(i0);
-
-    float4 c000 = cloudNoiseLoad(int3(i0.x, i0.y, i0.z));
-    float4 c100 = cloudNoiseLoad(int3(i1.x, i0.y, i0.z));
-    float4 c010 = cloudNoiseLoad(int3(i0.x, i1.y, i0.z));
-    float4 c110 = cloudNoiseLoad(int3(i1.x, i1.y, i0.z));
-    float4 c001 = cloudNoiseLoad(int3(i0.x, i0.y, i1.z));
-    float4 c101 = cloudNoiseLoad(int3(i1.x, i0.y, i1.z));
-    float4 c011 = cloudNoiseLoad(int3(i0.x, i1.y, i1.z));
-    float4 c111 = cloudNoiseLoad(int3(i1.x, i1.y, i1.z));
-
-    float4 x00 = lerp(c000, c100, f.x);
-    float4 x10 = lerp(c010, c110, f.x);
-    float4 x01 = lerp(c001, c101, f.x);
-    float4 x11 = lerp(c011, c111, f.x);
-    float4 y0v = lerp(x00, x10, f.y);
-    float4 y1v = lerp(x01, x11, f.y);
-    return lerp(y0v, y1v, f.z);
+    return gCloudNoiseVolume.SampleLevel(gVolumeSampler, p, 0.0f);
 }
 
 float remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
@@ -263,12 +229,22 @@ float densityField(float3 p) {
     float weatherMask = smoothstep(coverageThreshold - 0.22f, coverageThreshold + 0.12f, weather);
     float coverageMask = saturate(0.40f + 0.60f * weatherMask);
 
-    // 3) Single centered cloud volume mask (soft box) multiplied by weather.
+    // 3) Single centered cloud volume mask using rounded core + attached lobes.
     float3 local = (p - cloudCenter) / cloudHalfExtents;
-    float boxEdge = max(max(abs(local.x), abs(local.y)), abs(local.z));
-    float boxMask = 1.0f - smoothstep(0.82f, 1.04f, boxEdge);
-    float sphereMask = 1.0f - smoothstep(0.70f, 1.08f, length(local));
-    float singleCloudMask = saturate(boxMask * (0.35f + 0.65f * sphereMask));
+    float coreRadius = length(local * float3(0.92f, 1.12f, 0.92f));
+    float coreMask = 1.0f - smoothstep(0.58f, 1.05f, coreRadius);
+
+    float lobeA = 1.0f - smoothstep(0.55f, 1.00f, length((local - float3(0.36f, 0.14f, -0.08f)) * float3(1.10f, 0.95f, 1.10f)));
+    float lobeB = 1.0f - smoothstep(0.55f, 1.00f, length((local - float3(-0.33f, 0.18f, 0.16f)) * float3(1.05f, 0.90f, 1.05f)));
+    float lobeC = 1.0f - smoothstep(0.55f, 1.00f, length((local - float3(0.12f, 0.28f, 0.35f)) * float3(1.00f, 0.88f, 1.00f)));
+    float lobeD = 1.0f - smoothstep(0.55f, 1.00f, length((local - float3(-0.16f, 0.32f, -0.31f)) * float3(1.00f, 0.86f, 1.00f)));
+    float attachedLobes = max(max(lobeA, lobeB), max(lobeC, lobeD));
+
+    float lobeNoise = sampleCloudNoise((p - cloudCenter) * 0.22f + float3(0.41f, -0.17f, 0.29f)).x;
+    float lobeGate = smoothstep(0.44f, 0.72f, lobeNoise);
+    float shellBand = smoothstep(0.18f, 0.88f, coreMask) * (1.0f - smoothstep(0.82f, 1.00f, coreMask));
+    float singleCloudMask = saturate(max(coreMask, attachedLobes * (0.55f + 0.45f * lobeGate)));
+    singleCloudMask = saturate(singleCloudMask + 0.20f * shellBand * lobeGate);
     if (singleCloudMask <= 0.0f) {
         return 0.0f;
     }
@@ -300,6 +276,9 @@ float densityField(float3 p) {
     float mediumPerlin = remap(mediumBase, erosionGate, 1.0f, 0.0f, 1.0f);
     mediumPerlin = saturate(mediumPerlin);
     float cauliflower = smoothstep(0.12f, 0.78f, 0.85f * mediumPerlin + 0.15f * erosionLow);
+    float4 lobeNoiseField = sampleCloudNoise((pLocal + float3(-11.2f, 4.1f, -6.8f)) * (detailScale * 1.85f));
+    float lobeDetail = smoothstep(0.40f, 0.84f, 0.70f * lobeNoiseField.x + 0.30f * lobeNoiseField.y);
+    float lobeClumps = smoothstep(0.36f, 0.90f, macroCell * lobeDetail);
 
     float4 fineNoise = sampleCloudNoise((pLocal + float3(17.0f, -8.0f, 11.0f)) * (detailScale * 3.5f));
     float finePerlin = saturate(fineNoise.w);
@@ -307,6 +286,7 @@ float densityField(float3 p) {
 
     float detailBlend = saturate(0.38f + 0.40f * chunkiness);
     float detail = lerp(cauliflower, largeLobes, detailBlend);
+    detail = lerp(detail, lobeClumps, 0.38f + 0.25f * saturate(chunkiness));
     float stepped = floor(saturate(detail) * 4.0f) * (1.0f / 3.0f);
     detail = lerp(detail, stepped, stylization * 0.85f);
 
@@ -440,32 +420,30 @@ bool sampleDistance(
     return false;
 }
 
-float estimateSunTransmittance(float3 p, float3 sunDir, float sigmaMajorant, float densityScale, inout uint rng) {
+float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale) {
     float tMin = 0.0f;
     float tMax = 0.0f;
-    if (!intersectAabb(p + sunDir * 0.02f, sunDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
+    if (!intersectAabb(p + sunDir * 0.05f, sunDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
         return 1.0f;
     }
 
-    float tr = 1.0f;
-    float t = tMin;
-    [loop]
-    for (uint i = 0; i < kSunTrMaxSteps; ++i) {
-        float u = max(rand01(rng), 1e-6f);
-        t += -log(u) / sigmaMajorant;
-        if (t >= tMax) {
-            break;
-        }
-
-        float3 x = p + sunDir * t;
-        float sigmaT = densityField(x) * densityScale * 1.5f;
-        tr *= max(1.0f - (sigmaT / sigmaMajorant), 0.0f);
-        if (tr < 1e-3f) {
-            return 0.0f;
-        }
+    float marchDistance = tMax;
+    float stepSize = marchDistance / float(kSunTrMaxSteps);
+    if (stepSize <= 0.0f) {
+        return 1.0f;
     }
 
-    return tr;
+    float t = stepSize * 0.5f;
+    float opticalDepth = 0.0f;
+    [loop]
+    for (uint i = 0; i < kSunTrMaxSteps; ++i) {
+        float3 x = p + sunDir * t;
+        float density = densityField(x) * densityScale * 1.5f;
+        opticalDepth += density * stepSize;
+        t += stepSize;
+    }
+
+    return exp(-opticalDepth);
 }
 
 float phaseRayleigh(float cosTheta) {
@@ -611,14 +589,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         }
 
         if (debugSunTransmittance && bounce == 0u) {
-            float trSunDebug = estimateSunTransmittance(scatterPos, sunDir, sigmaMajorant, densityScale, rngState);
+            float trSunDebug = estimateSunTransmittance(scatterPos, sunDir, densityScale);
             L = float3(trSunDebug, trSunDebug, trSunDebug);
             break;
         }
 
         float3 wo = -rayDir;
         float3 sunDirSample = sampleUniformCone(sunDir, sunCosThetaMax, rngState);
-        float trSun = estimateSunTransmittance(scatterPos, sunDirSample, sigmaMajorant, densityScale, rngState);
+        float trSun = estimateSunTransmittance(scatterPos, sunDirSample, densityScale);
         // Conventions:
         // - viewDir points from previous vertex/camera toward the scattering point.
         // - lightDir points from sun toward the scattering point.

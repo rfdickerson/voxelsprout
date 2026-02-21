@@ -404,6 +404,7 @@ struct Renderer::Impl {
     ImageResource blueNoiseImage;
     ImageResource cloudNoiseImage;
     VkSampler blueNoiseSampler = VK_NULL_HANDLE;
+    VkSampler cloudNoiseSampler = VK_NULL_HANDLE;
 
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorPool imguiDescriptorPool = VK_NULL_HANDLE;
@@ -1007,6 +1008,15 @@ bool Renderer::Impl::createStorageImages() {
         return false;
     }
 
+    VkSamplerCreateInfo cloudSamplerInfo = samplerInfo;
+    cloudSamplerInfo.magFilter = VK_FILTER_LINEAR;
+    cloudSamplerInfo.minFilter = VK_FILTER_LINEAR;
+    cloudSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    if (vkCreateSampler(device, &cloudSamplerInfo, nullptr, &cloudNoiseSampler) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create cloud noise sampler";
+        return false;
+    }
+
     const std::size_t blueNoiseByteCount = static_cast<std::size_t>(kBlueNoiseSize) * static_cast<std::size_t>(kBlueNoiseSize) * 4u;
     std::vector<std::uint8_t> blueNoiseData(blueNoiseByteCount);
 
@@ -1359,6 +1369,10 @@ void Renderer::Impl::destroyStorageImages() {
         vkDestroySampler(device, blueNoiseSampler, nullptr);
         blueNoiseSampler = VK_NULL_HANDLE;
     }
+    if (cloudNoiseSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(device, cloudNoiseSampler, nullptr);
+        cloudNoiseSampler = VK_NULL_HANDLE;
+    }
 }
 
 VkShaderModule Renderer::Impl::createShaderModuleFromSpv(const char* relativePath) const {
@@ -1383,11 +1397,13 @@ VkShaderModule Renderer::Impl::createShaderModuleFromSpv(const char* relativePat
 }
 
 bool Renderer::Impl::createDescriptors() {
-    std::array<VkDescriptorPoolSize, 2> poolSizes{};
+    std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     poolSizes[0].descriptorCount = 5;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[1].descriptorCount = 2;
+    poolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
+    poolSizes[2].descriptorCount = 1;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1416,7 +1432,7 @@ bool Renderer::Impl::createDescriptors() {
         return false;
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 4> cloudBindings{};
+    std::array<VkDescriptorSetLayoutBinding, 5> cloudBindings{};
     cloudBindings[0].binding = 0;
     cloudBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     cloudBindings[0].descriptorCount = 1;
@@ -1433,6 +1449,10 @@ bool Renderer::Impl::createDescriptors() {
     cloudBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     cloudBindings[3].descriptorCount = 1;
     cloudBindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    cloudBindings[4].binding = 4;
+    cloudBindings[4].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    cloudBindings[4].descriptorCount = 1;
+    cloudBindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo cloudLayoutInfo{};
     cloudLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1506,11 +1526,16 @@ bool Renderer::Impl::createDescriptors() {
     cloudNoiseInfo.imageView = cloudNoiseImage.view;
     cloudNoiseInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+    VkDescriptorImageInfo cloudNoiseSamplerInfo{};
+    cloudNoiseSamplerInfo.sampler = cloudNoiseSampler;
+    cloudNoiseSamplerInfo.imageView = VK_NULL_HANDLE;
+    cloudNoiseSamplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
     VkDescriptorImageInfo toneInfo{};
     toneInfo.imageView = toneMapImage.view;
     toneInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    std::array<VkWriteDescriptorSet, 6> writes{};
+    std::array<VkWriteDescriptorSet, 7> writes{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = cloudPathTracePass.descriptorSet;
     writes[0].dstBinding = 0;
@@ -1540,18 +1565,25 @@ bool Renderer::Impl::createDescriptors() {
     writes[3].pImageInfo = &cloudNoiseInfo;
 
     writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[4].dstSet = toneMapPass.descriptorSet;
-    writes[4].dstBinding = 0;
-    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[4].dstSet = cloudPathTracePass.descriptorSet;
+    writes[4].dstBinding = 4;
+    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[4].descriptorCount = 1;
-    writes[4].pImageInfo = &accumInfo;
+    writes[4].pImageInfo = &cloudNoiseSamplerInfo;
 
     writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[5].dstSet = toneMapPass.descriptorSet;
-    writes[5].dstBinding = 1;
+    writes[5].dstBinding = 0;
     writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[5].descriptorCount = 1;
-    writes[5].pImageInfo = &toneInfo;
+    writes[5].pImageInfo = &accumInfo;
+
+    writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[6].dstSet = toneMapPass.descriptorSet;
+    writes[6].dstBinding = 1;
+    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[6].descriptorCount = 1;
+    writes[6].pImageInfo = &toneInfo;
 
     vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     return true;
