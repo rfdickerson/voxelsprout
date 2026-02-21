@@ -336,17 +336,17 @@ bool sampleDistance(
     return false;
 }
 
-float estimateSunTransmittanceSteps(float3 p, float3 sunDir, float densityScale, uint maxSteps) {
+float estimateSunOpticalDepth(float3 p, float3 sunDir, float densityScale, uint maxSteps) {
     float tMin = 0.0f;
     float tMax = 0.0f;
     if (!intersectAabb(p + sunDir * 0.05f, sunDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
-        return 1.0f;
+        return 0.0f;
     }
 
     float marchDistance = tMax;
     float stepSize = marchDistance / float(max(maxSteps, 1u));
     if (stepSize <= 0.0f) {
-        return 1.0f;
+        return 0.0f;
     }
 
     float t = stepSize * 0.5f;
@@ -359,7 +359,11 @@ float estimateSunTransmittanceSteps(float3 p, float3 sunDir, float densityScale,
         t += stepSize;
     }
 
-    return exp(-opticalDepth);
+    return opticalDepth;
+}
+
+float estimateSunTransmittanceSteps(float3 p, float3 sunDir, float densityScale, uint maxSteps) {
+    return exp(-estimateSunOpticalDepth(p, sunDir, densityScale, maxSteps));
 }
 
 float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale) {
@@ -395,7 +399,8 @@ float3 integrateCloudApproximation(
     float3 L = 0.0f;
     float3 throughput = 1.0f;
     float3 ambientSky = skyAmbientLighting(sunDir, sunIntensity);
-    float3 ambientTerm = ambientSky * (0.05f / (4.0f * kPi)) * ambientLift;
+    const float ambientStrength = lerp(0.05f, 0.6f, saturate(ambientLift));
+    float3 ambientTerm = ambientSky * (1.0f / (4.0f * kPi)) * ambientStrength;
 
     [loop]
     for (uint i = 0u; i < kCloudApproxSteps; ++i) {
@@ -411,17 +416,31 @@ float3 integrateCloudApproximation(
             float segmentScatter = 1.0f - segmentTransmit;
 
             float cosTheta = clamp(dot(-rayDir, -sunDir), -1.0f, 1.0f);
-            float phaseSun = dualHenyeyGreenstein(cosTheta, g);
-            float trSun = estimateSunTransmittanceSteps(x, sunDir, densityScale, kApproxSunTrSteps);
+            float opticalDepth = estimateSunOpticalDepth(x, sunDir, densityScale, kApproxSunTrSteps);
+            float msTransmittance = 0.0f;
+            float densityMult = 1.0f;
+            float contribMult = 1.0f;
+            float gMult = 1.0f;
+            [unroll]
+            for (int ms = 0; ms < 3; ++ms) {
+                const float tr = exp(-opticalDepth * densityMult);
+                const float phase = dualHenyeyGreenstein(cosTheta, g * gMult);
+                msTransmittance += tr * phase * contribMult;
+                densityMult *= 0.25f;
+                contribMult *= 0.70f;
+                gMult *= 0.5f;
+            }
             if (debugSunTransmittance) {
-                return float3(trSun, trSun, trSun);
+                const float trDebug = exp(-opticalDepth);
+                return float3(trDebug, trDebug, trDebug);
             }
 
-            float3 direct = sunRadiance * phaseSun * trSun * cloudAlbedo * brightnessBoost;
-            float powder = 1.0f - exp(-sigmaT * 1.2f);
-            float multipleScatteringApprox = 0.25f + (0.65f * powder);
+            const float localDensity = sigmaT;
+            float powderEffect = 1.0f - exp(-localDensity * 2.0f);
+            msTransmittance *= powderEffect;
 
-            L += throughput * segmentScatter * (direct + (direct * multipleScatteringApprox * powder));
+            float3 direct = sunRadiance * msTransmittance * cloudAlbedo * brightnessBoost;
+            L += throughput * segmentScatter * direct;
             L += throughput * segmentScatter * ambientTerm * cloudAlbedo;
 
             throughput *= segmentTransmit;
@@ -598,10 +617,23 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
             float3 wo = -rayDir;
             float3 sunDirSample = sampleUniformCone(sunDir, sunCosThetaMax, rngState);
-            float trSun = estimateSunTransmittance(scatterPos, sunDirSample, densityScale);
+            const float opticalDepth = estimateSunOpticalDepth(scatterPos, sunDirSample, densityScale, kSunTrMaxSteps);
+            float msTransmittance = 0.0f;
+            float densityMult = 1.0f;
+            float contribMult = 1.0f;
+            float gMult = 1.0f;
+            [unroll]
+            for (int ms = 0; ms < 3; ++ms) {
+                const float tr = exp(-opticalDepth * densityMult);
+                const float phase = dualHenyeyGreenstein(dot(-rayDir, -sunDirSample), g * gMult);
+                msTransmittance += tr * phase * contribMult;
+                densityMult *= 0.25f;
+                contribMult *= 0.70f;
+                gMult *= 0.5f;
+            }
             const float localDensity = densityField(scatterPos) * densityScale;
             const float powderEffect = 1.0f - exp(-localDensity * 2.0f);
-            trSun *= powderEffect;
+            msTransmittance *= powderEffect;
             // Conventions:
             // - viewDir points from previous vertex/camera toward the scattering point.
             // - lightDir points from sun toward the scattering point.
@@ -609,12 +641,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             float3 viewDir = rayDir;
             float3 lightDir = -sunDirSample;
             float cosTheta = clamp(dot(lightDir, -viewDir), -1.0f, 1.0f);
-            float phaseSun = dualHenyeyGreenstein(cosTheta, g);
             // sunRadiance here represents integrated sun-disk radiance under our UI intensity convention.
-            L += throughput * cloudAlbedo * brightnessBoost * trSun * phaseSun * sunRadiance;
+            const float phase = dualHenyeyGreenstein(cosTheta, g);
+            L += throughput * cloudAlbedo * brightnessBoost * msTransmittance * phase * sunRadiance;
 
             float3 ambientSky = skyAmbientLighting(sunDir, sunIntensity);
-            L += throughput * cloudAlbedo * (1.0f / (4.0f * kPi)) * ambientSky * 0.05f;
+            const float ambientStrength = lerp(0.05f, 0.6f, saturate(gPush.cloudLightParams.y));
+            L += throughput * cloudAlbedo * (1.0f / (4.0f * kPi)) * ambientSky * ambientStrength;
 
             if (bounce + 1u >= maxBounces) {
                 break;
