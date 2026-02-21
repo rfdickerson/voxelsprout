@@ -205,32 +205,32 @@ float densityField(float3 p) {
         return 0.0f;
     }
 
-    const float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
-    const float3 center = float3(0.0f, cloudBase + 2.0f, 0.0f);
+    const float3 center = float3(0.0f, cloudBase + 2.5f, 0.0f);
     const float3 localP = p - center;
-    const float3 stretchedLocalP = localP * float3(1.0f, 1.5f, 1.0f);
-    const float distFromCenter = length(stretchedLocalP);
-    const float coreRadius = 2.0f;
-    const float maxRadius = 6.0f;
-    const float bottomRamp = smoothstep(0.0f, 0.15f, h);
-    const float containerMask = smoothstep(maxRadius, coreRadius, distFromCenter) * bottomRamp;
-    if (containerMask <= 0.0f) {
+    const float maxRadius = 4.5f;
+    const float distFromCenter = length(localP);
+
+    const float radialMask = 1.0f - smoothstep(maxRadius * 0.3f, maxRadius, distFromCenter);
+    const float normalizedY = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
+    const float bottomRamp = smoothstep(0.0f, 0.15f, normalizedY);
+    const float topTaper = 1.0f - smoothstep(0.4f, 1.0f, normalizedY);
+
+    const float structuralMask = radialMask * bottomRamp * topTaper;
+    if (structuralMask <= 0.0f) {
         return 0.0f;
     }
 
-    const float3 baseUvw = p * macroScale * 0.02f;
-    const float4 baseNoise = sampleCloudNoise(baseUvw);
-    float baseDensity = remap(baseNoise.r, 1.0f - containerMask, 1.0f, 0.0f, 1.0f);
-    baseDensity = saturate(baseDensity);
+    const float3 baseUvw = p * macroScale * 0.12f;
+    const float baseNoise = sampleCloudNoise(baseUvw).r;
+    const float baseDensity = saturate(remap(baseNoise, 1.0f - structuralMask, 1.0f, 0.0f, 1.0f));
     if (baseDensity <= 0.0f) {
         return 0.0f;
     }
 
-    const float3 detailUvw = p * detailScale * 0.15f;
+    const float3 detailUvw = p * detailScale * 0.45f;
     const float4 detailNoise = sampleCloudNoise(detailUvw);
-    const float highFreqFbm = detailNoise.g * 0.625f + detailNoise.z * 0.25f + detailNoise.w * 0.125f;
-    const float heightErosionBias = lerp(0.2f, 1.0f, h);
-    const float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity) * heightErosionBias;
+    const float highFreqFbm = detailNoise.g * 0.625f + detailNoise.b * 0.25f + detailNoise.w * 0.125f;
+    const float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity);
     const float finalDensity = remap(baseDensity, erosionModifier * erosionStrength, 1.0f, 0.0f, 1.0f);
 
     return saturate(finalDensity) * densityScale;
