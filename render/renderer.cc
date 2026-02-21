@@ -257,7 +257,9 @@ VkImageMemoryBarrier2 imageBarrier(
     VkPipelineStageFlags2 srcStage,
     VkPipelineStageFlags2 dstStage,
     VkAccessFlags2 srcAccess,
-    VkAccessFlags2 dstAccess) {
+    VkAccessFlags2 dstAccess,
+    std::uint32_t srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+    std::uint32_t dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED) {
     VkImageMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     barrier.srcStageMask = srcStage;
@@ -266,8 +268,8 @@ VkImageMemoryBarrier2 imageBarrier(
     barrier.dstAccessMask = dstAccess;
     barrier.oldLayout = oldLayout;
     barrier.newLayout = newLayout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.srcQueueFamilyIndex = srcQueueFamilyIndex;
+    barrier.dstQueueFamilyIndex = dstQueueFamilyIndex;
     barrier.image = image;
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     barrier.subresourceRange.baseMipLevel = 0;
@@ -331,6 +333,7 @@ struct Renderer::Impl {
         VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
         VkSemaphore imageAvailable = VK_NULL_HANDLE;
         VkFence inFlightFence = VK_NULL_HANDLE;
+        std::uint64_t copiedComputeTimelineValue = 0;
     };
 
     struct CloudPathTracePass {
@@ -401,7 +404,9 @@ struct Renderer::Impl {
     std::uint32_t accumulationFrameIndex = 0;
     std::uint64_t presentFrameIndex = 0;
     std::uint64_t latestSubmittedComputeTimelineValue = 0;
+    std::uint64_t latestCopySubmittedComputeTimelineValue = 0;
     std::uint64_t latestPresentedComputeTimelineValue = 0;
+    bool toneMapOwnedByUi = false;
     GpuTimingInfo timings{};
 
     bool init(GLFWwindow* inWindow);
@@ -806,9 +811,6 @@ void Renderer::Impl::destroySwapchain() {
 }
 
 bool Renderer::Impl::createStorageImages() {
-    std::array<std::uint32_t, 2> sharedQueueFamilies = {queueFamilyIndex, computeQueueFamilyIndex};
-    const bool concurrentAcrossFamilies = (queueFamilyIndex != computeQueueFamilyIndex);
-
     auto createImage = [&](ImageResource& outImage, VkFormat format, VkImageUsageFlags usage, std::uint32_t width, std::uint32_t height, bool createView = true) -> bool {
         outImage.width = width;
         outImage.height = height;
@@ -828,13 +830,7 @@ bool Renderer::Impl::createStorageImages() {
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.usage = usage;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (concurrentAcrossFamilies) {
-            imageInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-            imageInfo.queueFamilyIndexCount = static_cast<std::uint32_t>(sharedQueueFamilies.size());
-            imageInfo.pQueueFamilyIndices = sharedQueueFamilies.data();
-        } else {
-            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        }
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -887,13 +883,7 @@ bool Renderer::Impl::createStorageImages() {
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.usage = usage;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (concurrentAcrossFamilies) {
-            imageInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-            imageInfo.queueFamilyIndexCount = static_cast<std::uint32_t>(sharedQueueFamilies.size());
-            imageInfo.pQueueFamilyIndices = sharedQueueFamilies.data();
-        } else {
-            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        }
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -1788,6 +1778,7 @@ void Renderer::Impl::destroyUiFrameResources() {
             vkDestroyFence(device, frame.inFlightFence, nullptr);
             frame.inFlightFence = VK_NULL_HANDLE;
         }
+        frame.copiedComputeTimelineValue = 0;
         if (frame.imageAvailable != VK_NULL_HANDLE) {
             vkDestroySemaphore(device, frame.imageAvailable, nullptr);
             frame.imageAvailable = VK_NULL_HANDLE;
@@ -1914,6 +1905,20 @@ void Renderer::Impl::fetchTimings(const FrameResources& frame) {
 
 bool Renderer::Impl::renderUiOnlyFrame(bool copyToneMap, std::uint64_t waitTimelineValue, bool& copiedToneMap) {
     copiedToneMap = false;
+    const bool splitQueueFamilies = computeQueueFamilyIndex != queueFamilyIndex;
+
+    for (UiFrameResources& candidate : uiFrames) {
+        if (candidate.inFlightFence == VK_NULL_HANDLE) {
+            continue;
+        }
+        if (vkGetFenceStatus(device, candidate.inFlightFence) == VK_SUCCESS
+            && candidate.copiedComputeTimelineValue > 0) {
+            latestPresentedComputeTimelineValue = std::max(
+                latestPresentedComputeTimelineValue,
+                candidate.copiedComputeTimelineValue);
+            candidate.copiedComputeTimelineValue = 0;
+        }
+    }
 
     const auto isUiFrameReady = [this](const UiFrameResources& candidate) {
         if (candidate.inFlightFence == VK_NULL_HANDLE) {
@@ -1983,16 +1988,29 @@ bool Renderer::Impl::renderUiOnlyFrame(bool copyToneMap, std::uint64_t waitTimel
         swapchainImageInitialized[imageIndex] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
 
     if (copyToneMap) {
-        std::array<VkImageMemoryBarrier2, 2> copyPrep{};
-        copyPrep[0] = imageBarrier(
+        std::array<VkImageMemoryBarrier2, 3> copyPrep{};
+        std::uint32_t copyPrepBarrierCount = 0;
+        if (splitQueueFamilies) {
+            copyPrep[copyPrepBarrierCount++] = imageBarrier(
+                toneMapImage.image,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_2_NONE,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_NONE,
+                VK_ACCESS_2_TRANSFER_READ_BIT,
+                computeQueueFamilyIndex,
+                queueFamilyIndex);
+        }
+        copyPrep[copyPrepBarrierCount++] = imageBarrier(
             toneMapImage.image,
             VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK_PIPELINE_STAGE_2_NONE,
+            splitQueueFamilies ? VK_PIPELINE_STAGE_2_TRANSFER_BIT : VK_PIPELINE_STAGE_2_NONE,
             VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_ACCESS_2_NONE,
+            splitQueueFamilies ? VK_ACCESS_2_TRANSFER_READ_BIT : VK_ACCESS_2_NONE,
             VK_ACCESS_2_TRANSFER_READ_BIT);
-        copyPrep[1] = imageBarrier(
+        copyPrep[copyPrepBarrierCount++] = imageBarrier(
             presentImage.image,
             presentImage.layout,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2003,7 +2021,7 @@ bool Renderer::Impl::renderUiOnlyFrame(bool copyToneMap, std::uint64_t waitTimel
 
         VkDependencyInfo copyPrepDep{};
         copyPrepDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        copyPrepDep.imageMemoryBarrierCount = static_cast<std::uint32_t>(copyPrep.size());
+        copyPrepDep.imageMemoryBarrierCount = copyPrepBarrierCount;
         copyPrepDep.pImageMemoryBarriers = copyPrep.data();
         vkCmdPipelineBarrier2(uiFrame.commandBuffer, &copyPrepDep);
 
@@ -2035,9 +2053,9 @@ bool Renderer::Impl::renderUiOnlyFrame(bool copyToneMap, std::uint64_t waitTimel
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_IMAGE_LAYOUT_GENERAL,
             VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            splitQueueFamilies ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_TRANSFER_READ_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            splitQueueFamilies ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         copyToUi[1] = imageBarrier(
             presentImage.image,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2052,6 +2070,7 @@ bool Renderer::Impl::renderUiOnlyFrame(bool copyToneMap, std::uint64_t waitTimel
         copyToUiDep.imageMemoryBarrierCount = static_cast<std::uint32_t>(copyToUi.size());
         copyToUiDep.pImageMemoryBarriers = copyToUi.data();
         vkCmdPipelineBarrier2(uiFrame.commandBuffer, &copyToUiDep);
+        toneMapImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         presentImage.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     }
 
@@ -2158,6 +2177,26 @@ bool Renderer::Impl::renderUiOnlyFrame(bool copyToneMap, std::uint64_t waitTimel
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), uiFrame.commandBuffer);
     vkCmdEndRendering(uiFrame.commandBuffer);
 
+    if (copyToneMap && splitQueueFamilies) {
+        VkImageMemoryBarrier2 toneMapReleaseBarrier = imageBarrier(
+            toneMapImage.image,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+            VK_PIPELINE_STAGE_2_NONE,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_ACCESS_2_NONE,
+            queueFamilyIndex,
+            computeQueueFamilyIndex);
+
+        VkDependencyInfo toneMapReleaseDep{};
+        toneMapReleaseDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        toneMapReleaseDep.imageMemoryBarrierCount = 1;
+        toneMapReleaseDep.pImageMemoryBarriers = &toneMapReleaseBarrier;
+        vkCmdPipelineBarrier2(uiFrame.commandBuffer, &toneMapReleaseDep);
+        toneMapOwnedByUi = false;
+    }
+
     VkImageMemoryBarrier2 uiToPresentBarrier = imageBarrier(
         swapchainImages[imageIndex],
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2241,6 +2280,7 @@ bool Renderer::Impl::renderUiOnlyFrame(bool copyToneMap, std::uint64_t waitTimel
         return false;
     }
 
+    uiFrame.copiedComputeTimelineValue = copyToneMap ? waitTimelineValue : 0;
     copiedToneMap = copyToneMap;
     uiFrameSlot = (selectedUiSlot + 1u) % kFramesInFlight;
     return true;
@@ -2279,7 +2319,9 @@ bool Renderer::Impl::recreateSwapchain() {
     accumulationFrameIndex = 0;
     hasPreviousParams = false;
     latestSubmittedComputeTimelineValue = 0;
+    latestCopySubmittedComputeTimelineValue = 0;
     latestPresentedComputeTimelineValue = 0;
+    toneMapOwnedByUi = false;
     return true;
 }
 
@@ -2385,11 +2427,12 @@ bool Renderer::Impl::render(const RenderParameters& params) {
 
     previousParams = params;
     hasPreviousParams = true;
+    const bool splitQueueFamilies = computeQueueFamilyIndex != queueFamilyIndex;
 
     const bool pendingUnpresentedCompute =
         latestSubmittedComputeTimelineValue > latestPresentedComputeTimelineValue;
     const bool shouldSubmitCompute =
-        foundReadyFrameSlot && runCloudPassThisFrame && (!pendingUnpresentedCompute || resetAccumulation);
+        foundReadyFrameSlot && runCloudPassThisFrame && !pendingUnpresentedCompute;
 
     if (shouldSubmitCompute) {
         FrameResources& frame = frames[selectedFrameSlot];
@@ -2405,7 +2448,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         vkCmdResetQueryPool(frame.commandBuffer, frame.timestampQueryPool, 0, kTimestampCount);
         vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, frame.timestampQueryPool, kTimestampFrameStart);
 
-        std::array<VkImageMemoryBarrier2, 3> startupBarriers{};
+        std::array<VkImageMemoryBarrier2, 4> startupBarriers{};
         std::uint32_t startupBarrierCount = 0;
 
         const VkPipelineStageFlags2 accumSrcStage =
@@ -2421,18 +2464,31 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             accumSrcAccess,
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-        const VkPipelineStageFlags2 toneSrcStage =
-            (toneMapImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        const VkAccessFlags2 toneSrcAccess =
-            (toneMapImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
-        startupBarriers[startupBarrierCount++] = imageBarrier(
-            toneMapImage.image,
-            toneMapImage.layout,
-            VK_IMAGE_LAYOUT_GENERAL,
-            toneSrcStage,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            toneSrcAccess,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        if (splitQueueFamilies && toneMapOwnedByUi) {
+            startupBarriers[startupBarrierCount++] = imageBarrier(
+                toneMapImage.image,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_2_NONE,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_NONE,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                queueFamilyIndex,
+                computeQueueFamilyIndex);
+        } else {
+            const VkPipelineStageFlags2 toneSrcStage =
+                (toneMapImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            const VkAccessFlags2 toneSrcAccess =
+                (toneMapImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
+            startupBarriers[startupBarrierCount++] = imageBarrier(
+                toneMapImage.image,
+                toneMapImage.layout,
+                VK_IMAGE_LAYOUT_GENERAL,
+                toneSrcStage,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                toneSrcAccess,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        }
 
         const VkPipelineStageFlags2 rngSrcStage =
             (rngStateImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -2456,6 +2512,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         accumulationImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         toneMapImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         rngStateImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+        toneMapOwnedByUi = false;
 
         const std::uint32_t dispatchX = (swapchainExtent.width + 7u) / 8u;
         const std::uint32_t dispatchY = (swapchainExtent.height + 7u) / 8u;
@@ -2587,9 +2644,11 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_GENERAL,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            splitQueueFamilies ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_ACCESS_2_TRANSFER_READ_BIT);
+            splitQueueFamilies ? VK_ACCESS_2_NONE : VK_ACCESS_2_TRANSFER_READ_BIT,
+            splitQueueFamilies ? computeQueueFamilyIndex : VK_QUEUE_FAMILY_IGNORED,
+            splitQueueFamilies ? queueFamilyIndex : VK_QUEUE_FAMILY_IGNORED);
         VkDependencyInfo toneReadyDep{};
         toneReadyDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         toneReadyDep.imageMemoryBarrierCount = 1;
@@ -2627,6 +2686,8 @@ bool Renderer::Impl::render(const RenderParameters& params) {
 
         frame.submittedTimelineValue = signalTimelineValue;
         latestSubmittedComputeTimelineValue = signalTimelineValue;
+        toneMapImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+        toneMapOwnedByUi = splitQueueFamilies;
         frameSlot = (selectedFrameSlot + 1u) % kFramesInFlight;
 
         if (params.enableAccumulation) {
@@ -2634,20 +2695,17 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         }
     }
 
-    bool copyToneMap = false;
-    std::uint64_t copyTimelineValue = 0;
-    if (latestSubmittedComputeTimelineValue > latestPresentedComputeTimelineValue
-        && currentTimelineValue >= latestSubmittedComputeTimelineValue) {
-        copyToneMap = true;
-        copyTimelineValue = latestSubmittedComputeTimelineValue;
-    }
+    const bool copyToneMap =
+        (latestSubmittedComputeTimelineValue > latestCopySubmittedComputeTimelineValue)
+        && (currentTimelineValue >= latestSubmittedComputeTimelineValue);
+    const std::uint64_t copyTimelineValue = copyToneMap ? latestSubmittedComputeTimelineValue : 0;
 
     bool copiedToneMap = false;
     if (!renderUiOnlyFrame(copyToneMap, copyTimelineValue, copiedToneMap)) {
         return false;
     }
     if (copiedToneMap) {
-        latestPresentedComputeTimelineValue = copyTimelineValue;
+        latestCopySubmittedComputeTimelineValue = copyTimelineValue;
     }
 
     presentFrameIndex += 1;
