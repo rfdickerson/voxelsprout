@@ -194,46 +194,46 @@ float remap(float value, float originalMin, float originalMax, float newMin, flo
 }
 
 float densityField(float3 p) {
-    const float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
-    const float detailScale = max(gPush.cloudShapeParams.y, 0.08f);
-    const float coverage = saturate(gPush.cloudProfileParams.x);
-    const float weatherScale = max(gPush.cloudProfileParams.y, 0.01f);
     const float cloudBase = gPush.cloudProfileParams.z;
     const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
+    const float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
+    const float detailScale = max(gPush.cloudShapeParams.y, 0.08f);
     const float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
+    const float densityScale = max(gPush.mediumParams.x, 0.01f);
 
     if (p.y < cloudBase || p.y > cloudTop) {
         return 0.0f;
     }
 
-    const float h = saturate((p.y - cloudBase) / max(cloudTop - cloudBase, 0.25f));
-    const float heightGradient = smoothstep(0.0f, 0.18f, h) * (1.0f - smoothstep(0.80f, 1.0f, h));
-    if (heightGradient <= 0.0f) {
+    const float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
+    const float3 center = float3(0.0f, cloudBase + 2.0f, 0.0f);
+    const float3 localP = p - center;
+    const float3 stretchedLocalP = localP * float3(1.0f, 1.5f, 1.0f);
+    const float distFromCenter = length(stretchedLocalP);
+    const float coreRadius = 2.0f;
+    const float maxRadius = 6.0f;
+    const float bottomRamp = smoothstep(0.0f, 0.15f, h);
+    const float containerMask = smoothstep(maxRadius, coreRadius, distFromCenter) * bottomRamp;
+    if (containerMask <= 0.0f) {
         return 0.0f;
     }
 
-    const float3 noiseOffset = float3(17.3f, 0.5f, -22.7f);
-    const float2 weatherUv = (p.xz * weatherScale) + noiseOffset.xz;
-    const float weatherNoise = sampleCloudNoise(float3(weatherUv.x, noiseOffset.y, weatherUv.y)).r;
-    const float coverageThreshold = 1.0f - coverage;
-    const float coverageMask = smoothstep(coverageThreshold - 0.12f, coverageThreshold + 0.12f, weatherNoise);
-    const float cloudIsland = 1.0f - smoothstep(3.0f, 7.0f, length(p.xz));
-    const float structuralMask = heightGradient * coverageMask * cloudIsland;
-    if (structuralMask <= 0.0f) {
-        return 0.0f;
-    }
-
-    const float4 baseNoise = sampleCloudNoise((p * macroScale * 0.05f) + (noiseOffset * 0.25f));
-    float baseDensity = saturate(baseNoise.r * structuralMask);
+    const float3 baseUvw = p * macroScale * 0.02f;
+    const float4 baseNoise = sampleCloudNoise(baseUvw);
+    float baseDensity = remap(baseNoise.r, 1.0f - containerMask, 1.0f, 0.0f, 1.0f);
+    baseDensity = saturate(baseDensity);
     if (baseDensity <= 0.0f) {
         return 0.0f;
     }
 
-    const float4 detailNoise = sampleCloudNoise((p * detailScale * 0.1f) + (noiseOffset * 0.45f));
+    const float3 detailUvw = p * detailScale * 0.15f;
+    const float4 detailNoise = sampleCloudNoise(detailUvw);
     const float highFreqFbm = detailNoise.g * 0.625f + detailNoise.z * 0.25f + detailNoise.w * 0.125f;
-    const float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity);
-    const float finalDensity = saturate(baseDensity - (0.20f * erosionModifier * erosionStrength));
-    return finalDensity;
+    const float heightErosionBias = lerp(0.2f, 1.0f, h);
+    const float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity) * heightErosionBias;
+    const float finalDensity = remap(baseDensity, erosionModifier * erosionStrength, 1.0f, 0.0f, 1.0f);
+
+    return saturate(finalDensity) * densityScale;
 }
 
 bool intersectAabb(float3 rayOrigin, float3 rayDir, float3 bmin, float3 bmax, out float tMin, out float tMax) {

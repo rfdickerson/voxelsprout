@@ -238,15 +238,11 @@ bool paramsDiffer(const RenderParameters& a, const RenderParameters& b) {
         !almostEqual(av.albedo, bv.albedo) ||
         !almostEqual(av.macroScale, bv.macroScale) ||
         !almostEqual(av.detailScale, bv.detailScale) ||
-        !almostEqual(av.densityCutoff, bv.densityCutoff) ||
-        !almostEqual(av.chunkiness, bv.chunkiness) ||
         !almostEqual(av.coverage, bv.coverage) ||
         !almostEqual(av.weatherScale, bv.weatherScale) ||
         !almostEqual(av.cloudBase, bv.cloudBase) ||
         !almostEqual(av.cloudTop, bv.cloudTop) ||
-        !almostEqual(av.warpStrength, bv.warpStrength) ||
         !almostEqual(av.erosionStrength, bv.erosionStrength) ||
-        !almostEqual(av.stylization, bv.stylization) ||
         !almostEqual(av.ambientLift, bv.ambientLift) ||
         av.maxBounces != bv.maxBounces ||
         !almostEqual(as.direction.x, bs.direction.x) ||
@@ -2622,15 +2618,15 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         cloudPush.mediumParams[3] = 0.0f;
         cloudPush.cloudShapeParams[0] = params.scene.volume.macroScale;
         cloudPush.cloudShapeParams[1] = params.scene.volume.detailScale;
-        cloudPush.cloudShapeParams[2] = params.scene.volume.densityCutoff;
-        cloudPush.cloudShapeParams[3] = params.scene.volume.chunkiness;
+        cloudPush.cloudShapeParams[2] = 0.0f;
+        cloudPush.cloudShapeParams[3] = 0.0f;
         cloudPush.cloudProfileParams[0] = params.scene.volume.coverage;
         cloudPush.cloudProfileParams[1] = params.scene.volume.weatherScale;
         cloudPush.cloudProfileParams[2] = params.scene.volume.cloudBase;
         cloudPush.cloudProfileParams[3] = params.scene.volume.cloudTop;
-        cloudPush.cloudWarpParams[0] = params.scene.volume.warpStrength;
+        cloudPush.cloudWarpParams[0] = 0.0f;
         cloudPush.cloudWarpParams[1] = params.scene.volume.erosionStrength;
-        cloudPush.cloudWarpParams[2] = params.scene.volume.stylization;
+        cloudPush.cloudWarpParams[2] = 0.0f;
         cloudPush.cloudWarpParams[3] = 0.0f;
         cloudPush.cloudLightParams[0] = 1.0f;
         cloudPush.cloudLightParams[1] = params.scene.volume.ambientLift;

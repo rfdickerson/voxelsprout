@@ -15,15 +15,11 @@ struct VolumeSettings {
     float albedo = 0.99f;
     float macroScale = 0.34f;
     float detailScale = 0.56f;
-    float densityCutoff = 0.08f;
-    float chunkiness = 0.8f;
     float coverage = 0.62f;
     float weatherScale = 0.08f;
     float cloudBase = 1.4f;
     float cloudTop = 8.8f;
-    float warpStrength = 0.9f;
     float erosionStrength = 0.55f;
-    float stylization = 0.45f;
     float brightnessBoost = 1.0f;
     float ambientLift = 0.55f;
     int maxBounces = 3;
