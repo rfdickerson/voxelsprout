@@ -13,7 +13,7 @@
 namespace voxelsprout::app {
 namespace {
 
-constexpr int kInteractivePreviewMaxBounces = 2;
+constexpr int kInteractivePreviewMaxBounces = 1;
 constexpr int kInteractivePreviewCooldownFrames = 8;
 
 voxelsprout::core::Vec3 sunDirectionFromAngles(float azimuthDegrees, float elevationDegrees) {
@@ -88,7 +88,7 @@ bool App::init() {
     m_renderParams.scene.volume.stylization = 0.30f;
     m_renderParams.scene.volume.brightnessBoost = 1.0f;
     m_renderParams.scene.volume.ambientLift = 0.14f;
-    m_renderParams.scene.volume.maxBounces = 5;
+    m_renderParams.scene.volume.maxBounces = 1;
     m_renderParams.exposure = 0.14f;
     m_renderParams.toneMapOperator = 2;
     m_renderParams.toneMapWhitePoint = 1.0f;
@@ -160,6 +160,7 @@ void App::buildUi() {
     ImGui::SliderFloat("Density cutoff", &m_renderParams.scene.volume.densityCutoff, 0.0f, 0.3f, "%.2f");
     ImGui::SliderFloat("Ambient lift", &m_renderParams.scene.volume.ambientLift, 0.0f, 1.5f, "%.2f");
     ImGui::SliderInt("Max bounces", &m_renderParams.scene.volume.maxBounces, 1, 12);
+    ImGui::Text("1 = real-time approx, >1 = full path traced");
     m_renderParams.scene.volume.albedo = std::clamp(m_renderParams.scene.volume.albedo, 0.9f, 1.0f);
     m_renderParams.scene.volume.cloudTop =
         std::max(m_renderParams.scene.volume.cloudTop, m_renderParams.scene.volume.cloudBase + 0.25f);

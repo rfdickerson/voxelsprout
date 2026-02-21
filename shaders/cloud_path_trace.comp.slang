@@ -3,6 +3,8 @@ static const float3 kCloudAabbMin = float3(-10.0f, 0.0f, -10.0f);
 static const float3 kCloudAabbMax = float3(10.0f, 10.0f, 10.0f);
 static const uint kMaxBouncesHardLimit = 12u;
 static const uint kSunTrMaxSteps = 32u;
+static const uint kApproxSunTrSteps = 12u;
+static const uint kCloudApproxSteps = 32u;
 static const float kSunAngularRadiusRadians = 0.004f; // ~0.23 degrees
 
 struct CameraPush {
@@ -420,7 +422,7 @@ bool sampleDistance(
     return false;
 }
 
-float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale) {
+float estimateSunTransmittanceSteps(float3 p, float3 sunDir, float densityScale, uint maxSteps) {
     float tMin = 0.0f;
     float tMax = 0.0f;
     if (!intersectAabb(p + sunDir * 0.05f, sunDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
@@ -428,7 +430,7 @@ float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale) {
     }
 
     float marchDistance = tMax;
-    float stepSize = marchDistance / float(kSunTrMaxSteps);
+    float stepSize = marchDistance / float(max(maxSteps, 1u));
     if (stepSize <= 0.0f) {
         return 1.0f;
     }
@@ -436,7 +438,7 @@ float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale) {
     float t = stepSize * 0.5f;
     float opticalDepth = 0.0f;
     [loop]
-    for (uint i = 0; i < kSunTrMaxSteps; ++i) {
+    for (uint i = 0; i < maxSteps; ++i) {
         float3 x = p + sunDir * t;
         float density = densityField(x) * densityScale * 1.5f;
         opticalDepth += density * stepSize;
@@ -444,6 +446,77 @@ float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale) {
     }
 
     return exp(-opticalDepth);
+}
+
+float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale) {
+    return estimateSunTransmittanceSteps(p, sunDir, densityScale, kSunTrMaxSteps);
+}
+
+float3 integrateCloudApproximation(
+    float3 rayOrigin,
+    float3 rayDir,
+    float3 sunDir,
+    float3 sunRadiance,
+    float sunIntensity,
+    float densityScale,
+    float g,
+    float3 cloudAlbedo,
+    float brightnessBoost,
+    float ambientLift,
+    bool debugSunTransmittance
+) {
+    float tMin = 0.0f;
+    float tMax = 0.0f;
+    if (!intersectAabb(rayOrigin, rayDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
+        return skyColor(rayDir, sunDir, sunIntensity);
+    }
+
+    float marchDistance = tMax - tMin;
+    if (marchDistance <= 0.0f) {
+        return skyColor(rayDir, sunDir, sunIntensity);
+    }
+
+    const float stepSize = marchDistance / float(kCloudApproxSteps);
+    float t = tMin + (0.5f * stepSize);
+    float3 L = 0.0f;
+    float3 throughput = 1.0f;
+    float3 ambientSky = skyAmbientLighting(sunDir, sunIntensity);
+    float3 ambientTerm = ambientSky * (0.05f / (4.0f * kPi)) * ambientLift;
+
+    [loop]
+    for (uint i = 0u; i < kCloudApproxSteps; ++i) {
+        float maxThroughput = max(throughput.x, max(throughput.y, throughput.z));
+        if (maxThroughput < 1.0e-4f) {
+            break;
+        }
+
+        float3 x = rayOrigin + (rayDir * t);
+        float sigmaT = densityField(x) * densityScale * 1.5f;
+        if (sigmaT > 0.0f) {
+            float segmentTransmit = exp(-sigmaT * stepSize);
+            float segmentScatter = 1.0f - segmentTransmit;
+
+            float cosTheta = clamp(dot(-rayDir, -sunDir), -1.0f, 1.0f);
+            float phaseSun = dualHenyeyGreenstein(cosTheta, g);
+            float trSun = estimateSunTransmittanceSteps(x, sunDir, densityScale, kApproxSunTrSteps);
+            if (debugSunTransmittance) {
+                return float3(trSun, trSun, trSun);
+            }
+
+            float3 direct = sunRadiance * phaseSun * trSun * cloudAlbedo * brightnessBoost;
+            float powder = 1.0f - exp(-sigmaT * 1.2f);
+            float multipleScatteringApprox = 0.25f + (0.65f * powder);
+
+            L += throughput * segmentScatter * (direct + (direct * multipleScatteringApprox * powder));
+            L += throughput * segmentScatter * ambientTerm * cloudAlbedo;
+
+            throughput *= segmentTransmit;
+        }
+
+        t += stepSize;
+    }
+
+    return L + (throughput * skyColor(rayDir, sunDir, sunIntensity));
 }
 
 float phaseRayleigh(float cosTheta) {
@@ -551,7 +624,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float densityScale = max(gPush.mediumParams.x, 0.01f);
     float g = clamp(gPush.mediumParams.y, 0.0f, 0.90f);
     float3 cloudAlbedo = float3(gPush.mediumParams.z, gPush.mediumParams.z, gPush.mediumParams.z);
-    const float brightnessBoost = 1.0f;
+    float brightnessBoost = max(gPush.cloudLightParams.x, 0.0f);
+    float ambientLift = max(gPush.cloudLightParams.y, 0.0f);
     bool debugSunTransmittance = gPush.cloudLightParams.w > 0.5f;
     uint maxBounces = (uint)clamp(gPush.cloudLightParams.z, 1.0f, (float)kMaxBouncesHardLimit);
     float sigmaMajorant = max(densityScale * (1.85f + 0.65f * saturate(gPush.cloudShapeParams.w)), 0.05f);
@@ -559,74 +633,89 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float3 L = 0.0f;
     float3 throughput = 1.0f;
 
-    [loop]
-    for (uint bounce = 0u; bounce < maxBounces; ++bounce) {
-        float tMin = 0.0f;
-        float tMax = 0.0f;
-        if (!intersectAabb(rayOrigin, rayDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
-            if (!debugSunTransmittance) {
-                L += throughput * skyColor(rayDir, sunDir, sunIntensity);
-            }
-            break;
-        }
-
-        float3 scatterPos = 0.0f;
-        bool hit = sampleDistance(
+    if (maxBounces <= 1u) {
+        L = integrateCloudApproximation(
             rayOrigin,
             rayDir,
-            tMin,
-            tMax,
-            sigmaMajorant,
+            sunDir,
+            sunRadiance,
+            sunIntensity,
             densityScale,
-            rngState,
-            scatterPos);
-
-        if (!hit) {
-            if (!debugSunTransmittance) {
-                L += throughput * skyColor(rayDir, sunDir, sunIntensity);
-            }
-            break;
-        }
-
-        if (debugSunTransmittance && bounce == 0u) {
-            float trSunDebug = estimateSunTransmittance(scatterPos, sunDir, densityScale);
-            L = float3(trSunDebug, trSunDebug, trSunDebug);
-            break;
-        }
-
-        float3 wo = -rayDir;
-        float3 sunDirSample = sampleUniformCone(sunDir, sunCosThetaMax, rngState);
-        float trSun = estimateSunTransmittance(scatterPos, sunDirSample, densityScale);
-        // Conventions:
-        // - viewDir points from previous vertex/camera toward the scattering point.
-        // - lightDir points from sun toward the scattering point.
-        // HG uses cos(theta) = dot(lightDir, -viewDir).
-        float3 viewDir = rayDir;
-        float3 lightDir = -sunDirSample;
-        float cosTheta = clamp(dot(lightDir, -viewDir), -1.0f, 1.0f);
-        float phaseSun = dualHenyeyGreenstein(cosTheta, g);
-        // sunRadiance here represents integrated sun-disk radiance under our UI intensity convention.
-        L += throughput * cloudAlbedo * brightnessBoost * trSun * phaseSun * sunRadiance;
-
-        float3 ambientSky = skyAmbientLighting(sunDir, sunIntensity);
-        L += throughput * cloudAlbedo * (1.0f / (4.0f * kPi)) * ambientSky * 0.05f;
-
-        if (bounce + 1u >= maxBounces) {
-            break;
-        }
-
-        float3 wi = sampleHenyeyGreenstein(wo, g, rngState);
-        rayOrigin = scatterPos + wi * 0.02f;
-        rayDir = wi;
-        throughput *= cloudAlbedo;
-
-        // Start RR at path depth 5 (bounce index 4) to preserve deeper backlit glow.
-        if (bounce >= 4u) {
-            const float rrSurvive = 0.9f;
-            if (rand01(rngState) > rrSurvive) {
+            g,
+            cloudAlbedo,
+            brightnessBoost,
+            ambientLift,
+            debugSunTransmittance);
+    } else {
+        [loop]
+        for (uint bounce = 0u; bounce < maxBounces; ++bounce) {
+            float tMin = 0.0f;
+            float tMax = 0.0f;
+            if (!intersectAabb(rayOrigin, rayDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
+                if (!debugSunTransmittance) {
+                    L += throughput * skyColor(rayDir, sunDir, sunIntensity);
+                }
                 break;
             }
-            throughput /= rrSurvive;
+
+            float3 scatterPos = 0.0f;
+            bool hit = sampleDistance(
+                rayOrigin,
+                rayDir,
+                tMin,
+                tMax,
+                sigmaMajorant,
+                densityScale,
+                rngState,
+                scatterPos);
+
+            if (!hit) {
+                if (!debugSunTransmittance) {
+                    L += throughput * skyColor(rayDir, sunDir, sunIntensity);
+                }
+                break;
+            }
+
+            if (debugSunTransmittance && bounce == 0u) {
+                float trSunDebug = estimateSunTransmittance(scatterPos, sunDir, densityScale);
+                L = float3(trSunDebug, trSunDebug, trSunDebug);
+                break;
+            }
+
+            float3 wo = -rayDir;
+            float3 sunDirSample = sampleUniformCone(sunDir, sunCosThetaMax, rngState);
+            float trSun = estimateSunTransmittance(scatterPos, sunDirSample, densityScale);
+            // Conventions:
+            // - viewDir points from previous vertex/camera toward the scattering point.
+            // - lightDir points from sun toward the scattering point.
+            // HG uses cos(theta) = dot(lightDir, -viewDir).
+            float3 viewDir = rayDir;
+            float3 lightDir = -sunDirSample;
+            float cosTheta = clamp(dot(lightDir, -viewDir), -1.0f, 1.0f);
+            float phaseSun = dualHenyeyGreenstein(cosTheta, g);
+            // sunRadiance here represents integrated sun-disk radiance under our UI intensity convention.
+            L += throughput * cloudAlbedo * brightnessBoost * trSun * phaseSun * sunRadiance;
+
+            float3 ambientSky = skyAmbientLighting(sunDir, sunIntensity);
+            L += throughput * cloudAlbedo * (1.0f / (4.0f * kPi)) * ambientSky * 0.05f;
+
+            if (bounce + 1u >= maxBounces) {
+                break;
+            }
+
+            float3 wi = sampleHenyeyGreenstein(wo, g, rngState);
+            rayOrigin = scatterPos + wi * 0.02f;
+            rayDir = wi;
+            throughput *= cloudAlbedo;
+
+            // Start RR at path depth 5 (bounce index 4) to preserve deeper backlit glow.
+            if (bounce >= 4u) {
+                const float rrSurvive = 0.9f;
+                if (rand01(rngState) > rrSurvive) {
+                    break;
+                }
+                throughput /= rrSurvive;
+            }
         }
     }
 
