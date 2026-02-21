@@ -40,6 +40,10 @@ bool almostEqual(float a, float b, float epsilon = 1e-4f) {
     return absDiff(a, b) <= epsilon;
 }
 
+bool isUnormSwapchainFormat(VkFormat format) {
+    return format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_R8G8B8A8_UNORM;
+}
+
 bool paramsDiffer(const RenderParameters& a, const RenderParameters& b) {
     const auto& ac = a.camera;
     const auto& bc = b.camera;
@@ -68,15 +72,15 @@ bool paramsDiffer(const RenderParameters& a, const RenderParameters& b) {
         !almostEqual(av.cloudTop, bv.cloudTop) ||
         !almostEqual(av.warpStrength, bv.warpStrength) ||
         !almostEqual(av.erosionStrength, bv.erosionStrength) ||
-        !almostEqual(av.brightnessBoost, bv.brightnessBoost) ||
+        !almostEqual(av.stylization, bv.stylization) ||
         !almostEqual(av.ambientLift, bv.ambientLift) ||
         av.maxBounces != bv.maxBounces ||
         !almostEqual(as.direction.x, bs.direction.x) ||
         !almostEqual(as.direction.y, bs.direction.y) ||
         !almostEqual(as.direction.z, bs.direction.z) ||
         !almostEqual(as.intensity, bs.intensity) ||
-        !almostEqual(a.exposure, b.exposure) ||
-        a.enableAccumulation != b.enableAccumulation;
+        a.enableAccumulation != b.enableAccumulation ||
+        a.debugSunTransmittance != b.debugSunTransmittance;
 }
 
 std::vector<char> loadBinaryFile(const std::string& path) {
@@ -139,6 +143,12 @@ struct CameraPush {
 
 struct ToneMapPush {
     float exposure = 1.0f;
+    float whitePoint = 1.0f;
+    float shoulder = 1.0f;
+    float gamma = 2.2f;
+    float contrast = 1.0f;
+    float saturation = 1.0f;
+    std::uint32_t toneMapOperator = 2;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint32_t sampleCount = 1;
@@ -443,12 +453,27 @@ bool Renderer::Impl::createSwapchain() {
     std::vector<VkSurfaceFormatKHR> formats(formatCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &formatCount, formats.data());
 
-    VkSurfaceFormatKHR chosenFormat = formats.front();
+    VkSurfaceFormatKHR chosenFormat{};
+    bool foundUnorm = false;
     for (const VkSurfaceFormatKHR format : formats) {
         if (format.format == VK_FORMAT_B8G8R8A8_UNORM && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             chosenFormat = format;
+            foundUnorm = true;
             break;
         }
+    }
+    if (!foundUnorm) {
+        for (const VkSurfaceFormatKHR format : formats) {
+            if (format.format == VK_FORMAT_R8G8B8A8_UNORM && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                chosenFormat = format;
+                foundUnorm = true;
+                break;
+            }
+        }
+    }
+    if (!foundUnorm || !isUnormSwapchainFormat(chosenFormat.format)) {
+        VOX_LOGE("render") << "failed to find UNORM swapchain format for linear output + explicit gamma";
+        return false;
     }
 
     std::uint32_t presentModeCount = 0;
@@ -1336,12 +1361,12 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         cloudPush.cloudProfileParams[3] = params.scene.volume.cloudTop;
         cloudPush.cloudWarpParams[0] = params.scene.volume.warpStrength;
         cloudPush.cloudWarpParams[1] = params.scene.volume.erosionStrength;
-        cloudPush.cloudWarpParams[2] = 0.0f;
+        cloudPush.cloudWarpParams[2] = params.scene.volume.stylization;
         cloudPush.cloudWarpParams[3] = 0.0f;
-        cloudPush.cloudLightParams[0] = params.scene.volume.brightnessBoost;
+        cloudPush.cloudLightParams[0] = 1.0f;
         cloudPush.cloudLightParams[1] = params.scene.volume.ambientLift;
         cloudPush.cloudLightParams[2] = static_cast<float>(params.scene.volume.maxBounces);
-        cloudPush.cloudLightParams[3] = 0.0f;
+        cloudPush.cloudLightParams[3] = params.debugSunTransmittance ? 1.0f : 0.0f;
         cloudPush.frameParams[0] = static_cast<float>(swapchainExtent.width);
         cloudPush.frameParams[1] = static_cast<float>(swapchainExtent.height);
         cloudPush.frameParams[2] = static_cast<float>(accumulationFrameIndex);
@@ -1386,6 +1411,12 @@ bool Renderer::Impl::render(const RenderParameters& params) {
 
         ToneMapPush tonePush{};
         tonePush.exposure = params.exposure;
+        tonePush.whitePoint = params.toneMapWhitePoint;
+        tonePush.shoulder = params.toneMapShoulder;
+        tonePush.gamma = 2.2f;
+        tonePush.contrast = params.toneMapContrast;
+        tonePush.saturation = params.toneMapSaturation;
+        tonePush.toneMapOperator = params.toneMapOperator;
         tonePush.width = swapchainExtent.width;
         tonePush.height = swapchainExtent.height;
         tonePush.sampleCount = params.enableAccumulation ? (accumulationFrameIndex + 1u) : 1u;

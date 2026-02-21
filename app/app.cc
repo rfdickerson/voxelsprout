@@ -1,6 +1,7 @@
 #include "app/app.h"
 
 #include "core/log.h"
+#include "core/noise_field.h"
 
 #include <GLFW/glfw3.h>
 #include <imgui.h>
@@ -29,17 +30,18 @@ void applyCloudPreset(int presetIndex, voxelsprout::render::RenderParameters& pa
         volume.cloudTop = 8.9f;
         volume.warpStrength = 0.6f;
         volume.erosionStrength = 0.42f;
-        volume.brightnessBoost = 2.15f;
+        volume.stylization = 0.35f;
+        volume.brightnessBoost = 1.0f;
         volume.ambientLift = 0.70f;
         volume.maxBounces = 2;
         params.scene.sun.intensity = 18.0f;
         break;
     case 1: // Cumulus Chunky
-        volume.densityScale = 1.00f;
-        volume.anisotropyG = 0.85f;
-        volume.albedo = 0.995f;
-        volume.macroScale = 0.24f;
-        volume.detailScale = 0.42f;
+        volume.densityScale = 5.0f;
+        volume.anisotropyG = 0.88f;
+        volume.albedo = 0.96f;
+        volume.macroScale = 0.08f;
+        volume.detailScale = 0.50f;
         volume.densityCutoff = 0.04f;
         volume.chunkiness = 1.20f;
         volume.coverage = 0.68f;
@@ -47,14 +49,15 @@ void applyCloudPreset(int presetIndex, voxelsprout::render::RenderParameters& pa
         volume.cloudBase = 1.4f;
         volume.cloudTop = 9.2f;
         volume.warpStrength = 1.05f;
-        volume.erosionStrength = 0.58f;
-        volume.brightnessBoost = 2.60f;
-        volume.ambientLift = 0.75f;
-        volume.maxBounces = 3;
-        params.scene.sun.intensity = 20.0f;
+        volume.erosionStrength = 0.38f;
+        volume.stylization = 0.55f;
+        volume.brightnessBoost = 1.0f;
+        volume.ambientLift = 0.08f;
+        volume.maxBounces = 12;
+        params.scene.sun.direction = {0.0f, 0.45f, -0.89f};
+        params.scene.sun.intensity = 40.0f;
         break;
     case 2: // Storm
-    default:
         volume.densityScale = 1.45f;
         volume.anisotropyG = 0.88f;
         volume.albedo = 0.93f;
@@ -68,12 +71,59 @@ void applyCloudPreset(int presetIndex, voxelsprout::render::RenderParameters& pa
         volume.cloudTop = 9.8f;
         volume.warpStrength = 1.25f;
         volume.erosionStrength = 0.25f;
-        volume.brightnessBoost = 1.40f;
+        volume.stylization = 0.18f;
+        volume.brightnessBoost = 1.0f;
         volume.ambientLift = 0.28f;
         volume.maxBounces = 4;
         params.scene.sun.intensity = 14.0f;
         break;
+    case 3: // Stylized Chunky (Up-like)
+    default:
+        volume.densityScale = 3.05f;
+        volume.anisotropyG = 0.79f;
+        volume.albedo = 0.956f;
+        volume.macroScale = 0.16f;
+        volume.detailScale = 0.26f;
+        volume.densityCutoff = 0.02f;
+        volume.chunkiness = 2.05f;
+        volume.coverage = 0.88f;
+        volume.weatherScale = 0.055f;
+        volume.cloudBase = 1.6f;
+        volume.cloudTop = 9.8f;
+        volume.warpStrength = 0.85f;
+        volume.erosionStrength = 0.14f;
+        volume.stylization = 0.92f;
+        volume.brightnessBoost = 1.0f;
+        volume.ambientLift = 0.85f;
+        volume.maxBounces = 2;
+        params.scene.sun.intensity = 19.0f;
+        break;
     }
+}
+
+voxelsprout::core::Vec3 sunDirectionFromAngles(float azimuthDegrees, float elevationDegrees) {
+    const float azimuthRadians = azimuthDegrees * (3.1415926535f / 180.0f);
+    const float elevationRadians = elevationDegrees * (3.1415926535f / 180.0f);
+    const float cosElevation = std::cos(elevationRadians);
+    return voxelsprout::core::normalize(voxelsprout::core::Vec3{
+        cosElevation * std::cos(azimuthRadians),
+        std::sin(elevationRadians),
+        cosElevation * std::sin(azimuthRadians)});
+}
+
+void sunAnglesFromDirection(const voxelsprout::core::Vec3& direction, float& outAzimuthDegrees, float& outElevationDegrees) {
+    const float len = std::sqrt((direction.x * direction.x) + (direction.y * direction.y) + (direction.z * direction.z));
+    if (len <= 1e-6f) {
+        outAzimuthDegrees = 0.0f;
+        outElevationDegrees = 15.0f;
+        return;
+    }
+
+    const float nx = direction.x / len;
+    const float ny = direction.y / len;
+    const float nz = direction.z / len;
+    outAzimuthDegrees = std::atan2(nz, nx) * (180.0f / 3.1415926535f);
+    outElevationDegrees = std::asin(std::clamp(ny, -1.0f, 1.0f)) * (180.0f / 3.1415926535f);
 }
 
 } // namespace
@@ -98,17 +148,20 @@ bool App::init() {
         return false;
     }
 
+    const voxelsprout::core::NoiseSamples noiseProbe = voxelsprout::core::sampleLibNoise(0.0, 0.0, 0.0);
+    VOX_LOGI("app") << "libnoise probe perlin=" << noiseProbe.perlin << " worley=" << noiseProbe.worley;
+
     m_renderParams.camera.position = {0.0f, 2.0f, 10.0f};
     m_renderParams.camera.yawDegrees = -90.0f;
     m_renderParams.camera.pitchDegrees = 12.0f;
     m_renderParams.camera.fovDegrees = 75.0f;
-    m_renderParams.scene.sun.direction = {1.0f, 1.0f, 0.5f};
-    m_renderParams.scene.sun.intensity = 20.0f;
-    m_renderParams.scene.volume.densityScale = 1.0f;
-    m_renderParams.scene.volume.anisotropyG = 0.85f;
-    m_renderParams.scene.volume.albedo = 0.995f;
-    m_renderParams.scene.volume.macroScale = 0.24f;
-    m_renderParams.scene.volume.detailScale = 0.42f;
+    m_renderParams.scene.sun.direction = {0.0f, 0.45f, -0.89f};
+    m_renderParams.scene.sun.intensity = 40.0f;
+    m_renderParams.scene.volume.densityScale = 5.0f;
+    m_renderParams.scene.volume.anisotropyG = 0.88f;
+    m_renderParams.scene.volume.albedo = 0.96f;
+    m_renderParams.scene.volume.macroScale = 0.08f;
+    m_renderParams.scene.volume.detailScale = 0.50f;
     m_renderParams.scene.volume.densityCutoff = 0.04f;
     m_renderParams.scene.volume.chunkiness = 1.2f;
     m_renderParams.scene.volume.coverage = 0.68f;
@@ -116,13 +169,22 @@ bool App::init() {
     m_renderParams.scene.volume.cloudBase = 1.4f;
     m_renderParams.scene.volume.cloudTop = 9.2f;
     m_renderParams.scene.volume.warpStrength = 1.05f;
-    m_renderParams.scene.volume.erosionStrength = 0.58f;
-    m_renderParams.scene.volume.brightnessBoost = 2.6f;
-    m_renderParams.scene.volume.ambientLift = 0.75f;
-    m_renderParams.scene.volume.maxBounces = 3;
+    m_renderParams.scene.volume.erosionStrength = 0.38f;
+    m_renderParams.scene.volume.stylization = 0.55f;
+    m_renderParams.scene.volume.brightnessBoost = 1.0f;
+    m_renderParams.scene.volume.ambientLift = 0.08f;
+    m_renderParams.scene.volume.maxBounces = 12;
+    m_renderParams.exposure = 0.10f;
+    m_renderParams.toneMapOperator = 2;
+    m_renderParams.toneMapWhitePoint = 1.0f;
+    m_renderParams.toneMapShoulder = 2.4f;
+    m_renderParams.toneMapContrast = 1.0f;
+    m_renderParams.toneMapSaturation = 1.0f;
+    m_renderParams.toneMapGamma = 2.2f;
     m_renderParams.cloudUpdateInterval = 2;
     m_renderParams.maxAccumulationSamples = 256;
     m_maxAccumulationSamplesUi = 256;
+    sunAnglesFromDirection(m_renderParams.scene.sun.direction, m_sunAzimuthDegreesUi, m_sunElevationDegreesUi);
     m_cloudPresetUi = 1;
     return true;
 }
@@ -149,17 +211,34 @@ void App::buildUi() {
     ImGui::Separator();
 
     ImGui::Checkbox("Progressive accumulation", &m_renderParams.enableAccumulation);
-    ImGui::SliderFloat("Exposure", &m_renderParams.exposure, 0.1f, 4.0f, "%.2f");
-    const char* presetLabels[] = {"Cumulus Soft", "Cumulus Chunky", "Storm"};
+    ImGui::Checkbox("Debug: Sun Tr grayscale", &m_renderParams.debugSunTransmittance);
+    ImGui::SeparatorText("Tone Mapping");
+    ImGui::SliderFloat("Exposure", &m_renderParams.exposure, 0.05f, 8.0f, "%.2f");
+    const char* toneMapLabels[] = {"Linear", "Reinhard", "ACES"};
+    int toneMapOperatorUi = static_cast<int>(m_renderParams.toneMapOperator);
+    ImGui::Combo("Tone map curve", &toneMapOperatorUi, toneMapLabels, IM_ARRAYSIZE(toneMapLabels));
+    m_renderParams.toneMapOperator = static_cast<std::uint32_t>(std::clamp(toneMapOperatorUi, 0, 2));
+    ImGui::SliderFloat("White point", &m_renderParams.toneMapWhitePoint, 0.1f, 16.0f, "%.2f");
+    ImGui::SliderFloat("Shoulder", &m_renderParams.toneMapShoulder, 0.2f, 8.0f, "%.2f");
+    ImGui::SliderFloat("Contrast", &m_renderParams.toneMapContrast, 0.5f, 1.8f, "%.2f");
+    ImGui::SliderFloat("Saturation", &m_renderParams.toneMapSaturation, 0.0f, 1.8f, "%.2f");
+    ImGui::Text("Gamma: 2.20 (fixed)");
+    m_renderParams.toneMapWhitePoint = std::max(m_renderParams.toneMapWhitePoint, 0.1f);
+    m_renderParams.toneMapShoulder = std::max(m_renderParams.toneMapShoulder, 0.2f);
+    m_renderParams.toneMapGamma = 2.2f;
+
+    ImGui::SeparatorText("Cloud");
+    const char* presetLabels[] = {"Cumulus Soft", "Cumulus Chunky", "Storm", "Stylized Chunky"};
     const int prevPreset = m_cloudPresetUi;
     ImGui::Combo("Cloud preset", &m_cloudPresetUi, presetLabels, IM_ARRAYSIZE(presetLabels));
     if (m_cloudPresetUi != prevPreset) {
         applyCloudPreset(m_cloudPresetUi, m_renderParams);
+        sunAnglesFromDirection(m_renderParams.scene.sun.direction, m_sunAzimuthDegreesUi, m_sunElevationDegreesUi);
         m_renderParams.forceReset = true;
     }
-    ImGui::SliderFloat("Density scale", &m_renderParams.scene.volume.densityScale, 0.1f, 3.0f, "%.2f");
-    ImGui::SliderFloat("g parameter", &m_renderParams.scene.volume.anisotropyG, 0.0f, 0.95f, "%.2f");
-    m_renderParams.scene.volume.anisotropyG = std::clamp(m_renderParams.scene.volume.anisotropyG, 0.0f, 0.95f);
+    ImGui::SliderFloat("Density scale", &m_renderParams.scene.volume.densityScale, 0.1f, 8.0f, "%.2f");
+    ImGui::SliderFloat("g parameter", &m_renderParams.scene.volume.anisotropyG, 0.0f, 0.90f, "%.2f");
+    m_renderParams.scene.volume.anisotropyG = std::clamp(m_renderParams.scene.volume.anisotropyG, 0.0f, 0.90f);
     ImGui::SliderFloat("Cloud albedo", &m_renderParams.scene.volume.albedo, 0.9f, 1.0f, "%.3f");
     ImGui::SliderFloat("Chunkiness", &m_renderParams.scene.volume.chunkiness, 0.2f, 2.5f, "%.2f");
     ImGui::SliderFloat("Macro scale", &m_renderParams.scene.volume.macroScale, 0.08f, 0.60f, "%.2f");
@@ -170,21 +249,23 @@ void App::buildUi() {
     ImGui::SliderFloat("Cloud top", &m_renderParams.scene.volume.cloudTop, 4.0f, 14.0f, "%.2f");
     ImGui::SliderFloat("Warp strength", &m_renderParams.scene.volume.warpStrength, 0.0f, 2.5f, "%.2f");
     ImGui::SliderFloat("Erosion strength", &m_renderParams.scene.volume.erosionStrength, 0.0f, 1.5f, "%.2f");
+    ImGui::SliderFloat("Stylization", &m_renderParams.scene.volume.stylization, 0.0f, 1.0f, "%.2f");
     ImGui::SliderFloat("Density cutoff", &m_renderParams.scene.volume.densityCutoff, 0.0f, 0.3f, "%.2f");
-    ImGui::SliderFloat("Cloud brightness", &m_renderParams.scene.volume.brightnessBoost, 0.5f, 5.0f, "%.2f");
     ImGui::SliderFloat("Ambient lift", &m_renderParams.scene.volume.ambientLift, 0.0f, 1.5f, "%.2f");
-    ImGui::SliderInt("Max bounces", &m_renderParams.scene.volume.maxBounces, 1, 6);
+    ImGui::SliderInt("Max bounces", &m_renderParams.scene.volume.maxBounces, 1, 12);
     m_renderParams.scene.volume.albedo = std::clamp(m_renderParams.scene.volume.albedo, 0.9f, 1.0f);
     m_renderParams.scene.volume.cloudTop =
         std::max(m_renderParams.scene.volume.cloudTop, m_renderParams.scene.volume.cloudBase + 0.25f);
-    m_renderParams.scene.volume.maxBounces = std::clamp(m_renderParams.scene.volume.maxBounces, 1, 6);
-    ImGui::SliderFloat("Sun intensity", &m_renderParams.scene.sun.intensity, 1.0f, 40.0f, "%.2f");
-    ImGui::SliderFloat3(
-        "Sun direction",
-        &m_renderParams.scene.sun.direction.x,
-        -1.0f,
-        1.0f,
-        "%.2f");
+    m_renderParams.scene.volume.maxBounces = std::clamp(m_renderParams.scene.volume.maxBounces, 1, 12);
+    ImGui::SliderFloat("Sun intensity", &m_renderParams.scene.sun.intensity, 1.0f, 80.0f, "%.2f");
+    ImGui::SliderFloat("Sun azimuth", &m_sunAzimuthDegreesUi, -180.0f, 180.0f, "%.1f deg");
+    ImGui::SliderFloat("Sun elevation", &m_sunElevationDegreesUi, -10.0f, 89.0f, "%.1f deg");
+    m_renderParams.scene.sun.direction = sunDirectionFromAngles(m_sunAzimuthDegreesUi, m_sunElevationDegreesUi);
+    ImGui::Text(
+        "Sun dir: (%.2f, %.2f, %.2f)",
+        m_renderParams.scene.sun.direction.x,
+        m_renderParams.scene.sun.direction.y,
+        m_renderParams.scene.sun.direction.z);
     if (ImGui::Button("Reset accumulation")) {
         m_renderParams.forceReset = true;
     }

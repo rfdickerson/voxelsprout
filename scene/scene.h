@@ -23,7 +23,8 @@ struct VolumeSettings {
     float cloudTop = 8.8f;
     float warpStrength = 0.9f;
     float erosionStrength = 0.55f;
-    float brightnessBoost = 2.2f;
+    float stylization = 0.45f;
+    float brightnessBoost = 1.0f;
     float ambientLift = 0.55f;
     int maxBounces = 3;
 };

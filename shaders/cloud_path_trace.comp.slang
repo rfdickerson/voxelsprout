@@ -1,7 +1,8 @@
 static const float kPi = 3.1415926535f;
 static const float3 kCloudAabbMin = float3(-10.0f, 0.0f, -10.0f);
 static const float3 kCloudAabbMax = float3(10.0f, 10.0f, 10.0f);
-static const uint kMaxBouncesHardLimit = 6u;
+static const uint kMaxBouncesHardLimit = 12u;
+static const float kSunAngularRadiusRadians = 0.004f; // ~0.23 degrees
 
 struct CameraPush {
     float4 cameraPositionFov;
@@ -12,8 +13,8 @@ struct CameraPush {
     float4 mediumParams; // x = density scale, y = g, z = albedo
     float4 cloudShapeParams; // x = macro scale, y = detail scale, z = density cutoff, w = chunkiness
     float4 cloudProfileParams; // x = coverage, y = weather scale, z = cloud base, w = cloud top
-    float4 cloudWarpParams; // x = warp strength, y = erosion strength
-    float4 cloudLightParams; // x = brightness boost, y = ambient lift, z = max bounces
+    float4 cloudWarpParams; // x = warp strength, y = erosion strength, z = stylization
+    float4 cloudLightParams; // x = brightness boost, y = ambient lift, z = max bounces, w = debug sun transmittance
     float4 frameParams;  // x = width, y = height, z = frame index, w = reset flag
 };
 
@@ -185,13 +186,16 @@ float densityField(float3 p) {
 
     float warpStrength = max(gPush.cloudWarpParams.x, 0.0f);
     float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
+    float stylization = saturate(gPush.cloudWarpParams.z);
 
-    // Vertical profile: build-up at base, billowy core, soft top dissipation.
+    // Vertical profile with flatter bottom and denser mid-column.
     float h = (p.y - cloudBase) / max(cloudTop - cloudBase, 0.25f);
-    float baseRamp = smoothstep(0.0f, 0.10f, h);
-    float topFade = 1.0f - smoothstep(0.72f, 1.0f, h);
-    float midBulge = saturate(1.0f - abs(h - 0.45f) * 2.2f);
-    float vertical = baseRamp * topFade * (0.62f + 0.38f * midBulge);
+    float baseRamp = smoothstep(0.02f, 0.11f, h);
+    float topFade = 1.0f - smoothstep(0.74f, 1.0f, h);
+    float midBulge = saturate(1.0f - abs(h - 0.42f) * 2.0f);
+    float flatBottom = 1.0f - smoothstep(0.0f, 0.035f, abs(h - 0.03f));
+    float vertical = baseRamp * topFade * (0.66f + 0.34f * midBulge);
+    vertical = lerp(vertical, vertical * (0.86f + 0.14f * flatBottom), 0.65f);
     if (vertical <= 0.0f) {
         return 0.0f;
     }
@@ -209,40 +213,85 @@ float densityField(float3 p) {
 
     // Curl warp for turbulent, non-spherical silhouette distortion.
     float3 warp = curlNoise(pLocal * 0.22f + float3(7.1f, -4.6f, 2.8f));
-    pLocal += warpStrength * 1.45f * warp;
+    pLocal += warpStrength * (1.45f - 0.60f * stylization) * warp;
 
-    // Multi-lobe macro scaffold to avoid oval symmetry.
-    float lobeA = 1.0f - dot(pLocal / float3(4.9f, 2.5f, 3.7f), pLocal / float3(4.9f, 2.5f, 3.7f));
-    float3 pb = pLocal - float3(2.3f, -0.1f, 0.8f);
-    float lobeB = 1.0f - dot(pb / float3(2.8f, 1.7f, 2.3f), pb / float3(2.8f, 1.7f, 2.3f));
-    float3 pc = pLocal - float3(-2.6f, 0.6f, -1.2f);
-    float lobeC = 1.0f - dot(pc / float3(3.0f, 1.9f, 2.5f), pc / float3(3.0f, 1.9f, 2.5f));
+    // Macro silhouette shaping:
+    // - low-frequency xz mask to keep a central mass and tapered outskirts,
+    // - offset lobe cluster (max of puffs) to break single-blob symmetry.
+    float macroMask = smoothstep(0.20f, 0.80f, 1.0f - length(pLocal.xz * 0.07f));
 
-    float macro = max(max(lobeA, lobeB), lobeC);
-    if (macro <= 0.0f) {
+    float3 lobeAOff = pLocal - float3(-1.8f, -0.2f, 0.9f);
+    float lobeA = 1.0f - dot(lobeAOff / float3(4.3f, 2.3f, 3.2f), lobeAOff / float3(4.3f, 2.3f, 3.2f));
+
+    float3 lobeBOff = pLocal - float3(2.5f, 0.5f, -0.7f);
+    float lobeB = 1.0f - dot(lobeBOff / float3(3.1f, 1.9f, 2.5f), lobeBOff / float3(3.1f, 1.9f, 2.5f));
+
+    float3 lobeCOff = pLocal - float3(-3.0f, 0.9f, -1.8f);
+    float lobeC = 1.0f - dot(lobeCOff / float3(2.8f, 1.8f, 2.2f), lobeCOff / float3(2.8f, 1.8f, 2.2f));
+
+    float3 lobeDOff = pLocal - float3(0.9f, 1.2f, 2.2f);
+    float lobeD = 1.0f - dot(lobeDOff / float3(2.4f, 1.6f, 2.0f), lobeDOff / float3(2.4f, 1.6f, 2.0f));
+
+    float macroShape = max(max(lobeA, lobeB), max(lobeC, lobeD));
+    if (macroShape <= 0.0f) {
         return 0.0f;
     }
-    macro = smoothstep(0.0f, 1.0f, macro);
-    macro *= vertical * coverageMask;
+    macroShape = smoothstep(0.0f, 1.0f, macroShape);
+    macroShape *= macroMask * vertical * coverageMask;
 
-    // Perlin + Worley(F1/F2) stack for believable cloud cell structure.
-    float perlin = perlinFbm((pLocal + float3(12.3f, 7.1f, -4.7f)) * macroScale);
-    float2 wf = worleyF1F2((pLocal + float3(-5.3f, 3.8f, 9.2f)) * detailScale);
-    float f1 = saturate(wf.x / 1.35f);
-    float cellInterior = 1.0f - f1;
-    float cellRidge = saturate((wf.y - wf.x) * 2.8f);
+    // Hierarchical structure:
+    // 1) large puffy lobes (low-frequency Worley macro cells),
+    // 2) medium cauliflower bumps,
+    // 3) fine wispy erosion.
+    float2 wMacro = worleyF1F2((pLocal + float3(8.4f, -3.1f, 2.7f)) * 0.08f);
+    float macroCell = 1.0f - saturate(wMacro.x / 1.45f);
+    float macroContrast = lerp(1.35f, 0.85f, saturate((macroScale - 0.05f) / 0.55f));
+    float largeLobes = pow(smoothstep(0.18f, 0.84f, macroCell), macroContrast);
 
-    float clump = smoothstep(0.28f, lerp(0.90f, 0.66f, saturate(chunkiness * 0.5f)), perlin);
-    float detailBlend = saturate(0.35f + 0.42f * chunkiness);
-    float detail = lerp(cellInterior, clump, detailBlend);
+    float2 wMedium = worleyF1F2((pLocal + float3(-5.3f, 3.8f, 9.2f)) * detailScale);
+    float mediumCell = 1.0f - saturate(wMedium.x / 1.25f);
+    float mediumPerlin = perlinFbm((pLocal + float3(2.2f, -4.4f, 6.1f)) * (detailScale * 1.55f));
+    float cauliflower = smoothstep(0.22f, 0.86f, 0.58f * mediumCell + 0.42f * mediumPerlin);
 
-    float skirt = smoothstep(0.0f, 0.22f, macro) * (1.0f - smoothstep(0.74f, 1.0f, macro));
-    float puffy = 0.48f + 0.24f * saturate(chunkiness);
-    float density = macro * (puffy + (1.0f - puffy) * detail) + (0.10f + 0.18f * saturate(chunkiness)) * skirt * clump;
+    float finePerlin = 0.5f + 0.5f * perlinNoise3((pLocal + float3(17.0f, -8.0f, 11.0f)) * (detailScale * 3.5f));
+    float fineWisp = smoothstep(0.35f, 0.82f, finePerlin);
 
-    // High-frequency erosion driven by Worley ridge/cellular contrast.
-    float erosion = erosionStrength * lerp((1.0f - perlin) * 0.25f, cellRidge, 0.75f);
-    density -= erosion * (0.35f + 0.65f * (1.0f - macro));
+    float detailBlend = saturate(0.38f + 0.40f * chunkiness);
+    float detail = lerp(cauliflower, largeLobes, detailBlend);
+    float stepped = floor(saturate(detail) * 4.0f) * (1.0f / 3.0f);
+    detail = lerp(detail, stepped, stylization * 0.85f);
+
+    float skirt = smoothstep(0.0f, 0.22f, macroShape) * (1.0f - smoothstep(0.74f, 1.0f, macroShape));
+    float puffy = 0.50f + 0.24f * saturate(chunkiness);
+    puffy = lerp(puffy, 0.87f, stylization);
+
+    // Core vs shell split:
+    // - core: denser interior mass
+    // - shell: brighter, lower-density outskirts
+    float structure = macroShape * detail;
+    float core = pow(saturate(structure), lerp(1.45f, 1.10f, stylization));
+    float shell = saturate(structure - (0.55f * core));
+    float coreDensity = core * (0.78f + 0.22f * largeLobes);
+    float shellDensity = shell * (0.52f + 0.48f * cauliflower);
+
+    float density = (coreDensity + shellDensity) * puffy + (0.08f + 0.20f * saturate(chunkiness)) * skirt * largeLobes;
+    density *= vertical * coverageMask;
+
+    // Sharper outer boundary + fine wispy erosion.
+    float boundary = saturate(1.0f - structure);
+    float boundarySharp = smoothstep(0.06f, 0.45f, boundary);
+    float ridge = saturate((wMedium.y - wMedium.x) * 3.2f);
+    float erosion = erosionStrength * lerp((1.0f - mediumPerlin) * 0.24f, ridge, 0.72f);
+    erosion *= lerp(1.0f, 0.22f, stylization);
+    erosion += 0.16f * erosionStrength * (1.0f - fineWisp) * boundarySharp;
+    density -= erosion * (0.32f + 0.68f * boundarySharp);
+
+    // Height-biased Worley breakup:
+    // fracture tops more than the base so the upper silhouette looks more turbulent.
+    float2 wTop = worleyF1F2((pLocal + float3(-2.7f, 5.1f, 1.9f)) * 1.5f);
+    float topErosion = saturate(wTop.x / 1.10f);
+    float edgeFactor = smoothstep(0.30f, 1.00f, h);
+    density -= topErosion * (0.50f * erosionStrength) * edgeFactor;
 
     return max(density - cutoff, 0.0f);
 }
@@ -268,6 +317,19 @@ float henyeyGreenstein(float cosTheta, float g) {
 
 float3 makeOrthoX(float3 n) {
     return (abs(n.z) < 0.999f) ? normalize(cross(float3(0.0f, 0.0f, 1.0f), n)) : normalize(cross(float3(0.0f, 1.0f, 0.0f), n));
+}
+
+float3 sampleUniformCone(float3 axis, float cosThetaMax, inout uint rng) {
+    float xi1 = rand01(rng);
+    float xi2 = rand01(rng);
+
+    float cosTheta = lerp(1.0f, cosThetaMax, xi1);
+    float sinTheta = sqrt(max(1.0f - cosTheta * cosTheta, 0.0f));
+    float phi = 2.0f * kPi * xi2;
+
+    float3 t = makeOrthoX(axis);
+    float3 b = cross(axis, t);
+    return normalize((sinTheta * cos(phi)) * t + (sinTheta * sin(phi)) * b + cosTheta * axis);
 }
 
 float3 sampleHenyeyGreenstein(float3 wo, float g, inout uint rng) {
@@ -361,9 +423,59 @@ float estimateSunTransmittance(float3 p, float3 sunDir, float sigmaMajorant, flo
     return tr;
 }
 
-float3 skyColor(float3 dir) {
-    float t = saturate(0.5f + 0.5f * dir.y);
-    return lerp(float3(0.62f, 0.72f, 0.85f), float3(0.28f, 0.46f, 0.72f), t);
+float phaseRayleigh(float cosTheta) {
+    return 3.0f * (1.0f + cosTheta * cosTheta) / (16.0f * kPi);
+}
+
+float phaseMie(float cosTheta, float g) {
+    float g2 = g * g;
+    float d = max(1.0f + g2 - 2.0f * g * cosTheta, 1e-4f);
+    return (1.0f - g2) / (4.0f * kPi * d * sqrt(d));
+}
+
+float airMass(float upDot) {
+    float clamped = clamp(upDot, 0.01f, 1.0f);
+    float zenith = acos(clamped);
+    float zenithDeg = zenith * (180.0f / kPi);
+    float denom = clamped + 0.15f * pow(max(93.885f - zenithDeg, 1.0f), -1.253f);
+    return 1.0f / max(denom, 0.02f);
+}
+
+float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
+    float3 v = normalize(dir);
+    float mu = clamp(dot(v, sunDir), -1.0f, 1.0f);
+
+    float mView = airMass(max(v.y, 0.01f));
+    float mSun = airMass(max(sunDir.y, 0.01f));
+
+    // Tuned to produce a plausible daylight atmosphere response in HDR.
+    float3 betaR = float3(5.5e-6f, 13.0e-6f, 22.4e-6f) * 14000.0f;
+    float3 betaM = float3(21.0e-6f, 21.0e-6f, 21.0e-6f) * 7000.0f;
+
+    float3 tau = betaR * mView + betaM * mView;
+    float3 extinction = exp(-tau);
+
+    float rayleigh = phaseRayleigh(mu);
+    float mie = phaseMie(mu, 0.82f);
+    float3 inscatter = (betaR * rayleigh + betaM * mie) * exp(-(betaR + betaM) * mSun);
+    inscatter *= (1.0f - extinction) / max(betaR + betaM, float3(1e-4f, 1e-4f, 1e-4f));
+
+    float sunDisk = smoothstep(0.9996f, 0.99995f, mu);
+    float sunHalo = pow(saturate(mu), 64.0f);
+    float horizonBoost = smoothstep(-0.08f, 0.25f, v.y);
+    float twilight = smoothstep(-0.18f, 0.08f, sunDir.y);
+
+    float3 skyBase = inscatter * (0.9f + 0.25f * horizonBoost) * twilight;
+    float3 sunColor = float3(1.0f, 0.96f, 0.90f);
+    float3 sunTerm = sunColor * (sunDisk * 24.0f + sunHalo * 1.8f);
+    return (skyBase + sunTerm) * max(sunIntensity, 0.01f);
+}
+
+float3 skyAmbientLighting(float3 sunDir, float sunIntensity) {
+    float3 up = skyColor(float3(0.0f, 1.0f, 0.0f), sunDir, sunIntensity);
+    float3 horizonSun = skyColor(normalize(float3(sunDir.x, 0.15f, sunDir.z)), sunDir, sunIntensity);
+    float3 horizonOpp = skyColor(normalize(float3(-sunDir.x, 0.15f, -sunDir.z)), sunDir, sunIntensity);
+    return (0.45f * up) + (0.35f * horizonSun) + (0.20f * horizonOpp);
 }
 
 [shader("compute")]
@@ -395,16 +507,15 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         (uv.y * tanHalfFov) * gPush.cameraUp.xyz);
 
     float3 sunDir = normalize(gPush.sunDirectionIntensity.xyz);
-    float3 sunRadiance = float3(
-        gPush.sunDirectionIntensity.w,
-        gPush.sunDirectionIntensity.w,
-        gPush.sunDirectionIntensity.w);
+    float sunIntensity = max(gPush.sunDirectionIntensity.w, 0.01f);
+    float sunCosThetaMax = cos(kSunAngularRadiusRadians);
+    float3 sunRadiance = float3(1.0f, 0.97f, 0.9f) * sunIntensity;
 
     float densityScale = max(gPush.mediumParams.x, 0.01f);
-    float g = clamp(gPush.mediumParams.y, 0.0f, 0.95f);
+    float g = clamp(gPush.mediumParams.y, 0.0f, 0.90f);
     float3 cloudAlbedo = float3(gPush.mediumParams.z, gPush.mediumParams.z, gPush.mediumParams.z);
-    float brightnessBoost = max(gPush.cloudLightParams.x, 0.1f);
-    float ambientLift = max(gPush.cloudLightParams.y, 0.0f);
+    const float brightnessBoost = 1.0f;
+    bool debugSunTransmittance = gPush.cloudLightParams.w > 0.5f;
     uint maxBounces = (uint)clamp(gPush.cloudLightParams.z, 1.0f, (float)kMaxBouncesHardLimit);
     float sigmaMajorant = max(densityScale * (1.85f + 0.65f * saturate(gPush.cloudShapeParams.w)), 0.05f);
 
@@ -416,7 +527,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         float tMin = 0.0f;
         float tMax = 0.0f;
         if (!intersectAabb(rayOrigin, rayDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
-            L += throughput * skyColor(rayDir);
+            if (!debugSunTransmittance) {
+                L += throughput * skyColor(rayDir, sunDir, sunIntensity);
+            }
             break;
         }
 
@@ -436,20 +549,36 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             sigmaS);
 
         if (!hit) {
-            L += throughput * trSegment * skyColor(rayDir);
+            if (!debugSunTransmittance) {
+                L += throughput * trSegment * skyColor(rayDir, sunDir, sunIntensity);
+            }
             break;
         }
 
         throughput *= trSegment;
 
+        if (debugSunTransmittance && bounce == 0u) {
+            float trSunDebug = estimateSunTransmittance(scatterPos, sunDir, sigmaMajorant, densityScale, rngState);
+            L = float3(trSunDebug, trSunDebug, trSunDebug);
+            break;
+        }
+
         float3 wo = -rayDir;
-        float trSun = estimateSunTransmittance(scatterPos, sunDir, sigmaMajorant, densityScale, rngState);
-        float phaseSun = henyeyGreenstein(dot(wo, sunDir), g);
+        float3 sunDirSample = sampleUniformCone(sunDir, sunCosThetaMax, rngState);
+        float trSun = estimateSunTransmittance(scatterPos, sunDirSample, sigmaMajorant, densityScale, rngState);
+        // Conventions:
+        // - viewDir points from previous vertex/camera toward the scattering point.
+        // - lightDir points from sun toward the scattering point.
+        // HG uses cos(theta) = dot(lightDir, -viewDir).
+        float3 viewDir = rayDir;
+        float3 lightDir = -sunDirSample;
+        float cosTheta = clamp(dot(lightDir, -viewDir), -1.0f, 1.0f);
+        float phaseSun = henyeyGreenstein(cosTheta, g);
+        // sunRadiance here represents integrated sun-disk radiance under our UI intensity convention.
         L += throughput * cloudAlbedo * brightnessBoost * trSun * sigmaS * phaseSun * sunRadiance;
 
-        float ambientBase = 0.10f + 0.20f * ambientLift;
-        float3 ambientSky = ambientLift * skyColor(float3(0.0f, 1.0f, 0.0f)) + float3(ambientBase, ambientBase, ambientBase);
-        L += throughput * cloudAlbedo * brightnessBoost * sigmaS * (1.0f / (4.0f * kPi)) * ambientSky;
+        float3 ambientSky = skyAmbientLighting(sunDir, sunIntensity);
+        L += throughput * cloudAlbedo * sigmaS * (1.0f / (4.0f * kPi)) * ambientSky * 0.05f;
 
         if (bounce + 1u >= maxBounces) {
             break;
@@ -458,10 +587,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         float3 wi = sampleHenyeyGreenstein(wo, g, rngState);
         rayOrigin = scatterPos + wi * 0.02f;
         rayDir = wi;
-        throughput *= lerp(float3(1.0f, 1.0f, 1.0f), cloudAlbedo, 0.35f);
+        throughput *= cloudAlbedo;
 
-        if (bounce >= 1u) {
-            const float rrSurvive = 0.8f;
+        // Start RR at path depth 5 (bounce index 4) to preserve deeper backlit glow.
+        if (bounce >= 4u) {
+            const float rrSurvive = 0.9f;
             if (rand01(rngState) > rrSurvive) {
                 break;
             }

@@ -42,6 +42,7 @@ add_executable(voxelsprout_compute_lab
     app/app.cc
     core/log.cc
     core/camera.cc
+    core/noise_field.cc
     render/vma_usage.cc
     render/renderer.cc
 )
@@ -59,6 +60,7 @@ find_package(glfw3 CONFIG QUIET)
 find_package(Vulkan REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+find_package(unofficial-noise CONFIG REQUIRED)
 
 if(TARGET glfw)
     target_link_libraries(voxelsprout_compute_lab PRIVATE glfw)
@@ -82,6 +84,7 @@ target_link_libraries(voxelsprout_compute_lab PRIVATE
     Vulkan::Vulkan
     GPUOpen::VulkanMemoryAllocator
     imgui::imgui
+    unofficial::noise::noise
 )
 
 if(TARGET slang_shaders)

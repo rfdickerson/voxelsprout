@@ -13,7 +13,14 @@ struct RenderParameters {
     voxelsprout::core::Camera camera{};
     voxelsprout::scene::SceneState scene{};
     float exposure = 1.0f;
+    std::uint32_t toneMapOperator = 2; // 0=Linear, 1=Reinhard, 2=ACES
+    float toneMapWhitePoint = 1.0f;
+    float toneMapShoulder = 1.0f;
+    float toneMapContrast = 1.0f;
+    float toneMapSaturation = 1.0f;
+    float toneMapGamma = 2.2f;
     bool enableAccumulation = true;
+    bool debugSunTransmittance = false;
     bool forceReset = false;
     std::uint32_t cloudUpdateInterval = 2;
     std::uint32_t maxAccumulationSamples = 256;
