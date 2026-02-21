@@ -206,16 +206,37 @@ float densityField(float3 p) {
 
     const float densityScale = max(gPush.mediumParams.x, 0.01f);
 
-    // 1. Dome container (squashed and flat-bottomed).
-    const float3 center = float3(0.0f, cloudBase + 1.5f, 0.0f);
-    const float3 localP = (p - center) * float3(1.0f, 1.8f, 1.0f);
-    const float distFromCenter = length(localP);
-    const float domeRadius = 7.0f;
-    const float domeMask = 1.0f - smoothstep(domeRadius * 0.1f, domeRadius, distFromCenter);
-
     const float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
-    const float bottomRamp = smoothstep(0.0f, 0.15f, h);
-    const float structuralMask = domeMask * bottomRamp;
+    const float bottomRamp = smoothstep(0.0f, 0.08f, h);
+    const float topTaper = 1.0f - smoothstep(0.74f, 0.98f, h);
+
+    // 1. Multi-dome container for non-symmetric cauliflower groups.
+    const float4 asym = sampleCloudNoise(p * 0.04f + float3(3.3f, 1.7f, 8.4f));
+    const float2 asymXZ = (asym.yz - 0.5f) * 1.6f;
+    const float3 center = float3(0.0f, cloudBase + 1.7f, 0.0f);
+
+    const float topBoil = sampleCloudNoise(float3(p.x * 0.10f, 1.8f, p.z * 0.10f) + float3(1.2f, 3.1f, -1.4f)).r;
+    const float topLift = 1.0f + 0.40f * (pow(saturate((topBoil - 0.45f) / 0.55f), 1.8f) * smoothstep(0.35f, 1.0f, h));
+
+    float structuralSeed = 0.0f;
+    float3 q = (p - (center + float3(-1.9f, 0.05f, 1.0f) + float3(asymXZ.x, 0.0f, asymXZ.y))) * float3(0.90f, 1.35f, 0.88f);
+    structuralSeed = max(structuralSeed, 1.0f - smoothstep(2.1f, 4.8f, length(q)));
+
+    q = (p - (center + float3(1.6f, 0.35f, -1.0f) + float3(-asymXZ.y, 0.0f, asymXZ.x * 0.6f))) * float3(0.86f, 1.25f, 0.94f);
+    structuralSeed = max(structuralSeed, 0.90f * (1.0f - smoothstep(1.8f, 4.2f, length(q))));
+
+    q = (p - (center + float3(-0.7f, 0.10f, 2.2f))) * float3(0.94f, 1.10f, 0.90f);
+    structuralSeed = max(structuralSeed, 0.85f * (1.0f - smoothstep(2.4f, 5.0f, length(q))));
+
+    q = (p - (center + float3(0.9f, 0.08f, -2.0f))) * float3(0.95f, 1.05f, 0.98f);
+    structuralSeed = max(structuralSeed, 0.75f * (1.0f - smoothstep(2.8f, 5.6f, length(q))));
+
+    // Core anchor gives a coherent parent body so lobes stay connected.
+    q = (p - center) * float3(0.95f, 1.05f, 0.95f);
+    structuralSeed = max(structuralSeed, 0.65f * (1.0f - smoothstep(3.4f, 7.2f, length(q))));
+
+    // Tall cap: gently promote upper regions for a dome-like rise.
+    const float structuralMask = saturate(structuralSeed * bottomRamp * topLift * topTaper);
     if (structuralMask <= 0.0f) {
         return 0.0f;
     }
@@ -478,9 +499,9 @@ float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
     float mView = airMass(max(v.y, 0.01f));
     float mSun = airMass(max(sunDir.y, 0.01f));
 
-    // Tuned to produce a plausible daylight atmosphere response in HDR.
-    float3 betaR = float3(5.5e-6f, 13.0e-6f, 22.4e-6f) * 14000.0f;
-    float3 betaM = float3(21.0e-6f, 21.0e-6f, 21.0e-6f) * 7000.0f;
+    // Richer Rayleigh scattering and reduced Mie haze for a clean noon sky.
+    float3 betaR = float3(5.8e-6f, 13.5e-6f, 33.1e-6f) * 11000.0f;
+    float3 betaM = float3(21.0e-6f, 21.0e-6f, 21.0e-6f) * 2000.0f;
 
     float3 tau = betaR * mView + betaM * mView;
     float3 extinction = exp(-tau);
@@ -496,7 +517,7 @@ float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
     float twilight = smoothstep(-0.18f, 0.08f, sunDir.y);
 
     float3 skyBase = inscatter * (0.9f + 0.25f * horizonBoost) * twilight;
-    float3 sunColor = float3(1.0f, 0.96f, 0.90f);
+    float3 sunColor = float3(1.0f, 0.99f, 0.98f);
     float3 sunTerm = sunColor * (sunDisk * 24.0f + sunHalo * 1.8f);
     return (skyBase + sunTerm) * max(sunIntensity, 0.01f);
 }
@@ -553,7 +574,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float3 sunDir = normalize(gPush.sunDirectionIntensity.xyz);
     float sunIntensity = max(gPush.sunDirectionIntensity.w, 0.01f);
     float sunCosThetaMax = cos(kSunAngularRadiusRadians);
-    float3 sunRadiance = float3(1.0f, 0.97f, 0.9f) * sunIntensity;
+    float3 sunRadiance = float3(1.0f, 1.0f, 0.98f) * sunIntensity;
 
     float densityScale = max(gPush.mediumParams.x, 0.01f);
     float g = clamp(gPush.mediumParams.y, 0.0f, 0.90f);
