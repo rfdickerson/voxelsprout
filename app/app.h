@@ -28,7 +28,6 @@ private:
     int m_interactionCooldownFrames = 0;
     int m_cloudUpdateIntervalUi = 2;
     int m_maxAccumulationSamplesUi = 256;
-    int m_cloudPresetUi = 1;
     float m_sunAzimuthDegreesUi = 0.0f;
     float m_sunElevationDegreesUi = 0.0f;
 };

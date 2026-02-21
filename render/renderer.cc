@@ -163,9 +163,24 @@ float worleyPeriodic(float x, float y, float z, int cells, std::uint32_t seed) {
     return std::clamp(f1 * (1.0f / 1.7320508f), 0.0f, 1.0f);
 }
 
+float remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
+    const float denom = originalMax - originalMin;
+    if (std::abs(denom) <= 1e-6f) {
+        return newMin;
+    }
+    const float t = (value - originalMin) / denom;
+    return newMin + t * (newMax - newMin);
+}
+
 std::vector<std::uint8_t> generateCloudNoiseVolumeRgba8(std::uint32_t dim) {
     const std::size_t voxelCount = static_cast<std::size_t>(dim) * static_cast<std::size_t>(dim) * static_cast<std::size_t>(dim);
     std::vector<std::uint8_t> data(voxelCount * 4u, 0u);
+
+    const int freqPerlin = 4;
+    const int freqWorleyBase = 4;
+    const int freqWorley1 = 4;
+    const int freqWorley2 = 8;
+    const int freqWorley3 = 16;
 
     for (std::uint32_t z = 0; z < dim; ++z) {
         for (std::uint32_t y = 0; y < dim; ++y) {
@@ -174,19 +189,28 @@ std::vector<std::uint8_t> generateCloudNoiseVolumeRgba8(std::uint32_t dim) {
                 const float ny = (static_cast<float>(y) + 0.5f) / static_cast<float>(dim);
                 const float nz = (static_cast<float>(z) + 0.5f) / static_cast<float>(dim);
 
-                const float perlinBase = fbmValueNoisePeriodic(nx, ny, nz, static_cast<int>(dim), 4, 2.0f, 0.5f, 0x1337u);
-                const float perlinDetail = fbmValueNoisePeriodic(nx, ny, nz, static_cast<int>(dim), 5, 2.03f, 0.5f, 0x4242u);
-                const float worleyMacro = 1.0f - worleyPeriodic(nx, ny, nz, 6, 0x9001u);
-                const float worleyDetail = 1.0f - worleyPeriodic(nx, ny, nz, 14, 0x8128u);
+                const float perlin = fbmValueNoisePeriodic(nx, ny, nz, freqPerlin, 7, 2.0f, 0.5f, 0x1337u);
+                const float worleyBase = 1.0f - worleyPeriodic(nx, ny, nz, freqWorleyBase, 0x9001u);
+                const float pwThreshold = std::clamp((1.0f - worleyBase) * 0.65f - 0.08f, 0.0f, 0.95f);
+                float perlinWorley = remap(perlin, pwThreshold, 1.0f, 0.0f, 1.0f);
+                perlinWorley = 0.72f * perlinWorley + 0.28f * perlin;
+                perlinWorley = std::clamp(perlinWorley, 0.0f, 1.0f);
+
+                const float worley1 = 1.0f - worleyPeriodic(nx, ny, nz, freqWorley1, 0xA1A1u);
+                const float worley2 = 1.0f - worleyPeriodic(nx, ny, nz, freqWorley2, 0xB2B2u);
+                const float worley3 = 1.0f - worleyPeriodic(nx, ny, nz, freqWorley3, 0xC3C3u);
+                const float wFbm1 = worley1 * 0.625f + worley2 * 0.25f + worley3 * 0.125f;
+                const float wFbm2 = worley2 * 0.625f + worley3 * 0.25f + worley1 * 0.125f;
+                const float wFbm3 = worley3 * 0.75f + worley1 * 0.25f;
 
                 const std::size_t idx = (static_cast<std::size_t>(z) * static_cast<std::size_t>(dim) * static_cast<std::size_t>(dim)
                     + static_cast<std::size_t>(y) * static_cast<std::size_t>(dim)
                     + static_cast<std::size_t>(x)) * 4u;
 
-                data[idx + 0] = static_cast<std::uint8_t>(std::clamp(perlinBase, 0.0f, 1.0f) * 255.0f + 0.5f);
-                data[idx + 1] = static_cast<std::uint8_t>(std::clamp(worleyMacro, 0.0f, 1.0f) * 255.0f + 0.5f);
-                data[idx + 2] = static_cast<std::uint8_t>(std::clamp(worleyDetail, 0.0f, 1.0f) * 255.0f + 0.5f);
-                data[idx + 3] = static_cast<std::uint8_t>(std::clamp(perlinDetail, 0.0f, 1.0f) * 255.0f + 0.5f);
+                data[idx + 0] = static_cast<std::uint8_t>(std::clamp(perlinWorley, 0.0f, 1.0f) * 255.0f + 0.5f);
+                data[idx + 1] = static_cast<std::uint8_t>(std::clamp(wFbm1, 0.0f, 1.0f) * 255.0f + 0.5f);
+                data[idx + 2] = static_cast<std::uint8_t>(std::clamp(wFbm2, 0.0f, 1.0f) * 255.0f + 0.5f);
+                data[idx + 3] = static_cast<std::uint8_t>(std::clamp(wFbm3, 0.0f, 1.0f) * 255.0f + 0.5f);
             }
         }
     }

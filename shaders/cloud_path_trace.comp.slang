@@ -216,8 +216,18 @@ float4 sampleCloudNoise(float3 p) {
     return lerp(y0v, y1v, f.z);
 }
 
+float remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
+    float denom = originalMax - originalMin;
+    if (abs(denom) < 1e-5f) {
+        return newMin;
+    }
+    float t = (value - originalMin) / denom;
+    return lerp(newMin, newMax, t);
+}
+
 float densityField(float3 p) {
-    const float3 cloudCenter = float3(0.0f, 4.2f, -1.8f);
+    const float3 cloudCenter = float3(0.0f, 4.8f, -2.0f);
+    const float3 cloudHalfExtents = float3(4.2f, 2.8f, 4.2f);
 
     float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
     float detailScale = max(gPush.cloudShapeParams.y, 0.08f);
@@ -233,73 +243,67 @@ float densityField(float3 p) {
     float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
     float stylization = saturate(gPush.cloudWarpParams.z);
 
-    // Vertical profile with flatter bottom and denser mid-column.
-    float h = (p.y - cloudBase) / max(cloudTop - cloudBase, 0.25f);
-    float baseRamp = smoothstep(0.02f, 0.11f, h);
-    float topFade = 1.0f - smoothstep(0.74f, 1.0f, h);
-    float midBulge = saturate(1.0f - abs(h - 0.42f) * 2.0f);
-    float flatBottom = 1.0f - smoothstep(0.0f, 0.035f, abs(h - 0.03f));
-    float vertical = baseRamp * topFade * (0.66f + 0.34f * midBulge);
-    vertical = lerp(vertical, vertical * (0.86f + 0.14f * flatBottom), 0.65f);
+    // 1) Vertical cloud layer profile (flat-ish base, softer top).
+    if (p.y < cloudBase || p.y > cloudTop) {
+        return 0.0f;
+    }
+    float h = saturate((p.y - cloudBase) / max(cloudTop - cloudBase, 0.25f));
+    float baseRamp = smoothstep(0.0f, 0.15f, h);
+    float topFade = 1.0f - smoothstep(0.62f, 1.0f, h);
+    float midBulge = 1.0f - abs(h - 0.45f) * 1.8f;
+    float vertical = baseRamp * topFade * (0.80f + 0.20f * saturate(midBulge));
     if (vertical <= 0.0f) {
         return 0.0f;
     }
 
-    // Low-frequency weather/coverage field for broad regional breakup.
-    float3 weatherP = float3(p.x, (p.y - cloudBase) * 0.35f, p.z) * weatherScale;
-    float weather = sampleCloudNoise(weatherP + float3(31.7f, -12.3f, 5.9f)).x;
+    // 2) Infinite 2D weather map in XZ to define where cloud columns exist.
+    float2 weatherP = p.xz * (weatherScale * 0.045f);
+    float weather = sampleCloudNoise(float3(weatherP.x + 0.37f, 0.5f, weatherP.y - 0.19f)).x;
     float coverageThreshold = 1.0f - coverage;
-    float coverageMask = smoothstep(coverageThreshold - 0.12f, coverageThreshold + 0.12f, weather);
-    if (coverageMask <= 0.0f) {
+    float weatherMask = smoothstep(coverageThreshold - 0.22f, coverageThreshold + 0.12f, weather);
+    float coverageMask = saturate(0.40f + 0.60f * weatherMask);
+
+    // 3) Single centered cloud volume mask (soft box) multiplied by weather.
+    float3 local = (p - cloudCenter) / cloudHalfExtents;
+    float boxEdge = max(max(abs(local.x), abs(local.y)), abs(local.z));
+    float boxMask = 1.0f - smoothstep(0.82f, 1.04f, boxEdge);
+    float sphereMask = 1.0f - smoothstep(0.70f, 1.08f, length(local));
+    float singleCloudMask = saturate(boxMask * (0.35f + 0.65f * sphereMask));
+    if (singleCloudMask <= 0.0f) {
         return 0.0f;
     }
 
-    float3 pLocal = p - cloudCenter;
+    // 4) Start macro shape from vertical * weather and confine it to the box.
+    float macroShape = vertical * coverageMask;
+    macroShape *= singleCloudMask;
 
-    // Curl warp for turbulent, non-spherical silhouette distortion.
+    // Optional warp to break straight extruded columns.
+    float3 pLocal = p;
     float3 warp = curlNoise(pLocal * 0.22f + float3(7.1f, -4.6f, 2.8f));
     pLocal += warpStrength * (1.45f - 0.60f * stylization) * warp;
 
-    // Macro silhouette shaping:
-    // - low-frequency xz mask to keep a central mass and tapered outskirts,
-    // - offset lobe cluster (max of puffs) to break single-blob symmetry.
-    float macroMask = smoothstep(0.20f, 0.80f, 1.0f - length(pLocal.xz * 0.07f));
-
-    float3 lobeAOff = pLocal - float3(-1.8f, -0.2f, 0.9f);
-    float lobeA = 1.0f - dot(lobeAOff / float3(4.3f, 2.3f, 3.2f), lobeAOff / float3(4.3f, 2.3f, 3.2f));
-
-    float3 lobeBOff = pLocal - float3(2.5f, 0.5f, -0.7f);
-    float lobeB = 1.0f - dot(lobeBOff / float3(3.1f, 1.9f, 2.5f), lobeBOff / float3(3.1f, 1.9f, 2.5f));
-
-    float3 lobeCOff = pLocal - float3(-3.0f, 0.9f, -1.8f);
-    float lobeC = 1.0f - dot(lobeCOff / float3(2.8f, 1.8f, 2.2f), lobeCOff / float3(2.8f, 1.8f, 2.2f));
-
-    float3 lobeDOff = pLocal - float3(0.9f, 1.2f, 2.2f);
-    float lobeD = 1.0f - dot(lobeDOff / float3(2.4f, 1.6f, 2.0f), lobeDOff / float3(2.4f, 1.6f, 2.0f));
-
-    float macroShape = max(max(lobeA, lobeB), max(lobeC, lobeD));
-    if (macroShape <= 0.0f) {
-        return 0.0f;
-    }
-    macroShape = smoothstep(0.0f, 1.0f, macroShape);
-    macroShape *= macroMask * vertical * coverageMask;
-
-    // Hierarchical structure:
-    // 1) large puffy lobes (low-frequency Worley macro cells),
-    // 2) medium cauliflower bumps,
-    // 3) fine wispy erosion.
-    float4 macroNoise = sampleCloudNoise((pLocal + float3(8.4f, -3.1f, 2.7f)) * 0.08f);
-    float macroCell = saturate(macroNoise.y);
+    // Hierarchical structure with Perlin-Worley base and multi-band Worley erosion.
+    float macroFreq = lerp(0.045f, 0.16f, saturate((macroScale - 0.05f) / 0.55f));
+    float4 macroNoise = sampleCloudNoise((pLocal + float3(8.4f, -3.1f, 2.7f)) * macroFreq);
+    float macroCell = saturate(macroNoise.x);
     float macroContrast = lerp(1.35f, 0.85f, saturate((macroScale - 0.05f) / 0.55f));
-    float largeLobes = pow(smoothstep(0.18f, 0.84f, macroCell), macroContrast);
+    float largeLobes = pow(smoothstep(0.10f, 0.78f, macroCell), macroContrast);
+    macroShape *= (0.55f + 0.45f * largeLobes);
 
     float4 mediumNoise = sampleCloudNoise((pLocal + float3(-5.3f, 3.8f, 9.2f)) * detailScale);
-    float mediumCell = saturate(mediumNoise.z);
-    float mediumPerlin = saturate(mediumNoise.x);
-    float cauliflower = smoothstep(0.22f, 0.86f, 0.58f * mediumCell + 0.42f * mediumPerlin);
+    float mediumBase = saturate(mediumNoise.x);
+    float erosionLow = saturate(mediumNoise.y);
+    float erosionMid = saturate(mediumNoise.z);
+    float erosionHigh = saturate(mediumNoise.w);
+    float highFreqFbm = erosionLow * 0.625f + erosionMid * 0.25f + erosionHigh * 0.125f;
+    float erosionGate = saturate(highFreqFbm * 0.32f - 0.05f);
+    float mediumPerlin = remap(mediumBase, erosionGate, 1.0f, 0.0f, 1.0f);
+    mediumPerlin = saturate(mediumPerlin);
+    float cauliflower = smoothstep(0.12f, 0.78f, 0.85f * mediumPerlin + 0.15f * erosionLow);
 
-    float finePerlin = saturate(sampleCloudNoise((pLocal + float3(17.0f, -8.0f, 11.0f)) * (detailScale * 3.5f)).w);
-    float fineWisp = smoothstep(0.30f, 0.84f, finePerlin);
+    float4 fineNoise = sampleCloudNoise((pLocal + float3(17.0f, -8.0f, 11.0f)) * (detailScale * 3.5f));
+    float finePerlin = saturate(fineNoise.w);
+    float fineWisp = smoothstep(0.30f, 0.84f, 1.0f - finePerlin);
 
     float detailBlend = saturate(0.38f + 0.40f * chunkiness);
     float detail = lerp(cauliflower, largeLobes, detailBlend);
@@ -325,19 +329,19 @@ float densityField(float3 p) {
     // Sharper outer boundary + fine wispy erosion.
     float boundary = saturate(1.0f - structure);
     float boundarySharp = smoothstep(0.06f, 0.45f, boundary);
-    float ridge = saturate(abs(mediumNoise.z - mediumNoise.w) * 3.2f);
-    float erosion = erosionStrength * lerp((1.0f - mediumPerlin) * 0.24f, ridge, 0.72f);
-    erosion *= lerp(1.0f, 0.22f, stylization);
-    erosion += 0.16f * erosionStrength * (1.0f - fineWisp) * boundarySharp;
-    density -= erosion * (0.32f + 0.68f * boundarySharp);
+    float ridge = saturate(abs(mediumNoise.y - mediumNoise.z) * 2.2f);
+    float erosion = erosionStrength * lerp((1.0f - mediumPerlin) * 0.12f, ridge, 0.45f);
+    erosion *= lerp(0.85f, 0.18f, stylization);
+    erosion += 0.08f * erosionStrength * (1.0f - fineWisp) * boundarySharp;
+    density -= erosion * (0.16f + 0.44f * boundarySharp);
 
     // Height-biased Worley breakup:
     // fracture tops more than the base so the upper silhouette looks more turbulent.
     float topErosion = 1.0f - saturate(sampleCloudNoise((pLocal + float3(-2.7f, 5.1f, 1.9f)) * 1.5f).z);
     float edgeFactor = smoothstep(0.30f, 1.00f, h);
-    density -= topErosion * (0.50f * erosionStrength) * edgeFactor;
+    density -= topErosion * (0.28f * erosionStrength) * edgeFactor;
 
-    return max(density - cutoff, 0.0f);
+    return max(density - (cutoff * 0.55f), 0.0f);
 }
 
 bool intersectAabb(float3 rayOrigin, float3 rayDir, float3 bmin, float3 bmax, out float tMin, out float tMax) {
