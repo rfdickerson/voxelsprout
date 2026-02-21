@@ -1,354 +1,382 @@
-🎯 Project Vision
+# 🎯 Project Vision
 
-Voxel Factory Toy is:
+Cloud Path Tracer is:
 
-A playable systems sandbox
-
-A graphics R&D playground
-
-A deterministic simulation testbed
-
-A modern Vulkan renderer built for clarity
+A physically-based volumetric rendering lab
+A Vulkan compute path tracing research platform
+A multiple-scattering experimentation sandbox
+A progressive offline renderer with real-time UI control
 
 It is not:
 
 A generic engine framework
+A gameplay sandbox
+A voxel simulation project
+An over-abstracted graphics architecture experiment
+A production content pipeline
 
-A tech demo without gameplay
+---
 
-A content-heavy authored experience
+# 🧠 Core Principles
 
-An enterprise architecture experiment
+## 1️⃣ Physics Over Hacks
 
-🧠 Core Principles
-1️⃣ Systems Over Features
-
-Add small composable rules.
-Avoid large feature drops.
-
-2️⃣ Determinism First
-
-Simulation must:
-
-Run at fixed timestep
-
-Be order-stable
-
-Be independent of rendering
-
-Produce identical results across runs
-
-Rendering is allowed to be non-deterministic. Simulation is not.
-
-3️⃣ Renderer Isolation
-
-Only render/ may include Vulkan headers.
-
-No Vulkan types may leak into:
-
-sim/
-
-world/
-
-core/
-
-Rendering consumes data. It does not control simulation.
-
-4️⃣ Performance Is a Feature
-
-Maintain:
-
-Smooth frame pacing
-
-Stable GPU timing
-
-Predictable memory behavior
-
-Clear synchronization boundaries
-
-Avoid hidden work or implicit allocations in hot paths.
-
-5️⃣ Readability Over Abstraction
+Prioritize physically-correct light transport.
 
 Prefer:
 
-Clear structs
-
-Explicit ownership
-
-Flat data
-
-Small focused files
+Radiative transfer equation fidelity
+Explicit phase functions
+Proper transmittance evaluation
+Energy conservation
 
 Avoid:
 
-Deep inheritance
+Ad-hoc lighting models
+Baked lighting shortcuts
+Unjustified approximations
 
-Over-generalization
+Approximation is allowed only if documented and measurable.
 
-Framework layering
+---
 
-Indirection for its own sake
+## 2️⃣ Progressive Monte Carlo First
 
-🧩 Architecture Overview
-app/      – Main loop, lifecycle
-core/     – Math, time, input, grid primitives
-world/    – Voxels, chunk storage, CSG
-sim/      – Deterministic simulation + networks
-render/   – Vulkan renderer + shaders
-assets/   – Textures, SPIR-V, materials
-tests/    – Deterministic unit tests
+Rendering must:
 
-Data Flow (Strictly One Direction)
-Input
+Be unbiased by default
+Improve monotonically with more samples
+Use explicit accumulation
+Reset cleanly when parameters change
+
+Denoising is optional and post-process only.
+
+No hidden caching that invalidates correctness.
+
+---
+
+## 3️⃣ Renderer Isolation
+
+Only `render/` may include Vulkan headers.
+
+No Vulkan types may leak into:
+
+core/
+math/
+scene/
+medium/
+
+Rendering consumes scene data.
+It does not mutate it.
+
+---
+
+## 4️⃣ Explicit Synchronization
+
+All GPU work must be:
+
+Explicitly dispatched
+Explicitly synchronized
+Explicitly measurable
+
+No implicit layout transitions.
+No hidden barriers.
+No implicit descriptor updates.
+
+Storage image and buffer usage requires correct memory barriers.
+
+Timeline semaphores must remain predictable.
+
+---
+
+## 5️⃣ Readability Over Cleverness
+
+Prefer:
+
+Small self-contained files
+Explicit integrator structure
+Clear math
+Flat data
+Deterministic RNG per pixel
+
+Avoid:
+
+Metaprogramming
+Template-heavy abstractions
+Inheritance hierarchies
+Over-generalized renderer layers
+Indirection without benefit
+
+The integrator must remain understandable.
+
+---
+
+# 🧩 Architecture Overview
+
+```
+app/        – Window, lifecycle, frame loop
+core/       – Math, RNG, camera, utilities
+scene/      – Density volumes, bounds, lights
+medium/     – Phase functions, transmittance logic
+render/     – Vulkan pipelines + compute passes
+shaders/    – Slang compute shaders
+assets/     – Density textures, reference data
+tests/      – Math & sampling validation
+```
+
+---
+
+# 📡 Data Flow (Strictly One Direction)
+
+User Input
 ↓
-Simulation (fixed tick)
+Parameter Update
 ↓
-World mutation
+Scene / Medium State
 ↓
-Meshing
+Path Tracer Dispatch
 ↓
-Renderer
+Accumulation Buffer
 ↓
-Post-processing
+Tone Mapping
+↓
+UI Overlay
+↓
+Present
 
+No upward dependencies.
+No render → scene mutation.
 
-No upward callbacks.
-No render → sim dependencies.
+---
 
-🧱 Rendering Architecture Guidelines
+# ☁️ Cloud Rendering Guidelines
+
+## Medium Model
+
+Clouds must use:
+
+Henyey–Greenstein phase function
+High albedo (~0.99)
+Delta tracking for heterogeneous density
+Next-event estimation for sun
+
+Multiple scattering is required.
+
+Single-scatter-only modes must be toggleable for debugging.
+
+---
+
+## Density Volumes
+
+Density may be:
+
+Procedural (Worley + FBM + gradient shaping)
+Precomputed 3D textures
+OpenVDB (optional future)
+
+Density must:
+
+Be bounded in AABB
+Be normalized and scaled explicitly
+Avoid uniform mid-density volumes
+
+Silhouette shaping is preferred over raw noise.
+
+---
+
+## Integrator Structure
+
+The integrator must clearly separate:
+
+Ray/AABB intersection
+Free-flight sampling
+Real vs null collisions
+Direct lighting estimation
+Phase sampling
+Throughput update
+Russian roulette
+Accumulation
+
+No monolithic shader functions.
+
+---
+
+# ⚙️ Rendering Architecture Guidelines
 
 The renderer currently includes:
 
-Vulkan 1.3 dynamic rendering
-
+Vulkan 1.3
+Dynamic rendering
 Synchronization2
-
 Timeline semaphores
-
-Reverse-Z projection
-
-Cascaded shadow maps (atlas)
-
-SH-based ambient
-
-Voxel GI (surface → inject → propagate)
-
-Froxel volumetrics
-
-SSAO
-
-HDR + bloom + ACES
-
+Compute-based path tracing
+HDR accumulation buffer
+Filmic tone mapping
 GPU timestamp profiling
 
-Rendering Rules
-1️⃣ Render passes must be explicit.
+---
+
+## Rendering Rules
+
+### 1️⃣ All passes must be explicit.
+
+CloudPathTrace.compute
+ToneMap.compute
+UI composite
+Present
 
 No hidden side effects between passes.
 
-2️⃣ Storage image reads/writes require explicit barriers.
+---
 
-Agents must not assume implicit synchronization.
+### 2️⃣ Progressive accumulation must be correct.
 
-3️⃣ GPU work must be measurable.
+Accumulation must:
 
-When adding passes:
+Average samples correctly
+Reset when parameters change
+Avoid floating precision drift
 
-Integrate into GPU timestamp system
+Frame index must be explicit.
 
-Expose tuning in debug UI
+---
 
-4️⃣ Post-processing must occur after tone mapping.
+### 3️⃣ GPU work must be measurable.
 
-Color grading operates in LDR unless explicitly justified.
+All compute passes must:
 
-🌍 World & Simulation Rules
-Voxels
+Integrate into timestamp profiling
+Expose iteration count and depth in UI
+Allow toggling for debugging
 
-Grid-aligned
+---
 
-Deterministic
+### 4️⃣ No silent performance regressions.
 
-Small (~0.25m scale)
+Maintain:
 
-No floating geometry
+Stable memory usage
+Predictable register pressure
+Reasonable occupancy
+Clear resource lifetimes
 
-No physics-driven placement
+Avoid hidden allocations in frame loop.
 
-Simulation
+---
 
-Fixed timestep
-
-Graph-based transport
-
-No dependency on rendering
-
-No variable-rate tick logic
-
-World Editing
-
-Use CSG commands
-
-Propagate AABB of changes
-
-Minimize chunk remeshing
-
-⚙️ Voxel GI Guidelines
-
-Voxel GI uses:
-
-Surface cache (RGB per face)
-
-Inject pass (bounce albedo weighted)
-
-Transport-aware propagation
-
-Shared memory tiled compute
-
-Openness-based bleed control
-
-When modifying GI:
-
-Preserve energy stability
-
-Avoid increasing light bleed
-
-Keep memory access coherent
-
-Maintain fixed iteration count
-
-If adding directional basis (e.g. SH), document memory impact.
-
-🧪 Testing Expectations
+# 🧪 Testing Expectations
 
 Add tests when:
 
-Introducing deterministic math utilities
+Implementing RNG
+Implementing phase sampling
+Implementing free-flight sampling
+Implementing transmittance estimation
+Adding mathematical utilities
 
-Modifying grid/graph logic
+Rendering output does not require golden-image tests,
+but numerical components must be validated.
 
-Adding transport behavior
+---
 
-Rendering features do not require unit tests,
-but must be:
-
-Measurable
-
-Toggleable
-
-Stable under GPU timing panel
-
-🚫 Non-Goals (Unless Explicitly Requested)
+# 🚫 Non-Goals (Unless Explicitly Requested)
 
 Do not introduce:
 
 ECS frameworks
-
-Job schedulers
-
-Plugin systems
-
-Script engines
-
+Scene graphs
 Asset pipelines
-
+Plugin systems
+Job schedulers
+Scripting systems
 Networking
-
+Editor tooling
 Serialization layers
 
-Editor frameworks
+This is a focused rendering lab, not a general engine.
 
-This project is intentionally single-binary and self-contained.
+---
 
-🤖 AI Agent Guidelines
+# 🤖 AI Agent Guidelines
 
 When generating code:
 
-Prefer
+Prefer:
 
 Clear C++20
-
 Google C++ style
-
 Small functions
-
 Explicit lifetime
-
+Stack allocation where reasonable
+Deterministic RNG design
 Value semantics
 
-Stack allocation where reasonable
-
-Avoid
+Avoid:
 
 Refactoring unrelated files
-
-Introducing new abstraction layers
-
-Changing architecture without request
-
+Introducing new architectural layers
+Changing synchronization model
 Over-optimizing prematurely
+Merging compute passes without request
 
-Adding new subsystems
+---
 
-Rendering Changes
+## Rendering Changes
 
-Respect existing pass structure
+Respect:
 
-Do not merge passes unless requested
+Explicit pass structure
+Explicit barriers
+Existing descriptor layout philosophy
+GPU timing integration
 
-Maintain explicit synchronization
+Do not collapse stages unless asked.
 
-Keep debug UI hooks intact
+---
 
-Simulation Changes
+## Integrator Changes
 
-Preserve determinism
+Preserve:
 
-Avoid floating-point drift when possible
+Energy conservation
+Correct PDF handling
+Unbiased Monte Carlo estimates
+Correct Russian roulette logic
 
-Keep tick logic separate from rendering
+If adding variance reduction techniques, document bias properties.
 
-If uncertain: generate the simplest correct implementation.
+---
 
-📊 Definition of Progress
+# 📊 Definition of Progress
 
 A change is successful if:
 
-The toy is more interactive
+Noise decreases per sample
+Physical correctness increases
+Image quality improves
+Frame pacing remains stable
+Code readability improves
 
-Systems are more emergent
+---
 
-Rendering is more stable or expressive
+# 🧭 Final Principle
 
-Frame pacing is unaffected
+This is a small, serious renderer.
 
-The codebase remains readable
-
-🧭 Final Principle
-
-This is a small, serious engine.
-
-Add power carefully.
+Add capability carefully.
 
 If complexity increases, clarity must increase with it.
 
-Why This Version Is Better
+---
 
-It:
+Linux builds use:
 
-Matches your renderer’s maturity
-
-Establishes synchronization rules
-
-Protects deterministic simulation
-
-Prevents AI from “engine-ifying” the project
-
-Keeps it scalable without losing identity
-
-Linux builds should use
+```
 cmake-build-linux
+```
 
 Windows builds use:
+
+```
 cmake-build-release
+```

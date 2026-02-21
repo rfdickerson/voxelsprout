@@ -60,3 +60,5 @@ Thumbs.db
 *.swo
 
 *.spv
+
+build-*
