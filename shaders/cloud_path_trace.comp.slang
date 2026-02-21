@@ -206,29 +206,35 @@ float densityField(float3 p) {
 
     const float densityScale = max(gPush.mediumParams.x, 0.01f);
 
-    // 1. Sculpting falloff.
-    const float3 center = float3(0.0f, cloudBase, 0.0f);
-    const float distXZ = length(p.xz - center.xz);
-    const float maxRadius = 6.0f;
-    const float radialFalloff = smoothstep(2.0f, maxRadius, distXZ);
+    // 1. Dome container (squashed and flat-bottomed).
+    const float3 center = float3(0.0f, cloudBase + 1.5f, 0.0f);
+    const float3 localP = (p - center) * float3(1.0f, 1.8f, 1.0f);
+    const float distFromCenter = length(localP);
+    const float domeRadius = 7.0f;
+    const float domeMask = 1.0f - smoothstep(domeRadius * 0.1f, domeRadius, distFromCenter);
 
-    const float normalizedY = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
-    const float heightFalloff = 1.0f - (smoothstep(0.0f, 0.15f, normalizedY) * smoothstep(1.0f, 0.4f, normalizedY));
-    const float structuralFalloff = max(radialFalloff, heightFalloff);
+    const float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
+    const float bottomRamp = smoothstep(0.0f, 0.15f, h);
+    const float structuralMask = domeMask * bottomRamp;
+    if (structuralMask <= 0.0f) {
+        return 0.0f;
+    }
 
     // 2. Base shape from low-frequency noise.
     const float3 baseUvw = p * macroScale * 0.15f;
     const float baseNoise = sampleCloudNoise(baseUvw).r;
-    const float baseDensity = saturate(baseNoise - structuralFalloff);
+    float baseDensity = remap(baseNoise, 1.0f - structuralMask, 1.0f, 0.0f, 1.0f);
+    baseDensity = saturate(baseDensity);
     if (baseDensity <= 0.0f) {
         return 0.0f;
     }
 
     // 3. Cauliflower edge carving from Worley channels.
-    const float3 detailUvw = p * detailScale * 0.5f;
+    const float3 detailUvw = p * detailScale * 0.4f;
     const float4 detailNoise = sampleCloudNoise(detailUvw);
     const float highFreqFbm = detailNoise.g * 0.625f + detailNoise.b * 0.25f + detailNoise.w * 0.125f;
-    const float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity);
+    const float heightBias = lerp(0.2f, 1.0f, h);
+    const float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity) * heightBias;
     const float finalDensity = saturate(baseDensity - (erosionModifier * erosionStrength));
 
     return saturate(finalDensity) * densityScale;
