@@ -14,9 +14,9 @@ struct CameraPush {
     float4 cameraUp;
     float4 sunDirectionIntensity;
     float4 mediumParams; // x = density scale, y = g, z = albedo
-    float4 cloudShapeParams; // x = macro scale, y = detail scale, z = density cutoff, w = chunkiness
+    float4 cloudShapeParams; // x = macro scale, y = detail scale
     float4 cloudProfileParams; // x = coverage, y = weather scale, z = cloud base, w = cloud top
-    float4 cloudWarpParams; // x = warp strength, y = erosion strength, z = stylization
+    float4 cloudWarpParams; // x = reserved, y = erosion strength, z = reserved
     float4 cloudLightParams; // x = brightness boost, y = ambient lift, z = max bounces, w = debug sun transmittance
     float4 frameParams;  // x = width, y = height, z = frame index, w = reset flag
 };
@@ -194,136 +194,46 @@ float remap(float value, float originalMin, float originalMax, float newMin, flo
 }
 
 float densityField(float3 p) {
-    const float3 cloudCenter = float3(0.0f, 4.8f, -2.0f);
-    const float3 cloudHalfExtents = float3(4.2f, 2.8f, 4.2f);
+    const float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
+    const float detailScale = max(gPush.cloudShapeParams.y, 0.08f);
+    const float coverage = saturate(gPush.cloudProfileParams.x);
+    const float weatherScale = max(gPush.cloudProfileParams.y, 0.01f);
+    const float cloudBase = gPush.cloudProfileParams.z;
+    const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
+    const float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
 
-    float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
-    float detailScale = max(gPush.cloudShapeParams.y, 0.08f);
-    float cutoff = saturate(gPush.cloudShapeParams.z);
-    float chunkiness = max(gPush.cloudShapeParams.w, 0.05f);
-
-    float coverage = saturate(gPush.cloudProfileParams.x);
-    float weatherScale = max(gPush.cloudProfileParams.y, 0.01f);
-    float cloudBase = gPush.cloudProfileParams.z;
-    float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
-
-    float warpStrength = max(gPush.cloudWarpParams.x, 0.0f);
-    float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
-    float stylization = saturate(gPush.cloudWarpParams.z);
-
-    // 1) Vertical cloud layer profile (flat-ish base, softer top).
     if (p.y < cloudBase || p.y > cloudTop) {
         return 0.0f;
     }
-    float h = saturate((p.y - cloudBase) / max(cloudTop - cloudBase, 0.25f));
-    float baseRamp = smoothstep(0.0f, 0.15f, h);
-    float topFade = 1.0f - smoothstep(0.62f, 1.0f, h);
-    float midBulge = 1.0f - abs(h - 0.45f) * 1.8f;
-    float vertical = baseRamp * topFade * (0.80f + 0.20f * saturate(midBulge));
-    if (vertical <= 0.0f) {
+
+    const float h = saturate((p.y - cloudBase) / max(cloudTop - cloudBase, 0.25f));
+    const float heightGradient = smoothstep(0.0f, 0.18f, h) * (1.0f - smoothstep(0.80f, 1.0f, h));
+    if (heightGradient <= 0.0f) {
         return 0.0f;
     }
 
-    // 2) Infinite 2D weather map in XZ to define where cloud columns exist.
-    float2 weatherP = p.xz * (weatherScale * 0.045f);
-    float weather = sampleCloudNoise(float3(weatherP.x + 0.37f, 0.5f, weatherP.y - 0.19f)).x;
-    float coverageThreshold = 1.0f - coverage;
-    float weatherMask = smoothstep(coverageThreshold - 0.22f, coverageThreshold + 0.12f, weather);
-    float coverageMask = saturate(0.40f + 0.60f * weatherMask);
-
-    // 3) Single centered cloud volume mask using rounded core + attached lobes.
-    float3 local = (p - cloudCenter) / cloudHalfExtents;
-    float coreRadius = length(local * float3(0.92f, 1.12f, 0.92f));
-    float coreMask = 1.0f - smoothstep(0.58f, 1.05f, coreRadius);
-
-    float lobeA = 1.0f - smoothstep(0.55f, 1.00f, length((local - float3(0.36f, 0.14f, -0.08f)) * float3(1.10f, 0.95f, 1.10f)));
-    float lobeB = 1.0f - smoothstep(0.55f, 1.00f, length((local - float3(-0.33f, 0.18f, 0.16f)) * float3(1.05f, 0.90f, 1.05f)));
-    float lobeC = 1.0f - smoothstep(0.55f, 1.00f, length((local - float3(0.12f, 0.28f, 0.35f)) * float3(1.00f, 0.88f, 1.00f)));
-    float lobeD = 1.0f - smoothstep(0.55f, 1.00f, length((local - float3(-0.16f, 0.32f, -0.31f)) * float3(1.00f, 0.86f, 1.00f)));
-    float attachedLobes = max(max(lobeA, lobeB), max(lobeC, lobeD));
-
-    float lobeNoise = sampleCloudNoise((p - cloudCenter) * 0.22f + float3(0.41f, -0.17f, 0.29f)).x;
-    float lobeGate = smoothstep(0.44f, 0.72f, lobeNoise);
-    float shellBand = smoothstep(0.18f, 0.88f, coreMask) * (1.0f - smoothstep(0.82f, 1.00f, coreMask));
-    float singleCloudMask = saturate(max(coreMask, attachedLobes * (0.55f + 0.45f * lobeGate)));
-    singleCloudMask = saturate(singleCloudMask + 0.20f * shellBand * lobeGate);
-    if (singleCloudMask <= 0.0f) {
+    const float3 noiseOffset = float3(17.3f, 0.5f, -22.7f);
+    const float2 weatherUv = (p.xz * weatherScale) + noiseOffset.xz;
+    const float weatherNoise = sampleCloudNoise(float3(weatherUv.x, noiseOffset.y, weatherUv.y)).r;
+    const float coverageThreshold = 1.0f - coverage;
+    const float coverageMask = smoothstep(coverageThreshold - 0.12f, coverageThreshold + 0.12f, weatherNoise);
+    const float cloudIsland = 1.0f - smoothstep(3.0f, 7.0f, length(p.xz));
+    const float structuralMask = heightGradient * coverageMask * cloudIsland;
+    if (structuralMask <= 0.0f) {
         return 0.0f;
     }
 
-    // 4) Start macro shape from vertical * weather and confine it to the box.
-    float macroShape = vertical * coverageMask;
-    macroShape *= singleCloudMask;
+    const float4 baseNoise = sampleCloudNoise((p * macroScale * 0.05f) + (noiseOffset * 0.25f));
+    float baseDensity = saturate(baseNoise.r * structuralMask);
+    if (baseDensity <= 0.0f) {
+        return 0.0f;
+    }
 
-    // Optional warp to break straight extruded columns.
-    float3 pLocal = p;
-    float3 warp = curlNoise(pLocal * 0.22f + float3(7.1f, -4.6f, 2.8f));
-    pLocal += warpStrength * (1.45f - 0.60f * stylization) * warp;
-
-    // Hierarchical structure with Perlin-Worley base and multi-band Worley erosion.
-    float macroFreq = lerp(0.045f, 0.16f, saturate((macroScale - 0.05f) / 0.55f));
-    float4 macroNoise = sampleCloudNoise((pLocal + float3(8.4f, -3.1f, 2.7f)) * macroFreq);
-    float macroCell = saturate(macroNoise.x);
-    float macroContrast = lerp(1.35f, 0.85f, saturate((macroScale - 0.05f) / 0.55f));
-    float largeLobes = pow(smoothstep(0.10f, 0.78f, macroCell), macroContrast);
-    macroShape *= (0.55f + 0.45f * largeLobes);
-
-    float4 mediumNoise = sampleCloudNoise((pLocal + float3(-5.3f, 3.8f, 9.2f)) * detailScale);
-    float mediumBase = saturate(mediumNoise.x);
-    float erosionLow = saturate(mediumNoise.y);
-    float erosionMid = saturate(mediumNoise.z);
-    float erosionHigh = saturate(mediumNoise.w);
-    float highFreqFbm = erosionLow * 0.625f + erosionMid * 0.25f + erosionHigh * 0.125f;
-    float erosionGate = saturate(highFreqFbm * 0.32f - 0.05f);
-    float mediumPerlin = remap(mediumBase, erosionGate, 1.0f, 0.0f, 1.0f);
-    mediumPerlin = saturate(mediumPerlin);
-    float cauliflower = smoothstep(0.12f, 0.78f, 0.85f * mediumPerlin + 0.15f * erosionLow);
-    float4 lobeNoiseField = sampleCloudNoise((pLocal + float3(-11.2f, 4.1f, -6.8f)) * (detailScale * 1.85f));
-    float lobeDetail = smoothstep(0.40f, 0.84f, 0.70f * lobeNoiseField.x + 0.30f * lobeNoiseField.y);
-    float lobeClumps = smoothstep(0.36f, 0.90f, macroCell * lobeDetail);
-
-    float4 fineNoise = sampleCloudNoise((pLocal + float3(17.0f, -8.0f, 11.0f)) * (detailScale * 3.5f));
-    float finePerlin = saturate(fineNoise.w);
-    float fineWisp = smoothstep(0.30f, 0.84f, 1.0f - finePerlin);
-
-    float detailBlend = saturate(0.38f + 0.40f * chunkiness);
-    float detail = lerp(cauliflower, largeLobes, detailBlend);
-    detail = lerp(detail, lobeClumps, 0.38f + 0.25f * saturate(chunkiness));
-    float stepped = floor(saturate(detail) * 4.0f) * (1.0f / 3.0f);
-    detail = lerp(detail, stepped, stylization * 0.85f);
-
-    float skirt = smoothstep(0.0f, 0.22f, macroShape) * (1.0f - smoothstep(0.74f, 1.0f, macroShape));
-    float puffy = 0.50f + 0.24f * saturate(chunkiness);
-    puffy = lerp(puffy, 0.87f, stylization);
-
-    // Core vs shell split:
-    // - core: denser interior mass
-    // - shell: brighter, lower-density outskirts
-    float structure = macroShape * detail;
-    float core = pow(saturate(structure), lerp(1.45f, 1.10f, stylization));
-    float shell = saturate(structure - (0.55f * core));
-    float coreDensity = core * (0.78f + 0.22f * largeLobes);
-    float shellDensity = shell * (0.52f + 0.48f * cauliflower);
-
-    float density = (coreDensity + shellDensity) * puffy + (0.08f + 0.20f * saturate(chunkiness)) * skirt * largeLobes;
-    density *= vertical * coverageMask;
-
-    // Sharper outer boundary + fine wispy erosion.
-    float boundary = saturate(1.0f - structure);
-    float boundarySharp = smoothstep(0.06f, 0.45f, boundary);
-    float ridge = saturate(abs(mediumNoise.y - mediumNoise.z) * 2.2f);
-    float erosion = erosionStrength * lerp((1.0f - mediumPerlin) * 0.12f, ridge, 0.45f);
-    erosion *= lerp(0.85f, 0.18f, stylization);
-    erosion += 0.08f * erosionStrength * (1.0f - fineWisp) * boundarySharp;
-    density -= erosion * (0.16f + 0.44f * boundarySharp);
-
-    // Height-biased Worley breakup:
-    // fracture tops more than the base so the upper silhouette looks more turbulent.
-    float topErosion = 1.0f - saturate(sampleCloudNoise((pLocal + float3(-2.7f, 5.1f, 1.9f)) * 1.5f).z);
-    float edgeFactor = smoothstep(0.30f, 1.00f, h);
-    density -= topErosion * (0.28f * erosionStrength) * edgeFactor;
-
-    return max(density - (cutoff * 0.55f), 0.0f);
+    const float4 detailNoise = sampleCloudNoise((p * detailScale * 0.1f) + (noiseOffset * 0.45f));
+    const float highFreqFbm = detailNoise.g * 0.625f + detailNoise.z * 0.25f + detailNoise.w * 0.125f;
+    const float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity);
+    const float finalDensity = saturate(baseDensity - (0.20f * erosionModifier * erosionStrength));
+    return finalDensity;
 }
 
 bool intersectAabb(float3 rayOrigin, float3 rayDir, float3 bmin, float3 bmax, out float tMin, out float tMax) {

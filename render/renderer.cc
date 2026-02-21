@@ -1009,6 +1009,9 @@ bool Renderer::Impl::createStorageImages() {
     }
 
     VkSamplerCreateInfo cloudSamplerInfo = samplerInfo;
+    cloudSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    cloudSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    cloudSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
     cloudSamplerInfo.magFilter = VK_FILTER_LINEAR;
     cloudSamplerInfo.minFilter = VK_FILTER_LINEAR;
     cloudSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
