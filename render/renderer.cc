@@ -211,6 +211,8 @@ struct Renderer::Impl {
     ImageResource accumulationImage;
     ImageResource rngStateImage;
     ImageResource toneMapImage;
+    ImageResource blueNoiseImage;
+    VkSampler blueNoiseSampler = VK_NULL_HANDLE;
 
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorPool imguiDescriptorPool = VK_NULL_HANDLE;
@@ -576,9 +578,9 @@ void Renderer::Impl::destroySwapchain() {
 }
 
 bool Renderer::Impl::createStorageImages() {
-    auto createImage = [&](ImageResource& outImage, VkFormat format, VkImageUsageFlags usage) -> bool {
-        outImage.width = swapchainExtent.width;
-        outImage.height = swapchainExtent.height;
+    auto createImage = [&](ImageResource& outImage, VkFormat format, VkImageUsageFlags usage, std::uint32_t width, std::uint32_t height) -> bool {
+        outImage.width = width;
+        outImage.height = height;
         outImage.format = format;
 
         VkImageCreateInfo imageInfo{};
@@ -626,19 +628,230 @@ bool Renderer::Impl::createStorageImages() {
     if (!createImage(
             accumulationImage,
             VK_FORMAT_R16G16B16A16_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT)) {
+            VK_IMAGE_USAGE_STORAGE_BIT,
+            swapchainExtent.width,
+            swapchainExtent.height)) {
         return false;
     }
     if (!createImage(
             rngStateImage,
             VK_FORMAT_R32_UINT,
-            VK_IMAGE_USAGE_STORAGE_BIT)) {
+            VK_IMAGE_USAGE_STORAGE_BIT,
+            swapchainExtent.width,
+            swapchainExtent.height)) {
         return false;
     }
     if (!createImage(
             toneMapImage,
             VK_FORMAT_R16G16B16A16_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            swapchainExtent.width,
+            swapchainExtent.height)) {
+        return false;
+    }
+
+    constexpr std::uint32_t kBlueNoiseSize = 256u;
+    if (!createImage(
+            blueNoiseImage,
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            kBlueNoiseSize,
+            kBlueNoiseSize)) {
+        return false;
+    }
+
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_NEAREST;
+    samplerInfo.minFilter = VK_FILTER_NEAREST;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = 0.0f;
+    samplerInfo.maxAnisotropy = 1.0f;
+    if (vkCreateSampler(device, &samplerInfo, nullptr, &blueNoiseSampler) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create blue noise sampler";
+        return false;
+    }
+
+    const std::size_t blueNoiseByteCount = static_cast<std::size_t>(kBlueNoiseSize) * static_cast<std::size_t>(kBlueNoiseSize) * 4u;
+    std::vector<std::uint8_t> blueNoiseData(blueNoiseByteCount);
+
+    const std::string blueNoisePath = std::string(VOXEL_PROJECT_SOURCE_DIR) + "/assets/blue_noise_rgba8_256.bin";
+    const std::vector<char> loadedBlueNoise = loadBinaryFile(blueNoisePath);
+    if (loadedBlueNoise.size() == blueNoiseByteCount) {
+        std::memcpy(blueNoiseData.data(), loadedBlueNoise.data(), blueNoiseByteCount);
+    } else {
+        VOX_LOGW("render") << "blue noise asset missing/invalid, using procedural fallback: " << blueNoisePath;
+        auto fractf = [](float v) {
+            return v - std::floor(v);
+        };
+        auto ign = [&](float x, float y) {
+            return fractf(52.9829189f * fractf((x * 0.06711056f) + (y * 0.00583715f)));
+        };
+
+        for (std::uint32_t y = 0; y < kBlueNoiseSize; ++y) {
+            for (std::uint32_t x = 0; x < kBlueNoiseSize; ++x) {
+                const std::size_t idx = (static_cast<std::size_t>(y) * static_cast<std::size_t>(kBlueNoiseSize) + x) * 4u;
+                const float r = ign(static_cast<float>(x) + 0.31f, static_cast<float>(y) + 0.73f);
+                const float g = ign(static_cast<float>(x) + 19.19f, static_cast<float>(y) + 7.17f);
+                const float b = ign(static_cast<float>(x) + 11.57f, static_cast<float>(y) + 23.41f);
+                const float a = ign(static_cast<float>(x) + 3.11f, static_cast<float>(y) + 29.93f);
+                blueNoiseData[idx + 0] = static_cast<std::uint8_t>(std::clamp(r, 0.0f, 1.0f) * 255.0f);
+                blueNoiseData[idx + 1] = static_cast<std::uint8_t>(std::clamp(g, 0.0f, 1.0f) * 255.0f);
+                blueNoiseData[idx + 2] = static_cast<std::uint8_t>(std::clamp(b, 0.0f, 1.0f) * 255.0f);
+                blueNoiseData[idx + 3] = static_cast<std::uint8_t>(std::clamp(a, 0.0f, 1.0f) * 255.0f);
+            }
+        }
+    }
+
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VmaAllocation stagingAllocation = VK_NULL_HANDLE;
+    VmaAllocationInfo stagingAllocInfo{};
+
+    VkBufferCreateInfo stagingBufferInfo{};
+    stagingBufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingBufferInfo.size = blueNoiseByteCount;
+    stagingBufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingBufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo stagingCreateInfo{};
+    stagingCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    stagingCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    if (vmaCreateBuffer(
+            allocator,
+            &stagingBufferInfo,
+            &stagingCreateInfo,
+            &stagingBuffer,
+            &stagingAllocation,
+            &stagingAllocInfo) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create blue noise staging buffer";
+        return false;
+    }
+
+    void* mappedData = stagingAllocInfo.pMappedData;
+    bool didMap = false;
+    if (mappedData == nullptr) {
+        if (vmaMapMemory(allocator, stagingAllocation, &mappedData) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to map blue noise staging buffer";
+            vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+            return false;
+        }
+        didMap = true;
+    }
+
+    std::memcpy(mappedData, blueNoiseData.data(), blueNoiseByteCount);
+    if (didMap) {
+        vmaUnmapMemory(allocator, stagingAllocation);
+    }
+
+    VkCommandPool uploadPool = VK_NULL_HANDLE;
+    VkCommandBuffer uploadCmd = VK_NULL_HANDLE;
+
+    VkCommandPoolCreateInfo uploadPoolInfo{};
+    uploadPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    uploadPoolInfo.queueFamilyIndex = queueFamilyIndex;
+    uploadPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    if (vkCreateCommandPool(device, &uploadPoolInfo, nullptr, &uploadPool) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create upload command pool";
+        vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo uploadAllocInfo{};
+    uploadAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    uploadAllocInfo.commandPool = uploadPool;
+    uploadAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    uploadAllocInfo.commandBufferCount = 1;
+    if (vkAllocateCommandBuffers(device, &uploadAllocInfo, &uploadCmd) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to allocate upload command buffer";
+        vkDestroyCommandPool(device, uploadPool, nullptr);
+        vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+        return false;
+    }
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(uploadCmd, &beginInfo) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to begin blue noise upload command buffer";
+        vkDestroyCommandPool(device, uploadPool, nullptr);
+        vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+        return false;
+    }
+
+    VkImageMemoryBarrier2 toTransfer = imageBarrier(
+        blueNoiseImage.image,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_NONE,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkDependencyInfo toTransferDep{};
+    toTransferDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    toTransferDep.imageMemoryBarrierCount = 1;
+    toTransferDep.pImageMemoryBarriers = &toTransfer;
+    vkCmdPipelineBarrier2(uploadCmd, &toTransferDep);
+
+    VkBufferImageCopy copyRegion{};
+    copyRegion.bufferOffset = 0;
+    copyRegion.bufferRowLength = 0;
+    copyRegion.bufferImageHeight = 0;
+    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyRegion.imageSubresource.mipLevel = 0;
+    copyRegion.imageSubresource.baseArrayLayer = 0;
+    copyRegion.imageSubresource.layerCount = 1;
+    copyRegion.imageExtent = {kBlueNoiseSize, kBlueNoiseSize, 1};
+    vkCmdCopyBufferToImage(
+        uploadCmd,
+        stagingBuffer,
+        blueNoiseImage.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &copyRegion);
+
+    VkImageMemoryBarrier2 toSample = imageBarrier(
+        blueNoiseImage.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    VkDependencyInfo toSampleDep{};
+    toSampleDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    toSampleDep.imageMemoryBarrierCount = 1;
+    toSampleDep.pImageMemoryBarriers = &toSample;
+    vkCmdPipelineBarrier2(uploadCmd, &toSampleDep);
+
+    if (vkEndCommandBuffer(uploadCmd) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to end blue noise upload command buffer";
+        vkDestroyCommandPool(device, uploadPool, nullptr);
+        vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+        return false;
+    }
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &uploadCmd;
+    if (vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to submit blue noise upload";
+        vkDestroyCommandPool(device, uploadPool, nullptr);
+        vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+        return false;
+    }
+    vkQueueWaitIdle(queue);
+
+    vkDestroyCommandPool(device, uploadPool, nullptr);
+    vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
+    blueNoiseImage.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    if (blueNoiseSampler == VK_NULL_HANDLE) {
+        VOX_LOGE("render") << "blue noise sampler is invalid after upload";
         return false;
     }
 
@@ -662,6 +875,12 @@ void Renderer::Impl::destroyStorageImages() {
     destroyImage(accumulationImage);
     destroyImage(rngStateImage);
     destroyImage(toneMapImage);
+    destroyImage(blueNoiseImage);
+
+    if (blueNoiseSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(device, blueNoiseSampler, nullptr);
+        blueNoiseSampler = VK_NULL_HANDLE;
+    }
 }
 
 VkShaderModule Renderer::Impl::createShaderModuleFromSpv(const char* relativePath) const {
@@ -686,9 +905,11 @@ VkShaderModule Renderer::Impl::createShaderModuleFromSpv(const char* relativePat
 }
 
 bool Renderer::Impl::createDescriptors() {
-    std::array<VkDescriptorPoolSize, 1> poolSizes{};
+    std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     poolSizes[0].descriptorCount = 5;
+    poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    poolSizes[1].descriptorCount = 1;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -717,7 +938,7 @@ bool Renderer::Impl::createDescriptors() {
         return false;
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 2> cloudBindings{};
+    std::array<VkDescriptorSetLayoutBinding, 3> cloudBindings{};
     cloudBindings[0].binding = 0;
     cloudBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     cloudBindings[0].descriptorCount = 1;
@@ -726,6 +947,10 @@ bool Renderer::Impl::createDescriptors() {
     cloudBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     cloudBindings[1].descriptorCount = 1;
     cloudBindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    cloudBindings[2].binding = 2;
+    cloudBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    cloudBindings[2].descriptorCount = 1;
+    cloudBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo cloudLayoutInfo{};
     cloudLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -789,11 +1014,16 @@ bool Renderer::Impl::createDescriptors() {
     rngInfo.imageView = rngStateImage.view;
     rngInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
+    VkDescriptorImageInfo blueNoiseInfo{};
+    blueNoiseInfo.sampler = VK_NULL_HANDLE;
+    blueNoiseInfo.imageView = blueNoiseImage.view;
+    blueNoiseInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     VkDescriptorImageInfo toneInfo{};
     toneInfo.imageView = toneMapImage.view;
     toneInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    std::array<VkWriteDescriptorSet, 4> writes{};
+    std::array<VkWriteDescriptorSet, 5> writes{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = cloudPathTracePass.descriptorSet;
     writes[0].dstBinding = 0;
@@ -809,18 +1039,25 @@ bool Renderer::Impl::createDescriptors() {
     writes[1].pImageInfo = &rngInfo;
 
     writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[2].dstSet = toneMapPass.descriptorSet;
-    writes[2].dstBinding = 0;
-    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[2].dstSet = cloudPathTracePass.descriptorSet;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[2].descriptorCount = 1;
-    writes[2].pImageInfo = &accumInfo;
+    writes[2].pImageInfo = &blueNoiseInfo;
 
     writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[3].dstSet = toneMapPass.descriptorSet;
-    writes[3].dstBinding = 1;
+    writes[3].dstBinding = 0;
     writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[3].descriptorCount = 1;
-    writes[3].pImageInfo = &toneInfo;
+    writes[3].pImageInfo = &accumInfo;
+
+    writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[4].dstSet = toneMapPass.descriptorSet;
+    writes[4].dstBinding = 1;
+    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[4].descriptorCount = 1;
+    writes[4].pImageInfo = &toneInfo;
 
     vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     return true;

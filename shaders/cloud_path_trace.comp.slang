@@ -2,6 +2,7 @@ static const float kPi = 3.1415926535f;
 static const float3 kCloudAabbMin = float3(-10.0f, 0.0f, -10.0f);
 static const float3 kCloudAabbMax = float3(10.0f, 10.0f, 10.0f);
 static const uint kMaxBouncesHardLimit = 12u;
+static const uint kSunTrMaxSteps = 32u;
 static const float kSunAngularRadiusRadians = 0.004f; // ~0.23 degrees
 
 struct CameraPush {
@@ -25,6 +26,8 @@ ConstantBuffer<CameraPush> gPush;
 RWTexture2D<float4> gAccumulation;
 [[vk::binding(1, 0)]]
 RWTexture2D<uint> gRngState;
+[[vk::binding(2, 0)]]
+Texture2D<float4> gBlueNoise;
 
 uint hash3(uint3 p) {
     uint h = p.x * 747796405u;
@@ -315,6 +318,13 @@ float henyeyGreenstein(float cosTheta, float g) {
     return (1.0f - g2) / (4.0f * kPi * pow(max(d, 1e-4f), 1.5f));
 }
 
+float dualHenyeyGreenstein(float cosTheta, float g) {
+    // Cloud droplets: dominant forward lobe + weaker backward lobe.
+    float forwardLobe = henyeyGreenstein(cosTheta, g);
+    float backwardLobe = henyeyGreenstein(cosTheta, -0.3f);
+    return lerp(backwardLobe, forwardLobe, 0.7f);
+}
+
 float3 makeOrthoX(float3 n) {
     return (abs(n.z) < 0.999f) ? normalize(cross(float3(0.0f, 0.0f, 1.0f), n)) : normalize(cross(float3(0.0f, 1.0f, 0.0f), n));
 }
@@ -351,7 +361,7 @@ float3 sampleHenyeyGreenstein(float3 wo, float g, inout uint rng) {
     return normalize((sinTheta * cos(phi)) * t + (sinTheta * sin(phi)) * b + cosTheta * wo);
 }
 
-bool sampleDeltaTrackingEvent(
+bool sampleDistance(
     float3 rayOrigin,
     float3 rayDir,
     float tMin,
@@ -359,13 +369,9 @@ bool sampleDeltaTrackingEvent(
     float sigmaMajorant,
     float densityScale,
     inout uint rng,
-    out float3 outPosition,
-    out float outTr,
-    out float outSigmaS
+    out float3 outPosition
 ) {
     outPosition = 0.0f;
-    outTr = 1.0f;
-    outSigmaS = 0.0f;
 
     float t = tMin;
     [loop]
@@ -377,18 +383,12 @@ bool sampleDeltaTrackingEvent(
         }
 
         float3 x = rayOrigin + rayDir * t;
-        float sigmaS = densityField(x) * densityScale * 1.5f;
-        float accept = saturate(sigmaS / sigmaMajorant);
+        float sigmaT = densityField(x) * densityScale * 1.5f;
+        float accept = saturate(sigmaT / sigmaMajorant);
 
         if (rand01(rng) < accept) {
             outPosition = x;
-            outSigmaS = sigmaS;
             return true;
-        }
-
-        outTr *= max(1.0f - accept, 0.0f);
-        if (outTr < 1e-4f) {
-            return false;
         }
     }
 
@@ -405,7 +405,7 @@ float estimateSunTransmittance(float3 p, float3 sunDir, float sigmaMajorant, flo
     float tr = 1.0f;
     float t = tMin;
     [loop]
-    for (uint i = 0; i < 128u; ++i) {
+    for (uint i = 0; i < kSunTrMaxSteps; ++i) {
         float u = max(rand01(rng), 1e-6f);
         t += -log(u) / sigmaMajorant;
         if (t >= tMax) {
@@ -488,12 +488,26 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     }
 
     uint2 pixel = dispatchThreadID.xy;
+    uint frameIndexUint = (uint)gPush.frameParams.z;
+
+    uint2 blueNoiseSize;
+    gBlueNoise.GetDimensions(blueNoiseSize.x, blueNoiseSize.y);
+    blueNoiseSize = max(blueNoiseSize, uint2(1u, 1u));
+
+    float2 goldenOffset = frac(float2(0.7548776f, 0.5698403f) * (float)frameIndexUint);
+    uint2 pixelOffset = uint2(goldenOffset * float2(blueNoiseSize));
+    uint2 blueNoiseCoord = uint2(
+        (pixel.x + pixelOffset.x) % blueNoiseSize.x,
+        (pixel.y + pixelOffset.y) % blueNoiseSize.y);
+    float4 blueNoise = gBlueNoise.Load(int3(blueNoiseCoord, 0));
+
     uint rngState = gRngState[pixel];
     if (rngState == 0u || gPush.frameParams.w > 0.5f) {
-        rngState = hash3(uint3(pixel, 1u));
+        uint bnInt = (uint)(blueNoise.z * 16777216.0f);
+        rngState = hash3(uint3(pixel, bnInt ^ frameIndexUint));
     }
 
-    float2 jitter = float2(rand01(rngState), rand01(rngState));
+    float2 jitter = blueNoise.xy;
     float2 uv = ((float2(pixel) + jitter) / float2(width, height)) * 2.0f - 1.0f;
     uv.y = -uv.y;
 
@@ -534,9 +548,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         }
 
         float3 scatterPos = 0.0f;
-        float trSegment = 1.0f;
-        float sigmaS = 0.0f;
-        bool hit = sampleDeltaTrackingEvent(
+        bool hit = sampleDistance(
             rayOrigin,
             rayDir,
             tMin,
@@ -544,18 +556,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             sigmaMajorant,
             densityScale,
             rngState,
-            scatterPos,
-            trSegment,
-            sigmaS);
+            scatterPos);
 
         if (!hit) {
             if (!debugSunTransmittance) {
-                L += throughput * trSegment * skyColor(rayDir, sunDir, sunIntensity);
+                L += throughput * skyColor(rayDir, sunDir, sunIntensity);
             }
             break;
         }
-
-        throughput *= trSegment;
 
         if (debugSunTransmittance && bounce == 0u) {
             float trSunDebug = estimateSunTransmittance(scatterPos, sunDir, sigmaMajorant, densityScale, rngState);
@@ -573,12 +581,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         float3 viewDir = rayDir;
         float3 lightDir = -sunDirSample;
         float cosTheta = clamp(dot(lightDir, -viewDir), -1.0f, 1.0f);
-        float phaseSun = henyeyGreenstein(cosTheta, g);
+        float phaseSun = dualHenyeyGreenstein(cosTheta, g);
         // sunRadiance here represents integrated sun-disk radiance under our UI intensity convention.
-        L += throughput * cloudAlbedo * brightnessBoost * trSun * sigmaS * phaseSun * sunRadiance;
+        L += throughput * cloudAlbedo * brightnessBoost * trSun * phaseSun * sunRadiance;
 
         float3 ambientSky = skyAmbientLighting(sunDir, sunIntensity);
-        L += throughput * cloudAlbedo * sigmaS * (1.0f / (4.0f * kPi)) * ambientSky * 0.05f;
+        L += throughput * cloudAlbedo * (1.0f / (4.0f * kPi)) * ambientSky * 0.05f;
 
         if (bounce + 1u >= maxBounces) {
             break;
