@@ -336,7 +336,7 @@ bool sampleDistance(
     return false;
 }
 
-float estimateSunOpticalDepth(float3 p, float3 sunDir, float densityScale, uint maxSteps) {
+float estimateSunOpticalDepth(float3 p, float3 sunDir, float densityScale, uint maxSteps, inout uint rngState) {
     float tMin = 0.0f;
     float tMax = 0.0f;
     if (!intersectAabb(p + sunDir * 0.05f, sunDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
@@ -349,7 +349,7 @@ float estimateSunOpticalDepth(float3 p, float3 sunDir, float densityScale, uint 
         return 0.0f;
     }
 
-    float t = stepSize * 0.5f;
+    float t = stepSize * rand01(rngState);
     float opticalDepth = 0.0f;
     [loop]
     for (uint i = 0; i < maxSteps; ++i) {
@@ -362,12 +362,12 @@ float estimateSunOpticalDepth(float3 p, float3 sunDir, float densityScale, uint 
     return opticalDepth;
 }
 
-float estimateSunTransmittanceSteps(float3 p, float3 sunDir, float densityScale, uint maxSteps) {
-    return exp(-estimateSunOpticalDepth(p, sunDir, densityScale, maxSteps));
+float estimateSunTransmittanceSteps(float3 p, float3 sunDir, float densityScale, uint maxSteps, inout uint rngState) {
+    return exp(-estimateSunOpticalDepth(p, sunDir, densityScale, maxSteps, rngState));
 }
 
-float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale) {
-    return estimateSunTransmittanceSteps(p, sunDir, densityScale, kSunTrMaxSteps);
+float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale, inout uint rngState) {
+    return estimateSunTransmittanceSteps(p, sunDir, densityScale, kSunTrMaxSteps, rngState);
 }
 
 float3 integrateCloudApproximation(
@@ -381,7 +381,8 @@ float3 integrateCloudApproximation(
     float3 cloudAlbedo,
     float brightnessBoost,
     float ambientLift,
-    bool debugSunTransmittance
+    bool debugSunTransmittance,
+    inout uint rngState
 ) {
     float tMin = 0.0f;
     float tMax = 0.0f;
@@ -395,7 +396,7 @@ float3 integrateCloudApproximation(
     }
 
     const float stepSize = marchDistance / float(kCloudApproxSteps);
-    float t = tMin + (0.5f * stepSize);
+    float t = tMin + (rand01(rngState) * stepSize);
     float3 L = 0.0f;
     float3 throughput = 1.0f;
     float3 ambientSky = skyAmbientLighting(sunDir, sunIntensity);
@@ -416,7 +417,7 @@ float3 integrateCloudApproximation(
             float segmentScatter = 1.0f - segmentTransmit;
 
             float cosTheta = clamp(dot(-rayDir, -sunDir), -1.0f, 1.0f);
-            float opticalDepth = estimateSunOpticalDepth(x, sunDir, densityScale, kApproxSunTrSteps);
+            float opticalDepth = estimateSunOpticalDepth(x, sunDir, densityScale, kApproxSunTrSteps, rngState);
             float msTransmittance = 0.0f;
             float densityMult = 1.0f;
             float contribMult = 1.0f;
@@ -578,7 +579,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             cloudAlbedo,
             brightnessBoost,
             ambientLift,
-            debugSunTransmittance);
+            debugSunTransmittance,
+            rngState);
     } else {
         [loop]
         for (uint bounce = 0u; bounce < maxBounces; ++bounce) {
@@ -610,14 +612,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             }
 
             if (debugSunTransmittance && bounce == 0u) {
-                float trSunDebug = estimateSunTransmittance(scatterPos, sunDir, densityScale);
+                float trSunDebug = estimateSunTransmittance(scatterPos, sunDir, densityScale, rngState);
                 L = float3(trSunDebug, trSunDebug, trSunDebug);
                 break;
             }
 
             float3 wo = -rayDir;
             float3 sunDirSample = sampleUniformCone(sunDir, sunCosThetaMax, rngState);
-            const float opticalDepth = estimateSunOpticalDepth(scatterPos, sunDirSample, densityScale, kSunTrMaxSteps);
+            const float opticalDepth = estimateSunOpticalDepth(scatterPos, sunDirSample, densityScale, kSunTrMaxSteps, rngState);
             float msTransmittance = 0.0f;
             float densityMult = 1.0f;
             float contribMult = 1.0f;
