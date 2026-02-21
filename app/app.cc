@@ -152,7 +152,7 @@ bool App::init() {
     }
 
     const voxelsprout::core::NoiseSamples noiseProbe = voxelsprout::core::sampleLibNoise(0.0, 0.0, 0.0);
-    VOX_LOGI("app") << "libnoise probe perlin=" << noiseProbe.perlin << " worley=" << noiseProbe.worley;
+    VOX_LOGI("app") << "noise probe perlin=" << noiseProbe.perlin << " worley=" << noiseProbe.worley;
 
     m_renderParams.camera.position = {0.0f, 2.0f, 10.0f};
     m_renderParams.camera.yawDegrees = -90.0f;
