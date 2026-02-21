@@ -4,6 +4,7 @@ static const float3 kCloudAabbMax = float3(10.0f, 10.0f, 10.0f);
 static const uint kMaxBouncesHardLimit = 12u;
 static const uint kSunTrMaxSteps = 32u;
 static const float kSunAngularRadiusRadians = 0.004f; // ~0.23 degrees
+static const int kCloudNoiseVolumeDim = 128;
 
 struct CameraPush {
     float4 cameraPositionFov;
@@ -28,6 +29,8 @@ RWTexture2D<float4> gAccumulation;
 RWTexture2D<uint> gRngState;
 [[vk::binding(2, 0)]]
 Texture2D<float4> gBlueNoise;
+[[vk::binding(3, 0)]]
+Texture3D<float4> gCloudNoiseVolume;
 
 uint hash3(uint3 p) {
     uint h = p.x * 747796405u;
@@ -174,6 +177,45 @@ float3 curlNoise(float3 p) {
     return (len > 1e-4f) ? (curl / len) : float3(0.0f, 0.0f, 0.0f);
 }
 
+int wrapNoiseCoord(int v) {
+    int m = v % kCloudNoiseVolumeDim;
+    return (m < 0) ? (m + kCloudNoiseVolumeDim) : m;
+}
+
+float4 cloudNoiseLoad(int3 coord) {
+    int3 wrapped = int3(
+        wrapNoiseCoord(coord.x),
+        wrapNoiseCoord(coord.y),
+        wrapNoiseCoord(coord.z));
+    return gCloudNoiseVolume.Load(int4(wrapped, 0));
+}
+
+float4 sampleCloudNoise(float3 p) {
+    float3 uvw = frac(p);
+    float3 coord = uvw * float(kCloudNoiseVolumeDim) - 0.5f;
+
+    int3 i0 = int3(floor(coord));
+    int3 i1 = i0 + int3(1, 1, 1);
+    float3 f = coord - float3(i0);
+
+    float4 c000 = cloudNoiseLoad(int3(i0.x, i0.y, i0.z));
+    float4 c100 = cloudNoiseLoad(int3(i1.x, i0.y, i0.z));
+    float4 c010 = cloudNoiseLoad(int3(i0.x, i1.y, i0.z));
+    float4 c110 = cloudNoiseLoad(int3(i1.x, i1.y, i0.z));
+    float4 c001 = cloudNoiseLoad(int3(i0.x, i0.y, i1.z));
+    float4 c101 = cloudNoiseLoad(int3(i1.x, i0.y, i1.z));
+    float4 c011 = cloudNoiseLoad(int3(i0.x, i1.y, i1.z));
+    float4 c111 = cloudNoiseLoad(int3(i1.x, i1.y, i1.z));
+
+    float4 x00 = lerp(c000, c100, f.x);
+    float4 x10 = lerp(c010, c110, f.x);
+    float4 x01 = lerp(c001, c101, f.x);
+    float4 x11 = lerp(c011, c111, f.x);
+    float4 y0v = lerp(x00, x10, f.y);
+    float4 y1v = lerp(x01, x11, f.y);
+    return lerp(y0v, y1v, f.z);
+}
+
 float densityField(float3 p) {
     const float3 cloudCenter = float3(0.0f, 4.2f, -1.8f);
 
@@ -205,7 +247,7 @@ float densityField(float3 p) {
 
     // Low-frequency weather/coverage field for broad regional breakup.
     float3 weatherP = float3(p.x, (p.y - cloudBase) * 0.35f, p.z) * weatherScale;
-    float weather = perlinFbm(weatherP + float3(31.7f, -12.3f, 5.9f));
+    float weather = sampleCloudNoise(weatherP + float3(31.7f, -12.3f, 5.9f)).x;
     float coverageThreshold = 1.0f - coverage;
     float coverageMask = smoothstep(coverageThreshold - 0.12f, coverageThreshold + 0.12f, weather);
     if (coverageMask <= 0.0f) {
@@ -246,18 +288,18 @@ float densityField(float3 p) {
     // 1) large puffy lobes (low-frequency Worley macro cells),
     // 2) medium cauliflower bumps,
     // 3) fine wispy erosion.
-    float2 wMacro = worleyF1F2((pLocal + float3(8.4f, -3.1f, 2.7f)) * 0.08f);
-    float macroCell = 1.0f - saturate(wMacro.x / 1.45f);
+    float4 macroNoise = sampleCloudNoise((pLocal + float3(8.4f, -3.1f, 2.7f)) * 0.08f);
+    float macroCell = saturate(macroNoise.y);
     float macroContrast = lerp(1.35f, 0.85f, saturate((macroScale - 0.05f) / 0.55f));
     float largeLobes = pow(smoothstep(0.18f, 0.84f, macroCell), macroContrast);
 
-    float2 wMedium = worleyF1F2((pLocal + float3(-5.3f, 3.8f, 9.2f)) * detailScale);
-    float mediumCell = 1.0f - saturate(wMedium.x / 1.25f);
-    float mediumPerlin = perlinFbm((pLocal + float3(2.2f, -4.4f, 6.1f)) * (detailScale * 1.55f));
+    float4 mediumNoise = sampleCloudNoise((pLocal + float3(-5.3f, 3.8f, 9.2f)) * detailScale);
+    float mediumCell = saturate(mediumNoise.z);
+    float mediumPerlin = saturate(mediumNoise.x);
     float cauliflower = smoothstep(0.22f, 0.86f, 0.58f * mediumCell + 0.42f * mediumPerlin);
 
-    float finePerlin = 0.5f + 0.5f * perlinNoise3((pLocal + float3(17.0f, -8.0f, 11.0f)) * (detailScale * 3.5f));
-    float fineWisp = smoothstep(0.35f, 0.82f, finePerlin);
+    float finePerlin = saturate(sampleCloudNoise((pLocal + float3(17.0f, -8.0f, 11.0f)) * (detailScale * 3.5f)).w);
+    float fineWisp = smoothstep(0.30f, 0.84f, finePerlin);
 
     float detailBlend = saturate(0.38f + 0.40f * chunkiness);
     float detail = lerp(cauliflower, largeLobes, detailBlend);
@@ -283,7 +325,7 @@ float densityField(float3 p) {
     // Sharper outer boundary + fine wispy erosion.
     float boundary = saturate(1.0f - structure);
     float boundarySharp = smoothstep(0.06f, 0.45f, boundary);
-    float ridge = saturate((wMedium.y - wMedium.x) * 3.2f);
+    float ridge = saturate(abs(mediumNoise.z - mediumNoise.w) * 3.2f);
     float erosion = erosionStrength * lerp((1.0f - mediumPerlin) * 0.24f, ridge, 0.72f);
     erosion *= lerp(1.0f, 0.22f, stylization);
     erosion += 0.16f * erosionStrength * (1.0f - fineWisp) * boundarySharp;
@@ -291,8 +333,7 @@ float densityField(float3 p) {
 
     // Height-biased Worley breakup:
     // fracture tops more than the base so the upper silhouette looks more turbulent.
-    float2 wTop = worleyF1F2((pLocal + float3(-2.7f, 5.1f, 1.9f)) * 1.5f);
-    float topErosion = saturate(wTop.x / 1.10f);
+    float topErosion = 1.0f - saturate(sampleCloudNoise((pLocal + float3(-2.7f, 5.1f, 1.9f)) * 1.5f).z);
     float edgeFactor = smoothstep(0.30f, 1.00f, h);
     density -= topErosion * (0.50f * erosionStrength) * edgeFactor;
 

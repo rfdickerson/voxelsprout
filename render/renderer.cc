@@ -28,6 +28,7 @@ constexpr std::uint32_t kTimestampFrameStart = 0;
 constexpr std::uint32_t kTimestampCloudEnd = 1;
 constexpr std::uint32_t kTimestampToneEnd = 2;
 constexpr std::uint32_t kTimestampFrameEnd = 3;
+constexpr std::uint32_t kCloudNoiseVolumeDim = 128;
 
 constexpr const char* kCloudShaderPath = "shaders/cloud_path_trace.comp.slang.spv";
 constexpr const char* kToneMapShaderPath = "shaders/tone_map.comp.slang.spv";
@@ -42,6 +43,155 @@ bool almostEqual(float a, float b, float epsilon = 1e-4f) {
 
 bool isUnormSwapchainFormat(VkFormat format) {
     return format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_R8G8B8A8_UNORM;
+}
+
+int wrapPeriod(int value, int period) {
+    int mod = value % period;
+    return (mod < 0) ? (mod + period) : mod;
+}
+
+float lerpFloat(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+float smoothStep3(float t) {
+    return t * t * (3.0f - 2.0f * t);
+}
+
+std::uint32_t hashNoise(std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t seed) {
+    std::uint32_t h = x * 0x8da6b343u;
+    h ^= y * 0xd8163841u;
+    h ^= z * 0xcb1ab31fu;
+    h ^= seed * 0x9e3779b9u;
+    h ^= (h >> 16u);
+    h *= 0x85ebca6bu;
+    h ^= (h >> 13u);
+    h *= 0xc2b2ae35u;
+    h ^= (h >> 16u);
+    return h;
+}
+
+float hashNoise01(std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t seed) {
+    return static_cast<float>(hashNoise(x, y, z, seed) & 0x00ffffffu) * (1.0f / 16777215.0f);
+}
+
+float valueNoisePeriodic(float x, float y, float z, int period, std::uint32_t seed) {
+    const int x0 = wrapPeriod(static_cast<int>(std::floor(x)), period);
+    const int y0 = wrapPeriod(static_cast<int>(std::floor(y)), period);
+    const int z0 = wrapPeriod(static_cast<int>(std::floor(z)), period);
+    const int x1 = wrapPeriod(x0 + 1, period);
+    const int y1 = wrapPeriod(y0 + 1, period);
+    const int z1 = wrapPeriod(z0 + 1, period);
+
+    const float fx = x - std::floor(x);
+    const float fy = y - std::floor(y);
+    const float fz = z - std::floor(z);
+
+    const float u = smoothStep3(fx);
+    const float v = smoothStep3(fy);
+    const float w = smoothStep3(fz);
+
+    const float c000 = hashNoise01(static_cast<std::uint32_t>(x0), static_cast<std::uint32_t>(y0), static_cast<std::uint32_t>(z0), seed);
+    const float c100 = hashNoise01(static_cast<std::uint32_t>(x1), static_cast<std::uint32_t>(y0), static_cast<std::uint32_t>(z0), seed);
+    const float c010 = hashNoise01(static_cast<std::uint32_t>(x0), static_cast<std::uint32_t>(y1), static_cast<std::uint32_t>(z0), seed);
+    const float c110 = hashNoise01(static_cast<std::uint32_t>(x1), static_cast<std::uint32_t>(y1), static_cast<std::uint32_t>(z0), seed);
+    const float c001 = hashNoise01(static_cast<std::uint32_t>(x0), static_cast<std::uint32_t>(y0), static_cast<std::uint32_t>(z1), seed);
+    const float c101 = hashNoise01(static_cast<std::uint32_t>(x1), static_cast<std::uint32_t>(y0), static_cast<std::uint32_t>(z1), seed);
+    const float c011 = hashNoise01(static_cast<std::uint32_t>(x0), static_cast<std::uint32_t>(y1), static_cast<std::uint32_t>(z1), seed);
+    const float c111 = hashNoise01(static_cast<std::uint32_t>(x1), static_cast<std::uint32_t>(y1), static_cast<std::uint32_t>(z1), seed);
+
+    const float x00 = lerpFloat(c000, c100, u);
+    const float x10 = lerpFloat(c010, c110, u);
+    const float x01 = lerpFloat(c001, c101, u);
+    const float x11 = lerpFloat(c011, c111, u);
+    const float y0v = lerpFloat(x00, x10, v);
+    const float y1v = lerpFloat(x01, x11, v);
+    return lerpFloat(y0v, y1v, w);
+}
+
+float fbmValueNoisePeriodic(float x, float y, float z, int basePeriod, int octaves, float lacunarity, float gain, std::uint32_t seed) {
+    float sum = 0.0f;
+    float amplitude = 0.5f;
+    float frequency = 1.0f;
+    float norm = 0.0f;
+
+    for (int i = 0; i < octaves; ++i) {
+        const int period = std::max(1, static_cast<int>(std::round(basePeriod * frequency)));
+        sum += amplitude * valueNoisePeriodic(x * frequency, y * frequency, z * frequency, period, seed + static_cast<std::uint32_t>(i * 997));
+        norm += amplitude;
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return (norm > 0.0f) ? (sum / norm) : 0.0f;
+}
+
+float worleyPeriodic(float x, float y, float z, int cells, std::uint32_t seed) {
+    const float px = x * static_cast<float>(cells);
+    const float py = y * static_cast<float>(cells);
+    const float pz = z * static_cast<float>(cells);
+    const int cx = static_cast<int>(std::floor(px));
+    const int cy = static_cast<int>(std::floor(py));
+    const int cz = static_cast<int>(std::floor(pz));
+
+    float f1 = 1e9f;
+
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int nxUnwrapped = cx + dx;
+                const int nyUnwrapped = cy + dy;
+                const int nzUnwrapped = cz + dz;
+
+                const int nxWrapped = wrapPeriod(nxUnwrapped, cells);
+                const int nyWrapped = wrapPeriod(nyUnwrapped, cells);
+                const int nzWrapped = wrapPeriod(nzUnwrapped, cells);
+
+                const float jx = hashNoise01(static_cast<std::uint32_t>(nxWrapped), static_cast<std::uint32_t>(nyWrapped), static_cast<std::uint32_t>(nzWrapped), seed);
+                const float jy = hashNoise01(static_cast<std::uint32_t>(nxWrapped), static_cast<std::uint32_t>(nyWrapped), static_cast<std::uint32_t>(nzWrapped), seed + 0x12345u);
+                const float jz = hashNoise01(static_cast<std::uint32_t>(nxWrapped), static_cast<std::uint32_t>(nyWrapped), static_cast<std::uint32_t>(nzWrapped), seed + 0x9e3779b9u);
+
+                const float fx = (static_cast<float>(nxUnwrapped) + jx) - px;
+                const float fy = (static_cast<float>(nyUnwrapped) + jy) - py;
+                const float fz = (static_cast<float>(nzUnwrapped) + jz) - pz;
+                const float d = std::sqrt((fx * fx) + (fy * fy) + (fz * fz));
+                f1 = std::min(f1, d);
+            }
+        }
+    }
+
+    return std::clamp(f1 * (1.0f / 1.7320508f), 0.0f, 1.0f);
+}
+
+std::vector<std::uint8_t> generateCloudNoiseVolumeRgba8(std::uint32_t dim) {
+    const std::size_t voxelCount = static_cast<std::size_t>(dim) * static_cast<std::size_t>(dim) * static_cast<std::size_t>(dim);
+    std::vector<std::uint8_t> data(voxelCount * 4u, 0u);
+
+    for (std::uint32_t z = 0; z < dim; ++z) {
+        for (std::uint32_t y = 0; y < dim; ++y) {
+            for (std::uint32_t x = 0; x < dim; ++x) {
+                const float nx = (static_cast<float>(x) + 0.5f) / static_cast<float>(dim);
+                const float ny = (static_cast<float>(y) + 0.5f) / static_cast<float>(dim);
+                const float nz = (static_cast<float>(z) + 0.5f) / static_cast<float>(dim);
+
+                const float perlinBase = fbmValueNoisePeriodic(nx, ny, nz, static_cast<int>(dim), 4, 2.0f, 0.5f, 0x1337u);
+                const float perlinDetail = fbmValueNoisePeriodic(nx, ny, nz, static_cast<int>(dim), 5, 2.03f, 0.5f, 0x4242u);
+                const float worleyMacro = 1.0f - worleyPeriodic(nx, ny, nz, 6, 0x9001u);
+                const float worleyDetail = 1.0f - worleyPeriodic(nx, ny, nz, 14, 0x8128u);
+
+                const std::size_t idx = (static_cast<std::size_t>(z) * static_cast<std::size_t>(dim) * static_cast<std::size_t>(dim)
+                    + static_cast<std::size_t>(y) * static_cast<std::size_t>(dim)
+                    + static_cast<std::size_t>(x)) * 4u;
+
+                data[idx + 0] = static_cast<std::uint8_t>(std::clamp(perlinBase, 0.0f, 1.0f) * 255.0f + 0.5f);
+                data[idx + 1] = static_cast<std::uint8_t>(std::clamp(worleyMacro, 0.0f, 1.0f) * 255.0f + 0.5f);
+                data[idx + 2] = static_cast<std::uint8_t>(std::clamp(worleyDetail, 0.0f, 1.0f) * 255.0f + 0.5f);
+                data[idx + 3] = static_cast<std::uint8_t>(std::clamp(perlinDetail, 0.0f, 1.0f) * 255.0f + 0.5f);
+            }
+        }
+    }
+
+    return data;
 }
 
 bool paramsDiffer(const RenderParameters& a, const RenderParameters& b) {
@@ -164,6 +314,7 @@ struct Renderer::Impl {
         VkFormat format = VK_FORMAT_UNDEFINED;
         std::uint32_t width = 0;
         std::uint32_t height = 0;
+        std::uint32_t depth = 1;
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
 
@@ -212,6 +363,7 @@ struct Renderer::Impl {
     ImageResource rngStateImage;
     ImageResource toneMapImage;
     ImageResource blueNoiseImage;
+    ImageResource cloudNoiseImage;
     VkSampler blueNoiseSampler = VK_NULL_HANDLE;
 
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
@@ -581,6 +733,7 @@ bool Renderer::Impl::createStorageImages() {
     auto createImage = [&](ImageResource& outImage, VkFormat format, VkImageUsageFlags usage, std::uint32_t width, std::uint32_t height) -> bool {
         outImage.width = width;
         outImage.height = height;
+        outImage.depth = 1;
         outImage.format = format;
 
         VkImageCreateInfo imageInfo{};
@@ -625,6 +778,54 @@ bool Renderer::Impl::createStorageImages() {
         return true;
     };
 
+    auto createImage3D = [&](ImageResource& outImage, VkFormat format, VkImageUsageFlags usage, std::uint32_t width, std::uint32_t height, std::uint32_t depth) -> bool {
+        outImage.width = width;
+        outImage.height = height;
+        outImage.depth = depth;
+        outImage.format = format;
+
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_3D;
+        imageInfo.format = format;
+        imageInfo.extent.width = outImage.width;
+        imageInfo.extent.height = outImage.height;
+        imageInfo.extent.depth = outImage.depth;
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.usage = usage;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+        if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &outImage.image, &outImage.allocation, nullptr) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to create 3D image";
+            return false;
+        }
+
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = outImage.image;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
+        viewInfo.format = format;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+
+        if (vkCreateImageView(device, &viewInfo, nullptr, &outImage.view) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to create 3D image view";
+            return false;
+        }
+
+        outImage.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        return true;
+    };
+
     if (!createImage(
             accumulationImage,
             VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -657,6 +858,16 @@ bool Renderer::Impl::createStorageImages() {
             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             kBlueNoiseSize,
             kBlueNoiseSize)) {
+        return false;
+    }
+
+    if (!createImage3D(
+            cloudNoiseImage,
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            kCloudNoiseVolumeDim,
+            kCloudNoiseVolumeDim,
+            kCloudNoiseVolumeDim)) {
         return false;
     }
 
@@ -855,6 +1066,151 @@ bool Renderer::Impl::createStorageImages() {
         return false;
     }
 
+    const std::vector<std::uint8_t> cloudNoiseData = generateCloudNoiseVolumeRgba8(kCloudNoiseVolumeDim);
+    const std::size_t cloudNoiseByteCount = cloudNoiseData.size();
+
+    VkBuffer cloudStagingBuffer = VK_NULL_HANDLE;
+    VmaAllocation cloudStagingAllocation = VK_NULL_HANDLE;
+    VmaAllocationInfo cloudStagingAllocInfo{};
+
+    VkBufferCreateInfo cloudStagingInfo{};
+    cloudStagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    cloudStagingInfo.size = cloudNoiseByteCount;
+    cloudStagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    cloudStagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo cloudStagingCreateInfo{};
+    cloudStagingCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    cloudStagingCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    if (vmaCreateBuffer(
+            allocator,
+            &cloudStagingInfo,
+            &cloudStagingCreateInfo,
+            &cloudStagingBuffer,
+            &cloudStagingAllocation,
+            &cloudStagingAllocInfo) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create cloud noise staging buffer";
+        return false;
+    }
+
+    void* cloudMappedData = cloudStagingAllocInfo.pMappedData;
+    bool cloudDidMap = false;
+    if (cloudMappedData == nullptr) {
+        if (vmaMapMemory(allocator, cloudStagingAllocation, &cloudMappedData) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to map cloud noise staging buffer";
+            vmaDestroyBuffer(allocator, cloudStagingBuffer, cloudStagingAllocation);
+            return false;
+        }
+        cloudDidMap = true;
+    }
+    std::memcpy(cloudMappedData, cloudNoiseData.data(), cloudNoiseByteCount);
+    if (cloudDidMap) {
+        vmaUnmapMemory(allocator, cloudStagingAllocation);
+    }
+
+    VkCommandPool cloudUploadPool = VK_NULL_HANDLE;
+    VkCommandBuffer cloudUploadCmd = VK_NULL_HANDLE;
+
+    VkCommandPoolCreateInfo cloudUploadPoolInfo{};
+    cloudUploadPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    cloudUploadPoolInfo.queueFamilyIndex = queueFamilyIndex;
+    cloudUploadPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    if (vkCreateCommandPool(device, &cloudUploadPoolInfo, nullptr, &cloudUploadPool) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create cloud upload command pool";
+        vmaDestroyBuffer(allocator, cloudStagingBuffer, cloudStagingAllocation);
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo cloudUploadAllocInfo{};
+    cloudUploadAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cloudUploadAllocInfo.commandPool = cloudUploadPool;
+    cloudUploadAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cloudUploadAllocInfo.commandBufferCount = 1;
+    if (vkAllocateCommandBuffers(device, &cloudUploadAllocInfo, &cloudUploadCmd) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to allocate cloud upload command buffer";
+        vkDestroyCommandPool(device, cloudUploadPool, nullptr);
+        vmaDestroyBuffer(allocator, cloudStagingBuffer, cloudStagingAllocation);
+        return false;
+    }
+
+    VkCommandBufferBeginInfo cloudBeginInfo{};
+    cloudBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cloudBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(cloudUploadCmd, &cloudBeginInfo) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to begin cloud upload command buffer";
+        vkDestroyCommandPool(device, cloudUploadPool, nullptr);
+        vmaDestroyBuffer(allocator, cloudStagingBuffer, cloudStagingAllocation);
+        return false;
+    }
+
+    VkImageMemoryBarrier2 cloudToTransfer = imageBarrier(
+        cloudNoiseImage.image,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_NONE,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkDependencyInfo cloudToTransferDep{};
+    cloudToTransferDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    cloudToTransferDep.imageMemoryBarrierCount = 1;
+    cloudToTransferDep.pImageMemoryBarriers = &cloudToTransfer;
+    vkCmdPipelineBarrier2(cloudUploadCmd, &cloudToTransferDep);
+
+    VkBufferImageCopy cloudCopyRegion{};
+    cloudCopyRegion.bufferOffset = 0;
+    cloudCopyRegion.bufferRowLength = 0;
+    cloudCopyRegion.bufferImageHeight = 0;
+    cloudCopyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    cloudCopyRegion.imageSubresource.mipLevel = 0;
+    cloudCopyRegion.imageSubresource.baseArrayLayer = 0;
+    cloudCopyRegion.imageSubresource.layerCount = 1;
+    cloudCopyRegion.imageExtent = {kCloudNoiseVolumeDim, kCloudNoiseVolumeDim, kCloudNoiseVolumeDim};
+    vkCmdCopyBufferToImage(
+        cloudUploadCmd,
+        cloudStagingBuffer,
+        cloudNoiseImage.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &cloudCopyRegion);
+
+    VkImageMemoryBarrier2 cloudToSample = imageBarrier(
+        cloudNoiseImage.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    VkDependencyInfo cloudToSampleDep{};
+    cloudToSampleDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    cloudToSampleDep.imageMemoryBarrierCount = 1;
+    cloudToSampleDep.pImageMemoryBarriers = &cloudToSample;
+    vkCmdPipelineBarrier2(cloudUploadCmd, &cloudToSampleDep);
+
+    if (vkEndCommandBuffer(cloudUploadCmd) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to end cloud upload command buffer";
+        vkDestroyCommandPool(device, cloudUploadPool, nullptr);
+        vmaDestroyBuffer(allocator, cloudStagingBuffer, cloudStagingAllocation);
+        return false;
+    }
+
+    VkSubmitInfo cloudSubmitInfo{};
+    cloudSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    cloudSubmitInfo.commandBufferCount = 1;
+    cloudSubmitInfo.pCommandBuffers = &cloudUploadCmd;
+    if (vkQueueSubmit(queue, 1, &cloudSubmitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to submit cloud upload";
+        vkDestroyCommandPool(device, cloudUploadPool, nullptr);
+        vmaDestroyBuffer(allocator, cloudStagingBuffer, cloudStagingAllocation);
+        return false;
+    }
+    vkQueueWaitIdle(queue);
+
+    vkDestroyCommandPool(device, cloudUploadPool, nullptr);
+    vmaDestroyBuffer(allocator, cloudStagingBuffer, cloudStagingAllocation);
+    cloudNoiseImage.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     return true;
 }
 
@@ -876,6 +1232,7 @@ void Renderer::Impl::destroyStorageImages() {
     destroyImage(rngStateImage);
     destroyImage(toneMapImage);
     destroyImage(blueNoiseImage);
+    destroyImage(cloudNoiseImage);
 
     if (blueNoiseSampler != VK_NULL_HANDLE) {
         vkDestroySampler(device, blueNoiseSampler, nullptr);
@@ -909,7 +1266,7 @@ bool Renderer::Impl::createDescriptors() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     poolSizes[0].descriptorCount = 5;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    poolSizes[1].descriptorCount = 1;
+    poolSizes[1].descriptorCount = 2;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -938,7 +1295,7 @@ bool Renderer::Impl::createDescriptors() {
         return false;
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 3> cloudBindings{};
+    std::array<VkDescriptorSetLayoutBinding, 4> cloudBindings{};
     cloudBindings[0].binding = 0;
     cloudBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     cloudBindings[0].descriptorCount = 1;
@@ -951,6 +1308,10 @@ bool Renderer::Impl::createDescriptors() {
     cloudBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     cloudBindings[2].descriptorCount = 1;
     cloudBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    cloudBindings[3].binding = 3;
+    cloudBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    cloudBindings[3].descriptorCount = 1;
+    cloudBindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo cloudLayoutInfo{};
     cloudLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1019,11 +1380,16 @@ bool Renderer::Impl::createDescriptors() {
     blueNoiseInfo.imageView = blueNoiseImage.view;
     blueNoiseInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+    VkDescriptorImageInfo cloudNoiseInfo{};
+    cloudNoiseInfo.sampler = VK_NULL_HANDLE;
+    cloudNoiseInfo.imageView = cloudNoiseImage.view;
+    cloudNoiseInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     VkDescriptorImageInfo toneInfo{};
     toneInfo.imageView = toneMapImage.view;
     toneInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    std::array<VkWriteDescriptorSet, 5> writes{};
+    std::array<VkWriteDescriptorSet, 6> writes{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = cloudPathTracePass.descriptorSet;
     writes[0].dstBinding = 0;
@@ -1046,18 +1412,25 @@ bool Renderer::Impl::createDescriptors() {
     writes[2].pImageInfo = &blueNoiseInfo;
 
     writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[3].dstSet = toneMapPass.descriptorSet;
-    writes[3].dstBinding = 0;
-    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[3].dstSet = cloudPathTracePass.descriptorSet;
+    writes[3].dstBinding = 3;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[3].descriptorCount = 1;
-    writes[3].pImageInfo = &accumInfo;
+    writes[3].pImageInfo = &cloudNoiseInfo;
 
     writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[4].dstSet = toneMapPass.descriptorSet;
-    writes[4].dstBinding = 1;
+    writes[4].dstBinding = 0;
     writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[4].descriptorCount = 1;
-    writes[4].pImageInfo = &toneInfo;
+    writes[4].pImageInfo = &accumInfo;
+
+    writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[5].dstSet = toneMapPass.descriptorSet;
+    writes[5].dstBinding = 1;
+    writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[5].descriptorCount = 1;
+    writes[5].pImageInfo = &toneInfo;
 
     vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     return true;
