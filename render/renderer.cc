@@ -322,9 +322,15 @@ struct Renderer::Impl {
         VkCommandPool commandPool = VK_NULL_HANDLE;
         VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
         VkSemaphore imageAvailable = VK_NULL_HANDLE;
-        VkSemaphore renderComplete = VK_NULL_HANDLE;
         VkQueryPool timestampQueryPool = VK_NULL_HANDLE;
         std::uint64_t submittedTimelineValue = 0;
+    };
+
+    struct UiFrameResources {
+        VkCommandPool commandPool = VK_NULL_HANDLE;
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        VkSemaphore imageAvailable = VK_NULL_HANDLE;
+        VkFence inFlightFence = VK_NULL_HANDLE;
     };
 
     struct CloudPathTracePass {
@@ -350,7 +356,11 @@ struct Renderer::Impl {
     VmaAllocator allocator = VK_NULL_HANDLE;
 
     std::uint32_t queueFamilyIndex = std::numeric_limits<std::uint32_t>::max();
-    VkQueue queue = VK_NULL_HANDLE;
+    std::uint32_t queueFamilyQueueCount = 1;
+    std::uint32_t computeQueueFamilyIndex = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t computeQueueFamilyQueueCount = 1;
+    VkQueue renderQueue = VK_NULL_HANDLE;
+    VkQueue uiQueue = VK_NULL_HANDLE;
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     VkFormat swapchainFormat = VK_FORMAT_UNDEFINED;
@@ -358,10 +368,12 @@ struct Renderer::Impl {
     std::vector<VkImage> swapchainImages;
     std::vector<VkImageView> swapchainImageViews;
     std::vector<bool> swapchainImageInitialized;
+    std::vector<VkSemaphore> swapchainRenderCompleteSemaphores;
 
     ImageResource accumulationImage;
     ImageResource rngStateImage;
     ImageResource toneMapImage;
+    ImageResource presentImage;
     ImageResource blueNoiseImage;
     ImageResource cloudNoiseImage;
     VkSampler blueNoiseSampler = VK_NULL_HANDLE;
@@ -374,6 +386,8 @@ struct Renderer::Impl {
 
     std::array<FrameResources, kFramesInFlight> frames{};
     std::uint32_t frameSlot = 0;
+    std::array<UiFrameResources, kFramesInFlight> uiFrames{};
+    std::uint32_t uiFrameSlot = 0;
 
     VkSemaphore timelineSemaphore = VK_NULL_HANDLE;
     std::uint64_t timelineValue = 0;
@@ -386,6 +400,8 @@ struct Renderer::Impl {
     RenderParameters previousParams{};
     std::uint32_t accumulationFrameIndex = 0;
     std::uint64_t presentFrameIndex = 0;
+    std::uint64_t latestSubmittedComputeTimelineValue = 0;
+    std::uint64_t latestPresentedComputeTimelineValue = 0;
     GpuTimingInfo timings{};
 
     bool init(GLFWwindow* inWindow);
@@ -403,14 +419,19 @@ struct Renderer::Impl {
     bool createDescriptors();
     bool createPipelines();
     bool createFrameResources();
+    bool createUiFrameResources();
+    bool createSwapchainRenderCompleteSemaphores();
     bool createTimelineSemaphore();
     bool initImGui();
+    bool renderUiOnlyFrame(bool copyToneMap, std::uint64_t waitTimelineValue, bool& copiedToneMap);
+    void destroySwapchainRenderCompleteSemaphores();
     bool recreateSwapchain();
 
     VkShaderModule createShaderModuleFromSpv(const char* relativePath) const;
     void destroyDescriptors();
     void destroyPipelines();
     void destroyFrameResources();
+    void destroyUiFrameResources();
 
     void fetchTimings(const FrameResources& frame);
 };
@@ -522,35 +543,77 @@ bool Renderer::Impl::pickPhysicalDevice() {
         std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &queueFamilyCount, queueFamilies.data());
 
+        std::uint32_t graphicsPresentFamily = std::numeric_limits<std::uint32_t>::max();
+        std::uint32_t computeOnlyFamily = std::numeric_limits<std::uint32_t>::max();
+        std::uint32_t anyComputeFamily = std::numeric_limits<std::uint32_t>::max();
+
         for (std::uint32_t family = 0; family < queueFamilyCount; ++family) {
             VkBool32 supportsPresent = VK_FALSE;
             vkGetPhysicalDeviceSurfaceSupportKHR(candidate, family, surface, &supportsPresent);
             const bool supportsGraphics = (queueFamilies[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
             const bool supportsCompute = (queueFamilies[family].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
-            if (supportsPresent && supportsGraphics && supportsCompute) {
-                physicalDevice = candidate;
-                queueFamilyIndex = family;
-                VkPhysicalDeviceProperties properties{};
-                vkGetPhysicalDeviceProperties(physicalDevice, &properties);
-                timestampPeriod = properties.limits.timestampPeriod;
-                VOX_LOGI("render") << "using GPU: " << properties.deviceName;
-                return true;
+
+            if (supportsPresent && supportsGraphics) {
+                graphicsPresentFamily = family;
             }
+            if (supportsCompute) {
+                if (anyComputeFamily == std::numeric_limits<std::uint32_t>::max()) {
+                    anyComputeFamily = family;
+                }
+                if (!supportsGraphics && computeOnlyFamily == std::numeric_limits<std::uint32_t>::max()) {
+                    computeOnlyFamily = family;
+                }
+            }
+        }
+
+        if (graphicsPresentFamily != std::numeric_limits<std::uint32_t>::max()
+            && anyComputeFamily != std::numeric_limits<std::uint32_t>::max()) {
+            physicalDevice = candidate;
+            queueFamilyIndex = graphicsPresentFamily;
+            queueFamilyQueueCount = queueFamilies[graphicsPresentFamily].queueCount;
+            computeQueueFamilyIndex =
+                (computeOnlyFamily != std::numeric_limits<std::uint32_t>::max()) ? computeOnlyFamily : anyComputeFamily;
+            computeQueueFamilyQueueCount = queueFamilies[computeQueueFamilyIndex].queueCount;
+
+            VkPhysicalDeviceProperties properties{};
+            vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+            timestampPeriod = properties.limits.timestampPeriod;
+            VOX_LOGI("render") << "using GPU: " << properties.deviceName;
+            VOX_LOGI("render") << "graphics/present queue family: " << queueFamilyIndex
+                               << ", compute queue family: " << computeQueueFamilyIndex;
+            return true;
         }
     }
 
-    VOX_LOGE("render") << "no suitable queue family with graphics+compute+present";
+    VOX_LOGE("render") << "no suitable queue families for graphics/present + compute";
     return false;
 }
 
 bool Renderer::Impl::createDevice() {
-    const float queuePriority = 1.0f;
+    const std::array<float, 2> queuePriorities = {1.0f, 1.0f};
+    std::array<VkDeviceQueueCreateInfo, 2> queueCreateInfos{};
+    std::uint32_t queueCreateInfoCount = 0;
 
-    VkDeviceQueueCreateInfo queueCreateInfo{};
-    queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queueCreateInfo.queueFamilyIndex = queueFamilyIndex;
-    queueCreateInfo.queueCount = 1;
-    queueCreateInfo.pQueuePriorities = &queuePriority;
+    const bool splitFamilies = (computeQueueFamilyIndex != queueFamilyIndex);
+    if (splitFamilies) {
+        queueCreateInfos[0].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueCreateInfos[0].queueFamilyIndex = queueFamilyIndex;
+        queueCreateInfos[0].queueCount = 1;
+        queueCreateInfos[0].pQueuePriorities = queuePriorities.data();
+
+        queueCreateInfos[1].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueCreateInfos[1].queueFamilyIndex = computeQueueFamilyIndex;
+        queueCreateInfos[1].queueCount = 1;
+        queueCreateInfos[1].pQueuePriorities = queuePriorities.data();
+        queueCreateInfoCount = 2;
+    } else {
+        const std::uint32_t requestedQueueCount = (queueFamilyQueueCount >= 2u) ? 2u : 1u;
+        queueCreateInfos[0].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueCreateInfos[0].queueFamilyIndex = queueFamilyIndex;
+        queueCreateInfos[0].queueCount = requestedQueueCount;
+        queueCreateInfos[0].pQueuePriorities = queuePriorities.data();
+        queueCreateInfoCount = 1;
+    }
 
     VkPhysicalDeviceVulkan13Features vulkan13Features{};
     vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -566,8 +629,8 @@ bool Renderer::Impl::createDevice() {
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    createInfo.pQueueCreateInfos = &queueCreateInfo;
-    createInfo.queueCreateInfoCount = 1;
+    createInfo.pQueueCreateInfos = queueCreateInfos.data();
+    createInfo.queueCreateInfoCount = queueCreateInfoCount;
     createInfo.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
     createInfo.ppEnabledExtensionNames = extensions.data();
     createInfo.pNext = &vulkan12Features;
@@ -577,7 +640,20 @@ bool Renderer::Impl::createDevice() {
         return false;
     }
 
-    vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
+    vkGetDeviceQueue(device, queueFamilyIndex, 0, &uiQueue);
+    if (splitFamilies) {
+        vkGetDeviceQueue(device, computeQueueFamilyIndex, 0, &renderQueue);
+        VOX_LOGI("render") << "using separate queue families: UI/present on "
+                           << queueFamilyIndex << ", compute on " << computeQueueFamilyIndex;
+    } else {
+        if (queueFamilyQueueCount >= 2u) {
+            vkGetDeviceQueue(device, queueFamilyIndex, 1, &renderQueue);
+            VOX_LOGI("render") << "using separate queues from same family for UI/present and compute";
+        } else {
+            renderQueue = uiQueue;
+            VOX_LOGW("render") << "single queue available; UI and compute share execution";
+        }
+    }
     return true;
 }
 
@@ -730,7 +806,10 @@ void Renderer::Impl::destroySwapchain() {
 }
 
 bool Renderer::Impl::createStorageImages() {
-    auto createImage = [&](ImageResource& outImage, VkFormat format, VkImageUsageFlags usage, std::uint32_t width, std::uint32_t height) -> bool {
+    std::array<std::uint32_t, 2> sharedQueueFamilies = {queueFamilyIndex, computeQueueFamilyIndex};
+    const bool concurrentAcrossFamilies = (queueFamilyIndex != computeQueueFamilyIndex);
+
+    auto createImage = [&](ImageResource& outImage, VkFormat format, VkImageUsageFlags usage, std::uint32_t width, std::uint32_t height, bool createView = true) -> bool {
         outImage.width = width;
         outImage.height = height;
         outImage.depth = 1;
@@ -749,6 +828,13 @@ bool Renderer::Impl::createStorageImages() {
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.usage = usage;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (concurrentAcrossFamilies) {
+            imageInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            imageInfo.queueFamilyIndexCount = static_cast<std::uint32_t>(sharedQueueFamilies.size());
+            imageInfo.pQueueFamilyIndices = sharedQueueFamilies.data();
+        } else {
+            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
 
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -758,20 +844,24 @@ bool Renderer::Impl::createStorageImages() {
             return false;
         }
 
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = outImage.image;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = format;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.baseArrayLayer = 0;
-        viewInfo.subresourceRange.layerCount = 1;
+        if (createView) {
+            VkImageViewCreateInfo viewInfo{};
+            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewInfo.image = outImage.image;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = format;
+            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewInfo.subresourceRange.baseMipLevel = 0;
+            viewInfo.subresourceRange.levelCount = 1;
+            viewInfo.subresourceRange.baseArrayLayer = 0;
+            viewInfo.subresourceRange.layerCount = 1;
 
-        if (vkCreateImageView(device, &viewInfo, nullptr, &outImage.view) != VK_SUCCESS) {
-            VOX_LOGE("render") << "failed to create storage image view";
-            return false;
+            if (vkCreateImageView(device, &viewInfo, nullptr, &outImage.view) != VK_SUCCESS) {
+                VOX_LOGE("render") << "failed to create storage image view";
+                return false;
+            }
+        } else {
+            outImage.view = VK_NULL_HANDLE;
         }
 
         outImage.layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -797,6 +887,13 @@ bool Renderer::Impl::createStorageImages() {
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.usage = usage;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (concurrentAcrossFamilies) {
+            imageInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            imageInfo.queueFamilyIndexCount = static_cast<std::uint32_t>(sharedQueueFamilies.size());
+            imageInfo.pQueueFamilyIndices = sharedQueueFamilies.data();
+        } else {
+            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
 
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -848,6 +945,15 @@ bool Renderer::Impl::createStorageImages() {
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
             swapchainExtent.width,
             swapchainExtent.height)) {
+        return false;
+    }
+    if (!createImage(
+            presentImage,
+            VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            swapchainExtent.width,
+            swapchainExtent.height,
+            false)) {
         return false;
     }
 
@@ -963,7 +1069,7 @@ bool Renderer::Impl::createStorageImages() {
 
     VkCommandPoolCreateInfo uploadPoolInfo{};
     uploadPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    uploadPoolInfo.queueFamilyIndex = queueFamilyIndex;
+    uploadPoolInfo.queueFamilyIndex = computeQueueFamilyIndex;
     uploadPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     if (vkCreateCommandPool(device, &uploadPoolInfo, nullptr, &uploadPool) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create upload command pool";
@@ -1049,13 +1155,13 @@ bool Renderer::Impl::createStorageImages() {
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &uploadCmd;
-    if (vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+    if (vkQueueSubmit(renderQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to submit blue noise upload";
         vkDestroyCommandPool(device, uploadPool, nullptr);
         vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
         return false;
     }
-    vkQueueWaitIdle(queue);
+    vkQueueWaitIdle(renderQueue);
 
     vkDestroyCommandPool(device, uploadPool, nullptr);
     vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
@@ -1113,7 +1219,7 @@ bool Renderer::Impl::createStorageImages() {
 
     VkCommandPoolCreateInfo cloudUploadPoolInfo{};
     cloudUploadPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    cloudUploadPoolInfo.queueFamilyIndex = queueFamilyIndex;
+    cloudUploadPoolInfo.queueFamilyIndex = computeQueueFamilyIndex;
     cloudUploadPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     if (vkCreateCommandPool(device, &cloudUploadPoolInfo, nullptr, &cloudUploadPool) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create cloud upload command pool";
@@ -1199,13 +1305,13 @@ bool Renderer::Impl::createStorageImages() {
     cloudSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     cloudSubmitInfo.commandBufferCount = 1;
     cloudSubmitInfo.pCommandBuffers = &cloudUploadCmd;
-    if (vkQueueSubmit(queue, 1, &cloudSubmitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+    if (vkQueueSubmit(renderQueue, 1, &cloudSubmitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to submit cloud upload";
         vkDestroyCommandPool(device, cloudUploadPool, nullptr);
         vmaDestroyBuffer(allocator, cloudStagingBuffer, cloudStagingAllocation);
         return false;
     }
-    vkQueueWaitIdle(queue);
+    vkQueueWaitIdle(renderQueue);
 
     vkDestroyCommandPool(device, cloudUploadPool, nullptr);
     vmaDestroyBuffer(allocator, cloudStagingBuffer, cloudStagingAllocation);
@@ -1231,6 +1337,7 @@ void Renderer::Impl::destroyStorageImages() {
     destroyImage(accumulationImage);
     destroyImage(rngStateImage);
     destroyImage(toneMapImage);
+    destroyImage(presentImage);
     destroyImage(blueNoiseImage);
     destroyImage(cloudNoiseImage);
 
@@ -1570,7 +1677,7 @@ bool Renderer::Impl::createFrameResources() {
     for (FrameResources& frame : frames) {
         VkCommandPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        poolInfo.queueFamilyIndex = queueFamilyIndex;
+        poolInfo.queueFamilyIndex = computeQueueFamilyIndex;
         poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 
         if (vkCreateCommandPool(device, &poolInfo, nullptr, &frame.commandPool) != VK_SUCCESS) {
@@ -1596,10 +1703,6 @@ bool Renderer::Impl::createFrameResources() {
             VOX_LOGE("render") << "failed to create imageAvailable semaphore";
             return false;
         }
-        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &frame.renderComplete) != VK_SUCCESS) {
-            VOX_LOGE("render") << "failed to create renderComplete semaphore";
-            return false;
-        }
 
         VkQueryPoolCreateInfo queryInfo{};
         queryInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
@@ -1608,6 +1711,53 @@ bool Renderer::Impl::createFrameResources() {
 
         if (vkCreateQueryPool(device, &queryInfo, nullptr, &frame.timestampQueryPool) != VK_SUCCESS) {
             VOX_LOGE("render") << "failed to create timestamp query pool";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool Renderer::Impl::createUiFrameResources() {
+    for (UiFrameResources& frame : uiFrames) {
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.queueFamilyIndex = queueFamilyIndex;
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+
+        if (vkCreateCommandPool(device, &poolInfo, nullptr, &frame.commandPool) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to create UI command pool";
+            destroyUiFrameResources();
+            return false;
+        }
+
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = frame.commandPool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+
+        if (vkAllocateCommandBuffers(device, &allocInfo, &frame.commandBuffer) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to allocate UI command buffer";
+            destroyUiFrameResources();
+            return false;
+        }
+
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &frame.imageAvailable) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to create UI imageAvailable semaphore";
+            destroyUiFrameResources();
+            return false;
+        }
+
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        if (vkCreateFence(device, &fenceInfo, nullptr, &frame.inFlightFence) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to create UI in-flight fence";
+            destroyUiFrameResources();
             return false;
         }
     }
@@ -1625,15 +1775,56 @@ void Renderer::Impl::destroyFrameResources() {
             vkDestroySemaphore(device, frame.imageAvailable, nullptr);
             frame.imageAvailable = VK_NULL_HANDLE;
         }
-        if (frame.renderComplete != VK_NULL_HANDLE) {
-            vkDestroySemaphore(device, frame.renderComplete, nullptr);
-            frame.renderComplete = VK_NULL_HANDLE;
-        }
         if (frame.commandPool != VK_NULL_HANDLE) {
             vkDestroyCommandPool(device, frame.commandPool, nullptr);
             frame.commandPool = VK_NULL_HANDLE;
         }
     }
+}
+
+void Renderer::Impl::destroyUiFrameResources() {
+    for (UiFrameResources& frame : uiFrames) {
+        if (frame.inFlightFence != VK_NULL_HANDLE) {
+            vkDestroyFence(device, frame.inFlightFence, nullptr);
+            frame.inFlightFence = VK_NULL_HANDLE;
+        }
+        if (frame.imageAvailable != VK_NULL_HANDLE) {
+            vkDestroySemaphore(device, frame.imageAvailable, nullptr);
+            frame.imageAvailable = VK_NULL_HANDLE;
+        }
+        if (frame.commandPool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(device, frame.commandPool, nullptr);
+            frame.commandPool = VK_NULL_HANDLE;
+            frame.commandBuffer = VK_NULL_HANDLE;
+        }
+    }
+}
+
+bool Renderer::Impl::createSwapchainRenderCompleteSemaphores() {
+    destroySwapchainRenderCompleteSemaphores();
+
+    swapchainRenderCompleteSemaphores.resize(swapchainImages.size(), VK_NULL_HANDLE);
+    VkSemaphoreCreateInfo semaphoreInfo{};
+    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+    for (std::size_t i = 0; i < swapchainRenderCompleteSemaphores.size(); ++i) {
+        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &swapchainRenderCompleteSemaphores[i]) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to create render-complete semaphore for swapchain image " << i;
+            destroySwapchainRenderCompleteSemaphores();
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void Renderer::Impl::destroySwapchainRenderCompleteSemaphores() {
+    for (VkSemaphore semaphore : swapchainRenderCompleteSemaphores) {
+        if (semaphore != VK_NULL_HANDLE) {
+            vkDestroySemaphore(device, semaphore, nullptr);
+        }
+    }
+    swapchainRenderCompleteSemaphores.clear();
 }
 
 bool Renderer::Impl::createTimelineSemaphore() {
@@ -1670,7 +1861,7 @@ bool Renderer::Impl::initImGui() {
     initInfo.PhysicalDevice = physicalDevice;
     initInfo.Device = device;
     initInfo.QueueFamily = queueFamilyIndex;
-    initInfo.Queue = queue;
+    initInfo.Queue = uiQueue;
     initInfo.DescriptorPool = imguiDescriptorPool;
     initInfo.MinImageCount = static_cast<std::uint32_t>(swapchainImages.size());
     initInfo.ImageCount = static_cast<std::uint32_t>(swapchainImages.size());
@@ -1689,6 +1880,7 @@ bool Renderer::Impl::initImGui() {
         VOX_LOGE("render") << "ImGui font texture upload failed";
         return false;
     }
+    vkQueueWaitIdle(uiQueue);
 
     imguiInitialized = true;
     return true;
@@ -1720,6 +1912,340 @@ void Renderer::Impl::fetchTimings(const FrameResources& frame) {
     timings.totalMs = static_cast<float>(values[kTimestampFrameEnd] - values[kTimestampFrameStart]) * nsToMs;
 }
 
+bool Renderer::Impl::renderUiOnlyFrame(bool copyToneMap, std::uint64_t waitTimelineValue, bool& copiedToneMap) {
+    copiedToneMap = false;
+
+    const auto isUiFrameReady = [this](const UiFrameResources& candidate) {
+        if (candidate.inFlightFence == VK_NULL_HANDLE) {
+            return true;
+        }
+        const VkResult status = vkGetFenceStatus(device, candidate.inFlightFence);
+        return status == VK_SUCCESS;
+    };
+
+    std::uint32_t selectedUiSlot = uiFrameSlot;
+    bool foundReadyUiSlot = false;
+    for (std::uint32_t i = 0; i < kFramesInFlight; ++i) {
+        const std::uint32_t candidateSlot = (uiFrameSlot + i) % kFramesInFlight;
+        if (isUiFrameReady(uiFrames[candidateSlot])) {
+            selectedUiSlot = candidateSlot;
+            foundReadyUiSlot = true;
+            break;
+        }
+    }
+
+    if (!foundReadyUiSlot) {
+        ImGui::Render();
+        return true;
+    }
+
+    UiFrameResources& uiFrame = uiFrames[selectedUiSlot];
+
+    std::uint32_t imageIndex = 0;
+    VkResult acquireResult = vkAcquireNextImageKHR(
+        device,
+        swapchain,
+        std::numeric_limits<std::uint64_t>::max(),
+        uiFrame.imageAvailable,
+        VK_NULL_HANDLE,
+        &imageIndex);
+
+    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
+        ImGui::Render();
+        return recreateSwapchain();
+    }
+    if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
+        VOX_LOGE("render") << "failed to acquire swapchain image for UI-only pass";
+        return false;
+    }
+
+    if (imageIndex >= swapchainImages.size()) {
+        ImGui::Render();
+        return true;
+    }
+    if (imageIndex >= swapchainRenderCompleteSemaphores.size()) {
+        VOX_LOGE("render") << "swapchain image index out of range for UI-only pass: " << imageIndex;
+        ImGui::Render();
+        return false;
+    }
+    const VkSemaphore imageRenderComplete = swapchainRenderCompleteSemaphores[imageIndex];
+
+    vkResetCommandPool(device, uiFrame.commandPool, 0);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    if (vkBeginCommandBuffer(uiFrame.commandBuffer, &beginInfo) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to begin UI command buffer";
+        return false;
+    }
+
+    const VkImageLayout oldSwapchainLayout =
+        swapchainImageInitialized[imageIndex] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (copyToneMap) {
+        std::array<VkImageMemoryBarrier2, 2> copyPrep{};
+        copyPrep[0] = imageBarrier(
+            toneMapImage.image,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_2_NONE,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_NONE,
+            VK_ACCESS_2_TRANSFER_READ_BIT);
+        copyPrep[1] = imageBarrier(
+            presentImage.image,
+            presentImage.layout,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            (presentImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            (presentImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+        VkDependencyInfo copyPrepDep{};
+        copyPrepDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        copyPrepDep.imageMemoryBarrierCount = static_cast<std::uint32_t>(copyPrep.size());
+        copyPrepDep.pImageMemoryBarriers = copyPrep.data();
+        vkCmdPipelineBarrier2(uiFrame.commandBuffer, &copyPrepDep);
+
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.layerCount = 1;
+        blit.srcOffsets[1].x = static_cast<std::int32_t>(swapchainExtent.width);
+        blit.srcOffsets[1].y = static_cast<std::int32_t>(swapchainExtent.height);
+        blit.srcOffsets[1].z = 1;
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.layerCount = 1;
+        blit.dstOffsets[1].x = static_cast<std::int32_t>(swapchainExtent.width);
+        blit.dstOffsets[1].y = static_cast<std::int32_t>(swapchainExtent.height);
+        blit.dstOffsets[1].z = 1;
+
+        vkCmdBlitImage(
+            uiFrame.commandBuffer,
+            toneMapImage.image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            presentImage.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &blit,
+            VK_FILTER_NEAREST);
+
+        std::array<VkImageMemoryBarrier2, 2> copyToUi{};
+        copyToUi[0] = imageBarrier(
+            toneMapImage.image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        copyToUi[1] = imageBarrier(
+            presentImage.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT);
+
+        VkDependencyInfo copyToUiDep{};
+        copyToUiDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        copyToUiDep.imageMemoryBarrierCount = static_cast<std::uint32_t>(copyToUi.size());
+        copyToUiDep.pImageMemoryBarriers = copyToUi.data();
+        vkCmdPipelineBarrier2(uiFrame.commandBuffer, &copyToUiDep);
+        presentImage.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    }
+
+    const bool hasPresentedImage = presentImage.layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    if (hasPresentedImage) {
+        std::array<VkImageMemoryBarrier2, 1> copyToSwapPrep{};
+        copyToSwapPrep[0] = imageBarrier(
+            swapchainImages[imageIndex],
+            oldSwapchainLayout,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_NONE,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+        VkDependencyInfo copyToSwapPrepDep{};
+        copyToSwapPrepDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        copyToSwapPrepDep.imageMemoryBarrierCount = static_cast<std::uint32_t>(copyToSwapPrep.size());
+        copyToSwapPrepDep.pImageMemoryBarriers = copyToSwapPrep.data();
+        vkCmdPipelineBarrier2(uiFrame.commandBuffer, &copyToSwapPrepDep);
+
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.layerCount = 1;
+        blit.srcOffsets[1].x = static_cast<std::int32_t>(swapchainExtent.width);
+        blit.srcOffsets[1].y = static_cast<std::int32_t>(swapchainExtent.height);
+        blit.srcOffsets[1].z = 1;
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.layerCount = 1;
+        blit.dstOffsets[1].x = static_cast<std::int32_t>(swapchainExtent.width);
+        blit.dstOffsets[1].y = static_cast<std::int32_t>(swapchainExtent.height);
+        blit.dstOffsets[1].z = 1;
+
+        vkCmdBlitImage(
+            uiFrame.commandBuffer,
+            presentImage.image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            swapchainImages[imageIndex],
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &blit,
+            VK_FILTER_NEAREST);
+
+        VkImageMemoryBarrier2 toUiBarrier = imageBarrier(
+            swapchainImages[imageIndex],
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
+        VkDependencyInfo toUiDep{};
+        toUiDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        toUiDep.imageMemoryBarrierCount = 1;
+        toUiDep.pImageMemoryBarriers = &toUiBarrier;
+        vkCmdPipelineBarrier2(uiFrame.commandBuffer, &toUiDep);
+    } else {
+        VkImageMemoryBarrier2 toUiBarrier = imageBarrier(
+            swapchainImages[imageIndex],
+            oldSwapchainLayout,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_NONE,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
+        VkDependencyInfo toUiDep{};
+        toUiDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        toUiDep.imageMemoryBarrierCount = 1;
+        toUiDep.pImageMemoryBarriers = &toUiBarrier;
+        vkCmdPipelineBarrier2(uiFrame.commandBuffer, &toUiDep);
+    }
+
+    VkClearValue uiClearValue{};
+    uiClearValue.color.float32[0] = 0.0f;
+    uiClearValue.color.float32[1] = 0.0f;
+    uiClearValue.color.float32[2] = 0.0f;
+    uiClearValue.color.float32[3] = 1.0f;
+
+    VkRenderingAttachmentInfo colorAttachment{};
+    colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    colorAttachment.imageView = swapchainImageViews[imageIndex];
+    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if (hasPresentedImage) {
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    } else {
+        colorAttachment.loadOp = swapchainImageInitialized[imageIndex] ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+    }
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.clearValue = uiClearValue;
+
+    VkRenderingInfo renderingInfo{};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderingInfo.renderArea.offset = {0, 0};
+    renderingInfo.renderArea.extent = swapchainExtent;
+    renderingInfo.layerCount = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments = &colorAttachment;
+
+    ImGui::Render();
+
+    vkCmdBeginRendering(uiFrame.commandBuffer, &renderingInfo);
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), uiFrame.commandBuffer);
+    vkCmdEndRendering(uiFrame.commandBuffer);
+
+    VkImageMemoryBarrier2 uiToPresentBarrier = imageBarrier(
+        swapchainImages[imageIndex],
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_ACCESS_2_NONE);
+
+    VkDependencyInfo uiToPresentDep{};
+    uiToPresentDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    uiToPresentDep.imageMemoryBarrierCount = 1;
+    uiToPresentDep.pImageMemoryBarriers = &uiToPresentBarrier;
+    vkCmdPipelineBarrier2(uiFrame.commandBuffer, &uiToPresentDep);
+
+    swapchainImageInitialized[imageIndex] = true;
+
+    if (vkEndCommandBuffer(uiFrame.commandBuffer) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to end UI command buffer";
+        return false;
+    }
+
+    std::array<VkSemaphoreSubmitInfo, 2> waitSemaphores{};
+    waitSemaphores[0].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    waitSemaphores[0].semaphore = uiFrame.imageAvailable;
+    waitSemaphores[0].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    waitSemaphores[0].deviceIndex = 0;
+    std::uint32_t waitSemaphoreCount = 1;
+    if (copyToneMap && waitTimelineValue > 0) {
+        waitSemaphores[1].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        waitSemaphores[1].semaphore = timelineSemaphore;
+        waitSemaphores[1].value = waitTimelineValue;
+        waitSemaphores[1].stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        waitSemaphores[1].deviceIndex = 0;
+        waitSemaphoreCount = 2;
+    }
+
+    VkCommandBufferSubmitInfo commandBufferInfo{};
+    commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    commandBufferInfo.commandBuffer = uiFrame.commandBuffer;
+
+    VkSemaphoreSubmitInfo signalSemaphore{};
+    signalSemaphore.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signalSemaphore.semaphore = imageRenderComplete;
+    signalSemaphore.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submitInfo.waitSemaphoreInfoCount = waitSemaphoreCount;
+    submitInfo.pWaitSemaphoreInfos = waitSemaphores.data();
+    submitInfo.commandBufferInfoCount = 1;
+    submitInfo.pCommandBufferInfos = &commandBufferInfo;
+    submitInfo.signalSemaphoreInfoCount = 1;
+    submitInfo.pSignalSemaphoreInfos = &signalSemaphore;
+
+    if (uiFrame.inFlightFence != VK_NULL_HANDLE && vkResetFences(device, 1, &uiFrame.inFlightFence) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to reset UI in-flight fence";
+        return false;
+    }
+
+    if (vkQueueSubmit2(uiQueue, 1, &submitInfo, uiFrame.inFlightFence) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to submit UI queue";
+        return false;
+    }
+
+    VkPresentInfoKHR presentInfo{};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &imageRenderComplete;
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = &swapchain;
+    presentInfo.pImageIndices = &imageIndex;
+
+    const VkResult presentResult = vkQueuePresentKHR(uiQueue, &presentInfo);
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+        if (!recreateSwapchain()) {
+            return false;
+        }
+    } else if (presentResult != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to present UI-only frame";
+        return false;
+    }
+
+    copiedToneMap = copyToneMap;
+    uiFrameSlot = (selectedUiSlot + 1u) % kFramesInFlight;
+    return true;
+}
+
 bool Renderer::Impl::recreateSwapchain() {
     vkDeviceWaitIdle(device);
 
@@ -1728,9 +2254,13 @@ bool Renderer::Impl::recreateSwapchain() {
     }
 
     destroyStorageImages();
+    destroySwapchainRenderCompleteSemaphores();
     destroySwapchain();
 
     if (!createSwapchain()) {
+        return false;
+    }
+    if (!createSwapchainRenderCompleteSemaphores()) {
         return false;
     }
     if (!createStorageImages()) {
@@ -1748,6 +2278,8 @@ bool Renderer::Impl::recreateSwapchain() {
 
     accumulationFrameIndex = 0;
     hasPreviousParams = false;
+    latestSubmittedComputeTimelineValue = 0;
+    latestPresentedComputeTimelineValue = 0;
     return true;
 }
 
@@ -1769,6 +2301,9 @@ bool Renderer::Impl::init(GLFWwindow* inWindow) {
     if (!createSwapchain()) {
         return false;
     }
+    if (!createSwapchainRenderCompleteSemaphores()) {
+        return false;
+    }
     if (!createStorageImages()) {
         return false;
     }
@@ -1779,6 +2314,9 @@ bool Renderer::Impl::init(GLFWwindow* inWindow) {
         return false;
     }
     if (!createFrameResources()) {
+        return false;
+    }
+    if (!createUiFrameResources()) {
         return false;
     }
     if (!createTimelineSemaphore()) {
@@ -1796,6 +2334,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
     int fbHeight = 0;
     glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
     if (fbWidth <= 0 || fbHeight <= 0) {
+        ImGui::Render();
         return true;
     }
 
@@ -1805,33 +2344,30 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         }
     }
 
-    FrameResources& frame = frames[frameSlot];
-
-    if (frame.submittedTimelineValue > 0) {
-        VkSemaphoreWaitInfo waitInfo{};
-        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-        waitInfo.semaphoreCount = 1;
-        waitInfo.pSemaphores = &timelineSemaphore;
-        waitInfo.pValues = &frame.submittedTimelineValue;
-        vkWaitSemaphores(device, &waitInfo, std::numeric_limits<std::uint64_t>::max());
-        fetchTimings(frame);
+    std::uint64_t currentTimelineValue = 0;
+    const VkResult timelineReadResult = vkGetSemaphoreCounterValue(device, timelineSemaphore, &currentTimelineValue);
+    if (timelineReadResult != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to read timeline semaphore counter";
+        currentTimelineValue = 0;
     }
 
-    std::uint32_t imageIndex = 0;
-    VkResult acquireResult = vkAcquireNextImageKHR(
-        device,
-        swapchain,
-        std::numeric_limits<std::uint64_t>::max(),
-        frame.imageAvailable,
-        VK_NULL_HANDLE,
-        &imageIndex);
+    const auto isFrameSlotReady = [currentTimelineValue](const FrameResources& candidate) {
+        return (candidate.submittedTimelineValue == 0) || (candidate.submittedTimelineValue <= currentTimelineValue);
+    };
 
-    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
-        return recreateSwapchain();
+    std::uint32_t selectedFrameSlot = frameSlot;
+    bool foundReadyFrameSlot = false;
+    for (std::uint32_t i = 0; i < kFramesInFlight; ++i) {
+        const std::uint32_t candidateSlot = (frameSlot + i) % kFramesInFlight;
+        if (isFrameSlotReady(frames[candidateSlot])) {
+            selectedFrameSlot = candidateSlot;
+            foundReadyFrameSlot = true;
+            break;
+        }
     }
-    if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
-        VOX_LOGE("render") << "failed to acquire swapchain image";
-        return false;
+
+    if (foundReadyFrameSlot && frames[selectedFrameSlot].submittedTimelineValue > 0) {
+        fetchTimings(frames[selectedFrameSlot]);
     }
 
     const bool paramsChanged = hasPreviousParams ? paramsDiffer(params, previousParams) : true;
@@ -1850,73 +2386,80 @@ bool Renderer::Impl::render(const RenderParameters& params) {
     previousParams = params;
     hasPreviousParams = true;
 
-    vkResetCommandPool(device, frame.commandPool, 0);
+    const bool pendingUnpresentedCompute =
+        latestSubmittedComputeTimelineValue > latestPresentedComputeTimelineValue;
+    const bool shouldSubmitCompute =
+        foundReadyFrameSlot && runCloudPassThisFrame && (!pendingUnpresentedCompute || resetAccumulation);
 
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    if (vkBeginCommandBuffer(frame.commandBuffer, &beginInfo) != VK_SUCCESS) {
-        VOX_LOGE("render") << "failed to begin command buffer";
-        return false;
-    }
+    if (shouldSubmitCompute) {
+        FrameResources& frame = frames[selectedFrameSlot];
+        vkResetCommandPool(device, frame.commandPool, 0);
 
-    vkCmdResetQueryPool(frame.commandBuffer, frame.timestampQueryPool, 0, kTimestampCount);
-    vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, frame.timestampQueryPool, kTimestampFrameStart);
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        if (vkBeginCommandBuffer(frame.commandBuffer, &beginInfo) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to begin compute command buffer";
+            return false;
+        }
 
-    std::array<VkImageMemoryBarrier2, 4> startupBarriers{};
-    std::uint32_t startupBarrierCount = 0;
+        vkCmdResetQueryPool(frame.commandBuffer, frame.timestampQueryPool, 0, kTimestampCount);
+        vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, frame.timestampQueryPool, kTimestampFrameStart);
 
-    const VkPipelineStageFlags2 accumSrcStage =
-        (accumulationImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    const VkAccessFlags2 accumSrcAccess =
-        (accumulationImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
-    startupBarriers[startupBarrierCount++] = imageBarrier(
-        accumulationImage.image,
-        accumulationImage.layout,
-        VK_IMAGE_LAYOUT_GENERAL,
-        accumSrcStage,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        accumSrcAccess,
-        VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        std::array<VkImageMemoryBarrier2, 3> startupBarriers{};
+        std::uint32_t startupBarrierCount = 0;
 
-    const VkPipelineStageFlags2 toneSrcStage =
-        (toneMapImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    const VkAccessFlags2 toneSrcAccess =
-        (toneMapImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
-    startupBarriers[startupBarrierCount++] = imageBarrier(
-        toneMapImage.image,
-        toneMapImage.layout,
-        VK_IMAGE_LAYOUT_GENERAL,
-        toneSrcStage,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        toneSrcAccess,
-        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        const VkPipelineStageFlags2 accumSrcStage =
+            (accumulationImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        const VkAccessFlags2 accumSrcAccess =
+            (accumulationImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
+        startupBarriers[startupBarrierCount++] = imageBarrier(
+            accumulationImage.image,
+            accumulationImage.layout,
+            VK_IMAGE_LAYOUT_GENERAL,
+            accumSrcStage,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            accumSrcAccess,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-    const VkPipelineStageFlags2 rngSrcStage =
-        (rngStateImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    const VkAccessFlags2 rngSrcAccess =
-        (rngStateImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
-    startupBarriers[startupBarrierCount++] = imageBarrier(
-        rngStateImage.image,
-        rngStateImage.layout,
-        VK_IMAGE_LAYOUT_GENERAL,
-        rngSrcStage,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        rngSrcAccess,
-        VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        const VkPipelineStageFlags2 toneSrcStage =
+            (toneMapImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        const VkAccessFlags2 toneSrcAccess =
+            (toneMapImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
+        startupBarriers[startupBarrierCount++] = imageBarrier(
+            toneMapImage.image,
+            toneMapImage.layout,
+            VK_IMAGE_LAYOUT_GENERAL,
+            toneSrcStage,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            toneSrcAccess,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-    VkDependencyInfo startupDep{};
-    startupDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    startupDep.imageMemoryBarrierCount = startupBarrierCount;
-    startupDep.pImageMemoryBarriers = startupBarriers.data();
-    vkCmdPipelineBarrier2(frame.commandBuffer, &startupDep);
+        const VkPipelineStageFlags2 rngSrcStage =
+            (rngStateImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        const VkAccessFlags2 rngSrcAccess =
+            (rngStateImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
+        startupBarriers[startupBarrierCount++] = imageBarrier(
+            rngStateImage.image,
+            rngStateImage.layout,
+            VK_IMAGE_LAYOUT_GENERAL,
+            rngSrcStage,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            rngSrcAccess,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-    accumulationImage.layout = VK_IMAGE_LAYOUT_GENERAL;
-    toneMapImage.layout = VK_IMAGE_LAYOUT_GENERAL;
-    rngStateImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDependencyInfo startupDep{};
+        startupDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        startupDep.imageMemoryBarrierCount = startupBarrierCount;
+        startupDep.pImageMemoryBarriers = startupBarriers.data();
+        vkCmdPipelineBarrier2(frame.commandBuffer, &startupDep);
 
-    const std::uint32_t dispatchX = (swapchainExtent.width + 7u) / 8u;
-    const std::uint32_t dispatchY = (swapchainExtent.height + 7u) / 8u;
-    if (runCloudPassThisFrame) {
+        accumulationImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+        toneMapImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+        rngStateImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+
+        const std::uint32_t dispatchX = (swapchainExtent.width + 7u) / 8u;
+        const std::uint32_t dispatchY = (swapchainExtent.height + 7u) / 8u;
+
         vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, cloudPathTracePass.pipeline);
         vkCmdBindDescriptorSets(
             frame.commandBuffer,
@@ -1989,7 +2532,6 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             0,
             sizeof(CameraPush),
             &cloudPush);
-
         vkCmdDispatch(frame.commandBuffer, dispatchX, dispatchY, 1);
         vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, frame.timestampQueryPool, kTimestampCloudEnd);
 
@@ -2001,7 +2543,6 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-
         VkDependencyInfo cloudToToneDep{};
         cloudToToneDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         cloudToToneDep.imageMemoryBarrierCount = 1;
@@ -2040,182 +2581,76 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             &tonePush);
         vkCmdDispatch(frame.commandBuffer, dispatchX, dispatchY, 1);
         vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, frame.timestampQueryPool, kTimestampToneEnd);
-    } else {
-        vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, frame.timestampQueryPool, kTimestampCloudEnd);
-        vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, frame.timestampQueryPool, kTimestampToneEnd);
-    }
 
-    const VkImageLayout oldSwapchainLayout = swapchainImageInitialized[imageIndex] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImageMemoryBarrier2 toneReadyBarrier = imageBarrier(
+            toneMapImage.image,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkDependencyInfo toneReadyDep{};
+        toneReadyDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        toneReadyDep.imageMemoryBarrierCount = 1;
+        toneReadyDep.pImageMemoryBarriers = &toneReadyBarrier;
+        vkCmdPipelineBarrier2(frame.commandBuffer, &toneReadyDep);
 
-    std::array<VkImageMemoryBarrier2, 2> copyPrep{};
-    copyPrep[0] = imageBarrier(
-        toneMapImage.image,
-        VK_IMAGE_LAYOUT_GENERAL,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-        VK_ACCESS_2_TRANSFER_READ_BIT);
-    copyPrep[1] = imageBarrier(
-        swapchainImages[imageIndex],
-        oldSwapchainLayout,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_PIPELINE_STAGE_2_NONE,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_NONE,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, frame.timestampQueryPool, kTimestampFrameEnd);
 
-    VkDependencyInfo copyPrepDep{};
-    copyPrepDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    copyPrepDep.imageMemoryBarrierCount = static_cast<std::uint32_t>(copyPrep.size());
-    copyPrepDep.pImageMemoryBarriers = copyPrep.data();
-    vkCmdPipelineBarrier2(frame.commandBuffer, &copyPrepDep);
-
-    toneMapImage.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-
-    VkImageBlit blit{};
-    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    blit.srcSubresource.layerCount = 1;
-    blit.srcOffsets[1].x = static_cast<std::int32_t>(swapchainExtent.width);
-    blit.srcOffsets[1].y = static_cast<std::int32_t>(swapchainExtent.height);
-    blit.srcOffsets[1].z = 1;
-    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    blit.dstSubresource.layerCount = 1;
-    blit.dstOffsets[1].x = static_cast<std::int32_t>(swapchainExtent.width);
-    blit.dstOffsets[1].y = static_cast<std::int32_t>(swapchainExtent.height);
-    blit.dstOffsets[1].z = 1;
-
-    vkCmdBlitImage(
-        frame.commandBuffer,
-        toneMapImage.image,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        swapchainImages[imageIndex],
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        1,
-        &blit,
-        VK_FILTER_NEAREST);
-
-    VkImageMemoryBarrier2 toUiBarrier = imageBarrier(
-        swapchainImages[imageIndex],
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-
-    VkDependencyInfo toUiDep{};
-    toUiDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    toUiDep.imageMemoryBarrierCount = 1;
-    toUiDep.pImageMemoryBarriers = &toUiBarrier;
-    vkCmdPipelineBarrier2(frame.commandBuffer, &toUiDep);
-
-    ImGui::Render();
-    VkRenderingAttachmentInfo colorAttachment{};
-    colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    colorAttachment.imageView = swapchainImageViews[imageIndex];
-    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-
-    VkRenderingInfo renderingInfo{};
-    renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    renderingInfo.renderArea.offset = {0, 0};
-    renderingInfo.renderArea.extent = swapchainExtent;
-    renderingInfo.layerCount = 1;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachments = &colorAttachment;
-
-    vkCmdBeginRendering(frame.commandBuffer, &renderingInfo);
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), frame.commandBuffer);
-    vkCmdEndRendering(frame.commandBuffer);
-
-    VkImageMemoryBarrier2 toPresentBarrier = imageBarrier(
-        swapchainImages[imageIndex],
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_ACCESS_2_NONE);
-
-    VkDependencyInfo toPresentDep{};
-    toPresentDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    toPresentDep.imageMemoryBarrierCount = 1;
-    toPresentDep.pImageMemoryBarriers = &toPresentBarrier;
-    vkCmdPipelineBarrier2(frame.commandBuffer, &toPresentDep);
-
-    swapchainImageInitialized[imageIndex] = true;
-
-    vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, frame.timestampQueryPool, kTimestampFrameEnd);
-
-    if (vkEndCommandBuffer(frame.commandBuffer) != VK_SUCCESS) {
-        VOX_LOGE("render") << "failed to end command buffer";
-        return false;
-    }
-
-    const std::uint64_t signalTimelineValue = ++timelineValue;
-
-    VkSemaphoreSubmitInfo waitSemaphore{};
-    waitSemaphore.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    waitSemaphore.semaphore = frame.imageAvailable;
-    waitSemaphore.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    waitSemaphore.deviceIndex = 0;
-
-    VkCommandBufferSubmitInfo commandBufferInfo{};
-    commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-    commandBufferInfo.commandBuffer = frame.commandBuffer;
-
-    std::array<VkSemaphoreSubmitInfo, 2> signalSemaphores{};
-    signalSemaphores[0].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    signalSemaphores[0].semaphore = frame.renderComplete;
-    signalSemaphores[0].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-    signalSemaphores[1].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    signalSemaphores[1].semaphore = timelineSemaphore;
-    signalSemaphores[1].value = signalTimelineValue;
-    signalSemaphores[1].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-    VkSubmitInfo2 submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-    submitInfo.waitSemaphoreInfoCount = 1;
-    submitInfo.pWaitSemaphoreInfos = &waitSemaphore;
-    submitInfo.commandBufferInfoCount = 1;
-    submitInfo.pCommandBufferInfos = &commandBufferInfo;
-    submitInfo.signalSemaphoreInfoCount = static_cast<std::uint32_t>(signalSemaphores.size());
-    submitInfo.pSignalSemaphoreInfos = signalSemaphores.data();
-
-    if (vkQueueSubmit2(queue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
-        VOX_LOGE("render") << "failed to submit queue";
-        return false;
-    }
-
-    VkPresentInfoKHR presentInfo{};
-    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &frame.renderComplete;
-    presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = &swapchain;
-    presentInfo.pImageIndices = &imageIndex;
-
-    const VkResult presentResult = vkQueuePresentKHR(queue, &presentInfo);
-    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
-        if (!recreateSwapchain()) {
+        if (vkEndCommandBuffer(frame.commandBuffer) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to end compute command buffer";
             return false;
         }
-    } else if (presentResult != VK_SUCCESS) {
-        VOX_LOGE("render") << "failed to present";
+
+        const std::uint64_t signalTimelineValue = ++timelineValue;
+        VkCommandBufferSubmitInfo commandBufferInfo{};
+        commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        commandBufferInfo.commandBuffer = frame.commandBuffer;
+
+        VkSemaphoreSubmitInfo signalSemaphore{};
+        signalSemaphore.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalSemaphore.semaphore = timelineSemaphore;
+        signalSemaphore.value = signalTimelineValue;
+        signalSemaphore.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+        VkSubmitInfo2 submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &commandBufferInfo;
+        submitInfo.signalSemaphoreInfoCount = 1;
+        submitInfo.pSignalSemaphoreInfos = &signalSemaphore;
+        if (vkQueueSubmit2(renderQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+            VOX_LOGE("render") << "failed to submit compute queue";
+            return false;
+        }
+
+        frame.submittedTimelineValue = signalTimelineValue;
+        latestSubmittedComputeTimelineValue = signalTimelineValue;
+        frameSlot = (selectedFrameSlot + 1u) % kFramesInFlight;
+
+        if (params.enableAccumulation) {
+            accumulationFrameIndex += 1;
+        }
+    }
+
+    bool copyToneMap = false;
+    std::uint64_t copyTimelineValue = 0;
+    if (latestSubmittedComputeTimelineValue > latestPresentedComputeTimelineValue
+        && currentTimelineValue >= latestSubmittedComputeTimelineValue) {
+        copyToneMap = true;
+        copyTimelineValue = latestSubmittedComputeTimelineValue;
+    }
+
+    bool copiedToneMap = false;
+    if (!renderUiOnlyFrame(copyToneMap, copyTimelineValue, copiedToneMap)) {
         return false;
     }
-
-    frame.submittedTimelineValue = signalTimelineValue;
-
-    if (runCloudPassThisFrame && params.enableAccumulation) {
-        accumulationFrameIndex += 1;
+    if (copiedToneMap) {
+        latestPresentedComputeTimelineValue = copyTimelineValue;
     }
-    presentFrameIndex += 1;
 
-    frameSlot = (frameSlot + 1u) % kFramesInFlight;
+    presentFrameIndex += 1;
     return true;
 }
 
@@ -2223,6 +2658,11 @@ void Renderer::Impl::shutdown() {
     if (device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device);
     }
+
+    // Destroy frame command buffers before ImGui backend resources so no
+    // command buffer retains references to ImGui GPU buffers at teardown.
+    destroyUiFrameResources();
+    destroyFrameResources();
 
     if (imguiInitialized) {
         ImGui_ImplVulkan_DestroyFontsTexture();
@@ -2232,12 +2672,14 @@ void Renderer::Impl::shutdown() {
         imguiInitialized = false;
     }
 
+    if (!swapchainRenderCompleteSemaphores.empty()) {
+        destroySwapchainRenderCompleteSemaphores();
+    }
+
     if (timelineSemaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(device, timelineSemaphore, nullptr);
         timelineSemaphore = VK_NULL_HANDLE;
     }
-
-    destroyFrameResources();
     destroyPipelines();
     destroyDescriptors();
     destroyStorageImages();
