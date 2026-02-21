@@ -391,6 +391,31 @@ float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale, inou
     return estimateSunTransmittanceSteps(p, sunDir, densityScale, kSunTrMaxSteps, rngState);
 }
 
+void projectSkySH1(
+    float3 sunDir,
+    float sunIntensity,
+    out float3 c0,
+    out float3 cx,
+    out float3 cy,
+    out float3 cz
+) {
+    const float3 up = skyColor(float3(0.0f, 1.0f, 0.0f), sunDir, sunIntensity);
+    const float3 down = skyColor(float3(0.0f, -1.0f, 0.0f), sunDir, sunIntensity);
+    const float3 right = skyColor(float3(1.0f, 0.0f, 0.0f), sunDir, sunIntensity);
+    const float3 left = skyColor(float3(-1.0f, 0.0f, 0.0f), sunDir, sunIntensity);
+    const float3 front = skyColor(float3(0.0f, 0.0f, 1.0f), sunDir, sunIntensity);
+    const float3 back = skyColor(float3(0.0f, 0.0f, -1.0f), sunDir, sunIntensity);
+
+    c0 = (up + down + right + left + front + back) * (1.0f / 6.0f);
+    cx = 0.5f * (right - left);
+    cy = 0.5f * (up - down);
+    cz = 0.5f * (front - back);
+}
+
+float3 evalSkySH1(float3 dir, float3 c0, float3 cx, float3 cy, float3 cz) {
+    return c0 + cx * dir.x + cy * dir.y + cz * dir.z;
+}
+
 float3 integrateCloudApproximation(
     float3 rayOrigin,
     float3 rayDir,
@@ -403,6 +428,8 @@ float3 integrateCloudApproximation(
     float brightnessBoost,
     float ambientLift,
     bool debugSunTransmittance,
+    float3 ambientSkyBottom,
+    float3 ambientSkyTop,
     inout uint rngState
 ) {
     float tMin = 0.0f;
@@ -420,9 +447,17 @@ float3 integrateCloudApproximation(
     float t = tMin + (rand01(rngState) * stepSize);
     float3 L = 0.0f;
     float3 throughput = 1.0f;
-    float3 ambientSky = skyAmbientLighting(sunDir, sunIntensity);
     const float ambientStrength = lerp(0.05f, 0.6f, saturate(ambientLift));
-    float3 ambientTerm = ambientSky * (1.0f / (4.0f * kPi)) * ambientStrength;
+
+    // Simulate diffuse sky/ground inter-reflection under clouds.
+    float3 groundAlbedoColor = float3(0.18f, 0.22f, 0.18f);
+    float3 earthBounce = sunRadiance * max(sunDir.y, 0.0f) * groundAlbedoColor;
+
+    const float cloudBase = gPush.cloudProfileParams.z;
+    const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
+
+    ambientSkyBottom = max(ambientSkyBottom, 0.0f);
+    ambientSkyTop = max(ambientSkyTop, 0.0f);
 
     [loop]
     for (uint i = 0u; i < kCloudApproxSteps; ++i) {
@@ -448,8 +483,8 @@ float3 integrateCloudApproximation(
                 const float tr = exp(-opticalDepth * densityMult);
                 const float phase = dualHenyeyGreenstein(cosTheta, g * gMult);
                 msTransmittance += tr * phase * contribMult;
-                densityMult *= 0.25f;
-                contribMult *= 0.70f;
+                densityMult *= 0.15f;
+                contribMult *= 0.60f;
                 gMult *= 0.5f;
             }
             if (debugSunTransmittance) {
@@ -460,6 +495,11 @@ float3 integrateCloudApproximation(
             const float localDensity = sigmaT;
             float powderEffect = 1.0f - exp(-localDensity * 2.0f);
             msTransmittance *= powderEffect;
+
+            const float hFrac = saturate((x.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
+            const float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
+            const float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
+            float3 ambientTerm = localAmbient * (1.0f / (4.0f * kPi)) * ambientStrength;
 
             float3 direct = sunRadiance * msTransmittance * cloudAlbedo * brightnessBoost;
             L += throughput * segmentScatter * direct;
@@ -496,37 +536,56 @@ float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
     float3 v = normalize(dir);
     float mu = clamp(dot(v, sunDir), -1.0f, 1.0f);
 
-    float mView = airMass(max(v.y, 0.01f));
-    float mSun = airMass(max(sunDir.y, 0.01f));
+    const float vY = max(v.y, 0.01f);
+    const float sY = max(sunDir.y, 0.0f);
+    const float mView = airMass(vY);
+    const float mSun = airMass(sY + 0.01f);
 
-    // Richer Rayleigh scattering and reduced Mie haze for a clean noon sky.
-    float3 betaR = float3(5.8e-6f, 13.5e-6f, 33.1e-6f) * 11000.0f;
-    float3 betaM = float3(21.0e-6f, 21.0e-6f, 21.0e-6f) * 2000.0f;
+    // Procedural atmospheric scattering with explicit Mie/Late-hour behavior.
+    const float3 betaR = float3(5.8e-6f, 13.5e-6f, 33.1e-6f) * 11000.0f;
+    const float mieHaze = 1.0f + 4.0f * pow(1.0f - sY, 2.0f);
+    const float3 betaM = float3(21.0e-6f) * 1800.0f * mieHaze;
 
-    float3 tau = betaR * mView + betaM * mView;
-    float3 extinction = exp(-tau);
+    const float sunWarm = pow(1.0f - sY, 1.5f);
+    const float mieG = lerp(0.76f, 0.93f, sunWarm);
+    const float3 mieColor = lerp(float3(1.0f, 1.0f, 1.0f), float3(1.20f, 0.55f, 0.14f), sunWarm);
 
-    float rayleigh = phaseRayleigh(mu);
-    float mie = phaseMie(mu, 0.82f);
-    float3 inscatter = (betaR * rayleigh + betaM * mie) * exp(-(betaR + betaM) * mSun);
-    inscatter *= (1.0f - extinction) / max(betaR + betaM, float3(1e-4f, 1e-4f, 1e-4f));
+    const float3 beta = betaR + betaM;
+    const float3 betaInv = max(beta, float3(1e-4f, 1e-4f, 1e-4f));
 
-    float sunDisk = smoothstep(0.9996f, 0.99995f, mu);
-    float sunHalo = pow(saturate(mu), 64.0f);
-    float horizonBoost = smoothstep(-0.08f, 0.25f, v.y);
-    float twilight = smoothstep(-0.18f, 0.08f, sunDir.y);
+    const float rayleigh = phaseRayleigh(mu);
+    const float mie = phaseMie(mu, mieG);
 
-    float3 skyBase = inscatter * (0.9f + 0.25f * horizonBoost) * twilight;
-    float3 sunColor = float3(1.0f, 0.99f, 0.98f);
-    float3 sunTerm = sunColor * (sunDisk * 24.0f + sunHalo * 1.8f);
-    return (skyBase + sunTerm) * max(sunIntensity, 0.01f);
+    float3 inscatter = (betaR * rayleigh + betaM * mie * mieColor);
+    inscatter *= (1.0f - exp(-beta * mView));
+    inscatter *= exp(-beta * mSun);
+    inscatter /= betaInv;
+
+    // Horizon/zenith gradation with sunset warm shift.
+    const float viewUp = saturate((v.y + 1.0f) * 0.5f);
+    const float3 zenithSky = float3(0.012f, 0.038f, 0.150f);
+    const float3 horizonSky = float3(0.190f, 0.250f, 0.430f) + float3(0.30f, 0.18f, 0.05f) * sunWarm;
+    const float3 baseSky = lerp(horizonSky, zenithSky, pow(viewUp, 0.9f));
+
+    // Sun disk and glow grows warmer and broader at low sun.
+    const float sunsetBoost = 1.0f + 2.5f * sunWarm;
+    const float sunDisk = smoothstep(0.999f, 0.99993f, mu) * sunsetBoost;
+    const float sunHalo = pow(saturate(mu), lerp(48.0f, 16.0f, sunWarm));
+    const float3 sunColor = float3(1.0f, 0.96f, 0.90f);
+    const float3 sunTerm = (sunColor * (sunDisk * 28.0f + sunHalo * (2.2f + 3.0f * sunWarm))) * sunsetBoost;
+
+    const float3 transView = exp(-beta * mView);
+    const float3 skyBase = (baseSky * (0.82f + 0.35f * sunWarm) + inscatter * 0.30f) * (1.0f - 0.20f * (1.0f - viewUp));
+    return (skyBase + sunTerm) * max(sunIntensity, 0.01f) * transView;
 }
 
-float3 skyAmbientLighting(float3 sunDir, float sunIntensity) {
-    float3 up = skyColor(float3(0.0f, 1.0f, 0.0f), sunDir, sunIntensity);
-    float3 horizonSun = skyColor(normalize(float3(sunDir.x, 0.15f, sunDir.z)), sunDir, sunIntensity);
-    float3 horizonOpp = skyColor(normalize(float3(-sunDir.x, 0.15f, -sunDir.z)), sunDir, sunIntensity);
-    return (0.45f * up) + (0.35f * horizonSun) + (0.20f * horizonOpp);
+float3 skyAmbientLighting(float3 dir, float3 sunDir, float sunIntensity) {
+    float3 shC0;
+    float3 shCx;
+    float3 shCy;
+    float3 shCz;
+    projectSkySH1(sunDir, sunIntensity, shC0, shCx, shCy, shCz);
+    return max(evalSkySH1(normalize(dir), shC0, shCx, shCy, shCz), 0.0f);
 }
 
 [shader("compute")]
@@ -584,6 +643,20 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     bool debugSunTransmittance = gPush.cloudLightParams.w > 0.5f;
     uint maxBounces = (uint)clamp(gPush.cloudLightParams.z, 1.0f, (float)kMaxBouncesHardLimit);
     float sigmaMajorant = max(densityScale * (1.85f + 0.65f * saturate(gPush.cloudShapeParams.w)), 0.05f);
+    const float cloudBase = gPush.cloudProfileParams.z;
+    const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
+    const float cloudHeightSpan = max(cloudTop - cloudBase, 0.25f);
+
+    float3 shC0;
+    float3 shCx;
+    float3 shCy;
+    float3 shCz;
+    projectSkySH1(sunDir, sunIntensity, shC0, shCx, shCy, shCz);
+    const float3 ambientSkyBottom = max(evalSkySH1(float3(0.0f, -1.0f, 0.0f), shC0, shCx, shCy, shCz), 0.0f);
+    const float3 ambientSkyTop = max(evalSkySH1(float3(0.0f, 1.0f, 0.0f), shC0, shCx, shCy, shCz), 0.0f);
+    const float3 groundAlbedoColor = float3(0.18f, 0.22f, 0.18f);
+    const float3 earthBounce = sunRadiance * max(sunDir.y, 0.0f) * groundAlbedoColor;
+    const float ambientStrength = lerp(0.05f, 0.6f, saturate(gPush.cloudLightParams.y));
 
     float3 L = 0.0f;
     float3 throughput = 1.0f;
@@ -601,6 +674,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             brightnessBoost,
             ambientLift,
             debugSunTransmittance,
+            ambientSkyBottom,
+            ambientSkyTop,
             rngState);
     } else {
         [loop]
@@ -668,9 +743,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             const float phase = dualHenyeyGreenstein(cosTheta, g);
             L += throughput * cloudAlbedo * brightnessBoost * msTransmittance * phase * sunRadiance;
 
-            float3 ambientSky = skyAmbientLighting(sunDir, sunIntensity);
-            const float ambientStrength = lerp(0.05f, 0.6f, saturate(gPush.cloudLightParams.y));
-            L += throughput * cloudAlbedo * (1.0f / (4.0f * kPi)) * ambientSky * ambientStrength;
+            const float hFrac = saturate((scatterPos.y - cloudBase) / cloudHeightSpan);
+            const float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
+            const float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
+            L += throughput * cloudAlbedo * (1.0f / (4.0f * kPi)) * localAmbient * ambientStrength;
 
             if (bounce + 1u >= maxBounces) {
                 break;

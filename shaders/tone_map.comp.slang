@@ -34,6 +34,18 @@ float3 applySaturation(float3 color, float saturation) {
     return lerp(float3(luma, luma, luma), color, saturation);
 }
 
+float hash11(uint3 p) {
+    uint h = p.x * 747796405u;
+    h ^= p.y * 2891336453u;
+    h ^= p.z * 1181783497u;
+    h ^= (h >> 16u);
+    h *= 2246822519u;
+    h ^= (h >> 13u);
+    h *= 3266489917u;
+    h ^= (h >> 16u);
+    return float(h & 0x00ffffffu) * (1.0f / 16777216.0f);
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
@@ -55,6 +67,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
     ldr = applySaturation(ldr, gPush.saturation);
     ldr = saturate(ldr);
+
+    // Subtle per-frame pixel dither to reduce smooth sky banding after tonemapping.
+    const float dither = (hash11(uint3(pixel.x, pixel.y, gPush.sampleCount)) - 0.5f) * (1.0f / 1024.0f);
+    ldr = saturate(ldr + float3(dither));
+
     ldr = pow(max(ldr, 0.0f), 1.0f / max(gPush.gamma, 1e-4f));
 
     gToneMapOut[pixel] = float4(ldr, 1.0f);
