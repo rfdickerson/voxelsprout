@@ -293,7 +293,8 @@ float3 skyColorWithSunDisk(float3 dir, float3 sunDir, float sunIntensity, bool i
     float3 dayHaze = float3(0.5f, 0.65f, 0.8f);
     float3 sunriseHaze = float3(1.2f, 0.35f, 0.65f);
     float3 horizonColor = lerp(sunriseHaze, dayHaze, smoothstep(-0.1f, 0.15f, sunDir.y));
-    inscatter += horizonColor * horizonBlend * 0.03f;
+    float nightFade = smoothstep(-0.15f, -0.05f, sunDir.y);
+    inscatter += horizonColor * horizonBlend * 0.03f * nightFade;
 
     bool allowSolarDisk = includeSunDisk && !isGround;
     float sunDisk = allowSolarDisk ? smoothstep(0.9997f, 0.99995f, muView) : 0.0f;
@@ -428,6 +429,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         debugSunTransmittance,
         rayJitterOffset);
 
+    // Add subtle screen-space blue-noise dither to reduce 8-bit gradient banding.
+    L += (blueNoise.rgb - 0.5f) * (1.0f / 255.0f);
     gAccumulation[pixel] = float4(L, 1.0f);
 
 }

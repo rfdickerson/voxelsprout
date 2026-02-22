@@ -41,7 +41,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float densityScale = max(gPush.mediumParams.x, 0.01f);
     float extinctionCoeff = max(gPush.mediumParams.w, 0.01f);
     float cloudAlbedo = saturate(gPush.mediumParams.z);
-    float3 sunRadiance = float3(1.0f, 1.0f, 0.98f) * max(gPush.sunDirectionIntensity.w, 0.01f);
+    float3 sunDir = normalize(gPush.sunDirectionIntensity.xyz);
+    float sunIntensity = max(gPush.sunDirectionIntensity.w, 0.01f);
+    float3 sunNoon = float3(1.0f, 0.99f, 0.98f);
+    float3 sunSet = float3(1.0f, 0.35f, 0.05f);
+    float3 dynamicSun = lerp(sunSet, sunNoon, smoothstep(-0.05f, 0.2f, sunDir.y));
+    float extinction = smoothstep(-0.15f, 0.15f, sunDir.y);
+    float3 sunRadiance = dynamicSun * sunIntensity * extinction;
 
     int3 voxel = int3(dispatchThreadID);
     uint3 msDim = uint3(dim, dim, dim);
@@ -72,7 +78,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float3 msZp = sampleMs(voxel + int3(0, 0, 1), dim);
     float3 msZn = sampleMs(voxel + int3(0, 0, -1), dim);
 
-    float3 sunDir = normalize(gPush.sunDirectionIntensity.xyz);
     float wXp = 0.5f - 0.5f * sunDir.x;
     float wXn = 0.5f + 0.5f * sunDir.x;
     float wYp = 0.5f - 0.5f * sunDir.y;
