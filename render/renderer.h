@@ -22,6 +22,7 @@ struct RenderParameters {
     bool enableAccumulation = true;
     bool debugSunTransmittance = false;
     bool forceReset = false;
+    bool multiScatterTemporalMode = false;
     std::uint32_t cloudUpdateInterval = 2;
     std::uint32_t maxAccumulationSamples = 256;
 };

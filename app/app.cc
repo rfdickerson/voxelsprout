@@ -220,6 +220,8 @@ void App::buildUi() {
     ImGui::SliderInt("Max accumulation samples", &m_maxAccumulationSamplesUi, 1, 4096);
     m_maxAccumulationSamplesUi = std::clamp(m_maxAccumulationSamplesUi, 1, 4096);
     m_renderParams.maxAccumulationSamples = static_cast<std::uint32_t>(m_maxAccumulationSamplesUi);
+    ImGui::Checkbox("Multi-scatter temporal mode (2 it/frame)", &m_renderParams.multiScatterTemporalMode);
+    ImGui::Text("Multi-scatter iterations: %u", m_renderParams.multiScatterTemporalMode ? 2u : 6u);
     ImGui::Text("Frame index: %u", m_renderer.frameIndex());
     if (m_renderer.frameIndex() >= m_renderParams.maxAccumulationSamples) {
         ImGui::Text("Accumulation paused (sample cap reached)");

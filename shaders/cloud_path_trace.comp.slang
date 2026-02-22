@@ -2,9 +2,8 @@ static const float kPi = 3.1415926535f;
 static const float3 kCloudAabbMin = float3(-10.0f, 0.0f, -10.0f);
 static const float3 kCloudAabbMax = float3(10.0f, 10.0f, 10.0f);
 static const uint kMaxBouncesHardLimit = 12u;
-static const uint kSunTrMaxSteps = 32u;
-static const uint kApproxSunTrSteps = 12u;
 static const uint kCloudApproxSteps = 32u;
+static const uint kViewMarchSteps = 32u;
 static const float kSunAngularRadiusRadians = 0.004f; // ~0.23 degrees
 
 struct CameraPush {
@@ -34,6 +33,10 @@ Texture2D<float4> gBlueNoise;
 Texture3D<float4> gCloudNoiseVolume;
 [[vk::binding(4, 0)]]
 SamplerState gVolumeSampler;
+[[vk::binding(5, 0)]]
+Texture3D<float> gSunTransmittance;
+[[vk::binding(6, 0)]]
+Texture3D<float4> gMultiScatterField;
 
 uint hash3(uint3 p) {
     uint h = p.x * 747796405u;
@@ -182,6 +185,16 @@ float3 curlNoise(float3 p) {
 
 float4 sampleCloudNoise(float3 p) {
     return gCloudNoiseVolume.SampleLevel(gVolumeSampler, p, 0.0f);
+}
+
+float sampleSunTransmittance(float3 p) {
+    float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
+    return gSunTransmittance.SampleLevel(gVolumeSampler, uvw, 0.0f).r;
+}
+
+float3 sampleMultiScatter(float3 p) {
+    float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
+    return gMultiScatterField.SampleLevel(gVolumeSampler, uvw, 0.0f).xyz;
 }
 
 float remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
@@ -367,40 +380,6 @@ bool sampleDistance(
     return false;
 }
 
-float estimateSunOpticalDepth(float3 p, float3 sunDir, float densityScale, uint maxSteps, inout uint rngState) {
-    float tMin = 0.0f;
-    float tMax = 0.0f;
-    if (!intersectAabb(p + sunDir * 0.05f, sunDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
-        return 0.0f;
-    }
-
-    float marchDistance = tMax;
-    float stepSize = marchDistance / float(max(maxSteps, 1u));
-    if (stepSize <= 0.0f) {
-        return 0.0f;
-    }
-
-    float t = stepSize * rand01(rngState);
-    float opticalDepth = 0.0f;
-    [loop]
-    for (uint i = 0; i < maxSteps; ++i) {
-        float3 x = p + sunDir * t;
-        float density = densityField(x) * densityScale * 1.5f;
-        opticalDepth += density * stepSize;
-        t += stepSize;
-    }
-
-    return opticalDepth;
-}
-
-float estimateSunTransmittanceSteps(float3 p, float3 sunDir, float densityScale, uint maxSteps, inout uint rngState) {
-    return exp(-estimateSunOpticalDepth(p, sunDir, densityScale, maxSteps, rngState));
-}
-
-float estimateSunTransmittance(float3 p, float3 sunDir, float densityScale, inout uint rngState) {
-    return estimateSunTransmittanceSteps(p, sunDir, densityScale, kSunTrMaxSteps, rngState);
-}
-
 void projectSkySH1(
     float3 sunDir,
     float sunIntensity,
@@ -484,7 +463,7 @@ float3 integrateCloudApproximation(
             float segmentScatter = 1.0f - segmentTransmit;
 
             float cosTheta = clamp(dot(-rayDir, -sunDir), -1.0f, 1.0f);
-            float opticalDepth = estimateSunOpticalDepth(x, sunDir, densityScale, kApproxSunTrSteps, rngState);
+            float baseSunTransmittance = sampleSunTransmittance(x);
             float msTransmittance = 0.0f;
             float isotropicScattering = 0.0f;
             float densityMult = 1.0f;
@@ -492,7 +471,7 @@ float3 integrateCloudApproximation(
             float gMult = 1.0f;
             [unroll]
             for (int ms = 0; ms < 3; ++ms) {
-                const float tr = exp(-opticalDepth * densityMult);
+                const float tr = pow(baseSunTransmittance, densityMult);
                 const float phase = dualHenyeyGreenstein(cosTheta, g * gMult);
                 msTransmittance += tr * phase * contribMult;
                 isotropicScattering += tr * contribMult;
@@ -501,7 +480,7 @@ float3 integrateCloudApproximation(
                 gMult *= 0.5f;
             }
             if (debugSunTransmittance) {
-                const float trDebug = exp(-opticalDepth);
+                const float trDebug = baseSunTransmittance;
                 return float3(trDebug, trDebug, trDebug);
             }
 
@@ -514,7 +493,8 @@ float3 integrateCloudApproximation(
             const float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
             const float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
             const float3 deepInternalGlow = sunRadiance * isotropicScattering * 0.45f;
-            const float3 enhancedAmbient = localAmbient + deepInternalGlow;
+            const float3 msField = sampleMultiScatter(x);
+            const float3 enhancedAmbient = localAmbient + deepInternalGlow + (msField * cloudAlbedo * 1.35f);
             float3 ambientTerm = enhancedAmbient * (1.0f / (4.0f * kPi)) * ambientStrength;
 
             const float3 directColor = lerp(sunRadiance, min(cloudTwilightColor, sunRadiance * 1.6f), clamp(1.0f - cosTheta, 0.0f, 1.0f) * 0.35f);
@@ -529,6 +509,67 @@ float3 integrateCloudApproximation(
     }
 
     return L + (throughput * skyColor(rayDir, sunDir, sunIntensity));
+}
+
+float3 integrateViewMarchFinal(
+    float3 rayOrigin,
+    float3 rayDir,
+    float3 sunDir,
+    float3 sunRadiance,
+    float sunIntensity,
+    float densityScale,
+    float g,
+    float3 cloudAlbedo,
+    bool debugSunTransmittance
+) {
+    float tMin = 0.0f;
+    float tMax = 0.0f;
+    if (!intersectAabb(rayOrigin, rayDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
+        return skyColor(rayDir, sunDir, sunIntensity);
+    }
+
+    float marchDistance = tMax - tMin;
+    if (marchDistance <= 0.0f) {
+        return skyColor(rayDir, sunDir, sunIntensity);
+    }
+
+    const float ds = marchDistance / float(kViewMarchSteps);
+    if (ds <= 0.0f) {
+        return skyColor(rayDir, sunDir, sunIntensity);
+    }
+
+    float3 Lss = 0.0f;
+    float3 Lms = 0.0f;
+    float Tview = 1.0f;
+    const float cosTheta = clamp(dot(-sunDir, -rayDir), -1.0f, 1.0f);
+    const float phase = dualHenyeyGreenstein(cosTheta, g);
+
+    [loop]
+    for (uint i = 0u; i < kViewMarchSteps; ++i) {
+        float t = tMin + (float(i) + 0.5f) * ds;
+        float3 x = rayOrigin + rayDir * t;
+        float rho = densityField(x);
+        if (rho <= 0.0f) {
+            continue;
+        }
+
+        float Tsun = sampleSunTransmittance(x);
+        if (debugSunTransmittance) {
+            return float3(Tsun, Tsun, Tsun);
+        }
+
+        float3 E = sampleMultiScatter(x);
+        Lss += Tview * rho * Tsun * phase * sunRadiance * cloudAlbedo * ds;
+        Lms += Tview * rho * E * ds;
+
+        // Use explicit view transmittance update for stable deterministic marching.
+        Tview *= exp(-rho * 1.5f * ds);
+        if (Tview < 1.0e-4f) {
+            break;
+        }
+    }
+
+    return Lss + Lms + (Tview * skyColor(rayDir, sunDir, sunIntensity));
 }
 
 float phaseRayleigh(float cosTheta) {
@@ -707,7 +748,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float3 throughput = 1.0f;
 
     if (maxBounces <= 1u) {
-        L = integrateCloudApproximation(
+        L = integrateViewMarchFinal(
             rayOrigin,
             rayDir,
             sunDir,
@@ -716,12 +757,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             densityScale,
             g,
             cloudAlbedo,
-            brightnessBoost,
-            ambientLift,
-            debugSunTransmittance,
-            ambientSkyBottom,
-            ambientSkyTop,
-            rngState);
+            debugSunTransmittance);
     } else {
         [loop]
         for (uint bounce = 0u; bounce < maxBounces; ++bounce) {
@@ -753,21 +789,21 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             }
 
             if (debugSunTransmittance && bounce == 0u) {
-                float trSunDebug = estimateSunTransmittance(scatterPos, sunDir, densityScale, rngState);
+                float trSunDebug = sampleSunTransmittance(scatterPos);
                 L = float3(trSunDebug, trSunDebug, trSunDebug);
                 break;
             }
 
             float3 wo = -rayDir;
             float3 sunDirSample = sampleUniformCone(sunDir, sunCosThetaMax, rngState);
-            const float opticalDepth = estimateSunOpticalDepth(scatterPos, sunDirSample, densityScale, kSunTrMaxSteps, rngState);
+            const float baseSunTransmittance = sampleSunTransmittance(scatterPos);
             float msTransmittance = 0.0f;
             float densityMult = 1.0f;
             float contribMult = 1.0f;
             float gMult = 1.0f;
             [unroll]
             for (int ms = 0; ms < 3; ++ms) {
-                const float tr = exp(-opticalDepth * densityMult);
+                const float tr = pow(baseSunTransmittance, densityMult);
                 const float phase = dualHenyeyGreenstein(dot(-rayDir, -sunDirSample), g * gMult);
                 msTransmittance += tr * phase * contribMult;
                 densityMult *= 0.25f;
@@ -793,7 +829,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             const float hFrac = saturate((scatterPos.y - cloudBase) / cloudHeightSpan);
             const float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
             const float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
+            const float3 msField = sampleMultiScatter(scatterPos);
             L += throughput * cloudAlbedo * (1.0f / (4.0f * kPi)) * localAmbient * ambientStrength;
+            L += throughput * cloudAlbedo * msField * 0.35f;
 
             if (bounce + 1u >= maxBounces) {
                 break;

@@ -29,8 +29,16 @@ constexpr std::uint32_t kTimestampCloudEnd = 1;
 constexpr std::uint32_t kTimestampToneEnd = 2;
 constexpr std::uint32_t kTimestampFrameEnd = 3;
 constexpr std::uint32_t kCloudNoiseVolumeDim = 128;
+constexpr std::uint32_t kSunTransmittanceVolumeDim = 128;
+constexpr std::uint32_t kSunTransmittanceMarchSteps = 48;
+constexpr std::uint32_t kMultiScatterVolumeDim = 32;
+constexpr std::uint32_t kMultiScatterIterationsHigh = 6;
+constexpr std::uint32_t kMultiScatterIterationsLow = 2;
+constexpr float kMultiScatterLambda = 0.45f;
 
 constexpr const char* kCloudShaderPath = "shaders/cloud_path_trace.comp.slang.spv";
+constexpr const char* kSunTransmittanceShaderPath = "shaders/cloud_sun_transmittance.comp.slang.spv";
+constexpr const char* kMultiScatterShaderPath = "shaders/cloud_multiscatter.comp.slang.spv";
 constexpr const char* kToneMapShaderPath = "shaders/tone_map.comp.slang.spv";
 
 float absDiff(float a, float b) {
@@ -250,6 +258,7 @@ bool paramsDiffer(const RenderParameters& a, const RenderParameters& b) {
         !almostEqual(as.direction.z, bs.direction.z) ||
         !almostEqual(as.intensity, bs.intensity) ||
         a.enableAccumulation != b.enableAccumulation ||
+        a.multiScatterTemporalMode != b.multiScatterTemporalMode ||
         a.debugSunTransmittance != b.debugSunTransmittance;
 }
 
@@ -326,6 +335,24 @@ struct ToneMapPush {
     std::uint32_t sampleCount = 1;
 };
 
+struct SunTransmittancePush {
+    float sunDirectionIntensity[4];
+    float mediumParams[4];
+    float cloudShapeParams[4];
+    float cloudProfileParams[4];
+    float cloudWarpParams[4];
+    float volumeParams[4];
+};
+
+struct MultiScatterPush {
+    float sunDirectionIntensity[4];
+    float mediumParams[4];
+    float cloudShapeParams[4];
+    float cloudProfileParams[4];
+    float cloudWarpParams[4];
+    float solveParams[4];
+};
+
 } // namespace
 
 struct Renderer::Impl {
@@ -370,6 +397,20 @@ struct Renderer::Impl {
         VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
     };
 
+    struct SunTransmittancePass {
+        VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    };
+
+    struct MultiScatterPass {
+        VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        std::array<VkDescriptorSet, 2> descriptorSets{};
+    };
+
     GLFWwindow* window = nullptr;
 
     VkInstance instance = VK_NULL_HANDLE;
@@ -396,6 +437,8 @@ struct Renderer::Impl {
     ImageResource accumulationImage;
     ImageResource rngStateImage;
     ImageResource toneMapImage;
+    ImageResource sunTransmittanceImage;
+    std::array<ImageResource, 2> multiScatterImages{};
     ImageResource presentImage;
     ImageResource blueNoiseImage;
     ImageResource cloudNoiseImage;
@@ -406,6 +449,8 @@ struct Renderer::Impl {
     VkDescriptorPool imguiDescriptorPool = VK_NULL_HANDLE;
 
     CloudPathTracePass cloudPathTracePass;
+    SunTransmittancePass sunTransmittancePass;
+    MultiScatterPass multiScatterPass;
     ToneMapPass toneMapPass;
 
     std::array<FrameResources, kFramesInFlight> frames{};
@@ -988,6 +1033,28 @@ bool Renderer::Impl::createStorageImages() {
         return false;
     }
 
+    if (!createImage3D(
+            sunTransmittanceImage,
+            VK_FORMAT_R16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            kSunTransmittanceVolumeDim,
+            kSunTransmittanceVolumeDim,
+            kSunTransmittanceVolumeDim)) {
+        return false;
+    }
+
+    for (ImageResource& multiScatterImage : multiScatterImages) {
+        if (!createImage3D(
+                multiScatterImage,
+                VK_FORMAT_R16G16B16A16_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                kMultiScatterVolumeDim,
+                kMultiScatterVolumeDim,
+                kMultiScatterVolumeDim)) {
+            return false;
+        }
+    }
+
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     samplerInfo.magFilter = VK_FILTER_NEAREST;
@@ -1360,6 +1427,10 @@ void Renderer::Impl::destroyStorageImages() {
     destroyImage(accumulationImage);
     destroyImage(rngStateImage);
     destroyImage(toneMapImage);
+    destroyImage(sunTransmittanceImage);
+    for (ImageResource& multiScatterImage : multiScatterImages) {
+        destroyImage(multiScatterImage);
+    }
     destroyImage(presentImage);
     destroyImage(blueNoiseImage);
     destroyImage(cloudNoiseImage);
@@ -1398,15 +1469,15 @@ VkShaderModule Renderer::Impl::createShaderModuleFromSpv(const char* relativePat
 bool Renderer::Impl::createDescriptors() {
     std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[0].descriptorCount = 5;
+    poolSizes[0].descriptorCount = 8;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    poolSizes[1].descriptorCount = 2;
+    poolSizes[1].descriptorCount = 12;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-    poolSizes[2].descriptorCount = 1;
+    poolSizes[2].descriptorCount = 4;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 2;
+    poolInfo.maxSets = 5;
     poolInfo.poolSizeCount = static_cast<std::uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
 
@@ -1431,7 +1502,7 @@ bool Renderer::Impl::createDescriptors() {
         return false;
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 5> cloudBindings{};
+    std::array<VkDescriptorSetLayoutBinding, 7> cloudBindings{};
     cloudBindings[0].binding = 0;
     cloudBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     cloudBindings[0].descriptorCount = 1;
@@ -1452,6 +1523,14 @@ bool Renderer::Impl::createDescriptors() {
     cloudBindings[4].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     cloudBindings[4].descriptorCount = 1;
     cloudBindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    cloudBindings[5].binding = 5;
+    cloudBindings[5].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    cloudBindings[5].descriptorCount = 1;
+    cloudBindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    cloudBindings[6].binding = 6;
+    cloudBindings[6].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    cloudBindings[6].descriptorCount = 1;
+    cloudBindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo cloudLayoutInfo{};
     cloudLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1460,6 +1539,62 @@ bool Renderer::Impl::createDescriptors() {
 
     if (vkCreateDescriptorSetLayout(device, &cloudLayoutInfo, nullptr, &cloudPathTracePass.descriptorSetLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create cloud descriptor set layout";
+        return false;
+    }
+
+    std::array<VkDescriptorSetLayoutBinding, 3> sunBindings{};
+    sunBindings[0].binding = 0;
+    sunBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    sunBindings[0].descriptorCount = 1;
+    sunBindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    sunBindings[1].binding = 1;
+    sunBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    sunBindings[1].descriptorCount = 1;
+    sunBindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    sunBindings[2].binding = 2;
+    sunBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    sunBindings[2].descriptorCount = 1;
+    sunBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo sunLayoutInfo{};
+    sunLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    sunLayoutInfo.bindingCount = static_cast<std::uint32_t>(sunBindings.size());
+    sunLayoutInfo.pBindings = sunBindings.data();
+
+    if (vkCreateDescriptorSetLayout(device, &sunLayoutInfo, nullptr, &sunTransmittancePass.descriptorSetLayout) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create sun transmittance descriptor set layout";
+        return false;
+    }
+
+    std::array<VkDescriptorSetLayoutBinding, 5> multiScatterBindings{};
+    multiScatterBindings[0].binding = 0;
+    multiScatterBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    multiScatterBindings[0].descriptorCount = 1;
+    multiScatterBindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    multiScatterBindings[1].binding = 1;
+    multiScatterBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    multiScatterBindings[1].descriptorCount = 1;
+    multiScatterBindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    multiScatterBindings[2].binding = 2;
+    multiScatterBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    multiScatterBindings[2].descriptorCount = 1;
+    multiScatterBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    multiScatterBindings[3].binding = 3;
+    multiScatterBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    multiScatterBindings[3].descriptorCount = 1;
+    multiScatterBindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    multiScatterBindings[4].binding = 4;
+    multiScatterBindings[4].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    multiScatterBindings[4].descriptorCount = 1;
+    multiScatterBindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo multiScatterLayoutInfo{};
+    multiScatterLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    multiScatterLayoutInfo.bindingCount = static_cast<std::uint32_t>(multiScatterBindings.size());
+    multiScatterLayoutInfo.pBindings = multiScatterBindings.data();
+
+    if (vkCreateDescriptorSetLayout(device, &multiScatterLayoutInfo, nullptr, &multiScatterPass.descriptorSetLayout) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create multi-scatter descriptor set layout";
         return false;
     }
 
@@ -1492,6 +1627,32 @@ bool Renderer::Impl::createDescriptors() {
 
     if (vkAllocateDescriptorSets(device, &cloudAllocInfo, &cloudPathTracePass.descriptorSet) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to allocate cloud descriptor set";
+        return false;
+    }
+
+    std::array<VkDescriptorSetLayout, 1> sunSetLayouts = {sunTransmittancePass.descriptorSetLayout};
+    VkDescriptorSetAllocateInfo sunAllocInfo{};
+    sunAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    sunAllocInfo.descriptorPool = descriptorPool;
+    sunAllocInfo.descriptorSetCount = static_cast<std::uint32_t>(sunSetLayouts.size());
+    sunAllocInfo.pSetLayouts = sunSetLayouts.data();
+
+    if (vkAllocateDescriptorSets(device, &sunAllocInfo, &sunTransmittancePass.descriptorSet) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to allocate sun transmittance descriptor set";
+        return false;
+    }
+
+    std::array<VkDescriptorSetLayout, 2> multiScatterSetLayouts = {
+        multiScatterPass.descriptorSetLayout,
+        multiScatterPass.descriptorSetLayout};
+    VkDescriptorSetAllocateInfo multiScatterAllocInfo{};
+    multiScatterAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    multiScatterAllocInfo.descriptorPool = descriptorPool;
+    multiScatterAllocInfo.descriptorSetCount = static_cast<std::uint32_t>(multiScatterSetLayouts.size());
+    multiScatterAllocInfo.pSetLayouts = multiScatterSetLayouts.data();
+
+    if (vkAllocateDescriptorSets(device, &multiScatterAllocInfo, multiScatterPass.descriptorSets.data()) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to allocate multi-scatter descriptor sets";
         return false;
     }
 
@@ -1530,11 +1691,33 @@ bool Renderer::Impl::createDescriptors() {
     cloudNoiseSamplerInfo.imageView = VK_NULL_HANDLE;
     cloudNoiseSamplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
+    VkDescriptorImageInfo sunTransmittanceStorageInfo{};
+    sunTransmittanceStorageInfo.imageView = sunTransmittanceImage.view;
+    sunTransmittanceStorageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo sunTransmittanceSampleInfo{};
+    sunTransmittanceSampleInfo.sampler = VK_NULL_HANDLE;
+    sunTransmittanceSampleInfo.imageView = sunTransmittanceImage.view;
+    sunTransmittanceSampleInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo multiScatterSampleInfo{};
+    multiScatterSampleInfo.sampler = VK_NULL_HANDLE;
+    multiScatterSampleInfo.imageView = multiScatterImages[0].view;
+    multiScatterSampleInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo multiScatterAStorageInfo{};
+    multiScatterAStorageInfo.imageView = multiScatterImages[0].view;
+    multiScatterAStorageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo multiScatterBStorageInfo{};
+    multiScatterBStorageInfo.imageView = multiScatterImages[1].view;
+    multiScatterBStorageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
     VkDescriptorImageInfo toneInfo{};
     toneInfo.imageView = toneMapImage.view;
     toneInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    std::array<VkWriteDescriptorSet, 7> writes{};
+    std::array<VkWriteDescriptorSet, 22> writes{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = cloudPathTracePass.descriptorSet;
     writes[0].dstBinding = 0;
@@ -1571,18 +1754,123 @@ bool Renderer::Impl::createDescriptors() {
     writes[4].pImageInfo = &cloudNoiseSamplerInfo;
 
     writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[5].dstSet = toneMapPass.descriptorSet;
-    writes[5].dstBinding = 0;
-    writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[5].dstSet = cloudPathTracePass.descriptorSet;
+    writes[5].dstBinding = 5;
+    writes[5].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[5].descriptorCount = 1;
-    writes[5].pImageInfo = &accumInfo;
+    writes[5].pImageInfo = &sunTransmittanceSampleInfo;
 
     writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[6].dstSet = toneMapPass.descriptorSet;
-    writes[6].dstBinding = 1;
-    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[6].dstSet = cloudPathTracePass.descriptorSet;
+    writes[6].dstBinding = 6;
+    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[6].descriptorCount = 1;
-    writes[6].pImageInfo = &toneInfo;
+    writes[6].pImageInfo = &multiScatterSampleInfo;
+
+    writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[7].dstSet = sunTransmittancePass.descriptorSet;
+    writes[7].dstBinding = 0;
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[7].descriptorCount = 1;
+    writes[7].pImageInfo = &sunTransmittanceStorageInfo;
+
+    writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[8].dstSet = sunTransmittancePass.descriptorSet;
+    writes[8].dstBinding = 1;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[8].descriptorCount = 1;
+    writes[8].pImageInfo = &cloudNoiseInfo;
+
+    writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[9].dstSet = sunTransmittancePass.descriptorSet;
+    writes[9].dstBinding = 2;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[9].descriptorCount = 1;
+    writes[9].pImageInfo = &cloudNoiseSamplerInfo;
+
+    writes[10].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[10].dstSet = multiScatterPass.descriptorSets[0];
+    writes[10].dstBinding = 0;
+    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[10].descriptorCount = 1;
+    writes[10].pImageInfo = &multiScatterBStorageInfo;
+
+    writes[11].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[11].dstSet = multiScatterPass.descriptorSets[0];
+    writes[11].dstBinding = 1;
+    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[11].descriptorCount = 1;
+    writes[11].pImageInfo = &multiScatterAStorageInfo;
+
+    writes[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[12].dstSet = multiScatterPass.descriptorSets[0];
+    writes[12].dstBinding = 2;
+    writes[12].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[12].descriptorCount = 1;
+    writes[12].pImageInfo = &sunTransmittanceSampleInfo;
+
+    writes[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[13].dstSet = multiScatterPass.descriptorSets[0];
+    writes[13].dstBinding = 3;
+    writes[13].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[13].descriptorCount = 1;
+    writes[13].pImageInfo = &cloudNoiseInfo;
+
+    writes[14].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[14].dstSet = multiScatterPass.descriptorSets[0];
+    writes[14].dstBinding = 4;
+    writes[14].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[14].descriptorCount = 1;
+    writes[14].pImageInfo = &cloudNoiseSamplerInfo;
+
+    writes[15].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[15].dstSet = multiScatterPass.descriptorSets[1];
+    writes[15].dstBinding = 0;
+    writes[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[15].descriptorCount = 1;
+    writes[15].pImageInfo = &multiScatterAStorageInfo;
+
+    writes[16].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[16].dstSet = multiScatterPass.descriptorSets[1];
+    writes[16].dstBinding = 1;
+    writes[16].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[16].descriptorCount = 1;
+    writes[16].pImageInfo = &multiScatterBStorageInfo;
+
+    writes[17].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[17].dstSet = multiScatterPass.descriptorSets[1];
+    writes[17].dstBinding = 2;
+    writes[17].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[17].descriptorCount = 1;
+    writes[17].pImageInfo = &sunTransmittanceSampleInfo;
+
+    writes[18].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[18].dstSet = multiScatterPass.descriptorSets[1];
+    writes[18].dstBinding = 3;
+    writes[18].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[18].descriptorCount = 1;
+    writes[18].pImageInfo = &cloudNoiseInfo;
+
+    writes[19].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[19].dstSet = multiScatterPass.descriptorSets[1];
+    writes[19].dstBinding = 4;
+    writes[19].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[19].descriptorCount = 1;
+    writes[19].pImageInfo = &cloudNoiseSamplerInfo;
+
+    writes[20].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[20].dstSet = toneMapPass.descriptorSet;
+    writes[20].dstBinding = 0;
+    writes[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[20].descriptorCount = 1;
+    writes[20].pImageInfo = &accumInfo;
+
+    writes[21].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[21].dstSet = toneMapPass.descriptorSet;
+    writes[21].dstBinding = 1;
+    writes[21].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[21].descriptorCount = 1;
+    writes[21].pImageInfo = &toneInfo;
 
     vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     return true;
@@ -1592,6 +1880,14 @@ void Renderer::Impl::destroyDescriptors() {
     if (cloudPathTracePass.descriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(device, cloudPathTracePass.descriptorSetLayout, nullptr);
         cloudPathTracePass.descriptorSetLayout = VK_NULL_HANDLE;
+    }
+    if (sunTransmittancePass.descriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, sunTransmittancePass.descriptorSetLayout, nullptr);
+        sunTransmittancePass.descriptorSetLayout = VK_NULL_HANDLE;
+    }
+    if (multiScatterPass.descriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, multiScatterPass.descriptorSetLayout, nullptr);
+        multiScatterPass.descriptorSetLayout = VK_NULL_HANDLE;
     }
     if (toneMapPass.descriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(device, toneMapPass.descriptorSetLayout, nullptr);
@@ -1609,10 +1905,19 @@ void Renderer::Impl::destroyDescriptors() {
 
 bool Renderer::Impl::createPipelines() {
     VkShaderModule cloudModule = createShaderModuleFromSpv(kCloudShaderPath);
+    VkShaderModule sunTransmittanceModule = createShaderModuleFromSpv(kSunTransmittanceShaderPath);
+    VkShaderModule multiScatterModule = createShaderModuleFromSpv(kMultiScatterShaderPath);
     VkShaderModule toneModule = createShaderModuleFromSpv(kToneMapShaderPath);
-    if (cloudModule == VK_NULL_HANDLE || toneModule == VK_NULL_HANDLE) {
+    if (cloudModule == VK_NULL_HANDLE || sunTransmittanceModule == VK_NULL_HANDLE || multiScatterModule == VK_NULL_HANDLE
+        || toneModule == VK_NULL_HANDLE) {
         if (cloudModule != VK_NULL_HANDLE) {
             vkDestroyShaderModule(device, cloudModule, nullptr);
+        }
+        if (sunTransmittanceModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        }
+        if (multiScatterModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device, multiScatterModule, nullptr);
         }
         if (toneModule != VK_NULL_HANDLE) {
             vkDestroyShaderModule(device, toneModule, nullptr);
@@ -1635,6 +1940,50 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreatePipelineLayout(device, &cloudLayoutInfo, nullptr, &cloudPathTracePass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create cloud pipeline layout";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        vkDestroyShaderModule(device, multiScatterModule, nullptr);
+        vkDestroyShaderModule(device, toneModule, nullptr);
+        return false;
+    }
+
+    VkPushConstantRange sunPushRange{};
+    sunPushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    sunPushRange.offset = 0;
+    sunPushRange.size = sizeof(SunTransmittancePush);
+
+    VkPipelineLayoutCreateInfo sunLayoutInfo{};
+    sunLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    sunLayoutInfo.setLayoutCount = 1;
+    sunLayoutInfo.pSetLayouts = &sunTransmittancePass.descriptorSetLayout;
+    sunLayoutInfo.pushConstantRangeCount = 1;
+    sunLayoutInfo.pPushConstantRanges = &sunPushRange;
+
+    if (vkCreatePipelineLayout(device, &sunLayoutInfo, nullptr, &sunTransmittancePass.pipelineLayout) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create sun transmittance pipeline layout";
+        vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        vkDestroyShaderModule(device, multiScatterModule, nullptr);
+        vkDestroyShaderModule(device, toneModule, nullptr);
+        return false;
+    }
+
+    VkPushConstantRange multiScatterPushRange{};
+    multiScatterPushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    multiScatterPushRange.offset = 0;
+    multiScatterPushRange.size = sizeof(MultiScatterPush);
+
+    VkPipelineLayoutCreateInfo multiScatterLayoutInfo{};
+    multiScatterLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    multiScatterLayoutInfo.setLayoutCount = 1;
+    multiScatterLayoutInfo.pSetLayouts = &multiScatterPass.descriptorSetLayout;
+    multiScatterLayoutInfo.pushConstantRangeCount = 1;
+    multiScatterLayoutInfo.pPushConstantRanges = &multiScatterPushRange;
+
+    if (vkCreatePipelineLayout(device, &multiScatterLayoutInfo, nullptr, &multiScatterPass.pipelineLayout) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create multi-scatter pipeline layout";
+        vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
         return false;
     }
@@ -1654,6 +2003,8 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreatePipelineLayout(device, &toneLayoutInfo, nullptr, &toneMapPass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create tone map pipeline layout";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
         return false;
     }
@@ -1672,6 +2023,48 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cloudPipelineInfo, nullptr, &cloudPathTracePass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create cloud compute pipeline";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        vkDestroyShaderModule(device, multiScatterModule, nullptr);
+        vkDestroyShaderModule(device, toneModule, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo sunStage{};
+    sunStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    sunStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    sunStage.module = sunTransmittanceModule;
+    sunStage.pName = "main";
+
+    VkComputePipelineCreateInfo sunPipelineInfo{};
+    sunPipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    sunPipelineInfo.stage = sunStage;
+    sunPipelineInfo.layout = sunTransmittancePass.pipelineLayout;
+
+    if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &sunPipelineInfo, nullptr, &sunTransmittancePass.pipeline) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create sun transmittance compute pipeline";
+        vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        vkDestroyShaderModule(device, multiScatterModule, nullptr);
+        vkDestroyShaderModule(device, toneModule, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo multiScatterStage{};
+    multiScatterStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    multiScatterStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    multiScatterStage.module = multiScatterModule;
+    multiScatterStage.pName = "main";
+
+    VkComputePipelineCreateInfo multiScatterPipelineInfo{};
+    multiScatterPipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    multiScatterPipelineInfo.stage = multiScatterStage;
+    multiScatterPipelineInfo.layout = multiScatterPass.pipelineLayout;
+
+    if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &multiScatterPipelineInfo, nullptr, &multiScatterPass.pipeline) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create multi-scatter compute pipeline";
+        vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
         return false;
     }
@@ -1690,11 +2083,15 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &tonePipelineInfo, nullptr, &toneMapPass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create tone map compute pipeline";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
         return false;
     }
 
     vkDestroyShaderModule(device, cloudModule, nullptr);
+    vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+    vkDestroyShaderModule(device, multiScatterModule, nullptr);
     vkDestroyShaderModule(device, toneModule, nullptr);
     return true;
 }
@@ -1707,6 +2104,22 @@ void Renderer::Impl::destroyPipelines() {
     if (cloudPathTracePass.pipelineLayout != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(device, cloudPathTracePass.pipelineLayout, nullptr);
         cloudPathTracePass.pipelineLayout = VK_NULL_HANDLE;
+    }
+    if (sunTransmittancePass.pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, sunTransmittancePass.pipeline, nullptr);
+        sunTransmittancePass.pipeline = VK_NULL_HANDLE;
+    }
+    if (sunTransmittancePass.pipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, sunTransmittancePass.pipelineLayout, nullptr);
+        sunTransmittancePass.pipelineLayout = VK_NULL_HANDLE;
+    }
+    if (multiScatterPass.pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, multiScatterPass.pipeline, nullptr);
+        multiScatterPass.pipeline = VK_NULL_HANDLE;
+    }
+    if (multiScatterPass.pipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, multiScatterPass.pipelineLayout, nullptr);
+        multiScatterPass.pipelineLayout = VK_NULL_HANDLE;
     }
     if (toneMapPass.pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(device, toneMapPass.pipeline, nullptr);
@@ -2503,7 +2916,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         vkCmdResetQueryPool(frame.commandBuffer, frame.timestampQueryPool, 0, kTimestampCount);
         vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, frame.timestampQueryPool, kTimestampFrameStart);
 
-        std::array<VkImageMemoryBarrier2, 4> startupBarriers{};
+        std::array<VkImageMemoryBarrier2, 7> startupBarriers{};
         std::uint32_t startupBarrierCount = 0;
 
         const VkPipelineStageFlags2 accumSrcStage =
@@ -2558,6 +2971,34 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             rngSrcAccess,
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
+        const VkPipelineStageFlags2 sunSrcStage =
+            (sunTransmittanceImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        const VkAccessFlags2 sunSrcAccess =
+            (sunTransmittanceImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
+        startupBarriers[startupBarrierCount++] = imageBarrier(
+            sunTransmittanceImage.image,
+            sunTransmittanceImage.layout,
+            VK_IMAGE_LAYOUT_GENERAL,
+            sunSrcStage,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            sunSrcAccess,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+        for (ImageResource& multiScatterImage : multiScatterImages) {
+            const VkPipelineStageFlags2 multiSrcStage =
+                (multiScatterImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            const VkAccessFlags2 multiSrcAccess =
+                (multiScatterImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
+            startupBarriers[startupBarrierCount++] = imageBarrier(
+                multiScatterImage.image,
+                multiScatterImage.layout,
+                VK_IMAGE_LAYOUT_GENERAL,
+                multiSrcStage,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                multiSrcAccess,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        }
+
         VkDependencyInfo startupDep{};
         startupDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         startupDep.imageMemoryBarrierCount = startupBarrierCount;
@@ -2567,10 +3008,194 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         accumulationImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         toneMapImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         rngStateImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+        sunTransmittanceImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+        multiScatterImages[0].layout = VK_IMAGE_LAYOUT_GENERAL;
+        multiScatterImages[1].layout = VK_IMAGE_LAYOUT_GENERAL;
         toneMapOwnedByUi = false;
+
+        if (resetAccumulation) {
+            VkImageSubresourceRange clearRange{};
+            clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            clearRange.baseMipLevel = 0;
+            clearRange.levelCount = 1;
+            clearRange.baseArrayLayer = 0;
+            clearRange.layerCount = 1;
+            VkClearColorValue clearValue{};
+            clearValue.float32[0] = 0.0f;
+            clearValue.float32[1] = 0.0f;
+            clearValue.float32[2] = 0.0f;
+            clearValue.float32[3] = 0.0f;
+            for (ImageResource& multiScatterImage : multiScatterImages) {
+                vkCmdClearColorImage(
+                    frame.commandBuffer,
+                    multiScatterImage.image,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    &clearValue,
+                    1,
+                    &clearRange);
+            }
+
+            std::array<VkImageMemoryBarrier2, 2> clearToCompute{};
+            clearToCompute[0] = imageBarrier(
+                multiScatterImages[0].image,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            clearToCompute[1] = imageBarrier(
+                multiScatterImages[1].image,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            VkDependencyInfo clearDep{};
+            clearDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            clearDep.imageMemoryBarrierCount = static_cast<std::uint32_t>(clearToCompute.size());
+            clearDep.pImageMemoryBarriers = clearToCompute.data();
+            vkCmdPipelineBarrier2(frame.commandBuffer, &clearDep);
+        }
 
         const std::uint32_t dispatchX = (swapchainExtent.width + 7u) / 8u;
         const std::uint32_t dispatchY = (swapchainExtent.height + 7u) / 8u;
+
+        const voxelsprout::core::Vec3 forward = params.camera.forward();
+        const voxelsprout::core::Vec3 right = params.camera.right();
+        const voxelsprout::core::Vec3 up = voxelsprout::core::normalize(voxelsprout::core::cross(right, forward));
+        voxelsprout::core::Vec3 sunDir = voxelsprout::core::normalize(params.scene.sun.direction);
+        if (voxelsprout::core::length(sunDir) <= 0.0f) {
+            sunDir = voxelsprout::core::normalize(voxelsprout::core::Vec3{1.0f, 1.0f, 0.5f});
+        }
+
+        vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, sunTransmittancePass.pipeline);
+        vkCmdBindDescriptorSets(
+            frame.commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            sunTransmittancePass.pipelineLayout,
+            0,
+            1,
+            &sunTransmittancePass.descriptorSet,
+            0,
+            nullptr);
+
+        SunTransmittancePush sunPush{};
+        sunPush.sunDirectionIntensity[0] = sunDir.x;
+        sunPush.sunDirectionIntensity[1] = sunDir.y;
+        sunPush.sunDirectionIntensity[2] = sunDir.z;
+        sunPush.sunDirectionIntensity[3] = params.scene.sun.intensity;
+        sunPush.mediumParams[0] = params.scene.volume.densityScale;
+        sunPush.mediumParams[1] = params.scene.volume.anisotropyG;
+        sunPush.mediumParams[2] = params.scene.volume.albedo;
+        sunPush.mediumParams[3] = 0.0f;
+        sunPush.cloudShapeParams[0] = params.scene.volume.macroScale;
+        sunPush.cloudShapeParams[1] = params.scene.volume.detailScale;
+        sunPush.cloudShapeParams[2] = 0.0f;
+        sunPush.cloudShapeParams[3] = 0.0f;
+        sunPush.cloudProfileParams[0] = params.scene.volume.coverage;
+        sunPush.cloudProfileParams[1] = params.scene.volume.weatherScale;
+        sunPush.cloudProfileParams[2] = params.scene.volume.cloudBase;
+        sunPush.cloudProfileParams[3] = params.scene.volume.cloudTop;
+        sunPush.cloudWarpParams[0] = 0.0f;
+        sunPush.cloudWarpParams[1] = params.scene.volume.erosionStrength;
+        sunPush.cloudWarpParams[2] = 0.0f;
+        sunPush.cloudWarpParams[3] = 0.0f;
+        sunPush.volumeParams[0] = static_cast<float>(kSunTransmittanceVolumeDim);
+        sunPush.volumeParams[1] = static_cast<float>(kSunTransmittanceMarchSteps);
+        sunPush.volumeParams[2] = 0.0f;
+        sunPush.volumeParams[3] = 0.0f;
+
+        const std::uint32_t sunDispatch = (kSunTransmittanceVolumeDim + 3u) / 4u;
+        vkCmdPushConstants(
+            frame.commandBuffer,
+            sunTransmittancePass.pipelineLayout,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            sizeof(SunTransmittancePush),
+            &sunPush);
+        vkCmdDispatch(frame.commandBuffer, sunDispatch, sunDispatch, sunDispatch);
+
+        VkImageMemoryBarrier2 sunToCloudBarrier = imageBarrier(
+            sunTransmittanceImage.image,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        VkDependencyInfo sunToCloudDep{};
+        sunToCloudDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        sunToCloudDep.imageMemoryBarrierCount = 1;
+        sunToCloudDep.pImageMemoryBarriers = &sunToCloudBarrier;
+        vkCmdPipelineBarrier2(frame.commandBuffer, &sunToCloudDep);
+
+        vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, multiScatterPass.pipeline);
+        const std::uint32_t multiDispatch = (kMultiScatterVolumeDim + 3u) / 4u;
+        MultiScatterPush multiScatterPush{};
+        multiScatterPush.sunDirectionIntensity[0] = sunDir.x;
+        multiScatterPush.sunDirectionIntensity[1] = sunDir.y;
+        multiScatterPush.sunDirectionIntensity[2] = sunDir.z;
+        multiScatterPush.sunDirectionIntensity[3] = params.scene.sun.intensity;
+        multiScatterPush.mediumParams[0] = params.scene.volume.densityScale;
+        multiScatterPush.mediumParams[1] = params.scene.volume.anisotropyG;
+        multiScatterPush.mediumParams[2] = params.scene.volume.albedo;
+        multiScatterPush.mediumParams[3] = 0.0f;
+        multiScatterPush.cloudShapeParams[0] = params.scene.volume.macroScale;
+        multiScatterPush.cloudShapeParams[1] = params.scene.volume.detailScale;
+        multiScatterPush.cloudShapeParams[2] = 0.0f;
+        multiScatterPush.cloudShapeParams[3] = 0.0f;
+        multiScatterPush.cloudProfileParams[0] = params.scene.volume.coverage;
+        multiScatterPush.cloudProfileParams[1] = params.scene.volume.weatherScale;
+        multiScatterPush.cloudProfileParams[2] = params.scene.volume.cloudBase;
+        multiScatterPush.cloudProfileParams[3] = params.scene.volume.cloudTop;
+        multiScatterPush.cloudWarpParams[0] = 0.0f;
+        multiScatterPush.cloudWarpParams[1] = params.scene.volume.erosionStrength;
+        multiScatterPush.cloudWarpParams[2] = 0.0f;
+        multiScatterPush.cloudWarpParams[3] = 0.0f;
+        multiScatterPush.solveParams[0] = static_cast<float>(kMultiScatterVolumeDim);
+        multiScatterPush.solveParams[1] = kMultiScatterLambda;
+        multiScatterPush.solveParams[2] = 20.0f / static_cast<float>(kMultiScatterVolumeDim);
+        multiScatterPush.solveParams[3] = 0.0f;
+
+        const std::uint32_t multiScatterIterations =
+            params.multiScatterTemporalMode ? kMultiScatterIterationsLow : kMultiScatterIterationsHigh;
+        for (std::uint32_t iter = 0; iter < multiScatterIterations; ++iter) {
+            const std::uint32_t setIndex = iter & 1u;
+            vkCmdBindDescriptorSets(
+                frame.commandBuffer,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                multiScatterPass.pipelineLayout,
+                0,
+                1,
+                &multiScatterPass.descriptorSets[setIndex],
+                0,
+                nullptr);
+            vkCmdPushConstants(
+                frame.commandBuffer,
+                multiScatterPass.pipelineLayout,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                sizeof(MultiScatterPush),
+                &multiScatterPush);
+            vkCmdDispatch(frame.commandBuffer, multiDispatch, multiDispatch, multiDispatch);
+
+            const std::uint32_t writtenIndex = (setIndex == 0u) ? 1u : 0u;
+            VkImageMemoryBarrier2 iterBarrier = imageBarrier(
+                multiScatterImages[writtenIndex].image,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            VkDependencyInfo iterDep{};
+            iterDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            iterDep.imageMemoryBarrierCount = 1;
+            iterDep.pImageMemoryBarriers = &iterBarrier;
+            vkCmdPipelineBarrier2(frame.commandBuffer, &iterDep);
+        }
 
         vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, cloudPathTracePass.pipeline);
         vkCmdBindDescriptorSets(
@@ -2582,14 +3207,6 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             &cloudPathTracePass.descriptorSet,
             0,
             nullptr);
-
-        const voxelsprout::core::Vec3 forward = params.camera.forward();
-        const voxelsprout::core::Vec3 right = params.camera.right();
-        const voxelsprout::core::Vec3 up = voxelsprout::core::normalize(voxelsprout::core::cross(right, forward));
-        voxelsprout::core::Vec3 sunDir = voxelsprout::core::normalize(params.scene.sun.direction);
-        if (voxelsprout::core::length(sunDir) <= 0.0f) {
-            sunDir = voxelsprout::core::normalize(voxelsprout::core::Vec3{1.0f, 1.0f, 0.5f});
-        }
 
         CameraPush cloudPush{};
         cloudPush.cameraPositionFov[0] = params.camera.position.x;

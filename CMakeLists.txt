@@ -31,6 +31,8 @@ if(SLANGC_EXECUTABLE)
     endfunction()
 
     add_slang_shader("${CMAKE_SOURCE_DIR}/shaders/cloud_path_trace.comp.slang")
+    add_slang_shader("${CMAKE_SOURCE_DIR}/shaders/cloud_sun_transmittance.comp.slang")
+    add_slang_shader("${CMAKE_SOURCE_DIR}/shaders/cloud_multiscatter.comp.slang")
     add_slang_shader("${CMAKE_SOURCE_DIR}/shaders/tone_map.comp.slang")
     add_custom_target(slang_shaders DEPENDS ${SLANG_SHADER_OUTPUTS})
 else()
