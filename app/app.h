@@ -28,8 +28,6 @@ private:
     bool m_orbitToggleWasDown = false;
     bool m_uiInteracting = false;
     int m_interactionCooldownFrames = 0;
-    int m_cloudUpdateIntervalUi = 2;
-    int m_maxAccumulationSamplesUi = 256;
     float m_sunAzimuthDegreesUi = -45.0f;
     float m_sunElevationDegreesUi = 70.0f;
 

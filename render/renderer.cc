@@ -3099,18 +3099,13 @@ bool Renderer::Impl::render(const RenderParameters& params) {
 
     const bool paramsChanged = hasPreviousParams ? paramsDiffer(params, previousParams) : true;
     const bool resetAccumulation = paramsChanged || !params.enableAccumulation || params.forceReset;
-    const std::uint32_t cloudInterval = std::max(1u, params.cloudUpdateInterval);
     const bool runDensityBakeThisFrame =
         params.densityBakeEveryFrame || paramsChanged || !densityVolumeValid;
 
     if (resetAccumulation) {
         accumulationFrameIndex = 0;
     }
-    const std::uint32_t maxAccumulationSamples = std::max(1u, params.maxAccumulationSamples);
-    const bool accumulationComplete =
-        params.enableAccumulation && (accumulationFrameIndex >= maxAccumulationSamples);
-    const bool runCloudPassThisFrame =
-        !accumulationComplete && (resetAccumulation || ((presentFrameIndex % cloudInterval) == 0u));
+    const bool runCloudPassThisFrame = true;
 
     previousParams = params;
     hasPreviousParams = true;
@@ -3554,7 +3549,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         cloudPush.cloudWarpParams[3] = 0.0f;
         cloudPush.cloudLightParams[0] = 1.0f;
         cloudPush.cloudLightParams[1] = params.scene.volume.ambientLift;
-        cloudPush.cloudLightParams[2] = static_cast<float>(params.scene.volume.maxBounces);
+        cloudPush.cloudLightParams[2] = 1.0f;
         cloudPush.cloudLightParams[3] = params.debugSunTransmittance ? 1.0f : 0.0f;
         cloudPush.frameParams[0] = static_cast<float>(swapchainExtent.width);
         cloudPush.frameParams[1] = static_cast<float>(swapchainExtent.height);

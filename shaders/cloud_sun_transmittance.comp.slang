@@ -20,8 +20,23 @@ Texture3D<float> gDensityVolume;
 [[vk::binding(2, 0)]]
 SamplerState gVolumeSampler;
 
+uint hash3(uint3 p) {
+    uint h = p.x * 747796405u;
+    h ^= p.y * 2891336453u;
+    h ^= p.z * 1181783497u;
+    h ^= (h >> 16u);
+    h *= 2246822519u;
+    h ^= (h >> 13u);
+    h *= 3266489917u;
+    h ^= (h >> 16u);
+    return h;
+}
+
 float sampleDensity(float3 p) {
-    float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
+    float3 uvw = (p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin);
+    if (any(uvw < 0.0f) || any(uvw > 1.0f)) {
+        return 0.0f;
+    }
     return gDensityVolume.SampleLevel(gVolumeSampler, uvw, 0.0f);
 }
 
@@ -58,18 +73,24 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     }
 
     uint steps = (uint)max(gPush.volumeParams.y, 1.0f);
-    float stepSize = tMax / float(steps);
+    float segmentLen = tMax - tMin;
+    float stepSize = segmentLen / float(steps);
+    float densityScale = max(gPush.mediumParams.x, 0.01f);
     if (stepSize <= 0.0f) {
         gSunTransmittance[dispatchThreadID] = 1.0f;
         return;
     }
 
+    const uint h = hash3(dispatchThreadID);
+    const float jitter = float(h & 0x00ffffffu) * (1.0f / 16777216.0f); // [0,1)
+
     float opticalDepth = 0.0f;
-    float t = 0.5f * stepSize;
+    float t = tMin + ((frac(jitter + 0.5f)) * stepSize);
     [loop]
     for (uint i = 0; i < steps; ++i) {
         float3 x = p + sunDir * t;
-        opticalDepth += sampleDensity(x) * 1.5f * stepSize;
+        float sigmaT = sampleDensity(x) * densityScale * 1.5f;
+        opticalDepth += sigmaT * stepSize;
         t += stepSize;
     }
 

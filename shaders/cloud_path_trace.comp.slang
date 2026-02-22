@@ -536,6 +536,8 @@ float3 integrateViewMarchFinal(
     float3 cloudAlbedo,
     float brightnessBoost,
     float ambientLift,
+    float3 ambientSkyBottom,
+    float3 ambientSkyTop,
     bool debugSunTransmittance,
     inout uint rngState,
     out float3 outHistoryAnchor,
@@ -567,6 +569,11 @@ float3 integrateViewMarchFinal(
     const float cosTheta = clamp(dot(-sunDir, -rayDir), -1.0f, 1.0f);
     const float phase = dualHenyeyGreenstein(cosTheta, g);
     const float ambientStrength = lerp(0.05f, 0.6f, saturate(ambientLift));
+    const float cloudBase = gPush.cloudProfileParams.z;
+    const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
+    const float cloudHeightSpan = max(cloudTop - cloudBase, 0.25f);
+    const float3 groundAlbedoColor = float3(0.18f, 0.22f, 0.18f);
+    const float3 earthBounce = sunRadiance * max(sunDir.y, 0.0f) * groundAlbedoColor;
 
     [loop]
     for (uint i = 0u; i < kViewMarchSteps; ++i) {
@@ -590,7 +597,12 @@ float3 integrateViewMarchFinal(
         float powder = 1.0f - exp(-rho * 1.8f);
         float3 direct = rho * Tsun * phase * sunRadiance * cloudAlbedo * (0.25f + 0.75f * powder);
         float3 indirect = rho * E * (0.35f + 0.65f * powder);
-        float3 ambient = rho * sunRadiance * cloudAlbedo * ambientStrength * (1.0f / (4.0f * kPi));
+        float hFrac = saturate((x.y - cloudBase) / cloudHeightSpan);
+        float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
+        float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
+        float3 ambientFloor = sunRadiance * 0.22f;
+        float3 ambientColor = max(localAmbient, ambientFloor);
+        float3 ambient = rho * ambientColor * cloudAlbedo * ambientStrength * (1.0f / (4.0f * kPi));
         Lss += Tview * direct * ds * max(brightnessBoost, 0.0f);
         Lms += Tview * (indirect + ambient) * ds;
 
@@ -829,6 +841,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             cloudAlbedo,
             brightnessBoost,
             ambientLift,
+            ambientSkyBottom,
+            ambientSkyTop,
             debugSunTransmittance,
             rngState,
             historyAnchor,

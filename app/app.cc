@@ -15,6 +15,7 @@ namespace {
 
 constexpr int kInteractivePreviewMaxBounces = 1;
 constexpr int kInteractivePreviewCooldownFrames = 8;
+constexpr int kRealtimeDefaultMaxBounces = 1;
 
 voxelsprout::core::Vec3 sunDirectionFromAngles(float azimuthDegrees, float elevationDegrees) {
     const float azimuthRadians = azimuthDegrees * (3.1415926535f / 180.0f);
@@ -85,7 +86,7 @@ bool App::init() {
     m_renderParams.scene.volume.erosionStrength = 0.75f;
     m_renderParams.scene.volume.brightnessBoost = 1.0f;
     m_renderParams.scene.volume.ambientLift = 0.65f;
-    m_renderParams.scene.volume.maxBounces = 1;
+    m_renderParams.scene.volume.maxBounces = kRealtimeDefaultMaxBounces;
     m_renderParams.exposure = 0.12f;
     m_renderParams.toneMapOperator = 2;
     m_renderParams.toneMapWhitePoint = 1.0f;
@@ -93,9 +94,6 @@ bool App::init() {
     m_renderParams.toneMapContrast = 1.08f;
     m_renderParams.toneMapSaturation = 1.0f;
     m_renderParams.toneMapGamma = 2.2f;
-    m_renderParams.cloudUpdateInterval = 2;
-    m_renderParams.maxAccumulationSamples = 256;
-    m_maxAccumulationSamplesUi = 256;
     sunAnglesFromDirection(m_renderParams.scene.sun.direction, m_sunAzimuthDegreesUi, m_sunElevationDegreesUi);
 
     m_orbitAngle = 1.57079637f;
@@ -196,12 +194,10 @@ void App::buildUi() {
     ImGui::SliderFloat("Cloud top", &m_renderParams.scene.volume.cloudTop, 4.0f, 14.0f, "%.2f");
     ImGui::SliderFloat("Erosion strength", &m_renderParams.scene.volume.erosionStrength, 0.0f, 3.0f, "%.2f");
     ImGui::SliderFloat("Ambient lift", &m_renderParams.scene.volume.ambientLift, 0.0f, 1.5f, "%.2f");
-    ImGui::SliderInt("Max bounces", &m_renderParams.scene.volume.maxBounces, 1, 12);
-    ImGui::Text("1 = real-time approx, >1 = full path traced");
     m_renderParams.scene.volume.albedo = std::clamp(m_renderParams.scene.volume.albedo, 0.9f, 1.0f);
     m_renderParams.scene.volume.cloudTop =
         std::max(m_renderParams.scene.volume.cloudTop, m_renderParams.scene.volume.cloudBase + 0.25f);
-    m_renderParams.scene.volume.maxBounces = std::clamp(m_renderParams.scene.volume.maxBounces, 1, 12);
+    m_renderParams.scene.volume.maxBounces = kRealtimeDefaultMaxBounces;
     ImGui::SliderFloat("Sun intensity", &m_renderParams.scene.sun.intensity, 1.0f, 80.0f, "%.2f");
     ImGui::SliderFloat("Sun azimuth", &m_sunAzimuthDegreesUi, -180.0f, 180.0f, "%.1f deg");
     ImGui::SliderFloat("Sun elevation", &m_sunElevationDegreesUi, -10.0f, 89.0f, "%.1f deg");
@@ -214,20 +210,10 @@ void App::buildUi() {
     if (ImGui::Button("Reset accumulation")) {
         m_renderParams.forceReset = true;
     }
-    ImGui::SliderInt("Cloud update interval (frames)", &m_cloudUpdateIntervalUi, 1, 8);
-    m_cloudUpdateIntervalUi = std::clamp(m_cloudUpdateIntervalUi, 1, 8);
-    m_renderParams.cloudUpdateInterval = static_cast<std::uint32_t>(m_cloudUpdateIntervalUi);
-    ImGui::SliderInt("Max accumulation samples", &m_maxAccumulationSamplesUi, 1, 4096);
-    m_maxAccumulationSamplesUi = std::clamp(m_maxAccumulationSamplesUi, 1, 4096);
-    m_renderParams.maxAccumulationSamples = static_cast<std::uint32_t>(m_maxAccumulationSamplesUi);
-    ImGui::Checkbox("Multi-scatter temporal mode (2 it/frame)", &m_renderParams.multiScatterTemporalMode);
-    ImGui::Text("Multi-scatter iterations: %u", m_renderParams.multiScatterTemporalMode ? 2u : 6u);
+    m_renderParams.multiScatterTemporalMode = false;
     ImGui::Checkbox("Density bake every frame", &m_renderParams.densityBakeEveryFrame);
     ImGui::Text("Density bake mode: %s", m_renderParams.densityBakeEveryFrame ? "dynamic" : "on change");
     ImGui::Text("Frame index: %u", m_renderer.frameIndex());
-    if (m_renderer.frameIndex() >= m_renderParams.maxAccumulationSamples) {
-        ImGui::Text("Accumulation paused (sample cap reached)");
-    }
 
     const voxelsprout::render::GpuTimingInfo& timings = m_renderer.gpuTimings();
     ImGui::Text("GPU cloud: %.3f ms", timings.cloudPathTraceMs);
@@ -269,7 +255,6 @@ void App::run() {
         voxelsprout::render::RenderParameters frameParams = m_renderParams;
         if (interactivePreview) {
             frameParams.scene.volume.maxBounces = std::min(frameParams.scene.volume.maxBounces, kInteractivePreviewMaxBounces);
-            frameParams.cloudUpdateInterval = 1;
             if (m_uiInteracting) {
                 frameParams.enableAccumulation = false;
                 frameParams.forceReset = true;
