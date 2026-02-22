@@ -62,14 +62,16 @@ void densityField(float3 p, out float outDensity, out float outEdge) {
     float3 q = (p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin);
 
     float3 warp = sampleCloudNoise((q * (macroScale * 2.0f)) + 0.37f).gba - 0.5f;
-    float3 qWarped = q + (warp * (0.03f * erosionStrength));
+    float warpStrength = min(0.03f * erosionStrength, 0.04f);
+    float3 qWarped = q + (warp * warpStrength);
+    float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.1f));
+    qWarped.x += h * 0.05f;
 
     float2 weatherUvw = (qWarped.xz + float2(0.31f, -0.17f)) * (macroScale * 0.6f);
     float weatherNoise = sampleCloudNoise(float3(weatherUvw.x, 0.0f, weatherUvw.y)).r;
     float threshold = 1.0f - coverage;
     float cellMask = smoothstep(threshold - 0.1f, threshold + 0.1f, weatherNoise);
 
-    float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.1f));
     float bottomRamp = smoothstep(0.0f, 0.1f, h);
     float localTop = lerp(0.50f, 1.0f, cellMask);
     float topTaper = 1.0f - smoothstep(localTop - 0.15f, localTop + 0.12f, h);
@@ -94,7 +96,8 @@ void densityField(float3 p, out float outDensity, out float outEdge) {
         return;
     }
 
-    float3 detailUvw = qWarped * (detailScale * 8.0f);
+    float detailHeightFactor = lerp(0.6f, 1.3f, h);
+    float3 detailUvw = qWarped * (detailScale * 8.0f * detailHeightFactor);
     float4 detailNoise = sampleCloudDetailNoise(detailUvw);
     float highFreqFbm = detailNoise.g * 0.625f + detailNoise.b * 0.25f + detailNoise.a * 0.125f;
     highFreqFbm += (detailNoise.r - 0.5f) * 0.05f;
