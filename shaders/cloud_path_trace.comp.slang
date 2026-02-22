@@ -206,8 +206,13 @@ float densityField(float3 p) {
 
     const float densityScale = max(gPush.mediumParams.x, 0.01f);
 
+    // 2. Sample low-frequency noise early so the base can be perturbed by vapor wisps.
+    const float3 baseUvw = p * macroScale * 0.15f;
+    const float baseNoise = sampleCloudNoise(baseUvw).r;
+
     const float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
-    const float bottomRamp = smoothstep(0.0f, 0.08f, h);
+    const float perturbedH = saturate(h - (baseNoise * 0.08f));
+    const float bottomRamp = smoothstep(0.0f, 0.15f, perturbedH);
     const float topTaper = 1.0f - smoothstep(0.74f, 0.98f, h);
 
     // 1. Multi-dome container for non-symmetric cauliflower groups.
@@ -248,8 +253,6 @@ float densityField(float3 p) {
     }
 
     // 2. Base shape from low-frequency noise.
-    const float3 baseUvw = p * macroScale * 0.15f;
-    const float baseNoise = sampleCloudNoise(baseUvw).r;
     float baseDensity = remap(baseNoise, 1.0f - structuralMask, 1.0f, 0.0f, 1.0f);
     baseDensity = saturate(baseDensity);
     if (baseDensity <= 0.0f) {
@@ -542,49 +545,57 @@ float airMass(float upDot) {
 
 float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
     float3 v = normalize(dir);
-    float mu = clamp(dot(v, sunDir), -1.0f, 1.0f);
+    
+    // 1. Differentiate Sky vs Ground
+    bool isGround = v.y < 0.0f;
+    // If looking at the ground, mirror the view vector upwards to calculate the sky haze above it
+    float3 viewDir = isGround ? float3(v.x, -v.y, v.z) : v; 
+    
+    float mu = clamp(dot(viewDir, sunDir), -1.0f, 1.0f);
+    float mView = airMass(max(viewDir.y, 0.001f));
+    float mSun = airMass(max(sunDir.y, 0.001f));
 
-    const float vY = max(v.y, 0.01f);
-    const float sY = max(sunDir.y, 0.0f);
-    const float mView = airMass(vY);
-    const float mSun = airMass(sY + 0.01f);
+    float3 betaR = float3(5.8e-6f, 13.5e-6f, 33.1e-6f) * 11000.0f;
+    float3 betaM = float3(21.0e-6f, 21.0e-6f, 21.0e-6f) * 2000.0f;
 
-    // Procedural atmospheric scattering with explicit Mie/Late-hour behavior.
-    const float3 betaR = float3(5.8e-6f, 13.5e-6f, 33.1e-6f) * 11000.0f;
-    const float mieHaze = 1.0f + 4.0f * pow(1.0f - sY, 2.0f);
-    const float3 betaM = float3(21.0e-6f) * 1800.0f * mieHaze;
+    float3 tau = betaR * mView + betaM * mView;
+    float3 extinction = exp(-tau);
 
-    const float sunWarm = pow(1.0f - sY, 1.5f);
-    const float mieG = lerp(0.76f, 0.93f, sunWarm);
-    const float3 mieColor = lerp(float3(1.0f, 1.0f, 1.0f), float3(1.20f, 0.55f, 0.14f), sunWarm);
+    float rayleigh = phaseRayleigh(mu);
+    float mie = phaseMie(mu, 0.82f);
+    float3 inscatter = (betaR * rayleigh + betaM * mie) * exp(-(betaR + betaM) * mSun);
+    inscatter *= (1.0f - extinction) / max(betaR + betaM, float3(1e-4f, 1e-4f, 1e-4f));
 
-    const float3 beta = betaR + betaM;
-    const float3 betaInv = max(beta, float3(1e-4f, 1e-4f, 1e-4f));
+    // 2. Add Horizon Haze (Multiple scattering approximation for the sky)
+    // This adds a bright, realistic atmospheric glow at the horizon line
+    float horizonBlend = exp(-viewDir.y * 4.0f); 
+    float3 horizonGlow = float3(0.5f, 0.65f, 0.8f) * 0.025f; // Bright sky-blue/cyan haze
+    inscatter += horizonGlow * horizonBlend;
 
-    const float rayleigh = phaseRayleigh(mu);
-    const float mie = phaseMie(mu, mieG);
+    float sunDisk = smoothstep(0.9996f, 0.99995f, mu);
+    float sunHalo = pow(saturate(mu), 64.0f);
+    float twilight = smoothstep(-0.18f, 0.08f, sunDir.y);
 
-    float3 inscatter = (betaR * rayleigh + betaM * mie * mieColor);
-    inscatter *= (1.0f - exp(-beta * mView));
-    inscatter *= exp(-beta * mSun);
-    inscatter /= betaInv;
+    float3 sunColor = float3(1.0f, 0.99f, 0.98f);
+    float3 sunTerm = sunColor * (sunDisk * 24.0f + sunHalo * 1.8f);
+    
+    float3 finalSky = (inscatter * twilight + sunTerm) * max(sunIntensity, 0.01f);
 
-    // Horizon/zenith gradation with sunset warm shift.
-    const float viewUp = saturate((v.y + 1.0f) * 0.5f);
-    const float3 zenithSky = float3(0.012f, 0.038f, 0.150f);
-    const float3 horizonSky = float3(0.190f, 0.250f, 0.430f) + float3(0.30f, 0.18f, 0.05f) * sunWarm;
-    const float3 baseSky = lerp(horizonSky, zenithSky, pow(viewUp, 0.9f));
+    // 3. Paint the Ground
+    if (isGround) {
+        float3 groundAlbedo = float3(0.18f, 0.22f, 0.18f); // Earthy green/brown
+        float3 groundLit = groundAlbedo * max(sunDir.y, 0.0f) * sunIntensity * 0.15f;
+        
+        // Fog the ground heavily so it blends seamlessly into the horizon haze
+        float groundFog = exp(v.y * 12.0f); // v.y is negative here, so this approaches 0 looking down
+        
+        // Find what the sky color is exactly AT the horizon to blend with
+        float3 baseHorizonColor = (inscatter * twilight) * max(sunIntensity, 0.01f);
+        
+        finalSky = lerp(groundLit, baseHorizonColor, groundFog);
+    }
 
-    // Sun disk and glow grows warmer and broader at low sun.
-    const float sunsetBoost = 1.0f + 2.5f * sunWarm;
-    const float sunDisk = smoothstep(0.999f, 0.99993f, mu) * sunsetBoost;
-    const float sunHalo = pow(saturate(mu), lerp(48.0f, 16.0f, sunWarm));
-    const float3 sunColor = float3(1.0f, 0.96f, 0.90f);
-    const float3 sunTerm = (sunColor * (sunDisk * 28.0f + sunHalo * (2.2f + 3.0f * sunWarm))) * sunsetBoost;
-
-    const float3 transView = exp(-beta * mView);
-    const float3 skyBase = (baseSky * (0.82f + 0.35f * sunWarm) + inscatter * 0.30f) * (1.0f - 0.20f * (1.0f - viewUp));
-    return (skyBase + sunTerm) * max(sunIntensity, 0.01f) * transView;
+    return finalSky;
 }
 
 float3 skyAmbientLighting(float3 dir, float3 sunDir, float sunIntensity) {

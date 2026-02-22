@@ -77,7 +77,7 @@ bool App::init() {
     m_renderParams.scene.volume.anisotropyG = 0.82f;
     m_renderParams.scene.volume.albedo = 0.97f;
     m_renderParams.scene.volume.macroScale = 1.0f;
-    m_renderParams.scene.volume.detailScale = 1.2f;
+    m_renderParams.scene.volume.detailScale = 2.0f;
     m_renderParams.scene.volume.coverage = 0.72f;
     m_renderParams.scene.volume.weatherScale = 1.0f;
     m_renderParams.scene.volume.cloudBase = 2.5f;
@@ -86,11 +86,11 @@ bool App::init() {
     m_renderParams.scene.volume.brightnessBoost = 1.0f;
     m_renderParams.scene.volume.ambientLift = 0.40f;
     m_renderParams.scene.volume.maxBounces = 1;
-    m_renderParams.exposure = 0.14f;
+    m_renderParams.exposure = 0.12f;
     m_renderParams.toneMapOperator = 2;
     m_renderParams.toneMapWhitePoint = 1.0f;
     m_renderParams.toneMapShoulder = 2.4f;
-    m_renderParams.toneMapContrast = 1.0f;
+    m_renderParams.toneMapContrast = 1.08f;
     m_renderParams.toneMapSaturation = 1.0f;
     m_renderParams.toneMapGamma = 2.2f;
     m_renderParams.cloudUpdateInterval = 2;
