@@ -40,10 +40,13 @@ void densityField(float3 p, out float outDensity, out float outEdge) {
 
     const float cloudBase = gPush.cloudProfileParams.z;
     const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
+    const float cloudHeight = max(cloudTop - cloudBase, 0.1f);
     const float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
     const float coverage = saturate(gPush.cloudProfileParams.x);
 
-    if (p.y < cloudBase || p.y > cloudTop) {
+    // Keep a soft fade band below cloudBase to avoid a hard geometric floor.
+    const float baseFeather = cloudHeight * 0.10f;
+    if (p.y < (cloudBase - baseFeather) || p.y > cloudTop) {
         return;
     }
 
@@ -52,7 +55,7 @@ void densityField(float3 p, out float outDensity, out float outEdge) {
     float boundsMask = edgeFadeX * edgeFadeZ;
 
     float3 q = (p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin);
-    float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.1f));
+    float h = saturate((p.y - cloudBase) / cloudHeight);
 
     float3 warp = sampleCloudNoise(q * macroScale * 1.5f).gba - 0.5f;
     float3 qWarped = q + (warp * 0.04f);
@@ -62,9 +65,12 @@ void densityField(float3 p, out float outDensity, out float outEdge) {
     float weatherNoise = sampleCloudNoise(float3(weatherUvw.x, 0.0f, weatherUvw.y)).r;
     float cellMask = saturate((weatherNoise - (1.0f - coverage)) / max(coverage, 0.01f));
 
-    float bottomRamp = smoothstep(0.0f, 0.05f, h);
+    // Vary local base height slightly per cell so distant silhouettes are not perfectly flat.
+    float localBaseOffset = (weatherNoise - 0.5f) * 0.08f;
+    float hBase = ((p.y - cloudBase) / cloudHeight) - localBaseOffset;
+    float bottomRamp = smoothstep(-0.08f, 0.10f, hBase);
     float localTop = lerp(0.3f, 1.0f, cellMask);
-    float topTaper = 1.0f - smoothstep(localTop - 0.25f, localTop, h);
+    float topTaper = 1.0f - smoothstep(localTop - 0.25f, localTop, saturate(hBase));
 
     float structuralMask = boundsMask * bottomRamp * topTaper * cellMask;
     if (structuralMask <= 0.0f) {
