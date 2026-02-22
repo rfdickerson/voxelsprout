@@ -130,13 +130,8 @@ float3 integrateViewMarchFinal(
     float3 ambientSkyBottom,
     float3 ambientSkyTop,
     bool debugSunTransmittance,
-    float rayJitterOffset,
-    out float3 outHistoryAnchor,
-    out bool outHasHistoryAnchor
+    float rayJitterOffset
 ) {
-    outHistoryAnchor = 0.0f;
-    outHasHistoryAnchor = false;
-
     float tMin = 0.0f;
     float tMax = 0.0f;
     if (!intersectAabb(rayOrigin, rayDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
@@ -198,10 +193,6 @@ float3 integrateViewMarchFinal(
             continue;
         }
         float sigmaT = rho * extinctionCoeff;
-        if (!outHasHistoryAnchor) {
-            outHistoryAnchor = x;
-            outHasHistoryAnchor = true;
-        }
 
         float Tsun = sampleSunTransmittance(x);
         if (debugSunTransmittance) {
@@ -239,42 +230,6 @@ float3 integrateViewMarchFinal(
     return finalCloudLight + (Tview * skyColor(rayDir, sunDir, sunIntensity));
 }
 
-bool reprojectToPrevPixel(float3 worldPoint, uint width, uint height, out int2 prevPixel) {
-    float3 toPoint = worldPoint - gPush.prevCameraPositionFov.xyz;
-    float3 prevForward = gPush.prevCameraForward.xyz;
-    float3 prevRight = gPush.prevCameraRight.xyz;
-    float3 prevUp = gPush.prevCameraUp.xyz;
-
-    float z = dot(toPoint, prevForward);
-    if (z <= 0.01f) {
-        prevPixel = int2(0, 0);
-        return false;
-    }
-
-    float x = dot(toPoint, prevRight);
-    float y = dot(toPoint, prevUp);
-    float aspect = float(width) / float(height);
-    float tanHalfFov = tan(radians(gPush.prevCameraPositionFov.w) * 0.5f);
-    if (tanHalfFov <= 1e-5f) {
-        prevPixel = int2(0, 0);
-        return false;
-    }
-
-    float ndcX = x / (z * tanHalfFov * aspect);
-    float ndcY = y / (z * tanHalfFov);
-    float2 uv;
-    uv.x = ndcX * 0.5f + 0.5f;
-    uv.y = 0.5f - ndcY * 0.5f;
-    if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f) {
-        prevPixel = int2(0, 0);
-        return false;
-    }
-
-    prevPixel = int2(uv * float2(width, height));
-    prevPixel = clamp(prevPixel, int2(0, 0), int2(int(width) - 1, int(height) - 1));
-    return true;
-}
-
 float phaseRayleigh(float cosTheta) {
     return 3.0f * (1.0f + cosTheta * cosTheta) / (16.0f * kPi);
 }
@@ -293,6 +248,18 @@ float airMass(float upDot) {
     return 1.0f / max(denom, 0.02f);
 }
 
+float3 dynamicSunColor(float sunElevation) {
+    float3 sunNoon = float3(1.0f, 0.99f, 0.98f);
+    float3 sunSet = float3(1.0f, 0.22f, 0.03f);
+    // Keep warm tones active through low/mid sun elevations.
+    float t = smoothstep(-0.10f, 0.45f, sunElevation);
+    float3 color = lerp(sunSet, sunNoon, t);
+    // Extra warm bias close to the horizon so clouds do not read as white.
+    float lowSun = 1.0f - smoothstep(-0.02f, 0.30f, sunElevation);
+    float3 warmTint = lerp(float3(1.0f, 1.0f, 1.0f), float3(1.15f, 0.82f, 0.55f), lowSun);
+    return color * warmTint;
+}
+
 float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
     float3 v = normalize(dir);
     
@@ -305,28 +272,31 @@ float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
     float mView = airMass(max(viewDir.y, 0.001f));
     float mSun = airMass(max(sunDir.y, 0.001f));
 
+    // Rayleigh (blue sky), Mie (haze), and ozone (green/yellow absorption).
     float3 betaR = float3(5.8e-6f, 13.5e-6f, 33.1e-6f) * 11000.0f;
     float3 betaM = float3(21.0e-6f, 21.0e-6f, 21.0e-6f) * 2000.0f;
+    float3 betaO = float3(3.426e-7f, 8.298e-7f, 0.356e-7f) * 3000.0f;
 
-    float3 tau = betaR * mView + betaM * mView;
+    float3 tau = betaR * mView + betaM * mView + betaO * mView;
     float3 extinction = exp(-tau);
 
     float rayleigh = phaseRayleigh(mu);
     float mie = phaseMie(mu, 0.82f);
-    float3 inscatter = (betaR * rayleigh + betaM * mie) * exp(-(betaR + betaM) * mSun);
+    float3 inscatter = (betaR * rayleigh + betaM * mie) * exp(-(betaR + betaM + betaO) * mSun);
     inscatter *= (1.0f - extinction) / max(betaR + betaM, float3(1e-4f, 1e-4f, 1e-4f));
 
-    // 2. Add Horizon Haze (Multiple scattering approximation for the sky)
-    // This adds a bright, realistic atmospheric glow at the horizon line
-    float horizonBlend = exp(-viewDir.y * 4.0f); 
-    float3 horizonGlow = float3(0.5f, 0.65f, 0.8f) * 0.025f; // Bright sky-blue/cyan haze
-    inscatter += horizonGlow * horizonBlend;
+    // Shift haze from magenta at low sun to blue during daytime.
+    float horizonBlend = exp(-viewDir.y * 5.0f);
+    float3 dayHaze = float3(0.5f, 0.65f, 0.8f);
+    float3 sunriseHaze = float3(1.2f, 0.35f, 0.65f);
+    float3 horizonColor = lerp(sunriseHaze, dayHaze, smoothstep(-0.1f, 0.15f, sunDir.y));
+    inscatter += horizonColor * horizonBlend * 0.03f;
 
-    float sunDisk = smoothstep(0.9996f, 0.99995f, mu);
+    float sunDisk = smoothstep(0.9997f, 0.99995f, mu);
     float sunHalo = pow(saturate(mu), 64.0f);
     float twilight = smoothstep(-0.18f, 0.08f, sunDir.y);
 
-    float3 sunColor = float3(1.0f, 0.99f, 0.98f);
+    float3 sunColor = dynamicSunColor(sunDir.y);
     float3 sunTerm = sunColor * (sunDisk * 24.0f + sunHalo * 1.8f);
     
     float3 finalSky = (inscatter * twilight + sunTerm) * max(sunIntensity, 0.01f);
@@ -334,7 +304,7 @@ float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
     // 3. Paint the Ground
     if (isGround) {
         float3 groundAlbedo = float3(0.18f, 0.22f, 0.18f); // Earthy green/brown
-        float3 groundLit = groundAlbedo * max(sunDir.y, 0.0f) * sunIntensity * 0.15f;
+        float3 groundLit = groundAlbedo * max(sunDir.y, 0.0f) * sunIntensity * sunColor * 0.15f;
         
         // Fog the ground heavily so it blends seamlessly into the horizon haze
         float groundFog = exp(v.y * 12.0f); // v.y is negative here, so this approaches 0 looking down
@@ -410,7 +380,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
     float3 sunDir = normalize(gPush.sunDirectionIntensity.xyz);
     float sunIntensity = max(gPush.sunDirectionIntensity.w, 0.01f);
-    float3 sunRadiance = float3(1.0f, 1.0f, 0.98f) * sunIntensity;
+    float3 sunRadiance = dynamicSunColor(sunDir.y) * sunIntensity;
 
     float g = clamp(gPush.mediumParams.y, 0.0f, 0.90f);
     float3 cloudAlbedo = float3(gPush.mediumParams.z, gPush.mediumParams.z, gPush.mediumParams.z);
@@ -426,13 +396,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float3 ambientSkyBottom = max(evalSkySH1(float3(0.0f, -1.0f, 0.0f), shC0, shCx, shCy, shCz), 0.0f);
     float3 ambientSkyTop = max(evalSkySH1(float3(0.0f, 1.0f, 0.0f), shC0, shCx, shCy, shCz), 0.0f);
 
-    // Deep shadows should retain a deep blue/cyan tint from sky scattering.
-    const float3 skyBlueTint = float3(0.55f, 0.75f, 1.25f);
-    ambientSkyTop *= skyBlueTint;
-    ambientSkyBottom *= lerp(skyBlueTint, float3(1.0f, 1.0f, 1.0f), 0.5f);
+    // Deep shadows inherit atmospheric color: purple at twilight, blue at daytime.
+    float3 twilightPurple = float3(0.9f, 0.35f, 0.85f);
+    float3 dayBlue = float3(0.55f, 0.75f, 1.25f);
+    float3 currentAmbientTint = lerp(twilightPurple, dayBlue, smoothstep(-0.1f, 0.2f, sunDir.y));
+    ambientSkyTop *= currentAmbientTint;
+    ambientSkyBottom *= lerp(currentAmbientTint, float3(1.0f, 1.0f, 1.0f), 0.5f);
 
-    float3 historyAnchor = 0.0f;
-    bool hasHistoryAnchor = false;
     float3 L = integrateViewMarchFinal(
         rayOrigin,
         rayDir,
@@ -446,26 +416,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         ambientSkyBottom,
         ambientSkyTop,
         debugSunTransmittance,
-        rayJitterOffset,
-        historyAnchor,
-        hasHistoryAnchor);
-
-    if (gPush.historyParams.x > 0.5f && hasHistoryAnchor) {
-        int2 prevPixel;
-        if (reprojectToPrevPixel(historyAnchor, width, height, prevPixel)) {
-            float3 history = gPrevAccumulation.Load(int3(prevPixel, 0)).xyz;
-            float clampStrength = max(gPush.historyParams.z, 1.0f);
-            const float3 lumaWeights = float3(0.2126f, 0.7152f, 0.0722f);
-            float l = dot(L, lumaWeights);
-            float lh = dot(history, lumaWeights);
-            float ratio = lh / max(l, 1.0e-4f);
-            if (ratio > clampStrength) {
-                history *= (clampStrength / ratio);
-            }
-            float blend = saturate(gPush.historyParams.y);
-            L = lerp(L, history, blend);
-        }
-    }
+        rayJitterOffset);
 
     gAccumulation[pixel] = float4(L, 1.0f);
 
