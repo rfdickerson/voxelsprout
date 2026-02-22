@@ -323,6 +323,11 @@ struct CameraPush {
     float cloudWarpParams[4];
     float cloudLightParams[4];
     float frameParams[4];
+    float prevCameraPositionFov[4];
+    float prevCameraForward[4];
+    float prevCameraRight[4];
+    float prevCameraUp[4];
+    float historyParams[4];
 };
 
 struct ToneMapPush {
@@ -455,6 +460,7 @@ struct Renderer::Impl {
     ImageResource accumulationImage;
     ImageResource rngStateImage;
     ImageResource toneMapImage;
+    ImageResource prevAccumulationImage;
     ImageResource densityImage;
     ImageResource sunTransmittanceImage;
     std::array<ImageResource, 2> multiScatterImages{};
@@ -494,6 +500,12 @@ struct Renderer::Impl {
     std::uint64_t latestPresentedComputeTimelineValue = 0;
     bool toneMapOwnedByUi = false;
     bool densityVolumeValid = false;
+    bool hasPreviousCameraState = false;
+    voxelsprout::core::Vec3 previousCameraPosition{};
+    voxelsprout::core::Vec3 previousCameraForward{};
+    voxelsprout::core::Vec3 previousCameraRight{};
+    voxelsprout::core::Vec3 previousCameraUp{};
+    float previousCameraFov = 75.0f;
     GpuTimingInfo timings{};
 
     bool init(GLFWwindow* inWindow);
@@ -1003,7 +1015,7 @@ bool Renderer::Impl::createStorageImages() {
     if (!createImage(
             accumulationImage,
             VK_FORMAT_R16G16B16A16_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
             swapchainExtent.width,
             swapchainExtent.height)) {
         return false;
@@ -1020,6 +1032,14 @@ bool Renderer::Impl::createStorageImages() {
             toneMapImage,
             VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            swapchainExtent.width,
+            swapchainExtent.height)) {
+        return false;
+    }
+    if (!createImage(
+            prevAccumulationImage,
+            VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             swapchainExtent.width,
             swapchainExtent.height)) {
         return false;
@@ -1458,6 +1478,7 @@ void Renderer::Impl::destroyStorageImages() {
     destroyImage(accumulationImage);
     destroyImage(rngStateImage);
     destroyImage(toneMapImage);
+    destroyImage(prevAccumulationImage);
     destroyImage(densityImage);
     destroyImage(sunTransmittanceImage);
     for (ImageResource& multiScatterImage : multiScatterImages) {
@@ -1503,7 +1524,7 @@ bool Renderer::Impl::createDescriptors() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     poolSizes[0].descriptorCount = 8;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    poolSizes[1].descriptorCount = 13;
+    poolSizes[1].descriptorCount = 14;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
     poolSizes[2].descriptorCount = 5;
 
@@ -1534,7 +1555,7 @@ bool Renderer::Impl::createDescriptors() {
         return false;
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 8> cloudBindings{};
+    std::array<VkDescriptorSetLayoutBinding, 9> cloudBindings{};
     cloudBindings[0].binding = 0;
     cloudBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     cloudBindings[0].descriptorCount = 1;
@@ -1567,6 +1588,10 @@ bool Renderer::Impl::createDescriptors() {
     cloudBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     cloudBindings[7].descriptorCount = 1;
     cloudBindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    cloudBindings[8].binding = 8;
+    cloudBindings[8].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    cloudBindings[8].descriptorCount = 1;
+    cloudBindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo cloudLayoutInfo{};
     cloudLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1781,6 +1806,11 @@ bool Renderer::Impl::createDescriptors() {
     densitySampleInfo.imageView = densityImage.view;
     densitySampleInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
+    VkDescriptorImageInfo prevAccumSampleInfo{};
+    prevAccumSampleInfo.sampler = VK_NULL_HANDLE;
+    prevAccumSampleInfo.imageView = prevAccumulationImage.view;
+    prevAccumSampleInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
     VkDescriptorImageInfo multiScatterSampleInfo{};
     multiScatterSampleInfo.sampler = VK_NULL_HANDLE;
     multiScatterSampleInfo.imageView = multiScatterImages[0].view;
@@ -1798,7 +1828,7 @@ bool Renderer::Impl::createDescriptors() {
     toneInfo.imageView = toneMapImage.view;
     toneInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    std::array<VkWriteDescriptorSet, 26> writes{};
+    std::array<VkWriteDescriptorSet, 27> writes{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = cloudPathTracePass.descriptorSet;
     writes[0].dstBinding = 0;
@@ -1856,130 +1886,137 @@ bool Renderer::Impl::createDescriptors() {
     writes[7].pImageInfo = &densitySampleInfo;
 
     writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[8].dstSet = densityBakePass.descriptorSet;
-    writes[8].dstBinding = 0;
-    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[8].dstSet = cloudPathTracePass.descriptorSet;
+    writes[8].dstBinding = 8;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[8].descriptorCount = 1;
-    writes[8].pImageInfo = &densityStorageInfo;
+    writes[8].pImageInfo = &prevAccumSampleInfo;
 
     writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[9].dstSet = densityBakePass.descriptorSet;
-    writes[9].dstBinding = 1;
-    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[9].dstBinding = 0;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[9].descriptorCount = 1;
-    writes[9].pImageInfo = &cloudNoiseInfo;
+    writes[9].pImageInfo = &densityStorageInfo;
 
     writes[10].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[10].dstSet = densityBakePass.descriptorSet;
-    writes[10].dstBinding = 2;
-    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[10].dstBinding = 1;
+    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[10].descriptorCount = 1;
-    writes[10].pImageInfo = &cloudNoiseSamplerInfo;
+    writes[10].pImageInfo = &cloudNoiseInfo;
 
     writes[11].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[11].dstSet = sunTransmittancePass.descriptorSet;
-    writes[11].dstBinding = 0;
-    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[11].dstSet = densityBakePass.descriptorSet;
+    writes[11].dstBinding = 2;
+    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[11].descriptorCount = 1;
-    writes[11].pImageInfo = &sunTransmittanceStorageInfo;
+    writes[11].pImageInfo = &cloudNoiseSamplerInfo;
 
     writes[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[12].dstSet = sunTransmittancePass.descriptorSet;
-    writes[12].dstBinding = 1;
-    writes[12].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[12].dstBinding = 0;
+    writes[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[12].descriptorCount = 1;
-    writes[12].pImageInfo = &densitySampleInfo;
+    writes[12].pImageInfo = &sunTransmittanceStorageInfo;
 
     writes[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[13].dstSet = sunTransmittancePass.descriptorSet;
-    writes[13].dstBinding = 2;
-    writes[13].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[13].dstBinding = 1;
+    writes[13].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[13].descriptorCount = 1;
-    writes[13].pImageInfo = &cloudNoiseSamplerInfo;
+    writes[13].pImageInfo = &densitySampleInfo;
 
     writes[14].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[14].dstSet = multiScatterPass.descriptorSets[0];
-    writes[14].dstBinding = 0;
-    writes[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[14].dstSet = sunTransmittancePass.descriptorSet;
+    writes[14].dstBinding = 2;
+    writes[14].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[14].descriptorCount = 1;
-    writes[14].pImageInfo = &multiScatterBStorageInfo;
+    writes[14].pImageInfo = &cloudNoiseSamplerInfo;
 
     writes[15].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[15].dstSet = multiScatterPass.descriptorSets[0];
-    writes[15].dstBinding = 1;
-    writes[15].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[15].dstBinding = 0;
+    writes[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[15].descriptorCount = 1;
-    writes[15].pImageInfo = &multiScatterAStorageInfo;
+    writes[15].pImageInfo = &multiScatterBStorageInfo;
 
     writes[16].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[16].dstSet = multiScatterPass.descriptorSets[0];
-    writes[16].dstBinding = 2;
+    writes[16].dstBinding = 1;
     writes[16].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[16].descriptorCount = 1;
-    writes[16].pImageInfo = &sunTransmittanceSampleInfo;
+    writes[16].pImageInfo = &multiScatterAStorageInfo;
 
     writes[17].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[17].dstSet = multiScatterPass.descriptorSets[0];
-    writes[17].dstBinding = 3;
+    writes[17].dstBinding = 2;
     writes[17].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[17].descriptorCount = 1;
-    writes[17].pImageInfo = &densitySampleInfo;
+    writes[17].pImageInfo = &sunTransmittanceSampleInfo;
 
     writes[18].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[18].dstSet = multiScatterPass.descriptorSets[0];
-    writes[18].dstBinding = 4;
-    writes[18].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[18].dstBinding = 3;
+    writes[18].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[18].descriptorCount = 1;
-    writes[18].pImageInfo = &cloudNoiseSamplerInfo;
+    writes[18].pImageInfo = &densitySampleInfo;
 
     writes[19].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[19].dstSet = multiScatterPass.descriptorSets[1];
-    writes[19].dstBinding = 0;
-    writes[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[19].dstSet = multiScatterPass.descriptorSets[0];
+    writes[19].dstBinding = 4;
+    writes[19].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[19].descriptorCount = 1;
-    writes[19].pImageInfo = &multiScatterAStorageInfo;
+    writes[19].pImageInfo = &cloudNoiseSamplerInfo;
 
     writes[20].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[20].dstSet = multiScatterPass.descriptorSets[1];
-    writes[20].dstBinding = 1;
-    writes[20].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[20].dstBinding = 0;
+    writes[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[20].descriptorCount = 1;
-    writes[20].pImageInfo = &multiScatterBStorageInfo;
+    writes[20].pImageInfo = &multiScatterAStorageInfo;
 
     writes[21].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[21].dstSet = multiScatterPass.descriptorSets[1];
-    writes[21].dstBinding = 2;
+    writes[21].dstBinding = 1;
     writes[21].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[21].descriptorCount = 1;
-    writes[21].pImageInfo = &sunTransmittanceSampleInfo;
+    writes[21].pImageInfo = &multiScatterBStorageInfo;
 
     writes[22].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[22].dstSet = multiScatterPass.descriptorSets[1];
-    writes[22].dstBinding = 3;
+    writes[22].dstBinding = 2;
     writes[22].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[22].descriptorCount = 1;
-    writes[22].pImageInfo = &densitySampleInfo;
+    writes[22].pImageInfo = &sunTransmittanceSampleInfo;
 
     writes[23].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[23].dstSet = multiScatterPass.descriptorSets[1];
-    writes[23].dstBinding = 4;
-    writes[23].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[23].dstBinding = 3;
+    writes[23].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[23].descriptorCount = 1;
-    writes[23].pImageInfo = &cloudNoiseSamplerInfo;
+    writes[23].pImageInfo = &densitySampleInfo;
 
     writes[24].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[24].dstSet = toneMapPass.descriptorSet;
-    writes[24].dstBinding = 0;
-    writes[24].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[24].dstSet = multiScatterPass.descriptorSets[1];
+    writes[24].dstBinding = 4;
+    writes[24].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[24].descriptorCount = 1;
-    writes[24].pImageInfo = &accumInfo;
+    writes[24].pImageInfo = &cloudNoiseSamplerInfo;
 
     writes[25].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[25].dstSet = toneMapPass.descriptorSet;
-    writes[25].dstBinding = 1;
+    writes[25].dstBinding = 0;
     writes[25].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[25].descriptorCount = 1;
-    writes[25].pImageInfo = &toneInfo;
+    writes[25].pImageInfo = &accumInfo;
+
+    writes[26].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[26].dstSet = toneMapPass.descriptorSet;
+    writes[26].dstBinding = 1;
+    writes[26].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[26].descriptorCount = 1;
+    writes[26].pImageInfo = &toneInfo;
 
     vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     return true;
@@ -2969,6 +3006,7 @@ bool Renderer::Impl::recreateSwapchain() {
     latestPresentedComputeTimelineValue = 0;
     toneMapOwnedByUi = false;
     densityVolumeValid = false;
+    hasPreviousCameraState = false;
     return true;
 }
 
@@ -3152,6 +3190,19 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             rngSrcAccess,
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
+        const VkPipelineStageFlags2 prevAccumSrcStage =
+            (prevAccumulationImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        const VkAccessFlags2 prevAccumSrcAccess =
+            (prevAccumulationImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
+        startupBarriers[startupBarrierCount++] = imageBarrier(
+            prevAccumulationImage.image,
+            prevAccumulationImage.layout,
+            VK_IMAGE_LAYOUT_GENERAL,
+            prevAccumSrcStage,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            prevAccumSrcAccess,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
         const VkPipelineStageFlags2 sunSrcStage =
             (sunTransmittanceImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         const VkAccessFlags2 sunSrcAccess =
@@ -3202,6 +3253,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         accumulationImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         toneMapImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         rngStateImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+        prevAccumulationImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         sunTransmittanceImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         densityImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         multiScatterImages[0].layout = VK_IMAGE_LAYOUT_GENERAL;
@@ -3508,6 +3560,26 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         cloudPush.frameParams[1] = static_cast<float>(swapchainExtent.height);
         cloudPush.frameParams[2] = static_cast<float>(accumulationFrameIndex);
         cloudPush.frameParams[3] = (resetAccumulation || !params.enableAccumulation) ? 1.0f : 0.0f;
+        cloudPush.prevCameraPositionFov[0] = previousCameraPosition.x;
+        cloudPush.prevCameraPositionFov[1] = previousCameraPosition.y;
+        cloudPush.prevCameraPositionFov[2] = previousCameraPosition.z;
+        cloudPush.prevCameraPositionFov[3] = previousCameraFov;
+        cloudPush.prevCameraForward[0] = previousCameraForward.x;
+        cloudPush.prevCameraForward[1] = previousCameraForward.y;
+        cloudPush.prevCameraForward[2] = previousCameraForward.z;
+        cloudPush.prevCameraForward[3] = 0.0f;
+        cloudPush.prevCameraRight[0] = previousCameraRight.x;
+        cloudPush.prevCameraRight[1] = previousCameraRight.y;
+        cloudPush.prevCameraRight[2] = previousCameraRight.z;
+        cloudPush.prevCameraRight[3] = 0.0f;
+        cloudPush.prevCameraUp[0] = previousCameraUp.x;
+        cloudPush.prevCameraUp[1] = previousCameraUp.y;
+        cloudPush.prevCameraUp[2] = previousCameraUp.z;
+        cloudPush.prevCameraUp[3] = 0.0f;
+        cloudPush.historyParams[0] = (!resetAccumulation && hasPreviousCameraState) ? 1.0f : 0.0f;
+        cloudPush.historyParams[1] = 0.90f;
+        cloudPush.historyParams[2] = 1.35f;
+        cloudPush.historyParams[3] = 0.0f;
 
         vkCmdPushConstants(
             frame.commandBuffer,
@@ -3566,6 +3638,64 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         vkCmdDispatch(frame.commandBuffer, dispatchX, dispatchY, 1);
         vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, frame.timestampQueryPool, kTimestampToneEnd);
 
+        std::array<VkImageMemoryBarrier2, 2> historyCopyPrep{};
+        historyCopyPrep[0] = imageBarrier(
+            accumulationImage.image,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT);
+        historyCopyPrep[1] = imageBarrier(
+            prevAccumulationImage.image,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkDependencyInfo historyCopyPrepDep{};
+        historyCopyPrepDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        historyCopyPrepDep.imageMemoryBarrierCount = static_cast<std::uint32_t>(historyCopyPrep.size());
+        historyCopyPrepDep.pImageMemoryBarriers = historyCopyPrep.data();
+        vkCmdPipelineBarrier2(frame.commandBuffer, &historyCopyPrepDep);
+
+        VkImageCopy historyCopy{};
+        historyCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        historyCopy.srcSubresource.mipLevel = 0;
+        historyCopy.srcSubresource.baseArrayLayer = 0;
+        historyCopy.srcSubresource.layerCount = 1;
+        historyCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        historyCopy.dstSubresource.mipLevel = 0;
+        historyCopy.dstSubresource.baseArrayLayer = 0;
+        historyCopy.dstSubresource.layerCount = 1;
+        historyCopy.extent.width = swapchainExtent.width;
+        historyCopy.extent.height = swapchainExtent.height;
+        historyCopy.extent.depth = 1;
+        vkCmdCopyImage(
+            frame.commandBuffer,
+            accumulationImage.image,
+            VK_IMAGE_LAYOUT_GENERAL,
+            prevAccumulationImage.image,
+            VK_IMAGE_LAYOUT_GENERAL,
+            1,
+            &historyCopy);
+
+        VkImageMemoryBarrier2 historyCopyDone = imageBarrier(
+            prevAccumulationImage.image,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        VkDependencyInfo historyCopyDoneDep{};
+        historyCopyDoneDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        historyCopyDoneDep.imageMemoryBarrierCount = 1;
+        historyCopyDoneDep.pImageMemoryBarriers = &historyCopyDone;
+        vkCmdPipelineBarrier2(frame.commandBuffer, &historyCopyDoneDep);
+
         VkImageMemoryBarrier2 toneReadyBarrier = imageBarrier(
             toneMapImage.image,
             VK_IMAGE_LAYOUT_GENERAL,
@@ -3614,8 +3744,15 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         frame.submittedTimelineValue = signalTimelineValue;
         latestSubmittedComputeTimelineValue = signalTimelineValue;
         toneMapImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+        prevAccumulationImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         toneMapOwnedByUi = splitQueueFamilies;
         frameSlot = (selectedFrameSlot + 1u) % kFramesInFlight;
+        previousCameraPosition = params.camera.position;
+        previousCameraForward = forward;
+        previousCameraRight = right;
+        previousCameraUp = up;
+        previousCameraFov = params.camera.fovDegrees;
+        hasPreviousCameraState = true;
 
         if (params.enableAccumulation) {
             accumulationFrameIndex += 1;

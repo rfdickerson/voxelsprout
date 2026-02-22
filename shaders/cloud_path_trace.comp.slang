@@ -18,6 +18,11 @@ struct CameraPush {
     float4 cloudWarpParams; // x = reserved, y = erosion strength, z = reserved
     float4 cloudLightParams; // x = brightness boost, y = ambient lift, z = max bounces, w = debug sun transmittance
     float4 frameParams;  // x = width, y = height, z = frame index, w = reset flag
+    float4 prevCameraPositionFov;
+    float4 prevCameraForward;
+    float4 prevCameraRight;
+    float4 prevCameraUp;
+    float4 historyParams; // x = use history, y = blend weight, z = clamp strength
 };
 
 [[vk::push_constant]]
@@ -39,6 +44,8 @@ Texture3D<float> gSunTransmittance;
 Texture3D<float4> gMultiScatterField;
 [[vk::binding(7, 0)]]
 Texture3D<float> gDensityVolume;
+[[vk::binding(8, 0)]]
+Texture2D<float4> gPrevAccumulation;
 
 uint hash3(uint3 p) {
     uint h = p.x * 747796405u;
@@ -530,8 +537,13 @@ float3 integrateViewMarchFinal(
     float brightnessBoost,
     float ambientLift,
     bool debugSunTransmittance,
-    inout uint rngState
+    inout uint rngState,
+    out float3 outHistoryAnchor,
+    out bool outHasHistoryAnchor
 ) {
+    outHistoryAnchor = 0.0f;
+    outHasHistoryAnchor = false;
+
     float tMin = 0.0f;
     float tMax = 0.0f;
     if (!intersectAabb(rayOrigin, rayDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
@@ -564,6 +576,10 @@ float3 integrateViewMarchFinal(
         if (rho <= 0.0f) {
             continue;
         }
+        if (!outHasHistoryAnchor) {
+            outHistoryAnchor = x;
+            outHasHistoryAnchor = true;
+        }
 
         float Tsun = sampleSunTransmittance(x);
         if (debugSunTransmittance) {
@@ -586,6 +602,42 @@ float3 integrateViewMarchFinal(
     }
 
     return Lss + Lms + (Tview * skyColor(rayDir, sunDir, sunIntensity));
+}
+
+bool reprojectToPrevPixel(float3 worldPoint, uint width, uint height, out int2 prevPixel) {
+    float3 toPoint = worldPoint - gPush.prevCameraPositionFov.xyz;
+    float3 prevForward = gPush.prevCameraForward.xyz;
+    float3 prevRight = gPush.prevCameraRight.xyz;
+    float3 prevUp = gPush.prevCameraUp.xyz;
+
+    float z = dot(toPoint, prevForward);
+    if (z <= 0.01f) {
+        prevPixel = int2(0, 0);
+        return false;
+    }
+
+    float x = dot(toPoint, prevRight);
+    float y = dot(toPoint, prevUp);
+    float aspect = float(width) / float(height);
+    float tanHalfFov = tan(radians(gPush.prevCameraPositionFov.w) * 0.5f);
+    if (tanHalfFov <= 1e-5f) {
+        prevPixel = int2(0, 0);
+        return false;
+    }
+
+    float ndcX = x / (z * tanHalfFov * aspect);
+    float ndcY = y / (z * tanHalfFov);
+    float2 uv;
+    uv.x = ndcX * 0.5f + 0.5f;
+    uv.y = 0.5f - ndcY * 0.5f;
+    if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f) {
+        prevPixel = int2(0, 0);
+        return false;
+    }
+
+    prevPixel = int2(uv * float2(width, height));
+    prevPixel = clamp(prevPixel, int2(0, 0), int2(int(width) - 1, int(height) - 1));
+    return true;
 }
 
 float phaseRayleigh(float cosTheta) {
@@ -764,6 +816,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float3 throughput = 1.0f;
 
     if (maxBounces <= 1u) {
+        float3 historyAnchor = 0.0f;
+        bool hasHistoryAnchor = false;
         L = integrateViewMarchFinal(
             rayOrigin,
             rayDir,
@@ -776,7 +830,22 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             brightnessBoost,
             ambientLift,
             debugSunTransmittance,
-            rngState);
+            rngState,
+            historyAnchor,
+            hasHistoryAnchor);
+
+        if (gPush.historyParams.x > 0.5f && hasHistoryAnchor) {
+            int2 prevPixel;
+            if (reprojectToPrevPixel(historyAnchor, width, height, prevPixel)) {
+                float3 history = gPrevAccumulation.Load(int3(prevPixel, 0)).xyz;
+                float clampStrength = max(gPush.historyParams.z, 0.05f);
+                float3 minColor = L / clampStrength;
+                float3 maxColor = L * clampStrength;
+                history = clamp(history, minColor, maxColor);
+                float blend = saturate(gPush.historyParams.y);
+                L = lerp(L, history, blend);
+            }
+        }
     } else {
         [loop]
         for (uint bounce = 0u; bounce < maxBounces; ++bounce) {
