@@ -294,6 +294,7 @@ bool paramsDiffer(const RenderParameters& a, const RenderParameters& b) {
         !almostEqual(av.cloudBase, bv.cloudBase) ||
         !almostEqual(av.cloudTop, bv.cloudTop) ||
         !almostEqual(av.erosionStrength, bv.erosionStrength) ||
+        av.animateShape != bv.animateShape ||
         !almostEqual(av.ambientLift, bv.ambientLift) ||
         !almostEqual(as.direction.x, bs.direction.x) ||
         !almostEqual(as.direction.y, bs.direction.y) ||
@@ -3567,7 +3568,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             densityPush.cloudProfileParams[3] = params.scene.volume.cloudTop;
             densityPush.cloudWarpParams[0] = 0.0f;
             densityPush.cloudWarpParams[1] = params.scene.volume.erosionStrength;
-            densityPush.cloudWarpParams[2] = 0.0f;
+            densityPush.cloudWarpParams[2] = params.scene.volume.animateShape ? 1.0f : 0.0f;
             densityPush.cloudWarpParams[3] = 0.0f;
             densityPush.volumeParams[0] = static_cast<float>(kDensityVolumeDim);
             densityPush.volumeParams[1] = 0.0f;
@@ -3639,7 +3640,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         sunPush.cloudProfileParams[3] = params.scene.volume.cloudTop;
         sunPush.cloudWarpParams[0] = 0.0f;
         sunPush.cloudWarpParams[1] = params.scene.volume.erosionStrength;
-        sunPush.cloudWarpParams[2] = 0.0f;
+        sunPush.cloudWarpParams[2] = params.scene.volume.animateShape ? 1.0f : 0.0f;
         sunPush.cloudWarpParams[3] = 0.0f;
         sunPush.volumeParams[0] = static_cast<float>(kSunTransmittanceVolumeDim);
         sunPush.volumeParams[1] = static_cast<float>(kSunTransmittanceMarchSteps);
@@ -3691,7 +3692,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         multiScatterPush.cloudProfileParams[3] = params.scene.volume.cloudTop;
         multiScatterPush.cloudWarpParams[0] = 0.0f;
         multiScatterPush.cloudWarpParams[1] = params.scene.volume.erosionStrength;
-        multiScatterPush.cloudWarpParams[2] = 0.0f;
+        multiScatterPush.cloudWarpParams[2] = params.scene.volume.animateShape ? 1.0f : 0.0f;
         multiScatterPush.cloudWarpParams[3] = 0.0f;
         multiScatterPush.solveParams[0] = static_cast<float>(kMultiScatterVolumeDim);
         multiScatterPush.solveParams[1] = kMultiScatterLambda;
@@ -3782,7 +3783,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         cloudPush.cloudProfileParams[3] = params.scene.volume.cloudTop;
         cloudPush.cloudWarpParams[0] = 0.0f;
         cloudPush.cloudWarpParams[1] = params.scene.volume.erosionStrength;
-        cloudPush.cloudWarpParams[2] = 0.0f;
+        cloudPush.cloudWarpParams[2] = params.scene.volume.animateShape ? 1.0f : 0.0f;
         cloudPush.cloudWarpParams[3] = 0.0f;
         cloudPush.cloudLightParams[0] = 1.0f;
         cloudPush.cloudLightParams[1] = params.scene.volume.ambientLift;

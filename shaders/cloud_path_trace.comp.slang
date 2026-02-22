@@ -12,7 +12,7 @@ struct CameraPush {
     float4 mediumParams; // x = density scale, y = g, z = albedo, w = extinction coeff
     float4 cloudShapeParams; // x = macro scale, y = detail scale
     float4 cloudProfileParams; // x = coverage, y = weather scale, z = cloud base, w = cloud top
-    float4 cloudWarpParams; // x = reserved, y = erosion strength, z = reserved
+    float4 cloudWarpParams; // x = reserved, y = erosion strength, z = animate shape (0/1)
     float4 cloudLightParams; // x = brightness boost, y = ambient lift, z = reserved, w = debug sun transmittance
     float4 frameParams;  // x = width, y = height, z = frame index, w = reset flag
     float4 prevCameraPositionFov;
@@ -85,11 +85,15 @@ float henyeyGreenstein(float cosTheta, float g) {
     return (1.0f - g2) / (4.0f * kPi * pow(max(d, 1e-4f), 1.5f));
 }
 
-float dualHenyeyGreenstein(float cosTheta, float g) {
-    // Cloud droplets: dominant forward lobe + weaker backward lobe.
+float tripleHenyeyGreenstein(float cosTheta, float g) {
+    // Base cloud scattering: dominant forward lobe + weaker backward lobe.
     float forwardLobe = henyeyGreenstein(cosTheta, g);
     float backwardLobe = henyeyGreenstein(cosTheta, -0.3f);
-    return lerp(backwardLobe, forwardLobe, 0.7f);
+    float basePhase = lerp(backwardLobe, forwardLobe, 0.7f);
+
+    // Sharp forward spike for silver-lining highlights near the sun disk.
+    float silverLining = henyeyGreenstein(cosTheta, 0.99f);
+    return basePhase + (silverLining * 2.5f);
 }
 
 float3 skyColorWithSunDisk(float3 dir, float3 sunDir, float sunIntensity, bool includeSunDisk);
@@ -160,8 +164,9 @@ float3 integrateViewMarchFinal(
     float Tview = 1.0f;
     const float densityScale = max(gPush.mediumParams.x, 0.01f);
     const float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
+    const float animateShape = step(0.5f, gPush.cloudWarpParams.z);
     const float cosTheta = clamp(dot(-sunDir, -rayDir), -1.0f, 1.0f);
-    const float phase = dualHenyeyGreenstein(cosTheta, g);
+    const float phase = tripleHenyeyGreenstein(cosTheta, g);
     const float ambientStrength = lerp(0.05f, 0.6f, saturate(ambientLift));
     const float extinctionCoeff = max(gPush.mediumParams.w, 0.01f);
     const float cloudBase = gPush.cloudProfileParams.z;
@@ -171,6 +176,8 @@ float3 integrateViewMarchFinal(
     const float3 earthBounce = sunRadiance * max(sunDir.y, 0.0f) * groundAlbedoColor;
 
     float startJitter = saturate(rayJitterOffset) * ds;
+    float time = gPush.frameParams.z * 0.005f * animateShape;
+    float3 windOffset = float3(1.0f, 0.25f, 0.0f) * time;
 
     [loop]
     for (uint i = 0u; i < steps; ++i) {
@@ -179,12 +186,16 @@ float3 integrateViewMarchFinal(
             break;
         }
         float3 x = rayOrigin + rayDir * t;
-        float bakedDensity = sampleDensity(x);
+        float hFrac = saturate((x.y - cloudBase) / cloudHeightSpan);
+        float3 skewedX = x;
+        skewedX.x += hFrac * 1.5f * animateShape;
+
+        float bakedDensity = sampleDensity(skewedX);
         if (bakedDensity <= 0.01f) {
             continue;
         }
         float detailScale = max(gPush.cloudShapeParams.y, 0.01f);
-        float3 detailUvw = x * detailScale * 0.5f;
+        float3 detailUvw = (skewedX + windOffset) * detailScale * 0.5f;
         float4 detailTex = gCloudNoiseVolume.SampleLevel(gVolumeSampler, detailUvw, 0.0f);
         float worleyFbm = detailTex.g * 0.625f + detailTex.b * 0.25f + detailTex.a * 0.125f;
         worleyFbm += (detailTex.r - 0.5f) * 0.05f;
@@ -205,8 +216,12 @@ float3 integrateViewMarchFinal(
 
         float powder = 1.0f - exp(-sigmaT * 2.0f);
         float3 sigmaS = sigmaT * cloudAlbedo;
-        float3 directLight = Tsun * phase * sunRadiance * (0.35f + 0.65f * powder);
-        float hFrac = saturate((x.y - cloudBase) / cloudHeightSpan);
+
+        // Model a rising Earth shadow as sun elevation goes negative.
+        float shadowRise = saturate(-sunDir.y * 12.0f);
+        float shadowHeight = lerp(cloudBase - 2.0f, cloudTop + 1.0f, shadowRise);
+        float earthShadow = smoothstep(shadowHeight - 1.0f, shadowHeight + 1.0f, x.y);
+        float3 directLight = Tsun * phase * sunRadiance * (0.35f + 0.65f * powder) * earthShadow;
         float3 skyFill = lerp(ambientSkyBottom, ambientSkyTop, hFrac);
         float3 localAmbient = max(lerp(earthBounce, skyFill, hFrac), 0.0f);
         float3 ambientFloor = max(sunRadiance * 0.22f, ambientSkyBottom * 0.4f);
@@ -431,6 +446,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
     // Add subtle screen-space blue-noise dither to reduce 8-bit gradient banding.
     L += (blueNoise.rgb - 0.5f) * (1.0f / 255.0f);
-    gAccumulation[pixel] = float4(L, 1.0f);
+
+    float4 prev = gAccumulation[pixel];
+    float frameIndex = gPush.frameParams.z;
+    if (gPush.frameParams.w > 0.5f || frameIndex <= 1.0f) {
+        gAccumulation[pixel] = float4(L, 1.0f);
+    } else {
+        float3 accum = (prev.xyz * frameIndex + L) / (frameIndex + 1.0f);
+        gAccumulation[pixel] = float4(accum, 1.0f);
+    }
 
 }

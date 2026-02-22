@@ -21,6 +21,7 @@ struct VolumeSettings {
     float cloudBase = 1.4f;
     float cloudTop = 8.8f;
     float erosionStrength = 0.55f;
+    bool animateShape = false;
     float brightnessBoost = 1.0f;
     float ambientLift = 0.55f;
 };

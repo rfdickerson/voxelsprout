@@ -192,6 +192,7 @@ void App::buildUi() {
     ImGui::SliderFloat("Cloud base", &m_renderParams.scene.volume.cloudBase, -1.0f, 6.0f, "%.2f");
     ImGui::SliderFloat("Cloud top", &m_renderParams.scene.volume.cloudTop, 4.0f, 14.0f, "%.2f");
     ImGui::SliderFloat("Erosion strength", &m_renderParams.scene.volume.erosionStrength, 0.0f, 3.0f, "%.2f");
+    ImGui::Checkbox("Animate clouds", &m_renderParams.scene.volume.animateShape);
     ImGui::SliderFloat("Ambient lift", &m_renderParams.scene.volume.ambientLift, 0.0f, 1.5f, "%.2f");
     m_renderParams.scene.volume.albedo = std::clamp(m_renderParams.scene.volume.albedo, 0.9f, 1.0f);
     m_renderParams.scene.volume.cloudTop =
