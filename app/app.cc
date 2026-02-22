@@ -81,7 +81,7 @@ bool App::init() {
     m_renderParams.scene.volume.coverage = 0.75f;
     m_renderParams.scene.volume.weatherScale = 1.0f;
     m_renderParams.scene.volume.cloudBase = 2.5f;
-    m_renderParams.scene.volume.cloudTop = 7.5f;
+    m_renderParams.scene.volume.cloudTop = 9.5f;
     m_renderParams.scene.volume.erosionStrength = 0.75f;
     m_renderParams.scene.volume.brightnessBoost = 1.0f;
     m_renderParams.scene.volume.ambientLift = 0.45f;
