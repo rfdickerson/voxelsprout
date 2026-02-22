@@ -92,6 +92,9 @@ float dualHenyeyGreenstein(float cosTheta, float g) {
     return lerp(backwardLobe, forwardLobe, 0.7f);
 }
 
+float3 skyColorWithSunDisk(float3 dir, float3 sunDir, float sunIntensity, bool includeSunDisk);
+float3 skyColor(float3 dir, float3 sunDir, float sunIntensity);
+
 void projectSkySH1(
     float3 sunDir,
     float sunIntensity,
@@ -100,12 +103,13 @@ void projectSkySH1(
     out float3 cy,
     out float3 cz
 ) {
-    const float3 up = skyColor(float3(0.0f, 1.0f, 0.0f), sunDir, sunIntensity);
-    const float3 down = skyColor(float3(0.0f, -1.0f, 0.0f), sunDir, sunIntensity);
-    const float3 right = skyColor(float3(1.0f, 0.0f, 0.0f), sunDir, sunIntensity);
-    const float3 left = skyColor(float3(-1.0f, 0.0f, 0.0f), sunDir, sunIntensity);
-    const float3 front = skyColor(float3(0.0f, 0.0f, 1.0f), sunDir, sunIntensity);
-    const float3 back = skyColor(float3(0.0f, 0.0f, -1.0f), sunDir, sunIntensity);
+    // SH ambient should exclude the sharp solar disk to avoid zenith-energy jumps.
+    const float3 up = skyColorWithSunDisk(float3(0.0f, 1.0f, 0.0f), sunDir, sunIntensity, false);
+    const float3 down = skyColorWithSunDisk(float3(0.0f, -1.0f, 0.0f), sunDir, sunIntensity, false);
+    const float3 right = skyColorWithSunDisk(float3(1.0f, 0.0f, 0.0f), sunDir, sunIntensity, false);
+    const float3 left = skyColorWithSunDisk(float3(-1.0f, 0.0f, 0.0f), sunDir, sunIntensity, false);
+    const float3 front = skyColorWithSunDisk(float3(0.0f, 0.0f, 1.0f), sunDir, sunIntensity, false);
+    const float3 back = skyColorWithSunDisk(float3(0.0f, 0.0f, -1.0f), sunDir, sunIntensity, false);
 
     c0 = (up + down + right + left + front + back) * (1.0f / 6.0f);
     cx = 0.5f * (right - left);
@@ -221,7 +225,9 @@ float3 integrateViewMarchFinal(
         }
     }
 
-    const float fogDensity = 0.012f;
+    const float fogDensityBase = 0.018f;
+    float horizonFogBoost = lerp(1.75f, 1.0f, saturate(rayDir.y * 0.5f + 0.5f));
+    float fogDensity = fogDensityBase * horizonFogBoost;
     float fogExtinction = exp(-tMin * fogDensity);
     float3 fogColor = lerp(ambientSkyBottom, ambientSkyTop, clamp(rayDir.y * 0.5f + 0.5f, 0.0f, 1.0f));
     float3 finalCloudLight = Lss + Lms;
@@ -250,17 +256,11 @@ float airMass(float upDot) {
 
 float3 dynamicSunColor(float sunElevation) {
     float3 sunNoon = float3(1.0f, 0.99f, 0.98f);
-    float3 sunSet = float3(1.0f, 0.22f, 0.03f);
-    // Keep warm tones active through low/mid sun elevations.
-    float t = smoothstep(-0.10f, 0.45f, sunElevation);
-    float3 color = lerp(sunSet, sunNoon, t);
-    // Extra warm bias close to the horizon so clouds do not read as white.
-    float lowSun = 1.0f - smoothstep(-0.02f, 0.30f, sunElevation);
-    float3 warmTint = lerp(float3(1.0f, 1.0f, 1.0f), float3(1.15f, 0.82f, 0.55f), lowSun);
-    return color * warmTint;
+    float3 sunSet = float3(1.0f, 0.35f, 0.05f);
+    return lerp(sunSet, sunNoon, smoothstep(-0.05f, 0.2f, sunElevation));
 }
 
-float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
+float3 skyColorWithSunDisk(float3 dir, float3 sunDir, float sunIntensity, bool includeSunDisk) {
     float3 v = normalize(dir);
     
     // 1. Differentiate Sky vs Ground
@@ -292,8 +292,8 @@ float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
     float3 horizonColor = lerp(sunriseHaze, dayHaze, smoothstep(-0.1f, 0.15f, sunDir.y));
     inscatter += horizonColor * horizonBlend * 0.03f;
 
-    float sunDisk = smoothstep(0.9997f, 0.99995f, mu);
-    float sunHalo = pow(saturate(mu), 64.0f);
+    float sunDisk = includeSunDisk ? smoothstep(0.9997f, 0.99995f, mu) : 0.0f;
+    float sunHalo = includeSunDisk ? pow(saturate(mu), 64.0f) : 0.0f;
     float twilight = smoothstep(-0.18f, 0.08f, sunDir.y);
 
     float3 sunColor = dynamicSunColor(sunDir.y);
@@ -316,6 +316,10 @@ float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
     }
 
     return finalSky;
+}
+
+float3 skyColor(float3 dir, float3 sunDir, float sunIntensity) {
+    return skyColorWithSunDisk(dir, sunDir, sunIntensity, true);
 }
 
 float3 skyAmbientLighting(float3 dir, float3 sunDir, float sunIntensity) {
