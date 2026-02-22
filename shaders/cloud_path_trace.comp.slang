@@ -230,7 +230,13 @@ float3 integrateViewMarchFinal(
         }
     }
 
-    return Lss + Lms + (Tview * skyColor(rayDir, sunDir, sunIntensity));
+    const float fogDensity = 0.012f;
+    float fogExtinction = exp(-tMin * fogDensity);
+    float3 fogColor = lerp(ambientSkyBottom, ambientSkyTop, clamp(rayDir.y * 0.5f + 0.5f, 0.0f, 1.0f));
+    float3 finalCloudLight = Lss + Lms;
+    finalCloudLight = lerp(fogColor * (1.0f - Tview), finalCloudLight, fogExtinction);
+
+    return finalCloudLight + (Tview * skyColor(rayDir, sunDir, sunIntensity));
 }
 
 bool reprojectToPrevPixel(float3 worldPoint, uint width, uint height, out int2 prevPixel) {
