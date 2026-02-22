@@ -73,7 +73,8 @@ bool App::init() {
     m_renderParams.scene.sun.direction = sunDirectionFromAngles(-45.0f, 70.0f);
     m_renderParams.scene.sun.intensity = 28.0f;
     m_renderParams.scene.volume.densityScale = 4.6f;
-    m_renderParams.scene.volume.anisotropyG = 0.82f;
+    m_renderParams.scene.volume.extinctionCoeff = 1.5f;
+    m_renderParams.scene.volume.anisotropyG = 0.55f;
     m_renderParams.scene.volume.albedo = 0.97f;
     m_renderParams.scene.volume.macroScale = 0.90f;
     m_renderParams.scene.volume.detailScale = 1.35f;
@@ -180,6 +181,7 @@ void App::buildUi() {
 
     ImGui::SeparatorText("Cloud");
     ImGui::SliderFloat("Density scale", &m_renderParams.scene.volume.densityScale, 0.1f, 8.0f, "%.2f");
+    ImGui::SliderFloat("Extinction coeff", &m_renderParams.scene.volume.extinctionCoeff, 0.2f, 4.0f, "%.2f");
     ImGui::SliderFloat("g parameter", &m_renderParams.scene.volume.anisotropyG, 0.0f, 0.90f, "%.2f");
     m_renderParams.scene.volume.anisotropyG = std::clamp(m_renderParams.scene.volume.anisotropyG, 0.0f, 0.90f);
     ImGui::SliderFloat("Cloud albedo", &m_renderParams.scene.volume.albedo, 0.9f, 1.0f, "%.3f");

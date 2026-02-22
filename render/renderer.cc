@@ -284,6 +284,7 @@ bool paramsDiffer(const RenderParameters& a, const RenderParameters& b) {
         !almostEqual(ac.pitchDegrees, bc.pitchDegrees) ||
         !almostEqual(ac.fovDegrees, bc.fovDegrees) ||
         !almostEqual(av.densityScale, bv.densityScale) ||
+        !almostEqual(av.extinctionCoeff, bv.extinctionCoeff) ||
         !almostEqual(av.anisotropyG, bv.anisotropyG) ||
         !almostEqual(av.albedo, bv.albedo) ||
         !almostEqual(av.macroScale, bv.macroScale) ||
@@ -2314,9 +2315,7 @@ bool Renderer::Impl::createPipelines() {
     VkShaderModule sunTransmittanceModule = createShaderModuleFromSpv(kSunTransmittanceShaderPath);
     VkShaderModule multiScatterModule = createShaderModuleFromSpv(kMultiScatterShaderPath);
     VkShaderModule toneModule = createShaderModuleFromSpv(kToneMapShaderPath);
-    if (cloudModule == VK_NULL_HANDLE || densityModule == VK_NULL_HANDLE || sunTransmittanceModule == VK_NULL_HANDLE
-        || multiScatterModule == VK_NULL_HANDLE
-        || toneModule == VK_NULL_HANDLE) {
+    auto destroyModules = [&]() {
         if (cloudModule != VK_NULL_HANDLE) {
             vkDestroyShaderModule(device, cloudModule, nullptr);
         }
@@ -2332,6 +2331,10 @@ bool Renderer::Impl::createPipelines() {
         if (toneModule != VK_NULL_HANDLE) {
             vkDestroyShaderModule(device, toneModule, nullptr);
         }
+    };
+    if (cloudModule == VK_NULL_HANDLE || densityModule == VK_NULL_HANDLE || sunTransmittanceModule == VK_NULL_HANDLE || multiScatterModule == VK_NULL_HANDLE
+        || toneModule == VK_NULL_HANDLE) {
+        destroyModules();
         return false;
     }
 
@@ -2349,11 +2352,7 @@ bool Renderer::Impl::createPipelines() {
 
     if (vkCreatePipelineLayout(device, &cloudLayoutInfo, nullptr, &cloudPathTracePass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create cloud pipeline layout";
-        vkDestroyShaderModule(device, cloudModule, nullptr);
-        vkDestroyShaderModule(device, densityModule, nullptr);
-        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-        vkDestroyShaderModule(device, multiScatterModule, nullptr);
-        vkDestroyShaderModule(device, toneModule, nullptr);
+        destroyModules();
         return false;
     }
 
@@ -2371,11 +2370,7 @@ bool Renderer::Impl::createPipelines() {
 
     if (vkCreatePipelineLayout(device, &densityLayoutInfo, nullptr, &densityBakePass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create density-bake pipeline layout";
-        vkDestroyShaderModule(device, cloudModule, nullptr);
-        vkDestroyShaderModule(device, densityModule, nullptr);
-        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-        vkDestroyShaderModule(device, multiScatterModule, nullptr);
-        vkDestroyShaderModule(device, toneModule, nullptr);
+        destroyModules();
         return false;
     }
 
@@ -2393,11 +2388,7 @@ bool Renderer::Impl::createPipelines() {
 
     if (vkCreatePipelineLayout(device, &sunLayoutInfo, nullptr, &sunTransmittancePass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create sun transmittance pipeline layout";
-        vkDestroyShaderModule(device, cloudModule, nullptr);
-        vkDestroyShaderModule(device, densityModule, nullptr);
-        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-        vkDestroyShaderModule(device, multiScatterModule, nullptr);
-        vkDestroyShaderModule(device, toneModule, nullptr);
+        destroyModules();
         return false;
     }
 
@@ -2415,11 +2406,7 @@ bool Renderer::Impl::createPipelines() {
 
     if (vkCreatePipelineLayout(device, &multiScatterLayoutInfo, nullptr, &multiScatterPass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create multi-scatter pipeline layout";
-        vkDestroyShaderModule(device, cloudModule, nullptr);
-        vkDestroyShaderModule(device, densityModule, nullptr);
-        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-        vkDestroyShaderModule(device, multiScatterModule, nullptr);
-        vkDestroyShaderModule(device, toneModule, nullptr);
+        destroyModules();
         return false;
     }
 
@@ -2437,11 +2424,7 @@ bool Renderer::Impl::createPipelines() {
 
     if (vkCreatePipelineLayout(device, &toneLayoutInfo, nullptr, &toneMapPass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create tone map pipeline layout";
-        vkDestroyShaderModule(device, cloudModule, nullptr);
-        vkDestroyShaderModule(device, densityModule, nullptr);
-        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-        vkDestroyShaderModule(device, multiScatterModule, nullptr);
-        vkDestroyShaderModule(device, toneModule, nullptr);
+        destroyModules();
         return false;
     }
 
@@ -2458,11 +2441,7 @@ bool Renderer::Impl::createPipelines() {
 
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cloudPipelineInfo, nullptr, &cloudPathTracePass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create cloud compute pipeline";
-        vkDestroyShaderModule(device, cloudModule, nullptr);
-        vkDestroyShaderModule(device, densityModule, nullptr);
-        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-        vkDestroyShaderModule(device, multiScatterModule, nullptr);
-        vkDestroyShaderModule(device, toneModule, nullptr);
+        destroyModules();
         return false;
     }
 
@@ -2479,11 +2458,7 @@ bool Renderer::Impl::createPipelines() {
 
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &densityPipelineInfo, nullptr, &densityBakePass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create density-bake compute pipeline";
-        vkDestroyShaderModule(device, cloudModule, nullptr);
-        vkDestroyShaderModule(device, densityModule, nullptr);
-        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-        vkDestroyShaderModule(device, multiScatterModule, nullptr);
-        vkDestroyShaderModule(device, toneModule, nullptr);
+        destroyModules();
         return false;
     }
 
@@ -2500,11 +2475,7 @@ bool Renderer::Impl::createPipelines() {
 
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &sunPipelineInfo, nullptr, &sunTransmittancePass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create sun transmittance compute pipeline";
-        vkDestroyShaderModule(device, cloudModule, nullptr);
-        vkDestroyShaderModule(device, densityModule, nullptr);
-        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-        vkDestroyShaderModule(device, multiScatterModule, nullptr);
-        vkDestroyShaderModule(device, toneModule, nullptr);
+        destroyModules();
         return false;
     }
 
@@ -2521,11 +2492,7 @@ bool Renderer::Impl::createPipelines() {
 
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &multiScatterPipelineInfo, nullptr, &multiScatterPass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create multi-scatter compute pipeline";
-        vkDestroyShaderModule(device, cloudModule, nullptr);
-        vkDestroyShaderModule(device, densityModule, nullptr);
-        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-        vkDestroyShaderModule(device, multiScatterModule, nullptr);
-        vkDestroyShaderModule(device, toneModule, nullptr);
+        destroyModules();
         return false;
     }
 
@@ -2542,19 +2509,11 @@ bool Renderer::Impl::createPipelines() {
 
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &tonePipelineInfo, nullptr, &toneMapPass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create tone map compute pipeline";
-        vkDestroyShaderModule(device, cloudModule, nullptr);
-        vkDestroyShaderModule(device, densityModule, nullptr);
-        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-        vkDestroyShaderModule(device, multiScatterModule, nullptr);
-        vkDestroyShaderModule(device, toneModule, nullptr);
+        destroyModules();
         return false;
     }
 
-    vkDestroyShaderModule(device, cloudModule, nullptr);
-    vkDestroyShaderModule(device, densityModule, nullptr);
-    vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
-    vkDestroyShaderModule(device, multiScatterModule, nullptr);
-    vkDestroyShaderModule(device, toneModule, nullptr);
+    destroyModules();
     return true;
 }
 
@@ -3597,7 +3556,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             densityPush.mediumParams[0] = params.scene.volume.densityScale;
             densityPush.mediumParams[1] = params.scene.volume.anisotropyG;
             densityPush.mediumParams[2] = params.scene.volume.albedo;
-            densityPush.mediumParams[3] = 0.0f;
+            densityPush.mediumParams[3] = params.scene.volume.extinctionCoeff;
             densityPush.cloudShapeParams[0] = params.scene.volume.macroScale;
             densityPush.cloudShapeParams[1] = params.scene.volume.detailScale;
             densityPush.cloudShapeParams[2] = 0.0f;
@@ -3669,7 +3628,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         sunPush.mediumParams[0] = params.scene.volume.densityScale;
         sunPush.mediumParams[1] = params.scene.volume.anisotropyG;
         sunPush.mediumParams[2] = params.scene.volume.albedo;
-        sunPush.mediumParams[3] = 0.0f;
+        sunPush.mediumParams[3] = params.scene.volume.extinctionCoeff;
         sunPush.cloudShapeParams[0] = params.scene.volume.macroScale;
         sunPush.cloudShapeParams[1] = params.scene.volume.detailScale;
         sunPush.cloudShapeParams[2] = 0.0f;
@@ -3721,7 +3680,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         multiScatterPush.mediumParams[0] = params.scene.volume.densityScale;
         multiScatterPush.mediumParams[1] = params.scene.volume.anisotropyG;
         multiScatterPush.mediumParams[2] = params.scene.volume.albedo;
-        multiScatterPush.mediumParams[3] = 0.0f;
+        multiScatterPush.mediumParams[3] = params.scene.volume.extinctionCoeff;
         multiScatterPush.cloudShapeParams[0] = params.scene.volume.macroScale;
         multiScatterPush.cloudShapeParams[1] = params.scene.volume.detailScale;
         multiScatterPush.cloudShapeParams[2] = 0.0f;
@@ -3812,7 +3771,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         cloudPush.mediumParams[0] = params.scene.volume.densityScale;
         cloudPush.mediumParams[1] = params.scene.volume.anisotropyG;
         cloudPush.mediumParams[2] = params.scene.volume.albedo;
-        cloudPush.mediumParams[3] = 0.0f;
+        cloudPush.mediumParams[3] = params.scene.volume.extinctionCoeff;
         cloudPush.cloudShapeParams[0] = params.scene.volume.macroScale;
         cloudPush.cloudShapeParams[1] = params.scene.volume.detailScale;
         cloudPush.cloudShapeParams[2] = 0.0f;

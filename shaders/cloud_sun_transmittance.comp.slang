@@ -3,7 +3,7 @@ static const float3 kCloudAabbMax = float3(10.0f, 10.0f, 10.0f);
 
 struct SunTransmittancePush {
     float4 sunDirectionIntensity;
-    float4 mediumParams; // x = density scale, y = g, z = albedo
+    float4 mediumParams; // x = density scale, y = g, z = albedo, w = extinction coeff
     float4 cloudShapeParams; // x = macro scale, y = detail scale
     float4 cloudProfileParams; // x = coverage, y = weather scale, z = cloud base, w = cloud top
     float4 cloudWarpParams; // y = erosion strength
@@ -76,6 +76,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float segmentLen = tMax - tMin;
     float stepSize = segmentLen / float(steps);
     float densityScale = max(gPush.mediumParams.x, 0.01f);
+    float extinctionCoeff = max(gPush.mediumParams.w, 0.01f);
     if (stepSize <= 0.0f) {
         gSunTransmittance[dispatchThreadID] = 1.0f;
         return;
@@ -89,7 +90,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     [loop]
     for (uint i = 0; i < steps; ++i) {
         float3 x = p + sunDir * t;
-        float sigmaT = sampleDensity(x) * densityScale * 1.5f;
+        float sigmaT = sampleDensity(x) * densityScale * extinctionCoeff;
         opticalDepth += sigmaT * stepSize;
         t += stepSize;
     }

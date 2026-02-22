@@ -11,6 +11,7 @@ struct SunLight {
 
 struct VolumeSettings {
     float densityScale = 0.2f;
+    float extinctionCoeff = 1.5f;
     float anisotropyG = 0.6f;
     float albedo = 0.99f;
     float macroScale = 0.34f;

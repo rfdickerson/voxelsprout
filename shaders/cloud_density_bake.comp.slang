@@ -2,7 +2,7 @@ static const float3 kCloudAabbMin = float3(-10.0f, 0.0f, -10.0f);
 static const float3 kCloudAabbMax = float3(10.0f, 10.0f, 10.0f);
 
 struct DensityBakePush {
-    float4 mediumParams; // x = density scale, y = g, z = albedo
+    float4 mediumParams; // x = density scale, y = g, z = albedo, w = extinction coeff
     float4 cloudShapeParams; // x = macro scale, y = detail scale
     float4 cloudProfileParams; // x = coverage, y = weather scale, z = cloud base, w = cloud top
     float4 cloudWarpParams; // y = erosion strength
@@ -16,8 +16,6 @@ ConstantBuffer<DensityBakePush> gPush;
 RWTexture3D<float> gDensityVolume;
 [[vk::binding(1, 0)]]
 Texture3D<float4> gCloudNoiseVolume;
-[[vk::binding(2, 0)]]
-Texture3D<float4> gCloudDetailNoiseVolume;
 [[vk::binding(3, 0)]]
 SamplerState gVolumeSampler;
 [[vk::binding(4, 0)]]
@@ -25,10 +23,6 @@ RWTexture3D<float> gDensityEdgeVolume;
 
 float4 sampleCloudNoise(float3 p) {
     return gCloudNoiseVolume.SampleLevel(gVolumeSampler, p, 0.0f);
-}
-
-float4 sampleCloudDetailNoise(float3 p) {
-    return gCloudDetailNoiseVolume.SampleLevel(gVolumeSampler, p, 0.0f);
 }
 
 float remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
@@ -47,8 +41,6 @@ void densityField(float3 p, out float outDensity, out float outEdge) {
     const float cloudBase = gPush.cloudProfileParams.z;
     const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
     const float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
-    const float detailScale = max(gPush.cloudShapeParams.y, 0.08f);
-    const float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
     const float coverage = saturate(gPush.cloudProfileParams.x);
 
     if (p.y < cloudBase || p.y > cloudTop) {
@@ -60,59 +52,39 @@ void densityField(float3 p, out float outDensity, out float outEdge) {
     float boundsMask = edgeFadeX * edgeFadeZ;
 
     float3 q = (p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin);
-
-    float3 warp = sampleCloudNoise((q * (macroScale * 2.0f)) + 0.37f).gba - 0.5f;
-    float warpStrength = min(0.03f * erosionStrength, 0.04f);
-    float3 qWarped = q + (warp * warpStrength);
     float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.1f));
-    qWarped.x += h * 0.05f;
 
-    float2 weatherUvw = (qWarped.xz + float2(0.31f, -0.17f)) * (macroScale * 0.6f);
+    float3 warp = sampleCloudNoise(q * macroScale * 1.5f).gba - 0.5f;
+    float3 qWarped = q + (warp * 0.04f);
+    qWarped.x += h * 0.08f;
+
+    float2 weatherUvw = (qWarped.xz + float2(0.31f, -0.17f)) * (macroScale * 0.5f);
     float weatherNoise = sampleCloudNoise(float3(weatherUvw.x, 0.0f, weatherUvw.y)).r;
-    float threshold = 1.0f - coverage;
-    float cellMask = smoothstep(threshold - 0.1f, threshold + 0.1f, weatherNoise);
+    float cellMask = saturate((weatherNoise - (1.0f - coverage)) / max(coverage, 0.01f));
 
-    float bottomRamp = smoothstep(0.0f, 0.1f, h);
-    float localTop = lerp(0.50f, 1.0f, cellMask);
-    float topTaper = 1.0f - smoothstep(localTop - 0.15f, localTop + 0.12f, h);
-    const float localCoverageBoost = saturate(0.25f + 0.75f * cellMask);
-    float midBulge = 1.0f - abs(h - 0.45f) * 2.2f;
-    midBulge = saturate(midBulge);
-    float flatBase = 1.0f - smoothstep(0.00f, 0.06f, h);
-    float vertical = bottomRamp * topTaper * (0.65f + 0.35f * midBulge);
-    vertical *= (0.85f + 0.15f * flatBase);
+    float bottomRamp = smoothstep(0.0f, 0.05f, h);
+    float localTop = lerp(0.3f, 1.0f, cellMask);
+    float topTaper = 1.0f - smoothstep(localTop - 0.25f, localTop, h);
 
-    float structuralMask = boundsMask * max(vertical, 0.12f) * localCoverageBoost;
+    float structuralMask = boundsMask * bottomRamp * topTaper * cellMask;
     if (structuralMask <= 0.0f) {
         return;
     }
 
-    float3 baseUvw = qWarped * (macroScale * 2.0f);
+    float3 baseUvw = qWarped * (macroScale * 2.5f);
     float baseNoise = sampleCloudNoise(baseUvw).r;
-    float remapThreshold = (1.0f - structuralMask) * 0.55f;
+    baseNoise = saturate(baseNoise + (coverage * 0.5f * structuralMask));
+
+    float remapThreshold = (1.0f - structuralMask) * 0.65f;
     float baseDensity = remap(baseNoise, remapThreshold, 1.0f, 0.0f, 1.0f);
-    baseDensity = saturate(pow(saturate(baseDensity), 0.6f));
+    baseDensity *= boundsMask;
+    baseDensity = saturate(pow(baseDensity, 0.6f));
     if (baseDensity <= 0.0f) {
         return;
     }
 
-    float detailHeightFactor = lerp(0.6f, 1.3f, h);
-    float3 detailUvw = qWarped * (detailScale * 8.0f * detailHeightFactor);
-    float4 detailNoise = sampleCloudDetailNoise(detailUvw);
-    float highFreqFbm = detailNoise.g * 0.625f + detailNoise.b * 0.25f + detailNoise.a * 0.125f;
-    highFreqFbm += (detailNoise.r - 0.5f) * 0.05f;
-
-    float heightBias = lerp(0.1f, 1.0f, h);
-    float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity) * heightBias;
-    float core = pow(baseDensity, 1.2f);
-    float shell = max(baseDensity - core, 0.0f);
-    float erodedShell = remap(shell, erosionModifier * erosionStrength, 1.0f, 0.0f, 1.0f);
-    float finalDensity = core + erodedShell;
-    finalDensity = saturate(finalDensity);
-    finalDensity = min(finalDensity, 0.98f);
-    outDensity = finalDensity;
-    float thin = 1.0f - saturate(finalDensity);
-    outEdge = pow(thin, 0.6f);
+    outDensity = baseDensity;
+    outEdge = pow(1.0f - baseDensity, 0.5f);
 }
 
 [shader("compute")]

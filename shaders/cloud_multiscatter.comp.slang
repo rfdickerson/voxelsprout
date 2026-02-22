@@ -4,7 +4,7 @@ static const float kPi = 3.1415926535f;
 
 struct MultiScatterPush {
     float4 sunDirectionIntensity;
-    float4 mediumParams; // x = density scale, y = g, z = albedo
+    float4 mediumParams; // x = density scale, y = g, z = albedo, w = extinction coeff
     float4 cloudShapeParams; // x = macro scale, y = detail scale
     float4 cloudProfileParams; // x = coverage, y = weather scale, z = cloud base, w = cloud top
     float4 cloudWarpParams; // y = erosion strength
@@ -22,13 +22,6 @@ Texture3D<float4> gMultiScatterIn;
 Texture3D<float> gSunTransmittance;
 [[vk::binding(3, 0)]]
 Texture3D<float> gDensityVolume;
-[[vk::binding(4, 0)]]
-SamplerState gVolumeSampler;
-
-float sampleDensity(float3 p) {
-    float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
-    return gDensityVolume.SampleLevel(gVolumeSampler, uvw, 0.0f);
-}
 
 float3 sampleMs(int3 p, uint dim) {
     int3 clamped = clamp(p, int3(0, 0, 0), int3(int(dim) - 1, int(dim) - 1, int(dim) - 1));
@@ -46,28 +39,56 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float lambda = saturate(gPush.solveParams.y);
     float stepDistance = max(gPush.solveParams.z, 1e-3f);
     float densityScale = max(gPush.mediumParams.x, 0.01f);
+    float extinctionCoeff = max(gPush.mediumParams.w, 0.01f);
     float cloudAlbedo = saturate(gPush.mediumParams.z);
     float3 sunRadiance = float3(1.0f, 1.0f, 0.98f) * max(gPush.sunDirectionIntensity.w, 0.01f);
 
     int3 voxel = int3(dispatchThreadID);
-    float3 uvw = (float3(dispatchThreadID) + 0.5f) / float(dim);
-    float3 p = lerp(kCloudAabbMin, kCloudAabbMax, uvw);
+    uint3 msDim = uint3(dim, dim, dim);
 
-    float density = sampleDensity(p) * densityScale * 1.5f;
-    float sunTr = gSunTransmittance.SampleLevel(gVolumeSampler, uvw, 0.0f);
+    uint3 densityDim;
+    gDensityVolume.GetDimensions(densityDim.x, densityDim.y, densityDim.z);
+    densityDim = max(densityDim, uint3(1u, 1u, 1u));
+
+    uint3 sunDim;
+    gSunTransmittance.GetDimensions(sunDim.x, sunDim.y, sunDim.z);
+    sunDim = max(sunDim, uint3(1u, 1u, 1u));
+
+    uint3 densityCoord = min((dispatchThreadID * densityDim) / msDim, densityDim - 1u);
+    uint3 sunCoord = min((dispatchThreadID * sunDim) / msDim, sunDim - 1u);
+    int4 densityTexCoord = int4(densityCoord, 0);
+    int4 sunTexCoord = int4(sunCoord, 0);
+
+    float rawDensity = gDensityVolume.Load(densityTexCoord).r;
+    float sunTr = gSunTransmittance.Load(sunTexCoord).r;
+    float density = rawDensity * densityScale * extinctionCoeff;
     float3 source = density * sunTr * sunRadiance * (1.0f / (4.0f * kPi));
 
     float3 prev = sampleMs(voxel, dim);
-    float3 blur = (
-        sampleMs(voxel + int3(1, 0, 0), dim) +
-        sampleMs(voxel + int3(-1, 0, 0), dim) +
-        sampleMs(voxel + int3(0, 1, 0), dim) +
-        sampleMs(voxel + int3(0, -1, 0), dim) +
-        sampleMs(voxel + int3(0, 0, 1), dim) +
-        sampleMs(voxel + int3(0, 0, -1), dim)) * (1.0f / 6.0f);
+    float3 msXp = sampleMs(voxel + int3(1, 0, 0), dim);
+    float3 msXn = sampleMs(voxel + int3(-1, 0, 0), dim);
+    float3 msYp = sampleMs(voxel + int3(0, 1, 0), dim);
+    float3 msYn = sampleMs(voxel + int3(0, -1, 0), dim);
+    float3 msZp = sampleMs(voxel + int3(0, 0, 1), dim);
+    float3 msZn = sampleMs(voxel + int3(0, 0, -1), dim);
+
+    float3 sunDir = normalize(gPush.sunDirectionIntensity.xyz);
+    float wXp = 0.5f - 0.5f * sunDir.x;
+    float wXn = 0.5f + 0.5f * sunDir.x;
+    float wYp = 0.5f - 0.5f * sunDir.y;
+    float wYn = 0.5f + 0.5f * sunDir.y;
+    float wZp = 0.5f - 0.5f * sunDir.z;
+    float wZn = 0.5f + 0.5f * sunDir.z;
+
+    float3 blur =
+        (msXp * wXp + msXn * wXn) +
+        (msYp * wYp + msYn * wYn) +
+        (msZp * wZp + msZn * wZn);
+    blur *= (1.0f / 3.0f);
 
     float3 propagated = lerp(prev, blur, lambda);
-    float damping = cloudAlbedo * exp(-density * stepDistance);
-    float3 outE = source + propagated * damping;
+    float transmission = exp(-density * stepDistance);
+    float scatteringFraction = (1.0f - transmission) * cloudAlbedo;
+    float3 outE = source + (propagated * scatteringFraction);
     gMultiScatterOut[dispatchThreadID] = float4(max(outE, 0.0f), 1.0f);
 }

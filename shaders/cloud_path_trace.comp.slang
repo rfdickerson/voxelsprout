@@ -1,7 +1,7 @@
 static const float kPi = 3.1415926535f;
 static const float3 kCloudAabbMin = float3(-10.0f, 0.0f, -10.0f);
 static const float3 kCloudAabbMax = float3(10.0f, 10.0f, 10.0f);
-static const uint kViewMarchSteps = 32u;
+static const uint kViewMarchStepsMax = 256u;
 
 struct CameraPush {
     float4 cameraPositionFov;
@@ -9,7 +9,7 @@ struct CameraPush {
     float4 cameraRight;
     float4 cameraUp;
     float4 sunDirectionIntensity;
-    float4 mediumParams; // x = density scale, y = g, z = albedo
+    float4 mediumParams; // x = density scale, y = g, z = albedo, w = extinction coeff
     float4 cloudShapeParams; // x = macro scale, y = detail scale
     float4 cloudProfileParams; // x = coverage, y = weather scale, z = cloud base, w = cloud top
     float4 cloudWarpParams; // x = reserved, y = erosion strength, z = reserved
@@ -46,155 +46,6 @@ Texture2D<float4> gPrevAccumulation;
 [[vk::binding(9, 0)]]
 Texture3D<float> gDensityEdgeVolume;
 
-uint hash3(uint3 p) {
-    uint h = p.x * 747796405u;
-    h ^= p.y * 2891336453u;
-    h ^= p.z * 1181783497u;
-    h ^= (h >> 16u);
-    h *= 2246822519u;
-    h ^= (h >> 13u);
-    h *= 3266489917u;
-    h ^= (h >> 16u);
-    return h;
-}
-
-float rand01(inout uint state) {
-    state = state * 1664525u + 1013904223u;
-    return float(state & 0x00ffffffu) * (1.0f / 16777216.0f);
-}
-
-float hashToUnitFloat(uint h) {
-    uint v = h ^ 0x9e3779b9u;
-    return float(v & 0x00ffffffu) * (1.0f / 16777216.0f);
-}
-
-float3 fade3(float3 t) {
-    return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
-}
-
-float perlinGrad(uint h, float3 p) {
-    uint g = h & 15u;
-    float u = (g < 8u) ? p.x : p.y;
-    float v = (g < 4u) ? p.y : ((g == 12u || g == 14u) ? p.x : p.z);
-    float a = ((g & 1u) != 0u) ? -u : u;
-    float b = ((g & 2u) != 0u) ? -v : v;
-    return a + b;
-}
-
-float perlinNoise3(float3 p) {
-    int3 i0 = int3(floor(p));
-    int3 i1 = i0 + int3(1, 1, 1);
-    float3 f = frac(p);
-    float3 u = fade3(f);
-
-    float n000 = perlinGrad(hash3(uint3(i0.x, i0.y, i0.z)), f - float3(0.0f, 0.0f, 0.0f));
-    float n100 = perlinGrad(hash3(uint3(i1.x, i0.y, i0.z)), f - float3(1.0f, 0.0f, 0.0f));
-    float n010 = perlinGrad(hash3(uint3(i0.x, i1.y, i0.z)), f - float3(0.0f, 1.0f, 0.0f));
-    float n110 = perlinGrad(hash3(uint3(i1.x, i1.y, i0.z)), f - float3(1.0f, 1.0f, 0.0f));
-    float n001 = perlinGrad(hash3(uint3(i0.x, i0.y, i1.z)), f - float3(0.0f, 0.0f, 1.0f));
-    float n101 = perlinGrad(hash3(uint3(i1.x, i0.y, i1.z)), f - float3(1.0f, 0.0f, 1.0f));
-    float n011 = perlinGrad(hash3(uint3(i0.x, i1.y, i1.z)), f - float3(0.0f, 1.0f, 1.0f));
-    float n111 = perlinGrad(hash3(uint3(i1.x, i1.y, i1.z)), f - float3(1.0f, 1.0f, 1.0f));
-
-    float nx00 = lerp(n000, n100, u.x);
-    float nx10 = lerp(n010, n110, u.x);
-    float nx01 = lerp(n001, n101, u.x);
-    float nx11 = lerp(n011, n111, u.x);
-    float nxy0 = lerp(nx00, nx10, u.y);
-    float nxy1 = lerp(nx01, nx11, u.y);
-    return lerp(nxy0, nxy1, u.z);
-}
-
-float perlinFbm(float3 p) {
-    float sum = 0.0f;
-    float amp = 0.5f;
-    float freq = 1.0f;
-    float norm = 0.0f;
-
-    [unroll]
-    for (int i = 0; i < 5; ++i) {
-        float n = perlinNoise3(p * freq);
-        sum += amp * (0.5f + 0.5f * n);
-        norm += amp;
-        freq *= 2.03f;
-        amp *= 0.5f;
-    }
-
-    return (norm > 0.0f) ? (sum / norm) : 0.0f;
-}
-
-float2 worleyF1F2(float3 p) {
-    int3 cell = int3(floor(p));
-    float f1 = 1e9f;
-    float f2 = 1e9f;
-
-    [loop]
-    for (int z = -1; z <= 1; ++z) {
-        [loop]
-        for (int y = -1; y <= 1; ++y) {
-            [loop]
-            for (int x = -1; x <= 1; ++x) {
-                int3 n = cell + int3(x, y, z);
-                uint h = hash3(uint3(n));
-                float3 j = float3(
-                    hashToUnitFloat(h),
-                    hashToUnitFloat(h * 1664525u + 1013904223u),
-                    hashToUnitFloat(h * 22695477u + 1u));
-                float3 feature = float3(n) + j;
-                float d = length(p - feature);
-                if (d < f1) {
-                    f2 = f1;
-                    f1 = d;
-                } else if (d < f2) {
-                    f2 = d;
-                }
-            }
-        }
-    }
-
-    return float2(f1, f2);
-}
-
-float3 curlNoise(float3 p) {
-    const float e = 0.18f;
-    float3 offA = float3(19.1f, -7.3f, 4.7f);
-    float3 offB = float3(-13.8f, 11.5f, -2.4f);
-    float3 offC = float3(5.2f, 3.9f, 14.1f);
-
-    float n1_y1 = perlinNoise3(p + float3(0.0f, e, 0.0f) + offA);
-    float n1_y0 = perlinNoise3(p - float3(0.0f, e, 0.0f) + offA);
-    float n1_z1 = perlinNoise3(p + float3(0.0f, 0.0f, e) + offA);
-    float n1_z0 = perlinNoise3(p - float3(0.0f, 0.0f, e) + offA);
-
-    float n2_x1 = perlinNoise3(p + float3(e, 0.0f, 0.0f) + offB);
-    float n2_x0 = perlinNoise3(p - float3(e, 0.0f, 0.0f) + offB);
-    float n2_z1 = perlinNoise3(p + float3(0.0f, 0.0f, e) + offB);
-    float n2_z0 = perlinNoise3(p - float3(0.0f, 0.0f, e) + offB);
-
-    float n3_x1 = perlinNoise3(p + float3(e, 0.0f, 0.0f) + offC);
-    float n3_x0 = perlinNoise3(p - float3(e, 0.0f, 0.0f) + offC);
-    float n3_y1 = perlinNoise3(p + float3(0.0f, e, 0.0f) + offC);
-    float n3_y0 = perlinNoise3(p - float3(0.0f, e, 0.0f) + offC);
-
-    float dA_dy = (n1_y1 - n1_y0) / (2.0f * e);
-    float dA_dz = (n1_z1 - n1_z0) / (2.0f * e);
-    float dB_dx = (n2_x1 - n2_x0) / (2.0f * e);
-    float dB_dz = (n2_z1 - n2_z0) / (2.0f * e);
-    float dC_dx = (n3_x1 - n3_x0) / (2.0f * e);
-    float dC_dy = (n3_y1 - n3_y0) / (2.0f * e);
-
-    float3 curl = float3(
-        dC_dy - dB_dz,
-        dA_dz - dC_dx,
-        dB_dx - dA_dy);
-    float len = length(curl);
-    return (len > 1e-4f) ? (curl / len) : float3(0.0f, 0.0f, 0.0f);
-}
-
-float4 sampleCloudNoise(float3 p) {
-    return gCloudNoiseVolume.SampleLevel(gVolumeSampler, p, 0.0f);
-}
-
 float sampleSunTransmittance(float3 p) {
     float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
     return gSunTransmittance.SampleLevel(gVolumeSampler, uvw, 0.0f).r;
@@ -207,8 +58,7 @@ float3 sampleMultiScatter(float3 p) {
 
 float sampleDensity(float3 p) {
     float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
-    float densityScale = max(gPush.mediumParams.x, 0.01f);
-    return gDensityVolume.SampleLevel(gVolumeSampler, uvw, 0.0f) * densityScale;
+    return gDensityVolume.SampleLevel(gVolumeSampler, uvw, 0.0f);
 }
 
 float sampleDensityEdge(float3 p) {
@@ -273,7 +123,6 @@ float3 integrateViewMarchFinal(
     float3 sunDir,
     float3 sunRadiance,
     float sunIntensity,
-    float densityScale,
     float g,
     float3 cloudAlbedo,
     float brightnessBoost,
@@ -281,7 +130,7 @@ float3 integrateViewMarchFinal(
     float3 ambientSkyBottom,
     float3 ambientSkyTop,
     bool debugSunTransmittance,
-    inout uint rngState,
+    float rayJitterOffset,
     out float3 outHistoryAnchor,
     out bool outHasHistoryAnchor
 ) {
@@ -299,32 +148,56 @@ float3 integrateViewMarchFinal(
         return skyColor(rayDir, sunDir, sunIntensity);
     }
 
-    const float ds = marchDistance / float(kViewMarchSteps);
-    if (ds <= 0.0f) {
+    const float targetDs = (kCloudAabbMax.x - kCloudAabbMin.x) / 256.0f;
+    if (targetDs <= 0.0f) {
         return skyColor(rayDir, sunDir, sunIntensity);
     }
+    uint steps = (uint)ceil(marchDistance / targetDs);
+    steps = min(steps, kViewMarchStepsMax);
+    const float ds = marchDistance / float(max(steps, 1u));
 
     float3 Lss = 0.0f;
     float3 Lms = 0.0f;
     float Tview = 1.0f;
-    const float stepJitter = rand01(rngState);
+    const float densityScale = max(gPush.mediumParams.x, 0.01f);
+    const float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
     const float cosTheta = clamp(dot(-sunDir, -rayDir), -1.0f, 1.0f);
     const float phase = dualHenyeyGreenstein(cosTheta, g);
     const float ambientStrength = lerp(0.05f, 0.6f, saturate(ambientLift));
+    const float extinctionCoeff = max(gPush.mediumParams.w, 0.01f);
     const float cloudBase = gPush.cloudProfileParams.z;
     const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
     const float cloudHeightSpan = max(cloudTop - cloudBase, 0.25f);
     const float3 groundAlbedoColor = float3(0.18f, 0.22f, 0.18f);
     const float3 earthBounce = sunRadiance * max(sunDir.y, 0.0f) * groundAlbedoColor;
 
+    float startJitter = saturate(rayJitterOffset) * ds;
+
     [loop]
-    for (uint i = 0u; i < kViewMarchSteps; ++i) {
-        float t = tMin + (float(i) + stepJitter) * ds;
+    for (uint i = 0u; i < steps; ++i) {
+        float t = tMin + startJitter + float(i) * ds;
+        if (t > tMax) {
+            break;
+        }
         float3 x = rayOrigin + rayDir * t;
-        float rho = sampleDensity(x);
+        float bakedDensity = sampleDensity(x);
+        if (bakedDensity <= 0.01f) {
+            continue;
+        }
+        float detailScale = max(gPush.cloudShapeParams.y, 0.01f);
+        float3 detailUvw = x * detailScale * 0.5f;
+        float4 detailTex = gCloudNoiseVolume.SampleLevel(gVolumeSampler, detailUvw, 0.0f);
+        float worleyFbm = detailTex.g * 0.625f + detailTex.b * 0.25f + detailTex.a * 0.125f;
+        worleyFbm += (detailTex.r - 0.5f) * 0.05f;
+
+        float erosionModifier = (1.0f - worleyFbm) * erosionStrength;
+        float erodedDensity = bakedDensity - erosionModifier;
+        float sharpDensity = saturate(erodedDensity * 10.0f) * bakedDensity;
+        float rho = sharpDensity * densityScale;
         if (rho <= 0.0f) {
             continue;
         }
+        float sigmaT = rho * extinctionCoeff;
         if (!outHasHistoryAnchor) {
             outHistoryAnchor = x;
             outHasHistoryAnchor = true;
@@ -335,29 +208,23 @@ float3 integrateViewMarchFinal(
             return float3(Tsun, Tsun, Tsun);
         }
 
-        float edge = sampleDensityEdge(x);
-        edge = saturate(edge);
-        float edgeBoost = lerp(1.0f, 1.35f, saturate(edge));
-        float powder = edge * 0.7f;
-        float3 direct = rho * Tsun * phase * sunRadiance * cloudAlbedo * (0.25f + 0.75f * powder) * edgeBoost;
+        float powder = 1.0f - exp(-sigmaT * 2.0f);
+        float3 sigmaS = sigmaT * cloudAlbedo;
+        float3 directLight = Tsun * phase * sunRadiance * (0.35f + 0.65f * powder);
         float hFrac = saturate((x.y - cloudBase) / cloudHeightSpan);
         float3 skyFill = lerp(ambientSkyBottom, ambientSkyTop, hFrac);
-        float3 E = sampleMultiScatter(x);
-        E = max(E, skyFill * 0.25f);
-        float thickness = 1.0f - Tview;
+        float3 localAmbient = max(lerp(earthBounce, skyFill, hFrac), 0.0f);
+        float3 E = sampleMultiScatter(x) * 2.5f;
+        float thickness = saturate(1.0f - Tview);
+        thickness = smoothstep(0.0f, 0.65f, thickness);
         float backlit = saturate(1.0f - Tsun);
-        float3 shadowBlue = ambientSkyTop * 0.4f;
-        float3 indirect = (E * thickness) + (shadowBlue * backlit * 0.3f);
-        float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
-        float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
-        float3 ambientFloor = sunRadiance * 0.22f;
-        float3 ambientColor = max(localAmbient, ambientFloor);
-        float3 ambient = rho * ambientColor * cloudAlbedo * ambientStrength * (1.0f / (4.0f * kPi));
-        Lss += Tview * direct * ds * max(brightnessBoost, 0.0f);
-        Lms += Tview * (indirect + ambient) * ds;
+        float3 shadowBlue = ambientSkyTop * 0.35f;
+        float3 indirectLight = (E * thickness) + (shadowBlue * backlit * 0.3f) + (localAmbient * ambientStrength * 0.5f);
+        Lss += Tview * sigmaS * directLight * ds * max(brightnessBoost, 1.0f);
+        Lms += Tview * sigmaS * indirectLight * ds;
 
         // Use explicit view transmittance update for stable deterministic marching.
-        Tview *= exp(-rho * 1.5f * ds);
+        Tview *= exp(-sigmaT * ds);
         if (Tview < 1.0e-4f) {
             break;
         }
@@ -521,13 +388,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         (pixel.y + pixelOffset.y) % blueNoiseSize.y);
     float4 blueNoise = gBlueNoise.Load(int3(blueNoiseCoord, 0));
 
-    uint rngState = gRngState[pixel];
-    if (rngState == 0u || gPush.frameParams.w > 0.5f) {
-        uint bnInt = (uint)(blueNoise.z * 16777216.0f);
-        rngState = hash3(uint3(pixel, bnInt ^ frameIndexUint));
-    }
-
     float2 jitter = blueNoise.xy;
+    float rayJitterOffset = blueNoise.r;
     float2 uv = ((float2(pixel) + jitter) / float2(width, height)) * 2.0f - 1.0f;
     uv.y = -uv.y;
 
@@ -544,7 +406,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float sunIntensity = max(gPush.sunDirectionIntensity.w, 0.01f);
     float3 sunRadiance = float3(1.0f, 1.0f, 0.98f) * sunIntensity;
 
-    float densityScale = max(gPush.mediumParams.x, 0.01f);
     float g = clamp(gPush.mediumParams.y, 0.0f, 0.90f);
     float3 cloudAlbedo = float3(gPush.mediumParams.z, gPush.mediumParams.z, gPush.mediumParams.z);
     float brightnessBoost = max(gPush.cloudLightParams.x, 0.0f);
@@ -572,7 +433,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         sunDir,
         sunRadiance,
         sunIntensity,
-        densityScale,
         g,
         cloudAlbedo,
         brightnessBoost,
@@ -580,7 +440,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         ambientSkyBottom,
         ambientSkyTop,
         debugSunTransmittance,
-        rngState,
+        rayJitterOffset,
         historyAnchor,
         hasHistoryAnchor);
 
@@ -601,14 +461,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         }
     }
 
-    float4 prev = gAccumulation[pixel];
-    float frameIndex = gPush.frameParams.z;
-    if (gPush.frameParams.w > 0.5f) {
-        gAccumulation[pixel] = float4(L, 1.0f);
-    } else {
-        float3 accum = (prev.xyz * frameIndex + L) / (frameIndex + 1.0f);
-        gAccumulation[pixel] = float4(accum, 1.0f);
-    }
+    gAccumulation[pixel] = float4(L, 1.0f);
 
-    gRngState[pixel] = rngState;
 }
