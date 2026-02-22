@@ -294,7 +294,6 @@ bool paramsDiffer(const RenderParameters& a, const RenderParameters& b) {
         !almostEqual(av.cloudTop, bv.cloudTop) ||
         !almostEqual(av.erosionStrength, bv.erosionStrength) ||
         !almostEqual(av.ambientLift, bv.ambientLift) ||
-        av.maxBounces != bv.maxBounces ||
         !almostEqual(as.direction.x, bs.direction.x) ||
         !almostEqual(as.direction.y, bs.direction.y) ||
         !almostEqual(as.direction.z, bs.direction.z) ||
@@ -361,7 +360,7 @@ struct CameraPush {
     float cloudShapeParams[4];
     float cloudProfileParams[4];
     float cloudWarpParams[4];
-    float cloudLightParams[4];
+    float cloudLightParams[4]; // x=brightness boost, y=ambient lift, z=reserved, w=debug sun transmittance
     float frameParams[4];
     float prevCameraPositionFov[4];
     float prevCameraForward[4];
@@ -3828,7 +3827,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         cloudPush.cloudWarpParams[3] = 0.0f;
         cloudPush.cloudLightParams[0] = 1.0f;
         cloudPush.cloudLightParams[1] = params.scene.volume.ambientLift;
-        cloudPush.cloudLightParams[2] = 1.0f;
+        cloudPush.cloudLightParams[2] = 0.0f;
         cloudPush.cloudLightParams[3] = params.debugSunTransmittance ? 1.0f : 0.0f;
         cloudPush.frameParams[0] = static_cast<float>(swapchainExtent.width);
         cloudPush.frameParams[1] = static_cast<float>(swapchainExtent.height);

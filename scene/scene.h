@@ -22,7 +22,6 @@ struct VolumeSettings {
     float erosionStrength = 0.55f;
     float brightnessBoost = 1.0f;
     float ambientLift = 0.55f;
-    int maxBounces = 3;
 };
 
 struct SceneState {

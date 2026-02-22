@@ -13,9 +13,7 @@
 namespace voxelsprout::app {
 namespace {
 
-constexpr int kInteractivePreviewMaxBounces = 1;
 constexpr int kInteractivePreviewCooldownFrames = 8;
-constexpr int kRealtimeDefaultMaxBounces = 1;
 
 voxelsprout::core::Vec3 sunDirectionFromAngles(float azimuthDegrees, float elevationDegrees) {
     const float azimuthRadians = azimuthDegrees * (3.1415926535f / 180.0f);
@@ -86,7 +84,6 @@ bool App::init() {
     m_renderParams.scene.volume.erosionStrength = 0.75f;
     m_renderParams.scene.volume.brightnessBoost = 1.0f;
     m_renderParams.scene.volume.ambientLift = 0.65f;
-    m_renderParams.scene.volume.maxBounces = kRealtimeDefaultMaxBounces;
     m_renderParams.exposure = 0.12f;
     m_renderParams.toneMapOperator = 2;
     m_renderParams.toneMapWhitePoint = 1.0f;
@@ -197,7 +194,6 @@ void App::buildUi() {
     m_renderParams.scene.volume.albedo = std::clamp(m_renderParams.scene.volume.albedo, 0.9f, 1.0f);
     m_renderParams.scene.volume.cloudTop =
         std::max(m_renderParams.scene.volume.cloudTop, m_renderParams.scene.volume.cloudBase + 0.25f);
-    m_renderParams.scene.volume.maxBounces = kRealtimeDefaultMaxBounces;
     ImGui::SliderFloat("Sun intensity", &m_renderParams.scene.sun.intensity, 1.0f, 80.0f, "%.2f");
     ImGui::SliderFloat("Sun azimuth", &m_sunAzimuthDegreesUi, -180.0f, 180.0f, "%.1f deg");
     ImGui::SliderFloat("Sun elevation", &m_sunElevationDegreesUi, -10.0f, 89.0f, "%.1f deg");
@@ -254,7 +250,6 @@ void App::run() {
         const bool interactivePreview = m_uiInteracting || (m_interactionCooldownFrames > 0);
         voxelsprout::render::RenderParameters frameParams = m_renderParams;
         if (interactivePreview) {
-            frameParams.scene.volume.maxBounces = std::min(frameParams.scene.volume.maxBounces, kInteractivePreviewMaxBounces);
             if (m_uiInteracting) {
                 frameParams.enableAccumulation = false;
                 frameParams.forceReset = true;

@@ -1,12 +1,7 @@
 static const float kPi = 3.1415926535f;
 static const float3 kCloudAabbMin = float3(-10.0f, 0.0f, -10.0f);
 static const float3 kCloudAabbMax = float3(10.0f, 10.0f, 10.0f);
-static const uint kMaxBouncesHardLimit = 12u;
-static const uint kCloudApproxSteps = 32u;
 static const uint kViewMarchSteps = 32u;
-static const float kSunAngularRadiusRadians = 0.004f; // ~0.23 degrees
-static const float kSigmaTScale = 1.5f;
-static const float kBakedDensityUpperBound = 0.98f;
 
 struct CameraPush {
     float4 cameraPositionFov;
@@ -18,7 +13,7 @@ struct CameraPush {
     float4 cloudShapeParams; // x = macro scale, y = detail scale
     float4 cloudProfileParams; // x = coverage, y = weather scale, z = cloud base, w = cloud top
     float4 cloudWarpParams; // x = reserved, y = erosion strength, z = reserved
-    float4 cloudLightParams; // x = brightness boost, y = ambient lift, z = max bounces, w = debug sun transmittance
+    float4 cloudLightParams; // x = brightness boost, y = ambient lift, z = reserved, w = debug sun transmittance
     float4 frameParams;  // x = width, y = height, z = frame index, w = reset flag
     float4 prevCameraPositionFov;
     float4 prevCameraForward;
@@ -221,15 +216,6 @@ float sampleDensityEdge(float3 p) {
     return gDensityEdgeVolume.SampleLevel(gVolumeSampler, uvw, 0.0f);
 }
 
-float remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
-    float denom = originalMax - originalMin;
-    if (abs(denom) < 1e-5f) {
-        return newMin;
-    }
-    float t = (value - originalMin) / denom;
-    return lerp(newMin, newMax, t);
-}
-
 bool intersectAabb(float3 rayOrigin, float3 rayDir, float3 bmin, float3 bmax, out float tMin, out float tMax) {
     float3 invD = 1.0f / rayDir;
     float3 t0 = (bmin - rayOrigin) * invD;
@@ -254,76 +240,6 @@ float dualHenyeyGreenstein(float cosTheta, float g) {
     float forwardLobe = henyeyGreenstein(cosTheta, g);
     float backwardLobe = henyeyGreenstein(cosTheta, -0.3f);
     return lerp(backwardLobe, forwardLobe, 0.7f);
-}
-
-float3 makeOrthoX(float3 n) {
-    return (abs(n.z) < 0.999f) ? normalize(cross(float3(0.0f, 0.0f, 1.0f), n)) : normalize(cross(float3(0.0f, 1.0f, 0.0f), n));
-}
-
-float3 sampleUniformCone(float3 axis, float cosThetaMax, inout uint rng) {
-    float xi1 = rand01(rng);
-    float xi2 = rand01(rng);
-
-    float cosTheta = lerp(1.0f, cosThetaMax, xi1);
-    float sinTheta = sqrt(max(1.0f - cosTheta * cosTheta, 0.0f));
-    float phi = 2.0f * kPi * xi2;
-
-    float3 t = makeOrthoX(axis);
-    float3 b = cross(axis, t);
-    return normalize((sinTheta * cos(phi)) * t + (sinTheta * sin(phi)) * b + cosTheta * axis);
-}
-
-float3 sampleHenyeyGreenstein(float3 wo, float g, inout uint rng) {
-    float xi1 = rand01(rng);
-    float xi2 = rand01(rng);
-
-    float cosTheta = 0.0f;
-    if (abs(g) < 1e-3f) {
-        cosTheta = 1.0f - 2.0f * xi1;
-    } else {
-        float s = (1.0f - g * g) / (1.0f - g + 2.0f * g * xi1);
-        cosTheta = (1.0f + g * g - s * s) / (2.0f * g);
-    }
-    float sinTheta = sqrt(max(1.0f - cosTheta * cosTheta, 0.0f));
-    float phi = 2.0f * kPi * xi2;
-
-    float3 t = makeOrthoX(wo);
-    float3 b = cross(wo, t);
-    return normalize((sinTheta * cos(phi)) * t + (sinTheta * sin(phi)) * b + cosTheta * wo);
-}
-
-bool sampleDistance(
-    float3 rayOrigin,
-    float3 rayDir,
-    float tMin,
-    float tMax,
-    float sigmaMajorant,
-    float densityScale,
-    inout uint rng,
-    out float3 outPosition
-) {
-    outPosition = 0.0f;
-
-    float t = tMin;
-    [loop]
-    for (uint i = 0u; i < 180u; ++i) {
-        float u = max(rand01(rng), 1e-6f);
-        t += -log(u) / sigmaMajorant;
-        if (t >= tMax) {
-            return false;
-        }
-
-        float3 x = rayOrigin + rayDir * t;
-        float sigmaT = sampleDensity(x) * kSigmaTScale;
-        float accept = saturate(sigmaT / sigmaMajorant);
-
-        if (rand01(rng) < accept) {
-            outPosition = x;
-            return true;
-        }
-    }
-
-    return false;
 }
 
 void projectSkySH1(
@@ -630,12 +546,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float brightnessBoost = max(gPush.cloudLightParams.x, 0.0f);
     float ambientLift = max(gPush.cloudLightParams.y, 0.0f);
     bool debugSunTransmittance = gPush.cloudLightParams.w > 0.5f;
-    uint maxBounces = (uint)clamp(gPush.cloudLightParams.z, 1.0f, (float)kMaxBouncesHardLimit);
-    // Keep majorant explicitly tied to baked-density cap and sigma_t scaling.
-    float sigmaMajorant = max(densityScale * kSigmaTScale * kBakedDensityUpperBound * 1.3f, 0.05f);
-    const float cloudBase = gPush.cloudProfileParams.z;
-    const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
-    const float cloudHeightSpan = max(cloudTop - cloudBase, 0.25f);
 
     float3 shC0;
     float3 shCx;
@@ -650,127 +560,40 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     ambientSkyTop *= skyBlueTint;
     ambientSkyBottom *= lerp(skyBlueTint, float3(1.0f, 1.0f, 1.0f), 0.5f);
 
-    const float3 groundAlbedoColor = float3(0.18f, 0.22f, 0.18f);
-    const float3 earthBounce = sunRadiance * max(sunDir.y, 0.0f) * groundAlbedoColor;
-    const float ambientStrength = lerp(0.05f, 0.6f, saturate(gPush.cloudLightParams.y));
+    float3 historyAnchor = 0.0f;
+    bool hasHistoryAnchor = false;
+    float3 L = integrateViewMarchFinal(
+        rayOrigin,
+        rayDir,
+        sunDir,
+        sunRadiance,
+        sunIntensity,
+        densityScale,
+        g,
+        cloudAlbedo,
+        brightnessBoost,
+        ambientLift,
+        ambientSkyBottom,
+        ambientSkyTop,
+        debugSunTransmittance,
+        rngState,
+        historyAnchor,
+        hasHistoryAnchor);
 
-    float3 L = 0.0f;
-    float3 throughput = 1.0f;
-
-    if (maxBounces <= 1u) {
-        float3 historyAnchor = 0.0f;
-        bool hasHistoryAnchor = false;
-        L = integrateViewMarchFinal(
-            rayOrigin,
-            rayDir,
-            sunDir,
-            sunRadiance,
-            sunIntensity,
-            densityScale,
-            g,
-            cloudAlbedo,
-            brightnessBoost,
-            ambientLift,
-            ambientSkyBottom,
-            ambientSkyTop,
-            debugSunTransmittance,
-            rngState,
-            historyAnchor,
-            hasHistoryAnchor);
-
-        if (gPush.historyParams.x > 0.5f && hasHistoryAnchor) {
-            int2 prevPixel;
-            if (reprojectToPrevPixel(historyAnchor, width, height, prevPixel)) {
-                float3 history = gPrevAccumulation.Load(int3(prevPixel, 0)).xyz;
-                float clampStrength = max(gPush.historyParams.z, 1.0f);
-                const float3 lumaWeights = float3(0.2126f, 0.7152f, 0.0722f);
-                float l = dot(L, lumaWeights);
-                float lh = dot(history, lumaWeights);
-                float ratio = lh / max(l, 1.0e-4f);
-                if (ratio > clampStrength) {
-                    history *= (clampStrength / ratio);
-                }
-                float blend = saturate(gPush.historyParams.y);
-                L = lerp(L, history, blend);
+    if (gPush.historyParams.x > 0.5f && hasHistoryAnchor) {
+        int2 prevPixel;
+        if (reprojectToPrevPixel(historyAnchor, width, height, prevPixel)) {
+            float3 history = gPrevAccumulation.Load(int3(prevPixel, 0)).xyz;
+            float clampStrength = max(gPush.historyParams.z, 1.0f);
+            const float3 lumaWeights = float3(0.2126f, 0.7152f, 0.0722f);
+            float l = dot(L, lumaWeights);
+            float lh = dot(history, lumaWeights);
+            float ratio = lh / max(l, 1.0e-4f);
+            if (ratio > clampStrength) {
+                history *= (clampStrength / ratio);
             }
-        }
-    } else {
-        const float sunCosThetaMax = cos(kSunAngularRadiusRadians);
-        [loop]
-        for (uint bounce = 0u; bounce < maxBounces; ++bounce) {
-            float tMin = 0.0f;
-            float tMax = 0.0f;
-            if (!intersectAabb(rayOrigin, rayDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
-                if (!debugSunTransmittance) {
-                    L += throughput * skyColor(rayDir, sunDir, sunIntensity);
-                }
-                break;
-            }
-
-            float3 scatterPos = 0.0f;
-            bool hit = sampleDistance(
-                rayOrigin,
-                rayDir,
-                tMin,
-                tMax,
-                sigmaMajorant,
-                densityScale,
-                rngState,
-                scatterPos);
-
-            if (!hit) {
-                if (!debugSunTransmittance) {
-                    L += throughput * skyColor(rayDir, sunDir, sunIntensity);
-                }
-                break;
-            }
-
-            if (debugSunTransmittance && bounce == 0u) {
-                float trSunDebug = sampleSunTransmittance(scatterPos);
-                L = float3(trSunDebug, trSunDebug, trSunDebug);
-                break;
-            }
-
-            float3 wo = -rayDir;
-            float3 sunDirSample = sampleUniformCone(sunDir, sunCosThetaMax, rngState);
-            const float baseSunTransmittance = sampleSunTransmittance(scatterPos);
-            // Conventions:
-            // - viewDir points from previous vertex/camera toward the scattering point.
-            // - lightDir points from sun toward the scattering point.
-            // HG uses cos(theta) = dot(lightDir, -viewDir).
-            float3 viewDir = rayDir;
-            float3 lightDir = -sunDirSample;
-            float cosTheta = clamp(dot(lightDir, -viewDir), -1.0f, 1.0f);
-            // sunRadiance here represents integrated sun-disk radiance under our UI intensity convention.
-            const float phase = dualHenyeyGreenstein(cosTheta, g);
-            const float3 cloudTint = cloudTwilightTint(rayDir, sunDirSample, sunIntensity);
-            const float3 directColor = lerp(sunRadiance, min(cloudTint, sunRadiance * 1.6f), clamp(1.0f - cosTheta, 0.0f, 1.0f) * 0.35f);
-            L += throughput * cloudAlbedo * brightnessBoost * baseSunTransmittance * phase * directColor;
-
-            const float hFrac = saturate((scatterPos.y - cloudBase) / cloudHeightSpan);
-            const float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
-            const float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
-            const float3 msField = sampleMultiScatter(scatterPos);
-            L += throughput * cloudAlbedo * (1.0f / (4.0f * kPi)) * localAmbient * ambientStrength;
-            L += throughput * cloudAlbedo * msField * 0.35f;
-
-            if (bounce + 1u >= maxBounces) {
-                break;
-            }
-
-            float3 wi = sampleHenyeyGreenstein(wo, g, rngState);
-            rayOrigin = scatterPos + wi * 0.02f;
-            rayDir = wi;
-            throughput *= cloudAlbedo;
-
-            // Start RR at path depth 5 (bounce index 4) to preserve deeper backlit glow.
-            if (bounce >= 4u) {
-                const float rrSurvive = 0.9f;
-                if (rand01(rngState) > rrSurvive) {
-                    break;
-                }
-                throughput /= rrSurvive;
-            }
+            float blend = saturate(gPush.historyParams.y);
+            L = lerp(L, history, blend);
         }
     }
 
