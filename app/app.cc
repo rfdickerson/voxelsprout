@@ -66,9 +66,9 @@ bool App::init() {
     const voxelsprout::core::NoiseSamples noiseProbe = voxelsprout::core::sampleLibNoise(0.0, 0.0, 0.0);
     VOX_LOGI("app") << "noise probe perlin=" << noiseProbe.perlin << " worley=" << noiseProbe.worley;
 
-    m_renderParams.camera.position = {0.0f, 2.0f, 10.0f};
+    m_renderParams.camera.position = {0.0f, 4.0f, 14.0f};
     m_renderParams.camera.yawDegrees = -90.0f;
-    m_renderParams.camera.pitchDegrees = 12.0f;
+    m_renderParams.camera.pitchDegrees = 10.0f;
     m_renderParams.camera.fovDegrees = 75.0f;
     // Start with a high frontal sun for bright front-lit cumulus.
     m_renderParams.scene.sun.direction = sunDirectionFromAngles(-45.0f, 70.0f);
@@ -76,15 +76,15 @@ bool App::init() {
     m_renderParams.scene.volume.densityScale = 3.5f;
     m_renderParams.scene.volume.anisotropyG = 0.82f;
     m_renderParams.scene.volume.albedo = 0.97f;
-    m_renderParams.scene.volume.macroScale = 1.0f;
-    m_renderParams.scene.volume.detailScale = 2.0f;
-    m_renderParams.scene.volume.coverage = 0.72f;
+    m_renderParams.scene.volume.macroScale = 0.70f;
+    m_renderParams.scene.volume.detailScale = 1.8f;
+    m_renderParams.scene.volume.coverage = 0.75f;
     m_renderParams.scene.volume.weatherScale = 1.0f;
     m_renderParams.scene.volume.cloudBase = 2.5f;
     m_renderParams.scene.volume.cloudTop = 7.5f;
-    m_renderParams.scene.volume.erosionStrength = 0.75f;
+    m_renderParams.scene.volume.erosionStrength = 0.70f;
     m_renderParams.scene.volume.brightnessBoost = 1.0f;
-    m_renderParams.scene.volume.ambientLift = 0.40f;
+    m_renderParams.scene.volume.ambientLift = 0.45f;
     m_renderParams.scene.volume.maxBounces = 1;
     m_renderParams.exposure = 0.12f;
     m_renderParams.toneMapOperator = 2;
@@ -97,13 +97,57 @@ bool App::init() {
     m_renderParams.maxAccumulationSamples = 256;
     m_maxAccumulationSamplesUi = 256;
     sunAnglesFromDirection(m_renderParams.scene.sun.direction, m_sunAzimuthDegreesUi, m_sunElevationDegreesUi);
+
+    m_orbitAngle = 1.57079637f;
+    m_orbitRadius = std::sqrt((m_renderParams.camera.position.x * m_renderParams.camera.position.x)
+                               + (m_renderParams.camera.position.z * m_renderParams.camera.position.z));
+    m_orbitHeight = m_renderParams.camera.position.y;
     return true;
+}
+
+void App::updateOrbitCamera(float dtSeconds) {
+    if (!m_autoOrbitCamera) {
+        return;
+    }
+
+    m_orbitAngle += m_orbitSpeed * dtSeconds;
+    constexpr float twoPi = 6.28318531f;
+    if (m_orbitAngle >= twoPi) {
+        m_orbitAngle -= twoPi;
+    }
+
+    const float cloudCenterX = 0.0f;
+    const float cloudCenterY = 0.5f * (m_renderParams.scene.volume.cloudBase + m_renderParams.scene.volume.cloudTop);
+    const float cloudCenterZ = 0.0f;
+
+    m_renderParams.camera.position.x = cloudCenterX + (m_orbitRadius * std::cos(m_orbitAngle));
+    m_renderParams.camera.position.y = m_orbitHeight;
+    m_renderParams.camera.position.z = cloudCenterZ + (m_orbitRadius * std::sin(m_orbitAngle));
+
+    const float lookX = cloudCenterX - m_renderParams.camera.position.x;
+    const float lookY = cloudCenterY - m_renderParams.camera.position.y;
+    const float lookZ = cloudCenterZ - m_renderParams.camera.position.z;
+    const float lookLen = std::sqrt((lookX * lookX) + (lookY * lookY) + (lookZ * lookZ));
+    if (lookLen < 1e-5f) {
+        return;
+    }
+
+    const float pitchRadians = std::asin(std::clamp(lookY / lookLen, -1.0f, 1.0f));
+    const float yawRadians = std::atan2(lookZ, lookX);
+    m_renderParams.camera.pitchDegrees = pitchRadians * (180.0f / 3.14159265f);
+    m_renderParams.camera.yawDegrees = yawRadians * (180.0f / 3.14159265f);
 }
 
 void App::pollInput() {
     if (glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
         glfwSetWindowShouldClose(m_window, GLFW_TRUE);
     }
+
+    const bool orbitDown = glfwGetKey(m_window, GLFW_KEY_O) == GLFW_PRESS;
+    if (orbitDown && !m_orbitToggleWasDown) {
+        m_autoOrbitCamera = !m_autoOrbitCamera;
+    }
+    m_orbitToggleWasDown = orbitDown;
 
     const bool tabDown = glfwGetKey(m_window, GLFW_KEY_TAB) == GLFW_PRESS;
     if (tabDown && !m_tabWasDown) {
@@ -150,7 +194,7 @@ void App::buildUi() {
     ImGui::SliderFloat("Weather scale", &m_renderParams.scene.volume.weatherScale, 0.05f, 2.0f, "%.2f");
     ImGui::SliderFloat("Cloud base", &m_renderParams.scene.volume.cloudBase, -1.0f, 6.0f, "%.2f");
     ImGui::SliderFloat("Cloud top", &m_renderParams.scene.volume.cloudTop, 4.0f, 14.0f, "%.2f");
-    ImGui::SliderFloat("Erosion strength", &m_renderParams.scene.volume.erosionStrength, 0.0f, 1.5f, "%.2f");
+    ImGui::SliderFloat("Erosion strength", &m_renderParams.scene.volume.erosionStrength, 0.0f, 3.0f, "%.2f");
     ImGui::SliderFloat("Ambient lift", &m_renderParams.scene.volume.ambientLift, 0.0f, 1.5f, "%.2f");
     ImGui::SliderInt("Max bounces", &m_renderParams.scene.volume.maxBounces, 1, 12);
     ImGui::Text("1 = real-time approx, >1 = full path traced");
@@ -203,9 +247,9 @@ void App::run() {
 
         const auto now = clock::now();
         const float dt = std::chrono::duration<float>(now - prevTime).count();
-        (void)dt;
         prevTime = now;
 
+        updateOrbitCamera(dt);
         pollInput();
 
         m_renderer.beginUiFrame();

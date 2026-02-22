@@ -199,75 +199,75 @@ float densityField(float3 p) {
     const float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
     const float detailScale = max(gPush.cloudShapeParams.y, 0.08f);
     const float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
+    const float coverage = saturate(gPush.cloudProfileParams.x); 
+    const float densityScale = max(gPush.mediumParams.x, 0.01f);
 
     if (p.y < cloudBase || p.y > cloudTop) {
         return 0.0f;
     }
 
-    const float densityScale = max(gPush.mediumParams.x, 0.01f);
+    // 1. Bounding Box Fade (Replaces the Disk/Cylinder)
+    // This allows the cloud to organically fill your 20x20 space, 
+    // only gently fading to 0 at the absolute borders so it doesn't hit a hard wall.
+    float edgeFadeX = smoothstep(-9.5f, -6.0f, p.x) * (1.0f - smoothstep(6.0f, 9.5f, p.x));
+    float edgeFadeZ = smoothstep(-9.5f, -6.0f, p.z) * (1.0f - smoothstep(6.0f, 9.5f, p.z));
+    float boundsMask = edgeFadeX * edgeFadeZ;
 
-    // 2. Sample low-frequency noise early so the base can be perturbed by vapor wisps.
-    const float3 baseUvw = p * macroScale * 0.15f;
-    const float baseNoise = sampleCloudNoise(baseUvw).r;
+    // 2. Weather Map (Defines storm cells)
+    float2 weatherUvw = p.xz * macroScale * 0.02f;
+    float weatherMap = sampleCloudNoise(float3(weatherUvw.x, 0.0f, weatherUvw.y)).r;
+    
+    // Map the UI coverage slider cleanly to the weather noise
+    float weatherCoverage = saturate((weatherMap - (1.0f - coverage)) / max(coverage, 0.01f));
+    const float weatherDensity = 0.45f + 0.55f * weatherCoverage;
 
-    const float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
-    const float perturbedH = saturate(h - (baseNoise * 0.08f));
-    const float bottomRamp = smoothstep(0.0f, 0.15f, perturbedH);
-    const float topTaper = 1.0f - smoothstep(0.74f, 0.98f, h);
+    // 3. Vertical Profile with Variable Tower Heights
+    float h = saturate((p.y - cloudBase) / (cloudTop - cloudBase));
+    float bottomRamp = smoothstep(0.0f, 0.05f, h);
+    
+    // Keep the roof gradual and avoid hard top clipping.
+    float topTaper = 1.0f - smoothstep(0.82f, 1.0f, h);
 
-    // 1. Multi-dome container for non-symmetric cauliflower groups.
-    const float4 asym = sampleCloudNoise(p * 0.04f + float3(3.3f, 1.7f, 8.4f));
-    const float2 asymXZ = (asym.yz - 0.5f) * 1.6f;
-    const float3 center = float3(0.0f, cloudBase + 2.5f, 0.0f);
-
-    // Taller tower support mask: relax vertical squash and widen the container for towering forms.
-    const float3 localP = (p - center) * float3(1.0f, 0.7f, 1.0f);
-    const float distFromCenter = length(localP);
-    const float domeRadius = 9.0f;
-    const float domeMask = 1.0f - smoothstep(domeRadius * 0.2f, domeRadius, distFromCenter);
-
-    const float topBoil = sampleCloudNoise(float3(p.x * 0.10f, 1.8f, p.z * 0.10f) + float3(1.2f, 3.1f, -1.4f)).r;
-    const float topLift = 1.0f + 0.40f * (pow(saturate((topBoil - 0.45f) / 0.55f), 1.8f) * smoothstep(0.35f, 1.0f, h));
-
-    float structuralSeed = 0.0f;
-    float3 q = (p - (center + float3(-1.9f, 0.05f, 1.0f) + float3(asymXZ.x, 0.0f, asymXZ.y))) * float3(0.90f, 1.35f, 0.88f);
-    structuralSeed = max(structuralSeed, 1.0f - smoothstep(2.1f, 4.8f, length(q)));
-
-    q = (p - (center + float3(1.6f, 0.35f, -1.0f) + float3(-asymXZ.y, 0.0f, asymXZ.x * 0.6f))) * float3(0.86f, 1.25f, 0.94f);
-    structuralSeed = max(structuralSeed, 0.90f * (1.0f - smoothstep(1.8f, 4.2f, length(q))));
-
-    q = (p - (center + float3(-0.7f, 0.10f, 2.2f))) * float3(0.94f, 1.10f, 0.90f);
-    structuralSeed = max(structuralSeed, 0.85f * (1.0f - smoothstep(2.4f, 5.0f, length(q))));
-
-    q = (p - (center + float3(0.9f, 0.08f, -2.0f))) * float3(0.95f, 1.05f, 0.98f);
-    structuralSeed = max(structuralSeed, 0.75f * (1.0f - smoothstep(2.8f, 5.6f, length(q))));
-
-    // Core anchor gives a coherent parent body so lobes stay connected.
-    q = (p - center) * float3(0.95f, 1.05f, 0.95f);
-    structuralSeed = max(structuralSeed, 0.65f * (1.0f - smoothstep(3.4f, 7.2f, length(q))));
-
-    // Tall cap: gently promote upper regions for a dome-like rise.
-    const float structuralMask = saturate(structuralSeed * domeMask * bottomRamp * topLift * topTaper);
+    // Combine structural components
+    float structuralMask = boundsMask * bottomRamp * topTaper * weatherDensity;
     if (structuralMask <= 0.0f) {
         return 0.0f;
     }
 
-    // 2. Base shape from low-frequency noise.
-    float baseDensity = remap(baseNoise, 1.0f - structuralMask, 1.0f, 0.0f, 1.0f);
+    // 4. Fetch Noise Textures
+    float3 baseUvw = p * macroScale * 0.1f; 
+    float baseNoise = sampleCloudNoise(baseUvw).r;
+
+    float3 detailUvw = p * detailScale * 0.35f;
+    float4 detailNoise = sampleCloudNoise(detailUvw);
+    float highFreqFbm = detailNoise.g * 0.625f + detailNoise.b * 0.25f + detailNoise.a * 0.125f;
+
+    // 5. THE FIREFLY FIX: Masked Spatial Dither
+    // We only apply the anti-banding dither where the cloud actually exists. 
+    // As the structural mask approaches 0 (empty sky), the dither fades to 0 as well.
+    float dither = (highFreqFbm - 0.5f) * 0.08f;
+    structuralMask = saturate(structuralMask + dither * smoothstep(0.0f, 0.1f, structuralMask)); 
+
+    // 6. Base Shape Remap
+    const float remapLo = max((1.0f - structuralMask) * 0.60f, 0.05f);
+    float baseDensity = remap(baseNoise, remapLo, 1.0f, 0.0f, 1.0f);
     baseDensity = saturate(baseDensity);
+    
+    // Plump the density so the cores stay bright and heavy
+    baseDensity = saturate(pow(baseDensity, 0.8f)); 
+
     if (baseDensity <= 0.0f) {
         return 0.0f;
     }
 
-    // 3. Cauliflower edge carving from Worley channels.
-    const float3 detailUvw = p * detailScale * 0.4f;
-    const float4 detailNoise = sampleCloudNoise(detailUvw);
-    const float highFreqFbm = detailNoise.g * 0.625f + detailNoise.b * 0.25f + detailNoise.w * 0.125f;
-    const float heightBias = lerp(0.2f, 1.0f, h);
-    const float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity) * heightBias;
-    const float finalDensity = saturate(baseDensity - (erosionModifier * erosionStrength));
+    // 7. Cauliflower Erosion
+    // Erode the puffy tops heavily, but protect the flat bottom base
+    float heightBias = lerp(0.1f, 1.0f, h);
+    float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity) * heightBias;
+    
+    float finalDensity = saturate(baseDensity - (erosionModifier * erosionStrength));
 
-    return saturate(finalDensity) * densityScale;
+    return finalDensity * densityScale;
 }
 
 bool intersectAabb(float3 rayOrigin, float3 rayDir, float3 bmin, float3 bmax, out float tMin, out float tMax) {
