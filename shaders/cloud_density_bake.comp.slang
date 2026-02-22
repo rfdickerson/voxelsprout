@@ -65,12 +65,12 @@ void densityField(float3 p, out float outDensity, out float outEdge) {
     float weatherNoise = sampleCloudNoise(float3(weatherUvw.x, 0.0f, weatherUvw.y)).r;
     float cellMask = saturate((weatherNoise - (1.0f - coverage)) / max(coverage, 0.01f));
 
-    // Vary local base height slightly per cell so distant silhouettes are not perfectly flat.
-    float localBaseOffset = (weatherNoise - 0.5f) * 0.08f;
-    float hBase = ((p.y - cloudBase) / cloudHeight) - localBaseOffset;
-    float bottomRamp = smoothstep(-0.08f, 0.10f, hBase);
+    // Perturb vertical profile to avoid flat "sliced" tops/bottoms near bounds.
+    float heightWarp = (weatherNoise - 0.5f) * 0.15f;
+    float hWarped = saturate(h + heightWarp);
+    float bottomRamp = smoothstep(0.0f, 0.05f, hWarped);
     float localTop = lerp(0.3f, 1.0f, cellMask);
-    float topTaper = 1.0f - smoothstep(localTop - 0.25f, localTop, saturate(hBase));
+    float topTaper = 1.0f - smoothstep(localTop - 0.25f, localTop, hWarped);
 
     float structuralMask = boundsMask * bottomRamp * topTaper * cellMask;
     if (structuralMask <= 0.0f) {

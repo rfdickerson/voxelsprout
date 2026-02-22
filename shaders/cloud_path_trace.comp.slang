@@ -209,12 +209,14 @@ float3 integrateViewMarchFinal(
         float hFrac = saturate((x.y - cloudBase) / cloudHeightSpan);
         float3 skyFill = lerp(ambientSkyBottom, ambientSkyTop, hFrac);
         float3 localAmbient = max(lerp(earthBounce, skyFill, hFrac), 0.0f);
+        float3 ambientFloor = max(sunRadiance * 0.22f, ambientSkyBottom * 0.4f);
+        float3 ambientColor = max(localAmbient, ambientFloor);
         float3 E = sampleMultiScatter(x) * 2.5f;
         float thickness = saturate(1.0f - Tview);
         thickness = smoothstep(0.0f, 0.65f, thickness);
         float backlit = saturate(1.0f - Tsun);
         float3 shadowBlue = ambientSkyTop * 0.35f;
-        float3 indirectLight = (E * thickness) + (shadowBlue * backlit * 0.3f) + (localAmbient * ambientStrength * 0.5f);
+        float3 indirectLight = (E * thickness) + (shadowBlue * backlit * 0.3f) + (ambientColor * ambientStrength * 0.5f);
         Lss += Tview * sigmaS * directLight * ds * max(brightnessBoost, 1.0f);
         Lms += Tview * sigmaS * indirectLight * ds;
 
@@ -229,7 +231,7 @@ float3 integrateViewMarchFinal(
     float horizonFogBoost = lerp(1.75f, 1.0f, saturate(rayDir.y * 0.5f + 0.5f));
     float fogDensity = fogDensityBase * horizonFogBoost;
     float fogExtinction = exp(-tMin * fogDensity);
-    float3 fogColor = lerp(ambientSkyBottom, ambientSkyTop, clamp(rayDir.y * 0.5f + 0.5f, 0.0f, 1.0f));
+    float3 fogColor = skyColorWithSunDisk(rayDir, sunDir, sunIntensity, false);
     float3 finalCloudLight = Lss + Lms;
     finalCloudLight = lerp(fogColor * (1.0f - Tview), finalCloudLight, fogExtinction);
 
@@ -269,6 +271,7 @@ float3 skyColorWithSunDisk(float3 dir, float3 sunDir, float sunIntensity, bool i
     float3 viewDir = isGround ? float3(v.x, -v.y, v.z) : v; 
     
     float mu = clamp(dot(viewDir, sunDir), -1.0f, 1.0f);
+    float muView = clamp(dot(v, sunDir), -1.0f, 1.0f);
     float mView = airMass(max(viewDir.y, 0.001f));
     float mSun = airMass(max(sunDir.y, 0.001f));
 
@@ -292,12 +295,14 @@ float3 skyColorWithSunDisk(float3 dir, float3 sunDir, float sunIntensity, bool i
     float3 horizonColor = lerp(sunriseHaze, dayHaze, smoothstep(-0.1f, 0.15f, sunDir.y));
     inscatter += horizonColor * horizonBlend * 0.03f;
 
-    float sunDisk = includeSunDisk ? smoothstep(0.9997f, 0.99995f, mu) : 0.0f;
-    float sunHalo = includeSunDisk ? pow(saturate(mu), 64.0f) : 0.0f;
+    bool allowSolarDisk = includeSunDisk && !isGround;
+    float sunDisk = allowSolarDisk ? smoothstep(0.9997f, 0.99995f, muView) : 0.0f;
+    float sunHalo = allowSolarDisk ? pow(saturate(muView), 64.0f) : 0.0f;
     float twilight = smoothstep(-0.18f, 0.08f, sunDir.y);
+    float earthShadow = smoothstep(-0.05f, 0.02f, sunDir.y);
 
     float3 sunColor = dynamicSunColor(sunDir.y);
-    float3 sunTerm = sunColor * (sunDisk * 24.0f + sunHalo * 1.8f);
+    float3 sunTerm = sunColor * (sunDisk * 24.0f + sunHalo * 1.8f) * earthShadow;
     
     float3 finalSky = (inscatter * twilight + sunTerm) * max(sunIntensity, 0.01f);
 
@@ -309,10 +314,7 @@ float3 skyColorWithSunDisk(float3 dir, float3 sunDir, float sunIntensity, bool i
         // Fog the ground heavily so it blends seamlessly into the horizon haze
         float groundFog = exp(v.y * 12.0f); // v.y is negative here, so this approaches 0 looking down
         
-        // Find what the sky color is exactly AT the horizon to blend with
-        float3 baseHorizonColor = (inscatter * twilight) * max(sunIntensity, 0.01f);
-        
-        finalSky = lerp(groundLit, baseHorizonColor, groundFog);
+        finalSky = lerp(groundLit, finalSky, groundFog);
     }
 
     return finalSky;
@@ -384,7 +386,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
     float3 sunDir = normalize(gPush.sunDirectionIntensity.xyz);
     float sunIntensity = max(gPush.sunDirectionIntensity.w, 0.01f);
-    float3 sunRadiance = dynamicSunColor(sunDir.y) * sunIntensity;
+    float3 sunNoon = float3(1.0f, 0.99f, 0.98f);
+    float3 sunSet = float3(1.0f, 0.35f, 0.05f);
+    float3 dynamicSun = lerp(sunSet, sunNoon, smoothstep(-0.05f, 0.2f, sunDir.y));
+    float extinction = smoothstep(-0.15f, 0.15f, sunDir.y);
+    float3 sunRadiance = dynamicSun * sunIntensity * extinction;
 
     float g = clamp(gPush.mediumParams.y, 0.0f, 0.90f);
     float3 cloudAlbedo = float3(gPush.mediumParams.z, gPush.mediumParams.z, gPush.mediumParams.z);
