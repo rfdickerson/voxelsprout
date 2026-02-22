@@ -73,7 +73,7 @@ bool App::init() {
     // Start with a high frontal sun for bright front-lit cumulus.
     m_renderParams.scene.sun.direction = sunDirectionFromAngles(-45.0f, 70.0f);
     m_renderParams.scene.sun.intensity = 28.0f;
-    m_renderParams.scene.volume.densityScale = 3.5f;
+    m_renderParams.scene.volume.densityScale = 4.6f;
     m_renderParams.scene.volume.anisotropyG = 0.82f;
     m_renderParams.scene.volume.albedo = 0.97f;
     m_renderParams.scene.volume.macroScale = 0.90f;
@@ -84,7 +84,7 @@ bool App::init() {
     m_renderParams.scene.volume.cloudTop = 9.5f;
     m_renderParams.scene.volume.erosionStrength = 0.75f;
     m_renderParams.scene.volume.brightnessBoost = 1.0f;
-    m_renderParams.scene.volume.ambientLift = 0.45f;
+    m_renderParams.scene.volume.ambientLift = 0.65f;
     m_renderParams.scene.volume.maxBounces = 1;
     m_renderParams.exposure = 0.12f;
     m_renderParams.toneMapOperator = 2;

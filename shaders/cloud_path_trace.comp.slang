@@ -229,6 +229,7 @@ float densityField(float3 p) {
     const float localCoverageBoost = saturate(0.25f + 0.75f * cellMask);
 
     float structuralMask = boundsMask * max(bottomRamp, 0.18f) * max(topTaper, 0.12f) * localCoverageBoost;
+
     if (structuralMask <= 0.0f) {
         return 0.0f;
     }
@@ -244,7 +245,7 @@ float densityField(float3 p) {
     float baseDensity = remap(baseNoise, remapThreshold, 1.0f, 0.0f, 1.0f);
     baseDensity = saturate(baseDensity);
 
-    // Plump up the cores heavily to make them bright, opaque white
+    // Plump up the cores to make them bright, opaque white
     baseDensity = saturate(pow(baseDensity, 0.6f)); 
 
     if (baseDensity <= 0.0f) {
@@ -485,6 +486,7 @@ float3 integrateCloudApproximation(
             float cosTheta = clamp(dot(-rayDir, -sunDir), -1.0f, 1.0f);
             float opticalDepth = estimateSunOpticalDepth(x, sunDir, densityScale, kApproxSunTrSteps, rngState);
             float msTransmittance = 0.0f;
+            float isotropicScattering = 0.0f;
             float densityMult = 1.0f;
             float contribMult = 1.0f;
             float gMult = 1.0f;
@@ -493,6 +495,7 @@ float3 integrateCloudApproximation(
                 const float tr = exp(-opticalDepth * densityMult);
                 const float phase = dualHenyeyGreenstein(cosTheta, g * gMult);
                 msTransmittance += tr * phase * contribMult;
+                isotropicScattering += tr * contribMult;
                 densityMult *= 0.15f;
                 contribMult *= 0.60f;
                 gMult *= 0.5f;
@@ -505,11 +508,14 @@ float3 integrateCloudApproximation(
             const float localDensity = sigmaT;
             float powderEffect = 1.0f - exp(-localDensity * 2.0f);
             msTransmittance *= powderEffect;
+            isotropicScattering *= powderEffect;
 
             const float hFrac = saturate((x.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
             const float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
             const float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
-            float3 ambientTerm = localAmbient * (1.0f / (4.0f * kPi)) * ambientStrength;
+            const float3 deepInternalGlow = sunRadiance * isotropicScattering * 0.45f;
+            const float3 enhancedAmbient = localAmbient + deepInternalGlow;
+            float3 ambientTerm = enhancedAmbient * (1.0f / (4.0f * kPi)) * ambientStrength;
 
             const float3 directColor = lerp(sunRadiance, min(cloudTwilightColor, sunRadiance * 1.6f), clamp(1.0f - cosTheta, 0.0f, 1.0f) * 0.35f);
             float3 direct = directColor * msTransmittance * cloudAlbedo * brightnessBoost;
@@ -685,8 +691,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float3 shCy;
     float3 shCz;
     projectSkySH1(sunDir, sunIntensity, shC0, shCx, shCy, shCz);
-    const float3 ambientSkyBottom = max(evalSkySH1(float3(0.0f, -1.0f, 0.0f), shC0, shCx, shCy, shCz), 0.0f);
-    const float3 ambientSkyTop = max(evalSkySH1(float3(0.0f, 1.0f, 0.0f), shC0, shCx, shCy, shCz), 0.0f);
+    float3 ambientSkyBottom = max(evalSkySH1(float3(0.0f, -1.0f, 0.0f), shC0, shCx, shCy, shCz), 0.0f);
+    float3 ambientSkyTop = max(evalSkySH1(float3(0.0f, 1.0f, 0.0f), shC0, shCx, shCy, shCz), 0.0f);
+
+    // Deep shadows should retain a deep blue/cyan tint from sky scattering.
+    const float3 skyBlueTint = float3(0.55f, 0.75f, 1.25f);
+    ambientSkyTop *= skyBlueTint;
+    ambientSkyBottom *= lerp(skyBlueTint, float3(1.0f, 1.0f, 1.0f), 0.5f);
+
     const float3 groundAlbedoColor = float3(0.18f, 0.22f, 0.18f);
     const float3 earthBounce = sunRadiance * max(sunDir.y, 0.0f) * groundAlbedoColor;
     const float ambientStrength = lerp(0.05f, 0.6f, saturate(gPush.cloudLightParams.y));
