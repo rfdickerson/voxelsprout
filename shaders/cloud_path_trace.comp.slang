@@ -5,6 +5,8 @@ static const uint kMaxBouncesHardLimit = 12u;
 static const uint kCloudApproxSteps = 32u;
 static const uint kViewMarchSteps = 32u;
 static const float kSunAngularRadiusRadians = 0.004f; // ~0.23 degrees
+static const float kSigmaTScale = 1.5f;
+static const float kBakedDensityUpperBound = 0.98f;
 
 struct CameraPush {
     float4 cameraPositionFov;
@@ -228,84 +230,6 @@ float remap(float value, float originalMin, float originalMax, float newMin, flo
     return lerp(newMin, newMax, t);
 }
 
-float densityField(float3 p) {
-    const float cloudBase = gPush.cloudProfileParams.z;
-    const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
-    const float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
-    const float detailScale = max(gPush.cloudShapeParams.y, 0.08f);
-    const float erosionStrength = max(gPush.cloudWarpParams.y, 0.0f);
-    const float coverage = saturate(gPush.cloudProfileParams.x); 
-    const float densityScale = max(gPush.mediumParams.x, 0.01f);
-
-    if (p.y < cloudBase || p.y > cloudTop) {
-        return 0.0f;
-    }
-
-    // 1. Soft Bounding Box Fade
-    float edgeFadeX = smoothstep(-9.5f, -6.0f, p.x) * (1.0f - smoothstep(6.0f, 9.5f, p.x));
-    float edgeFadeZ = smoothstep(-9.5f, -6.0f, p.z) * (1.0f - smoothstep(6.0f, 9.5f, p.z));
-    float boundsMask = edgeFadeX * edgeFadeZ;
-
-    // 2. Weather Map (Spawns distinct storm cells)
-    // Increased slightly more robust frequency and added a neutral offset to avoid dead regions.
-    float2 weatherUvw = (p.xz + float2(15.2f, -8.4f)) * macroScale * 0.06f; 
-    float weatherNoise = sampleCloudNoise(float3(weatherUvw.x, 0.0f, weatherUvw.y)).r;
-    float cellMask = saturate((weatherNoise + (coverage - 0.5f)));
-
-    // 3. Vertical Profile (The Convection Towers)
-    float h = saturate((p.y - cloudBase) / max((cloudTop - cloudBase), 0.1f));
-    float bottomRamp = smoothstep(0.0f, 0.1f, h);
-    
-    // Let dense cells always reach the cloud top, while still tapering thinner cells.
-    float localTop = lerp(0.50f, 1.0f, cellMask);
-    float topTaper = 1.0f - smoothstep(localTop - 0.15f, localTop + 0.12f, h); 
-
-    // Preserve a small amount of structure even in thinner regions so cells never fully vanish.
-    const float localCoverageBoost = saturate(0.25f + 0.75f * cellMask);
-
-    float structuralMask = boundsMask * max(bottomRamp, 0.18f) * max(topTaper, 0.12f) * localCoverageBoost;
-
-    if (structuralMask <= 0.0f) {
-        return 0.0f;
-    }
-
-    // 4. Base Shape (The Massive Lumps)
-    // FIXED: Increased frequency slightly to give us chunkier details
-    float3 baseUvw = p * macroScale * 0.12f; 
-    float baseNoise = sampleCloudNoise(baseUvw).r;
-
-    // Threshold the noise to sculpt the solid cores and puffy exteriors
-    // More forgiving remap so the cloud can’t collapse to invisible everywhere.
-    float remapThreshold = (1.0f - structuralMask) * 0.55f;
-    float baseDensity = remap(baseNoise, remapThreshold, 1.0f, 0.0f, 1.0f);
-    baseDensity = saturate(baseDensity);
-
-    // Plump up the cores to make them bright, opaque white
-    baseDensity = saturate(pow(baseDensity, 0.6f)); 
-
-    if (baseDensity <= 0.0f) {
-        return 0.0f;
-    }
-
-    // 5. Cauliflower Details (Worley FBM)
-    float3 detailUvw = p * detailScale * 0.35f;
-    float4 detailNoise = sampleCloudNoise(detailUvw);
-    float highFreqFbm = detailNoise.g * 0.625f + detailNoise.b * 0.25f + detailNoise.a * 0.125f;
-
-    // Anti-banding spatial dither applied to the erosion layer
-    highFreqFbm += (detailNoise.r - 0.5f) * 0.05f;
-
-    // Erode the edges and tops, but protect the dense core and flat bottom
-    float heightBias = lerp(0.1f, 1.0f, h);
-    float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity) * heightBias;
-    
-    // THE SECRET TO CRISP EDGES: Remapping instead of subtracting!
-    // This creates sharp, defined "bite marks" rather than misty, blurry edges.
-    float finalDensity = remap(baseDensity, erosionModifier * erosionStrength, 1.0f, 0.0f, 1.0f);
-
-    return saturate(finalDensity) * densityScale;
-}
-
 bool intersectAabb(float3 rayOrigin, float3 rayDir, float3 bmin, float3 bmax, out float tMin, out float tMax) {
     float3 invD = 1.0f / rayDir;
     float3 t0 = (bmin - rayOrigin) * invD;
@@ -390,7 +314,7 @@ bool sampleDistance(
         }
 
         float3 x = rayOrigin + rayDir * t;
-        float sigmaT = sampleDensity(x) * 1.5f;
+        float sigmaT = sampleDensity(x) * kSigmaTScale;
         float accept = saturate(sigmaT / sigmaMajorant);
 
         if (rand01(rng) < accept) {
@@ -425,112 +349,6 @@ void projectSkySH1(
 
 float3 evalSkySH1(float3 dir, float3 c0, float3 cx, float3 cy, float3 cz) {
     return c0 + cx * dir.x + cy * dir.y + cz * dir.z;
-}
-
-float3 integrateCloudApproximation(
-    float3 rayOrigin,
-    float3 rayDir,
-    float3 sunDir,
-    float3 sunRadiance,
-    float sunIntensity,
-    float densityScale,
-    float g,
-    float3 cloudAlbedo,
-    float brightnessBoost,
-    float ambientLift,
-    bool debugSunTransmittance,
-    float3 ambientSkyBottom,
-    float3 ambientSkyTop,
-    inout uint rngState
-) {
-    float tMin = 0.0f;
-    float tMax = 0.0f;
-    if (!intersectAabb(rayOrigin, rayDir, kCloudAabbMin, kCloudAabbMax, tMin, tMax)) {
-        return skyColor(rayDir, sunDir, sunIntensity);
-    }
-
-    float marchDistance = tMax - tMin;
-    if (marchDistance <= 0.0f) {
-        return skyColor(rayDir, sunDir, sunIntensity);
-    }
-
-    const float stepSize = marchDistance / float(kCloudApproxSteps);
-    float t = tMin + (rand01(rngState) * stepSize);
-    float3 L = 0.0f;
-    float3 throughput = 1.0f;
-    const float ambientStrength = lerp(0.05f, 0.6f, saturate(ambientLift));
-
-    // Simulate diffuse sky/ground inter-reflection under clouds.
-    float3 groundAlbedoColor = float3(0.18f, 0.22f, 0.18f);
-    float3 earthBounce = sunRadiance * max(sunDir.y, 0.0f) * groundAlbedoColor;
-
-    const float cloudBase = gPush.cloudProfileParams.z;
-    const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
-
-    ambientSkyBottom = max(ambientSkyBottom, 0.0f);
-    ambientSkyTop = max(ambientSkyTop, 0.0f);
-    const float3 cloudTwilightColor = cloudTwilightTint(rayDir, sunDir, sunIntensity);
-
-    [loop]
-    for (uint i = 0u; i < kCloudApproxSteps; ++i) {
-        float maxThroughput = max(throughput.x, max(throughput.y, throughput.z));
-        if (maxThroughput < 1.0e-4f) {
-            break;
-        }
-
-        float3 x = rayOrigin + (rayDir * t);
-        float sigmaT = sampleDensity(x) * 1.5f;
-        if (sigmaT > 0.0f) {
-            float segmentTransmit = exp(-sigmaT * stepSize);
-            float segmentScatter = 1.0f - segmentTransmit;
-
-            float cosTheta = clamp(dot(-rayDir, -sunDir), -1.0f, 1.0f);
-            float baseSunTransmittance = sampleSunTransmittance(x);
-            float msTransmittance = 0.0f;
-            float isotropicScattering = 0.0f;
-            float densityMult = 1.0f;
-            float contribMult = 1.0f;
-            float gMult = 1.0f;
-            [unroll]
-            for (int ms = 0; ms < 3; ++ms) {
-                const float tr = pow(baseSunTransmittance, densityMult);
-                const float phase = dualHenyeyGreenstein(cosTheta, g * gMult);
-                msTransmittance += tr * phase * contribMult;
-                isotropicScattering += tr * contribMult;
-                densityMult *= 0.15f;
-                contribMult *= 0.60f;
-                gMult *= 0.5f;
-            }
-            if (debugSunTransmittance) {
-                const float trDebug = baseSunTransmittance;
-                return float3(trDebug, trDebug, trDebug);
-            }
-
-            const float localDensity = sigmaT;
-            float powderEffect = 1.0f - exp(-localDensity * 2.0f);
-            msTransmittance *= powderEffect;
-            isotropicScattering *= powderEffect;
-
-            const float hFrac = saturate((x.y - cloudBase) / max((cloudTop - cloudBase), 0.25f));
-            const float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
-            const float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
-            const float3 deepInternalGlow = sunRadiance * isotropicScattering * 0.45f;
-            const float3 msField = sampleMultiScatter(x);
-            const float3 enhancedAmbient = localAmbient + deepInternalGlow + (msField * cloudAlbedo * 1.35f);
-            float3 ambientTerm = enhancedAmbient * (1.0f / (4.0f * kPi)) * ambientStrength;
-
-            const float3 directColor = lerp(sunRadiance, min(cloudTwilightColor, sunRadiance * 1.6f), clamp(1.0f - cosTheta, 0.0f, 1.0f) * 0.35f);
-            float3 direct = directColor * msTransmittance * cloudAlbedo * brightnessBoost;
-            L += throughput * segmentScatter * direct;
-            L += throughput * segmentScatter * ambientTerm * cloudAlbedo;
-
-            throughput *= segmentTransmit;
-        }
-
-        t += stepSize;
-    }
-
-    return L + (throughput * skyColor(rayDir, sunDir, sunIntensity));
 }
 
 float3 integrateViewMarchFinal(
@@ -604,9 +422,11 @@ float3 integrateViewMarchFinal(
         float edge = sampleDensityEdge(x);
         float edgeBoost = lerp(1.0f, 1.35f, saturate(edge));
         float3 E = sampleMultiScatter(x);
-        float powder = 1.0f - exp(-rho * 1.8f);
+        float powderFromDensity = 1.0f - exp(-rho * 1.2f);
+        float powder = lerp(powderFromDensity, saturate(edge), 0.65f);
         float3 direct = rho * Tsun * phase * sunRadiance * cloudAlbedo * (0.25f + 0.75f * powder) * edgeBoost;
-        float3 indirect = rho * E * (0.35f + 0.65f * powder);
+        float rhoMask = 0.2f + 0.8f * saturate(rho);
+        float3 indirect = E * rhoMask * (0.65f + 0.35f * powder);
         float hFrac = saturate((x.y - cloudBase) / cloudHeightSpan);
         float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
         float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
@@ -617,7 +437,7 @@ float3 integrateViewMarchFinal(
         Lms += Tview * (indirect + ambient) * ds;
 
         // Use explicit view transmittance update for stable deterministic marching.
-        Tview *= exp(-rho * 1.2f * ds);
+        Tview *= exp(-rho * 1.5f * ds);
         if (Tview < 1.0e-4f) {
             break;
         }
@@ -802,7 +622,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
     float3 sunDir = normalize(gPush.sunDirectionIntensity.xyz);
     float sunIntensity = max(gPush.sunDirectionIntensity.w, 0.01f);
-    float sunCosThetaMax = cos(kSunAngularRadiusRadians);
     float3 sunRadiance = float3(1.0f, 1.0f, 0.98f) * sunIntensity;
 
     float densityScale = max(gPush.mediumParams.x, 0.01f);
@@ -812,7 +631,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float ambientLift = max(gPush.cloudLightParams.y, 0.0f);
     bool debugSunTransmittance = gPush.cloudLightParams.w > 0.5f;
     uint maxBounces = (uint)clamp(gPush.cloudLightParams.z, 1.0f, (float)kMaxBouncesHardLimit);
-    float sigmaMajorant = max(densityScale * (1.85f + 0.65f * saturate(gPush.cloudShapeParams.w)), 0.05f);
+    // Keep majorant explicitly tied to baked-density cap and sigma_t scaling.
+    float sigmaMajorant = max(densityScale * kSigmaTScale * kBakedDensityUpperBound * 1.3f, 0.05f);
     const float cloudBase = gPush.cloudProfileParams.z;
     const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
     const float cloudHeightSpan = max(cloudTop - cloudBase, 0.25f);
@@ -862,15 +682,20 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             int2 prevPixel;
             if (reprojectToPrevPixel(historyAnchor, width, height, prevPixel)) {
                 float3 history = gPrevAccumulation.Load(int3(prevPixel, 0)).xyz;
-                float clampStrength = max(gPush.historyParams.z, 0.05f);
-                float3 minColor = L / clampStrength;
-                float3 maxColor = L * clampStrength;
-                history = clamp(history, minColor, maxColor);
+                float clampStrength = max(gPush.historyParams.z, 1.0f);
+                const float3 lumaWeights = float3(0.2126f, 0.7152f, 0.0722f);
+                float l = dot(L, lumaWeights);
+                float lh = dot(history, lumaWeights);
+                float ratio = lh / max(l, 1.0e-4f);
+                if (ratio > clampStrength) {
+                    history *= (clampStrength / ratio);
+                }
                 float blend = saturate(gPush.historyParams.y);
                 L = lerp(L, history, blend);
             }
         }
     } else {
+        const float sunCosThetaMax = cos(kSunAngularRadiusRadians);
         [loop]
         for (uint bounce = 0u; bounce < maxBounces; ++bounce) {
             float tMin = 0.0f;
@@ -909,22 +734,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             float3 wo = -rayDir;
             float3 sunDirSample = sampleUniformCone(sunDir, sunCosThetaMax, rngState);
             const float baseSunTransmittance = sampleSunTransmittance(scatterPos);
-            float msTransmittance = 0.0f;
-            float densityMult = 1.0f;
-            float contribMult = 1.0f;
-            float gMult = 1.0f;
-            [unroll]
-            for (int ms = 0; ms < 3; ++ms) {
-                const float tr = pow(baseSunTransmittance, densityMult);
-                const float phase = dualHenyeyGreenstein(dot(-rayDir, -sunDirSample), g * gMult);
-                msTransmittance += tr * phase * contribMult;
-                densityMult *= 0.25f;
-                contribMult *= 0.70f;
-                gMult *= 0.5f;
-            }
-            const float localDensity = sampleDensity(scatterPos);
-            const float powderEffect = 1.0f - exp(-localDensity * 2.0f);
-            msTransmittance *= powderEffect;
             // Conventions:
             // - viewDir points from previous vertex/camera toward the scattering point.
             // - lightDir points from sun toward the scattering point.
@@ -936,7 +745,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             const float phase = dualHenyeyGreenstein(cosTheta, g);
             const float3 cloudTint = cloudTwilightTint(rayDir, sunDirSample, sunIntensity);
             const float3 directColor = lerp(sunRadiance, min(cloudTint, sunRadiance * 1.6f), clamp(1.0f - cosTheta, 0.0f, 1.0f) * 0.35f);
-            L += throughput * cloudAlbedo * brightnessBoost * msTransmittance * phase * directColor;
+            L += throughput * cloudAlbedo * brightnessBoost * baseSunTransmittance * phase * directColor;
 
             const float hFrac = saturate((scatterPos.y - cloudBase) / cloudHeightSpan);
             const float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
