@@ -76,13 +76,13 @@ bool App::init() {
     m_renderParams.scene.volume.densityScale = 3.5f;
     m_renderParams.scene.volume.anisotropyG = 0.82f;
     m_renderParams.scene.volume.albedo = 0.97f;
-    m_renderParams.scene.volume.macroScale = 0.70f;
-    m_renderParams.scene.volume.detailScale = 1.8f;
+    m_renderParams.scene.volume.macroScale = 0.90f;
+    m_renderParams.scene.volume.detailScale = 1.35f;
     m_renderParams.scene.volume.coverage = 0.75f;
     m_renderParams.scene.volume.weatherScale = 1.0f;
     m_renderParams.scene.volume.cloudBase = 2.5f;
     m_renderParams.scene.volume.cloudTop = 7.5f;
-    m_renderParams.scene.volume.erosionStrength = 0.70f;
+    m_renderParams.scene.volume.erosionStrength = 0.75f;
     m_renderParams.scene.volume.brightnessBoost = 1.0f;
     m_renderParams.scene.volume.ambientLift = 0.45f;
     m_renderParams.scene.volume.maxBounces = 1;
