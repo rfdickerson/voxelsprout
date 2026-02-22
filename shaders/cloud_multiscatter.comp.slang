@@ -45,6 +45,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
     float lambda = saturate(gPush.solveParams.y);
     float stepDistance = max(gPush.solveParams.z, 1e-3f);
+    float densityScale = max(gPush.mediumParams.x, 0.01f);
     float cloudAlbedo = saturate(gPush.mediumParams.z);
     float3 sunRadiance = float3(1.0f, 1.0f, 0.98f) * max(gPush.sunDirectionIntensity.w, 0.01f);
 
@@ -52,7 +53,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float3 uvw = (float3(dispatchThreadID) + 0.5f) / float(dim);
     float3 p = lerp(kCloudAabbMin, kCloudAabbMax, uvw);
 
-    float density = sampleDensity(p) * 1.5f;
+    float density = sampleDensity(p) * densityScale * 1.5f;
     float sunTr = gSunTransmittance.SampleLevel(gVolumeSampler, uvw, 0.0f);
     float3 source = density * sunTr * sunRadiance * (1.0f / (4.0f * kPi));
 

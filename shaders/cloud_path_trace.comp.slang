@@ -208,7 +208,8 @@ float3 sampleMultiScatter(float3 p) {
 
 float sampleDensity(float3 p) {
     float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
-    return gDensityVolume.SampleLevel(gVolumeSampler, uvw, 0.0f);
+    float densityScale = max(gPush.mediumParams.x, 0.01f);
+    return gDensityVolume.SampleLevel(gVolumeSampler, uvw, 0.0f) * densityScale;
 }
 
 float remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
