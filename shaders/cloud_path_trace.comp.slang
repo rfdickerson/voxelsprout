@@ -46,6 +46,8 @@ Texture3D<float4> gMultiScatterField;
 Texture3D<float> gDensityVolume;
 [[vk::binding(8, 0)]]
 Texture2D<float4> gPrevAccumulation;
+[[vk::binding(9, 0)]]
+Texture3D<float> gDensityEdgeVolume;
 
 uint hash3(uint3 p) {
     uint h = p.x * 747796405u;
@@ -210,6 +212,11 @@ float sampleDensity(float3 p) {
     float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
     float densityScale = max(gPush.mediumParams.x, 0.01f);
     return gDensityVolume.SampleLevel(gVolumeSampler, uvw, 0.0f) * densityScale;
+}
+
+float sampleDensityEdge(float3 p) {
+    float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
+    return gDensityEdgeVolume.SampleLevel(gVolumeSampler, uvw, 0.0f);
 }
 
 float remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
@@ -594,9 +601,11 @@ float3 integrateViewMarchFinal(
             return float3(Tsun, Tsun, Tsun);
         }
 
+        float edge = sampleDensityEdge(x);
+        float edgeBoost = lerp(1.0f, 1.35f, saturate(edge));
         float3 E = sampleMultiScatter(x);
         float powder = 1.0f - exp(-rho * 1.8f);
-        float3 direct = rho * Tsun * phase * sunRadiance * cloudAlbedo * (0.25f + 0.75f * powder);
+        float3 direct = rho * Tsun * phase * sunRadiance * cloudAlbedo * (0.25f + 0.75f * powder) * edgeBoost;
         float3 indirect = rho * E * (0.35f + 0.65f * powder);
         float hFrac = saturate((x.y - cloudBase) / cloudHeightSpan);
         float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);

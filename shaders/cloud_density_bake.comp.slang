@@ -17,10 +17,18 @@ RWTexture3D<float> gDensityVolume;
 [[vk::binding(1, 0)]]
 Texture3D<float4> gCloudNoiseVolume;
 [[vk::binding(2, 0)]]
+Texture3D<float4> gCloudDetailNoiseVolume;
+[[vk::binding(3, 0)]]
 SamplerState gVolumeSampler;
+[[vk::binding(4, 0)]]
+RWTexture3D<float> gDensityEdgeVolume;
 
 float4 sampleCloudNoise(float3 p) {
     return gCloudNoiseVolume.SampleLevel(gVolumeSampler, p, 0.0f);
+}
+
+float4 sampleCloudDetailNoise(float3 p) {
+    return gCloudDetailNoiseVolume.SampleLevel(gVolumeSampler, p, 0.0f);
 }
 
 float remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
@@ -32,7 +40,10 @@ float remap(float value, float originalMin, float originalMax, float newMin, flo
     return lerp(newMin, newMax, t);
 }
 
-float densityField(float3 p) {
+void densityField(float3 p, out float outDensity, out float outEdge) {
+    outDensity = 0.0f;
+    outEdge = 0.0f;
+
     const float cloudBase = gPush.cloudProfileParams.z;
     const float cloudTop = max(gPush.cloudProfileParams.w, cloudBase + 0.25f);
     const float macroScale = max(gPush.cloudShapeParams.x, 0.05f);
@@ -41,7 +52,7 @@ float densityField(float3 p) {
     const float coverage = saturate(gPush.cloudProfileParams.x);
 
     if (p.y < cloudBase || p.y > cloudTop) {
-        return 0.0f;
+        return;
     }
 
     float edgeFadeX = smoothstep(-9.5f, -6.0f, p.x) * (1.0f - smoothstep(6.0f, 9.5f, p.x));
@@ -71,7 +82,7 @@ float densityField(float3 p) {
 
     float structuralMask = boundsMask * max(vertical, 0.12f) * localCoverageBoost;
     if (structuralMask <= 0.0f) {
-        return 0.0f;
+        return;
     }
 
     float3 baseUvw = qWarped * (macroScale * 2.0f);
@@ -80,11 +91,11 @@ float densityField(float3 p) {
     float baseDensity = remap(baseNoise, remapThreshold, 1.0f, 0.0f, 1.0f);
     baseDensity = saturate(pow(saturate(baseDensity), 0.6f));
     if (baseDensity <= 0.0f) {
-        return 0.0f;
+        return;
     }
 
     float3 detailUvw = qWarped * (detailScale * 8.0f);
-    float4 detailNoise = sampleCloudNoise(detailUvw);
+    float4 detailNoise = sampleCloudDetailNoise(detailUvw);
     float highFreqFbm = detailNoise.g * 0.625f + detailNoise.b * 0.25f + detailNoise.a * 0.125f;
     highFreqFbm += (detailNoise.r - 0.5f) * 0.05f;
 
@@ -93,7 +104,8 @@ float densityField(float3 p) {
     float finalDensity = remap(baseDensity, erosionModifier * erosionStrength, 1.0f, 0.0f, 1.0f);
     finalDensity = saturate(finalDensity);
     finalDensity = min(finalDensity, 0.98f);
-    return finalDensity;
+    outDensity = finalDensity;
+    outEdge = 1.0f - smoothstep(0.2f, 0.8f, baseDensity);
 }
 
 [shader("compute")]
@@ -106,5 +118,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
     float3 uvw = (float3(dispatchThreadID) + 0.5f) / float(dim);
     float3 p = lerp(kCloudAabbMin, kCloudAabbMax, uvw);
-    gDensityVolume[dispatchThreadID] = densityField(p);
+    float density = 0.0f;
+    float edge = 0.0f;
+    densityField(p, density, edge);
+    gDensityVolume[dispatchThreadID] = density;
+    gDensityEdgeVolume[dispatchThreadID] = edge;
 }
