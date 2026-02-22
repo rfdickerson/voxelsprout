@@ -336,14 +336,18 @@ float3 integrateViewMarchFinal(
         }
 
         float edge = sampleDensityEdge(x);
+        edge = saturate(edge);
         float edgeBoost = lerp(1.0f, 1.35f, saturate(edge));
-        float3 E = sampleMultiScatter(x);
-        float powderFromDensity = 1.0f - exp(-rho * 1.2f);
-        float powder = lerp(powderFromDensity, saturate(edge), 0.65f);
+        float powder = edge * 0.7f;
         float3 direct = rho * Tsun * phase * sunRadiance * cloudAlbedo * (0.25f + 0.75f * powder) * edgeBoost;
-        float rhoMask = 0.2f + 0.8f * saturate(rho);
-        float3 indirect = E * rhoMask * (0.65f + 0.35f * powder);
         float hFrac = saturate((x.y - cloudBase) / cloudHeightSpan);
+        float3 skyFill = lerp(ambientSkyBottom, ambientSkyTop, hFrac);
+        float3 E = sampleMultiScatter(x);
+        E = max(E, skyFill * 0.25f);
+        float thickness = 1.0f - Tview;
+        float backlit = saturate(1.0f - Tsun);
+        float3 shadowBlue = ambientSkyTop * 0.4f;
+        float3 indirect = (E * thickness) + (shadowBlue * backlit * 0.3f);
         float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
         float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
         float3 ambientFloor = sunRadiance * 0.22f;
