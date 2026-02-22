@@ -70,20 +70,21 @@ bool App::init() {
     m_renderParams.camera.yawDegrees = -90.0f;
     m_renderParams.camera.pitchDegrees = 12.0f;
     m_renderParams.camera.fovDegrees = 75.0f;
-    m_renderParams.scene.sun.direction = {0.18f, 0.54f, -0.82f};
+    // Start with a high frontal sun for bright front-lit cumulus.
+    m_renderParams.scene.sun.direction = sunDirectionFromAngles(-45.0f, 70.0f);
     m_renderParams.scene.sun.intensity = 28.0f;
     m_renderParams.scene.volume.densityScale = 3.5f;
     m_renderParams.scene.volume.anisotropyG = 0.82f;
     m_renderParams.scene.volume.albedo = 0.97f;
     m_renderParams.scene.volume.macroScale = 1.0f;
-    m_renderParams.scene.volume.detailScale = 1.5f;
+    m_renderParams.scene.volume.detailScale = 1.2f;
     m_renderParams.scene.volume.coverage = 0.72f;
     m_renderParams.scene.volume.weatherScale = 1.0f;
     m_renderParams.scene.volume.cloudBase = 2.5f;
     m_renderParams.scene.volume.cloudTop = 7.5f;
-    m_renderParams.scene.volume.erosionStrength = 0.85f;
+    m_renderParams.scene.volume.erosionStrength = 0.75f;
     m_renderParams.scene.volume.brightnessBoost = 1.0f;
-    m_renderParams.scene.volume.ambientLift = 0.14f;
+    m_renderParams.scene.volume.ambientLift = 0.40f;
     m_renderParams.scene.volume.maxBounces = 1;
     m_renderParams.exposure = 0.14f;
     m_renderParams.toneMapOperator = 2;

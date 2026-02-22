@@ -28,8 +28,8 @@ private:
     int m_interactionCooldownFrames = 0;
     int m_cloudUpdateIntervalUi = 2;
     int m_maxAccumulationSamplesUi = 256;
-    float m_sunAzimuthDegreesUi = 0.0f;
-    float m_sunElevationDegreesUi = 0.0f;
+    float m_sunAzimuthDegreesUi = -45.0f;
+    float m_sunElevationDegreesUi = 70.0f;
 };
 
 } // namespace voxelsprout::app

@@ -213,7 +213,13 @@ float densityField(float3 p) {
     // 1. Multi-dome container for non-symmetric cauliflower groups.
     const float4 asym = sampleCloudNoise(p * 0.04f + float3(3.3f, 1.7f, 8.4f));
     const float2 asymXZ = (asym.yz - 0.5f) * 1.6f;
-    const float3 center = float3(0.0f, cloudBase + 1.7f, 0.0f);
+    const float3 center = float3(0.0f, cloudBase + 2.5f, 0.0f);
+
+    // Taller tower support mask: relax vertical squash and widen the container for towering forms.
+    const float3 localP = (p - center) * float3(1.0f, 0.7f, 1.0f);
+    const float distFromCenter = length(localP);
+    const float domeRadius = 9.0f;
+    const float domeMask = 1.0f - smoothstep(domeRadius * 0.2f, domeRadius, distFromCenter);
 
     const float topBoil = sampleCloudNoise(float3(p.x * 0.10f, 1.8f, p.z * 0.10f) + float3(1.2f, 3.1f, -1.4f)).r;
     const float topLift = 1.0f + 0.40f * (pow(saturate((topBoil - 0.45f) / 0.55f), 1.8f) * smoothstep(0.35f, 1.0f, h));
@@ -236,7 +242,7 @@ float densityField(float3 p) {
     structuralSeed = max(structuralSeed, 0.65f * (1.0f - smoothstep(3.4f, 7.2f, length(q))));
 
     // Tall cap: gently promote upper regions for a dome-like rise.
-    const float structuralMask = saturate(structuralSeed * bottomRamp * topLift * topTaper);
+    const float structuralMask = saturate(structuralSeed * domeMask * bottomRamp * topLift * topTaper);
     if (structuralMask <= 0.0f) {
         return 0.0f;
     }
@@ -458,6 +464,7 @@ float3 integrateCloudApproximation(
 
     ambientSkyBottom = max(ambientSkyBottom, 0.0f);
     ambientSkyTop = max(ambientSkyTop, 0.0f);
+    const float3 cloudTwilightColor = cloudTwilightTint(rayDir, sunDir, sunIntensity);
 
     [loop]
     for (uint i = 0u; i < kCloudApproxSteps; ++i) {
@@ -501,7 +508,8 @@ float3 integrateCloudApproximation(
             const float3 localAmbient = max(lerp(earthBounce, ambientSky, hFrac), 0.0f);
             float3 ambientTerm = localAmbient * (1.0f / (4.0f * kPi)) * ambientStrength;
 
-            float3 direct = sunRadiance * msTransmittance * cloudAlbedo * brightnessBoost;
+            const float3 directColor = lerp(sunRadiance, min(cloudTwilightColor, sunRadiance * 1.6f), clamp(1.0f - cosTheta, 0.0f, 1.0f) * 0.35f);
+            float3 direct = directColor * msTransmittance * cloudAlbedo * brightnessBoost;
             L += throughput * segmentScatter * direct;
             L += throughput * segmentScatter * ambientTerm * cloudAlbedo;
 
@@ -586,6 +594,20 @@ float3 skyAmbientLighting(float3 dir, float3 sunDir, float sunIntensity) {
     float3 shCz;
     projectSkySH1(sunDir, sunIntensity, shC0, shCx, shCy, shCz);
     return max(evalSkySH1(normalize(dir), shC0, shCx, shCy, shCz), 0.0f);
+}
+
+float3 cloudTwilightTint(float3 viewDir, float3 sunDir, float sunIntensity) {
+    const float sunWarm = pow(1.0f - clamp(sunDir.y, 0.0f, 1.0f), 1.2f);
+
+    const float3 viewSky = max(skyColor(-viewDir, sunDir, sunIntensity), 0.0f);
+    const float3 rimDir = normalize(-viewDir + (-sunDir * 0.55f));
+    const float3 rimSky = max(skyColor(rimDir, sunDir, sunIntensity), 0.0f);
+    const float3 glowDir = normalize(0.75f * (-viewDir) - 0.25f * sunDir);
+    const float3 glowSky = max(skyColor(glowDir, sunDir, sunIntensity), 0.0f);
+
+    const float viewBlend = 0.45f + 0.55f * sunWarm;
+    float3 tinted = lerp(viewSky, rimSky, viewBlend);
+    return lerp(tinted, glowSky, 0.35f * sunWarm);
 }
 
 [shader("compute")]
@@ -741,7 +763,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             float cosTheta = clamp(dot(lightDir, -viewDir), -1.0f, 1.0f);
             // sunRadiance here represents integrated sun-disk radiance under our UI intensity convention.
             const float phase = dualHenyeyGreenstein(cosTheta, g);
-            L += throughput * cloudAlbedo * brightnessBoost * msTransmittance * phase * sunRadiance;
+            const float3 cloudTint = cloudTwilightTint(rayDir, sunDirSample, sunIntensity);
+            const float3 directColor = lerp(sunRadiance, min(cloudTint, sunRadiance * 1.6f), clamp(1.0f - cosTheta, 0.0f, 1.0f) * 0.35f);
+            L += throughput * cloudAlbedo * brightnessBoost * msTransmittance * phase * directColor;
 
             const float hFrac = saturate((scatterPos.y - cloudBase) / cloudHeightSpan);
             const float3 ambientSky = max(lerp(ambientSkyBottom, ambientSkyTop, hFrac), 0.0f);
