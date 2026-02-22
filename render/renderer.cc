@@ -29,6 +29,7 @@ constexpr std::uint32_t kTimestampCloudEnd = 1;
 constexpr std::uint32_t kTimestampToneEnd = 2;
 constexpr std::uint32_t kTimestampFrameEnd = 3;
 constexpr std::uint32_t kCloudNoiseVolumeDim = 128;
+constexpr std::uint32_t kDensityVolumeDim = 128;
 constexpr std::uint32_t kSunTransmittanceVolumeDim = 128;
 constexpr std::uint32_t kSunTransmittanceMarchSteps = 48;
 constexpr std::uint32_t kMultiScatterVolumeDim = 32;
@@ -37,6 +38,7 @@ constexpr std::uint32_t kMultiScatterIterationsLow = 2;
 constexpr float kMultiScatterLambda = 0.45f;
 
 constexpr const char* kCloudShaderPath = "shaders/cloud_path_trace.comp.slang.spv";
+constexpr const char* kDensityBakeShaderPath = "shaders/cloud_density_bake.comp.slang.spv";
 constexpr const char* kSunTransmittanceShaderPath = "shaders/cloud_sun_transmittance.comp.slang.spv";
 constexpr const char* kMultiScatterShaderPath = "shaders/cloud_multiscatter.comp.slang.spv";
 constexpr const char* kToneMapShaderPath = "shaders/tone_map.comp.slang.spv";
@@ -258,6 +260,7 @@ bool paramsDiffer(const RenderParameters& a, const RenderParameters& b) {
         !almostEqual(as.direction.z, bs.direction.z) ||
         !almostEqual(as.intensity, bs.intensity) ||
         a.enableAccumulation != b.enableAccumulation ||
+        a.densityBakeEveryFrame != b.densityBakeEveryFrame ||
         a.multiScatterTemporalMode != b.multiScatterTemporalMode ||
         a.debugSunTransmittance != b.debugSunTransmittance;
 }
@@ -344,6 +347,14 @@ struct SunTransmittancePush {
     float volumeParams[4];
 };
 
+struct DensityBakePush {
+    float mediumParams[4];
+    float cloudShapeParams[4];
+    float cloudProfileParams[4];
+    float cloudWarpParams[4];
+    float volumeParams[4];
+};
+
 struct MultiScatterPush {
     float sunDirectionIntensity[4];
     float mediumParams[4];
@@ -404,6 +415,13 @@ struct Renderer::Impl {
         VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
     };
 
+    struct DensityBakePass {
+        VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    };
+
     struct MultiScatterPass {
         VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
@@ -437,6 +455,7 @@ struct Renderer::Impl {
     ImageResource accumulationImage;
     ImageResource rngStateImage;
     ImageResource toneMapImage;
+    ImageResource densityImage;
     ImageResource sunTransmittanceImage;
     std::array<ImageResource, 2> multiScatterImages{};
     ImageResource presentImage;
@@ -449,6 +468,7 @@ struct Renderer::Impl {
     VkDescriptorPool imguiDescriptorPool = VK_NULL_HANDLE;
 
     CloudPathTracePass cloudPathTracePass;
+    DensityBakePass densityBakePass;
     SunTransmittancePass sunTransmittancePass;
     MultiScatterPass multiScatterPass;
     ToneMapPass toneMapPass;
@@ -473,6 +493,7 @@ struct Renderer::Impl {
     std::uint64_t latestCopySubmittedComputeTimelineValue = 0;
     std::uint64_t latestPresentedComputeTimelineValue = 0;
     bool toneMapOwnedByUi = false;
+    bool densityVolumeValid = false;
     GpuTimingInfo timings{};
 
     bool init(GLFWwindow* inWindow);
@@ -1043,6 +1064,16 @@ bool Renderer::Impl::createStorageImages() {
         return false;
     }
 
+    if (!createImage3D(
+            densityImage,
+            VK_FORMAT_R16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            kDensityVolumeDim,
+            kDensityVolumeDim,
+            kDensityVolumeDim)) {
+        return false;
+    }
+
     for (ImageResource& multiScatterImage : multiScatterImages) {
         if (!createImage3D(
                 multiScatterImage,
@@ -1427,6 +1458,7 @@ void Renderer::Impl::destroyStorageImages() {
     destroyImage(accumulationImage);
     destroyImage(rngStateImage);
     destroyImage(toneMapImage);
+    destroyImage(densityImage);
     destroyImage(sunTransmittanceImage);
     for (ImageResource& multiScatterImage : multiScatterImages) {
         destroyImage(multiScatterImage);
@@ -1471,13 +1503,13 @@ bool Renderer::Impl::createDescriptors() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     poolSizes[0].descriptorCount = 8;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    poolSizes[1].descriptorCount = 12;
+    poolSizes[1].descriptorCount = 13;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-    poolSizes[2].descriptorCount = 4;
+    poolSizes[2].descriptorCount = 5;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 5;
+    poolInfo.maxSets = 6;
     poolInfo.poolSizeCount = static_cast<std::uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
 
@@ -1502,7 +1534,7 @@ bool Renderer::Impl::createDescriptors() {
         return false;
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 7> cloudBindings{};
+    std::array<VkDescriptorSetLayoutBinding, 8> cloudBindings{};
     cloudBindings[0].binding = 0;
     cloudBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     cloudBindings[0].descriptorCount = 1;
@@ -1531,6 +1563,10 @@ bool Renderer::Impl::createDescriptors() {
     cloudBindings[6].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     cloudBindings[6].descriptorCount = 1;
     cloudBindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    cloudBindings[7].binding = 7;
+    cloudBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    cloudBindings[7].descriptorCount = 1;
+    cloudBindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo cloudLayoutInfo{};
     cloudLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1539,6 +1575,30 @@ bool Renderer::Impl::createDescriptors() {
 
     if (vkCreateDescriptorSetLayout(device, &cloudLayoutInfo, nullptr, &cloudPathTracePass.descriptorSetLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create cloud descriptor set layout";
+        return false;
+    }
+
+    std::array<VkDescriptorSetLayoutBinding, 3> densityBindings{};
+    densityBindings[0].binding = 0;
+    densityBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    densityBindings[0].descriptorCount = 1;
+    densityBindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    densityBindings[1].binding = 1;
+    densityBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    densityBindings[1].descriptorCount = 1;
+    densityBindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    densityBindings[2].binding = 2;
+    densityBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    densityBindings[2].descriptorCount = 1;
+    densityBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo densityLayoutInfo{};
+    densityLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    densityLayoutInfo.bindingCount = static_cast<std::uint32_t>(densityBindings.size());
+    densityLayoutInfo.pBindings = densityBindings.data();
+
+    if (vkCreateDescriptorSetLayout(device, &densityLayoutInfo, nullptr, &densityBakePass.descriptorSetLayout) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create density-bake descriptor set layout";
         return false;
     }
 
@@ -1630,6 +1690,18 @@ bool Renderer::Impl::createDescriptors() {
         return false;
     }
 
+    std::array<VkDescriptorSetLayout, 1> densitySetLayouts = {densityBakePass.descriptorSetLayout};
+    VkDescriptorSetAllocateInfo densityAllocInfo{};
+    densityAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    densityAllocInfo.descriptorPool = descriptorPool;
+    densityAllocInfo.descriptorSetCount = static_cast<std::uint32_t>(densitySetLayouts.size());
+    densityAllocInfo.pSetLayouts = densitySetLayouts.data();
+
+    if (vkAllocateDescriptorSets(device, &densityAllocInfo, &densityBakePass.descriptorSet) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to allocate density-bake descriptor set";
+        return false;
+    }
+
     std::array<VkDescriptorSetLayout, 1> sunSetLayouts = {sunTransmittancePass.descriptorSetLayout};
     VkDescriptorSetAllocateInfo sunAllocInfo{};
     sunAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -1700,6 +1772,15 @@ bool Renderer::Impl::createDescriptors() {
     sunTransmittanceSampleInfo.imageView = sunTransmittanceImage.view;
     sunTransmittanceSampleInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
+    VkDescriptorImageInfo densityStorageInfo{};
+    densityStorageInfo.imageView = densityImage.view;
+    densityStorageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo densitySampleInfo{};
+    densitySampleInfo.sampler = VK_NULL_HANDLE;
+    densitySampleInfo.imageView = densityImage.view;
+    densitySampleInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
     VkDescriptorImageInfo multiScatterSampleInfo{};
     multiScatterSampleInfo.sampler = VK_NULL_HANDLE;
     multiScatterSampleInfo.imageView = multiScatterImages[0].view;
@@ -1717,7 +1798,7 @@ bool Renderer::Impl::createDescriptors() {
     toneInfo.imageView = toneMapImage.view;
     toneInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    std::array<VkWriteDescriptorSet, 22> writes{};
+    std::array<VkWriteDescriptorSet, 26> writes{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = cloudPathTracePass.descriptorSet;
     writes[0].dstBinding = 0;
@@ -1768,109 +1849,137 @@ bool Renderer::Impl::createDescriptors() {
     writes[6].pImageInfo = &multiScatterSampleInfo;
 
     writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[7].dstSet = sunTransmittancePass.descriptorSet;
-    writes[7].dstBinding = 0;
-    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[7].dstSet = cloudPathTracePass.descriptorSet;
+    writes[7].dstBinding = 7;
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[7].descriptorCount = 1;
-    writes[7].pImageInfo = &sunTransmittanceStorageInfo;
+    writes[7].pImageInfo = &densitySampleInfo;
 
     writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[8].dstSet = sunTransmittancePass.descriptorSet;
-    writes[8].dstBinding = 1;
-    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[8].dstSet = densityBakePass.descriptorSet;
+    writes[8].dstBinding = 0;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[8].descriptorCount = 1;
-    writes[8].pImageInfo = &cloudNoiseInfo;
+    writes[8].pImageInfo = &densityStorageInfo;
 
     writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[9].dstSet = sunTransmittancePass.descriptorSet;
-    writes[9].dstBinding = 2;
-    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[9].dstSet = densityBakePass.descriptorSet;
+    writes[9].dstBinding = 1;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[9].descriptorCount = 1;
-    writes[9].pImageInfo = &cloudNoiseSamplerInfo;
+    writes[9].pImageInfo = &cloudNoiseInfo;
 
     writes[10].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[10].dstSet = multiScatterPass.descriptorSets[0];
-    writes[10].dstBinding = 0;
-    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[10].dstSet = densityBakePass.descriptorSet;
+    writes[10].dstBinding = 2;
+    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[10].descriptorCount = 1;
-    writes[10].pImageInfo = &multiScatterBStorageInfo;
+    writes[10].pImageInfo = &cloudNoiseSamplerInfo;
 
     writes[11].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[11].dstSet = multiScatterPass.descriptorSets[0];
-    writes[11].dstBinding = 1;
-    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[11].dstSet = sunTransmittancePass.descriptorSet;
+    writes[11].dstBinding = 0;
+    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[11].descriptorCount = 1;
-    writes[11].pImageInfo = &multiScatterAStorageInfo;
+    writes[11].pImageInfo = &sunTransmittanceStorageInfo;
 
     writes[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[12].dstSet = multiScatterPass.descriptorSets[0];
-    writes[12].dstBinding = 2;
+    writes[12].dstSet = sunTransmittancePass.descriptorSet;
+    writes[12].dstBinding = 1;
     writes[12].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[12].descriptorCount = 1;
-    writes[12].pImageInfo = &sunTransmittanceSampleInfo;
+    writes[12].pImageInfo = &densitySampleInfo;
 
     writes[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[13].dstSet = multiScatterPass.descriptorSets[0];
-    writes[13].dstBinding = 3;
-    writes[13].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[13].dstSet = sunTransmittancePass.descriptorSet;
+    writes[13].dstBinding = 2;
+    writes[13].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[13].descriptorCount = 1;
-    writes[13].pImageInfo = &cloudNoiseInfo;
+    writes[13].pImageInfo = &cloudNoiseSamplerInfo;
 
     writes[14].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[14].dstSet = multiScatterPass.descriptorSets[0];
-    writes[14].dstBinding = 4;
-    writes[14].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[14].dstBinding = 0;
+    writes[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[14].descriptorCount = 1;
-    writes[14].pImageInfo = &cloudNoiseSamplerInfo;
+    writes[14].pImageInfo = &multiScatterBStorageInfo;
 
     writes[15].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[15].dstSet = multiScatterPass.descriptorSets[1];
-    writes[15].dstBinding = 0;
-    writes[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[15].dstSet = multiScatterPass.descriptorSets[0];
+    writes[15].dstBinding = 1;
+    writes[15].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[15].descriptorCount = 1;
     writes[15].pImageInfo = &multiScatterAStorageInfo;
 
     writes[16].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[16].dstSet = multiScatterPass.descriptorSets[1];
-    writes[16].dstBinding = 1;
+    writes[16].dstSet = multiScatterPass.descriptorSets[0];
+    writes[16].dstBinding = 2;
     writes[16].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[16].descriptorCount = 1;
-    writes[16].pImageInfo = &multiScatterBStorageInfo;
+    writes[16].pImageInfo = &sunTransmittanceSampleInfo;
 
     writes[17].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[17].dstSet = multiScatterPass.descriptorSets[1];
-    writes[17].dstBinding = 2;
+    writes[17].dstSet = multiScatterPass.descriptorSets[0];
+    writes[17].dstBinding = 3;
     writes[17].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[17].descriptorCount = 1;
-    writes[17].pImageInfo = &sunTransmittanceSampleInfo;
+    writes[17].pImageInfo = &densitySampleInfo;
 
     writes[18].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[18].dstSet = multiScatterPass.descriptorSets[1];
-    writes[18].dstBinding = 3;
-    writes[18].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[18].dstSet = multiScatterPass.descriptorSets[0];
+    writes[18].dstBinding = 4;
+    writes[18].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[18].descriptorCount = 1;
-    writes[18].pImageInfo = &cloudNoiseInfo;
+    writes[18].pImageInfo = &cloudNoiseSamplerInfo;
 
     writes[19].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[19].dstSet = multiScatterPass.descriptorSets[1];
-    writes[19].dstBinding = 4;
-    writes[19].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[19].dstBinding = 0;
+    writes[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[19].descriptorCount = 1;
-    writes[19].pImageInfo = &cloudNoiseSamplerInfo;
+    writes[19].pImageInfo = &multiScatterAStorageInfo;
 
     writes[20].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[20].dstSet = toneMapPass.descriptorSet;
-    writes[20].dstBinding = 0;
-    writes[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[20].dstSet = multiScatterPass.descriptorSets[1];
+    writes[20].dstBinding = 1;
+    writes[20].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[20].descriptorCount = 1;
-    writes[20].pImageInfo = &accumInfo;
+    writes[20].pImageInfo = &multiScatterBStorageInfo;
 
     writes[21].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[21].dstSet = toneMapPass.descriptorSet;
-    writes[21].dstBinding = 1;
-    writes[21].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[21].dstSet = multiScatterPass.descriptorSets[1];
+    writes[21].dstBinding = 2;
+    writes[21].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     writes[21].descriptorCount = 1;
-    writes[21].pImageInfo = &toneInfo;
+    writes[21].pImageInfo = &sunTransmittanceSampleInfo;
+
+    writes[22].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[22].dstSet = multiScatterPass.descriptorSets[1];
+    writes[22].dstBinding = 3;
+    writes[22].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[22].descriptorCount = 1;
+    writes[22].pImageInfo = &densitySampleInfo;
+
+    writes[23].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[23].dstSet = multiScatterPass.descriptorSets[1];
+    writes[23].dstBinding = 4;
+    writes[23].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[23].descriptorCount = 1;
+    writes[23].pImageInfo = &cloudNoiseSamplerInfo;
+
+    writes[24].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[24].dstSet = toneMapPass.descriptorSet;
+    writes[24].dstBinding = 0;
+    writes[24].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[24].descriptorCount = 1;
+    writes[24].pImageInfo = &accumInfo;
+
+    writes[25].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[25].dstSet = toneMapPass.descriptorSet;
+    writes[25].dstBinding = 1;
+    writes[25].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[25].descriptorCount = 1;
+    writes[25].pImageInfo = &toneInfo;
 
     vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     return true;
@@ -1880,6 +1989,10 @@ void Renderer::Impl::destroyDescriptors() {
     if (cloudPathTracePass.descriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(device, cloudPathTracePass.descriptorSetLayout, nullptr);
         cloudPathTracePass.descriptorSetLayout = VK_NULL_HANDLE;
+    }
+    if (densityBakePass.descriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, densityBakePass.descriptorSetLayout, nullptr);
+        densityBakePass.descriptorSetLayout = VK_NULL_HANDLE;
     }
     if (sunTransmittancePass.descriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(device, sunTransmittancePass.descriptorSetLayout, nullptr);
@@ -1905,13 +2018,18 @@ void Renderer::Impl::destroyDescriptors() {
 
 bool Renderer::Impl::createPipelines() {
     VkShaderModule cloudModule = createShaderModuleFromSpv(kCloudShaderPath);
+    VkShaderModule densityModule = createShaderModuleFromSpv(kDensityBakeShaderPath);
     VkShaderModule sunTransmittanceModule = createShaderModuleFromSpv(kSunTransmittanceShaderPath);
     VkShaderModule multiScatterModule = createShaderModuleFromSpv(kMultiScatterShaderPath);
     VkShaderModule toneModule = createShaderModuleFromSpv(kToneMapShaderPath);
-    if (cloudModule == VK_NULL_HANDLE || sunTransmittanceModule == VK_NULL_HANDLE || multiScatterModule == VK_NULL_HANDLE
+    if (cloudModule == VK_NULL_HANDLE || densityModule == VK_NULL_HANDLE || sunTransmittanceModule == VK_NULL_HANDLE
+        || multiScatterModule == VK_NULL_HANDLE
         || toneModule == VK_NULL_HANDLE) {
         if (cloudModule != VK_NULL_HANDLE) {
             vkDestroyShaderModule(device, cloudModule, nullptr);
+        }
+        if (densityModule != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device, densityModule, nullptr);
         }
         if (sunTransmittanceModule != VK_NULL_HANDLE) {
             vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
@@ -1940,6 +2058,29 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreatePipelineLayout(device, &cloudLayoutInfo, nullptr, &cloudPathTracePass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create cloud pipeline layout";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, densityModule, nullptr);
+        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        vkDestroyShaderModule(device, multiScatterModule, nullptr);
+        vkDestroyShaderModule(device, toneModule, nullptr);
+        return false;
+    }
+
+    VkPushConstantRange densityPushRange{};
+    densityPushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    densityPushRange.offset = 0;
+    densityPushRange.size = sizeof(DensityBakePush);
+
+    VkPipelineLayoutCreateInfo densityLayoutInfo{};
+    densityLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    densityLayoutInfo.setLayoutCount = 1;
+    densityLayoutInfo.pSetLayouts = &densityBakePass.descriptorSetLayout;
+    densityLayoutInfo.pushConstantRangeCount = 1;
+    densityLayoutInfo.pPushConstantRanges = &densityPushRange;
+
+    if (vkCreatePipelineLayout(device, &densityLayoutInfo, nullptr, &densityBakePass.pipelineLayout) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create density-bake pipeline layout";
+        vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, densityModule, nullptr);
         vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
         vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
@@ -1961,6 +2102,7 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreatePipelineLayout(device, &sunLayoutInfo, nullptr, &sunTransmittancePass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create sun transmittance pipeline layout";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, densityModule, nullptr);
         vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
         vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
@@ -1982,6 +2124,7 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreatePipelineLayout(device, &multiScatterLayoutInfo, nullptr, &multiScatterPass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create multi-scatter pipeline layout";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, densityModule, nullptr);
         vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
         vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
@@ -2003,6 +2146,7 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreatePipelineLayout(device, &toneLayoutInfo, nullptr, &toneMapPass.pipelineLayout) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create tone map pipeline layout";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, densityModule, nullptr);
         vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
         vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
@@ -2023,6 +2167,28 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cloudPipelineInfo, nullptr, &cloudPathTracePass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create cloud compute pipeline";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, densityModule, nullptr);
+        vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
+        vkDestroyShaderModule(device, multiScatterModule, nullptr);
+        vkDestroyShaderModule(device, toneModule, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo densityStage{};
+    densityStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    densityStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    densityStage.module = densityModule;
+    densityStage.pName = "main";
+
+    VkComputePipelineCreateInfo densityPipelineInfo{};
+    densityPipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    densityPipelineInfo.stage = densityStage;
+    densityPipelineInfo.layout = densityBakePass.pipelineLayout;
+
+    if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &densityPipelineInfo, nullptr, &densityBakePass.pipeline) != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to create density-bake compute pipeline";
+        vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, densityModule, nullptr);
         vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
         vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
@@ -2043,6 +2209,7 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &sunPipelineInfo, nullptr, &sunTransmittancePass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create sun transmittance compute pipeline";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, densityModule, nullptr);
         vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
         vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
@@ -2063,6 +2230,7 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &multiScatterPipelineInfo, nullptr, &multiScatterPass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create multi-scatter compute pipeline";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, densityModule, nullptr);
         vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
         vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
@@ -2083,6 +2251,7 @@ bool Renderer::Impl::createPipelines() {
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &tonePipelineInfo, nullptr, &toneMapPass.pipeline) != VK_SUCCESS) {
         VOX_LOGE("render") << "failed to create tone map compute pipeline";
         vkDestroyShaderModule(device, cloudModule, nullptr);
+        vkDestroyShaderModule(device, densityModule, nullptr);
         vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
         vkDestroyShaderModule(device, multiScatterModule, nullptr);
         vkDestroyShaderModule(device, toneModule, nullptr);
@@ -2090,6 +2259,7 @@ bool Renderer::Impl::createPipelines() {
     }
 
     vkDestroyShaderModule(device, cloudModule, nullptr);
+    vkDestroyShaderModule(device, densityModule, nullptr);
     vkDestroyShaderModule(device, sunTransmittanceModule, nullptr);
     vkDestroyShaderModule(device, multiScatterModule, nullptr);
     vkDestroyShaderModule(device, toneModule, nullptr);
@@ -2104,6 +2274,14 @@ void Renderer::Impl::destroyPipelines() {
     if (cloudPathTracePass.pipelineLayout != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(device, cloudPathTracePass.pipelineLayout, nullptr);
         cloudPathTracePass.pipelineLayout = VK_NULL_HANDLE;
+    }
+    if (densityBakePass.pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, densityBakePass.pipeline, nullptr);
+        densityBakePass.pipeline = VK_NULL_HANDLE;
+    }
+    if (densityBakePass.pipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, densityBakePass.pipelineLayout, nullptr);
+        densityBakePass.pipelineLayout = VK_NULL_HANDLE;
     }
     if (sunTransmittancePass.pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(device, sunTransmittancePass.pipeline, nullptr);
@@ -2790,6 +2968,7 @@ bool Renderer::Impl::recreateSwapchain() {
     latestCopySubmittedComputeTimelineValue = 0;
     latestPresentedComputeTimelineValue = 0;
     toneMapOwnedByUi = false;
+    densityVolumeValid = false;
     return true;
 }
 
@@ -2883,6 +3062,8 @@ bool Renderer::Impl::render(const RenderParameters& params) {
     const bool paramsChanged = hasPreviousParams ? paramsDiffer(params, previousParams) : true;
     const bool resetAccumulation = paramsChanged || !params.enableAccumulation || params.forceReset;
     const std::uint32_t cloudInterval = std::max(1u, params.cloudUpdateInterval);
+    const bool runDensityBakeThisFrame =
+        params.densityBakeEveryFrame || paramsChanged || !densityVolumeValid;
 
     if (resetAccumulation) {
         accumulationFrameIndex = 0;
@@ -2916,7 +3097,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         vkCmdResetQueryPool(frame.commandBuffer, frame.timestampQueryPool, 0, kTimestampCount);
         vkCmdWriteTimestamp2(frame.commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, frame.timestampQueryPool, kTimestampFrameStart);
 
-        std::array<VkImageMemoryBarrier2, 7> startupBarriers{};
+        std::array<VkImageMemoryBarrier2, 8> startupBarriers{};
         std::uint32_t startupBarrierCount = 0;
 
         const VkPipelineStageFlags2 accumSrcStage =
@@ -2984,6 +3165,19 @@ bool Renderer::Impl::render(const RenderParameters& params) {
             sunSrcAccess,
             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
+        const VkPipelineStageFlags2 densitySrcStage =
+            (densityImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        const VkAccessFlags2 densitySrcAccess =
+            (densityImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_ACCESS_2_NONE : VK_ACCESS_2_MEMORY_WRITE_BIT;
+        startupBarriers[startupBarrierCount++] = imageBarrier(
+            densityImage.image,
+            densityImage.layout,
+            VK_IMAGE_LAYOUT_GENERAL,
+            densitySrcStage,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            densitySrcAccess,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
         for (ImageResource& multiScatterImage : multiScatterImages) {
             const VkPipelineStageFlags2 multiSrcStage =
                 (multiScatterImage.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -3009,6 +3203,7 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         toneMapImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         rngStateImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         sunTransmittanceImage.layout = VK_IMAGE_LAYOUT_GENERAL;
+        densityImage.layout = VK_IMAGE_LAYOUT_GENERAL;
         multiScatterImages[0].layout = VK_IMAGE_LAYOUT_GENERAL;
         multiScatterImages[1].layout = VK_IMAGE_LAYOUT_GENERAL;
         toneMapOwnedByUi = false;
@@ -3068,6 +3263,66 @@ bool Renderer::Impl::render(const RenderParameters& params) {
         voxelsprout::core::Vec3 sunDir = voxelsprout::core::normalize(params.scene.sun.direction);
         if (voxelsprout::core::length(sunDir) <= 0.0f) {
             sunDir = voxelsprout::core::normalize(voxelsprout::core::Vec3{1.0f, 1.0f, 0.5f});
+        }
+
+        if (runDensityBakeThisFrame) {
+            vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, densityBakePass.pipeline);
+            vkCmdBindDescriptorSets(
+                frame.commandBuffer,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                densityBakePass.pipelineLayout,
+                0,
+                1,
+                &densityBakePass.descriptorSet,
+                0,
+                nullptr);
+
+            DensityBakePush densityPush{};
+            densityPush.mediumParams[0] = params.scene.volume.densityScale;
+            densityPush.mediumParams[1] = params.scene.volume.anisotropyG;
+            densityPush.mediumParams[2] = params.scene.volume.albedo;
+            densityPush.mediumParams[3] = 0.0f;
+            densityPush.cloudShapeParams[0] = params.scene.volume.macroScale;
+            densityPush.cloudShapeParams[1] = params.scene.volume.detailScale;
+            densityPush.cloudShapeParams[2] = 0.0f;
+            densityPush.cloudShapeParams[3] = 0.0f;
+            densityPush.cloudProfileParams[0] = params.scene.volume.coverage;
+            densityPush.cloudProfileParams[1] = params.scene.volume.weatherScale;
+            densityPush.cloudProfileParams[2] = params.scene.volume.cloudBase;
+            densityPush.cloudProfileParams[3] = params.scene.volume.cloudTop;
+            densityPush.cloudWarpParams[0] = 0.0f;
+            densityPush.cloudWarpParams[1] = params.scene.volume.erosionStrength;
+            densityPush.cloudWarpParams[2] = 0.0f;
+            densityPush.cloudWarpParams[3] = 0.0f;
+            densityPush.volumeParams[0] = static_cast<float>(kDensityVolumeDim);
+            densityPush.volumeParams[1] = 0.0f;
+            densityPush.volumeParams[2] = 0.0f;
+            densityPush.volumeParams[3] = 0.0f;
+
+            const std::uint32_t densityDispatch = (kDensityVolumeDim + 3u) / 4u;
+            vkCmdPushConstants(
+                frame.commandBuffer,
+                densityBakePass.pipelineLayout,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                sizeof(DensityBakePush),
+                &densityPush);
+            vkCmdDispatch(frame.commandBuffer, densityDispatch, densityDispatch, densityDispatch);
+
+            VkImageMemoryBarrier2 densityToConsumersBarrier = imageBarrier(
+                densityImage.image,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            VkDependencyInfo densityToConsumersDep{};
+            densityToConsumersDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            densityToConsumersDep.imageMemoryBarrierCount = 1;
+            densityToConsumersDep.pImageMemoryBarriers = &densityToConsumersBarrier;
+            vkCmdPipelineBarrier2(frame.commandBuffer, &densityToConsumersDep);
+            densityVolumeValid = true;
         }
 
         vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, sunTransmittancePass.pipeline);

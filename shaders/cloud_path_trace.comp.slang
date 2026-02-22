@@ -37,6 +37,8 @@ SamplerState gVolumeSampler;
 Texture3D<float> gSunTransmittance;
 [[vk::binding(6, 0)]]
 Texture3D<float4> gMultiScatterField;
+[[vk::binding(7, 0)]]
+Texture3D<float> gDensityVolume;
 
 uint hash3(uint3 p) {
     uint h = p.x * 747796405u;
@@ -195,6 +197,11 @@ float sampleSunTransmittance(float3 p) {
 float3 sampleMultiScatter(float3 p) {
     float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
     return gMultiScatterField.SampleLevel(gVolumeSampler, uvw, 0.0f).xyz;
+}
+
+float sampleDensity(float3 p) {
+    float3 uvw = saturate((p - kCloudAabbMin) / (kCloudAabbMax - kCloudAabbMin));
+    return gDensityVolume.SampleLevel(gVolumeSampler, uvw, 0.0f);
 }
 
 float remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
@@ -368,7 +375,7 @@ bool sampleDistance(
         }
 
         float3 x = rayOrigin + rayDir * t;
-        float sigmaT = densityField(x) * densityScale * 1.5f;
+        float sigmaT = sampleDensity(x) * 1.5f;
         float accept = saturate(sigmaT / sigmaMajorant);
 
         if (rand01(rng) < accept) {
@@ -457,7 +464,7 @@ float3 integrateCloudApproximation(
         }
 
         float3 x = rayOrigin + (rayDir * t);
-        float sigmaT = densityField(x) * densityScale * 1.5f;
+        float sigmaT = sampleDensity(x) * 1.5f;
         if (sigmaT > 0.0f) {
             float segmentTransmit = exp(-sigmaT * stepSize);
             float segmentScatter = 1.0f - segmentTransmit;
@@ -520,7 +527,10 @@ float3 integrateViewMarchFinal(
     float densityScale,
     float g,
     float3 cloudAlbedo,
-    bool debugSunTransmittance
+    float brightnessBoost,
+    float ambientLift,
+    bool debugSunTransmittance,
+    inout uint rngState
 ) {
     float tMin = 0.0f;
     float tMax = 0.0f;
@@ -541,14 +551,16 @@ float3 integrateViewMarchFinal(
     float3 Lss = 0.0f;
     float3 Lms = 0.0f;
     float Tview = 1.0f;
+    const float stepJitter = rand01(rngState);
     const float cosTheta = clamp(dot(-sunDir, -rayDir), -1.0f, 1.0f);
     const float phase = dualHenyeyGreenstein(cosTheta, g);
+    const float ambientStrength = lerp(0.05f, 0.6f, saturate(ambientLift));
 
     [loop]
     for (uint i = 0u; i < kViewMarchSteps; ++i) {
-        float t = tMin + (float(i) + 0.5f) * ds;
+        float t = tMin + (float(i) + stepJitter) * ds;
         float3 x = rayOrigin + rayDir * t;
-        float rho = densityField(x);
+        float rho = sampleDensity(x);
         if (rho <= 0.0f) {
             continue;
         }
@@ -559,11 +571,15 @@ float3 integrateViewMarchFinal(
         }
 
         float3 E = sampleMultiScatter(x);
-        Lss += Tview * rho * Tsun * phase * sunRadiance * cloudAlbedo * ds;
-        Lms += Tview * rho * E * ds;
+        float powder = 1.0f - exp(-rho * 1.8f);
+        float3 direct = rho * Tsun * phase * sunRadiance * cloudAlbedo * (0.25f + 0.75f * powder);
+        float3 indirect = rho * E * (0.35f + 0.65f * powder);
+        float3 ambient = rho * sunRadiance * cloudAlbedo * ambientStrength * (1.0f / (4.0f * kPi));
+        Lss += Tview * direct * ds * max(brightnessBoost, 0.0f);
+        Lms += Tview * (indirect + ambient) * ds;
 
         // Use explicit view transmittance update for stable deterministic marching.
-        Tview *= exp(-rho * 1.5f * ds);
+        Tview *= exp(-rho * 1.2f * ds);
         if (Tview < 1.0e-4f) {
             break;
         }
@@ -757,7 +773,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             densityScale,
             g,
             cloudAlbedo,
-            debugSunTransmittance);
+            brightnessBoost,
+            ambientLift,
+            debugSunTransmittance,
+            rngState);
     } else {
         [loop]
         for (uint bounce = 0u; bounce < maxBounces; ++bounce) {
@@ -810,7 +829,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
                 contribMult *= 0.70f;
                 gMult *= 0.5f;
             }
-            const float localDensity = densityField(scatterPos) * densityScale;
+            const float localDensity = sampleDensity(scatterPos);
             const float powderEffect = 1.0f - exp(-localDensity * 2.0f);
             msTransmittance *= powderEffect;
             // Conventions:

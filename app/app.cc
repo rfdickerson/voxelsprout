@@ -222,6 +222,8 @@ void App::buildUi() {
     m_renderParams.maxAccumulationSamples = static_cast<std::uint32_t>(m_maxAccumulationSamplesUi);
     ImGui::Checkbox("Multi-scatter temporal mode (2 it/frame)", &m_renderParams.multiScatterTemporalMode);
     ImGui::Text("Multi-scatter iterations: %u", m_renderParams.multiScatterTemporalMode ? 2u : 6u);
+    ImGui::Checkbox("Density bake every frame", &m_renderParams.densityBakeEveryFrame);
+    ImGui::Text("Density bake mode: %s", m_renderParams.densityBakeEveryFrame ? "dynamic" : "on change");
     ImGui::Text("Frame index: %u", m_renderer.frameIndex());
     if (m_renderer.frameIndex() >= m_renderParams.maxAccumulationSamples) {
         ImGui::Text("Accumulation paused (sample cap reached)");
