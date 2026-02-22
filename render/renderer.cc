@@ -2484,10 +2484,10 @@ bool Renderer::Impl::render(const RenderParameters& params) {
     hasPreviousParams = true;
     const bool splitQueueFamilies = computeQueueFamilyIndex != queueFamilyIndex;
 
-    const bool pendingUnpresentedCompute =
-        latestSubmittedComputeTimelineValue > latestPresentedComputeTimelineValue;
+    const bool pendingUncopiedCompute =
+        latestSubmittedComputeTimelineValue > latestCopySubmittedComputeTimelineValue;
     const bool shouldSubmitCompute =
-        foundReadyFrameSlot && runCloudPassThisFrame && !pendingUnpresentedCompute;
+        foundReadyFrameSlot && runCloudPassThisFrame && !pendingUncopiedCompute;
 
     if (shouldSubmitCompute) {
         FrameResources& frame = frames[selectedFrameSlot];
