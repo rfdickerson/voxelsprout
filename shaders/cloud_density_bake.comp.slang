@@ -64,7 +64,7 @@ void densityField(float3 p, out float outDensity, out float outEdge) {
     float3 warp = sampleCloudNoise((q * (macroScale * 2.0f)) + 0.37f).gba - 0.5f;
     float3 qWarped = q + (warp * (0.03f * erosionStrength));
 
-    float2 weatherUvw = (qWarped.xz + float2(0.31f, -0.17f)) * (macroScale * 1.2f);
+    float2 weatherUvw = (qWarped.xz + float2(0.31f, -0.17f)) * (macroScale * 0.6f);
     float weatherNoise = sampleCloudNoise(float3(weatherUvw.x, 0.0f, weatherUvw.y)).r;
     float threshold = 1.0f - coverage;
     float cellMask = smoothstep(threshold - 0.1f, threshold + 0.1f, weatherNoise);
@@ -101,11 +101,15 @@ void densityField(float3 p, out float outDensity, out float outEdge) {
 
     float heightBias = lerp(0.1f, 1.0f, h);
     float erosionModifier = lerp(highFreqFbm, 0.0f, baseDensity) * heightBias;
-    float finalDensity = remap(baseDensity, erosionModifier * erosionStrength, 1.0f, 0.0f, 1.0f);
+    float core = pow(baseDensity, 1.2f);
+    float shell = max(baseDensity - core, 0.0f);
+    float erodedShell = remap(shell, erosionModifier * erosionStrength, 1.0f, 0.0f, 1.0f);
+    float finalDensity = core + erodedShell;
     finalDensity = saturate(finalDensity);
     finalDensity = min(finalDensity, 0.98f);
     outDensity = finalDensity;
-    outEdge = 1.0f - smoothstep(0.2f, 0.8f, baseDensity);
+    float thin = 1.0f - saturate(finalDensity);
+    outEdge = pow(thin, 0.6f);
 }
 
 [shader("compute")]
