@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -87,6 +89,91 @@ float percentileFromRingBuffer(
 
 } // namespace
 
+uint64_t RendererBackend::completedTimelineValue() const {
+    if (m_renderTimelineSemaphore == VK_NULL_HANDLE) {
+        return 0;
+    }
+    uint64_t completedValue = 0;
+    const VkResult result = vkGetSemaphoreCounterValue(m_device, m_renderTimelineSemaphore, &completedValue);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkGetSemaphoreCounterValue(timeline)", result);
+        return 0;
+    }
+    return completedValue;
+}
+
+std::uint32_t RendererBackend::countQueuedFrames(uint64_t completedValue) const {
+    std::uint32_t queuedFrames = 0;
+    for (uint64_t frameTimelineValue : m_frameTimelineValues) {
+        if (frameTimelineValue > completedValue) {
+            ++queuedFrames;
+        }
+    }
+    return queuedFrames;
+}
+
+bool RendererBackend::shouldThrottleFrameStart(uint64_t completedValue, float* outCpuWaitMs) const {
+    if (m_framePacingSettings.maxQueuedFrames >= kMaxFramesInFlight) {
+        return false;
+    }
+    const std::uint32_t queuedFrames = countQueuedFrames(completedValue);
+    if (queuedFrames < m_framePacingSettings.maxQueuedFrames) {
+        return false;
+    }
+
+    if (outCpuWaitMs != nullptr) {
+        *outCpuWaitMs += 1.0f;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return true;
+}
+
+void RendererBackend::resetDisplayTimingTracking() {
+    m_debugDisplayRefreshMs = 0.0f;
+    m_debugDisplayPresentMarginMs = 0.0f;
+    m_debugDisplayActualEarliestDeltaMs = 0.0f;
+    m_debugDisplayScheduleErrorMs = 0.0f;
+    m_debugDisplayTimingSampleCount = 0;
+    m_debugLatePresentCount = 0;
+    m_lastSubmittedDisplayTimingPresentId = 0;
+    m_lastPresentedDisplayTimingPresentId = 0;
+    m_lastProcessedDisplayTimingPresentId = 0;
+    m_lastDisplayTimingActualPresentTimeNs = 0;
+    m_displayRefreshDurationNs = 0;
+    m_lastScheduledDesiredPresentTimeNs = 0;
+    m_displayTimingDesiredPresentTimesNs.clear();
+    m_framePacingStats.presentMarginMs = 0.0f;
+    m_framePacingStats.actualPresentDeltaMs = 0.0f;
+    m_framePacingStats.presentScheduleErrorMs = 0.0f;
+    m_framePacingStats.desiredLeadTimeMs = 0.0f;
+    m_framePacingStats.desiredPresentTimeNs = 0;
+    m_framePacingStats.latePresentCount = 0;
+}
+
+uint64_t RendererBackend::computeDesiredPresentTimeNs(std::uint64_t nowNs) const {
+    if (m_displayRefreshDurationNs == 0) {
+        return 0;
+    }
+    const std::uint64_t cadenceDivisor = std::max<std::uint32_t>(1u, m_framePacingSettings.cadenceDivisor);
+    const std::uint64_t presentIntervalNs = m_displayRefreshDurationNs * cadenceDivisor;
+    const std::uint64_t minimumLeadNs = std::max<std::uint64_t>(m_displayRefreshDurationNs / 4u, 500000u);
+    const std::uint64_t targetFloorNs = nowNs + minimumLeadNs;
+
+    std::uint64_t desiredPresentTimeNs = 0;
+    if (m_lastDisplayTimingActualPresentTimeNs > 0) {
+        desiredPresentTimeNs = m_lastDisplayTimingActualPresentTimeNs + presentIntervalNs;
+    } else if (m_lastScheduledDesiredPresentTimeNs > 0) {
+        desiredPresentTimeNs = m_lastScheduledDesiredPresentTimeNs + presentIntervalNs;
+    } else {
+        desiredPresentTimeNs = targetFloorNs + presentIntervalNs;
+    }
+
+    while (desiredPresentTimeNs < targetFloorNs) {
+        desiredPresentTimeNs += presentIntervalNs;
+    }
+    return desiredPresentTimeNs;
+}
+
 bool RendererBackend::createFrameResources() {
     for (size_t frameIndex = 0; frameIndex < m_frames.size(); ++frameIndex) {
         FrameResources& frame = m_frames[frameIndex];
@@ -159,13 +246,7 @@ bool RendererBackend::isTimelineValueReached(uint64_t value) const {
     if (value == 0 || m_renderTimelineSemaphore == VK_NULL_HANDLE) {
         return true;
     }
-    uint64_t completedValue = 0;
-    const VkResult result = vkGetSemaphoreCounterValue(m_device, m_renderTimelineSemaphore, &completedValue);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkGetSemaphoreCounterValue(timeline)", result);
-        return false;
-    }
-    return completedValue >= value;
+    return completedTimelineValue() >= value;
 }
 
 void RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
@@ -234,6 +315,7 @@ void RendererBackend::updateDisplayTimingStats() {
         VkRefreshCycleDurationGOOGLE refreshCycle{};
         const VkResult refreshResult = m_getRefreshCycleDurationGoogle(m_device, m_swapchain, &refreshCycle);
         if (refreshResult == VK_SUCCESS) {
+            m_displayRefreshDurationNs = refreshCycle.refreshDuration;
             m_debugDisplayRefreshMs = static_cast<float>(refreshCycle.refreshDuration * 1.0e-6);
         }
     }
@@ -263,6 +345,7 @@ void RendererBackend::updateDisplayTimingStats() {
     const VkPastPresentationTimingGOOGLE& latest = timings.back();
     m_lastPresentedDisplayTimingPresentId = latest.presentID;
     m_debugDisplayPresentMarginMs = static_cast<float>(latest.presentMargin * 1.0e-6);
+    m_framePacingStats.presentMarginMs = m_debugDisplayPresentMarginMs;
     if (latest.actualPresentTime >= latest.earliestPresentTime) {
         m_debugDisplayActualEarliestDeltaMs =
             static_cast<float>((latest.actualPresentTime - latest.earliestPresentTime) * 1.0e-6);
@@ -288,9 +371,27 @@ void RendererBackend::updateDisplayTimingStats() {
                 m_debugPresentedFps = 1000.0f / presentFrameMs;
             }
         }
+        auto desiredPresentTimeIt = m_displayTimingDesiredPresentTimesNs.find(timing.presentID);
+        if (desiredPresentTimeIt != m_displayTimingDesiredPresentTimesNs.end()) {
+            const std::uint64_t desiredPresentTimeNs = desiredPresentTimeIt->second;
+            if (timing.actualPresentTime >= desiredPresentTimeNs) {
+                m_debugDisplayScheduleErrorMs =
+                    static_cast<float>((timing.actualPresentTime - desiredPresentTimeNs) * 1.0e-6);
+            } else {
+                m_debugDisplayScheduleErrorMs =
+                    -static_cast<float>((desiredPresentTimeNs - timing.actualPresentTime) * 1.0e-6);
+            }
+            m_framePacingStats.presentScheduleErrorMs = m_debugDisplayScheduleErrorMs;
+            if (timing.actualPresentTime > desiredPresentTimeNs + 500000u) {
+                ++m_debugLatePresentCount;
+            }
+            m_displayTimingDesiredPresentTimesNs.erase(desiredPresentTimeIt);
+        }
         m_lastDisplayTimingActualPresentTimeNs = timing.actualPresentTime;
         m_lastProcessedDisplayTimingPresentId = timing.presentID;
     }
+    m_framePacingStats.actualPresentDeltaMs = m_debugDisplayActualEarliestDeltaMs;
+    m_framePacingStats.latePresentCount = m_debugLatePresentCount;
     updateFrameTimingPercentiles();
 }
 
@@ -369,12 +470,7 @@ void RendererBackend::collectCompletedBufferReleases() {
         return;
     }
 
-    uint64_t completedValue = 0;
-    const VkResult counterResult = vkGetSemaphoreCounterValue(m_device, m_renderTimelineSemaphore, &completedValue);
-    if (counterResult != VK_SUCCESS) {
-        logVkFailure("vkGetSemaphoreCounterValue", counterResult);
-        return;
-    }
+    const uint64_t completedValue = completedTimelineValue();
 
     for (const DeferredBufferRelease& release : m_deferredBufferReleases) {
         if (release.timelineValue <= completedValue) {

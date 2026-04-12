@@ -87,6 +87,18 @@ bool Renderer::isFrameStatsVisible() const {
     return m_backend->isFrameStatsVisible();
 }
 
+void Renderer::setFramePacingSettings(const FramePacingSettings& settings) {
+    m_backend->setFramePacingSettings(settings);
+}
+
+FramePacingSettings Renderer::framePacingSettings() const {
+    return m_backend->framePacingSettings();
+}
+
+FramePacingStats Renderer::framePacingStats() const {
+    return m_backend->framePacingStats();
+}
+
 void Renderer::setSunAngles(float yawDegrees, float pitchDegrees) {
     m_backend->setSunAngles(yawDegrees, pitchDegrees);
 }

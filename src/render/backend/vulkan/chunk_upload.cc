@@ -713,41 +713,46 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
 
         transferSignalValue = m_nextTimelineValue++;
         std::array<VkSemaphore, 1> transferWaitSemaphores{};
-        std::array<VkPipelineStageFlags, 1> transferWaitStages{};
+        std::array<VkPipelineStageFlags2, 1> transferWaitStages{};
         std::array<uint64_t, 1> transferWaitValues{};
         uint32_t transferWaitCount = 0;
         if (m_lastGraphicsTimelineValue > 0) {
             transferWaitSemaphores[0] = m_renderTimelineSemaphore;
-            transferWaitStages[0] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            transferWaitStages[0] = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
             transferWaitValues[0] = m_lastGraphicsTimelineValue;
             transferWaitCount = 1;
         }
 
-        VkSemaphore timelineSemaphore = m_renderTimelineSemaphore;
-        VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
-        timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-        timelineSubmitInfo.waitSemaphoreValueCount = transferWaitCount;
-        timelineSubmitInfo.pWaitSemaphoreValues =
-            transferWaitCount > 0 ? transferWaitValues.data() : nullptr;
-        timelineSubmitInfo.signalSemaphoreValueCount = 1;
-        timelineSubmitInfo.pSignalSemaphoreValues = &transferSignalValue;
+        std::array<VkSemaphoreSubmitInfo, 1> transferWaitSemaphoreInfos{};
+        if (transferWaitCount > 0) {
+            transferWaitSemaphoreInfos[0].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+            transferWaitSemaphoreInfos[0].semaphore = transferWaitSemaphores[0];
+            transferWaitSemaphoreInfos[0].value = transferWaitValues[0];
+            transferWaitSemaphoreInfos[0].stageMask = transferWaitStages[0];
+            transferWaitSemaphoreInfos[0].deviceIndex = 0;
+        }
+        VkSemaphoreSubmitInfo transferSignalSemaphoreInfo{};
+        transferSignalSemaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        transferSignalSemaphoreInfo.semaphore = m_renderTimelineSemaphore;
+        transferSignalSemaphoreInfo.value = transferSignalValue;
+        transferSignalSemaphoreInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        transferSignalSemaphoreInfo.deviceIndex = 0;
+        VkCommandBufferSubmitInfo transferCommandBufferInfo{};
+        transferCommandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        transferCommandBufferInfo.commandBuffer = m_transferCommandBuffer;
+        VkSubmitInfo2 transferSubmitInfo{};
+        transferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        transferSubmitInfo.waitSemaphoreInfoCount = transferWaitCount;
+        transferSubmitInfo.pWaitSemaphoreInfos =
+            transferWaitCount > 0 ? transferWaitSemaphoreInfos.data() : nullptr;
+        transferSubmitInfo.commandBufferInfoCount = 1;
+        transferSubmitInfo.pCommandBufferInfos = &transferCommandBufferInfo;
+        transferSubmitInfo.signalSemaphoreInfoCount = 1;
+        transferSubmitInfo.pSignalSemaphoreInfos = &transferSignalSemaphoreInfo;
 
-        VkSubmitInfo transferSubmitInfo{};
-        transferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        transferSubmitInfo.pNext = &timelineSubmitInfo;
-        transferSubmitInfo.waitSemaphoreCount = transferWaitCount;
-        transferSubmitInfo.pWaitSemaphores =
-            transferWaitCount > 0 ? transferWaitSemaphores.data() : nullptr;
-        transferSubmitInfo.pWaitDstStageMask =
-            transferWaitCount > 0 ? transferWaitStages.data() : nullptr;
-        transferSubmitInfo.commandBufferCount = 1;
-        transferSubmitInfo.pCommandBuffers = &m_transferCommandBuffer;
-        transferSubmitInfo.signalSemaphoreCount = 1;
-        transferSubmitInfo.pSignalSemaphores = &timelineSemaphore;
-
-        const VkResult submitResult = vkQueueSubmit(m_transferQueue, 1, &transferSubmitInfo, VK_NULL_HANDLE);
+        const VkResult submitResult = vkQueueSubmit2(m_transferQueue, 1, &transferSubmitInfo, VK_NULL_HANDLE);
         if (submitResult != VK_SUCCESS) {
-            logVkFailure("vkQueueSubmit(transfer)", submitResult);
+            logVkFailure("vkQueueSubmit2(transfer)", submitResult);
             cleanupPendingAllocations();
             rollbackChunkDrawState();
             return false;

@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 #include <vk_mem_alloc.h>
@@ -134,6 +135,9 @@ public:
     bool isDebugUiVisible() const;
     void setFrameStatsVisible(bool visible);
     bool isFrameStatsVisible() const;
+    void setFramePacingSettings(const FramePacingSettings& settings);
+    [[nodiscard]] FramePacingSettings framePacingSettings() const;
+    [[nodiscard]] FramePacingStats framePacingStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
     float cameraFovDegrees() const;
     void shutdown();
@@ -300,9 +304,14 @@ private:
     void readGpuTimestampResults(uint32_t frameIndex);
     void scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue);
     void collectCompletedBufferReleases();
+    void resetDisplayTimingTracking();
     void updateDisplayTimingStats();
     void updateFrameTimingPercentiles();
     bool isTimelineValueReached(uint64_t value) const;
+    uint64_t completedTimelineValue() const;
+    std::uint32_t countQueuedFrames(uint64_t completedValue) const;
+    bool shouldThrottleFrameStart(uint64_t completedValue, float* outCpuWaitMs) const;
+    uint64_t computeDesiredPresentTimeNs(std::uint64_t nowNs) const;
     struct DeferredBufferRelease {
         BufferHandle handle = kInvalidBufferHandle;
         uint64_t timelineValue = 0;
@@ -693,6 +702,8 @@ private:
     bool m_supportsDisplayTiming = false;
     bool m_hasDisplayTimingExtension = false;
     bool m_enableDisplayTiming = false;
+    FramePacingSettings m_framePacingSettings{};
+    FramePacingStats m_framePacingStats{};
     uint32_t m_bindlessTextureCapacity = 0;
     bool m_gpuTimestampsSupported = false;
     float m_gpuTimestampPeriodNs = 0.0f;
@@ -753,6 +764,9 @@ private:
     uint32_t m_lastPresentedDisplayTimingPresentId = 0;
     uint32_t m_lastProcessedDisplayTimingPresentId = 0;
     std::uint64_t m_lastDisplayTimingActualPresentTimeNs = 0;
+    std::uint64_t m_displayRefreshDurationNs = 0;
+    std::uint64_t m_lastScheduledDesiredPresentTimeNs = 0;
+    std::unordered_map<std::uint32_t, std::uint64_t> m_displayTimingDesiredPresentTimesNs;
     uint32_t m_currentFrame = 0;
     bool m_debugUiVisible = false;
     bool m_showFrameStatsPanel = false;
@@ -799,6 +813,7 @@ private:
     float m_debugDisplayRefreshMs = 0.0f;
     float m_debugDisplayPresentMarginMs = 0.0f;
     float m_debugDisplayActualEarliestDeltaMs = 0.0f;
+    float m_debugDisplayScheduleErrorMs = 0.0f;
     float m_debugPresentedFrameTimeMs = 0.0f;
     float m_debugPresentedFps = 0.0f;
     float m_debugCpuFrameP50Ms = 0.0f;
@@ -826,6 +841,7 @@ private:
     std::uint32_t m_debugPresentedFrameTimingMsHistoryWrite = 0;
     std::uint32_t m_debugPresentedFrameTimingMsHistoryCount = 0;
     float m_debugFps = 0.0f;
+    std::uint32_t m_debugLatePresentCount = 0;
     std::uint32_t m_debugChunkCount = 0;
     std::uint32_t m_debugMacroCellUniformCount = 0;
     std::uint32_t m_debugMacroCellRefined4Count = 0;

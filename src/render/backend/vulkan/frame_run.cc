@@ -63,6 +63,23 @@ void RendererBackend::renderFrame(
         m_debugFps = (deltaSeconds > 0.0) ? static_cast<float>(1.0 / deltaSeconds) : 0.0f;
     }
     m_lastFrameTimestampSeconds = frameNowSeconds;
+    m_framePacingStats = {};
+    m_framePacingStats.displayTimingSupported = m_supportsDisplayTiming;
+    m_framePacingStats.displayTimingEnabled = m_supportsDisplayTiming && m_enableDisplayTiming;
+    m_framePacingStats.schedulingActive =
+        m_framePacingStats.displayTimingEnabled && m_framePacingSettings.mode == FramePacingMode::Scheduled;
+    m_framePacingStats.cadenceDivisor = std::max(1u, m_framePacingSettings.cadenceDivisor);
+    m_framePacingStats.maxQueuedFrames = std::clamp(m_framePacingSettings.maxQueuedFrames, 1u, kMaxFramesInFlight);
+    m_framePacingStats.refreshMs = m_debugDisplayRefreshMs;
+    m_framePacingStats.presentMarginMs = m_debugDisplayPresentMarginMs;
+    m_framePacingStats.actualPresentDeltaMs = m_debugDisplayActualEarliestDeltaMs;
+    m_framePacingStats.presentScheduleErrorMs = m_debugDisplayScheduleErrorMs;
+    m_framePacingStats.latePresentCount = m_debugLatePresentCount;
+    if (m_displayRefreshDurationNs > 0) {
+        m_framePacingStats.targetPresentIntervalMs = static_cast<float>(
+            (m_displayRefreshDurationNs * m_framePacingStats.cadenceDivisor) * 1.0e-6
+        );
+    }
     if (!m_debugCameraFovInitialized) {
         m_debugCameraFovDegrees = camera.fovDegrees;
         m_debugCameraFovInitialized = true;
@@ -102,14 +119,17 @@ void RendererBackend::renderFrame(
     CoreFrameGraphOrderValidator coreFramePassOrderValidator(*coreFrameGraphPlan);
 
     collectCompletedBufferReleases();
+    const uint64_t completedTimelineValueBeforeFrame = completedTimelineValue();
+    m_framePacingStats.queuedFrames = countQueuedFrames(completedTimelineValueBeforeFrame);
+    if (shouldThrottleFrameStart(completedTimelineValueBeforeFrame, &cpuWaitMs)) {
+        return;
+    }
 
     FrameResources& frame = m_frames[m_currentFrame];
     if (!isTimelineValueReached(m_frameTimelineValues[m_currentFrame])) {
         static double lastStallLogTimeSeconds = 0.0;
-        uint64_t completedValue = 0;
-        const VkResult counterResult =
-            vkGetSemaphoreCounterValue(m_device, m_renderTimelineSemaphore, &completedValue);
-        if (counterResult == VK_SUCCESS) {
+        const uint64_t completedValue = completedTimelineValue();
+        if (completedValue > 0 || m_frameTimelineValues[m_currentFrame] > 0) {
             const uint64_t targetValue = m_frameTimelineValues[m_currentFrame];
             const uint64_t lag = (targetValue > completedValue) ? (targetValue - completedValue) : 0u;
             const double nowSeconds = glfwGetTime();
@@ -123,8 +143,6 @@ void RendererBackend::renderFrame(
                     << ", frameIndex=" << m_currentFrame;
                 lastStallLogTimeSeconds = nowSeconds;
             }
-        } else {
-            logVkFailure("vkGetSemaphoreCounterValue(stuckFrame)", counterResult);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
@@ -1901,18 +1919,18 @@ void RendererBackend::renderFrame(
     }
 
     std::array<VkSemaphore, 2> waitSemaphores{};
-    std::array<VkPipelineStageFlags, 2> waitStages{};
+    std::array<VkPipelineStageFlags2, 2> waitStages{};
     std::array<uint64_t, 2> waitSemaphoreValues{};
     uint32_t waitSemaphoreCount = 0;
 
     waitSemaphores[waitSemaphoreCount] = frame.imageAvailable;
-    waitStages[waitSemaphoreCount] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    waitStages[waitSemaphoreCount] = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     waitSemaphoreValues[waitSemaphoreCount] = 0;
     ++waitSemaphoreCount;
 
     if (m_pendingTransferTimelineValue > 0) {
         waitSemaphores[waitSemaphoreCount] = m_renderTimelineSemaphore;
-        waitStages[waitSemaphoreCount] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        waitStages[waitSemaphoreCount] = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         waitSemaphoreValues[waitSemaphoreCount] = m_pendingTransferTimelineValue;
         ++waitSemaphoreCount;
     }
@@ -1926,31 +1944,43 @@ void RendererBackend::renderFrame(
         0,
         signalTimelineValue
     };
-    VkTimelineSemaphoreSubmitInfo timelineSubmitInfo{};
-    timelineSubmitInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    timelineSubmitInfo.waitSemaphoreValueCount = waitSemaphoreCount;
-    timelineSubmitInfo.pWaitSemaphoreValues = waitSemaphoreValues.data();
-    timelineSubmitInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalSemaphoreValues.size());
-    timelineSubmitInfo.pSignalSemaphoreValues = signalSemaphoreValues.data();
+    std::array<VkSemaphoreSubmitInfo, 2> waitSemaphoreInfos{};
+    for (uint32_t i = 0; i < waitSemaphoreCount; ++i) {
+        waitSemaphoreInfos[i].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        waitSemaphoreInfos[i].semaphore = waitSemaphores[i];
+        waitSemaphoreInfos[i].value = waitSemaphoreValues[i];
+        waitSemaphoreInfos[i].stageMask = waitStages[i];
+        waitSemaphoreInfos[i].deviceIndex = 0;
+    }
+    std::array<VkSemaphoreSubmitInfo, 2> signalSemaphoreInfos{};
+    for (uint32_t i = 0; i < signalSemaphores.size(); ++i) {
+        signalSemaphoreInfos[i].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalSemaphoreInfos[i].semaphore = signalSemaphores[i];
+        signalSemaphoreInfos[i].value = signalSemaphoreValues[i];
+        signalSemaphoreInfos[i].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        signalSemaphoreInfos[i].deviceIndex = 0;
+    }
+    VkCommandBufferSubmitInfo commandBufferSubmitInfo{};
+    commandBufferSubmitInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    commandBufferSubmitInfo.commandBuffer = commandBuffer;
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.pNext = &timelineSubmitInfo;
-    submitInfo.waitSemaphoreCount = waitSemaphoreCount;
-    submitInfo.pWaitSemaphores = waitSemaphores.data();
-    submitInfo.pWaitDstStageMask = waitStages.data();
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-    submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
-    submitInfo.pSignalSemaphores = signalSemaphores.data();
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submitInfo.waitSemaphoreInfoCount = waitSemaphoreCount;
+    submitInfo.pWaitSemaphoreInfos = waitSemaphoreInfos.data();
+    submitInfo.commandBufferInfoCount = 1;
+    submitInfo.pCommandBufferInfos = &commandBufferSubmitInfo;
+    submitInfo.signalSemaphoreInfoCount = static_cast<uint32_t>(signalSemaphoreInfos.size());
+    submitInfo.pSignalSemaphoreInfos = signalSemaphoreInfos.data();
 
-    if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
-        VOX_LOGE("render") << "vkQueueSubmit failed\n";
+    if (vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+        VOX_LOGE("render") << "vkQueueSubmit2 failed\n";
         return;
     }
     m_frameTimelineValues[m_currentFrame] = signalTimelineValue;
     m_swapchainImageTimelineValues[imageIndex] = signalTimelineValue;
     m_lastGraphicsTimelineValue = signalTimelineValue;
+    m_framePacingStats.queuedFrames = countQueuedFrames(completedTimelineValue());
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -1968,14 +1998,30 @@ void RendererBackend::renderFrame(
     if (useDisplayTiming) {
         const uint32_t submittedPresentId = m_nextDisplayTimingPresentId++;
         presentTime.presentID = submittedPresentId;
-        presentTime.desiredPresentTime = 0;
+        const auto nowNs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()
+        );
+        std::uint64_t desiredPresentTimeNs = 0;
+        if (m_framePacingSettings.mode == FramePacingMode::Scheduled) {
+            desiredPresentTimeNs = computeDesiredPresentTimeNs(nowNs);
+        }
+        presentTime.desiredPresentTime = desiredPresentTimeNs;
         presentTimesInfo.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE;
         presentTimesInfo.swapchainCount = 1;
         presentTimesInfo.pTimes = &presentTime;
         presentInfo.pNext = &presentTimesInfo;
         m_lastSubmittedDisplayTimingPresentId = submittedPresentId;
+        m_lastScheduledDesiredPresentTimeNs = desiredPresentTimeNs;
+        if (desiredPresentTimeNs > 0) {
+            m_displayTimingDesiredPresentTimesNs[submittedPresentId] = desiredPresentTimeNs;
+            m_framePacingStats.desiredLeadTimeMs = static_cast<float>((desiredPresentTimeNs - nowNs) * 1.0e-6);
+        } else {
+            m_framePacingStats.desiredLeadTimeMs = 0.0f;
+        }
+        m_framePacingStats.desiredPresentTimeNs = desiredPresentTimeNs;
     } else {
         m_lastSubmittedDisplayTimingPresentId = 0;
+        m_lastScheduledDesiredPresentTimeNs = 0;
     }
 
     const auto presentStartTime = std::chrono::steady_clock::now();
@@ -1986,6 +2032,16 @@ void RendererBackend::renderFrame(
     if (useDisplayTiming && (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR)) {
         updateDisplayTimingStats();
     }
+    m_framePacingStats.refreshMs = m_debugDisplayRefreshMs;
+    if (m_displayRefreshDurationNs > 0) {
+        m_framePacingStats.targetPresentIntervalMs = static_cast<float>(
+            (m_displayRefreshDurationNs * m_framePacingStats.cadenceDivisor) * 1.0e-6
+        );
+    }
+    m_framePacingStats.presentMarginMs = m_debugDisplayPresentMarginMs;
+    m_framePacingStats.actualPresentDeltaMs = m_debugDisplayActualEarliestDeltaMs;
+    m_framePacingStats.presentScheduleErrorMs = m_debugDisplayScheduleErrorMs;
+    m_framePacingStats.latePresentCount = m_debugLatePresentCount;
     m_shadowDepthInitialized = true;
     m_swapchainImageInitialized[imageIndex] = true;
     m_msaaColorImageInitialized[imageIndex] = true;
