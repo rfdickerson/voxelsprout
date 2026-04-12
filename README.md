@@ -84,6 +84,23 @@ cmake -S . -B build-vcpkg -G Ninja `
 cmake --build build-vcpkg -j
 ```
 
+## Windows Runnable Release Build
+
+The current release-oriented workflow uses the existing Windows build tree:
+
+```powershell
+cmake --build cmake-build-release --target voxel_factory_toy -j 4
+```
+
+Run `voxel_factory_toy.exe` from `cmake-build-release` so the runtime-relative asset paths resolve as expected.
+
+Expected runtime files for a clean launch:
+
+- `world.vxw` in `cmake-build-release` is optional; the app falls back to an empty world if it is missing.
+- `assets/magicka/*.vox` must remain available relative to the project root for the Magica stamps to load.
+- Required shader binaries must exist under `src/render/shaders/*.slang.spv`.
+- `src/render/shaders/voxel_packed_rt.frag.slang.spv` is optional; if missing, RT beta falls back to shadow maps.
+
 ## Tests (CTest)
 
 ```bash
@@ -99,6 +116,14 @@ Current test target: `voxel_foundation_tests`.
 - If `slangc` is found, CMake builds `.slang.spv` targets automatically.
 - If `slangc` is not found, shader compile target is skipped.
 - Committed `.spv` outputs in `src/render/shaders/` allow building without local Slang.
+- The release build also generates `voxel_packed_rt.frag.slang.spv` for the RT beta path when `slangc` is available.
+
+## RT Beta Notes
+
+- Shadow maps remain the default release path.
+- The RT path is currently beta/experimental and only affects the main voxel + Magica direct sun shadow pass.
+- SDF, GI, sun shafts, grass, and other shadow consumers still use the cascaded shadow-map atlas.
+- If the GPU, runtime, TLAS, or RT shader variant is unavailable, the renderer falls back to shadow maps and logs the reason.
 
 ## Controls (Current)
 

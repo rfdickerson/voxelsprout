@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <vector>
 
 namespace voxelsprout::render {
 
@@ -64,85 +65,94 @@ constexpr uint32_t kAutoExposureHistogramBins = 64u;
 
 bool RendererBackend::createDescriptorResources() {
     if (m_descriptorSetLayout == VK_NULL_HANDLE) {
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        bindings.reserve(12);
+
         VkDescriptorSetLayoutBinding mvpBinding{};
         mvpBinding.binding = 0;
         mvpBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         mvpBinding.descriptorCount = 1;
         mvpBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(mvpBinding);
 
         VkDescriptorSetLayoutBinding diffuseTextureBinding{};
         diffuseTextureBinding.binding = 1;
         diffuseTextureBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         diffuseTextureBinding.descriptorCount = 1;
         diffuseTextureBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(diffuseTextureBinding);
 
         VkDescriptorSetLayoutBinding exposureStateBinding{};
         exposureStateBinding.binding = 2;
         exposureStateBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         exposureStateBinding.descriptorCount = 1;
         exposureStateBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(exposureStateBinding);
 
         VkDescriptorSetLayoutBinding hdrSceneBinding{};
         hdrSceneBinding.binding = 3;
         hdrSceneBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         hdrSceneBinding.descriptorCount = 1;
         hdrSceneBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(hdrSceneBinding);
 
         VkDescriptorSetLayoutBinding shadowMapBinding{};
         shadowMapBinding.binding = 4;
         shadowMapBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         shadowMapBinding.descriptorCount = 1;
         shadowMapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(shadowMapBinding);
 
         VkDescriptorSetLayoutBinding normalDepthBinding{};
         normalDepthBinding.binding = 6;
         normalDepthBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         normalDepthBinding.descriptorCount = 1;
         normalDepthBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(normalDepthBinding);
 
         VkDescriptorSetLayoutBinding ssaoBlurBinding{};
         ssaoBlurBinding.binding = 7;
         ssaoBlurBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         ssaoBlurBinding.descriptorCount = 1;
         ssaoBlurBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(ssaoBlurBinding);
 
         VkDescriptorSetLayoutBinding ssaoRawBinding{};
         ssaoRawBinding.binding = 8;
         ssaoRawBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         ssaoRawBinding.descriptorCount = 1;
         ssaoRawBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(ssaoRawBinding);
 
         VkDescriptorSetLayoutBinding voxelGiBinding{};
         voxelGiBinding.binding = 9;
         voxelGiBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         voxelGiBinding.descriptorCount = 1;
         voxelGiBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(voxelGiBinding);
 
         VkDescriptorSetLayoutBinding sunShaftBinding{};
         sunShaftBinding.binding = 10;
         sunShaftBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         sunShaftBinding.descriptorCount = 1;
         sunShaftBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(sunShaftBinding);
 
         VkDescriptorSetLayoutBinding voxelGiOccupancyDebugBinding{};
         voxelGiOccupancyDebugBinding.binding = 11;
         voxelGiOccupancyDebugBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         voxelGiOccupancyDebugBinding.descriptorCount = 1;
         voxelGiOccupancyDebugBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(voxelGiOccupancyDebugBinding);
 
-        const std::array<VkDescriptorSetLayoutBinding, 11> bindings = {
-            mvpBinding,
-            diffuseTextureBinding,
-            exposureStateBinding,
-            hdrSceneBinding,
-            shadowMapBinding,
-            normalDepthBinding,
-            ssaoBlurBinding,
-            ssaoRawBinding,
-            voxelGiBinding,
-            sunShaftBinding,
-            voxelGiOccupancyDebugBinding
-        };
+        if (m_rayTracingRuntimeEnabled) {
+            VkDescriptorSetLayoutBinding shadowSceneBinding{};
+            shadowSceneBinding.binding = 12;
+            shadowSceneBinding.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            shadowSceneBinding.descriptorCount = 1;
+            shadowSceneBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            bindings.push_back(shadowSceneBinding);
+        }
 
         if (!createDescriptorSetLayout(
                 bindings,
@@ -155,7 +165,7 @@ bool RendererBackend::createDescriptorResources() {
     }
 
     if (m_descriptorPool == VK_NULL_HANDLE) {
-        const std::array<VkDescriptorPoolSize, 3> poolSizes = {
+        std::vector<VkDescriptorPoolSize> poolSizes = {
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                 kMaxFramesInFlight
@@ -169,6 +179,12 @@ bool RendererBackend::createDescriptorResources() {
                 kMaxFramesInFlight
             }
         };
+        if (m_rayTracingRuntimeEnabled) {
+            poolSizes.push_back(VkDescriptorPoolSize{
+                VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+                kMaxFramesInFlight
+            });
+        }
 
         if (!createDescriptorPool(
                 poolSizes,
@@ -335,8 +351,13 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     autoExposureStateBufferInfo.buffer = autoExposureStateBuffer;
     autoExposureStateBufferInfo.offset = 0;
     autoExposureStateBufferInfo.range = sizeof(float) * 4u;
+    const bool hasRayTracingSceneDescriptor = m_rayTracingRuntimeEnabled && m_rtTlas.handle != VK_NULL_HANDLE;
+    VkWriteDescriptorSetAccelerationStructureKHR rayTracingSceneWriteInfo{};
+    rayTracingSceneWriteInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    rayTracingSceneWriteInfo.accelerationStructureCount = hasRayTracingSceneDescriptor ? 1u : 0u;
+    rayTracingSceneWriteInfo.pAccelerationStructures = hasRayTracingSceneDescriptor ? &m_rtTlas.handle : nullptr;
 
-    std::array<VkWriteDescriptorSet, 11> writes{};
+    std::array<VkWriteDescriptorSet, 12> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -414,6 +435,17 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     writes[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[10].pImageInfo = &voxelGiOccupancyDebugImageInfo;
 
+    std::uint32_t writeCount = 11;
+    if (hasRayTracingSceneDescriptor) {
+        writes[11] = write;
+        writes[11].dstSet = m_descriptorSets[m_currentFrame];
+        writes[11].dstBinding = 12;
+        writes[11].descriptorCount = 1;
+        writes[11].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        writes[11].pNext = &rayTracingSceneWriteInfo;
+        writeCount = 12;
+    }
+
     if (m_descriptorSets[frameIndex] != VK_NULL_HANDLE) {
         const std::array<std::uint64_t, kMainDescriptorWriteKeyWordCount> mainDescriptorWriteKey = {
             vkHandleToUint64(m_descriptorSets[frameIndex]),
@@ -438,14 +470,15 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             vkHandleToUint64(sunShaftImageInfo.sampler),
             vkHandleToUint64(sunShaftImageInfo.imageView),
             vkHandleToUint64(voxelGiOccupancyDebugImageInfo.sampler),
-            vkHandleToUint64(voxelGiOccupancyDebugImageInfo.imageView)
+            vkHandleToUint64(voxelGiOccupancyDebugImageInfo.imageView),
+            vkHandleToUint64(hasRayTracingSceneDescriptor ? m_rtTlas.handle : VK_NULL_HANDLE)
         };
         if (descriptorWriteKeyChanged(
                 m_mainDescriptorWriteKeys[frameIndex],
                 m_mainDescriptorWriteKeyValid[frameIndex],
                 mainDescriptorWriteKey
             )) {
-            vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+            vkUpdateDescriptorSets(m_device, writeCount, writes.data(), 0, nullptr);
         }
     } else {
         m_mainDescriptorWriteKeyValid[frameIndex] = false;
@@ -498,7 +531,14 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         const VkDescriptorBufferInfo& voxelGiChunkVoxelInfo =
             (voxelGiChunkVoxelBufferInfo != nullptr) ? *voxelGiChunkVoxelBufferInfo : voxelGiFallbackStorageInfo;
 
-        std::array<VkWriteDescriptorSet, 16> voxelGiWrites{};
+        const bool hasVoxelGiRayTracingSceneDescriptor = m_rayTracingRuntimeEnabled && m_rtTlas.handle != VK_NULL_HANDLE;
+        VkWriteDescriptorSetAccelerationStructureKHR voxelGiRayTracingSceneWriteInfo{};
+        voxelGiRayTracingSceneWriteInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+        voxelGiRayTracingSceneWriteInfo.accelerationStructureCount = hasVoxelGiRayTracingSceneDescriptor ? 1u : 0u;
+        voxelGiRayTracingSceneWriteInfo.pAccelerationStructures =
+            hasVoxelGiRayTracingSceneDescriptor ? &m_rtTlas.handle : nullptr;
+
+        std::array<VkWriteDescriptorSet, 17> voxelGiWrites{};
         voxelGiWrites[0] = write;
         voxelGiWrites[0].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
         voxelGiWrites[0].dstBinding = 0;
@@ -611,6 +651,17 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         voxelGiWrites[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         voxelGiWrites[15].pBufferInfo = &voxelGiChunkVoxelInfo;
 
+        std::uint32_t voxelGiWriteCount = 16;
+        if (hasVoxelGiRayTracingSceneDescriptor) {
+            voxelGiWrites[16] = write;
+            voxelGiWrites[16].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+            voxelGiWrites[16].dstBinding = 16;
+            voxelGiWrites[16].descriptorCount = 1;
+            voxelGiWrites[16].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            voxelGiWrites[16].pNext = &voxelGiRayTracingSceneWriteInfo;
+            voxelGiWriteCount = 17;
+        }
+
         const std::array<std::uint64_t, kVoxelGiDescriptorWriteKeyWordCount> voxelGiDescriptorWriteKey = {
             vkHandleToUint64(m_voxelGiDescriptorSets[frameIndex]),
             vkHandleToUint64(cameraBufferInfo.buffer),
@@ -634,7 +685,8 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             static_cast<std::uint64_t>(voxelGiChunkMetaInfo.range),
             vkHandleToUint64(voxelGiChunkVoxelInfo.buffer),
             static_cast<std::uint64_t>(voxelGiChunkVoxelInfo.offset),
-            static_cast<std::uint64_t>(voxelGiChunkVoxelInfo.range)
+            static_cast<std::uint64_t>(voxelGiChunkVoxelInfo.range),
+            vkHandleToUint64(hasVoxelGiRayTracingSceneDescriptor ? m_rtTlas.handle : VK_NULL_HANDLE)
         };
         if (descriptorWriteKeyChanged(
                 m_voxelGiDescriptorWriteKeys[frameIndex],
@@ -643,7 +695,7 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             )) {
             vkUpdateDescriptorSets(
                 m_device,
-                static_cast<uint32_t>(voxelGiWrites.size()),
+                voxelGiWriteCount,
                 voxelGiWrites.data(),
                 0,
                 nullptr

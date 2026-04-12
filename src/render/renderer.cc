@@ -99,6 +99,18 @@ FramePacingStats Renderer::framePacingStats() const {
     return m_backend->framePacingStats();
 }
 
+void Renderer::setShadowSettings(const ShadowSettings& settings) {
+    m_backend->setShadowSettings(settings);
+}
+
+ShadowSettings Renderer::shadowSettings() const {
+    return m_backend->shadowSettings();
+}
+
+ShadowStats Renderer::shadowStats() const {
+    return m_backend->shadowStats();
+}
+
 void Renderer::setSunAngles(float yawDegrees, float pitchDegrees) {
     m_backend->setSunAngles(yawDegrees, pitchDegrees);
 }

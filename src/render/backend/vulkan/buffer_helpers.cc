@@ -267,6 +267,17 @@ VkDeviceSize BufferAllocator::getSize(BufferHandle handle) const {
     return (slot != nullptr) ? slot->size : 0;
 }
 
+VkDeviceAddress BufferAllocator::getDeviceAddress(BufferHandle handle) const {
+    const BufferSlot* slot = getSlot(handle);
+    if (slot == nullptr || slot->buffer == VK_NULL_HANDLE || m_device == VK_NULL_HANDLE) {
+        return 0;
+    }
+    VkBufferDeviceAddressInfo addressInfo{};
+    addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    addressInfo.buffer = slot->buffer;
+    return vkGetBufferDeviceAddress(m_device, &addressInfo);
+}
+
 void* BufferAllocator::mapBuffer(BufferHandle handle, VkDeviceSize offset, VkDeviceSize size) {
     BufferSlot* slot = getSlot(handle);
     if (slot == nullptr) {

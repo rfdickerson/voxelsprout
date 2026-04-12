@@ -1375,6 +1375,7 @@ bool RendererBackend::createVoxelGiResources() {
     constexpr const char* kVoxelGiSkyExposureShaderPath = "../src/render/shaders/voxel_gi_sky_exposure.comp.slang.spv";
     constexpr const char* kVoxelGiOccupancyShaderPath = "../src/render/shaders/voxel_gi_occupancy.comp.slang.spv";
     constexpr const char* kVoxelGiSurfaceShaderPath = "../src/render/shaders/voxel_gi_surface.comp.slang.spv";
+    constexpr const char* kVoxelGiSurfaceRtShaderPath = "../src/render/shaders/voxel_gi_surface_rt.comp.slang.spv";
     constexpr const char* kVoxelGiInjectShaderPath = "../src/render/shaders/voxel_gi_inject.comp.slang.spv";
     constexpr const char* kVoxelGiPropagateShaderPath = "../src/render/shaders/voxel_gi_propagate.comp.slang.spv";
     const bool hasSkyExposureShader = readBinaryFile(kVoxelGiSkyExposureShaderPath).has_value();
@@ -1382,12 +1383,20 @@ bool RendererBackend::createVoxelGiResources() {
     const bool hasSurfaceShader = readBinaryFile(kVoxelGiSurfaceShaderPath).has_value();
     const bool hasInjectShader = readBinaryFile(kVoxelGiInjectShaderPath).has_value();
     const bool hasPropagateShader = readBinaryFile(kVoxelGiPropagateShaderPath).has_value();
+    const bool hasRtSurfaceShaderVariant =
+        m_rayTracingRuntimeEnabled &&
+        readBinaryFile(kVoxelGiSurfaceRtShaderPath).has_value();
+    m_voxelGiRtSurfaceReady = false;
     if (!hasSkyExposureShader || !hasOccupancyShader || !hasSurfaceShader || !hasInjectShader || !hasPropagateShader) {
         VOX_LOGI("render")
             << "voxel GI compute shaders not found; keeping static volume fallback (expected: "
             << kVoxelGiSkyExposureShaderPath << ", " << kVoxelGiOccupancyShaderPath << ", "
             << kVoxelGiSurfaceShaderPath << ", " << kVoxelGiInjectShaderPath << ", "
             << kVoxelGiPropagateShaderPath << ")\n";
+        VOX_LOGI("render") << "voxel GI runtime: compute=no, rtSurfaceVariant="
+                           << (hasRtSurfaceShaderVariant ? "yes" : "no")
+                           << ", rtSurfaceReady=no, rtSurfaceTracingRequested="
+                           << (m_voxelGiDebugSettings.enableRtSurfaceTracing ? "yes" : "no") << "\n";
         m_voxelGiComputeAvailable = false;
         m_voxelGiInitialized = false;
         m_voxelGiSkyExposureInitialized = false;
@@ -1492,7 +1501,7 @@ bool RendererBackend::createVoxelGiResources() {
         chunkVoxelBinding.descriptorCount = 1;
         chunkVoxelBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 16> bindings = {
+        std::vector<VkDescriptorSetLayoutBinding> bindings = {
             cameraBinding,
             shadowBinding,
             injectWriteBinding,
@@ -1510,6 +1519,14 @@ bool RendererBackend::createVoxelGiResources() {
             chunkMetaBinding,
             chunkVoxelBinding
         };
+        if (m_rayTracingRuntimeEnabled) {
+            VkDescriptorSetLayoutBinding rtSurfaceSceneBinding{};
+            rtSurfaceSceneBinding.binding = 16;
+            rtSurfaceSceneBinding.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            rtSurfaceSceneBinding.descriptorCount = 1;
+            rtSurfaceSceneBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            bindings.push_back(rtSurfaceSceneBinding);
+        }
 
         if (!createDescriptorSetLayout(
                 bindings,
@@ -1523,13 +1540,19 @@ bool RendererBackend::createVoxelGiResources() {
     }
 
     if (m_voxelGiDescriptorPool == VK_NULL_HANDLE) {
-        const std::array<VkDescriptorPoolSize, 5> poolSizes = {
+        std::vector<VkDescriptorPoolSize> poolSizes = {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10 * kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kMaxFramesInFlight}
         };
+        if (m_rayTracingRuntimeEnabled) {
+            poolSizes.push_back(VkDescriptorPoolSize{
+                VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+                kMaxFramesInFlight
+            });
+        }
         if (!createDescriptorPool(
                 poolSizes,
                 kMaxFramesInFlight,
@@ -1554,7 +1577,8 @@ bool RendererBackend::createVoxelGiResources() {
     }
     m_voxelGiDescriptorWriteKeyValid.fill(false);
 
-    std::array<VkShaderModule, 5> shaderModules = {
+    std::array<VkShaderModule, 6> shaderModules = {
+        VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
@@ -1564,8 +1588,9 @@ bool RendererBackend::createVoxelGiResources() {
     VkShaderModule& skyExposureShaderModule = shaderModules[0];
     VkShaderModule& occupancyShaderModule = shaderModules[1];
     VkShaderModule& surfaceShaderModule = shaderModules[2];
-    VkShaderModule& injectShaderModule = shaderModules[3];
-    VkShaderModule& propagateShaderModule = shaderModules[4];
+    VkShaderModule& surfaceRtShaderModule = shaderModules[3];
+    VkShaderModule& injectShaderModule = shaderModules[4];
+    VkShaderModule& propagateShaderModule = shaderModules[5];
     if (!createShaderModuleFromFile(
             m_device,
             kVoxelGiSkyExposureShaderPath,
@@ -1594,7 +1619,20 @@ bool RendererBackend::createVoxelGiResources() {
         )) {
         destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
-        return false;
+            return false;
+    }
+    bool createdRtSurfacePipeline = false;
+    if (hasRtSurfaceShaderVariant) {
+        if (!createShaderModuleFromFile(
+                m_device,
+                kVoxelGiSurfaceRtShaderPath,
+                "voxel_gi_surface_rt.comp",
+                surfaceRtShaderModule
+            )) {
+            destroyShaderModules(m_device, shaderModules);
+            destroyVoxelGiResources();
+            return false;
+        }
     }
     if (!createShaderModuleFromFile(
             m_device,
@@ -1661,6 +1699,20 @@ bool RendererBackend::createVoxelGiResources() {
         destroyVoxelGiResources();
         return false;
     }
+    if (hasRtSurfaceShaderVariant) {
+        if (!createComputePipeline(
+                m_voxelGiPipelineLayout,
+                surfaceRtShaderModule,
+                m_voxelGiSurfacePipelineRt,
+                "vkCreateComputePipelines(voxelGiSurfaceRt)",
+                "pipeline.voxelGi.surface.rt"
+            )) {
+            destroyShaderModules(m_device, shaderModules);
+            destroyVoxelGiResources();
+            return false;
+        }
+        createdRtSurfacePipeline = true;
+    }
     if (!createComputePipeline(
             m_voxelGiPipelineLayout,
             injectShaderModule,
@@ -1689,10 +1741,19 @@ bool RendererBackend::createVoxelGiResources() {
     m_voxelGiInitialized = false;
     m_voxelGiSkyExposureInitialized = false;
     m_voxelGiOccupancyInitialized = false;
+    m_voxelGiRtSurfaceReady =
+        m_rayTracingRuntimeEnabled &&
+        createdRtSurfacePipeline &&
+        m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE;
     VOX_LOGI("render") << "voxel GI resources ready: "
                        << kVoxelGiGridResolution << "^3, format=" << static_cast<int>(m_voxelGiFormat)
                        << ", occupancyFormat=" << static_cast<int>(m_voxelGiOccupancyFormat)
                        << ", compute=enabled\n";
+    VOX_LOGI("render") << "voxel GI runtime: compute=yes, rtSurfaceVariant="
+                       << (hasRtSurfaceShaderVariant ? "yes" : "no")
+                       << ", rtSurfaceReady=" << (m_voxelGiRtSurfaceReady ? "yes" : "no")
+                       << ", rtSurfaceTracingRequested="
+                       << (m_voxelGiDebugSettings.enableRtSurfaceTracing ? "yes" : "no") << "\n";
     return true;
 }
 

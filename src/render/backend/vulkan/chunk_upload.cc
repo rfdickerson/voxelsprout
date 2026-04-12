@@ -34,6 +34,117 @@ namespace voxelsprout::render {
 
 #include "render/renderer_shared.h"
 
+namespace {
+
+RtVertex decodePackedVoxelVertexPosition(std::uint32_t packedBits, float offsetX, float offsetY, float offsetZ) {
+    const std::uint32_t x =
+        (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftX) & voxelsprout::world::PackedVoxelVertex::kMask5;
+    const std::uint32_t y =
+        (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftY) & voxelsprout::world::PackedVoxelVertex::kMask5;
+    const std::uint32_t z =
+        (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftZ) & voxelsprout::world::PackedVoxelVertex::kMask5;
+    const std::uint32_t face =
+        (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftFace) & voxelsprout::world::PackedVoxelVertex::kMask3;
+    const std::uint32_t corner =
+        (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftCorner) & voxelsprout::world::PackedVoxelVertex::kMask2;
+
+    RtVertex vertex{};
+    vertex.position[0] = static_cast<float>(x) + offsetX;
+    vertex.position[1] = static_cast<float>(y) + offsetY;
+    vertex.position[2] = static_cast<float>(z) + offsetZ;
+    if (face == 0u) {
+        vertex.position[0] += 1.0f;
+        vertex.position[1] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
+        vertex.position[2] += (corner == 2u || corner == 3u) ? 1.0f : 0.0f;
+        return vertex;
+    }
+    if (face == 1u) {
+        vertex.position[1] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
+        vertex.position[2] += (corner == 0u || corner == 1u) ? 1.0f : 0.0f;
+        return vertex;
+    }
+    if (face == 2u) {
+        vertex.position[0] += (corner == 2u || corner == 3u) ? 1.0f : 0.0f;
+        vertex.position[1] += 1.0f;
+        vertex.position[2] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
+        return vertex;
+    }
+    if (face == 3u) {
+        vertex.position[0] += (corner == 2u || corner == 3u) ? 1.0f : 0.0f;
+        vertex.position[2] += (corner == 0u || corner == 3u) ? 1.0f : 0.0f;
+        return vertex;
+    }
+    if (face == 4u) {
+        vertex.position[0] += (corner == 0u || corner == 1u) ? 1.0f : 0.0f;
+        vertex.position[1] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
+        vertex.position[2] += 1.0f;
+        return vertex;
+    }
+
+    vertex.position[0] += (corner == 2u || corner == 3u) ? 1.0f : 0.0f;
+    vertex.position[1] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
+    return vertex;
+}
+
+void destroyRtGeometryBuffers(BufferAllocator& allocator, RtGeometryBuffers& geometry) {
+    if (geometry.indexBufferHandle != kInvalidBufferHandle) {
+        allocator.destroyBuffer(geometry.indexBufferHandle);
+        geometry.indexBufferHandle = kInvalidBufferHandle;
+    }
+    if (geometry.vertexBufferHandle != kInvalidBufferHandle) {
+        allocator.destroyBuffer(geometry.vertexBufferHandle);
+        geometry.vertexBufferHandle = kInvalidBufferHandle;
+    }
+    geometry.vertexCount = 0;
+    geometry.indexCount = 0;
+}
+
+bool createRtGeometryBuffers(
+    BufferAllocator& allocator,
+    const std::vector<RtVertex>& vertices,
+    const std::vector<std::uint32_t>& indices,
+    RtGeometryBuffers& outGeometry
+) {
+    destroyRtGeometryBuffers(allocator, outGeometry);
+    if (vertices.empty() || indices.empty()) {
+        return true;
+    }
+
+    BufferCreateDesc vertexCreateDesc{};
+    vertexCreateDesc.size = static_cast<VkDeviceSize>(vertices.size() * sizeof(RtVertex));
+    vertexCreateDesc.usage =
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vertexCreateDesc.initialData = vertices.data();
+    outGeometry.vertexBufferHandle = allocator.createBuffer(vertexCreateDesc);
+    if (outGeometry.vertexBufferHandle == kInvalidBufferHandle) {
+        return false;
+    }
+
+    BufferCreateDesc indexCreateDesc{};
+    indexCreateDesc.size = static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
+    indexCreateDesc.usage =
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    indexCreateDesc.initialData = indices.data();
+    outGeometry.indexBufferHandle = allocator.createBuffer(indexCreateDesc);
+    if (outGeometry.indexBufferHandle == kInvalidBufferHandle) {
+        destroyRtGeometryBuffers(allocator, outGeometry);
+        return false;
+    }
+
+    outGeometry.vertexCount = static_cast<std::uint32_t>(vertices.size());
+    outGeometry.indexCount = static_cast<std::uint32_t>(indices.size());
+    return true;
+}
+
+} // namespace
+
 void RendererBackend::clearMagicaVoxelMeshes() {
     for (MagicaMeshDraw& draw : m_magicaMeshDraws) {
         if (draw.vertexBufferHandle != kInvalidBufferHandle) {
@@ -47,6 +158,11 @@ void RendererBackend::clearMagicaVoxelMeshes() {
         draw.indexCount = 0;
     }
     m_magicaMeshDraws.clear();
+    for (RtGeometryBuffers& geometry : m_rtMagicaGeometries) {
+        destroyRtGeometryBuffers(m_bufferAllocator, geometry);
+    }
+    m_rtMagicaGeometries.clear();
+    markRayTracingSceneDirty();
 }
 
 
@@ -109,6 +225,23 @@ bool RendererBackend::uploadMagicaVoxelMesh(
     draw.offsetY = worldOffsetY;
     draw.offsetZ = worldOffsetZ;
     m_magicaMeshDraws.push_back(draw);
+    if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
+        std::vector<RtVertex> rtVertices;
+        rtVertices.reserve(mesh.vertices.size());
+        for (const voxelsprout::world::PackedVoxelVertex& vertex : mesh.vertices) {
+            rtVertices.push_back(decodePackedVoxelVertexPosition(vertex.bits, worldOffsetX, worldOffsetY, worldOffsetZ));
+        }
+        RtGeometryBuffers rtGeometry{};
+        if (!createRtGeometryBuffers(m_bufferAllocator, rtVertices, mesh.indices, rtGeometry)) {
+            VOX_LOGE("render") << "magica voxel RT geometry buffer allocation failed";
+        } else {
+            m_rtMagicaGeometries.push_back(rtGeometry);
+            markRayTracingSceneDirty();
+            if (rayTracingRuntimeReady() && !rebuildRayTracingScene()) {
+                VOX_LOGE("render") << "magica voxel RT scene rebuild failed";
+            }
+        }
+    }
     return true;
 }
 
@@ -486,6 +619,8 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
 
     std::vector<voxelsprout::world::PackedVoxelVertex> combinedVertices;
     std::vector<std::uint32_t> combinedIndices;
+    std::vector<RtVertex> rtChunkVertices;
+    std::vector<std::uint32_t> rtChunkIndices;
     std::size_t uploadedVertexCount = 0;
     std::size_t uploadedIndexCount = 0;
 
@@ -522,6 +657,20 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
             combinedIndices.reserve(combinedIndices.size() + chunkMesh.indices.size());
             for (const std::uint32_t index : chunkMesh.indices) {
                 combinedIndices.push_back(index + baseVertex);
+            }
+            if (lodIndex == 0u && m_rayTracingCapabilityProbe.rayTracingCoreReady) {
+                // RT shadows should trace against the highest-detail chunk mesh.
+                const std::uint32_t rtBaseVertex = static_cast<std::uint32_t>(rtChunkVertices.size());
+                rtChunkVertices.reserve(rtChunkVertices.size() + chunkMesh.vertices.size());
+                rtChunkIndices.reserve(rtChunkIndices.size() + chunkMesh.indices.size());
+                for (const voxelsprout::world::PackedVoxelVertex& vertex : chunkMesh.vertices) {
+                    rtChunkVertices.push_back(
+                        decodePackedVoxelVertexPosition(vertex.bits, drawRange.offsetX, drawRange.offsetY, drawRange.offsetZ)
+                    );
+                }
+                for (const std::uint32_t index : chunkMesh.indices) {
+                    rtChunkIndices.push_back(index + rtBaseVertex);
+                }
             }
 
             drawRange.firstIndex = firstIndex;
@@ -658,6 +807,14 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     }
 
     uint64_t transferSignalValue = 0;
+    const bool startupChunkUpload =
+        m_lastGraphicsTimelineValue == 0 &&
+        previousChunkReadyTimelineValue == 0 &&
+        std::all_of(
+            m_frameTimelineValues.begin(),
+            m_frameTimelineValues.end(),
+            [](uint64_t value) { return value == 0; }
+        );
     if (hasChunkCopies) {
         const VkResult resetResult = vkResetCommandPool(m_device, m_transferCommandPool, 0);
         if (resetResult != VK_SUCCESS) {
@@ -758,9 +915,22 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
             return false;
         }
 
-        m_currentChunkReadyTimelineValue = transferSignalValue;
-        m_pendingTransferTimelineValue = transferSignalValue;
-        m_transferCommandBufferInFlightValue = transferSignalValue;
+        if (startupChunkUpload) {
+            const VkResult transferWaitResult = vkQueueWaitIdle(m_transferQueue);
+            if (transferWaitResult != VK_SUCCESS) {
+                logVkFailure("vkQueueWaitIdle(startupChunkUpload)", transferWaitResult);
+                cleanupPendingAllocations();
+                rollbackChunkDrawState();
+                return false;
+            }
+            m_currentChunkReadyTimelineValue = 0;
+            m_pendingTransferTimelineValue = 0;
+            m_transferCommandBufferInFlightValue = 0;
+        } else {
+            m_currentChunkReadyTimelineValue = transferSignalValue;
+            m_pendingTransferTimelineValue = transferSignalValue;
+            m_transferCommandBufferInFlightValue = transferSignalValue;
+        }
     }
 
     const uint64_t oldChunkReleaseValue = std::max(m_lastGraphicsTimelineValue, previousChunkReadyTimelineValue);
@@ -770,6 +940,16 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     m_chunkIndexBufferHandle = newChunkIndexBufferHandle;
     newChunkVertexBufferHandle = kInvalidBufferHandle;
     newChunkIndexBufferHandle = kInvalidBufferHandle;
+    if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
+        if (!createRtGeometryBuffers(m_bufferAllocator, rtChunkVertices, rtChunkIndices, m_rtChunkGeometry)) {
+            VOX_LOGE("render") << "chunk RT geometry buffer allocation failed";
+        } else {
+            markRayTracingSceneDirty();
+            if (rayTracingRuntimeReady() && !rebuildRayTracingScene()) {
+                VOX_LOGE("render") << "chunk RT scene rebuild failed";
+            }
+        }
+    }
 
     VOX_LOGD("render") << "chunk upload queued (ranges=" << m_chunkDrawRanges.size()
                        << ", remeshedChunks=" << remeshedChunkCount
@@ -781,6 +961,398 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
                                ? (", timelineValue=" + std::to_string(transferSignalValue))
                                : ", immediate=true")
                        << ")";
+    return true;
+}
+
+void RendererBackend::markRayTracingSceneDirty() {
+    if (!m_rayTracingCapabilityProbe.rayTracingCoreReady) {
+        return;
+    }
+    m_rtSceneDirty = true;
+    refreshShadowStats();
+}
+
+void RendererBackend::destroyRayTracingScene() {
+    auto destroyAs = [&](RtAccelerationStructure& accelerationStructure) {
+        if (accelerationStructure.handle != VK_NULL_HANDLE && m_destroyAccelerationStructureKhr != nullptr) {
+            m_destroyAccelerationStructureKhr(m_device, accelerationStructure.handle, nullptr);
+            accelerationStructure.handle = VK_NULL_HANDLE;
+        }
+        if (accelerationStructure.storageBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(accelerationStructure.storageBufferHandle);
+            accelerationStructure.storageBufferHandle = kInvalidBufferHandle;
+        }
+        accelerationStructure.deviceAddress = 0;
+        accelerationStructure.primitiveCount = 0;
+    };
+
+    destroyAs(m_rtTlas);
+    if (m_rtTlasInstanceBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_rtTlasInstanceBufferHandle);
+        m_rtTlasInstanceBufferHandle = kInvalidBufferHandle;
+    }
+    destroyAs(m_rtChunkBlas);
+    for (RtAccelerationStructure& blas : m_rtMagicaBlases) {
+        destroyAs(blas);
+    }
+    m_rtMagicaBlases.clear();
+    destroyRtGeometryBuffers(m_bufferAllocator, m_rtChunkGeometry);
+    for (RtGeometryBuffers& geometry : m_rtMagicaGeometries) {
+        destroyRtGeometryBuffers(m_bufferAllocator, geometry);
+    }
+    m_rtMagicaGeometries.clear();
+    m_rtSceneDirty = false;
+    m_rtSceneBuildCount = 0;
+    m_rtBlasBuildCount = 0;
+    m_rtTlasBuildCount = 0;
+    refreshShadowStats();
+}
+
+bool RendererBackend::rebuildRayTracingScene() {
+    if (!rayTracingRuntimeReady()) {
+        refreshShadowStats();
+        return false;
+    }
+    const VkDeviceAddress scratchAlignment = std::max<VkDeviceAddress>(
+        1,
+        static_cast<VkDeviceAddress>(m_rayTracingCapabilityProbe.scratchAlignment)
+    );
+    auto alignDeviceAddress = [&](VkDeviceAddress address) -> VkDeviceAddress {
+        const VkDeviceAddress mask = scratchAlignment - 1;
+        return (address + mask) & ~mask;
+    };
+
+    auto destroyAs = [&](RtAccelerationStructure& accelerationStructure) {
+        if (accelerationStructure.handle != VK_NULL_HANDLE && m_destroyAccelerationStructureKhr != nullptr) {
+            m_destroyAccelerationStructureKhr(m_device, accelerationStructure.handle, nullptr);
+            accelerationStructure.handle = VK_NULL_HANDLE;
+        }
+        if (accelerationStructure.storageBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(accelerationStructure.storageBufferHandle);
+            accelerationStructure.storageBufferHandle = kInvalidBufferHandle;
+        }
+        accelerationStructure.deviceAddress = 0;
+        accelerationStructure.primitiveCount = 0;
+    };
+    auto createAsStorage = [&](VkAccelerationStructureTypeKHR type,
+                               VkDeviceSize size,
+                               RtAccelerationStructure& outAccelerationStructure) -> bool {
+        destroyAs(outAccelerationStructure);
+        BufferCreateDesc storageCreateDesc{};
+        storageCreateDesc.size = size;
+        storageCreateDesc.usage =
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        storageCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        outAccelerationStructure.storageBufferHandle = m_bufferAllocator.createBuffer(storageCreateDesc);
+        if (outAccelerationStructure.storageBufferHandle == kInvalidBufferHandle) {
+            return false;
+        }
+        VkAccelerationStructureCreateInfoKHR createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+        createInfo.buffer = m_bufferAllocator.getBuffer(outAccelerationStructure.storageBufferHandle);
+        createInfo.size = size;
+        createInfo.type = type;
+        if (m_createAccelerationStructureKhr(m_device, &createInfo, nullptr, &outAccelerationStructure.handle) != VK_SUCCESS) {
+            m_bufferAllocator.destroyBuffer(outAccelerationStructure.storageBufferHandle);
+            outAccelerationStructure.storageBufferHandle = kInvalidBufferHandle;
+            return false;
+        }
+        VkAccelerationStructureDeviceAddressInfoKHR addressInfo{};
+        addressInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+        addressInfo.accelerationStructure = outAccelerationStructure.handle;
+        outAccelerationStructure.deviceAddress =
+            m_getAccelerationStructureDeviceAddressKhr(m_device, &addressInfo);
+        return outAccelerationStructure.deviceAddress != 0;
+    };
+
+    std::vector<std::pair<RtGeometryBuffers*, RtAccelerationStructure*>> buildGeometries;
+    if (m_rtChunkGeometry.vertexCount > 0 && m_rtChunkGeometry.indexCount > 0) {
+        buildGeometries.push_back({&m_rtChunkGeometry, &m_rtChunkBlas});
+    }
+    if (m_rtMagicaBlases.size() > m_rtMagicaGeometries.size()) {
+        for (std::size_t i = m_rtMagicaGeometries.size(); i < m_rtMagicaBlases.size(); ++i) {
+            destroyAs(m_rtMagicaBlases[i]);
+        }
+    }
+    m_rtMagicaBlases.resize(m_rtMagicaGeometries.size());
+    for (std::size_t i = 0; i < m_rtMagicaGeometries.size(); ++i) {
+        if (m_rtMagicaGeometries[i].vertexCount == 0 || m_rtMagicaGeometries[i].indexCount == 0) {
+            continue;
+        }
+        buildGeometries.push_back({&m_rtMagicaGeometries[i], &m_rtMagicaBlases[i]});
+    }
+
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    if (vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool) != VK_SUCCESS) {
+        return false;
+    }
+    VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
+    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    commandBufferAllocateInfo.commandPool = commandPool;
+    commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandBufferAllocateInfo.commandBufferCount = 1;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(m_device, &commandBufferAllocateInfo, &commandBuffer) != VK_SUCCESS) {
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        return false;
+    }
+
+    struct ScratchAllocation {
+        BufferHandle handle = kInvalidBufferHandle;
+        VkDeviceAddress alignedAddress = 0;
+    };
+    std::vector<ScratchAllocation> scratchBuffers;
+    scratchBuffers.reserve(buildGeometries.size() + 1u);
+    std::vector<VkAccelerationStructureInstanceKHR> tlasInstances;
+    tlasInstances.reserve(buildGeometries.size());
+    bool buildOk = true;
+    bool commandBufferBegun = false;
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    buildOk = vkBeginCommandBuffer(commandBuffer, &beginInfo) == VK_SUCCESS;
+    commandBufferBegun = buildOk;
+
+    for (const auto& [geometry, outBlas] : buildGeometries) {
+        if (!buildOk) {
+            break;
+        }
+        VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
+        triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        triangles.vertexData.deviceAddress = m_bufferAllocator.getDeviceAddress(geometry->vertexBufferHandle);
+        triangles.vertexStride = sizeof(RtVertex);
+        triangles.maxVertex = geometry->vertexCount > 0 ? (geometry->vertexCount - 1u) : 0u;
+        triangles.indexType = VK_INDEX_TYPE_UINT32;
+        triangles.indexData.deviceAddress = m_bufferAllocator.getDeviceAddress(geometry->indexBufferHandle);
+
+        VkAccelerationStructureGeometryKHR asGeometry{};
+        asGeometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        asGeometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        asGeometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        asGeometry.geometry.triangles = triangles;
+
+        const std::uint32_t primitiveCount = geometry->indexCount / 3u;
+        VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+        buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+        buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        buildInfo.geometryCount = 1;
+        buildInfo.pGeometries = &asGeometry;
+
+        VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+        sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+        m_getAccelerationStructureBuildSizesKhr(
+            m_device,
+            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+            &buildInfo,
+            &primitiveCount,
+            &sizeInfo
+        );
+        buildOk = createAsStorage(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizeInfo.accelerationStructureSize, *outBlas);
+        if (!buildOk) {
+            break;
+        }
+        BufferCreateDesc scratchCreateDesc{};
+        scratchCreateDesc.size = sizeInfo.buildScratchSize + scratchAlignment - 1;
+        scratchCreateDesc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        scratchCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        const BufferHandle scratchHandle = m_bufferAllocator.createBuffer(scratchCreateDesc);
+        if (scratchHandle == kInvalidBufferHandle) {
+            buildOk = false;
+            break;
+        }
+        const VkDeviceAddress scratchAddress = alignDeviceAddress(m_bufferAllocator.getDeviceAddress(scratchHandle));
+        if (scratchAddress == 0) {
+            m_bufferAllocator.destroyBuffer(scratchHandle);
+            buildOk = false;
+            break;
+        }
+        scratchBuffers.push_back({scratchHandle, scratchAddress});
+
+        buildInfo.dstAccelerationStructure = outBlas->handle;
+        buildInfo.scratchData.deviceAddress = scratchAddress;
+        VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+        rangeInfo.primitiveCount = primitiveCount;
+        const VkAccelerationStructureBuildRangeInfoKHR* rangeInfos[] = {&rangeInfo};
+        m_cmdBuildAccelerationStructuresKhr(commandBuffer, 1, &buildInfo, rangeInfos);
+        outBlas->primitiveCount = primitiveCount;
+
+        VkAccelerationStructureInstanceKHR instance{};
+        instance.transform.matrix[0][0] = 1.0f;
+        instance.transform.matrix[1][1] = 1.0f;
+        instance.transform.matrix[2][2] = 1.0f;
+        instance.instanceCustomIndex = static_cast<std::uint32_t>(tlasInstances.size());
+        instance.mask = 0xFFu;
+        instance.instanceShaderBindingTableRecordOffset = 0;
+        instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        instance.accelerationStructureReference = outBlas->deviceAddress;
+        tlasInstances.push_back(instance);
+    }
+
+    if (buildOk && !buildGeometries.empty()) {
+        VkMemoryBarrier2 blasBuildBarrier{};
+        blasBuildBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        blasBuildBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        blasBuildBarrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        blasBuildBarrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        blasBuildBarrier.dstAccessMask =
+            VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+            VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+
+        VkDependencyInfo dependencyInfo{};
+        dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependencyInfo.memoryBarrierCount = 1;
+        dependencyInfo.pMemoryBarriers = &blasBuildBarrier;
+        vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+    }
+
+    if (buildOk && !tlasInstances.empty()) {
+        if (m_rtTlasInstanceBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(m_rtTlasInstanceBufferHandle);
+            m_rtTlasInstanceBufferHandle = kInvalidBufferHandle;
+        }
+        BufferCreateDesc instanceCreateDesc{};
+        instanceCreateDesc.size = static_cast<VkDeviceSize>(tlasInstances.size() * sizeof(VkAccelerationStructureInstanceKHR));
+        instanceCreateDesc.usage =
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        instanceCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        instanceCreateDesc.initialData = tlasInstances.data();
+        m_rtTlasInstanceBufferHandle = m_bufferAllocator.createBuffer(instanceCreateDesc);
+        buildOk = m_rtTlasInstanceBufferHandle != kInvalidBufferHandle;
+        if (buildOk) {
+            VkAccelerationStructureGeometryInstancesDataKHR instancesData{};
+            instancesData.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+            instancesData.data.deviceAddress = m_bufferAllocator.getDeviceAddress(m_rtTlasInstanceBufferHandle);
+
+            VkAccelerationStructureGeometryKHR tlasGeometry{};
+            tlasGeometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+            tlasGeometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+            tlasGeometry.geometry.instances = instancesData;
+
+            const std::uint32_t primitiveCount = static_cast<std::uint32_t>(tlasInstances.size());
+            VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+            buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+            buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+            buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+            buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+            buildInfo.geometryCount = 1;
+            buildInfo.pGeometries = &tlasGeometry;
+
+            VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+            sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+            m_getAccelerationStructureBuildSizesKhr(
+                m_device,
+                VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                &buildInfo,
+                &primitiveCount,
+                &sizeInfo
+            );
+            buildOk = createAsStorage(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, sizeInfo.accelerationStructureSize, m_rtTlas);
+            if (buildOk) {
+                BufferCreateDesc scratchCreateDesc{};
+                scratchCreateDesc.size = sizeInfo.buildScratchSize + scratchAlignment - 1;
+                scratchCreateDesc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+                scratchCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                const BufferHandle scratchHandle = m_bufferAllocator.createBuffer(scratchCreateDesc);
+                VkDeviceAddress scratchAddress = 0;
+                buildOk = scratchHandle != kInvalidBufferHandle;
+                if (buildOk) {
+                    scratchAddress = alignDeviceAddress(m_bufferAllocator.getDeviceAddress(scratchHandle));
+                    buildOk = scratchAddress != 0;
+                    if (!buildOk) {
+                        m_bufferAllocator.destroyBuffer(scratchHandle);
+                    } else {
+                        scratchBuffers.push_back({scratchHandle, scratchAddress});
+                    }
+                }
+                if (buildOk) {
+                    buildInfo.dstAccelerationStructure = m_rtTlas.handle;
+                    buildInfo.scratchData.deviceAddress = scratchAddress;
+                    VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+                    rangeInfo.primitiveCount = primitiveCount;
+                    const VkAccelerationStructureBuildRangeInfoKHR* rangeInfos[] = {&rangeInfo};
+                    m_cmdBuildAccelerationStructuresKhr(commandBuffer, 1, &buildInfo, rangeInfos);
+                    m_rtTlas.primitiveCount = primitiveCount;
+                }
+            }
+        }
+    } else {
+        if (m_rtTlasInstanceBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(m_rtTlasInstanceBufferHandle);
+            m_rtTlasInstanceBufferHandle = kInvalidBufferHandle;
+        }
+        destroyAs(m_rtTlas);
+    }
+
+    if (buildOk && m_rtTlas.handle != VK_NULL_HANDLE) {
+        VkMemoryBarrier2 tlasBuildBarrier{};
+        tlasBuildBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        tlasBuildBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        tlasBuildBarrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        tlasBuildBarrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        tlasBuildBarrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+
+        VkDependencyInfo dependencyInfo{};
+        dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependencyInfo.memoryBarrierCount = 1;
+        dependencyInfo.pMemoryBarriers = &tlasBuildBarrier;
+        vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+    }
+
+    if (buildOk) {
+        buildOk = vkEndCommandBuffer(commandBuffer) == VK_SUCCESS;
+    } else if (commandBufferBegun) {
+        vkEndCommandBuffer(commandBuffer);
+    }
+    if (buildOk) {
+        VkCommandBufferSubmitInfo commandBufferInfo{};
+        commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        commandBufferInfo.commandBuffer = commandBuffer;
+        VkSubmitInfo2 submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &commandBufferInfo;
+        buildOk = vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) == VK_SUCCESS;
+    }
+    if (buildOk) {
+        buildOk = vkQueueWaitIdle(m_graphicsQueue) == VK_SUCCESS;
+    }
+
+    for (const ScratchAllocation& scratchAllocation : scratchBuffers) {
+        if (scratchAllocation.handle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(scratchAllocation.handle);
+        }
+    }
+    vkDestroyCommandPool(m_device, commandPool, nullptr);
+
+    if (!buildOk) {
+        destroyAs(m_rtTlas);
+        destroyAs(m_rtChunkBlas);
+        for (RtAccelerationStructure& blas : m_rtMagicaBlases) {
+            destroyAs(blas);
+        }
+        refreshShadowStats();
+        return false;
+    }
+
+    m_rtSceneDirty = false;
+    ++m_rtSceneBuildCount;
+    m_rtBlasBuildCount = static_cast<std::uint32_t>(buildGeometries.size());
+    m_rtTlasBuildCount = tlasInstances.empty() ? 0u : 1u;
+    refreshShadowStats();
+    VOX_LOGI("render") << "ray tracing scene rebuilt: blas=" << m_rtBlasBuildCount
+                       << ", tlas=" << m_rtTlasBuildCount
+                       << ", instances=" << tlasInstances.size()
+                       << ", sceneBuilds=" << m_rtSceneBuildCount << "\n";
     return true;
 }
 } // namespace voxelsprout::render

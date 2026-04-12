@@ -73,6 +73,7 @@ struct VoxelGiPassContext {
     std::array<VkImage, 2> voxelGiImages{};
     VkImage skyExposureImage = VK_NULL_HANDLE;
     VkQueryPool timestampQueryPool = VK_NULL_HANDLE;
+    bool useRtSurfaceTracing = false;
 };
 
 struct VoxelGiPassState {
@@ -84,6 +85,8 @@ struct VoxelGiPassState {
 struct VoxelGiTimestampQueryIndices {
     uint32_t occupancyStart = 0u;
     uint32_t occupancyEnd = 0u;
+    uint32_t surfaceStart = 0u;
+    uint32_t surfaceEnd = 0u;
     uint32_t injectStart = 0u;
     uint32_t injectEnd = 0u;
     uint32_t propagateStart = 0u;
@@ -179,8 +182,24 @@ void recordVoxelGiOccupancyPass(
 
 void recordVoxelGiSurfacePass(
     const VoxelGiPassContext& context,
-    const VoxelGiDispatchDims& dims
+    const VoxelGiDispatchDims& dims,
+    const VoxelGiTimestampQueryIndices& timestampQueries
 ) {
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.surfaceStart);
+    if (context.useRtSurfaceTracing) {
+        VkMemoryBarrier2 rayTracingReadBarrier{};
+        rayTracingReadBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        rayTracingReadBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        rayTracingReadBarrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        rayTracingReadBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        rayTracingReadBarrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+
+        VkDependencyInfo dependencyInfo{};
+        dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependencyInfo.memoryBarrierCount = 1;
+        dependencyInfo.pMemoryBarriers = &rayTracingReadBarrier;
+        vkCmdPipelineBarrier2(context.commandBuffer, &dependencyInfo);
+    }
     bindVoxelGiComputePass(context, context.surfacePipeline);
     vkCmdDispatch(context.commandBuffer, dims.volumeX, dims.volumeY, dims.volumeZ);
     for (const VkImage surfaceFaceImage : context.surfaceFaceImages) {
@@ -196,6 +215,7 @@ void recordVoxelGiSurfacePass(
             VK_IMAGE_ASPECT_COLOR_BIT
         );
     }
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.surfaceEnd);
 }
 
 void recordVoxelGiInjectPass(
@@ -339,6 +359,12 @@ void RendererBackend::recordVoxelGiDispatchSequence(
     VkQueryPool gpuTimestampQueryPool,
     uint32_t occupancyDispatchZ
 ) {
+    const bool useRtSurfaceTracing =
+        m_voxelGiDebugSettings.enableRtSurfaceTracing &&
+        m_rayTracingRuntimeEnabled &&
+        m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE &&
+        m_rtTlas.handle != VK_NULL_HANDLE;
+    m_voxelGiRtSurfaceActiveThisFrame = useRtSurfaceTracing;
     const VoxelGiDispatchDims dispatchDims = computeVoxelGiDispatchDims();
     const VoxelGiPassContext passContext{
         commandBuffer,
@@ -347,14 +373,15 @@ void RendererBackend::recordVoxelGiDispatchSequence(
         m_voxelGiDescriptorSets[m_currentFrame],
         m_voxelGiOccupancyPipeline,
         m_voxelGiSkyExposurePipeline,
-        m_voxelGiSurfacePipeline,
+        useRtSurfaceTracing ? m_voxelGiSurfacePipelineRt : m_voxelGiSurfacePipeline,
         m_voxelGiInjectPipeline,
         m_voxelGiPropagatePipeline,
         m_voxelGiOccupancyImage,
         m_voxelGiSurfaceFaceImages,
         m_voxelGiImages,
         m_voxelGiSkyExposureImage,
-        gpuTimestampQueryPool
+        gpuTimestampQueryPool,
+        useRtSurfaceTracing
     };
     VoxelGiPassState passState{
         &m_voxelGiSkyExposureInitialized,
@@ -364,6 +391,8 @@ void RendererBackend::recordVoxelGiDispatchSequence(
     const VoxelGiTimestampQueryIndices timestampQueries{
         kGpuTimestampQueryGiOccupancyStart,
         kGpuTimestampQueryGiOccupancyEnd,
+        kGpuTimestampQueryGiSurfaceStart,
+        kGpuTimestampQueryGiSurfaceEnd,
         kGpuTimestampQueryGiInjectStart,
         kGpuTimestampQueryGiInjectEnd,
         kGpuTimestampQueryGiPropagateStart,
@@ -372,7 +401,7 @@ void RendererBackend::recordVoxelGiDispatchSequence(
 
     recordVoxelGiOccupancyPass(passContext, dispatchDims, timestampQueries, occupancyDispatchZ);
     recordVoxelGiSkyExposurePass(passContext, dispatchDims, passState);
-    recordVoxelGiSurfacePass(passContext, dispatchDims);
+    recordVoxelGiSurfacePass(passContext, dispatchDims, timestampQueries);
     recordVoxelGiInjectPass(passContext, dispatchDims, timestampQueries);
     recordVoxelGiPropagationPass(passContext, dispatchDims, timestampQueries);
     finalizeVoxelGiPass(passContext, passState);

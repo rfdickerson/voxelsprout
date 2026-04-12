@@ -37,6 +37,27 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const uint32_t beltCargoInstanceCount = inputs.beltCargoInstanceCount;
     const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt = *inputs.beltCargoInstanceSliceOpt;
     const VoxelPreview& preview = *inputs.preview;
+    const bool useRtMainShadows =
+        m_shadowStats.activeMode == ShadowMode::RayTraced &&
+        m_shadowStats.mainPassRayTracingReady &&
+        m_pipelineRt != VK_NULL_HANDLE &&
+        m_magicaPipelineRt != VK_NULL_HANDLE;
+    m_shadowStats.mainPassRayTracingActive = useRtMainShadows;
+
+    if (useRtMainShadows) {
+        VkMemoryBarrier2 rayTracingReadBarrier{};
+        rayTracingReadBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        rayTracingReadBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        rayTracingReadBarrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        rayTracingReadBarrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        rayTracingReadBarrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+
+        VkDependencyInfo dependencyInfo{};
+        dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependencyInfo.memoryBarrierCount = 1;
+        dependencyInfo.pMemoryBarriers = &rayTracingReadBarrier;
+        vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+    }
 
     const uint32_t boundDescriptorSetCount = boundDescriptorSets.count;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
@@ -148,7 +169,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, useRtMainShadows ? m_pipelineRt : m_pipeline);
     vkCmdBindDescriptorSets(
         commandBuffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -185,7 +206,11 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         drawIndirectChunkRanges(commandBuffer, m_debugDrawCallsMain, frameChunkDrawData);
     }
     if (canDrawMagica) {
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_magicaPipeline);
+        vkCmdBindPipeline(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            useRtMainShadows ? m_magicaPipelineRt : m_magicaPipeline
+        );
         vkCmdBindDescriptorSets(
             commandBuffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,

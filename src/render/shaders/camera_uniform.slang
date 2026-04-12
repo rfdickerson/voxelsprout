@@ -16,6 +16,7 @@ public struct CameraUniform
     public float4 shadowConfig1;
     public float4 shadowConfig2;
     public float4 shadowConfig3;
+    public float4 shadowConfig4;
     public float4 shadowVoxelGridOrigin;
     public float4 shadowVoxelGridSize;
     public float4 skyConfig0;
