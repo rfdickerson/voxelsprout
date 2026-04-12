@@ -68,6 +68,10 @@ void RendererBackend::setDebugUiVisible(bool visible) {
     m_showSunPanel = visible;
 }
 
+void RendererBackend::setGameplayUiState(const GameplayUiState& state) {
+    m_gameplayUiState = state;
+}
+
 
 bool RendererBackend::isDebugUiVisible() const {
     return m_debugUiVisible;
@@ -95,6 +99,26 @@ FramePacingSettings RendererBackend::framePacingSettings() const {
 
 FramePacingStats RendererBackend::framePacingStats() const {
     return m_framePacingStats;
+}
+
+void RendererBackend::setVertexAoEnabled(bool enabled) {
+    m_debugEnableVertexAo = enabled;
+}
+
+bool RendererBackend::isVertexAoEnabled() const {
+    return m_debugEnableVertexAo;
+}
+
+void RendererBackend::setSsaoEnabled(bool enabled) {
+    m_debugEnableSsao = enabled;
+    if (!enabled) {
+        m_debugVisualizeSsao = false;
+        m_debugVisualizeAoNormals = false;
+    }
+}
+
+bool RendererBackend::isSsaoEnabled() const {
+    return m_debugEnableSsao;
 }
 
 bool RendererBackend::rayTracingRuntimeReady() const {
@@ -645,6 +669,9 @@ void RendererBackend::buildMeshingDebugUi() {
 
 
 void RendererBackend::buildAimReticleUi() {
+    if (m_gameplayUiState.inventoryVisible || m_debugUiVisible) {
+        return;
+    }
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
     if (drawList == nullptr) {
         return;
@@ -661,6 +688,149 @@ void RendererBackend::buildAimReticleUi() {
     drawList->AddLine(ImVec2(center.x + kInner, center.y), ImVec2(center.x + kOuter, center.y), color, kThickness);
     drawList->AddLine(ImVec2(center.x, center.y - kOuter), ImVec2(center.x, center.y - kInner), color, kThickness);
     drawList->AddLine(ImVec2(center.x, center.y + kInner), ImVec2(center.x, center.y + kOuter), color, kThickness);
+}
+
+void RendererBackend::buildGameplayHudUi() {
+    ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+    if (drawList == nullptr) {
+        return;
+    }
+
+    auto itemLabel = [](InventoryItemId itemId) -> const char* {
+        switch (itemId) {
+        case InventoryItemId::Stone: return "Stone";
+        case InventoryItemId::Dirt: return "Dirt";
+        case InventoryItemId::Grass: return "Grass";
+        case InventoryItemId::Wood: return "Wood";
+        case InventoryItemId::Red: return "Red";
+        case InventoryItemId::Empty:
+        default:
+            return "";
+        }
+    };
+    auto itemTint = [](InventoryItemId itemId) -> ImU32 {
+        switch (itemId) {
+        case InventoryItemId::Stone: return IM_COL32(170, 176, 184, 255);
+        case InventoryItemId::Dirt: return IM_COL32(145, 100, 62, 255);
+        case InventoryItemId::Grass: return IM_COL32(95, 167, 82, 255);
+        case InventoryItemId::Wood: return IM_COL32(162, 127, 88, 255);
+        case InventoryItemId::Red: return IM_COL32(220, 86, 74, 255);
+        case InventoryItemId::Empty:
+        default:
+            return IM_COL32(80, 86, 96, 255);
+        }
+    };
+
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    const GameplayUiLayout layout = buildGameplayUiLayout(displaySize.x, displaySize.y);
+    const ImU32 panelColor = IM_COL32(12, 14, 18, 210);
+    const ImU32 slotColor = IM_COL32(28, 32, 40, 230);
+    const ImU32 borderColor = IM_COL32(110, 120, 136, 255);
+    const ImU32 selectedBorderColor = IM_COL32(240, 245, 255, 255);
+    const ImU32 textColor = IM_COL32(236, 241, 248, 255);
+    const ImU32 emptyTextColor = IM_COL32(152, 160, 172, 255);
+
+    drawList->AddRectFilled(
+        ImVec2(layout.hotbarPanel.minX, layout.hotbarPanel.minY),
+        ImVec2(layout.hotbarPanel.maxX, layout.hotbarPanel.maxY),
+        panelColor,
+        12.0f
+    );
+    for (std::size_t slotIndex = 0; slotIndex < kGameplayHotbarSlotCount; ++slotIndex) {
+        const GameplayUiRect& slot = layout.hotbarSlots[slotIndex];
+        const InventoryItemId itemId = m_gameplayUiState.hotbarItems[slotIndex];
+        const bool selected = slotIndex == m_gameplayUiState.selectedHotbarSlot;
+        drawList->AddRectFilled(
+            ImVec2(slot.minX, slot.minY),
+            ImVec2(slot.maxX, slot.maxY),
+            slotColor,
+            8.0f
+        );
+        drawList->AddRect(
+            ImVec2(slot.minX, slot.minY),
+            ImVec2(slot.maxX, slot.maxY),
+            selected ? selectedBorderColor : borderColor,
+            8.0f,
+            0,
+            selected ? 2.5f : 1.5f
+        );
+        const float centerX = (slot.minX + slot.maxX) * 0.5f;
+        const float centerY = (slot.minY + slot.maxY) * 0.5f;
+        drawList->AddCircleFilled(ImVec2(centerX, centerY - 6.0f), 11.0f, itemTint(itemId), 18);
+        const std::string slotNumber = std::to_string(slotIndex + 1);
+        drawList->AddText(ImVec2(slot.minX + 6.0f, slot.minY + 4.0f), emptyTextColor, slotNumber.c_str());
+        const char* label = itemLabel(itemId);
+        if (label[0] != '\0') {
+            const ImVec2 textSize = ImGui::CalcTextSize(label);
+            drawList->AddText(
+                ImVec2(centerX - (textSize.x * 0.5f), slot.maxY - 18.0f),
+                textColor,
+                label
+            );
+        }
+    }
+
+    if (!m_gameplayUiState.inventoryVisible) {
+        return;
+    }
+
+    drawList->AddRectFilled(
+        ImVec2(0.0f, 0.0f),
+        ImVec2(displaySize.x, displaySize.y),
+        IM_COL32(4, 6, 10, 130)
+    );
+    drawList->AddRectFilled(
+        ImVec2(layout.inventoryPanel.minX, layout.inventoryPanel.minY),
+        ImVec2(layout.inventoryPanel.maxX, layout.inventoryPanel.maxY),
+        IM_COL32(18, 22, 30, 235),
+        14.0f
+    );
+    drawList->AddRect(
+        ImVec2(layout.inventoryPanel.minX, layout.inventoryPanel.minY),
+        ImVec2(layout.inventoryPanel.maxX, layout.inventoryPanel.maxY),
+        borderColor,
+        14.0f,
+        0,
+        2.0f
+    );
+    drawList->AddText(
+        ImVec2(layout.inventoryPanel.minX + 24.0f, layout.inventoryPanel.minY + 20.0f),
+        textColor,
+        "Creative Inventory"
+    );
+    drawList->AddText(
+        ImVec2(layout.inventoryPanel.minX + 24.0f, layout.inventoryPanel.minY + 44.0f),
+        emptyTextColor,
+        "Click an item to assign it to the selected hotbar slot."
+    );
+    for (std::size_t itemIndex = 0; itemIndex < kCreativeInventoryItemCount; ++itemIndex) {
+        const GameplayUiRect& slot = layout.inventorySlots[itemIndex];
+        const InventoryItemId itemId = m_gameplayUiState.creativeInventoryItems[itemIndex];
+        const char* label = itemLabel(itemId);
+        drawList->AddRectFilled(
+            ImVec2(slot.minX, slot.minY),
+            ImVec2(slot.maxX, slot.maxY),
+            slotColor,
+            10.0f
+        );
+        drawList->AddRect(
+            ImVec2(slot.minX, slot.minY),
+            ImVec2(slot.maxX, slot.maxY),
+            borderColor,
+            10.0f,
+            0,
+            1.5f
+        );
+        const float centerX = (slot.minX + slot.maxX) * 0.5f;
+        const float centerY = (slot.minY + slot.maxY) * 0.5f;
+        drawList->AddCircleFilled(ImVec2(centerX, centerY - 8.0f), 16.0f, itemTint(itemId), 20);
+        const ImVec2 textSize = ImGui::CalcTextSize(label);
+        drawList->AddText(
+            ImVec2(centerX - (textSize.x * 0.5f), slot.maxY - 22.0f),
+            textColor,
+            label
+        );
+    }
 }
 
 

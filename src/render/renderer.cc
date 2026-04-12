@@ -60,6 +60,10 @@ void Renderer::setSpatialQueryStats(bool used, const voxelsprout::world::Spatial
     m_backend->setSpatialQueryStats(used, stats, visibleChunkCount);
 }
 
+void Renderer::setGameplayUiState(const GameplayUiState& state) {
+    m_backend->setGameplayUiState(state);
+}
+
 void Renderer::renderFrame(
     const voxelsprout::world::ChunkGrid& chunkGrid,
     const voxelsprout::sim::Simulation& simulation,
@@ -97,6 +101,22 @@ FramePacingSettings Renderer::framePacingSettings() const {
 
 FramePacingStats Renderer::framePacingStats() const {
     return m_backend->framePacingStats();
+}
+
+void Renderer::setVertexAoEnabled(bool enabled) {
+    m_backend->setVertexAoEnabled(enabled);
+}
+
+bool Renderer::isVertexAoEnabled() const {
+    return m_backend->isVertexAoEnabled();
+}
+
+void Renderer::setSsaoEnabled(bool enabled) {
+    m_backend->setSsaoEnabled(enabled);
+}
+
+bool Renderer::isSsaoEnabled() const {
+    return m_backend->isSsaoEnabled();
 }
 
 void Renderer::setShadowSettings(const ShadowSettings& settings) {

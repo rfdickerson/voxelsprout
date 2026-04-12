@@ -34,6 +34,8 @@ namespace {
 constexpr float kMouseSensitivity = 0.1f;
 constexpr float kMouseSmoothingSeconds = 0.035f;
 constexpr float kMoveMaxSpeed = 5.0f;
+constexpr float kSprintSpeedMultiplier = 1.35f;
+constexpr float kSneakSpeedMultiplier = 0.35f;
 constexpr float kMoveAcceleration = 14.0f;
 constexpr float kMoveDeceleration = 18.0f;
 constexpr float kJumpSpeed = 7.8f;
@@ -81,18 +83,6 @@ constexpr const char* kMagicaTeapotPath = "assets/magicka/teapot.vox";
 constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 
-constexpr std::array<voxelsprout::world::VoxelType, 5> kPlaceableBlockTypes = {
-    voxelsprout::world::VoxelType::Stone,
-    voxelsprout::world::VoxelType::Dirt,
-    voxelsprout::world::VoxelType::Grass,
-    voxelsprout::world::VoxelType::Wood,
-    voxelsprout::world::VoxelType::SolidRed
-};
-constexpr int kHotbarSlotBlock = 0;
-constexpr int kHotbarSlotPipe = 1;
-constexpr int kHotbarSlotConveyor = 2;
-constexpr int kHotbarSlotTrack = 3;
-constexpr int kHotbarSlotCount = 4;
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
 constexpr voxelsprout::math::Vector3 kDefaultPipeTint{0.95f, 0.95f, 0.95f};
@@ -155,21 +145,32 @@ bool aabbOverlaps(const Aabb3f& lhs, const Aabb3f& rhs) {
         lhs.minZ < (rhs.maxZ - kCollisionEpsilon);
 }
 
-const char* placeableBlockLabel(voxelsprout::world::VoxelType type) {
-    switch (type) {
-    case voxelsprout::world::VoxelType::Solid:
-        return "stone";
-    case voxelsprout::world::VoxelType::Dirt:
-        return "dirt";
-    case voxelsprout::world::VoxelType::Grass:
-        return "grass";
-    case voxelsprout::world::VoxelType::Wood:
-        return "wood";
-    case voxelsprout::world::VoxelType::SolidRed:
-        return "red";
-    case voxelsprout::world::VoxelType::Empty:
+const char* inventoryItemLabel(voxelsprout::render::InventoryItemId itemId) {
+    switch (itemId) {
+    case voxelsprout::render::InventoryItemId::Stone: return "stone";
+    case voxelsprout::render::InventoryItemId::Dirt: return "dirt";
+    case voxelsprout::render::InventoryItemId::Grass: return "grass";
+    case voxelsprout::render::InventoryItemId::Wood: return "wood";
+    case voxelsprout::render::InventoryItemId::Red: return "red";
+    case voxelsprout::render::InventoryItemId::Empty:
     default:
         return "empty";
+    }
+}
+
+voxelsprout::world::Voxel itemToVoxel(voxelsprout::render::InventoryItemId itemId) {
+    using voxelsprout::render::InventoryItemId;
+    using voxelsprout::world::Voxel;
+    using voxelsprout::world::VoxelType;
+    switch (itemId) {
+    case InventoryItemId::Stone: return Voxel{VoxelType::Stone};
+    case InventoryItemId::Dirt: return Voxel{VoxelType::Dirt};
+    case InventoryItemId::Grass: return Voxel{VoxelType::Grass};
+    case InventoryItemId::Wood: return Voxel{VoxelType::Wood};
+    case InventoryItemId::Red: return Voxel{VoxelType::SolidRed};
+    case InventoryItemId::Empty:
+    default:
+        return Voxel{VoxelType::Empty};
     }
 }
 
@@ -198,6 +199,22 @@ bool parseShadowModeConfigValue(const std::string& value, voxelsprout::render::S
     return false;
 }
 
+const char* boolConfigName(bool value) {
+    return value ? "true" : "false";
+}
+
+bool parseBoolConfigValue(const std::string& value, bool& outValue) {
+    if (value == "true" || value == "1" || value == "yes" || value == "on") {
+        outValue = true;
+        return true;
+    }
+    if (value == "false" || value == "0" || value == "no" || value == "off") {
+        outValue = false;
+        return true;
+    }
+    return false;
+}
+
 std::string trimConfigString(const std::string& value) {
     std::size_t begin = 0;
     while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
@@ -208,6 +225,18 @@ std::string trimConfigString(const std::string& value) {
         --end;
     }
     return value.substr(begin, end - begin);
+}
+
+void glfwScrollHotbarCallback(GLFWwindow* window, double /*xoffset*/, double yoffset) {
+    if (window == nullptr || yoffset == 0.0) {
+        return;
+    }
+    auto* app = static_cast<voxelsprout::app::App*>(glfwGetWindowUserPointer(window));
+    if (app == nullptr) {
+        return;
+    }
+    const int step = (yoffset > 0.0) ? -1 : +1;
+    app->queueHotbarScroll(step);
 }
 
 struct FrustumPlane {
@@ -590,11 +619,35 @@ bool App::loadConfig(const std::filesystem::path& configPath) {
                 continue;
             }
             loadedConfig.shadowMode = parsedMode;
+            continue;
+        }
+        if (key == "enable_vertex_ao") {
+            bool parsedValue = loadedConfig.enableVertexAo;
+            if (!parseBoolConfigValue(value, parsedValue)) {
+                VOX_LOGW("app") << "invalid config enable_vertex_ao='" << value
+                                << "' at " << configPath.string() << "; keeping "
+                                << boolConfigName(loadedConfig.enableVertexAo);
+                continue;
+            }
+            loadedConfig.enableVertexAo = parsedValue;
+            continue;
+        }
+        if (key == "enable_ssao") {
+            bool parsedValue = loadedConfig.enableSsao;
+            if (!parseBoolConfigValue(value, parsedValue)) {
+                VOX_LOGW("app") << "invalid config enable_ssao='" << value
+                                << "' at " << configPath.string() << "; keeping "
+                                << boolConfigName(loadedConfig.enableSsao);
+                continue;
+            }
+            loadedConfig.enableSsao = parsedValue;
         }
     }
     m_config = loadedConfig;
     VOX_LOGI("app") << "config loaded from " << configPath.string()
                     << " (shadow_mode=" << shadowModeConfigName(m_config.shadowMode)
+                    << ", enable_vertex_ao=" << boolConfigName(m_config.enableVertexAo)
+                    << ", enable_ssao=" << boolConfigName(m_config.enableSsao)
                     << ", parsedLines=" << parsedLineCount << ")";
     return true;
 }
@@ -606,6 +659,8 @@ bool App::saveConfig(const std::filesystem::path& configPath) const {
     }
     file << "# Voxel Factory Toy runtime config\n";
     file << "shadow_mode=" << shadowModeConfigName(m_config.shadowMode) << "\n";
+    file << "enable_vertex_ao=" << boolConfigName(m_config.enableVertexAo) << "\n";
+    file << "enable_ssao=" << boolConfigName(m_config.enableSsao) << "\n";
     return true;
 }
 
@@ -640,6 +695,8 @@ bool App::init() {
     VOX_LOGI("app") << "init step createWindow took " << elapsedMs(windowStart) << " ms";
 
     // Relative mouse mode for camera look.
+    glfwSetWindowUserPointer(m_window, this);
+    glfwSetScrollCallback(m_window, glfwScrollHotbarCallback);
     glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     const std::filesystem::path configPath{kConfigFilePath};
@@ -651,6 +708,21 @@ bool App::init() {
         return false;
     }
     m_renderer.setShadowSettings(voxelsprout::render::ShadowSettings{m_config.shadowMode});
+    m_renderer.setVertexAoEnabled(m_config.enableVertexAo);
+    m_renderer.setSsaoEnabled(m_config.enableSsao);
+    m_gameplayUiState.selectedHotbarSlot = 0;
+    m_gameplayUiState.hotbarItems = {
+        voxelsprout::render::InventoryItemId::Stone,
+        voxelsprout::render::InventoryItemId::Dirt,
+        voxelsprout::render::InventoryItemId::Grass,
+        voxelsprout::render::InventoryItemId::Wood,
+        voxelsprout::render::InventoryItemId::Red,
+        voxelsprout::render::InventoryItemId::Empty,
+        voxelsprout::render::InventoryItemId::Empty,
+        voxelsprout::render::InventoryItemId::Empty,
+        voxelsprout::render::InventoryItemId::Empty,
+    };
+    syncGameplayUiState();
 
     const auto worldLoadStart = Clock::now();
     const std::filesystem::path worldPath{kWorldFilePath};
@@ -709,7 +781,7 @@ bool App::init() {
 
 void App::run() {
     VOX_LOGI("app") << "run begin";
-    VOX_LOGI("app") << "voxel edit mode disabled by default (press V to toggle)";
+    VOX_LOGI("app") << "creative inventory ready (E inventory, 1-9 hotbar, mouse wheel cycle)";
     double previousTime = glfwGetTime();
     double simulationAccumulatorSeconds = 0.0;
     m_cameraPrevious = m_camera;
@@ -724,10 +796,6 @@ void App::run() {
         simulationAccumulatorSeconds += frameSeconds;
 
         pollInput();
-        if (m_input.quitRequested) {
-            glfwSetWindowShouldClose(m_window, GLFW_TRUE);
-            break;
-        }
         if (glfwWindowShouldClose(m_window) == GLFW_TRUE) {
             break;
         }
@@ -759,17 +827,57 @@ void App::run() {
                     << (m_window != nullptr ? glfwWindowShouldClose(m_window) : 1);
 }
 
-void App::update(float dt, float simulationAlpha) {
-    if (!m_debugUiVisible && m_input.toggleVoxelEditModeDown && !m_wasToggleVoxelEditModeDown) {
-        m_voxelEditModeEnabled = !m_voxelEditModeEnabled;
-        VOX_LOGI("app") << "voxel edit mode "
-                        << (m_voxelEditModeEnabled ? "enabled" : "disabled")
-                        << " (V)";
+void App::toggleDebugUi() {
+    m_debugUiVisible = !m_debugUiVisible;
+    if (m_debugUiVisible) {
+        m_inventoryVisible = false;
     }
-    m_wasToggleVoxelEditModeDown = m_input.toggleVoxelEditModeDown;
+}
 
+bool App::isAnyUiVisible() const {
+    return m_debugUiVisible || m_inventoryVisible;
+}
+
+void App::syncGameplayUiState() {
+    m_gameplayUiState.inventoryVisible = m_inventoryVisible;
+    m_renderer.setGameplayUiState(m_gameplayUiState);
+}
+
+void App::assignInventoryItemToSelectedHotbar(voxelsprout::render::InventoryItemId itemId) {
+    const std::size_t hotbarIndex = std::min<std::size_t>(
+        m_gameplayUiState.selectedHotbarSlot,
+        m_gameplayUiState.hotbarItems.size() - 1
+    );
+    if (m_gameplayUiState.hotbarItems[hotbarIndex] == itemId) {
+        return;
+    }
+    m_gameplayUiState.hotbarItems[hotbarIndex] = itemId;
+    VOX_LOGI("app") << "assigned hotbar " << (hotbarIndex + 1) << ": " << inventoryItemLabel(itemId);
+    syncGameplayUiState();
+}
+
+void App::handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight) {
+    const voxelsprout::render::GameplayUiLayout layout =
+        voxelsprout::render::buildGameplayUiLayout(displayWidth, displayHeight);
+    for (std::size_t slotIndex = 0; slotIndex < layout.hotbarSlots.size(); ++slotIndex) {
+        if (!layout.hotbarSlots[slotIndex].contains(mouseX, mouseY)) {
+            continue;
+        }
+        selectHotbarSlot(static_cast<int>(slotIndex));
+        return;
+    }
+    for (std::size_t itemIndex = 0; itemIndex < layout.inventorySlots.size(); ++itemIndex) {
+        if (!layout.inventorySlots[itemIndex].contains(mouseX, mouseY)) {
+            continue;
+        }
+        assignInventoryItemToSelectedHotbar(m_gameplayUiState.creativeInventoryItems[itemIndex]);
+        return;
+    }
+}
+
+void App::update(float dt, float simulationAlpha) {
     const bool regeneratePressedThisFrame =
-        !m_debugUiVisible && m_input.regenerateWorldDown && !m_wasRegenerateWorldDown;
+        !isAnyUiVisible() && m_input.regenerateWorldDown && !m_wasRegenerateWorldDown;
     m_wasRegenerateWorldDown = m_input.regenerateWorldDown;
     if (regeneratePressedThisFrame) {
         regenerateWorld();
@@ -777,7 +885,24 @@ void App::update(float dt, float simulationAlpha) {
 
     const CameraRaycastResult raycast = raycastFromCamera();
 
-    const bool blockInteractionEnabled = !m_debugUiVisible && m_voxelEditModeEnabled;
+    int windowWidth = 0;
+    int windowHeight = 0;
+    glfwGetWindowSize(m_window, &windowWidth, &windowHeight);
+    double mouseX = 0.0;
+    double mouseY = 0.0;
+    glfwGetCursorPos(m_window, &mouseX, &mouseY);
+
+    const bool inventoryClickPressedThisFrame = m_inventoryVisible && m_input.removeBlockDown && !m_wasRemoveBlockDown;
+    if (inventoryClickPressedThisFrame) {
+        handleInventoryClick(
+            static_cast<float>(mouseX),
+            static_cast<float>(mouseY),
+            static_cast<float>(std::max(windowWidth, 1)),
+            static_cast<float>(std::max(windowHeight, 1))
+        );
+    }
+
+    const bool blockInteractionEnabled = !isAnyUiVisible();
     const bool placePressedThisFrame = blockInteractionEnabled && m_input.placeBlockDown && !m_wasPlaceBlockDown;
     const bool removePressedThisFrame = blockInteractionEnabled && m_input.removeBlockDown && !m_wasRemoveBlockDown;
     m_wasPlaceBlockDown = m_input.placeBlockDown;
@@ -785,34 +910,11 @@ void App::update(float dt, float simulationAlpha) {
 
     bool voxelChunkEdited = false;
     std::vector<std::size_t> editedChunkIndices;
-    if (isPipeHotbarSelected()) {
-        if (placePressedThisFrame) {
-            (void)tryPlacePipeFromCameraRay();
-        }
-        if (removePressedThisFrame) {
-            (void)tryRemovePipeFromCameraRay();
-        }
-    } else if (isConveyorHotbarSelected()) {
-        if (placePressedThisFrame) {
-            (void)tryPlaceBeltFromCameraRay();
-        }
-        if (removePressedThisFrame) {
-            (void)tryRemoveBeltFromCameraRay();
-        }
-    } else if (isTrackHotbarSelected()) {
-        if (placePressedThisFrame) {
-            (void)tryPlaceTrackFromCameraRay();
-        }
-        if (removePressedThisFrame) {
-            (void)tryRemoveTrackFromCameraRay();
-        }
-    } else {
-        if (placePressedThisFrame && tryPlaceVoxelFromCameraRay(editedChunkIndices)) {
-            voxelChunkEdited = true;
-        }
-        if (removePressedThisFrame && tryRemoveVoxelFromCameraRay(editedChunkIndices)) {
-            voxelChunkEdited = true;
-        }
+    if (placePressedThisFrame && tryPlaceVoxelFromCameraRay(editedChunkIndices)) {
+        voxelChunkEdited = true;
+    }
+    if (removePressedThisFrame && tryRemoveVoxelFromCameraRay(editedChunkIndices)) {
+        voxelChunkEdited = true;
     }
 
     if (voxelChunkEdited) {
@@ -883,126 +985,9 @@ void App::update(float dt, float simulationAlpha) {
         m_cameraPrevious.pitchDegrees + ((m_camera.pitchDegrees - m_cameraPrevious.pitchDegrees) * renderAlpha);
 
     voxelsprout::render::VoxelPreview preview{};
-    const bool pipeSelected = isPipeHotbarSelected();
-    const bool conveyorSelected = isConveyorHotbarSelected();
-    const bool trackSelected = isTrackHotbarSelected();
-    if (!m_debugUiVisible && m_voxelEditModeEnabled) {
+    if (!isAnyUiVisible()) {
         const bool showRemovePreview = m_input.removeBlockDown;
-        if (pipeSelected || conveyorSelected || trackSelected) {
-            const InteractionRaycastResult pipeRaycast = raycastInteractionFromCamera(true);
-            if (pipeRaycast.hit && pipeRaycast.hitDistance <= kBlockInteractMaxDistance) {
-                preview.pipeStyle = true;
-                if (pipeSelected) {
-                    preview.pipeRadius = 0.45f;
-                    preview.pipeStyleId = 0.0f;
-                } else if (conveyorSelected) {
-                    preview.pipeRadius = 0.49f;
-                    preview.pipeStyleId = 1.0f;
-                } else {
-                    preview.pipeRadius = 0.38f;
-                    preview.pipeStyleId = 2.0f;
-                }
-                if (showRemovePreview) {
-                    if (pipeSelected && pipeRaycast.hitPipe) {
-                        preview.visible = true;
-                        preview.mode = voxelsprout::render::VoxelPreview::Mode::Remove;
-                        preview.x = pipeRaycast.x;
-                        preview.y = pipeRaycast.y;
-                        preview.z = pipeRaycast.z;
-                        preview.brushSize = 1;
-                        std::size_t pipeIndex = 0;
-                        if (isPipeAtWorld(pipeRaycast.x, pipeRaycast.y, pipeRaycast.z, &pipeIndex)) {
-                            const voxelsprout::sim::Pipe& pipe = m_simulation.pipes()[pipeIndex];
-                            preview.pipeAxisX = pipe.axis.x;
-                            preview.pipeAxisY = pipe.axis.y;
-                            preview.pipeAxisZ = pipe.axis.z;
-                        }
-                    } else if (conveyorSelected && pipeRaycast.hitBelt) {
-                        preview.visible = true;
-                        preview.mode = voxelsprout::render::VoxelPreview::Mode::Remove;
-                        preview.x = pipeRaycast.x;
-                        preview.y = pipeRaycast.y;
-                        preview.z = pipeRaycast.z;
-                        preview.brushSize = 1;
-                        std::size_t beltIndex = 0;
-                        if (isBeltAtWorld(pipeRaycast.x, pipeRaycast.y, pipeRaycast.z, &beltIndex)) {
-                            const voxelsprout::sim::Belt& belt = m_simulation.belts()[beltIndex];
-                            const voxelsprout::core::Dir6 beltDir = beltDirectionToDir6(belt.direction);
-                            const voxelsprout::core::Cell3i axis = voxelsprout::core::dirToOffset(beltDir);
-                            preview.pipeAxisX = static_cast<float>(axis.x);
-                            preview.pipeAxisY = static_cast<float>(axis.y);
-                            preview.pipeAxisZ = static_cast<float>(axis.z);
-                        }
-                    } else if (trackSelected && pipeRaycast.hitTrack) {
-                        preview.visible = true;
-                        preview.mode = voxelsprout::render::VoxelPreview::Mode::Remove;
-                        preview.x = pipeRaycast.x;
-                        preview.y = pipeRaycast.y;
-                        preview.z = pipeRaycast.z;
-                        preview.brushSize = 1;
-                        std::size_t trackIndex = 0;
-                        if (isTrackAtWorld(pipeRaycast.x, pipeRaycast.y, pipeRaycast.z, &trackIndex)) {
-                            const voxelsprout::sim::Track& track = m_simulation.tracks()[trackIndex];
-                            const voxelsprout::core::Dir6 trackDir = trackDirectionToDir6(track.direction);
-                            const voxelsprout::core::Cell3i axis = voxelsprout::core::dirToOffset(trackDir);
-                            preview.pipeAxisX = static_cast<float>(axis.x);
-                            preview.pipeAxisY = static_cast<float>(axis.y);
-                            preview.pipeAxisZ = static_cast<float>(axis.z);
-                        }
-                    }
-                } else {
-                    int targetX = 0;
-                    int targetY = 0;
-                    int targetZ = 0;
-                    int axisX = 0;
-                    int axisY = 1;
-                    int axisZ = 0;
-                    bool hasPlacement = false;
-                    if (pipeSelected) {
-                        hasPlacement = computePipePlacementFromInteractionRaycast(
-                            pipeRaycast,
-                            targetX,
-                            targetY,
-                            targetZ,
-                            axisX,
-                            axisY,
-                            axisZ
-                        );
-                    } else if (conveyorSelected) {
-                        hasPlacement = computeBeltPlacementFromInteractionRaycast(
-                            pipeRaycast,
-                            targetX,
-                            targetY,
-                            targetZ,
-                            axisX,
-                            axisY,
-                            axisZ
-                        );
-                    } else if (trackSelected) {
-                        hasPlacement = computeTrackPlacementFromInteractionRaycast(
-                            pipeRaycast,
-                            targetX,
-                            targetY,
-                            targetZ,
-                            axisX,
-                            axisY,
-                            axisZ
-                        );
-                    }
-                    if (hasPlacement) {
-                        preview.visible = true;
-                        preview.mode = voxelsprout::render::VoxelPreview::Mode::Add;
-                        preview.x = targetX;
-                        preview.y = targetY;
-                        preview.z = targetZ;
-                        preview.brushSize = 1;
-                        preview.pipeAxisX = static_cast<float>(axisX);
-                        preview.pipeAxisY = static_cast<float>(axisY);
-                        preview.pipeAxisZ = static_cast<float>(axisZ);
-                    }
-                }
-            }
-        } else if (raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
+        if (raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
             if (raycast.hasHitFaceNormal) {
                 auto normalToFaceId = [](int nx, int ny, int nz) -> uint32_t {
                     if (nx > 0) { return 0u; }
@@ -1031,7 +1016,8 @@ void App::update(float dt, float simulationAlpha) {
                 int targetY = 0;
                 int targetZ = 0;
                 if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
-                    if (isWorldVoxelInBounds(targetX, targetY, targetZ)) {
+                    if (isWorldVoxelInBounds(targetX, targetY, targetZ) &&
+                        selectedPlaceVoxel().type != voxelsprout::world::VoxelType::Empty) {
                         preview.visible = true;
                         preview.mode = voxelsprout::render::VoxelPreview::Mode::Add;
                         preview.x = targetX;
@@ -1052,6 +1038,7 @@ void App::update(float dt, float simulationAlpha) {
         renderCameraPitchDegrees,
         m_camera.fovDegrees
     };
+    syncGameplayUiState();
 
     const voxelsprout::world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
     if (!m_hasAppliedClipmapConfig ||
@@ -1214,12 +1201,16 @@ void App::shutdown() {
     VOX_LOGI("app") << "shutdown begin";
 
     m_config.shadowMode = m_renderer.shadowSettings().mode;
+    m_config.enableVertexAo = m_renderer.isVertexAoEnabled();
+    m_config.enableSsao = m_renderer.isSsaoEnabled();
     const std::filesystem::path configPath{kConfigFilePath};
     if (!saveConfig(configPath)) {
         VOX_LOGE("app") << "failed to save config to " << configPath.string();
     } else {
         VOX_LOGI("app") << "saved config to " << configPath.string()
-                        << " (shadow_mode=" << shadowModeConfigName(m_config.shadowMode) << ")";
+                        << " (shadow_mode=" << shadowModeConfigName(m_config.shadowMode)
+                        << ", enable_vertex_ao=" << boolConfigName(m_config.enableVertexAo)
+                        << ", enable_ssao=" << boolConfigName(m_config.enableSsao) << ")";
     }
 
     if (m_worldDirty) {
@@ -1254,12 +1245,33 @@ void App::pollInput() {
     }
     m_wasToggleFrameStatsDown = toggleFrameStatsDown;
 
+    const bool inventoryKeyDown = glfwGetKey(m_window, GLFW_KEY_E) == GLFW_PRESS;
+    if (inventoryKeyDown && !m_wasInventoryKeyDown) {
+        m_inventoryVisible = !m_inventoryVisible;
+        if (m_inventoryVisible) {
+            m_debugUiVisible = false;
+        }
+        uiVisibilityChanged = true;
+    }
+    m_wasInventoryKeyDown = inventoryKeyDown;
+
     const bool toggleConfigUiDown = glfwGetKey(m_window, GLFW_KEY_C) == GLFW_PRESS;
     if (toggleConfigUiDown && !m_wasToggleConfigUiDown) {
-        m_debugUiVisible = !m_debugUiVisible;
+        toggleDebugUi();
         uiVisibilityChanged = true;
     }
     m_wasToggleConfigUiDown = toggleConfigUiDown;
+
+    const bool escapeKeyDown = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+    if (escapeKeyDown && !m_wasEscapeKeyDown) {
+        if (m_inventoryVisible) {
+            m_inventoryVisible = false;
+        } else {
+            toggleDebugUi();
+        }
+        uiVisibilityChanged = true;
+    }
+    m_wasEscapeKeyDown = escapeKeyDown;
 
     const bool toggleDayCycleDown = glfwGetKey(m_window, GLFW_KEY_T) == GLFW_PRESS;
     if (toggleDayCycleDown && !m_wasToggleDayCycleDown) {
@@ -1270,8 +1282,6 @@ void App::pollInput() {
     }
     m_wasToggleDayCycleDown = toggleDayCycleDown;
 
-    m_input.toggleVoxelEditModeDown = glfwGetKey(m_window, GLFW_KEY_V) == GLFW_PRESS;
-
     m_renderer.setDebugUiVisible(m_debugUiVisible);
     const bool rendererUiVisible = m_renderer.isDebugUiVisible();
     if (rendererUiVisible != m_debugUiVisible) {
@@ -1279,19 +1289,24 @@ void App::pollInput() {
         uiVisibilityChanged = true;
     }
     if (uiVisibilityChanged) {
-        glfwSetInputMode(m_window, GLFW_CURSOR, m_debugUiVisible ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+        glfwSetInputMode(m_window, GLFW_CURSOR, isAnyUiVisible() ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
         m_hasMouseSample = false;
     }
+    syncGameplayUiState();
 
-    m_input.quitRequested = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+    m_input.quitRequested = false;
     m_input.moveForward = glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS;
     m_input.moveBackward = glfwGetKey(m_window, GLFW_KEY_S) == GLFW_PRESS;
     m_input.moveLeft = glfwGetKey(m_window, GLFW_KEY_A) == GLFW_PRESS;
     m_input.moveRight = glfwGetKey(m_window, GLFW_KEY_D) == GLFW_PRESS;
     m_input.moveUp = glfwGetKey(m_window, GLFW_KEY_SPACE) == GLFW_PRESS;
-    m_input.moveDown =
+    m_input.sneakDown =
         glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
         glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+    m_input.moveDown = m_hoverEnabled && m_input.sneakDown;
+    m_input.sprintDown =
+        glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+        glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
     m_input.toggleHoverDown = glfwGetKey(m_window, GLFW_KEY_H) == GLFW_PRESS;
     m_input.regenerateWorldDown = glfwGetKey(m_window, GLFW_KEY_R) == GLFW_PRESS;
     bool controllerPlaceDown = false;
@@ -1340,36 +1355,39 @@ void App::pollInput() {
     m_wasPrevBlockDown = prevHotbarDown;
     m_wasNextBlockDown = nextHotbarDown;
 
-    if (!m_debugUiVisible) {
-        if (glfwGetKey(m_window, GLFW_KEY_1) == GLFW_PRESS) {
-            selectHotbarSlot(kHotbarSlotBlock);
-        } else if (glfwGetKey(m_window, GLFW_KEY_2) == GLFW_PRESS) {
-            selectHotbarSlot(kHotbarSlotPipe);
-        } else if (glfwGetKey(m_window, GLFW_KEY_3) == GLFW_PRESS) {
-            selectHotbarSlot(kHotbarSlotConveyor);
-        } else if (glfwGetKey(m_window, GLFW_KEY_4) == GLFW_PRESS) {
-            selectHotbarSlot(kHotbarSlotTrack);
-        }
-        if (m_selectedHotbarIndex == kHotbarSlotBlock) {
-            if (glfwGetKey(m_window, GLFW_KEY_5) == GLFW_PRESS) {
-                selectPlaceableBlock(0);
-            } else if (glfwGetKey(m_window, GLFW_KEY_6) == GLFW_PRESS) {
-                selectPlaceableBlock(1);
-            } else if (glfwGetKey(m_window, GLFW_KEY_7) == GLFW_PRESS) {
-                selectPlaceableBlock(2);
-            } else if (glfwGetKey(m_window, GLFW_KEY_8) == GLFW_PRESS) {
-                selectPlaceableBlock(3);
-            } else if (glfwGetKey(m_window, GLFW_KEY_9) == GLFW_PRESS) {
-                selectPlaceableBlock(4);
-            }
-        }
+    if (!isAnyUiVisible() && m_pendingHotbarScrollSteps != 0) {
+        const int scrollDirection = (m_pendingHotbarScrollSteps > 0) ? +1 : -1;
+        cycleSelectedHotbar(scrollDirection);
+        m_pendingHotbarScrollSteps -= scrollDirection;
+    } else if (isAnyUiVisible()) {
+        m_pendingHotbarScrollSteps = 0;
+    }
+
+    if (glfwGetKey(m_window, GLFW_KEY_1) == GLFW_PRESS) {
+        selectHotbarSlot(0);
+    } else if (glfwGetKey(m_window, GLFW_KEY_2) == GLFW_PRESS) {
+        selectHotbarSlot(1);
+    } else if (glfwGetKey(m_window, GLFW_KEY_3) == GLFW_PRESS) {
+        selectHotbarSlot(2);
+    } else if (glfwGetKey(m_window, GLFW_KEY_4) == GLFW_PRESS) {
+        selectHotbarSlot(3);
+    } else if (glfwGetKey(m_window, GLFW_KEY_5) == GLFW_PRESS) {
+        selectHotbarSlot(4);
+    } else if (glfwGetKey(m_window, GLFW_KEY_6) == GLFW_PRESS) {
+        selectHotbarSlot(5);
+    } else if (glfwGetKey(m_window, GLFW_KEY_7) == GLFW_PRESS) {
+        selectHotbarSlot(6);
+    } else if (glfwGetKey(m_window, GLFW_KEY_8) == GLFW_PRESS) {
+        selectHotbarSlot(7);
+    } else if (glfwGetKey(m_window, GLFW_KEY_9) == GLFW_PRESS) {
+        selectHotbarSlot(8);
     }
 
     m_input.placeBlockDown =
-        glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS ||
+        glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS ||
         controllerPlaceDown;
     m_input.removeBlockDown =
-        glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS ||
+        glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS ||
         controllerRemoveDown;
     m_input.moveUp = m_input.moveUp || controllerMoveUpDown;
     m_input.moveDown = m_input.moveDown || controllerMoveDownDown;
@@ -1391,7 +1409,7 @@ void App::pollInput() {
     m_input.mouseDeltaX = static_cast<float>(mouseX - m_lastMouseX);
     m_input.mouseDeltaY = static_cast<float>(mouseY - m_lastMouseY);
 
-    if (m_debugUiVisible) {
+    if (isAnyUiVisible()) {
         m_input.mouseDeltaX = 0.0f;
         m_input.mouseDeltaY = 0.0f;
     }
@@ -1457,7 +1475,14 @@ void App::updateCamera(float dt) {
     float targetVelocityZ = 0.0f;
     if (moveLength > 0.0f) {
         moveDirection /= moveLength;
-        const voxelsprout::math::Vector3 targetVelocity = moveDirection * kMoveMaxSpeed;
+        float moveSpeed = kMoveMaxSpeed;
+        if (m_input.sprintDown && !m_hoverEnabled && moveForwardInput > 0.0f) {
+            moveSpeed *= kSprintSpeedMultiplier;
+        }
+        if (m_input.sneakDown && !m_hoverEnabled) {
+            moveSpeed *= kSneakSpeedMultiplier;
+        }
+        const voxelsprout::math::Vector3 targetVelocity = moveDirection * moveSpeed;
         targetVelocityX = targetVelocity.x;
         targetVelocityZ = targetVelocity.z;
     }
@@ -2135,67 +2160,46 @@ bool App::isWorldVoxelInBounds(int x, int y, int z) const {
 }
 
 void App::cycleSelectedHotbar(int direction) {
-    if (kHotbarSlotCount <= 0) {
-        m_selectedHotbarIndex = 0;
+    const int hotbarSlotCount = static_cast<int>(voxelsprout::render::kGameplayHotbarSlotCount);
+    if (hotbarSlotCount <= 0) {
+        m_gameplayUiState.selectedHotbarSlot = 0;
         return;
     }
-    const int next = (m_selectedHotbarIndex + direction) % kHotbarSlotCount;
-    selectHotbarSlot(next < 0 ? next + kHotbarSlotCount : next);
+    const int currentSlot = static_cast<int>(m_gameplayUiState.selectedHotbarSlot);
+    const int next = (currentSlot + direction) % hotbarSlotCount;
+    selectHotbarSlot(next < 0 ? next + hotbarSlotCount : next);
+}
+
+void App::queueHotbarScroll(int direction) {
+    if (direction == 0) {
+        return;
+    }
+    m_pendingHotbarScrollSteps += direction;
 }
 
 void App::selectHotbarSlot(int hotbarIndex) {
-    const int clampedIndex = std::clamp(hotbarIndex, 0, kHotbarSlotCount - 1);
-    if (m_selectedHotbarIndex == clampedIndex) {
+    const int clampedIndex = std::clamp(
+        hotbarIndex,
+        0,
+        static_cast<int>(voxelsprout::render::kGameplayHotbarSlotCount) - 1
+    );
+    if (m_gameplayUiState.selectedHotbarSlot == static_cast<std::uint32_t>(clampedIndex)) {
         return;
     }
-    m_selectedHotbarIndex = clampedIndex;
-    const char* label = "block";
-    if (m_selectedHotbarIndex == kHotbarSlotPipe) {
-        label = "pipe";
-    } else if (m_selectedHotbarIndex == kHotbarSlotConveyor) {
-        label = "conveyor";
-    } else if (m_selectedHotbarIndex == kHotbarSlotTrack) {
-        label = "track";
-    }
-    VOX_LOGI("app") << "selected hotbar: " << label;
-}
-
-void App::selectPlaceableBlock(int blockIndex) {
-    if (kPlaceableBlockTypes.empty()) {
-        m_selectedBlockIndex = 0;
-        return;
-    }
-    const int clampedIndex = std::clamp(blockIndex, 0, static_cast<int>(kPlaceableBlockTypes.size()) - 1);
-    if (m_selectedBlockIndex == clampedIndex) {
-        return;
-    }
-    m_selectedBlockIndex = clampedIndex;
-    VOX_LOGI("app") << "selected block material: "
-                    << placeableBlockLabel(kPlaceableBlockTypes[static_cast<std::size_t>(m_selectedBlockIndex)]);
-}
-
-bool App::isPipeHotbarSelected() const {
-    return m_selectedHotbarIndex == kHotbarSlotPipe;
-}
-
-bool App::isConveyorHotbarSelected() const {
-    return m_selectedHotbarIndex == kHotbarSlotConveyor;
-}
-
-bool App::isTrackHotbarSelected() const {
-    return m_selectedHotbarIndex == kHotbarSlotTrack;
+    m_gameplayUiState.selectedHotbarSlot = static_cast<std::uint32_t>(clampedIndex);
+    syncGameplayUiState();
+    const voxelsprout::render::InventoryItemId itemId =
+        m_gameplayUiState.hotbarItems[static_cast<std::size_t>(clampedIndex)];
+    VOX_LOGI("app") << "selected hotbar " << (clampedIndex + 1)
+                    << ": " << inventoryItemLabel(itemId);
 }
 
 voxelsprout::world::Voxel App::selectedPlaceVoxel() const {
-    if (kPlaceableBlockTypes.empty()) {
-        return voxelsprout::world::Voxel{voxelsprout::world::VoxelType::Stone};
-    }
-    const int clampedIndex = std::clamp(
-        m_selectedBlockIndex,
-        0,
-        static_cast<int>(kPlaceableBlockTypes.size()) - 1
+    const std::size_t hotbarIndex = std::min<std::size_t>(
+        m_gameplayUiState.selectedHotbarSlot,
+        m_gameplayUiState.hotbarItems.size() - 1
     );
-    return voxelsprout::world::Voxel{kPlaceableBlockTypes[static_cast<std::size_t>(clampedIndex)]};
+    return itemToVoxel(m_gameplayUiState.hotbarItems[hotbarIndex]);
 }
 
 bool App::computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const {
@@ -2613,6 +2617,10 @@ bool App::tryPlaceVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndi
     if (m_world.chunkGrid().chunks().empty()) {
         return false;
     }
+    const voxelsprout::world::Voxel placeVoxel = selectedPlaceVoxel();
+    if (placeVoxel.type == voxelsprout::world::VoxelType::Empty) {
+        return false;
+    }
 
     const CameraRaycastResult raycast = raycastFromCamera();
     if (!raycast.hitSolid || raycast.hitDistance > kBlockInteractMaxDistance) {
@@ -2626,7 +2634,7 @@ bool App::tryPlaceVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndi
         return false;
     }
 
-    return applyVoxelEdit(targetX, targetY, targetZ, selectedPlaceVoxel(), outDirtyChunkIndices);
+    return applyVoxelEdit(targetX, targetY, targetZ, placeVoxel, outDirtyChunkIndices);
 }
 
 bool App::tryRemoveVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices) {

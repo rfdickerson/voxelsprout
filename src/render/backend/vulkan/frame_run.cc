@@ -301,6 +301,7 @@ void RendererBackend::renderFrame(
         buildShadowDebugUi();
         buildSunDebugUi();
         m_debugUiVisible = m_showMeshingPanel || m_showShadowPanel || m_showSunPanel;
+        buildGameplayHudUi();
         buildAimReticleUi();
         ImGui::Render();
     }

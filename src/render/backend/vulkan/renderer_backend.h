@@ -146,6 +146,7 @@ public:
     bool useSpatialPartitioningQueries() const;
     voxelsprout::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const voxelsprout::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
+    void setGameplayUiState(const GameplayUiState& state);
     void renderFrame(
         const voxelsprout::world::ChunkGrid& chunkGrid,
         const voxelsprout::sim::Simulation& simulation,
@@ -161,6 +162,10 @@ public:
     void setFramePacingSettings(const FramePacingSettings& settings);
     [[nodiscard]] FramePacingSettings framePacingSettings() const;
     [[nodiscard]] FramePacingStats framePacingStats() const;
+    void setVertexAoEnabled(bool enabled);
+    [[nodiscard]] bool isVertexAoEnabled() const;
+    void setSsaoEnabled(bool enabled);
+    [[nodiscard]] bool isSsaoEnabled() const;
     void setShadowSettings(const ShadowSettings& settings);
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
@@ -234,7 +239,6 @@ private:
     bool createPipeBuffers();
     bool createPipePipeline();
     bool createAoPipelines();
-    bool createSdfPipelines();
     bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
@@ -257,6 +261,7 @@ private:
     void buildMeshingDebugUi();
     void buildShadowDebugUi();
     void buildSunDebugUi();
+    void buildGameplayHudUi();
     void buildAimReticleUi();
     std::vector<std::uint8_t> buildShadowCandidateMask(
         std::span<const voxelsprout::world::Chunk> chunks,
@@ -728,7 +733,6 @@ private:
     VkPipeline& m_shadowPipeline = m_pipelineManager.shadowPipeline;
     VkPipeline& m_pipeShadowPipeline = m_pipelineManager.pipeShadowPipeline;
     VkPipeline& m_grassBillboardShadowPipeline = m_pipelineManager.grassBillboardShadowPipeline;
-    VkPipeline& m_sdfShadowPipeline = m_pipelineManager.sdfShadowPipeline;
     VkPipeline& m_skyboxPipeline = m_pipelineManager.skyboxPipeline;
     VkPipeline& m_tonemapPipeline = m_pipelineManager.tonemapPipeline;
     VkPipeline& m_pipePipeline = m_pipelineManager.pipePipeline;
@@ -736,8 +740,6 @@ private:
     VkPipeline& m_voxelNormalDepthPipeline = m_pipelineManager.voxelNormalDepthPipeline;
     VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
     VkPipeline& m_grassBillboardNormalDepthPipeline = m_pipelineManager.grassBillboardNormalDepthPipeline;
-    VkPipeline& m_sdfPrepassPipeline = m_pipelineManager.sdfPrepassPipeline;
-    VkPipeline& m_sdfMainPipeline = m_pipelineManager.sdfMainPipeline;
     VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
     VkPipeline& m_magicaPipelineRt = m_pipelineManager.magicaPipelineRt;
     VkPipeline& m_ssaoPipeline = m_pipelineManager.ssaoPipeline;
@@ -873,10 +875,11 @@ private:
     bool m_showMeshingPanel = false;
     bool m_showShadowPanel = false;
     bool m_showSunPanel = false;
+    GameplayUiState m_gameplayUiState{};
     float m_debugCameraFovDegrees = 90.0f;
     bool m_debugCameraFovInitialized = false;
     bool m_debugEnableVertexAo = true;
-    bool m_debugEnableSsao = true;
+    bool m_debugEnableSsao = false;
     bool m_debugVisualizeSsao = false;
     bool m_debugVisualizeAoNormals = false;
     ShadowDebugSettings m_shadowDebugSettings{};

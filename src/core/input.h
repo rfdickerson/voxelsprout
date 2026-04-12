@@ -13,6 +13,8 @@ struct InputState {
     bool moveRight = false;
     bool moveUp = false;
     bool moveDown = false;
+    bool sprintDown = false;
+    bool sneakDown = false;
     bool toggleHoverDown = false;
     bool toggleVoxelEditModeDown = false;
     bool regenerateWorldDown = false;

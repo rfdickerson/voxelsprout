@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace voxelsprout::render {
@@ -103,5 +105,100 @@ struct VoxelPreview {
     float pipeRadius = 0.45f;
     float pipeStyleId = 0.0f;
 };
+
+enum class InventoryItemId : std::uint8_t {
+    Empty = 0,
+    Stone = 1,
+    Dirt = 2,
+    Grass = 3,
+    Wood = 4,
+    Red = 5,
+};
+
+static constexpr std::size_t kGameplayHotbarSlotCount = 9;
+static constexpr std::size_t kCreativeInventoryItemCount = 5;
+
+struct GameplayUiRect {
+    float minX = 0.0f;
+    float minY = 0.0f;
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+
+    [[nodiscard]] bool contains(float x, float y) const {
+        return x >= minX && x <= maxX && y >= minY && y <= maxY;
+    }
+};
+
+struct GameplayUiLayout {
+    GameplayUiRect hotbarPanel{};
+    std::array<GameplayUiRect, kGameplayHotbarSlotCount> hotbarSlots{};
+    GameplayUiRect inventoryPanel{};
+    std::array<GameplayUiRect, kCreativeInventoryItemCount> inventorySlots{};
+};
+
+struct GameplayUiState {
+    bool inventoryVisible = false;
+    std::uint32_t selectedHotbarSlot = 0;
+    std::array<InventoryItemId, kGameplayHotbarSlotCount> hotbarItems{};
+    std::array<InventoryItemId, kCreativeInventoryItemCount> creativeInventoryItems = {
+        InventoryItemId::Stone,
+        InventoryItemId::Dirt,
+        InventoryItemId::Grass,
+        InventoryItemId::Wood,
+        InventoryItemId::Red,
+    };
+};
+
+inline GameplayUiLayout buildGameplayUiLayout(float displayWidth, float displayHeight) {
+    GameplayUiLayout layout{};
+    const float hotbarSlotSize = 52.0f;
+    const float hotbarGap = 8.0f;
+    const float hotbarWidth =
+        (hotbarSlotSize * static_cast<float>(kGameplayHotbarSlotCount)) +
+        (hotbarGap * static_cast<float>(kGameplayHotbarSlotCount - 1));
+    const float hotbarMinX = (displayWidth - hotbarWidth) * 0.5f;
+    const float hotbarMinY = displayHeight - 84.0f;
+    layout.hotbarPanel = {
+        hotbarMinX - 14.0f,
+        hotbarMinY - 14.0f,
+        hotbarMinX + hotbarWidth + 14.0f,
+        hotbarMinY + hotbarSlotSize + 14.0f
+    };
+    for (std::size_t slotIndex = 0; slotIndex < kGameplayHotbarSlotCount; ++slotIndex) {
+        const float slotMinX = hotbarMinX + (static_cast<float>(slotIndex) * (hotbarSlotSize + hotbarGap));
+        layout.hotbarSlots[slotIndex] = {
+            slotMinX,
+            hotbarMinY,
+            slotMinX + hotbarSlotSize,
+            hotbarMinY + hotbarSlotSize
+        };
+    }
+
+    const float inventorySlotSize = 76.0f;
+    const float inventoryGap = 18.0f;
+    const float inventoryWidth =
+        (inventorySlotSize * static_cast<float>(kCreativeInventoryItemCount)) +
+        (inventoryGap * static_cast<float>(kCreativeInventoryItemCount - 1));
+    const float inventoryPanelMinX = (displayWidth - (inventoryWidth + 56.0f)) * 0.5f;
+    const float inventoryPanelMinY = (displayHeight - 214.0f) * 0.5f;
+    layout.inventoryPanel = {
+        inventoryPanelMinX,
+        inventoryPanelMinY,
+        inventoryPanelMinX + inventoryWidth + 56.0f,
+        inventoryPanelMinY + 214.0f
+    };
+    const float inventorySlotMinX = layout.inventoryPanel.minX + 28.0f;
+    const float inventorySlotMinY = layout.inventoryPanel.minY + 84.0f;
+    for (std::size_t itemIndex = 0; itemIndex < kCreativeInventoryItemCount; ++itemIndex) {
+        const float slotMinX = inventorySlotMinX + (static_cast<float>(itemIndex) * (inventorySlotSize + inventoryGap));
+        layout.inventorySlots[itemIndex] = {
+            slotMinX,
+            inventorySlotMinY,
+            slotMinX + inventorySlotSize,
+            inventorySlotMinY + inventorySlotSize
+        };
+    }
+    return layout;
+}
 
 } // namespace voxelsprout::render
