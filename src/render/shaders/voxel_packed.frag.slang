@@ -440,10 +440,14 @@ float sampleRayTracedShadowRay(float3 origin, float3 direction, float tMin, floa
 
 float sampleRayTracedShadow(float3 worldPosition, float3 normal, float ndotl)
 {
-    const float normalOffset = lerp(camera.shadowConfig0.x, camera.shadowConfig0.y, 0.35) * (1.0 + (1.0 - ndotl));
+    const float shadowMapReceiverOffset =
+        lerp(camera.shadowConfig0.x, camera.shadowConfig0.y, 0.35) * (1.0 + (1.0 - ndotl));
+    // Ray-query shadows do not need the larger receiver offset used by shadow maps.
+    // Keep the origin bias small so the contact edge stays attached to the voxel face.
+    const float normalOffset = clamp(shadowMapReceiverOffset * 0.12, 0.0025, 0.015);
     const float3 shadowSamplePosition = worldPosition + (normal * normalOffset);
     const float3 toSun = -normalize(camera.sunDirectionIntensity.xyz);
-    const float tMin = max(0.02, normalOffset * 0.5);
+    const float tMin = max(0.001, normalOffset * 0.25);
     const float tMax = max(camera.shadowCascadeSplits.w * 1.5, 512.0);
     const int sampleCount = clamp(int(camera.shadowConfig4.x + 0.5), 1, 8);
     const float sunAngularRadiusDegrees = max(camera.shadowConfig4.y, 0.0);

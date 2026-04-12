@@ -160,10 +160,10 @@ float sampleRtSunVisibility(float3 faceWorldPosition, float3 normal, float ndotl
 {
     const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
     const float receiverBiasScale = clamp(camera.shadowConfig4.w, 0.25, 4.0);
-    const float normalOffset = max(cellSize * 0.02 * receiverBiasScale, cellSize * 0.005);
+    const float normalOffset = max(cellSize * 0.01 * receiverBiasScale, cellSize * 0.0025);
     const float3 origin = faceWorldPosition + (normal * normalOffset);
     const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
-    const float tMin = max(cellSize * 0.02, normalOffset * 0.5);
+    const float tMin = max(cellSize * 0.002, normalOffset * 0.25);
     const float tMax = max(camera.shadowCascadeSplits.w * 1.5, 512.0);
     const int sampleCount = clamp(int(camera.shadowConfig4.z + 0.5), 1, 2);
     const float sunAngularRadiusDegrees = max(camera.shadowConfig4.y, 0.0);

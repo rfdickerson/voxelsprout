@@ -524,10 +524,13 @@ void RendererBackend::buildFrameStatsUi() {
     }
     ImGui::Text("Chunk Indirect Commands: %u", m_debugChunkIndirectCommandCount);
     ImGui::Text(
-        "Spatial Query N/C/V: %u / %u / %u",
+        "Spatial Query N/C/V/R/New/Evict: %u / %u / %u / %u / %u / %u",
         m_debugSpatialQueryStats.visitedNodeCount,
         m_debugSpatialQueryStats.candidateChunkCount,
-        m_debugSpatialQueryStats.visibleChunkCount
+        m_debugSpatialQueryStats.visibleChunkCount,
+        m_debugSpatialQueryStats.retainedChunkCount,
+        m_debugSpatialQueryStats.newlyVisibleChunkCount,
+        m_debugSpatialQueryStats.evictedChunkCount
     );
     if (m_debugSpatialQueryStats.clipmapActiveLevelCount > 0) {
         ImGui::Text(
@@ -616,10 +619,13 @@ void RendererBackend::buildMeshingDebugUi() {
     }
 
     ImGui::Text(
-        "Query N/C/V: %u / %u / %u",
+        "Query N/C/V/R/New/Evict: %u / %u / %u / %u / %u / %u",
         m_debugSpatialQueryStats.visitedNodeCount,
         m_debugSpatialQueryStats.candidateChunkCount,
-        m_debugSpatialQueryStats.visibleChunkCount
+        m_debugSpatialQueryStats.visibleChunkCount,
+        m_debugSpatialQueryStats.retainedChunkCount,
+        m_debugSpatialQueryStats.newlyVisibleChunkCount,
+        m_debugSpatialQueryStats.evictedChunkCount
     );
     if (m_debugSpatialQueryStats.clipmapActiveLevelCount > 0) {
         ImGui::Text(
