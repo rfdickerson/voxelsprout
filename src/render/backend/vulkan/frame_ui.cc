@@ -59,6 +59,20 @@ bool RendererBackend::isFrameStatsVisible() const {
     return m_showFrameStatsPanel;
 }
 
+void RendererBackend::setFramePacingSettings(const FramePacingSettings& settings) {
+    m_framePacingSettings.mode = settings.mode;
+    m_framePacingSettings.cadenceDivisor = std::max(1u, settings.cadenceDivisor);
+    m_framePacingSettings.maxQueuedFrames = std::clamp(settings.maxQueuedFrames, 1u, kMaxFramesInFlight);
+}
+
+FramePacingSettings RendererBackend::framePacingSettings() const {
+    return m_framePacingSettings;
+}
+
+FramePacingStats RendererBackend::framePacingStats() const {
+    return m_framePacingStats;
+}
+
 
 void RendererBackend::setSunAngles(float yawDegrees, float pitchDegrees) {
     m_skyDebugSettings.sunYawDegrees = yawDegrees;
@@ -148,6 +162,36 @@ void RendererBackend::buildFrameStatsUi() {
 
     ImGui::Text("FPS (submit/presented): %.1f / %.1f", m_debugFps, m_debugPresentedFps);
     ImGui::Text("Chunks (visible/total): %u / %u", m_debugSpatialVisibleChunkCount, m_debugChunkCount);
+    if (ImGui::TreeNodeEx("Frame Pacing", ImGuiTreeNodeFlags_DefaultOpen)) {
+        int pacingMode = static_cast<int>(m_framePacingSettings.mode);
+        if (ImGui::Combo("Mode", &pacingMode, "Off\0Passive\0Scheduled\0")) {
+            m_framePacingSettings.mode = static_cast<FramePacingMode>(pacingMode);
+        }
+        int cadenceDivisor = static_cast<int>(m_framePacingSettings.cadenceDivisor);
+        if (ImGui::SliderInt("Cadence Divisor", &cadenceDivisor, 1, 4)) {
+            m_framePacingSettings.cadenceDivisor = static_cast<std::uint32_t>(cadenceDivisor);
+        }
+        int maxQueuedFrames = static_cast<int>(m_framePacingSettings.maxQueuedFrames);
+        if (ImGui::SliderInt("Max Queued Frames", &maxQueuedFrames, 1, static_cast<int>(kMaxFramesInFlight))) {
+            m_framePacingSettings.maxQueuedFrames = static_cast<std::uint32_t>(maxQueuedFrames);
+        }
+        ImGui::Text(
+            "Active: %s",
+            m_framePacingStats.schedulingActive
+                ? "Scheduled"
+                : (m_framePacingStats.displayTimingEnabled ? "Passive" : "Off")
+        );
+        ImGui::Text(
+            "Queued Frames / Limit: %u / %u",
+            m_framePacingStats.queuedFrames,
+            m_framePacingStats.maxQueuedFrames
+        );
+        ImGui::Text("Target Present Interval: %.3f ms", m_framePacingStats.targetPresentIntervalMs);
+        ImGui::Text("Desired Lead Time: %.3f ms", m_framePacingStats.desiredLeadTimeMs);
+        ImGui::Text("Schedule Error: %.3f ms", m_framePacingStats.presentScheduleErrorMs);
+        ImGui::Text("Late Presents: %u", m_framePacingStats.latePresentCount);
+        ImGui::TreePop();
+    }
     if (m_gpuTimestampsSupported) {
         ImGui::Text(
             "Frame CPU (total/work/ewma): %.2f / %.2f / %.2f ms",
@@ -209,6 +253,7 @@ void RendererBackend::buildFrameStatsUi() {
         ImGui::Text("Display Refresh: %.3f ms", m_debugDisplayRefreshMs);
         ImGui::Text("Display Present Margin: %.3f ms", m_debugDisplayPresentMarginMs);
         ImGui::Text("Display Actual-Earliest: %.3f ms", m_debugDisplayActualEarliestDeltaMs);
+        ImGui::Text("Display Schedule Error: %.3f ms", m_debugDisplayScheduleErrorMs);
         ImGui::Text("Display Timing Samples: %u", m_debugDisplayTimingSampleCount);
     }
     if (ImGui::TreeNodeEx("Draw Calls", ImGuiTreeNodeFlags_DefaultOpen)) {

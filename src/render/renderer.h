@@ -49,6 +49,9 @@ public:
     bool isDebugUiVisible() const;
     void setFrameStatsVisible(bool visible);
     bool isFrameStatsVisible() const;
+    void setFramePacingSettings(const FramePacingSettings& settings);
+    [[nodiscard]] FramePacingSettings framePacingSettings() const;
+    [[nodiscard]] FramePacingStats framePacingStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
     float cameraFovDegrees() const;
     void shutdown();

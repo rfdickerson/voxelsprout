@@ -1367,6 +1367,7 @@ void RendererBackend::destroyImGuiResources() {
 
 bool RendererBackend::recreateSwapchain() {
     VOX_LOGI("render") << "recreateSwapchain begin\n";
+    resetDisplayTimingTracking();
     int width = 0;
     int height = 0;
     glfwGetFramebufferSize(m_window, &width, &height);
@@ -1413,6 +1414,7 @@ bool RendererBackend::recreateSwapchain() {
 
 
 void RendererBackend::destroySwapchain() {
+    resetDisplayTimingTracking();
     destroyHdrResolveTargets();
     destroyMsaaColorTargets();
     destroyDepthTargets();
@@ -1736,9 +1738,6 @@ void RendererBackend::shutdown() {
     m_debugGpuSsaoBlurTimeMs = 0.0f;
     m_debugGpuMainTimeMs = 0.0f;
     m_debugGpuPostTimeMs = 0.0f;
-    m_debugDisplayRefreshMs = 0.0f;
-    m_debugDisplayPresentMarginMs = 0.0f;
-    m_debugDisplayActualEarliestDeltaMs = 0.0f;
     m_debugPresentedFrameTimeMs = 0.0f;
     m_debugPresentedFps = 0.0f;
     m_debugCpuFrameP50Ms = 0.0f;
@@ -1780,19 +1779,18 @@ void RendererBackend::shutdown() {
     m_debugPresentedFrameTimingMsHistory.fill(0.0f);
     m_debugPresentedFrameTimingMsHistoryWrite = 0;
     m_debugPresentedFrameTimingMsHistoryCount = 0;
+    m_framePacingSettings = {};
+    m_framePacingStats = {};
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;
     m_transferCommandBufferInFlightValue = 0;
     m_lastGraphicsTimelineValue = 0;
     m_nextTimelineValue = 1;
-    m_nextDisplayTimingPresentId = 1;
-    m_lastSubmittedDisplayTimingPresentId = 0;
-    m_lastPresentedDisplayTimingPresentId = 0;
-    m_lastProcessedDisplayTimingPresentId = 0;
-    m_lastDisplayTimingActualPresentTimeNs = 0;
     m_getRefreshCycleDurationGoogle = nullptr;
     m_getPastPresentationTimingGoogle = nullptr;
+    resetDisplayTimingTracking();
+    m_nextDisplayTimingPresentId = 1;
     m_currentFrame = 0;
     m_window = nullptr;
     VOX_LOGI("render") << "shutdown complete\n";
