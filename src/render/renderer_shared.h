@@ -61,7 +61,7 @@ constexpr std::array<voxelsprout::math::Vector3, 5> kBeltCargoTints = {
     voxelsprout::math::Vector3{0.56f, 0.88f, 0.48f},
     voxelsprout::math::Vector3{0.84f, 0.54f, 0.92f},
 };
-constexpr uint64_t kAcquireNextImageTimeoutNs = 100000000ull; // 100 ms
+constexpr uint64_t kAcquireNextImageTimeoutNs = 2000000ull; // 2 ms
 constexpr uint64_t kFrameTimelineWarnLagThreshold = 6u;
 constexpr double kFrameTimelineWarnCooldownSeconds = 2.0;
 constexpr float kCpuFrameEwmaAlpha = 0.08f;
@@ -87,6 +87,7 @@ struct alignas(16) CameraUniform {
     float shadowConfig1[4];
     float shadowConfig2[4];
     float shadowConfig3[4];
+    float shadowConfig4[4];
     float shadowVoxelGridOrigin[4];
     float shadowVoxelGridSize[4];
     float skyConfig0[4];

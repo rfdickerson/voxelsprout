@@ -16,6 +16,15 @@ namespace voxelsprout::render {
 
 namespace {
 
+float performShortPacingWait() {
+    const auto waitStart = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for(std::chrono::microseconds(250));
+    std::this_thread::yield();
+    return static_cast<float>(
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count()
+    );
+}
+
 template <typename VkHandleT>
 uint64_t vkHandleToUint64(VkHandleT handle) {
     if constexpr (std::is_pointer_v<VkHandleT>) {
@@ -122,9 +131,10 @@ bool RendererBackend::shouldThrottleFrameStart(uint64_t completedValue, float* o
     }
 
     if (outCpuWaitMs != nullptr) {
-        *outCpuWaitMs += 1.0f;
+        *outCpuWaitMs += performShortPacingWait();
+    } else {
+        (void)performShortPacingWait();
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     return true;
 }
 
@@ -204,7 +214,8 @@ bool RendererBackend::createFrameResources() {
         }
     }
 
-    VOX_LOGI("render") << "frame resources ready (" << kMaxFramesInFlight << " frames in flight)\n";
+    VOX_LOGI("render") << "frame resources ready (" << kMaxFramesInFlight
+                       << " frames in flight, timestampReadback=deferred)\n";
     return true;
 }
 
@@ -249,13 +260,16 @@ bool RendererBackend::isTimelineValueReached(uint64_t value) const {
     return completedTimelineValue() >= value;
 }
 
-void RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
+bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     if (!m_gpuTimestampsSupported || m_device == VK_NULL_HANDLE || frameIndex >= m_gpuTimestampQueryPools.size()) {
-        return;
+        return false;
     }
     const VkQueryPool queryPool = m_gpuTimestampQueryPools[frameIndex];
     if (queryPool == VK_NULL_HANDLE) {
-        return;
+        return false;
+    }
+    if (!m_gpuTimestampQuerySubmitted[frameIndex]) {
+        return false;
     }
 
     std::array<std::uint64_t, kGpuTimestampQueryCount> timestamps{};
@@ -267,11 +281,14 @@ void RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         sizeof(timestamps),
         timestamps.data(),
         sizeof(std::uint64_t),
-        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT
+        VK_QUERY_RESULT_64_BIT
     );
+    if (result == VK_NOT_READY) {
+        return false;
+    }
     if (result != VK_SUCCESS) {
         logVkFailure("vkGetQueryPoolResults(gpuTimestamps)", result);
-        return;
+        return false;
     }
 
     const auto durationMs = [&](uint32_t startIndex, uint32_t endIndex) -> float {
@@ -290,6 +307,7 @@ void RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuFrameTimeMs = durationMs(kGpuTimestampQueryFrameStart, kGpuTimestampQueryFrameEnd);
     m_debugGpuShadowTimeMs = durationMs(kGpuTimestampQueryShadowStart, kGpuTimestampQueryShadowEnd);
     m_debugGpuGiOccupancyTimeMs = durationMs(kGpuTimestampQueryGiOccupancyStart, kGpuTimestampQueryGiOccupancyEnd);
+    m_debugGpuGiSurfaceTimeMs = durationMs(kGpuTimestampQueryGiSurfaceStart, kGpuTimestampQueryGiSurfaceEnd);
     m_debugGpuGiInjectTimeMs = durationMs(kGpuTimestampQueryGiInjectStart, kGpuTimestampQueryGiInjectEnd);
     m_debugGpuGiPropagateTimeMs = durationMs(kGpuTimestampQueryGiPropagateStart, kGpuTimestampQueryGiPropagateEnd);
     m_debugGpuAutoExposureTimeMs = durationMs(kGpuTimestampQueryAutoExposureStart, kGpuTimestampQueryAutoExposureEnd);
@@ -305,6 +323,8 @@ void RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuFrameTimingMsHistoryCount =
         std::min(m_debugGpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
     updateFrameTimingPercentiles();
+    m_gpuTimestampQuerySubmitted[frameIndex] = false;
+    return true;
 }
 
 void RendererBackend::updateDisplayTimingStats() {
@@ -512,6 +532,7 @@ void RendererBackend::destroyGpuTimestampResources() {
             queryPool = VK_NULL_HANDLE;
         }
     }
+    m_gpuTimestampQuerySubmitted.fill(false);
 }
 
 } // namespace voxelsprout::render

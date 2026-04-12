@@ -52,6 +52,9 @@ public:
     void setFramePacingSettings(const FramePacingSettings& settings);
     [[nodiscard]] FramePacingSettings framePacingSettings() const;
     [[nodiscard]] FramePacingStats framePacingStats() const;
+    void setShadowSettings(const ShadowSettings& settings);
+    [[nodiscard]] ShadowSettings shadowSettings() const;
+    [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
     float cameraFovDegrees() const;
     void shutdown();

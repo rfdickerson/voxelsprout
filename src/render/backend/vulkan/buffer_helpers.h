@@ -43,6 +43,7 @@ public:
 
     [[nodiscard]] VkBuffer getBuffer(BufferHandle handle) const;
     [[nodiscard]] VkDeviceSize getSize(BufferHandle handle) const;
+    [[nodiscard]] VkDeviceAddress getDeviceAddress(BufferHandle handle) const;
     [[nodiscard]] void* mapBuffer(BufferHandle handle, VkDeviceSize offset, VkDeviceSize size);
     void unmapBuffer(BufferHandle handle);
 

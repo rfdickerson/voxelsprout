@@ -37,6 +37,15 @@ void RendererBackend::buildShadowDebugUi() {
             ImGui::Separator();
             ImGui::Checkbox("Shadow Occluder Culling", &m_shadowDebugSettings.enableOccluderCulling);
             ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
+            ImGui::SeparatorText("RT Main Pass");
+            ImGui::SliderInt("RT Samples", &m_shadowDebugSettings.rtShadowSampleCount, 1, 8);
+            ImGui::SliderFloat(
+                "RT Sun Radius (deg)",
+                &m_shadowDebugSettings.rtSunAngularRadiusDegrees,
+                0.0f,
+                1.0f,
+                "%.2f"
+            );
             ImGui::SliderFloat("Cascade Blend Min", &m_shadowDebugSettings.cascadeBlendMin, 1.0f, 20.0f, "%.2f");
             ImGui::SliderFloat("Cascade Blend Factor", &m_shadowDebugSettings.cascadeBlendFactor, 0.05f, 0.60f, "%.2f");
             ImGui::SliderInt("Grass Shadow Cascades", &m_shadowDebugSettings.grassShadowCascadeCount, 0, static_cast<int>(kShadowCascadeCount));
@@ -77,6 +86,9 @@ void RendererBackend::buildShadowDebugUi() {
             ImGui::Text("Compute: %s", m_voxelGiComputeAvailable ? "on" : "fallback");
             ImGui::SliderFloat("Bounce Strength", &m_voxelGiDebugSettings.bounceStrength, 0.0f, 2.50f, "%.2f");
             ImGui::SliderFloat("Diffusion Softness", &m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f, "%.2f");
+            ImGui::Checkbox("RT Surface Tracing", &m_voxelGiDebugSettings.enableRtSurfaceTracing);
+            ImGui::SliderInt("RT Surface Samples", &m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2);
+            ImGui::SliderFloat("RT Surface Bias", &m_voxelGiDebugSettings.rtSurfaceBiasScale, 0.25f, 4.0f, "%.2f");
             if (ImGui::CollapsingHeader("Advanced GI Debug")) {
                 const char* giVisualizationModes = "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0";
                 ImGui::Combo("GI Visualize", &m_voxelGiDebugSettings.visualizationMode, giVisualizationModes);

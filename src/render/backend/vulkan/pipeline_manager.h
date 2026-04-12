@@ -8,6 +8,7 @@ class PipelineManager {
 public:
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipeline pipelineRt = VK_NULL_HANDLE;
     VkPipeline shadowPipeline = VK_NULL_HANDLE;
     VkPipeline pipeShadowPipeline = VK_NULL_HANDLE;
     VkPipeline grassBillboardShadowPipeline = VK_NULL_HANDLE;
@@ -22,12 +23,14 @@ public:
     VkPipeline sdfPrepassPipeline = VK_NULL_HANDLE;
     VkPipeline sdfMainPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
+    VkPipeline magicaPipelineRt = VK_NULL_HANDLE;
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     VkPipeline previewAddPipeline = VK_NULL_HANDLE;
     VkPipeline previewRemovePipeline = VK_NULL_HANDLE;
     VkPipelineLayout voxelGiPipelineLayout = VK_NULL_HANDLE;
     VkPipeline voxelGiSurfacePipeline = VK_NULL_HANDLE;
+    VkPipeline voxelGiSurfacePipelineRt = VK_NULL_HANDLE;
     VkPipeline voxelGiOccupancyPipeline = VK_NULL_HANDLE;
     VkPipeline voxelGiSkyExposurePipeline = VK_NULL_HANDLE;
     VkPipeline voxelGiInjectPipeline = VK_NULL_HANDLE;
@@ -106,9 +109,17 @@ public:
             vkDestroyPipeline(device, magicaPipeline, nullptr);
             magicaPipeline = VK_NULL_HANDLE;
         }
+        if (magicaPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, magicaPipelineRt, nullptr);
+            magicaPipelineRt = VK_NULL_HANDLE;
+        }
         if (pipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, pipeline, nullptr);
             pipeline = VK_NULL_HANDLE;
+        }
+        if (pipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, pipelineRt, nullptr);
+            pipelineRt = VK_NULL_HANDLE;
         }
         if (pipelineLayout != VK_NULL_HANDLE) {
             vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
@@ -128,6 +139,10 @@ public:
         if (voxelGiSurfacePipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, voxelGiSurfacePipeline, nullptr);
             voxelGiSurfacePipeline = VK_NULL_HANDLE;
+        }
+        if (voxelGiSurfacePipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, voxelGiSurfacePipelineRt, nullptr);
+            voxelGiSurfacePipelineRt = VK_NULL_HANDLE;
         }
         if (voxelGiInjectPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, voxelGiInjectPipeline, nullptr);

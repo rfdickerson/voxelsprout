@@ -10,16 +10,26 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <span>
 #include <string>
 #include <vector>
 
 namespace {
+
+#ifndef VOXEL_APP_VERSION
+#define VOXEL_APP_VERSION "dev"
+#endif
+
+#ifndef VOXEL_RELEASE_PROFILE
+#define VOXEL_RELEASE_PROFILE "dev_runtime"
+#endif
 
 constexpr float kMouseSensitivity = 0.1f;
 constexpr float kMouseSmoothingSeconds = 0.035f;
@@ -63,6 +73,7 @@ constexpr float kGamepadMoveDeadzone = 0.18f;
 constexpr float kGamepadLookDeadzone = 0.14f;
 constexpr float kGamepadLookDegreesPerSecond = 160.0f;
 constexpr const char* kWorldFilePath = "world.vxw";
+constexpr const char* kConfigFilePath = "voxel_factory_toy.cfg";
 constexpr const char* kMagicaCastlePath = "assets/magicka/castle.vox";
 constexpr const char* kMagicaTeapotPath = "assets/magicka/teapot.vox";
 constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
@@ -158,6 +169,43 @@ const char* placeableBlockLabel(voxelsprout::world::VoxelType type) {
     default:
         return "empty";
     }
+}
+
+const char* shadowModeConfigName(voxelsprout::render::ShadowMode mode) {
+    switch (mode) {
+    case voxelsprout::render::ShadowMode::ShadowMaps: return "shadow_maps";
+    case voxelsprout::render::ShadowMode::RayTraced: return "ray_traced";
+    case voxelsprout::render::ShadowMode::Auto: return "auto";
+    }
+    return "auto";
+}
+
+bool parseShadowModeConfigValue(const std::string& value, voxelsprout::render::ShadowMode& outMode) {
+    if (value == "shadow_maps") {
+        outMode = voxelsprout::render::ShadowMode::ShadowMaps;
+        return true;
+    }
+    if (value == "ray_traced") {
+        outMode = voxelsprout::render::ShadowMode::RayTraced;
+        return true;
+    }
+    if (value == "auto") {
+        outMode = voxelsprout::render::ShadowMode::Auto;
+        return true;
+    }
+    return false;
+}
+
+std::string trimConfigString(const std::string& value) {
+    std::size_t begin = 0;
+    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+        ++begin;
+    }
+    std::size_t end = value.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
 }
 
 struct FrustumPlane {
@@ -508,6 +556,57 @@ voxelsprout::core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, voxelspro
 
 namespace voxelsprout::app {
 
+bool App::loadConfig(const std::filesystem::path& configPath) {
+    std::ifstream file(configPath);
+    if (!file) {
+        VOX_LOGI("app") << "config file missing at " << configPath.string()
+                        << "; using defaults";
+        return true;
+    }
+
+    AppConfig loadedConfig = m_config;
+    std::string line;
+    std::uint32_t parsedLineCount = 0;
+    while (std::getline(file, line)) {
+        ++parsedLineCount;
+        const std::size_t commentPos = line.find('#');
+        if (commentPos != std::string::npos) {
+            line.erase(commentPos);
+        }
+        const std::size_t equalsPos = line.find('=');
+        if (equalsPos == std::string::npos) {
+            continue;
+        }
+        const std::string key = trimConfigString(line.substr(0, equalsPos));
+        const std::string value = trimConfigString(line.substr(equalsPos + 1));
+        if (key == "shadow_mode") {
+            voxelsprout::render::ShadowMode parsedMode = loadedConfig.shadowMode;
+            if (!parseShadowModeConfigValue(value, parsedMode)) {
+                VOX_LOGW("app") << "invalid config shadow_mode='" << value
+                                << "' at " << configPath.string() << "; keeping "
+                                << shadowModeConfigName(loadedConfig.shadowMode);
+                continue;
+            }
+            loadedConfig.shadowMode = parsedMode;
+        }
+    }
+    m_config = loadedConfig;
+    VOX_LOGI("app") << "config loaded from " << configPath.string()
+                    << " (shadow_mode=" << shadowModeConfigName(m_config.shadowMode)
+                    << ", parsedLines=" << parsedLineCount << ")";
+    return true;
+}
+
+bool App::saveConfig(const std::filesystem::path& configPath) const {
+    std::ofstream file(configPath, std::ios::trunc);
+    if (!file) {
+        return false;
+    }
+    file << "# Voxel Factory Toy runtime config\n";
+    file << "shadow_mode=" << shadowModeConfigName(m_config.shadowMode) << "\n";
+    return true;
+}
+
 bool App::init() {
     using Clock = std::chrono::steady_clock;
     const auto initStart = Clock::now();
@@ -515,7 +614,9 @@ bool App::init() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
     };
 
-    VOX_LOGI("app") << "init begin";
+    VOX_LOGI("app") << "init begin"
+                    << " version=" << VOXEL_APP_VERSION
+                    << " profile=" << VOXEL_RELEASE_PROFILE;
     glfwSetErrorCallback(glfwErrorCallback);
 
     const auto glfwStart = Clock::now();
@@ -538,6 +639,16 @@ bool App::init() {
 
     // Relative mouse mode for camera look.
     glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+    const std::filesystem::path configPath{kConfigFilePath};
+    if (!loadConfig(configPath)) {
+        VOX_LOGE("app") << "failed to load config from " << configPath.string();
+        glfwDestroyWindow(m_window);
+        m_window = nullptr;
+        glfwTerminate();
+        return false;
+    }
+    m_renderer.setShadowSettings(voxelsprout::render::ShadowSettings{m_config.shadowMode});
 
     const auto worldLoadStart = Clock::now();
     const std::filesystem::path worldPath{kWorldFilePath};
@@ -564,6 +675,9 @@ bool App::init() {
                     << ", clipped=" << stampResult.clippedVoxelCount
                     << ", paletteColors=" << static_cast<std::uint32_t>(stampResult.baseColorPaletteCount)
                     << ") in " << elapsedMs(magicaStampStart) << " ms";
+    if (stampResult.stampedResourceCount != kMagicaLoadSpecs.size()) {
+        VOX_LOGW("app") << "release runtime missing one or more Magica assets; world stamp count is incomplete";
+    }
     m_renderer.setVoxelBaseColorPalette(stampResult.baseColorPalette);
 
     const auto clipmapStart = Clock::now();
@@ -1023,6 +1137,15 @@ void App::update(float dt, float simulationAlpha) {
 
 void App::shutdown() {
     VOX_LOGI("app") << "shutdown begin";
+
+    m_config.shadowMode = m_renderer.shadowSettings().mode;
+    const std::filesystem::path configPath{kConfigFilePath};
+    if (!saveConfig(configPath)) {
+        VOX_LOGE("app") << "failed to save config to " << configPath.string();
+    } else {
+        VOX_LOGI("app") << "saved config to " << configPath.string()
+                        << " (shadow_mode=" << shadowModeConfigName(m_config.shadowMode) << ")";
+    }
 
     if (m_worldDirty) {
         const std::filesystem::path worldPath{kWorldFilePath};

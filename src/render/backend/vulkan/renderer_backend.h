@@ -33,6 +33,24 @@ namespace voxelsprout::render {
 class CoreFrameGraphOrderValidator;
 struct CoreFrameGraphPlan;
 
+struct RtVertex {
+    float position[3];
+};
+
+struct RtGeometryBuffers {
+    BufferHandle vertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle indexBufferHandle = kInvalidBufferHandle;
+    std::uint32_t vertexCount = 0;
+    std::uint32_t indexCount = 0;
+};
+
+struct RtAccelerationStructure {
+    VkAccelerationStructureKHR handle = VK_NULL_HANDLE;
+    BufferHandle storageBufferHandle = kInvalidBufferHandle;
+    std::uint64_t deviceAddress = 0;
+    std::uint32_t primitiveCount = 0;
+};
+
 class RendererBackend {
 public:
     struct ShadowDebugSettings {
@@ -52,6 +70,8 @@ public:
         float cascadeBlendFactor = 0.30f;
 
         float pcfRadius = 1.0f;
+        int rtShadowSampleCount = 8;
+        float rtSunAngularRadiusDegrees = 0.18f;
         int grassShadowCascadeCount = 1;
         bool enableOccluderCulling = true;
 
@@ -110,6 +130,9 @@ public:
     struct VoxelGiDebugSettings {
         float bounceStrength = 1.45f;
         float diffusionSoftness = 0.45f;
+        bool enableRtSurfaceTracing = true;
+        int rtSurfaceSampleCount = 2;
+        float rtSurfaceBiasScale = 1.0f;
         int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo
     };
 
@@ -138,12 +161,15 @@ public:
     void setFramePacingSettings(const FramePacingSettings& settings);
     [[nodiscard]] FramePacingSettings framePacingSettings() const;
     [[nodiscard]] FramePacingStats framePacingStats() const;
+    void setShadowSettings(const ShadowSettings& settings);
+    [[nodiscard]] ShadowSettings shadowSettings() const;
+    [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
     float cameraFovDegrees() const;
     void shutdown();
 
 private:
-    static constexpr uint32_t kMaxFramesInFlight = 2;
+    static constexpr uint32_t kMaxFramesInFlight = 3;
     static constexpr uint32_t kShadowCascadeCount = 4;
     static constexpr uint32_t kShadowAtlasSize = 8192;
     static constexpr uint32_t kGpuTimestampQueryFrameStart = 0;
@@ -151,29 +177,31 @@ private:
     static constexpr uint32_t kGpuTimestampQueryShadowEnd = 2;
     static constexpr uint32_t kGpuTimestampQueryGiOccupancyStart = 3;
     static constexpr uint32_t kGpuTimestampQueryGiOccupancyEnd = 4;
-    static constexpr uint32_t kGpuTimestampQueryGiInjectStart = 5;
-    static constexpr uint32_t kGpuTimestampQueryGiInjectEnd = 6;
-    static constexpr uint32_t kGpuTimestampQueryGiPropagateStart = 7;
-    static constexpr uint32_t kGpuTimestampQueryGiPropagateEnd = 8;
-    static constexpr uint32_t kGpuTimestampQueryAutoExposureStart = 9;
-    static constexpr uint32_t kGpuTimestampQueryAutoExposureEnd = 10;
-    static constexpr uint32_t kGpuTimestampQuerySunShaftStart = 11;
-    static constexpr uint32_t kGpuTimestampQuerySunShaftEnd = 12;
-    static constexpr uint32_t kGpuTimestampQueryPrepassStart = 13;
-    static constexpr uint32_t kGpuTimestampQueryPrepassEnd = 14;
-    static constexpr uint32_t kGpuTimestampQuerySsaoStart = 15;
-    static constexpr uint32_t kGpuTimestampQuerySsaoEnd = 16;
-    static constexpr uint32_t kGpuTimestampQuerySsaoBlurStart = 17;
-    static constexpr uint32_t kGpuTimestampQuerySsaoBlurEnd = 18;
-    static constexpr uint32_t kGpuTimestampQueryMainStart = 19;
-    static constexpr uint32_t kGpuTimestampQueryMainEnd = 20;
-    static constexpr uint32_t kGpuTimestampQueryPostStart = 21;
-    static constexpr uint32_t kGpuTimestampQueryPostEnd = 22;
-    static constexpr uint32_t kGpuTimestampQueryFrameEnd = 23;
-    static constexpr uint32_t kGpuTimestampQueryCount = 24;
+    static constexpr uint32_t kGpuTimestampQueryGiSurfaceStart = 5;
+    static constexpr uint32_t kGpuTimestampQueryGiSurfaceEnd = 6;
+    static constexpr uint32_t kGpuTimestampQueryGiInjectStart = 7;
+    static constexpr uint32_t kGpuTimestampQueryGiInjectEnd = 8;
+    static constexpr uint32_t kGpuTimestampQueryGiPropagateStart = 9;
+    static constexpr uint32_t kGpuTimestampQueryGiPropagateEnd = 10;
+    static constexpr uint32_t kGpuTimestampQueryAutoExposureStart = 11;
+    static constexpr uint32_t kGpuTimestampQueryAutoExposureEnd = 12;
+    static constexpr uint32_t kGpuTimestampQuerySunShaftStart = 13;
+    static constexpr uint32_t kGpuTimestampQuerySunShaftEnd = 14;
+    static constexpr uint32_t kGpuTimestampQueryPrepassStart = 15;
+    static constexpr uint32_t kGpuTimestampQueryPrepassEnd = 16;
+    static constexpr uint32_t kGpuTimestampQuerySsaoStart = 17;
+    static constexpr uint32_t kGpuTimestampQuerySsaoEnd = 18;
+    static constexpr uint32_t kGpuTimestampQuerySsaoBlurStart = 19;
+    static constexpr uint32_t kGpuTimestampQuerySsaoBlurEnd = 20;
+    static constexpr uint32_t kGpuTimestampQueryMainStart = 21;
+    static constexpr uint32_t kGpuTimestampQueryMainEnd = 22;
+    static constexpr uint32_t kGpuTimestampQueryPostStart = 23;
+    static constexpr uint32_t kGpuTimestampQueryPostEnd = 24;
+    static constexpr uint32_t kGpuTimestampQueryFrameEnd = 25;
+    static constexpr uint32_t kGpuTimestampQueryCount = 26;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
-    static constexpr std::size_t kMainDescriptorWriteKeyWordCount = 23;
-    static constexpr std::size_t kVoxelGiDescriptorWriteKeyWordCount = 23;
+    static constexpr std::size_t kMainDescriptorWriteKeyWordCount = 24;
+    static constexpr std::size_t kVoxelGiDescriptorWriteKeyWordCount = 24;
     static constexpr std::size_t kAutoExposureDescriptorWriteKeyWordCount = 6;
     static constexpr std::size_t kSunShaftDescriptorWriteKeyWordCount = 10;
 
@@ -259,6 +287,9 @@ private:
     void destroyEnvironmentResources();
     void destroyDiffuseTextureResources();
     void destroyTransferResources();
+    bool rebuildRayTracingScene();
+    void destroyRayTracingScene();
+    void markRayTracingSceneDirty();
     void destroyPipeline();
     void loadDebugUtilsFunctions();
     bool allocatePerFrameDescriptorSets(
@@ -301,9 +332,11 @@ private:
     void beginDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
     void endDebugLabel(VkCommandBuffer commandBuffer) const;
     void insertDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
-    void readGpuTimestampResults(uint32_t frameIndex);
+    bool readGpuTimestampResults(uint32_t frameIndex);
     void scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue);
     void collectCompletedBufferReleases();
+    void refreshShadowStats();
+    bool validateReleaseRuntimeAssets();
     void resetDisplayTimingTracking();
     void updateDisplayTimingStats();
     void updateFrameTimingPercentiles();
@@ -312,9 +345,44 @@ private:
     std::uint32_t countQueuedFrames(uint64_t completedValue) const;
     bool shouldThrottleFrameStart(uint64_t completedValue, float* outCpuWaitMs) const;
     uint64_t computeDesiredPresentTimeNs(std::uint64_t nowNs) const;
+    bool loadRayTracingFunctions();
+    [[nodiscard]] bool rayTracingRuntimeReady() const;
+    [[nodiscard]] const char* rayTracingReleaseStatusName() const;
     struct DeferredBufferRelease {
         BufferHandle handle = kInvalidBufferHandle;
         uint64_t timelineValue = 0;
+    };
+
+    struct DesktopCapabilityProbe {
+        bool descriptorHeapExtension = false;
+        bool unifiedImageLayoutsExtension = false;
+        bool hostImageCopyExtension = false;
+        bool shaderClockExtension = false;
+        bool computeShaderDerivativesExtension = false;
+        bool fragmentShadingRateExtension = false;
+        bool swapchainMaintenance1Extension = false;
+        bool presentIdExtension = false;
+        bool presentWaitExtension = false;
+        bool displayTimingExtension = false;
+        bool roadmap2026CoreReady = false;
+        std::uint32_t maxPerStageDescriptorSamplers = 0;
+        std::uint32_t maxPerStageDescriptorSampledImages = 0;
+        std::uint32_t maxDescriptorSetSampledImages = 0;
+        std::uint32_t maxDescriptorSetStorageImages = 0;
+        std::uint32_t maxFragmentCombinedOutputResources = 0;
+    };
+
+    struct RayTracingCapabilityProbe {
+        bool accelerationStructureExtension = false;
+        bool rayQueryExtension = false;
+        bool deferredHostOperationsExtension = false;
+        bool rayTracingPipelineExtension = false;
+        bool rayTracingMaintenance1Extension = false;
+        bool rayTracingPositionFetchExtension = false;
+        bool accelerationStructureFeature = false;
+        bool rayQueryFeature = false;
+        bool rayTracingCoreReady = false;
+        std::uint64_t scratchAlignment = 0;
     };
 
     struct ChunkDrawRange {
@@ -606,6 +674,10 @@ private:
     std::array<std::array<float, 3>, 9> m_voxelGiPreviousShIrradiance{};
     float m_voxelGiPreviousBounceStrength = 0.0f;
     float m_voxelGiPreviousDiffusionSoftness = 0.0f;
+    bool m_voxelGiPreviousRtSurfaceTracingEnabled = false;
+    float m_voxelGiPreviousRtSurfaceSampleCount = 0.0f;
+    float m_voxelGiPreviousRtSurfaceBiasScale = 0.0f;
+    float m_voxelGiPreviousRtSunAngularRadiusDegrees = 0.0f;
     std::array<float, 3> m_voxelGiOccupancyBuildOrigin{0.0f, 0.0f, 0.0f};
     std::size_t m_voxelGiOccupancyFullRebuildCursor = 0;
     bool m_voxelGiOccupancyFullRebuildInProgress = false;
@@ -652,6 +724,7 @@ private:
     // Existing Renderer call sites use these aliases while ownership lives in managers.
     VkPipelineLayout& m_pipelineLayout = m_pipelineManager.pipelineLayout;
     VkPipeline& m_pipeline = m_pipelineManager.pipeline;
+    VkPipeline& m_pipelineRt = m_pipelineManager.pipelineRt;
     VkPipeline& m_shadowPipeline = m_pipelineManager.shadowPipeline;
     VkPipeline& m_pipeShadowPipeline = m_pipelineManager.pipeShadowPipeline;
     VkPipeline& m_grassBillboardShadowPipeline = m_pipelineManager.grassBillboardShadowPipeline;
@@ -666,12 +739,14 @@ private:
     VkPipeline& m_sdfPrepassPipeline = m_pipelineManager.sdfPrepassPipeline;
     VkPipeline& m_sdfMainPipeline = m_pipelineManager.sdfMainPipeline;
     VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
+    VkPipeline& m_magicaPipelineRt = m_pipelineManager.magicaPipelineRt;
     VkPipeline& m_ssaoPipeline = m_pipelineManager.ssaoPipeline;
     VkPipeline& m_ssaoBlurPipeline = m_pipelineManager.ssaoBlurPipeline;
     VkPipeline& m_previewAddPipeline = m_pipelineManager.previewAddPipeline;
     VkPipeline& m_previewRemovePipeline = m_pipelineManager.previewRemovePipeline;
     VkPipelineLayout& m_voxelGiPipelineLayout = m_pipelineManager.voxelGiPipelineLayout;
     VkPipeline& m_voxelGiSurfacePipeline = m_pipelineManager.voxelGiSurfacePipeline;
+    VkPipeline& m_voxelGiSurfacePipelineRt = m_pipelineManager.voxelGiSurfacePipelineRt;
     VkPipeline& m_voxelGiOccupancyPipeline = m_pipelineManager.voxelGiOccupancyPipeline;
     VkPipeline& m_voxelGiSkyExposurePipeline = m_pipelineManager.voxelGiSkyExposurePipeline;
     VkPipeline& m_voxelGiInjectPipeline = m_pipelineManager.voxelGiInjectPipeline;
@@ -704,10 +779,25 @@ private:
     bool m_enableDisplayTiming = false;
     FramePacingSettings m_framePacingSettings{};
     FramePacingStats m_framePacingStats{};
+    ShadowSettings m_shadowSettings{};
+    ShadowStats m_shadowStats{};
+    DesktopCapabilityProbe m_desktopCapabilityProbe{};
+    RayTracingCapabilityProbe m_rayTracingCapabilityProbe{};
+    bool m_rayTracingRuntimeEnabled = false;
+    bool m_rtMainPassImplemented = false;
+    bool m_rtShaderVariantFileAvailable = false;
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR m_enabledAccelerationStructureFeatures{};
+    VkPhysicalDeviceRayQueryFeaturesKHR m_enabledRayQueryFeatures{};
+    PFN_vkCreateAccelerationStructureKHR m_createAccelerationStructureKhr = nullptr;
+    PFN_vkDestroyAccelerationStructureKHR m_destroyAccelerationStructureKhr = nullptr;
+    PFN_vkGetAccelerationStructureBuildSizesKHR m_getAccelerationStructureBuildSizesKhr = nullptr;
+    PFN_vkCmdBuildAccelerationStructuresKHR m_cmdBuildAccelerationStructuresKhr = nullptr;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR m_getAccelerationStructureDeviceAddressKhr = nullptr;
     uint32_t m_bindlessTextureCapacity = 0;
     bool m_gpuTimestampsSupported = false;
     float m_gpuTimestampPeriodNs = 0.0f;
     std::array<VkQueryPool, kMaxFramesInFlight> m_gpuTimestampQueryPools{};
+    std::array<bool, kMaxFramesInFlight> m_gpuTimestampQuerySubmitted{};
     float m_maxSamplerAnisotropy = 1.0f;
     VkDeviceSize m_uniformBufferAlignment = 256;
 
@@ -731,6 +821,16 @@ private:
     std::vector<voxelsprout::world::ChunkLodMeshes> m_chunkLodMeshCache;
     std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
+    RtGeometryBuffers m_rtChunkGeometry{};
+    std::vector<RtGeometryBuffers> m_rtMagicaGeometries;
+    RtAccelerationStructure m_rtChunkBlas{};
+    std::vector<RtAccelerationStructure> m_rtMagicaBlases;
+    RtAccelerationStructure m_rtTlas{};
+    BufferHandle m_rtTlasInstanceBufferHandle = kInvalidBufferHandle;
+    bool m_rtSceneDirty = false;
+    std::uint32_t m_rtSceneBuildCount = 0;
+    std::uint32_t m_rtBlasBuildCount = 0;
+    std::uint32_t m_rtTlasBuildCount = 0;
     bool m_chunkLodMeshCacheValid = false;
     voxelsprout::world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;
@@ -800,6 +900,7 @@ private:
     float m_debugGpuFrameTimeMs = 0.0f;
     float m_debugGpuShadowTimeMs = 0.0f;
     float m_debugGpuGiOccupancyTimeMs = 0.0f;
+    float m_debugGpuGiSurfaceTimeMs = 0.0f;
     float m_debugGpuGiInjectTimeMs = 0.0f;
     float m_debugGpuGiPropagateTimeMs = 0.0f;
     float m_debugGpuAutoExposureTimeMs = 0.0f;
@@ -825,6 +926,10 @@ private:
     float m_debugPresentedFrameP50Ms = 0.0f;
     float m_debugPresentedFrameP95Ms = 0.0f;
     float m_debugPresentedFrameP99Ms = 0.0f;
+    bool m_voxelGiRtSurfaceReady = false;
+    bool m_voxelGiRtSurfaceActiveThisFrame = false;
+    bool m_voxelGiRtSurfaceLastLoggedActive = false;
+    bool m_voxelGiRtSurfaceLastLoggedValid = false;
     std::uint32_t m_debugDisplayTimingSampleCount = 0;
     std::array<float, kTimingHistorySampleCount> m_debugCpuFrameTotalMsHistory{};
     std::array<float, kTimingHistorySampleCount> m_debugCpuFrameWorkMsHistory{};

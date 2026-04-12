@@ -34,6 +34,30 @@ namespace voxelsprout::render {
 
 #include "render/renderer_shared.h"
 
+namespace {
+
+const char* shadowModeName(ShadowMode mode) {
+    switch (mode) {
+    case ShadowMode::ShadowMaps: return "shadow_maps";
+    case ShadowMode::RayTraced: return "ray_traced";
+    case ShadowMode::Auto: return "auto";
+    }
+    return "shadow_maps";
+}
+
+const char* shadowFallbackReasonName(ShadowFallbackReason reason) {
+    switch (reason) {
+    case ShadowFallbackReason::None: return "none";
+    case ShadowFallbackReason::RayTracingUnsupported: return "rt_unsupported";
+    case ShadowFallbackReason::RayTracingDisabled: return "rt_runtime_disabled";
+    case ShadowFallbackReason::MainPassNotImplemented: return "rt_main_not_implemented";
+    case ShadowFallbackReason::RayTracingSceneUnavailable: return "rt_scene_unavailable";
+    }
+    return "none";
+}
+
+} // namespace
+
 void RendererBackend::setDebugUiVisible(bool visible) {
     if (m_debugUiVisible == visible) {
         return;
@@ -71,6 +95,109 @@ FramePacingSettings RendererBackend::framePacingSettings() const {
 
 FramePacingStats RendererBackend::framePacingStats() const {
     return m_framePacingStats;
+}
+
+bool RendererBackend::rayTracingRuntimeReady() const {
+    return m_rayTracingRuntimeEnabled &&
+        m_rayTracingCapabilityProbe.accelerationStructureFeature &&
+        m_rayTracingCapabilityProbe.rayQueryFeature &&
+        m_createAccelerationStructureKhr != nullptr &&
+        m_destroyAccelerationStructureKhr != nullptr &&
+        m_getAccelerationStructureBuildSizesKhr != nullptr &&
+        m_cmdBuildAccelerationStructuresKhr != nullptr &&
+        m_getAccelerationStructureDeviceAddressKhr != nullptr;
+}
+
+const char* RendererBackend::rayTracingReleaseStatusName() const {
+    const bool rtRequested =
+        m_shadowSettings.mode == ShadowMode::RayTraced ||
+        m_shadowSettings.mode == ShadowMode::Auto;
+    if (!m_shadowStats.rayTracingSupported) {
+        return "unsupported";
+    }
+    if (!m_shadowStats.rayTracingRuntimeEnabled || !rtRequested) {
+        return "supported_but_disabled";
+    }
+    if (m_shadowStats.activeMode == ShadowMode::RayTraced && m_shadowStats.mainPassRayTracingReady) {
+        return "beta_ready";
+    }
+    if (m_shadowStats.fallbackActive) {
+        return "beta_requested_but_fell_back";
+    }
+    return "supported_but_disabled";
+}
+
+void RendererBackend::refreshShadowStats() {
+    m_shadowStats.requestedMode = m_shadowSettings.mode;
+    m_shadowStats.rayTracingSupported = m_rayTracingCapabilityProbe.rayTracingCoreReady;
+    m_shadowStats.rayQuerySupported = m_rayTracingCapabilityProbe.rayQueryExtension;
+    m_shadowStats.accelerationStructureSupported = m_rayTracingCapabilityProbe.accelerationStructureExtension;
+    m_shadowStats.rayTracingRuntimeEnabled = rayTracingRuntimeReady();
+    const bool mainPassPipelinesReady =
+        m_rtMainPassImplemented &&
+        m_pipelineRt != VK_NULL_HANDLE &&
+        m_magicaPipelineRt != VK_NULL_HANDLE;
+    const bool mainPassSceneReady = m_rtTlas.handle != VK_NULL_HANDLE;
+    m_shadowStats.mainPassRayTracingReady =
+        rayTracingRuntimeReady() &&
+        mainPassPipelinesReady &&
+        mainPassSceneReady;
+    m_shadowStats.mainPassRayTracingActive = false;
+    m_shadowStats.activeMode = ShadowMode::ShadowMaps;
+    m_shadowStats.fallbackActive = false;
+    m_shadowStats.fallbackReason = ShadowFallbackReason::None;
+
+    const bool wantsRayTracing =
+        m_shadowSettings.mode == ShadowMode::RayTraced ||
+        m_shadowSettings.mode == ShadowMode::Auto;
+    if (!wantsRayTracing) {
+        return;
+    }
+    if (!m_shadowStats.rayTracingSupported) {
+        m_shadowStats.fallbackActive = true;
+        m_shadowStats.fallbackReason = ShadowFallbackReason::RayTracingUnsupported;
+        return;
+    }
+    if (!m_shadowStats.rayTracingRuntimeEnabled) {
+        m_shadowStats.fallbackActive = true;
+        m_shadowStats.fallbackReason = ShadowFallbackReason::RayTracingDisabled;
+        return;
+    }
+    if (m_shadowStats.mainPassRayTracingReady) {
+        m_shadowStats.activeMode = ShadowMode::RayTraced;
+        m_shadowStats.mainPassRayTracingActive = true;
+        return;
+    }
+    if (!mainPassPipelinesReady) {
+        m_shadowStats.fallbackActive = true;
+        m_shadowStats.fallbackReason = ShadowFallbackReason::MainPassNotImplemented;
+        return;
+    }
+    m_shadowStats.fallbackActive = true;
+    m_shadowStats.fallbackReason = ShadowFallbackReason::RayTracingSceneUnavailable;
+}
+
+void RendererBackend::setShadowSettings(const ShadowSettings& settings) {
+    m_shadowSettings = settings;
+    refreshShadowStats();
+    if (m_device == VK_NULL_HANDLE) {
+        return;
+    }
+    VOX_LOGI("render") << "shadow mode: requested=" << shadowModeName(m_shadowStats.requestedMode)
+                       << ", active=" << shadowModeName(m_shadowStats.activeMode)
+                       << ", fallback=" << (m_shadowStats.fallbackActive ? "yes" : "no")
+                       << ", reason=" << shadowFallbackReasonName(m_shadowStats.fallbackReason)
+                       << ", rtCoreReady=" << (m_rayTracingCapabilityProbe.rayTracingCoreReady ? "yes" : "no")
+                       << ", rtRuntime=" << (m_shadowStats.rayTracingRuntimeEnabled ? "yes" : "no")
+                       << ", rtReleaseStatus=" << rayTracingReleaseStatusName();
+}
+
+ShadowSettings RendererBackend::shadowSettings() const {
+    return m_shadowSettings;
+}
+
+ShadowStats RendererBackend::shadowStats() const {
+    return m_shadowStats;
 }
 
 
@@ -186,10 +313,67 @@ void RendererBackend::buildFrameStatsUi() {
             m_framePacingStats.queuedFrames,
             m_framePacingStats.maxQueuedFrames
         );
+        ImGui::Text(
+            "CPU Waits slot/acquire/present/transfer: %.3f / %.3f / %.3f / %.3f ms",
+            m_framePacingStats.cpuWaitFrameSlotMs,
+            m_framePacingStats.cpuWaitAcquireMs,
+            m_framePacingStats.cpuWaitPresentMs,
+            m_framePacingStats.cpuWaitTransferMs
+        );
+        ImGui::Text(
+            "GPU Timestamp Readback: %s (%u skipped)",
+            m_framePacingStats.gpuTimestampsPending ? "pending" : "ready",
+            m_framePacingStats.gpuTimestampSkippedFrames
+        );
         ImGui::Text("Target Present Interval: %.3f ms", m_framePacingStats.targetPresentIntervalMs);
         ImGui::Text("Desired Lead Time: %.3f ms", m_framePacingStats.desiredLeadTimeMs);
         ImGui::Text("Schedule Error: %.3f ms", m_framePacingStats.presentScheduleErrorMs);
         ImGui::Text("Late Presents: %u", m_framePacingStats.latePresentCount);
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNodeEx("Shadow Mode", ImGuiTreeNodeFlags_DefaultOpen)) {
+        int shadowMode = static_cast<int>(m_shadowSettings.mode);
+        if (ImGui::Combo("Shadow Backend", &shadowMode, "Shadow Maps\0Ray Traced (Beta)\0Auto (Beta)\0")) {
+            setShadowSettings(ShadowSettings{static_cast<ShadowMode>(shadowMode)});
+        }
+        const char* activeModeLabel = "Shadow Maps";
+        if (m_shadowStats.activeMode == ShadowMode::RayTraced) {
+            activeModeLabel = "Ray Traced";
+        } else if (m_shadowStats.activeMode == ShadowMode::Auto) {
+            activeModeLabel = "Auto";
+        }
+        ImGui::Text("Active: %s", activeModeLabel);
+        ImGui::Text("Fallback Active: %s", m_shadowStats.fallbackActive ? "yes" : "no");
+        ImGui::Text("Fallback Reason: %s", shadowFallbackReasonName(m_shadowStats.fallbackReason));
+        ImGui::Text("RT Release Status: %s", rayTracingReleaseStatusName());
+        ImGui::Text("RT Core Ready: %s", m_shadowStats.rayTracingSupported ? "yes" : "no");
+        ImGui::Text("RT Runtime Enabled: %s", m_shadowStats.rayTracingRuntimeEnabled ? "yes" : "no");
+        ImGui::Text("Main Pass RT Ready: %s", m_shadowStats.mainPassRayTracingReady ? "yes" : "no");
+        ImGui::Text("Main Pass RT Active: %s", m_shadowStats.mainPassRayTracingActive ? "yes" : "no");
+        ImGui::Text(
+            "RT Samples / Sun Radius: %d / %.2f deg",
+            std::clamp(m_shadowDebugSettings.rtShadowSampleCount, 1, 8),
+            m_shadowDebugSettings.rtSunAngularRadiusDegrees
+        );
+        ImGui::Text("RT Beta Scope: main-pass voxels + Magica only");
+        ImGui::Text(
+            "RT Scene Builds / BLAS / TLAS: %u / %u / %u",
+            m_rtSceneBuildCount,
+            m_rtBlasBuildCount,
+            m_rtTlasBuildCount
+        );
+        ImGui::Text(
+            "GI RT Surface: %s / active=%s (%d samp, bias %.2f)",
+            m_voxelGiRtSurfaceReady ? "ready" : "fallback",
+            m_voxelGiRtSurfaceActiveThisFrame ? "yes" : "no",
+            std::clamp(m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2),
+            m_voxelGiDebugSettings.rtSurfaceBiasScale
+        );
+        ImGui::Text("Ray Query: %s", m_shadowStats.rayQuerySupported ? "yes" : "no");
+        ImGui::Text(
+            "Acceleration Structure: %s",
+            m_shadowStats.accelerationStructureSupported ? "yes" : "no"
+        );
         ImGui::TreePop();
     }
     if (m_gpuTimestampsSupported) {
@@ -214,6 +398,7 @@ void RendererBackend::buildFrameStatsUi() {
         if (ImGui::TreeNodeEx("GPU Stages (ms)", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
             ImGui::Text("GI Occupancy (compute): %.2f", m_debugGpuGiOccupancyTimeMs);
+            ImGui::Text("GI Surface (compute): %.2f", m_debugGpuGiSurfaceTimeMs);
             ImGui::Text("GI Inject (compute): %.2f", m_debugGpuGiInjectTimeMs);
             ImGui::Text("GI Propagate (compute): %.2f", m_debugGpuGiPropagateTimeMs);
             ImGui::Text("Auto Exposure (compute): %.2f", m_debugGpuAutoExposureTimeMs);
@@ -255,6 +440,79 @@ void RendererBackend::buildFrameStatsUi() {
         ImGui::Text("Display Actual-Earliest: %.3f ms", m_debugDisplayActualEarliestDeltaMs);
         ImGui::Text("Display Schedule Error: %.3f ms", m_debugDisplayScheduleErrorMs);
         ImGui::Text("Display Timing Samples: %u", m_debugDisplayTimingSampleCount);
+    }
+    if (ImGui::TreeNodeEx("Desktop Capabilities", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Roadmap 2026 Core Ready: %s", m_desktopCapabilityProbe.roadmap2026CoreReady ? "yes" : "no");
+        ImGui::Text("Descriptor Heap: %s", m_desktopCapabilityProbe.descriptorHeapExtension ? "yes" : "no");
+        ImGui::Text(
+            "Unified Image Layouts: %s",
+            m_desktopCapabilityProbe.unifiedImageLayoutsExtension ? "yes" : "no"
+        );
+        ImGui::Text("Host Image Copy: %s", m_desktopCapabilityProbe.hostImageCopyExtension ? "yes" : "no");
+        ImGui::Text("Shader Clock: %s", m_desktopCapabilityProbe.shaderClockExtension ? "yes" : "no");
+        ImGui::Text(
+            "Compute Shader Derivatives: %s",
+            m_desktopCapabilityProbe.computeShaderDerivativesExtension ? "yes" : "no"
+        );
+        ImGui::Text(
+            "Fragment Shading Rate: %s",
+            m_desktopCapabilityProbe.fragmentShadingRateExtension ? "yes" : "no"
+        );
+        ImGui::Text(
+            "Swapchain Maintenance1: %s",
+            m_desktopCapabilityProbe.swapchainMaintenance1Extension ? "yes" : "no"
+        );
+        ImGui::Text("Present ID: %s", m_desktopCapabilityProbe.presentIdExtension ? "yes" : "no");
+        ImGui::Text("Present Wait: %s", m_desktopCapabilityProbe.presentWaitExtension ? "yes" : "no");
+        ImGui::Text(
+            "Descriptor Limits S/SI/DS/Frag: %u / %u / %u / %u",
+            m_desktopCapabilityProbe.maxPerStageDescriptorSamplers,
+            m_desktopCapabilityProbe.maxPerStageDescriptorSampledImages,
+            m_desktopCapabilityProbe.maxDescriptorSetSampledImages,
+            m_desktopCapabilityProbe.maxFragmentCombinedOutputResources
+        );
+        ImGui::Text(
+            "Storage Image Limit: %u",
+            m_desktopCapabilityProbe.maxDescriptorSetStorageImages
+        );
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNodeEx("Ray Tracing Capabilities", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text(
+            "Acceleration Structure: %s",
+            m_rayTracingCapabilityProbe.accelerationStructureExtension ? "yes" : "no"
+        );
+        ImGui::Text("Ray Query: %s", m_rayTracingCapabilityProbe.rayQueryExtension ? "yes" : "no");
+        ImGui::Text(
+            "Deferred Host Operations: %s",
+            m_rayTracingCapabilityProbe.deferredHostOperationsExtension ? "yes" : "no"
+        );
+        ImGui::Text(
+            "RT Pipeline: %s",
+            m_rayTracingCapabilityProbe.rayTracingPipelineExtension ? "yes" : "no"
+        );
+        ImGui::Text(
+            "RT Maintenance1: %s",
+            m_rayTracingCapabilityProbe.rayTracingMaintenance1Extension ? "yes" : "no"
+        );
+        ImGui::Text(
+            "RT Position Fetch: %s",
+            m_rayTracingCapabilityProbe.rayTracingPositionFetchExtension ? "yes" : "no"
+        );
+        ImGui::Text(
+            "Acceleration Structure Feature: %s",
+            m_rayTracingCapabilityProbe.accelerationStructureFeature ? "yes" : "no"
+        );
+        ImGui::Text("Ray Query Feature: %s", m_rayTracingCapabilityProbe.rayQueryFeature ? "yes" : "no");
+        ImGui::Text("RT Core Ready: %s", m_rayTracingCapabilityProbe.rayTracingCoreReady ? "yes" : "no");
+        ImGui::Text(
+            "Scratch Alignment: %llu",
+            static_cast<unsigned long long>(m_rayTracingCapabilityProbe.scratchAlignment)
+        );
+        ImGui::Text("Chunk RT Vertices: %u", m_rtChunkGeometry.vertexCount);
+        ImGui::Text("Chunk RT Indices: %u", m_rtChunkGeometry.indexCount);
+        ImGui::Text("Magica RT Geometries: %u", static_cast<unsigned>(m_rtMagicaGeometries.size()));
+        ImGui::TreePop();
     }
     if (ImGui::TreeNodeEx("Draw Calls", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("Total: %u", m_debugDrawCallsTotal);

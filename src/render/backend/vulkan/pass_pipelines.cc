@@ -168,18 +168,25 @@ bool RendererBackend::createMagicaPipeline() {
 
     constexpr const char* kWorldVertexShaderPath = "../src/render/shaders/voxel_packed.vert.slang.spv";
     constexpr const char* kWorldFragmentShaderPath = "../src/render/shaders/voxel_packed.frag.slang.spv";
+    constexpr const char* kWorldFragmentRtShaderPath = "../src/render/shaders/voxel_packed_rt.frag.slang.spv";
 
-    std::array<VkShaderModule, 2> shaderModules = {
+    std::array<VkShaderModule, 3> shaderModules = {
+        VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE
     };
     VkShaderModule& magicaVertShaderModule = shaderModules[0];
     VkShaderModule& magicaFragShaderModule = shaderModules[1];
+    VkShaderModule& magicaFragRtShaderModule = shaderModules[2];
     const std::array<ShaderModuleLoadSpec, 2> shaderLoadSpecs = {{
         {kWorldVertexShaderPath, "magica.voxel_packed.vert"},
         {kWorldFragmentShaderPath, "magica.voxel_packed.frag"},
     }};
-    if (!createShaderModulesFromFiles(m_device, shaderLoadSpecs, shaderModules)) {
+    if (!createShaderModulesFromFiles(
+            m_device,
+            shaderLoadSpecs,
+            std::span<VkShaderModule>(shaderModules).first(shaderLoadSpecs.size())
+        )) {
         return false;
     }
 
@@ -228,6 +235,20 @@ bool RendererBackend::createMagicaPipeline() {
     const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
         vertexShaderStage,
         fragmentShaderStage
+    };
+    VkPipelineShaderStageCreateInfo rtFragmentShaderStage = fragmentShaderStage;
+    bool hasRtMagicaVariant = false;
+    if (m_rayTracingRuntimeEnabled && m_rtShaderVariantFileAvailable) {
+        if (!createShaderModuleFromFile(m_device, kWorldFragmentRtShaderPath, "magica.voxel_packed_rt.frag", magicaFragRtShaderModule)) {
+            VOX_LOGW("render") << "magica RT fragment shader unavailable; keeping shadow-map-only magica path\n";
+        } else {
+            rtFragmentShaderStage.module = magicaFragRtShaderModule;
+            hasRtMagicaVariant = true;
+        }
+    }
+    const std::array<VkPipelineShaderStageCreateInfo, 2> rtShaderStages = {
+        vertexShaderStage,
+        rtFragmentShaderStage
     };
 
     VkVertexInputBindingDescription bindingDescriptions[2]{};
@@ -336,9 +357,8 @@ bool RendererBackend::createMagicaPipeline() {
         &magicaPipeline
     );
 
-    destroyShaderModules(m_device, shaderModules);
-
     if (pipelineResult != VK_SUCCESS) {
+        destroyShaderModules(m_device, shaderModules);
         logVkFailure("vkCreateGraphicsPipelines(magica)", pipelineResult);
         return false;
     }
@@ -348,9 +368,38 @@ bool RendererBackend::createMagicaPipeline() {
     }
     m_magicaPipeline = magicaPipeline;
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_magicaPipeline), "pipeline.magicaVoxel");
+    if (m_magicaPipelineRt != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_magicaPipelineRt, nullptr);
+        m_magicaPipelineRt = VK_NULL_HANDLE;
+    }
+    if (hasRtMagicaVariant) {
+        VkPipeline rtMagicaPipeline = VK_NULL_HANDLE;
+        VkGraphicsPipelineCreateInfo rtPipelineCreateInfo = pipelineCreateInfo;
+        rtPipelineCreateInfo.pStages = rtShaderStages.data();
+        const VkResult rtPipelineResult = vkCreateGraphicsPipelines(
+            m_device,
+            VK_NULL_HANDLE,
+            1,
+            &rtPipelineCreateInfo,
+            nullptr,
+            &rtMagicaPipeline
+        );
+        if (rtPipelineResult != VK_SUCCESS) {
+            vkDestroyPipeline(m_device, magicaPipeline, nullptr);
+            destroyShaderModules(m_device, shaderModules);
+            logVkFailure("vkCreateGraphicsPipelines(magica_rt)", rtPipelineResult);
+            return false;
+        }
+        m_magicaPipelineRt = rtMagicaPipeline;
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_magicaPipelineRt), "pipeline.magicaVoxel.rt");
+    }
+    destroyShaderModules(m_device, shaderModules);
+    m_rtMainPassImplemented = m_rayTracingRuntimeEnabled && m_pipelineRt != VK_NULL_HANDLE && m_magicaPipelineRt != VK_NULL_HANDLE;
+    refreshShadowStats();
     VOX_LOGI("render") << "pipeline config (magica): samples=" << static_cast<uint32_t>(m_colorSampleCount)
                        << ", cullMode=" << static_cast<uint32_t>(rasterizer.cullMode)
                        << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
+                       << ", rtVariant=" << (m_magicaPipelineRt != VK_NULL_HANDLE ? "yes" : "no")
                        << "\n";
     return true;
 }
@@ -1221,6 +1270,7 @@ bool RendererBackend::createGraphicsPipeline() {
 
     constexpr const char* kWorldVertexShaderPath = "../src/render/shaders/voxel_packed.vert.slang.spv";
     constexpr const char* kWorldFragmentShaderPath = "../src/render/shaders/voxel_packed.frag.slang.spv";
+    constexpr const char* kWorldFragmentRtShaderPath = "../src/render/shaders/voxel_packed_rt.frag.slang.spv";
     constexpr const char* kSkyboxVertexShaderPath = "../src/render/shaders/skybox.vert.slang.spv";
     constexpr const char* kSkyboxFragmentShaderPath = "../src/render/shaders/skybox.frag.slang.spv";
     constexpr const char* kToneMapVertexShaderPath = "../src/render/shaders/tone_map.vert.slang.spv";
@@ -1230,7 +1280,8 @@ bool RendererBackend::createGraphicsPipeline() {
     constexpr const char* kGrassShadowVertexShaderPath = "../src/render/shaders/grass_billboard_shadow.vert.slang.spv";
     constexpr const char* kGrassShadowFragmentShaderPath = "../src/render/shaders/grass_billboard_shadow.frag.slang.spv";
 
-    std::array<VkShaderModule, 7> sceneShaderModules = {
+    std::array<VkShaderModule, 8> sceneShaderModules = {
+        VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
@@ -1245,7 +1296,8 @@ bool RendererBackend::createGraphicsPipeline() {
     VkShaderModule& skyboxFragShaderModule = sceneShaderModules[3];
     VkShaderModule& toneMapVertShaderModule = sceneShaderModules[4];
     VkShaderModule& toneMapFragShaderModule = sceneShaderModules[5];
-    VkShaderModule& shadowVertShaderModule = sceneShaderModules[6];
+    VkShaderModule& worldFragRtShaderModule = sceneShaderModules[6];
+    VkShaderModule& shadowVertShaderModule = sceneShaderModules[7];
 
     const std::array<ShaderModuleLoadSpec, 6> sceneShaderLoadSpecs = {{
         {kWorldVertexShaderPath, "voxel_packed.vert"},
@@ -1309,6 +1361,16 @@ bool RendererBackend::createGraphicsPipeline() {
     worldFragmentShaderStage.pSpecializationInfo = &worldFragmentSpecializationInfo;
 
     std::array<VkPipelineShaderStageCreateInfo, 2> worldShaderStages = {worldVertexShaderStage, worldFragmentShaderStage};
+    std::array<VkPipelineShaderStageCreateInfo, 2> worldRtShaderStages = worldShaderStages;
+    bool hasRtWorldVariant = false;
+    if (m_rayTracingRuntimeEnabled && m_rtShaderVariantFileAvailable) {
+        if (!createShaderModuleFromFile(m_device, kWorldFragmentRtShaderPath, "voxel_packed_rt.frag", worldFragRtShaderModule)) {
+            VOX_LOGW("render") << "world RT fragment shader unavailable; keeping shadow-map-only world path\n";
+        } else {
+            worldRtShaderStages[1].module = worldFragRtShaderModule;
+            hasRtWorldVariant = true;
+        }
+    }
 
     // Binding 0: packed voxel vertices. Binding 1: per-draw chunk origin.
     VkVertexInputBindingDescription bindingDescriptions[2]{};
@@ -1421,11 +1483,31 @@ bool RendererBackend::createGraphicsPipeline() {
         logVkFailure("vkCreateGraphicsPipelines(world)", worldPipelineResult);
         return false;
     }
+    VkPipeline worldRtPipeline = VK_NULL_HANDLE;
+    if (hasRtWorldVariant) {
+        VkGraphicsPipelineCreateInfo worldRtPipelineCreateInfo = pipelineCreateInfo;
+        worldRtPipelineCreateInfo.pStages = worldRtShaderStages.data();
+        const VkResult worldRtPipelineResult = vkCreateGraphicsPipelines(
+            m_device,
+            VK_NULL_HANDLE,
+            1,
+            &worldRtPipelineCreateInfo,
+            nullptr,
+            &worldRtPipeline
+        );
+        if (worldRtPipelineResult != VK_SUCCESS) {
+            vkDestroyPipeline(m_device, worldPipeline, nullptr);
+            destroySceneShaderModules();
+            logVkFailure("vkCreateGraphicsPipelines(world_rt)", worldRtPipelineResult);
+            return false;
+        }
+    }
     VOX_LOGI("render") << "pipeline config (world): samples=" << static_cast<uint32_t>(m_colorSampleCount)
               << ", cullMode=" << static_cast<uint32_t>(rasterizer.cullMode)
               << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
               << ", shadowPolicyMode=" << worldFragmentSpecializationData.shadowPolicyMode
               << ", ambientPolicyMode=" << worldFragmentSpecializationData.ambientPolicyMode
+              << ", rtVariant=" << (worldRtPipeline != VK_NULL_HANDLE ? "yes" : "no")
               << "\n";
 
     VkPipelineRasterizationStateCreateInfo previewAddRasterizer = rasterizer;
@@ -1647,7 +1729,7 @@ bool RendererBackend::createGraphicsPipeline() {
     if (!createShaderModulesFromFiles(
             m_device,
             shadowShaderLoadSpecs,
-            std::span<VkShaderModule>(sceneShaderModules).subspan(6, 1)
+            std::span<VkShaderModule>(sceneShaderModules).subspan(7, 1)
         )) {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
@@ -1943,6 +2025,9 @@ bool RendererBackend::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
         vkDestroyPipeline(m_device, shadowPipeline, nullptr);
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        if (worldRtPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, worldRtPipeline, nullptr);
+        }
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
         vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
@@ -1957,6 +2042,9 @@ bool RendererBackend::createGraphicsPipeline() {
 
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
+    }
+    if (m_pipelineRt != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipelineRt, nullptr);
     }
     if (m_skyboxPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_skyboxPipeline, nullptr);
@@ -1980,6 +2068,7 @@ bool RendererBackend::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
     }
     m_pipeline = worldPipeline;
+    m_pipelineRt = worldRtPipeline;
     m_skyboxPipeline = skyboxPipeline;
     m_shadowPipeline = shadowPipeline;
     m_pipeShadowPipeline = pipeShadowPipeline;
@@ -1988,6 +2077,9 @@ bool RendererBackend::createGraphicsPipeline() {
     m_previewAddPipeline = previewAddPipeline;
     m_previewRemovePipeline = previewRemovePipeline;
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeline), "pipeline.world");
+    if (m_pipelineRt != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipelineRt), "pipeline.world.rt");
+    }
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyboxPipeline), "pipeline.skybox");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_shadowPipeline), "pipeline.shadow.voxels");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeShadowPipeline), "pipeline.shadow.pipes");
@@ -1999,6 +2091,12 @@ bool RendererBackend::createGraphicsPipeline() {
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_tonemapPipeline), "pipeline.tonemap");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewAddPipeline), "pipeline.preview.add");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewRemovePipeline), "pipeline.preview.remove");
+    if (!createMagicaPipeline()) {
+        VOX_LOGE("render") << "createGraphicsPipeline failed: createMagicaPipeline\n";
+        return false;
+    }
+    m_rtMainPassImplemented = m_rayTracingRuntimeEnabled && m_pipelineRt != VK_NULL_HANDLE && m_magicaPipelineRt != VK_NULL_HANDLE;
+    refreshShadowStats();
     VOX_LOGI("render") << "graphics pipelines ready (shadow + hdr scene + tonemap + preview="
               << (m_supportsWireframePreview ? "wireframe" : "ghost")
               << ")\n";

@@ -13,6 +13,11 @@ Sampler3D<float4> voxelGiVolume;
 [[vk::binding(11, 0)]]
 Sampler3D<float4> voxelGiOccupancyVolume;
 
+#ifdef VOXEL_RT_SHADOWS
+[[vk::binding(12, 0)]]
+RaytracingAccelerationStructure shadowScene;
+#endif
+
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
 
@@ -394,6 +399,82 @@ float sampleShadowPcf(float3 worldPosition, float3 normal, int cascadeIndex, flo
     return visibility / max(weightSum, 0.0001);
 }
 
+#ifdef VOXEL_RT_SHADOWS
+static const float kPi = 3.14159265;
+static const float kGoldenAngle = 2.39996323;
+
+float2 rtDiskSampleOffset(int sampleIndex, int sampleCount)
+{
+    const float count = max(float(sampleCount), 1.0);
+    const float radius = sqrt((float(sampleIndex) + 0.5) / count);
+    const float angle = (float(sampleIndex) + 1.0) * kGoldenAngle;
+    return float2(cos(angle), sin(angle)) * radius;
+}
+
+float hashRtShadowRotation(float3 worldPosition, uint face)
+{
+    const float3 p = worldPosition + float3(float(face) * 0.173, float(face) * 0.071, float(face) * 0.119);
+    return frac(sin(dot(p, float3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+float2 rotateRtDiskOffset(float2 offset, float angle)
+{
+    const float s = sin(angle);
+    const float c = cos(angle);
+    return float2((offset.x * c) - (offset.y * s), (offset.x * s) + (offset.y * c));
+}
+
+float sampleRayTracedShadowRay(float3 origin, float3 direction, float tMin, float tMax)
+{
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = tMin;
+    ray.TMax = tMax;
+
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> rayQuery;
+    rayQuery.TraceRayInline(shadowScene, 0, 0xFF, ray);
+    while (rayQuery.Proceed()) {}
+    return (rayQuery.CommittedStatus() == COMMITTED_NOTHING) ? 1.0 : 0.0;
+}
+
+float sampleRayTracedShadow(float3 worldPosition, float3 normal, float ndotl)
+{
+    const float normalOffset = lerp(camera.shadowConfig0.x, camera.shadowConfig0.y, 0.35) * (1.0 + (1.0 - ndotl));
+    const float3 shadowSamplePosition = worldPosition + (normal * normalOffset);
+    const float3 toSun = -normalize(camera.sunDirectionIntensity.xyz);
+    const float tMin = max(0.02, normalOffset * 0.5);
+    const float tMax = max(camera.shadowCascadeSplits.w * 1.5, 512.0);
+    const int sampleCount = clamp(int(camera.shadowConfig4.x + 0.5), 1, 8);
+    const float sunAngularRadiusDegrees = max(camera.shadowConfig4.y, 0.0);
+    const float coneRadius = tan(sunAngularRadiusDegrees * (kPi / 180.0));
+
+    if (sampleCount <= 1 || coneRadius <= 1e-5)
+    {
+        return sampleRayTracedShadowRay(shadowSamplePosition, toSun, tMin, tMax);
+    }
+
+    const float3 basisUp = (abs(toSun.y) < 0.999) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    const float3 tangent = normalize(cross(basisUp, toSun));
+    const float3 bitangent = cross(toSun, tangent);
+    const float rotationAngle = hashRtShadowRotation(worldPosition, 0u) * (2.0 * kPi);
+
+    float visibility = 0.0;
+    [unroll]
+    for (int sampleIndex = 0; sampleIndex < 8; ++sampleIndex)
+    {
+        if (sampleIndex >= sampleCount) break;
+        const float2 diskOffset = rotateRtDiskOffset(rtDiskSampleOffset(sampleIndex, sampleCount), rotationAngle);
+        const float3 rayDirection = normalize(
+            toSun +
+            ((tangent * diskOffset.x) + (bitangent * diskOffset.y)) * coneRadius
+        );
+        visibility += sampleRayTracedShadowRay(shadowSamplePosition, rayDirection, tMin, tMax);
+    }
+    return visibility / float(sampleCount);
+}
+#endif
+
 float sampleCascadedShadow(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
 {
     const int primaryCascade = chooseShadowCascade(viewDepth);
@@ -498,6 +579,9 @@ float3 evaluateAmbient<TAmbientPolicy : IAmbientPolicy>(
 
 float selectShadowVisibility(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
 {
+#ifdef VOXEL_RT_SHADOWS
+    return sampleRayTracedShadow(worldPosition, normal, ndotl);
+#else
     if (kShadowPolicyMode <= 0)
     {
         return evaluateShadow(NoShadowPolicy(), worldPosition, normal, viewDepth, ndotl);
@@ -507,6 +591,7 @@ float selectShadowVisibility(float3 worldPosition, float3 normal, float viewDept
         return evaluateShadow(PrimaryCascadePcfShadowPolicy(), worldPosition, normal, viewDepth, ndotl);
     }
     return evaluateShadow(CascadedBlendPcfShadowPolicy(), worldPosition, normal, viewDepth, ndotl);
+#endif
 }
 
 float3 selectAmbient(float3 normal, float vertexAo)
@@ -562,7 +647,11 @@ float4 main(FragmentInput input) : SV_Target0
         // Use the directional shadow map as a cheap sky-visibility proxy for enclosed spaces.
         const float3 skyProbeNormal = float3(0.0, 1.0, 0.0);
         const float skyProbeNdotL = max(dot(skyProbeNormal, -sunDirection), 0.25);
+#ifdef VOXEL_RT_SHADOWS
+        skyOcclusion = sampleRayTracedShadow(input.inWorldPosition, skyProbeNormal, skyProbeNdotL);
+#else
         skyOcclusion = selectShadowVisibility(input.inWorldPosition, skyProbeNormal, viewDepth, skyProbeNdotL);
+#endif
     }
     const float skyVisibility = clamp(skyOcclusion, 0.0, 1.0);
 

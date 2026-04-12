@@ -2,11 +2,21 @@
 
 #include "core/log.h"
 
+#ifndef VOXEL_APP_VERSION
+#define VOXEL_APP_VERSION "dev"
+#endif
+
+#ifndef VOXEL_RELEASE_PROFILE
+#define VOXEL_RELEASE_PROFILE "dev_runtime"
+#endif
+
 // Program entry point
 // Responsible for: creating the app and handing control to the app runtime loop.
 // Should NOT do: implement gameplay systems or low-level window/input handling.
 int main() {
-    VOX_LOGI("main") << "startup";
+    VOX_LOGI("main") << "startup"
+                     << " version=" << VOXEL_APP_VERSION
+                     << " profile=" << VOXEL_RELEASE_PROFILE;
     voxelsprout::app::App app;
 
     if (!app.init()) {

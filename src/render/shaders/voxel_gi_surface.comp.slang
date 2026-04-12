@@ -31,6 +31,11 @@ RWTexture3D<float4> voxelGiSurfaceNegZOut;
 [[vk::binding(12, 0)]]
 RWTexture3D<float4> voxelGiSkyExposure;
 
+#ifdef VOXEL_GI_RT_SURFACE
+[[vk::binding(16, 0)]]
+RaytracingAccelerationStructure giSurfaceScene;
+#endif
+
 int chooseShadowCascade(float viewDepth)
 {
     if (viewDepth <= camera.shadowCascadeSplits.x) return 0;
@@ -112,6 +117,83 @@ float sampleSunVoxelVisibility(int3 cell, int3 faceOffset, int3 dims, float3 sun
 
     return visibility;
 }
+
+#ifdef VOXEL_GI_RT_SURFACE
+static const float kPi = 3.14159265;
+
+float2 rtSurfaceDiskSampleOffset(int sampleIndex)
+{
+    if (sampleIndex == 0) return float2(0.0, 0.0);
+    if (sampleIndex == 1) return float2(0.72, 0.0);
+    if (sampleIndex == 2) return float2(-0.36, 0.6235);
+    return float2(-0.36, -0.6235);
+}
+
+float hashRtSurfaceRotation(int3 cell, int faceIndex)
+{
+    const float3 p = float3(cell) + float3(float(faceIndex) * 0.173, float(faceIndex) * 0.071, float(faceIndex) * 0.119);
+    return frac(sin(dot(p, float3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+float2 rotateRtSurfaceOffset(float2 offset, float angle)
+{
+    const float s = sin(angle);
+    const float c = cos(angle);
+    return float2((offset.x * c) - (offset.y * s), (offset.x * s) + (offset.y * c));
+}
+
+float sampleRtSurfaceRay(float3 origin, float3 direction, float tMin, float tMax)
+{
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = tMin;
+    ray.TMax = tMax;
+
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> rayQuery;
+    rayQuery.TraceRayInline(giSurfaceScene, 0, 0xFF, ray);
+    while (rayQuery.Proceed()) {}
+    return (rayQuery.CommittedStatus() == COMMITTED_NOTHING) ? 1.0 : 0.0;
+}
+
+float sampleRtSunVisibility(float3 faceWorldPosition, float3 normal, float ndotl, int3 cell, int faceIndex)
+{
+    const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
+    const float receiverBiasScale = clamp(camera.shadowConfig4.w, 0.25, 4.0);
+    const float normalOffset = max(cellSize * 0.02 * receiverBiasScale, cellSize * 0.005);
+    const float3 origin = faceWorldPosition + (normal * normalOffset);
+    const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
+    const float tMin = max(cellSize * 0.02, normalOffset * 0.5);
+    const float tMax = max(camera.shadowCascadeSplits.w * 1.5, 512.0);
+    const int sampleCount = clamp(int(camera.shadowConfig4.z + 0.5), 1, 2);
+    const float sunAngularRadiusDegrees = max(camera.shadowConfig4.y, 0.0);
+    const float coneRadius = tan(sunAngularRadiusDegrees * (kPi / 180.0));
+
+    if (sampleCount <= 1 || coneRadius <= 1e-5)
+    {
+        return sampleRtSurfaceRay(origin, toSun, tMin, tMax);
+    }
+
+    const float3 basisUp = (abs(toSun.y) < 0.999) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    const float3 tangent = normalize(cross(basisUp, toSun));
+    const float3 bitangent = cross(toSun, tangent);
+    const float rotationAngle = hashRtSurfaceRotation(cell, faceIndex) * (2.0 * kPi);
+
+    float visibility = 0.0;
+    [unroll]
+    for (int sampleIndex = 0; sampleIndex < 2; ++sampleIndex)
+    {
+        if (sampleIndex >= sampleCount) break;
+        const float2 diskOffset = rotateRtSurfaceOffset(rtSurfaceDiskSampleOffset(sampleIndex), rotationAngle);
+        const float3 direction = normalize(
+            toSun +
+            ((tangent * diskOffset.x) + (bitangent * diskOffset.y)) * coneRadius
+        );
+        visibility += sampleRtSurfaceRay(origin, direction, tMin, tMax);
+    }
+    return visibility / float(sampleCount);
+}
+#endif
 
 [numthreads(4, 4, 4)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
@@ -200,12 +282,17 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
         const float ndotl = max(dot(normal, -sunDirection), 0.0);
         const float3 faceCenterOffset = normal * (cellSize * 0.51);
+#ifndef VOXEL_GI_RT_SURFACE
         const float3 receiverBiasOffset = normal * (cellSize * 0.02);
         const float shadowVisibility =
             (ndotl > 0.0001) ? sampleShadowVisibility(worldPosition + faceCenterOffset + receiverBiasOffset) : 0.0;
         const float voxelSunVisibility =
             (ndotl > 0.0001) ? sampleSunVoxelVisibility(cell, faceOffsets[i], dims, sunDirection) : 0.0;
         const float directVisibility = shadowVisibility * voxelSunVisibility;
+#else
+        const float directVisibility =
+            (ndotl > 0.0001) ? sampleRtSunVisibility(worldPosition + faceCenterOffset, normal, ndotl, cell, i) : 0.0;
+#endif
         const float skyFactor = lerp(0.25, 1.0, skyColumnExposure) * skyLocalOcclusion;
         const float upFactor = saturate((normal.y * 0.5) + 0.5);
         const float ambientBoost = lerp(0.6, 1.2, upFactor);

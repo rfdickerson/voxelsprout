@@ -34,6 +34,20 @@ namespace voxelsprout::render {
 
 #include "render/renderer_shared.h"
 
+namespace {
+
+struct RuntimeAssetSpec {
+    const char* path = nullptr;
+    const char* label = nullptr;
+    bool required = true;
+};
+
+bool runtimeAssetExists(const char* path) {
+    return path != nullptr && path[0] != '\0' && std::filesystem::exists(std::filesystem::path(path));
+}
+
+} // namespace
+
 bool isDeviceExtensionAvailable(VkPhysicalDevice physicalDevice, const char* extensionName) {
     if (physicalDevice == VK_NULL_HANDLE || extensionName == nullptr || extensionName[0] == '\0') {
         return false;
@@ -114,6 +128,11 @@ bool RendererBackend::init(GLFWwindow* window, const voxelsprout::world::ChunkGr
                 (static_cast<std::uint32_t>(shade) << 16u) |
                 (0xFFu << 24u);
         }
+    }
+
+    if (!validateReleaseRuntimeAssets()) {
+        VOX_LOGE("render") << "init failed: required runtime assets missing\n";
+        return false;
     }
 
     if (glfwVulkanSupported() == GLFW_FALSE) {
@@ -258,9 +277,77 @@ bool RendererBackend::init(GLFWwindow* window, const voxelsprout::world::ChunkGr
         shutdown();
         return false;
     }
+    setShadowSettings(m_shadowSettings);
+    VOX_LOGI("render") << "ray tracing release status: " << rayTracingReleaseStatusName()
+                       << ", requested=" << (m_shadowSettings.mode == ShadowMode::ShadowMaps ? "shadow_maps" : "rt_beta")
+                       << ", optionalRtShaderVariant=" << (m_rtShaderVariantFileAvailable ? "yes" : "no")
+                       << ", betaScope=main_pass_voxels_magica_only";
 
     VOX_LOGI("render") << "init complete in " << elapsedMs(initStart) << " ms\n";
     return true;
+}
+
+bool RendererBackend::validateReleaseRuntimeAssets() {
+    constexpr std::array<RuntimeAssetSpec, 25> kRuntimeAssetSpecs = {{
+        {"../src/render/shaders/voxel_packed.vert.slang.spv", "world vertex shader", true},
+        {"../src/render/shaders/voxel_packed.frag.slang.spv", "world fragment shader", true},
+        {"../src/render/shaders/skybox.vert.slang.spv", "skybox vertex shader", true},
+        {"../src/render/shaders/skybox.frag.slang.spv", "skybox fragment shader", true},
+        {"../src/render/shaders/tone_map.vert.slang.spv", "tonemap vertex shader", true},
+        {"../src/render/shaders/tone_map.frag.slang.spv", "tonemap fragment shader", true},
+        {"../src/render/shaders/shadow_depth.vert.slang.spv", "shadow vertex shader", true},
+        {"../src/render/shaders/pipe_shadow.vert.slang.spv", "pipe shadow vertex shader", true},
+        {"../src/render/shaders/grass_billboard_shadow.vert.slang.spv", "grass shadow vertex shader", true},
+        {"../src/render/shaders/grass_billboard_shadow.frag.slang.spv", "grass shadow fragment shader", true},
+        {"../src/render/shaders/pipe_instanced.vert.slang.spv", "pipe vertex shader", true},
+        {"../src/render/shaders/pipe_instanced.frag.slang.spv", "pipe fragment shader", true},
+        {"../src/render/shaders/grass_billboard.vert.slang.spv", "grass vertex shader", true},
+        {"../src/render/shaders/grass_billboard.frag.slang.spv", "grass fragment shader", true},
+        {"../src/render/shaders/grass_billboard_normaldepth.frag.slang.spv", "grass normal-depth shader", true},
+        {"../src/render/shaders/pipe_normaldepth.frag.slang.spv", "pipe normal-depth shader", true},
+        {"../src/render/shaders/voxel_normaldepth.frag.slang.spv", "voxel normal-depth shader", true},
+        {"../src/render/shaders/ssao.frag.slang.spv", "ssao shader", true},
+        {"../src/render/shaders/ssao_blur.frag.slang.spv", "ssao blur shader", true},
+        {"../src/render/shaders/sdf_main.vert.slang.spv", "sdf main vertex shader", true},
+        {"../src/render/shaders/sdf_main.frag.slang.spv", "sdf main fragment shader", true},
+        {"../src/render/shaders/sdf_prepass.vert.slang.spv", "sdf prepass vertex shader", true},
+        {"../src/render/shaders/sdf_prepass.frag.slang.spv", "sdf prepass fragment shader", true},
+        {"../src/render/shaders/sdf_shadow.vert.slang.spv", "sdf shadow vertex shader", true},
+        {"../src/render/shaders/sdf_shadow.frag.slang.spv", "sdf shadow fragment shader", true},
+    }};
+    constexpr std::array<RuntimeAssetSpec, 3> kPostAndComputeAssetSpecs = {{
+        {"../src/render/shaders/auto_exposure_histogram.comp.slang.spv", "auto exposure histogram shader", true},
+        {"../src/render/shaders/auto_exposure_update.comp.slang.spv", "auto exposure update shader", true},
+        {"../src/render/shaders/sun_shafts.comp.slang.spv", "sun shafts shader", true},
+    }};
+    constexpr RuntimeAssetSpec kOptionalRtShaderVariant = {
+        "../src/render/shaders/voxel_packed_rt.frag.slang.spv",
+        "ray-traced main-pass fragment shader variant",
+        false
+    };
+
+    bool missingRequiredAsset = false;
+    for (const RuntimeAssetSpec& asset : kRuntimeAssetSpecs) {
+        if (!runtimeAssetExists(asset.path)) {
+            VOX_LOGE("render") << "missing required runtime asset: " << asset.label
+                               << " (" << asset.path << ")\n";
+            missingRequiredAsset = true;
+        }
+    }
+    for (const RuntimeAssetSpec& asset : kPostAndComputeAssetSpecs) {
+        if (!runtimeAssetExists(asset.path)) {
+            VOX_LOGE("render") << "missing required runtime asset: " << asset.label
+                               << " (" << asset.path << ")\n";
+            missingRequiredAsset = true;
+        }
+    }
+    m_rtShaderVariantFileAvailable = runtimeAssetExists(kOptionalRtShaderVariant.path);
+    if (!m_rtShaderVariantFileAvailable) {
+        VOX_LOGW("render") << "optional runtime asset missing: " << kOptionalRtShaderVariant.label
+                           << " (" << kOptionalRtShaderVariant.path
+                           << "); RT beta main-pass shaders will stay disabled\n";
+    }
+    return !missingRequiredAsset;
 }
 
 
@@ -330,6 +417,8 @@ bool RendererBackend::pickPhysicalDevice() {
     m_bindlessTextureCapacity = 0;
     m_supportsDisplayTiming = false;
     m_hasDisplayTimingExtension = false;
+    m_desktopCapabilityProbe = {};
+    m_rayTracingCapabilityProbe = {};
 
     struct CandidateSelection {
         VkPhysicalDevice device = VK_NULL_HANDLE;
@@ -351,6 +440,8 @@ bool RendererBackend::pickPhysicalDevice() {
         VkFormat hdrColorFormat = VK_FORMAT_UNDEFINED;
         VkFormat normalDepthFormat = VK_FORMAT_UNDEFINED;
         VkFormat ssaoFormat = VK_FORMAT_UNDEFINED;
+        DesktopCapabilityProbe capabilityProbe{};
+        RayTracingCapabilityProbe rayTracingProbe{};
     };
     auto scoreCandidate = [](const CandidateSelection& candidate) -> int {
         int score = 0;
@@ -451,10 +542,24 @@ bool RendererBackend::pickPhysicalDevice() {
         VkPhysicalDeviceMemoryPriorityFeaturesEXT memoryPriorityFeatures{};
         memoryPriorityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT;
         memoryPriorityFeatures.pNext = &vulkan13Features;
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures{};
+        accelerationStructureFeatures.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+        accelerationStructureFeatures.pNext = &memoryPriorityFeatures;
+        VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+        rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+        rayQueryFeatures.pNext = &accelerationStructureFeatures;
         VkPhysicalDeviceFeatures2 features2{};
         features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features2.pNext = &memoryPriorityFeatures;
+        features2.pNext = &rayQueryFeatures;
         vkGetPhysicalDeviceFeatures2(candidate, &features2);
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR accelerationStructureProperties{};
+        accelerationStructureProperties.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+        VkPhysicalDeviceProperties2 properties2{};
+        properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        properties2.pNext = &accelerationStructureProperties;
+        vkGetPhysicalDeviceProperties2(candidate, &properties2);
         if (vulkan13Features.dynamicRendering != VK_TRUE) {
             VOX_LOGI("render") << "skip GPU: dynamicRendering not supported\n";
             continue;
@@ -516,6 +621,58 @@ bool RendererBackend::pickPhysicalDevice() {
         const bool displayTimingExtensionAvailable =
             isDeviceExtensionAvailable(candidate, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
         const bool supportsDisplayTiming = displayTimingExtensionAvailable;
+        DesktopCapabilityProbe capabilityProbe{};
+        capabilityProbe.descriptorHeapExtension =
+            isDeviceExtensionAvailable(candidate, "VK_EXT_descriptor_heap");
+        capabilityProbe.unifiedImageLayoutsExtension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_unified_image_layouts");
+        capabilityProbe.hostImageCopyExtension =
+            isDeviceExtensionAvailable(candidate, "VK_EXT_host_image_copy");
+        capabilityProbe.shaderClockExtension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_shader_clock");
+        capabilityProbe.computeShaderDerivativesExtension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_compute_shader_derivatives");
+        capabilityProbe.fragmentShadingRateExtension =
+            isDeviceExtensionAvailable(candidate, VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+        capabilityProbe.swapchainMaintenance1Extension =
+            isDeviceExtensionAvailable(candidate, "VK_EXT_swapchain_maintenance1");
+        capabilityProbe.presentIdExtension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_present_id");
+        capabilityProbe.presentWaitExtension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_present_wait");
+        capabilityProbe.displayTimingExtension = displayTimingExtensionAvailable;
+        capabilityProbe.maxPerStageDescriptorSamplers = properties.limits.maxPerStageDescriptorSamplers;
+        capabilityProbe.maxPerStageDescriptorSampledImages = properties.limits.maxPerStageDescriptorSampledImages;
+        capabilityProbe.maxDescriptorSetSampledImages = properties.limits.maxDescriptorSetSampledImages;
+        capabilityProbe.maxDescriptorSetStorageImages = properties.limits.maxDescriptorSetStorageImages;
+        capabilityProbe.maxFragmentCombinedOutputResources = properties.limits.maxFragmentCombinedOutputResources;
+        capabilityProbe.roadmap2026CoreReady =
+            capabilityProbe.hostImageCopyExtension &&
+            capabilityProbe.fragmentShadingRateExtension &&
+            capabilityProbe.computeShaderDerivativesExtension &&
+            capabilityProbe.swapchainMaintenance1Extension;
+        RayTracingCapabilityProbe rayTracingProbe{};
+        rayTracingProbe.accelerationStructureExtension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_acceleration_structure");
+        rayTracingProbe.rayQueryExtension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_ray_query");
+        rayTracingProbe.deferredHostOperationsExtension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_deferred_host_operations");
+        rayTracingProbe.rayTracingPipelineExtension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_ray_tracing_pipeline");
+        rayTracingProbe.rayTracingMaintenance1Extension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_ray_tracing_maintenance1");
+        rayTracingProbe.rayTracingPositionFetchExtension =
+            isDeviceExtensionAvailable(candidate, "VK_KHR_ray_tracing_position_fetch");
+        rayTracingProbe.accelerationStructureFeature = accelerationStructureFeatures.accelerationStructure == VK_TRUE;
+        rayTracingProbe.rayQueryFeature = rayQueryFeatures.rayQuery == VK_TRUE;
+        rayTracingProbe.rayTracingCoreReady =
+            rayTracingProbe.accelerationStructureExtension &&
+            rayTracingProbe.rayQueryExtension &&
+            rayTracingProbe.deferredHostOperationsExtension &&
+            rayTracingProbe.accelerationStructureFeature &&
+            rayTracingProbe.rayQueryFeature;
+        rayTracingProbe.scratchAlignment = accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment;
 
         CandidateSelection candidateSelection{};
         candidateSelection.device = candidate;
@@ -540,10 +697,36 @@ bool RendererBackend::pickPhysicalDevice() {
         candidateSelection.hdrColorFormat = hdrColorFormat;
         candidateSelection.normalDepthFormat = normalDepthFormat;
         candidateSelection.ssaoFormat = ssaoFormat;
+        candidateSelection.capabilityProbe = capabilityProbe;
+        candidateSelection.rayTracingProbe = rayTracingProbe;
 
         VOX_LOGI("render") << "candidate presentation timing: gpu=" << properties.deviceName
                            << ", displayTimingSupport=" << (candidateSelection.supportsDisplayTiming ? "yes" : "no")
                            << "(ext=" << (candidateSelection.hasDisplayTimingExtension ? "yes" : "no") << ")\n";
+        VOX_LOGI("render") << "candidate roadmap2026 probe: gpu=" << properties.deviceName
+                           << ", descriptorHeap=" << (capabilityProbe.descriptorHeapExtension ? "yes" : "no")
+                           << ", unifiedImageLayouts=" << (capabilityProbe.unifiedImageLayoutsExtension ? "yes" : "no")
+                           << ", hostImageCopy=" << (capabilityProbe.hostImageCopyExtension ? "yes" : "no")
+                           << ", shaderClock=" << (capabilityProbe.shaderClockExtension ? "yes" : "no")
+                           << ", computeDerivatives=" << (capabilityProbe.computeShaderDerivativesExtension ? "yes" : "no")
+                           << ", fragmentShadingRate=" << (capabilityProbe.fragmentShadingRateExtension ? "yes" : "no")
+                           << ", swapchainMaintenance1=" << (capabilityProbe.swapchainMaintenance1Extension ? "yes" : "no")
+                           << ", presentId=" << (capabilityProbe.presentIdExtension ? "yes" : "no")
+                           << ", presentWait=" << (capabilityProbe.presentWaitExtension ? "yes" : "no")
+                           << ", roadmap2026CoreReady=" << (capabilityProbe.roadmap2026CoreReady ? "yes" : "no")
+                           << "\n";
+        VOX_LOGI("render") << "candidate ray tracing probe: gpu=" << properties.deviceName
+                           << ", accelerationStructure=" << (rayTracingProbe.accelerationStructureExtension ? "yes" : "no")
+                           << ", rayQuery=" << (rayTracingProbe.rayQueryExtension ? "yes" : "no")
+                           << ", deferredHostOps=" << (rayTracingProbe.deferredHostOperationsExtension ? "yes" : "no")
+                           << ", rtPipeline=" << (rayTracingProbe.rayTracingPipelineExtension ? "yes" : "no")
+                           << ", rtMaintenance1=" << (rayTracingProbe.rayTracingMaintenance1Extension ? "yes" : "no")
+                           << ", rtPositionFetch=" << (rayTracingProbe.rayTracingPositionFetchExtension ? "yes" : "no")
+                           << ", accelFeature=" << (rayTracingProbe.accelerationStructureFeature ? "yes" : "no")
+                           << ", rayQueryFeature=" << (rayTracingProbe.rayQueryFeature ? "yes" : "no")
+                           << ", rtCoreReady=" << (rayTracingProbe.rayTracingCoreReady ? "yes" : "no")
+                           << ", scratchAlignment=" << rayTracingProbe.scratchAlignment
+                           << "\n";
 
         if (!bestCandidate.has_value() ||
             scoreCandidate(candidateSelection) > scoreCandidate(bestCandidate.value())) {
@@ -572,6 +755,8 @@ bool RendererBackend::pickPhysicalDevice() {
         m_hdrColorFormat = selected.hdrColorFormat;
         m_normalDepthFormat = selected.normalDepthFormat;
         m_ssaoFormat = selected.ssaoFormat;
+        m_desktopCapabilityProbe = selected.capabilityProbe;
+        m_rayTracingCapabilityProbe = selected.rayTracingProbe;
         m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
 
         VOX_LOGI("render") << "selected GPU: " << selected.properties.deviceName
@@ -594,6 +779,35 @@ bool RendererBackend::pickPhysicalDevice() {
                            << ", hdrColorFormat=" << static_cast<int>(m_hdrColorFormat)
                            << ", normalDepthFormat=" << static_cast<int>(m_normalDepthFormat)
                            << ", ssaoFormat=" << static_cast<int>(m_ssaoFormat)
+                           << "\n";
+        VOX_LOGI("render") << "selected roadmap2026 probe: descriptorHeap="
+                           << (m_desktopCapabilityProbe.descriptorHeapExtension ? "yes" : "no")
+                           << ", unifiedImageLayouts=" << (m_desktopCapabilityProbe.unifiedImageLayoutsExtension ? "yes" : "no")
+                           << ", hostImageCopy=" << (m_desktopCapabilityProbe.hostImageCopyExtension ? "yes" : "no")
+                           << ", shaderClock=" << (m_desktopCapabilityProbe.shaderClockExtension ? "yes" : "no")
+                           << ", computeDerivatives=" << (m_desktopCapabilityProbe.computeShaderDerivativesExtension ? "yes" : "no")
+                           << ", fragmentShadingRate=" << (m_desktopCapabilityProbe.fragmentShadingRateExtension ? "yes" : "no")
+                           << ", swapchainMaintenance1=" << (m_desktopCapabilityProbe.swapchainMaintenance1Extension ? "yes" : "no")
+                           << ", presentId=" << (m_desktopCapabilityProbe.presentIdExtension ? "yes" : "no")
+                           << ", presentWait=" << (m_desktopCapabilityProbe.presentWaitExtension ? "yes" : "no")
+                           << ", roadmap2026CoreReady=" << (m_desktopCapabilityProbe.roadmap2026CoreReady ? "yes" : "no")
+                           << ", maxPerStageSamplers=" << m_desktopCapabilityProbe.maxPerStageDescriptorSamplers
+                           << ", maxPerStageSampledImages=" << m_desktopCapabilityProbe.maxPerStageDescriptorSampledImages
+                           << ", maxSetSampledImages=" << m_desktopCapabilityProbe.maxDescriptorSetSampledImages
+                           << ", maxSetStorageImages=" << m_desktopCapabilityProbe.maxDescriptorSetStorageImages
+                           << ", maxFragOutputResources=" << m_desktopCapabilityProbe.maxFragmentCombinedOutputResources
+                           << "\n";
+        VOX_LOGI("render") << "selected ray tracing probe: accelerationStructure="
+                           << (m_rayTracingCapabilityProbe.accelerationStructureExtension ? "yes" : "no")
+                           << ", rayQuery=" << (m_rayTracingCapabilityProbe.rayQueryExtension ? "yes" : "no")
+                           << ", deferredHostOps=" << (m_rayTracingCapabilityProbe.deferredHostOperationsExtension ? "yes" : "no")
+                           << ", rtPipeline=" << (m_rayTracingCapabilityProbe.rayTracingPipelineExtension ? "yes" : "no")
+                           << ", rtMaintenance1=" << (m_rayTracingCapabilityProbe.rayTracingMaintenance1Extension ? "yes" : "no")
+                           << ", rtPositionFetch=" << (m_rayTracingCapabilityProbe.rayTracingPositionFetchExtension ? "yes" : "no")
+                           << ", accelFeature=" << (m_rayTracingCapabilityProbe.accelerationStructureFeature ? "yes" : "no")
+                           << ", rayQueryFeature=" << (m_rayTracingCapabilityProbe.rayQueryFeature ? "yes" : "no")
+                           << ", rtCoreReady=" << (m_rayTracingCapabilityProbe.rayTracingCoreReady ? "yes" : "no")
+                           << ", scratchAlignment=" << m_rayTracingCapabilityProbe.scratchAlignment
                            << "\n";
         if (!anyCandidateSupportsDisplayTiming) {
             VOX_LOGI("render")
@@ -674,11 +888,29 @@ bool RendererBackend::createLogicalDevice() {
     memoryPriorityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT;
     memoryPriorityFeatures.pNext = &vulkan13Features;
     memoryPriorityFeatures.memoryPriority = VK_TRUE;
-    enabledFeatures2.pNext = &memoryPriorityFeatures;
+    m_enabledAccelerationStructureFeatures = {};
+    m_enabledAccelerationStructureFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    m_enabledRayQueryFeatures = {};
+    m_enabledRayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
+        m_enabledAccelerationStructureFeatures.accelerationStructure = VK_TRUE;
+        m_enabledRayQueryFeatures.rayQuery = VK_TRUE;
+        m_enabledRayQueryFeatures.pNext = &m_enabledAccelerationStructureFeatures;
+        m_enabledAccelerationStructureFeatures.pNext = &memoryPriorityFeatures;
+        enabledFeatures2.pNext = &m_enabledRayQueryFeatures;
+    } else {
+        enabledFeatures2.pNext = &memoryPriorityFeatures;
+    }
 
     std::vector<const char*> enabledDeviceExtensions(kDeviceExtensions.begin(), kDeviceExtensions.end());
     if (m_supportsDisplayTiming && m_hasDisplayTimingExtension) {
         appendDeviceExtensionIfMissing(enabledDeviceExtensions, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+    }
+    if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
+        appendDeviceExtensionIfMissing(enabledDeviceExtensions, "VK_KHR_deferred_host_operations");
+        appendDeviceExtensionIfMissing(enabledDeviceExtensions, "VK_KHR_acceleration_structure");
+        appendDeviceExtensionIfMissing(enabledDeviceExtensions, "VK_KHR_ray_query");
     }
 
     VkDeviceCreateInfo createInfo{};
@@ -702,6 +934,8 @@ bool RendererBackend::createLogicalDevice() {
         << ", runtimeDescriptorArray=" << (m_supportsBindlessDescriptors ? 1 : 0)
         << ", sampledImageArrayNonUniformIndexing=" << (m_supportsBindlessDescriptors ? 1 : 0)
         << ", descriptorBindingPartiallyBound=" << (m_supportsBindlessDescriptors ? 1 : 0)
+        << ", accelerationStructure=" << (m_rayTracingCapabilityProbe.rayTracingCoreReady ? 1 : 0)
+        << ", rayQuery=" << (m_rayTracingCapabilityProbe.rayTracingCoreReady ? 1 : 0)
         << ", displayTiming=" << (m_supportsDisplayTiming ? 1 : 0)
         << "\n";
     {
@@ -735,10 +969,24 @@ bool RendererBackend::createLogicalDevice() {
         m_supportsDisplayTiming = false;
         m_enableDisplayTiming = false;
     }
+    m_rayTracingRuntimeEnabled = loadRayTracingFunctions();
     VOX_LOGI("render") << "present runtime: displayTimingSupport=" << (m_supportsDisplayTiming ? "yes" : "no")
         << ", displayTimingExtension=" << (m_hasDisplayTimingExtension ? "yes" : "no")
         << ", displayTimingEnabled=" << (m_enableDisplayTiming ? "yes" : "no")
         << "\n";
+    VOX_LOGI("render") << "frame pacing profile: framesInFlight=" << kMaxFramesInFlight
+        << ", maxQueuedFrames=" << m_framePacingSettings.maxQueuedFrames
+        << ", displayTimingMode="
+        << (m_framePacingSettings.mode == FramePacingMode::Scheduled
+                ? "scheduled"
+                : (m_framePacingSettings.mode == FramePacingMode::Passive ? "passive" : "off"))
+        << ", timestampReadback=deferred\n";
+    VOX_LOGI("render") << "ray tracing runtime: coreReady="
+        << (m_rayTracingCapabilityProbe.rayTracingCoreReady ? "yes" : "no")
+        << ", runtimeEnabled=" << (m_rayTracingRuntimeEnabled ? "yes" : "no")
+        << ", mainPassImplemented=" << (m_rtMainPassImplemented ? "yes" : "no")
+        << "\n";
+    refreshShadowStats();
     loadDebugUtilsFunctions();
     setObjectName(VK_OBJECT_TYPE_DEVICE, vkHandleToUint64(m_device), "renderer.device");
     setObjectName(VK_OBJECT_TYPE_QUEUE, vkHandleToUint64(m_graphicsQueue), "renderer.queue.graphics");
@@ -790,6 +1038,41 @@ bool RendererBackend::createLogicalDevice() {
             << "BUFFER_DEVICE_ADDRESS|EXT_MEMORY_BUDGET|EXT_MEMORY_PRIORITY\n";
     }
     return true;
+}
+
+bool RendererBackend::loadRayTracingFunctions() {
+    m_createAccelerationStructureKhr = nullptr;
+    m_destroyAccelerationStructureKhr = nullptr;
+    m_getAccelerationStructureBuildSizesKhr = nullptr;
+    m_cmdBuildAccelerationStructuresKhr = nullptr;
+    m_getAccelerationStructureDeviceAddressKhr = nullptr;
+    if (!m_rayTracingCapabilityProbe.rayTracingCoreReady || m_device == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    m_createAccelerationStructureKhr = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
+        vkGetDeviceProcAddr(m_device, "vkCreateAccelerationStructureKHR")
+    );
+    m_destroyAccelerationStructureKhr = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
+        vkGetDeviceProcAddr(m_device, "vkDestroyAccelerationStructureKHR")
+    );
+    m_getAccelerationStructureBuildSizesKhr =
+        reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
+            vkGetDeviceProcAddr(m_device, "vkGetAccelerationStructureBuildSizesKHR")
+        );
+    m_cmdBuildAccelerationStructuresKhr = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
+        vkGetDeviceProcAddr(m_device, "vkCmdBuildAccelerationStructuresKHR")
+    );
+    m_getAccelerationStructureDeviceAddressKhr =
+        reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
+            vkGetDeviceProcAddr(m_device, "vkGetAccelerationStructureDeviceAddressKHR")
+        );
+
+    return m_createAccelerationStructureKhr != nullptr &&
+        m_destroyAccelerationStructureKhr != nullptr &&
+        m_getAccelerationStructureBuildSizesKhr != nullptr &&
+        m_cmdBuildAccelerationStructuresKhr != nullptr &&
+        m_getAccelerationStructureDeviceAddressKhr != nullptr;
 }
 
 
@@ -1381,6 +1664,7 @@ bool RendererBackend::recreateSwapchain() {
     }
 
     vkDeviceWaitIdle(m_device);
+    m_gpuTimestampQuerySubmitted.fill(false);
 
     destroyPipeline();
     destroySwapchain();
@@ -1583,6 +1867,7 @@ void RendererBackend::shutdown() {
         destroyPipeBuffers();
         destroyPreviewBuffers();
         destroyMagicaBuffers();
+        destroyRayTracingScene();
         destroyEnvironmentResources();
         destroyShadowResources();
         destroyVoxelGiResources();
@@ -1717,18 +2002,24 @@ void RendererBackend::shutdown() {
     m_supportsDisplayTiming = false;
     m_hasDisplayTimingExtension = false;
     m_enableDisplayTiming = false;
+    m_shadowSettings = {};
+    m_shadowStats = {};
+    m_rtShaderVariantFileAvailable = false;
     m_chunkMeshingOptions = voxelsprout::world::MeshingOptions{};
     m_chunkMeshRebuildRequested = false;
     m_pendingChunkRemeshIndices.clear();
     m_gpuTimestampsSupported = false;
     m_gpuTimestampPeriodNs = 0.0f;
     m_gpuTimestampQueryPools.fill(VK_NULL_HANDLE);
+    m_gpuTimestampQuerySubmitted.fill(false);
     m_mainDescriptorWriteKeyValid.fill(false);
     m_voxelGiDescriptorWriteKeyValid.fill(false);
     m_autoExposureDescriptorWriteKeyValid.fill(false);
     m_sunShaftDescriptorWriteKeyValid.fill(false);
     m_debugGpuFrameTimeMs = 0.0f;
     m_debugGpuShadowTimeMs = 0.0f;
+    m_debugGpuGiOccupancyTimeMs = 0.0f;
+    m_debugGpuGiSurfaceTimeMs = 0.0f;
     m_debugGpuGiInjectTimeMs = 0.0f;
     m_debugGpuGiPropagateTimeMs = 0.0f;
     m_debugGpuAutoExposureTimeMs = 0.0f;
@@ -1736,6 +2027,10 @@ void RendererBackend::shutdown() {
     m_debugGpuPrepassTimeMs = 0.0f;
     m_debugGpuSsaoTimeMs = 0.0f;
     m_debugGpuSsaoBlurTimeMs = 0.0f;
+    m_voxelGiRtSurfaceReady = false;
+    m_voxelGiRtSurfaceActiveThisFrame = false;
+    m_voxelGiRtSurfaceLastLoggedActive = false;
+    m_voxelGiRtSurfaceLastLoggedValid = false;
     m_debugGpuMainTimeMs = 0.0f;
     m_debugGpuPostTimeMs = 0.0f;
     m_debugPresentedFrameTimeMs = 0.0f;
@@ -1781,6 +2076,17 @@ void RendererBackend::shutdown() {
     m_debugPresentedFrameTimingMsHistoryCount = 0;
     m_framePacingSettings = {};
     m_framePacingStats = {};
+    m_desktopCapabilityProbe = {};
+    m_rayTracingCapabilityProbe = {};
+    m_rayTracingRuntimeEnabled = false;
+    m_rtMainPassImplemented = false;
+    m_enabledAccelerationStructureFeatures = {};
+    m_enabledRayQueryFeatures = {};
+    m_createAccelerationStructureKhr = nullptr;
+    m_destroyAccelerationStructureKhr = nullptr;
+    m_getAccelerationStructureBuildSizesKhr = nullptr;
+    m_cmdBuildAccelerationStructuresKhr = nullptr;
+    m_getAccelerationStructureDeviceAddressKhr = nullptr;
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;

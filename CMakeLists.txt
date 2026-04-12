@@ -29,6 +29,7 @@ if(SLANGC_EXECUTABLE)
                 -stage "${SLANG_STAGE}"
                 -matrix-layout-column-major
                 -I "${CMAKE_SOURCE_DIR}/src/render/shaders"
+                ${ARGN}
                 "${SLANG_SHADER}"
                 -o "${SLANG_OUTPUT}"
             DEPENDS "${SLANG_SHADER}" ${SLANG_SHARED_INCLUDES}
@@ -38,9 +39,34 @@ if(SLANGC_EXECUTABLE)
         list(APPEND SLANG_SHADER_OUTPUTS "${SLANG_OUTPUT}")
         set(SLANG_SHADER_OUTPUTS "${SLANG_SHADER_OUTPUTS}" PARENT_SCOPE)
     endfunction()
+    function(add_slang_shader_variant SLANG_SHADER SLANG_STAGE SLANG_OUTPUT)
+        add_custom_command(
+            OUTPUT "${SLANG_OUTPUT}"
+            COMMAND "${SLANGC_EXECUTABLE}"
+                -target spirv
+                -entry main
+                -stage "${SLANG_STAGE}"
+                -matrix-layout-column-major
+                -I "${CMAKE_SOURCE_DIR}/src/render/shaders"
+                ${ARGN}
+                "${SLANG_SHADER}"
+                -o "${SLANG_OUTPUT}"
+            DEPENDS "${SLANG_SHADER}" ${SLANG_SHARED_INCLUDES}
+            COMMENT "Compiling Slang shader variant ${SLANG_OUTPUT}"
+            VERBATIM
+        )
+        list(APPEND SLANG_SHADER_OUTPUTS "${SLANG_OUTPUT}")
+        set(SLANG_SHADER_OUTPUTS "${SLANG_SHADER_OUTPUTS}" PARENT_SCOPE)
+    endfunction()
 
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang" fragment)
+    add_slang_shader_variant(
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang"
+        fragment
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed_rt.frag.slang.spv"
+        -DVOXEL_RT_SHADOWS=1
+    )
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_normaldepth.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/skybox.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/skybox.frag.slang" fragment)
@@ -66,7 +92,14 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sdf_prepass.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sdf_shadow.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sdf_shadow.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_occupancy.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface.comp.slang" compute)
+    add_slang_shader_variant(
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface.comp.slang"
+        compute
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface_rt.comp.slang.spv"
+        -DVOXEL_GI_RT_SURFACE=1
+    )
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_sky_exposure.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_inject.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_propagate.comp.slang" compute)
@@ -146,7 +179,12 @@ if(TARGET slang_shaders)
 endif()
 
 target_include_directories(voxel_factory_toy PRIVATE src)
-target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\")
+target_compile_definitions(
+    voxel_factory_toy PRIVATE
+    VOXEL_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+    VOXEL_APP_VERSION=\"${PROJECT_VERSION}\"
+    VOXEL_RELEASE_PROFILE=\"windows_runnable_rt_beta\"
+)
 
 if(MSVC)
     target_compile_options(voxel_factory_toy PRIVATE

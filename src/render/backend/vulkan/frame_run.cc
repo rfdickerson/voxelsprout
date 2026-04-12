@@ -47,6 +47,10 @@ void RendererBackend::renderFrame(
 ) {
     const auto cpuFrameStartTime = std::chrono::steady_clock::now();
     float cpuWaitMs = 0.0f;
+    float cpuWaitFrameSlotMs = 0.0f;
+    float cpuWaitAcquireMs = 0.0f;
+    float cpuWaitPresentMs = 0.0f;
+    float cpuWaitTransferMs = 0.0f;
 
     if (m_device == VK_NULL_HANDLE || m_swapchain == VK_NULL_HANDLE) {
         return;
@@ -75,11 +79,27 @@ void RendererBackend::renderFrame(
     m_framePacingStats.actualPresentDeltaMs = m_debugDisplayActualEarliestDeltaMs;
     m_framePacingStats.presentScheduleErrorMs = m_debugDisplayScheduleErrorMs;
     m_framePacingStats.latePresentCount = m_debugLatePresentCount;
+    m_framePacingStats.cpuWaitFrameSlotMs = 0.0f;
+    m_framePacingStats.cpuWaitAcquireMs = 0.0f;
+    m_framePacingStats.cpuWaitPresentMs = 0.0f;
+    m_framePacingStats.cpuWaitTransferMs = 0.0f;
+    m_framePacingStats.gpuTimestampsPending = false;
+    m_framePacingStats.gpuTimestampSkippedFrames = 0;
     if (m_displayRefreshDurationNs > 0) {
         m_framePacingStats.targetPresentIntervalMs = static_cast<float>(
             (m_displayRefreshDurationNs * m_framePacingStats.cadenceDivisor) * 1.0e-6
         );
     }
+    auto shortWait = [&](float& bucketMs) {
+        const auto waitStartTime = std::chrono::steady_clock::now();
+        std::this_thread::sleep_for(std::chrono::microseconds(250));
+        std::this_thread::yield();
+        const float waitMs = static_cast<float>(
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStartTime).count()
+        );
+        bucketMs += waitMs;
+        cpuWaitMs += waitMs;
+    };
     if (!m_debugCameraFovInitialized) {
         m_debugCameraFovDegrees = camera.fovDegrees;
         m_debugCameraFovInitialized = true;
@@ -121,7 +141,9 @@ void RendererBackend::renderFrame(
     collectCompletedBufferReleases();
     const uint64_t completedTimelineValueBeforeFrame = completedTimelineValue();
     m_framePacingStats.queuedFrames = countQueuedFrames(completedTimelineValueBeforeFrame);
-    if (shouldThrottleFrameStart(completedTimelineValueBeforeFrame, &cpuWaitMs)) {
+    if (shouldThrottleFrameStart(completedTimelineValueBeforeFrame, &cpuWaitFrameSlotMs)) {
+        cpuWaitMs += cpuWaitFrameSlotMs;
+        m_framePacingStats.cpuWaitFrameSlotMs = cpuWaitFrameSlotMs;
         return;
     }
 
@@ -144,17 +166,25 @@ void RendererBackend::renderFrame(
                 lastStallLogTimeSeconds = nowSeconds;
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        shortWait(cpuWaitFrameSlotMs);
+        m_framePacingStats.cpuWaitFrameSlotMs = cpuWaitFrameSlotMs;
         return;
     }
     if (m_frameTimelineValues[m_currentFrame] > 0) {
-        readGpuTimestampResults(m_currentFrame);
+        if (!readGpuTimestampResults(m_currentFrame)) {
+            m_framePacingStats.gpuTimestampsPending = true;
+            ++m_framePacingStats.gpuTimestampSkippedFrames;
+        }
     }
     if (m_transferCommandBufferInFlightValue > 0) {
         if (isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
             m_transferCommandBufferInFlightValue = 0;
             m_pendingTransferTimelineValue = 0;
             collectCompletedBufferReleases();
+        } else {
+            shortWait(cpuWaitTransferMs);
+            m_framePacingStats.cpuWaitTransferMs = cpuWaitTransferMs;
+            return;
         }
     }
     m_frameArena.beginFrame(m_currentFrame);
@@ -186,9 +216,11 @@ void RendererBackend::renderFrame(
         VK_NULL_HANDLE,
         &imageIndex
     );
-    cpuWaitMs += static_cast<float>(
+    const float acquireWaitMs = static_cast<float>(
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - acquireStartTime).count()
     );
+    cpuWaitMs += acquireWaitMs;
+    cpuWaitAcquireMs += acquireWaitMs;
 
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
         VOX_LOGI("render") << "swapchain out of date during acquire, recreating\n";
@@ -196,7 +228,7 @@ void RendererBackend::renderFrame(
         return;
     }
     if (acquireResult == VK_TIMEOUT) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        m_framePacingStats.cpuWaitAcquireMs = cpuWaitAcquireMs;
         return;
     }
     if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
@@ -573,6 +605,10 @@ void RendererBackend::renderFrame(
     mvpUniform.shadowConfig3[1] = std::clamp(m_voxelGiDebugSettings.bounceStrength, 0.0f, 4.0f);
     mvpUniform.shadowConfig3[2] = std::clamp(m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f);
     mvpUniform.shadowConfig3[3] = m_shadowDebugSettings.pcfRadius;
+    mvpUniform.shadowConfig4[0] = static_cast<float>(std::clamp(m_shadowDebugSettings.rtShadowSampleCount, 1, 8));
+    mvpUniform.shadowConfig4[1] = std::clamp(m_shadowDebugSettings.rtSunAngularRadiusDegrees, 0.0f, 1.0f);
+    mvpUniform.shadowConfig4[2] = static_cast<float>(std::clamp(m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2));
+    mvpUniform.shadowConfig4[3] = std::clamp(m_voxelGiDebugSettings.rtSurfaceBiasScale, 0.25f, 4.0f);
 
     // Reuse origin XYZ for fixed GI rebalance + debug mode to avoid enlarging camera UBO.
     mvpUniform.shadowVoxelGridOrigin[0] = kVoxelGiAmbientRebalanceStrength;
@@ -711,8 +747,17 @@ void RendererBackend::renderFrame(
         kVoxelGiTuningChangeThreshold
     );
     const bool voxelGiNeedsOccupancyUpload = voxelGiFlags.needsOccupancyUpload;
+    const bool voxelGiRtSurfaceSettingsChanged =
+        !m_voxelGiHasPreviousFrameState ||
+        m_voxelGiDebugSettings.enableRtSurfaceTracing != m_voxelGiPreviousRtSurfaceTracingEnabled ||
+        std::abs(static_cast<float>(m_voxelGiDebugSettings.rtSurfaceSampleCount) - m_voxelGiPreviousRtSurfaceSampleCount) >
+            kVoxelGiTuningChangeThreshold ||
+        std::abs(m_voxelGiDebugSettings.rtSurfaceBiasScale - m_voxelGiPreviousRtSurfaceBiasScale) >
+            kVoxelGiTuningChangeThreshold ||
+        std::abs(m_shadowDebugSettings.rtSunAngularRadiusDegrees - m_voxelGiPreviousRtSunAngularRadiusDegrees) >
+            kVoxelGiTuningChangeThreshold;
     const bool voxelGiNeedsComputeUpdate =
-        voxelGiFlags.needsComputeUpdate || !m_voxelGiInitialized;
+        voxelGiFlags.needsComputeUpdate || voxelGiRtSurfaceSettingsChanged || !m_voxelGiInitialized;
     m_voxelGiHasPreviousFrameState = true;
     m_voxelGiPreviousGridOrigin = {voxelGiOriginX, voxelGiOriginY, voxelGiOriginZ};
     m_voxelGiPreviousSunDirection = {sunDirection.x, sunDirection.y, sunDirection.z};
@@ -723,6 +768,10 @@ void RendererBackend::renderFrame(
     }
     m_voxelGiPreviousBounceStrength = m_voxelGiDebugSettings.bounceStrength;
     m_voxelGiPreviousDiffusionSoftness = m_voxelGiDebugSettings.diffusionSoftness;
+    m_voxelGiPreviousRtSurfaceTracingEnabled = m_voxelGiDebugSettings.enableRtSurfaceTracing;
+    m_voxelGiPreviousRtSurfaceSampleCount = static_cast<float>(m_voxelGiDebugSettings.rtSurfaceSampleCount);
+    m_voxelGiPreviousRtSurfaceBiasScale = m_voxelGiDebugSettings.rtSurfaceBiasScale;
+    m_voxelGiPreviousRtSunAngularRadiusDegrees = m_shadowDebugSettings.rtSunAngularRadiusDegrees;
     mvpUniform.voxelGiGridOriginCellSize[0] = voxelGiOriginX;
     mvpUniform.voxelGiGridOriginCellSize[1] = voxelGiOriginY;
     mvpUniform.voxelGiGridOriginCellSize[2] = voxelGiOriginZ;
@@ -1116,6 +1165,7 @@ void RendererBackend::renderFrame(
     recordShadowAtlasPass(frameExecutionContext, shadowPassInputs);
 
     bool wroteVoxelGiTimestamps = false;
+    m_voxelGiRtSurfaceActiveThisFrame = false;
     bool wroteAutoExposureTimestamps = false;
     bool wroteSunShaftTimestamps = false;
     const bool voxelGiSurfaceFacesReady = std::all_of(
@@ -1286,10 +1336,30 @@ void RendererBackend::renderFrame(
     if (!wroteVoxelGiTimestamps) {
         writeGpuTimestampTop(kGpuTimestampQueryGiOccupancyStart);
         writeGpuTimestampBottom(kGpuTimestampQueryGiOccupancyEnd);
+        writeGpuTimestampTop(kGpuTimestampQueryGiSurfaceStart);
+        writeGpuTimestampBottom(kGpuTimestampQueryGiSurfaceEnd);
         writeGpuTimestampTop(kGpuTimestampQueryGiInjectStart);
         writeGpuTimestampBottom(kGpuTimestampQueryGiInjectEnd);
         writeGpuTimestampTop(kGpuTimestampQueryGiPropagateStart);
         writeGpuTimestampBottom(kGpuTimestampQueryGiPropagateEnd);
+    }
+    const bool voxelGiRtSurfaceCanRun =
+        m_voxelGiComputeAvailable &&
+        m_voxelGiDebugSettings.enableRtSurfaceTracing &&
+        m_rayTracingRuntimeEnabled &&
+        m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE &&
+        m_rtTlas.handle != VK_NULL_HANDLE;
+    if (!m_voxelGiRtSurfaceLastLoggedValid ||
+        m_voxelGiRtSurfaceLastLoggedActive != m_voxelGiRtSurfaceActiveThisFrame) {
+        VOX_LOGI("render") << "voxel GI RT surface: requested="
+                           << (m_voxelGiDebugSettings.enableRtSurfaceTracing ? "yes" : "no")
+                           << ", compute=" << (m_voxelGiComputeAvailable ? "yes" : "no")
+                           << ", ready=" << (voxelGiRtSurfaceCanRun ? "yes" : "no")
+                           << ", active=" << (m_voxelGiRtSurfaceActiveThisFrame ? "yes" : "no")
+                           << ", tlas=" << (m_rtTlas.handle != VK_NULL_HANDLE ? "yes" : "no")
+                           << ", rtPipeline=" << (m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE ? "yes" : "no");
+        m_voxelGiRtSurfaceLastLoggedActive = m_voxelGiRtSurfaceActiveThisFrame;
+        m_voxelGiRtSurfaceLastLoggedValid = true;
     }
 
     const VkExtent2D aoExtent = {
@@ -1977,6 +2047,9 @@ void RendererBackend::renderFrame(
         VOX_LOGE("render") << "vkQueueSubmit2 failed\n";
         return;
     }
+    if (gpuTimestampQueryPool != VK_NULL_HANDLE) {
+        m_gpuTimestampQuerySubmitted[m_currentFrame] = true;
+    }
     m_frameTimelineValues[m_currentFrame] = signalTimelineValue;
     m_swapchainImageTimelineValues[imageIndex] = signalTimelineValue;
     m_lastGraphicsTimelineValue = signalTimelineValue;
@@ -2026,9 +2099,11 @@ void RendererBackend::renderFrame(
 
     const auto presentStartTime = std::chrono::steady_clock::now();
     const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
-    cpuWaitMs += static_cast<float>(
+    const float presentWaitMs = static_cast<float>(
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - presentStartTime).count()
     );
+    cpuWaitMs += presentWaitMs;
+    cpuWaitPresentMs += presentWaitMs;
     if (useDisplayTiming && (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR)) {
         updateDisplayTimingStats();
     }
@@ -2042,6 +2117,10 @@ void RendererBackend::renderFrame(
     m_framePacingStats.actualPresentDeltaMs = m_debugDisplayActualEarliestDeltaMs;
     m_framePacingStats.presentScheduleErrorMs = m_debugDisplayScheduleErrorMs;
     m_framePacingStats.latePresentCount = m_debugLatePresentCount;
+    m_framePacingStats.cpuWaitFrameSlotMs = cpuWaitFrameSlotMs;
+    m_framePacingStats.cpuWaitAcquireMs = cpuWaitAcquireMs;
+    m_framePacingStats.cpuWaitPresentMs = cpuWaitPresentMs;
+    m_framePacingStats.cpuWaitTransferMs = cpuWaitTransferMs;
     m_shadowDepthInitialized = true;
     m_swapchainImageInitialized[imageIndex] = true;
     m_msaaColorImageInitialized[imageIndex] = true;

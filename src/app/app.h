@@ -6,6 +6,7 @@
 #include "world/clipmap_index.h"
 #include "world/world.h"
 
+#include <filesystem>
 #include <vector>
 
 struct GLFWwindow;
@@ -23,6 +24,10 @@ public:
     void shutdown();
 
 private:
+    struct AppConfig {
+        voxelsprout::render::ShadowMode shadowMode = voxelsprout::render::ShadowMode::Auto;
+    };
+
     struct CameraRaycastResult {
         bool hitSolid = false;
         int solidX = 0;
@@ -128,6 +133,8 @@ private:
     [[nodiscard]] bool isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const;
     [[nodiscard]] bool isBeltAtWorld(int worldX, int worldY, int worldZ, std::size_t* outBeltIndex) const;
     [[nodiscard]] bool isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTrackIndex) const;
+    bool loadConfig(const std::filesystem::path& configPath);
+    bool saveConfig(const std::filesystem::path& configPath) const;
     void regenerateWorld();
     [[nodiscard]] bool tryPlaceVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices);
     [[nodiscard]] bool tryRemoveVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices);
@@ -182,6 +189,7 @@ private:
     bool m_gamepadConnected = false;
     bool m_worldDirty = false;
     float m_worldAutosaveElapsedSeconds = 0.0f;
+    AppConfig m_config{};
     std::vector<std::size_t> m_visibleChunkIndices;
     voxelsprout::world::ClipmapConfig m_appliedClipmapConfig{};
     bool m_hasAppliedClipmapConfig = false;
