@@ -191,6 +191,10 @@ private:
     float m_worldAutosaveElapsedSeconds = 0.0f;
     AppConfig m_config{};
     std::vector<std::size_t> m_visibleChunkIndices;
+    std::vector<std::uint8_t> m_visibleChunkGraceFrames;
+    std::vector<std::uint8_t> m_previousVisibleChunkMask;
+    std::vector<std::uint8_t> m_currentVisibleChunkMask;
+    std::vector<std::uint8_t> m_directlyVisibleChunkMask;
     voxelsprout::world::ClipmapConfig m_appliedClipmapConfig{};
     bool m_hasAppliedClipmapConfig = false;
 

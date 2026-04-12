@@ -47,6 +47,8 @@ constexpr float kRenderCullNearPlane = 0.1f;
 constexpr float kRenderCullFarPlane = 500.0f;
 constexpr float kRenderFrustumBoundsPadVoxels = 8.0f;
 constexpr float kRenderFrustumPlaneSlackVoxels = 2.5f;
+constexpr float kRenderFrustumKeepAlivePlaneSlackVoxels = 10.0f;
+constexpr std::uint8_t kSpatialQueryVisibilityGraceFrames = 2;
 constexpr float kRenderAspectFallback = 16.0f / 9.0f;
 // 1x voxel world scale: roughly Minecraft-like player proportions.
 constexpr float kPlayerHeightVoxels = 1.8f;
@@ -1087,27 +1089,91 @@ void App::update(float dt, float simulationAlpha) {
             m_camera.fovDegrees,
             aspectRatio
         );
+        const CameraFrustum keepAliveFrustum = buildCameraFrustum(
+            voxelsprout::math::Vector3{renderCameraX, renderCameraY, renderCameraZ},
+            renderCameraYawDegrees,
+            renderCameraPitchDegrees,
+            m_camera.fovDegrees,
+            aspectRatio
+        );
         if (cameraFrustum.valid && m_chunkClipmapIndex.valid()) {
             m_chunkClipmapIndex.updateCamera(renderCameraX, renderCameraY, renderCameraZ, &spatialQueryStats);
             std::vector<std::size_t> candidateChunkIndices =
                 m_chunkClipmapIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
             spatialQueriesUsed = true;
-            m_visibleChunkIndices.reserve(candidateChunkIndices.size());
             const std::vector<voxelsprout::world::Chunk>& chunks = m_world.chunkGrid().chunks();
+            if (m_visibleChunkGraceFrames.size() != chunks.size() ||
+                m_previousVisibleChunkMask.size() != chunks.size() ||
+                m_currentVisibleChunkMask.size() != chunks.size() ||
+                m_directlyVisibleChunkMask.size() != chunks.size()) {
+                m_visibleChunkGraceFrames.assign(chunks.size(), 0u);
+                m_previousVisibleChunkMask.assign(chunks.size(), 0u);
+                m_currentVisibleChunkMask.assign(chunks.size(), 0u);
+                m_directlyVisibleChunkMask.assign(chunks.size(), 0u);
+                m_visibleChunkIndices.clear();
+            }
+            std::fill(m_currentVisibleChunkMask.begin(), m_currentVisibleChunkMask.end(), 0u);
+            std::fill(m_directlyVisibleChunkMask.begin(), m_directlyVisibleChunkMask.end(), 0u);
             for (std::size_t chunkIndex : candidateChunkIndices) {
                 if (chunkIndex >= chunks.size()) {
                     continue;
                 }
                 if (chunkIntersectsFrustum(chunks[chunkIndex], cameraFrustum.planes, kRenderFrustumPlaneSlackVoxels)) {
-                    m_visibleChunkIndices.push_back(chunkIndex);
+                    m_directlyVisibleChunkMask[chunkIndex] = 1u;
                 }
             }
-            std::sort(m_visibleChunkIndices.begin(), m_visibleChunkIndices.end());
-            m_visibleChunkIndices.erase(
-                std::unique(m_visibleChunkIndices.begin(), m_visibleChunkIndices.end()),
-                m_visibleChunkIndices.end()
-            );
+            std::uint32_t retainedChunkCount = 0;
+            std::uint32_t newlyVisibleChunkCount = 0;
+            std::uint32_t evictedChunkCount = 0;
+            for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
+                const bool directlyVisible = m_directlyVisibleChunkMask[chunkIndex] != 0u;
+                if (directlyVisible) {
+                    m_visibleChunkGraceFrames[chunkIndex] = kSpatialQueryVisibilityGraceFrames;
+                    m_currentVisibleChunkMask[chunkIndex] = 1u;
+                } else {
+                    const bool previouslyVisible = m_previousVisibleChunkMask[chunkIndex] != 0u;
+                    const bool keepAliveVisible =
+                        previouslyVisible &&
+                        keepAliveFrustum.valid &&
+                        chunkIntersectsFrustum(
+                            chunks[chunkIndex],
+                            keepAliveFrustum.planes,
+                            kRenderFrustumKeepAlivePlaneSlackVoxels
+                        );
+                    std::uint8_t& graceFrames = m_visibleChunkGraceFrames[chunkIndex];
+                    if (keepAliveVisible) {
+                        graceFrames = kSpatialQueryVisibilityGraceFrames;
+                        m_currentVisibleChunkMask[chunkIndex] = 1u;
+                    } else if (graceFrames > 0) {
+                        --graceFrames;
+                        m_currentVisibleChunkMask[chunkIndex] = 1u;
+                    }
+                }
+
+                if (m_currentVisibleChunkMask[chunkIndex] != 0u && !directlyVisible) {
+                    ++retainedChunkCount;
+                }
+                if (m_currentVisibleChunkMask[chunkIndex] != 0u && m_previousVisibleChunkMask[chunkIndex] == 0u) {
+                    ++newlyVisibleChunkCount;
+                }
+                if (m_currentVisibleChunkMask[chunkIndex] == 0u && m_previousVisibleChunkMask[chunkIndex] != 0u) {
+                    ++evictedChunkCount;
+                }
+            }
+            if (m_currentVisibleChunkMask != m_previousVisibleChunkMask) {
+                m_visibleChunkIndices.clear();
+                m_visibleChunkIndices.reserve(candidateChunkIndices.size() + retainedChunkCount);
+                for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
+                    if (m_currentVisibleChunkMask[chunkIndex] != 0u) {
+                        m_visibleChunkIndices.push_back(chunkIndex);
+                    }
+                }
+            }
             spatialQueryStats.visibleChunkCount = static_cast<std::uint32_t>(m_visibleChunkIndices.size());
+            spatialQueryStats.retainedChunkCount = retainedChunkCount;
+            spatialQueryStats.newlyVisibleChunkCount = newlyVisibleChunkCount;
+            spatialQueryStats.evictedChunkCount = evictedChunkCount;
+            m_previousVisibleChunkMask.swap(m_currentVisibleChunkMask);
         }
     }
 
@@ -1117,6 +1183,15 @@ void App::update(float dt, float simulationAlpha) {
         for (std::size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
             m_visibleChunkIndices[chunkIndex] = chunkIndex;
         }
+        m_visibleChunkGraceFrames.assign(chunkCount, 0u);
+        m_previousVisibleChunkMask.assign(chunkCount, 1u);
+        m_currentVisibleChunkMask.assign(chunkCount, 0u);
+        m_directlyVisibleChunkMask.assign(chunkCount, 0u);
+    } else if (!spatialQueriesUsed) {
+        m_visibleChunkGraceFrames.clear();
+        m_previousVisibleChunkMask.clear();
+        m_currentVisibleChunkMask.clear();
+        m_directlyVisibleChunkMask.clear();
     }
     m_renderer.setSpatialQueryStats(
         spatialQueriesUsed,
