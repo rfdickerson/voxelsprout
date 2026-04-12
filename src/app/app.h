@@ -22,10 +22,13 @@ public:
     void run();
     void update(float dt, float simulationAlpha);
     void shutdown();
+    void queueHotbarScroll(int direction);
 
 private:
     struct AppConfig {
         voxelsprout::render::ShadowMode shadowMode = voxelsprout::render::ShadowMode::Auto;
+        bool enableVertexAo = true;
+        bool enableSsao = false;
     };
 
     struct CameraRaycastResult {
@@ -62,6 +65,10 @@ private:
 
     void pollInput();
     void updateCamera(float dt);
+    void syncGameplayUiState();
+    void assignInventoryItemToSelectedHotbar(voxelsprout::render::InventoryItemId itemId);
+    void handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight);
+    [[nodiscard]] bool isAnyUiVisible() const;
     [[nodiscard]] bool isSolidWorldVoxel(int worldX, int worldY, int worldZ) const;
     [[nodiscard]] bool worldToChunkLocal(
         int worldX,
@@ -117,10 +124,7 @@ private:
     [[nodiscard]] bool isWorldVoxelInBounds(int x, int y, int z) const;
     void cycleSelectedHotbar(int direction);
     void selectHotbarSlot(int hotbarIndex);
-    void selectPlaceableBlock(int blockIndex);
-    [[nodiscard]] bool isPipeHotbarSelected() const;
-    [[nodiscard]] bool isConveyorHotbarSelected() const;
-    [[nodiscard]] bool isTrackHotbarSelected() const;
+    void toggleDebugUi();
     [[nodiscard]] voxelsprout::world::Voxel selectedPlaceVoxel() const;
     [[nodiscard]] bool computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const;
     [[nodiscard]] bool applyVoxelEdit(
@@ -172,24 +176,25 @@ private:
     bool m_wasPlaceBlockDown = false;
     bool m_wasRemoveBlockDown = false;
     bool m_debugUiVisible = false;
+    bool m_inventoryVisible = false;
     bool m_wasToggleConfigUiDown = false;
     bool m_wasToggleFrameStatsDown = false;
     bool m_dayCycleEnabled = false;
     bool m_wasToggleDayCycleDown = false;
     float m_dayCyclePhase = 0.0f;
     bool m_hoverEnabled = false;
-    bool m_voxelEditModeEnabled = false;
     bool m_wasToggleHoverDown = false;
-    bool m_wasToggleVoxelEditModeDown = false;
+    bool m_wasInventoryKeyDown = false;
+    bool m_wasEscapeKeyDown = false;
     bool m_wasRegenerateWorldDown = false;
-    int m_selectedHotbarIndex = 0;
-    int m_selectedBlockIndex = 0;
     bool m_wasPrevBlockDown = false;
     bool m_wasNextBlockDown = false;
     bool m_gamepadConnected = false;
     bool m_worldDirty = false;
     float m_worldAutosaveElapsedSeconds = 0.0f;
+    int m_pendingHotbarScrollSteps = 0;
     AppConfig m_config{};
+    voxelsprout::render::GameplayUiState m_gameplayUiState{};
     std::vector<std::size_t> m_visibleChunkIndices;
     std::vector<std::uint8_t> m_visibleChunkGraceFrames;
     std::vector<std::uint8_t> m_previousVisibleChunkMask;

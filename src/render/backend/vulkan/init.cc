@@ -237,11 +237,6 @@ bool RendererBackend::init(GLFWwindow* window, const voxelsprout::world::ChunkGr
         shutdown();
         return false;
     }
-    if (!runStep("createSdfPipelines", [&] { return createSdfPipelines(); })) {
-        VOX_LOGE("render") << "init failed at createSdfPipelines\n";
-        shutdown();
-        return false;
-    }
     {
         const auto frameArenaStart = Clock::now();
         m_frameArena.beginFrame(0);
@@ -288,7 +283,7 @@ bool RendererBackend::init(GLFWwindow* window, const voxelsprout::world::ChunkGr
 }
 
 bool RendererBackend::validateReleaseRuntimeAssets() {
-    constexpr std::array<RuntimeAssetSpec, 25> kRuntimeAssetSpecs = {{
+    constexpr std::array<RuntimeAssetSpec, 19> kRuntimeAssetSpecs = {{
         {"../src/render/shaders/voxel_packed.vert.slang.spv", "world vertex shader", true},
         {"../src/render/shaders/voxel_packed.frag.slang.spv", "world fragment shader", true},
         {"../src/render/shaders/skybox.vert.slang.spv", "skybox vertex shader", true},
@@ -308,12 +303,6 @@ bool RendererBackend::validateReleaseRuntimeAssets() {
         {"../src/render/shaders/voxel_normaldepth.frag.slang.spv", "voxel normal-depth shader", true},
         {"../src/render/shaders/ssao.frag.slang.spv", "ssao shader", true},
         {"../src/render/shaders/ssao_blur.frag.slang.spv", "ssao blur shader", true},
-        {"../src/render/shaders/sdf_main.vert.slang.spv", "sdf main vertex shader", true},
-        {"../src/render/shaders/sdf_main.frag.slang.spv", "sdf main fragment shader", true},
-        {"../src/render/shaders/sdf_prepass.vert.slang.spv", "sdf prepass vertex shader", true},
-        {"../src/render/shaders/sdf_prepass.frag.slang.spv", "sdf prepass fragment shader", true},
-        {"../src/render/shaders/sdf_shadow.vert.slang.spv", "sdf shadow vertex shader", true},
-        {"../src/render/shaders/sdf_shadow.frag.slang.spv", "sdf shadow fragment shader", true},
     }};
     constexpr std::array<RuntimeAssetSpec, 3> kPostAndComputeAssetSpecs = {{
         {"../src/render/shaders/auto_exposure_histogram.comp.slang.spv", "auto exposure histogram shader", true},
@@ -328,6 +317,9 @@ bool RendererBackend::validateReleaseRuntimeAssets() {
 
     bool missingRequiredAsset = false;
     for (const RuntimeAssetSpec& asset : kRuntimeAssetSpecs) {
+        if (asset.path == nullptr || asset.label == nullptr) {
+            continue;
+        }
         if (!runtimeAssetExists(asset.path)) {
             VOX_LOGE("render") << "missing required runtime asset: " << asset.label
                                << " (" << asset.path << ")\n";
@@ -335,6 +327,9 @@ bool RendererBackend::validateReleaseRuntimeAssets() {
         }
     }
     for (const RuntimeAssetSpec& asset : kPostAndComputeAssetSpecs) {
+        if (asset.path == nullptr || asset.label == nullptr) {
+            continue;
+        }
         if (!runtimeAssetExists(asset.path)) {
             VOX_LOGE("render") << "missing required runtime asset: " << asset.label
                                << " (" << asset.path << ")\n";
@@ -1683,10 +1678,6 @@ bool RendererBackend::recreateSwapchain() {
     }
     if (!createAoPipelines()) {
         VOX_LOGE("render") << "recreateSwapchain failed: createAoPipelines\n";
-        return false;
-    }
-    if (!createSdfPipelines()) {
-        VOX_LOGE("render") << "recreateSwapchain failed: createSdfPipelines\n";
         return false;
     }
     if (m_imguiInitialized) {

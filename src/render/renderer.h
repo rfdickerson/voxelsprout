@@ -37,6 +37,7 @@ public:
     bool useSpatialPartitioningQueries() const;
     voxelsprout::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const voxelsprout::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
+    void setGameplayUiState(const GameplayUiState& state);
     void renderFrame(
         const voxelsprout::world::ChunkGrid& chunkGrid,
         const voxelsprout::sim::Simulation& simulation,
@@ -52,6 +53,10 @@ public:
     void setFramePacingSettings(const FramePacingSettings& settings);
     [[nodiscard]] FramePacingSettings framePacingSettings() const;
     [[nodiscard]] FramePacingStats framePacingStats() const;
+    void setVertexAoEnabled(bool enabled);
+    [[nodiscard]] bool isVertexAoEnabled() const;
+    void setSsaoEnabled(bool enabled);
+    [[nodiscard]] bool isSsaoEnabled() const;
     void setShadowSettings(const ShadowSettings& settings);
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
