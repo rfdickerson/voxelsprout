@@ -1,3 +1,8 @@
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#endif
+
 namespace {
 
 constexpr std::array<const char*, 1> kValidationLayers = {"VK_LAYER_KHRONOS_validation"};
@@ -1425,3 +1430,7 @@ void destroyShaderModules(VkDevice device, std::span<const VkShaderModule> shade
 }
 
 } // namespace
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif

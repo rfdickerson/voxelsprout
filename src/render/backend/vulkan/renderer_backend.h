@@ -931,7 +931,8 @@ private:
     float m_debugPresentedFrameP99Ms = 0.0f;
     bool m_voxelGiRtSurfaceReady = false;
     bool m_voxelGiRtSurfaceActiveThisFrame = false;
-    bool m_voxelGiRtSurfaceLastLoggedActive = false;
+    bool m_voxelGiRtSurfaceLastLoggedRequested = false;
+    bool m_voxelGiRtSurfaceLastLoggedReady = false;
     bool m_voxelGiRtSurfaceLastLoggedValid = false;
     std::uint32_t m_debugDisplayTimingSampleCount = 0;
     std::array<float, kTimingHistorySampleCount> m_debugCpuFrameTotalMsHistory{};
