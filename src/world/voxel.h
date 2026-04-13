@@ -14,7 +14,8 @@ enum class VoxelType : std::uint8_t {
     SolidRed = 2,
     Dirt = 3,
     Grass = 4,
-    Wood = 5
+    Wood = 5,
+    Leaves = 6
 };
 
 struct Voxel {

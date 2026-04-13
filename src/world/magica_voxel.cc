@@ -203,7 +203,7 @@ std::uint32_t cornerAoLevel(
     return static_cast<std::uint32_t>(3 - occlusion);
 }
 
-constexpr std::uint8_t kMaterialPalette = 6u;
+constexpr std::uint8_t kMaterialPalette = 7u;
 
 std::uint8_t quantizeBaseColorIndex(
     std::uint32_t rgba,

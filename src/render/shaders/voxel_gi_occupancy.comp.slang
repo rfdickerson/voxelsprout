@@ -27,6 +27,7 @@ float3 voxelTypeDefaultAlbedo(uint voxelType)
     if (voxelType == 3u) return float3(122.0 / 255.0, 93.0 / 255.0, 58.0 / 255.0);
     if (voxelType == 4u) return float3(80.0 / 255.0, 142.0 / 255.0, 63.0 / 255.0);
     if (voxelType == 5u) return float3(141.0 / 255.0, 106.0 / 255.0, 64.0 / 255.0);
+    if (voxelType == 6u) return float3(92.0 / 255.0, 148.0 / 255.0, 78.0 / 255.0);
     return float3(0.0, 0.0, 0.0);
 }
 

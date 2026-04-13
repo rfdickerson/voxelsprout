@@ -31,7 +31,8 @@ constexpr std::uint8_t kMaterialDirt = 2u;
 constexpr std::uint8_t kMaterialGrass = 3u;
 constexpr std::uint8_t kMaterialWood = 4u;
 constexpr std::uint8_t kMaterialRed = 5u;
-constexpr std::uint8_t kMaterialPalette = 6u;
+constexpr std::uint8_t kMaterialLeaves = 6u;
+constexpr std::uint8_t kMaterialPalette = 7u;
 
 std::uint8_t materialForVoxelType(VoxelType type) {
     switch (type) {
@@ -45,6 +46,8 @@ std::uint8_t materialForVoxelType(VoxelType type) {
         return kMaterialWood;
     case VoxelType::SolidRed:
         return kMaterialRed;
+    case VoxelType::Leaves:
+        return kMaterialLeaves;
     case VoxelType::Empty:
     default:
         return 0;
