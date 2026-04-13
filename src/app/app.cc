@@ -2650,10 +2650,21 @@ void App::refreshStreamingWindow(bool forceRendererUpload) {
         return;
     }
 
-    m_chunkClipmapIndex.setConfig(m_renderer.clipmapQueryConfig());
-    m_appliedClipmapConfig = m_renderer.clipmapQueryConfig();
+    const voxelsprout::world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
+    const bool clipmapConfigChanged =
+        !m_hasAppliedClipmapConfig ||
+        requestedClipmapConfig.levelCount != m_appliedClipmapConfig.levelCount ||
+        requestedClipmapConfig.gridResolution != m_appliedClipmapConfig.gridResolution ||
+        requestedClipmapConfig.baseVoxelSize != m_appliedClipmapConfig.baseVoxelSize ||
+        requestedClipmapConfig.brickResolution != m_appliedClipmapConfig.brickResolution;
+    m_chunkClipmapIndex.setConfig(requestedClipmapConfig);
+    m_appliedClipmapConfig = requestedClipmapConfig;
     m_hasAppliedClipmapConfig = true;
-    m_chunkClipmapIndex.rebuild(m_world.chunkGrid());
+    if (clipmapConfigChanged || !m_chunkClipmapIndex.valid()) {
+        m_chunkClipmapIndex.rebuild(m_world.chunkGrid());
+    } else {
+        m_chunkClipmapIndex.syncResidentChunks(m_world.chunkGrid());
+    }
     m_visibleChunkIndices.clear();
     m_visibleChunkGraceFrames.assign(m_world.chunkGrid().chunkCount(), 0u);
     m_previousVisibleChunkMask.assign(m_world.chunkGrid().chunkCount(), 0u);

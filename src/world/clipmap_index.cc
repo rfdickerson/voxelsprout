@@ -46,8 +46,19 @@ void ChunkClipmapIndex::clear() {
 
 void ChunkClipmapIndex::rebuild(const ChunkGrid& chunkGrid) {
     clear();
+    syncResidentChunks(chunkGrid);
+    rebuildLevels();
+    m_valid = !m_levels.empty() && m_worldBounds.valid && !m_worldBounds.empty();
+}
+
+void ChunkClipmapIndex::syncResidentChunks(const ChunkGrid& chunkGrid) {
+    m_chunkBounds.clear();
+    m_allChunkIndices.clear();
+    m_worldBounds = {};
+
     const std::vector<Chunk>& chunks = chunkGrid.chunks();
     if (chunks.empty()) {
+        m_valid = false;
         return;
     }
 
@@ -60,7 +71,6 @@ void ChunkClipmapIndex::rebuild(const ChunkGrid& chunkGrid) {
         m_worldBounds.includeAabb(chunkBounds);
     }
 
-    rebuildLevels();
     m_valid = !m_levels.empty() && m_worldBounds.valid && !m_worldBounds.empty();
 }
 

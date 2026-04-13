@@ -36,6 +36,23 @@ namespace voxelsprout::render {
 
 namespace {
 
+ChunkResidentKey chunkResidentKeyForChunk(const voxelsprout::world::Chunk& chunk) {
+    return ChunkResidentKey{
+        chunk.chunkX(),
+        chunk.chunkY(),
+        chunk.chunkZ()
+    };
+}
+
+bool chunkResidentKeyMatchesRecord(
+    const ChunkResidentKey& key,
+    const RtChunkSceneRecord& record
+) {
+    return key.chunkX == record.chunkX &&
+           key.chunkY == record.chunkY &&
+           key.chunkZ == record.chunkZ;
+}
+
 RtVertex decodePackedVoxelVertexPosition(std::uint32_t packedBits, float offsetX, float offsetY, float offsetZ) {
     const std::uint32_t x =
         (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftX) & voxelsprout::world::PackedVoxelVertex::kMask5;
@@ -356,21 +373,91 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     if (m_chunkDrawRanges.size() != expectedDrawRangeCount) {
         m_chunkDrawRanges.assign(expectedDrawRangeCount, ChunkDrawRange{});
     }
-    if (m_chunkLodMeshCache.size() != chunks.size()) {
-        m_chunkLodMeshCache.assign(chunks.size(), voxelsprout::world::ChunkLodMeshes{});
+    const std::vector<ChunkResidentKey> previousResidentKeys = std::move(m_chunkResidentKeys);
+    const std::vector<voxelsprout::world::ChunkLodMeshes> previousChunkLodMeshCache = std::move(m_chunkLodMeshCache);
+    const std::vector<std::vector<GrassBillboardInstance>> previousChunkGrassInstanceCache = std::move(m_chunkGrassInstanceCache);
+    std::vector<RtChunkSceneRecord> previousRtChunkSceneRecords = std::move(m_rtChunkSceneRecords);
+
+    m_chunkResidentKeys.assign(chunks.size(), ChunkResidentKey{});
+    m_chunkLodMeshCache.assign(chunks.size(), voxelsprout::world::ChunkLodMeshes{});
+    m_chunkGrassInstanceCache.assign(chunks.size(), std::vector<GrassBillboardInstance>{});
+    m_rtChunkSceneRecords.assign(chunks.size(), RtChunkSceneRecord{});
+
+    std::vector<std::uint8_t> remeshMask(chunks.size(), 0u);
+    bool reusedAnyChunkCache = false;
+    bool residentSetChanged = previousResidentKeys.size() != chunks.size();
+    for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
+        const ChunkResidentKey key = chunkResidentKeyForChunk(chunks[chunkArrayIndex]);
+        m_chunkResidentKeys[chunkArrayIndex] = key;
+
+        const auto previousIt = std::find(previousResidentKeys.begin(), previousResidentKeys.end(), key);
+        if (previousIt == previousResidentKeys.end()) {
+            remeshMask[chunkArrayIndex] = 1u;
+            residentSetChanged = true;
+            continue;
+        }
+
+        const std::size_t previousIndex = static_cast<std::size_t>(std::distance(previousResidentKeys.begin(), previousIt));
+        if (previousIndex < previousChunkLodMeshCache.size()) {
+            m_chunkLodMeshCache[chunkArrayIndex] = previousChunkLodMeshCache[previousIndex];
+            reusedAnyChunkCache = true;
+        } else {
+            remeshMask[chunkArrayIndex] = 1u;
+        }
+        if (previousIndex < previousChunkGrassInstanceCache.size()) {
+            m_chunkGrassInstanceCache[chunkArrayIndex] = previousChunkGrassInstanceCache[previousIndex];
+        }
+        if (previousIndex != chunkArrayIndex) {
+            residentSetChanged = true;
+        }
+        const auto previousRtIt = std::find_if(
+            previousRtChunkSceneRecords.begin(),
+            previousRtChunkSceneRecords.end(),
+            [&](const RtChunkSceneRecord& record) { return chunkResidentKeyMatchesRecord(key, record); });
+        if (previousRtIt != previousRtChunkSceneRecords.end()) {
+            m_rtChunkSceneRecords[chunkArrayIndex] = std::move(*previousRtIt);
+            previousRtIt->chunkX = std::numeric_limits<int>::min();
+            previousRtIt->chunkY = std::numeric_limits<int>::min();
+            previousRtIt->chunkZ = std::numeric_limits<int>::min();
+        }
+    }
+    if (previousResidentKeys.empty() || !reusedAnyChunkCache) {
         m_chunkLodMeshCacheValid = false;
+        std::fill(remeshMask.begin(), remeshMask.end(), 1u);
     }
-    if (m_chunkGrassInstanceCache.size() != chunks.size()) {
-        m_chunkGrassInstanceCache.assign(chunks.size(), std::vector<GrassBillboardInstance>{});
+    for (const std::size_t chunkIndex : remeshChunkIndices) {
+        if (chunkIndex >= chunks.size()) {
+            rollbackChunkDrawState();
+            return false;
+        }
+        remeshMask[chunkIndex] = 1u;
     }
+
+    int minChunkX = std::numeric_limits<int>::max();
+    int maxChunkX = std::numeric_limits<int>::min();
+    int minChunkZ = std::numeric_limits<int>::max();
+    int maxChunkZ = std::numeric_limits<int>::min();
+    for (const voxelsprout::world::Chunk& chunk : chunks) {
+        minChunkX = std::min(minChunkX, chunk.chunkX());
+        maxChunkX = std::max(maxChunkX, chunk.chunkX());
+        minChunkZ = std::min(minChunkZ, chunk.chunkZ());
+        maxChunkZ = std::max(maxChunkZ, chunk.chunkZ());
+    }
+    const int residentCenterChunkX = (minChunkX + maxChunkX) / 2;
+    const int residentCenterChunkZ = (minChunkZ + maxChunkZ) / 2;
 
     auto rebuildGrassInstancesForChunk = [&](std::size_t chunkArrayIndex) {
         if (chunkArrayIndex >= chunks.size()) {
             return;
         }
         const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
+        const int grassDistanceX = std::abs(chunk.chunkX() - residentCenterChunkX);
+        const int grassDistanceZ = std::abs(chunk.chunkZ() - residentCenterChunkZ);
         std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
         grassInstances.clear();
+        if (grassDistanceX > kGrassActiveChunkRadius || grassDistanceZ > kGrassActiveChunkRadius) {
+            return;
+        }
         grassInstances.reserve(448);
 
         const float chunkWorldX = static_cast<float>(chunk.chunkX() * voxelsprout::world::Chunk::kSizeX);
@@ -472,7 +559,9 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
             outIndices += lodMesh.indices.size();
         }
     };
-    const bool fullRemesh = !m_chunkLodMeshCacheValid || remeshChunkIndices.empty();
+    const bool fullRemesh =
+        !m_chunkLodMeshCacheValid ||
+        std::all_of(remeshMask.begin(), remeshMask.end(), [](std::uint8_t dirty) { return dirty != 0u; });
     const auto remeshStart = std::chrono::steady_clock::now();
     if (fullRemesh) {
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
@@ -496,18 +585,12 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         remeshedChunkCount = chunks.size();
         m_chunkLodMeshCacheValid = true;
     } else {
-        std::vector<std::uint8_t> remeshMask(chunks.size(), 0u);
         std::vector<std::size_t> uniqueRemeshChunkIndices;
-        uniqueRemeshChunkIndices.reserve(remeshChunkIndices.size());
-        for (const std::size_t chunkArrayIndex : remeshChunkIndices) {
-            if (chunkArrayIndex >= chunks.size()) {
-                rollbackChunkDrawState();
-                return false;
-            }
-            if (remeshMask[chunkArrayIndex] != 0u) {
+        uniqueRemeshChunkIndices.reserve(chunks.size());
+        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < remeshMask.size(); ++chunkArrayIndex) {
+            if (remeshMask[chunkArrayIndex] == 0u) {
                 continue;
             }
-            remeshMask[chunkArrayIndex] = 1u;
             uniqueRemeshChunkIndices.push_back(chunkArrayIndex);
         }
 
@@ -547,6 +630,12 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     }
     if (fullRemesh) {
         m_debugChunkLastFullRemeshMs = remeshMs.count();
+    } else if (residentSetChanged) {
+        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
+            if (remeshMask[chunkArrayIndex] == 0u) {
+                rebuildGrassInstancesForChunk(chunkArrayIndex);
+            }
+        }
     }
 
     std::vector<GrassBillboardInstance> combinedGrassInstances;
@@ -617,32 +706,8 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         }
     }
 
-    struct RtChunkSceneMetadata {
-        int chunkX = 0;
-        int chunkY = 0;
-        int chunkZ = 0;
-        std::uint32_t vertexCount = 0;
-        std::uint32_t indexCount = 0;
-        bool geometryResident = false;
-    };
-
     std::vector<voxelsprout::world::PackedVoxelVertex> combinedVertices;
     std::vector<std::uint32_t> combinedIndices;
-    std::vector<RtChunkSceneRecord> previousRtChunkSceneRecords = std::move(m_rtChunkSceneRecords);
-    const bool previousChunkBlasesInUse = std::any_of(
-        previousRtChunkSceneRecords.begin(),
-        previousRtChunkSceneRecords.end(),
-        [](const RtChunkSceneRecord& record) { return record.blas.handle != VK_NULL_HANDLE; }
-    );
-    if (previousChunkBlasesInUse && m_graphicsQueue != VK_NULL_HANDLE) {
-        const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
-        if (waitResult != VK_SUCCESS) {
-            logVkFailure("vkQueueWaitIdle(chunkRtRetire)", waitResult);
-            m_rtChunkSceneRecords = std::move(previousRtChunkSceneRecords);
-            rollbackChunkDrawState();
-            return false;
-        }
-    }
     auto destroyRtAs = [&](RtAccelerationStructure& accelerationStructure) {
         if (accelerationStructure.handle != VK_NULL_HANDLE && m_destroyAccelerationStructureKhr != nullptr) {
             m_destroyAccelerationStructureKhr(m_device, accelerationStructure.handle, nullptr);
@@ -655,21 +720,6 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         accelerationStructure.deviceAddress = 0;
         accelerationStructure.primitiveCount = 0;
     };
-    std::vector<RtChunkSceneMetadata> previousRtChunkSceneMetadata;
-    previousRtChunkSceneMetadata.reserve(previousRtChunkSceneRecords.size());
-    for (RtChunkSceneRecord& previousRecord : previousRtChunkSceneRecords) {
-        previousRtChunkSceneMetadata.push_back(RtChunkSceneMetadata{
-            previousRecord.chunkX,
-            previousRecord.chunkY,
-            previousRecord.chunkZ,
-            previousRecord.vertexCount,
-            previousRecord.indexCount,
-            previousRecord.geometryResident
-        });
-        destroyRtAs(previousRecord.blas);
-        destroyRtGeometryBuffers(m_bufferAllocator, previousRecord.geometry);
-    }
-    m_rtChunkSceneRecords.resize(chunks.size());
     m_rtDirtyChunkCount = 0;
     std::size_t uploadedVertexCount = 0;
     std::size_t uploadedIndexCount = 0;
@@ -678,9 +728,15 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
         const voxelsprout::world::ChunkLodMeshes& chunkLodMeshes = m_chunkLodMeshCache[chunkArrayIndex];
         RtChunkSceneRecord& rtChunkRecord = m_rtChunkSceneRecords[chunkArrayIndex];
+        const bool remeshChunk = fullRemesh || remeshMask[chunkArrayIndex] != 0u;
+        const bool rtEligible =
+            std::abs(chunk.chunkX() - residentCenterChunkX) <= kRtActiveChunkRadius &&
+            std::abs(chunk.chunkZ() - residentCenterChunkZ) <= kRtActiveChunkRadius;
+        const bool previousRtEligible = rtChunkRecord.rtEligible;
         rtChunkRecord.chunkX = chunk.chunkX();
         rtChunkRecord.chunkY = chunk.chunkY();
         rtChunkRecord.chunkZ = chunk.chunkZ();
+        rtChunkRecord.rtEligible = rtEligible;
 
         for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
             const voxelsprout::world::ChunkMeshData& chunkMesh = chunkLodMeshes.lodMeshes[lodIndex];
@@ -712,7 +768,10 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
             for (const std::uint32_t index : chunkMesh.indices) {
                 combinedIndices.push_back(index + baseVertex);
             }
-            if (lodIndex == 0u && m_rayTracingCapabilityProbe.rayTracingCoreReady) {
+            if (lodIndex == 0u &&
+                m_rayTracingCapabilityProbe.rayTracingCoreReady &&
+                rtEligible &&
+                (remeshChunk || !rtChunkRecord.geometryResident || previousRtEligible != rtEligible)) {
                 // RT shadows should trace against the highest-detail chunk mesh.
                 rtChunkRecord.vertexCount = static_cast<std::uint32_t>(chunkMesh.vertices.size());
                 rtChunkRecord.indexCount = static_cast<std::uint32_t>(chunkMesh.indices.size());
@@ -743,23 +802,25 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
             uploadedIndexCount += chunkMesh.indices.size();
         }
 
-        const auto previousRecordIt = std::find_if(
-            previousRtChunkSceneMetadata.begin(),
-            previousRtChunkSceneMetadata.end(),
-            [&](const RtChunkSceneMetadata& record) {
-                return record.chunkX == rtChunkRecord.chunkX &&
-                       record.chunkY == rtChunkRecord.chunkY &&
-                       record.chunkZ == rtChunkRecord.chunkZ;
-            });
+        if (!rtEligible) {
+            destroyRtGeometryBuffers(m_bufferAllocator, rtChunkRecord.geometry);
+            rtChunkRecord.geometryResident = false;
+            rtChunkRecord.vertexCount = 0;
+            rtChunkRecord.indexCount = 0;
+        }
         rtChunkRecord.dirty =
-            previousRecordIt == previousRtChunkSceneMetadata.end() ||
-            previousRecordIt->vertexCount != rtChunkRecord.vertexCount ||
-            previousRecordIt->indexCount != rtChunkRecord.indexCount ||
-            previousRecordIt->geometryResident != rtChunkRecord.geometryResident ||
-            fullRemesh;
+            (rtEligible || previousRtEligible) &&
+            (remeshChunk || previousRtEligible != rtEligible);
         if (rtChunkRecord.dirty) {
             ++m_rtDirtyChunkCount;
         }
+    }
+    for (RtChunkSceneRecord& previousRecord : previousRtChunkSceneRecords) {
+        if (previousRecord.chunkX == std::numeric_limits<int>::min()) {
+            continue;
+        }
+        destroyRtAs(previousRecord.blas);
+        destroyRtGeometryBuffers(m_bufferAllocator, previousRecord.geometry);
     }
     m_debugChunkMeshVertexCount = static_cast<std::uint32_t>(uploadedVertexCount);
     m_debugChunkMeshIndexCount = static_cast<std::uint32_t>(uploadedIndexCount);
@@ -1020,7 +1081,10 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     m_chunkIndexBufferHandle = newChunkIndexBufferHandle;
     newChunkVertexBufferHandle = kInvalidBufferHandle;
     newChunkIndexBufferHandle = kInvalidBufferHandle;
-    if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
+    const bool rtSceneNeedsRefresh =
+        m_rayTracingCapabilityProbe.rayTracingCoreReady &&
+        (m_rtDirtyChunkCount > 0 || m_rtTlas.handle == VK_NULL_HANDLE);
+    if (rtSceneNeedsRefresh) {
         markRayTracingSceneDirty();
         if (rayTracingRuntimeReady() && !rebuildRayTracingScene()) {
             VOX_LOGE("render") << "chunk RT scene rebuild failed";
@@ -1105,18 +1169,6 @@ bool RendererBackend::rebuildRayTracingScene() {
         refreshShadowStats();
         return false;
     }
-    const bool hasExistingScene =
-        m_rtTlas.handle != VK_NULL_HANDLE ||
-        !m_rtChunkSceneRecords.empty() ||
-        !m_rtMagicaBlases.empty();
-    if (hasExistingScene) {
-        const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
-        if (waitResult != VK_SUCCESS) {
-            VOX_LOGE("render") << "rebuildRayTracingScene: vkQueueWaitIdle failed before AS rebuild";
-            refreshShadowStats();
-            return false;
-        }
-    }
     const VkDeviceAddress scratchAlignment = std::max<VkDeviceAddress>(
         1,
         static_cast<VkDeviceAddress>(m_rayTracingCapabilityProbe.scratchAlignment)
@@ -1170,15 +1222,39 @@ bool RendererBackend::rebuildRayTracingScene() {
         return outAccelerationStructure.deviceAddress != 0;
     };
 
+    bool needsGraphicsIdle = false;
+    for (const RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
+        if (chunkRecord.blas.handle != VK_NULL_HANDLE &&
+            (!chunkRecord.rtEligible || !chunkRecord.geometryResident || chunkRecord.dirty)) {
+            needsGraphicsIdle = true;
+            break;
+        }
+    }
+    if (!needsGraphicsIdle && m_rtTlas.handle != VK_NULL_HANDLE && m_rtSceneDirty) {
+        needsGraphicsIdle = true;
+    }
+    if (needsGraphicsIdle) {
+        const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
+        if (waitResult != VK_SUCCESS) {
+            VOX_LOGE("render") << "rebuildRayTracingScene: vkQueueWaitIdle failed before AS rebuild";
+            refreshShadowStats();
+            return false;
+        }
+    }
+
     std::vector<std::pair<RtGeometryBuffers*, RtAccelerationStructure*>> buildGeometries;
     for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
-        if (!chunkRecord.geometryResident ||
+        if (!chunkRecord.rtEligible ||
+            !chunkRecord.geometryResident ||
             chunkRecord.geometry.vertexCount == 0 ||
             chunkRecord.geometry.indexCount == 0) {
             destroyAs(chunkRecord.blas);
             continue;
         }
-        buildGeometries.push_back({&chunkRecord.geometry, &chunkRecord.blas});
+        if (chunkRecord.dirty || chunkRecord.blas.handle == VK_NULL_HANDLE) {
+            destroyAs(chunkRecord.blas);
+            buildGeometries.push_back({&chunkRecord.geometry, &chunkRecord.blas});
+        }
     }
     if (m_rtMagicaBlases.size() > m_rtMagicaGeometries.size()) {
         for (std::size_t i = m_rtMagicaGeometries.size(); i < m_rtMagicaBlases.size(); ++i) {
@@ -1188,9 +1264,12 @@ bool RendererBackend::rebuildRayTracingScene() {
     m_rtMagicaBlases.resize(m_rtMagicaGeometries.size());
     for (std::size_t i = 0; i < m_rtMagicaGeometries.size(); ++i) {
         if (m_rtMagicaGeometries[i].vertexCount == 0 || m_rtMagicaGeometries[i].indexCount == 0) {
+            destroyAs(m_rtMagicaBlases[i]);
             continue;
         }
-        buildGeometries.push_back({&m_rtMagicaGeometries[i], &m_rtMagicaBlases[i]});
+        if (m_rtMagicaBlases[i].handle == VK_NULL_HANDLE) {
+            buildGeometries.push_back({&m_rtMagicaGeometries[i], &m_rtMagicaBlases[i]});
+        }
     }
 
     VkCommandPoolCreateInfo commandPoolCreateInfo{};
@@ -1218,8 +1297,14 @@ bool RendererBackend::rebuildRayTracingScene() {
     };
     std::vector<ScratchAllocation> scratchBuffers;
     scratchBuffers.reserve(buildGeometries.size() + 1u);
+    std::size_t estimatedInstanceCount = m_rtMagicaGeometries.size();
+    for (const RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
+        if (chunkRecord.rtEligible && chunkRecord.geometryResident && chunkRecord.geometry.indexCount > 0) {
+            ++estimatedInstanceCount;
+        }
+    }
     std::vector<VkAccelerationStructureInstanceKHR> tlasInstances;
-    tlasInstances.reserve(buildGeometries.size());
+    tlasInstances.reserve(estimatedInstanceCount);
     bool buildOk = true;
     bool commandBufferBegun = false;
 
@@ -1294,17 +1379,6 @@ bool RendererBackend::rebuildRayTracingScene() {
         const VkAccelerationStructureBuildRangeInfoKHR* rangeInfos[] = {&rangeInfo};
         m_cmdBuildAccelerationStructuresKhr(commandBuffer, 1, &buildInfo, rangeInfos);
         outBlas->primitiveCount = primitiveCount;
-
-        VkAccelerationStructureInstanceKHR instance{};
-        instance.transform.matrix[0][0] = 1.0f;
-        instance.transform.matrix[1][1] = 1.0f;
-        instance.transform.matrix[2][2] = 1.0f;
-        instance.instanceCustomIndex = static_cast<std::uint32_t>(tlasInstances.size());
-        instance.mask = 0xFFu;
-        instance.instanceShaderBindingTableRecordOffset = 0;
-        instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-        instance.accelerationStructureReference = outBlas->deviceAddress;
-        tlasInstances.push_back(instance);
     }
 
     if (buildOk && !buildGeometries.empty()) {
@@ -1322,6 +1396,34 @@ bool RendererBackend::rebuildRayTracingScene() {
         dependencyInfo.memoryBarrierCount = 1;
         dependencyInfo.pMemoryBarriers = &blasBuildBarrier;
         vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+    }
+
+    if (buildOk) {
+        auto appendTlasInstance = [&](const RtAccelerationStructure& accelerationStructure) {
+            if (accelerationStructure.handle == VK_NULL_HANDLE || accelerationStructure.deviceAddress == 0) {
+                return;
+            }
+            VkAccelerationStructureInstanceKHR instance{};
+            instance.transform.matrix[0][0] = 1.0f;
+            instance.transform.matrix[1][1] = 1.0f;
+            instance.transform.matrix[2][2] = 1.0f;
+            instance.instanceCustomIndex = static_cast<std::uint32_t>(tlasInstances.size());
+            instance.mask = 0xFFu;
+            instance.instanceShaderBindingTableRecordOffset = 0;
+            instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+            instance.accelerationStructureReference = accelerationStructure.deviceAddress;
+            tlasInstances.push_back(instance);
+        };
+
+        for (const RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
+            if (!chunkRecord.rtEligible || !chunkRecord.geometryResident) {
+                continue;
+            }
+            appendTlasInstance(chunkRecord.blas);
+        }
+        for (const RtAccelerationStructure& blas : m_rtMagicaBlases) {
+            appendTlasInstance(blas);
+        }
     }
 
     if (buildOk && !tlasInstances.empty()) {
@@ -1460,6 +1562,9 @@ bool RendererBackend::rebuildRayTracingScene() {
     ++m_rtSceneBuildCount;
     m_rtBlasBuildCount = static_cast<std::uint32_t>(buildGeometries.size());
     m_rtTlasBuildCount = tlasInstances.empty() ? 0u : 1u;
+    for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
+        chunkRecord.dirty = false;
+    }
     refreshShadowStats();
     VOX_LOGI("render") << "ray tracing scene rebuilt: blas=" << m_rtBlasBuildCount
                        << ", tlas=" << m_rtTlasBuildCount

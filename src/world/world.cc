@@ -551,7 +551,7 @@ World::ChunkStreamingUpdate World::syncResidentChunkGrid(int centerChunkX, int c
         !update.enteredChunkKeys.empty() ||
         !update.exitedChunkKeys.empty();
 
-    update.requiresFullMeshUpload = stats.changed;
+    update.requiresFullMeshUpload = false;
     m_chunkGrid.setChunks(std::move(residentChunks));
     for (std::size_t residentChunkIndex = 0; residentChunkIndex < m_chunkGrid.chunkCount(); ++residentChunkIndex) {
         const ChunkKey residentKey = chunkKeyForChunk(m_chunkGrid.chunks()[residentChunkIndex]);

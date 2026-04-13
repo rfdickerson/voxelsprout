@@ -24,6 +24,7 @@ class ChunkClipmapIndex {
 public:
     void clear();
     void rebuild(const ChunkGrid& chunkGrid);
+    void syncResidentChunks(const ChunkGrid& chunkGrid);
     void setConfig(const ClipmapConfig& config);
 
     [[nodiscard]] const ClipmapConfig& config() const;
