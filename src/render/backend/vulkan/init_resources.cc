@@ -1376,6 +1376,10 @@ bool RendererBackend::createVoxelGiResources() {
     constexpr const char* kVoxelGiOccupancyShaderPath = "../src/render/shaders/voxel_gi_occupancy.comp.slang.spv";
     constexpr const char* kVoxelGiSurfaceShaderPath = "../src/render/shaders/voxel_gi_surface.comp.slang.spv";
     constexpr const char* kVoxelGiSurfaceRtShaderPath = "../src/render/shaders/voxel_gi_surface_rt.comp.slang.spv";
+    constexpr const char* kVoxelGiRestirCandidateShaderPath = "../src/render/shaders/voxel_gi_restir_candidate.comp.slang.spv";
+    constexpr const char* kVoxelGiRestirTemporalShaderPath = "../src/render/shaders/voxel_gi_restir_temporal.comp.slang.spv";
+    constexpr const char* kVoxelGiRestirSpatialShaderPath = "../src/render/shaders/voxel_gi_restir_spatial.comp.slang.spv";
+    constexpr const char* kVoxelGiRestirResolveShaderPath = "../src/render/shaders/voxel_gi_restir_resolve.comp.slang.spv";
     constexpr const char* kVoxelGiInjectShaderPath = "../src/render/shaders/voxel_gi_inject.comp.slang.spv";
     constexpr const char* kVoxelGiPropagateShaderPath = "../src/render/shaders/voxel_gi_propagate.comp.slang.spv";
     const bool hasSkyExposureShader = readBinaryFile(kVoxelGiSkyExposureShaderPath).has_value();
@@ -1386,7 +1390,14 @@ bool RendererBackend::createVoxelGiResources() {
     const bool hasRtSurfaceShaderVariant =
         m_rayTracingRuntimeEnabled &&
         readBinaryFile(kVoxelGiSurfaceRtShaderPath).has_value();
+    const bool hasRestirShaderSet =
+        m_rayTracingRuntimeEnabled &&
+        readBinaryFile(kVoxelGiRestirCandidateShaderPath).has_value() &&
+        readBinaryFile(kVoxelGiRestirTemporalShaderPath).has_value() &&
+        readBinaryFile(kVoxelGiRestirSpatialShaderPath).has_value() &&
+        readBinaryFile(kVoxelGiRestirResolveShaderPath).has_value();
     m_voxelGiRtSurfaceReady = false;
+    m_voxelGiRestirReady = false;
     if (!hasSkyExposureShader || !hasOccupancyShader || !hasSurfaceShader || !hasInjectShader || !hasPropagateShader) {
         VOX_LOGI("render")
             << "voxel GI compute shaders not found; keeping static volume fallback (expected: "
@@ -1395,8 +1406,8 @@ bool RendererBackend::createVoxelGiResources() {
             << kVoxelGiPropagateShaderPath << ")\n";
         VOX_LOGI("render") << "voxel GI runtime: compute=no, rtSurfaceVariant="
                            << (hasRtSurfaceShaderVariant ? "yes" : "no")
-                           << ", rtSurfaceReady=no, rtSurfaceTracingRequested="
-                           << (m_voxelGiDebugSettings.enableRtSurfaceTracing ? "yes" : "no") << "\n";
+                           << ", rtSurfaceReady=no, restirSurfaceReady=no, rtSurfaceTracingRequested="
+                           << (m_voxelGiDebugSettings.surfaceMode != VoxelGiSurfaceMode::Legacy ? "yes" : "no") << "\n";
         m_voxelGiComputeAvailable = false;
         m_voxelGiInitialized = false;
         m_voxelGiSkyExposureInitialized = false;
@@ -1526,6 +1537,27 @@ bool RendererBackend::createVoxelGiResources() {
             rtSurfaceSceneBinding.descriptorCount = 1;
             rtSurfaceSceneBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
             bindings.push_back(rtSurfaceSceneBinding);
+
+            VkDescriptorSetLayoutBinding restirCurrentBinding{};
+            restirCurrentBinding.binding = 17;
+            restirCurrentBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            restirCurrentBinding.descriptorCount = 1;
+            restirCurrentBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            bindings.push_back(restirCurrentBinding);
+
+            VkDescriptorSetLayoutBinding restirPreviousBinding{};
+            restirPreviousBinding.binding = 18;
+            restirPreviousBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            restirPreviousBinding.descriptorCount = 1;
+            restirPreviousBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            bindings.push_back(restirPreviousBinding);
+
+            VkDescriptorSetLayoutBinding restirScratchBinding{};
+            restirScratchBinding.binding = 19;
+            restirScratchBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            restirScratchBinding.descriptorCount = 1;
+            restirScratchBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            bindings.push_back(restirScratchBinding);
         }
 
         if (!createDescriptorSetLayout(
@@ -1545,7 +1577,7 @@ bool RendererBackend::createVoxelGiResources() {
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * kMaxFramesInFlight},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10 * kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kMaxFramesInFlight}
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kMaxFramesInFlight}
         };
         if (m_rayTracingRuntimeEnabled) {
             poolSizes.push_back(VkDescriptorPoolSize{
@@ -1577,7 +1609,11 @@ bool RendererBackend::createVoxelGiResources() {
     }
     m_voxelGiDescriptorWriteKeyValid.fill(false);
 
-    std::array<VkShaderModule, 6> shaderModules = {
+    std::array<VkShaderModule, 10> shaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
@@ -1591,6 +1627,10 @@ bool RendererBackend::createVoxelGiResources() {
     VkShaderModule& surfaceRtShaderModule = shaderModules[3];
     VkShaderModule& injectShaderModule = shaderModules[4];
     VkShaderModule& propagateShaderModule = shaderModules[5];
+    VkShaderModule& restirCandidateShaderModule = shaderModules[6];
+    VkShaderModule& restirTemporalShaderModule = shaderModules[7];
+    VkShaderModule& restirSpatialShaderModule = shaderModules[8];
+    VkShaderModule& restirResolveShaderModule = shaderModules[9];
     if (!createShaderModuleFromFile(
             m_device,
             kVoxelGiSkyExposureShaderPath,
@@ -1628,6 +1668,36 @@ bool RendererBackend::createVoxelGiResources() {
                 kVoxelGiSurfaceRtShaderPath,
                 "voxel_gi_surface_rt.comp",
                 surfaceRtShaderModule
+            )) {
+            destroyShaderModules(m_device, shaderModules);
+            destroyVoxelGiResources();
+            return false;
+        }
+    }
+    if (hasRestirShaderSet) {
+        if (!createShaderModuleFromFile(
+                m_device,
+                kVoxelGiRestirCandidateShaderPath,
+                "voxel_gi_restir_candidate.comp",
+                restirCandidateShaderModule
+            ) ||
+            !createShaderModuleFromFile(
+                m_device,
+                kVoxelGiRestirTemporalShaderPath,
+                "voxel_gi_restir_temporal.comp",
+                restirTemporalShaderModule
+            ) ||
+            !createShaderModuleFromFile(
+                m_device,
+                kVoxelGiRestirSpatialShaderPath,
+                "voxel_gi_restir_spatial.comp",
+                restirSpatialShaderModule
+            ) ||
+            !createShaderModuleFromFile(
+                m_device,
+                kVoxelGiRestirResolveShaderPath,
+                "voxel_gi_restir_resolve.comp",
+                restirResolveShaderModule
             )) {
             destroyShaderModules(m_device, shaderModules);
             destroyVoxelGiResources();
@@ -1713,6 +1783,42 @@ bool RendererBackend::createVoxelGiResources() {
         }
         createdRtSurfacePipeline = true;
     }
+    bool createdRestirPipelines = false;
+    if (hasRestirShaderSet) {
+        if (!createComputePipeline(
+                m_voxelGiPipelineLayout,
+                restirCandidateShaderModule,
+                m_voxelGiRestirCandidatePipeline,
+                "vkCreateComputePipelines(voxelGiRestirCandidate)",
+                "pipeline.voxelGi.restirCandidate"
+            ) ||
+            !createComputePipeline(
+                m_voxelGiPipelineLayout,
+                restirTemporalShaderModule,
+                m_voxelGiRestirTemporalPipeline,
+                "vkCreateComputePipelines(voxelGiRestirTemporal)",
+                "pipeline.voxelGi.restirTemporal"
+            ) ||
+            !createComputePipeline(
+                m_voxelGiPipelineLayout,
+                restirSpatialShaderModule,
+                m_voxelGiRestirSpatialPipeline,
+                "vkCreateComputePipelines(voxelGiRestirSpatial)",
+                "pipeline.voxelGi.restirSpatial"
+            ) ||
+            !createComputePipeline(
+                m_voxelGiPipelineLayout,
+                restirResolveShaderModule,
+                m_voxelGiRestirResolvePipeline,
+                "vkCreateComputePipelines(voxelGiRestirResolve)",
+                "pipeline.voxelGi.restirResolve"
+            )) {
+            destroyShaderModules(m_device, shaderModules);
+            destroyVoxelGiResources();
+            return false;
+        }
+        createdRestirPipelines = true;
+    }
     if (!createComputePipeline(
             m_voxelGiPipelineLayout,
             injectShaderModule,
@@ -1745,6 +1851,44 @@ bool RendererBackend::createVoxelGiResources() {
         m_rayTracingRuntimeEnabled &&
         createdRtSurfacePipeline &&
         m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE;
+    m_voxelGiRestirReady =
+        m_rayTracingRuntimeEnabled &&
+        createdRestirPipelines &&
+        m_voxelGiRestirCandidatePipeline != VK_NULL_HANDLE &&
+        m_voxelGiRestirTemporalPipeline != VK_NULL_HANDLE &&
+        m_voxelGiRestirSpatialPipeline != VK_NULL_HANDLE &&
+        m_voxelGiRestirResolvePipeline != VK_NULL_HANDLE;
+    if (m_rayTracingRuntimeEnabled) {
+        struct alignas(16) VoxelGiRestirReservoirInit {
+            float radiance[4];
+            float state[4];
+        };
+        constexpr std::size_t kReservoirFaceCount = 6u;
+        const VkDeviceSize reservoirCount =
+            static_cast<VkDeviceSize>(kVoxelGiGridResolution) *
+            static_cast<VkDeviceSize>(kVoxelGiGridResolution) *
+            static_cast<VkDeviceSize>(kVoxelGiGridResolution) *
+            static_cast<VkDeviceSize>(kReservoirFaceCount);
+        const VkDeviceSize reservoirBytes =
+            reservoirCount * static_cast<VkDeviceSize>(sizeof(VoxelGiRestirReservoirInit));
+        const BufferCreateDesc reservoirCreateDesc{
+            reservoirBytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            0,
+            nullptr,
+            0,
+            nullptr
+        };
+        m_voxelGiRestirReservoirCurrentBufferHandle = m_bufferAllocator.createBuffer(reservoirCreateDesc);
+        m_voxelGiRestirReservoirPreviousBufferHandle = m_bufferAllocator.createBuffer(reservoirCreateDesc);
+        m_voxelGiRestirReservoirScratchBufferHandle = m_bufferAllocator.createBuffer(reservoirCreateDesc);
+        if (m_voxelGiRestirReservoirCurrentBufferHandle == kInvalidBufferHandle ||
+            m_voxelGiRestirReservoirPreviousBufferHandle == kInvalidBufferHandle ||
+            m_voxelGiRestirReservoirScratchBufferHandle == kInvalidBufferHandle) {
+            destroyVoxelGiResources();
+            return false;
+        }
+    }
     VOX_LOGI("render") << "voxel GI resources ready: "
                        << kVoxelGiGridResolution << "^3, format=" << static_cast<int>(m_voxelGiFormat)
                        << ", occupancyFormat=" << static_cast<int>(m_voxelGiOccupancyFormat)
@@ -1752,8 +1896,9 @@ bool RendererBackend::createVoxelGiResources() {
     VOX_LOGI("render") << "voxel GI runtime: compute=yes, rtSurfaceVariant="
                        << (hasRtSurfaceShaderVariant ? "yes" : "no")
                        << ", rtSurfaceReady=" << (m_voxelGiRtSurfaceReady ? "yes" : "no")
+                       << ", restirSurfaceReady=" << (m_voxelGiRestirReady ? "yes" : "no")
                        << ", rtSurfaceTracingRequested="
-                       << (m_voxelGiDebugSettings.enableRtSurfaceTracing ? "yes" : "no") << "\n";
+                       << (m_voxelGiDebugSettings.surfaceMode != VoxelGiSurfaceMode::Legacy ? "yes" : "no") << "\n";
     return true;
 }
 
@@ -1824,6 +1969,12 @@ void RendererBackend::destroyVoxelGiResources() {
     m_pipelineManager.destroyVoxelGiPipelines(m_device);
     m_descriptorManager.destroyVoxelGi(m_device);
     m_voxelGiDescriptorWriteKeyValid.fill(false);
+    m_bufferAllocator.destroyBuffer(m_voxelGiRestirReservoirCurrentBufferHandle);
+    m_bufferAllocator.destroyBuffer(m_voxelGiRestirReservoirPreviousBufferHandle);
+    m_bufferAllocator.destroyBuffer(m_voxelGiRestirReservoirScratchBufferHandle);
+    m_voxelGiRestirReservoirCurrentBufferHandle = kInvalidBufferHandle;
+    m_voxelGiRestirReservoirPreviousBufferHandle = kInvalidBufferHandle;
+    m_voxelGiRestirReservoirScratchBufferHandle = kInvalidBufferHandle;
 
     if (m_voxelGiOccupancySampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device, m_voxelGiOccupancySampler, nullptr);
@@ -1921,16 +2072,29 @@ void RendererBackend::destroyVoxelGiResources() {
     m_voxelGiSkyExposureInitialized = false;
     m_voxelGiOccupancyInitialized = false;
     m_voxelGiComputeAvailable = false;
+    m_voxelGiRestirReady = false;
+    m_voxelGiRestirActiveThisFrame = false;
+    m_voxelGiRestirHistoryValid = false;
+    m_voxelGiRestirHistoryResetReason = "destroyed";
     m_voxelGiWorldDirty = true;
     ++m_voxelGiWorldVersion;
     m_voxelGiHasPreviousFrameState = false;
     m_voxelGiPreviousBounceStrength = 0.0f;
     m_voxelGiPreviousDiffusionSoftness = 0.0f;
+    m_voxelGiPreviousSurfaceMode = VoxelGiSurfaceMode::RtSurface;
     m_voxelGiOccupancyBuildOrigin = {0.0f, 0.0f, 0.0f};
     m_voxelGiOccupancyFullRebuildCursor = 0;
     m_voxelGiOccupancyFullRebuildInProgress = false;
     m_voxelGiOccupancyFullRebuildNeedsClear = false;
     m_voxelGiDirtyChunkIndices.clear();
+    m_voxelGiPreviousRtSurfaceTracingEnabled = false;
+    m_voxelGiPreviousRtSurfaceSampleCount = 0.0f;
+    m_voxelGiPreviousRtSurfaceBiasScale = 0.0f;
+    m_voxelGiPreviousRtSunAngularRadiusDegrees = 0.0f;
+    m_voxelGiPreviousRestirCandidateCount = 0.0f;
+    m_voxelGiPreviousRestirTemporalReuseEnabled = false;
+    m_voxelGiPreviousRestirSpatialReuseEnabled = false;
+    m_voxelGiPreviousRestirSpatialRadius = 0.0f;
 }
 
 

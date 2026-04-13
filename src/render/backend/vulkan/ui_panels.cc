@@ -86,9 +86,19 @@ void RendererBackend::buildShadowDebugUi() {
             ImGui::Text("Compute: %s", m_voxelGiComputeAvailable ? "on" : "fallback");
             ImGui::SliderFloat("Bounce Strength", &m_voxelGiDebugSettings.bounceStrength, 0.0f, 2.50f, "%.2f");
             ImGui::SliderFloat("Diffusion Softness", &m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f, "%.2f");
-            ImGui::Checkbox("RT Surface Tracing", &m_voxelGiDebugSettings.enableRtSurfaceTracing);
+            int giSurfaceMode = static_cast<int>(m_voxelGiDebugSettings.surfaceMode);
+            ImGui::Combo("GI Surface Mode", &giSurfaceMode, "Legacy\0RT Surface\0ReSTIR Surface\0");
+            m_voxelGiDebugSettings.surfaceMode = static_cast<VoxelGiSurfaceMode>(giSurfaceMode);
             ImGui::SliderInt("RT Surface Samples", &m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2);
             ImGui::SliderFloat("RT Surface Bias", &m_voxelGiDebugSettings.rtSurfaceBiasScale, 0.25f, 4.0f, "%.2f");
+            ImGui::SeparatorText("ReSTIR GI");
+            ImGui::SliderInt("ReSTIR Candidates", &m_voxelGiDebugSettings.restirCandidateCount, 1, 8);
+            ImGui::Checkbox("ReSTIR Temporal", &m_voxelGiDebugSettings.restirEnableTemporalReuse);
+            ImGui::Checkbox("ReSTIR Spatial", &m_voxelGiDebugSettings.restirEnableSpatialReuse);
+            ImGui::SliderInt("ReSTIR Radius", &m_voxelGiDebugSettings.restirSpatialRadius, 1, 2);
+            if (ImGui::Button("Reset ReSTIR History")) {
+                m_voxelGiDebugSettings.restirHistoryResetRequested = true;
+            }
             if (ImGui::CollapsingHeader("Advanced GI Debug")) {
                 const char* giVisualizationModes = "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0";
                 ImGui::Combo("GI Visualize", &m_voxelGiDebugSettings.visualizationMode, giVisualizationModes);

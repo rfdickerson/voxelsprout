@@ -47,6 +47,12 @@ enum class ShadowMode : std::uint8_t {
     Auto = 2,
 };
 
+enum class VoxelGiSurfaceMode : std::uint8_t {
+    Legacy = 0,
+    RtSurface = 1,
+    RestirSurface = 2,
+};
+
 enum class ShadowFallbackReason : std::uint8_t {
     None = 0,
     RayTracingUnsupported = 1,
