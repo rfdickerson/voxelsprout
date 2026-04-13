@@ -1366,8 +1366,8 @@ bool RendererBackend::createPreviewBuffers() {
         return true;
     }
 
-    const voxelsprout::world::ChunkMeshData addMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 3, 250);
-    const voxelsprout::world::ChunkMeshData removeMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 3, 251);
+    const voxelsprout::world::ChunkMeshData addMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 15, 250);
+    const voxelsprout::world::ChunkMeshData removeMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 15, 251);
     if (addMesh.vertices.empty() || addMesh.indices.empty() || removeMesh.vertices.empty() || removeMesh.indices.empty()) {
         VOX_LOGE("render") << "preview mesh build failed\n";
         return false;

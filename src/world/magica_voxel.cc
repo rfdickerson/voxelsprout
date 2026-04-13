@@ -145,7 +145,7 @@ std::uint32_t cornerAoLevel(
     std::uint32_t corner
 ) {
     if (faceId >= kFaceNeighbors.size() || corner >= 4u) {
-        return 3u;
+        return PackedVoxelVertex::kMask4;
     }
 
     const FaceNeighbor& face = kFaceNeighbors[faceId];
@@ -194,20 +194,44 @@ std::uint32_t cornerAoLevel(
         baseZ + (uz * uSign) + (vz * vSign)
     );
 
-    int occlusion = 0;
+    const bool edgeAExtended = isSolid(
+        densePalette,
+        sizeX,
+        sizeY,
+        sizeZ,
+        baseX + (ux * uSign * 2),
+        baseY + (uy * uSign * 2),
+        baseZ + (uz * uSign * 2)
+    );
+    const bool edgeBExtended = isSolid(
+        densePalette,
+        sizeX,
+        sizeY,
+        sizeZ,
+        baseX + (vx * vSign * 2),
+        baseY + (vy * vSign * 2),
+        baseZ + (vz * vSign * 2)
+    );
+
+    float occlusion = 0.0f;
     if (sideA && sideB) {
-        occlusion = 3;
+        occlusion = 1.0f;
     } else {
-        occlusion = (sideA ? 1 : 0) + (sideB ? 1 : 0) + (cornerSolid ? 1 : 0);
+        occlusion += sideA ? 0.36f : 0.0f;
+        occlusion += sideB ? 0.36f : 0.0f;
+        occlusion += cornerSolid ? 0.20f : 0.0f;
+        occlusion += edgeAExtended ? 0.04f : 0.0f;
+        occlusion += edgeBExtended ? 0.04f : 0.0f;
     }
-    return static_cast<std::uint32_t>(3 - occlusion);
+    const float visibility = 1.0f - std::min(occlusion, 1.0f);
+    return static_cast<std::uint32_t>((visibility * 15.0f) + 0.5f);
 }
 
 constexpr std::uint8_t kMaterialPalette = 7u;
 
 std::uint8_t quantizeBaseColorIndex(
     std::uint32_t rgba,
-    std::array<std::uint32_t, 16>& paletteSlots,
+    std::array<std::uint32_t, 8>& paletteSlots,
     std::uint8_t& paletteSlotCount
 ) {
     for (std::uint8_t i = 0; i < paletteSlotCount; ++i) {
@@ -246,7 +270,7 @@ std::uint8_t quantizeBaseColorIndex(
     return nearest;
 }
 
-constexpr std::uint16_t kEmptyMaskKey = 0xFFFFu;
+constexpr std::uint32_t kEmptyMaskKey = 0xFFFFFFFFu;
 
 void faceSliceDimensionsForVolume(
     std::uint32_t faceId,
@@ -351,7 +375,7 @@ void faceRectCornerGrid(
     }
 }
 
-std::uint8_t faceCornerAoSignatureDense(
+std::uint16_t faceCornerAoSignatureDense(
     const std::vector<std::uint8_t>& densePalette,
     int sizeX,
     int sizeY,
@@ -361,23 +385,20 @@ std::uint8_t faceCornerAoSignatureDense(
     int z,
     std::uint32_t faceId
 ) {
-    std::uint8_t signature = 0;
+    std::uint16_t signature = 0;
     for (std::uint32_t corner = 0; corner < 4u; ++corner) {
-        const std::uint32_t ao = cornerAoLevel(densePalette, sizeX, sizeY, sizeZ, x, y, z, faceId, corner) & 0x3u;
-        signature |= static_cast<std::uint8_t>(ao << (corner * 2u));
+        const std::uint32_t ao =
+            cornerAoLevel(densePalette, sizeX, sizeY, sizeZ, x, y, z, faceId, corner) & PackedVoxelVertex::kMask4;
+        signature |= static_cast<std::uint16_t>(ao << (corner * 4u));
     }
     return signature;
 }
 
-std::uint16_t makeMaskKey(std::uint8_t material, std::uint8_t aoSignature, std::uint8_t baseColorIndex) {
-    // 16-bit greedy mask key layout:
-    // bits 12..15: material (4 bits)
-    // bits  4..11: AO signature (8 bits; 4 corners x 2 bits)
-    // bits  0.. 3: base color index (4 bits)
-    return static_cast<std::uint16_t>(
-        (static_cast<std::uint16_t>(material & PackedVoxelVertex::kMask4) << 12u) |
-        (static_cast<std::uint16_t>(aoSignature) << 4u) |
-        static_cast<std::uint16_t>(baseColorIndex & PackedVoxelVertex::kMask4)
+std::uint32_t makeMaskKey(std::uint8_t material, std::uint16_t aoSignature, std::uint8_t baseColorIndex) {
+    return static_cast<std::uint32_t>(
+        (static_cast<std::uint32_t>(material & PackedVoxelVertex::kMask3) << 19u) |
+        (static_cast<std::uint32_t>(aoSignature) << 3u) |
+        static_cast<std::uint32_t>(baseColorIndex & PackedVoxelVertex::kMask3)
     );
 }
 
@@ -390,7 +411,7 @@ bool appendGreedyFaceQuadLocal(
     int width,
     int height,
     std::uint8_t material,
-    std::uint8_t aoSignature,
+    std::uint16_t aoSignature,
     std::uint8_t baseColorIndex,
     std::uint32_t lodLevel,
     int sizeX,
@@ -412,7 +433,7 @@ bool appendGreedyFaceQuadLocal(
             baseZ < 0 || baseZ >= sizeZ) {
             return false;
         }
-        const std::uint32_t ao = (aoSignature >> (corner * 2u)) & 0x3u;
+        const std::uint32_t ao = (aoSignature >> (corner * 4u)) & PackedVoxelVertex::kMask4;
         PackedVoxelVertex vertex{};
         vertex.bits = PackedVoxelVertex::pack(
             static_cast<std::uint32_t>(baseX),
@@ -428,12 +449,26 @@ bool appendGreedyFaceQuadLocal(
         mesh.vertices.push_back(vertex);
     }
 
-    mesh.indices.push_back(baseVertex + 0u);
-    mesh.indices.push_back(baseVertex + 1u);
-    mesh.indices.push_back(baseVertex + 2u);
-    mesh.indices.push_back(baseVertex + 0u);
-    mesh.indices.push_back(baseVertex + 2u);
-    mesh.indices.push_back(baseVertex + 3u);
+    const std::uint32_t ao0 = (aoSignature >> 0u) & PackedVoxelVertex::kMask4;
+    const std::uint32_t ao1 = (aoSignature >> 4u) & PackedVoxelVertex::kMask4;
+    const std::uint32_t ao2 = (aoSignature >> 8u) & PackedVoxelVertex::kMask4;
+    const std::uint32_t ao3 = (aoSignature >> 12u) & PackedVoxelVertex::kMask4;
+    const bool useFlippedDiagonal = (ao0 + ao2) > (ao1 + ao3);
+    if (useFlippedDiagonal) {
+        mesh.indices.push_back(baseVertex + 1u);
+        mesh.indices.push_back(baseVertex + 2u);
+        mesh.indices.push_back(baseVertex + 3u);
+        mesh.indices.push_back(baseVertex + 1u);
+        mesh.indices.push_back(baseVertex + 3u);
+        mesh.indices.push_back(baseVertex + 0u);
+    } else {
+        mesh.indices.push_back(baseVertex + 0u);
+        mesh.indices.push_back(baseVertex + 1u);
+        mesh.indices.push_back(baseVertex + 2u);
+        mesh.indices.push_back(baseVertex + 0u);
+        mesh.indices.push_back(baseVertex + 2u);
+        mesh.indices.push_back(baseVertex + 3u);
+    }
     return true;
 }
 
@@ -649,7 +684,7 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
         static_cast<std::size_t>(transformedSizeX * transformedSizeY * transformedSizeZ),
         0u
     );
-    std::array<std::uint32_t, 16> baseColorPaletteSlots{};
+    std::array<std::uint32_t, 8> baseColorPaletteSlots{};
     std::uint8_t baseColorPaletteSlotCount = 0u;
 
     for (const MagicaVoxel& voxel : model.voxels) {
@@ -700,7 +735,7 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                         uCount,
                         vCount
                     );
-                    std::vector<std::uint16_t> mask(static_cast<std::size_t>(uCount * vCount), kEmptyMaskKey);
+                    std::vector<std::uint32_t> mask(static_cast<std::size_t>(uCount * vCount), kEmptyMaskKey);
 
                     for (int slice = 0; slice < sliceCount; ++slice) {
                         std::fill(mask.begin(), mask.end(), kEmptyMaskKey);
@@ -746,7 +781,7 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                                     baseColorPaletteSlotCount
                                 );
                                 const std::uint8_t material = kMaterialPalette;
-                                const std::uint8_t aoSignature = faceCornerAoSignatureDense(
+                                const std::uint16_t aoSignature = faceCornerAoSignatureDense(
                                     densePalette,
                                     transformedSizeX,
                                     transformedSizeY,
@@ -764,7 +799,7 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                         for (int v = 0; v < vCount; ++v) {
                             for (int u = 0; u < uCount;) {
                                 const std::size_t startIndex = static_cast<std::size_t>(u + (v * uCount));
-                                const std::uint16_t key = mask[startIndex];
+                                const std::uint32_t key = mask[startIndex];
                                 if (key == kEmptyMaskKey) {
                                     ++u;
                                     continue;
@@ -796,10 +831,11 @@ std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelMo
                                 }
 
                                 const std::uint8_t material =
-                                    static_cast<std::uint8_t>((key >> 12u) & PackedVoxelVertex::kMask4);
-                                const std::uint8_t aoSignature = static_cast<std::uint8_t>((key >> 4u) & 0xFFu);
+                                    static_cast<std::uint8_t>((key >> 19u) & PackedVoxelVertex::kMask3);
+                                const std::uint16_t aoSignature =
+                                    static_cast<std::uint16_t>((key >> 3u) & 0xFFFFu);
                                 const std::uint8_t baseColorIndex =
-                                    static_cast<std::uint8_t>(key & PackedVoxelVertex::kMask4);
+                                    static_cast<std::uint8_t>(key & PackedVoxelVertex::kMask3);
                                 const bool mergedQuadAppended = appendGreedyFaceQuadLocal(
                                     mesh,
                                     faceId,

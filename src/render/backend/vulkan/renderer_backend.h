@@ -893,6 +893,10 @@ private:
     VkDeviceMemory m_diffuseTextureMemory = VK_NULL_HANDLE;
     VkImageView m_diffuseTextureImageView = VK_NULL_HANDLE;
     VkSampler m_diffuseTextureSampler = VK_NULL_HANDLE;
+    VkImage m_plantDiffuseTextureImage = VK_NULL_HANDLE;
+    VkDeviceMemory m_plantDiffuseTextureMemory = VK_NULL_HANDLE;
+    VmaAllocation m_plantDiffuseTextureAllocation = VK_NULL_HANDLE;
+    VkImageView m_plantDiffuseTextureImageView = VK_NULL_HANDLE;
     VkSampler m_diffuseTexturePlantSampler = VK_NULL_HANDLE;
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};

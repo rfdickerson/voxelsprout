@@ -34,12 +34,198 @@ namespace voxelsprout::render {
 
 #include "render/renderer_shared.h"
 
+namespace {
+
+constexpr std::uint32_t makeFourCc(char a, char b, char c, char d) {
+    return
+        static_cast<std::uint32_t>(static_cast<std::uint8_t>(a)) |
+        (static_cast<std::uint32_t>(static_cast<std::uint8_t>(b)) << 8u) |
+        (static_cast<std::uint32_t>(static_cast<std::uint8_t>(c)) << 16u) |
+        (static_cast<std::uint32_t>(static_cast<std::uint8_t>(d)) << 24u);
+}
+
+struct DdsPixelFormat {
+    std::uint32_t size = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t fourCc = 0;
+    std::uint32_t rgbBitCount = 0;
+    std::uint32_t rMask = 0;
+    std::uint32_t gMask = 0;
+    std::uint32_t bMask = 0;
+    std::uint32_t aMask = 0;
+};
+
+struct DdsHeader {
+    std::uint32_t size = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t height = 0;
+    std::uint32_t width = 0;
+    std::uint32_t pitchOrLinearSize = 0;
+    std::uint32_t depth = 0;
+    std::uint32_t mipMapCount = 0;
+    std::uint32_t reserved1[11]{};
+    DdsPixelFormat pixelFormat{};
+    std::uint32_t caps = 0;
+    std::uint32_t caps2 = 0;
+    std::uint32_t caps3 = 0;
+    std::uint32_t caps4 = 0;
+    std::uint32_t reserved2 = 0;
+};
+
+struct DdsMipInfo {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    VkDeviceSize offset = 0;
+    VkDeviceSize size = 0;
+};
+
+struct DdsCompressedImage {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t mipLevels = 0;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    std::vector<std::uint8_t> pixelData;
+    std::vector<DdsMipInfo> mipInfos;
+};
+
+bool supportsBc1DiffuseAtlas(VkPhysicalDevice physicalDevice) {
+    VkFormatProperties formatProperties{};
+    vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, &formatProperties);
+    const VkFormatFeatureFlags features = formatProperties.optimalTilingFeatures;
+    return
+        (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0 &&
+        (features & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) != 0;
+}
+
+bool supportsBc3PlantAtlas(VkPhysicalDevice physicalDevice) {
+    VkFormatProperties formatProperties{};
+    vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_BC3_UNORM_BLOCK, &formatProperties);
+    const VkFormatFeatureFlags features = formatProperties.optimalTilingFeatures;
+    return
+        (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0 &&
+        (features & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) != 0;
+}
+
+bool loadCompressedDdsFile(
+    const std::filesystem::path& path,
+    std::uint32_t expectedFourCc,
+    VkFormat format,
+    std::uint32_t bytesPerBlock,
+    DdsCompressedImage& outImage
+) {
+    outImage = DdsCompressedImage{};
+
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    if (!stream) {
+        return false;
+    }
+
+    const std::streamsize fileSize = stream.tellg();
+    if (fileSize <= 0) {
+        return false;
+    }
+    stream.seekg(0, std::ios::beg);
+
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(fileSize));
+    if (!stream.read(reinterpret_cast<char*>(bytes.data()), fileSize)) {
+        return false;
+    }
+    if (bytes.size() < (4u + sizeof(DdsHeader))) {
+        return false;
+    }
+    if (std::memcmp(bytes.data(), "DDS ", 4) != 0) {
+        return false;
+    }
+
+    DdsHeader header{};
+    std::memcpy(&header, bytes.data() + 4u, sizeof(DdsHeader));
+    if (header.size != 124u || header.pixelFormat.size != 32u) {
+        return false;
+    }
+    if (header.pixelFormat.fourCc != expectedFourCc) {
+        return false;
+    }
+    if (header.width == 0u || header.height == 0u) {
+        return false;
+    }
+
+    const std::uint32_t mipLevels = std::max(header.mipMapCount, 1u);
+    const std::size_t dataOffset = 4u + sizeof(DdsHeader);
+    if (bytes.size() < dataOffset) {
+        return false;
+    }
+
+    std::vector<DdsMipInfo> mipInfos;
+    mipInfos.reserve(mipLevels);
+    VkDeviceSize runningOffset = 0;
+    for (std::uint32_t mipIndex = 0; mipIndex < mipLevels; ++mipIndex) {
+        const std::uint32_t mipWidth = std::max(1u, header.width >> mipIndex);
+        const std::uint32_t mipHeight = std::max(1u, header.height >> mipIndex);
+        const std::uint32_t blockWidth = std::max(1u, (mipWidth + 3u) / 4u);
+        const std::uint32_t blockHeight = std::max(1u, (mipHeight + 3u) / 4u);
+        const VkDeviceSize mipSize =
+            static_cast<VkDeviceSize>(blockWidth) * static_cast<VkDeviceSize>(blockHeight) * bytesPerBlock;
+        mipInfos.push_back(DdsMipInfo{mipWidth, mipHeight, runningOffset, mipSize});
+        runningOffset += mipSize;
+    }
+
+    const std::size_t payloadSize = bytes.size() - dataOffset;
+    if (payloadSize < static_cast<std::size_t>(runningOffset)) {
+        return false;
+    }
+
+    outImage.width = header.width;
+    outImage.height = header.height;
+    outImage.mipLevels = mipLevels;
+    outImage.format = format;
+    outImage.pixelData.assign(bytes.begin() + static_cast<std::ptrdiff_t>(dataOffset), bytes.end());
+    outImage.mipInfos = std::move(mipInfos);
+    return true;
+}
+
+std::filesystem::path resolveRendererAssetPath(const std::filesystem::path& relativePath) {
+    std::vector<std::filesystem::path> baseCandidates;
+    baseCandidates.reserve(6);
+
+#if defined(VOXEL_PROJECT_SOURCE_DIR)
+    baseCandidates.emplace_back(std::filesystem::path{VOXEL_PROJECT_SOURCE_DIR});
+#endif
+
+    std::error_code cwdError;
+    const std::filesystem::path cwd = std::filesystem::current_path(cwdError);
+    if (!cwdError) {
+        baseCandidates.push_back(cwd);
+        baseCandidates.push_back(cwd / "..");
+        baseCandidates.push_back(cwd / ".." / "..");
+        baseCandidates.push_back(cwd / ".." / ".." / "..");
+    }
+
+    for (const std::filesystem::path& base : baseCandidates) {
+        const std::filesystem::path candidate = base / relativePath;
+        std::error_code existsError;
+        if (!std::filesystem::exists(candidate, existsError) || existsError) {
+            continue;
+        }
+
+        std::error_code canonicalError;
+        const std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(candidate, canonicalError);
+        if (!canonicalError) {
+            return canonicalPath;
+        }
+        return candidate;
+    }
+
+    return relativePath;
+}
+
+} // namespace
+
 bool RendererBackend::createEnvironmentResources() {
     if (!createDiffuseTextureResources()) {
         VOX_LOGE("render") << "diffuse texture creation failed\n";
         return false;
     }
-    VOX_LOGI("render") << "environment uses procedural sky + SH irradiance + diffuse albedo texture\n";
+    VOX_LOGI("render") << "environment uses procedural sky + SH irradiance + diffuse albedo atlas\n";
     return true;
 }
 
@@ -59,17 +245,636 @@ bool RendererBackend::createDiffuseTextureResources() {
         return true;
     }
 
-    constexpr uint32_t kTileSize = 16;
-    constexpr uint32_t kTextureTilesX = 9;
+    constexpr uint32_t kTileSize = 32;
+    constexpr uint32_t kTextureTilesX = 16;
     constexpr uint32_t kTextureTilesY = 1;
     constexpr uint32_t kTextureWidth = kTileSize * kTextureTilesX;
     constexpr uint32_t kTextureHeight = kTileSize * kTextureTilesY;
+    constexpr VkFormat kCompressedTextureFormat = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
     constexpr VkFormat kTextureFormat = VK_FORMAT_R8G8B8A8_UNORM;
     uint32_t diffuseMipLevels = 1u;
     for (uint32_t tileExtent = kTileSize; tileExtent > 1u; tileExtent >>= 1u) {
         ++diffuseMipLevels;
     }
     constexpr VkDeviceSize kTextureBytes = kTextureWidth * kTextureHeight * 4;
+    const std::filesystem::path faithfulAtlasPath =
+        resolveRendererAssetPath("assets/textures/faithful_block_atlas.dds");
+
+    if (supportsBc1DiffuseAtlas(m_physicalDevice)) {
+        DdsCompressedImage ddsImage{};
+        if (loadCompressedDdsFile(
+                faithfulAtlasPath,
+                makeFourCc('D', 'X', 'T', '1'),
+                kCompressedTextureFormat,
+                8u,
+                ddsImage
+            ) &&
+            ddsImage.width == kTextureWidth &&
+            ddsImage.height == kTextureHeight) {
+            diffuseMipLevels = ddsImage.mipLevels;
+
+            VkBuffer stagingBuffer = VK_NULL_HANDLE;
+            VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+            VkBufferCreateInfo stagingCreateInfo{};
+            stagingCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            stagingCreateInfo.size = static_cast<VkDeviceSize>(ddsImage.pixelData.size());
+            stagingCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            stagingCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            VkResult result = vkCreateBuffer(m_device, &stagingCreateInfo, nullptr, &stagingBuffer);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkCreateBuffer(diffuseDdsStaging)", result);
+                return false;
+            }
+            setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(stagingBuffer), "diffuse.dds.staging.buffer");
+
+            VkMemoryRequirements stagingMemReq{};
+            vkGetBufferMemoryRequirements(m_device, stagingBuffer, &stagingMemReq);
+            uint32_t memoryTypeIndex = findMemoryTypeIndex(
+                m_physicalDevice,
+                stagingMemReq.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+            if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+                VOX_LOGI("render") << "no staging memory type for Faithful BC1 atlas\n";
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                return false;
+            }
+
+            VkMemoryAllocateInfo stagingAllocInfo{};
+            stagingAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            stagingAllocInfo.allocationSize = stagingMemReq.size;
+            stagingAllocInfo.memoryTypeIndex = memoryTypeIndex;
+            result = vkAllocateMemory(m_device, &stagingAllocInfo, nullptr, &stagingMemory);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkAllocateMemory(diffuseDdsStaging)", result);
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                return false;
+            }
+            result = vkBindBufferMemory(m_device, stagingBuffer, stagingMemory, 0);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkBindBufferMemory(diffuseDdsStaging)", result);
+                vkFreeMemory(m_device, stagingMemory, nullptr);
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                return false;
+            }
+
+            void* mapped = nullptr;
+            result = vkMapMemory(
+                m_device,
+                stagingMemory,
+                0,
+                static_cast<VkDeviceSize>(ddsImage.pixelData.size()),
+                0,
+                &mapped
+            );
+            if (result != VK_SUCCESS || mapped == nullptr) {
+                logVkFailure("vkMapMemory(diffuseDdsStaging)", result);
+                vkFreeMemory(m_device, stagingMemory, nullptr);
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                return false;
+            }
+            std::memcpy(mapped, ddsImage.pixelData.data(), ddsImage.pixelData.size());
+            vkUnmapMemory(m_device, stagingMemory);
+
+            VkImageCreateInfo imageCreateInfo{};
+            imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+            imageCreateInfo.format = kCompressedTextureFormat;
+            imageCreateInfo.extent = {kTextureWidth, kTextureHeight, 1};
+            imageCreateInfo.mipLevels = diffuseMipLevels;
+            imageCreateInfo.arrayLayers = 1;
+            imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+            imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            m_diffuseTextureMemory = VK_NULL_HANDLE;
+            m_diffuseTextureAllocation = VK_NULL_HANDLE;
+            if (m_vmaAllocator != VK_NULL_HANDLE) {
+                VmaAllocationCreateInfo allocationCreateInfo{};
+                allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+                allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                result = vmaCreateImage(
+                    m_vmaAllocator,
+                    &imageCreateInfo,
+                    &allocationCreateInfo,
+                    &m_diffuseTextureImage,
+                    &m_diffuseTextureAllocation,
+                    nullptr
+                );
+                if (result != VK_SUCCESS) {
+                    logVkFailure("vmaCreateImage(diffuseDdsTexture)", result);
+                    vkFreeMemory(m_device, stagingMemory, nullptr);
+                    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                    return false;
+                }
+            } else {
+                result = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_diffuseTextureImage);
+                if (result != VK_SUCCESS) {
+                    logVkFailure("vkCreateImage(diffuseDdsTexture)", result);
+                    vkFreeMemory(m_device, stagingMemory, nullptr);
+                    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                    return false;
+                }
+
+                VkMemoryRequirements imageMemReq{};
+                vkGetImageMemoryRequirements(m_device, m_diffuseTextureImage, &imageMemReq);
+                memoryTypeIndex = findMemoryTypeIndex(
+                    m_physicalDevice,
+                    imageMemReq.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                );
+                if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+                    VOX_LOGI("render") << "no device-local memory for Faithful BC1 atlas\n";
+                    vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
+                    m_diffuseTextureImage = VK_NULL_HANDLE;
+                    vkFreeMemory(m_device, stagingMemory, nullptr);
+                    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                    return false;
+                }
+
+                VkMemoryAllocateInfo imageAllocInfo{};
+                imageAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                imageAllocInfo.allocationSize = imageMemReq.size;
+                imageAllocInfo.memoryTypeIndex = memoryTypeIndex;
+                result = vkAllocateMemory(m_device, &imageAllocInfo, nullptr, &m_diffuseTextureMemory);
+                if (result != VK_SUCCESS) {
+                    logVkFailure("vkAllocateMemory(diffuseDdsTexture)", result);
+                    vkDestroyImage(m_device, m_diffuseTextureImage, nullptr);
+                    m_diffuseTextureImage = VK_NULL_HANDLE;
+                    vkFreeMemory(m_device, stagingMemory, nullptr);
+                    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                    return false;
+                }
+                result = vkBindImageMemory(m_device, m_diffuseTextureImage, m_diffuseTextureMemory, 0);
+                if (result != VK_SUCCESS) {
+                    logVkFailure("vkBindImageMemory(diffuseDdsTexture)", result);
+                    destroyDiffuseTextureResources();
+                    vkFreeMemory(m_device, stagingMemory, nullptr);
+                    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                    return false;
+                }
+            }
+            setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_diffuseTextureImage), "diffuse.albedo.image");
+
+            VkCommandPool commandPool = VK_NULL_HANDLE;
+            VkCommandPoolCreateInfo poolCreateInfo{};
+            poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+            poolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+            poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+            result = vkCreateCommandPool(m_device, &poolCreateInfo, nullptr, &commandPool);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkCreateCommandPool(diffuseDdsUpload)", result);
+                destroyDiffuseTextureResources();
+                vkFreeMemory(m_device, stagingMemory, nullptr);
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                return false;
+            }
+            setObjectName(VK_OBJECT_TYPE_COMMAND_POOL, vkHandleToUint64(commandPool), "diffuse.dds.upload.commandPool");
+
+            VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+            VkCommandBufferAllocateInfo cmdAllocInfo{};
+            cmdAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            cmdAllocInfo.commandPool = commandPool;
+            cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cmdAllocInfo.commandBufferCount = 1;
+            result = vkAllocateCommandBuffers(m_device, &cmdAllocInfo, &commandBuffer);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkAllocateCommandBuffers(diffuseDdsUpload)", result);
+                vkDestroyCommandPool(m_device, commandPool, nullptr);
+                destroyDiffuseTextureResources();
+                vkFreeMemory(m_device, stagingMemory, nullptr);
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                return false;
+            }
+
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkBeginCommandBuffer(diffuseDdsUpload)", result);
+                vkDestroyCommandPool(m_device, commandPool, nullptr);
+                destroyDiffuseTextureResources();
+                vkFreeMemory(m_device, stagingMemory, nullptr);
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                return false;
+            }
+
+            transitionImageLayout(
+                commandBuffer,
+                m_diffuseTextureImage,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_PIPELINE_STAGE_2_NONE,
+                VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0u,
+                1u,
+                0u,
+                diffuseMipLevels
+            );
+
+            std::vector<VkBufferImageCopy> copyRegions;
+            copyRegions.reserve(ddsImage.mipInfos.size());
+            for (std::uint32_t mipIndex = 0; mipIndex < ddsImage.mipInfos.size(); ++mipIndex) {
+                const DdsMipInfo& mipInfo = ddsImage.mipInfos[mipIndex];
+                VkBufferImageCopy copyRegion{};
+                copyRegion.bufferOffset = mipInfo.offset;
+                copyRegion.bufferRowLength = 0;
+                copyRegion.bufferImageHeight = 0;
+                copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                copyRegion.imageSubresource.mipLevel = mipIndex;
+                copyRegion.imageSubresource.baseArrayLayer = 0;
+                copyRegion.imageSubresource.layerCount = 1;
+                copyRegion.imageOffset = {0, 0, 0};
+                copyRegion.imageExtent = {mipInfo.width, mipInfo.height, 1};
+                copyRegions.push_back(copyRegion);
+            }
+            vkCmdCopyBufferToImage(
+                commandBuffer,
+                stagingBuffer,
+                m_diffuseTextureImage,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                static_cast<std::uint32_t>(copyRegions.size()),
+                copyRegions.data()
+            );
+
+            transitionImageLayout(
+                commandBuffer,
+                m_diffuseTextureImage,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0u,
+                1u,
+                0u,
+                diffuseMipLevels
+            );
+
+            result = vkEndCommandBuffer(commandBuffer);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkEndCommandBuffer(diffuseDdsUpload)", result);
+                vkDestroyCommandPool(m_device, commandPool, nullptr);
+                destroyDiffuseTextureResources();
+                vkFreeMemory(m_device, stagingMemory, nullptr);
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                return false;
+            }
+
+            VkSubmitInfo submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &commandBuffer;
+            result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkQueueSubmit(diffuseDdsUpload)", result);
+                vkDestroyCommandPool(m_device, commandPool, nullptr);
+                destroyDiffuseTextureResources();
+                vkFreeMemory(m_device, stagingMemory, nullptr);
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                return false;
+            }
+            result = vkQueueWaitIdle(m_graphicsQueue);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkQueueWaitIdle(diffuseDdsUpload)", result);
+                vkDestroyCommandPool(m_device, commandPool, nullptr);
+                destroyDiffuseTextureResources();
+                vkFreeMemory(m_device, stagingMemory, nullptr);
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                return false;
+            }
+
+            vkDestroyCommandPool(m_device, commandPool, nullptr);
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+
+            VkImageViewCreateInfo viewCreateInfo{};
+            viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewCreateInfo.image = m_diffuseTextureImage;
+            viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewCreateInfo.format = kCompressedTextureFormat;
+            viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewCreateInfo.subresourceRange.baseMipLevel = 0;
+            viewCreateInfo.subresourceRange.levelCount = diffuseMipLevels;
+            viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+            viewCreateInfo.subresourceRange.layerCount = 1;
+            result = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_diffuseTextureImageView);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkCreateImageView(diffuseDdsTexture)", result);
+                destroyDiffuseTextureResources();
+                return false;
+            }
+            setObjectName(
+                VK_OBJECT_TYPE_IMAGE_VIEW,
+                vkHandleToUint64(m_diffuseTextureImageView),
+                "diffuse.albedo.imageView"
+            );
+
+            VkSamplerCreateInfo samplerCreateInfo{};
+            samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            samplerCreateInfo.magFilter = VK_FILTER_NEAREST;
+            samplerCreateInfo.minFilter = VK_FILTER_NEAREST;
+            samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerCreateInfo.mipLodBias = 0.0f;
+            samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
+            samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
+                ? std::min(8.0f, m_maxSamplerAnisotropy)
+                : 1.0f;
+            samplerCreateInfo.compareEnable = VK_FALSE;
+            samplerCreateInfo.minLod = 0.0f;
+            samplerCreateInfo.maxLod = static_cast<float>(diffuseMipLevels - 1u);
+            samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+            samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+            result = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_diffuseTextureSampler);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkCreateSampler(diffuseDdsTexture)", result);
+                destroyDiffuseTextureResources();
+                return false;
+            }
+            setObjectName(
+                VK_OBJECT_TYPE_SAMPLER,
+                vkHandleToUint64(m_diffuseTextureSampler),
+                "diffuse.albedo.sampler"
+            );
+
+            VkSamplerCreateInfo plantSamplerCreateInfo = samplerCreateInfo;
+            plantSamplerCreateInfo.magFilter = VK_FILTER_NEAREST;
+            plantSamplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+            plantSamplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            plantSamplerCreateInfo.anisotropyEnable = VK_FALSE;
+            plantSamplerCreateInfo.maxAnisotropy = 1.0f;
+            result = vkCreateSampler(m_device, &plantSamplerCreateInfo, nullptr, &m_diffuseTexturePlantSampler);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkCreateSampler(diffuseDdsPlant)", result);
+                destroyDiffuseTextureResources();
+                return false;
+            }
+            setObjectName(
+                VK_OBJECT_TYPE_SAMPLER,
+                vkHandleToUint64(m_diffuseTexturePlantSampler),
+                "diffuse.albedo.plantSampler"
+            );
+
+            const std::filesystem::path faithfulPlantAtlasPath =
+                resolveRendererAssetPath("assets/textures/faithful_plant_atlas.dds");
+            if (supportsBc3PlantAtlas(m_physicalDevice)) {
+                DdsCompressedImage plantDdsImage{};
+                if (loadCompressedDdsFile(
+                        faithfulPlantAtlasPath,
+                        makeFourCc('D', 'X', 'T', '5'),
+                        VK_FORMAT_BC3_UNORM_BLOCK,
+                        16u,
+                        plantDdsImage
+                    ) &&
+                    plantDdsImage.width == 256u &&
+                    plantDdsImage.height == 32u) {
+                    VkBuffer plantStagingBuffer = VK_NULL_HANDLE;
+                    VkDeviceMemory plantStagingMemory = VK_NULL_HANDLE;
+                    VkBufferCreateInfo plantStagingCreateInfo{};
+                    plantStagingCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                    plantStagingCreateInfo.size = static_cast<VkDeviceSize>(plantDdsImage.pixelData.size());
+                    plantStagingCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+                    plantStagingCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                    result = vkCreateBuffer(m_device, &plantStagingCreateInfo, nullptr, &plantStagingBuffer);
+                    if (result == VK_SUCCESS) {
+                        VkMemoryRequirements plantStagingMemReq{};
+                        vkGetBufferMemoryRequirements(m_device, plantStagingBuffer, &plantStagingMemReq);
+                        uint32_t plantMemoryTypeIndex = findMemoryTypeIndex(
+                            m_physicalDevice,
+                            plantStagingMemReq.memoryTypeBits,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                        );
+                        if (plantMemoryTypeIndex != std::numeric_limits<uint32_t>::max()) {
+                            VkMemoryAllocateInfo plantStagingAllocInfo{};
+                            plantStagingAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                            plantStagingAllocInfo.allocationSize = plantStagingMemReq.size;
+                            plantStagingAllocInfo.memoryTypeIndex = plantMemoryTypeIndex;
+                            result = vkAllocateMemory(m_device, &plantStagingAllocInfo, nullptr, &plantStagingMemory);
+                            if (result == VK_SUCCESS &&
+                                vkBindBufferMemory(m_device, plantStagingBuffer, plantStagingMemory, 0) == VK_SUCCESS) {
+                                void* plantMapped = nullptr;
+                                result = vkMapMemory(
+                                    m_device,
+                                    plantStagingMemory,
+                                    0,
+                                    static_cast<VkDeviceSize>(plantDdsImage.pixelData.size()),
+                                    0,
+                                    &plantMapped
+                                );
+                                if (result == VK_SUCCESS && plantMapped != nullptr) {
+                                    std::memcpy(plantMapped, plantDdsImage.pixelData.data(), plantDdsImage.pixelData.size());
+                                    vkUnmapMemory(m_device, plantStagingMemory);
+
+                                    VkImageCreateInfo plantImageCreateInfo{};
+                                    plantImageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+                                    plantImageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+                                    plantImageCreateInfo.format = VK_FORMAT_BC3_UNORM_BLOCK;
+                                    plantImageCreateInfo.extent = {plantDdsImage.width, plantDdsImage.height, 1};
+                                    plantImageCreateInfo.mipLevels = plantDdsImage.mipLevels;
+                                    plantImageCreateInfo.arrayLayers = 1;
+                                    plantImageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+                                    plantImageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+                                    plantImageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+                                    plantImageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                                    plantImageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                                    if (m_vmaAllocator != VK_NULL_HANDLE) {
+                                        VmaAllocationCreateInfo plantAllocationCreateInfo{};
+                                        plantAllocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+                                        plantAllocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                                        result = vmaCreateImage(
+                                            m_vmaAllocator,
+                                            &plantImageCreateInfo,
+                                            &plantAllocationCreateInfo,
+                                            &m_plantDiffuseTextureImage,
+                                            &m_plantDiffuseTextureAllocation,
+                                            nullptr
+                                        );
+                                    } else {
+                                        result = vkCreateImage(m_device, &plantImageCreateInfo, nullptr, &m_plantDiffuseTextureImage);
+                                        if (result == VK_SUCCESS) {
+                                            VkMemoryRequirements plantImageMemReq{};
+                                            vkGetImageMemoryRequirements(m_device, m_plantDiffuseTextureImage, &plantImageMemReq);
+                                            plantMemoryTypeIndex = findMemoryTypeIndex(
+                                                m_physicalDevice,
+                                                plantImageMemReq.memoryTypeBits,
+                                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                                            );
+                                            if (plantMemoryTypeIndex != std::numeric_limits<uint32_t>::max()) {
+                                                VkMemoryAllocateInfo plantImageAllocInfo{};
+                                                plantImageAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                                                plantImageAllocInfo.allocationSize = plantImageMemReq.size;
+                                                plantImageAllocInfo.memoryTypeIndex = plantMemoryTypeIndex;
+                                                result = vkAllocateMemory(
+                                                    m_device,
+                                                    &plantImageAllocInfo,
+                                                    nullptr,
+                                                    &m_plantDiffuseTextureMemory
+                                                );
+                                                if (result == VK_SUCCESS) {
+                                                    result = vkBindImageMemory(
+                                                        m_device,
+                                                        m_plantDiffuseTextureImage,
+                                                        m_plantDiffuseTextureMemory,
+                                                        0
+                                                    );
+                                                }
+                                            } else {
+                                                result = VK_ERROR_FORMAT_NOT_SUPPORTED;
+                                            }
+                                        }
+                                    }
+
+                                    if (result == VK_SUCCESS) {
+                                        VkCommandPool plantCommandPool = VK_NULL_HANDLE;
+                                        VkCommandPoolCreateInfo plantPoolCreateInfo{};
+                                        plantPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+                                        plantPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+                                        plantPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+                                        result = vkCreateCommandPool(m_device, &plantPoolCreateInfo, nullptr, &plantCommandPool);
+                                        if (result == VK_SUCCESS) {
+                                            VkCommandBuffer plantCommandBuffer = VK_NULL_HANDLE;
+                                            VkCommandBufferAllocateInfo plantCmdAllocInfo{};
+                                            plantCmdAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+                                            plantCmdAllocInfo.commandPool = plantCommandPool;
+                                            plantCmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                                            plantCmdAllocInfo.commandBufferCount = 1;
+                                            result = vkAllocateCommandBuffers(m_device, &plantCmdAllocInfo, &plantCommandBuffer);
+                                            if (result == VK_SUCCESS) {
+                                                VkCommandBufferBeginInfo plantBeginInfo{};
+                                                plantBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                                                plantBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                                                result = vkBeginCommandBuffer(plantCommandBuffer, &plantBeginInfo);
+                                                if (result == VK_SUCCESS) {
+                                                    transitionImageLayout(
+                                                        plantCommandBuffer,
+                                                        m_plantDiffuseTextureImage,
+                                                        VK_IMAGE_LAYOUT_UNDEFINED,
+                                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                                        VK_PIPELINE_STAGE_2_NONE,
+                                                        VK_ACCESS_2_NONE,
+                                                        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                                        VK_IMAGE_ASPECT_COLOR_BIT,
+                                                        0u,
+                                                        1u,
+                                                        0u,
+                                                        plantDdsImage.mipLevels
+                                                    );
+                                                    std::vector<VkBufferImageCopy> plantCopyRegions;
+                                                    plantCopyRegions.reserve(plantDdsImage.mipInfos.size());
+                                                    for (std::uint32_t mipIndex = 0; mipIndex < plantDdsImage.mipInfos.size(); ++mipIndex) {
+                                                        const DdsMipInfo& mipInfo = plantDdsImage.mipInfos[mipIndex];
+                                                        VkBufferImageCopy copyRegion{};
+                                                        copyRegion.bufferOffset = mipInfo.offset;
+                                                        copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                                                        copyRegion.imageSubresource.mipLevel = mipIndex;
+                                                        copyRegion.imageSubresource.baseArrayLayer = 0;
+                                                        copyRegion.imageSubresource.layerCount = 1;
+                                                        copyRegion.imageExtent = {mipInfo.width, mipInfo.height, 1};
+                                                        plantCopyRegions.push_back(copyRegion);
+                                                    }
+                                                    vkCmdCopyBufferToImage(
+                                                        plantCommandBuffer,
+                                                        plantStagingBuffer,
+                                                        m_plantDiffuseTextureImage,
+                                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                                        static_cast<std::uint32_t>(plantCopyRegions.size()),
+                                                        plantCopyRegions.data()
+                                                    );
+                                                    transitionImageLayout(
+                                                        plantCommandBuffer,
+                                                        m_plantDiffuseTextureImage,
+                                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                                        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                                        VK_IMAGE_ASPECT_COLOR_BIT,
+                                                        0u,
+                                                        1u,
+                                                        0u,
+                                                        plantDdsImage.mipLevels
+                                                    );
+                                                    result = vkEndCommandBuffer(plantCommandBuffer);
+                                                    if (result == VK_SUCCESS) {
+                                                        VkSubmitInfo plantSubmitInfo{};
+                                                        plantSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                                                        plantSubmitInfo.commandBufferCount = 1;
+                                                        plantSubmitInfo.pCommandBuffers = &plantCommandBuffer;
+                                                        result = vkQueueSubmit(m_graphicsQueue, 1, &plantSubmitInfo, VK_NULL_HANDLE);
+                                                        if (result == VK_SUCCESS) {
+                                                            result = vkQueueWaitIdle(m_graphicsQueue);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            vkDestroyCommandPool(m_device, plantCommandPool, nullptr);
+                                        }
+                                    }
+
+                                    if (result == VK_SUCCESS) {
+                                        VkImageViewCreateInfo plantViewCreateInfo{};
+                                        plantViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                                        plantViewCreateInfo.image = m_plantDiffuseTextureImage;
+                                        plantViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                                        plantViewCreateInfo.format = VK_FORMAT_BC3_UNORM_BLOCK;
+                                        plantViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                                        plantViewCreateInfo.subresourceRange.baseMipLevel = 0;
+                                        plantViewCreateInfo.subresourceRange.levelCount = plantDdsImage.mipLevels;
+                                        plantViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+                                        plantViewCreateInfo.subresourceRange.layerCount = 1;
+                                        result = vkCreateImageView(
+                                            m_device,
+                                            &plantViewCreateInfo,
+                                            nullptr,
+                                            &m_plantDiffuseTextureImageView
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (plantStagingMemory != VK_NULL_HANDLE) {
+                        vkFreeMemory(m_device, plantStagingMemory, nullptr);
+                    }
+                    if (plantStagingBuffer != VK_NULL_HANDLE) {
+                        vkDestroyBuffer(m_device, plantStagingBuffer, nullptr);
+                    }
+                }
+            }
+            if (m_plantDiffuseTextureImageView == VK_NULL_HANDLE) {
+                VOX_LOGI("render") << "Faithful plant atlas unavailable or invalid at "
+                                   << faithfulPlantAtlasPath.string()
+                                   << "; using block atlas for plant sampling\n";
+            } else {
+                VOX_LOGI("render") << "Faithful plant atlas loaded with alpha-capable compression from "
+                                   << faithfulPlantAtlasPath.string() << "\n";
+            }
+
+            VOX_LOGI("render") << "Faithful BC1 diffuse atlas loaded from " << faithfulAtlasPath.string()
+                               << ": mips=" << diffuseMipLevels
+                               << ", tileSize=" << kTileSize << ", atlas=" << kTextureWidth << "x" << kTextureHeight << "\n";
+            return true;
+        }
+
+        VOX_LOGI("render") << "Faithful BC1 diffuse atlas unavailable or invalid at "
+                           << faithfulAtlasPath.string()
+                           << "; falling back to procedural atlas\n";
+    } else {
+        VOX_LOGI("render") << "BC1 atlas sampling unsupported; falling back to procedural atlas\n";
+    }
 
     std::vector<std::uint8_t> pixels(static_cast<size_t>(kTextureBytes), 0);
     auto hash8 = [](uint32_t x, uint32_t y, uint32_t seed) -> std::uint8_t {
@@ -112,20 +917,46 @@ bool RendererBackend::createDiffuseTextureResources() {
                 g = static_cast<std::uint8_t>(std::clamp(warm - 2, 48, 112));
                 b = static_cast<std::uint8_t>(std::clamp(cool - 8, 26, 84));
             } else if (tileIndex == 2u) {
-                // Grass.
+                // Grass top.
                 const int green = 118 + static_cast<int>(noiseA % 32u) - 16;
                 r = static_cast<std::uint8_t>(std::clamp(52 + static_cast<int>(noiseB % 18u) - 9, 34, 74));
                 g = static_cast<std::uint8_t>(std::clamp(green, 82, 154));
                 b = static_cast<std::uint8_t>(std::clamp(44 + static_cast<int>(noiseA % 14u) - 7, 26, 64));
             } else if (tileIndex == 3u) {
-                // Wood.
+                // Grass side.
+                const bool grassyBand = localY < (kTileSize / 3u);
+                if (grassyBand) {
+                    const int green = 108 + static_cast<int>(noiseA % 28u) - 14;
+                    r = static_cast<std::uint8_t>(std::clamp(58 + static_cast<int>(noiseB % 18u) - 9, 38, 84));
+                    g = static_cast<std::uint8_t>(std::clamp(green, 78, 148));
+                    b = static_cast<std::uint8_t>(std::clamp(42 + static_cast<int>(noiseA % 14u) - 7, 24, 68));
+                } else {
+                    const int warm = 96 + static_cast<int>(noiseA % 26u) - 13;
+                    const int cool = 70 + static_cast<int>(noiseB % 18u) - 9;
+                    r = static_cast<std::uint8_t>(std::clamp(warm + 16, 74, 142));
+                    g = static_cast<std::uint8_t>(std::clamp(warm - 6, 50, 106));
+                    b = static_cast<std::uint8_t>(std::clamp(cool - 10, 24, 82));
+                }
+            } else if (tileIndex == 4u) {
+                // Wood side.
                 const int stripe = ((localX / 3u) + (localY / 5u)) % 3u;
                 const int base = (stripe == 0) ? 112 : (stripe == 1 ? 96 : 84);
                 const int grain = static_cast<int>(noiseA % 16u) - 8;
                 r = static_cast<std::uint8_t>(std::clamp(base + 34 + grain, 78, 168));
                 g = static_cast<std::uint8_t>(std::clamp(base + 12 + grain, 56, 136));
                 b = static_cast<std::uint8_t>(std::clamp(base - 6 + (grain / 2), 36, 110));
-            } else if (tileIndex == 4u) {
+            } else if (tileIndex == 5u) {
+                // Wood top.
+                const int dx = static_cast<int>(localX) - static_cast<int>(kTileSize / 2u);
+                const int dy = static_cast<int>(localY) - static_cast<int>(kTileSize / 2u);
+                const float ring = std::sqrt(static_cast<float>((dx * dx) + (dy * dy)));
+                const int ringBand = static_cast<int>(ring / 3.4f) % 3;
+                const int base = (ringBand == 0) ? 126 : (ringBand == 1 ? 108 : 92);
+                const int grain = static_cast<int>(noiseA % 18u) - 9;
+                r = static_cast<std::uint8_t>(std::clamp(base + 28 + grain, 84, 176));
+                g = static_cast<std::uint8_t>(std::clamp(base + 8 + grain, 60, 142));
+                b = static_cast<std::uint8_t>(std::clamp(base - 10 + (grain / 2), 36, 116));
+            } else if (tileIndex == 6u) {
                 // Billboard grass-bush sprite (transparent background).
                 const int ix = static_cast<int>(localX);
                 const int iy = static_cast<int>(localY);
@@ -174,13 +1005,13 @@ bool RendererBackend::createDiffuseTextureResources() {
                 const std::uint8_t alpha = static_cast<std::uint8_t>(std::clamp(alphaBase + static_cast<int>(noiseB % 28u) - 10, 120, 250));
                 writePixel(x, y, r, g, b, alpha);
                 continue;
-            } else {
-                // Procedural flower sprites (tiles 5..8):
-                // 5-6 = poppies (red/orange-red), 7-8 = light wildflowers.
+            } else if (tileIndex >= 7u && tileIndex <= 10u) {
+                // Procedural flower sprites (tiles 7..10):
+                // 7-8 = poppies (red/orange-red), 9-10 = light wildflowers.
                 const int ix = static_cast<int>(localX);
                 const int iy = static_cast<int>(localY);
                 const int rowFromBottom = static_cast<int>(kTileSize - 1u - localY);
-                const uint32_t flowerVariant = (tileIndex - 5u) & 3u;
+                const uint32_t flowerVariant = (tileIndex - 7u) & 3u;
                 const bool poppyVariant = flowerVariant < 2u;
 
                 constexpr std::array<std::array<int, 3>, 4> kPetalPalette = {{
@@ -266,6 +1097,47 @@ bool RendererBackend::createDiffuseTextureResources() {
                     );
                     writePixel(x, y, r, g, b, alpha);
                 }
+                continue;
+            } else if (tileIndex == 11u) {
+                // Leaves.
+                const int ix = static_cast<int>(localX);
+                const int iy = static_cast<int>(localY);
+                auto circleWeight = [&](int cx, int cy, int radius) -> float {
+                    const int dx = ix - cx;
+                    const int dy = iy - cy;
+                    const int distSq = (dx * dx) + (dy * dy);
+                    const int radiusSq = radius * radius;
+                    if (distSq >= radiusSq) {
+                        return 0.0f;
+                    }
+                    return 1.0f - (static_cast<float>(distSq) / static_cast<float>(radiusSq));
+                };
+                float leafWeight = 0.0f;
+                leafWeight = std::max(leafWeight, circleWeight(9, 11, 9));
+                leafWeight = std::max(leafWeight, circleWeight(16, 8, 10));
+                leafWeight = std::max(leafWeight, circleWeight(23, 14, 8));
+                leafWeight = std::max(leafWeight, circleWeight(15, 22, 9));
+                const float edgeNoise = static_cast<float>(noiseA % 100u) / 100.0f;
+                if (leafWeight < (0.16f + (edgeNoise * 0.20f))) {
+                    writePixel(x, y, 0u, 0u, 0u, 0u);
+                    continue;
+                }
+                r = static_cast<std::uint8_t>(std::clamp(52 + static_cast<int>(noiseB % 30u) - 12, 28, 94));
+                g = static_cast<std::uint8_t>(std::clamp(124 + static_cast<int>(noiseA % 54u) - 22, 86, 188));
+                b = static_cast<std::uint8_t>(std::clamp(44 + static_cast<int>(noiseB % 18u) - 7, 22, 76));
+                const int alphaBase = static_cast<int>(116.0f + (leafWeight * 138.0f));
+                const std::uint8_t alpha = static_cast<std::uint8_t>(
+                    std::clamp(alphaBase + static_cast<int>(noiseB % 24u) - 10, 118, 250)
+                );
+                writePixel(x, y, r, g, b, alpha);
+                continue;
+            } else if (tileIndex == 12u) {
+                // Red concrete.
+                r = static_cast<std::uint8_t>(std::clamp(182 + static_cast<int>(noiseA % 14u) - 7, 160, 204));
+                g = static_cast<std::uint8_t>(std::clamp(48 + static_cast<int>(noiseB % 10u) - 5, 34, 64));
+                b = static_cast<std::uint8_t>(std::clamp(42 + static_cast<int>(noiseA % 10u) - 5, 28, 58));
+            } else {
+                writePixel(x, y, 0u, 0u, 0u, 0u);
                 continue;
             }
             writePixel(x, y, r, g, b);
@@ -1914,6 +2786,24 @@ void RendererBackend::destroyDiffuseTextureResources() {
         vkDestroySampler(m_device, m_diffuseTexturePlantSampler, nullptr);
         m_diffuseTexturePlantSampler = VK_NULL_HANDLE;
     }
+    if (m_plantDiffuseTextureImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, m_plantDiffuseTextureImageView, nullptr);
+        m_plantDiffuseTextureImageView = VK_NULL_HANDLE;
+    }
+    if (m_plantDiffuseTextureImage != VK_NULL_HANDLE) {
+        if (m_vmaAllocator != VK_NULL_HANDLE && m_plantDiffuseTextureAllocation != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, m_plantDiffuseTextureImage, m_plantDiffuseTextureAllocation);
+            m_plantDiffuseTextureAllocation = VK_NULL_HANDLE;
+        } else {
+            vkDestroyImage(m_device, m_plantDiffuseTextureImage, nullptr);
+        }
+        m_plantDiffuseTextureImage = VK_NULL_HANDLE;
+    }
+    if (m_plantDiffuseTextureMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, m_plantDiffuseTextureMemory, nullptr);
+        m_plantDiffuseTextureMemory = VK_NULL_HANDLE;
+    }
+    m_plantDiffuseTextureAllocation = VK_NULL_HANDLE;
     if (m_diffuseTextureSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device, m_diffuseTextureSampler, nullptr);
         m_diffuseTextureSampler = VK_NULL_HANDLE;
