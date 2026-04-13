@@ -973,6 +973,16 @@ void RendererBackend::markRayTracingSceneDirty() {
 }
 
 void RendererBackend::destroyRayTracingScene() {
+    const bool hasExistingScene =
+        m_rtTlas.handle != VK_NULL_HANDLE ||
+        m_rtChunkBlas.handle != VK_NULL_HANDLE ||
+        !m_rtMagicaBlases.empty();
+    if (hasExistingScene && m_device != VK_NULL_HANDLE && m_graphicsQueue != VK_NULL_HANDLE) {
+        const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
+        if (waitResult != VK_SUCCESS) {
+            VOX_LOGW("render") << "destroyRayTracingScene: vkQueueWaitIdle failed before AS destruction";
+        }
+    }
     auto destroyAs = [&](RtAccelerationStructure& accelerationStructure) {
         if (accelerationStructure.handle != VK_NULL_HANDLE && m_destroyAccelerationStructureKhr != nullptr) {
             m_destroyAccelerationStructureKhr(m_device, accelerationStructure.handle, nullptr);
@@ -1012,6 +1022,18 @@ bool RendererBackend::rebuildRayTracingScene() {
     if (!rayTracingRuntimeReady()) {
         refreshShadowStats();
         return false;
+    }
+    const bool hasExistingScene =
+        m_rtTlas.handle != VK_NULL_HANDLE ||
+        m_rtChunkBlas.handle != VK_NULL_HANDLE ||
+        !m_rtMagicaBlases.empty();
+    if (hasExistingScene) {
+        const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
+        if (waitResult != VK_SUCCESS) {
+            VOX_LOGE("render") << "rebuildRayTracingScene: vkQueueWaitIdle failed before AS rebuild";
+            refreshShadowStats();
+            return false;
+        }
     }
     const VkDeviceAddress scratchAlignment = std::max<VkDeviceAddress>(
         1,

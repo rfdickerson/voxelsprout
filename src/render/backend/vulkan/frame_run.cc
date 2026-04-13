@@ -1350,16 +1350,18 @@ void RendererBackend::renderFrame(
         m_rayTracingRuntimeEnabled &&
         m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE &&
         m_rtTlas.handle != VK_NULL_HANDLE;
+    const bool voxelGiRtSurfaceRequested = m_voxelGiDebugSettings.enableRtSurfaceTracing;
     if (!m_voxelGiRtSurfaceLastLoggedValid ||
-        m_voxelGiRtSurfaceLastLoggedActive != m_voxelGiRtSurfaceActiveThisFrame) {
+        m_voxelGiRtSurfaceLastLoggedRequested != voxelGiRtSurfaceRequested ||
+        m_voxelGiRtSurfaceLastLoggedReady != voxelGiRtSurfaceCanRun) {
         VOX_LOGI("render") << "voxel GI RT surface: requested="
-                           << (m_voxelGiDebugSettings.enableRtSurfaceTracing ? "yes" : "no")
+                           << (voxelGiRtSurfaceRequested ? "yes" : "no")
                            << ", compute=" << (m_voxelGiComputeAvailable ? "yes" : "no")
                            << ", ready=" << (voxelGiRtSurfaceCanRun ? "yes" : "no")
-                           << ", active=" << (m_voxelGiRtSurfaceActiveThisFrame ? "yes" : "no")
                            << ", tlas=" << (m_rtTlas.handle != VK_NULL_HANDLE ? "yes" : "no")
                            << ", rtPipeline=" << (m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE ? "yes" : "no");
-        m_voxelGiRtSurfaceLastLoggedActive = m_voxelGiRtSurfaceActiveThisFrame;
+        m_voxelGiRtSurfaceLastLoggedRequested = voxelGiRtSurfaceRequested;
+        m_voxelGiRtSurfaceLastLoggedReady = voxelGiRtSurfaceCanRun;
         m_voxelGiRtSurfaceLastLoggedValid = true;
     }
 

@@ -2020,7 +2020,8 @@ void RendererBackend::shutdown() {
     m_debugGpuSsaoBlurTimeMs = 0.0f;
     m_voxelGiRtSurfaceReady = false;
     m_voxelGiRtSurfaceActiveThisFrame = false;
-    m_voxelGiRtSurfaceLastLoggedActive = false;
+    m_voxelGiRtSurfaceLastLoggedRequested = false;
+    m_voxelGiRtSurfaceLastLoggedReady = false;
     m_voxelGiRtSurfaceLastLoggedValid = false;
     m_debugGpuMainTimeMs = 0.0f;
     m_debugGpuPostTimeMs = 0.0f;
