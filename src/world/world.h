@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <unordered_map>
 
 namespace voxelsprout::world {
 
@@ -17,6 +18,15 @@ public:
         int chunkZ = 0;
 
         [[nodiscard]] bool operator==(const ChunkKey& other) const = default;
+    };
+
+    struct ChunkKeyHash {
+        [[nodiscard]] std::size_t operator()(const ChunkKey& key) const noexcept {
+            const std::size_t hx = std::hash<int>{}(key.chunkX);
+            const std::size_t hy = std::hash<int>{}(key.chunkY);
+            const std::size_t hz = std::hash<int>{}(key.chunkZ);
+            return hx ^ (hy << 1u) ^ (hz << 2u);
+        }
     };
 
     struct ChunkStreamingConfig {
@@ -90,9 +100,11 @@ private:
         int& outLocalY,
         int& outLocalZ
     ) const;
+    void rebuildChunkStorageIndex();
 
     ChunkGrid m_chunkGrid;
     std::vector<Chunk> m_chunkStorage;
+    std::unordered_map<ChunkKey, std::size_t, ChunkKeyHash> m_chunkStorageIndexByKey;
     ChunkStreamingConfig m_streamingConfig{};
     ChunkStreamingStats m_streamingStats{};
 };

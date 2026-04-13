@@ -8,6 +8,7 @@ public static const uint kShiftCorner = 18u;
 public static const uint kShiftAo = 20u;
 public static const uint kShiftMaterial = 24u;
 public static const uint kShiftBaseColor = 27u;
+public static const uint kShiftLodLevel = 30u;
 
 public float3 cornerOffset(uint face, uint corner)
 {

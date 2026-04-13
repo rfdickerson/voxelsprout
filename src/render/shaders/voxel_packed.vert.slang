@@ -30,7 +30,6 @@ VertexOutput main(VertexInput input)
     const uint ao = (input.inPacked >> kShiftAo) & 0xFu;
     const uint material = (input.inPacked >> kShiftMaterial) & 0x7u;
     const uint baseColorIndex = (input.inPacked >> kShiftBaseColor) & 0x7u;
-
     const float3 basePosition = float3(float(x), float(y), float(z));
     const float3 worldPosition =
         basePosition +

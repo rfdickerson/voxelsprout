@@ -208,7 +208,10 @@ private:
     static constexpr uint32_t kShadowCascadeCount = 4;
     static constexpr uint32_t kShadowAtlasSize = 8192;
     static constexpr int kGrassActiveChunkRadius = 1;
+    static constexpr int kGrassRetainedChunkRadius = 2;
     static constexpr int kRtActiveChunkRadius = 1;
+    static constexpr int kRtRetainedChunkRadius = 2;
+    static constexpr std::size_t kChunkRemeshBudgetPerFrame = 6;
     static constexpr uint32_t kGpuTimestampQueryFrameStart = 0;
     static constexpr uint32_t kGpuTimestampQueryShadowStart = 1;
     static constexpr uint32_t kGpuTimestampQueryShadowEnd = 2;
@@ -894,7 +897,7 @@ private:
     bool m_chunkLodMeshCacheValid = false;
     voxelsprout::world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;
-    std::vector<std::size_t> m_pendingChunkRemeshIndices;
+    std::vector<ChunkResidentKey> m_pendingChunkRemeshKeys;
     uint32_t m_previewIndexCount = 0;
     uint32_t m_pipeIndexCount = 0;
     uint32_t m_transportIndexCount = 0;
@@ -1043,6 +1046,9 @@ private:
     std::uint32_t m_debugChunkMeshVertexCount = 0;
     std::uint32_t m_debugChunkMeshIndexCount = 0;
     std::uint32_t m_debugChunkLastRemeshedChunkCount = 0;
+    std::uint32_t m_debugChunkPendingRemeshCount = 0;
+    std::uint32_t m_debugChunkRemeshBatchCount = 0;
+    std::uint32_t m_debugRtActiveChunkCount = 0;
     std::uint32_t m_debugChunkLastRemeshActiveVertexCount = 0;
     std::uint32_t m_debugChunkLastRemeshActiveIndexCount = 0;
     std::uint32_t m_debugChunkLastRemeshNaiveVertexCount = 0;

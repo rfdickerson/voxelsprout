@@ -227,20 +227,115 @@ void RendererBackend::renderFrame(
     }
     m_frameArena.beginFrame(m_currentFrame);
 
-    if (m_chunkMeshRebuildRequested || !m_pendingChunkRemeshIndices.empty()) {
+    if (!m_pendingChunkRemeshKeys.empty()) {
+        std::erase_if(m_pendingChunkRemeshKeys, [&](const ChunkResidentKey& pendingKey) {
+            return std::find_if(
+                       chunkGrid.chunks().begin(),
+                       chunkGrid.chunks().end(),
+                       [&](const voxelsprout::world::Chunk& chunk) {
+                           return chunk.chunkX() == pendingKey.chunkX &&
+                                  chunk.chunkY() == pendingKey.chunkY &&
+                                  chunk.chunkZ() == pendingKey.chunkZ;
+                       }) == chunkGrid.chunks().end();
+        });
+    }
+    m_debugChunkPendingRemeshCount = static_cast<std::uint32_t>(m_pendingChunkRemeshKeys.size());
+    m_debugChunkRemeshBatchCount = 0;
+    if (m_chunkMeshRebuildRequested || !m_pendingChunkRemeshKeys.empty()) {
         // Avoid CPU stalls when async transfer is still in flight.
         if (m_transferCommandBufferInFlightValue == 0 ||
             isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
+            std::vector<ChunkResidentKey> remeshBatchKeys;
+            std::vector<std::size_t> resolvedRemeshIndices;
+            if (!m_chunkMeshRebuildRequested) {
+                remeshBatchKeys = m_pendingChunkRemeshKeys;
+                const int remeshCameraChunkX = static_cast<int>(std::floor(
+                    camera.x / static_cast<float>(voxelsprout::world::Chunk::kSizeX)));
+                const int remeshCameraChunkZ = static_cast<int>(std::floor(
+                    camera.z / static_cast<float>(voxelsprout::world::Chunk::kSizeZ)));
+                std::sort(
+                    remeshBatchKeys.begin(),
+                    remeshBatchKeys.end(),
+                    [&](const ChunkResidentKey& a, const ChunkResidentKey& b) {
+                        const auto chunkDistance = [&](const ChunkResidentKey& key) {
+                            const int dx = std::abs(key.chunkX - remeshCameraChunkX);
+                            const int dz = std::abs(key.chunkZ - remeshCameraChunkZ);
+                            return std::max(dx, dz);
+                        };
+                        const int distanceA = chunkDistance(a);
+                        const int distanceB = chunkDistance(b);
+                        if (distanceA != distanceB) {
+                            return distanceA < distanceB;
+                        }
+                        if (a.chunkX != b.chunkX) {
+                            return a.chunkX < b.chunkX;
+                        }
+                        if (a.chunkY != b.chunkY) {
+                            return a.chunkY < b.chunkY;
+                        }
+                        return a.chunkZ < b.chunkZ;
+                    });
+                if (remeshBatchKeys.size() > kChunkRemeshBudgetPerFrame) {
+                    remeshBatchKeys.resize(kChunkRemeshBudgetPerFrame);
+                }
+                resolvedRemeshIndices.reserve(remeshBatchKeys.size());
+                for (const ChunkResidentKey& key : remeshBatchKeys) {
+                    const auto residentIt = std::find_if(
+                        chunkGrid.chunks().begin(),
+                        chunkGrid.chunks().end(),
+                        [&](const voxelsprout::world::Chunk& chunk) {
+                            return chunk.chunkX() == key.chunkX &&
+                                   chunk.chunkY() == key.chunkY &&
+                                   chunk.chunkZ() == key.chunkZ;
+                        });
+                    if (residentIt != chunkGrid.chunks().end()) {
+                        resolvedRemeshIndices.push_back(
+                            static_cast<std::size_t>(std::distance(chunkGrid.chunks().begin(), residentIt)));
+                    }
+                }
+            }
             const std::span<const std::size_t> pendingRemeshIndices =
                 m_chunkMeshRebuildRequested
                     ? std::span<const std::size_t>{}
-                    : std::span<const std::size_t>(m_pendingChunkRemeshIndices.data(), m_pendingChunkRemeshIndices.size());
-            if (createChunkBuffers(chunkGrid, pendingRemeshIndices)) {
-                m_chunkMeshRebuildRequested = false;
-                m_pendingChunkRemeshIndices.clear();
+                    : std::span<const std::size_t>(resolvedRemeshIndices.data(), resolvedRemeshIndices.size());
+            m_debugChunkRemeshBatchCount = static_cast<std::uint32_t>(pendingRemeshIndices.size());
+            if (!m_chunkMeshRebuildRequested && remeshBatchKeys.empty()) {
+                m_pendingChunkRemeshKeys.clear();
+                m_debugChunkPendingRemeshCount = 0;
+            } else if (!m_chunkMeshRebuildRequested && pendingRemeshIndices.empty()) {
+                for (const ChunkResidentKey& processedKey : remeshBatchKeys) {
+                    const auto pendingIt =
+                        std::find(m_pendingChunkRemeshKeys.begin(), m_pendingChunkRemeshKeys.end(), processedKey);
+                    if (pendingIt != m_pendingChunkRemeshKeys.end()) {
+                        m_pendingChunkRemeshKeys.erase(pendingIt);
+                    }
+                }
+                m_debugChunkPendingRemeshCount = static_cast<std::uint32_t>(m_pendingChunkRemeshKeys.size());
+            } else if (createChunkBuffers(chunkGrid, pendingRemeshIndices)) {
+                if (m_chunkMeshRebuildRequested) {
+                    m_chunkMeshRebuildRequested = false;
+                    m_pendingChunkRemeshKeys.clear();
+                } else {
+                    for (const ChunkResidentKey& processedKey : remeshBatchKeys) {
+                        const auto pendingIt =
+                            std::find(m_pendingChunkRemeshKeys.begin(), m_pendingChunkRemeshKeys.end(), processedKey);
+                        if (pendingIt != m_pendingChunkRemeshKeys.end()) {
+                            m_pendingChunkRemeshKeys.erase(pendingIt);
+                        }
+                    }
+                }
+                m_debugChunkPendingRemeshCount = static_cast<std::uint32_t>(m_pendingChunkRemeshKeys.size());
             } else {
                 VOX_LOGE("render") << "failed deferred chunk remesh";
             }
+        }
+    }
+    if (m_rtSceneDirty &&
+        !m_chunkMeshRebuildRequested &&
+        m_pendingChunkRemeshKeys.empty() &&
+        m_transferCommandBufferInFlightValue == 0) {
+        if (rayTracingRuntimeReady() && !rebuildRayTracingScene()) {
+            VOX_LOGE("render") << "deferred chunk RT scene rebuild failed";
         }
     }
 

@@ -2023,7 +2023,7 @@ void RendererBackend::shutdown() {
     m_rtShaderVariantFileAvailable = false;
     m_chunkMeshingOptions = voxelsprout::world::MeshingOptions{};
     m_chunkMeshRebuildRequested = false;
-    m_pendingChunkRemeshIndices.clear();
+    m_pendingChunkRemeshKeys.clear();
     m_gpuTimestampsSupported = false;
     m_gpuTimestampPeriodNs = 0.0f;
     m_gpuTimestampQueryPools.fill(VK_NULL_HANDLE);

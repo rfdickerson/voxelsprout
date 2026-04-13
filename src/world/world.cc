@@ -14,6 +14,8 @@ namespace voxelsprout::world {
 
 namespace {
 
+constexpr int kStreamingCenterHysteresisVoxels = Chunk::kSizeX / 4;
+
 int floorDiv(int value, int divisor) {
     int quotient = value / divisor;
     const int remainder = value % divisor;
@@ -77,12 +79,6 @@ bool chunkKeyLess(const World::ChunkKey& a, const World::ChunkKey& b) {
 
 bool chunkLess(const Chunk& a, const Chunk& b) {
     return chunkKeyLess(chunkKeyForChunk(a), chunkKeyForChunk(b));
-}
-
-bool chunkMatchesKey(const Chunk& chunk, const World::ChunkKey& key) {
-    return chunk.chunkX() == key.chunkX &&
-           chunk.chunkY() == key.chunkY &&
-           chunk.chunkZ() == key.chunkZ;
 }
 
 MagicaVoxelModel downscaleMagicaModel(const MagicaVoxelModel& source, float scale) {
@@ -222,8 +218,8 @@ bool World::loadOrInitialize(const std::filesystem::path& worldPath, LoadResult*
     LoadResult result{};
     if (m_chunkGrid.loadFromBinaryFile(worldPath)) {
         m_chunkStorage = m_chunkGrid.chunks();
-        std::sort(m_chunkStorage.begin(), m_chunkStorage.end(), chunkLess);
-        syncResidentChunkGrid(0, 0);
+        rebuildChunkStorageIndex();
+        (void)syncResidentChunkGrid(0, 0);
         result.loadedFromFile = true;
         if (outResult != nullptr) {
             *outResult = result;
@@ -233,6 +229,7 @@ bool World::loadOrInitialize(const std::filesystem::path& worldPath, LoadResult*
 
     m_chunkGrid.initializeEmptyWorld();
     m_chunkStorage.clear();
+    m_chunkStorageIndexByKey.clear();
     m_chunkGrid.chunks().clear();
     m_streamingStats = ChunkStreamingStats{};
     result.initializedFallback = true;
@@ -244,15 +241,18 @@ bool World::loadOrInitialize(const std::filesystem::path& worldPath, LoadResult*
 
 bool World::save(const std::filesystem::path& worldPath) const {
     ChunkGrid storageGrid;
-    storageGrid.setChunks(m_chunkStorage);
+    std::vector<Chunk> sortedChunks = m_chunkStorage;
+    std::sort(sortedChunks.begin(), sortedChunks.end(), chunkLess);
+    storageGrid.setChunks(std::move(sortedChunks));
     return storageGrid.saveToBinaryFile(worldPath);
 }
 
 void World::regenerateFlatWorld() {
     m_chunkStorage.clear();
+    m_chunkStorageIndexByKey.clear();
     m_chunkGrid.chunks().clear();
     m_streamingStats = ChunkStreamingStats{};
-    syncResidentChunkGrid(m_streamingStats.centerChunkX, m_streamingStats.centerChunkZ);
+    (void)syncResidentChunkGrid(m_streamingStats.centerChunkX, m_streamingStats.centerChunkZ);
 }
 
 void World::setStreamingConfig(const ChunkStreamingConfig& config) {
@@ -265,8 +265,24 @@ World::ChunkStreamingConfig World::streamingConfig() const {
 }
 
 World::ChunkStreamingUpdate World::updateStreamingWindowForWorldPosition(float worldX, float worldZ) {
-    const int centerChunkX = floorDiv(static_cast<int>(std::floor(worldX)), Chunk::kSizeX);
-    const int centerChunkZ = floorDiv(static_cast<int>(std::floor(worldZ)), Chunk::kSizeZ);
+    const int flooredWorldX = static_cast<int>(std::floor(worldX));
+    const int flooredWorldZ = static_cast<int>(std::floor(worldZ));
+    int centerChunkX = m_streamingStats.centerChunkX;
+    int centerChunkZ = m_streamingStats.centerChunkZ;
+
+    const auto applyChunkCenterHysteresis = [](int worldCoord, int currentCenterChunk, int chunkSize) {
+        int centerChunk = currentCenterChunk;
+        while (worldCoord < ((centerChunk * chunkSize) - kStreamingCenterHysteresisVoxels)) {
+            --centerChunk;
+        }
+        while (worldCoord >= (((centerChunk + 1) * chunkSize) + kStreamingCenterHysteresisVoxels)) {
+            ++centerChunk;
+        }
+        return centerChunk;
+    };
+
+    centerChunkX = applyChunkCenterHysteresis(flooredWorldX, centerChunkX, Chunk::kSizeX);
+    centerChunkZ = applyChunkCenterHysteresis(flooredWorldZ, centerChunkZ, Chunk::kSizeZ);
     return syncResidentChunkGrid(centerChunkX, centerChunkZ);
 }
 
@@ -275,23 +291,25 @@ const World::ChunkStreamingStats& World::streamingStats() const {
 }
 
 bool World::setVoxelAtWorld(int worldX, int worldY, int worldZ, Voxel voxel) {
+    bool updated = false;
+    const ChunkKey storageKey{
+        floorDiv(worldX, Chunk::kSizeX),
+        floorDiv(worldY, Chunk::kSizeY),
+        floorDiv(worldZ, Chunk::kSizeZ)
+    };
+    const auto storageIt = m_chunkStorageIndexByKey.find(storageKey);
+    if (storageIt != m_chunkStorageIndexByKey.end() && storageIt->second < m_chunkStorage.size()) {
+        const Chunk& storageChunk = m_chunkStorage[storageIt->second];
+        const int localX = worldX - (storageChunk.chunkX() * Chunk::kSizeX);
+        const int localY = worldY - (storageChunk.chunkY() * Chunk::kSizeY);
+        const int localZ = worldZ - (storageChunk.chunkZ() * Chunk::kSizeZ);
+        m_chunkStorage[storageIt->second].setVoxel(localX, localY, localZ, voxel);
+        updated = true;
+    }
     std::size_t chunkIndex = 0;
     int localX = 0;
     int localY = 0;
     int localZ = 0;
-    bool updated = false;
-    if (worldToChunkLocalInChunks(
-            std::span<Chunk>(m_chunkStorage),
-            worldX,
-            worldY,
-            worldZ,
-            chunkIndex,
-            localX,
-            localY,
-            localZ)) {
-        m_chunkStorage[chunkIndex].setVoxel(localX, localY, localZ, voxel);
-        updated = true;
-    }
     if (worldToChunkLocalInChunks(
             std::span<Chunk>(m_chunkGrid.chunks()),
             worldX,
@@ -349,24 +367,21 @@ World::MagicaStampResult World::stampMagicaResources(std::span<const MagicaStamp
             const int worldY = worldOriginY + static_cast<int>(voxel.z);
             const int worldZ = worldOriginZ + static_cast<int>(voxel.y);
 
-            std::size_t chunkIndex = 0;
-            int localX = 0;
-            int localY = 0;
-            int localZ = 0;
-            if (!worldToChunkLocalInChunks(
-                    std::span<Chunk>(m_chunkStorage),
-                    worldX,
-                    worldY,
-                    worldZ,
-                    chunkIndex,
-                    localX,
-                    localY,
-                    localZ)) {
+            const ChunkKey storageKey{
+                floorDiv(worldX, Chunk::kSizeX),
+                floorDiv(worldY, Chunk::kSizeY),
+                floorDiv(worldZ, Chunk::kSizeZ)
+            };
+            const auto storageIt = m_chunkStorageIndexByKey.find(storageKey);
+            if (storageIt == m_chunkStorageIndexByKey.end() || storageIt->second >= m_chunkStorage.size()) {
                 ++resourceClipped;
                 continue;
             }
 
-            Chunk& chunk = m_chunkStorage[chunkIndex];
+            Chunk& chunk = m_chunkStorage[storageIt->second];
+            const int localX = worldX - (chunk.chunkX() * Chunk::kSizeX);
+            const int localY = worldY - (chunk.chunkY() * Chunk::kSizeY);
+            const int localZ = worldZ - (chunk.chunkZ() * Chunk::kSizeZ);
             const std::uint8_t baseColorIndex = quantizeBaseColorIndex(
                 paletteRgba,
                 result.baseColorPalette,
@@ -391,8 +406,16 @@ World::MagicaStampResult World::stampMagicaResources(std::span<const MagicaStamp
                            << ", scale=" << spec.uniformScale << ")";
     }
 
-    syncResidentChunkGrid(m_streamingStats.centerChunkX, m_streamingStats.centerChunkZ);
+    (void)syncResidentChunkGrid(m_streamingStats.centerChunkX, m_streamingStats.centerChunkZ);
     return result;
+}
+
+void World::rebuildChunkStorageIndex() {
+    m_chunkStorageIndexByKey.clear();
+    m_chunkStorageIndexByKey.reserve(m_chunkStorage.size() * 2u);
+    for (std::size_t chunkIndex = 0; chunkIndex < m_chunkStorage.size(); ++chunkIndex) {
+        m_chunkStorageIndexByKey[chunkKeyForChunk(m_chunkStorage[chunkIndex])] = chunkIndex;
+    }
 }
 
 ChunkGrid& World::chunkGrid() {
@@ -486,29 +509,22 @@ World::ChunkStreamingUpdate World::syncResidentChunkGrid(int centerChunkX, int c
     std::sort(desiredKeys.begin(), desiredKeys.end(), chunkKeyLess);
 
     for (const ChunkKey& key : desiredKeys) {
-        const auto existingIt = std::find_if(
-            m_chunkStorage.begin(),
-            m_chunkStorage.end(),
-            [&](const Chunk& chunk) { return chunkMatchesKey(chunk, key); });
-        if (existingIt != m_chunkStorage.end()) {
+        if (m_chunkStorageIndexByKey.contains(key)) {
             continue;
         }
+        m_chunkStorageIndexByKey[key] = m_chunkStorage.size();
         m_chunkStorage.push_back(buildProceduralChunk(key.chunkX, key.chunkY, key.chunkZ));
         update.generatedChunkKeys.push_back(key);
     }
-    std::sort(m_chunkStorage.begin(), m_chunkStorage.end(), chunkLess);
 
     std::vector<Chunk> residentChunks;
     residentChunks.reserve(desiredKeys.size());
     for (const ChunkKey& desiredKey : desiredKeys) {
-        const auto storedIt = std::find_if(
-            m_chunkStorage.begin(),
-            m_chunkStorage.end(),
-            [&](const Chunk& chunk) { return chunkMatchesKey(chunk, desiredKey); });
-        if (storedIt == m_chunkStorage.end()) {
+        const auto storedIt = m_chunkStorageIndexByKey.find(desiredKey);
+        if (storedIt == m_chunkStorageIndexByKey.end() || storedIt->second >= m_chunkStorage.size()) {
             continue;
         }
-        residentChunks.push_back(*storedIt);
+        residentChunks.push_back(m_chunkStorage[storedIt->second]);
     }
 
     std::vector<ChunkKey> residentKeys;
