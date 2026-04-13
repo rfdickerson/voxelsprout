@@ -4,8 +4,8 @@ import camera_uniform;
 Sampler2D<float4> bindlessTextures[];
 
 static const uint kBindlessTextureIndexDiffuseAtlas = 6u;
-static const uint kVoxelAtlasTileSize = 16u;
-static const uint kGrassSpriteTile = 4u;
+static const uint kVoxelAtlasTileSize = 32u;
+static const uint kGrassSpriteTile = 0u;
 
 struct FragmentInput
 {

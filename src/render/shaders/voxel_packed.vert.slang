@@ -27,9 +27,9 @@ VertexOutput main(VertexInput input)
     const uint z = (input.inPacked >> kShiftZ) & 0x1Fu;
     const uint face = (input.inPacked >> kShiftFace) & 0x7u;
     const uint corner = (input.inPacked >> kShiftCorner) & 0x3u;
-    const uint ao = (input.inPacked >> kShiftAo) & 0x3u;
-    const uint material = (input.inPacked >> kShiftMaterial) & 0xFu;
-    const uint baseColorIndex = (input.inPacked >> kShiftBaseColor) & 0xFu;
+    const uint ao = (input.inPacked >> kShiftAo) & 0xFu;
+    const uint material = (input.inPacked >> kShiftMaterial) & 0x7u;
+    const uint baseColorIndex = (input.inPacked >> kShiftBaseColor) & 0x7u;
 
     const float3 basePosition = float3(float(x), float(y), float(z));
     const float3 worldPosition =
@@ -41,7 +41,9 @@ VertexOutput main(VertexInput input)
     output.outFace = face;
     output.outMaterial = material;
     output.outWorldPosition = worldPosition;
-    output.outVertexAo = lerp(0.45, 1.0, float(ao) / 3.0);
+    const float ao01 = saturate(float(ao) / 15.0);
+    const float shapedAo = sqrt(ao01);
+    output.outVertexAo = lerp(0.52, 1.0, shapedAo);
     output.outBaseColorIndex = baseColorIndex;
     output.position = mul(camera.mvp, float4(worldPosition, 1.0));
     return output;

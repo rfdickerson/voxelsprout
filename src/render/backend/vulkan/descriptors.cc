@@ -308,7 +308,8 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
 
     VkDescriptorImageInfo plantDiffuseTextureImageInfo{};
     plantDiffuseTextureImageInfo.sampler = m_diffuseTexturePlantSampler;
-    plantDiffuseTextureImageInfo.imageView = m_diffuseTextureImageView;
+    plantDiffuseTextureImageInfo.imageView =
+        (m_plantDiffuseTextureImageView != VK_NULL_HANDLE) ? m_plantDiffuseTextureImageView : m_diffuseTextureImageView;
     plantDiffuseTextureImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo shadowMapImageInfo{};

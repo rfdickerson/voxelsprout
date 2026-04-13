@@ -424,21 +424,21 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
                         // Mostly green bushes, with some flowers.
                         const bool placeFlower = ((clumpHash >> 5u) % 100u) < 18u;
                         if (placeFlower) {
-                            // Bias strongly toward poppies (tiles 5-6), with rarer lighter wildflowers (7-8).
+                            // Bias strongly toward poppies (tiles 1-2), with rarer lighter wildflowers (3-4).
                             const bool choosePoppy = ((clumpHash >> 13u) % 100u) < 74u;
                             const std::uint32_t flowerTile = choosePoppy
-                                ? (5u + ((clumpHash >> 9u) & 0x1u))
-                                : (7u + ((clumpHash >> 10u) & 0x1u));
+                                ? (1u + ((clumpHash >> 9u) & 0x1u))
+                                : (3u + ((clumpHash >> 10u) & 0x1u));
                             if (choosePoppy) {
-                                const float poppyBoost = 0.92f + (tintRand1 * 0.30f);
-                                instance.colorTint[0] = (1.05f + (tintRand0 * 0.55f)) * poppyBoost;
-                                instance.colorTint[1] = (0.58f + (tintRand2 * 0.38f)) * poppyBoost;
-                                instance.colorTint[2] = (0.40f + (tintRand1 * 0.24f)) * poppyBoost;
+                                const float poppyBoost = 0.96f + (tintRand1 * 0.10f);
+                                instance.colorTint[0] = (0.92f + (tintRand0 * 0.14f)) * poppyBoost;
+                                instance.colorTint[1] = (0.92f + (tintRand2 * 0.14f)) * poppyBoost;
+                                instance.colorTint[2] = (0.92f + (tintRand1 * 0.14f)) * poppyBoost;
                             } else {
-                                const float flowerBoost = 0.88f + (tintRand1 * 0.30f);
-                                instance.colorTint[0] = (0.96f + (tintRand0 * 0.42f)) * flowerBoost;
-                                instance.colorTint[1] = (0.96f + (tintRand2 * 0.42f)) * flowerBoost;
-                                instance.colorTint[2] = (0.96f + (tintRand1 * 0.42f)) * flowerBoost;
+                                const float flowerBoost = 0.94f + (tintRand1 * 0.12f);
+                                instance.colorTint[0] = (0.94f + (tintRand0 * 0.14f)) * flowerBoost;
+                                instance.colorTint[1] = (0.94f + (tintRand2 * 0.14f)) * flowerBoost;
+                                instance.colorTint[2] = (0.94f + (tintRand1 * 0.14f)) * flowerBoost;
                             }
                             instance.colorTint[3] = static_cast<float>(flowerTile);
                         } else {

@@ -10,8 +10,8 @@ struct VertexInput
     [[vk::location(4)]] float4 inColorTint : TEXCOORD4;
 };
 
-static const uint kPoppySpriteTileRed = 5u;
-static const uint kPoppySpriteTileOrangeRed = 6u;
+static const uint kPoppySpriteTileRed = 1u;
+static const uint kPoppySpriteTileOrangeRed = 2u;
 
 struct VertexOutput
 {

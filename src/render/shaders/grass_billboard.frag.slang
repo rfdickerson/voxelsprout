@@ -5,8 +5,8 @@ import sh_lighting;
 Sampler2D<float4> bindlessTextures[];
 
 static const uint kBindlessTextureIndexDiffuseAtlas = 6u;
-static const uint kVoxelAtlasTileSize = 16u;
-static const uint kGrassSpriteTile = 4u;
+static const uint kVoxelAtlasTileSize = 32u;
+static const uint kGrassSpriteTile = 0u;
 
 struct FragmentInput
 {
@@ -133,7 +133,7 @@ float4 main(FragmentInput input) : SV_Target0
     const float transmissionStrength = lerp(0.03, 0.16, plantDirectionality) * giMatch;
 
     const float3 tint = clamp(input.inColorTint.xyz, float3(0.10, 0.10, 0.10), float3(2.50, 2.50, 2.50));
-    const bool isFlower = spriteTile >= 5u;
+    const bool isFlower = spriteTile >= 1u;
     const float flowerTintStrength = isFlower ? 1.0 : 0.68;
     const float3 variedSprite = lerp(sprite.rgb, sprite.rgb * tint, flowerTintStrength);
     const float3 transmission = variedSprite * camera.sunColorShadow.xyz * (sunIntensity * backScatter * transmissionStrength);

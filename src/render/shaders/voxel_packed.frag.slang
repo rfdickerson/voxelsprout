@@ -18,11 +18,12 @@ Sampler3D<float4> voxelGiOccupancyVolume;
 RaytracingAccelerationStructure shadowScene;
 #endif
 
+[[vk::binding(1, 0)]]
+Sampler2D<float4> diffuseTexture;
+
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
-
-static const uint kBindlessTextureIndexDiffuseAtlas = 0u;
-static const uint kVoxelAtlasTileSize = 16u;
+static const uint kVoxelAtlasTileSize = 32u;
 static const uint kMaterialStone = 1u;
 static const uint kMaterialDirt = 2u;
 static const uint kMaterialGrass = 3u;
@@ -40,6 +41,7 @@ const int kForceTintOnly = 0;
 
 float3 materialTint(uint material)
 {
+    if (material == kMaterialGrass) return float3(0.47, 0.76, 0.28);
     if (material == kMaterialRed) return float3(1.00, 0.28, 0.22);
     if (material == kMaterialLeaves) return float3(0.42, 0.70, 0.34);
     return float3(0.9, 0.9, 0.9);
@@ -68,7 +70,12 @@ float2 faceUv(uint face, float3 worldPosition)
     if (face == 0u || face == 1u) uv = worldPosition.zy;
     else if (face == 2u || face == 3u) uv = worldPosition.xz;
     else uv = worldPosition.xy;
-    return frac(uv);
+    uv = frac(uv);
+    if (face == 0u || face == 1u || face == 4u || face == 5u)
+    {
+        uv.y = 1.0 - uv.y;
+    }
+    return uv;
 }
 
 float3 faceNormal(uint face)
@@ -87,7 +94,9 @@ bool materialUsesAtlas(uint material)
         material == kMaterialStone ||
         material == kMaterialDirt ||
         material == kMaterialGrass ||
-        material == kMaterialWood;
+        material == kMaterialWood ||
+        material == kMaterialLeaves ||
+        material == kMaterialRed;
 }
 
 uint materialAtlasTile(uint material, uint face)
@@ -96,10 +105,13 @@ uint materialAtlasTile(uint material, uint face)
     if (material == kMaterialDirt) return 1u;
     if (material == kMaterialGrass)
     {
+        if (face == 2u) return 2u;
         if (face == 3u) return 1u;
-        return 2u;
+        return 3u;
     }
-    if (material == kMaterialWood) return 3u;
+    if (material == kMaterialWood) return (face == 2u || face == 3u) ? 5u : 4u;
+    if (material == kMaterialLeaves) return 11u;
+    if (material == kMaterialRed) return 12u;
     return 0u;
 }
 
@@ -120,13 +132,21 @@ float3 sampleMaterialAlbedo(uint material, uint face, float3 worldPosition)
 
     uint texW = 0u;
     uint texH = 0u;
-    bindlessTextures[kBindlessTextureIndexDiffuseAtlas].GetDimensions(texW, texH);
+    diffuseTexture.GetDimensions(texW, texH);
     const uint tilesX = max(texW / kVoxelAtlasTileSize, 1u);
     const uint tilesY = max(texH / kVoxelAtlasTileSize, 1u);
     const uint tileX = tileIndex % tilesX;
     const uint tileY = tileIndex / tilesX;
     const float2 atlasUv = (float2(float(tileX), float(tileY)) + uv) / float2(float(tilesX), float(tilesY));
-    return bindlessTextures[kBindlessTextureIndexDiffuseAtlas].Sample(atlasUv).xyz;
+    float3 albedo = diffuseTexture.Sample(atlasUv).xyz;
+    if (material == kMaterialGrass) {
+        if (face == 2u) {
+            albedo *= materialTint(material);
+        } else if (face != 3u) {
+            albedo *= lerp(float3(1.0, 1.0, 1.0), materialTint(material), 0.18);
+        }
+    }
+    return albedo;
 }
 
 float3 sampleVoxelGi(float3 worldPosition, float3 normal)
