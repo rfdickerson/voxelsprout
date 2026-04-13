@@ -56,6 +56,15 @@ const char* shadowFallbackReasonName(ShadowFallbackReason reason) {
     return "none";
 }
 
+const char* voxelGiSurfaceModeName(VoxelGiSurfaceMode mode) {
+    switch (mode) {
+    case VoxelGiSurfaceMode::Legacy: return "legacy";
+    case VoxelGiSurfaceMode::RtSurface: return "rt_surface";
+    case VoxelGiSurfaceMode::RestirSurface: return "restir_surface";
+    }
+    return "legacy";
+}
+
 } // namespace
 
 void RendererBackend::setDebugUiVisible(bool visible) {
@@ -387,10 +396,11 @@ void RendererBackend::buildFrameStatsUi() {
             m_rtTlasBuildCount
         );
         ImGui::Text(
-            "GI Surface Mode: %s",
-            m_voxelGiDebugSettings.surfaceMode == VoxelGiSurfaceMode::Legacy
-                ? "legacy"
-                : (m_voxelGiDebugSettings.surfaceMode == VoxelGiSurfaceMode::RtSurface ? "rt_surface" : "restir_surface")
+            "GI Surface Mode: requested=%s active=%s",
+            voxelGiSurfaceModeName(m_voxelGiDebugSettings.surfaceMode),
+            m_voxelGiRestirActiveThisFrame
+                ? "restir_surface"
+                : (m_voxelGiRtSurfaceActiveThisFrame ? "rt_surface" : "legacy")
         );
         ImGui::Text(
             "GI RT Surface: %s / active=%s",
@@ -406,6 +416,12 @@ void RendererBackend::buildFrameStatsUi() {
             m_voxelGiDebugSettings.restirEnableSpatialReuse ? "yes" : "no",
             std::clamp(m_voxelGiDebugSettings.restirSpatialRadius, 1, 2)
         );
+        if (m_voxelGiDebugSettings.surfaceMode == VoxelGiSurfaceMode::RestirSurface && !m_voxelGiRestirActiveThisFrame) {
+            ImGui::Text(
+                "GI ReSTIR Fallback: %s",
+                m_voxelGiRtSurfaceActiveThisFrame ? "rt_surface" : "legacy"
+            );
+        }
         ImGui::Text(
             "GI RT Samples / Bias: %d / %.2f",
             std::clamp(m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2),
@@ -556,8 +572,15 @@ void RendererBackend::buildFrameStatsUi() {
             "Scratch Alignment: %llu",
             static_cast<unsigned long long>(m_rayTracingCapabilityProbe.scratchAlignment)
         );
-        ImGui::Text("Chunk RT Vertices: %u", m_rtChunkGeometry.vertexCount);
-        ImGui::Text("Chunk RT Indices: %u", m_rtChunkGeometry.indexCount);
+        std::uint32_t chunkRtVertexCount = 0;
+        std::uint32_t chunkRtIndexCount = 0;
+        for (const RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
+            chunkRtVertexCount += chunkRecord.vertexCount;
+            chunkRtIndexCount += chunkRecord.indexCount;
+        }
+        ImGui::Text("Chunk RT Vertices: %u", chunkRtVertexCount);
+        ImGui::Text("Chunk RT Indices: %u", chunkRtIndexCount);
+        ImGui::Text("Chunk RT Records: %u", static_cast<unsigned>(m_rtChunkSceneRecords.size()));
         ImGui::Text("Magica RT Geometries: %u", static_cast<unsigned>(m_rtMagicaGeometries.size()));
         ImGui::TreePop();
     }

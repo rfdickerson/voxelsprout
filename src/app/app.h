@@ -140,6 +140,7 @@ private:
     bool loadConfig(const std::filesystem::path& configPath);
     bool saveConfig(const std::filesystem::path& configPath) const;
     void regenerateWorld();
+    void refreshStreamingWindow(bool forceRendererUpload);
     [[nodiscard]] bool tryPlaceVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices);
     [[nodiscard]] bool tryRemoveVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices);
     [[nodiscard]] bool tryPlacePipeFromCameraRay();
@@ -148,6 +149,7 @@ private:
     [[nodiscard]] bool tryRemoveBeltFromCameraRay();
     [[nodiscard]] bool tryPlaceTrackFromCameraRay();
     [[nodiscard]] bool tryRemoveTrackFromCameraRay();
+    void resetVoxelBreakProgress();
 
     struct CameraState {
         float x = 0.0f;
@@ -193,6 +195,11 @@ private:
     bool m_worldDirty = false;
     float m_worldAutosaveElapsedSeconds = 0.0f;
     int m_pendingHotbarScrollSteps = 0;
+    bool m_voxelBreakTargetValid = false;
+    int m_voxelBreakTargetX = 0;
+    int m_voxelBreakTargetY = 0;
+    int m_voxelBreakTargetZ = 0;
+    int m_voxelBreakClicks = 0;
     AppConfig m_config{};
     voxelsprout::render::GameplayUiState m_gameplayUiState{};
     std::vector<std::size_t> m_visibleChunkIndices;

@@ -38,6 +38,12 @@ struct WorldGenerationStats {
     std::uint32_t settlementColumnCount = 0;
 };
 
+struct SettlementSite {
+    int x = 0;
+    int z = 0;
+    int radius = 10;
+};
+
 constexpr std::array<std::uint8_t, 256> kPerlinPermutation = {
     151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
     140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,
@@ -124,40 +130,9 @@ int floorDiv(int value, int divisor) {
     return quotient;
 }
 
-struct ChunkLookupResult {
-    Chunk* chunk = nullptr;
-    int localX = 0;
-    int localY = 0;
-    int localZ = 0;
-};
-
-ChunkLookupResult findChunkVoxel(ChunkGrid& grid, int worldX, int worldY, int worldZ) {
-    if (worldY < 0 || worldY >= Chunk::kSizeY) {
-        return {};
-    }
-
-    const int chunkX = floorDiv(worldX, Chunk::kSizeX);
-    const int chunkZ = floorDiv(worldZ, Chunk::kSizeZ);
-    const int localX = worldX - (chunkX * Chunk::kSizeX);
-    const int localZ = worldZ - (chunkZ * Chunk::kSizeZ);
-    for (Chunk& chunk : grid.chunks()) {
-        if (chunk.chunkX() == chunkX && chunk.chunkY() == 0 && chunk.chunkZ() == chunkZ) {
-            return ChunkLookupResult{&chunk, localX, worldY, localZ};
-        }
-    }
-    return {};
-}
-
-bool setWorldVoxel(ChunkGrid& grid, int worldX, int worldY, int worldZ, Voxel voxel, bool onlyIfEmpty = false) {
-    ChunkLookupResult lookup = findChunkVoxel(grid, worldX, worldY, worldZ);
-    if (lookup.chunk == nullptr) {
-        return false;
-    }
-    if (onlyIfEmpty && lookup.chunk->voxelAt(lookup.localX, lookup.localY, lookup.localZ).type != VoxelType::Empty) {
-        return false;
-    }
-    lookup.chunk->setVoxel(lookup.localX, lookup.localY, lookup.localZ, voxel);
-    return true;
+int positiveModulo(int value, int divisor) {
+    const int remainder = value % divisor;
+    return remainder < 0 ? remainder + divisor : remainder;
 }
 
 const char* biomeName(BiomeType biome) {
@@ -183,14 +158,160 @@ BiomeType classifyBiome(float moisture, float temperature, float ruggedness) {
     return BiomeType::Plains;
 }
 
-void stampTreeVariant(ChunkGrid& grid, int originX, int originY, int originZ, int variantIndex) {
+std::vector<SettlementSite> settlementSitesNearWorld(int worldX, int worldZ) {
+    constexpr int kSettlementCellSize = 160;
+    std::vector<SettlementSite> sites;
+    const int cellX = floorDiv(worldX, kSettlementCellSize);
+    const int cellZ = floorDiv(worldZ, kSettlementCellSize);
+    for (int offsetZ = -1; offsetZ <= 1; ++offsetZ) {
+        for (int offsetX = -1; offsetX <= 1; ++offsetX) {
+            const int sampleCellX = cellX + offsetX;
+            const int sampleCellZ = cellZ + offsetZ;
+            const std::uint32_t siteHash = hashCoords(sampleCellX, sampleCellZ, 71u);
+            if ((siteHash & 0xFFu) < 160u) {
+                continue;
+            }
+            const int cellOriginX = sampleCellX * kSettlementCellSize;
+            const int cellOriginZ = sampleCellZ * kSettlementCellSize;
+            const int jitterX = static_cast<int>((siteHash >> 8u) % 64u) - 32;
+            const int jitterZ = static_cast<int>((siteHash >> 16u) % 64u) - 32;
+            const int radius = 9 + static_cast<int>((siteHash >> 24u) % 4u);
+            sites.push_back(SettlementSite{
+                cellOriginX + (kSettlementCellSize / 2) + jitterX,
+                cellOriginZ + (kSettlementCellSize / 2) + jitterZ,
+                radius
+            });
+        }
+    }
+    return sites;
+}
+
+ColumnSample sampleColumnAtWorld(int worldX, int worldZ, WorldGenerationStats* outStats = nullptr) {
+    const float wx = static_cast<float>(worldX);
+    const float wz = static_cast<float>(worldZ);
+    const float warpX = perlin2((wx * 0.008f) + 13.7f, (wz * 0.008f) - 7.1f) * 18.0f;
+    const float warpZ = perlin2((wx * 0.008f) - 19.4f, (wz * 0.008f) + 29.3f) * 18.0f;
+    const float sampleX = wx + warpX;
+    const float sampleZ = wz + warpZ;
+
+    const float macroShape = perlin2(sampleX * 0.0085f, sampleZ * 0.0085f);
+    const float rolling = perlin2(sampleX * 0.020f, sampleZ * 0.020f);
+    const float detail = perlin2(sampleX * 0.046f, sampleZ * 0.046f);
+    const float ruggednessField = (perlin2((sampleX * 0.011f) + 52.0f, (sampleZ * 0.011f) - 44.0f) * 0.5f) + 0.5f;
+    const float moisture = (perlin2((sampleX * 0.006f) + 91.0f, (sampleZ * 0.006f) - 37.0f) * 0.5f) + 0.5f;
+    const float temperature = (perlin2((sampleX * 0.005f) - 63.0f, (sampleZ * 0.005f) + 84.0f) * 0.5f) + 0.5f;
+    const float basinNoise = (perlin2((sampleX * 0.004f) + 141.0f, (sampleZ * 0.004f) + 26.0f) * 0.5f) + 0.5f;
+    const float basinDepth = std::pow(std::clamp((0.50f - basinNoise) / 0.50f, 0.0f, 1.0f), 1.7f) * 5.0f;
+
+    ColumnSample sample{};
+    sample.moisture = moisture;
+    sample.temperature = temperature;
+    sample.ruggedness = ruggednessField;
+    sample.biome = classifyBiome(moisture, temperature, ruggednessField);
+
+    float biomeHeightBias = 0.0f;
+    float biomeReliefBias = 0.0f;
+    switch (sample.biome) {
+    case BiomeType::Forest:
+        biomeHeightBias = 1.4f;
+        biomeReliefBias = 0.9f;
+        break;
+    case BiomeType::RockyHighlands:
+        biomeHeightBias = 4.8f;
+        biomeReliefBias = 2.6f;
+        break;
+    case BiomeType::DryScrub:
+        biomeHeightBias = -0.8f;
+        biomeReliefBias = 0.4f;
+        break;
+    case BiomeType::Plains:
+    default:
+        biomeHeightBias = 0.0f;
+        biomeReliefBias = 0.3f;
+        break;
+    }
+
+    float terrainHeightF =
+        9.0f +
+        (macroShape * (5.0f + biomeReliefBias)) +
+        (rolling * (2.7f + (ruggednessField * 1.8f))) +
+        (detail * (0.8f + biomeReliefBias)) +
+        biomeHeightBias -
+        basinDepth;
+
+    for (const SettlementSite& settlement : settlementSitesNearWorld(worldX, worldZ)) {
+        const float dx = static_cast<float>(worldX - settlement.x);
+        const float dz = static_cast<float>(worldZ - settlement.z);
+        const float distance = std::sqrt((dx * dx) + (dz * dz));
+        if (distance > static_cast<float>(settlement.radius)) {
+            continue;
+        }
+        const float t = 1.0f - (distance / static_cast<float>(settlement.radius));
+        const bool roadMask =
+            positiveModulo(std::abs(worldX - settlement.x), 8) <= 1 ||
+            positiveModulo(std::abs(worldZ - settlement.z), 8) <= 1;
+        if (roadMask) {
+            terrainHeightF = std::max(terrainHeightF, 10.0f + (t * 2.0f));
+        } else {
+            const float lotNoise = (perlin2((dx * 0.55f) + 17.0f, (dz * 0.55f) - 31.0f) * 0.5f) + 0.5f;
+            if (lotNoise > 0.38f) {
+                terrainHeightF = std::max(terrainHeightF, 12.0f + (t * (3.0f + (lotNoise * 5.0f))));
+                if (outStats != nullptr) {
+                    ++outStats->settlementColumnCount;
+                }
+            }
+        }
+    }
+
+    sample.terrainHeight = std::clamp(static_cast<int>(std::round(terrainHeightF)), 1, Chunk::kSizeY - 6);
+    return sample;
+}
+
+bool supportsGrassAtWorld(const ColumnSample& sample, int worldX, int worldZ) {
+    const std::uint32_t surfaceHash = hashCoords(worldX, worldZ, 7u);
+    const float grassPatch = static_cast<float>((surfaceHash >> 8u) & 0xFFu) / 255.0f;
+    return sample.slope <= 2.0f &&
+           ((sample.biome == BiomeType::Forest) ||
+            (sample.biome == BiomeType::Plains && grassPatch > 0.20f) ||
+            (sample.biome == BiomeType::DryScrub && grassPatch > 0.72f) ||
+            (sample.biome == BiomeType::RockyHighlands && sample.ruggedness < 0.55f && grassPatch > 0.84f));
+}
+
+bool supportsDenseVegetationAtWorld(const ColumnSample& sample) {
+    return sample.supportsGrass &&
+           sample.slope <= 1.0f &&
+           (sample.biome == BiomeType::Forest ||
+            (sample.biome == BiomeType::Plains && sample.moisture > 0.45f));
+}
+
+void stampTreeVariant(Chunk& chunk, int originX, int originY, int originZ, int variantIndex) {
     const int trunkHeight = 4 + (variantIndex % 3);
     const int canopyRadius = (variantIndex == 0) ? 2 : 1;
     const int canopyBottom = originY + trunkHeight - 1;
     const int canopyTop = canopyBottom + 2 + (variantIndex == 2 ? 1 : 0);
 
+    const int chunkMinX = chunk.chunkX() * Chunk::kSizeX;
+    const int chunkMinY = chunk.chunkY() * Chunk::kSizeY;
+    const int chunkMinZ = chunk.chunkZ() * Chunk::kSizeZ;
+    auto setChunkWorldVoxel = [&](int worldX, int worldY, int worldZ, Voxel voxel, bool onlyIfEmpty = false) {
+        const int localX = worldX - chunkMinX;
+        const int localY = worldY - chunkMinY;
+        const int localZ = worldZ - chunkMinZ;
+        const bool inBounds =
+            localX >= 0 && localX < Chunk::kSizeX &&
+            localY >= 0 && localY < Chunk::kSizeY &&
+            localZ >= 0 && localZ < Chunk::kSizeZ;
+        if (!inBounds) {
+            return;
+        }
+        if (onlyIfEmpty && chunk.voxelAt(localX, localY, localZ).type != VoxelType::Empty) {
+            return;
+        }
+        chunk.setVoxel(localX, localY, localZ, voxel);
+    };
+
     for (int y = 0; y < trunkHeight; ++y) {
-        setWorldVoxel(grid, originX, originY + y, originZ, Voxel{VoxelType::Wood});
+        setChunkWorldVoxel(originX, originY + y, originZ, Voxel{VoxelType::Wood});
     }
 
     for (int y = canopyBottom; y <= canopyTop; ++y) {
@@ -205,161 +326,85 @@ void stampTreeVariant(ChunkGrid& grid, int originX, int originY, int originZ, in
                 if (dx == 0 && dz == 0 && y <= originY + trunkHeight) {
                     continue;
                 }
-                setWorldVoxel(grid, originX + dx, y, originZ + dz, Voxel{VoxelType::Leaves}, true);
+                setChunkWorldVoxel(originX + dx, y, originZ + dz, Voxel{VoxelType::Leaves}, true);
             }
         }
     }
 
     if (variantIndex == 1) {
-        setWorldVoxel(grid, originX, canopyTop + 1, originZ, Voxel{VoxelType::Leaves}, true);
+        setChunkWorldVoxel(originX, canopyTop + 1, originZ, Voxel{VoxelType::Leaves}, true);
     }
+}
+
+bool shouldPlaceTreeAtWorld(int worldX, int worldZ, const ColumnSample& sample) {
+    if (!sample.supportsDenseVegetation || sample.terrainHeight >= Chunk::kSizeY - 8) {
+        return false;
+    }
+    const int spacing = (sample.biome == BiomeType::Forest) ? 5 : 7;
+    if (positiveModulo(worldX, spacing) != spacing / 2 || positiveModulo(worldZ, spacing) != spacing / 2) {
+        return false;
+    }
+
+    const std::uint32_t treeHash = hashCoords(worldX, worldZ, 19u);
+    const float treeChance = static_cast<float>(treeHash & 0xFFu) / 255.0f;
+    const float threshold = (sample.biome == BiomeType::Forest) ? 0.34f : 0.20f;
+    if (treeChance < threshold) {
+        return false;
+    }
+
+    for (int dz = -spacing; dz <= spacing; dz += spacing) {
+        for (int dx = -spacing; dx <= spacing; dx += spacing) {
+            if (dx == 0 && dz == 0) {
+                continue;
+            }
+            const int neighborX = worldX + dx;
+            const int neighborZ = worldZ + dz;
+            const ColumnSample neighborSample = sampleColumnAtWorld(neighborX, neighborZ);
+            if (!neighborSample.supportsDenseVegetation) {
+                continue;
+            }
+            const std::uint32_t neighborHash = hashCoords(neighborX, neighborZ, 19u);
+            const float neighborChance = static_cast<float>(neighborHash & 0xFFu) / 255.0f;
+            if (neighborChance > treeChance && neighborChance >= threshold) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 } // namespace
 
-void ChunkGrid::initializeFlatWorld() {
-    initializeEmptyWorld();
-    if (m_chunks.empty()) {
-        return;
+Chunk buildProceduralChunk(int chunkX, int chunkY, int chunkZ) {
+    Chunk chunk(chunkX, chunkY, chunkZ);
+    if (chunkY != 0) {
+        return chunk;
     }
 
-    int worldMinX = std::numeric_limits<int>::max();
-    int worldMaxX = std::numeric_limits<int>::min();
-    int worldMinZ = std::numeric_limits<int>::max();
-    int worldMaxZ = std::numeric_limits<int>::min();
-    for (const Chunk& chunk : m_chunks) {
-        const int chunkWorldMinX = chunk.chunkX() * Chunk::kSizeX;
-        const int chunkWorldMaxX = chunkWorldMinX + (Chunk::kSizeX - 1);
-        const int chunkWorldMinZ = chunk.chunkZ() * Chunk::kSizeZ;
-        const int chunkWorldMaxZ = chunkWorldMinZ + (Chunk::kSizeZ - 1);
-        worldMinX = std::min(worldMinX, chunkWorldMinX);
-        worldMaxX = std::max(worldMaxX, chunkWorldMaxX);
-        worldMinZ = std::min(worldMinZ, chunkWorldMinZ);
-        worldMaxZ = std::max(worldMaxZ, chunkWorldMaxZ);
-    }
-
-    const int worldSpanX = (worldMaxX - worldMinX) + 1;
-    const int worldSpanZ = (worldMaxZ - worldMinZ) + 1;
-    const auto toIndex = [&](int worldX, int worldZ) -> std::size_t {
-        return static_cast<std::size_t>((worldX - worldMinX) + ((worldZ - worldMinZ) * worldSpanX));
-    };
-
-    struct SettlementSite {
-        int x = 0;
-        int z = 0;
-        int radius = 10;
-    };
-    const std::array<SettlementSite, 2> settlements = {{
-        {worldMinX + (worldSpanX / 3), worldMinZ + ((worldSpanZ * 2) / 3), 11},
-        {worldMinX + ((worldSpanX * 2) / 3), worldMinZ + (worldSpanZ / 3), 9},
-    }};
-
-    std::vector<ColumnSample> columns(static_cast<std::size_t>(worldSpanX * worldSpanZ));
     WorldGenerationStats stats{};
+    const int worldMinX = chunkX * Chunk::kSizeX;
+    const int worldMinZ = chunkZ * Chunk::kSizeZ;
+    const int worldMaxX = worldMinX + Chunk::kSizeX - 1;
+    const int worldMaxZ = worldMinZ + Chunk::kSizeZ - 1;
 
-    for (int worldZ = worldMinZ; worldZ <= worldMaxZ; ++worldZ) {
-        for (int worldX = worldMinX; worldX <= worldMaxX; ++worldX) {
-            const float wx = static_cast<float>(worldX);
-            const float wz = static_cast<float>(worldZ);
-            const float warpX = perlin2((wx * 0.008f) + 13.7f, (wz * 0.008f) - 7.1f) * 18.0f;
-            const float warpZ = perlin2((wx * 0.008f) - 19.4f, (wz * 0.008f) + 29.3f) * 18.0f;
-            const float sampleX = wx + warpX;
-            const float sampleZ = wz + warpZ;
+    for (int localZ = 0; localZ < Chunk::kSizeZ; ++localZ) {
+        for (int localX = 0; localX < Chunk::kSizeX; ++localX) {
+            const int worldX = worldMinX + localX;
+            const int worldZ = worldMinZ + localZ;
+            ColumnSample sample = sampleColumnAtWorld(worldX, worldZ, &stats);
 
-            const float macroShape = perlin2(sampleX * 0.0085f, sampleZ * 0.0085f);
-            const float rolling = perlin2(sampleX * 0.020f, sampleZ * 0.020f);
-            const float detail = perlin2(sampleX * 0.046f, sampleZ * 0.046f);
-            const float ruggednessField = (perlin2((sampleX * 0.011f) + 52.0f, (sampleZ * 0.011f) - 44.0f) * 0.5f) + 0.5f;
-            const float moisture = (perlin2((sampleX * 0.006f) + 91.0f, (sampleZ * 0.006f) - 37.0f) * 0.5f) + 0.5f;
-            const float temperature = (perlin2((sampleX * 0.005f) - 63.0f, (sampleZ * 0.005f) + 84.0f) * 0.5f) + 0.5f;
-            const float basinNoise = (perlin2((sampleX * 0.004f) + 141.0f, (sampleZ * 0.004f) + 26.0f) * 0.5f) + 0.5f;
-            const float basinDepth = std::pow(std::clamp((0.50f - basinNoise) / 0.50f, 0.0f, 1.0f), 1.7f) * 5.0f;
-
-            ColumnSample sample{};
-            sample.moisture = moisture;
-            sample.temperature = temperature;
-            sample.ruggedness = ruggednessField;
-            sample.biome = classifyBiome(moisture, temperature, ruggednessField);
-
-            float biomeHeightBias = 0.0f;
-            float biomeReliefBias = 0.0f;
-            switch (sample.biome) {
-            case BiomeType::Forest:
-                biomeHeightBias = 1.4f;
-                biomeReliefBias = 0.9f;
-                break;
-            case BiomeType::RockyHighlands:
-                biomeHeightBias = 4.8f;
-                biomeReliefBias = 2.6f;
-                break;
-            case BiomeType::DryScrub:
-                biomeHeightBias = -0.8f;
-                biomeReliefBias = 0.4f;
-                break;
-            case BiomeType::Plains:
-            default:
-                biomeHeightBias = 0.0f;
-                biomeReliefBias = 0.3f;
-                break;
-            }
-
-            float terrainHeightF =
-                9.0f +
-                (macroShape * (5.0f + biomeReliefBias)) +
-                (rolling * (2.7f + (ruggednessField * 1.8f))) +
-                (detail * (0.8f + biomeReliefBias)) +
-                biomeHeightBias -
-                basinDepth;
-
-            for (const SettlementSite& settlement : settlements) {
-                const float dx = static_cast<float>(worldX - settlement.x);
-                const float dz = static_cast<float>(worldZ - settlement.z);
-                const float distance = std::sqrt((dx * dx) + (dz * dz));
-                if (distance > static_cast<float>(settlement.radius)) {
-                    continue;
-                }
-                const float t = 1.0f - (distance / static_cast<float>(settlement.radius));
-                const bool roadMask =
-                    (std::abs(worldX - settlement.x) % 8) <= 1 ||
-                    (std::abs(worldZ - settlement.z) % 8) <= 1;
-                if (roadMask) {
-                    terrainHeightF = std::max(terrainHeightF, 10.0f + (t * 2.0f));
-                } else {
-                    const float lotNoise = (perlin2((dx * 0.55f) + 17.0f, (dz * 0.55f) - 31.0f) * 0.5f) + 0.5f;
-                    if (lotNoise > 0.38f) {
-                        terrainHeightF = std::max(terrainHeightF, 12.0f + (t * (3.0f + (lotNoise * 5.0f))));
-                        ++stats.settlementColumnCount;
-                    }
-                }
-            }
-
-            sample.terrainHeight = std::clamp(static_cast<int>(std::round(terrainHeightF)), 1, Chunk::kSizeY - 6);
-            columns[toIndex(worldX, worldZ)] = sample;
-        }
-    }
-
-    for (int worldZ = worldMinZ; worldZ <= worldMaxZ; ++worldZ) {
-        for (int worldX = worldMinX; worldX <= worldMaxX; ++worldX) {
-            ColumnSample& sample = columns[toIndex(worldX, worldZ)];
-            const int west = columns[toIndex(std::max(worldX - 1, worldMinX), worldZ)].terrainHeight;
-            const int east = columns[toIndex(std::min(worldX + 1, worldMaxX), worldZ)].terrainHeight;
-            const int north = columns[toIndex(worldX, std::max(worldZ - 1, worldMinZ))].terrainHeight;
-            const int south = columns[toIndex(worldX, std::min(worldZ + 1, worldMaxZ))].terrainHeight;
-            sample.slope = static_cast<float>(std::max(std::abs(east - west), std::abs(south - north)));
-
-            const std::uint32_t surfaceHash = hashCoords(worldX, worldZ, 7u);
-            const float grassPatch = static_cast<float>((surfaceHash >> 8u) & 0xFFu) / 255.0f;
-            sample.supportsGrass =
-                sample.slope <= 2.0f &&
-                ((sample.biome == BiomeType::Forest) ||
-                 (sample.biome == BiomeType::Plains && grassPatch > 0.20f) ||
-                 (sample.biome == BiomeType::DryScrub && grassPatch > 0.72f) ||
-                 (sample.biome == BiomeType::RockyHighlands && sample.ruggedness < 0.55f && grassPatch > 0.84f));
-            sample.supportsDenseVegetation =
-                sample.supportsGrass &&
-                sample.slope <= 1.0f &&
-                (sample.biome == BiomeType::Forest ||
-                 (sample.biome == BiomeType::Plains && sample.moisture > 0.45f));
+            const ColumnSample west = sampleColumnAtWorld(worldX - 1, worldZ);
+            const ColumnSample east = sampleColumnAtWorld(worldX + 1, worldZ);
+            const ColumnSample north = sampleColumnAtWorld(worldX, worldZ - 1);
+            const ColumnSample south = sampleColumnAtWorld(worldX, worldZ + 1);
+            sample.slope = static_cast<float>(
+                std::max(
+                    std::abs(east.terrainHeight - west.terrainHeight),
+                    std::abs(south.terrainHeight - north.terrainHeight)
+                )
+            );
+            sample.supportsGrass = supportsGrassAtWorld(sample, worldX, worldZ);
+            sample.supportsDenseVegetation = supportsDenseVegetationAtWorld(sample);
 
             ++stats.biomeColumnCounts[static_cast<std::size_t>(sample.biome)];
             if (sample.supportsGrass) {
@@ -368,97 +413,66 @@ void ChunkGrid::initializeFlatWorld() {
             if (sample.supportsDenseVegetation) {
                 ++stats.denseVegetationColumnCount;
             }
-        }
-    }
 
-    for (Chunk& chunk : m_chunks) {
-        const int chunkX = chunk.chunkX();
-        const int chunkZ = chunk.chunkZ();
-        for (int z = 0; z < Chunk::kSizeZ; ++z) {
-            for (int x = 0; x < Chunk::kSizeX; ++x) {
-                const int worldX = (chunkX * Chunk::kSizeX) + x;
-                const int worldZ = (chunkZ * Chunk::kSizeZ) + z;
-                const ColumnSample& sample = columns[toIndex(worldX, worldZ)];
-                for (int y = 0; y <= sample.terrainHeight; ++y) {
-                    VoxelType voxelType = VoxelType::Stone;
-                    if (y <= sample.terrainHeight - 4) {
-                        voxelType = VoxelType::Stone;
-                    } else if (y < sample.terrainHeight) {
-                        voxelType = (sample.biome == BiomeType::RockyHighlands && sample.slope > 2.0f)
-                            ? VoxelType::Stone
-                            : VoxelType::Dirt;
-                    } else {
-                        if (sample.supportsGrass) {
-                            voxelType = VoxelType::Grass;
-                        } else if (sample.biome == BiomeType::RockyHighlands || sample.slope > 2.0f) {
-                            voxelType = VoxelType::Stone;
-                        } else {
-                            voxelType = VoxelType::Dirt;
-                        }
-                    }
-                    chunk.setVoxel(x, y, z, Voxel{voxelType});
+            for (int y = 0; y <= sample.terrainHeight; ++y) {
+                VoxelType voxelType = VoxelType::Stone;
+                if (y <= sample.terrainHeight - 4) {
+                    voxelType = VoxelType::Stone;
+                } else if (y < sample.terrainHeight) {
+                    voxelType = (sample.biome == BiomeType::RockyHighlands && sample.slope > 2.0f)
+                        ? VoxelType::Stone
+                        : VoxelType::Dirt;
+                } else if (sample.supportsGrass) {
+                    voxelType = VoxelType::Grass;
+                } else if (sample.biome == BiomeType::RockyHighlands || sample.slope > 2.0f) {
+                    voxelType = VoxelType::Stone;
+                } else {
+                    voxelType = VoxelType::Dirt;
                 }
+                chunk.setVoxel(localX, y, localZ, Voxel{voxelType});
             }
         }
     }
 
-    for (int worldZ = worldMinZ + 3; worldZ <= worldMaxZ - 3; ++worldZ) {
-        for (int worldX = worldMinX + 3; worldX <= worldMaxX - 3; ++worldX) {
-            const ColumnSample& sample = columns[toIndex(worldX, worldZ)];
-            if (!sample.supportsDenseVegetation || sample.terrainHeight >= Chunk::kSizeY - 8) {
+    for (int worldZ = worldMinZ - 3; worldZ <= worldMaxZ + 3; ++worldZ) {
+        for (int worldX = worldMinX - 3; worldX <= worldMaxX + 3; ++worldX) {
+            const ColumnSample sample = sampleColumnAtWorld(worldX, worldZ);
+            if (!shouldPlaceTreeAtWorld(worldX, worldZ, sample)) {
                 continue;
             }
-            const int spacing = (sample.biome == BiomeType::Forest) ? 5 : 7;
-            if ((worldX - worldMinX) % spacing != spacing / 2 || (worldZ - worldMinZ) % spacing != spacing / 2) {
-                continue;
-            }
-
-            const std::uint32_t treeHash = hashCoords(worldX, worldZ, 19u);
-            const float treeChance = static_cast<float>(treeHash & 0xFFu) / 255.0f;
-            const float threshold = (sample.biome == BiomeType::Forest) ? 0.34f : 0.20f;
-            if (treeChance < threshold) {
-                continue;
-            }
-
-            bool tooCloseToOtherTrees = false;
-            for (int dz = -spacing; dz <= spacing && !tooCloseToOtherTrees; dz += spacing) {
-                for (int dx = -spacing; dx <= spacing; dx += spacing) {
-                    if (dx == 0 && dz == 0) {
-                        continue;
-                    }
-                    const int neighborX = worldX + dx;
-                    const int neighborZ = worldZ + dz;
-                    if (neighborX < worldMinX || neighborX > worldMaxX || neighborZ < worldMinZ || neighborZ > worldMaxZ) {
-                        continue;
-                    }
-                    const std::uint32_t neighborHash = hashCoords(neighborX, neighborZ, 19u);
-                    const float neighborChance = static_cast<float>(neighborHash & 0xFFu) / 255.0f;
-                    if (neighborChance > treeChance && neighborChance >= threshold) {
-                        tooCloseToOtherTrees = true;
-                        break;
-                    }
-                }
-            }
-            if (tooCloseToOtherTrees) {
-                continue;
-            }
-
             const int baseY = sample.terrainHeight + 1;
-            stampTreeVariant(*this, worldX, baseY, worldZ, static_cast<int>((treeHash >> 9u) % 3u));
+            const std::uint32_t treeHash = hashCoords(worldX, worldZ, 19u);
+            stampTreeVariant(chunk, worldX, baseY, worldZ, static_cast<int>((treeHash >> 9u) % 3u));
             ++stats.treeCount;
         }
     }
 
-    VOX_LOGI("world") << "generated procedural world"
-                      << " biomes={"
+    VOX_LOGD("world") << "generated procedural chunk"
+                      << " chunk=(" << chunkX << "," << chunkY << "," << chunkZ << ")"
+                      << ", biomes={"
                       << biomeName(BiomeType::Plains) << ":" << stats.biomeColumnCounts[0]
                       << ", " << biomeName(BiomeType::Forest) << ":" << stats.biomeColumnCounts[1]
                       << ", " << biomeName(BiomeType::RockyHighlands) << ":" << stats.biomeColumnCounts[2]
                       << ", " << biomeName(BiomeType::DryScrub) << ":" << stats.biomeColumnCounts[3]
-                      << "}, grassyColumns=" << stats.grassyColumnCount
-                      << ", denseVegetationColumns=" << stats.denseVegetationColumnCount
-                      << ", trees=" << stats.treeCount
-                      << ", settlementColumns=" << stats.settlementColumnCount;
+                      << "}, trees=" << stats.treeCount;
+    return chunk;
+}
+
+void ChunkGrid::initializeFlatWorld() {
+    initializeEmptyWorld();
+    if (m_chunks.empty()) {
+        return;
+    }
+
+    std::size_t treeChunkCount = 0;
+    for (Chunk& chunk : m_chunks) {
+        chunk = buildProceduralChunk(chunk.chunkX(), chunk.chunkY(), chunk.chunkZ());
+        if (chunk.chunkY() == 0) {
+            ++treeChunkCount;
+        }
+    }
+
+    VOX_LOGI("world") << "generated procedural world chunks=" << treeChunkCount;
 }
 
 } // namespace voxelsprout::world

@@ -25,6 +25,7 @@ public:
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     VkPipeline previewAddPipeline = VK_NULL_HANDLE;
     VkPipeline previewRemovePipeline = VK_NULL_HANDLE;
+    VkPipeline previewFaceOutlinePipeline = VK_NULL_HANDLE;
     VkPipelineLayout voxelGiPipelineLayout = VK_NULL_HANDLE;
     VkPipeline voxelGiSurfacePipeline = VK_NULL_HANDLE;
     VkPipeline voxelGiSurfacePipelineRt = VK_NULL_HANDLE;
@@ -81,6 +82,10 @@ public:
         if (previewRemovePipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, previewRemovePipeline, nullptr);
             previewRemovePipeline = VK_NULL_HANDLE;
+        }
+        if (previewFaceOutlinePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, previewFaceOutlinePipeline, nullptr);
+            previewFaceOutlinePipeline = VK_NULL_HANDLE;
         }
         if (previewAddPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, previewAddPipeline, nullptr);

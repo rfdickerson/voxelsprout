@@ -617,16 +617,70 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         }
     }
 
+    struct RtChunkSceneMetadata {
+        int chunkX = 0;
+        int chunkY = 0;
+        int chunkZ = 0;
+        std::uint32_t vertexCount = 0;
+        std::uint32_t indexCount = 0;
+        bool geometryResident = false;
+    };
+
     std::vector<voxelsprout::world::PackedVoxelVertex> combinedVertices;
     std::vector<std::uint32_t> combinedIndices;
-    std::vector<RtVertex> rtChunkVertices;
-    std::vector<std::uint32_t> rtChunkIndices;
+    std::vector<RtChunkSceneRecord> previousRtChunkSceneRecords = std::move(m_rtChunkSceneRecords);
+    const bool previousChunkBlasesInUse = std::any_of(
+        previousRtChunkSceneRecords.begin(),
+        previousRtChunkSceneRecords.end(),
+        [](const RtChunkSceneRecord& record) { return record.blas.handle != VK_NULL_HANDLE; }
+    );
+    if (previousChunkBlasesInUse && m_graphicsQueue != VK_NULL_HANDLE) {
+        const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
+        if (waitResult != VK_SUCCESS) {
+            logVkFailure("vkQueueWaitIdle(chunkRtRetire)", waitResult);
+            m_rtChunkSceneRecords = std::move(previousRtChunkSceneRecords);
+            rollbackChunkDrawState();
+            return false;
+        }
+    }
+    auto destroyRtAs = [&](RtAccelerationStructure& accelerationStructure) {
+        if (accelerationStructure.handle != VK_NULL_HANDLE && m_destroyAccelerationStructureKhr != nullptr) {
+            m_destroyAccelerationStructureKhr(m_device, accelerationStructure.handle, nullptr);
+            accelerationStructure.handle = VK_NULL_HANDLE;
+        }
+        if (accelerationStructure.storageBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(accelerationStructure.storageBufferHandle);
+            accelerationStructure.storageBufferHandle = kInvalidBufferHandle;
+        }
+        accelerationStructure.deviceAddress = 0;
+        accelerationStructure.primitiveCount = 0;
+    };
+    std::vector<RtChunkSceneMetadata> previousRtChunkSceneMetadata;
+    previousRtChunkSceneMetadata.reserve(previousRtChunkSceneRecords.size());
+    for (RtChunkSceneRecord& previousRecord : previousRtChunkSceneRecords) {
+        previousRtChunkSceneMetadata.push_back(RtChunkSceneMetadata{
+            previousRecord.chunkX,
+            previousRecord.chunkY,
+            previousRecord.chunkZ,
+            previousRecord.vertexCount,
+            previousRecord.indexCount,
+            previousRecord.geometryResident
+        });
+        destroyRtAs(previousRecord.blas);
+        destroyRtGeometryBuffers(m_bufferAllocator, previousRecord.geometry);
+    }
+    m_rtChunkSceneRecords.resize(chunks.size());
+    m_rtDirtyChunkCount = 0;
     std::size_t uploadedVertexCount = 0;
     std::size_t uploadedIndexCount = 0;
 
     for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
         const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
         const voxelsprout::world::ChunkLodMeshes& chunkLodMeshes = m_chunkLodMeshCache[chunkArrayIndex];
+        RtChunkSceneRecord& rtChunkRecord = m_rtChunkSceneRecords[chunkArrayIndex];
+        rtChunkRecord.chunkX = chunk.chunkX();
+        rtChunkRecord.chunkY = chunk.chunkY();
+        rtChunkRecord.chunkZ = chunk.chunkZ();
 
         for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
             const voxelsprout::world::ChunkMeshData& chunkMesh = chunkLodMeshes.lodMeshes[lodIndex];
@@ -660,16 +714,24 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
             }
             if (lodIndex == 0u && m_rayTracingCapabilityProbe.rayTracingCoreReady) {
                 // RT shadows should trace against the highest-detail chunk mesh.
-                const std::uint32_t rtBaseVertex = static_cast<std::uint32_t>(rtChunkVertices.size());
-                rtChunkVertices.reserve(rtChunkVertices.size() + chunkMesh.vertices.size());
-                rtChunkIndices.reserve(rtChunkIndices.size() + chunkMesh.indices.size());
+                rtChunkRecord.vertexCount = static_cast<std::uint32_t>(chunkMesh.vertices.size());
+                rtChunkRecord.indexCount = static_cast<std::uint32_t>(chunkMesh.indices.size());
+                rtChunkRecord.geometryResident = !chunkMesh.vertices.empty() && !chunkMesh.indices.empty();
+                std::vector<RtVertex> rtChunkVertices;
+                rtChunkVertices.reserve(chunkMesh.vertices.size());
                 for (const voxelsprout::world::PackedVoxelVertex& vertex : chunkMesh.vertices) {
                     rtChunkVertices.push_back(
                         decodePackedVoxelVertexPosition(vertex.bits, drawRange.offsetX, drawRange.offsetY, drawRange.offsetZ)
                     );
                 }
-                for (const std::uint32_t index : chunkMesh.indices) {
-                    rtChunkIndices.push_back(index + rtBaseVertex);
+                if (!createRtGeometryBuffers(m_bufferAllocator, rtChunkVertices, chunkMesh.indices, rtChunkRecord.geometry)) {
+                    VOX_LOGE("render") << "chunk RT geometry buffer allocation failed for chunk ("
+                                       << rtChunkRecord.chunkX << ","
+                                       << rtChunkRecord.chunkY << ","
+                                       << rtChunkRecord.chunkZ << ")";
+                    rtChunkRecord.geometryResident = false;
+                    rtChunkRecord.vertexCount = 0;
+                    rtChunkRecord.indexCount = 0;
                 }
             }
 
@@ -679,6 +741,24 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
             drawRange.indexCount = static_cast<uint32_t>(chunkMesh.indices.size());
             uploadedVertexCount += chunkMesh.vertices.size();
             uploadedIndexCount += chunkMesh.indices.size();
+        }
+
+        const auto previousRecordIt = std::find_if(
+            previousRtChunkSceneMetadata.begin(),
+            previousRtChunkSceneMetadata.end(),
+            [&](const RtChunkSceneMetadata& record) {
+                return record.chunkX == rtChunkRecord.chunkX &&
+                       record.chunkY == rtChunkRecord.chunkY &&
+                       record.chunkZ == rtChunkRecord.chunkZ;
+            });
+        rtChunkRecord.dirty =
+            previousRecordIt == previousRtChunkSceneMetadata.end() ||
+            previousRecordIt->vertexCount != rtChunkRecord.vertexCount ||
+            previousRecordIt->indexCount != rtChunkRecord.indexCount ||
+            previousRecordIt->geometryResident != rtChunkRecord.geometryResident ||
+            fullRemesh;
+        if (rtChunkRecord.dirty) {
+            ++m_rtDirtyChunkCount;
         }
     }
     m_debugChunkMeshVertexCount = static_cast<std::uint32_t>(uploadedVertexCount);
@@ -941,13 +1021,9 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     newChunkVertexBufferHandle = kInvalidBufferHandle;
     newChunkIndexBufferHandle = kInvalidBufferHandle;
     if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
-        if (!createRtGeometryBuffers(m_bufferAllocator, rtChunkVertices, rtChunkIndices, m_rtChunkGeometry)) {
-            VOX_LOGE("render") << "chunk RT geometry buffer allocation failed";
-        } else {
-            markRayTracingSceneDirty();
-            if (rayTracingRuntimeReady() && !rebuildRayTracingScene()) {
-                VOX_LOGE("render") << "chunk RT scene rebuild failed";
-            }
+        markRayTracingSceneDirty();
+        if (rayTracingRuntimeReady() && !rebuildRayTracingScene()) {
+            VOX_LOGE("render") << "chunk RT scene rebuild failed";
         }
     }
 
@@ -957,6 +1033,8 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
                        << (m_chunkMeshingOptions.mode == voxelsprout::world::MeshingMode::Greedy ? "greedy" : "naive")
                        << ", vertices=" << uploadedVertexCount
                        << ", indices=" << uploadedIndexCount
+                       << ", rtResidentChunks=" << m_rtChunkSceneRecords.size()
+                       << ", rtDirtyChunks=" << m_rtDirtyChunkCount
                        << (hasChunkCopies
                                ? (", timelineValue=" + std::to_string(transferSignalValue))
                                : ", immediate=true")
@@ -975,7 +1053,7 @@ void RendererBackend::markRayTracingSceneDirty() {
 void RendererBackend::destroyRayTracingScene() {
     const bool hasExistingScene =
         m_rtTlas.handle != VK_NULL_HANDLE ||
-        m_rtChunkBlas.handle != VK_NULL_HANDLE ||
+        !m_rtChunkSceneRecords.empty() ||
         !m_rtMagicaBlases.empty();
     if (hasExistingScene && m_device != VK_NULL_HANDLE && m_graphicsQueue != VK_NULL_HANDLE) {
         const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
@@ -1001,12 +1079,14 @@ void RendererBackend::destroyRayTracingScene() {
         m_bufferAllocator.destroyBuffer(m_rtTlasInstanceBufferHandle);
         m_rtTlasInstanceBufferHandle = kInvalidBufferHandle;
     }
-    destroyAs(m_rtChunkBlas);
+    for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
+        destroyAs(chunkRecord.blas);
+        destroyRtGeometryBuffers(m_bufferAllocator, chunkRecord.geometry);
+    }
     for (RtAccelerationStructure& blas : m_rtMagicaBlases) {
         destroyAs(blas);
     }
     m_rtMagicaBlases.clear();
-    destroyRtGeometryBuffers(m_bufferAllocator, m_rtChunkGeometry);
     for (RtGeometryBuffers& geometry : m_rtMagicaGeometries) {
         destroyRtGeometryBuffers(m_bufferAllocator, geometry);
     }
@@ -1015,6 +1095,8 @@ void RendererBackend::destroyRayTracingScene() {
     m_rtSceneBuildCount = 0;
     m_rtBlasBuildCount = 0;
     m_rtTlasBuildCount = 0;
+    m_rtDirtyChunkCount = 0;
+    m_rtChunkSceneRecords.clear();
     refreshShadowStats();
 }
 
@@ -1025,7 +1107,7 @@ bool RendererBackend::rebuildRayTracingScene() {
     }
     const bool hasExistingScene =
         m_rtTlas.handle != VK_NULL_HANDLE ||
-        m_rtChunkBlas.handle != VK_NULL_HANDLE ||
+        !m_rtChunkSceneRecords.empty() ||
         !m_rtMagicaBlases.empty();
     if (hasExistingScene) {
         const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
@@ -1089,8 +1171,14 @@ bool RendererBackend::rebuildRayTracingScene() {
     };
 
     std::vector<std::pair<RtGeometryBuffers*, RtAccelerationStructure*>> buildGeometries;
-    if (m_rtChunkGeometry.vertexCount > 0 && m_rtChunkGeometry.indexCount > 0) {
-        buildGeometries.push_back({&m_rtChunkGeometry, &m_rtChunkBlas});
+    for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
+        if (!chunkRecord.geometryResident ||
+            chunkRecord.geometry.vertexCount == 0 ||
+            chunkRecord.geometry.indexCount == 0) {
+            destroyAs(chunkRecord.blas);
+            continue;
+        }
+        buildGeometries.push_back({&chunkRecord.geometry, &chunkRecord.blas});
     }
     if (m_rtMagicaBlases.size() > m_rtMagicaGeometries.size()) {
         for (std::size_t i = m_rtMagicaGeometries.size(); i < m_rtMagicaBlases.size(); ++i) {
@@ -1358,7 +1446,9 @@ bool RendererBackend::rebuildRayTracingScene() {
 
     if (!buildOk) {
         destroyAs(m_rtTlas);
-        destroyAs(m_rtChunkBlas);
+        for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
+            destroyAs(chunkRecord.blas);
+        }
         for (RtAccelerationStructure& blas : m_rtMagicaBlases) {
             destroyAs(blas);
         }
@@ -1374,6 +1464,8 @@ bool RendererBackend::rebuildRayTracingScene() {
     VOX_LOGI("render") << "ray tracing scene rebuilt: blas=" << m_rtBlasBuildCount
                        << ", tlas=" << m_rtTlasBuildCount
                        << ", instances=" << tlasInstances.size()
+                       << ", residentChunks=" << m_rtChunkSceneRecords.size()
+                       << ", dirtyChunks=" << m_rtDirtyChunkCount
                        << ", sceneBuilds=" << m_rtSceneBuildCount << "\n";
     return true;
 }

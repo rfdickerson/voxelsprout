@@ -76,6 +76,7 @@ constexpr float kGamepadTriggerPressedThreshold = 0.30f;
 constexpr float kGamepadMoveDeadzone = 0.18f;
 constexpr float kGamepadLookDeadzone = 0.14f;
 constexpr float kGamepadLookDegreesPerSecond = 160.0f;
+constexpr int kVoxelBreakClicksRequired = 2;
 constexpr const char* kWorldFilePath = "world.vxw";
 constexpr const char* kConfigFilePath = "voxel_factory_toy.cfg";
 constexpr const char* kMagicaCastlePath = "assets/magicka/castle.vox";
@@ -734,7 +735,7 @@ bool App::init() {
     } else if (worldLoadResult.initializedFallback) {
         const auto worldLoadMs = elapsedMs(worldLoadStart);
         VOX_LOGW("app") << "world file missing/invalid at " << std::filesystem::absolute(worldPath).string()
-                        << "; using empty world (press R to regenerate) in " << worldLoadMs << " ms";
+                        << "; starting procedural chunk streaming window in " << worldLoadMs << " ms";
     }
 
     const auto magicaStampStart = Clock::now();
@@ -753,6 +754,19 @@ bool App::init() {
         VOX_LOGW("app") << "release runtime missing one or more Magica assets; world stamp count is incomplete";
     }
     m_renderer.setVoxelBaseColorPalette(stampResult.baseColorPalette);
+
+    m_world.setStreamingConfig(voxelsprout::world::World::ChunkStreamingConfig{2, 2});
+    const voxelsprout::world::World::ChunkStreamingUpdate initialStreamingUpdate =
+        m_world.updateStreamingWindowForWorldPosition(m_camera.x, m_camera.z);
+    const voxelsprout::world::World::ChunkStreamingStats& initialStreamingStats = initialStreamingUpdate.stats;
+    VOX_LOGI("app") << "chunk streaming ready (center="
+                    << initialStreamingStats.centerChunkX << "," << initialStreamingStats.centerChunkZ
+                    << ", resident=" << initialStreamingStats.residentChunkCount
+                    << ", stored=" << initialStreamingStats.storedChunkCount
+                    << ", generated=" << initialStreamingUpdate.generatedChunkKeys.size()
+                    << ", radius=" << m_world.streamingConfig().radiusChunksX
+                    << "x" << m_world.streamingConfig().radiusChunksZ
+                    << ")";
 
     const auto clipmapStart = Clock::now();
     m_appliedClipmapConfig = m_renderer.clipmapQueryConfig();
@@ -843,6 +857,14 @@ void App::syncGameplayUiState() {
     m_renderer.setGameplayUiState(m_gameplayUiState);
 }
 
+void App::resetVoxelBreakProgress() {
+    m_voxelBreakTargetValid = false;
+    m_voxelBreakTargetX = 0;
+    m_voxelBreakTargetY = 0;
+    m_voxelBreakTargetZ = 0;
+    m_voxelBreakClicks = 0;
+}
+
 void App::assignInventoryItemToSelectedHotbar(voxelsprout::render::InventoryItemId itemId) {
     const std::size_t hotbarIndex = std::min<std::size_t>(
         m_gameplayUiState.selectedHotbarSlot,
@@ -876,6 +898,8 @@ void App::handleInventoryClick(float mouseX, float mouseY, float displayWidth, f
 }
 
 void App::update(float dt, float simulationAlpha) {
+    refreshStreamingWindow(false);
+
     const bool regeneratePressedThisFrame =
         !isAnyUiVisible() && m_input.regenerateWorldDown && !m_wasRegenerateWorldDown;
     m_wasRegenerateWorldDown = m_input.regenerateWorldDown;
@@ -884,6 +908,18 @@ void App::update(float dt, float simulationAlpha) {
     }
 
     const CameraRaycastResult raycast = raycastFromCamera();
+    if (m_voxelBreakTargetValid) {
+        const bool blockTargetStillValid =
+            !isAnyUiVisible() &&
+            raycast.hitSolid &&
+            raycast.hitDistance <= kBlockInteractMaxDistance &&
+            raycast.solidX == m_voxelBreakTargetX &&
+            raycast.solidY == m_voxelBreakTargetY &&
+            raycast.solidZ == m_voxelBreakTargetZ;
+        if (!blockTargetStillValid) {
+            resetVoxelBreakProgress();
+        }
+    }
 
     int windowWidth = 0;
     int windowHeight = 0;
@@ -910,8 +946,11 @@ void App::update(float dt, float simulationAlpha) {
 
     bool voxelChunkEdited = false;
     std::vector<std::size_t> editedChunkIndices;
-    if (placePressedThisFrame && tryPlaceVoxelFromCameraRay(editedChunkIndices)) {
-        voxelChunkEdited = true;
+    if (placePressedThisFrame) {
+        resetVoxelBreakProgress();
+        if (tryPlaceVoxelFromCameraRay(editedChunkIndices)) {
+            voxelChunkEdited = true;
+        }
     }
     if (removePressedThisFrame && tryRemoveVoxelFromCameraRay(editedChunkIndices)) {
         voxelChunkEdited = true;
@@ -986,7 +1025,6 @@ void App::update(float dt, float simulationAlpha) {
 
     voxelsprout::render::VoxelPreview preview{};
     if (!isAnyUiVisible()) {
-        const bool showRemovePreview = m_input.removeBlockDown;
         if (raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
             if (raycast.hasHitFaceNormal) {
                 auto normalToFaceId = [](int nx, int ny, int nz) -> uint32_t {
@@ -1002,29 +1040,24 @@ void App::update(float dt, float simulationAlpha) {
                 preview.faceY = raycast.solidY;
                 preview.faceZ = raycast.solidZ;
                 preview.faceId = normalToFaceId(raycast.hitFaceNormalX, raycast.hitFaceNormalY, raycast.hitFaceNormalZ);
+                preview.mode = m_input.removeBlockDown
+                    ? voxelsprout::render::VoxelPreview::Mode::Remove
+                    : voxelsprout::render::VoxelPreview::Mode::Add;
             }
 
-            if (showRemovePreview) {
-                preview.visible = true;
-                preview.mode = voxelsprout::render::VoxelPreview::Mode::Remove;
-                preview.x = raycast.solidX;
-                preview.y = raycast.solidY;
-                preview.z = raycast.solidZ;
-                preview.brushSize = 1;
-            } else {
+            if (!m_input.removeBlockDown) {
                 int targetX = 0;
                 int targetY = 0;
                 int targetZ = 0;
                 if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
                     if (isWorldVoxelInBounds(targetX, targetY, targetZ) &&
                         selectedPlaceVoxel().type != voxelsprout::world::VoxelType::Empty) {
-                        preview.visible = true;
-                        preview.mode = voxelsprout::render::VoxelPreview::Mode::Add;
-                        preview.x = targetX;
-                        preview.y = targetY;
-                        preview.z = targetZ;
-                        preview.brushSize = 1;
+                        // Face highlight is enough for placement; do not show a ghost voxel cube.
+                    } else {
+                        preview.faceVisible = false;
                     }
+                } else {
+                    preview.faceVisible = false;
                 }
             }
         }
@@ -2504,11 +2537,14 @@ bool App::applyVoxelEdit(
         return false;
     }
 
-    voxelsprout::world::Chunk& chunk = m_world.chunkGrid().chunks()[editedChunkIndex];
-    if (chunk.voxelAt(localX, localY, localZ).type == voxel.type) {
+    const voxelsprout::world::Voxel existingVoxel =
+        m_world.chunkGrid().chunks()[editedChunkIndex].voxelAt(localX, localY, localZ);
+    if (existingVoxel.type == voxel.type) {
         return false;
     }
-    chunk.setVoxel(localX, localY, localZ, voxel);
+    if (!m_world.setVoxelAtWorld(targetX, targetY, targetZ, voxel)) {
+        return false;
+    }
 
     auto appendUniqueChunkIndex = [&outDirtyChunkIndices](std::size_t chunkIndex) {
         if (std::find(outDirtyChunkIndices.begin(), outDirtyChunkIndices.end(), chunkIndex) != outDirtyChunkIndices.end()) {
@@ -2594,14 +2630,7 @@ bool App::isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTra
 
 void App::regenerateWorld() {
     m_world.regenerateFlatWorld();
-    const voxelsprout::world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
-    m_chunkClipmapIndex.setConfig(requestedClipmapConfig);
-    m_appliedClipmapConfig = requestedClipmapConfig;
-    m_hasAppliedClipmapConfig = true;
-    m_chunkClipmapIndex.rebuild(m_world.chunkGrid());
-    if (!m_renderer.updateChunkMesh(m_world.chunkGrid())) {
-        VOX_LOGE("app") << "world regenerate failed to update chunk meshes";
-    }
+    refreshStreamingWindow(true);
 
     const std::filesystem::path worldPath{kWorldFilePath};
     if (m_world.save(worldPath)) {
@@ -2611,6 +2640,45 @@ void App::regenerateWorld() {
     } else {
         VOX_LOGW("app") << "world regenerated, but failed to save " << worldPath.string();
     }
+}
+
+void App::refreshStreamingWindow(bool forceRendererUpload) {
+    const voxelsprout::world::World::ChunkStreamingUpdate streamingUpdate =
+        m_world.updateStreamingWindowForWorldPosition(m_camera.x, m_camera.z);
+    const voxelsprout::world::World::ChunkStreamingStats& streamingStats = streamingUpdate.stats;
+    if (!streamingStats.changed && !forceRendererUpload) {
+        return;
+    }
+
+    m_chunkClipmapIndex.setConfig(m_renderer.clipmapQueryConfig());
+    m_appliedClipmapConfig = m_renderer.clipmapQueryConfig();
+    m_hasAppliedClipmapConfig = true;
+    m_chunkClipmapIndex.rebuild(m_world.chunkGrid());
+    m_visibleChunkIndices.clear();
+    m_visibleChunkGraceFrames.assign(m_world.chunkGrid().chunkCount(), 0u);
+    m_previousVisibleChunkMask.assign(m_world.chunkGrid().chunkCount(), 0u);
+    m_currentVisibleChunkMask.assign(m_world.chunkGrid().chunkCount(), 0u);
+    m_directlyVisibleChunkMask.assign(m_world.chunkGrid().chunkCount(), 0u);
+
+    const bool uploadOk = streamingUpdate.requiresFullMeshUpload || forceRendererUpload
+        ? m_renderer.updateChunkMesh(m_world.chunkGrid())
+        : m_renderer.updateChunkMesh(
+            m_world.chunkGrid(),
+            std::span<const std::size_t>(streamingUpdate.residentChunkIndicesNeedingUpload)
+        );
+    if (!uploadOk) {
+        VOX_LOGE("app") << "streaming update failed to refresh resident chunk meshes";
+        return;
+    }
+
+    VOX_LOGI("app") << "chunk streaming update: center="
+                    << streamingStats.centerChunkX << "," << streamingStats.centerChunkZ
+                    << ", resident=" << streamingStats.residentChunkCount
+                    << "/" << streamingStats.storedChunkCount
+                    << ", generated=" << streamingUpdate.generatedChunkKeys.size()
+                    << ", entered=" << streamingStats.enteredChunkCount
+                    << ", exited=" << streamingStats.exitedChunkCount
+                    << ", meshUpload=" << (streamingUpdate.requiresFullMeshUpload || forceRendererUpload ? "full" : "partial");
 }
 
 bool App::tryPlaceVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices) {
@@ -2646,6 +2714,26 @@ bool App::tryRemoveVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkInd
     if (!raycast.hitSolid || raycast.hitDistance > kBlockInteractMaxDistance) {
         return false;
     }
+
+    const bool sameTarget =
+        m_voxelBreakTargetValid &&
+        m_voxelBreakTargetX == raycast.solidX &&
+        m_voxelBreakTargetY == raycast.solidY &&
+        m_voxelBreakTargetZ == raycast.solidZ;
+    if (!sameTarget) {
+        m_voxelBreakTargetValid = true;
+        m_voxelBreakTargetX = raycast.solidX;
+        m_voxelBreakTargetY = raycast.solidY;
+        m_voxelBreakTargetZ = raycast.solidZ;
+        m_voxelBreakClicks = 0;
+    }
+
+    ++m_voxelBreakClicks;
+    if (m_voxelBreakClicks < kVoxelBreakClicksRequired) {
+        return false;
+    }
+
+    resetVoxelBreakProgress();
 
     return applyVoxelEdit(
         raycast.solidX,

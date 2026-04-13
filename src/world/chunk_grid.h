@@ -29,12 +29,15 @@ public:
     bool loadFromBinaryFile(const std::filesystem::path& path);
     bool saveToBinaryFile(const std::filesystem::path& path) const;
     std::size_t chunkCount() const;
+    void setChunks(std::vector<Chunk> chunks);
     std::vector<Chunk>& chunks();
     const std::vector<Chunk>& chunks() const;
 
 private:
     std::vector<Chunk> m_chunks;
 };
+
+Chunk buildProceduralChunk(int chunkX, int chunkY, int chunkZ);
 
 inline void ChunkGrid::initializeEmptyWorld() {
     m_chunks.clear();
@@ -203,6 +206,10 @@ inline bool ChunkGrid::saveToBinaryFile(const std::filesystem::path& path) const
 
 inline std::size_t ChunkGrid::chunkCount() const {
     return m_chunks.size();
+}
+
+inline void ChunkGrid::setChunks(std::vector<Chunk> chunks) {
+    m_chunks = std::move(chunks);
 }
 
 inline std::vector<Chunk>& ChunkGrid::chunks() {

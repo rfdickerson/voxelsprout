@@ -1579,6 +1579,42 @@ bool RendererBackend::createGraphicsPipeline() {
         return false;
     }
 
+    VkPipelineInputAssemblyStateCreateInfo previewFaceOutlineInputAssembly = inputAssembly;
+    previewFaceOutlineInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+
+    VkPipelineRasterizationStateCreateInfo previewFaceOutlineRasterizer = rasterizer;
+    previewFaceOutlineRasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    previewFaceOutlineRasterizer.cullMode = VK_CULL_MODE_NONE;
+    previewFaceOutlineRasterizer.depthBiasEnable = VK_FALSE;
+
+    VkPipelineDepthStencilStateCreateInfo previewFaceOutlineDepthStencil = depthStencil;
+    previewFaceOutlineDepthStencil.depthWriteEnable = VK_FALSE;
+    previewFaceOutlineDepthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+
+    VkGraphicsPipelineCreateInfo previewFaceOutlinePipelineCreateInfo = pipelineCreateInfo;
+    previewFaceOutlinePipelineCreateInfo.pInputAssemblyState = &previewFaceOutlineInputAssembly;
+    previewFaceOutlinePipelineCreateInfo.pRasterizationState = &previewFaceOutlineRasterizer;
+    previewFaceOutlinePipelineCreateInfo.pDepthStencilState = &previewFaceOutlineDepthStencil;
+    previewFaceOutlinePipelineCreateInfo.pDynamicState = &previewDynamicState;
+
+    VkPipeline previewFaceOutlinePipeline = VK_NULL_HANDLE;
+    const VkResult previewFaceOutlinePipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &previewFaceOutlinePipelineCreateInfo,
+        nullptr,
+        &previewFaceOutlinePipeline
+    );
+    if (previewFaceOutlinePipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        destroySceneShaderModules();
+        logVkFailure("vkCreateGraphicsPipelines(previewFaceOutline)", previewFaceOutlinePipelineResult);
+        return false;
+    }
+
     VkPipelineShaderStageCreateInfo skyboxVertexShaderStage{};
     skyboxVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     skyboxVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -1631,6 +1667,7 @@ bool RendererBackend::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         destroySceneShaderModules();
         logVkFailure("vkCreateGraphicsPipelines(skybox)", skyboxPipelineResult);
         return false;
@@ -1714,6 +1751,7 @@ bool RendererBackend::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(toneMap)", toneMapPipelineResult);
         return false;
@@ -1734,6 +1772,7 @@ bool RendererBackend::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
         vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
         return false;
@@ -1815,6 +1854,7 @@ bool RendererBackend::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
         vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(shadow)", shadowPipelineResult);
@@ -1836,6 +1876,7 @@ bool RendererBackend::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
         vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
         return false;
@@ -1916,6 +1957,7 @@ bool RendererBackend::createGraphicsPipeline() {
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
         vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(pipeShadow)", pipeShadowPipelineResult);
@@ -2030,6 +2072,7 @@ bool RendererBackend::createGraphicsPipeline() {
         }
         vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
         vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
         vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(grassShadow)", grassShadowPipelineResult);
@@ -2067,6 +2110,9 @@ bool RendererBackend::createGraphicsPipeline() {
     if (m_previewRemovePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
     }
+    if (m_previewFaceOutlinePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_previewFaceOutlinePipeline, nullptr);
+    }
     m_pipeline = worldPipeline;
     m_pipelineRt = worldRtPipeline;
     m_skyboxPipeline = skyboxPipeline;
@@ -2076,6 +2122,7 @@ bool RendererBackend::createGraphicsPipeline() {
     m_tonemapPipeline = toneMapPipeline;
     m_previewAddPipeline = previewAddPipeline;
     m_previewRemovePipeline = previewRemovePipeline;
+    m_previewFaceOutlinePipeline = previewFaceOutlinePipeline;
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeline), "pipeline.world");
     if (m_pipelineRt != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipelineRt), "pipeline.world.rt");
@@ -2091,6 +2138,11 @@ bool RendererBackend::createGraphicsPipeline() {
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_tonemapPipeline), "pipeline.tonemap");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewAddPipeline), "pipeline.preview.add");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewRemovePipeline), "pipeline.preview.remove");
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_previewFaceOutlinePipeline),
+        "pipeline.preview.faceOutline"
+    );
     if (!createMagicaPipeline()) {
         VOX_LOGE("render") << "createGraphicsPipeline failed: createMagicaPipeline\n";
         return false;

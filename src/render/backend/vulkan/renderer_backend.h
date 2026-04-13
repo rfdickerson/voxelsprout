@@ -51,6 +51,18 @@ struct RtAccelerationStructure {
     std::uint32_t primitiveCount = 0;
 };
 
+struct RtChunkSceneRecord {
+    int chunkX = 0;
+    int chunkY = 0;
+    int chunkZ = 0;
+    RtGeometryBuffers geometry{};
+    RtAccelerationStructure blas{};
+    std::uint32_t vertexCount = 0;
+    std::uint32_t indexCount = 0;
+    bool geometryResident = false;
+    bool dirty = false;
+};
+
 class RendererBackend {
 public:
     struct ShadowDebugSettings {
@@ -91,32 +103,36 @@ public:
         float sunHaloIntensity = 22.0f;
         float sunDiskSize = 2.0f;
         float sunHazeFalloff = 0.35f;
-        float bloomThreshold = 0.75f;
-        float bloomSoftKnee = 0.5f;
-        float bloomBaseIntensity = 0.08f;
-        float bloomSunFacingBoost = 0.28f;
-        bool autoExposureEnabled = true;
-        float manualExposure = 1.00f;
-        float autoExposureKeyValue = 0.20f;
-        float autoExposureMin = 0.40f;
-        float autoExposureMax = 4.00f;
-        float autoExposureAdaptUp = 2.20f;
-        float autoExposureAdaptDown = 0.85f;
-        float autoExposureLowPercentile = 0.35f;
-        float autoExposureHighPercentile = 0.95f;
+        float bloomThreshold = 1.15f;
+        float bloomSoftKnee = 0.25f;
+        float bloomBaseIntensity = 0.045f;
+        float bloomSunFacingBoost = 0.18f;
+        bool autoExposureEnabled = false;
+        float manualExposure = 0.40f;
+        float autoExposureKeyValue = 0.16f;
+        float autoExposureMin = 0.70f;
+        float autoExposureMax = 1.75f;
+        float autoExposureAdaptUp = 1.60f;
+        float autoExposureAdaptDown = 0.65f;
+        float autoExposureLowPercentile = 0.55f;
+        float autoExposureHighPercentile = 0.90f;
         int autoExposureUpdateIntervalFrames = 2;
-        float colorGradingWhiteBalanceR = 1.02f;
+        int postColorLookPreset = 2;
+        float colorGradingWhiteBalanceR = 1.03f;
         float colorGradingWhiteBalanceG = 1.00f;
-        float colorGradingWhiteBalanceB = 0.98f;
-        float colorGradingContrast = 1.08f;
-        float colorGradingSaturation = 1.05f;
-        float colorGradingVibrance = 0.10f;
-        float colorGradingShadowTintR = 0.02f;
-        float colorGradingShadowTintG = 0.03f;
-        float colorGradingShadowTintB = 0.05f;
-        float colorGradingHighlightTintR = 0.03f;
-        float colorGradingHighlightTintG = 0.02f;
-        float colorGradingHighlightTintB = 0.01f;
+        float colorGradingWhiteBalanceB = 0.97f;
+        float colorGradingContrast = 1.14f;
+        float colorGradingSaturation = 1.16f;
+        float colorGradingVibrance = 0.24f;
+        float colorGradingMidtoneContrast = 1.12f;
+        float colorGradingShadowDensity = 1.08f;
+        float colorGradingHighlightRolloff = 0.90f;
+        float colorGradingShadowTintR = -0.01f;
+        float colorGradingShadowTintG = 0.01f;
+        float colorGradingShadowTintB = 0.06f;
+        float colorGradingHighlightTintR = 0.06f;
+        float colorGradingHighlightTintG = 0.03f;
+        float colorGradingHighlightTintB = -0.01f;
         float volumetricFogDensity = 0.0045f;
         float volumetricFogHeightFalloff = 0.075f;
         float volumetricFogBaseHeight = 6.0f;
@@ -130,7 +146,7 @@ public:
     struct VoxelGiDebugSettings {
         float bounceStrength = 1.45f;
         float diffusionSoftness = 0.45f;
-        VoxelGiSurfaceMode surfaceMode = VoxelGiSurfaceMode::RtSurface;
+        VoxelGiSurfaceMode surfaceMode = VoxelGiSurfaceMode::RestirSurface;
         int rtSurfaceSampleCount = 2;
         float rtSurfaceBiasScale = 1.0f;
         int restirCandidateCount = 4;
@@ -703,7 +719,7 @@ private:
     float m_voxelGiPreviousRtSurfaceSampleCount = 0.0f;
     float m_voxelGiPreviousRtSurfaceBiasScale = 0.0f;
     float m_voxelGiPreviousRtSunAngularRadiusDegrees = 0.0f;
-    VoxelGiSurfaceMode m_voxelGiPreviousSurfaceMode = VoxelGiSurfaceMode::RtSurface;
+    VoxelGiSurfaceMode m_voxelGiPreviousSurfaceMode = VoxelGiSurfaceMode::RestirSurface;
     float m_voxelGiPreviousRestirCandidateCount = 0.0f;
     bool m_voxelGiPreviousRestirTemporalReuseEnabled = false;
     bool m_voxelGiPreviousRestirSpatialReuseEnabled = false;
@@ -771,6 +787,7 @@ private:
     VkPipeline& m_ssaoBlurPipeline = m_pipelineManager.ssaoBlurPipeline;
     VkPipeline& m_previewAddPipeline = m_pipelineManager.previewAddPipeline;
     VkPipeline& m_previewRemovePipeline = m_pipelineManager.previewRemovePipeline;
+    VkPipeline& m_previewFaceOutlinePipeline = m_pipelineManager.previewFaceOutlinePipeline;
     VkPipelineLayout& m_voxelGiPipelineLayout = m_pipelineManager.voxelGiPipelineLayout;
     VkPipeline& m_voxelGiSurfacePipeline = m_pipelineManager.voxelGiSurfacePipeline;
     VkPipeline& m_voxelGiSurfacePipelineRt = m_pipelineManager.voxelGiSurfacePipelineRt;
@@ -852,9 +869,8 @@ private:
     std::vector<voxelsprout::world::ChunkLodMeshes> m_chunkLodMeshCache;
     std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
-    RtGeometryBuffers m_rtChunkGeometry{};
+    std::vector<RtChunkSceneRecord> m_rtChunkSceneRecords;
     std::vector<RtGeometryBuffers> m_rtMagicaGeometries;
-    RtAccelerationStructure m_rtChunkBlas{};
     std::vector<RtAccelerationStructure> m_rtMagicaBlases;
     RtAccelerationStructure m_rtTlas{};
     BufferHandle m_rtTlasInstanceBufferHandle = kInvalidBufferHandle;
@@ -862,6 +878,7 @@ private:
     std::uint32_t m_rtSceneBuildCount = 0;
     std::uint32_t m_rtBlasBuildCount = 0;
     std::uint32_t m_rtTlasBuildCount = 0;
+    std::uint32_t m_rtDirtyChunkCount = 0;
     bool m_chunkLodMeshCacheValid = false;
     voxelsprout::world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;
@@ -946,6 +963,9 @@ private:
     float m_debugGpuSsaoBlurTimeMs = 0.0f;
     float m_debugGpuMainTimeMs = 0.0f;
     float m_debugGpuPostTimeMs = 0.0f;
+    float m_debugResolvedExposure = 1.0f;
+    float m_debugTargetExposure = 1.0f;
+    float m_debugAverageSceneLuminance = 1.0f;
     float m_debugCpuGiOccupancyBuildMs = 0.0f;
     float m_debugDisplayRefreshMs = 0.0f;
     float m_debugDisplayPresentMarginMs = 0.0f;

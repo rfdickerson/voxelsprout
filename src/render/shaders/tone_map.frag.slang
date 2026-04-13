@@ -41,6 +41,33 @@ float3 applyContrastCurve(float3 color, float contrast)
     return saturate(((color - 0.5) * c) + 0.5);
 }
 
+float3 applyMidtoneContrast(float3 color, float contrast)
+{
+    const float c = clamp(contrast, 0.80, 1.40);
+    const float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
+    const float midMask = 1.0 - smoothstep(0.0, 0.60, abs(luma - 0.50) * 2.0);
+    return saturate(color + ((color - 0.5) * ((c - 1.0) * midMask)));
+}
+
+float3 applyShadowDensity(float3 color, float density)
+{
+    const float d = clamp(density, 0.70, 1.40);
+    const float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
+    const float shadowMask = 1.0 - smoothstep(0.10, 0.55, luma);
+    const float shadowScale = lerp(1.0, d, shadowMask);
+    return saturate(color * shadowScale);
+}
+
+float3 applyHighlightRolloff(float3 color, float rolloff)
+{
+    const float r = clamp(rolloff, 0.70, 1.10);
+    const float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
+    const float highlightMask = smoothstep(0.55, 1.0, luma);
+    const float compression = max(1.0 - r, 0.0);
+    const float3 compressed = color / (1.0 + (color * (compression * 1.8)));
+    return saturate(lerp(color, compressed, highlightMask));
+}
+
 float3 applyVibrance(float3 color, float vibrance)
 {
     const float v = clamp(vibrance, -1.0, 1.0);
@@ -49,6 +76,17 @@ float3 applyVibrance(float3 color, float vibrance)
     const float valley = min(color.x, min(color.y, color.z));
     const float saturation = peak - valley;
     const float boost = 1.0 + (v * (1.0 - saturation));
+    return saturate(lerp(float3(luma, luma, luma), color, boost));
+}
+
+float3 preserveBrightColor(float3 color, float amount)
+{
+    const float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
+    const float peak = max(color.x, max(color.y, color.z));
+    const float valley = min(color.x, min(color.y, color.z));
+    const float saturation = peak - valley;
+    const float highlightMask = smoothstep(0.55, 0.95, luma);
+    const float boost = 1.0 + (amount * (1.0 - saturation) * highlightMask);
     return saturate(lerp(float3(luma, luma, luma), color, boost));
 }
 
@@ -435,8 +473,12 @@ float4 main(FragmentInput input) : SV_Target0
         camera.colorGrading0.xyz
     );
     toneMapped = applyContrastCurve(toneMapped, camera.colorGrading0.w);
+    toneMapped = applyMidtoneContrast(toneMapped, camera.colorGrading1.z);
+    toneMapped = applyShadowDensity(toneMapped, camera.colorGrading1.w);
     toneMapped = applySaturation(toneMapped, camera.colorGrading1.x);
     toneMapped = applyVibrance(toneMapped, camera.colorGrading1.y);
+    toneMapped = applyHighlightRolloff(toneMapped, camera.colorGrading2.w);
+    toneMapped = preserveBrightColor(toneMapped, 0.35 * (2.0 - camera.colorGrading2.w));
     toneMapped = applySplitTone(
         toneMapped,
         camera.colorGrading2.xyz,
