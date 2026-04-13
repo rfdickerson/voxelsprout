@@ -1,6 +1,7 @@
 #include "render/backend/vulkan/renderer_backend.h"
 
 #include <GLFW/glfw3.h>
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +14,23 @@
 namespace voxelsprout::render {
 
 #include "render/renderer_shared.h"
+
+namespace {
+
+std::size_t selectChunkLodIndex(
+    const voxelsprout::world::Chunk& chunk,
+    int cameraChunkX,
+    int cameraChunkY,
+    int cameraChunkZ
+) {
+    (void)chunk;
+    (void)cameraChunkX;
+    (void)cameraChunkY;
+    (void)cameraChunkZ;
+    return 0u;
+}
+
+} // namespace
 
 RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
     const std::vector<voxelsprout::world::Chunk>& chunks,
@@ -57,47 +75,39 @@ RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
             return;
         }
         const voxelsprout::world::Chunk& drawChunk = chunks[chunkArrayIndex];
-        const bool allowDetailLods =
-            drawChunk.chunkX() == cameraChunkX &&
-            drawChunk.chunkY() == cameraChunkY &&
-            drawChunk.chunkZ() == cameraChunkZ;
-        for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
-            if (lodIndex > 0 && !allowDetailLods) {
-                continue;
-            }
-            const std::size_t drawRangeIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
-            if (drawRangeIndex >= m_chunkDrawRanges.size()) {
-                continue;
-            }
-            const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
-            if (drawRange.indexCount == 0 || !chunkDrawBuffersReady) {
-                continue;
-            }
+        const std::size_t lodIndex = selectChunkLodIndex(drawChunk, cameraChunkX, cameraChunkY, cameraChunkZ);
+        const std::size_t drawRangeIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
+        if (drawRangeIndex >= m_chunkDrawRanges.size()) {
+            return;
+        }
+        const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
+        if (drawRange.indexCount == 0 || !chunkDrawBuffersReady) {
+            return;
+        }
 
-            const uint32_t instanceIndex = static_cast<uint32_t>(outInstanceData.size());
-            ChunkInstanceData instance{};
-            instance.chunkOffset[0] = drawRange.offsetX;
-            instance.chunkOffset[1] = drawRange.offsetY;
-            instance.chunkOffset[2] = drawRange.offsetZ;
-            instance.chunkOffset[3] = 0.0f;
-            outInstanceData.push_back(instance);
+        const uint32_t instanceIndex = static_cast<uint32_t>(outInstanceData.size());
+        ChunkInstanceData instance{};
+        instance.chunkOffset[0] = drawRange.offsetX;
+        instance.chunkOffset[1] = drawRange.offsetY;
+        instance.chunkOffset[2] = drawRange.offsetZ;
+        instance.chunkOffset[3] = 0.0f;
+        outInstanceData.push_back(instance);
 
-            VkDrawIndexedIndirectCommand indirectCommand{};
-            indirectCommand.indexCount = drawRange.indexCount;
-            indirectCommand.instanceCount = 1;
-            indirectCommand.firstIndex = drawRange.firstIndex;
-            indirectCommand.vertexOffset = drawRange.vertexOffset;
-            indirectCommand.firstInstance = instanceIndex;
-            outIndirectCommands.push_back(indirectCommand);
+        VkDrawIndexedIndirectCommand indirectCommand{};
+        indirectCommand.indexCount = drawRange.indexCount;
+        indirectCommand.instanceCount = 1;
+        indirectCommand.firstIndex = drawRange.firstIndex;
+        indirectCommand.vertexOffset = drawRange.vertexOffset;
+        indirectCommand.firstInstance = instanceIndex;
+        outIndirectCommands.push_back(indirectCommand);
 
-            if (countVisibleLodStats) {
-                if (lodIndex == 0) {
-                    ++m_debugDrawnLod0Ranges;
-                } else if (lodIndex == 1) {
-                    ++m_debugDrawnLod1Ranges;
-                } else {
-                    ++m_debugDrawnLod2Ranges;
-                }
+        if (countVisibleLodStats) {
+            if (lodIndex == 0) {
+                ++m_debugDrawnLod0Ranges;
+            } else if (lodIndex == 1) {
+                ++m_debugDrawnLod1Ranges;
+            } else {
+                ++m_debugDrawnLod2Ranges;
             }
         }
     };
@@ -117,42 +127,34 @@ RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
             return;
         }
         const voxelsprout::world::Chunk& drawChunk = chunks[chunkArrayIndex];
-        const bool allowDetailLods =
-            drawChunk.chunkX() == cameraChunkX &&
-            drawChunk.chunkY() == cameraChunkY &&
-            drawChunk.chunkZ() == cameraChunkZ;
-        for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
-            if (lodIndex > 0 && !allowDetailLods) {
-                continue;
-            }
-            const std::size_t drawRangeIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
-            if (drawRangeIndex >= m_chunkDrawRanges.size()) {
-                continue;
-            }
-            const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
-            if (drawRange.indexCount == 0 || !chunkDrawBuffersReady) {
-                continue;
-            }
+        const std::size_t lodIndex = selectChunkLodIndex(drawChunk, cameraChunkX, cameraChunkY, cameraChunkZ);
+        const std::size_t drawRangeIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
+        if (drawRangeIndex >= m_chunkDrawRanges.size()) {
+            return;
+        }
+        const ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeIndex];
+        if (drawRange.indexCount == 0 || !chunkDrawBuffersReady) {
+            return;
+        }
 
-            const uint32_t instanceIndex = static_cast<uint32_t>(shadowChunkInstanceData.size());
-            ChunkInstanceData instance{};
-            instance.chunkOffset[0] = drawRange.offsetX;
-            instance.chunkOffset[1] = drawRange.offsetY;
-            instance.chunkOffset[2] = drawRange.offsetZ;
-            instance.chunkOffset[3] = 0.0f;
-            shadowChunkInstanceData.push_back(instance);
+        const uint32_t instanceIndex = static_cast<uint32_t>(shadowChunkInstanceData.size());
+        ChunkInstanceData instance{};
+        instance.chunkOffset[0] = drawRange.offsetX;
+        instance.chunkOffset[1] = drawRange.offsetY;
+        instance.chunkOffset[2] = drawRange.offsetZ;
+        instance.chunkOffset[3] = 0.0f;
+        shadowChunkInstanceData.push_back(instance);
 
-            VkDrawIndexedIndirectCommand indirectCommand{};
-            indirectCommand.indexCount = drawRange.indexCount;
-            indirectCommand.instanceCount = 1;
-            indirectCommand.firstIndex = drawRange.firstIndex;
-            indirectCommand.vertexOffset = drawRange.vertexOffset;
-            indirectCommand.firstInstance = instanceIndex;
-            shadowChunkIndirectCommands.push_back(indirectCommand);
-            for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-                if ((cascadeMask & (1u << cascadeIndex)) != 0u) {
-                    shadowCascadeIndirectCommands[cascadeIndex].push_back(indirectCommand);
-                }
+        VkDrawIndexedIndirectCommand indirectCommand{};
+        indirectCommand.indexCount = drawRange.indexCount;
+        indirectCommand.instanceCount = 1;
+        indirectCommand.firstIndex = drawRange.firstIndex;
+        indirectCommand.vertexOffset = drawRange.vertexOffset;
+        indirectCommand.firstInstance = instanceIndex;
+        shadowChunkIndirectCommands.push_back(indirectCommand);
+        for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            if ((cascadeMask & (1u << cascadeIndex)) != 0u) {
+                shadowCascadeIndirectCommands[cascadeIndex].push_back(indirectCommand);
             }
         }
     };

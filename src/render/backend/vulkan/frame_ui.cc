@@ -613,6 +613,8 @@ void RendererBackend::buildFrameStatsUi() {
     }
     ImGui::Text("Chunk Mesh Vert/Idx: %u / %u", m_debugChunkMeshVertexCount, m_debugChunkMeshIndexCount);
     ImGui::Text("Last Chunk Remesh: %.2f ms (%u)", m_debugChunkLastRemeshMs, m_debugChunkLastRemeshedChunkCount);
+    ImGui::Text("Chunk Remesh Pending/Batch: %u / %u", m_debugChunkPendingRemeshCount, m_debugChunkRemeshBatchCount);
+    ImGui::Text("RT Active Chunks: %u", m_debugRtActiveChunkCount);
     ImGui::Text("Greedy Reduction vs Naive: %.1f%%", m_debugChunkLastRemeshReductionPercent);
     const bool hasFrameArenaMetrics =
         m_debugFrameArenaUploadBytes > 0 ||
@@ -681,7 +683,7 @@ void RendererBackend::buildMeshingDebugUi() {
             m_chunkMeshingOptions.mode = nextMode;
             m_chunkLodMeshCacheValid = false;
             m_chunkMeshRebuildRequested = true;
-            m_pendingChunkRemeshIndices.clear();
+            m_pendingChunkRemeshKeys.clear();
             VOX_LOGI("render") << "chunk meshing mode changed to "
                                << (nextMode == voxelsprout::world::MeshingMode::Greedy ? "Greedy" : "Naive")
                                << ", scheduling full remesh";
@@ -709,6 +711,8 @@ void RendererBackend::buildMeshingDebugUi() {
 
     ImGui::Text("Chunk Mesh Vert/Idx: %u / %u", m_debugChunkMeshVertexCount, m_debugChunkMeshIndexCount);
     ImGui::Text("Last Chunk Remesh: %.2f ms (%u)", m_debugChunkLastRemeshMs, m_debugChunkLastRemeshedChunkCount);
+    ImGui::Text("Chunk Remesh Pending/Batch: %u / %u", m_debugChunkPendingRemeshCount, m_debugChunkRemeshBatchCount);
+    ImGui::Text("RT Active Chunks: %u", m_debugRtActiveChunkCount);
     ImGui::Text("Greedy Reduction vs Naive: %.1f%%", m_debugChunkLastRemeshReductionPercent);
     ImGui::End();
 }

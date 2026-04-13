@@ -225,6 +225,43 @@ void appendVoxelFace(
     mesh.indices.push_back(baseVertex + 3);
 }
 
+void appendVoxelFaceFromAoSignature(
+    ChunkMeshData& mesh,
+    int x,
+    int y,
+    int z,
+    std::uint32_t faceId,
+    std::uint32_t material,
+    std::uint32_t baseColorIndex,
+    std::uint32_t lodLevel,
+    std::uint16_t aoSignature
+) {
+    const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
+    for (std::uint32_t corner = 0; corner < 4u; ++corner) {
+        const std::uint32_t ao = (aoSignature >> (corner * 4u)) & PackedVoxelVertex::kMask4;
+        PackedVoxelVertex vertex{};
+        vertex.bits = PackedVoxelVertex::pack(
+            static_cast<std::uint32_t>(x),
+            static_cast<std::uint32_t>(y),
+            static_cast<std::uint32_t>(z),
+            faceId,
+            corner,
+            ao,
+            material,
+            baseColorIndex,
+            lodLevel
+        );
+        mesh.vertices.push_back(vertex);
+    }
+
+    mesh.indices.push_back(baseVertex + 0u);
+    mesh.indices.push_back(baseVertex + 1u);
+    mesh.indices.push_back(baseVertex + 2u);
+    mesh.indices.push_back(baseVertex + 0u);
+    mesh.indices.push_back(baseVertex + 2u);
+    mesh.indices.push_back(baseVertex + 3u);
+}
+
 constexpr std::uint32_t kEmptyMaskKey = 0xFFFFFFFFu;
 
 void faceSliceDimensions(std::uint32_t faceId, int& outSliceCount, int& outUCount, int& outVCount) {
@@ -333,6 +370,128 @@ std::uint16_t faceCornerAoSignature(
     for (std::uint32_t corner = 0; corner < 4u; ++corner) {
         const std::uint32_t ao = cornerAoLevel(chunk, x, y, z, faceId, corner) & PackedVoxelVertex::kMask4;
         signature |= static_cast<std::uint16_t>(ao << (corner * 4u));
+    }
+    return signature;
+}
+
+struct CoarseVoxelCell {
+    bool solid = false;
+    std::uint8_t material = 0u;
+    std::uint8_t baseColorIndex = 0u;
+};
+
+std::size_t coarseVoxelIndex(std::uint32_t resolution, int x, int y, int z) {
+    return static_cast<std::size_t>(x + (y * static_cast<int>(resolution)) + (z * static_cast<int>(resolution * resolution)));
+}
+
+std::vector<CoarseVoxelCell> buildCoarseVoxelCells(const Chunk& chunk, std::uint32_t cellSize) {
+    const std::uint32_t resolution = static_cast<std::uint32_t>(Chunk::kSizeX) / cellSize;
+    std::vector<CoarseVoxelCell> cells(static_cast<std::size_t>(resolution * resolution * resolution));
+    for (std::uint32_t coarseZ = 0; coarseZ < resolution; ++coarseZ) {
+        for (std::uint32_t coarseY = 0; coarseY < resolution; ++coarseY) {
+            for (std::uint32_t coarseX = 0; coarseX < resolution; ++coarseX) {
+                std::array<std::uint16_t, 8> materialCounts{};
+                std::array<std::uint16_t, 8> baseColorCounts{};
+                bool foundSolid = false;
+                for (std::uint32_t localZ = 0; localZ < cellSize; ++localZ) {
+                    for (std::uint32_t localY = 0; localY < cellSize; ++localY) {
+                        for (std::uint32_t localX = 0; localX < cellSize; ++localX) {
+                            const int worldX = static_cast<int>((coarseX * cellSize) + localX);
+                            const int worldY = static_cast<int>((coarseY * cellSize) + localY);
+                            const int worldZ = static_cast<int>((coarseZ * cellSize) + localZ);
+                            const Voxel voxel = chunk.voxelAt(worldX, worldY, worldZ);
+                            if (voxel.type == VoxelType::Empty) {
+                                continue;
+                            }
+                            foundSolid = true;
+                            const std::uint8_t material = materialForVoxel(voxel);
+                            const std::uint8_t baseColorIndex = packedBaseColorIndexForVoxel(voxel);
+                            if (material < materialCounts.size()) {
+                                ++materialCounts[material];
+                            }
+                            if (baseColorIndex < baseColorCounts.size()) {
+                                ++baseColorCounts[baseColorIndex];
+                            }
+                        }
+                    }
+                }
+                if (!foundSolid) {
+                    continue;
+                }
+                std::uint8_t dominantMaterial = 0u;
+                std::uint16_t dominantMaterialCount = 0u;
+                for (std::uint8_t material = 0u; material < materialCounts.size(); ++material) {
+                    if (materialCounts[material] > dominantMaterialCount) {
+                        dominantMaterialCount = materialCounts[material];
+                        dominantMaterial = material;
+                    }
+                }
+                std::uint8_t dominantBaseColorIndex = 0u;
+                std::uint16_t dominantBaseColorCount = 0u;
+                for (std::uint8_t baseColorIndex = 0u; baseColorIndex < baseColorCounts.size(); ++baseColorIndex) {
+                    if (baseColorCounts[baseColorIndex] > dominantBaseColorCount) {
+                        dominantBaseColorCount = baseColorCounts[baseColorIndex];
+                        dominantBaseColorIndex = baseColorIndex;
+                    }
+                }
+                CoarseVoxelCell& cell = cells[coarseVoxelIndex(resolution, static_cast<int>(coarseX), static_cast<int>(coarseY), static_cast<int>(coarseZ))];
+                cell.solid = true;
+                cell.material = dominantMaterial;
+                cell.baseColorIndex = dominantBaseColorIndex;
+            }
+        }
+    }
+    return cells;
+}
+
+bool coarseCellSolid(const std::vector<CoarseVoxelCell>& cells, std::uint32_t resolution, int x, int y, int z) {
+    if (x < 0 || x >= static_cast<int>(resolution) ||
+        y < 0 || y >= static_cast<int>(resolution) ||
+        z < 0 || z >= static_cast<int>(resolution)) {
+        return false;
+    }
+    return cells[coarseVoxelIndex(resolution, x, y, z)].solid;
+}
+
+std::uint16_t faceCornerAoSignatureCoarse(
+    const std::vector<CoarseVoxelCell>& cells,
+    std::uint32_t resolution,
+    int x,
+    int y,
+    int z,
+    std::uint32_t faceId
+) {
+    std::uint16_t signature = 0u;
+    const FaceNeighbor& face = kFaceNeighbors[faceId];
+    for (std::uint32_t corner = 0; corner < 4u; ++corner) {
+        const CornerAxes& cornerAxes = kFaceCornerAxes[faceId][corner];
+        int ux = 0;
+        int uy = 0;
+        int uz = 0;
+        int vx = 0;
+        int vy = 0;
+        int vz = 0;
+        faceAoAxes(faceId, ux, uy, uz, vx, vy, vz);
+
+        const int uSign = ((ux != 0 ? cornerAxes.x : (uy != 0 ? cornerAxes.y : cornerAxes.z)) != 0) ? +1 : -1;
+        const int vSign = ((vx != 0 ? cornerAxes.x : (vy != 0 ? cornerAxes.y : cornerAxes.z)) != 0) ? +1 : -1;
+        const int baseX = x + face.nx;
+        const int baseY = y + face.ny;
+        const int baseZ = z + face.nz;
+        const bool sideA = coarseCellSolid(cells, resolution, baseX + (ux * uSign), baseY + (uy * uSign), baseZ + (uz * uSign));
+        const bool sideB = coarseCellSolid(cells, resolution, baseX + (vx * vSign), baseY + (vy * vSign), baseZ + (vz * vSign));
+        const bool cornerSolid = coarseCellSolid(
+            cells,
+            resolution,
+            baseX + (ux * uSign) + (vx * vSign),
+            baseY + (uy * uSign) + (vy * vSign),
+            baseZ + (uz * uSign) + (vz * vSign)
+        );
+        const std::uint32_t ao =
+            (sideA && sideB)
+                ? 0u
+                : (15u - static_cast<std::uint32_t>((sideA ? 5 : 0) + (sideB ? 5 : 0) + (cornerSolid ? 5 : 0)));
+        signature |= static_cast<std::uint16_t>((ao & PackedVoxelVertex::kMask4) << (corner * 4u));
     }
     return signature;
 }
@@ -550,6 +709,8 @@ ChunkLodMeshes buildChunkLodMeshesGreedy(const Chunk& chunk) {
         }
     }
 
+    meshes.lodMeshes[1] = meshes.lodMeshes[0];
+    meshes.lodMeshes[2] = meshes.lodMeshes[0];
     return meshes;
 }
 
@@ -605,6 +766,8 @@ ChunkLodMeshes buildChunkLodMeshesNaive(const Chunk& chunk) {
         }
     }
 
+    meshes.lodMeshes[1] = meshes.lodMeshes[0];
+    meshes.lodMeshes[2] = meshes.lodMeshes[0];
     return meshes;
 }
 
@@ -620,25 +783,7 @@ ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk, MeshingOptions options) {
 
 ChunkMeshData buildChunkMesh(const Chunk& chunk, MeshingOptions options) {
     const ChunkLodMeshes lodMeshes = buildChunkLodMeshes(chunk, options);
-    ChunkMeshData merged{};
-    std::size_t vertexTotal = 0;
-    std::size_t indexTotal = 0;
-    for (const ChunkMeshData& mesh : lodMeshes.lodMeshes) {
-        vertexTotal += mesh.vertices.size();
-        indexTotal += mesh.indices.size();
-    }
-    merged.vertices.reserve(vertexTotal);
-    merged.indices.reserve(indexTotal);
-
-    for (const ChunkMeshData& mesh : lodMeshes.lodMeshes) {
-        const std::uint32_t baseVertex = static_cast<std::uint32_t>(merged.vertices.size());
-        merged.vertices.insert(merged.vertices.end(), mesh.vertices.begin(), mesh.vertices.end());
-        for (const std::uint32_t index : mesh.indices) {
-            merged.indices.push_back(baseVertex + index);
-        }
-    }
-
-    return merged;
+    return lodMeshes.lodMeshes[0];
 }
 
 ChunkMeshData buildSingleChunkMesh(const ChunkGrid& chunkGrid, MeshingOptions options) {

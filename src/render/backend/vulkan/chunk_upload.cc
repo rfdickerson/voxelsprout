@@ -269,7 +269,7 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
     }
     (void)chunkGrid;
     m_chunkMeshRebuildRequested = true;
-    m_pendingChunkRemeshIndices.clear();
+    m_pendingChunkRemeshKeys.clear();
     m_voxelGiWorldDirty = true;
     ++m_voxelGiWorldVersion;
     m_voxelGiOccupancyFullRebuildInProgress = true;
@@ -290,9 +290,10 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
     if (m_chunkMeshRebuildRequested) {
         return true;
     }
-    if (std::find(m_pendingChunkRemeshIndices.begin(), m_pendingChunkRemeshIndices.end(), chunkIndex) ==
-        m_pendingChunkRemeshIndices.end()) {
-        m_pendingChunkRemeshIndices.push_back(chunkIndex);
+    const ChunkResidentKey remeshKey = chunkResidentKeyForChunk(chunkGrid.chunks()[chunkIndex]);
+    if (std::find(m_pendingChunkRemeshKeys.begin(), m_pendingChunkRemeshKeys.end(), remeshKey) ==
+        m_pendingChunkRemeshKeys.end()) {
+        m_pendingChunkRemeshKeys.push_back(remeshKey);
     }
     if (!m_voxelGiOccupancyFullRebuildInProgress &&
         std::find(m_voxelGiDirtyChunkIndices.begin(), m_voxelGiDirtyChunkIndices.end(), chunkIndex) ==
@@ -319,9 +320,10 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
         if (chunkIndex >= chunkGrid.chunks().size()) {
             return false;
         }
-        if (std::find(m_pendingChunkRemeshIndices.begin(), m_pendingChunkRemeshIndices.end(), chunkIndex) ==
-            m_pendingChunkRemeshIndices.end()) {
-            m_pendingChunkRemeshIndices.push_back(chunkIndex);
+        const ChunkResidentKey remeshKey = chunkResidentKeyForChunk(chunkGrid.chunks()[chunkIndex]);
+        if (std::find(m_pendingChunkRemeshKeys.begin(), m_pendingChunkRemeshKeys.end(), remeshKey) ==
+            m_pendingChunkRemeshKeys.end()) {
+            m_pendingChunkRemeshKeys.push_back(remeshKey);
         }
         if (!m_voxelGiOccupancyFullRebuildInProgress &&
             std::find(m_voxelGiDirtyChunkIndices.begin(), m_voxelGiDirtyChunkIndices.end(), chunkIndex) ==
@@ -377,6 +379,22 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     const std::vector<voxelsprout::world::ChunkLodMeshes> previousChunkLodMeshCache = std::move(m_chunkLodMeshCache);
     const std::vector<std::vector<GrassBillboardInstance>> previousChunkGrassInstanceCache = std::move(m_chunkGrassInstanceCache);
     std::vector<RtChunkSceneRecord> previousRtChunkSceneRecords = std::move(m_rtChunkSceneRecords);
+    int previousResidentCenterChunkX = 0;
+    int previousResidentCenterChunkZ = 0;
+    if (!previousResidentKeys.empty()) {
+        int previousMinChunkX = std::numeric_limits<int>::max();
+        int previousMaxChunkX = std::numeric_limits<int>::min();
+        int previousMinChunkZ = std::numeric_limits<int>::max();
+        int previousMaxChunkZ = std::numeric_limits<int>::min();
+        for (const ChunkResidentKey& key : previousResidentKeys) {
+            previousMinChunkX = std::min(previousMinChunkX, key.chunkX);
+            previousMaxChunkX = std::max(previousMaxChunkX, key.chunkX);
+            previousMinChunkZ = std::min(previousMinChunkZ, key.chunkZ);
+            previousMaxChunkZ = std::max(previousMaxChunkZ, key.chunkZ);
+        }
+        previousResidentCenterChunkX = (previousMinChunkX + previousMaxChunkX) / 2;
+        previousResidentCenterChunkZ = (previousMinChunkZ + previousMaxChunkZ) / 2;
+    }
 
     m_chunkResidentKeys.assign(chunks.size(), ChunkResidentKey{});
     m_chunkLodMeshCache.assign(chunks.size(), voxelsprout::world::ChunkLodMeshes{});
@@ -454,8 +472,11 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         const int grassDistanceX = std::abs(chunk.chunkX() - residentCenterChunkX);
         const int grassDistanceZ = std::abs(chunk.chunkZ() - residentCenterChunkZ);
         std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
+        const bool previouslyGrassActive = !grassInstances.empty();
         grassInstances.clear();
-        if (grassDistanceX > kGrassActiveChunkRadius || grassDistanceZ > kGrassActiveChunkRadius) {
+        const int grassActiveRadius =
+            previouslyGrassActive ? kGrassRetainedChunkRadius : kGrassActiveChunkRadius;
+        if (grassDistanceX > grassActiveRadius || grassDistanceZ > grassActiveRadius) {
             return;
         }
         grassInstances.reserve(448);
@@ -633,7 +654,21 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     } else if (residentSetChanged) {
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
             if (remeshMask[chunkArrayIndex] == 0u) {
-                rebuildGrassInstancesForChunk(chunkArrayIndex);
+                const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
+                const std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
+                const bool previouslyGrassActive = !grassInstances.empty();
+                const bool currentlyGrassActive =
+                    std::abs(chunk.chunkX() - residentCenterChunkX) <=
+                        (previouslyGrassActive ? kGrassRetainedChunkRadius : kGrassActiveChunkRadius) &&
+                    std::abs(chunk.chunkZ() - residentCenterChunkZ) <=
+                        (previouslyGrassActive ? kGrassRetainedChunkRadius : kGrassActiveChunkRadius);
+                const bool previouslyWithinRetainedRadius =
+                    std::abs(chunk.chunkX() - previousResidentCenterChunkX) <= kGrassRetainedChunkRadius &&
+                    std::abs(chunk.chunkZ() - previousResidentCenterChunkZ) <= kGrassRetainedChunkRadius;
+                if (previouslyGrassActive != currentlyGrassActive ||
+                    (currentlyGrassActive && !previouslyWithinRetainedRadius)) {
+                    rebuildGrassInstancesForChunk(chunkArrayIndex);
+                }
             }
         }
     }
@@ -721,6 +756,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         accelerationStructure.primitiveCount = 0;
     };
     m_rtDirtyChunkCount = 0;
+    m_debugRtActiveChunkCount = 0;
     std::size_t uploadedVertexCount = 0;
     std::size_t uploadedIndexCount = 0;
 
@@ -729,14 +765,19 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         const voxelsprout::world::ChunkLodMeshes& chunkLodMeshes = m_chunkLodMeshCache[chunkArrayIndex];
         RtChunkSceneRecord& rtChunkRecord = m_rtChunkSceneRecords[chunkArrayIndex];
         const bool remeshChunk = fullRemesh || remeshMask[chunkArrayIndex] != 0u;
-        const bool rtEligible =
-            std::abs(chunk.chunkX() - residentCenterChunkX) <= kRtActiveChunkRadius &&
-            std::abs(chunk.chunkZ() - residentCenterChunkZ) <= kRtActiveChunkRadius;
         const bool previousRtEligible = rtChunkRecord.rtEligible;
+        const int rtActiveRadius =
+            previousRtEligible ? kRtRetainedChunkRadius : kRtActiveChunkRadius;
+        const bool rtEligible =
+            std::abs(chunk.chunkX() - residentCenterChunkX) <= rtActiveRadius &&
+            std::abs(chunk.chunkZ() - residentCenterChunkZ) <= rtActiveRadius;
         rtChunkRecord.chunkX = chunk.chunkX();
         rtChunkRecord.chunkY = chunk.chunkY();
         rtChunkRecord.chunkZ = chunk.chunkZ();
         rtChunkRecord.rtEligible = rtEligible;
+        if (rtEligible) {
+            ++m_debugRtActiveChunkCount;
+        }
 
         for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
             const voxelsprout::world::ChunkMeshData& chunkMesh = chunkLodMeshes.lodMeshes[lodIndex];
@@ -1086,9 +1127,6 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         (m_rtDirtyChunkCount > 0 || m_rtTlas.handle == VK_NULL_HANDLE);
     if (rtSceneNeedsRefresh) {
         markRayTracingSceneDirty();
-        if (rayTracingRuntimeReady() && !rebuildRayTracingScene()) {
-            VOX_LOGE("render") << "chunk RT scene rebuild failed";
-        }
     }
 
     VOX_LOGD("render") << "chunk upload queued (ranges=" << m_chunkDrawRanges.size()

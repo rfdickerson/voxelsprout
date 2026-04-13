@@ -31,7 +31,7 @@ struct MeshingOptions {
 // - bits 20..23: AO level (0 darkest .. 15 brightest)
 // - bits 24..26: material id (0..7)
 // - bits 27..29: base color index (0..7)
-// - bits 30..31: lod level (0=8x, 1=4x, 2=1x)
+// - bits 30..31: lod level (0=4x, 1=2x, 2=1x)
 //
 // This format also supports future greedy meshing and instancing:
 // - Greedy meshing can add width/height in reserved or expanded fields.
