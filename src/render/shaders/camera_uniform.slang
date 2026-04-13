@@ -25,6 +25,8 @@ public struct CameraUniform
     public float4 skyConfig3;
     public float4 skyConfig4;
     public float4 skyConfig5;
+    public float4 voxelGiRestirConfig0;
+    public float4 voxelGiRestirConfig1;
     public float4 colorGrading0;
     public float4 colorGrading1;
     public float4 colorGrading2;

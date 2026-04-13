@@ -308,6 +308,10 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuShadowTimeMs = durationMs(kGpuTimestampQueryShadowStart, kGpuTimestampQueryShadowEnd);
     m_debugGpuGiOccupancyTimeMs = durationMs(kGpuTimestampQueryGiOccupancyStart, kGpuTimestampQueryGiOccupancyEnd);
     m_debugGpuGiSurfaceTimeMs = durationMs(kGpuTimestampQueryGiSurfaceStart, kGpuTimestampQueryGiSurfaceEnd);
+    m_debugGpuGiSurfaceCandidateTimeMs = durationMs(kGpuTimestampQueryGiSurfaceCandidateStart, kGpuTimestampQueryGiSurfaceCandidateEnd);
+    m_debugGpuGiSurfaceTemporalTimeMs = durationMs(kGpuTimestampQueryGiSurfaceTemporalStart, kGpuTimestampQueryGiSurfaceTemporalEnd);
+    m_debugGpuGiSurfaceSpatialTimeMs = durationMs(kGpuTimestampQueryGiSurfaceSpatialStart, kGpuTimestampQueryGiSurfaceSpatialEnd);
+    m_debugGpuGiSurfaceResolveTimeMs = durationMs(kGpuTimestampQueryGiSurfaceResolveStart, kGpuTimestampQueryGiSurfaceResolveEnd);
     m_debugGpuGiInjectTimeMs = durationMs(kGpuTimestampQueryGiInjectStart, kGpuTimestampQueryGiInjectEnd);
     m_debugGpuGiPropagateTimeMs = durationMs(kGpuTimestampQueryGiPropagateStart, kGpuTimestampQueryGiPropagateEnd);
     m_debugGpuAutoExposureTimeMs = durationMs(kGpuTimestampQueryAutoExposureStart, kGpuTimestampQueryAutoExposureEnd);

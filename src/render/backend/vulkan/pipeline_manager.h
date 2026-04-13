@@ -28,6 +28,10 @@ public:
     VkPipelineLayout voxelGiPipelineLayout = VK_NULL_HANDLE;
     VkPipeline voxelGiSurfacePipeline = VK_NULL_HANDLE;
     VkPipeline voxelGiSurfacePipelineRt = VK_NULL_HANDLE;
+    VkPipeline voxelGiRestirCandidatePipeline = VK_NULL_HANDLE;
+    VkPipeline voxelGiRestirTemporalPipeline = VK_NULL_HANDLE;
+    VkPipeline voxelGiRestirSpatialPipeline = VK_NULL_HANDLE;
+    VkPipeline voxelGiRestirResolvePipeline = VK_NULL_HANDLE;
     VkPipeline voxelGiOccupancyPipeline = VK_NULL_HANDLE;
     VkPipeline voxelGiSkyExposurePipeline = VK_NULL_HANDLE;
     VkPipeline voxelGiInjectPipeline = VK_NULL_HANDLE;
@@ -128,6 +132,22 @@ public:
         if (voxelGiSurfacePipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, voxelGiSurfacePipelineRt, nullptr);
             voxelGiSurfacePipelineRt = VK_NULL_HANDLE;
+        }
+        if (voxelGiRestirCandidatePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, voxelGiRestirCandidatePipeline, nullptr);
+            voxelGiRestirCandidatePipeline = VK_NULL_HANDLE;
+        }
+        if (voxelGiRestirTemporalPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, voxelGiRestirTemporalPipeline, nullptr);
+            voxelGiRestirTemporalPipeline = VK_NULL_HANDLE;
+        }
+        if (voxelGiRestirSpatialPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, voxelGiRestirSpatialPipeline, nullptr);
+            voxelGiRestirSpatialPipeline = VK_NULL_HANDLE;
+        }
+        if (voxelGiRestirResolvePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, voxelGiRestirResolvePipeline, nullptr);
+            voxelGiRestirResolvePipeline = VK_NULL_HANDLE;
         }
         if (voxelGiInjectPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, voxelGiInjectPipeline, nullptr);

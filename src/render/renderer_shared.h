@@ -101,6 +101,8 @@ struct alignas(16) CameraUniform {
     float skyConfig3[4];
     float skyConfig4[4];
     float skyConfig5[4];
+    float voxelGiRestirConfig0[4];
+    float voxelGiRestirConfig1[4];
     float colorGrading0[4];
     float colorGrading1[4];
     float colorGrading2[4];

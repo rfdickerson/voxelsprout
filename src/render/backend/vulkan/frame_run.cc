@@ -610,6 +610,16 @@ void RendererBackend::renderFrame(
     mvpUniform.shadowConfig4[1] = std::clamp(m_shadowDebugSettings.rtSunAngularRadiusDegrees, 0.0f, 1.0f);
     mvpUniform.shadowConfig4[2] = static_cast<float>(std::clamp(m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2));
     mvpUniform.shadowConfig4[3] = std::clamp(m_voxelGiDebugSettings.rtSurfaceBiasScale, 0.25f, 4.0f);
+    mvpUniform.voxelGiRestirConfig0[0] = static_cast<float>(static_cast<int>(m_voxelGiDebugSettings.surfaceMode));
+    mvpUniform.voxelGiRestirConfig0[1] =
+        static_cast<float>(std::clamp(m_voxelGiDebugSettings.restirCandidateCount, 1, 8));
+    mvpUniform.voxelGiRestirConfig0[2] = m_voxelGiDebugSettings.restirEnableTemporalReuse ? 1.0f : 0.0f;
+    mvpUniform.voxelGiRestirConfig0[3] = m_voxelGiRestirHistoryValid ? 1.0f : 0.0f;
+    mvpUniform.voxelGiRestirConfig1[0] = m_voxelGiDebugSettings.restirEnableSpatialReuse ? 1.0f : 0.0f;
+    mvpUniform.voxelGiRestirConfig1[1] =
+        static_cast<float>(std::clamp(m_voxelGiDebugSettings.restirSpatialRadius, 1, 2));
+    mvpUniform.voxelGiRestirConfig1[2] = 4.0f;
+    mvpUniform.voxelGiRestirConfig1[3] = 0.0f;
 
     // Reuse origin XYZ for fixed GI rebalance + debug mode to avoid enlarging camera UBO.
     mvpUniform.shadowVoxelGridOrigin[0] = kVoxelGiAmbientRebalanceStrength;
@@ -750,15 +760,42 @@ void RendererBackend::renderFrame(
     const bool voxelGiNeedsOccupancyUpload = voxelGiFlags.needsOccupancyUpload;
     const bool voxelGiRtSurfaceSettingsChanged =
         !m_voxelGiHasPreviousFrameState ||
-        m_voxelGiDebugSettings.enableRtSurfaceTracing != m_voxelGiPreviousRtSurfaceTracingEnabled ||
+        (m_voxelGiDebugSettings.surfaceMode != VoxelGiSurfaceMode::Legacy) != m_voxelGiPreviousRtSurfaceTracingEnabled ||
         std::abs(static_cast<float>(m_voxelGiDebugSettings.rtSurfaceSampleCount) - m_voxelGiPreviousRtSurfaceSampleCount) >
             kVoxelGiTuningChangeThreshold ||
         std::abs(m_voxelGiDebugSettings.rtSurfaceBiasScale - m_voxelGiPreviousRtSurfaceBiasScale) >
             kVoxelGiTuningChangeThreshold ||
         std::abs(m_shadowDebugSettings.rtSunAngularRadiusDegrees - m_voxelGiPreviousRtSunAngularRadiusDegrees) >
             kVoxelGiTuningChangeThreshold;
+    const bool voxelGiRestirSettingsChanged =
+        !m_voxelGiHasPreviousFrameState ||
+        m_voxelGiDebugSettings.surfaceMode != m_voxelGiPreviousSurfaceMode ||
+        std::abs(static_cast<float>(m_voxelGiDebugSettings.restirCandidateCount) - m_voxelGiPreviousRestirCandidateCount) >
+            kVoxelGiTuningChangeThreshold ||
+        m_voxelGiDebugSettings.restirEnableTemporalReuse != m_voxelGiPreviousRestirTemporalReuseEnabled ||
+        m_voxelGiDebugSettings.restirEnableSpatialReuse != m_voxelGiPreviousRestirSpatialReuseEnabled ||
+        std::abs(static_cast<float>(m_voxelGiDebugSettings.restirSpatialRadius) - m_voxelGiPreviousRestirSpatialRadius) >
+            kVoxelGiTuningChangeThreshold;
+    if (m_voxelGiDebugSettings.restirHistoryResetRequested) {
+        m_voxelGiRestirHistoryValid = false;
+        m_voxelGiRestirHistoryResetReason = "manual_reset";
+        m_voxelGiDebugSettings.restirHistoryResetRequested = false;
+    }
+    if (m_voxelGiWorldDirty) {
+        m_voxelGiRestirHistoryValid = false;
+        m_voxelGiRestirHistoryResetReason = "world_dirty";
+    } else if (!m_voxelGiHasPreviousFrameState) {
+        m_voxelGiRestirHistoryValid = false;
+        m_voxelGiRestirHistoryResetReason = "startup";
+    } else if (voxelGiRestirSettingsChanged) {
+        m_voxelGiRestirHistoryValid = false;
+        m_voxelGiRestirHistoryResetReason = "restir_settings";
+    } else if (voxelGiFlags.needsComputeUpdate && voxelGiFlags.needsOccupancyUpload) {
+        m_voxelGiRestirHistoryValid = false;
+        m_voxelGiRestirHistoryResetReason = "occupancy_rebuild";
+    }
     const bool voxelGiNeedsComputeUpdate =
-        voxelGiFlags.needsComputeUpdate || voxelGiRtSurfaceSettingsChanged || !m_voxelGiInitialized;
+        voxelGiFlags.needsComputeUpdate || voxelGiRtSurfaceSettingsChanged || voxelGiRestirSettingsChanged || !m_voxelGiInitialized;
     m_voxelGiHasPreviousFrameState = true;
     m_voxelGiPreviousGridOrigin = {voxelGiOriginX, voxelGiOriginY, voxelGiOriginZ};
     m_voxelGiPreviousSunDirection = {sunDirection.x, sunDirection.y, sunDirection.z};
@@ -769,10 +806,15 @@ void RendererBackend::renderFrame(
     }
     m_voxelGiPreviousBounceStrength = m_voxelGiDebugSettings.bounceStrength;
     m_voxelGiPreviousDiffusionSoftness = m_voxelGiDebugSettings.diffusionSoftness;
-    m_voxelGiPreviousRtSurfaceTracingEnabled = m_voxelGiDebugSettings.enableRtSurfaceTracing;
+    m_voxelGiPreviousRtSurfaceTracingEnabled = m_voxelGiDebugSettings.surfaceMode != VoxelGiSurfaceMode::Legacy;
     m_voxelGiPreviousRtSurfaceSampleCount = static_cast<float>(m_voxelGiDebugSettings.rtSurfaceSampleCount);
     m_voxelGiPreviousRtSurfaceBiasScale = m_voxelGiDebugSettings.rtSurfaceBiasScale;
     m_voxelGiPreviousRtSunAngularRadiusDegrees = m_shadowDebugSettings.rtSunAngularRadiusDegrees;
+    m_voxelGiPreviousSurfaceMode = m_voxelGiDebugSettings.surfaceMode;
+    m_voxelGiPreviousRestirCandidateCount = static_cast<float>(m_voxelGiDebugSettings.restirCandidateCount);
+    m_voxelGiPreviousRestirTemporalReuseEnabled = m_voxelGiDebugSettings.restirEnableTemporalReuse;
+    m_voxelGiPreviousRestirSpatialReuseEnabled = m_voxelGiDebugSettings.restirEnableSpatialReuse;
+    m_voxelGiPreviousRestirSpatialRadius = static_cast<float>(m_voxelGiDebugSettings.restirSpatialRadius);
     mvpUniform.voxelGiGridOriginCellSize[0] = voxelGiOriginX;
     mvpUniform.voxelGiGridOriginCellSize[1] = voxelGiOriginY;
     mvpUniform.voxelGiGridOriginCellSize[2] = voxelGiOriginZ;
@@ -1167,6 +1209,7 @@ void RendererBackend::renderFrame(
 
     bool wroteVoxelGiTimestamps = false;
     m_voxelGiRtSurfaceActiveThisFrame = false;
+    m_voxelGiRestirActiveThisFrame = false;
     bool wroteAutoExposureTimestamps = false;
     bool wroteSunShaftTimestamps = false;
     const bool voxelGiSurfaceFacesReady = std::all_of(
@@ -1339,30 +1382,56 @@ void RendererBackend::renderFrame(
         writeGpuTimestampBottom(kGpuTimestampQueryGiOccupancyEnd);
         writeGpuTimestampTop(kGpuTimestampQueryGiSurfaceStart);
         writeGpuTimestampBottom(kGpuTimestampQueryGiSurfaceEnd);
+        writeGpuTimestampTop(kGpuTimestampQueryGiSurfaceCandidateStart);
+        writeGpuTimestampBottom(kGpuTimestampQueryGiSurfaceCandidateEnd);
+        writeGpuTimestampTop(kGpuTimestampQueryGiSurfaceTemporalStart);
+        writeGpuTimestampBottom(kGpuTimestampQueryGiSurfaceTemporalEnd);
+        writeGpuTimestampTop(kGpuTimestampQueryGiSurfaceSpatialStart);
+        writeGpuTimestampBottom(kGpuTimestampQueryGiSurfaceSpatialEnd);
+        writeGpuTimestampTop(kGpuTimestampQueryGiSurfaceResolveStart);
+        writeGpuTimestampBottom(kGpuTimestampQueryGiSurfaceResolveEnd);
         writeGpuTimestampTop(kGpuTimestampQueryGiInjectStart);
         writeGpuTimestampBottom(kGpuTimestampQueryGiInjectEnd);
         writeGpuTimestampTop(kGpuTimestampQueryGiPropagateStart);
         writeGpuTimestampBottom(kGpuTimestampQueryGiPropagateEnd);
     }
+    const bool voxelGiRtSurfaceRequested = m_voxelGiDebugSettings.surfaceMode != VoxelGiSurfaceMode::Legacy;
     const bool voxelGiRtSurfaceCanRun =
         m_voxelGiComputeAvailable &&
-        m_voxelGiDebugSettings.enableRtSurfaceTracing &&
+        voxelGiRtSurfaceRequested &&
         m_rayTracingRuntimeEnabled &&
         m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE &&
         m_rtTlas.handle != VK_NULL_HANDLE;
-    const bool voxelGiRtSurfaceRequested = m_voxelGiDebugSettings.enableRtSurfaceTracing;
-    if (!m_voxelGiRtSurfaceLastLoggedValid ||
-        m_voxelGiRtSurfaceLastLoggedRequested != voxelGiRtSurfaceRequested ||
-        m_voxelGiRtSurfaceLastLoggedReady != voxelGiRtSurfaceCanRun) {
-        VOX_LOGI("render") << "voxel GI RT surface: requested="
+    const bool voxelGiRestirRequested = m_voxelGiDebugSettings.surfaceMode == VoxelGiSurfaceMode::RestirSurface;
+    const bool voxelGiRestirCanRun =
+        m_voxelGiComputeAvailable &&
+        voxelGiRestirRequested &&
+        m_rayTracingRuntimeEnabled &&
+        m_voxelGiRestirReady &&
+        m_rtTlas.handle != VK_NULL_HANDLE;
+    if (!m_voxelGiSurfaceLastLoggedValid ||
+        m_voxelGiSurfaceLastLoggedRequestedRt != voxelGiRtSurfaceRequested ||
+        m_voxelGiSurfaceLastLoggedRtReady != voxelGiRtSurfaceCanRun ||
+        m_voxelGiSurfaceLastLoggedRequestedRestir != voxelGiRestirRequested ||
+        m_voxelGiSurfaceLastLoggedRestirReady != voxelGiRestirCanRun) {
+        VOX_LOGI("render") << "voxel GI surface mode: rtRequested="
                            << (voxelGiRtSurfaceRequested ? "yes" : "no")
+                           << ", restirRequested=" << (voxelGiRestirRequested ? "yes" : "no")
                            << ", compute=" << (m_voxelGiComputeAvailable ? "yes" : "no")
-                           << ", ready=" << (voxelGiRtSurfaceCanRun ? "yes" : "no")
+                           << ", rtReady=" << (voxelGiRtSurfaceCanRun ? "yes" : "no")
+                           << ", restirReady=" << (voxelGiRestirCanRun ? "yes" : "no")
                            << ", tlas=" << (m_rtTlas.handle != VK_NULL_HANDLE ? "yes" : "no")
-                           << ", rtPipeline=" << (m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE ? "yes" : "no");
-        m_voxelGiRtSurfaceLastLoggedRequested = voxelGiRtSurfaceRequested;
-        m_voxelGiRtSurfaceLastLoggedReady = voxelGiRtSurfaceCanRun;
-        m_voxelGiRtSurfaceLastLoggedValid = true;
+                           << ", rtPipeline=" << (m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE ? "yes" : "no")
+                           << ", restirPipelines="
+                           << ((m_voxelGiRestirCandidatePipeline != VK_NULL_HANDLE &&
+                                m_voxelGiRestirTemporalPipeline != VK_NULL_HANDLE &&
+                                m_voxelGiRestirSpatialPipeline != VK_NULL_HANDLE &&
+                                m_voxelGiRestirResolvePipeline != VK_NULL_HANDLE) ? "yes" : "no");
+        m_voxelGiSurfaceLastLoggedRequestedRt = voxelGiRtSurfaceRequested;
+        m_voxelGiSurfaceLastLoggedRequestedRestir = voxelGiRestirRequested;
+        m_voxelGiSurfaceLastLoggedRtReady = voxelGiRtSurfaceCanRun;
+        m_voxelGiSurfaceLastLoggedRestirReady = voxelGiRestirCanRun;
+        m_voxelGiSurfaceLastLoggedValid = true;
     }
 
     const VkExtent2D aoExtent = {

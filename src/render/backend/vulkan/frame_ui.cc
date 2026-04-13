@@ -387,12 +387,31 @@ void RendererBackend::buildFrameStatsUi() {
             m_rtTlasBuildCount
         );
         ImGui::Text(
-            "GI RT Surface: %s / active=%s (%d samp, bias %.2f)",
+            "GI Surface Mode: %s",
+            m_voxelGiDebugSettings.surfaceMode == VoxelGiSurfaceMode::Legacy
+                ? "legacy"
+                : (m_voxelGiDebugSettings.surfaceMode == VoxelGiSurfaceMode::RtSurface ? "rt_surface" : "restir_surface")
+        );
+        ImGui::Text(
+            "GI RT Surface: %s / active=%s",
             m_voxelGiRtSurfaceReady ? "ready" : "fallback",
-            m_voxelGiRtSurfaceActiveThisFrame ? "yes" : "no",
+            m_voxelGiRtSurfaceActiveThisFrame ? "yes" : "no"
+        );
+        ImGui::Text(
+            "GI ReSTIR: %s / active=%s (%d cand, temporal=%s, spatial=%s, radius=%d)",
+            m_voxelGiRestirReady ? "ready" : "fallback",
+            m_voxelGiRestirActiveThisFrame ? "yes" : "no",
+            std::clamp(m_voxelGiDebugSettings.restirCandidateCount, 1, 8),
+            m_voxelGiDebugSettings.restirEnableTemporalReuse ? "yes" : "no",
+            m_voxelGiDebugSettings.restirEnableSpatialReuse ? "yes" : "no",
+            std::clamp(m_voxelGiDebugSettings.restirSpatialRadius, 1, 2)
+        );
+        ImGui::Text(
+            "GI RT Samples / Bias: %d / %.2f",
             std::clamp(m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2),
             m_voxelGiDebugSettings.rtSurfaceBiasScale
         );
+        ImGui::Text("GI ReSTIR History: %s (%s)", m_voxelGiRestirHistoryValid ? "valid" : "reset", m_voxelGiRestirHistoryResetReason.c_str());
         ImGui::Text("Ray Query: %s", m_shadowStats.rayQuerySupported ? "yes" : "no");
         ImGui::Text(
             "Acceleration Structure: %s",
@@ -423,6 +442,10 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
             ImGui::Text("GI Occupancy (compute): %.2f", m_debugGpuGiOccupancyTimeMs);
             ImGui::Text("GI Surface (compute): %.2f", m_debugGpuGiSurfaceTimeMs);
+            ImGui::Text("GI ReSTIR Candidate (compute): %.2f", m_debugGpuGiSurfaceCandidateTimeMs);
+            ImGui::Text("GI ReSTIR Temporal (compute): %.2f", m_debugGpuGiSurfaceTemporalTimeMs);
+            ImGui::Text("GI ReSTIR Spatial (compute): %.2f", m_debugGpuGiSurfaceSpatialTimeMs);
+            ImGui::Text("GI ReSTIR Resolve (compute): %.2f", m_debugGpuGiSurfaceResolveTimeMs);
             ImGui::Text("GI Inject (compute): %.2f", m_debugGpuGiInjectTimeMs);
             ImGui::Text("GI Propagate (compute): %.2f", m_debugGpuGiPropagateTimeMs);
             ImGui::Text("Auto Exposure (compute): %.2f", m_debugGpuAutoExposureTimeMs);

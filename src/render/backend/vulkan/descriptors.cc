@@ -538,7 +538,22 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         voxelGiRayTracingSceneWriteInfo.pAccelerationStructures =
             hasVoxelGiRayTracingSceneDescriptor ? &m_rtTlas.handle : nullptr;
 
-        std::array<VkWriteDescriptorSet, 17> voxelGiWrites{};
+        VkDescriptorBufferInfo voxelGiRestirCurrentInfo{};
+        voxelGiRestirCurrentInfo.buffer = m_bufferAllocator.getBuffer(m_voxelGiRestirReservoirCurrentBufferHandle);
+        voxelGiRestirCurrentInfo.offset = 0;
+        voxelGiRestirCurrentInfo.range = VK_WHOLE_SIZE;
+
+        VkDescriptorBufferInfo voxelGiRestirPreviousInfo{};
+        voxelGiRestirPreviousInfo.buffer = m_bufferAllocator.getBuffer(m_voxelGiRestirReservoirPreviousBufferHandle);
+        voxelGiRestirPreviousInfo.offset = 0;
+        voxelGiRestirPreviousInfo.range = VK_WHOLE_SIZE;
+
+        VkDescriptorBufferInfo voxelGiRestirScratchInfo{};
+        voxelGiRestirScratchInfo.buffer = m_bufferAllocator.getBuffer(m_voxelGiRestirReservoirScratchBufferHandle);
+        voxelGiRestirScratchInfo.offset = 0;
+        voxelGiRestirScratchInfo.range = VK_WHOLE_SIZE;
+
+        std::array<VkWriteDescriptorSet, 20> voxelGiWrites{};
         voxelGiWrites[0] = write;
         voxelGiWrites[0].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
         voxelGiWrites[0].dstBinding = 0;
@@ -651,6 +666,10 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         voxelGiWrites[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         voxelGiWrites[15].pBufferInfo = &voxelGiChunkVoxelInfo;
 
+        const bool hasVoxelGiRestirBuffers =
+            voxelGiRestirCurrentInfo.buffer != VK_NULL_HANDLE &&
+            voxelGiRestirPreviousInfo.buffer != VK_NULL_HANDLE &&
+            voxelGiRestirScratchInfo.buffer != VK_NULL_HANDLE;
         std::uint32_t voxelGiWriteCount = 16;
         if (hasVoxelGiRayTracingSceneDescriptor) {
             voxelGiWrites[16] = write;
@@ -660,6 +679,29 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             voxelGiWrites[16].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
             voxelGiWrites[16].pNext = &voxelGiRayTracingSceneWriteInfo;
             voxelGiWriteCount = 17;
+        }
+        if (m_rayTracingRuntimeEnabled && hasVoxelGiRestirBuffers) {
+            voxelGiWrites[17] = write;
+            voxelGiWrites[17].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+            voxelGiWrites[17].dstBinding = 17;
+            voxelGiWrites[17].descriptorCount = 1;
+            voxelGiWrites[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            voxelGiWrites[17].pBufferInfo = &voxelGiRestirCurrentInfo;
+
+            voxelGiWrites[18] = write;
+            voxelGiWrites[18].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+            voxelGiWrites[18].dstBinding = 18;
+            voxelGiWrites[18].descriptorCount = 1;
+            voxelGiWrites[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            voxelGiWrites[18].pBufferInfo = &voxelGiRestirPreviousInfo;
+
+            voxelGiWrites[19] = write;
+            voxelGiWrites[19].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+            voxelGiWrites[19].dstBinding = 19;
+            voxelGiWrites[19].descriptorCount = 1;
+            voxelGiWrites[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            voxelGiWrites[19].pBufferInfo = &voxelGiRestirScratchInfo;
+            voxelGiWriteCount = 20;
         }
 
         const std::array<std::uint64_t, kVoxelGiDescriptorWriteKeyWordCount> voxelGiDescriptorWriteKey = {
@@ -686,7 +728,10 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             vkHandleToUint64(voxelGiChunkVoxelInfo.buffer),
             static_cast<std::uint64_t>(voxelGiChunkVoxelInfo.offset),
             static_cast<std::uint64_t>(voxelGiChunkVoxelInfo.range),
-            vkHandleToUint64(hasVoxelGiRayTracingSceneDescriptor ? m_rtTlas.handle : VK_NULL_HANDLE)
+            vkHandleToUint64(hasVoxelGiRayTracingSceneDescriptor ? m_rtTlas.handle : VK_NULL_HANDLE),
+            vkHandleToUint64(voxelGiRestirCurrentInfo.buffer),
+            vkHandleToUint64(voxelGiRestirPreviousInfo.buffer),
+            vkHandleToUint64(voxelGiRestirScratchInfo.buffer)
         };
         if (descriptorWriteKeyChanged(
                 m_voxelGiDescriptorWriteKeys[frameIndex],
