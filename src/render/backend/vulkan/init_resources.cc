@@ -2081,7 +2081,7 @@ void RendererBackend::destroyVoxelGiResources() {
     m_voxelGiHasPreviousFrameState = false;
     m_voxelGiPreviousBounceStrength = 0.0f;
     m_voxelGiPreviousDiffusionSoftness = 0.0f;
-    m_voxelGiPreviousSurfaceMode = VoxelGiSurfaceMode::RtSurface;
+    m_voxelGiPreviousSurfaceMode = VoxelGiSurfaceMode::RestirSurface;
     m_voxelGiOccupancyBuildOrigin = {0.0f, 0.0f, 0.0f};
     m_voxelGiOccupancyFullRebuildCursor = 0;
     m_voxelGiOccupancyFullRebuildInProgress = false;

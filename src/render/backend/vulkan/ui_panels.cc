@@ -4,6 +4,105 @@
 
 namespace voxelsprout::render {
 
+namespace {
+
+constexpr int kPostLookPresetNeutral = 0;
+constexpr int kPostLookPresetPunchy = 1;
+constexpr int kPostLookPresetStylizedVivid = 2;
+
+void applyPostLookPreset(RendererBackend::SkyDebugSettings& settings, int preset) {
+    settings.postColorLookPreset = preset;
+    switch (preset) {
+    case kPostLookPresetNeutral:
+        settings.autoExposureKeyValue = 0.18f;
+        settings.autoExposureMin = 0.75f;
+        settings.autoExposureMax = 1.60f;
+        settings.autoExposureAdaptUp = 1.80f;
+        settings.autoExposureAdaptDown = 0.80f;
+        settings.autoExposureLowPercentile = 0.50f;
+        settings.autoExposureHighPercentile = 0.92f;
+        settings.bloomThreshold = 1.25f;
+        settings.bloomSoftKnee = 0.20f;
+        settings.bloomBaseIntensity = 0.030f;
+        settings.bloomSunFacingBoost = 0.12f;
+        settings.colorGradingWhiteBalanceR = 1.01f;
+        settings.colorGradingWhiteBalanceG = 1.00f;
+        settings.colorGradingWhiteBalanceB = 0.99f;
+        settings.colorGradingContrast = 1.06f;
+        settings.colorGradingSaturation = 1.02f;
+        settings.colorGradingVibrance = 0.06f;
+        settings.colorGradingMidtoneContrast = 1.04f;
+        settings.colorGradingShadowDensity = 1.02f;
+        settings.colorGradingHighlightRolloff = 0.96f;
+        settings.colorGradingShadowTintR = 0.00f;
+        settings.colorGradingShadowTintG = 0.00f;
+        settings.colorGradingShadowTintB = 0.02f;
+        settings.colorGradingHighlightTintR = 0.02f;
+        settings.colorGradingHighlightTintG = 0.01f;
+        settings.colorGradingHighlightTintB = 0.00f;
+        break;
+    case kPostLookPresetPunchy:
+        settings.autoExposureKeyValue = 0.17f;
+        settings.autoExposureMin = 0.72f;
+        settings.autoExposureMax = 1.70f;
+        settings.autoExposureAdaptUp = 1.70f;
+        settings.autoExposureAdaptDown = 0.72f;
+        settings.autoExposureLowPercentile = 0.52f;
+        settings.autoExposureHighPercentile = 0.91f;
+        settings.bloomThreshold = 1.20f;
+        settings.bloomSoftKnee = 0.22f;
+        settings.bloomBaseIntensity = 0.040f;
+        settings.bloomSunFacingBoost = 0.15f;
+        settings.colorGradingWhiteBalanceR = 1.02f;
+        settings.colorGradingWhiteBalanceG = 1.00f;
+        settings.colorGradingWhiteBalanceB = 0.98f;
+        settings.colorGradingContrast = 1.11f;
+        settings.colorGradingSaturation = 1.10f;
+        settings.colorGradingVibrance = 0.16f;
+        settings.colorGradingMidtoneContrast = 1.08f;
+        settings.colorGradingShadowDensity = 1.05f;
+        settings.colorGradingHighlightRolloff = 0.93f;
+        settings.colorGradingShadowTintR = -0.01f;
+        settings.colorGradingShadowTintG = 0.00f;
+        settings.colorGradingShadowTintB = 0.04f;
+        settings.colorGradingHighlightTintR = 0.04f;
+        settings.colorGradingHighlightTintG = 0.02f;
+        settings.colorGradingHighlightTintB = -0.01f;
+        break;
+    case kPostLookPresetStylizedVivid:
+    default:
+        settings.autoExposureKeyValue = 0.16f;
+        settings.autoExposureMin = 0.70f;
+        settings.autoExposureMax = 1.75f;
+        settings.autoExposureAdaptUp = 1.60f;
+        settings.autoExposureAdaptDown = 0.65f;
+        settings.autoExposureLowPercentile = 0.55f;
+        settings.autoExposureHighPercentile = 0.90f;
+        settings.bloomThreshold = 1.15f;
+        settings.bloomSoftKnee = 0.25f;
+        settings.bloomBaseIntensity = 0.045f;
+        settings.bloomSunFacingBoost = 0.18f;
+        settings.colorGradingWhiteBalanceR = 1.03f;
+        settings.colorGradingWhiteBalanceG = 1.00f;
+        settings.colorGradingWhiteBalanceB = 0.97f;
+        settings.colorGradingContrast = 1.14f;
+        settings.colorGradingSaturation = 1.16f;
+        settings.colorGradingVibrance = 0.24f;
+        settings.colorGradingMidtoneContrast = 1.12f;
+        settings.colorGradingShadowDensity = 1.08f;
+        settings.colorGradingHighlightRolloff = 0.90f;
+        settings.colorGradingShadowTintR = -0.01f;
+        settings.colorGradingShadowTintG = 0.01f;
+        settings.colorGradingShadowTintB = 0.06f;
+        settings.colorGradingHighlightTintR = 0.06f;
+        settings.colorGradingHighlightTintG = 0.03f;
+        settings.colorGradingHighlightTintB = -0.01f;
+        break;
+    }
+}
+
+} // namespace
+
 void RendererBackend::buildShadowDebugUi() {
     if (!m_debugUiVisible || !m_showShadowPanel) {
         return;
@@ -164,6 +263,12 @@ void RendererBackend::buildSunDebugUi() {
             ImGui::Text("Eye Adaptation");
             ImGui::Checkbox("Auto Exposure", &m_skyDebugSettings.autoExposureEnabled);
             ImGui::SliderFloat("Manual Exposure", &m_skyDebugSettings.manualExposure, 0.05f, 4.0f, "%.3f");
+            ImGui::Text(
+                "Resolved Exposure: %.3f (target %.3f, avg luma %.3f)",
+                m_debugResolvedExposure,
+                m_debugTargetExposure,
+                m_debugAverageSceneLuminance
+            );
             if (m_skyDebugSettings.autoExposureEnabled && ImGui::CollapsingHeader("Advanced Exposure")) {
                 ImGui::SliderInt("AE Update Interval", &m_skyDebugSettings.autoExposureUpdateIntervalFrames, 1, 16);
                 ImGui::SliderFloat("AE Key Value", &m_skyDebugSettings.autoExposureKeyValue, 0.05f, 0.50f, "%.3f");
@@ -190,9 +295,16 @@ void RendererBackend::buildSunDebugUi() {
 
             ImGui::Separator();
             ImGui::Text("Color Grading");
+            const char* postLookPresets = "Neutral\0Punchy\0Stylized Vivid\0";
+            if (ImGui::Combo("Post Look", &m_skyDebugSettings.postColorLookPreset, postLookPresets)) {
+                applyPostLookPreset(m_skyDebugSettings, m_skyDebugSettings.postColorLookPreset);
+            }
             ImGui::SliderFloat("Contrast", &m_skyDebugSettings.colorGradingContrast, 0.70f, 1.40f, "%.2f");
             ImGui::SliderFloat("Saturation", &m_skyDebugSettings.colorGradingSaturation, 0.0f, 2.0f, "%.2f");
             ImGui::SliderFloat("Vibrance", &m_skyDebugSettings.colorGradingVibrance, -1.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Midtone Contrast", &m_skyDebugSettings.colorGradingMidtoneContrast, 0.80f, 1.40f, "%.2f");
+            ImGui::SliderFloat("Shadow Density", &m_skyDebugSettings.colorGradingShadowDensity, 0.70f, 1.40f, "%.2f");
+            ImGui::SliderFloat("Highlight Rolloff", &m_skyDebugSettings.colorGradingHighlightRolloff, 0.70f, 1.10f, "%.2f");
             if (ImGui::CollapsingHeader("Advanced Color Grading")) {
                 ImGui::SliderFloat("White Balance R", &m_skyDebugSettings.colorGradingWhiteBalanceR, 0.80f, 1.20f, "%.2f");
                 ImGui::SliderFloat("White Balance G", &m_skyDebugSettings.colorGradingWhiteBalanceG, 0.80f, 1.20f, "%.2f");

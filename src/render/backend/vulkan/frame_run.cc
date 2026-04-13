@@ -37,6 +37,44 @@ namespace voxelsprout::render {
 
 #include "render/renderer_shared.h"
 
+namespace {
+
+const char* voxelGiSurfaceModeName(VoxelGiSurfaceMode mode) {
+    switch (mode) {
+    case VoxelGiSurfaceMode::Legacy: return "legacy";
+    case VoxelGiSurfaceMode::RtSurface: return "rt_surface";
+    case VoxelGiSurfaceMode::RestirSurface: return "restir_surface";
+    }
+    return "legacy";
+}
+
+const char* voxelGiSurfaceFallbackReasonName(
+    VoxelGiSurfaceMode requestedMode,
+    bool computeAvailable,
+    bool rtReady,
+    bool restirReady,
+    bool rtTlasReady
+) {
+    if (requestedMode == VoxelGiSurfaceMode::Legacy) {
+        return "none";
+    }
+    if (!computeAvailable) {
+        return "compute_unavailable";
+    }
+    if (!rtTlasReady) {
+        return "scene_unavailable";
+    }
+    if (requestedMode == VoxelGiSurfaceMode::RestirSurface && !restirReady) {
+        return rtReady ? "restir_unavailable" : "rt_surface_unavailable";
+    }
+    if (!rtReady) {
+        return "rt_surface_unavailable";
+    }
+    return "none";
+}
+
+} // namespace
+
 void RendererBackend::renderFrame(
     const voxelsprout::world::ChunkGrid& chunkGrid,
     const voxelsprout::sim::Simulation& simulation,
@@ -680,12 +718,12 @@ void RendererBackend::renderFrame(
     mvpUniform.colorGrading0[3] = std::clamp(m_skyDebugSettings.colorGradingContrast, 0.70f, 1.40f);
     mvpUniform.colorGrading1[0] = std::clamp(m_skyDebugSettings.colorGradingSaturation, 0.0f, 2.0f);
     mvpUniform.colorGrading1[1] = std::clamp(m_skyDebugSettings.colorGradingVibrance, -1.0f, 1.0f);
-    mvpUniform.colorGrading1[2] = 0.0f;
-    mvpUniform.colorGrading1[3] = 0.0f;
+    mvpUniform.colorGrading1[2] = std::clamp(m_skyDebugSettings.colorGradingMidtoneContrast, 0.80f, 1.40f);
+    mvpUniform.colorGrading1[3] = std::clamp(m_skyDebugSettings.colorGradingShadowDensity, 0.70f, 1.40f);
     mvpUniform.colorGrading2[0] = std::clamp(m_skyDebugSettings.colorGradingShadowTintR, -1.0f, 1.0f);
     mvpUniform.colorGrading2[1] = std::clamp(m_skyDebugSettings.colorGradingShadowTintG, -1.0f, 1.0f);
     mvpUniform.colorGrading2[2] = std::clamp(m_skyDebugSettings.colorGradingShadowTintB, -1.0f, 1.0f);
-    mvpUniform.colorGrading2[3] = 0.0f;
+    mvpUniform.colorGrading2[3] = std::clamp(m_skyDebugSettings.colorGradingHighlightRolloff, 0.70f, 1.10f);
     mvpUniform.colorGrading3[0] = std::clamp(m_skyDebugSettings.colorGradingHighlightTintR, -1.0f, 1.0f);
     mvpUniform.colorGrading3[1] = std::clamp(m_skyDebugSettings.colorGradingHighlightTintG, -1.0f, 1.0f);
     mvpUniform.colorGrading3[2] = std::clamp(m_skyDebugSettings.colorGradingHighlightTintB, -1.0f, 1.0f);
@@ -846,6 +884,21 @@ void RendererBackend::renderFrame(
     if (autoExposureStateBuffer == VK_NULL_HANDLE) {
         VOX_LOGE("render") << "auto exposure state buffer unavailable";
         return;
+    }
+    if (const void* exposureStateMapped = m_bufferAllocator.mapBuffer(
+            m_autoExposureStateBufferHandle,
+            0,
+            sizeof(float) * 4u
+        )) {
+        const auto* exposureState = static_cast<const float*>(exposureStateMapped);
+        m_debugResolvedExposure = std::max(exposureState[0], 0.001f);
+        m_debugTargetExposure = std::max(exposureState[1], 0.001f);
+        m_debugAverageSceneLuminance = std::max(exposureState[2], 0.0f);
+        m_bufferAllocator.unmapBuffer(m_autoExposureStateBufferHandle);
+    } else {
+        m_debugResolvedExposure = std::max(m_skyDebugSettings.manualExposure, 0.001f);
+        m_debugTargetExposure = m_debugResolvedExposure;
+        m_debugAverageSceneLuminance = 0.0f;
     }
 
     struct VoxelGiChunkMetaUpload {
@@ -1409,14 +1462,26 @@ void RendererBackend::renderFrame(
         m_rayTracingRuntimeEnabled &&
         m_voxelGiRestirReady &&
         m_rtTlas.handle != VK_NULL_HANDLE;
+    const VoxelGiSurfaceMode activeVoxelGiSurfaceMode =
+        voxelGiRestirCanRun ? VoxelGiSurfaceMode::RestirSurface
+        : (voxelGiRtSurfaceCanRun ? VoxelGiSurfaceMode::RtSurface : VoxelGiSurfaceMode::Legacy);
+    const char* voxelGiSurfaceFallbackReason = voxelGiSurfaceFallbackReasonName(
+        m_voxelGiDebugSettings.surfaceMode,
+        m_voxelGiComputeAvailable,
+        voxelGiRtSurfaceCanRun,
+        voxelGiRestirCanRun,
+        m_rtTlas.handle != VK_NULL_HANDLE
+    );
     if (!m_voxelGiSurfaceLastLoggedValid ||
         m_voxelGiSurfaceLastLoggedRequestedRt != voxelGiRtSurfaceRequested ||
         m_voxelGiSurfaceLastLoggedRtReady != voxelGiRtSurfaceCanRun ||
         m_voxelGiSurfaceLastLoggedRequestedRestir != voxelGiRestirRequested ||
         m_voxelGiSurfaceLastLoggedRestirReady != voxelGiRestirCanRun) {
-        VOX_LOGI("render") << "voxel GI surface mode: rtRequested="
-                           << (voxelGiRtSurfaceRequested ? "yes" : "no")
-                           << ", restirRequested=" << (voxelGiRestirRequested ? "yes" : "no")
+        VOX_LOGI("render") << "voxel GI surface mode: requested="
+                           << voxelGiSurfaceModeName(m_voxelGiDebugSettings.surfaceMode)
+                           << ", active=" << voxelGiSurfaceModeName(activeVoxelGiSurfaceMode)
+                           << ", fallback=" << (activeVoxelGiSurfaceMode != m_voxelGiDebugSettings.surfaceMode ? "yes" : "no")
+                           << ", reason=" << voxelGiSurfaceFallbackReason
                            << ", compute=" << (m_voxelGiComputeAvailable ? "yes" : "no")
                            << ", rtReady=" << (voxelGiRtSurfaceCanRun ? "yes" : "no")
                            << ", restirReady=" << (voxelGiRestirCanRun ? "yes" : "no")

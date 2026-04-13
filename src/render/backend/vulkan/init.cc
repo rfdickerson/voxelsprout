@@ -1383,6 +1383,31 @@ bool RendererBackend::createPreviewBuffers() {
         mesh.indices.push_back(index + removeBaseVertex);
     }
 
+    const uint32_t addFaceBaseVertex = 0u;
+    for (uint32_t faceId = 0; faceId < 6u; ++faceId) {
+        const uint32_t faceVertex = addFaceBaseVertex + (faceId * 4u);
+        mesh.indices.push_back(faceVertex + 0u);
+        mesh.indices.push_back(faceVertex + 1u);
+        mesh.indices.push_back(faceVertex + 1u);
+        mesh.indices.push_back(faceVertex + 2u);
+        mesh.indices.push_back(faceVertex + 2u);
+        mesh.indices.push_back(faceVertex + 3u);
+        mesh.indices.push_back(faceVertex + 3u);
+        mesh.indices.push_back(faceVertex + 0u);
+    }
+
+    for (uint32_t faceId = 0; faceId < 6u; ++faceId) {
+        const uint32_t faceVertex = removeBaseVertex + (faceId * 4u);
+        mesh.indices.push_back(faceVertex + 0u);
+        mesh.indices.push_back(faceVertex + 1u);
+        mesh.indices.push_back(faceVertex + 1u);
+        mesh.indices.push_back(faceVertex + 2u);
+        mesh.indices.push_back(faceVertex + 2u);
+        mesh.indices.push_back(faceVertex + 3u);
+        mesh.indices.push_back(faceVertex + 3u);
+        mesh.indices.push_back(faceVertex + 0u);
+    }
+
     BufferCreateDesc vertexCreateDesc{};
     vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(voxelsprout::world::PackedVoxelVertex));
     vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;

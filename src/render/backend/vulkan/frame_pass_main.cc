@@ -339,7 +339,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         (preview.mode == VoxelPreview::Mode::Remove) ? m_previewRemovePipeline : m_previewAddPipeline;
     const bool drawCubePreview = !preview.pipeStyle && preview.visible && activePreviewPipeline != VK_NULL_HANDLE;
     const bool drawFacePreview =
-        !preview.pipeStyle && preview.faceVisible && preview.brushSize == 1 && m_previewRemovePipeline != VK_NULL_HANDLE;
+        !preview.pipeStyle && preview.faceVisible && preview.brushSize == 1 && m_previewFaceOutlinePipeline != VK_NULL_HANDLE;
 
     if (preview.pipeStyle && preview.visible && m_pipePipeline != VK_NULL_HANDLE) {
         PipeInstance previewInstance{};
@@ -426,10 +426,11 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
 
     if (drawCubePreview || drawFacePreview) {
         constexpr uint32_t kPreviewCubeIndexCount = 36u;
-        constexpr uint32_t kPreviewFaceIndexCount = 6u;
+        constexpr uint32_t kPreviewFaceOutlineIndexCount = 8u;
         constexpr uint32_t kAddCubeFirstIndex = 0u;
         constexpr uint32_t kRemoveCubeFirstIndex = 36u;
-        constexpr uint32_t kFaceFirstIndexBase = kRemoveCubeFirstIndex;
+        constexpr uint32_t kAddFaceOutlineFirstIndexBase = 72u;
+        constexpr uint32_t kRemoveFaceOutlineFirstIndexBase = 120u;
         constexpr float kChunkCoordinateScale = 1.0f;
 
         const VkBuffer previewVertexBuffer = m_bufferAllocator.getBuffer(m_previewVertexBufferHandle);
@@ -502,10 +503,13 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
 
             if (drawFacePreview) {
                 const uint32_t faceFirstIndex =
-                    kFaceFirstIndexBase + (std::min(preview.faceId, 5u) * kPreviewFaceIndexCount);
+                    ((preview.mode == VoxelPreview::Mode::Add)
+                         ? kAddFaceOutlineFirstIndexBase
+                         : kRemoveFaceOutlineFirstIndexBase) +
+                    (std::min(preview.faceId, 5u) * kPreviewFaceOutlineIndexCount);
                 drawPreviewRange(
-                    m_previewRemovePipeline,
-                    kPreviewFaceIndexCount,
+                    m_previewFaceOutlinePipeline,
+                    kPreviewFaceOutlineIndexCount,
                     faceFirstIndex,
                     preview.faceX,
                     preview.faceY,
