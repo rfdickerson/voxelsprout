@@ -116,6 +116,7 @@ add_executable(voxel_factory_toy
     src/render/renderer.cc
     src/world/magica_voxel.cc
     src/world/world.cc
+    src/world/chunk_grid_worldgen.cc
     src/world/chunk_mesher.cc
     src/world/clipmap_index.cc
 )

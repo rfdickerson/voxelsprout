@@ -28,7 +28,8 @@ static const uint kMaterialDirt = 2u;
 static const uint kMaterialGrass = 3u;
 static const uint kMaterialWood = 4u;
 static const uint kMaterialRed = 5u;
-static const uint kMaterialPalette = 6u;
+static const uint kMaterialLeaves = 6u;
+static const uint kMaterialPalette = 7u;
 
 [[vk::constant_id(6)]]
 const int kShadowPolicyMode = 2;
@@ -40,6 +41,7 @@ const int kForceTintOnly = 0;
 float3 materialTint(uint material)
 {
     if (material == kMaterialRed) return float3(1.00, 0.28, 0.22);
+    if (material == kMaterialLeaves) return float3(0.42, 0.70, 0.34);
     return float3(0.9, 0.9, 0.9);
 }
 
@@ -50,6 +52,7 @@ float materialSmoothness(uint material)
     if (material == kMaterialGrass) return 0.08;
     if (material == kMaterialWood) return 0.14;
     if (material == kMaterialRed) return 0.24;
+    if (material == kMaterialLeaves) return 0.10;
     if (material == kMaterialPalette) return 0.18;
     return 0.12;
 }

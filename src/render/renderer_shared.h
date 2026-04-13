@@ -1077,6 +1077,8 @@ std::array<std::uint8_t, 3> voxelTypeAlbedoRgb(voxelsprout::world::VoxelType typ
         return {80u, 142u, 63u};
     case voxelsprout::world::VoxelType::Wood:
         return {141u, 106u, 64u};
+    case voxelsprout::world::VoxelType::Leaves:
+        return {92u, 148u, 78u};
     case voxelsprout::world::VoxelType::SolidRed:
         return {255u, 71u, 56u};
     case voxelsprout::world::VoxelType::Empty:

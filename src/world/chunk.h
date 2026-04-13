@@ -271,6 +271,8 @@ inline VoxelType Chunk::voxelTypeFromSerializedByte(std::uint8_t raw) {
         return VoxelType::Grass;
     case static_cast<std::uint8_t>(VoxelType::Wood):
         return VoxelType::Wood;
+    case static_cast<std::uint8_t>(VoxelType::Leaves):
+        return VoxelType::Leaves;
     default:
         return VoxelType::Stone;
     }
