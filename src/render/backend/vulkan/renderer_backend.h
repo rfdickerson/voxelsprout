@@ -60,7 +60,16 @@ struct RtChunkSceneRecord {
     std::uint32_t vertexCount = 0;
     std::uint32_t indexCount = 0;
     bool geometryResident = false;
+    bool rtEligible = false;
     bool dirty = false;
+};
+
+struct ChunkResidentKey {
+    int chunkX = 0;
+    int chunkY = 0;
+    int chunkZ = 0;
+
+    [[nodiscard]] bool operator==(const ChunkResidentKey& other) const = default;
 };
 
 class RendererBackend {
@@ -198,6 +207,8 @@ private:
     static constexpr uint32_t kMaxFramesInFlight = 3;
     static constexpr uint32_t kShadowCascadeCount = 4;
     static constexpr uint32_t kShadowAtlasSize = 8192;
+    static constexpr int kGrassActiveChunkRadius = 1;
+    static constexpr int kRtActiveChunkRadius = 1;
     static constexpr uint32_t kGpuTimestampQueryFrameStart = 0;
     static constexpr uint32_t kGpuTimestampQueryShadowStart = 1;
     static constexpr uint32_t kGpuTimestampQueryShadowEnd = 2;
@@ -866,6 +877,7 @@ private:
     BufferHandle m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
+    std::vector<ChunkResidentKey> m_chunkResidentKeys;
     std::vector<voxelsprout::world::ChunkLodMeshes> m_chunkLodMeshCache;
     std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
