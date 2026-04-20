@@ -1793,6 +1793,79 @@ void RendererBackend::destroyMagicaBuffers() {
 }
 
 
+void RendererBackend::destroyImportedBuffers() {
+    for (ImportedTextureResource& texture : m_importedTextureResources) {
+        if (texture.imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, texture.imageView, nullptr);
+            texture.imageView = VK_NULL_HANDLE;
+        }
+        if (texture.image != VK_NULL_HANDLE) {
+            if (m_vmaAllocator != VK_NULL_HANDLE && texture.allocation != VK_NULL_HANDLE) {
+                vmaDestroyImage(m_vmaAllocator, texture.image, texture.allocation);
+            } else {
+                vkDestroyImage(m_device, texture.image, nullptr);
+            }
+            texture.image = VK_NULL_HANDLE;
+            texture.allocation = VK_NULL_HANDLE;
+        }
+    }
+    m_importedTextureResources.clear();
+    if (m_importedTextureSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_importedTextureSampler, nullptr);
+        m_importedTextureSampler = VK_NULL_HANDLE;
+    }
+    for (ImportedMeshDraw& draw : m_importedMeshDraws) {
+        if (draw.indexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(draw.indexBufferHandle);
+            draw.indexBufferHandle = kInvalidBufferHandle;
+        }
+        if (draw.vertexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(draw.vertexBufferHandle);
+            draw.vertexBufferHandle = kInvalidBufferHandle;
+        }
+        draw.indexCount = 0;
+    }
+    m_importedMeshDraws.clear();
+    m_importedVertexBufferHandle = kInvalidBufferHandle;
+    m_importedIndexBufferHandle = kInvalidBufferHandle;
+    if (m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_importedWaterIndexBufferHandle);
+        m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_importedWaterVertexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_importedWaterVertexBufferHandle);
+        m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
+    }
+    m_importedIndexCount = 0;
+    m_importedTerrainDrawCount = 0;
+    m_importedStaticDrawCount = 0;
+    m_importedWaterIndexCount = 0;
+    for (RtImportedSceneRecord& record : m_rtImportedSceneRecords) {
+        if (record.blas.handle != VK_NULL_HANDLE && m_destroyAccelerationStructureKhr != nullptr) {
+            m_destroyAccelerationStructureKhr(m_device, record.blas.handle, nullptr);
+            record.blas.handle = VK_NULL_HANDLE;
+        }
+        if (record.blas.storageBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(record.blas.storageBufferHandle);
+            record.blas.storageBufferHandle = kInvalidBufferHandle;
+        }
+        record.blas.deviceAddress = 0;
+        record.blas.primitiveCount = 0;
+        if (record.geometry.indexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(record.geometry.indexBufferHandle);
+            record.geometry.indexBufferHandle = kInvalidBufferHandle;
+        }
+        if (record.geometry.vertexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(record.geometry.vertexBufferHandle);
+            record.geometry.vertexBufferHandle = kInvalidBufferHandle;
+        }
+        record.geometry.vertexCount = 0;
+        record.geometry.indexCount = 0;
+    }
+    m_rtImportedSceneRecords.clear();
+}
+
+
 void RendererBackend::destroyPipeBuffers() {
     if (m_grassBillboardIndexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_grassBillboardIndexBufferHandle);
@@ -1883,6 +1956,7 @@ void RendererBackend::shutdown() {
         destroyPipeBuffers();
         destroyPreviewBuffers();
         destroyMagicaBuffers();
+        destroyImportedBuffers();
         destroyRayTracingScene();
         destroyEnvironmentResources();
         destroyShadowResources();

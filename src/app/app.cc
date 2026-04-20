@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -35,6 +36,11 @@ constexpr float kMouseSensitivity = 0.1f;
 constexpr float kMouseSmoothingSeconds = 0.035f;
 constexpr float kMoveMaxSpeed = 5.0f;
 constexpr float kSprintSpeedMultiplier = 1.35f;
+constexpr float kImportedSceneMoveSpeed = 1800.0f;
+constexpr float kImportedSceneSprintSpeedMultiplier = 3.0f;
+constexpr float kImportedSceneVerticalMoveSpeed = 1400.0f;
+constexpr float kImportedSceneSunYawDegrees = 62.0f;
+constexpr float kImportedSceneSunPitchDegrees = -8.0f;
 constexpr float kSneakSpeedMultiplier = 0.35f;
 constexpr float kMoveAcceleration = 14.0f;
 constexpr float kMoveDeceleration = 18.0f;
@@ -83,6 +89,7 @@ constexpr const char* kMagicaCastlePath = "assets/magicka/castle.vox";
 constexpr const char* kMagicaTeapotPath = "assets/magicka/teapot.vox";
 constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
+constexpr const char* kImportedSceneEnvVar = "VOXEL_IMPORTED_SCENE";
 
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
@@ -226,18 +233,6 @@ std::string trimConfigString(const std::string& value) {
         --end;
     }
     return value.substr(begin, end - begin);
-}
-
-void glfwScrollHotbarCallback(GLFWwindow* window, double /*xoffset*/, double yoffset) {
-    if (window == nullptr || yoffset == 0.0) {
-        return;
-    }
-    auto* app = static_cast<voxelsprout::app::App*>(glfwGetWindowUserPointer(window));
-    if (app == nullptr) {
-        return;
-    }
-    const int step = (yoffset > 0.0) ? -1 : +1;
-    app->queueHotbarScroll(step);
 }
 
 struct FrustumPlane {
@@ -421,6 +416,151 @@ float approach(float current, float target, float maxDelta) {
         return current - maxDelta;
     }
     return target;
+}
+
+std::optional<std::filesystem::path> findImportedSceneDemoPath() {
+    std::string envPathValue;
+#ifdef _WIN32
+    char* envPath = nullptr;
+    std::size_t envPathLength = 0;
+    if (_dupenv_s(&envPath, &envPathLength, kImportedSceneEnvVar) == 0 && envPath != nullptr) {
+        envPathValue = envPath;
+    }
+    std::free(envPath);
+#else
+    if (const char* envPath = std::getenv(kImportedSceneEnvVar); envPath != nullptr) {
+        envPathValue = envPath;
+    }
+#endif
+    if (!envPathValue.empty()) {
+        return std::filesystem::path(envPathValue);
+    }
+
+    constexpr std::array<const char*, 4> kFallbackPaths = {
+        "balmora_scene.bin",
+        "C:/temp/balmora_scene.bin",
+        "/mnt/c/temp/balmora_scene.bin",
+        "/tmp/balmora_scene.bin"
+    };
+    for (const char* candidate : kFallbackPaths) {
+        const std::filesystem::path path(candidate);
+        if (std::filesystem::exists(path)) {
+            return path;
+        }
+    }
+    return std::nullopt;
+}
+
+struct ImportedSceneCameraPose {
+    float x = 0.0f;
+    float y = 2200.0f;
+    float z = -2200.0f;
+    float yawDegrees = 45.0f;
+    float pitchDegrees = -18.0f;
+};
+
+ImportedSceneCameraPose makeImportedSceneLookAtPose(
+    float eyeX,
+    float eyeY,
+    float eyeZ,
+    float targetX,
+    float targetY,
+    float targetZ
+) {
+    ImportedSceneCameraPose pose{};
+    pose.x = eyeX;
+    pose.y = eyeY;
+    pose.z = eyeZ;
+    const float dx = targetX - eyeX;
+    const float dy = targetY - eyeY;
+    const float dz = targetZ - eyeZ;
+    const float horizontalDistance = std::sqrt((dx * dx) + (dz * dz));
+    pose.yawDegrees = voxelsprout::math::degrees(std::atan2(dz, dx));
+    pose.pitchDegrees = voxelsprout::math::degrees(std::atan2(dy, std::max(horizontalDistance, 0.001f)));
+    return pose;
+}
+
+ImportedSceneCameraPose configureImportedSceneCamera(const voxelsprout::importer::ImportedScene& scene) {
+    ImportedSceneCameraPose pose{};
+    const bool haveBounds =
+        scene.boundsMax[0] > scene.boundsMin[0] ||
+        scene.boundsMax[1] > scene.boundsMin[1] ||
+        scene.boundsMax[2] > scene.boundsMin[2];
+
+    float minX = std::numeric_limits<float>::max();
+    float minY = std::numeric_limits<float>::max();
+    float minZ = std::numeric_limits<float>::max();
+    float maxX = std::numeric_limits<float>::lowest();
+    float maxY = std::numeric_limits<float>::lowest();
+    float maxZ = std::numeric_limits<float>::lowest();
+    if (haveBounds) {
+        minX = scene.boundsMin[0];
+        minY = scene.boundsMin[1];
+        minZ = scene.boundsMin[2];
+        maxX = scene.boundsMax[0];
+        maxY = scene.boundsMax[1];
+        maxZ = scene.boundsMax[2];
+    } else {
+        if (scene.landscapeCells.empty()) {
+            return pose;
+        }
+        constexpr float kCellSizeUnits = 8192.0f;
+        for (const voxelsprout::importer::ImportedSceneLandscapeCell& cell : scene.landscapeCells) {
+            minX = std::min(minX, static_cast<float>(cell.gridX) * kCellSizeUnits);
+            minZ = std::min(minZ, static_cast<float>(cell.gridY) * kCellSizeUnits);
+            maxX = std::max(maxX, static_cast<float>(cell.gridX + 1) * kCellSizeUnits);
+            maxZ = std::max(maxZ, static_cast<float>(cell.gridY + 1) * kCellSizeUnits);
+            for (const float height : cell.heights) {
+                minY = std::min(minY, height);
+                maxY = std::max(maxY, height);
+            }
+        }
+    }
+
+    const float centerX = (minX + maxX) * 0.5f;
+    const float centerZ = (minZ + maxZ) * 0.5f;
+    const float centerY = (minY + maxY) * 0.5f;
+
+    if (scene.sourceTag == "morrowind_balmora" && !scene.waterPatches.empty()) {
+        const voxelsprout::importer::ImportedSceneWaterPatch* bridgePatch = nullptr;
+        float bestScore = std::numeric_limits<float>::max();
+        for (const voxelsprout::importer::ImportedSceneWaterPatch& patch : scene.waterPatches) {
+            const float patchCenterX = patch.originX + (patch.sizeX * 0.5f);
+            const float patchCenterZ = patch.originZ + (patch.sizeZ * 0.5f);
+            const float dx = patchCenterX - centerX;
+            const float dz = patchCenterZ - centerZ;
+            const float score = (dx * dx) + (dz * dz);
+            if (score < bestScore) {
+                bestScore = score;
+                bridgePatch = &patch;
+            }
+        }
+        if (bridgePatch != nullptr) {
+            const float bridgeCenterX = bridgePatch->originX + (bridgePatch->sizeX * 0.5f);
+            const float bridgeCenterZ = bridgePatch->originZ + (bridgePatch->sizeZ * 0.5f);
+            const float bridgeY = bridgePatch->waterLevel + 260.0f;
+            const float eyeX = bridgeCenterX - 520.0f;
+            const float eyeY = bridgeY;
+            const float eyeZ = bridgeCenterZ - 180.0f;
+            return makeImportedSceneLookAtPose(
+                eyeX,
+                eyeY,
+                eyeZ,
+                centerX + 420.0f,
+                centerY + 260.0f,
+                centerZ);
+        }
+    }
+
+    const float spanX = maxX - minX;
+    const float spanZ = maxZ - minZ;
+    const float offset = std::max(spanX, spanZ) * 0.38f;
+    pose.x = centerX - offset;
+    pose.y = maxY + std::max(spanX, spanZ) * 0.18f + 1200.0f;
+    pose.z = centerZ - offset * 0.75f;
+    pose.yawDegrees = 48.0f;
+    pose.pitchDegrees = -24.0f;
+    return pose;
 }
 
 float applyStickDeadzone(float value, float deadzone) {
@@ -623,14 +763,6 @@ bool App::loadConfig(const std::filesystem::path& configPath) {
             continue;
         }
         if (key == "enable_vertex_ao") {
-            bool parsedValue = loadedConfig.enableVertexAo;
-            if (!parseBoolConfigValue(value, parsedValue)) {
-                VOX_LOGW("app") << "invalid config enable_vertex_ao='" << value
-                                << "' at " << configPath.string() << "; keeping "
-                                << boolConfigName(loadedConfig.enableVertexAo);
-                continue;
-            }
-            loadedConfig.enableVertexAo = parsedValue;
             continue;
         }
         if (key == "enable_ssao") {
@@ -647,7 +779,6 @@ bool App::loadConfig(const std::filesystem::path& configPath) {
     m_config = loadedConfig;
     VOX_LOGI("app") << "config loaded from " << configPath.string()
                     << " (shadow_mode=" << shadowModeConfigName(m_config.shadowMode)
-                    << ", enable_vertex_ao=" << boolConfigName(m_config.enableVertexAo)
                     << ", enable_ssao=" << boolConfigName(m_config.enableSsao)
                     << ", parsedLines=" << parsedLineCount << ")";
     return true;
@@ -658,9 +789,8 @@ bool App::saveConfig(const std::filesystem::path& configPath) const {
     if (!file) {
         return false;
     }
-    file << "# Voxel Factory Toy runtime config\n";
+    file << "# Morrowind renderer runtime config\n";
     file << "shadow_mode=" << shadowModeConfigName(m_config.shadowMode) << "\n";
-    file << "enable_vertex_ao=" << boolConfigName(m_config.enableVertexAo) << "\n";
     file << "enable_ssao=" << boolConfigName(m_config.enableSsao) << "\n";
     return true;
 }
@@ -697,7 +827,6 @@ bool App::init() {
 
     // Relative mouse mode for camera look.
     glfwSetWindowUserPointer(m_window, this);
-    glfwSetScrollCallback(m_window, glfwScrollHotbarCallback);
     glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     const std::filesystem::path configPath{kConfigFilePath};
@@ -709,7 +838,6 @@ bool App::init() {
         return false;
     }
     m_renderer.setShadowSettings(voxelsprout::render::ShadowSettings{m_config.shadowMode});
-    m_renderer.setVertexAoEnabled(m_config.enableVertexAo);
     m_renderer.setSsaoEnabled(m_config.enableSsao);
     m_gameplayUiState.selectedHotbarSlot = 0;
     m_gameplayUiState.hotbarItems = {
@@ -723,7 +851,59 @@ bool App::init() {
         voxelsprout::render::InventoryItemId::Empty,
         voxelsprout::render::InventoryItemId::Empty,
     };
-    syncGameplayUiState();
+
+    if (const std::optional<std::filesystem::path> importedScenePath = findImportedSceneDemoPath();
+        importedScenePath.has_value()) {
+        m_importedScenePath = *importedScenePath;
+        const auto importedSceneLoadStart = Clock::now();
+        if (!voxelsprout::importer::loadImportedSceneRuntime(m_importedScenePath, m_importedScene)) {
+            VOX_LOGE("app") << "failed to load imported scene from "
+                            << std::filesystem::absolute(m_importedScenePath).string()
+                            << ": " << voxelsprout::importer::getImportedSceneLastError();
+            return false;
+        }
+        const ImportedSceneCameraPose importedCameraPose = configureImportedSceneCamera(m_importedScene);
+        m_camera.x = importedCameraPose.x;
+        m_camera.y = importedCameraPose.y;
+        m_camera.z = importedCameraPose.z;
+        m_camera.yawDegrees = importedCameraPose.yawDegrees;
+        m_camera.pitchDegrees = importedCameraPose.pitchDegrees;
+        m_cameraPrevious = m_camera;
+        m_importedSceneDemoEnabled = true;
+        VOX_LOGI("app") << "imported scene demo enabled from "
+                        << std::filesystem::absolute(m_importedScenePath).string()
+                        << " in " << elapsedMs(importedSceneLoadStart) << " ms"
+                        << " (version=" << m_importedScene.sourceFileVersion
+                        << ", meshes=" << m_importedScene.sourceMeshCount
+                        << ", instances=" << m_importedScene.sourceInstanceCount
+                        << ", terrainCells=" << m_importedScene.sourceLandscapeCellCount
+                        << ", packedVertices=" << m_importedScene.packedVertices.size()
+                        << ", packedIndices=" << m_importedScene.packedIndices.size() << ")";
+    }
+
+    if (m_importedSceneDemoEnabled) {
+        const auto rendererInitStart = Clock::now();
+        const bool rendererOk = m_renderer.init(m_window, m_world.chunkGrid());
+        const auto rendererInitMs = elapsedMs(rendererInitStart);
+        VOX_LOGI("app") << "init step renderer init took " << rendererInitMs << " ms";
+        if (!rendererOk) {
+            VOX_LOGE("app") << "renderer init failed";
+            return false;
+        }
+        if (!m_renderer.uploadImportedScene(m_importedScene)) {
+            VOX_LOGE("app") << "failed to upload imported scene demo geometry";
+            return false;
+        }
+        m_renderer.setSunAngles(kImportedSceneSunYawDegrees, kImportedSceneSunPitchDegrees);
+        m_renderer.setImportedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms";
+        return true;
+    }
 
     const auto worldLoadStart = Clock::now();
     const std::filesystem::path worldPath{kWorldFilePath};
@@ -795,7 +975,7 @@ bool App::init() {
 
 void App::run() {
     VOX_LOGI("app") << "run begin";
-    VOX_LOGI("app") << "creative inventory ready (E inventory, 1-9 hotbar, mouse wheel cycle)";
+    VOX_LOGI("app") << "morrowind viewer ready (WASD move, Space up, Shift down, F/C renderer panel, F5 terrain, F6 statics, K textures, F7 flat shading, F8 water debug)";
     double previousTime = glfwGetTime();
     double simulationAccumulatorSeconds = 0.0;
     m_cameraPrevious = m_camera;
@@ -819,7 +999,9 @@ void App::run() {
                simulationStepCount < kMaxSimulationStepsPerFrame) {
             m_cameraPrevious = m_camera;
             updateCamera(static_cast<float>(kSimulationFixedStepSeconds));
-            m_simulation.update(static_cast<float>(kSimulationFixedStepSeconds));
+            if (!m_importedSceneDemoEnabled) {
+                m_simulation.update(static_cast<float>(kSimulationFixedStepSeconds));
+            }
             simulationAccumulatorSeconds -= kSimulationFixedStepSeconds;
             ++simulationStepCount;
         }
@@ -843,18 +1025,13 @@ void App::run() {
 
 void App::toggleDebugUi() {
     m_debugUiVisible = !m_debugUiVisible;
-    if (m_debugUiVisible) {
-        m_inventoryVisible = false;
-    }
 }
 
 bool App::isAnyUiVisible() const {
-    return m_debugUiVisible || m_inventoryVisible;
+    return m_debugUiVisible;
 }
 
 void App::syncGameplayUiState() {
-    m_gameplayUiState.inventoryVisible = m_inventoryVisible;
-    m_renderer.setGameplayUiState(m_gameplayUiState);
 }
 
 void App::resetVoxelBreakProgress() {
@@ -898,6 +1075,30 @@ void App::handleInventoryClick(float mouseX, float mouseY, float displayWidth, f
 }
 
 void App::update(float dt, float simulationAlpha) {
+    if (m_importedSceneDemoEnabled) {
+        const float renderAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
+        const voxelsprout::render::CameraPose cameraPose{
+            m_cameraPrevious.x + ((m_camera.x - m_cameraPrevious.x) * renderAlpha),
+            m_cameraPrevious.y + ((m_camera.y - m_cameraPrevious.y) * renderAlpha),
+            m_cameraPrevious.z + ((m_camera.z - m_cameraPrevious.z) * renderAlpha),
+            lerpWrappedDegrees(m_cameraPrevious.yawDegrees, m_camera.yawDegrees, renderAlpha),
+            m_cameraPrevious.pitchDegrees + ((m_camera.pitchDegrees - m_cameraPrevious.pitchDegrees) * renderAlpha),
+            m_camera.fovDegrees
+        };
+        m_visibleChunkIndices.clear();
+        m_renderer.setSpatialQueryStats(false, voxelsprout::world::SpatialQueryStats{}, 0u);
+        m_renderer.renderFrame(
+            m_world.chunkGrid(),
+            m_simulation,
+            cameraPose,
+            voxelsprout::render::VoxelPreview{},
+            simulationAlpha,
+            std::span<const std::size_t>(m_visibleChunkIndices)
+        );
+        m_camera.fovDegrees = m_renderer.cameraFovDegrees();
+        return;
+    }
+
     refreshStreamingWindow(false);
 
     const bool regeneratePressedThisFrame =
@@ -1234,7 +1435,6 @@ void App::shutdown() {
     VOX_LOGI("app") << "shutdown begin";
 
     m_config.shadowMode = m_renderer.shadowSettings().mode;
-    m_config.enableVertexAo = m_renderer.isVertexAoEnabled();
     m_config.enableSsao = m_renderer.isSsaoEnabled();
     const std::filesystem::path configPath{kConfigFilePath};
     if (!saveConfig(configPath)) {
@@ -1242,7 +1442,6 @@ void App::shutdown() {
     } else {
         VOX_LOGI("app") << "saved config to " << configPath.string()
                         << " (shadow_mode=" << shadowModeConfigName(m_config.shadowMode)
-                        << ", enable_vertex_ao=" << boolConfigName(m_config.enableVertexAo)
                         << ", enable_ssao=" << boolConfigName(m_config.enableSsao) << ")";
     }
 
@@ -1274,19 +1473,10 @@ void App::pollInput() {
     bool uiVisibilityChanged = false;
     const bool toggleFrameStatsDown = glfwGetKey(m_window, GLFW_KEY_F) == GLFW_PRESS;
     if (toggleFrameStatsDown && !m_wasToggleFrameStatsDown) {
-        m_renderer.setFrameStatsVisible(!m_renderer.isFrameStatsVisible());
-    }
-    m_wasToggleFrameStatsDown = toggleFrameStatsDown;
-
-    const bool inventoryKeyDown = glfwGetKey(m_window, GLFW_KEY_E) == GLFW_PRESS;
-    if (inventoryKeyDown && !m_wasInventoryKeyDown) {
-        m_inventoryVisible = !m_inventoryVisible;
-        if (m_inventoryVisible) {
-            m_debugUiVisible = false;
-        }
+        toggleDebugUi();
         uiVisibilityChanged = true;
     }
-    m_wasInventoryKeyDown = inventoryKeyDown;
+    m_wasToggleFrameStatsDown = toggleFrameStatsDown;
 
     const bool toggleConfigUiDown = glfwGetKey(m_window, GLFW_KEY_C) == GLFW_PRESS;
     if (toggleConfigUiDown && !m_wasToggleConfigUiDown) {
@@ -1297,12 +1487,10 @@ void App::pollInput() {
 
     const bool escapeKeyDown = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     if (escapeKeyDown && !m_wasEscapeKeyDown) {
-        if (m_inventoryVisible) {
-            m_inventoryVisible = false;
-        } else {
+        if (m_debugUiVisible) {
             toggleDebugUi();
+            uiVisibilityChanged = true;
         }
-        uiVisibilityChanged = true;
     }
     m_wasEscapeKeyDown = escapeKeyDown;
 
@@ -1315,6 +1503,101 @@ void App::pollInput() {
     }
     m_wasToggleDayCycleDown = toggleDayCycleDown;
 
+    const bool toggleImportedTerrainDown = glfwGetKey(m_window, GLFW_KEY_F5) == GLFW_PRESS;
+    if (m_importedSceneDemoEnabled && toggleImportedTerrainDown && !m_wasToggleImportedTerrainDown) {
+        m_renderer.importedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        m_importedShowTerrain = !m_importedShowTerrain;
+        m_renderer.setImportedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        VOX_LOGI("app") << "imported terrain " << (m_importedShowTerrain ? "visible" : "hidden") << " (F5)";
+    }
+    m_wasToggleImportedTerrainDown = toggleImportedTerrainDown;
+
+    const bool toggleImportedStaticsDown = glfwGetKey(m_window, GLFW_KEY_F6) == GLFW_PRESS;
+    if (m_importedSceneDemoEnabled && toggleImportedStaticsDown && !m_wasToggleImportedStaticsDown) {
+        m_renderer.importedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        m_importedShowStatics = !m_importedShowStatics;
+        m_renderer.setImportedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        VOX_LOGI("app") << "imported statics " << (m_importedShowStatics ? "visible" : "hidden") << " (F6)";
+    }
+    m_wasToggleImportedStaticsDown = toggleImportedStaticsDown;
+
+    const bool toggleImportedTexturesDown = glfwGetKey(m_window, GLFW_KEY_K) == GLFW_PRESS;
+    if (m_importedSceneDemoEnabled && toggleImportedTexturesDown && !m_wasToggleImportedTexturesDown) {
+        m_renderer.importedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        m_importedShowTextures = !m_importedShowTextures;
+        m_renderer.setImportedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        VOX_LOGI("app") << "imported textures " << (m_importedShowTextures ? "enabled" : "disabled") << " (K)";
+    }
+    m_wasToggleImportedTexturesDown = toggleImportedTexturesDown;
+
+    const bool toggleImportedFlatShadingDown = glfwGetKey(m_window, GLFW_KEY_F7) == GLFW_PRESS;
+    if (m_importedSceneDemoEnabled && toggleImportedFlatShadingDown && !m_wasToggleImportedFlatShadingDown) {
+        m_renderer.importedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        m_importedFlatShading = !m_importedFlatShading;
+        m_renderer.setImportedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        VOX_LOGI("app") << "imported flat shading " << (m_importedFlatShading ? "enabled" : "disabled") << " (F7)";
+    }
+    m_wasToggleImportedFlatShadingDown = toggleImportedFlatShadingDown;
+
+    const bool toggleImportedWaterDebugDown = glfwGetKey(m_window, GLFW_KEY_F8) == GLFW_PRESS;
+    if (m_importedSceneDemoEnabled && toggleImportedWaterDebugDown && !m_wasToggleImportedWaterDebugDown) {
+        m_renderer.importedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        m_importedWaterDebug = !m_importedWaterDebug;
+        m_renderer.setImportedSceneDebugState(
+            m_importedShowTerrain,
+            m_importedShowStatics,
+            m_importedShowTextures,
+            m_importedFlatShading,
+            m_importedWaterDebug);
+        VOX_LOGI("app") << "imported water debug " << (m_importedWaterDebug ? "enabled" : "disabled") << " (F8)";
+    }
+    m_wasToggleImportedWaterDebugDown = toggleImportedWaterDebugDown;
+
     m_renderer.setDebugUiVisible(m_debugUiVisible);
     const bool rendererUiVisible = m_renderer.isDebugUiVisible();
     if (rendererUiVisible != m_debugUiVisible) {
@@ -1325,7 +1608,6 @@ void App::pollInput() {
         glfwSetInputMode(m_window, GLFW_CURSOR, isAnyUiVisible() ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
         m_hasMouseSample = false;
     }
-    syncGameplayUiState();
 
     m_input.quitRequested = false;
     m_input.moveForward = glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS;
@@ -1336,7 +1618,9 @@ void App::pollInput() {
     m_input.sneakDown =
         glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
         glfwGetKey(m_window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
-    m_input.moveDown = m_hoverEnabled && m_input.sneakDown;
+    m_input.moveDown = m_importedSceneDemoEnabled
+        ? m_input.sneakDown
+        : (m_hoverEnabled && m_input.sneakDown);
     m_input.sprintDown =
         glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
         glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
@@ -1344,8 +1628,6 @@ void App::pollInput() {
     m_input.regenerateWorldDown = glfwGetKey(m_window, GLFW_KEY_R) == GLFW_PRESS;
     bool controllerPlaceDown = false;
     bool controllerRemoveDown = false;
-    bool controllerPrevBlockDown = false;
-    bool controllerNextBlockDown = false;
     bool controllerMoveUpDown = false;
     bool controllerMoveDownDown = false;
     float controllerMoveForward = 0.0f;
@@ -1359,7 +1641,7 @@ void App::pollInput() {
     if (hasGamepad != m_gamepadConnected) {
         m_gamepadConnected = hasGamepad;
         if (m_gamepadConnected) {
-            VOX_LOGI("app") << "gamepad connected: RT place, LT remove, LB/RB hotbar";
+            VOX_LOGI("app") << "gamepad connected: RT place, LT remove";
         } else {
             VOX_LOGI("app") << "gamepad disconnected";
         }
@@ -1367,53 +1649,12 @@ void App::pollInput() {
     if (hasGamepad) {
         controllerPlaceDown = gamepadState.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > kGamepadTriggerPressedThreshold;
         controllerRemoveDown = gamepadState.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER] > kGamepadTriggerPressedThreshold;
-        controllerPrevBlockDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_LEFT_BUMPER] == GLFW_PRESS;
-        controllerNextBlockDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER] == GLFW_PRESS;
         controllerMoveUpDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_A] == GLFW_PRESS;
         controllerMoveDownDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_B] == GLFW_PRESS;
         controllerMoveForward = -applyStickDeadzone(gamepadState.axes[GLFW_GAMEPAD_AXIS_LEFT_Y], kGamepadMoveDeadzone);
         controllerMoveRight = applyStickDeadzone(gamepadState.axes[GLFW_GAMEPAD_AXIS_LEFT_X], kGamepadMoveDeadzone);
         controllerLookX = applyStickDeadzone(gamepadState.axes[GLFW_GAMEPAD_AXIS_RIGHT_X], kGamepadLookDeadzone);
         controllerLookY = -applyStickDeadzone(gamepadState.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y], kGamepadLookDeadzone);
-    }
-
-    const bool prevHotbarDown = controllerPrevBlockDown;
-    const bool nextHotbarDown = controllerNextBlockDown;
-    if (!m_debugUiVisible && prevHotbarDown && !m_wasPrevBlockDown) {
-        cycleSelectedHotbar(-1);
-    }
-    if (!m_debugUiVisible && nextHotbarDown && !m_wasNextBlockDown) {
-        cycleSelectedHotbar(+1);
-    }
-    m_wasPrevBlockDown = prevHotbarDown;
-    m_wasNextBlockDown = nextHotbarDown;
-
-    if (!isAnyUiVisible() && m_pendingHotbarScrollSteps != 0) {
-        const int scrollDirection = (m_pendingHotbarScrollSteps > 0) ? +1 : -1;
-        cycleSelectedHotbar(scrollDirection);
-        m_pendingHotbarScrollSteps -= scrollDirection;
-    } else if (isAnyUiVisible()) {
-        m_pendingHotbarScrollSteps = 0;
-    }
-
-    if (glfwGetKey(m_window, GLFW_KEY_1) == GLFW_PRESS) {
-        selectHotbarSlot(0);
-    } else if (glfwGetKey(m_window, GLFW_KEY_2) == GLFW_PRESS) {
-        selectHotbarSlot(1);
-    } else if (glfwGetKey(m_window, GLFW_KEY_3) == GLFW_PRESS) {
-        selectHotbarSlot(2);
-    } else if (glfwGetKey(m_window, GLFW_KEY_4) == GLFW_PRESS) {
-        selectHotbarSlot(3);
-    } else if (glfwGetKey(m_window, GLFW_KEY_5) == GLFW_PRESS) {
-        selectHotbarSlot(4);
-    } else if (glfwGetKey(m_window, GLFW_KEY_6) == GLFW_PRESS) {
-        selectHotbarSlot(5);
-    } else if (glfwGetKey(m_window, GLFW_KEY_7) == GLFW_PRESS) {
-        selectHotbarSlot(6);
-    } else if (glfwGetKey(m_window, GLFW_KEY_8) == GLFW_PRESS) {
-        selectHotbarSlot(7);
-    } else if (glfwGetKey(m_window, GLFW_KEY_9) == GLFW_PRESS) {
-        selectHotbarSlot(8);
     }
 
     m_input.placeBlockDown =
@@ -1498,6 +1739,39 @@ void App::updateCamera(float dt) {
     }
     moveForwardInput = std::clamp(moveForwardInput, -1.0f, 1.0f);
     moveRightInput = std::clamp(moveRightInput, -1.0f, 1.0f);
+
+    if (m_importedSceneDemoEnabled) {
+        moveDirection += forward * moveForwardInput;
+        moveDirection += right * moveRightInput;
+        if (m_input.moveUp) {
+            moveDirection.y += 1.0f;
+        }
+        if (m_input.moveDown) {
+            moveDirection.y -= 1.0f;
+        }
+
+        const float moveLengthSq = voxelsprout::math::lengthSquared(moveDirection);
+        if (moveLengthSq > 0.0f) {
+            moveDirection /= std::sqrt(moveLengthSq);
+        }
+
+        float moveSpeed = kImportedSceneMoveSpeed;
+        if (m_input.sprintDown) {
+            moveSpeed *= kImportedSceneSprintSpeedMultiplier;
+        }
+        if (std::fabs(moveDirection.y) > 0.0f) {
+            moveDirection.y *= (kImportedSceneVerticalMoveSpeed / kImportedSceneMoveSpeed);
+        }
+
+        m_camera.velocityX = moveDirection.x * moveSpeed;
+        m_camera.velocityY = moveDirection.y * moveSpeed;
+        m_camera.velocityZ = moveDirection.z * moveSpeed;
+        m_camera.x += m_camera.velocityX * dt;
+        m_camera.y += m_camera.velocityY * dt;
+        m_camera.z += m_camera.velocityZ * dt;
+        m_camera.onGround = false;
+        return;
+    }
 
     moveDirection += forward * moveForwardInput;
     moveDirection += right * moveRightInput;
@@ -2201,13 +2475,6 @@ void App::cycleSelectedHotbar(int direction) {
     const int currentSlot = static_cast<int>(m_gameplayUiState.selectedHotbarSlot);
     const int next = (currentSlot + direction) % hotbarSlotCount;
     selectHotbarSlot(next < 0 ? next + hotbarSlotCount : next);
-}
-
-void App::queueHotbarScroll(int direction) {
-    if (direction == 0) {
-        return;
-    }
-    m_pendingHotbarScrollSteps += direction;
 }
 
 void App::selectHotbarSlot(int hotbarIndex) {

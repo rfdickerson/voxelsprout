@@ -28,6 +28,9 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
     const bool canDrawMagica = inputs.canDrawMagica;
     const std::span<const ReadyMagicaDraw> readyMagicaDraws = inputs.readyMagicaDraws;
+    const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
+    const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
+    const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = inputs.transportInstanceCount;
@@ -168,6 +171,37 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 );
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
                 vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
+            }
+        }
+        if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&
+            importedVertexBuffer != VK_NULL_HANDLE &&
+            importedIndexBuffer != VK_NULL_HANDLE &&
+            !importedMeshDraws.empty()) {
+            const std::size_t terrainDrawCount = std::min<std::size_t>(m_importedTerrainDrawCount, importedMeshDraws.size());
+            const std::size_t staticDrawStart = terrainDrawCount;
+            const VkBuffer importedVertexBuffers[1] = {importedVertexBuffer};
+            const VkDeviceSize importedVertexOffsets[1] = {0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticNormalDepthPipeline);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout,
+                0,
+                boundDescriptorSetCount,
+                boundDescriptorSets.sets.data(),
+                1,
+                &mvpDynamicOffset
+            );
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                if ((drawIndex < terrainDrawCount && !m_debugShowImportedTerrain) ||
+                    (drawIndex >= staticDrawStart && !m_debugShowImportedStatics)) {
+                    continue;
+                }
+                const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+                countDrawCalls(m_debugDrawCallsPrepass, 1);
+                vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
             }
         }
     }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sim/simulation.h"
+#include "import/imported_scene.h"
 #include "world/chunk_grid.h"
 #include "world/chunk_mesher.h"
 #include "world/clipmap_index.h"
@@ -30,6 +31,8 @@ public:
     bool init(GLFWwindow* window, const voxelsprout::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const voxelsprout::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
+    void clearImportedSceneMeshes();
+    bool uploadImportedScene(const voxelsprout::importer::ImportedScene& scene);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
     bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
@@ -61,6 +64,14 @@ public:
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
+    void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
+    void importedSceneDebugState(
+        bool& outShowTerrain,
+        bool& outShowStatics,
+        bool& outShowTextures,
+        bool& outFlatShading,
+        bool& outWaterDebug
+    ) const;
     float cameraFovDegrees() const;
     void shutdown();
 

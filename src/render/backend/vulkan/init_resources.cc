@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -88,6 +89,12 @@ struct DdsCompressedImage {
     std::vector<DdsMipInfo> mipInfos;
 };
 
+struct DdsRgbaImage {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::vector<std::uint8_t> pixelData;
+};
+
 bool supportsBc1DiffuseAtlas(VkPhysicalDevice physicalDevice) {
     VkFormatProperties formatProperties{};
     vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, &formatProperties);
@@ -100,6 +107,15 @@ bool supportsBc1DiffuseAtlas(VkPhysicalDevice physicalDevice) {
 bool supportsBc3PlantAtlas(VkPhysicalDevice physicalDevice) {
     VkFormatProperties formatProperties{};
     vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_BC3_UNORM_BLOCK, &formatProperties);
+    const VkFormatFeatureFlags features = formatProperties.optimalTilingFeatures;
+    return
+        (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0 &&
+        (features & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) != 0;
+}
+
+bool supportsBc5WaterNormalTexture(VkPhysicalDevice physicalDevice) {
+    VkFormatProperties formatProperties{};
+    vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_BC5_UNORM_BLOCK, &formatProperties);
     const VkFormatFeatureFlags features = formatProperties.optimalTilingFeatures;
     return
         (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0 &&
@@ -183,6 +199,94 @@ bool loadCompressedDdsFile(
     return true;
 }
 
+std::uint8_t decodeDdsChannel(std::uint32_t packedPixel, std::uint32_t mask, std::uint8_t defaultValue) {
+    if (mask == 0u) {
+        return defaultValue;
+    }
+
+    const std::uint32_t shift = std::countr_zero(mask);
+    const std::uint32_t shiftedMask = mask >> shift;
+    const std::uint32_t componentBits = std::popcount(shiftedMask);
+    if (componentBits == 0u) {
+        return defaultValue;
+    }
+
+    const std::uint32_t componentValue = (packedPixel & mask) >> shift;
+    const std::uint32_t componentMax = (1u << componentBits) - 1u;
+    if (componentMax == 0u) {
+        return defaultValue;
+    }
+
+    return static_cast<std::uint8_t>((componentValue * 255u + (componentMax / 2u)) / componentMax);
+}
+
+bool loadUncompressedRgbaDdsFile(const std::filesystem::path& path, DdsRgbaImage& outImage) {
+    outImage = DdsRgbaImage{};
+
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    if (!stream) {
+        return false;
+    }
+
+    const std::streamsize fileSize = stream.tellg();
+    if (fileSize <= 0) {
+        return false;
+    }
+    stream.seekg(0, std::ios::beg);
+
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(fileSize));
+    if (!stream.read(reinterpret_cast<char*>(bytes.data()), fileSize)) {
+        return false;
+    }
+    if (bytes.size() < (4u + sizeof(DdsHeader))) {
+        return false;
+    }
+    if (std::memcmp(bytes.data(), "DDS ", 4) != 0) {
+        return false;
+    }
+
+    DdsHeader header{};
+    std::memcpy(&header, bytes.data() + 4u, sizeof(DdsHeader));
+    if (header.size != 124u || header.pixelFormat.size != 32u) {
+        return false;
+    }
+    if (header.width == 0u || header.height == 0u) {
+        return false;
+    }
+    if (header.pixelFormat.fourCc != 0u || header.pixelFormat.rgbBitCount != 32u) {
+        return false;
+    }
+
+    const std::size_t dataOffset = 4u + sizeof(DdsHeader);
+    const std::size_t pixelCount = static_cast<std::size_t>(header.width) * static_cast<std::size_t>(header.height);
+    const std::size_t firstMipSize = pixelCount * 4u;
+    if ((bytes.size() - dataOffset) < firstMipSize) {
+        return false;
+    }
+
+    outImage.width = header.width;
+    outImage.height = header.height;
+    outImage.pixelData.resize(firstMipSize);
+
+    for (std::size_t pixelIndex = 0; pixelIndex < pixelCount; ++pixelIndex) {
+        std::uint32_t packedPixel = 0u;
+        std::memcpy(
+            &packedPixel,
+            bytes.data() + dataOffset + (pixelIndex * sizeof(std::uint32_t)),
+            sizeof(std::uint32_t));
+        outImage.pixelData[pixelIndex * 4u + 0u] =
+            decodeDdsChannel(packedPixel, header.pixelFormat.rMask, 0u);
+        outImage.pixelData[pixelIndex * 4u + 1u] =
+            decodeDdsChannel(packedPixel, header.pixelFormat.gMask, 0u);
+        outImage.pixelData[pixelIndex * 4u + 2u] =
+            decodeDdsChannel(packedPixel, header.pixelFormat.bMask, 0u);
+        outImage.pixelData[pixelIndex * 4u + 3u] =
+            decodeDdsChannel(packedPixel, header.pixelFormat.aMask, 255u);
+    }
+
+    return true;
+}
+
 std::filesystem::path resolveRendererAssetPath(const std::filesystem::path& relativePath) {
     std::vector<std::filesystem::path> baseCandidates;
     baseCandidates.reserve(6);
@@ -218,6 +322,82 @@ std::filesystem::path resolveRendererAssetPath(const std::filesystem::path& rela
     return relativePath;
 }
 
+std::filesystem::path resolveMorrowindSkyTexturePath() {
+    constexpr std::array<const char*, 2> kCandidatePaths = {
+        "C:/GOG Games/Morrowind/Data Files/Textures/tx_sky_clear.dds",
+        "/mnt/c/GOG Games/Morrowind/Data Files/Textures/tx_sky_clear.dds"
+    };
+    for (const char* candidatePath : kCandidatePaths) {
+        const std::filesystem::path candidate(candidatePath);
+        std::error_code existsError;
+        if (!std::filesystem::exists(candidate, existsError) || existsError) {
+            continue;
+        }
+        std::error_code canonicalError;
+        const std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(candidate, canonicalError);
+        return canonicalError ? candidate : canonicalPath;
+    }
+    return {};
+}
+
+constexpr uint32_t kGeneratedWaterNormalTextureSize = 128u;
+
+float wrapUnit(float value) {
+    return value - std::floor(value);
+}
+
+float sampleGeneratedWaterNormalHeight(float u, float v) {
+    constexpr float kTwoPi = 6.28318530718f;
+    const float warpX =
+        std::sin(((u * 1.0f) + (v * 0.8f)) * kTwoPi) * 0.035f +
+        std::cos(((u * 2.2f) - (v * 1.7f)) * kTwoPi) * 0.018f;
+    const float warpY =
+        std::cos(((u * 0.9f) - (v * 1.1f)) * kTwoPi) * 0.032f +
+        std::sin(((u * 1.8f) + (v * 2.4f)) * kTwoPi) * 0.016f;
+    const float uu = wrapUnit(u + warpX);
+    const float vv = wrapUnit(v + warpY);
+    return
+        std::sin(((uu * 1.0f) + (vv * 0.75f)) * kTwoPi) * 0.44f +
+        std::cos(((uu * 1.65f) - (vv * 1.25f)) * kTwoPi) * 0.28f +
+        std::sin(((uu * 3.20f) + (vv * 2.65f)) * kTwoPi) * 0.14f +
+        std::cos(((uu * 4.80f) - (vv * 4.20f)) * kTwoPi) * 0.07f;
+}
+
+std::vector<std::uint8_t> generateWaterNormalTexturePixels() {
+    constexpr uint32_t kSize = kGeneratedWaterNormalTextureSize;
+    constexpr float kNormalStrength = 2.2f;
+    const float du = 1.0f / static_cast<float>(kSize);
+    const float dv = 1.0f / static_cast<float>(kSize);
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kSize) * static_cast<std::size_t>(kSize) * 4u);
+    for (uint32_t y = 0; y < kSize; ++y) {
+        for (uint32_t x = 0; x < kSize; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) * du;
+            const float v = (static_cast<float>(y) + 0.5f) * dv;
+            const float heightL = sampleGeneratedWaterNormalHeight(wrapUnit(u - du), v);
+            const float heightR = sampleGeneratedWaterNormalHeight(wrapUnit(u + du), v);
+            const float heightD = sampleGeneratedWaterNormalHeight(u, wrapUnit(v - dv));
+            const float heightU = sampleGeneratedWaterNormalHeight(u, wrapUnit(v + dv));
+            const float dHdU = (heightR - heightL) * kNormalStrength;
+            const float dHdV = (heightU - heightD) * kNormalStrength;
+            const float tangentX = -dHdU;
+            const float tangentY = -dHdV;
+            const float tangentZ = 1.0f;
+            const float invLen =
+                1.0f / std::sqrt((tangentX * tangentX) + (tangentY * tangentY) + (tangentZ * tangentZ));
+            const float packedX = (tangentX * invLen * 0.5f) + 0.5f;
+            const float packedY = (tangentY * invLen * 0.5f) + 0.5f;
+            const float packedZ = (tangentZ * invLen * 0.5f) + 0.5f;
+            const std::size_t pixelIndex =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(kSize) + static_cast<std::size_t>(x)) * 4u;
+            pixels[pixelIndex + 0u] = static_cast<std::uint8_t>(std::clamp(packedX, 0.0f, 1.0f) * 255.0f);
+            pixels[pixelIndex + 1u] = static_cast<std::uint8_t>(std::clamp(packedY, 0.0f, 1.0f) * 255.0f);
+            pixels[pixelIndex + 2u] = static_cast<std::uint8_t>(std::clamp(packedZ, 0.0f, 1.0f) * 255.0f);
+            pixels[pixelIndex + 3u] = 255u;
+        }
+    }
+    return pixels;
+}
+
 } // namespace
 
 bool RendererBackend::createEnvironmentResources() {
@@ -225,7 +405,975 @@ bool RendererBackend::createEnvironmentResources() {
         VOX_LOGE("render") << "diffuse texture creation failed\n";
         return false;
     }
-    VOX_LOGI("render") << "environment uses procedural sky + SH irradiance + diffuse albedo atlas\n";
+    if (!createMorrowindSkyTextureResources()) {
+        VOX_LOGW("render") << "Morrowind clear-weather sky texture load failed; keeping procedural sky";
+    }
+    if (!createWaterNormalTextureResources()) {
+        VOX_LOGW("render") << "generated water normal texture creation failed; keeping procedural water normals only";
+    }
+    VOX_LOGI("render") << "environment uses procedural sky; Morrowind clear-weather sky texture is staged for future sky-dome rendering when available\n";
+    return true;
+}
+
+
+bool RendererBackend::createWaterNormalTextureResources() {
+    bool hasWaterAllocation = (m_waterNormalTextureMemory != VK_NULL_HANDLE);
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        hasWaterAllocation = (m_waterNormalTextureAllocation != VK_NULL_HANDLE);
+    }
+    if (m_waterNormalTextureImage != VK_NULL_HANDLE &&
+        hasWaterAllocation &&
+        m_waterNormalTextureImageView != VK_NULL_HANDLE &&
+        m_waterNormalTextureSampler != VK_NULL_HANDLE) {
+        return true;
+    }
+
+    auto destroyWaterTextureResourcesPartial = [&]() {
+        if (m_waterNormalTextureSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(m_device, m_waterNormalTextureSampler, nullptr);
+            m_waterNormalTextureSampler = VK_NULL_HANDLE;
+        }
+        if (m_waterNormalTextureImageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, m_waterNormalTextureImageView, nullptr);
+            m_waterNormalTextureImageView = VK_NULL_HANDLE;
+        }
+        if (m_waterNormalTextureImage != VK_NULL_HANDLE) {
+            if (m_vmaAllocator != VK_NULL_HANDLE && m_waterNormalTextureAllocation != VK_NULL_HANDLE) {
+                vmaDestroyImage(m_vmaAllocator, m_waterNormalTextureImage, m_waterNormalTextureAllocation);
+                m_waterNormalTextureAllocation = VK_NULL_HANDLE;
+            } else {
+                vkDestroyImage(m_device, m_waterNormalTextureImage, nullptr);
+            }
+            m_waterNormalTextureImage = VK_NULL_HANDLE;
+        }
+        if (m_waterNormalTextureMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, m_waterNormalTextureMemory, nullptr);
+            m_waterNormalTextureMemory = VK_NULL_HANDLE;
+        }
+        m_waterNormalTextureAllocation = VK_NULL_HANDLE;
+    };
+
+    const std::filesystem::path waterNormalPath = resolveRendererAssetPath("assets/water.dds");
+    if (supportsBc5WaterNormalTexture(m_physicalDevice)) {
+        DdsCompressedImage ddsImage{};
+        if (loadCompressedDdsFile(
+                waterNormalPath,
+                makeFourCc('B', 'C', '5', 'U'),
+                VK_FORMAT_BC5_UNORM_BLOCK,
+                16u,
+                ddsImage
+            )) {
+            VkBuffer stagingBuffer = VK_NULL_HANDLE;
+            VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+            VkBufferCreateInfo stagingCreateInfo{};
+            stagingCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            stagingCreateInfo.size = static_cast<VkDeviceSize>(ddsImage.pixelData.size());
+            stagingCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            stagingCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            VkResult result = vkCreateBuffer(m_device, &stagingCreateInfo, nullptr, &stagingBuffer);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkCreateBuffer(waterNormalDdsStaging)", result);
+                return false;
+            }
+            setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(stagingBuffer), "water.normal.dds.staging.buffer");
+
+            VkMemoryRequirements stagingMemReq{};
+            vkGetBufferMemoryRequirements(m_device, stagingBuffer, &stagingMemReq);
+            uint32_t memoryTypeIndex = findMemoryTypeIndex(
+                m_physicalDevice,
+                stagingMemReq.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+            if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                VOX_LOGW("render") << "no staging memory type for DDS water normal texture";
+            } else {
+                VkMemoryAllocateInfo stagingAllocInfo{};
+                stagingAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                stagingAllocInfo.allocationSize = stagingMemReq.size;
+                stagingAllocInfo.memoryTypeIndex = memoryTypeIndex;
+                result = vkAllocateMemory(m_device, &stagingAllocInfo, nullptr, &stagingMemory);
+                if (result == VK_SUCCESS && vkBindBufferMemory(m_device, stagingBuffer, stagingMemory, 0) == VK_SUCCESS) {
+                    void* mapped = nullptr;
+                    result = vkMapMemory(
+                        m_device,
+                        stagingMemory,
+                        0,
+                        static_cast<VkDeviceSize>(ddsImage.pixelData.size()),
+                        0,
+                        &mapped
+                    );
+                    if (result == VK_SUCCESS && mapped != nullptr) {
+                        std::memcpy(mapped, ddsImage.pixelData.data(), ddsImage.pixelData.size());
+                        vkUnmapMemory(m_device, stagingMemory);
+
+                        VkImageCreateInfo imageCreateInfo{};
+                        imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+                        imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+                        imageCreateInfo.format = ddsImage.format;
+                        imageCreateInfo.extent = {ddsImage.width, ddsImage.height, 1u};
+                        imageCreateInfo.mipLevels = ddsImage.mipLevels;
+                        imageCreateInfo.arrayLayers = 1;
+                        imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+                        imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+                        imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+                        imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                        imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                        if (m_vmaAllocator != VK_NULL_HANDLE) {
+                            VmaAllocationCreateInfo allocationCreateInfo{};
+                            allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+                            allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                            result = vmaCreateImage(
+                                m_vmaAllocator,
+                                &imageCreateInfo,
+                                &allocationCreateInfo,
+                                &m_waterNormalTextureImage,
+                                &m_waterNormalTextureAllocation,
+                                nullptr
+                            );
+                        } else {
+                            result = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_waterNormalTextureImage);
+                            if (result == VK_SUCCESS) {
+                                VkMemoryRequirements imageMemReq{};
+                                vkGetImageMemoryRequirements(m_device, m_waterNormalTextureImage, &imageMemReq);
+                                memoryTypeIndex = findMemoryTypeIndex(
+                                    m_physicalDevice,
+                                    imageMemReq.memoryTypeBits,
+                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                                );
+                                if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+                                    result = VK_ERROR_FEATURE_NOT_PRESENT;
+                                } else {
+                                    VkMemoryAllocateInfo imageAllocInfo{};
+                                    imageAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                                    imageAllocInfo.allocationSize = imageMemReq.size;
+                                    imageAllocInfo.memoryTypeIndex = memoryTypeIndex;
+                                    result = vkAllocateMemory(m_device, &imageAllocInfo, nullptr, &m_waterNormalTextureMemory);
+                                    if (result == VK_SUCCESS) {
+                                        result = vkBindImageMemory(m_device, m_waterNormalTextureImage, m_waterNormalTextureMemory, 0);
+                                    }
+                                }
+                            }
+                        }
+
+                        if (result == VK_SUCCESS) {
+                            setObjectName(
+                                VK_OBJECT_TYPE_IMAGE,
+                                vkHandleToUint64(m_waterNormalTextureImage),
+                                "water.normal.image"
+                            );
+
+                            VkCommandPool commandPool = VK_NULL_HANDLE;
+                            VkCommandPoolCreateInfo commandPoolCreateInfo{};
+                            commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+                            commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+                            commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+                            result = vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool);
+                            if (result == VK_SUCCESS) {
+                                VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+                                VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
+                                commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+                                commandBufferAllocateInfo.commandPool = commandPool;
+                                commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                                commandBufferAllocateInfo.commandBufferCount = 1;
+                                result = vkAllocateCommandBuffers(m_device, &commandBufferAllocateInfo, &commandBuffer);
+                                if (result == VK_SUCCESS) {
+                                    VkCommandBufferBeginInfo beginInfo{};
+                                    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                                    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                                    result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+                                    if (result == VK_SUCCESS) {
+                                        VkImageMemoryBarrier barrier{};
+                                        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                                        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                                        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                                        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                        barrier.image = m_waterNormalTextureImage;
+                                        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                                        barrier.subresourceRange.baseMipLevel = 0;
+                                        barrier.subresourceRange.levelCount = ddsImage.mipLevels;
+                                        barrier.subresourceRange.baseArrayLayer = 0;
+                                        barrier.subresourceRange.layerCount = 1;
+                                        barrier.srcAccessMask = 0;
+                                        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                                        vkCmdPipelineBarrier(
+                                            commandBuffer,
+                                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                            0,
+                                            0,
+                                            nullptr,
+                                            0,
+                                            nullptr,
+                                            1,
+                                            &barrier
+                                        );
+
+                                        std::vector<VkBufferImageCopy> copyRegions;
+                                        copyRegions.reserve(ddsImage.mipInfos.size());
+                                        for (const DdsMipInfo& mipInfo : ddsImage.mipInfos) {
+                                            VkBufferImageCopy copyRegion{};
+                                            copyRegion.bufferOffset = mipInfo.offset;
+                                            copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                                            copyRegion.imageSubresource.mipLevel =
+                                                static_cast<uint32_t>(copyRegions.size());
+                                            copyRegion.imageSubresource.baseArrayLayer = 0;
+                                            copyRegion.imageSubresource.layerCount = 1;
+                                            copyRegion.imageExtent = {mipInfo.width, mipInfo.height, 1u};
+                                            copyRegions.push_back(copyRegion);
+                                        }
+                                        vkCmdCopyBufferToImage(
+                                            commandBuffer,
+                                            stagingBuffer,
+                                            m_waterNormalTextureImage,
+                                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                            static_cast<uint32_t>(copyRegions.size()),
+                                            copyRegions.data()
+                                        );
+
+                                        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                                        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                                        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                                        vkCmdPipelineBarrier(
+                                            commandBuffer,
+                                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                            0,
+                                            0,
+                                            nullptr,
+                                            0,
+                                            nullptr,
+                                            1,
+                                            &barrier
+                                        );
+
+                                        result = vkEndCommandBuffer(commandBuffer);
+                                        if (result == VK_SUCCESS) {
+                                            VkSubmitInfo submitInfo{};
+                                            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                                            submitInfo.commandBufferCount = 1;
+                                            submitInfo.pCommandBuffers = &commandBuffer;
+                                            result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+                                            if (result == VK_SUCCESS) {
+                                                result = vkQueueWaitIdle(m_graphicsQueue);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (result == VK_SUCCESS) {
+                                VkImageViewCreateInfo viewCreateInfo{};
+                                viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                                viewCreateInfo.image = m_waterNormalTextureImage;
+                                viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                                viewCreateInfo.format = ddsImage.format;
+                                viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                                viewCreateInfo.subresourceRange.baseMipLevel = 0;
+                                viewCreateInfo.subresourceRange.levelCount = ddsImage.mipLevels;
+                                viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+                                viewCreateInfo.subresourceRange.layerCount = 1;
+                                result = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_waterNormalTextureImageView);
+                            }
+                            if (result == VK_SUCCESS) {
+                                setObjectName(
+                                    VK_OBJECT_TYPE_IMAGE_VIEW,
+                                    vkHandleToUint64(m_waterNormalTextureImageView),
+                                    "water.normal.view"
+                                );
+                                VkSamplerCreateInfo samplerCreateInfo{};
+                                samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+                                samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+                                samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+                                samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+                                samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+                                samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+                                samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+                                samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
+                                samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
+                                    ? std::min(8.0f, m_maxSamplerAnisotropy)
+                                    : 1.0f;
+                                samplerCreateInfo.minLod = 0.0f;
+                                samplerCreateInfo.maxLod = static_cast<float>(ddsImage.mipLevels - 1u);
+                                result = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_waterNormalTextureSampler);
+                                if (result == VK_SUCCESS) {
+                                    setObjectName(
+                                        VK_OBJECT_TYPE_SAMPLER,
+                                        vkHandleToUint64(m_waterNormalTextureSampler),
+                                        "water.normal.sampler"
+                                    );
+                                    VOX_LOGI("render") << "water normal texture loaded from "
+                                                       << waterNormalPath.string()
+                                                       << ": " << ddsImage.width << "x" << ddsImage.height
+                                                       << ", mips=" << ddsImage.mipLevels
+                                                       << ", format=BC5";
+                                }
+                            }
+                            if (result != VK_SUCCESS) {
+                                destroyWaterTextureResourcesPartial();
+                            }
+                            if (commandPool != VK_NULL_HANDLE) {
+                                vkDestroyCommandPool(m_device, commandPool, nullptr);
+                            }
+                        } else {
+                            destroyWaterTextureResourcesPartial();
+                        }
+                    }
+                }
+                if (stagingMemory != VK_NULL_HANDLE) {
+                    vkFreeMemory(m_device, stagingMemory, nullptr);
+                }
+                vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+                if (m_waterNormalTextureSampler != VK_NULL_HANDLE &&
+                    m_waterNormalTextureImageView != VK_NULL_HANDLE &&
+                    m_waterNormalTextureImage != VK_NULL_HANDLE) {
+                    return true;
+                }
+                VOX_LOGW("render") << "failed to upload DDS water normal texture " << waterNormalPath.string()
+                                   << "; falling back to generated normal";
+            }
+        } else if (!waterNormalPath.empty()) {
+            VOX_LOGW("render") << "failed to parse DDS water normal texture " << waterNormalPath.string()
+                               << "; falling back to generated normal";
+        }
+    } else {
+        VOX_LOGW("render") << "BC5 water normal textures unsupported on this GPU; falling back to generated normal";
+    }
+
+    const std::vector<std::uint8_t> pixelData = generateWaterNormalTexturePixels();
+    const VkDeviceSize textureBytes = static_cast<VkDeviceSize>(pixelData.size());
+
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    VkBufferCreateInfo stagingCreateInfo{};
+    stagingCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingCreateInfo.size = textureBytes;
+    stagingCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkResult result = vkCreateBuffer(m_device, &stagingCreateInfo, nullptr, &stagingBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateBuffer(waterNormalStaging)", result);
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(stagingBuffer), "water.normal.staging.buffer");
+
+    VkMemoryRequirements stagingMemReq{};
+    vkGetBufferMemoryRequirements(m_device, stagingBuffer, &stagingMemReq);
+    uint32_t memoryTypeIndex = findMemoryTypeIndex(
+        m_physicalDevice,
+        stagingMemReq.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        VOX_LOGW("render") << "no staging memory type for water normal texture";
+        return false;
+    }
+
+    VkMemoryAllocateInfo stagingAllocInfo{};
+    stagingAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    stagingAllocInfo.allocationSize = stagingMemReq.size;
+    stagingAllocInfo.memoryTypeIndex = memoryTypeIndex;
+    result = vkAllocateMemory(m_device, &stagingAllocInfo, nullptr, &stagingMemory);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkAllocateMemory(waterNormalStaging)", result);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    result = vkBindBufferMemory(m_device, stagingBuffer, stagingMemory, 0);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkBindBufferMemory(waterNormalStaging)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    void* mapped = nullptr;
+    result = vkMapMemory(m_device, stagingMemory, 0, textureBytes, 0, &mapped);
+    if (result != VK_SUCCESS || mapped == nullptr) {
+        logVkFailure("vkMapMemory(waterNormalStaging)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    std::memcpy(mapped, pixelData.data(), pixelData.size());
+    vkUnmapMemory(m_device, stagingMemory);
+
+    VkImageCreateInfo imageCreateInfo{};
+    imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageCreateInfo.extent = {kGeneratedWaterNormalTextureSize, kGeneratedWaterNormalTextureSize, 1u};
+    imageCreateInfo.mipLevels = 1;
+    imageCreateInfo.arrayLayers = 1;
+    imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        VmaAllocationCreateInfo allocationCreateInfo{};
+        allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        result = vmaCreateImage(
+            m_vmaAllocator,
+            &imageCreateInfo,
+            &allocationCreateInfo,
+            &m_waterNormalTextureImage,
+            &m_waterNormalTextureAllocation,
+            nullptr);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vmaCreateImage(waterNormal)", result);
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+    } else {
+        result = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_waterNormalTextureImage);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(waterNormal)", result);
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+        VkMemoryRequirements imageMemReq{};
+        vkGetImageMemoryRequirements(m_device, m_waterNormalTextureImage, &imageMemReq);
+        memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice,
+            imageMemReq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            vkDestroyImage(m_device, m_waterNormalTextureImage, nullptr);
+            m_waterNormalTextureImage = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            VOX_LOGW("render") << "no device-local memory for water normal texture";
+            return false;
+        }
+        VkMemoryAllocateInfo imageAllocInfo{};
+        imageAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        imageAllocInfo.allocationSize = imageMemReq.size;
+        imageAllocInfo.memoryTypeIndex = memoryTypeIndex;
+        result = vkAllocateMemory(m_device, &imageAllocInfo, nullptr, &m_waterNormalTextureMemory);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(waterNormal)", result);
+            vkDestroyImage(m_device, m_waterNormalTextureImage, nullptr);
+            m_waterNormalTextureImage = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+        result = vkBindImageMemory(m_device, m_waterNormalTextureImage, m_waterNormalTextureMemory, 0);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(waterNormal)", result);
+            vkDestroyImage(m_device, m_waterNormalTextureImage, nullptr);
+            m_waterNormalTextureImage = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, m_waterNormalTextureMemory, nullptr);
+            m_waterNormalTextureMemory = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+    }
+    setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_waterNormalTextureImage), "water.normal.image");
+
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    result = vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateCommandPool(waterNormalUpload)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
+    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    commandBufferAllocateInfo.commandPool = commandPool;
+    commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandBufferAllocateInfo.commandBufferCount = 1;
+    result = vkAllocateCommandBuffers(m_device, &commandBufferAllocateInfo, &commandBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkAllocateCommandBuffers(waterNormalUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkBeginCommandBuffer(waterNormalUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = m_waterNormalTextureImage;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+
+    VkBufferImageCopy copyRegion{};
+    copyRegion.bufferOffset = 0;
+    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyRegion.imageSubresource.mipLevel = 0;
+    copyRegion.imageSubresource.baseArrayLayer = 0;
+    copyRegion.imageSubresource.layerCount = 1;
+    copyRegion.imageExtent = {kGeneratedWaterNormalTextureSize, kGeneratedWaterNormalTextureSize, 1u};
+    vkCmdCopyBufferToImage(
+        commandBuffer,
+        stagingBuffer,
+        m_waterNormalTextureImage,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &copyRegion);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+
+    result = vkEndCommandBuffer(commandBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkEndCommandBuffer(waterNormalUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkQueueSubmit(waterNormalUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    result = vkQueueWaitIdle(m_graphicsQueue);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkQueueWaitIdle(waterNormalUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    vkDestroyCommandPool(m_device, commandPool, nullptr);
+    vkFreeMemory(m_device, stagingMemory, nullptr);
+    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+
+    VkImageViewCreateInfo viewCreateInfo{};
+    viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCreateInfo.image = m_waterNormalTextureImage;
+    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCreateInfo.subresourceRange.baseMipLevel = 0;
+    viewCreateInfo.subresourceRange.levelCount = 1;
+    viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+    viewCreateInfo.subresourceRange.layerCount = 1;
+    result = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_waterNormalTextureImageView);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateImageView(waterNormal)", result);
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_waterNormalTextureImageView), "water.normal.view");
+
+    VkSamplerCreateInfo samplerCreateInfo{};
+    samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.minLod = 0.0f;
+    samplerCreateInfo.maxLod = 0.0f;
+    samplerCreateInfo.maxAnisotropy = 1.0f;
+    result = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_waterNormalTextureSampler);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateSampler(waterNormal)", result);
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_SAMPLER, vkHandleToUint64(m_waterNormalTextureSampler), "water.normal.sampler");
+    VOX_LOGI("render") << "generated subtle water normal texture ready: "
+                       << kGeneratedWaterNormalTextureSize << "x" << kGeneratedWaterNormalTextureSize;
+    return true;
+}
+
+
+bool RendererBackend::createMorrowindSkyTextureResources() {
+    bool hasSkyAllocation = (m_morrowindSkyTextureMemory != VK_NULL_HANDLE);
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        hasSkyAllocation = (m_morrowindSkyTextureAllocation != VK_NULL_HANDLE);
+    }
+    if (m_morrowindSkyTextureImage != VK_NULL_HANDLE &&
+        hasSkyAllocation &&
+        m_morrowindSkyTextureImageView != VK_NULL_HANDLE &&
+        m_morrowindSkyTextureSampler != VK_NULL_HANDLE) {
+        return true;
+    }
+
+    const std::filesystem::path skyTexturePath = resolveMorrowindSkyTexturePath();
+    if (skyTexturePath.empty()) {
+        VOX_LOGI("render") << "Morrowind clear-weather sky texture not found; using procedural sky fallback";
+        return true;
+    }
+
+    DdsRgbaImage ddsImage{};
+    if (!loadUncompressedRgbaDdsFile(skyTexturePath, ddsImage)) {
+        VOX_LOGW("render") << "failed to parse Morrowind sky texture " << skyTexturePath.string();
+        return true;
+    }
+
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    VkBufferCreateInfo stagingCreateInfo{};
+    stagingCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingCreateInfo.size = static_cast<VkDeviceSize>(ddsImage.pixelData.size());
+    stagingCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkResult result = vkCreateBuffer(m_device, &stagingCreateInfo, nullptr, &stagingBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateBuffer(morrowindSkyStaging)", result);
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(stagingBuffer), "sky.morrowind.staging.buffer");
+
+    VkMemoryRequirements stagingMemReq{};
+    vkGetBufferMemoryRequirements(m_device, stagingBuffer, &stagingMemReq);
+    uint32_t memoryTypeIndex = findMemoryTypeIndex(
+        m_physicalDevice,
+        stagingMemReq.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        VOX_LOGW("render") << "no staging memory type for Morrowind sky texture";
+        return true;
+    }
+
+    VkMemoryAllocateInfo stagingAllocInfo{};
+    stagingAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    stagingAllocInfo.allocationSize = stagingMemReq.size;
+    stagingAllocInfo.memoryTypeIndex = memoryTypeIndex;
+    result = vkAllocateMemory(m_device, &stagingAllocInfo, nullptr, &stagingMemory);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkAllocateMemory(morrowindSkyStaging)", result);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    result = vkBindBufferMemory(m_device, stagingBuffer, stagingMemory, 0);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkBindBufferMemory(morrowindSkyStaging)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    void* mapped = nullptr;
+    result = vkMapMemory(m_device, stagingMemory, 0, stagingCreateInfo.size, 0, &mapped);
+    if (result != VK_SUCCESS || mapped == nullptr) {
+        logVkFailure("vkMapMemory(morrowindSkyStaging)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    std::memcpy(mapped, ddsImage.pixelData.data(), ddsImage.pixelData.size());
+    vkUnmapMemory(m_device, stagingMemory);
+
+    VkImageCreateInfo imageCreateInfo{};
+    imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageCreateInfo.extent = {ddsImage.width, ddsImage.height, 1};
+    imageCreateInfo.mipLevels = 1;
+    imageCreateInfo.arrayLayers = 1;
+    imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        VmaAllocationCreateInfo allocationCreateInfo{};
+        allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        result = vmaCreateImage(
+            m_vmaAllocator,
+            &imageCreateInfo,
+            &allocationCreateInfo,
+            &m_morrowindSkyTextureImage,
+            &m_morrowindSkyTextureAllocation,
+            nullptr);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vmaCreateImage(morrowindSky)", result);
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+    } else {
+        result = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_morrowindSkyTextureImage);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(morrowindSky)", result);
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+        VkMemoryRequirements imageMemReq{};
+        vkGetImageMemoryRequirements(m_device, m_morrowindSkyTextureImage, &imageMemReq);
+        memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice,
+            imageMemReq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            vkDestroyImage(m_device, m_morrowindSkyTextureImage, nullptr);
+            m_morrowindSkyTextureImage = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            VOX_LOGW("render") << "no device-local memory for Morrowind sky texture";
+            return true;
+        }
+        VkMemoryAllocateInfo imageAllocInfo{};
+        imageAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        imageAllocInfo.allocationSize = imageMemReq.size;
+        imageAllocInfo.memoryTypeIndex = memoryTypeIndex;
+        result = vkAllocateMemory(m_device, &imageAllocInfo, nullptr, &m_morrowindSkyTextureMemory);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(morrowindSky)", result);
+            vkDestroyImage(m_device, m_morrowindSkyTextureImage, nullptr);
+            m_morrowindSkyTextureImage = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+        result = vkBindImageMemory(m_device, m_morrowindSkyTextureImage, m_morrowindSkyTextureMemory, 0);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(morrowindSky)", result);
+            vkDestroyImage(m_device, m_morrowindSkyTextureImage, nullptr);
+            m_morrowindSkyTextureImage = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, m_morrowindSkyTextureMemory, nullptr);
+            m_morrowindSkyTextureMemory = VK_NULL_HANDLE;
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+    }
+    setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_morrowindSkyTextureImage), "sky.morrowind.image");
+
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    result = vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateCommandPool(morrowindSkyUpload)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
+    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    commandBufferAllocateInfo.commandPool = commandPool;
+    commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandBufferAllocateInfo.commandBufferCount = 1;
+    result = vkAllocateCommandBuffers(m_device, &commandBufferAllocateInfo, &commandBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkAllocateCommandBuffers(morrowindSkyUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkBeginCommandBuffer(morrowindSkyUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = m_morrowindSkyTextureImage;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+
+    VkBufferImageCopy copyRegion{};
+    copyRegion.bufferOffset = 0;
+    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyRegion.imageSubresource.mipLevel = 0;
+    copyRegion.imageSubresource.baseArrayLayer = 0;
+    copyRegion.imageSubresource.layerCount = 1;
+    copyRegion.imageExtent = {ddsImage.width, ddsImage.height, 1};
+    vkCmdCopyBufferToImage(
+        commandBuffer,
+        stagingBuffer,
+        m_morrowindSkyTextureImage,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &copyRegion);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+
+    result = vkEndCommandBuffer(commandBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkEndCommandBuffer(morrowindSkyUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkQueueSubmit(morrowindSkyUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    result = vkQueueWaitIdle(m_graphicsQueue);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkQueueWaitIdle(morrowindSkyUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    vkDestroyCommandPool(m_device, commandPool, nullptr);
+    vkFreeMemory(m_device, stagingMemory, nullptr);
+    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+
+    VkImageViewCreateInfo viewCreateInfo{};
+    viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCreateInfo.image = m_morrowindSkyTextureImage;
+    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCreateInfo.subresourceRange.baseMipLevel = 0;
+    viewCreateInfo.subresourceRange.levelCount = 1;
+    viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+    viewCreateInfo.subresourceRange.layerCount = 1;
+    result = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_morrowindSkyTextureImageView);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateImageView(morrowindSky)", result);
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_morrowindSkyTextureImageView), "sky.morrowind.view");
+
+    VkSamplerCreateInfo samplerCreateInfo{};
+    samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.minLod = 0.0f;
+    samplerCreateInfo.maxLod = 0.0f;
+    samplerCreateInfo.maxAnisotropy = 1.0f;
+    result = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_morrowindSkyTextureSampler);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateSampler(morrowindSky)", result);
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_SAMPLER, vkHandleToUint64(m_morrowindSkyTextureSampler), "sky.morrowind.sampler");
+    VOX_LOGI("render") << "Morrowind clear-weather sky texture loaded from " << skyTexturePath.string()
+                       << ": " << ddsImage.width << "x" << ddsImage.height
+                       << ", rgba8 (not applied until sky-dome mesh rendering is implemented)";
     return true;
 }
 
@@ -2782,6 +3930,50 @@ void RendererBackend::destroyEnvironmentResources() {
 
 
 void RendererBackend::destroyDiffuseTextureResources() {
+    if (m_waterNormalTextureSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_waterNormalTextureSampler, nullptr);
+        m_waterNormalTextureSampler = VK_NULL_HANDLE;
+    }
+    if (m_waterNormalTextureImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, m_waterNormalTextureImageView, nullptr);
+        m_waterNormalTextureImageView = VK_NULL_HANDLE;
+    }
+    if (m_waterNormalTextureImage != VK_NULL_HANDLE) {
+        if (m_vmaAllocator != VK_NULL_HANDLE && m_waterNormalTextureAllocation != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, m_waterNormalTextureImage, m_waterNormalTextureAllocation);
+            m_waterNormalTextureAllocation = VK_NULL_HANDLE;
+        } else {
+            vkDestroyImage(m_device, m_waterNormalTextureImage, nullptr);
+        }
+        m_waterNormalTextureImage = VK_NULL_HANDLE;
+    }
+    if (m_waterNormalTextureMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, m_waterNormalTextureMemory, nullptr);
+        m_waterNormalTextureMemory = VK_NULL_HANDLE;
+    }
+    m_waterNormalTextureAllocation = VK_NULL_HANDLE;
+    if (m_morrowindSkyTextureSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_morrowindSkyTextureSampler, nullptr);
+        m_morrowindSkyTextureSampler = VK_NULL_HANDLE;
+    }
+    if (m_morrowindSkyTextureImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, m_morrowindSkyTextureImageView, nullptr);
+        m_morrowindSkyTextureImageView = VK_NULL_HANDLE;
+    }
+    if (m_morrowindSkyTextureImage != VK_NULL_HANDLE) {
+        if (m_vmaAllocator != VK_NULL_HANDLE && m_morrowindSkyTextureAllocation != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, m_morrowindSkyTextureImage, m_morrowindSkyTextureAllocation);
+            m_morrowindSkyTextureAllocation = VK_NULL_HANDLE;
+        } else {
+            vkDestroyImage(m_device, m_morrowindSkyTextureImage, nullptr);
+        }
+        m_morrowindSkyTextureImage = VK_NULL_HANDLE;
+    }
+    if (m_morrowindSkyTextureMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, m_morrowindSkyTextureMemory, nullptr);
+        m_morrowindSkyTextureMemory = VK_NULL_HANDLE;
+    }
+    m_morrowindSkyTextureAllocation = VK_NULL_HANDLE;
     if (m_diffuseTexturePlantSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device, m_diffuseTexturePlantSampler, nullptr);
         m_diffuseTexturePlantSampler = VK_NULL_HANDLE;

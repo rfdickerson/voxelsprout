@@ -30,6 +30,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
     const bool canDrawMagica = inputs.canDrawMagica;
     const std::span<const ReadyMagicaDraw> readyMagicaDraws = inputs.readyMagicaDraws;
+    const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
+    const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
+    const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = inputs.transportInstanceCount;
@@ -39,9 +42,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VoxelPreview& preview = *inputs.preview;
     const bool useRtMainShadows =
         m_shadowStats.activeMode == ShadowMode::RayTraced &&
-        m_shadowStats.mainPassRayTracingReady &&
-        m_pipelineRt != VK_NULL_HANDLE &&
-        m_magicaPipelineRt != VK_NULL_HANDLE;
+        m_shadowStats.mainPassRayTracingReady;
+    const bool useRtVoxelShadows = useRtMainShadows && m_pipelineRt != VK_NULL_HANDLE;
+    const bool useRtMagicaShadows = useRtMainShadows && m_magicaPipelineRt != VK_NULL_HANDLE;
     m_shadowStats.mainPassRayTracingActive = useRtMainShadows;
 
     if (useRtMainShadows) {
@@ -169,7 +172,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, useRtMainShadows ? m_pipelineRt : m_pipeline);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, useRtVoxelShadows ? m_pipelineRt : m_pipeline);
     vkCmdBindDescriptorSets(
         commandBuffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -209,7 +212,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdBindPipeline(
             commandBuffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
-            useRtMainShadows ? m_magicaPipelineRt : m_magicaPipeline
+            useRtMagicaShadows ? m_magicaPipelineRt : m_magicaPipeline
         );
         vkCmdBindDescriptorSets(
             commandBuffer,
@@ -246,6 +249,56 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             );
             countDrawCalls(m_debugDrawCallsMain, 1);
             vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
+        }
+    }
+    if (m_importedStaticPipeline != VK_NULL_HANDLE &&
+        importedVertexBuffer != VK_NULL_HANDLE &&
+        importedIndexBuffer != VK_NULL_HANDLE &&
+        !importedMeshDraws.empty()) {
+        const std::size_t terrainDrawCount = std::min<std::size_t>(m_importedTerrainDrawCount, importedMeshDraws.size());
+        const std::size_t staticDrawStart = terrainDrawCount;
+        const bool drawTerrain = m_debugShowImportedTerrain;
+        const bool drawStatics = m_debugShowImportedStatics;
+        const VkBuffer importedVertexBuffers[1] = {importedVertexBuffer};
+        const VkDeviceSize importedVertexOffsets[1] = {0};
+        vkCmdBindPipeline(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                ? m_importedStaticPipelineRt
+                : m_importedStaticPipeline
+        );
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            boundDescriptorSetCount,
+            boundDescriptorSets.sets.data(),
+            1,
+            &mvpDynamicOffset
+        );
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
+        vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        ChunkPushConstants importedPushConstants{};
+        importedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
+        importedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
+        vkCmdPushConstants(
+            commandBuffer,
+            m_pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(ChunkPushConstants),
+            &importedPushConstants
+        );
+        for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+            if ((drawIndex < terrainDrawCount && !drawTerrain) ||
+                (drawIndex >= staticDrawStart && !drawStatics)) {
+                continue;
+            }
+            const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
         }
     }
 
@@ -333,6 +386,51 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
             countDrawCalls(m_debugDrawCallsMain, 1);
             vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
+        }
+    }
+
+    if (m_importedWaterPipeline != VK_NULL_HANDLE &&
+        m_importedWaterVertexBufferHandle != kInvalidBufferHandle &&
+        m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
+        m_importedWaterIndexCount > 0) {
+        const VkBuffer waterVertexBuffer = m_bufferAllocator.getBuffer(m_importedWaterVertexBufferHandle);
+        const VkBuffer waterIndexBuffer = m_bufferAllocator.getBuffer(m_importedWaterIndexBufferHandle);
+        if (waterVertexBuffer != VK_NULL_HANDLE && waterIndexBuffer != VK_NULL_HANDLE) {
+            const bool useRtWaterReflections =
+                m_rayTracingRuntimeEnabled &&
+                m_rtTlas.handle != VK_NULL_HANDLE &&
+                m_importedWaterPipelineRt != VK_NULL_HANDLE;
+            const VkBuffer waterVertexBuffers[1] = {waterVertexBuffer};
+            const VkDeviceSize waterVertexOffsets[1] = {0};
+            vkCmdBindPipeline(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                useRtWaterReflections ? m_importedWaterPipelineRt : m_importedWaterPipeline
+            );
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout,
+                0,
+                boundDescriptorSetCount,
+                boundDescriptorSets.sets.data(),
+                1,
+                &mvpDynamicOffset
+            );
+            ChunkPushConstants waterPushConstants{};
+            waterPushConstants.cascadeData[2] = m_debugImportedWaterSolid ? 1.0f : 0.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &waterPushConstants
+            );
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, waterVertexBuffers, waterVertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, waterIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDrawIndexed(commandBuffer, m_importedWaterIndexCount, 1, 0, 0, 0);
         }
     }
     const VkPipeline activePreviewPipeline =
