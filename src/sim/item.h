@@ -3,10 +3,10 @@
 // Simulation Item subsystem
 // Responsible for: defining a minimal item data placeholder for factory entities.
 // Should NOT do: inventory rules, transport logic, or serialization yet.
-namespace voxelsprout::sim {
+namespace odai::sim {
 
 struct Item {
     int id = 0;
 };
 
-} // namespace voxelsprout::sim
+} // namespace odai::sim

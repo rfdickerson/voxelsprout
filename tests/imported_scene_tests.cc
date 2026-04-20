@@ -26,15 +26,15 @@ void expectNear(float actual, float expected, float epsilon, const char* message
 
 void testImportedSceneSerialization() {
     namespace fs = std::filesystem;
-    using voxelsprout::importer::ImportedScene;
-    using voxelsprout::importer::ImportedSceneCellRef;
-    using voxelsprout::importer::ImportedSceneInstance;
-    using voxelsprout::importer::ImportedSceneLandscapeCell;
-    using voxelsprout::importer::ImportedSceneMesh;
-    using voxelsprout::importer::ImportedSceneMeshPart;
-    using voxelsprout::importer::ImportedSceneTexture;
-    using voxelsprout::importer::ImportedSceneVertex;
-    using voxelsprout::importer::ImportedSceneWaterPatch;
+    using odai::importer::ImportedScene;
+    using odai::importer::ImportedSceneCellRef;
+    using odai::importer::ImportedSceneInstance;
+    using odai::importer::ImportedSceneLandscapeCell;
+    using odai::importer::ImportedSceneMesh;
+    using odai::importer::ImportedSceneMeshPart;
+    using odai::importer::ImportedSceneTexture;
+    using odai::importer::ImportedSceneVertex;
+    using odai::importer::ImportedSceneWaterPatch;
 
     ImportedScene scene{};
     scene.sourceTag = "synthetic_scene";
@@ -99,15 +99,15 @@ void testImportedSceneSerialization() {
     instance.sourceId = "ex_hlaalu_b_01";
     instance.modelPath = "x/ex_hlaalu_b_01.nif";
     scene.instances.push_back(instance);
-    voxelsprout::importer::buildImportedScenePackedRenderData(scene);
+    odai::importer::buildImportedScenePackedRenderData(scene);
 
-    const fs::path scenePath = fs::temp_directory_path() / "voxelsprout_imported_scene_roundtrip.bin";
-    const fs::path objPath = fs::temp_directory_path() / "voxelsprout_imported_scene_roundtrip.obj";
+    const fs::path scenePath = fs::temp_directory_path() / "odai_imported_scene_roundtrip.bin";
+    const fs::path objPath = fs::temp_directory_path() / "odai_imported_scene_roundtrip.obj";
 
-    expectTrue(voxelsprout::importer::saveImportedScene(scene, scenePath), "Imported scene saves");
+    expectTrue(odai::importer::saveImportedScene(scene, scenePath), "Imported scene saves");
 
     ImportedScene loaded{};
-    expectTrue(voxelsprout::importer::loadImportedScene(scenePath, loaded), "Imported scene loads");
+    expectTrue(odai::importer::loadImportedScene(scenePath, loaded), "Imported scene loads");
     expectTrue(loaded.sourceTag == scene.sourceTag, "Imported scene source tag round-trips");
     expectTrue(loaded.textures.size() == 1u, "Imported scene texture count round-trips");
     expectTrue(loaded.meshes.size() == 1u, "Imported scene mesh count round-trips");
@@ -127,7 +127,7 @@ void testImportedSceneSerialization() {
     expectNear(loaded.waterPatches.front().waterLevel, waterPatch.waterLevel, 1e-6f, "Imported scene water patch level round-trips");
 
     ImportedScene runtimeLoaded{};
-    expectTrue(voxelsprout::importer::loadImportedSceneRuntime(scenePath, runtimeLoaded), "Imported scene runtime loader works");
+    expectTrue(odai::importer::loadImportedSceneRuntime(scenePath, runtimeLoaded), "Imported scene runtime loader works");
     expectTrue(runtimeLoaded.sourceMeshCount == 1u, "Imported scene runtime loader keeps mesh count metadata");
     expectTrue(runtimeLoaded.sourceInstanceCount == 1u, "Imported scene runtime loader keeps instance count metadata");
     expectTrue(runtimeLoaded.meshes.empty(), "Imported scene runtime loader skips full meshes");
@@ -140,7 +140,7 @@ void testImportedSceneSerialization() {
     expectTrue(!runtimeLoaded.packedDraws.empty(), "Imported scene runtime loader reads packed draws");
     expectTrue(runtimeLoaded.boundsMax[0] >= runtimeLoaded.boundsMin[0], "Imported scene runtime loader reads bounds");
 
-    expectTrue(voxelsprout::importer::exportImportedSceneTerrainObj(loaded, objPath), "Imported scene OBJ export succeeds");
+    expectTrue(odai::importer::exportImportedSceneTerrainObj(loaded, objPath), "Imported scene OBJ export succeeds");
     expectTrue(fs::exists(objPath), "Imported scene OBJ export writes a file");
     expectTrue(fs::file_size(objPath) > 0u, "Imported scene OBJ export file is non-empty");
 

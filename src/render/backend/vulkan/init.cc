@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
@@ -93,7 +93,7 @@ void appendDeviceExtensionIfMissing(std::vector<const char*>& extensions, const 
 }
 
 
-bool RendererBackend::init(GLFWwindow* window, const voxelsprout::world::ChunkGrid& chunkGrid) {
+bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid) {
     using Clock = std::chrono::steady_clock;
     const auto initStart = Clock::now();
     auto elapsedMs = [](const Clock::time_point& start) -> std::int64_t {
@@ -373,7 +373,7 @@ bool RendererBackend::createInstance() {
 
     VkApplicationInfo applicationInfo{};
     applicationInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    applicationInfo.pApplicationName = "voxel_factory_toy";
+    applicationInfo.pApplicationName = "odai";
     applicationInfo.applicationVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
     applicationInfo.pEngineName = "none";
     applicationInfo.engineVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
@@ -1366,14 +1366,14 @@ bool RendererBackend::createPreviewBuffers() {
         return true;
     }
 
-    const voxelsprout::world::ChunkMeshData addMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 15, 250);
-    const voxelsprout::world::ChunkMeshData removeMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 15, 251);
+    const odai::world::ChunkMeshData addMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 15, 250);
+    const odai::world::ChunkMeshData removeMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 15, 251);
     if (addMesh.vertices.empty() || addMesh.indices.empty() || removeMesh.vertices.empty() || removeMesh.indices.empty()) {
         VOX_LOGE("render") << "preview mesh build failed\n";
         return false;
     }
 
-    voxelsprout::world::ChunkMeshData mesh{};
+    odai::world::ChunkMeshData mesh{};
     mesh.vertices = addMesh.vertices;
     mesh.indices = addMesh.indices;
     mesh.vertices.insert(mesh.vertices.end(), removeMesh.vertices.begin(), removeMesh.vertices.end());
@@ -1409,7 +1409,7 @@ bool RendererBackend::createPreviewBuffers() {
     }
 
     BufferCreateDesc vertexCreateDesc{};
-    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(voxelsprout::world::PackedVoxelVertex));
+    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(odai::world::PackedVoxelVertex));
     vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     vertexCreateDesc.initialData = mesh.vertices.data();
@@ -2095,7 +2095,7 @@ void RendererBackend::shutdown() {
     m_shadowSettings = {};
     m_shadowStats = {};
     m_rtShaderVariantFileAvailable = false;
-    m_chunkMeshingOptions = voxelsprout::world::MeshingOptions{};
+    m_chunkMeshingOptions = odai::world::MeshingOptions{};
     m_chunkMeshRebuildRequested = false;
     m_pendingChunkRemeshKeys.clear();
     m_gpuTimestampsSupported = false;
@@ -2157,7 +2157,7 @@ void RendererBackend::shutdown() {
     m_debugChunkLastRemeshMs = 0.0f;
     m_debugChunkLastFullRemeshMs = 0.0f;
     m_debugEnableSpatialQueries = true;
-    m_debugClipmapConfig = voxelsprout::world::ClipmapConfig{};
+    m_debugClipmapConfig = odai::world::ClipmapConfig{};
     m_debugSpatialQueriesUsed = false;
     m_debugSpatialQueryStats = {};
     m_debugSpatialVisibleChunkCount = 0;
@@ -2203,4 +2203,4 @@ void RendererBackend::shutdown() {
     VOX_LOGI("render") << "shutdown complete\n";
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

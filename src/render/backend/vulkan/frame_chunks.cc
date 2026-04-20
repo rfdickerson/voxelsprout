@@ -11,14 +11,14 @@
 #include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
 namespace {
 
 std::size_t selectChunkLodIndex(
-    const voxelsprout::world::Chunk& chunk,
+    const odai::world::Chunk& chunk,
     int cameraChunkX,
     int cameraChunkY,
     int cameraChunkZ
@@ -33,9 +33,9 @@ std::size_t selectChunkLodIndex(
 } // namespace
 
 RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
-    const std::vector<voxelsprout::world::Chunk>& chunks,
+    const std::vector<odai::world::Chunk>& chunks,
     std::span<const std::size_t> visibleChunkIndices,
-    const std::array<voxelsprout::math::Matrix4, kShadowCascadeCount>& lightViewProjMatrices,
+    const std::array<odai::math::Matrix4, kShadowCascadeCount>& lightViewProjMatrices,
     int cameraChunkX,
     int cameraChunkY,
     int cameraChunkZ
@@ -74,9 +74,9 @@ RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
         if (chunkArrayIndex >= chunks.size()) {
             return;
         }
-        const voxelsprout::world::Chunk& drawChunk = chunks[chunkArrayIndex];
+        const odai::world::Chunk& drawChunk = chunks[chunkArrayIndex];
         const std::size_t lodIndex = selectChunkLodIndex(drawChunk, cameraChunkX, cameraChunkY, cameraChunkZ);
-        const std::size_t drawRangeIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
+        const std::size_t drawRangeIndex = (chunkArrayIndex * odai::world::kChunkMeshLodCount) + lodIndex;
         if (drawRangeIndex >= m_chunkDrawRanges.size()) {
             return;
         }
@@ -126,9 +126,9 @@ RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
         if (chunkArrayIndex >= chunks.size()) {
             return;
         }
-        const voxelsprout::world::Chunk& drawChunk = chunks[chunkArrayIndex];
+        const odai::world::Chunk& drawChunk = chunks[chunkArrayIndex];
         const std::size_t lodIndex = selectChunkLodIndex(drawChunk, cameraChunkX, cameraChunkY, cameraChunkZ);
-        const std::size_t drawRangeIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
+        const std::size_t drawRangeIndex = (chunkArrayIndex * odai::world::kChunkMeshLodCount) + lodIndex;
         if (drawRangeIndex >= m_chunkDrawRanges.size()) {
             return;
         }
@@ -171,7 +171,7 @@ RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
             if (!shadowCandidateMask.empty() && shadowCandidateMask[chunkArrayIndex] == 0u) {
                 continue;
             }
-            const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
+            const odai::world::Chunk& chunk = chunks[chunkArrayIndex];
             uint32_t cascadeMask = 0u;
             for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
                 if (chunkIntersectsShadowCascadeClip(chunk, lightViewProjMatrices[cascadeIndex], kShadowCasterClipMargin)) {
@@ -296,4 +296,4 @@ RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
     return out;
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

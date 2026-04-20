@@ -24,12 +24,12 @@
 
 namespace {
 
-#ifndef VOXEL_APP_VERSION
-#define VOXEL_APP_VERSION "dev"
+#ifndef ODAI_APP_VERSION
+#define ODAI_APP_VERSION "dev"
 #endif
 
-#ifndef VOXEL_RELEASE_PROFILE
-#define VOXEL_RELEASE_PROFILE "dev_runtime"
+#ifndef ODAI_RELEASE_PROFILE
+#define ODAI_RELEASE_PROFILE "dev_runtime"
 #endif
 
 constexpr float kMouseSensitivity = 0.1f;
@@ -84,16 +84,16 @@ constexpr float kGamepadLookDeadzone = 0.14f;
 constexpr float kGamepadLookDegreesPerSecond = 160.0f;
 constexpr int kVoxelBreakClicksRequired = 2;
 constexpr const char* kWorldFilePath = "world.vxw";
-constexpr const char* kConfigFilePath = "voxel_factory_toy.cfg";
+constexpr const char* kConfigFilePath = "odai.cfg";
 constexpr const char* kMagicaCastlePath = "assets/magicka/castle.vox";
 constexpr const char* kMagicaTeapotPath = "assets/magicka/teapot.vox";
 constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
-constexpr const char* kImportedSceneEnvVar = "VOXEL_IMPORTED_SCENE";
+constexpr const char* kImportedSceneEnvVar = "ODAI_IMPORTED_SCENE";
 
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
-constexpr voxelsprout::math::Vector3 kDefaultPipeTint{0.95f, 0.95f, 0.95f};
+constexpr odai::math::Vector3 kDefaultPipeTint{0.95f, 0.95f, 0.95f};
 constexpr float kConveyorCollisionRadius = 0.49f;
 constexpr float kConveyorAlongHalfExtent = 0.5f;
 constexpr float kConveyorCrossAxisScale = 2.0f;
@@ -123,11 +123,11 @@ Aabb3f makePlayerCollisionAabb(float eyeX, float eyeY, float eyeZ) {
     return bounds;
 }
 
-Aabb3f makeConveyorBeltAabb(const voxelsprout::sim::Belt& belt) {
+Aabb3f makeConveyorBeltAabb(const odai::sim::Belt& belt) {
     const float centerX = static_cast<float>(belt.x) + 0.5f;
     const float centerY = static_cast<float>(belt.y) + 0.5f;
     const float centerZ = static_cast<float>(belt.z) + 0.5f;
-    const bool alongX = belt.direction == voxelsprout::sim::BeltDirection::East || belt.direction == voxelsprout::sim::BeltDirection::West;
+    const bool alongX = belt.direction == odai::sim::BeltDirection::East || belt.direction == odai::sim::BeltDirection::West;
     const float halfHeight = kConveyorVerticalScale * kConveyorCollisionRadius;
     const float halfCrossAxis = kConveyorCrossAxisScale * kConveyorCollisionRadius;
     const float halfExtentX = alongX ? kConveyorAlongHalfExtent : halfCrossAxis;
@@ -153,23 +153,23 @@ bool aabbOverlaps(const Aabb3f& lhs, const Aabb3f& rhs) {
         lhs.minZ < (rhs.maxZ - kCollisionEpsilon);
 }
 
-const char* inventoryItemLabel(voxelsprout::render::InventoryItemId itemId) {
+const char* inventoryItemLabel(odai::render::InventoryItemId itemId) {
     switch (itemId) {
-    case voxelsprout::render::InventoryItemId::Stone: return "stone";
-    case voxelsprout::render::InventoryItemId::Dirt: return "dirt";
-    case voxelsprout::render::InventoryItemId::Grass: return "grass";
-    case voxelsprout::render::InventoryItemId::Wood: return "wood";
-    case voxelsprout::render::InventoryItemId::Red: return "red";
-    case voxelsprout::render::InventoryItemId::Empty:
+    case odai::render::InventoryItemId::Stone: return "stone";
+    case odai::render::InventoryItemId::Dirt: return "dirt";
+    case odai::render::InventoryItemId::Grass: return "grass";
+    case odai::render::InventoryItemId::Wood: return "wood";
+    case odai::render::InventoryItemId::Red: return "red";
+    case odai::render::InventoryItemId::Empty:
     default:
         return "empty";
     }
 }
 
-voxelsprout::world::Voxel itemToVoxel(voxelsprout::render::InventoryItemId itemId) {
-    using voxelsprout::render::InventoryItemId;
-    using voxelsprout::world::Voxel;
-    using voxelsprout::world::VoxelType;
+odai::world::Voxel itemToVoxel(odai::render::InventoryItemId itemId) {
+    using odai::render::InventoryItemId;
+    using odai::world::Voxel;
+    using odai::world::VoxelType;
     switch (itemId) {
     case InventoryItemId::Stone: return Voxel{VoxelType::Stone};
     case InventoryItemId::Dirt: return Voxel{VoxelType::Dirt};
@@ -182,26 +182,26 @@ voxelsprout::world::Voxel itemToVoxel(voxelsprout::render::InventoryItemId itemI
     }
 }
 
-const char* shadowModeConfigName(voxelsprout::render::ShadowMode mode) {
+const char* shadowModeConfigName(odai::render::ShadowMode mode) {
     switch (mode) {
-    case voxelsprout::render::ShadowMode::ShadowMaps: return "shadow_maps";
-    case voxelsprout::render::ShadowMode::RayTraced: return "ray_traced";
-    case voxelsprout::render::ShadowMode::Auto: return "auto";
+    case odai::render::ShadowMode::ShadowMaps: return "shadow_maps";
+    case odai::render::ShadowMode::RayTraced: return "ray_traced";
+    case odai::render::ShadowMode::Auto: return "auto";
     }
     return "auto";
 }
 
-bool parseShadowModeConfigValue(const std::string& value, voxelsprout::render::ShadowMode& outMode) {
+bool parseShadowModeConfigValue(const std::string& value, odai::render::ShadowMode& outMode) {
     if (value == "shadow_maps") {
-        outMode = voxelsprout::render::ShadowMode::ShadowMaps;
+        outMode = odai::render::ShadowMode::ShadowMaps;
         return true;
     }
     if (value == "ray_traced") {
-        outMode = voxelsprout::render::ShadowMode::RayTraced;
+        outMode = odai::render::ShadowMode::RayTraced;
         return true;
     }
     if (value == "auto") {
-        outMode = voxelsprout::render::ShadowMode::Auto;
+        outMode = odai::render::ShadowMode::Auto;
         return true;
     }
     return false;
@@ -236,33 +236,33 @@ std::string trimConfigString(const std::string& value) {
 }
 
 struct FrustumPlane {
-    voxelsprout::math::Vector3 normal{};
+    odai::math::Vector3 normal{};
     float d = 0.0f;
 };
 
 struct CameraFrustum {
     std::array<FrustumPlane, 6> planes{};
-    voxelsprout::core::CellAabb broadPhaseBounds{};
+    odai::core::CellAabb broadPhaseBounds{};
     bool valid = false;
 };
 
-FrustumPlane makePlaneFromPointNormal(const voxelsprout::math::Vector3& point, const voxelsprout::math::Vector3& normal) {
-    const voxelsprout::math::Vector3 normalized = voxelsprout::math::normalize(normal);
+FrustumPlane makePlaneFromPointNormal(const odai::math::Vector3& point, const odai::math::Vector3& normal) {
+    const odai::math::Vector3 normalized = odai::math::normalize(normal);
     FrustumPlane plane{};
     plane.normal = normalized;
-    plane.d = -voxelsprout::math::dot(normalized, point);
+    plane.d = -odai::math::dot(normalized, point);
     return plane;
 }
 
-void orientPlaneTowardForward(FrustumPlane& plane, const voxelsprout::math::Vector3& forward) {
-    if (voxelsprout::math::dot(plane.normal, forward) < 0.0f) {
+void orientPlaneTowardForward(FrustumPlane& plane, const odai::math::Vector3& forward) {
+    if (odai::math::dot(plane.normal, forward) < 0.0f) {
         plane.normal = -plane.normal;
         plane.d = -plane.d;
     }
 }
 
 CameraFrustum buildCameraFrustum(
-    const voxelsprout::math::Vector3& eye,
+    const odai::math::Vector3& eye,
     float yawDegrees,
     float pitchDegrees,
     float fovDegrees,
@@ -271,48 +271,48 @@ CameraFrustum buildCameraFrustum(
     CameraFrustum frustum{};
     const float clampedAspect = std::max(aspectRatio, 0.1f);
     const float clampedFovDegrees = std::clamp(fovDegrees, 20.0f, 120.0f);
-    const float yawRadians = voxelsprout::math::radians(yawDegrees);
-    const float pitchRadians = voxelsprout::math::radians(pitchDegrees);
+    const float yawRadians = odai::math::radians(yawDegrees);
+    const float pitchRadians = odai::math::radians(pitchDegrees);
     const float cosPitch = std::cos(pitchRadians);
-    voxelsprout::math::Vector3 forward{
+    odai::math::Vector3 forward{
         std::cos(yawRadians) * cosPitch,
         std::sin(pitchRadians),
         std::sin(yawRadians) * cosPitch
     };
-    forward = voxelsprout::math::normalize(forward);
-    if (voxelsprout::math::lengthSquared(forward) <= 0.0001f) {
+    forward = odai::math::normalize(forward);
+    if (odai::math::lengthSquared(forward) <= 0.0001f) {
         return frustum;
     }
 
-    const voxelsprout::math::Vector3 worldUp{0.0f, 1.0f, 0.0f};
-    voxelsprout::math::Vector3 right = voxelsprout::math::normalize(voxelsprout::math::cross(forward, worldUp));
-    if (voxelsprout::math::lengthSquared(right) <= 0.0001f) {
-        right = voxelsprout::math::Vector3{1.0f, 0.0f, 0.0f};
+    const odai::math::Vector3 worldUp{0.0f, 1.0f, 0.0f};
+    odai::math::Vector3 right = odai::math::normalize(odai::math::cross(forward, worldUp));
+    if (odai::math::lengthSquared(right) <= 0.0001f) {
+        right = odai::math::Vector3{1.0f, 0.0f, 0.0f};
     }
-    voxelsprout::math::Vector3 up = voxelsprout::math::normalize(voxelsprout::math::cross(right, forward));
-    if (voxelsprout::math::lengthSquared(up) <= 0.0001f) {
+    odai::math::Vector3 up = odai::math::normalize(odai::math::cross(right, forward));
+    if (odai::math::lengthSquared(up) <= 0.0001f) {
         up = worldUp;
     }
 
-    const float halfFovY = voxelsprout::math::radians(clampedFovDegrees) * 0.5f;
+    const float halfFovY = odai::math::radians(clampedFovDegrees) * 0.5f;
     const float tanHalfY = std::tan(halfFovY);
     const float tanHalfX = tanHalfY * clampedAspect;
     const float nearDistance = kRenderCullNearPlane;
     const float farDistance = kRenderCullFarPlane;
 
-    const voxelsprout::math::Vector3 nearCenter = eye + (forward * nearDistance);
-    const voxelsprout::math::Vector3 farCenter = eye + (forward * farDistance);
+    const odai::math::Vector3 nearCenter = eye + (forward * nearDistance);
+    const odai::math::Vector3 farCenter = eye + (forward * farDistance);
     const float nearHalfHeight = nearDistance * tanHalfY;
     const float nearHalfWidth = nearDistance * tanHalfX;
     const float farHalfHeight = farDistance * tanHalfY;
     const float farHalfWidth = farDistance * tanHalfX;
 
-    const voxelsprout::math::Vector3 nearUp = up * nearHalfHeight;
-    const voxelsprout::math::Vector3 nearRight = right * nearHalfWidth;
-    const voxelsprout::math::Vector3 farUp = up * farHalfHeight;
-    const voxelsprout::math::Vector3 farRight = right * farHalfWidth;
+    const odai::math::Vector3 nearUp = up * nearHalfHeight;
+    const odai::math::Vector3 nearRight = right * nearHalfWidth;
+    const odai::math::Vector3 farUp = up * farHalfHeight;
+    const odai::math::Vector3 farRight = right * farHalfWidth;
 
-    const std::array<voxelsprout::math::Vector3, 8> corners = {
+    const std::array<odai::math::Vector3, 8> corners = {
         nearCenter + nearUp - nearRight,
         nearCenter + nearUp + nearRight,
         nearCenter - nearUp - nearRight,
@@ -329,7 +329,7 @@ CameraFrustum buildCameraFrustum(
     float maxX = corners[0].x;
     float maxY = corners[0].y;
     float maxZ = corners[0].z;
-    for (const voxelsprout::math::Vector3& corner : corners) {
+    for (const odai::math::Vector3& corner : corners) {
         minX = std::min(minX, corner.x);
         minY = std::min(minY, corner.y);
         minZ = std::min(minZ, corner.z);
@@ -338,31 +338,31 @@ CameraFrustum buildCameraFrustum(
         maxZ = std::max(maxZ, corner.z);
     }
 
-    voxelsprout::core::CellAabb broadPhaseBounds{};
+    odai::core::CellAabb broadPhaseBounds{};
     broadPhaseBounds.valid = true;
-    broadPhaseBounds.minInclusive = voxelsprout::core::Cell3i{
+    broadPhaseBounds.minInclusive = odai::core::Cell3i{
         static_cast<int>(std::floor(minX - kRenderFrustumBoundsPadVoxels)),
         static_cast<int>(std::floor(minY - kRenderFrustumBoundsPadVoxels)),
         static_cast<int>(std::floor(minZ - kRenderFrustumBoundsPadVoxels))
     };
-    broadPhaseBounds.maxExclusive = voxelsprout::core::Cell3i{
+    broadPhaseBounds.maxExclusive = odai::core::Cell3i{
         static_cast<int>(std::floor(maxX + kRenderFrustumBoundsPadVoxels)) + 1,
         static_cast<int>(std::floor(maxY + kRenderFrustumBoundsPadVoxels)) + 1,
         static_cast<int>(std::floor(maxZ + kRenderFrustumBoundsPadVoxels)) + 1
     };
 
-    const voxelsprout::math::Vector3 leftDir = voxelsprout::math::normalize(forward - (right * tanHalfX));
-    const voxelsprout::math::Vector3 rightDir = voxelsprout::math::normalize(forward + (right * tanHalfX));
-    const voxelsprout::math::Vector3 topDir = voxelsprout::math::normalize(forward + (up * tanHalfY));
-    const voxelsprout::math::Vector3 bottomDir = voxelsprout::math::normalize(forward - (up * tanHalfY));
+    const odai::math::Vector3 leftDir = odai::math::normalize(forward - (right * tanHalfX));
+    const odai::math::Vector3 rightDir = odai::math::normalize(forward + (right * tanHalfX));
+    const odai::math::Vector3 topDir = odai::math::normalize(forward + (up * tanHalfY));
+    const odai::math::Vector3 bottomDir = odai::math::normalize(forward - (up * tanHalfY));
 
     std::array<FrustumPlane, 6> planes{};
     planes[0] = makePlaneFromPointNormal(nearCenter, forward);
     planes[1] = makePlaneFromPointNormal(farCenter, -forward);
-    planes[2] = makePlaneFromPointNormal(eye, voxelsprout::math::cross(up, leftDir));
-    planes[3] = makePlaneFromPointNormal(eye, voxelsprout::math::cross(rightDir, up));
-    planes[4] = makePlaneFromPointNormal(eye, voxelsprout::math::cross(topDir, right));
-    planes[5] = makePlaneFromPointNormal(eye, voxelsprout::math::cross(right, bottomDir));
+    planes[2] = makePlaneFromPointNormal(eye, odai::math::cross(up, leftDir));
+    planes[3] = makePlaneFromPointNormal(eye, odai::math::cross(rightDir, up));
+    planes[4] = makePlaneFromPointNormal(eye, odai::math::cross(topDir, right));
+    planes[5] = makePlaneFromPointNormal(eye, odai::math::cross(right, bottomDir));
     orientPlaneTowardForward(planes[2], forward);
     orientPlaneTowardForward(planes[3], forward);
     orientPlaneTowardForward(planes[4], forward);
@@ -375,16 +375,16 @@ CameraFrustum buildCameraFrustum(
 }
 
 bool chunkIntersectsFrustum(
-    const voxelsprout::world::Chunk& chunk,
+    const odai::world::Chunk& chunk,
     const std::array<FrustumPlane, 6>& planes,
     float planeSlack
 ) {
-    const float minX = static_cast<float>(chunk.chunkX() * voxelsprout::world::Chunk::kSizeX);
-    const float minY = static_cast<float>(chunk.chunkY() * voxelsprout::world::Chunk::kSizeY);
-    const float minZ = static_cast<float>(chunk.chunkZ() * voxelsprout::world::Chunk::kSizeZ);
-    const float maxX = minX + static_cast<float>(voxelsprout::world::Chunk::kSizeX);
-    const float maxY = minY + static_cast<float>(voxelsprout::world::Chunk::kSizeY);
-    const float maxZ = minZ + static_cast<float>(voxelsprout::world::Chunk::kSizeZ);
+    const float minX = static_cast<float>(chunk.chunkX() * odai::world::Chunk::kSizeX);
+    const float minY = static_cast<float>(chunk.chunkY() * odai::world::Chunk::kSizeY);
+    const float minZ = static_cast<float>(chunk.chunkZ() * odai::world::Chunk::kSizeZ);
+    const float maxX = minX + static_cast<float>(odai::world::Chunk::kSizeX);
+    const float maxY = minY + static_cast<float>(odai::world::Chunk::kSizeY);
+    const float maxZ = minZ + static_cast<float>(odai::world::Chunk::kSizeZ);
 
     for (const FrustumPlane& plane : planes) {
         const float positiveX = (plane.normal.x >= 0.0f) ? maxX : minX;
@@ -475,12 +475,12 @@ ImportedSceneCameraPose makeImportedSceneLookAtPose(
     const float dy = targetY - eyeY;
     const float dz = targetZ - eyeZ;
     const float horizontalDistance = std::sqrt((dx * dx) + (dz * dz));
-    pose.yawDegrees = voxelsprout::math::degrees(std::atan2(dz, dx));
-    pose.pitchDegrees = voxelsprout::math::degrees(std::atan2(dy, std::max(horizontalDistance, 0.001f)));
+    pose.yawDegrees = odai::math::degrees(std::atan2(dz, dx));
+    pose.pitchDegrees = odai::math::degrees(std::atan2(dy, std::max(horizontalDistance, 0.001f)));
     return pose;
 }
 
-ImportedSceneCameraPose configureImportedSceneCamera(const voxelsprout::importer::ImportedScene& scene) {
+ImportedSceneCameraPose configureImportedSceneCamera(const odai::importer::ImportedScene& scene) {
     ImportedSceneCameraPose pose{};
     const bool haveBounds =
         scene.boundsMax[0] > scene.boundsMin[0] ||
@@ -505,7 +505,7 @@ ImportedSceneCameraPose configureImportedSceneCamera(const voxelsprout::importer
             return pose;
         }
         constexpr float kCellSizeUnits = 8192.0f;
-        for (const voxelsprout::importer::ImportedSceneLandscapeCell& cell : scene.landscapeCells) {
+        for (const odai::importer::ImportedSceneLandscapeCell& cell : scene.landscapeCells) {
             minX = std::min(minX, static_cast<float>(cell.gridX) * kCellSizeUnits);
             minZ = std::min(minZ, static_cast<float>(cell.gridY) * kCellSizeUnits);
             maxX = std::max(maxX, static_cast<float>(cell.gridX + 1) * kCellSizeUnits);
@@ -522,9 +522,9 @@ ImportedSceneCameraPose configureImportedSceneCamera(const voxelsprout::importer
     const float centerY = (minY + maxY) * 0.5f;
 
     if (scene.sourceTag == "morrowind_balmora" && !scene.waterPatches.empty()) {
-        const voxelsprout::importer::ImportedSceneWaterPatch* bridgePatch = nullptr;
+        const odai::importer::ImportedSceneWaterPatch* bridgePatch = nullptr;
         float bestScore = std::numeric_limits<float>::max();
-        for (const voxelsprout::importer::ImportedSceneWaterPatch& patch : scene.waterPatches) {
+        for (const odai::importer::ImportedSceneWaterPatch& patch : scene.waterPatches) {
             const float patchCenterX = patch.originX + (patch.sizeX * 0.5f);
             const float patchCenterZ = patch.originZ + (patch.sizeZ * 0.5f);
             const float dx = patchCenterX - centerX;
@@ -573,48 +573,48 @@ float applyStickDeadzone(float value, float deadzone) {
     return std::copysign(normalized, value);
 }
 
-voxelsprout::core::Dir6 axisToDir6(const voxelsprout::math::Vector3& axis) {
-    const voxelsprout::math::Vector3 normalized = voxelsprout::math::normalize(axis);
+odai::core::Dir6 axisToDir6(const odai::math::Vector3& axis) {
+    const odai::math::Vector3 normalized = odai::math::normalize(axis);
     const float absX = std::abs(normalized.x);
     const float absY = std::abs(normalized.y);
     const float absZ = std::abs(normalized.z);
     if (absX >= absY && absX >= absZ) {
-        return normalized.x >= 0.0f ? voxelsprout::core::Dir6::PosX : voxelsprout::core::Dir6::NegX;
+        return normalized.x >= 0.0f ? odai::core::Dir6::PosX : odai::core::Dir6::NegX;
     }
     if (absY >= absX && absY >= absZ) {
-        return normalized.y >= 0.0f ? voxelsprout::core::Dir6::PosY : voxelsprout::core::Dir6::NegY;
+        return normalized.y >= 0.0f ? odai::core::Dir6::PosY : odai::core::Dir6::NegY;
     }
-    return normalized.z >= 0.0f ? voxelsprout::core::Dir6::PosZ : voxelsprout::core::Dir6::NegZ;
+    return normalized.z >= 0.0f ? odai::core::Dir6::PosZ : odai::core::Dir6::NegZ;
 }
 
-voxelsprout::core::Dir6 faceNormalToDir6(int nx, int ny, int nz) {
+odai::core::Dir6 faceNormalToDir6(int nx, int ny, int nz) {
     if (nx > 0) {
-        return voxelsprout::core::Dir6::PosX;
+        return odai::core::Dir6::PosX;
     }
     if (nx < 0) {
-        return voxelsprout::core::Dir6::NegX;
+        return odai::core::Dir6::NegX;
     }
     if (ny > 0) {
-        return voxelsprout::core::Dir6::PosY;
+        return odai::core::Dir6::PosY;
     }
     if (ny < 0) {
-        return voxelsprout::core::Dir6::NegY;
+        return odai::core::Dir6::NegY;
     }
     if (nz > 0) {
-        return voxelsprout::core::Dir6::PosZ;
+        return odai::core::Dir6::PosZ;
     }
-    return voxelsprout::core::Dir6::NegZ;
+    return odai::core::Dir6::NegZ;
 }
 
-void dir6ToAxisInts(voxelsprout::core::Dir6 dir, int& outX, int& outY, int& outZ) {
-    const voxelsprout::core::Cell3i offset = voxelsprout::core::dirToOffset(dir);
+void dir6ToAxisInts(odai::core::Dir6 dir, int& outX, int& outY, int& outZ) {
+    const odai::core::Cell3i offset = odai::core::dirToOffset(dir);
     outX = static_cast<int>(offset.x);
     outY = static_cast<int>(offset.y);
     outZ = static_cast<int>(offset.z);
 }
 
-bool dirSharesAxis(voxelsprout::core::Dir6 lhs, voxelsprout::core::Dir6 rhs) {
-    return lhs == rhs || voxelsprout::core::areOpposite(lhs, rhs);
+bool dirSharesAxis(odai::core::Dir6 lhs, odai::core::Dir6 rhs) {
+    return lhs == rhs || odai::core::areOpposite(lhs, rhs);
 }
 
 float wrapDegreesSigned(float degrees) {
@@ -632,88 +632,88 @@ float lerpWrappedDegrees(float fromDegrees, float toDegrees, float alpha) {
     return wrapDegreesSigned(fromDegrees + (delta * alpha));
 }
 
-voxelsprout::core::Dir6 horizontalDirFromYaw(float yawDegrees) {
-    const float yawRadians = voxelsprout::math::radians(yawDegrees);
+odai::core::Dir6 horizontalDirFromYaw(float yawDegrees) {
+    const float yawRadians = odai::math::radians(yawDegrees);
     const float x = std::cos(yawRadians);
     const float z = std::sin(yawRadians);
     if (std::abs(x) >= std::abs(z)) {
-        return x >= 0.0f ? voxelsprout::core::Dir6::PosX : voxelsprout::core::Dir6::NegX;
+        return x >= 0.0f ? odai::core::Dir6::PosX : odai::core::Dir6::NegX;
     }
-    return z >= 0.0f ? voxelsprout::core::Dir6::PosZ : voxelsprout::core::Dir6::NegZ;
+    return z >= 0.0f ? odai::core::Dir6::PosZ : odai::core::Dir6::NegZ;
 }
 
-voxelsprout::sim::BeltDirection dir6ToBeltDirection(voxelsprout::core::Dir6 dir) {
+odai::sim::BeltDirection dir6ToBeltDirection(odai::core::Dir6 dir) {
     switch (dir) {
-    case voxelsprout::core::Dir6::PosX:
-        return voxelsprout::sim::BeltDirection::East;
-    case voxelsprout::core::Dir6::NegX:
-        return voxelsprout::sim::BeltDirection::West;
-    case voxelsprout::core::Dir6::PosZ:
-        return voxelsprout::sim::BeltDirection::South;
-    case voxelsprout::core::Dir6::NegZ:
+    case odai::core::Dir6::PosX:
+        return odai::sim::BeltDirection::East;
+    case odai::core::Dir6::NegX:
+        return odai::sim::BeltDirection::West;
+    case odai::core::Dir6::PosZ:
+        return odai::sim::BeltDirection::South;
+    case odai::core::Dir6::NegZ:
     default:
-        return voxelsprout::sim::BeltDirection::North;
+        return odai::sim::BeltDirection::North;
     }
 }
 
-voxelsprout::core::Dir6 beltDirectionToDir6(voxelsprout::sim::BeltDirection direction) {
+odai::core::Dir6 beltDirectionToDir6(odai::sim::BeltDirection direction) {
     switch (direction) {
-    case voxelsprout::sim::BeltDirection::East:
-        return voxelsprout::core::Dir6::PosX;
-    case voxelsprout::sim::BeltDirection::West:
-        return voxelsprout::core::Dir6::NegX;
-    case voxelsprout::sim::BeltDirection::South:
-        return voxelsprout::core::Dir6::PosZ;
-    case voxelsprout::sim::BeltDirection::North:
+    case odai::sim::BeltDirection::East:
+        return odai::core::Dir6::PosX;
+    case odai::sim::BeltDirection::West:
+        return odai::core::Dir6::NegX;
+    case odai::sim::BeltDirection::South:
+        return odai::core::Dir6::PosZ;
+    case odai::sim::BeltDirection::North:
     default:
-        return voxelsprout::core::Dir6::NegZ;
+        return odai::core::Dir6::NegZ;
     }
 }
 
-voxelsprout::sim::TrackDirection dir6ToTrackDirection(voxelsprout::core::Dir6 dir) {
+odai::sim::TrackDirection dir6ToTrackDirection(odai::core::Dir6 dir) {
     switch (dir) {
-    case voxelsprout::core::Dir6::PosX:
-        return voxelsprout::sim::TrackDirection::East;
-    case voxelsprout::core::Dir6::NegX:
-        return voxelsprout::sim::TrackDirection::West;
-    case voxelsprout::core::Dir6::PosZ:
-        return voxelsprout::sim::TrackDirection::South;
-    case voxelsprout::core::Dir6::NegZ:
+    case odai::core::Dir6::PosX:
+        return odai::sim::TrackDirection::East;
+    case odai::core::Dir6::NegX:
+        return odai::sim::TrackDirection::West;
+    case odai::core::Dir6::PosZ:
+        return odai::sim::TrackDirection::South;
+    case odai::core::Dir6::NegZ:
     default:
-        return voxelsprout::sim::TrackDirection::North;
+        return odai::sim::TrackDirection::North;
     }
 }
 
-voxelsprout::core::Dir6 trackDirectionToDir6(voxelsprout::sim::TrackDirection direction) {
+odai::core::Dir6 trackDirectionToDir6(odai::sim::TrackDirection direction) {
     switch (direction) {
-    case voxelsprout::sim::TrackDirection::East:
-        return voxelsprout::core::Dir6::PosX;
-    case voxelsprout::sim::TrackDirection::West:
-        return voxelsprout::core::Dir6::NegX;
-    case voxelsprout::sim::TrackDirection::South:
-        return voxelsprout::core::Dir6::PosZ;
-    case voxelsprout::sim::TrackDirection::North:
+    case odai::sim::TrackDirection::East:
+        return odai::core::Dir6::PosX;
+    case odai::sim::TrackDirection::West:
+        return odai::core::Dir6::NegX;
+    case odai::sim::TrackDirection::South:
+        return odai::core::Dir6::PosZ;
+    case odai::sim::TrackDirection::North:
     default:
-        return voxelsprout::core::Dir6::NegZ;
+        return odai::core::Dir6::NegZ;
     }
 }
 
-voxelsprout::core::Dir6 firstDirFromMask(std::uint8_t mask) {
-    for (const voxelsprout::core::Dir6 dir : voxelsprout::core::kAllDir6) {
-        if ((mask & voxelsprout::core::dirBit(dir)) != 0u) {
+odai::core::Dir6 firstDirFromMask(std::uint8_t mask) {
+    for (const odai::core::Dir6 dir : odai::core::kAllDir6) {
+        if ((mask & odai::core::dirBit(dir)) != 0u) {
             return dir;
         }
     }
-    return voxelsprout::core::Dir6::PosY;
+    return odai::core::Dir6::PosY;
 }
 
-voxelsprout::core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, voxelsprout::core::Dir6 preferredAxis) {
-    for (const voxelsprout::core::Dir6 dir : voxelsprout::core::kAllDir6) {
-        if ((mask & voxelsprout::core::dirBit(dir)) == 0u) {
+odai::core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, odai::core::Dir6 preferredAxis) {
+    for (const odai::core::Dir6 dir : odai::core::kAllDir6) {
+        if ((mask & odai::core::dirBit(dir)) == 0u) {
             continue;
         }
-        const voxelsprout::core::Dir6 opposite = voxelsprout::core::oppositeDir(dir);
-        if ((mask & voxelsprout::core::dirBit(opposite)) == 0u) {
+        const odai::core::Dir6 opposite = odai::core::oppositeDir(dir);
+        if ((mask & odai::core::dirBit(opposite)) == 0u) {
             continue;
         }
         if (dirSharesAxis(preferredAxis, dir)) {
@@ -726,7 +726,7 @@ voxelsprout::core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, voxelspro
 
 } // namespace
 
-namespace voxelsprout::app {
+namespace odai::app {
 
 bool App::loadConfig(const std::filesystem::path& configPath) {
     std::ifstream file(configPath);
@@ -752,7 +752,7 @@ bool App::loadConfig(const std::filesystem::path& configPath) {
         const std::string key = trimConfigString(line.substr(0, equalsPos));
         const std::string value = trimConfigString(line.substr(equalsPos + 1));
         if (key == "shadow_mode") {
-            voxelsprout::render::ShadowMode parsedMode = loadedConfig.shadowMode;
+            odai::render::ShadowMode parsedMode = loadedConfig.shadowMode;
             if (!parseShadowModeConfigValue(value, parsedMode)) {
                 VOX_LOGW("app") << "invalid config shadow_mode='" << value
                                 << "' at " << configPath.string() << "; keeping "
@@ -803,8 +803,8 @@ bool App::init() {
     };
 
     VOX_LOGI("app") << "init begin"
-                    << " version=" << VOXEL_APP_VERSION
-                    << " profile=" << VOXEL_RELEASE_PROFILE;
+                    << " version=" << ODAI_APP_VERSION
+                    << " profile=" << ODAI_RELEASE_PROFILE;
     glfwSetErrorCallback(glfwErrorCallback);
 
     const auto glfwStart = Clock::now();
@@ -817,7 +817,7 @@ bool App::init() {
     // Vulkan renderer path requires no OpenGL context.
     const auto windowStart = Clock::now();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    m_window = glfwCreateWindow(1280, 720, "voxel_factory_toy", nullptr, nullptr);
+    m_window = glfwCreateWindow(1280, 720, "odai", nullptr, nullptr);
     if (m_window == nullptr) {
         VOX_LOGE("app") << "glfwCreateWindow failed";
         glfwTerminate();
@@ -837,29 +837,29 @@ bool App::init() {
         glfwTerminate();
         return false;
     }
-    m_renderer.setShadowSettings(voxelsprout::render::ShadowSettings{m_config.shadowMode});
+    m_renderer.setShadowSettings(odai::render::ShadowSettings{m_config.shadowMode});
     m_renderer.setSsaoEnabled(m_config.enableSsao);
     m_gameplayUiState.selectedHotbarSlot = 0;
     m_gameplayUiState.hotbarItems = {
-        voxelsprout::render::InventoryItemId::Stone,
-        voxelsprout::render::InventoryItemId::Dirt,
-        voxelsprout::render::InventoryItemId::Grass,
-        voxelsprout::render::InventoryItemId::Wood,
-        voxelsprout::render::InventoryItemId::Red,
-        voxelsprout::render::InventoryItemId::Empty,
-        voxelsprout::render::InventoryItemId::Empty,
-        voxelsprout::render::InventoryItemId::Empty,
-        voxelsprout::render::InventoryItemId::Empty,
+        odai::render::InventoryItemId::Stone,
+        odai::render::InventoryItemId::Dirt,
+        odai::render::InventoryItemId::Grass,
+        odai::render::InventoryItemId::Wood,
+        odai::render::InventoryItemId::Red,
+        odai::render::InventoryItemId::Empty,
+        odai::render::InventoryItemId::Empty,
+        odai::render::InventoryItemId::Empty,
+        odai::render::InventoryItemId::Empty,
     };
 
     if (const std::optional<std::filesystem::path> importedScenePath = findImportedSceneDemoPath();
         importedScenePath.has_value()) {
         m_importedScenePath = *importedScenePath;
         const auto importedSceneLoadStart = Clock::now();
-        if (!voxelsprout::importer::loadImportedSceneRuntime(m_importedScenePath, m_importedScene)) {
+        if (!odai::importer::loadImportedSceneRuntime(m_importedScenePath, m_importedScene)) {
             VOX_LOGE("app") << "failed to load imported scene from "
                             << std::filesystem::absolute(m_importedScenePath).string()
-                            << ": " << voxelsprout::importer::getImportedSceneLastError();
+                            << ": " << odai::importer::getImportedSceneLastError();
             return false;
         }
         const ImportedSceneCameraPose importedCameraPose = configureImportedSceneCamera(m_importedScene);
@@ -907,7 +907,7 @@ bool App::init() {
 
     const auto worldLoadStart = Clock::now();
     const std::filesystem::path worldPath{kWorldFilePath};
-    voxelsprout::world::World::LoadResult worldLoadResult{};
+    odai::world::World::LoadResult worldLoadResult{};
     if (m_world.loadOrInitialize(worldPath, &worldLoadResult)) {
         const auto worldLoadMs = elapsedMs(worldLoadStart);
         VOX_LOGI("app") << "loaded world from " << std::filesystem::absolute(worldPath).string()
@@ -919,12 +919,12 @@ bool App::init() {
     }
 
     const auto magicaStampStart = Clock::now();
-    constexpr std::array<voxelsprout::world::World::MagicaStampSpec, 3> kMagicaLoadSpecs = {
-        voxelsprout::world::World::MagicaStampSpec{kMagicaCastlePath, 0.0f, 0.0f, 0.0f, 1.0f},
-        voxelsprout::world::World::MagicaStampSpec{kMagicaTeapotPath, 64.0f, 0.0f, 0.0f, 0.36f},
-        voxelsprout::world::World::MagicaStampSpec{kMagicaMonu2Path, -72.0f, 0.0f, 16.0f, 0.25f},
+    constexpr std::array<odai::world::World::MagicaStampSpec, 3> kMagicaLoadSpecs = {
+        odai::world::World::MagicaStampSpec{kMagicaCastlePath, 0.0f, 0.0f, 0.0f, 1.0f},
+        odai::world::World::MagicaStampSpec{kMagicaTeapotPath, 64.0f, 0.0f, 0.0f, 0.36f},
+        odai::world::World::MagicaStampSpec{kMagicaMonu2Path, -72.0f, 0.0f, 16.0f, 0.25f},
     };
-    const voxelsprout::world::World::MagicaStampResult stampResult = m_world.stampMagicaResources(kMagicaLoadSpecs);
+    const odai::world::World::MagicaStampResult stampResult = m_world.stampMagicaResources(kMagicaLoadSpecs);
     VOX_LOGI("app") << "stamped " << stampResult.stampedResourceCount << "/" << kMagicaLoadSpecs.size()
                     << " magica resources into world (voxels=" << stampResult.stampedVoxelCount
                     << ", clipped=" << stampResult.clippedVoxelCount
@@ -935,10 +935,10 @@ bool App::init() {
     }
     m_renderer.setVoxelBaseColorPalette(stampResult.baseColorPalette);
 
-    m_world.setStreamingConfig(voxelsprout::world::World::ChunkStreamingConfig{2, 2});
-    const voxelsprout::world::World::ChunkStreamingUpdate initialStreamingUpdate =
+    m_world.setStreamingConfig(odai::world::World::ChunkStreamingConfig{2, 2});
+    const odai::world::World::ChunkStreamingUpdate initialStreamingUpdate =
         m_world.updateStreamingWindowForWorldPosition(m_camera.x, m_camera.z);
-    const voxelsprout::world::World::ChunkStreamingStats& initialStreamingStats = initialStreamingUpdate.stats;
+    const odai::world::World::ChunkStreamingStats& initialStreamingStats = initialStreamingUpdate.stats;
     VOX_LOGI("app") << "chunk streaming ready (center="
                     << initialStreamingStats.centerChunkX << "," << initialStreamingStats.centerChunkZ
                     << ", resident=" << initialStreamingStats.residentChunkCount
@@ -1042,7 +1042,7 @@ void App::resetVoxelBreakProgress() {
     m_voxelBreakClicks = 0;
 }
 
-void App::assignInventoryItemToSelectedHotbar(voxelsprout::render::InventoryItemId itemId) {
+void App::assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId) {
     const std::size_t hotbarIndex = std::min<std::size_t>(
         m_gameplayUiState.selectedHotbarSlot,
         m_gameplayUiState.hotbarItems.size() - 1
@@ -1056,8 +1056,8 @@ void App::assignInventoryItemToSelectedHotbar(voxelsprout::render::InventoryItem
 }
 
 void App::handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight) {
-    const voxelsprout::render::GameplayUiLayout layout =
-        voxelsprout::render::buildGameplayUiLayout(displayWidth, displayHeight);
+    const odai::render::GameplayUiLayout layout =
+        odai::render::buildGameplayUiLayout(displayWidth, displayHeight);
     for (std::size_t slotIndex = 0; slotIndex < layout.hotbarSlots.size(); ++slotIndex) {
         if (!layout.hotbarSlots[slotIndex].contains(mouseX, mouseY)) {
             continue;
@@ -1077,7 +1077,7 @@ void App::handleInventoryClick(float mouseX, float mouseY, float displayWidth, f
 void App::update(float dt, float simulationAlpha) {
     if (m_importedSceneDemoEnabled) {
         const float renderAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
-        const voxelsprout::render::CameraPose cameraPose{
+        const odai::render::CameraPose cameraPose{
             m_cameraPrevious.x + ((m_camera.x - m_cameraPrevious.x) * renderAlpha),
             m_cameraPrevious.y + ((m_camera.y - m_cameraPrevious.y) * renderAlpha),
             m_cameraPrevious.z + ((m_camera.z - m_cameraPrevious.z) * renderAlpha),
@@ -1086,12 +1086,12 @@ void App::update(float dt, float simulationAlpha) {
             m_camera.fovDegrees
         };
         m_visibleChunkIndices.clear();
-        m_renderer.setSpatialQueryStats(false, voxelsprout::world::SpatialQueryStats{}, 0u);
+        m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
         m_renderer.renderFrame(
             m_world.chunkGrid(),
             m_simulation,
             cameraPose,
-            voxelsprout::render::VoxelPreview{},
+            odai::render::VoxelPreview{},
             simulationAlpha,
             std::span<const std::size_t>(m_visibleChunkIndices)
         );
@@ -1186,8 +1186,8 @@ void App::update(float dt, float simulationAlpha) {
         // - fixed latitude + declination
         // - hour angle advances through a full day
         // - yields low sun altitude and modest azimuth drift (SE -> S -> SW)
-        const float latitudeRadians = voxelsprout::math::radians(kDayCycleLatitudeDegrees);
-        const float declinationRadians = voxelsprout::math::radians(kDayCycleWinterDeclinationDegrees);
+        const float latitudeRadians = odai::math::radians(kDayCycleLatitudeDegrees);
+        const float declinationRadians = odai::math::radians(kDayCycleWinterDeclinationDegrees);
         const float hourAngleRadians = ((m_dayCyclePhase * 360.0f) - 180.0f) * (kTwoPi / 360.0f);
 
         const float sinLat = std::sin(latitudeRadians);
@@ -1203,8 +1203,8 @@ void App::update(float dt, float simulationAlpha) {
         const float sunNorth = (cosLat * sinDec) - (sinLat * cosDec * cosHour);
         const float sunUp = (sinLat * sinDec) + (cosLat * cosDec * cosHour);
 
-        const float sunPitchDegrees = voxelsprout::math::degrees(std::asin(std::clamp(sunUp, -1.0f, 1.0f)));
-        float sunAzimuthDegrees = voxelsprout::math::degrees(std::atan2(sunEast, sunNorth));
+        const float sunPitchDegrees = odai::math::degrees(std::asin(std::clamp(sunUp, -1.0f, 1.0f)));
+        float sunAzimuthDegrees = odai::math::degrees(std::atan2(sunEast, sunNorth));
         if (sunAzimuthDegrees < 0.0f) {
             sunAzimuthDegrees += 360.0f;
         }
@@ -1224,7 +1224,7 @@ void App::update(float dt, float simulationAlpha) {
     const float renderCameraPitchDegrees =
         m_cameraPrevious.pitchDegrees + ((m_camera.pitchDegrees - m_cameraPrevious.pitchDegrees) * renderAlpha);
 
-    voxelsprout::render::VoxelPreview preview{};
+    odai::render::VoxelPreview preview{};
     if (!isAnyUiVisible()) {
         if (raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
             if (raycast.hasHitFaceNormal) {
@@ -1242,8 +1242,8 @@ void App::update(float dt, float simulationAlpha) {
                 preview.faceZ = raycast.solidZ;
                 preview.faceId = normalToFaceId(raycast.hitFaceNormalX, raycast.hitFaceNormalY, raycast.hitFaceNormalZ);
                 preview.mode = m_input.removeBlockDown
-                    ? voxelsprout::render::VoxelPreview::Mode::Remove
-                    : voxelsprout::render::VoxelPreview::Mode::Add;
+                    ? odai::render::VoxelPreview::Mode::Remove
+                    : odai::render::VoxelPreview::Mode::Add;
             }
 
             if (!m_input.removeBlockDown) {
@@ -1252,7 +1252,7 @@ void App::update(float dt, float simulationAlpha) {
                 int targetZ = 0;
                 if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
                     if (isWorldVoxelInBounds(targetX, targetY, targetZ) &&
-                        selectedPlaceVoxel().type != voxelsprout::world::VoxelType::Empty) {
+                        selectedPlaceVoxel().type != odai::world::VoxelType::Empty) {
                         // Face highlight is enough for placement; do not show a ghost voxel cube.
                     } else {
                         preview.faceVisible = false;
@@ -1264,7 +1264,7 @@ void App::update(float dt, float simulationAlpha) {
         }
     }
 
-    const voxelsprout::render::CameraPose cameraPose{
+    const odai::render::CameraPose cameraPose{
         renderCameraX,
         renderCameraY,
         renderCameraZ,
@@ -1274,7 +1274,7 @@ void App::update(float dt, float simulationAlpha) {
     };
     syncGameplayUiState();
 
-    const voxelsprout::world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
+    const odai::world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
     if (!m_hasAppliedClipmapConfig ||
         requestedClipmapConfig.levelCount != m_appliedClipmapConfig.levelCount ||
         requestedClipmapConfig.gridResolution != m_appliedClipmapConfig.gridResolution ||
@@ -1293,7 +1293,7 @@ void App::update(float dt, float simulationAlpha) {
     }
 
     m_visibleChunkIndices.clear();
-    voxelsprout::world::SpatialQueryStats spatialQueryStats{};
+    odai::world::SpatialQueryStats spatialQueryStats{};
     bool spatialQueriesUsed = false;
     if (m_renderer.useSpatialPartitioningQueries()) {
         int framebufferWidth = 0;
@@ -1304,14 +1304,14 @@ void App::update(float dt, float simulationAlpha) {
                 ? static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight)
                 : kRenderAspectFallback;
         const CameraFrustum cameraFrustum = buildCameraFrustum(
-            voxelsprout::math::Vector3{renderCameraX, renderCameraY, renderCameraZ},
+            odai::math::Vector3{renderCameraX, renderCameraY, renderCameraZ},
             renderCameraYawDegrees,
             renderCameraPitchDegrees,
             m_camera.fovDegrees,
             aspectRatio
         );
         const CameraFrustum keepAliveFrustum = buildCameraFrustum(
-            voxelsprout::math::Vector3{renderCameraX, renderCameraY, renderCameraZ},
+            odai::math::Vector3{renderCameraX, renderCameraY, renderCameraZ},
             renderCameraYawDegrees,
             renderCameraPitchDegrees,
             m_camera.fovDegrees,
@@ -1322,7 +1322,7 @@ void App::update(float dt, float simulationAlpha) {
             std::vector<std::size_t> candidateChunkIndices =
                 m_chunkClipmapIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
             spatialQueriesUsed = true;
-            const std::vector<voxelsprout::world::Chunk>& chunks = m_world.chunkGrid().chunks();
+            const std::vector<odai::world::Chunk>& chunks = m_world.chunkGrid().chunks();
             if (m_visibleChunkGraceFrames.size() != chunks.size() ||
                 m_previousVisibleChunkMask.size() != chunks.size() ||
                 m_currentVisibleChunkMask.size() != chunks.size() ||
@@ -1718,10 +1718,10 @@ void App::updateCamera(float dt) {
     m_camera.pitchDegrees += m_input.gamepadLookY * kGamepadLookDegreesPerSecond * dt;
     m_camera.pitchDegrees = std::clamp(m_camera.pitchDegrees, kPitchMinDegrees, kPitchMaxDegrees);
 
-    const float yawRadians = voxelsprout::math::radians(m_camera.yawDegrees);
-    const voxelsprout::math::Vector3 forward{std::cos(yawRadians), 0.0f, std::sin(yawRadians)};
-    const voxelsprout::math::Vector3 right{-forward.z, 0.0f, forward.x};
-    voxelsprout::math::Vector3 moveDirection{};
+    const float yawRadians = odai::math::radians(m_camera.yawDegrees);
+    const odai::math::Vector3 forward{std::cos(yawRadians), 0.0f, std::sin(yawRadians)};
+    const odai::math::Vector3 right{-forward.z, 0.0f, forward.x};
+    odai::math::Vector3 moveDirection{};
 
     float moveForwardInput = m_input.gamepadMoveForward;
     float moveRightInput = m_input.gamepadMoveRight;
@@ -1750,7 +1750,7 @@ void App::updateCamera(float dt) {
             moveDirection.y -= 1.0f;
         }
 
-        const float moveLengthSq = voxelsprout::math::lengthSquared(moveDirection);
+        const float moveLengthSq = odai::math::lengthSquared(moveDirection);
         if (moveLengthSq > 0.0f) {
             moveDirection /= std::sqrt(moveLengthSq);
         }
@@ -1776,7 +1776,7 @@ void App::updateCamera(float dt) {
     moveDirection += forward * moveForwardInput;
     moveDirection += right * moveRightInput;
 
-    const float moveLengthSq = voxelsprout::math::lengthSquared(moveDirection);
+    const float moveLengthSq = odai::math::lengthSquared(moveDirection);
     const float moveLength = std::sqrt(moveLengthSq);
     float targetVelocityX = 0.0f;
     float targetVelocityZ = 0.0f;
@@ -1789,7 +1789,7 @@ void App::updateCamera(float dt) {
         if (m_input.sneakDown && !m_hoverEnabled) {
             moveSpeed *= kSneakSpeedMultiplier;
         }
-        const voxelsprout::math::Vector3 targetVelocity = moveDirection * moveSpeed;
+        const odai::math::Vector3 targetVelocity = moveDirection * moveSpeed;
         targetVelocityX = targetVelocity.x;
         targetVelocityZ = targetVelocity.z;
     }
@@ -1842,7 +1842,7 @@ bool App::isSolidWorldVoxel(int worldX, int worldY, int worldZ) const {
         return true;
     }
 
-    const voxelsprout::world::Chunk* chunk = nullptr;
+    const odai::world::Chunk* chunk = nullptr;
     int localX = 0;
     int localY = 0;
     int localZ = 0;
@@ -1862,19 +1862,19 @@ bool App::worldToChunkLocal(
     int& outLocalY,
     int& outLocalZ
 ) const {
-    const std::vector<voxelsprout::world::Chunk>& chunks = m_world.chunkGrid().chunks();
+    const std::vector<odai::world::Chunk>& chunks = m_world.chunkGrid().chunks();
     for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
-        const voxelsprout::world::Chunk& chunk = chunks[chunkIndex];
-        const int chunkMinX = chunk.chunkX() * voxelsprout::world::Chunk::kSizeX;
-        const int chunkMinY = chunk.chunkY() * voxelsprout::world::Chunk::kSizeY;
-        const int chunkMinZ = chunk.chunkZ() * voxelsprout::world::Chunk::kSizeZ;
+        const odai::world::Chunk& chunk = chunks[chunkIndex];
+        const int chunkMinX = chunk.chunkX() * odai::world::Chunk::kSizeX;
+        const int chunkMinY = chunk.chunkY() * odai::world::Chunk::kSizeY;
+        const int chunkMinZ = chunk.chunkZ() * odai::world::Chunk::kSizeZ;
         const int localX = worldX - chunkMinX;
         const int localY = worldY - chunkMinY;
         const int localZ = worldZ - chunkMinZ;
         const bool insideChunk =
-            localX >= 0 && localX < voxelsprout::world::Chunk::kSizeX &&
-            localY >= 0 && localY < voxelsprout::world::Chunk::kSizeY &&
-            localZ >= 0 && localZ < voxelsprout::world::Chunk::kSizeZ;
+            localX >= 0 && localX < odai::world::Chunk::kSizeX &&
+            localY >= 0 && localY < odai::world::Chunk::kSizeY &&
+            localZ >= 0 && localZ < odai::world::Chunk::kSizeZ;
         if (!insideChunk) {
             continue;
         }
@@ -1893,7 +1893,7 @@ bool App::worldToChunkLocalConst(
     int worldX,
     int worldY,
     int worldZ,
-    const voxelsprout::world::Chunk*& outChunk,
+    const odai::world::Chunk*& outChunk,
     int& outLocalX,
     int& outLocalY,
     int& outLocalZ
@@ -1955,7 +1955,7 @@ bool App::doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const {
 
 bool App::doesPlayerOverlapConveyorBelt(float eyeX, float eyeY, float eyeZ) const {
     const Aabb3f playerBounds = makePlayerCollisionAabb(eyeX, eyeY, eyeZ);
-    for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
+    for (const odai::sim::Belt& belt : m_simulation.belts()) {
         const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
         if (aabbOverlaps(playerBounds, beltBounds)) {
             return true;
@@ -2005,7 +2005,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
+            for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMinX = std::min(blockingMinX, beltBounds.minX);
@@ -2025,7 +2025,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
+            for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMaxX = std::max(blockingMaxX, beltBounds.maxX);
@@ -2071,7 +2071,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
+            for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMinZ = std::min(blockingMinZ, beltBounds.minZ);
@@ -2091,7 +2091,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
+            for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMaxZ = std::max(blockingMaxZ, beltBounds.maxZ);
@@ -2137,7 +2137,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
+            for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMinY = std::min(blockingMinY, beltBounds.minY);
@@ -2157,7 +2157,7 @@ void App::resolvePlayerCollisions(float dt) {
                     }
                 }
             }
-            for (const voxelsprout::sim::Belt& belt : m_simulation.belts()) {
+            for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
                 if (aabbOverlaps(playerBounds, beltBounds)) {
                     blockingMaxY = std::max(blockingMaxY, beltBounds.maxY);
@@ -2190,21 +2190,21 @@ App::CameraRaycastResult App::raycastFromCamera() const {
         return result;
     }
 
-    const float yawRadians = voxelsprout::math::radians(m_camera.yawDegrees);
-    const float pitchRadians = voxelsprout::math::radians(m_camera.pitchDegrees);
+    const float yawRadians = odai::math::radians(m_camera.yawDegrees);
+    const float pitchRadians = odai::math::radians(m_camera.pitchDegrees);
     const float cosPitch = std::cos(pitchRadians);
-    const voxelsprout::math::Vector3 rayDirection = voxelsprout::math::normalize(voxelsprout::math::Vector3{
+    const odai::math::Vector3 rayDirection = odai::math::normalize(odai::math::Vector3{
         std::cos(yawRadians) * cosPitch,
         std::sin(pitchRadians),
         std::sin(yawRadians) * cosPitch
     });
-    if (voxelsprout::math::lengthSquared(rayDirection) <= 0.0f) {
+    if (odai::math::lengthSquared(rayDirection) <= 0.0f) {
         return result;
     }
 
     // Nudge origin slightly forward so close-surface targeting does not start inside solids.
-    const voxelsprout::math::Vector3 rayOrigin =
-        voxelsprout::math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
+    const odai::math::Vector3 rayOrigin =
+        odai::math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
     constexpr float kRayMaxDistance = kBlockInteractMaxDistance + 1.0f;
 
     int vx = static_cast<int>(std::floor(rayOrigin.x));
@@ -2331,20 +2331,20 @@ App::InteractionRaycastResult App::raycastInteractionFromCamera(bool includePipe
         return result;
     }
 
-    const float yawRadians = voxelsprout::math::radians(m_camera.yawDegrees);
-    const float pitchRadians = voxelsprout::math::radians(m_camera.pitchDegrees);
+    const float yawRadians = odai::math::radians(m_camera.yawDegrees);
+    const float pitchRadians = odai::math::radians(m_camera.pitchDegrees);
     const float cosPitch = std::cos(pitchRadians);
-    const voxelsprout::math::Vector3 rayDirection = voxelsprout::math::normalize(voxelsprout::math::Vector3{
+    const odai::math::Vector3 rayDirection = odai::math::normalize(odai::math::Vector3{
         std::cos(yawRadians) * cosPitch,
         std::sin(pitchRadians),
         std::sin(yawRadians) * cosPitch
     });
-    if (voxelsprout::math::lengthSquared(rayDirection) <= 0.0f) {
+    if (odai::math::lengthSquared(rayDirection) <= 0.0f) {
         return result;
     }
 
-    const voxelsprout::math::Vector3 rayOrigin =
-        voxelsprout::math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
+    const odai::math::Vector3 rayOrigin =
+        odai::math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
     constexpr float kRayMaxDistance = kBlockInteractMaxDistance + 1.0f;
 
     int vx = static_cast<int>(std::floor(rayOrigin.x));
@@ -2467,7 +2467,7 @@ bool App::isWorldVoxelInBounds(int x, int y, int z) const {
 }
 
 void App::cycleSelectedHotbar(int direction) {
-    const int hotbarSlotCount = static_cast<int>(voxelsprout::render::kGameplayHotbarSlotCount);
+    const int hotbarSlotCount = static_cast<int>(odai::render::kGameplayHotbarSlotCount);
     if (hotbarSlotCount <= 0) {
         m_gameplayUiState.selectedHotbarSlot = 0;
         return;
@@ -2481,20 +2481,20 @@ void App::selectHotbarSlot(int hotbarIndex) {
     const int clampedIndex = std::clamp(
         hotbarIndex,
         0,
-        static_cast<int>(voxelsprout::render::kGameplayHotbarSlotCount) - 1
+        static_cast<int>(odai::render::kGameplayHotbarSlotCount) - 1
     );
     if (m_gameplayUiState.selectedHotbarSlot == static_cast<std::uint32_t>(clampedIndex)) {
         return;
     }
     m_gameplayUiState.selectedHotbarSlot = static_cast<std::uint32_t>(clampedIndex);
     syncGameplayUiState();
-    const voxelsprout::render::InventoryItemId itemId =
+    const odai::render::InventoryItemId itemId =
         m_gameplayUiState.hotbarItems[static_cast<std::size_t>(clampedIndex)];
     VOX_LOGI("app") << "selected hotbar " << (clampedIndex + 1)
                     << ": " << inventoryItemLabel(itemId);
 }
 
-voxelsprout::world::Voxel App::selectedPlaceVoxel() const {
+odai::world::Voxel App::selectedPlaceVoxel() const {
     const std::size_t hotbarIndex = std::min<std::size_t>(
         m_gameplayUiState.selectedHotbarSlot,
         m_gameplayUiState.hotbarItems.size() - 1
@@ -2533,14 +2533,14 @@ bool App::computePipePlacementFromInteractionRaycast(
         return false;
     }
 
-    const voxelsprout::core::Dir6 faceDir = faceNormalToDir6(
+    const odai::core::Dir6 faceDir = faceNormalToDir6(
         raycast.hitFaceNormalX,
         raycast.hitFaceNormalY,
         raycast.hitFaceNormalZ
     );
-    voxelsprout::core::Dir6 selectedAxis = faceDir;
+    odai::core::Dir6 selectedAxis = faceDir;
     int extensionSign = 1;
-    voxelsprout::core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
+    odai::core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
 
     if (raycast.hitPipe) {
         std::size_t pipeIndex = 0;
@@ -2548,13 +2548,13 @@ bool App::computePipePlacementFromInteractionRaycast(
             return false;
         }
 
-        const std::vector<voxelsprout::sim::Pipe>& pipes = m_simulation.pipes();
+        const std::vector<odai::sim::Pipe>& pipes = m_simulation.pipes();
         if (pipeIndex >= pipes.size()) {
             return false;
         }
 
         selectedAxis = axisToDir6(pipes[pipeIndex].axis);
-        const voxelsprout::core::Cell3i axisOffset = voxelsprout::core::dirToOffset(selectedAxis);
+        const odai::core::Cell3i axisOffset = odai::core::dirToOffset(selectedAxis);
         const int faceNormalDotAxis =
             (raycast.hitFaceNormalX * axisOffset.x) +
             (raycast.hitFaceNormalY * axisOffset.y) +
@@ -2572,10 +2572,10 @@ bool App::computePipePlacementFromInteractionRaycast(
             }
 
             // If a chain already exists, extend from its far end instead of failing at an internal segment.
-            const voxelsprout::core::Dir6 extensionDir =
-                extensionSign >= 0 ? selectedAxis : voxelsprout::core::oppositeDir(selectedAxis);
+            const odai::core::Dir6 extensionDir =
+                extensionSign >= 0 ? selectedAxis : odai::core::oppositeDir(selectedAxis);
             while (true) {
-                const voxelsprout::core::Cell3i nextCell = voxelsprout::core::neighborCell(extensionAnchor, extensionDir);
+                const odai::core::Cell3i nextCell = odai::core::neighborCell(extensionAnchor, extensionDir);
                 std::size_t nextPipeIndex = 0;
                 if (!isPipeAtWorld(nextCell.x, nextCell.y, nextCell.z, &nextPipeIndex)) {
                     break;
@@ -2583,7 +2583,7 @@ bool App::computePipePlacementFromInteractionRaycast(
                 if (nextPipeIndex >= pipes.size()) {
                     break;
                 }
-                const voxelsprout::core::Dir6 nextAxis = axisToDir6(pipes[nextPipeIndex].axis);
+                const odai::core::Dir6 nextAxis = axisToDir6(pipes[nextPipeIndex].axis);
                 if (!dirSharesAxis(nextAxis, selectedAxis)) {
                     break;
                 }
@@ -2592,9 +2592,9 @@ bool App::computePipePlacementFromInteractionRaycast(
         }
     }
 
-    const voxelsprout::core::Dir6 extensionDir =
-        extensionSign >= 0 ? selectedAxis : voxelsprout::core::oppositeDir(selectedAxis);
-    const voxelsprout::core::Cell3i targetCell = voxelsprout::core::neighborCell(extensionAnchor, extensionDir);
+    const odai::core::Dir6 extensionDir =
+        extensionSign >= 0 ? selectedAxis : odai::core::oppositeDir(selectedAxis);
+    const odai::core::Cell3i targetCell = odai::core::neighborCell(extensionAnchor, extensionDir);
     const int targetX = targetCell.x;
     const int targetY = targetCell.y;
     const int targetZ = targetCell.z;
@@ -2610,17 +2610,17 @@ bool App::computePipePlacementFromInteractionRaycast(
         return false;
     }
 
-    const std::uint8_t neighborMask = voxelsprout::sim::neighborMask6(targetCell, [this](const voxelsprout::core::Cell3i& cell) {
+    const std::uint8_t neighborMask = odai::sim::neighborMask6(targetCell, [this](const odai::core::Cell3i& cell) {
         return isPipeAtWorld(cell.x, cell.y, cell.z, nullptr);
     });
-    const std::uint32_t neighborCount = voxelsprout::sim::connectionCount(neighborMask);
-    const voxelsprout::sim::JoinPiece joinPiece = voxelsprout::sim::classifyJoinPiece(neighborMask);
+    const std::uint32_t neighborCount = odai::sim::connectionCount(neighborMask);
+    const odai::sim::JoinPiece joinPiece = odai::sim::classifyJoinPiece(neighborMask);
 
-    voxelsprout::core::Dir6 resolvedAxis = selectedAxis;
+    odai::core::Dir6 resolvedAxis = selectedAxis;
     if (neighborCount == 1u) {
-        const voxelsprout::core::Dir6 neighborDir = firstDirFromMask(neighborMask);
-        resolvedAxis = voxelsprout::core::oppositeDir(neighborDir);
-    } else if (joinPiece == voxelsprout::sim::JoinPiece::Straight) {
+        const odai::core::Dir6 neighborDir = firstDirFromMask(neighborMask);
+        resolvedAxis = odai::core::oppositeDir(neighborDir);
+    } else if (joinPiece == odai::sim::JoinPiece::Straight) {
         resolvedAxis = resolveStraightAxisFromMask(neighborMask, selectedAxis);
     }
 
@@ -2644,40 +2644,40 @@ bool App::computeBeltPlacementFromInteractionRaycast(
         return false;
     }
 
-    voxelsprout::core::Dir6 selectedAxis = faceNormalToDir6(
+    odai::core::Dir6 selectedAxis = faceNormalToDir6(
         raycast.hitFaceNormalX,
         raycast.hitFaceNormalY,
         raycast.hitFaceNormalZ
     );
-    if (selectedAxis == voxelsprout::core::Dir6::PosY || selectedAxis == voxelsprout::core::Dir6::NegY) {
+    if (selectedAxis == odai::core::Dir6::PosY || selectedAxis == odai::core::Dir6::NegY) {
         selectedAxis = horizontalDirFromYaw(m_camera.yawDegrees);
     }
     int extensionSign = 1;
-    voxelsprout::core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
+    odai::core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
 
     if (raycast.hitBelt) {
         std::size_t beltIndex = 0;
         if (!isBeltAtWorld(raycast.x, raycast.y, raycast.z, &beltIndex)) {
             return false;
         }
-        const std::vector<voxelsprout::sim::Belt>& belts = m_simulation.belts();
+        const std::vector<odai::sim::Belt>& belts = m_simulation.belts();
         if (beltIndex >= belts.size()) {
             return false;
         }
 
         selectedAxis = beltDirectionToDir6(belts[beltIndex].direction);
-        const voxelsprout::core::Cell3i axisOffset = voxelsprout::core::dirToOffset(selectedAxis);
+        const odai::core::Cell3i axisOffset = odai::core::dirToOffset(selectedAxis);
         const int faceNormalDotAxis =
             (raycast.hitFaceNormalX * axisOffset.x) +
             (raycast.hitFaceNormalY * axisOffset.y) +
             (raycast.hitFaceNormalZ * axisOffset.z);
         if (faceNormalDotAxis == 0) {
-            voxelsprout::core::Dir6 faceDir = faceNormalToDir6(
+            odai::core::Dir6 faceDir = faceNormalToDir6(
                 raycast.hitFaceNormalX,
                 raycast.hitFaceNormalY,
                 raycast.hitFaceNormalZ
             );
-            if (faceDir == voxelsprout::core::Dir6::PosY || faceDir == voxelsprout::core::Dir6::NegY) {
+            if (faceDir == odai::core::Dir6::PosY || faceDir == odai::core::Dir6::NegY) {
                 faceDir = horizontalDirFromYaw(m_camera.yawDegrees);
             }
             selectedAxis = faceDir;
@@ -2687,9 +2687,9 @@ bool App::computeBeltPlacementFromInteractionRaycast(
         }
     }
 
-    const voxelsprout::core::Dir6 extensionDir =
-        extensionSign >= 0 ? selectedAxis : voxelsprout::core::oppositeDir(selectedAxis);
-    const voxelsprout::core::Cell3i targetCell = voxelsprout::core::neighborCell(extensionAnchor, extensionDir);
+    const odai::core::Dir6 extensionDir =
+        extensionSign >= 0 ? selectedAxis : odai::core::oppositeDir(selectedAxis);
+    const odai::core::Cell3i targetCell = odai::core::neighborCell(extensionAnchor, extensionDir);
     const int targetX = targetCell.x;
     const int targetY = targetCell.y;
     const int targetZ = targetCell.z;
@@ -2723,40 +2723,40 @@ bool App::computeTrackPlacementFromInteractionRaycast(
         return false;
     }
 
-    voxelsprout::core::Dir6 selectedAxis = faceNormalToDir6(
+    odai::core::Dir6 selectedAxis = faceNormalToDir6(
         raycast.hitFaceNormalX,
         raycast.hitFaceNormalY,
         raycast.hitFaceNormalZ
     );
-    if (selectedAxis == voxelsprout::core::Dir6::PosY || selectedAxis == voxelsprout::core::Dir6::NegY) {
+    if (selectedAxis == odai::core::Dir6::PosY || selectedAxis == odai::core::Dir6::NegY) {
         selectedAxis = horizontalDirFromYaw(m_camera.yawDegrees);
     }
     int extensionSign = 1;
-    voxelsprout::core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
+    odai::core::Cell3i extensionAnchor{raycast.x, raycast.y, raycast.z};
 
     if (raycast.hitTrack) {
         std::size_t trackIndex = 0;
         if (!isTrackAtWorld(raycast.x, raycast.y, raycast.z, &trackIndex)) {
             return false;
         }
-        const std::vector<voxelsprout::sim::Track>& tracks = m_simulation.tracks();
+        const std::vector<odai::sim::Track>& tracks = m_simulation.tracks();
         if (trackIndex >= tracks.size()) {
             return false;
         }
 
         selectedAxis = trackDirectionToDir6(tracks[trackIndex].direction);
-        const voxelsprout::core::Cell3i axisOffset = voxelsprout::core::dirToOffset(selectedAxis);
+        const odai::core::Cell3i axisOffset = odai::core::dirToOffset(selectedAxis);
         const int faceNormalDotAxis =
             (raycast.hitFaceNormalX * axisOffset.x) +
             (raycast.hitFaceNormalY * axisOffset.y) +
             (raycast.hitFaceNormalZ * axisOffset.z);
         if (faceNormalDotAxis == 0) {
-            voxelsprout::core::Dir6 faceDir = faceNormalToDir6(
+            odai::core::Dir6 faceDir = faceNormalToDir6(
                 raycast.hitFaceNormalX,
                 raycast.hitFaceNormalY,
                 raycast.hitFaceNormalZ
             );
-            if (faceDir == voxelsprout::core::Dir6::PosY || faceDir == voxelsprout::core::Dir6::NegY) {
+            if (faceDir == odai::core::Dir6::PosY || faceDir == odai::core::Dir6::NegY) {
                 faceDir = horizontalDirFromYaw(m_camera.yawDegrees);
             }
             selectedAxis = faceDir;
@@ -2766,9 +2766,9 @@ bool App::computeTrackPlacementFromInteractionRaycast(
         }
     }
 
-    const voxelsprout::core::Dir6 extensionDir =
-        extensionSign >= 0 ? selectedAxis : voxelsprout::core::oppositeDir(selectedAxis);
-    const voxelsprout::core::Cell3i targetCell = voxelsprout::core::neighborCell(extensionAnchor, extensionDir);
+    const odai::core::Dir6 extensionDir =
+        extensionSign >= 0 ? selectedAxis : odai::core::oppositeDir(selectedAxis);
+    const odai::core::Cell3i targetCell = odai::core::neighborCell(extensionAnchor, extensionDir);
     const int targetX = targetCell.x;
     const int targetY = targetCell.y;
     const int targetZ = targetCell.z;
@@ -2793,7 +2793,7 @@ bool App::applyVoxelEdit(
     int targetX,
     int targetY,
     int targetZ,
-    voxelsprout::world::Voxel voxel,
+    odai::world::Voxel voxel,
     std::vector<std::size_t>& outDirtyChunkIndices
 ) {
     int localX = 0;
@@ -2804,7 +2804,7 @@ bool App::applyVoxelEdit(
         return false;
     }
 
-    const voxelsprout::world::Voxel existingVoxel =
+    const odai::world::Voxel existingVoxel =
         m_world.chunkGrid().chunks()[editedChunkIndex].voxelAt(localX, localY, localZ);
     if (existingVoxel.type == voxel.type) {
         return false;
@@ -2834,19 +2834,19 @@ bool App::applyVoxelEdit(
     if (localX == 0) {
         appendNeighborChunkForWorldVoxel(targetX - 1, targetY, targetZ);
     }
-    if (localX == (voxelsprout::world::Chunk::kSizeX - 1)) {
+    if (localX == (odai::world::Chunk::kSizeX - 1)) {
         appendNeighborChunkForWorldVoxel(targetX + 1, targetY, targetZ);
     }
     if (localY == 0) {
         appendNeighborChunkForWorldVoxel(targetX, targetY - 1, targetZ);
     }
-    if (localY == (voxelsprout::world::Chunk::kSizeY - 1)) {
+    if (localY == (odai::world::Chunk::kSizeY - 1)) {
         appendNeighborChunkForWorldVoxel(targetX, targetY + 1, targetZ);
     }
     if (localZ == 0) {
         appendNeighborChunkForWorldVoxel(targetX, targetY, targetZ - 1);
     }
-    if (localZ == (voxelsprout::world::Chunk::kSizeZ - 1)) {
+    if (localZ == (odai::world::Chunk::kSizeZ - 1)) {
         appendNeighborChunkForWorldVoxel(targetX, targetY, targetZ + 1);
     }
 
@@ -2854,9 +2854,9 @@ bool App::applyVoxelEdit(
 }
 
 bool App::isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const {
-    const std::vector<voxelsprout::sim::Pipe>& pipes = m_simulation.pipes();
+    const std::vector<odai::sim::Pipe>& pipes = m_simulation.pipes();
     for (std::size_t pipeIndex = 0; pipeIndex < pipes.size(); ++pipeIndex) {
-        const voxelsprout::sim::Pipe& pipe = pipes[pipeIndex];
+        const odai::sim::Pipe& pipe = pipes[pipeIndex];
         if (pipe.x == worldX && pipe.y == worldY && pipe.z == worldZ) {
             if (outPipeIndex != nullptr) {
                 *outPipeIndex = pipeIndex;
@@ -2868,9 +2868,9 @@ bool App::isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipe
 }
 
 bool App::isBeltAtWorld(int worldX, int worldY, int worldZ, std::size_t* outBeltIndex) const {
-    const std::vector<voxelsprout::sim::Belt>& belts = m_simulation.belts();
+    const std::vector<odai::sim::Belt>& belts = m_simulation.belts();
     for (std::size_t beltIndex = 0; beltIndex < belts.size(); ++beltIndex) {
-        const voxelsprout::sim::Belt& belt = belts[beltIndex];
+        const odai::sim::Belt& belt = belts[beltIndex];
         if (belt.x == worldX && belt.y == worldY && belt.z == worldZ) {
             if (outBeltIndex != nullptr) {
                 *outBeltIndex = beltIndex;
@@ -2882,9 +2882,9 @@ bool App::isBeltAtWorld(int worldX, int worldY, int worldZ, std::size_t* outBelt
 }
 
 bool App::isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTrackIndex) const {
-    const std::vector<voxelsprout::sim::Track>& tracks = m_simulation.tracks();
+    const std::vector<odai::sim::Track>& tracks = m_simulation.tracks();
     for (std::size_t trackIndex = 0; trackIndex < tracks.size(); ++trackIndex) {
-        const voxelsprout::sim::Track& track = tracks[trackIndex];
+        const odai::sim::Track& track = tracks[trackIndex];
         if (track.x == worldX && track.y == worldY && track.z == worldZ) {
             if (outTrackIndex != nullptr) {
                 *outTrackIndex = trackIndex;
@@ -2910,14 +2910,14 @@ void App::regenerateWorld() {
 }
 
 void App::refreshStreamingWindow(bool forceRendererUpload) {
-    const voxelsprout::world::World::ChunkStreamingUpdate streamingUpdate =
+    const odai::world::World::ChunkStreamingUpdate streamingUpdate =
         m_world.updateStreamingWindowForWorldPosition(m_camera.x, m_camera.z);
-    const voxelsprout::world::World::ChunkStreamingStats& streamingStats = streamingUpdate.stats;
+    const odai::world::World::ChunkStreamingStats& streamingStats = streamingUpdate.stats;
     if (!streamingStats.changed && !forceRendererUpload) {
         return;
     }
 
-    const voxelsprout::world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
+    const odai::world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
     const bool clipmapConfigChanged =
         !m_hasAppliedClipmapConfig ||
         requestedClipmapConfig.levelCount != m_appliedClipmapConfig.levelCount ||
@@ -2963,8 +2963,8 @@ bool App::tryPlaceVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndi
     if (m_world.chunkGrid().chunks().empty()) {
         return false;
     }
-    const voxelsprout::world::Voxel placeVoxel = selectedPlaceVoxel();
-    if (placeVoxel.type == voxelsprout::world::VoxelType::Empty) {
+    const odai::world::Voxel placeVoxel = selectedPlaceVoxel();
+    if (placeVoxel.type == odai::world::VoxelType::Empty) {
         return false;
     }
 
@@ -3017,7 +3017,7 @@ bool App::tryRemoveVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkInd
         raycast.solidX,
         raycast.solidY,
         raycast.solidZ,
-        voxelsprout::world::Voxel{voxelsprout::world::VoxelType::Empty},
+        odai::world::Voxel{odai::world::VoxelType::Empty},
         outDirtyChunkIndices
     );
 }
@@ -3046,7 +3046,7 @@ bool App::tryPlacePipeFromCameraRay() {
         return false;
     }
 
-    const voxelsprout::math::Vector3 axis{
+    const odai::math::Vector3 axis{
         static_cast<float>(axisX),
         static_cast<float>(axisY),
         static_cast<float>(axisZ)
@@ -3074,7 +3074,7 @@ bool App::tryRemovePipeFromCameraRay() {
         return false;
     }
 
-    std::vector<voxelsprout::sim::Pipe>& pipes = m_simulation.pipes();
+    std::vector<odai::sim::Pipe>& pipes = m_simulation.pipes();
     if (pipeIndex >= pipes.size()) {
         return false;
     }
@@ -3106,8 +3106,8 @@ bool App::tryPlaceBeltFromCameraRay() {
         return false;
     }
 
-    voxelsprout::core::Dir6 axisDir = faceNormalToDir6(axisX, axisY, axisZ);
-    if (axisDir == voxelsprout::core::Dir6::PosY || axisDir == voxelsprout::core::Dir6::NegY) {
+    odai::core::Dir6 axisDir = faceNormalToDir6(axisX, axisY, axisZ);
+    if (axisDir == odai::core::Dir6::PosY || axisDir == odai::core::Dir6::NegY) {
         axisDir = horizontalDirFromYaw(m_camera.yawDegrees);
     }
     m_simulation.belts().emplace_back(targetX, targetY, targetZ, dir6ToBeltDirection(axisDir));
@@ -3125,7 +3125,7 @@ bool App::tryRemoveBeltFromCameraRay() {
         return false;
     }
 
-    std::vector<voxelsprout::sim::Belt>& belts = m_simulation.belts();
+    std::vector<odai::sim::Belt>& belts = m_simulation.belts();
     if (beltIndex >= belts.size()) {
         return false;
     }
@@ -3157,8 +3157,8 @@ bool App::tryPlaceTrackFromCameraRay() {
         return false;
     }
 
-    voxelsprout::core::Dir6 axisDir = faceNormalToDir6(axisX, axisY, axisZ);
-    if (axisDir == voxelsprout::core::Dir6::PosY || axisDir == voxelsprout::core::Dir6::NegY) {
+    odai::core::Dir6 axisDir = faceNormalToDir6(axisX, axisY, axisZ);
+    if (axisDir == odai::core::Dir6::PosY || axisDir == odai::core::Dir6::NegY) {
         axisDir = horizontalDirFromYaw(m_camera.yawDegrees);
     }
     m_simulation.tracks().emplace_back(targetX, targetY, targetZ, dir6ToTrackDirection(axisDir));
@@ -3176,7 +3176,7 @@ bool App::tryRemoveTrackFromCameraRay() {
         return false;
     }
 
-    std::vector<voxelsprout::sim::Track>& tracks = m_simulation.tracks();
+    std::vector<odai::sim::Track>& tracks = m_simulation.tracks();
     if (trackIndex >= tracks.size()) {
         return false;
     }
@@ -3184,4 +3184,4 @@ bool App::tryRemoveTrackFromCameraRay() {
     return true;
 }
 
-} // namespace voxelsprout::app
+} // namespace odai::app

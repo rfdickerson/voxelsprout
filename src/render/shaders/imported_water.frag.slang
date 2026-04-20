@@ -4,7 +4,7 @@ import chunk_push_constants;
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
 
-#ifdef VOXEL_RT_REFLECTIONS
+#ifdef ODAI_RT_REFLECTIONS
 [[vk::binding(12, 0)]]
 RaytracingAccelerationStructure reflectionScene;
 #endif
@@ -130,7 +130,7 @@ float3 waterNormal(float3 worldPosition, float2 uv)
     ));
 }
 
-#ifdef VOXEL_RT_REFLECTIONS
+#ifdef ODAI_RT_REFLECTIONS
 float3 traceWaterReflection(float3 origin, float3 reflectionDir, float3 skyReflection)
 {
     RayDesc ray;
@@ -253,12 +253,12 @@ float4 main(FragmentInput input) : SV_Target0
 
     const float3 skyReflection = proceduralWaterReflectionSky(reflectionDir);
     float3 reflectionColor = skyReflection;
-#ifdef VOXEL_RT_REFLECTIONS
+#ifdef ODAI_RT_REFLECTIONS
     reflectionColor = traceWaterReflection(input.inWorldPosition + (normal * 0.08), reflectionDir, skyReflection);
 #endif
 
     float3 refractionColor = waterBody;
-#ifdef VOXEL_RT_REFLECTIONS
+#ifdef ODAI_RT_REFLECTIONS
     if (dot(refractionDir, refractionDir) > 0.0001)
     {
         refractionColor = traceWaterRefraction(

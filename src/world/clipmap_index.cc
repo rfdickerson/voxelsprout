@@ -3,10 +3,10 @@
 #include <algorithm>
 #include <cmath>
 
-namespace voxelsprout::world {
+namespace odai::world {
 namespace {
 
-bool aabbIntersects(const voxelsprout::core::CellAabb& lhs, const voxelsprout::core::CellAabb& rhs) {
+bool aabbIntersects(const odai::core::CellAabb& lhs, const odai::core::CellAabb& rhs) {
     if (!lhs.valid || lhs.empty() || !rhs.valid || rhs.empty()) {
         return false;
     }
@@ -15,14 +15,14 @@ bool aabbIntersects(const voxelsprout::core::CellAabb& lhs, const voxelsprout::c
            lhs.minInclusive.z < rhs.maxExclusive.z && lhs.maxExclusive.z > rhs.minInclusive.z;
 }
 
-voxelsprout::core::CellAabb chunkBoundsFromChunk(const Chunk& chunk) {
+odai::core::CellAabb chunkBoundsFromChunk(const Chunk& chunk) {
     const std::int32_t minX = chunk.chunkX() * Chunk::kSizeX;
     const std::int32_t minY = chunk.chunkY() * Chunk::kSizeY;
     const std::int32_t minZ = chunk.chunkZ() * Chunk::kSizeZ;
-    voxelsprout::core::CellAabb bounds{};
+    odai::core::CellAabb bounds{};
     bounds.valid = true;
-    bounds.minInclusive = voxelsprout::core::Cell3i{minX, minY, minZ};
-    bounds.maxExclusive = voxelsprout::core::Cell3i{minX + Chunk::kSizeX, minY + Chunk::kSizeY, minZ + Chunk::kSizeZ};
+    bounds.minInclusive = odai::core::Cell3i{minX, minY, minZ};
+    bounds.maxExclusive = odai::core::Cell3i{minX + Chunk::kSizeX, minY + Chunk::kSizeY, minZ + Chunk::kSizeZ};
     return bounds;
 }
 
@@ -65,7 +65,7 @@ void ChunkClipmapIndex::syncResidentChunks(const ChunkGrid& chunkGrid) {
     m_chunkBounds.resize(chunks.size());
     m_allChunkIndices.resize(chunks.size());
     for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
-        const voxelsprout::core::CellAabb chunkBounds = chunkBoundsFromChunk(chunks[chunkIndex]);
+        const odai::core::CellAabb chunkBounds = chunkBoundsFromChunk(chunks[chunkIndex]);
         m_chunkBounds[chunkIndex] = chunkBounds;
         m_allChunkIndices[chunkIndex] = chunkIndex;
         m_worldBounds.includeAabb(chunkBounds);
@@ -103,7 +103,7 @@ std::size_t ChunkClipmapIndex::chunkCount() const {
     return m_allChunkIndices.size();
 }
 
-const voxelsprout::core::CellAabb& ChunkClipmapIndex::worldBounds() const {
+const odai::core::CellAabb& ChunkClipmapIndex::worldBounds() const {
     return m_worldBounds;
 }
 
@@ -133,7 +133,7 @@ void ChunkClipmapIndex::updateCamera(float cameraX, float cameraY, float cameraZ
         const std::int32_t snappedY = snapDownToMultiple(cameraCellY, level.voxelSize);
         const std::int32_t snappedZ = snapDownToMultiple(cameraCellZ, level.voxelSize);
         const std::int32_t halfCoverage = (level.gridResolution * level.voxelSize) / 2;
-        const voxelsprout::core::Cell3i newOrigin{
+        const odai::core::Cell3i newOrigin{
             snappedX - halfCoverage,
             snappedY - halfCoverage,
             snappedZ - halfCoverage
@@ -263,7 +263,7 @@ void ChunkClipmapIndex::updateCamera(float cameraX, float cameraY, float cameraZ
 }
 
 std::vector<std::size_t> ChunkClipmapIndex::queryChunksIntersecting(
-    const voxelsprout::core::CellAabb& bounds,
+    const odai::core::CellAabb& bounds,
     SpatialQueryStats* outStats
 ) const {
     std::vector<std::size_t> result;
@@ -274,11 +274,11 @@ std::vector<std::size_t> ChunkClipmapIndex::queryChunksIntersecting(
         return result;
     }
 
-    const voxelsprout::core::CellAabb clipmapBounds = m_levels.back().bounds;
+    const odai::core::CellAabb clipmapBounds = m_levels.back().bounds;
     if (!aabbIntersects(clipmapBounds, bounds)) {
         return result;
     }
-    const voxelsprout::core::CellAabb effectiveBounds = voxelsprout::core::intersectAabb(clipmapBounds, bounds);
+    const odai::core::CellAabb effectiveBounds = odai::core::intersectAabb(clipmapBounds, bounds);
     if (!effectiveBounds.valid || effectiveBounds.empty()) {
         return result;
     }
@@ -322,7 +322,7 @@ void ChunkClipmapIndex::rebuildLevels() {
             1,
             (level.gridResolution + level.brickResolution - 1) / level.brickResolution
         );
-        level.originMin = voxelsprout::core::Cell3i{};
+        level.originMin = odai::core::Cell3i{};
         level.originBrickMin = BrickCoord{};
         level.bounds = makeLevelBounds(level.originMin, level.gridResolution, level.voxelSize);
         const std::size_t brickCount = static_cast<std::size_t>(level.brickGridResolution) *
@@ -358,7 +358,7 @@ std::size_t ChunkClipmapIndex::brickLinearIndex(
 }
 
 ChunkClipmapIndex::BrickCoord ChunkClipmapIndex::worldToBrickCoord(
-    const voxelsprout::core::Cell3i& worldCell,
+    const odai::core::Cell3i& worldCell,
     std::int32_t brickWorldSize
 ) {
     return BrickCoord{
@@ -379,16 +379,16 @@ std::int32_t ChunkClipmapIndex::snapDownToMultiple(std::int32_t value, std::int3
     return value - remainder;
 }
 
-voxelsprout::core::CellAabb ChunkClipmapIndex::makeLevelBounds(
-    const voxelsprout::core::Cell3i& originMin,
+odai::core::CellAabb ChunkClipmapIndex::makeLevelBounds(
+    const odai::core::Cell3i& originMin,
     std::int32_t gridResolution,
     std::int32_t voxelSize
 ) {
-    voxelsprout::core::CellAabb bounds{};
+    odai::core::CellAabb bounds{};
     bounds.valid = true;
     bounds.minInclusive = originMin;
     const std::int32_t extent = gridResolution * voxelSize;
-    bounds.maxExclusive = voxelsprout::core::Cell3i{
+    bounds.maxExclusive = odai::core::Cell3i{
         originMin.x + extent,
         originMin.y + extent,
         originMin.z + extent
@@ -406,7 +406,7 @@ void ChunkClipmapIndex::markAllBricksDirty(ClipmapLevel& level) {
                     continue;
                 }
                 level.brickDirtyMask[index] = 1u;
-                level.dirtyBrickRingQueue.push_back(voxelsprout::core::Cell3i{bx, by, bz});
+                level.dirtyBrickRingQueue.push_back(odai::core::Cell3i{bx, by, bz});
             }
         }
     }
@@ -424,12 +424,12 @@ void ChunkClipmapIndex::markBrickDirtyAbsolute(ClipmapLevel& level, const BrickC
         return;
     }
     level.brickDirtyMask[index] = 1u;
-    level.dirtyBrickRingQueue.push_back(voxelsprout::core::Cell3i{ringX, ringY, ringZ});
+    level.dirtyBrickRingQueue.push_back(odai::core::Cell3i{ringX, ringY, ringZ});
 }
 
 std::uint32_t ChunkClipmapIndex::processDirtyBricks(ClipmapLevel& level) {
     std::uint32_t updatedBrickCount = 0;
-    for (const voxelsprout::core::Cell3i& ringCoord : level.dirtyBrickRingQueue) {
+    for (const odai::core::Cell3i& ringCoord : level.dirtyBrickRingQueue) {
         const std::size_t index = brickLinearIndex(ringCoord.x, ringCoord.y, ringCoord.z, level.brickGridResolution);
         if (index >= level.brickDirtyMask.size() || index >= level.brickVersions.size()) {
             continue;
@@ -442,4 +442,4 @@ std::uint32_t ChunkClipmapIndex::processDirtyBricks(ClipmapLevel& level) {
     return updatedBrickCount;
 }
 
-} // namespace voxelsprout::world
+} // namespace odai::world

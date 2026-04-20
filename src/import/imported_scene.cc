@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -20,12 +21,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace voxelsprout::importer {
+namespace odai::importer {
 
 namespace {
 
 constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
-constexpr std::uint32_t kImportedSceneVersion = 13u;
+constexpr std::uint32_t kImportedSceneVersion = 14u;
 constexpr float kExteriorWaterLevel = 0.0f;
 constexpr float kExteriorWaterSurfaceLift = 32.0f;
 constexpr int kLandSize = 65;
@@ -38,6 +39,28 @@ std::string g_lastImportedSceneError;
 
 void setLastImportedSceneError(std::string message) {
     g_lastImportedSceneError = std::move(message);
+}
+
+std::optional<std::string> getEnvironmentVariable(const char* name) {
+#ifdef _WIN32
+    char* value = nullptr;
+    std::size_t length = 0u;
+    if (_dupenv_s(&value, &length, name) != 0 || value == nullptr || length == 0u) {
+        if (value != nullptr) {
+            std::free(value);
+        }
+        return std::nullopt;
+    }
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return std::nullopt;
+    }
+    return std::string(value);
+#endif
 }
 
 std::string lowerCopy(std::string value) {
@@ -62,6 +85,87 @@ std::string trimNullTerminated(std::string_view bytes) {
         break;
     }
     return value;
+}
+
+std::vector<std::string> splitCommaSeparatedList(std::string value) {
+    std::vector<std::string> result;
+    std::size_t start = 0u;
+    while (start < value.size()) {
+        std::size_t end = value.find(',', start);
+        if (end == std::string::npos) {
+            end = value.size();
+        }
+        std::string item = value.substr(start, end - start);
+        item.erase(item.begin(), std::find_if(item.begin(), item.end(), [](unsigned char c) { return !std::isspace(c); }));
+        item.erase(std::find_if(item.rbegin(), item.rend(), [](unsigned char c) { return !std::isspace(c); }).base(), item.end());
+        if (!item.empty()) {
+            result.push_back(lowerCopy(std::move(item)));
+        }
+        start = end + 1u;
+    }
+    return result;
+}
+
+struct DebugBounds {
+    std::array<float, 3> min{
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max()
+    };
+    std::array<float, 3> max{
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest()
+    };
+    bool valid = false;
+};
+
+void expandBounds(DebugBounds& bounds, const std::array<float, 3>& point) {
+    bounds.valid = true;
+    for (int axis = 0; axis < 3; ++axis) {
+        bounds.min[axis] = std::min(bounds.min[axis], point[axis]);
+        bounds.max[axis] = std::max(bounds.max[axis], point[axis]);
+    }
+}
+
+DebugBounds computeMeshBounds(const ImportedSceneMesh& mesh) {
+    DebugBounds bounds{};
+    for (const ImportedSceneVertex& vertex : mesh.vertices) {
+        expandBounds(bounds, {vertex.position[0], vertex.position[1], vertex.position[2]});
+    }
+    return bounds;
+}
+
+DebugBounds computeTransformedMeshBounds(
+    const ImportedSceneMesh& mesh,
+    const std::array<float, 16>& transform
+) {
+    DebugBounds bounds{};
+    for (const ImportedSceneVertex& vertex : mesh.vertices) {
+        const std::array<float, 3> point{
+            (transform[0] * vertex.position[0]) + (transform[1] * vertex.position[1]) + (transform[2] * vertex.position[2]) + transform[3],
+            (transform[4] * vertex.position[0]) + (transform[5] * vertex.position[1]) + (transform[6] * vertex.position[2]) + transform[7],
+            (transform[8] * vertex.position[0]) + (transform[9] * vertex.position[1]) + (transform[10] * vertex.position[2]) + transform[11]
+        };
+        expandBounds(bounds, point);
+    }
+    return bounds;
+}
+
+bool modelPathMatchesDebugFilters(
+    std::string_view modelPath,
+    const std::vector<std::string>& filters
+) {
+    if (filters.empty()) {
+        return false;
+    }
+    const std::string normalizedPath = lowerCopy(std::string(modelPath));
+    for (const std::string& filter : filters) {
+        if (normalizedPath.find(filter) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
 }
 
 struct PackedRenderColor {
@@ -987,39 +1091,6 @@ std::array<float, 16> multiplyMatrices(
     return out;
 }
 
-std::array<float, 16> makeRotationX(float radians) {
-    const float c = std::cos(radians);
-    const float s = std::sin(radians);
-    return {
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, c, -s, 0.0f,
-        0.0f, s, c, 0.0f,
-        0.0f, 0.0f, 0.0f, 1.0f
-    };
-}
-
-std::array<float, 16> makeRotationY(float radians) {
-    const float c = std::cos(radians);
-    const float s = std::sin(radians);
-    return {
-        c, 0.0f, s, 0.0f,
-        0.0f, 1.0f, 0.0f, 0.0f,
-        -s, 0.0f, c, 0.0f,
-        0.0f, 0.0f, 0.0f, 1.0f
-    };
-}
-
-std::array<float, 16> makeRotationZ(float radians) {
-    const float c = std::cos(radians);
-    const float s = std::sin(radians);
-    return {
-        c, -s, 0.0f, 0.0f,
-        s, c, 0.0f, 0.0f,
-        0.0f, 0.0f, 1.0f, 0.0f,
-        0.0f, 0.0f, 0.0f, 1.0f
-    };
-}
-
 std::array<float, 16> makeScaleMatrix(float scale) {
     return {
         scale, 0.0f, 0.0f, 0.0f,
@@ -1034,6 +1105,67 @@ std::array<float, 16> makeTranslationMatrix(float x, float y, float z) {
         1.0f, 0.0f, 0.0f, x,
         0.0f, 1.0f, 0.0f, y,
         0.0f, 0.0f, 1.0f, z,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+}
+
+struct Quaternion {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float w = 1.0f;
+};
+
+Quaternion makeAxisAngleQuaternion(float axisX, float axisY, float axisZ, float radians) {
+    const float halfAngle = radians * 0.5f;
+    const float s = std::sin(halfAngle);
+    const float c = std::cos(halfAngle);
+    return {
+        axisX * s,
+        axisY * s,
+        axisZ * s,
+        c
+    };
+}
+
+Quaternion multiplyQuaternions(const Quaternion& lhs, const Quaternion& rhs) {
+    return {
+        (lhs.w * rhs.x) + (lhs.x * rhs.w) + (lhs.y * rhs.z) - (lhs.z * rhs.y),
+        (lhs.w * rhs.y) - (lhs.x * rhs.z) + (lhs.y * rhs.w) + (lhs.z * rhs.x),
+        (lhs.w * rhs.z) + (lhs.x * rhs.y) - (lhs.y * rhs.x) + (lhs.z * rhs.w),
+        (lhs.w * rhs.w) - (lhs.x * rhs.x) - (lhs.y * rhs.y) - (lhs.z * rhs.z)
+    };
+}
+
+Quaternion normalizeQuaternion(Quaternion q) {
+    const float length = std::sqrt((q.x * q.x) + (q.y * q.y) + (q.z * q.z) + (q.w * q.w));
+    if (length > 1e-6f) {
+        q.x /= length;
+        q.y /= length;
+        q.z /= length;
+        q.w /= length;
+    } else {
+        q = {};
+    }
+    return q;
+}
+
+std::array<float, 16> makeRotationMatrix(const Quaternion& quaternion) {
+    const Quaternion q = normalizeQuaternion(quaternion);
+    const float xx = q.x * q.x;
+    const float yy = q.y * q.y;
+    const float zz = q.z * q.z;
+    const float xy = q.x * q.y;
+    const float xz = q.x * q.z;
+    const float yz = q.y * q.z;
+    const float wx = q.w * q.x;
+    const float wy = q.w * q.y;
+    const float wz = q.w * q.z;
+
+    return {
+        1.0f - (2.0f * (yy + zz)), 2.0f * (xy - wz), 2.0f * (xz + wy), 0.0f,
+        2.0f * (xy + wz), 1.0f - (2.0f * (xx + zz)), 2.0f * (yz - wx), 0.0f,
+        2.0f * (xz - wy), 2.0f * (yz + wx), 1.0f - (2.0f * (xx + yy)), 0.0f,
         0.0f, 0.0f, 0.0f, 1.0f
     };
 }
@@ -1077,20 +1209,29 @@ std::array<float, 16> buildInstanceTransform(const ParsedCellRef& ref) {
     std::array<float, 16> transform = identityMatrix();
     // Morrowind object refs use X/Y ground-plane coordinates with Z as up.
     // Convert to the engine's X/Z ground plane with Y up before applying rotation.
-    // Match OpenMW's non-actor rotation convention:
-    // quat(z,-Z) * quat(y,-Y) * quat(x,-X), remapped into engine axes.
+    // Match OpenMW's non-actor rotation convention exactly:
+    // quat(x,-X) * quat(y,-Y) * quat(z,-Z), remapped into engine axes.
     transform = multiplyMatrices(transform, makeTranslationMatrix(ref.position[0], ref.position[2], ref.position[1]));
-    transform = multiplyMatrices(transform, makeRotationY(-ref.rotation[2]));
-    transform = multiplyMatrices(transform, makeRotationZ(-ref.rotation[1]));
-    transform = multiplyMatrices(transform, makeRotationX(-ref.rotation[0]));
+    const Quaternion rotation = multiplyQuaternions(
+        multiplyQuaternions(
+            makeAxisAngleQuaternion(-1.0f, 0.0f, 0.0f, ref.rotation[0]),
+            makeAxisAngleQuaternion(0.0f, 0.0f, -1.0f, ref.rotation[1])),
+        makeAxisAngleQuaternion(0.0f, -1.0f, 0.0f, ref.rotation[2]));
+    transform = multiplyMatrices(transform, makeRotationMatrix(rotation));
     transform = multiplyMatrices(transform, makeScaleMatrix(ref.scale));
     return transform;
 }
 
 std::filesystem::path normalizeModelRelativePath(std::string path) {
     path = lowerCopy(std::move(path));
+    while (path.rfind("./", 0) == 0) {
+        path.erase(0, 2);
+    }
     while (!path.empty() && path.front() == '/') {
         path.erase(path.begin());
+    }
+    if (path.rfind("data files/", 0) == 0) {
+        path.erase(0, 11);
     }
     if (path.rfind("meshes/", 0) == 0) {
         path.erase(0, 7);
@@ -1100,8 +1241,14 @@ std::filesystem::path normalizeModelRelativePath(std::string path) {
 
 std::string normalizeTextureRelativePath(std::string path) {
     path = lowerCopy(std::move(path));
+    while (path.rfind("./", 0) == 0) {
+        path.erase(0, 2);
+    }
     while (!path.empty() && path.front() == '/') {
         path.erase(path.begin());
+    }
+    if (path.rfind("data files/", 0) == 0) {
+        path.erase(0, 11);
     }
     return path;
 }
@@ -1313,6 +1460,9 @@ ImportedScene buildSceneFromParsedData(
     const std::unordered_map<std::string, std::filesystem::path> meshFileIndex = buildCaseInsensitiveFileIndex(meshesRoot);
     std::unordered_map<std::string, std::uint32_t> meshIndexByModelPath;
     std::unordered_map<std::string, std::string> failedMeshReasonByModelPath;
+    std::unordered_map<std::string, std::size_t> failedMeshCountByReason;
+    const std::vector<std::string> debugModelFilters = splitCommaSeparatedList(
+        getEnvironmentVariable("ODAI_IMPORT_DEBUG_MODEL_FILTER").value_or(""));
     std::size_t attemptedModelImports = 0;
     std::size_t successfulModelImports = 0;
 
@@ -1346,9 +1496,11 @@ ImportedScene buildSceneFromParsedData(
                             haveImportedMesh = true;
                         } else {
                             failedMeshReasonByModelPath.emplace(normalizedModelPath, nifError);
+                            ++failedMeshCountByReason[nifError];
                         }
                     } else {
                         failedMeshReasonByModelPath.emplace(normalizedModelPath, "Mesh file not found");
+                        ++failedMeshCountByReason["Mesh file not found"];
                     }
                 }
 
@@ -1359,6 +1511,31 @@ ImportedScene buildSceneFromParsedData(
                     std::copy(transform.begin(), transform.end(), instance.transform);
                     instance.sourceId = ref.refId;
                     instance.modelPath = normalizedModelPath;
+                    if (modelPathMatchesDebugFilters(normalizedModelPath, debugModelFilters) &&
+                        importedMeshIndex < scene.meshes.size()) {
+                        const ImportedSceneMesh& debugMesh = scene.meshes[importedMeshIndex];
+                        const DebugBounds localBounds = computeMeshBounds(debugMesh);
+                        const DebugBounds worldBounds = computeTransformedMeshBounds(debugMesh, transform);
+                        std::cerr << "[morrowind cooker][debug] model=" << normalizedModelPath
+                                  << " refId=" << ref.refId
+                                  << " cell=(" << cell.gridX << "," << cell.gridY << ")"
+                                  << " pos=(" << ref.position[0] << "," << ref.position[1] << "," << ref.position[2] << ")"
+                                  << " rot=(" << ref.rotation[0] << "," << ref.rotation[1] << "," << ref.rotation[2] << ")"
+                                  << " scale=" << ref.scale;
+                        if (localBounds.valid) {
+                            std::cerr << " localBoundsMin=("
+                                      << localBounds.min[0] << "," << localBounds.min[1] << "," << localBounds.min[2] << ")"
+                                      << " localBoundsMax=("
+                                      << localBounds.max[0] << "," << localBounds.max[1] << "," << localBounds.max[2] << ")";
+                        }
+                        if (worldBounds.valid) {
+                            std::cerr << " worldBoundsMin=("
+                                      << worldBounds.min[0] << "," << worldBounds.min[1] << "," << worldBounds.min[2] << ")"
+                                      << " worldBoundsMax=("
+                                      << worldBounds.max[0] << "," << worldBounds.max[1] << "," << worldBounds.max[2] << ")";
+                        }
+                        std::cerr << "\n";
+                    }
                     scene.instances.push_back(std::move(instance));
                     continue;
                 }
@@ -1402,6 +1579,10 @@ ImportedScene buildSceneFromParsedData(
               << loadedTextureCount << " succeeded out of "
               << scene.textures.size() << " referenced textures\n";
     if (!failedMeshReasonByModelPath.empty()) {
+        for (const auto& [reason, count] : failedMeshCountByReason) {
+            std::cerr << "[morrowind cooker] Static mesh failure bucket: "
+                      << reason << " -> " << count << "\n";
+        }
         int printed = 0;
         for (const auto& [modelPath, reason] : failedMeshReasonByModelPath) {
             std::cerr << "[morrowind cooker] Static mesh import failed: "
@@ -1795,7 +1976,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
     if (version != kImportedSceneVersion) {
         setLastImportedSceneError(
             "Imported scene file version " + std::to_string(version) +
-            " is outdated; recook with the current voxel_morrowind_balmora_cooker (expected version " +
+            " is outdated; recook with the current odai_balmora_cooker (expected version " +
             std::to_string(kImportedSceneVersion) + ")");
         return false;
     }
@@ -1978,7 +2159,7 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     if (version != kImportedSceneVersion) {
         setLastImportedSceneError(
             "Imported scene file version " + std::to_string(version) +
-            " is outdated; recook with the current voxel_morrowind_balmora_cooker (expected version " +
+            " is outdated; recook with the current odai_balmora_cooker (expected version " +
             std::to_string(kImportedSceneVersion) + ")");
         return false;
     }
@@ -2347,4 +2528,4 @@ bool cookMorrowindBalmoraScene(
     return true;
 }
 
-}  // namespace voxelsprout::importer
+}  // namespace odai::importer

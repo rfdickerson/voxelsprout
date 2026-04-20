@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
-project(voxel_factory_toy VERSION 0.1.0 LANGUAGES CXX)
+project(odai VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
-option(VOXEL_BUILD_APP "Build the main Vulkan toy application." ON)
-option(VOXEL_BUILD_TOOLS "Build offline content tools." ON)
+option(ODAI_BUILD_APP "Build the main Vulkan toy application." ON)
+option(ODAI_BUILD_TOOLS "Build offline content tools." ON)
 
 # Optional Slang shader compilation (to SPIR-V for Vulkan).
 # Produces .slang.spv files next to the source shaders.
@@ -66,7 +66,7 @@ if(SLANGC_EXECUTABLE)
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang"
         fragment
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed_rt.frag.slang.spv"
-        -DVOXEL_RT_SHADOWS=1
+        -DODAI_RT_SHADOWS=1
     )
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_normaldepth.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/skybox.vert.slang" vertex)
@@ -89,7 +89,7 @@ if(SLANGC_EXECUTABLE)
         "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static.frag.slang"
         fragment
         "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static_rt.frag.slang.spv"
-        -DVOXEL_RT_SHADOWS=1
+        -DODAI_RT_SHADOWS=1
     )
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_water.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_water.frag.slang" fragment)
@@ -97,7 +97,7 @@ if(SLANGC_EXECUTABLE)
         "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_water.frag.slang"
         fragment
         "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_water_rt.frag.slang.spv"
-        -DVOXEL_RT_REFLECTIONS=1
+        -DODAI_RT_REFLECTIONS=1
     )
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static_normaldepth.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard.vert.slang" vertex)
@@ -112,7 +112,7 @@ if(SLANGC_EXECUTABLE)
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface.comp.slang"
         compute
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface_rt.comp.slang.spv"
-        -DVOXEL_GI_RT_SURFACE=1
+        -DODAI_GI_RT_SURFACE=1
     )
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_sky_exposure.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_restir_candidate.comp.slang" compute)
@@ -129,8 +129,8 @@ else()
     message(STATUS "slangc not found; skipping Slang shader target")
 endif()
 
-if(VOXEL_BUILD_APP)
-    add_executable(voxel_factory_toy
+if(ODAI_BUILD_APP)
+    add_executable(odai
         src/app/main.cc
         src/app/app.cc
         src/core/log.cc
@@ -144,13 +144,13 @@ if(VOXEL_BUILD_APP)
         src/world/chunk_mesher.cc
         src/world/clipmap_index.cc
     )
-    set(VOXEL_RENDER_BACKEND "VULKAN" CACHE STRING "Render backend to build. Supported values: VULKAN, DX12, METAL.")
-    set_property(CACHE VOXEL_RENDER_BACKEND PROPERTY STRINGS VULKAN DX12 METAL)
-    string(TOUPPER "${VOXEL_RENDER_BACKEND}" VOXEL_RENDER_BACKEND_UPPER)
+    set(ODAI_RENDER_BACKEND "VULKAN" CACHE STRING "Render backend to build. Supported values: VULKAN, DX12, METAL.")
+    set_property(CACHE ODAI_RENDER_BACKEND PROPERTY STRINGS VULKAN DX12 METAL)
+    string(TOUPPER "${ODAI_RENDER_BACKEND}" ODAI_RENDER_BACKEND_UPPER)
 
     set(RENDER_BACKEND_SOURCES)
 
-    if(VOXEL_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
+    if(ODAI_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
         list(APPEND RENDER_BACKEND_SOURCES
             src/render/backend/vulkan/frame_ui.cc
             src/render/backend/vulkan/buffer_helpers.cc
@@ -179,37 +179,37 @@ if(VOXEL_BUILD_APP)
             src/render/backend/vulkan/shadow_culling.cc
             src/render/backend/vulkan/vma_usage.cc
         )
-        target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_RENDER_BACKEND_VULKAN=1)
-        target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VULKAN=1)
+        target_compile_definitions(odai PRIVATE ODAI_RENDER_BACKEND_VULKAN=1)
+        target_compile_definitions(odai PRIVATE ODAI_HAS_VULKAN=1)
         set(VULKAN_RENDER_BACKEND "ON")
-    elseif(VOXEL_RENDER_BACKEND_UPPER STREQUAL "DX12")
+    elseif(ODAI_RENDER_BACKEND_UPPER STREQUAL "DX12")
         message(FATAL_ERROR "DX12 backend is not implemented yet.")
-    elseif(VOXEL_RENDER_BACKEND_UPPER STREQUAL "METAL")
+    elseif(ODAI_RENDER_BACKEND_UPPER STREQUAL "METAL")
         message(FATAL_ERROR "Metal backend is not implemented yet.")
     else()
         message(
             FATAL_ERROR
-            "Unsupported VOXEL_RENDER_BACKEND value '${VOXEL_RENDER_BACKEND}'."
+            "Unsupported ODAI_RENDER_BACKEND value '${ODAI_RENDER_BACKEND}'."
             " Expected VULKAN, DX12, or METAL."
         )
     endif()
 
-    target_sources(voxel_factory_toy PRIVATE ${RENDER_BACKEND_SOURCES})
+    target_sources(odai PRIVATE ${RENDER_BACKEND_SOURCES})
 
     if(TARGET slang_shaders)
-        add_dependencies(voxel_factory_toy slang_shaders)
+        add_dependencies(odai slang_shaders)
     endif()
 
-    target_include_directories(voxel_factory_toy PRIVATE src)
+    target_include_directories(odai PRIVATE src)
     target_compile_definitions(
-        voxel_factory_toy PRIVATE
-        VOXEL_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
-        VOXEL_APP_VERSION=\"${PROJECT_VERSION}\"
-        VOXEL_RELEASE_PROFILE=\"windows_runnable_rt_beta\"
+        odai PRIVATE
+        ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        ODAI_APP_VERSION=\"${PROJECT_VERSION}\"
+        ODAI_RELEASE_PROFILE=\"windows_runnable_rt_beta\"
     )
 
     if(MSVC)
-        target_compile_options(voxel_factory_toy PRIVATE
+        target_compile_options(odai PRIVATE
             /W4
             /permissive-
             /w14242
@@ -233,7 +233,7 @@ if(VOXEL_BUILD_APP)
             /w14928
         )
     else()
-        target_compile_options(voxel_factory_toy PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(odai PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
     find_package(glfw3 CONFIG QUIET)
@@ -242,24 +242,24 @@ if(VOXEL_BUILD_APP)
         find_package(Vulkan REQUIRED)
         find_package(imgui CONFIG REQUIRED)
         find_package(VulkanMemoryAllocator CONFIG REQUIRED)
-        target_link_libraries(voxel_factory_toy PRIVATE Vulkan::Vulkan)
-        target_link_libraries(voxel_factory_toy PRIVATE GPUOpen::VulkanMemoryAllocator)
-        target_link_libraries(voxel_factory_toy PRIVATE imgui::imgui)
+        target_link_libraries(odai PRIVATE Vulkan::Vulkan)
+        target_link_libraries(odai PRIVATE GPUOpen::VulkanMemoryAllocator)
+        target_link_libraries(odai PRIVATE imgui::imgui)
     endif()
 
     if(TARGET glfw)
-        target_link_libraries(voxel_factory_toy PRIVATE glfw)
-        target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_GLFW=1)
+        target_link_libraries(odai PRIVATE glfw)
+        target_compile_definitions(odai PRIVATE ODAI_HAS_GLFW=1)
     elseif(TARGET glfw3::glfw)
-        target_link_libraries(voxel_factory_toy PRIVATE glfw3::glfw)
-        target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_GLFW=1)
+        target_link_libraries(odai PRIVATE glfw3::glfw)
+        target_compile_definitions(odai PRIVATE ODAI_HAS_GLFW=1)
     else()
         find_package(PkgConfig QUIET)
         if(PkgConfig_FOUND)
             pkg_check_modules(GLFW3 QUIET IMPORTED_TARGET glfw3)
             if(TARGET PkgConfig::GLFW3)
-                target_link_libraries(voxel_factory_toy PRIVATE PkgConfig::GLFW3)
-                target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_GLFW=1)
+                target_link_libraries(odai PRIVATE PkgConfig::GLFW3)
+                target_compile_definitions(odai PRIVATE ODAI_HAS_GLFW=1)
             else()
                 message(FATAL_ERROR "GLFW is required. Install via vcpkg or provide glfw3 to CMake.")
             endif()
@@ -269,42 +269,43 @@ if(VOXEL_BUILD_APP)
     endif()
 endif()
 
-if(VOXEL_BUILD_TOOLS)
-    add_executable(voxel_morrowind_balmora_cooker
+if(ODAI_BUILD_TOOLS)
+    add_executable(odai_balmora_cooker
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
         src/tools/morrowind_balmora_cooker_main.cc
     )
-    target_include_directories(voxel_morrowind_balmora_cooker PRIVATE src)
+    target_include_directories(odai_balmora_cooker PRIVATE src)
+    set_target_properties(odai_balmora_cooker PROPERTIES OUTPUT_NAME odai_balmora_cooker)
     if(MSVC)
-        target_compile_options(voxel_morrowind_balmora_cooker PRIVATE /W4 /permissive-)
+        target_compile_options(odai_balmora_cooker PRIVATE /W4 /permissive-)
     else()
-        target_compile_options(voxel_morrowind_balmora_cooker PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(odai_balmora_cooker PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
-    add_executable(voxel_imported_scene_preview
+    add_executable(odai_imported_scene_preview
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
         src/tools/imported_scene_preview_main.cc
     )
-    target_include_directories(voxel_imported_scene_preview PRIVATE src)
+    target_include_directories(odai_imported_scene_preview PRIVATE src)
     if(MSVC)
-        target_compile_options(voxel_imported_scene_preview PRIVATE /W4 /permissive-)
+        target_compile_options(odai_imported_scene_preview PRIVATE /W4 /permissive-)
     else()
-        target_compile_options(voxel_imported_scene_preview PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(odai_imported_scene_preview PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
 
 if(BUILD_TESTING)
-    add_executable(voxel_imported_scene_tests
+    add_executable(odai_imported_scene_tests
         tests/imported_scene_tests.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
     )
-    target_include_directories(voxel_imported_scene_tests PRIVATE src)
+    target_include_directories(odai_imported_scene_tests PRIVATE src)
 
     if(MSVC)
-        target_compile_options(voxel_imported_scene_tests PRIVATE
+        target_compile_options(odai_imported_scene_tests PRIVATE
             /W4
             /permissive-
             /w14242
@@ -328,21 +329,21 @@ if(BUILD_TESTING)
             /w14928
         )
     else()
-        target_compile_options(voxel_imported_scene_tests PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(odai_imported_scene_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
-    add_test(NAME voxel_imported_scene_tests COMMAND voxel_imported_scene_tests)
+    add_test(NAME odai_imported_scene_tests COMMAND odai_imported_scene_tests)
 
-    add_executable(voxel_foundation_tests
+    add_executable(odai_foundation_tests
         tests/foundation_tests.cc
         src/world/magica_voxel.cc
         src/world/chunk_mesher.cc
         src/world/clipmap_index.cc
     )
-    target_include_directories(voxel_foundation_tests PRIVATE src)
+    target_include_directories(odai_foundation_tests PRIVATE src)
 
     if(MSVC)
-        target_compile_options(voxel_foundation_tests PRIVATE
+        target_compile_options(odai_foundation_tests PRIVATE
             /W4
             /permissive-
             /w14242
@@ -366,17 +367,17 @@ if(BUILD_TESTING)
             /w14928
         )
     else()
-        target_compile_options(voxel_foundation_tests PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(odai_foundation_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
-    add_test(NAME voxel_foundation_tests COMMAND voxel_foundation_tests)
+    add_test(NAME odai_foundation_tests COMMAND odai_foundation_tests)
 
     find_package(GTest CONFIG QUIET)
     if(NOT GTest_FOUND)
         find_package(GTest QUIET)
     endif()
     if(GTest_FOUND)
-        add_executable(voxel_stability_gtests
+        add_executable(odai_stability_gtests
             tests/stability_g_tests.cc
             tests/frame_math_tests.cc
             tests/frame_graph_tests.cc
@@ -390,11 +391,11 @@ if(BUILD_TESTING)
             src/world/chunk_mesher.cc
             src/world/clipmap_index.cc
         )
-        target_include_directories(voxel_stability_gtests PRIVATE src)
-        target_link_libraries(voxel_stability_gtests PRIVATE GTest::gtest_main)
+        target_include_directories(odai_stability_gtests PRIVATE src)
+        target_link_libraries(odai_stability_gtests PRIVATE GTest::gtest_main)
 
         if(MSVC)
-            target_compile_options(voxel_stability_gtests PRIVATE
+            target_compile_options(odai_stability_gtests PRIVATE
                 /W4
                 /permissive-
                 /w14242
@@ -418,12 +419,12 @@ if(BUILD_TESTING)
                 /w14928
             )
         else()
-            target_compile_options(voxel_stability_gtests PRIVATE -Wall -Wextra -Wpedantic)
+            target_compile_options(odai_stability_gtests PRIVATE -Wall -Wextra -Wpedantic)
         endif()
 
         include(GoogleTest)
-        gtest_discover_tests(voxel_stability_gtests DISCOVERY_TIMEOUT 60)
+        gtest_discover_tests(odai_stability_gtests DISCOVERY_TIMEOUT 60)
     else()
-        message(STATUS "GTest not found; skipping voxel_stability_gtests target (install gtest for your active triplet)")
+        message(STATUS "GTest not found; skipping odai_stability_gtests target (install gtest for your active triplet)")
     endif()
 endif()

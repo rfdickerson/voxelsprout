@@ -33,7 +33,7 @@
 #include "render/backend/vulkan/frame_graph_runtime.h"
 #include "render/backend/vulkan/frame_math.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
@@ -76,8 +76,8 @@ const char* voxelGiSurfaceFallbackReasonName(
 } // namespace
 
 void RendererBackend::renderFrame(
-    const voxelsprout::world::ChunkGrid& chunkGrid,
-    const voxelsprout::sim::Simulation& simulation,
+    const odai::world::ChunkGrid& chunkGrid,
+    const odai::sim::Simulation& simulation,
     const CameraPose& camera,
     const VoxelPreview& preview,
     float simulationAlpha,
@@ -149,19 +149,19 @@ void RendererBackend::renderFrame(
     m_debugMacroCellUniformCount = 0;
     m_debugMacroCellRefined4Count = 0;
     m_debugMacroCellRefined1Count = 0;
-    for (const voxelsprout::world::Chunk& chunk : chunkGrid.chunks()) {
-        for (int my = 0; my < voxelsprout::world::Chunk::kMacroSizeY; ++my) {
-            for (int mz = 0; mz < voxelsprout::world::Chunk::kMacroSizeZ; ++mz) {
-                for (int mx = 0; mx < voxelsprout::world::Chunk::kMacroSizeX; ++mx) {
-                    const voxelsprout::world::Chunk::MacroCell cell = chunk.macroCellAt(mx, my, mz);
+    for (const odai::world::Chunk& chunk : chunkGrid.chunks()) {
+        for (int my = 0; my < odai::world::Chunk::kMacroSizeY; ++my) {
+            for (int mz = 0; mz < odai::world::Chunk::kMacroSizeZ; ++mz) {
+                for (int mx = 0; mx < odai::world::Chunk::kMacroSizeX; ++mx) {
+                    const odai::world::Chunk::MacroCell cell = chunk.macroCellAt(mx, my, mz);
                     switch (cell.resolution) {
-                    case voxelsprout::world::Chunk::CellResolution::Uniform:
+                    case odai::world::Chunk::CellResolution::Uniform:
                         ++m_debugMacroCellUniformCount;
                         break;
-                    case voxelsprout::world::Chunk::CellResolution::Refined4:
+                    case odai::world::Chunk::CellResolution::Refined4:
                         ++m_debugMacroCellRefined4Count;
                         break;
-                    case voxelsprout::world::Chunk::CellResolution::Refined1:
+                    case odai::world::Chunk::CellResolution::Refined1:
                         ++m_debugMacroCellRefined1Count;
                         break;
                     }
@@ -232,7 +232,7 @@ void RendererBackend::renderFrame(
             return std::find_if(
                        chunkGrid.chunks().begin(),
                        chunkGrid.chunks().end(),
-                       [&](const voxelsprout::world::Chunk& chunk) {
+                       [&](const odai::world::Chunk& chunk) {
                            return chunk.chunkX() == pendingKey.chunkX &&
                                   chunk.chunkY() == pendingKey.chunkY &&
                                   chunk.chunkZ() == pendingKey.chunkZ;
@@ -250,9 +250,9 @@ void RendererBackend::renderFrame(
             if (!m_chunkMeshRebuildRequested) {
                 remeshBatchKeys = m_pendingChunkRemeshKeys;
                 const int remeshCameraChunkX = static_cast<int>(std::floor(
-                    camera.x / static_cast<float>(voxelsprout::world::Chunk::kSizeX)));
+                    camera.x / static_cast<float>(odai::world::Chunk::kSizeX)));
                 const int remeshCameraChunkZ = static_cast<int>(std::floor(
-                    camera.z / static_cast<float>(voxelsprout::world::Chunk::kSizeZ)));
+                    camera.z / static_cast<float>(odai::world::Chunk::kSizeZ)));
                 std::sort(
                     remeshBatchKeys.begin(),
                     remeshBatchKeys.end(),
@@ -283,7 +283,7 @@ void RendererBackend::renderFrame(
                     const auto residentIt = std::find_if(
                         chunkGrid.chunks().begin(),
                         chunkGrid.chunks().end(),
-                        [&](const voxelsprout::world::Chunk& chunk) {
+                        [&](const odai::world::Chunk& chunk) {
                             return chunk.chunkX() == key.chunkX &&
                                    chunk.chunkY() == key.chunkY &&
                                    chunk.chunkZ() == key.chunkZ;
@@ -448,21 +448,21 @@ void RendererBackend::renderFrame(
     const float nearPlane = 0.1f;
     const bool renderingImportedScene = !m_importedMeshDraws.empty();
     const float farPlane = renderingImportedScene ? 50000.0f : 500.0f;
-    const float halfFovRadians = voxelsprout::math::radians(activeFovDegrees) * 0.5f;
+    const float halfFovRadians = odai::math::radians(activeFovDegrees) * 0.5f;
     const float tanHalfFov = std::tan(halfFovRadians);
-    const voxelsprout::math::Vector3 eye{camera.x, camera.y, camera.z};
+    const odai::math::Vector3 eye{camera.x, camera.y, camera.z};
     const CameraFrameDerived cameraFrame = computeCameraFrame(camera);
     const int cameraChunkX = cameraFrame.chunkX;
     const int cameraChunkY = cameraFrame.chunkY;
     const int cameraChunkZ = cameraFrame.chunkZ;
-    const voxelsprout::math::Vector3 forward = cameraFrame.forward;
+    const odai::math::Vector3 forward = cameraFrame.forward;
 
-    const voxelsprout::math::Matrix4 view = lookAt(eye, eye + forward, voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f});
-    const voxelsprout::math::Matrix4 projection = perspectiveVulkan(voxelsprout::math::radians(activeFovDegrees), aspectRatio, nearPlane, farPlane);
-    const voxelsprout::math::Matrix4 mvp = projection * view;
-    const voxelsprout::math::Matrix4 mvpColumnMajor = transpose(mvp);
-    const voxelsprout::math::Matrix4 viewColumnMajor = transpose(view);
-    const voxelsprout::math::Matrix4 projectionColumnMajor = transpose(projection);
+    const odai::math::Matrix4 view = lookAt(eye, eye + forward, odai::math::Vector3{0.0f, 1.0f, 0.0f});
+    const odai::math::Matrix4 projection = perspectiveVulkan(odai::math::radians(activeFovDegrees), aspectRatio, nearPlane, farPlane);
+    const odai::math::Matrix4 mvp = projection * view;
+    const odai::math::Matrix4 mvpColumnMajor = transpose(mvp);
+    const odai::math::Matrix4 viewColumnMajor = transpose(view);
+    const odai::math::Matrix4 projectionColumnMajor = transpose(projection);
 
     const bool projectionParamsChanged =
         std::abs(m_shadowStableAspectRatio - aspectRatio) > 0.0001f ||
@@ -473,12 +473,12 @@ void RendererBackend::renderFrame(
         m_shadowStableCascadeRadii.fill(0.0f);
     }
 
-    voxelsprout::math::Vector3 sunDirection = voxelsprout::math::normalize(computeSunDirection(
+    odai::math::Vector3 sunDirection = odai::math::normalize(computeSunDirection(
         m_skyDebugSettings.sunYawDegrees,
         m_skyDebugSettings.sunPitchDegrees
     ));
-    const voxelsprout::math::Vector3 toSun = -voxelsprout::math::normalize(sunDirection);
-    const float sunElevationDegrees = voxelsprout::math::degrees(std::asin(std::clamp(toSun.y, -1.0f, 1.0f)));
+    const odai::math::Vector3 toSun = -odai::math::normalize(sunDirection);
+    const float sunElevationDegrees = odai::math::degrees(std::asin(std::clamp(toSun.y, -1.0f, 1.0f)));
 
     SkyTuningSample manualTuning{};
     manualTuning.rayleighStrength = m_skyDebugSettings.rayleighStrength;
@@ -553,8 +553,8 @@ void RendererBackend::renderFrame(
         effectiveSkySettings.sunHaloIntensity = 0.0f;
     }
 
-    const voxelsprout::math::Vector3 sunColor = isNight
-        ? voxelsprout::math::Vector3{0.0f, 0.0f, 0.0f}
+    const odai::math::Vector3 sunColor = isNight
+        ? odai::math::Vector3{0.0f, 0.0f, 0.0f}
         : computeSunColor(effectiveSkySettings, sunDirection);
 
     constexpr float kCascadeLambda = 0.70f;
@@ -582,14 +582,14 @@ void RendererBackend::renderFrame(
         cascadeDistances[cascadeIndex] = split;
     }
 
-    std::array<voxelsprout::math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
+    std::array<odai::math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
         const float cascadeFar = cascadeDistances[cascadeIndex];
         const float farHalfHeight = cascadeFar * tanHalfFov;
         const float farHalfWidth = farHalfHeight * aspectRatio;
 
         // Camera-position-only cascades: only translation moves cascade centers; rotation does not.
-        const voxelsprout::math::Vector3 frustumCenter = eye;
+        const odai::math::Vector3 frustumCenter = eye;
         float boundingRadius =
             std::sqrt((cascadeFar * cascadeFar) + (farHalfWidth * farHalfWidth) + (farHalfHeight * farHalfHeight));
         boundingRadius = std::max(boundingRadius * 1.04f, 24.0f);
@@ -603,26 +603,26 @@ void RendererBackend::renderFrame(
 
         // Keep the light farther than the cascade sphere but avoid overly large depth spans.
         const float lightDistance = (cascadeRadius * 1.9f) + 48.0f;
-        const float sunUpDot = std::abs(voxelsprout::math::dot(sunDirection, voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f}));
-        const voxelsprout::math::Vector3 lightUpHint =
-            (sunUpDot > 0.95f) ? voxelsprout::math::Vector3{0.0f, 0.0f, 1.0f} : voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f};
-        const voxelsprout::math::Vector3 lightForward = voxelsprout::math::normalize(sunDirection);
-        const voxelsprout::math::Vector3 lightRight = voxelsprout::math::normalize(voxelsprout::math::cross(lightForward, lightUpHint));
-        const voxelsprout::math::Vector3 lightUp = voxelsprout::math::cross(lightRight, lightForward);
+        const float sunUpDot = std::abs(odai::math::dot(sunDirection, odai::math::Vector3{0.0f, 1.0f, 0.0f}));
+        const odai::math::Vector3 lightUpHint =
+            (sunUpDot > 0.95f) ? odai::math::Vector3{0.0f, 0.0f, 1.0f} : odai::math::Vector3{0.0f, 1.0f, 0.0f};
+        const odai::math::Vector3 lightForward = odai::math::normalize(sunDirection);
+        const odai::math::Vector3 lightRight = odai::math::normalize(odai::math::cross(lightForward, lightUpHint));
+        const odai::math::Vector3 lightUp = odai::math::cross(lightRight, lightForward);
 
         // Stabilize translation by snapping the cascade center along light-view right/up texel units
         // before constructing the view matrix.
-        const float centerRight = voxelsprout::math::dot(frustumCenter, lightRight);
-        const float centerUp = voxelsprout::math::dot(frustumCenter, lightUp);
+        const float centerRight = odai::math::dot(frustumCenter, lightRight);
+        const float centerUp = odai::math::dot(frustumCenter, lightUp);
         const float snappedCenterRight = std::floor((centerRight / texelSize) + 0.5f) * texelSize;
         const float snappedCenterUp = std::floor((centerUp / texelSize) + 0.5f) * texelSize;
-        const voxelsprout::math::Vector3 snappedFrustumCenter =
+        const odai::math::Vector3 snappedFrustumCenter =
             frustumCenter +
             (lightRight * (snappedCenterRight - centerRight)) +
             (lightUp * (snappedCenterUp - centerUp));
 
-        const voxelsprout::math::Vector3 lightPosition = snappedFrustumCenter - (lightForward * lightDistance);
-        const voxelsprout::math::Matrix4 lightView = lookAt(lightPosition, snappedFrustumCenter, lightUp);
+        const odai::math::Vector3 lightPosition = snappedFrustumCenter - (lightForward * lightDistance);
+        const odai::math::Matrix4 lightView = lookAt(lightPosition, snappedFrustumCenter, lightUp);
 
         const float left = -cascadeRadius;
         const float right = cascadeRadius;
@@ -632,7 +632,7 @@ void RendererBackend::renderFrame(
         const float casterPadding = std::max(24.0f, cascadeRadius * 0.35f);
         const float lightNear = std::max(0.1f, lightDistance - cascadeRadius - casterPadding);
         const float lightFar = lightDistance + cascadeRadius + casterPadding;
-        const voxelsprout::math::Matrix4 lightProjection = orthographicVulkan(
+        const odai::math::Matrix4 lightProjection = orthographicVulkan(
             left,
             right,
             bottom,
@@ -643,16 +643,16 @@ void RendererBackend::renderFrame(
         lightViewProjMatrices[cascadeIndex] = lightProjection * lightView;
     }
 
-    std::array<voxelsprout::math::Vector3, 9> shIrradiance{};
+    std::array<odai::math::Vector3, 9> shIrradiance{};
     if (!isNight) {
         shIrradiance = computeIrradianceShCoefficients(sunDirection, sunColor, effectiveSkySettings);
     } else {
-        for (voxelsprout::math::Vector3& coefficient : shIrradiance) {
-            coefficient = voxelsprout::math::Vector3{0.0f, 0.0f, 0.0f};
+        for (odai::math::Vector3& coefficient : shIrradiance) {
+            coefficient = odai::math::Vector3{0.0f, 0.0f, 0.0f};
         }
         // Constant dark-blue ambient irradiance for night.
         constexpr float kShY00 = 0.282095f;
-        const voxelsprout::math::Vector3 nightAmbientIrradiance{0.050f, 0.078f, 0.155f};
+        const odai::math::Vector3 nightAmbientIrradiance{0.050f, 0.078f, 0.155f};
         shIrradiance[0] = nightAmbientIrradiance * (1.0f / kShY00);
     }
 
@@ -672,9 +672,9 @@ void RendererBackend::renderFrame(
     std::memcpy(mvpUniform.view, viewColumnMajor.m, sizeof(mvpUniform.view));
     std::memcpy(mvpUniform.proj, projectionColumnMajor.m, sizeof(mvpUniform.proj));
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-        const voxelsprout::math::Matrix4 lightViewProjColumnMajor = transpose(lightViewProjMatrices[cascadeIndex]);
-        const voxelsprout::math::Matrix4 inverseLightViewProjColumnMajor =
-            transpose(voxelsprout::math::inverse(lightViewProjMatrices[cascadeIndex]));
+        const odai::math::Matrix4 lightViewProjColumnMajor = transpose(lightViewProjMatrices[cascadeIndex]);
+        const odai::math::Matrix4 inverseLightViewProjColumnMajor =
+            transpose(odai::math::inverse(lightViewProjMatrices[cascadeIndex]));
         std::memcpy(
             mvpUniform.lightViewProj[cascadeIndex],
             lightViewProjColumnMajor.m,
@@ -934,7 +934,7 @@ void RendererBackend::renderFrame(
     m_voxelGiPreviousSunDirection = {sunDirection.x, sunDirection.y, sunDirection.z};
     m_voxelGiPreviousSunColor = {sunColor.x, sunColor.y, sunColor.z};
     for (std::size_t coeffIndex = 0; coeffIndex < shIrradiance.size(); ++coeffIndex) {
-        const voxelsprout::math::Vector3& coeff = shIrradiance[coeffIndex];
+        const odai::math::Vector3& coeff = shIrradiance[coeffIndex];
         m_voxelGiPreviousShIrradiance[coeffIndex] = {coeff.x, coeff.y, coeff.z};
     }
     m_voxelGiPreviousBounceStrength = m_voxelGiDebugSettings.bounceStrength;
@@ -1003,9 +1003,9 @@ void RendererBackend::renderFrame(
         uint32_t voxelOffset = 0;
     };
     constexpr uint32_t kVoxelGiChunkVoxelCount =
-        static_cast<uint32_t>(voxelsprout::world::Chunk::kSizeX) *
-        static_cast<uint32_t>(voxelsprout::world::Chunk::kSizeY) *
-        static_cast<uint32_t>(voxelsprout::world::Chunk::kSizeZ);
+        static_cast<uint32_t>(odai::world::Chunk::kSizeX) *
+        static_cast<uint32_t>(odai::world::Chunk::kSizeY) *
+        static_cast<uint32_t>(odai::world::Chunk::kSizeZ);
     constexpr uint32_t kVoxelGiOccupancyChunkBudgetPerFrame = 8u;
     constexpr float kVoxelGiOccupancyOriginRebuildThreshold = 0.001f;
 
@@ -1092,23 +1092,23 @@ void RendererBackend::renderFrame(
                 chunkVoxelsSliceOpt->mapped != nullptr) {
                 auto* chunkMeta = static_cast<VoxelGiChunkMetaUpload*>(chunkMetaSliceOpt->mapped);
                 auto* chunkVoxels = static_cast<uint32_t*>(chunkVoxelsSliceOpt->mapped);
-                const std::vector<voxelsprout::world::Chunk>& chunks = chunkGrid.chunks();
+                const std::vector<odai::world::Chunk>& chunks = chunkGrid.chunks();
                 for (std::size_t batchIndex = 0; batchIndex < occupancyChunkBatch.size(); ++batchIndex) {
                     const std::size_t chunkIndex = occupancyChunkBatch[batchIndex];
                     if (chunkIndex >= chunks.size()) {
                         continue;
                     }
-                    const voxelsprout::world::Chunk& chunk = chunks[chunkIndex];
-                    chunkMeta[batchIndex].worldMinX = chunk.chunkX() * voxelsprout::world::Chunk::kSizeX;
-                    chunkMeta[batchIndex].worldMinY = chunk.chunkY() * voxelsprout::world::Chunk::kSizeY;
-                    chunkMeta[batchIndex].worldMinZ = chunk.chunkZ() * voxelsprout::world::Chunk::kSizeZ;
+                    const odai::world::Chunk& chunk = chunks[chunkIndex];
+                    chunkMeta[batchIndex].worldMinX = chunk.chunkX() * odai::world::Chunk::kSizeX;
+                    chunkMeta[batchIndex].worldMinY = chunk.chunkY() * odai::world::Chunk::kSizeY;
+                    chunkMeta[batchIndex].worldMinZ = chunk.chunkZ() * odai::world::Chunk::kSizeZ;
                     chunkMeta[batchIndex].voxelOffset =
                         static_cast<uint32_t>(batchIndex * static_cast<std::size_t>(kVoxelGiChunkVoxelCount));
 
-                    const std::vector<voxelsprout::world::Voxel>& voxels = chunk.voxels();
+                    const std::vector<odai::world::Voxel>& voxels = chunk.voxels();
                     const std::size_t voxelWriteOffset = batchIndex * static_cast<std::size_t>(kVoxelGiChunkVoxelCount);
                     for (std::size_t voxelIndex = 0; voxelIndex < voxels.size(); ++voxelIndex) {
-                        const voxelsprout::world::Voxel& voxel = voxels[voxelIndex];
+                        const odai::world::Voxel& voxel = voxels[voxelIndex];
                         const uint32_t packedVoxel = static_cast<uint32_t>(
                             static_cast<uint32_t>(static_cast<uint8_t>(voxel.type)) |
                             static_cast<uint32_t>(static_cast<uint32_t>(voxel.baseColorIndex) << 8u)
@@ -1131,7 +1131,7 @@ void RendererBackend::renderFrame(
                         chunkVoxelsSliceOpt->size
                     };
                     voxelGiOccupancyDispatchZ = static_cast<uint32_t>(
-                        occupancyChunkBatch.size() * static_cast<std::size_t>(voxelsprout::world::Chunk::kSizeZ)
+                        occupancyChunkBatch.size() * static_cast<std::size_t>(odai::world::Chunk::kSizeZ)
                     );
                     if (buildFromFullRebuild) {
                         m_voxelGiOccupancyFullRebuildCursor = fullRebuildBatchBegin + occupancyChunkBatch.size();
@@ -2422,4 +2422,4 @@ void RendererBackend::renderFrame(
 }
 
 
-} // namespace voxelsprout::render
+} // namespace odai::render

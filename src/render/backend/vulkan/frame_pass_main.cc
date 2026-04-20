@@ -8,7 +8,7 @@
 #include "sim/network_procedural.h"
 #include "render/backend/vulkan/frame_graph_runtime.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
@@ -445,10 +445,10 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         previewInstance.originLength[1] = static_cast<float>(preview.y);
         previewInstance.originLength[2] = static_cast<float>(preview.z);
         previewInstance.originLength[3] = 1.0f;
-        voxelsprout::math::Vector3 previewAxis =
-            voxelsprout::math::normalize(voxelsprout::math::Vector3{preview.pipeAxisX, preview.pipeAxisY, preview.pipeAxisZ});
-        if (voxelsprout::math::lengthSquared(previewAxis) <= 0.0001f) {
-            previewAxis = voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f};
+        odai::math::Vector3 previewAxis =
+            odai::math::normalize(odai::math::Vector3{preview.pipeAxisX, preview.pipeAxisY, preview.pipeAxisZ});
+        if (odai::math::lengthSquared(previewAxis) <= 0.0001f) {
+            previewAxis = odai::math::Vector3{0.0f, 1.0f, 0.0f};
         }
         previewInstance.axisRadius[0] = previewAxis.x;
         previewInstance.axisRadius[1] = previewAxis.y;
@@ -639,4 +639,4 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     writeGpuTimestampBottom(kGpuTimestampQueryMainEnd);
 }
 
-}  // namespace voxelsprout::render
+}  // namespace odai::render

@@ -3,7 +3,7 @@
 #include <cstdint>
 
 // World spatial query stats shared by spatial backends (clipmap, legacy octree).
-namespace voxelsprout::world {
+namespace odai::world {
 
 struct SpatialQueryStats {
     std::uint32_t visitedNodeCount = 0;
@@ -19,4 +19,4 @@ struct SpatialQueryStats {
     std::uint32_t clipmapResidentBrickCount = 0;
 };
 
-} // namespace voxelsprout::world
+} // namespace odai::world

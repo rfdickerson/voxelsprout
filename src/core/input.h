@@ -3,7 +3,7 @@
 // Core Input subsystem
 // Responsible for: defining minimal input state placeholders used by the app.
 // Should NOT do: poll OS APIs, bind actions, or process gameplay commands yet.
-namespace voxelsprout::core {
+namespace odai::core {
 
 struct InputState {
     bool quitRequested = false;
@@ -29,4 +29,4 @@ struct InputState {
     float gamepadLookY = 0.0f;
 };
 
-} // namespace voxelsprout::core
+} // namespace odai::core

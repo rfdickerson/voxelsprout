@@ -7,7 +7,7 @@
 #include "render/renderer_types.h"
 #include "world/chunk.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 struct CameraFrameDerived {
     math::Vector3 forward;
@@ -155,4 +155,4 @@ inline VoxelGiComputeFlags computeVoxelGiFlags(
     };
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

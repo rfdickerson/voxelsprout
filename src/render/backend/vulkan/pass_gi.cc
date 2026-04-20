@@ -1,6 +1,6 @@
 #include "render/backend/vulkan/renderer_backend.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 namespace {
 // Keep these in sync with renderer.cc GI constants.
@@ -545,4 +545,4 @@ void RendererBackend::recordVoxelGiDispatchSequence(
     }
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

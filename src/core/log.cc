@@ -9,8 +9,9 @@
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
+#include <string>
 
-namespace voxelsprout::core {
+namespace odai::core {
 
 namespace {
 
@@ -101,6 +102,22 @@ LogLevel parseLogLevel(const std::string& text, LogLevel fallback) {
     return fallback;
 }
 
+std::string getEnvironmentVariable(const char* name) {
+#if defined(_WIN32)
+    char* value = nullptr;
+    std::size_t valueLength = 0;
+    if (_dupenv_s(&value, &valueLength, name) != 0 || value == nullptr) {
+        return {};
+    }
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : std::string();
+#endif
+}
+
 } // namespace
 
 void setLogLevel(LogLevel level) {
@@ -118,8 +135,8 @@ bool shouldLog(LogLevel level) {
 
 void initializeLogLevelFromEnvironment() {
     std::call_once(g_envInitOnce, []() {
-        const char* envValue = std::getenv("VOXEL_LOG_LEVEL");
-        if (envValue == nullptr || envValue[0] == '\0') {
+        const std::string envValue = getEnvironmentVariable("ODAI_LOG_LEVEL");
+        if (envValue.empty()) {
             return;
         }
         setLogLevel(parseLogLevel(envValue, LogLevel::Info));
@@ -142,4 +159,4 @@ std::ostream& LogLine::stream() {
     return m_stream;
 }
 
-} // namespace voxelsprout::core
+} // namespace odai::core

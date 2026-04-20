@@ -6,7 +6,7 @@
 
 namespace {
 
-void ExpectCell(const voxelsprout::core::Cell3i& cell, int x, int y, int z) {
+void ExpectCell(const odai::core::Cell3i& cell, int x, int y, int z) {
     EXPECT_EQ(cell.x, x);
     EXPECT_EQ(cell.y, y);
     EXPECT_EQ(cell.z, z);
@@ -15,7 +15,7 @@ void ExpectCell(const voxelsprout::core::Cell3i& cell, int x, int y, int z) {
 } // namespace
 
 TEST(SimNetworkProceduralTest, NeighborMask6FlagsAdjacentCells) {
-    using namespace voxelsprout;
+    using namespace odai;
 
     constexpr int kPipeX = 0;
     constexpr int kPipeY = 0;
@@ -47,7 +47,7 @@ TEST(SimNetworkProceduralTest, NeighborMask6FlagsAdjacentCells) {
 }
 
 TEST(SimNetworkProceduralTest, RasterizeSpanMatchesDirection) {
-    using namespace voxelsprout;
+    using namespace odai;
 
     const sim::EdgeSpan span{
         .start = core::Cell3i{1, 2, 3},
@@ -64,7 +64,7 @@ TEST(SimNetworkProceduralTest, RasterizeSpanMatchesDirection) {
 }
 
 TEST(SimNetworkProceduralTest, ClassifyJoinPieceCategories) {
-    using namespace voxelsprout;
+    using namespace odai;
 
     EXPECT_EQ(sim::classifyJoinPiece(0u), sim::JoinPiece::Isolated);
     EXPECT_EQ(sim::classifyJoinPiece(core::dirBit(core::Dir6::PosY)), sim::JoinPiece::EndCap);

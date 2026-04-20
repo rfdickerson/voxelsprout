@@ -31,7 +31,7 @@
 #include <utility>
 #include <vector>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
@@ -53,7 +53,7 @@ struct ImportedDrawBounds {
 
 void expandImportedBounds(
     ImportedDrawBounds& bounds,
-    const voxelsprout::importer::ImportedScenePackedVertex& vertex
+    const odai::importer::ImportedScenePackedVertex& vertex
 ) {
     bounds.valid = true;
     bounds.min[0] = std::min(bounds.min[0], vertex.position[0]);
@@ -123,12 +123,12 @@ std::uint32_t inferImportedTextureMipLevelCount(
 }
 
 ImportedDrawBounds computeImportedDrawBounds(
-    const std::vector<voxelsprout::importer::ImportedScenePackedVertex>& vertices,
+    const std::vector<odai::importer::ImportedScenePackedVertex>& vertices,
     const std::vector<std::uint32_t>& indices,
-    std::span<const voxelsprout::importer::ImportedScenePackedDraw> draws
+    std::span<const odai::importer::ImportedScenePackedDraw> draws
 ) {
     ImportedDrawBounds bounds{};
-    for (const voxelsprout::importer::ImportedScenePackedDraw& draw : draws) {
+    for (const odai::importer::ImportedScenePackedDraw& draw : draws) {
         const std::size_t indexEnd = static_cast<std::size_t>(draw.firstIndex) + static_cast<std::size_t>(draw.indexCount);
         if (draw.indexCount == 0 || indexEnd > indices.size()) {
             continue;
@@ -144,7 +144,7 @@ ImportedDrawBounds computeImportedDrawBounds(
     return bounds;
 }
 
-ChunkResidentKey chunkResidentKeyForChunk(const voxelsprout::world::Chunk& chunk) {
+ChunkResidentKey chunkResidentKeyForChunk(const odai::world::Chunk& chunk) {
     return ChunkResidentKey{
         chunk.chunkX(),
         chunk.chunkY(),
@@ -163,15 +163,15 @@ bool chunkResidentKeyMatchesRecord(
 
 RtVertex decodePackedVoxelVertexPosition(std::uint32_t packedBits, float offsetX, float offsetY, float offsetZ) {
     const std::uint32_t x =
-        (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftX) & voxelsprout::world::PackedVoxelVertex::kMask5;
+        (packedBits >> odai::world::PackedVoxelVertex::kShiftX) & odai::world::PackedVoxelVertex::kMask5;
     const std::uint32_t y =
-        (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftY) & voxelsprout::world::PackedVoxelVertex::kMask5;
+        (packedBits >> odai::world::PackedVoxelVertex::kShiftY) & odai::world::PackedVoxelVertex::kMask5;
     const std::uint32_t z =
-        (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftZ) & voxelsprout::world::PackedVoxelVertex::kMask5;
+        (packedBits >> odai::world::PackedVoxelVertex::kShiftZ) & odai::world::PackedVoxelVertex::kMask5;
     const std::uint32_t face =
-        (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftFace) & voxelsprout::world::PackedVoxelVertex::kMask3;
+        (packedBits >> odai::world::PackedVoxelVertex::kShiftFace) & odai::world::PackedVoxelVertex::kMask3;
     const std::uint32_t corner =
-        (packedBits >> voxelsprout::world::PackedVoxelVertex::kShiftCorner) & voxelsprout::world::PackedVoxelVertex::kMask2;
+        (packedBits >> odai::world::PackedVoxelVertex::kShiftCorner) & odai::world::PackedVoxelVertex::kMask2;
 
     RtVertex vertex{};
     vertex.position[0] = static_cast<float>(x) + offsetX;
@@ -209,36 +209,6 @@ RtVertex decodePackedVoxelVertexPosition(std::uint32_t packedBits, float offsetX
     vertex.position[0] += (corner == 2u || corner == 3u) ? 1.0f : 0.0f;
     vertex.position[1] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
     return vertex;
-}
-
-voxelsprout::math::Matrix4 importedTransformMatrix(const float transform[16]) {
-    voxelsprout::math::Matrix4 matrix{};
-    for (int i = 0; i < 16; ++i) {
-        matrix.m[i] = transform[i];
-    }
-    return matrix;
-}
-
-voxelsprout::math::Vector3 importedColorFromHash(std::string_view key) {
-    std::uint32_t hash = 2166136261u;
-    for (const char ch : key) {
-        hash ^= static_cast<std::uint8_t>(ch);
-        hash *= 16777619u;
-    }
-    const float r = 0.45f + (static_cast<float>((hash >> 0) & 0xFFu) / 255.0f) * 0.35f;
-    const float g = 0.42f + (static_cast<float>((hash >> 8) & 0xFFu) / 255.0f) * 0.30f;
-    const float b = 0.38f + (static_cast<float>((hash >> 16) & 0xFFu) / 255.0f) * 0.22f;
-    return {r, g, b};
-}
-
-voxelsprout::math::Vector3 importedTerrainColor(float height) {
-    const float riverBand = std::clamp((height + 96.0f) / 192.0f, 0.0f, 1.0f);
-    const float slopeTint = std::clamp((height + 16.0f) / 320.0f, 0.0f, 1.0f);
-    const voxelsprout::math::Vector3 low{0.38f, 0.31f, 0.22f};
-    const voxelsprout::math::Vector3 mid{0.55f, 0.47f, 0.34f};
-    const voxelsprout::math::Vector3 high{0.69f, 0.61f, 0.44f};
-    return ((low * (1.0f - riverBand)) + (mid * riverBand)) * (0.82f + (slopeTint * 0.28f)) +
-           (high * (slopeTint * 0.15f));
 }
 
 void destroyRtGeometryBuffers(BufferAllocator& allocator, RtGeometryBuffers& geometry) {
@@ -300,9 +270,9 @@ bool createRtGeometryBuffers(
 
 bool createImportedRtGeometryBuffers(
     BufferAllocator& allocator,
-    const std::vector<voxelsprout::importer::ImportedScenePackedVertex>& packedVertices,
+    const std::vector<odai::importer::ImportedScenePackedVertex>& packedVertices,
     const std::vector<std::uint32_t>& packedIndices,
-    std::span<const voxelsprout::importer::ImportedScenePackedDraw> draws,
+    std::span<const odai::importer::ImportedScenePackedDraw> draws,
     RtGeometryBuffers& outGeometry
 ) {
     if (packedVertices.empty() || packedIndices.empty() || draws.empty()) {
@@ -312,7 +282,7 @@ bool createImportedRtGeometryBuffers(
 
     std::vector<RtVertex> rtVertices;
     rtVertices.reserve(packedVertices.size());
-    for (const voxelsprout::importer::ImportedScenePackedVertex& packedVertex : packedVertices) {
+    for (const odai::importer::ImportedScenePackedVertex& packedVertex : packedVertices) {
         RtVertex rtVertex{};
         rtVertex.position[0] = packedVertex.position[0];
         rtVertex.position[1] = packedVertex.position[1];
@@ -321,7 +291,7 @@ bool createImportedRtGeometryBuffers(
     }
 
     std::vector<std::uint32_t> rtIndices;
-    for (const voxelsprout::importer::ImportedScenePackedDraw& draw : draws) {
+    for (const odai::importer::ImportedScenePackedDraw& draw : draws) {
         const std::size_t firstIndex = static_cast<std::size_t>(draw.firstIndex);
         const std::size_t indexCount = static_cast<std::size_t>(draw.indexCount);
         if (indexCount == 0 || firstIndex >= packedIndices.size()) {
@@ -438,21 +408,21 @@ void RendererBackend::clearImportedSceneMeshes() {
     }
 }
 
-bool RendererBackend::uploadImportedScene(const voxelsprout::importer::ImportedScene& scene) {
+bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& scene) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
 
     clearImportedSceneMeshes();
 
-    voxelsprout::importer::ImportedScene uploadScene = scene;
+    odai::importer::ImportedScene uploadScene = scene;
     const bool havePackedScene =
         !uploadScene.packedVertices.empty() &&
         !uploadScene.packedIndices.empty() &&
         !uploadScene.packedDraws.empty();
     if (!havePackedScene) {
         VOX_LOGI("render") << "imported scene missing packed geometry cache; rebuilding render stream on load";
-        voxelsprout::importer::buildImportedScenePackedRenderData(uploadScene);
+        odai::importer::buildImportedScenePackedRenderData(uploadScene);
     } else {
         VOX_LOGI("render") << "imported scene using packed geometry cache (vertices="
                            << uploadScene.packedVertices.size()
@@ -539,7 +509,7 @@ bool RendererBackend::uploadImportedScene(const voxelsprout::importer::ImportedS
         const std::size_t importedTextureLimit =
             std::min<std::size_t>(uploadScene.textures.size(), maxImportedTextures);
         for (std::size_t textureIndex = 0; textureIndex < importedTextureLimit && !textureUploadFailed; ++textureIndex) {
-            const voxelsprout::importer::ImportedSceneTexture& srcTexture = uploadScene.textures[textureIndex];
+            const odai::importer::ImportedSceneTexture& srcTexture = uploadScene.textures[textureIndex];
             if (srcTexture.width == 0u || srcTexture.height == 0u || srcTexture.rgba8.empty()) {
                 continue;
             }
@@ -763,7 +733,7 @@ bool RendererBackend::uploadImportedScene(const voxelsprout::importer::ImportedS
     waterVertices.reserve(uploadScene.waterPatches.size() * 4u);
     waterIndices.reserve(uploadScene.waterPatches.size() * 6u);
 
-    for (const voxelsprout::importer::ImportedScenePackedVertex& srcVertex : uploadScene.packedVertices) {
+    for (const odai::importer::ImportedScenePackedVertex& srcVertex : uploadScene.packedVertices) {
         ImportedMeshVertex dstVertex{};
         std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
         std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
@@ -778,7 +748,7 @@ bool RendererBackend::uploadImportedScene(const voxelsprout::importer::ImportedS
         vertices.push_back(dstVertex);
     }
     indices.assign(uploadScene.packedIndices.begin(), uploadScene.packedIndices.end());
-    for (const voxelsprout::importer::ImportedScenePackedDraw& srcDraw : uploadScene.packedDraws) {
+    for (const odai::importer::ImportedScenePackedDraw& srcDraw : uploadScene.packedDraws) {
         if (srcDraw.indexCount == 0) {
             continue;
         }
@@ -787,7 +757,7 @@ bool RendererBackend::uploadImportedScene(const voxelsprout::importer::ImportedS
         draw.indexCount = srcDraw.indexCount;
         draws.push_back(draw);
     }
-    for (const voxelsprout::importer::ImportedSceneWaterPatch& patch : uploadScene.waterPatches) {
+    for (const odai::importer::ImportedSceneWaterPatch& patch : uploadScene.waterPatches) {
         const std::uint32_t baseVertex = static_cast<std::uint32_t>(waterVertices.size());
         ImportedWaterVertex vertex{};
         vertex.position[0] = patch.originX;
@@ -927,10 +897,10 @@ bool RendererBackend::uploadImportedScene(const voxelsprout::importer::ImportedS
             }
         }
     }
-    const std::span<const voxelsprout::importer::ImportedScenePackedDraw> allDraws(uploadScene.packedDraws);
-    const std::span<const voxelsprout::importer::ImportedScenePackedDraw> terrainDraws =
+    const std::span<const odai::importer::ImportedScenePackedDraw> allDraws(uploadScene.packedDraws);
+    const std::span<const odai::importer::ImportedScenePackedDraw> terrainDraws =
         allDraws.first(std::min<std::size_t>(m_importedTerrainDrawCount, allDraws.size()));
-    const std::span<const voxelsprout::importer::ImportedScenePackedDraw> staticDraws =
+    const std::span<const odai::importer::ImportedScenePackedDraw> staticDraws =
         allDraws.subspan(std::min<std::size_t>(m_importedTerrainDrawCount, allDraws.size()));
     const ImportedDrawBounds terrainBounds =
         computeImportedDrawBounds(uploadScene.packedVertices, uploadScene.packedIndices, terrainDraws);
@@ -1031,7 +1001,7 @@ void RendererBackend::setVoxelBaseColorPalette(const std::array<std::uint32_t, 1
 
 
 bool RendererBackend::uploadMagicaVoxelMesh(
-    const voxelsprout::world::ChunkMeshData& mesh,
+    const odai::world::ChunkMeshData& mesh,
     float worldOffsetX,
     float worldOffsetY,
     float worldOffsetZ
@@ -1045,7 +1015,7 @@ bool RendererBackend::uploadMagicaVoxelMesh(
     }
 
     BufferCreateDesc vertexCreateDesc{};
-    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(voxelsprout::world::PackedVoxelVertex));
+    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(odai::world::PackedVoxelVertex));
     vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     vertexCreateDesc.initialData = mesh.vertices.data();
@@ -1087,7 +1057,7 @@ bool RendererBackend::uploadMagicaVoxelMesh(
     if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
         std::vector<RtVertex> rtVertices;
         rtVertices.reserve(mesh.vertices.size());
-        for (const voxelsprout::world::PackedVoxelVertex& vertex : mesh.vertices) {
+        for (const odai::world::PackedVoxelVertex& vertex : mesh.vertices) {
             rtVertices.push_back(decodePackedVoxelVertexPosition(vertex.bits, worldOffsetX, worldOffsetY, worldOffsetZ));
         }
         RtGeometryBuffers rtGeometry{};
@@ -1105,7 +1075,7 @@ bool RendererBackend::uploadMagicaVoxelMesh(
 }
 
 
-bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid) {
+bool RendererBackend::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
@@ -1122,7 +1092,7 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
 }
 
 
-bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::size_t chunkIndex) {
+bool RendererBackend::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
@@ -1148,7 +1118,7 @@ bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunk
 }
 
 
-bool RendererBackend::updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices) {
+bool RendererBackend::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
@@ -1183,14 +1153,14 @@ bool RendererBackend::useSpatialPartitioningQueries() const {
     return m_debugEnableSpatialQueries;
 }
 
-voxelsprout::world::ClipmapConfig RendererBackend::clipmapQueryConfig() const {
+odai::world::ClipmapConfig RendererBackend::clipmapQueryConfig() const {
     return m_debugClipmapConfig;
 }
 
 
 void RendererBackend::setSpatialQueryStats(
     bool used,
-    const voxelsprout::world::SpatialQueryStats& stats,
+    const odai::world::SpatialQueryStats& stats,
     std::uint32_t visibleChunkCount
 ) {
     m_debugSpatialQueriesUsed = used;
@@ -1199,7 +1169,7 @@ void RendererBackend::setSpatialQueryStats(
 }
 
 
-bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices) {
+bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices) {
     if (chunkGrid.chunks().empty()) {
         m_chunkDrawRanges.clear();
         m_chunkResidentKeys.clear();
@@ -1256,7 +1226,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         return true;
     }
 
-    const std::vector<voxelsprout::world::Chunk>& chunks = chunkGrid.chunks();
+    const std::vector<odai::world::Chunk>& chunks = chunkGrid.chunks();
     const std::vector<ChunkDrawRange> previousChunkDrawRanges = m_chunkDrawRanges;
     const std::uint32_t previousDebugChunkMeshVertexCount = m_debugChunkMeshVertexCount;
     const std::uint32_t previousDebugChunkMeshIndexCount = m_debugChunkMeshIndexCount;
@@ -1265,12 +1235,12 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         m_debugChunkMeshVertexCount = previousDebugChunkMeshVertexCount;
         m_debugChunkMeshIndexCount = previousDebugChunkMeshIndexCount;
     };
-    const std::size_t expectedDrawRangeCount = chunks.size() * voxelsprout::world::kChunkMeshLodCount;
+    const std::size_t expectedDrawRangeCount = chunks.size() * odai::world::kChunkMeshLodCount;
     if (m_chunkDrawRanges.size() != expectedDrawRangeCount) {
         m_chunkDrawRanges.assign(expectedDrawRangeCount, ChunkDrawRange{});
     }
     const std::vector<ChunkResidentKey> previousResidentKeys = std::move(m_chunkResidentKeys);
-    const std::vector<voxelsprout::world::ChunkLodMeshes> previousChunkLodMeshCache = std::move(m_chunkLodMeshCache);
+    const std::vector<odai::world::ChunkLodMeshes> previousChunkLodMeshCache = std::move(m_chunkLodMeshCache);
     const std::vector<std::vector<GrassBillboardInstance>> previousChunkGrassInstanceCache = std::move(m_chunkGrassInstanceCache);
     std::vector<RtChunkSceneRecord> previousRtChunkSceneRecords = std::move(m_rtChunkSceneRecords);
     int previousResidentCenterChunkX = 0;
@@ -1291,7 +1261,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     }
 
     m_chunkResidentKeys.assign(chunks.size(), ChunkResidentKey{});
-    m_chunkLodMeshCache.assign(chunks.size(), voxelsprout::world::ChunkLodMeshes{});
+    m_chunkLodMeshCache.assign(chunks.size(), odai::world::ChunkLodMeshes{});
     m_chunkGrassInstanceCache.assign(chunks.size(), std::vector<GrassBillboardInstance>{});
     m_rtChunkSceneRecords.assign(chunks.size(), RtChunkSceneRecord{});
 
@@ -1349,7 +1319,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     int maxChunkX = std::numeric_limits<int>::min();
     int minChunkZ = std::numeric_limits<int>::max();
     int maxChunkZ = std::numeric_limits<int>::min();
-    for (const voxelsprout::world::Chunk& chunk : chunks) {
+    for (const odai::world::Chunk& chunk : chunks) {
         minChunkX = std::min(minChunkX, chunk.chunkX());
         maxChunkX = std::max(maxChunkX, chunk.chunkX());
         minChunkZ = std::min(minChunkZ, chunk.chunkZ());
@@ -1362,7 +1332,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         if (chunkArrayIndex >= chunks.size()) {
             return;
         }
-        const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
+        const odai::world::Chunk& chunk = chunks[chunkArrayIndex];
         const int grassDistanceX = std::abs(chunk.chunkX() - residentCenterChunkX);
         const int grassDistanceZ = std::abs(chunk.chunkZ() - residentCenterChunkZ);
         std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
@@ -1375,17 +1345,17 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         }
         grassInstances.reserve(448);
 
-        const float chunkWorldX = static_cast<float>(chunk.chunkX() * voxelsprout::world::Chunk::kSizeX);
-        const float chunkWorldY = static_cast<float>(chunk.chunkY() * voxelsprout::world::Chunk::kSizeY);
-        const float chunkWorldZ = static_cast<float>(chunk.chunkZ() * voxelsprout::world::Chunk::kSizeZ);
+        const float chunkWorldX = static_cast<float>(chunk.chunkX() * odai::world::Chunk::kSizeX);
+        const float chunkWorldY = static_cast<float>(chunk.chunkY() * odai::world::Chunk::kSizeY);
+        const float chunkWorldZ = static_cast<float>(chunk.chunkZ() * odai::world::Chunk::kSizeZ);
 
-        for (int y = 0; y < voxelsprout::world::Chunk::kSizeY - 1; ++y) {
-            for (int z = 0; z < voxelsprout::world::Chunk::kSizeZ; ++z) {
-                for (int x = 0; x < voxelsprout::world::Chunk::kSizeX; ++x) {
-                    if (chunk.voxelAt(x, y, z).type != voxelsprout::world::VoxelType::Grass) {
+        for (int y = 0; y < odai::world::Chunk::kSizeY - 1; ++y) {
+            for (int z = 0; z < odai::world::Chunk::kSizeZ; ++z) {
+                for (int x = 0; x < odai::world::Chunk::kSizeX; ++x) {
+                    if (chunk.voxelAt(x, y, z).type != odai::world::VoxelType::Grass) {
                         continue;
                     }
-                    if (chunk.voxelAt(x, y + 1, z).type != voxelsprout::world::VoxelType::Empty) {
+                    if (chunk.voxelAt(x, y + 1, z).type != odai::world::VoxelType::Empty) {
                         continue;
                     }
 
@@ -1468,8 +1438,8 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     std::size_t remeshedActiveIndexCount = 0;
     std::size_t remeshedNaiveVertexCount = 0;
     std::size_t remeshedNaiveIndexCount = 0;
-    const auto countMeshGeometry = [](const voxelsprout::world::ChunkLodMeshes& lodMeshes, std::size_t& outVertices, std::size_t& outIndices) {
-        for (const voxelsprout::world::ChunkMeshData& lodMesh : lodMeshes.lodMeshes) {
+    const auto countMeshGeometry = [](const odai::world::ChunkLodMeshes& lodMeshes, std::size_t& outVertices, std::size_t& outIndices) {
+        for (const odai::world::ChunkMeshData& lodMesh : lodMeshes.lodMeshes) {
             outVertices += lodMesh.vertices.size();
             outIndices += lodMesh.indices.size();
         }
@@ -1481,19 +1451,19 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     if (fullRemesh) {
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
             m_chunkLodMeshCache[chunkArrayIndex] =
-                voxelsprout::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
+                odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
             rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
                 remeshedActiveVertexCount,
                 remeshedActiveIndexCount
             );
-            if (m_chunkMeshingOptions.mode == voxelsprout::world::MeshingMode::Naive) {
+            if (m_chunkMeshingOptions.mode == odai::world::MeshingMode::Naive) {
                 remeshedNaiveVertexCount = remeshedActiveVertexCount;
                 remeshedNaiveIndexCount = remeshedActiveIndexCount;
             } else {
-                const voxelsprout::world::ChunkLodMeshes naiveLodMeshes =
-                    voxelsprout::world::buildChunkLodMeshes(chunks[chunkArrayIndex], voxelsprout::world::MeshingOptions{voxelsprout::world::MeshingMode::Naive});
+                const odai::world::ChunkLodMeshes naiveLodMeshes =
+                    odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], odai::world::MeshingOptions{odai::world::MeshingMode::Naive});
                 countMeshGeometry(naiveLodMeshes, remeshedNaiveVertexCount, remeshedNaiveIndexCount);
             }
         }
@@ -1511,19 +1481,19 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
 
         for (const std::size_t chunkArrayIndex : uniqueRemeshChunkIndices) {
             m_chunkLodMeshCache[chunkArrayIndex] =
-                voxelsprout::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
+                odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
             rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
                 remeshedActiveVertexCount,
                 remeshedActiveIndexCount
             );
-            if (m_chunkMeshingOptions.mode == voxelsprout::world::MeshingMode::Naive) {
+            if (m_chunkMeshingOptions.mode == odai::world::MeshingMode::Naive) {
                 remeshedNaiveVertexCount = remeshedActiveVertexCount;
                 remeshedNaiveIndexCount = remeshedActiveIndexCount;
             } else {
-                const voxelsprout::world::ChunkLodMeshes naiveLodMeshes =
-                    voxelsprout::world::buildChunkLodMeshes(chunks[chunkArrayIndex], voxelsprout::world::MeshingOptions{voxelsprout::world::MeshingMode::Naive});
+                const odai::world::ChunkLodMeshes naiveLodMeshes =
+                    odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], odai::world::MeshingOptions{odai::world::MeshingMode::Naive});
                 countMeshGeometry(naiveLodMeshes, remeshedNaiveVertexCount, remeshedNaiveIndexCount);
             }
         }
@@ -1548,7 +1518,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     } else if (residentSetChanged) {
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
             if (remeshMask[chunkArrayIndex] == 0u) {
-                const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
+                const odai::world::Chunk& chunk = chunks[chunkArrayIndex];
                 const std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
                 const bool previouslyGrassActive = !grassInstances.empty();
                 const bool currentlyGrassActive =
@@ -1635,7 +1605,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
         }
     }
 
-    std::vector<voxelsprout::world::PackedVoxelVertex> combinedVertices;
+    std::vector<odai::world::PackedVoxelVertex> combinedVertices;
     std::vector<std::uint32_t> combinedIndices;
     auto destroyRtAs = [&](RtAccelerationStructure& accelerationStructure) {
         if (accelerationStructure.handle != VK_NULL_HANDLE && m_destroyAccelerationStructureKhr != nullptr) {
@@ -1655,8 +1625,8 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     std::size_t uploadedIndexCount = 0;
 
     for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-        const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
-        const voxelsprout::world::ChunkLodMeshes& chunkLodMeshes = m_chunkLodMeshCache[chunkArrayIndex];
+        const odai::world::Chunk& chunk = chunks[chunkArrayIndex];
+        const odai::world::ChunkLodMeshes& chunkLodMeshes = m_chunkLodMeshCache[chunkArrayIndex];
         RtChunkSceneRecord& rtChunkRecord = m_rtChunkSceneRecords[chunkArrayIndex];
         const bool remeshChunk = fullRemesh || remeshMask[chunkArrayIndex] != 0u;
         const bool previousRtEligible = rtChunkRecord.rtEligible;
@@ -1673,14 +1643,14 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
             ++m_debugRtActiveChunkCount;
         }
 
-        for (std::size_t lodIndex = 0; lodIndex < voxelsprout::world::kChunkMeshLodCount; ++lodIndex) {
-            const voxelsprout::world::ChunkMeshData& chunkMesh = chunkLodMeshes.lodMeshes[lodIndex];
-            const std::size_t drawRangeArrayIndex = (chunkArrayIndex * voxelsprout::world::kChunkMeshLodCount) + lodIndex;
+        for (std::size_t lodIndex = 0; lodIndex < odai::world::kChunkMeshLodCount; ++lodIndex) {
+            const odai::world::ChunkMeshData& chunkMesh = chunkLodMeshes.lodMeshes[lodIndex];
+            const std::size_t drawRangeArrayIndex = (chunkArrayIndex * odai::world::kChunkMeshLodCount) + lodIndex;
             ChunkDrawRange& drawRange = m_chunkDrawRanges[drawRangeArrayIndex];
 
-            drawRange.offsetX = static_cast<float>(chunk.chunkX() * voxelsprout::world::Chunk::kSizeX);
-            drawRange.offsetY = static_cast<float>(chunk.chunkY() * voxelsprout::world::Chunk::kSizeY);
-            drawRange.offsetZ = static_cast<float>(chunk.chunkZ() * voxelsprout::world::Chunk::kSizeZ);
+            drawRange.offsetX = static_cast<float>(chunk.chunkX() * odai::world::Chunk::kSizeX);
+            drawRange.offsetY = static_cast<float>(chunk.chunkY() * odai::world::Chunk::kSizeY);
+            drawRange.offsetZ = static_cast<float>(chunk.chunkZ() * odai::world::Chunk::kSizeZ);
             drawRange.firstIndex = 0;
             drawRange.vertexOffset = 0;
             drawRange.indexCount = 0;
@@ -1713,7 +1683,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
                 rtChunkRecord.geometryResident = !chunkMesh.vertices.empty() && !chunkMesh.indices.empty();
                 std::vector<RtVertex> rtChunkVertices;
                 rtChunkVertices.reserve(chunkMesh.vertices.size());
-                for (const voxelsprout::world::PackedVoxelVertex& vertex : chunkMesh.vertices) {
+                for (const odai::world::PackedVoxelVertex& vertex : chunkMesh.vertices) {
                     rtChunkVertices.push_back(
                         decodePackedVoxelVertexPosition(vertex.bits, drawRange.offsetX, drawRange.offsetY, drawRange.offsetZ)
                     );
@@ -1799,7 +1769,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
 
     if (hasChunkCopies) {
         const VkDeviceSize vertexBufferSize =
-            static_cast<VkDeviceSize>(combinedVertices.size() * sizeof(voxelsprout::world::PackedVoxelVertex));
+            static_cast<VkDeviceSize>(combinedVertices.size() * sizeof(odai::world::PackedVoxelVertex));
         const VkDeviceSize indexBufferSize =
             static_cast<VkDeviceSize>(combinedIndices.size() * sizeof(std::uint32_t));
 
@@ -1849,7 +1819,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
 
         chunkVertexUploadSliceOpt = m_frameArena.allocateUpload(
             vertexBufferSize,
-            static_cast<VkDeviceSize>(alignof(voxelsprout::world::PackedVoxelVertex)),
+            static_cast<VkDeviceSize>(alignof(odai::world::PackedVoxelVertex)),
             FrameArenaUploadKind::Unknown
         );
         if (!chunkVertexUploadSliceOpt.has_value() || chunkVertexUploadSliceOpt->mapped == nullptr) {
@@ -2026,7 +1996,7 @@ bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& ch
     VOX_LOGD("render") << "chunk upload queued (ranges=" << m_chunkDrawRanges.size()
                        << ", remeshedChunks=" << remeshedChunkCount
                        << ", meshingMode="
-                       << (m_chunkMeshingOptions.mode == voxelsprout::world::MeshingMode::Greedy ? "greedy" : "naive")
+                       << (m_chunkMeshingOptions.mode == odai::world::MeshingMode::Greedy ? "greedy" : "naive")
                        << ", vertices=" << uploadedVertexCount
                        << ", indices=" << uploadedIndexCount
                        << ", rtResidentChunks=" << m_rtChunkSceneRecords.size()
@@ -2551,4 +2521,4 @@ bool RendererBackend::rebuildRayTracingScene() {
                        << ", sceneBuilds=" << m_rtSceneBuildCount << "\n";
     return true;
 }
-} // namespace voxelsprout::render
+} // namespace odai::render

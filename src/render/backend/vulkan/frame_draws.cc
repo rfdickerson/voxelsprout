@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 void RendererBackend::drawIndirectChunkRanges(
     VkCommandBuffer commandBuffer,
@@ -80,4 +80,4 @@ void RendererBackend::drawIndirectShadowChunkRanges(
     }
 }
 
-}  // namespace voxelsprout::render
+}  // namespace odai::render

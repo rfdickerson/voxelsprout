@@ -29,7 +29,7 @@ struct GLFWwindow;
 // Render subsystem
 // Responsible for: owning the rendering interface used by the app.
 // Should NOT do: gameplay simulation, world editing rules, or graphics API specifics yet.
-namespace voxelsprout::render {
+namespace odai::render {
 
 class CoreFrameGraphOrderValidator;
 struct CoreFrameGraphPlan;
@@ -179,24 +179,24 @@ public:
         int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo
     };
 
-    bool init(GLFWwindow* window, const voxelsprout::world::ChunkGrid& chunkGrid);
+    bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
-    bool uploadMagicaVoxelMesh(const voxelsprout::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
+    bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
     void clearImportedSceneMeshes();
-    bool uploadImportedScene(const voxelsprout::importer::ImportedScene& scene);
+    bool uploadImportedScene(const odai::importer::ImportedScene& scene);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
-    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid);
-    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
-    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
+    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
+    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
+    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
     bool useSpatialPartitioningQueries() const;
-    voxelsprout::world::ClipmapConfig clipmapQueryConfig() const;
-    void setSpatialQueryStats(bool used, const voxelsprout::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
+    odai::world::ClipmapConfig clipmapQueryConfig() const;
+    void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void setGameplayUiState(const GameplayUiState& state);
     void renderFrame(
-        const voxelsprout::world::ChunkGrid& chunkGrid,
-        const voxelsprout::sim::Simulation& simulation,
-        const voxelsprout::render::CameraPose& camera,
-        const voxelsprout::render::VoxelPreview& preview,
+        const odai::world::ChunkGrid& chunkGrid,
+        const odai::sim::Simulation& simulation,
+        const odai::render::CameraPose& camera,
+        const odai::render::VoxelPreview& preview,
         float simulationAlpha,
         std::span<const std::size_t> visibleChunkIndices
     );
@@ -319,7 +319,7 @@ private:
         const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo = nullptr,
         const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo = nullptr
     );
-    bool createChunkBuffers(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
+    bool createChunkBuffers(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
     bool createFrameResources();
     bool createGpuTimestampResources();
     bool createImGuiResources();
@@ -331,7 +331,7 @@ private:
     void buildGameplayHudUi();
     void buildAimReticleUi();
     std::vector<std::uint8_t> buildShadowCandidateMask(
-        std::span<const voxelsprout::world::Chunk> chunks,
+        std::span<const odai::world::Chunk> chunks,
         std::span<const std::size_t> visibleChunkIndices
     ) const;
     void recordVoxelGiDispatchSequence(
@@ -638,14 +638,14 @@ private:
     };
 
     FrameInstanceDrawData prepareFrameInstanceDrawData(
-        const voxelsprout::sim::Simulation& simulation,
+        const odai::sim::Simulation& simulation,
         float simulationAlpha
     );
 
     FrameChunkDrawData prepareFrameChunkDrawData(
-        const std::vector<voxelsprout::world::Chunk>& chunks,
+        const std::vector<odai::world::Chunk>& chunks,
         std::span<const std::size_t> visibleChunkIndices,
-        const std::array<voxelsprout::math::Matrix4, kShadowCascadeCount>& lightViewProjMatrices,
+        const std::array<odai::math::Matrix4, kShadowCascadeCount>& lightViewProjMatrices,
         int cameraChunkX,
         int cameraChunkY,
         int cameraChunkZ
@@ -953,7 +953,7 @@ private:
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     std::vector<ChunkResidentKey> m_chunkResidentKeys;
-    std::vector<voxelsprout::world::ChunkLodMeshes> m_chunkLodMeshCache;
+    std::vector<odai::world::ChunkLodMeshes> m_chunkLodMeshCache;
     std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
     std::vector<ImportedMeshDraw> m_importedMeshDraws;
@@ -969,7 +969,7 @@ private:
     std::uint32_t m_rtTlasBuildCount = 0;
     std::uint32_t m_rtDirtyChunkCount = 0;
     bool m_chunkLodMeshCacheValid = false;
-    voxelsprout::world::MeshingOptions m_chunkMeshingOptions{};
+    odai::world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;
     std::vector<ChunkResidentKey> m_pendingChunkRemeshKeys;
     uint32_t m_previewIndexCount = 0;
@@ -1128,9 +1128,9 @@ private:
     std::uint32_t m_debugDrawnLod1Ranges = 0;
     std::uint32_t m_debugDrawnLod2Ranges = 0;
     bool m_debugEnableSpatialQueries = true;
-    voxelsprout::world::ClipmapConfig m_debugClipmapConfig{};
+    odai::world::ClipmapConfig m_debugClipmapConfig{};
     bool m_debugSpatialQueriesUsed = false;
-    voxelsprout::world::SpatialQueryStats m_debugSpatialQueryStats{};
+    odai::world::SpatialQueryStats m_debugSpatialQueryStats{};
     std::uint32_t m_debugSpatialVisibleChunkCount = 0;
     std::uint32_t m_debugChunkIndirectCommandCount = 0;
     std::uint32_t m_debugDrawCallsTotal = 0;
@@ -1172,4 +1172,4 @@ private:
     float m_shadowStableFovDegrees = -1.0f;
 };
 
-} // namespace voxelsprout::render
+} // namespace odai::render

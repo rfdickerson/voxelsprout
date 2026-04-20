@@ -15,7 +15,7 @@
 
 struct GLFWwindow;
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 class RendererBackend;
 
@@ -28,22 +28,22 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    bool init(GLFWwindow* window, const voxelsprout::world::ChunkGrid& chunkGrid);
+    bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
-    bool uploadMagicaVoxelMesh(const voxelsprout::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
+    bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
     void clearImportedSceneMeshes();
-    bool uploadImportedScene(const voxelsprout::importer::ImportedScene& scene);
+    bool uploadImportedScene(const odai::importer::ImportedScene& scene);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
-    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid);
-    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
-    bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
+    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
+    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
+    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
     bool useSpatialPartitioningQueries() const;
-    voxelsprout::world::ClipmapConfig clipmapQueryConfig() const;
-    void setSpatialQueryStats(bool used, const voxelsprout::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
+    odai::world::ClipmapConfig clipmapQueryConfig() const;
+    void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void setGameplayUiState(const GameplayUiState& state);
     void renderFrame(
-        const voxelsprout::world::ChunkGrid& chunkGrid,
-        const voxelsprout::sim::Simulation& simulation,
+        const odai::world::ChunkGrid& chunkGrid,
+        const odai::sim::Simulation& simulation,
         const CameraPose& camera,
         const VoxelPreview& preview,
         float simulationAlpha,
@@ -79,4 +79,4 @@ private:
     std::unique_ptr<RendererBackend> m_backend;
 };
 
-} // namespace voxelsprout::render
+} // namespace odai::render

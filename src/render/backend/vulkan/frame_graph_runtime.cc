@@ -2,7 +2,7 @@
 
 #include "core/log.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 CoreFrameGraphOrderValidator::CoreFrameGraphOrderValidator(const CoreFrameGraphPlan& plan)
     : m_passOrderById(plan.passOrderById) {}
@@ -21,4 +21,4 @@ void CoreFrameGraphOrderValidator::markPassEntered(FrameGraph::PassId passId, co
     m_lastPassOrderIndex = passOrderIndex;
 }
 
-}  // namespace voxelsprout::render
+}  // namespace odai::render

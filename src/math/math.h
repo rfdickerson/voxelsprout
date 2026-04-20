@@ -2,7 +2,7 @@
 
 #include <cmath>
 
-namespace voxelsprout::math {
+namespace odai::math {
 
 constexpr float kPi = 3.14159265358979323846f;
 
@@ -363,4 +363,4 @@ inline Matrix4 inverse(const Matrix4& matrix) {
     return inverseMatrix;
 }
 
-} // namespace voxelsprout::math
+} // namespace odai::math

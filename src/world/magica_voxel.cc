@@ -9,7 +9,7 @@
 #include <limits>
 #include <utility>
 
-namespace voxelsprout::world {
+namespace odai::world {
 
 namespace {
 
@@ -938,4 +938,4 @@ ChunkMeshData buildMagicaVoxelMesh(const MagicaVoxelModel& model) {
     return mesh;
 }
 
-} // namespace voxelsprout::world
+} // namespace odai::world

@@ -8,7 +8,7 @@ namespace {
 
 void printUsage() {
     std::cerr
-        << "Usage: voxel_morrowind_balmora_cooker <Data Files path> <scene output path> [terrain obj output path]\n";
+        << "Usage: odai_balmora_cooker <Data Files path> <scene output path> [terrain obj output path]\n";
 }
 
 }  // namespace
@@ -23,10 +23,10 @@ int main(int argc, char** argv) {
     const std::filesystem::path sceneOutputPath = argv[2];
     const std::filesystem::path terrainObjOutputPath = argc >= 4 ? std::filesystem::path(argv[3]) : std::filesystem::path{};
 
-    voxelsprout::importer::MorrowindBalmoraCookResult result{};
-    if (!voxelsprout::importer::cookMorrowindBalmoraScene(dataFilesPath, result)) {
+    odai::importer::MorrowindBalmoraCookResult result{};
+    if (!odai::importer::cookMorrowindBalmoraScene(dataFilesPath, result)) {
         std::cerr << "Failed to cook Balmora scene from " << dataFilesPath << "\n";
-        const std::string& detail = voxelsprout::importer::getImportedSceneLastError();
+        const std::string& detail = odai::importer::getImportedSceneLastError();
         if (!detail.empty()) {
             std::cerr << "Reason: " << detail << "\n";
         }
@@ -34,9 +34,9 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    if (!voxelsprout::importer::saveImportedScene(result.scene, sceneOutputPath)) {
+    if (!odai::importer::saveImportedScene(result.scene, sceneOutputPath)) {
         std::cerr << "Failed to save cooked scene to " << sceneOutputPath << "\n";
-        const std::string& detail = voxelsprout::importer::getImportedSceneLastError();
+        const std::string& detail = odai::importer::getImportedSceneLastError();
         if (!detail.empty()) {
             std::cerr << "Reason: " << detail << "\n";
         }
@@ -44,9 +44,9 @@ int main(int argc, char** argv) {
     }
 
     if (!terrainObjOutputPath.empty() &&
-        !voxelsprout::importer::exportImportedSceneTerrainObj(result.scene, terrainObjOutputPath)) {
+        !odai::importer::exportImportedSceneTerrainObj(result.scene, terrainObjOutputPath)) {
         std::cerr << "Failed to export terrain OBJ to " << terrainObjOutputPath << "\n";
-        const std::string& detail = voxelsprout::importer::getImportedSceneLastError();
+        const std::string& detail = odai::importer::getImportedSceneLastError();
         if (!detail.empty()) {
             std::cerr << "Reason: " << detail << "\n";
         }

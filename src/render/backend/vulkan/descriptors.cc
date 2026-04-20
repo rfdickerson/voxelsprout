@@ -8,7 +8,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 namespace {
 
@@ -942,4 +942,4 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     return m_descriptorManager.buildBoundDescriptorSets(m_currentFrame);
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

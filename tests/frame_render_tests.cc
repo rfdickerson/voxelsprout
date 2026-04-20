@@ -10,30 +10,30 @@
 namespace {
 
 TEST(FrameRenderTest, BuildShadowCandidateMaskReturnsEmptyWhenDisabled) {
-    const std::vector<voxelsprout::world::Chunk> chunks = {
-        voxelsprout::world::Chunk(0, 0, 0),
-        voxelsprout::world::Chunk(1, 0, 0),
-        voxelsprout::world::Chunk(0, 1, 0)
+    const std::vector<odai::world::Chunk> chunks = {
+        odai::world::Chunk(0, 0, 0),
+        odai::world::Chunk(1, 0, 0),
+        odai::world::Chunk(0, 1, 0)
     };
 
     const std::vector<std::size_t> visibleChunkIndices = {0u};
     const std::vector<std::uint8_t> candidates =
-        voxelsprout::render::buildShadowCandidateMask(chunks, visibleChunkIndices, false);
+        odai::render::buildShadowCandidateMask(chunks, visibleChunkIndices, false);
 
     EXPECT_TRUE(candidates.empty());
 }
 
 TEST(FrameRenderTest, BuildShadowCandidateMaskMarksNeighborChunks) {
-    const std::vector<voxelsprout::world::Chunk> chunks = {
-        voxelsprout::world::Chunk(0, 0, 0),
-        voxelsprout::world::Chunk(1, 0, 0),
-        voxelsprout::world::Chunk(2, 0, 0),
-        voxelsprout::world::Chunk(0, 1, 0)
+    const std::vector<odai::world::Chunk> chunks = {
+        odai::world::Chunk(0, 0, 0),
+        odai::world::Chunk(1, 0, 0),
+        odai::world::Chunk(2, 0, 0),
+        odai::world::Chunk(0, 1, 0)
     };
 
     const std::vector<std::size_t> visibleChunkIndices = {0u, 3u};
     const std::vector<std::uint8_t> candidates =
-        voxelsprout::render::buildShadowCandidateMask(chunks, visibleChunkIndices, true);
+        odai::render::buildShadowCandidateMask(chunks, visibleChunkIndices, true);
 
     ASSERT_EQ(candidates.size(), 4u);
     EXPECT_EQ(candidates[0u], 1u);
@@ -43,14 +43,14 @@ TEST(FrameRenderTest, BuildShadowCandidateMaskMarksNeighborChunks) {
 }
 
 TEST(FrameRenderTest, BuildShadowCandidateMaskSkipsInvalidVisibleIndices) {
-    const std::vector<voxelsprout::world::Chunk> chunks = {
-        voxelsprout::world::Chunk(0, 0, 0),
-        voxelsprout::world::Chunk(0, 0, 1)
+    const std::vector<odai::world::Chunk> chunks = {
+        odai::world::Chunk(0, 0, 0),
+        odai::world::Chunk(0, 0, 1)
     };
     const std::vector<std::size_t> visibleChunkIndices = {0u, 99u};
 
     const std::vector<std::uint8_t> candidates =
-        voxelsprout::render::buildShadowCandidateMask(chunks, visibleChunkIndices, true);
+        odai::render::buildShadowCandidateMask(chunks, visibleChunkIndices, true);
 
     ASSERT_EQ(candidates.size(), 2u);
     EXPECT_EQ(candidates[0u], 1u);

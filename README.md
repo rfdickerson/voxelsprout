@@ -35,14 +35,14 @@ Use the `Data Files` path as the first cooker argument.
 Linux/WSL2 tool-only build:
 
 ```bash
-cmake -S . -B /tmp/voxelsprout-cmake-check \
-  -DVOXEL_BUILD_APP=OFF \
-  -DVOXEL_BUILD_TOOLS=ON \
+cmake -S . -B /tmp/odai-cmake-check \
+  -DODAI_BUILD_APP=OFF \
+  -DODAI_BUILD_TOOLS=ON \
   -DBUILD_TESTING=ON \
   -DCMAKE_BUILD_TYPE=Debug
 
-cmake --build /tmp/voxelsprout-cmake-check --target voxel_morrowind_balmora_cooker -j 4
-cmake --build /tmp/voxelsprout-cmake-check --target voxel_imported_scene_tests -j 4
+cmake --build /tmp/odai-cmake-check --target odai_balmora_cooker -j 4
+cmake --build /tmp/odai-cmake-check --target odai_imported_scene_tests -j 4
 ```
 
 Windows app builds should continue using `cmake-build-release`.
@@ -53,7 +53,7 @@ Linux builds should continue using `cmake-build-linux`.
 WSL2 example:
 
 ```bash
-/tmp/voxelsprout-cmake-check/voxel_morrowind_balmora_cooker \
+/tmp/odai-cmake-check/odai_balmora_cooker \
   "/mnt/c/GOG Games/Morrowind/Data Files" \
   /tmp/balmora_scene.bin \
   /tmp/balmora_terrain.obj
@@ -62,7 +62,7 @@ WSL2 example:
 Windows example from PowerShell after building the tool:
 
 ```powershell
-voxel_morrowind_balmora_cooker.exe `
+odai_balmora_cooker.exe `
   "C:\GOG Games\Morrowind\Data Files" `
   "C:\temp\balmora_scene.bin" `
   "C:\temp\balmora_terrain.obj"
@@ -94,14 +94,14 @@ The cooker reads:
 Run the importer-focused test target:
 
 ```bash
-/tmp/voxelsprout-cmake-check/voxel_imported_scene_tests
+/tmp/odai-cmake-check/odai_imported_scene_tests
 ```
 
 This currently validates imported-scene save/load round-tripping and terrain OBJ export.
 
 ## Current Workflow
 
-1. Build `voxel_morrowind_balmora_cooker`
+1. Build `odai_balmora_cooker`
 2. Point it at the Morrowind `Data Files` directory
 3. Generate `balmora_scene.bin`
 4. Optionally inspect `balmora_terrain.obj`

@@ -4,7 +4,7 @@
 
 #include "sim/network_procedural.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
@@ -157,4 +157,4 @@ void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
     );
 }
 
-}  // namespace voxelsprout::render
+}  // namespace odai::render

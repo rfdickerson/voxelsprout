@@ -7,7 +7,7 @@
 #include <filesystem>
 #include <vector>
 
-namespace voxelsprout::world {
+namespace odai::world {
 
 struct MagicaVoxel {
     std::uint8_t x = 0;
@@ -37,4 +37,4 @@ bool loadMagicaVoxelModel(const std::filesystem::path& path, MagicaVoxelModel& o
 std::vector<MagicaVoxelMeshChunk> buildMagicaVoxelMeshChunks(const MagicaVoxelModel& model);
 ChunkMeshData buildMagicaVoxelMesh(const MagicaVoxelModel& model);
 
-} // namespace voxelsprout::world
+} // namespace odai::world

@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 namespace {
 
@@ -558,4 +558,4 @@ void RendererBackend::destroySunShaftResources() {
     m_sunShaftShaderAvailable = false;
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

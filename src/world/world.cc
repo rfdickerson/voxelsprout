@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace voxelsprout::world {
+namespace odai::world {
 
 namespace {
 
@@ -430,8 +430,8 @@ std::filesystem::path World::resolveAssetPath(const std::filesystem::path& relat
     std::vector<std::filesystem::path> baseCandidates;
     baseCandidates.reserve(6);
 
-#if defined(VOXEL_PROJECT_SOURCE_DIR)
-    baseCandidates.emplace_back(std::filesystem::path{VOXEL_PROJECT_SOURCE_DIR});
+#if defined(ODAI_PROJECT_SOURCE_DIR)
+    baseCandidates.emplace_back(std::filesystem::path{ODAI_PROJECT_SOURCE_DIR});
 #endif
 
     std::error_code cwdError;
@@ -584,4 +584,4 @@ World::ChunkStreamingUpdate World::syncResidentChunkGrid(int centerChunkX, int c
     return update;
 }
 
-} // namespace voxelsprout::world
+} // namespace odai::world

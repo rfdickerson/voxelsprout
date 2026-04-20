@@ -5,7 +5,7 @@
 #include "sim/network_procedural.h"
 #include "render/backend/vulkan/frame_graph_runtime.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
@@ -307,4 +307,4 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     );
 }
 
-}  // namespace voxelsprout::render
+}  // namespace odai::render

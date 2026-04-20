@@ -5,7 +5,7 @@
 #include <filesystem>
 #include <string>
 
-namespace voxelsprout::importer {
+namespace odai::importer {
 
 struct ImportedNifResult {
     ImportedSceneMesh mesh;
@@ -19,4 +19,4 @@ bool loadMorrowindStaticNif(
     std::string& outError
 );
 
-}  // namespace voxelsprout::importer
+}  // namespace odai::importer

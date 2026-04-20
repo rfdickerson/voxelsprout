@@ -1,9 +1,9 @@
 ---
 layout: default
-title: VoxelSprout Devlog
+title: Odai Devlog
 ---
 
-# VoxelSprout Devlog
+# Odai Devlog
 
 Project development log:
 
