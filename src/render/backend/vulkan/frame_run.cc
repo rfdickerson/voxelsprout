@@ -430,12 +430,7 @@ void RendererBackend::renderFrame(
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         buildFrameStatsUi();
-        buildMeshingDebugUi();
-        buildShadowDebugUi();
-        buildSunDebugUi();
-        m_debugUiVisible = m_showMeshingPanel || m_showShadowPanel || m_showSunPanel;
-        buildGameplayHudUi();
-        buildAimReticleUi();
+        m_debugUiVisible = m_showFrameStatsPanel;
         ImGui::Render();
     }
     // Keep previous frame counters visible in UI, then reset for this frame's capture.
@@ -451,7 +446,8 @@ void RendererBackend::renderFrame(
 
     const float aspectRatio = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
     const float nearPlane = 0.1f;
-    const float farPlane = 500.0f;
+    const bool renderingImportedScene = !m_importedMeshDraws.empty();
+    const float farPlane = renderingImportedScene ? 50000.0f : 500.0f;
     const float halfFovRadians = voxelsprout::math::radians(activeFovDegrees) * 0.5f;
     const float tanHalfFov = std::tan(halfFovRadians);
     const voxelsprout::math::Vector3 eye{camera.x, camera.y, camera.z};
@@ -805,8 +801,8 @@ void RendererBackend::renderFrame(
     const bool autoExposureEnabled = m_skyDebugSettings.autoExposureEnabled && m_autoExposureComputeAvailable;
     mvpUniform.skyConfig5[0] = autoExposureEnabled ? 1.0f : 0.0f;
     mvpUniform.skyConfig5[1] = std::clamp(m_skyDebugSettings.manualExposure, 0.05f, 8.0f);
-    mvpUniform.skyConfig5[2] = 0.0f;
-    mvpUniform.skyConfig5[3] = 0.0f;
+    mvpUniform.skyConfig5[2] = (m_morrowindSkyTextureImageView != VK_NULL_HANDLE) ? 1.0f : 0.0f;
+    mvpUniform.skyConfig5[3] = std::clamp(m_skyDebugSettings.waterRefractionDecay, 0.25f, 3.0f);
     mvpUniform.colorGrading0[0] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceR, 0.0f, 4.0f);
     mvpUniform.colorGrading0[1] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceG, 0.0f, 4.0f);
     mvpUniform.colorGrading0[2] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceB, 0.0f, 4.0f);
@@ -823,6 +819,10 @@ void RendererBackend::renderFrame(
     mvpUniform.colorGrading3[1] = std::clamp(m_skyDebugSettings.colorGradingHighlightTintG, -1.0f, 1.0f);
     mvpUniform.colorGrading3[2] = std::clamp(m_skyDebugSettings.colorGradingHighlightTintB, -1.0f, 1.0f);
     mvpUniform.colorGrading3[3] = 0.0f;
+    mvpUniform.waterConfig[0] = std::clamp(m_skyDebugSettings.waterAnimationSpeed, 0.25f, 4.0f);
+    mvpUniform.waterConfig[1] = std::clamp(m_skyDebugSettings.waterNormalStrength, 0.25f, 2.5f);
+    mvpUniform.waterConfig[2] = std::clamp(m_skyDebugSettings.waterReflectionStrength, 0.25f, 4.0f);
+    mvpUniform.waterConfig[3] = std::clamp(m_skyDebugSettings.waterRefractionDecay, 0.25f, 5.0f);
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
     const float voxelGiDesiredOriginX = computeVoxelGiAxisOrigin(camera.x, voxelGiHalfSpan, kVoxelGiCellSize);
@@ -1324,6 +1324,8 @@ void RendererBackend::renderFrame(
     const VkBuffer shadowChunkInstanceBuffer = frameChunkDrawData.shadowChunkInstanceBuffer;
     const VkBuffer chunkVertexBuffer = m_bufferAllocator.getBuffer(m_chunkVertexBufferHandle);
     const VkBuffer chunkIndexBuffer = m_bufferAllocator.getBuffer(m_chunkIndexBufferHandle);
+    const VkBuffer importedVertexBuffer = m_bufferAllocator.getBuffer(m_importedVertexBufferHandle);
+    const VkBuffer importedIndexBuffer = m_bufferAllocator.getBuffer(m_importedIndexBufferHandle);
     const bool canDrawMagica = !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
@@ -1347,6 +1349,9 @@ void RendererBackend::renderFrame(
     shadowPassInputs.chunkIndexBuffer = chunkIndexBuffer;
     shadowPassInputs.canDrawMagica = canDrawMagica;
     shadowPassInputs.readyMagicaDraws = readyMagicaDraws;
+    shadowPassInputs.importedVertexBuffer = importedVertexBuffer;
+    shadowPassInputs.importedIndexBuffer = importedIndexBuffer;
+    shadowPassInputs.importedMeshDraws = m_importedMeshDraws;
     shadowPassInputs.pipeInstanceCount = pipeInstanceCount;
     shadowPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     shadowPassInputs.transportInstanceCount = transportInstanceCount;
@@ -1560,6 +1565,8 @@ void RendererBackend::renderFrame(
     const VoxelGiSurfaceMode activeVoxelGiSurfaceMode =
         voxelGiRestirCanRun ? VoxelGiSurfaceMode::RestirSurface
         : (voxelGiRtSurfaceCanRun ? VoxelGiSurfaceMode::RtSurface : VoxelGiSurfaceMode::Legacy);
+    m_voxelGiRtSurfaceActiveThisFrame = activeVoxelGiSurfaceMode == VoxelGiSurfaceMode::RtSurface;
+    m_voxelGiRestirActiveThisFrame = activeVoxelGiSurfaceMode == VoxelGiSurfaceMode::RestirSurface;
     const char* voxelGiSurfaceFallbackReason = voxelGiSurfaceFallbackReasonName(
         m_voxelGiDebugSettings.surfaceMode,
         m_voxelGiComputeAvailable,
@@ -1678,6 +1685,9 @@ void RendererBackend::renderFrame(
     prepassInputs.chunkIndexBuffer = chunkIndexBuffer;
     prepassInputs.canDrawMagica = canDrawMagica;
     prepassInputs.readyMagicaDraws = readyMagicaDraws;
+    prepassInputs.importedVertexBuffer = importedVertexBuffer;
+    prepassInputs.importedIndexBuffer = importedIndexBuffer;
+    prepassInputs.importedMeshDraws = m_importedMeshDraws;
     prepassInputs.pipeInstanceCount = pipeInstanceCount;
     prepassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     prepassInputs.transportInstanceCount = transportInstanceCount;
@@ -1715,6 +1725,9 @@ void RendererBackend::renderFrame(
     mainPassInputs.chunkIndexBuffer = chunkIndexBuffer;
     mainPassInputs.canDrawMagica = canDrawMagica;
     mainPassInputs.readyMagicaDraws = readyMagicaDraws;
+    mainPassInputs.importedVertexBuffer = importedVertexBuffer;
+    mainPassInputs.importedIndexBuffer = importedIndexBuffer;
+    mainPassInputs.importedMeshDraws = m_importedMeshDraws;
     mainPassInputs.pipeInstanceCount = pipeInstanceCount;
     mainPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     mainPassInputs.transportInstanceCount = transportInstanceCount;

@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
+option(VOXEL_BUILD_APP "Build the main Vulkan toy application." ON)
+option(VOXEL_BUILD_TOOLS "Build offline content tools." ON)
 
 # Optional Slang shader compilation (to SPIR-V for Vulkan).
 # Produces .slang.spv files next to the source shaders.
@@ -75,10 +77,29 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/shadow_depth.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_shadow.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_shadow.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static_shadow.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static_shadow.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard_shadow.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard_shadow.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_instanced.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_instanced.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static.frag.slang" fragment)
+    add_slang_shader_variant(
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static.frag.slang"
+        fragment
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static_rt.frag.slang.spv"
+        -DVOXEL_RT_SHADOWS=1
+    )
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_water.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_water.frag.slang" fragment)
+    add_slang_shader_variant(
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_water.frag.slang"
+        fragment
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_water_rt.frag.slang.spv"
+        -DVOXEL_RT_REFLECTIONS=1
+    )
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static_normaldepth.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard_normaldepth.frag.slang" fragment)
@@ -108,145 +129,210 @@ else()
     message(STATUS "slangc not found; skipping Slang shader target")
 endif()
 
-add_executable(voxel_factory_toy
-    src/app/main.cc
-    src/app/app.cc
-    src/core/log.cc
-    src/render/frame_graph.cc
-    src/render/renderer.cc
-    src/world/magica_voxel.cc
-    src/world/world.cc
-    src/world/chunk_grid_worldgen.cc
-    src/world/chunk_mesher.cc
-    src/world/clipmap_index.cc
-)
-set(VOXEL_RENDER_BACKEND "VULKAN" CACHE STRING "Render backend to build. Supported values: VULKAN, DX12, METAL.")
-set_property(CACHE VOXEL_RENDER_BACKEND PROPERTY STRINGS VULKAN DX12 METAL)
-string(TOUPPER "${VOXEL_RENDER_BACKEND}" VOXEL_RENDER_BACKEND_UPPER)
-
-set(RENDER_BACKEND_SOURCES)
-
-if(VOXEL_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
-    list(APPEND RENDER_BACKEND_SOURCES
-        src/render/backend/vulkan/frame_ui.cc
-        src/render/backend/vulkan/buffer_helpers.cc
-        src/render/backend/vulkan/device.cc
-        src/render/backend/vulkan/frame.cc
-        src/render/backend/vulkan/frame_run.cc
-        src/render/backend/vulkan/frame_graph_core.cc
-        src/render/backend/vulkan/frame_graph_runtime.cc
-        src/render/backend/vulkan/frame_pass_shadow.cc
-        src/render/backend/vulkan/frame_pass_prepass.cc
-        src/render/backend/vulkan/frame_pass_ssao.cc
-        src/render/backend/vulkan/frame_pass_main.cc
-        src/render/backend/vulkan/frame_chunks.cc
-        src/render/backend/vulkan/frame_draws.cc
-        src/render/backend/vulkan/frame_instances.cc
-        src/render/backend/vulkan/init.cc
-        src/render/backend/vulkan/init_resources.cc
-        src/render/backend/vulkan/chunk_upload.cc
-        src/render/backend/vulkan/shadow_culling_utils.cc
-        src/render/backend/vulkan/descriptors.cc
-        src/render/backend/vulkan/ui_panels.cc
-        src/render/backend/vulkan/pass_pipelines.cc
-        src/render/backend/vulkan/swapchain_targets.cc
-        src/render/backend/vulkan/post_compute.cc
-        src/render/backend/vulkan/pass_gi.cc
-        src/render/backend/vulkan/shadow_culling.cc
-        src/render/backend/vulkan/vma_usage.cc
+if(VOXEL_BUILD_APP)
+    add_executable(voxel_factory_toy
+        src/app/main.cc
+        src/app/app.cc
+        src/core/log.cc
+        src/import/imported_scene.cc
+        src/import/morrowind_nif.cc
+        src/render/frame_graph.cc
+        src/render/renderer.cc
+        src/world/magica_voxel.cc
+        src/world/world.cc
+        src/world/chunk_grid_worldgen.cc
+        src/world/chunk_mesher.cc
+        src/world/clipmap_index.cc
     )
-    target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_RENDER_BACKEND_VULKAN=1)
-    target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VULKAN=1)
-    set(VULKAN_RENDER_BACKEND "ON")
-elseif(VOXEL_RENDER_BACKEND_UPPER STREQUAL "DX12")
-    message(FATAL_ERROR "DX12 backend is not implemented yet.")
-elseif(VOXEL_RENDER_BACKEND_UPPER STREQUAL "METAL")
-    message(FATAL_ERROR "Metal backend is not implemented yet.")
-else()
-    message(
-        FATAL_ERROR
-        "Unsupported VOXEL_RENDER_BACKEND value '${VOXEL_RENDER_BACKEND}'."
-        " Expected VULKAN, DX12, or METAL."
+    set(VOXEL_RENDER_BACKEND "VULKAN" CACHE STRING "Render backend to build. Supported values: VULKAN, DX12, METAL.")
+    set_property(CACHE VOXEL_RENDER_BACKEND PROPERTY STRINGS VULKAN DX12 METAL)
+    string(TOUPPER "${VOXEL_RENDER_BACKEND}" VOXEL_RENDER_BACKEND_UPPER)
+
+    set(RENDER_BACKEND_SOURCES)
+
+    if(VOXEL_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
+        list(APPEND RENDER_BACKEND_SOURCES
+            src/render/backend/vulkan/frame_ui.cc
+            src/render/backend/vulkan/buffer_helpers.cc
+            src/render/backend/vulkan/device.cc
+            src/render/backend/vulkan/frame.cc
+            src/render/backend/vulkan/frame_run.cc
+            src/render/backend/vulkan/frame_graph_core.cc
+            src/render/backend/vulkan/frame_graph_runtime.cc
+            src/render/backend/vulkan/frame_pass_shadow.cc
+            src/render/backend/vulkan/frame_pass_prepass.cc
+            src/render/backend/vulkan/frame_pass_ssao.cc
+            src/render/backend/vulkan/frame_pass_main.cc
+            src/render/backend/vulkan/frame_chunks.cc
+            src/render/backend/vulkan/frame_draws.cc
+            src/render/backend/vulkan/frame_instances.cc
+            src/render/backend/vulkan/init.cc
+            src/render/backend/vulkan/init_resources.cc
+            src/render/backend/vulkan/chunk_upload.cc
+            src/render/backend/vulkan/shadow_culling_utils.cc
+            src/render/backend/vulkan/descriptors.cc
+            src/render/backend/vulkan/ui_panels.cc
+            src/render/backend/vulkan/pass_pipelines.cc
+            src/render/backend/vulkan/swapchain_targets.cc
+            src/render/backend/vulkan/post_compute.cc
+            src/render/backend/vulkan/pass_gi.cc
+            src/render/backend/vulkan/shadow_culling.cc
+            src/render/backend/vulkan/vma_usage.cc
+        )
+        target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_RENDER_BACKEND_VULKAN=1)
+        target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_VULKAN=1)
+        set(VULKAN_RENDER_BACKEND "ON")
+    elseif(VOXEL_RENDER_BACKEND_UPPER STREQUAL "DX12")
+        message(FATAL_ERROR "DX12 backend is not implemented yet.")
+    elseif(VOXEL_RENDER_BACKEND_UPPER STREQUAL "METAL")
+        message(FATAL_ERROR "Metal backend is not implemented yet.")
+    else()
+        message(
+            FATAL_ERROR
+            "Unsupported VOXEL_RENDER_BACKEND value '${VOXEL_RENDER_BACKEND}'."
+            " Expected VULKAN, DX12, or METAL."
+        )
+    endif()
+
+    target_sources(voxel_factory_toy PRIVATE ${RENDER_BACKEND_SOURCES})
+
+    if(TARGET slang_shaders)
+        add_dependencies(voxel_factory_toy slang_shaders)
+    endif()
+
+    target_include_directories(voxel_factory_toy PRIVATE src)
+    target_compile_definitions(
+        voxel_factory_toy PRIVATE
+        VOXEL_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        VOXEL_APP_VERSION=\"${PROJECT_VERSION}\"
+        VOXEL_RELEASE_PROFILE=\"windows_runnable_rt_beta\"
     )
-endif()
 
-target_sources(voxel_factory_toy PRIVATE ${RENDER_BACKEND_SOURCES})
+    if(MSVC)
+        target_compile_options(voxel_factory_toy PRIVATE
+            /W4
+            /permissive-
+            /w14242
+            /w14254
+            /w14263
+            /w14265
+            /w14287
+            /we4289
+            /w14296
+            /w14311
+            /w14545
+            /w14546
+            /w14547
+            /w14549
+            /w14555
+            /w14619
+            /w14640
+            /w14826
+            /w14905
+            /w14906
+            /w14928
+        )
+    else()
+        target_compile_options(voxel_factory_toy PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
 
-if(TARGET slang_shaders)
-    add_dependencies(voxel_factory_toy slang_shaders)
-endif()
+    find_package(glfw3 CONFIG QUIET)
 
-target_include_directories(voxel_factory_toy PRIVATE src)
-target_compile_definitions(
-    voxel_factory_toy PRIVATE
-    VOXEL_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
-    VOXEL_APP_VERSION=\"${PROJECT_VERSION}\"
-    VOXEL_RELEASE_PROFILE=\"windows_runnable_rt_beta\"
-)
+    if(VULKAN_RENDER_BACKEND)
+        find_package(Vulkan REQUIRED)
+        find_package(imgui CONFIG REQUIRED)
+        find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+        target_link_libraries(voxel_factory_toy PRIVATE Vulkan::Vulkan)
+        target_link_libraries(voxel_factory_toy PRIVATE GPUOpen::VulkanMemoryAllocator)
+        target_link_libraries(voxel_factory_toy PRIVATE imgui::imgui)
+    endif()
 
-if(MSVC)
-    target_compile_options(voxel_factory_toy PRIVATE
-        /W4
-        /permissive-
-        /w14242 # possible data loss in conversion
-        /w14254 # possible loss of data from conversion/operator
-        /w14263 # member function does not override any base virtual member function
-        /w14265 # class has virtual functions, but destructor is not virtual
-        /w14287 # unsigned/negative constant mismatch
-        /we4289 # loop control variable used outside loop scope
-        /w14296 # expression is always true/false
-        /w14311 # pointer truncation
-        /w14545 # expression before comma has no effect
-        /w14546 # function call before comma missing argument list
-        /w14547 # operator before comma has no effect
-        /w14549 # operator before comma has no effect
-        /w14555 # expression has no effect
-        /w14619 # pragma warning: no warning number
-        /w14640 # thread-unsafe static member initialization
-        /w14826 # conversion is sign-extended
-        /w14905 # wide string literal cast to LPCSTR
-        /w14906 # string literal cast to LPWSTR
-        /w14928 # illegal copy-initialization
-    )
-else()
-    target_compile_options(voxel_factory_toy PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-
-# GLFW is required for the minimal window + input runtime.
-find_package(glfw3 CONFIG QUIET)
-
-# Required renderer dependencies.
-if(VULKAN_RENDER_BACKEND)
-    find_package(Vulkan REQUIRED)
-    find_package(imgui CONFIG REQUIRED)
-    find_package(VulkanMemoryAllocator CONFIG REQUIRED)
-    target_link_libraries(voxel_factory_toy PRIVATE Vulkan::Vulkan)
-    target_link_libraries(voxel_factory_toy PRIVATE GPUOpen::VulkanMemoryAllocator)
-    target_link_libraries(voxel_factory_toy PRIVATE imgui::imgui)
-endif()
-
-if(TARGET glfw)
-    target_link_libraries(voxel_factory_toy PRIVATE glfw)
-    target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_GLFW=1)
-elseif(TARGET glfw3::glfw)
-    target_link_libraries(voxel_factory_toy PRIVATE glfw3::glfw)
-    target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_GLFW=1)
-else()
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(GLFW3 QUIET IMPORTED_TARGET glfw3)
-        if(TARGET PkgConfig::GLFW3)
-            target_link_libraries(voxel_factory_toy PRIVATE PkgConfig::GLFW3)
-            target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_GLFW=1)
+    if(TARGET glfw)
+        target_link_libraries(voxel_factory_toy PRIVATE glfw)
+        target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_GLFW=1)
+    elseif(TARGET glfw3::glfw)
+        target_link_libraries(voxel_factory_toy PRIVATE glfw3::glfw)
+        target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_GLFW=1)
+    else()
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(GLFW3 QUIET IMPORTED_TARGET glfw3)
+            if(TARGET PkgConfig::GLFW3)
+                target_link_libraries(voxel_factory_toy PRIVATE PkgConfig::GLFW3)
+                target_compile_definitions(voxel_factory_toy PRIVATE VOXEL_HAS_GLFW=1)
+            else()
+                message(FATAL_ERROR "GLFW is required. Install via vcpkg or provide glfw3 to CMake.")
+            endif()
         else()
             message(FATAL_ERROR "GLFW is required. Install via vcpkg or provide glfw3 to CMake.")
         endif()
+    endif()
+endif()
+
+if(VOXEL_BUILD_TOOLS)
+    add_executable(voxel_morrowind_balmora_cooker
+        src/import/imported_scene.cc
+        src/import/morrowind_nif.cc
+        src/tools/morrowind_balmora_cooker_main.cc
+    )
+    target_include_directories(voxel_morrowind_balmora_cooker PRIVATE src)
+    if(MSVC)
+        target_compile_options(voxel_morrowind_balmora_cooker PRIVATE /W4 /permissive-)
     else()
-        message(FATAL_ERROR "GLFW is required. Install via vcpkg or provide glfw3 to CMake.")
+        target_compile_options(voxel_morrowind_balmora_cooker PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_executable(voxel_imported_scene_preview
+        src/import/imported_scene.cc
+        src/import/morrowind_nif.cc
+        src/tools/imported_scene_preview_main.cc
+    )
+    target_include_directories(voxel_imported_scene_preview PRIVATE src)
+    if(MSVC)
+        target_compile_options(voxel_imported_scene_preview PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(voxel_imported_scene_preview PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
 
 if(BUILD_TESTING)
+    add_executable(voxel_imported_scene_tests
+        tests/imported_scene_tests.cc
+        src/import/imported_scene.cc
+        src/import/morrowind_nif.cc
+    )
+    target_include_directories(voxel_imported_scene_tests PRIVATE src)
+
+    if(MSVC)
+        target_compile_options(voxel_imported_scene_tests PRIVATE
+            /W4
+            /permissive-
+            /w14242
+            /w14254
+            /w14263
+            /w14265
+            /w14287
+            /we4289
+            /w14296
+            /w14311
+            /w14545
+            /w14546
+            /w14547
+            /w14549
+            /w14555
+            /w14619
+            /w14640
+            /w14826
+            /w14905
+            /w14906
+            /w14928
+        )
+    else()
+        target_compile_options(voxel_imported_scene_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_test(NAME voxel_imported_scene_tests COMMAND voxel_imported_scene_tests)
+
     add_executable(voxel_foundation_tests
         tests/foundation_tests.cc
         src/world/magica_voxel.cc

@@ -394,7 +394,11 @@ bool RendererBackend::createMagicaPipeline() {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_magicaPipelineRt), "pipeline.magicaVoxel.rt");
     }
     destroyShaderModules(m_device, shaderModules);
-    m_rtMainPassImplemented = m_rayTracingRuntimeEnabled && m_pipelineRt != VK_NULL_HANDLE && m_magicaPipelineRt != VK_NULL_HANDLE;
+    m_rtMainPassImplemented =
+        m_rayTracingRuntimeEnabled &&
+        (m_pipelineRt != VK_NULL_HANDLE ||
+         m_magicaPipelineRt != VK_NULL_HANDLE ||
+         m_importedStaticPipelineRt != VK_NULL_HANDLE);
     refreshShadowStats();
     VOX_LOGI("render") << "pipeline config (magica): samples=" << static_cast<uint32_t>(m_colorSampleCount)
                        << ", cullMode=" << static_cast<uint32_t>(rasterizer.cullMode)
@@ -414,6 +418,12 @@ bool RendererBackend::createPipePipeline() {
 
     constexpr const char* kPipeVertexShaderPath = "../src/render/shaders/pipe_instanced.vert.slang.spv";
     constexpr const char* kPipeFragmentShaderPath = "../src/render/shaders/pipe_instanced.frag.slang.spv";
+    constexpr const char* kImportedStaticVertexShaderPath = "../src/render/shaders/imported_static.vert.slang.spv";
+    constexpr const char* kImportedStaticFragmentShaderPath = "../src/render/shaders/imported_static.frag.slang.spv";
+    constexpr const char* kImportedStaticRtFragmentShaderPath = "../src/render/shaders/imported_static_rt.frag.slang.spv";
+    constexpr const char* kImportedWaterVertexShaderPath = "../src/render/shaders/imported_water.vert.slang.spv";
+    constexpr const char* kImportedWaterFragmentShaderPath = "../src/render/shaders/imported_water.frag.slang.spv";
+    constexpr const char* kImportedWaterRtFragmentShaderPath = "../src/render/shaders/imported_water_rt.frag.slang.spv";
 
     std::array<VkShaderModule, 2> pipeShaderModules = {
         VK_NULL_HANDLE,
@@ -579,6 +589,280 @@ bool RendererBackend::createPipePipeline() {
               << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
               << "\n";
 
+    const bool hasRtImportedVariant = m_rayTracingRuntimeEnabled && std::filesystem::exists(kImportedStaticRtFragmentShaderPath);
+    std::array<VkShaderModule, 3> importedShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    const std::array<ShaderModuleLoadSpec, 3> importedShaderLoadSpecs = {{
+        {kImportedStaticVertexShaderPath, "imported_static.vert"},
+        {kImportedStaticFragmentShaderPath, "imported_static.frag"},
+        {kImportedStaticRtFragmentShaderPath, "imported_static.rt.frag"},
+    }};
+    if (!createShaderModulesFromFiles(
+            m_device,
+            std::span(importedShaderLoadSpecs).first(hasRtImportedVariant ? 3u : 2u),
+            std::span(importedShaderModules).first(hasRtImportedVariant ? 3u : 2u)
+        )) {
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo importedVertexShaderStage{};
+    importedVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    importedVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    importedVertexShaderStage.module = importedShaderModules[0];
+    importedVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo importedFragmentShaderStage{};
+    importedFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    importedFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    importedFragmentShaderStage.module = importedShaderModules[1];
+    importedFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> importedShaderStages = {
+        importedVertexShaderStage,
+        importedFragmentShaderStage
+    };
+    VkPipelineShaderStageCreateInfo importedRtFragmentShaderStage = importedFragmentShaderStage;
+    importedRtFragmentShaderStage.module = importedShaderModules[2];
+    const std::array<VkPipelineShaderStageCreateInfo, 2> importedRtShaderStages = {
+        importedVertexShaderStage,
+        importedRtFragmentShaderStage
+    };
+
+    VkVertexInputBindingDescription importedBindings[1]{};
+    importedBindings[0].binding = 0;
+    importedBindings[0].stride = sizeof(ImportedMeshVertex);
+    importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription importedAttributes[6]{};
+    importedAttributes[0].location = 0;
+    importedAttributes[0].binding = 0;
+    importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, position));
+    importedAttributes[1].location = 1;
+    importedAttributes[1].binding = 0;
+    importedAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, normal));
+    importedAttributes[2].location = 2;
+    importedAttributes[2].binding = 0;
+    importedAttributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, color));
+    importedAttributes[3].location = 3;
+    importedAttributes[3].binding = 0;
+    importedAttributes[3].format = VK_FORMAT_R32G32_SFLOAT;
+    importedAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, uv));
+    importedAttributes[4].location = 4;
+    importedAttributes[4].binding = 0;
+    importedAttributes[4].format = VK_FORMAT_R32_UINT;
+    importedAttributes[4].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, textureIndex));
+    importedAttributes[5].location = 5;
+    importedAttributes[5].binding = 0;
+    importedAttributes[5].format = VK_FORMAT_R32_UINT;
+    importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+
+    VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
+    importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    importedVertexInputInfo.vertexBindingDescriptionCount = 1;
+    importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
+
+    VkGraphicsPipelineCreateInfo importedPipelineCreateInfo = pipelineCreateInfo;
+    importedPipelineCreateInfo.stageCount = static_cast<uint32_t>(importedShaderStages.size());
+    importedPipelineCreateInfo.pStages = importedShaderStages.data();
+    importedPipelineCreateInfo.pVertexInputState = &importedVertexInputInfo;
+    VkPipelineRasterizationStateCreateInfo importedRasterizer = rasterizer;
+    importedRasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    importedPipelineCreateInfo.pRasterizationState = &importedRasterizer;
+
+    VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
+    const VkResult importedPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &importedPipelineCreateInfo,
+        nullptr,
+        &importedStaticPipeline
+    );
+    if (importedPipelineResult != VK_SUCCESS) {
+        destroyShaderModules(m_device, importedShaderModules);
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(importedStatic)", importedPipelineResult);
+        return false;
+    }
+    VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
+    if (hasRtImportedVariant) {
+        VkGraphicsPipelineCreateInfo importedRtPipelineCreateInfo = importedPipelineCreateInfo;
+        importedRtPipelineCreateInfo.pStages = importedRtShaderStages.data();
+        const VkResult importedRtPipelineResult = vkCreateGraphicsPipelines(
+            m_device,
+            VK_NULL_HANDLE,
+            1,
+            &importedRtPipelineCreateInfo,
+            nullptr,
+            &importedStaticPipelineRt
+        );
+        if (importedRtPipelineResult != VK_SUCCESS) {
+            destroyShaderModules(m_device, importedShaderModules);
+            vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
+            vkDestroyPipeline(m_device, pipePipeline, nullptr);
+            logVkFailure("vkCreateGraphicsPipelines(importedStaticRt)", importedRtPipelineResult);
+            return false;
+        }
+    }
+    destroyShaderModules(m_device, importedShaderModules);
+    VOX_LOGI("render") << "pipeline config (importedStatic): samples=" << static_cast<uint32_t>(m_colorSampleCount)
+              << ", cullMode=" << static_cast<uint32_t>(importedRasterizer.cullMode)
+              << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
+              << ", rtVariant=" << (importedStaticPipelineRt != VK_NULL_HANDLE ? "yes" : "no")
+              << "\n";
+
+    const bool hasRtImportedWaterVariant =
+        m_rayTracingRuntimeEnabled && std::filesystem::exists(kImportedWaterRtFragmentShaderPath);
+    std::array<VkShaderModule, 3> importedWaterShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    const std::array<ShaderModuleLoadSpec, 3> importedWaterShaderLoadSpecs = {{
+        {kImportedWaterVertexShaderPath, "imported_water.vert"},
+        {kImportedWaterFragmentShaderPath, "imported_water.frag"},
+        {kImportedWaterRtFragmentShaderPath, "imported_water.rt.frag"},
+    }};
+    if (!createShaderModulesFromFiles(
+            m_device,
+            std::span(importedWaterShaderLoadSpecs).first(hasRtImportedWaterVariant ? 3u : 2u),
+            std::span(importedWaterShaderModules).first(hasRtImportedWaterVariant ? 3u : 2u)
+        )) {
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
+        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
+        }
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo importedWaterVertexShaderStage{};
+    importedWaterVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    importedWaterVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    importedWaterVertexShaderStage.module = importedWaterShaderModules[0];
+    importedWaterVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo importedWaterFragmentShaderStage{};
+    importedWaterFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    importedWaterFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    importedWaterFragmentShaderStage.module = importedWaterShaderModules[1];
+    importedWaterFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> importedWaterShaderStages = {
+        importedWaterVertexShaderStage,
+        importedWaterFragmentShaderStage
+    };
+    VkPipelineShaderStageCreateInfo importedWaterRtFragmentShaderStage = importedWaterFragmentShaderStage;
+    importedWaterRtFragmentShaderStage.module = importedWaterShaderModules[2];
+    const std::array<VkPipelineShaderStageCreateInfo, 2> importedWaterRtShaderStages = {
+        importedWaterVertexShaderStage,
+        importedWaterRtFragmentShaderStage
+    };
+
+    VkVertexInputBindingDescription importedWaterBindings[1]{};
+    importedWaterBindings[0].binding = 0;
+    importedWaterBindings[0].stride = sizeof(ImportedWaterVertex);
+    importedWaterBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription importedWaterAttributes[2]{};
+    importedWaterAttributes[0].location = 0;
+    importedWaterAttributes[0].binding = 0;
+    importedWaterAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedWaterAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, position));
+    importedWaterAttributes[1].location = 1;
+    importedWaterAttributes[1].binding = 0;
+    importedWaterAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+    importedWaterAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, uv));
+
+    VkPipelineVertexInputStateCreateInfo importedWaterVertexInputInfo{};
+    importedWaterVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    importedWaterVertexInputInfo.vertexBindingDescriptionCount = 1;
+    importedWaterVertexInputInfo.pVertexBindingDescriptions = importedWaterBindings;
+    importedWaterVertexInputInfo.vertexAttributeDescriptionCount = 2;
+    importedWaterVertexInputInfo.pVertexAttributeDescriptions = importedWaterAttributes;
+
+    VkGraphicsPipelineCreateInfo importedWaterPipelineCreateInfo = pipelineCreateInfo;
+    importedWaterPipelineCreateInfo.stageCount = static_cast<uint32_t>(importedWaterShaderStages.size());
+    importedWaterPipelineCreateInfo.pStages = importedWaterShaderStages.data();
+    importedWaterPipelineCreateInfo.pVertexInputState = &importedWaterVertexInputInfo;
+    VkPipelineRasterizationStateCreateInfo importedWaterRasterizer = rasterizer;
+    importedWaterRasterizer.cullMode = VK_CULL_MODE_NONE;
+    importedWaterPipelineCreateInfo.pRasterizationState = &importedWaterRasterizer;
+    VkPipelineDepthStencilStateCreateInfo importedWaterDepthStencil = depthStencil;
+    importedWaterDepthStencil.depthWriteEnable = VK_FALSE;
+    importedWaterPipelineCreateInfo.pDepthStencilState = &importedWaterDepthStencil;
+    VkPipelineColorBlendAttachmentState importedWaterColorBlendAttachment = colorBlendAttachment;
+    importedWaterColorBlendAttachment.blendEnable = VK_TRUE;
+    importedWaterColorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    importedWaterColorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    importedWaterColorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    importedWaterColorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    importedWaterColorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    importedWaterColorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    VkPipelineColorBlendStateCreateInfo importedWaterColorBlending = colorBlending;
+    importedWaterColorBlending.pAttachments = &importedWaterColorBlendAttachment;
+    importedWaterPipelineCreateInfo.pColorBlendState = &importedWaterColorBlending;
+
+    VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
+    const VkResult importedWaterPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &importedWaterPipelineCreateInfo,
+        nullptr,
+        &importedWaterPipeline
+    );
+    if (importedWaterPipelineResult != VK_SUCCESS) {
+        destroyShaderModules(m_device, importedWaterShaderModules);
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
+        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
+        }
+        logVkFailure("vkCreateGraphicsPipelines(importedWater)", importedWaterPipelineResult);
+        return false;
+    }
+
+    VkPipeline importedWaterPipelineRt = VK_NULL_HANDLE;
+    if (hasRtImportedWaterVariant) {
+        VkGraphicsPipelineCreateInfo importedWaterRtPipelineCreateInfo = importedWaterPipelineCreateInfo;
+        importedWaterRtPipelineCreateInfo.pStages = importedWaterRtShaderStages.data();
+        const VkResult importedWaterRtPipelineResult = vkCreateGraphicsPipelines(
+            m_device,
+            VK_NULL_HANDLE,
+            1,
+            &importedWaterRtPipelineCreateInfo,
+            nullptr,
+            &importedWaterPipelineRt
+        );
+        if (importedWaterRtPipelineResult != VK_SUCCESS) {
+            destroyShaderModules(m_device, importedWaterShaderModules);
+            vkDestroyPipeline(m_device, pipePipeline, nullptr);
+            vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
+            if (importedStaticPipelineRt != VK_NULL_HANDLE) {
+                vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
+            }
+            vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
+            logVkFailure("vkCreateGraphicsPipelines(importedWaterRt)", importedWaterRtPipelineResult);
+            return false;
+        }
+    }
+    destroyShaderModules(m_device, importedWaterShaderModules);
+    VOX_LOGI("render") << "pipeline config (importedWater): samples=" << static_cast<uint32_t>(m_colorSampleCount)
+              << ", cullMode=" << static_cast<uint32_t>(importedWaterRasterizer.cullMode)
+              << ", depthCompare=" << static_cast<uint32_t>(importedWaterDepthStencil.depthCompareOp)
+              << ", rtVariant=" << (importedWaterPipelineRt != VK_NULL_HANDLE ? "yes" : "no")
+              << "\n";
+
     constexpr const char* kGrassBillboardVertexShaderPath = "../src/render/shaders/grass_billboard.vert.slang.spv";
     constexpr const char* kGrassBillboardFragmentShaderPath = "../src/render/shaders/grass_billboard.frag.slang.spv";
     std::array<VkShaderModule, 2> grassShaderModules = {
@@ -593,6 +877,14 @@ bool RendererBackend::createPipePipeline() {
     }};
     if (!createShaderModulesFromFiles(m_device, grassShaderLoadSpecs, grassShaderModules)) {
         vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
+        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
+        }
+        vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
+        if (importedWaterPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedWaterPipelineRt, nullptr);
+        }
         return false;
     }
 
@@ -676,6 +968,14 @@ bool RendererBackend::createPipePipeline() {
     if (grassPipelineResult != VK_SUCCESS) {
         logVkFailure("vkCreateGraphicsPipelines(grassBillboard)", grassPipelineResult);
         vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
+        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
+        }
+        vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
+        if (importedWaterPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedWaterPipelineRt, nullptr);
+        }
         return false;
     }
     VOX_LOGI("render") << "pipeline config (grassBillboard): samples=" << static_cast<uint32_t>(m_colorSampleCount)
@@ -686,13 +986,43 @@ bool RendererBackend::createPipePipeline() {
     if (m_pipePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
     }
+    if (m_importedStaticPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr);
+    }
+    if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr);
+    }
+    if (m_importedWaterPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedWaterPipeline, nullptr);
+    }
+    if (m_importedWaterPipelineRt != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedWaterPipelineRt, nullptr);
+    }
     if (m_grassBillboardPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_grassBillboardPipeline, nullptr);
     }
     m_pipePipeline = pipePipeline;
+    m_importedStaticPipeline = importedStaticPipeline;
+    m_importedStaticPipelineRt = importedStaticPipelineRt;
+    m_importedWaterPipeline = importedWaterPipeline;
+    m_importedWaterPipelineRt = importedWaterPipelineRt;
     m_grassBillboardPipeline = grassBillboardPipeline;
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipePipeline), "pipeline.pipe.lit");
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipeline), "pipeline.importedStatic");
+    if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipelineRt), "pipeline.importedStatic.rt");
+    }
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipeline), "pipeline.importedWater");
+    if (m_importedWaterPipelineRt != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipelineRt), "pipeline.importedWater.rt");
+    }
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_grassBillboardPipeline), "pipeline.grass.billboard");
+    m_rtMainPassImplemented =
+        m_rayTracingRuntimeEnabled &&
+        (m_pipelineRt != VK_NULL_HANDLE ||
+         m_magicaPipelineRt != VK_NULL_HANDLE ||
+         m_importedStaticPipelineRt != VK_NULL_HANDLE);
+    refreshShadowStats();
     return true;
 }
 
@@ -712,13 +1042,17 @@ bool RendererBackend::createAoPipelines() {
     constexpr const char* kVoxelNormalDepthFragShaderPath = "../src/render/shaders/voxel_normaldepth.frag.slang.spv";
     constexpr const char* kPipeVertShaderPath = "../src/render/shaders/pipe_instanced.vert.slang.spv";
     constexpr const char* kPipeNormalDepthFragShaderPath = "../src/render/shaders/pipe_normaldepth.frag.slang.spv";
+    constexpr const char* kImportedStaticVertShaderPath = "../src/render/shaders/imported_static.vert.slang.spv";
+    constexpr const char* kImportedStaticNormalDepthFragShaderPath = "../src/render/shaders/imported_static_normaldepth.frag.slang.spv";
     constexpr const char* kGrassBillboardVertShaderPath = "../src/render/shaders/grass_billboard.vert.slang.spv";
     constexpr const char* kGrassBillboardNormalDepthFragShaderPath = "../src/render/shaders/grass_billboard_normaldepth.frag.slang.spv";
     constexpr const char* kFullscreenVertShaderPath = "../src/render/shaders/tone_map.vert.slang.spv";
     constexpr const char* kSsaoFragShaderPath = "../src/render/shaders/ssao.frag.slang.spv";
     constexpr const char* kSsaoBlurFragShaderPath = "../src/render/shaders/ssao_blur.frag.slang.spv";
 
-    std::array<VkShaderModule, 9> shaderModules = {
+    std::array<VkShaderModule, 11> shaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
@@ -735,17 +1069,21 @@ bool RendererBackend::createAoPipelines() {
     VkShaderModule& pipeNormalDepthFragShaderModule = shaderModules[3];
     VkShaderModule& grassBillboardVertShaderModule = shaderModules[4];
     VkShaderModule& grassBillboardNormalDepthFragShaderModule = shaderModules[5];
-    VkShaderModule& fullscreenVertShaderModule = shaderModules[6];
-    VkShaderModule& ssaoFragShaderModule = shaderModules[7];
-    VkShaderModule& ssaoBlurFragShaderModule = shaderModules[8];
+    VkShaderModule& importedStaticVertShaderModule = shaderModules[6];
+    VkShaderModule& importedStaticNormalDepthFragShaderModule = shaderModules[7];
+    VkShaderModule& fullscreenVertShaderModule = shaderModules[8];
+    VkShaderModule& ssaoFragShaderModule = shaderModules[9];
+    VkShaderModule& ssaoBlurFragShaderModule = shaderModules[10];
 
-    const std::array<ShaderModuleLoadSpec, 9> shaderLoadSpecs = {{
+    const std::array<ShaderModuleLoadSpec, 11> shaderLoadSpecs = {{
         {kVoxelVertShaderPath, "voxel_packed.vert"},
         {kVoxelNormalDepthFragShaderPath, "voxel_normaldepth.frag"},
         {kPipeVertShaderPath, "pipe_instanced.vert"},
         {kPipeNormalDepthFragShaderPath, "pipe_normaldepth.frag"},
         {kGrassBillboardVertShaderPath, "grass_billboard.vert"},
         {kGrassBillboardNormalDepthFragShaderPath, "grass_billboard_normaldepth.frag"},
+        {kImportedStaticVertShaderPath, "imported_static.vert"},
+        {kImportedStaticNormalDepthFragShaderPath, "imported_static_normaldepth.frag"},
         {kFullscreenVertShaderPath, "tone_map.vert"},
         {kSsaoFragShaderPath, "ssao.frag"},
         {kSsaoBlurFragShaderPath, "ssao_blur.frag"},
@@ -757,6 +1095,7 @@ bool RendererBackend::createAoPipelines() {
     VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     auto destroyNewPipelines = [&]() {
@@ -771,6 +1110,10 @@ bool RendererBackend::createAoPipelines() {
         if (pipeNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, pipeNormalDepthPipeline, nullptr);
             pipeNormalDepthPipeline = VK_NULL_HANDLE;
+        }
+        if (importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticNormalDepthPipeline, nullptr);
+            importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
         }
         if (grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, grassBillboardNormalDepthPipeline, nullptr);
@@ -1044,6 +1387,72 @@ bool RendererBackend::createAoPipelines() {
         return false;
     }
 
+    VkPipelineShaderStageCreateInfo importedNormalDepthStageInfos[2]{};
+    importedNormalDepthStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    importedNormalDepthStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    importedNormalDepthStageInfos[0].module = importedStaticVertShaderModule;
+    importedNormalDepthStageInfos[0].pName = "main";
+    importedNormalDepthStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    importedNormalDepthStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    importedNormalDepthStageInfos[1].module = importedStaticNormalDepthFragShaderModule;
+    importedNormalDepthStageInfos[1].pName = "main";
+
+    VkVertexInputBindingDescription importedBindings[1]{};
+    importedBindings[0].binding = 0;
+    importedBindings[0].stride = sizeof(ImportedMeshVertex);
+    importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription importedAttributes[6]{};
+    importedAttributes[0].location = 0;
+    importedAttributes[0].binding = 0;
+    importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, position));
+    importedAttributes[1].location = 1;
+    importedAttributes[1].binding = 0;
+    importedAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, normal));
+    importedAttributes[2].location = 2;
+    importedAttributes[2].binding = 0;
+    importedAttributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, color));
+    importedAttributes[3].location = 3;
+    importedAttributes[3].binding = 0;
+    importedAttributes[3].format = VK_FORMAT_R32G32_SFLOAT;
+    importedAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, uv));
+    importedAttributes[4].location = 4;
+    importedAttributes[4].binding = 0;
+    importedAttributes[4].format = VK_FORMAT_R32_UINT;
+    importedAttributes[4].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, textureIndex));
+    importedAttributes[5].location = 5;
+    importedAttributes[5].binding = 0;
+    importedAttributes[5].format = VK_FORMAT_R32_UINT;
+    importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+
+    VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
+    importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    importedVertexInputInfo.vertexBindingDescriptionCount = 1;
+    importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
+
+    pipelineCreateInfo.pStages = importedNormalDepthStageInfos;
+    pipelineCreateInfo.pVertexInputState = &importedVertexInputInfo;
+    pipelineCreateInfo.pRasterizationState = &rasterizer;
+    const VkResult importedNormalDepthPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &importedStaticNormalDepthPipeline
+    );
+    if (importedNormalDepthPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(importedStaticNormalDepth)", importedNormalDepthPipelineResult);
+        destroyNewPipelines();
+        destroyShaderModules(m_device, shaderModules);
+        return false;
+    }
+
     // SSAO fullscreen pipelines.
     VkPipelineShaderStageCreateInfo ssaoStageInfos[2]{};
     ssaoStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1184,6 +1593,9 @@ bool RendererBackend::createAoPipelines() {
     if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeNormalDepthPipeline, nullptr);
     }
+    if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticNormalDepthPipeline, nullptr);
+    }
     if (m_grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_grassBillboardNormalDepthPipeline, nullptr);
     }
@@ -1196,6 +1608,7 @@ bool RendererBackend::createAoPipelines() {
 
     m_voxelNormalDepthPipeline = voxelNormalDepthPipeline;
     m_pipeNormalDepthPipeline = pipeNormalDepthPipeline;
+    m_importedStaticNormalDepthPipeline = importedStaticNormalDepthPipeline;
     m_grassBillboardNormalDepthPipeline = grassBillboardNormalDepthPipeline;
     m_ssaoPipeline = ssaoPipeline;
     m_ssaoBlurPipeline = ssaoBlurPipeline;
@@ -1208,6 +1621,11 @@ bool RendererBackend::createAoPipelines() {
         VK_OBJECT_TYPE_PIPELINE,
         vkHandleToUint64(m_pipeNormalDepthPipeline),
         "pipeline.prepass.pipeNormalDepth"
+    );
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_importedStaticNormalDepthPipeline),
+        "pipeline.prepass.importedStaticNormalDepth"
     );
     setObjectName(
         VK_OBJECT_TYPE_PIPELINE,
@@ -1237,7 +1655,7 @@ bool RendererBackend::createGraphicsPipeline() {
 
     if (m_pipelineLayout == VK_NULL_HANDLE) {
         VkPushConstantRange chunkPushConstantRange{};
-        chunkPushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        chunkPushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         chunkPushConstantRange.offset = 0;
         chunkPushConstantRange.size = sizeof(ChunkPushConstants);
 
@@ -1277,6 +1695,7 @@ bool RendererBackend::createGraphicsPipeline() {
     constexpr const char* kToneMapFragmentShaderPath = "../src/render/shaders/tone_map.frag.slang.spv";
     constexpr const char* kShadowVertexShaderPath = "../src/render/shaders/shadow_depth.vert.slang.spv";
     constexpr const char* kPipeShadowVertexShaderPath = "../src/render/shaders/pipe_shadow.vert.slang.spv";
+    constexpr const char* kImportedStaticShadowVertexShaderPath = "../src/render/shaders/imported_static_shadow.vert.slang.spv";
     constexpr const char* kGrassShadowVertexShaderPath = "../src/render/shaders/grass_billboard_shadow.vert.slang.spv";
     constexpr const char* kGrassShadowFragmentShaderPath = "../src/render/shaders/grass_billboard_shadow.frag.slang.spv";
 
@@ -1968,6 +2387,110 @@ bool RendererBackend::createGraphicsPipeline() {
               << ", depthBias=" << (pipeShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
               << "\n";
 
+    constexpr const char* kImportedStaticShadowFragmentShaderPath = "../src/render/shaders/imported_static_shadow.frag.slang.spv";
+    std::array<VkShaderModule, 2> importedShadowShaderModules = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    const std::array<ShaderModuleLoadSpec, 2> importedShadowShaderLoadSpecs = {{
+        {kImportedStaticShadowVertexShaderPath, "imported_static_shadow.vert"},
+        {kImportedStaticShadowFragmentShaderPath, "imported_static_shadow.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, importedShadowShaderLoadSpecs, importedShadowShaderModules)) {
+        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo importedShadowVertexShaderStage{};
+    importedShadowVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    importedShadowVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    importedShadowVertexShaderStage.module = importedShadowShaderModules[0];
+    importedShadowVertexShaderStage.pName = "main";
+    VkPipelineShaderStageCreateInfo importedShadowFragmentShaderStage{};
+    importedShadowFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    importedShadowFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    importedShadowFragmentShaderStage.module = importedShadowShaderModules[1];
+    importedShadowFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> importedShadowShaderStages = {
+        importedShadowVertexShaderStage,
+        importedShadowFragmentShaderStage
+    };
+
+    VkVertexInputBindingDescription importedShadowBindings[1]{};
+    importedShadowBindings[0].binding = 0;
+    importedShadowBindings[0].stride = sizeof(ImportedMeshVertex);
+    importedShadowBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription importedShadowAttributes[6]{};
+    importedShadowAttributes[0].location = 0;
+    importedShadowAttributes[0].binding = 0;
+    importedShadowAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedShadowAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, position));
+    importedShadowAttributes[1].location = 1;
+    importedShadowAttributes[1].binding = 0;
+    importedShadowAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, normal));
+    importedShadowAttributes[2].location = 2;
+    importedShadowAttributes[2].binding = 0;
+    importedShadowAttributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, color));
+    importedShadowAttributes[3].location = 3;
+    importedShadowAttributes[3].binding = 0;
+    importedShadowAttributes[3].format = VK_FORMAT_R32G32_SFLOAT;
+    importedShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, uv));
+    importedShadowAttributes[4].location = 4;
+    importedShadowAttributes[4].binding = 0;
+    importedShadowAttributes[4].format = VK_FORMAT_R32_UINT;
+    importedShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, textureIndex));
+    importedShadowAttributes[5].location = 5;
+    importedShadowAttributes[5].binding = 0;
+    importedShadowAttributes[5].format = VK_FORMAT_R32_UINT;
+    importedShadowAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+
+    VkPipelineVertexInputStateCreateInfo importedShadowVertexInputInfo{};
+    importedShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    importedShadowVertexInputInfo.vertexBindingDescriptionCount = 1;
+    importedShadowVertexInputInfo.pVertexBindingDescriptions = importedShadowBindings;
+    importedShadowVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedShadowVertexInputInfo.pVertexAttributeDescriptions = importedShadowAttributes;
+
+    VkGraphicsPipelineCreateInfo importedShadowPipelineCreateInfo = shadowPipelineCreateInfo;
+    importedShadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(importedShadowShaderStages.size());
+    importedShadowPipelineCreateInfo.pStages = importedShadowShaderStages.data();
+    importedShadowPipelineCreateInfo.pVertexInputState = &importedShadowVertexInputInfo;
+
+    VkPipeline importedStaticShadowPipeline = VK_NULL_HANDLE;
+    const VkResult importedShadowPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &importedShadowPipelineCreateInfo,
+        nullptr,
+        &importedStaticShadowPipeline
+    );
+    destroyShaderModules(m_device, importedShadowShaderModules);
+    if (importedShadowPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+        logVkFailure("vkCreateGraphicsPipelines(importedStaticShadow)", importedShadowPipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (importedStaticShadow): cullMode="
+              << static_cast<uint32_t>(shadowRasterizer.cullMode)
+              << ", depthBias=" << (shadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
+              << "\n";
+
     std::array<VkShaderModule, 2> grassShadowShaderModules = {
         VK_NULL_HANDLE,
         VK_NULL_HANDLE
@@ -1979,6 +2502,7 @@ bool RendererBackend::createGraphicsPipeline() {
         {kGrassShadowFragmentShaderPath, "grass_billboard_shadow.frag"},
     }};
     if (!createShaderModulesFromFiles(m_device, grassShadowShaderLoadSpecs, grassShadowShaderModules)) {
+        vkDestroyPipeline(m_device, importedStaticShadowPipeline, nullptr);
         vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
         vkDestroyPipeline(m_device, shadowPipeline, nullptr);
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
@@ -2064,6 +2588,7 @@ bool RendererBackend::createGraphicsPipeline() {
     destroyShaderModules(m_device, grassShadowShaderModules);
 
     if (grassShadowPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, importedStaticShadowPipeline, nullptr);
         vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
         vkDestroyPipeline(m_device, shadowPipeline, nullptr);
         vkDestroyPipeline(m_device, worldPipeline, nullptr);
@@ -2098,6 +2623,9 @@ bool RendererBackend::createGraphicsPipeline() {
     if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeShadowPipeline, nullptr);
     }
+    if (m_importedStaticShadowPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticShadowPipeline, nullptr);
+    }
     if (m_grassBillboardShadowPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_grassBillboardShadowPipeline, nullptr);
     }
@@ -2118,6 +2646,7 @@ bool RendererBackend::createGraphicsPipeline() {
     m_skyboxPipeline = skyboxPipeline;
     m_shadowPipeline = shadowPipeline;
     m_pipeShadowPipeline = pipeShadowPipeline;
+    m_importedStaticShadowPipeline = importedStaticShadowPipeline;
     m_grassBillboardShadowPipeline = grassShadowPipeline;
     m_tonemapPipeline = toneMapPipeline;
     m_previewAddPipeline = previewAddPipeline;
@@ -2130,6 +2659,11 @@ bool RendererBackend::createGraphicsPipeline() {
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyboxPipeline), "pipeline.skybox");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_shadowPipeline), "pipeline.shadow.voxels");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeShadowPipeline), "pipeline.shadow.pipes");
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_importedStaticShadowPipeline),
+        "pipeline.shadow.importedStatic"
+    );
     setObjectName(
         VK_OBJECT_TYPE_PIPELINE,
         vkHandleToUint64(m_grassBillboardShadowPipeline),
@@ -2147,7 +2681,11 @@ bool RendererBackend::createGraphicsPipeline() {
         VOX_LOGE("render") << "createGraphicsPipeline failed: createMagicaPipeline\n";
         return false;
     }
-    m_rtMainPassImplemented = m_rayTracingRuntimeEnabled && m_pipelineRt != VK_NULL_HANDLE && m_magicaPipelineRt != VK_NULL_HANDLE;
+    m_rtMainPassImplemented =
+        m_rayTracingRuntimeEnabled &&
+        (m_pipelineRt != VK_NULL_HANDLE ||
+         m_magicaPipelineRt != VK_NULL_HANDLE ||
+         m_importedStaticPipelineRt != VK_NULL_HANDLE);
     refreshShadowStats();
     VOX_LOGI("render") << "graphics pipelines ready (shadow + hdr scene + tonemap + preview="
               << (m_supportsWireframePreview ? "wireframe" : "ghost")

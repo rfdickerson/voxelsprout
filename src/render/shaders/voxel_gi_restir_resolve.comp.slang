@@ -23,7 +23,7 @@ RWTexture3D<float4> voxelGiSurfacePosZOut;
 RWTexture3D<float4> voxelGiSurfaceNegZOut;
 
 [[vk::binding(12, 0)]]
-Texture3D<float4> voxelGiSkyExposure;
+RWTexture3D<float4> voxelGiSkyExposure;
 
 struct RestirReservoir {
     float4 radianceWeight;

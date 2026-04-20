@@ -68,13 +68,11 @@ const char* voxelGiSurfaceModeName(VoxelGiSurfaceMode mode) {
 } // namespace
 
 void RendererBackend::setDebugUiVisible(bool visible) {
-    if (m_debugUiVisible == visible) {
+    if (m_debugUiVisible == visible && m_showFrameStatsPanel == visible) {
         return;
     }
     m_debugUiVisible = visible;
-    m_showMeshingPanel = visible;
-    m_showShadowPanel = visible;
-    m_showSunPanel = visible;
+    m_showFrameStatsPanel = visible;
 }
 
 void RendererBackend::setGameplayUiState(const GameplayUiState& state) {
@@ -83,12 +81,12 @@ void RendererBackend::setGameplayUiState(const GameplayUiState& state) {
 
 
 bool RendererBackend::isDebugUiVisible() const {
-    return m_debugUiVisible;
+    return m_debugUiVisible && m_showFrameStatsPanel;
 }
 
 
 void RendererBackend::setFrameStatsVisible(bool visible) {
-    m_showFrameStatsPanel = visible;
+    setDebugUiVisible(visible);
 }
 
 
@@ -166,10 +164,17 @@ void RendererBackend::refreshShadowStats() {
     m_shadowStats.rayQuerySupported = m_rayTracingCapabilityProbe.rayQueryExtension;
     m_shadowStats.accelerationStructureSupported = m_rayTracingCapabilityProbe.accelerationStructureExtension;
     m_shadowStats.rayTracingRuntimeEnabled = rayTracingRuntimeReady();
+    const bool hasVoxelRtMainGeometry =
+        m_chunkVertexBufferHandle != kInvalidBufferHandle &&
+        m_chunkIndexBufferHandle != kInvalidBufferHandle &&
+        !m_chunkDrawRanges.empty();
+    const bool hasMagicaRtMainGeometry = !m_magicaMeshDraws.empty();
+    const bool hasImportedRtMainGeometry = !m_importedMeshDraws.empty();
     const bool mainPassPipelinesReady =
         m_rtMainPassImplemented &&
-        m_pipelineRt != VK_NULL_HANDLE &&
-        m_magicaPipelineRt != VK_NULL_HANDLE;
+        ((m_pipelineRt != VK_NULL_HANDLE && hasVoxelRtMainGeometry) ||
+         (m_magicaPipelineRt != VK_NULL_HANDLE && hasMagicaRtMainGeometry) ||
+         (m_importedStaticPipelineRt != VK_NULL_HANDLE && hasImportedRtMainGeometry));
     const bool mainPassSceneReady = m_rtTlas.handle != VK_NULL_HANDLE;
     m_shadowStats.mainPassRayTracingReady =
         rayTracingRuntimeReady() &&
@@ -236,7 +241,29 @@ ShadowStats RendererBackend::shadowStats() const {
 
 void RendererBackend::setSunAngles(float yawDegrees, float pitchDegrees) {
     m_skyDebugSettings.sunYawDegrees = yawDegrees;
-    m_skyDebugSettings.sunPitchDegrees = std::clamp(pitchDegrees, -89.0f, 5.0f);
+    m_skyDebugSettings.sunPitchDegrees = std::clamp(pitchDegrees, -89.0f, 89.0f);
+}
+
+void RendererBackend::setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug) {
+    m_debugShowImportedTerrain = showTerrain;
+    m_debugShowImportedStatics = showStatics;
+    m_debugShowImportedTextures = showTextures;
+    m_debugImportedFlatShading = flatShading;
+    m_debugImportedWaterSolid = waterDebug;
+}
+
+void RendererBackend::importedSceneDebugState(
+    bool& outShowTerrain,
+    bool& outShowStatics,
+    bool& outShowTextures,
+    bool& outFlatShading,
+    bool& outWaterDebug
+) const {
+    outShowTerrain = m_debugShowImportedTerrain;
+    outShowStatics = m_debugShowImportedStatics;
+    outShowTextures = m_debugShowImportedTextures;
+    outFlatShading = m_debugImportedFlatShading;
+    outWaterDebug = m_debugImportedWaterSolid;
 }
 
 
@@ -246,83 +273,65 @@ float RendererBackend::cameraFovDegrees() const {
 
 
 void RendererBackend::buildFrameStatsUi() {
-    if (!m_showFrameStatsPanel) {
+    if (!m_debugUiVisible || !m_showFrameStatsPanel) {
         return;
     }
 
     constexpr ImGuiWindowFlags kPanelFlags =
         ImGuiWindowFlags_AlwaysAutoResize |
         ImGuiWindowFlags_NoSavedSettings;
-    if (!ImGui::Begin("Frame Stats", &m_showFrameStatsPanel, kPanelFlags)) {
+    if (!ImGui::Begin("Morrowind Renderer", &m_showFrameStatsPanel, kPanelFlags)) {
         ImGui::End();
         return;
     }
 
+    const bool importedSceneLoaded = !m_importedMeshDraws.empty() || m_importedWaterIndexCount > 0;
     const float autoScale = std::numeric_limits<float>::max();
-    if (m_debugCpuFrameTimingMsHistoryCount > 0) {
-        const int cpuHistoryCount = static_cast<int>(m_debugCpuFrameTimingMsHistoryCount);
-        const int cpuHistoryOffset =
-            (m_debugCpuFrameTimingMsHistoryCount == kTimingHistorySampleCount)
-                ? static_cast<int>(m_debugCpuFrameTimingMsHistoryWrite)
-                : 0;
-        ImGui::PlotLines(
-            "CPU Work (ms)",
-            m_debugCpuFrameWorkMsHistory.data(),
-            cpuHistoryCount,
-            cpuHistoryOffset,
-            nullptr,
-            0.0f,
-            autoScale,
-            ImVec2(0.0f, 64.0f)
-        );
-    } else {
-        ImGui::Text("CPU Timing (ms): collecting...");
-    }
-
-    if (m_gpuTimestampsSupported) {
-        if (m_debugGpuFrameTimingMsHistoryCount > 0) {
-            const int gpuHistoryCount = static_cast<int>(m_debugGpuFrameTimingMsHistoryCount);
-            const int gpuHistoryOffset =
-                (m_debugGpuFrameTimingMsHistoryCount == kTimingHistorySampleCount)
-                    ? static_cast<int>(m_debugGpuFrameTimingMsHistoryWrite)
-                    : 0;
-            ImGui::PlotLines(
-                "GPU Frame (ms)",
-                m_debugGpuFrameTimingMsHistory.data(),
-                gpuHistoryCount,
-                gpuHistoryOffset,
-                nullptr,
-                0.0f,
-                autoScale,
-                ImVec2(0.0f, 64.0f)
+    if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Viewer: Morrowind scene");
+        ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
+        if (importedSceneLoaded) {
+            ImGui::Checkbox("Show Terrain", &m_debugShowImportedTerrain);
+            ImGui::Checkbox("Show Statics", &m_debugShowImportedStatics);
+            ImGui::Checkbox("Show Textures", &m_debugShowImportedTextures);
+            ImGui::Checkbox("Flat Static Shading", &m_debugImportedFlatShading);
+            ImGui::Checkbox("Solid Water Debug", &m_debugImportedWaterSolid);
+            ImGui::SliderFloat(
+                "Water Animation Speed",
+                &m_skyDebugSettings.waterAnimationSpeed,
+                0.25f,
+                4.0f,
+                "%.2f");
+            ImGui::SliderFloat(
+                "Water Normal Strength",
+                &m_skyDebugSettings.waterNormalStrength,
+                0.25f,
+                2.5f,
+                "%.2f");
+            ImGui::SliderFloat(
+                "Water Reflection Strength",
+                &m_skyDebugSettings.waterReflectionStrength,
+                0.25f,
+                4.0f,
+                "%.2f");
+            ImGui::SliderFloat(
+                "Water Refraction Decay",
+                &m_skyDebugSettings.waterRefractionDecay,
+                0.25f,
+                5.0f,
+                "%.2f");
+            ImGui::TextDisabled("Hotkeys: F5 terrain, F6 statics, K textures, F7 flat shading, F8 water debug");
+            ImGui::Text(
+                "Imported Draws / Water Indices: %u / %u",
+                static_cast<unsigned>(m_importedMeshDraws.size()),
+                m_importedWaterIndexCount
             );
         } else {
-            ImGui::Text("GPU Frame (ms): collecting...");
+            ImGui::TextDisabled("Imported-scene geometry not loaded.");
         }
-    } else {
-        ImGui::Text("GPU Frame (ms): unavailable");
-    }
-    if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
-        const int presentHistoryCount = static_cast<int>(m_debugPresentedFrameTimingMsHistoryCount);
-        const int presentHistoryOffset =
-            (m_debugPresentedFrameTimingMsHistoryCount == kTimingHistorySampleCount)
-                ? static_cast<int>(m_debugPresentedFrameTimingMsHistoryWrite)
-                : 0;
-        ImGui::PlotLines(
-            "Presented Frame (ms)",
-            m_debugPresentedFrameTimingMsHistory.data(),
-            presentHistoryCount,
-            presentHistoryOffset,
-            nullptr,
-            0.0f,
-            autoScale,
-            ImVec2(0.0f, 64.0f)
-        );
     }
 
-    ImGui::Text("FPS (submit/presented): %.1f / %.1f", m_debugFps, m_debugPresentedFps);
-    ImGui::Text("Chunks (visible/total): %u / %u", m_debugSpatialVisibleChunkCount, m_debugChunkCount);
-    if (ImGui::TreeNodeEx("Frame Pacing", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Frame Pacing", ImGuiTreeNodeFlags_DefaultOpen)) {
         int pacingMode = static_cast<int>(m_framePacingSettings.mode);
         if (ImGui::Combo("Mode", &pacingMode, "Off\0Passive\0Scheduled\0")) {
             m_framePacingSettings.mode = static_cast<FramePacingMode>(pacingMode);
@@ -362,9 +371,15 @@ void RendererBackend::buildFrameStatsUi() {
         ImGui::Text("Desired Lead Time: %.3f ms", m_framePacingStats.desiredLeadTimeMs);
         ImGui::Text("Schedule Error: %.3f ms", m_framePacingStats.presentScheduleErrorMs);
         ImGui::Text("Late Presents: %u", m_framePacingStats.latePresentCount);
-        ImGui::TreePop();
+        if (m_supportsDisplayTiming) {
+            ImGui::Checkbox("Use Display Timing", &m_enableDisplayTiming);
+        } else {
+            ImGui::TextDisabled("Display timing unavailable");
+            m_enableDisplayTiming = false;
+        }
     }
-    if (ImGui::TreeNodeEx("Shadow Mode", ImGuiTreeNodeFlags_DefaultOpen)) {
+
+    if (ImGui::CollapsingHeader("Lighting & Shadows", ImGuiTreeNodeFlags_DefaultOpen)) {
         int shadowMode = static_cast<int>(m_shadowSettings.mode);
         if (ImGui::Combo("Shadow Backend", &shadowMode, "Shadow Maps\0Ray Traced (Beta)\0Auto (Beta)\0")) {
             setShadowSettings(ShadowSettings{static_cast<ShadowMode>(shadowMode)});
@@ -388,63 +403,431 @@ void RendererBackend::buildFrameStatsUi() {
             std::clamp(m_shadowDebugSettings.rtShadowSampleCount, 1, 8),
             m_shadowDebugSettings.rtSunAngularRadiusDegrees
         );
-        ImGui::Text("RT Beta Scope: main-pass voxels + Magica only");
+        ImGui::Text("RT Beta Scope: main-pass geometry + imported scene");
         ImGui::Text(
             "RT Scene Builds / BLAS / TLAS: %u / %u / %u",
             m_rtSceneBuildCount,
             m_rtBlasBuildCount,
             m_rtTlasBuildCount
         );
+        ImGui::Text("Imported RT Geometries: %u", static_cast<unsigned>(m_rtImportedSceneRecords.size()));
         ImGui::Text(
-            "GI Surface Mode: requested=%s active=%s",
-            voxelGiSurfaceModeName(m_voxelGiDebugSettings.surfaceMode),
+            "Cascade Splits: %.1f / %.1f / %.1f / %.1f",
+            m_shadowCascadeSplits[0],
+            m_shadowCascadeSplits[1],
+            m_shadowCascadeSplits[2],
+            m_shadowCascadeSplits[3]
+        );
+        ImGui::SliderFloat("Sun Yaw", &m_skyDebugSettings.sunYawDegrees, -180.0f, 180.0f, "%.1f deg");
+        ImGui::SliderFloat("Sun Pitch", &m_skyDebugSettings.sunPitchDegrees, -89.0f, 89.0f, "%.1f deg");
+        ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
+        ImGui::SliderFloat("Sun Disk Intensity", &m_skyDebugSettings.sunDiskIntensity, 300.0f, 2200.0f, "%.0f");
+        ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");
+        ImGui::Checkbox("Shadow Occluder Culling", &m_shadowDebugSettings.enableOccluderCulling);
+        ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
+        ImGui::SliderInt("RT Samples", &m_shadowDebugSettings.rtShadowSampleCount, 1, 8);
+        ImGui::SliderFloat(
+            "RT Sun Radius (deg)",
+            &m_shadowDebugSettings.rtSunAngularRadiusDegrees,
+            0.0f,
+            1.0f,
+            "%.2f"
+        );
+        ImGui::SliderFloat("Cascade Blend Min", &m_shadowDebugSettings.cascadeBlendMin, 1.0f, 20.0f, "%.2f");
+        ImGui::SliderFloat("Cascade Blend Factor", &m_shadowDebugSettings.cascadeBlendFactor, 0.05f, 0.60f, "%.2f");
+        ImGui::SliderInt(
+            "Grass Shadow Cascades",
+            &m_shadowDebugSettings.grassShadowCascadeCount,
+            0,
+            static_cast<int>(kShadowCascadeCount)
+        );
+        if (ImGui::TreeNodeEx("Advanced Shadow Bias", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Receiver Bias");
+            ImGui::SliderFloat(
+                "Normal Offset Near",
+                &m_shadowDebugSettings.receiverNormalOffsetNear,
+                0.0f,
+                0.20f,
+                "%.3f"
+            );
+            ImGui::SliderFloat(
+                "Normal Offset Far",
+                &m_shadowDebugSettings.receiverNormalOffsetFar,
+                0.0f,
+                0.35f,
+                "%.3f"
+            );
+            ImGui::SliderFloat(
+                "Base Bias Near (texel)",
+                &m_shadowDebugSettings.receiverBaseBiasNearTexel,
+                0.0f,
+                12.0f,
+                "%.2f"
+            );
+            ImGui::SliderFloat(
+                "Base Bias Far (texel)",
+                &m_shadowDebugSettings.receiverBaseBiasFarTexel,
+                0.0f,
+                16.0f,
+                "%.2f"
+            );
+            ImGui::SliderFloat(
+                "Slope Bias Near (texel)",
+                &m_shadowDebugSettings.receiverSlopeBiasNearTexel,
+                0.0f,
+                14.0f,
+                "%.2f"
+            );
+            ImGui::SliderFloat(
+                "Slope Bias Far (texel)",
+                &m_shadowDebugSettings.receiverSlopeBiasFarTexel,
+                0.0f,
+                18.0f,
+                "%.2f"
+            );
+            ImGui::Separator();
+            ImGui::Text("Caster Bias");
+            ImGui::SliderFloat(
+                "Const Bias Base",
+                &m_shadowDebugSettings.casterConstantBiasBase,
+                0.0f,
+                6.0f,
+                "%.2f"
+            );
+            ImGui::SliderFloat(
+                "Const Bias Cascade Scale",
+                &m_shadowDebugSettings.casterConstantBiasCascadeScale,
+                0.0f,
+                3.0f,
+                "%.2f"
+            );
+            ImGui::SliderFloat(
+                "Slope Bias Base",
+                &m_shadowDebugSettings.casterSlopeBiasBase,
+                0.0f,
+                8.0f,
+                "%.2f"
+            );
+            ImGui::SliderFloat(
+                "Slope Bias Cascade Scale",
+                &m_shadowDebugSettings.casterSlopeBiasCascadeScale,
+                0.0f,
+                4.0f,
+                "%.2f"
+            );
+            ImGui::TreePop();
+        }
+        if (ImGui::Button("Reset Shadow Defaults")) {
+            m_shadowDebugSettings = ShadowDebugSettings{};
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Global Illumination", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Enable SSAO", &m_debugEnableSsao);
+        ImGui::SliderFloat("SSAO Radius", &m_shadowDebugSettings.ssaoRadius, 0.10f, 2.00f, "%.2f");
+        ImGui::SliderFloat("SSAO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 0.20f, "%.3f");
+        ImGui::SliderFloat("SSAO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 1.50f, "%.2f");
+        if (ImGui::TreeNodeEx("Advanced AO Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Visualize SSAO", &m_debugVisualizeSsao);
+            ImGui::Checkbox("Visualize AO Normals", &m_debugVisualizeAoNormals);
+            ImGui::TreePop();
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Scene GI");
+        ImGui::Text("Compute: %s", m_voxelGiComputeAvailable ? "on" : "fallback");
+        int giSurfaceMode = static_cast<int>(m_voxelGiDebugSettings.surfaceMode);
+        ImGui::Combo("GI Surface Mode", &giSurfaceMode, "Legacy\0RT Surface\0ReSTIR Surface\0");
+        m_voxelGiDebugSettings.surfaceMode = static_cast<VoxelGiSurfaceMode>(giSurfaceMode);
+        ImGui::Text(
+            "GI Active: %s",
             m_voxelGiRestirActiveThisFrame
-                ? "restir_surface"
-                : (m_voxelGiRtSurfaceActiveThisFrame ? "rt_surface" : "legacy")
+                ? "ReSTIR Surface"
+                : (m_voxelGiRtSurfaceActiveThisFrame ? "RT Surface" : "Legacy")
         );
         ImGui::Text(
-            "GI RT Surface: %s / active=%s",
-            m_voxelGiRtSurfaceReady ? "ready" : "fallback",
-            m_voxelGiRtSurfaceActiveThisFrame ? "yes" : "no"
+            "GI Readiness: RT=%s ReSTIR=%s TLAS=%s",
+            m_voxelGiRtSurfaceReady ? "yes" : "no",
+            m_voxelGiRestirReady ? "yes" : "no",
+            m_rtTlas.handle != VK_NULL_HANDLE ? "yes" : "no"
+        );
+        ImGui::SliderFloat("Bounce Strength", &m_voxelGiDebugSettings.bounceStrength, 0.0f, 2.50f, "%.2f");
+        ImGui::SliderFloat("Diffusion Softness", &m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderInt("RT Surface Samples", &m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2);
+        ImGui::SliderFloat("RT Surface Bias", &m_voxelGiDebugSettings.rtSurfaceBiasScale, 0.25f, 4.0f, "%.2f");
+        ImGui::SeparatorText("ReSTIR GI");
+        ImGui::SliderInt("ReSTIR Candidates", &m_voxelGiDebugSettings.restirCandidateCount, 1, 8);
+        ImGui::Checkbox("ReSTIR Temporal", &m_voxelGiDebugSettings.restirEnableTemporalReuse);
+        ImGui::Checkbox("ReSTIR Spatial", &m_voxelGiDebugSettings.restirEnableSpatialReuse);
+        ImGui::SliderInt("ReSTIR Radius", &m_voxelGiDebugSettings.restirSpatialRadius, 1, 2);
+        ImGui::Text(
+            "History: %s (%s)",
+            m_voxelGiRestirHistoryValid ? "valid" : "reset",
+            m_voxelGiRestirHistoryResetReason.c_str()
+        );
+        if (ImGui::Button("Reset ReSTIR History")) {
+            m_voxelGiDebugSettings.restirHistoryResetRequested = true;
+        }
+        if (ImGui::TreeNodeEx("Advanced GI Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const char* giVisualizationModes =
+                "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0";
+            ImGui::Combo("GI Visualize", &m_voxelGiDebugSettings.visualizationMode, giVisualizationModes);
+            if (m_voxelGiDebugSettings.visualizationMode > 0) {
+                m_debugVisualizeSsao = false;
+                m_debugVisualizeAoNormals = false;
+            }
+            ImGui::TreePop();
+        }
+        if (ImGui::Button("Reset GI Defaults")) {
+            m_voxelGiDebugSettings = VoxelGiDebugSettings{};
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Sky & Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::TreeNodeEx("Advanced Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Auto Sunrise Tuning", &m_skyDebugSettings.autoSunriseTuning);
+            ImGui::SliderFloat("Auto Sunrise Blend", &m_skyDebugSettings.autoSunriseBlend, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Auto Adapt Speed", &m_skyDebugSettings.autoSunriseAdaptSpeed, 0.5f, 12.0f, "%.2f");
+            ImGui::Separator();
+            ImGui::SliderFloat("Rayleigh Strength", &m_skyDebugSettings.rayleighStrength, 0.1f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Mie Strength", &m_skyDebugSettings.mieStrength, 0.05f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Mie Anisotropy", &m_skyDebugSettings.mieAnisotropy, 0.0f, 0.95f, "%.2f");
+            ImGui::SliderFloat("Sun Disk Size", &m_skyDebugSettings.sunDiskSize, 0.5f, 6.0f, "%.2f");
+            ImGui::SliderFloat("Sun Haze Falloff", &m_skyDebugSettings.sunHazeFalloff, 0.10f, 1.20f, "%.2f");
+            ImGui::TreePop();
+        }
+        ImGui::SliderFloat("Fog Density", &m_skyDebugSettings.volumetricFogDensity, 0.0f, 0.03f, "%.4f");
+        ImGui::SliderFloat("Fog Sun Scatter", &m_skyDebugSettings.volumetricSunScattering, 0.0f, 3.0f, "%.2f");
+        if (ImGui::TreeNodeEx("Advanced Fog", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderFloat(
+                "Fog Height Falloff",
+                &m_skyDebugSettings.volumetricFogHeightFalloff,
+                0.0f,
+                0.30f,
+                "%.3f"
+            );
+            ImGui::SliderFloat(
+                "Fog Base Height",
+                &m_skyDebugSettings.volumetricFogBaseHeight,
+                -32.0f,
+                64.0f,
+                "%.1f"
+            );
+            ImGui::TreePop();
+        }
+        ImGui::SliderFloat(
+            "Plant Quad Directionality",
+            &m_skyDebugSettings.plantQuadDirectionality,
+            0.0f,
+            1.0f,
+            "%.2f"
         );
         ImGui::Text(
-            "GI ReSTIR: %s / active=%s (%d cand, temporal=%s, spatial=%s, radius=%d)",
-            m_voxelGiRestirReady ? "ready" : "fallback",
-            m_voxelGiRestirActiveThisFrame ? "yes" : "no",
-            std::clamp(m_voxelGiDebugSettings.restirCandidateCount, 1, 8),
-            m_voxelGiDebugSettings.restirEnableTemporalReuse ? "yes" : "no",
-            m_voxelGiDebugSettings.restirEnableSpatialReuse ? "yes" : "no",
-            std::clamp(m_voxelGiDebugSettings.restirSpatialRadius, 1, 2)
+            "Runtime: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",
+            m_skyTuningRuntime.rayleighStrength,
+            m_skyTuningRuntime.mieStrength,
+            m_skyTuningRuntime.skyExposure,
+            m_skyTuningRuntime.sunDiskSize
         );
-        if (m_voxelGiDebugSettings.surfaceMode == VoxelGiSurfaceMode::RestirSurface && !m_voxelGiRestirActiveThisFrame) {
-            ImGui::Text(
-                "GI ReSTIR Fallback: %s",
-                m_voxelGiRtSurfaceActiveThisFrame ? "rt_surface" : "legacy"
+        if (ImGui::Button("Reset Sun/Sky Defaults")) {
+            m_skyDebugSettings = SkyDebugSettings{};
+            m_skyTuningRuntime = RendererBackend::SkyTuningRuntimeState{};
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Post", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Eye Adaptation");
+        ImGui::Checkbox("Auto Exposure", &m_skyDebugSettings.autoExposureEnabled);
+        ImGui::SliderFloat("Manual Exposure", &m_skyDebugSettings.manualExposure, 0.05f, 4.0f, "%.3f");
+        ImGui::Text(
+            "Resolved Exposure: %.3f (target %.3f, avg luma %.3f)",
+            m_debugResolvedExposure,
+            m_debugTargetExposure,
+            m_debugAverageSceneLuminance
+        );
+        if (m_skyDebugSettings.autoExposureEnabled && ImGui::TreeNodeEx("Advanced Exposure", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderInt("AE Update Interval", &m_skyDebugSettings.autoExposureUpdateIntervalFrames, 1, 16);
+            ImGui::SliderFloat("AE Key Value", &m_skyDebugSettings.autoExposureKeyValue, 0.05f, 0.50f, "%.3f");
+            ImGui::SliderFloat("AE Min Exposure", &m_skyDebugSettings.autoExposureMin, 0.05f, 2.50f, "%.3f");
+            ImGui::SliderFloat("AE Max Exposure", &m_skyDebugSettings.autoExposureMax, 0.20f, 12.00f, "%.3f");
+            ImGui::SliderFloat("AE Adapt Up", &m_skyDebugSettings.autoExposureAdaptUp, 0.10f, 12.00f, "%.2f");
+            ImGui::SliderFloat("AE Adapt Down", &m_skyDebugSettings.autoExposureAdaptDown, 0.10f, 12.00f, "%.2f");
+            ImGui::SliderFloat(
+                "AE Low Percentile",
+                &m_skyDebugSettings.autoExposureLowPercentile,
+                0.00f,
+                0.95f,
+                "%.2f"
+            );
+            ImGui::SliderFloat(
+                "AE High Percentile",
+                &m_skyDebugSettings.autoExposureHighPercentile,
+                0.05f,
+                1.00f,
+                "%.2f"
+            );
+            ImGui::TreePop();
+        }
+        if (!m_autoExposureComputeAvailable) {
+            ImGui::TextDisabled("Auto exposure compute unavailable; manual exposure is active.");
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Bloom");
+        ImGui::SliderFloat("Bloom Global Intensity", &m_skyDebugSettings.bloomBaseIntensity, 0.0f, 0.35f, "%.3f");
+        if (ImGui::TreeNodeEx("Advanced Bloom", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderFloat("Bloom Threshold", &m_skyDebugSettings.bloomThreshold, 0.25f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Bloom Soft Knee", &m_skyDebugSettings.bloomSoftKnee, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Bloom Sun Boost", &m_skyDebugSettings.bloomSunFacingBoost, 0.0f, 0.40f, "%.3f");
+            ImGui::TreePop();
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Color Grading");
+        const char* postLookPresets = "Neutral\0Punchy\0Stylized Vivid\0";
+        ImGui::Combo("Post Look", &m_skyDebugSettings.postColorLookPreset, postLookPresets);
+        ImGui::SliderFloat("Contrast", &m_skyDebugSettings.colorGradingContrast, 0.70f, 1.40f, "%.2f");
+        ImGui::SliderFloat("Saturation", &m_skyDebugSettings.colorGradingSaturation, 0.0f, 2.0f, "%.2f");
+        ImGui::SliderFloat("Vibrance", &m_skyDebugSettings.colorGradingVibrance, -1.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat(
+            "Midtone Contrast",
+            &m_skyDebugSettings.colorGradingMidtoneContrast,
+            0.80f,
+            1.40f,
+            "%.2f"
+        );
+        ImGui::SliderFloat(
+            "Shadow Density",
+            &m_skyDebugSettings.colorGradingShadowDensity,
+            0.70f,
+            1.40f,
+            "%.2f"
+        );
+        ImGui::SliderFloat(
+            "Highlight Rolloff",
+            &m_skyDebugSettings.colorGradingHighlightRolloff,
+            0.70f,
+            1.10f,
+            "%.2f"
+        );
+        if (ImGui::TreeNodeEx("Advanced Color Grading", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderFloat("White Balance R", &m_skyDebugSettings.colorGradingWhiteBalanceR, 0.80f, 1.20f, "%.2f");
+            ImGui::SliderFloat("White Balance G", &m_skyDebugSettings.colorGradingWhiteBalanceG, 0.80f, 1.20f, "%.2f");
+            ImGui::SliderFloat("White Balance B", &m_skyDebugSettings.colorGradingWhiteBalanceB, 0.80f, 1.20f, "%.2f");
+            ImGui::SliderFloat("Shadow Tint R", &m_skyDebugSettings.colorGradingShadowTintR, -0.20f, 0.20f, "%.2f");
+            ImGui::SliderFloat("Shadow Tint G", &m_skyDebugSettings.colorGradingShadowTintG, -0.20f, 0.20f, "%.2f");
+            ImGui::SliderFloat("Shadow Tint B", &m_skyDebugSettings.colorGradingShadowTintB, -0.20f, 0.20f, "%.2f");
+            ImGui::SliderFloat(
+                "Highlight Tint R",
+                &m_skyDebugSettings.colorGradingHighlightTintR,
+                -0.20f,
+                0.20f,
+                "%.2f"
+            );
+            ImGui::SliderFloat(
+                "Highlight Tint G",
+                &m_skyDebugSettings.colorGradingHighlightTintG,
+                -0.20f,
+                0.20f,
+                "%.2f"
+            );
+            ImGui::SliderFloat(
+                "Highlight Tint B",
+                &m_skyDebugSettings.colorGradingHighlightTintB,
+                -0.20f,
+                0.20f,
+                "%.2f"
+            );
+            ImGui::TreePop();
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (m_debugCpuFrameTimingMsHistoryCount > 0) {
+            const int cpuHistoryCount = static_cast<int>(m_debugCpuFrameTimingMsHistoryCount);
+            const int cpuHistoryOffset =
+                (m_debugCpuFrameTimingMsHistoryCount == kTimingHistorySampleCount)
+                    ? static_cast<int>(m_debugCpuFrameTimingMsHistoryWrite)
+                    : 0;
+            ImGui::PlotLines(
+                "CPU Work (ms)",
+                m_debugCpuFrameWorkMsHistory.data(),
+                cpuHistoryCount,
+                cpuHistoryOffset,
+                nullptr,
+                0.0f,
+                autoScale,
+                ImVec2(0.0f, 64.0f)
+            );
+        } else {
+            ImGui::Text("CPU Timing (ms): collecting...");
+        }
+
+        if (m_gpuTimestampsSupported) {
+            if (m_debugGpuFrameTimingMsHistoryCount > 0) {
+                const int gpuHistoryCount = static_cast<int>(m_debugGpuFrameTimingMsHistoryCount);
+                const int gpuHistoryOffset =
+                    (m_debugGpuFrameTimingMsHistoryCount == kTimingHistorySampleCount)
+                        ? static_cast<int>(m_debugGpuFrameTimingMsHistoryWrite)
+                        : 0;
+                ImGui::PlotLines(
+                    "GPU Frame (ms)",
+                    m_debugGpuFrameTimingMsHistory.data(),
+                    gpuHistoryCount,
+                    gpuHistoryOffset,
+                    nullptr,
+                    0.0f,
+                    autoScale,
+                    ImVec2(0.0f, 64.0f)
+                );
+            } else {
+                ImGui::Text("GPU Frame (ms): collecting...");
+            }
+        } else {
+            ImGui::Text("GPU Frame (ms): unavailable");
+        }
+        if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
+            const int presentHistoryCount = static_cast<int>(m_debugPresentedFrameTimingMsHistoryCount);
+            const int presentHistoryOffset =
+                (m_debugPresentedFrameTimingMsHistoryCount == kTimingHistorySampleCount)
+                    ? static_cast<int>(m_debugPresentedFrameTimingMsHistoryWrite)
+                    : 0;
+            ImGui::PlotLines(
+                "Presented Frame (ms)",
+                m_debugPresentedFrameTimingMsHistory.data(),
+                presentHistoryCount,
+                presentHistoryOffset,
+                nullptr,
+                0.0f,
+                autoScale,
+                ImVec2(0.0f, 64.0f)
             );
         }
-        ImGui::Text(
-            "GI RT Samples / Bias: %d / %.2f",
-            std::clamp(m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2),
-            m_voxelGiDebugSettings.rtSurfaceBiasScale
-        );
-        ImGui::Text("GI ReSTIR History: %s (%s)", m_voxelGiRestirHistoryValid ? "valid" : "reset", m_voxelGiRestirHistoryResetReason.c_str());
-        ImGui::Text("Ray Query: %s", m_shadowStats.rayQuerySupported ? "yes" : "no");
-        ImGui::Text(
-            "Acceleration Structure: %s",
-            m_shadowStats.accelerationStructureSupported ? "yes" : "no"
-        );
-        ImGui::TreePop();
-    }
-    if (m_gpuTimestampsSupported) {
+
+        ImGui::Text("FPS (submit/presented): %.1f / %.1f", m_debugFps, m_debugPresentedFps);
         ImGui::Text(
             "Frame CPU (total/work/ewma): %.2f / %.2f / %.2f ms",
             m_debugFrameTimeMs,
             m_debugCpuFrameWorkMs,
             m_debugCpuFrameEwmaMs
         );
-        ImGui::Text("Frame CPU P50/P95/P99: %.2f / %.2f / %.2f ms", m_debugCpuFrameP50Ms, m_debugCpuFrameP95Ms, m_debugCpuFrameP99Ms);
-        ImGui::Text("Frame GPU: %.2f ms", m_debugGpuFrameTimeMs);
-        ImGui::Text("Frame GPU P50/P95/P99: %.2f / %.2f / %.2f ms", m_debugGpuFrameP50Ms, m_debugGpuFrameP95Ms, m_debugGpuFrameP99Ms);
+        ImGui::Text(
+            "Frame CPU P50/P95/P99: %.2f / %.2f / %.2f ms",
+            m_debugCpuFrameP50Ms,
+            m_debugCpuFrameP95Ms,
+            m_debugCpuFrameP99Ms
+        );
+        if (m_gpuTimestampsSupported) {
+            ImGui::Text("Frame GPU: %.2f ms", m_debugGpuFrameTimeMs);
+            ImGui::Text(
+                "Frame GPU P50/P95/P99: %.2f / %.2f / %.2f ms",
+                m_debugGpuFrameP50Ms,
+                m_debugGpuFrameP95Ms,
+                m_debugGpuFrameP99Ms
+            );
+        } else {
+            ImGui::Text("Frame GPU: n/a");
+        }
         if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
             ImGui::Text(
                 "Presented Frame (last/P50/P95/P99): %.2f / %.2f / %.2f / %.2f ms",
@@ -473,175 +856,125 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::Text("Post: %.2f", m_debugGpuPostTimeMs);
             ImGui::TreePop();
         }
-    } else {
-        ImGui::Text(
-            "Frame CPU (total/work/ewma): %.2f / %.2f / %.2f ms",
-            m_debugFrameTimeMs,
-            m_debugCpuFrameWorkMs,
-            m_debugCpuFrameEwmaMs
-        );
-        ImGui::Text("Frame CPU P50/P95/P99: %.2f / %.2f / %.2f ms", m_debugCpuFrameP50Ms, m_debugCpuFrameP95Ms, m_debugCpuFrameP99Ms);
-        ImGui::Text("Frame GPU: n/a");
-        if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
+        if (ImGui::TreeNodeEx("Draw Calls", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Total: %u", m_debugDrawCallsTotal);
+            ImGui::Text("Shadow: %u", m_debugDrawCallsShadow);
+            ImGui::Text("Prepass: %u", m_debugDrawCallsPrepass);
+            ImGui::Text("Main: %u", m_debugDrawCallsMain);
+            ImGui::Text("Post: %u", m_debugDrawCallsPost);
+            ImGui::TreePop();
+        }
+        const bool hasFrameArenaMetrics =
+            m_debugFrameArenaUploadBytes > 0 ||
+            m_debugFrameArenaUploadAllocs > 0 ||
+            m_debugFrameArenaTransientBufferBytes > 0 ||
+            m_debugFrameArenaTransientBufferCount > 0 ||
+            m_debugFrameArenaTransientImageBytes > 0 ||
+            m_debugFrameArenaTransientImageCount > 0 ||
+            m_debugFrameArenaAliasReuses > 0 ||
+            m_debugFrameArenaResidentBufferBytes > 0 ||
+            m_debugFrameArenaResidentBufferCount > 0 ||
+            m_debugFrameArenaResidentImageBytes > 0 ||
+            m_debugFrameArenaResidentImageCount > 0 ||
+            m_debugFrameArenaResidentAliasReuses > 0 ||
+            !m_debugAliasedImages.empty();
+        if (hasFrameArenaMetrics && ImGui::TreeNodeEx("FrameArena", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (m_debugFrameArenaUploadBytes > 0 || m_debugFrameArenaUploadAllocs > 0) {
+                ImGui::Text(
+                    "Upload this frame: %llu B (%u allocs)",
+                    static_cast<unsigned long long>(m_debugFrameArenaUploadBytes),
+                    m_debugFrameArenaUploadAllocs
+                );
+            }
             ImGui::Text(
-                "Presented Frame (last/P50/P95/P99): %.2f / %.2f / %.2f / %.2f ms",
-                m_debugPresentedFrameTimeMs,
-                m_debugPresentedFrameP50Ms,
-                m_debugPresentedFrameP95Ms,
-                m_debugPresentedFrameP99Ms
+                "Image alias reuses (frame/live): %u / %u",
+                m_debugFrameArenaAliasReuses,
+                m_debugFrameArenaResidentAliasReuses
             );
+            ImGui::Text("Resident images (live): %u", m_debugFrameArenaResidentImageCount);
+            ImGui::TreePop();
         }
     }
-    if (m_supportsDisplayTiming) {
-        ImGui::Text(
-            "Display Timing Present ID submit/presented: %u / %u",
-            m_lastSubmittedDisplayTimingPresentId,
-            m_lastPresentedDisplayTimingPresentId
-        );
-        ImGui::Text("Display Refresh: %.3f ms", m_debugDisplayRefreshMs);
-        ImGui::Text("Display Present Margin: %.3f ms", m_debugDisplayPresentMarginMs);
-        ImGui::Text("Display Actual-Earliest: %.3f ms", m_debugDisplayActualEarliestDeltaMs);
-        ImGui::Text("Display Schedule Error: %.3f ms", m_debugDisplayScheduleErrorMs);
-        ImGui::Text("Display Timing Samples: %u", m_debugDisplayTimingSampleCount);
-    }
-    if (ImGui::TreeNodeEx("Desktop Capabilities", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Text("Roadmap 2026 Core Ready: %s", m_desktopCapabilityProbe.roadmap2026CoreReady ? "yes" : "no");
-        ImGui::Text("Descriptor Heap: %s", m_desktopCapabilityProbe.descriptorHeapExtension ? "yes" : "no");
-        ImGui::Text(
-            "Unified Image Layouts: %s",
-            m_desktopCapabilityProbe.unifiedImageLayoutsExtension ? "yes" : "no"
-        );
-        ImGui::Text("Host Image Copy: %s", m_desktopCapabilityProbe.hostImageCopyExtension ? "yes" : "no");
-        ImGui::Text("Shader Clock: %s", m_desktopCapabilityProbe.shaderClockExtension ? "yes" : "no");
-        ImGui::Text(
-            "Compute Shader Derivatives: %s",
-            m_desktopCapabilityProbe.computeShaderDerivativesExtension ? "yes" : "no"
-        );
-        ImGui::Text(
-            "Fragment Shading Rate: %s",
-            m_desktopCapabilityProbe.fragmentShadingRateExtension ? "yes" : "no"
-        );
-        ImGui::Text(
-            "Swapchain Maintenance1: %s",
-            m_desktopCapabilityProbe.swapchainMaintenance1Extension ? "yes" : "no"
-        );
-        ImGui::Text("Present ID: %s", m_desktopCapabilityProbe.presentIdExtension ? "yes" : "no");
-        ImGui::Text("Present Wait: %s", m_desktopCapabilityProbe.presentWaitExtension ? "yes" : "no");
-        ImGui::Text(
-            "Descriptor Limits S/SI/DS/Frag: %u / %u / %u / %u",
-            m_desktopCapabilityProbe.maxPerStageDescriptorSamplers,
-            m_desktopCapabilityProbe.maxPerStageDescriptorSampledImages,
-            m_desktopCapabilityProbe.maxDescriptorSetSampledImages,
-            m_desktopCapabilityProbe.maxFragmentCombinedOutputResources
-        );
-        ImGui::Text(
-            "Storage Image Limit: %u",
-            m_desktopCapabilityProbe.maxDescriptorSetStorageImages
-        );
-        ImGui::TreePop();
-    }
-    if (ImGui::TreeNodeEx("Ray Tracing Capabilities", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Text(
-            "Acceleration Structure: %s",
-            m_rayTracingCapabilityProbe.accelerationStructureExtension ? "yes" : "no"
-        );
-        ImGui::Text("Ray Query: %s", m_rayTracingCapabilityProbe.rayQueryExtension ? "yes" : "no");
-        ImGui::Text(
-            "Deferred Host Operations: %s",
-            m_rayTracingCapabilityProbe.deferredHostOperationsExtension ? "yes" : "no"
-        );
-        ImGui::Text(
-            "RT Pipeline: %s",
-            m_rayTracingCapabilityProbe.rayTracingPipelineExtension ? "yes" : "no"
-        );
-        ImGui::Text(
-            "RT Maintenance1: %s",
-            m_rayTracingCapabilityProbe.rayTracingMaintenance1Extension ? "yes" : "no"
-        );
-        ImGui::Text(
-            "RT Position Fetch: %s",
-            m_rayTracingCapabilityProbe.rayTracingPositionFetchExtension ? "yes" : "no"
-        );
-        ImGui::Text(
-            "Acceleration Structure Feature: %s",
-            m_rayTracingCapabilityProbe.accelerationStructureFeature ? "yes" : "no"
-        );
-        ImGui::Text("Ray Query Feature: %s", m_rayTracingCapabilityProbe.rayQueryFeature ? "yes" : "no");
-        ImGui::Text("RT Core Ready: %s", m_rayTracingCapabilityProbe.rayTracingCoreReady ? "yes" : "no");
-        ImGui::Text(
-            "Scratch Alignment: %llu",
-            static_cast<unsigned long long>(m_rayTracingCapabilityProbe.scratchAlignment)
-        );
-        std::uint32_t chunkRtVertexCount = 0;
-        std::uint32_t chunkRtIndexCount = 0;
-        for (const RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
-            chunkRtVertexCount += chunkRecord.vertexCount;
-            chunkRtIndexCount += chunkRecord.indexCount;
-        }
-        ImGui::Text("Chunk RT Vertices: %u", chunkRtVertexCount);
-        ImGui::Text("Chunk RT Indices: %u", chunkRtIndexCount);
-        ImGui::Text("Chunk RT Records: %u", static_cast<unsigned>(m_rtChunkSceneRecords.size()));
-        ImGui::Text("Magica RT Geometries: %u", static_cast<unsigned>(m_rtMagicaGeometries.size()));
-        ImGui::TreePop();
-    }
-    if (ImGui::TreeNodeEx("Draw Calls", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Text("Total: %u", m_debugDrawCallsTotal);
-        ImGui::Text("Shadow: %u", m_debugDrawCallsShadow);
-        ImGui::Text("Prepass: %u", m_debugDrawCallsPrepass);
-        ImGui::Text("Main: %u", m_debugDrawCallsMain);
-        ImGui::Text("Post: %u", m_debugDrawCallsPost);
-        ImGui::TreePop();
-    }
-    ImGui::Text("Chunk Indirect Commands: %u", m_debugChunkIndirectCommandCount);
-    ImGui::Text(
-        "Spatial Query N/C/V/R/New/Evict: %u / %u / %u / %u / %u / %u",
-        m_debugSpatialQueryStats.visitedNodeCount,
-        m_debugSpatialQueryStats.candidateChunkCount,
-        m_debugSpatialQueryStats.visibleChunkCount,
-        m_debugSpatialQueryStats.retainedChunkCount,
-        m_debugSpatialQueryStats.newlyVisibleChunkCount,
-        m_debugSpatialQueryStats.evictedChunkCount
-    );
-    if (m_debugSpatialQueryStats.clipmapActiveLevelCount > 0) {
-        ImGui::Text(
-            "Clipmap L/U/S/B: %u / %u / %u / %u",
-            m_debugSpatialQueryStats.clipmapActiveLevelCount,
-            m_debugSpatialQueryStats.clipmapUpdatedLevelCount,
-            m_debugSpatialQueryStats.clipmapUpdatedSlabCount,
-            m_debugSpatialQueryStats.clipmapUpdatedBrickCount
-        );
-    }
-    ImGui::Text("Chunk Mesh Vert/Idx: %u / %u", m_debugChunkMeshVertexCount, m_debugChunkMeshIndexCount);
-    ImGui::Text("Last Chunk Remesh: %.2f ms (%u)", m_debugChunkLastRemeshMs, m_debugChunkLastRemeshedChunkCount);
-    ImGui::Text("Chunk Remesh Pending/Batch: %u / %u", m_debugChunkPendingRemeshCount, m_debugChunkRemeshBatchCount);
-    ImGui::Text("RT Active Chunks: %u", m_debugRtActiveChunkCount);
-    ImGui::Text("Greedy Reduction vs Naive: %.1f%%", m_debugChunkLastRemeshReductionPercent);
-    const bool hasFrameArenaMetrics =
-        m_debugFrameArenaUploadBytes > 0 ||
-        m_debugFrameArenaUploadAllocs > 0 ||
-        m_debugFrameArenaTransientBufferBytes > 0 ||
-        m_debugFrameArenaTransientBufferCount > 0 ||
-        m_debugFrameArenaTransientImageBytes > 0 ||
-        m_debugFrameArenaTransientImageCount > 0 ||
-        m_debugFrameArenaAliasReuses > 0 ||
-        m_debugFrameArenaResidentBufferBytes > 0 ||
-        m_debugFrameArenaResidentBufferCount > 0 ||
-        m_debugFrameArenaResidentImageBytes > 0 ||
-        m_debugFrameArenaResidentImageCount > 0 ||
-        m_debugFrameArenaResidentAliasReuses > 0 ||
-        !m_debugAliasedImages.empty();
-    if (hasFrameArenaMetrics) {
-        ImGui::Separator();
-        ImGui::Text("FrameArena");
-        if (m_debugFrameArenaUploadBytes > 0 || m_debugFrameArenaUploadAllocs > 0) {
+
+    if (ImGui::CollapsingHeader("Renderer Diagnostics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (m_supportsDisplayTiming) {
             ImGui::Text(
-                "Upload this frame: %llu B (%u allocs)",
-                static_cast<unsigned long long>(m_debugFrameArenaUploadBytes),
-                m_debugFrameArenaUploadAllocs
+                "Display Timing Present ID submit/presented: %u / %u",
+                m_lastSubmittedDisplayTimingPresentId,
+                m_lastPresentedDisplayTimingPresentId
             );
+            ImGui::Text("Display Refresh: %.3f ms", m_debugDisplayRefreshMs);
+            ImGui::Text("Display Present Margin: %.3f ms", m_debugDisplayPresentMarginMs);
+            ImGui::Text("Display Actual-Earliest: %.3f ms", m_debugDisplayActualEarliestDeltaMs);
+            ImGui::Text("Display Schedule Error: %.3f ms", m_debugDisplayScheduleErrorMs);
+            ImGui::Text("Display Timing Samples: %u", m_debugDisplayTimingSampleCount);
         }
-        ImGui::Text("Image alias reuses (frame/live): %u / %u", m_debugFrameArenaAliasReuses, m_debugFrameArenaResidentAliasReuses);
-        ImGui::Text("Resident images (live): %u", m_debugFrameArenaResidentImageCount);
+        if (ImGui::TreeNodeEx("Desktop Capabilities", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Roadmap 2026 Core Ready: %s", m_desktopCapabilityProbe.roadmap2026CoreReady ? "yes" : "no");
+            ImGui::Text("Descriptor Heap: %s", m_desktopCapabilityProbe.descriptorHeapExtension ? "yes" : "no");
+            ImGui::Text(
+                "Unified Image Layouts: %s",
+                m_desktopCapabilityProbe.unifiedImageLayoutsExtension ? "yes" : "no"
+            );
+            ImGui::Text("Host Image Copy: %s", m_desktopCapabilityProbe.hostImageCopyExtension ? "yes" : "no");
+            ImGui::Text("Shader Clock: %s", m_desktopCapabilityProbe.shaderClockExtension ? "yes" : "no");
+            ImGui::Text(
+                "Compute Shader Derivatives: %s",
+                m_desktopCapabilityProbe.computeShaderDerivativesExtension ? "yes" : "no"
+            );
+            ImGui::Text(
+                "Fragment Shading Rate: %s",
+                m_desktopCapabilityProbe.fragmentShadingRateExtension ? "yes" : "no"
+            );
+            ImGui::Text(
+                "Swapchain Maintenance1: %s",
+                m_desktopCapabilityProbe.swapchainMaintenance1Extension ? "yes" : "no"
+            );
+            ImGui::Text("Present ID: %s", m_desktopCapabilityProbe.presentIdExtension ? "yes" : "no");
+            ImGui::Text("Present Wait: %s", m_desktopCapabilityProbe.presentWaitExtension ? "yes" : "no");
+            ImGui::Text(
+                "Descriptor Limits S/SI/DS/Frag: %u / %u / %u / %u",
+                m_desktopCapabilityProbe.maxPerStageDescriptorSamplers,
+                m_desktopCapabilityProbe.maxPerStageDescriptorSampledImages,
+                m_desktopCapabilityProbe.maxDescriptorSetSampledImages,
+                m_desktopCapabilityProbe.maxFragmentCombinedOutputResources
+            );
+            ImGui::Text("Storage Image Limit: %u", m_desktopCapabilityProbe.maxDescriptorSetStorageImages);
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNodeEx("Ray Tracing Capabilities", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text(
+                "Acceleration Structure: %s",
+                m_rayTracingCapabilityProbe.accelerationStructureExtension ? "yes" : "no"
+            );
+            ImGui::Text("Ray Query: %s", m_rayTracingCapabilityProbe.rayQueryExtension ? "yes" : "no");
+            ImGui::Text(
+                "Deferred Host Operations: %s",
+                m_rayTracingCapabilityProbe.deferredHostOperationsExtension ? "yes" : "no"
+            );
+            ImGui::Text("RT Pipeline: %s", m_rayTracingCapabilityProbe.rayTracingPipelineExtension ? "yes" : "no");
+            ImGui::Text(
+                "RT Maintenance1: %s",
+                m_rayTracingCapabilityProbe.rayTracingMaintenance1Extension ? "yes" : "no"
+            );
+            ImGui::Text(
+                "RT Position Fetch: %s",
+                m_rayTracingCapabilityProbe.rayTracingPositionFetchExtension ? "yes" : "no"
+            );
+            ImGui::Text(
+                "Acceleration Structure Feature: %s",
+                m_rayTracingCapabilityProbe.accelerationStructureFeature ? "yes" : "no"
+            );
+            ImGui::Text("Ray Query Feature: %s", m_rayTracingCapabilityProbe.rayQueryFeature ? "yes" : "no");
+            ImGui::Text("RT Core Ready: %s", m_rayTracingCapabilityProbe.rayTracingCoreReady ? "yes" : "no");
+            ImGui::Text(
+                "Scratch Alignment: %llu",
+                static_cast<unsigned long long>(m_rayTracingCapabilityProbe.scratchAlignment)
+            );
+            ImGui::Text("Imported RT Geometries: %u", static_cast<unsigned>(m_rtImportedSceneRecords.size()));
+            ImGui::Text("Magica RT Geometries: %u", static_cast<unsigned>(m_rtMagicaGeometries.size()));
+            ImGui::TreePop();
+        }
     }
     ImGui::End();
 }

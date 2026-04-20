@@ -1,145 +1,116 @@
-![Voxel Factory Toy Screenshot](assets/screenshots/voxel-screen.png)
+# Morrowind Engine
 
-# Voxel Factory Toy
+This repo is being repurposed into a small Vulkan-based Morrowind scene renderer, starting with a Balmora demo pipeline.
 
-Experimental voxel-based factory toy game focused on emergent discovery, deterministic simulation, and readable systems.
+Current implemented scope:
 
-## Highlights
+- Offline Balmora scene cooking from vanilla `Morrowind.esm`
+- Terrain extraction from `LAND` records
+- Landscape texture reference extraction from `LTEX`
+- Exterior cell reference extraction for Balmora and a 1-cell border ring
+- Binary imported-scene serialization
+- Terrain OBJ export for inspection
 
-- Grid-aligned voxel world with deterministic simulation.
-- Procedural transport content: pipes, conveyors, rails, vegetation billboards.
-- Slang shader pipeline (`.slang -> SPIR-V`) for Vulkan.
-- Lightweight in-game debug UI for frame stats and graphics tuning.
-- Voxel GI using compute surface/inject/propagate passes with occupancy/albedo volume.
-- Froxel-based volumetric fog + sun shafts integration.
-- Tunable color grading and post pipeline (exposure, ACES, vibrance, split tints).
+Not implemented yet:
 
-## Vulkan + Graphics Techniques
+- NIF static object geometry import
+- Runtime in-engine rendering of the imported scene
+- Texture decode/upload path for Morrowind assets
 
-This renderer currently uses:
+## Data Files Path
 
-- Vulkan 1.3+ baseline with dynamic rendering and synchronization2.
-- Timeline semaphores for async upload/graphics sequencing.
-- VMA-backed buffer/image allocation (with memory budget/priority flags).
-- Optional bindless sampled-image descriptor array for texture atlas indexing.
-- Reverse-Z projection and cascaded shadow mapping (atlas layout).
-- Shadow occluder culling (toggleable) driven by camera-visible receivers + neighboring chunk casters.
-- SSAO path with normal/depth prepass + blur.
-- Vertex AO contribution for voxel shading.
-- SH-based ambient lighting from a procedural sky model.
-- HDR scene path with bloom + tone mapping to LDR swapchain.
-- Post stack: auto/manual exposure, ACES fitted tonemap, white balance, contrast, saturation, vibrance, shadow/highlight tinting.
-- Instanced crossed-billboard vegetation rendering.
-- Volumetric height fog and sun-shaft post lighting.
-- GPU timestamp profiling and frame timing plots in ImGui.
-- Spatial clipmap-based chunk query/culling and greedy meshing support.
-- Optional `VK_GOOGLE_display_timing` integration when supported by the active driver.
+The cooker expects the `Data Files` directory inside a Morrowind install.
 
-## Build Requirements
+Typical locations for this machine:
 
-- CMake 3.21+
-- C++20 compiler
-- Ninja (recommended)
-- GLFW3
-- OpenGL dev package
-- Vulkan loader/dev package
-- Optional:
-  - `slangc` in `PATH` (to recompile shaders)
-  - ImGui + Vulkan Memory Allocator (via vcpkg or system packages)
+- Windows install root: `C:\GOG Games\Morrowind`
+- Windows data path: `C:\GOG Games\Morrowind\Data Files`
+- WSL2 install root: `/mnt/c/GOG Games/Morrowind`
+- WSL2 data path: `/mnt/c/GOG Games/Morrowind/Data Files`
 
-## Build (Linux)
+Use the `Data Files` path as the first cooker argument.
+
+## Build
+
+Linux/WSL2 tool-only build:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential cmake ninja-build pkg-config \
-  libglfw3-dev libvulkan-dev mesa-common-dev \
-  libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+cmake -S . -B /tmp/voxelsprout-cmake-check \
+  -DVOXEL_BUILD_APP=OFF \
+  -DVOXEL_BUILD_TOOLS=ON \
+  -DBUILD_TESTING=ON \
+  -DCMAKE_BUILD_TYPE=Debug
 
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j
+cmake --build /tmp/voxelsprout-cmake-check --target voxel_morrowind_balmora_cooker -j 4
+cmake --build /tmp/voxelsprout-cmake-check --target voxel_imported_scene_tests -j 4
 ```
 
-Run:
+Windows app builds should continue using `cmake-build-release`.
+Linux builds should continue using `cmake-build-linux`.
+
+## Cook Balmora
+
+WSL2 example:
 
 ```bash
-./build/voxel_factory_toy
+/tmp/voxelsprout-cmake-check/voxel_morrowind_balmora_cooker \
+  "/mnt/c/GOG Games/Morrowind/Data Files" \
+  /tmp/balmora_scene.bin \
+  /tmp/balmora_terrain.obj
 ```
 
-## Build (Windows, vcpkg manifest)
-
-Dependencies are defined in `vcpkg.json`.
+Windows example from PowerShell after building the tool:
 
 ```powershell
-cmake --preset vcpkg
-cmake --build --preset vcpkg
+voxel_morrowind_balmora_cooker.exe `
+  "C:\GOG Games\Morrowind\Data Files" `
+  "C:\temp\balmora_scene.bin" `
+  "C:\temp\balmora_terrain.obj"
 ```
 
-Or explicit configure:
+Arguments:
 
-```powershell
-cmake -S . -B build-vcpkg -G Ninja `
-  -DCMAKE_BUILD_TYPE=Debug `
-  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-cmake --build build-vcpkg -j
-```
+- `arg1`: Morrowind `Data Files` path
+- `arg2`: output imported-scene binary
+- `arg3`: optional terrain OBJ output path
 
-## Windows Runnable Release Build
+## How Path Selection Works
 
-The current release-oriented workflow uses the existing Windows build tree:
+There is no config file or environment variable yet. You specify the Morrowind asset path directly on the command line when running the cooker.
 
-```powershell
-cmake --build cmake-build-release --target voxel_factory_toy -j 4
-```
+Use:
 
-Run `voxel_factory_toy.exe` from `cmake-build-release` so the runtime-relative asset paths resolve as expected.
+- `C:\GOG Games\Morrowind\Data Files` on Windows
+- `/mnt/c/GOG Games/Morrowind/Data Files` on WSL2
 
-Expected runtime files for a clean launch:
+The cooker reads:
 
-- `world.vxw` in `cmake-build-release` is optional; the app falls back to an empty world if it is missing.
-- `assets/magicka/*.vox` must remain available relative to the project root for the Magica stamps to load.
-- Required shader binaries must exist under `src/render/shaders/*.slang.spv`.
-- `src/render/shaders/voxel_packed_rt.frag.slang.spv` is optional; if missing, RT beta falls back to shadow maps.
+- `Morrowind.esm`
+- referenced terrain texture names from the same `Data Files` tree
+- object model record metadata from `Morrowind.esm`
 
-## Tests (CTest)
+## Tests
+
+Run the importer-focused test target:
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+/tmp/voxelsprout-cmake-check/voxel_imported_scene_tests
 ```
 
-Current test target: `voxel_foundation_tests`.
+This currently validates imported-scene save/load round-tripping and terrain OBJ export.
 
-## Shader Compilation Notes
+## Current Workflow
 
-- If `slangc` is found, CMake builds `.slang.spv` targets automatically.
-- If `slangc` is not found, shader compile target is skipped.
-- Committed `.spv` outputs in `src/render/shaders/` allow building without local Slang.
-- The release build also generates `voxel_packed_rt.frag.slang.spv` for the RT beta path when `slangc` is available.
+1. Build `voxel_morrowind_balmora_cooker`
+2. Point it at the Morrowind `Data Files` directory
+3. Generate `balmora_scene.bin`
+4. Optionally inspect `balmora_terrain.obj`
+5. Continue implementing NIF mesh import and runtime Vulkan rendering
 
-## RT Beta Notes
+## Next Planned Engine Work
 
-- Shadow maps remain the default release path.
-- The RT path is currently beta/experimental and only affects the main voxel + Magica direct sun shadow pass.
-- SDF, GI, sun shafts, grass, and other shadow consumers still use the cascaded shadow-map atlas.
-- If the GPU, runtime, TLAS, or RT shader variant is unavailable, the renderer falls back to shadow maps and logs the reason.
-
-## Controls (Current)
-
-- `W/A/S/D` move
-- Mouse look
-- `Space` / `Shift` vertical movement
-- `C` config panels
-- `F` frame stats panel
-
-## Debug UI (Current)
-
-- `Frame Stats`:
-  - CPU/GPU timing history, per-stage GPU breakdown, draw-call counters.
-- `Shadows`:
-  - Tabbed layout for shadow tuning, AO/GI tuning, and display timing options.
-  - Includes `Shadow Occluder Culling` toggle for on/off benchmarking.
-- `Sun/Sky`:
-  - Tabbed layout for sun/atmosphere, post controls, and fog/foliage.
-  - Advanced controls are hidden behind collapsible sections.
+- Minimal NIF static mesh import for Balmora buildings and props
+- Texture loading and mip preparation for Morrowind assets
+- Imported-scene GPU upload path
+- Separate Vulkan terrain/object passes
+- Camera spawn and debug mode for a Balmora scene viewer

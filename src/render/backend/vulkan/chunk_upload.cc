@@ -24,6 +24,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -35,6 +36,113 @@ namespace voxelsprout::render {
 #include "render/renderer_shared.h"
 
 namespace {
+
+struct ImportedDrawBounds {
+    float min[3] = {
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max()
+    };
+    float max[3] = {
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest(),
+        std::numeric_limits<float>::lowest()
+    };
+    bool valid = false;
+};
+
+void expandImportedBounds(
+    ImportedDrawBounds& bounds,
+    const voxelsprout::importer::ImportedScenePackedVertex& vertex
+) {
+    bounds.valid = true;
+    bounds.min[0] = std::min(bounds.min[0], vertex.position[0]);
+    bounds.min[1] = std::min(bounds.min[1], vertex.position[1]);
+    bounds.min[2] = std::min(bounds.min[2], vertex.position[2]);
+    bounds.max[0] = std::max(bounds.max[0], vertex.position[0]);
+    bounds.max[1] = std::max(bounds.max[1], vertex.position[1]);
+    bounds.max[2] = std::max(bounds.max[2], vertex.position[2]);
+}
+
+void expandImportedBounds(
+    ImportedDrawBounds& bounds,
+    float x,
+    float y,
+    float z
+) {
+    bounds.valid = true;
+    bounds.min[0] = std::min(bounds.min[0], x);
+    bounds.min[1] = std::min(bounds.min[1], y);
+    bounds.min[2] = std::min(bounds.min[2], z);
+    bounds.max[0] = std::max(bounds.max[0], x);
+    bounds.max[1] = std::max(bounds.max[1], y);
+    bounds.max[2] = std::max(bounds.max[2], z);
+}
+
+VkDeviceSize importedTextureMipOffset(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t mipLevel
+) {
+    VkDeviceSize offset = 0;
+    for (std::uint32_t level = 0; level < mipLevel; ++level) {
+        offset += static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4u;
+        width = std::max(1u, width >> 1u);
+        height = std::max(1u, height >> 1u);
+    }
+    return offset;
+}
+
+std::uint32_t inferImportedTextureMipLevelCount(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::size_t rgbaByteSize
+) {
+    if (width == 0u || height == 0u || rgbaByteSize == 0u) {
+        return 0u;
+    }
+    std::size_t consumedBytes = 0u;
+    std::uint32_t mipLevelCount = 0u;
+    while (true) {
+        const std::size_t mipByteSize =
+            static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
+        consumedBytes += mipByteSize;
+        ++mipLevelCount;
+        if (consumedBytes == rgbaByteSize) {
+            return mipLevelCount;
+        }
+        if (consumedBytes > rgbaByteSize) {
+            return 0u;
+        }
+        if (width == 1u && height == 1u) {
+            return 0u;
+        }
+        width = std::max(1u, width >> 1u);
+        height = std::max(1u, height >> 1u);
+    }
+}
+
+ImportedDrawBounds computeImportedDrawBounds(
+    const std::vector<voxelsprout::importer::ImportedScenePackedVertex>& vertices,
+    const std::vector<std::uint32_t>& indices,
+    std::span<const voxelsprout::importer::ImportedScenePackedDraw> draws
+) {
+    ImportedDrawBounds bounds{};
+    for (const voxelsprout::importer::ImportedScenePackedDraw& draw : draws) {
+        const std::size_t indexEnd = static_cast<std::size_t>(draw.firstIndex) + static_cast<std::size_t>(draw.indexCount);
+        if (draw.indexCount == 0 || indexEnd > indices.size()) {
+            continue;
+        }
+        for (std::size_t i = draw.firstIndex; i < indexEnd; ++i) {
+            const std::uint32_t vertexIndex = indices[i];
+            if (vertexIndex >= vertices.size()) {
+                continue;
+            }
+            expandImportedBounds(bounds, vertices[vertexIndex]);
+        }
+    }
+    return bounds;
+}
 
 ChunkResidentKey chunkResidentKeyForChunk(const voxelsprout::world::Chunk& chunk) {
     return ChunkResidentKey{
@@ -103,6 +211,36 @@ RtVertex decodePackedVoxelVertexPosition(std::uint32_t packedBits, float offsetX
     return vertex;
 }
 
+voxelsprout::math::Matrix4 importedTransformMatrix(const float transform[16]) {
+    voxelsprout::math::Matrix4 matrix{};
+    for (int i = 0; i < 16; ++i) {
+        matrix.m[i] = transform[i];
+    }
+    return matrix;
+}
+
+voxelsprout::math::Vector3 importedColorFromHash(std::string_view key) {
+    std::uint32_t hash = 2166136261u;
+    for (const char ch : key) {
+        hash ^= static_cast<std::uint8_t>(ch);
+        hash *= 16777619u;
+    }
+    const float r = 0.45f + (static_cast<float>((hash >> 0) & 0xFFu) / 255.0f) * 0.35f;
+    const float g = 0.42f + (static_cast<float>((hash >> 8) & 0xFFu) / 255.0f) * 0.30f;
+    const float b = 0.38f + (static_cast<float>((hash >> 16) & 0xFFu) / 255.0f) * 0.22f;
+    return {r, g, b};
+}
+
+voxelsprout::math::Vector3 importedTerrainColor(float height) {
+    const float riverBand = std::clamp((height + 96.0f) / 192.0f, 0.0f, 1.0f);
+    const float slopeTint = std::clamp((height + 16.0f) / 320.0f, 0.0f, 1.0f);
+    const voxelsprout::math::Vector3 low{0.38f, 0.31f, 0.22f};
+    const voxelsprout::math::Vector3 mid{0.55f, 0.47f, 0.34f};
+    const voxelsprout::math::Vector3 high{0.69f, 0.61f, 0.44f};
+    return ((low * (1.0f - riverBand)) + (mid * riverBand)) * (0.82f + (slopeTint * 0.28f)) +
+           (high * (slopeTint * 0.15f));
+}
+
 void destroyRtGeometryBuffers(BufferAllocator& allocator, RtGeometryBuffers& geometry) {
     if (geometry.indexBufferHandle != kInvalidBufferHandle) {
         allocator.destroyBuffer(geometry.indexBufferHandle);
@@ -160,6 +298,47 @@ bool createRtGeometryBuffers(
     return true;
 }
 
+bool createImportedRtGeometryBuffers(
+    BufferAllocator& allocator,
+    const std::vector<voxelsprout::importer::ImportedScenePackedVertex>& packedVertices,
+    const std::vector<std::uint32_t>& packedIndices,
+    std::span<const voxelsprout::importer::ImportedScenePackedDraw> draws,
+    RtGeometryBuffers& outGeometry
+) {
+    if (packedVertices.empty() || packedIndices.empty() || draws.empty()) {
+        destroyRtGeometryBuffers(allocator, outGeometry);
+        return true;
+    }
+
+    std::vector<RtVertex> rtVertices;
+    rtVertices.reserve(packedVertices.size());
+    for (const voxelsprout::importer::ImportedScenePackedVertex& packedVertex : packedVertices) {
+        RtVertex rtVertex{};
+        rtVertex.position[0] = packedVertex.position[0];
+        rtVertex.position[1] = packedVertex.position[1];
+        rtVertex.position[2] = packedVertex.position[2];
+        rtVertices.push_back(rtVertex);
+    }
+
+    std::vector<std::uint32_t> rtIndices;
+    for (const voxelsprout::importer::ImportedScenePackedDraw& draw : draws) {
+        const std::size_t firstIndex = static_cast<std::size_t>(draw.firstIndex);
+        const std::size_t indexCount = static_cast<std::size_t>(draw.indexCount);
+        if (indexCount == 0 || firstIndex >= packedIndices.size()) {
+            continue;
+        }
+        const std::size_t indexEnd = std::min(firstIndex + indexCount, packedIndices.size());
+        rtIndices.insert(rtIndices.end(), packedIndices.begin() + static_cast<std::ptrdiff_t>(firstIndex),
+                         packedIndices.begin() + static_cast<std::ptrdiff_t>(indexEnd));
+    }
+
+    if (rtIndices.empty()) {
+        destroyRtGeometryBuffers(allocator, outGeometry);
+        return true;
+    }
+    return createRtGeometryBuffers(allocator, rtVertices, rtIndices, outGeometry);
+}
+
 } // namespace
 
 void RendererBackend::clearMagicaVoxelMeshes() {
@@ -180,6 +359,669 @@ void RendererBackend::clearMagicaVoxelMeshes() {
     }
     m_rtMagicaGeometries.clear();
     markRayTracingSceneDirty();
+}
+
+void RendererBackend::clearImportedSceneMeshes() {
+    if (!m_importedTextureResources.empty() && m_device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(m_device);
+        for (ImportedTextureResource& texture : m_importedTextureResources) {
+            if (texture.imageView != VK_NULL_HANDLE) {
+                vkDestroyImageView(m_device, texture.imageView, nullptr);
+                texture.imageView = VK_NULL_HANDLE;
+            }
+            if (texture.image != VK_NULL_HANDLE) {
+                if (m_vmaAllocator != VK_NULL_HANDLE && texture.allocation != VK_NULL_HANDLE) {
+                    vmaDestroyImage(m_vmaAllocator, texture.image, texture.allocation);
+                } else {
+                    vkDestroyImage(m_device, texture.image, nullptr);
+                }
+                texture.image = VK_NULL_HANDLE;
+                texture.allocation = VK_NULL_HANDLE;
+            }
+        }
+        m_importedTextureResources.clear();
+    }
+    if (m_importedVertexBufferHandle != kInvalidBufferHandle) {
+        if (m_lastGraphicsTimelineValue == 0) {
+            m_bufferAllocator.destroyBuffer(m_importedVertexBufferHandle);
+        } else {
+            scheduleBufferRelease(m_importedVertexBufferHandle, m_lastGraphicsTimelineValue);
+        }
+        m_importedVertexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_importedIndexBufferHandle != kInvalidBufferHandle) {
+        if (m_lastGraphicsTimelineValue == 0) {
+            m_bufferAllocator.destroyBuffer(m_importedIndexBufferHandle);
+        } else {
+            scheduleBufferRelease(m_importedIndexBufferHandle, m_lastGraphicsTimelineValue);
+        }
+        m_importedIndexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_importedWaterVertexBufferHandle != kInvalidBufferHandle) {
+        if (m_lastGraphicsTimelineValue == 0) {
+            m_bufferAllocator.destroyBuffer(m_importedWaterVertexBufferHandle);
+        } else {
+            scheduleBufferRelease(m_importedWaterVertexBufferHandle, m_lastGraphicsTimelineValue);
+        }
+        m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
+        if (m_lastGraphicsTimelineValue == 0) {
+            m_bufferAllocator.destroyBuffer(m_importedWaterIndexBufferHandle);
+        } else {
+            scheduleBufferRelease(m_importedWaterIndexBufferHandle, m_lastGraphicsTimelineValue);
+        }
+        m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
+    }
+    m_importedMeshDraws.clear();
+    m_importedIndexCount = 0;
+    m_importedTerrainDrawCount = 0;
+    m_importedStaticDrawCount = 0;
+    m_importedWaterIndexCount = 0;
+    for (RtImportedSceneRecord& record : m_rtImportedSceneRecords) {
+        if (record.blas.handle != VK_NULL_HANDLE && m_destroyAccelerationStructureKhr != nullptr) {
+            m_destroyAccelerationStructureKhr(m_device, record.blas.handle, nullptr);
+            record.blas.handle = VK_NULL_HANDLE;
+        }
+        if (record.blas.storageBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(record.blas.storageBufferHandle);
+            record.blas.storageBufferHandle = kInvalidBufferHandle;
+        }
+        record.blas.deviceAddress = 0;
+        record.blas.primitiveCount = 0;
+        destroyRtGeometryBuffers(m_bufferAllocator, record.geometry);
+        record.geometryResident = false;
+        record.dirty = true;
+    }
+    if (!m_rtImportedSceneRecords.empty()) {
+        markRayTracingSceneDirty();
+    }
+}
+
+bool RendererBackend::uploadImportedScene(const voxelsprout::importer::ImportedScene& scene) {
+    if (m_device == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    clearImportedSceneMeshes();
+
+    voxelsprout::importer::ImportedScene uploadScene = scene;
+    const bool havePackedScene =
+        !uploadScene.packedVertices.empty() &&
+        !uploadScene.packedIndices.empty() &&
+        !uploadScene.packedDraws.empty();
+    if (!havePackedScene) {
+        VOX_LOGI("render") << "imported scene missing packed geometry cache; rebuilding render stream on load";
+        voxelsprout::importer::buildImportedScenePackedRenderData(uploadScene);
+    } else {
+        VOX_LOGI("render") << "imported scene using packed geometry cache (vertices="
+                           << uploadScene.packedVertices.size()
+                           << ", indices=" << uploadScene.packedIndices.size()
+                           << ", draws=" << uploadScene.packedDraws.size() << ")";
+    }
+
+    std::vector<std::uint32_t> importedTextureSlots(
+        uploadScene.textures.size(),
+        std::numeric_limits<std::uint32_t>::max());
+    if (m_supportsBindlessDescriptors &&
+        m_bindlessDescriptorSet != VK_NULL_HANDLE &&
+        m_bindlessTextureCapacity > kBindlessTextureStaticCount &&
+        !uploadScene.textures.empty()) {
+        if (m_importedTextureSampler == VK_NULL_HANDLE) {
+            VkSamplerCreateInfo samplerCreateInfo{};
+            samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+            samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+            samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerCreateInfo.mipLodBias = 0.0f;
+            samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
+            samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
+                ? std::min(m_maxSamplerAnisotropy, 8.0f)
+                : 1.0f;
+            samplerCreateInfo.compareEnable = VK_FALSE;
+            samplerCreateInfo.minLod = 0.0f;
+            samplerCreateInfo.maxLod = 16.0f;
+            samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+            samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+            if (vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_importedTextureSampler) != VK_SUCCESS) {
+                VOX_LOGE("render") << "imported texture sampler creation failed";
+                m_importedTextureSampler = VK_NULL_HANDLE;
+                return false;
+            }
+            setObjectName(
+                VK_OBJECT_TYPE_SAMPLER,
+                vkHandleToUint64(m_importedTextureSampler),
+                "imported.texture.sampler");
+        }
+
+        std::vector<BufferHandle> stagingBufferHandles;
+        stagingBufferHandles.reserve(uploadScene.textures.size());
+        bool textureUploadFailed = false;
+        std::size_t uploadedTextureCount = 0u;
+        VkCommandPool commandPool = VK_NULL_HANDLE;
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        if (!uploadScene.textures.empty()) {
+            VkCommandPoolCreateInfo commandPoolCreateInfo{};
+            commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+            commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+            commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+            if (vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool) != VK_SUCCESS) {
+                VOX_LOGE("render") << "imported texture upload command pool creation failed";
+                textureUploadFailed = true;
+            }
+            if (!textureUploadFailed) {
+                VkCommandBufferAllocateInfo allocateInfo{};
+                allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+                allocateInfo.commandPool = commandPool;
+                allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                allocateInfo.commandBufferCount = 1;
+                if (vkAllocateCommandBuffers(m_device, &allocateInfo, &commandBuffer) != VK_SUCCESS) {
+                    VOX_LOGE("render") << "imported texture upload command buffer allocation failed";
+                    textureUploadFailed = true;
+                }
+            }
+            if (!textureUploadFailed) {
+                VkCommandBufferBeginInfo beginInfo{};
+                beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+                    VOX_LOGE("render") << "imported texture upload command buffer begin failed";
+                    textureUploadFailed = true;
+                }
+            }
+        }
+
+        const std::uint32_t maxImportedTextures =
+            m_bindlessTextureCapacity - kBindlessTextureStaticCount;
+        const std::size_t importedTextureLimit =
+            std::min<std::size_t>(uploadScene.textures.size(), maxImportedTextures);
+        for (std::size_t textureIndex = 0; textureIndex < importedTextureLimit && !textureUploadFailed; ++textureIndex) {
+            const voxelsprout::importer::ImportedSceneTexture& srcTexture = uploadScene.textures[textureIndex];
+            if (srcTexture.width == 0u || srcTexture.height == 0u || srcTexture.rgba8.empty()) {
+                continue;
+            }
+            const std::uint32_t inferredMipLevelCount =
+                inferImportedTextureMipLevelCount(srcTexture.width, srcTexture.height, srcTexture.rgba8.size());
+            if (inferredMipLevelCount == 0u) {
+                VOX_LOGW("render") << "imported texture mip chain size invalid for "
+                                   << srcTexture.sourcePath << "; skipping texture";
+                continue;
+            }
+            const std::uint32_t mipLevelCount = inferredMipLevelCount;
+            if (srcTexture.mipLevelCount != 0u && srcTexture.mipLevelCount != inferredMipLevelCount) {
+                VOX_LOGW("render") << "imported texture mip metadata mismatch for "
+                                   << srcTexture.sourcePath << "; stored=" << srcTexture.mipLevelCount
+                                   << ", inferred=" << inferredMipLevelCount
+                                   << " (using inferred chain)";
+            }
+
+            BufferCreateDesc stagingCreateDesc{};
+            stagingCreateDesc.size = static_cast<VkDeviceSize>(srcTexture.rgba8.size());
+            stagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            stagingCreateDesc.memoryProperties =
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            stagingCreateDesc.initialData = srcTexture.rgba8.data();
+            const BufferHandle stagingHandle = m_bufferAllocator.createBuffer(stagingCreateDesc);
+            if (stagingHandle == kInvalidBufferHandle) {
+                VOX_LOGE("render") << "imported texture staging buffer allocation failed for "
+                                   << srcTexture.sourcePath;
+                textureUploadFailed = true;
+                break;
+            }
+            stagingBufferHandles.push_back(stagingHandle);
+
+            VkImageCreateInfo imageCreateInfo{};
+            imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+            imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+            imageCreateInfo.extent = {srcTexture.width, srcTexture.height, 1};
+            imageCreateInfo.mipLevels = mipLevelCount;
+            imageCreateInfo.arrayLayers = 1;
+            imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+            imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+            ImportedTextureResource resource{};
+            VmaAllocationCreateInfo allocationCreateInfo{};
+            allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            const VkResult imageCreateResult = vmaCreateImage(
+                m_vmaAllocator,
+                &imageCreateInfo,
+                &allocationCreateInfo,
+                &resource.image,
+                &resource.allocation,
+                nullptr);
+            if (imageCreateResult != VK_SUCCESS) {
+                logVkFailure("vmaCreateImage(importedTexture)", imageCreateResult);
+                textureUploadFailed = true;
+                break;
+            }
+
+            VkImageViewCreateInfo viewCreateInfo{};
+            viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewCreateInfo.image = resource.image;
+            viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+            viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewCreateInfo.subresourceRange.baseMipLevel = 0;
+            viewCreateInfo.subresourceRange.levelCount = mipLevelCount;
+            viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+            viewCreateInfo.subresourceRange.layerCount = 1;
+            const VkResult imageViewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &resource.imageView);
+            if (imageViewResult != VK_SUCCESS) {
+                logVkFailure("vkCreateImageView(importedTexture)", imageViewResult);
+                if (resource.image != VK_NULL_HANDLE) {
+                    vmaDestroyImage(m_vmaAllocator, resource.image, resource.allocation);
+                }
+                textureUploadFailed = true;
+                break;
+            }
+
+            setObjectName(
+                VK_OBJECT_TYPE_IMAGE,
+                vkHandleToUint64(resource.image),
+                ("imported.texture.image." + std::to_string(textureIndex)).c_str());
+            setObjectName(
+                VK_OBJECT_TYPE_IMAGE_VIEW,
+                vkHandleToUint64(resource.imageView),
+                ("imported.texture.view." + std::to_string(textureIndex)).c_str());
+
+            VkImageMemoryBarrier transitionToCopy{};
+            transitionToCopy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            transitionToCopy.srcAccessMask = 0;
+            transitionToCopy.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            transitionToCopy.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            transitionToCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            transitionToCopy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            transitionToCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            transitionToCopy.image = resource.image;
+            transitionToCopy.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            transitionToCopy.subresourceRange.baseMipLevel = 0;
+            transitionToCopy.subresourceRange.levelCount = mipLevelCount;
+            transitionToCopy.subresourceRange.baseArrayLayer = 0;
+            transitionToCopy.subresourceRange.layerCount = 1;
+            vkCmdPipelineBarrier(
+                commandBuffer,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0,
+                nullptr,
+                0,
+                nullptr,
+                1,
+                &transitionToCopy);
+
+            std::vector<VkBufferImageCopy> copyRegions;
+            copyRegions.reserve(mipLevelCount);
+            for (std::uint32_t mipLevel = 0; mipLevel < mipLevelCount; ++mipLevel) {
+                VkBufferImageCopy copyRegion{};
+                copyRegion.bufferOffset = importedTextureMipOffset(srcTexture.width, srcTexture.height, mipLevel);
+                copyRegion.bufferRowLength = 0;
+                copyRegion.bufferImageHeight = 0;
+                copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                copyRegion.imageSubresource.mipLevel = mipLevel;
+                copyRegion.imageSubresource.baseArrayLayer = 0;
+                copyRegion.imageSubresource.layerCount = 1;
+                copyRegion.imageOffset = {0, 0, 0};
+                copyRegion.imageExtent = {
+                    std::max(1u, srcTexture.width >> mipLevel),
+                    std::max(1u, srcTexture.height >> mipLevel),
+                    1
+                };
+                copyRegions.push_back(copyRegion);
+            }
+            vkCmdCopyBufferToImage(
+                commandBuffer,
+                m_bufferAllocator.getBuffer(stagingHandle),
+                resource.image,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                static_cast<std::uint32_t>(copyRegions.size()),
+                copyRegions.data());
+
+            VkImageMemoryBarrier transitionToRead{};
+            transitionToRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            transitionToRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            transitionToRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            transitionToRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            transitionToRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            transitionToRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            transitionToRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            transitionToRead.image = resource.image;
+            transitionToRead.subresourceRange = transitionToCopy.subresourceRange;
+            vkCmdPipelineBarrier(
+                commandBuffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0,
+                0,
+                nullptr,
+                0,
+                nullptr,
+                1,
+                &transitionToRead);
+
+            importedTextureSlots[textureIndex] =
+                static_cast<std::uint32_t>(kBindlessTextureStaticCount + m_importedTextureResources.size());
+            m_importedTextureResources.push_back(resource);
+            ++uploadedTextureCount;
+        }
+
+        if (!textureUploadFailed && commandBuffer != VK_NULL_HANDLE) {
+            if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+                VOX_LOGE("render") << "imported texture upload command buffer end failed";
+                textureUploadFailed = true;
+            }
+        }
+        if (!textureUploadFailed && commandBuffer != VK_NULL_HANDLE) {
+            VkSubmitInfo submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &commandBuffer;
+            if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS ||
+                vkQueueWaitIdle(m_graphicsQueue) != VK_SUCCESS) {
+                VOX_LOGE("render") << "imported texture upload submit failed";
+                textureUploadFailed = true;
+            }
+        }
+        for (const BufferHandle stagingHandle : stagingBufferHandles) {
+            if (stagingHandle != kInvalidBufferHandle) {
+                m_bufferAllocator.destroyBuffer(stagingHandle);
+            }
+        }
+        if (commandPool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(m_device, commandPool, nullptr);
+        }
+        if (textureUploadFailed) {
+            clearImportedSceneMeshes();
+            return false;
+        }
+        if (uploadScene.textures.size() > importedTextureLimit) {
+            VOX_LOGW("render") << "imported texture set truncated by bindless capacity: uploaded "
+                               << uploadedTextureCount << " of " << uploadScene.textures.size();
+        } else if (uploadedTextureCount > 0u) {
+            VOX_LOGI("render") << "uploaded imported textures: " << uploadedTextureCount;
+        }
+    } else if (!uploadScene.textures.empty()) {
+        VOX_LOGW("render") << "imported textures unavailable because bindless texture sampling is not ready";
+    }
+
+    std::vector<ImportedMeshVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    std::vector<ImportedMeshDraw> draws;
+    std::vector<ImportedWaterVertex> waterVertices;
+    std::vector<std::uint32_t> waterIndices;
+    vertices.reserve(uploadScene.packedVertices.size());
+    indices.reserve(uploadScene.packedIndices.size());
+    draws.reserve(uploadScene.packedDraws.size());
+    waterVertices.reserve(uploadScene.waterPatches.size() * 4u);
+    waterIndices.reserve(uploadScene.waterPatches.size() * 6u);
+
+    for (const voxelsprout::importer::ImportedScenePackedVertex& srcVertex : uploadScene.packedVertices) {
+        ImportedMeshVertex dstVertex{};
+        std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
+        std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
+        std::memcpy(dstVertex.color, srcVertex.color, sizeof(dstVertex.color));
+        std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
+        dstVertex.flags = srcVertex.flags;
+        if (srcVertex.textureIndex < importedTextureSlots.size()) {
+            dstVertex.textureIndex = importedTextureSlots[srcVertex.textureIndex];
+        } else {
+            dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
+        }
+        vertices.push_back(dstVertex);
+    }
+    indices.assign(uploadScene.packedIndices.begin(), uploadScene.packedIndices.end());
+    for (const voxelsprout::importer::ImportedScenePackedDraw& srcDraw : uploadScene.packedDraws) {
+        if (srcDraw.indexCount == 0) {
+            continue;
+        }
+        ImportedMeshDraw draw{};
+        draw.firstIndex = srcDraw.firstIndex;
+        draw.indexCount = srcDraw.indexCount;
+        draws.push_back(draw);
+    }
+    for (const voxelsprout::importer::ImportedSceneWaterPatch& patch : uploadScene.waterPatches) {
+        const std::uint32_t baseVertex = static_cast<std::uint32_t>(waterVertices.size());
+        ImportedWaterVertex vertex{};
+        vertex.position[0] = patch.originX;
+        vertex.position[1] = patch.waterLevel;
+        vertex.position[2] = patch.originZ;
+        vertex.uv[0] = 0.0f;
+        vertex.uv[1] = 0.0f;
+        waterVertices.push_back(vertex);
+
+        vertex.position[0] = patch.originX + patch.sizeX;
+        vertex.position[2] = patch.originZ;
+        vertex.uv[0] = 1.0f;
+        vertex.uv[1] = 0.0f;
+        waterVertices.push_back(vertex);
+
+        vertex.position[0] = patch.originX + patch.sizeX;
+        vertex.position[2] = patch.originZ + patch.sizeZ;
+        vertex.uv[0] = 1.0f;
+        vertex.uv[1] = 1.0f;
+        waterVertices.push_back(vertex);
+
+        vertex.position[0] = patch.originX;
+        vertex.position[2] = patch.originZ + patch.sizeZ;
+        vertex.uv[0] = 0.0f;
+        vertex.uv[1] = 1.0f;
+        waterVertices.push_back(vertex);
+
+        waterIndices.push_back(baseVertex + 0u);
+        waterIndices.push_back(baseVertex + 2u);
+        waterIndices.push_back(baseVertex + 1u);
+        waterIndices.push_back(baseVertex + 0u);
+        waterIndices.push_back(baseVertex + 3u);
+        waterIndices.push_back(baseVertex + 2u);
+    }
+
+    if (vertices.empty() || indices.empty()) {
+        VOX_LOGW("render") << "imported scene upload skipped because it produced no renderable geometry";
+        return true;
+    }
+
+    BufferCreateDesc vertexCreateDesc{};
+    vertexCreateDesc.size = static_cast<VkDeviceSize>(vertices.size() * sizeof(ImportedMeshVertex));
+    vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vertexCreateDesc.initialData = vertices.data();
+    const BufferHandle newVertexHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
+    if (newVertexHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "imported scene vertex buffer allocation failed";
+        return false;
+    }
+
+    BufferCreateDesc indexCreateDesc{};
+    indexCreateDesc.size = static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
+    indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    indexCreateDesc.initialData = indices.data();
+    const BufferHandle newIndexHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
+    if (newIndexHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "imported scene index buffer allocation failed";
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        return false;
+    }
+
+    m_importedVertexBufferHandle = newVertexHandle;
+    m_importedIndexBufferHandle = newIndexHandle;
+    m_importedIndexCount = static_cast<std::uint32_t>(indices.size());
+    m_importedTerrainDrawCount =
+        (!uploadScene.packedDraws.empty() && uploadScene.sourceLandscapeCellCount > 0) ? 1u : 0u;
+    m_importedStaticDrawCount = static_cast<std::uint32_t>(draws.size()) - std::min(m_importedTerrainDrawCount, static_cast<std::uint32_t>(draws.size()));
+    for (ImportedMeshDraw& draw : draws) {
+        draw.vertexBufferHandle = newVertexHandle;
+        draw.indexBufferHandle = newIndexHandle;
+        m_importedMeshDraws.push_back(draw);
+    }
+
+    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(newVertexHandle);
+    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(newIndexHandle);
+    if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE) {
+        VOX_LOGE("render") << "imported scene upload produced null Vulkan buffers"
+                           << " (vertexHandle=" << newVertexHandle
+                           << ", indexHandle=" << newIndexHandle << ")";
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        m_bufferAllocator.destroyBuffer(newIndexHandle);
+        m_importedVertexBufferHandle = kInvalidBufferHandle;
+        m_importedIndexBufferHandle = kInvalidBufferHandle;
+        m_importedMeshDraws.clear();
+        m_importedIndexCount = 0;
+        m_importedTerrainDrawCount = 0;
+        m_importedStaticDrawCount = 0;
+        return false;
+    }
+    if (vertexBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(vertexBuffer), "mesh.importedScene.vertex");
+    }
+    if (indexBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "mesh.importedScene.index");
+    }
+    if (!waterVertices.empty() && !waterIndices.empty()) {
+        BufferCreateDesc waterVertexCreateDesc{};
+        waterVertexCreateDesc.size = static_cast<VkDeviceSize>(waterVertices.size() * sizeof(ImportedWaterVertex));
+        waterVertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        waterVertexCreateDesc.memoryProperties =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        waterVertexCreateDesc.initialData = waterVertices.data();
+        const BufferHandle waterVertexHandle = m_bufferAllocator.createBuffer(waterVertexCreateDesc);
+        if (waterVertexHandle == kInvalidBufferHandle) {
+            VOX_LOGE("render") << "imported scene water vertex buffer allocation failed";
+        } else {
+            BufferCreateDesc waterIndexCreateDesc{};
+            waterIndexCreateDesc.size = static_cast<VkDeviceSize>(waterIndices.size() * sizeof(std::uint32_t));
+            waterIndexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+            waterIndexCreateDesc.memoryProperties =
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            waterIndexCreateDesc.initialData = waterIndices.data();
+            const BufferHandle waterIndexHandle = m_bufferAllocator.createBuffer(waterIndexCreateDesc);
+            if (waterIndexHandle == kInvalidBufferHandle) {
+                VOX_LOGE("render") << "imported scene water index buffer allocation failed";
+                m_bufferAllocator.destroyBuffer(waterVertexHandle);
+            } else {
+                m_importedWaterVertexBufferHandle = waterVertexHandle;
+                m_importedWaterIndexBufferHandle = waterIndexHandle;
+                m_importedWaterIndexCount = static_cast<std::uint32_t>(waterIndices.size());
+                const VkBuffer waterVertexBuffer = m_bufferAllocator.getBuffer(waterVertexHandle);
+                const VkBuffer waterIndexBuffer = m_bufferAllocator.getBuffer(waterIndexHandle);
+                if (waterVertexBuffer != VK_NULL_HANDLE) {
+                    setObjectName(
+                        VK_OBJECT_TYPE_BUFFER,
+                        vkHandleToUint64(waterVertexBuffer),
+                        "mesh.importedScene.water.vertex");
+                }
+                if (waterIndexBuffer != VK_NULL_HANDLE) {
+                    setObjectName(
+                        VK_OBJECT_TYPE_BUFFER,
+                        vkHandleToUint64(waterIndexBuffer),
+                        "mesh.importedScene.water.index");
+                }
+            }
+        }
+    }
+    const std::span<const voxelsprout::importer::ImportedScenePackedDraw> allDraws(uploadScene.packedDraws);
+    const std::span<const voxelsprout::importer::ImportedScenePackedDraw> terrainDraws =
+        allDraws.first(std::min<std::size_t>(m_importedTerrainDrawCount, allDraws.size()));
+    const std::span<const voxelsprout::importer::ImportedScenePackedDraw> staticDraws =
+        allDraws.subspan(std::min<std::size_t>(m_importedTerrainDrawCount, allDraws.size()));
+    const ImportedDrawBounds terrainBounds =
+        computeImportedDrawBounds(uploadScene.packedVertices, uploadScene.packedIndices, terrainDraws);
+    const ImportedDrawBounds staticBounds =
+        computeImportedDrawBounds(uploadScene.packedVertices, uploadScene.packedIndices, staticDraws);
+    ImportedDrawBounds waterBounds{};
+    for (const ImportedWaterVertex& vertex : waterVertices) {
+        expandImportedBounds(
+            waterBounds,
+            vertex.position[0],
+            vertex.position[1],
+            vertex.position[2]);
+    }
+    VOX_LOGI("render") << "uploaded imported scene geometry (vertices=" << vertices.size()
+                       << ", indices=" << indices.size()
+                       << ", draws=" << m_importedMeshDraws.size()
+                       << ", instances=" << uploadScene.instances.size()
+                       << ", terrainCells=" << uploadScene.landscapeCells.size()
+                       << ", waterPatches=" << uploadScene.waterPatches.size() << ")";
+    if (terrainBounds.valid) {
+        VOX_LOGI("render") << "imported terrain bounds min=("
+                           << terrainBounds.min[0] << ", " << terrainBounds.min[1] << ", " << terrainBounds.min[2]
+                           << ") max=("
+                           << terrainBounds.max[0] << ", " << terrainBounds.max[1] << ", " << terrainBounds.max[2]
+                           << ") draws=" << terrainDraws.size();
+    }
+    if (staticBounds.valid) {
+        VOX_LOGI("render") << "imported static bounds min=("
+                           << staticBounds.min[0] << ", " << staticBounds.min[1] << ", " << staticBounds.min[2]
+                           << ") max=("
+                           << staticBounds.max[0] << ", " << staticBounds.max[1] << ", " << staticBounds.max[2]
+                           << ") draws=" << staticDraws.size();
+    } else {
+        VOX_LOGW("render") << "imported scene contained no static bounds after upload";
+    }
+    if (m_importedWaterIndexCount > 0) {
+        VOX_LOGI("render") << "imported water geometry uploaded (vertices=" << waterVertices.size()
+                           << ", indices=" << waterIndices.size()
+                           << ", patches=" << uploadScene.waterPatches.size() << ")";
+        if (waterBounds.valid) {
+            VOX_LOGI("render") << "imported water bounds min=("
+                               << waterBounds.min[0] << ", " << waterBounds.min[1] << ", " << waterBounds.min[2]
+                               << ") max=("
+                               << waterBounds.max[0] << ", " << waterBounds.max[1] << ", " << waterBounds.max[2]
+                               << ")";
+        }
+    }
+    if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
+        m_rtImportedSceneRecords.clear();
+        if (!terrainDraws.empty()) {
+            RtImportedSceneRecord terrainRecord{};
+            terrainRecord.debugName = "imported_terrain";
+            if (!createImportedRtGeometryBuffers(
+                    m_bufferAllocator,
+                    uploadScene.packedVertices,
+                    uploadScene.packedIndices,
+                    terrainDraws,
+                    terrainRecord.geometry
+                )) {
+                VOX_LOGE("render") << "imported terrain RT geometry buffer allocation failed";
+            } else {
+                terrainRecord.geometryResident =
+                    terrainRecord.geometry.vertexCount > 0 && terrainRecord.geometry.indexCount > 0;
+                terrainRecord.dirty = terrainRecord.geometryResident;
+                m_rtImportedSceneRecords.push_back(terrainRecord);
+            }
+        }
+        if (!staticDraws.empty()) {
+            RtImportedSceneRecord staticRecord{};
+            staticRecord.debugName = "imported_statics";
+            if (!createImportedRtGeometryBuffers(
+                    m_bufferAllocator,
+                    uploadScene.packedVertices,
+                    uploadScene.packedIndices,
+                    staticDraws,
+                    staticRecord.geometry
+                )) {
+                VOX_LOGE("render") << "imported static RT geometry buffer allocation failed";
+            } else {
+                staticRecord.geometryResident =
+                    staticRecord.geometry.vertexCount > 0 && staticRecord.geometry.indexCount > 0;
+                staticRecord.dirty = staticRecord.geometryResident;
+                m_rtImportedSceneRecords.push_back(staticRecord);
+            }
+        }
+        if (!m_rtImportedSceneRecords.empty()) {
+            VOX_LOGI("render") << "imported RT geometry prepared (records=" << m_rtImportedSceneRecords.size() << ")";
+            markRayTracingSceneDirty();
+        }
+    }
+    return true;
 }
 
 
@@ -359,7 +1201,59 @@ void RendererBackend::setSpatialQueryStats(
 
 bool RendererBackend::createChunkBuffers(const voxelsprout::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices) {
     if (chunkGrid.chunks().empty()) {
-        return false;
+        m_chunkDrawRanges.clear();
+        m_chunkResidentKeys.clear();
+        m_chunkLodMeshCache.clear();
+        m_chunkGrassInstanceCache.clear();
+        m_rtChunkSceneRecords.clear();
+        m_chunkLodMeshCacheValid = false;
+        m_debugChunkMeshVertexCount = 0;
+        m_debugChunkMeshIndexCount = 0;
+        m_debugChunkLastRemeshedChunkCount = 0;
+        m_debugChunkLastRemeshActiveVertexCount = 0;
+        m_debugChunkLastRemeshActiveIndexCount = 0;
+        m_debugChunkLastRemeshNaiveVertexCount = 0;
+        m_debugChunkLastRemeshNaiveIndexCount = 0;
+        m_debugChunkLastRemeshMs = 0.0f;
+        m_debugChunkLastRemeshReductionPercent = 0.0f;
+        m_debugChunkLastFullRemeshMs = 0.0f;
+        m_debugRtActiveChunkCount = 0;
+        m_rtDirtyChunkCount = 0;
+
+        collectCompletedBufferReleases();
+        if (m_transferCommandBufferInFlightValue > 0 && !isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
+            return false;
+        }
+        m_transferCommandBufferInFlightValue = 0;
+
+        if (m_chunkVertexBufferHandle != kInvalidBufferHandle) {
+            if (m_lastGraphicsTimelineValue == 0) {
+                m_bufferAllocator.destroyBuffer(m_chunkVertexBufferHandle);
+            } else {
+                scheduleBufferRelease(m_chunkVertexBufferHandle, m_lastGraphicsTimelineValue);
+            }
+            m_chunkVertexBufferHandle = kInvalidBufferHandle;
+        }
+        if (m_chunkIndexBufferHandle != kInvalidBufferHandle) {
+            if (m_lastGraphicsTimelineValue == 0) {
+                m_bufferAllocator.destroyBuffer(m_chunkIndexBufferHandle);
+            } else {
+                scheduleBufferRelease(m_chunkIndexBufferHandle, m_lastGraphicsTimelineValue);
+            }
+            m_chunkIndexBufferHandle = kInvalidBufferHandle;
+        }
+        if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
+            if (m_lastGraphicsTimelineValue == 0) {
+                m_bufferAllocator.destroyBuffer(m_grassBillboardInstanceBufferHandle);
+            } else {
+                scheduleBufferRelease(m_grassBillboardInstanceBufferHandle, m_lastGraphicsTimelineValue);
+            }
+            m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
+        }
+        m_grassBillboardInstanceCount = 0;
+        m_pendingTransferTimelineValue = 0;
+        m_currentChunkReadyTimelineValue = 0;
+        return true;
     }
 
     const std::vector<voxelsprout::world::Chunk>& chunks = chunkGrid.chunks();
@@ -1156,6 +2050,7 @@ void RendererBackend::destroyRayTracingScene() {
     const bool hasExistingScene =
         m_rtTlas.handle != VK_NULL_HANDLE ||
         !m_rtChunkSceneRecords.empty() ||
+        !m_rtImportedSceneRecords.empty() ||
         !m_rtMagicaBlases.empty();
     if (hasExistingScene && m_device != VK_NULL_HANDLE && m_graphicsQueue != VK_NULL_HANDLE) {
         const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
@@ -1185,6 +2080,11 @@ void RendererBackend::destroyRayTracingScene() {
         destroyAs(chunkRecord.blas);
         destroyRtGeometryBuffers(m_bufferAllocator, chunkRecord.geometry);
     }
+    for (RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
+        destroyAs(importedRecord.blas);
+        destroyRtGeometryBuffers(m_bufferAllocator, importedRecord.geometry);
+    }
+    m_rtImportedSceneRecords.clear();
     for (RtAccelerationStructure& blas : m_rtMagicaBlases) {
         destroyAs(blas);
     }
@@ -1268,6 +2168,15 @@ bool RendererBackend::rebuildRayTracingScene() {
             break;
         }
     }
+    if (!needsGraphicsIdle) {
+        for (const RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
+            if (importedRecord.blas.handle != VK_NULL_HANDLE &&
+                (!importedRecord.geometryResident || importedRecord.dirty)) {
+                needsGraphicsIdle = true;
+                break;
+            }
+        }
+    }
     if (!needsGraphicsIdle && m_rtTlas.handle != VK_NULL_HANDLE && m_rtSceneDirty) {
         needsGraphicsIdle = true;
     }
@@ -1292,6 +2201,18 @@ bool RendererBackend::rebuildRayTracingScene() {
         if (chunkRecord.dirty || chunkRecord.blas.handle == VK_NULL_HANDLE) {
             destroyAs(chunkRecord.blas);
             buildGeometries.push_back({&chunkRecord.geometry, &chunkRecord.blas});
+        }
+    }
+    for (RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
+        if (!importedRecord.geometryResident ||
+            importedRecord.geometry.vertexCount == 0 ||
+            importedRecord.geometry.indexCount == 0) {
+            destroyAs(importedRecord.blas);
+            continue;
+        }
+        if (importedRecord.dirty || importedRecord.blas.handle == VK_NULL_HANDLE) {
+            destroyAs(importedRecord.blas);
+            buildGeometries.push_back({&importedRecord.geometry, &importedRecord.blas});
         }
     }
     if (m_rtMagicaBlases.size() > m_rtMagicaGeometries.size()) {
@@ -1338,6 +2259,11 @@ bool RendererBackend::rebuildRayTracingScene() {
     std::size_t estimatedInstanceCount = m_rtMagicaGeometries.size();
     for (const RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
         if (chunkRecord.rtEligible && chunkRecord.geometryResident && chunkRecord.geometry.indexCount > 0) {
+            ++estimatedInstanceCount;
+        }
+    }
+    for (const RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
+        if (importedRecord.geometryResident && importedRecord.geometry.indexCount > 0) {
             ++estimatedInstanceCount;
         }
     }
@@ -1458,6 +2384,12 @@ bool RendererBackend::rebuildRayTracingScene() {
                 continue;
             }
             appendTlasInstance(chunkRecord.blas);
+        }
+        for (const RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
+            if (!importedRecord.geometryResident) {
+                continue;
+            }
+            appendTlasInstance(importedRecord.blas);
         }
         for (const RtAccelerationStructure& blas : m_rtMagicaBlases) {
             appendTlasInstance(blas);
@@ -1589,6 +2521,9 @@ bool RendererBackend::rebuildRayTracingScene() {
         for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
             destroyAs(chunkRecord.blas);
         }
+        for (RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
+            destroyAs(importedRecord.blas);
+        }
         for (RtAccelerationStructure& blas : m_rtMagicaBlases) {
             destroyAs(blas);
         }
@@ -1603,10 +2538,14 @@ bool RendererBackend::rebuildRayTracingScene() {
     for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
         chunkRecord.dirty = false;
     }
+    for (RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
+        importedRecord.dirty = false;
+    }
     refreshShadowStats();
     VOX_LOGI("render") << "ray tracing scene rebuilt: blas=" << m_rtBlasBuildCount
                        << ", tlas=" << m_rtTlasBuildCount
                        << ", instances=" << tlasInstances.size()
+                       << ", importedRecords=" << m_rtImportedSceneRecords.size()
                        << ", residentChunks=" << m_rtChunkSceneRecords.size()
                        << ", dirtyChunks=" << m_rtDirtyChunkCount
                        << ", sceneBuilds=" << m_rtSceneBuildCount << "\n";

@@ -23,6 +23,10 @@ void Renderer::clearMagicaVoxelMeshes() {
     m_backend->clearMagicaVoxelMeshes();
 }
 
+void Renderer::clearImportedSceneMeshes() {
+    m_backend->clearImportedSceneMeshes();
+}
+
 bool Renderer::uploadMagicaVoxelMesh(
     const voxelsprout::world::ChunkMeshData& mesh,
     float worldOffsetX,
@@ -30,6 +34,10 @@ bool Renderer::uploadMagicaVoxelMesh(
     float worldOffsetZ
 ) {
     return m_backend->uploadMagicaVoxelMesh(mesh, worldOffsetX, worldOffsetY, worldOffsetZ);
+}
+
+bool Renderer::uploadImportedScene(const voxelsprout::importer::ImportedScene& scene) {
+    return m_backend->uploadImportedScene(scene);
 }
 
 void Renderer::setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba) {
@@ -133,6 +141,25 @@ ShadowStats Renderer::shadowStats() const {
 
 void Renderer::setSunAngles(float yawDegrees, float pitchDegrees) {
     m_backend->setSunAngles(yawDegrees, pitchDegrees);
+}
+
+void Renderer::setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug) {
+    m_backend->setImportedSceneDebugState(showTerrain, showStatics, showTextures, flatShading, waterDebug);
+}
+
+void Renderer::importedSceneDebugState(
+    bool& outShowTerrain,
+    bool& outShowStatics,
+    bool& outShowTextures,
+    bool& outFlatShading,
+    bool& outWaterDebug
+) const {
+    m_backend->importedSceneDebugState(
+        outShowTerrain,
+        outShowStatics,
+        outShowTextures,
+        outFlatShading,
+        outWaterDebug);
 }
 
 float Renderer::cameraFovDegrees() const {

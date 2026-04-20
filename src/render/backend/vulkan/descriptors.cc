@@ -58,7 +58,9 @@ constexpr uint32_t kBindlessTextureIndexNormalDepth = 3u;
 constexpr uint32_t kBindlessTextureIndexSsaoBlur = 4u;
 constexpr uint32_t kBindlessTextureIndexSsaoRaw = 5u;
 constexpr uint32_t kBindlessTextureIndexPlantDiffuse = 6u;
-constexpr uint32_t kBindlessTextureStaticCount = 7u;
+constexpr uint32_t kBindlessTextureIndexSkyDaylight = 7u;
+constexpr uint32_t kBindlessTextureIndexWaterNormal = 8u;
+constexpr uint32_t kBindlessTextureStaticCount = 9u;
 constexpr uint32_t kAutoExposureHistogramBins = 64u;
 
 } // namespace
@@ -311,6 +313,20 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     plantDiffuseTextureImageInfo.imageView =
         (m_plantDiffuseTextureImageView != VK_NULL_HANDLE) ? m_plantDiffuseTextureImageView : m_diffuseTextureImageView;
     plantDiffuseTextureImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkDescriptorImageInfo morrowindSkyTextureImageInfo{};
+    morrowindSkyTextureImageInfo.sampler =
+        (m_morrowindSkyTextureSampler != VK_NULL_HANDLE) ? m_morrowindSkyTextureSampler : m_diffuseTextureSampler;
+    morrowindSkyTextureImageInfo.imageView =
+        (m_morrowindSkyTextureImageView != VK_NULL_HANDLE) ? m_morrowindSkyTextureImageView : m_diffuseTextureImageView;
+    morrowindSkyTextureImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkDescriptorImageInfo waterNormalTextureImageInfo{};
+    waterNormalTextureImageInfo.sampler =
+        (m_waterNormalTextureSampler != VK_NULL_HANDLE) ? m_waterNormalTextureSampler : m_diffuseTextureSampler;
+    waterNormalTextureImageInfo.imageView =
+        (m_waterNormalTextureImageView != VK_NULL_HANDLE) ? m_waterNormalTextureImageView : m_diffuseTextureImageView;
+    waterNormalTextureImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo shadowMapImageInfo{};
     shadowMapImageInfo.sampler = m_shadowDepthSampler;
@@ -673,36 +689,38 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             voxelGiRestirScratchInfo.buffer != VK_NULL_HANDLE;
         std::uint32_t voxelGiWriteCount = 16;
         if (hasVoxelGiRayTracingSceneDescriptor) {
-            voxelGiWrites[16] = write;
-            voxelGiWrites[16].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-            voxelGiWrites[16].dstBinding = 16;
-            voxelGiWrites[16].descriptorCount = 1;
-            voxelGiWrites[16].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-            voxelGiWrites[16].pNext = &voxelGiRayTracingSceneWriteInfo;
-            voxelGiWriteCount = 17;
+            const std::uint32_t writeIndex = voxelGiWriteCount++;
+            voxelGiWrites[writeIndex] = write;
+            voxelGiWrites[writeIndex].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+            voxelGiWrites[writeIndex].dstBinding = 16;
+            voxelGiWrites[writeIndex].descriptorCount = 1;
+            voxelGiWrites[writeIndex].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            voxelGiWrites[writeIndex].pNext = &voxelGiRayTracingSceneWriteInfo;
         }
         if (m_rayTracingRuntimeEnabled && hasVoxelGiRestirBuffers) {
-            voxelGiWrites[17] = write;
-            voxelGiWrites[17].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-            voxelGiWrites[17].dstBinding = 17;
-            voxelGiWrites[17].descriptorCount = 1;
-            voxelGiWrites[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            voxelGiWrites[17].pBufferInfo = &voxelGiRestirCurrentInfo;
+            const std::uint32_t currentWriteIndex = voxelGiWriteCount++;
+            voxelGiWrites[currentWriteIndex] = write;
+            voxelGiWrites[currentWriteIndex].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+            voxelGiWrites[currentWriteIndex].dstBinding = 17;
+            voxelGiWrites[currentWriteIndex].descriptorCount = 1;
+            voxelGiWrites[currentWriteIndex].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            voxelGiWrites[currentWriteIndex].pBufferInfo = &voxelGiRestirCurrentInfo;
 
-            voxelGiWrites[18] = write;
-            voxelGiWrites[18].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-            voxelGiWrites[18].dstBinding = 18;
-            voxelGiWrites[18].descriptorCount = 1;
-            voxelGiWrites[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            voxelGiWrites[18].pBufferInfo = &voxelGiRestirPreviousInfo;
+            const std::uint32_t previousWriteIndex = voxelGiWriteCount++;
+            voxelGiWrites[previousWriteIndex] = write;
+            voxelGiWrites[previousWriteIndex].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+            voxelGiWrites[previousWriteIndex].dstBinding = 18;
+            voxelGiWrites[previousWriteIndex].descriptorCount = 1;
+            voxelGiWrites[previousWriteIndex].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            voxelGiWrites[previousWriteIndex].pBufferInfo = &voxelGiRestirPreviousInfo;
 
-            voxelGiWrites[19] = write;
-            voxelGiWrites[19].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-            voxelGiWrites[19].dstBinding = 19;
-            voxelGiWrites[19].descriptorCount = 1;
-            voxelGiWrites[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            voxelGiWrites[19].pBufferInfo = &voxelGiRestirScratchInfo;
-            voxelGiWriteCount = 20;
+            const std::uint32_t scratchWriteIndex = voxelGiWriteCount++;
+            voxelGiWrites[scratchWriteIndex] = write;
+            voxelGiWrites[scratchWriteIndex].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
+            voxelGiWrites[scratchWriteIndex].dstBinding = 19;
+            voxelGiWrites[scratchWriteIndex].descriptorCount = 1;
+            voxelGiWrites[scratchWriteIndex].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            voxelGiWrites[scratchWriteIndex].pBufferInfo = &voxelGiRestirScratchInfo;
         }
 
         const std::array<std::uint64_t, kVoxelGiDescriptorWriteKeyWordCount> voxelGiDescriptorWriteKey = {
@@ -879,8 +897,14 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         m_sunShaftDescriptorWriteKeyValid[frameIndex] = false;
     }
 
-    if (m_bindlessDescriptorSet != VK_NULL_HANDLE && m_bindlessTextureCapacity >= kBindlessTextureStaticCount) {
-        std::array<VkDescriptorImageInfo, kBindlessTextureStaticCount> bindlessImageInfos{};
+    const std::size_t bindlessTextureCount =
+        kBindlessTextureStaticCount + std::min<std::size_t>(
+            m_importedTextureResources.size(),
+            (m_bindlessTextureCapacity > kBindlessTextureStaticCount)
+                ? static_cast<std::size_t>(m_bindlessTextureCapacity - kBindlessTextureStaticCount)
+                : 0u);
+    if (m_bindlessDescriptorSet != VK_NULL_HANDLE && m_bindlessTextureCapacity >= bindlessTextureCount) {
+        std::vector<VkDescriptorImageInfo> bindlessImageInfos(bindlessTextureCount);
         bindlessImageInfos[kBindlessTextureIndexDiffuse] = diffuseTextureImageInfo;
         bindlessImageInfos[kBindlessTextureIndexHdrResolved] = hdrSceneImageInfo;
         bindlessImageInfos[kBindlessTextureIndexShadowAtlas] = shadowMapImageInfo;
@@ -888,13 +912,28 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         bindlessImageInfos[kBindlessTextureIndexSsaoBlur] = ssaoBlurImageInfo;
         bindlessImageInfos[kBindlessTextureIndexSsaoRaw] = ssaoRawImageInfo;
         bindlessImageInfos[kBindlessTextureIndexPlantDiffuse] = plantDiffuseTextureImageInfo;
+        bindlessImageInfos[kBindlessTextureIndexSkyDaylight] = morrowindSkyTextureImageInfo;
+        bindlessImageInfos[kBindlessTextureIndexWaterNormal] = waterNormalTextureImageInfo;
+        for (std::size_t textureIndex = 0; textureIndex < m_importedTextureResources.size(); ++textureIndex) {
+            const std::size_t bindlessIndex = kBindlessTextureStaticCount + textureIndex;
+            if (bindlessIndex >= bindlessImageInfos.size()) {
+                break;
+            }
+            const ImportedTextureResource& texture = m_importedTextureResources[textureIndex];
+            if (texture.imageView == VK_NULL_HANDLE || m_importedTextureSampler == VK_NULL_HANDLE) {
+                continue;
+            }
+            bindlessImageInfos[bindlessIndex].sampler = m_importedTextureSampler;
+            bindlessImageInfos[bindlessIndex].imageView = texture.imageView;
+            bindlessImageInfos[bindlessIndex].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
 
         VkWriteDescriptorSet bindlessWrite{};
         bindlessWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         bindlessWrite.dstSet = m_bindlessDescriptorSet;
         bindlessWrite.dstBinding = 0;
         bindlessWrite.dstArrayElement = 0;
-        bindlessWrite.descriptorCount = kBindlessTextureStaticCount;
+        bindlessWrite.descriptorCount = static_cast<uint32_t>(bindlessImageInfos.size());
         bindlessWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindlessWrite.pImageInfo = bindlessImageInfos.data();
         vkUpdateDescriptorSets(m_device, 1, &bindlessWrite, 0, nullptr);

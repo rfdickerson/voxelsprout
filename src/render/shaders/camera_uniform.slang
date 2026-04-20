@@ -31,6 +31,7 @@ public struct CameraUniform
     public float4 colorGrading1;
     public float4 colorGrading2;
     public float4 colorGrading3;
+    public float4 waterConfig;
     public float4 voxelBaseColorPalette[16];
     public float4 voxelGiGridOriginCellSize;
     public float4 voxelGiGridExtentStrength;

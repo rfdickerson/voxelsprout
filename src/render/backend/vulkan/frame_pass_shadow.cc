@@ -27,6 +27,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
     const bool canDrawMagica = inputs.canDrawMagica;
     const std::span<const ReadyMagicaDraw> readyMagicaDraws = inputs.readyMagicaDraws;
+    const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
+    const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
+    const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = inputs.transportInstanceCount;
@@ -147,7 +150,12 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
             // Reverse-Z uses GREATER depth tests, so flip bias sign.
             vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
 
-            if (cascadeIndex < kShadowCascadeCount) {
+            if (cascadeIndex < kShadowCascadeCount &&
+                frameChunkDrawData.canDrawShadowChunksIndirectByCascade[cascadeIndex] &&
+                shadowChunkInstanceSliceOpt.has_value() &&
+                shadowChunkInstanceBuffer != VK_NULL_HANDLE &&
+                chunkVertexBuffer != VK_NULL_HANDLE &&
+                chunkIndexBuffer != VK_NULL_HANDLE) {
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
                 vkCmdBindDescriptorSets(
                     commandBuffer,
@@ -209,6 +217,54 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     );
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
+                }
+            }
+            if (m_importedStaticShadowPipeline != VK_NULL_HANDLE &&
+                importedVertexBuffer != VK_NULL_HANDLE &&
+                importedIndexBuffer != VK_NULL_HANDLE &&
+                !importedMeshDraws.empty()) {
+                const std::size_t terrainDrawCount = std::min<std::size_t>(m_importedTerrainDrawCount, importedMeshDraws.size());
+                const std::size_t staticDrawStart = terrainDrawCount;
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
+                vkCmdBindDescriptorSets(
+                    commandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    m_pipelineLayout,
+                    0,
+                    boundDescriptorSetCount,
+                    boundDescriptorSets.sets.data(),
+                    1,
+                    &mvpDynamicOffset
+                );
+                const VkBuffer importedVertexBuffers[1] = {importedVertexBuffer};
+                const VkDeviceSize importedVertexOffsets[1] = {0};
+                vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
+                vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                ChunkPushConstants importedPushConstants{};
+                importedPushConstants.chunkOffset[0] = 0.0f;
+                importedPushConstants.chunkOffset[1] = 0.0f;
+                importedPushConstants.chunkOffset[2] = 0.0f;
+                importedPushConstants.chunkOffset[3] = 0.0f;
+                importedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
+                importedPushConstants.cascadeData[1] = 0.0f;
+                importedPushConstants.cascadeData[2] = 0.0f;
+                importedPushConstants.cascadeData[3] = 0.0f;
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &importedPushConstants
+                );
+                for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                    if ((drawIndex < terrainDrawCount && !m_debugShowImportedTerrain) ||
+                        (drawIndex >= staticDrawStart && !m_debugShowImportedStatics)) {
+                        continue;
+                    }
+                    const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+                    countDrawCalls(m_debugDrawCallsShadow, 1);
+                    vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
                 }
             }
 

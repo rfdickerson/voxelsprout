@@ -1,5 +1,6 @@
 #pragma once
 
+#include "import/imported_scene.h"
 #include "render/backend/vulkan/buffer_helpers.h"
 #include "render/backend/vulkan/descriptor_manager.h"
 #include "render/frame_graph.h"
@@ -64,6 +65,14 @@ struct RtChunkSceneRecord {
     bool dirty = false;
 };
 
+struct RtImportedSceneRecord {
+    RtGeometryBuffers geometry{};
+    RtAccelerationStructure blas{};
+    bool geometryResident = false;
+    bool dirty = false;
+    const char* debugName = nullptr;
+};
+
 struct ChunkResidentKey {
     int chunkX = 0;
     int chunkY = 0;
@@ -103,7 +112,7 @@ public:
 
     struct SkyDebugSettings {
         float sunYawDegrees = -157.5f;
-        float sunPitchDegrees = -13.0f;
+        float sunPitchDegrees = -8.0f;
         float rayleighStrength = 1.0f;
         float mieStrength = 1.0f;
         float mieAnisotropy = 0.55f;
@@ -146,6 +155,10 @@ public:
         float volumetricFogHeightFalloff = 0.075f;
         float volumetricFogBaseHeight = 6.0f;
         float volumetricSunScattering = 1.25f;
+        float waterAnimationSpeed = 2.5f;
+        float waterNormalStrength = 1.0f;
+        float waterReflectionStrength = 3.0f;
+        float waterRefractionDecay = 1.0f;
         bool autoSunriseTuning = true;
         float autoSunriseBlend = 1.0f;
         float autoSunriseAdaptSpeed = 4.0f;
@@ -169,6 +182,8 @@ public:
     bool init(GLFWwindow* window, const voxelsprout::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const voxelsprout::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
+    void clearImportedSceneMeshes();
+    bool uploadImportedScene(const voxelsprout::importer::ImportedScene& scene);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
     bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const voxelsprout::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
@@ -200,6 +215,14 @@ public:
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
+    void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
+    void importedSceneDebugState(
+        bool& outShowTerrain,
+        bool& outShowStatics,
+        bool& outShowTextures,
+        bool& outFlatShading,
+        bool& outWaterDebug
+    ) const;
     float cameraFovDegrees() const;
     void shutdown();
 
@@ -285,6 +308,7 @@ private:
     bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
+    bool createWaterNormalTextureResources();
     bool createDescriptorResources();
     using BoundDescriptorSets = DescriptorManager<kMaxFramesInFlight>::BoundDescriptorSets;
     BoundDescriptorSets updateFrameDescriptorSets(
@@ -330,10 +354,12 @@ private:
     void destroyFrameResources();
     void destroyChunkBuffers();
     void destroyMagicaBuffers();
+    void destroyImportedBuffers();
     void destroyPipeBuffers();
     void destroyPreviewBuffers();
     void destroyEnvironmentResources();
     void destroyDiffuseTextureResources();
+    bool createMorrowindSkyTextureResources();
     void destroyTransferResources();
     bool rebuildRayTracingScene();
     void destroyRayTracingScene();
@@ -454,6 +480,20 @@ private:
         float extensions[4];
     };
 
+    struct ImportedMeshVertex {
+        float position[3];
+        float normal[3];
+        float color[3];
+        float uv[2];
+        std::uint32_t textureIndex = 0xffffffffu;
+        std::uint32_t flags = 0u;
+    };
+
+    struct ImportedWaterVertex {
+        float position[3];
+        float uv[2];
+    };
+
     struct ReadyMagicaDraw {
         VkBuffer vertexBuffer = VK_NULL_HANDLE;
         VkBuffer indexBuffer = VK_NULL_HANDLE;
@@ -471,6 +511,19 @@ private:
         uint32_t beltCargoInstanceCount = 0;
         std::optional<FrameArenaSlice> beltCargoInstanceSliceOpt = std::nullopt;
         std::vector<ReadyMagicaDraw> readyMagicaDraws;
+    };
+
+    struct ImportedMeshDraw {
+        BufferHandle vertexBufferHandle = kInvalidBufferHandle;
+        BufferHandle indexBufferHandle = kInvalidBufferHandle;
+        std::uint32_t firstIndex = 0;
+        std::uint32_t indexCount = 0;
+    };
+
+    struct ImportedTextureResource {
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        VkImageView imageView = VK_NULL_HANDLE;
     };
 
     struct FrameChunkDrawData {
@@ -534,6 +587,9 @@ private:
         VkBuffer chunkIndexBuffer = VK_NULL_HANDLE;
         bool canDrawMagica = false;
         std::span<const ReadyMagicaDraw> readyMagicaDraws;
+        VkBuffer importedVertexBuffer = VK_NULL_HANDLE;
+        VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
+        std::span<const ImportedMeshDraw> importedMeshDraws;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -550,6 +606,9 @@ private:
         VkBuffer chunkIndexBuffer = VK_NULL_HANDLE;
         bool canDrawMagica = false;
         std::span<const ReadyMagicaDraw> readyMagicaDraws;
+        VkBuffer importedVertexBuffer = VK_NULL_HANDLE;
+        VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
+        std::span<const ImportedMeshDraw> importedMeshDraws;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -566,6 +625,9 @@ private:
         VkBuffer chunkIndexBuffer = VK_NULL_HANDLE;
         bool canDrawMagica = false;
         std::span<const ReadyMagicaDraw> readyMagicaDraws;
+        VkBuffer importedVertexBuffer = VK_NULL_HANDLE;
+        VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
+        std::span<const ImportedMeshDraw> importedMeshDraws;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -795,6 +857,12 @@ private:
     VkPipeline& m_voxelNormalDepthPipeline = m_pipelineManager.voxelNormalDepthPipeline;
     VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
     VkPipeline& m_grassBillboardNormalDepthPipeline = m_pipelineManager.grassBillboardNormalDepthPipeline;
+    VkPipeline& m_importedStaticPipeline = m_pipelineManager.importedStaticPipeline;
+    VkPipeline& m_importedStaticPipelineRt = m_pipelineManager.importedStaticPipelineRt;
+    VkPipeline& m_importedWaterPipeline = m_pipelineManager.importedWaterPipeline;
+    VkPipeline& m_importedWaterPipelineRt = m_pipelineManager.importedWaterPipelineRt;
+    VkPipeline& m_importedStaticNormalDepthPipeline = m_pipelineManager.importedStaticNormalDepthPipeline;
+    VkPipeline& m_importedStaticShadowPipeline = m_pipelineManager.importedStaticShadowPipeline;
     VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
     VkPipeline& m_magicaPipelineRt = m_pipelineManager.magicaPipelineRt;
     VkPipeline& m_ssaoPipeline = m_pipelineManager.ssaoPipeline;
@@ -878,13 +946,19 @@ private:
     BufferHandle m_grassBillboardVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_grassBillboardIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_importedVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_importedIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     std::vector<ChunkResidentKey> m_chunkResidentKeys;
     std::vector<voxelsprout::world::ChunkLodMeshes> m_chunkLodMeshCache;
     std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
+    std::vector<ImportedMeshDraw> m_importedMeshDraws;
     std::vector<RtChunkSceneRecord> m_rtChunkSceneRecords;
+    std::vector<RtImportedSceneRecord> m_rtImportedSceneRecords;
     std::vector<RtGeometryBuffers> m_rtMagicaGeometries;
     std::vector<RtAccelerationStructure> m_rtMagicaBlases;
     RtAccelerationStructure m_rtTlas{};
@@ -903,6 +977,12 @@ private:
     uint32_t m_transportIndexCount = 0;
     uint32_t m_grassBillboardIndexCount = 0;
     uint32_t m_grassBillboardInstanceCount = 0;
+    uint32_t m_importedIndexCount = 0;
+    uint32_t m_importedTerrainDrawCount = 0;
+    uint32_t m_importedStaticDrawCount = 0;
+    uint32_t m_importedWaterIndexCount = 0;
+    std::vector<ImportedTextureResource> m_importedTextureResources;
+    VkSampler m_importedTextureSampler = VK_NULL_HANDLE;
     std::array<std::uint32_t, 16> m_voxelBaseColorPaletteRgba{};
     VkImage m_diffuseTextureImage = VK_NULL_HANDLE;
     VkDeviceMemory m_diffuseTextureMemory = VK_NULL_HANDLE;
@@ -913,6 +993,16 @@ private:
     VmaAllocation m_plantDiffuseTextureAllocation = VK_NULL_HANDLE;
     VkImageView m_plantDiffuseTextureImageView = VK_NULL_HANDLE;
     VkSampler m_diffuseTexturePlantSampler = VK_NULL_HANDLE;
+    VkImage m_morrowindSkyTextureImage = VK_NULL_HANDLE;
+    VkDeviceMemory m_morrowindSkyTextureMemory = VK_NULL_HANDLE;
+    VmaAllocation m_morrowindSkyTextureAllocation = VK_NULL_HANDLE;
+    VkImageView m_morrowindSkyTextureImageView = VK_NULL_HANDLE;
+    VkSampler m_morrowindSkyTextureSampler = VK_NULL_HANDLE;
+    VkImage m_waterNormalTextureImage = VK_NULL_HANDLE;
+    VkDeviceMemory m_waterNormalTextureMemory = VK_NULL_HANDLE;
+    VmaAllocation m_waterNormalTextureAllocation = VK_NULL_HANDLE;
+    VkImageView m_waterNormalTextureImageView = VK_NULL_HANDLE;
+    VkSampler m_waterNormalTextureSampler = VK_NULL_HANDLE;
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};
     VkCommandPool m_transferCommandPool = VK_NULL_HANDLE;
@@ -945,6 +1035,11 @@ private:
     bool m_debugCameraFovInitialized = false;
     bool m_debugEnableVertexAo = true;
     bool m_debugEnableSsao = false;
+    bool m_debugShowImportedTerrain = true;
+    bool m_debugShowImportedStatics = true;
+    bool m_debugShowImportedTextures = true;
+    bool m_debugImportedFlatShading = false;
+    bool m_debugImportedWaterSolid = false;
     bool m_debugVisualizeSsao = false;
     bool m_debugVisualizeAoNormals = false;
     ShadowDebugSettings m_shadowDebugSettings{};

@@ -5,7 +5,7 @@ import sh_lighting;
 Texture3D<float4> voxelGiOccupancy;
 
 [[vk::binding(12, 0)]]
-Texture3D<float4> voxelGiSkyExposure;
+RWTexture3D<float4> voxelGiSkyExposure;
 
 [[vk::binding(16, 0)]]
 RaytracingAccelerationStructure giSurfaceScene;

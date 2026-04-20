@@ -15,12 +15,18 @@ public:
     VkPipeline skyboxPipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline pipePipeline = VK_NULL_HANDLE;
+    VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
+    VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
+    VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
+    VkPipeline importedWaterPipelineRt = VK_NULL_HANDLE;
     VkPipeline grassBillboardPipeline = VK_NULL_HANDLE;
     VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipelineRt = VK_NULL_HANDLE;
+    VkPipeline importedStaticShadowPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     VkPipeline previewAddPipeline = VK_NULL_HANDLE;
@@ -51,6 +57,10 @@ public:
             vkDestroyPipeline(device, pipeNormalDepthPipeline, nullptr);
             pipeNormalDepthPipeline = VK_NULL_HANDLE;
         }
+        if (importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticNormalDepthPipeline, nullptr);
+            importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+        }
         if (grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, grassBillboardNormalDepthPipeline, nullptr);
             grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
@@ -75,6 +85,10 @@ public:
             vkDestroyPipeline(device, pipeShadowPipeline, nullptr);
             pipeShadowPipeline = VK_NULL_HANDLE;
         }
+        if (importedStaticShadowPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticShadowPipeline, nullptr);
+            importedStaticShadowPipeline = VK_NULL_HANDLE;
+        }
         if (grassBillboardShadowPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, grassBillboardShadowPipeline, nullptr);
             grassBillboardShadowPipeline = VK_NULL_HANDLE;
@@ -94,6 +108,22 @@ public:
         if (pipePipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, pipePipeline, nullptr);
             pipePipeline = VK_NULL_HANDLE;
+        }
+        if (importedStaticPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticPipeline, nullptr);
+            importedStaticPipeline = VK_NULL_HANDLE;
+        }
+        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticPipelineRt, nullptr);
+            importedStaticPipelineRt = VK_NULL_HANDLE;
+        }
+        if (importedWaterPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedWaterPipeline, nullptr);
+            importedWaterPipeline = VK_NULL_HANDLE;
+        }
+        if (importedWaterPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedWaterPipelineRt, nullptr);
+            importedWaterPipelineRt = VK_NULL_HANDLE;
         }
         if (grassBillboardPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, grassBillboardPipeline, nullptr);

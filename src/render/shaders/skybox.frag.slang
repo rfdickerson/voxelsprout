@@ -1,5 +1,4 @@
 import camera_uniform;
-
 float saturate01(float value)
 {
     return clamp(value, 0.0, 1.0);
@@ -124,6 +123,9 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 viewDir = normalize(float3(input.inNdc.x / projX, input.inNdc.y / projY, -1.0));
     const float3x3 invViewRotation = transpose((float3x3)camera.view);
     const float3 worldDir = normalize(mul(invViewRotation, viewDir));
-
+    // The real Morrowind sky textures are authored for dedicated sky NIF meshes
+    // (for example meshes/sky_clouds_01.nif), not for full-screen skybox reprojection.
+    // Until the renderer draws those meshes directly, keep the procedural sky rather
+    // than an incorrect approximation.
     return float4(proceduralSky(worldDir, camera.sunDirectionIntensity.xyz), 1.0);
 }

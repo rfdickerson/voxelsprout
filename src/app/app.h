@@ -22,12 +22,10 @@ public:
     void run();
     void update(float dt, float simulationAlpha);
     void shutdown();
-    void queueHotbarScroll(int direction);
 
 private:
     struct AppConfig {
         voxelsprout::render::ShadowMode shadowMode = voxelsprout::render::ShadowMode::Auto;
-        bool enableVertexAo = true;
         bool enableSsao = false;
     };
 
@@ -189,12 +187,16 @@ private:
     bool m_wasInventoryKeyDown = false;
     bool m_wasEscapeKeyDown = false;
     bool m_wasRegenerateWorldDown = false;
+    bool m_wasToggleImportedTerrainDown = false;
+    bool m_wasToggleImportedStaticsDown = false;
+    bool m_wasToggleImportedTexturesDown = false;
+    bool m_wasToggleImportedFlatShadingDown = false;
+    bool m_wasToggleImportedWaterDebugDown = false;
     bool m_wasPrevBlockDown = false;
     bool m_wasNextBlockDown = false;
     bool m_gamepadConnected = false;
     bool m_worldDirty = false;
     float m_worldAutosaveElapsedSeconds = 0.0f;
-    int m_pendingHotbarScrollSteps = 0;
     bool m_voxelBreakTargetValid = false;
     int m_voxelBreakTargetX = 0;
     int m_voxelBreakTargetY = 0;
@@ -214,6 +216,14 @@ private:
     voxelsprout::world::World m_world;
     voxelsprout::world::ChunkClipmapIndex m_chunkClipmapIndex;
     voxelsprout::render::Renderer m_renderer;
+    bool m_importedSceneDemoEnabled = false;
+    bool m_importedShowTerrain = true;
+    bool m_importedShowStatics = true;
+    bool m_importedShowTextures = true;
+    bool m_importedFlatShading = false;
+    bool m_importedWaterDebug = false;
+    std::filesystem::path m_importedScenePath;
+    voxelsprout::importer::ImportedScene m_importedScene;
 };
 
 } // namespace voxelsprout::app
