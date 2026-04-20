@@ -1,6 +1,6 @@
 #include "render/backend/vulkan/frame_graph_core.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 std::optional<CoreFrameGraphPlan> buildCoreFrameGraphPlan(FrameGraph* frameGraph) {
     if (frameGraph == nullptr) {
@@ -48,4 +48,4 @@ std::optional<CoreFrameGraphPlan> buildCoreFrameGraphPlan(FrameGraph* frameGraph
     return plan;
 }
 
-}  // namespace voxelsprout::render
+}  // namespace odai::render

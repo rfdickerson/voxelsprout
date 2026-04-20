@@ -6,7 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace voxelsprout::importer {
+namespace odai::importer {
 
 struct ImportedSceneVertex {
     float position[3] = {};
@@ -123,4 +123,4 @@ bool cookMorrowindBalmoraScene(
     MorrowindBalmoraCookResult& outResult
 );
 
-}  // namespace voxelsprout::importer
+}  // namespace odai::importer

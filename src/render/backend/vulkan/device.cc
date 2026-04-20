@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
@@ -258,4 +258,4 @@ void RendererBackend::insertDebugLabel(
 }
 
 
-} // namespace voxelsprout::render
+} // namespace odai::render

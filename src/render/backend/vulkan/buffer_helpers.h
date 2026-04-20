@@ -13,7 +13,7 @@
 #include <vk_mem_alloc.h>
 #include <vulkan/vulkan.h>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 // Opaque buffer handle so the renderer can refer to buffers without exposing Vulkan objects.
 // Future resource systems can replace this with generation-based handles or IDs from an asset DB.
@@ -268,4 +268,4 @@ private:
     std::unordered_map<uint64_t, std::string> m_liveImageDebugNames;
 };
 
-} // namespace voxelsprout::render
+} // namespace odai::render

@@ -6,7 +6,7 @@
 
 #include "render/frame_graph.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 struct CoreFrameGraphPlan {
     FrameGraph::PassId shadow = 0;
@@ -19,4 +19,4 @@ struct CoreFrameGraphPlan {
 
 std::optional<CoreFrameGraphPlan> buildCoreFrameGraphPlan(FrameGraph* frameGraph);
 
-}  // namespace voxelsprout::render
+}  // namespace odai::render

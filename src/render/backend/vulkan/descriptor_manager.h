@@ -6,7 +6,7 @@
 
 #include <vulkan/vulkan.h>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 template <std::size_t FrameCount>
 class DescriptorManager {
@@ -70,4 +70,4 @@ public:
     }
 };
 
-} // namespace voxelsprout::render
+} // namespace odai::render

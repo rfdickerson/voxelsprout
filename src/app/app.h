@@ -14,7 +14,7 @@ struct GLFWwindow;
 // App subsystem
 // Responsible for: coordinating startup, per-frame update flow, and shutdown.
 // Should NOT do: contain gameplay rules, low-level rendering internals, or thread management.
-namespace voxelsprout::app {
+namespace odai::app {
 
 class App {
 public:
@@ -25,7 +25,7 @@ public:
 
 private:
     struct AppConfig {
-        voxelsprout::render::ShadowMode shadowMode = voxelsprout::render::ShadowMode::Auto;
+        odai::render::ShadowMode shadowMode = odai::render::ShadowMode::Auto;
         bool enableSsao = false;
     };
 
@@ -64,7 +64,7 @@ private:
     void pollInput();
     void updateCamera(float dt);
     void syncGameplayUiState();
-    void assignInventoryItemToSelectedHotbar(voxelsprout::render::InventoryItemId itemId);
+    void assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId);
     void handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight);
     [[nodiscard]] bool isAnyUiVisible() const;
     [[nodiscard]] bool isSolidWorldVoxel(int worldX, int worldY, int worldZ) const;
@@ -81,7 +81,7 @@ private:
         int worldX,
         int worldY,
         int worldZ,
-        const voxelsprout::world::Chunk*& outChunk,
+        const odai::world::Chunk*& outChunk,
         int& outLocalX,
         int& outLocalY,
         int& outLocalZ
@@ -123,13 +123,13 @@ private:
     void cycleSelectedHotbar(int direction);
     void selectHotbarSlot(int hotbarIndex);
     void toggleDebugUi();
-    [[nodiscard]] voxelsprout::world::Voxel selectedPlaceVoxel() const;
+    [[nodiscard]] odai::world::Voxel selectedPlaceVoxel() const;
     [[nodiscard]] bool computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const;
     [[nodiscard]] bool applyVoxelEdit(
         int targetX,
         int targetY,
         int targetZ,
-        voxelsprout::world::Voxel voxel,
+        odai::world::Voxel voxel,
         std::vector<std::size_t>& outDirtyChunkIndices
     );
     [[nodiscard]] bool isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const;
@@ -165,7 +165,7 @@ private:
     };
 
     GLFWwindow* m_window = nullptr;
-    voxelsprout::core::InputState m_input{};
+    odai::core::InputState m_input{};
     CameraState m_camera{};
     CameraState m_cameraPrevious{};
     double m_lastMouseX = 0.0;
@@ -203,19 +203,19 @@ private:
     int m_voxelBreakTargetZ = 0;
     int m_voxelBreakClicks = 0;
     AppConfig m_config{};
-    voxelsprout::render::GameplayUiState m_gameplayUiState{};
+    odai::render::GameplayUiState m_gameplayUiState{};
     std::vector<std::size_t> m_visibleChunkIndices;
     std::vector<std::uint8_t> m_visibleChunkGraceFrames;
     std::vector<std::uint8_t> m_previousVisibleChunkMask;
     std::vector<std::uint8_t> m_currentVisibleChunkMask;
     std::vector<std::uint8_t> m_directlyVisibleChunkMask;
-    voxelsprout::world::ClipmapConfig m_appliedClipmapConfig{};
+    odai::world::ClipmapConfig m_appliedClipmapConfig{};
     bool m_hasAppliedClipmapConfig = false;
 
-    voxelsprout::sim::Simulation m_simulation;
-    voxelsprout::world::World m_world;
-    voxelsprout::world::ChunkClipmapIndex m_chunkClipmapIndex;
-    voxelsprout::render::Renderer m_renderer;
+    odai::sim::Simulation m_simulation;
+    odai::world::World m_world;
+    odai::world::ChunkClipmapIndex m_chunkClipmapIndex;
+    odai::render::Renderer m_renderer;
     bool m_importedSceneDemoEnabled = false;
     bool m_importedShowTerrain = true;
     bool m_importedShowStatics = true;
@@ -223,7 +223,7 @@ private:
     bool m_importedFlatShading = false;
     bool m_importedWaterDebug = false;
     std::filesystem::path m_importedScenePath;
-    voxelsprout::importer::ImportedScene m_importedScene;
+    odai::importer::ImportedScene m_importedScene;
 };
 
-} // namespace voxelsprout::app
+} // namespace odai::app

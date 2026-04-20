@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
@@ -54,15 +54,6 @@ const char* shadowFallbackReasonName(ShadowFallbackReason reason) {
     case ShadowFallbackReason::RayTracingSceneUnavailable: return "rt_scene_unavailable";
     }
     return "none";
-}
-
-const char* voxelGiSurfaceModeName(VoxelGiSurfaceMode mode) {
-    switch (mode) {
-    case VoxelGiSurfaceMode::Legacy: return "legacy";
-    case VoxelGiSurfaceMode::RtSurface: return "rt_surface";
-    case VoxelGiSurfaceMode::RestirSurface: return "restir_surface";
-    }
-    return "legacy";
 }
 
 } // namespace
@@ -1008,17 +999,17 @@ void RendererBackend::buildMeshingDebugUi() {
         m_debugClipmapConfig.brickResolution = clipmapBrickResolution;
     }
 
-    int meshingModeSelection = (m_chunkMeshingOptions.mode == voxelsprout::world::MeshingMode::Greedy) ? 1 : 0;
+    int meshingModeSelection = (m_chunkMeshingOptions.mode == odai::world::MeshingMode::Greedy) ? 1 : 0;
     if (ImGui::Combo("Chunk Meshing", &meshingModeSelection, "Naive\0Greedy\0")) {
-        const voxelsprout::world::MeshingMode nextMode =
-            (meshingModeSelection == 1) ? voxelsprout::world::MeshingMode::Greedy : voxelsprout::world::MeshingMode::Naive;
+        const odai::world::MeshingMode nextMode =
+            (meshingModeSelection == 1) ? odai::world::MeshingMode::Greedy : odai::world::MeshingMode::Naive;
         if (nextMode != m_chunkMeshingOptions.mode) {
             m_chunkMeshingOptions.mode = nextMode;
             m_chunkLodMeshCacheValid = false;
             m_chunkMeshRebuildRequested = true;
             m_pendingChunkRemeshKeys.clear();
             VOX_LOGI("render") << "chunk meshing mode changed to "
-                               << (nextMode == voxelsprout::world::MeshingMode::Greedy ? "Greedy" : "Naive")
+                               << (nextMode == odai::world::MeshingMode::Greedy ? "Greedy" : "Naive")
                                << ", scheduling full remesh";
         }
     }
@@ -1217,4 +1208,4 @@ void RendererBackend::buildGameplayHudUi() {
 }
 
 
-} // namespace voxelsprout::render
+} // namespace odai::render

@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 namespace {
 
@@ -896,4 +896,4 @@ void RendererBackend::destroyAoTargets() {
     m_normalDepthImageInitialized.clear();
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

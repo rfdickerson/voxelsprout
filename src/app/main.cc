@@ -2,12 +2,12 @@
 
 #include "core/log.h"
 
-#ifndef VOXEL_APP_VERSION
-#define VOXEL_APP_VERSION "dev"
+#ifndef ODAI_APP_VERSION
+#define ODAI_APP_VERSION "dev"
 #endif
 
-#ifndef VOXEL_RELEASE_PROFILE
-#define VOXEL_RELEASE_PROFILE "dev_runtime"
+#ifndef ODAI_RELEASE_PROFILE
+#define ODAI_RELEASE_PROFILE "dev_runtime"
 #endif
 
 // Program entry point
@@ -15,9 +15,9 @@
 // Should NOT do: implement gameplay systems or low-level window/input handling.
 int main() {
     VOX_LOGI("main") << "startup"
-                     << " version=" << VOXEL_APP_VERSION
-                     << " profile=" << VOXEL_RELEASE_PROFILE;
-    voxelsprout::app::App app;
+                     << " version=" << ODAI_APP_VERSION
+                     << " profile=" << ODAI_RELEASE_PROFILE;
+    odai::app::App app;
 
     if (!app.init()) {
         VOX_LOGE("main") << "app init failed, exiting";

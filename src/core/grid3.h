@@ -9,7 +9,7 @@
 // Core Grid subsystem
 // Responsible for: defining deterministic integer-grid primitives shared by world and simulation code.
 // Should NOT do: simulation state ownership, rendering behavior, or file serialization.
-namespace voxelsprout::core {
+namespace odai::core {
 
 struct Cell3i {
     std::int32_t x = 0;
@@ -189,37 +189,37 @@ inline constexpr Cell3i neighborCell(const Cell3i& cell, Dir6 dir) {
     return cell + dirToOffset(dir);
 }
 
-inline constexpr voxelsprout::math::Vector3 dirToUnitVector(Dir6 dir) {
+inline constexpr odai::math::Vector3 dirToUnitVector(Dir6 dir) {
     switch (dir) {
-    case Dir6::PosX: return voxelsprout::math::Vector3{1.0f, 0.0f, 0.0f};
-    case Dir6::NegX: return voxelsprout::math::Vector3{-1.0f, 0.0f, 0.0f};
-    case Dir6::PosY: return voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f};
-    case Dir6::NegY: return voxelsprout::math::Vector3{0.0f, -1.0f, 0.0f};
-    case Dir6::PosZ: return voxelsprout::math::Vector3{0.0f, 0.0f, 1.0f};
-    case Dir6::NegZ: return voxelsprout::math::Vector3{0.0f, 0.0f, -1.0f};
+    case Dir6::PosX: return odai::math::Vector3{1.0f, 0.0f, 0.0f};
+    case Dir6::NegX: return odai::math::Vector3{-1.0f, 0.0f, 0.0f};
+    case Dir6::PosY: return odai::math::Vector3{0.0f, 1.0f, 0.0f};
+    case Dir6::NegY: return odai::math::Vector3{0.0f, -1.0f, 0.0f};
+    case Dir6::PosZ: return odai::math::Vector3{0.0f, 0.0f, 1.0f};
+    case Dir6::NegZ: return odai::math::Vector3{0.0f, 0.0f, -1.0f};
     }
-    return voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f};
+    return odai::math::Vector3{0.0f, 1.0f, 0.0f};
 }
 
 struct AxisFrame {
-    voxelsprout::math::Vector3 forward{0.0f, 1.0f, 0.0f};
-    voxelsprout::math::Vector3 right{1.0f, 0.0f, 0.0f};
-    voxelsprout::math::Vector3 up{0.0f, 0.0f, 1.0f};
+    odai::math::Vector3 forward{0.0f, 1.0f, 0.0f};
+    odai::math::Vector3 right{1.0f, 0.0f, 0.0f};
+    odai::math::Vector3 up{0.0f, 0.0f, 1.0f};
 };
 
 inline AxisFrame buildAxisFrame(Dir6 forwardDir) {
     AxisFrame frame{};
     frame.forward = dirToUnitVector(forwardDir);
 
-    const voxelsprout::math::Vector3 fallbackUp = std::abs(frame.forward.y) > 0.99f
-        ? voxelsprout::math::Vector3{0.0f, 0.0f, 1.0f}
-        : voxelsprout::math::Vector3{0.0f, 1.0f, 0.0f};
-    frame.right = voxelsprout::math::normalize(voxelsprout::math::cross(frame.forward, fallbackUp));
-    if (voxelsprout::math::lengthSquared(frame.right) <= 0.000001f) {
-        frame.right = voxelsprout::math::Vector3{1.0f, 0.0f, 0.0f};
+    const odai::math::Vector3 fallbackUp = std::abs(frame.forward.y) > 0.99f
+        ? odai::math::Vector3{0.0f, 0.0f, 1.0f}
+        : odai::math::Vector3{0.0f, 1.0f, 0.0f};
+    frame.right = odai::math::normalize(odai::math::cross(frame.forward, fallbackUp));
+    if (odai::math::lengthSquared(frame.right) <= 0.000001f) {
+        frame.right = odai::math::Vector3{1.0f, 0.0f, 0.0f};
     }
-    frame.up = voxelsprout::math::normalize(voxelsprout::math::cross(frame.right, frame.forward));
+    frame.up = odai::math::normalize(odai::math::cross(frame.right, frame.forward));
     return frame;
 }
 
-} // namespace voxelsprout::core
+} // namespace odai::core

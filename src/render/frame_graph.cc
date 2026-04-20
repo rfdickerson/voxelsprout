@@ -2,7 +2,7 @@
 
 #include <queue>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 void FrameGraph::reset() {
     m_passes.clear();
@@ -107,4 +107,4 @@ bool FrameGraph::buildExecutionOrder(std::vector<PassId>* outOrder) const {
     return outOrder->size() == m_passes.size();
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 template <typename VkHandleT>
 uint64_t vkHandleToUint64(VkHandleT handle) {
@@ -1242,4 +1242,4 @@ uint32_t FrameArena::findMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlag
     return std::numeric_limits<uint32_t>::max();
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

@@ -31,7 +31,7 @@ RWTexture3D<float4> voxelGiSurfaceNegZOut;
 [[vk::binding(12, 0)]]
 RWTexture3D<float4> voxelGiSkyExposure;
 
-#ifdef VOXEL_GI_RT_SURFACE
+#ifdef ODAI_GI_RT_SURFACE
 [[vk::binding(16, 0)]]
 RaytracingAccelerationStructure giSurfaceScene;
 #endif
@@ -118,7 +118,7 @@ float sampleSunVoxelVisibility(int3 cell, int3 faceOffset, int3 dims, float3 sun
     return visibility;
 }
 
-#ifdef VOXEL_GI_RT_SURFACE
+#ifdef ODAI_GI_RT_SURFACE
 static const float kPi = 3.14159265;
 
 float2 rtSurfaceDiskSampleOffset(int sampleIndex)
@@ -282,7 +282,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
         const float ndotl = max(dot(normal, -sunDirection), 0.0);
         const float3 faceCenterOffset = normal * (cellSize * 0.51);
-#ifndef VOXEL_GI_RT_SURFACE
+#ifndef ODAI_GI_RT_SURFACE
         const float3 receiverBiasOffset = normal * (cellSize * 0.02);
         const float shadowVisibility =
             (ndotl > 0.0001) ? sampleShadowVisibility(worldPosition + faceCenterOffset + receiverBiasOffset) : 0.0;

@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <vector>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 namespace {
 
@@ -539,4 +539,4 @@ void RendererBackend::destroyGpuTimestampResources() {
     m_gpuTimestampQuerySubmitted.fill(false);
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

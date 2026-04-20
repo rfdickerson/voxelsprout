@@ -40,7 +40,7 @@ struct ImageRgba {
 
 void printUsage() {
     std::cerr
-        << "Usage: voxel_imported_scene_preview <scene input path> <preview bmp output path> [width] [topdown|isometric]\n";
+        << "Usage: odai_imported_scene_preview <scene input path> <preview bmp output path> [width] [topdown|isometric]\n";
 }
 
 std::uint8_t clampToByte(float value) {
@@ -52,7 +52,7 @@ std::uint32_t landCellKey(int gridX, int gridY) {
     return (static_cast<std::uint32_t>(gridX) << 16u) ^ static_cast<std::uint32_t>(gridY & 0xffff);
 }
 
-PreviewBounds computeBounds(const voxelsprout::importer::ImportedScene& scene) {
+PreviewBounds computeBounds(const odai::importer::ImportedScene& scene) {
     PreviewBounds bounds{};
     bounds.minX = std::numeric_limits<float>::max();
     bounds.maxX = -std::numeric_limits<float>::max();
@@ -89,7 +89,7 @@ PreviewBounds computeBounds(const voxelsprout::importer::ImportedScene& scene) {
 }
 
 float sampleLandHeight(
-    const voxelsprout::importer::ImportedSceneLandscapeCell& cell,
+    const odai::importer::ImportedSceneLandscapeCell& cell,
     float localX,
     float localZ
 ) {
@@ -200,7 +200,7 @@ std::array<float, 3> transformPoint(
 }
 
 bool computeMeshBounds(
-    const voxelsprout::importer::ImportedSceneMesh& mesh,
+    const odai::importer::ImportedSceneMesh& mesh,
     std::array<float, 3>& outMin,
     std::array<float, 3>& outMax
 ) {
@@ -310,7 +310,7 @@ bool writeBmp(const std::filesystem::path& outputPath, const ImageRgba& image) {
     return output.good();
 }
 
-ImageRgba buildPreviewImage(const voxelsprout::importer::ImportedScene& scene, int width) {
+ImageRgba buildPreviewImage(const odai::importer::ImportedScene& scene, int width) {
     const PreviewBounds bounds = computeBounds(scene);
     const float spanX = std::max(bounds.maxX - bounds.minX, 1.0f);
     const float spanZ = std::max(bounds.maxZ - bounds.minZ, 1.0f);
@@ -322,7 +322,7 @@ ImageRgba buildPreviewImage(const voxelsprout::importer::ImportedScene& scene, i
     image.height = height;
     image.pixels.assign(static_cast<std::size_t>(width * height * 4), 255u);
 
-    std::unordered_map<std::uint32_t, const voxelsprout::importer::ImportedSceneLandscapeCell*> cellByKey;
+    std::unordered_map<std::uint32_t, const odai::importer::ImportedSceneLandscapeCell*> cellByKey;
     for (const auto& cell : scene.landscapeCells) {
         cellByKey.emplace(landCellKey(cell.gridX, cell.gridY), &cell);
     }
@@ -368,7 +368,7 @@ ImageRgba buildPreviewImage(const voxelsprout::importer::ImportedScene& scene, i
     return image;
 }
 
-ImageRgba buildIsometricPreviewImage(const voxelsprout::importer::ImportedScene& scene, int width) {
+ImageRgba buildIsometricPreviewImage(const odai::importer::ImportedScene& scene, int width) {
     const PreviewBounds bounds = computeBounds(scene);
     const float centerX = 0.5f * (bounds.minX + bounds.maxX);
     const float centerZ = 0.5f * (bounds.minZ + bounds.maxZ);
@@ -553,8 +553,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    voxelsprout::importer::ImportedScene scene{};
-    if (!voxelsprout::importer::loadImportedScene(inputPath, scene)) {
+    odai::importer::ImportedScene scene{};
+    if (!odai::importer::loadImportedScene(inputPath, scene)) {
         std::cerr << "Failed to load imported scene from " << inputPath << "\n";
         return 2;
     }

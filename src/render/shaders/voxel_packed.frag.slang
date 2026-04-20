@@ -13,7 +13,7 @@ Sampler3D<float4> voxelGiVolume;
 [[vk::binding(11, 0)]]
 Sampler3D<float4> voxelGiOccupancyVolume;
 
-#ifdef VOXEL_RT_SHADOWS
+#ifdef ODAI_RT_SHADOWS
 [[vk::binding(12, 0)]]
 RaytracingAccelerationStructure shadowScene;
 #endif
@@ -422,7 +422,7 @@ float sampleShadowPcf(float3 worldPosition, float3 normal, int cascadeIndex, flo
     return visibility / max(weightSum, 0.0001);
 }
 
-#ifdef VOXEL_RT_SHADOWS
+#ifdef ODAI_RT_SHADOWS
 static const float kPi = 3.14159265;
 static const float kGoldenAngle = 2.39996323;
 
@@ -606,7 +606,7 @@ float3 evaluateAmbient<TAmbientPolicy : IAmbientPolicy>(
 
 float selectShadowVisibility(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
 {
-#ifdef VOXEL_RT_SHADOWS
+#ifdef ODAI_RT_SHADOWS
     return sampleRayTracedShadow(worldPosition, normal, ndotl);
 #else
     if (kShadowPolicyMode <= 0)
@@ -674,7 +674,7 @@ float4 main(FragmentInput input) : SV_Target0
         // Use the directional shadow map as a cheap sky-visibility proxy for enclosed spaces.
         const float3 skyProbeNormal = float3(0.0, 1.0, 0.0);
         const float skyProbeNdotL = max(dot(skyProbeNormal, -sunDirection), 0.25);
-#ifdef VOXEL_RT_SHADOWS
+#ifdef ODAI_RT_SHADOWS
         skyOcclusion = sampleRayTracedShadow(input.inWorldPosition, skyProbeNormal, skyProbeNdotL);
 #else
         skyOcclusion = selectShadowVisibility(input.inWorldPosition, skyProbeNormal, viewDepth, skyProbeNdotL);

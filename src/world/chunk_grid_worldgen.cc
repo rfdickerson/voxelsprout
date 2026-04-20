@@ -8,7 +8,7 @@
 #include <limits>
 #include <vector>
 
-namespace voxelsprout::world {
+namespace odai::world {
 
 namespace {
 
@@ -475,4 +475,4 @@ void ChunkGrid::initializeFlatWorld() {
     VOX_LOGI("world") << "generated procedural world chunks=" << treeChunkCount;
 }
 
-} // namespace voxelsprout::world
+} // namespace odai::world

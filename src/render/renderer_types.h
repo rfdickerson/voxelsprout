@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 enum class FramePacingMode : std::uint8_t {
     Off = 0,
@@ -207,4 +207,4 @@ inline GameplayUiLayout buildGameplayUiLayout(float displayWidth, float displayH
     return layout;
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

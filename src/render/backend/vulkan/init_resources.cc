@@ -31,7 +31,7 @@
 #include <utility>
 #include <vector>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
@@ -291,8 +291,8 @@ std::filesystem::path resolveRendererAssetPath(const std::filesystem::path& rela
     std::vector<std::filesystem::path> baseCandidates;
     baseCandidates.reserve(6);
 
-#if defined(VOXEL_PROJECT_SOURCE_DIR)
-    baseCandidates.emplace_back(std::filesystem::path{VOXEL_PROJECT_SOURCE_DIR});
+#if defined(ODAI_PROJECT_SOURCE_DIR)
+    baseCandidates.emplace_back(std::filesystem::path{ODAI_PROJECT_SOURCE_DIR});
 #endif
 
     std::error_code cwdError;
@@ -4181,4 +4181,4 @@ void RendererBackend::destroyVoxelGiResources() {
 
 
 
-} // namespace voxelsprout::render
+} // namespace odai::render

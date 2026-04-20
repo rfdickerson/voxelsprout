@@ -8,12 +8,12 @@
 #include "sim/simulation.h"
 #include "sim/network_procedural.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 #include "render/renderer_shared.h"
 
 RendererBackend::FrameInstanceDrawData RendererBackend::prepareFrameInstanceDrawData(
-    const voxelsprout::sim::Simulation& simulation,
+    const odai::sim::Simulation& simulation,
     float simulationAlpha
 ) {
     FrameInstanceDrawData out{};
@@ -21,17 +21,17 @@ RendererBackend::FrameInstanceDrawData RendererBackend::prepareFrameInstanceDraw
     const float clampedSimulationAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
 
     if (buildPipeAndTransportInstances) {
-        const std::vector<voxelsprout::sim::Pipe>& pipes = simulation.pipes();
-        const std::vector<voxelsprout::sim::Belt>& belts = simulation.belts();
-        const std::vector<voxelsprout::sim::Track>& tracks = simulation.tracks();
-        const std::vector<voxelsprout::sim::BeltCargo>& beltCargoes = simulation.beltCargoes();
+        const std::vector<odai::sim::Pipe>& pipes = simulation.pipes();
+        const std::vector<odai::sim::Belt>& belts = simulation.belts();
+        const std::vector<odai::sim::Track>& tracks = simulation.tracks();
+        const std::vector<odai::sim::BeltCargo>& beltCargoes = simulation.beltCargoes();
         const std::vector<PipeEndpointState> endpointStates =
             pipes.empty() ? std::vector<PipeEndpointState>{} : buildPipeEndpointStates(pipes);
 
         std::vector<PipeInstance> pipeInstances;
         pipeInstances.reserve(pipes.size());
         for (std::size_t pipeIndex = 0; pipeIndex < pipes.size(); ++pipeIndex) {
-            const voxelsprout::sim::Pipe& pipe = pipes[pipeIndex];
+            const odai::sim::Pipe& pipe = pipes[pipeIndex];
             const PipeEndpointState& endpointState = endpointStates[pipeIndex];
             PipeInstance instance{};
             instance.originLength[0] = static_cast<float>(pipe.x);
@@ -55,13 +55,13 @@ RendererBackend::FrameInstanceDrawData RendererBackend::prepareFrameInstanceDraw
 
         std::vector<PipeInstance> transportInstances;
         transportInstances.reserve(belts.size() + tracks.size());
-        for (const voxelsprout::sim::Belt& belt : belts) {
+        for (const odai::sim::Belt& belt : belts) {
             PipeInstance instance{};
             instance.originLength[0] = static_cast<float>(belt.x);
             instance.originLength[1] = static_cast<float>(belt.y);
             instance.originLength[2] = static_cast<float>(belt.z);
             instance.originLength[3] = 1.0f;
-            const voxelsprout::math::Vector3 axis = beltDirectionAxis(belt.direction);
+            const odai::math::Vector3 axis = beltDirectionAxis(belt.direction);
             instance.axisRadius[0] = axis.x;
             instance.axisRadius[1] = axis.y;
             instance.axisRadius[2] = axis.z;
@@ -77,13 +77,13 @@ RendererBackend::FrameInstanceDrawData RendererBackend::prepareFrameInstanceDraw
             transportInstances.push_back(instance);
         }
 
-        for (const voxelsprout::sim::Track& track : tracks) {
+        for (const odai::sim::Track& track : tracks) {
             PipeInstance instance{};
             instance.originLength[0] = static_cast<float>(track.x);
             instance.originLength[1] = static_cast<float>(track.y);
             instance.originLength[2] = static_cast<float>(track.z);
             instance.originLength[3] = 1.0f;
-            const voxelsprout::math::Vector3 axis = trackDirectionAxis(track.direction);
+            const odai::math::Vector3 axis = trackDirectionAxis(track.direction);
             instance.axisRadius[0] = axis.x;
             instance.axisRadius[1] = axis.y;
             instance.axisRadius[2] = axis.z;
@@ -101,16 +101,16 @@ RendererBackend::FrameInstanceDrawData RendererBackend::prepareFrameInstanceDraw
 
         std::vector<PipeInstance> beltCargoInstances;
         beltCargoInstances.reserve(beltCargoes.size());
-        for (const voxelsprout::sim::BeltCargo& cargo : beltCargoes) {
+        for (const odai::sim::BeltCargo& cargo : beltCargoes) {
             if (cargo.beltIndex < 0 || static_cast<std::size_t>(cargo.beltIndex) >= belts.size()) {
                 continue;
             }
             const float worldX = std::lerp(cargo.prevWorldPos[0], cargo.currWorldPos[0], clampedSimulationAlpha);
             const float worldY = std::lerp(cargo.prevWorldPos[1], cargo.currWorldPos[1], clampedSimulationAlpha);
             const float worldZ = std::lerp(cargo.prevWorldPos[2], cargo.currWorldPos[2], clampedSimulationAlpha);
-            const voxelsprout::sim::Belt& belt = belts[static_cast<std::size_t>(cargo.beltIndex)];
-            const voxelsprout::math::Vector3 axis = beltDirectionAxis(belt.direction);
-            const voxelsprout::math::Vector3 tint =
+            const odai::sim::Belt& belt = belts[static_cast<std::size_t>(cargo.beltIndex)];
+            const odai::math::Vector3 axis = beltDirectionAxis(belt.direction);
+            const odai::math::Vector3 tint =
                 kBeltCargoTints[static_cast<std::size_t>(cargo.typeId % kBeltCargoTints.size())];
 
             PipeInstance instance{};
@@ -207,4 +207,4 @@ RendererBackend::FrameInstanceDrawData RendererBackend::prepareFrameInstanceDraw
     return out;
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

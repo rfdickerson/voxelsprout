@@ -8,7 +8,7 @@
 #include <span>
 #include <unordered_map>
 
-namespace voxelsprout::world {
+namespace odai::world {
 
 class World {
 public:
@@ -109,4 +109,4 @@ private:
     ChunkStreamingStats m_streamingStats{};
 };
 
-} // namespace voxelsprout::world
+} // namespace odai::world

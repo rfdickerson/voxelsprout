@@ -5,7 +5,7 @@
 // World Voxel subsystem
 // Responsible for: defining the smallest data unit in the voxel world.
 // Should NOT do: perform simulation logic, chunk storage management, or rendering.
-namespace voxelsprout::world {
+namespace odai::world {
 
 enum class VoxelType : std::uint8_t {
     Empty = 0,
@@ -24,4 +24,4 @@ struct Voxel {
     std::uint8_t baseColorIndex = 0xFFu;
 };
 
-} // namespace voxelsprout::world
+} // namespace odai::world

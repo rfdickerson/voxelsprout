@@ -2,7 +2,7 @@
 
 #include <vulkan/vulkan.h>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 class PipelineManager {
 public:
@@ -199,4 +199,4 @@ public:
     }
 };
 
-} // namespace voxelsprout::render
+} // namespace odai::render

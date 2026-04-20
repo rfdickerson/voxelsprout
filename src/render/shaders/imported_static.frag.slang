@@ -14,7 +14,7 @@ Sampler3D<float4> voxelGiOccupancyVolume;
 static const uint kImportedMaterialFlagAlphaTest = 1u;
 static const uint kInvalidImportedTextureIndex = 0xffffffffu;
 
-#ifdef VOXEL_RT_SHADOWS
+#ifdef ODAI_RT_SHADOWS
 [[vk::binding(12, 0)]]
 RaytracingAccelerationStructure shadowScene;
 static const float kPi = 3.14159265359;
@@ -167,7 +167,7 @@ float4 main(FragmentInput input) : SV_Target0
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
     const float wrappedNdotL = saturate((ndotl * 0.65) + 0.35);
     float shadowVisibility = 1.0;
-#ifdef VOXEL_RT_SHADOWS
+#ifdef ODAI_RT_SHADOWS
     shadowVisibility = sampleRayTracedShadow(input.inWorldPosition, normal, ndotl);
 #endif
     const float3 ambient =

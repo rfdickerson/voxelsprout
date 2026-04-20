@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 enum class FrameGraphQueue : std::uint8_t {
     Graphics,
@@ -63,4 +63,4 @@ private:
     std::vector<std::tuple<PassId, ResourceId, FrameGraphResourceAccess>> m_resourceUses;
 };
 
-} // namespace voxelsprout::render
+} // namespace odai::render

@@ -2,17 +2,17 @@
 
 #include "render/backend/vulkan/shadow_culling_utils.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 std::vector<std::uint8_t> RendererBackend::buildShadowCandidateMask(
-    std::span<const voxelsprout::world::Chunk> chunks,
+    std::span<const odai::world::Chunk> chunks,
     std::span<const std::size_t> visibleChunkIndices
 ) const {
-    return ::voxelsprout::render::buildShadowCandidateMask(
+    return ::odai::render::buildShadowCandidateMask(
         chunks,
         visibleChunkIndices,
         m_shadowDebugSettings.enableOccluderCulling
     );
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

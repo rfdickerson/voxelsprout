@@ -6,7 +6,7 @@
 
 namespace {
 
-void ExpectNear(const voxelsprout::math::Vector3& lhs, const voxelsprout::math::Vector3& rhs) {
+void ExpectNear(const odai::math::Vector3& lhs, const odai::math::Vector3& rhs) {
     EXPECT_NEAR(lhs.x, rhs.x, 1e-5f);
     EXPECT_NEAR(lhs.y, rhs.y, 1e-5f);
     EXPECT_NEAR(lhs.z, rhs.z, 1e-5f);
@@ -15,7 +15,7 @@ void ExpectNear(const voxelsprout::math::Vector3& lhs, const voxelsprout::math::
 } // namespace
 
 TEST(FrameMathTest, ComputeCameraFrameCalculatesForwardAndChunkIndices) {
-    const voxelsprout::render::CameraPose camera{
+    const odai::render::CameraPose camera{
         .x = 32.5f,
         .y = -15.2f,
         .z = 15.9f,
@@ -24,8 +24,8 @@ TEST(FrameMathTest, ComputeCameraFrameCalculatesForwardAndChunkIndices) {
         .fovDegrees = 70.0f
     };
 
-    const voxelsprout::render::CameraFrameDerived frame = voxelsprout::render::computeCameraFrame(camera);
-    ExpectNear(frame.forward, voxelsprout::math::Vector3{0.0f, 0.0f, 1.0f});
+    const odai::render::CameraFrameDerived frame = odai::render::computeCameraFrame(camera);
+    ExpectNear(frame.forward, odai::math::Vector3{0.0f, 0.0f, 1.0f});
     EXPECT_EQ(frame.chunkX, 1);
     EXPECT_EQ(frame.chunkY, -1);
     EXPECT_EQ(frame.chunkZ, 0);
@@ -35,39 +35,39 @@ TEST(FrameMathTest, ComputeVoxelGiAxisOriginAndVerticalStability) {
     constexpr float halfSpan = 32.0f;
     constexpr float cellSize = 1.0f;
 
-    EXPECT_FLOAT_EQ(voxelsprout::render::computeVoxelGiAxisOrigin(10.9f, halfSpan, cellSize), -22.0f);
-    EXPECT_FLOAT_EQ(voxelsprout::render::computeVoxelGiAxisOrigin(-10.1f, halfSpan, cellSize), -43.0f);
+    EXPECT_FLOAT_EQ(odai::render::computeVoxelGiAxisOrigin(10.9f, halfSpan, cellSize), -22.0f);
+    EXPECT_FLOAT_EQ(odai::render::computeVoxelGiAxisOrigin(-10.1f, halfSpan, cellSize), -43.0f);
 
     EXPECT_FLOAT_EQ(
-        voxelsprout::render::computeVoxelGiStableOriginY(100.0f, 99.0f, true, 2.0f),
+        odai::render::computeVoxelGiStableOriginY(100.0f, 99.0f, true, 2.0f),
         99.0f
     );
     EXPECT_FLOAT_EQ(
-        voxelsprout::render::computeVoxelGiStableOriginY(100.0f, 97.0f, true, 2.0f),
+        odai::render::computeVoxelGiStableOriginY(100.0f, 97.0f, true, 2.0f),
         100.0f
     );
     EXPECT_FLOAT_EQ(
-        voxelsprout::render::computeVoxelGiStableOriginY(100.0f, 0.0f, false, 2.0f),
+        odai::render::computeVoxelGiStableOriginY(100.0f, 0.0f, false, 2.0f),
         100.0f
     );
 }
 
 TEST(FrameMathTest, ComputeSunDirectionUsesYawPitch) {
-    const voxelsprout::math::Vector3 dir = voxelsprout::render::computeSunDirection(-90.0f, 30.0f);
-    ExpectNear(dir, voxelsprout::math::Vector3{0.0f, 0.5f, -0.8660254f});
+    const odai::math::Vector3 dir = odai::render::computeSunDirection(-90.0f, 30.0f);
+    ExpectNear(dir, odai::math::Vector3{0.0f, 0.5f, -0.8660254f});
 }
 
 TEST(FrameMathTest, ComputeVoxelGiFlagsDetectsChanges) {
-    const std::array<voxelsprout::math::Vector3, 9> sh = {
-        voxelsprout::math::Vector3{0.1f, 0.2f, 0.3f},
-        voxelsprout::math::Vector3{0.2f, 0.1f, 0.4f},
-        voxelsprout::math::Vector3{0.3f, 0.0f, 0.1f},
-        voxelsprout::math::Vector3{0.4f, 0.3f, 0.2f},
-        voxelsprout::math::Vector3{0.5f, 0.1f, 0.0f},
-        voxelsprout::math::Vector3{0.6f, 0.2f, 0.1f},
-        voxelsprout::math::Vector3{0.7f, 0.3f, 0.2f},
-        voxelsprout::math::Vector3{0.8f, 0.4f, 0.3f},
-        voxelsprout::math::Vector3{0.9f, 0.5f, 0.4f},
+    const std::array<odai::math::Vector3, 9> sh = {
+        odai::math::Vector3{0.1f, 0.2f, 0.3f},
+        odai::math::Vector3{0.2f, 0.1f, 0.4f},
+        odai::math::Vector3{0.3f, 0.0f, 0.1f},
+        odai::math::Vector3{0.4f, 0.3f, 0.2f},
+        odai::math::Vector3{0.5f, 0.1f, 0.0f},
+        odai::math::Vector3{0.6f, 0.2f, 0.1f},
+        odai::math::Vector3{0.7f, 0.3f, 0.2f},
+        odai::math::Vector3{0.8f, 0.4f, 0.3f},
+        odai::math::Vector3{0.9f, 0.5f, 0.4f},
     };
     const std::array<std::array<float, 3>, 9> previousSh = {
         std::array<float, 3>{0.1f, 0.2f, 0.3f},
@@ -81,7 +81,7 @@ TEST(FrameMathTest, ComputeVoxelGiFlagsDetectsChanges) {
         std::array<float, 3>{0.9f, 0.5f, 0.4f},
     };
 
-    const voxelsprout::render::VoxelGiComputeFlags first = voxelsprout::render::computeVoxelGiFlags(
+    const odai::render::VoxelGiComputeFlags first = odai::render::computeVoxelGiFlags(
         sh,
         previousSh,
         {1.0f, 2.0f, 3.0f},
@@ -89,10 +89,10 @@ TEST(FrameMathTest, ComputeVoxelGiFlagsDetectsChanges) {
         true,
         false,
         true,
-        voxelsprout::math::Vector3{1.0f, 2.0f, 3.0f},
-        voxelsprout::math::Vector3{1.0f, 2.0f, 3.0f},
-        voxelsprout::math::Vector3{0.1f, 0.2f, 0.3f},
-        voxelsprout::math::Vector3{0.1f, 0.2f, 0.3f},
+        odai::math::Vector3{1.0f, 2.0f, 3.0f},
+        odai::math::Vector3{1.0f, 2.0f, 3.0f},
+        odai::math::Vector3{0.1f, 0.2f, 0.3f},
+        odai::math::Vector3{0.1f, 0.2f, 0.3f},
         1.0f,
         1.0f,
         0.5f,
@@ -106,7 +106,7 @@ TEST(FrameMathTest, ComputeVoxelGiFlagsDetectsChanges) {
     EXPECT_FALSE(first.needsOccupancyUpload);
     EXPECT_FALSE(first.needsComputeUpdate);
 
-    const voxelsprout::render::VoxelGiComputeFlags second = voxelsprout::render::computeVoxelGiFlags(
+    const odai::render::VoxelGiComputeFlags second = odai::render::computeVoxelGiFlags(
         sh,
         previousSh,
         {1.0f, 2.0f, 3.0f},
@@ -114,10 +114,10 @@ TEST(FrameMathTest, ComputeVoxelGiFlagsDetectsChanges) {
         true,
         true,
         true,
-        voxelsprout::math::Vector3{2.0f, 2.0f, 3.0f},
-        voxelsprout::math::Vector3{1.0f, 2.0f, 3.0f},
-        voxelsprout::math::Vector3{0.1f, 0.2f, 0.3f},
-        voxelsprout::math::Vector3{0.1f, 0.2f, 0.3f},
+        odai::math::Vector3{2.0f, 2.0f, 3.0f},
+        odai::math::Vector3{1.0f, 2.0f, 3.0f},
+        odai::math::Vector3{0.1f, 0.2f, 0.3f},
+        odai::math::Vector3{0.1f, 0.2f, 0.3f},
         1.0f,
         1.0f,
         0.5f,

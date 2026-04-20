@@ -11,7 +11,7 @@
 // World Chunk subsystem
 // Responsible for: owning a small local collection of voxels.
 // Should NOT do: global world streaming, simulation rules, or drawing.
-namespace voxelsprout::world {
+namespace odai::world {
 
 class Chunk {
 public:
@@ -426,4 +426,4 @@ inline void Chunk::syncMacroCellFromDense(int mx, int my, int mz) {
     cell.resolution = CellResolution::Refined1;
 }
 
-} // namespace voxelsprout::world
+} // namespace odai::world

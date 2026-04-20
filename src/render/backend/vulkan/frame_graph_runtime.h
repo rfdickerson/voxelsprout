@@ -6,7 +6,7 @@
 
 #include "render/backend/vulkan/frame_graph_core.h"
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 class CoreFrameGraphOrderValidator {
 public:
@@ -19,4 +19,4 @@ private:
     std::optional<std::uint32_t> m_lastPassOrderIndex = std::nullopt;
 };
 
-}  // namespace voxelsprout::render
+}  // namespace odai::render

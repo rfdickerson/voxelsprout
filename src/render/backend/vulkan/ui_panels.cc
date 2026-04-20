@@ -2,7 +2,7 @@
 
 #include <imgui.h>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 namespace {
 
@@ -346,4 +346,4 @@ void RendererBackend::buildSunDebugUi() {
     ImGui::End();
 }
 
-} // namespace voxelsprout::render
+} // namespace odai::render

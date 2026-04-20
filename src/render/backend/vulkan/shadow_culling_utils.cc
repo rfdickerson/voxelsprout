@@ -3,7 +3,7 @@
 #include <tuple>
 #include <unordered_map>
 
-namespace voxelsprout::render {
+namespace odai::render {
 
 namespace {
 struct ChunkCoordHash {
@@ -17,7 +17,7 @@ struct ChunkCoordHash {
 } // namespace
 
 std::vector<std::uint8_t> buildShadowCandidateMask(
-    std::span<const voxelsprout::world::Chunk> chunks,
+    std::span<const odai::world::Chunk> chunks,
     std::span<const std::size_t> visibleChunkIndices,
     bool enableOccluderCulling
 ) {
@@ -30,7 +30,7 @@ std::vector<std::uint8_t> buildShadowCandidateMask(
     std::unordered_map<std::tuple<int, int, int>, std::size_t, ChunkCoordHash> chunkIndexByCoord;
     chunkIndexByCoord.reserve(chunks.size() * 2u);
     for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-        const voxelsprout::world::Chunk& chunk = chunks[chunkArrayIndex];
+        const odai::world::Chunk& chunk = chunks[chunkArrayIndex];
         chunkIndexByCoord.emplace(
             std::tuple<int, int, int>{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()},
             chunkArrayIndex
@@ -48,7 +48,7 @@ std::vector<std::uint8_t> buildShadowCandidateMask(
         if (visibleChunkIndex >= chunks.size()) {
             continue;
         }
-        const voxelsprout::world::Chunk& chunk = chunks[visibleChunkIndex];
+        const odai::world::Chunk& chunk = chunks[visibleChunkIndex];
         shadowCandidateMask[visibleChunkIndex] = 1u;
         const int baseChunkX = chunk.chunkX();
         const int baseChunkY = chunk.chunkY();
@@ -69,4 +69,4 @@ std::vector<std::uint8_t> buildShadowCandidateMask(
     return shadowCandidateMask;
 }
 
-}  // namespace voxelsprout::render
+}  // namespace odai::render
