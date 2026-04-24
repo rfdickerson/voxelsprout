@@ -28,12 +28,13 @@ namespace {
 constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 constexpr std::uint32_t kImportedSceneVersion = 14u;
 constexpr float kExteriorWaterLevel = 0.0f;
-constexpr float kExteriorWaterSurfaceLift = 32.0f;
 constexpr int kLandSize = 65;
 constexpr int kLandTextureSize = 16;
 constexpr float kCellSizeUnits = 8192.0f;
 constexpr float kHeightScale = 8.0f;
 constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
+constexpr float kRiverAuditMaxDistance = 1024.0f;
+constexpr std::uint32_t kTerrainCompositeTextureSize = 1024u;
 
 std::string g_lastImportedSceneError;
 
@@ -150,6 +151,24 @@ DebugBounds computeTransformedMeshBounds(
         expandBounds(bounds, point);
     }
     return bounds;
+}
+
+float distanceBoundsToWaterPatchXz(const DebugBounds& bounds, const ImportedSceneWaterPatch& patch) {
+    const float patchMaxX = patch.originX + patch.sizeX;
+    const float patchMaxZ = patch.originZ + patch.sizeZ;
+    float dx = 0.0f;
+    if (bounds.max[0] < patch.originX) {
+        dx = patch.originX - bounds.max[0];
+    } else if (bounds.min[0] > patchMaxX) {
+        dx = bounds.min[0] - patchMaxX;
+    }
+    float dz = 0.0f;
+    if (bounds.max[2] < patch.originZ) {
+        dz = patch.originZ - bounds.max[2];
+    } else if (bounds.min[2] > patchMaxZ) {
+        dz = bounds.min[2] - patchMaxZ;
+    }
+    return std::sqrt((dx * dx) + (dz * dz));
 }
 
 bool modelPathMatchesDebugFilters(
@@ -1271,6 +1290,132 @@ std::optional<std::filesystem::path> resolveTextureFilePath(
     return std::nullopt;
 }
 
+float sampleTextureChannelWrapped(
+    const ImportedSceneTexture& texture,
+    float u,
+    float v,
+    int channel
+) {
+    if (texture.width == 0u || texture.height == 0u ||
+        texture.rgba8.size() < static_cast<std::size_t>(texture.width) * texture.height * 4u) {
+        return channel == 3 ? 255.0f : 128.0f;
+    }
+    u -= std::floor(u);
+    v -= std::floor(v);
+    const float x = (u * static_cast<float>(texture.width)) - 0.5f;
+    const float y = (v * static_cast<float>(texture.height)) - 0.5f;
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const float fx = x - static_cast<float>(x0);
+    const float fy = y - static_cast<float>(y0);
+    const auto texel = [&](int sx, int sy) -> float {
+        sx %= static_cast<int>(texture.width);
+        sy %= static_cast<int>(texture.height);
+        if (sx < 0) {
+            sx += static_cast<int>(texture.width);
+        }
+        if (sy < 0) {
+            sy += static_cast<int>(texture.height);
+        }
+        const std::size_t offset =
+            (static_cast<std::size_t>(sy) * texture.width + static_cast<std::size_t>(sx)) * 4u;
+        return static_cast<float>(texture.rgba8[offset + static_cast<std::size_t>(channel)]);
+    };
+    const float c00 = texel(x0, y0);
+    const float c10 = texel(x0 + 1, y0);
+    const float c01 = texel(x0, y0 + 1);
+    const float c11 = texel(x0 + 1, y0 + 1);
+    return std::lerp(std::lerp(c00, c10, fx), std::lerp(c01, c11, fx), fy);
+}
+
+std::uint32_t buildTerrainCompositeTexture(
+    ImportedScene& scene,
+    const ParsedLand& land,
+    const std::unordered_map<std::uint32_t, std::string>& landscapeTextureByIndex,
+    const std::unordered_map<std::string, std::uint32_t>& terrainTextureSlotByPath
+) {
+    ImportedSceneTexture composite{};
+    composite.sourcePath = "__generated/terrain_cell_" +
+        std::to_string(land.gridX) + "_" + std::to_string(land.gridY) + "_splat";
+    composite.width = kTerrainCompositeTextureSize;
+    composite.height = kTerrainCompositeTextureSize;
+    composite.mipLevelCount = 1u;
+    composite.rgba8.resize(
+        static_cast<std::size_t>(composite.width) * composite.height * 4u,
+        255u);
+
+    const auto textureSlotForVtex = [&](std::uint16_t vtex) -> std::uint32_t {
+        const auto texIt = landscapeTextureByIndex.find(vtex);
+        if (texIt == landscapeTextureByIndex.end()) {
+            return std::numeric_limits<std::uint32_t>::max();
+        }
+        const auto slotIt = terrainTextureSlotByPath.find(texIt->second);
+        if (slotIt == terrainTextureSlotByPath.end()) {
+            return std::numeric_limits<std::uint32_t>::max();
+        }
+        return slotIt->second;
+    };
+
+    for (std::uint32_t y = 0; y < composite.height; ++y) {
+        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(composite.height);
+        const float textureGridY = (v * static_cast<float>(kLandTextureSize)) - 0.5f;
+        const int y0 = static_cast<int>(std::floor(textureGridY));
+        const float fy = textureGridY - static_cast<float>(y0);
+        const int tileY = std::clamp(static_cast<int>(v * static_cast<float>(kLandTextureSize)), 0, kLandTextureSize - 1);
+        for (std::uint32_t x = 0; x < composite.width; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(composite.width);
+            const float textureGridX = (u * static_cast<float>(kLandTextureSize)) - 0.5f;
+            const int x0 = static_cast<int>(std::floor(textureGridX));
+            const float fx = textureGridX - static_cast<float>(x0);
+            const int tileX = std::clamp(static_cast<int>(u * static_cast<float>(kLandTextureSize)), 0, kLandTextureSize - 1);
+            const float localU = (u * static_cast<float>(kLandTextureSize)) - static_cast<float>(tileX);
+            const float localV = (v * static_cast<float>(kLandTextureSize)) - static_cast<float>(tileY);
+
+            float accum[4] = {};
+            float totalWeight = 0.0f;
+            for (int oy = 0; oy < 2; ++oy) {
+                const int sy = std::clamp(y0 + oy, 0, kLandTextureSize - 1);
+                const float wy = oy == 0 ? (1.0f - fy) : fy;
+                for (int ox = 0; ox < 2; ++ox) {
+                    const int sx = std::clamp(x0 + ox, 0, kLandTextureSize - 1);
+                    const float wx = ox == 0 ? (1.0f - fx) : fx;
+                    const float weight = wx * wy;
+                    if (weight <= 0.0f) {
+                        continue;
+                    }
+                    const std::uint16_t vtex = land.textureIndices[static_cast<std::size_t>((sy * kLandTextureSize) + sx)];
+                    const std::uint32_t slot = textureSlotForVtex(vtex);
+                    if (slot >= scene.textures.size()) {
+                        continue;
+                    }
+                    const ImportedSceneTexture& source = scene.textures[slot];
+                    for (int channel = 0; channel < 4; ++channel) {
+                        accum[channel] += sampleTextureChannelWrapped(source, localU, localV, channel) * weight;
+                    }
+                    totalWeight += weight;
+                }
+            }
+
+            const std::size_t dstOffset = (static_cast<std::size_t>(y) * composite.width + x) * 4u;
+            if (totalWeight <= 1e-5f) {
+                composite.rgba8[dstOffset + 0u] = 128u;
+                composite.rgba8[dstOffset + 1u] = 128u;
+                composite.rgba8[dstOffset + 2u] = 128u;
+                composite.rgba8[dstOffset + 3u] = 255u;
+                continue;
+            }
+            for (int channel = 0; channel < 4; ++channel) {
+                composite.rgba8[dstOffset + static_cast<std::size_t>(channel)] =
+                    static_cast<std::uint8_t>(std::clamp((accum[channel] / totalWeight) + 0.5f, 0.0f, 255.0f));
+            }
+        }
+    }
+
+    const std::uint32_t textureIndex = static_cast<std::uint32_t>(scene.textures.size());
+    scene.textures.push_back(std::move(composite));
+    return textureIndex;
+}
+
 std::unordered_map<std::string, std::filesystem::path> buildCaseInsensitiveFileIndex(
     const std::filesystem::path& root
 ) {
@@ -1324,26 +1469,38 @@ ImportedScene buildSceneFromParsedData(
         const float cellOriginZ = static_cast<float>(land.gridY) * kCellSizeUnits;
         const float quadSize = kCellSizeUnits / static_cast<float>(kLandSize - 1);
         for (int quadY = 0; quadY < (kLandSize - 1); ++quadY) {
+            bool inWaterRun = false;
+            int runStartQuadX = 0;
+            auto flushWaterRun = [&](int endQuadX) {
+                if (!inWaterRun || endQuadX <= runStartQuadX) {
+                    return;
+                }
+                ImportedSceneWaterPatch patch{};
+                patch.originX = cellOriginX + (static_cast<float>(runStartQuadX) * quadSize);
+                patch.originZ = cellOriginZ + (static_cast<float>(quadY) * quadSize);
+                patch.sizeX = static_cast<float>(endQuadX - runStartQuadX) * quadSize;
+                patch.sizeZ = quadSize;
+                patch.waterLevel = kExteriorWaterLevel;
+                scene.waterPatches.push_back(patch);
+                inWaterRun = false;
+            };
             for (int quadX = 0; quadX < (kLandSize - 1); ++quadX) {
                 const std::size_t i00 = static_cast<std::size_t>((quadY * kLandSize) + quadX);
                 const std::size_t i10 = static_cast<std::size_t>((quadY * kLandSize) + quadX + 1);
                 const std::size_t i01 = static_cast<std::size_t>(((quadY + 1) * kLandSize) + quadX);
                 const std::size_t i11 = static_cast<std::size_t>(((quadY + 1) * kLandSize) + quadX + 1);
-                const float minHeight = std::min(
-                    std::min(land.heights[i00], land.heights[i10]),
-                    std::min(land.heights[i01], land.heights[i11]));
-                if (minHeight > kExteriorWaterLevel) {
-                    continue;
+                const float centerHeight =
+                    (land.heights[i00] + land.heights[i10] + land.heights[i01] + land.heights[i11]) * 0.25f;
+                if (centerHeight <= kExteriorWaterLevel) {
+                    if (!inWaterRun) {
+                        inWaterRun = true;
+                        runStartQuadX = quadX;
+                    }
+                } else {
+                    flushWaterRun(quadX);
                 }
-
-                ImportedSceneWaterPatch patch{};
-                patch.originX = cellOriginX + (static_cast<float>(quadX) * quadSize);
-                patch.originZ = cellOriginZ + (static_cast<float>(quadY) * quadSize);
-                patch.sizeX = quadSize;
-                patch.sizeZ = quadSize;
-                patch.waterLevel = kExteriorWaterLevel + kExteriorWaterSurfaceLift;
-                scene.waterPatches.push_back(patch);
             }
+            flushWaterRun(kLandSize - 1);
         }
     }
 
@@ -1366,6 +1523,16 @@ ImportedScene buildSceneFromParsedData(
     std::unordered_map<std::string, std::uint32_t> terrainTextureSlotByPath;
     for (std::uint32_t i = 0; i < scene.textures.size(); ++i) {
         terrainTextureSlotByPath[scene.textures[i].sourcePath] = i;
+    }
+    const std::unordered_map<std::string, std::filesystem::path> dataFileIndex =
+        buildCaseInsensitiveFileIndex(morrowindDataFilesPath);
+    for (ImportedSceneTexture& texture : scene.textures) {
+        const std::optional<std::filesystem::path> texturePath =
+            resolveTextureFilePath(dataFileIndex, texture.sourcePath);
+        if (!texturePath.has_value()) {
+            continue;
+        }
+        loadTextureRgba(*texturePath, texture.width, texture.height, texture.rgba8);
     }
 
     auto addTextureSlot = [&](const std::string& sourcePath) {
@@ -1393,69 +1560,55 @@ ImportedScene buildSceneFromParsedData(
         const float cellOriginX = static_cast<float>(land.gridX) * kCellSizeUnits;
         const float cellOriginZ = static_cast<float>(land.gridY) * kCellSizeUnits;
         const float quadSize = kCellSizeUnits / static_cast<float>(kLandSize - 1);
+        const std::uint32_t compositeTextureIndex = buildTerrainCompositeTexture(
+            scene,
+            land,
+            landscapeTextureByIndex,
+            terrainTextureSlotByPath);
 
-        for (int textureY = 0; textureY < kLandTextureSize; ++textureY) {
-            for (int textureX = 0; textureX < kLandTextureSize; ++textureX) {
-                const int vertexMinX = textureX * 4;
-                const int vertexMinY = textureY * 4;
-                const std::uint16_t textureIndex = land.textureIndices[static_cast<std::size_t>((textureY * kLandTextureSize) + textureX)];
-                std::uint32_t sceneTextureIndex = 0u;
-                const auto texIt = landscapeTextureByIndex.find(textureIndex);
-                if (texIt != landscapeTextureByIndex.end()) {
-                    const auto slotIt = terrainTextureSlotByPath.find(texIt->second);
-                    if (slotIt != terrainTextureSlotByPath.end()) {
-                        sceneTextureIndex = slotIt->second;
-                    }
-                }
-                ImportedSceneMeshPart part{};
-                part.firstIndex = static_cast<std::uint32_t>(terrainMesh.indices.size());
-                part.textureIndex = sceneTextureIndex;
-                part.alphaTest = false;
-                for (int localY = 0; localY <= 4; ++localY) {
-                    for (int localX = 0; localX <= 4; ++localX) {
-                        const int x = vertexMinX + localX;
-                        const int y = vertexMinY + localY;
-                        const std::size_t vertexIndex = static_cast<std::size_t>((y * kLandSize) + x);
-                        ImportedSceneVertex vertex{};
-                        vertex.position[0] = cellOriginX + (static_cast<float>(x) * quadSize);
-                        vertex.position[1] = land.heights[vertexIndex];
-                        vertex.position[2] = cellOriginZ + (static_cast<float>(y) * quadSize);
-                        const std::array<float, 3> normal = computeCellNormal(land, x, y);
-                        vertex.normal[0] = normal[0];
-                        vertex.normal[1] = normal[1];
-                        vertex.normal[2] = normal[2];
-                        vertex.uv[0] = static_cast<float>(localX) / 4.0f;
-                        vertex.uv[1] = static_cast<float>(localY) / 4.0f;
-                        terrainMesh.vertices.push_back(vertex);
-                    }
-                }
-
-                const std::uint32_t baseVertex = static_cast<std::uint32_t>(terrainMesh.vertices.size() - 25u);
-                for (int patchY = 0; patchY < 4; ++patchY) {
-                    for (int patchX = 0; patchX < 4; ++patchX) {
-                        const std::uint32_t i0 = baseVertex + static_cast<std::uint32_t>((patchY * 5) + patchX);
-                        const std::uint32_t i1 = i0 + 1u;
-                        const std::uint32_t i2 = i0 + 5u;
-                        const std::uint32_t i3 = i2 + 1u;
-                        terrainMesh.indices.push_back(i0);
-                        terrainMesh.indices.push_back(i2);
-                        terrainMesh.indices.push_back(i1);
-                        terrainMesh.indices.push_back(i1);
-                        terrainMesh.indices.push_back(i2);
-                        terrainMesh.indices.push_back(i3);
-                    }
-                }
-                part.indexCount = static_cast<std::uint32_t>(terrainMesh.indices.size()) - part.firstIndex;
-                terrainMesh.parts.push_back(part);
+        ImportedSceneMeshPart part{};
+        part.firstIndex = static_cast<std::uint32_t>(terrainMesh.indices.size());
+        part.textureIndex = compositeTextureIndex;
+        part.alphaTest = false;
+        const std::uint32_t baseVertex = static_cast<std::uint32_t>(terrainMesh.vertices.size());
+        for (int y = 0; y < kLandSize; ++y) {
+            for (int x = 0; x < kLandSize; ++x) {
+                const std::size_t vertexIndex = static_cast<std::size_t>((y * kLandSize) + x);
+                ImportedSceneVertex vertex{};
+                vertex.position[0] = cellOriginX + (static_cast<float>(x) * quadSize);
+                vertex.position[1] = land.heights[vertexIndex];
+                vertex.position[2] = cellOriginZ + (static_cast<float>(y) * quadSize);
+                const std::array<float, 3> normal = computeCellNormal(land, x, y);
+                vertex.normal[0] = normal[0];
+                vertex.normal[1] = normal[1];
+                vertex.normal[2] = normal[2];
+                vertex.uv[0] = static_cast<float>(x) / static_cast<float>(kLandSize - 1);
+                vertex.uv[1] = static_cast<float>(y) / static_cast<float>(kLandSize - 1);
+                terrainMesh.vertices.push_back(vertex);
             }
         }
+
+        for (int y = 0; y < (kLandSize - 1); ++y) {
+            for (int x = 0; x < (kLandSize - 1); ++x) {
+                const std::uint32_t i0 = baseVertex + static_cast<std::uint32_t>((y * kLandSize) + x);
+                const std::uint32_t i1 = i0 + 1u;
+                const std::uint32_t i2 = i0 + static_cast<std::uint32_t>(kLandSize);
+                const std::uint32_t i3 = i2 + 1u;
+                terrainMesh.indices.push_back(i0);
+                terrainMesh.indices.push_back(i2);
+                terrainMesh.indices.push_back(i1);
+                terrainMesh.indices.push_back(i1);
+                terrainMesh.indices.push_back(i2);
+                terrainMesh.indices.push_back(i3);
+            }
+        }
+        part.indexCount = static_cast<std::uint32_t>(terrainMesh.indices.size()) - part.firstIndex;
+        terrainMesh.parts.push_back(part);
     }
     if (!terrainMesh.indices.empty()) {
         scene.meshes.push_back(std::move(terrainMesh));
     }
 
-    const std::unordered_map<std::string, std::filesystem::path> dataFileIndex =
-        buildCaseInsensitiveFileIndex(morrowindDataFilesPath);
     const std::filesystem::path meshesRoot = morrowindDataFilesPath / "Meshes";
     const std::unordered_map<std::string, std::filesystem::path> meshFileIndex = buildCaseInsensitiveFileIndex(meshesRoot);
     std::unordered_map<std::string, std::uint32_t> meshIndexByModelPath;
@@ -1559,16 +1712,58 @@ ImportedScene buildSceneFromParsedData(
 
     std::size_t loadedTextureCount = 0u;
     for (ImportedSceneTexture& texture : scene.textures) {
-        const std::optional<std::filesystem::path> texturePath =
-            resolveTextureFilePath(dataFileIndex, texture.sourcePath);
-        if (!texturePath.has_value()) {
-            continue;
-        }
-        if (!loadTextureRgba(*texturePath, texture.width, texture.height, texture.rgba8)) {
-            continue;
+        if (texture.rgba8.empty()) {
+            const std::optional<std::filesystem::path> texturePath =
+                resolveTextureFilePath(dataFileIndex, texture.sourcePath);
+            if (!texturePath.has_value()) {
+                continue;
+            }
+            if (!loadTextureRgba(*texturePath, texture.width, texture.height, texture.rgba8)) {
+                continue;
+            }
         }
         generateTextureMipChain(texture.width, texture.height, texture.rgba8, texture.mipLevelCount);
         ++loadedTextureCount;
+    }
+
+    if (getEnvironmentVariable("ODAI_BAKE_RIVER_AUDIT").has_value()) {
+        std::size_t printedRiverAuditRecords = 0u;
+        for (const ImportedSceneInstance& instance : scene.instances) {
+            if (instance.meshIndex >= scene.meshes.size()) {
+                continue;
+            }
+            std::array<float, 16> transform{};
+            std::copy(std::begin(instance.transform), std::end(instance.transform), transform.begin());
+            const DebugBounds worldBounds = computeTransformedMeshBounds(scene.meshes[instance.meshIndex], transform);
+            if (!worldBounds.valid) {
+                continue;
+            }
+            float nearestWaterDistance = std::numeric_limits<float>::max();
+            for (const ImportedSceneWaterPatch& patch : scene.waterPatches) {
+                nearestWaterDistance = std::min(nearestWaterDistance, distanceBoundsToWaterPatchXz(worldBounds, patch));
+            }
+            if (nearestWaterDistance > kRiverAuditMaxDistance) {
+                continue;
+            }
+            if (printedRiverAuditRecords == 0u) {
+                std::cerr << "[morrowind cooker][river audit] statics within "
+                          << kRiverAuditMaxDistance << " units of baked water:\n";
+            }
+            std::cerr << "[morrowind cooker][river audit] model=" << instance.modelPath
+                      << " refId=" << instance.sourceId
+                      << " nearestWaterDistance=" << nearestWaterDistance
+                      << " boundsMin=(" << worldBounds.min[0] << "," << worldBounds.min[1] << "," << worldBounds.min[2] << ")"
+                      << " boundsMax=(" << worldBounds.max[0] << "," << worldBounds.max[1] << "," << worldBounds.max[2] << ")\n";
+            ++printedRiverAuditRecords;
+            if (printedRiverAuditRecords >= 96u) {
+                std::cerr << "[morrowind cooker][river audit] stopped after 96 nearby statics\n";
+                break;
+            }
+        }
+        if (printedRiverAuditRecords == 0u) {
+            std::cerr << "[morrowind cooker][river audit] no statics found within "
+                      << kRiverAuditMaxDistance << " units of baked water\n";
+        }
     }
 
     std::cerr << "[morrowind cooker] Static mesh import: "
@@ -1713,11 +1908,11 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
     if (!scene.meshes.empty()) {
         const ImportedSceneMesh& terrainMesh = scene.meshes.front();
         if (!terrainMesh.vertices.empty() && !terrainMesh.indices.empty()) {
-            const std::uint32_t firstIndex = static_cast<std::uint32_t>(scene.packedIndices.size());
             for (const ImportedSceneMeshPart& part : terrainMesh.parts) {
                 if (part.indexCount == 0u || part.firstIndex >= terrainMesh.indices.size()) {
                     continue;
                 }
+                const std::uint32_t firstIndex = static_cast<std::uint32_t>(scene.packedIndices.size());
                 std::vector<std::uint32_t> remappedVertexIndices(
                     terrainMesh.vertices.size(),
                     std::numeric_limits<std::uint32_t>::max());
@@ -1759,11 +1954,11 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     }
                     scene.packedIndices.push_back(remappedIndex);
                 }
-            }
-            const std::uint32_t terrainIndexCount =
-                static_cast<std::uint32_t>(scene.packedIndices.size() - firstIndex);
-            if (terrainIndexCount != 0u) {
-                scene.packedDraws.push_back(ImportedScenePackedDraw{firstIndex, terrainIndexCount});
+                const std::uint32_t indexCount =
+                    static_cast<std::uint32_t>(scene.packedIndices.size() - firstIndex);
+                if (indexCount != 0u) {
+                    scene.packedDraws.push_back(ImportedScenePackedDraw{firstIndex, indexCount});
+                }
             }
         }
 
