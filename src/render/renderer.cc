@@ -23,6 +23,10 @@ void Renderer::clearMagicaVoxelMeshes() {
     m_backend->clearMagicaVoxelMeshes();
 }
 
+void Renderer::clearGpuScene() {
+    m_backend->clearGpuScene();
+}
+
 void Renderer::clearImportedSceneMeshes() {
     m_backend->clearImportedSceneMeshes();
 }
@@ -34,6 +38,10 @@ bool Renderer::uploadMagicaVoxelMesh(
     float worldOffsetZ
 ) {
     return m_backend->uploadMagicaVoxelMesh(mesh, worldOffsetX, worldOffsetY, worldOffsetZ);
+}
+
+bool Renderer::uploadGpuScene(const odai::importer::GpuSceneAsset& scene) {
+    return m_backend->uploadGpuScene(scene);
 }
 
 bool Renderer::uploadImportedScene(const odai::importer::ImportedScene& scene) {

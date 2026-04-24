@@ -369,7 +369,7 @@ float4 main(FragmentInput input) : SV_Target0
 
     const float ssaoEnable = step(0.5, ssaoMode);
     const float ssaoIntensity = clamp(camera.shadowConfig2.z, 0.0, 2.0);
-    const float ssaoContribution = lerp(1.0, ssao, ssaoIntensity);
+    const float ssaoContribution = pow(max(ssao, 0.001), ssaoIntensity);
     const float aoFactor = lerp(1.0, ssaoContribution, ssaoEnable);
     hdrColor *= lerp(1.0, aoFactor, geometryMask);
 

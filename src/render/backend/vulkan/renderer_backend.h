@@ -1,5 +1,6 @@
 #pragma once
 
+#include "import/gpu_scene.h"
 #include "import/imported_scene.h"
 #include "render/backend/vulkan/buffer_helpers.h"
 #include "render/backend/vulkan/descriptor_manager.h"
@@ -105,9 +106,9 @@ public:
         int grassShadowCascadeCount = 1;
         bool enableOccluderCulling = true;
 
-        float ssaoRadius = 0.55f;
-        float ssaoBias = 0.03f;
-        float ssaoIntensity = 0.60f;
+        float ssaoRadius = 24.0f;
+        float ssaoBias = 1.25f;
+        float ssaoIntensity = 0.85f;
     };
 
     struct SkyDebugSettings {
@@ -182,6 +183,8 @@ public:
     bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
+    void clearGpuScene();
+    bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
@@ -1024,6 +1027,7 @@ private:
     std::uint64_t m_displayRefreshDurationNs = 0;
     std::uint64_t m_lastScheduledDesiredPresentTimeNs = 0;
     std::unordered_map<std::uint32_t, std::uint64_t> m_displayTimingDesiredPresentTimesNs;
+    std::vector<VkPastPresentationTimingGOOGLE> m_pastPresentationTimings;
     uint32_t m_currentFrame = 0;
     bool m_debugUiVisible = false;
     bool m_showFrameStatsPanel = false;
@@ -1034,7 +1038,7 @@ private:
     float m_debugCameraFovDegrees = 90.0f;
     bool m_debugCameraFovInitialized = false;
     bool m_debugEnableVertexAo = true;
-    bool m_debugEnableSsao = false;
+    bool m_debugEnableSsao = true;
     bool m_debugShowImportedTerrain = true;
     bool m_debugShowImportedStatics = true;
     bool m_debugShowImportedTextures = true;

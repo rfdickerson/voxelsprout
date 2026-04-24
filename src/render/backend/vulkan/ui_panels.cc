@@ -172,9 +172,9 @@ void RendererBackend::buildShadowDebugUi() {
         if (ImGui::BeginTabItem("AO + GI")) {
             ImGui::Checkbox("Enable Vertex AO", &m_debugEnableVertexAo);
             ImGui::Checkbox("Enable SSAO", &m_debugEnableSsao);
-            ImGui::SliderFloat("SSAO Radius", &m_shadowDebugSettings.ssaoRadius, 0.10f, 2.00f, "%.2f");
-            ImGui::SliderFloat("SSAO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 0.20f, "%.3f");
-            ImGui::SliderFloat("SSAO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 1.50f, "%.2f");
+            ImGui::SliderFloat("SSAO Radius", &m_shadowDebugSettings.ssaoRadius, 1.0f, 96.0f, "%.1f");
+            ImGui::SliderFloat("SSAO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 6.0f, "%.2f");
+            ImGui::SliderFloat("SSAO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 2.0f, "%.2f");
             if (ImGui::CollapsingHeader("Advanced AO Debug")) {
                 ImGui::Checkbox("Visualize SSAO", &m_debugVisualizeSsao);
                 ImGui::Checkbox("Visualize AO Normals", &m_debugVisualizeAoNormals);

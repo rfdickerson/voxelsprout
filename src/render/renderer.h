@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sim/simulation.h"
+#include "import/gpu_scene.h"
 #include "import/imported_scene.h"
 #include "world/chunk_grid.h"
 #include "world/chunk_mesher.h"
@@ -31,6 +32,8 @@ public:
     bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
+    void clearGpuScene();
+    bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
