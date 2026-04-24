@@ -233,6 +233,13 @@ void testGpuSceneBuildFromImportedScene() {
     expectTrue(gpuScene.renderCache.drawInstanceIndices.size() == gpuScene.renderCache.packedDraws.size(),
                "GPU scene draw-instance mapping matches draw count");
     expectTrue(gpuScene.renderCache.packedDraws.size() == 3u, "GPU scene preserves mesh parts as separate draws");
+    expectTrue(!gpuScene.renderCache.pageDrawRanges.empty(), "GPU scene render cache records page draw ranges");
+    expectTrue(gpuScene.renderCache.pageDrawRanges.front().firstDraw == 0u,
+               "GPU scene page draw ranges start at the first draw");
+    expectTrue(gpuScene.renderCache.pageDrawRanges.front().drawCount >= 1u,
+               "GPU scene page draw ranges cover at least one draw");
+    expectTrue(gpuScene.renderCache.pageDrawRanges.front().terrainDrawCount == 1u,
+               "GPU scene page draw ranges record terrain draws");
     const auto& opaqueWallDraw = gpuScene.renderCache.packedDraws[1];
     const auto& alphaWallDraw = gpuScene.renderCache.packedDraws[2];
     const std::uint32_t opaqueWallVertex =

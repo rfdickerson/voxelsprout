@@ -94,6 +94,13 @@ struct GpuScenePageRecord {
     GpuSceneBounds bounds{};
 };
 
+struct GpuScenePageDrawRange {
+    std::uint32_t pageIndex = 0;
+    std::uint32_t firstDraw = 0;
+    std::uint32_t drawCount = 0;
+    std::uint32_t terrainDrawCount = 0;
+};
+
 struct GpuSceneRenderCache {
     std::vector<ImportedSceneTexture> textures;
     std::vector<ImportedSceneWaterPatch> waterPatches;
@@ -101,6 +108,7 @@ struct GpuSceneRenderCache {
     std::vector<std::uint32_t> packedIndices;
     std::vector<ImportedScenePackedDraw> packedDraws;
     std::vector<std::uint32_t> drawInstanceIndices;
+    std::vector<GpuScenePageDrawRange> pageDrawRanges;
     std::uint32_t terrainDrawCount = 0;
 };
 

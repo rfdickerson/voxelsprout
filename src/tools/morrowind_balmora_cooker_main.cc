@@ -1,5 +1,6 @@
 #include "import/imported_scene.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -9,6 +10,14 @@ namespace {
 void printUsage() {
     std::cerr
         << "Usage: odai_balmora_cooker <Data Files path> <scene output path> [terrain obj output path]\n";
+}
+
+std::uint64_t totalTextureBytes(const odai::importer::ImportedScene& scene) {
+    std::uint64_t total = 0u;
+    for (const odai::importer::ImportedSceneTexture& texture : scene.textures) {
+        total += static_cast<std::uint64_t>(texture.rgba8.size());
+    }
+    return total;
 }
 
 }  // namespace
@@ -60,6 +69,12 @@ int main(int argc, char** argv) {
     std::cout << "  Unresolved refs: " << result.scene.unresolvedRefs.size() << "\n";
     std::cout << "  Model records: " << result.modelPathById.size() << "\n";
     std::cout << "  Landscape textures: " << result.texturePathByLandscapeIndex.size() << "\n";
+    std::cout << "  Loaded textures: " << result.scene.textures.size()
+              << " (" << totalTextureBytes(result.scene) << " rgba8 bytes)\n";
+    std::cout << "  Water patches: " << result.scene.waterPatches.size() << "\n";
+    std::cout << "  Packed vertices: " << result.scene.packedVertices.size() << "\n";
+    std::cout << "  Packed indices: " << result.scene.packedIndices.size() << "\n";
+    std::cout << "  Packed draws: " << result.scene.packedDraws.size() << "\n";
     std::cout << "  Scene output: " << sceneOutputPath << "\n";
     if (!terrainObjOutputPath.empty()) {
         std::cout << "  Terrain OBJ: " << terrainObjOutputPath << "\n";

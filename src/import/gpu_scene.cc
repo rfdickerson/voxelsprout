@@ -459,9 +459,30 @@ void buildGpuSceneRenderCache(GpuSceneAsset& scene) {
     scene.renderCache.packedVertices.reserve(scene.vertices.size() + (scene.instances.objectIndices.size() * 64u));
     scene.renderCache.packedIndices.reserve(scene.indices.size() + (scene.instances.objectIndices.size() * 128u));
 
+    auto appendPageDrawRange = [&](std::uint32_t pageIndex, std::uint32_t drawIndex, bool terrainMesh) {
+        if (!scene.renderCache.pageDrawRanges.empty()) {
+            GpuScenePageDrawRange& lastRange = scene.renderCache.pageDrawRanges.back();
+            if (lastRange.pageIndex == pageIndex &&
+                lastRange.firstDraw + lastRange.drawCount == drawIndex) {
+                ++lastRange.drawCount;
+                if (terrainMesh) {
+                    ++lastRange.terrainDrawCount;
+                }
+                return;
+            }
+        }
+        GpuScenePageDrawRange range{};
+        range.pageIndex = pageIndex;
+        range.firstDraw = drawIndex;
+        range.drawCount = 1u;
+        range.terrainDrawCount = terrainMesh ? 1u : 0u;
+        scene.renderCache.pageDrawRanges.push_back(range);
+    };
+
     auto appendMeshInstance = [&](const GpuSceneMeshAsset& mesh,
                                   const std::array<float, 16>& transform,
                                   std::uint32_t instanceIndex,
+                                  std::uint32_t pageIndex,
                                   bool transformedVertices,
                                   bool terrainMesh,
                                   const PackedRenderColor& flatColor) {
@@ -537,8 +558,10 @@ void buildGpuSceneRenderCache(GpuSceneAsset& scene) {
             ImportedScenePackedDraw draw{};
             draw.firstIndex = drawFirstIndex;
             draw.indexCount = drawIndexCount;
+            const std::uint32_t drawIndex = static_cast<std::uint32_t>(scene.renderCache.packedDraws.size());
             scene.renderCache.packedDraws.push_back(draw);
             scene.renderCache.drawInstanceIndices.push_back(instanceIndex);
+            appendPageDrawRange(pageIndex, drawIndex, terrainMesh);
             return 1u;
         };
 
@@ -562,10 +585,14 @@ void buildGpuSceneRenderCache(GpuSceneAsset& scene) {
     };
 
     if (!scene.meshAssets.empty()) {
+        const std::uint32_t terrainPageIndex = scene.instances.pageIndices.empty()
+            ? 0u
+            : scene.instances.pageIndices.front();
         scene.renderCache.terrainDrawCount = appendMeshInstance(
             scene.meshAssets.front(),
             scene.objects.appliedTransforms.front(),
             0u,
+            terrainPageIndex,
             false,
             true,
             {});
@@ -587,6 +614,7 @@ void buildGpuSceneRenderCache(GpuSceneAsset& scene) {
             scene.meshAssets[meshAssetIndex],
             scene.objects.appliedTransforms[objectIndex],
             instanceIndex,
+            scene.instances.pageIndices[instanceIndex],
             true,
             false,
             packedRenderColorFromHash(objectName));
