@@ -63,8 +63,8 @@ float main(FragmentInput input) : SV_Target0
     const float c = cos(randomAngle);
     const float2x2 rot = float2x2(c, -s, s, c);
 
-    const float radius = clamp(camera.shadowConfig2.x, 0.15, 3.0);
-    const float bias = clamp(camera.shadowConfig2.y, 0.0, 0.20);
+    const float radius = clamp(camera.shadowConfig2.x, 0.25, 128.0);
+    const float bias = clamp(camera.shadowConfig2.y, 0.0, 8.0);
     float occlusion = 0.0;
     float sampleCount = 0.0;
     const float kGoldenAngle = 2.39996323;

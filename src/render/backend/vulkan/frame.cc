@@ -152,6 +152,7 @@ void RendererBackend::resetDisplayTimingTracking() {
     m_displayRefreshDurationNs = 0;
     m_lastScheduledDesiredPresentTimeNs = 0;
     m_displayTimingDesiredPresentTimesNs.clear();
+    m_pastPresentationTimings.clear();
     m_framePacingStats.presentMarginMs = 0.0f;
     m_framePacingStats.actualPresentDeltaMs = 0.0f;
     m_framePacingStats.presentScheduleErrorMs = 0.0f;
@@ -352,21 +353,26 @@ void RendererBackend::updateDisplayTimingStats() {
     if (timingResult != VK_SUCCESS || timingCount == 0) {
         return;
     }
-    std::vector<VkPastPresentationTimingGOOGLE> timings(timingCount);
-    timingResult = m_getPastPresentationTimingGoogle(m_device, m_swapchain, &timingCount, timings.data());
+    m_pastPresentationTimings.resize(timingCount);
+    timingResult = m_getPastPresentationTimingGoogle(
+        m_device,
+        m_swapchain,
+        &timingCount,
+        m_pastPresentationTimings.data());
     if (timingResult != VK_SUCCESS || timingCount == 0) {
         return;
     }
+    m_pastPresentationTimings.resize(timingCount);
     m_debugDisplayTimingSampleCount = timingCount;
 
     std::sort(
-        timings.begin(),
-        timings.end(),
+        m_pastPresentationTimings.begin(),
+        m_pastPresentationTimings.end(),
         [](const VkPastPresentationTimingGOOGLE& a, const VkPastPresentationTimingGOOGLE& b) {
             return a.presentID < b.presentID;
         }
     );
-    const VkPastPresentationTimingGOOGLE& latest = timings.back();
+    const VkPastPresentationTimingGOOGLE& latest = m_pastPresentationTimings.back();
     m_lastPresentedDisplayTimingPresentId = latest.presentID;
     m_debugDisplayPresentMarginMs = static_cast<float>(latest.presentMargin * 1.0e-6);
     m_framePacingStats.presentMarginMs = m_debugDisplayPresentMarginMs;
@@ -377,7 +383,7 @@ void RendererBackend::updateDisplayTimingStats() {
         m_debugDisplayActualEarliestDeltaMs = 0.0f;
     }
 
-    for (const VkPastPresentationTimingGOOGLE& timing : timings) {
+    for (const VkPastPresentationTimingGOOGLE& timing : m_pastPresentationTimings) {
         if (timing.presentID <= m_lastProcessedDisplayTimingPresentId) {
             continue;
         }

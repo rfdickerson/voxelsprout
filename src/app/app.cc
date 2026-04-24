@@ -856,12 +856,18 @@ bool App::init() {
         importedScenePath.has_value()) {
         m_importedScenePath = *importedScenePath;
         const auto importedSceneLoadStart = Clock::now();
-        if (!odai::importer::loadImportedSceneRuntime(m_importedScenePath, m_importedScene)) {
+        if (!odai::importer::loadImportedScene(m_importedScenePath, m_importedScene)) {
             VOX_LOGE("app") << "failed to load imported scene from "
                             << std::filesystem::absolute(m_importedScenePath).string()
                             << ": " << odai::importer::getImportedSceneLastError();
             return false;
         }
+        if (!odai::importer::buildGpuSceneAssetFromImportedScene(m_importedScene, m_gpuSceneAsset)) {
+            VOX_LOGE("app") << "failed to build GPU scene asset from imported scene";
+            return false;
+        }
+        m_gpuSceneRuntime = odai::importer::createGpuSceneRuntime(m_gpuSceneAsset);
+        odai::importer::rebuildGpuSceneWorldTransforms(m_gpuSceneRuntime);
         const ImportedSceneCameraPose importedCameraPose = configureImportedSceneCamera(m_importedScene);
         m_camera.x = importedCameraPose.x;
         m_camera.y = importedCameraPose.y;
@@ -877,8 +883,10 @@ bool App::init() {
                         << ", meshes=" << m_importedScene.sourceMeshCount
                         << ", instances=" << m_importedScene.sourceInstanceCount
                         << ", terrainCells=" << m_importedScene.sourceLandscapeCellCount
-                        << ", packedVertices=" << m_importedScene.packedVertices.size()
-                        << ", packedIndices=" << m_importedScene.packedIndices.size() << ")";
+                        << ", objects=" << m_gpuSceneAsset.objects.rootTransformIndices.size()
+                        << ", pages=" << m_gpuSceneAsset.pages.size()
+                        << ", renderVertices=" << m_gpuSceneAsset.renderCache.packedVertices.size()
+                        << ", renderIndices=" << m_gpuSceneAsset.renderCache.packedIndices.size() << ")";
     }
 
     if (m_importedSceneDemoEnabled) {
@@ -890,8 +898,8 @@ bool App::init() {
             VOX_LOGE("app") << "renderer init failed";
             return false;
         }
-        if (!m_renderer.uploadImportedScene(m_importedScene)) {
-            VOX_LOGE("app") << "failed to upload imported scene demo geometry";
+        if (!m_renderer.uploadGpuScene(m_gpuSceneAsset)) {
+            VOX_LOGE("app") << "failed to upload GPU scene demo geometry";
             return false;
         }
         m_renderer.setSunAngles(kImportedSceneSunYawDegrees, kImportedSceneSunPitchDegrees);

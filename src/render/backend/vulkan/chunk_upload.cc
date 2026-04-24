@@ -331,7 +331,7 @@ void RendererBackend::clearMagicaVoxelMeshes() {
     markRayTracingSceneDirty();
 }
 
-void RendererBackend::clearImportedSceneMeshes() {
+void RendererBackend::clearGpuScene() {
     if (!m_importedTextureResources.empty() && m_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(m_device);
         for (ImportedTextureResource& texture : m_importedTextureResources) {
@@ -406,6 +406,32 @@ void RendererBackend::clearImportedSceneMeshes() {
     if (!m_rtImportedSceneRecords.empty()) {
         markRayTracingSceneDirty();
     }
+}
+
+void RendererBackend::clearImportedSceneMeshes() {
+    clearGpuScene();
+}
+
+bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene) {
+    odai::importer::ImportedScene compatibilityScene{};
+    compatibilityScene.sourceTag = scene.sourceTag;
+    compatibilityScene.textures = scene.renderCache.textures;
+    compatibilityScene.waterPatches = scene.renderCache.waterPatches;
+    compatibilityScene.packedVertices = scene.renderCache.packedVertices;
+    compatibilityScene.packedIndices = scene.renderCache.packedIndices;
+    compatibilityScene.packedDraws = scene.renderCache.packedDraws;
+    compatibilityScene.sourceTextureCount = static_cast<std::uint32_t>(scene.textures.size());
+    compatibilityScene.sourceMeshCount = static_cast<std::uint32_t>(scene.meshAssets.size());
+    compatibilityScene.sourceInstanceCount = static_cast<std::uint32_t>(scene.instances.objectIndices.size());
+    compatibilityScene.sourceLandscapeCellCount = scene.renderCache.terrainDrawCount;
+    compatibilityScene.sourceWaterPatchCount = static_cast<std::uint32_t>(scene.waterPatches.size());
+    compatibilityScene.boundsMin[0] = scene.sceneBounds.min[0];
+    compatibilityScene.boundsMin[1] = scene.sceneBounds.min[1];
+    compatibilityScene.boundsMin[2] = scene.sceneBounds.min[2];
+    compatibilityScene.boundsMax[0] = scene.sceneBounds.max[0];
+    compatibilityScene.boundsMax[1] = scene.sceneBounds.max[1];
+    compatibilityScene.boundsMax[2] = scene.sceneBounds.max[2];
+    return uploadImportedScene(compatibilityScene);
 }
 
 bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& scene) {
@@ -748,14 +774,38 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
         vertices.push_back(dstVertex);
     }
     indices.assign(uploadScene.packedIndices.begin(), uploadScene.packedIndices.end());
-    for (const odai::importer::ImportedScenePackedDraw& srcDraw : uploadScene.packedDraws) {
+    const std::uint32_t sourceTerrainDrawCount =
+        std::min<std::uint32_t>(uploadScene.sourceLandscapeCellCount, static_cast<std::uint32_t>(uploadScene.packedDraws.size()));
+    std::uint32_t mergedTerrainDrawCount = 0;
+    bool lastMergedDrawWasTerrain = false;
+    auto appendMergedDraw = [&](std::uint32_t firstIndex, std::uint32_t indexCount, bool terrainDraw) {
+        if (indexCount == 0) {
+            return;
+        }
+        if (!draws.empty()) {
+            ImportedMeshDraw& previous = draws.back();
+            if (lastMergedDrawWasTerrain == terrainDraw &&
+                previous.firstIndex + previous.indexCount == firstIndex) {
+                previous.indexCount += indexCount;
+                return;
+            }
+        }
+        ImportedMeshDraw draw{};
+        draw.firstIndex = firstIndex;
+        draw.indexCount = indexCount;
+        draws.push_back(draw);
+        if (terrainDraw) {
+            ++mergedTerrainDrawCount;
+        }
+        lastMergedDrawWasTerrain = terrainDraw;
+    };
+
+    for (std::uint32_t drawIndex = 0; drawIndex < uploadScene.packedDraws.size(); ++drawIndex) {
+        const odai::importer::ImportedScenePackedDraw& srcDraw = uploadScene.packedDraws[drawIndex];
         if (srcDraw.indexCount == 0) {
             continue;
         }
-        ImportedMeshDraw draw{};
-        draw.firstIndex = srcDraw.firstIndex;
-        draw.indexCount = srcDraw.indexCount;
-        draws.push_back(draw);
+        appendMergedDraw(srcDraw.firstIndex, srcDraw.indexCount, drawIndex < sourceTerrainDrawCount);
     }
     for (const odai::importer::ImportedSceneWaterPatch& patch : uploadScene.waterPatches) {
         const std::uint32_t baseVertex = static_cast<std::uint32_t>(waterVertices.size());
@@ -824,8 +874,7 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
     m_importedVertexBufferHandle = newVertexHandle;
     m_importedIndexBufferHandle = newIndexHandle;
     m_importedIndexCount = static_cast<std::uint32_t>(indices.size());
-    m_importedTerrainDrawCount =
-        (!uploadScene.packedDraws.empty() && uploadScene.sourceLandscapeCellCount > 0) ? 1u : 0u;
+    m_importedTerrainDrawCount = std::min<std::uint32_t>(mergedTerrainDrawCount, static_cast<std::uint32_t>(draws.size()));
     m_importedStaticDrawCount = static_cast<std::uint32_t>(draws.size()) - std::min(m_importedTerrainDrawCount, static_cast<std::uint32_t>(draws.size()));
     for (ImportedMeshDraw& draw : draws) {
         draw.vertexBufferHandle = newVertexHandle;
@@ -899,9 +948,9 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
     }
     const std::span<const odai::importer::ImportedScenePackedDraw> allDraws(uploadScene.packedDraws);
     const std::span<const odai::importer::ImportedScenePackedDraw> terrainDraws =
-        allDraws.first(std::min<std::size_t>(m_importedTerrainDrawCount, allDraws.size()));
+        allDraws.first(std::min<std::size_t>(sourceTerrainDrawCount, allDraws.size()));
     const std::span<const odai::importer::ImportedScenePackedDraw> staticDraws =
-        allDraws.subspan(std::min<std::size_t>(m_importedTerrainDrawCount, allDraws.size()));
+        allDraws.subspan(std::min<std::size_t>(sourceTerrainDrawCount, allDraws.size()));
     const ImportedDrawBounds terrainBounds =
         computeImportedDrawBounds(uploadScene.packedVertices, uploadScene.packedIndices, terrainDraws);
     const ImportedDrawBounds staticBounds =

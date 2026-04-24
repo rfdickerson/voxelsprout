@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/input.h"
+#include "import/gpu_scene.h"
 #include "render/renderer.h"
 #include "sim/simulation.h"
 #include "world/clipmap_index.h"
@@ -26,7 +27,7 @@ public:
 private:
     struct AppConfig {
         odai::render::ShadowMode shadowMode = odai::render::ShadowMode::Auto;
-        bool enableSsao = false;
+        bool enableSsao = true;
     };
 
     struct CameraRaycastResult {
@@ -224,6 +225,8 @@ private:
     bool m_importedWaterDebug = false;
     std::filesystem::path m_importedScenePath;
     odai::importer::ImportedScene m_importedScene;
+    odai::importer::GpuSceneAsset m_gpuSceneAsset;
+    odai::importer::GpuSceneRuntime m_gpuSceneRuntime;
 };
 
 } // namespace odai::app

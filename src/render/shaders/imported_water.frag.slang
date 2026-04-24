@@ -14,6 +14,9 @@ static const float kAirIor = 1.0;
 static const float kWaterIor = 1.333;
 static const float kAirToWaterEta = kAirIor / kWaterIor;
 static const uint kBindlessTextureIndexWaterNormal = 8u;
+static const float3 kWaterShallowTint = float3(0.18, 0.44, 0.39);
+static const float3 kWaterDeepTint = float3(0.018, 0.075, 0.105);
+static const float3 kWaterAbsorption = float3(0.034, 0.021, 0.012);
 
 struct FragmentInput
 {
@@ -95,38 +98,70 @@ float3 applyAtmosphericFog(float3 litColor, float3 worldPosition, float viewDept
     return (litColor * transmittance) + (inscatterColor * (float3(1.0, 1.0, 1.0) - transmittance));
 }
 
+float stableWaterNoise(float2 p)
+{
+    const float2 i = floor(p);
+    const float2 f = frac(p);
+    const float2 u = f * f * (3.0 - (2.0 * f));
+    const float a = frac(sin(dot(i + float2(0.0, 0.0), float2(127.1, 311.7))) * 43758.5453123);
+    const float b = frac(sin(dot(i + float2(1.0, 0.0), float2(127.1, 311.7))) * 43758.5453123);
+    const float c = frac(sin(dot(i + float2(0.0, 1.0), float2(127.1, 311.7))) * 43758.5453123);
+    const float d = frac(sin(dot(i + float2(1.0, 1.0), float2(127.1, 311.7))) * 43758.5453123);
+    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+}
+
+float waterCausticPattern(float3 worldPosition, float depthDistance)
+{
+    const float time = camera.skyConfig1.z * max(camera.waterConfig.x, 0.01);
+    const float2 p0 = (worldPosition.xz * 0.033) + float2(time * 0.030, -time * 0.021);
+    const float2 p1 = (worldPosition.zx * 0.047) + float2(-time * 0.026, time * 0.018);
+    const float2 p2 = (worldPosition.xz * 0.021) + float2(-time * 0.013, time * 0.016);
+    const float line0 = pow(1.0 - abs(frac(p0.x + sin(p0.y) * 0.18) - 0.5) * 2.0, 8.0);
+    const float line1 = pow(1.0 - abs(frac(p1.x + cos(p1.y) * 0.16) - 0.5) * 2.0, 10.0);
+    const float breakup = 0.72 + (0.28 * stableWaterNoise(p2 * 2.7));
+    const float depthFade = 1.0 - smoothstep(5.0, 34.0, depthDistance);
+    return (line0 * 0.58 + line1 * 0.42) * breakup * depthFade;
+}
+
 float3 waterNormal(float3 worldPosition, float2 uv)
 {
     const float time = camera.skyConfig1.z;
     const float animationSpeed = max(camera.waterConfig.x, 0.01);
     const float normalStrength = max(camera.waterConfig.y, 0.01);
+    const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
+    const float viewDistance = length(cameraWorld - worldPosition);
+    const float detailFade = 1.0 - smoothstep(220.0, 1800.0, viewDistance);
     const float swell0 = sin((worldPosition.x * 0.0068) + (worldPosition.z * 0.0052) + (time * 0.0036 * animationSpeed));
     const float swell1 = cos((worldPosition.x * 0.0056) - (worldPosition.z * 0.0074) - (time * 0.0026 * animationSpeed));
-    const float microRipple = sin((uv.x * 6.28318 * 0.95) + (uv.y * 6.28318 * 0.74) + (time * 0.0048 * animationSpeed));
-    const float dx = (swell0 * 0.0046) + (swell1 * 0.0028) + (microRipple * 0.0034);
-    const float dz = (swell1 * 0.0042) - (microRipple * 0.0031);
+    const float windRipple = sin((worldPosition.x * 0.021) - (worldPosition.z * 0.017) + (time * 0.011 * animationSpeed));
+    const float microRipple = sin((uv.x * 6.28318 * 0.82) + (uv.y * 6.28318 * 0.67) + (time * 0.0042 * animationSpeed));
+    const float dx = (swell0 * 0.0044) + (swell1 * 0.0026) + (windRipple * 0.0018) + (microRipple * 0.0016 * detailFade);
+    const float dz = (swell1 * 0.0039) - (windRipple * 0.0017) - (microRipple * 0.0015 * detailFade);
     const float2 worldUv = float2(worldPosition.x, worldPosition.z) * 0.00195;
-    const float2 scroll0 = float2(time * 0.0068, -time * 0.0048) * animationSpeed;
-    const float2 scroll1 = float2(-time * 0.0042, time * 0.0054) * animationSpeed;
-    const float2 scroll2 = float2(time * 0.0032, time * 0.0026) * animationSpeed;
-    const float2 sampleUv0 = (worldUv * 1.30) + scroll0;
-    const float2 sampleUv1 = (worldUv * 1.95) + scroll1;
-    const float2 sampleUv2 = (float2(worldUv.y, -worldUv.x) * 1.58) + scroll2;
+    const float2 warp = float2(
+        stableWaterNoise((worldUv * 19.0) + float2(time * 0.010, 0.0)),
+        stableWaterNoise((worldUv.yx * 17.0) + float2(0.0, -time * 0.009))) - 0.5;
+    const float2 scroll0 = float2(time * 0.0054, -time * 0.0038) * animationSpeed;
+    const float2 scroll1 = float2(-time * 0.0033, time * 0.0046) * animationSpeed;
+    const float2 scroll2 = float2(time * 0.0024, time * 0.0020) * animationSpeed;
+    const float2 sampleUv0 = (worldUv * 1.07) + scroll0 + (warp * 0.022);
+    const float2 sampleUv1 = (worldUv * 1.69) + scroll1 - (warp * 0.015);
+    const float2 sampleUv2 = (float2(worldUv.y, -worldUv.x) * 1.41) + scroll2 + (warp.yx * 0.012);
     const float2 waterNormalRg0 = bindlessTextures[kBindlessTextureIndexWaterNormal].SampleLevel(sampleUv0, 0.0).xy * 2.0 - 1.0;
     const float2 waterNormalRg1 = bindlessTextures[kBindlessTextureIndexWaterNormal].SampleLevel(sampleUv1, 0.0).xy * 2.0 - 1.0;
     const float2 waterNormalRg2 = bindlessTextures[kBindlessTextureIndexWaterNormal].SampleLevel(sampleUv2, 0.0).xy * 2.0 - 1.0;
     const float2 blendedNormalRg =
-        (waterNormalRg0 * 0.46) +
-        (waterNormalRg1 * 0.34) +
-        (waterNormalRg2 * 0.20);
-    const float2 tangentNormalXY = blendedNormalRg * (0.54 * normalStrength);
+        (waterNormalRg0 * 0.42) +
+        (waterNormalRg1 * 0.36) +
+        (waterNormalRg2 * 0.22);
+    const float2 tangentNormalXY = blendedNormalRg * (0.31 + (0.17 * detailFade)) * normalStrength;
     const float tangentNormalZ = sqrt(saturate(1.0 - dot(tangentNormalXY, tangentNormalXY)));
     const float3 sampledNormal = normalize(float3(tangentNormalXY.x, tangentNormalZ, tangentNormalXY.y));
     const float3 proceduralNormal = normalize(float3(-dx, 1.0, -dz));
     return normalize(float3(
-        (proceduralNormal.x * 0.22) + (sampledNormal.x * (0.98 * normalStrength)),
+        (proceduralNormal.x * 0.18) + (sampledNormal.x * (0.94 * normalStrength)),
         1.0,
-        (proceduralNormal.z * 0.22) + (sampledNormal.z * (0.98 * normalStrength))
+        (proceduralNormal.z * 0.18) + (sampledNormal.z * (0.94 * normalStrength))
     ));
 }
 
@@ -181,7 +216,7 @@ float3 traceWaterRefraction(
     ray.Origin = origin;
     ray.Direction = refractionDir;
     ray.TMin = 0.02;
-    ray.TMax = 192.0;
+    ray.TMax = 224.0;
 
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER> rayQuery;
     rayQuery.TraceRayInline(reflectionScene, 0, 0xFF, ray);
@@ -196,29 +231,30 @@ float3 traceWaterRefraction(
     const float hitDistance = rayQuery.CommittedRayT();
     const float3 hitPosition = origin + (refractionDir * hitDistance);
     outHitDistance = hitDistance;
-    const float depthFactor = saturate(hitDistance / 140.0);
+    const float depthFactor = saturate(hitDistance / 150.0);
     const float shallowFactor = 1.0 - depthFactor;
     const float refractionDecay = max(camera.waterConfig.w, 0.01);
-    const float murkFactor = saturate(hitDistance / max(18.0 / refractionDecay, 1.0));
+    const float murkFactor = saturate(hitDistance / max(34.0 / refractionDecay, 1.0));
     const float riverbedHeightFactor = saturate((hitPosition.y + 256.0) / 768.0);
     const float riverbedSlopeFactor = saturate(abs(refractionDir.y) * 1.35);
     const float sunFacing = saturate(dot(
         normalize(float3(-refractionDir.x, 0.55, -refractionDir.z)),
         -normalize(camera.sunDirectionIntensity.xyz)));
     const float3 siltTint = lerp(
-        float3(0.18, 0.16, 0.12),
-        float3(0.31, 0.27, 0.20),
+        float3(0.24, 0.21, 0.15),
+        float3(0.36, 0.32, 0.23),
         riverbedHeightFactor);
     const float3 rockTint = lerp(
-        float3(0.12, 0.14, 0.11),
-        float3(0.24, 0.29, 0.22),
+        float3(0.15, 0.18, 0.14),
+        float3(0.29, 0.34, 0.25),
         sunFacing);
     const float3 hitSurfaceTint = lerp(siltTint, rockTint, riverbedSlopeFactor * 0.48);
-    const float3 bottomTint = lerp(hitSurfaceTint * 1.05, deepWater * 0.34, depthFactor);
-    const float3 attenuation = exp(-float3(0.065, 0.038, 0.020) * (hitDistance * refractionDecay));
-    const float3 transmittedColor = (bottomTint * attenuation) + (shallowWater * 0.12 * shallowFactor);
-    const float3 murkyVolumeColor = lerp(shallowWater * 0.58, deepWater * 1.06, murkFactor);
-    return lerp(transmittedColor, murkyVolumeColor, saturate(murkFactor * 0.92));
+    const float caustics = waterCausticPattern(hitPosition, hitDistance) * (0.20 + (0.42 * sunFacing));
+    const float3 bottomTint = lerp((hitSurfaceTint * (1.04 + caustics)), deepWater * 0.30, depthFactor);
+    const float3 attenuation = exp(-kWaterAbsorption * (hitDistance * refractionDecay));
+    const float3 transmittedColor = (bottomTint * attenuation) + (shallowWater * 0.18 * shallowFactor);
+    const float3 murkyVolumeColor = lerp(shallowWater * 0.52, deepWater * 0.96, murkFactor);
+    return lerp(transmittedColor, murkyVolumeColor, saturate(murkFactor * 0.74));
 }
 #endif
 
@@ -237,15 +273,15 @@ float4 main(FragmentInput input) : SV_Target0
     const float rippleSlope = saturate(length(normal.xz) * 2.6);
     const float fresnelBase = 0.020;
     const float fresnel = fresnelBase + ((1.0 - fresnelBase) * pow(1.0 - nDotV, 5.0));
-    const float fresnelReflect = saturate(pow(fresnel, 1.65));
+    const float fresnelReflect = saturate(pow(fresnel, 1.85));
     const float reflectionStrength = max(camera.waterConfig.z, 0.01);
     const float3 refractionDir = refract(-viewDir, normal, kAirToWaterEta);
 
     const float depthHint =
         saturate((input.inWorldPosition.y - camera.shadowCascadeSplits.x) / max(camera.shadowCascadeSplits.w, 1.0));
     const float shoreFactor = saturate(1.0 - (depthHint * 1.35));
-    const float3 shallowWater = float3(0.22, 0.40, 0.30);
-    const float3 deepWater = float3(0.03, 0.11, 0.15);
+    const float3 shallowWater = kWaterShallowTint;
+    const float3 deepWater = kWaterDeepTint;
     float refractedHitDistance = 18.0;
     float rtDepthFactor = 0.0;
     float rtShallowFactor = shoreFactor;
@@ -267,9 +303,16 @@ float4 main(FragmentInput input) : SV_Target0
             deepWater,
             shallowWater,
             refractedHitDistance);
-        rtDepthFactor = saturate(refractedHitDistance / 6.0);
+        rtDepthFactor = saturate(refractedHitDistance / 14.0);
         rtShallowFactor = 1.0 - rtDepthFactor;
     }
+#else
+    refractedHitDistance = lerp(4.0, 46.0, saturate(depthHint * 1.35));
+    rtDepthFactor = saturate(refractedHitDistance / 18.0);
+    rtShallowFactor = 1.0 - rtDepthFactor;
+    const float3 attenuation = exp(-kWaterAbsorption * (refractedHitDistance * max(camera.waterConfig.w, 0.01)));
+    refractionColor = lerp(shallowWater * 0.98, deepWater * 0.96, rtDepthFactor) * attenuation +
+        waterBody * (0.22 + (0.18 * shoreFactor));
 #endif
 
     const float3 sunDir = -normalize(camera.sunDirectionIntensity.xyz);
@@ -277,32 +320,42 @@ float4 main(FragmentInput input) : SV_Target0
     const float ndotl = saturate(dot(normal, sunDir));
     const float ndoth = saturate(dot(normal, halfVector));
     const float vdoth = saturate(dot(viewDir, halfVector));
-    const float sunGlint = pow(saturate(dot(reflectionDir, sunDir)), 54.0);
-    const float broadSpecular = pow(ndoth, 18.0) * (0.08 + (0.22 * fresnelReflect));
-    const float tightSpecular = pow(ndoth, 96.0) * (0.16 + (0.44 * fresnelReflect));
-    const float directionalSpecular = (broadSpecular + tightSpecular) * (0.30 + (0.70 * ndotl)) * (0.55 + (0.45 * vdoth));
-    const float3 sunScatterTint = waterBody * lerp(0.10, 0.22, ndotl);
+    const float sunGlint = pow(saturate(dot(reflectionDir, sunDir)), 64.0);
+    const float windNoise = stableWaterNoise((input.inWorldPosition.xz * 0.014) + (camera.skyConfig1.z * 0.010));
+    const float broadSpecular = pow(ndoth, 18.0) * (0.045 + (0.13 * fresnelReflect));
+    const float tightSpecular = pow(ndoth, lerp(84.0, 144.0, windNoise)) * (0.10 + (0.34 * fresnelReflect));
+    const float directionalSpecular = (broadSpecular + tightSpecular) * (0.24 + (0.76 * ndotl)) * (0.55 + (0.45 * vdoth));
+    const float3 sunScatterTint = waterBody * lerp(0.06, 0.16, ndotl);
     const float grazingFactor = saturate(1.0 - nDotV);
     const float angleReflectionFactor = saturate(pow(grazingFactor, 0.72));
-    const float bottomDepthFactor = saturate(refractedHitDistance / 5.5);
+    const float bottomDepthFactor = saturate(refractedHitDistance / 14.0);
     const float shallowTransmissionFactor = saturate(rtShallowFactor);
     const float reflectionDriver =
-        (angleReflectionFactor * 0.58) +
-        (bottomDepthFactor * 0.30) +
-        ((1.0 - shallowTransmissionFactor) * 0.12);
+        (angleReflectionFactor * 0.54) +
+        (bottomDepthFactor * 0.20) +
+        ((1.0 - shallowTransmissionFactor) * 0.10);
     const float reflectionWeight = saturate(
-        lerp(fresnelReflect, reflectionDriver, 0.72) * reflectionStrength);
+        lerp(fresnelReflect, reflectionDriver, 0.58) *
+        reflectionStrength *
+        lerp(0.55, 1.0, bottomDepthFactor));
     const float transmissionWeight = 1.0 - reflectionWeight;
     float3 litColor = (refractionColor * transmissionWeight) + (reflectionColor * reflectionWeight);
-    litColor *= 0.92 + (0.28 * ndotl) + (0.24 * rippleSlope);
-    litColor += camera.sunColorShadow.xyz * (sunGlint * (0.12 + (fresnelReflect * 0.28)));
+    const float foamMask = saturate((rtShallowFactor - 0.52) * 1.65) *
+        saturate((rippleSlope - 0.16) * 3.2) *
+        (0.45 + (0.55 * stableWaterNoise((input.inWorldPosition.xz * 0.055) + (camera.skyConfig1.z * 0.018))));
+    const float causticLift = waterCausticPattern(input.inWorldPosition - float3(0.0, refractedHitDistance, 0.0), refractedHitDistance);
+    litColor *= 0.96 + (0.20 * ndotl) + (0.10 * rippleSlope);
+    litColor += shallowWater * (causticLift * (0.050 + (0.065 * ndotl)) * saturate(rtShallowFactor + 0.25));
+    litColor += lerp(float3(0.70, 0.82, 0.78), float3(0.88, 0.94, 0.88), ndotl) * (foamMask * 0.09);
+    litColor += camera.sunColorShadow.xyz * (sunGlint * (0.075 + (fresnelReflect * 0.20)));
     litColor += camera.sunColorShadow.xyz * directionalSpecular;
     litColor += sunScatterTint;
-    litColor += waterBody * 0.05;
+    litColor += waterBody * 0.025;
     const float alpha = saturate(
-        0.12 +
-        (bottomDepthFactor * 0.24) +
+        0.07 +
+        (bottomDepthFactor * 0.22) +
         (angleReflectionFactor * 0.20) +
-        ((1.0 - shallowTransmissionFactor) * 0.10));
+        ((1.0 - shallowTransmissionFactor) * 0.10) +
+        (foamMask * 0.03));
     return float4(litColor, alpha);
 }

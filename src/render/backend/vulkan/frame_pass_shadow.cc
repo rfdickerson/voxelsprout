@@ -11,6 +11,13 @@ namespace odai::render {
 
 #include "render/renderer_shared.h"
 
+namespace {
+
+constexpr float kImportedShadowConstantBiasScale = 1.9f;
+constexpr float kImportedShadowSlopeBiasScale = 2.2f;
+
+}  // namespace
+
 void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context, const ShadowPassInputs& inputs) {
     VkCommandBuffer commandBuffer = context.commandBuffer;
     VkQueryPool gpuTimestampQueryPool = context.gpuTimestampQueryPool;
@@ -225,6 +232,11 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 !importedMeshDraws.empty()) {
                 const std::size_t terrainDrawCount = std::min<std::size_t>(m_importedTerrainDrawCount, importedMeshDraws.size());
                 const std::size_t staticDrawStart = terrainDrawCount;
+                vkCmdSetDepthBias(
+                    commandBuffer,
+                    -(constantBias * kImportedShadowConstantBiasScale),
+                    0.0f,
+                    -(slopeBias * kImportedShadowSlopeBiasScale));
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
                 vkCmdBindDescriptorSets(
                     commandBuffer,
@@ -266,6 +278,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
                 }
+                vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
             }
 
             if (m_pipeShadowPipeline != VK_NULL_HANDLE) {

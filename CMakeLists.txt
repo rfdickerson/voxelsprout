@@ -134,6 +134,7 @@ if(ODAI_BUILD_APP)
         src/app/main.cc
         src/app/app.cc
         src/core/log.cc
+        src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
         src/render/frame_graph.cc
@@ -271,6 +272,7 @@ endif()
 
 if(ODAI_BUILD_TOOLS)
     add_executable(odai_balmora_cooker
+        src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
         src/tools/morrowind_balmora_cooker_main.cc
@@ -284,6 +286,7 @@ if(ODAI_BUILD_TOOLS)
     endif()
 
     add_executable(odai_imported_scene_preview
+        src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
         src/tools/imported_scene_preview_main.cc
@@ -299,6 +302,7 @@ endif()
 if(BUILD_TESTING)
     add_executable(odai_imported_scene_tests
         tests/imported_scene_tests.cc
+        src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
     )
