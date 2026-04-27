@@ -55,7 +55,7 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
     const float phaseBoost = (phaseRayleigh * rayleighStrength) + (phaseMie * mieStrength * 1.4);
 
     // Analytic sun disk in angular space with altitude-dependent haze bloom.
-    // Low sun: larger, hazier bloom. High sun: tighter, more discrete disk.
+    // Low sun: wider and vertically flattened by near-horizon atmospheric distortion.
     const float sunAngle = acos(sunDotRaw);
     const float diskSizeScale = clamp(camera.skyConfig2.x, 0.5, 6.0);
     const float hazeFalloffScale = clamp(camera.skyConfig2.y, 0.10, 1.20);
@@ -69,8 +69,18 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
     const float sunRadius = lerp(radiusTwilight, radiusDay, dayFactor) * diskSizeScale;
     const float sunAaBase = max(fwidth(sunAngle), 0.00010);
     const float sunEdgeWidth = sunAaBase * lerp(2.30, 0.85, highSunCrisp);
-    const float diskMask = 1.0 - smoothStep(sunRadius - sunEdgeWidth, sunRadius + sunEdgeWidth, sunAngle);
-    const float centerT = saturate01(1.0 - (sunAngle / max(sunRadius, 1e-5)));
+    const float3 horizonBasisUp = (abs(toSun.y) < 0.98) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    const float3 horizonRight = normalize(cross(horizonBasisUp, toSun));
+    const float3 sunUp = normalize(cross(toSun, horizonRight));
+    const float2 sunPlane = float2(dot(dir, horizonRight), dot(dir, sunUp));
+    const float flattenAmount = (1.0 - highSunCrisp) * smoothStep(-0.08, 0.18, sunAltitude);
+    const float horizontalRadius = sunRadius * lerp(1.0, 1.55, flattenAmount);
+    const float verticalRadius = sunRadius * lerp(1.0, 0.42, flattenAmount);
+    const float ellipseAngle = length(float2(
+        sunPlane.x / max(horizontalRadius, 1e-5),
+        sunPlane.y / max(verticalRadius, 1e-5))) * sunRadius;
+    const float diskMask = 1.0 - smoothStep(sunRadius - sunEdgeWidth, sunRadius + sunEdgeWidth, ellipseAngle);
+    const float centerT = saturate01(1.0 - (ellipseAngle / max(sunRadius, 1e-5)));
     const float limbDarkening = 0.52 + (0.48 * pow(centerT, lerp(0.50, 0.24, highSunCrisp)));
 
     const float diskIntensity = max(camera.skyConfig1.x / 1150.0, 0.01);

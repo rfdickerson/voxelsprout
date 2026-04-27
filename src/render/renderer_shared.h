@@ -654,14 +654,14 @@ SkyTuningSample evaluateSunriseSkyTuning(float sunElevationDegrees) {
     const float day = smoothStep(0.15f, 0.85f, h);
 
     SkyTuningSample sample{};
-    sample.rayleighStrength = std::lerp(1.20f, 1.00f, day);
-    sample.mieStrength = std::lerp(1.85f, 0.75f, day);
-    sample.mieAnisotropy = std::lerp(0.87f, 0.78f, day);
-    sample.skyExposure = std::lerp(1.35f, 1.00f, day);
-    sample.sunDiskIntensity = std::lerp(1450.0f, 1150.0f, day);
-    sample.sunHaloIntensity = std::lerp(36.0f, 22.0f, day);
-    sample.sunDiskSize = std::lerp(3.2f, 1.8f, day);
-    sample.sunHazeFalloff = std::lerp(0.62f, 0.34f, day);
+    sample.rayleighStrength = std::lerp(1.10f, 0.96f, day);
+    sample.mieStrength = std::lerp(1.45f, 0.72f, day);
+    sample.mieAnisotropy = std::lerp(0.82f, 0.76f, day);
+    sample.skyExposure = std::lerp(1.12f, 0.96f, day);
+    sample.sunDiskIntensity = std::lerp(1180.0f, 1040.0f, day);
+    sample.sunHaloIntensity = std::lerp(24.0f, 18.0f, day);
+    sample.sunDiskSize = std::lerp(2.45f, 1.70f, day);
+    sample.sunHazeFalloff = std::lerp(0.46f, 0.30f, day);
     return sample;
 }
 
