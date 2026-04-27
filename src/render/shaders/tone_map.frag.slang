@@ -276,7 +276,7 @@ float hgPhase(float cosTheta, float anisotropy)
     const float g = clamp(anisotropy, 0.0, 0.95);
     const float g2 = g * g;
     const float denom = max(pow(1.0 + g2 - (2.0 * g * cosTheta), 1.5), 1e-4);
-    return (1.0 - g2) / denom;
+    return (1.0 - g2) / (4.0 * 3.14159265 * denom);
 }
 
 float heightFogDensityAt(float worldHeight, float fogBaseHeight, float heightFalloff)
@@ -285,7 +285,23 @@ float heightFogDensityAt(float worldHeight, float fogBaseHeight, float heightFal
     return exp(clamp(-relativeHeight * heightFalloff, -7.0, 7.0));
 }
 
-float3 volumetricFogColor(
+float3 fogExtinctionCoefficient()
+{
+    const float rayleighT = clamp(camera.skyConfig0.x * 0.25, 0.0, 1.0);
+    const float mieT = clamp(camera.skyConfig0.y * 0.25, 0.0, 1.0);
+    const float rayleighStrength = lerp(0.80, 1.20, rayleighT);
+    const float mieStrength = lerp(0.80, 1.20, mieT);
+    const float3 rayleighExtinction = float3(0.025, 0.050, 0.110) * rayleighStrength;
+    const float3 mieExtinction = float3(0.145, 0.140, 0.130) * mieStrength;
+    return rayleighExtinction + mieExtinction;
+}
+
+float3 fogScatteringAlbedo()
+{
+    return float3(0.97, 0.985, 1.0);
+}
+
+float3 volumetricIncidentRadiance(
     float3 worldViewDir,
     float3 toSun,
     float sampleHeight,
@@ -298,28 +314,22 @@ float3 volumetricFogColor(
     const float dayFactor = smoothstep(0.04, 0.70, sunAltitude);
     const float twilightFactor = 1.0 - dayFactor;
     const float skyT = clamp((worldViewDir.y * 0.5) + 0.5, 0.0, 1.0);
-    const float valleyT = 1.0 - smoothstep(fogBaseHeight - 6.0, fogBaseHeight + 34.0, sampleHeight);
+    const float valleyT = 1.0 - smoothstep(fogBaseHeight - 16.0, fogBaseHeight + 160.0, sampleHeight);
 
-    const float3 fogHorizon = lerp(float3(0.46, 0.58, 0.76), float3(0.80, 0.54, 0.48), twilightFactor * 0.62);
-    const float3 fogZenith = lerp(float3(0.24, 0.32, 0.48), float3(0.36, 0.25, 0.34), twilightFactor * 0.52);
-    const float3 coolAerialHorizon = float3(0.50, 0.62, 0.78);
-    const float3 coolAerialZenith = float3(0.34, 0.48, 0.66);
-
-    float3 ambientFogColor = lerp(fogHorizon, fogZenith, pow(skyT, 0.36));
-    const float3 coolAerialColor = lerp(coolAerialHorizon, coolAerialZenith, pow(skyT, 0.45));
-    ambientFogColor = lerp(ambientFogColor, coolAerialColor, dayFactor * 0.45);
-
-    const float3 groundMistTint = lerp(float3(0.58, 0.62, 0.66), float3(0.68, 0.61, 0.52), twilightFactor * 0.50);
-    ambientFogColor = lerp(ambientFogColor, groundMistTint, valleyT * 0.28);
+    const float3 skyHorizon = lerp(float3(0.46, 0.58, 0.78), float3(0.92, 0.48, 0.30), twilightFactor * 0.68);
+    const float3 skyZenith = lerp(float3(0.22, 0.36, 0.68), float3(0.30, 0.20, 0.36), twilightFactor * 0.60);
+    const float3 groundBounce = lerp(float3(0.50, 0.47, 0.43), float3(0.58, 0.42, 0.34), twilightFactor);
+    const float3 skyRadiance = lerp(skyHorizon, skyZenith, pow(skyT, 0.45));
+    const float ambientStrength = lerp(0.95, 1.45, dayFactor);
+    const float3 ambientRadiance = lerp(skyRadiance, groundBounce, valleyT * 0.10) * ambientStrength;
 
     const float cosTheta = clamp(dot(worldViewDir, toSun), -1.0, 1.0);
-    const float forwardScatter = saturate(cosTheta);
-    const float sunPhase = hgPhase(forwardScatter, camera.skyConfig0.z) * 0.085 * forwardScatter;
+    const float sunPhase = hgPhase(cosTheta, camera.skyConfig0.z);
     const float sunAboveHorizon = smoothstep(-0.08, 0.18, sunAltitude);
     const float sunOcclusion = clamp(sunVisibility, 0.0, 1.0);
-    const float3 sunScatterColor =
+    const float3 sunRadiance =
         camera.sunColorShadow.xyz * (sunPhase * sunScatterStrength * sunAboveHorizon * sunOcclusion);
-    return ambientFogColor + sunScatterColor;
+    return ambientRadiance + sunRadiance;
 }
 
 float3 applyVolumetricHeightFog(
@@ -342,10 +352,8 @@ float3 applyVolumetricHeightFog(
     const float fogBaseHeight = camera.skyConfig4.z;
     const float sunScatterStrength = max(camera.skyConfig4.w, 0.0);
 
-    // RGB extinction gives atmospheric perspective (distance naturally desaturates and cools).
-    const float3 sigmaRayleigh = float3(0.18, 0.34, 0.72) * max(camera.skyConfig0.x, 0.01);
-    const float sigmaMie = 0.32 * max(camera.skyConfig0.y, 0.01);
-    const float3 extinction = (sigmaRayleigh + float3(sigmaMie, sigmaMie, sigmaMie));
+    const float3 extinction = fogExtinctionCoefficient();
+    const float3 scatteringAlbedo = fogScatteringAlbedo();
 
     const float horizonGather = 1.0 + (pow(1.0 - saturate(abs(worldViewDir.y)), 2.0) * 0.32);
     const int sampleCount = 6;
@@ -362,7 +370,7 @@ float3 applyVolumetricHeightFog(
             fogDensity * heightFogDensityAt(samplePosition.y, fogBaseHeight, heightFalloff) * horizonGather;
         const float opticalDepth = localDensity * stepLength;
         const float3 segmentTransmittance = exp(-(extinction * opticalDepth));
-        const float3 segmentFogColor = volumetricFogColor(
+        const float3 incidentRadiance = volumetricIncidentRadiance(
             worldViewDir,
             toSun,
             samplePosition.y,
@@ -370,14 +378,15 @@ float3 applyVolumetricHeightFog(
             sunScatterStrength,
             sunVisibility
         );
-        inscatter += transmittance * (float3(1.0, 1.0, 1.0) - segmentTransmittance) * segmentFogColor;
+        inscatter +=
+            transmittance *
+            (float3(1.0, 1.0, 1.0) - segmentTransmittance) *
+            scatteringAlbedo *
+            incidentRadiance;
         transmittance *= segmentTransmittance;
     }
 
-    const float fogAmount = saturate(1.0 - dot(transmittance, float3(0.2126, 0.7152, 0.0722)));
-    const float luma = dot(litColor, float3(0.2126, 0.7152, 0.0722));
-    const float3 litAerial = lerp(litColor, float3(luma, luma, luma), fogAmount * 0.62);
-    return (litAerial * transmittance) + inscatter;
+    return (litColor * transmittance) + inscatter;
 }
 
 struct FragmentInput
