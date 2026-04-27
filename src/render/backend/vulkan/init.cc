@@ -283,11 +283,13 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
 }
 
 bool RendererBackend::validateReleaseRuntimeAssets() {
-    constexpr std::array<RuntimeAssetSpec, 19> kRuntimeAssetSpecs = {{
+    constexpr std::array<RuntimeAssetSpec, 21> kRuntimeAssetSpecs = {{
         {"../src/render/shaders/voxel_packed.vert.slang.spv", "world vertex shader", true},
         {"../src/render/shaders/voxel_packed.frag.slang.spv", "world fragment shader", true},
         {"../src/render/shaders/skybox.vert.slang.spv", "skybox vertex shader", true},
         {"../src/render/shaders/skybox.frag.slang.spv", "skybox fragment shader", true},
+        {"../src/render/shaders/sky_cloud.vert.slang.spv", "sky cloud vertex shader", true},
+        {"../src/render/shaders/sky_cloud.frag.slang.spv", "sky cloud fragment shader", true},
         {"../src/render/shaders/tone_map.vert.slang.spv", "tonemap vertex shader", true},
         {"../src/render/shaders/tone_map.frag.slang.spv", "tonemap fragment shader", true},
         {"../src/render/shaders/shadow_depth.vert.slang.spv", "shadow vertex shader", true},

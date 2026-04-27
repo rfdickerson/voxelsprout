@@ -311,6 +311,7 @@ private:
     bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
+    bool createMorrowindSkyCloudMeshResources();
     bool createWaterNormalTextureResources();
     bool createDescriptorResources();
     using BoundDescriptorSets = DescriptorManager<kMaxFramesInFlight>::BoundDescriptorSets;
@@ -868,6 +869,7 @@ private:
     VkPipeline& m_pipeShadowPipeline = m_pipelineManager.pipeShadowPipeline;
     VkPipeline& m_grassBillboardShadowPipeline = m_pipelineManager.grassBillboardShadowPipeline;
     VkPipeline& m_skyboxPipeline = m_pipelineManager.skyboxPipeline;
+    VkPipeline& m_skyCloudPipeline = m_pipelineManager.skyCloudPipeline;
     VkPipeline& m_tonemapPipeline = m_pipelineManager.tonemapPipeline;
     VkPipeline& m_pipePipeline = m_pipelineManager.pipePipeline;
     VkPipeline& m_grassBillboardPipeline = m_pipelineManager.grassBillboardPipeline;
@@ -967,6 +969,8 @@ private:
     BufferHandle m_importedIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_skyCloudVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_skyCloudIndexBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     std::vector<ChunkResidentKey> m_chunkResidentKeys;
@@ -1000,6 +1004,7 @@ private:
     uint32_t m_importedTerrainDrawCount = 0;
     uint32_t m_importedStaticDrawCount = 0;
     uint32_t m_importedWaterIndexCount = 0;
+    uint32_t m_skyCloudIndexCount = 0;
     std::vector<ImportedTextureResource> m_importedTextureResources;
     VkSampler m_importedTextureSampler = VK_NULL_HANDLE;
     std::array<std::uint32_t, 16> m_voxelBaseColorPaletteRgba{};

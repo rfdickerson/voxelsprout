@@ -3,6 +3,7 @@
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
 #include "core/log.h"
+#include "import/morrowind_nif.h"
 #include "math/math.h"
 #include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
@@ -323,9 +324,29 @@ std::filesystem::path resolveRendererAssetPath(const std::filesystem::path& rela
 }
 
 std::filesystem::path resolveMorrowindSkyTexturePath() {
-    constexpr std::array<const char*, 2> kCandidatePaths = {
+    constexpr std::array<const char*, 4> kCandidatePaths = {
+        "C:/GOG Games/Morrowind/Data Files/Textures/tx_sky_cloudy.dds",
         "C:/GOG Games/Morrowind/Data Files/Textures/tx_sky_clear.dds",
+        "/mnt/c/GOG Games/Morrowind/Data Files/Textures/tx_sky_cloudy.dds",
         "/mnt/c/GOG Games/Morrowind/Data Files/Textures/tx_sky_clear.dds"
+    };
+    for (const char* candidatePath : kCandidatePaths) {
+        const std::filesystem::path candidate(candidatePath);
+        std::error_code existsError;
+        if (!std::filesystem::exists(candidate, existsError) || existsError) {
+            continue;
+        }
+        std::error_code canonicalError;
+        const std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(candidate, canonicalError);
+        return canonicalError ? candidate : canonicalPath;
+    }
+    return {};
+}
+
+std::filesystem::path resolveMorrowindSkyCloudMeshPath() {
+    constexpr std::array<const char*, 2> kCandidatePaths = {
+        "C:/GOG Games/Morrowind/Data Files/Meshes/sky_clouds_01.nif",
+        "/mnt/c/GOG Games/Morrowind/Data Files/Meshes/sky_clouds_01.nif"
     };
     for (const char* candidatePath : kCandidatePaths) {
         const std::filesystem::path candidate(candidatePath);
@@ -406,12 +427,136 @@ bool RendererBackend::createEnvironmentResources() {
         return false;
     }
     if (!createMorrowindSkyTextureResources()) {
-        VOX_LOGW("render") << "Morrowind clear-weather sky texture load failed; keeping procedural sky";
+        VOX_LOGW("render") << "Morrowind sky texture load failed; keeping procedural sky";
+    }
+    if (!createMorrowindSkyCloudMeshResources()) {
+        VOX_LOGW("render") << "Morrowind sky cloud mesh load failed; keeping procedural sky only";
     }
     if (!createWaterNormalTextureResources()) {
         VOX_LOGW("render") << "generated water normal texture creation failed; keeping procedural water normals only";
     }
-    VOX_LOGI("render") << "environment uses procedural sky; Morrowind clear-weather sky texture is staged for future sky-dome rendering when available\n";
+    VOX_LOGI("render") << "environment uses procedural sky with Morrowind sky cloud mesh when Data Files are available\n";
+    return true;
+}
+
+bool RendererBackend::createMorrowindSkyCloudMeshResources() {
+    if (m_skyCloudVertexBufferHandle != kInvalidBufferHandle &&
+        m_skyCloudIndexBufferHandle != kInvalidBufferHandle &&
+        m_skyCloudIndexCount > 0) {
+        return true;
+    }
+
+    const std::filesystem::path skyCloudMeshPath = resolveMorrowindSkyCloudMeshPath();
+    if (skyCloudMeshPath.empty()) {
+        VOX_LOGI("render") << "Morrowind sky cloud mesh not found; using procedural sky only";
+        return true;
+    }
+
+    odai::importer::ImportedNifResult nifResult{};
+    std::string nifError;
+    if (!odai::importer::loadMorrowindStaticNif(skyCloudMeshPath, nifResult, nifError)) {
+        VOX_LOGW("render") << "failed to load Morrowind sky cloud mesh " << skyCloudMeshPath.string()
+                           << ": " << nifError;
+        return true;
+    }
+    if (nifResult.mesh.vertices.empty() || nifResult.mesh.indices.empty()) {
+        VOX_LOGW("render") << "Morrowind sky cloud mesh has no renderable triangles: "
+                           << skyCloudMeshPath.string();
+        return true;
+    }
+
+    float boundsMin[3] = {
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max()
+    };
+    float boundsMax[3] = {
+        -std::numeric_limits<float>::max(),
+        -std::numeric_limits<float>::max(),
+        -std::numeric_limits<float>::max()
+    };
+    for (const odai::importer::ImportedSceneVertex& srcVertex : nifResult.mesh.vertices) {
+        for (int axis = 0; axis < 3; ++axis) {
+            boundsMin[axis] = std::min(boundsMin[axis], srcVertex.position[axis]);
+            boundsMax[axis] = std::max(boundsMax[axis], srcVertex.position[axis]);
+        }
+    }
+
+    const float center[3] = {
+        (boundsMin[0] + boundsMax[0]) * 0.5f,
+        (boundsMin[1] + boundsMax[1]) * 0.5f,
+        (boundsMin[2] + boundsMax[2]) * 0.5f
+    };
+    float maxRadius = 0.0f;
+    for (const odai::importer::ImportedSceneVertex& srcVertex : nifResult.mesh.vertices) {
+        const float dx = srcVertex.position[0] - center[0];
+        const float dy = srcVertex.position[1] - center[1];
+        const float dz = srcVertex.position[2] - center[2];
+        maxRadius = std::max(maxRadius, std::sqrt((dx * dx) + (dy * dy) + (dz * dz)));
+    }
+
+    constexpr float kSkyCloudRadius = 950.0f;
+    const float meshScale = (maxRadius > 0.001f) ? (kSkyCloudRadius / maxRadius) : 1.0f;
+
+    std::vector<ImportedMeshVertex> vertices;
+    vertices.reserve(nifResult.mesh.vertices.size());
+    for (const odai::importer::ImportedSceneVertex& srcVertex : nifResult.mesh.vertices) {
+        ImportedMeshVertex dstVertex{};
+        dstVertex.position[0] = (srcVertex.position[0] - center[0]) * meshScale;
+        dstVertex.position[1] = (srcVertex.position[1] - center[1]) * meshScale;
+        dstVertex.position[2] = (srcVertex.position[2] - center[2]) * meshScale;
+        dstVertex.normal[0] = srcVertex.normal[0];
+        dstVertex.normal[1] = srcVertex.normal[1];
+        dstVertex.normal[2] = srcVertex.normal[2];
+        dstVertex.color[0] = 1.0f;
+        dstVertex.color[1] = 1.0f;
+        dstVertex.color[2] = 1.0f;
+        dstVertex.uv[0] = srcVertex.uv[0];
+        dstVertex.uv[1] = srcVertex.uv[1];
+        dstVertex.textureIndex = kBindlessTextureIndexSkyDaylight;
+        dstVertex.flags = 0u;
+        vertices.push_back(dstVertex);
+    }
+
+    BufferCreateDesc vertexCreateDesc{};
+    vertexCreateDesc.size = static_cast<VkDeviceSize>(vertices.size() * sizeof(ImportedMeshVertex));
+    vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vertexCreateDesc.initialData = vertices.data();
+    m_skyCloudVertexBufferHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
+    if (m_skyCloudVertexBufferHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "Morrowind sky cloud vertex buffer allocation failed\n";
+        return false;
+    }
+    if (const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(m_skyCloudVertexBufferHandle);
+        vertexBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(vertexBuffer), "sky.cloud.vertex");
+    }
+
+    BufferCreateDesc indexCreateDesc{};
+    indexCreateDesc.size = static_cast<VkDeviceSize>(nifResult.mesh.indices.size() * sizeof(std::uint32_t));
+    indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    indexCreateDesc.initialData = nifResult.mesh.indices.data();
+    m_skyCloudIndexBufferHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
+    if (m_skyCloudIndexBufferHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "Morrowind sky cloud index buffer allocation failed\n";
+        m_bufferAllocator.destroyBuffer(m_skyCloudVertexBufferHandle);
+        m_skyCloudVertexBufferHandle = kInvalidBufferHandle;
+        return false;
+    }
+    if (const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(m_skyCloudIndexBufferHandle);
+        indexBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "sky.cloud.index");
+    }
+
+    m_skyCloudIndexCount = static_cast<std::uint32_t>(nifResult.mesh.indices.size());
+    VOX_LOGI("render") << "Morrowind sky cloud mesh loaded from " << skyCloudMeshPath.string()
+                       << ": vertices=" << vertices.size()
+                       << ", indices=" << nifResult.mesh.indices.size()
+                       << ", sourceTexture=" << (nifResult.diffuseTexturePath.empty()
+                            ? std::string("<none>")
+                            : nifResult.diffuseTexturePath);
     return true;
 }
 
@@ -1063,7 +1208,7 @@ bool RendererBackend::createMorrowindSkyTextureResources() {
 
     const std::filesystem::path skyTexturePath = resolveMorrowindSkyTexturePath();
     if (skyTexturePath.empty()) {
-        VOX_LOGI("render") << "Morrowind clear-weather sky texture not found; using procedural sky fallback";
+        VOX_LOGI("render") << "Morrowind sky texture not found; using procedural sky fallback";
         return true;
     }
 
@@ -1371,9 +1516,9 @@ bool RendererBackend::createMorrowindSkyTextureResources() {
         return false;
     }
     setObjectName(VK_OBJECT_TYPE_SAMPLER, vkHandleToUint64(m_morrowindSkyTextureSampler), "sky.morrowind.sampler");
-    VOX_LOGI("render") << "Morrowind clear-weather sky texture loaded from " << skyTexturePath.string()
+    VOX_LOGI("render") << "Morrowind sky texture loaded from " << skyTexturePath.string()
                        << ": " << ddsImage.width << "x" << ddsImage.height
-                       << ", rgba8 (not applied until sky-dome mesh rendering is implemented)";
+                       << ", rgba8";
     return true;
 }
 
@@ -3930,6 +4075,15 @@ void RendererBackend::destroyEnvironmentResources() {
 
 
 void RendererBackend::destroyDiffuseTextureResources() {
+    if (m_skyCloudIndexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_skyCloudIndexBufferHandle);
+        m_skyCloudIndexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_skyCloudVertexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_skyCloudVertexBufferHandle);
+        m_skyCloudVertexBufferHandle = kInvalidBufferHandle;
+    }
+    m_skyCloudIndexCount = 0;
     if (m_waterNormalTextureSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device, m_waterNormalTextureSampler, nullptr);
         m_waterNormalTextureSampler = VK_NULL_HANDLE;
