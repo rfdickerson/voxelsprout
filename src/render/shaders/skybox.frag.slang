@@ -133,9 +133,7 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 viewDir = normalize(float3(input.inNdc.x / projX, input.inNdc.y / projY, -1.0));
     const float3x3 invViewRotation = transpose((float3x3)camera.view);
     const float3 worldDir = normalize(mul(invViewRotation, viewDir));
-    // The real Morrowind sky textures are authored for dedicated sky NIF meshes
-    // (for example meshes/sky_clouds_01.nif), not for full-screen skybox reprojection.
-    // Until the renderer draws those meshes directly, keep the procedural sky rather
-    // than an incorrect approximation.
+    // Morrowind sky textures are authored for dedicated sky NIF meshes. Keep this
+    // pass as the atmospheric base; the mesh cloud layer is drawn over sky pixels.
     return float4(proceduralSky(worldDir, camera.sunDirectionIntensity.xyz), 1.0);
 }

@@ -13,6 +13,7 @@ public:
     VkPipeline pipeShadowPipeline = VK_NULL_HANDLE;
     VkPipeline grassBillboardShadowPipeline = VK_NULL_HANDLE;
     VkPipeline skyboxPipeline = VK_NULL_HANDLE;
+    VkPipeline skyCloudPipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline pipePipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
@@ -76,6 +77,10 @@ public:
         if (skyboxPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, skyboxPipeline, nullptr);
             skyboxPipeline = VK_NULL_HANDLE;
+        }
+        if (skyCloudPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, skyCloudPipeline, nullptr);
+            skyCloudPipeline = VK_NULL_HANDLE;
         }
         if (shadowPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, shadowPipeline, nullptr);

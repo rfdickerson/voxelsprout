@@ -633,6 +633,33 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         countDrawCalls(m_debugDrawCallsMain, 1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
+    if (m_skyCloudPipeline != VK_NULL_HANDLE &&
+        m_skyCloudVertexBufferHandle != kInvalidBufferHandle &&
+        m_skyCloudIndexBufferHandle != kInvalidBufferHandle &&
+        m_skyCloudIndexCount > 0 &&
+        m_morrowindSkyTextureImageView != VK_NULL_HANDLE) {
+        const VkBuffer skyCloudVertexBuffer = m_bufferAllocator.getBuffer(m_skyCloudVertexBufferHandle);
+        const VkBuffer skyCloudIndexBuffer = m_bufferAllocator.getBuffer(m_skyCloudIndexBufferHandle);
+        if (skyCloudVertexBuffer != VK_NULL_HANDLE && skyCloudIndexBuffer != VK_NULL_HANDLE) {
+            const VkBuffer skyCloudVertexBuffers[1] = {skyCloudVertexBuffer};
+            const VkDeviceSize skyCloudVertexOffsets[1] = {0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyCloudPipeline);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout,
+                0,
+                boundDescriptorSetCount,
+                boundDescriptorSets.sets.data(),
+                1,
+                &mvpDynamicOffset
+            );
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, skyCloudVertexBuffers, skyCloudVertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, skyCloudIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDrawIndexed(commandBuffer, m_skyCloudIndexCount, 1, 0, 0, 0);
+        }
+    }
 
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);

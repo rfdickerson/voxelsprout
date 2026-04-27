@@ -424,6 +424,8 @@ bool RendererBackend::createPipePipeline() {
     constexpr const char* kImportedWaterVertexShaderPath = "../src/render/shaders/imported_water.vert.slang.spv";
     constexpr const char* kImportedWaterFragmentShaderPath = "../src/render/shaders/imported_water.frag.slang.spv";
     constexpr const char* kImportedWaterRtFragmentShaderPath = "../src/render/shaders/imported_water_rt.frag.slang.spv";
+    constexpr const char* kSkyCloudVertexShaderPath = "../src/render/shaders/sky_cloud.vert.slang.spv";
+    constexpr const char* kSkyCloudFragmentShaderPath = "../src/render/shaders/sky_cloud.frag.slang.spv";
 
     std::array<VkShaderModule, 2> pipeShaderModules = {
         VK_NULL_HANDLE,
@@ -720,6 +722,88 @@ bool RendererBackend::createPipePipeline() {
               << ", rtVariant=" << (importedStaticPipelineRt != VK_NULL_HANDLE ? "yes" : "no")
               << "\n";
 
+    std::array<VkShaderModule, 2> skyCloudShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    const std::array<ShaderModuleLoadSpec, 2> skyCloudShaderLoadSpecs = {{
+        {kSkyCloudVertexShaderPath, "sky_cloud.vert"},
+        {kSkyCloudFragmentShaderPath, "sky_cloud.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, skyCloudShaderLoadSpecs, skyCloudShaderModules)) {
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
+        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
+        }
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo skyCloudVertexShaderStage{};
+    skyCloudVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    skyCloudVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    skyCloudVertexShaderStage.module = skyCloudShaderModules[0];
+    skyCloudVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo skyCloudFragmentShaderStage{};
+    skyCloudFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    skyCloudFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    skyCloudFragmentShaderStage.module = skyCloudShaderModules[1];
+    skyCloudFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> skyCloudShaderStages = {
+        skyCloudVertexShaderStage,
+        skyCloudFragmentShaderStage
+    };
+
+    VkGraphicsPipelineCreateInfo skyCloudPipelineCreateInfo = pipelineCreateInfo;
+    skyCloudPipelineCreateInfo.stageCount = static_cast<uint32_t>(skyCloudShaderStages.size());
+    skyCloudPipelineCreateInfo.pStages = skyCloudShaderStages.data();
+    skyCloudPipelineCreateInfo.pVertexInputState = &importedVertexInputInfo;
+    VkPipelineRasterizationStateCreateInfo skyCloudRasterizer = rasterizer;
+    skyCloudRasterizer.cullMode = VK_CULL_MODE_NONE;
+    skyCloudPipelineCreateInfo.pRasterizationState = &skyCloudRasterizer;
+    VkPipelineDepthStencilStateCreateInfo skyCloudDepthStencil = depthStencil;
+    skyCloudDepthStencil.depthTestEnable = VK_TRUE;
+    skyCloudDepthStencil.depthWriteEnable = VK_FALSE;
+    skyCloudDepthStencil.depthCompareOp = VK_COMPARE_OP_EQUAL;
+    skyCloudPipelineCreateInfo.pDepthStencilState = &skyCloudDepthStencil;
+    VkPipelineColorBlendAttachmentState skyCloudColorBlendAttachment = colorBlendAttachment;
+    skyCloudColorBlendAttachment.blendEnable = VK_TRUE;
+    skyCloudColorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    skyCloudColorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    skyCloudColorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    skyCloudColorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    skyCloudColorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    skyCloudColorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    VkPipelineColorBlendStateCreateInfo skyCloudColorBlending = colorBlending;
+    skyCloudColorBlending.pAttachments = &skyCloudColorBlendAttachment;
+    skyCloudPipelineCreateInfo.pColorBlendState = &skyCloudColorBlending;
+
+    VkPipeline skyCloudPipeline = VK_NULL_HANDLE;
+    const VkResult skyCloudPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &skyCloudPipelineCreateInfo,
+        nullptr,
+        &skyCloudPipeline
+    );
+    destroyShaderModules(m_device, skyCloudShaderModules);
+    if (skyCloudPipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
+        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
+        }
+        logVkFailure("vkCreateGraphicsPipelines(skyCloud)", skyCloudPipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (skyCloud): samples=" << static_cast<uint32_t>(m_colorSampleCount)
+              << ", cullMode=" << static_cast<uint32_t>(skyCloudRasterizer.cullMode)
+              << ", depthCompare=" << static_cast<uint32_t>(skyCloudDepthStencil.depthCompareOp)
+              << ", alphaBlend=1\n";
+
     const bool hasRtImportedWaterVariant =
         m_rayTracingRuntimeEnabled && std::filesystem::exists(kImportedWaterRtFragmentShaderPath);
     std::array<VkShaderModule, 3> importedWaterShaderModules = {
@@ -742,6 +826,7 @@ bool RendererBackend::createPipePipeline() {
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
         }
+        vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
         return false;
     }
 
@@ -828,6 +913,7 @@ bool RendererBackend::createPipePipeline() {
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
         }
+        vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(importedWater)", importedWaterPipelineResult);
         return false;
     }
@@ -851,6 +937,7 @@ bool RendererBackend::createPipePipeline() {
             if (importedStaticPipelineRt != VK_NULL_HANDLE) {
                 vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
             }
+            vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
             vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
             logVkFailure("vkCreateGraphicsPipelines(importedWaterRt)", importedWaterRtPipelineResult);
             return false;
@@ -881,6 +968,7 @@ bool RendererBackend::createPipePipeline() {
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
         }
+        vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
         vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
         if (importedWaterPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedWaterPipelineRt, nullptr);
@@ -972,6 +1060,7 @@ bool RendererBackend::createPipePipeline() {
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
         }
+        vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
         vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
         if (importedWaterPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedWaterPipelineRt, nullptr);
@@ -992,6 +1081,9 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr);
     }
+    if (m_skyCloudPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_skyCloudPipeline, nullptr);
+    }
     if (m_importedWaterPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedWaterPipeline, nullptr);
     }
@@ -1004,6 +1096,7 @@ bool RendererBackend::createPipePipeline() {
     m_pipePipeline = pipePipeline;
     m_importedStaticPipeline = importedStaticPipeline;
     m_importedStaticPipelineRt = importedStaticPipelineRt;
+    m_skyCloudPipeline = skyCloudPipeline;
     m_importedWaterPipeline = importedWaterPipeline;
     m_importedWaterPipelineRt = importedWaterPipelineRt;
     m_grassBillboardPipeline = grassBillboardPipeline;
@@ -1012,6 +1105,7 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipelineRt), "pipeline.importedStatic.rt");
     }
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyCloudPipeline), "pipeline.skyCloud");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipeline), "pipeline.importedWater");
     if (m_importedWaterPipelineRt != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipelineRt), "pipeline.importedWater.rt");
