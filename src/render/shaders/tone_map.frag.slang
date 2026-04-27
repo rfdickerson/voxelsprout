@@ -317,7 +317,7 @@ float3 fogExtinctionCoefficient()
 
 float3 fogScatteringAlbedo()
 {
-    return float3(0.97, 0.985, 1.0);
+    return float3(0.98, 0.955, 0.90);
 }
 
 float3 volumetricIncidentRadiance(
@@ -335,11 +335,11 @@ float3 volumetricIncidentRadiance(
     const float skyT = clamp((worldViewDir.y * 0.5) + 0.5, 0.0, 1.0);
     const float valleyT = 1.0 - smoothstep(fogBaseHeight - 16.0, fogBaseHeight + 160.0, sampleHeight);
 
-    const float3 skyHorizon = lerp(float3(0.46, 0.58, 0.78), float3(0.92, 0.48, 0.30), twilightFactor * 0.68);
-    const float3 skyZenith = lerp(float3(0.22, 0.36, 0.68), float3(0.30, 0.20, 0.36), twilightFactor * 0.60);
-    const float3 groundBounce = lerp(float3(0.50, 0.47, 0.43), float3(0.58, 0.42, 0.34), twilightFactor);
+    const float3 skyHorizon = lerp(float3(0.48, 0.57, 0.70), float3(0.86, 0.52, 0.32), twilightFactor * 0.58);
+    const float3 skyZenith = lerp(float3(0.24, 0.34, 0.58), float3(0.30, 0.22, 0.30), twilightFactor * 0.46);
+    const float3 groundBounce = lerp(float3(0.54, 0.49, 0.40), float3(0.66, 0.46, 0.30), twilightFactor);
     const float3 skyRadiance = lerp(skyHorizon, skyZenith, pow(skyT, 0.45));
-    const float ambientStrength = lerp(0.95, 1.45, dayFactor);
+    const float ambientStrength = lerp(0.86, 1.26, dayFactor);
     const float3 ambientRadiance = lerp(skyRadiance, groundBounce, valleyT * 0.10) * ambientStrength;
 
     const float cosTheta = clamp(dot(worldViewDir, toSun), -1.0, 1.0);
