@@ -24,6 +24,7 @@ public:
     VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipelineRt = VK_NULL_HANDLE;
@@ -61,6 +62,10 @@ public:
         if (importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticNormalDepthPipeline, nullptr);
             importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+        }
+        if (importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedWaterNormalDepthPipeline, nullptr);
+            importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
         }
         if (grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, grassBillboardNormalDepthPipeline, nullptr);

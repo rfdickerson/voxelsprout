@@ -1138,13 +1138,17 @@ bool RendererBackend::createAoPipelines() {
     constexpr const char* kPipeNormalDepthFragShaderPath = "../src/render/shaders/pipe_normaldepth.frag.slang.spv";
     constexpr const char* kImportedStaticVertShaderPath = "../src/render/shaders/imported_static.vert.slang.spv";
     constexpr const char* kImportedStaticNormalDepthFragShaderPath = "../src/render/shaders/imported_static_normaldepth.frag.slang.spv";
+    constexpr const char* kImportedWaterVertShaderPath = "../src/render/shaders/imported_water.vert.slang.spv";
+    constexpr const char* kImportedWaterNormalDepthFragShaderPath = "../src/render/shaders/imported_water_normaldepth.frag.slang.spv";
     constexpr const char* kGrassBillboardVertShaderPath = "../src/render/shaders/grass_billboard.vert.slang.spv";
     constexpr const char* kGrassBillboardNormalDepthFragShaderPath = "../src/render/shaders/grass_billboard_normaldepth.frag.slang.spv";
     constexpr const char* kFullscreenVertShaderPath = "../src/render/shaders/tone_map.vert.slang.spv";
     constexpr const char* kSsaoFragShaderPath = "../src/render/shaders/ssao.frag.slang.spv";
     constexpr const char* kSsaoBlurFragShaderPath = "../src/render/shaders/ssao_blur.frag.slang.spv";
 
-    std::array<VkShaderModule, 11> shaderModules = {
+    std::array<VkShaderModule, 13> shaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
@@ -1165,11 +1169,13 @@ bool RendererBackend::createAoPipelines() {
     VkShaderModule& grassBillboardNormalDepthFragShaderModule = shaderModules[5];
     VkShaderModule& importedStaticVertShaderModule = shaderModules[6];
     VkShaderModule& importedStaticNormalDepthFragShaderModule = shaderModules[7];
-    VkShaderModule& fullscreenVertShaderModule = shaderModules[8];
-    VkShaderModule& ssaoFragShaderModule = shaderModules[9];
-    VkShaderModule& ssaoBlurFragShaderModule = shaderModules[10];
+    VkShaderModule& importedWaterVertShaderModule = shaderModules[8];
+    VkShaderModule& importedWaterNormalDepthFragShaderModule = shaderModules[9];
+    VkShaderModule& fullscreenVertShaderModule = shaderModules[10];
+    VkShaderModule& ssaoFragShaderModule = shaderModules[11];
+    VkShaderModule& ssaoBlurFragShaderModule = shaderModules[12];
 
-    const std::array<ShaderModuleLoadSpec, 11> shaderLoadSpecs = {{
+    const std::array<ShaderModuleLoadSpec, 13> shaderLoadSpecs = {{
         {kVoxelVertShaderPath, "voxel_packed.vert"},
         {kVoxelNormalDepthFragShaderPath, "voxel_normaldepth.frag"},
         {kPipeVertShaderPath, "pipe_instanced.vert"},
@@ -1178,6 +1184,8 @@ bool RendererBackend::createAoPipelines() {
         {kGrassBillboardNormalDepthFragShaderPath, "grass_billboard_normaldepth.frag"},
         {kImportedStaticVertShaderPath, "imported_static.vert"},
         {kImportedStaticNormalDepthFragShaderPath, "imported_static_normaldepth.frag"},
+        {kImportedWaterVertShaderPath, "imported_water.vert"},
+        {kImportedWaterNormalDepthFragShaderPath, "imported_water_normaldepth.frag"},
         {kFullscreenVertShaderPath, "tone_map.vert"},
         {kSsaoFragShaderPath, "ssao.frag"},
         {kSsaoBlurFragShaderPath, "ssao_blur.frag"},
@@ -1190,6 +1198,7 @@ bool RendererBackend::createAoPipelines() {
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     auto destroyNewPipelines = [&]() {
@@ -1208,6 +1217,10 @@ bool RendererBackend::createAoPipelines() {
         if (importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticNormalDepthPipeline, nullptr);
             importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+        }
+        if (importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedWaterNormalDepthPipeline, nullptr);
+            importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
         }
         if (grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, grassBillboardNormalDepthPipeline, nullptr);
@@ -1547,6 +1560,58 @@ bool RendererBackend::createAoPipelines() {
         return false;
     }
 
+    VkPipelineShaderStageCreateInfo importedWaterNormalDepthStageInfos[2]{};
+    importedWaterNormalDepthStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    importedWaterNormalDepthStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    importedWaterNormalDepthStageInfos[0].module = importedWaterVertShaderModule;
+    importedWaterNormalDepthStageInfos[0].pName = "main";
+    importedWaterNormalDepthStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    importedWaterNormalDepthStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    importedWaterNormalDepthStageInfos[1].module = importedWaterNormalDepthFragShaderModule;
+    importedWaterNormalDepthStageInfos[1].pName = "main";
+
+    VkVertexInputBindingDescription importedWaterBindings[1]{};
+    importedWaterBindings[0].binding = 0;
+    importedWaterBindings[0].stride = sizeof(ImportedWaterVertex);
+    importedWaterBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription importedWaterAttributes[2]{};
+    importedWaterAttributes[0].location = 0;
+    importedWaterAttributes[0].binding = 0;
+    importedWaterAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedWaterAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, position));
+    importedWaterAttributes[1].location = 1;
+    importedWaterAttributes[1].binding = 0;
+    importedWaterAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+    importedWaterAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, uv));
+
+    VkPipelineVertexInputStateCreateInfo importedWaterVertexInputInfo{};
+    importedWaterVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    importedWaterVertexInputInfo.vertexBindingDescriptionCount = 1;
+    importedWaterVertexInputInfo.pVertexBindingDescriptions = importedWaterBindings;
+    importedWaterVertexInputInfo.vertexAttributeDescriptionCount = 2;
+    importedWaterVertexInputInfo.pVertexAttributeDescriptions = importedWaterAttributes;
+
+    VkPipelineRasterizationStateCreateInfo importedWaterRasterizer = rasterizer;
+    importedWaterRasterizer.cullMode = VK_CULL_MODE_NONE;
+    pipelineCreateInfo.pStages = importedWaterNormalDepthStageInfos;
+    pipelineCreateInfo.pVertexInputState = &importedWaterVertexInputInfo;
+    pipelineCreateInfo.pRasterizationState = &importedWaterRasterizer;
+    const VkResult importedWaterNormalDepthPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &importedWaterNormalDepthPipeline
+    );
+    if (importedWaterNormalDepthPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(importedWaterNormalDepth)", importedWaterNormalDepthPipelineResult);
+        destroyNewPipelines();
+        destroyShaderModules(m_device, shaderModules);
+        return false;
+    }
+
     // SSAO fullscreen pipelines.
     VkPipelineShaderStageCreateInfo ssaoStageInfos[2]{};
     ssaoStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1690,6 +1755,9 @@ bool RendererBackend::createAoPipelines() {
     if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticNormalDepthPipeline, nullptr);
     }
+    if (m_importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedWaterNormalDepthPipeline, nullptr);
+    }
     if (m_grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_grassBillboardNormalDepthPipeline, nullptr);
     }
@@ -1703,6 +1771,7 @@ bool RendererBackend::createAoPipelines() {
     m_voxelNormalDepthPipeline = voxelNormalDepthPipeline;
     m_pipeNormalDepthPipeline = pipeNormalDepthPipeline;
     m_importedStaticNormalDepthPipeline = importedStaticNormalDepthPipeline;
+    m_importedWaterNormalDepthPipeline = importedWaterNormalDepthPipeline;
     m_grassBillboardNormalDepthPipeline = grassBillboardNormalDepthPipeline;
     m_ssaoPipeline = ssaoPipeline;
     m_ssaoBlurPipeline = ssaoBlurPipeline;
@@ -1720,6 +1789,11 @@ bool RendererBackend::createAoPipelines() {
         VK_OBJECT_TYPE_PIPELINE,
         vkHandleToUint64(m_importedStaticNormalDepthPipeline),
         "pipeline.prepass.importedStaticNormalDepth"
+    );
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE,
+        vkHandleToUint64(m_importedWaterNormalDepthPipeline),
+        "pipeline.prepass.importedWaterNormalDepth"
     );
     setObjectName(
         VK_OBJECT_TYPE_PIPELINE,

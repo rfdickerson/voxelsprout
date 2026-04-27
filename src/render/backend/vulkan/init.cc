@@ -283,7 +283,7 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
 }
 
 bool RendererBackend::validateReleaseRuntimeAssets() {
-    constexpr std::array<RuntimeAssetSpec, 21> kRuntimeAssetSpecs = {{
+    constexpr std::array<RuntimeAssetSpec, 22> kRuntimeAssetSpecs = {{
         {"../src/render/shaders/voxel_packed.vert.slang.spv", "world vertex shader", true},
         {"../src/render/shaders/voxel_packed.frag.slang.spv", "world fragment shader", true},
         {"../src/render/shaders/skybox.vert.slang.spv", "skybox vertex shader", true},
@@ -301,6 +301,7 @@ bool RendererBackend::validateReleaseRuntimeAssets() {
         {"../src/render/shaders/grass_billboard.vert.slang.spv", "grass vertex shader", true},
         {"../src/render/shaders/grass_billboard.frag.slang.spv", "grass fragment shader", true},
         {"../src/render/shaders/grass_billboard_normaldepth.frag.slang.spv", "grass normal-depth shader", true},
+        {"../src/render/shaders/imported_water_normaldepth.frag.slang.spv", "imported water normal-depth shader", true},
         {"../src/render/shaders/pipe_normaldepth.frag.slang.spv", "pipe normal-depth shader", true},
         {"../src/render/shaders/voxel_normaldepth.frag.slang.spv", "voxel normal-depth shader", true},
         {"../src/render/shaders/ssao.frag.slang.spv", "ssao shader", true},

@@ -881,6 +881,7 @@ private:
     VkPipeline& m_importedWaterPipeline = m_pipelineManager.importedWaterPipeline;
     VkPipeline& m_importedWaterPipelineRt = m_pipelineManager.importedWaterPipelineRt;
     VkPipeline& m_importedStaticNormalDepthPipeline = m_pipelineManager.importedStaticNormalDepthPipeline;
+    VkPipeline& m_importedWaterNormalDepthPipeline = m_pipelineManager.importedWaterNormalDepthPipeline;
     VkPipeline& m_importedStaticShadowPipeline = m_pipelineManager.importedStaticShadowPipeline;
     VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
     VkPipeline& m_magicaPipelineRt = m_pipelineManager.magicaPipelineRt;
