@@ -152,6 +152,42 @@ float4 sampleImportedAlbedo(FragmentInput input)
     return float4(sampled.rgb, sampled.a);
 }
 
+float3 evaluateImportedLocalLights(float3 worldPosition, float3 normal)
+{
+    const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
+    const float globalIntensity = max(camera.importedLightConfig.y, 0.0);
+    if (lightCount <= 0 || globalIntensity <= 0.0)
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+
+    float3 lighting = float3(0.0, 0.0, 0.0);
+    [loop]
+    for (int lightIndex = 0; lightIndex < 64; ++lightIndex)
+    {
+        if (lightIndex >= lightCount) break;
+        const float4 positionRadius = camera.importedLightPositionRadius[lightIndex];
+        const float4 colorIntensity = camera.importedLightColorIntensity[lightIndex];
+        const float3 toLight = positionRadius.xyz - worldPosition;
+        const float distanceSquared = dot(toLight, toLight);
+        const float radius = max(positionRadius.w, 1.0);
+        const float radiusSquared = radius * radius;
+        if (distanceSquared >= radiusSquared)
+        {
+            continue;
+        }
+
+        const float distanceToLight = sqrt(max(distanceSquared, 1e-4));
+        const float3 lightDirection = toLight / distanceToLight;
+        const float ndotl = saturate(dot(normal, lightDirection));
+        const float normalizedDistance = saturate(distanceToLight / radius);
+        const float falloff = saturate(1.0 - (normalizedDistance * normalizedDistance));
+        const float attenuation = falloff * falloff;
+        lighting += colorIntensity.rgb * (colorIntensity.w * globalIntensity * ndotl * attenuation);
+    }
+    return lighting;
+}
+
 float4 main(FragmentInput input) : SV_Target0
 {
     const float4 albedo = sampleImportedAlbedo(input);
@@ -174,12 +210,13 @@ float4 main(FragmentInput input) : SV_Target0
         float3(0.18, 0.19, 0.21) +
         (ambientIrradiance * float3(0.92, 0.95, 1.00) * 0.58);
     const float3 voxelGi = sampleImportedVoxelGi(input.inWorldPosition, normal) * 1.35;
+    const float3 importedLights = evaluateImportedLocalLights(input.inWorldPosition, normal);
     const float3 direct =
         camera.sunColorShadow.xyz * (sunIntensity * wrappedNdotL * shadowVisibility * 0.62);
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
     const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
     const float rim = pow(1.0 - saturate(dot(normal, viewDir)), 2.0);
     const float3 shaded =
-        (((ambient + voxelGi + direct) * albedo.rgb) + (float3(1.0, 0.98, 0.94) * (rim * 0.022)));
+        (((ambient + voxelGi + direct + importedLights) * albedo.rgb) + (float3(1.0, 0.98, 0.94) * (rim * 0.022)));
     return float4(shaded, 1.0);
 }

@@ -883,6 +883,7 @@ bool App::init() {
                         << ", meshes=" << m_importedScene.sourceMeshCount
                         << ", instances=" << m_importedScene.sourceInstanceCount
                         << ", terrainCells=" << m_importedScene.sourceLandscapeCellCount
+                        << ", lights=" << m_importedScene.sourceLightCount
                         << ", objects=" << m_gpuSceneAsset.objects.rootTransformIndices.size()
                         << ", pages=" << m_gpuSceneAsset.pages.size()
                         << ", renderVertices=" << m_gpuSceneAsset.renderCache.packedVertices.size()

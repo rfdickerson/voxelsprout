@@ -29,6 +29,7 @@ constexpr uint32_t kBindlessTextureIndexSkyDaylight = 7;
 constexpr uint32_t kBindlessTextureIndexWaterNormal = 8;
 constexpr uint32_t kBindlessTextureStaticCount = 9;
 constexpr uint32_t kShadowCascadeCount = 4;
+constexpr uint32_t kImportedLocalLightCapacity = 64;
 constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {4096u, 2048u, 2048u, 1024u};
 struct ShadowAtlasRect {
     uint32_t x;
@@ -110,6 +111,9 @@ struct alignas(16) CameraUniform {
     float colorGrading2[4];
     float colorGrading3[4];
     float waterConfig[4];
+    float importedLightPositionRadius[kImportedLocalLightCapacity][4];
+    float importedLightColorIntensity[kImportedLocalLightCapacity][4];
+    float importedLightConfig[4];
     float voxelBaseColorPalette[16][4];
     float voxelGiGridOriginCellSize[4];
     float voxelGiGridExtentStrength[4];

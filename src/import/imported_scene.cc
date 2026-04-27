@@ -26,7 +26,7 @@ namespace odai::importer {
 namespace {
 
 constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
-constexpr std::uint32_t kImportedSceneVersion = 14u;
+constexpr std::uint32_t kImportedSceneVersion = 15u;
 constexpr float kExteriorWaterLevel = 0.0f;
 constexpr int kLandSize = 65;
 constexpr int kLandTextureSize = 16;
@@ -35,6 +35,8 @@ constexpr float kHeightScale = 8.0f;
 constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
 constexpr float kRiverAuditMaxDistance = 1024.0f;
 constexpr std::uint32_t kTerrainCompositeTextureSize = 1024u;
+constexpr std::uint32_t kTes3LightFlagNegative = 0x004u;
+constexpr std::uint32_t kTes3LightFlagOffDefault = 0x020u;
 
 std::string g_lastImportedSceneError;
 
@@ -787,6 +789,15 @@ struct ParsedLand {
     std::vector<std::uint16_t> textureIndices;
 };
 
+struct ParsedLightRecord {
+    std::string id;
+    std::string modelPath;
+    float color[3] = {1.0f, 1.0f, 1.0f};
+    std::int32_t radius = 0;
+    std::int32_t time = 0;
+    std::uint32_t flags = 0u;
+};
+
 struct CellSummary {
     std::string name;
     int gridX = 0;
@@ -1052,6 +1063,56 @@ bool parseModelRecord(std::istream& input, std::uint32_t recordSize, std::string
             outId = lowerCopy(readSizedString(input, subHeader.size));
         } else if (subName == "MODL") {
             outModelPath = lowerCopy(readSizedString(input, subHeader.size));
+        } else {
+            input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
+        }
+        bytesLeft -= subHeader.size;
+    }
+    input.seekg(recordStart + static_cast<std::streamoff>(recordSize), std::ios::beg);
+    return true;
+}
+
+bool parseLightRecord(std::istream& input, std::uint32_t recordSize, ParsedLightRecord& outLight) {
+    const std::streampos recordStart = input.tellg();
+    std::uint32_t bytesLeft = recordSize;
+    while (bytesLeft >= sizeof(Tes3SubRecordHeader)) {
+        Tes3SubRecordHeader subHeader{};
+        if (!readSubRecordHeader(input, subHeader)) {
+            return false;
+        }
+        bytesLeft -= static_cast<std::uint32_t>(sizeof(subHeader));
+        const std::string subName = fourCcToString(subHeader.name);
+        if (subHeader.size > bytesLeft) {
+            return false;
+        }
+        if (subName == "NAME") {
+            outLight.id = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "MODL") {
+            outLight.modelPath = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "LHDT" && subHeader.size >= 24u) {
+            float weight = 0.0f;
+            std::int32_t value = 0;
+            std::int32_t time = 0;
+            std::int32_t radius = 0;
+            std::uint32_t color = 0xffffffffu;
+            std::int32_t flags = 0;
+            readValue(input, weight);
+            readValue(input, value);
+            readValue(input, time);
+            readValue(input, radius);
+            readValue(input, color);
+            readValue(input, flags);
+            (void)weight;
+            (void)value;
+            outLight.time = time;
+            outLight.radius = radius;
+            outLight.flags = static_cast<std::uint32_t>(flags);
+            outLight.color[0] = static_cast<float>(color & 0xffu) * (1.0f / 255.0f);
+            outLight.color[1] = static_cast<float>((color >> 8u) & 0xffu) * (1.0f / 255.0f);
+            outLight.color[2] = static_cast<float>((color >> 16u) & 0xffu) * (1.0f / 255.0f);
+            if (subHeader.size > 24u) {
+                input.seekg(static_cast<std::streamoff>(subHeader.size - 24u), std::ios::cur);
+            }
         } else {
             input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
         }
@@ -1448,6 +1509,7 @@ ImportedScene buildSceneFromParsedData(
     const std::filesystem::path& morrowindDataFilesPath,
     const std::unordered_map<std::uint32_t, std::string>& landscapeTextureByIndex,
     const std::unordered_map<std::string, std::string>& modelPathById,
+    const std::unordered_map<std::string, ParsedLightRecord>& lightById,
     const std::vector<ParsedCell>& cells,
     const std::vector<ParsedLand>& lands
 ) {
@@ -1621,6 +1683,28 @@ ImportedScene buildSceneFromParsedData(
 
     for (const ParsedCell& cell : cells) {
         for (const ParsedCellRef& ref : cell.refs) {
+            const auto lightIt = lightById.find(lowerCopy(ref.refId));
+            if (lightIt != lightById.end()) {
+                const ParsedLightRecord& lightRecord = lightIt->second;
+                const bool isUsablePlacedLight =
+                    lightRecord.radius > 0 &&
+                    (lightRecord.flags & kTes3LightFlagOffDefault) == 0u &&
+                    (lightRecord.flags & kTes3LightFlagNegative) == 0u;
+                if (isUsablePlacedLight) {
+                    ImportedSceneLight light{};
+                    light.sourceId = ref.refId;
+                    light.position[0] = ref.position[0];
+                    light.position[1] = ref.position[1];
+                    light.position[2] = ref.position[2];
+                    light.color[0] = lightRecord.color[0];
+                    light.color[1] = lightRecord.color[1];
+                    light.color[2] = lightRecord.color[2];
+                    light.radius = static_cast<float>(lightRecord.radius) * std::max(ref.scale, 0.01f);
+                    light.intensity = 1.0f;
+                    light.flags = lightRecord.flags;
+                    scene.lights.push_back(std::move(light));
+                }
+            }
             const auto modelIt = modelPathById.find(lowerCopy(ref.refId));
             if (modelIt != modelPathById.end()) {
                 const std::string normalizedModelPath = lowerCopy(modelIt->second);
@@ -2043,6 +2127,7 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
     const std::uint32_t instanceCount = static_cast<std::uint32_t>(scene.instances.size());
     const std::uint32_t landscapeCellCount = static_cast<std::uint32_t>(scene.landscapeCells.size());
     const std::uint32_t waterPatchCount = static_cast<std::uint32_t>(scene.waterPatches.size());
+    const std::uint32_t lightCount = static_cast<std::uint32_t>(scene.lights.size());
     const std::uint32_t unresolvedRefCount = static_cast<std::uint32_t>(scene.unresolvedRefs.size());
     const std::uint32_t packedVertexCount = static_cast<std::uint32_t>(scene.packedVertices.size());
     const std::uint32_t packedIndexCount = static_cast<std::uint32_t>(scene.packedIndices.size());
@@ -2052,6 +2137,7 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
     writeValue(output, instanceCount);
     writeValue(output, landscapeCellCount);
     writeValue(output, waterPatchCount);
+    writeValue(output, lightCount);
     writeValue(output, unresolvedRefCount);
     writeValue(output, packedVertexCount);
     writeValue(output, packedIndexCount);
@@ -2123,6 +2209,15 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
             static_cast<std::streamsize>(scene.waterPatches.size() * sizeof(ImportedSceneWaterPatch)));
     }
 
+    for (const ImportedSceneLight& light : scene.lights) {
+        writeString(output, light.sourceId);
+        output.write(reinterpret_cast<const char*>(light.position), static_cast<std::streamsize>(sizeof(light.position)));
+        output.write(reinterpret_cast<const char*>(light.color), static_cast<std::streamsize>(sizeof(light.color)));
+        writeValue(output, light.radius);
+        writeValue(output, light.intensity);
+        writeValue(output, light.flags);
+    }
+
     for (const ImportedSceneCellRef& ref : scene.unresolvedRefs) {
         writeString(output, ref.refId);
         writeString(output, ref.modelPath);
@@ -2188,6 +2283,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
     std::uint32_t instanceCount = 0;
     std::uint32_t landscapeCellCount = 0;
     std::uint32_t waterPatchCount = 0;
+    std::uint32_t lightCount = 0;
     std::uint32_t unresolvedRefCount = 0;
     std::uint32_t packedVertexCount = 0;
     std::uint32_t packedIndexCount = 0;
@@ -2197,6 +2293,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         !readValue(input, instanceCount) ||
         !readValue(input, landscapeCellCount) ||
         !readValue(input, waterPatchCount) ||
+        !readValue(input, lightCount) ||
         !readValue(input, unresolvedRefCount)) {
         return false;
     }
@@ -2216,6 +2313,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
     scene.sourceInstanceCount = instanceCount;
     scene.sourceLandscapeCellCount = landscapeCellCount;
     scene.sourceWaterPatchCount = waterPatchCount;
+    scene.sourceLightCount = lightCount;
     scene.sourceUnresolvedRefCount = unresolvedRefCount;
 
     scene.textures.resize(textureCount);
@@ -2302,6 +2400,18 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         return false;
     }
 
+    scene.lights.resize(lightCount);
+    for (ImportedSceneLight& light : scene.lights) {
+        if (!readString(input, light.sourceId) ||
+            !readExact(input, light.position, sizeof(light.position)) ||
+            !readExact(input, light.color, sizeof(light.color)) ||
+            !readValue(input, light.radius) ||
+            !readValue(input, light.intensity) ||
+            !readValue(input, light.flags)) {
+            return false;
+        }
+    }
+
     scene.unresolvedRefs.resize(unresolvedRefCount);
     for (ImportedSceneCellRef& ref : scene.unresolvedRefs) {
         if (!readString(input, ref.refId) ||
@@ -2370,6 +2480,7 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     std::uint32_t instanceCount = 0;
     std::uint32_t landscapeCellCount = 0;
     std::uint32_t waterPatchCount = 0;
+    std::uint32_t lightCount = 0;
     std::uint32_t unresolvedRefCount = 0;
     std::uint32_t packedVertexCount = 0;
     std::uint32_t packedIndexCount = 0;
@@ -2379,6 +2490,7 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
         !readValue(input, instanceCount) ||
         !readValue(input, landscapeCellCount) ||
         !readValue(input, waterPatchCount) ||
+        !readValue(input, lightCount) ||
         !readValue(input, unresolvedRefCount) ||
         !readValue(input, packedVertexCount) ||
         !readValue(input, packedIndexCount) ||
@@ -2395,6 +2507,7 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     scene.sourceInstanceCount = instanceCount;
     scene.sourceLandscapeCellCount = landscapeCellCount;
     scene.sourceWaterPatchCount = waterPatchCount;
+    scene.sourceLightCount = lightCount;
     scene.sourceUnresolvedRefCount = unresolvedRefCount;
 
     scene.textures.resize(textureCount);
@@ -2468,6 +2581,18 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     if (waterPatchCount != 0 &&
         !readExact(input, scene.waterPatches.data(), scene.waterPatches.size() * sizeof(ImportedSceneWaterPatch))) {
         return false;
+    }
+
+    scene.lights.resize(lightCount);
+    for (ImportedSceneLight& light : scene.lights) {
+        if (!readString(input, light.sourceId) ||
+            !readExact(input, light.position, sizeof(light.position)) ||
+            !readExact(input, light.color, sizeof(light.color)) ||
+            !readValue(input, light.radius) ||
+            !readValue(input, light.intensity) ||
+            !readValue(input, light.flags)) {
+            return false;
+        }
     }
 
     for (std::uint32_t i = 0; i < unresolvedRefCount; ++i) {
@@ -2569,6 +2694,7 @@ bool cookMorrowindBalmoraScene(
     std::cerr << "[morrowind cooker] Pass 1: scanning CELL/LTEX/object records\n";
 
     std::unordered_map<std::string, std::string> modelPathById;
+    std::unordered_map<std::string, ParsedLightRecord> lightById;
     std::unordered_map<std::uint32_t, std::string> landscapeTextureByIndex;
     std::vector<std::pair<int, int>> balmoraCells;
 
@@ -2610,9 +2736,22 @@ bool cookMorrowindBalmoraScene(
             if (!texturePath.empty()) {
                 landscapeTextureByIndex[landscapeIndex] = lowerCopy(texturePath);
             }
+        } else if (recordName == "LIGH") {
+            ParsedLightRecord light{};
+            if (!parseLightRecord(pass1, header.size, light)) {
+                setLastImportedSceneError(
+                    "Failed to parse LIGH record during pass 1 at record " + std::to_string(pass1RecordIndex));
+                return false;
+            }
+            if (!light.id.empty()) {
+                lightById[light.id] = light;
+                if (!light.modelPath.empty()) {
+                    modelPathById[light.id] = light.modelPath;
+                }
+            }
         } else if (
             recordName == "STAT" || recordName == "DOOR" || recordName == "CONT" || recordName == "FLOR" ||
-            recordName == "ACTI" || recordName == "LIGH" || recordName == "FURN" || recordName == "MISC" ||
+            recordName == "ACTI" || recordName == "FURN" || recordName == "MISC" ||
             recordName == "APPA" || recordName == "WEAP" || recordName == "ARMO" || recordName == "CLOT" ||
             recordName == "BOOK" || recordName == "INGR" || recordName == "ALCH" || recordName == "LOCK" ||
             recordName == "PROB" || recordName == "REPA") {
@@ -2639,7 +2778,8 @@ bool cookMorrowindBalmoraScene(
     std::cerr << "[morrowind cooker] Pass 1 complete: "
               << balmoraCells.size() << " Balmora cells, "
               << landscapeTextureByIndex.size() << " landscape textures, "
-              << modelPathById.size() << " model records\n";
+              << modelPathById.size() << " model records, "
+              << lightById.size() << " light records\n";
 
     std::set<std::pair<int, int>> includedCellsSet;
     for (const std::pair<int, int>& cell : balmoraCells) {
@@ -2709,12 +2849,14 @@ bool cookMorrowindBalmoraScene(
         morrowindDataFilesPath,
         landscapeTextureByIndex,
         modelPathById,
+        lightById,
         parsedCells,
         parsedLands
     );
     std::cerr << "[morrowind cooker] Scene build complete: "
               << outResult.scene.meshes.size() << " meshes, "
               << outResult.scene.landscapeCells.size() << " landscape cells, "
+              << outResult.scene.lights.size() << " lights, "
               << outResult.scene.unresolvedRefs.size() << " unresolved refs\n";
     outResult.balmoraCells = balmoraCells;
     outResult.includedCells.assign(includedCellsSet.begin(), includedCellsSet.end());

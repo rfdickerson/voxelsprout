@@ -90,7 +90,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 worldDir = normalize(mul(invViewRotation, viewDir));
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
 
-    const float maxDistance = hasGeometry ? min(sceneDepth, 96.0) : 96.0;
+    const float travelDistance = sceneDepth / max(-viewDir.z, 1e-4);
+    const float maxDistance = hasGeometry ? min(travelDistance, 128.0) : 128.0;
     if (maxDistance <= 0.05)
     {
         sunShaftTexture[dispatchThreadId.xy] = float4(0.0, 0.0, 0.0, 1.0);
@@ -120,7 +121,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float t = (float(i) + 0.5) * stepLength;
         const float3 worldPos = cameraWorld + (worldDir * t);
         const float relativeHeight = worldPos.y - fogBaseHeight;
-        const float localDensity = fogDensityBase * exp(-relativeHeight * fogHeightFalloff);
+        const float localDensity = fogDensityBase * exp(clamp(-relativeHeight * fogHeightFalloff, -7.0, 7.0));
         if (localDensity <= 1e-6)
         {
             continue;

@@ -144,6 +144,34 @@ ImportedDrawBounds computeImportedDrawBounds(
     return bounds;
 }
 
+std::array<float, 3> sampleImportedTextureBaseColor(
+    const std::vector<odai::importer::ImportedSceneTexture>& textures,
+    const odai::importer::ImportedScenePackedVertex& vertex
+) {
+    if (vertex.textureIndex >= textures.size()) {
+        return {vertex.color[0], vertex.color[1], vertex.color[2]};
+    }
+    const odai::importer::ImportedSceneTexture& texture = textures[vertex.textureIndex];
+    if (texture.width == 0u || texture.height == 0u ||
+        texture.rgba8.size() < static_cast<std::size_t>(texture.width) * texture.height * 4u) {
+        return {vertex.color[0], vertex.color[1], vertex.color[2]};
+    }
+    float u = vertex.uv[0] - std::floor(vertex.uv[0]);
+    float v = vertex.uv[1] - std::floor(vertex.uv[1]);
+    const std::uint32_t x = std::min(
+        static_cast<std::uint32_t>(u * static_cast<float>(texture.width)),
+        texture.width - 1u);
+    const std::uint32_t y = std::min(
+        static_cast<std::uint32_t>(v * static_cast<float>(texture.height)),
+        texture.height - 1u);
+    const std::size_t offset = (static_cast<std::size_t>(y) * texture.width + x) * 4u;
+    return {
+        static_cast<float>(texture.rgba8[offset + 0u]) / 255.0f,
+        static_cast<float>(texture.rgba8[offset + 1u]) / 255.0f,
+        static_cast<float>(texture.rgba8[offset + 2u]) / 255.0f
+    };
+}
+
 ChunkResidentKey chunkResidentKeyForChunk(const odai::world::Chunk& chunk) {
     return ChunkResidentKey{
         chunk.chunkX(),
@@ -384,6 +412,9 @@ void RendererBackend::clearGpuScene() {
         m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
     }
     m_importedMeshDraws.clear();
+    m_importedGiTriangles.clear();
+    m_importedLocalLights.clear();
+    m_debugImportedLightSelectedCount = 0;
     m_importedIndexCount = 0;
     m_importedTerrainDrawCount = 0;
     m_importedStaticDrawCount = 0;
@@ -417,6 +448,7 @@ bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene)
     compatibilityScene.sourceTag = scene.sourceTag;
     compatibilityScene.textures = scene.renderCache.textures;
     compatibilityScene.waterPatches = scene.renderCache.waterPatches;
+    compatibilityScene.lights = scene.renderCache.lights;
     compatibilityScene.packedVertices = scene.renderCache.packedVertices;
     compatibilityScene.packedIndices = scene.renderCache.packedIndices;
     compatibilityScene.packedDraws = scene.renderCache.packedDraws;
@@ -425,6 +457,7 @@ bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene)
     compatibilityScene.sourceInstanceCount = static_cast<std::uint32_t>(scene.instances.objectIndices.size());
     compatibilityScene.sourceLandscapeCellCount = scene.renderCache.terrainDrawCount;
     compatibilityScene.sourceWaterPatchCount = static_cast<std::uint32_t>(scene.waterPatches.size());
+    compatibilityScene.sourceLightCount = static_cast<std::uint32_t>(scene.lights.size());
     compatibilityScene.boundsMin[0] = scene.sceneBounds.min[0];
     compatibilityScene.boundsMin[1] = scene.sceneBounds.min[1];
     compatibilityScene.boundsMin[2] = scene.sceneBounds.min[2];
@@ -758,6 +791,21 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
     draws.reserve(uploadScene.packedDraws.size());
     waterVertices.reserve(uploadScene.waterPatches.size() * 4u);
     waterIndices.reserve(uploadScene.waterPatches.size() * 6u);
+    m_importedLocalLights.clear();
+    m_importedLocalLights.reserve(uploadScene.lights.size());
+    for (const odai::importer::ImportedSceneLight& sceneLight : uploadScene.lights) {
+        if (sceneLight.radius <= 0.0f || sceneLight.intensity <= 0.0f) {
+            continue;
+        }
+        ImportedLocalLight light{};
+        std::memcpy(light.position, sceneLight.position, sizeof(light.position));
+        light.color[0] = std::clamp(sceneLight.color[0], 0.0f, 8.0f);
+        light.color[1] = std::clamp(sceneLight.color[1], 0.0f, 8.0f);
+        light.color[2] = std::clamp(sceneLight.color[2], 0.0f, 8.0f);
+        light.radius = sceneLight.radius;
+        light.intensity = sceneLight.intensity;
+        m_importedLocalLights.push_back(light);
+    }
 
     for (const odai::importer::ImportedScenePackedVertex& srcVertex : uploadScene.packedVertices) {
         ImportedMeshVertex dstVertex{};
@@ -955,6 +1003,50 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
         computeImportedDrawBounds(uploadScene.packedVertices, uploadScene.packedIndices, terrainDraws);
     const ImportedDrawBounds staticBounds =
         computeImportedDrawBounds(uploadScene.packedVertices, uploadScene.packedIndices, staticDraws);
+    m_importedGiTriangles.clear();
+    constexpr std::size_t kImportedGiTriangleLimit = 300000u;
+    m_importedGiTriangles.reserve(std::min<std::size_t>(uploadScene.packedIndices.size() / 3u, kImportedGiTriangleLimit));
+    auto appendImportedGiTriangles = [&](std::span<const odai::importer::ImportedScenePackedDraw> sourceDraws) {
+        for (const odai::importer::ImportedScenePackedDraw& draw : sourceDraws) {
+            const std::size_t indexEnd =
+                static_cast<std::size_t>(draw.firstIndex) + static_cast<std::size_t>(draw.indexCount);
+            if (draw.indexCount < 3u || indexEnd > uploadScene.packedIndices.size()) {
+                continue;
+            }
+            for (std::size_t indexOffset = draw.firstIndex; indexOffset + 2u < indexEnd; indexOffset += 3u) {
+                const std::uint32_t i0 = uploadScene.packedIndices[indexOffset + 0u];
+                const std::uint32_t i1 = uploadScene.packedIndices[indexOffset + 1u];
+                const std::uint32_t i2 = uploadScene.packedIndices[indexOffset + 2u];
+                if (i0 >= uploadScene.packedVertices.size() ||
+                    i1 >= uploadScene.packedVertices.size() ||
+                    i2 >= uploadScene.packedVertices.size()) {
+                    continue;
+                }
+                const odai::importer::ImportedScenePackedVertex& v0 = uploadScene.packedVertices[i0];
+                const odai::importer::ImportedScenePackedVertex& v1 = uploadScene.packedVertices[i1];
+                const odai::importer::ImportedScenePackedVertex& v2 = uploadScene.packedVertices[i2];
+                ImportedGiTriangle triangle{};
+                std::memcpy(triangle.p0, v0.position, sizeof(triangle.p0));
+                std::memcpy(triangle.p1, v1.position, sizeof(triangle.p1));
+                std::memcpy(triangle.p2, v2.position, sizeof(triangle.p2));
+                const std::array<float, 3> c0 = sampleImportedTextureBaseColor(uploadScene.textures, v0);
+                const std::array<float, 3> c1 = sampleImportedTextureBaseColor(uploadScene.textures, v1);
+                const std::array<float, 3> c2 = sampleImportedTextureBaseColor(uploadScene.textures, v2);
+                triangle.albedo[0] = (c0[0] + c1[0] + c2[0]) * (1.0f / 3.0f);
+                triangle.albedo[1] = (c0[1] + c1[1] + c2[1]) * (1.0f / 3.0f);
+                triangle.albedo[2] = (c0[2] + c1[2] + c2[2]) * (1.0f / 3.0f);
+                m_importedGiTriangles.push_back(triangle);
+                if (m_importedGiTriangles.size() >= kImportedGiTriangleLimit) {
+                    return;
+                }
+            }
+            if (m_importedGiTriangles.size() >= kImportedGiTriangleLimit) {
+                break;
+            }
+        }
+    };
+    appendImportedGiTriangles(terrainDraws);
+    appendImportedGiTriangles(staticDraws);
     ImportedDrawBounds waterBounds{};
     for (const ImportedWaterVertex& vertex : waterVertices) {
         expandImportedBounds(
@@ -968,7 +1060,8 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
                        << ", draws=" << m_importedMeshDraws.size()
                        << ", instances=" << uploadScene.instances.size()
                        << ", terrainCells=" << uploadScene.landscapeCells.size()
-                       << ", waterPatches=" << uploadScene.waterPatches.size() << ")";
+                       << ", waterPatches=" << uploadScene.waterPatches.size()
+                       << ", lights=" << m_importedLocalLights.size() << ")";
     if (terrainBounds.valid) {
         VOX_LOGI("render") << "imported terrain bounds min=("
                            << terrainBounds.min[0] << ", " << terrainBounds.min[1] << ", " << terrainBounds.min[2]
@@ -984,6 +1077,15 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
                            << ") draws=" << staticDraws.size();
     } else {
         VOX_LOGW("render") << "imported scene contained no static bounds after upload";
+    }
+    VOX_LOGI("render") << "imported GI voxelization source triangles="
+                       << m_importedGiTriangles.size();
+    if (!m_importedGiTriangles.empty()) {
+        m_voxelGiWorldDirty = true;
+        ++m_voxelGiWorldVersion;
+        m_voxelGiOccupancyFullRebuildInProgress = true;
+        m_voxelGiOccupancyFullRebuildNeedsClear = true;
+        m_voxelGiOccupancyFullRebuildCursor = 0;
     }
     if (m_importedWaterIndexCount > 0) {
         VOX_LOGI("render") << "imported water geometry uploaded (vertices=" << waterVertices.size()

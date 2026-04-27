@@ -152,10 +152,10 @@ public:
         float colorGradingHighlightTintR = 0.06f;
         float colorGradingHighlightTintG = 0.03f;
         float colorGradingHighlightTintB = -0.01f;
-        float volumetricFogDensity = 0.0045f;
-        float volumetricFogHeightFalloff = 0.075f;
-        float volumetricFogBaseHeight = 6.0f;
-        float volumetricSunScattering = 1.25f;
+        float volumetricFogDensity = 0.0040f;
+        float volumetricFogHeightFalloff = 0.0045f;
+        float volumetricFogBaseHeight = 64.0f;
+        float volumetricSunScattering = 1.45f;
         float waterAnimationSpeed = 2.5f;
         float waterNormalStrength = 1.0f;
         float waterReflectionStrength = 3.0f;
@@ -521,6 +521,20 @@ private:
         BufferHandle indexBufferHandle = kInvalidBufferHandle;
         std::uint32_t firstIndex = 0;
         std::uint32_t indexCount = 0;
+    };
+
+    struct ImportedGiTriangle {
+        float p0[3] = {};
+        float p1[3] = {};
+        float p2[3] = {};
+        float albedo[3] = {};
+    };
+
+    struct ImportedLocalLight {
+        float position[3] = {};
+        float color[3] = {1.0f, 1.0f, 1.0f};
+        float radius = 0.0f;
+        float intensity = 1.0f;
     };
 
     struct ImportedTextureResource {
@@ -960,6 +974,8 @@ private:
     std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
     std::vector<ImportedMeshDraw> m_importedMeshDraws;
+    std::vector<ImportedGiTriangle> m_importedGiTriangles;
+    std::vector<ImportedLocalLight> m_importedLocalLights;
     std::vector<RtChunkSceneRecord> m_rtChunkSceneRecords;
     std::vector<RtImportedSceneRecord> m_rtImportedSceneRecords;
     std::vector<RtGeometryBuffers> m_rtMagicaGeometries;
@@ -1044,6 +1060,10 @@ private:
     bool m_debugShowImportedTextures = true;
     bool m_debugImportedFlatShading = false;
     bool m_debugImportedWaterSolid = false;
+    bool m_debugImportedLightsEnabled = true;
+    float m_debugImportedLightIntensity = 1.65f;
+    float m_debugImportedLightDayScale = 0.18f;
+    std::uint32_t m_debugImportedLightSelectedCount = 0;
     bool m_debugVisualizeSsao = false;
     bool m_debugVisualizeAoNormals = false;
     ShadowDebugSettings m_shadowDebugSettings{};
