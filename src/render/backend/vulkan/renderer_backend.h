@@ -1068,7 +1068,7 @@ private:
     bool m_debugImportedWaterSolid = false;
     bool m_debugImportedLightsEnabled = true;
     float m_debugImportedLightIntensity = 1.65f;
-    float m_debugImportedLightDayScale = 0.18f;
+    float m_debugImportedLightRadiusScale = 3.0f;
     std::uint32_t m_debugImportedLightSelectedCount = 0;
     bool m_debugVisualizeSsao = false;
     bool m_debugVisualizeAoNormals = false;
