@@ -206,6 +206,25 @@ float sampleSkyMask(float2 uv)
     return 1.0 - step(0.0001, viewDepth);
 }
 
+float sampleFogGeometryCoverage(float2 uv)
+{
+    uint texW = 0u;
+    uint texH = 0u;
+    normalDepthTexture.GetDimensions(texW, texH);
+    const float2 texelSize = 1.0 / float2(float(max(texW, 1u)), float(max(texH, 1u)));
+
+    float coverage = step(0.0001, normalDepthTexture.SampleLevel(uv, 0.0).w) * 4.0;
+    coverage += step(0.0001, normalDepthTexture.SampleLevel(uv + float2(texelSize.x, 0.0), 0.0).w);
+    coverage += step(0.0001, normalDepthTexture.SampleLevel(uv - float2(texelSize.x, 0.0), 0.0).w);
+    coverage += step(0.0001, normalDepthTexture.SampleLevel(uv + float2(0.0, texelSize.y), 0.0).w);
+    coverage += step(0.0001, normalDepthTexture.SampleLevel(uv - float2(0.0, texelSize.y), 0.0).w);
+    coverage += step(0.0001, normalDepthTexture.SampleLevel(uv + texelSize, 0.0).w) * 0.5;
+    coverage += step(0.0001, normalDepthTexture.SampleLevel(uv - texelSize, 0.0).w) * 0.5;
+    coverage += step(0.0001, normalDepthTexture.SampleLevel(uv + float2(texelSize.x, -texelSize.y), 0.0).w) * 0.5;
+    coverage += step(0.0001, normalDepthTexture.SampleLevel(uv + float2(-texelSize.x, texelSize.y), 0.0).w) * 0.5;
+    return saturate(coverage / 10.0);
+}
+
 float sampleScreenSpaceSunShafts(float2 uv, float2 sunUv, float sunVisibility, float sunFacing)
 {
     if (sunVisibility <= 1e-5 || sunFacing <= 1e-5)
@@ -463,7 +482,7 @@ float4 main(FragmentInput input) : SV_Target0
         const float3 worldViewDir = normalize(mul(invViewRotation, viewRay));
         const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
         const float3 worldPos = cameraWorld + (worldViewDir * travelDistance);
-        hdrColor = applyVolumetricHeightFog(
+        const float3 foggedColor = applyVolumetricHeightFog(
             hdrColor,
             cameraWorld,
             worldPos,
@@ -472,6 +491,7 @@ float4 main(FragmentInput input) : SV_Target0
             toSun,
             sunVisibility
         );
+        hdrColor = lerp(hdrColor, foggedColor, sampleFogGeometryCoverage(input.inUv));
     }
 
     const float3 cameraForward = normalize(mul(invViewRotation, float3(0.0, 0.0, -1.0)));

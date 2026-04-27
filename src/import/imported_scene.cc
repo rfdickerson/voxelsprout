@@ -1289,14 +1289,15 @@ std::array<float, 16> buildInstanceTransform(const ParsedCellRef& ref) {
     std::array<float, 16> transform = identityMatrix();
     // Morrowind object refs use X/Y ground-plane coordinates with Z as up.
     // Convert to the engine's X/Z ground plane with Y up before applying rotation.
-    // Match OpenMW's non-actor rotation convention exactly:
-    // quat(x,-X) * quat(y,-Y) * quat(z,-Z), remapped into engine axes.
+    // Match OpenMW's direct non-actor rotation convention:
+    // quat(z,-Z) * quat(y,-Y) * quat(x,-X), remapped through the engine's
+    // handedness-changing Y/Z axis swap.
     transform = multiplyMatrices(transform, makeTranslationMatrix(ref.position[0], ref.position[2], ref.position[1]));
     const Quaternion rotation = multiplyQuaternions(
         multiplyQuaternions(
-            makeAxisAngleQuaternion(-1.0f, 0.0f, 0.0f, ref.rotation[0]),
-            makeAxisAngleQuaternion(0.0f, 0.0f, -1.0f, ref.rotation[1])),
-        makeAxisAngleQuaternion(0.0f, -1.0f, 0.0f, ref.rotation[2]));
+            makeAxisAngleQuaternion(0.0f, 1.0f, 0.0f, ref.rotation[2]),
+            makeAxisAngleQuaternion(0.0f, 0.0f, 1.0f, ref.rotation[1])),
+        makeAxisAngleQuaternion(1.0f, 0.0f, 0.0f, ref.rotation[0]));
     transform = multiplyMatrices(transform, makeRotationMatrix(rotation));
     transform = multiplyMatrices(transform, makeScaleMatrix(ref.scale));
     return transform;
