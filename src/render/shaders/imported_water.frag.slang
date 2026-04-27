@@ -337,7 +337,7 @@ float4 main(FragmentInput input) : SV_Target0
     const float bottomDepthFactor = saturate(refractedHitDistance / 14.0);
     const float shallowTransmissionFactor = saturate(rtShallowFactor);
     const float reflectionFloor =
-        (0.050 + (0.070 * bottomDepthFactor) + (0.032 * rippleSlope)) *
+        (0.065 + (0.090 * bottomDepthFactor) + (0.040 * rippleSlope)) *
         (0.65 + (0.35 * angleReflectionFactor));
     const float reflectionDriver =
         (angleReflectionFactor * 0.66) +
@@ -366,12 +366,12 @@ float4 main(FragmentInput input) : SV_Target0
     litColor += sunScatterTint;
     litColor += waterBody * 0.025;
     const float alphaBase =
-        0.12 +
-        (bottomDepthFactor * 0.22) +
-        (angleReflectionFactor * 0.18) +
-        (reflectionWeight * 0.11) +
-        ((1.0 - shallowTransmissionFactor) * 0.10) +
+        0.18 +
+        (bottomDepthFactor * 0.28) +
+        (angleReflectionFactor * 0.20) +
+        (reflectionWeight * 0.14) +
+        ((1.0 - shallowTransmissionFactor) * 0.13) +
         (foamMask * 0.03);
-    const float alpha = saturate(alphaBase * lerp(1.0, 0.74, overheadView));
+    const float alpha = saturate(alphaBase * lerp(1.0, 0.82, overheadView));
     return float4(litColor, alpha);
 }
