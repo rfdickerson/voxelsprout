@@ -823,6 +823,69 @@ void RendererBackend::renderFrame(
     mvpUniform.waterConfig[1] = std::clamp(m_skyDebugSettings.waterNormalStrength, 0.25f, 2.5f);
     mvpUniform.waterConfig[2] = std::clamp(m_skyDebugSettings.waterReflectionStrength, 0.25f, 4.0f);
     mvpUniform.waterConfig[3] = std::clamp(m_skyDebugSettings.waterRefractionDecay, 0.25f, 5.0f);
+
+    struct SelectedImportedLight {
+        const ImportedLocalLight* light = nullptr;
+        float score = 0.0f;
+    };
+    std::array<SelectedImportedLight, kImportedLocalLightCapacity> selectedImportedLights{};
+    std::size_t selectedImportedLightCount = 0;
+    if (m_debugImportedLightsEnabled && !m_importedLocalLights.empty()) {
+        for (const ImportedLocalLight& light : m_importedLocalLights) {
+            const float dx = light.position[0] - camera.x;
+            const float dy = light.position[1] - camera.y;
+            const float dz = light.position[2] - camera.z;
+            const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
+            const float influenceRadius = std::max(light.radius, 1.0f);
+            const float cullRadius = influenceRadius * 2.5f;
+            if (distanceSquared > (cullRadius * cullRadius)) {
+                continue;
+            }
+            const SelectedImportedLight selected{&light, distanceSquared / influenceRadius};
+            if (selectedImportedLightCount < selectedImportedLights.size()) {
+                selectedImportedLights[selectedImportedLightCount++] = selected;
+                continue;
+            }
+            std::size_t worstIndex = 0;
+            float worstScore = selectedImportedLights[0].score;
+            for (std::size_t lightIndex = 1; lightIndex < selectedImportedLights.size(); ++lightIndex) {
+                if (selectedImportedLights[lightIndex].score > worstScore) {
+                    worstScore = selectedImportedLights[lightIndex].score;
+                    worstIndex = lightIndex;
+                }
+            }
+            if (selected.score < worstScore) {
+                selectedImportedLights[worstIndex] = selected;
+            }
+        }
+        std::sort(
+            selectedImportedLights.begin(),
+            selectedImportedLights.begin() + static_cast<std::ptrdiff_t>(selectedImportedLightCount),
+            [](const SelectedImportedLight& a, const SelectedImportedLight& b) {
+                return a.score < b.score;
+            });
+    }
+    m_debugImportedLightSelectedCount = static_cast<std::uint32_t>(selectedImportedLightCount);
+    const float importedLightTimeScale =
+        isNight ? 1.0f : std::clamp(m_debugImportedLightDayScale, 0.0f, 1.0f);
+    const float importedLightGlobalIntensity =
+        std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f) * importedLightTimeScale;
+    for (std::size_t lightIndex = 0; lightIndex < selectedImportedLightCount; ++lightIndex) {
+        const ImportedLocalLight& light = *selectedImportedLights[lightIndex].light;
+        mvpUniform.importedLightPositionRadius[lightIndex][0] = light.position[0];
+        mvpUniform.importedLightPositionRadius[lightIndex][1] = light.position[1];
+        mvpUniform.importedLightPositionRadius[lightIndex][2] = light.position[2];
+        mvpUniform.importedLightPositionRadius[lightIndex][3] = std::max(light.radius, 1.0f);
+        mvpUniform.importedLightColorIntensity[lightIndex][0] = light.color[0];
+        mvpUniform.importedLightColorIntensity[lightIndex][1] = light.color[1];
+        mvpUniform.importedLightColorIntensity[lightIndex][2] = light.color[2];
+        mvpUniform.importedLightColorIntensity[lightIndex][3] = light.intensity;
+    }
+    mvpUniform.importedLightConfig[0] = static_cast<float>(selectedImportedLightCount);
+    mvpUniform.importedLightConfig[1] = importedLightGlobalIntensity;
+    mvpUniform.importedLightConfig[2] = m_debugImportedLightsEnabled ? 1.0f : 0.0f;
+    mvpUniform.importedLightConfig[3] = static_cast<float>(m_importedLocalLights.size());
+
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
     const float voxelGiDesiredOriginX = computeVoxelGiAxisOrigin(camera.x, voxelGiHalfSpan, kVoxelGiCellSize);
@@ -1002,18 +1065,132 @@ void RendererBackend::renderFrame(
         int32_t worldMinZ = 0;
         uint32_t voxelOffset = 0;
     };
+    struct ImportedGiOccupancyChunk {
+        int32_t worldMinX = 0;
+        int32_t worldMinY = 0;
+        int32_t worldMinZ = 0;
+        std::vector<uint32_t> voxels;
+    };
     constexpr uint32_t kVoxelGiChunkVoxelCount =
         static_cast<uint32_t>(odai::world::Chunk::kSizeX) *
         static_cast<uint32_t>(odai::world::Chunk::kSizeY) *
         static_cast<uint32_t>(odai::world::Chunk::kSizeZ);
     constexpr uint32_t kVoxelGiOccupancyChunkBudgetPerFrame = 8u;
     constexpr float kVoxelGiOccupancyOriginRebuildThreshold = 0.001f;
+    constexpr uint32_t kImportedGiVoxelType = 250u;
 
     std::optional<VkDescriptorBufferInfo> voxelGiChunkMetaDescriptorInfo = std::nullopt;
     std::optional<VkDescriptorBufferInfo> voxelGiChunkVoxelDescriptorInfo = std::nullopt;
     uint32_t voxelGiOccupancyDispatchZ = 0;
     bool voxelGiOccupancyClearThisFrame = false;
     float voxelGiOccupancyCpuMs = 0.0f;
+    uint32_t importedGiVoxelizedCellCount = 0u;
+
+    auto buildImportedGiOccupancyChunks = [&]() {
+        std::vector<ImportedGiOccupancyChunk> chunks;
+        if (m_importedGiTriangles.empty()) {
+            return chunks;
+        }
+        chunks.reserve(8u);
+        const int32_t originX = static_cast<int32_t>(std::floor(voxelGiOriginX));
+        const int32_t originY = static_cast<int32_t>(std::floor(voxelGiOriginY));
+        const int32_t originZ = static_cast<int32_t>(std::floor(voxelGiOriginZ));
+        for (int cz = 0; cz < 2; ++cz) {
+            for (int cy = 0; cy < 2; ++cy) {
+                for (int cx = 0; cx < 2; ++cx) {
+                    ImportedGiOccupancyChunk chunk{};
+                    chunk.worldMinX = originX + (cx * odai::world::Chunk::kSizeX);
+                    chunk.worldMinY = originY + (cy * odai::world::Chunk::kSizeY);
+                    chunk.worldMinZ = originZ + (cz * odai::world::Chunk::kSizeZ);
+                    chunk.voxels.assign(kVoxelGiChunkVoxelCount, 0u);
+                    chunks.push_back(std::move(chunk));
+                }
+            }
+        }
+        const auto packVoxel = [&](const float albedo[3]) {
+            const uint32_t r = static_cast<uint32_t>(std::clamp(albedo[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+            const uint32_t g = static_cast<uint32_t>(std::clamp(albedo[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+            const uint32_t b = static_cast<uint32_t>(std::clamp(albedo[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+            return kImportedGiVoxelType | (r << 8u) | (g << 16u) | (b << 24u);
+        };
+        const auto markCell = [&](int gx, int gy, int gz, const float albedo[3]) {
+            if (gx < 0 || gy < 0 || gz < 0 ||
+                gx >= static_cast<int>(kVoxelGiGridResolution) ||
+                gy >= static_cast<int>(kVoxelGiGridResolution) ||
+                gz >= static_cast<int>(kVoxelGiGridResolution)) {
+                return;
+            }
+            const int chunkX = std::clamp(gx / odai::world::Chunk::kSizeX, 0, 1);
+            const int chunkY = std::clamp(gy / odai::world::Chunk::kSizeY, 0, 1);
+            const int chunkZ = std::clamp(gz / odai::world::Chunk::kSizeZ, 0, 1);
+            const int localX = gx - (chunkX * odai::world::Chunk::kSizeX);
+            const int localY = gy - (chunkY * odai::world::Chunk::kSizeY);
+            const int localZ = gz - (chunkZ * odai::world::Chunk::kSizeZ);
+            const std::size_t chunkIndex = static_cast<std::size_t>((chunkZ * 4) + (chunkY * 2) + chunkX);
+            const std::size_t voxelIndex =
+                static_cast<std::size_t>(localX) +
+                (static_cast<std::size_t>(odai::world::Chunk::kSizeX) *
+                    (static_cast<std::size_t>(localZ) +
+                     (static_cast<std::size_t>(odai::world::Chunk::kSizeZ) * static_cast<std::size_t>(localY))));
+            if (chunkIndex >= chunks.size() || voxelIndex >= chunks[chunkIndex].voxels.size()) {
+                return;
+            }
+            if (chunks[chunkIndex].voxels[voxelIndex] == 0u) {
+                ++importedGiVoxelizedCellCount;
+            }
+            chunks[chunkIndex].voxels[voxelIndex] = packVoxel(albedo);
+        };
+        const auto markPoint = [&](const float p[3], const float albedo[3]) {
+            markCell(
+                static_cast<int>(std::floor((p[0] - voxelGiOriginX) / kVoxelGiCellSize)),
+                static_cast<int>(std::floor((p[1] - voxelGiOriginY) / kVoxelGiCellSize)),
+                static_cast<int>(std::floor((p[2] - voxelGiOriginZ) / kVoxelGiCellSize)),
+                albedo);
+        };
+        constexpr int kMaxFilledCellsPerTriangle = 512;
+        for (const ImportedGiTriangle& triangle : m_importedGiTriangles) {
+            const float minX = std::min({triangle.p0[0], triangle.p1[0], triangle.p2[0]});
+            const float minY = std::min({triangle.p0[1], triangle.p1[1], triangle.p2[1]});
+            const float minZ = std::min({triangle.p0[2], triangle.p1[2], triangle.p2[2]});
+            const float maxX = std::max({triangle.p0[0], triangle.p1[0], triangle.p2[0]});
+            const float maxY = std::max({triangle.p0[1], triangle.p1[1], triangle.p2[1]});
+            const float maxZ = std::max({triangle.p0[2], triangle.p1[2], triangle.p2[2]});
+            const float gridMaxX = voxelGiOriginX + static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
+            const float gridMaxY = voxelGiOriginY + static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
+            const float gridMaxZ = voxelGiOriginZ + static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
+            if (maxX < voxelGiOriginX || maxY < voxelGiOriginY || maxZ < voxelGiOriginZ ||
+                minX > gridMaxX || minY > gridMaxY || minZ > gridMaxZ) {
+                continue;
+            }
+            const int gx0 = std::clamp(static_cast<int>(std::floor((minX - voxelGiOriginX) / kVoxelGiCellSize)) - 1, 0, static_cast<int>(kVoxelGiGridResolution) - 1);
+            const int gy0 = std::clamp(static_cast<int>(std::floor((minY - voxelGiOriginY) / kVoxelGiCellSize)) - 1, 0, static_cast<int>(kVoxelGiGridResolution) - 1);
+            const int gz0 = std::clamp(static_cast<int>(std::floor((minZ - voxelGiOriginZ) / kVoxelGiCellSize)) - 1, 0, static_cast<int>(kVoxelGiGridResolution) - 1);
+            const int gx1 = std::clamp(static_cast<int>(std::floor((maxX - voxelGiOriginX) / kVoxelGiCellSize)) + 1, 0, static_cast<int>(kVoxelGiGridResolution) - 1);
+            const int gy1 = std::clamp(static_cast<int>(std::floor((maxY - voxelGiOriginY) / kVoxelGiCellSize)) + 1, 0, static_cast<int>(kVoxelGiGridResolution) - 1);
+            const int gz1 = std::clamp(static_cast<int>(std::floor((maxZ - voxelGiOriginZ) / kVoxelGiCellSize)) + 1, 0, static_cast<int>(kVoxelGiGridResolution) - 1);
+            const int cellCount = (gx1 - gx0 + 1) * (gy1 - gy0 + 1) * (gz1 - gz0 + 1);
+            if (cellCount > kMaxFilledCellsPerTriangle) {
+                markPoint(triangle.p0, triangle.albedo);
+                markPoint(triangle.p1, triangle.albedo);
+                markPoint(triangle.p2, triangle.albedo);
+                const float center[3] = {
+                    (triangle.p0[0] + triangle.p1[0] + triangle.p2[0]) * (1.0f / 3.0f),
+                    (triangle.p0[1] + triangle.p1[1] + triangle.p2[1]) * (1.0f / 3.0f),
+                    (triangle.p0[2] + triangle.p1[2] + triangle.p2[2]) * (1.0f / 3.0f)
+                };
+                markPoint(center, triangle.albedo);
+                continue;
+            }
+            for (int gz = gz0; gz <= gz1; ++gz) {
+                for (int gy = gy0; gy <= gy1; ++gy) {
+                    for (int gx = gx0; gx <= gx1; ++gx) {
+                        markCell(gx, gy, gz, triangle.albedo);
+                    }
+                }
+            }
+        }
+        return chunks;
+    };
 
     if (voxelGiNeedsOccupancyUpload &&
         m_voxelGiComputeAvailable &&
@@ -1040,7 +1217,7 @@ void RendererBackend::renderFrame(
         }
 
         const std::size_t chunkCount = chunkGrid.chunkCount();
-        if (m_voxelGiOccupancyFullRebuildInProgress && chunkCount == 0u) {
+        if (m_voxelGiOccupancyFullRebuildInProgress && chunkCount == 0u && m_importedGiTriangles.empty()) {
             m_voxelGiOccupancyFullRebuildInProgress = false;
             m_voxelGiOccupancyFullRebuildCursor = 0u;
         }
@@ -1068,12 +1245,17 @@ void RendererBackend::renderFrame(
                 occupancyChunkBatch.push_back(m_voxelGiDirtyChunkIndices[dirtyStart + i]);
             }
         }
+        std::vector<ImportedGiOccupancyChunk> importedGiChunks;
+        if (buildFromFullRebuild || occupancyBuildOriginChanged || !m_voxelGiOccupancyInitialized) {
+            importedGiChunks = buildImportedGiOccupancyChunks();
+        }
+        const std::size_t occupancySourceCount = occupancyChunkBatch.size() + importedGiChunks.size();
 
-        if (!occupancyChunkBatch.empty()) {
+        if (occupancySourceCount != 0u) {
             const VkDeviceSize chunkMetaBytes =
-                static_cast<VkDeviceSize>(occupancyChunkBatch.size() * sizeof(VoxelGiChunkMetaUpload));
+                static_cast<VkDeviceSize>(occupancySourceCount * sizeof(VoxelGiChunkMetaUpload));
             const VkDeviceSize chunkVoxelsBytes =
-                static_cast<VkDeviceSize>(occupancyChunkBatch.size()) *
+                static_cast<VkDeviceSize>(occupancySourceCount) *
                 static_cast<VkDeviceSize>(kVoxelGiChunkVoxelCount) *
                 static_cast<VkDeviceSize>(sizeof(uint32_t));
             const std::optional<FrameArenaSlice> chunkMetaSliceOpt = m_frameArena.allocateUpload(
@@ -1116,6 +1298,22 @@ void RendererBackend::renderFrame(
                         chunkVoxels[voxelWriteOffset + voxelIndex] = packedVoxel;
                     }
                 }
+                const std::size_t importedChunkBase = occupancyChunkBatch.size();
+                for (std::size_t importedIndex = 0; importedIndex < importedGiChunks.size(); ++importedIndex) {
+                    const std::size_t batchIndex = importedChunkBase + importedIndex;
+                    const ImportedGiOccupancyChunk& importedChunk = importedGiChunks[importedIndex];
+                    chunkMeta[batchIndex].worldMinX = importedChunk.worldMinX;
+                    chunkMeta[batchIndex].worldMinY = importedChunk.worldMinY;
+                    chunkMeta[batchIndex].worldMinZ = importedChunk.worldMinZ;
+                    chunkMeta[batchIndex].voxelOffset =
+                        static_cast<uint32_t>(batchIndex * static_cast<std::size_t>(kVoxelGiChunkVoxelCount)) |
+                        0x80000000u;
+                    const std::size_t voxelWriteOffset = batchIndex * static_cast<std::size_t>(kVoxelGiChunkVoxelCount);
+                    std::copy(
+                        importedChunk.voxels.begin(),
+                        importedChunk.voxels.end(),
+                        chunkVoxels + voxelWriteOffset);
+                }
 
                 const VkBuffer chunkMetaUploadBuffer = m_bufferAllocator.getBuffer(chunkMetaSliceOpt->buffer);
                 const VkBuffer chunkVoxelsUploadBuffer = m_bufferAllocator.getBuffer(chunkVoxelsSliceOpt->buffer);
@@ -1131,7 +1329,7 @@ void RendererBackend::renderFrame(
                         chunkVoxelsSliceOpt->size
                     };
                     voxelGiOccupancyDispatchZ = static_cast<uint32_t>(
-                        occupancyChunkBatch.size() * static_cast<std::size_t>(odai::world::Chunk::kSizeZ)
+                        occupancySourceCount * static_cast<std::size_t>(odai::world::Chunk::kSizeZ)
                     );
                     if (buildFromFullRebuild) {
                         m_voxelGiOccupancyFullRebuildCursor = fullRebuildBatchBegin + occupancyChunkBatch.size();
@@ -1151,6 +1349,10 @@ void RendererBackend::renderFrame(
         voxelGiOccupancyCpuMs = static_cast<float>(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - occupancyCpuStartTime).count()
         );
+        if (importedGiVoxelizedCellCount > 0u) {
+            VOX_LOGI("render") << "imported GI occupancy voxelized cells="
+                               << importedGiVoxelizedCellCount;
+        }
     } else if (!voxelGiNeedsOccupancyUpload) {
         m_voxelGiOccupancyFullRebuildInProgress = false;
         m_voxelGiOccupancyFullRebuildNeedsClear = false;

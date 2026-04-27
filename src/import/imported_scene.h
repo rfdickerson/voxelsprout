@@ -80,6 +80,15 @@ struct ImportedSceneWaterPatch {
     float waterLevel = 0.0f;
 };
 
+struct ImportedSceneLight {
+    std::string sourceId;
+    float position[3] = {};
+    float color[3] = {1.0f, 1.0f, 1.0f};
+    float radius = 0.0f;
+    float intensity = 1.0f;
+    std::uint32_t flags = 0u;
+};
+
 struct ImportedScene {
     std::string sourceTag;
     std::vector<ImportedSceneTexture> textures;
@@ -87,6 +96,7 @@ struct ImportedScene {
     std::vector<ImportedSceneInstance> instances;
     std::vector<ImportedSceneLandscapeCell> landscapeCells;
     std::vector<ImportedSceneWaterPatch> waterPatches;
+    std::vector<ImportedSceneLight> lights;
     std::vector<ImportedSceneCellRef> unresolvedRefs;
     std::vector<ImportedScenePackedVertex> packedVertices;
     std::vector<std::uint32_t> packedIndices;
@@ -97,6 +107,7 @@ struct ImportedScene {
     std::uint32_t sourceInstanceCount = 0;
     std::uint32_t sourceLandscapeCellCount = 0;
     std::uint32_t sourceWaterPatchCount = 0;
+    std::uint32_t sourceLightCount = 0;
     std::uint32_t sourceUnresolvedRefCount = 0;
     float boundsMin[3] = {};
     float boundsMax[3] = {};

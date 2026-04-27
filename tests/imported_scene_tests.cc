@@ -31,6 +31,7 @@ void testImportedSceneSerialization() {
     using odai::importer::ImportedSceneCellRef;
     using odai::importer::ImportedSceneInstance;
     using odai::importer::ImportedSceneLandscapeCell;
+    using odai::importer::ImportedSceneLight;
     using odai::importer::ImportedSceneMesh;
     using odai::importer::ImportedSceneMeshPart;
     using odai::importer::ImportedSceneTexture;
@@ -88,6 +89,19 @@ void testImportedSceneSerialization() {
     waterPatch.waterLevel = 4.0f;
     scene.waterPatches.push_back(waterPatch);
 
+    ImportedSceneLight light{};
+    light.sourceId = "light_de_lantern_05_128";
+    light.position[0] = 16.0f;
+    light.position[1] = 72.0f;
+    light.position[2] = 24.0f;
+    light.color[0] = 1.0f;
+    light.color[1] = 0.72f;
+    light.color[2] = 0.42f;
+    light.radius = 384.0f;
+    light.intensity = 1.0f;
+    light.flags = 0x018u;
+    scene.lights.push_back(light);
+
     ImportedSceneInstance instance{};
     instance.meshIndex = 0u;
     instance.transform[0] = 1.0f;
@@ -126,6 +140,11 @@ void testImportedSceneSerialization() {
     expectNear(loaded.unresolvedRefs.front().scale, unresolved.scale, 1e-6f, "Imported scene unresolved ref scale round-trips");
     expectTrue(loaded.waterPatches.size() == 1u, "Imported scene water patch count round-trips");
     expectNear(loaded.waterPatches.front().waterLevel, waterPatch.waterLevel, 1e-6f, "Imported scene water patch level round-trips");
+    expectTrue(loaded.lights.size() == 1u, "Imported scene light count round-trips");
+    expectTrue(loaded.lights.front().sourceId == light.sourceId, "Imported scene light id round-trips");
+    expectNear(loaded.lights.front().position[1], light.position[1], 1e-6f, "Imported scene light position round-trips");
+    expectNear(loaded.lights.front().color[1], light.color[1], 1e-6f, "Imported scene light color round-trips");
+    expectNear(loaded.lights.front().radius, light.radius, 1e-6f, "Imported scene light radius round-trips");
 
     ImportedScene runtimeLoaded{};
     expectTrue(odai::importer::loadImportedSceneRuntime(scenePath, runtimeLoaded), "Imported scene runtime loader works");
@@ -136,6 +155,7 @@ void testImportedSceneSerialization() {
     expectTrue(runtimeLoaded.instances.empty(), "Imported scene runtime loader skips instance transforms");
     expectTrue(runtimeLoaded.landscapeCells.empty(), "Imported scene runtime loader skips landscape cells");
     expectTrue(runtimeLoaded.waterPatches.size() == 1u, "Imported scene runtime loader keeps water patches");
+    expectTrue(runtimeLoaded.lights.size() == 1u, "Imported scene runtime loader keeps lights");
     expectTrue(!runtimeLoaded.packedVertices.empty(), "Imported scene runtime loader reads packed vertices");
     expectTrue(!runtimeLoaded.packedIndices.empty(), "Imported scene runtime loader reads packed indices");
     expectTrue(!runtimeLoaded.packedDraws.empty(), "Imported scene runtime loader reads packed draws");
@@ -155,6 +175,7 @@ void testGpuSceneBuildFromImportedScene() {
     using odai::importer::GpuSceneRuntime;
     using odai::importer::ImportedScene;
     using odai::importer::ImportedSceneInstance;
+    using odai::importer::ImportedSceneLight;
     using odai::importer::ImportedSceneMesh;
     using odai::importer::ImportedSceneMeshPart;
     using odai::importer::ImportedSceneTexture;
@@ -218,6 +239,12 @@ void testGpuSceneBuildFromImportedScene() {
     patch.waterLevel = 2.0f;
     scene.waterPatches.push_back(patch);
 
+    ImportedSceneLight light{};
+    light.sourceId = "light_de_lantern_05_128";
+    light.position[1] = 72.0f;
+    light.radius = 256.0f;
+    scene.lights.push_back(light);
+
     GpuSceneAsset gpuScene{};
     expectTrue(
         odai::importer::buildGpuSceneAssetFromImportedScene(scene, gpuScene),
@@ -233,6 +260,8 @@ void testGpuSceneBuildFromImportedScene() {
     expectTrue(gpuScene.renderCache.drawInstanceIndices.size() == gpuScene.renderCache.packedDraws.size(),
                "GPU scene draw-instance mapping matches draw count");
     expectTrue(gpuScene.renderCache.packedDraws.size() == 3u, "GPU scene preserves mesh parts as separate draws");
+    expectTrue(gpuScene.lights.size() == 1u, "GPU scene keeps imported lights");
+    expectTrue(gpuScene.renderCache.lights.size() == 1u, "GPU scene render cache keeps imported lights");
     expectTrue(!gpuScene.renderCache.pageDrawRanges.empty(), "GPU scene render cache records page draw ranges");
     expectTrue(gpuScene.renderCache.pageDrawRanges.front().firstDraw == 0u,
                "GPU scene page draw ranges start at the first draw");

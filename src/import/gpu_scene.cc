@@ -280,6 +280,7 @@ bool buildGpuSceneAssetFromImportedScene(const ImportedScene& scene, GpuSceneAss
     outAsset.sourceTag = scene.sourceTag;
     outAsset.textures = scene.textures;
     outAsset.waterPatches = scene.waterPatches;
+    outAsset.lights = scene.lights;
     outAsset.sceneBounds = makeEmptyBounds();
 
     std::uint32_t globalFirstVertex = 0u;
@@ -456,6 +457,7 @@ void buildGpuSceneRenderCache(GpuSceneAsset& scene) {
     scene.renderCache = {};
     scene.renderCache.textures = scene.textures;
     scene.renderCache.waterPatches = scene.waterPatches;
+    scene.renderCache.lights = scene.lights;
     scene.renderCache.packedVertices.reserve(scene.vertices.size() + (scene.instances.objectIndices.size() * 64u));
     scene.renderCache.packedIndices.reserve(scene.indices.size() + (scene.instances.objectIndices.size() * 128u));
 

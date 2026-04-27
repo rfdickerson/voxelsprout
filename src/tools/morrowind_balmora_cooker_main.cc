@@ -72,6 +72,7 @@ int main(int argc, char** argv) {
     std::cout << "  Loaded textures: " << result.scene.textures.size()
               << " (" << totalTextureBytes(result.scene) << " rgba8 bytes)\n";
     std::cout << "  Water patches: " << result.scene.waterPatches.size() << "\n";
+    std::cout << "  Lights: " << result.scene.lights.size() << "\n";
     std::cout << "  Packed vertices: " << result.scene.packedVertices.size() << "\n";
     std::cout << "  Packed indices: " << result.scene.packedIndices.size() << "\n";
     std::cout << "  Packed draws: " << result.scene.packedDraws.size() << "\n";

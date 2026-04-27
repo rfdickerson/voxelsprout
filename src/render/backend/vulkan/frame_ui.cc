@@ -414,6 +414,15 @@ void RendererBackend::buildFrameStatsUi() {
         ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
         ImGui::SliderFloat("Sun Disk Intensity", &m_skyDebugSettings.sunDiskIntensity, 300.0f, 2200.0f, "%.0f");
         ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");
+        ImGui::SeparatorText("Imported Lights");
+        ImGui::Checkbox("Enable Imported Lights", &m_debugImportedLightsEnabled);
+        ImGui::SliderFloat("Imported Light Intensity", &m_debugImportedLightIntensity, 0.0f, 4.0f, "%.2f");
+        ImGui::SliderFloat("Imported Light Day Scale", &m_debugImportedLightDayScale, 0.0f, 1.0f, "%.2f");
+        ImGui::Text(
+            "Imported Lights: %u total / %u selected",
+            static_cast<unsigned>(m_importedLocalLights.size()),
+            static_cast<unsigned>(m_debugImportedLightSelectedCount)
+        );
         ImGui::Checkbox("Shadow Occluder Culling", &m_shadowDebugSettings.enableOccluderCulling);
         ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
         ImGui::SliderInt("RT Samples", &m_shadowDebugSettings.rtShadowSampleCount, 1, 8);
@@ -595,13 +604,13 @@ void RendererBackend::buildFrameStatsUi() {
                 &m_skyDebugSettings.volumetricFogHeightFalloff,
                 0.0f,
                 0.30f,
-                "%.3f"
+                "%.4f"
             );
             ImGui::SliderFloat(
                 "Fog Base Height",
                 &m_skyDebugSettings.volumetricFogBaseHeight,
                 -32.0f,
-                64.0f,
+                320.0f,
                 "%.1f"
             );
             ImGui::TreePop();

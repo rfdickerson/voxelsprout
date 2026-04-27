@@ -323,8 +323,8 @@ void RendererBackend::buildSunDebugUi() {
             ImGui::SliderFloat("Fog Density", &m_skyDebugSettings.volumetricFogDensity, 0.0f, 0.03f, "%.4f");
             ImGui::SliderFloat("Fog Sun Scatter", &m_skyDebugSettings.volumetricSunScattering, 0.0f, 3.0f, "%.2f");
             if (ImGui::CollapsingHeader("Advanced Fog")) {
-                ImGui::SliderFloat("Fog Height Falloff", &m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 0.30f, "%.3f");
-                ImGui::SliderFloat("Fog Base Height", &m_skyDebugSettings.volumetricFogBaseHeight, -32.0f, 64.0f, "%.1f");
+                ImGui::SliderFloat("Fog Height Falloff", &m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 0.30f, "%.4f");
+                ImGui::SliderFloat("Fog Base Height", &m_skyDebugSettings.volumetricFogBaseHeight, -32.0f, 320.0f, "%.1f");
             }
             ImGui::Separator();
             ImGui::SliderFloat("Plant Quad Directionality", &m_skyDebugSettings.plantQuadDirectionality, 0.0f, 1.0f, "%.2f");

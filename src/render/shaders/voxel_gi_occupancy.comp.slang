@@ -31,8 +31,16 @@ float3 voxelTypeDefaultAlbedo(uint voxelType)
     return float3(0.0, 0.0, 0.0);
 }
 
-float3 resolveVoxelAlbedo(uint voxelType, uint baseColorIndex)
+float3 resolveVoxelAlbedo(uint voxelType, uint albedoPayload)
 {
+    if (voxelType == 250u)
+    {
+        const float r = float((albedoPayload >> 0u) & 0xFFu) / 255.0;
+        const float g = float((albedoPayload >> 8u) & 0xFFu) / 255.0;
+        const float b = float((albedoPayload >> 16u) & 0xFFu) / 255.0;
+        return saturate(float3(r, g, b));
+    }
+    const uint baseColorIndex = albedoPayload & 0xFFu;
     if (baseColorIndex <= 15u)
     {
         const float3 paletteColor = saturate(camera.voxelBaseColorPalette[baseColorIndex].xyz);
@@ -71,9 +79,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const VoxelGiChunkMeta chunkMeta = voxelGiChunkMetaBuffer[chunkIndex];
     const uint localLinearIndex = localX + (32u * (localZ + (32u * localY)));
-    const uint packedVoxel = voxelGiChunkVoxelsBuffer[chunkMeta.voxelOffset + localLinearIndex];
+    const bool skipEmptyVoxels = (chunkMeta.voxelOffset & 0x80000000u) != 0u;
+    const uint voxelOffset = chunkMeta.voxelOffset & 0x7FFFFFFFu;
+    const uint packedVoxel = voxelGiChunkVoxelsBuffer[voxelOffset + localLinearIndex];
     const uint voxelType = packedVoxel & 0xFFu;
-    const uint baseColorIndex = (packedVoxel >> 8u) & 0xFFu;
+    const uint albedoPayload = packedVoxel >> 8u;
 
     const float3 worldPosition = float3(
         float(chunkMeta.worldMinX) + float(localX) + 0.5,
@@ -94,10 +104,14 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     if (voxelType == 0u)
     {
+        if (skipEmptyVoxels)
+        {
+            return;
+        }
         voxelGiOccupancyOut[uint3(gridCell)] = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
-    const float3 albedo = resolveVoxelAlbedo(voxelType, baseColorIndex);
+    const float3 albedo = resolveVoxelAlbedo(voxelType, albedoPayload);
     voxelGiOccupancyOut[uint3(gridCell)] = float4(1.0, albedo.x, albedo.y, albedo.z);
 }
