@@ -417,7 +417,7 @@ void RendererBackend::buildFrameStatsUi() {
         ImGui::SeparatorText("Imported Lights");
         ImGui::Checkbox("Enable Imported Lights", &m_debugImportedLightsEnabled);
         ImGui::SliderFloat("Imported Light Intensity", &m_debugImportedLightIntensity, 0.0f, 4.0f, "%.2f");
-        ImGui::SliderFloat("Imported Light Day Scale", &m_debugImportedLightDayScale, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Imported Light Radius", &m_debugImportedLightRadiusScale, 0.25f, 8.0f, "%.2fx");
         ImGui::Text(
             "Imported Lights: %u total / %u selected",
             static_cast<unsigned>(m_importedLocalLights.size()),

@@ -830,18 +830,26 @@ void RendererBackend::renderFrame(
     };
     std::array<SelectedImportedLight, kImportedLocalLightCapacity> selectedImportedLights{};
     std::size_t selectedImportedLightCount = 0;
+    const float importedLightRadiusScale = std::clamp(m_debugImportedLightRadiusScale, 0.25f, 8.0f);
     if (m_debugImportedLightsEnabled && !m_importedLocalLights.empty()) {
         for (const ImportedLocalLight& light : m_importedLocalLights) {
-            const float dx = light.position[0] - camera.x;
-            const float dy = light.position[1] - camera.y;
-            const float dz = light.position[2] - camera.z;
-            const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
-            const float influenceRadius = std::max(light.radius, 1.0f);
-            const float cullRadius = influenceRadius * 2.5f;
-            if (distanceSquared > (cullRadius * cullRadius)) {
-                continue;
-            }
-            const SelectedImportedLight selected{&light, distanceSquared / influenceRadius};
+            const odai::math::Vector3 lightPosition{light.position[0], light.position[1], light.position[2]};
+            const odai::math::Vector3 cameraToLight = lightPosition - eye;
+            const float influenceRadius = std::max(light.radius * importedLightRadiusScale, 1.0f);
+            const float alongView = odai::math::dot(cameraToLight, forward);
+            const odai::math::Vector3 closestViewPoint = eye + (forward * std::max(alongView, 0.0f));
+            const odai::math::Vector3 lightToViewRay = lightPosition - closestViewPoint;
+            const float viewRayDistanceSquared = odai::math::lengthSquared(lightToViewRay);
+            const float distanceSquared = odai::math::lengthSquared(cameraToLight);
+            const float radiusSquared = influenceRadius * influenceRadius;
+            const float viewInfluenceScore =
+                std::max(viewRayDistanceSquared - radiusSquared, 0.0f) / radiusSquared;
+            const float distanceScore = distanceSquared / std::max(radiusSquared, 1.0f);
+            const float behindCameraPenalty = alongView < -influenceRadius ? 16.0f : 0.0f;
+            const SelectedImportedLight selected{
+                &light,
+                viewInfluenceScore + (distanceScore * 0.08f) + behindCameraPenalty
+            };
             if (selectedImportedLightCount < selectedImportedLights.size()) {
                 selectedImportedLights[selectedImportedLightCount++] = selected;
                 continue;
@@ -866,16 +874,14 @@ void RendererBackend::renderFrame(
             });
     }
     m_debugImportedLightSelectedCount = static_cast<std::uint32_t>(selectedImportedLightCount);
-    const float importedLightTimeScale =
-        isNight ? 1.0f : std::clamp(m_debugImportedLightDayScale, 0.0f, 1.0f);
     const float importedLightGlobalIntensity =
-        std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f) * importedLightTimeScale;
+        std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f);
     for (std::size_t lightIndex = 0; lightIndex < selectedImportedLightCount; ++lightIndex) {
         const ImportedLocalLight& light = *selectedImportedLights[lightIndex].light;
         mvpUniform.importedLightPositionRadius[lightIndex][0] = light.position[0];
         mvpUniform.importedLightPositionRadius[lightIndex][1] = light.position[1];
         mvpUniform.importedLightPositionRadius[lightIndex][2] = light.position[2];
-        mvpUniform.importedLightPositionRadius[lightIndex][3] = std::max(light.radius, 1.0f);
+        mvpUniform.importedLightPositionRadius[lightIndex][3] = std::max(light.radius * importedLightRadiusScale, 1.0f);
         mvpUniform.importedLightColorIntensity[lightIndex][0] = light.color[0];
         mvpUniform.importedLightColorIntensity[lightIndex][1] = light.color[1];
         mvpUniform.importedLightColorIntensity[lightIndex][2] = light.color[2];

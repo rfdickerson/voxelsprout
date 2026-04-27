@@ -26,7 +26,8 @@ namespace odai::importer {
 namespace {
 
 constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
-constexpr std::uint32_t kImportedSceneVersion = 15u;
+constexpr std::uint32_t kImportedSceneVersion = 16u;
+constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
 constexpr float kExteriorWaterLevel = 0.0f;
 constexpr int kLandSize = 65;
 constexpr int kLandTextureSize = 16;
@@ -1303,6 +1304,10 @@ std::array<float, 16> buildInstanceTransform(const ParsedCellRef& ref) {
     return transform;
 }
 
+std::array<float, 3> refPositionToEngineSpace(const float position[3]) {
+    return {position[0], position[2], position[1]};
+}
+
 std::filesystem::path normalizeModelRelativePath(std::string path) {
     path = lowerCopy(std::move(path));
     while (path.rfind("./", 0) == 0) {
@@ -1693,10 +1698,11 @@ ImportedScene buildSceneFromParsedData(
                     (lightRecord.flags & kTes3LightFlagNegative) == 0u;
                 if (isUsablePlacedLight) {
                     ImportedSceneLight light{};
+                    const std::array<float, 3> enginePosition = refPositionToEngineSpace(ref.position);
                     light.sourceId = ref.refId;
-                    light.position[0] = ref.position[0];
-                    light.position[1] = ref.position[1];
-                    light.position[2] = ref.position[2];
+                    light.position[0] = enginePosition[0];
+                    light.position[1] = enginePosition[1];
+                    light.position[2] = enginePosition[2];
                     light.color[0] = lightRecord.color[0];
                     light.color[1] = lightRecord.color[1];
                     light.color[2] = lightRecord.color[2];
@@ -2264,10 +2270,11 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         setLastImportedSceneError("Invalid imported scene file header: " + inputPath.string());
         return false;
     }
-    if (version != kImportedSceneVersion) {
+    if (version < kMinSupportedImportedSceneVersion || version > kImportedSceneVersion) {
         setLastImportedSceneError(
             "Imported scene file version " + std::to_string(version) +
-            " is outdated; recook with the current odai_balmora_cooker (expected version " +
+            " is unsupported; recook with the current odai_balmora_cooker (supported versions " +
+            std::to_string(kMinSupportedImportedSceneVersion) + "-" +
             std::to_string(kImportedSceneVersion) + ")");
         return false;
     }
@@ -2411,6 +2418,11 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
             !readValue(input, light.flags)) {
             return false;
         }
+        if (version < 16u) {
+            const float morrowindY = light.position[1];
+            light.position[1] = light.position[2];
+            light.position[2] = morrowindY;
+        }
     }
 
     scene.unresolvedRefs.resize(unresolvedRefCount);
@@ -2462,10 +2474,11 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
         setLastImportedSceneError("Invalid imported scene file header: " + inputPath.string());
         return false;
     }
-    if (version != kImportedSceneVersion) {
+    if (version < kMinSupportedImportedSceneVersion || version > kImportedSceneVersion) {
         setLastImportedSceneError(
             "Imported scene file version " + std::to_string(version) +
-            " is outdated; recook with the current odai_balmora_cooker (expected version " +
+            " is unsupported; recook with the current odai_balmora_cooker (supported versions " +
+            std::to_string(kMinSupportedImportedSceneVersion) + "-" +
             std::to_string(kImportedSceneVersion) + ")");
         return false;
     }
@@ -2593,6 +2606,11 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
             !readValue(input, light.intensity) ||
             !readValue(input, light.flags)) {
             return false;
+        }
+        if (version < 16u) {
+            const float morrowindY = light.position[1];
+            light.position[1] = light.position[2];
+            light.position[2] = morrowindY;
         }
     }
 
