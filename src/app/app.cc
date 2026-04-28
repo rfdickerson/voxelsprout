@@ -79,6 +79,7 @@ constexpr float kImportedPlayerTopOffset = kImportedPlayerHeight - kImportedPlay
 constexpr float kImportedPlayerRadius = 28.0f;
 constexpr float kImportedPlayerStepHeight = 28.0f;
 constexpr float kImportedPlayerGroundSnapDistance = 24.0f;
+constexpr float kImportedPlayerMinStepHeight = 1.0f;
 constexpr float kImportedPlayerWalkableNormalY = 0.65f;
 constexpr float kImportedPlayerCollisionSkin = 0.5f;
 constexpr float kImportedPlayerCollisionSubstepDistance = 24.0f;
@@ -2258,9 +2259,71 @@ void App::resolveImportedScenePlayerCollisions(float dt) {
         return m_camera.y + kImportedPlayerTopOffset;
     };
 
+    auto hasCeilingAtCurrentPosition = [&]() {
+        odai::world::ImportedSceneCollision::CeilingHit ceilingHit{};
+        return m_importedSceneCollision.findCeiling(
+            m_camera.x,
+            topY(),
+            m_camera.z,
+            kImportedPlayerRadius,
+            kImportedPlayerCollisionSkin,
+            ceilingHit);
+    };
+
+    auto tryStepUp = [&]() {
+        if (!m_camera.onGround && !groundedThisFrame) {
+            return false;
+        }
+
+        odai::world::ImportedSceneCollision::GroundHit groundHit{};
+        if (!m_importedSceneCollision.findGroundSupport(
+                m_camera.x,
+                feetY(),
+                m_camera.z,
+                kImportedPlayerRadius,
+                kImportedPlayerCollisionSkin,
+                kImportedPlayerStepHeight,
+                kImportedPlayerWalkableNormalY,
+                groundHit)) {
+            return false;
+        }
+
+        const float currentFeetY = feetY();
+        const float stepHeight = groundHit.y - currentFeetY;
+        if (stepHeight < kImportedPlayerMinStepHeight ||
+            stepHeight > kImportedPlayerStepHeight) {
+            return false;
+        }
+
+        const float previousEyeY = m_camera.y;
+        m_camera.y = groundHit.y + kImportedPlayerEyeHeight + kImportedPlayerCollisionSkin;
+        if (hasCeilingAtCurrentPosition()) {
+            m_camera.y = previousEyeY;
+            return false;
+        }
+
+        groundedThisFrame = true;
+        if (m_camera.velocityY < 0.0f) {
+            m_camera.velocityY = 0.0f;
+        }
+        return true;
+    };
+
     auto resolveHorizontal = [&]() {
         odai::math::Vector3 correction{};
         if (!m_importedSceneCollision.resolveHorizontalCylinder(
+                m_camera.x,
+                feetY(),
+                m_camera.z,
+                kImportedPlayerRadius,
+                kImportedPlayerHeight,
+                kImportedPlayerWalkableNormalY,
+                correction)) {
+            return;
+        }
+
+        if (tryStepUp() &&
+            !m_importedSceneCollision.resolveHorizontalCylinder(
                 m_camera.x,
                 feetY(),
                 m_camera.z,

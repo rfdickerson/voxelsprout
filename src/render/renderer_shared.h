@@ -110,6 +110,8 @@ struct alignas(16) CameraUniform {
     float colorGrading1[4];
     float colorGrading2[4];
     float colorGrading3[4];
+    float dofConfig[4];
+    float dofConfig2[4];
     float waterConfig[4];
     float importedLightPositionRadius[kImportedLocalLightCapacity][4];
     float importedLightColorIntensity[kImportedLocalLightCapacity][4];

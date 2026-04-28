@@ -349,6 +349,18 @@ void testImportedSceneCollision() {
     wall.parts = {ImportedSceneMeshPart{0u, 6u, 0u, false}};
     scene.meshes.push_back(wall);
 
+    ImportedSceneMesh narrowTread{};
+    narrowTread.name = "narrow_tread";
+    narrowTread.vertices = {
+        ImportedSceneVertex{{0.0f, 2.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{0.4f, 2.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{0.4f, 2.0f, 0.4f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
+        ImportedSceneVertex{{0.0f, 2.0f, 0.4f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
+    };
+    narrowTread.indices = {0u, 2u, 1u, 0u, 3u, 2u};
+    narrowTread.parts = {ImportedSceneMeshPart{0u, 6u, 0u, false}};
+    scene.meshes.push_back(narrowTread);
+
     ImportedSceneInstance floorInstance{};
     floorInstance.meshIndex = 1u;
     floorInstance.transform[0] = 1.0f;
@@ -368,6 +380,16 @@ void testImportedSceneCollision() {
     wallInstance.transform[3] = 40.0f;
     scene.instances.push_back(wallInstance);
 
+    ImportedSceneInstance narrowTreadInstance{};
+    narrowTreadInstance.meshIndex = 3u;
+    narrowTreadInstance.transform[0] = 1.0f;
+    narrowTreadInstance.transform[5] = 1.0f;
+    narrowTreadInstance.transform[10] = 1.0f;
+    narrowTreadInstance.transform[15] = 1.0f;
+    narrowTreadInstance.transform[3] = 61.6f;
+    narrowTreadInstance.transform[11] = 0.1f;
+    scene.instances.push_back(narrowTreadInstance);
+
     GpuSceneAsset gpuScene{};
     expectTrue(
         odai::importer::buildGpuSceneAssetFromImportedScene(scene, gpuScene),
@@ -376,7 +398,7 @@ void testImportedSceneCollision() {
     ImportedSceneCollision collision{};
     expectTrue(collision.build(gpuScene), "Imported scene collision builds");
     const ImportedSceneCollision::BuildStats stats = collision.stats();
-    expectTrue(stats.triangleCount == 6u, "Imported scene collision keeps terrain and static triangles");
+    expectTrue(stats.triangleCount == 8u, "Imported scene collision keeps terrain and static triangles");
 
     ImportedSceneCollision::GroundHit groundHit{};
     expectTrue(
@@ -392,6 +414,11 @@ void testImportedSceneCollision() {
     expectTrue(
         !collision.findGroundSupport(30.0f, 12.0f, 2.0f, 0.5f, 10.0f, 1.0f, 0.65f, groundHit),
         "Imported scene collision rejects support outside triangles");
+
+    expectTrue(
+        collision.findGroundSupport(60.0f, 0.0f, 0.0f, 2.0f, 0.5f, 3.0f, 0.65f, groundHit),
+        "Imported scene collision finds narrow stair treads inside the player footprint");
+    expectNear(groundHit.y, 2.0f, 1e-5f, "Imported scene narrow stair support height is correct");
 
     ImportedSceneCollision::CeilingHit ceilingHit{};
     expectTrue(

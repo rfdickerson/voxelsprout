@@ -131,6 +131,82 @@ float3 extractBloom(float3 hdrColor, float threshold, float softKnee)
     return hdrColor * (contribution / brightness);
 }
 
+float depthOfFieldRadiusPixels(float viewDepth)
+{
+    if (camera.dofConfig.x <= 0.5 || viewDepth <= 0.0001)
+    {
+        return 0.0;
+    }
+
+    const float sharpDistance = max(camera.dofConfig.y, 0.5);
+    const float falloffDistance = max(camera.dofConfig.z, 0.5);
+    const float maxRadiusPixels = max(camera.dofConfig.w, 0.0);
+    const float distanceBeyondFocus = max(viewDepth - sharpDistance, 0.0);
+    const float focusFalloff = smoothstep(0.0, falloffDistance, distanceBeyondFocus);
+    return focusFalloff * maxRadiusPixels;
+}
+
+float3 sampleDepthOfField(
+    float2 uv,
+    float centerDepth,
+    float3 centerColor,
+    float ssaoEnable,
+    float ssaoIntensity
+)
+{
+    const float centerRadiusPixels = depthOfFieldRadiusPixels(centerDepth);
+    if (centerRadiusPixels <= 0.25)
+    {
+        return centerColor;
+    }
+
+    uint texW = 0u;
+    uint texH = 0u;
+    hdrSceneColor.GetDimensions(texW, texH);
+    const float2 texelSize = 1.0 / float2(float(max(texW, 1u)), float(max(texH, 1u)));
+    const float2 offsets[12] = {
+        float2(0.0, 1.0),
+        float2(0.866, 0.5),
+        float2(0.866, -0.5),
+        float2(0.0, -1.0),
+        float2(-0.866, -0.5),
+        float2(-0.866, 0.5),
+        float2(0.35, 0.35),
+        float2(0.35, -0.35),
+        float2(-0.35, -0.35),
+        float2(-0.35, 0.35),
+        float2(1.0, 0.0),
+        float2(-1.0, 0.0)
+    };
+
+    float3 colorSum = centerColor * 2.0;
+    float weightSum = 2.0;
+    const float depthTolerance = max(camera.dofConfig.z * 0.45, 1.0);
+    for (int i = 0; i < 12; ++i)
+    {
+        const float ringScale = (i < 6) ? 1.0 : 0.52;
+        const float2 sampleUv = clamp(
+            uv + (offsets[i] * texelSize * centerRadiusPixels * ringScale),
+            float2(0.0, 0.0),
+            float2(1.0, 1.0)
+        );
+        const float4 sampleNormalDepth = normalDepthTexture.SampleLevel(sampleUv, 0.0);
+        const float sampleDepth = sampleNormalDepth.w;
+        const float sampleGeometry = step(0.0001, sampleDepth);
+        const float sampleRadiusPixels = depthOfFieldRadiusPixels(sampleDepth);
+        const float sameLayer = 1.0 - smoothstep(depthTolerance, depthTolerance * 2.0, abs(sampleDepth - centerDepth));
+        const float blurWeight = max(sameLayer, smoothstep(0.0, centerRadiusPixels, sampleRadiusPixels));
+        const float weight = lerp(0.35, 1.0, blurWeight) * lerp(0.5, 1.0, sampleGeometry);
+        const float sampleSsao = clamp(ssaoTexture.SampleLevel(sampleUv, 0.0).x, 0.0, 1.0);
+        const float sampleAo = pow(max(sampleSsao, 0.001), ssaoIntensity);
+        const float sampleAoFactor = lerp(1.0, sampleAo, ssaoEnable * sampleGeometry);
+        colorSum += (hdrSceneColor.SampleLevel(sampleUv, 0.0).xyz * sampleAoFactor) * weight;
+        weightSum += weight;
+    }
+
+    return colorSum / max(weightSum, 1e-5);
+}
+
 float resolveExposure()
 {
     const float manualExposure = max(camera.skyConfig5.y, 0.001);
@@ -448,6 +524,11 @@ float4 main(FragmentInput input) : SV_Target0
     const float ssaoContribution = pow(max(ssao, 0.001), ssaoIntensity);
     const float aoFactor = lerp(1.0, ssaoContribution, ssaoEnable);
     hdrColor *= lerp(1.0, aoFactor, geometryMask);
+
+    if (geometryMask > 0.5)
+    {
+        hdrColor = sampleDepthOfField(input.inUv, viewDepth, hdrColor, ssaoEnable, ssaoIntensity);
+    }
 
     const float3x3 invViewRotation = transpose((float3x3)camera.view);
     const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
