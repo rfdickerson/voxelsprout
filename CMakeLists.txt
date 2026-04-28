@@ -346,6 +346,8 @@ if(BUILD_TESTING)
 
     add_executable(odai_foundation_tests
         tests/foundation_tests.cc
+        src/core/log.cc
+        src/world/chunk_grid_worldgen.cc
         src/world/magica_voxel.cc
         src/world/chunk_mesher.cc
         src/world/clipmap_index.cc

@@ -2,10 +2,12 @@
 
 #include "core/log.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numeric>
 #include <vector>
 
 namespace odai::world {
@@ -21,11 +23,16 @@ enum class BiomeType : std::uint8_t {
 
 struct ColumnSample {
     int terrainHeight = 1;
+    float terrainHeightF = 1.0f;
     BiomeType biome = BiomeType::Plains;
     float moisture = 0.0f;
     float temperature = 0.0f;
     float ruggedness = 0.0f;
     float slope = 0.0f;
+    float ridge = 0.0f;
+    float flow = 0.0f;
+    float cliffBias = 0.0f;
+    float settlementMask = 0.0f;
     bool supportsGrass = false;
     bool supportsDenseVegetation = false;
 };
@@ -43,6 +50,41 @@ struct SettlementSite {
     int z = 0;
     int radius = 10;
 };
+
+struct WarpedPoint {
+    float x = 0.0f;
+    float z = 0.0f;
+};
+
+struct TerrainPatch {
+    int minWorldX = 0;
+    int minWorldZ = 0;
+    int width = 0;
+    int depth = 0;
+    std::vector<ColumnSample> samples;
+
+    [[nodiscard]] int index(int localX, int localZ) const {
+        return localX + (localZ * width);
+    }
+
+    [[nodiscard]] bool containsWorld(int worldX, int worldZ) const {
+        return worldX >= minWorldX &&
+               worldZ >= minWorldZ &&
+               worldX < minWorldX + width &&
+               worldZ < minWorldZ + depth;
+    }
+
+    [[nodiscard]] ColumnSample& sampleAtLocal(int localX, int localZ) {
+        return samples[static_cast<std::size_t>(index(localX, localZ))];
+    }
+
+    [[nodiscard]] const ColumnSample& sampleAtLocal(int localX, int localZ) const {
+        return samples[static_cast<std::size_t>(index(localX, localZ))];
+    }
+};
+
+constexpr int kTerrainPatchBorder = 12;
+constexpr int kHydraulicErosionIterations = 10;
 
 constexpr std::array<std::uint8_t, 256> kPerlinPermutation = {
     151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
@@ -69,6 +111,14 @@ float fade(float t) {
 
 float lerp(float a, float b, float t) {
     return a + (t * (b - a));
+}
+
+float smoothstep(float edge0, float edge1, float value) {
+    if (edge0 == edge1) {
+        return value < edge0 ? 0.0f : 1.0f;
+    }
+    const float t = std::clamp((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    return t * t * (3.0f - (2.0f * t));
 }
 
 float grad2(std::uint8_t hash, float x, float z) {
@@ -107,6 +157,24 @@ float perlin2(float x, float z) {
     const float x0 = lerp(grad2(aa, xf, zf), grad2(ba, xf - 1.0f, zf), u);
     const float x1 = lerp(grad2(ab, xf, zf - 1.0f), grad2(bb, xf - 1.0f, zf - 1.0f), u);
     return lerp(x0, x1, v);
+}
+
+float ridgedPerlin2(float x, float z) {
+    return 1.0f - std::abs(std::clamp(perlin2(x, z), -1.0f, 1.0f));
+}
+
+WarpedPoint warpTerrainDomain(float worldX, float worldZ) {
+    const float broadWarpX =
+        perlin2((worldX * 0.0065f) + 13.7f, (worldZ * 0.0065f) - 7.1f) * 22.0f;
+    const float broadWarpZ =
+        perlin2((worldX * 0.0065f) - 19.4f, (worldZ * 0.0065f) + 29.3f) * 22.0f;
+    const float foldedX = worldX + broadWarpX;
+    const float foldedZ = worldZ + broadWarpZ;
+    const float localWarpX =
+        perlin2((foldedX * 0.020f) + 101.0f, (foldedZ * 0.020f) - 61.0f) * 5.0f;
+    const float localWarpZ =
+        perlin2((foldedX * 0.020f) - 44.0f, (foldedZ * 0.020f) + 87.0f) * 5.0f;
+    return WarpedPoint{foldedX + localWarpX, foldedZ + localWarpZ};
 }
 
 std::uint32_t hashCoords(int x, int z, std::uint32_t salt = 0u) {
@@ -186,17 +254,19 @@ std::vector<SettlementSite> settlementSitesNearWorld(int worldX, int worldZ) {
     return sites;
 }
 
-ColumnSample sampleColumnAtWorld(int worldX, int worldZ, WorldGenerationStats* outStats = nullptr) {
+ColumnSample sampleBaseColumnAtWorld(int worldX, int worldZ) {
     const float wx = static_cast<float>(worldX);
     const float wz = static_cast<float>(worldZ);
-    const float warpX = perlin2((wx * 0.008f) + 13.7f, (wz * 0.008f) - 7.1f) * 18.0f;
-    const float warpZ = perlin2((wx * 0.008f) - 19.4f, (wz * 0.008f) + 29.3f) * 18.0f;
-    const float sampleX = wx + warpX;
-    const float sampleZ = wz + warpZ;
+    const WarpedPoint warped = warpTerrainDomain(wx, wz);
+    const float sampleX = warped.x;
+    const float sampleZ = warped.z;
 
     const float macroShape = perlin2(sampleX * 0.0085f, sampleZ * 0.0085f);
     const float rolling = perlin2(sampleX * 0.020f, sampleZ * 0.020f);
     const float detail = perlin2(sampleX * 0.046f, sampleZ * 0.046f);
+    const float ridgePrimary = ridgedPerlin2((sampleX * 0.017f) - 24.0f, (sampleZ * 0.017f) + 18.0f);
+    const float ridgeSecondary = ridgedPerlin2((sampleX * 0.041f) + 9.0f, (sampleZ * 0.041f) - 35.0f);
+    const float ridge = std::pow(std::clamp((ridgePrimary * 0.78f) + (ridgeSecondary * 0.22f), 0.0f, 1.0f), 2.4f);
     const float ruggednessField = (perlin2((sampleX * 0.011f) + 52.0f, (sampleZ * 0.011f) - 44.0f) * 0.5f) + 0.5f;
     const float moisture = (perlin2((sampleX * 0.006f) + 91.0f, (sampleZ * 0.006f) - 37.0f) * 0.5f) + 0.5f;
     const float temperature = (perlin2((sampleX * 0.005f) - 63.0f, (sampleZ * 0.005f) + 84.0f) * 0.5f) + 0.5f;
@@ -208,6 +278,7 @@ ColumnSample sampleColumnAtWorld(int worldX, int worldZ, WorldGenerationStats* o
     sample.temperature = temperature;
     sample.ruggedness = ruggednessField;
     sample.biome = classifyBiome(moisture, temperature, ruggednessField);
+    sample.ridge = ridge;
 
     float biomeHeightBias = 0.0f;
     float biomeReliefBias = 0.0f;
@@ -236,6 +307,7 @@ ColumnSample sampleColumnAtWorld(int worldX, int worldZ, WorldGenerationStats* o
         (macroShape * (5.0f + biomeReliefBias)) +
         (rolling * (2.7f + (ruggednessField * 1.8f))) +
         (detail * (0.8f + biomeReliefBias)) +
+        (ridge * ruggednessField * (2.2f + biomeReliefBias)) +
         biomeHeightBias -
         basinDepth;
 
@@ -252,25 +324,361 @@ ColumnSample sampleColumnAtWorld(int worldX, int worldZ, WorldGenerationStats* o
             positiveModulo(std::abs(worldZ - settlement.z), 8) <= 1;
         if (roadMask) {
             terrainHeightF = std::max(terrainHeightF, 10.0f + (t * 2.0f));
+            sample.settlementMask = std::max(sample.settlementMask, t);
         } else {
             const float lotNoise = (perlin2((dx * 0.55f) + 17.0f, (dz * 0.55f) - 31.0f) * 0.5f) + 0.5f;
             if (lotNoise > 0.38f) {
                 terrainHeightF = std::max(terrainHeightF, 12.0f + (t * (3.0f + (lotNoise * 5.0f))));
-                if (outStats != nullptr) {
-                    ++outStats->settlementColumnCount;
+                sample.settlementMask = std::max(sample.settlementMask, t);
+            }
+        }
+    }
+
+    sample.terrainHeightF = std::clamp(terrainHeightF, 1.0f, static_cast<float>(Chunk::kSizeY - 6));
+    sample.terrainHeight = std::clamp(static_cast<int>(std::round(sample.terrainHeightF)), 1, Chunk::kSizeY - 6);
+    return sample;
+}
+
+float heightAtLocalClamped(const TerrainPatch& patch, int localX, int localZ) {
+    const int x = std::clamp(localX, 0, patch.width - 1);
+    const int z = std::clamp(localZ, 0, patch.depth - 1);
+    return patch.sampleAtLocal(x, z).terrainHeightF;
+}
+
+float slopeAtLocal(const TerrainPatch& patch, int localX, int localZ) {
+    const float west = heightAtLocalClamped(patch, localX - 1, localZ);
+    const float east = heightAtLocalClamped(patch, localX + 1, localZ);
+    const float north = heightAtLocalClamped(patch, localX, localZ - 1);
+    const float south = heightAtLocalClamped(patch, localX, localZ + 1);
+    const float dx = (east - west) * 0.5f;
+    const float dz = (south - north) * 0.5f;
+    return std::sqrt((dx * dx) + (dz * dz));
+}
+
+ColumnSample sampleTerrainAtWorld(const TerrainPatch& patch, int worldX, int worldZ) {
+    if (!patch.containsWorld(worldX, worldZ)) {
+        return sampleBaseColumnAtWorld(worldX, worldZ);
+    }
+    return patch.sampleAtLocal(worldX - patch.minWorldX, worldZ - patch.minWorldZ);
+}
+
+void clampPatchHeights(TerrainPatch& patch) {
+    for (ColumnSample& sample : patch.samples) {
+        sample.terrainHeightF = std::clamp(sample.terrainHeightF, 1.0f, static_cast<float>(Chunk::kSizeY - 6));
+    }
+}
+
+void applyRidgeSharpening(TerrainPatch& patch) {
+    for (int localZ = 0; localZ < patch.depth; ++localZ) {
+        for (int localX = 0; localX < patch.width; ++localX) {
+            ColumnSample& sample = patch.sampleAtLocal(localX, localZ);
+            const float ridgeMask =
+                sample.ridge * smoothstep(0.45f, 0.85f, sample.ruggedness) * (1.0f - (sample.settlementMask * 0.85f));
+            if (ridgeMask <= 0.001f) {
+                continue;
+            }
+            const float terraced = std::round(sample.terrainHeightF * 0.80f) / 0.80f;
+            sample.terrainHeightF = lerp(sample.terrainHeightF, terraced + 0.35f, ridgeMask * 0.35f);
+        }
+    }
+    clampPatchHeights(patch);
+}
+
+void runLightweightHydraulicErosion(TerrainPatch& patch) {
+    const int cellCount = patch.width * patch.depth;
+    std::vector<float> water(static_cast<std::size_t>(cellCount), 0.0f);
+    std::vector<float> sediment(static_cast<std::size_t>(cellCount), 0.0f);
+    std::vector<float> nextWater(static_cast<std::size_t>(cellCount), 0.0f);
+    std::vector<float> nextSediment(static_cast<std::size_t>(cellCount), 0.0f);
+
+    constexpr std::array<int, 4> kOffsetX = {-1, 1, 0, 0};
+    constexpr std::array<int, 4> kOffsetZ = {0, 0, -1, 1};
+
+    for (int iteration = 0; iteration < kHydraulicErosionIterations; ++iteration) {
+        for (int localZ = 0; localZ < patch.depth; ++localZ) {
+            for (int localX = 0; localX < patch.width; ++localX) {
+                const int worldX = patch.minWorldX + localX;
+                const int worldZ = patch.minWorldZ + localZ;
+                const int index = patch.index(localX, localZ);
+                const ColumnSample& sample = patch.sampleAtLocal(localX, localZ);
+                const float rainNoise =
+                    (perlin2((static_cast<float>(worldX) * 0.071f) + 11.0f,
+                             (static_cast<float>(worldZ) * 0.071f) - 29.0f) * 0.5f) + 0.5f;
+                const float settlementScale = 1.0f - (sample.settlementMask * 0.75f);
+                water[static_cast<std::size_t>(index)] += (0.018f + (rainNoise * 0.012f)) * settlementScale;
+            }
+        }
+
+        std::fill(nextWater.begin(), nextWater.end(), 0.0f);
+        std::fill(nextSediment.begin(), nextSediment.end(), 0.0f);
+
+        for (int localZ = 0; localZ < patch.depth; ++localZ) {
+            for (int localX = 0; localX < patch.width; ++localX) {
+                const int index = patch.index(localX, localZ);
+                const std::size_t sampleIndex = static_cast<std::size_t>(index);
+                const float currentSurface = patch.sampleAtLocal(localX, localZ).terrainHeightF + water[sampleIndex];
+
+                std::array<int, 4> lowerIndices{};
+                std::array<float, 4> lowerWeights{};
+                int lowerCount = 0;
+                float weightSum = 0.0f;
+                for (std::size_t neighbor = 0; neighbor < kOffsetX.size(); ++neighbor) {
+                    const int nx = localX + kOffsetX[neighbor];
+                    const int nz = localZ + kOffsetZ[neighbor];
+                    if (nx < 0 || nx >= patch.width || nz < 0 || nz >= patch.depth) {
+                        continue;
+                    }
+                    const int neighborIndex = patch.index(nx, nz);
+                    const float neighborSurface =
+                        patch.sampleAtLocal(nx, nz).terrainHeightF + water[static_cast<std::size_t>(neighborIndex)];
+                    const float drop = currentSurface - neighborSurface;
+                    if (drop <= 0.001f) {
+                        continue;
+                    }
+                    lowerIndices[static_cast<std::size_t>(lowerCount)] = neighborIndex;
+                    lowerWeights[static_cast<std::size_t>(lowerCount)] = drop;
+                    weightSum += drop;
+                    ++lowerCount;
+                }
+
+                if (lowerCount == 0 || weightSum <= 0.001f) {
+                    nextWater[sampleIndex] += water[sampleIndex];
+                    nextSediment[sampleIndex] += sediment[sampleIndex];
+                    continue;
+                }
+
+                const float moveFraction = 0.52f;
+                const float movedWater = water[sampleIndex] * moveFraction;
+                const float movedSediment = sediment[sampleIndex] * moveFraction;
+                nextWater[sampleIndex] += water[sampleIndex] - movedWater;
+                nextSediment[sampleIndex] += sediment[sampleIndex] - movedSediment;
+                for (int lower = 0; lower < lowerCount; ++lower) {
+                    const float share = lowerWeights[static_cast<std::size_t>(lower)] / weightSum;
+                    const std::size_t lowerIndex = static_cast<std::size_t>(lowerIndices[static_cast<std::size_t>(lower)]);
+                    nextWater[lowerIndex] += movedWater * share;
+                    nextSediment[lowerIndex] += movedSediment * share;
+                }
+            }
+        }
+
+        water.swap(nextWater);
+        sediment.swap(nextSediment);
+
+        for (int localZ = 0; localZ < patch.depth; ++localZ) {
+            for (int localX = 0; localX < patch.width; ++localX) {
+                const int index = patch.index(localX, localZ);
+                const std::size_t sampleIndex = static_cast<std::size_t>(index);
+                ColumnSample& sample = patch.sampleAtLocal(localX, localZ);
+                const float slope = slopeAtLocal(patch, localX, localZ);
+                const float settlementScale = 1.0f - (sample.settlementMask * 0.90f);
+                const float capacity = water[sampleIndex] * (0.18f + (slope * 0.28f));
+                if (sediment[sampleIndex] > capacity) {
+                    const float deposit = (sediment[sampleIndex] - capacity) * 0.18f * settlementScale;
+                    sample.terrainHeightF += deposit;
+                    sediment[sampleIndex] -= deposit;
+                } else {
+                    const float erosion =
+                        std::min((capacity - sediment[sampleIndex]) * 0.060f * settlementScale, 0.16f);
+                    sample.terrainHeightF -= erosion;
+                    sediment[sampleIndex] += erosion;
+                }
+                water[sampleIndex] *= 0.62f;
+            }
+        }
+        clampPatchHeights(patch);
+    }
+}
+
+void generateFlowMapAndCarve(TerrainPatch& patch) {
+    const int cellCount = patch.width * patch.depth;
+    std::vector<float> flow(static_cast<std::size_t>(cellCount), 1.0f);
+    std::vector<int> downhill(static_cast<std::size_t>(cellCount), 0);
+    std::vector<int> order(static_cast<std::size_t>(cellCount), 0);
+    std::iota(order.begin(), order.end(), 0);
+
+    for (int localZ = 0; localZ < patch.depth; ++localZ) {
+        for (int localX = 0; localX < patch.width; ++localX) {
+            const int index = patch.index(localX, localZ);
+            downhill[static_cast<std::size_t>(index)] = index;
+            const int worldX = patch.minWorldX + localX;
+            const int worldZ = patch.minWorldZ + localZ;
+            const float rainfall =
+                0.75f +
+                (((perlin2((static_cast<float>(worldX) * 0.015f) + 73.0f,
+                           (static_cast<float>(worldZ) * 0.015f) - 41.0f) * 0.5f) + 0.5f) * 0.50f);
+            flow[static_cast<std::size_t>(index)] = rainfall;
+
+            float bestDrop = 0.0f;
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dz == 0) {
+                        continue;
+                    }
+                    const int nx = localX + dx;
+                    const int nz = localZ + dz;
+                    if (nx < 0 || nx >= patch.width || nz < 0 || nz >= patch.depth) {
+                        continue;
+                    }
+                    const float distance = (dx != 0 && dz != 0) ? 1.41421356f : 1.0f;
+                    const float drop =
+                        (patch.sampleAtLocal(localX, localZ).terrainHeightF -
+                         patch.sampleAtLocal(nx, nz).terrainHeightF) / distance;
+                    if (drop > bestDrop) {
+                        bestDrop = drop;
+                        downhill[static_cast<std::size_t>(index)] = patch.index(nx, nz);
+                    }
                 }
             }
         }
     }
 
-    sample.terrainHeight = std::clamp(static_cast<int>(std::round(terrainHeightF)), 1, Chunk::kSizeY - 6);
-    return sample;
+    std::sort(order.begin(), order.end(), [&](int lhs, int rhs) {
+        const int lhsX = lhs % patch.width;
+        const int lhsZ = lhs / patch.width;
+        const int rhsX = rhs % patch.width;
+        const int rhsZ = rhs / patch.width;
+        return patch.sampleAtLocal(lhsX, lhsZ).terrainHeightF > patch.sampleAtLocal(rhsX, rhsZ).terrainHeightF;
+    });
+
+    for (int index : order) {
+        const int receiver = downhill[static_cast<std::size_t>(index)];
+        if (receiver != index) {
+            flow[static_cast<std::size_t>(receiver)] += flow[static_cast<std::size_t>(index)] * 0.92f;
+        }
+    }
+
+    const float maxFlow = *std::max_element(flow.begin(), flow.end());
+    const float flowDenominator = std::log1p(std::max(maxFlow, 1.0f));
+    for (int localZ = 0; localZ < patch.depth; ++localZ) {
+        for (int localX = 0; localX < patch.width; ++localX) {
+            const int index = patch.index(localX, localZ);
+            ColumnSample& sample = patch.sampleAtLocal(localX, localZ);
+            const float flow01 = std::clamp(std::log1p(flow[static_cast<std::size_t>(index)]) / flowDenominator, 0.0f, 1.0f);
+            const float slope = slopeAtLocal(patch, localX, localZ);
+            const float slopeMask = smoothstep(0.25f, 2.75f, slope);
+            const float channelMask =
+                smoothstep(0.48f, 0.92f, flow01) * slopeMask * (1.0f - (sample.settlementMask * 0.90f));
+            sample.flow = flow01;
+            sample.terrainHeightF -= channelMask * (0.08f + (0.42f * std::min(slope, 1.0f)));
+        }
+    }
+    clampPatchHeights(patch);
+}
+
+void applySlopeBasedNoiseDetail(TerrainPatch& patch) {
+    std::vector<float> originalHeights;
+    originalHeights.reserve(patch.samples.size());
+    for (const ColumnSample& sample : patch.samples) {
+        originalHeights.push_back(sample.terrainHeightF);
+    }
+
+    auto originalHeightAt = [&](int localX, int localZ) {
+        const int x = std::clamp(localX, 0, patch.width - 1);
+        const int z = std::clamp(localZ, 0, patch.depth - 1);
+        return originalHeights[static_cast<std::size_t>(patch.index(x, z))];
+    };
+
+    for (int localZ = 0; localZ < patch.depth; ++localZ) {
+        for (int localX = 0; localX < patch.width; ++localX) {
+            const int worldX = patch.minWorldX + localX;
+            const int worldZ = patch.minWorldZ + localZ;
+            ColumnSample& sample = patch.sampleAtLocal(localX, localZ);
+            const float west = originalHeightAt(localX - 1, localZ);
+            const float east = originalHeightAt(localX + 1, localZ);
+            const float north = originalHeightAt(localX, localZ - 1);
+            const float south = originalHeightAt(localX, localZ + 1);
+            const float dx = (east - west) * 0.5f;
+            const float dz = (south - north) * 0.5f;
+            const float slope = std::sqrt((dx * dx) + (dz * dz));
+            const float slopeMask = smoothstep(0.80f, 4.20f, slope);
+            const float settlementScale = 1.0f - (sample.settlementMask * 0.85f);
+            const float coarseDetail =
+                perlin2((static_cast<float>(worldX) * 0.170f) + 19.0f,
+                        (static_cast<float>(worldZ) * 0.170f) - 43.0f);
+            const float fineDetail =
+                perlin2((static_cast<float>(worldX) * 0.360f) - 83.0f,
+                        (static_cast<float>(worldZ) * 0.360f) + 12.0f);
+            const float detail = (coarseDetail * 0.34f) + (fineDetail * 0.12f);
+            sample.terrainHeightF += detail * slopeMask * settlementScale;
+        }
+    }
+    clampPatchHeights(patch);
+}
+
+void applyCliffBias(TerrainPatch& patch) {
+    for (int localZ = 0; localZ < patch.depth; ++localZ) {
+        for (int localX = 0; localX < patch.width; ++localX) {
+            ColumnSample& sample = patch.sampleAtLocal(localX, localZ);
+            const int worldX = patch.minWorldX + localX;
+            const int worldZ = patch.minWorldZ + localZ;
+            const float slope = slopeAtLocal(patch, localX, localZ);
+            const float cliff =
+                smoothstep(3.15f, 6.80f, slope) * (0.55f + (sample.ruggedness * 0.45f)) *
+                (1.0f - (sample.settlementMask * 0.80f));
+            const float ridgeCliff = sample.ridge * smoothstep(1.60f, 4.20f, slope) * 0.50f;
+            sample.cliffBias = std::clamp(std::max(cliff, ridgeCliff), 0.0f, 1.0f);
+            if (sample.cliffBias <= 0.001f) {
+                continue;
+            }
+            const float shelfHeight = std::round(sample.terrainHeightF * 0.66f) / 0.66f;
+            const float fracture =
+                perlin2((static_cast<float>(worldX) * 0.105f) + 211.0f,
+                        (static_cast<float>(worldZ) * 0.105f) - 97.0f);
+            sample.terrainHeightF =
+                lerp(sample.terrainHeightF, shelfHeight, sample.cliffBias * 0.28f) +
+                (fracture * sample.cliffBias * 0.16f);
+        }
+    }
+    clampPatchHeights(patch);
+}
+
+void finalizeTerrainPatch(TerrainPatch& patch) {
+    clampPatchHeights(patch);
+    for (int localZ = 0; localZ < patch.depth; ++localZ) {
+        for (int localX = 0; localX < patch.width; ++localX) {
+            ColumnSample& sample = patch.sampleAtLocal(localX, localZ);
+            sample.slope = slopeAtLocal(patch, localX, localZ);
+            sample.terrainHeight = std::clamp(
+                static_cast<int>(std::round(sample.terrainHeightF)),
+                1,
+                Chunk::kSizeY - 6
+            );
+        }
+    }
+}
+
+TerrainPatch buildTerrainPatch(int worldMinX, int worldMinZ, int width, int depth) {
+    TerrainPatch patch{};
+    patch.minWorldX = worldMinX - kTerrainPatchBorder;
+    patch.minWorldZ = worldMinZ - kTerrainPatchBorder;
+    patch.width = width + (kTerrainPatchBorder * 2);
+    patch.depth = depth + (kTerrainPatchBorder * 2);
+    patch.samples.resize(static_cast<std::size_t>(patch.width * patch.depth));
+
+    for (int localZ = 0; localZ < patch.depth; ++localZ) {
+        for (int localX = 0; localX < patch.width; ++localX) {
+            const int worldX = patch.minWorldX + localX;
+            const int worldZ = patch.minWorldZ + localZ;
+            patch.sampleAtLocal(localX, localZ) = sampleBaseColumnAtWorld(worldX, worldZ);
+        }
+    }
+
+    applyRidgeSharpening(patch);
+    runLightweightHydraulicErosion(patch);
+    generateFlowMapAndCarve(patch);
+    applySlopeBasedNoiseDetail(patch);
+    applyCliffBias(patch);
+    finalizeTerrainPatch(patch);
+    return patch;
 }
 
 bool supportsGrassAtWorld(const ColumnSample& sample, int worldX, int worldZ) {
     const std::uint32_t surfaceHash = hashCoords(worldX, worldZ, 7u);
     const float grassPatch = static_cast<float>((surfaceHash >> 8u) & 0xFFu) / 255.0f;
-    return sample.slope <= 2.0f &&
+    const bool carvedChannel = sample.flow > 0.72f && sample.slope > 0.20f;
+    return !carvedChannel &&
+           sample.cliffBias < 0.42f &&
+           sample.slope <= 2.0f &&
            ((sample.biome == BiomeType::Forest) ||
             (sample.biome == BiomeType::Plains && grassPatch > 0.20f) ||
             (sample.biome == BiomeType::DryScrub && grassPatch > 0.72f) ||
@@ -282,6 +690,18 @@ bool supportsDenseVegetationAtWorld(const ColumnSample& sample) {
            sample.slope <= 1.0f &&
            (sample.biome == BiomeType::Forest ||
             (sample.biome == BiomeType::Plains && sample.moisture > 0.45f));
+}
+
+void refreshPatchVegetationSupport(TerrainPatch& patch) {
+    for (int localZ = 0; localZ < patch.depth; ++localZ) {
+        for (int localX = 0; localX < patch.width; ++localX) {
+            const int worldX = patch.minWorldX + localX;
+            const int worldZ = patch.minWorldZ + localZ;
+            ColumnSample& sample = patch.sampleAtLocal(localX, localZ);
+            sample.supportsGrass = supportsGrassAtWorld(sample, worldX, worldZ);
+            sample.supportsDenseVegetation = supportsDenseVegetationAtWorld(sample);
+        }
+    }
 }
 
 void stampTreeVariant(Chunk& chunk, int originX, int originY, int originZ, int variantIndex) {
@@ -336,7 +756,8 @@ void stampTreeVariant(Chunk& chunk, int originX, int originY, int originZ, int v
     }
 }
 
-bool shouldPlaceTreeAtWorld(int worldX, int worldZ, const ColumnSample& sample) {
+bool shouldPlaceTreeAtWorld(const TerrainPatch& patch, int worldX, int worldZ) {
+    const ColumnSample sample = sampleTerrainAtWorld(patch, worldX, worldZ);
     if (!sample.supportsDenseVegetation || sample.terrainHeight >= Chunk::kSizeY - 8) {
         return false;
     }
@@ -359,7 +780,7 @@ bool shouldPlaceTreeAtWorld(int worldX, int worldZ, const ColumnSample& sample) 
             }
             const int neighborX = worldX + dx;
             const int neighborZ = worldZ + dz;
-            const ColumnSample neighborSample = sampleColumnAtWorld(neighborX, neighborZ);
+            const ColumnSample neighborSample = sampleTerrainAtWorld(patch, neighborX, neighborZ);
             if (!neighborSample.supportsDenseVegetation) {
                 continue;
             }
@@ -386,25 +807,19 @@ Chunk buildProceduralChunk(int chunkX, int chunkY, int chunkZ) {
     const int worldMinZ = chunkZ * Chunk::kSizeZ;
     const int worldMaxX = worldMinX + Chunk::kSizeX - 1;
     const int worldMaxZ = worldMinZ + Chunk::kSizeZ - 1;
+    TerrainPatch terrain = buildTerrainPatch(worldMinX, worldMinZ, Chunk::kSizeX, Chunk::kSizeZ);
+    refreshPatchVegetationSupport(terrain);
 
     for (int localZ = 0; localZ < Chunk::kSizeZ; ++localZ) {
         for (int localX = 0; localX < Chunk::kSizeX; ++localX) {
             const int worldX = worldMinX + localX;
             const int worldZ = worldMinZ + localZ;
-            ColumnSample sample = sampleColumnAtWorld(worldX, worldZ, &stats);
-
-            const ColumnSample west = sampleColumnAtWorld(worldX - 1, worldZ);
-            const ColumnSample east = sampleColumnAtWorld(worldX + 1, worldZ);
-            const ColumnSample north = sampleColumnAtWorld(worldX, worldZ - 1);
-            const ColumnSample south = sampleColumnAtWorld(worldX, worldZ + 1);
-            sample.slope = static_cast<float>(
-                std::max(
-                    std::abs(east.terrainHeight - west.terrainHeight),
-                    std::abs(south.terrainHeight - north.terrainHeight)
-                )
-            );
-            sample.supportsGrass = supportsGrassAtWorld(sample, worldX, worldZ);
-            sample.supportsDenseVegetation = supportsDenseVegetationAtWorld(sample);
+            const ColumnSample sample = sampleTerrainAtWorld(terrain, worldX, worldZ);
+            const bool cliffOrRock =
+                sample.biome == BiomeType::RockyHighlands ||
+                sample.slope > 2.25f ||
+                sample.cliffBias > 0.34f;
+            const bool carvedChannel = sample.flow > 0.70f && sample.slope > 0.20f;
 
             ++stats.biomeColumnCounts[static_cast<std::size_t>(sample.biome)];
             if (sample.supportsGrass) {
@@ -413,19 +828,24 @@ Chunk buildProceduralChunk(int chunkX, int chunkY, int chunkZ) {
             if (sample.supportsDenseVegetation) {
                 ++stats.denseVegetationColumnCount;
             }
+            if (sample.settlementMask > 0.0f) {
+                ++stats.settlementColumnCount;
+            }
 
             for (int y = 0; y <= sample.terrainHeight; ++y) {
                 VoxelType voxelType = VoxelType::Stone;
                 if (y <= sample.terrainHeight - 4) {
                     voxelType = VoxelType::Stone;
                 } else if (y < sample.terrainHeight) {
-                    voxelType = (sample.biome == BiomeType::RockyHighlands && sample.slope > 2.0f)
+                    voxelType = cliffOrRock && y >= sample.terrainHeight - 2
                         ? VoxelType::Stone
                         : VoxelType::Dirt;
                 } else if (sample.supportsGrass) {
                     voxelType = VoxelType::Grass;
-                } else if (sample.biome == BiomeType::RockyHighlands || sample.slope > 2.0f) {
+                } else if (cliffOrRock) {
                     voxelType = VoxelType::Stone;
+                } else if (carvedChannel) {
+                    voxelType = VoxelType::Dirt;
                 } else {
                     voxelType = VoxelType::Dirt;
                 }
@@ -436,8 +856,8 @@ Chunk buildProceduralChunk(int chunkX, int chunkY, int chunkZ) {
 
     for (int worldZ = worldMinZ - 3; worldZ <= worldMaxZ + 3; ++worldZ) {
         for (int worldX = worldMinX - 3; worldX <= worldMaxX + 3; ++worldX) {
-            const ColumnSample sample = sampleColumnAtWorld(worldX, worldZ);
-            if (!shouldPlaceTreeAtWorld(worldX, worldZ, sample)) {
+            const ColumnSample sample = sampleTerrainAtWorld(terrain, worldX, worldZ);
+            if (!shouldPlaceTreeAtWorld(terrain, worldX, worldZ)) {
                 continue;
             }
             const int baseY = sample.terrainHeight + 1;
@@ -454,7 +874,10 @@ Chunk buildProceduralChunk(int chunkX, int chunkY, int chunkZ) {
                       << ", " << biomeName(BiomeType::Forest) << ":" << stats.biomeColumnCounts[1]
                       << ", " << biomeName(BiomeType::RockyHighlands) << ":" << stats.biomeColumnCounts[2]
                       << ", " << biomeName(BiomeType::DryScrub) << ":" << stats.biomeColumnCounts[3]
-                      << "}, trees=" << stats.treeCount;
+                      << "}, grass=" << stats.grassyColumnCount
+                      << ", denseVegetation=" << stats.denseVegetationColumnCount
+                      << ", settlements=" << stats.settlementColumnCount
+                      << ", trees=" << stats.treeCount;
     return chunk;
 }
 

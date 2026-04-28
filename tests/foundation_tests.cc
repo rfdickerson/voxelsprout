@@ -1,3 +1,4 @@
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -43,6 +44,27 @@ std::size_t countSolidCells(const odai::world::CsgVolume& volume) {
         }
     }
     return count;
+}
+
+bool chunksEqual(const odai::world::Chunk& lhs, const odai::world::Chunk& rhs) {
+    for (int y = 0; y < odai::world::Chunk::kSizeY; ++y) {
+        for (int z = 0; z < odai::world::Chunk::kSizeZ; ++z) {
+            for (int x = 0; x < odai::world::Chunk::kSizeX; ++x) {
+                const odai::world::Voxel lhsVoxel = lhs.voxelAt(x, y, z);
+                const odai::world::Voxel rhsVoxel = rhs.voxelAt(x, y, z);
+                if (lhsVoxel.type != rhsVoxel.type || lhsVoxel.baseColorIndex != rhsVoxel.baseColorIndex) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool isTerrainSurfaceVoxel(odai::world::VoxelType type) {
+    return type == odai::world::VoxelType::Stone ||
+           type == odai::world::VoxelType::Dirt ||
+           type == odai::world::VoxelType::Grass;
 }
 
 void testGridPrimitives() {
@@ -297,6 +319,65 @@ void testChunkMeshingModes() {
     }
 }
 
+void testProceduralWorldGenerationTerrain() {
+    const odai::world::Chunk center = odai::world::buildProceduralChunk(0, 0, 0);
+    const odai::world::Chunk centerRepeat = odai::world::buildProceduralChunk(0, 0, 0);
+    expectTrue(chunksEqual(center, centerRepeat), "Procedural chunk generation is deterministic");
+
+    std::array<std::uint32_t, 7> surfaceCounts{};
+    int minTerrainHeight = odai::world::Chunk::kSizeY;
+    int maxTerrainHeight = 0;
+    std::uint32_t terrainColumnCount = 0;
+
+    const std::array<odai::world::Chunk, 4> chunks = {
+        center,
+        odai::world::buildProceduralChunk(1, 0, 0),
+        odai::world::buildProceduralChunk(-1, 0, 0),
+        odai::world::buildProceduralChunk(0, 0, 1),
+    };
+
+    for (const odai::world::Chunk& chunk : chunks) {
+        for (int z = 0; z < odai::world::Chunk::kSizeZ; ++z) {
+            for (int x = 0; x < odai::world::Chunk::kSizeX; ++x) {
+                int terrainY = -1;
+                odai::world::VoxelType terrainType = odai::world::VoxelType::Empty;
+                for (int y = odai::world::Chunk::kSizeY - 1; y >= 0; --y) {
+                    const odai::world::VoxelType type = chunk.voxelAt(x, y, z).type;
+                    if (isTerrainSurfaceVoxel(type)) {
+                        terrainY = y;
+                        terrainType = type;
+                        break;
+                    }
+                }
+
+                expectTrue(terrainY >= 1, "Procedural terrain column has ground");
+                if (terrainY < 0) {
+                    continue;
+                }
+
+                minTerrainHeight = std::min(minTerrainHeight, terrainY);
+                maxTerrainHeight = std::max(maxTerrainHeight, terrainY);
+                ++terrainColumnCount;
+                const std::size_t typeIndex = static_cast<std::size_t>(terrainType);
+                if (typeIndex < surfaceCounts.size()) {
+                    ++surfaceCounts[typeIndex];
+                }
+            }
+        }
+    }
+
+    const bool hasGrass = surfaceCounts[static_cast<std::size_t>(odai::world::VoxelType::Grass)] > 0u;
+    const bool hasStone = surfaceCounts[static_cast<std::size_t>(odai::world::VoxelType::Stone)] > 0u;
+    const bool hasDirt = surfaceCounts[static_cast<std::size_t>(odai::world::VoxelType::Dirt)] > 0u;
+    const int materialVariety = (hasGrass ? 1 : 0) + (hasStone ? 1 : 0) + (hasDirt ? 1 : 0);
+
+    expectTrue(terrainColumnCount == 4u * odai::world::Chunk::kSizeX * odai::world::Chunk::kSizeZ,
+               "Procedural terrain fills every sampled column");
+    expectTrue(maxTerrainHeight > minTerrainHeight, "Procedural terrain has height variation");
+    expectTrue(maxTerrainHeight <= odai::world::Chunk::kSizeY - 6, "Procedural terrain respects headroom clamp");
+    expectTrue(materialVariety >= 2, "Procedural terrain uses slope-aware surface material variety");
+}
+
 void testClipmapIndex() {
     odai::world::ChunkGrid grid;
     grid.initializeEmptyWorld();
@@ -395,6 +476,7 @@ void testMagicaVoxelMeshing() {
     }
     expectTrue(vertexArraysEqual, "Magica mesher deterministic vertices");
 
+    constexpr std::uint32_t kPackedPaletteMaterial = 7u;
     bool foundPaletteMaterial = false;
     bool foundBaseColorIndex0 = false;
     bool foundBaseColorIndex1 = false;
@@ -403,7 +485,7 @@ void testMagicaVoxelMeshing() {
             (vertex.bits >> odai::world::PackedVoxelVertex::kShiftMaterial) & odai::world::PackedVoxelVertex::kMask4;
         const std::uint32_t baseColorIndex =
             (vertex.bits >> odai::world::PackedVoxelVertex::kShiftBaseColor) & odai::world::PackedVoxelVertex::kMask4;
-        if (material == 6u) {
+        if (material == kPackedPaletteMaterial) {
             foundPaletteMaterial = true;
         }
         if (baseColorIndex == 0u) {
@@ -494,6 +576,7 @@ int main() {
     testCsgCommands();
     testFrameArenaAliasUtilities();
     testChunkMeshingModes();
+    testProceduralWorldGenerationTerrain();
     testClipmapIndex();
     testSimulationBeltCargoDeterminism();
     testMagicaVoxelMeshing();
