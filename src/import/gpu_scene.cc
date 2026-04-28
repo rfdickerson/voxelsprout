@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -57,6 +58,38 @@ PackedRenderColor packedTerrainColor(float height) {
     color.g = 0.24f + (normalized * 0.34f);
     color.b = 0.18f + (normalized * 0.14f);
     return color;
+}
+
+bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
+    const std::size_t basePixelCount = static_cast<std::size_t>(texture.width) * texture.height;
+    const std::size_t baseByteCount = basePixelCount * 4u;
+    if (texture.width == 0u || texture.height == 0u || texture.rgba8.size() < baseByteCount) {
+        return false;
+    }
+
+    bool sawTransparent = false;
+    bool sawVisible = false;
+    for (std::size_t pixelIndex = 0; pixelIndex < basePixelCount; ++pixelIndex) {
+        const std::uint8_t alpha = texture.rgba8[(pixelIndex * 4u) + 3u];
+        sawTransparent = sawTransparent || alpha < 250u;
+        sawVisible = sawVisible || alpha > 8u;
+        if (sawTransparent && sawVisible) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<bool> buildTextureAlphaCutoutMask(const std::vector<ImportedSceneTexture>& textures) {
+    std::vector<bool> mask(textures.size(), false);
+    for (std::size_t textureIndex = 0; textureIndex < textures.size(); ++textureIndex) {
+        mask[textureIndex] = textureUsesAlphaCutout(textures[textureIndex]);
+    }
+    return mask;
+}
+
+bool textureIndexUsesAlphaCutout(const std::vector<bool>& mask, std::uint32_t textureIndex) {
+    return textureIndex < mask.size() && mask[textureIndex];
 }
 
 GpuSceneBounds makeEmptyBounds() {
@@ -282,6 +315,7 @@ bool buildGpuSceneAssetFromImportedScene(const ImportedScene& scene, GpuSceneAss
     outAsset.waterPatches = scene.waterPatches;
     outAsset.lights = scene.lights;
     outAsset.sceneBounds = makeEmptyBounds();
+    const std::vector<bool> textureAlphaCutoutMask = buildTextureAlphaCutoutMask(scene.textures);
 
     std::uint32_t globalFirstVertex = 0u;
     std::uint32_t globalFirstIndex = 0u;
@@ -309,7 +343,9 @@ bool buildGpuSceneAssetFromImportedScene(const ImportedScene& scene, GpuSceneAss
             dstPart.firstIndex = part.firstIndex + globalFirstIndex;
             dstPart.indexCount = part.indexCount;
             dstPart.textureIndex = part.textureIndex;
-            dstPart.flags = part.alphaTest ? kGpuSceneComponentFlagAlphaTest : 0u;
+            dstPart.flags = (part.alphaTest || textureIndexUsesAlphaCutout(textureAlphaCutoutMask, part.textureIndex))
+                ? kGpuSceneComponentFlagAlphaTest
+                : 0u;
             outAsset.meshParts.push_back(dstPart);
         }
         globalFirstVertex += asset.vertexCount;

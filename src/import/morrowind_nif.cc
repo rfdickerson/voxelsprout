@@ -569,7 +569,7 @@ NifAlphaPropertyRecord readAlphaPropertyRecord(NifCursor& cursor) {
     readObjectNetName(cursor);
     const std::uint16_t flags = cursor.readValue<std::uint16_t>();
     cursor.readValue<std::uint8_t>();
-    property.alphaTest = (flags & 0x0200u) != 0u;
+    property.alphaTest = (flags & 0x0201u) != 0u;
     return property;
 }
 

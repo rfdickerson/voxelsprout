@@ -4,6 +4,7 @@
 
 #include "import/gpu_scene.h"
 #include "import/imported_scene.h"
+#include "world/imported_scene_collision.h"
 
 namespace {
 
@@ -191,6 +192,12 @@ void testGpuSceneBuildFromImportedScene() {
     texture.height = 1;
     texture.rgba8 = {255, 255, 255, 255};
     scene.textures.push_back(texture);
+    ImportedSceneTexture leafTexture{};
+    leafTexture.sourcePath = "textures/test/leaves.dds";
+    leafTexture.width = 2;
+    leafTexture.height = 1;
+    leafTexture.rgba8 = {16, 48, 16, 255, 16, 48, 16, 0};
+    scene.textures.push_back(leafTexture);
 
     ImportedSceneMesh terrain{};
     terrain.name = "terrain";
@@ -214,7 +221,7 @@ void testGpuSceneBuildFromImportedScene() {
     wall.indices = {0u, 1u, 2u, 0u, 2u, 3u};
     wall.parts = {
         ImportedSceneMeshPart{0u, 3u, 0u, false},
-        ImportedSceneMeshPart{3u, 3u, 0u, true}
+        ImportedSceneMeshPart{3u, 3u, 1u, false}
     };
     scene.meshes.push_back(wall);
 
@@ -280,7 +287,7 @@ void testGpuSceneBuildFromImportedScene() {
         "GPU scene render cache keeps opaque part flags isolated");
     expectTrue(
         gpuScene.renderCache.packedVertices[alphaWallVertex].flags == 1u,
-        "GPU scene render cache keeps alpha-test part flags isolated");
+        "GPU scene render cache derives alpha-test flags from texture alpha");
 
     const GpuSceneObjectView wallView = odai::importer::gpuSceneObjectView(gpuScene, 1u);
     expectTrue(wallView.name == "ex_hlaalu_wall_01", "GPU scene object view exposes object name");
@@ -294,11 +301,117 @@ void testGpuSceneBuildFromImportedScene() {
     expectNear(runtime.transforms.worldMatrices[1][3], 32.0f, 1e-6f, "GPU scene runtime rebuild keeps translation");
 }
 
+void testImportedSceneCollision() {
+    using odai::importer::GpuSceneAsset;
+    using odai::importer::ImportedScene;
+    using odai::importer::ImportedSceneInstance;
+    using odai::importer::ImportedSceneMesh;
+    using odai::importer::ImportedSceneMeshPart;
+    using odai::importer::ImportedSceneVertex;
+    using odai::world::ImportedSceneCollision;
+
+    ImportedScene scene{};
+    scene.sourceTag = "collision_synthetic";
+
+    ImportedSceneMesh terrain{};
+    terrain.name = "terrain";
+    terrain.vertices = {
+        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{10.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{10.0f, 0.0f, 10.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
+        ImportedSceneVertex{{0.0f, 0.0f, 10.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
+    };
+    terrain.indices = {0u, 2u, 1u, 0u, 3u, 2u};
+    terrain.parts = {ImportedSceneMeshPart{0u, 6u, 0u, false}};
+    scene.meshes.push_back(terrain);
+
+    ImportedSceneMesh raisedFloor{};
+    raisedFloor.name = "raised_floor";
+    raisedFloor.vertices = {
+        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{4.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{4.0f, 0.0f, 4.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
+        ImportedSceneVertex{{0.0f, 0.0f, 4.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
+    };
+    raisedFloor.indices = {0u, 2u, 1u, 0u, 3u, 2u};
+    raisedFloor.parts = {ImportedSceneMeshPart{0u, 6u, 0u, false}};
+    scene.meshes.push_back(raisedFloor);
+
+    ImportedSceneMesh wall{};
+    wall.name = "wall";
+    wall.vertices = {
+        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{4.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{4.0f, 6.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
+        ImportedSceneVertex{{0.0f, 6.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}}
+    };
+    wall.indices = {0u, 1u, 2u, 0u, 2u, 3u};
+    wall.parts = {ImportedSceneMeshPart{0u, 6u, 0u, false}};
+    scene.meshes.push_back(wall);
+
+    ImportedSceneInstance floorInstance{};
+    floorInstance.meshIndex = 1u;
+    floorInstance.transform[0] = 1.0f;
+    floorInstance.transform[5] = 1.0f;
+    floorInstance.transform[10] = 1.0f;
+    floorInstance.transform[15] = 1.0f;
+    floorInstance.transform[3] = 20.0f;
+    floorInstance.transform[7] = 8.0f;
+    scene.instances.push_back(floorInstance);
+
+    ImportedSceneInstance wallInstance{};
+    wallInstance.meshIndex = 2u;
+    wallInstance.transform[0] = 1.0f;
+    wallInstance.transform[5] = 1.0f;
+    wallInstance.transform[10] = 1.0f;
+    wallInstance.transform[15] = 1.0f;
+    wallInstance.transform[3] = 40.0f;
+    scene.instances.push_back(wallInstance);
+
+    GpuSceneAsset gpuScene{};
+    expectTrue(
+        odai::importer::buildGpuSceneAssetFromImportedScene(scene, gpuScene),
+        "GPU scene asset builds for collision test");
+
+    ImportedSceneCollision collision{};
+    expectTrue(collision.build(gpuScene), "Imported scene collision builds");
+    const ImportedSceneCollision::BuildStats stats = collision.stats();
+    expectTrue(stats.triangleCount == 6u, "Imported scene collision keeps terrain and static triangles");
+
+    ImportedSceneCollision::GroundHit groundHit{};
+    expectTrue(
+        collision.findGroundSupport(2.0f, 5.0f, 2.0f, 0.5f, 10.0f, 1.0f, 0.65f, groundHit),
+        "Imported scene collision finds terrain support");
+    expectNear(groundHit.y, 0.0f, 1e-5f, "Imported scene terrain support height is correct");
+
+    expectTrue(
+        collision.findGroundSupport(22.0f, 12.0f, 2.0f, 0.5f, 10.0f, 1.0f, 0.65f, groundHit),
+        "Imported scene collision finds transformed static floor support");
+    expectNear(groundHit.y, 8.0f, 1e-5f, "Imported scene transformed floor support height is correct");
+
+    expectTrue(
+        !collision.findGroundSupport(30.0f, 12.0f, 2.0f, 0.5f, 10.0f, 1.0f, 0.65f, groundHit),
+        "Imported scene collision rejects support outside triangles");
+
+    ImportedSceneCollision::CeilingHit ceilingHit{};
+    expectTrue(
+        collision.findCeiling(22.0f, 8.5f, 2.0f, 0.5f, 1.0f, ceilingHit),
+        "Imported scene collision finds a penetrated ceiling plane");
+    expectNear(ceilingHit.y, 8.0f, 1e-5f, "Imported scene ceiling height is correct");
+
+    odai::math::Vector3 correction{};
+    expectTrue(
+        collision.resolveHorizontalCylinder(42.0f, 1.0f, 0.25f, 1.0f, 4.0f, 0.65f, correction),
+        "Imported scene collision resolves a wall overlap");
+    expectTrue(correction.z > 0.0f, "Imported scene wall correction pushes away from wall");
+}
+
 }  // namespace
 
 int main() {
     testImportedSceneSerialization();
     testGpuSceneBuildFromImportedScene();
+    testImportedSceneCollision();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";
