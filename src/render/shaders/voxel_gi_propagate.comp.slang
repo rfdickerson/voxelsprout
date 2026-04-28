@@ -32,6 +32,10 @@ float sampleOpenCell(int3 cell, int3 dims)
     {
         return 1.0;
     }
+    if (camera.importedLightConfig.z > 0.5 && camera.importedLightConfig.x > 0.5)
+    {
+        return 1.0;
+    }
     const float occupancy = voxelGiOccupancy.Load(int4(cell, 0)).x;
     return (occupancy <= 0.5) ? 1.0 : 0.0;
 }
@@ -122,7 +126,10 @@ void main(
             occupancySample = voxelGiOccupancy.Load(int4(globalSharedCell, 0)).x;
             radianceSample = voxelGiPropagateIn.Load(int4(globalSharedCell, 0));
         }
-        sOpen[sx][sy][sz] = (occupancySample <= 0.5) ? 1.0 : 0.0;
+        sOpen[sx][sy][sz] =
+            (camera.importedLightConfig.z > 0.5 && camera.importedLightConfig.x > 0.5)
+                ? 1.0
+                : ((occupancySample <= 0.5) ? 1.0 : 0.0);
         sRadiance[sx][sy][sz] = radianceSample;
     }
     GroupMemoryBarrierWithGroupSync();
@@ -132,9 +139,9 @@ void main(
         return;
     }
 
+    const bool morrowindGi = camera.importedLightConfig.z > 0.5 && camera.importedLightConfig.x > 0.5;
     const float occupancy = 1.0 - sOpen[localCell.x][localCell.y][localCell.z];
-
-    if (occupancy > 0.5)
+    if (occupancy > 0.5 && !morrowindGi)
     {
         voxelGiPropagateOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
         return;

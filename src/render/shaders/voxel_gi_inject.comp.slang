@@ -156,6 +156,48 @@ float3 sampleDirectionalSurfaceIrradiance(int3 cell, int3 directionToReceiver, i
     return directional + (isotropicRadiance * isotropicFloorScale);
 }
 
+float3 evaluateImportedLocalLightVolumeSeed(float3 worldPosition)
+{
+    const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
+    const float globalIntensity = camera.importedLightConfig.z > 0.5 ? max(camera.importedLightConfig.y, 0.0) : 0.0;
+    if (lightCount <= 0 || globalIntensity <= 0.0)
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+
+    float3 lighting = float3(0.0, 0.0, 0.0);
+    [loop]
+    for (int lightIndex = 0; lightIndex < 64; ++lightIndex)
+    {
+        if (lightIndex >= lightCount)
+        {
+            break;
+        }
+
+        const float4 positionRadius = camera.importedLightPositionRadius[lightIndex];
+        const float4 colorIntensity = camera.importedLightColorIntensity[lightIndex];
+        const float radius = max(positionRadius.w, 1.0);
+        const float3 toLight = positionRadius.xyz - worldPosition;
+        const float distanceSquared = dot(toLight, toLight);
+        if (distanceSquared >= radius * radius)
+        {
+            continue;
+        }
+
+        const float distanceToLight = sqrt(max(distanceSquared, 1e-4));
+        const float normalizedDistance = saturate(distanceToLight / radius);
+        const float falloff = saturate(1.0 - (normalizedDistance * normalizedDistance));
+        const float attenuation = falloff * falloff;
+        lighting += colorIntensity.rgb * (colorIntensity.w * globalIntensity * attenuation);
+    }
+    return lighting;
+}
+
+bool morrowindInteriorGiActive()
+{
+    return camera.importedLightConfig.z > 0.5 && camera.importedLightConfig.x > 0.5;
+}
+
 [numthreads(4, 4, 4)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -172,7 +214,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const int3 cell = int3(dispatchThreadId);
     const float4 occupancySample = voxelGiOccupancy.Load(int4(int3(dispatchThreadId), 0));
     const float occupancy = occupancySample.x;
-    if (occupancy > 0.5)
+    const bool morrowindGi = morrowindInteriorGiActive();
+    if (occupancy > 0.5 && !morrowindGi)
     {
         voxelGiInjectOut[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
         return;
@@ -240,8 +283,21 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float ambientInjectScale = injectShScale * 0.08;
     const float3 ambientIrradiance =
         evaluateShHemisphereIrradiance(float3(0.0, 1.0, 0.0)) * (ambientInjectScale * ambientGate);
+    const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
+    const float3 worldPosition =
+        camera.voxelGiGridOriginCellSize.xyz + ((float3(dispatchThreadId) + 0.5) * cellSize);
+    const float importedLightSeedScale = morrowindGi ? 0.22 : 0.0;
+    const float3 importedLightIrradiance =
+        evaluateImportedLocalLightVolumeSeed(worldPosition) *
+        (importedLightSeedScale * lerp(0.65, 1.0, localOpenRatio));
+    const float3 materialTint = (occupancy > 0.5)
+        ? saturate(lerp(float3(1.0, 1.0, 1.0), occupancySample.yzw, 0.35))
+        : float3(1.0, 1.0, 1.0);
 
     const float3 injected =
-        max((bouncedLightSum * (injectBounceScale * 1.55) + ambientIrradiance) * lambertInvPi, float3(0.0, 0.0, 0.0));
+        max(
+            ((bouncedLightSum * (injectBounceScale * 1.55) + ambientIrradiance + importedLightIrradiance) *
+                materialTint) * lambertInvPi,
+            float3(0.0, 0.0, 0.0));
     voxelGiInjectOut[dispatchThreadId] = float4(injected, 1.0);
 }

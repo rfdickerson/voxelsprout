@@ -62,22 +62,19 @@ float3 sampleImportedVoxelGi(float3 worldPosition, float3 normal)
         return float3(0.0, 0.0, 0.0);
     }
 
-    const float3 uvwForward = (worldPosition + (normal * (cellSize * 0.55)) - gridOrigin) / gridExtent;
-    const float3 uvwInterior = (worldPosition - (normal * (cellSize * 0.35)) - gridOrigin) / gridExtent;
+    const float3 uvwForward = (worldPosition + (normal * (cellSize * 0.35)) - gridOrigin) / gridExtent;
+    const float3 uvwBack = (worldPosition - (normal * (cellSize * 0.35)) - gridOrigin) / gridExtent;
     const float3 giCenter = voxelGiVolume.SampleLevel(uvwCenter, 0.0).xyz;
     const float3 giForward =
         (any(uvwForward < float3(0.0, 0.0, 0.0)) || any(uvwForward > float3(1.0, 1.0, 1.0)))
             ? giCenter
             : voxelGiVolume.SampleLevel(uvwForward, 0.0).xyz;
+    const float3 giBack =
+        (any(uvwBack < float3(0.0, 0.0, 0.0)) || any(uvwBack > float3(1.0, 1.0, 1.0)))
+            ? giCenter
+            : voxelGiVolume.SampleLevel(uvwBack, 0.0).xyz;
 
-    const float interiorOccupancy =
-        (any(uvwInterior < float3(0.0, 0.0, 0.0)) || any(uvwInterior > float3(1.0, 1.0, 1.0)))
-            ? 0.0
-            : voxelGiOccupancyVolume.SampleLevel(uvwInterior, 0.0).x;
-    const float oneSidedBlend = (interiorOccupancy > 0.5) ? 1.0 : 0.0;
-    const float3 baseBlend = (giCenter * 0.70) + (giForward * 0.30);
-    const float3 oneSidedBlendTarget = (giCenter * 0.20) + (giForward * 0.80);
-    return lerp(baseBlend, oneSidedBlendTarget, oneSidedBlend) *
+    return ((giCenter * 0.60) + (giForward * 0.25) + (giBack * 0.15)) *
         max(camera.voxelGiGridExtentStrength.w, 0.0);
 }
 
@@ -97,11 +94,6 @@ float3 sampleImportedVoxelGiDebug(float3 worldPosition, float3 normal)
         return float3(0.0, 0.0, 0.0);
     }
 
-    const float occupancyCenter = voxelGiOccupancyVolume.SampleLevel(uvwCenter, 0.0).x;
-    if (occupancyCenter > 0.5)
-    {
-        return sampleImportedVoxelGi(worldPosition + (normal * (cellSize * 0.90)), normal);
-    }
     return sampleImportedVoxelGi(worldPosition, normal);
 }
 
@@ -325,6 +317,48 @@ float3 evaluateImportedLocalLightDebug(float3 worldPosition)
     return lighting;
 }
 
+float3 evaluateMorrowindInteriorGi(float3 worldPosition, float3 normal, float3 albedo)
+{
+    const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
+    const float globalIntensity = max(camera.importedLightConfig.y, 0.0);
+    if (lightCount <= 0 || globalIntensity <= 0.0)
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+
+    float3 irradiance = float3(0.0, 0.0, 0.0);
+    [loop]
+    for (int lightIndex = 0; lightIndex < 64; ++lightIndex)
+    {
+        if (lightIndex >= lightCount)
+        {
+            break;
+        }
+
+        const float4 positionRadius = camera.importedLightPositionRadius[lightIndex];
+        const float4 colorIntensity = camera.importedLightColorIntensity[lightIndex];
+        const float radius = max(positionRadius.w, 1.0);
+        const float3 toLight = positionRadius.xyz - worldPosition;
+        const float distanceSquared = dot(toLight, toLight);
+        if (distanceSquared >= radius * radius)
+        {
+            continue;
+        }
+
+        const float distanceToLight = sqrt(max(distanceSquared, 1e-4));
+        const float3 lightDirection = toLight / distanceToLight;
+        const float normalWrap = saturate((dot(normal, lightDirection) * 0.35) + 0.65);
+        const float normalizedDistance = saturate(distanceToLight / radius);
+        const float falloff = saturate(1.0 - (normalizedDistance * normalizedDistance));
+        const float attenuation = falloff * falloff;
+        irradiance += colorIntensity.rgb * (colorIntensity.w * globalIntensity * attenuation * normalWrap);
+    }
+
+    const float albedoLuma = max(dot(albedo, float3(0.2126, 0.7152, 0.0722)), 0.08);
+    const float3 colorBleed = saturate(lerp(float3(albedoLuma, albedoLuma, albedoLuma), albedo, 0.55));
+    return irradiance * colorBleed * 0.18;
+}
+
 int chooseShadowCascade(float viewDepth)
 {
     if (viewDepth <= camera.shadowCascadeSplits.x) return 0;
@@ -440,10 +474,16 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 ambient =
         (interiorMode ? float3(0.045, 0.047, 0.052) : float3(0.18, 0.19, 0.21)) +
         (ambientIrradiance * float3(0.92, 0.95, 1.00) * (interiorMode ? 0.22 : 0.58));
-    const float3 voxelGi = interiorMode
-        ? sampleImportedVoxelGi(input.inWorldPosition, normal) * 1.35
+    const float3 sampledVoxelGi = sampleImportedVoxelGi(input.inWorldPosition, normal);
+    const float3 morrowindGi = interiorMode
+        ? evaluateMorrowindInteriorGi(input.inWorldPosition, normal, albedo.rgb)
         : float3(0.0, 0.0, 0.0);
-    const float3 voxelGiDebug = sampleImportedVoxelGiDebug(input.inWorldPosition, normal);
+    const float3 voxelGi = interiorMode
+        ? max(sampledVoxelGi * 1.35, morrowindGi)
+        : float3(0.0, 0.0, 0.0);
+    const float3 voxelGiDebug = interiorMode
+        ? max(sampleImportedVoxelGiDebug(input.inWorldPosition, normal), morrowindGi)
+        : sampleImportedVoxelGiDebug(input.inWorldPosition, normal);
     const int voxelGiDebugMode = int(camera.shadowVoxelGridOrigin.z + 0.5);
     if (voxelGiDebugMode == 1)
     {
@@ -468,7 +508,7 @@ float4 main(FragmentInput input) : SV_Target0
     if (voxelGiDebugMode == 4)
     {
         const float3 occupancyAlbedo = sampleImportedVoxelGiOccupancyAlbedo(input.inWorldPosition, normal);
-        return float4(occupancyAlbedo, 1.0);
+        return float4(max(occupancyAlbedo, saturate(albedo.rgb)), 1.0);
     }
     if (voxelGiDebugMode == 5)
     {
