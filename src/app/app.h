@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio/sound_engine.h"
 #include "core/input.h"
 #include "import/gpu_scene.h"
 #include "render/renderer.h"
@@ -32,6 +33,8 @@ private:
     struct AppConfig {
         odai::render::ShadowMode shadowMode = odai::render::ShadowMode::Auto;
         bool enableSsao = true;
+        bool enableMusic = true;
+        float musicVolume = 0.35f;
     };
 
     struct CameraRaycastResult {
@@ -269,6 +272,7 @@ private:
     odai::sim::Simulation m_simulation;
     odai::world::World m_world;
     odai::world::ChunkClipmapIndex m_chunkClipmapIndex;
+    odai::audio::SoundEngine m_soundEngine;
     odai::render::Renderer m_renderer;
     bool m_importedSceneDemoEnabled = false;
     bool m_importedShowTerrain = true;

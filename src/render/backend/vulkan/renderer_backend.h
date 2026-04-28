@@ -186,6 +186,10 @@ public:
         int restirSpatialRadius = 1;
         bool restirHistoryResetRequested = false;
         int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo, 5 = imported lights
+        float morrowindGiStrength = 0.18f;
+        float morrowindGiRadiusScale = 1.55f;
+        float morrowindGiOcclusionFloor = 0.25f;
+        float morrowindGiColorBleed = 0.55f;
     };
 
     bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);

@@ -117,6 +117,7 @@ struct alignas(16) CameraUniform {
     float importedLightPositionRadius[kImportedLocalLightCapacity][4];
     float importedLightColorIntensity[kImportedLocalLightCapacity][4];
     float importedLightConfig[4];
+    float morrowindGiConfig[4];
     float voxelBaseColorPalette[16][4];
     float voxelGiGridOriginCellSize[4];
     float voxelGiGridExtentStrength[4];

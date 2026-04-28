@@ -140,6 +140,7 @@ if(ODAI_BUILD_APP)
     add_executable(odai
         src/app/main.cc
         src/app/app.cc
+        src/audio/sound_engine.cc
         src/core/log.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
@@ -276,6 +277,10 @@ if(ODAI_BUILD_APP)
         else()
             message(FATAL_ERROR "GLFW is required. Install via vcpkg or provide glfw3 to CMake.")
         endif()
+    endif()
+
+    if(WIN32)
+        target_link_libraries(odai PRIVATE xaudio2 mfplat mfreadwrite mfuuid)
     endif()
 endif()
 

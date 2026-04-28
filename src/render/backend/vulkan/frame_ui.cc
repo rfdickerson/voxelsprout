@@ -582,6 +582,13 @@ void RendererBackend::buildFrameStatsUi() {
         ImGui::SliderFloat("Diffusion Softness", &m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f, "%.2f");
         ImGui::SliderInt("RT Surface Samples", &m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2);
         ImGui::SliderFloat("RT Surface Bias", &m_voxelGiDebugSettings.rtSurfaceBiasScale, 0.25f, 4.0f, "%.2f");
+        if (m_importedSceneInteriorMode) {
+            ImGui::SeparatorText("Morrowind Interior GI");
+            ImGui::SliderFloat("MW GI Strength", &m_voxelGiDebugSettings.morrowindGiStrength, 0.0f, 0.60f, "%.2f");
+            ImGui::SliderFloat("MW GI Radius", &m_voxelGiDebugSettings.morrowindGiRadiusScale, 0.50f, 4.0f, "%.2fx");
+            ImGui::SliderFloat("MW GI Occlusion Floor", &m_voxelGiDebugSettings.morrowindGiOcclusionFloor, 0.0f, 0.75f, "%.2f");
+            ImGui::SliderFloat("MW GI Color Bleed", &m_voxelGiDebugSettings.morrowindGiColorBleed, 0.0f, 1.0f, "%.2f");
+        }
         ImGui::SeparatorText("ReSTIR GI");
         ImGui::SliderInt("ReSTIR Candidates", &m_voxelGiDebugSettings.restirCandidateCount, 1, 8);
         ImGui::Checkbox("ReSTIR Temporal", &m_voxelGiDebugSettings.restirEnableTemporalReuse);

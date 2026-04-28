@@ -321,6 +321,10 @@ float3 evaluateMorrowindInteriorGi(float3 worldPosition, float3 normal, float3 a
 {
     const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
     const float globalIntensity = max(camera.importedLightConfig.y, 0.0);
+    const float giStrength = max(camera.morrowindGiConfig.x, 0.0);
+    const float radiusScale = clamp(camera.morrowindGiConfig.y, 0.25, 4.0);
+    const float occlusionFloor = clamp(camera.morrowindGiConfig.z, 0.0, 1.0);
+    const float colorBleedStrength = clamp(camera.morrowindGiConfig.w, 0.0, 1.0);
     if (lightCount <= 0 || globalIntensity <= 0.0)
     {
         return float3(0.0, 0.0, 0.0);
@@ -337,7 +341,7 @@ float3 evaluateMorrowindInteriorGi(float3 worldPosition, float3 normal, float3 a
 
         const float4 positionRadius = camera.importedLightPositionRadius[lightIndex];
         const float4 colorIntensity = camera.importedLightColorIntensity[lightIndex];
-        const float radius = max(positionRadius.w, 1.0);
+        const float radius = max(positionRadius.w * radiusScale, 1.0);
         const float3 toLight = positionRadius.xyz - worldPosition;
         const float distanceSquared = dot(toLight, toLight);
         if (distanceSquared >= radius * radius)
@@ -347,16 +351,36 @@ float3 evaluateMorrowindInteriorGi(float3 worldPosition, float3 normal, float3 a
 
         const float distanceToLight = sqrt(max(distanceSquared, 1e-4));
         const float3 lightDirection = toLight / distanceToLight;
-        const float normalWrap = saturate((dot(normal, lightDirection) * 0.35) + 0.65);
+        const float ndotl = saturate(dot(normal, lightDirection));
+        const float normalWrap = saturate((dot(normal, lightDirection) * 0.25) + 0.75);
         const float normalizedDistance = saturate(distanceToLight / radius);
-        const float falloff = saturate(1.0 - (normalizedDistance * normalizedDistance));
+        const float falloff = 1.0 - smoothstep(0.72, 1.0, normalizedDistance);
         const float attenuation = falloff * falloff;
-        irradiance += colorIntensity.rgb * (colorIntensity.w * globalIntensity * attenuation * normalWrap);
+        float visibility = 1.0;
+#ifdef ODAI_RT_SHADOWS
+        visibility = lerp(
+            occlusionFloor,
+            1.0,
+            sampleRayTracedPointLightShadow(
+                worldPosition,
+                normal,
+                lightDirection,
+                distanceToLight,
+                max(ndotl, 0.25)));
+#endif
+        irradiance += colorIntensity.rgb * (colorIntensity.w * globalIntensity * attenuation * normalWrap * visibility);
     }
 
     const float albedoLuma = max(dot(albedo, float3(0.2126, 0.7152, 0.0722)), 0.08);
-    const float3 colorBleed = saturate(lerp(float3(albedoLuma, albedoLuma, albedoLuma), albedo, 0.55));
-    return irradiance * colorBleed * 0.18;
+    const float albedoPeak = max(max(albedo.x, albedo.y), albedo.z);
+    const float albedoMin = min(min(albedo.x, albedo.y), albedo.z);
+    const float saturation = (albedoPeak > 0.0001) ? ((albedoPeak - albedoMin) / albedoPeak) : 0.0;
+    const float darkMaterial = 1.0 - smoothstep(0.04, 0.22, albedoLuma);
+    const float metalLike = smoothstep(0.72, 0.96, albedoPeak) * (1.0 - smoothstep(0.05, 0.22, saturation));
+    const float bleedScale = colorBleedStrength * (1.0 - (metalLike * 0.80)) * (1.0 - (darkMaterial * 0.45));
+    const float3 neutralBleed = float3(albedoLuma, albedoLuma, albedoLuma);
+    const float3 colorBleed = saturate(lerp(neutralBleed, albedo, bleedScale));
+    return irradiance * colorBleed * giStrength;
 }
 
 int chooseShadowCascade(float viewDepth)

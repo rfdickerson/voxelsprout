@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cmath>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -110,6 +111,7 @@ constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 constexpr const char* kImportedSceneEnvVar = "ODAI_IMPORTED_SCENE";
 constexpr const char* kMorrowindDataFilesEnvVar = "ODAI_MORROWIND_DATA_FILES";
+constexpr const char* kMorrowindMusicDirEnvVar = "ODAI_MORROWIND_MUSIC_DIR";
 constexpr const char* kBalmoraGuardsEnvVar = "ODAI_ENABLE_BALMORA_GUARDS";
 constexpr const char* kBalmoraInteriorCacheEnvVar = "ODAI_BALMORA_INTERIOR_CACHE";
 constexpr float kBalmoraDoorActivationRadius = 180.0f;
@@ -250,6 +252,20 @@ bool parseBoolConfigValue(const std::string& value, bool& outValue) {
         return true;
     }
     return false;
+}
+
+bool parseFloatConfigValue(const std::string& value, float& outValue) {
+    try {
+        std::size_t parsedLength = 0;
+        const float parsedValue = std::stof(value, &parsedLength);
+        if (parsedLength != value.size() || !std::isfinite(parsedValue)) {
+            return false;
+        }
+        outValue = parsedValue;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 std::string trimConfigString(const std::string& value) {
@@ -515,6 +531,34 @@ std::optional<std::filesystem::path> findMorrowindDataFilesPath() {
         const std::filesystem::path path(*envPath);
         if (std::filesystem::exists(path / "Morrowind.esm")) {
             return path;
+        }
+    }
+    constexpr std::array<const char*, 2> kFallbackPaths = {
+        "C:/GOG Games/Morrowind/Data Files",
+        "/mnt/c/GOG Games/Morrowind/Data Files"
+    };
+    for (const char* candidate : kFallbackPaths) {
+        const std::filesystem::path path(candidate);
+        if (std::filesystem::exists(path / "Morrowind.esm")) {
+            return path;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path> findMorrowindMusicDirectoryPath() {
+    if (const std::optional<std::string> envPath = readEnvironmentString(kMorrowindMusicDirEnvVar);
+        envPath.has_value() && !envPath->empty()) {
+        const std::filesystem::path path(*envPath);
+        if (std::filesystem::exists(path)) {
+            return path;
+        }
+    }
+    if (const std::optional<std::filesystem::path> dataFilesPath = findMorrowindDataFilesPath();
+        dataFilesPath.has_value()) {
+        const std::filesystem::path musicPath = *dataFilesPath / "Music";
+        if (std::filesystem::exists(musicPath)) {
+            return musicPath;
         }
     }
     return std::nullopt;
@@ -873,12 +917,37 @@ bool App::loadConfig(const std::filesystem::path& configPath) {
                 continue;
             }
             loadedConfig.enableSsao = parsedValue;
+            continue;
+        }
+        if (key == "enable_music") {
+            bool parsedValue = loadedConfig.enableMusic;
+            if (!parseBoolConfigValue(value, parsedValue)) {
+                VOX_LOGW("app") << "invalid config enable_music='" << value
+                                << "' at " << configPath.string() << "; keeping "
+                                << boolConfigName(loadedConfig.enableMusic);
+                continue;
+            }
+            loadedConfig.enableMusic = parsedValue;
+            continue;
+        }
+        if (key == "music_volume") {
+            float parsedValue = loadedConfig.musicVolume;
+            if (!parseFloatConfigValue(value, parsedValue)) {
+                VOX_LOGW("app") << "invalid config music_volume='" << value
+                                << "' at " << configPath.string() << "; keeping "
+                                << loadedConfig.musicVolume;
+                continue;
+            }
+            loadedConfig.musicVolume = std::clamp(parsedValue, 0.0f, 1.0f);
+            continue;
         }
     }
     m_config = loadedConfig;
     VOX_LOGI("app") << "config loaded from " << configPath.string()
                     << " (shadow_mode=" << shadowModeConfigName(m_config.shadowMode)
                     << ", enable_ssao=" << boolConfigName(m_config.enableSsao)
+                    << ", enable_music=" << boolConfigName(m_config.enableMusic)
+                    << ", music_volume=" << m_config.musicVolume
                     << ", parsedLines=" << parsedLineCount << ")";
     return true;
 }
@@ -891,6 +960,8 @@ bool App::saveConfig(const std::filesystem::path& configPath) const {
     file << "# Morrowind renderer runtime config\n";
     file << "shadow_mode=" << shadowModeConfigName(m_config.shadowMode) << "\n";
     file << "enable_ssao=" << boolConfigName(m_config.enableSsao) << "\n";
+    file << "enable_music=" << boolConfigName(m_config.enableMusic) << "\n";
+    file << "music_volume=" << m_config.musicVolume << "\n";
     return true;
 }
 
@@ -938,6 +1009,19 @@ bool App::init() {
     }
     m_renderer.setShadowSettings(odai::render::ShadowSettings{m_config.shadowMode});
     m_renderer.setSsaoEnabled(m_config.enableSsao);
+    if (!m_soundEngine.init(odai::audio::MusicSettings{m_config.enableMusic, m_config.musicVolume})) {
+        VOX_LOGW("app") << "sound engine init failed; continuing without music";
+    } else if (m_config.enableMusic) {
+        if (const std::optional<std::filesystem::path> musicPath = findMorrowindMusicDirectoryPath();
+            musicPath.has_value()) {
+            if (!m_soundEngine.playMusicDirectory(*musicPath)) {
+                VOX_LOGW("app") << "failed to start Morrowind music from " << musicPath->string();
+            }
+        } else {
+            VOX_LOGW("app") << "Morrowind music disabled: Music directory not found; set "
+                            << kMorrowindMusicDirEnvVar << " or " << kMorrowindDataFilesEnvVar;
+        }
+    }
     m_gameplayUiState.selectedHotbarSlot = 0;
     m_gameplayUiState.hotbarItems = {
         odai::render::InventoryItemId::Stone,
@@ -1125,6 +1209,7 @@ void App::run() {
         if (glfwWindowShouldClose(m_window) == GLFW_TRUE) {
             break;
         }
+        m_soundEngine.update();
 
         int simulationStepCount = 0;
         while (simulationAccumulatorSeconds >= kSimulationFixedStepSeconds &&
@@ -2251,6 +2336,8 @@ void App::update(float dt, float simulationAlpha) {
 void App::shutdown() {
     VOX_LOGI("app") << "shutdown begin";
 
+    m_config.enableMusic = m_soundEngine.musicSettings().enabled;
+    m_config.musicVolume = m_soundEngine.musicSettings().volume;
     m_config.shadowMode = m_renderer.shadowSettings().mode;
     m_config.enableSsao = m_renderer.isSsaoEnabled();
     const std::filesystem::path configPath{kConfigFilePath};
@@ -2259,7 +2346,9 @@ void App::shutdown() {
     } else {
         VOX_LOGI("app") << "saved config to " << configPath.string()
                         << " (shadow_mode=" << shadowModeConfigName(m_config.shadowMode)
-                        << ", enable_ssao=" << boolConfigName(m_config.enableSsao) << ")";
+                        << ", enable_ssao=" << boolConfigName(m_config.enableSsao)
+                        << ", enable_music=" << boolConfigName(m_config.enableMusic)
+                        << ", music_volume=" << m_config.musicVolume << ")";
     }
 
     if (m_worldDirty) {
@@ -2273,6 +2362,7 @@ void App::shutdown() {
         }
     }
 
+    m_soundEngine.shutdown();
     m_renderer.shutdown();
 
     if (m_window != nullptr) {

@@ -869,9 +869,11 @@ void RendererBackend::renderFrame(
                 std::max(viewRayDistanceSquared - radiusSquared, 0.0f) / radiusSquared;
             const float distanceScore = distanceSquared / std::max(radiusSquared, 1.0f);
             const float behindCameraPenalty = alongView < -influenceRadius ? 16.0f : 0.0f;
+            const float interiorGiScore = distanceScore + (viewInfluenceScore * 0.12f);
+            const float exteriorViewScore = viewInfluenceScore + (distanceScore * 0.08f) + behindCameraPenalty;
             const SelectedImportedLight selected{
                 &light,
-                viewInfluenceScore + (distanceScore * 0.08f) + behindCameraPenalty
+                m_importedSceneInteriorMode ? interiorGiScore : exteriorViewScore
             };
             if (selectedImportedLightCount < selectedImportedLights.size()) {
                 selectedImportedLights[selectedImportedLightCount++] = selected;
@@ -899,6 +901,10 @@ void RendererBackend::renderFrame(
     m_debugImportedLightSelectedCount = static_cast<std::uint32_t>(selectedImportedLightCount);
     const float importedLightGlobalIntensity =
         std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f);
+    mvpUniform.morrowindGiConfig[0] = std::clamp(m_voxelGiDebugSettings.morrowindGiStrength, 0.0f, 1.0f);
+    mvpUniform.morrowindGiConfig[1] = std::clamp(m_voxelGiDebugSettings.morrowindGiRadiusScale, 0.25f, 4.0f);
+    mvpUniform.morrowindGiConfig[2] = std::clamp(m_voxelGiDebugSettings.morrowindGiOcclusionFloor, 0.0f, 1.0f);
+    mvpUniform.morrowindGiConfig[3] = std::clamp(m_voxelGiDebugSettings.morrowindGiColorBleed, 0.0f, 1.0f);
     auto mixImportedLightSignature = [](std::uint64_t hash, std::uint64_t value) {
         hash ^= value;
         hash *= 1099511628211ull;
@@ -918,6 +924,10 @@ void RendererBackend::renderFrame(
         static_cast<std::uint64_t>(selectedImportedLightCount));
     importedLightSignature = mixImportedLightFloat(importedLightSignature, importedLightGlobalIntensity);
     importedLightSignature = mixImportedLightFloat(importedLightSignature, importedLightRadiusScale);
+    importedLightSignature = mixImportedLightFloat(importedLightSignature, mvpUniform.morrowindGiConfig[0]);
+    importedLightSignature = mixImportedLightFloat(importedLightSignature, mvpUniform.morrowindGiConfig[1]);
+    importedLightSignature = mixImportedLightFloat(importedLightSignature, mvpUniform.morrowindGiConfig[2]);
+    importedLightSignature = mixImportedLightFloat(importedLightSignature, mvpUniform.morrowindGiConfig[3]);
     for (std::size_t lightIndex = 0; lightIndex < selectedImportedLightCount; ++lightIndex) {
         const ImportedLocalLight& light = *selectedImportedLights[lightIndex].light;
         const float lightRadius = std::max(light.radius * importedLightRadiusScale, 1.0f);

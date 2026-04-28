@@ -37,6 +37,7 @@ public struct CameraUniform
     public float4 importedLightPositionRadius[64];
     public float4 importedLightColorIntensity[64];
     public float4 importedLightConfig;
+    public float4 morrowindGiConfig;
     public float4 voxelBaseColorPalette[16];
     public float4 voxelGiGridOriginCellSize;
     public float4 voxelGiGridExtentStrength;
