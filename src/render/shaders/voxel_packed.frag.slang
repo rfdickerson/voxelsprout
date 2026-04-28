@@ -88,6 +88,89 @@ float3 faceNormal(uint face)
     return float3(0.0, 0.0, -1.0);
 }
 
+bool isTerrainMaterial(uint material)
+{
+    return material == kMaterialStone || material == kMaterialDirt || material == kMaterialGrass;
+}
+
+float terrainDetailSignal(float3 worldPosition)
+{
+    return
+        sin(dot(worldPosition, float3(0.73, 0.00, 1.17))) * 0.52 +
+        sin(dot(worldPosition, float3(1.91, 0.37, -0.64))) * 0.30 +
+        sin(dot(worldPosition, float3(-0.41, 1.48, 1.33))) * 0.18;
+}
+
+void terrainNormalBasis(float3 normal, out float3 tangent, out float3 bitangent)
+{
+    const float3 reference = (abs(normal.y) < 0.94) ? float3(0.0, 1.0, 0.0) : float3(0.0, 0.0, 1.0);
+    tangent = normalize(cross(reference, normal));
+    bitangent = normalize(cross(normal, tangent));
+}
+
+float3 terrainShadingNormal(uint material, float3 geometricNormal, float3 worldPosition)
+{
+    if (!isTerrainMaterial(material))
+    {
+        return geometricNormal;
+    }
+
+    const float slope = 1.0 - abs(geometricNormal.y);
+    float normalStrength = 0.035;
+    if (material == kMaterialStone) normalStrength = lerp(0.08, 0.22, slope);
+    if (material == kMaterialDirt) normalStrength = lerp(0.045, 0.13, slope);
+    if (material == kMaterialGrass) normalStrength = lerp(0.030, 0.09, slope);
+
+    float3 tangent;
+    float3 bitangent;
+    terrainNormalBasis(geometricNormal, tangent, bitangent);
+
+    const float sampleDistance = 0.42;
+    const float detailScale = (material == kMaterialStone) ? 0.72 : 0.46;
+    const float3 signalPosition = worldPosition * detailScale;
+    const float center = terrainDetailSignal(signalPosition);
+    const float tangentDelta =
+        terrainDetailSignal((worldPosition + (tangent * sampleDistance)) * detailScale) - center;
+    const float bitangentDelta =
+        terrainDetailSignal((worldPosition + (bitangent * sampleDistance)) * detailScale) - center;
+
+    const float3 perturbed =
+        normalize(geometricNormal - (tangent * tangentDelta * normalStrength) - (bitangent * bitangentDelta * normalStrength));
+    return (dot(perturbed, geometricNormal) > 0.25) ? perturbed : geometricNormal;
+}
+
+float3 applySlopeMaterialAlbedo(uint material, float3 geometricNormal, float3 worldPosition, float3 albedo)
+{
+    if (!isTerrainMaterial(material))
+    {
+        return albedo;
+    }
+
+    const float slope = 1.0 - abs(geometricNormal.y);
+    const float detail = terrainDetailSignal(worldPosition * 0.21);
+    const float lichen = smoothstep(0.35, 0.95, detail * 0.5 + 0.5);
+    if (material == kMaterialGrass)
+    {
+        const float sideBlend = smoothstep(0.25, 0.95, slope);
+        const float3 dryGrass = albedo * float3(0.78, 0.72, 0.56);
+        const float3 rootDirt = float3(0.34, 0.27, 0.18);
+        return lerp(lerp(albedo, dryGrass, 0.18), rootDirt, sideBlend * 0.42);
+    }
+    if (material == kMaterialDirt)
+    {
+        const float3 packedSoil = albedo * float3(0.82, 0.76, 0.68);
+        const float3 exposedStone = float3(0.42, 0.41, 0.38);
+        return lerp(lerp(albedo, packedSoil, 0.20), exposedStone, smoothstep(0.40, 1.0, slope) * 0.35);
+    }
+    if (material == kMaterialStone)
+    {
+        const float3 coolStone = albedo * float3(0.76, 0.80, 0.84);
+        const float3 paleLichen = float3(0.55, 0.60, 0.46);
+        return lerp(coolStone, paleLichen, lichen * (1.0 - slope) * 0.16);
+    }
+    return albedo;
+}
+
 bool materialUsesAtlas(uint material)
 {
     return
@@ -648,12 +731,14 @@ float4 main(FragmentInput input) : SV_Target0
     // Keep warm/cool separation in final lighting (not GI solve) for cleaner material contrast.
     const float3 kSunWarmTint = float3(1.05, 0.95, 0.88);
     const float3 kSkyCoolTint = float3(0.78, 0.86, 1.08);
-    const float3 normal = faceNormal(input.inFace);
+    const float3 geometricNormal = faceNormal(input.inFace);
+    const float3 normal = terrainShadingNormal(input.inMaterial, geometricNormal, input.inWorldPosition);
     float3 baseColor = sampleMaterialAlbedo(input.inMaterial, input.inFace, input.inWorldPosition);
     if (input.inMaterial == kMaterialPalette)
     {
         baseColor = baseColorFromPalette(input.inBaseColorIndex);
     }
+    baseColor = applySlopeMaterialAlbedo(input.inMaterial, geometricNormal, input.inWorldPosition, baseColor);
 
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
@@ -661,11 +746,12 @@ float4 main(FragmentInput input) : SV_Target0
     const float shadowStrength = clamp(camera.sunColorShadow.w, 0.0, 1.0);
 
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
+    const float shadowNdotL = max(dot(geometricNormal, -sunDirection), 0.0);
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
     float shadowVisibility = 1.0;
-    if (ndotl > 0.0001)
+    if (shadowNdotL > 0.0001)
     {
-        shadowVisibility = selectShadowVisibility(input.inWorldPosition, normal, viewDepth, ndotl);
+        shadowVisibility = selectShadowVisibility(input.inWorldPosition, geometricNormal, viewDepth, shadowNdotL);
     }
 
     float skyOcclusion = 1.0;
@@ -684,8 +770,8 @@ float4 main(FragmentInput input) : SV_Target0
 
     const float vertexAoEnable = clamp(camera.shadowVoxelGridOrigin.w, 0.0, 1.0);
     const float vertexAo = lerp(1.0, clamp(input.inVertexAo, 0.0, 1.0), vertexAoEnable);
-    const float3 voxelGi = sampleVoxelGi(input.inWorldPosition, normal) * vertexAo;
-    const float3 voxelGiDebug = sampleVoxelGiDebug(input.inWorldPosition, normal) * vertexAo;
+    const float3 voxelGi = sampleVoxelGi(input.inWorldPosition, geometricNormal) * vertexAo;
+    const float3 voxelGiDebug = sampleVoxelGiDebug(input.inWorldPosition, geometricNormal) * vertexAo;
     const int voxelGiDebugMode = int(camera.shadowVoxelGridOrigin.z + 0.5);
     if (voxelGiDebugMode == 1)
     {
@@ -709,7 +795,7 @@ float4 main(FragmentInput input) : SV_Target0
     }
     if (voxelGiDebugMode == 4)
     {
-        const float3 occupancyAlbedo = sampleVoxelGiOccupancyAlbedo(input.inWorldPosition, normal);
+        const float3 occupancyAlbedo = sampleVoxelGiOccupancyAlbedo(input.inWorldPosition, geometricNormal);
         return float4(occupancyAlbedo, 1.0);
     }
 
@@ -717,7 +803,7 @@ float4 main(FragmentInput input) : SV_Target0
     const float ambientRebalanceStrength = max(camera.shadowVoxelGridOrigin.x, 0.0);
     const float ambientFloor = clamp(camera.shadowVoxelGridOrigin.y, 0.0, 1.0);
     const float ambientScale = clamp(1.0 / (1.0 + (voxelGiLumaValue * ambientRebalanceStrength)), ambientFloor, 1.0);
-    const float skyExposureFromVoxel = sampleVoxelSkyExposure(input.inWorldPosition + (normal * 0.08));
+    const float skyExposureFromVoxel = sampleVoxelSkyExposure(input.inWorldPosition + (geometricNormal * 0.08));
     // Keep SH ambient independent from direct-sun shadowing so sky-facing open surfaces
     // keep useful fill, and bias toward full SH when they are actually in shadow.
     const float ambientSkyVisibility = lerp(0.55, 1.0, skyExposureFromVoxel);
