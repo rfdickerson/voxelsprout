@@ -62,6 +62,10 @@ if(SLANGC_EXECUTABLE)
 
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.tesc.slang" hull)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.tese.slang" domain)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.frag.slang" fragment)
     add_slang_shader_variant(
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang"
         fragment
@@ -288,6 +292,20 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_balmora_cooker PRIVATE /W4 /permissive-)
     else()
         target_compile_options(odai_balmora_cooker PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_executable(odai_balmora_interior_cache
+        src/import/gpu_scene.cc
+        src/import/imported_scene.cc
+        src/import/morrowind_nif.cc
+        src/tools/morrowind_balmora_interior_cache_main.cc
+    )
+    target_include_directories(odai_balmora_interior_cache PRIVATE src)
+    set_target_properties(odai_balmora_interior_cache PROPERTIES OUTPUT_NAME odai_balmora_interior_cache)
+    if(MSVC)
+        target_compile_options(odai_balmora_interior_cache PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_balmora_interior_cache PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
     add_executable(odai_imported_scene_preview

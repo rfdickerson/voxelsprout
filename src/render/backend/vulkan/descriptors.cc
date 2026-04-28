@@ -60,7 +60,8 @@ constexpr uint32_t kBindlessTextureIndexSsaoRaw = 5u;
 constexpr uint32_t kBindlessTextureIndexPlantDiffuse = 6u;
 constexpr uint32_t kBindlessTextureIndexSkyDaylight = 7u;
 constexpr uint32_t kBindlessTextureIndexWaterNormal = 8u;
-constexpr uint32_t kBindlessTextureStaticCount = 9u;
+constexpr uint32_t kBindlessTextureIndexTerrainDetail = 9u;
+constexpr uint32_t kBindlessTextureStaticCount = 10u;
 constexpr uint32_t kAutoExposureHistogramBins = 64u;
 
 } // namespace
@@ -74,7 +75,11 @@ bool RendererBackend::createDescriptorResources() {
         mvpBinding.binding = 0;
         mvpBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         mvpBinding.descriptorCount = 1;
-        mvpBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        mvpBinding.stageFlags =
+            VK_SHADER_STAGE_VERTEX_BIT |
+            VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+            VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+            VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings.push_back(mvpBinding);
 
         VkDescriptorSetLayoutBinding diffuseTextureBinding{};
@@ -334,6 +339,13 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     waterNormalTextureImageInfo.imageView =
         (m_waterNormalTextureImageView != VK_NULL_HANDLE) ? m_waterNormalTextureImageView : m_diffuseTextureImageView;
     waterNormalTextureImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkDescriptorImageInfo terrainDetailTextureImageInfo{};
+    terrainDetailTextureImageInfo.sampler =
+        (m_terrainDetailTextureSampler != VK_NULL_HANDLE) ? m_terrainDetailTextureSampler : m_diffuseTextureSampler;
+    terrainDetailTextureImageInfo.imageView =
+        (m_terrainDetailTextureImageView != VK_NULL_HANDLE) ? m_terrainDetailTextureImageView : m_diffuseTextureImageView;
+    terrainDetailTextureImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo shadowMapImageInfo{};
     shadowMapImageInfo.sampler = m_shadowDepthSampler;
@@ -936,6 +948,7 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         bindlessImageInfos[kBindlessTextureIndexPlantDiffuse] = plantDiffuseTextureImageInfo;
         bindlessImageInfos[kBindlessTextureIndexSkyDaylight] = morrowindSkyTextureImageInfo;
         bindlessImageInfos[kBindlessTextureIndexWaterNormal] = waterNormalTextureImageInfo;
+        bindlessImageInfos[kBindlessTextureIndexTerrainDetail] = terrainDetailTextureImageInfo;
         for (std::size_t textureIndex = 0; textureIndex < m_importedTextureResources.size(); ++textureIndex) {
             const std::size_t bindlessIndex = kBindlessTextureStaticCount + textureIndex;
             if (bindlessIndex >= bindlessImageInfos.size()) {

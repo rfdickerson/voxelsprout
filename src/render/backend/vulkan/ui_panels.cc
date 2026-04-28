@@ -220,7 +220,8 @@ void RendererBackend::buildShadowDebugUi() {
                 m_voxelGiDebugSettings.restirHistoryResetRequested = true;
             }
             if (ImGui::CollapsingHeader("Advanced GI Debug")) {
-                const char* giVisualizationModes = "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0";
+                const char* giVisualizationModes =
+                    "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0Imported Lights\0";
                 ImGui::Combo("GI Visualize", &m_voxelGiDebugSettings.visualizationMode, giVisualizationModes);
                 if (m_voxelGiDebugSettings.visualizationMode > 0) {
                     m_debugVisualizeSsao = false;

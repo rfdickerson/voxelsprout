@@ -10,6 +10,8 @@
 #include "world/world.h"
 
 #include <filesystem>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 struct GLFWwindow;
@@ -64,6 +66,16 @@ private:
         int hitFaceNormalZ = 0;
     };
 
+    struct ImportedSceneInspectHit {
+        bool hit = false;
+        float distance = 0.0f;
+        odai::math::Vector3 position{};
+        std::uint32_t drawIndex = 0;
+        std::uint32_t triangleIndex = 0;
+        std::uint32_t textureIndex = 0xffffffffu;
+        std::uint32_t flags = 0u;
+    };
+
     void pollInput();
     void updateCamera(float dt);
     void syncGameplayUiState();
@@ -96,6 +108,8 @@ private:
     void resolveImportedScenePlayerCollisions(float dt);
     [[nodiscard]] CameraRaycastResult raycastFromCamera() const;
     [[nodiscard]] InteractionRaycastResult raycastInteractionFromCamera(bool includePipes) const;
+    [[nodiscard]] ImportedSceneInspectHit raycastImportedSceneFromCamera() const;
+    void inspectImportedSceneFromCamera() const;
     [[nodiscard]] bool computePipePlacementFromInteractionRaycast(
         const InteractionRaycastResult& raycast,
         int& outX,
@@ -155,6 +169,10 @@ private:
     void initializeBalmoraGuards();
     void updateBalmoraGuards(float dt);
     void rebuildBalmoraGuardRenderFrame(float simulationAlpha);
+    void initializeBalmoraDoorActivation();
+    [[nodiscard]] bool tryActivateBalmoraDoor();
+    [[nodiscard]] bool enterMorrowindInterior(const odai::importer::MorrowindDoorReference& door);
+    [[nodiscard]] bool leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& door);
 
     struct CameraState {
         float x = 0.0f;
@@ -191,6 +209,13 @@ private:
         std::size_t pathIndex = 0;
     };
 
+    struct MorrowindInteriorCacheEntry {
+        odai::importer::ImportedScene scene;
+        odai::world::ImportedSceneCollision collision;
+        std::vector<odai::importer::MorrowindDoorReference> doors;
+        bool sceneLoaded = false;
+    };
+
     GLFWwindow* m_window = nullptr;
     odai::core::InputState m_input{};
     CameraState m_camera{};
@@ -219,6 +244,8 @@ private:
     bool m_wasToggleImportedTexturesDown = false;
     bool m_wasToggleImportedFlatShadingDown = false;
     bool m_wasToggleImportedWaterDebugDown = false;
+    bool m_wasInspectImportedSceneDown = false;
+    bool m_wasActivateDoorDown = false;
     bool m_wasPrevBlockDown = false;
     bool m_wasNextBlockDown = false;
     bool m_gamepadConnected = false;
@@ -250,6 +277,13 @@ private:
     bool m_importedFlatShading = false;
     bool m_importedWaterDebug = false;
     std::filesystem::path m_importedScenePath;
+    std::vector<odai::importer::MorrowindDoorReference> m_balmoraDoors;
+    std::unordered_map<std::string, MorrowindInteriorCacheEntry> m_balmoraInteriorCache;
+    std::string m_currentMorrowindInteriorCell;
+    bool m_balmoraExteriorCached = false;
+    odai::importer::ImportedScene m_balmoraExteriorScene;
+    odai::importer::GpuSceneAsset m_balmoraExteriorGpuSceneAsset;
+    odai::world::ImportedSceneCollision m_balmoraExteriorCollision;
     odai::importer::ImportedScene m_importedScene;
     odai::importer::GpuSceneAsset m_gpuSceneAsset;
     odai::importer::GpuSceneRuntime m_gpuSceneRuntime;

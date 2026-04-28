@@ -85,6 +85,44 @@ float sampleCandidateVisibility(float3 faceWorldPosition, float3 normal, int3 ce
     return sampleRtSurfaceRay(origin, direction, tMin, tMax);
 }
 
+float3 evaluateImportedLocalLightIrradiance(float3 faceWorldPosition, float3 normal)
+{
+    const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
+    const float globalIntensity = camera.importedLightConfig.z > 0.5 ? max(camera.importedLightConfig.y, 0.0) : 0.0;
+    float3 lighting = float3(0.0, 0.0, 0.0);
+    for (int lightIndex = 0; lightIndex < 64; ++lightIndex)
+    {
+        if (lightIndex >= lightCount)
+        {
+            break;
+        }
+
+        const float4 positionRadius = camera.importedLightPositionRadius[lightIndex];
+        const float4 colorIntensity = camera.importedLightColorIntensity[lightIndex];
+        const float radius = max(positionRadius.w, 1.0);
+        const float3 toLight = positionRadius.xyz - faceWorldPosition;
+        const float distanceSquared = dot(toLight, toLight);
+        if (distanceSquared >= radius * radius)
+        {
+            continue;
+        }
+
+        const float distanceToLight = sqrt(max(distanceSquared, 1e-4));
+        const float3 lightDirection = toLight / distanceToLight;
+        const float ndotl = saturate(dot(normal, lightDirection));
+        if (ndotl <= 0.0001)
+        {
+            continue;
+        }
+
+        const float normalizedDistance = saturate(distanceToLight / radius);
+        const float falloff = saturate(1.0 - (normalizedDistance * normalizedDistance));
+        const float attenuation = falloff * falloff;
+        lighting += colorIntensity.rgb * (colorIntensity.w * globalIntensity * ndotl * attenuation);
+    }
+    return lighting;
+}
+
 [numthreads(4, 4, 4)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -106,6 +144,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
     const float injectSunScale = clamp(camera.shadowConfig2.w, 0.0, 4.0);
+    const float injectShScale = clamp(camera.shadowConfig3.x, 0.0, 4.0);
     const float skyColumnExposure = clamp(voxelGiSkyExposure[dispatchThreadId].x, 0.0, 1.0);
     const int sampleCount = clamp(int(camera.voxelGiRestirConfig0.y + 0.5), 1, 8);
 
@@ -153,21 +192,25 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
         const float3 normal = normals[faceIndex];
         const float ndotl = max(dot(normal, -sunDirection), 0.0);
-        if (ndotl <= 0.0001)
-        {
-            restirCurrent[reservoirIndex] = reservoir;
-            continue;
-        }
-
         const float3 faceCenter = worldPosition + (normal * (cellSize * 0.51));
+        const float skyFactor = lerp(0.25, 1.0, skyColumnExposure);
+        const float upFactor = saturate((normal.y * 0.5) + 0.5);
+        const float ambientBoost = lerp(0.6, 1.2, upFactor);
+        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyFactor * ambientBoost);
+        const float3 localLightIrradiance = evaluateImportedLocalLightIrradiance(faceCenter, normal);
         float bestWeight = 0.0;
         float3 bestRadiance = float3(0.0, 0.0, 0.0);
         [loop]
         for (int sampleIndex = 0; sampleIndex < 8; ++sampleIndex)
         {
             if (sampleIndex >= sampleCount) break;
-            const float visibility = sampleCandidateVisibility(faceCenter, normal, cell, faceIndex, sampleIndex, sampleCount);
-            const float3 radiance = camera.sunColorShadow.xyz * (sunIntensity * ndotl * visibility * injectSunScale);
+            const float visibility =
+                (ndotl > 0.0001)
+                    ? sampleCandidateVisibility(faceCenter, normal, cell, faceIndex, sampleIndex, sampleCount)
+                    : 0.0;
+            const float3 directRadiance =
+                camera.sunColorShadow.xyz * (sunIntensity * ndotl * visibility * injectSunScale);
+            const float3 radiance = max(directRadiance + skyIrradiance + localLightIrradiance, float3(0.0, 0.0, 0.0));
             const float weight = max(dot(radiance, float3(0.2126, 0.7152, 0.0722)), 0.0);
             if (weight > bestWeight)
             {
@@ -179,7 +222,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         if (bestWeight > 0.0)
         {
             reservoir.radianceWeight = float4(bestRadiance, bestWeight);
-            reservoir.state = float4(float(sampleCount), float(sampleCount), 0.0, skyColumnExposure);
+            reservoir.state = float4(float(sampleCount), float(sampleCount), 0.0, 1.0);
         }
         restirCurrent[reservoirIndex] = reservoir;
     }

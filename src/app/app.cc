@@ -111,9 +111,14 @@ constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 constexpr const char* kImportedSceneEnvVar = "ODAI_IMPORTED_SCENE";
 constexpr const char* kMorrowindDataFilesEnvVar = "ODAI_MORROWIND_DATA_FILES";
 constexpr const char* kBalmoraGuardsEnvVar = "ODAI_ENABLE_BALMORA_GUARDS";
+constexpr const char* kBalmoraInteriorCacheEnvVar = "ODAI_BALMORA_INTERIOR_CACHE";
+constexpr float kBalmoraDoorActivationRadius = 180.0f;
+constexpr float kMorrowindInteriorSpawnEyeHeight = 112.0f;
+constexpr float kImportedInspectRayMaxDistance = 4096.0f;
 constexpr float kBalmoraGuardRouteReachRadius = 54.0f;
 constexpr float kBalmoraGuardNavmeshProbeHeight = 96.0f;
 constexpr float kBalmoraGuardWalkCycleScale = 0.046f;
+constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
 
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
@@ -474,21 +479,40 @@ std::string lowerPathCopy(std::string value) {
     return value;
 }
 
+std::uint64_t fnv1a64(std::string_view value) {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (const char ch : value) {
+        hash ^= static_cast<std::uint8_t>(ch);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+std::filesystem::path balmoraInteriorCacheRoot() {
+    if (const std::optional<std::string> envPath = readEnvironmentString(kBalmoraInteriorCacheEnvVar);
+        envPath.has_value() && !envPath->empty()) {
+        return std::filesystem::path(*envPath);
+    }
+#ifdef ODAI_PROJECT_SOURCE_DIR
+    return std::filesystem::path(ODAI_PROJECT_SOURCE_DIR) / "balmora_interior_cache";
+#else
+    return std::filesystem::path("balmora_interior_cache");
+#endif
+}
+
+std::filesystem::path balmoraInteriorCachePath(std::string_view normalizedCellName) {
+    return balmoraInteriorCacheRoot() /
+        ("interior_" + std::to_string(fnv1a64(normalizedCellName)) + ".bin");
+}
+
+std::filesystem::path balmoraDoorCachePath() {
+    return balmoraInteriorCacheRoot() / "balmora_doors.bin";
+}
+
 std::optional<std::filesystem::path> findMorrowindDataFilesPath() {
     if (const std::optional<std::string> envPath = readEnvironmentString(kMorrowindDataFilesEnvVar);
         envPath.has_value() && !envPath->empty()) {
         const std::filesystem::path path(*envPath);
-        if (std::filesystem::exists(path / "Morrowind.esm")) {
-            return path;
-        }
-    }
-
-    constexpr std::array<const char*, 2> kFallbackPaths = {
-        "C:/GOG Games/Morrowind/Data Files",
-        "/mnt/c/GOG Games/Morrowind/Data Files"
-    };
-    for (const char* candidate : kFallbackPaths) {
-        const std::filesystem::path path(candidate);
         if (std::filesystem::exists(path / "Morrowind.esm")) {
             return path;
         }
@@ -941,6 +965,7 @@ bool App::init() {
             VOX_LOGE("app") << "failed to build GPU scene asset from imported scene";
             return false;
         }
+        initializeBalmoraDoorActivation();
         if (balmoraGuardsEnabledByEnvironment()) {
             initializeBalmoraGuards();
             if (!odai::importer::buildGpuSceneAssetFromImportedScene(m_importedScene, m_gpuSceneAsset)) {
@@ -954,6 +979,13 @@ bool App::init() {
         m_gpuSceneRuntime = odai::importer::createGpuSceneRuntime(m_gpuSceneAsset);
         odai::importer::rebuildGpuSceneWorldTransforms(m_gpuSceneRuntime);
         m_importedSceneCollision.build(m_gpuSceneAsset);
+        if (m_importedScene.sourceTag == "morrowind_balmora") {
+            m_balmoraExteriorCached = true;
+            m_balmoraExteriorScene = m_importedScene;
+            m_balmoraExteriorGpuSceneAsset = m_gpuSceneAsset;
+            m_balmoraExteriorCollision = m_importedSceneCollision;
+            m_currentMorrowindInteriorCell.clear();
+        }
         const odai::world::ImportedSceneCollision::BuildStats collisionStats =
             m_importedSceneCollision.stats();
         const ImportedSceneCameraPose importedCameraPose = configureImportedSceneCamera(m_importedScene);
@@ -993,6 +1025,7 @@ bool App::init() {
             VOX_LOGE("app") << "failed to upload GPU scene demo geometry";
             return false;
         }
+        m_renderer.setImportedSceneInteriorMode(false);
         m_renderer.setSunAngles(kImportedSceneSunYawDegrees, kImportedSceneSunPitchDegrees);
         m_renderer.setImportedSceneDebugState(
             m_importedShowTerrain,
@@ -1074,7 +1107,7 @@ bool App::init() {
 
 void App::run() {
     VOX_LOGI("app") << "run begin";
-    VOX_LOGI("app") << "morrowind viewer ready (WASD move, Space up, Shift down, F/C renderer panel, F5 terrain, F6 statics, K textures, F7 flat shading, F8 water debug)";
+    VOX_LOGI("app") << "morrowind viewer ready (WASD move, R activate door, Space jump/up, Shift down, F/C renderer panel, F5 terrain, F6 statics, K textures, F7 flat shading, F8 water debug)";
     double previousTime = glfwGetTime();
     double simulationAccumulatorSeconds = 0.0;
     m_cameraPrevious = m_camera;
@@ -1143,6 +1176,267 @@ void App::resetVoxelBreakProgress() {
     m_voxelBreakClicks = 0;
 }
 
+void App::initializeBalmoraDoorActivation() {
+    m_balmoraDoors.clear();
+    m_balmoraInteriorCache.clear();
+    if (m_importedScene.sourceTag != "morrowind_balmora") {
+        return;
+    }
+
+    odai::importer::MorrowindDoorCache doorCache{};
+    const auto doorLoadStart = std::chrono::steady_clock::now();
+    const bool loadedDoorCache =
+        odai::importer::loadMorrowindDoorCache(balmoraDoorCachePath(), doorCache);
+    if (loadedDoorCache) {
+        m_balmoraDoors = doorCache.exteriorDoors;
+    } else {
+        VOX_LOGW("app") << "Balmora doors disabled: missing cooked door manifest "
+                        << balmoraDoorCachePath().string()
+                        << " (" << odai::importer::getImportedSceneLastError()
+                        << "); run odai_balmora_interior_cache";
+        m_balmoraDoors.clear();
+        return;
+    }
+    const auto doorLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - doorLoadStart).count();
+
+    VOX_LOGI("app") << "Balmora door activation ready (doors=" << m_balmoraDoors.size()
+                    << ", source=cache"
+                    << ", elapsedMs=" << doorLoadMs
+                    << ", manifest=" << balmoraDoorCachePath().string() << ")";
+
+    std::vector<std::string> destinationCells;
+    destinationCells.reserve(m_balmoraDoors.size());
+    for (const odai::importer::MorrowindDoorReference& door : m_balmoraDoors) {
+        const std::string normalizedCell = lowerPathCopy(door.destination.destinationCell);
+        if (normalizedCell.empty() ||
+            std::find(destinationCells.begin(), destinationCells.end(), normalizedCell) != destinationCells.end()) {
+            continue;
+        }
+        destinationCells.push_back(normalizedCell);
+    }
+
+    const auto cacheLoadStart = std::chrono::steady_clock::now();
+    std::uint32_t cachedInteriorFileCount = 0;
+    std::uint32_t preparedInteriorCount = 0;
+    std::uint32_t missingDoorCount = 0;
+    for (const std::string& destinationCell : destinationCells) {
+        const std::filesystem::path cachePath = balmoraInteriorCachePath(destinationCell);
+        if (!std::filesystem::exists(cachePath)) {
+            continue;
+        }
+        ++cachedInteriorFileCount;
+
+        MorrowindInteriorCacheEntry entry{};
+        if (loadedDoorCache) {
+            if (const auto doorIt = doorCache.interiorDoorsByCell.find(destinationCell);
+                doorIt != doorCache.interiorDoorsByCell.end()) {
+                entry.doors = doorIt->second;
+            } else {
+                ++missingDoorCount;
+            }
+        }
+        m_balmoraInteriorCache.emplace(destinationCell, std::move(entry));
+        ++preparedInteriorCount;
+    }
+
+    const auto cacheLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - cacheLoadStart).count();
+    VOX_LOGI("app") << "Balmora interior disk cache ready (prepared=" << preparedInteriorCount
+                    << ", cachedFiles=" << cachedInteriorFileCount
+                    << "/" << destinationCells.size()
+                    << ", lazyLoad=true"
+                    << ", missingDoorManifests=" << missingDoorCount
+                    << ", elapsedMs=" << cacheLoadMs
+                    << ", directory=" << balmoraInteriorCacheRoot().string() << ")";
+}
+
+bool App::tryActivateBalmoraDoor() {
+    if (!m_importedSceneDemoEnabled) {
+        return false;
+    }
+
+    if (m_importedScene.sourceTag == "morrowind_interior") {
+        auto cacheIt = m_balmoraInteriorCache.find(m_currentMorrowindInteriorCell);
+        if (cacheIt == m_balmoraInteriorCache.end() || cacheIt->second.doors.empty()) {
+            return false;
+        }
+
+        const odai::importer::MorrowindDoorReference* bestDoor = nullptr;
+        float bestDistanceSq = kBalmoraDoorActivationRadius * kBalmoraDoorActivationRadius;
+        for (const odai::importer::MorrowindDoorReference& door : cacheIt->second.doors) {
+            if (lowerPathCopy(door.destination.destinationCell) != "balmora") {
+                continue;
+            }
+            const float dx = door.position[0] - m_camera.x;
+            const float dy = door.position[1] - (m_camera.y - kImportedPlayerEyeHeight);
+            const float dz = door.position[2] - m_camera.z;
+            const float distanceSq = (dx * dx) + (dy * dy * 0.25f) + (dz * dz);
+            if (distanceSq < bestDistanceSq) {
+                bestDistanceSq = distanceSq;
+                bestDoor = &door;
+            }
+        }
+        if (bestDoor == nullptr) {
+            return false;
+        }
+        return leaveMorrowindInterior(*bestDoor);
+    }
+
+    if (m_importedScene.sourceTag != "morrowind_balmora" || m_balmoraDoors.empty()) {
+        return false;
+    }
+
+    const odai::importer::MorrowindDoorReference* bestDoor = nullptr;
+    float bestDistanceSq = kBalmoraDoorActivationRadius * kBalmoraDoorActivationRadius;
+    for (const odai::importer::MorrowindDoorReference& door : m_balmoraDoors) {
+        const float dx = door.position[0] - m_camera.x;
+        const float dy = door.position[1] - (m_camera.y - kImportedPlayerEyeHeight);
+        const float dz = door.position[2] - m_camera.z;
+        const float distanceSq = (dx * dx) + (dy * dy * 0.25f) + (dz * dz);
+        if (distanceSq < bestDistanceSq) {
+            bestDistanceSq = distanceSq;
+            bestDoor = &door;
+        }
+    }
+
+    if (bestDoor == nullptr) {
+        return false;
+    }
+    return enterMorrowindInterior(*bestDoor);
+}
+
+bool App::enterMorrowindInterior(const odai::importer::MorrowindDoorReference& door) {
+    const std::string destinationCell = lowerPathCopy(door.destination.destinationCell);
+    auto cacheIt = m_balmoraInteriorCache.find(destinationCell);
+    if (cacheIt == m_balmoraInteriorCache.end()) {
+        VOX_LOGW("app") << "failed to enter " << door.destination.destinationCell
+                        << ": cached interior is missing; run odai_balmora_interior_cache for "
+                        << balmoraInteriorCacheRoot().string();
+        return false;
+    }
+    MorrowindInteriorCacheEntry& cachedInterior = cacheIt->second;
+    if (!cachedInterior.sceneLoaded) {
+        const std::filesystem::path cachePath = balmoraInteriorCachePath(destinationCell);
+        const auto interiorLoadStart = std::chrono::steady_clock::now();
+        if (!odai::importer::loadImportedSceneRuntime(cachePath, cachedInterior.scene)) {
+            VOX_LOGW("app") << "failed to load cached interior " << door.destination.destinationCell
+                            << " from " << cachePath.string()
+                            << ": " << odai::importer::getImportedSceneLastError();
+            return false;
+        }
+        if (cachedInterior.scene.sourceTag != "morrowind_interior" ||
+            cachedInterior.scene.sourceMeshCount != 0u ||
+            cachedInterior.scene.sourceInstanceCount != 0u ||
+            cachedInterior.scene.sourceLandscapeCellCount != 0u ||
+            cachedInterior.scene.sourceWaterPatchCount != 0u ||
+            cachedInterior.scene.packedVertices.empty() ||
+            cachedInterior.scene.packedIndices.empty() ||
+            cachedInterior.scene.packedDraws.empty()) {
+            VOX_LOGW("app") << "stale cached interior " << cachePath.string()
+                            << "; regenerate it with odai_balmora_interior_cache --force";
+            cachedInterior.scene = {};
+            return false;
+        }
+        if (!cachedInterior.collision.buildFromPackedScene(cachedInterior.scene)) {
+            VOX_LOGW("app") << "failed to build collision for cached interior " << cachePath.string();
+            cachedInterior.scene = {};
+            return false;
+        }
+        if (cachedInterior.doors.empty()) {
+            VOX_LOGW("app") << "cached interior " << door.destination.destinationCell
+                            << " has no exit doors in " << balmoraDoorCachePath().string()
+                            << "; regenerate the door manifest with odai_balmora_interior_cache";
+        }
+        cachedInterior.sceneLoaded = true;
+        const auto interiorLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - interiorLoadStart).count();
+        VOX_LOGI("app") << "loaded cached interior '" << door.destination.destinationCell
+                        << "' on demand in " << interiorLoadMs << " ms";
+    }
+
+    if (!m_renderer.uploadImportedScene(cachedInterior.scene)) {
+        VOX_LOGW("app") << "failed to upload interior scene for " << door.destination.destinationCell;
+        return false;
+    }
+    m_renderer.setImportedSceneInteriorMode(true);
+
+    m_importedScene = cachedInterior.scene;
+    m_gpuSceneAsset = {};
+    m_gpuSceneRuntime = {};
+    m_importedSceneCollision = cachedInterior.collision;
+    m_currentMorrowindInteriorCell = destinationCell;
+    m_balmoraGuards.clear();
+    m_balmoraGuardPrototype = {};
+    m_balmoraNavmesh.clear();
+    m_balmoraGuardFrameVertices.clear();
+    m_balmoraGuardFrameIndices.clear();
+    m_balmoraGuardFrameDraws.clear();
+    if (balmoraGuardsEnabledByEnvironment()) {
+        initializeBalmoraGuards();
+    }
+
+    m_camera.x = door.destination.position[0];
+    m_camera.y = door.destination.position[1] + kMorrowindInteriorSpawnEyeHeight;
+    m_camera.z = door.destination.position[2];
+    m_camera.yawDegrees = odai::math::degrees(door.destination.rotationRadians[2]);
+    m_camera.pitchDegrees = 0.0f;
+    m_camera.velocityX = 0.0f;
+    m_camera.velocityY = 0.0f;
+    m_camera.velocityZ = 0.0f;
+    m_camera.onGround = false;
+    m_cameraPrevious = m_camera;
+
+    VOX_LOGI("app") << "entered interior '" << door.destination.destinationCell
+                    << "' from door " << door.refId
+                    << " (renderVertices=" << m_importedScene.packedVertices.size()
+                    << ", renderIndices=" << m_importedScene.packedIndices.size()
+                    << ", collisionTriangles=" << m_importedSceneCollision.stats().triangleCount << ")";
+    return true;
+}
+
+bool App::leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& door) {
+    if (!m_balmoraExteriorCached) {
+        VOX_LOGW("app") << "failed to leave interior: Balmora exterior scene is not cached";
+        return false;
+    }
+
+    if (!m_renderer.uploadGpuScene(m_balmoraExteriorGpuSceneAsset)) {
+        VOX_LOGW("app") << "failed to upload Balmora exterior scene while leaving interior";
+        return false;
+    }
+    m_renderer.setImportedSceneInteriorMode(false);
+
+    m_importedScene = m_balmoraExteriorScene;
+    m_gpuSceneAsset = m_balmoraExteriorGpuSceneAsset;
+    m_gpuSceneRuntime = odai::importer::createGpuSceneRuntime(m_gpuSceneAsset);
+    odai::importer::rebuildGpuSceneWorldTransforms(m_gpuSceneRuntime);
+    m_importedSceneCollision = m_balmoraExteriorCollision;
+    m_currentMorrowindInteriorCell.clear();
+    m_balmoraGuards.clear();
+    m_balmoraGuardPrototype = {};
+    m_balmoraNavmesh.clear();
+    m_balmoraGuardFrameVertices.clear();
+    m_balmoraGuardFrameIndices.clear();
+    m_balmoraGuardFrameDraws.clear();
+
+    m_camera.x = door.destination.position[0];
+    m_camera.y = door.destination.position[1] + kImportedPlayerEyeHeight;
+    m_camera.z = door.destination.position[2];
+    m_camera.yawDegrees = odai::math::degrees(door.destination.rotationRadians[2]);
+    m_camera.pitchDegrees = 0.0f;
+    m_camera.velocityX = 0.0f;
+    m_camera.velocityY = 0.0f;
+    m_camera.velocityZ = 0.0f;
+    m_camera.onGround = false;
+    m_cameraPrevious = m_camera;
+
+    VOX_LOGI("app") << "left interior '" << door.sourceCell
+                    << "' through door " << door.refId
+                    << " to " << door.destination.destinationCell;
+    return true;
+}
+
 void App::initializeBalmoraGuards() {
     m_balmoraGuards.clear();
     m_balmoraGuardPrototype = {};
@@ -1202,17 +1496,22 @@ void App::initializeBalmoraGuards() {
             return;
         }
 
-        const std::uint32_t textureIndex = addActorTextureSlot(nifResult.diffuseTexturePath);
         if (nifResult.mesh.parts.empty()) {
             odai::importer::ImportedSceneMeshPart part{};
             part.firstIndex = 0u;
             part.indexCount = static_cast<std::uint32_t>(nifResult.mesh.indices.size());
-            part.textureIndex = textureIndex;
+            part.textureIndex = addActorTextureSlot(nifResult.diffuseTexturePath);
             part.alphaTest = nifResult.alphaTest;
             nifResult.mesh.parts.push_back(part);
         } else {
-            for (odai::importer::ImportedSceneMeshPart& part : nifResult.mesh.parts) {
-                part.textureIndex = textureIndex;
+            for (std::size_t partIndex = 0; partIndex < nifResult.mesh.parts.size(); ++partIndex) {
+                odai::importer::ImportedSceneMeshPart& part = nifResult.mesh.parts[partIndex];
+                std::string texturePath = nifResult.diffuseTexturePath;
+                if (partIndex < nifResult.partDiffuseTexturePaths.size() &&
+                    !nifResult.partDiffuseTexturePaths[partIndex].empty()) {
+                    texturePath = nifResult.partDiffuseTexturePaths[partIndex];
+                }
+                part.textureIndex = addActorTextureSlot(texturePath);
             }
         }
 
@@ -2116,6 +2415,12 @@ void App::pollInput() {
     }
     m_wasToggleImportedWaterDebugDown = toggleImportedWaterDebugDown;
 
+    const bool inspectImportedSceneDown = glfwGetKey(m_window, GLFW_KEY_I) == GLFW_PRESS;
+    if (m_importedSceneDemoEnabled && inspectImportedSceneDown && !m_wasInspectImportedSceneDown) {
+        inspectImportedSceneFromCamera();
+    }
+    m_wasInspectImportedSceneDown = inspectImportedSceneDown;
+
     m_renderer.setDebugUiVisible(m_debugUiVisible);
     const bool rendererUiVisible = m_renderer.isDebugUiVisible();
     if (rendererUiVisible != m_debugUiVisible) {
@@ -2220,6 +2525,16 @@ void App::updateCamera(float dt) {
         VOX_LOGI("app") << "hover " << (m_hoverEnabled ? "enabled" : "disabled") << " (H)";
     }
     m_wasToggleHoverDown = m_input.toggleHoverDown;
+
+    const bool activateDoorPressedThisStep =
+        m_importedSceneDemoEnabled &&
+        !isAnyUiVisible() &&
+        glfwGetKey(m_window, GLFW_KEY_R) == GLFW_PRESS &&
+        !m_wasActivateDoorDown;
+    m_wasActivateDoorDown = glfwGetKey(m_window, GLFW_KEY_R) == GLFW_PRESS;
+    if (activateDoorPressedThisStep && tryActivateBalmoraDoor()) {
+        return;
+    }
 
     const float mouseDeltaX = m_pendingMouseDeltaX;
     const float mouseDeltaY = m_pendingMouseDeltaY;
@@ -3167,6 +3482,164 @@ App::InteractionRaycastResult App::raycastInteractionFromCamera(bool includePipe
     }
 
     return result;
+}
+
+App::ImportedSceneInspectHit App::raycastImportedSceneFromCamera() const {
+    ImportedSceneInspectHit result{};
+    if (!m_importedSceneDemoEnabled ||
+        m_importedScene.packedVertices.empty() ||
+        m_importedScene.packedIndices.empty() ||
+        m_importedScene.packedDraws.empty()) {
+        return result;
+    }
+
+    const float yawRadians = odai::math::radians(m_camera.yawDegrees);
+    const float pitchRadians = odai::math::radians(m_camera.pitchDegrees);
+    const float cosPitch = std::cos(pitchRadians);
+    const odai::math::Vector3 rayDirection = odai::math::normalize(odai::math::Vector3{
+        std::cos(yawRadians) * cosPitch,
+        std::sin(pitchRadians),
+        std::sin(yawRadians) * cosPitch
+    });
+    if (odai::math::lengthSquared(rayDirection) <= 0.0f) {
+        return result;
+    }
+    const odai::math::Vector3 rayOrigin =
+        odai::math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
+
+    const auto packedPosition = [](const odai::importer::ImportedScenePackedVertex& vertex) {
+        return odai::math::Vector3{vertex.position[0], vertex.position[1], vertex.position[2]};
+    };
+
+    float bestDistance = kImportedInspectRayMaxDistance;
+    constexpr float kRayEpsilon = 1e-4f;
+    for (std::uint32_t drawIndex = 0; drawIndex < m_importedScene.packedDraws.size(); ++drawIndex) {
+        const odai::importer::ImportedScenePackedDraw& draw = m_importedScene.packedDraws[drawIndex];
+        const std::uint32_t lastIndex = std::min<std::uint32_t>(
+            draw.firstIndex + draw.indexCount,
+            static_cast<std::uint32_t>(m_importedScene.packedIndices.size()));
+        for (std::uint32_t index = draw.firstIndex; index + 2u < lastIndex; index += 3u) {
+            const std::uint32_t i0 = m_importedScene.packedIndices[index];
+            const std::uint32_t i1 = m_importedScene.packedIndices[index + 1u];
+            const std::uint32_t i2 = m_importedScene.packedIndices[index + 2u];
+            if (i0 >= m_importedScene.packedVertices.size() ||
+                i1 >= m_importedScene.packedVertices.size() ||
+                i2 >= m_importedScene.packedVertices.size()) {
+                continue;
+            }
+
+            const odai::math::Vector3 p0 = packedPosition(m_importedScene.packedVertices[i0]);
+            const odai::math::Vector3 p1 = packedPosition(m_importedScene.packedVertices[i1]);
+            const odai::math::Vector3 p2 = packedPosition(m_importedScene.packedVertices[i2]);
+            const odai::math::Vector3 edge1 = p1 - p0;
+            const odai::math::Vector3 edge2 = p2 - p0;
+            const odai::math::Vector3 pvec = odai::math::cross(rayDirection, edge2);
+            const float det = odai::math::dot(edge1, pvec);
+            if (std::fabs(det) <= kRayEpsilon) {
+                continue;
+            }
+
+            const float invDet = 1.0f / det;
+            const odai::math::Vector3 tvec = rayOrigin - p0;
+            const float u = odai::math::dot(tvec, pvec) * invDet;
+            if (u < 0.0f || u > 1.0f) {
+                continue;
+            }
+            const odai::math::Vector3 qvec = odai::math::cross(tvec, edge1);
+            const float v = odai::math::dot(rayDirection, qvec) * invDet;
+            if (v < 0.0f || (u + v) > 1.0f) {
+                continue;
+            }
+            const float distance = odai::math::dot(edge2, qvec) * invDet;
+            if (distance <= kRayEpsilon || distance >= bestDistance) {
+                continue;
+            }
+
+            const odai::importer::ImportedScenePackedVertex& hitVertex = m_importedScene.packedVertices[i0];
+            bestDistance = distance;
+            result.hit = true;
+            result.distance = distance;
+            result.position = rayOrigin + (rayDirection * distance);
+            result.drawIndex = drawIndex;
+            result.triangleIndex = (index - draw.firstIndex) / 3u;
+            result.textureIndex = hitVertex.textureIndex;
+            result.flags = hitVertex.flags;
+        }
+    }
+
+    return result;
+}
+
+void App::inspectImportedSceneFromCamera() const {
+    const ImportedSceneInspectHit hit = raycastImportedSceneFromCamera();
+    if (!hit.hit) {
+        VOX_LOGI("app") << "imported inspect: no hit (I)";
+        return;
+    }
+
+    std::uint32_t drawCursor = 0u;
+    const bool importedSceneIsInterior = m_importedScene.sourceTag == "morrowind_interior";
+    const std::uint32_t terrainDrawCount = importedSceneIsInterior
+        ? 0u
+        : std::min<std::uint32_t>(
+            m_importedScene.sourceLandscapeCellCount,
+            static_cast<std::uint32_t>(m_importedScene.packedDraws.size()));
+    const odai::importer::ImportedSceneInstance* hitInstance = nullptr;
+    if (hit.drawIndex < terrainDrawCount) {
+        drawCursor = terrainDrawCount;
+    } else {
+        drawCursor = terrainDrawCount;
+        for (const odai::importer::ImportedSceneInstance& instance : m_importedScene.instances) {
+            if (instance.meshIndex >= m_importedScene.meshes.size()) {
+                continue;
+            }
+            const odai::importer::ImportedSceneMesh& mesh = m_importedScene.meshes[instance.meshIndex];
+            if (mesh.vertices.empty() || mesh.indices.empty()) {
+                continue;
+            }
+
+            std::uint32_t emittedIndexCount = 0u;
+            if (mesh.parts.empty()) {
+                emittedIndexCount = static_cast<std::uint32_t>(mesh.indices.size());
+            } else {
+                for (const odai::importer::ImportedSceneMeshPart& part : mesh.parts) {
+                    if (part.indexCount == 0u || part.firstIndex >= mesh.indices.size()) {
+                        continue;
+                    }
+                    const std::uint32_t lastPartIndex = std::min<std::uint32_t>(
+                        part.firstIndex + part.indexCount,
+                        static_cast<std::uint32_t>(mesh.indices.size()));
+                    emittedIndexCount += lastPartIndex - part.firstIndex;
+                }
+            }
+            if (emittedIndexCount == 0u) {
+                continue;
+            }
+            if (drawCursor == hit.drawIndex) {
+                hitInstance = &instance;
+                break;
+            }
+            ++drawCursor;
+        }
+    }
+
+    const char* kind = (hit.drawIndex < terrainDrawCount) ? "terrain" : "static";
+    const std::string texturePath =
+        (hit.textureIndex < m_importedScene.textures.size())
+            ? m_importedScene.textures[hit.textureIndex].sourcePath
+            : std::string("<none>");
+    VOX_LOGI("app") << "imported inspect (I): kind=" << kind
+                    << ", draw=" << hit.drawIndex
+                    << ", tri=" << hit.triangleIndex
+                    << ", dist=" << hit.distance
+                    << ", pos=(" << hit.position.x << "," << hit.position.y << "," << hit.position.z << ")"
+                    << ", texture=" << texturePath
+                    << ", alphaTest=" << (((hit.flags & kImportedSceneMaterialFlagAlphaTest) != 0u) ? "yes" : "no");
+    if (hitInstance != nullptr) {
+        VOX_LOGI("app") << "imported inspect source: refId=" << hitInstance->sourceId
+                        << ", model=" << hitInstance->modelPath
+                        << ", meshIndex=" << hitInstance->meshIndex;
+    }
 }
 
 bool App::isWorldVoxelInBounds(int x, int y, int z) const {

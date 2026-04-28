@@ -65,6 +65,8 @@ RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
         cascadeCommands.reserve((m_chunkDrawRanges.size() / kShadowCascadeCount) + 1u);
     }
 
+    const bool suppressVoxelChunks = !m_importedMeshDraws.empty();
+
     const auto appendChunkLods = [&](
                                    std::size_t chunkArrayIndex,
                                    std::vector<ChunkInstanceData>& outInstanceData,
@@ -112,13 +114,15 @@ RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
         }
     };
 
-    if (!visibleChunkIndices.empty()) {
-        for (const std::size_t chunkArrayIndex : visibleChunkIndices) {
-            appendChunkLods(chunkArrayIndex, chunkInstanceData, chunkIndirectCommands, true);
-        }
-    } else {
-        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-            appendChunkLods(chunkArrayIndex, chunkInstanceData, chunkIndirectCommands, true);
+    if (!suppressVoxelChunks) {
+        if (!visibleChunkIndices.empty()) {
+            for (const std::size_t chunkArrayIndex : visibleChunkIndices) {
+                appendChunkLods(chunkArrayIndex, chunkInstanceData, chunkIndirectCommands, true);
+            }
+        } else {
+            for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
+                appendChunkLods(chunkArrayIndex, chunkInstanceData, chunkIndirectCommands, true);
+            }
         }
     }
 
@@ -159,27 +163,29 @@ RendererBackend::FrameChunkDrawData RendererBackend::prepareFrameChunkDrawData(
         }
     };
 
-    const std::vector<std::uint8_t> shadowCandidateMask = buildShadowCandidateMask(chunks, visibleChunkIndices);
-    constexpr float kShadowCasterClipMargin = 0.08f;
-    if (!m_shadowDebugSettings.enableOccluderCulling) {
-        const uint32_t allCascadeMask = (1u << kShadowCascadeCount) - 1u;
-        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-            appendShadowChunkLods(chunkArrayIndex, allCascadeMask);
-        }
-    } else {
-        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-            if (!shadowCandidateMask.empty() && shadowCandidateMask[chunkArrayIndex] == 0u) {
-                continue;
+    if (!suppressVoxelChunks) {
+        const std::vector<std::uint8_t> shadowCandidateMask = buildShadowCandidateMask(chunks, visibleChunkIndices);
+        constexpr float kShadowCasterClipMargin = 0.08f;
+        if (!m_shadowDebugSettings.enableOccluderCulling) {
+            const uint32_t allCascadeMask = (1u << kShadowCascadeCount) - 1u;
+            for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
+                appendShadowChunkLods(chunkArrayIndex, allCascadeMask);
             }
-            const odai::world::Chunk& chunk = chunks[chunkArrayIndex];
-            uint32_t cascadeMask = 0u;
-            for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-                if (chunkIntersectsShadowCascadeClip(chunk, lightViewProjMatrices[cascadeIndex], kShadowCasterClipMargin)) {
-                    cascadeMask |= (1u << cascadeIndex);
+        } else {
+            for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
+                if (!shadowCandidateMask.empty() && shadowCandidateMask[chunkArrayIndex] == 0u) {
+                    continue;
                 }
-            }
-            if (cascadeMask != 0u) {
-                appendShadowChunkLods(chunkArrayIndex, cascadeMask);
+                const odai::world::Chunk& chunk = chunks[chunkArrayIndex];
+                uint32_t cascadeMask = 0u;
+                for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+                    if (chunkIntersectsShadowCascadeClip(chunk, lightViewProjMatrices[cascadeIndex], kShadowCasterClipMargin)) {
+                        cascadeMask |= (1u << cascadeIndex);
+                    }
+                }
+                if (cascadeMask != 0u) {
+                    appendShadowChunkLods(chunkArrayIndex, cascadeMask);
+                }
             }
         }
     }

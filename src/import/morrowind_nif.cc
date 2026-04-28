@@ -230,6 +230,11 @@ bool equalsIgnoreCaseAscii(std::string_view lhs, std::string_view rhs) {
     return true;
 }
 
+bool nodeIsRootCollisionNode(const NifNodeRecord& node) {
+    return node.isRootCollisionNode ||
+        equalsIgnoreCaseAscii(node.avObject.name, "RootCollisionNode");
+}
+
 std::vector<std::int32_t> readRefList(NifCursor& cursor) {
     const std::uint32_t count = cursor.readValue<std::uint32_t>();
     std::vector<std::int32_t> refs;
@@ -776,7 +781,7 @@ void appendGeometry(
         childState.parentTransform = multiplyMatrices(state.parentTransform, localTransform);
         childState.discardRootTransform = false;
         childState.skipMeshes = childState.skipMeshes ||
-            geometryRecord.node.isRootCollisionNode ||
+            nodeIsRootCollisionNode(geometryRecord.node) ||
             avObjectIsHidden(geometryRecord.node.avObject);
         for (const std::int32_t childRef : geometryRecord.node.childRefs) {
             appendGeometry(records, childRef, childState, outResult, sawGeometry);
@@ -824,6 +829,7 @@ void appendGeometry(
 
     ImportedSceneMeshPart part{};
     part.firstIndex = static_cast<std::uint32_t>(outResult.mesh.indices.size());
+    part.textureIndex = std::numeric_limits<std::uint32_t>::max();
     part.alphaTest = alphaTest;
 
     const std::uint32_t baseVertex = static_cast<std::uint32_t>(outResult.mesh.vertices.size());
@@ -879,6 +885,7 @@ void appendGeometry(
     part.indexCount = static_cast<std::uint32_t>(outResult.mesh.indices.size()) - part.firstIndex;
     if (part.indexCount != 0u) {
         outResult.mesh.parts.push_back(part);
+        outResult.partDiffuseTexturePaths.push_back(diffuseTexturePath);
         sawGeometry = true;
     }
 }

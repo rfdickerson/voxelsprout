@@ -69,6 +69,7 @@ public:
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
+    void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(
         bool& outShowTerrain,
         bool& outShowStatics,
