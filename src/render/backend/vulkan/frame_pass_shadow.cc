@@ -37,6 +37,8 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
+    const std::uint32_t importedTerrainDrawCount = inputs.importedTerrainDrawCount;
+    const bool importedPageCullingEnabled = inputs.importedPageCullingEnabled;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = inputs.transportInstanceCount;
@@ -226,11 +228,18 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
                 }
             }
+            const std::span<const ImportedMeshDraw> cascadeImportedMeshDraws =
+                importedPageCullingEnabled ? inputs.importedMeshDrawsByCascade[cascadeIndex] : importedMeshDraws;
+            const std::uint32_t cascadeImportedTerrainDrawCount =
+                importedPageCullingEnabled
+                    ? inputs.importedTerrainDrawCountsByCascade[cascadeIndex]
+                    : importedTerrainDrawCount;
             if (m_importedStaticShadowPipeline != VK_NULL_HANDLE &&
                 importedVertexBuffer != VK_NULL_HANDLE &&
                 importedIndexBuffer != VK_NULL_HANDLE &&
-                !importedMeshDraws.empty()) {
-                const std::size_t terrainDrawCount = std::min<std::size_t>(m_importedTerrainDrawCount, importedMeshDraws.size());
+                !cascadeImportedMeshDraws.empty()) {
+                const std::size_t terrainDrawCount =
+                    std::min<std::size_t>(cascadeImportedTerrainDrawCount, cascadeImportedMeshDraws.size());
                 const std::size_t staticDrawStart = terrainDrawCount;
                 vkCmdSetDepthBias(
                     commandBuffer,
@@ -269,12 +278,12 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     sizeof(ChunkPushConstants),
                     &importedPushConstants
                 );
-                for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                for (std::size_t drawIndex = 0; drawIndex < cascadeImportedMeshDraws.size(); ++drawIndex) {
                     if ((drawIndex < terrainDrawCount && !m_debugShowImportedTerrain) ||
                         (drawIndex >= staticDrawStart && !m_debugShowImportedStatics)) {
                         continue;
                     }
-                    const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+                    const ImportedMeshDraw& importedDraw = cascadeImportedMeshDraws[drawIndex];
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
                 }

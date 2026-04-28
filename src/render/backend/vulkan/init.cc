@@ -1817,20 +1817,23 @@ void RendererBackend::destroyImportedBuffers() {
         vkDestroySampler(m_device, m_importedTextureSampler, nullptr);
         m_importedTextureSampler = VK_NULL_HANDLE;
     }
-    for (ImportedMeshDraw& draw : m_importedMeshDraws) {
-        if (draw.indexBufferHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(draw.indexBufferHandle);
-            draw.indexBufferHandle = kInvalidBufferHandle;
-        }
-        if (draw.vertexBufferHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(draw.vertexBufferHandle);
-            draw.vertexBufferHandle = kInvalidBufferHandle;
-        }
-        draw.indexCount = 0;
+    if (m_importedIndexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_importedIndexBufferHandle);
+        m_importedIndexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_importedVertexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_importedVertexBufferHandle);
+        m_importedVertexBufferHandle = kInvalidBufferHandle;
     }
     m_importedMeshDraws.clear();
-    m_importedVertexBufferHandle = kInvalidBufferHandle;
-    m_importedIndexBufferHandle = kInvalidBufferHandle;
+    m_importedPageDrawRanges.clear();
+    m_visibleImportedMeshDraws.clear();
+    for (std::vector<ImportedMeshDraw>& shadowDraws : m_visibleImportedShadowMeshDraws) {
+        shadowDraws.clear();
+    }
+    m_visibleImportedPageScratch.clear();
+    m_visibleImportedTerrainDrawCount = 0;
+    m_visibleImportedShadowTerrainDrawCounts.fill(0u);
     if (m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_importedWaterIndexBufferHandle);
         m_importedWaterIndexBufferHandle = kInvalidBufferHandle;

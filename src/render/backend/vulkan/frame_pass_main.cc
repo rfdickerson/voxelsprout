@@ -33,6 +33,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
+    const std::uint32_t importedTerrainDrawCount = inputs.importedTerrainDrawCount;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = inputs.transportInstanceCount;
@@ -255,7 +256,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         importedVertexBuffer != VK_NULL_HANDLE &&
         importedIndexBuffer != VK_NULL_HANDLE &&
         !importedMeshDraws.empty()) {
-        const std::size_t terrainDrawCount = std::min<std::size_t>(m_importedTerrainDrawCount, importedMeshDraws.size());
+        const std::size_t terrainDrawCount = std::min<std::size_t>(importedTerrainDrawCount, importedMeshDraws.size());
         const std::size_t staticDrawStart = terrainDrawCount;
         const bool drawTerrain = m_debugShowImportedTerrain;
         const bool drawStatics = m_debugShowImportedStatics;

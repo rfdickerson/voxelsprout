@@ -550,8 +550,6 @@ ChunkLodMeshes buildChunkLodMeshesGreedy(const Chunk& chunk) {
         }
     }
 
-    meshes.lodMeshes[1] = meshes.lodMeshes[0];
-    meshes.lodMeshes[2] = meshes.lodMeshes[0];
     return meshes;
 }
 
@@ -607,8 +605,6 @@ ChunkLodMeshes buildChunkLodMeshesNaive(const Chunk& chunk) {
         }
     }
 
-    meshes.lodMeshes[1] = meshes.lodMeshes[0];
-    meshes.lodMeshes[2] = meshes.lodMeshes[0];
     return meshes;
 }
 

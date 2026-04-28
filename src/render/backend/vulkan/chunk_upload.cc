@@ -412,6 +412,14 @@ void RendererBackend::clearGpuScene() {
         m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
     }
     m_importedMeshDraws.clear();
+    m_importedPageDrawRanges.clear();
+    m_visibleImportedMeshDraws.clear();
+    for (std::vector<ImportedMeshDraw>& shadowDraws : m_visibleImportedShadowMeshDraws) {
+        shadowDraws.clear();
+    }
+    m_visibleImportedPageScratch.clear();
+    m_visibleImportedTerrainDrawCount = 0;
+    m_visibleImportedShadowTerrainDrawCounts.fill(0u);
     m_importedGiTriangles.clear();
     m_importedLocalLights.clear();
     m_debugImportedLightSelectedCount = 0;
@@ -464,10 +472,17 @@ bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene)
     compatibilityScene.boundsMax[0] = scene.sceneBounds.max[0];
     compatibilityScene.boundsMax[1] = scene.sceneBounds.max[1];
     compatibilityScene.boundsMax[2] = scene.sceneBounds.max[2];
-    return uploadImportedScene(compatibilityScene);
+    return uploadImportedSceneInternal(compatibilityScene, &scene);
 }
 
 bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& scene) {
+    return uploadImportedSceneInternal(scene, nullptr);
+}
+
+bool RendererBackend::uploadImportedSceneInternal(
+    const odai::importer::ImportedScene& scene,
+    const odai::importer::GpuSceneAsset* gpuScene
+) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
@@ -824,15 +839,66 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
     indices.assign(uploadScene.packedIndices.begin(), uploadScene.packedIndices.end());
     const std::uint32_t sourceTerrainDrawCount =
         std::min<std::uint32_t>(uploadScene.sourceLandscapeCellCount, static_cast<std::uint32_t>(uploadScene.packedDraws.size()));
+    constexpr std::uint32_t kInvalidImportedPageRangeIndex = std::numeric_limits<std::uint32_t>::max();
+    std::vector<std::uint32_t> sourceDrawPageRangeIndices(
+        uploadScene.packedDraws.size(),
+        kInvalidImportedPageRangeIndex);
+    std::vector<ImportedScenePageDrawRange> pageDrawRanges;
+    if (gpuScene != nullptr && !gpuScene->renderCache.pageDrawRanges.empty() && !gpuScene->pages.empty()) {
+        pageDrawRanges.reserve(gpuScene->renderCache.pageDrawRanges.size());
+        for (const odai::importer::GpuScenePageDrawRange& sourceRange : gpuScene->renderCache.pageDrawRanges) {
+            if (sourceRange.drawCount == 0u ||
+                sourceRange.firstDraw >= uploadScene.packedDraws.size() ||
+                sourceRange.pageIndex >= gpuScene->pages.size()) {
+                continue;
+            }
+            ImportedScenePageDrawRange rendererRange{};
+            const odai::importer::GpuSceneBounds& bounds = gpuScene->pages[sourceRange.pageIndex].bounds;
+            std::memcpy(rendererRange.boundsMin, bounds.min, sizeof(rendererRange.boundsMin));
+            std::memcpy(rendererRange.boundsMax, bounds.max, sizeof(rendererRange.boundsMax));
+            const std::uint32_t rendererRangeIndex = static_cast<std::uint32_t>(pageDrawRanges.size());
+            pageDrawRanges.push_back(rendererRange);
+
+            const std::uint32_t sourceDrawEnd = static_cast<std::uint32_t>(std::min<std::size_t>(
+                static_cast<std::size_t>(sourceRange.firstDraw) + static_cast<std::size_t>(sourceRange.drawCount),
+                uploadScene.packedDraws.size()));
+            for (std::uint32_t drawIndex = sourceRange.firstDraw; drawIndex < sourceDrawEnd; ++drawIndex) {
+                sourceDrawPageRangeIndices[drawIndex] = rendererRangeIndex;
+            }
+        }
+
+        bool pageRangesCoverDraws = !pageDrawRanges.empty();
+        for (std::uint32_t drawIndex = 0; drawIndex < uploadScene.packedDraws.size(); ++drawIndex) {
+            if (uploadScene.packedDraws[drawIndex].indexCount != 0u &&
+                sourceDrawPageRangeIndices[drawIndex] == kInvalidImportedPageRangeIndex) {
+                pageRangesCoverDraws = false;
+                break;
+            }
+        }
+        if (!pageRangesCoverDraws) {
+            pageDrawRanges.clear();
+            std::fill(
+                sourceDrawPageRangeIndices.begin(),
+                sourceDrawPageRangeIndices.end(),
+                kInvalidImportedPageRangeIndex);
+        }
+    }
     std::uint32_t mergedTerrainDrawCount = 0;
     bool lastMergedDrawWasTerrain = false;
-    auto appendMergedDraw = [&](std::uint32_t firstIndex, std::uint32_t indexCount, bool terrainDraw) {
+    std::uint32_t lastMergedPageRangeIndex = kInvalidImportedPageRangeIndex;
+    auto appendMergedDraw = [&](
+                                std::uint32_t firstIndex,
+                                std::uint32_t indexCount,
+                                bool terrainDraw,
+                                std::uint32_t pageRangeIndex
+                            ) {
         if (indexCount == 0) {
             return;
         }
         if (!draws.empty()) {
             ImportedMeshDraw& previous = draws.back();
             if (lastMergedDrawWasTerrain == terrainDraw &&
+                lastMergedPageRangeIndex == pageRangeIndex &&
                 previous.firstIndex + previous.indexCount == firstIndex) {
                 previous.indexCount += indexCount;
                 return;
@@ -841,11 +907,23 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
         ImportedMeshDraw draw{};
         draw.firstIndex = firstIndex;
         draw.indexCount = indexCount;
+        const std::uint32_t rendererDrawIndex = static_cast<std::uint32_t>(draws.size());
         draws.push_back(draw);
         if (terrainDraw) {
             ++mergedTerrainDrawCount;
         }
+        if (pageRangeIndex != kInvalidImportedPageRangeIndex && pageRangeIndex < pageDrawRanges.size()) {
+            ImportedScenePageDrawRange& pageRange = pageDrawRanges[pageRangeIndex];
+            if (pageRange.drawCount == 0u) {
+                pageRange.firstDraw = rendererDrawIndex;
+            }
+            ++pageRange.drawCount;
+            if (terrainDraw) {
+                ++pageRange.terrainDrawCount;
+            }
+        }
         lastMergedDrawWasTerrain = terrainDraw;
+        lastMergedPageRangeIndex = pageRangeIndex;
     };
 
     for (std::uint32_t drawIndex = 0; drawIndex < uploadScene.packedDraws.size(); ++drawIndex) {
@@ -853,7 +931,11 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
         if (srcDraw.indexCount == 0) {
             continue;
         }
-        appendMergedDraw(srcDraw.firstIndex, srcDraw.indexCount, drawIndex < sourceTerrainDrawCount);
+        appendMergedDraw(
+            srcDraw.firstIndex,
+            srcDraw.indexCount,
+            drawIndex < sourceTerrainDrawCount,
+            sourceDrawPageRangeIndices[drawIndex]);
     }
     for (const odai::importer::ImportedSceneWaterPatch& patch : uploadScene.waterPatches) {
         const std::uint32_t baseVertex = static_cast<std::uint32_t>(waterVertices.size());
@@ -896,25 +978,142 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
         return true;
     }
 
-    BufferCreateDesc vertexCreateDesc{};
-    vertexCreateDesc.size = static_cast<VkDeviceSize>(vertices.size() * sizeof(ImportedMeshVertex));
-    vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    vertexCreateDesc.initialData = vertices.data();
-    const BufferHandle newVertexHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
-    if (newVertexHandle == kInvalidBufferHandle) {
-        VOX_LOGE("render") << "imported scene vertex buffer allocation failed";
+    auto uploadDeviceLocalBuffer = [&](
+                                      const void* sourceData,
+                                      VkDeviceSize bufferSize,
+                                      VkBufferUsageFlags usage,
+                                      const char* debugLabel,
+                                      BufferHandle& outHandle
+                                  ) -> bool {
+        outHandle = kInvalidBufferHandle;
+        if (sourceData == nullptr || bufferSize == 0u) {
+            return false;
+        }
+
+        BufferCreateDesc stagingCreateDesc{};
+        stagingCreateDesc.size = bufferSize;
+        stagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        stagingCreateDesc.memoryProperties =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        stagingCreateDesc.initialData = sourceData;
+        const BufferHandle stagingHandle = m_bufferAllocator.createBuffer(stagingCreateDesc);
+        if (stagingHandle == kInvalidBufferHandle) {
+            VOX_LOGE("render") << debugLabel << " staging buffer allocation failed";
+            return false;
+        }
+
+        BufferCreateDesc deviceCreateDesc{};
+        deviceCreateDesc.size = bufferSize;
+        deviceCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage;
+        deviceCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        outHandle = m_bufferAllocator.createBuffer(deviceCreateDesc);
+        if (outHandle == kInvalidBufferHandle) {
+            VOX_LOGE("render") << debugLabel << " device-local buffer allocation failed";
+            m_bufferAllocator.destroyBuffer(stagingHandle);
+            return false;
+        }
+
+        bool uploadFailed = false;
+        VkCommandPool commandPool = VK_NULL_HANDLE;
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        VkCommandPoolCreateInfo commandPoolCreateInfo{};
+        commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+        VkResult result = vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkCreateCommandPool(importedGeometryUpload)", result);
+            uploadFailed = true;
+        }
+
+        if (!uploadFailed) {
+            VkCommandBufferAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            allocateInfo.commandPool = commandPool;
+            allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocateInfo.commandBufferCount = 1;
+            result = vkAllocateCommandBuffers(m_device, &allocateInfo, &commandBuffer);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkAllocateCommandBuffers(importedGeometryUpload)", result);
+                uploadFailed = true;
+            }
+        }
+
+        if (!uploadFailed) {
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkBeginCommandBuffer(importedGeometryUpload)", result);
+                uploadFailed = true;
+            }
+        }
+
+        if (!uploadFailed) {
+            VkBufferCopy copyRegion{};
+            copyRegion.size = bufferSize;
+            vkCmdCopyBuffer(
+                commandBuffer,
+                m_bufferAllocator.getBuffer(stagingHandle),
+                m_bufferAllocator.getBuffer(outHandle),
+                1,
+                &copyRegion);
+            result = vkEndCommandBuffer(commandBuffer);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkEndCommandBuffer(importedGeometryUpload)", result);
+                uploadFailed = true;
+            }
+        }
+
+        if (!uploadFailed) {
+            VkSubmitInfo submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &commandBuffer;
+            result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkQueueSubmit(importedGeometryUpload)", result);
+                uploadFailed = true;
+            }
+        }
+        if (!uploadFailed) {
+            result = vkQueueWaitIdle(m_graphicsQueue);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkQueueWaitIdle(importedGeometryUpload)", result);
+                uploadFailed = true;
+            }
+        }
+
+        if (commandPool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(m_device, commandPool, nullptr);
+        }
+        m_bufferAllocator.destroyBuffer(stagingHandle);
+        if (uploadFailed) {
+            m_bufferAllocator.destroyBuffer(outHandle);
+            outHandle = kInvalidBufferHandle;
+            return false;
+        }
+        return true;
+    };
+
+    BufferHandle newVertexHandle = kInvalidBufferHandle;
+    if (!uploadDeviceLocalBuffer(
+            vertices.data(),
+            static_cast<VkDeviceSize>(vertices.size() * sizeof(ImportedMeshVertex)),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            "imported scene vertex",
+            newVertexHandle)) {
         return false;
     }
 
-    BufferCreateDesc indexCreateDesc{};
-    indexCreateDesc.size = static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t));
-    indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    indexCreateDesc.initialData = indices.data();
-    const BufferHandle newIndexHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
-    if (newIndexHandle == kInvalidBufferHandle) {
-        VOX_LOGE("render") << "imported scene index buffer allocation failed";
+    BufferHandle newIndexHandle = kInvalidBufferHandle;
+    if (!uploadDeviceLocalBuffer(
+            indices.data(),
+            static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t)),
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            "imported scene index",
+            newIndexHandle)) {
         m_bufferAllocator.destroyBuffer(newVertexHandle);
         return false;
     }
@@ -929,6 +1128,7 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
         draw.indexBufferHandle = newIndexHandle;
         m_importedMeshDraws.push_back(draw);
     }
+    m_importedPageDrawRanges = std::move(pageDrawRanges);
 
     const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(newVertexHandle);
     const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(newIndexHandle);
@@ -941,6 +1141,7 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
         m_importedVertexBufferHandle = kInvalidBufferHandle;
         m_importedIndexBufferHandle = kInvalidBufferHandle;
         m_importedMeshDraws.clear();
+        m_importedPageDrawRanges.clear();
         m_importedIndexCount = 0;
         m_importedTerrainDrawCount = 0;
         m_importedStaticDrawCount = 0;
@@ -953,25 +1154,23 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
         setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "mesh.importedScene.index");
     }
     if (!waterVertices.empty() && !waterIndices.empty()) {
-        BufferCreateDesc waterVertexCreateDesc{};
-        waterVertexCreateDesc.size = static_cast<VkDeviceSize>(waterVertices.size() * sizeof(ImportedWaterVertex));
-        waterVertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        waterVertexCreateDesc.memoryProperties =
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        waterVertexCreateDesc.initialData = waterVertices.data();
-        const BufferHandle waterVertexHandle = m_bufferAllocator.createBuffer(waterVertexCreateDesc);
-        if (waterVertexHandle == kInvalidBufferHandle) {
-            VOX_LOGE("render") << "imported scene water vertex buffer allocation failed";
+        BufferHandle waterVertexHandle = kInvalidBufferHandle;
+        if (!uploadDeviceLocalBuffer(
+                waterVertices.data(),
+                static_cast<VkDeviceSize>(waterVertices.size() * sizeof(ImportedWaterVertex)),
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                "imported scene water vertex",
+                waterVertexHandle)) {
+            VOX_LOGE("render") << "imported scene water vertex buffer upload failed";
         } else {
-            BufferCreateDesc waterIndexCreateDesc{};
-            waterIndexCreateDesc.size = static_cast<VkDeviceSize>(waterIndices.size() * sizeof(std::uint32_t));
-            waterIndexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-            waterIndexCreateDesc.memoryProperties =
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-            waterIndexCreateDesc.initialData = waterIndices.data();
-            const BufferHandle waterIndexHandle = m_bufferAllocator.createBuffer(waterIndexCreateDesc);
-            if (waterIndexHandle == kInvalidBufferHandle) {
-                VOX_LOGE("render") << "imported scene water index buffer allocation failed";
+            BufferHandle waterIndexHandle = kInvalidBufferHandle;
+            if (!uploadDeviceLocalBuffer(
+                    waterIndices.data(),
+                    static_cast<VkDeviceSize>(waterIndices.size() * sizeof(std::uint32_t)),
+                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                    "imported scene water index",
+                    waterIndexHandle)) {
+                VOX_LOGE("render") << "imported scene water index buffer upload failed";
                 m_bufferAllocator.destroyBuffer(waterVertexHandle);
             } else {
                 m_importedWaterVertexBufferHandle = waterVertexHandle;
@@ -1058,6 +1257,7 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
     VOX_LOGI("render") << "uploaded imported scene geometry (vertices=" << vertices.size()
                        << ", indices=" << indices.size()
                        << ", draws=" << m_importedMeshDraws.size()
+                       << ", pageRanges=" << m_importedPageDrawRanges.size()
                        << ", instances=" << uploadScene.instances.size()
                        << ", terrainCells=" << uploadScene.landscapeCells.size()
                        << ", waterPatches=" << uploadScene.waterPatches.size()
