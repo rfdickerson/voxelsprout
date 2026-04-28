@@ -161,10 +161,12 @@ public:
         float volumetricFogHeightFalloff = 0.0065f;
         float volumetricFogBaseHeight = 42.0f;
         float volumetricSunScattering = 1.05f;
-        float waterAnimationSpeed = 1.65f;
-        float waterNormalStrength = 0.86f;
-        float waterReflectionStrength = 1.70f;
-        float waterRefractionDecay = 1.25f;
+        float waterAnimationSpeed = 1.05f;
+        float waterNormalStrength = 1.25f;
+        float waterReflectionStrength = 2.45f;
+        float waterRefractionDecay = 0.70f;
+        float waterRefractionStrength = 1.65f;
+        float waterRefractionDistortionPixels = 96.0f;
         bool autoSunriseTuning = true;
         float autoSunriseBlend = 1.0f;
         float autoSunriseAdaptSpeed = 4.0f;
@@ -206,7 +208,8 @@ public:
         const odai::render::CameraPose& camera,
         const odai::render::VoxelPreview& preview,
         float simulationAlpha,
-        std::span<const std::size_t> visibleChunkIndices
+        std::span<const std::size_t> visibleChunkIndices,
+        const odai::render::ImportedActorFrameData* importedActors = nullptr
     );
     void setDebugUiVisible(bool visible);
     bool isDebugUiVisible() const;
@@ -279,7 +282,7 @@ private:
     static constexpr uint32_t kGpuTimestampQueryFrameEnd = 33;
     static constexpr uint32_t kGpuTimestampQueryCount = 34;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
-    static constexpr std::size_t kMainDescriptorWriteKeyWordCount = 24;
+    static constexpr std::size_t kMainDescriptorWriteKeyWordCount = 26;
     static constexpr std::size_t kVoxelGiDescriptorWriteKeyWordCount = 27;
     static constexpr std::size_t kAutoExposureDescriptorWriteKeyWordCount = 6;
     static constexpr std::size_t kSunShaftDescriptorWriteKeyWordCount = 10;
@@ -627,6 +630,11 @@ private:
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
         std::uint32_t importedTerrainDrawCount = 0;
+        VkBuffer importedActorVertexBuffer = VK_NULL_HANDLE;
+        VkDeviceSize importedActorVertexOffset = 0;
+        VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
+        VkDeviceSize importedActorIndexOffset = 0;
+        std::span<const ImportedMeshDraw> importedActorMeshDraws;
         bool importedPageCullingEnabled = false;
         std::array<std::span<const ImportedMeshDraw>, kShadowCascadeCount> importedMeshDrawsByCascade;
         std::array<std::uint32_t, kShadowCascadeCount> importedTerrainDrawCountsByCascade{};
@@ -650,6 +658,11 @@ private:
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
         std::uint32_t importedTerrainDrawCount = 0;
+        VkBuffer importedActorVertexBuffer = VK_NULL_HANDLE;
+        VkDeviceSize importedActorVertexOffset = 0;
+        VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
+        VkDeviceSize importedActorIndexOffset = 0;
+        std::span<const ImportedMeshDraw> importedActorMeshDraws;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -670,6 +683,11 @@ private:
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
         std::uint32_t importedTerrainDrawCount = 0;
+        VkBuffer importedActorVertexBuffer = VK_NULL_HANDLE;
+        VkDeviceSize importedActorVertexOffset = 0;
+        VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
+        VkDeviceSize importedActorIndexOffset = 0;
+        std::span<const ImportedMeshDraw> importedActorMeshDraws;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -763,6 +781,10 @@ private:
     std::vector<bool> m_hdrResolveImageInitialized;
     uint32_t m_hdrResolveMipLevels = 1;
     VkSampler m_hdrResolveSampler = VK_NULL_HANDLE;
+    std::vector<VkImage> m_waterRefractionImages;
+    std::vector<VkImageView> m_waterRefractionImageViews;
+    std::vector<TransientImageHandle> m_waterRefractionTransientHandles;
+    std::vector<bool> m_waterRefractionImageInitialized;
     std::vector<VkImage> m_depthImages;
     std::vector<VkDeviceMemory> m_depthImageMemories;
     std::vector<VkImageView> m_depthImageViews;
@@ -1006,6 +1028,7 @@ private:
     std::vector<ImportedScenePageDrawRange> m_importedPageDrawRanges;
     std::vector<ImportedMeshDraw> m_visibleImportedMeshDraws;
     std::array<std::vector<ImportedMeshDraw>, kShadowCascadeCount> m_visibleImportedShadowMeshDraws;
+    std::vector<std::uint32_t> m_importedTextureSlots;
     std::vector<std::uint8_t> m_visibleImportedPageScratch;
     std::uint32_t m_visibleImportedTerrainDrawCount = 0;
     std::array<std::uint32_t, kShadowCascadeCount> m_visibleImportedShadowTerrainDrawCounts{};

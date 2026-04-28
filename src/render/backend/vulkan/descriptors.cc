@@ -68,7 +68,7 @@ constexpr uint32_t kAutoExposureHistogramBins = 64u;
 bool RendererBackend::createDescriptorResources() {
     if (m_descriptorSetLayout == VK_NULL_HANDLE) {
         std::vector<VkDescriptorSetLayoutBinding> bindings;
-        bindings.reserve(12);
+        bindings.reserve(13);
 
         VkDescriptorSetLayoutBinding mvpBinding{};
         mvpBinding.binding = 0;
@@ -104,6 +104,13 @@ bool RendererBackend::createDescriptorResources() {
         shadowMapBinding.descriptorCount = 1;
         shadowMapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings.push_back(shadowMapBinding);
+
+        VkDescriptorSetLayoutBinding waterRefractionBinding{};
+        waterRefractionBinding.binding = 5;
+        waterRefractionBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        waterRefractionBinding.descriptorCount = 1;
+        waterRefractionBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(waterRefractionBinding);
 
         VkDescriptorSetLayoutBinding normalDepthBinding{};
         normalDepthBinding.binding = 6;
@@ -174,7 +181,7 @@ bool RendererBackend::createDescriptorResources() {
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                9 * kMaxFramesInFlight
+                10 * kMaxFramesInFlight
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -333,6 +340,12 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     shadowMapImageInfo.imageView = m_shadowDepthImageView;
     shadowMapImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
+    VkDescriptorImageInfo waterRefractionImageInfo{};
+    waterRefractionImageInfo.sampler = m_hdrResolveSampler;
+    waterRefractionImageInfo.imageView =
+        (aoFrameIndex < m_waterRefractionImageViews.size()) ? m_waterRefractionImageViews[aoFrameIndex] : VK_NULL_HANDLE;
+    waterRefractionImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     VkDescriptorImageInfo normalDepthImageInfo{};
     normalDepthImageInfo.sampler = m_normalDepthSampler;
     normalDepthImageInfo.imageView = m_normalDepthImageViews[aoFrameIndex];
@@ -374,7 +387,7 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     rayTracingSceneWriteInfo.accelerationStructureCount = hasRayTracingSceneDescriptor ? 1u : 0u;
     rayTracingSceneWriteInfo.pAccelerationStructures = hasRayTracingSceneDescriptor ? &m_rtTlas.handle : nullptr;
 
-    std::array<VkWriteDescriptorSet, 12> writes{};
+    std::array<VkWriteDescriptorSet, 13> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -412,55 +425,62 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
 
     writes[5] = write;
     writes[5].dstSet = m_descriptorSets[m_currentFrame];
-    writes[5].dstBinding = 6;
+    writes[5].dstBinding = 5;
     writes[5].descriptorCount = 1;
     writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[5].pImageInfo = &normalDepthImageInfo;
+    writes[5].pImageInfo = &waterRefractionImageInfo;
 
     writes[6] = write;
     writes[6].dstSet = m_descriptorSets[m_currentFrame];
-    writes[6].dstBinding = 7;
+    writes[6].dstBinding = 6;
     writes[6].descriptorCount = 1;
     writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[6].pImageInfo = &ssaoBlurImageInfo;
+    writes[6].pImageInfo = &normalDepthImageInfo;
 
     writes[7] = write;
     writes[7].dstSet = m_descriptorSets[m_currentFrame];
-    writes[7].dstBinding = 8;
+    writes[7].dstBinding = 7;
     writes[7].descriptorCount = 1;
     writes[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[7].pImageInfo = &ssaoRawImageInfo;
+    writes[7].pImageInfo = &ssaoBlurImageInfo;
 
     writes[8] = write;
     writes[8].dstSet = m_descriptorSets[m_currentFrame];
-    writes[8].dstBinding = 9;
+    writes[8].dstBinding = 8;
     writes[8].descriptorCount = 1;
     writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[8].pImageInfo = &voxelGiVolumeImageInfo;
+    writes[8].pImageInfo = &ssaoRawImageInfo;
 
     writes[9] = write;
     writes[9].dstSet = m_descriptorSets[m_currentFrame];
-    writes[9].dstBinding = 10;
+    writes[9].dstBinding = 9;
     writes[9].descriptorCount = 1;
     writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[9].pImageInfo = &sunShaftImageInfo;
+    writes[9].pImageInfo = &voxelGiVolumeImageInfo;
 
     writes[10] = write;
     writes[10].dstSet = m_descriptorSets[m_currentFrame];
-    writes[10].dstBinding = 11;
+    writes[10].dstBinding = 10;
     writes[10].descriptorCount = 1;
     writes[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[10].pImageInfo = &voxelGiOccupancyDebugImageInfo;
+    writes[10].pImageInfo = &sunShaftImageInfo;
 
-    std::uint32_t writeCount = 11;
+    writes[11] = write;
+    writes[11].dstSet = m_descriptorSets[m_currentFrame];
+    writes[11].dstBinding = 11;
+    writes[11].descriptorCount = 1;
+    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[11].pImageInfo = &voxelGiOccupancyDebugImageInfo;
+
+    std::uint32_t writeCount = 12;
     if (hasRayTracingSceneDescriptor) {
-        writes[11] = write;
-        writes[11].dstSet = m_descriptorSets[m_currentFrame];
-        writes[11].dstBinding = 12;
-        writes[11].descriptorCount = 1;
-        writes[11].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        writes[11].pNext = &rayTracingSceneWriteInfo;
-        writeCount = 12;
+        writes[12] = write;
+        writes[12].dstSet = m_descriptorSets[m_currentFrame];
+        writes[12].dstBinding = 12;
+        writes[12].descriptorCount = 1;
+        writes[12].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        writes[12].pNext = &rayTracingSceneWriteInfo;
+        writeCount = 13;
     }
 
     if (m_descriptorSets[frameIndex] != VK_NULL_HANDLE) {
@@ -477,6 +497,8 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             vkHandleToUint64(hdrSceneImageInfo.imageView),
             vkHandleToUint64(shadowMapImageInfo.sampler),
             vkHandleToUint64(shadowMapImageInfo.imageView),
+            vkHandleToUint64(waterRefractionImageInfo.sampler),
+            vkHandleToUint64(waterRefractionImageInfo.imageView),
             vkHandleToUint64(normalDepthImageInfo.sampler),
             vkHandleToUint64(normalDepthImageInfo.imageView),
             vkHandleToUint64(ssaoBlurImageInfo.sampler),

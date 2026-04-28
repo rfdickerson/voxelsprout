@@ -126,6 +126,11 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
 bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedScene& outScene);
 const std::string& getImportedSceneLastError();
 void buildImportedScenePackedRenderData(ImportedScene& scene);
+bool loadMorrowindTexture(
+    const std::filesystem::path& morrowindDataFilesPath,
+    const std::string& sourcePath,
+    ImportedSceneTexture& outTexture
+);
 
 bool exportImportedSceneTerrainObj(const ImportedScene& scene, const std::filesystem::path& outputObjPath);
 

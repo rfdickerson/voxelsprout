@@ -555,9 +555,6 @@ bool Navmesh::findPath(
                 continue;
             }
             const Triangle& neighbor = m_walkableTriangles[neighborIndex];
-            if (segmentBlocked(triangle.center, neighbor.center)) {
-                continue;
-            }
             const float stepCost = std::sqrt(distanceSquaredXz(triangle.center, neighbor.center)) +
                 std::fabs(triangle.center.y - neighbor.center.y);
             const float nextCost = bestCost[current.triangleIndex] + stepCost;

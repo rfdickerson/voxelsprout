@@ -285,10 +285,11 @@ void skipExtraRecordHeader(NifCursor& cursor) {
 std::uint32_t skipKeyMap(
     NifCursor& cursor,
     std::size_t valueComponentCount,
-    bool quaternionValues = false
+    bool quaternionValues = false,
+    bool readInterpolationWhenEmpty = false
 ) {
     const std::uint32_t keyCount = cursor.readValue<std::uint32_t>();
-    if (keyCount == 0u) {
+    if (keyCount == 0u && !readInterpolationWhenEmpty) {
         return 0u;
     }
 
@@ -585,6 +586,22 @@ void skipTextKeyExtraDataRecord(NifCursor& cursor) {
 void skipKeyframeControllerRecord(NifCursor& cursor) {
     skipTimeControllerRecord(cursor);
     cursor.readValue<std::int32_t>();
+}
+
+void skipGeomMorpherControllerRecord(NifCursor& cursor) {
+    skipTimeControllerRecord(cursor);
+    cursor.readValue<std::int32_t>();
+    cursor.readValue<std::uint8_t>();
+}
+
+void skipMorphDataRecord(NifCursor& cursor) {
+    const std::uint32_t morphCount = cursor.readValue<std::uint32_t>();
+    const std::uint32_t vertexCount = cursor.readValue<std::uint32_t>();
+    cursor.readValue<std::uint8_t>();
+    for (std::uint32_t morphIndex = 0; morphIndex < morphCount; ++morphIndex) {
+        skipKeyMap(cursor, 1u, false, true);
+        cursor.skip(static_cast<std::size_t>(vertexCount) * sizeof(float) * 3u);
+    }
 }
 
 void skipParticleSystemControllerRecord(NifCursor& cursor) {
@@ -962,8 +979,12 @@ bool loadMorrowindStaticNif(
                 skipTextKeyExtraDataRecord(cursor);
             } else if (recordType == "NiKeyframeController") {
                 skipKeyframeControllerRecord(cursor);
+            } else if (recordType == "NiGeomMorpherController") {
+                skipGeomMorpherControllerRecord(cursor);
             } else if (recordType == "NiKeyframeData") {
                 skipKeyframeDataRecord(cursor);
+            } else if (recordType == "NiMorphData") {
+                skipMorphDataRecord(cursor);
             } else if (recordType == "NiParticleSystemController") {
                 skipParticleSystemControllerRecord(cursor);
             } else if (recordType == "NiParticleGrowFade") {

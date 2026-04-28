@@ -311,6 +311,18 @@ void RendererBackend::buildFrameStatsUi() {
                 0.25f,
                 5.0f,
                 "%.2f");
+            ImGui::SliderFloat(
+                "Water Refraction Strength",
+                &m_skyDebugSettings.waterRefractionStrength,
+                0.0f,
+                3.0f,
+                "%.2f");
+            ImGui::SliderFloat(
+                "Water Refraction Distortion",
+                &m_skyDebugSettings.waterRefractionDistortionPixels,
+                0.0f,
+                160.0f,
+                "%.0f px");
             ImGui::TextDisabled("Hotkeys: F5 terrain, F6 statics, K textures, F7 flat shading, F8 water debug");
             ImGui::Text(
                 "Imported Draws / Water Indices: %u / %u",

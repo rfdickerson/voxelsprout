@@ -6,6 +6,7 @@
 #include "sim/simulation.h"
 #include "world/clipmap_index.h"
 #include "world/imported_scene_collision.h"
+#include "world/navmesh.h"
 #include "world/world.h"
 
 #include <filesystem>
@@ -151,6 +152,9 @@ private:
     [[nodiscard]] bool tryPlaceTrackFromCameraRay();
     [[nodiscard]] bool tryRemoveTrackFromCameraRay();
     void resetVoxelBreakProgress();
+    void initializeBalmoraGuards();
+    void updateBalmoraGuards(float dt);
+    void rebuildBalmoraGuardRenderFrame(float simulationAlpha);
 
     struct CameraState {
         float x = 0.0f;
@@ -165,6 +169,26 @@ private:
         float smoothedMouseDeltaY = 0.0f;
         float fovDegrees = 90.0f;
         bool onGround = false;
+    };
+
+    struct BalmoraGuardPrototype {
+        std::vector<odai::importer::ImportedScenePackedVertex> vertices;
+        std::vector<std::uint32_t> indices;
+        std::vector<odai::importer::ImportedScenePackedDraw> draws;
+    };
+
+    struct BalmoraGuardAgent {
+        odai::math::Vector3 position{};
+        odai::math::Vector3 previousPosition{};
+        float yawRadians = 0.0f;
+        float previousYawRadians = 0.0f;
+        float walkPhase = 0.0f;
+        float previousWalkPhase = 0.0f;
+        float speed = 92.0f;
+        std::vector<odai::math::Vector3> route;
+        std::vector<odai::world::NavmeshPathPoint> path;
+        std::size_t routeIndex = 0;
+        std::size_t pathIndex = 0;
     };
 
     GLFWwindow* m_window = nullptr;
@@ -230,6 +254,12 @@ private:
     odai::importer::GpuSceneAsset m_gpuSceneAsset;
     odai::importer::GpuSceneRuntime m_gpuSceneRuntime;
     odai::world::ImportedSceneCollision m_importedSceneCollision;
+    odai::world::Navmesh m_balmoraNavmesh;
+    BalmoraGuardPrototype m_balmoraGuardPrototype;
+    std::vector<BalmoraGuardAgent> m_balmoraGuards;
+    std::vector<odai::importer::ImportedScenePackedVertex> m_balmoraGuardFrameVertices;
+    std::vector<std::uint32_t> m_balmoraGuardFrameIndices;
+    std::vector<odai::importer::ImportedScenePackedDraw> m_balmoraGuardFrameDraws;
 };
 
 } // namespace odai::app

@@ -1,8 +1,11 @@
 #pragma once
 
+#include "import/imported_scene.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace odai::render {
 
@@ -110,6 +113,12 @@ struct VoxelPreview {
     float pipeAxisZ = 0.0f;
     float pipeRadius = 0.45f;
     float pipeStyleId = 0.0f;
+};
+
+struct ImportedActorFrameData {
+    std::span<const odai::importer::ImportedScenePackedVertex> vertices;
+    std::span<const std::uint32_t> indices;
+    std::span<const odai::importer::ImportedScenePackedDraw> draws;
 };
 
 enum class InventoryItemId : std::uint8_t {
