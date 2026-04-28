@@ -89,6 +89,25 @@ struct ImportedSceneLight {
     std::uint32_t flags = 0u;
 };
 
+struct MorrowindDoorDestination {
+    std::string destinationCell;
+    float position[3] = {};
+    float rotationRadians[3] = {};
+};
+
+struct MorrowindDoorReference {
+    std::string refId;
+    std::string sourceCell;
+    float position[3] = {};
+    float rotationRadians[3] = {};
+    MorrowindDoorDestination destination;
+};
+
+struct MorrowindDoorCache {
+    std::vector<MorrowindDoorReference> exteriorDoors;
+    std::unordered_map<std::string, std::vector<MorrowindDoorReference>> interiorDoorsByCell;
+};
+
 struct ImportedScene {
     std::string sourceTag;
     std::vector<ImportedSceneTexture> textures;
@@ -137,6 +156,22 @@ bool exportImportedSceneTerrainObj(const ImportedScene& scene, const std::filesy
 bool cookMorrowindBalmoraScene(
     const std::filesystem::path& morrowindDataFilesPath,
     MorrowindBalmoraCookResult& outResult
+);
+bool loadMorrowindBalmoraDoorReferences(
+    const std::filesystem::path& morrowindDataFilesPath,
+    std::vector<MorrowindDoorReference>& outDoors
+);
+bool loadMorrowindInteriorDoorReferences(
+    const std::filesystem::path& morrowindDataFilesPath,
+    const std::string& cellName,
+    std::vector<MorrowindDoorReference>& outDoors
+);
+bool saveMorrowindDoorCache(const MorrowindDoorCache& cache, const std::filesystem::path& outputPath);
+bool loadMorrowindDoorCache(const std::filesystem::path& inputPath, MorrowindDoorCache& outCache);
+bool cookMorrowindInteriorCellScene(
+    const std::filesystem::path& morrowindDataFilesPath,
+    const std::string& cellName,
+    ImportedScene& outScene
 );
 
 }  // namespace odai::importer

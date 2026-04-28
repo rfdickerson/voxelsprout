@@ -243,6 +243,10 @@ void RendererBackend::setImportedSceneDebugState(bool showTerrain, bool showStat
     m_debugImportedWaterSolid = waterDebug;
 }
 
+void RendererBackend::setImportedSceneInteriorMode(bool enabled) {
+    m_importedSceneInteriorMode = enabled;
+}
+
 void RendererBackend::importedSceneDebugState(
     bool& outShowTerrain,
     bool& outShowStatics,
@@ -566,6 +570,14 @@ void RendererBackend::buildFrameStatsUi() {
             m_voxelGiRestirReady ? "yes" : "no",
             m_rtTlas.handle != VK_NULL_HANDLE ? "yes" : "no"
         );
+        if (m_importedSceneInteriorMode) {
+            ImGui::Text(
+                "Imported GI: %u tris / %u voxels / %u lights",
+                static_cast<unsigned>(m_debugImportedGiTriangleCount),
+                static_cast<unsigned>(m_debugImportedGiVoxelizedCellCount),
+                static_cast<unsigned>(m_debugImportedLightSelectedCount)
+            );
+        }
         ImGui::SliderFloat("Bounce Strength", &m_voxelGiDebugSettings.bounceStrength, 0.0f, 2.50f, "%.2f");
         ImGui::SliderFloat("Diffusion Softness", &m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f, "%.2f");
         ImGui::SliderInt("RT Surface Samples", &m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2);
@@ -585,7 +597,7 @@ void RendererBackend::buildFrameStatsUi() {
         }
         if (ImGui::TreeNodeEx("Advanced GI Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
             const char* giVisualizationModes =
-                "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0";
+                "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0Imported Lights\0";
             ImGui::Combo("GI Visualize", &m_voxelGiDebugSettings.visualizationMode, giVisualizationModes);
             if (m_voxelGiDebugSettings.visualizationMode > 0) {
                 m_debugVisualizeSsao = false;

@@ -185,7 +185,7 @@ public:
         bool restirEnableSpatialReuse = true;
         int restirSpatialRadius = 1;
         bool restirHistoryResetRequested = false;
-        int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo
+        int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo, 5 = imported lights
     };
 
     bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
@@ -228,6 +228,7 @@ public:
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
+    void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(
         bool& outShowTerrain,
         bool& outShowStatics,
@@ -322,6 +323,7 @@ private:
     bool createDiffuseTextureResources();
     bool createMorrowindSkyCloudMeshResources();
     bool createWaterNormalTextureResources();
+    bool createTerrainDetailTextureResources();
     bool createDescriptorResources();
     using BoundDescriptorSets = DescriptorManager<kMaxFramesInFlight>::BoundDescriptorSets;
     BoundDescriptorSets updateFrameDescriptorSets(
@@ -912,6 +914,7 @@ private:
     VkPipelineLayout& m_pipelineLayout = m_pipelineManager.pipelineLayout;
     VkPipeline& m_pipeline = m_pipelineManager.pipeline;
     VkPipeline& m_pipelineRt = m_pipelineManager.pipelineRt;
+    VkPipeline& m_terrainTessPipeline = m_pipelineManager.terrainTessPipeline;
     VkPipeline& m_shadowPipeline = m_pipelineManager.shadowPipeline;
     VkPipeline& m_pipeShadowPipeline = m_pipelineManager.pipeShadowPipeline;
     VkPipeline& m_grassBillboardShadowPipeline = m_pipelineManager.grassBillboardShadowPipeline;
@@ -970,6 +973,7 @@ private:
     bool m_supportsWireframePreview = false;
     bool m_supportsSamplerAnisotropy = false;
     bool m_supportsMultiDrawIndirect = false;
+    bool m_supportsTessellationShader = false;
     bool m_supportsBindlessDescriptors = false;
     bool m_supportsDisplayTiming = false;
     bool m_hasDisplayTimingExtension = false;
@@ -1082,6 +1086,11 @@ private:
     VmaAllocation m_waterNormalTextureAllocation = VK_NULL_HANDLE;
     VkImageView m_waterNormalTextureImageView = VK_NULL_HANDLE;
     VkSampler m_waterNormalTextureSampler = VK_NULL_HANDLE;
+    VkImage m_terrainDetailTextureImage = VK_NULL_HANDLE;
+    VkDeviceMemory m_terrainDetailTextureMemory = VK_NULL_HANDLE;
+    VmaAllocation m_terrainDetailTextureAllocation = VK_NULL_HANDLE;
+    VkImageView m_terrainDetailTextureImageView = VK_NULL_HANDLE;
+    VkSampler m_terrainDetailTextureSampler = VK_NULL_HANDLE;
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};
     VkCommandPool m_transferCommandPool = VK_NULL_HANDLE;
@@ -1120,10 +1129,15 @@ private:
     bool m_debugShowImportedTextures = true;
     bool m_debugImportedFlatShading = false;
     bool m_debugImportedWaterSolid = false;
+    bool m_importedSceneInteriorMode = false;
     bool m_debugImportedLightsEnabled = true;
     float m_debugImportedLightIntensity = 1.65f;
     float m_debugImportedLightRadiusScale = 3.0f;
     std::uint32_t m_debugImportedLightSelectedCount = 0;
+    std::uint32_t m_debugImportedGiTriangleCount = 0;
+    std::uint32_t m_debugImportedGiVoxelizedCellCount = 0;
+    std::uint64_t m_voxelGiPreviousImportedLightSignature = 0;
+    bool m_voxelGiPreviousImportedLightSignatureValid = false;
     bool m_debugVisualizeSsao = false;
     bool m_debugVisualizeAoNormals = false;
     ShadowDebugSettings m_shadowDebugSettings{};

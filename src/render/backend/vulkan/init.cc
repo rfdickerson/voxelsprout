@@ -283,9 +283,13 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
 }
 
 bool RendererBackend::validateReleaseRuntimeAssets() {
-    constexpr std::array<RuntimeAssetSpec, 22> kRuntimeAssetSpecs = {{
+    constexpr std::array<RuntimeAssetSpec, 26> kRuntimeAssetSpecs = {{
         {"../src/render/shaders/voxel_packed.vert.slang.spv", "world vertex shader", true},
         {"../src/render/shaders/voxel_packed.frag.slang.spv", "world fragment shader", true},
+        {"../src/render/shaders/terrain_heightmap.vert.slang.spv", "terrain heightmap vertex shader", true},
+        {"../src/render/shaders/terrain_heightmap.tesc.slang.spv", "terrain heightmap tess-control shader", true},
+        {"../src/render/shaders/terrain_heightmap.tese.slang.spv", "terrain heightmap tess-eval shader", true},
+        {"../src/render/shaders/terrain_heightmap.frag.slang.spv", "terrain heightmap fragment shader", true},
         {"../src/render/shaders/skybox.vert.slang.spv", "skybox vertex shader", true},
         {"../src/render/shaders/skybox.frag.slang.spv", "skybox fragment shader", true},
         {"../src/render/shaders/sky_cloud.vert.slang.spv", "sky cloud vertex shader", true},
@@ -429,6 +433,7 @@ bool RendererBackend::pickPhysicalDevice() {
         bool supportsSamplerAnisotropy = false;
         bool supportsMultiDrawIndirect = false;
         bool supportsDrawIndirectFirstInstance = false;
+        bool supportsTessellationShader = false;
         bool supportsDisplayTiming = false;
         bool hasDisplayTimingExtension = false;
         uint32_t bindlessTextureCapacity = 0;
@@ -586,6 +591,10 @@ bool RendererBackend::pickPhysicalDevice() {
             VOX_LOGI("render") << "skip GPU: drawIndirectFirstInstance not supported\n";
             continue;
         }
+        if (features2.features.tessellationShader != VK_TRUE) {
+            VOX_LOGI("render") << "skip GPU: tessellationShader not supported\n";
+            continue;
+        }
         if (vulkan11Features.shaderDrawParameters != VK_TRUE) {
             VOX_LOGI("render") << "skip GPU: shaderDrawParameters not supported\n";
             continue;
@@ -683,6 +692,7 @@ bool RendererBackend::pickPhysicalDevice() {
         candidateSelection.supportsSamplerAnisotropy = features2.features.samplerAnisotropy == VK_TRUE;
         candidateSelection.supportsDrawIndirectFirstInstance = features2.features.drawIndirectFirstInstance == VK_TRUE;
         candidateSelection.supportsMultiDrawIndirect = features2.features.multiDrawIndirect == VK_TRUE;
+        candidateSelection.supportsTessellationShader = features2.features.tessellationShader == VK_TRUE;
         candidateSelection.supportsDisplayTiming = supportsDisplayTiming;
         candidateSelection.hasDisplayTimingExtension = displayTimingExtensionAvailable;
         if (supportsDisplayTiming) {
@@ -742,6 +752,7 @@ bool RendererBackend::pickPhysicalDevice() {
         m_supportsWireframePreview = selected.supportsWireframe;
         m_supportsSamplerAnisotropy = selected.supportsSamplerAnisotropy;
         m_supportsMultiDrawIndirect = selected.supportsMultiDrawIndirect;
+        m_supportsTessellationShader = selected.supportsTessellationShader;
         m_supportsBindlessDescriptors = true;
         m_supportsDisplayTiming = selected.supportsDisplayTiming;
         m_hasDisplayTimingExtension = selected.hasDisplayTimingExtension;
@@ -767,6 +778,7 @@ bool RendererBackend::pickPhysicalDevice() {
                            << ", drawIndirectFirstInstance="
                            << (selected.supportsDrawIndirectFirstInstance ? "yes" : "no")
                            << ", multiDrawIndirect=" << (m_supportsMultiDrawIndirect ? "yes" : "no")
+                           << ", tessellationShader=" << (m_supportsTessellationShader ? "yes" : "no")
                            << ", bindlessDescriptors=" << (m_supportsBindlessDescriptors ? "yes" : "no")
                            << ", bindlessTextureCapacity=" << m_bindlessTextureCapacity
                            << ", displayTiming=" << (m_supportsDisplayTiming ? "yes" : "no")
@@ -858,6 +870,7 @@ bool RendererBackend::createLogicalDevice() {
     enabledFeatures2.features.samplerAnisotropy = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
     enabledFeatures2.features.multiDrawIndirect = m_supportsMultiDrawIndirect ? VK_TRUE : VK_FALSE;
     enabledFeatures2.features.drawIndirectFirstInstance = VK_TRUE;
+    enabledFeatures2.features.tessellationShader = VK_TRUE;
 
     VkPhysicalDeviceVulkan11Features vulkan11Features{};
     vulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
@@ -928,6 +941,7 @@ bool RendererBackend::createLogicalDevice() {
     VOX_LOGI("render") << "device features enabled: dynamicRendering=1, synchronization2=1, maintenance4=1, "
         << "timelineSemaphore=1, bufferDeviceAddress=1, memoryPriority=1, shaderDrawParameters=1, drawIndirectFirstInstance=1, "
         << "multiDrawIndirect=" << (m_supportsMultiDrawIndirect ? 1 : 0)
+        << ", tessellationShader=1"
         << ", descriptorIndexing=" << (m_supportsBindlessDescriptors ? 1 : 0)
         << ", runtimeDescriptorArray=" << (m_supportsBindlessDescriptors ? 1 : 0)
         << ", sampledImageArrayNonUniformIndexing=" << (m_supportsBindlessDescriptors ? 1 : 0)
@@ -2096,6 +2110,7 @@ void RendererBackend::shutdown() {
     m_supportsWireframePreview = false;
     m_supportsSamplerAnisotropy = false;
     m_supportsMultiDrawIndirect = false;
+    m_supportsTessellationShader = false;
     m_supportsDisplayTiming = false;
     m_hasDisplayTimingExtension = false;
     m_enableDisplayTiming = false;

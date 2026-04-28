@@ -252,6 +252,67 @@ bool ImportedSceneCollision::build(const odai::importer::GpuSceneAsset& scene) {
     return !m_triangles.empty();
 }
 
+bool ImportedSceneCollision::buildFromPackedScene(const odai::importer::ImportedScene& scene) {
+    clear();
+
+    auto appendTriangle = [this](const odai::math::Vector3& p0,
+                                const odai::math::Vector3& p1,
+                                const odai::math::Vector3& p2) {
+        const odai::math::Vector3 normal = odai::math::cross(p1 - p0, p2 - p0);
+        const float normalLength = odai::math::length(normal);
+        if (normalLength <= kGeometryEpsilon) {
+            return;
+        }
+
+        Triangle triangle{};
+        triangle.p0 = p0;
+        triangle.p1 = p1;
+        triangle.p2 = p2;
+        triangle.normal = normal / normalLength;
+        triangle.bounds = makeTriangleBounds(p0, p1, p2);
+
+        const std::uint32_t triangleIndex = static_cast<std::uint32_t>(m_triangles.size());
+        m_triangles.push_back(triangle);
+
+        const int minTileX = tileCoord(triangle.bounds.minX);
+        const int maxTileX = tileCoord(triangle.bounds.maxX);
+        const int minTileZ = tileCoord(triangle.bounds.minZ);
+        const int maxTileZ = tileCoord(triangle.bounds.maxZ);
+        for (int tileZ = minTileZ; tileZ <= maxTileZ; ++tileZ) {
+            for (int tileX = minTileX; tileX <= maxTileX; ++tileX) {
+                m_tileTriangleIndices[tileKey(tileX, tileZ)].push_back(triangleIndex);
+            }
+        }
+    };
+
+    auto packedPosition = [](const odai::importer::ImportedScenePackedVertex& vertex) {
+        return odai::math::Vector3{vertex.position[0], vertex.position[1], vertex.position[2]};
+    };
+
+    for (const odai::importer::ImportedScenePackedDraw& draw : scene.packedDraws) {
+        const std::uint32_t lastIndex = std::min<std::uint32_t>(
+            draw.firstIndex + draw.indexCount,
+            static_cast<std::uint32_t>(scene.packedIndices.size()));
+        for (std::uint32_t index = draw.firstIndex; index + 2u < lastIndex; index += 3u) {
+            const std::uint32_t i0 = scene.packedIndices[index];
+            const std::uint32_t i1 = scene.packedIndices[index + 1u];
+            const std::uint32_t i2 = scene.packedIndices[index + 2u];
+            if (i0 >= scene.packedVertices.size() ||
+                i1 >= scene.packedVertices.size() ||
+                i2 >= scene.packedVertices.size()) {
+                continue;
+            }
+            appendTriangle(
+                packedPosition(scene.packedVertices[i0]),
+                packedPosition(scene.packedVertices[i1]),
+                packedPosition(scene.packedVertices[i2]));
+        }
+    }
+
+    m_queryStamps.assign(m_triangles.size(), 0u);
+    return !m_triangles.empty();
+}
+
 bool ImportedSceneCollision::empty() const {
     return m_triangles.empty();
 }

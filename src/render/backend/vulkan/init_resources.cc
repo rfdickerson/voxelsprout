@@ -435,6 +435,9 @@ bool RendererBackend::createEnvironmentResources() {
     if (!createWaterNormalTextureResources()) {
         VOX_LOGW("render") << "generated water normal texture creation failed; keeping procedural water normals only";
     }
+    if (!createTerrainDetailTextureResources()) {
+        VOX_LOGW("render") << "terrain detail texture load failed; close terrain will use shader-only detail";
+    }
     VOX_LOGI("render") << "environment uses procedural sky with Morrowind sky cloud mesh when Data Files are available\n";
     return true;
 }
@@ -1517,6 +1520,341 @@ bool RendererBackend::createMorrowindSkyTextureResources() {
     }
     setObjectName(VK_OBJECT_TYPE_SAMPLER, vkHandleToUint64(m_morrowindSkyTextureSampler), "sky.morrowind.sampler");
     VOX_LOGI("render") << "Morrowind sky texture loaded from " << skyTexturePath.string()
+                       << ": " << ddsImage.width << "x" << ddsImage.height
+                       << ", rgba8";
+    return true;
+}
+
+
+bool RendererBackend::createTerrainDetailTextureResources() {
+    bool hasTerrainDetailAllocation = (m_terrainDetailTextureMemory != VK_NULL_HANDLE);
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        hasTerrainDetailAllocation = (m_terrainDetailTextureAllocation != VK_NULL_HANDLE);
+    }
+    if (m_terrainDetailTextureImage != VK_NULL_HANDLE &&
+        hasTerrainDetailAllocation &&
+        m_terrainDetailTextureImageView != VK_NULL_HANDLE &&
+        m_terrainDetailTextureSampler != VK_NULL_HANDLE) {
+        return true;
+    }
+
+    const std::filesystem::path texturePath = resolveRendererAssetPath("assets/terrain_detail_rock_dirt.dds");
+    DdsRgbaImage ddsImage{};
+    if (!loadUncompressedRgbaDdsFile(texturePath, ddsImage)) {
+        VOX_LOGW("render") << "failed to parse terrain detail texture " << texturePath.string();
+        return true;
+    }
+
+    auto destroyPartial = [&]() {
+        if (m_terrainDetailTextureSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(m_device, m_terrainDetailTextureSampler, nullptr);
+            m_terrainDetailTextureSampler = VK_NULL_HANDLE;
+        }
+        if (m_terrainDetailTextureImageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, m_terrainDetailTextureImageView, nullptr);
+            m_terrainDetailTextureImageView = VK_NULL_HANDLE;
+        }
+        if (m_terrainDetailTextureImage != VK_NULL_HANDLE) {
+            if (m_vmaAllocator != VK_NULL_HANDLE && m_terrainDetailTextureAllocation != VK_NULL_HANDLE) {
+                vmaDestroyImage(m_vmaAllocator, m_terrainDetailTextureImage, m_terrainDetailTextureAllocation);
+                m_terrainDetailTextureAllocation = VK_NULL_HANDLE;
+            } else {
+                vkDestroyImage(m_device, m_terrainDetailTextureImage, nullptr);
+            }
+            m_terrainDetailTextureImage = VK_NULL_HANDLE;
+        }
+        if (m_terrainDetailTextureMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, m_terrainDetailTextureMemory, nullptr);
+            m_terrainDetailTextureMemory = VK_NULL_HANDLE;
+        }
+        m_terrainDetailTextureAllocation = VK_NULL_HANDLE;
+    };
+
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    VkBufferCreateInfo stagingCreateInfo{};
+    stagingCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingCreateInfo.size = static_cast<VkDeviceSize>(ddsImage.pixelData.size());
+    stagingCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkResult result = vkCreateBuffer(m_device, &stagingCreateInfo, nullptr, &stagingBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateBuffer(terrainDetailStaging)", result);
+        return false;
+    }
+
+    VkMemoryRequirements stagingMemReq{};
+    vkGetBufferMemoryRequirements(m_device, stagingBuffer, &stagingMemReq);
+    uint32_t memoryTypeIndex = findMemoryTypeIndex(
+        m_physicalDevice,
+        stagingMemReq.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        VOX_LOGW("render") << "no staging memory type for terrain detail texture";
+        return true;
+    }
+
+    VkMemoryAllocateInfo stagingAllocInfo{};
+    stagingAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    stagingAllocInfo.allocationSize = stagingMemReq.size;
+    stagingAllocInfo.memoryTypeIndex = memoryTypeIndex;
+    result = vkAllocateMemory(m_device, &stagingAllocInfo, nullptr, &stagingMemory);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkAllocateMemory(terrainDetailStaging)", result);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    result = vkBindBufferMemory(m_device, stagingBuffer, stagingMemory, 0);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkBindBufferMemory(terrainDetailStaging)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    void* mapped = nullptr;
+    result = vkMapMemory(m_device, stagingMemory, 0, stagingCreateInfo.size, 0, &mapped);
+    if (result != VK_SUCCESS || mapped == nullptr) {
+        logVkFailure("vkMapMemory(terrainDetailStaging)", result);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+    std::memcpy(mapped, ddsImage.pixelData.data(), ddsImage.pixelData.size());
+    vkUnmapMemory(m_device, stagingMemory);
+
+    VkImageCreateInfo imageCreateInfo{};
+    imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageCreateInfo.extent = {ddsImage.width, ddsImage.height, 1};
+    imageCreateInfo.mipLevels = 1;
+    imageCreateInfo.arrayLayers = 1;
+    imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (m_vmaAllocator != VK_NULL_HANDLE) {
+        VmaAllocationCreateInfo allocationCreateInfo{};
+        allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        result = vmaCreateImage(
+            m_vmaAllocator,
+            &imageCreateInfo,
+            &allocationCreateInfo,
+            &m_terrainDetailTextureImage,
+            &m_terrainDetailTextureAllocation,
+            nullptr);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vmaCreateImage(terrainDetail)", result);
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+    } else {
+        result = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_terrainDetailTextureImage);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(terrainDetail)", result);
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+        VkMemoryRequirements imageMemReq{};
+        vkGetImageMemoryRequirements(m_device, m_terrainDetailTextureImage, &imageMemReq);
+        memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice,
+            imageMemReq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            destroyPartial();
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            VOX_LOGW("render") << "no device-local memory for terrain detail texture";
+            return true;
+        }
+        VkMemoryAllocateInfo imageAllocInfo{};
+        imageAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        imageAllocInfo.allocationSize = imageMemReq.size;
+        imageAllocInfo.memoryTypeIndex = memoryTypeIndex;
+        result = vkAllocateMemory(m_device, &imageAllocInfo, nullptr, &m_terrainDetailTextureMemory);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(terrainDetail)", result);
+            destroyPartial();
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+        result = vkBindImageMemory(m_device, m_terrainDetailTextureImage, m_terrainDetailTextureMemory, 0);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(terrainDetail)", result);
+            destroyPartial();
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+    }
+    setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_terrainDetailTextureImage), "terrain.detail.image");
+
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    result = vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateCommandPool(terrainDetailUpload)", result);
+        destroyPartial();
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
+    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    commandBufferAllocateInfo.commandPool = commandPool;
+    commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandBufferAllocateInfo.commandBufferCount = 1;
+    result = vkAllocateCommandBuffers(m_device, &commandBufferAllocateInfo, &commandBuffer);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkAllocateCommandBuffers(terrainDetailUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        destroyPartial();
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkBeginCommandBuffer(terrainDetailUpload)", result);
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+        destroyPartial();
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+        return false;
+    }
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = m_terrainDetailTextureImage;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+
+    VkBufferImageCopy copyRegion{};
+    copyRegion.bufferOffset = 0;
+    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyRegion.imageSubresource.mipLevel = 0;
+    copyRegion.imageSubresource.baseArrayLayer = 0;
+    copyRegion.imageSubresource.layerCount = 1;
+    copyRegion.imageExtent = {ddsImage.width, ddsImage.height, 1};
+    vkCmdCopyBufferToImage(
+        commandBuffer,
+        stagingBuffer,
+        m_terrainDetailTextureImage,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &copyRegion);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier);
+
+    result = vkEndCommandBuffer(commandBuffer);
+    if (result == VK_SUCCESS) {
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+        result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        if (result == VK_SUCCESS) {
+            result = vkQueueWaitIdle(m_graphicsQueue);
+        }
+    }
+    vkDestroyCommandPool(m_device, commandPool, nullptr);
+    vkFreeMemory(m_device, stagingMemory, nullptr);
+    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+    if (result != VK_SUCCESS) {
+        logVkFailure("terrainDetailUpload", result);
+        destroyPartial();
+        return false;
+    }
+
+    VkImageViewCreateInfo viewCreateInfo{};
+    viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCreateInfo.image = m_terrainDetailTextureImage;
+    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCreateInfo.subresourceRange.baseMipLevel = 0;
+    viewCreateInfo.subresourceRange.levelCount = 1;
+    viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+    viewCreateInfo.subresourceRange.layerCount = 1;
+    result = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_terrainDetailTextureImageView);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateImageView(terrainDetail)", result);
+        destroyPartial();
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(m_terrainDetailTextureImageView), "terrain.detail.view");
+
+    VkSamplerCreateInfo samplerCreateInfo{};
+    samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.minLod = 0.0f;
+    samplerCreateInfo.maxLod = 0.0f;
+    samplerCreateInfo.maxAnisotropy = 1.0f;
+    result = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_terrainDetailTextureSampler);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateSampler(terrainDetail)", result);
+        destroyPartial();
+        return false;
+    }
+    setObjectName(VK_OBJECT_TYPE_SAMPLER, vkHandleToUint64(m_terrainDetailTextureSampler), "terrain.detail.sampler");
+    VOX_LOGI("render") << "terrain detail texture loaded from " << texturePath.string()
                        << ": " << ddsImage.width << "x" << ddsImage.height
                        << ", rgba8";
     return true;
@@ -4106,6 +4444,28 @@ void RendererBackend::destroyDiffuseTextureResources() {
         m_waterNormalTextureMemory = VK_NULL_HANDLE;
     }
     m_waterNormalTextureAllocation = VK_NULL_HANDLE;
+    if (m_terrainDetailTextureSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_terrainDetailTextureSampler, nullptr);
+        m_terrainDetailTextureSampler = VK_NULL_HANDLE;
+    }
+    if (m_terrainDetailTextureImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, m_terrainDetailTextureImageView, nullptr);
+        m_terrainDetailTextureImageView = VK_NULL_HANDLE;
+    }
+    if (m_terrainDetailTextureImage != VK_NULL_HANDLE) {
+        if (m_vmaAllocator != VK_NULL_HANDLE && m_terrainDetailTextureAllocation != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, m_terrainDetailTextureImage, m_terrainDetailTextureAllocation);
+            m_terrainDetailTextureAllocation = VK_NULL_HANDLE;
+        } else {
+            vkDestroyImage(m_device, m_terrainDetailTextureImage, nullptr);
+        }
+        m_terrainDetailTextureImage = VK_NULL_HANDLE;
+    }
+    if (m_terrainDetailTextureMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, m_terrainDetailTextureMemory, nullptr);
+        m_terrainDetailTextureMemory = VK_NULL_HANDLE;
+    }
+    m_terrainDetailTextureAllocation = VK_NULL_HANDLE;
     if (m_morrowindSkyTextureSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device, m_morrowindSkyTextureSampler, nullptr);
         m_morrowindSkyTextureSampler = VK_NULL_HANDLE;

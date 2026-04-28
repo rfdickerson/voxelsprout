@@ -195,6 +195,44 @@ float sampleRtSunVisibility(float3 faceWorldPosition, float3 normal, float ndotl
 }
 #endif
 
+float3 evaluateImportedLocalLightIrradiance(float3 faceWorldPosition, float3 normal)
+{
+    const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
+    const float globalIntensity = camera.importedLightConfig.z > 0.5 ? max(camera.importedLightConfig.y, 0.0) : 0.0;
+    float3 lighting = float3(0.0, 0.0, 0.0);
+    for (int lightIndex = 0; lightIndex < 64; ++lightIndex)
+    {
+        if (lightIndex >= lightCount)
+        {
+            break;
+        }
+
+        const float4 positionRadius = camera.importedLightPositionRadius[lightIndex];
+        const float4 colorIntensity = camera.importedLightColorIntensity[lightIndex];
+        const float radius = max(positionRadius.w, 1.0);
+        const float3 toLight = positionRadius.xyz - faceWorldPosition;
+        const float distanceSquared = dot(toLight, toLight);
+        if (distanceSquared >= radius * radius)
+        {
+            continue;
+        }
+
+        const float distanceToLight = sqrt(max(distanceSquared, 1e-4));
+        const float3 lightDirection = toLight / distanceToLight;
+        const float ndotl = saturate(dot(normal, lightDirection));
+        if (ndotl <= 0.0001)
+        {
+            continue;
+        }
+
+        const float normalizedDistance = saturate(distanceToLight / radius);
+        const float falloff = saturate(1.0 - (normalizedDistance * normalizedDistance));
+        const float attenuation = falloff * falloff;
+        lighting += colorIntensity.rgb * (colorIntensity.w * globalIntensity * ndotl * attenuation);
+    }
+    return lighting;
+}
+
 [numthreads(4, 4, 4)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -297,9 +335,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float upFactor = saturate((normal.y * 0.5) + 0.5);
         const float ambientBoost = lerp(0.6, 1.2, upFactor);
         const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyFactor * ambientBoost);
+        const float3 localLightIrradiance = evaluateImportedLocalLightIrradiance(worldPosition + faceCenterOffset, normal);
         const float3 directIrradiance =
             camera.sunColorShadow.xyz * (sunIntensity * ndotl * directVisibility * injectSunScale);
-        const float3 faceIrradianceColor = max(directIrradiance + skyIrradiance, float3(0.0, 0.0, 0.0));
+        const float3 faceIrradianceColor =
+            max(directIrradiance + skyIrradiance + localLightIrradiance, float3(0.0, 0.0, 0.0));
         if (i == 0) cachedSurfaceIrradiancePosX = faceIrradianceColor;
         if (i == 1) cachedSurfaceIrradianceNegX = faceIrradianceColor;
         if (i == 2) cachedSurfaceIrradiancePosY = faceIrradianceColor;

@@ -1851,6 +1851,10 @@ bool RendererBackend::createGraphicsPipeline() {
     constexpr const char* kWorldVertexShaderPath = "../src/render/shaders/voxel_packed.vert.slang.spv";
     constexpr const char* kWorldFragmentShaderPath = "../src/render/shaders/voxel_packed.frag.slang.spv";
     constexpr const char* kWorldFragmentRtShaderPath = "../src/render/shaders/voxel_packed_rt.frag.slang.spv";
+    constexpr const char* kTerrainVertexShaderPath = "../src/render/shaders/terrain_heightmap.vert.slang.spv";
+    constexpr const char* kTerrainTessControlShaderPath = "../src/render/shaders/terrain_heightmap.tesc.slang.spv";
+    constexpr const char* kTerrainTessEvalShaderPath = "../src/render/shaders/terrain_heightmap.tese.slang.spv";
+    constexpr const char* kTerrainFragmentShaderPath = "../src/render/shaders/terrain_heightmap.frag.slang.spv";
     constexpr const char* kSkyboxVertexShaderPath = "../src/render/shaders/skybox.vert.slang.spv";
     constexpr const char* kSkyboxFragmentShaderPath = "../src/render/shaders/skybox.frag.slang.spv";
     constexpr const char* kToneMapVertexShaderPath = "../src/render/shaders/tone_map.vert.slang.spv";
@@ -2770,6 +2774,111 @@ bool RendererBackend::createGraphicsPipeline() {
               << ", depthBias=" << (grassShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
               << "\n";
 
+    std::array<VkShaderModule, 4> terrainShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    const std::array<ShaderModuleLoadSpec, 4> terrainShaderLoadSpecs = {{
+        {kTerrainVertexShaderPath, "terrain_heightmap.vert"},
+        {kTerrainTessControlShaderPath, "terrain_heightmap.tesc"},
+        {kTerrainTessEvalShaderPath, "terrain_heightmap.tese"},
+        {kTerrainFragmentShaderPath, "terrain_heightmap.frag"},
+    }};
+    auto destroyNewScenePipelines = [&]() {
+        vkDestroyPipeline(m_device, grassShadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, importedStaticShadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
+        vkDestroyPipeline(m_device, worldPipeline, nullptr);
+        if (worldRtPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, worldRtPipeline, nullptr);
+        }
+        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
+        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
+        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
+        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
+    };
+    if (!createShaderModulesFromFiles(m_device, terrainShaderLoadSpecs, terrainShaderModules)) {
+        destroyNewScenePipelines();
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo terrainVertexShaderStage{};
+    terrainVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    terrainVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    terrainVertexShaderStage.module = terrainShaderModules[0];
+    terrainVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo terrainTessControlShaderStage{};
+    terrainTessControlShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    terrainTessControlShaderStage.stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+    terrainTessControlShaderStage.module = terrainShaderModules[1];
+    terrainTessControlShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo terrainTessEvalShaderStage{};
+    terrainTessEvalShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    terrainTessEvalShaderStage.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    terrainTessEvalShaderStage.module = terrainShaderModules[2];
+    terrainTessEvalShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo terrainFragmentShaderStage{};
+    terrainFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    terrainFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    terrainFragmentShaderStage.module = terrainShaderModules[3];
+    terrainFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 4> terrainShaderStages = {
+        terrainVertexShaderStage,
+        terrainTessControlShaderStage,
+        terrainTessEvalShaderStage,
+        terrainFragmentShaderStage
+    };
+
+    VkPipelineVertexInputStateCreateInfo terrainVertexInputInfo{};
+    terrainVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo terrainInputAssembly{};
+    terrainInputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    terrainInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+
+    VkPipelineTessellationStateCreateInfo terrainTessellationState{};
+    terrainTessellationState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+    terrainTessellationState.patchControlPoints = 4;
+
+    VkPipelineRasterizationStateCreateInfo terrainRasterizer = rasterizer;
+    terrainRasterizer.cullMode = VK_CULL_MODE_NONE;
+
+    VkGraphicsPipelineCreateInfo terrainPipelineCreateInfo = pipelineCreateInfo;
+    terrainPipelineCreateInfo.stageCount = static_cast<uint32_t>(terrainShaderStages.size());
+    terrainPipelineCreateInfo.pStages = terrainShaderStages.data();
+    terrainPipelineCreateInfo.pVertexInputState = &terrainVertexInputInfo;
+    terrainPipelineCreateInfo.pInputAssemblyState = &terrainInputAssembly;
+    terrainPipelineCreateInfo.pTessellationState = &terrainTessellationState;
+    terrainPipelineCreateInfo.pRasterizationState = &terrainRasterizer;
+
+    VkPipeline terrainTessPipeline = VK_NULL_HANDLE;
+    const VkResult terrainPipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &terrainPipelineCreateInfo,
+        nullptr,
+        &terrainTessPipeline
+    );
+    destroyShaderModules(m_device, terrainShaderModules);
+    if (terrainPipelineResult != VK_SUCCESS) {
+        destroyNewScenePipelines();
+        logVkFailure("vkCreateGraphicsPipelines(terrainHeightmapTess)", terrainPipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (terrainHeightmapTess): topology=patch_list"
+              << ", patchControlPoints=" << terrainTessellationState.patchControlPoints
+              << ", cullMode=" << static_cast<uint32_t>(terrainRasterizer.cullMode)
+              << "\n";
+
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
     }
@@ -2803,8 +2912,12 @@ bool RendererBackend::createGraphicsPipeline() {
     if (m_previewFaceOutlinePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_previewFaceOutlinePipeline, nullptr);
     }
+    if (m_terrainTessPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_terrainTessPipeline, nullptr);
+    }
     m_pipeline = worldPipeline;
     m_pipelineRt = worldRtPipeline;
+    m_terrainTessPipeline = terrainTessPipeline;
     m_skyboxPipeline = skyboxPipeline;
     m_shadowPipeline = shadowPipeline;
     m_pipeShadowPipeline = pipeShadowPipeline;
@@ -2818,6 +2931,7 @@ bool RendererBackend::createGraphicsPipeline() {
     if (m_pipelineRt != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipelineRt), "pipeline.world.rt");
     }
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_terrainTessPipeline), "pipeline.terrainHeightmapTess");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyboxPipeline), "pipeline.skybox");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_shadowPipeline), "pipeline.shadow.voxels");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeShadowPipeline), "pipeline.shadow.pipes");

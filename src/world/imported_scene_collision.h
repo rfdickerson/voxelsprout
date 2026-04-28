@@ -45,6 +45,7 @@ public:
 
     void clear();
     bool build(const odai::importer::GpuSceneAsset& scene);
+    bool buildFromPackedScene(const odai::importer::ImportedScene& scene);
 
     [[nodiscard]] bool empty() const;
     [[nodiscard]] BuildStats stats() const;

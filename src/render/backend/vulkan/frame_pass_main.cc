@@ -39,6 +39,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
+    const bool renderingImportedScene = !importedMeshDraws.empty() || !importedActorMeshDraws.empty();
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = inputs.transportInstanceCount;
@@ -183,6 +184,30 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
+    if (!renderingImportedScene && m_terrainTessPipeline != VK_NULL_HANDLE) {
+        constexpr std::uint32_t kTerrainPatchGridResolution = 16u;
+        constexpr std::uint32_t kTerrainPatchControlPointCount = 4u;
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_terrainTessPipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            boundDescriptorSetCount,
+            boundDescriptorSets.sets.data(),
+            1,
+            &mvpDynamicOffset
+        );
+        countDrawCalls(m_debugDrawCallsMain, 1);
+        vkCmdDraw(
+            commandBuffer,
+            kTerrainPatchControlPointCount * kTerrainPatchGridResolution * kTerrainPatchGridResolution,
+            1,
+            0,
+            0
+        );
+    }
+
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, useRtVoxelShadows ? m_pipelineRt : m_pipeline);
     vkCmdBindDescriptorSets(
         commandBuffer,
@@ -194,7 +219,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         1,
         &mvpDynamicOffset
     );
-    if (frameChunkDrawData.canDrawChunksIndirect) {
+    if (frameChunkDrawData.canDrawChunksIndirect && m_terrainTessPipeline == VK_NULL_HANDLE) {
         const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, chunkInstanceBuffer};
         const VkDeviceSize voxelVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
         vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
@@ -292,6 +317,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
         vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
         ChunkPushConstants importedPushConstants{};
+        importedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
         importedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
         importedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
         vkCmdPushConstants(
@@ -339,6 +365,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
         vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
         ChunkPushConstants importedPushConstants{};
+        importedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
         importedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
         importedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
         vkCmdPushConstants(

@@ -681,7 +681,8 @@ bool Navmesh::segmentBlocked(
     };
 
     for (const Triangle& obstacle : m_obstacleTriangles) {
-        const QueryAabb obstacleBounds = makeBounds(obstacle.p0, obstacle.p1, obstacle.p2);
+
+      const QueryAabb obstacleBounds = makeBounds(obstacle.p0, obstacle.p1, obstacle.p2);
         if (!aabbOverlaps(segmentBounds, obstacleBounds)) {
             continue;
         }

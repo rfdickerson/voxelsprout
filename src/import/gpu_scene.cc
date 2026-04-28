@@ -416,7 +416,11 @@ bool buildGpuSceneAssetFromImportedScene(const ImportedScene& scene, GpuSceneAss
         }
     };
 
-    if (!outAsset.meshAssets.empty()) {
+    const bool hasTerrainMesh =
+        !scene.meshes.empty() &&
+        !outAsset.meshAssets.empty() &&
+        scene.meshes.front().name == "terrain";
+    if (hasTerrainMesh) {
         appendStaticObject("terrain", {
             1.0f, 0.0f, 0.0f, 0.0f,
             0.0f, 1.0f, 0.0f, 0.0f,
@@ -622,20 +626,22 @@ void buildGpuSceneRenderCache(GpuSceneAsset& scene) {
         return appendedDrawCount;
     };
 
-    if (!scene.meshAssets.empty()) {
-        const std::uint32_t terrainPageIndex = scene.instances.pageIndices.empty()
-            ? 0u
-            : scene.instances.pageIndices.front();
+    std::uint32_t firstStaticInstanceIndex = 0u;
+    if (!scene.instances.objectIndices.empty() &&
+        !scene.instances.flags.empty() &&
+        (scene.instances.flags.front() & kGpuSceneComponentFlagTerrain) != 0u) {
+        const std::uint32_t terrainPageIndex = scene.instances.pageIndices.front();
         scene.renderCache.terrainDrawCount = appendMeshInstance(
-            scene.meshAssets.front(),
+            scene.meshAssets[scene.instances.meshAssetIndices.front()],
             scene.objects.appliedTransforms.front(),
             0u,
             terrainPageIndex,
             false,
             true,
             {});
+        firstStaticInstanceIndex = 1u;
     }
-    for (std::uint32_t instanceIndex = 1u; instanceIndex < scene.instances.objectIndices.size(); ++instanceIndex) {
+    for (std::uint32_t instanceIndex = firstStaticInstanceIndex; instanceIndex < scene.instances.objectIndices.size(); ++instanceIndex) {
         const std::uint32_t meshAssetIndex = scene.instances.meshAssetIndices[instanceIndex];
         if (meshAssetIndex >= scene.meshAssets.size()) {
             continue;

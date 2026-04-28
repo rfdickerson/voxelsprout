@@ -454,6 +454,11 @@ void RendererBackend::renderFrame(
         !importedActors->indices.empty() &&
         !importedActors->draws.empty();
     const bool renderingImportedScene = !m_importedMeshDraws.empty() || renderingImportedActors;
+    const bool legacyVoxelRenderingEnabled = !renderingImportedScene;
+    const bool importedInteriorGiEnabled =
+        m_importedSceneInteriorMode &&
+        !m_importedGiTriangles.empty();
+    const bool voxelGiSceneEnabled = legacyVoxelRenderingEnabled || importedInteriorGiEnabled;
     const float farPlane = renderingImportedScene ? 50000.0f : 500.0f;
     const float halfFovRadians = odai::math::radians(activeFovDegrees) * 0.5f;
     const float tanHalfFov = std::tan(halfFovRadians);
@@ -761,7 +766,7 @@ void RendererBackend::renderFrame(
     mvpUniform.shadowVoxelGridOrigin[0] = kVoxelGiAmbientRebalanceStrength;
     mvpUniform.shadowVoxelGridOrigin[1] = kVoxelGiAmbientFloor;
     mvpUniform.shadowVoxelGridOrigin[2] =
-        static_cast<float>(std::clamp(m_voxelGiDebugSettings.visualizationMode, 0, 4));
+        static_cast<float>(std::clamp(m_voxelGiDebugSettings.visualizationMode, 0, 5));
     // W channel remains AO enable: 1.0 enables vertex AO, 0.0 disables.
     mvpUniform.shadowVoxelGridOrigin[3] = m_debugEnableVertexAo ? 1.0f : 0.0f;
 
@@ -797,7 +802,9 @@ void RendererBackend::renderFrame(
     mvpUniform.skyConfig3[1] = std::clamp(m_skyDebugSettings.bloomSoftKnee, 0.0f, 1.0f);
     mvpUniform.skyConfig3[2] = std::clamp(m_skyDebugSettings.bloomBaseIntensity, 0.0f, 2.0f);
     mvpUniform.skyConfig3[3] = std::clamp(m_skyDebugSettings.bloomSunFacingBoost, 0.0f, 2.0f);
-    mvpUniform.skyConfig4[0] = std::clamp(m_skyDebugSettings.volumetricFogDensity, 0.0f, 1.0f);
+    mvpUniform.skyConfig4[0] = m_importedSceneInteriorMode
+        ? 0.0f
+        : std::clamp(m_skyDebugSettings.volumetricFogDensity, 0.0f, 1.0f);
     mvpUniform.skyConfig4[1] = std::clamp(m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 1.0f);
     mvpUniform.skyConfig4[2] = m_skyDebugSettings.volumetricFogBaseHeight;
     mvpUniform.skyConfig4[3] = std::clamp(m_skyDebugSettings.volumetricSunScattering, 0.0f, 8.0f);
@@ -892,16 +899,44 @@ void RendererBackend::renderFrame(
     m_debugImportedLightSelectedCount = static_cast<std::uint32_t>(selectedImportedLightCount);
     const float importedLightGlobalIntensity =
         std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f);
+    auto mixImportedLightSignature = [](std::uint64_t hash, std::uint64_t value) {
+        hash ^= value;
+        hash *= 1099511628211ull;
+        return hash;
+    };
+    auto mixImportedLightFloat = [&](std::uint64_t hash, float value) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return mixImportedLightSignature(hash, static_cast<std::uint64_t>(bits));
+    };
+    std::uint64_t importedLightSignature = 1469598103934665603ull;
+    importedLightSignature = mixImportedLightSignature(
+        importedLightSignature,
+        m_debugImportedLightsEnabled ? 1ull : 0ull);
+    importedLightSignature = mixImportedLightSignature(
+        importedLightSignature,
+        static_cast<std::uint64_t>(selectedImportedLightCount));
+    importedLightSignature = mixImportedLightFloat(importedLightSignature, importedLightGlobalIntensity);
+    importedLightSignature = mixImportedLightFloat(importedLightSignature, importedLightRadiusScale);
     for (std::size_t lightIndex = 0; lightIndex < selectedImportedLightCount; ++lightIndex) {
         const ImportedLocalLight& light = *selectedImportedLights[lightIndex].light;
+        const float lightRadius = std::max(light.radius * importedLightRadiusScale, 1.0f);
         mvpUniform.importedLightPositionRadius[lightIndex][0] = light.position[0];
         mvpUniform.importedLightPositionRadius[lightIndex][1] = light.position[1];
         mvpUniform.importedLightPositionRadius[lightIndex][2] = light.position[2];
-        mvpUniform.importedLightPositionRadius[lightIndex][3] = std::max(light.radius * importedLightRadiusScale, 1.0f);
+        mvpUniform.importedLightPositionRadius[lightIndex][3] = lightRadius;
         mvpUniform.importedLightColorIntensity[lightIndex][0] = light.color[0];
         mvpUniform.importedLightColorIntensity[lightIndex][1] = light.color[1];
         mvpUniform.importedLightColorIntensity[lightIndex][2] = light.color[2];
         mvpUniform.importedLightColorIntensity[lightIndex][3] = light.intensity;
+        importedLightSignature = mixImportedLightFloat(importedLightSignature, light.position[0]);
+        importedLightSignature = mixImportedLightFloat(importedLightSignature, light.position[1]);
+        importedLightSignature = mixImportedLightFloat(importedLightSignature, light.position[2]);
+        importedLightSignature = mixImportedLightFloat(importedLightSignature, lightRadius);
+        importedLightSignature = mixImportedLightFloat(importedLightSignature, light.color[0]);
+        importedLightSignature = mixImportedLightFloat(importedLightSignature, light.color[1]);
+        importedLightSignature = mixImportedLightFloat(importedLightSignature, light.color[2]);
+        importedLightSignature = mixImportedLightFloat(importedLightSignature, light.intensity);
     }
     mvpUniform.importedLightConfig[0] = static_cast<float>(selectedImportedLightCount);
     mvpUniform.importedLightConfig[1] = importedLightGlobalIntensity;
@@ -975,7 +1010,14 @@ void RendererBackend::renderFrame(
         kVoxelGiLightingChangeThreshold,
         kVoxelGiTuningChangeThreshold
     );
-    const bool voxelGiNeedsOccupancyUpload = voxelGiFlags.needsOccupancyUpload;
+    if (!voxelGiSceneEnabled) {
+        m_voxelGiWorldDirty = false;
+        m_voxelGiOccupancyFullRebuildInProgress = false;
+        m_voxelGiOccupancyFullRebuildNeedsClear = false;
+        m_voxelGiOccupancyFullRebuildCursor = 0;
+        m_voxelGiDirtyChunkIndices.clear();
+    }
+    const bool voxelGiNeedsOccupancyUpload = voxelGiSceneEnabled && voxelGiFlags.needsOccupancyUpload;
     const bool voxelGiRtSurfaceSettingsChanged =
         !m_voxelGiHasPreviousFrameState ||
         (m_voxelGiDebugSettings.surfaceMode != VoxelGiSurfaceMode::Legacy) != m_voxelGiPreviousRtSurfaceTracingEnabled ||
@@ -994,6 +1036,10 @@ void RendererBackend::renderFrame(
         m_voxelGiDebugSettings.restirEnableSpatialReuse != m_voxelGiPreviousRestirSpatialReuseEnabled ||
         std::abs(static_cast<float>(m_voxelGiDebugSettings.restirSpatialRadius) - m_voxelGiPreviousRestirSpatialRadius) >
             kVoxelGiTuningChangeThreshold;
+    const bool importedGiLightStateChanged =
+        importedInteriorGiEnabled &&
+        (!m_voxelGiPreviousImportedLightSignatureValid ||
+         importedLightSignature != m_voxelGiPreviousImportedLightSignature);
     if (m_voxelGiDebugSettings.restirHistoryResetRequested) {
         m_voxelGiRestirHistoryValid = false;
         m_voxelGiRestirHistoryResetReason = "manual_reset";
@@ -1008,12 +1054,20 @@ void RendererBackend::renderFrame(
     } else if (voxelGiRestirSettingsChanged) {
         m_voxelGiRestirHistoryValid = false;
         m_voxelGiRestirHistoryResetReason = "restir_settings";
+    } else if (importedGiLightStateChanged) {
+        m_voxelGiRestirHistoryValid = false;
+        m_voxelGiRestirHistoryResetReason = "imported_lights";
     } else if (voxelGiFlags.needsComputeUpdate && voxelGiFlags.needsOccupancyUpload) {
         m_voxelGiRestirHistoryValid = false;
         m_voxelGiRestirHistoryResetReason = "occupancy_rebuild";
     }
     const bool voxelGiNeedsComputeUpdate =
-        voxelGiFlags.needsComputeUpdate || voxelGiRtSurfaceSettingsChanged || voxelGiRestirSettingsChanged || !m_voxelGiInitialized;
+        voxelGiSceneEnabled &&
+        (voxelGiFlags.needsComputeUpdate ||
+         voxelGiRtSurfaceSettingsChanged ||
+         voxelGiRestirSettingsChanged ||
+         importedGiLightStateChanged ||
+         !m_voxelGiInitialized);
     m_voxelGiHasPreviousFrameState = true;
     m_voxelGiPreviousGridOrigin = {voxelGiOriginX, voxelGiOriginY, voxelGiOriginZ};
     m_voxelGiPreviousSunDirection = {sunDirection.x, sunDirection.y, sunDirection.z};
@@ -1033,6 +1087,8 @@ void RendererBackend::renderFrame(
     m_voxelGiPreviousRestirTemporalReuseEnabled = m_voxelGiDebugSettings.restirEnableTemporalReuse;
     m_voxelGiPreviousRestirSpatialReuseEnabled = m_voxelGiDebugSettings.restirEnableSpatialReuse;
     m_voxelGiPreviousRestirSpatialRadius = static_cast<float>(m_voxelGiDebugSettings.restirSpatialRadius);
+    m_voxelGiPreviousImportedLightSignature = importedLightSignature;
+    m_voxelGiPreviousImportedLightSignatureValid = importedInteriorGiEnabled;
     mvpUniform.voxelGiGridOriginCellSize[0] = voxelGiOriginX;
     mvpUniform.voxelGiGridOriginCellSize[1] = voxelGiOriginY;
     mvpUniform.voxelGiGridOriginCellSize[2] = voxelGiOriginZ;
@@ -1048,6 +1104,7 @@ void RendererBackend::renderFrame(
         mvpUniform.voxelBaseColorPalette[colorIndex][2] = static_cast<float>((rgba >> 16u) & 0xFFu) / 255.0f;
         mvpUniform.voxelBaseColorPalette[colorIndex][3] = static_cast<float>((rgba >> 24u) & 0xFFu) / 255.0f;
     }
+    mvpUniform.voxelGiRestirConfig0[3] = m_voxelGiRestirHistoryValid ? 1.0f : 0.0f;
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     VkDescriptorBufferInfo bufferInfo{};
@@ -1238,7 +1295,7 @@ void RendererBackend::renderFrame(
             m_voxelGiOccupancyFullRebuildCursor = 0;
         }
 
-        const std::size_t chunkCount = chunkGrid.chunkCount();
+        const std::size_t chunkCount = legacyVoxelRenderingEnabled ? chunkGrid.chunkCount() : 0u;
         if (m_voxelGiOccupancyFullRebuildInProgress && chunkCount == 0u && m_importedGiTriangles.empty()) {
             m_voxelGiOccupancyFullRebuildInProgress = false;
             m_voxelGiOccupancyFullRebuildCursor = 0u;
@@ -1371,6 +1428,7 @@ void RendererBackend::renderFrame(
         voxelGiOccupancyCpuMs = static_cast<float>(
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - occupancyCpuStartTime).count()
         );
+        m_debugImportedGiVoxelizedCellCount = importedGiVoxelizedCellCount;
         if (importedGiVoxelizedCellCount > 0u) {
             VOX_LOGI("render") << "imported GI occupancy voxelized cells="
                                << importedGiVoxelizedCellCount;
@@ -1525,7 +1583,10 @@ void RendererBackend::renderFrame(
         );
     }
 
-    const FrameInstanceDrawData frameInstanceDrawData = prepareFrameInstanceDrawData(simulation, simulationAlpha);
+    const bool legacySceneRenderingEnabled = legacyVoxelRenderingEnabled;
+    const FrameInstanceDrawData frameInstanceDrawData = legacySceneRenderingEnabled
+        ? prepareFrameInstanceDrawData(simulation, simulationAlpha)
+        : FrameInstanceDrawData{};
     const uint32_t pipeInstanceCount = frameInstanceDrawData.pipeInstanceCount;
     const auto& pipeInstanceSliceOpt = frameInstanceDrawData.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = frameInstanceDrawData.transportInstanceCount;
@@ -1534,20 +1595,25 @@ void RendererBackend::renderFrame(
     const auto& beltCargoInstanceSliceOpt = frameInstanceDrawData.beltCargoInstanceSliceOpt;
     const std::vector<ReadyMagicaDraw>& readyMagicaDraws = frameInstanceDrawData.readyMagicaDraws;
 
-    const FrameChunkDrawData frameChunkDrawData = prepareFrameChunkDrawData(
-        chunkGrid.chunks(),
-        visibleChunkIndices,
-        lightViewProjMatrices,
-        cameraChunkX,
-        cameraChunkY,
-        cameraChunkZ
-    );
+    const FrameChunkDrawData frameChunkDrawData = legacySceneRenderingEnabled
+        ? prepareFrameChunkDrawData(
+            chunkGrid.chunks(),
+            visibleChunkIndices,
+            lightViewProjMatrices,
+            cameraChunkX,
+            cameraChunkY,
+            cameraChunkZ)
+        : FrameChunkDrawData{};
     const auto& chunkInstanceSliceOpt = frameChunkDrawData.chunkInstanceSliceOpt;
     const auto& shadowChunkInstanceSliceOpt = frameChunkDrawData.shadowChunkInstanceSliceOpt;
     const VkBuffer chunkInstanceBuffer = frameChunkDrawData.chunkInstanceBuffer;
     const VkBuffer shadowChunkInstanceBuffer = frameChunkDrawData.shadowChunkInstanceBuffer;
-    const VkBuffer chunkVertexBuffer = m_bufferAllocator.getBuffer(m_chunkVertexBufferHandle);
-    const VkBuffer chunkIndexBuffer = m_bufferAllocator.getBuffer(m_chunkIndexBufferHandle);
+    const VkBuffer chunkVertexBuffer = legacySceneRenderingEnabled
+        ? m_bufferAllocator.getBuffer(m_chunkVertexBufferHandle)
+        : VK_NULL_HANDLE;
+    const VkBuffer chunkIndexBuffer = legacySceneRenderingEnabled
+        ? m_bufferAllocator.getBuffer(m_chunkIndexBufferHandle)
+        : VK_NULL_HANDLE;
     const VkBuffer importedVertexBuffer = m_bufferAllocator.getBuffer(m_importedVertexBufferHandle);
     const VkBuffer importedIndexBuffer = m_bufferAllocator.getBuffer(m_importedIndexBufferHandle);
     std::vector<ImportedMeshDraw> importedActorMeshDraws;
@@ -1726,7 +1792,8 @@ void RendererBackend::renderFrame(
                 m_visibleImportedShadowMeshDraws[cascadeIndex]);
         }
     }
-    const bool canDrawMagica = !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
+    const bool canDrawMagica =
+        legacySceneRenderingEnabled && !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
         m_debugDrawCallsTotal += drawCount;
@@ -1983,8 +2050,10 @@ void RendererBackend::renderFrame(
     const VoxelGiSurfaceMode activeVoxelGiSurfaceMode =
         voxelGiRestirCanRun ? VoxelGiSurfaceMode::RestirSurface
         : (voxelGiRtSurfaceCanRun ? VoxelGiSurfaceMode::RtSurface : VoxelGiSurfaceMode::Legacy);
-    m_voxelGiRtSurfaceActiveThisFrame = activeVoxelGiSurfaceMode == VoxelGiSurfaceMode::RtSurface;
-    m_voxelGiRestirActiveThisFrame = activeVoxelGiSurfaceMode == VoxelGiSurfaceMode::RestirSurface;
+    if (!wroteVoxelGiTimestamps) {
+        m_voxelGiRtSurfaceActiveThisFrame = false;
+        m_voxelGiRestirActiveThisFrame = false;
+    }
     const char* voxelGiSurfaceFallbackReason = voxelGiSurfaceFallbackReasonName(
         m_voxelGiDebugSettings.surfaceMode,
         m_voxelGiComputeAvailable,

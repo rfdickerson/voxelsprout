@@ -4,12 +4,14 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace odai::importer {
 
 struct ImportedNifResult {
     ImportedSceneMesh mesh;
     std::string diffuseTexturePath;
+    std::vector<std::string> partDiffuseTexturePaths;
     bool alphaTest = false;
 };
 

@@ -152,19 +152,24 @@ std::array<float, 3> sampleImportedTextureBaseColor(
         return {vertex.color[0], vertex.color[1], vertex.color[2]};
     }
     const odai::importer::ImportedSceneTexture& texture = textures[vertex.textureIndex];
-    if (texture.width == 0u || texture.height == 0u ||
-        texture.rgba8.size() < static_cast<std::size_t>(texture.width) * texture.height * 4u) {
+    if (texture.width == 0u ||
+        texture.height == 0u ||
+        texture.rgba8.size() < static_cast<std::size_t>(texture.width) *
+            static_cast<std::size_t>(texture.height) * 4u) {
         return {vertex.color[0], vertex.color[1], vertex.color[2]};
     }
-    float u = vertex.uv[0] - std::floor(vertex.uv[0]);
-    float v = vertex.uv[1] - std::floor(vertex.uv[1]);
+
+    const float u = vertex.uv[0] - std::floor(vertex.uv[0]);
+    const float v = vertex.uv[1] - std::floor(vertex.uv[1]);
     const std::uint32_t x = std::min(
         static_cast<std::uint32_t>(u * static_cast<float>(texture.width)),
         texture.width - 1u);
     const std::uint32_t y = std::min(
         static_cast<std::uint32_t>(v * static_cast<float>(texture.height)),
         texture.height - 1u);
-    const std::size_t offset = (static_cast<std::size_t>(y) * texture.width + x) * 4u;
+    const std::size_t offset =
+        ((static_cast<std::size_t>(y) * static_cast<std::size_t>(texture.width)) +
+            static_cast<std::size_t>(x)) * 4u;
     return {
         static_cast<float>(texture.rgba8[offset + 0u]) / 255.0f,
         static_cast<float>(texture.rgba8[offset + 1u]) / 255.0f,
@@ -319,6 +324,7 @@ bool createImportedRtGeometryBuffers(
     }
 
     std::vector<std::uint32_t> rtIndices;
+    rtIndices.reserve(packedIndices.size());
     for (const odai::importer::ImportedScenePackedDraw& draw : draws) {
         const std::size_t firstIndex = static_cast<std::size_t>(draw.firstIndex);
         const std::size_t indexCount = static_cast<std::size_t>(draw.indexCount);
@@ -326,8 +332,11 @@ bool createImportedRtGeometryBuffers(
             continue;
         }
         const std::size_t indexEnd = std::min(firstIndex + indexCount, packedIndices.size());
-        rtIndices.insert(rtIndices.end(), packedIndices.begin() + static_cast<std::ptrdiff_t>(firstIndex),
-                         packedIndices.begin() + static_cast<std::ptrdiff_t>(indexEnd));
+        rtIndices.insert(
+            rtIndices.end(),
+            packedIndices.begin() + static_cast<std::ptrdiff_t>(firstIndex),
+            packedIndices.begin() + static_cast<std::ptrdiff_t>(indexEnd)
+        );
     }
 
     if (rtIndices.empty()) {
@@ -422,6 +431,8 @@ void RendererBackend::clearGpuScene() {
     m_visibleImportedTerrainDrawCount = 0;
     m_visibleImportedShadowTerrainDrawCounts.fill(0u);
     m_importedGiTriangles.clear();
+    m_debugImportedGiTriangleCount = 0;
+    m_debugImportedGiVoxelizedCellCount = 0;
     m_importedLocalLights.clear();
     m_debugImportedLightSelectedCount = 0;
     m_importedIndexCount = 0;
@@ -489,6 +500,7 @@ bool RendererBackend::uploadImportedSceneInternal(
     }
 
     clearImportedSceneMeshes();
+    destroyRayTracingScene();
 
     odai::importer::ImportedScene uploadScene = scene;
     const bool havePackedScene =
@@ -839,8 +851,12 @@ bool RendererBackend::uploadImportedSceneInternal(
         vertices.push_back(dstVertex);
     }
     indices.assign(uploadScene.packedIndices.begin(), uploadScene.packedIndices.end());
-    const std::uint32_t sourceTerrainDrawCount =
-        std::min<std::uint32_t>(uploadScene.sourceLandscapeCellCount, static_cast<std::uint32_t>(uploadScene.packedDraws.size()));
+    const bool importedSceneIsInterior = uploadScene.sourceTag == "morrowind_interior";
+    const std::uint32_t sourceTerrainDrawCount = importedSceneIsInterior
+        ? 0u
+        : std::min<std::uint32_t>(
+            uploadScene.sourceLandscapeCellCount,
+            static_cast<std::uint32_t>(uploadScene.packedDraws.size()));
     constexpr std::uint32_t kInvalidImportedPageRangeIndex = std::numeric_limits<std::uint32_t>::max();
     std::vector<std::uint32_t> sourceDrawPageRangeIndices(
         uploadScene.packedDraws.size(),
@@ -1205,10 +1221,11 @@ bool RendererBackend::uploadImportedSceneInternal(
     const ImportedDrawBounds staticBounds =
         computeImportedDrawBounds(uploadScene.packedVertices, uploadScene.packedIndices, staticDraws);
     m_importedGiTriangles.clear();
-    constexpr std::size_t kImportedGiTriangleLimit = 300000u;
-    m_importedGiTriangles.reserve(std::min<std::size_t>(uploadScene.packedIndices.size() / 3u, kImportedGiTriangleLimit));
-    auto appendImportedGiTriangles = [&](std::span<const odai::importer::ImportedScenePackedDraw> sourceDraws) {
-        for (const odai::importer::ImportedScenePackedDraw& draw : sourceDraws) {
+    if (importedSceneIsInterior) {
+        constexpr std::size_t kImportedGiTriangleLimit = 300000u;
+        m_importedGiTriangles.reserve(
+            std::min<std::size_t>(uploadScene.packedIndices.size() / 3u, kImportedGiTriangleLimit));
+        for (const odai::importer::ImportedScenePackedDraw& draw : staticDraws) {
             const std::size_t indexEnd =
                 static_cast<std::size_t>(draw.firstIndex) + static_cast<std::size_t>(draw.indexCount);
             if (draw.indexCount < 3u || indexEnd > uploadScene.packedIndices.size()) {
@@ -1223,6 +1240,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                     i2 >= uploadScene.packedVertices.size()) {
                     continue;
                 }
+
                 const odai::importer::ImportedScenePackedVertex& v0 = uploadScene.packedVertices[i0];
                 const odai::importer::ImportedScenePackedVertex& v1 = uploadScene.packedVertices[i1];
                 const odai::importer::ImportedScenePackedVertex& v2 = uploadScene.packedVertices[i2];
@@ -1238,16 +1256,14 @@ bool RendererBackend::uploadImportedSceneInternal(
                 triangle.albedo[2] = (c0[2] + c1[2] + c2[2]) * (1.0f / 3.0f);
                 m_importedGiTriangles.push_back(triangle);
                 if (m_importedGiTriangles.size() >= kImportedGiTriangleLimit) {
-                    return;
+                    break;
                 }
             }
             if (m_importedGiTriangles.size() >= kImportedGiTriangleLimit) {
                 break;
             }
         }
-    };
-    appendImportedGiTriangles(terrainDraws);
-    appendImportedGiTriangles(staticDraws);
+    }
     ImportedDrawBounds waterBounds{};
     for (const ImportedWaterVertex& vertex : waterVertices) {
         expandImportedBounds(
@@ -1280,14 +1296,22 @@ bool RendererBackend::uploadImportedSceneInternal(
     } else {
         VOX_LOGW("render") << "imported scene contained no static bounds after upload";
     }
-    VOX_LOGI("render") << "imported GI voxelization source triangles="
-                       << m_importedGiTriangles.size();
+    m_voxelGiWorldDirty = false;
+    m_voxelGiOccupancyFullRebuildInProgress = false;
+    m_voxelGiOccupancyFullRebuildNeedsClear = false;
+    m_voxelGiOccupancyFullRebuildCursor = 0;
+    m_voxelGiDirtyChunkIndices.clear();
     if (!m_importedGiTriangles.empty()) {
+        m_debugImportedGiTriangleCount = static_cast<std::uint32_t>(
+            std::min<std::size_t>(
+                m_importedGiTriangles.size(),
+                static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
         m_voxelGiWorldDirty = true;
         ++m_voxelGiWorldVersion;
         m_voxelGiOccupancyFullRebuildInProgress = true;
         m_voxelGiOccupancyFullRebuildNeedsClear = true;
-        m_voxelGiOccupancyFullRebuildCursor = 0;
+        VOX_LOGI("render") << "imported interior GI source triangles="
+                           << m_importedGiTriangles.size();
     }
     if (m_importedWaterIndexCount > 0) {
         VOX_LOGI("render") << "imported water geometry uploaded (vertices=" << waterVertices.size()
@@ -1302,47 +1326,42 @@ bool RendererBackend::uploadImportedSceneInternal(
         }
     }
     if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
-        m_rtImportedSceneRecords.clear();
-        if (!terrainDraws.empty()) {
-            RtImportedSceneRecord terrainRecord{};
-            terrainRecord.debugName = "imported_terrain";
+        auto appendImportedRtRecord = [&](
+                                          std::span<const odai::importer::ImportedScenePackedDraw> sourceDraws,
+                                          const char* debugName
+                                      ) {
+            if (sourceDraws.empty()) {
+                return;
+            }
+            RtImportedSceneRecord record{};
+            record.debugName = debugName;
             if (!createImportedRtGeometryBuffers(
                     m_bufferAllocator,
                     uploadScene.packedVertices,
                     uploadScene.packedIndices,
-                    terrainDraws,
-                    terrainRecord.geometry
+                    sourceDraws,
+                    record.geometry
                 )) {
-                VOX_LOGE("render") << "imported terrain RT geometry buffer allocation failed";
-            } else {
-                terrainRecord.geometryResident =
-                    terrainRecord.geometry.vertexCount > 0 && terrainRecord.geometry.indexCount > 0;
-                terrainRecord.dirty = terrainRecord.geometryResident;
-                m_rtImportedSceneRecords.push_back(terrainRecord);
+                VOX_LOGE("render") << debugName << " RT geometry buffer allocation failed";
+                return;
             }
-        }
-        if (!staticDraws.empty()) {
-            RtImportedSceneRecord staticRecord{};
-            staticRecord.debugName = "imported_statics";
-            if (!createImportedRtGeometryBuffers(
-                    m_bufferAllocator,
-                    uploadScene.packedVertices,
-                    uploadScene.packedIndices,
-                    staticDraws,
-                    staticRecord.geometry
-                )) {
-                VOX_LOGE("render") << "imported static RT geometry buffer allocation failed";
-            } else {
-                staticRecord.geometryResident =
-                    staticRecord.geometry.vertexCount > 0 && staticRecord.geometry.indexCount > 0;
-                staticRecord.dirty = staticRecord.geometryResident;
-                m_rtImportedSceneRecords.push_back(staticRecord);
+            record.geometryResident =
+                record.geometry.vertexCount > 0 && record.geometry.indexCount > 0;
+            record.dirty = record.geometryResident;
+            if (record.geometryResident) {
+                m_rtImportedSceneRecords.push_back(record);
             }
-        }
+        };
+
+        appendImportedRtRecord(terrainDraws, "imported terrain");
+        appendImportedRtRecord(staticDraws, "imported statics");
         if (!m_rtImportedSceneRecords.empty()) {
-            VOX_LOGI("render") << "imported RT geometry prepared (records=" << m_rtImportedSceneRecords.size() << ")";
+            VOX_LOGI("render") << "imported RT geometry prepared (records="
+                               << m_rtImportedSceneRecords.size() << ")";
             markRayTracingSceneDirty();
         }
+    } else {
+        refreshShadowStats();
     }
     return true;
 }

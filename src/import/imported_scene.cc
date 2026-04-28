@@ -28,6 +28,8 @@ namespace {
 constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 constexpr std::uint32_t kImportedSceneVersion = 16u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
+constexpr std::uint32_t kMorrowindDoorCacheMagic = 0x524F4442u;  // BDOR
+constexpr std::uint32_t kMorrowindDoorCacheVersion = 1u;
 constexpr float kExteriorWaterLevel = 0.0f;
 constexpr int kLandSize = 65;
 constexpr int kLandTextureSize = 16;
@@ -188,6 +190,26 @@ bool modelPathMatchesDebugFilters(
         }
     }
     return false;
+}
+
+bool isMorrowindEditorMarkerId(std::string_view refId) {
+    const std::string id = lowerCopy(std::string(refId));
+    return id == "doormarker" ||
+        id == "travelmarker" ||
+        id == "northmarker" ||
+        id == "prisonmarker" ||
+        id == "templemarker" ||
+        id == "divinemarker";
+}
+
+bool isMorrowindEditorMarkerModel(std::string_view modelPath) {
+    const std::string normalizedPath = lowerCopy(std::string(modelPath));
+    const std::size_t slash = normalizedPath.find_last_of('/');
+    const std::string fileName = slash == std::string::npos
+        ? normalizedPath
+        : normalizedPath.substr(slash + 1u);
+    return fileName.rfind("marker_", 0u) == 0u ||
+        fileName.rfind("editormarker_", 0u) == 0u;
 }
 
 struct PackedRenderColor {
@@ -910,6 +932,10 @@ struct ParsedCellRef {
     float position[3] = {};
     float rotation[3] = {};
     float scale = 1.0f;
+    bool hasTeleportDestination = false;
+    std::string destinationCell;
+    float destinationPosition[3] = {};
+    float destinationRotation[3] = {};
     bool deleted = false;
 };
 
@@ -917,6 +943,7 @@ struct ParsedCell {
     std::string name;
     int gridX = 0;
     int gridY = 0;
+    bool exterior = true;
     std::vector<ParsedCellRef> refs;
 };
 
@@ -1017,6 +1044,7 @@ bool parseCellRefs(std::istream& input, std::uint32_t recordSize, ParsedCell& ou
             readValue(input, flags);
             readValue(input, outCell.gridX);
             readValue(input, outCell.gridY);
+            outCell.exterior = (flags & 0x01) == 0;
             if (subHeader.size > 12u) {
                 input.seekg(static_cast<std::streamoff>(subHeader.size - 12u), std::ios::cur);
             }
@@ -1039,6 +1067,15 @@ bool parseCellRefs(std::istream& input, std::uint32_t recordSize, ParsedCell& ou
             if (subHeader.size > sizeof(float) * 6u) {
                 input.seekg(static_cast<std::streamoff>(subHeader.size - (sizeof(float) * 6u)), std::ios::cur);
             }
+        } else if (inRef && subName == "DODT" && subHeader.size >= sizeof(float) * 6u) {
+            currentRef.hasTeleportDestination = true;
+            readExact(input, currentRef.destinationPosition, sizeof(float) * 3u);
+            readExact(input, currentRef.destinationRotation, sizeof(float) * 3u);
+            if (subHeader.size > sizeof(float) * 6u) {
+                input.seekg(static_cast<std::streamoff>(subHeader.size - (sizeof(float) * 6u)), std::ios::cur);
+            }
+        } else if (inRef && subName == "DNAM") {
+            currentRef.destinationCell = readSizedString(input, subHeader.size);
         } else if (inRef && subName == "DELE") {
             currentRef.deleted = true;
             input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
@@ -1654,10 +1691,11 @@ ImportedScene buildSceneFromParsedData(
     const std::unordered_map<std::string, std::string>& modelPathById,
     const std::unordered_map<std::string, ParsedLightRecord>& lightById,
     const std::vector<ParsedCell>& cells,
-    const std::vector<ParsedLand>& lands
+    const std::vector<ParsedLand>& lands,
+    std::string sourceTag = "morrowind_balmora"
 ) {
     ImportedScene scene{};
-    scene.sourceTag = "morrowind_balmora";
+    scene.sourceTag = std::move(sourceTag);
     scene.landscapeCells.reserve(lands.size());
     for (const ParsedLand& land : lands) {
         ImportedSceneLandscapeCell cell{};
@@ -1826,7 +1864,14 @@ ImportedScene buildSceneFromParsedData(
 
     for (const ParsedCell& cell : cells) {
         for (const ParsedCellRef& ref : cell.refs) {
-            const auto lightIt = lightById.find(lowerCopy(ref.refId));
+            const std::string normalizedRefId = lowerCopy(ref.refId);
+            const auto modelIt = modelPathById.find(normalizedRefId);
+            if (isMorrowindEditorMarkerId(normalizedRefId) ||
+                (modelIt != modelPathById.end() && isMorrowindEditorMarkerModel(modelIt->second))) {
+                continue;
+            }
+
+            const auto lightIt = lightById.find(normalizedRefId);
             if (lightIt != lightById.end()) {
                 const ParsedLightRecord& lightRecord = lightIt->second;
                 const bool isUsablePlacedLight =
@@ -1849,7 +1894,6 @@ ImportedScene buildSceneFromParsedData(
                     scene.lights.push_back(std::move(light));
                 }
             }
-            const auto modelIt = modelPathById.find(lowerCopy(ref.refId));
             if (modelIt != modelPathById.end()) {
                 const std::string normalizedModelPath = lowerCopy(modelIt->second);
                 std::uint32_t importedMeshIndex = std::numeric_limits<std::uint32_t>::max();
@@ -1865,9 +1909,15 @@ ImportedScene buildSceneFromParsedData(
                         ImportedNifResult nifResult{};
                         std::string nifError;
                         if (loadMorrowindStaticNif(fileIt->second, nifResult, nifError)) {
-                            for (ImportedSceneMeshPart& part : nifResult.mesh.parts) {
-                                if (!nifResult.diffuseTexturePath.empty()) {
-                                    part.textureIndex = addTextureSlot(nifResult.diffuseTexturePath);
+                            for (std::size_t partIndex = 0; partIndex < nifResult.mesh.parts.size(); ++partIndex) {
+                                ImportedSceneMeshPart& part = nifResult.mesh.parts[partIndex];
+                                std::string texturePath = nifResult.diffuseTexturePath;
+                                if (partIndex < nifResult.partDiffuseTexturePaths.size() &&
+                                    !nifResult.partDiffuseTexturePaths[partIndex].empty()) {
+                                    texturePath = nifResult.partDiffuseTexturePaths[partIndex];
+                                }
+                                if (!texturePath.empty()) {
+                                    part.textureIndex = addTextureSlot(texturePath);
                                 }
                             }
                             importedMeshIndex = static_cast<std::uint32_t>(scene.meshes.size());
@@ -2134,7 +2184,8 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
         }
     };
 
-    if (!scene.meshes.empty()) {
+    const bool hasTerrainMesh = !scene.meshes.empty() && scene.meshes.front().name == "terrain";
+    if (hasTerrainMesh) {
         const ImportedSceneMesh& terrainMesh = scene.meshes.front();
         if (!terrainMesh.vertices.empty() && !terrainMesh.indices.empty()) {
             for (const ImportedSceneMeshPart& part : terrainMesh.parts) {
@@ -2191,17 +2242,18 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             }
         }
 
-        for (const ImportedSceneInstance& instance : scene.instances) {
-            if (instance.meshIndex == 0u || instance.meshIndex >= scene.meshes.size()) {
-                continue;
-            }
-            std::array<float, 16> transform{};
-            std::copy(std::begin(instance.transform), std::end(instance.transform), transform.begin());
-            appendMesh(
-                scene.meshes[instance.meshIndex],
-                transform,
-                packedRenderColorFromHash(instance.modelPath));
+    }
+
+    for (const ImportedSceneInstance& instance : scene.instances) {
+        if ((hasTerrainMesh && instance.meshIndex == 0u) || instance.meshIndex >= scene.meshes.size()) {
+            continue;
         }
+        std::array<float, 16> transform{};
+        std::copy(std::begin(instance.transform), std::end(instance.transform), transform.begin());
+        appendMesh(
+            scene.meshes[instance.meshIndex],
+            transform,
+            packedRenderColorFromHash(instance.modelPath));
     }
 
     if (scene.packedVertices.empty()) {
@@ -3054,6 +3106,355 @@ bool cookMorrowindBalmoraScene(
     outResult.includedCells.assign(includedCellsSet.begin(), includedCellsSet.end());
     outResult.modelPathById = std::move(modelPathById);
     outResult.texturePathByLandscapeIndex = std::move(landscapeTextureByIndex);
+    return true;
+}
+
+bool loadMorrowindBalmoraDoorReferences(
+    const std::filesystem::path& morrowindDataFilesPath,
+    std::vector<MorrowindDoorReference>& outDoors
+) {
+    g_lastImportedSceneError.clear();
+    outDoors.clear();
+
+    const std::filesystem::path esmPath = morrowindDataFilesPath / "Morrowind.esm";
+    std::ifstream input(esmPath, std::ios::binary);
+    if (!input) {
+        setLastImportedSceneError("Failed to open Morrowind.esm");
+        return false;
+    }
+
+    Tes3RecordHeader header{};
+    if (!readRecordHeader(input, header) || fourCcToString(header.name) != "TES3") {
+        setLastImportedSceneError("File does not begin with a TES3 record");
+        return false;
+    }
+    input.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+
+    while (readRecordHeader(input, header)) {
+        const std::string recordName = fourCcToString(header.name);
+        if (recordName != "CELL") {
+            input.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+            continue;
+        }
+
+        ParsedCell cell{};
+        if (!parseCellRefs(input, header.size, cell)) {
+            setLastImportedSceneError("Failed to parse CELL record while scanning Balmora doors");
+            return false;
+        }
+        if (!cell.exterior || lowerCopy(cell.name) != "balmora") {
+            continue;
+        }
+        for (const ParsedCellRef& ref : cell.refs) {
+            if (!ref.hasTeleportDestination) {
+                continue;
+            }
+
+            MorrowindDoorReference door{};
+            door.refId = ref.refId;
+            door.sourceCell = cell.name;
+            const std::array<float, 3> position = refPositionToEngineSpace(ref.position);
+            const std::array<float, 3> destinationPosition = refPositionToEngineSpace(ref.destinationPosition);
+            std::copy(position.begin(), position.end(), door.position);
+            std::copy(std::begin(ref.rotation), std::end(ref.rotation), door.rotationRadians);
+            door.destination.destinationCell = ref.destinationCell.empty() ? "Balmora" : ref.destinationCell;
+            std::copy(destinationPosition.begin(), destinationPosition.end(), door.destination.position);
+            std::copy(
+                std::begin(ref.destinationRotation),
+                std::end(ref.destinationRotation),
+                door.destination.rotationRadians);
+            outDoors.push_back(std::move(door));
+        }
+    }
+
+    return true;
+}
+
+bool loadMorrowindInteriorDoorReferences(
+    const std::filesystem::path& morrowindDataFilesPath,
+    const std::string& cellName,
+    std::vector<MorrowindDoorReference>& outDoors
+) {
+    g_lastImportedSceneError.clear();
+    outDoors.clear();
+
+    const std::filesystem::path esmPath = morrowindDataFilesPath / "Morrowind.esm";
+    std::ifstream input(esmPath, std::ios::binary);
+    if (!input) {
+        setLastImportedSceneError("Failed to open Morrowind.esm");
+        return false;
+    }
+
+    Tes3RecordHeader header{};
+    if (!readRecordHeader(input, header) || fourCcToString(header.name) != "TES3") {
+        setLastImportedSceneError("File does not begin with a TES3 record");
+        return false;
+    }
+    input.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+
+    const std::string wantedCell = lowerCopy(cellName);
+    while (readRecordHeader(input, header)) {
+        const std::string recordName = fourCcToString(header.name);
+        if (recordName != "CELL") {
+            input.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+            continue;
+        }
+
+        ParsedCell cell{};
+        if (!parseCellRefs(input, header.size, cell)) {
+            setLastImportedSceneError("Failed to parse CELL record while scanning interior doors");
+            return false;
+        }
+        if (cell.exterior || lowerCopy(cell.name) != wantedCell) {
+            continue;
+        }
+        for (const ParsedCellRef& ref : cell.refs) {
+            if (!ref.hasTeleportDestination) {
+                continue;
+            }
+
+            MorrowindDoorReference door{};
+            door.refId = ref.refId;
+            door.sourceCell = cell.name;
+            const std::array<float, 3> position = refPositionToEngineSpace(ref.position);
+            const std::array<float, 3> destinationPosition = refPositionToEngineSpace(ref.destinationPosition);
+            std::copy(position.begin(), position.end(), door.position);
+            std::copy(std::begin(ref.rotation), std::end(ref.rotation), door.rotationRadians);
+            door.destination.destinationCell = ref.destinationCell.empty() ? "Balmora" : ref.destinationCell;
+            std::copy(destinationPosition.begin(), destinationPosition.end(), door.destination.position);
+            std::copy(
+                std::begin(ref.destinationRotation),
+                std::end(ref.destinationRotation),
+                door.destination.rotationRadians);
+            outDoors.push_back(std::move(door));
+        }
+        return true;
+    }
+
+    setLastImportedSceneError("Did not find interior CELL record named " + cellName);
+    return false;
+}
+
+namespace {
+
+void writeDoorReference(std::ostream& output, const MorrowindDoorReference& door) {
+    writeString(output, door.refId);
+    writeString(output, door.sourceCell);
+    output.write(reinterpret_cast<const char*>(door.position), static_cast<std::streamsize>(sizeof(door.position)));
+    output.write(reinterpret_cast<const char*>(door.rotationRadians), static_cast<std::streamsize>(sizeof(door.rotationRadians)));
+    writeString(output, door.destination.destinationCell);
+    output.write(
+        reinterpret_cast<const char*>(door.destination.position),
+        static_cast<std::streamsize>(sizeof(door.destination.position)));
+    output.write(
+        reinterpret_cast<const char*>(door.destination.rotationRadians),
+        static_cast<std::streamsize>(sizeof(door.destination.rotationRadians)));
+}
+
+bool readDoorReference(std::istream& input, MorrowindDoorReference& door) {
+    return readString(input, door.refId) &&
+        readString(input, door.sourceCell) &&
+        readExact(input, door.position, sizeof(door.position)) &&
+        readExact(input, door.rotationRadians, sizeof(door.rotationRadians)) &&
+        readString(input, door.destination.destinationCell) &&
+        readExact(input, door.destination.position, sizeof(door.destination.position)) &&
+        readExact(input, door.destination.rotationRadians, sizeof(door.destination.rotationRadians));
+}
+
+}  // namespace
+
+bool saveMorrowindDoorCache(const MorrowindDoorCache& cache, const std::filesystem::path& outputPath) {
+    g_lastImportedSceneError.clear();
+    const std::filesystem::path parentPath = outputPath.parent_path();
+    if (!parentPath.empty()) {
+        std::error_code mkdirError;
+        std::filesystem::create_directories(parentPath, mkdirError);
+        if (mkdirError) {
+            setLastImportedSceneError(
+                "Failed to create door cache directory " + parentPath.string() + ": " + mkdirError.message());
+            return false;
+        }
+    }
+
+    std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        setLastImportedSceneError("Failed to open door cache for writing: " + outputPath.string());
+        return false;
+    }
+
+    writeValue(output, kMorrowindDoorCacheMagic);
+    writeValue(output, kMorrowindDoorCacheVersion);
+    const std::uint32_t exteriorDoorCount = static_cast<std::uint32_t>(cache.exteriorDoors.size());
+    const std::uint32_t interiorCellCount = static_cast<std::uint32_t>(cache.interiorDoorsByCell.size());
+    writeValue(output, exteriorDoorCount);
+    writeValue(output, interiorCellCount);
+    for (const MorrowindDoorReference& door : cache.exteriorDoors) {
+        writeDoorReference(output, door);
+    }
+    for (const auto& [cellName, doors] : cache.interiorDoorsByCell) {
+        writeString(output, cellName);
+        const std::uint32_t doorCount = static_cast<std::uint32_t>(doors.size());
+        writeValue(output, doorCount);
+        for (const MorrowindDoorReference& door : doors) {
+            writeDoorReference(output, door);
+        }
+    }
+
+    if (!output.good()) {
+        setLastImportedSceneError("Failed while writing door cache: " + outputPath.string());
+        return false;
+    }
+    return true;
+}
+
+bool loadMorrowindDoorCache(const std::filesystem::path& inputPath, MorrowindDoorCache& outCache) {
+    g_lastImportedSceneError.clear();
+    std::ifstream input(inputPath, std::ios::binary);
+    if (!input) {
+        setLastImportedSceneError("Failed to open door cache: " + inputPath.string());
+        return false;
+    }
+
+    std::uint32_t magic = 0;
+    std::uint32_t version = 0;
+    std::uint32_t exteriorDoorCount = 0;
+    std::uint32_t interiorCellCount = 0;
+    if (!readValue(input, magic) ||
+        !readValue(input, version) ||
+        magic != kMorrowindDoorCacheMagic ||
+        version != kMorrowindDoorCacheVersion ||
+        !readValue(input, exteriorDoorCount) ||
+        !readValue(input, interiorCellCount)) {
+        setLastImportedSceneError("Invalid door cache header: " + inputPath.string());
+        return false;
+    }
+
+    MorrowindDoorCache cache{};
+    cache.exteriorDoors.resize(exteriorDoorCount);
+    for (MorrowindDoorReference& door : cache.exteriorDoors) {
+        if (!readDoorReference(input, door)) {
+            setLastImportedSceneError("Failed to read exterior door cache entry: " + inputPath.string());
+            return false;
+        }
+    }
+    for (std::uint32_t cellIndex = 0; cellIndex < interiorCellCount; ++cellIndex) {
+        std::string cellName;
+        std::uint32_t doorCount = 0;
+        if (!readString(input, cellName) || !readValue(input, doorCount)) {
+            setLastImportedSceneError("Failed to read interior door cache cell: " + inputPath.string());
+            return false;
+        }
+        std::vector<MorrowindDoorReference> doors(doorCount);
+        for (MorrowindDoorReference& door : doors) {
+            if (!readDoorReference(input, door)) {
+                setLastImportedSceneError("Failed to read interior door cache entry: " + inputPath.string());
+                return false;
+            }
+        }
+        cache.interiorDoorsByCell.emplace(std::move(cellName), std::move(doors));
+    }
+
+    outCache = std::move(cache);
+    return true;
+}
+
+bool cookMorrowindInteriorCellScene(
+    const std::filesystem::path& morrowindDataFilesPath,
+    const std::string& cellName,
+    ImportedScene& outScene
+) {
+    g_lastImportedSceneError.clear();
+    const std::filesystem::path esmPath = morrowindDataFilesPath / "Morrowind.esm";
+
+    std::unordered_map<std::string, std::string> modelPathById;
+    std::unordered_map<std::string, ParsedLightRecord> lightById;
+    std::unordered_map<std::uint32_t, std::string> landscapeTextureByIndex;
+
+    std::ifstream pass1(esmPath, std::ios::binary);
+    if (!pass1) {
+        setLastImportedSceneError("Failed to open Morrowind.esm");
+        return false;
+    }
+    Tes3RecordHeader header{};
+    if (!readRecordHeader(pass1, header) || fourCcToString(header.name) != "TES3") {
+        setLastImportedSceneError("File does not begin with a TES3 record");
+        return false;
+    }
+    pass1.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+
+    while (readRecordHeader(pass1, header)) {
+        const std::string recordName = fourCcToString(header.name);
+        if (recordName == "LIGH") {
+            ParsedLightRecord light{};
+            if (!parseLightRecord(pass1, header.size, light)) {
+                setLastImportedSceneError("Failed to parse LIGH record while cooking interior");
+                return false;
+            }
+            if (!light.id.empty()) {
+                lightById[light.id] = light;
+                if (!light.modelPath.empty()) {
+                    modelPathById[light.id] = light.modelPath;
+                }
+            }
+        } else if (
+            recordName == "STAT" || recordName == "DOOR" || recordName == "CONT" || recordName == "FLOR" ||
+            recordName == "ACTI" || recordName == "FURN" || recordName == "MISC" ||
+            recordName == "APPA" || recordName == "WEAP" || recordName == "ARMO" || recordName == "CLOT" ||
+            recordName == "BOOK" || recordName == "INGR" || recordName == "ALCH" || recordName == "LOCK" ||
+            recordName == "PROB" || recordName == "REPA") {
+            std::string id;
+            std::string modelPath;
+            if (!parseModelRecord(pass1, header.size, id, modelPath)) {
+                setLastImportedSceneError("Failed to parse model record while cooking interior");
+                return false;
+            }
+            if (!id.empty() && !modelPath.empty()) {
+                modelPathById[id] = modelPath;
+            }
+        } else {
+            pass1.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+        }
+    }
+
+    std::ifstream pass2(esmPath, std::ios::binary);
+    if (!pass2 || !readRecordHeader(pass2, header) || fourCcToString(header.name) != "TES3") {
+        setLastImportedSceneError("Failed to reopen or validate Morrowind.esm");
+        return false;
+    }
+    pass2.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+
+    std::vector<ParsedCell> parsedCells;
+    const std::string wantedCell = lowerCopy(cellName);
+    while (readRecordHeader(pass2, header)) {
+        const std::string recordName = fourCcToString(header.name);
+        if (recordName != "CELL") {
+            pass2.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+            continue;
+        }
+
+        ParsedCell cell{};
+        if (!parseCellRefs(pass2, header.size, cell)) {
+            setLastImportedSceneError("Failed to parse CELL record while cooking interior");
+            return false;
+        }
+        if (!cell.exterior && lowerCopy(cell.name) == wantedCell) {
+            parsedCells.push_back(std::move(cell));
+            break;
+        }
+    }
+    if (parsedCells.empty()) {
+        setLastImportedSceneError("Interior CELL not found: " + cellName);
+        return false;
+    }
+
+    outScene = buildSceneFromParsedData(
+        morrowindDataFilesPath,
+        landscapeTextureByIndex,
+        modelPathById,
+        lightById,
+        parsedCells,
+        {},
+        "morrowind_interior");
     return true;
 }
 
