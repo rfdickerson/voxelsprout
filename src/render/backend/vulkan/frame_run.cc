@@ -1534,6 +1534,124 @@ void RendererBackend::renderFrame(
     const VkBuffer chunkIndexBuffer = m_bufferAllocator.getBuffer(m_chunkIndexBufferHandle);
     const VkBuffer importedVertexBuffer = m_bufferAllocator.getBuffer(m_importedVertexBufferHandle);
     const VkBuffer importedIndexBuffer = m_bufferAllocator.getBuffer(m_importedIndexBufferHandle);
+    std::span<const ImportedMeshDraw> importedMeshDrawsForFrame(
+        m_importedMeshDraws.data(),
+        m_importedMeshDraws.size());
+    std::uint32_t importedTerrainDrawCountForFrame = m_importedTerrainDrawCount;
+    const bool importedPageCullingEnabled = !m_importedPageDrawRanges.empty();
+    auto importedPageIntersectsClip = [](
+                                          const ImportedScenePageDrawRange& pageRange,
+                                          const odai::math::Matrix4& clipMatrix,
+                                          float clipMargin
+                                      ) -> bool {
+        if (pageRange.drawCount == 0u) {
+            return false;
+        }
+        if (pageRange.boundsMin[0] > pageRange.boundsMax[0] ||
+            pageRange.boundsMin[1] > pageRange.boundsMax[1] ||
+            pageRange.boundsMin[2] > pageRange.boundsMax[2]) {
+            return true;
+        }
+
+        std::array<odai::math::Vector3, 8> corners = {
+            odai::math::Vector3{pageRange.boundsMin[0], pageRange.boundsMin[1], pageRange.boundsMin[2]},
+            odai::math::Vector3{pageRange.boundsMax[0], pageRange.boundsMin[1], pageRange.boundsMin[2]},
+            odai::math::Vector3{pageRange.boundsMin[0], pageRange.boundsMax[1], pageRange.boundsMin[2]},
+            odai::math::Vector3{pageRange.boundsMax[0], pageRange.boundsMax[1], pageRange.boundsMin[2]},
+            odai::math::Vector3{pageRange.boundsMin[0], pageRange.boundsMin[1], pageRange.boundsMax[2]},
+            odai::math::Vector3{pageRange.boundsMax[0], pageRange.boundsMin[1], pageRange.boundsMax[2]},
+            odai::math::Vector3{pageRange.boundsMin[0], pageRange.boundsMax[1], pageRange.boundsMax[2]},
+            odai::math::Vector3{pageRange.boundsMax[0], pageRange.boundsMax[1], pageRange.boundsMax[2]},
+        };
+
+        float ndcMinX = std::numeric_limits<float>::max();
+        float ndcMinY = std::numeric_limits<float>::max();
+        float ndcMinZ = std::numeric_limits<float>::max();
+        float ndcMaxX = std::numeric_limits<float>::lowest();
+        float ndcMaxY = std::numeric_limits<float>::lowest();
+        float ndcMaxZ = std::numeric_limits<float>::lowest();
+        for (const odai::math::Vector3& corner : corners) {
+            const odai::math::Vector3 clip = odai::math::transformPoint(clipMatrix, corner);
+            ndcMinX = std::min(ndcMinX, clip.x);
+            ndcMinY = std::min(ndcMinY, clip.y);
+            ndcMinZ = std::min(ndcMinZ, clip.z);
+            ndcMaxX = std::max(ndcMaxX, clip.x);
+            ndcMaxY = std::max(ndcMaxY, clip.y);
+            ndcMaxZ = std::max(ndcMaxZ, clip.z);
+        }
+
+        return !(ndcMaxX < (-1.0f - clipMargin) ||
+                 ndcMinX > (1.0f + clipMargin) ||
+                 ndcMaxY < (-1.0f - clipMargin) ||
+                 ndcMinY > (1.0f + clipMargin) ||
+                 ndcMaxZ < (0.0f - clipMargin) ||
+                 ndcMinZ > (1.0f + clipMargin));
+    };
+    auto buildVisibleImportedDraws = [&](
+                                      const odai::math::Matrix4& clipMatrix,
+                                      float clipMargin,
+                                      std::vector<ImportedMeshDraw>& outDraws
+                                  ) -> std::uint32_t {
+        outDraws.clear();
+        if (outDraws.capacity() < m_importedMeshDraws.size()) {
+            outDraws.reserve(m_importedMeshDraws.size());
+        }
+        m_visibleImportedPageScratch.assign(m_importedPageDrawRanges.size(), 0u);
+        for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
+            if (importedPageIntersectsClip(m_importedPageDrawRanges[pageIndex], clipMatrix, clipMargin)) {
+                m_visibleImportedPageScratch[pageIndex] = 1u;
+            }
+        }
+
+        auto appendDrawRange = [&](std::uint32_t firstDraw, std::uint32_t drawCount) -> std::uint32_t {
+            if (drawCount == 0u || firstDraw >= m_importedMeshDraws.size()) {
+                return 0u;
+            }
+            const std::size_t availableDrawCount = m_importedMeshDraws.size() - firstDraw;
+            const std::uint32_t clampedDrawCount =
+                std::min<std::uint32_t>(drawCount, static_cast<std::uint32_t>(availableDrawCount));
+            outDraws.insert(
+                outDraws.end(),
+                m_importedMeshDraws.begin() + static_cast<std::ptrdiff_t>(firstDraw),
+                m_importedMeshDraws.begin() + static_cast<std::ptrdiff_t>(firstDraw + clampedDrawCount));
+            return clampedDrawCount;
+        };
+
+        std::uint32_t visibleTerrainDrawCount = 0;
+        for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
+            if (m_visibleImportedPageScratch[pageIndex] == 0u) {
+                continue;
+            }
+            const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
+            const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
+            visibleTerrainDrawCount += appendDrawRange(pageRange.firstDraw, terrainDrawCount);
+        }
+        for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
+            if (m_visibleImportedPageScratch[pageIndex] == 0u) {
+                continue;
+            }
+            const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
+            const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
+            appendDrawRange(pageRange.firstDraw + terrainDrawCount, pageRange.drawCount - terrainDrawCount);
+        }
+        return visibleTerrainDrawCount;
+    };
+    if (importedPageCullingEnabled) {
+        constexpr float kImportedMainClipMargin = 0.04f;
+        constexpr float kImportedShadowClipMargin = 0.08f;
+        m_visibleImportedTerrainDrawCount =
+            buildVisibleImportedDraws(mvp, kImportedMainClipMargin, m_visibleImportedMeshDraws);
+        importedMeshDrawsForFrame = std::span<const ImportedMeshDraw>(
+            m_visibleImportedMeshDraws.data(),
+            m_visibleImportedMeshDraws.size());
+        importedTerrainDrawCountForFrame = m_visibleImportedTerrainDrawCount;
+        for (std::uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            m_visibleImportedShadowTerrainDrawCounts[cascadeIndex] = buildVisibleImportedDraws(
+                lightViewProjMatrices[cascadeIndex],
+                kImportedShadowClipMargin,
+                m_visibleImportedShadowMeshDraws[cascadeIndex]);
+        }
+    }
     const bool canDrawMagica = !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
@@ -1560,6 +1678,17 @@ void RendererBackend::renderFrame(
     shadowPassInputs.importedVertexBuffer = importedVertexBuffer;
     shadowPassInputs.importedIndexBuffer = importedIndexBuffer;
     shadowPassInputs.importedMeshDraws = m_importedMeshDraws;
+    shadowPassInputs.importedTerrainDrawCount = m_importedTerrainDrawCount;
+    shadowPassInputs.importedPageCullingEnabled = importedPageCullingEnabled;
+    if (importedPageCullingEnabled) {
+        for (std::uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            shadowPassInputs.importedMeshDrawsByCascade[cascadeIndex] = std::span<const ImportedMeshDraw>(
+                m_visibleImportedShadowMeshDraws[cascadeIndex].data(),
+                m_visibleImportedShadowMeshDraws[cascadeIndex].size());
+            shadowPassInputs.importedTerrainDrawCountsByCascade[cascadeIndex] =
+                m_visibleImportedShadowTerrainDrawCounts[cascadeIndex];
+        }
+    }
     shadowPassInputs.pipeInstanceCount = pipeInstanceCount;
     shadowPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     shadowPassInputs.transportInstanceCount = transportInstanceCount;
@@ -1895,7 +2024,8 @@ void RendererBackend::renderFrame(
     prepassInputs.readyMagicaDraws = readyMagicaDraws;
     prepassInputs.importedVertexBuffer = importedVertexBuffer;
     prepassInputs.importedIndexBuffer = importedIndexBuffer;
-    prepassInputs.importedMeshDraws = m_importedMeshDraws;
+    prepassInputs.importedMeshDraws = importedMeshDrawsForFrame;
+    prepassInputs.importedTerrainDrawCount = importedTerrainDrawCountForFrame;
     prepassInputs.pipeInstanceCount = pipeInstanceCount;
     prepassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     prepassInputs.transportInstanceCount = transportInstanceCount;
@@ -1935,7 +2065,8 @@ void RendererBackend::renderFrame(
     mainPassInputs.readyMagicaDraws = readyMagicaDraws;
     mainPassInputs.importedVertexBuffer = importedVertexBuffer;
     mainPassInputs.importedIndexBuffer = importedIndexBuffer;
-    mainPassInputs.importedMeshDraws = m_importedMeshDraws;
+    mainPassInputs.importedMeshDraws = importedMeshDrawsForFrame;
+    mainPassInputs.importedTerrainDrawCount = importedTerrainDrawCountForFrame;
     mainPassInputs.pipeInstanceCount = pipeInstanceCount;
     mainPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     mainPassInputs.transportInstanceCount = transportInstanceCount;

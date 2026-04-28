@@ -327,6 +327,10 @@ private:
     bool createFrameResources();
     bool createGpuTimestampResources();
     bool createImGuiResources();
+    bool uploadImportedSceneInternal(
+        const odai::importer::ImportedScene& scene,
+        const odai::importer::GpuSceneAsset* gpuScene
+    );
     void destroyImGuiResources();
     void buildFrameStatsUi();
     void buildMeshingDebugUi();
@@ -524,6 +528,14 @@ private:
         std::uint32_t indexCount = 0;
     };
 
+    struct ImportedScenePageDrawRange {
+        std::uint32_t firstDraw = 0;
+        std::uint32_t drawCount = 0;
+        std::uint32_t terrainDrawCount = 0;
+        float boundsMin[3] = {};
+        float boundsMax[3] = {};
+    };
+
     struct ImportedGiTriangle {
         float p0[3] = {};
         float p1[3] = {};
@@ -608,6 +620,10 @@ private:
         VkBuffer importedVertexBuffer = VK_NULL_HANDLE;
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
+        std::uint32_t importedTerrainDrawCount = 0;
+        bool importedPageCullingEnabled = false;
+        std::array<std::span<const ImportedMeshDraw>, kShadowCascadeCount> importedMeshDrawsByCascade;
+        std::array<std::uint32_t, kShadowCascadeCount> importedTerrainDrawCountsByCascade{};
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -627,6 +643,7 @@ private:
         VkBuffer importedVertexBuffer = VK_NULL_HANDLE;
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
+        std::uint32_t importedTerrainDrawCount = 0;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -646,6 +663,7 @@ private:
         VkBuffer importedVertexBuffer = VK_NULL_HANDLE;
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
+        std::uint32_t importedTerrainDrawCount = 0;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -979,6 +997,12 @@ private:
     std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
     std::vector<ImportedMeshDraw> m_importedMeshDraws;
+    std::vector<ImportedScenePageDrawRange> m_importedPageDrawRanges;
+    std::vector<ImportedMeshDraw> m_visibleImportedMeshDraws;
+    std::array<std::vector<ImportedMeshDraw>, kShadowCascadeCount> m_visibleImportedShadowMeshDraws;
+    std::vector<std::uint8_t> m_visibleImportedPageScratch;
+    std::uint32_t m_visibleImportedTerrainDrawCount = 0;
+    std::array<std::uint32_t, kShadowCascadeCount> m_visibleImportedShadowTerrainDrawCounts{};
     std::vector<ImportedGiTriangle> m_importedGiTriangles;
     std::vector<ImportedLocalLight> m_importedLocalLights;
     std::vector<RtChunkSceneRecord> m_rtChunkSceneRecords;
