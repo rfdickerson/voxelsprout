@@ -32,6 +32,11 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
     const std::uint32_t importedTerrainDrawCount = inputs.importedTerrainDrawCount;
+    const VkBuffer importedActorVertexBuffer = inputs.importedActorVertexBuffer;
+    const VkDeviceSize importedActorVertexOffset = inputs.importedActorVertexOffset;
+    const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
+    const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
+    const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = inputs.transportInstanceCount;
@@ -139,7 +144,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             vkCmdPushConstants(
                 commandBuffer,
                 m_pipelineLayout,
-                VK_SHADER_STAGE_VERTEX_BIT,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0,
                 sizeof(ChunkPushConstants),
                 &chunkPushConstants
@@ -165,7 +170,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 vkCmdPushConstants(
                     commandBuffer,
                     m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                     0,
                     sizeof(ChunkPushConstants),
                     &magicaPushConstants
@@ -201,6 +206,31 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     continue;
                 }
                 const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+                countDrawCalls(m_debugDrawCallsPrepass, 1);
+                vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+            }
+        }
+        if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&
+            importedActorVertexBuffer != VK_NULL_HANDLE &&
+            importedActorIndexBuffer != VK_NULL_HANDLE &&
+            !importedActorMeshDraws.empty() &&
+            m_debugShowImportedStatics) {
+            const VkBuffer importedVertexBuffers[1] = {importedActorVertexBuffer};
+            const VkDeviceSize importedVertexOffsets[1] = {importedActorVertexOffset};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticNormalDepthPipeline);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout,
+                0,
+                boundDescriptorSetCount,
+                boundDescriptorSets.sets.data(),
+                1,
+                &mvpDynamicOffset
+            );
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
+            for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
                 vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
             }

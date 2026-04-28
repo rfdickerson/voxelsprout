@@ -3,6 +3,7 @@
 #include <GLFW/glfw3.h>
 
 #include "core/grid3.h"
+#include "import/morrowind_nif.h"
 #include "core/log.h"
 #include "math/math.h"
 #include "sim/network_procedural.h"
@@ -18,8 +19,11 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -105,6 +109,11 @@ constexpr const char* kMagicaTeapotPath = "assets/magicka/teapot.vox";
 constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 constexpr const char* kImportedSceneEnvVar = "ODAI_IMPORTED_SCENE";
+constexpr const char* kMorrowindDataFilesEnvVar = "ODAI_MORROWIND_DATA_FILES";
+constexpr const char* kBalmoraGuardsEnvVar = "ODAI_ENABLE_BALMORA_GUARDS";
+constexpr float kBalmoraGuardRouteReachRadius = 54.0f;
+constexpr float kBalmoraGuardNavmeshProbeHeight = 96.0f;
+constexpr float kBalmoraGuardWalkCycleScale = 0.046f;
 
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
@@ -433,22 +442,64 @@ float approach(float current, float target, float maxDelta) {
     return target;
 }
 
-std::optional<std::filesystem::path> findImportedSceneDemoPath() {
-    std::string envPathValue;
+std::optional<std::string> readEnvironmentString(const char* name) {
 #ifdef _WIN32
-    char* envPath = nullptr;
-    std::size_t envPathLength = 0;
-    if (_dupenv_s(&envPath, &envPathLength, kImportedSceneEnvVar) == 0 && envPath != nullptr) {
-        envPathValue = envPath;
+    char* value = nullptr;
+    std::size_t valueLength = 0;
+    if (_dupenv_s(&value, &valueLength, name) != 0 || value == nullptr || valueLength == 0) {
+        if (value != nullptr) {
+            std::free(value);
+        }
+        return std::nullopt;
     }
-    std::free(envPath);
+    std::string result(value);
+    std::free(value);
+    return result;
 #else
-    if (const char* envPath = std::getenv(kImportedSceneEnvVar); envPath != nullptr) {
-        envPathValue = envPath;
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return std::nullopt;
     }
+    return std::string(value);
 #endif
-    if (!envPathValue.empty()) {
-        return std::filesystem::path(envPathValue);
+}
+
+std::string lowerPathCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        if (ch == '\\') {
+            return '/';
+        }
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+std::optional<std::filesystem::path> findMorrowindDataFilesPath() {
+    if (const std::optional<std::string> envPath = readEnvironmentString(kMorrowindDataFilesEnvVar);
+        envPath.has_value() && !envPath->empty()) {
+        const std::filesystem::path path(*envPath);
+        if (std::filesystem::exists(path / "Morrowind.esm")) {
+            return path;
+        }
+    }
+
+    constexpr std::array<const char*, 2> kFallbackPaths = {
+        "C:/GOG Games/Morrowind/Data Files",
+        "/mnt/c/GOG Games/Morrowind/Data Files"
+    };
+    for (const char* candidate : kFallbackPaths) {
+        const std::filesystem::path path(candidate);
+        if (std::filesystem::exists(path / "Morrowind.esm")) {
+            return path;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path> findImportedSceneDemoPath() {
+    if (const std::optional<std::string> envPathValue = readEnvironmentString(kImportedSceneEnvVar);
+        envPathValue.has_value() && !envPathValue->empty()) {
+        return std::filesystem::path(*envPathValue);
     }
 
     constexpr std::array<const char*, 4> kFallbackPaths = {
@@ -464,6 +515,15 @@ std::optional<std::filesystem::path> findImportedSceneDemoPath() {
         }
     }
     return std::nullopt;
+}
+
+bool balmoraGuardsEnabledByEnvironment() {
+    const std::optional<std::string> value = readEnvironmentString(kBalmoraGuardsEnvVar);
+    if (!value.has_value()) {
+        return false;
+    }
+    const std::string normalized = lowerPathCopy(*value);
+    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
 }
 
 struct ImportedSceneCameraPose {
@@ -881,6 +941,16 @@ bool App::init() {
             VOX_LOGE("app") << "failed to build GPU scene asset from imported scene";
             return false;
         }
+        if (balmoraGuardsEnabledByEnvironment()) {
+            initializeBalmoraGuards();
+            if (!odai::importer::buildGpuSceneAssetFromImportedScene(m_importedScene, m_gpuSceneAsset)) {
+                VOX_LOGE("app") << "failed to rebuild GPU scene asset after guard texture import";
+                return false;
+            }
+        } else {
+            VOX_LOGI("app") << "Balmora guards disabled by default; set "
+                            << kBalmoraGuardsEnvVar << "=1 to enable experimental guards";
+        }
         m_gpuSceneRuntime = odai::importer::createGpuSceneRuntime(m_gpuSceneAsset);
         odai::importer::rebuildGpuSceneWorldTransforms(m_gpuSceneRuntime);
         m_importedSceneCollision.build(m_gpuSceneAsset);
@@ -1028,7 +1098,9 @@ void App::run() {
                simulationStepCount < kMaxSimulationStepsPerFrame) {
             m_cameraPrevious = m_camera;
             updateCamera(static_cast<float>(kSimulationFixedStepSeconds));
-            if (!m_importedSceneDemoEnabled) {
+            if (m_importedSceneDemoEnabled) {
+                updateBalmoraGuards(static_cast<float>(kSimulationFixedStepSeconds));
+            } else {
                 m_simulation.update(static_cast<float>(kSimulationFixedStepSeconds));
             }
             simulationAccumulatorSeconds -= kSimulationFixedStepSeconds;
@@ -1069,6 +1141,411 @@ void App::resetVoxelBreakProgress() {
     m_voxelBreakTargetY = 0;
     m_voxelBreakTargetZ = 0;
     m_voxelBreakClicks = 0;
+}
+
+void App::initializeBalmoraGuards() {
+    m_balmoraGuards.clear();
+    m_balmoraGuardPrototype = {};
+    m_balmoraNavmesh.clear();
+
+    if (m_importedScene.sourceTag != "morrowind_balmora") {
+        return;
+    }
+
+    const std::optional<std::filesystem::path> dataFilesPath = findMorrowindDataFilesPath();
+    if (!dataFilesPath.has_value()) {
+        VOX_LOGW("app") << "Balmora guards disabled: Morrowind Data Files not found; set "
+                         << kMorrowindDataFilesEnvVar;
+        return;
+    }
+
+    std::unordered_map<std::string, std::uint32_t> textureSlotByPath;
+    for (std::uint32_t textureIndex = 0; textureIndex < m_importedScene.textures.size(); ++textureIndex) {
+        textureSlotByPath.emplace(
+            lowerPathCopy(m_importedScene.textures[textureIndex].sourcePath),
+            textureIndex);
+    }
+    auto addActorTextureSlot = [&](const std::string& sourcePath) -> std::uint32_t {
+        if (sourcePath.empty()) {
+            return std::numeric_limits<std::uint32_t>::max();
+        }
+        const std::string key = lowerPathCopy(sourcePath);
+        const auto existing = textureSlotByPath.find(key);
+        if (existing != textureSlotByPath.end()) {
+            return existing->second;
+        }
+
+        odai::importer::ImportedSceneTexture texture{};
+        if (!odai::importer::loadMorrowindTexture(*dataFilesPath, sourcePath, texture)) {
+            VOX_LOGW("app") << "Balmora guard texture skipped: " << sourcePath
+                             << " (" << odai::importer::getImportedSceneLastError() << ")";
+            return std::numeric_limits<std::uint32_t>::max();
+        }
+        const std::uint32_t textureIndex = static_cast<std::uint32_t>(m_importedScene.textures.size());
+        textureSlotByPath.emplace(lowerPathCopy(texture.sourcePath), textureIndex);
+        m_importedScene.textures.push_back(std::move(texture));
+        return textureIndex;
+    };
+
+    auto appendNifToPrototype = [&](std::string_view relativeModelPath) {
+        std::filesystem::path nifPath = *dataFilesPath / "Meshes" / std::filesystem::path(std::string(relativeModelPath));
+        if (!std::filesystem::exists(nifPath)) {
+            VOX_LOGW("app") << "Balmora guard mesh missing: " << nifPath.string();
+            return;
+        }
+
+        odai::importer::ImportedNifResult nifResult{};
+        std::string nifError;
+        if (!odai::importer::loadMorrowindStaticNif(nifPath, nifResult, nifError)) {
+            VOX_LOGW("app") << "Balmora guard mesh skipped: " << nifPath.string()
+                             << " (" << nifError << ")";
+            return;
+        }
+
+        const std::uint32_t textureIndex = addActorTextureSlot(nifResult.diffuseTexturePath);
+        if (nifResult.mesh.parts.empty()) {
+            odai::importer::ImportedSceneMeshPart part{};
+            part.firstIndex = 0u;
+            part.indexCount = static_cast<std::uint32_t>(nifResult.mesh.indices.size());
+            part.textureIndex = textureIndex;
+            part.alphaTest = nifResult.alphaTest;
+            nifResult.mesh.parts.push_back(part);
+        } else {
+            for (odai::importer::ImportedSceneMeshPart& part : nifResult.mesh.parts) {
+                part.textureIndex = textureIndex;
+            }
+        }
+
+        for (const odai::importer::ImportedSceneMeshPart& part : nifResult.mesh.parts) {
+            const std::uint32_t firstIndex = part.firstIndex;
+            const std::uint32_t indexEnd = std::min<std::uint32_t>(
+                firstIndex + part.indexCount,
+                static_cast<std::uint32_t>(nifResult.mesh.indices.size()));
+            if (firstIndex >= indexEnd) {
+                continue;
+            }
+
+            const std::uint32_t drawFirstIndex =
+                static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size());
+            std::vector<std::uint32_t> remap(
+                nifResult.mesh.vertices.size(),
+                std::numeric_limits<std::uint32_t>::max());
+            for (std::uint32_t indexOffset = firstIndex; indexOffset < indexEnd; ++indexOffset) {
+                const std::uint32_t sourceVertexIndex = nifResult.mesh.indices[indexOffset];
+                if (sourceVertexIndex >= nifResult.mesh.vertices.size()) {
+                    continue;
+                }
+                std::uint32_t& mappedIndex = remap[sourceVertexIndex];
+                if (mappedIndex == std::numeric_limits<std::uint32_t>::max()) {
+                    const odai::importer::ImportedSceneVertex& sourceVertex =
+                        nifResult.mesh.vertices[sourceVertexIndex];
+                    odai::importer::ImportedScenePackedVertex vertex{};
+                    std::copy(std::begin(sourceVertex.position), std::end(sourceVertex.position), std::begin(vertex.position));
+                    std::copy(std::begin(sourceVertex.normal), std::end(sourceVertex.normal), std::begin(vertex.normal));
+                    std::copy(std::begin(sourceVertex.uv), std::end(sourceVertex.uv), std::begin(vertex.uv));
+                    vertex.color[0] = 0.78f;
+                    vertex.color[1] = 0.72f;
+                    vertex.color[2] = 0.62f;
+                    vertex.textureIndex = part.textureIndex;
+                    vertex.flags = part.alphaTest ? 1u : 0u;
+                    mappedIndex = static_cast<std::uint32_t>(m_balmoraGuardPrototype.vertices.size());
+                    m_balmoraGuardPrototype.vertices.push_back(vertex);
+                }
+                m_balmoraGuardPrototype.indices.push_back(mappedIndex);
+            }
+
+            const std::uint32_t drawIndexCount =
+                static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size()) - drawFirstIndex;
+            if (drawIndexCount == 0u) {
+                continue;
+            }
+            odai::importer::ImportedScenePackedDraw draw{};
+            draw.firstIndex = drawFirstIndex;
+            draw.indexCount = drawIndexCount;
+            m_balmoraGuardPrototype.draws.push_back(draw);
+        }
+    };
+
+    constexpr std::array<std::string_view, 13> kGuardModelParts = {
+        "b/B_N_Dark Elf_M_Neck.NIF",
+        "b/B_N_Dark Elf_M_Head_01.NIF",
+        "b/B_N_Dark Elf_M_Hair_17.nif",
+        "a/A_Bonemold_Armun_An_helm.nif",
+        "a/A_Bonemold_Cuirass_C.NIF",
+        "a/A_Bonemold_Armun_An_UA.nif",
+        "a/A_Bonemold_Armun_An_CL.nif",
+        "a/A_Bonemold_Bracer_W.nif",
+        "a/A_Bonemold_Greaves_G.nif",
+        "a/A_Bonemold_Greaves_UL.nif",
+        "a/A_Bonemold_Greaves_K.nif",
+        "a/A_Bonemold_Boots_F.nif",
+        "a/A_Bonemold_Boots_A.nif"
+    };
+    for (const std::string_view modelPart : kGuardModelParts) {
+        appendNifToPrototype(modelPart);
+    }
+    if (m_balmoraGuardPrototype.vertices.empty() ||
+        m_balmoraGuardPrototype.indices.empty() ||
+        m_balmoraGuardPrototype.draws.empty()) {
+        VOX_LOGW("app") << "Balmora guards disabled: no guard actor geometry imported";
+        m_balmoraGuardPrototype = {};
+        return;
+    }
+
+    odai::world::NavmeshSettings navmeshSettings{};
+    navmeshSettings.agentRadius = 32.0f;
+    navmeshSettings.agentHeight = 128.0f;
+    navmeshSettings.maxClimb = 72.0f;
+    navmeshSettings.maxSlopeDegrees = 52.0f;
+    navmeshSettings.nearestPointMaxDistance = 1200.0f;
+    navmeshSettings.edgeMergeEpsilon = 0.35f;
+    if (!m_balmoraNavmesh.buildFromGpuSceneAsset(m_gpuSceneAsset, navmeshSettings)) {
+        VOX_LOGW("app") << "Balmora guards disabled: navmesh build failed";
+        m_balmoraGuardPrototype = {};
+        return;
+    }
+
+    std::vector<odai::math::Vector3> guardSpawns;
+    for (const odai::importer::ImportedSceneCellRef& ref : m_importedScene.unresolvedRefs) {
+        if (lowerPathCopy(ref.refId) != "hlaalu guard_outside") {
+            continue;
+        }
+        guardSpawns.push_back({ref.position[0], ref.position[2], ref.position[1]});
+    }
+    if (guardSpawns.empty()) {
+        guardSpawns = {
+            {-17051.3105f, 228.6063f, -14461.3164f},
+            {-20190.7988f, 169.6947f, -13064.7422f},
+            {-22458.5312f, 576.0219f, -14094.3115f},
+            {-24606.0293f, 971.5856f, -12884.6289f}
+        };
+    }
+
+    const auto snapToNavmesh = [&](const odai::math::Vector3& point, odai::math::Vector3& outPoint) {
+        return m_balmoraNavmesh.findNearestPoint(
+            {point.x, point.y + kBalmoraGuardNavmeshProbeHeight, point.z},
+            outPoint);
+    };
+
+    std::vector<odai::math::Vector3> route;
+    constexpr std::array<odai::math::Vector3, 8> kRawRoute = {
+        odai::math::Vector3{-17051.3105f, 228.6063f, -14461.3164f},
+        odai::math::Vector3{-18470.0f, 260.0f, -14440.0f},
+        odai::math::Vector3{-20190.7988f, 169.6947f, -13064.7422f},
+        odai::math::Vector3{-21340.0f, 330.0f, -13780.0f},
+        odai::math::Vector3{-22458.5312f, 576.0219f, -14094.3115f},
+        odai::math::Vector3{-23640.0f, 810.0f, -13520.0f},
+        odai::math::Vector3{-24606.0293f, 971.5856f, -12884.6289f},
+        odai::math::Vector3{-21760.0f, 640.0f, -15440.0f}
+    };
+    for (const odai::math::Vector3& rawPoint : kRawRoute) {
+        odai::math::Vector3 snapped{};
+        if (snapToNavmesh(rawPoint, snapped)) {
+            route.push_back(snapped);
+        }
+    }
+
+    for (std::size_t guardIndex = 0; guardIndex < guardSpawns.size(); ++guardIndex) {
+        odai::math::Vector3 snappedSpawn{};
+        if (!snapToNavmesh(guardSpawns[guardIndex], snappedSpawn)) {
+            continue;
+        }
+        BalmoraGuardAgent guard{};
+        guard.position = snappedSpawn;
+        guard.previousPosition = snappedSpawn;
+        guard.route = route;
+        guard.routeIndex = route.empty() ? 0u : ((guardIndex * 2u) % route.size());
+        guard.speed = 84.0f + (static_cast<float>(guardIndex % 3u) * 9.0f);
+        guard.walkPhase = static_cast<float>(guardIndex) * 1.37f;
+        guard.previousWalkPhase = guard.walkPhase;
+        m_balmoraGuards.push_back(std::move(guard));
+    }
+
+    const odai::world::Navmesh::Stats navmeshStats = m_balmoraNavmesh.stats();
+    VOX_LOGI("app") << "Balmora guards enabled"
+                    << " guards=" << m_balmoraGuards.size()
+                    << " actorVertices=" << m_balmoraGuardPrototype.vertices.size()
+                    << " actorIndices=" << m_balmoraGuardPrototype.indices.size()
+                    << " navmeshWalkable=" << navmeshStats.walkableTriangleCount
+                    << " navmeshLinks=" << navmeshStats.linkCount;
+}
+
+void App::updateBalmoraGuards(float dt) {
+    if (m_balmoraGuards.empty() || m_balmoraGuardPrototype.vertices.empty() || m_balmoraNavmesh.empty()) {
+        return;
+    }
+
+    auto chooseNextPath = [&](BalmoraGuardAgent& guard) {
+        guard.path.clear();
+        guard.pathIndex = 0;
+        if (guard.route.empty()) {
+            return;
+        }
+        for (std::size_t attempt = 0; attempt < guard.route.size(); ++attempt) {
+            const odai::math::Vector3 target = guard.route[guard.routeIndex];
+            guard.routeIndex = (guard.routeIndex + 1u) % guard.route.size();
+            const odai::math::Vector3 delta = target - guard.position;
+            if ((delta.x * delta.x) + (delta.z * delta.z) <
+                (kBalmoraGuardRouteReachRadius * kBalmoraGuardRouteReachRadius)) {
+                continue;
+            }
+            guard.path.push_back({guard.position});
+            guard.path.push_back({target});
+            guard.pathIndex = 1u;
+            return;
+        }
+    };
+
+    for (BalmoraGuardAgent& guard : m_balmoraGuards) {
+        guard.previousPosition = guard.position;
+        guard.previousYawRadians = guard.yawRadians;
+        guard.previousWalkPhase = guard.walkPhase;
+
+        if (guard.path.empty() || guard.pathIndex >= guard.path.size()) {
+            chooseNextPath(guard);
+        }
+        if (guard.path.empty() || guard.pathIndex >= guard.path.size()) {
+            continue;
+        }
+
+        float remainingStep = std::max(guard.speed * std::max(dt, 0.0f), 0.0f);
+        while (remainingStep > 0.0f && guard.pathIndex < guard.path.size()) {
+            const odai::math::Vector3 target = guard.path[guard.pathIndex].position;
+            const odai::math::Vector3 delta{target.x - guard.position.x, 0.0f, target.z - guard.position.z};
+            const float distance = std::sqrt((delta.x * delta.x) + (delta.z * delta.z));
+            if (distance <= kBalmoraGuardRouteReachRadius) {
+                ++guard.pathIndex;
+                if (guard.pathIndex >= guard.path.size()) {
+                    chooseNextPath(guard);
+                    break;
+                }
+                continue;
+            }
+
+            const float moveDistance = std::min(remainingStep, distance);
+            const odai::math::Vector3 direction = delta / std::max(distance, 0.001f);
+            odai::math::Vector3 moved{
+                guard.position.x + (direction.x * moveDistance),
+                guard.position.y,
+                guard.position.z + (direction.z * moveDistance)
+            };
+            odai::math::Vector3 snapped{};
+            if (m_balmoraNavmesh.findNearestPoint(
+                    {moved.x, moved.y + kBalmoraGuardNavmeshProbeHeight, moved.z},
+                    snapped)) {
+                moved = snapped;
+            }
+            guard.position = moved;
+            guard.yawRadians = std::atan2(direction.x, direction.z);
+            guard.walkPhase += moveDistance * kBalmoraGuardWalkCycleScale;
+            remainingStep -= moveDistance;
+            if (moveDistance < 0.001f) {
+                break;
+            }
+        }
+    }
+}
+
+void App::rebuildBalmoraGuardRenderFrame(float simulationAlpha) {
+    m_balmoraGuardFrameVertices.clear();
+    m_balmoraGuardFrameIndices.clear();
+    m_balmoraGuardFrameDraws.clear();
+    if (m_balmoraGuards.empty() || m_balmoraGuardPrototype.vertices.empty()) {
+        return;
+    }
+
+    const float alpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
+    m_balmoraGuardFrameVertices.reserve(m_balmoraGuardPrototype.vertices.size() * m_balmoraGuards.size());
+    m_balmoraGuardFrameIndices.reserve(m_balmoraGuardPrototype.indices.size() * m_balmoraGuards.size());
+    m_balmoraGuardFrameDraws.reserve(m_balmoraGuardPrototype.draws.size() * m_balmoraGuards.size());
+
+    const auto lerpAngle = [](float from, float to, float t) {
+        float delta = std::fmod(to - from, kTwoPi);
+        if (delta <= -odai::math::kPi) {
+            delta += kTwoPi;
+        } else if (delta > odai::math::kPi) {
+            delta -= kTwoPi;
+        }
+        return from + (delta * t);
+    };
+    const auto rotateX = [](odai::math::Vector3 value, float pivotY, float pivotZ, float radians) {
+        const float c = std::cos(radians);
+        const float s = std::sin(radians);
+        const float y = value.y - pivotY;
+        const float z = value.z - pivotZ;
+        value.y = pivotY + (y * c) - (z * s);
+        value.z = pivotZ + (y * s) + (z * c);
+        return value;
+    };
+    const auto applyWalkSkin = [&](odai::math::Vector3& position,
+                                   odai::math::Vector3& normal,
+                                   float walkPhase) {
+        const float side = position.x < 0.0f ? -1.0f : 1.0f;
+        if (position.y < 82.0f) {
+            const float legWeight = std::clamp((82.0f - position.y) / 82.0f, 0.0f, 1.0f) *
+                std::clamp((std::abs(position.x) - 2.0f) / 18.0f, 0.0f, 1.0f);
+            const float legSwing = std::sin(walkPhase + (side > 0.0f ? odai::math::kPi : 0.0f)) * 0.34f * legWeight;
+            position = rotateX(position, 72.0f, 0.0f, legSwing);
+            normal = rotateX(normal, 0.0f, 0.0f, legSwing * 0.65f);
+        }
+        if (position.y > 42.0f && position.y < 128.0f) {
+            const float armWeight = std::clamp((std::abs(position.x) - 18.0f) / 18.0f, 0.0f, 1.0f) *
+                std::clamp((128.0f - position.y) / 58.0f, 0.0f, 1.0f);
+            const float armSwing = std::sin(walkPhase + (side > 0.0f ? 0.0f : odai::math::kPi)) * 0.28f * armWeight;
+            position = rotateX(position, 104.0f, 0.0f, armSwing);
+            normal = rotateX(normal, 0.0f, 0.0f, armSwing * 0.65f);
+        }
+    };
+
+    for (const BalmoraGuardAgent& guard : m_balmoraGuards) {
+        const odai::math::Vector3 position =
+            guard.previousPosition + ((guard.position - guard.previousPosition) * alpha);
+        const float yawRadians = lerpAngle(guard.previousYawRadians, guard.yawRadians, alpha);
+        const float walkPhase = guard.previousWalkPhase + ((guard.walkPhase - guard.previousWalkPhase) * alpha);
+        const float c = std::cos(yawRadians);
+        const float s = std::sin(yawRadians);
+        const float bob = std::abs(std::sin(walkPhase * 2.0f)) * 1.6f;
+
+        const std::uint32_t baseVertex = static_cast<std::uint32_t>(m_balmoraGuardFrameVertices.size());
+        for (const odai::importer::ImportedScenePackedVertex& sourceVertex : m_balmoraGuardPrototype.vertices) {
+            odai::math::Vector3 localPosition{
+                sourceVertex.position[0],
+                sourceVertex.position[1],
+                sourceVertex.position[2]
+            };
+            odai::math::Vector3 localNormal{
+                sourceVertex.normal[0],
+                sourceVertex.normal[1],
+                sourceVertex.normal[2]
+            };
+            applyWalkSkin(localPosition, localNormal, walkPhase);
+
+            odai::importer::ImportedScenePackedVertex vertex = sourceVertex;
+            vertex.position[0] = position.x + (localPosition.x * c) + (localPosition.z * s);
+            vertex.position[1] = position.y + localPosition.y + bob;
+            vertex.position[2] = position.z + (-localPosition.x * s) + (localPosition.z * c);
+            const odai::math::Vector3 worldNormal = odai::math::normalize({
+                (localNormal.x * c) + (localNormal.z * s),
+                localNormal.y,
+                (-localNormal.x * s) + (localNormal.z * c)
+            });
+            vertex.normal[0] = worldNormal.x;
+            vertex.normal[1] = worldNormal.y;
+            vertex.normal[2] = worldNormal.z;
+            m_balmoraGuardFrameVertices.push_back(vertex);
+        }
+
+        const std::uint32_t firstActorIndex = static_cast<std::uint32_t>(m_balmoraGuardFrameIndices.size());
+        for (const std::uint32_t sourceIndex : m_balmoraGuardPrototype.indices) {
+            m_balmoraGuardFrameIndices.push_back(baseVertex + sourceIndex);
+        }
+        for (const odai::importer::ImportedScenePackedDraw& sourceDraw : m_balmoraGuardPrototype.draws) {
+            odai::importer::ImportedScenePackedDraw draw{};
+            draw.firstIndex = firstActorIndex + sourceDraw.firstIndex;
+            draw.indexCount = sourceDraw.indexCount;
+            m_balmoraGuardFrameDraws.push_back(draw);
+        }
+    }
 }
 
 void App::assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId) {
@@ -1116,13 +1593,25 @@ void App::update(float dt, float simulationAlpha) {
         };
         m_visibleChunkIndices.clear();
         m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
+        rebuildBalmoraGuardRenderFrame(renderAlpha);
+        odai::render::ImportedActorFrameData guardFrameData{};
+        const odai::render::ImportedActorFrameData* guardFrameDataPtr = nullptr;
+        if (!m_balmoraGuardFrameVertices.empty() &&
+            !m_balmoraGuardFrameIndices.empty() &&
+            !m_balmoraGuardFrameDraws.empty()) {
+            guardFrameData.vertices = m_balmoraGuardFrameVertices;
+            guardFrameData.indices = m_balmoraGuardFrameIndices;
+            guardFrameData.draws = m_balmoraGuardFrameDraws;
+            guardFrameDataPtr = &guardFrameData;
+        }
         m_renderer.renderFrame(
             m_world.chunkGrid(),
             m_simulation,
             cameraPose,
             odai::render::VoxelPreview{},
             simulationAlpha,
-            std::span<const std::size_t>(m_visibleChunkIndices)
+            std::span<const std::size_t>(m_visibleChunkIndices),
+            guardFrameDataPtr
         );
         m_camera.fovDegrees = m_renderer.cameraFovDegrees();
         return;

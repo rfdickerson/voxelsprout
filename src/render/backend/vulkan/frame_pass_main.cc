@@ -34,6 +34,11 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
     const std::uint32_t importedTerrainDrawCount = inputs.importedTerrainDrawCount;
+    const VkBuffer importedActorVertexBuffer = inputs.importedActorVertexBuffer;
+    const VkDeviceSize importedActorVertexOffset = inputs.importedActorVertexOffset;
+    const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
+    const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
+    const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = inputs.transportInstanceCount;
@@ -90,6 +95,11 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             queryIndex
         );
     };
+    const bool canDrawImportedWater =
+        m_importedWaterPipeline != VK_NULL_HANDLE &&
+        m_importedWaterVertexBufferHandle != kInvalidBufferHandle &&
+        m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
+        m_importedWaterIndexCount > 0;
 
     if (!m_msaaColorImageInitialized[imageIndex]) {
         transitionImageLayout(
@@ -139,7 +149,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     colorAttachment.imageView = m_msaaColorImageViews[imageIndex];
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     colorAttachment.clearValue = clearValue;
     colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
     colorAttachment.resolveImageView = m_hdrResolveImageViews[aoFrameIndex];
@@ -154,7 +164,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     depthAttachment.imageView = m_depthImageViews[imageIndex];
     depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depthAttachment.clearValue = depthClearValue;
 
     VkRenderingInfo renderingInfo{};
@@ -202,7 +212,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdPushConstants(
             commandBuffer,
             m_pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             0,
             sizeof(ChunkPushConstants),
             &chunkPushConstants
@@ -243,7 +253,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             vkCmdPushConstants(
                 commandBuffer,
                 m_pipelineLayout,
-                VK_SHADER_STAGE_VERTEX_BIT,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0,
                 sizeof(ChunkPushConstants),
                 &magicaPushConstants
@@ -298,6 +308,48 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 continue;
             }
             const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+        }
+    }
+    if (m_importedStaticPipeline != VK_NULL_HANDLE &&
+        importedActorVertexBuffer != VK_NULL_HANDLE &&
+        importedActorIndexBuffer != VK_NULL_HANDLE &&
+        !importedActorMeshDraws.empty() &&
+        m_debugShowImportedStatics) {
+        const VkBuffer importedVertexBuffers[1] = {importedActorVertexBuffer};
+        const VkDeviceSize importedVertexOffsets[1] = {importedActorVertexOffset};
+        vkCmdBindPipeline(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                ? m_importedStaticPipelineRt
+                : m_importedStaticPipeline
+        );
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            boundDescriptorSetCount,
+            boundDescriptorSets.sets.data(),
+            1,
+            &mvpDynamicOffset
+        );
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
+        vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
+        ChunkPushConstants importedPushConstants{};
+        importedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
+        importedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
+        vkCmdPushConstants(
+            commandBuffer,
+            m_pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(ChunkPushConstants),
+            &importedPushConstants
+        );
+        for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
             countDrawCalls(m_debugDrawCallsMain, 1);
             vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
         }
@@ -390,10 +442,134 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         }
     }
 
-    if (m_importedWaterPipeline != VK_NULL_HANDLE &&
-        m_importedWaterVertexBufferHandle != kInvalidBufferHandle &&
-        m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
-        m_importedWaterIndexCount > 0) {
+    const bool canCaptureWaterRefraction =
+        canDrawImportedWater &&
+        aoFrameIndex < m_waterRefractionImages.size() &&
+        aoFrameIndex < m_waterRefractionImageInitialized.size() &&
+        m_waterRefractionImages[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_hdrResolveImages[aoFrameIndex] != VK_NULL_HANDLE;
+    if (canCaptureWaterRefraction) {
+        vkCmdEndRendering(commandBuffer);
+
+        transitionImageLayout(
+            commandBuffer,
+            m_hdrResolveImages[aoFrameIndex],
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0u,
+            1u,
+            0u,
+            1u
+        );
+        transitionImageLayout(
+            commandBuffer,
+            m_waterRefractionImages[aoFrameIndex],
+            m_waterRefractionImageInitialized[aoFrameIndex]
+                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            m_waterRefractionImageInitialized[aoFrameIndex]
+                ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                : VK_PIPELINE_STAGE_2_NONE,
+            m_waterRefractionImageInitialized[aoFrameIndex]
+                ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+                : VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT
+        );
+
+        VkImageCopy opaqueCopyRegion{};
+        opaqueCopyRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        opaqueCopyRegion.srcSubresource.mipLevel = 0;
+        opaqueCopyRegion.srcSubresource.baseArrayLayer = 0;
+        opaqueCopyRegion.srcSubresource.layerCount = 1;
+        opaqueCopyRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        opaqueCopyRegion.dstSubresource.mipLevel = 0;
+        opaqueCopyRegion.dstSubresource.baseArrayLayer = 0;
+        opaqueCopyRegion.dstSubresource.layerCount = 1;
+        opaqueCopyRegion.extent = {m_swapchainExtent.width, m_swapchainExtent.height, 1u};
+        vkCmdCopyImage(
+            commandBuffer,
+            m_hdrResolveImages[aoFrameIndex],
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            m_waterRefractionImages[aoFrameIndex],
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &opaqueCopyRegion
+        );
+
+        transitionImageLayout(
+            commandBuffer,
+            m_waterRefractionImages[aoFrameIndex],
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT
+        );
+        transitionImageLayout(
+            commandBuffer,
+            m_hdrResolveImages[aoFrameIndex],
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0u,
+            1u,
+            0u,
+            1u
+        );
+        transitionImageLayout(
+            commandBuffer,
+            m_msaaColorImages[imageIndex],
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT
+        );
+        transitionImageLayout(
+            commandBuffer,
+            m_depthImages[imageIndex],
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        );
+        m_waterRefractionImageInitialized[aoFrameIndex] = true;
+
+        VkRenderingAttachmentInfo waterColorAttachment = colorAttachment;
+        waterColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        waterColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        VkRenderingAttachmentInfo waterDepthAttachment = depthAttachment;
+        waterDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        waterDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        VkRenderingInfo waterRenderingInfo = renderingInfo;
+        waterRenderingInfo.pColorAttachments = &waterColorAttachment;
+        waterRenderingInfo.pDepthAttachment = &waterDepthAttachment;
+
+        vkCmdBeginRendering(commandBuffer, &waterRenderingInfo);
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+    }
+
+    if (canDrawImportedWater) {
         const VkBuffer waterVertexBuffer = m_bufferAllocator.getBuffer(m_importedWaterVertexBufferHandle);
         const VkBuffer waterIndexBuffer = m_bufferAllocator.getBuffer(m_importedWaterIndexBufferHandle);
         if (waterVertexBuffer != VK_NULL_HANDLE && waterIndexBuffer != VK_NULL_HANDLE) {
@@ -571,7 +747,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 vkCmdPushConstants(
                     commandBuffer,
                     m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                     0,
                     sizeof(ChunkPushConstants),
                     &previewChunkPushConstants

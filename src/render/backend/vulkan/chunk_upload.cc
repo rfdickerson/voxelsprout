@@ -414,6 +414,7 @@ void RendererBackend::clearGpuScene() {
     m_importedMeshDraws.clear();
     m_importedPageDrawRanges.clear();
     m_visibleImportedMeshDraws.clear();
+    m_importedTextureSlots.clear();
     for (std::vector<ImportedMeshDraw>& shadowDraws : m_visibleImportedShadowMeshDraws) {
         shadowDraws.clear();
     }
@@ -795,6 +796,7 @@ bool RendererBackend::uploadImportedSceneInternal(
     } else if (!uploadScene.textures.empty()) {
         VOX_LOGW("render") << "imported textures unavailable because bindless texture sampling is not ready";
     }
+    m_importedTextureSlots = importedTextureSlots;
 
     std::vector<ImportedMeshVertex> vertices;
     std::vector<std::uint32_t> indices;

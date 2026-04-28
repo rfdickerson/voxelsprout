@@ -510,6 +510,10 @@ bool RendererBackend::createHdrResolveTargets() {
     m_hdrResolveSampleImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
     m_hdrResolveTransientHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
     m_hdrResolveImageInitialized.assign(frameTargetCount, false);
+    m_waterRefractionImages.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_waterRefractionImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_waterRefractionTransientHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
+    m_waterRefractionImageInitialized.assign(frameTargetCount, false);
 
     for (uint32_t i = 0; i < frameTargetCount; ++i) {
         TransientImageDesc hdrResolveDesc{};
@@ -588,6 +592,45 @@ bool RendererBackend::createHdrResolveTargets() {
                 sampleViewName.c_str()
             );
         }
+
+        TransientImageDesc waterRefractionDesc{};
+        waterRefractionDesc.imageType = VK_IMAGE_TYPE_2D;
+        waterRefractionDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        waterRefractionDesc.format = m_hdrColorFormat;
+        waterRefractionDesc.extent = {m_swapchainExtent.width, m_swapchainExtent.height, 1u};
+        waterRefractionDesc.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        waterRefractionDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        waterRefractionDesc.mipLevels = 1;
+        waterRefractionDesc.arrayLayers = 1;
+        waterRefractionDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+        waterRefractionDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
+        waterRefractionDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        waterRefractionDesc.firstPass = FrameArenaPass::Main;
+        waterRefractionDesc.lastPass = FrameArenaPass::Main;
+        waterRefractionDesc.debugName = "water.refraction.opaque[" + std::to_string(i) + "]";
+        const TransientImageHandle waterRefractionHandle = m_frameArena.createTransientImage(
+            waterRefractionDesc,
+            FrameArenaImageLifetime::Persistent
+        );
+        if (waterRefractionHandle == kInvalidTransientImageHandle) {
+            VOX_LOGE("render") << "failed creating water refraction transient image\n";
+            return false;
+        }
+        const TransientImageInfo* waterRefractionInfo = m_frameArena.getTransientImage(waterRefractionHandle);
+        if (waterRefractionInfo == nullptr ||
+            waterRefractionInfo->image == VK_NULL_HANDLE ||
+            waterRefractionInfo->view == VK_NULL_HANDLE) {
+            VOX_LOGE("render") << "invalid water refraction transient image info\n";
+            return false;
+        }
+        m_waterRefractionTransientHandles[i] = waterRefractionHandle;
+        m_waterRefractionImages[i] = waterRefractionInfo->image;
+        m_waterRefractionImageViews[i] = waterRefractionInfo->view;
+        setObjectName(
+            VK_OBJECT_TYPE_IMAGE,
+            vkHandleToUint64(m_waterRefractionImages[i]),
+            waterRefractionDesc.debugName.c_str()
+        );
     }
 
     if (m_hdrResolveSampler != VK_NULL_HANDLE) {
@@ -738,6 +781,16 @@ void RendererBackend::destroyHdrResolveTargets() {
         vkDestroySampler(m_device, m_hdrResolveSampler, nullptr);
         m_hdrResolveSampler = VK_NULL_HANDLE;
     }
+
+    for (TransientImageHandle handle : m_waterRefractionTransientHandles) {
+        if (handle != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(handle);
+        }
+    }
+    m_waterRefractionImageViews.clear();
+    m_waterRefractionImages.clear();
+    m_waterRefractionTransientHandles.clear();
+    m_waterRefractionImageInitialized.clear();
 
     for (VkImageView imageView : m_hdrResolveImageViews) {
         if (imageView != VK_NULL_HANDLE) {

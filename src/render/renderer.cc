@@ -86,9 +86,10 @@ void Renderer::renderFrame(
     const CameraPose& camera,
     const VoxelPreview& preview,
     float simulationAlpha,
-    std::span<const std::size_t> visibleChunkIndices
+    std::span<const std::size_t> visibleChunkIndices,
+    const ImportedActorFrameData* importedActors
 ) {
-    m_backend->renderFrame(chunkGrid, simulation, camera, preview, simulationAlpha, visibleChunkIndices);
+    m_backend->renderFrame(chunkGrid, simulation, camera, preview, simulationAlpha, visibleChunkIndices, importedActors);
 }
 
 void Renderer::setDebugUiVisible(bool visible) {

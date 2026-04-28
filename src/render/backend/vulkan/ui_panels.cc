@@ -367,6 +367,18 @@ void RendererBackend::buildSunDebugUi() {
             ImGui::SliderFloat("Water Normal Strength", &m_skyDebugSettings.waterNormalStrength, 0.25f, 2.5f, "%.2f");
             ImGui::SliderFloat("Water Reflection", &m_skyDebugSettings.waterReflectionStrength, 0.25f, 4.0f, "%.2f");
             ImGui::SliderFloat("Water Absorption", &m_skyDebugSettings.waterRefractionDecay, 0.25f, 5.0f, "%.2f");
+            ImGui::SliderFloat(
+                "Water Refraction Strength",
+                &m_skyDebugSettings.waterRefractionStrength,
+                0.0f,
+                3.0f,
+                "%.2f");
+            ImGui::SliderFloat(
+                "Water Refraction Distortion",
+                &m_skyDebugSettings.waterRefractionDistortionPixels,
+                0.0f,
+                160.0f,
+                "%.0f px");
             ImGui::Separator();
             ImGui::SliderFloat("Plant Quad Directionality", &m_skyDebugSettings.plantQuadDirectionality, 0.0f, 1.0f, "%.2f");
             ImGui::Text("Active: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",

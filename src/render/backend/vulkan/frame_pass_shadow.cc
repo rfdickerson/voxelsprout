@@ -38,6 +38,11 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
     const std::uint32_t importedTerrainDrawCount = inputs.importedTerrainDrawCount;
+    const VkBuffer importedActorVertexBuffer = inputs.importedActorVertexBuffer;
+    const VkDeviceSize importedActorVertexOffset = inputs.importedActorVertexOffset;
+    const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
+    const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
+    const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
     const bool importedPageCullingEnabled = inputs.importedPageCullingEnabled;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
@@ -193,7 +198,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdPushConstants(
                     commandBuffer,
                     m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                     0,
                     sizeof(ChunkPushConstants),
                     &chunkPushConstants
@@ -219,7 +224,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     vkCmdPushConstants(
                         commandBuffer,
                         m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0,
                         sizeof(ChunkPushConstants),
                         &magicaPushConstants
@@ -273,7 +278,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdPushConstants(
                     commandBuffer,
                     m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                     0,
                     sizeof(ChunkPushConstants),
                     &importedPushConstants
@@ -284,6 +289,47 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         continue;
                     }
                     const ImportedMeshDraw& importedDraw = cascadeImportedMeshDraws[drawIndex];
+                    countDrawCalls(m_debugDrawCallsShadow, 1);
+                    vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                }
+                vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
+            }
+            if (m_importedStaticShadowPipeline != VK_NULL_HANDLE &&
+                importedActorVertexBuffer != VK_NULL_HANDLE &&
+                importedActorIndexBuffer != VK_NULL_HANDLE &&
+                !importedActorMeshDraws.empty() &&
+                m_debugShowImportedStatics) {
+                vkCmdSetDepthBias(
+                    commandBuffer,
+                    -(constantBias * kImportedShadowConstantBiasScale),
+                    0.0f,
+                    -(slopeBias * kImportedShadowSlopeBiasScale));
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
+                vkCmdBindDescriptorSets(
+                    commandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    m_pipelineLayout,
+                    0,
+                    boundDescriptorSetCount,
+                    boundDescriptorSets.sets.data(),
+                    1,
+                    &mvpDynamicOffset
+                );
+                const VkBuffer importedVertexBuffers[1] = {importedActorVertexBuffer};
+                const VkDeviceSize importedVertexOffsets[1] = {importedActorVertexOffset};
+                vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
+                vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
+                ChunkPushConstants importedPushConstants{};
+                importedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &importedPushConstants
+                );
+                for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
                 }
@@ -333,7 +379,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     vkCmdPushConstants(
                         commandBuffer,
                         m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0,
                         sizeof(ChunkPushConstants),
                         &pipeShadowPushConstants
@@ -408,7 +454,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     vkCmdPushConstants(
                         commandBuffer,
                         m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0,
                         sizeof(ChunkPushConstants),
                         &grassShadowPushConstants

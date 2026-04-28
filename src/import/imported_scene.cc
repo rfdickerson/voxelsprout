@@ -584,6 +584,92 @@ bool decodeTgaRgba(
     return true;
 }
 
+std::uint16_t readLe16(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    return static_cast<std::uint16_t>(bytes[offset] | (bytes[offset + 1u] << 8u));
+}
+
+std::uint32_t readLe32(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    return static_cast<std::uint32_t>(bytes[offset]) |
+        (static_cast<std::uint32_t>(bytes[offset + 1u]) << 8u) |
+        (static_cast<std::uint32_t>(bytes[offset + 2u]) << 16u) |
+        (static_cast<std::uint32_t>(bytes[offset + 3u]) << 24u);
+}
+
+std::int32_t readLeSigned32(const std::vector<std::uint8_t>& bytes, std::size_t offset) {
+    const std::uint32_t value = readLe32(bytes, offset);
+    std::int32_t signedValue = 0;
+    std::memcpy(&signedValue, &value, sizeof(signedValue));
+    return signedValue;
+}
+
+bool decodeBmpRgba(
+    const std::filesystem::path& path,
+    std::uint32_t& outWidth,
+    std::uint32_t& outHeight,
+    std::vector<std::uint8_t>& outRgba8
+) {
+    outWidth = 0u;
+    outHeight = 0u;
+    outRgba8.clear();
+
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(path, bytes) || bytes.size() < 54u) {
+        return false;
+    }
+    if (bytes[0] != 'B' || bytes[1] != 'M') {
+        return false;
+    }
+
+    const std::uint32_t pixelDataOffset = readLe32(bytes, 10u);
+    const std::uint32_t dibHeaderSize = readLe32(bytes, 14u);
+    if (dibHeaderSize < 40u || pixelDataOffset >= bytes.size()) {
+        return false;
+    }
+
+    const std::int32_t signedWidth = readLeSigned32(bytes, 18u);
+    const std::int32_t signedHeight = readLeSigned32(bytes, 22u);
+    const std::uint16_t planes = readLe16(bytes, 26u);
+    const std::uint16_t bitsPerPixel = readLe16(bytes, 28u);
+    const std::uint32_t compression = readLe32(bytes, 30u);
+    if (signedWidth <= 0 || signedHeight == 0 ||
+        signedHeight == std::numeric_limits<std::int32_t>::min() ||
+        planes != 1u || compression != 0u) {
+        return false;
+    }
+    if (bitsPerPixel != 24u && bitsPerPixel != 32u) {
+        return false;
+    }
+
+    const std::uint32_t width = static_cast<std::uint32_t>(signedWidth);
+    const std::uint32_t height = static_cast<std::uint32_t>(signedHeight < 0 ? -signedHeight : signedHeight);
+    const bool topDown = signedHeight < 0;
+    const std::size_t bytesPerPixel = static_cast<std::size_t>(bitsPerPixel / 8u);
+    const std::size_t rowStride =
+        ((static_cast<std::size_t>(width) * bitsPerPixel + 31u) / 32u) * 4u;
+    const std::size_t requiredBytes = pixelDataOffset + rowStride * static_cast<std::size_t>(height);
+    if (width == 0u || height == 0u || requiredBytes > bytes.size()) {
+        return false;
+    }
+
+    outWidth = width;
+    outHeight = height;
+    outRgba8.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        const std::uint32_t srcY = topDown ? y : (height - 1u - y);
+        const std::size_t rowOffset = pixelDataOffset + static_cast<std::size_t>(srcY) * rowStride;
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t srcOffset = rowOffset + static_cast<std::size_t>(x) * bytesPerPixel;
+            const std::size_t dstOffset =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + x) * 4u;
+            outRgba8[dstOffset + 0u] = bytes[srcOffset + 2u];
+            outRgba8[dstOffset + 1u] = bytes[srcOffset + 1u];
+            outRgba8[dstOffset + 2u] = bytes[srcOffset + 0u];
+            outRgba8[dstOffset + 3u] = (bytesPerPixel == 4u) ? bytes[srcOffset + 3u] : 255u;
+        }
+    }
+    return true;
+}
+
 bool loadTextureRgba(
     const std::filesystem::path& path,
     std::uint32_t& outWidth,
@@ -596,6 +682,9 @@ bool loadTextureRgba(
     }
     if (extension == ".tga") {
         return decodeTgaRgba(path, outWidth, outHeight, outRgba8);
+    }
+    if (extension == ".bmp") {
+        return decodeBmpRgba(path, outWidth, outHeight, outRgba8);
     }
     return false;
 }
@@ -2153,6 +2242,39 @@ void computeImportedSceneBoundsFromPackedData(ImportedScene& scene) {
 
 const std::string& getImportedSceneLastError() {
     return g_lastImportedSceneError;
+}
+
+bool loadMorrowindTexture(
+    const std::filesystem::path& morrowindDataFilesPath,
+    const std::string& sourcePath,
+    ImportedSceneTexture& outTexture
+) {
+    g_lastImportedSceneError.clear();
+    outTexture = ImportedSceneTexture{};
+    outTexture.sourcePath = normalizeTextureRelativePath(sourcePath);
+
+    static std::filesystem::path cachedDataFilesPath;
+    static std::unordered_map<std::string, std::filesystem::path> cachedDataFileIndex;
+    if (cachedDataFileIndex.empty() || cachedDataFilesPath != morrowindDataFilesPath) {
+        cachedDataFilesPath = morrowindDataFilesPath;
+        cachedDataFileIndex = buildCaseInsensitiveFileIndex(morrowindDataFilesPath);
+    }
+    const std::optional<std::filesystem::path> texturePath =
+        resolveTextureFilePath(cachedDataFileIndex, outTexture.sourcePath);
+    if (!texturePath.has_value()) {
+        setLastImportedSceneError("Morrowind texture file not found: " + sourcePath);
+        return false;
+    }
+    if (!loadTextureRgba(*texturePath, outTexture.width, outTexture.height, outTexture.rgba8)) {
+        setLastImportedSceneError("Failed to decode Morrowind texture: " + texturePath->string());
+        return false;
+    }
+    generateTextureMipChain(outTexture.width, outTexture.height, outTexture.rgba8, outTexture.mipLevelCount);
+    if (outTexture.rgba8.empty() || outTexture.mipLevelCount == 0u) {
+        setLastImportedSceneError("Failed to generate mip chain for Morrowind texture: " + texturePath->string());
+        return false;
+    }
+    return true;
 }
 
 bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& outputPath) {

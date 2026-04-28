@@ -50,7 +50,8 @@ public:
         const CameraPose& camera,
         const VoxelPreview& preview,
         float simulationAlpha,
-        std::span<const std::size_t> visibleChunkIndices
+        std::span<const std::size_t> visibleChunkIndices,
+        const ImportedActorFrameData* importedActors = nullptr
     );
     void setDebugUiVisible(bool visible);
     bool isDebugUiVisible() const;
