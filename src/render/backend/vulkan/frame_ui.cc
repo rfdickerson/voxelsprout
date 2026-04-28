@@ -287,6 +287,9 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::Checkbox("Show Textures", &m_debugShowImportedTextures);
             ImGui::Checkbox("Flat Static Shading", &m_debugImportedFlatShading);
             ImGui::Checkbox("Solid Water Debug", &m_debugImportedWaterSolid);
+            const char* waterDebugViews =
+                "Final\0Normals\0Depth/Thickness\0Scene Refraction\0Refraction UV Offset\0Reflection\0Fresnel\0";
+            ImGui::Combo("Water Debug View", &m_skyDebugSettings.waterDebugMode, waterDebugViews);
             ImGui::SliderFloat(
                 "Water Animation Speed",
                 &m_skyDebugSettings.waterAnimationSpeed,

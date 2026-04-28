@@ -886,13 +886,7 @@ bool RendererBackend::createPipePipeline() {
     importedWaterDepthStencil.depthWriteEnable = VK_FALSE;
     importedWaterPipelineCreateInfo.pDepthStencilState = &importedWaterDepthStencil;
     VkPipelineColorBlendAttachmentState importedWaterColorBlendAttachment = colorBlendAttachment;
-    importedWaterColorBlendAttachment.blendEnable = VK_TRUE;
-    importedWaterColorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    importedWaterColorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    importedWaterColorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-    importedWaterColorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    importedWaterColorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    importedWaterColorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    importedWaterColorBlendAttachment.blendEnable = VK_FALSE;
     VkPipelineColorBlendStateCreateInfo importedWaterColorBlending = colorBlending;
     importedWaterColorBlending.pAttachments = &importedWaterColorBlendAttachment;
     importedWaterPipelineCreateInfo.pColorBlendState = &importedWaterColorBlending;

@@ -442,6 +442,12 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
     const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
     const float3 normal = waterNormal(input.inWorldPosition, input.inUv);
+    const float waterDebugMode = camera.dofConfig2.w;
+    if (waterDebugMode > 0.5 && waterDebugMode < 1.5)
+    {
+        return float4((normal * 0.5) + 0.5, 1.0);
+    }
+
     const float3 reflectionDir = normalize(reflect(-viewDir, normal));
     const float nDotV = saturate(dot(normal, viewDir));
     const float rippleSlope = saturate(length(normal.xz) * 2.25);
@@ -449,6 +455,11 @@ float4 main(FragmentInput input) : SV_Target0
     const float fresnelBase = 0.020;
     const float fresnel = fresnelBase + ((1.0 - fresnelBase) * pow(1.0 - nDotV, 5.0));
     const float fresnelReflect = saturate((fresnel * 1.28) + (rippleSlope * 0.075));
+    if (waterDebugMode > 5.5 && waterDebugMode < 6.5)
+    {
+        return float4(fresnelReflect.xxx, 1.0);
+    }
+
     const float reflectionStrength = max(camera.waterConfig.z, 0.01);
     const float3 refractionDir = refract(-viewDir, normal, kAirToWaterEta);
 
@@ -472,6 +483,10 @@ float4 main(FragmentInput input) : SV_Target0
 #ifdef ODAI_RT_REFLECTIONS
     reflectionColor = traceWaterReflection(input.inWorldPosition + (normal * 0.08), reflectionDir, skyReflection);
 #endif
+    if (waterDebugMode > 4.5 && waterDebugMode < 5.5)
+    {
+        return float4(reflectionColor, 1.0);
+    }
 
     float3 refractionColor = waterBody;
 #ifdef ODAI_RT_REFLECTIONS
@@ -504,6 +519,14 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 volumeColor = lerp(shallowWater * 0.86, deepWater * 1.18, smoothstep(0.12, 1.0, rtDepthFactor));
     refractionColor = lerp(transmittedColor, volumeColor, saturate(murkFactor * 0.55));
 #endif
+    if (waterDebugMode > 1.5 && waterDebugMode < 2.5)
+    {
+        const float depthViz = saturate(refractedHitDistance / 60.0);
+        const float3 shallowViz = float3(0.02, 0.82, 0.92);
+        const float3 deepViz = float3(0.02, 0.04, 0.16);
+        const float3 contactViz = float3(sceneWater.contact * 0.85, 0.0, 0.0);
+        return float4(saturate(lerp(shallowViz, deepViz, depthViz) + contactViz), 1.0);
+    }
 
     const float2 baseScreenUv = waterScreenUv(input.inPosition);
     const ScreenRefractionSample screenRefraction = sampleAnimatedSceneRefraction(
@@ -516,15 +539,28 @@ float4 main(FragmentInput input) : SV_Target0
         shallowWater,
         refractionColor);
     refractionColor = screenRefraction.color;
+    if (waterDebugMode > 2.5 && waterDebugMode < 3.5)
+    {
+        return float4(screenRefraction.color, 1.0);
+    }
+    if (waterDebugMode > 3.5 && waterDebugMode < 4.5)
+    {
+        const float warpViz = saturate((screenRefraction.distortionPixels * length(normal.xz)) / 18.0);
+        return float4(warpViz, screenRefraction.weight, 1.0 - warpViz, 1.0);
+    }
 
     const float bottomMottle0 = stableWaterNoise((input.inWorldPosition.xz * 0.028) + float2(13.7, 4.1));
     const float bottomMottle1 = stableWaterNoise((input.inWorldPosition.zx * 0.061) + float2(-7.3, 18.9));
     const float bottomMottle = (bottomMottle0 * 0.62) + (bottomMottle1 * 0.38);
     const float3 overheadBottomTint = lerp(float3(0.48, 0.44, 0.30), float3(0.04, 0.18, 0.19), rtDepthFactor);
-    const float overheadClarity = overheadView * (0.52 + (0.42 * rtShallowFactor));
+    const float screenRefractionPresence = screenRefraction.weight * (0.55 + (0.45 * rtShallowFactor));
+    const float overheadClarity =
+        overheadView *
+        (0.34 + (0.26 * rtShallowFactor)) *
+        lerp(1.0, 0.28, screenRefractionPresence);
     refractionColor = lerp(
         refractionColor,
-        (refractionColor * (0.88 + (0.18 * bottomMottle))) + (overheadBottomTint * (0.10 + (0.08 * bottomMottle))),
+        (refractionColor * (0.92 + (0.12 * bottomMottle))) + (overheadBottomTint * (0.060 + (0.045 * bottomMottle))),
         overheadClarity);
 
     const float3 sunDir = -normalize(camera.sunDirectionIntensity.xyz);
@@ -550,16 +586,18 @@ float4 main(FragmentInput input) : SV_Target0
         (bottomDepthFactor * 0.25) +
         ((1.0 - shallowTransmissionFactor) * 0.10) +
         (rippleSlope * 0.035);
-    const float screenRefractionBalance = screenRefraction.weight * (0.45 + (0.55 * shallowTransmissionFactor));
     const float reflectionWeight = saturate(
         max(fresnelReflect, max(reflectionFloor, reflectionDriver * 0.62)) *
         reflectionStrength *
-        lerp(0.54, 0.86, bottomDepthFactor) *
-        lerp(1.0, 0.42, overheadView) *
-        lerp(1.0, 0.66, screenRefractionBalance * overheadView));
-    const float transmissionWeight = 1.0 - reflectionWeight;
+        lerp(0.48, 0.90, bottomDepthFactor) *
+        lerp(1.0, 0.62, overheadView));
     const float3 reflectionBoost = lerp(float3(0.96, 0.98, 0.96), float3(1.08, 1.11, 1.10), angleReflectionFactor);
-    float3 litColor = (refractionColor * transmissionWeight) + ((reflectionColor * reflectionBoost) * reflectionWeight);
+    const float finalReflectionMix = saturate(
+        (reflectionWeight * 0.72) +
+        (fresnelReflect * reflectionStrength * 0.18) +
+        (rippleSlope * 0.030));
+    float3 litColor = lerp(screenRefraction.color, reflectionColor * reflectionBoost, finalReflectionMix);
+    litColor = lerp(litColor, refractionColor, saturate((1.0 - screenRefraction.weight) * 0.65));
     const float contactFilmMask = sceneWater.contact *
         (0.35 + (0.65 * stableWaterNoise((input.inWorldPosition.xz * 0.075) + float2(camera.skyConfig1.z * 0.012, 3.1))));
     const float foamMask = max(
@@ -586,23 +624,14 @@ float4 main(FragmentInput input) : SV_Target0
         (overheadView * (0.045 + (0.040 * causticLift)) * (0.45 + (0.55 * rtShallowFactor)));
     litColor += lerp(float3(0.54, 0.82, 0.74), float3(0.84, 0.94, 0.86), ndotl) * (foamMask * 0.045);
     litColor += float3(0.22, 0.44, 0.36) * (contactFilmMask * 0.025);
+    const float rawRefractionPull = saturate(
+        screenRefraction.weight *
+        (0.16 + (0.18 * overheadView) + (0.14 * shallowTransmissionFactor)) *
+        (1.0 - (angleReflectionFactor * 0.62)));
+    litColor = lerp(litColor, screenRefraction.color, rawRefractionPull);
     litColor += camera.sunColorShadow.xyz * (sunGlint * (0.070 + (fresnelReflect * 0.18)));
     litColor += camera.sunColorShadow.xyz * directionalSpecular;
     litColor += sunScatterTint;
     litColor += lerp(shallowWater * 0.080, deepWater * 0.035, bottomDepthFactor);
-    const float refractionAlphaBoost =
-        screenRefraction.weight *
-        (0.24 + (0.28 * shallowTransmissionFactor) + (0.16 * overheadView)) *
-        (0.65 + (0.35 * saturate(screenRefraction.distortionPixels / 80.0)));
-    const float alphaBase =
-        0.095 +
-        (bottomDepthFactor * 0.17) +
-        (angleReflectionFactor * 0.18) +
-        (rippleSlope * 0.065) +
-        (reflectionWeight * 0.08) +
-        ((1.0 - shallowTransmissionFactor) * 0.070) +
-        refractionAlphaBoost +
-        (foamMask * 0.015);
-    const float alpha = saturate(alphaBase * lerp(1.0, 0.64, overheadView));
-    return float4(litColor, alpha);
+    return float4(litColor, 1.0);
 }
