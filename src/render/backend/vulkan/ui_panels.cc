@@ -367,6 +367,9 @@ void RendererBackend::buildSunDebugUi() {
             ImGui::SliderFloat("Water Normal Strength", &m_skyDebugSettings.waterNormalStrength, 0.25f, 2.5f, "%.2f");
             ImGui::SliderFloat("Water Reflection", &m_skyDebugSettings.waterReflectionStrength, 0.25f, 4.0f, "%.2f");
             ImGui::SliderFloat("Water Absorption", &m_skyDebugSettings.waterRefractionDecay, 0.25f, 5.0f, "%.2f");
+            const char* waterDebugViews =
+                "Final\0Normals\0Depth/Thickness\0Scene Refraction\0Refraction UV Offset\0Reflection\0Fresnel\0";
+            ImGui::Combo("Water Debug View", &m_skyDebugSettings.waterDebugMode, waterDebugViews);
             ImGui::SliderFloat(
                 "Water Refraction Strength",
                 &m_skyDebugSettings.waterRefractionStrength,

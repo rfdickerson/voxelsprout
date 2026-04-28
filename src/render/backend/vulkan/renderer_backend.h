@@ -167,6 +167,7 @@ public:
         float waterRefractionDecay = 0.70f;
         float waterRefractionStrength = 1.65f;
         float waterRefractionDistortionPixels = 96.0f;
+        int waterDebugMode = 0;
         bool autoSunriseTuning = true;
         float autoSunriseBlend = 1.0f;
         float autoSunriseAdaptSpeed = 4.0f;

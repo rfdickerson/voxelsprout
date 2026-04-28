@@ -834,7 +834,7 @@ void RendererBackend::renderFrame(
     mvpUniform.dofConfig2[1] = std::clamp(m_skyDebugSettings.waterRefractionStrength, 0.0f, 3.0f);
     mvpUniform.dofConfig2[2] =
         std::clamp(m_skyDebugSettings.waterRefractionDistortionPixels, 0.0f, 160.0f);
-    mvpUniform.dofConfig2[3] = 0.0f;
+    mvpUniform.dofConfig2[3] = static_cast<float>(std::clamp(m_skyDebugSettings.waterDebugMode, 0, 6));
     mvpUniform.waterConfig[0] = std::clamp(m_skyDebugSettings.waterAnimationSpeed, 0.25f, 4.0f);
     mvpUniform.waterConfig[1] = std::clamp(m_skyDebugSettings.waterNormalStrength, 0.25f, 2.5f);
     mvpUniform.waterConfig[2] = std::clamp(m_skyDebugSettings.waterReflectionStrength, 0.25f, 4.0f);
