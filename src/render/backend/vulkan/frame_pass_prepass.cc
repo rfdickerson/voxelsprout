@@ -205,32 +205,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
             }
         }
-        if (m_importedWaterNormalDepthPipeline != VK_NULL_HANDLE &&
-            m_importedWaterVertexBufferHandle != kInvalidBufferHandle &&
-            m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
-            m_importedWaterIndexCount > 0) {
-            const VkBuffer waterVertexBuffer = m_bufferAllocator.getBuffer(m_importedWaterVertexBufferHandle);
-            const VkBuffer waterIndexBuffer = m_bufferAllocator.getBuffer(m_importedWaterIndexBufferHandle);
-            if (waterVertexBuffer != VK_NULL_HANDLE && waterIndexBuffer != VK_NULL_HANDLE) {
-                const VkBuffer waterVertexBuffers[1] = {waterVertexBuffer};
-                const VkDeviceSize waterVertexOffsets[1] = {0};
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedWaterNormalDepthPipeline);
-                vkCmdBindDescriptorSets(
-                    commandBuffer,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_pipelineLayout,
-                    0,
-                    boundDescriptorSetCount,
-                    boundDescriptorSets.sets.data(),
-                    1,
-                    &mvpDynamicOffset
-                );
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, waterVertexBuffers, waterVertexOffsets);
-                vkCmdBindIndexBuffer(commandBuffer, waterIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                countDrawCalls(m_debugDrawCallsPrepass, 1);
-                vkCmdDrawIndexed(commandBuffer, m_importedWaterIndexCount, 1, 0, 0, 0);
-            }
-        }
+        // Transparent water samples this prepass to estimate the opaque scene below it.
     }
 
     if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {

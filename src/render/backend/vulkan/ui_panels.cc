@@ -103,6 +103,27 @@ void applyPostLookPreset(RendererBackend::SkyDebugSettings& settings, int preset
 
 } // namespace
 
+void RendererBackend::buildDofDebugUi() {
+    if (!m_debugUiVisible || !m_showFrameStatsPanel) {
+        return;
+    }
+
+    constexpr ImGuiWindowFlags kPanelFlags =
+        ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoSavedSettings;
+    ImGui::SetNextWindowPos(ImVec2(16.0f, 420.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Depth of Field", nullptr, kPanelFlags)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Checkbox("Enable DoF", &m_skyDebugSettings.depthOfFieldEnabled);
+    ImGui::SliderFloat("DoF Intensity", &m_skyDebugSettings.depthOfFieldMaxRadiusPixels, 0.0f, 14.0f, "%.1f");
+    ImGui::SliderFloat("DoF Target Distance", &m_skyDebugSettings.depthOfFieldFocusDistance, 1.0f, 240.0f, "%.1f");
+
+    ImGui::End();
+}
+
 void RendererBackend::buildShadowDebugUi() {
     if (!m_debugUiVisible || !m_showShadowPanel) {
         return;
@@ -239,6 +260,10 @@ void RendererBackend::buildSunDebugUi() {
 
     if (ImGui::BeginTabBar("SunSkyTabs")) {
         if (ImGui::BeginTabItem("Sun & Atmosphere")) {
+            ImGui::Checkbox("Enable DoF", &m_skyDebugSettings.depthOfFieldEnabled);
+            ImGui::SliderFloat("DoF Intensity", &m_skyDebugSettings.depthOfFieldMaxRadiusPixels, 0.0f, 14.0f, "%.1f");
+            ImGui::SliderFloat("DoF Target Distance", &m_skyDebugSettings.depthOfFieldFocusDistance, 1.0f, 240.0f, "%.1f");
+            ImGui::Separator();
             ImGui::SliderFloat("Sun Yaw", &m_skyDebugSettings.sunYawDegrees, -180.0f, 180.0f, "%.1f deg");
             ImGui::SliderFloat("Sun Pitch", &m_skyDebugSettings.sunPitchDegrees, -89.0f, 5.0f, "%.1f deg");
             ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
@@ -260,6 +285,16 @@ void RendererBackend::buildSunDebugUi() {
         }
 
         if (ImGui::BeginTabItem("Post")) {
+            ImGui::Text("Depth of Field");
+            ImGui::Checkbox("Enable DoF", &m_skyDebugSettings.depthOfFieldEnabled);
+            ImGui::SliderFloat("DoF Intensity", &m_skyDebugSettings.depthOfFieldMaxRadiusPixels, 0.0f, 14.0f, "%.1f");
+            ImGui::SliderFloat("DoF Target Distance", &m_skyDebugSettings.depthOfFieldFocusDistance, 1.0f, 240.0f, "%.1f");
+            ImGui::SliderFloat("Focus Range", &m_skyDebugSettings.depthOfFieldFocusRange, 1.0f, 120.0f, "%.1f");
+            if (ImGui::CollapsingHeader("Advanced Depth of Field")) {
+                ImGui::SliderFloat("Near Blur Scale", &m_skyDebugSettings.depthOfFieldNearBlurScale, 0.25f, 3.0f, "%.2f");
+            }
+
+            ImGui::Separator();
             ImGui::Text("Eye Adaptation");
             ImGui::Checkbox("Auto Exposure", &m_skyDebugSettings.autoExposureEnabled);
             ImGui::SliderFloat("Manual Exposure", &m_skyDebugSettings.manualExposure, 0.05f, 4.0f, "%.3f");
@@ -326,6 +361,12 @@ void RendererBackend::buildSunDebugUi() {
                 ImGui::SliderFloat("Fog Height Falloff", &m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 0.30f, "%.4f");
                 ImGui::SliderFloat("Fog Base Height", &m_skyDebugSettings.volumetricFogBaseHeight, -32.0f, 320.0f, "%.1f");
             }
+            ImGui::Separator();
+            ImGui::Text("Water");
+            ImGui::SliderFloat("Water Speed", &m_skyDebugSettings.waterAnimationSpeed, 0.25f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Water Normal Strength", &m_skyDebugSettings.waterNormalStrength, 0.25f, 2.5f, "%.2f");
+            ImGui::SliderFloat("Water Reflection", &m_skyDebugSettings.waterReflectionStrength, 0.25f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Water Absorption", &m_skyDebugSettings.waterRefractionDecay, 0.25f, 5.0f, "%.2f");
             ImGui::Separator();
             ImGui::SliderFloat("Plant Quad Directionality", &m_skyDebugSettings.plantQuadDirectionality, 0.0f, 1.0f, "%.2f");
             ImGui::Text("Active: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",

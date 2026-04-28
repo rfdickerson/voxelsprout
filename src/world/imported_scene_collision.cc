@@ -301,6 +301,21 @@ bool ImportedSceneCollision::findGroundSupport(
     float bestY = -std::numeric_limits<float>::infinity();
     odai::math::Vector3 bestNormal{0.0f, 1.0f, 0.0f};
 
+    auto considerCandidate = [&](const Triangle& triangle, float sampleX, float sampleZ) {
+        float candidateY = 0.0f;
+        if (!triangleHeightAtXz(triangle, sampleX, sampleZ, candidateY)) {
+            return;
+        }
+        if (candidateY < feetY - maxDrop || candidateY > feetY + maxStepUp) {
+            return;
+        }
+        if (!found || candidateY > bestY) {
+            found = true;
+            bestY = candidateY;
+            bestNormal = orientedUpNormal(triangle.normal);
+        }
+    };
+
     for (const std::uint32_t triangleIndex : m_queryScratch) {
         const Triangle& triangle = m_triangles[triangleIndex];
         if (!aabbOverlaps(triangle.bounds, queryBounds)) {
@@ -310,19 +325,15 @@ bool ImportedSceneCollision::findGroundSupport(
             continue;
         }
 
+        const odai::math::Vector3 closest = closestPointOnTriangleXz(centerX, centerZ, triangle);
+        const float closestDx = closest.x - centerX;
+        const float closestDz = closest.z - centerZ;
+        if ((closestDx * closestDx) + (closestDz * closestDz) <= radius * radius) {
+            considerCandidate(triangle, closest.x, closest.z);
+        }
+
         for (const std::array<float, 2>& sample : samples) {
-            float candidateY = 0.0f;
-            if (!triangleHeightAtXz(triangle, centerX + sample[0], centerZ + sample[1], candidateY)) {
-                continue;
-            }
-            if (candidateY < feetY - maxDrop || candidateY > feetY + maxStepUp) {
-                continue;
-            }
-            if (!found || candidateY > bestY) {
-                found = true;
-                bestY = candidateY;
-                bestNormal = orientedUpNormal(triangle.normal);
-            }
+            considerCandidate(triangle, centerX + sample[0], centerZ + sample[1]);
         }
     }
 

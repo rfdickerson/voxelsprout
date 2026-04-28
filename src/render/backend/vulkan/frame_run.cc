@@ -430,6 +430,7 @@ void RendererBackend::renderFrame(
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         buildFrameStatsUi();
+        buildDofDebugUi();
         m_debugUiVisible = m_showFrameStatsPanel;
         ImGui::Render();
     }
@@ -819,6 +820,14 @@ void RendererBackend::renderFrame(
     mvpUniform.colorGrading3[1] = std::clamp(m_skyDebugSettings.colorGradingHighlightTintG, -1.0f, 1.0f);
     mvpUniform.colorGrading3[2] = std::clamp(m_skyDebugSettings.colorGradingHighlightTintB, -1.0f, 1.0f);
     mvpUniform.colorGrading3[3] = 0.0f;
+    mvpUniform.dofConfig[0] = m_skyDebugSettings.depthOfFieldEnabled ? 1.0f : 0.0f;
+    mvpUniform.dofConfig[1] = std::clamp(m_skyDebugSettings.depthOfFieldFocusDistance, 0.5f, 5000.0f);
+    mvpUniform.dofConfig[2] = std::clamp(m_skyDebugSettings.depthOfFieldFocusRange, 0.5f, 1000.0f);
+    mvpUniform.dofConfig[3] = std::clamp(m_skyDebugSettings.depthOfFieldMaxRadiusPixels, 0.0f, 20.0f);
+    mvpUniform.dofConfig2[0] = std::clamp(m_skyDebugSettings.depthOfFieldNearBlurScale, 0.25f, 3.0f);
+    mvpUniform.dofConfig2[1] = 0.0f;
+    mvpUniform.dofConfig2[2] = 0.0f;
+    mvpUniform.dofConfig2[3] = 0.0f;
     mvpUniform.waterConfig[0] = std::clamp(m_skyDebugSettings.waterAnimationSpeed, 0.25f, 4.0f);
     mvpUniform.waterConfig[1] = std::clamp(m_skyDebugSettings.waterNormalStrength, 0.25f, 2.5f);
     mvpUniform.waterConfig[2] = std::clamp(m_skyDebugSettings.waterReflectionStrength, 0.25f, 4.0f);
