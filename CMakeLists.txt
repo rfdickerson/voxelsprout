@@ -147,6 +147,7 @@ if(ODAI_BUILD_APP)
         src/world/chunk_grid_worldgen.cc
         src/world/chunk_mesher.cc
         src/world/clipmap_index.cc
+        src/world/imported_scene_collision.cc
     )
     set(ODAI_RENDER_BACKEND "VULKAN" CACHE STRING "Render backend to build. Supported values: VULKAN, DX12, METAL.")
     set_property(CACHE ODAI_RENDER_BACKEND PROPERTY STRINGS VULKAN DX12 METAL)
@@ -308,6 +309,7 @@ if(BUILD_TESTING)
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
+        src/world/imported_scene_collision.cc
     )
     target_include_directories(odai_imported_scene_tests PRIVATE src)
 

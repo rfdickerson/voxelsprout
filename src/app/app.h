@@ -5,6 +5,7 @@
 #include "render/renderer.h"
 #include "sim/simulation.h"
 #include "world/clipmap_index.h"
+#include "world/imported_scene_collision.h"
 #include "world/world.h"
 
 #include <filesystem>
@@ -91,6 +92,7 @@ private:
     [[nodiscard]] bool doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const;
     [[nodiscard]] bool doesPlayerOverlapConveyorBelt(float eyeX, float eyeY, float eyeZ) const;
     void resolvePlayerCollisions(float dt);
+    void resolveImportedScenePlayerCollisions(float dt);
     [[nodiscard]] CameraRaycastResult raycastFromCamera() const;
     [[nodiscard]] InteractionRaycastResult raycastInteractionFromCamera(bool includePipes) const;
     [[nodiscard]] bool computePipePlacementFromInteractionRaycast(
@@ -227,6 +229,7 @@ private:
     odai::importer::ImportedScene m_importedScene;
     odai::importer::GpuSceneAsset m_gpuSceneAsset;
     odai::importer::GpuSceneRuntime m_gpuSceneRuntime;
+    odai::world::ImportedSceneCollision m_importedSceneCollision;
 };
 
 } // namespace odai::app

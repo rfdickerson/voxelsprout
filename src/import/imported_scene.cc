@@ -689,6 +689,54 @@ void generateTextureMipChain(
     rgba8 = std::move(mipChain);
 }
 
+bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
+    const std::size_t basePixelCount = static_cast<std::size_t>(texture.width) * texture.height;
+    const std::size_t baseByteCount = basePixelCount * 4u;
+    if (texture.width == 0u || texture.height == 0u || texture.rgba8.size() < baseByteCount) {
+        return false;
+    }
+
+    bool sawTransparent = false;
+    bool sawVisible = false;
+    for (std::size_t pixelIndex = 0; pixelIndex < basePixelCount; ++pixelIndex) {
+        const std::uint8_t alpha = texture.rgba8[(pixelIndex * 4u) + 3u];
+        sawTransparent = sawTransparent || alpha < 250u;
+        sawVisible = sawVisible || alpha > 8u;
+        if (sawTransparent && sawVisible) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<bool> buildTextureAlphaCutoutMask(const std::vector<ImportedSceneTexture>& textures) {
+    std::vector<bool> mask(textures.size(), false);
+    for (std::size_t textureIndex = 0; textureIndex < textures.size(); ++textureIndex) {
+        mask[textureIndex] = textureUsesAlphaCutout(textures[textureIndex]);
+    }
+    return mask;
+}
+
+bool textureIndexUsesAlphaCutout(const std::vector<bool>& mask, std::uint32_t textureIndex) {
+    return textureIndex < mask.size() && mask[textureIndex];
+}
+
+void applyTextureAlphaCutoutFlags(ImportedScene& scene) {
+    const std::vector<bool> textureAlphaCutoutMask = buildTextureAlphaCutoutMask(scene.textures);
+    for (ImportedSceneMesh& mesh : scene.meshes) {
+        for (ImportedSceneMeshPart& part : mesh.parts) {
+            if (textureIndexUsesAlphaCutout(textureAlphaCutoutMask, part.textureIndex)) {
+                part.alphaTest = true;
+            }
+        }
+    }
+    for (ImportedScenePackedVertex& vertex : scene.packedVertices) {
+        if (textureIndexUsesAlphaCutout(textureAlphaCutoutMask, vertex.textureIndex)) {
+            vertex.flags |= kImportedSceneMaterialFlagAlphaTest;
+        }
+    }
+}
+
 bool readExact(std::istream& input, void* dst, std::size_t size) {
     input.read(static_cast<char*>(dst), static_cast<std::streamsize>(size));
     return input.good();
@@ -1887,6 +1935,7 @@ ImportedScene buildSceneFromParsedData(
 }  // namespace
 
 void buildImportedScenePackedRenderData(ImportedScene& scene) {
+    applyTextureAlphaCutoutFlags(scene);
     scene.packedVertices.clear();
     scene.packedIndices.clear();
     scene.packedDraws.clear();
@@ -2456,6 +2505,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         buildImportedScenePackedRenderData(scene);
     }
 
+    applyTextureAlphaCutoutFlags(scene);
     outScene = std::move(scene);
     return true;
 }
@@ -2642,6 +2692,7 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
         computeImportedSceneBoundsFromPackedData(scene);
     }
 
+    applyTextureAlphaCutoutFlags(scene);
     outScene = std::move(scene);
     return true;
 }
