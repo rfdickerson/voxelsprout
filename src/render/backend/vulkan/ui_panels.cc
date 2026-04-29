@@ -211,8 +211,8 @@ void RendererBackend::buildShadowDebugUi() {
             m_voxelGiDebugSettings.surfaceMode = static_cast<VoxelGiSurfaceMode>(giSurfaceMode);
             ImGui::SliderInt("RT Surface Samples", &m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2);
             ImGui::SliderFloat("RT Surface Bias", &m_voxelGiDebugSettings.rtSurfaceBiasScale, 0.25f, 4.0f, "%.2f");
-            if (m_importedSceneInteriorMode) {
-                ImGui::SeparatorText("Morrowind Interior GI");
+            if (!m_importedMeshDraws.empty() || m_importedWaterIndexCount > 0) {
+                ImGui::SeparatorText("Morrowind GI");
                 ImGui::SliderFloat("MW GI Strength", &m_voxelGiDebugSettings.morrowindGiStrength, 0.0f, 0.60f, "%.2f");
                 ImGui::SliderFloat("MW GI Radius", &m_voxelGiDebugSettings.morrowindGiRadiusScale, 0.50f, 4.0f, "%.2fx");
                 ImGui::SliderFloat("MW GI Occlusion Floor", &m_voxelGiDebugSettings.morrowindGiOcclusionFloor, 0.0f, 0.75f, "%.2f");
@@ -298,9 +298,6 @@ void RendererBackend::buildSunDebugUi() {
             ImGui::SliderFloat("DoF Intensity", &m_skyDebugSettings.depthOfFieldMaxRadiusPixels, 0.0f, 14.0f, "%.1f");
             ImGui::SliderFloat("DoF Target Distance", &m_skyDebugSettings.depthOfFieldFocusDistance, 1.0f, 240.0f, "%.1f");
             ImGui::SliderFloat("Focus Range", &m_skyDebugSettings.depthOfFieldFocusRange, 1.0f, 120.0f, "%.1f");
-            if (ImGui::CollapsingHeader("Advanced Depth of Field")) {
-                ImGui::SliderFloat("Near Blur Scale", &m_skyDebugSettings.depthOfFieldNearBlurScale, 0.25f, 3.0f, "%.2f");
-            }
 
             ImGui::Separator();
             ImGui::Text("Eye Adaptation");

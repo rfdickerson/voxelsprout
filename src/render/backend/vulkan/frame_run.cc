@@ -869,11 +869,12 @@ void RendererBackend::renderFrame(
                 std::max(viewRayDistanceSquared - radiusSquared, 0.0f) / radiusSquared;
             const float distanceScore = distanceSquared / std::max(radiusSquared, 1.0f);
             const float behindCameraPenalty = alongView < -influenceRadius ? 16.0f : 0.0f;
-            const float interiorGiScore = distanceScore + (viewInfluenceScore * 0.12f);
-            const float exteriorViewScore = viewInfluenceScore + (distanceScore * 0.08f) + behindCameraPenalty;
+            const float localInfluenceScore = distanceScore + (viewInfluenceScore * 0.12f);
+            const float exteriorViewScore =
+                (viewInfluenceScore * 0.45f) + (distanceScore * 0.55f) + (behindCameraPenalty * 0.25f);
             const SelectedImportedLight selected{
                 &light,
-                m_importedSceneInteriorMode ? interiorGiScore : exteriorViewScore
+                m_importedSceneInteriorMode ? localInfluenceScore : exteriorViewScore
             };
             if (selectedImportedLightCount < selectedImportedLights.size()) {
                 selectedImportedLights[selectedImportedLightCount++] = selected;
@@ -2060,10 +2061,8 @@ void RendererBackend::renderFrame(
     const VoxelGiSurfaceMode activeVoxelGiSurfaceMode =
         voxelGiRestirCanRun ? VoxelGiSurfaceMode::RestirSurface
         : (voxelGiRtSurfaceCanRun ? VoxelGiSurfaceMode::RtSurface : VoxelGiSurfaceMode::Legacy);
-    if (!wroteVoxelGiTimestamps) {
-        m_voxelGiRtSurfaceActiveThisFrame = false;
-        m_voxelGiRestirActiveThisFrame = false;
-    }
+    m_voxelGiRtSurfaceActiveThisFrame = activeVoxelGiSurfaceMode == VoxelGiSurfaceMode::RtSurface;
+    m_voxelGiRestirActiveThisFrame = activeVoxelGiSurfaceMode == VoxelGiSurfaceMode::RestirSurface;
     const char* voxelGiSurfaceFallbackReason = voxelGiSurfaceFallbackReasonName(
         m_voxelGiDebugSettings.surfaceMode,
         m_voxelGiComputeAvailable,

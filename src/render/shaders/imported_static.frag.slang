@@ -236,7 +236,7 @@ float sampleRayTracedDirectionalShadow(float3 worldPosition, float3 normal, floa
 }
 #endif
 
-float3 evaluateImportedLocalLights(float3 worldPosition, float3 normal)
+float3 evaluateImportedLocalLights(float3 worldPosition, float3 normal, bool interiorMode)
 {
     const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
     const float globalIntensity = max(camera.importedLightConfig.y, 0.0);
@@ -264,7 +264,8 @@ float3 evaluateImportedLocalLights(float3 worldPosition, float3 normal)
         const float distanceToLight = sqrt(max(distanceSquared, 1e-4));
         const float3 lightDirection = toLight / distanceToLight;
         const float ndotl = saturate(dot(normal, lightDirection));
-        if (ndotl <= 0.0001)
+        const float wrappedNdotL = interiorMode ? ndotl : saturate((ndotl * 0.75) + 0.25);
+        if (wrappedNdotL <= 0.0001)
         {
             continue;
         }
@@ -273,14 +274,15 @@ float3 evaluateImportedLocalLights(float3 worldPosition, float3 normal)
         const float attenuation = falloff * falloff;
         float visibility = 1.0;
 #ifdef ODAI_RT_SHADOWS
-        visibility = sampleRayTracedPointLightShadow(
+        const float rawVisibility = sampleRayTracedPointLightShadow(
             worldPosition,
             normal,
             lightDirection,
             distanceToLight,
-            ndotl);
+            max(ndotl, 0.25));
+        visibility = interiorMode ? rawVisibility : lerp(0.22, 1.0, rawVisibility);
 #endif
-        lighting += colorIntensity.rgb * (colorIntensity.w * globalIntensity * ndotl * attenuation * visibility);
+        lighting += colorIntensity.rgb * (colorIntensity.w * globalIntensity * wrappedNdotL * attenuation * visibility);
     }
     return lighting;
 }
@@ -495,19 +497,21 @@ float4 main(FragmentInput input) : SV_Target0
 #endif
     }
     const float ambientOcclusion = interiorMode ? lerp(0.28, 1.0, skyVisibility) : 1.0;
+    const float exteriorSkyAmbientScale = 0.34;
+    const float exteriorAmbientFloorScale = 0.48;
     const float3 ambient =
-        (interiorMode ? float3(0.045, 0.047, 0.052) : float3(0.18, 0.19, 0.21)) +
-        (ambientIrradiance * float3(0.92, 0.95, 1.00) * (interiorMode ? 0.22 : 0.58));
+        (interiorMode
+            ? float3(0.045, 0.047, 0.052)
+            : float3(0.18, 0.19, 0.21) * exteriorAmbientFloorScale) +
+        (ambientIrradiance * float3(0.92, 0.95, 1.00) * (interiorMode ? 0.22 : exteriorSkyAmbientScale));
     const float3 sampledVoxelGi = sampleImportedVoxelGi(input.inWorldPosition, normal);
-    const float3 morrowindGi = interiorMode
-        ? evaluateMorrowindInteriorGi(input.inWorldPosition, normal, albedo.rgb)
-        : float3(0.0, 0.0, 0.0);
+    const float3 morrowindGi =
+        evaluateMorrowindInteriorGi(input.inWorldPosition, normal, albedo.rgb) * (interiorMode ? 1.0 : 0.62);
     const float3 voxelGi = interiorMode
         ? max(sampledVoxelGi * 1.35, morrowindGi)
-        : float3(0.0, 0.0, 0.0);
-    const float3 voxelGiDebug = interiorMode
-        ? max(sampleImportedVoxelGiDebug(input.inWorldPosition, normal), morrowindGi)
-        : sampleImportedVoxelGiDebug(input.inWorldPosition, normal);
+        : morrowindGi;
+    const float3 voxelGiDebug =
+        max(sampleImportedVoxelGiDebug(input.inWorldPosition, normal), morrowindGi);
     const int voxelGiDebugMode = int(camera.shadowVoxelGridOrigin.z + 0.5);
     if (voxelGiDebugMode == 1)
     {
@@ -543,7 +547,7 @@ float4 main(FragmentInput input) : SV_Target0
         return float4(hue * intensity, 1.0);
     }
     const float3 importedLights =
-        evaluateImportedLocalLights(input.inWorldPosition, normal) * (interiorMode ? 1.25 : 1.0);
+        evaluateImportedLocalLights(input.inWorldPosition, normal, interiorMode) * (interiorMode ? 1.25 : 1.15);
     const float directShadowFactor = lerp(1.0, shadowVisibility, clamp(camera.sunColorShadow.w, 0.0, 1.0));
     const float3 direct =
         camera.sunColorShadow.xyz *

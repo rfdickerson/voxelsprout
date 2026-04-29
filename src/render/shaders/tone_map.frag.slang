@@ -141,9 +141,30 @@ float depthOfFieldRadiusPixels(float viewDepth)
     const float sharpDistance = max(camera.dofConfig.y, 0.5);
     const float falloffDistance = max(camera.dofConfig.z, 0.5);
     const float maxRadiusPixels = max(camera.dofConfig.w, 0.0);
-    const float distanceBeyondFocus = max(viewDepth - sharpDistance, 0.0);
-    const float focusFalloff = smoothstep(0.0, falloffDistance, distanceBeyondFocus);
-    return focusFalloff * maxRadiusPixels;
+    const float farDistance = max(viewDepth - sharpDistance, 0.0);
+    const float farFalloff = smoothstep(0.0, falloffDistance * 2.5, farDistance);
+    return farFalloff * maxRadiusPixels * 0.55;
+}
+
+float interleavedGradientNoise(float2 pixel)
+{
+    return frac(52.9829189 * frac(dot(pixel, float2(0.06711056, 0.00583715))));
+}
+
+float2 rotate2d(float2 v, float angle)
+{
+    const float s = sin(angle);
+    const float c = cos(angle);
+    return float2((v.x * c) - (v.y * s), (v.x * s) + (v.y * c));
+}
+
+float2 apertureSampleOffset(int sampleIndex, int sampleCount, float rotation)
+{
+    const float kGoldenAngle = 2.39996323;
+    const float sampleT = (float(sampleIndex) + 0.5) / float(sampleCount);
+    const float radius = sqrt(sampleT);
+    const float angle = (float(sampleIndex) * kGoldenAngle) + rotation;
+    return float2(cos(angle), sin(angle)) * radius;
 }
 
 float3 sampleDepthOfField(
@@ -164,29 +185,20 @@ float3 sampleDepthOfField(
     uint texH = 0u;
     hdrSceneColor.GetDimensions(texW, texH);
     const float2 texelSize = 1.0 / float2(float(max(texW, 1u)), float(max(texH, 1u)));
-    const float2 offsets[12] = {
-        float2(0.0, 1.0),
-        float2(0.866, 0.5),
-        float2(0.866, -0.5),
-        float2(0.0, -1.0),
-        float2(-0.866, -0.5),
-        float2(-0.866, 0.5),
-        float2(0.35, 0.35),
-        float2(0.35, -0.35),
-        float2(-0.35, -0.35),
-        float2(-0.35, 0.35),
-        float2(1.0, 0.0),
-        float2(-1.0, 0.0)
-    };
 
-    float3 colorSum = centerColor * 2.0;
-    float weightSum = 2.0;
+    const float pixelRotation = interleavedGradientNoise(uv * float2(float(texW), float(texH))) * 6.28318531;
+    const float gatherMip = clamp(log2(max(centerRadiusPixels * 0.45, 1.0)), 0.0, 3.5);
+    float3 colorSum = centerColor * 1.5;
+    float weightSum = 1.5;
     const float depthTolerance = max(camera.dofConfig.z * 0.45, 1.0);
-    for (int i = 0; i < 12; ++i)
+    const int sampleCount = 24;
+    for (int i = 0; i < sampleCount; ++i)
     {
-        const float ringScale = (i < 6) ? 1.0 : 0.52;
+        float2 apertureOffset = apertureSampleOffset(i, sampleCount, pixelRotation);
+        apertureOffset.x *= 1.08;
+        apertureOffset = rotate2d(apertureOffset, 0.18);
         const float2 sampleUv = clamp(
-            uv + (offsets[i] * texelSize * centerRadiusPixels * ringScale),
+            uv + (apertureOffset * texelSize * centerRadiusPixels),
             float2(0.0, 0.0),
             float2(1.0, 1.0)
         );
@@ -196,11 +208,14 @@ float3 sampleDepthOfField(
         const float sampleRadiusPixels = depthOfFieldRadiusPixels(sampleDepth);
         const float sameLayer = 1.0 - smoothstep(depthTolerance, depthTolerance * 2.0, abs(sampleDepth - centerDepth));
         const float blurWeight = max(sameLayer, smoothstep(0.0, centerRadiusPixels, sampleRadiusPixels));
-        const float weight = lerp(0.35, 1.0, blurWeight) * lerp(0.5, 1.0, sampleGeometry);
+        const float apertureEdge = 1.0 - smoothstep(0.55, 1.05, length(apertureOffset));
+        const float weight = lerp(0.18, 1.0, blurWeight) * lerp(0.45, 1.0, sampleGeometry) * lerp(0.65, 1.0, apertureEdge);
         const float sampleSsao = clamp(ssaoTexture.SampleLevel(sampleUv, 0.0).x, 0.0, 1.0);
         const float sampleAo = pow(max(sampleSsao, 0.001), ssaoIntensity);
         const float sampleAoFactor = lerp(1.0, sampleAo, ssaoEnable * sampleGeometry);
-        colorSum += (hdrSceneColor.SampleLevel(sampleUv, 0.0).xyz * sampleAoFactor) * weight;
+        const float3 sampleColor = hdrSceneColor.SampleLevel(sampleUv, gatherMip).xyz * sampleAoFactor;
+        const float highlightWeight = 1.0 + (smoothstep(1.0, 8.0, bloomBrightness(sampleColor)) * centerRadiusPixels * 0.035);
+        colorSum += sampleColor * weight * highlightWeight;
         weightSum += weight;
     }
 
