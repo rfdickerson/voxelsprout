@@ -1636,12 +1636,20 @@ bool RendererBackend::createImGuiResources() {
     initInfo.DescriptorPool = m_imguiDescriptorPool;
     initInfo.MinImageCount = std::max<uint32_t>(2u, static_cast<uint32_t>(m_swapchainImages.size()));
     initInfo.ImageCount = static_cast<uint32_t>(m_swapchainImages.size());
-    initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     initInfo.UseDynamicRendering = true;
+#if IMGUI_VERSION_NUM >= 19250
+    initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    initInfo.PipelineInfoMain.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    initInfo.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    initInfo.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &m_swapchainFormat;
+    initInfo.PipelineInfoMain.PipelineRenderingCreateInfo.depthAttachmentFormat = VK_FORMAT_UNDEFINED;
+#else
+    initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     initInfo.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
     initInfo.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
     initInfo.PipelineRenderingCreateInfo.pColorAttachmentFormats = &m_swapchainFormat;
     initInfo.PipelineRenderingCreateInfo.depthAttachmentFormat = VK_FORMAT_UNDEFINED;
+#endif
     initInfo.CheckVkResultFn = imguiCheckVkResult;
     if (!ImGui_ImplVulkan_Init(&initInfo)) {
         VOX_LOGE("imgui") << "ImGui_ImplVulkan_Init failed\n";
@@ -1652,6 +1660,7 @@ bool RendererBackend::createImGuiResources() {
         return false;
     }
 
+#if IMGUI_VERSION_NUM < 19200
     if (!ImGui_ImplVulkan_CreateFontsTexture()) {
         VOX_LOGE("imgui") << "ImGui_ImplVulkan_CreateFontsTexture failed\n";
         ImGui_ImplVulkan_Shutdown();
@@ -1661,6 +1670,7 @@ bool RendererBackend::createImGuiResources() {
         ImGui::DestroyContext();
         return false;
     }
+#endif
 
     m_imguiInitialized = true;
     return true;
@@ -1672,7 +1682,9 @@ void RendererBackend::destroyImGuiResources() {
     }
 
     VOX_LOGI("imgui") << "destroy begin\n";
+#if IMGUI_VERSION_NUM < 19200
     ImGui_ImplVulkan_DestroyFontsTexture();
+#endif
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();

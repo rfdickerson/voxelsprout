@@ -129,6 +129,9 @@ constexpr std::size_t kMaxSeydaNeenGuardCount = 4u;
 constexpr int kSeydaNeenCellX = -2;
 constexpr int kSeydaNeenCellY = -9;
 constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
+constexpr std::uint32_t kImportedSceneMaterialFlagNpcGpuTransform = 1u << 24u;
+constexpr std::uint32_t kImportedSceneMaterialNpcYawShift = 17u;
+constexpr std::uint32_t kImportedSceneMaterialNpcYawMask = 0x7fu;
 
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
@@ -160,6 +163,18 @@ Aabb3f makePlayerCollisionAabb(float eyeX, float eyeY, float eyeZ) {
     bounds.minZ = eyeZ - kPlayerRadius;
     bounds.maxZ = eyeZ + kPlayerRadius;
     return bounds;
+}
+
+std::uint32_t encodeNpcYawFlagBits(float yawRadians) {
+    float wrappedYaw = std::fmod(yawRadians, kTwoPi);
+    if (wrappedYaw < 0.0f) {
+        wrappedYaw += kTwoPi;
+    }
+    const auto quantizedYaw = static_cast<std::uint32_t>(
+        std::clamp(wrappedYaw / kTwoPi, 0.0f, 0.9999f) *
+        static_cast<float>(kImportedSceneMaterialNpcYawMask + 1u)
+    );
+    return (quantizedYaw & kImportedSceneMaterialNpcYawMask) << kImportedSceneMaterialNpcYawShift;
 }
 
 Aabb3f makeConveyorBeltAabb(const odai::sim::Belt& belt) {
@@ -2335,6 +2350,9 @@ void App::initializeBalmoraGuards(bool reusePreparedNavmesh) {
         guard.speed = 84.0f + (static_cast<float>(guardIndex % 3u) * 9.0f);
         guard.walkPhase = static_cast<float>(guardIndex) * 1.37f;
         guard.previousWalkPhase = guard.walkPhase;
+        guard.scriptActorId =
+            std::string(seydaNeenRegion ? "seyda_neen_guard_" : "balmora_guard_") +
+            std::to_string(guardIndex);
         m_balmoraGuards.push_back(std::move(guard));
     }
 
@@ -2351,6 +2369,12 @@ void App::updateBalmoraGuards(float dt) {
     if (m_balmoraGuards.empty() || m_balmoraGuardPrototype.vertices.empty() || m_balmoraNavmesh.empty()) {
         return;
     }
+
+    auto snapToNavmesh = [&](const odai::math::Vector3& point, odai::math::Vector3& outPoint) {
+        return m_balmoraNavmesh.findNearestPoint(
+            {point.x, point.y + kBalmoraGuardNavmeshProbeHeight, point.z},
+            outPoint);
+    };
 
     auto chooseNextPath = [&](BalmoraGuardAgent& guard) -> bool {
         guard.path.clear();
@@ -2386,6 +2410,52 @@ void App::updateBalmoraGuards(float dt) {
         guard.pathRetryCooldownSeconds = std::max(
             0.0f,
             guard.pathRetryCooldownSeconds - std::max(dt, 0.0f));
+        guard.scriptUpdateCooldownSeconds = std::max(
+            0.0f,
+            guard.scriptUpdateCooldownSeconds - std::max(dt, 0.0f));
+
+        if (m_luaScriptRuntime.initialized() &&
+            guard.scriptUpdateCooldownSeconds <= 0.0f &&
+            !guard.scriptActorId.empty()) {
+            guard.scriptUpdateCooldownSeconds = 0.5f;
+            const odai::game::LuaScriptRuntime::NpcUpdateCommand command =
+                m_luaScriptRuntime.updateNpc(
+                    guard.scriptActorId,
+                    guard.position.x,
+                    guard.position.y,
+                    guard.position.z);
+            if (command.handled) {
+                if (command.speed > 0.0f) {
+                    guard.speed = command.speed;
+                }
+                if (command.stop) {
+                    guard.route.clear();
+                    guard.path.clear();
+                    guard.routeIndex = 0u;
+                    guard.pathIndex = 0u;
+                }
+                if (!command.route.empty()) {
+                    std::vector<odai::math::Vector3> scriptedRoute;
+                    scriptedRoute.reserve(command.route.size());
+                    for (const odai::game::LuaScriptRuntime::NpcRoutePoint& point : command.route) {
+                        odai::math::Vector3 snapped{};
+                        if (snapToNavmesh({point.x, point.y, point.z}, snapped)) {
+                            scriptedRoute.push_back(snapped);
+                        }
+                    }
+                    if (!scriptedRoute.empty()) {
+                        guard.route = std::move(scriptedRoute);
+                        guard.routeIndex = 0u;
+                        guard.path.clear();
+                        guard.pathIndex = 0u;
+                        guard.pathRetryCooldownSeconds = 0.0f;
+                    }
+                }
+                if (!command.message.empty()) {
+                    m_lastScriptMessage = command.message;
+                }
+            }
+        }
 
         if (guard.path.empty() || guard.pathIndex >= guard.path.size()) {
             if (guard.pathRetryCooldownSeconds > 0.0f) {
@@ -2453,70 +2523,20 @@ void App::rebuildBalmoraGuardRenderFrame(float simulationAlpha) {
         }
         return from + (delta * t);
     };
-    const auto rotateX = [](odai::math::Vector3 value, float pivotY, float pivotZ, float radians) {
-        const float c = std::cos(radians);
-        const float s = std::sin(radians);
-        const float y = value.y - pivotY;
-        const float z = value.z - pivotZ;
-        value.y = pivotY + (y * c) - (z * s);
-        value.z = pivotZ + (y * s) + (z * c);
-        return value;
-    };
-    const auto applyWalkSkin = [&](odai::math::Vector3& position,
-                                   odai::math::Vector3& normal,
-                                   float walkPhase) {
-        const float side = position.x < 0.0f ? -1.0f : 1.0f;
-        if (position.y < 82.0f) {
-            const float legWeight = std::clamp((82.0f - position.y) / 82.0f, 0.0f, 1.0f) *
-                std::clamp((std::abs(position.x) - 2.0f) / 18.0f, 0.0f, 1.0f);
-            const float legSwing = std::sin(walkPhase + (side > 0.0f ? odai::math::kPi : 0.0f)) * 0.34f * legWeight;
-            position = rotateX(position, 72.0f, 0.0f, legSwing);
-            normal = rotateX(normal, 0.0f, 0.0f, legSwing * 0.65f);
-        }
-        if (position.y > 42.0f && position.y < 128.0f) {
-            const float armWeight = std::clamp((std::abs(position.x) - 18.0f) / 18.0f, 0.0f, 1.0f) *
-                std::clamp((128.0f - position.y) / 58.0f, 0.0f, 1.0f);
-            const float armSwing = std::sin(walkPhase + (side > 0.0f ? 0.0f : odai::math::kPi)) * 0.28f * armWeight;
-            position = rotateX(position, 104.0f, 0.0f, armSwing);
-            normal = rotateX(normal, 0.0f, 0.0f, armSwing * 0.65f);
-        }
-    };
-
     for (const BalmoraGuardAgent& guard : m_balmoraGuards) {
         const odai::math::Vector3 position =
             guard.previousPosition + ((guard.position - guard.previousPosition) * alpha);
         const float yawRadians = lerpAngle(guard.previousYawRadians, guard.yawRadians, alpha);
-        const float walkPhase = guard.previousWalkPhase + ((guard.walkPhase - guard.previousWalkPhase) * alpha);
-        const float c = std::cos(yawRadians);
-        const float s = std::sin(yawRadians);
-        const float bob = std::abs(std::sin(walkPhase * 2.0f)) * 1.6f;
+        const std::uint32_t npcFlags =
+            kImportedSceneMaterialFlagNpcGpuTransform | encodeNpcYawFlagBits(yawRadians);
 
         const std::uint32_t baseVertex = static_cast<std::uint32_t>(m_balmoraGuardFrameVertices.size());
         for (const odai::importer::ImportedScenePackedVertex& sourceVertex : m_balmoraGuardPrototype.vertices) {
-            odai::math::Vector3 localPosition{
-                sourceVertex.position[0],
-                sourceVertex.position[1],
-                sourceVertex.position[2]
-            };
-            odai::math::Vector3 localNormal{
-                sourceVertex.normal[0],
-                sourceVertex.normal[1],
-                sourceVertex.normal[2]
-            };
-            applyWalkSkin(localPosition, localNormal, walkPhase);
-
             odai::importer::ImportedScenePackedVertex vertex = sourceVertex;
-            vertex.position[0] = position.x + (localPosition.x * c) + (localPosition.z * s);
-            vertex.position[1] = position.y + localPosition.y + bob;
-            vertex.position[2] = position.z + (-localPosition.x * s) + (localPosition.z * c);
-            const odai::math::Vector3 worldNormal = odai::math::normalize({
-                (localNormal.x * c) + (localNormal.z * s),
-                localNormal.y,
-                (-localNormal.x * s) + (localNormal.z * c)
-            });
-            vertex.normal[0] = worldNormal.x;
-            vertex.normal[1] = worldNormal.y;
-            vertex.normal[2] = worldNormal.z;
+            vertex.color[0] = position.x;
+            vertex.color[1] = position.y;
+            vertex.color[2] = position.z;
+            vertex.flags |= npcFlags;
             m_balmoraGuardFrameVertices.push_back(vertex);
         }
 
@@ -2769,7 +2789,7 @@ bool App::pollMorrowindExteriorStreamingPrepare() {
 
 void App::update(float dt, float simulationAlpha) {
     if (m_importedSceneDemoEnabled) {
-        updateMorrowindExteriorStreaming(false);
+        (void)updateMorrowindExteriorStreaming(false);
         const float renderAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
         const odai::render::CameraPose cameraPose{
             m_cameraPrevious.x + ((m_camera.x - m_cameraPrevious.x) * renderAlpha),

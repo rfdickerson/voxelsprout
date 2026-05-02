@@ -12,6 +12,8 @@ extern "C" {
 }
 #endif
 
+#include <algorithm>
+#include <cstddef>
 #include <utility>
 
 namespace odai::game {
@@ -175,6 +177,28 @@ bool optionalTableBool(lua_State* lua, int tableIndex, const char* fieldName) {
     return result;
 }
 
+float optionalTableFloat(lua_State* lua, int tableIndex, const char* fieldName, float fallback) {
+    lua_getfield(lua, tableIndex, fieldName);
+    const float result = lua_isnumber(lua, -1) ? static_cast<float>(lua_tonumber(lua, -1)) : fallback;
+    lua_pop(lua, 1);
+    return result;
+}
+
+float routePointComponent(lua_State* lua, int tableIndex, const char* fieldName, int arrayIndex) {
+    lua_getfield(lua, tableIndex, fieldName);
+    if (lua_isnumber(lua, -1)) {
+        const float result = static_cast<float>(lua_tonumber(lua, -1));
+        lua_pop(lua, 1);
+        return result;
+    }
+    lua_pop(lua, 1);
+
+    lua_rawgeti(lua, tableIndex, arrayIndex);
+    const float result = lua_isnumber(lua, -1) ? static_cast<float>(lua_tonumber(lua, -1)) : 0.0f;
+    lua_pop(lua, 1);
+    return result;
+}
+
 }  // namespace
 
 LuaScriptRuntime::LuaScriptRuntime() = default;
@@ -305,6 +329,40 @@ DialogueResult LuaScriptRuntime::readDialogueResult(int stackIndex) const {
     return result;
 }
 
+LuaScriptRuntime::NpcUpdateCommand LuaScriptRuntime::readNpcUpdateCommand(int stackIndex) const {
+    NpcUpdateCommand result{};
+    if (!lua_istable(m_lua, stackIndex)) {
+        return result;
+    }
+
+    const int tableIndex = lua_absindex(m_lua, stackIndex);
+    result.handled = optionalTableBool(m_lua, tableIndex, "handled");
+    result.stop = optionalTableBool(m_lua, tableIndex, "stop");
+    result.speed = optionalTableFloat(m_lua, tableIndex, "speed", -1.0f);
+    result.message = optionalTableString(m_lua, tableIndex, "message");
+
+    lua_getfield(m_lua, tableIndex, "route");
+    if (lua_istable(m_lua, -1)) {
+        const int routeIndex = lua_absindex(m_lua, -1);
+        const int routeLength = static_cast<int>(lua_rawlen(m_lua, routeIndex));
+        result.route.reserve(static_cast<std::size_t>(std::max(routeLength, 0)));
+        for (int i = 1; i <= routeLength; ++i) {
+            lua_rawgeti(m_lua, routeIndex, i);
+            if (lua_istable(m_lua, -1)) {
+                const int pointIndex = lua_absindex(m_lua, -1);
+                result.route.push_back({
+                    routePointComponent(m_lua, pointIndex, "x", 1),
+                    routePointComponent(m_lua, pointIndex, "y", 2),
+                    routePointComponent(m_lua, pointIndex, "z", 3)
+                });
+            }
+            lua_pop(m_lua, 1);
+        }
+    }
+    lua_pop(m_lua, 1);
+    return result;
+}
+
 ScriptCallResult LuaScriptRuntime::onActivate(const std::string& refId) {
     if (!callStringFunction("on_activate", refId, 1)) {
         return {};
@@ -354,6 +412,39 @@ ScriptCallResult LuaScriptRuntime::onActorDeath(const std::string& actorId) {
     }
     ScriptCallResult result = readScriptCallResult(-1);
     lua_pop(m_lua, 1);
+    return result;
+}
+
+LuaScriptRuntime::NpcUpdateCommand LuaScriptRuntime::updateNpc(
+    const std::string& actorId,
+    float x,
+    float y,
+    float z
+) {
+    if (!initialized()) {
+        setError("Lua runtime is not initialized");
+        return {};
+    }
+    lua_getglobal(m_lua, "update_npc");
+    if (!lua_isfunction(m_lua, -1)) {
+        lua_pop(m_lua, 1);
+        return {};
+    }
+
+    const GameState snapshot = *m_state;
+    lua_pushlstring(m_lua, actorId.data(), actorId.size());
+    lua_pushnumber(m_lua, x);
+    lua_pushnumber(m_lua, y);
+    lua_pushnumber(m_lua, z);
+    if (lua_pcall(m_lua, 4, 1, 0) != LUA_OK) {
+        *m_state = snapshot;
+        setError(lua_tostring(m_lua, -1) != nullptr ? lua_tostring(m_lua, -1) : "Lua NPC update call failed");
+        lua_pop(m_lua, 1);
+        return {};
+    }
+    NpcUpdateCommand result = readNpcUpdateCommand(-1);
+    lua_pop(m_lua, 1);
+    m_lastError.clear();
     return result;
 }
 

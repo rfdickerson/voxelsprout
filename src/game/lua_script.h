@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 struct lua_State;
 
@@ -11,6 +12,20 @@ namespace odai::game {
 
 class LuaScriptRuntime {
 public:
+    struct NpcRoutePoint {
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
+    };
+
+    struct NpcUpdateCommand {
+        bool handled = false;
+        bool stop = false;
+        float speed = -1.0f;
+        std::string message;
+        std::vector<NpcRoutePoint> route;
+    };
+
     LuaScriptRuntime();
     ~LuaScriptRuntime();
     LuaScriptRuntime(const LuaScriptRuntime&) = delete;
@@ -29,6 +44,7 @@ public:
     DialogueResult getDialogue(const std::string& actorId, const std::string& topicId);
     ScriptCallResult chooseDialogue(const std::string& responseId);
     ScriptCallResult onActorDeath(const std::string& actorId);
+    NpcUpdateCommand updateNpc(const std::string& actorId, float x, float y, float z);
 
 private:
     [[nodiscard]] bool callStringFunction(
@@ -38,6 +54,7 @@ private:
     );
     [[nodiscard]] ScriptCallResult readScriptCallResult(int stackIndex) const;
     [[nodiscard]] DialogueResult readDialogueResult(int stackIndex) const;
+    [[nodiscard]] NpcUpdateCommand readNpcUpdateCommand(int stackIndex) const;
     void setError(std::string error);
 
     lua_State* m_lua = nullptr;

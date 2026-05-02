@@ -218,9 +218,11 @@ private:
         float speed = 92.0f;
         std::vector<odai::math::Vector3> route;
         std::vector<odai::world::NavmeshPathPoint> path;
+        std::string scriptActorId;
         std::size_t routeIndex = 0;
         std::size_t pathIndex = 0;
         float pathRetryCooldownSeconds = 0.0f;
+        float scriptUpdateCooldownSeconds = 0.0f;
     };
 
     struct MorrowindInteriorCacheEntry {
