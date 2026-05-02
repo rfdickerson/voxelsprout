@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +24,9 @@ constexpr std::uint32_t kGpuSceneComponentFlagTerrain = 1u << 0;
 constexpr std::uint32_t kGpuSceneComponentFlagStatic = 1u << 1;
 constexpr std::uint32_t kGpuSceneComponentFlagAlphaTest = 1u << 2;
 constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
+constexpr std::uint32_t kImportedSceneMaterialFlagSiltStrider = 1u << 1u;
+constexpr std::uint32_t kImportedSceneMaterialFlagSiltStriderMaskShift = 8u;
+constexpr std::uint32_t kImportedSceneMaterialFlagSiltStriderSide = 1u << 16u;
 constexpr float kGpuScenePageSize = 4096.0f;
 
 struct Quaternion {
@@ -49,6 +53,27 @@ PackedRenderColor packedRenderColorFromHash(std::string_view key) {
     color.g = 0.28f + (static_cast<float>((hash >> 8) & 0xffu) / 255.0f) * 0.52f;
     color.b = 0.25f + (static_cast<float>((hash >> 16) & 0xffu) / 255.0f) * 0.50f;
     return color;
+}
+
+std::string lowerCopy(std::string_view value) {
+    std::string result(value);
+    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return result;
+}
+
+std::uint32_t siltStriderAnimationFlags(const ImportedSceneVertex& vertex) {
+    const float lateral = std::abs(vertex.position[0]);
+    const float lowMask = std::clamp((125.0f - vertex.position[1]) / 320.0f, 0.0f, 1.0f);
+    const float outerMask = std::clamp((lateral - 18.0f) / 85.0f, 0.0f, 1.0f);
+    const float influence = std::clamp(lowMask * outerMask, 0.0f, 1.0f);
+    const std::uint32_t packedInfluence = static_cast<std::uint32_t>((influence * 255.0f) + 0.5f);
+    const std::uint32_t side =
+        vertex.position[0] >= 0.0f ? kImportedSceneMaterialFlagSiltStriderSide : 0u;
+    return kImportedSceneMaterialFlagSiltStrider |
+        (packedInfluence << kImportedSceneMaterialFlagSiltStriderMaskShift) |
+        side;
 }
 
 PackedRenderColor packedTerrainColor(float height) {
@@ -528,6 +553,8 @@ void buildGpuSceneRenderCache(GpuSceneAsset& scene) {
                                   bool transformedVertices,
                                   bool terrainMesh,
                                   const PackedRenderColor& flatColor) {
+        const bool animateSiltStrider =
+            lowerCopy(mesh.name).find("siltstrider") != std::string::npos;
         auto appendVertex = [&](std::uint32_t sourceVertexIndex,
                                 std::uint32_t textureIndex,
                                 std::uint32_t flags) {
@@ -562,7 +589,7 @@ void buildGpuSceneRenderCache(GpuSceneAsset& scene) {
             dstVertex.uv[0] = srcVertex.uv[0];
             dstVertex.uv[1] = srcVertex.uv[1];
             dstVertex.textureIndex = textureIndex;
-            dstVertex.flags = flags;
+            dstVertex.flags = flags | (animateSiltStrider ? siltStriderAnimationFlags(srcVertex) : 0u);
             const std::uint32_t packedVertexIndex = static_cast<std::uint32_t>(scene.renderCache.packedVertices.size());
             scene.renderCache.packedVertices.push_back(dstVertex);
             return packedVertexIndex;

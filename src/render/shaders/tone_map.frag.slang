@@ -389,6 +389,47 @@ float hgPhase(float cosTheta, float anisotropy)
     return (1.0 - g2) / (4.0 * 3.14159265 * denom);
 }
 
+float3 proceduralSkyNoSunDisk(float3 direction, float3 toSun)
+{
+    const float3 dir = normalize(direction);
+    const float rayleighStrength = max(camera.skyConfig0.x, 0.01);
+    const float mieStrength = max(camera.skyConfig0.y, 0.01);
+    const float skyExposure = max(camera.skyConfig0.w, 0.01);
+    const float sunAltitude = clamp(toSun.y, -1.0, 1.0);
+    const float dayFactor = smoothstep(0.05, 0.65, sunAltitude);
+    const float twilightFactor = 1.0 - dayFactor;
+    const float horizonBand = saturate(1.0 - (abs(sunAltitude) / 0.35));
+    const float warmAmount = twilightFactor * pow(horizonBand, 1.2);
+    const float pinkAmount = warmAmount * saturate((0.10 - sunAltitude) / 0.30);
+
+    const float horizonT = saturate((dir.y * 0.5) + 0.5);
+    const float skyT = pow(horizonT, 0.35);
+
+    float3 horizonRayleigh = lerp(float3(0.54, 0.70, 1.00), float3(0.74, 0.44, 0.52), warmAmount);
+    float3 horizonMie = lerp(float3(1.00, 0.74, 0.42), float3(1.18, 0.54, 0.30), warmAmount);
+    horizonRayleigh = lerp(horizonRayleigh, float3(0.70, 0.36, 0.68), pinkAmount * 0.70);
+    horizonMie = lerp(horizonMie, float3(1.08, 0.46, 0.72), pinkAmount * 0.85);
+
+    const float zenithWarm = twilightFactor * 0.58;
+    const float3 zenithRayleigh = lerp(float3(0.06, 0.24, 0.54), float3(0.16, 0.12, 0.30), zenithWarm);
+    const float3 zenithMie = lerp(float3(0.22, 0.20, 0.15), float3(0.30, 0.18, 0.24), zenithWarm);
+
+    const float3 horizonColor =
+        (horizonRayleigh * rayleighStrength) +
+        (horizonMie * (mieStrength * 0.58));
+    const float3 zenithColor =
+        (zenithRayleigh * rayleighStrength) +
+        (zenithMie * (mieStrength * 0.25));
+    const float3 sky = lerp(horizonColor, zenithColor, skyT);
+
+    const float3 groundColor = float3(0.05, 0.06, 0.07);
+    const float belowHorizon = saturate(-dir.y);
+    const float3 horizonGroundColor = horizonColor * 0.32;
+    const float3 ground = lerp(horizonGroundColor, groundColor, pow(belowHorizon, 0.55));
+    const float skyWeight = smoothstep(-0.18, 0.02, dir.y);
+    return max(lerp(ground, sky, skyWeight) * skyExposure, float3(0.0, 0.0, 0.0));
+}
+
 float heightFogDensityAt(float worldHeight, float fogBaseHeight, float heightFalloff)
 {
     const float relativeHeight = worldHeight - fogBaseHeight;
@@ -411,6 +452,18 @@ float3 fogScatteringAlbedo()
     return float3(0.98, 0.955, 0.90);
 }
 
+float stableFogNoise(float2 p)
+{
+    const float2 i = floor(p);
+    const float2 f = frac(p);
+    const float2 u = f * f * (3.0 - (2.0 * f));
+    const float a = frac(sin(dot(i + float2(0.0, 0.0), float2(127.1, 311.7))) * 43758.5453123);
+    const float b = frac(sin(dot(i + float2(1.0, 0.0), float2(127.1, 311.7))) * 43758.5453123);
+    const float c = frac(sin(dot(i + float2(0.0, 1.0), float2(127.1, 311.7))) * 43758.5453123);
+    const float d = frac(sin(dot(i + float2(1.0, 1.0), float2(127.1, 311.7))) * 43758.5453123);
+    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+}
+
 float3 volumetricIncidentRadiance(
     float3 worldViewDir,
     float3 toSun,
@@ -422,16 +475,16 @@ float3 volumetricIncidentRadiance(
 {
     const float sunAltitude = clamp(toSun.y, -1.0, 1.0);
     const float dayFactor = smoothstep(0.04, 0.70, sunAltitude);
-    const float twilightFactor = 1.0 - dayFactor;
-    const float skyT = clamp((worldViewDir.y * 0.5) + 0.5, 0.0, 1.0);
     const float valleyT = 1.0 - smoothstep(fogBaseHeight - 16.0, fogBaseHeight + 160.0, sampleHeight);
 
-    const float3 skyHorizon = lerp(float3(0.48, 0.57, 0.70), float3(0.86, 0.52, 0.32), twilightFactor * 0.58);
-    const float3 skyZenith = lerp(float3(0.24, 0.34, 0.58), float3(0.30, 0.22, 0.30), twilightFactor * 0.46);
-    const float3 groundBounce = lerp(float3(0.54, 0.49, 0.40), float3(0.66, 0.46, 0.30), twilightFactor);
-    const float3 skyRadiance = lerp(skyHorizon, skyZenith, pow(skyT, 0.45));
-    const float ambientStrength = lerp(0.86, 1.26, dayFactor);
-    const float3 ambientRadiance = lerp(skyRadiance, groundBounce, valleyT * 0.10) * ambientStrength;
+    const float3 skyRadiance = proceduralSkyNoSunDisk(worldViewDir, toSun);
+    const float3 horizonDir = normalize(float3(worldViewDir.x, 0.015, worldViewDir.z));
+    const float3 horizonRadiance = proceduralSkyNoSunDisk(horizonDir, toSun);
+    const float3 groundBounce = horizonRadiance * lerp(0.28, 0.20, dayFactor);
+    const float horizonBlend = pow(1.0 - saturate(abs(worldViewDir.y)), 2.0);
+    const float3 skyMatchedRadiance = lerp(skyRadiance, horizonRadiance, horizonBlend * 0.16);
+    const float ambientStrength = lerp(0.72, 1.00, dayFactor);
+    const float3 ambientRadiance = lerp(skyMatchedRadiance, groundBounce, valleyT * 0.040) * ambientStrength;
 
     const float cosTheta = clamp(dot(worldViewDir, toSun), -1.0, 1.0);
     const float sunPhase = hgPhase(cosTheta, camera.skyConfig0.z);
@@ -465,7 +518,7 @@ float3 applyVolumetricHeightFog(
     const float3 extinction = fogExtinctionCoefficient();
     const float3 scatteringAlbedo = fogScatteringAlbedo();
 
-    const float horizonGather = 1.0 + (pow(1.0 - saturate(abs(worldViewDir.y)), 2.0) * 0.32);
+    const float horizonGather = 1.0 + (pow(1.0 - saturate(abs(worldViewDir.y)), 2.0) * 0.12);
     const int sampleCount = 6;
     const float stepLength = travelDistance / float(sampleCount);
     float3 transmittance = float3(1.0, 1.0, 1.0);
@@ -476,8 +529,19 @@ float3 applyVolumetricHeightFog(
     {
         const float t = (float(i) + 0.5) * stepLength;
         const float3 samplePosition = cameraWorld + (worldViewDir * t);
+        const float distanceRamp = smoothstep(18.0, 96.0, t) * lerp(0.82, 1.12, smoothstep(260.0, 1100.0, t));
+        const float lowlandMask = 1.0 - smoothstep(fogBaseHeight + 26.0, fogBaseHeight + 180.0, samplePosition.y);
+        const float breakupNoise =
+            (stableFogNoise(samplePosition.xz * 0.0065) * 0.62) +
+            (stableFogNoise((samplePosition.zx * 0.017) + 19.0) * 0.38);
+        const float lowlandBreakup = lerp(0.62, 1.18, smoothstep(0.22, 0.92, breakupNoise));
+        const float terrainGuidedDensity = lerp(0.82, lowlandBreakup, lowlandMask * 0.55);
         const float localDensity =
-            fogDensity * heightFogDensityAt(samplePosition.y, fogBaseHeight, heightFalloff) * horizonGather;
+            fogDensity *
+            heightFogDensityAt(samplePosition.y, fogBaseHeight, heightFalloff) *
+            horizonGather *
+            distanceRamp *
+            terrainGuidedDensity;
         const float opticalDepth = localDensity * stepLength;
         const float3 segmentTransmittance = exp(-(extinction * opticalDepth));
         const float3 incidentRadiance = volumetricIncidentRadiance(

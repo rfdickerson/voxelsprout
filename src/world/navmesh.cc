@@ -4,8 +4,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <queue>
+#include <type_traits>
 #include <unordered_map>
 
 namespace odai::world {
@@ -14,6 +16,8 @@ namespace {
 
 constexpr float kGeometryEpsilon = 1e-4f;
 constexpr std::uint32_t kGpuSceneComponentFlagAlphaTest = 1u << 2;
+constexpr std::uint32_t kNavmeshCacheMagic = 0x4d56414eu;  // NAVM
+constexpr std::uint32_t kNavmeshCacheVersion = 1u;
 
 struct QueryAabb {
     float minX = 0.0f;
@@ -491,6 +495,170 @@ Navmesh::Stats Navmesh::stats() const {
     result.obstacleTriangleCount = static_cast<std::uint32_t>(m_obstacleTriangles.size());
     result.linkCount = m_linkCount;
     return result;
+}
+
+namespace {
+
+template <typename T>
+bool readBinaryValue(std::istream& input, T& out) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    input.read(reinterpret_cast<char*>(&out), static_cast<std::streamsize>(sizeof(T)));
+    return input.good();
+}
+
+template <typename T>
+void writeBinaryValue(std::ostream& output, const T& value) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    output.write(reinterpret_cast<const char*>(&value), static_cast<std::streamsize>(sizeof(T)));
+}
+
+bool navmeshSettingsMatch(const NavmeshSettings& lhs, const NavmeshSettings& rhs) {
+    constexpr float kSettingsEpsilon = 0.0001f;
+    return
+        std::fabs(lhs.agentRadius - rhs.agentRadius) <= kSettingsEpsilon &&
+        std::fabs(lhs.agentHeight - rhs.agentHeight) <= kSettingsEpsilon &&
+        std::fabs(lhs.maxClimb - rhs.maxClimb) <= kSettingsEpsilon &&
+        std::fabs(lhs.maxSlopeDegrees - rhs.maxSlopeDegrees) <= kSettingsEpsilon &&
+        std::fabs(lhs.nearestPointMaxDistance - rhs.nearestPointMaxDistance) <= kSettingsEpsilon &&
+        std::fabs(lhs.edgeMergeEpsilon - rhs.edgeMergeEpsilon) <= kSettingsEpsilon;
+}
+
+bool writeNavmeshTriangle(std::ostream& output, const Navmesh::Triangle& triangle) {
+    writeBinaryValue(output, triangle.p0);
+    writeBinaryValue(output, triangle.p1);
+    writeBinaryValue(output, triangle.p2);
+    writeBinaryValue(output, triangle.normal);
+    writeBinaryValue(output, triangle.center);
+    const std::uint8_t area = static_cast<std::uint8_t>(triangle.area);
+    writeBinaryValue(output, area);
+    const std::uint32_t neighborCount = static_cast<std::uint32_t>(triangle.neighbors.size());
+    writeBinaryValue(output, neighborCount);
+    if (!triangle.neighbors.empty()) {
+        output.write(
+            reinterpret_cast<const char*>(triangle.neighbors.data()),
+            static_cast<std::streamsize>(triangle.neighbors.size() * sizeof(std::uint32_t)));
+    }
+    return output.good();
+}
+
+bool readNavmeshTriangle(std::istream& input, Navmesh::Triangle& triangle) {
+    std::uint8_t area = 0u;
+    std::uint32_t neighborCount = 0u;
+    if (!readBinaryValue(input, triangle.p0) ||
+        !readBinaryValue(input, triangle.p1) ||
+        !readBinaryValue(input, triangle.p2) ||
+        !readBinaryValue(input, triangle.normal) ||
+        !readBinaryValue(input, triangle.center) ||
+        !readBinaryValue(input, area) ||
+        !readBinaryValue(input, neighborCount)) {
+        return false;
+    }
+    if (area > static_cast<std::uint8_t>(NavmeshArea::Obstacle)) {
+        return false;
+    }
+    triangle.area = static_cast<NavmeshArea>(area);
+    triangle.neighbors.resize(neighborCount);
+    if (neighborCount != 0u) {
+        input.read(
+            reinterpret_cast<char*>(triangle.neighbors.data()),
+            static_cast<std::streamsize>(triangle.neighbors.size() * sizeof(std::uint32_t)));
+        if (!input.good()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool Navmesh::saveBinary(const std::filesystem::path& path) const {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        return false;
+    }
+
+    writeBinaryValue(output, kNavmeshCacheMagic);
+    writeBinaryValue(output, kNavmeshCacheVersion);
+    writeBinaryValue(output, m_settings);
+    writeBinaryValue(output, m_linkCount);
+    const std::uint32_t walkableCount = static_cast<std::uint32_t>(m_walkableTriangles.size());
+    const std::uint32_t obstacleCount = static_cast<std::uint32_t>(m_obstacleTriangles.size());
+    writeBinaryValue(output, walkableCount);
+    writeBinaryValue(output, obstacleCount);
+    for (const Triangle& triangle : m_walkableTriangles) {
+        if (!writeNavmeshTriangle(output, triangle)) {
+            return false;
+        }
+    }
+    for (const Triangle& triangle : m_obstacleTriangles) {
+        if (!writeNavmeshTriangle(output, triangle)) {
+            return false;
+        }
+    }
+    return output.good();
+}
+
+bool Navmesh::loadBinary(const std::filesystem::path& path, const NavmeshSettings& expectedSettings) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return false;
+    }
+
+    std::uint32_t magic = 0u;
+    std::uint32_t version = 0u;
+    NavmeshSettings settings{};
+    std::uint32_t linkCount = 0u;
+    std::uint32_t walkableCount = 0u;
+    std::uint32_t obstacleCount = 0u;
+    if (!readBinaryValue(input, magic) ||
+        !readBinaryValue(input, version) ||
+        magic != kNavmeshCacheMagic ||
+        version != kNavmeshCacheVersion ||
+        !readBinaryValue(input, settings) ||
+        !navmeshSettingsMatch(settings, expectedSettings) ||
+        !readBinaryValue(input, linkCount) ||
+        !readBinaryValue(input, walkableCount) ||
+        !readBinaryValue(input, obstacleCount)) {
+        clear();
+        return false;
+    }
+    if (walkableCount > 10'000'000u || obstacleCount > 10'000'000u) {
+        clear();
+        return false;
+    }
+
+    std::vector<Triangle> walkableTriangles(walkableCount);
+    std::vector<Triangle> obstacleTriangles(obstacleCount);
+    for (Triangle& triangle : walkableTriangles) {
+        if (!readNavmeshTriangle(input, triangle)) {
+            clear();
+            return false;
+        }
+    }
+    for (Triangle& triangle : obstacleTriangles) {
+        if (!readNavmeshTriangle(input, triangle)) {
+            clear();
+            return false;
+        }
+    }
+    for (const Triangle& triangle : walkableTriangles) {
+        for (const std::uint32_t neighborIndex : triangle.neighbors) {
+            if (neighborIndex >= walkableTriangles.size()) {
+                clear();
+                return false;
+            }
+        }
+    }
+
+    m_settings = settings;
+    m_walkableTriangles = std::move(walkableTriangles);
+    m_obstacleTriangles = std::move(obstacleTriangles);
+    m_linkCount = linkCount;
+    if (m_walkableTriangles.empty()) {
+        clear();
+        return false;
+    }
+    return true;
 }
 
 bool Navmesh::findNearestPoint(

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -86,12 +87,15 @@ struct NifAvObject {
 struct NifNodeRecord {
     NifAvObject avObject;
     std::vector<std::int32_t> childRefs;
+    std::uint32_t activeChildIndex = std::numeric_limits<std::uint32_t>::max();
+    bool traverseActiveChildOnly = false;
     bool isRootCollisionNode = false;
 };
 
 struct NifGeometryRecord {
     NifAvObject avObject;
     std::int32_t dataRef = -1;
+    std::int32_t skinInstanceRef = -1;
 };
 
 struct NifTriShapeDataRecord {
@@ -111,6 +115,52 @@ struct NifSourceTextureRecord {
 
 struct NifAlphaPropertyRecord {
     bool alphaTest = false;
+    bool alphaBlend = false;
+};
+
+struct NifSkinInstanceRecord {
+    std::int32_t skinDataRef = -1;
+    std::int32_t skeletonRootRef = -1;
+    std::vector<std::int32_t> boneRefs;
+};
+
+struct NifSkinDataRecord {
+    struct VertexWeight {
+        std::uint16_t vertexIndex = 0u;
+        float weight = 0.0f;
+    };
+
+    struct BoneData {
+        NifTransform transform;
+        std::vector<VertexWeight> weights;
+    };
+
+    NifTransform skinTransform;
+    std::vector<BoneData> bones;
+};
+
+struct NifTimeControllerRecord {
+    std::int32_t nextControllerRef = -1;
+    std::uint16_t flags = 0u;
+    float frequency = 1.0f;
+    float phase = 0.0f;
+    float startTime = 0.0f;
+    float stopTime = 0.0f;
+    std::int32_t targetRef = -1;
+};
+
+struct NifKeyframeControllerRecord {
+    NifTimeControllerRecord time;
+    std::int32_t dataRef = -1;
+};
+
+struct NifKeyframeDataRecord {
+    std::vector<ImportedNifVec3Key> translationKeys;
+    std::vector<ImportedNifQuatKey> rotationKeys;
+    std::vector<ImportedNifFloatKey> scaleKeys;
+    std::vector<ImportedNifFloatKey> xRotationKeys;
+    std::vector<ImportedNifFloatKey> yRotationKeys;
+    std::vector<ImportedNifFloatKey> zRotationKeys;
 };
 
 enum class RecordKind {
@@ -121,7 +171,11 @@ enum class RecordKind {
     ParticleData,
     TexturingProperty,
     SourceTexture,
-    AlphaProperty
+    AlphaProperty,
+    SkinInstance,
+    SkinData,
+    KeyframeController,
+    KeyframeData
 };
 
 struct NifRecord {
@@ -132,6 +186,10 @@ struct NifRecord {
     NifTexturingPropertyRecord texturingProperty{};
     NifSourceTextureRecord sourceTexture{};
     NifAlphaPropertyRecord alphaProperty{};
+    NifSkinInstanceRecord skinInstance{};
+    NifSkinDataRecord skinData{};
+    NifKeyframeControllerRecord keyframeController{};
+    NifKeyframeDataRecord keyframeData{};
 };
 
 std::array<float, 16> identityMatrix() {
@@ -212,8 +270,61 @@ std::array<float, 16> makeTransformMatrix(const NifTransform& transform) {
     return matrix;
 }
 
+NifTransform readSkinTransform(NifCursor& cursor) {
+    NifTransform transform{};
+    for (float& value : transform.rotation) {
+        value = cursor.readValue<float>();
+    }
+    for (float& value : transform.translation) {
+        value = cursor.readValue<float>();
+    }
+    transform.scale = cursor.readValue<float>();
+    return transform;
+}
+
 bool avObjectIsHidden(const NifAvObject& avObject) {
     return (avObject.flags & 0x0001u) != 0u;
+}
+
+std::string lowerAsciiCopy(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (const char ch : text) {
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return out;
+}
+
+bool containsAnyFoliageAlphaHint(std::string_view text) {
+    return text.find("flora") != std::string_view::npos ||
+        text.find("leaf") != std::string_view::npos ||
+        text.find("leaves") != std::string_view::npos ||
+        text.find("fern") != std::string_view::npos ||
+        text.find("grass") != std::string_view::npos ||
+        text.find("vine") != std::string_view::npos ||
+        text.find("ivy") != std::string_view::npos ||
+        text.find("moss") != std::string_view::npos ||
+        text.find("lilypad") != std::string_view::npos ||
+        text.find("shrub") != std::string_view::npos ||
+        text.find("branch") != std::string_view::npos ||
+        text.find("heather") != std::string_view::npos ||
+        text.find("chokeweed") != std::string_view::npos ||
+        text.find("comberry") != std::string_view::npos ||
+        text.find("corkbulb") != std::string_view::npos ||
+        text.find("roobrush") != std::string_view::npos ||
+        text.find("podplant") != std::string_view::npos;
+}
+
+bool alphaBlendOnlyPartCanUseCutoutFallback(
+    std::string_view meshName,
+    std::string_view geometryName,
+    std::string_view diffuseTexturePath
+) {
+    const std::string combined =
+        lowerAsciiCopy(meshName) + "|" +
+        lowerAsciiCopy(geometryName) + "|" +
+        lowerAsciiCopy(diffuseTexturePath);
+    return containsAnyFoliageAlphaHint(combined);
 }
 
 bool equalsIgnoreCaseAscii(std::string_view lhs, std::string_view rhs) {
@@ -320,11 +431,111 @@ std::uint32_t skipKeyMap(
     }
 }
 
+template <typename ReadValue>
+std::uint32_t readKeyMapHeader(NifCursor& cursor, ReadValue readValues) {
+    const std::uint32_t keyCount = cursor.readValue<std::uint32_t>();
+    if (keyCount == 0u) {
+        return 0u;
+    }
+    const std::uint32_t interpolationType = cursor.readValue<std::uint32_t>();
+    for (std::uint32_t keyIndex = 0; keyIndex < keyCount; ++keyIndex) {
+        const float time = cursor.readValue<float>();
+        readValues(time, interpolationType);
+    }
+    return interpolationType;
+}
+
+std::vector<ImportedNifFloatKey> readFloatKeyMap(NifCursor& cursor) {
+    std::vector<ImportedNifFloatKey> keys;
+    const std::uint32_t keyCount = cursor.readValue<std::uint32_t>();
+    if (keyCount == 0u) {
+        return keys;
+    }
+    const std::uint32_t interpolationType = cursor.readValue<std::uint32_t>();
+    keys.reserve(keyCount);
+    for (std::uint32_t keyIndex = 0; keyIndex < keyCount; ++keyIndex) {
+        ImportedNifFloatKey key{};
+        key.time = cursor.readValue<float>();
+        key.value = cursor.readValue<float>();
+        if (interpolationType == 2u) {
+            cursor.skip(sizeof(float) * 2u);
+        } else if (interpolationType == 3u) {
+            cursor.skip(sizeof(float) * 3u);
+        } else if (interpolationType != 1u && interpolationType != 5u) {
+            throw std::runtime_error("Unsupported NIF scalar key interpolation type " + std::to_string(interpolationType));
+        }
+        keys.push_back(key);
+    }
+    return keys;
+}
+
+std::vector<ImportedNifVec3Key> readVec3KeyMap(NifCursor& cursor) {
+    std::vector<ImportedNifVec3Key> keys;
+    const std::uint32_t keyCount = cursor.readValue<std::uint32_t>();
+    if (keyCount == 0u) {
+        return keys;
+    }
+    const std::uint32_t interpolationType = cursor.readValue<std::uint32_t>();
+    keys.reserve(keyCount);
+    for (std::uint32_t keyIndex = 0; keyIndex < keyCount; ++keyIndex) {
+        ImportedNifVec3Key key{};
+        key.time = cursor.readValue<float>();
+        key.value[0] = cursor.readValue<float>();
+        key.value[1] = cursor.readValue<float>();
+        key.value[2] = cursor.readValue<float>();
+        if (interpolationType == 2u) {
+            cursor.skip(sizeof(float) * 6u);
+        } else if (interpolationType == 3u) {
+            cursor.skip(sizeof(float) * 3u);
+        } else if (interpolationType != 1u && interpolationType != 5u) {
+            throw std::runtime_error("Unsupported NIF vector key interpolation type " + std::to_string(interpolationType));
+        }
+        keys.push_back(key);
+    }
+    return keys;
+}
+
+std::vector<ImportedNifQuatKey> readQuatKeyMapBody(
+    NifCursor& cursor,
+    std::uint32_t keyCount,
+    std::uint32_t interpolationType
+) {
+    std::vector<ImportedNifQuatKey> keys;
+    keys.reserve(keyCount);
+    for (std::uint32_t keyIndex = 0; keyIndex < keyCount; ++keyIndex) {
+        ImportedNifQuatKey key{};
+        key.time = cursor.readValue<float>();
+        key.value[0] = cursor.readValue<float>();
+        key.value[1] = cursor.readValue<float>();
+        key.value[2] = cursor.readValue<float>();
+        key.value[3] = cursor.readValue<float>();
+        if (interpolationType == 3u) {
+            cursor.skip(sizeof(float) * 3u);
+        } else if (interpolationType != 1u && interpolationType != 2u && interpolationType != 5u) {
+            throw std::runtime_error("Unsupported NIF quaternion key interpolation type " + std::to_string(interpolationType));
+        }
+        keys.push_back(key);
+    }
+    return keys;
+}
+
 void skipTimeControllerRecord(NifCursor& cursor) {
     cursor.readValue<std::int32_t>();
     cursor.readValue<std::uint16_t>();
     cursor.skip(sizeof(float) * 4u);
     cursor.readValue<std::int32_t>();
+}
+
+NifTimeControllerRecord readTimeControllerRecord(NifCursor& cursor) {
+    NifTimeControllerRecord record{};
+    record.nextControllerRef = cursor.readValue<std::int32_t>();
+    record.flags = cursor.readValue<std::uint16_t>();
+    record.frequency = cursor.readValue<float>();
+    record.phase = cursor.readValue<float>();
+    record.startTime = cursor.readValue<float>();
+    record.stopTime = cursor.readValue<float>();
+    record.targetRef = cursor.readValue<std::int32_t>();
+    return record;
 }
 
 NifAvObject readAvObject(NifCursor& cursor) {
@@ -354,11 +565,28 @@ NifNodeRecord readNodeRecord(NifCursor& cursor) {
     return node;
 }
 
+NifNodeRecord readSwitchNodeRecord(NifCursor& cursor) {
+    NifNodeRecord node = readNodeRecord(cursor);
+    node.activeChildIndex = cursor.readValue<std::uint32_t>();
+    node.traverseActiveChildOnly = true;
+    return node;
+}
+
+NifNodeRecord readLodNodeRecord(NifCursor& cursor) {
+    NifNodeRecord node = readSwitchNodeRecord(cursor);
+    node.activeChildIndex = 0u;
+    node.traverseActiveChildOnly = true;
+    cursor.skip(sizeof(float) * 3u);
+    const std::uint32_t levelCount = cursor.readValue<std::uint32_t>();
+    cursor.skip(static_cast<std::size_t>(levelCount) * sizeof(float) * 2u);
+    return node;
+}
+
 NifGeometryRecord readGeometryRecord(NifCursor& cursor) {
     NifGeometryRecord geometry{};
     geometry.avObject = readAvObject(cursor);
     geometry.dataRef = cursor.readValue<std::int32_t>();
-    cursor.readValue<std::int32_t>();
+    geometry.skinInstanceRef = cursor.readValue<std::int32_t>();
     return geometry;
 }
 
@@ -575,7 +803,8 @@ NifAlphaPropertyRecord readAlphaPropertyRecord(NifCursor& cursor) {
     readObjectNetName(cursor);
     const std::uint16_t flags = cursor.readValue<std::uint16_t>();
     cursor.readValue<std::uint8_t>();
-    property.alphaTest = (flags & 0x0201u) != 0u;
+    property.alphaBlend = (flags & 0x0001u) != 0u;
+    property.alphaTest = (flags & 0x0200u) != 0u;
     return property;
 }
 
@@ -593,10 +822,23 @@ void skipKeyframeControllerRecord(NifCursor& cursor) {
     cursor.readValue<std::int32_t>();
 }
 
+NifKeyframeControllerRecord readKeyframeControllerRecord(NifCursor& cursor) {
+    NifKeyframeControllerRecord record{};
+    record.time = readTimeControllerRecord(cursor);
+    record.dataRef = cursor.readValue<std::int32_t>();
+    return record;
+}
+
 void skipGeomMorpherControllerRecord(NifCursor& cursor) {
     skipTimeControllerRecord(cursor);
     cursor.readValue<std::int32_t>();
     cursor.readValue<std::uint8_t>();
+}
+
+void skipUvControllerRecord(NifCursor& cursor) {
+    skipTimeControllerRecord(cursor);
+    cursor.readValue<std::uint16_t>();
+    cursor.readValue<std::int32_t>();
 }
 
 void skipMorphDataRecord(NifCursor& cursor) {
@@ -640,6 +882,12 @@ void skipParticleModifierRecord(NifCursor& cursor, std::size_t payloadBytes) {
     cursor.skip(payloadBytes);
 }
 
+void skipGravityRecord(NifCursor& cursor) {
+    skipParticleModifierRecord(
+        cursor,
+        sizeof(float) * 2u + sizeof(std::uint32_t) + sizeof(float) * 6u);
+}
+
 void skipColorDataRecord(NifCursor& cursor) {
     skipKeyMap(cursor, 4u);
 }
@@ -654,6 +902,24 @@ void skipKeyframeDataRecord(NifCursor& cursor) {
     }
     skipKeyMap(cursor, 3u);
     skipKeyMap(cursor, 1u);
+}
+
+NifKeyframeDataRecord readKeyframeDataRecord(NifCursor& cursor) {
+    NifKeyframeDataRecord record{};
+    const std::uint32_t rotationKeyCount = cursor.readValue<std::uint32_t>();
+    if (rotationKeyCount != 0u) {
+        const std::uint32_t rotationInterpolation = cursor.readValue<std::uint32_t>();
+        if (rotationInterpolation == 4u) {
+            record.xRotationKeys = readFloatKeyMap(cursor);
+            record.yRotationKeys = readFloatKeyMap(cursor);
+            record.zRotationKeys = readFloatKeyMap(cursor);
+        } else {
+            record.rotationKeys = readQuatKeyMapBody(cursor, rotationKeyCount, rotationInterpolation);
+        }
+    }
+    record.translationKeys = readVec3KeyMap(cursor);
+    record.scaleKeys = readFloatKeyMap(cursor);
+    return record;
 }
 
 void skipGeometryDataPrefix(
@@ -720,22 +986,35 @@ void skipSkinPartitionRecord(NifCursor& cursor) {
     }
 }
 
-void skipSkinDataRecord(NifCursor& cursor) {
-    cursor.skip((sizeof(float) * 13u));
+NifSkinDataRecord readSkinDataRecord(NifCursor& cursor) {
+    NifSkinDataRecord record{};
+    record.skinTransform = readSkinTransform(cursor);
     const std::uint32_t boneCount = cursor.readValue<std::uint32_t>();
     cursor.readValue<std::int32_t>();
+    record.bones.reserve(boneCount);
     for (std::uint32_t boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
-        cursor.skip(sizeof(float) * 13u);
+        NifSkinDataRecord::BoneData bone{};
+        bone.transform = readSkinTransform(cursor);
         cursor.skip(sizeof(float) * 4u);
         const std::uint16_t weightCount = cursor.readValue<std::uint16_t>();
-        cursor.skip(static_cast<std::size_t>(weightCount) * (sizeof(std::uint16_t) + sizeof(float)));
+        bone.weights.reserve(weightCount);
+        for (std::uint16_t weightIndex = 0; weightIndex < weightCount; ++weightIndex) {
+            NifSkinDataRecord::VertexWeight weight{};
+            weight.vertexIndex = cursor.readValue<std::uint16_t>();
+            weight.weight = cursor.readValue<float>();
+            bone.weights.push_back(weight);
+        }
+        record.bones.push_back(std::move(bone));
     }
+    return record;
 }
 
-void skipSkinInstanceRecord(NifCursor& cursor) {
-    cursor.readValue<std::int32_t>();
-    cursor.readValue<std::int32_t>();
-    readRefList(cursor);
+NifSkinInstanceRecord readSkinInstanceRecord(NifCursor& cursor) {
+    NifSkinInstanceRecord record{};
+    record.skinDataRef = cursor.readValue<std::int32_t>();
+    record.skeletonRootRef = cursor.readValue<std::int32_t>();
+    record.boneRefs = readRefList(cursor);
+    return record;
 }
 
 void skipSimplePropertyRecord(NifCursor& cursor, std::size_t payloadBytes) {
@@ -755,9 +1034,63 @@ bool isFiniteVector(const std::array<float, 3>& value) {
 
 struct GeometryTraversalState {
     std::array<float, 16> parentTransform = identityMatrix();
+    const std::vector<std::array<float, 16>>* recordWorldTransforms = nullptr;
     bool skipMeshes = false;
     bool discardRootTransform = false;
+    bool includeHiddenGeometry = false;
+    bool keepAlphaBlendOnlyParts = false;
+    bool bakeSkinBindPose = false;
 };
+
+void buildRecordWorldTransformsRecursive(
+    const std::vector<NifRecord>& records,
+    std::int32_t recordIndex,
+    const std::array<float, 16>& parentTransform,
+    bool discardRootTransform,
+    std::vector<std::array<float, 16>>& outTransforms
+) {
+    if (recordIndex < 0 || static_cast<std::size_t>(recordIndex) >= records.size()) {
+        return;
+    }
+    const NifRecord& record = records[static_cast<std::size_t>(recordIndex)];
+    if (record.kind != RecordKind::Node && record.kind != RecordKind::Geometry) {
+        return;
+    }
+
+    std::array<float, 16> localTransform = record.kind == RecordKind::Node
+        ? makeTransformMatrix(record.node.avObject.transform)
+        : makeTransformMatrix(record.geometry.avObject.transform);
+    if (discardRootTransform &&
+        record.kind == RecordKind::Node &&
+        !equalsIgnoreCaseAscii(record.node.avObject.name, "bip01")) {
+        localTransform = identityMatrix();
+    }
+    const std::array<float, 16> worldTransform = multiplyMatrices(parentTransform, localTransform);
+    outTransforms[static_cast<std::size_t>(recordIndex)] = worldTransform;
+
+    if (record.kind == RecordKind::Node) {
+        for (const std::int32_t childRef : record.node.childRefs) {
+            buildRecordWorldTransformsRecursive(records, childRef, worldTransform, false, outTransforms);
+        }
+    }
+}
+
+std::vector<std::array<float, 16>> buildRecordWorldTransforms(
+    const std::vector<NifRecord>& records,
+    std::span<const std::int32_t> rootRefs,
+    bool discardSingleRootZeroTransform
+) {
+    std::vector<std::array<float, 16>> transforms(records.size(), identityMatrix());
+    for (const std::int32_t rootRef : rootRefs) {
+        buildRecordWorldTransformsRecursive(
+            records,
+            rootRef,
+            identityMatrix(),
+            discardSingleRootZeroTransform,
+            transforms);
+    }
+    return transforms;
+}
 
 void appendGeometry(
     const std::vector<NifRecord>& records,
@@ -782,7 +1115,20 @@ void appendGeometry(
         childState.discardRootTransform = false;
         childState.skipMeshes = childState.skipMeshes ||
             nodeIsRootCollisionNode(geometryRecord.node) ||
-            avObjectIsHidden(geometryRecord.node.avObject);
+            (!childState.includeHiddenGeometry && avObjectIsHidden(geometryRecord.node.avObject));
+        if (geometryRecord.node.traverseActiveChildOnly) {
+            const std::size_t activeChildIndex =
+                static_cast<std::size_t>(geometryRecord.node.activeChildIndex);
+            if (activeChildIndex < geometryRecord.node.childRefs.size()) {
+                appendGeometry(
+                    records,
+                    geometryRecord.node.childRefs[activeChildIndex],
+                    childState,
+                    outResult,
+                    sawGeometry);
+            }
+            return;
+        }
         for (const std::int32_t childRef : geometryRecord.node.childRefs) {
             appendGeometry(records, childRef, childState, outResult, sawGeometry);
         }
@@ -806,6 +1152,7 @@ void appendGeometry(
 
     std::string diffuseTexturePath;
     bool alphaTest = false;
+    bool alphaBlend = false;
     for (const std::int32_t propertyRef : geometryRecord.geometry.avObject.propertyRefs) {
         if (propertyRef < 0 || static_cast<std::size_t>(propertyRef) >= records.size()) {
             continue;
@@ -821,6 +1168,22 @@ void appendGeometry(
             }
         } else if (propertyRecord.kind == RecordKind::AlphaProperty) {
             alphaTest = alphaTest || propertyRecord.alphaProperty.alphaTest;
+            alphaBlend = alphaBlend || propertyRecord.alphaProperty.alphaBlend;
+        }
+    }
+    if (alphaBlend && !alphaTest) {
+        // The imported static path is opaque/alpha-test only. Keep vanilla foliage
+        // usable as cutouts, but drop blend-only overlays such as stains/decals
+        // until imported statics have a dedicated transparent pass.
+        if (state.keepAlphaBlendOnlyParts ||
+            alphaBlendOnlyPartCanUseCutoutFallback(
+                outResult.mesh.name,
+                geometryRecord.geometry.avObject.name,
+                diffuseTexturePath)) {
+            alphaTest = true;
+        } else {
+            ++outResult.skippedAlphaBlendOnlyParts;
+            return;
         }
     }
     if (outResult.diffuseTexturePath.empty() && !diffuseTexturePath.empty()) {
@@ -832,12 +1195,80 @@ void appendGeometry(
     part.textureIndex = std::numeric_limits<std::uint32_t>::max();
     part.alphaTest = alphaTest;
 
+    std::vector<std::array<float, 3>> bakedSkinPositions;
+    std::vector<std::array<float, 3>> bakedSkinNormals;
+    std::vector<float> bakedSkinWeights;
+    if (state.bakeSkinBindPose &&
+        state.recordWorldTransforms != nullptr &&
+        geometryRecord.geometry.skinInstanceRef >= 0 &&
+        static_cast<std::size_t>(geometryRecord.geometry.skinInstanceRef) < records.size()) {
+        const NifRecord& skinInstanceRecord =
+            records[static_cast<std::size_t>(geometryRecord.geometry.skinInstanceRef)];
+        if (skinInstanceRecord.kind == RecordKind::SkinInstance &&
+            skinInstanceRecord.skinInstance.skinDataRef >= 0 &&
+            static_cast<std::size_t>(skinInstanceRecord.skinInstance.skinDataRef) < records.size()) {
+            const NifRecord& skinDataRecord =
+                records[static_cast<std::size_t>(skinInstanceRecord.skinInstance.skinDataRef)];
+            if (skinDataRecord.kind == RecordKind::SkinData) {
+                const std::size_t vertexCount = dataRecord.triShapeData.vertices.size();
+                bakedSkinPositions.assign(vertexCount, {0.0f, 0.0f, 0.0f});
+                bakedSkinNormals.assign(vertexCount, {0.0f, 0.0f, 0.0f});
+                bakedSkinWeights.assign(vertexCount, 0.0f);
+                const std::array<float, 16> skinMatrix =
+                    makeTransformMatrix(skinDataRecord.skinData.skinTransform);
+                const std::size_t boneCount = std::min(
+                    skinDataRecord.skinData.bones.size(),
+                    skinInstanceRecord.skinInstance.boneRefs.size());
+                for (std::size_t boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
+                    const std::int32_t boneRef = skinInstanceRecord.skinInstance.boneRefs[boneIndex];
+                    if (boneRef < 0 ||
+                        static_cast<std::size_t>(boneRef) >= state.recordWorldTransforms->size()) {
+                        continue;
+                    }
+                    const NifSkinDataRecord::BoneData& bone = skinDataRecord.skinData.bones[boneIndex];
+                    const std::array<float, 16> boneMatrix = multiplyMatrices(
+                        multiplyMatrices(
+                            (*state.recordWorldTransforms)[static_cast<std::size_t>(boneRef)],
+                            makeTransformMatrix(bone.transform)),
+                        skinMatrix);
+                    for (const NifSkinDataRecord::VertexWeight& weight : bone.weights) {
+                        if (weight.vertexIndex >= vertexCount || weight.weight <= 0.0f) {
+                            continue;
+                        }
+                        const std::size_t vertexIndex = weight.vertexIndex;
+                        const std::array<float, 3> position =
+                            transformPoint(boneMatrix, dataRecord.triShapeData.vertices[vertexIndex]);
+                        std::array<float, 3> normal{0.0f, 1.0f, 0.0f};
+                        if (vertexIndex < dataRecord.triShapeData.normals.size()) {
+                            normal = transformVector(boneMatrix, dataRecord.triShapeData.normals[vertexIndex]);
+                        }
+                        bakedSkinPositions[vertexIndex][0] += position[0] * weight.weight;
+                        bakedSkinPositions[vertexIndex][1] += position[1] * weight.weight;
+                        bakedSkinPositions[vertexIndex][2] += position[2] * weight.weight;
+                        bakedSkinNormals[vertexIndex][0] += normal[0] * weight.weight;
+                        bakedSkinNormals[vertexIndex][1] += normal[1] * weight.weight;
+                        bakedSkinNormals[vertexIndex][2] += normal[2] * weight.weight;
+                        bakedSkinWeights[vertexIndex] += weight.weight;
+                    }
+                }
+            }
+        }
+    }
+
     const std::uint32_t baseVertex = static_cast<std::uint32_t>(outResult.mesh.vertices.size());
     outResult.mesh.vertices.reserve(outResult.mesh.vertices.size() + dataRecord.triShapeData.vertices.size());
     for (std::size_t vertexIndex = 0; vertexIndex < dataRecord.triShapeData.vertices.size(); ++vertexIndex) {
         const auto& sourceVertex = dataRecord.triShapeData.vertices[vertexIndex];
         ImportedSceneVertex vertex{};
-        const std::array<float, 3> transformedPosition = transformPoint(worldTransform, sourceVertex);
+        std::array<float, 3> transformedPosition = transformPoint(worldTransform, sourceVertex);
+        if (vertexIndex < bakedSkinWeights.size() && bakedSkinWeights[vertexIndex] > 0.0001f) {
+            const float invWeight = 1.0f / bakedSkinWeights[vertexIndex];
+            transformedPosition = {
+                bakedSkinPositions[vertexIndex][0] * invWeight,
+                bakedSkinPositions[vertexIndex][1] * invWeight,
+                bakedSkinPositions[vertexIndex][2] * invWeight
+            };
+        }
         if (!isFiniteVector(transformedPosition)) {
             continue;
         }
@@ -847,17 +1278,24 @@ void appendGeometry(
         vertex.position[2] = enginePosition[2];
 
         std::array<float, 3> normal{0.0f, 1.0f, 0.0f};
-        if (vertexIndex < dataRecord.triShapeData.normals.size()) {
+        if (vertexIndex < bakedSkinWeights.size() && bakedSkinWeights[vertexIndex] > 0.0001f) {
+            const float invWeight = 1.0f / bakedSkinWeights[vertexIndex];
+            normal = {
+                bakedSkinNormals[vertexIndex][0] * invWeight,
+                bakedSkinNormals[vertexIndex][1] * invWeight,
+                bakedSkinNormals[vertexIndex][2] * invWeight
+            };
+        } else if (vertexIndex < dataRecord.triShapeData.normals.size()) {
             normal = transformVector(worldTransform, dataRecord.triShapeData.normals[vertexIndex]);
-            const float normalLength = std::sqrt(
-                normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
-            if (normalLength > 0.00001f) {
-                normal[0] /= normalLength;
-                normal[1] /= normalLength;
-                normal[2] /= normalLength;
-            } else {
-                normal = {0.0f, 1.0f, 0.0f};
-            }
+        }
+        const float normalLength = std::sqrt(
+            normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+        if (normalLength > 0.00001f) {
+            normal[0] /= normalLength;
+            normal[1] /= normalLength;
+            normal[2] /= normalLength;
+        } else {
+            normal = {0.0f, 1.0f, 0.0f};
         }
         const std::array<float, 3> engineNormal = toEngineSpace(normal);
         vertex.normal[0] = engineNormal[0];
@@ -890,12 +1328,200 @@ void appendGeometry(
     }
 }
 
-}  // namespace
+void copyMatrixToFloatArray(const std::array<float, 16>& matrix, float out[16]) {
+    std::copy(matrix.begin(), matrix.end(), out);
+}
 
-bool loadMorrowindStaticNif(
+void appendAnimatedGeometry(
+    const std::vector<NifRecord>& records,
+    std::int32_t recordIndex,
+    std::int32_t parentNodeIndex,
+    const GeometryTraversalState& state,
+    ImportedAnimatedNifResult& outResult,
+    std::vector<std::int32_t>& recordToAnimatedNodeIndex,
+    bool& sawGeometry
+) {
+    if (recordIndex < 0 || static_cast<std::size_t>(recordIndex) >= records.size()) {
+        return;
+    }
+    const NifRecord& record = records[static_cast<std::size_t>(recordIndex)];
+    if (record.kind == RecordKind::Node) {
+        std::array<float, 16> localTransform = makeTransformMatrix(record.node.avObject.transform);
+        if (state.discardRootTransform &&
+            !equalsIgnoreCaseAscii(record.node.avObject.name, "bip01")) {
+            localTransform = identityMatrix();
+        }
+
+        GeometryTraversalState childState = state;
+        childState.discardRootTransform = false;
+        childState.skipMeshes = childState.skipMeshes ||
+            nodeIsRootCollisionNode(record.node) ||
+            (!childState.includeHiddenGeometry && avObjectIsHidden(record.node.avObject));
+
+        std::int32_t animatedNodeIndex = parentNodeIndex;
+        if (!childState.skipMeshes) {
+            ImportedAnimatedNifNode node{};
+            node.name = record.node.avObject.name;
+            node.parentIndex = parentNodeIndex;
+            copyMatrixToFloatArray(localTransform, node.localTransform);
+            animatedNodeIndex = static_cast<std::int32_t>(outResult.nodes.size());
+            outResult.nodes.push_back(std::move(node));
+            recordToAnimatedNodeIndex[static_cast<std::size_t>(recordIndex)] = animatedNodeIndex;
+        }
+
+        if (record.node.traverseActiveChildOnly) {
+            const std::size_t activeChildIndex = static_cast<std::size_t>(record.node.activeChildIndex);
+            if (activeChildIndex < record.node.childRefs.size()) {
+                appendAnimatedGeometry(
+                    records,
+                    record.node.childRefs[activeChildIndex],
+                    animatedNodeIndex,
+                    childState,
+                    outResult,
+                    recordToAnimatedNodeIndex,
+                    sawGeometry);
+            }
+            return;
+        }
+        for (const std::int32_t childRef : record.node.childRefs) {
+            appendAnimatedGeometry(
+                records,
+                childRef,
+                animatedNodeIndex,
+                childState,
+                outResult,
+                recordToAnimatedNodeIndex,
+                sawGeometry);
+        }
+        return;
+    }
+    if (record.kind != RecordKind::Geometry || state.skipMeshes || parentNodeIndex < 0) {
+        return;
+    }
+
+    const std::array<float, 16> geometryTransform = makeTransformMatrix(record.geometry.avObject.transform);
+    const std::int32_t dataRef = record.geometry.dataRef;
+    if (dataRef < 0 || static_cast<std::size_t>(dataRef) >= records.size()) {
+        return;
+    }
+    const NifRecord& dataRecord = records[static_cast<std::size_t>(dataRef)];
+    if (dataRecord.kind != RecordKind::TriShapeData ||
+        dataRecord.triShapeData.indices.empty() ||
+        dataRecord.triShapeData.vertices.empty()) {
+        return;
+    }
+
+    std::string diffuseTexturePath;
+    bool alphaTest = false;
+    bool alphaBlend = false;
+    for (const std::int32_t propertyRef : record.geometry.avObject.propertyRefs) {
+        if (propertyRef < 0 || static_cast<std::size_t>(propertyRef) >= records.size()) {
+            continue;
+        }
+        const NifRecord& propertyRecord = records[static_cast<std::size_t>(propertyRef)];
+        if (propertyRecord.kind == RecordKind::TexturingProperty) {
+            const std::int32_t sourceRef = propertyRecord.texturingProperty.baseTextureSourceRef;
+            if (sourceRef >= 0 && static_cast<std::size_t>(sourceRef) < records.size()) {
+                const NifRecord& sourceRecord = records[static_cast<std::size_t>(sourceRef)];
+                if (sourceRecord.kind == RecordKind::SourceTexture && !sourceRecord.sourceTexture.filePath.empty()) {
+                    diffuseTexturePath = sourceRecord.sourceTexture.filePath;
+                }
+            }
+        } else if (propertyRecord.kind == RecordKind::AlphaProperty) {
+            alphaTest = alphaTest || propertyRecord.alphaProperty.alphaTest;
+            alphaBlend = alphaBlend || propertyRecord.alphaProperty.alphaBlend;
+        }
+    }
+    if (alphaBlend && !alphaTest) {
+        if (state.keepAlphaBlendOnlyParts ||
+            alphaBlendOnlyPartCanUseCutoutFallback(
+                outResult.name,
+                record.geometry.avObject.name,
+                diffuseTexturePath)) {
+            alphaTest = true;
+        } else {
+            ++outResult.skippedAlphaBlendOnlyParts;
+            return;
+        }
+    }
+    if (outResult.diffuseTexturePath.empty() && !diffuseTexturePath.empty()) {
+        outResult.diffuseTexturePath = diffuseTexturePath;
+    }
+
+    ImportedAnimatedNifPart part{};
+    part.firstIndex = static_cast<std::uint32_t>(outResult.indices.size());
+    part.textureIndex = std::numeric_limits<std::uint32_t>::max();
+    part.alphaTest = alphaTest;
+    part.nodeIndex = static_cast<std::uint32_t>(parentNodeIndex);
+
+    const std::uint32_t baseVertex = static_cast<std::uint32_t>(outResult.vertices.size());
+    outResult.vertices.reserve(outResult.vertices.size() + dataRecord.triShapeData.vertices.size());
+    for (std::size_t vertexIndex = 0; vertexIndex < dataRecord.triShapeData.vertices.size(); ++vertexIndex) {
+        const auto& sourceVertex = dataRecord.triShapeData.vertices[vertexIndex];
+        ImportedSceneVertex vertex{};
+        const std::array<float, 3> localPosition = transformPoint(geometryTransform, sourceVertex);
+        if (!isFiniteVector(localPosition)) {
+            continue;
+        }
+        const std::array<float, 3> enginePosition = toEngineSpace(localPosition);
+        vertex.position[0] = enginePosition[0];
+        vertex.position[1] = enginePosition[1];
+        vertex.position[2] = enginePosition[2];
+
+        std::array<float, 3> normal{0.0f, 1.0f, 0.0f};
+        if (vertexIndex < dataRecord.triShapeData.normals.size()) {
+            normal = transformVector(geometryTransform, dataRecord.triShapeData.normals[vertexIndex]);
+            const float normalLength = std::sqrt(
+                normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+            if (normalLength > 0.00001f) {
+                normal[0] /= normalLength;
+                normal[1] /= normalLength;
+                normal[2] /= normalLength;
+            } else {
+                normal = {0.0f, 1.0f, 0.0f};
+            }
+        }
+        const std::array<float, 3> engineNormal = toEngineSpace(normal);
+        vertex.normal[0] = engineNormal[0];
+        vertex.normal[1] = engineNormal[1];
+        vertex.normal[2] = engineNormal[2];
+
+        if (vertexIndex < dataRecord.triShapeData.uv0.size()) {
+            vertex.uv[0] = dataRecord.triShapeData.uv0[vertexIndex][0];
+            vertex.uv[1] = dataRecord.triShapeData.uv0[vertexIndex][1];
+        }
+        outResult.vertices.push_back(vertex);
+    }
+
+    outResult.indices.reserve(outResult.indices.size() + dataRecord.triShapeData.indices.size());
+    for (std::size_t indexOffset = 0; indexOffset + 2u < dataRecord.triShapeData.indices.size(); indexOffset += 3u) {
+        const std::uint32_t i0 = baseVertex + static_cast<std::uint32_t>(dataRecord.triShapeData.indices[indexOffset + 0u]);
+        const std::uint32_t i1 = baseVertex + static_cast<std::uint32_t>(dataRecord.triShapeData.indices[indexOffset + 1u]);
+        const std::uint32_t i2 = baseVertex + static_cast<std::uint32_t>(dataRecord.triShapeData.indices[indexOffset + 2u]);
+        outResult.indices.push_back(i0);
+        outResult.indices.push_back(i2);
+        outResult.indices.push_back(i1);
+    }
+    part.indexCount = static_cast<std::uint32_t>(outResult.indices.size()) - part.firstIndex;
+    if (part.indexCount != 0u) {
+        outResult.parts.push_back(part);
+        outResult.partDiffuseTexturePaths.push_back(diffuseTexturePath);
+        sawGeometry = true;
+    }
+}
+
+struct StaticNifLoadOptions {
+    bool includeHiddenGeometry = false;
+    bool keepAlphaBlendOnlyParts = false;
+    bool preserveRootTransform = false;
+    bool bakeSkinBindPose = false;
+};
+
+bool loadMorrowindStaticNifWithOptions(
     const std::filesystem::path& nifPath,
     ImportedNifResult& outResult,
-    std::string& outError
+    std::string& outError,
+    const StaticNifLoadOptions& options
 ) {
     outResult = ImportedNifResult{};
     outError.clear();
@@ -950,11 +1576,16 @@ bool loadMorrowindStaticNif(
             NifRecord record{};
             if (recordType == "NiNode" || recordType == "RootCollisionNode" ||
                 recordType == "NiBSAnimationNode" || recordType == "NiBSParticleNode" ||
-                recordType == "NiSwitchNode" || recordType == "NiLODNode" ||
                 recordType == "NiBillboardNode") {
                 record.kind = RecordKind::Node;
                 record.node = readNodeRecord(cursor);
                 record.node.isRootCollisionNode = (recordType == "RootCollisionNode");
+            } else if (recordType == "NiSwitchNode") {
+                record.kind = RecordKind::Node;
+                record.node = readSwitchNodeRecord(cursor);
+            } else if (recordType == "NiLODNode") {
+                record.kind = RecordKind::Node;
+                record.node = readLodNodeRecord(cursor);
             } else if (recordType == "NiTriShape" || recordType == "NiParticles" ||
                        recordType == "NiRotatingParticles") {
                 record.kind = RecordKind::Geometry;
@@ -988,6 +1619,8 @@ bool loadMorrowindStaticNif(
                 skipKeyframeControllerRecord(cursor);
             } else if (recordType == "NiGeomMorpherController") {
                 skipGeomMorpherControllerRecord(cursor);
+            } else if (recordType == "NiUVController") {
+                skipUvControllerRecord(cursor);
             } else if (recordType == "NiKeyframeData") {
                 skipKeyframeDataRecord(cursor);
             } else if (recordType == "NiMorphData") {
@@ -996,6 +1629,8 @@ bool loadMorrowindStaticNif(
                 skipParticleSystemControllerRecord(cursor);
             } else if (recordType == "NiParticleGrowFade") {
                 skipParticleModifierRecord(cursor, sizeof(float) * 2u);
+            } else if (recordType == "NiGravity") {
+                skipGravityRecord(cursor);
             } else if (recordType == "NiParticleColorModifier") {
                 cursor.readValue<std::int32_t>();
                 cursor.readValue<std::int32_t>();
@@ -1003,9 +1638,11 @@ bool loadMorrowindStaticNif(
             } else if (recordType == "NiColorData") {
                 skipColorDataRecord(cursor);
             } else if (recordType == "NiSkinInstance") {
-                skipSkinInstanceRecord(cursor);
+                record.kind = RecordKind::SkinInstance;
+                record.skinInstance = readSkinInstanceRecord(cursor);
             } else if (recordType == "NiSkinData") {
-                skipSkinDataRecord(cursor);
+                record.kind = RecordKind::SkinData;
+                record.skinData = readSkinDataRecord(cursor);
             } else if (recordType == "NiSkinPartition") {
                 skipSkinPartitionRecord(cursor);
             } else if (recordType == "NiMaterialProperty") {
@@ -1039,11 +1676,20 @@ bool loadMorrowindStaticNif(
         }
         const bool discardSingleRootZeroTransform =
             (rootRefs.size() == 1u && rootRefs.front() == 0);
+        const std::vector<std::array<float, 16>> recordWorldTransforms =
+            buildRecordWorldTransforms(
+                records,
+                rootRefs,
+                discardSingleRootZeroTransform && !options.preserveRootTransform);
         for (const std::int32_t rootRef : rootRefs) {
             GeometryTraversalState traversalState{};
             traversalState.parentTransform = identityMatrix();
+            traversalState.recordWorldTransforms = &recordWorldTransforms;
             traversalState.skipMeshes = false;
-            traversalState.discardRootTransform = discardSingleRootZeroTransform;
+            traversalState.discardRootTransform = discardSingleRootZeroTransform && !options.preserveRootTransform;
+            traversalState.includeHiddenGeometry = options.includeHiddenGeometry;
+            traversalState.keepAlphaBlendOnlyParts = options.keepAlphaBlendOnlyParts;
+            traversalState.bakeSkinBindPose = options.bakeSkinBindPose;
             appendGeometry(records, rootRef, traversalState, outResult, sawGeometry);
         }
         if (!sawGeometry) {
@@ -1058,6 +1704,250 @@ bool loadMorrowindStaticNif(
             outError = "record " + std::to_string(currentRecordIndex) + ": " + outError;
         }
         outResult = ImportedNifResult{};
+        return false;
+    }
+}
+
+}  // namespace
+
+bool loadMorrowindStaticNif(
+    const std::filesystem::path& nifPath,
+    ImportedNifResult& outResult,
+    std::string& outError
+) {
+    return loadMorrowindStaticNifWithOptions(nifPath, outResult, outError, StaticNifLoadOptions{});
+}
+
+bool loadMorrowindActorPartNif(
+    const std::filesystem::path& nifPath,
+    ImportedNifResult& outResult,
+    std::string& outError
+) {
+    StaticNifLoadOptions options{};
+    options.includeHiddenGeometry = true;
+    options.keepAlphaBlendOnlyParts = true;
+    options.preserveRootTransform = true;
+    options.bakeSkinBindPose = true;
+    return loadMorrowindStaticNifWithOptions(nifPath, outResult, outError, options);
+}
+
+bool loadMorrowindAnimatedNif(
+    const std::filesystem::path& nifPath,
+    ImportedAnimatedNifResult& outResult,
+    std::string& outError
+) {
+    outResult = ImportedAnimatedNifResult{};
+    outError.clear();
+
+    std::ifstream input(nifPath, std::ios::binary);
+    if (!input) {
+        outError = "Failed to open NIF file";
+        return false;
+    }
+
+    NifCursor cursor{};
+    input.seekg(0, std::ios::end);
+    const std::streamsize fileSize = input.tellg();
+    if (fileSize <= 0) {
+        outError = "NIF file is empty";
+        return false;
+    }
+    input.seekg(0, std::ios::beg);
+    cursor.bytes.resize(static_cast<std::size_t>(fileSize));
+    input.read(reinterpret_cast<char*>(cursor.bytes.data()), fileSize);
+    if (!input.good()) {
+        outError = "Failed to read NIF file";
+        return false;
+    }
+
+    std::string currentRecordType;
+    std::uint32_t currentRecordIndex = 0u;
+
+    try {
+        if (cursor.remaining() < kExpectedHeader.size()) {
+            throw std::runtime_error("Missing NIF header");
+        }
+        const std::string_view header(
+            reinterpret_cast<const char*>(cursor.bytes.data()),
+            kExpectedHeader.size());
+        if (header != kExpectedHeader) {
+            throw std::runtime_error("Unsupported NIF header");
+        }
+        cursor.offset += kExpectedHeader.size();
+
+        const std::uint32_t version = cursor.readValue<std::uint32_t>();
+        if (version != kExpectedVersion) {
+            throw std::runtime_error("Unsupported NIF version");
+        }
+
+        const std::uint32_t recordCount = cursor.readValue<std::uint32_t>();
+        std::vector<NifRecord> records(recordCount);
+        for (std::uint32_t recordIndex = 0; recordIndex < recordCount; ++recordIndex) {
+            currentRecordIndex = recordIndex;
+            const std::string recordType = cursor.readSizedString();
+            currentRecordType = recordType;
+            NifRecord record{};
+            if (recordType == "NiNode" || recordType == "RootCollisionNode" ||
+                recordType == "NiBSAnimationNode" || recordType == "NiBSParticleNode" ||
+                recordType == "NiBillboardNode") {
+                record.kind = RecordKind::Node;
+                record.node = readNodeRecord(cursor);
+                record.node.isRootCollisionNode = (recordType == "RootCollisionNode");
+            } else if (recordType == "NiSwitchNode") {
+                record.kind = RecordKind::Node;
+                record.node = readSwitchNodeRecord(cursor);
+            } else if (recordType == "NiLODNode") {
+                record.kind = RecordKind::Node;
+                record.node = readLodNodeRecord(cursor);
+            } else if (recordType == "NiTriShape" || recordType == "NiParticles" ||
+                       recordType == "NiRotatingParticles") {
+                record.kind = RecordKind::Geometry;
+                record.geometry = readGeometryRecord(cursor);
+            } else if (recordType == "NiTriShapeData") {
+                record.kind = RecordKind::TriShapeData;
+                record.triShapeData = readTriShapeDataRecord(cursor);
+            } else if (recordType == "NiTriStrips") {
+                record.kind = RecordKind::Geometry;
+                record.geometry = readGeometryRecord(cursor);
+            } else if (recordType == "NiTriStripsData") {
+                record.kind = RecordKind::TriShapeData;
+                record.triShapeData = readTriStripsDataRecord(cursor);
+            } else if (recordType == "NiRotatingParticlesData") {
+                record.kind = RecordKind::ParticleData;
+                skipRotatingParticlesDataRecord(cursor);
+            } else if (recordType == "NiTexturingProperty") {
+                record.kind = RecordKind::TexturingProperty;
+                record.texturingProperty = readTexturingPropertyRecord(cursor);
+            } else if (recordType == "NiSourceTexture") {
+                record.kind = RecordKind::SourceTexture;
+                record.sourceTexture = readSourceTextureRecord(cursor);
+            } else if (recordType == "NiAlphaProperty") {
+                record.kind = RecordKind::AlphaProperty;
+                record.alphaProperty = readAlphaPropertyRecord(cursor);
+            } else if (recordType == "NiStringExtraData") {
+                skipStringExtraDataRecord(cursor);
+            } else if (recordType == "NiTextKeyExtraData") {
+                skipTextKeyExtraDataRecord(cursor);
+            } else if (recordType == "NiKeyframeController") {
+                record.kind = RecordKind::KeyframeController;
+                record.keyframeController = readKeyframeControllerRecord(cursor);
+            } else if (recordType == "NiGeomMorpherController") {
+                skipGeomMorpherControllerRecord(cursor);
+            } else if (recordType == "NiUVController") {
+                skipUvControllerRecord(cursor);
+            } else if (recordType == "NiKeyframeData") {
+                record.kind = RecordKind::KeyframeData;
+                record.keyframeData = readKeyframeDataRecord(cursor);
+            } else if (recordType == "NiMorphData") {
+                skipMorphDataRecord(cursor);
+            } else if (recordType == "NiParticleSystemController") {
+                skipParticleSystemControllerRecord(cursor);
+            } else if (recordType == "NiParticleGrowFade") {
+                skipParticleModifierRecord(cursor, sizeof(float) * 2u);
+            } else if (recordType == "NiGravity") {
+                skipGravityRecord(cursor);
+            } else if (recordType == "NiParticleColorModifier") {
+                cursor.readValue<std::int32_t>();
+                cursor.readValue<std::int32_t>();
+                cursor.readValue<std::int32_t>();
+            } else if (recordType == "NiColorData") {
+                skipColorDataRecord(cursor);
+            } else if (recordType == "NiSkinInstance") {
+                record.kind = RecordKind::SkinInstance;
+                record.skinInstance = readSkinInstanceRecord(cursor);
+            } else if (recordType == "NiSkinData") {
+                record.kind = RecordKind::SkinData;
+                record.skinData = readSkinDataRecord(cursor);
+            } else if (recordType == "NiSkinPartition") {
+                skipSkinPartitionRecord(cursor);
+            } else if (recordType == "NiMaterialProperty") {
+                skipSimplePropertyRecord(cursor, sizeof(std::uint16_t) + (sizeof(float) * 14u));
+            } else if (recordType == "NiVertexColorProperty") {
+                skipSimplePropertyRecord(cursor, sizeof(std::uint16_t) + sizeof(std::uint32_t) * 2u);
+            } else if (recordType == "NiZBufferProperty" || recordType == "NiSpecularProperty" ||
+                       recordType == "NiWireframeProperty") {
+                skipSimplePropertyRecord(cursor, sizeof(std::uint16_t));
+            } else {
+                throw std::runtime_error("Unsupported NIF record type " + recordType);
+            }
+            records[recordIndex] = std::move(record);
+        }
+
+        outResult.name = nifPath.filename().string();
+        bool sawGeometry = false;
+        std::vector<std::int32_t> rootRefs;
+        if (cursor.remaining() >= sizeof(std::uint32_t)) {
+            const std::uint32_t rootCount = cursor.readValue<std::uint32_t>();
+            if (rootCount > (cursor.remaining() / sizeof(std::int32_t))) {
+                throw std::runtime_error("Invalid NIF root list");
+            }
+            rootRefs.reserve(rootCount);
+            for (std::uint32_t rootIndex = 0; rootIndex < rootCount; ++rootIndex) {
+                rootRefs.push_back(cursor.readValue<std::int32_t>());
+            }
+        }
+        if (rootRefs.empty()) {
+            rootRefs.push_back(0);
+        }
+
+        std::vector<std::int32_t> recordToAnimatedNodeIndex(records.size(), -1);
+        const bool discardSingleRootZeroTransform =
+            (rootRefs.size() == 1u && rootRefs.front() == 0);
+        for (const std::int32_t rootRef : rootRefs) {
+            GeometryTraversalState traversalState{};
+            traversalState.parentTransform = identityMatrix();
+            traversalState.skipMeshes = false;
+            traversalState.discardRootTransform = discardSingleRootZeroTransform;
+            appendAnimatedGeometry(
+                records,
+                rootRef,
+                -1,
+                traversalState,
+                outResult,
+                recordToAnimatedNodeIndex,
+                sawGeometry);
+        }
+        if (!sawGeometry) {
+            throw std::runtime_error("NIF did not contain supported animated geometry");
+        }
+
+        for (const NifRecord& record : records) {
+            if (record.kind != RecordKind::KeyframeController ||
+                record.keyframeController.time.targetRef < 0 ||
+                record.keyframeController.dataRef < 0 ||
+                static_cast<std::size_t>(record.keyframeController.time.targetRef) >= recordToAnimatedNodeIndex.size() ||
+                static_cast<std::size_t>(record.keyframeController.dataRef) >= records.size()) {
+                continue;
+            }
+            const std::int32_t animatedNodeIndex =
+                recordToAnimatedNodeIndex[static_cast<std::size_t>(record.keyframeController.time.targetRef)];
+            const NifRecord& dataRecord = records[static_cast<std::size_t>(record.keyframeController.dataRef)];
+            if (animatedNodeIndex < 0 || dataRecord.kind != RecordKind::KeyframeData) {
+                continue;
+            }
+            ImportedNifNodeAnimation animation{};
+            animation.nodeIndex = static_cast<std::uint32_t>(animatedNodeIndex);
+            animation.startTime = record.keyframeController.time.startTime;
+            animation.stopTime = record.keyframeController.time.stopTime;
+            animation.frequency = record.keyframeController.time.frequency;
+            animation.phase = record.keyframeController.time.phase;
+            animation.translationKeys = dataRecord.keyframeData.translationKeys;
+            animation.rotationKeys = dataRecord.keyframeData.rotationKeys;
+            animation.scaleKeys = dataRecord.keyframeData.scaleKeys;
+            animation.xRotationKeys = dataRecord.keyframeData.xRotationKeys;
+            animation.yRotationKeys = dataRecord.keyframeData.yRotationKeys;
+            animation.zRotationKeys = dataRecord.keyframeData.zRotationKeys;
+            outResult.nodeAnimations.push_back(std::move(animation));
+        }
+        return true;
+    } catch (const std::exception& e) {
+        outError = e.what();
+        if (!currentRecordType.empty()) {
+            outError = "record " + std::to_string(currentRecordIndex) + " (" + currentRecordType + "): " + outError;
+        } else if (currentRecordIndex != 0u) {
+            outError = "record " + std::to_string(currentRecordIndex) + ": " + outError;
+        }
+        outResult = ImportedAnimatedNifResult{};
         return false;
     }
 }

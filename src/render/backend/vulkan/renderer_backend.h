@@ -113,7 +113,7 @@ public:
 
     struct SkyDebugSettings {
         float sunYawDegrees = -157.5f;
-        float sunPitchDegrees = -8.0f;
+        float sunPitchDegrees = -13.0f;
         float rayleighStrength = 1.0f;
         float mieStrength = 1.0f;
         float mieAnisotropy = 0.55f;
@@ -157,16 +157,17 @@ public:
         float depthOfFieldFocusRange = 18.0f;
         float depthOfFieldMaxRadiusPixels = 5.0f;
         float depthOfFieldNearBlurScale = 1.25f;
+        bool volumetricFogEnabled = true;
         float volumetricFogDensity = 0.0032f;
         float volumetricFogHeightFalloff = 0.0065f;
         float volumetricFogBaseHeight = 42.0f;
         float volumetricSunScattering = 1.05f;
         float waterAnimationSpeed = 1.05f;
-        float waterNormalStrength = 1.25f;
-        float waterReflectionStrength = 2.45f;
-        float waterRefractionDecay = 0.70f;
-        float waterRefractionStrength = 1.65f;
-        float waterRefractionDistortionPixels = 96.0f;
+        float waterNormalStrength = 0.82f;
+        float waterReflectionStrength = 2.10f;
+        float waterRefractionDecay = 0.92f;
+        float waterRefractionStrength = 1.35f;
+        float waterRefractionDistortionPixels = 54.0f;
         int waterDebugMode = 0;
         bool autoSunriseTuning = true;
         float autoSunriseBlend = 1.0f;
@@ -1134,8 +1135,14 @@ private:
     bool m_debugImportedFlatShading = false;
     bool m_debugImportedWaterSolid = false;
     bool m_importedSceneInteriorMode = false;
+    std::uint32_t m_debugImportedPageRangeCount = 0;
+    std::uint32_t m_debugImportedMainVisiblePageCount = 0;
+    std::uint32_t m_debugImportedMainVisibleDrawCount = 0;
+    std::array<std::uint32_t, kShadowCascadeCount> m_debugImportedShadowVisiblePageCounts{};
+    std::array<std::uint32_t, kShadowCascadeCount> m_debugImportedShadowVisibleDrawCounts{};
     bool m_debugImportedLightsEnabled = true;
     float m_debugImportedLightIntensity = 1.65f;
+    float m_debugImportedOutdoorLightStrength = 1.0f;
     float m_debugImportedLightRadiusScale = 3.0f;
     std::uint32_t m_debugImportedLightSelectedCount = 0;
     std::uint32_t m_debugImportedGiTriangleCount = 0;

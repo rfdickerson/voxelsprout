@@ -26,7 +26,7 @@ namespace odai::importer {
 namespace {
 
 constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
-constexpr std::uint32_t kImportedSceneVersion = 16u;
+constexpr std::uint32_t kImportedSceneVersion = 20u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
 constexpr std::uint32_t kMorrowindDoorCacheMagic = 0x524F4442u;  // BDOR
 constexpr std::uint32_t kMorrowindDoorCacheVersion = 1u;
@@ -36,6 +36,9 @@ constexpr int kLandTextureSize = 16;
 constexpr float kCellSizeUnits = 8192.0f;
 constexpr float kHeightScale = 8.0f;
 constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
+constexpr std::uint32_t kImportedSceneMaterialFlagSiltStrider = 1u << 1u;
+constexpr std::uint32_t kImportedSceneMaterialFlagSiltStriderMaskShift = 8u;
+constexpr std::uint32_t kImportedSceneMaterialFlagSiltStriderSide = 1u << 16u;
 constexpr float kRiverAuditMaxDistance = 1024.0f;
 constexpr std::uint32_t kTerrainCompositeTextureSize = 1024u;
 constexpr std::uint32_t kTes3LightFlagNegative = 0x004u;
@@ -229,6 +232,19 @@ PackedRenderColor packedRenderColorFromHash(std::string_view key) {
     color.g = 0.28f + (static_cast<float>((hash >> 8) & 0xffu) / 255.0f) * 0.52f;
     color.b = 0.25f + (static_cast<float>((hash >> 16) & 0xffu) / 255.0f) * 0.50f;
     return color;
+}
+
+std::uint32_t siltStriderAnimationFlags(const ImportedSceneVertex& vertex) {
+    const float lateral = std::abs(vertex.position[0]);
+    const float lowMask = std::clamp((125.0f - vertex.position[1]) / 320.0f, 0.0f, 1.0f);
+    const float outerMask = std::clamp((lateral - 18.0f) / 85.0f, 0.0f, 1.0f);
+    const float influence = std::clamp(lowMask * outerMask, 0.0f, 1.0f);
+    const std::uint32_t packedInfluence = static_cast<std::uint32_t>((influence * 255.0f) + 0.5f);
+    const std::uint32_t side =
+        vertex.position[0] >= 0.0f ? kImportedSceneMaterialFlagSiltStriderSide : 0u;
+    return kImportedSceneMaterialFlagSiltStrider |
+        (packedInfluence << kImportedSceneMaterialFlagSiltStriderMaskShift) |
+        side;
 }
 
 PackedRenderColor packedTerrainColor(float height) {
@@ -928,6 +944,8 @@ std::string readSizedString(std::istream& input, std::uint32_t size) {
 }
 
 struct ParsedCellRef {
+    std::uint32_t refNum = 0u;
+    bool hasRefNum = false;
     std::string refId;
     float position[3] = {};
     float rotation[3] = {};
@@ -937,6 +955,7 @@ struct ParsedCellRef {
     float destinationPosition[3] = {};
     float destinationRotation[3] = {};
     bool deleted = false;
+    bool moved = false;
 };
 
 struct ParsedCell {
@@ -1018,8 +1037,9 @@ bool parseCellRefs(std::istream& input, std::uint32_t recordSize, ParsedCell& ou
     std::uint32_t bytesLeft = recordSize;
     ParsedCellRef currentRef{};
     bool inRef = false;
+    bool nextFrmrIsMovedRef = false;
     auto flushRef = [&]() {
-        if (inRef && !currentRef.refId.empty() && !currentRef.deleted) {
+        if (inRef && !currentRef.moved && (!currentRef.refId.empty() || currentRef.hasRefNum)) {
             outCell.refs.push_back(currentRef);
         }
         currentRef = ParsedCellRef{};
@@ -1051,9 +1071,22 @@ bool parseCellRefs(std::istream& input, std::uint32_t recordSize, ParsedCell& ou
         } else if (subName == "FRMR") {
             flushRef();
             inRef = true;
-            input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
+            currentRef.moved = nextFrmrIsMovedRef;
+            nextFrmrIsMovedRef = false;
+            if (subHeader.size >= sizeof(std::uint32_t)) {
+                readValue(input, currentRef.refNum);
+                currentRef.hasRefNum = true;
+                if (subHeader.size > sizeof(std::uint32_t)) {
+                    input.seekg(
+                        static_cast<std::streamoff>(subHeader.size - sizeof(std::uint32_t)),
+                        std::ios::cur);
+                }
+            } else {
+                input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
+            }
         } else if (subName == "MVRF") {
             flushRef();
+            nextFrmrIsMovedRef = true;
             input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
         } else if (subName == "CNDT") {
             input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
@@ -1685,6 +1718,107 @@ std::unordered_map<std::string, std::filesystem::path> buildCaseInsensitiveFileI
     return index;
 }
 
+std::string parsedCellMergeKey(const ParsedCell& cell) {
+    if (cell.exterior) {
+        return "exterior:" + std::to_string(cell.gridX) + "," + std::to_string(cell.gridY);
+    }
+    return "interior:" + lowerCopy(cell.name);
+}
+
+std::string parsedCellRefMergeKey(const ParsedCell& cell, const ParsedCellRef& ref) {
+    return parsedCellMergeKey(cell) + ":ref:" + std::to_string(ref.refNum);
+}
+
+std::vector<ParsedCell> compactParsedCells(const std::vector<ParsedCell>& cells) {
+    std::vector<ParsedCell> compactedCells;
+    std::unordered_map<std::string, std::size_t> cellIndexByKey;
+    std::unordered_map<std::string, std::pair<std::size_t, std::size_t>> refIndexByKey;
+
+    for (const ParsedCell& cell : cells) {
+        const std::string cellKey = parsedCellMergeKey(cell);
+        const auto [cellIt, insertedCell] =
+            cellIndexByKey.emplace(cellKey, compactedCells.size());
+        if (insertedCell) {
+            ParsedCell compactedCell{};
+            compactedCell.name = cell.name;
+            compactedCell.gridX = cell.gridX;
+            compactedCell.gridY = cell.gridY;
+            compactedCell.exterior = cell.exterior;
+            compactedCells.push_back(std::move(compactedCell));
+        }
+        ParsedCell& outCell = compactedCells[cellIt->second];
+        for (const ParsedCellRef& ref : cell.refs) {
+            if (ref.moved) {
+                continue;
+            }
+            if (!ref.hasRefNum) {
+                if (!ref.deleted && !ref.refId.empty()) {
+                    outCell.refs.push_back(ref);
+                }
+                continue;
+            }
+
+            const std::string refKey = parsedCellRefMergeKey(cell, ref);
+            const auto existing = refIndexByKey.find(refKey);
+            if (ref.deleted) {
+                if (existing != refIndexByKey.end()) {
+                    ParsedCell& existingCell = compactedCells[existing->second.first];
+                    if (existing->second.second < existingCell.refs.size()) {
+                        existingCell.refs[existing->second.second].deleted = true;
+                    }
+                }
+                continue;
+            }
+            if (ref.refId.empty()) {
+                continue;
+            }
+            if (existing != refIndexByKey.end()) {
+                ParsedCell& existingCell = compactedCells[existing->second.first];
+                if (existing->second.second < existingCell.refs.size()) {
+                    existingCell.refs[existing->second.second] = ref;
+                }
+                continue;
+            }
+
+            const std::size_t refIndex = outCell.refs.size();
+            outCell.refs.push_back(ref);
+            refIndexByKey.emplace(refKey, std::pair<std::size_t, std::size_t>{cellIt->second, refIndex});
+        }
+    }
+
+    for (ParsedCell& cell : compactedCells) {
+        cell.refs.erase(
+            std::remove_if(
+                cell.refs.begin(),
+                cell.refs.end(),
+                [](const ParsedCellRef& ref) {
+                    return ref.deleted || ref.moved || ref.refId.empty();
+                }),
+            cell.refs.end());
+    }
+    return compactedCells;
+}
+
+std::int64_t quantizeImportFloat(float value, float scale) {
+    return static_cast<std::int64_t>(std::llround(static_cast<double>(value) * static_cast<double>(scale)));
+}
+
+std::string duplicateStaticInstanceKey(const std::string& normalizedModelPath, const ParsedCellRef& ref) {
+    std::string key = normalizedModelPath;
+    auto appendQuantized = [&](float value, float scale) {
+        key.push_back('|');
+        key += std::to_string(quantizeImportFloat(value, scale));
+    };
+    appendQuantized(ref.position[0], 100.0f);
+    appendQuantized(ref.position[1], 100.0f);
+    appendQuantized(ref.position[2], 100.0f);
+    appendQuantized(ref.rotation[0], 100000.0f);
+    appendQuantized(ref.rotation[1], 100000.0f);
+    appendQuantized(ref.rotation[2], 100000.0f);
+    appendQuantized(ref.scale, 100000.0f);
+    return key;
+}
+
 ImportedScene buildSceneFromParsedData(
     const std::filesystem::path& morrowindDataFilesPath,
     const std::unordered_map<std::uint32_t, std::string>& landscapeTextureByIndex,
@@ -1696,6 +1830,7 @@ ImportedScene buildSceneFromParsedData(
 ) {
     ImportedScene scene{};
     scene.sourceTag = std::move(sourceTag);
+    const std::vector<ParsedCell> compactedCells = compactParsedCells(cells);
     scene.landscapeCells.reserve(lands.size());
     for (const ParsedLand& land : lands) {
         ImportedSceneLandscapeCell cell{};
@@ -1861,9 +1996,15 @@ ImportedScene buildSceneFromParsedData(
         getEnvironmentVariable("ODAI_IMPORT_DEBUG_MODEL_FILTER").value_or(""));
     std::size_t attemptedModelImports = 0;
     std::size_t successfulModelImports = 0;
+    std::size_t skippedAlphaBlendOnlyParts = 0;
+    std::size_t duplicatePlacedInstanceSkips = 0;
+    std::unordered_set<std::string> placedStaticInstanceKeys;
 
-    for (const ParsedCell& cell : cells) {
+    for (const ParsedCell& cell : compactedCells) {
         for (const ParsedCellRef& ref : cell.refs) {
+            if (ref.deleted || ref.moved) {
+                continue;
+            }
             const std::string normalizedRefId = lowerCopy(ref.refId);
             const auto modelIt = modelPathById.find(normalizedRefId);
             if (isMorrowindEditorMarkerId(normalizedRefId) ||
@@ -1909,6 +2050,7 @@ ImportedScene buildSceneFromParsedData(
                         ImportedNifResult nifResult{};
                         std::string nifError;
                         if (loadMorrowindStaticNif(fileIt->second, nifResult, nifError)) {
+                            skippedAlphaBlendOnlyParts += nifResult.skippedAlphaBlendOnlyParts;
                             for (std::size_t partIndex = 0; partIndex < nifResult.mesh.parts.size(); ++partIndex) {
                                 ImportedSceneMeshPart& part = nifResult.mesh.parts[partIndex];
                                 std::string texturePath = nifResult.diffuseTexturePath;
@@ -1936,6 +2078,12 @@ ImportedScene buildSceneFromParsedData(
                 }
 
                 if (haveImportedMesh) {
+                    const std::string duplicateKey = duplicateStaticInstanceKey(normalizedModelPath, ref);
+                    if (!placedStaticInstanceKeys.insert(duplicateKey).second) {
+                        ++duplicatePlacedInstanceSkips;
+                        continue;
+                    }
+
                     ImportedSceneInstance instance{};
                     instance.meshIndex = importedMeshIndex;
                     const std::array<float, 16> transform = buildInstanceTransform(ref);
@@ -2051,6 +2199,14 @@ ImportedScene buildSceneFromParsedData(
     std::cerr << "[morrowind cooker] Texture decode: "
               << loadedTextureCount << " succeeded out of "
               << scene.textures.size() << " referenced textures\n";
+    if (duplicatePlacedInstanceSkips != 0u) {
+        std::cerr << "[morrowind cooker] Static duplicate placement skips: "
+                  << duplicatePlacedInstanceSkips << "\n";
+    }
+    if (skippedAlphaBlendOnlyParts != 0u) {
+        std::cerr << "[morrowind cooker] Static alpha-blend-only parts skipped: "
+                  << skippedAlphaBlendOnlyParts << "\n";
+    }
     if (!failedMeshReasonByModelPath.empty()) {
         for (const auto& [reason, count] : failedMeshCountByReason) {
             std::cerr << "[morrowind cooker] Static mesh failure bucket: "
@@ -2100,6 +2256,8 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
         if (mesh.vertices.empty() || mesh.indices.empty()) {
             return;
         }
+        const bool animateSiltStrider =
+            lowerCopy(mesh.name).find("siltstrider") != std::string::npos;
         const std::uint32_t firstIndex = static_cast<std::uint32_t>(scene.packedIndices.size());
         const auto appendVertex = [&](const ImportedSceneVertex& srcVertex,
                                       std::uint32_t textureIndex,
@@ -2129,7 +2287,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             dstVertex.uv[0] = srcVertex.uv[0];
             dstVertex.uv[1] = srcVertex.uv[1];
             dstVertex.textureIndex = textureIndex;
-            dstVertex.flags = flags;
+            dstVertex.flags = flags | (animateSiltStrider ? siltStriderAnimationFlags(srcVertex) : 0u);
             const std::uint32_t packedVertexIndex = static_cast<std::uint32_t>(scene.packedVertices.size());
             scene.packedVertices.push_back(dstVertex);
             expandBounds(dstVertex);
@@ -2922,11 +3080,95 @@ bool exportImportedSceneTerrainObj(const ImportedScene& scene, const std::filesy
     return true;
 }
 
-bool cookMorrowindBalmoraScene(
+std::uint64_t hashMorrowindExteriorCellSet(std::vector<std::pair<int, int>> cells) {
+    std::sort(cells.begin(), cells.end());
+    std::uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&](std::uint32_t value) {
+        for (int byteIndex = 0; byteIndex < 4; ++byteIndex) {
+            hash ^= static_cast<std::uint8_t>((value >> (byteIndex * 8)) & 0xffu);
+            hash *= 1099511628211ull;
+        }
+    };
+    for (const std::pair<int, int>& cell : cells) {
+        mix(static_cast<std::uint32_t>(cell.first));
+        mix(static_cast<std::uint32_t>(cell.second));
+    }
+    return hash;
+}
+
+std::filesystem::path morrowindExteriorRegionCachePath(
+    const std::filesystem::path& cacheRoot,
+    const std::vector<std::pair<int, int>>& cells
+) {
+    return cacheRoot / "regions" / ("exterior_" + std::to_string(hashMorrowindExteriorCellSet(cells)) + ".bin");
+}
+
+void refreshImportedSceneSourceCounts(ImportedScene& scene) {
+    scene.sourceTextureCount = static_cast<std::uint32_t>(scene.textures.size());
+    scene.sourceMeshCount = static_cast<std::uint32_t>(scene.meshes.size());
+    scene.sourceInstanceCount = static_cast<std::uint32_t>(scene.instances.size());
+    scene.sourceLandscapeCellCount = static_cast<std::uint32_t>(scene.landscapeCells.size());
+    scene.sourceWaterPatchCount = static_cast<std::uint32_t>(scene.waterPatches.size());
+    scene.sourceLightCount = static_cast<std::uint32_t>(scene.lights.size());
+    scene.sourceUnresolvedRefCount = static_cast<std::uint32_t>(scene.unresolvedRefs.size());
+}
+
+enum class MorrowindExteriorCacheStatus {
+    Missing,
+    Stale,
+    Fresh,
+    TimeError
+};
+
+MorrowindExteriorCacheStatus checkMorrowindExteriorCacheFreshness(
+    const std::filesystem::path& esmPath,
+    const std::filesystem::path& cachePath,
+    std::string& outReason
+) {
+    std::error_code error;
+    if (!std::filesystem::exists(cachePath, error)) {
+        outReason = error ? ("exists_error: " + error.message()) : "missing";
+        return error ? MorrowindExteriorCacheStatus::TimeError : MorrowindExteriorCacheStatus::Missing;
+    }
+    const std::filesystem::file_time_type cacheTime = std::filesystem::last_write_time(cachePath, error);
+    if (error) {
+        outReason = "cache_time_error: " + error.message();
+        return MorrowindExteriorCacheStatus::TimeError;
+    }
+    const std::filesystem::file_time_type esmTime = std::filesystem::last_write_time(esmPath, error);
+    if (error) {
+        outReason = "esm_time_error: " + error.message();
+        return MorrowindExteriorCacheStatus::TimeError;
+    }
+    if (cacheTime < esmTime) {
+        outReason = "stale";
+        return MorrowindExteriorCacheStatus::Stale;
+    }
+    outReason = "fresh";
+    return MorrowindExteriorCacheStatus::Fresh;
+}
+
+bool cookMorrowindExteriorRegionScene(
     const std::filesystem::path& morrowindDataFilesPath,
-    MorrowindBalmoraCookResult& outResult
+    const MorrowindExteriorCellSelection& selection,
+    MorrowindExteriorCookResult& outResult
 ) {
     g_lastImportedSceneError.clear();
+    outResult = {};
+
+    std::vector<std::string> wantedCellNames;
+    wantedCellNames.reserve(selection.exteriorCellNames.size());
+    for (const std::string& name : selection.exteriorCellNames) {
+        const std::string normalizedName = lowerCopy(name);
+        if (!normalizedName.empty()) {
+            wantedCellNames.push_back(normalizedName);
+        }
+    }
+    if (wantedCellNames.empty() && selection.explicitCells.empty()) {
+        setLastImportedSceneError("Exterior region selection did not include any named or explicit cells");
+        return false;
+    }
+
     const std::filesystem::path esmPath = morrowindDataFilesPath / "Morrowind.esm";
     std::cerr << "[morrowind cooker] Data Files: " << morrowindDataFilesPath << "\n";
     std::cerr << "[morrowind cooker] ESM: " << esmPath << "\n";
@@ -2940,7 +3182,16 @@ bool cookMorrowindBalmoraScene(
     std::unordered_map<std::string, std::string> modelPathById;
     std::unordered_map<std::string, ParsedLightRecord> lightById;
     std::unordered_map<std::uint32_t, std::string> landscapeTextureByIndex;
-    std::vector<std::pair<int, int>> balmoraCells;
+    std::vector<std::vector<std::pair<int, int>>> anchorsByName(wantedCellNames.size());
+
+    const auto cellNameMatches = [](std::string_view normalizedCellName, std::string_view wantedName) {
+        if (normalizedCellName == wantedName) {
+            return true;
+        }
+        return normalizedCellName.size() > wantedName.size() &&
+            normalizedCellName.substr(0u, wantedName.size()) == wantedName &&
+            normalizedCellName[wantedName.size()] == ',';
+    };
 
     Tes3RecordHeader header{};
     if (!readRecordHeader(pass1, header) || fourCcToString(header.name) != "TES3") {
@@ -2964,10 +3215,15 @@ bool cookMorrowindBalmoraScene(
                     "Failed to parse CELL record during pass 1 at record " + std::to_string(pass1RecordIndex));
                 return false;
             }
-            if (cell.exterior && lowerCopy(cell.name) == "balmora") {
-                balmoraCells.emplace_back(cell.gridX, cell.gridY);
-                std::cerr << "[morrowind cooker] Found Balmora exterior cell at ("
-                          << cell.gridX << ", " << cell.gridY << ")\n";
+            if (cell.exterior) {
+                const std::string normalizedCellName = lowerCopy(cell.name);
+                for (std::size_t nameIndex = 0; nameIndex < wantedCellNames.size(); ++nameIndex) {
+                    if (cellNameMatches(normalizedCellName, wantedCellNames[nameIndex])) {
+                        anchorsByName[nameIndex].emplace_back(cell.gridX, cell.gridY);
+                        std::cerr << "[morrowind cooker] Found exterior anchor '" << cell.name
+                                  << "' at (" << cell.gridX << ", " << cell.gridY << ")\n";
+                    }
+                }
             }
         } else if (recordName == "LTEX") {
             std::uint32_t landscapeIndex = 0;
@@ -3014,23 +3270,76 @@ bool cookMorrowindBalmoraScene(
         }
     }
 
-    if (balmoraCells.empty()) {
-        setLastImportedSceneError("Did not find any exterior CELL records named Balmora");
-        return false;
+    std::vector<std::pair<int, int>> anchorCells;
+    std::vector<std::pair<int, int>> corridorAnchorCells;
+    for (std::size_t nameIndex = 0; nameIndex < wantedCellNames.size(); ++nameIndex) {
+        if (anchorsByName[nameIndex].empty()) {
+            setLastImportedSceneError("Did not find any exterior CELL records matching " + wantedCellNames[nameIndex]);
+            return false;
+        }
+        int sumX = 0;
+        int sumY = 0;
+        for (const std::pair<int, int>& cell : anchorsByName[nameIndex]) {
+            sumX += cell.first;
+            sumY += cell.second;
+        }
+        corridorAnchorCells.emplace_back(
+            static_cast<int>(std::lround(static_cast<double>(sumX) / static_cast<double>(anchorsByName[nameIndex].size()))),
+            static_cast<int>(std::lround(static_cast<double>(sumY) / static_cast<double>(anchorsByName[nameIndex].size()))));
+        anchorCells.insert(anchorCells.end(), anchorsByName[nameIndex].begin(), anchorsByName[nameIndex].end());
     }
+    anchorCells.insert(anchorCells.end(), selection.explicitCells.begin(), selection.explicitCells.end());
+    corridorAnchorCells.insert(
+        corridorAnchorCells.end(),
+        selection.explicitCells.begin(),
+        selection.explicitCells.end());
 
     std::cerr << "[morrowind cooker] Pass 1 complete: "
-              << balmoraCells.size() << " Balmora cells, "
+              << anchorCells.size() << " anchor cells, "
               << landscapeTextureByIndex.size() << " landscape textures, "
               << modelPathById.size() << " model records, "
               << lightById.size() << " light records\n";
 
     std::set<std::pair<int, int>> includedCellsSet;
-    for (const std::pair<int, int>& cell : balmoraCells) {
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
+    const auto includeCellWithRadius = [&](const std::pair<int, int>& cell, int radius) {
+        const int clampedRadius = std::max(0, radius);
+        for (int dy = -clampedRadius; dy <= clampedRadius; ++dy) {
+            for (int dx = -clampedRadius; dx <= clampedRadius; ++dx) {
                 includedCellsSet.emplace(cell.first + dx, cell.second + dy);
             }
+        }
+    };
+    const auto includeLineWithRadius = [&](std::pair<int, int> start, std::pair<int, int> end, int radius) {
+        int x = start.first;
+        int y = start.second;
+        const int dx = std::abs(end.first - start.first);
+        const int sx = start.first < end.first ? 1 : -1;
+        const int dy = -std::abs(end.second - start.second);
+        const int sy = start.second < end.second ? 1 : -1;
+        int err = dx + dy;
+        while (true) {
+            includeCellWithRadius({x, y}, radius);
+            if (x == end.first && y == end.second) {
+                break;
+            }
+            const int e2 = 2 * err;
+            if (e2 >= dy) {
+                err += dy;
+                x += sx;
+            }
+            if (e2 <= dx) {
+                err += dx;
+                y += sy;
+            }
+        }
+    };
+
+    for (const std::pair<int, int>& cell : anchorCells) {
+        includeCellWithRadius(cell, selection.anchorNeighborRadius);
+    }
+    if (selection.connectAnchorsInOrder && corridorAnchorCells.size() >= 2u) {
+        for (std::size_t i = 1u; i < corridorAnchorCells.size(); ++i) {
+            includeLineWithRadius(corridorAnchorCells[i - 1u], corridorAnchorCells[i], selection.corridorRadius);
         }
     }
 
@@ -3095,17 +3404,230 @@ bool cookMorrowindBalmoraScene(
         modelPathById,
         lightById,
         parsedCells,
-        parsedLands
+        parsedLands,
+        "morrowind_exterior_region"
     );
     std::cerr << "[morrowind cooker] Scene build complete: "
               << outResult.scene.meshes.size() << " meshes, "
               << outResult.scene.landscapeCells.size() << " landscape cells, "
               << outResult.scene.lights.size() << " lights, "
               << outResult.scene.unresolvedRefs.size() << " unresolved refs\n";
-    outResult.balmoraCells = balmoraCells;
+    outResult.anchorCells = anchorCells;
     outResult.includedCells.assign(includedCellsSet.begin(), includedCellsSet.end());
     outResult.modelPathById = std::move(modelPathById);
     outResult.texturePathByLandscapeIndex = std::move(landscapeTextureByIndex);
+    return true;
+}
+
+bool loadMorrowindExteriorCellsRuntime(
+    const std::filesystem::path& morrowindDataFilesPath,
+    const MorrowindExteriorRuntimeLoadOptions& options,
+    MorrowindExteriorRuntimeLoadResult& outResult
+) {
+    g_lastImportedSceneError.clear();
+    outResult = {};
+    if (options.cells.empty()) {
+        setLastImportedSceneError("Runtime exterior load did not request any cells");
+        return false;
+    }
+
+    const std::filesystem::path esmPath = morrowindDataFilesPath / "Morrowind.esm";
+    if (!std::filesystem::exists(esmPath)) {
+        setLastImportedSceneError("Failed to find Morrowind.esm at " + esmPath.string());
+        return false;
+    }
+
+    const bool cacheEnabled = options.useCellCache && !options.cacheRoot.empty();
+    if (cacheEnabled) {
+        const std::filesystem::path regionCachePath =
+            morrowindExteriorRegionCachePath(options.cacheRoot, options.cells);
+        std::string cacheReason;
+        const MorrowindExteriorCacheStatus cacheStatus =
+            checkMorrowindExteriorCacheFreshness(esmPath, regionCachePath, cacheReason);
+        std::cerr << "[morrowind runtime] Region cache: " << regionCachePath
+                  << " (" << cacheReason << ")\n";
+        if (cacheStatus == MorrowindExteriorCacheStatus::Fresh) {
+            ImportedScene cachedScene{};
+            if (loadImportedScene(regionCachePath, cachedScene)) {
+                if (cachedScene.sourceFileVersion != kImportedSceneVersion) {
+                    std::cerr << "[morrowind runtime] Region cache version "
+                              << cachedScene.sourceFileVersion
+                              << " is stale; rebuilding from ESM\n";
+                } else {
+                    refreshImportedSceneSourceCounts(cachedScene);
+                    std::cerr << "[morrowind runtime] Region cache hit: "
+                              << cachedScene.packedVertices.size() << " packed vertices, "
+                              << cachedScene.packedIndices.size() << " packed indices, "
+                              << cachedScene.packedDraws.size() << " draws\n";
+                    outResult.scene = std::move(cachedScene);
+                    outResult.loadedCells = options.cells;
+                    outResult.cacheHitCount = 1u;
+                    return true;
+                }
+            } else {
+                std::cerr << "[morrowind runtime] Region cache read failed: "
+                          << getImportedSceneLastError() << "; rebuilding from ESM\n";
+            }
+        }
+    } else {
+        std::cerr << "[morrowind runtime] Region cache disabled\n";
+    }
+    outResult.cacheMissCount = 1u;
+
+    std::set<std::pair<int, int>> requestedCells(options.cells.begin(), options.cells.end());
+    std::unordered_map<std::string, std::string> modelPathById;
+    std::unordered_map<std::string, ParsedLightRecord> lightById;
+    std::unordered_map<std::uint32_t, std::string> landscapeTextureByIndex;
+
+    std::ifstream pass1(esmPath, std::ios::binary);
+    if (!pass1) {
+        setLastImportedSceneError("Failed to open Morrowind.esm");
+        return false;
+    }
+    Tes3RecordHeader header{};
+    if (!readRecordHeader(pass1, header) || fourCcToString(header.name) != "TES3") {
+        setLastImportedSceneError("File does not begin with a TES3 record");
+        return false;
+    }
+    pass1.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+    while (readRecordHeader(pass1, header)) {
+        const std::string recordName = fourCcToString(header.name);
+        if (recordName == "LTEX") {
+            std::uint32_t landscapeIndex = 0;
+            std::string texturePath;
+            if (!parseLandTextureRecord(pass1, header.size, landscapeIndex, texturePath)) {
+                setLastImportedSceneError("Failed to parse LTEX record during runtime exterior load");
+                return false;
+            }
+            if (!texturePath.empty()) {
+                landscapeTextureByIndex[landscapeIndex] = lowerCopy(texturePath);
+            }
+        } else if (recordName == "LIGH") {
+            ParsedLightRecord light{};
+            if (!parseLightRecord(pass1, header.size, light)) {
+                setLastImportedSceneError("Failed to parse LIGH record during runtime exterior load");
+                return false;
+            }
+            if (!light.id.empty()) {
+                lightById[light.id] = light;
+                if (!light.modelPath.empty()) {
+                    modelPathById[light.id] = light.modelPath;
+                }
+            }
+        } else if (
+            recordName == "STAT" || recordName == "DOOR" || recordName == "CONT" || recordName == "FLOR" ||
+            recordName == "ACTI" || recordName == "FURN" || recordName == "MISC" ||
+            recordName == "APPA" || recordName == "WEAP" || recordName == "ARMO" || recordName == "CLOT" ||
+            recordName == "BOOK" || recordName == "INGR" || recordName == "ALCH" || recordName == "LOCK" ||
+            recordName == "PROB" || recordName == "REPA") {
+            std::string id;
+            std::string modelPath;
+            if (!parseModelRecord(pass1, header.size, id, modelPath)) {
+                setLastImportedSceneError("Failed to parse " + recordName + " record during runtime exterior load");
+                return false;
+            }
+            if (!id.empty() && !modelPath.empty()) {
+                modelPathById[id] = modelPath;
+            }
+        } else {
+            pass1.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+        }
+    }
+
+    std::vector<ParsedCell> parsedCells;
+    std::vector<ParsedLand> parsedLands;
+    std::ifstream pass2(esmPath, std::ios::binary);
+    if (!pass2 || !readRecordHeader(pass2, header) || fourCcToString(header.name) != "TES3") {
+        setLastImportedSceneError("Failed to reopen or validate Morrowind.esm for runtime exterior load");
+        return false;
+    }
+    pass2.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+    while (readRecordHeader(pass2, header)) {
+        const std::string recordName = fourCcToString(header.name);
+        if (recordName == "CELL") {
+            ParsedCell cell{};
+            if (!parseCellRefs(pass2, header.size, cell)) {
+                setLastImportedSceneError("Failed to parse CELL record during runtime exterior load");
+                return false;
+            }
+            if (cell.exterior && requestedCells.contains({cell.gridX, cell.gridY})) {
+                parsedCells.push_back(std::move(cell));
+            }
+        } else if (recordName == "LAND") {
+            ParsedLand land{};
+            if (!parseLandRecord(pass2, header.size, land)) {
+                if (g_lastImportedSceneError.empty()) {
+                    setLastImportedSceneError("Failed to parse LAND record during runtime exterior load");
+                }
+                return false;
+            }
+            if (requestedCells.contains({land.gridX, land.gridY})) {
+                parsedLands.push_back(std::move(land));
+            }
+        } else {
+            pass2.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+        }
+    }
+
+    ImportedScene scene = buildSceneFromParsedData(
+        morrowindDataFilesPath,
+        landscapeTextureByIndex,
+        modelPathById,
+        lightById,
+        parsedCells,
+        parsedLands,
+        "morrowind_exterior_region");
+    if (scene.landscapeCells.empty() && scene.instances.empty() && scene.packedVertices.empty()) {
+        setLastImportedSceneError("Runtime exterior load did not resolve any requested cells");
+        return false;
+    }
+    scene.sourceFileVersion = kImportedSceneVersion;
+    refreshImportedSceneSourceCounts(scene);
+    if (cacheEnabled) {
+        const std::filesystem::path regionCachePath =
+            morrowindExteriorRegionCachePath(options.cacheRoot, options.cells);
+        std::error_code mkdirError;
+        std::filesystem::create_directories(regionCachePath.parent_path(), mkdirError);
+        if (!mkdirError) {
+            if (saveImportedScene(scene, regionCachePath)) {
+                std::cerr << "[morrowind runtime] Region cache saved: " << regionCachePath
+                          << " (" << scene.packedVertices.size() << " packed vertices, "
+                          << scene.packedIndices.size() << " packed indices, "
+                          << scene.packedDraws.size() << " draws)\n";
+            } else {
+                std::cerr << "[morrowind runtime] Region cache save failed: "
+                          << getImportedSceneLastError() << "\n";
+            }
+        } else {
+            std::cerr << "[morrowind runtime] Region cache directory create failed: "
+                      << mkdirError.message() << "\n";
+        }
+    }
+
+    outResult.loadedCells = options.cells;
+    outResult.scene = std::move(scene);
+    return true;
+}
+
+bool cookMorrowindBalmoraScene(
+    const std::filesystem::path& morrowindDataFilesPath,
+    MorrowindBalmoraCookResult& outResult
+) {
+    MorrowindExteriorCellSelection selection{};
+    selection.exteriorCellNames = {"Balmora"};
+    selection.anchorNeighborRadius = 1;
+
+    MorrowindExteriorCookResult regionResult{};
+    if (!cookMorrowindExteriorRegionScene(morrowindDataFilesPath, selection, regionResult)) {
+        return false;
+    }
+
+    outResult.scene = std::move(regionResult.scene);
+    outResult.scene.sourceTag = "morrowind_balmora";
+    outResult.balmoraCells = std::move(regionResult.anchorCells);
+    outResult.includedCells = std::move(regionResult.includedCells);
+    outResult.modelPathById = std::move(regionResult.modelPathById);
+    outResult.texturePathByLandscapeIndex = std::move(regionResult.texturePathByLandscapeIndex);
     return true;
 }
 
@@ -3146,7 +3668,7 @@ bool loadMorrowindBalmoraDoorReferences(
             continue;
         }
         for (const ParsedCellRef& ref : cell.refs) {
-            if (!ref.hasTeleportDestination) {
+            if (ref.deleted || ref.moved || !ref.hasTeleportDestination) {
                 continue;
             }
 
@@ -3209,7 +3731,7 @@ bool loadMorrowindInteriorDoorReferences(
             continue;
         }
         for (const ParsedCellRef& ref : cell.refs) {
-            if (!ref.hasTeleportDestination) {
+            if (ref.deleted || ref.moved || !ref.hasTeleportDestination) {
                 continue;
             }
 

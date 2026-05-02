@@ -56,6 +56,101 @@ const char* shadowFallbackReasonName(ShadowFallbackReason reason) {
     return "none";
 }
 
+constexpr int kPostLookPresetNeutral = 0;
+constexpr int kPostLookPresetPunchy = 1;
+constexpr int kPostLookPresetStylizedVivid = 2;
+
+void applyPostLookPreset(RendererBackend::SkyDebugSettings& settings, int preset) {
+    settings.postColorLookPreset = preset;
+    switch (preset) {
+    case kPostLookPresetNeutral:
+        settings.autoExposureKeyValue = 0.18f;
+        settings.autoExposureMin = 0.75f;
+        settings.autoExposureMax = 1.60f;
+        settings.autoExposureAdaptUp = 1.80f;
+        settings.autoExposureAdaptDown = 0.80f;
+        settings.autoExposureLowPercentile = 0.50f;
+        settings.autoExposureHighPercentile = 0.92f;
+        settings.bloomThreshold = 1.25f;
+        settings.bloomSoftKnee = 0.20f;
+        settings.bloomBaseIntensity = 0.030f;
+        settings.bloomSunFacingBoost = 0.12f;
+        settings.colorGradingWhiteBalanceR = 1.01f;
+        settings.colorGradingWhiteBalanceG = 1.00f;
+        settings.colorGradingWhiteBalanceB = 0.99f;
+        settings.colorGradingContrast = 1.06f;
+        settings.colorGradingSaturation = 1.02f;
+        settings.colorGradingVibrance = 0.06f;
+        settings.colorGradingMidtoneContrast = 1.04f;
+        settings.colorGradingShadowDensity = 1.02f;
+        settings.colorGradingHighlightRolloff = 0.96f;
+        settings.colorGradingShadowTintR = 0.00f;
+        settings.colorGradingShadowTintG = 0.00f;
+        settings.colorGradingShadowTintB = 0.02f;
+        settings.colorGradingHighlightTintR = 0.02f;
+        settings.colorGradingHighlightTintG = 0.01f;
+        settings.colorGradingHighlightTintB = 0.00f;
+        break;
+    case kPostLookPresetPunchy:
+        settings.autoExposureKeyValue = 0.17f;
+        settings.autoExposureMin = 0.72f;
+        settings.autoExposureMax = 1.70f;
+        settings.autoExposureAdaptUp = 1.70f;
+        settings.autoExposureAdaptDown = 0.72f;
+        settings.autoExposureLowPercentile = 0.52f;
+        settings.autoExposureHighPercentile = 0.91f;
+        settings.bloomThreshold = 1.20f;
+        settings.bloomSoftKnee = 0.22f;
+        settings.bloomBaseIntensity = 0.040f;
+        settings.bloomSunFacingBoost = 0.15f;
+        settings.colorGradingWhiteBalanceR = 1.02f;
+        settings.colorGradingWhiteBalanceG = 1.00f;
+        settings.colorGradingWhiteBalanceB = 0.98f;
+        settings.colorGradingContrast = 1.11f;
+        settings.colorGradingSaturation = 1.10f;
+        settings.colorGradingVibrance = 0.16f;
+        settings.colorGradingMidtoneContrast = 1.08f;
+        settings.colorGradingShadowDensity = 1.05f;
+        settings.colorGradingHighlightRolloff = 0.93f;
+        settings.colorGradingShadowTintR = -0.01f;
+        settings.colorGradingShadowTintG = 0.00f;
+        settings.colorGradingShadowTintB = 0.04f;
+        settings.colorGradingHighlightTintR = 0.04f;
+        settings.colorGradingHighlightTintG = 0.02f;
+        settings.colorGradingHighlightTintB = -0.01f;
+        break;
+    case kPostLookPresetStylizedVivid:
+    default:
+        settings.autoExposureKeyValue = 0.16f;
+        settings.autoExposureMin = 0.70f;
+        settings.autoExposureMax = 1.75f;
+        settings.autoExposureAdaptUp = 1.60f;
+        settings.autoExposureAdaptDown = 0.65f;
+        settings.autoExposureLowPercentile = 0.55f;
+        settings.autoExposureHighPercentile = 0.90f;
+        settings.bloomThreshold = 1.15f;
+        settings.bloomSoftKnee = 0.25f;
+        settings.bloomBaseIntensity = 0.045f;
+        settings.bloomSunFacingBoost = 0.18f;
+        settings.colorGradingWhiteBalanceR = 1.03f;
+        settings.colorGradingWhiteBalanceG = 1.00f;
+        settings.colorGradingWhiteBalanceB = 0.97f;
+        settings.colorGradingContrast = 1.14f;
+        settings.colorGradingSaturation = 1.16f;
+        settings.colorGradingVibrance = 0.24f;
+        settings.colorGradingMidtoneContrast = 1.12f;
+        settings.colorGradingShadowDensity = 1.08f;
+        settings.colorGradingHighlightRolloff = 0.90f;
+        settings.colorGradingShadowTintR = -0.01f;
+        settings.colorGradingShadowTintG = 0.01f;
+        settings.colorGradingShadowTintB = 0.06f;
+        settings.colorGradingHighlightTintR = 0.06f;
+        settings.colorGradingHighlightTintG = 0.03f;
+        settings.colorGradingHighlightTintB = -0.01f;
+        break;
+    }
+}
+
 } // namespace
 
 void RendererBackend::setDebugUiVisible(bool visible) {
@@ -282,7 +377,8 @@ void RendererBackend::buildFrameStatsUi() {
 
     const bool importedSceneLoaded = !m_importedMeshDraws.empty() || m_importedWaterIndexCount > 0;
     const float autoScale = std::numeric_limits<float>::max();
-    if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTabBar("MorrowindRendererTabs")) {
+    if (ImGui::BeginTabItem("Scene")) {
         ImGui::Text("Viewer: Morrowind scene");
         ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
         if (importedSceneLoaded) {
@@ -291,57 +387,45 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::Checkbox("Show Textures", &m_debugShowImportedTextures);
             ImGui::Checkbox("Flat Static Shading", &m_debugImportedFlatShading);
             ImGui::Checkbox("Solid Water Debug", &m_debugImportedWaterSolid);
-            const char* waterDebugViews =
-                "Final\0Normals\0Depth/Thickness\0Scene Refraction\0Refraction UV Offset\0Reflection\0Fresnel\0";
-            ImGui::Combo("Water Debug View", &m_skyDebugSettings.waterDebugMode, waterDebugViews);
-            ImGui::SliderFloat(
-                "Water Animation Speed",
-                &m_skyDebugSettings.waterAnimationSpeed,
-                0.25f,
-                4.0f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Normal Strength",
-                &m_skyDebugSettings.waterNormalStrength,
-                0.25f,
-                2.5f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Reflection Strength",
-                &m_skyDebugSettings.waterReflectionStrength,
-                0.25f,
-                4.0f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Refraction Decay",
-                &m_skyDebugSettings.waterRefractionDecay,
-                0.25f,
-                5.0f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Refraction Strength",
-                &m_skyDebugSettings.waterRefractionStrength,
-                0.0f,
-                3.0f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Refraction Distortion",
-                &m_skyDebugSettings.waterRefractionDistortionPixels,
-                0.0f,
-                160.0f,
-                "%.0f px");
             ImGui::TextDisabled("Hotkeys: F5 terrain, F6 statics, K textures, F7 flat shading, F8 water debug");
             ImGui::Text(
                 "Imported Draws / Water Indices: %u / %u",
                 static_cast<unsigned>(m_importedMeshDraws.size()),
                 m_importedWaterIndexCount
             );
+            if (m_debugImportedPageRangeCount > 0u) {
+                ImGui::Text(
+                    "Imported Pages Visible: %u / %u",
+                    m_debugImportedMainVisiblePageCount,
+                    m_debugImportedPageRangeCount
+                );
+                ImGui::Text(
+                    "Imported Draws Visible: %u / %u",
+                    m_debugImportedMainVisibleDrawCount,
+                    static_cast<unsigned>(m_importedMeshDraws.size())
+                );
+                ImGui::Text(
+                    "Shadow Pages Visible: %u / %u / %u / %u",
+                    m_debugImportedShadowVisiblePageCounts[0],
+                    m_debugImportedShadowVisiblePageCounts[1],
+                    m_debugImportedShadowVisiblePageCounts[2],
+                    m_debugImportedShadowVisiblePageCounts[3]
+                );
+                ImGui::Text(
+                    "Shadow Draws Visible: %u / %u / %u / %u",
+                    m_debugImportedShadowVisibleDrawCounts[0],
+                    m_debugImportedShadowVisibleDrawCounts[1],
+                    m_debugImportedShadowVisibleDrawCounts[2],
+                    m_debugImportedShadowVisibleDrawCounts[3]
+                );
+            }
         } else {
             ImGui::TextDisabled("Imported-scene geometry not loaded.");
         }
+        ImGui::EndTabItem();
     }
 
-    if (ImGui::CollapsingHeader("Frame Pacing", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTabItem("Pacing")) {
         int pacingMode = static_cast<int>(m_framePacingSettings.mode);
         if (ImGui::Combo("Mode", &pacingMode, "Off\0Passive\0Scheduled\0")) {
             m_framePacingSettings.mode = static_cast<FramePacingMode>(pacingMode);
@@ -387,9 +471,12 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::TextDisabled("Display timing unavailable");
             m_enableDisplayTiming = false;
         }
+        ImGui::EndTabItem();
     }
 
-    if (ImGui::CollapsingHeader("Lighting & Shadows", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTabItem("Lighting")) {
+        if (ImGui::BeginTabBar("LightingTabs")) {
+        if (ImGui::BeginTabItem("Shadows")) {
         int shadowMode = static_cast<int>(m_shadowSettings.mode);
         if (ImGui::Combo("Shadow Backend", &shadowMode, "Shadow Maps\0Ray Traced (Beta)\0Auto (Beta)\0")) {
             setShadowSettings(ShadowSettings{static_cast<ShadowMode>(shadowMode)});
@@ -427,20 +514,6 @@ void RendererBackend::buildFrameStatsUi() {
             m_shadowCascadeSplits[1],
             m_shadowCascadeSplits[2],
             m_shadowCascadeSplits[3]
-        );
-        ImGui::SliderFloat("Sun Yaw", &m_skyDebugSettings.sunYawDegrees, -180.0f, 180.0f, "%.1f deg");
-        ImGui::SliderFloat("Sun Pitch", &m_skyDebugSettings.sunPitchDegrees, -89.0f, 89.0f, "%.1f deg");
-        ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
-        ImGui::SliderFloat("Sun Disk Intensity", &m_skyDebugSettings.sunDiskIntensity, 300.0f, 2200.0f, "%.0f");
-        ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");
-        ImGui::SeparatorText("Imported Lights");
-        ImGui::Checkbox("Enable Imported Lights", &m_debugImportedLightsEnabled);
-        ImGui::SliderFloat("Imported Light Intensity", &m_debugImportedLightIntensity, 0.0f, 4.0f, "%.2f");
-        ImGui::SliderFloat("Imported Light Radius", &m_debugImportedLightRadiusScale, 0.25f, 8.0f, "%.2fx");
-        ImGui::Text(
-            "Imported Lights: %u total / %u selected",
-            static_cast<unsigned>(m_importedLocalLights.size()),
-            static_cast<unsigned>(m_debugImportedLightSelectedCount)
         );
         ImGui::Checkbox("Shadow Occluder Culling", &m_shadowDebugSettings.enableOccluderCulling);
         ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
@@ -539,9 +612,10 @@ void RendererBackend::buildFrameStatsUi() {
         if (ImGui::Button("Reset Shadow Defaults")) {
             m_shadowDebugSettings = ShadowDebugSettings{};
         }
-    }
+        ImGui::EndTabItem();
+        }
 
-    if (ImGui::CollapsingHeader("Global Illumination", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::BeginTabItem("AO + GI")) {
         ImGui::Checkbox("Enable SSAO", &m_debugEnableSsao);
         ImGui::SliderFloat("SSAO Radius", &m_shadowDebugSettings.ssaoRadius, 1.0f, 96.0f, "%.1f");
         ImGui::SliderFloat("SSAO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 6.0f, "%.2f");
@@ -615,9 +689,34 @@ void RendererBackend::buildFrameStatsUi() {
         if (ImGui::Button("Reset GI Defaults")) {
             m_voxelGiDebugSettings = VoxelGiDebugSettings{};
         }
+        ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Imported Lights")) {
+            ImGui::Checkbox("Enable Imported Lights", &m_debugImportedLightsEnabled);
+            ImGui::SliderFloat("Imported Light Intensity", &m_debugImportedLightIntensity, 0.0f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Outdoor Lamp Strength", &m_debugImportedOutdoorLightStrength, 0.0f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Imported Light Radius", &m_debugImportedLightRadiusScale, 0.25f, 8.0f, "%.2fx");
+            ImGui::Text(
+                "Imported Lights: %u total / %u selected",
+                static_cast<unsigned>(m_importedLocalLights.size()),
+                static_cast<unsigned>(m_debugImportedLightSelectedCount)
+            );
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+        }
+        ImGui::EndTabItem();
     }
 
-    if (ImGui::CollapsingHeader("Sky & Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTabItem("Art Direction")) {
+        if (ImGui::BeginTabBar("ArtDirectionTabs")) {
+        if (ImGui::BeginTabItem("Sun/Sky")) {
+        ImGui::SliderFloat("Sun Yaw", &m_skyDebugSettings.sunYawDegrees, -180.0f, 180.0f, "%.1f deg");
+        ImGui::SliderFloat("Sun Pitch", &m_skyDebugSettings.sunPitchDegrees, -89.0f, 89.0f, "%.1f deg");
+        ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
+        ImGui::SliderFloat("Sun Disk Intensity", &m_skyDebugSettings.sunDiskIntensity, 300.0f, 2200.0f, "%.0f");
+        ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");
         if (ImGui::TreeNodeEx("Advanced Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Auto Sunrise Tuning", &m_skyDebugSettings.autoSunriseTuning);
             ImGui::SliderFloat("Auto Sunrise Blend", &m_skyDebugSettings.autoSunriseBlend, 0.0f, 1.0f, "%.2f");
@@ -630,6 +729,18 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::SliderFloat("Sun Haze Falloff", &m_skyDebugSettings.sunHazeFalloff, 0.10f, 1.20f, "%.2f");
             ImGui::TreePop();
         }
+        ImGui::Text(
+            "Runtime: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",
+            m_skyTuningRuntime.rayleighStrength,
+            m_skyTuningRuntime.mieStrength,
+            m_skyTuningRuntime.skyExposure,
+            m_skyTuningRuntime.sunDiskSize
+        );
+        ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Water/Fog")) {
+        ImGui::Checkbox("Enable Fog", &m_skyDebugSettings.volumetricFogEnabled);
         ImGui::SliderFloat("Fog Density", &m_skyDebugSettings.volumetricFogDensity, 0.0f, 0.03f, "%.4f");
         ImGui::SliderFloat("Fog Sun Scatter", &m_skyDebugSettings.volumetricSunScattering, 0.0f, 3.0f, "%.2f");
         if (ImGui::TreeNodeEx("Advanced Fog", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -649,6 +760,22 @@ void RendererBackend::buildFrameStatsUi() {
             );
             ImGui::TreePop();
         }
+        ImGui::SeparatorText("Water");
+        ImGui::SliderFloat("Water Speed", &m_skyDebugSettings.waterAnimationSpeed, 0.25f, 4.0f, "%.2f");
+        ImGui::SliderFloat("Water Normal Strength", &m_skyDebugSettings.waterNormalStrength, 0.25f, 2.5f, "%.2f");
+        ImGui::SliderFloat("Water Reflection", &m_skyDebugSettings.waterReflectionStrength, 0.25f, 4.0f, "%.2f");
+        ImGui::SliderFloat("Water Absorption", &m_skyDebugSettings.waterRefractionDecay, 0.25f, 5.0f, "%.2f");
+        if (ImGui::TreeNodeEx("Advanced Water", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderFloat("Water Refraction Strength", &m_skyDebugSettings.waterRefractionStrength, 0.0f, 3.0f, "%.2f");
+            ImGui::SliderFloat(
+                "Water Refraction Distortion",
+                &m_skyDebugSettings.waterRefractionDistortionPixels,
+                0.0f,
+                160.0f,
+                "%.0f px"
+            );
+            ImGui::TreePop();
+        }
         ImGui::SliderFloat(
             "Plant Quad Directionality",
             &m_skyDebugSettings.plantQuadDirectionality,
@@ -656,20 +783,16 @@ void RendererBackend::buildFrameStatsUi() {
             1.0f,
             "%.2f"
         );
-        ImGui::Text(
-            "Runtime: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",
-            m_skyTuningRuntime.rayleighStrength,
-            m_skyTuningRuntime.mieStrength,
-            m_skyTuningRuntime.skyExposure,
-            m_skyTuningRuntime.sunDiskSize
-        );
-        if (ImGui::Button("Reset Sun/Sky Defaults")) {
-            m_skyDebugSettings = SkyDebugSettings{};
-            m_skyTuningRuntime = RendererBackend::SkyTuningRuntimeState{};
+        ImGui::EndTabItem();
         }
-    }
 
-    if (ImGui::CollapsingHeader("Post", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::BeginTabItem("Post")) {
+        ImGui::Text("Depth of Field");
+        ImGui::Checkbox("Enable DoF", &m_skyDebugSettings.depthOfFieldEnabled);
+        ImGui::SliderFloat("DoF Intensity", &m_skyDebugSettings.depthOfFieldMaxRadiusPixels, 0.0f, 14.0f, "%.1f");
+        ImGui::SliderFloat("DoF Target Distance", &m_skyDebugSettings.depthOfFieldFocusDistance, 1.0f, 240.0f, "%.1f");
+        ImGui::SliderFloat("Focus Range", &m_skyDebugSettings.depthOfFieldFocusRange, 1.0f, 120.0f, "%.1f");
+        ImGui::Separator();
         ImGui::Text("Eye Adaptation");
         ImGui::Checkbox("Auto Exposure", &m_skyDebugSettings.autoExposureEnabled);
         ImGui::SliderFloat("Manual Exposure", &m_skyDebugSettings.manualExposure, 0.05f, 4.0f, "%.3f");
@@ -686,28 +809,15 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::SliderFloat("AE Max Exposure", &m_skyDebugSettings.autoExposureMax, 0.20f, 12.00f, "%.3f");
             ImGui::SliderFloat("AE Adapt Up", &m_skyDebugSettings.autoExposureAdaptUp, 0.10f, 12.00f, "%.2f");
             ImGui::SliderFloat("AE Adapt Down", &m_skyDebugSettings.autoExposureAdaptDown, 0.10f, 12.00f, "%.2f");
-            ImGui::SliderFloat(
-                "AE Low Percentile",
-                &m_skyDebugSettings.autoExposureLowPercentile,
-                0.00f,
-                0.95f,
-                "%.2f"
-            );
-            ImGui::SliderFloat(
-                "AE High Percentile",
-                &m_skyDebugSettings.autoExposureHighPercentile,
-                0.05f,
-                1.00f,
-                "%.2f"
-            );
+            ImGui::SliderFloat("AE Low Percentile", &m_skyDebugSettings.autoExposureLowPercentile, 0.00f, 0.95f, "%.2f");
+            ImGui::SliderFloat("AE High Percentile", &m_skyDebugSettings.autoExposureHighPercentile, 0.05f, 1.00f, "%.2f");
             ImGui::TreePop();
         }
         if (!m_autoExposureComputeAvailable) {
             ImGui::TextDisabled("Auto exposure compute unavailable; manual exposure is active.");
         }
 
-        ImGui::Separator();
-        ImGui::Text("Bloom");
+        ImGui::SeparatorText("Bloom");
         ImGui::SliderFloat("Bloom Global Intensity", &m_skyDebugSettings.bloomBaseIntensity, 0.0f, 0.35f, "%.3f");
         if (ImGui::TreeNodeEx("Advanced Bloom", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::SliderFloat("Bloom Threshold", &m_skyDebugSettings.bloomThreshold, 0.25f, 4.0f, "%.2f");
@@ -716,67 +826,42 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::TreePop();
         }
 
-        ImGui::Separator();
-        ImGui::Text("Color Grading");
+        ImGui::SeparatorText("Color Grading");
         const char* postLookPresets = "Neutral\0Punchy\0Stylized Vivid\0";
-        ImGui::Combo("Post Look", &m_skyDebugSettings.postColorLookPreset, postLookPresets);
+        if (ImGui::Combo("Post Look", &m_skyDebugSettings.postColorLookPreset, postLookPresets)) {
+            applyPostLookPreset(m_skyDebugSettings, m_skyDebugSettings.postColorLookPreset);
+        }
         ImGui::SliderFloat("Contrast", &m_skyDebugSettings.colorGradingContrast, 0.70f, 1.40f, "%.2f");
         ImGui::SliderFloat("Saturation", &m_skyDebugSettings.colorGradingSaturation, 0.0f, 2.0f, "%.2f");
         ImGui::SliderFloat("Vibrance", &m_skyDebugSettings.colorGradingVibrance, -1.0f, 1.0f, "%.2f");
-        ImGui::SliderFloat(
-            "Midtone Contrast",
-            &m_skyDebugSettings.colorGradingMidtoneContrast,
-            0.80f,
-            1.40f,
-            "%.2f"
-        );
-        ImGui::SliderFloat(
-            "Shadow Density",
-            &m_skyDebugSettings.colorGradingShadowDensity,
-            0.70f,
-            1.40f,
-            "%.2f"
-        );
-        ImGui::SliderFloat(
-            "Highlight Rolloff",
-            &m_skyDebugSettings.colorGradingHighlightRolloff,
-            0.70f,
-            1.10f,
-            "%.2f"
-        );
         if (ImGui::TreeNodeEx("Advanced Color Grading", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderFloat("Midtone Contrast", &m_skyDebugSettings.colorGradingMidtoneContrast, 0.80f, 1.40f, "%.2f");
+            ImGui::SliderFloat("Shadow Density", &m_skyDebugSettings.colorGradingShadowDensity, 0.70f, 1.40f, "%.2f");
+            ImGui::SliderFloat("Highlight Rolloff", &m_skyDebugSettings.colorGradingHighlightRolloff, 0.70f, 1.10f, "%.2f");
             ImGui::SliderFloat("White Balance R", &m_skyDebugSettings.colorGradingWhiteBalanceR, 0.80f, 1.20f, "%.2f");
             ImGui::SliderFloat("White Balance G", &m_skyDebugSettings.colorGradingWhiteBalanceG, 0.80f, 1.20f, "%.2f");
             ImGui::SliderFloat("White Balance B", &m_skyDebugSettings.colorGradingWhiteBalanceB, 0.80f, 1.20f, "%.2f");
             ImGui::SliderFloat("Shadow Tint R", &m_skyDebugSettings.colorGradingShadowTintR, -0.20f, 0.20f, "%.2f");
             ImGui::SliderFloat("Shadow Tint G", &m_skyDebugSettings.colorGradingShadowTintG, -0.20f, 0.20f, "%.2f");
             ImGui::SliderFloat("Shadow Tint B", &m_skyDebugSettings.colorGradingShadowTintB, -0.20f, 0.20f, "%.2f");
-            ImGui::SliderFloat(
-                "Highlight Tint R",
-                &m_skyDebugSettings.colorGradingHighlightTintR,
-                -0.20f,
-                0.20f,
-                "%.2f"
-            );
-            ImGui::SliderFloat(
-                "Highlight Tint G",
-                &m_skyDebugSettings.colorGradingHighlightTintG,
-                -0.20f,
-                0.20f,
-                "%.2f"
-            );
-            ImGui::SliderFloat(
-                "Highlight Tint B",
-                &m_skyDebugSettings.colorGradingHighlightTintB,
-                -0.20f,
-                0.20f,
-                "%.2f"
-            );
+            ImGui::SliderFloat("Highlight Tint R", &m_skyDebugSettings.colorGradingHighlightTintR, -0.20f, 0.20f, "%.2f");
+            ImGui::SliderFloat("Highlight Tint G", &m_skyDebugSettings.colorGradingHighlightTintG, -0.20f, 0.20f, "%.2f");
+            ImGui::SliderFloat("Highlight Tint B", &m_skyDebugSettings.colorGradingHighlightTintB, -0.20f, 0.20f, "%.2f");
             ImGui::TreePop();
         }
+        ImGui::EndTabItem();
+        }
+
+        if (ImGui::Button("Reset Sun/Sky Defaults")) {
+            m_skyDebugSettings = SkyDebugSettings{};
+            m_skyTuningRuntime = RendererBackend::SkyTuningRuntimeState{};
+        }
+        ImGui::EndTabBar();
+        }
+        ImGui::EndTabItem();
     }
 
-    if (ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTabItem("Performance")) {
         if (m_debugCpuFrameTimingMsHistoryCount > 0) {
             const int cpuHistoryCount = static_cast<int>(m_debugCpuFrameTimingMsHistoryCount);
             const int cpuHistoryOffset =
@@ -928,9 +1013,51 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::Text("Resident images (live): %u", m_debugFrameArenaResidentImageCount);
             ImGui::TreePop();
         }
+        ImGui::EndTabItem();
     }
 
-    if (ImGui::CollapsingHeader("Renderer Diagnostics", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTabItem("Diagnostics")) {
+        const char* waterDebugViews =
+            "Final\0Normals\0Depth/Thickness\0Scene Refraction\0Refraction UV Offset\0Reflection\0Fresnel\0";
+        ImGui::Combo("Water Debug View", &m_skyDebugSettings.waterDebugMode, waterDebugViews);
+        if (ImGui::TreeNodeEx("Meshing", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Use Spatial Queries", &m_debugEnableSpatialQueries);
+            int clipmapLevels = static_cast<int>(m_debugClipmapConfig.levelCount);
+            int clipmapGridResolution = m_debugClipmapConfig.gridResolution;
+            int clipmapBaseVoxelSize = m_debugClipmapConfig.baseVoxelSize;
+            int clipmapBrickResolution = m_debugClipmapConfig.brickResolution;
+            if (ImGui::SliderInt("Clipmap Levels", &clipmapLevels, 1, 8)) {
+                m_debugClipmapConfig.levelCount = static_cast<std::uint32_t>(clipmapLevels);
+            }
+            if (ImGui::SliderInt("Clipmap Grid Res", &clipmapGridResolution, 32, 256)) {
+                m_debugClipmapConfig.gridResolution = clipmapGridResolution;
+            }
+            if (ImGui::SliderInt("Clipmap Base Voxel", &clipmapBaseVoxelSize, 1, 8)) {
+                m_debugClipmapConfig.baseVoxelSize = clipmapBaseVoxelSize;
+            }
+            if (ImGui::SliderInt("Clipmap Brick Res", &clipmapBrickResolution, 2, 32)) {
+                m_debugClipmapConfig.brickResolution = clipmapBrickResolution;
+            }
+            int meshingModeSelection = (m_chunkMeshingOptions.mode == odai::world::MeshingMode::Greedy) ? 1 : 0;
+            if (ImGui::Combo("Chunk Meshing", &meshingModeSelection, "Naive\0Greedy\0")) {
+                const odai::world::MeshingMode nextMode =
+                    (meshingModeSelection == 1) ? odai::world::MeshingMode::Greedy : odai::world::MeshingMode::Naive;
+                if (nextMode != m_chunkMeshingOptions.mode) {
+                    m_chunkMeshingOptions.mode = nextMode;
+                    m_chunkLodMeshCacheValid = false;
+                    m_chunkMeshRebuildRequested = true;
+                    m_pendingChunkRemeshKeys.clear();
+                    VOX_LOGI("render") << "chunk meshing mode changed to "
+                                       << (nextMode == odai::world::MeshingMode::Greedy ? "Greedy" : "Naive")
+                                       << ", scheduling full remesh";
+                }
+            }
+            ImGui::Text("Chunk Mesh Vert/Idx: %u / %u", m_debugChunkMeshVertexCount, m_debugChunkMeshIndexCount);
+            ImGui::Text("Last Chunk Remesh: %.2f ms (%u)", m_debugChunkLastRemeshMs, m_debugChunkLastRemeshedChunkCount);
+            ImGui::Text("Chunk Remesh Pending/Batch: %u / %u", m_debugChunkPendingRemeshCount, m_debugChunkRemeshBatchCount);
+            ImGui::Text("RT Active Chunks: %u", m_debugRtActiveChunkCount);
+            ImGui::TreePop();
+        }
         if (m_supportsDisplayTiming) {
             ImGui::Text(
                 "Display Timing Present ID submit/presented: %u / %u",
@@ -1009,6 +1136,9 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::Text("Magica RT Geometries: %u", static_cast<unsigned>(m_rtMagicaGeometries.size()));
             ImGui::TreePop();
         }
+        ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
     }
     ImGui::End();
 }

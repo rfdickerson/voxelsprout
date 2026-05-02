@@ -431,7 +431,6 @@ void RendererBackend::renderFrame(
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         buildFrameStatsUi();
-        buildDofDebugUi();
         m_debugUiVisible = m_showFrameStatsPanel;
         ImGui::Render();
     }
@@ -802,7 +801,7 @@ void RendererBackend::renderFrame(
     mvpUniform.skyConfig3[1] = std::clamp(m_skyDebugSettings.bloomSoftKnee, 0.0f, 1.0f);
     mvpUniform.skyConfig3[2] = std::clamp(m_skyDebugSettings.bloomBaseIntensity, 0.0f, 2.0f);
     mvpUniform.skyConfig3[3] = std::clamp(m_skyDebugSettings.bloomSunFacingBoost, 0.0f, 2.0f);
-    mvpUniform.skyConfig4[0] = m_importedSceneInteriorMode
+    mvpUniform.skyConfig4[0] = (m_importedSceneInteriorMode || !m_skyDebugSettings.volumetricFogEnabled)
         ? 0.0f
         : std::clamp(m_skyDebugSettings.volumetricFogDensity, 0.0f, 1.0f);
     mvpUniform.skyConfig4[1] = std::clamp(m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 1.0f);
@@ -901,7 +900,12 @@ void RendererBackend::renderFrame(
     }
     m_debugImportedLightSelectedCount = static_cast<std::uint32_t>(selectedImportedLightCount);
     const float importedLightGlobalIntensity =
-        std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f);
+        std::clamp(
+            m_debugImportedLightIntensity *
+                (m_importedSceneInteriorMode ? 1.0f : std::clamp(m_debugImportedOutdoorLightStrength, 0.0f, 4.0f)),
+            0.0f,
+            8.0f
+        );
     mvpUniform.morrowindGiConfig[0] = std::clamp(m_voxelGiDebugSettings.morrowindGiStrength, 0.0f, 1.0f);
     mvpUniform.morrowindGiConfig[1] = std::clamp(m_voxelGiDebugSettings.morrowindGiRadiusScale, 0.25f, 4.0f);
     mvpUniform.morrowindGiConfig[2] = std::clamp(m_voxelGiDebugSettings.morrowindGiOcclusionFloor, 0.0f, 1.0f);
@@ -924,6 +928,8 @@ void RendererBackend::renderFrame(
         importedLightSignature,
         static_cast<std::uint64_t>(selectedImportedLightCount));
     importedLightSignature = mixImportedLightFloat(importedLightSignature, importedLightGlobalIntensity);
+    importedLightSignature =
+        mixImportedLightFloat(importedLightSignature, std::clamp(m_debugImportedOutdoorLightStrength, 0.0f, 4.0f));
     importedLightSignature = mixImportedLightFloat(importedLightSignature, importedLightRadiusScale);
     importedLightSignature = mixImportedLightFloat(importedLightSignature, mvpUniform.morrowindGiConfig[0]);
     importedLightSignature = mixImportedLightFloat(importedLightSignature, mvpUniform.morrowindGiConfig[1]);
@@ -1633,25 +1639,8 @@ void RendererBackend::renderFrame(
     VkBuffer importedActorVertexBuffer = VK_NULL_HANDLE;
     VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
     if (renderingImportedActors) {
-        std::vector<ImportedMeshVertex> actorVertices;
-        actorVertices.reserve(importedActors->vertices.size());
-        for (const odai::importer::ImportedScenePackedVertex& srcVertex : importedActors->vertices) {
-            ImportedMeshVertex dstVertex{};
-            std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
-            std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
-            std::memcpy(dstVertex.color, srcVertex.color, sizeof(dstVertex.color));
-            std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
-            dstVertex.flags = srcVertex.flags;
-            if (srcVertex.textureIndex < m_importedTextureSlots.size()) {
-                dstVertex.textureIndex = m_importedTextureSlots[srcVertex.textureIndex];
-            } else {
-                dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
-            }
-            actorVertices.push_back(dstVertex);
-        }
-
         const VkDeviceSize actorVertexBytes =
-            static_cast<VkDeviceSize>(actorVertices.size() * sizeof(ImportedMeshVertex));
+            static_cast<VkDeviceSize>(importedActors->vertices.size() * sizeof(ImportedMeshVertex));
         const VkDeviceSize actorIndexBytes =
             static_cast<VkDeviceSize>(importedActors->indices.size() * sizeof(std::uint32_t));
         importedActorVertexSliceOpt = m_frameArena.allocateUpload(
@@ -1666,7 +1655,22 @@ void RendererBackend::renderFrame(
             importedActorIndexSliceOpt.has_value() &&
             importedActorVertexSliceOpt->mapped != nullptr &&
             importedActorIndexSliceOpt->mapped != nullptr) {
-            std::memcpy(importedActorVertexSliceOpt->mapped, actorVertices.data(), actorVertexBytes);
+            ImportedMeshVertex* actorVertices =
+                static_cast<ImportedMeshVertex*>(importedActorVertexSliceOpt->mapped);
+            for (std::size_t vertexIndex = 0; vertexIndex < importedActors->vertices.size(); ++vertexIndex) {
+                const odai::importer::ImportedScenePackedVertex& srcVertex = importedActors->vertices[vertexIndex];
+                ImportedMeshVertex& dstVertex = actorVertices[vertexIndex];
+                std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
+                std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
+                std::memcpy(dstVertex.color, srcVertex.color, sizeof(dstVertex.color));
+                std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
+                dstVertex.flags = srcVertex.flags;
+                if (srcVertex.textureIndex < m_importedTextureSlots.size()) {
+                    dstVertex.textureIndex = m_importedTextureSlots[srcVertex.textureIndex];
+                } else {
+                    dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
+                }
+            }
             std::memcpy(importedActorIndexSliceOpt->mapped, importedActors->indices.data(), actorIndexBytes);
             importedActorVertexBuffer = m_bufferAllocator.getBuffer(importedActorVertexSliceOpt->buffer);
             importedActorIndexBuffer = m_bufferAllocator.getBuffer(importedActorIndexSliceOpt->buffer);
@@ -1715,34 +1719,49 @@ void RendererBackend::renderFrame(
             odai::math::Vector3{pageRange.boundsMax[0], pageRange.boundsMax[1], pageRange.boundsMax[2]},
         };
 
-        float ndcMinX = std::numeric_limits<float>::max();
-        float ndcMinY = std::numeric_limits<float>::max();
-        float ndcMinZ = std::numeric_limits<float>::max();
-        float ndcMaxX = std::numeric_limits<float>::lowest();
-        float ndcMaxY = std::numeric_limits<float>::lowest();
-        float ndcMaxZ = std::numeric_limits<float>::lowest();
-        for (const odai::math::Vector3& corner : corners) {
-            const odai::math::Vector3 clip = odai::math::transformPoint(clipMatrix, corner);
-            ndcMinX = std::min(ndcMinX, clip.x);
-            ndcMinY = std::min(ndcMinY, clip.y);
-            ndcMinZ = std::min(ndcMinZ, clip.z);
-            ndcMaxX = std::max(ndcMaxX, clip.x);
-            ndcMaxY = std::max(ndcMaxY, clip.y);
-            ndcMaxZ = std::max(ndcMaxZ, clip.z);
+        std::array<odai::math::Vector4, 8> clipCorners{};
+        for (std::size_t cornerIndex = 0; cornerIndex < corners.size(); ++cornerIndex) {
+            clipCorners[cornerIndex] = clipMatrix * odai::math::Vector4{corners[cornerIndex], 1.0f};
         }
 
-        return !(ndcMaxX < (-1.0f - clipMargin) ||
-                 ndcMinX > (1.0f + clipMargin) ||
-                 ndcMaxY < (-1.0f - clipMargin) ||
-                 ndcMinY > (1.0f + clipMargin) ||
-                 ndcMaxZ < (0.0f - clipMargin) ||
-                 ndcMinZ > (1.0f + clipMargin));
+        auto outsideAll = [&](auto outsidePlane) -> bool {
+            for (const odai::math::Vector4& clip : clipCorners) {
+                const float margin = clipMargin * std::max(std::abs(clip.w), 1.0f);
+                if (!outsidePlane(clip, margin)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        return !(outsideAll([](const odai::math::Vector4& clip, float margin) {
+                     return clip.x < (-clip.w - margin);
+                 }) ||
+                 outsideAll([](const odai::math::Vector4& clip, float margin) {
+                     return clip.x > (clip.w + margin);
+                 }) ||
+                 outsideAll([](const odai::math::Vector4& clip, float margin) {
+                     return clip.y < (-clip.w - margin);
+                 }) ||
+                 outsideAll([](const odai::math::Vector4& clip, float margin) {
+                     return clip.y > (clip.w + margin);
+                 }) ||
+                 outsideAll([](const odai::math::Vector4& clip, float margin) {
+                     return clip.z < -margin;
+                 }) ||
+                 outsideAll([](const odai::math::Vector4& clip, float margin) {
+                     return clip.z > (clip.w + margin);
+                 }));
     };
     auto buildVisibleImportedDraws = [&](
                                       const odai::math::Matrix4& clipMatrix,
                                       float clipMargin,
-                                      std::vector<ImportedMeshDraw>& outDraws
+                                      std::vector<ImportedMeshDraw>& outDraws,
+                                      std::uint32_t* outVisiblePageCount
                                   ) -> std::uint32_t {
+        if (outVisiblePageCount != nullptr) {
+            *outVisiblePageCount = 0u;
+        }
         outDraws.clear();
         if (outDraws.capacity() < m_importedMeshDraws.size()) {
             outDraws.reserve(m_importedMeshDraws.size());
@@ -1751,6 +1770,9 @@ void RendererBackend::renderFrame(
         for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
             if (importedPageIntersectsClip(m_importedPageDrawRanges[pageIndex], clipMatrix, clipMargin)) {
                 m_visibleImportedPageScratch[pageIndex] = 1u;
+                if (outVisiblePageCount != nullptr) {
+                    ++(*outVisiblePageCount);
+                }
             }
         }
 
@@ -1790,8 +1812,14 @@ void RendererBackend::renderFrame(
     if (importedPageCullingEnabled) {
         constexpr float kImportedMainClipMargin = 0.04f;
         constexpr float kImportedShadowClipMargin = 0.08f;
+        m_debugImportedPageRangeCount = static_cast<std::uint32_t>(m_importedPageDrawRanges.size());
         m_visibleImportedTerrainDrawCount =
-            buildVisibleImportedDraws(mvp, kImportedMainClipMargin, m_visibleImportedMeshDraws);
+            buildVisibleImportedDraws(
+                mvp,
+                kImportedMainClipMargin,
+                m_visibleImportedMeshDraws,
+                &m_debugImportedMainVisiblePageCount);
+        m_debugImportedMainVisibleDrawCount = static_cast<std::uint32_t>(m_visibleImportedMeshDraws.size());
         importedMeshDrawsForFrame = std::span<const ImportedMeshDraw>(
             m_visibleImportedMeshDraws.data(),
             m_visibleImportedMeshDraws.size());
@@ -1800,8 +1828,17 @@ void RendererBackend::renderFrame(
             m_visibleImportedShadowTerrainDrawCounts[cascadeIndex] = buildVisibleImportedDraws(
                 lightViewProjMatrices[cascadeIndex],
                 kImportedShadowClipMargin,
-                m_visibleImportedShadowMeshDraws[cascadeIndex]);
+                m_visibleImportedShadowMeshDraws[cascadeIndex],
+                &m_debugImportedShadowVisiblePageCounts[cascadeIndex]);
+            m_debugImportedShadowVisibleDrawCounts[cascadeIndex] =
+                static_cast<std::uint32_t>(m_visibleImportedShadowMeshDraws[cascadeIndex].size());
         }
+    } else {
+        m_debugImportedPageRangeCount = 0u;
+        m_debugImportedMainVisiblePageCount = 0u;
+        m_debugImportedMainVisibleDrawCount = static_cast<std::uint32_t>(m_importedMeshDraws.size());
+        m_debugImportedShadowVisiblePageCounts.fill(0u);
+        m_debugImportedShadowVisibleDrawCounts.fill(static_cast<std::uint32_t>(m_importedMeshDraws.size()));
     }
     const bool canDrawMagica =
         legacySceneRenderingEnabled && !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;

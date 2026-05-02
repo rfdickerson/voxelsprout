@@ -4,6 +4,7 @@
 #include "math/math.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <span>
 #include <vector>
 
@@ -59,6 +60,8 @@ public:
 
     [[nodiscard]] bool empty() const;
     [[nodiscard]] Stats stats() const;
+    [[nodiscard]] bool saveBinary(const std::filesystem::path& path) const;
+    [[nodiscard]] bool loadBinary(const std::filesystem::path& path, const NavmeshSettings& expectedSettings);
 
     [[nodiscard]] bool findNearestPoint(
         const odai::math::Vector3& position,

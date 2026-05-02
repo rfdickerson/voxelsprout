@@ -93,12 +93,20 @@ bool isTerrainMaterial(uint material)
     return material == kMaterialStone || material == kMaterialDirt || material == kMaterialGrass;
 }
 
-float terrainDetailSignal(float3 worldPosition)
+float terrainMacroBreakupSignal(float3 worldPosition)
 {
     return
         sin(dot(worldPosition, float3(0.73, 0.00, 1.17))) * 0.52 +
         sin(dot(worldPosition, float3(1.91, 0.37, -0.64))) * 0.30 +
         sin(dot(worldPosition, float3(-0.41, 1.48, 1.33))) * 0.18;
+}
+
+float terrainMicroHeightSignal(float3 worldPosition)
+{
+    return
+        sin(dot(worldPosition, float3(5.11, 1.37, -3.73))) * 0.46 +
+        sin(dot(worldPosition, float3(-2.67, 4.29, 6.13))) * 0.34 +
+        sin(dot(worldPosition, float3(8.91, -1.18, 2.45))) * 0.20;
 }
 
 void terrainNormalBasis(float3 normal, out float3 tangent, out float3 bitangent)
@@ -116,23 +124,23 @@ float3 terrainShadingNormal(uint material, float3 geometricNormal, float3 worldP
     }
 
     const float slope = 1.0 - abs(geometricNormal.y);
-    float normalStrength = 0.035;
-    if (material == kMaterialStone) normalStrength = lerp(0.08, 0.22, slope);
-    if (material == kMaterialDirt) normalStrength = lerp(0.045, 0.13, slope);
-    if (material == kMaterialGrass) normalStrength = lerp(0.030, 0.09, slope);
+    float normalStrength = 0.045;
+    if (material == kMaterialStone) normalStrength = lerp(0.12, 0.32, slope);
+    if (material == kMaterialDirt) normalStrength = lerp(0.055, 0.16, slope);
+    if (material == kMaterialGrass) normalStrength = lerp(0.035, 0.10, slope);
 
     float3 tangent;
     float3 bitangent;
     terrainNormalBasis(geometricNormal, tangent, bitangent);
 
-    const float sampleDistance = 0.42;
-    const float detailScale = (material == kMaterialStone) ? 0.72 : 0.46;
+    const float sampleDistance = 0.16;
+    const float detailScale = (material == kMaterialStone) ? 1.00 : 0.74;
     const float3 signalPosition = worldPosition * detailScale;
-    const float center = terrainDetailSignal(signalPosition);
+    const float center = terrainMicroHeightSignal(signalPosition);
     const float tangentDelta =
-        terrainDetailSignal((worldPosition + (tangent * sampleDistance)) * detailScale) - center;
+        terrainMicroHeightSignal((worldPosition + (tangent * sampleDistance)) * detailScale) - center;
     const float bitangentDelta =
-        terrainDetailSignal((worldPosition + (bitangent * sampleDistance)) * detailScale) - center;
+        terrainMicroHeightSignal((worldPosition + (bitangent * sampleDistance)) * detailScale) - center;
 
     const float3 perturbed =
         normalize(geometricNormal - (tangent * tangentDelta * normalStrength) - (bitangent * bitangentDelta * normalStrength));
@@ -147,7 +155,7 @@ float3 applySlopeMaterialAlbedo(uint material, float3 geometricNormal, float3 wo
     }
 
     const float slope = 1.0 - abs(geometricNormal.y);
-    const float detail = terrainDetailSignal(worldPosition * 0.21);
+    const float detail = terrainMacroBreakupSignal(worldPosition * 0.21);
     const float lichen = smoothstep(0.35, 0.95, detail * 0.5 + 0.5);
     if (material == kMaterialGrass)
     {

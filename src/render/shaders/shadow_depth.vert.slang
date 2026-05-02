@@ -15,13 +15,15 @@ float4 main(VertexInput input) : SV_Position
     const uint z = (input.inPacked >> kShiftZ) & 0x1Fu;
     const uint face = (input.inPacked >> kShiftFace) & 0x7u;
     const uint corner = (input.inPacked >> kShiftCorner) & 0x3u;
+    const uint material = (input.inPacked >> kShiftMaterial) & 0x7u;
 
     const float3 basePosition = float3(float(x), float(y), float(z));
-    const float3 worldPosition =
+    const float3 geometricWorldPosition =
         basePosition +
         cornerOffset(face, corner) +
         input.inChunkOffset.xyz +
         chunkPc.chunkOffset.xyz;
+    const float3 worldPosition = displacedVoxelWorldPosition(material, face, geometricWorldPosition);
     const int cascadeIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 3);
     return mul(camera.lightViewProj[cascadeIndex], float4(worldPosition, 1.0));
 }

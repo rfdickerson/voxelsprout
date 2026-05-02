@@ -115,10 +115,46 @@ struct VoxelPreview {
     float pipeStyleId = 0.0f;
 };
 
+struct ImportedActorGpuAnimationFrameData;
+
+struct ImportedActorGpuNodeKeyframe {
+    // Row-major 3x4 affine matrices. The vertex shader interpolates these rows
+    // and applies the result per rigid animated NIF draw.
+    float previousRows[12] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f
+    };
+    float nextRows[12] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f
+    };
+    float blend = 0.0f;
+    float normalBlend = 0.0f;
+    float _pad0 = 0.0f;
+    float _pad1 = 0.0f;
+};
+
+struct ImportedActorGpuAnimatedDraw {
+    std::uint32_t firstIndex = 0;
+    std::uint32_t indexCount = 0;
+    std::uint32_t nodeKeyframeIndex = 0;
+    std::uint32_t _pad0 = 0;
+};
+
+struct ImportedActorGpuAnimationFrameData {
+    std::span<const odai::importer::ImportedScenePackedVertex> localVertices;
+    std::span<const std::uint32_t> indices;
+    std::span<const ImportedActorGpuAnimatedDraw> draws;
+    std::span<const ImportedActorGpuNodeKeyframe> nodeKeyframes;
+};
+
 struct ImportedActorFrameData {
     std::span<const odai::importer::ImportedScenePackedVertex> vertices;
     std::span<const std::uint32_t> indices;
     std::span<const odai::importer::ImportedScenePackedDraw> draws;
+    const ImportedActorGpuAnimationFrameData* gpuAnimation = nullptr;
 };
 
 enum class InventoryItemId : std::uint8_t {

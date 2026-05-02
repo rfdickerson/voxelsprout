@@ -37,6 +37,8 @@ namespace odai::render {
 
 namespace {
 
+constexpr std::uint32_t kImportedRtMaterialFlagAlphaTest = 1u;
+
 struct ImportedDrawBounds {
     float min[3] = {
         std::numeric_limits<float>::max(),
@@ -332,11 +334,24 @@ bool createImportedRtGeometryBuffers(
             continue;
         }
         const std::size_t indexEnd = std::min(firstIndex + indexCount, packedIndices.size());
-        rtIndices.insert(
-            rtIndices.end(),
-            packedIndices.begin() + static_cast<std::ptrdiff_t>(firstIndex),
-            packedIndices.begin() + static_cast<std::ptrdiff_t>(indexEnd)
-        );
+        for (std::size_t indexOffset = firstIndex; indexOffset + 2u < indexEnd; indexOffset += 3u) {
+            const std::uint32_t i0 = packedIndices[indexOffset + 0u];
+            const std::uint32_t i1 = packedIndices[indexOffset + 1u];
+            const std::uint32_t i2 = packedIndices[indexOffset + 2u];
+            if (i0 >= packedVertices.size() ||
+                i1 >= packedVertices.size() ||
+                i2 >= packedVertices.size()) {
+                continue;
+            }
+            const std::uint32_t triangleFlags =
+                packedVertices[i0].flags | packedVertices[i1].flags | packedVertices[i2].flags;
+            if ((triangleFlags & kImportedRtMaterialFlagAlphaTest) != 0u) {
+                continue;
+            }
+            rtIndices.push_back(i0);
+            rtIndices.push_back(i1);
+            rtIndices.push_back(i2);
+        }
     }
 
     if (rtIndices.empty()) {
@@ -899,6 +914,33 @@ bool RendererBackend::uploadImportedSceneInternal(
                 sourceDrawPageRangeIndices.begin(),
                 sourceDrawPageRangeIndices.end(),
                 kInvalidImportedPageRangeIndex);
+        }
+    }
+    if (!importedSceneIsInterior &&
+        sourceTerrainDrawCount > 0u &&
+        (gpuScene != nullptr || sourceTerrainDrawCount == uploadScene.packedDraws.size())) {
+        for (std::uint32_t drawIndex = 0; drawIndex < sourceTerrainDrawCount; ++drawIndex) {
+            if (drawIndex >= uploadScene.packedDraws.size()) {
+                break;
+            }
+            const odai::importer::ImportedScenePackedDraw& sourceDraw = uploadScene.packedDraws[drawIndex];
+            if (sourceDraw.indexCount == 0u) {
+                continue;
+            }
+            const ImportedDrawBounds terrainCellBounds = computeImportedDrawBounds(
+                uploadScene.packedVertices,
+                uploadScene.packedIndices,
+                std::span<const odai::importer::ImportedScenePackedDraw>(&sourceDraw, 1u));
+            if (!terrainCellBounds.valid) {
+                continue;
+            }
+
+            ImportedScenePageDrawRange rendererRange{};
+            std::memcpy(rendererRange.boundsMin, terrainCellBounds.min, sizeof(rendererRange.boundsMin));
+            std::memcpy(rendererRange.boundsMax, terrainCellBounds.max, sizeof(rendererRange.boundsMax));
+            const std::uint32_t rendererRangeIndex = static_cast<std::uint32_t>(pageDrawRanges.size());
+            pageDrawRanges.push_back(rendererRange);
+            sourceDrawPageRangeIndices[drawIndex] = rendererRangeIndex;
         }
     }
     std::uint32_t mergedTerrainDrawCount = 0;

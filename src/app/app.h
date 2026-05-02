@@ -2,6 +2,8 @@
 
 #include "audio/sound_engine.h"
 #include "core/input.h"
+#include "game/game_state.h"
+#include "game/lua_script.h"
 #include "import/gpu_scene.h"
 #include "render/renderer.h"
 #include "sim/simulation.h"
@@ -11,8 +13,10 @@
 #include "world/world.h"
 
 #include <filesystem>
+#include <future>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 struct GLFWwindow;
@@ -169,13 +173,19 @@ private:
     [[nodiscard]] bool tryPlaceTrackFromCameraRay();
     [[nodiscard]] bool tryRemoveTrackFromCameraRay();
     void resetVoxelBreakProgress();
-    void initializeBalmoraGuards();
+    void initializeBalmoraGuards(bool reusePreparedNavmesh = false);
     void updateBalmoraGuards(float dt);
     void rebuildBalmoraGuardRenderFrame(float simulationAlpha);
     void initializeBalmoraDoorActivation();
+    void initializeMorrowindGameplayScripts();
+    [[nodiscard]] bool tryActivateMorrowindScript();
     [[nodiscard]] bool tryActivateBalmoraDoor();
     [[nodiscard]] bool enterMorrowindInterior(const odai::importer::MorrowindDoorReference& door);
     [[nodiscard]] bool leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& door);
+    [[nodiscard]] std::pair<int, int> currentMorrowindExteriorCell() const;
+    [[nodiscard]] bool updateMorrowindExteriorStreaming(bool force);
+    void startMorrowindExteriorStreamingPrepare(int centerCellX, int centerCellY);
+    [[nodiscard]] bool pollMorrowindExteriorStreamingPrepare();
 
     struct CameraState {
         float x = 0.0f;
@@ -210,6 +220,7 @@ private:
         std::vector<odai::world::NavmeshPathPoint> path;
         std::size_t routeIndex = 0;
         std::size_t pathIndex = 0;
+        float pathRetryCooldownSeconds = 0.0f;
     };
 
     struct MorrowindInteriorCacheEntry {
@@ -217,6 +228,21 @@ private:
         odai::world::ImportedSceneCollision collision;
         std::vector<odai::importer::MorrowindDoorReference> doors;
         bool sceneLoaded = false;
+    };
+
+    struct MorrowindExteriorPreparedRegion {
+        odai::importer::ImportedScene scene;
+        odai::importer::GpuSceneAsset gpuSceneAsset;
+        odai::world::ImportedSceneCollision collision;
+        odai::world::Navmesh navmesh;
+        std::vector<std::pair<int, int>> loadedCells;
+        std::uint32_t cacheHitCount = 0;
+        std::uint32_t cacheMissCount = 0;
+        bool navmeshCacheHit = false;
+        int centerCellX = 0;
+        int centerCellY = 0;
+        bool success = false;
+        std::string error;
     };
 
     GLFWwindow* m_window = nullptr;
@@ -281,9 +307,25 @@ private:
     bool m_importedFlatShading = false;
     bool m_importedWaterDebug = false;
     std::filesystem::path m_importedScenePath;
+    std::filesystem::path m_morrowindRuntimeDataFilesPath;
+    std::filesystem::path m_morrowindRuntimeCellCacheRoot;
+    bool m_morrowindRuntimeExteriorStreamingEnabled = false;
+    int m_morrowindRuntimeExteriorRadius = 1;
+    int m_morrowindRuntimeLoadedCenterCellX = 0;
+    int m_morrowindRuntimeLoadedCenterCellY = 0;
+    bool m_morrowindRuntimeLoadedCenterValid = false;
+    bool m_morrowindRuntimePrepareActive = false;
+    int m_morrowindRuntimePrepareCenterCellX = 0;
+    int m_morrowindRuntimePrepareCenterCellY = 0;
+    std::future<MorrowindExteriorPreparedRegion> m_morrowindRuntimePrepareFuture;
     std::vector<odai::importer::MorrowindDoorReference> m_balmoraDoors;
     std::unordered_map<std::string, MorrowindInteriorCacheEntry> m_balmoraInteriorCache;
     std::string m_currentMorrowindInteriorCell;
+    odai::game::GameState m_gameState;
+    odai::game::LuaScriptRuntime m_luaScriptRuntime;
+    odai::game::DialogueResult m_activeDialogue;
+    std::string m_activeDialogueActorId;
+    std::string m_lastScriptMessage;
     bool m_balmoraExteriorCached = false;
     odai::importer::ImportedScene m_balmoraExteriorScene;
     odai::importer::GpuSceneAsset m_balmoraExteriorGpuSceneAsset;

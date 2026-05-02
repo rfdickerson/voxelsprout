@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace odai::importer {
@@ -140,6 +141,35 @@ struct MorrowindBalmoraCookResult {
     std::unordered_map<std::uint32_t, std::string> texturePathByLandscapeIndex;
 };
 
+struct MorrowindExteriorCellSelection {
+    std::vector<std::string> exteriorCellNames;
+    std::vector<std::pair<int, int>> explicitCells;
+    int anchorNeighborRadius = 1;
+    int corridorRadius = 0;
+    bool connectAnchorsInOrder = false;
+};
+
+struct MorrowindExteriorCookResult {
+    ImportedScene scene;
+    std::vector<std::pair<int, int>> anchorCells;
+    std::vector<std::pair<int, int>> includedCells;
+    std::unordered_map<std::string, std::string> modelPathById;
+    std::unordered_map<std::uint32_t, std::string> texturePathByLandscapeIndex;
+};
+
+struct MorrowindExteriorRuntimeLoadOptions {
+    std::vector<std::pair<int, int>> cells;
+    std::filesystem::path cacheRoot;
+    bool useCellCache = true;
+};
+
+struct MorrowindExteriorRuntimeLoadResult {
+    ImportedScene scene;
+    std::vector<std::pair<int, int>> loadedCells;
+    std::uint32_t cacheHitCount = 0;
+    std::uint32_t cacheMissCount = 0;
+};
+
 bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& outputPath);
 bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& outScene);
 bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedScene& outScene);
@@ -153,6 +183,16 @@ bool loadMorrowindTexture(
 
 bool exportImportedSceneTerrainObj(const ImportedScene& scene, const std::filesystem::path& outputObjPath);
 
+bool cookMorrowindExteriorRegionScene(
+    const std::filesystem::path& morrowindDataFilesPath,
+    const MorrowindExteriorCellSelection& selection,
+    MorrowindExteriorCookResult& outResult
+);
+bool loadMorrowindExteriorCellsRuntime(
+    const std::filesystem::path& morrowindDataFilesPath,
+    const MorrowindExteriorRuntimeLoadOptions& options,
+    MorrowindExteriorRuntimeLoadResult& outResult
+);
 bool cookMorrowindBalmoraScene(
     const std::filesystem::path& morrowindDataFilesPath,
     MorrowindBalmoraCookResult& outResult

@@ -163,6 +163,13 @@ float ridgedPerlin2(float x, float z) {
     return 1.0f - std::abs(std::clamp(perlin2(x, z), -1.0f, 1.0f));
 }
 
+float stretchedRidgedPerlin2(float x, float z, float axisX, float axisZ, float alongScale, float acrossScale) {
+    const float along = (x * axisX) + (z * axisZ);
+    const float across = (x * -axisZ) + (z * axisX);
+    const float ridged = ridgedPerlin2(along * alongScale, across * acrossScale);
+    return ridged * ridged;
+}
+
 WarpedPoint warpTerrainDomain(float worldX, float worldZ) {
     const float broadWarpX =
         perlin2((worldX * 0.0065f) + 13.7f, (worldZ * 0.0065f) - 7.1f) * 22.0f;
@@ -264,9 +271,13 @@ ColumnSample sampleBaseColumnAtWorld(int worldX, int worldZ) {
     const float macroShape = perlin2(sampleX * 0.0085f, sampleZ * 0.0085f);
     const float rolling = perlin2(sampleX * 0.020f, sampleZ * 0.020f);
     const float detail = perlin2(sampleX * 0.046f, sampleZ * 0.046f);
-    const float ridgePrimary = ridgedPerlin2((sampleX * 0.017f) - 24.0f, (sampleZ * 0.017f) + 18.0f);
-    const float ridgeSecondary = ridgedPerlin2((sampleX * 0.041f) + 9.0f, (sampleZ * 0.041f) - 35.0f);
-    const float ridge = std::pow(std::clamp((ridgePrimary * 0.78f) + (ridgeSecondary * 0.22f), 0.0f, 1.0f), 2.4f);
+    const float ridgePrimary =
+        stretchedRidgedPerlin2(sampleX - 240.0f, sampleZ + 180.0f, 0.86f, 0.51f, 0.0065f, 0.033f);
+    const float ridgeSecondary =
+        stretchedRidgedPerlin2(sampleX + 90.0f, sampleZ - 350.0f, -0.34f, 0.94f, 0.011f, 0.052f);
+    const float ridgeDetail = ridgedPerlin2((sampleX * 0.041f) + 9.0f, (sampleZ * 0.041f) - 35.0f);
+    const float ridge =
+        std::pow(std::clamp((ridgePrimary * 0.64f) + (ridgeSecondary * 0.24f) + (ridgeDetail * 0.12f), 0.0f, 1.0f), 1.7f);
     const float ruggednessField = (perlin2((sampleX * 0.011f) + 52.0f, (sampleZ * 0.011f) - 44.0f) * 0.5f) + 0.5f;
     const float moisture = (perlin2((sampleX * 0.006f) + 91.0f, (sampleZ * 0.006f) - 37.0f) * 0.5f) + 0.5f;
     const float temperature = (perlin2((sampleX * 0.005f) - 63.0f, (sampleZ * 0.005f) + 84.0f) * 0.5f) + 0.5f;
@@ -307,7 +318,7 @@ ColumnSample sampleBaseColumnAtWorld(int worldX, int worldZ) {
         (macroShape * (5.0f + biomeReliefBias)) +
         (rolling * (2.7f + (ruggednessField * 1.8f))) +
         (detail * (0.8f + biomeReliefBias)) +
-        (ridge * ruggednessField * (2.2f + biomeReliefBias)) +
+        (ridge * ruggednessField * (3.4f + (biomeReliefBias * 1.25f))) +
         biomeHeightBias -
         basinDepth;
 
@@ -353,6 +364,15 @@ float slopeAtLocal(const TerrainPatch& patch, int localX, int localZ) {
     const float dx = (east - west) * 0.5f;
     const float dz = (south - north) * 0.5f;
     return std::sqrt((dx * dx) + (dz * dz));
+}
+
+float heightfieldNormalUpDot(float slope) {
+    return 1.0f / std::sqrt(1.0f + (slope * slope));
+}
+
+float cliffMaskFromSlope(float slope) {
+    const float steepness = 1.0f - heightfieldNormalUpDot(slope);
+    return smoothstep(0.48f, 0.86f, steepness);
 }
 
 ColumnSample sampleTerrainAtWorld(const TerrainPatch& patch, int worldX, int worldZ) {
@@ -612,8 +632,9 @@ void applyCliffBias(TerrainPatch& patch) {
             const int worldX = patch.minWorldX + localX;
             const int worldZ = patch.minWorldZ + localZ;
             const float slope = slopeAtLocal(patch, localX, localZ);
+            const float normalCliff = cliffMaskFromSlope(slope);
             const float cliff =
-                smoothstep(3.15f, 6.80f, slope) * (0.55f + (sample.ruggedness * 0.45f)) *
+                normalCliff * (0.55f + (sample.ruggedness * 0.45f)) *
                 (1.0f - (sample.settlementMask * 0.80f));
             const float ridgeCliff = sample.ridge * smoothstep(1.60f, 4.20f, slope) * 0.50f;
             sample.cliffBias = std::clamp(std::max(cliff, ridgeCliff), 0.0f, 1.0f);
@@ -627,6 +648,39 @@ void applyCliffBias(TerrainPatch& patch) {
             sample.terrainHeightF =
                 lerp(sample.terrainHeightF, shelfHeight, sample.cliffBias * 0.28f) +
                 (fracture * sample.cliffBias * 0.16f);
+        }
+    }
+    clampPatchHeights(patch);
+}
+
+void applyCliffFaceExaggeration(TerrainPatch& patch) {
+    std::vector<float> originalHeights;
+    originalHeights.reserve(patch.samples.size());
+    for (const ColumnSample& sample : patch.samples) {
+        originalHeights.push_back(sample.terrainHeightF);
+    }
+
+    auto originalHeightAt = [&](int localX, int localZ) {
+        const int x = std::clamp(localX, 0, patch.width - 1);
+        const int z = std::clamp(localZ, 0, patch.depth - 1);
+        return originalHeights[static_cast<std::size_t>(patch.index(x, z))];
+    };
+
+    for (int localZ = 0; localZ < patch.depth; ++localZ) {
+        for (int localX = 0; localX < patch.width; ++localX) {
+            ColumnSample& sample = patch.sampleAtLocal(localX, localZ);
+            if (sample.cliffBias <= 0.001f) {
+                continue;
+            }
+
+            const float center = originalHeightAt(localX, localZ);
+            const float averageNeighbor =
+                (originalHeightAt(localX - 1, localZ) +
+                 originalHeightAt(localX + 1, localZ) +
+                 originalHeightAt(localX, localZ - 1) +
+                 originalHeightAt(localX, localZ + 1)) * 0.25f;
+            const float contrast = std::clamp(center - averageNeighbor, -2.5f, 2.5f);
+            sample.terrainHeightF += contrast * sample.cliffBias * 0.32f;
         }
     }
     clampPatchHeights(patch);
@@ -668,6 +722,7 @@ TerrainPatch buildTerrainPatch(int worldMinX, int worldMinZ, int width, int dept
     generateFlowMapAndCarve(patch);
     applySlopeBasedNoiseDetail(patch);
     applyCliffBias(patch);
+    applyCliffFaceExaggeration(patch);
     finalizeTerrainPatch(patch);
     return patch;
 }
@@ -817,9 +872,12 @@ Chunk buildProceduralChunk(int chunkX, int chunkY, int chunkZ) {
             const ColumnSample sample = sampleTerrainAtWorld(terrain, worldX, worldZ);
             const bool cliffOrRock =
                 sample.biome == BiomeType::RockyHighlands ||
-                sample.slope > 2.25f ||
-                sample.cliffBias > 0.34f;
+                cliffMaskFromSlope(sample.slope) > 0.18f ||
+                sample.cliffBias > 0.24f;
             const bool carvedChannel = sample.flow > 0.70f && sample.slope > 0.20f;
+            const int rockFaceDepth = cliffOrRock
+                ? 2 + static_cast<int>(std::round(std::clamp(sample.cliffBias, 0.0f, 1.0f) * 4.0f))
+                : 0;
 
             ++stats.biomeColumnCounts[static_cast<std::size_t>(sample.biome)];
             if (sample.supportsGrass) {
@@ -837,13 +895,13 @@ Chunk buildProceduralChunk(int chunkX, int chunkY, int chunkZ) {
                 if (y <= sample.terrainHeight - 4) {
                     voxelType = VoxelType::Stone;
                 } else if (y < sample.terrainHeight) {
-                    voxelType = cliffOrRock && y >= sample.terrainHeight - 2
+                    voxelType = cliffOrRock && y >= sample.terrainHeight - rockFaceDepth
                         ? VoxelType::Stone
                         : VoxelType::Dirt;
-                } else if (sample.supportsGrass) {
-                    voxelType = VoxelType::Grass;
                 } else if (cliffOrRock) {
                     voxelType = VoxelType::Stone;
+                } else if (sample.supportsGrass) {
+                    voxelType = VoxelType::Grass;
                 } else if (carvedChannel) {
                     voxelType = VoxelType::Dirt;
                 } else {

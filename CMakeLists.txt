@@ -7,6 +7,29 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 option(ODAI_BUILD_APP "Build the main Vulkan toy application." ON)
 option(ODAI_BUILD_TOOLS "Build offline content tools." ON)
+find_package(Lua REQUIRED)
+
+function(odai_copy_lua_runtime TARGET_NAME)
+    if(WIN32)
+        if(DEFINED VCPKG_TARGET_TRIPLET)
+            set(ODAI_LUA_DLL "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin/lua.dll")
+        else()
+            get_filename_component(ODAI_LUA_LIB_DIR "${LUA_LIBRARIES}" DIRECTORY)
+            get_filename_component(ODAI_LUA_TRIPLET_DIR "${ODAI_LUA_LIB_DIR}" DIRECTORY)
+            set(ODAI_LUA_DLL "${ODAI_LUA_TRIPLET_DIR}/bin/lua.dll")
+        endif()
+        if(EXISTS "${ODAI_LUA_DLL}")
+            add_custom_command(
+                TARGET ${TARGET_NAME}
+                PRE_LINK
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${ODAI_LUA_DLL}"
+                    "$<TARGET_FILE_DIR:${TARGET_NAME}>"
+                VERBATIM
+            )
+        endif()
+    endif()
+endfunction()
 
 # Optional Slang shader compilation (to SPIR-V for Vulkan).
 # Produces .slang.spv files next to the source shaders.
@@ -142,6 +165,8 @@ if(ODAI_BUILD_APP)
         src/app/app.cc
         src/audio/sound_engine.cc
         src/core/log.cc
+        src/game/game_state.cc
+        src/game/lua_script.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
@@ -212,6 +237,9 @@ if(ODAI_BUILD_APP)
     endif()
 
     target_include_directories(odai PRIVATE src)
+    target_include_directories(odai PRIVATE ${LUA_INCLUDE_DIR})
+    target_link_libraries(odai PRIVATE ${LUA_LIBRARIES})
+    odai_copy_lua_runtime(odai)
     target_compile_definitions(
         odai PRIVATE
         ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
@@ -299,6 +327,20 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_balmora_cooker PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
+    add_executable(odai_morrowind_exterior_cooker
+        src/import/gpu_scene.cc
+        src/import/imported_scene.cc
+        src/import/morrowind_nif.cc
+        src/tools/morrowind_exterior_cooker_main.cc
+    )
+    target_include_directories(odai_morrowind_exterior_cooker PRIVATE src)
+    set_target_properties(odai_morrowind_exterior_cooker PROPERTIES OUTPUT_NAME odai_morrowind_exterior_cooker)
+    if(MSVC)
+        target_compile_options(odai_morrowind_exterior_cooker PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_morrowind_exterior_cooker PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
     add_executable(odai_balmora_interior_cache
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
@@ -328,6 +370,23 @@ if(ODAI_BUILD_TOOLS)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(odai_game_script_tests
+        tests/game_script_tests.cc
+        src/game/game_state.cc
+        src/game/lua_script.cc
+    )
+    target_include_directories(odai_game_script_tests PRIVATE src)
+    target_include_directories(odai_game_script_tests PRIVATE ${LUA_INCLUDE_DIR})
+    target_compile_definitions(odai_game_script_tests PRIVATE ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\")
+    target_link_libraries(odai_game_script_tests PRIVATE ${LUA_LIBRARIES})
+    odai_copy_lua_runtime(odai_game_script_tests)
+    if(MSVC)
+        target_compile_options(odai_game_script_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_game_script_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_game_script_tests COMMAND odai_game_script_tests)
+
     add_executable(odai_imported_scene_tests
         tests/imported_scene_tests.cc
         src/import/gpu_scene.cc

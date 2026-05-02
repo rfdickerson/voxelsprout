@@ -31,11 +31,12 @@ VertexOutput main(VertexInput input)
     const uint material = (input.inPacked >> kShiftMaterial) & 0x7u;
     const uint baseColorIndex = (input.inPacked >> kShiftBaseColor) & 0x7u;
     const float3 basePosition = float3(float(x), float(y), float(z));
-    const float3 worldPosition =
+    const float3 geometricWorldPosition =
         basePosition +
         cornerOffset(face, corner) +
         input.inChunkOffset.xyz +
         chunkPc.chunkOffset.xyz;
+    const float3 worldPosition = displacedVoxelWorldPosition(material, face, geometricWorldPosition);
 
     output.outFace = face;
     output.outMaterial = material;

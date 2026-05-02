@@ -43,6 +43,7 @@ Thumbs.db
 *.tmp
 *.pid
 /balmora_interior_cache/
+/morrowind_cell_cache/
 
 # Binaries and debug symbols
 *.exe
