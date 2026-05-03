@@ -348,6 +348,11 @@ bool equalsIgnoreCaseAscii(std::string_view lhs, std::string_view rhs) {
     return true;
 }
 
+bool startsWithIgnoreCaseAscii(std::string_view text, std::string_view prefix) {
+    return text.size() >= prefix.size() &&
+        equalsIgnoreCaseAscii(text.substr(0u, prefix.size()), prefix);
+}
+
 bool nodeIsRootCollisionNode(const NifNodeRecord& node) {
     return node.isRootCollisionNode ||
         equalsIgnoreCaseAscii(node.avObject.name, "RootCollisionNode");
@@ -1130,7 +1135,61 @@ struct GeometryTraversalState {
     bool includeHiddenGeometry = false;
     bool keepAlphaBlendOnlyParts = false;
     bool bakeSkinBindPose = false;
+    std::string actorPartFilter;
+    std::vector<std::string>* actorPartSeenGeometryNames = nullptr;
+    std::vector<std::string>* actorPartMatchedEmptyGeometryNames = nullptr;
 };
+
+std::string normalizeActorPartFilterKey(std::string value) {
+    value = lowerAsciiCopy(value);
+    std::string out;
+    out.reserve(value.size());
+    for (char ch : value) {
+        if (ch == '_' || ch == '-' || std::isspace(static_cast<unsigned char>(ch))) {
+            continue;
+        }
+        out.push_back(ch);
+    }
+    const auto eraseToken = [&](std::string token) {
+        std::size_t pos = out.find(token);
+        while (pos != std::string::npos) {
+            out.erase(pos, token.size());
+            pos = out.find(token);
+        }
+    };
+    eraseToken("tri");
+    eraseToken("bip01");
+    std::size_t pos = out.find("right");
+    while (pos != std::string::npos) {
+        out.replace(pos, 5u, "r");
+        pos = out.find("right");
+    }
+    pos = out.find("left");
+    while (pos != std::string::npos) {
+        out.replace(pos, 4u, "l");
+        pos = out.find("left");
+    }
+    return out;
+}
+
+bool actorPartFilterMatches(std::string_view nodeName, std::string_view filter) {
+    if (filter.empty()) {
+        return true;
+    }
+    std::string name{nodeName};
+    if (startsWithIgnoreCaseAscii(name, "tri ")) {
+        name = name.substr(4u);
+    }
+    if (startsWithIgnoreCaseAscii(name, filter)) {
+        return true;
+    }
+    const std::string normalizedName = normalizeActorPartFilterKey(name);
+    const std::string normalizedFilter = normalizeActorPartFilterKey(std::string(filter));
+    if (normalizedName.empty() || normalizedFilter.empty()) {
+        return false;
+    }
+    return normalizedName.rfind(normalizedFilter, 0u) == 0u;
+}
 
 void buildRecordWorldTransformsRecursive(
     const std::vector<NifRecord>& records,
@@ -1182,6 +1241,29 @@ std::vector<std::array<float, 16>> buildRecordWorldTransforms(
     return transforms;
 }
 
+std::vector<std::int32_t> inferNifRootRefsFromHierarchy(const std::vector<NifRecord>& records) {
+    std::vector<bool> referenced(records.size(), false);
+    for (const NifRecord& record : records) {
+        if (record.kind != RecordKind::Node) {
+            continue;
+        }
+        for (const std::int32_t childRef : record.node.childRefs) {
+            if (childRef >= 0 && static_cast<std::size_t>(childRef) < referenced.size()) {
+                referenced[static_cast<std::size_t>(childRef)] = true;
+            }
+        }
+    }
+    std::vector<std::int32_t> roots;
+    for (std::size_t recordIndex = 0; recordIndex < records.size(); ++recordIndex) {
+        const NifRecord& record = records[recordIndex];
+        if (!referenced[recordIndex] &&
+            (record.kind == RecordKind::Node || record.kind == RecordKind::Geometry)) {
+            roots.push_back(static_cast<std::int32_t>(recordIndex));
+        }
+    }
+    return roots;
+}
+
 void appendGeometry(
     const std::vector<NifRecord>& records,
     std::int32_t geometryRecordIndex,
@@ -1227,6 +1309,19 @@ void appendGeometry(
     if (geometryRecord.kind != RecordKind::Geometry || state.skipMeshes) {
         return;
     }
+    if (state.actorPartSeenGeometryNames != nullptr) {
+        state.actorPartSeenGeometryNames->push_back(geometryRecord.geometry.avObject.name);
+    }
+    const bool hasSkinInstance =
+        geometryRecord.geometry.skinInstanceRef >= 0 &&
+        static_cast<std::size_t>(geometryRecord.geometry.skinInstanceRef) < records.size() &&
+        records[static_cast<std::size_t>(geometryRecord.geometry.skinInstanceRef)].kind == RecordKind::SkinInstance;
+    if (hasSkinInstance &&
+        !actorPartFilterMatches(
+            geometryRecord.geometry.avObject.name,
+            state.actorPartFilter)) {
+        return;
+    }
 
     const std::array<float, 16> localTransform = makeTransformMatrix(geometryRecord.geometry.avObject.transform);
     const std::array<float, 16> worldTransform = multiplyMatrices(state.parentTransform, localTransform);
@@ -1237,6 +1332,17 @@ void appendGeometry(
     const NifRecord& dataRecord = records[static_cast<std::size_t>(dataRef)];
     if (dataRecord.kind != RecordKind::TriShapeData || dataRecord.triShapeData.indices.empty() ||
         dataRecord.triShapeData.vertices.empty()) {
+        if (state.actorPartMatchedEmptyGeometryNames != nullptr) {
+            state.actorPartMatchedEmptyGeometryNames->push_back(
+                geometryRecord.geometry.avObject.name + " vertices=" +
+                std::to_string(dataRecord.kind == RecordKind::TriShapeData
+                    ? dataRecord.triShapeData.vertices.size()
+                    : 0u) +
+                " indices=" +
+                std::to_string(dataRecord.kind == RecordKind::TriShapeData
+                    ? dataRecord.triShapeData.indices.size()
+                    : 0u));
+        }
         return;
     }
 
@@ -1556,6 +1662,24 @@ void copyMatrixToFloatArray(const std::array<float, 16>& matrix, float out[16]) 
     std::copy(matrix.begin(), matrix.end(), out);
 }
 
+std::string joinDiagnosticStrings(std::span<const std::string> values, std::size_t maxCount) {
+    std::string out;
+    const std::size_t count = std::min(values.size(), maxCount);
+    for (std::size_t index = 0; index < count; ++index) {
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += values[index];
+    }
+    if (values.size() > count) {
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += "...";
+    }
+    return out;
+}
+
 std::string trimAsciiWhitespace(std::string value) {
     while (!value.empty() && (value.back() == ' ' || value.back() == '\t' ||
                               value.back() == '\r' || value.back() == '\n')) {
@@ -1816,6 +1940,7 @@ struct StaticNifLoadOptions {
     std::uint32_t* unweightedVertexCount = nullptr;
     std::uint32_t* unknownBoneInfluenceCount = nullptr;
     std::uint32_t* droppedInfluenceCount = nullptr;
+    std::string actorPartFilter;
 };
 
 bool loadMorrowindStaticNifWithOptions(
@@ -1973,7 +2098,10 @@ bool loadMorrowindStaticNifWithOptions(
             }
         }
         if (rootRefs.empty()) {
-            rootRefs.push_back(0);
+            rootRefs = inferNifRootRefsFromHierarchy(records);
+        }
+        if (rootRefs.empty()) {
+            throw std::runtime_error("NIF did not contain a root node or root geometry");
         }
         const bool discardSingleRootZeroTransform =
             (rootRefs.size() == 1u && rootRefs.front() == 0);
@@ -1982,6 +2110,8 @@ bool loadMorrowindStaticNifWithOptions(
                 records,
                 rootRefs,
                 discardSingleRootZeroTransform && !options.preserveRootTransform);
+        std::vector<std::string> actorPartSeenGeometryNames;
+        std::vector<std::string> actorPartMatchedEmptyGeometryNames;
         for (const std::int32_t rootRef : rootRefs) {
             GeometryTraversalState traversalState{};
             traversalState.parentTransform = identityMatrix();
@@ -1999,9 +2129,20 @@ bool loadMorrowindStaticNifWithOptions(
             traversalState.unweightedVertexCount = options.unweightedVertexCount;
             traversalState.unknownBoneInfluenceCount = options.unknownBoneInfluenceCount;
             traversalState.droppedInfluenceCount = options.droppedInfluenceCount;
+            traversalState.actorPartFilter = options.actorPartFilter;
+            traversalState.actorPartSeenGeometryNames = &actorPartSeenGeometryNames;
+            traversalState.actorPartMatchedEmptyGeometryNames = &actorPartMatchedEmptyGeometryNames;
             appendGeometry(records, rootRef, traversalState, outResult, sawGeometry);
         }
         if (!sawGeometry) {
+            if (!options.actorPartFilter.empty()) {
+                throw std::runtime_error(
+                    "NIF did not contain supported static geometry for actor part filter '" +
+                    options.actorPartFilter + "'; seenGeometry=[" +
+                    joinDiagnosticStrings(actorPartSeenGeometryNames, 12u) +
+                    "]; matchedEmptyGeometry=[" +
+                    joinDiagnosticStrings(actorPartMatchedEmptyGeometryNames, 12u) + "]");
+            }
             throw std::runtime_error("NIF did not contain supported static geometry");
         }
         return true;
@@ -2042,7 +2183,7 @@ bool loadMorrowindActorPartNif(
     std::string& outError
 ) {
     StaticNifLoadOptions options{};
-    options.includeHiddenGeometry = false;
+    options.includeHiddenGeometry = true;
     options.keepAlphaBlendOnlyParts = true;
     options.preserveRootTransform = true;
     options.bakeSkinBindPose = true;
@@ -2441,79 +2582,154 @@ std::uint16_t importedSkeletonBoneIndex(
             return static_cast<std::uint16_t>(boneIndex);
         }
     }
-    return 0u;
+    return std::numeric_limits<std::uint16_t>::max();
 }
 
-std::string inferActorPartSlotFromNifPath(const std::filesystem::path& nifPath) {
-    const std::string key = lowerAsciiCopy(nifPath.generic_string());
-    if (key.find("hair") != std::string::npos) return "hair";
-    if (key.find("head") != std::string::npos || key.find("helm") != std::string::npos) return "head";
-    if (key.find("neck") != std::string::npos) return "neck";
-    if (key.find("hand") != std::string::npos || key.find("gauntlet") != std::string::npos) return "hand";
-    if (key.find("forearm") != std::string::npos || key.find("_fa_") != std::string::npos) return "forearm";
-    if (key.find("upperarm") != std::string::npos || key.find("_ua_") != std::string::npos) return "upperarm";
-    if (key.find("upperleg") != std::string::npos || key.find("_ul_") != std::string::npos) return "upperleg";
-    if (key.find("foot") != std::string::npos || key.find("shoe") != std::string::npos ||
-        key.find("boot") != std::string::npos) return "foot";
-    if (key.find("ankle") != std::string::npos || key.find("_a_") != std::string::npos) return "ankle";
-    if (key.find("knee") != std::string::npos || key.find("_k_") != std::string::npos) return "knee";
-    if (key.find("pants_g") != std::string::npos || key.find("skirt") != std::string::npos) return "groin";
-    return "body";
+std::string normalizeActorPartSlot(std::string slot) {
+    slot = lowerAsciiCopy(slot);
+    if (slot == "upperarm") return "upper_arm";
+    if (slot == "upperleg") return "upper_leg";
+    if (slot == "shoe" || slot == "boot") return "foot";
+    if (slot == "skirt") return "groin";
+    return slot;
 }
 
-std::uint16_t rigidActorPartBoneIndex(
-    const ImportedSkinnedActorAsset& actorAsset,
-    const std::string& slot,
+bool actorPartMetadataSlotSupported(const MorrowindActorPartMetadata& metadata) {
+    const std::string slot = normalizeActorPartSlot(metadata.slot);
+    return slot == "body" ||
+        slot == "torso" ||
+        slot == "hair" ||
+        slot == "head" ||
+        slot == "helm" ||
+        slot == "neck" ||
+        slot == "groin" ||
+        slot == "hand" ||
+        slot == "wrist" ||
+        slot == "forearm" ||
+        slot == "upper_arm" ||
+        slot == "foot" ||
+        slot == "ankle" ||
+        slot == "knee" ||
+        slot == "upper_leg" ||
+        slot == "clavicle" ||
+        slot == "tail";
+}
+
+std::string canonicalActorPartBoneName(
+    const MorrowindActorPartMetadata& metadata,
     float localX
 ) {
-    const std::string lowerSlot = lowerAsciiCopy(slot);
-    const bool leftSide = localX < 0.0f;
-    if (lowerSlot == "hair" || lowerSlot == "head" || lowerSlot == "helm") {
-        return importedSkeletonBoneIndex(actorAsset, "Bip01 Head");
+    const std::string slot = normalizeActorPartSlot(metadata.slot);
+    std::string side = lowerAsciiCopy(metadata.side);
+    if (side != "left" && side != "right") {
+        side = localX < 0.0f ? "left" : "right";
     }
-    if (lowerSlot == "neck") {
-        return importedSkeletonBoneIndex(actorAsset, "Bip01 Neck");
+    const char* sidePrefix = side == "left" ? "Left" : "Right";
+    if (!metadata.attachBone.empty()) {
+        const std::string attachBone = metadata.attachBone;
+        const std::string lowerAttachBone = lowerAsciiCopy(attachBone);
+        const bool sideSensitiveAttach =
+            lowerAttachBone == "hand" ||
+            lowerAttachBone == "wrist" ||
+            lowerAttachBone == "forearm" ||
+            lowerAttachBone == "upper arm" ||
+            lowerAttachBone == "foot" ||
+            lowerAttachBone == "ankle" ||
+            lowerAttachBone == "knee" ||
+            lowerAttachBone == "upper leg" ||
+            lowerAttachBone == "clavicle";
+        if (sideSensitiveAttach) {
+            return std::string(sidePrefix) + " " + attachBone;
+        }
+        return attachBone;
     }
-    if (lowerSlot == "hand" || lowerSlot == "wrist") {
-        return importedSkeletonBoneIndex(actorAsset, leftSide ? "Bip01 L Hand" : "Bip01 R Hand");
+    if (slot == "hair" || slot == "head" || slot == "helm") {
+        return "Head";
     }
-    if (lowerSlot == "forearm") {
-        return importedSkeletonBoneIndex(actorAsset, leftSide ? "Bip01 L Forearm" : "Bip01 R Forearm");
+    if (slot == "neck") {
+        return "Neck";
     }
-    if (lowerSlot == "upperarm" || lowerSlot == "upper_arm") {
-        return importedSkeletonBoneIndex(actorAsset, leftSide ? "Bip01 L UpperArm" : "Bip01 R UpperArm");
+    if (slot == "hand" || slot == "wrist") {
+        return std::string(sidePrefix) + (slot == "wrist" ? " Wrist" : " Hand");
     }
-    if (lowerSlot == "foot" || lowerSlot == "shoe" || lowerSlot == "boot") {
-        return importedSkeletonBoneIndex(actorAsset, leftSide ? "Bip01 L Foot" : "Bip01 R Foot");
+    if (slot == "forearm") {
+        return std::string(sidePrefix) + " Forearm";
     }
-    if (lowerSlot == "ankle") {
-        return importedSkeletonBoneIndex(actorAsset, leftSide ? "Bip01 L Calf" : "Bip01 R Calf");
+    if (slot == "upper_arm") {
+        return std::string(sidePrefix) + " Upper Arm";
     }
-    if (lowerSlot == "knee" || lowerSlot == "upperleg" || lowerSlot == "upper_leg") {
-        return importedSkeletonBoneIndex(actorAsset, leftSide ? "Bip01 L Thigh" : "Bip01 R Thigh");
+    if (slot == "foot") {
+        return std::string(sidePrefix) + " Foot";
     }
-    if (lowerSlot == "groin" || lowerSlot == "skirt") {
-        return importedSkeletonBoneIndex(actorAsset, "Bip01 Pelvis");
+    if (slot == "ankle") {
+        return std::string(sidePrefix) + " Ankle";
     }
-    return importedSkeletonBoneIndex(actorAsset, "Bip01 Spine1");
+    if (slot == "knee") {
+        return std::string(sidePrefix) + " Knee";
+    }
+    if (slot == "upper_leg") {
+        return std::string(sidePrefix) + " Upper Leg";
+    }
+    if (slot == "groin") {
+        return "Groin";
+    }
+    if (slot == "torso" || slot == "body") {
+        return "Chest";
+    }
+    if (slot == "tail") {
+        return "Tail";
+    }
+    return {};
 }
 
-void attachRigidUnweightedActorPartVertices(
-    const std::filesystem::path& nifPath,
+std::string openMwActorPartFilter(const MorrowindActorPartMetadata& metadata) {
+    if (!metadata.meshFilter.empty()) {
+        return metadata.meshFilter;
+    }
+    const std::string slot = normalizeActorPartSlot(metadata.slot);
+    std::string side = lowerAsciiCopy(metadata.side);
+    const auto sideName = [&]() -> std::string {
+        if (side == "left") return "Left";
+        if (side == "right") return "Right";
+        return {};
+    };
+    if (slot == "hair") return "Hair";
+    if (slot == "head" || slot == "helm") return "Head";
+    if (slot == "neck") return "Neck";
+    if (slot == "torso" || slot == "body") return {};
+    if (slot == "groin") return "Groin";
+    const std::string sidePrefix = sideName();
+    const auto sideFiltered = [&](std::string_view bodyPart) {
+        return sidePrefix.empty() ? std::string(bodyPart) : sidePrefix + " " + std::string(bodyPart);
+    };
+    if (slot == "hand") return sideFiltered("Hand");
+    if (slot == "wrist") return sideFiltered("Wrist");
+    if (slot == "forearm") return sideFiltered("Forearm");
+    if (slot == "upper_arm") return sideFiltered("Upper Arm");
+    if (slot == "foot") return sideFiltered("Foot");
+    if (slot == "ankle") return sideFiltered("Ankle");
+    if (slot == "knee") return sideFiltered("Knee");
+    if (slot == "upper_leg") return sideFiltered("Upper Leg");
+    return {};
+}
+
+bool assignRigidWeightsToUnweightedActorPartVertices(
+    const MorrowindActorPartMetadata& metadata,
     const ImportedSkinnedActorAsset& actorAsset,
     const std::vector<std::array<float, 16>>& canonicalBoneWorldTransforms,
     ImportedNifResult& partResult,
     std::vector<std::array<std::uint16_t, 4>>& partBoneIndices,
     std::vector<std::array<float, 4>>& partBoneWeights,
-    std::uint32_t& assignedCount
+    std::uint32_t& assignedCount,
+    std::string& outError
 ) {
     assignedCount = 0u;
     if (partResult.mesh.vertices.size() != partBoneWeights.size() ||
         partBoneIndices.size() != partBoneWeights.size() ||
         canonicalBoneWorldTransforms.empty()) {
-        return;
+        outError = "Rigid actor part influence stream was invalid";
+        return false;
     }
-    const std::string slot = inferActorPartSlotFromNifPath(nifPath);
     for (std::size_t vertexIndex = 0; vertexIndex < partResult.mesh.vertices.size(); ++vertexIndex) {
         const std::array<float, 4>& weights = partBoneWeights[vertexIndex];
         const float weightSum = weights[0] + weights[1] + weights[2] + weights[3];
@@ -2521,32 +2737,57 @@ void attachRigidUnweightedActorPartVertices(
             continue;
         }
         ImportedSceneVertex& vertex = partResult.mesh.vertices[vertexIndex];
-        const std::uint16_t boneIndex =
-            rigidActorPartBoneIndex(actorAsset, slot, vertex.position[0]);
-        if (boneIndex < canonicalBoneWorldTransforms.size()) {
-            const std::array<float, 3> nifPosition = fromEngineSpace(vertex.position);
-            const std::array<float, 16>& boneWorld = canonicalBoneWorldTransforms[boneIndex];
-            // Rigid Morrowind body parts such as heads, hair, hands, and segmented
-            // clothing are authored in the target bone's local orientation. OpenMW
-            // attaches these as body-part geometry under the skeleton; applying
-            // the full bone rotation here rotates heads and limb chunks sideways.
-            // Bake only the bind-pose bone translation, then let the single rigid
-            // influence carry animation through the normal palette path.
-            const std::array<float, 3> attachedNifPosition = {
-                nifPosition[0] + boneWorld[3],
-                nifPosition[1] + boneWorld[7],
-                nifPosition[2] + boneWorld[11]
-            };
-            const std::array<float, 3> attachedEnginePosition =
-                toEngineSpace(attachedNifPosition);
-            vertex.position[0] = attachedEnginePosition[0];
-            vertex.position[1] = attachedEnginePosition[1];
-            vertex.position[2] = attachedEnginePosition[2];
+        const std::string boneName = canonicalActorPartBoneName(metadata, vertex.position[0]);
+        if (boneName.empty()) {
+            outError = "Rigid actor part has no canonical bone for slot " + metadata.slot;
+            return false;
         }
+        const std::uint16_t boneIndex =
+            importedSkeletonBoneIndex(actorAsset, boneName);
+        if (boneIndex >= canonicalBoneWorldTransforms.size()) {
+            outError = "Rigid actor part bone not found in skeleton: " + boneName;
+            return false;
+        }
+        std::array<float, 3> nifPosition = fromEngineSpace(vertex.position);
+        std::array<float, 3> nifNormal = fromEngineSpace(vertex.normal);
+        if (lowerAsciiCopy(metadata.side) == "left") {
+            nifPosition[0] = -nifPosition[0];
+            nifNormal[0] = -nifNormal[0];
+        }
+        const std::array<float, 16>& boneWorld = canonicalBoneWorldTransforms[boneIndex];
+        // OpenMW attaches rigid body parts under named attachment nodes. Bake
+        // that bind-pose attachment transform into the flat mesh, then use one
+        // rigid influence so animation applies the palette delta from bind pose.
+        const std::array<float, 3> attachedNifPosition =
+            transformPoint(boneWorld, nifPosition);
+        std::array<float, 3> attachedNifNormal =
+            transformVector(boneWorld, nifNormal);
+        const float normalLength = std::sqrt(
+            attachedNifNormal[0] * attachedNifNormal[0] +
+            attachedNifNormal[1] * attachedNifNormal[1] +
+            attachedNifNormal[2] * attachedNifNormal[2]);
+        if (normalLength > 0.00001f) {
+            attachedNifNormal[0] /= normalLength;
+            attachedNifNormal[1] /= normalLength;
+            attachedNifNormal[2] /= normalLength;
+        } else {
+            attachedNifNormal = {0.0f, 1.0f, 0.0f};
+        }
+        const std::array<float, 3> attachedEnginePosition =
+            toEngineSpace(attachedNifPosition);
+        const std::array<float, 3> attachedEngineNormal =
+            toEngineSpace(attachedNifNormal);
+        vertex.position[0] = attachedEnginePosition[0];
+        vertex.position[1] = attachedEnginePosition[1];
+        vertex.position[2] = attachedEnginePosition[2];
+        vertex.normal[0] = attachedEngineNormal[0];
+        vertex.normal[1] = attachedEngineNormal[1];
+        vertex.normal[2] = attachedEngineNormal[2];
         partBoneIndices[vertexIndex] = {boneIndex, 0u, 0u, 0u};
         partBoneWeights[vertexIndex] = {1.0f, 0.0f, 0.0f, 0.0f};
         ++assignedCount;
     }
+    return true;
 }
 
 bool appendMorrowindSkinnedActorPartNif(
@@ -2554,8 +2795,26 @@ bool appendMorrowindSkinnedActorPartNif(
     ImportedSkinnedActorAsset& ioAsset,
     std::string& outError
 ) {
+    outError = "Skinned actor part metadata is required; path-inferred actor assembly is disabled";
+    return false;
+}
+
+bool appendMorrowindSkinnedActorPartNif(
+    const std::filesystem::path& nifPath,
+    const MorrowindActorPartMetadata& metadata,
+    ImportedSkinnedActorAsset& ioAsset,
+    std::string& outError
+) {
     if (ioAsset.skeleton.empty()) {
         outError = "Skinned actor skeleton must be loaded before actor parts";
+        return false;
+    }
+    if (trimAsciiWhitespace(metadata.slot).empty()) {
+        outError = "Skinned actor part metadata missing BODY slot";
+        return false;
+    }
+    if (!actorPartMetadataSlotSupported(metadata)) {
+        outError = "Skinned actor part metadata has unsupported BODY slot: " + metadata.slot;
         return false;
     }
 
@@ -2586,7 +2845,7 @@ bool appendMorrowindSkinnedActorPartNif(
     std::vector<std::array<std::uint16_t, 4>> partBoneIndices;
     std::vector<std::array<float, 4>> partBoneWeights;
     StaticNifLoadOptions options{};
-    options.includeHiddenGeometry = false;
+    options.includeHiddenGeometry = true;
     options.keepAlphaBlendOnlyParts = true;
     options.preserveRootTransform = true;
     // Body-part NIFs are authored in part-local spaces and rely on NiSkinData to
@@ -2602,6 +2861,7 @@ bool appendMorrowindSkinnedActorPartNif(
     options.unweightedVertexCount = &ioAsset.unweightedVertexCount;
     options.unknownBoneInfluenceCount = &ioAsset.unknownBoneInfluenceCount;
     options.droppedInfluenceCount = &ioAsset.droppedInfluenceCount;
+    options.actorPartFilter = openMwActorPartFilter(metadata);
     if (!loadMorrowindStaticNifWithOptions(nifPath, partResult, outError, options)) {
         return false;
     }
@@ -2615,14 +2875,17 @@ bool appendMorrowindSkinnedActorPartNif(
         return false;
     }
     std::uint32_t rigidAssignedVertexCount = 0u;
-    attachRigidUnweightedActorPartVertices(
-        nifPath,
+    if (!assignRigidWeightsToUnweightedActorPartVertices(
+        metadata,
         ioAsset,
         canonicalBoneWorldTransforms,
         partResult,
         partBoneIndices,
         partBoneWeights,
-        rigidAssignedVertexCount);
+        rigidAssignedVertexCount,
+        outError)) {
+        return false;
+    }
     if (rigidAssignedVertexCount != 0u) {
         ioAsset.weightedVertexCount += rigidAssignedVertexCount;
         ioAsset.unweightedVertexCount = rigidAssignedVertexCount >= ioAsset.unweightedVertexCount

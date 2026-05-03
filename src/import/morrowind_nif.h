@@ -167,4 +167,11 @@ bool appendMorrowindSkinnedActorPartNif(
     std::string& outError
 );
 
+bool appendMorrowindSkinnedActorPartNif(
+    const std::filesystem::path& nifPath,
+    const MorrowindActorPartMetadata& metadata,
+    ImportedSkinnedActorAsset& ioAsset,
+    std::string& outError
+);
+
 }  // namespace odai::importer

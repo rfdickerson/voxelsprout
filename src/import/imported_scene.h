@@ -138,17 +138,36 @@ struct MorrowindEquipmentCatalog {
         std::string id;
         std::string modelPath;
         std::string slot;
+        std::string side;
+        std::string attachBone;
+        std::string meshFilter;
+        std::uint8_t meshPart = 0xffu;
         std::string inferredRaceId;
         std::string inferredGender;
     };
     struct ResolvedActorPart {
         std::string modelPath;
         std::string slot;
-        bool fallback = false;
+        std::string side;
+        std::string bodyPartId;
+        std::string attachBone;
+        std::string meshFilter;
+        std::uint8_t meshPart = 0xffu;
+        std::uint8_t partReferenceType = 0xffu;
     };
     std::unordered_map<std::string, BodyPartRecord> bodyPartById;
     std::unordered_map<std::string, std::string> modelPathByBodyPartId;
     std::unordered_map<std::string, std::vector<std::string>> bodyPartModelPathsByItemId;
+    std::unordered_map<std::string, std::vector<ResolvedActorPart>> actorPartsByItemId;
+};
+
+struct MorrowindActorPartMetadata {
+    std::string modelPath;
+    std::string bodyPartId;
+    std::string slot;
+    std::string side;
+    std::string attachBone;
+    std::string meshFilter;
 };
 
 struct ImportedScene {
@@ -237,6 +256,9 @@ std::vector<std::string> resolveMorrowindNpcPartModelPaths(
 std::vector<MorrowindEquipmentCatalog::ResolvedActorPart> resolveMorrowindNpcParts(
     const MorrowindActorRecord& actor,
     const MorrowindEquipmentCatalog& equipmentCatalog
+);
+MorrowindActorPartMetadata toMorrowindActorPartMetadata(
+    const MorrowindEquipmentCatalog::ResolvedActorPart& part
 );
 
 bool exportImportedSceneTerrainObj(const ImportedScene& scene, const std::filesystem::path& outputObjPath);

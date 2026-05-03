@@ -1333,43 +1333,166 @@ bool parseActorRecord(
     return true;
 }
 
-std::string bodyPartIdToActorModelPath(const std::string& bodyPartId) {
-    if (bodyPartId.empty()) {
-        return {};
+std::string slotFromBodyMeshPart(std::uint8_t meshPart) {
+    switch (meshPart) {
+    case 0: return "head";
+    case 1: return "hair";
+    case 2: return "neck";
+    case 3: return "torso";
+    case 4: return "groin";
+    case 5: return "hand";
+    case 6: return "wrist";
+    case 7: return "forearm";
+    case 8: return "upper_arm";
+    case 9: return "foot";
+    case 10: return "ankle";
+    case 11: return "knee";
+    case 12: return "upper_leg";
+    case 13: return "clavicle";
+    case 14: return "tail";
+    default: return {};
     }
-    std::string path;
-    const char prefix = static_cast<char>(std::tolower(static_cast<unsigned char>(bodyPartId.front())));
-    if (prefix == 'c') {
-        path = "c/";
-    } else if (prefix == 'a') {
-        path = "a/";
-    } else {
-        path = "b/";
-    }
-    for (char ch : bodyPartId) {
-        path.push_back(std::isspace(static_cast<unsigned char>(ch)) ? '_' : ch);
-    }
-    path += ".nif";
-    return lowerCopy(path);
 }
 
-std::string inferBodyPartSlot(const std::string& bodyPartId, const std::string& modelPath) {
+std::string slotFromPartReferenceType(std::uint8_t partType) {
+    switch (partType) {
+    case 0: return "head";
+    case 1: return "hair";
+    case 2: return "neck";
+    case 3: return "torso";
+    case 4:
+    case 5: return "groin";
+    case 6:
+    case 7: return "hand";
+    case 8:
+    case 9: return "wrist";
+    case 11:
+    case 12: return "forearm";
+    case 13:
+    case 14: return "upper_arm";
+    case 15:
+    case 16: return "foot";
+    case 17:
+    case 18: return "ankle";
+    case 19:
+    case 20: return "knee";
+    case 21:
+    case 22: return "upper_leg";
+    case 23:
+    case 24: return "clavicle";
+    case 26: return "tail";
+    default: return {};
+    }
+}
+
+std::string sideFromPartReferenceType(std::uint8_t partType) {
+    switch (partType) {
+    case 6:
+    case 8:
+    case 11:
+    case 13:
+    case 15:
+    case 17:
+    case 19:
+    case 21:
+    case 23: return "right";
+    case 7:
+    case 9:
+    case 12:
+    case 14:
+    case 16:
+    case 18:
+    case 20:
+    case 22:
+    case 24: return "left";
+    default: return {};
+    }
+}
+
+std::string openMwAttachBoneFromPartReferenceType(std::uint8_t partType) {
+    switch (partType) {
+    case 0: return "Head";
+    case 1: return "Head";
+    case 2: return "Neck";
+    case 3: return "Chest";
+    case 4:
+    case 5: return "Groin";
+    case 6: return "Right Hand";
+    case 7: return "Left Hand";
+    case 8: return "Right Wrist";
+    case 9: return "Left Wrist";
+    case 11: return "Right Forearm";
+    case 12: return "Left Forearm";
+    case 13: return "Right Upper Arm";
+    case 14: return "Left Upper Arm";
+    case 15: return "Right Foot";
+    case 16: return "Left Foot";
+    case 17: return "Right Ankle";
+    case 18: return "Left Ankle";
+    case 19: return "Right Knee";
+    case 20: return "Left Knee";
+    case 21: return "Right Upper Leg";
+    case 22: return "Left Upper Leg";
+    case 23: return "Right Clavicle";
+    case 24: return "Left Clavicle";
+    case 26: return "Tail";
+    default: return {};
+    }
+}
+
+std::string openMwMeshFilterFromPartReferenceType(std::uint8_t partType) {
+    if (partType == 1u) {
+        return "Hair";
+    }
+    return openMwAttachBoneFromPartReferenceType(partType);
+}
+
+std::string openMwAttachBoneFromBodyMeshPart(std::uint8_t meshPart) {
+    switch (meshPart) {
+    case 0: return "Head";
+    case 1: return "Head";
+    case 2: return "Neck";
+    case 3: return "Chest";
+    case 4: return "Groin";
+    case 5: return "Hand";
+    case 6: return "Wrist";
+    case 7: return "Forearm";
+    case 8: return "Upper Arm";
+    case 9: return "Foot";
+    case 10: return "Ankle";
+    case 11: return "Knee";
+    case 12: return "Upper Leg";
+    case 13: return "Clavicle";
+    case 14: return "Tail";
+    default: return {};
+    }
+}
+
+std::string inferBodyPartSide(const std::string& bodyPartId, const std::string& modelPath) {
     const std::string key = lowerCopy(bodyPartId + " " + modelPath);
-    if (key.find("hair") != std::string::npos) return "hair";
-    if (key.find("head") != std::string::npos || key.find("helm") != std::string::npos) return "head";
-    if (key.find("neck") != std::string::npos) return "neck";
-    if (key.find("skins") != std::string::npos) return "body";
-    if (key.find("shirt") != std::string::npos || key.find("cuirass") != std::string::npos || key.find("_c.") != std::string::npos) return "torso";
-    if (key.find("robe") != std::string::npos || key.find("skirt") != std::string::npos) return "torso";
-    if (key.find("pants") != std::string::npos || key.find("greaves") != std::string::npos || key.find("_g.") != std::string::npos) return "groin";
-    if (key.find("_ua") != std::string::npos || key.find("pauldron") != std::string::npos) return "upper_arm";
-    if (key.find("_fa") != std::string::npos || key.find("bracer") != std::string::npos) return "forearm";
-    if (key.find("_w") != std::string::npos || key.find("gauntlet") != std::string::npos) return "hand";
-    if (key.find("_ul") != std::string::npos) return "upper_leg";
-    if (key.find("_k") != std::string::npos) return "knee";
-    if (key.find("_a") != std::string::npos || key.find("ankle") != std::string::npos) return "ankle";
-    if (key.find("shoe") != std::string::npos || key.find("boot") != std::string::npos || key.find("foot") != std::string::npos) return "foot";
-    return "misc";
+    if (key.find("left") != std::string::npos ||
+        key.find("_l_") != std::string::npos ||
+        key.find("_l.") != std::string::npos ||
+        key.find(" l ") != std::string::npos ||
+        key.find("lhand") != std::string::npos ||
+        key.find("lfoot") != std::string::npos ||
+        key.find("lleg") != std::string::npos ||
+        key.find("lwrist") != std::string::npos ||
+        key.find("lforearm") != std::string::npos) {
+        return "left";
+    }
+    if (key.find("right") != std::string::npos ||
+        key.find("_r_") != std::string::npos ||
+        key.find("_r.") != std::string::npos ||
+        key.find(" r ") != std::string::npos ||
+        key.find("rhand") != std::string::npos ||
+        key.find("rfoot") != std::string::npos ||
+        key.find("rleg") != std::string::npos ||
+        key.find("rwrist") != std::string::npos ||
+        key.find("rforearm") != std::string::npos) {
+        return "right";
+    }
+    return {};
 }
 
 std::string inferBodyPartGender(const std::string& bodyPartId, const std::string& modelPath) {
@@ -1387,12 +1510,14 @@ bool parseBodyRecord(
     std::istream& input,
     std::uint32_t recordSize,
     std::string& outBodyPartId,
-    std::string& outModelPath
+    std::string& outModelPath,
+    std::uint8_t& outMeshPart
 ) {
     const std::streampos recordStart = input.tellg();
     std::uint32_t bytesLeft = recordSize;
     outBodyPartId.clear();
     outModelPath.clear();
+    outMeshPart = 0xffu;
     while (bytesLeft >= sizeof(Tes3SubRecordHeader)) {
         Tes3SubRecordHeader subHeader{};
         if (!readSubRecordHeader(input, subHeader)) {
@@ -1408,6 +1533,19 @@ bool parseBodyRecord(
             outBodyPartId = lowerCopy(readSizedString(input, subHeader.size));
         } else if (subName == "MODL") {
             outModelPath = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "BYDT") {
+            if (subHeader.size < 1u) {
+                return false;
+            }
+            std::uint8_t data[4] = {};
+            const std::uint32_t bytesToRead = std::min<std::uint32_t>(subHeader.size, sizeof(data));
+            if (!readExact(input, data, bytesToRead)) {
+                return false;
+            }
+            if (subHeader.size > bytesToRead) {
+                input.seekg(static_cast<std::streamoff>(subHeader.size - bytesToRead), std::ios::cur);
+            }
+            outMeshPart = data[0];
         } else {
             input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
         }
@@ -1421,12 +1559,13 @@ bool parseEquipmentRecord(
     std::istream& input,
     std::uint32_t recordSize,
     std::string& outItemId,
-    std::vector<std::string>& outBodyPartIds
+    std::vector<std::pair<std::uint8_t, std::string>>& outBodyPartRefs
 ) {
     const std::streampos recordStart = input.tellg();
     std::uint32_t bytesLeft = recordSize;
     outItemId.clear();
-    outBodyPartIds.clear();
+    outBodyPartRefs.clear();
+    std::uint8_t currentPartType = 0xffu;
     while (bytesLeft >= sizeof(Tes3SubRecordHeader)) {
         Tes3SubRecordHeader subHeader{};
         if (!readSubRecordHeader(input, subHeader)) {
@@ -1440,10 +1579,23 @@ bool parseEquipmentRecord(
 
         if (subName == "NAME") {
             outItemId = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "INDX") {
+            if (subHeader.size < 1u) {
+                return false;
+            }
+            if (!readExact(input, &currentPartType, sizeof(currentPartType))) {
+                return false;
+            }
+            if (subHeader.size > sizeof(currentPartType)) {
+                input.seekg(static_cast<std::streamoff>(subHeader.size - sizeof(currentPartType)), std::ios::cur);
+            }
         } else if (subName == "BNAM") {
             const std::string bodyPartId = lowerCopy(readSizedString(input, subHeader.size));
+            if (!bodyPartId.empty() && currentPartType == 0xffu) {
+                return false;
+            }
             if (!bodyPartId.empty()) {
-                outBodyPartIds.push_back(bodyPartId);
+                outBodyPartRefs.emplace_back(currentPartType, bodyPartId);
             }
         } else {
             input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
@@ -3351,12 +3503,19 @@ bool loadMorrowindEquipmentCatalog(
         return false;
     }
     input.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+    struct PendingEquipmentRecord {
+        std::string recordName;
+        std::string itemId;
+        std::vector<std::pair<std::uint8_t, std::string>> bodyPartRefs;
+    };
+    std::vector<PendingEquipmentRecord> pendingEquipmentRecords;
     while (readRecordHeader(input, header)) {
         const std::string recordName = fourCcToString(header.name);
         if (recordName == "BODY") {
             std::string bodyPartId;
             std::string modelPath;
-            if (!parseBodyRecord(input, header.size, bodyPartId, modelPath)) {
+            std::uint8_t meshPart = 0xffu;
+            if (!parseBodyRecord(input, header.size, bodyPartId, modelPath, meshPart)) {
                 setLastImportedSceneError("Failed to parse BODY record");
                 return false;
             }
@@ -3364,36 +3523,92 @@ bool loadMorrowindEquipmentCatalog(
                 MorrowindEquipmentCatalog::BodyPartRecord bodyPart{};
                 bodyPart.id = bodyPartId;
                 bodyPart.modelPath = modelPath;
-                bodyPart.slot = inferBodyPartSlot(bodyPartId, modelPath);
+                bodyPart.meshPart = meshPart;
+                bodyPart.slot = slotFromBodyMeshPart(meshPart);
+                if (bodyPart.slot.empty()) {
+                    setLastImportedSceneError(
+                        "BODY " + bodyPartId + " has unsupported BYDT mesh part " + std::to_string(meshPart));
+                    return false;
+                }
+                bodyPart.side = inferBodyPartSide(bodyPartId, modelPath);
+                bodyPart.attachBone = openMwAttachBoneFromBodyMeshPart(meshPart);
+                bodyPart.meshFilter = bodyPart.attachBone;
+                if (meshPart == 1u) {
+                    bodyPart.meshFilter = "Hair";
+                }
                 bodyPart.inferredGender = inferBodyPartGender(bodyPartId, modelPath);
                 outCatalog.bodyPartById[bodyPartId] = bodyPart;
                 outCatalog.modelPathByBodyPartId[bodyPartId] = modelPath;
             }
         } else if (recordName == "CLOT" || recordName == "ARMO") {
             std::string itemId;
-            std::vector<std::string> bodyPartIds;
-            if (!parseEquipmentRecord(input, header.size, itemId, bodyPartIds)) {
+            std::vector<std::pair<std::uint8_t, std::string>> bodyPartRefs;
+            if (!parseEquipmentRecord(input, header.size, itemId, bodyPartRefs)) {
                 setLastImportedSceneError("Failed to parse " + recordName + " equipment record");
                 return false;
             }
-            if (!itemId.empty() && !bodyPartIds.empty()) {
-                std::vector<std::string> modelPaths;
-                std::unordered_set<std::string> seenModelPaths;
-                for (const std::string& bodyPartId : bodyPartIds) {
-                    const auto bodyIt = outCatalog.modelPathByBodyPartId.find(bodyPartId);
-                    const std::string modelPath = bodyIt != outCatalog.modelPathByBodyPartId.end()
-                        ? bodyIt->second
-                        : bodyPartIdToActorModelPath(bodyPartId);
-                    if (!modelPath.empty() && seenModelPaths.insert(modelPath).second) {
-                        modelPaths.push_back(modelPath);
-                    }
-                }
-                if (!modelPaths.empty()) {
-                    outCatalog.bodyPartModelPathsByItemId[itemId] = std::move(modelPaths);
-                }
+            if (!itemId.empty() && !bodyPartRefs.empty()) {
+                pendingEquipmentRecords.push_back(PendingEquipmentRecord{
+                    recordName,
+                    std::move(itemId),
+                    std::move(bodyPartRefs)
+                });
             }
         } else {
             input.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+        }
+    }
+    for (const PendingEquipmentRecord& pending : pendingEquipmentRecords) {
+        std::vector<std::string> modelPaths;
+        std::unordered_set<std::string> seenModelPaths;
+        std::vector<MorrowindEquipmentCatalog::ResolvedActorPart> actorParts;
+        std::unordered_set<std::string> seenActorParts;
+        for (const std::pair<std::uint8_t, std::string>& bodyPartRef : pending.bodyPartRefs) {
+            const std::uint8_t partReferenceType = bodyPartRef.first;
+            const std::string& bodyPartId = bodyPartRef.second;
+            const auto bodyIt = outCatalog.modelPathByBodyPartId.find(bodyPartId);
+            if (bodyIt == outCatalog.modelPathByBodyPartId.end()) {
+                setLastImportedSceneError(
+                    pending.recordName + " " + pending.itemId + " references unknown BODY part " + bodyPartId);
+                return false;
+            }
+            const std::string& modelPath = bodyIt->second;
+            if (!modelPath.empty() && seenModelPaths.insert(modelPath).second) {
+                modelPaths.push_back(modelPath);
+            }
+            if (!modelPath.empty()) {
+                MorrowindEquipmentCatalog::ResolvedActorPart part{};
+                part.modelPath = modelPath;
+                part.bodyPartId = bodyPartId;
+                part.partReferenceType = partReferenceType;
+                part.slot = slotFromPartReferenceType(partReferenceType);
+                part.side = sideFromPartReferenceType(partReferenceType);
+                part.attachBone = openMwAttachBoneFromPartReferenceType(partReferenceType);
+                part.meshFilter = openMwMeshFilterFromPartReferenceType(partReferenceType);
+                const auto recordIt = outCatalog.bodyPartById.find(bodyPartId);
+                if (recordIt != outCatalog.bodyPartById.end()) {
+                    part.meshPart = recordIt->second.meshPart;
+                }
+                if (part.slot.empty() || part.attachBone.empty()) {
+                    continue;
+                }
+                const std::string actorPartKey =
+                    lowerCopy(
+                        part.modelPath + "|" +
+                        part.slot + "|" +
+                        part.side + "|" +
+                        part.bodyPartId + "|" +
+                        std::to_string(part.partReferenceType));
+                if (seenActorParts.insert(actorPartKey).second) {
+                    actorParts.push_back(std::move(part));
+                }
+            }
+        }
+        if (!modelPaths.empty()) {
+            outCatalog.bodyPartModelPathsByItemId[pending.itemId] = std::move(modelPaths);
+        }
+        if (!actorParts.empty()) {
+            outCatalog.actorPartsByItemId[pending.itemId] = std::move(actorParts);
         }
     }
     return true;
@@ -3403,20 +3618,35 @@ std::vector<MorrowindEquipmentCatalog::ResolvedActorPart> resolveMorrowindNpcPar
     const MorrowindActorRecord& actor,
     const MorrowindEquipmentCatalog& equipmentCatalog
 ) {
-    auto bodyPart = [&](const std::string& bodyPartId, bool fallback) {
+    auto bodyPart = [&](const std::string& bodyPartId) {
         MorrowindEquipmentCatalog::ResolvedActorPart resolved{};
         const auto bodyIt = equipmentCatalog.modelPathByBodyPartId.find(bodyPartId);
         if (bodyIt != equipmentCatalog.modelPathByBodyPartId.end()) {
             resolved.modelPath = bodyIt->second;
         } else {
-            resolved.modelPath = bodyPartIdToActorModelPath(bodyPartId);
-            resolved.fallback = true;
+            return resolved;
         }
+        resolved.bodyPartId = bodyPartId;
         const auto recordIt = equipmentCatalog.bodyPartById.find(bodyPartId);
-        resolved.slot = recordIt != equipmentCatalog.bodyPartById.end()
-            ? recordIt->second.slot
-            : inferBodyPartSlot(bodyPartId, resolved.modelPath);
-        resolved.fallback = resolved.fallback || fallback;
+        if (recordIt != equipmentCatalog.bodyPartById.end()) {
+            resolved.slot = recordIt->second.slot;
+            resolved.side = recordIt->second.side;
+            resolved.attachBone = recordIt->second.attachBone;
+            resolved.meshFilter = recordIt->second.meshFilter;
+            resolved.meshPart = recordIt->second.meshPart;
+        }
+        return resolved;
+    };
+    auto bodyPartWithPartReference = [&](const std::string& bodyPartId, std::uint8_t partReferenceType) {
+        MorrowindEquipmentCatalog::ResolvedActorPart resolved = bodyPart(bodyPartId);
+        if (resolved.modelPath.empty()) {
+            return resolved;
+        }
+        resolved.partReferenceType = partReferenceType;
+        resolved.slot = slotFromPartReferenceType(partReferenceType);
+        resolved.side = sideFromPartReferenceType(partReferenceType);
+        resolved.attachBone = openMwAttachBoneFromPartReferenceType(partReferenceType);
+        resolved.meshFilter = openMwMeshFilterFromPartReferenceType(partReferenceType);
         return resolved;
     };
     auto raceStem = [](std::string raceId) {
@@ -3435,55 +3665,129 @@ std::vector<MorrowindEquipmentCatalog::ResolvedActorPart> resolveMorrowindNpcPar
         if (raceId == "orc") return std::string("Orc");
         if (raceId == "argonian") return std::string("Argonian");
         if (raceId == "khajiit") return std::string("Khajiit");
-        return std::string("Dark Elf");
+        return std::string{};
     };
 
     const bool male = actor.headBodyPartId.find("_f_") == std::string::npos &&
         actor.hairBodyPartId.find("_f_") == std::string::npos;
     const std::string gender = male ? "M" : "F";
     const std::string stem = raceStem(actor.raceId);
+    if (stem.empty()) {
+        return {};
+    }
+    const std::string lowerStem = lowerCopy(stem);
+    const std::string lowerGender = lowerCopy(gender);
 
     std::vector<MorrowindEquipmentCatalog::ResolvedActorPart> parts;
     std::unordered_set<std::string> seenParts;
     auto addPart = [&](MorrowindEquipmentCatalog::ResolvedActorPart part) {
-        if (!part.modelPath.empty() && seenParts.insert(part.modelPath).second) {
-            if (part.slot.empty()) {
-                part.slot = inferBodyPartSlot({}, part.modelPath);
-            }
+        if (part.modelPath.empty()) {
+            return;
+        }
+        if (part.slot.empty()) {
+            return;
+        }
+        const std::string partKey =
+            lowerCopy(
+                part.modelPath + "|" +
+                part.slot + "|" +
+                part.side + "|" +
+                part.bodyPartId + "|" +
+                part.attachBone + "|" +
+                part.meshFilter + "|" +
+                std::to_string(part.partReferenceType));
+        if (seenParts.insert(partKey).second) {
             parts.push_back(std::move(part));
         }
     };
     addPart(MorrowindEquipmentCatalog::ResolvedActorPart{
-        "b/b_n_" + lowerCopy(stem) + "_" + lowerCopy(gender) + "_skins.nif",
+        "b/b_n_" + lowerStem + "_" + lowerGender + "_skins.nif",
         "body",
-        true
+        "",
+        "",
+        "Chest",
+        "",
+        0xffu,
+        0xffu
     });
     addPart(MorrowindEquipmentCatalog::ResolvedActorPart{
-        "b/b_n_" + lowerCopy(stem) + "_" + lowerCopy(gender) + "_neck.nif",
+        "b/b_n_" + lowerStem + "_" + lowerGender + "_neck.nif",
         "neck",
-        true
+        "",
+        "",
+        "Neck",
+        "Neck",
+        2u,
+        2u
     });
     if (!actor.headBodyPartId.empty()) {
-        addPart(bodyPart(actor.headBodyPartId, false));
+        addPart(bodyPartWithPartReference(actor.headBodyPartId, 0u));
     }
     if (!actor.hairBodyPartId.empty()) {
-        addPart(bodyPart(actor.hairBodyPartId, false));
+        addPart(bodyPartWithPartReference(actor.hairBodyPartId, 1u));
     }
 
     for (const std::string& itemId : actor.inventoryItemIds) {
-        const auto itemIt = equipmentCatalog.bodyPartModelPathsByItemId.find(itemId);
-        if (itemIt == equipmentCatalog.bodyPartModelPathsByItemId.end()) {
+        const auto actorPartsIt = equipmentCatalog.actorPartsByItemId.find(itemId);
+        if (actorPartsIt != equipmentCatalog.actorPartsByItemId.end()) {
+            for (const MorrowindEquipmentCatalog::ResolvedActorPart& part : actorPartsIt->second) {
+                addPart(part);
+            }
             continue;
         }
-        for (const std::string& modelPath : itemIt->second) {
-            addPart(MorrowindEquipmentCatalog::ResolvedActorPart{
-                modelPath,
-                inferBodyPartSlot({}, modelPath),
-                false
-            });
+    }
+    std::unordered_set<std::uint8_t> coveredPartTypes;
+    for (const MorrowindEquipmentCatalog::ResolvedActorPart& part : parts) {
+        if (part.partReferenceType != 0xffu) {
+            coveredPartTypes.insert(part.partReferenceType);
         }
     }
+    const auto addUncoveredRacePart =
+        [&](std::uint8_t partReferenceType, const std::string& bodyPartSuffix) {
+        if (coveredPartTypes.find(partReferenceType) != coveredPartTypes.end()) {
+            return;
+        }
+        MorrowindEquipmentCatalog::ResolvedActorPart part =
+            bodyPartWithPartReference(
+                "b_n_" + lowerStem + "_" + lowerGender + "_" + bodyPartSuffix,
+                partReferenceType);
+        if (!part.modelPath.empty()) {
+            addPart(std::move(part));
+            coveredPartTypes.insert(partReferenceType);
+        }
+    };
+    addUncoveredRacePart(3u, "chest");
+    addUncoveredRacePart(4u, "groin");
+    addUncoveredRacePart(6u, "hands");
+    addUncoveredRacePart(7u, "hands");
+    addUncoveredRacePart(8u, "wrist");
+    addUncoveredRacePart(9u, "wrist");
+    addUncoveredRacePart(11u, "forearm");
+    addUncoveredRacePart(12u, "forearm");
+    addUncoveredRacePart(13u, "upper arm");
+    addUncoveredRacePart(14u, "upper arm");
+    addUncoveredRacePart(15u, "foot");
+    addUncoveredRacePart(16u, "foot");
+    addUncoveredRacePart(17u, "ankle");
+    addUncoveredRacePart(18u, "ankle");
+    addUncoveredRacePart(19u, "knee");
+    addUncoveredRacePart(20u, "knee");
+    addUncoveredRacePart(21u, "upper leg");
+    addUncoveredRacePart(22u, "upper leg");
     return parts;
+}
+
+MorrowindActorPartMetadata toMorrowindActorPartMetadata(
+    const MorrowindEquipmentCatalog::ResolvedActorPart& part
+) {
+    MorrowindActorPartMetadata metadata{};
+    metadata.modelPath = part.modelPath;
+    metadata.bodyPartId = part.bodyPartId;
+    metadata.slot = part.slot;
+    metadata.side = part.side;
+    metadata.attachBone = part.attachBone;
+    metadata.meshFilter = part.meshFilter;
+    return metadata;
 }
 
 std::vector<std::string> resolveMorrowindNpcPartModelPaths(

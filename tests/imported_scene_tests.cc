@@ -1053,25 +1053,24 @@ void testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable() {
         return;
     }
 
-    const std::vector<std::string> fargothModelParts = {
-        "b/B_N_Wood Elf_M_Skins.nif",
-        "b/B_N_Wood Elf_M_Neck.NIF",
-        "b/B_N_Wood Elf_M_Head_02.nif",
-        "b/B_N_Wood Elf_M_Hair_03.nif",
-        "c/C_M_Shirt_C_commonL04.NIF",
-        "c/C_M_Shirt_UA_commonL04.nif",
-        "c/C_M_Shirt_FA_commonL04.nif",
-        "c/C_M_Shirt_W_commonL04.nif",
-        "c/C_M_Pants_G_common02.nif",
-        "c/C_M_pants_A_common02.nif",
-        "c/C_M_Pants_UL_common02.nif",
-        "c/C_M_Pants_K_common02.nif",
-        "c/C_shoes_common_4.NIF"
-    };
-    for (const std::string& relativeModelPath : fargothModelParts) {
+    odai::importer::MorrowindActorCatalog actorCatalog{};
+    odai::importer::MorrowindEquipmentCatalog equipmentCatalog{};
+    std::vector<odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart> fargothParts;
+    if (odai::importer::loadMorrowindActorCatalog(dataFilesPath, actorCatalog) &&
+        odai::importer::loadMorrowindEquipmentCatalog(dataFilesPath, equipmentCatalog)) {
+        const auto fargothIt = actorCatalog.actorsById.find("fargoth");
+        if (fargothIt != actorCatalog.actorsById.end()) {
+            fargothParts =
+                odai::importer::resolveMorrowindNpcParts(fargothIt->second, equipmentCatalog);
+        }
+    }
+    expectTrue(!fargothParts.empty(), "Fargoth resolves catalog-driven actor parts");
+    for (const odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart& part : fargothParts) {
+        const std::string& relativeModelPath = part.modelPath;
         const std::size_t firstNewVertex = actor.vertices.size();
         const bool loaded = odai::importer::appendMorrowindSkinnedActorPartNif(
             meshesPath / std::filesystem::path(relativeModelPath),
+            odai::importer::toMorrowindActorPartMetadata(part),
             actor,
             error);
         if (!loaded) {
@@ -1080,8 +1079,7 @@ void testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable() {
         }
         expectTrue(loaded, "Fargoth skinned actor part loads");
         if (loaded &&
-            (relativeModelPath.find("Head") != std::string::npos ||
-             relativeModelPath.find("Hair") != std::string::npos)) {
+            (part.slot == "head" || part.slot == "hair")) {
             expectTrue(
                 actor.vertices.size() > firstNewVertex,
                 "Fargoth head/hair actor part appends vertices");
@@ -1107,6 +1105,7 @@ void testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable() {
     expectTrue(actor.boneIndices.size() == actor.vertices.size(), "bone index stream matches vertex count");
     expectTrue(actor.boneWeights.size() == actor.vertices.size(), "bone weight stream matches vertex count");
     expectTrue(actor.weightedVertexCount > 0u, "Fargoth skinned actor has weighted vertices");
+    expectTrue(actor.unweightedVertexCount == 0u, "Fargoth skinned actor has no unweighted vertices after actor build");
     if (!actor.skeleton.empty()) {
         std::vector<std::array<float, 16>> worldMatrices(actor.skeleton.size());
         float maxBindPaletteError = 0.0f;
@@ -1316,13 +1315,20 @@ void testMorrowindGenericHumanoidSkinnedActorLoadsWhenDataFilesAvailable() {
         return;
     }
     expectTrue(parts.size() >= 5u, "Generic humanoid resolves multiple body/equipment parts");
-    std::unordered_set<std::string> uniquePaths;
+    std::unordered_set<std::string> uniquePartKeys;
     bool hasHead = false;
     bool hasHair = false;
     bool hasTorso = false;
     bool hasLegsOrFeet = false;
     for (const odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart& part : parts) {
-        uniquePaths.insert(part.modelPath);
+        uniquePartKeys.insert(
+            part.modelPath + "|" +
+            part.slot + "|" +
+            part.side + "|" +
+            part.bodyPartId + "|" +
+            part.attachBone + "|" +
+            part.meshFilter + "|" +
+            std::to_string(part.partReferenceType));
         hasHead = hasHead || part.slot == "head";
         hasHair = hasHair || part.slot == "hair";
         hasTorso = hasTorso || part.slot == "torso" || part.slot == "body";
@@ -1333,7 +1339,7 @@ void testMorrowindGenericHumanoidSkinnedActorLoadsWhenDataFilesAvailable() {
             part.slot == "ankle" ||
             part.slot == "foot";
     }
-    expectTrue(uniquePaths.size() == parts.size(), "Generic humanoid resolved part paths are deduplicated");
+    expectTrue(uniquePartKeys.size() == parts.size(), "Generic humanoid resolved actor part keys are deduplicated");
     expectTrue(hasHead, "Generic humanoid resolves a head part");
     expectTrue(hasHair, "Generic humanoid resolves a hair part");
     expectTrue(hasTorso, "Generic humanoid resolves torso/body coverage");
@@ -1349,7 +1355,11 @@ void testMorrowindGenericHumanoidSkinnedActorLoadsWhenDataFilesAvailable() {
         if (!std::filesystem::exists(nifPath)) {
             continue;
         }
-        (void)odai::importer::appendMorrowindSkinnedActorPartNif(nifPath, actor, error);
+        (void)odai::importer::appendMorrowindSkinnedActorPartNif(
+            nifPath,
+            odai::importer::toMorrowindActorPartMetadata(part),
+            actor,
+            error);
     }
 
     expectTrue(!actor.vertices.empty(), "Generic humanoid skinned actor has vertices");
