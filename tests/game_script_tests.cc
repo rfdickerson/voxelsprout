@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -48,6 +49,40 @@ void testLuaApiAndRollback() {
     expectTrue(!failed.handled, "Failed Lua activation is not handled");
     expectTrue(state.gold() == beforeGold, "Lua call failure rolls back state");
     expectTrue(!runtime.lastError().empty(), "Lua call records error");
+}
+
+void testPlayerStatsInventoryAndQuestViews() {
+    odai::game::GameState state;
+    odai::game::LuaScriptRuntime runtime;
+    expectTrue(runtime.init(state), "Player stats runtime initializes");
+    expectTrue(runtime.loadScriptString(
+                   "function on_activate(ref)\n"
+                   "  game.set_player_max_stats(120, 80, 110)\n"
+                   "  game.set_player_stats(90, 50, 70)\n"
+                   "  game.damage_player(25)\n"
+                   "  game.restore_player(5, 10, 15)\n"
+                   "  game.set_item_name('sample_item', 'Sample Item')\n"
+                   "  game.add_item('sample_item', 2)\n"
+                   "  game.define_quest('sample_quest', 'Sample Quest', 'Start it.')\n"
+                   "  game.set_journal('sample_quest', 10)\n"
+                   "  game.set_quest_objective('sample_quest', 'Finish it.')\n"
+                   "  game.complete_quest('sample_quest')\n"
+                   "  return { handled = true, message = 'ok' }\n"
+                   "end\n",
+                   "player_stats_test"),
+               "Player stats script loads");
+    const odai::game::ScriptCallResult result = runtime.onActivate("target");
+    expectTrue(result.handled, "Player stats activation handled");
+    expectTrue(state.playerStats().maxHealth == 120, "Player max health set");
+    expectTrue(state.playerStats().health == 70, "Player health damage/restore applied");
+    expectTrue(state.playerStats().magicka == 60, "Player magicka restore applied");
+    expectTrue(state.playerStats().fatigue == 85, "Player fatigue restore applied");
+    const std::vector<odai::game::InventoryEntry> inventory = state.inventoryEntries();
+    const std::vector<odai::game::QuestEntry> quests = state.questEntries();
+    expectTrue(inventory.size() == 1u, "Inventory view exposes item");
+    expectTrue(!inventory.empty() && inventory[0].name == "Sample Item", "Inventory view exposes display name");
+    expectTrue(quests.size() == 1u, "Quest view exposes quest");
+    expectTrue(!quests.empty() && quests[0].completed, "Quest view exposes completion");
 }
 
 void testDeathTaxmanQuestScript() {
@@ -262,15 +297,51 @@ void testSeydaNeenActorStatsAndServices() {
     expectTrue(runtime.chooseDialogue("travel:darvame hleran").handled, "Travel choice is handled");
 }
 
+void testBalmoraPlayableQuestSlice() {
+    odai::game::GameState state;
+    odai::game::LuaScriptRuntime runtime;
+    expectTrue(runtime.init(state), "Balmora runtime initializes");
+    const std::filesystem::path scriptPath =
+        std::filesystem::path(ODAI_PROJECT_SOURCE_DIR) / "assets" / "scripts" / "mv_deadtaxman.lua";
+    expectTrue(runtime.loadScriptFile(scriptPath), "Regional gameplay script loads");
+
+    state.addItem("package_for_caius", 1);
+    state.setJournalStage("MV_ReportToCaius", 30);
+    const odai::game::DialogueResult caius = runtime.getDialogue("caius cosades", "orders");
+    expectTrue(caius.handled, "Caius orders dialogue handled");
+    expectTrue(!caius.choices.empty(), "Caius offers package delivery");
+    expectTrue(runtime.chooseDialogue("caius_deliver_package").handled, "Caius package delivery handled");
+    expectTrue(state.journalStage("MV_ReportToCaius") == 100, "Caius quest completes");
+    expectTrue(state.itemCount("package_for_caius") == 0, "Caius package removed");
+
+    const odai::game::DialogueResult eydis = runtime.getDialogue("eydis fire-eye", "balmora work");
+    expectTrue(eydis.handled, "Eydis Balmora work dialogue handled");
+    expectTrue(runtime.chooseDialogue("fg_start_rats").handled, "Fighters Guild rat job starts");
+    expectTrue(state.journalStage("MV_FG_Rats") == 10, "Rat job journal starts");
+    expectTrue(runtime.chooseDialogue("combat:fire-eye rat").handled, "Rat combat first attack handled");
+    expectTrue(runtime.chooseDialogue("combat:fire-eye rat").handled, "Rat combat second attack handled");
+    expectTrue(state.isRefDead("fire-eye rat"), "Rat marked dead");
+    expectTrue(state.journalStage("MV_FG_Rats") == 100, "Rat job completes");
+
+    expectTrue(runtime.chooseDialogue("mg_start_mushrooms").handled, "Mages Guild mushrooms completes");
+    expectTrue(state.itemCount("luminous_russula") == 1, "Mushroom reward item exists");
+    expectTrue(runtime.chooseDialogue("tg_start_diamond").handled, "Thieves Guild diamond completes");
+    expectTrue(state.itemCount("diamond") == 1, "Diamond acquired");
+    expectTrue(runtime.chooseDialogue("hh_start_records").handled, "House Hlaalu records completes");
+    expectTrue(state.itemCount("hlaalu_records") >= 1, "Hlaalu records acquired");
+}
+
 }  // namespace
 
 int main() {
     testLuaApiAndRollback();
+    testPlayerStatsInventoryAndQuestViews();
     testDeathTaxmanQuestScript();
     testSeydaNeenDialogueTopicsAndChoices();
     testFargothNightRoutineAndStashQuest();
     testSeydaNeenScheduleCommands();
     testSeydaNeenActorStatsAndServices();
+    testBalmoraPlayableQuestSlice();
 
     if (g_failures != 0) {
         std::cerr << "[game script test] " << g_failures << " failures\n";

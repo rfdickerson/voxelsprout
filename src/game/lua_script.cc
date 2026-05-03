@@ -47,6 +47,33 @@ int luaSetJournal(lua_State* lua) {
     return 0;
 }
 
+int luaDefineQuest(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->defineQuest(luaL_checkstring(lua, 1), luaL_checkstring(lua, 2), luaL_optstring(lua, 3, ""));
+    }
+    return 0;
+}
+
+int luaSetQuestObjective(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->setQuestObjective(luaL_checkstring(lua, 1), luaL_checkstring(lua, 2));
+    }
+    return 0;
+}
+
+int luaCompleteQuest(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->completeQuest(luaL_checkstring(lua, 1));
+    }
+    return 0;
+}
+
+int luaIsQuestCompleted(lua_State* lua) {
+    GameState* state = stateFromLua(lua);
+    lua_pushboolean(lua, state != nullptr && state->isQuestCompleted(luaL_checkstring(lua, 1)));
+    return 1;
+}
+
 int luaItemCount(lua_State* lua) {
     GameState* state = stateFromLua(lua);
     lua_pushinteger(lua, state == nullptr ? 0 : state->itemCount(luaL_checkstring(lua, 1)));
@@ -63,6 +90,13 @@ int luaHasItem(lua_State* lua) {
 int luaAddItem(lua_State* lua) {
     if (GameState* state = stateFromLua(lua)) {
         state->addItem(luaL_checkstring(lua, 1), static_cast<int>(luaL_checkinteger(lua, 2)));
+    }
+    return 0;
+}
+
+int luaSetItemName(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->setItemName(luaL_checkstring(lua, 1), luaL_checkstring(lua, 2));
     }
     return 0;
 }
@@ -98,6 +132,95 @@ int luaSpendGold(lua_State* lua) {
     return 1;
 }
 
+int luaPlayerHealth(lua_State* lua) {
+    GameState* state = stateFromLua(lua);
+    lua_pushinteger(lua, state == nullptr ? 0 : state->playerStats().health);
+    return 1;
+}
+
+int luaPlayerMagicka(lua_State* lua) {
+    GameState* state = stateFromLua(lua);
+    lua_pushinteger(lua, state == nullptr ? 0 : state->playerStats().magicka);
+    return 1;
+}
+
+int luaPlayerFatigue(lua_State* lua) {
+    GameState* state = stateFromLua(lua);
+    lua_pushinteger(lua, state == nullptr ? 0 : state->playerStats().fatigue);
+    return 1;
+}
+
+int luaSetPlayerMaxStats(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->setPlayerMaxStats(
+            static_cast<int>(luaL_checkinteger(lua, 1)),
+            static_cast<int>(luaL_checkinteger(lua, 2)),
+            static_cast<int>(luaL_checkinteger(lua, 3))
+        );
+    }
+    return 0;
+}
+
+int luaSetPlayerStats(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->setPlayerStats(
+            static_cast<int>(luaL_checkinteger(lua, 1)),
+            static_cast<int>(luaL_checkinteger(lua, 2)),
+            static_cast<int>(luaL_checkinteger(lua, 3))
+        );
+    }
+    return 0;
+}
+
+int luaDamagePlayer(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->damagePlayer(static_cast<int>(luaL_checkinteger(lua, 1)));
+    }
+    return 0;
+}
+
+int luaRestorePlayer(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->restorePlayer(
+            static_cast<int>(luaL_optinteger(lua, 1, 0)),
+            static_cast<int>(luaL_optinteger(lua, 2, 0)),
+            static_cast<int>(luaL_optinteger(lua, 3, 0))
+        );
+    }
+    return 0;
+}
+
+int luaSpendPlayerMagicka(lua_State* lua) {
+    bool spent = false;
+    if (GameState* state = stateFromLua(lua)) {
+        spent = state->spendPlayerMagicka(static_cast<int>(luaL_checkinteger(lua, 1)));
+    }
+    lua_pushboolean(lua, spent);
+    return 1;
+}
+
+int luaSpendPlayerFatigue(lua_State* lua) {
+    bool spent = false;
+    if (GameState* state = stateFromLua(lua)) {
+        spent = state->spendPlayerFatigue(static_cast<int>(luaL_checkinteger(lua, 1)));
+    }
+    lua_pushboolean(lua, spent);
+    return 1;
+}
+
+int luaRecoverPlayer(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->recoverPlayer();
+    }
+    return 0;
+}
+
+int luaIsPlayerDead(lua_State* lua) {
+    GameState* state = stateFromLua(lua);
+    lua_pushboolean(lua, state != nullptr && state->isPlayerDead());
+    return 1;
+}
+
 int luaIsRefDead(lua_State* lua) {
     GameState* state = stateFromLua(lua);
     lua_pushboolean(lua, state != nullptr && state->isRefDead(luaL_checkstring(lua, 1)));
@@ -124,6 +247,26 @@ int luaSetRefDisabled(lua_State* lua) {
     return 0;
 }
 
+int luaRefHealth(lua_State* lua) {
+    GameState* state = stateFromLua(lua);
+    lua_pushinteger(lua, state == nullptr ? 0 : state->refHealth(luaL_checkstring(lua, 1)));
+    return 1;
+}
+
+int luaSetRefHealth(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->setRefHealth(luaL_checkstring(lua, 1), static_cast<int>(luaL_checkinteger(lua, 2)));
+    }
+    return 0;
+}
+
+int luaDamageRef(lua_State* lua) {
+    if (GameState* state = stateFromLua(lua)) {
+        state->damageRef(luaL_checkstring(lua, 1), static_cast<int>(luaL_checkinteger(lua, 2)));
+    }
+    return 0;
+}
+
 void registerGameApi(lua_State* lua, GameState& state) {
     lua_pushlightuserdata(lua, &state);
     lua_setfield(lua, LUA_REGISTRYINDEX, "odai_game_state");
@@ -135,12 +278,22 @@ void registerGameApi(lua_State* lua, GameState& state) {
     lua_setfield(lua, -2, "journal");
     lua_pushcfunction(lua, luaSetJournal);
     lua_setfield(lua, -2, "set_journal");
+    lua_pushcfunction(lua, luaDefineQuest);
+    lua_setfield(lua, -2, "define_quest");
+    lua_pushcfunction(lua, luaSetQuestObjective);
+    lua_setfield(lua, -2, "set_quest_objective");
+    lua_pushcfunction(lua, luaCompleteQuest);
+    lua_setfield(lua, -2, "complete_quest");
+    lua_pushcfunction(lua, luaIsQuestCompleted);
+    lua_setfield(lua, -2, "is_quest_completed");
     lua_pushcfunction(lua, luaItemCount);
     lua_setfield(lua, -2, "item_count");
     lua_pushcfunction(lua, luaHasItem);
     lua_setfield(lua, -2, "has_item");
     lua_pushcfunction(lua, luaAddItem);
     lua_setfield(lua, -2, "add_item");
+    lua_pushcfunction(lua, luaSetItemName);
+    lua_setfield(lua, -2, "set_item_name");
     lua_pushcfunction(lua, luaRemoveItem);
     lua_setfield(lua, -2, "remove_item");
     lua_pushcfunction(lua, luaGold);
@@ -149,6 +302,28 @@ void registerGameApi(lua_State* lua, GameState& state) {
     lua_setfield(lua, -2, "add_gold");
     lua_pushcfunction(lua, luaSpendGold);
     lua_setfield(lua, -2, "spend_gold");
+    lua_pushcfunction(lua, luaPlayerHealth);
+    lua_setfield(lua, -2, "player_health");
+    lua_pushcfunction(lua, luaPlayerMagicka);
+    lua_setfield(lua, -2, "player_magicka");
+    lua_pushcfunction(lua, luaPlayerFatigue);
+    lua_setfield(lua, -2, "player_fatigue");
+    lua_pushcfunction(lua, luaSetPlayerMaxStats);
+    lua_setfield(lua, -2, "set_player_max_stats");
+    lua_pushcfunction(lua, luaSetPlayerStats);
+    lua_setfield(lua, -2, "set_player_stats");
+    lua_pushcfunction(lua, luaDamagePlayer);
+    lua_setfield(lua, -2, "damage_player");
+    lua_pushcfunction(lua, luaRestorePlayer);
+    lua_setfield(lua, -2, "restore_player");
+    lua_pushcfunction(lua, luaSpendPlayerMagicka);
+    lua_setfield(lua, -2, "spend_player_magicka");
+    lua_pushcfunction(lua, luaSpendPlayerFatigue);
+    lua_setfield(lua, -2, "spend_player_fatigue");
+    lua_pushcfunction(lua, luaRecoverPlayer);
+    lua_setfield(lua, -2, "recover_player");
+    lua_pushcfunction(lua, luaIsPlayerDead);
+    lua_setfield(lua, -2, "is_player_dead");
     lua_pushcfunction(lua, luaIsRefDead);
     lua_setfield(lua, -2, "is_ref_dead");
     lua_pushcfunction(lua, luaSetRefDead);
@@ -157,6 +332,12 @@ void registerGameApi(lua_State* lua, GameState& state) {
     lua_setfield(lua, -2, "is_ref_disabled");
     lua_pushcfunction(lua, luaSetRefDisabled);
     lua_setfield(lua, -2, "set_ref_disabled");
+    lua_pushcfunction(lua, luaRefHealth);
+    lua_setfield(lua, -2, "ref_health");
+    lua_pushcfunction(lua, luaSetRefHealth);
+    lua_setfield(lua, -2, "set_ref_health");
+    lua_pushcfunction(lua, luaDamageRef);
+    lua_setfield(lua, -2, "damage_ref");
     lua_setglobal(lua, "game");
 }
 

@@ -225,6 +225,14 @@ struct GameplayUiLayout {
 };
 
 struct GameplayUiState {
+    int health = 100;
+    int maxHealth = 100;
+    int magicka = 60;
+    int maxMagicka = 60;
+    int fatigue = 100;
+    int maxFatigue = 100;
+    int gold = 0;
+    bool playerDead = false;
     bool inventoryVisible = false;
     std::uint32_t selectedHotbarSlot = 0;
     std::array<InventoryItemId, kGameplayHotbarSlotCount> hotbarItems{};
@@ -243,6 +251,9 @@ struct GameplayUiState {
     std::string dialogueJournalSummary;
     std::vector<std::pair<std::string, std::string>> dialogueTopics;
     std::vector<std::pair<std::string, std::string>> dialogueChoices;
+    std::vector<std::pair<std::string, std::string>> inventoryEntries;
+    std::vector<std::pair<std::string, std::string>> questEntries;
+    std::string trackedQuestText;
 };
 
 enum class GameplayUiCommandType : std::uint8_t {

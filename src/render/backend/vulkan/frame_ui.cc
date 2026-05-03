@@ -1357,9 +1357,6 @@ void RendererBackend::buildGameplayHudUi() {
     if (drawList == nullptr) {
         return;
     }
-    if (!m_gameplayUiState.inventoryVisible) {
-        return;
-    }
 
     auto itemLabel = [](InventoryItemId itemId) -> const char* {
         switch (itemId) {
@@ -1393,62 +1390,131 @@ void RendererBackend::buildGameplayHudUi() {
     const ImU32 textColor = IM_COL32(236, 241, 248, 255);
     const ImU32 emptyTextColor = IM_COL32(152, 160, 172, 255);
 
-    drawList->AddRectFilled(
-        ImVec2(0.0f, 0.0f),
-        ImVec2(displaySize.x, displaySize.y),
-        IM_COL32(4, 6, 10, 130)
-    );
-    drawList->AddRectFilled(
-        ImVec2(layout.inventoryPanel.minX, layout.inventoryPanel.minY),
-        ImVec2(layout.inventoryPanel.maxX, layout.inventoryPanel.maxY),
-        IM_COL32(18, 22, 30, 235),
-        14.0f
-    );
-    drawList->AddRect(
-        ImVec2(layout.inventoryPanel.minX, layout.inventoryPanel.minY),
-        ImVec2(layout.inventoryPanel.maxX, layout.inventoryPanel.maxY),
-        borderColor,
-        14.0f,
-        0,
-        2.0f
-    );
-    drawList->AddText(
-        ImVec2(layout.inventoryPanel.minX + 24.0f, layout.inventoryPanel.minY + 20.0f),
-        textColor,
-        "Creative Inventory"
-    );
-    drawList->AddText(
-        ImVec2(layout.inventoryPanel.minX + 24.0f, layout.inventoryPanel.minY + 44.0f),
-        emptyTextColor,
-        "Click an item to assign it to the selected hotbar slot."
-    );
-    for (std::size_t itemIndex = 0; itemIndex < kCreativeInventoryItemCount; ++itemIndex) {
-        const GameplayUiRect& slot = layout.inventorySlots[itemIndex];
-        const InventoryItemId itemId = m_gameplayUiState.creativeInventoryItems[itemIndex];
-        const char* label = itemLabel(itemId);
+    auto drawBar = [&](float x, float y, float width, const char* label, int value, int maxValue, ImU32 fillColor) {
+        const float clampedMax = static_cast<float>(std::max(maxValue, 1));
+        const float fraction = std::clamp(static_cast<float>(value) / clampedMax, 0.0f, 1.0f);
+        drawList->AddRectFilled(ImVec2(x, y), ImVec2(x + width, y + 14.0f), IM_COL32(18, 20, 24, 230), 3.0f);
+        drawList->AddRectFilled(ImVec2(x, y), ImVec2(x + (width * fraction), y + 14.0f), fillColor, 3.0f);
+        drawList->AddRect(ImVec2(x, y), ImVec2(x + width, y + 14.0f), IM_COL32(20, 20, 20, 220), 3.0f);
+        const std::string text = std::string(label) + " " + std::to_string(std::max(value, 0)) + "/" + std::to_string(std::max(maxValue, 0));
+        drawList->AddText(ImVec2(x + 6.0f, y - 1.0f), IM_COL32(245, 245, 236, 245), text.c_str());
+    };
+
+    const float hudX = 22.0f;
+    const float hudY = displaySize.y - 172.0f;
+    const float hudWidth = 282.0f;
+    drawList->AddRectFilled(ImVec2(hudX - 12.0f, hudY - 14.0f), ImVec2(hudX + hudWidth + 12.0f, hudY + 94.0f), IM_COL32(12, 14, 16, 190), 5.0f);
+    drawBar(hudX, hudY, hudWidth, "Health", m_gameplayUiState.health, m_gameplayUiState.maxHealth, IM_COL32(172, 48, 42, 245));
+    drawBar(hudX, hudY + 24.0f, hudWidth, "Magicka", m_gameplayUiState.magicka, m_gameplayUiState.maxMagicka, IM_COL32(60, 92, 190, 245));
+    drawBar(hudX, hudY + 48.0f, hudWidth, "Fatigue", m_gameplayUiState.fatigue, m_gameplayUiState.maxFatigue, IM_COL32(58, 142, 72, 245));
+    const std::string goldText = "Gold " + std::to_string(m_gameplayUiState.gold);
+    drawList->AddText(ImVec2(hudX, hudY + 72.0f), IM_COL32(236, 205, 116, 245), goldText.c_str());
+
+    if (!m_gameplayUiState.trackedQuestText.empty() && !m_gameplayUiState.dialogueVisible) {
+        const float questWidth = std::clamp(displaySize.x * 0.42f, 360.0f, 640.0f);
+        const ImVec2 questPos{displaySize.x - questWidth - 22.0f, 24.0f};
+        drawList->AddRectFilled(questPos, ImVec2(questPos.x + questWidth, questPos.y + 52.0f), IM_COL32(14, 16, 18, 180), 5.0f);
+        drawList->AddText(ImVec2(questPos.x + 14.0f, questPos.y + 8.0f), IM_COL32(238, 221, 172, 245), "Tracked Quest");
+        drawList->AddText(ImVec2(questPos.x + 14.0f, questPos.y + 28.0f), IM_COL32(232, 236, 230, 245), m_gameplayUiState.trackedQuestText.c_str());
+    }
+
+    if (m_gameplayUiState.playerDead) {
+        const char* message = "You are down. Press R to recover.";
+        const ImVec2 textSize = ImGui::CalcTextSize(message);
+        const ImVec2 boxMin{(displaySize.x - textSize.x) * 0.5f - 24.0f, displaySize.y * 0.28f};
+        const ImVec2 boxMax{boxMin.x + textSize.x + 48.0f, boxMin.y + 52.0f};
+        drawList->AddRectFilled(boxMin, boxMax, IM_COL32(40, 8, 8, 220), 5.0f);
+        drawList->AddText(ImVec2(boxMin.x + 24.0f, boxMin.y + 18.0f), IM_COL32(255, 230, 220, 255), message);
+    }
+
+    for (std::size_t slotIndex = 0; slotIndex < layout.hotbarSlots.size(); ++slotIndex) {
+        const GameplayUiRect& slot = layout.hotbarSlots[slotIndex];
+        const InventoryItemId itemId = m_gameplayUiState.hotbarItems[slotIndex];
+        const bool selected = slotIndex == m_gameplayUiState.selectedHotbarSlot;
         drawList->AddRectFilled(
             ImVec2(slot.minX, slot.minY),
             ImVec2(slot.maxX, slot.maxY),
             slotColor,
-            10.0f
+            6.0f
         );
         drawList->AddRect(
             ImVec2(slot.minX, slot.minY),
             ImVec2(slot.maxX, slot.maxY),
-            borderColor,
-            10.0f,
+            selected ? IM_COL32(240, 206, 106, 255) : borderColor,
+            6.0f,
             0,
-            1.5f
+            selected ? 2.4f : 1.4f
         );
+        const float centerX = (slot.minX + slot.maxX) * 0.5f;
+        const float centerY = (slot.minY + slot.maxY) * 0.5f;
+        drawList->AddCircleFilled(ImVec2(centerX, centerY - 7.0f), 13.0f, itemTint(itemId), 20);
+        const char* label = itemLabel(itemId);
+        const ImVec2 textSize = ImGui::CalcTextSize(label);
+        drawList->AddText(
+            ImVec2(centerX - (textSize.x * 0.5f), slot.maxY - 18.0f),
+            textColor,
+            label
+        );
+    }
+
+    if (!m_gameplayUiState.inventoryVisible) {
+        return;
+    }
+
+    drawList->AddRectFilled(ImVec2(0.0f, 0.0f), ImVec2(displaySize.x, displaySize.y), IM_COL32(4, 6, 10, 130));
+    drawList->AddRectFilled(
+        ImVec2(layout.inventoryPanel.minX, layout.inventoryPanel.minY),
+        ImVec2(layout.inventoryPanel.maxX + 360.0f, layout.inventoryPanel.maxY + 180.0f),
+        IM_COL32(18, 22, 30, 235),
+        8.0f
+    );
+    drawList->AddRect(
+        ImVec2(layout.inventoryPanel.minX, layout.inventoryPanel.minY),
+        ImVec2(layout.inventoryPanel.maxX + 360.0f, layout.inventoryPanel.maxY + 180.0f),
+        borderColor,
+        8.0f,
+        0,
+        2.0f
+    );
+    drawList->AddText(ImVec2(layout.inventoryPanel.minX + 24.0f, layout.inventoryPanel.minY + 20.0f), textColor, "Inventory");
+    drawList->AddText(ImVec2(layout.inventoryPanel.minX + 24.0f, layout.inventoryPanel.minY + 44.0f), emptyTextColor, "Click a block item to assign it to the selected hotbar slot.");
+    for (std::size_t itemIndex = 0; itemIndex < kCreativeInventoryItemCount; ++itemIndex) {
+        const GameplayUiRect& slot = layout.inventorySlots[itemIndex];
+        const InventoryItemId itemId = m_gameplayUiState.creativeInventoryItems[itemIndex];
+        const char* label = itemLabel(itemId);
+        drawList->AddRectFilled(ImVec2(slot.minX, slot.minY), ImVec2(slot.maxX, slot.maxY), slotColor, 6.0f);
+        drawList->AddRect(ImVec2(slot.minX, slot.minY), ImVec2(slot.maxX, slot.maxY), borderColor, 6.0f, 0, 1.5f);
         const float centerX = (slot.minX + slot.maxX) * 0.5f;
         const float centerY = (slot.minY + slot.maxY) * 0.5f;
         drawList->AddCircleFilled(ImVec2(centerX, centerY - 8.0f), 16.0f, itemTint(itemId), 20);
         const ImVec2 textSize = ImGui::CalcTextSize(label);
-        drawList->AddText(
-            ImVec2(centerX - (textSize.x * 0.5f), slot.maxY - 22.0f),
-            textColor,
-            label
-        );
+        drawList->AddText(ImVec2(centerX - (textSize.x * 0.5f), slot.maxY - 22.0f), textColor, label);
+    }
+
+    float listX = layout.inventoryPanel.minX + 24.0f;
+    float listY = layout.inventoryPanel.maxY + 18.0f;
+    drawList->AddText(ImVec2(listX, listY), textColor, "Items");
+    listY += 24.0f;
+    if (m_gameplayUiState.inventoryEntries.empty()) {
+        drawList->AddText(ImVec2(listX, listY), emptyTextColor, "No quest items yet.");
+    } else {
+        for (const auto& entry : m_gameplayUiState.inventoryEntries) {
+            drawList->AddText(ImVec2(listX, listY), textColor, entry.second.c_str());
+            listY += 20.0f;
+        }
+    }
+
+    float questX = layout.inventoryPanel.maxX + 34.0f;
+    float questY = layout.inventoryPanel.minY + 20.0f;
+    drawList->AddText(ImVec2(questX, questY), textColor, "Journal");
+    questY += 26.0f;
+    if (m_gameplayUiState.questEntries.empty()) {
+        drawList->AddText(ImVec2(questX, questY), emptyTextColor, "No quests started.");
+    } else {
+        for (const auto& quest : m_gameplayUiState.questEntries) {
+            drawList->AddText(ImVec2(questX, questY), textColor, quest.second.c_str());
+            questY += 22.0f;
+        }
     }
 }
 

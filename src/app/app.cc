@@ -1843,6 +1843,15 @@ bool App::isAnyUiVisible() const {
 }
 
 void App::syncGameplayUiState() {
+    const odai::game::PlayerStats& playerStats = m_gameState.playerStats();
+    m_gameplayUiState.health = playerStats.health;
+    m_gameplayUiState.maxHealth = playerStats.maxHealth;
+    m_gameplayUiState.magicka = playerStats.magicka;
+    m_gameplayUiState.maxMagicka = playerStats.maxMagicka;
+    m_gameplayUiState.fatigue = playerStats.fatigue;
+    m_gameplayUiState.maxFatigue = playerStats.maxFatigue;
+    m_gameplayUiState.gold = m_gameState.gold();
+    m_gameplayUiState.playerDead = m_gameState.isPlayerDead();
     m_gameplayUiState.inventoryVisible = m_inventoryVisible;
     m_gameplayUiState.dialogueVisible = !m_activeDialogueActorId.empty() && m_activeDialogue.handled;
     m_gameplayUiState.dialogueActorName = m_gameplayUiState.dialogueVisible
@@ -1858,6 +1867,24 @@ void App::syncGameplayUiState() {
         " | Ring " + std::to_string(m_gameState.journalStage("MV_FargothRing")) +
         " | Hiding " + std::to_string(m_gameState.journalStage("MV_FargothHiding")) +
         " | Caius " + std::to_string(m_gameState.journalStage("MV_ReportToCaius"));
+    m_gameplayUiState.inventoryEntries.clear();
+    for (const odai::game::InventoryEntry& entry : m_gameState.inventoryEntries()) {
+        m_gameplayUiState.inventoryEntries.emplace_back(
+            entry.id,
+            entry.name + " x" + std::to_string(entry.count)
+        );
+    }
+    m_gameplayUiState.questEntries.clear();
+    m_gameplayUiState.trackedQuestText.clear();
+    for (const odai::game::QuestEntry& quest : m_gameState.questEntries()) {
+        const std::string status = quest.completed ? "Done" : ("Stage " + std::to_string(quest.stage));
+        const std::string line = quest.name + " - " + status +
+            (quest.objective.empty() ? std::string{} : (": " + quest.objective));
+        if (m_gameplayUiState.trackedQuestText.empty() && !quest.completed) {
+            m_gameplayUiState.trackedQuestText = quest.name + ": " + quest.objective;
+        }
+        m_gameplayUiState.questEntries.emplace_back(quest.id, line);
+    }
     m_gameplayUiState.dialogueTopics.clear();
     m_gameplayUiState.dialogueChoices.clear();
     if (m_gameplayUiState.dialogueVisible) {
@@ -2080,6 +2107,14 @@ bool App::tryActivateMorrowindScript() {
 
     const std::string targetRefId = resolveMorrowindScriptTargetRefId();
     if (targetRefId.empty()) {
+        if (m_gameState.isPlayerDead()) {
+            const odai::game::ScriptCallResult recovery = m_luaScriptRuntime.onActivate("__player_recover");
+            if (recovery.handled) {
+                m_lastScriptMessage = recovery.message;
+                syncGameplayUiState();
+                return true;
+            }
+        }
         return false;
     }
 
@@ -4785,6 +4820,14 @@ void App::pollInput() {
         }
     }
     m_wasEscapeKeyDown = escapeKeyDown;
+
+    const bool inventoryKeyDown = glfwGetKey(m_window, GLFW_KEY_E) == GLFW_PRESS;
+    if (inventoryKeyDown && !m_wasInventoryKeyDown && m_activeDialogueActorId.empty()) {
+        m_inventoryVisible = !m_inventoryVisible;
+        uiVisibilityChanged = true;
+        syncGameplayUiState();
+    }
+    m_wasInventoryKeyDown = inventoryKeyDown;
 
     const bool toggleDayCycleDown = glfwGetKey(m_window, GLFW_KEY_T) == GLFW_PRESS;
     if (toggleDayCycleDown && !m_wasToggleDayCycleDown) {
