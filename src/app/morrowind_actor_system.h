@@ -86,6 +86,8 @@ public:
     [[nodiscard]] std::uint32_t skeletonNodeCount() const;
     [[nodiscard]] std::uint32_t paletteMatrixCount() const;
     [[nodiscard]] std::uint32_t visibleInstanceCount() const;
+    [[nodiscard]] std::uint32_t framePoseCacheHitCount() const { return m_framePoseCacheHitCount; }
+    [[nodiscard]] std::uint32_t framePoseCacheMissCount() const { return m_framePoseCacheMissCount; }
     [[nodiscard]] const odai::importer::ImportedAnimationClip* walkClip() const;
     [[nodiscard]] const odai::importer::ImportedAnimationClip* idleClip() const;
 
@@ -93,6 +95,13 @@ private:
     struct PrototypeRange {
         std::uint32_t firstDraw = 0u;
         std::uint32_t drawCount = 0u;
+    };
+
+    struct FramePoseCacheEntry {
+        std::uint64_t key = 0u;
+        std::uint32_t paletteOffset = 0u;
+        std::vector<odai::render::ImportedActorBonePaletteMatrix> palette;
+        std::vector<std::array<float, 16>> worldMatrices;
     };
 
     [[nodiscard]] std::string makeAppearanceSignature(
@@ -119,7 +128,10 @@ private:
     std::vector<odai::render::ImportedActorInstanceData> m_frameInstances;
     std::vector<odai::render::ImportedActorBonePaletteMatrix> m_frameBonePalette;
     std::vector<odai::render::ImportedActorDebugLineVertex> m_frameDebugBoneLines;
+    std::vector<FramePoseCacheEntry> m_framePoseCache;
     BuildStats m_stats{};
+    std::uint32_t m_framePoseCacheHitCount = 0u;
+    std::uint32_t m_framePoseCacheMissCount = 0u;
     bool m_skeletonLoaded = false;
     bool m_assetDirty = false;
     bool m_frameDebugBoneLinesEnabled = false;

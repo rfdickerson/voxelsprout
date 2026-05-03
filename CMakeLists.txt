@@ -165,6 +165,7 @@ if(ODAI_BUILD_APP)
     add_executable(odai
         src/app/main.cc
         src/app/app.cc
+        src/app/morrowind_actor_ai.cc
         src/app/morrowind_actor_system.cc
         src/audio/sound_engine.cc
         src/core/log.cc
@@ -389,6 +390,18 @@ if(BUILD_TESTING)
         target_compile_options(odai_game_script_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_game_script_tests COMMAND odai_game_script_tests)
+
+    add_executable(odai_actor_ai_tests
+        tests/actor_ai_tests.cc
+        src/app/morrowind_actor_ai.cc
+    )
+    target_include_directories(odai_actor_ai_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_actor_ai_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_actor_ai_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_actor_ai_tests COMMAND odai_actor_ai_tests)
 
     add_executable(odai_imported_scene_tests
         tests/imported_scene_tests.cc

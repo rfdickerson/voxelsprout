@@ -359,6 +359,11 @@ LuaScriptRuntime::NpcUpdateCommand LuaScriptRuntime::readNpcUpdateCommand(int st
     result.handled = optionalTableBool(m_lua, tableIndex, "handled");
     result.stop = optionalTableBool(m_lua, tableIndex, "stop");
     result.speed = optionalTableFloat(m_lua, tableIndex, "speed", -1.0f);
+    result.waitSeconds = optionalTableFloat(m_lua, tableIndex, "wait_seconds", -1.0f);
+    result.wanderRadius = optionalTableFloat(m_lua, tableIndex, "wander_radius", -1.0f);
+    result.priority = static_cast<int>(optionalTableFloat(m_lua, tableIndex, "priority", 0.0f));
+    result.state = optionalTableString(m_lua, tableIndex, "state");
+    result.anchor = optionalTableString(m_lua, tableIndex, "anchor");
     result.message = optionalTableString(m_lua, tableIndex, "message");
 
     lua_getfield(m_lua, tableIndex, "route");

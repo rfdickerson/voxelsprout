@@ -22,6 +22,11 @@ public:
         bool handled = false;
         bool stop = false;
         float speed = -1.0f;
+        float waitSeconds = -1.0f;
+        float wanderRadius = -1.0f;
+        int priority = 0;
+        std::string state;
+        std::string anchor;
         std::string message;
         std::vector<NpcRoutePoint> route;
     };

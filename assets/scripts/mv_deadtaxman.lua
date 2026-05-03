@@ -41,6 +41,9 @@ local function common_topics()
     return {
         topic("seyda neen", "Seyda Neen"),
         topic("latest rumors", "Latest rumors"),
+        topic("background", "Background"),
+        topic("statistics", "Statistics"),
+        topic("services", "Services"),
     }
 end
 
@@ -65,8 +68,187 @@ local function lower(value)
     return string.lower(value or "")
 end
 
-local function fargoth_topics()
+local SEYDA_NEEN_PEOPLE = {
+    ["adraria vandacia"] = { race = "Imperial", gender = "Female", class = "Agent", faction = "Census and Excise", rank = "Taxman", level = 11, health = 98, magicka = 102, location = "Census and Excise Warehouse", trainer = true },
+    ["albecius colollius"] = { race = "Imperial", gender = "Male", class = "Battlemage", level = 6, health = 68, magicka = 122, location = "Arrille's Tradehouse" },
+    ["aronil"] = { race = "High Elf", gender = "Male", class = "Battlemage", level = 12, health = 180, magicka = 500, location = "Outside [-1,-10]" },
+    ["arrille"] = { race = "High Elf", gender = "Male", class = "Trader Service", level = 15, health = 141, magicka = 42, location = "Arrille's Tradehouse", merchant = true, spell_merchant = true },
+    ["darvame hleran"] = { race = "Dark Elf", gender = "Female", class = "Caravaner", level = 0, health = 32, magicka = 96, location = "Outside [-2,-9]", travel = true },
+    ["draren thiralas"] = { race = "Dark Elf", gender = "Male", class = "Commoner", level = 4, health = 63, magicka = 86, location = "Draren Thiralas' House" },
+    ["eldafire"] = { race = "High Elf", gender = "Female", class = "Commoner", level = 5, health = 58, magicka = 108, location = "Outside [-2,-9]" },
+    ["elone"] = { race = "Redguard", gender = "Female", class = "Scout", faction = "Blades", rank = "Journeyman", level = 9, health = 110, magicka = 78, location = "Arrille's Tradehouse", trainer = true },
+    ["erene llenim"] = { race = "Dark Elf", gender = "Male", class = "Commoner", level = 3, health = 57, magicka = 84, location = "Outside [-2,-9]" },
+    [FARGOTH] = { race = "Wood Elf", gender = "Male", class = "Commoner", level = 2, health = 41, magicka = 82, location = "Outside [-2,-9]" },
+    ["fine-mouth"] = { race = "Argonian", gender = "Male", class = "Commoner", level = 2, health = 46, magicka = 82, location = "Fine-Mouth's Shack" },
+    [FORYN] = { race = "Dark Elf", gender = "Male", class = "Commoner", level = 5, health = 68, magicka = 88, location = "Foryn Gilnith's Shack" },
+    ["ganciele douar"] = { race = "Imperial", gender = "Male", class = "Guard", faction = "Imperial Legion", rank = "Spearman", level = 15, health = 170, magicka = 110, location = "Census and Excise Office" },
+    ["hjrondir"] = { race = "Nord", gender = "Male", class = "Warrior", level = 10, health = 220, magicka = 74, location = "Outside [-1,-10]" },
+    [HRISSKAR] = { race = "Nord", gender = "Male", class = "Rogue", faction = "Imperial Legion", rank = "Trooper", level = 8, health = 81, magicka = 18, location = "Arrille's Tradehouse" },
+    ["indrele rathryon"] = { race = "Dark Elf", gender = "Female", class = "Commoner", level = 1, health = 40, magicka = 80, location = "Outside [-2,-9]" },
+    ["mara"] = { race = "Wood Elf", gender = "Female", class = "Archer", level = 10, health = 180, magicka = 72, location = "Outside [-1,-10]" },
+    ["raflod the braggart"] = { race = "Nord", gender = "Male", class = "Scout", faction = "Thieves Guild", rank = "Wet Ear", level = 7, health = 100, magicka = 74, location = "Arrille's Tradehouse", trainer = true },
+    [SELLUS] = { race = "Imperial", gender = "Male", class = "Guard", faction = "Imperial Legion", rank = "Knight Errant", level = 17, health = 186, magicka = 116, location = "Census and Excise Office" },
+    ["silm-dar"] = { race = "Argonian", gender = "Male", class = "Commoner", level = 6, health = 150, magicka = 68, location = "Outside [-1,-10]" },
+    [SOCUCIUS] = { race = "Breton", gender = "Male", class = "Agent", faction = "Census and Excise", rank = "Agent", level = 14, health = 102, magicka = 128, location = "Census and Excise Office", trainer = true },
+    ["tandram andalen"] = { race = "Dark Elf", gender = "Male", class = "Bard", level = 3, health = 51, magicka = 108, location = "Arrille's Tradehouse" },
+    ["teleri helvi"] = { race = "Dark Elf", gender = "Female", class = "Commoner", level = 4, health = 58, magicka = 86, location = "Outside [-2,-9]" },
+    ["teruise girvayne"] = { race = "Dark Elf", gender = "Female", class = "Commoner", level = 3, health = 52, magicka = 84, location = "Terurise Girvayne's House" },
+    ["thavere vedrano"] = { race = "Dark Elf", gender = "Female", class = "Commoner", level = 5, health = 63, magicka = 88, location = "Lighthouse" },
+    ["tolvise othralen"] = { race = "Dark Elf", gender = "Female", class = "Commoner", level = 3, health = 52, magicka = 84, location = "Arrille's Tradehouse" },
+    [VODUNIUS] = { race = "Imperial", gender = "Male", class = "Commoner", level = 4, health = 63, magicka = 86, location = "Outside [-2,-9]" },
+}
+
+local function actor_info(actor)
+    return SEYDA_NEEN_PEOPLE[lower(actor)]
+end
+
+local function append_actor_service_choices(actor, choices)
+    local info = actor_info(actor)
+    if info == nil then
+        return choices or {}
+    end
+    choices = choices or {}
+    if info.trainer then
+        choices[#choices + 1] = choice("train:" .. lower(actor), "Ask about training.")
+    end
+    if info.merchant then
+        choices[#choices + 1] = choice("barter:" .. lower(actor), "Ask to barter.")
+    end
+    if info.spell_merchant then
+        choices[#choices + 1] = choice("spells:" .. lower(actor), "Ask about spells.")
+    end
+    if info.travel then
+        choices[#choices + 1] = choice("travel:" .. lower(actor), "Ask about travel.")
+    end
+    return choices
+end
+
+local function actor_topics(actor)
     local topics = common_topics()
+    local info = actor_info(actor)
+    if info ~= nil and (info.trainer or info.merchant or info.spell_merchant or info.travel) then
+        append_topic(topics, "training", "Training")
+    end
+    return topics
+end
+
+local function actor_summary(actor)
+    local info = actor_info(actor)
+    if info == nil then
+        return nil
+    end
+    local faction = ""
+    if info.faction ~= nil then
+        faction = " " .. info.faction
+        if info.rank ~= nil then
+            faction = faction .. " (" .. info.rank .. ")"
+        end
+        faction = faction .. "."
+    end
+    return actor .. " is a level " .. tostring(info.level) .. " " .. info.gender .. " " ..
+        info.race .. " " .. info.class .. " found at " .. info.location .. "." .. faction
+end
+
+local function actor_statistics_text(actor)
+    local info = actor_info(actor)
+    if info == nil then
+        return nil
+    end
+    return "Level " .. tostring(info.level) ..
+        ". Health " .. tostring(info.health) ..
+        ". Magicka " .. tostring(info.magicka) .. "."
+end
+
+local function actor_services_text(actor)
+    local info = actor_info(actor)
+    if info == nil then
+        return nil
+    end
+    local services = {}
+    if info.trainer then services[#services + 1] = "training" end
+    if info.merchant then services[#services + 1] = "barter" end
+    if info.spell_merchant then services[#services + 1] = "spell merchant" end
+    if info.travel then services[#services + 1] = "silt strider travel" end
+    if #services == 0 then
+        return "I do not offer services."
+    end
+    return "Available services: " .. table.concat(services, ", ") .. "."
+end
+
+local SEYDA_NEEN_SCHEDULES = {
+    [FARGOTH] = { day = "village_square", night = "fargoth_home", speed = 68.0 },
+    ["eldafire"] = { day = "eldafire_home", night = "eldafire_home", speed = 62.0 },
+    ["erene llenim"] = { day = "erene_home", night = "erene_home", speed = 60.0 },
+    ["indrele rathryon"] = { day = "indrele_shack", night = "indrele_shack", speed = 58.0 },
+    ["teleri helvi"] = { day = "teleri_home", night = "teleri_home", speed = 60.0 },
+    [VODUNIUS] = { day = "tradehouse", night = "vodunius_home", speed = 66.0 },
+    ["darvame hleran"] = { day = "darvame_silt_strider", night = "darvame_silt_strider", speed = 56.0 },
+    ["aronil"] = { day = "road_east", night = "road_east", speed = 72.0 },
+    ["hjrondir"] = { day = "road_east", night = "road_east", speed = 74.0 },
+    ["mara"] = { day = "road_east", night = "road_east", speed = 74.0 },
+    ["silm-dar"] = { day = "road_east", night = "road_east", speed = 64.0 },
+}
+
+local function is_seyda_neen_guard(actor)
+    return string.sub(actor, 1, 17) == "seyda_neen_guard_"
+        or actor == "imperial guard"
+        or actor == "chargen dock guard"
+        or actor == "chargen boat guard 1"
+end
+
+local function generic_schedule(actor, game_hour)
+    local hour = game_hour or 14.0
+    local is_night = hour >= 21.0 or hour < 6.0
+    if is_seyda_neen_guard(actor) then
+        if is_night then
+            return {
+                handled = true,
+                state = "wander",
+                anchor = "census_office",
+                speed = 86.0,
+                wait_seconds = 3.0,
+                wander_radius = 260.0,
+                priority = 10,
+            }
+        end
+        return {
+            handled = true,
+            state = "wander",
+            anchor = "dock",
+            speed = 92.0,
+            wait_seconds = 2.0,
+            wander_radius = 320.0,
+            priority = 10,
+        }
+    end
+
+    local schedule = SEYDA_NEEN_SCHEDULES[actor]
+    if schedule == nil then
+        return ignored()
+    end
+    if is_night then
+        return {
+            handled = true,
+            state = "travel",
+            anchor = schedule.night,
+            speed = schedule.speed,
+            wait_seconds = 8.0,
+            priority = 1,
+        }
+    end
+    return {
+        handled = true,
+        state = "wander",
+        anchor = schedule.day,
+        speed = schedule.speed,
+        wait_seconds = 4.0,
+        wander_radius = 180.0,
+        priority = 1,
+    }
+end
+
+local function fargoth_topics()
+    local topics = actor_topics(FARGOTH)
     append_topic(topics, "missing ring", "Missing ring")
     if game.journal(FARGOTH_HIDING_QUEST) >= 10 then
         append_topic(topics, "hiding place", "Hiding place")
@@ -75,7 +257,7 @@ local function fargoth_topics()
 end
 
 local function hrisskar_topics()
-    local topics = common_topics()
+    local topics = actor_topics(HRISSKAR)
     if game.journal(FARGOTH_RING_QUEST) >= 30 then
         append_topic(topics, "fargoth's hiding place", "Fargoth's hiding place")
     end
@@ -83,7 +265,7 @@ local function hrisskar_topics()
 end
 
 local function taxman_topics()
-    local topics = common_topics()
+    local topics = actor_topics(SOCUCIUS)
     append_topic(topics, "murder of processus vitellius", "Murder of Processus Vitellius")
     return topics
 end
@@ -154,6 +336,27 @@ function get_dialogue(actor_id, topic_id)
         )
     end
 
+    if topic_id == "background" then
+        local summary = actor_summary(actor)
+        if summary ~= nil then
+            return dialogue(summary, actor_topics(actor), append_actor_service_choices(actor, {}))
+        end
+    end
+
+    if topic_id == "statistics" then
+        local stats = actor_statistics_text(actor)
+        if stats ~= nil then
+            return dialogue(stats, actor_topics(actor), append_actor_service_choices(actor, {}))
+        end
+    end
+
+    if topic_id == "services" or topic_id == "training" then
+        local services = actor_services_text(actor)
+        if services ~= nil then
+            return dialogue(services, actor_topics(actor), append_actor_service_choices(actor, {}))
+        end
+    end
+
     if actor == FARGOTH then
         if topic_id == "missing ring" then
             if game.journal(FARGOTH_RING_QUEST) >= 30 then
@@ -186,7 +389,7 @@ function get_dialogue(actor_id, topic_id)
         return dialogue(
             "Are you the one that boat dropped off? Odd time for a ship to arrive. If you find my ring, please bring it to me.",
             fargoth_topics(),
-            {}
+            append_actor_service_choices(actor, {})
         )
     end
 
@@ -229,7 +432,7 @@ function get_dialogue(actor_id, topic_id)
         return dialogue(
             "Hrisskar Flat-Foot. I keep order upstairs at Arrille's when order needs keeping.",
             hrisskar_topics(),
-            {}
+            append_actor_service_choices(actor, {})
         )
     end
 
@@ -318,14 +521,56 @@ function get_dialogue(actor_id, topic_id)
         return dialogue(
             "Vodunius Nuccius. Down on my luck, and not much fond of this place.",
             topics,
-            {}
+            append_actor_service_choices(actor, {})
         )
+    end
+
+    local summary = actor_summary(actor)
+    if summary ~= nil then
+        return dialogue(summary, actor_topics(actor), append_actor_service_choices(actor, {}))
     end
 
     return ignored()
 end
 
 function choose_dialogue(response_id)
+    local response = lower(response_id)
+    if string.sub(response, 1, 6) == "train:" then
+        local actor = string.sub(response, 7)
+        local info = actor_info(actor)
+        if info ~= nil and info.trainer then
+            return result(actor .. " offers practical training appropriate to " .. info.class .. ".")
+        end
+        return ignored()
+    end
+
+    if string.sub(response, 1, 7) == "barter:" then
+        local actor = string.sub(response, 8)
+        local info = actor_info(actor)
+        if info ~= nil and info.merchant then
+            return result(actor .. " is willing to barter.")
+        end
+        return ignored()
+    end
+
+    if string.sub(response, 1, 7) == "spells:" then
+        local actor = string.sub(response, 8)
+        local info = actor_info(actor)
+        if info ~= nil and info.spell_merchant then
+            return result(actor .. " offers spells for sale.")
+        end
+        return ignored()
+    end
+
+    if string.sub(response, 1, 7) == "travel:" then
+        local actor = string.sub(response, 8)
+        local info = actor_info(actor)
+        if info ~= nil and info.travel then
+            return result(actor .. " offers silt strider travel to Balmora, Gnisis, Suran, and Vivec.")
+        end
+        return ignored()
+    end
+
     if response_id == "fargoth_return_ring" and game.journal(FARGOTH_RING_QUEST) < 30 then
         if game.remove_item(FARGOTH_RING, 1) then
             game.set_journal(FARGOTH_RING_QUEST, 30)
@@ -404,19 +649,19 @@ end
 function update_npc(actor_id, x, y, z, game_hour)
     local actor = lower(actor_id)
     if actor ~= FARGOTH then
-        return { handled = false }
+        return generic_schedule(actor, game_hour)
     end
 
     local hiding_stage = game.journal(FARGOTH_HIDING_QUEST)
     if hiding_stage < 10 or hiding_stage >= 20 then
-        return { handled = true, stop = true }
+        return generic_schedule(actor, game_hour)
     end
 
     if hiding_stage == 10 then
         local hour = game_hour or 14.0
         local is_night = hour >= 20.0 or hour < 5.0
         if not is_night then
-            return { handled = true, stop = true }
+            return generic_schedule(actor, game_hour)
         end
         game.set_journal(FARGOTH_HIDING_QUEST, 12)
         return {

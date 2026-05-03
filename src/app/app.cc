@@ -127,6 +127,25 @@ constexpr float kBalmoraGuardRouteReachRadius = 54.0f;
 constexpr float kBalmoraGuardNavmeshProbeHeight = 96.0f;
 constexpr float kBalmoraGuardWalkCycleScale = 0.046f;
 constexpr float kBalmoraGuardPathRetryCooldownSeconds = 1.0f;
+constexpr float kMorrowindActorAvoidanceRadius = 76.0f;
+constexpr float kMorrowindActorPathPointReachRadius = 12.0f;
+constexpr float kMorrowindActorPathCacheBucketSize = 512.0f;
+constexpr float kMorrowindActorPathCacheMaxAgeSeconds = 90.0f;
+constexpr std::size_t kMorrowindActorPathCacheMaxEntries = 128u;
+constexpr std::size_t kMorrowindActorPathRequestQueueMaxEntries = 8u;
+constexpr std::size_t kMorrowindActorPathSmoothLookahead = 8u;
+constexpr float kMorrowindActorStuckSeconds = 2.2f;
+constexpr float kMorrowindActorScheduleThinkSeconds = 1.2f;
+constexpr float kMorrowindActorAvoidanceUpdateSeconds = 1.0f / 12.0f;
+constexpr int kMorrowindActorMaxPathRequestsPerTick = 3;
+constexpr float kMorrowindActorPerfLogSeconds = 2.0f;
+constexpr float kMorrowindActorNearRenderDistance = 1400.0f;
+constexpr float kMorrowindActorMaxRenderDistance = 6200.0f;
+constexpr float kMorrowindActorNearRenderDistanceSq =
+    kMorrowindActorNearRenderDistance * kMorrowindActorNearRenderDistance;
+constexpr float kMorrowindActorMaxRenderDistanceSq =
+    kMorrowindActorMaxRenderDistance * kMorrowindActorMaxRenderDistance;
+constexpr float kMorrowindActorRenderRearDot = -0.35f;
 constexpr float kNpcDialogueActivationRadius = 260.0f;
 constexpr float kNpcDialogueActivationMinFacingDot = 0.58f;
 constexpr float kFargothStashActivationRadius = 220.0f;
@@ -552,6 +571,37 @@ odai::math::Vector3 fargothStashWorldPosition() {
     };
 }
 
+odai::math::Vector3 seydaNeenCellPoint(float xFraction, float zFraction) {
+    const float cellMinX = static_cast<float>(kSeydaNeenCellX) * kMorrowindCellSizeUnits;
+    const float cellMinZ = static_cast<float>(kSeydaNeenCellY) * kMorrowindCellSizeUnits;
+    return {
+        cellMinX + (xFraction * kMorrowindCellSizeUnits),
+        0.0f,
+        cellMinZ + (zFraction * kMorrowindCellSizeUnits)
+    };
+}
+
+odai::math::Vector3 seydaNeenScheduleAnchorPoint(const std::string& anchorId) {
+    const std::string anchor = lowerPathCopy(anchorId);
+    if (anchor == "fargoth_home") return seydaNeenCellPoint(0.49f, 0.50f);
+    if (anchor == "eldafire_home") return seydaNeenCellPoint(0.34f, 0.48f);
+    if (anchor == "erene_home") return seydaNeenCellPoint(0.44f, 0.63f);
+    if (anchor == "indrele_shack") return seydaNeenCellPoint(0.37f, 0.58f);
+    if (anchor == "teleri_home") return seydaNeenCellPoint(0.55f, 0.58f);
+    if (anchor == "vodunius_home") return seydaNeenCellPoint(0.55f, 0.44f);
+    if (anchor == "darvame_silt_strider") return seydaNeenCellPoint(0.64f, 0.59f);
+    if (anchor == "silt_strider") return seydaNeenCellPoint(0.67f, 0.61f);
+    if (anchor == "tradehouse") return seydaNeenCellPoint(0.44f, 0.47f);
+    if (anchor == "census_office") return seydaNeenCellPoint(0.56f, 0.39f);
+    if (anchor == "warehouse") return seydaNeenCellPoint(0.47f, 0.36f);
+    if (anchor == "dock") return seydaNeenCellPoint(0.58f, 0.32f);
+    if (anchor == "lighthouse") return seydaNeenCellPoint(0.28f, 0.36f);
+    if (anchor == "road_east") return seydaNeenCellPoint(0.78f, 0.52f);
+    if (anchor == "village_square") return seydaNeenCellPoint(0.49f, 0.51f);
+    if (anchor == "fargoth_stash") return fargothStashWorldPosition();
+    return seydaNeenCellPoint(0.49f, 0.51f);
+}
+
 std::string morrowindActorRefKeyString(
     int cellX,
     int cellY,
@@ -578,6 +628,84 @@ std::uint64_t fnv1a64(std::string_view value) {
         hash *= 1099511628211ull;
     }
     return hash;
+}
+
+odai::math::Vector3 seydaNeenScheduleMilestonePoint(
+    const std::string& anchorId,
+    const std::string& actorId,
+    std::uint32_t ordinal,
+    float wanderRadius
+) {
+    const odai::math::Vector3 center = seydaNeenScheduleAnchorPoint(anchorId);
+    if (wanderRadius <= 0.0f) {
+        return center;
+    }
+
+    const float radius = std::clamp(wanderRadius, 80.0f, 260.0f);
+    const std::uint64_t hash = fnv1a64(lowerPathCopy(anchorId) + ":" + lowerPathCopy(actorId));
+    if (((ordinal + static_cast<std::uint32_t>(hash & 3ull)) % 5u) == 0u) {
+        return center;
+    }
+
+    constexpr float kGoldenAngleRadians = 2.3999631f;
+    const float angle =
+        (static_cast<float>((hash >> 8u) % 628u) * 0.01f) +
+        (static_cast<float>(ordinal + 1u) * kGoldenAngleRadians);
+    const float distanceScale =
+        0.45f + (0.1f * static_cast<float>((ordinal + static_cast<std::uint32_t>(hash >> 20u)) % 5u));
+    return {
+        center.x + (std::cos(angle) * radius * distanceScale),
+        center.y,
+        center.z + (std::sin(angle) * radius * distanceScale)
+    };
+}
+
+bool morrowindActorPathSegmentsClear(
+    const odai::world::Navmesh& navmesh,
+    const std::vector<odai::world::NavmeshPathPoint>& path
+) {
+    if (path.size() < 2u) {
+        return false;
+    }
+    for (std::size_t pointIndex = 1u; pointIndex < path.size(); ++pointIndex) {
+        if (navmesh.isSegmentBlocked(
+                path[pointIndex - 1u].position,
+                path[pointIndex].position)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void smoothMorrowindActorPath(
+    const odai::world::Navmesh& navmesh,
+    std::vector<odai::world::NavmeshPathPoint>& path
+) {
+    if (path.size() <= 2u) {
+        return;
+    }
+
+    std::vector<odai::world::NavmeshPathPoint> smoothed;
+    smoothed.reserve(path.size());
+    std::size_t currentIndex = 0u;
+    smoothed.push_back(path[currentIndex]);
+    while (currentIndex + 1u < path.size()) {
+        std::size_t farthestIndex = currentIndex + 1u;
+        const std::size_t endIndex = std::min(
+            path.size() - 1u,
+            currentIndex + kMorrowindActorPathSmoothLookahead);
+        for (std::size_t candidateIndex = endIndex; candidateIndex > currentIndex + 1u; --candidateIndex) {
+            if (!navmesh.isSegmentBlocked(
+                    path[currentIndex].position,
+                    path[candidateIndex].position)) {
+                farthestIndex = candidateIndex;
+                break;
+            }
+        }
+        smoothed.push_back(path[farthestIndex]);
+        currentIndex = farthestIndex;
+    }
+    path = std::move(smoothed);
 }
 
 std::filesystem::path balmoraInteriorCacheRoot() {
@@ -2195,6 +2323,7 @@ bool App::enterMorrowindInterior(const odai::importer::MorrowindDoorReference& d
         actor.resident = false;
     }
     m_morrowindActorSystem.clear();
+    stopMorrowindActorPathWorker();
     m_balmoraNavmesh.clear();
 
     m_camera.x = door.destination.position[0];
@@ -2241,6 +2370,7 @@ bool App::leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& d
         actor.resident = false;
     }
     m_morrowindActorSystem.clear();
+    stopMorrowindActorPathWorker();
     m_balmoraNavmesh.clear();
 
     m_camera.x = door.destination.position[0];
@@ -2266,6 +2396,7 @@ bool App::initializeActorDebugScene(const std::filesystem::path& dataFilesPath) 
     m_gpuSceneAsset = {};
     m_gpuSceneRuntime = {};
     m_importedSceneCollision = {};
+    stopMorrowindActorPathWorker();
     m_balmoraNavmesh.clear();
     m_morrowindActorSystem.clear();
     m_morrowindActors.clear();
@@ -2402,10 +2533,12 @@ bool App::initializeActorDebugScene(const std::filesystem::path& dataFilesPath) 
 }
 
 void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
+    stopMorrowindActorPathWorker();
     for (MorrowindActorInstance& actor : m_morrowindActors) {
         actor.resident = false;
     }
     m_morrowindActorSystem.clear();
+    m_morrowindActorPathCache.clear();
     if (!reusePreparedNavmesh) {
         m_balmoraNavmesh.clear();
     }
@@ -2658,6 +2791,9 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
             if (actor.route.empty() && !actorRoute.empty()) {
                 actor.route = actorRoute;
             }
+            if (actor.scheduleAnchorId.empty()) {
+                actor.scheduleAnchorId = "village_square";
+            }
             return;
         }
 
@@ -2681,6 +2817,9 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
         actor.routeIndex = actor.route.empty() ? 0u : (m_morrowindActors.size() % actor.route.size());
         actor.actorId = normalizedActorId;
         actor.dialogueActorId = normalizedActorId;
+        actor.scriptUpdateCooldownSeconds = 0.05f * static_cast<float>(m_morrowindActors.size() % 24u);
+        actor.lastProgressPosition = snappedSpawn;
+        actor.scheduleAnchorId = "village_square";
         actor.resident = true;
         m_morrowindActorIndexByRefKey.emplace(refKey, m_morrowindActors.size());
         m_morrowindActors.push_back(std::move(actor));
@@ -2832,20 +2971,246 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
                     << " skeletonNodes=" << m_morrowindActorSystem.skeletonNodeCount()
                     << " navmeshWalkable=" << navmeshStats.walkableTriangleCount
                     << " navmeshLinks=" << navmeshStats.linkCount;
+    startMorrowindActorPathWorker();
+}
+
+void App::startMorrowindActorPathWorker() {
+    if (m_balmoraNavmesh.empty() || m_morrowindActorPathThread.joinable()) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_morrowindActorPathMutex);
+        m_morrowindActorPathWorkerStop = false;
+        m_morrowindActorPathRequests.clear();
+        m_morrowindActorPathResults.clear();
+        ++m_morrowindActorPathGeneration;
+    }
+
+    m_morrowindActorPathThread = std::thread([this]() {
+        while (true) {
+            MorrowindActorPathRequest request{};
+            {
+                std::unique_lock<std::mutex> lock(m_morrowindActorPathMutex);
+                m_morrowindActorPathCondition.wait(lock, [this]() {
+                    return m_morrowindActorPathWorkerStop || !m_morrowindActorPathRequests.empty();
+                });
+                if (m_morrowindActorPathWorkerStop && m_morrowindActorPathRequests.empty()) {
+                    return;
+                }
+                request = std::move(m_morrowindActorPathRequests.front());
+                m_morrowindActorPathRequests.pop_front();
+            }
+
+            MorrowindActorPathResult result{};
+            result.id = request.id;
+            result.generation = request.generation;
+            result.actorIndex = request.actorIndex;
+            result.cacheKey = request.cacheKey;
+            result.success = m_balmoraNavmesh.findPath(request.start, request.target, result.path);
+            if (result.success) {
+                smoothMorrowindActorPath(m_balmoraNavmesh, result.path);
+                result.success = morrowindActorPathSegmentsClear(m_balmoraNavmesh, result.path);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(m_morrowindActorPathMutex);
+                if (!m_morrowindActorPathWorkerStop && result.generation == m_morrowindActorPathGeneration) {
+                    m_morrowindActorPathResults.push_back(std::move(result));
+                }
+            }
+        }
+    });
+}
+
+void App::stopMorrowindActorPathWorker() {
+    {
+        std::lock_guard<std::mutex> lock(m_morrowindActorPathMutex);
+        m_morrowindActorPathWorkerStop = true;
+        ++m_morrowindActorPathGeneration;
+        m_morrowindActorPathRequests.clear();
+        m_morrowindActorPathResults.clear();
+    }
+    m_morrowindActorPathCondition.notify_all();
+    if (m_morrowindActorPathThread.joinable()) {
+        m_morrowindActorPathThread.join();
+    }
+    for (MorrowindActorInstance& actor : m_morrowindActors) {
+        actor.pendingPathRequestId = 0u;
+        actor.pendingPathCacheKey.clear();
+        actor.pendingPathTarget = {};
+    }
+}
+
+std::uint64_t App::submitMorrowindActorPathRequest(
+    std::size_t actorIndex,
+    const odai::math::Vector3& start,
+    const odai::math::Vector3& target,
+    const std::string& cacheKey
+) {
+    std::uint64_t requestId = 0u;
+    {
+        std::lock_guard<std::mutex> lock(m_morrowindActorPathMutex);
+        if (!m_morrowindActorPathThread.joinable() ||
+            m_morrowindActorPathWorkerStop ||
+            m_morrowindActorPathRequests.size() >= kMorrowindActorPathRequestQueueMaxEntries) {
+            return 0u;
+        }
+        requestId = m_nextMorrowindActorPathRequestId++;
+        m_morrowindActorPathRequests.push_back(MorrowindActorPathRequest{
+            requestId,
+            m_morrowindActorPathGeneration,
+            actorIndex,
+            start,
+            target,
+            cacheKey
+        });
+    }
+    m_morrowindActorPathCondition.notify_one();
+    return requestId;
 }
 
 void App::updateMorrowindActors(float dt) {
     if (m_morrowindActors.empty() || !m_morrowindActorSystem.hasRenderableAsset() || m_balmoraNavmesh.empty()) {
         return;
     }
+    const auto updateStartTime = std::chrono::high_resolution_clock::now();
+    auto elapsedMs = [](const auto& startTime) {
+        const auto endTime = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration<double, std::milli>(endTime - startTime).count();
+    };
+    const float clampedDt = std::max(dt, 0.0f);
+    MorrowindActorPerfStats frameStats{};
+    m_morrowindActorPerfStats.logCooldownSeconds = std::max(
+        0.0f,
+        m_morrowindActorPerfStats.logCooldownSeconds - clampedDt);
+    int pathRequestsRemaining = kMorrowindActorMaxPathRequestsPerTick;
+
+    for (auto it = m_morrowindActorPathCache.begin(); it != m_morrowindActorPathCache.end();) {
+        it->second.ageSeconds += clampedDt;
+        if (isMorrowindActorPathCacheExpired(
+                it->second.ageSeconds,
+                kMorrowindActorPathCacheMaxAgeSeconds)) {
+            it = m_morrowindActorPathCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    std::vector<odai::math::Vector3> actorPositions;
+    actorPositions.reserve(m_morrowindActors.size());
+    for (const MorrowindActorInstance& actor : m_morrowindActors) {
+        actorPositions.push_back(
+            (actor.resident && !actor.disabled && !actor.dead)
+                ? actor.position
+                : odai::math::Vector3{std::numeric_limits<float>::max(), 0.0f, std::numeric_limits<float>::max()});
+    }
 
     auto snapToNavmesh = [&](const odai::math::Vector3& point, odai::math::Vector3& outPoint) {
-        return m_balmoraNavmesh.findNearestPoint(
+        const auto startTime = std::chrono::high_resolution_clock::now();
+        const bool snapped = m_balmoraNavmesh.findNearestPoint(
             {point.x, point.y + kBalmoraGuardNavmeshProbeHeight, point.z},
             outPoint);
+        frameStats.nearestMs += elapsedMs(startTime);
+        ++frameStats.nearestQueries;
+        return snapped;
     };
 
-    auto chooseNextPath = [&](MorrowindActorInstance& guard) -> bool {
+    auto clearPendingPath = [](MorrowindActorInstance& actor) {
+        actor.pendingPathRequestId = 0u;
+        actor.pendingPathCacheKey.clear();
+        actor.pendingPathTarget = {};
+    };
+
+    auto trimPathCache = [&]() {
+        while (m_morrowindActorPathCache.size() > kMorrowindActorPathCacheMaxEntries) {
+            auto oldestIt = m_morrowindActorPathCache.begin();
+            for (auto it = m_morrowindActorPathCache.begin(); it != m_morrowindActorPathCache.end(); ++it) {
+                if (it->second.ageSeconds > oldestIt->second.ageSeconds) {
+                    oldestIt = it;
+                }
+            }
+            m_morrowindActorPathCache.erase(oldestIt);
+        }
+    };
+
+    auto pollPathResults = [&]() {
+        std::deque<MorrowindActorPathResult> completed;
+        {
+            std::lock_guard<std::mutex> lock(m_morrowindActorPathMutex);
+            completed.swap(m_morrowindActorPathResults);
+        }
+        for (MorrowindActorPathResult& result : completed) {
+            if (result.actorIndex >= m_morrowindActors.size()) {
+                continue;
+            }
+            MorrowindActorInstance& actor = m_morrowindActors[result.actorIndex];
+            if (actor.pendingPathRequestId != result.id ||
+                actor.pendingPathCacheKey != result.cacheKey) {
+                continue;
+            }
+            clearPendingPath(actor);
+            if (!result.success || result.path.size() < 2u) {
+                ++frameStats.pathFailures;
+                actor.pathRetryCooldownSeconds =
+                    kBalmoraGuardPathRetryCooldownSeconds +
+                    (0.15f * static_cast<float>(actor.routeIndex % 5u));
+                continue;
+            }
+            actor.path = result.path;
+            actor.path.front().position = actor.position;
+            actor.pathIndex = 1u;
+            actor.pathRetryCooldownSeconds = 0.0f;
+            actor.stuckSeconds = 0.0f;
+            m_morrowindActorPathCache[result.cacheKey] = {result.path, 0.0f, true};
+            ++frameStats.pathCompletes;
+        }
+        trimPathCache();
+    };
+
+    pollPathResults();
+
+    auto assignScheduleRoute = [&](MorrowindActorInstance& actor, const std::string& anchorId, MorrowindActorScheduleState state, float wanderRadius) {
+        std::vector<odai::math::Vector3> scheduledRoute;
+        odai::math::Vector3 snapped{};
+        const odai::math::Vector3 targetPoint =
+            state == MorrowindActorScheduleState::Wander
+                ? seydaNeenScheduleMilestonePoint(
+                    anchorId,
+                    actor.actorId,
+                    actor.scheduleTargetOrdinal++,
+                    wanderRadius)
+                : seydaNeenScheduleAnchorPoint(anchorId);
+        if (snapToNavmesh(targetPoint, snapped)) {
+            scheduledRoute.push_back(snapped);
+        }
+        if (scheduledRoute.empty()) {
+            VOX_LOGW("app") << "Seyda Neen actor schedule anchor invalid actor=" << actor.actorId
+                            << " anchor=" << anchorId
+                            << " state=" << morrowindActorScheduleStateName(state);
+            actor.scheduleState = MorrowindActorScheduleState::Idle;
+            actor.route.clear();
+            actor.path.clear();
+            actor.routeIndex = 0u;
+            actor.pathIndex = 0u;
+            clearPendingPath(actor);
+            return;
+        }
+        actor.scheduleAnchorId = lowerPathCopy(anchorId);
+        actor.scheduleState = state;
+        actor.route = std::move(scheduledRoute);
+        actor.routeIndex = 0u;
+        actor.path.clear();
+        actor.pathIndex = 0u;
+        clearPendingPath(actor);
+        actor.pathRetryCooldownSeconds = 0.0f;
+    };
+
+    auto chooseNextPath = [&](MorrowindActorInstance& guard, std::size_t actorIndex) -> bool {
+        if (guard.pendingPathRequestId != 0u) {
+            ++frameStats.pathPending;
+            return false;
+        }
         guard.path.clear();
         guard.pathIndex = 0;
         if (guard.route.empty()) {
@@ -2858,21 +3223,83 @@ void App::updateMorrowindActors(float dt) {
             const odai::math::Vector3 delta = target - guard.position;
             if ((delta.x * delta.x) + (delta.z * delta.z) <
                 (kBalmoraGuardRouteReachRadius * kBalmoraGuardRouteReachRadius)) {
+                if (guard.scheduleState == MorrowindActorScheduleState::Travel) {
+                    guard.scheduleState = MorrowindActorScheduleState::Wait;
+                    guard.scheduleWaitSeconds = std::max(guard.scheduleWaitSeconds, 8.0f);
+                    guard.route.clear();
+                    guard.path.clear();
+                    guard.routeIndex = 0u;
+                    guard.pathIndex = 0u;
+                    clearPendingPath(guard);
+                    guard.pathRetryCooldownSeconds = kBalmoraGuardPathRetryCooldownSeconds;
+                    return false;
+                }
+                if (guard.scheduleState == MorrowindActorScheduleState::Wander) {
+                    guard.scheduleState = MorrowindActorScheduleState::Wait;
+                    guard.scheduleWaitSeconds = std::max(guard.scheduleWaitSeconds, 8.0f);
+                    guard.route.clear();
+                    guard.path.clear();
+                    guard.routeIndex = 0u;
+                    guard.pathIndex = 0u;
+                    clearPendingPath(guard);
+                    guard.pathRetryCooldownSeconds = kBalmoraGuardPathRetryCooldownSeconds;
+                    return false;
+                }
                 continue;
             }
-            if (m_balmoraNavmesh.findPath(guard.position, target, guard.path) &&
-                guard.path.size() >= 2u) {
+            const std::string startLabel = guard.scheduleAnchorId.empty()
+                ? "actor:" + guard.actorId
+                : "schedule:" + guard.scheduleAnchorId;
+            const std::string targetLabel = guard.scheduleAnchorId.empty()
+                ? "target"
+                : "target:" + guard.scheduleAnchorId;
+            const std::string cacheKey = makeMorrowindActorEndpointPathCacheKey(
+                startLabel,
+                guard.position,
+                targetLabel,
+                target,
+                kMorrowindActorPathCacheBucketSize);
+            const auto cachedIt = m_morrowindActorPathCache.find(cacheKey);
+            if (cachedIt != m_morrowindActorPathCache.end() &&
+                cachedIt->second.segmentsValidated &&
+                cachedIt->second.path.size() >= 2u) {
+                guard.path = cachedIt->second.path;
+                guard.path.front().position = guard.position;
+                if (m_balmoraNavmesh.isSegmentBlocked(guard.path[0].position, guard.path[1].position)) {
+                    m_morrowindActorPathCache.erase(cachedIt);
+                    continue;
+                }
                 guard.pathIndex = 1u;
                 guard.pathRetryCooldownSeconds = 0.0f;
+                cachedIt->second.ageSeconds = 0.0f;
+                ++frameStats.pathCacheHits;
                 return true;
             }
+            if (pathRequestsRemaining <= 0) {
+                ++frameStats.pathPending;
+                return false;
+            }
+            const std::uint64_t requestId =
+                submitMorrowindActorPathRequest(actorIndex, guard.position, target, cacheKey);
+            if (requestId != 0u) {
+                --pathRequestsRemaining;
+                ++frameStats.pathRequests;
+                ++frameStats.pathSubmits;
+                guard.pendingPathRequestId = requestId;
+                guard.pendingPathCacheKey = cacheKey;
+                guard.pendingPathTarget = target;
+                return true;
+            }
+            ++frameStats.pathPending;
+            return false;
         }
         guard.pathRetryCooldownSeconds =
             kBalmoraGuardPathRetryCooldownSeconds + (0.15f * static_cast<float>(guard.routeIndex % 5u));
         return false;
     };
 
-    for (MorrowindActorInstance& guard : m_morrowindActors) {
+    for (std::size_t actorIndex = 0; actorIndex < m_morrowindActors.size(); ++actorIndex) {
+        MorrowindActorInstance& guard = m_morrowindActors[actorIndex];
         if (!guard.resident || guard.disabled || guard.dead) {
             continue;
         }
@@ -2881,15 +3308,34 @@ void App::updateMorrowindActors(float dt) {
         guard.previousWalkPhase = guard.walkPhase;
         guard.pathRetryCooldownSeconds = std::max(
             0.0f,
-            guard.pathRetryCooldownSeconds - std::max(dt, 0.0f));
+            guard.pathRetryCooldownSeconds - clampedDt);
         guard.scriptUpdateCooldownSeconds = std::max(
             0.0f,
-            guard.scriptUpdateCooldownSeconds - std::max(dt, 0.0f));
+            guard.scriptUpdateCooldownSeconds - clampedDt);
+        guard.scheduleWaitSeconds = std::max(0.0f, guard.scheduleWaitSeconds - clampedDt);
+        guard.avoidanceUpdateCooldownSeconds = std::max(0.0f, guard.avoidanceUpdateCooldownSeconds - clampedDt);
+
+        if ((guard.position.x - guard.lastProgressPosition.x) * (guard.position.x - guard.lastProgressPosition.x) +
+                (guard.position.z - guard.lastProgressPosition.z) * (guard.position.z - guard.lastProgressPosition.z) >
+            18.0f * 18.0f) {
+            guard.lastProgressPosition = guard.position;
+            guard.stuckSeconds = 0.0f;
+        } else if (!guard.path.empty() && guard.pathIndex < guard.path.size()) {
+            guard.stuckSeconds += clampedDt;
+            if (guard.stuckSeconds >= kMorrowindActorStuckSeconds) {
+                guard.path.clear();
+                guard.pathIndex = 0u;
+                guard.pathRetryCooldownSeconds = 0.0f;
+                guard.stuckSeconds = 0.0f;
+                clearPendingPath(guard);
+            }
+        }
 
         if (m_luaScriptRuntime.initialized() &&
             guard.scriptUpdateCooldownSeconds <= 0.0f &&
             !guard.actorId.empty()) {
-            guard.scriptUpdateCooldownSeconds = 0.5f;
+            guard.scriptUpdateCooldownSeconds = kMorrowindActorScheduleThinkSeconds;
+            const auto luaStartTime = std::chrono::high_resolution_clock::now();
             const odai::game::LuaScriptRuntime::NpcUpdateCommand command =
                 m_luaScriptRuntime.updateNpc(
                     guard.actorId,
@@ -2897,15 +3343,54 @@ void App::updateMorrowindActors(float dt) {
                     guard.position.y,
                     guard.position.z,
                     m_morrowindGameHour);
+            frameStats.luaMs += elapsedMs(luaStartTime);
+            ++frameStats.luaCalls;
             if (command.handled) {
                 if (command.speed > 0.0f) {
                     guard.speed = command.speed;
                 }
+                const MorrowindActorScheduleState commandState =
+                    parseMorrowindActorScheduleState(command.state);
                 if (command.stop) {
                     guard.route.clear();
                     guard.path.clear();
                     guard.routeIndex = 0u;
                     guard.pathIndex = 0u;
+                    clearPendingPath(guard);
+                    guard.scheduleState = commandState == MorrowindActorScheduleState::None
+                        ? MorrowindActorScheduleState::Idle
+                        : commandState;
+                }
+                if (commandState != MorrowindActorScheduleState::None && !command.anchor.empty()) {
+                    const std::string normalizedAnchor = lowerPathCopy(command.anchor);
+                    const bool scheduleChanged =
+                        guard.scheduleState != commandState ||
+                        guard.scheduleAnchorId != normalizedAnchor;
+                    const bool needsRoute =
+                        guard.route.empty() &&
+                        guard.path.empty() &&
+                        guard.scheduleWaitSeconds <= 0.0f;
+                    const bool waitingAtSameAnchor =
+                        guard.scheduleState == MorrowindActorScheduleState::Wait &&
+                        guard.scheduleAnchorId == normalizedAnchor &&
+                        guard.scheduleWaitSeconds > 0.0f;
+                    if ((scheduleChanged && !waitingAtSameAnchor) || needsRoute) {
+                        if (command.waitSeconds >= 0.0f) {
+                            guard.scheduleWaitSeconds = command.waitSeconds;
+                        }
+                        assignScheduleRoute(guard, normalizedAnchor, commandState, command.wanderRadius);
+                    }
+                } else if (commandState == MorrowindActorScheduleState::Idle ||
+                           commandState == MorrowindActorScheduleState::Wait) {
+                    guard.scheduleState = commandState;
+                    if (command.waitSeconds >= 0.0f) {
+                        guard.scheduleWaitSeconds = command.waitSeconds;
+                    }
+                    guard.route.clear();
+                    guard.path.clear();
+                    guard.routeIndex = 0u;
+                    guard.pathIndex = 0u;
+                    clearPendingPath(guard);
                 }
                 if (!command.route.empty()) {
                     std::vector<odai::math::Vector3> scriptedRoute;
@@ -2921,7 +3406,9 @@ void App::updateMorrowindActors(float dt) {
                         guard.routeIndex = 0u;
                         guard.path.clear();
                         guard.pathIndex = 0u;
+                        clearPendingPath(guard);
                         guard.pathRetryCooldownSeconds = 0.0f;
+                        guard.scheduleState = MorrowindActorScheduleState::Travel;
                     }
                 }
                 if (!command.message.empty()) {
@@ -2931,32 +3418,75 @@ void App::updateMorrowindActors(float dt) {
         }
 
         if (guard.path.empty() || guard.pathIndex >= guard.path.size()) {
+            if (guard.pendingPathRequestId != 0u) {
+                ++frameStats.pathPending;
+                continue;
+            }
             if (guard.pathRetryCooldownSeconds > 0.0f) {
                 continue;
             }
-            chooseNextPath(guard);
+            if (guard.scheduleState == MorrowindActorScheduleState::Wait && guard.scheduleWaitSeconds > 0.0f) {
+                continue;
+            }
+            chooseNextPath(guard, actorIndex);
         }
         if (guard.path.empty() || guard.pathIndex >= guard.path.size()) {
             continue;
         }
 
-        float remainingStep = std::max(guard.speed * std::max(dt, 0.0f), 0.0f);
+        float remainingStep = std::max(guard.speed * clampedDt, 0.0f);
         while (remainingStep > 0.0f && guard.pathIndex < guard.path.size()) {
             const odai::math::Vector3 target = guard.path[guard.pathIndex].position;
             const odai::math::Vector3 delta{target.x - guard.position.x, 0.0f, target.z - guard.position.z};
             const float distance = std::sqrt((delta.x * delta.x) + (delta.z * delta.z));
-            if (distance <= kBalmoraGuardRouteReachRadius) {
-                guard.position = target;
+            if (distance <= kMorrowindActorPathPointReachRadius) {
                 ++guard.pathIndex;
                 if (guard.pathIndex >= guard.path.size()) {
-                    chooseNextPath(guard);
+                    if (guard.scheduleState == MorrowindActorScheduleState::Travel) {
+                        guard.scheduleState = MorrowindActorScheduleState::Wait;
+                        guard.scheduleWaitSeconds = std::max(guard.scheduleWaitSeconds, 8.0f);
+                        guard.route.clear();
+                        guard.path.clear();
+                        guard.routeIndex = 0u;
+                        guard.pathIndex = 0u;
+                        break;
+                    }
+                    if (guard.scheduleState == MorrowindActorScheduleState::Wander) {
+                        guard.scheduleState = MorrowindActorScheduleState::Wait;
+                        guard.route.clear();
+                        guard.routeIndex = 0u;
+                    }
+                    guard.scheduleWaitSeconds = std::max(
+                        guard.scheduleWaitSeconds,
+                        8.0f + (0.75f * static_cast<float>((actorIndex + guard.routeIndex) % 11u)));
+                    guard.pathRetryCooldownSeconds = std::max(
+                        guard.pathRetryCooldownSeconds,
+                        0.5f);
                     break;
                 }
                 continue;
             }
 
             const float moveDistance = std::min(remainingStep, distance);
-            const odai::math::Vector3 direction = delta / std::max(distance, 0.001f);
+            odai::math::Vector3 direction = delta / std::max(distance, 0.001f);
+            if (guard.avoidanceUpdateCooldownSeconds <= 0.0f) {
+                const auto avoidanceStartTime = std::chrono::high_resolution_clock::now();
+                guard.cachedAvoidanceDirection = computeMorrowindActorAvoidanceDirection(
+                    MorrowindActorAvoidanceInput{
+                        guard.position,
+                        direction,
+                        actorIndex,
+                        kMorrowindActorAvoidanceRadius,
+                        0.65f
+                    },
+                    actorPositions);
+                frameStats.avoidanceMs += elapsedMs(avoidanceStartTime);
+                ++frameStats.avoidanceQueries;
+                guard.avoidanceUpdateCooldownSeconds = kMorrowindActorAvoidanceUpdateSeconds;
+            }
+            if (odai::math::lengthSquared(guard.cachedAvoidanceDirection) > 0.0f) {
+                direction = guard.cachedAvoidanceDirection;
+            }
             const float segmentT = moveDistance / std::max(distance, 0.001f);
             odai::math::Vector3 moved{
                 guard.position.x + (direction.x * moveDistance),
@@ -2971,6 +3501,41 @@ void App::updateMorrowindActors(float dt) {
                 break;
             }
         }
+        actorPositions[actorIndex] = guard.position;
+    }
+    frameStats.updateMs = elapsedMs(updateStartTime);
+    m_morrowindActorPerfStats.updateMs = frameStats.updateMs;
+    m_morrowindActorPerfStats.luaMs = frameStats.luaMs;
+    m_morrowindActorPerfStats.pathMs = frameStats.pathMs;
+    m_morrowindActorPerfStats.nearestMs = frameStats.nearestMs;
+    m_morrowindActorPerfStats.avoidanceMs = frameStats.avoidanceMs;
+    m_morrowindActorPerfStats.luaCalls = frameStats.luaCalls;
+    m_morrowindActorPerfStats.pathRequests = frameStats.pathRequests;
+    m_morrowindActorPerfStats.pathSubmits = frameStats.pathSubmits;
+    m_morrowindActorPerfStats.pathCompletes = frameStats.pathCompletes;
+    m_morrowindActorPerfStats.pathCacheHits = frameStats.pathCacheHits;
+    m_morrowindActorPerfStats.pathPending = frameStats.pathPending;
+    m_morrowindActorPerfStats.pathFailures = frameStats.pathFailures;
+    m_morrowindActorPerfStats.nearestQueries = frameStats.nearestQueries;
+    m_morrowindActorPerfStats.avoidanceQueries = frameStats.avoidanceQueries;
+    if (m_morrowindActorPerfStats.logCooldownSeconds <= 0.0f &&
+        (frameStats.updateMs > 1.0 ||
+         frameStats.pathRequests > 0u ||
+         frameStats.pathCompletes > 0u ||
+         frameStats.pathFailures > 0u ||
+         frameStats.luaCalls > 0u)) {
+        VOX_LOGI("app") << "actor cpu update"
+                        << " totalMs=" << frameStats.updateMs
+                        << " luaMs=" << frameStats.luaMs << "/" << frameStats.luaCalls
+                        << " pathSubmit=" << frameStats.pathSubmits
+                        << " pathComplete=" << frameStats.pathCompletes
+                        << " pathCacheHits=" << frameStats.pathCacheHits
+                        << " pathPending=" << frameStats.pathPending
+                        << " pathFailures=" << frameStats.pathFailures
+                        << " nearestMs=" << frameStats.nearestMs << "/" << frameStats.nearestQueries
+                        << " avoidanceMs=" << frameStats.avoidanceMs << "/" << frameStats.avoidanceQueries
+                        << " pathCacheSize=" << m_morrowindActorPathCache.size();
+        m_morrowindActorPerfStats.logCooldownSeconds = kMorrowindActorPerfLogSeconds;
     }
 }
 
@@ -3468,17 +4033,40 @@ void App::rebuildMorrowindActorRenderFrame(float simulationAlpha) {
         }
         return from + (delta * t);
     };
+    const float cameraYawRadians = odai::math::radians(m_camera.yawDegrees);
+    const float cameraPitchRadians = odai::math::radians(m_camera.pitchDegrees);
+    const float cameraCosPitch = std::cos(cameraPitchRadians);
+    const odai::math::Vector3 cameraForward = odai::math::normalize({
+        std::cos(cameraYawRadians) * cameraCosPitch,
+        std::sin(cameraPitchRadians),
+        std::sin(cameraYawRadians) * cameraCosPitch
+    });
     for (const MorrowindActorInstance& guard : m_morrowindActors) {
         if (!guard.resident || guard.disabled || guard.dead) {
             continue;
         }
         const odai::math::Vector3 position =
             guard.previousPosition + ((guard.position - guard.previousPosition) * alpha);
+        if (!m_actorDebugSceneEnabled) {
+            const odai::math::Vector3 toActor = position - odai::math::Vector3{m_camera.x, m_camera.y, m_camera.z};
+            const float distanceSq = odai::math::lengthSquared(toActor);
+            if (distanceSq > kMorrowindActorMaxRenderDistanceSq) {
+                continue;
+            }
+            if (distanceSq > kMorrowindActorNearRenderDistanceSq &&
+                odai::math::lengthSquared(cameraForward) > 0.0f) {
+                const float facing = odai::math::dot(cameraForward, odai::math::normalize(toActor));
+                if (facing < kMorrowindActorRenderRearDot) {
+                    continue;
+                }
+            }
+        }
         const float yawRadians = lerpAngle(guard.previousYawRadians, guard.yawRadians, alpha);
         const float frameMoveDistanceSq =
             ((guard.position.x - guard.previousPosition.x) * (guard.position.x - guard.previousPosition.x)) +
             ((guard.position.z - guard.previousPosition.z) * (guard.position.z - guard.previousPosition.z));
-        const float animationTime = frameMoveDistanceSq > 0.01f
+        const bool movingForAnimation = frameMoveDistanceSq > 0.01f;
+        const float animationTime = movingForAnimation
             ? (guard.previousWalkPhase + ((guard.walkPhase - guard.previousWalkPhase) * alpha))
             : 0.0f;
         MorrowindActorSystem::PoseMode poseMode = MorrowindActorSystem::PoseMode::Movement;
@@ -3492,7 +4080,7 @@ void App::rebuildMorrowindActorRenderFrame(float simulationAlpha) {
         frameInput.position = position;
         frameInput.yawRadians = yawRadians;
         frameInput.animationTime = animationTime;
-        frameInput.moving = frameMoveDistanceSq > 0.01f;
+        frameInput.moving = movingForAnimation;
         m_morrowindActorSystem.appendFrameInstance(
             frameInput,
             poseMode,
@@ -3699,6 +4287,7 @@ bool App::pollMorrowindExteriorStreamingPrepare() {
     VOX_LOGI("app") << "swapping prepared Morrowind exterior cells around ("
                     << prepared.centerCellX << ", " << prepared.centerCellY << ")";
 
+    stopMorrowindActorPathWorker();
     m_importedScene = std::move(prepared.scene);
     m_gpuSceneAsset = std::move(prepared.gpuSceneAsset);
     m_importedSceneCollision = std::move(prepared.collision);
@@ -3721,6 +4310,7 @@ bool App::pollMorrowindExteriorStreamingPrepare() {
             actor.resident = false;
         }
         m_morrowindActorSystem.clear();
+        stopMorrowindActorPathWorker();
         m_balmoraNavmesh.clear();
     }
     if (!m_renderer.uploadGpuScene(m_gpuSceneAsset)) {
@@ -4120,6 +4710,7 @@ void App::update(float dt, float simulationAlpha) {
 
 void App::shutdown() {
     VOX_LOGI("app") << "shutdown begin";
+    stopMorrowindActorPathWorker();
 
     if (m_morrowindRuntimePrepareActive) {
         VOX_LOGI("app") << "waiting for Morrowind exterior streaming prepare during shutdown";

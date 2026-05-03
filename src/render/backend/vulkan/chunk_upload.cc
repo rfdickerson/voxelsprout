@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -39,6 +40,28 @@ namespace {
 
 constexpr std::uint32_t kImportedRtMaterialFlagAlphaTest = 1u;
 constexpr double kImportedActorRtUpdateIntervalSeconds = 1.0 / 15.0;
+
+bool importedActorRtShadowsEnabledByEnvironment() {
+#if defined(_WIN32)
+    char* value = nullptr;
+    std::size_t valueLength = 0;
+    if (_dupenv_s(&value, &valueLength, "ODAI_ENABLE_ACTOR_RT_SHADOWS") != 0 ||
+        value == nullptr) {
+        return false;
+    }
+    const std::string_view text(value, valueLength > 0u ? valueLength - 1u : 0u);
+    const bool enabled = text == "1" || text == "true" || text == "TRUE" || text == "on" || text == "ON";
+    std::free(value);
+    return enabled;
+#else
+    const char* value = std::getenv("ODAI_ENABLE_ACTOR_RT_SHADOWS");
+    if (value == nullptr) {
+        return false;
+    }
+    std::string_view text(value);
+    return text == "1" || text == "true" || text == "TRUE" || text == "on" || text == "ON";
+#endif
+}
 
 struct ImportedDrawBounds {
     float min[3] = {
@@ -2655,14 +2678,6 @@ bool RendererBackend::updateImportedActorRayTracingGeometry(
         return true;
     }
 
-    const bool hasActors =
-        importedActors != nullptr &&
-        !importedActors->instances.empty() &&
-        !importedActors->bonePalette.empty() &&
-        !m_importedActorCpuVertices.empty() &&
-        !m_importedActorCpuIndices.empty() &&
-        !m_importedActorMeshDraws.empty();
-
     auto destroyActorFrameAs = [&]() {
         if (m_rtImportedActorFrameRecord.blas.handle != VK_NULL_HANDLE &&
             m_destroyAccelerationStructureKhr != nullptr) {
@@ -2676,6 +2691,40 @@ bool RendererBackend::updateImportedActorRayTracingGeometry(
         m_rtImportedActorFrameRecord.blas.deviceAddress = 0;
         m_rtImportedActorFrameRecord.blas.primitiveCount = 0;
     };
+
+    if (!importedActorRtShadowsEnabledByEnvironment()) {
+        static bool loggedDisabledActorRtShadows = false;
+        if (!loggedDisabledActorRtShadows) {
+            VOX_LOGI("render")
+                << "animated actor RT shadows disabled by default; "
+                << "set ODAI_ENABLE_ACTOR_RT_SHADOWS=1 to re-enable the CPU-skinned diagnostic path";
+            loggedDisabledActorRtShadows = true;
+        }
+        if (m_rtImportedActorFrameRecord.geometryResident ||
+            m_rtImportedActorFrameRecord.blas.handle != VK_NULL_HANDLE) {
+            const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
+            if (waitResult != VK_SUCCESS) {
+                VOX_LOGE("render") << "failed to idle graphics queue before clearing imported actor RT geometry";
+                return false;
+            }
+            destroyActorFrameAs();
+            destroyRtGeometryBuffers(m_bufferAllocator, m_rtImportedActorFrameRecord.geometry);
+            m_rtImportedActorFrameRecord.geometryResident = false;
+            m_rtImportedActorFrameRecord.dirty = true;
+            m_rtImportedActorLastInstanceCount = 0;
+            m_rtImportedActorLastUpdateSeconds = -1.0;
+            markRayTracingSceneDirty();
+        }
+        return true;
+    }
+
+    const bool hasActors =
+        importedActors != nullptr &&
+        !importedActors->instances.empty() &&
+        !importedActors->bonePalette.empty() &&
+        !m_importedActorCpuVertices.empty() &&
+        !m_importedActorCpuIndices.empty() &&
+        !m_importedActorMeshDraws.empty();
 
     if (!hasActors) {
         if (m_rtImportedActorFrameRecord.geometryResident ||

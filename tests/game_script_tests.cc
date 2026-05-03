@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <iostream>
+#include <string>
 
 namespace {
 
@@ -189,6 +190,78 @@ void testFargothNightRoutineAndStashQuest() {
     expectTrue(state.gold() == beforeTurnInGold + 100, "Hrisskar reward is not duplicated");
 }
 
+void testSeydaNeenScheduleCommands() {
+    odai::game::GameState state;
+    odai::game::LuaScriptRuntime runtime;
+    expectTrue(runtime.init(state), "Seyda Neen schedule runtime initializes");
+    const std::filesystem::path scriptPath =
+        std::filesystem::path(ODAI_PROJECT_SOURCE_DIR) / "assets" / "scripts" / "mv_deadtaxman.lua";
+    expectTrue(runtime.loadScriptFile(scriptPath), "Seyda Neen schedule script loads");
+
+    const odai::game::LuaScriptRuntime::NpcUpdateCommand day =
+        runtime.updateNpc("darvame hleran", -11000.0f, 0.0f, -69000.0f, 12.0f);
+    expectTrue(day.handled, "Outdoor Seyda Neen NPC schedule is handled");
+    expectTrue(day.state == "wander", "Day schedule wanders");
+    expectTrue(day.anchor == "darvame_silt_strider", "Darvame day anchor is silt strider");
+    expectTrue(day.speed > 0.0f, "Schedule provides movement speed");
+    expectTrue(day.wanderRadius > 0.0f, "Wander schedule provides radius");
+
+    const odai::game::LuaScriptRuntime::NpcUpdateCommand night =
+        runtime.updateNpc("vodunius nuccius", -11000.0f, 0.0f, -69000.0f, 23.0f);
+    expectTrue(night.handled, "Night schedule is handled");
+    expectTrue(night.state == "travel", "Night schedule travels to rest anchor");
+    expectTrue(night.anchor == "vodunius_home", "Vodunius night anchor is home");
+    expectTrue(night.waitSeconds > 0.0f, "Night schedule includes wait time");
+
+    const odai::game::LuaScriptRuntime::NpcUpdateCommand guard =
+        runtime.updateNpc("seyda_neen_guard_1", -11000.0f, 0.0f, -69000.0f, 10.0f);
+    expectTrue(guard.handled, "Generated Seyda Neen guard schedule is handled");
+    expectTrue(guard.state == "wander", "Guard patrol uses wander state");
+    expectTrue(guard.anchor == "dock", "Day guard anchor patrols dock");
+    expectTrue(guard.priority == 10, "Guard schedule has higher priority");
+
+    const odai::game::LuaScriptRuntime::NpcUpdateCommand unknown =
+        runtime.updateNpc("not a seyda neen actor", 0.0f, 0.0f, 0.0f, 10.0f);
+    expectTrue(!unknown.handled, "Unknown actor schedule is ignored");
+}
+
+void testSeydaNeenActorStatsAndServices() {
+    odai::game::GameState state;
+    odai::game::LuaScriptRuntime runtime;
+    expectTrue(runtime.init(state), "Seyda Neen actor stats runtime initializes");
+    const std::filesystem::path scriptPath =
+        std::filesystem::path(ODAI_PROJECT_SOURCE_DIR) / "assets" / "scripts" / "mv_deadtaxman.lua";
+    expectTrue(runtime.loadScriptFile(scriptPath), "Seyda Neen actor stats script loads");
+
+    const odai::game::DialogueResult fargothStats = runtime.getDialogue("fargoth", "statistics");
+    expectTrue(fargothStats.handled, "Fargoth stats topic handled");
+    expectTrue(fargothStats.text.find("Level 2") != std::string::npos, "Fargoth level is exposed");
+    expectTrue(fargothStats.text.find("Health 41") != std::string::npos, "Fargoth health is exposed");
+    expectTrue(fargothStats.text.find("Magicka 82") != std::string::npos, "Fargoth magicka is exposed");
+
+    const odai::game::DialogueResult socuciusServices = runtime.getDialogue("socucius ergalla", "services");
+    expectTrue(socuciusServices.handled, "Socucius services topic handled");
+    expectTrue(!socuciusServices.choices.empty(), "Socucius exposes service choices");
+    bool hasTrainingChoice = false;
+    for (const odai::game::DialogueChoice& choice : socuciusServices.choices) {
+        hasTrainingChoice = hasTrainingChoice || choice.id == "train:socucius ergalla";
+    }
+    expectTrue(hasTrainingChoice, "Socucius exposes training choice");
+
+    const odai::game::ScriptCallResult training = runtime.chooseDialogue("train:socucius ergalla");
+    expectTrue(training.handled, "Training choice is handled");
+    expectTrue(training.message.find("Agent") != std::string::npos, "Training response includes class");
+
+    const odai::game::DialogueResult darvameServices = runtime.getDialogue("darvame hleran", "services");
+    expectTrue(darvameServices.handled, "Darvame services topic handled");
+    bool hasTravelChoice = false;
+    for (const odai::game::DialogueChoice& choice : darvameServices.choices) {
+        hasTravelChoice = hasTravelChoice || choice.id == "travel:darvame hleran";
+    }
+    expectTrue(hasTravelChoice, "Darvame exposes travel choice");
+    expectTrue(runtime.chooseDialogue("travel:darvame hleran").handled, "Travel choice is handled");
+}
+
 }  // namespace
 
 int main() {
@@ -196,6 +269,8 @@ int main() {
     testDeathTaxmanQuestScript();
     testSeydaNeenDialogueTopicsAndChoices();
     testFargothNightRoutineAndStashQuest();
+    testSeydaNeenScheduleCommands();
+    testSeydaNeenActorStatsAndServices();
 
     if (g_failures != 0) {
         std::cerr << "[game script test] " << g_failures << " failures\n";

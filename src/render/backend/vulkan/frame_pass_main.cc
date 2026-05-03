@@ -306,9 +306,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdBindPipeline(
             commandBuffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
-            (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
-                ? m_importedStaticPipelineRt
-                : m_importedStaticPipeline
+            m_importedStaticPipeline
         );
         vkCmdBindDescriptorSets(
             commandBuffer,
@@ -355,9 +353,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdBindPipeline(
             commandBuffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
-            (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
-                ? m_importedStaticPipelineRt
-                : m_importedStaticPipeline
+            m_importedStaticPipeline
         );
         vkCmdBindDescriptorSets(
             commandBuffer,

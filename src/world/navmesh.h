@@ -80,6 +80,13 @@ public:
         odai::math::Vector3& outFarthestReachable
     ) const;
 
+    [[nodiscard]] bool isSegmentBlocked(
+        const odai::math::Vector3& start,
+        const odai::math::Vector3& end
+    ) const {
+        return segmentBlocked(start, end);
+    }
+
     [[nodiscard]] std::vector<NavmeshDebugTriangle> debugTriangles() const;
 
     struct Triangle {

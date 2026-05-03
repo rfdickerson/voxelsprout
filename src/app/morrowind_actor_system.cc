@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <span>
 #include <unordered_set>
 
 namespace {
@@ -427,7 +428,10 @@ void MorrowindActorSystem::clear() {
     m_frameInstances.clear();
     m_frameBonePalette.clear();
     m_frameDebugBoneLines.clear();
+    m_framePoseCache.clear();
     m_stats = {};
+    m_framePoseCacheHitCount = 0u;
+    m_framePoseCacheMissCount = 0u;
     m_skeletonLoaded = false;
     m_assetDirty = true;
     m_frameDebugBoneLinesEnabled = false;
@@ -658,6 +662,9 @@ void MorrowindActorSystem::beginFrame(std::size_t visibleActorCapacity, bool deb
     m_frameInstances.clear();
     m_frameBonePalette.clear();
     m_frameDebugBoneLines.clear();
+    m_framePoseCache.clear();
+    m_framePoseCacheHitCount = 0u;
+    m_framePoseCacheMissCount = 0u;
     m_frameDebugBoneLinesEnabled = debugBoneLines;
     m_frameInstances.reserve(visibleActorCapacity);
     m_frameBonePalette.reserve(visibleActorCapacity * m_skeletonTemplate.skeleton.size());
@@ -684,7 +691,6 @@ void MorrowindActorSystem::appendFrameInstance(
     instance.flags = kImportedSceneMaterialFlagNpcGpuTransform;
     instance.firstDraw = range.firstDraw;
     instance.drawCount = range.drawCount;
-    instance.bonePaletteOffset = static_cast<std::uint32_t>(m_frameBonePalette.size());
 
     const odai::importer::ImportedAnimationClip* animationClip = nullptr;
     if (poseMode == PoseMode::WalkClip) {
@@ -706,42 +712,80 @@ void MorrowindActorSystem::appendFrameInstance(
         }
     }
 
-    std::vector<std::array<float, 16>> worldMatrices(m_skeletonTemplate.skeleton.size(), identityActorMatrix());
-    for (std::size_t nodeIndex = 0; nodeIndex < m_skeletonTemplate.skeleton.size(); ++nodeIndex) {
-        const std::array<float, 16> local =
-            animatedActorLocalMatrix(
-                m_skeletonTemplate.skeleton[nodeIndex],
-                static_cast<std::uint32_t>(nodeIndex),
-                m_skeletonTemplate.nodeAnimations,
-                animationClip,
-                instance.animationTime);
-        const std::int32_t parentIndex = m_skeletonTemplate.skeleton[nodeIndex].parentIndex;
-        if (parentIndex >= 0 && static_cast<std::size_t>(parentIndex) < worldMatrices.size()) {
-            worldMatrices[nodeIndex] =
-                multiplyActorMatrices(worldMatrices[static_cast<std::size_t>(parentIndex)], local);
-        } else {
-            worldMatrices[nodeIndex] = local;
-        }
+    const bool poseCacheEnabled = animationClip == nullptr;
+    std::uint32_t poseBucket = 0u;
+    float sampledTime = instance.animationTime;
+    const std::uint32_t poseClipKey = animationClip != nullptr
+        ? instance.clipIndex
+        : std::numeric_limits<std::uint32_t>::max();
+    const std::uint64_t poseKey =
+        (static_cast<std::uint64_t>(poseClipKey) << 32u) ^
+        poseBucket;
 
-        const std::array<float, 16> inverseBind =
-            actorMatrixFromArray(m_skeletonTemplate.skeleton[nodeIndex].inverseBindWorldTransform);
-        const std::array<float, 16> paletteNif = multiplyActorMatrices(worldMatrices[nodeIndex], inverseBind);
-        const std::array<float, 16> paletteEngine = nifMatrixToEngineMatrix(paletteNif);
-        odai::render::ImportedActorBonePaletteMatrix matrix{};
-        matrix.rows[0] = paletteEngine[0];
-        matrix.rows[1] = paletteEngine[1];
-        matrix.rows[2] = paletteEngine[2];
-        matrix.rows[3] = paletteEngine[3];
-        matrix.rows[4] = paletteEngine[4];
-        matrix.rows[5] = paletteEngine[5];
-        matrix.rows[6] = paletteEngine[6];
-        matrix.rows[7] = paletteEngine[7];
-        matrix.rows[8] = paletteEngine[8];
-        matrix.rows[9] = paletteEngine[9];
-        matrix.rows[10] = paletteEngine[10];
-        matrix.rows[11] = paletteEngine[11];
-        m_frameBonePalette.push_back(matrix);
+    const FramePoseCacheEntry* cacheEntry = nullptr;
+    if (poseCacheEnabled) {
+        for (const FramePoseCacheEntry& entry : m_framePoseCache) {
+            if (entry.key == poseKey) {
+                cacheEntry = &entry;
+                break;
+            }
+        }
     }
+    if (cacheEntry == nullptr) {
+        FramePoseCacheEntry newEntry{};
+        newEntry.key = poseKey;
+        newEntry.paletteOffset = static_cast<std::uint32_t>(
+            std::min<std::size_t>(m_frameBonePalette.size(), std::numeric_limits<std::uint32_t>::max()));
+        newEntry.worldMatrices.assign(m_skeletonTemplate.skeleton.size(), identityActorMatrix());
+        newEntry.palette.reserve(m_skeletonTemplate.skeleton.size());
+        for (std::size_t nodeIndex = 0; nodeIndex < m_skeletonTemplate.skeleton.size(); ++nodeIndex) {
+            const std::array<float, 16> local =
+                animatedActorLocalMatrix(
+                    m_skeletonTemplate.skeleton[nodeIndex],
+                    static_cast<std::uint32_t>(nodeIndex),
+                    m_skeletonTemplate.nodeAnimations,
+                    animationClip,
+                    sampledTime);
+            const std::int32_t parentIndex = m_skeletonTemplate.skeleton[nodeIndex].parentIndex;
+            if (parentIndex >= 0 && static_cast<std::size_t>(parentIndex) < newEntry.worldMatrices.size()) {
+                newEntry.worldMatrices[nodeIndex] =
+                    multiplyActorMatrices(newEntry.worldMatrices[static_cast<std::size_t>(parentIndex)], local);
+            } else {
+                newEntry.worldMatrices[nodeIndex] = local;
+            }
+
+            const std::array<float, 16> inverseBind =
+                actorMatrixFromArray(m_skeletonTemplate.skeleton[nodeIndex].inverseBindWorldTransform);
+            const std::array<float, 16> paletteNif = multiplyActorMatrices(newEntry.worldMatrices[nodeIndex], inverseBind);
+            const std::array<float, 16> paletteEngine = nifMatrixToEngineMatrix(paletteNif);
+            odai::render::ImportedActorBonePaletteMatrix matrix{};
+            matrix.rows[0] = paletteEngine[0];
+            matrix.rows[1] = paletteEngine[1];
+            matrix.rows[2] = paletteEngine[2];
+            matrix.rows[3] = paletteEngine[3];
+            matrix.rows[4] = paletteEngine[4];
+            matrix.rows[5] = paletteEngine[5];
+            matrix.rows[6] = paletteEngine[6];
+            matrix.rows[7] = paletteEngine[7];
+            matrix.rows[8] = paletteEngine[8];
+            matrix.rows[9] = paletteEngine[9];
+            matrix.rows[10] = paletteEngine[10];
+            matrix.rows[11] = paletteEngine[11];
+            newEntry.palette.push_back(matrix);
+        }
+        m_frameBonePalette.insert(
+            m_frameBonePalette.end(),
+            newEntry.palette.begin(),
+            newEntry.palette.end());
+        m_framePoseCache.push_back(std::move(newEntry));
+        cacheEntry = &m_framePoseCache.back();
+        if (poseCacheEnabled) {
+            ++m_framePoseCacheMissCount;
+        }
+    } else {
+        ++m_framePoseCacheHitCount;
+    }
+    instance.bonePaletteOffset = cacheEntry->paletteOffset;
 
     if (!m_frameDebugBoneLinesEnabled) {
         m_frameInstances.push_back(instance);
@@ -749,12 +793,12 @@ void MorrowindActorSystem::appendFrameInstance(
     }
     for (std::size_t nodeIndex = 0; nodeIndex < m_skeletonTemplate.skeleton.size(); ++nodeIndex) {
         const std::int32_t parentIndex = m_skeletonTemplate.skeleton[nodeIndex].parentIndex;
-        if (parentIndex < 0 || static_cast<std::size_t>(parentIndex) >= worldMatrices.size()) {
+        if (parentIndex < 0 || static_cast<std::size_t>(parentIndex) >= cacheEntry->worldMatrices.size()) {
             continue;
         }
         const odai::math::Vector3 parentLocal =
-            nifPointToEnginePoint(worldMatrices[static_cast<std::size_t>(parentIndex)]);
-        const odai::math::Vector3 childLocal = nifPointToEnginePoint(worldMatrices[nodeIndex]);
+            nifPointToEnginePoint(cacheEntry->worldMatrices[static_cast<std::size_t>(parentIndex)]);
+        const odai::math::Vector3 childLocal = nifPointToEnginePoint(cacheEntry->worldMatrices[nodeIndex]);
         const odai::math::Vector3 parentWorld =
             rotateActorLocalPointToWorld(parentLocal, input.position, input.yawRadians);
         const odai::math::Vector3 childWorld =

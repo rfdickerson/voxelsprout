@@ -2,6 +2,7 @@
 
 #include "audio/sound_engine.h"
 #include "app/morrowind_actor_system.h"
+#include "app/morrowind_actor_ai.h"
 #include "core/input.h"
 #include "game/game_state.h"
 #include "game/lua_script.h"
@@ -15,9 +16,13 @@
 #include "world/world.h"
 
 #include <array>
+#include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <future>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -187,6 +192,14 @@ private:
     void updateMorrowindActors(float dt);
     void rebuildMorrowindActorRenderFrame(float simulationAlpha);
     [[nodiscard]] bool uploadMorrowindActorRenderAsset();
+    void startMorrowindActorPathWorker();
+    void stopMorrowindActorPathWorker();
+    [[nodiscard]] std::uint64_t submitMorrowindActorPathRequest(
+        std::size_t actorIndex,
+        const odai::math::Vector3& start,
+        const odai::math::Vector3& target,
+        const std::string& cacheKey
+    );
     void initializeBalmoraDoorActivation();
     void initializeMorrowindGameplayScripts();
     [[nodiscard]] bool tryActivateMorrowindScript();
@@ -243,9 +256,62 @@ private:
         std::size_t pathIndex = 0;
         float pathRetryCooldownSeconds = 0.0f;
         float scriptUpdateCooldownSeconds = 0.0f;
+        float scheduleWaitSeconds = 0.0f;
+        float stuckSeconds = 0.0f;
+        odai::math::Vector3 lastProgressPosition{};
+        odai::math::Vector3 cachedAvoidanceDirection{};
+        std::string scheduleAnchorId;
+        std::uint32_t scheduleTargetOrdinal = 0u;
+        std::uint64_t pendingPathRequestId = 0u;
+        std::string pendingPathCacheKey;
+        odai::math::Vector3 pendingPathTarget{};
+        MorrowindActorScheduleState scheduleState = MorrowindActorScheduleState::None;
+        float avoidanceUpdateCooldownSeconds = 0.0f;
         bool resident = false;
         bool disabled = false;
         bool dead = false;
+    };
+
+    struct MorrowindActorCachedPath {
+        std::vector<odai::world::NavmeshPathPoint> path;
+        float ageSeconds = 0.0f;
+        bool segmentsValidated = false;
+    };
+
+    struct MorrowindActorPerfStats {
+        double updateMs = 0.0;
+        double luaMs = 0.0;
+        double pathMs = 0.0;
+        double nearestMs = 0.0;
+        double avoidanceMs = 0.0;
+        std::uint32_t luaCalls = 0u;
+        std::uint32_t pathRequests = 0u;
+        std::uint32_t pathSubmits = 0u;
+        std::uint32_t pathCompletes = 0u;
+        std::uint32_t pathCacheHits = 0u;
+        std::uint32_t pathPending = 0u;
+        std::uint32_t pathFailures = 0u;
+        std::uint32_t nearestQueries = 0u;
+        std::uint32_t avoidanceQueries = 0u;
+        float logCooldownSeconds = 0.0f;
+    };
+
+    struct MorrowindActorPathRequest {
+        std::uint64_t id = 0u;
+        std::uint64_t generation = 0u;
+        std::size_t actorIndex = 0u;
+        odai::math::Vector3 start{};
+        odai::math::Vector3 target{};
+        std::string cacheKey;
+    };
+
+    struct MorrowindActorPathResult {
+        std::uint64_t id = 0u;
+        std::uint64_t generation = 0u;
+        std::size_t actorIndex = 0u;
+        std::vector<odai::world::NavmeshPathPoint> path;
+        std::string cacheKey;
+        bool success = false;
     };
 
     struct MorrowindInteriorCacheEntry {
@@ -366,6 +432,16 @@ private:
     MorrowindActorSystem m_morrowindActorSystem;
     std::vector<MorrowindActorInstance> m_morrowindActors;
     std::unordered_map<std::string, std::size_t> m_morrowindActorIndexByRefKey;
+    std::unordered_map<std::string, MorrowindActorCachedPath> m_morrowindActorPathCache;
+    MorrowindActorPerfStats m_morrowindActorPerfStats{};
+    std::mutex m_morrowindActorPathMutex;
+    std::condition_variable m_morrowindActorPathCondition;
+    std::deque<MorrowindActorPathRequest> m_morrowindActorPathRequests;
+    std::deque<MorrowindActorPathResult> m_morrowindActorPathResults;
+    std::thread m_morrowindActorPathThread;
+    bool m_morrowindActorPathWorkerStop = false;
+    std::uint64_t m_morrowindActorPathGeneration = 0u;
+    std::uint64_t m_nextMorrowindActorPathRequestId = 1u;
 };
 
 } // namespace odai::app
