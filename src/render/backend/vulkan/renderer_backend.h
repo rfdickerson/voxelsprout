@@ -244,6 +244,7 @@ public:
         bool& outFlatShading,
         bool& outWaterDebug
     ) const;
+    [[nodiscard]] int actorDebugPoseMode() const { return m_debugActorPoseMode; }
     float cameraFovDegrees() const;
     void shutdown();
 
@@ -709,6 +710,9 @@ private:
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
         std::span<const odai::render::ImportedActorInstanceData> importedActorInstances;
         bool importedActorBonePaletteAvailable = false;
+        VkBuffer importedActorDebugLineVertexBuffer = VK_NULL_HANDLE;
+        VkDeviceSize importedActorDebugLineVertexOffset = 0;
+        std::uint32_t importedActorDebugLineVertexCount = 0u;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -946,6 +950,7 @@ private:
     VkPipeline& m_grassBillboardNormalDepthPipeline = m_pipelineManager.grassBillboardNormalDepthPipeline;
     VkPipeline& m_importedStaticPipeline = m_pipelineManager.importedStaticPipeline;
     VkPipeline& m_importedStaticPipelineRt = m_pipelineManager.importedStaticPipelineRt;
+    VkPipeline& m_actorDebugLinePipeline = m_pipelineManager.actorDebugLinePipeline;
     VkPipeline& m_importedWaterPipeline = m_pipelineManager.importedWaterPipeline;
     VkPipeline& m_importedWaterPipelineRt = m_pipelineManager.importedWaterPipelineRt;
     VkPipeline& m_importedStaticNormalDepthPipeline = m_pipelineManager.importedStaticNormalDepthPipeline;
@@ -1151,6 +1156,10 @@ private:
     bool m_debugShowImportedTextures = true;
     bool m_debugImportedFlatShading = false;
     bool m_debugImportedWaterSolid = false;
+    int m_debugActorPoseMode = 0;
+    bool m_debugActorSkinningEnabled = true;
+    std::uint32_t m_debugImportedActorInstanceCount = 0u;
+    std::uint32_t m_debugImportedActorBoneLineVertexCount = 0u;
     bool m_importedSceneInteriorMode = false;
     std::uint32_t m_debugImportedPageRangeCount = 0;
     std::uint32_t m_debugImportedMainVisiblePageCount = 0;

@@ -1504,6 +1504,34 @@ void RendererBackend::renderFrame(
             importedActorBonePaletteBufferInfo.range = sizeof(fallbackActorBonePaletteMatrix);
         }
     }
+    if (!m_debugActorSkinningEnabled) {
+        importedActorBonePaletteAvailable = false;
+    }
+
+    VkBuffer importedActorDebugLineVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceSize importedActorDebugLineVertexOffset = 0;
+    std::uint32_t importedActorDebugLineVertexCount = 0u;
+    if (importedActors != nullptr && !importedActors->debugBoneLines.empty()) {
+        const VkDeviceSize debugLineBytes =
+            static_cast<VkDeviceSize>(importedActors->debugBoneLines.size() *
+                                      sizeof(odai::render::ImportedActorDebugLineVertex));
+        const std::optional<FrameArenaSlice> debugLineSliceOpt = m_frameArena.allocateUpload(
+            debugLineBytes,
+            16u,
+            FrameArenaUploadKind::InstanceData
+        );
+        if (debugLineSliceOpt.has_value() && debugLineSliceOpt->mapped != nullptr) {
+            std::memcpy(debugLineSliceOpt->mapped, importedActors->debugBoneLines.data(), debugLineBytes);
+            importedActorDebugLineVertexBuffer = m_bufferAllocator.getBuffer(debugLineSliceOpt->buffer);
+            importedActorDebugLineVertexOffset = debugLineSliceOpt->offset;
+            importedActorDebugLineVertexCount =
+                static_cast<std::uint32_t>(std::min<std::size_t>(
+                    importedActors->debugBoneLines.size(),
+                    std::numeric_limits<std::uint32_t>::max()));
+        } else {
+            VOX_LOGW("render") << "imported actor debug bone line upload allocation failed";
+        }
+    }
 
     const BoundDescriptorSets boundDescriptorSets = updateFrameDescriptorSets(
         aoFrameIndex,
@@ -1689,6 +1717,12 @@ void RendererBackend::renderFrame(
         : VK_NULL_HANDLE;
     const std::span<const odai::render::ImportedActorInstanceData> importedActorInstances =
         renderingImportedActors ? importedActors->instances : std::span<const odai::render::ImportedActorInstanceData>{};
+    m_debugImportedActorInstanceCount = static_cast<std::uint32_t>(
+        std::min<std::size_t>(importedActorInstances.size(), std::numeric_limits<std::uint32_t>::max()));
+    m_debugImportedActorBoneLineVertexCount = (importedActors != nullptr)
+        ? static_cast<std::uint32_t>(
+            std::min<std::size_t>(importedActors->debugBoneLines.size(), std::numeric_limits<std::uint32_t>::max()))
+        : 0u;
     std::span<const ImportedMeshDraw> importedMeshDrawsForFrame(
         m_importedMeshDraws.data(),
         m_importedMeshDraws.size());
@@ -2277,6 +2311,9 @@ void RendererBackend::renderFrame(
     mainPassInputs.importedActorMeshDraws = m_importedActorMeshDraws;
     mainPassInputs.importedActorInstances = importedActorInstances;
     mainPassInputs.importedActorBonePaletteAvailable = importedActorBonePaletteAvailable;
+    mainPassInputs.importedActorDebugLineVertexBuffer = importedActorDebugLineVertexBuffer;
+    mainPassInputs.importedActorDebugLineVertexOffset = importedActorDebugLineVertexOffset;
+    mainPassInputs.importedActorDebugLineVertexCount = importedActorDebugLineVertexCount;
     mainPassInputs.pipeInstanceCount = pipeInstanceCount;
     mainPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     mainPassInputs.transportInstanceCount = transportInstanceCount;

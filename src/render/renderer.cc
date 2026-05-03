@@ -187,6 +187,10 @@ void Renderer::importedSceneDebugState(
         outWaterDebug);
 }
 
+int Renderer::actorDebugPoseMode() const {
+    return m_backend->actorDebugPoseMode();
+}
+
 float Renderer::cameraFovDegrees() const {
     return m_backend->cameraFovDegrees();
 }

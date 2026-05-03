@@ -181,6 +181,7 @@ private:
     [[nodiscard]] bool tryPlaceTrackFromCameraRay();
     [[nodiscard]] bool tryRemoveTrackFromCameraRay();
     void resetVoxelBreakProgress();
+    [[nodiscard]] bool initializeActorDebugScene(const std::filesystem::path& dataFilesPath);
     void rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh = false);
     void updateMorrowindActors(float dt);
     void rebuildMorrowindActorRenderFrame(float simulationAlpha);
@@ -219,6 +220,8 @@ private:
         std::vector<std::array<std::uint16_t, 4>> boneIndices;
         std::vector<std::array<float, 4>> boneWeights;
         std::vector<odai::importer::ImportedSkeletonNode> skeleton;
+        std::vector<odai::importer::ImportedNifNodeAnimation> nodeAnimations;
+        std::vector<odai::importer::ImportedAnimationClip> animationClips;
         bool gpuSkinned = false;
     };
 
@@ -350,6 +353,7 @@ private:
     bool m_importedShowTextures = true;
     bool m_importedFlatShading = false;
     bool m_importedWaterDebug = false;
+    bool m_actorDebugSceneEnabled = false;
     std::filesystem::path m_importedScenePath;
     std::filesystem::path m_morrowindRuntimeDataFilesPath;
     std::filesystem::path m_morrowindRuntimeCellCacheRoot;
@@ -387,6 +391,7 @@ private:
     std::unordered_map<std::string, MorrowindActorPrototypeCacheEntry> m_morrowindActorPrototypeCache;
     std::vector<odai::render::ImportedActorInstanceData> m_balmoraGuardFrameInstances;
     std::vector<odai::render::ImportedActorBonePaletteMatrix> m_balmoraGuardBonePalette;
+    std::vector<odai::render::ImportedActorDebugLineVertex> m_balmoraGuardDebugBoneLines;
 };
 
 } // namespace odai::app

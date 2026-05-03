@@ -19,6 +19,7 @@ public:
     VkPipeline pipePipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
+    VkPipeline actorDebugLinePipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterPipelineRt = VK_NULL_HANDLE;
     VkPipeline grassBillboardPipeline = VK_NULL_HANDLE;
@@ -127,6 +128,10 @@ public:
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineRt, nullptr);
             importedStaticPipelineRt = VK_NULL_HANDLE;
+        }
+        if (actorDebugLinePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, actorDebugLinePipeline, nullptr);
+            actorDebugLinePipeline = VK_NULL_HANDLE;
         }
         if (importedWaterPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedWaterPipeline, nullptr);

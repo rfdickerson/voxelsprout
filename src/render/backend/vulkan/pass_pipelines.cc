@@ -422,6 +422,8 @@ bool RendererBackend::createPipePipeline() {
     constexpr const char* kImportedStaticVertexShaderPath = "../src/render/shaders/imported_static.vert.slang.spv";
     constexpr const char* kImportedStaticFragmentShaderPath = "../src/render/shaders/imported_static.frag.slang.spv";
     constexpr const char* kImportedStaticRtFragmentShaderPath = "../src/render/shaders/imported_static_rt.frag.slang.spv";
+    constexpr const char* kActorDebugLineVertexShaderPath = "../src/render/shaders/actor_debug_lines.vert.slang.spv";
+    constexpr const char* kActorDebugLineFragmentShaderPath = "../src/render/shaders/actor_debug_lines.frag.slang.spv";
     constexpr const char* kImportedWaterVertexShaderPath = "../src/render/shaders/imported_water.vert.slang.spv";
     constexpr const char* kImportedWaterFragmentShaderPath = "../src/render/shaders/imported_water.frag.slang.spv";
     constexpr const char* kImportedWaterRtFragmentShaderPath = "../src/render/shaders/imported_water_rt.frag.slang.spv";
@@ -731,6 +733,99 @@ bool RendererBackend::createPipePipeline() {
               << ", rtVariant=" << (importedStaticPipelineRt != VK_NULL_HANDLE ? "yes" : "no")
               << "\n";
 
+    std::array<VkShaderModule, 2> actorDebugLineShaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    const std::array<ShaderModuleLoadSpec, 2> actorDebugLineShaderLoadSpecs = {{
+        {kActorDebugLineVertexShaderPath, "actor_debug_lines.vert"},
+        {kActorDebugLineFragmentShaderPath, "actor_debug_lines.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, actorDebugLineShaderLoadSpecs, actorDebugLineShaderModules)) {
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
+        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
+        }
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo actorDebugLineVertexShaderStage{};
+    actorDebugLineVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    actorDebugLineVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    actorDebugLineVertexShaderStage.module = actorDebugLineShaderModules[0];
+    actorDebugLineVertexShaderStage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo actorDebugLineFragmentShaderStage{};
+    actorDebugLineFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    actorDebugLineFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    actorDebugLineFragmentShaderStage.module = actorDebugLineShaderModules[1];
+    actorDebugLineFragmentShaderStage.pName = "main";
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> actorDebugLineShaderStages = {
+        actorDebugLineVertexShaderStage,
+        actorDebugLineFragmentShaderStage
+    };
+    VkVertexInputBindingDescription actorDebugLineBindings[1]{};
+    actorDebugLineBindings[0].binding = 0;
+    actorDebugLineBindings[0].stride = sizeof(ImportedActorDebugLineVertex);
+    actorDebugLineBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription actorDebugLineAttributes[2]{};
+    actorDebugLineAttributes[0].location = 0;
+    actorDebugLineAttributes[0].binding = 0;
+    actorDebugLineAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    actorDebugLineAttributes[0].offset =
+        static_cast<uint32_t>(offsetof(ImportedActorDebugLineVertex, position));
+    actorDebugLineAttributes[1].location = 1;
+    actorDebugLineAttributes[1].binding = 0;
+    actorDebugLineAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    actorDebugLineAttributes[1].offset =
+        static_cast<uint32_t>(offsetof(ImportedActorDebugLineVertex, color));
+
+    VkPipelineVertexInputStateCreateInfo actorDebugLineVertexInputInfo{};
+    actorDebugLineVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    actorDebugLineVertexInputInfo.vertexBindingDescriptionCount = 1;
+    actorDebugLineVertexInputInfo.pVertexBindingDescriptions = actorDebugLineBindings;
+    actorDebugLineVertexInputInfo.vertexAttributeDescriptionCount = 2;
+    actorDebugLineVertexInputInfo.pVertexAttributeDescriptions = actorDebugLineAttributes;
+
+    VkPipelineInputAssemblyStateCreateInfo actorDebugLineInputAssembly = inputAssembly;
+    actorDebugLineInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    VkPipelineRasterizationStateCreateInfo actorDebugLineRasterizer = rasterizer;
+    actorDebugLineRasterizer.cullMode = VK_CULL_MODE_NONE;
+    VkPipelineDepthStencilStateCreateInfo actorDebugLineDepthStencil = depthStencil;
+    actorDebugLineDepthStencil.depthTestEnable = VK_FALSE;
+    actorDebugLineDepthStencil.depthWriteEnable = VK_FALSE;
+    VkGraphicsPipelineCreateInfo actorDebugLinePipelineCreateInfo = pipelineCreateInfo;
+    actorDebugLinePipelineCreateInfo.stageCount = static_cast<uint32_t>(actorDebugLineShaderStages.size());
+    actorDebugLinePipelineCreateInfo.pStages = actorDebugLineShaderStages.data();
+    actorDebugLinePipelineCreateInfo.pVertexInputState = &actorDebugLineVertexInputInfo;
+    actorDebugLinePipelineCreateInfo.pInputAssemblyState = &actorDebugLineInputAssembly;
+    actorDebugLinePipelineCreateInfo.pRasterizationState = &actorDebugLineRasterizer;
+    actorDebugLinePipelineCreateInfo.pDepthStencilState = &actorDebugLineDepthStencil;
+
+    VkPipeline actorDebugLinePipeline = VK_NULL_HANDLE;
+    const VkResult actorDebugLinePipelineResult = vkCreateGraphicsPipelines(
+        m_device,
+        VK_NULL_HANDLE,
+        1,
+        &actorDebugLinePipelineCreateInfo,
+        nullptr,
+        &actorDebugLinePipeline
+    );
+    destroyShaderModules(m_device, actorDebugLineShaderModules);
+    if (actorDebugLinePipelineResult != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, pipePipeline, nullptr);
+        vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
+        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
+        }
+        logVkFailure("vkCreateGraphicsPipelines(actorDebugLines)", actorDebugLinePipelineResult);
+        return false;
+    }
+    VOX_LOGI("render") << "pipeline config (actorDebugLines): topology=line_list, depthTest=0\n";
+
     std::array<VkShaderModule, 2> skyCloudShaderModules = {
         VK_NULL_HANDLE,
         VK_NULL_HANDLE
@@ -805,6 +900,7 @@ bool RendererBackend::createPipePipeline() {
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
         }
+        vkDestroyPipeline(m_device, actorDebugLinePipeline, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(skyCloud)", skyCloudPipelineResult);
         return false;
     }
@@ -835,6 +931,7 @@ bool RendererBackend::createPipePipeline() {
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
         }
+        vkDestroyPipeline(m_device, actorDebugLinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
         return false;
     }
@@ -916,6 +1013,7 @@ bool RendererBackend::createPipePipeline() {
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
         }
+        vkDestroyPipeline(m_device, actorDebugLinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(importedWater)", importedWaterPipelineResult);
         return false;
@@ -940,6 +1038,7 @@ bool RendererBackend::createPipePipeline() {
             if (importedStaticPipelineRt != VK_NULL_HANDLE) {
                 vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
             }
+            vkDestroyPipeline(m_device, actorDebugLinePipeline, nullptr);
             vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
             vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
             logVkFailure("vkCreateGraphicsPipelines(importedWaterRt)", importedWaterRtPipelineResult);
@@ -971,6 +1070,7 @@ bool RendererBackend::createPipePipeline() {
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
         }
+        vkDestroyPipeline(m_device, actorDebugLinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
         vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
         if (importedWaterPipelineRt != VK_NULL_HANDLE) {
@@ -1063,6 +1163,7 @@ bool RendererBackend::createPipePipeline() {
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
         }
+        vkDestroyPipeline(m_device, actorDebugLinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
         vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
         if (importedWaterPipelineRt != VK_NULL_HANDLE) {
@@ -1084,6 +1185,9 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr);
     }
+    if (m_actorDebugLinePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_actorDebugLinePipeline, nullptr);
+    }
     if (m_skyCloudPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_skyCloudPipeline, nullptr);
     }
@@ -1099,6 +1203,7 @@ bool RendererBackend::createPipePipeline() {
     m_pipePipeline = pipePipeline;
     m_importedStaticPipeline = importedStaticPipeline;
     m_importedStaticPipelineRt = importedStaticPipelineRt;
+    m_actorDebugLinePipeline = actorDebugLinePipeline;
     m_skyCloudPipeline = skyCloudPipeline;
     m_importedWaterPipeline = importedWaterPipeline;
     m_importedWaterPipelineRt = importedWaterPipelineRt;
@@ -1108,6 +1213,7 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipelineRt), "pipeline.importedStatic.rt");
     }
+    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_actorDebugLinePipeline), "pipeline.actorDebugLines");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyCloudPipeline), "pipeline.skyCloud");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipeline), "pipeline.importedWater");
     if (m_importedWaterPipelineRt != VK_NULL_HANDLE) {

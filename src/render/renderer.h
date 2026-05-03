@@ -80,6 +80,7 @@ public:
         bool& outFlatShading,
         bool& outWaterDebug
     ) const;
+    [[nodiscard]] int actorDebugPoseMode() const;
     float cameraFovDegrees() const;
     void shutdown();
 

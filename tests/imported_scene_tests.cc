@@ -1,9 +1,12 @@
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -31,6 +34,43 @@ void expectNear(float actual, float expected, float epsilon, const char* message
                   << ", got " << actual << ")\n";
         ++g_failures;
     }
+}
+
+std::array<float, 16> multiplyMatrices(
+    const std::array<float, 16>& lhs,
+    const std::array<float, 16>& rhs
+) {
+    std::array<float, 16> out{};
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            float sum = 0.0f;
+            for (int i = 0; i < 4; ++i) {
+                sum += lhs[row * 4 + i] * rhs[i * 4 + col];
+            }
+            out[row * 4 + col] = sum;
+        }
+    }
+    return out;
+}
+
+std::array<float, 16> matrixFromFloats(const float matrix[16]) {
+    std::array<float, 16> out{};
+    std::copy(matrix, matrix + 16, out.begin());
+    return out;
+}
+
+float maxAbsDifferenceFromIdentity(const std::array<float, 16>& matrix) {
+    const std::array<float, 16> identity{
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+    float maxDifference = 0.0f;
+    for (std::size_t i = 0; i < matrix.size(); ++i) {
+        maxDifference = std::max(maxDifference, std::fabs(matrix[i] - identity[i]));
+    }
+    return maxDifference;
 }
 
 template <typename T>
@@ -82,6 +122,33 @@ void appendIdentityAvObject(std::vector<std::uint8_t>& bytes, const std::string&
     appendBool(bytes, false);
 }
 
+void appendAvObjectWithTransform(
+    std::vector<std::uint8_t>& bytes,
+    const std::string& name,
+    const float (&translation)[3],
+    const float (&rotation)[9],
+    float scale = 1.0f
+) {
+    appendSizedString(bytes, name);
+    appendBinaryValue(bytes, static_cast<std::int32_t>(-1));
+    appendBinaryValue(bytes, static_cast<std::int32_t>(-1));
+    appendBinaryValue(bytes, static_cast<std::uint16_t>(0));
+
+    for (const float value : translation) {
+        appendBinaryValue(bytes, value);
+    }
+    for (const float value : rotation) {
+        appendBinaryValue(bytes, value);
+    }
+    appendBinaryValue(bytes, scale);
+    const float center[3] = {0.0f, 0.0f, 0.0f};
+    for (const float value : center) {
+        appendBinaryValue(bytes, value);
+    }
+    appendRefList(bytes, {});
+    appendBool(bytes, false);
+}
+
 void appendNifNode(
     std::vector<std::uint8_t>& bytes,
     const std::string& name,
@@ -89,6 +156,19 @@ void appendNifNode(
 ) {
     appendSizedString(bytes, "NiNode");
     appendIdentityAvObject(bytes, name);
+    appendRefList(bytes, children);
+    appendRefList(bytes, {});
+}
+
+void appendNifNodeWithTransform(
+    std::vector<std::uint8_t>& bytes,
+    const std::string& name,
+    std::initializer_list<std::int32_t> children,
+    const float (&translation)[3],
+    const float (&rotation)[9]
+) {
+    appendSizedString(bytes, "NiNode");
+    appendAvObjectWithTransform(bytes, name, translation, rotation);
     appendRefList(bytes, children);
     appendRefList(bytes, {});
 }
@@ -102,6 +182,18 @@ void appendNifTriShape(
     appendIdentityAvObject(bytes, name);
     appendBinaryValue(bytes, dataRef);
     appendBinaryValue(bytes, static_cast<std::int32_t>(-1));
+}
+
+void appendNifSkinnedTriShape(
+    std::vector<std::uint8_t>& bytes,
+    const std::string& name,
+    std::int32_t dataRef,
+    std::int32_t skinInstanceRef
+) {
+    appendSizedString(bytes, "NiTriShape");
+    appendIdentityAvObject(bytes, name);
+    appendBinaryValue(bytes, dataRef);
+    appendBinaryValue(bytes, skinInstanceRef);
 }
 
 void appendNifTriShapeData(
@@ -147,6 +239,56 @@ void appendNifTriShapeData(
     appendBinaryValue(bytes, static_cast<std::uint16_t>(0));
 }
 
+void appendSkinTransform(
+    std::vector<std::uint8_t>& bytes,
+    const float (&translation)[3],
+    const float (&rotation)[9],
+    float scale = 1.0f
+) {
+    for (const float value : rotation) {
+        appendBinaryValue(bytes, value);
+    }
+    for (const float value : translation) {
+        appendBinaryValue(bytes, value);
+    }
+    appendBinaryValue(bytes, scale);
+}
+
+void appendNifSkinInstance(
+    std::vector<std::uint8_t>& bytes,
+    std::int32_t skinDataRef,
+    std::int32_t skeletonRootRef,
+    std::initializer_list<std::int32_t> boneRefs
+) {
+    appendSizedString(bytes, "NiSkinInstance");
+    appendBinaryValue(bytes, skinDataRef);
+    appendBinaryValue(bytes, skeletonRootRef);
+    appendRefList(bytes, boneRefs);
+}
+
+void appendNifSkinDataSingleBone(
+    std::vector<std::uint8_t>& bytes,
+    const float (&skinTranslation)[3],
+    const float (&skinRotation)[9],
+    const float (&boneTranslation)[3],
+    const float (&boneRotation)[9]
+) {
+    appendSizedString(bytes, "NiSkinData");
+    appendSkinTransform(bytes, skinTranslation, skinRotation);
+    appendBinaryValue(bytes, static_cast<std::uint32_t>(1));
+    appendBinaryValue(bytes, static_cast<std::int32_t>(1));
+    appendSkinTransform(bytes, boneTranslation, boneRotation);
+    const float bounds[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    for (const float value : bounds) {
+        appendBinaryValue(bytes, value);
+    }
+    appendBinaryValue(bytes, static_cast<std::uint16_t>(3));
+    for (std::uint16_t vertexIndex = 0; vertexIndex < 3u; ++vertexIndex) {
+        appendBinaryValue(bytes, vertexIndex);
+        appendBinaryValue(bytes, 1.0f);
+    }
+}
+
 std::filesystem::path writeSyntheticRootCollisionNif() {
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() / "odai_named_root_collision_node.nif";
@@ -173,6 +315,54 @@ std::filesystem::path writeSyntheticRootCollisionNif() {
         10.0f, 1.0f, 0.0f
     };
     appendNifTriShapeData(bytes, collisionPositions, triangleIndices);
+
+    appendBinaryValue(bytes, static_cast<std::uint32_t>(1));
+    appendBinaryValue(bytes, static_cast<std::int32_t>(0));
+
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    return path;
+}
+
+std::filesystem::path writeSyntheticSkinnedTransformOrderNif() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "odai_skinned_transform_order_actor_part.nif";
+    std::vector<std::uint8_t> bytes;
+    const std::string header = "NetImmerse File Format, Version 4.0.0.2\n";
+    bytes.insert(bytes.end(), header.begin(), header.end());
+    appendBinaryValue(bytes, static_cast<std::uint32_t>(0x04000002u));
+    appendBinaryValue(bytes, static_cast<std::uint32_t>(6));
+
+    const float identityTranslation[3] = {0.0f, 0.0f, 0.0f};
+    const float identityRotation[9] = {
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f
+    };
+    const float rotateZ90[9] = {
+        0.0f, -1.0f, 0.0f,
+        1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f
+    };
+    const float skinTranslation[3] = {2.0f, 3.0f, 5.0f};
+
+    appendNifNode(bytes, "Root", {1, 3});
+    appendNifSkinnedTriShape(bytes, "tri Chest", 2, 4);
+    const float positions[9] = {
+        1.0f, 0.0f, 0.0f,
+        1.0f, 1.0f, 0.0f,
+        1.0f, 0.0f, 1.0f
+    };
+    const std::uint16_t triangleIndices[3] = {0, 1, 2};
+    appendNifTriShapeData(bytes, positions, triangleIndices);
+    appendNifNodeWithTransform(bytes, "Bip01 Chest", {}, identityTranslation, rotateZ90);
+    appendNifSkinInstance(bytes, 5, 0, {3});
+    appendNifSkinDataSingleBone(
+        bytes,
+        skinTranslation,
+        identityRotation,
+        identityTranslation,
+        identityRotation);
 
     appendBinaryValue(bytes, static_cast<std::uint32_t>(1));
     appendBinaryValue(bytes, static_cast<std::int32_t>(0));
@@ -620,6 +810,36 @@ void testMorrowindSkeletonOnlyNifLoadsAndExtractsTextKeys() {
     std::filesystem::remove(nifPath);
 }
 
+void testMorrowindSkinnedActorPartUsesOpenMwMatrixOrder() {
+    const std::filesystem::path nifPath = writeSyntheticSkinnedTransformOrderNif();
+
+    odai::importer::ImportedNifResult result{};
+    std::string error;
+    expectTrue(
+        odai::importer::loadMorrowindActorPartNif(nifPath, result, error),
+        "Skinned actor part matrix-order fixture loads");
+    expectTrue(result.mesh.vertices.size() == 3u, "Matrix-order fixture keeps all vertices");
+    expectTrue(result.mesh.indices.size() == 3u, "Matrix-order fixture keeps triangle indices");
+    if (result.mesh.vertices.size() >= 3u) {
+        // OpenMW evaluates sourceVertex * inverseBind * boneWorld * skinTransform
+        // in row-vector OSG space. In our column-vector convention the same vertex
+        // becomes skinTransform * boneWorld * inverseBind * sourceVertex, then the
+        // Morrowind Y/Z axes are remapped into engine space.
+        expectNear(result.mesh.vertices[0].position[0], 2.0f, 0.0001f,
+                   "Skinned bind-pose bake applies skin translation after bone rotation (x)");
+        expectNear(result.mesh.vertices[0].position[1], 5.0f, 0.0001f,
+                   "Skinned bind-pose bake remaps NIF z to engine y");
+        expectNear(result.mesh.vertices[0].position[2], 4.0f, 0.0001f,
+                   "Skinned bind-pose bake applies OpenMW-compatible transform order");
+        expectNear(result.mesh.vertices[1].position[0], 1.0f, 0.0001f,
+                   "Skinned bind-pose bake rotates the second vertex");
+        expectNear(result.mesh.vertices[2].position[1], 6.0f, 0.0001f,
+                   "Skinned bind-pose bake preserves post-rotation height");
+    }
+
+    std::filesystem::remove(nifPath);
+}
+
 void testImportedSceneCollision() {
     using odai::importer::GpuSceneAsset;
     using odai::importer::ImportedScene;
@@ -835,13 +1055,21 @@ void testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable() {
 
     const std::vector<std::string> fargothModelParts = {
         "b/B_N_Wood Elf_M_Skins.nif",
+        "b/B_N_Wood Elf_M_Neck.NIF",
         "b/B_N_Wood Elf_M_Head_02.nif",
         "b/B_N_Wood Elf_M_Hair_03.nif",
         "c/C_M_Shirt_C_commonL04.NIF",
+        "c/C_M_Shirt_UA_commonL04.nif",
+        "c/C_M_Shirt_FA_commonL04.nif",
+        "c/C_M_Shirt_W_commonL04.nif",
         "c/C_M_Pants_G_common02.nif",
+        "c/C_M_pants_A_common02.nif",
+        "c/C_M_Pants_UL_common02.nif",
+        "c/C_M_Pants_K_common02.nif",
         "c/C_shoes_common_4.NIF"
     };
     for (const std::string& relativeModelPath : fargothModelParts) {
+        const std::size_t firstNewVertex = actor.vertices.size();
         const bool loaded = odai::importer::appendMorrowindSkinnedActorPartNif(
             meshesPath / std::filesystem::path(relativeModelPath),
             actor,
@@ -851,6 +1079,26 @@ void testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable() {
                       << relativeModelPath << " (" << error << ")\n";
         }
         expectTrue(loaded, "Fargoth skinned actor part loads");
+        if (loaded &&
+            (relativeModelPath.find("Head") != std::string::npos ||
+             relativeModelPath.find("Hair") != std::string::npos)) {
+            expectTrue(
+                actor.vertices.size() > firstNewVertex,
+                "Fargoth head/hair actor part appends vertices");
+            float minY = std::numeric_limits<float>::max();
+            float maxY = -std::numeric_limits<float>::max();
+            for (std::size_t vertexIndex = firstNewVertex; vertexIndex < actor.vertices.size(); ++vertexIndex) {
+                minY = std::min(minY, actor.vertices[vertexIndex].position[1]);
+                maxY = std::max(maxY, actor.vertices[vertexIndex].position[1]);
+            }
+            if (maxY <= 95.0f || minY >= 180.0f) {
+                std::cerr << "[imported scene test] Fargoth head/hair part "
+                          << relativeModelPath << " y-bounds min=" << minY
+                          << " max=" << maxY << '\n';
+            }
+            expectTrue(maxY > 95.0f && minY < 180.0f,
+                       "Fargoth head/hair actor part is positioned near the upper body");
+        }
     }
 
     expectTrue(!actor.vertices.empty(), "Fargoth skinned actor has vertices");
@@ -859,6 +1107,42 @@ void testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable() {
     expectTrue(actor.boneIndices.size() == actor.vertices.size(), "bone index stream matches vertex count");
     expectTrue(actor.boneWeights.size() == actor.vertices.size(), "bone weight stream matches vertex count");
     expectTrue(actor.weightedVertexCount > 0u, "Fargoth skinned actor has weighted vertices");
+    if (!actor.skeleton.empty()) {
+        std::vector<std::array<float, 16>> worldMatrices(actor.skeleton.size());
+        float maxBindPaletteError = 0.0f;
+        for (std::size_t nodeIndex = 0; nodeIndex < actor.skeleton.size(); ++nodeIndex) {
+            const std::array<float, 16> local = matrixFromFloats(actor.skeleton[nodeIndex].localTransform);
+            const std::int32_t parentIndex = actor.skeleton[nodeIndex].parentIndex;
+            if (parentIndex >= 0 && static_cast<std::size_t>(parentIndex) < worldMatrices.size()) {
+                worldMatrices[nodeIndex] =
+                    multiplyMatrices(worldMatrices[static_cast<std::size_t>(parentIndex)], local);
+            } else {
+                worldMatrices[nodeIndex] = local;
+            }
+            const std::array<float, 16> inverseBind =
+                matrixFromFloats(actor.skeleton[nodeIndex].inverseBindWorldTransform);
+            const std::array<float, 16> bindPalette =
+                multiplyMatrices(worldMatrices[nodeIndex], inverseBind);
+            maxBindPaletteError =
+                std::max(maxBindPaletteError, maxAbsDifferenceFromIdentity(bindPalette));
+        }
+        if (maxBindPaletteError > 0.001f) {
+            std::cerr << "[imported scene test] Fargoth bind palette max identity error="
+                      << maxBindPaletteError << '\n';
+        }
+        expectTrue(maxBindPaletteError <= 0.001f, "Fargoth bind pose palette evaluates to identity");
+    }
+    std::size_t invalidIndexCount = 0u;
+    for (const std::uint32_t index : actor.indices) {
+        if (index >= actor.vertices.size()) {
+            ++invalidIndexCount;
+        }
+    }
+    if (invalidIndexCount != 0u) {
+        std::cerr << "[imported scene test] Fargoth invalid actor indices="
+                  << invalidIndexCount << '\n';
+    }
+    expectTrue(invalidIndexCount == 0u, "Fargoth assembled actor indices stay inside vertex buffer");
     if (!actor.vertices.empty()) {
         float minX = actor.vertices.front().position[0];
         float minY = actor.vertices.front().position[1];
@@ -877,14 +1161,39 @@ void testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable() {
         const float spanX = maxX - minX;
         const float spanY = maxY - minY;
         const float spanZ = maxZ - minZ;
-        if (!(spanY > spanX * 0.75f && spanY > spanZ)) {
+        if (spanY <= 100.0f || spanX >= 220.0f || spanZ >= 140.0f || spanY <= spanZ) {
             std::cerr << "[imported scene test] Fargoth assembled spans x=" << spanX
                       << " y=" << spanY
                       << " z=" << spanZ << '\n';
         }
         expectTrue(spanY > 80.0f, "Fargoth assembled actor has upright vertical extent");
-        expectTrue(spanX < 180.0f && spanZ < 180.0f, "Fargoth assembled actor parts stay near the skeleton");
-        expectTrue(spanY > spanX * 0.75f && spanY > spanZ, "Fargoth assembled actor is upright and not prone");
+        expectTrue(spanX < 220.0f && spanZ < 140.0f, "Fargoth assembled actor parts stay near the skeleton");
+        expectTrue(spanY > 100.0f && spanY > spanZ, "Fargoth assembled actor has a sane T-pose envelope");
+        float maxTriangleEdge = 0.0f;
+        auto edgeLength = [&](std::uint32_t a, std::uint32_t b) {
+            const odai::importer::ImportedScenePackedVertex& va = actor.vertices[a];
+            const odai::importer::ImportedScenePackedVertex& vb = actor.vertices[b];
+            const float dx = va.position[0] - vb.position[0];
+            const float dy = va.position[1] - vb.position[1];
+            const float dz = va.position[2] - vb.position[2];
+            return std::sqrt((dx * dx) + (dy * dy) + (dz * dz));
+        };
+        for (std::size_t indexOffset = 0; indexOffset + 2u < actor.indices.size(); indexOffset += 3u) {
+            const std::uint32_t i0 = actor.indices[indexOffset + 0u];
+            const std::uint32_t i1 = actor.indices[indexOffset + 1u];
+            const std::uint32_t i2 = actor.indices[indexOffset + 2u];
+            if (i0 >= actor.vertices.size() || i1 >= actor.vertices.size() || i2 >= actor.vertices.size()) {
+                continue;
+            }
+            maxTriangleEdge = std::max(maxTriangleEdge, edgeLength(i0, i1));
+            maxTriangleEdge = std::max(maxTriangleEdge, edgeLength(i1, i2));
+            maxTriangleEdge = std::max(maxTriangleEdge, edgeLength(i2, i0));
+        }
+        if (maxTriangleEdge >= 96.0f) {
+            std::cerr << "[imported scene test] Fargoth assembled max triangle edge="
+                      << maxTriangleEdge << '\n';
+        }
+        expectTrue(maxTriangleEdge < 96.0f, "Fargoth assembled actor triangles stay local");
     }
     for (std::size_t vertexIndex = 0; vertexIndex < actor.boneWeights.size(); ++vertexIndex) {
         float totalWeight = 0.0f;
@@ -1059,6 +1368,7 @@ int main() {
     testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain();
     testMorrowindNifSkipsNamedRootCollisionNode();
     testMorrowindSkeletonOnlyNifLoadsAndExtractsTextKeys();
+    testMorrowindSkinnedActorPartUsesOpenMwMatrixOrder();
     testImportedSceneCollision();
     testMorrowindFargothActorPartsLoadWhenDataFilesAvailable();
     testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable();

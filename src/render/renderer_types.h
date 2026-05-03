@@ -169,6 +169,11 @@ struct ImportedActorRenderAssetData {
     std::span<const std::array<float, 4>> boneWeights;
 };
 
+struct ImportedActorDebugLineVertex {
+    float position[3] = {};
+    float color[3] = {1.0f, 1.0f, 1.0f};
+};
+
 struct ImportedActorInstanceData {
     float position[3] = {};
     float yawRadians = 0.0f;
@@ -185,6 +190,7 @@ struct ImportedActorInstanceData {
 struct ImportedActorFrameData {
     std::span<const ImportedActorInstanceData> instances;
     std::span<const ImportedActorBonePaletteMatrix> bonePalette;
+    std::span<const ImportedActorDebugLineVertex> debugBoneLines;
     const ImportedActorGpuAnimationFrameData* gpuAnimation = nullptr;
 };
 

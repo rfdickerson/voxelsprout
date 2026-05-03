@@ -381,7 +381,10 @@ void RendererBackend::buildFrameStatsUi() {
         return;
     }
 
-    const bool importedSceneLoaded = !m_importedMeshDraws.empty() || m_importedWaterIndexCount > 0;
+    const bool importedSceneLoaded =
+        !m_importedMeshDraws.empty() ||
+        m_importedWaterIndexCount > 0 ||
+        m_debugImportedActorInstanceCount > 0u;
     const float autoScale = std::numeric_limits<float>::max();
     if (ImGui::BeginTabBar("MorrowindRendererTabs")) {
     if (ImGui::BeginTabItem("Scene")) {
@@ -425,7 +428,19 @@ void RendererBackend::buildFrameStatsUi() {
                     m_debugImportedShadowVisibleDrawCounts[3]
                 );
             }
-        } else {
+        }
+        if (m_debugImportedActorInstanceCount > 0u) {
+            ImGui::Separator();
+            ImGui::Text("Actor Debug");
+            ImGui::Checkbox("GPU Skinning (palette)", &m_debugActorSkinningEnabled);
+            ImGui::RadioButton("Bind/T-Pose", &m_debugActorPoseMode, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("Walk", &m_debugActorPoseMode, 1);
+            ImGui::Text(
+                "Actors / Bone Line Vertices: %u / %u",
+                m_debugImportedActorInstanceCount,
+                m_debugImportedActorBoneLineVertexCount);
+        } else if (!importedSceneLoaded) {
             ImGui::TextDisabled("Imported-scene geometry not loaded.");
         }
         ImGui::EndTabItem();

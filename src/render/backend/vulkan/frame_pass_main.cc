@@ -42,6 +42,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const std::span<const odai::render::ImportedActorInstanceData> importedActorInstances =
         inputs.importedActorInstances;
     const bool importedActorBonePaletteAvailable = inputs.importedActorBonePaletteAvailable;
+    const VkBuffer importedActorDebugLineVertexBuffer = inputs.importedActorDebugLineVertexBuffer;
+    const VkDeviceSize importedActorDebugLineVertexOffset = inputs.importedActorDebugLineVertexOffset;
+    const std::uint32_t importedActorDebugLineVertexCount = inputs.importedActorDebugLineVertexCount;
     const bool renderingImportedScene = !importedMeshDraws.empty() || !importedActorMeshDraws.empty();
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
@@ -404,6 +407,35 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
             }
         }
+    }
+    if (m_actorDebugLinePipeline != VK_NULL_HANDLE &&
+        importedActorDebugLineVertexBuffer != VK_NULL_HANDLE &&
+        importedActorDebugLineVertexCount > 0u) {
+        const VkBuffer debugLineVertexBuffers[1] = {importedActorDebugLineVertexBuffer};
+        const VkDeviceSize debugLineVertexOffsets[1] = {importedActorDebugLineVertexOffset};
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_actorDebugLinePipeline);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout,
+            0,
+            boundDescriptorSetCount,
+            boundDescriptorSets.sets.data(),
+            1,
+            &mvpDynamicOffset
+        );
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, debugLineVertexBuffers, debugLineVertexOffsets);
+        ChunkPushConstants debugLinePushConstants{};
+        vkCmdPushConstants(
+            commandBuffer,
+            m_pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(ChunkPushConstants),
+            &debugLinePushConstants
+        );
+        countDrawCalls(m_debugDrawCallsMain, 1);
+        vkCmdDraw(commandBuffer, importedActorDebugLineVertexCount, 1, 0, 0);
     }
 
     if (m_pipePipeline != VK_NULL_HANDLE) {

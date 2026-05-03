@@ -155,6 +155,12 @@ bool loadMorrowindSkinnedActorSkeleton(
     std::string& outError
 );
 
+bool loadMorrowindSkinnedActorSkeletonBindPose(
+    const std::filesystem::path& baseAnimPath,
+    ImportedSkinnedActorAsset& outAsset,
+    std::string& outError
+);
+
 bool appendMorrowindSkinnedActorPartNif(
     const std::filesystem::path& nifPath,
     ImportedSkinnedActorAsset& ioAsset,
