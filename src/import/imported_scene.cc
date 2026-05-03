@@ -26,7 +26,7 @@ namespace odai::importer {
 namespace {
 
 constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
-constexpr std::uint32_t kImportedSceneVersion = 20u;
+constexpr std::uint32_t kImportedSceneVersion = 21u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
 constexpr std::uint32_t kMorrowindDoorCacheMagic = 0x524F4442u;  // BDOR
 constexpr std::uint32_t kMorrowindDoorCacheVersion = 1u;
@@ -1280,6 +1280,180 @@ bool parseModelRecord(std::istream& input, std::uint32_t recordSize, std::string
     return true;
 }
 
+bool parseActorRecord(
+    std::istream& input,
+    std::uint32_t recordSize,
+    MorrowindActorKind kind,
+    MorrowindActorRecord& outActor
+) {
+    const std::streampos recordStart = input.tellg();
+    std::uint32_t bytesLeft = recordSize;
+    outActor = {};
+    outActor.kind = kind;
+    while (bytesLeft >= sizeof(Tes3SubRecordHeader)) {
+        Tes3SubRecordHeader subHeader{};
+        if (!readSubRecordHeader(input, subHeader)) {
+            return false;
+        }
+        bytesLeft -= static_cast<std::uint32_t>(sizeof(subHeader));
+        const std::string subName = fourCcToString(subHeader.name);
+        if (subHeader.size > bytesLeft) {
+            return false;
+        }
+
+        if (subName == "NAME") {
+            outActor.id = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "MODL") {
+            outActor.modelPath = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "RNAM") {
+            outActor.raceId = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "BNAM") {
+            outActor.headBodyPartId = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "KNAM") {
+            outActor.hairBodyPartId = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "NPCO" && subHeader.size >= 36u) {
+            std::int32_t count = 0;
+            readValue(input, count);
+            std::string itemId(32u, '\0');
+            readExact(input, itemId.data(), itemId.size());
+            itemId.resize(std::strlen(itemId.c_str()));
+            itemId = lowerCopy(itemId);
+            if (!itemId.empty()) {
+                outActor.inventoryItemIds.push_back(itemId);
+            }
+            if (subHeader.size > 36u) {
+                input.seekg(static_cast<std::streamoff>(subHeader.size - 36u), std::ios::cur);
+            }
+        } else {
+            input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
+        }
+        bytesLeft -= subHeader.size;
+    }
+    input.seekg(recordStart + static_cast<std::streamoff>(recordSize), std::ios::beg);
+    return true;
+}
+
+std::string bodyPartIdToActorModelPath(const std::string& bodyPartId) {
+    if (bodyPartId.empty()) {
+        return {};
+    }
+    std::string path;
+    const char prefix = static_cast<char>(std::tolower(static_cast<unsigned char>(bodyPartId.front())));
+    if (prefix == 'c') {
+        path = "c/";
+    } else if (prefix == 'a') {
+        path = "a/";
+    } else {
+        path = "b/";
+    }
+    for (char ch : bodyPartId) {
+        path.push_back(std::isspace(static_cast<unsigned char>(ch)) ? '_' : ch);
+    }
+    path += ".nif";
+    return lowerCopy(path);
+}
+
+std::string inferBodyPartSlot(const std::string& bodyPartId, const std::string& modelPath) {
+    const std::string key = lowerCopy(bodyPartId + " " + modelPath);
+    if (key.find("hair") != std::string::npos) return "hair";
+    if (key.find("head") != std::string::npos || key.find("helm") != std::string::npos) return "head";
+    if (key.find("neck") != std::string::npos) return "neck";
+    if (key.find("skins") != std::string::npos) return "body";
+    if (key.find("shirt") != std::string::npos || key.find("cuirass") != std::string::npos || key.find("_c.") != std::string::npos) return "torso";
+    if (key.find("robe") != std::string::npos || key.find("skirt") != std::string::npos) return "torso";
+    if (key.find("pants") != std::string::npos || key.find("greaves") != std::string::npos || key.find("_g.") != std::string::npos) return "groin";
+    if (key.find("_ua") != std::string::npos || key.find("pauldron") != std::string::npos) return "upper_arm";
+    if (key.find("_fa") != std::string::npos || key.find("bracer") != std::string::npos) return "forearm";
+    if (key.find("_w") != std::string::npos || key.find("gauntlet") != std::string::npos) return "hand";
+    if (key.find("_ul") != std::string::npos) return "upper_leg";
+    if (key.find("_k") != std::string::npos) return "knee";
+    if (key.find("_a") != std::string::npos || key.find("ankle") != std::string::npos) return "ankle";
+    if (key.find("shoe") != std::string::npos || key.find("boot") != std::string::npos || key.find("foot") != std::string::npos) return "foot";
+    return "misc";
+}
+
+std::string inferBodyPartGender(const std::string& bodyPartId, const std::string& modelPath) {
+    const std::string key = lowerCopy(bodyPartId + " " + modelPath);
+    if (key.find("_f_") != std::string::npos || key.find("_f.") != std::string::npos) {
+        return "f";
+    }
+    if (key.find("_m_") != std::string::npos || key.find("_m.") != std::string::npos) {
+        return "m";
+    }
+    return {};
+}
+
+bool parseBodyRecord(
+    std::istream& input,
+    std::uint32_t recordSize,
+    std::string& outBodyPartId,
+    std::string& outModelPath
+) {
+    const std::streampos recordStart = input.tellg();
+    std::uint32_t bytesLeft = recordSize;
+    outBodyPartId.clear();
+    outModelPath.clear();
+    while (bytesLeft >= sizeof(Tes3SubRecordHeader)) {
+        Tes3SubRecordHeader subHeader{};
+        if (!readSubRecordHeader(input, subHeader)) {
+            return false;
+        }
+        bytesLeft -= static_cast<std::uint32_t>(sizeof(subHeader));
+        const std::string subName = fourCcToString(subHeader.name);
+        if (subHeader.size > bytesLeft) {
+            return false;
+        }
+
+        if (subName == "NAME") {
+            outBodyPartId = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "MODL") {
+            outModelPath = lowerCopy(readSizedString(input, subHeader.size));
+        } else {
+            input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
+        }
+        bytesLeft -= subHeader.size;
+    }
+    input.seekg(recordStart + static_cast<std::streamoff>(recordSize), std::ios::beg);
+    return true;
+}
+
+bool parseEquipmentRecord(
+    std::istream& input,
+    std::uint32_t recordSize,
+    std::string& outItemId,
+    std::vector<std::string>& outBodyPartIds
+) {
+    const std::streampos recordStart = input.tellg();
+    std::uint32_t bytesLeft = recordSize;
+    outItemId.clear();
+    outBodyPartIds.clear();
+    while (bytesLeft >= sizeof(Tes3SubRecordHeader)) {
+        Tes3SubRecordHeader subHeader{};
+        if (!readSubRecordHeader(input, subHeader)) {
+            return false;
+        }
+        bytesLeft -= static_cast<std::uint32_t>(sizeof(subHeader));
+        const std::string subName = fourCcToString(subHeader.name);
+        if (subHeader.size > bytesLeft) {
+            return false;
+        }
+
+        if (subName == "NAME") {
+            outItemId = lowerCopy(readSizedString(input, subHeader.size));
+        } else if (subName == "BNAM") {
+            const std::string bodyPartId = lowerCopy(readSizedString(input, subHeader.size));
+            if (!bodyPartId.empty()) {
+                outBodyPartIds.push_back(bodyPartId);
+            }
+        } else {
+            input.seekg(static_cast<std::streamoff>(subHeader.size), std::ios::cur);
+        }
+        bytesLeft -= subHeader.size;
+    }
+    input.seekg(recordStart + static_cast<std::streamoff>(recordSize), std::ios::beg);
+    return true;
+}
+
 bool parseLightRecord(std::istream& input, std::uint32_t recordSize, ParsedLightRecord& outLight) {
     const std::streampos recordStart = input.tellg();
     std::uint32_t bytesLeft = recordSize;
@@ -2125,6 +2299,11 @@ ImportedScene buildSceneFromParsedData(
             if (modelIt != modelPathById.end()) {
                 unresolved.modelPath = modelIt->second;
             }
+            unresolved.refNum = ref.refNum;
+            unresolved.hasRefNum = ref.hasRefNum;
+            unresolved.cellX = cell.gridX;
+            unresolved.cellY = cell.gridY;
+            unresolved.deleted = ref.deleted;
             unresolved.position[0] = ref.position[0];
             unresolved.position[1] = ref.position[1];
             unresolved.position[2] = ref.position[2];
@@ -2612,6 +2791,11 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
         output.write(reinterpret_cast<const char*>(ref.position), static_cast<std::streamsize>(sizeof(ref.position)));
         output.write(reinterpret_cast<const char*>(ref.rotationRadians), static_cast<std::streamsize>(sizeof(ref.rotationRadians)));
         writeValue(output, ref.scale);
+        writeValue(output, ref.refNum);
+        writeValue(output, ref.hasRefNum ? 1u : 0u);
+        writeValue(output, ref.cellX);
+        writeValue(output, ref.cellY);
+        writeValue(output, ref.deleted ? 1u : 0u);
     }
 
     if (!scene.packedVertices.empty()) {
@@ -2815,6 +2999,19 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
             !readValue(input, ref.scale)) {
             return false;
         }
+        if (version >= 21u) {
+            std::uint32_t hasRefNum = 0u;
+            std::uint32_t deleted = 0u;
+            if (!readValue(input, ref.refNum) ||
+                !readValue(input, hasRefNum) ||
+                !readValue(input, ref.cellX) ||
+                !readValue(input, ref.cellY) ||
+                !readValue(input, deleted)) {
+                return false;
+            }
+            ref.hasRefNum = hasRefNum != 0u;
+            ref.deleted = deleted != 0u;
+        }
     }
 
     if (version >= 2u) {
@@ -3007,6 +3204,20 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
             !readValue(input, scale)) {
             return false;
         }
+        if (version >= 21u) {
+            std::uint32_t refNum = 0u;
+            std::uint32_t hasRefNum = 0u;
+            int cellX = 0;
+            int cellY = 0;
+            std::uint32_t deleted = 0u;
+            if (!readValue(input, refNum) ||
+                !readValue(input, hasRefNum) ||
+                !readValue(input, cellX) ||
+                !readValue(input, cellY) ||
+                !readValue(input, deleted)) {
+                return false;
+            }
+        }
     }
 
     scene.packedVertices.resize(packedVertexCount);
@@ -3078,6 +3289,213 @@ bool exportImportedSceneTerrainObj(const ImportedScene& scene, const std::filesy
         return false;
     }
     return true;
+}
+
+bool loadMorrowindActorCatalog(
+    const std::filesystem::path& morrowindDataFilesPath,
+    MorrowindActorCatalog& outCatalog
+) {
+    g_lastImportedSceneError.clear();
+    outCatalog = {};
+    const std::filesystem::path esmPath = morrowindDataFilesPath / "Morrowind.esm";
+    std::ifstream input(esmPath, std::ios::binary);
+    if (!input) {
+        setLastImportedSceneError("Failed to open Morrowind.esm");
+        return false;
+    }
+
+    Tes3RecordHeader header{};
+    if (!readRecordHeader(input, header) || fourCcToString(header.name) != "TES3") {
+        setLastImportedSceneError("File does not begin with a TES3 record");
+        return false;
+    }
+    input.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+    while (readRecordHeader(input, header)) {
+        const std::string recordName = fourCcToString(header.name);
+        if (recordName == "NPC_" || recordName == "CREA") {
+            MorrowindActorRecord actor{};
+            if (!parseActorRecord(
+                    input,
+                    header.size,
+                    recordName == "CREA" ? MorrowindActorKind::Creature : MorrowindActorKind::Npc,
+                    actor)) {
+                setLastImportedSceneError("Failed to parse " + recordName + " actor record");
+                return false;
+            }
+            if (!actor.id.empty()) {
+                outCatalog.actorsById[actor.id] = std::move(actor);
+            }
+        } else {
+            input.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+        }
+    }
+    return true;
+}
+
+bool loadMorrowindEquipmentCatalog(
+    const std::filesystem::path& morrowindDataFilesPath,
+    MorrowindEquipmentCatalog& outCatalog
+) {
+    g_lastImportedSceneError.clear();
+    outCatalog = {};
+    const std::filesystem::path esmPath = morrowindDataFilesPath / "Morrowind.esm";
+    std::ifstream input(esmPath, std::ios::binary);
+    if (!input) {
+        setLastImportedSceneError("Failed to open Morrowind.esm");
+        return false;
+    }
+
+    Tes3RecordHeader header{};
+    if (!readRecordHeader(input, header) || fourCcToString(header.name) != "TES3") {
+        setLastImportedSceneError("File does not begin with a TES3 record");
+        return false;
+    }
+    input.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+    while (readRecordHeader(input, header)) {
+        const std::string recordName = fourCcToString(header.name);
+        if (recordName == "BODY") {
+            std::string bodyPartId;
+            std::string modelPath;
+            if (!parseBodyRecord(input, header.size, bodyPartId, modelPath)) {
+                setLastImportedSceneError("Failed to parse BODY record");
+                return false;
+            }
+            if (!bodyPartId.empty() && !modelPath.empty()) {
+                MorrowindEquipmentCatalog::BodyPartRecord bodyPart{};
+                bodyPart.id = bodyPartId;
+                bodyPart.modelPath = modelPath;
+                bodyPart.slot = inferBodyPartSlot(bodyPartId, modelPath);
+                bodyPart.inferredGender = inferBodyPartGender(bodyPartId, modelPath);
+                outCatalog.bodyPartById[bodyPartId] = bodyPart;
+                outCatalog.modelPathByBodyPartId[bodyPartId] = modelPath;
+            }
+        } else if (recordName == "CLOT" || recordName == "ARMO") {
+            std::string itemId;
+            std::vector<std::string> bodyPartIds;
+            if (!parseEquipmentRecord(input, header.size, itemId, bodyPartIds)) {
+                setLastImportedSceneError("Failed to parse " + recordName + " equipment record");
+                return false;
+            }
+            if (!itemId.empty() && !bodyPartIds.empty()) {
+                std::vector<std::string> modelPaths;
+                std::unordered_set<std::string> seenModelPaths;
+                for (const std::string& bodyPartId : bodyPartIds) {
+                    const auto bodyIt = outCatalog.modelPathByBodyPartId.find(bodyPartId);
+                    const std::string modelPath = bodyIt != outCatalog.modelPathByBodyPartId.end()
+                        ? bodyIt->second
+                        : bodyPartIdToActorModelPath(bodyPartId);
+                    if (!modelPath.empty() && seenModelPaths.insert(modelPath).second) {
+                        modelPaths.push_back(modelPath);
+                    }
+                }
+                if (!modelPaths.empty()) {
+                    outCatalog.bodyPartModelPathsByItemId[itemId] = std::move(modelPaths);
+                }
+            }
+        } else {
+            input.seekg(static_cast<std::streamoff>(header.size), std::ios::cur);
+        }
+    }
+    return true;
+}
+
+std::vector<MorrowindEquipmentCatalog::ResolvedActorPart> resolveMorrowindNpcParts(
+    const MorrowindActorRecord& actor,
+    const MorrowindEquipmentCatalog& equipmentCatalog
+) {
+    auto bodyPart = [&](const std::string& bodyPartId, bool fallback) {
+        MorrowindEquipmentCatalog::ResolvedActorPart resolved{};
+        const auto bodyIt = equipmentCatalog.modelPathByBodyPartId.find(bodyPartId);
+        if (bodyIt != equipmentCatalog.modelPathByBodyPartId.end()) {
+            resolved.modelPath = bodyIt->second;
+        } else {
+            resolved.modelPath = bodyPartIdToActorModelPath(bodyPartId);
+            resolved.fallback = true;
+        }
+        const auto recordIt = equipmentCatalog.bodyPartById.find(bodyPartId);
+        resolved.slot = recordIt != equipmentCatalog.bodyPartById.end()
+            ? recordIt->second.slot
+            : inferBodyPartSlot(bodyPartId, resolved.modelPath);
+        resolved.fallback = resolved.fallback || fallback;
+        return resolved;
+    };
+    auto raceStem = [](std::string raceId) {
+        for (char& ch : raceId) {
+            if (ch == '_') {
+                ch = ' ';
+            }
+        }
+        if (raceId == "dark elf") return std::string("Dark Elf");
+        if (raceId == "wood elf") return std::string("Wood Elf");
+        if (raceId == "high elf") return std::string("High Elf");
+        if (raceId == "breton") return std::string("Breton");
+        if (raceId == "imperial") return std::string("Imperial");
+        if (raceId == "nord") return std::string("Nord");
+        if (raceId == "redguard") return std::string("Redguard");
+        if (raceId == "orc") return std::string("Orc");
+        if (raceId == "argonian") return std::string("Argonian");
+        if (raceId == "khajiit") return std::string("Khajiit");
+        return std::string("Dark Elf");
+    };
+
+    const bool male = actor.headBodyPartId.find("_f_") == std::string::npos &&
+        actor.hairBodyPartId.find("_f_") == std::string::npos;
+    const std::string gender = male ? "M" : "F";
+    const std::string stem = raceStem(actor.raceId);
+
+    std::vector<MorrowindEquipmentCatalog::ResolvedActorPart> parts;
+    std::unordered_set<std::string> seenParts;
+    auto addPart = [&](MorrowindEquipmentCatalog::ResolvedActorPart part) {
+        if (!part.modelPath.empty() && seenParts.insert(part.modelPath).second) {
+            if (part.slot.empty()) {
+                part.slot = inferBodyPartSlot({}, part.modelPath);
+            }
+            parts.push_back(std::move(part));
+        }
+    };
+    addPart(MorrowindEquipmentCatalog::ResolvedActorPart{
+        "b/b_n_" + lowerCopy(stem) + "_" + lowerCopy(gender) + "_skins.nif",
+        "body",
+        true
+    });
+    addPart(MorrowindEquipmentCatalog::ResolvedActorPart{
+        "b/b_n_" + lowerCopy(stem) + "_" + lowerCopy(gender) + "_neck.nif",
+        "neck",
+        true
+    });
+    if (!actor.headBodyPartId.empty()) {
+        addPart(bodyPart(actor.headBodyPartId, false));
+    }
+    if (!actor.hairBodyPartId.empty()) {
+        addPart(bodyPart(actor.hairBodyPartId, false));
+    }
+
+    for (const std::string& itemId : actor.inventoryItemIds) {
+        const auto itemIt = equipmentCatalog.bodyPartModelPathsByItemId.find(itemId);
+        if (itemIt == equipmentCatalog.bodyPartModelPathsByItemId.end()) {
+            continue;
+        }
+        for (const std::string& modelPath : itemIt->second) {
+            addPart(MorrowindEquipmentCatalog::ResolvedActorPart{
+                modelPath,
+                inferBodyPartSlot({}, modelPath),
+                false
+            });
+        }
+    }
+    return parts;
+}
+
+std::vector<std::string> resolveMorrowindNpcPartModelPaths(
+    const MorrowindActorRecord& actor,
+    const MorrowindEquipmentCatalog& equipmentCatalog
+) {
+    std::vector<std::string> modelPaths;
+    for (const MorrowindEquipmentCatalog::ResolvedActorPart& part :
+         resolveMorrowindNpcParts(actor, equipmentCatalog)) {
+        modelPaths.push_back(part.modelPath);
+    }
+    return modelPaths;
 }
 
 std::uint64_t hashMorrowindExteriorCellSet(std::vector<std::pair<int, int>> cells) {
@@ -3254,7 +3672,7 @@ bool cookMorrowindExteriorRegionScene(
             recordName == "ACTI" || recordName == "FURN" || recordName == "MISC" ||
             recordName == "APPA" || recordName == "WEAP" || recordName == "ARMO" || recordName == "CLOT" ||
             recordName == "BOOK" || recordName == "INGR" || recordName == "ALCH" || recordName == "LOCK" ||
-            recordName == "PROB" || recordName == "REPA") {
+            recordName == "PROB" || recordName == "REPA" || recordName == "CREA") {
             std::string id;
             std::string modelPath;
             if (!parseModelRecord(pass1, header.size, id, modelPath)) {
@@ -3519,7 +3937,7 @@ bool loadMorrowindExteriorCellsRuntime(
             recordName == "ACTI" || recordName == "FURN" || recordName == "MISC" ||
             recordName == "APPA" || recordName == "WEAP" || recordName == "ARMO" || recordName == "CLOT" ||
             recordName == "BOOK" || recordName == "INGR" || recordName == "ALCH" || recordName == "LOCK" ||
-            recordName == "PROB" || recordName == "REPA") {
+            recordName == "PROB" || recordName == "REPA" || recordName == "CREA") {
             std::string id;
             std::string modelPath;
             if (!parseModelRecord(pass1, header.size, id, modelPath)) {
@@ -3923,7 +4341,7 @@ bool cookMorrowindInteriorCellScene(
             recordName == "ACTI" || recordName == "FURN" || recordName == "MISC" ||
             recordName == "APPA" || recordName == "WEAP" || recordName == "ARMO" || recordName == "CLOT" ||
             recordName == "BOOK" || recordName == "INGR" || recordName == "ALCH" || recordName == "LOCK" ||
-            recordName == "PROB" || recordName == "REPA") {
+            recordName == "PROB" || recordName == "REPA" || recordName == "CREA") {
             std::string id;
             std::string modelPath;
             if (!parseModelRecord(pass1, header.size, id, modelPath)) {

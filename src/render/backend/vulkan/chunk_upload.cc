@@ -435,6 +435,7 @@ void RendererBackend::clearGpuScene() {
         }
         m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
     }
+    clearImportedActorAssets();
     m_importedMeshDraws.clear();
     m_importedPageDrawRanges.clear();
     m_visibleImportedMeshDraws.clear();
@@ -476,6 +477,120 @@ void RendererBackend::clearGpuScene() {
 
 void RendererBackend::clearImportedSceneMeshes() {
     clearGpuScene();
+}
+
+void RendererBackend::clearImportedActorAssets() {
+    if (m_importedActorVertexBufferHandle != kInvalidBufferHandle) {
+        if (m_lastGraphicsTimelineValue == 0) {
+            m_bufferAllocator.destroyBuffer(m_importedActorVertexBufferHandle);
+        } else {
+            scheduleBufferRelease(m_importedActorVertexBufferHandle, m_lastGraphicsTimelineValue);
+        }
+        m_importedActorVertexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_importedActorIndexBufferHandle != kInvalidBufferHandle) {
+        if (m_lastGraphicsTimelineValue == 0) {
+            m_bufferAllocator.destroyBuffer(m_importedActorIndexBufferHandle);
+        } else {
+            scheduleBufferRelease(m_importedActorIndexBufferHandle, m_lastGraphicsTimelineValue);
+        }
+        m_importedActorIndexBufferHandle = kInvalidBufferHandle;
+    }
+    m_importedActorMeshDraws.clear();
+}
+
+bool RendererBackend::uploadImportedActorAsset(const odai::render::ImportedActorRenderAssetData& asset) {
+    clearImportedActorAssets();
+    if (m_device == VK_NULL_HANDLE ||
+        asset.vertices.empty() ||
+        asset.indices.empty() ||
+        asset.draws.empty()) {
+        return false;
+    }
+
+    std::vector<ImportedMeshVertex> vertices;
+    vertices.reserve(asset.vertices.size());
+    for (std::size_t vertexIndex = 0; vertexIndex < asset.vertices.size(); ++vertexIndex) {
+        const odai::importer::ImportedScenePackedVertex& srcVertex = asset.vertices[vertexIndex];
+        ImportedMeshVertex dstVertex{};
+        std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
+        std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
+        std::memcpy(dstVertex.color, srcVertex.color, sizeof(dstVertex.color));
+        std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
+        dstVertex.flags = srcVertex.flags;
+        if (srcVertex.textureIndex < m_importedTextureSlots.size()) {
+            dstVertex.textureIndex = m_importedTextureSlots[srcVertex.textureIndex];
+        } else {
+            dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
+        }
+        if (vertexIndex < asset.boneIndices.size() && vertexIndex < asset.boneWeights.size()) {
+            for (std::size_t influenceIndex = 0; influenceIndex < 4u; ++influenceIndex) {
+                dstVertex.boneIndices[influenceIndex] = asset.boneIndices[vertexIndex][influenceIndex];
+                dstVertex.boneWeights[influenceIndex] = asset.boneWeights[vertexIndex][influenceIndex];
+            }
+        }
+        vertices.push_back(dstVertex);
+    }
+
+    BufferCreateDesc vertexCreateDesc{};
+    vertexCreateDesc.size = static_cast<VkDeviceSize>(vertices.size() * sizeof(ImportedMeshVertex));
+    vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vertexCreateDesc.memoryProperties =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vertexCreateDesc.initialData = vertices.data();
+    const BufferHandle vertexHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
+    if (vertexHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "failed to create imported actor vertex buffer";
+        return false;
+    }
+
+    BufferCreateDesc indexCreateDesc{};
+    indexCreateDesc.size = static_cast<VkDeviceSize>(asset.indices.size() * sizeof(std::uint32_t));
+    indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    indexCreateDesc.memoryProperties =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    indexCreateDesc.initialData = asset.indices.data();
+    const BufferHandle indexHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
+    if (indexHandle == kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(vertexHandle);
+        VOX_LOGE("render") << "failed to create imported actor index buffer";
+        return false;
+    }
+
+    m_importedActorVertexBufferHandle = vertexHandle;
+    m_importedActorIndexBufferHandle = indexHandle;
+    m_importedActorMeshDraws.reserve(asset.draws.size());
+    for (const odai::importer::ImportedScenePackedDraw& srcDraw : asset.draws) {
+        if (srcDraw.indexCount == 0u || srcDraw.firstIndex >= asset.indices.size()) {
+            continue;
+        }
+        ImportedMeshDraw draw{};
+        draw.vertexBufferHandle = vertexHandle;
+        draw.indexBufferHandle = indexHandle;
+        draw.firstIndex = srcDraw.firstIndex;
+        draw.indexCount = std::min<std::uint32_t>(
+            srcDraw.indexCount,
+            static_cast<std::uint32_t>(asset.indices.size() - srcDraw.firstIndex));
+        m_importedActorMeshDraws.push_back(draw);
+    }
+    if (m_importedActorMeshDraws.empty()) {
+        clearImportedActorAssets();
+        return false;
+    }
+
+    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
+    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
+    if (vertexBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(vertexBuffer), "mesh.importedActor.vertex");
+    }
+    if (indexBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "mesh.importedActor.index");
+    }
+    VOX_LOGI("render") << "uploaded imported actor asset"
+                       << " vertices=" << vertices.size()
+                       << " indices=" << asset.indices.size()
+                       << " draws=" << m_importedActorMeshDraws.size();
+    return true;
 }
 
 bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene) {

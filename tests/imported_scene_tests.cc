@@ -5,6 +5,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "import/gpu_scene.h"
@@ -230,6 +231,10 @@ void testImportedSceneSerialization() {
     ImportedSceneCellRef unresolved{};
     unresolved.refId = "flora_bittergreen_01";
     unresolved.modelPath = "f/flora_bittergreen_01.nif";
+    unresolved.refNum = 12345u;
+    unresolved.hasRefNum = true;
+    unresolved.cellX = -2;
+    unresolved.cellY = -9;
     unresolved.position[0] = 12.0f;
     unresolved.position[1] = 24.0f;
     unresolved.position[2] = 36.0f;
@@ -292,6 +297,13 @@ void testImportedSceneSerialization() {
     expectTrue(loaded.landscapeCells.size() == 1u, "Imported scene landscape cell count round-trips");
     expectTrue(loaded.landscapeCells.front().gridX == -1 && loaded.landscapeCells.front().gridY == 2, "Imported scene landscape cell coords round-trip");
     expectTrue(loaded.unresolvedRefs.size() == 1u, "Imported scene unresolved ref count round-trips");
+    expectTrue(loaded.unresolvedRefs.front().hasRefNum, "Imported scene unresolved ref number presence round-trips");
+    expectTrue(loaded.unresolvedRefs.front().refNum == unresolved.refNum, "Imported scene unresolved ref number round-trips");
+    expectTrue(
+        loaded.unresolvedRefs.front().cellX == unresolved.cellX &&
+        loaded.unresolvedRefs.front().cellY == unresolved.cellY,
+        "Imported scene unresolved ref source cell round-trips");
+    expectTrue(!loaded.unresolvedRefs.front().deleted, "Imported scene unresolved ref deleted flag defaults false");
     expectNear(loaded.unresolvedRefs.front().rotationRadians[1], unresolved.rotationRadians[1], 1e-6f, "Imported scene unresolved ref rotation round-trips");
     expectNear(loaded.unresolvedRefs.front().scale, unresolved.scale, 1e-6f, "Imported scene unresolved ref scale round-trips");
     expectTrue(loaded.waterPatches.size() == 1u, "Imported scene water patch count round-trips");
@@ -686,6 +698,305 @@ void testImportedSceneCollision() {
     expectTrue(correction.z > 0.0f, "Imported scene wall correction pushes away from wall");
 }
 
+void testMorrowindFargothActorPartsLoadWhenDataFilesAvailable() {
+    const std::filesystem::path dataFilesPath = "C:/GOG Games/Morrowind/Data Files";
+    const std::filesystem::path meshesPath = dataFilesPath / "Meshes";
+    if (!std::filesystem::exists(meshesPath)) {
+        std::cout << "[imported scene test] skipping Fargoth actor part load: "
+                  << meshesPath.string() << " not found\n";
+        return;
+    }
+
+    const std::vector<std::string> fargothModelParts = {
+        "b/B_N_Wood Elf_M_Skins.nif",
+        "b/B_N_Wood Elf_M_Neck.NIF",
+        "b/B_N_Wood Elf_M_Head_02.nif",
+        "b/B_N_Wood Elf_M_Hair_03.nif",
+        "c/C_M_Shirt_C_commonL04.NIF",
+        "c/C_M_Shirt_UA_commonL04.nif",
+        "c/C_M_Shirt_FA_commonL04.nif",
+        "c/C_M_Shirt_W_commonL04.nif",
+        "c/C_M_Pants_G_common02.nif",
+        "c/C_M_pants_A_common02.nif",
+        "c/C_M_Pants_UL_common02.nif",
+        "c/C_M_Pants_K_common02.nif",
+        "c/C_shoes_common_4.NIF"
+    };
+
+    for (const std::string& relativeModelPath : fargothModelParts) {
+        const std::filesystem::path nifPath = meshesPath / std::filesystem::path(relativeModelPath);
+        expectTrue(std::filesystem::exists(nifPath), "Fargoth actor part NIF exists");
+        if (!std::filesystem::exists(nifPath)) {
+            continue;
+        }
+
+        odai::importer::ImportedNifResult result{};
+        std::string error;
+        const bool loaded = odai::importer::loadMorrowindActorPartNif(nifPath, result, error);
+        if (!loaded) {
+            std::cerr << "[imported scene test] actor part failed: "
+                      << relativeModelPath << " (" << error << ")\n";
+        }
+        expectTrue(loaded, "Fargoth actor part NIF loads");
+        if (!loaded) {
+            continue;
+        }
+        expectTrue(!result.mesh.vertices.empty(), "Fargoth actor part has vertices");
+        expectTrue(!result.mesh.indices.empty(), "Fargoth actor part has indices");
+        expectTrue(!result.mesh.parts.empty(), "Fargoth actor part has draw parts");
+        expectTrue(
+            !result.diffuseTexturePath.empty() || !result.partDiffuseTexturePaths.empty(),
+            "Fargoth actor part exposes texture paths");
+        for (const odai::importer::ImportedSceneMeshPart& part : result.mesh.parts) {
+            expectTrue(
+                part.firstIndex + part.indexCount <= result.mesh.indices.size(),
+                "Fargoth actor part draw range stays inside index buffer");
+        }
+    }
+}
+
+void testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable() {
+    const std::filesystem::path dataFilesPath = "C:/GOG Games/Morrowind/Data Files";
+    const std::filesystem::path meshesPath = dataFilesPath / "Meshes";
+    if (!std::filesystem::exists(meshesPath)) {
+        std::cout << "[imported scene test] skipping Fargoth skinned actor load: "
+                  << meshesPath.string() << " not found\n";
+        return;
+    }
+
+    odai::importer::ImportedSkinnedActorAsset actor{};
+    std::string error;
+    const bool skeletonLoaded =
+        odai::importer::loadMorrowindSkinnedActorSkeleton(meshesPath / "base_anim.nif", actor, error);
+    if (!skeletonLoaded) {
+        std::cerr << "[imported scene test] base_anim.nif failed: " << error << '\n';
+    }
+    expectTrue(skeletonLoaded, "base_anim.nif loads as a skinned actor skeleton");
+    expectTrue(!actor.skeleton.empty(), "base_anim.nif exposes skeleton nodes");
+    expectTrue(!actor.nodeAnimations.empty(), "base_anim.nif exposes keyframe animation data");
+    expectTrue(!actor.animationClips.empty(), "base_anim.nif exposes animation clip ranges");
+    if (!skeletonLoaded) {
+        return;
+    }
+
+    const std::vector<std::string> fargothModelParts = {
+        "b/B_N_Wood Elf_M_Skins.nif",
+        "b/B_N_Wood Elf_M_Head_02.nif",
+        "b/B_N_Wood Elf_M_Hair_03.nif",
+        "c/C_M_Shirt_C_commonL04.NIF",
+        "c/C_M_Pants_G_common02.nif",
+        "c/C_shoes_common_4.NIF"
+    };
+    for (const std::string& relativeModelPath : fargothModelParts) {
+        const bool loaded = odai::importer::appendMorrowindSkinnedActorPartNif(
+            meshesPath / std::filesystem::path(relativeModelPath),
+            actor,
+            error);
+        if (!loaded) {
+            std::cerr << "[imported scene test] skinned actor part failed: "
+                      << relativeModelPath << " (" << error << ")\n";
+        }
+        expectTrue(loaded, "Fargoth skinned actor part loads");
+    }
+
+    expectTrue(!actor.vertices.empty(), "Fargoth skinned actor has vertices");
+    expectTrue(!actor.indices.empty(), "Fargoth skinned actor has indices");
+    expectTrue(!actor.draws.empty(), "Fargoth skinned actor has draws");
+    expectTrue(actor.boneIndices.size() == actor.vertices.size(), "bone index stream matches vertex count");
+    expectTrue(actor.boneWeights.size() == actor.vertices.size(), "bone weight stream matches vertex count");
+    expectTrue(actor.weightedVertexCount > 0u, "Fargoth skinned actor has weighted vertices");
+    if (!actor.vertices.empty()) {
+        float minX = actor.vertices.front().position[0];
+        float minY = actor.vertices.front().position[1];
+        float minZ = actor.vertices.front().position[2];
+        float maxX = minX;
+        float maxY = minY;
+        float maxZ = minZ;
+        for (const odai::importer::ImportedScenePackedVertex& vertex : actor.vertices) {
+            minX = std::min(minX, vertex.position[0]);
+            minY = std::min(minY, vertex.position[1]);
+            minZ = std::min(minZ, vertex.position[2]);
+            maxX = std::max(maxX, vertex.position[0]);
+            maxY = std::max(maxY, vertex.position[1]);
+            maxZ = std::max(maxZ, vertex.position[2]);
+        }
+        const float spanX = maxX - minX;
+        const float spanY = maxY - minY;
+        const float spanZ = maxZ - minZ;
+        if (!(spanY > spanX * 0.75f && spanY > spanZ)) {
+            std::cerr << "[imported scene test] Fargoth assembled spans x=" << spanX
+                      << " y=" << spanY
+                      << " z=" << spanZ << '\n';
+        }
+        expectTrue(spanY > 80.0f, "Fargoth assembled actor has upright vertical extent");
+        expectTrue(spanX < 180.0f && spanZ < 180.0f, "Fargoth assembled actor parts stay near the skeleton");
+        expectTrue(spanY > spanX * 0.75f && spanY > spanZ, "Fargoth assembled actor is upright and not prone");
+    }
+    for (std::size_t vertexIndex = 0; vertexIndex < actor.boneWeights.size(); ++vertexIndex) {
+        float totalWeight = 0.0f;
+        for (std::size_t influenceIndex = 0; influenceIndex < 4u; ++influenceIndex) {
+            totalWeight += actor.boneWeights[vertexIndex][influenceIndex];
+            expectTrue(
+                actor.boneIndices[vertexIndex][influenceIndex] < actor.skeleton.size(),
+                "Fargoth bone influence uses a valid skeleton node index");
+        }
+        if (totalWeight > 0.0f) {
+            expectNear(totalWeight, 1.0f, 0.001f, "Fargoth bone weights normalize to one");
+        }
+    }
+}
+
+void testMorrowindActorCatalogLoadsNpcAndCreatureRecordsWhenDataFilesAvailable() {
+    const std::filesystem::path dataFilesPath = "C:/GOG Games/Morrowind/Data Files";
+    const std::filesystem::path masterPath = dataFilesPath / "Morrowind.esm";
+    if (!std::filesystem::exists(masterPath)) {
+        std::cout << "[imported scene test] skipping actor catalog load: "
+                  << masterPath.string() << " not found\n";
+        return;
+    }
+
+    odai::importer::MorrowindActorCatalog catalog{};
+    expectTrue(
+        odai::importer::loadMorrowindActorCatalog(dataFilesPath, catalog),
+        "Morrowind actor catalog loads from Morrowind.esm");
+    expectTrue(!catalog.actorsById.empty(), "Morrowind actor catalog contains actor records");
+
+    const auto fargothIt = catalog.actorsById.find("fargoth");
+    expectTrue(fargothIt != catalog.actorsById.end(), "Morrowind actor catalog contains Fargoth");
+    if (fargothIt != catalog.actorsById.end()) {
+        const odai::importer::MorrowindActorRecord& fargoth = fargothIt->second;
+        expectTrue(fargoth.kind == odai::importer::MorrowindActorKind::Npc, "Fargoth is an NPC record");
+        expectTrue(fargoth.raceId == "wood elf", "Fargoth keeps his Wood Elf race id");
+        expectTrue(!fargoth.headBodyPartId.empty(), "Fargoth exposes a head body-part id");
+        expectTrue(!fargoth.hairBodyPartId.empty(), "Fargoth exposes a hair body-part id");
+        expectTrue(!fargoth.inventoryItemIds.empty(), "Fargoth exposes inventory item ids");
+    }
+
+    bool foundCreatureWithMesh = false;
+    for (const auto& [actorId, actor] : catalog.actorsById) {
+        (void)actorId;
+        if (actor.kind == odai::importer::MorrowindActorKind::Creature && !actor.modelPath.empty()) {
+            foundCreatureWithMesh = true;
+            break;
+        }
+    }
+    expectTrue(foundCreatureWithMesh, "Morrowind actor catalog contains creature mesh paths");
+}
+
+void testMorrowindEquipmentCatalogLoadsKnownClothingWhenDataFilesAvailable() {
+    const std::filesystem::path dataFilesPath = "C:/GOG Games/Morrowind/Data Files";
+    const std::filesystem::path masterPath = dataFilesPath / "Morrowind.esm";
+    if (!std::filesystem::exists(masterPath)) {
+        std::cout << "[imported scene test] skipping equipment catalog load: "
+                  << masterPath.string() << " not found\n";
+        return;
+    }
+
+    odai::importer::MorrowindEquipmentCatalog equipmentCatalog{};
+    expectTrue(
+        odai::importer::loadMorrowindEquipmentCatalog(dataFilesPath, equipmentCatalog),
+        "Morrowind equipment catalog loads from Morrowind.esm");
+    const auto headIt = equipmentCatalog.modelPathByBodyPartId.find("b_n_wood elf_m_head_02");
+    expectTrue(headIt != equipmentCatalog.modelPathByBodyPartId.end(), "Equipment catalog contains Wood Elf male head BODY record");
+    if (headIt != equipmentCatalog.modelPathByBodyPartId.end()) {
+        expectTrue(!headIt->second.empty(), "Wood Elf male head resolves through BODY MODL");
+    }
+    const auto shirtIt = equipmentCatalog.bodyPartModelPathsByItemId.find("common_shirt_04");
+    expectTrue(shirtIt != equipmentCatalog.bodyPartModelPathsByItemId.end(), "Equipment catalog contains common_shirt_04");
+    if (shirtIt != equipmentCatalog.bodyPartModelPathsByItemId.end()) {
+        expectTrue(!shirtIt->second.empty(), "common_shirt_04 resolves body part model paths");
+        std::unordered_set<std::string> uniquePaths(shirtIt->second.begin(), shirtIt->second.end());
+        expectTrue(uniquePaths.size() == shirtIt->second.size(), "common_shirt_04 body part model paths are deduplicated");
+    }
+}
+
+void testMorrowindGenericHumanoidSkinnedActorLoadsWhenDataFilesAvailable() {
+    const std::filesystem::path dataFilesPath = "C:/GOG Games/Morrowind/Data Files";
+    const std::filesystem::path meshesPath = dataFilesPath / "Meshes";
+    if (!std::filesystem::exists(meshesPath)) {
+        std::cout << "[imported scene test] skipping generic humanoid skinned actor load: "
+                  << meshesPath.string() << " not found\n";
+        return;
+    }
+
+    odai::importer::MorrowindActorCatalog actorCatalog{};
+    odai::importer::MorrowindEquipmentCatalog equipmentCatalog{};
+    expectTrue(
+        odai::importer::loadMorrowindActorCatalog(dataFilesPath, actorCatalog),
+        "Generic humanoid actor catalog loads");
+    expectTrue(
+        odai::importer::loadMorrowindEquipmentCatalog(dataFilesPath, equipmentCatalog),
+        "Generic humanoid equipment catalog loads");
+
+    const odai::importer::MorrowindActorRecord* selectedActor = nullptr;
+    std::vector<odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart> parts;
+    for (const auto& [actorId, actor] : actorCatalog.actorsById) {
+        if (actor.kind != odai::importer::MorrowindActorKind::Npc || actorId == "fargoth") {
+            continue;
+        }
+        std::vector<odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart> candidateParts =
+            odai::importer::resolveMorrowindNpcParts(actor, equipmentCatalog);
+        std::size_t existingPartCount = 0;
+        for (const auto& part : candidateParts) {
+            if (!part.modelPath.empty() && std::filesystem::exists(meshesPath / std::filesystem::path(part.modelPath))) {
+                ++existingPartCount;
+            }
+        }
+        if (existingPartCount >= 5u) {
+            selectedActor = &actor;
+            parts = std::move(candidateParts);
+            break;
+        }
+    }
+    expectTrue(selectedActor != nullptr, "Actor catalog contains a non-Fargoth humanoid with resolved parts");
+    if (selectedActor == nullptr) {
+        return;
+    }
+    expectTrue(parts.size() >= 5u, "Generic humanoid resolves multiple body/equipment parts");
+    std::unordered_set<std::string> uniquePaths;
+    bool hasHead = false;
+    bool hasHair = false;
+    bool hasTorso = false;
+    bool hasLegsOrFeet = false;
+    for (const odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart& part : parts) {
+        uniquePaths.insert(part.modelPath);
+        hasHead = hasHead || part.slot == "head";
+        hasHair = hasHair || part.slot == "hair";
+        hasTorso = hasTorso || part.slot == "torso" || part.slot == "body";
+        hasLegsOrFeet = hasLegsOrFeet ||
+            part.slot == "groin" ||
+            part.slot == "upper_leg" ||
+            part.slot == "knee" ||
+            part.slot == "ankle" ||
+            part.slot == "foot";
+    }
+    expectTrue(uniquePaths.size() == parts.size(), "Generic humanoid resolved part paths are deduplicated");
+    expectTrue(hasHead, "Generic humanoid resolves a head part");
+    expectTrue(hasHair, "Generic humanoid resolves a hair part");
+    expectTrue(hasTorso, "Generic humanoid resolves torso/body coverage");
+    expectTrue(hasLegsOrFeet, "Generic humanoid resolves lower-body coverage");
+
+    odai::importer::ImportedSkinnedActorAsset actor{};
+    std::string error;
+    expectTrue(
+        odai::importer::loadMorrowindSkinnedActorSkeleton(meshesPath / "base_anim.nif", actor, error),
+        "Generic humanoid base skeleton loads");
+    for (const odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart& part : parts) {
+        const std::filesystem::path nifPath = meshesPath / std::filesystem::path(part.modelPath);
+        if (!std::filesystem::exists(nifPath)) {
+            continue;
+        }
+        (void)odai::importer::appendMorrowindSkinnedActorPartNif(nifPath, actor, error);
+    }
+
+    expectTrue(!actor.vertices.empty(), "Generic humanoid skinned actor has vertices");
+    expectTrue(!actor.indices.empty(), "Generic humanoid skinned actor has indices");
+    expectTrue(!actor.draws.empty(), "Generic humanoid skinned actor has draws");
+    expectTrue(actor.boneIndices.size() == actor.vertices.size(), "Generic humanoid bone index stream matches vertex count");
+    expectTrue(actor.boneWeights.size() == actor.vertices.size(), "Generic humanoid bone weight stream matches vertex count");
+    expectTrue(actor.weightedVertexCount > 0u, "Generic humanoid has weighted vertices");
+}
+
 }  // namespace
 
 int main() {
@@ -694,6 +1005,11 @@ int main() {
     testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain();
     testMorrowindNifSkipsNamedRootCollisionNode();
     testImportedSceneCollision();
+    testMorrowindFargothActorPartsLoadWhenDataFilesAvailable();
+    testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable();
+    testMorrowindActorCatalogLoadsNpcAndCreatureRecordsWhenDataFilesAvailable();
+    testMorrowindEquipmentCatalogLoadsKnownClothingWhenDataFilesAvailable();
+    testMorrowindGenericHumanoidSkinnedActorLoadsWhenDataFilesAvailable();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";

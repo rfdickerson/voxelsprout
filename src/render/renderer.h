@@ -36,6 +36,8 @@ public:
     bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
+    void clearImportedActorAssets();
+    bool uploadImportedActorAsset(const ImportedActorRenderAssetData& asset);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
@@ -44,6 +46,7 @@ public:
     odai::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void setGameplayUiState(const GameplayUiState& state);
+    GameplayUiCommand consumeGameplayUiCommand();
     void renderFrame(
         const odai::world::ChunkGrid& chunkGrid,
         const odai::sim::Simulation& simulation,

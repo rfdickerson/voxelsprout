@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
+#include <vector>
 
 namespace odai::render {
 
@@ -150,10 +152,27 @@ struct ImportedActorGpuAnimationFrameData {
     std::span<const ImportedActorGpuNodeKeyframe> nodeKeyframes;
 };
 
-struct ImportedActorFrameData {
+struct ImportedActorRenderAssetData {
     std::span<const odai::importer::ImportedScenePackedVertex> vertices;
     std::span<const std::uint32_t> indices;
     std::span<const odai::importer::ImportedScenePackedDraw> draws;
+    std::span<const std::array<std::uint16_t, 4>> boneIndices;
+    std::span<const std::array<float, 4>> boneWeights;
+};
+
+struct ImportedActorInstanceData {
+    float position[3] = {};
+    float yawRadians = 0.0f;
+    float tint[3] = {0.78f, 0.72f, 0.62f};
+    float animationTime = 0.0f;
+    std::uint32_t flags = 0u;
+    std::uint32_t assetIndex = 0u;
+    std::uint32_t firstDraw = 0u;
+    std::uint32_t drawCount = 0u;
+};
+
+struct ImportedActorFrameData {
+    std::span<const ImportedActorInstanceData> instances;
     const ImportedActorGpuAnimationFrameData* gpuAnimation = nullptr;
 };
 
@@ -198,6 +217,26 @@ struct GameplayUiState {
         InventoryItemId::Wood,
         InventoryItemId::Red,
     };
+    bool dialogueVisible = false;
+    std::string dialogueActorName;
+    std::string dialogueText;
+    std::string dialogueSelectedTopicId;
+    std::string dialogueLastMessage;
+    std::string dialogueJournalSummary;
+    std::vector<std::pair<std::string, std::string>> dialogueTopics;
+    std::vector<std::pair<std::string, std::string>> dialogueChoices;
+};
+
+enum class GameplayUiCommandType : std::uint8_t {
+    None = 0,
+    CloseDialogue = 1,
+    SelectDialogueTopic = 2,
+    SelectDialogueChoice = 3,
+};
+
+struct GameplayUiCommand {
+    GameplayUiCommandType type = GameplayUiCommandType::None;
+    std::string id;
 };
 
 inline GameplayUiLayout buildGameplayUiLayout(float displayWidth, float displayHeight) {

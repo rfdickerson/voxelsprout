@@ -200,6 +200,8 @@ public:
     bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
+    void clearImportedActorAssets();
+    bool uploadImportedActorAsset(const odai::render::ImportedActorRenderAssetData& asset);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
@@ -208,6 +210,7 @@ public:
     odai::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void setGameplayUiState(const GameplayUiState& state);
+    GameplayUiCommand consumeGameplayUiCommand();
     void renderFrame(
         const odai::world::ChunkGrid& chunkGrid,
         const odai::sim::Simulation& simulation,
@@ -354,6 +357,7 @@ private:
     void buildShadowDebugUi();
     void buildSunDebugUi();
     void buildGameplayHudUi();
+    void buildDialogueUi();
     void buildAimReticleUi();
     std::vector<std::uint8_t> buildShadowCandidateMask(
         std::span<const odai::world::Chunk> chunks,
@@ -512,6 +516,8 @@ private:
         float uv[2];
         std::uint32_t textureIndex = 0xffffffffu;
         std::uint32_t flags = 0u;
+        std::uint32_t boneIndices[4] = {};
+        float boneWeights[4] = {};
     };
 
     struct ImportedWaterVertex {
@@ -643,6 +649,7 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
+        std::span<const odai::render::ImportedActorInstanceData> importedActorInstances;
         bool importedPageCullingEnabled = false;
         std::array<std::span<const ImportedMeshDraw>, kShadowCascadeCount> importedMeshDrawsByCascade;
         std::array<std::uint32_t, kShadowCascadeCount> importedTerrainDrawCountsByCascade{};
@@ -671,6 +678,7 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
+        std::span<const odai::render::ImportedActorInstanceData> importedActorInstances;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -696,6 +704,7 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
+        std::span<const odai::render::ImportedActorInstanceData> importedActorInstances;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -1024,6 +1033,8 @@ private:
     BufferHandle m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_importedActorVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_importedActorIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_skyCloudVertexBufferHandle = kInvalidBufferHandle;
@@ -1035,6 +1046,7 @@ private:
     std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
     std::vector<ImportedMeshDraw> m_importedMeshDraws;
+    std::vector<ImportedMeshDraw> m_importedActorMeshDraws;
     std::vector<ImportedScenePageDrawRange> m_importedPageDrawRanges;
     std::vector<ImportedMeshDraw> m_visibleImportedMeshDraws;
     std::array<std::vector<ImportedMeshDraw>, kShadowCascadeCount> m_visibleImportedShadowMeshDraws;
@@ -1125,6 +1137,7 @@ private:
     bool m_showShadowPanel = false;
     bool m_showSunPanel = false;
     GameplayUiState m_gameplayUiState{};
+    GameplayUiCommand m_pendingGameplayUiCommand{};
     float m_debugCameraFovDegrees = 90.0f;
     bool m_debugCameraFovInitialized = false;
     bool m_debugEnableVertexAo = true;

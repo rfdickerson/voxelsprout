@@ -48,6 +48,14 @@ bool Renderer::uploadImportedScene(const odai::importer::ImportedScene& scene) {
     return m_backend->uploadImportedScene(scene);
 }
 
+void Renderer::clearImportedActorAssets() {
+    m_backend->clearImportedActorAssets();
+}
+
+bool Renderer::uploadImportedActorAsset(const ImportedActorRenderAssetData& asset) {
+    return m_backend->uploadImportedActorAsset(asset);
+}
+
 void Renderer::setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba) {
     m_backend->setVoxelBaseColorPalette(paletteRgba);
 }
@@ -78,6 +86,10 @@ void Renderer::setSpatialQueryStats(bool used, const odai::world::SpatialQuerySt
 
 void Renderer::setGameplayUiState(const GameplayUiState& state) {
     m_backend->setGameplayUiState(state);
+}
+
+GameplayUiCommand Renderer::consumeGameplayUiCommand() {
+    return m_backend->consumeGameplayUiCommand();
 }
 
 void Renderer::renderFrame(

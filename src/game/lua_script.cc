@@ -307,6 +307,26 @@ DialogueResult LuaScriptRuntime::readDialogueResult(int stackIndex) const {
     const int tableIndex = lua_absindex(m_lua, stackIndex);
     result.handled = optionalTableBool(m_lua, tableIndex, "handled");
     result.text = optionalTableString(m_lua, tableIndex, "text");
+    lua_getfield(m_lua, tableIndex, "topics");
+    if (lua_istable(m_lua, -1)) {
+        const int topicsIndex = lua_absindex(m_lua, -1);
+        const int topicCount = static_cast<int>(lua_rawlen(m_lua, topicsIndex));
+        for (int i = 1; i <= topicCount; ++i) {
+            lua_rawgeti(m_lua, topicsIndex, i);
+            if (lua_istable(m_lua, -1)) {
+                const int topicIndex = lua_absindex(m_lua, -1);
+                DialogueTopic topic{};
+                topic.id = optionalTableString(m_lua, topicIndex, "id");
+                topic.text = optionalTableString(m_lua, topicIndex, "text");
+                if (!topic.id.empty()) {
+                    result.topics.push_back(std::move(topic));
+                }
+            }
+            lua_pop(m_lua, 1);
+        }
+    }
+    lua_pop(m_lua, 1);
+
     lua_getfield(m_lua, tableIndex, "choices");
     if (lua_istable(m_lua, -1)) {
         const int choicesIndex = lua_absindex(m_lua, -1);
@@ -419,7 +439,8 @@ LuaScriptRuntime::NpcUpdateCommand LuaScriptRuntime::updateNpc(
     const std::string& actorId,
     float x,
     float y,
-    float z
+    float z,
+    float gameHour
 ) {
     if (!initialized()) {
         setError("Lua runtime is not initialized");
@@ -436,7 +457,8 @@ LuaScriptRuntime::NpcUpdateCommand LuaScriptRuntime::updateNpc(
     lua_pushnumber(m_lua, x);
     lua_pushnumber(m_lua, y);
     lua_pushnumber(m_lua, z);
-    if (lua_pcall(m_lua, 4, 1, 0) != LUA_OK) {
+    lua_pushnumber(m_lua, gameHour);
+    if (lua_pcall(m_lua, 5, 1, 0) != LUA_OK) {
         *m_state = snapshot;
         setError(lua_tostring(m_lua, -1) != nullptr ? lua_tostring(m_lua, -1) : "Lua NPC update call failed");
         lua_pop(m_lua, 1);

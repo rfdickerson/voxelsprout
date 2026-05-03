@@ -88,11 +88,114 @@ void testDeathTaxmanQuestScript() {
     expectTrue(state.gold() == 500, "Reward is not duplicated");
 }
 
+void testSeydaNeenDialogueTopicsAndChoices() {
+    odai::game::GameState state;
+    odai::game::LuaScriptRuntime runtime;
+    expectTrue(runtime.init(state), "Seyda Neen runtime initializes");
+    const std::filesystem::path scriptPath =
+        std::filesystem::path(ODAI_PROJECT_SOURCE_DIR) / "assets" / "scripts" / "mv_deadtaxman.lua";
+    expectTrue(runtime.loadScriptFile(scriptPath), "Seyda Neen script loads");
+
+    state.addItem("engraved_ring_of_healing", 1);
+    const odai::game::DialogueResult fargothGreeting = runtime.getDialogue("fargoth", "");
+    expectTrue(fargothGreeting.handled, "Fargoth greeting handled");
+    expectTrue(!fargothGreeting.topics.empty(), "Fargoth greeting exposes topics");
+
+    const odai::game::DialogueResult ringTopic = runtime.getDialogue("fargoth", "missing ring");
+    expectTrue(ringTopic.handled, "Fargoth missing ring topic handled");
+    expectTrue(ringTopic.choices.size() == 1u, "Fargoth ring topic offers return choice");
+
+    const odai::game::ScriptCallResult returnedRing = runtime.chooseDialogue("fargoth_return_ring");
+    expectTrue(returnedRing.handled, "Fargoth ring return handled");
+    expectTrue(state.itemCount("engraved_ring_of_healing") == 0, "Fargoth ring removed");
+    expectTrue(state.journalStage("MV_FargothRing") == 30, "Fargoth ring quest advances");
+
+    const odai::game::ScriptCallResult duplicateRing = runtime.chooseDialogue("fargoth_return_ring");
+    expectTrue(!duplicateRing.handled, "Fargoth duplicate ring return ignored");
+    expectTrue(state.journalStage("MV_FargothRing") == 30, "Fargoth ring quest does not repeat");
+
+    const odai::game::DialogueResult hrisskarGreeting = runtime.getDialogue("hrisskar flat-foot", "");
+    bool hasHidingTopic = false;
+    for (const odai::game::DialogueTopic& topic : hrisskarGreeting.topics) {
+        hasHidingTopic = hasHidingTopic || topic.id == "fargoth's hiding place";
+    }
+    expectTrue(hasHidingTopic, "Hrisskar exposes Fargoth hiding topic after ring return");
+
+    const odai::game::DialogueResult hidingTopic =
+        runtime.getDialogue("hrisskar flat-foot", "fargoth's hiding place");
+    expectTrue(hidingTopic.handled, "Hrisskar hiding topic handled");
+    expectTrue(!hidingTopic.choices.empty(), "Hrisskar hiding topic offers quest choice");
+
+    const int beforeGold = state.gold();
+    const odai::game::ScriptCallResult invalid = runtime.chooseDialogue("not_a_real_choice");
+    expectTrue(!invalid.handled, "Invalid dialogue choice is ignored");
+    expectTrue(state.gold() == beforeGold, "Invalid dialogue choice does not mutate gold");
+    expectTrue(state.journalStage("MV_FargothHiding") == 0, "Invalid dialogue choice does not mutate journal");
+}
+
+void testFargothNightRoutineAndStashQuest() {
+    odai::game::GameState state;
+    odai::game::LuaScriptRuntime runtime;
+    expectTrue(runtime.init(state), "Fargoth night routine runtime initializes");
+    const std::filesystem::path scriptPath =
+        std::filesystem::path(ODAI_PROJECT_SOURCE_DIR) / "assets" / "scripts" / "mv_deadtaxman.lua";
+    expectTrue(runtime.loadScriptFile(scriptPath), "Fargoth night routine script loads");
+
+    odai::game::LuaScriptRuntime::NpcUpdateCommand beforeQuest =
+        runtime.updateNpc("fargoth", -12369.92f, 0.0f, -69672.32f, 22.0f);
+    expectTrue(beforeQuest.handled, "Fargoth update handles prequest state");
+    expectTrue(beforeQuest.route.empty(), "Fargoth has no hiding route before Hrisskar quest");
+
+    state.setJournalStage("MV_FargothRing", 30);
+    state.setJournalStage("MV_FargothHiding", 10);
+    odai::game::LuaScriptRuntime::NpcUpdateCommand daytime =
+        runtime.updateNpc("fargoth", -12369.92f, 0.0f, -69672.32f, 14.0f);
+    expectTrue(daytime.handled, "Fargoth daytime update handled");
+    expectTrue(daytime.route.empty(), "Fargoth has no hiding route during daytime");
+    expectTrue(state.journalStage("MV_FargothHiding") == 10, "Daytime update does not advance hiding quest");
+
+    odai::game::LuaScriptRuntime::NpcUpdateCommand night =
+        runtime.updateNpc("fargoth", -12369.92f, 0.0f, -69672.32f, 22.0f);
+    expectTrue(night.handled, "Fargoth night update handled");
+    expectTrue(night.route.size() >= 2u, "Fargoth gets hiding route at night");
+    expectTrue(state.journalStage("MV_FargothHiding") == 12, "Night route marks Fargoth en route");
+
+    const odai::game::ScriptCallResult earlyStash = runtime.onActivate("fargoth_stash");
+    expectTrue(!earlyStash.handled, "Stash cannot be taken before Fargoth reveals it");
+    expectTrue(state.itemCount("fargoth_stash") == 0, "Early stash activation gives no item");
+
+    odai::game::LuaScriptRuntime::NpcUpdateCommand reveal =
+        runtime.updateNpc("fargoth", -13352.96f, 0.0f, -68649.04f, 22.5f);
+    expectTrue(reveal.handled, "Fargoth reveal update handled");
+    expectTrue(reveal.stop, "Fargoth stops after revealing stash");
+    expectTrue(state.journalStage("MV_FargothHiding") == 15, "Fargoth reveal advances hiding quest");
+
+    const odai::game::ScriptCallResult stash = runtime.onActivate("fargoth_stash");
+    expectTrue(stash.handled, "Revealed stash activation handled");
+    expectTrue(state.itemCount("fargoth_stash") == 1, "Revealed stash gives stash item");
+    const odai::game::ScriptCallResult duplicateStash = runtime.onActivate("fargoth_stash");
+    expectTrue(duplicateStash.handled, "Duplicate stash activation gives feedback");
+    expectTrue(state.itemCount("fargoth_stash") == 1, "Stash item is not duplicated");
+
+    const int beforeTurnInGold = state.gold();
+    const odai::game::ScriptCallResult turnIn = runtime.chooseDialogue("hrisskar_turn_in_stash");
+    expectTrue(turnIn.handled, "Hrisskar stash turn-in handled");
+    expectTrue(state.itemCount("fargoth_stash") == 0, "Hrisskar turn-in removes stash item");
+    expectTrue(state.journalStage("MV_FargothHiding") == 20, "Hrisskar turn-in completes hiding quest");
+    expectTrue(state.gold() == beforeTurnInGold + 100, "Hrisskar turn-in pays reward");
+
+    const odai::game::ScriptCallResult duplicateTurnIn = runtime.chooseDialogue("hrisskar_turn_in_stash");
+    expectTrue(!duplicateTurnIn.handled, "Hrisskar turn-in cannot repeat");
+    expectTrue(state.gold() == beforeTurnInGold + 100, "Hrisskar reward is not duplicated");
+}
+
 }  // namespace
 
 int main() {
     testLuaApiAndRollback();
     testDeathTaxmanQuestScript();
+    testSeydaNeenDialogueTopicsAndChoices();
+    testFargothNightRoutineAndStashQuest();
 
     if (g_failures != 0) {
         std::cerr << "[game script test] " << g_failures << " failures\n";

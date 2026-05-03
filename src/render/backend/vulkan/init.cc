@@ -1852,7 +1852,16 @@ void RendererBackend::destroyImportedBuffers() {
         m_bufferAllocator.destroyBuffer(m_importedVertexBufferHandle);
         m_importedVertexBufferHandle = kInvalidBufferHandle;
     }
+    if (m_importedActorIndexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_importedActorIndexBufferHandle);
+        m_importedActorIndexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_importedActorVertexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_importedActorVertexBufferHandle);
+        m_importedActorVertexBufferHandle = kInvalidBufferHandle;
+    }
     m_importedMeshDraws.clear();
+    m_importedActorMeshDraws.clear();
     m_importedPageDrawRanges.clear();
     m_visibleImportedMeshDraws.clear();
     for (std::vector<ImportedMeshDraw>& shadowDraws : m_visibleImportedShadowMeshDraws) {

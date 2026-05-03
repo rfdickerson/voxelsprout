@@ -431,6 +431,9 @@ void RendererBackend::renderFrame(
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         buildFrameStatsUi();
+        buildAimReticleUi();
+        buildGameplayHudUi();
+        buildDialogueUi();
         m_debugUiVisible = m_showFrameStatsPanel;
         ImGui::Render();
     }
@@ -449,9 +452,10 @@ void RendererBackend::renderFrame(
     const float nearPlane = 0.1f;
     const bool renderingImportedActors =
         importedActors != nullptr &&
-        !importedActors->vertices.empty() &&
-        !importedActors->indices.empty() &&
-        !importedActors->draws.empty();
+        !importedActors->instances.empty() &&
+        m_importedActorVertexBufferHandle != kInvalidBufferHandle &&
+        m_importedActorIndexBufferHandle != kInvalidBufferHandle &&
+        !m_importedActorMeshDraws.empty();
     const bool renderingImportedScene = !m_importedMeshDraws.empty() || renderingImportedActors;
     const bool legacyVoxelRenderingEnabled = !renderingImportedScene;
     const bool importedInteriorGiEnabled =
@@ -1633,62 +1637,14 @@ void RendererBackend::renderFrame(
         : VK_NULL_HANDLE;
     const VkBuffer importedVertexBuffer = m_bufferAllocator.getBuffer(m_importedVertexBufferHandle);
     const VkBuffer importedIndexBuffer = m_bufferAllocator.getBuffer(m_importedIndexBufferHandle);
-    std::vector<ImportedMeshDraw> importedActorMeshDraws;
-    std::optional<FrameArenaSlice> importedActorVertexSliceOpt = std::nullopt;
-    std::optional<FrameArenaSlice> importedActorIndexSliceOpt = std::nullopt;
-    VkBuffer importedActorVertexBuffer = VK_NULL_HANDLE;
-    VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
-    if (renderingImportedActors) {
-        const VkDeviceSize actorVertexBytes =
-            static_cast<VkDeviceSize>(importedActors->vertices.size() * sizeof(ImportedMeshVertex));
-        const VkDeviceSize actorIndexBytes =
-            static_cast<VkDeviceSize>(importedActors->indices.size() * sizeof(std::uint32_t));
-        importedActorVertexSliceOpt = m_frameArena.allocateUpload(
-            actorVertexBytes,
-            static_cast<VkDeviceSize>(alignof(ImportedMeshVertex)),
-            FrameArenaUploadKind::Unknown);
-        importedActorIndexSliceOpt = m_frameArena.allocateUpload(
-            actorIndexBytes,
-            static_cast<VkDeviceSize>(alignof(std::uint32_t)),
-            FrameArenaUploadKind::Unknown);
-        if (importedActorVertexSliceOpt.has_value() &&
-            importedActorIndexSliceOpt.has_value() &&
-            importedActorVertexSliceOpt->mapped != nullptr &&
-            importedActorIndexSliceOpt->mapped != nullptr) {
-            ImportedMeshVertex* actorVertices =
-                static_cast<ImportedMeshVertex*>(importedActorVertexSliceOpt->mapped);
-            for (std::size_t vertexIndex = 0; vertexIndex < importedActors->vertices.size(); ++vertexIndex) {
-                const odai::importer::ImportedScenePackedVertex& srcVertex = importedActors->vertices[vertexIndex];
-                ImportedMeshVertex& dstVertex = actorVertices[vertexIndex];
-                std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
-                std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
-                std::memcpy(dstVertex.color, srcVertex.color, sizeof(dstVertex.color));
-                std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
-                dstVertex.flags = srcVertex.flags;
-                if (srcVertex.textureIndex < m_importedTextureSlots.size()) {
-                    dstVertex.textureIndex = m_importedTextureSlots[srcVertex.textureIndex];
-                } else {
-                    dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
-                }
-            }
-            std::memcpy(importedActorIndexSliceOpt->mapped, importedActors->indices.data(), actorIndexBytes);
-            importedActorVertexBuffer = m_bufferAllocator.getBuffer(importedActorVertexSliceOpt->buffer);
-            importedActorIndexBuffer = m_bufferAllocator.getBuffer(importedActorIndexSliceOpt->buffer);
-            importedActorMeshDraws.reserve(importedActors->draws.size());
-            for (const odai::importer::ImportedScenePackedDraw& srcDraw : importedActors->draws) {
-                if (srcDraw.indexCount == 0u ||
-                    srcDraw.firstIndex >= importedActors->indices.size()) {
-                    continue;
-                }
-                ImportedMeshDraw draw{};
-                draw.firstIndex = srcDraw.firstIndex;
-                draw.indexCount = std::min<std::uint32_t>(
-                    srcDraw.indexCount,
-                    static_cast<std::uint32_t>(importedActors->indices.size() - srcDraw.firstIndex));
-                importedActorMeshDraws.push_back(draw);
-            }
-        }
-    }
+    const VkBuffer importedActorVertexBuffer = renderingImportedActors
+        ? m_bufferAllocator.getBuffer(m_importedActorVertexBufferHandle)
+        : VK_NULL_HANDLE;
+    const VkBuffer importedActorIndexBuffer = renderingImportedActors
+        ? m_bufferAllocator.getBuffer(m_importedActorIndexBufferHandle)
+        : VK_NULL_HANDLE;
+    const std::span<const odai::render::ImportedActorInstanceData> importedActorInstances =
+        renderingImportedActors ? importedActors->instances : std::span<const odai::render::ImportedActorInstanceData>{};
     std::span<const ImportedMeshDraw> importedMeshDrawsForFrame(
         m_importedMeshDraws.data(),
         m_importedMeshDraws.size());
@@ -1869,12 +1825,11 @@ void RendererBackend::renderFrame(
     shadowPassInputs.importedMeshDraws = m_importedMeshDraws;
     shadowPassInputs.importedTerrainDrawCount = m_importedTerrainDrawCount;
     shadowPassInputs.importedActorVertexBuffer = importedActorVertexBuffer;
-    shadowPassInputs.importedActorVertexOffset =
-        importedActorVertexSliceOpt.has_value() ? importedActorVertexSliceOpt->offset : 0u;
+    shadowPassInputs.importedActorVertexOffset = 0u;
     shadowPassInputs.importedActorIndexBuffer = importedActorIndexBuffer;
-    shadowPassInputs.importedActorIndexOffset =
-        importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
-    shadowPassInputs.importedActorMeshDraws = importedActorMeshDraws;
+    shadowPassInputs.importedActorIndexOffset = 0u;
+    shadowPassInputs.importedActorMeshDraws = m_importedActorMeshDraws;
+    shadowPassInputs.importedActorInstances = importedActorInstances;
     shadowPassInputs.importedPageCullingEnabled = importedPageCullingEnabled;
     if (importedPageCullingEnabled) {
         for (std::uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
@@ -2223,12 +2178,11 @@ void RendererBackend::renderFrame(
     prepassInputs.importedMeshDraws = importedMeshDrawsForFrame;
     prepassInputs.importedTerrainDrawCount = importedTerrainDrawCountForFrame;
     prepassInputs.importedActorVertexBuffer = importedActorVertexBuffer;
-    prepassInputs.importedActorVertexOffset =
-        importedActorVertexSliceOpt.has_value() ? importedActorVertexSliceOpt->offset : 0u;
+    prepassInputs.importedActorVertexOffset = 0u;
     prepassInputs.importedActorIndexBuffer = importedActorIndexBuffer;
-    prepassInputs.importedActorIndexOffset =
-        importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
-    prepassInputs.importedActorMeshDraws = importedActorMeshDraws;
+    prepassInputs.importedActorIndexOffset = 0u;
+    prepassInputs.importedActorMeshDraws = m_importedActorMeshDraws;
+    prepassInputs.importedActorInstances = importedActorInstances;
     prepassInputs.pipeInstanceCount = pipeInstanceCount;
     prepassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     prepassInputs.transportInstanceCount = transportInstanceCount;
@@ -2271,12 +2225,11 @@ void RendererBackend::renderFrame(
     mainPassInputs.importedMeshDraws = importedMeshDrawsForFrame;
     mainPassInputs.importedTerrainDrawCount = importedTerrainDrawCountForFrame;
     mainPassInputs.importedActorVertexBuffer = importedActorVertexBuffer;
-    mainPassInputs.importedActorVertexOffset =
-        importedActorVertexSliceOpt.has_value() ? importedActorVertexSliceOpt->offset : 0u;
+    mainPassInputs.importedActorVertexOffset = 0u;
     mainPassInputs.importedActorIndexBuffer = importedActorIndexBuffer;
-    mainPassInputs.importedActorIndexOffset =
-        importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
-    mainPassInputs.importedActorMeshDraws = importedActorMeshDraws;
+    mainPassInputs.importedActorIndexOffset = 0u;
+    mainPassInputs.importedActorMeshDraws = m_importedActorMeshDraws;
+    mainPassInputs.importedActorInstances = importedActorInstances;
     mainPassInputs.pipeInstanceCount = pipeInstanceCount;
     mainPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     mainPassInputs.transportInstanceCount = transportInstanceCount;

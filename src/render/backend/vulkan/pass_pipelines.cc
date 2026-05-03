@@ -639,7 +639,7 @@ bool RendererBackend::createPipePipeline() {
     importedBindings[0].stride = sizeof(ImportedMeshVertex);
     importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedAttributes[6]{};
+    VkVertexInputAttributeDescription importedAttributes[8]{};
     importedAttributes[0].location = 0;
     importedAttributes[0].binding = 0;
     importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -664,12 +664,20 @@ bool RendererBackend::createPipePipeline() {
     importedAttributes[5].binding = 0;
     importedAttributes[5].format = VK_FORMAT_R32_UINT;
     importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+    importedAttributes[6].location = 6;
+    importedAttributes[6].binding = 0;
+    importedAttributes[6].format = VK_FORMAT_R32G32B32A32_UINT;
+    importedAttributes[6].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, boneIndices));
+    importedAttributes[7].location = 7;
+    importedAttributes[7].binding = 0;
+    importedAttributes[7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    importedAttributes[7].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, boneWeights));
 
     VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
     importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
-    importedVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 8;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
     VkGraphicsPipelineCreateInfo importedPipelineCreateInfo = pipelineCreateInfo;
@@ -1503,7 +1511,7 @@ bool RendererBackend::createAoPipelines() {
     importedBindings[0].stride = sizeof(ImportedMeshVertex);
     importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedAttributes[6]{};
+    VkVertexInputAttributeDescription importedAttributes[8]{};
     importedAttributes[0].location = 0;
     importedAttributes[0].binding = 0;
     importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -1528,12 +1536,20 @@ bool RendererBackend::createAoPipelines() {
     importedAttributes[5].binding = 0;
     importedAttributes[5].format = VK_FORMAT_R32_UINT;
     importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+    importedAttributes[6].location = 6;
+    importedAttributes[6].binding = 0;
+    importedAttributes[6].format = VK_FORMAT_R32G32B32A32_UINT;
+    importedAttributes[6].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, boneIndices));
+    importedAttributes[7].location = 7;
+    importedAttributes[7].binding = 0;
+    importedAttributes[7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    importedAttributes[7].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, boneWeights));
 
     VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
     importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
-    importedVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 8;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
     pipelineCreateInfo.pStages = importedNormalDepthStageInfos;
@@ -2592,7 +2608,7 @@ bool RendererBackend::createGraphicsPipeline() {
     importedShadowBindings[0].stride = sizeof(ImportedMeshVertex);
     importedShadowBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedShadowAttributes[6]{};
+    VkVertexInputAttributeDescription importedShadowAttributes[8]{};
     importedShadowAttributes[0].location = 0;
     importedShadowAttributes[0].binding = 0;
     importedShadowAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -2617,12 +2633,20 @@ bool RendererBackend::createGraphicsPipeline() {
     importedShadowAttributes[5].binding = 0;
     importedShadowAttributes[5].format = VK_FORMAT_R32_UINT;
     importedShadowAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+    importedShadowAttributes[6].location = 6;
+    importedShadowAttributes[6].binding = 0;
+    importedShadowAttributes[6].format = VK_FORMAT_R32G32B32A32_UINT;
+    importedShadowAttributes[6].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, boneIndices));
+    importedShadowAttributes[7].location = 7;
+    importedShadowAttributes[7].binding = 0;
+    importedShadowAttributes[7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    importedShadowAttributes[7].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, boneWeights));
 
     VkPipelineVertexInputStateCreateInfo importedShadowVertexInputInfo{};
     importedShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedShadowVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedShadowVertexInputInfo.pVertexBindingDescriptions = importedShadowBindings;
-    importedShadowVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedShadowVertexInputInfo.vertexAttributeDescriptionCount = 8;
     importedShadowVertexInputInfo.pVertexAttributeDescriptions = importedShadowAttributes;
 
     VkGraphicsPipelineCreateInfo importedShadowPipelineCreateInfo = shadowPipelineCreateInfo;

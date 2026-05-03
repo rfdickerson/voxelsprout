@@ -44,7 +44,7 @@ public:
     DialogueResult getDialogue(const std::string& actorId, const std::string& topicId);
     ScriptCallResult chooseDialogue(const std::string& responseId);
     ScriptCallResult onActorDeath(const std::string& actorId);
-    NpcUpdateCommand updateNpc(const std::string& actorId, float x, float y, float z);
+    NpcUpdateCommand updateNpc(const std::string& actorId, float x, float y, float z, float gameHour);
 
 private:
     [[nodiscard]] bool callStringFunction(

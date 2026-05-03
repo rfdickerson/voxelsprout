@@ -2,6 +2,7 @@
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 #include "sim/network_procedural.h"
@@ -43,6 +44,8 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
+    const std::span<const odai::render::ImportedActorInstanceData> importedActorInstances =
+        inputs.importedActorInstances;
     const bool importedPageCullingEnabled = inputs.importedPageCullingEnabled;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
@@ -298,6 +301,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 importedActorVertexBuffer != VK_NULL_HANDLE &&
                 importedActorIndexBuffer != VK_NULL_HANDLE &&
                 !importedActorMeshDraws.empty() &&
+                !importedActorInstances.empty() &&
                 m_debugShowImportedStatics) {
                 vkCmdSetDepthBias(
                     commandBuffer,
@@ -319,19 +323,36 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 const VkDeviceSize importedVertexOffsets[1] = {importedActorVertexOffset};
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
-                ChunkPushConstants importedPushConstants{};
-                importedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &importedPushConstants
-                );
-                for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
-                    countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                for (const odai::render::ImportedActorInstanceData& actorInstance : importedActorInstances) {
+                    ChunkPushConstants importedPushConstants{};
+                    importedPushConstants.chunkOffset[0] = actorInstance.position[0];
+                    importedPushConstants.chunkOffset[1] = actorInstance.position[1];
+                    importedPushConstants.chunkOffset[2] = actorInstance.position[2];
+                    importedPushConstants.chunkOffset[3] = actorInstance.yawRadians;
+                    importedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
+                    importedPushConstants.cascadeData[1] = actorInstance.animationTime;
+                    importedPushConstants.cascadeData[2] = (std::abs(actorInstance.animationTime) > 0.001f) ? 1.0f : 0.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &importedPushConstants
+                    );
+                    const std::uint32_t firstDraw = std::min<std::uint32_t>(
+                        actorInstance.firstDraw,
+                        static_cast<std::uint32_t>(importedActorMeshDraws.size()));
+                    const std::uint32_t drawEnd = std::min<std::uint32_t>(
+                        firstDraw + (actorInstance.drawCount == 0u
+                            ? static_cast<std::uint32_t>(importedActorMeshDraws.size()) - firstDraw
+                            : actorInstance.drawCount),
+                        static_cast<std::uint32_t>(importedActorMeshDraws.size()));
+                    for (std::uint32_t drawIndex = firstDraw; drawIndex < drawEnd; ++drawIndex) {
+                        const ImportedMeshDraw& importedDraw = importedActorMeshDraws[drawIndex];
+                        countDrawCalls(m_debugDrawCallsShadow, 1);
+                        vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                    }
                 }
                 vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
             }

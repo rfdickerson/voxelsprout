@@ -61,6 +61,11 @@ struct ImportedScenePackedDraw {
 struct ImportedSceneCellRef {
     std::string refId;
     std::string modelPath;
+    std::uint32_t refNum = 0u;
+    bool hasRefNum = false;
+    int cellX = 0;
+    int cellY = 0;
+    bool deleted = false;
     float position[3] = {};
     float rotationRadians[3] = {};
     float scale = 1.0f;
@@ -107,6 +112,43 @@ struct MorrowindDoorReference {
 struct MorrowindDoorCache {
     std::vector<MorrowindDoorReference> exteriorDoors;
     std::unordered_map<std::string, std::vector<MorrowindDoorReference>> interiorDoorsByCell;
+};
+
+enum class MorrowindActorKind : std::uint8_t {
+    Npc = 0,
+    Creature = 1,
+};
+
+struct MorrowindActorRecord {
+    std::string id;
+    MorrowindActorKind kind = MorrowindActorKind::Npc;
+    std::string modelPath;
+    std::string raceId;
+    std::string headBodyPartId;
+    std::string hairBodyPartId;
+    std::vector<std::string> inventoryItemIds;
+};
+
+struct MorrowindActorCatalog {
+    std::unordered_map<std::string, MorrowindActorRecord> actorsById;
+};
+
+struct MorrowindEquipmentCatalog {
+    struct BodyPartRecord {
+        std::string id;
+        std::string modelPath;
+        std::string slot;
+        std::string inferredRaceId;
+        std::string inferredGender;
+    };
+    struct ResolvedActorPart {
+        std::string modelPath;
+        std::string slot;
+        bool fallback = false;
+    };
+    std::unordered_map<std::string, BodyPartRecord> bodyPartById;
+    std::unordered_map<std::string, std::string> modelPathByBodyPartId;
+    std::unordered_map<std::string, std::vector<std::string>> bodyPartModelPathsByItemId;
 };
 
 struct ImportedScene {
@@ -179,6 +221,22 @@ bool loadMorrowindTexture(
     const std::filesystem::path& morrowindDataFilesPath,
     const std::string& sourcePath,
     ImportedSceneTexture& outTexture
+);
+bool loadMorrowindActorCatalog(
+    const std::filesystem::path& morrowindDataFilesPath,
+    MorrowindActorCatalog& outCatalog
+);
+bool loadMorrowindEquipmentCatalog(
+    const std::filesystem::path& morrowindDataFilesPath,
+    MorrowindEquipmentCatalog& outCatalog
+);
+std::vector<std::string> resolveMorrowindNpcPartModelPaths(
+    const MorrowindActorRecord& actor,
+    const MorrowindEquipmentCatalog& equipmentCatalog
+);
+std::vector<MorrowindEquipmentCatalog::ResolvedActorPart> resolveMorrowindNpcParts(
+    const MorrowindActorRecord& actor,
+    const MorrowindEquipmentCatalog& equipmentCatalog
 );
 
 bool exportImportedSceneTerrainObj(const ImportedScene& scene, const std::filesystem::path& outputObjPath);

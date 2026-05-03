@@ -9,6 +9,8 @@ struct VertexInput
     [[vk::location(3)]] float2 inUv : TEXCOORD3;
     [[vk::location(4)]] uint inTextureIndex : TEXCOORD4;
     [[vk::location(5)]] uint inFlags : TEXCOORD5;
+    [[vk::location(6)]] uint4 inBoneIndices : TEXCOORD6;
+    [[vk::location(7)]] float4 inBoneWeights : TEXCOORD7;
 };
 
 struct VertexOutput
@@ -23,9 +25,9 @@ static const uint kImportedMaterialFlagSiltStrider = 1u << 1u;
 static const uint kSiltStriderMaskShift = 8u;
 static const uint kSiltStriderMaskMask = 0xffu;
 static const uint kSiltStriderSideFlag = 1u << 16u;
-static const uint kNpcYawShift = 17u;
-static const uint kNpcYawMask = 0x7fu;
 static const uint kImportedMaterialFlagNpcGpuTransform = 1u << 24u;
+static const uint kImportedMaterialFlagNpcNoDeform = 1u << 25u;
+static const uint kImportedMaterialFlagNpcGpuSkinned = 1u << 26u;
 
 float siltStriderLegInfluence(uint flags)
 {
@@ -61,11 +63,6 @@ float3 rotateNpcVector(float3 value, float yaw)
     return float3((value.x * c) + (value.z * s), value.y, (-value.x * s) + (value.z * c));
 }
 
-float npcYaw(uint flags)
-{
-    return (float((flags >> kNpcYawShift) & kNpcYawMask) + 0.5) * (6.2831853 / 128.0);
-}
-
 float npcWalkPhase(float3 localPosition, float2 worldOffset)
 {
     return (camera.skyConfig1.z * 5.4) + dot(worldOffset, float2(0.0017, 0.0023)) + (localPosition.y * 0.012);
@@ -73,7 +70,16 @@ float npcWalkPhase(float3 localPosition, float2 worldOffset)
 
 float3 animateNpcLocalPosition(float3 position, uint flags, float phase)
 {
-    if ((flags & kImportedMaterialFlagNpcGpuTransform) == 0u) {
+    if ((flags & kImportedMaterialFlagNpcGpuTransform) == 0u ||
+        (flags & kImportedMaterialFlagNpcNoDeform) != 0u) {
+        return position;
+    }
+
+    if (abs(phase) <= 0.001) {
+        const float idlePhase = camera.skyConfig1.z * 2.1 + position.y * 0.015;
+        const float torsoWeight = saturate((position.y - 54.0) / 42.0) *
+            saturate((142.0 - position.y) / 58.0);
+        position.y += sin(idlePhase) * 0.8 * torsoWeight;
         return position;
     }
 
@@ -93,14 +99,27 @@ float3 animateNpcLocalPosition(float3 position, uint flags, float phase)
     return position;
 }
 
-float3 transformNpcPosition(float3 position, float3 instanceData, uint flags)
+float3 skinNpcLocalPosition(float3 position, uint flags, uint4 boneIndices, float4 boneWeights)
+{
+    if ((flags & kImportedMaterialFlagNpcGpuSkinned) == 0u) {
+        return position;
+    }
+    const float weightSum = boneWeights.x + boneWeights.y + boneWeights.z + boneWeights.w;
+    if (weightSum <= 0.001) {
+        return position;
+    }
+    return position;
+}
+
+float3 transformNpcPosition(float3 position, uint flags, uint4 boneIndices, float4 boneWeights)
 {
     if ((flags & kImportedMaterialFlagNpcGpuTransform) == 0u) {
         return position;
     }
-    const float3 worldOffset = instanceData;
-    const float yaw = npcYaw(flags);
-    float3 local = animateNpcLocalPosition(position, flags, npcWalkPhase(position, worldOffset.xz));
+    const float3 worldOffset = chunkPc.chunkOffset.xyz;
+    const float yaw = chunkPc.chunkOffset.w;
+    float3 local = skinNpcLocalPosition(position, flags, boneIndices, boneWeights);
+    local = animateNpcLocalPosition(local, flags, 0.0);
     const float3 rotated = rotateNpcVector(local, yaw);
     return worldOffset + rotated;
 }
@@ -109,7 +128,8 @@ VertexOutput main(VertexInput input)
 {
     VertexOutput output;
     const int cascadeIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 3);
-    float3 animatedPosition = transformNpcPosition(input.inPosition, input.inColor, input.inFlags);
+    float3 animatedPosition =
+        transformNpcPosition(input.inPosition, input.inFlags, input.inBoneIndices, input.inBoneWeights);
     animatedPosition = animateSiltStriderPosition(animatedPosition, input.inFlags);
     output.position = mul(camera.lightViewProj[cascadeIndex], float4(animatedPosition, 1.0));
     output.outUv = input.inUv;

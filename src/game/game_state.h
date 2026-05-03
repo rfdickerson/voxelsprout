@@ -12,9 +12,15 @@ struct DialogueChoice {
     std::string text;
 };
 
+struct DialogueTopic {
+    std::string id;
+    std::string text;
+};
+
 struct DialogueResult {
     bool handled = false;
     std::string text;
+    std::vector<DialogueTopic> topics;
     std::vector<DialogueChoice> choices;
 };
 

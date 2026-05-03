@@ -37,6 +37,8 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
+    const std::span<const odai::render::ImportedActorInstanceData> importedActorInstances =
+        inputs.importedActorInstances;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = inputs.transportInstanceCount;
@@ -214,6 +216,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             importedActorVertexBuffer != VK_NULL_HANDLE &&
             importedActorIndexBuffer != VK_NULL_HANDLE &&
             !importedActorMeshDraws.empty() &&
+            !importedActorInstances.empty() &&
             m_debugShowImportedStatics) {
             const VkBuffer importedVertexBuffers[1] = {importedActorVertexBuffer};
             const VkDeviceSize importedVertexOffsets[1] = {importedActorVertexOffset};
@@ -230,9 +233,34 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             );
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
-            for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
-                countDrawCalls(m_debugDrawCallsPrepass, 1);
-                vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+            for (const odai::render::ImportedActorInstanceData& actorInstance : importedActorInstances) {
+                ChunkPushConstants importedPushConstants{};
+                importedPushConstants.chunkOffset[0] = actorInstance.position[0];
+                importedPushConstants.chunkOffset[1] = actorInstance.position[1];
+                importedPushConstants.chunkOffset[2] = actorInstance.position[2];
+                importedPushConstants.chunkOffset[3] = actorInstance.yawRadians;
+                importedPushConstants.cascadeData[0] = actorInstance.animationTime;
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &importedPushConstants
+                );
+                const std::uint32_t firstDraw = std::min<std::uint32_t>(
+                    actorInstance.firstDraw,
+                    static_cast<std::uint32_t>(importedActorMeshDraws.size()));
+                const std::uint32_t drawEnd = std::min<std::uint32_t>(
+                    firstDraw + (actorInstance.drawCount == 0u
+                        ? static_cast<std::uint32_t>(importedActorMeshDraws.size()) - firstDraw
+                        : actorInstance.drawCount),
+                    static_cast<std::uint32_t>(importedActorMeshDraws.size()));
+                for (std::uint32_t drawIndex = firstDraw; drawIndex < drawEnd; ++drawIndex) {
+                    const ImportedMeshDraw& importedDraw = importedActorMeshDraws[drawIndex];
+                    countDrawCalls(m_debugDrawCallsPrepass, 1);
+                    vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                }
             }
         }
         // Transparent water samples this prepass to estimate the opaque scene below it.

@@ -12,10 +12,12 @@
 #include "world/navmesh.h"
 #include "world/world.h"
 
+#include <array>
 #include <filesystem>
 #include <future>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -86,8 +88,13 @@ private:
     void pollInput();
     void updateCamera(float dt);
     void syncGameplayUiState();
+    void refreshUiCursorMode();
     void assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId);
     void handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight);
+    void processGameplayUiCommand();
+    void closeDialogue();
+    [[nodiscard]] bool openDialogue(const std::string& actorId);
+    [[nodiscard]] bool requestDialogueTopic(const std::string& topicId);
     [[nodiscard]] bool isAnyUiVisible() const;
     [[nodiscard]] bool isSolidWorldVoxel(int worldX, int worldY, int worldZ) const;
     [[nodiscard]] bool worldToChunkLocal(
@@ -173,12 +180,14 @@ private:
     [[nodiscard]] bool tryPlaceTrackFromCameraRay();
     [[nodiscard]] bool tryRemoveTrackFromCameraRay();
     void resetVoxelBreakProgress();
-    void initializeBalmoraGuards(bool reusePreparedNavmesh = false);
-    void updateBalmoraGuards(float dt);
-    void rebuildBalmoraGuardRenderFrame(float simulationAlpha);
+    void rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh = false);
+    void updateMorrowindActors(float dt);
+    void rebuildMorrowindActorRenderFrame(float simulationAlpha);
+    [[nodiscard]] bool uploadMorrowindActorRenderAsset();
     void initializeBalmoraDoorActivation();
     void initializeMorrowindGameplayScripts();
     [[nodiscard]] bool tryActivateMorrowindScript();
+    [[nodiscard]] std::string resolveMorrowindScriptTargetRefId() const;
     [[nodiscard]] bool tryActivateBalmoraDoor();
     [[nodiscard]] bool enterMorrowindInterior(const odai::importer::MorrowindDoorReference& door);
     [[nodiscard]] bool leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& door);
@@ -206,9 +215,29 @@ private:
         std::vector<odai::importer::ImportedScenePackedVertex> vertices;
         std::vector<std::uint32_t> indices;
         std::vector<odai::importer::ImportedScenePackedDraw> draws;
+        std::vector<std::array<std::uint16_t, 4>> boneIndices;
+        std::vector<std::array<float, 4>> boneWeights;
+        bool gpuSkinned = false;
     };
 
-    struct BalmoraGuardAgent {
+    struct ImportedActorPrototypeRange {
+        std::uint32_t firstDraw = 0u;
+        std::uint32_t drawCount = 0u;
+    };
+
+    struct MorrowindActorRefKey {
+        int cellX = 0;
+        int cellY = 0;
+        std::uint32_t refNum = 0u;
+        std::string actorId;
+    };
+
+    struct MorrowindActorInstance {
+        MorrowindActorRefKey refKey{};
+        odai::importer::MorrowindActorKind kind = odai::importer::MorrowindActorKind::Npc;
+        int sourceCellX = 0;
+        int sourceCellY = 0;
+        odai::math::Vector3 originalPosition{};
         odai::math::Vector3 position{};
         odai::math::Vector3 previousPosition{};
         float yawRadians = 0.0f;
@@ -216,13 +245,23 @@ private:
         float walkPhase = 0.0f;
         float previousWalkPhase = 0.0f;
         float speed = 92.0f;
+        std::uint32_t actorPrototypeIndex = 0u;
         std::vector<odai::math::Vector3> route;
         std::vector<odai::world::NavmeshPathPoint> path;
-        std::string scriptActorId;
+        std::string actorId;
+        std::string dialogueActorId;
         std::size_t routeIndex = 0;
         std::size_t pathIndex = 0;
         float pathRetryCooldownSeconds = 0.0f;
         float scriptUpdateCooldownSeconds = 0.0f;
+        bool resident = false;
+        bool disabled = false;
+        bool dead = false;
+    };
+
+    struct MorrowindActorPrototypeCacheEntry {
+        std::uint32_t prototypeIndex = 0u;
+        std::string signature;
     };
 
     struct MorrowindInteriorCacheEntry {
@@ -264,7 +303,8 @@ private:
     bool m_wasToggleFrameStatsDown = false;
     bool m_dayCycleEnabled = false;
     bool m_wasToggleDayCycleDown = false;
-    float m_dayCyclePhase = 0.0f;
+    float m_dayCyclePhase = 14.0f / 24.0f;
+    float m_morrowindGameHour = 14.0f;
     bool m_hoverEnabled = false;
     bool m_wasToggleHoverDown = false;
     bool m_wasInventoryKeyDown = false;
@@ -327,6 +367,7 @@ private:
     odai::game::LuaScriptRuntime m_luaScriptRuntime;
     odai::game::DialogueResult m_activeDialogue;
     std::string m_activeDialogueActorId;
+    std::string m_activeDialogueTopicId;
     std::string m_lastScriptMessage;
     bool m_balmoraExteriorCached = false;
     odai::importer::ImportedScene m_balmoraExteriorScene;
@@ -338,10 +379,11 @@ private:
     odai::world::ImportedSceneCollision m_importedSceneCollision;
     odai::world::Navmesh m_balmoraNavmesh;
     BalmoraGuardPrototype m_balmoraGuardPrototype;
-    std::vector<BalmoraGuardAgent> m_balmoraGuards;
-    std::vector<odai::importer::ImportedScenePackedVertex> m_balmoraGuardFrameVertices;
-    std::vector<std::uint32_t> m_balmoraGuardFrameIndices;
-    std::vector<odai::importer::ImportedScenePackedDraw> m_balmoraGuardFrameDraws;
+    std::vector<ImportedActorPrototypeRange> m_importedActorPrototypeRanges;
+    std::vector<MorrowindActorInstance> m_morrowindActors;
+    std::unordered_map<std::string, std::size_t> m_morrowindActorIndexByRefKey;
+    std::unordered_map<std::string, MorrowindActorPrototypeCacheEntry> m_morrowindActorPrototypeCache;
+    std::vector<odai::render::ImportedActorInstanceData> m_balmoraGuardFrameInstances;
 };
 
 } // namespace odai::app

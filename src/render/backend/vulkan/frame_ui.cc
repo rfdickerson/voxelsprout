@@ -165,6 +165,12 @@ void RendererBackend::setGameplayUiState(const GameplayUiState& state) {
     m_gameplayUiState = state;
 }
 
+GameplayUiCommand RendererBackend::consumeGameplayUiCommand() {
+    GameplayUiCommand command = std::move(m_pendingGameplayUiCommand);
+    m_pendingGameplayUiCommand = {};
+    return command;
+}
+
 
 bool RendererBackend::isDebugUiVisible() const {
     return m_debugUiVisible && m_showFrameStatsPanel;
@@ -1216,7 +1222,7 @@ void RendererBackend::buildMeshingDebugUi() {
 
 
 void RendererBackend::buildAimReticleUi() {
-    if (m_gameplayUiState.inventoryVisible || m_debugUiVisible) {
+    if (m_gameplayUiState.inventoryVisible || m_gameplayUiState.dialogueVisible || m_debugUiVisible) {
         return;
     }
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
@@ -1237,9 +1243,106 @@ void RendererBackend::buildAimReticleUi() {
     drawList->AddLine(ImVec2(center.x, center.y + kInner), ImVec2(center.x, center.y + kOuter), color, kThickness);
 }
 
+void RendererBackend::buildDialogueUi() {
+    if (!m_gameplayUiState.dialogueVisible) {
+        return;
+    }
+
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    const float panelWidth = std::clamp(displaySize.x * 0.72f, 720.0f, 1040.0f);
+    const float panelHeight = std::clamp(displaySize.y * 0.58f, 420.0f, 620.0f);
+    const ImVec2 panelPos{
+        (displaySize.x - panelWidth) * 0.5f,
+        displaySize.y - panelHeight - 42.0f
+    };
+
+    ImGui::SetNextWindowPos(panelPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(panelWidth, panelHeight), ImGuiCond_Always);
+    constexpr ImGuiWindowFlags kFlags =
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoSavedSettings;
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.13f, 0.10f, 0.07f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.72f, 0.58f, 0.34f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.84f, 0.66f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.18f, 0.10f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.42f, 0.31f, 0.16f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.56f, 0.42f, 0.22f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+    if (!ImGui::Begin("Dialogue", nullptr, kFlags)) {
+        ImGui::End();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(6);
+        return;
+    }
+
+    ImGui::TextUnformatted(m_gameplayUiState.dialogueActorName.c_str());
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(panelWidth - 88.0f);
+    if (ImGui::Button("Close", ImVec2(72.0f, 0.0f))) {
+        m_pendingGameplayUiCommand = {GameplayUiCommandType::CloseDialogue, {}};
+    }
+    ImGui::Separator();
+
+    const float footerHeight = 116.0f;
+    const float topicWidth = 240.0f;
+    const float contentHeight = panelHeight - footerHeight - 72.0f;
+    ImGui::BeginChild("DialogueText", ImVec2(panelWidth - topicWidth - 34.0f, contentHeight), true);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(m_gameplayUiState.dialogueText.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+    ImGui::BeginChild("DialogueTopics", ImVec2(topicWidth, contentHeight), true);
+    ImGui::TextUnformatted("Topics");
+    ImGui::Separator();
+    for (const auto& topic : m_gameplayUiState.dialogueTopics) {
+        const bool selected = topic.first == m_gameplayUiState.dialogueSelectedTopicId;
+        if (selected) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.88f, 0.50f, 1.0f));
+        }
+        if (ImGui::Selectable(topic.second.c_str(), selected)) {
+            m_pendingGameplayUiCommand = {GameplayUiCommandType::SelectDialogueTopic, topic.first};
+        }
+        if (selected) {
+            ImGui::PopStyleColor();
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    if (!m_gameplayUiState.dialogueLastMessage.empty()) {
+        ImGui::TextWrapped("%s", m_gameplayUiState.dialogueLastMessage.c_str());
+    }
+    ImGui::TextDisabled("%s", m_gameplayUiState.dialogueJournalSummary.c_str());
+
+    if (!m_gameplayUiState.dialogueChoices.empty()) {
+        ImGui::Separator();
+        for (const auto& choice : m_gameplayUiState.dialogueChoices) {
+            if (ImGui::Button(choice.second.c_str(), ImVec2(0.0f, 0.0f))) {
+                m_pendingGameplayUiCommand = {GameplayUiCommandType::SelectDialogueChoice, choice.first};
+            }
+            ImGui::SameLine();
+        }
+        ImGui::NewLine();
+    }
+
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(6);
+}
+
 void RendererBackend::buildGameplayHudUi() {
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
     if (drawList == nullptr) {
+        return;
+    }
+    if (!m_gameplayUiState.inventoryVisible) {
         return;
     }
 
@@ -1270,56 +1373,10 @@ void RendererBackend::buildGameplayHudUi() {
 
     const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
     const GameplayUiLayout layout = buildGameplayUiLayout(displaySize.x, displaySize.y);
-    const ImU32 panelColor = IM_COL32(12, 14, 18, 210);
     const ImU32 slotColor = IM_COL32(28, 32, 40, 230);
     const ImU32 borderColor = IM_COL32(110, 120, 136, 255);
-    const ImU32 selectedBorderColor = IM_COL32(240, 245, 255, 255);
     const ImU32 textColor = IM_COL32(236, 241, 248, 255);
     const ImU32 emptyTextColor = IM_COL32(152, 160, 172, 255);
-
-    drawList->AddRectFilled(
-        ImVec2(layout.hotbarPanel.minX, layout.hotbarPanel.minY),
-        ImVec2(layout.hotbarPanel.maxX, layout.hotbarPanel.maxY),
-        panelColor,
-        12.0f
-    );
-    for (std::size_t slotIndex = 0; slotIndex < kGameplayHotbarSlotCount; ++slotIndex) {
-        const GameplayUiRect& slot = layout.hotbarSlots[slotIndex];
-        const InventoryItemId itemId = m_gameplayUiState.hotbarItems[slotIndex];
-        const bool selected = slotIndex == m_gameplayUiState.selectedHotbarSlot;
-        drawList->AddRectFilled(
-            ImVec2(slot.minX, slot.minY),
-            ImVec2(slot.maxX, slot.maxY),
-            slotColor,
-            8.0f
-        );
-        drawList->AddRect(
-            ImVec2(slot.minX, slot.minY),
-            ImVec2(slot.maxX, slot.maxY),
-            selected ? selectedBorderColor : borderColor,
-            8.0f,
-            0,
-            selected ? 2.5f : 1.5f
-        );
-        const float centerX = (slot.minX + slot.maxX) * 0.5f;
-        const float centerY = (slot.minY + slot.maxY) * 0.5f;
-        drawList->AddCircleFilled(ImVec2(centerX, centerY - 6.0f), 11.0f, itemTint(itemId), 18);
-        const std::string slotNumber = std::to_string(slotIndex + 1);
-        drawList->AddText(ImVec2(slot.minX + 6.0f, slot.minY + 4.0f), emptyTextColor, slotNumber.c_str());
-        const char* label = itemLabel(itemId);
-        if (label[0] != '\0') {
-            const ImVec2 textSize = ImGui::CalcTextSize(label);
-            drawList->AddText(
-                ImVec2(centerX - (textSize.x * 0.5f), slot.maxY - 18.0f),
-                textColor,
-                label
-            );
-        }
-    }
-
-    if (!m_gameplayUiState.inventoryVisible) {
-        return;
-    }
 
     drawList->AddRectFilled(
         ImVec2(0.0f, 0.0f),

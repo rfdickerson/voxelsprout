@@ -25,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -124,14 +125,18 @@ constexpr float kBalmoraGuardRouteReachRadius = 54.0f;
 constexpr float kBalmoraGuardNavmeshProbeHeight = 96.0f;
 constexpr float kBalmoraGuardWalkCycleScale = 0.046f;
 constexpr float kBalmoraGuardPathRetryCooldownSeconds = 1.0f;
+constexpr float kNpcDialogueActivationRadius = 260.0f;
+constexpr float kNpcDialogueActivationMinFacingDot = 0.58f;
+constexpr float kFargothStashActivationRadius = 220.0f;
 constexpr std::size_t kMaxBalmoraGuardCount = 6u;
 constexpr std::size_t kMaxSeydaNeenGuardCount = 4u;
 constexpr int kSeydaNeenCellX = -2;
 constexpr int kSeydaNeenCellY = -9;
 constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
 constexpr std::uint32_t kImportedSceneMaterialFlagNpcGpuTransform = 1u << 24u;
-constexpr std::uint32_t kImportedSceneMaterialNpcYawShift = 17u;
-constexpr std::uint32_t kImportedSceneMaterialNpcYawMask = 0x7fu;
+constexpr std::uint32_t kImportedSceneMaterialFlagNpcNoDeform = 1u << 25u;
+constexpr std::uint32_t kImportedSceneMaterialFlagNpcGpuSkinned = 1u << 26u;
+constexpr float kMorrowindCellSizeUnits = 8192.0f;
 
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
@@ -163,18 +168,6 @@ Aabb3f makePlayerCollisionAabb(float eyeX, float eyeY, float eyeZ) {
     bounds.minZ = eyeZ - kPlayerRadius;
     bounds.maxZ = eyeZ + kPlayerRadius;
     return bounds;
-}
-
-std::uint32_t encodeNpcYawFlagBits(float yawRadians) {
-    float wrappedYaw = std::fmod(yawRadians, kTwoPi);
-    if (wrappedYaw < 0.0f) {
-        wrappedYaw += kTwoPi;
-    }
-    const auto quantizedYaw = static_cast<std::uint32_t>(
-        std::clamp(wrappedYaw / kTwoPi, 0.0f, 0.9999f) *
-        static_cast<float>(kImportedSceneMaterialNpcYawMask + 1u)
-    );
-    return (quantizedYaw & kImportedSceneMaterialNpcYawMask) << kImportedSceneMaterialNpcYawShift;
 }
 
 Aabb3f makeConveyorBeltAabb(const odai::sim::Belt& belt) {
@@ -529,6 +522,56 @@ std::string lowerPathCopy(std::string value) {
     return value;
 }
 
+std::string displayNameFromActorId(std::string value) {
+    bool capitalizeNext = true;
+    for (char& ch : value) {
+        if (ch == '_' || ch == '-') {
+            ch = ' ';
+            capitalizeNext = true;
+            continue;
+        }
+        const unsigned char uch = static_cast<unsigned char>(ch);
+        if (std::isspace(uch)) {
+            capitalizeNext = true;
+        } else if (capitalizeNext) {
+            ch = static_cast<char>(std::toupper(uch));
+            capitalizeNext = false;
+        } else {
+            ch = static_cast<char>(std::tolower(uch));
+        }
+    }
+    return value;
+}
+
+odai::math::Vector3 fargothStashWorldPosition() {
+    const float cellMinX = static_cast<float>(kSeydaNeenCellX) * kMorrowindCellSizeUnits;
+    const float cellMinZ = static_cast<float>(kSeydaNeenCellY) * kMorrowindCellSizeUnits;
+    return {
+        cellMinX + (0.37f * kMorrowindCellSizeUnits),
+        0.0f,
+        cellMinZ + (0.62f * kMorrowindCellSizeUnits)
+    };
+}
+
+std::string morrowindActorRefKeyString(
+    int cellX,
+    int cellY,
+    std::uint32_t refNum,
+    bool hasRefNum,
+    const std::string& actorId,
+    const odai::math::Vector3& position
+) {
+    std::string key = std::to_string(cellX) + ":" + std::to_string(cellY) + ":";
+    if (hasRefNum) {
+        key += std::to_string(refNum);
+    } else {
+        key += "pos:" + std::to_string(static_cast<int>(std::lround(position.x))) + "," +
+            std::to_string(static_cast<int>(std::lround(position.z)));
+    }
+    key += ":" + actorId;
+    return key;
+}
+
 std::uint64_t fnv1a64(std::string_view value) {
     std::uint64_t hash = 14695981039346656037ull;
     for (const char ch : value) {
@@ -716,23 +759,6 @@ bool morrowindExteriorWindowContainsCell(
         cellX <= centerCellX + clampedRadius &&
         cellY >= centerCellY - clampedRadius &&
         cellY <= centerCellY + clampedRadius;
-}
-
-bool morrowindExteriorWindowHasWalkingGuards(int centerCellX, int centerCellY, int radius) {
-    const int clampedRadius = std::clamp(radius, 0, 4);
-    if (morrowindExteriorWindowContainsCell(
-            centerCellX,
-            centerCellY,
-            clampedRadius,
-            kSeydaNeenCellX,
-            kSeydaNeenCellY)) {
-        return true;
-    }
-    return
-        centerCellX + clampedRadius >= -4 &&
-        centerCellX - clampedRadius <= -2 &&
-        centerCellY + clampedRadius >= -3 &&
-        centerCellY - clampedRadius <= -1;
 }
 
 bool morrowindRuntimeExteriorEnabledByEnvironment() {
@@ -1404,7 +1430,7 @@ bool App::init() {
         if ((m_importedScene.sourceTag == "morrowind_balmora" ||
              m_importedScene.sourceTag == "morrowind_exterior_region") &&
             balmoraGuardsEnabledByEnvironment()) {
-            initializeBalmoraGuards();
+            rebuildMorrowindActorsForLoadedRegion();
             if (!odai::importer::buildGpuSceneAssetFromImportedScene(m_importedScene, m_gpuSceneAsset)) {
                 VOX_LOGE("app") << "failed to rebuild GPU scene asset after guard texture import";
                 return false;
@@ -1470,6 +1496,9 @@ bool App::init() {
         }
         if (!m_renderer.uploadGpuScene(m_gpuSceneAsset)) {
             VOX_LOGE("app") << "failed to upload GPU scene demo geometry";
+            return false;
+        }
+        if (!uploadMorrowindActorRenderAsset()) {
             return false;
         }
         m_renderer.setImportedSceneInteriorMode(false);
@@ -1554,7 +1583,7 @@ bool App::init() {
 
 void App::run() {
     VOX_LOGI("app") << "run begin";
-    VOX_LOGI("app") << "morrowind viewer ready (WASD move, R activate door, Space jump/up, Shift down, F/C renderer panel, F5 terrain, F6 statics, K textures, F7 flat shading, F8 water debug)";
+    VOX_LOGI("app") << "morrowind viewer ready (WASD move, R activate NPC/dialogue/door, Space jump/up, Shift down, F/C renderer panel, F5 terrain, F6 statics, K textures, F7 flat shading, F8 water debug)";
     double previousTime = glfwGetTime();
     double simulationAccumulatorSeconds = 0.0;
     m_cameraPrevious = m_camera;
@@ -1580,7 +1609,7 @@ void App::run() {
             m_cameraPrevious = m_camera;
             updateCamera(static_cast<float>(kSimulationFixedStepSeconds));
             if (m_importedSceneDemoEnabled) {
-                updateBalmoraGuards(static_cast<float>(kSimulationFixedStepSeconds));
+                updateMorrowindActors(static_cast<float>(kSimulationFixedStepSeconds));
             } else {
                 m_simulation.update(static_cast<float>(kSimulationFixedStepSeconds));
             }
@@ -1610,16 +1639,137 @@ void App::toggleDebugUi() {
 }
 
 bool App::isAnyUiVisible() const {
-    return m_debugUiVisible;
+    return m_debugUiVisible || m_inventoryVisible || !m_activeDialogueActorId.empty();
 }
 
 void App::syncGameplayUiState() {
+    m_gameplayUiState.inventoryVisible = m_inventoryVisible;
+    m_gameplayUiState.dialogueVisible = !m_activeDialogueActorId.empty() && m_activeDialogue.handled;
+    m_gameplayUiState.dialogueActorName = m_gameplayUiState.dialogueVisible
+        ? displayNameFromActorId(m_activeDialogueActorId)
+        : std::string{};
+    m_gameplayUiState.dialogueText = m_gameplayUiState.dialogueVisible ? m_activeDialogue.text : std::string{};
+    m_gameplayUiState.dialogueSelectedTopicId =
+        m_gameplayUiState.dialogueVisible ? m_activeDialogueTopicId : std::string{};
+    m_gameplayUiState.dialogueLastMessage = m_lastScriptMessage;
+    m_gameplayUiState.dialogueJournalSummary =
+        "Gold " + std::to_string(m_gameState.gold()) +
+        " | Taxman " + std::to_string(m_gameState.journalStage("MV_DeadTaxman")) +
+        " | Ring " + std::to_string(m_gameState.journalStage("MV_FargothRing")) +
+        " | Hiding " + std::to_string(m_gameState.journalStage("MV_FargothHiding")) +
+        " | Caius " + std::to_string(m_gameState.journalStage("MV_ReportToCaius"));
+    m_gameplayUiState.dialogueTopics.clear();
+    m_gameplayUiState.dialogueChoices.clear();
+    if (m_gameplayUiState.dialogueVisible) {
+        m_gameplayUiState.dialogueTopics.reserve(m_activeDialogue.topics.size());
+        for (const odai::game::DialogueTopic& topic : m_activeDialogue.topics) {
+            m_gameplayUiState.dialogueTopics.emplace_back(topic.id, topic.text);
+        }
+        m_gameplayUiState.dialogueChoices.reserve(m_activeDialogue.choices.size());
+        for (const odai::game::DialogueChoice& choice : m_activeDialogue.choices) {
+            m_gameplayUiState.dialogueChoices.emplace_back(choice.id, choice.text);
+        }
+    }
+    m_renderer.setGameplayUiState(m_gameplayUiState);
+}
+
+void App::refreshUiCursorMode() {
+    if (m_window == nullptr) {
+        return;
+    }
+    glfwSetInputMode(m_window, GLFW_CURSOR, isAnyUiVisible() ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+    m_hasMouseSample = false;
+}
+
+void App::closeDialogue() {
+    if (m_activeDialogueActorId.empty()) {
+        return;
+    }
+    m_activeDialogue = {};
+    m_activeDialogueActorId.clear();
+    m_activeDialogueTopicId.clear();
+    syncGameplayUiState();
+    refreshUiCursorMode();
+}
+
+bool App::requestDialogueTopic(const std::string& topicId) {
+    if (m_activeDialogueActorId.empty() || !m_luaScriptRuntime.initialized()) {
+        return false;
+    }
+    odai::game::DialogueResult dialogue =
+        m_luaScriptRuntime.getDialogue(m_activeDialogueActorId, topicId);
+    if (!m_luaScriptRuntime.lastError().empty()) {
+        VOX_LOGW("app") << "Lua dialogue failed for " << m_activeDialogueActorId
+                        << ": " << m_luaScriptRuntime.lastError();
+        return false;
+    }
+    if (!dialogue.handled) {
+        return false;
+    }
+    m_activeDialogueTopicId = topicId;
+    m_activeDialogue = std::move(dialogue);
+    m_lastScriptMessage = m_activeDialogue.text;
+    syncGameplayUiState();
+    return true;
+}
+
+bool App::openDialogue(const std::string& actorId) {
+    if (actorId.empty() || !m_luaScriptRuntime.initialized()) {
+        return false;
+    }
+    m_activeDialogueActorId = lowerPathCopy(actorId);
+    m_activeDialogueTopicId.clear();
+    if (!requestDialogueTopic("")) {
+        m_activeDialogue = {};
+        m_activeDialogueActorId.clear();
+        m_activeDialogueTopicId.clear();
+        syncGameplayUiState();
+        return false;
+    }
+    refreshUiCursorMode();
+    VOX_LOGI("app") << "dialogue opened [" << m_activeDialogueActorId << "]: " << m_activeDialogue.text;
+    return true;
+}
+
+void App::processGameplayUiCommand() {
+    const odai::render::GameplayUiCommand command = m_renderer.consumeGameplayUiCommand();
+    if (command.type == odai::render::GameplayUiCommandType::None) {
+        return;
+    }
+    if (command.type == odai::render::GameplayUiCommandType::CloseDialogue) {
+        closeDialogue();
+        return;
+    }
+    if (command.type == odai::render::GameplayUiCommandType::SelectDialogueTopic) {
+        (void)requestDialogueTopic(command.id);
+        return;
+    }
+    if (command.type == odai::render::GameplayUiCommandType::SelectDialogueChoice) {
+        if (command.id.empty() || !m_luaScriptRuntime.initialized()) {
+            return;
+        }
+        const odai::game::ScriptCallResult result = m_luaScriptRuntime.chooseDialogue(command.id);
+        if (!m_luaScriptRuntime.lastError().empty()) {
+            VOX_LOGW("app") << "Lua dialogue choice failed: " << m_luaScriptRuntime.lastError();
+            return;
+        }
+        if (!result.handled) {
+            return;
+        }
+        m_lastScriptMessage = result.message;
+        VOX_LOGI("app") << "quest dialogue choice: " << result.message
+                        << " (gold=" << m_gameState.gold() << ")";
+        if (!requestDialogueTopic(m_activeDialogueTopicId)) {
+            (void)requestDialogueTopic("");
+        }
+    }
 }
 
 void App::initializeMorrowindGameplayScripts() {
     m_gameState.clear();
     m_activeDialogue = {};
     m_activeDialogueActorId.clear();
+    m_activeDialogueTopicId.clear();
     m_lastScriptMessage.clear();
     if (!m_luaScriptRuntime.init(m_gameState)) {
         VOX_LOGW("app") << "Lua gameplay scripting disabled: " << m_luaScriptRuntime.lastError();
@@ -1728,24 +1878,31 @@ bool App::tryActivateMorrowindScript() {
         return false;
     }
 
-    if (!m_activeDialogue.choices.empty()) {
-        const odai::game::DialogueChoice choice = m_activeDialogue.choices.front();
-        const odai::game::ScriptCallResult result = m_luaScriptRuntime.chooseDialogue(choice.id);
-        m_activeDialogue = {};
-        if (!m_luaScriptRuntime.lastError().empty()) {
-            VOX_LOGW("app") << "Lua dialogue choice failed: " << m_luaScriptRuntime.lastError();
-            return false;
-        }
-        if (result.handled) {
-            m_lastScriptMessage = result.message;
-            VOX_LOGI("app") << "quest dialogue: " << result.message
-                            << " (journal MV_DeadTaxman="
-                            << m_gameState.journalStage("MV_DeadTaxman")
-                            << ", gold=" << m_gameState.gold() << ")";
-            return true;
-        }
+    const std::string targetRefId = resolveMorrowindScriptTargetRefId();
+    if (targetRefId.empty()) {
+        return false;
     }
 
+    const odai::game::ScriptCallResult activation = m_luaScriptRuntime.onActivate(targetRefId);
+    if (!m_luaScriptRuntime.lastError().empty()) {
+        VOX_LOGW("app") << "Lua activation failed for " << targetRefId
+                        << ": " << m_luaScriptRuntime.lastError();
+        return false;
+    }
+    if (activation.handled) {
+        m_lastScriptMessage = activation.message;
+        VOX_LOGI("app") << "quest activation: " << activation.message
+                        << " (journal MV_DeadTaxman="
+                        << m_gameState.journalStage("MV_DeadTaxman")
+                        << ", gold=" << m_gameState.gold() << ")";
+        syncGameplayUiState();
+        return true;
+    }
+
+    return openDialogue(targetRefId);
+}
+
+std::string App::resolveMorrowindScriptTargetRefId() const {
     std::string targetRefId;
     const ImportedSceneInspectHit hit = raycastImportedSceneFromCamera();
     if (hit.hit) {
@@ -1774,9 +1931,68 @@ bool App::tryActivateMorrowindScript() {
         }
     }
 
+    if (targetRefId.empty()) {
+        const float yawRadians = odai::math::radians(m_camera.yawDegrees);
+        const float pitchRadians = odai::math::radians(m_camera.pitchDegrees);
+        const float cosPitch = std::cos(pitchRadians);
+        const odai::math::Vector3 cameraForward = odai::math::normalize({
+            std::cos(yawRadians) * cosPitch,
+            std::sin(pitchRadians),
+            std::sin(yawRadians) * cosPitch
+        });
+        const odai::math::Vector3 eye{m_camera.x, m_camera.y, m_camera.z};
+        float bestScore = std::numeric_limits<float>::max();
+        for (const MorrowindActorInstance& actor : m_morrowindActors) {
+            if (!actor.resident || actor.disabled || actor.dead) {
+                continue;
+            }
+            const odai::math::Vector3 actorFocus{
+                actor.position.x,
+                actor.position.y + 84.0f,
+                actor.position.z
+            };
+            const odai::math::Vector3 toActor = actorFocus - eye;
+            const float distanceSq = odai::math::lengthSquared(toActor);
+            if (distanceSq >
+                kNpcDialogueActivationRadius * kNpcDialogueActivationRadius) {
+                continue;
+            }
+            const odai::math::Vector3 direction = odai::math::normalize(toActor);
+            const float facing = odai::math::dot(cameraForward, direction);
+            if (facing < kNpcDialogueActivationMinFacingDot) {
+                continue;
+            }
+            const float score = distanceSq * (1.0f - facing);
+            if (score < bestScore) {
+                bestScore = score;
+                targetRefId = actor.dialogueActorId.empty() ? actor.actorId : actor.dialogueActorId;
+            }
+        }
+    }
+
+    if (targetRefId.empty() &&
+        m_importedScene.sourceTag == "morrowind_exterior_region" &&
+        m_gameState.journalStage("MV_FargothHiding") >= 15 &&
+        m_gameState.journalStage("MV_FargothHiding") < 20 &&
+        m_gameState.itemCount("fargoth_stash") == 0) {
+        const odai::math::Vector3 stashPosition = fargothStashWorldPosition();
+        const float dx = stashPosition.x - m_camera.x;
+        const float dz = stashPosition.z - m_camera.z;
+        const float distanceSq = (dx * dx) + (dz * dz);
+        if (distanceSq <= kFargothStashActivationRadius * kFargothStashActivationRadius) {
+            targetRefId = "fargoth_stash";
+        }
+    }
+
     if (targetRefId.empty() && m_importedScene.sourceTag == "morrowind_exterior_region") {
+        const int ringStage = m_gameState.journalStage("MV_FargothRing");
+        const int hidingStage = m_gameState.journalStage("MV_FargothHiding");
         const int taxmanStage = m_gameState.journalStage("MV_DeadTaxman");
-        if (taxmanStage < 10) {
+        if (ringStage < 30) {
+            targetRefId = "fargoth";
+        } else if (hidingStage < 20) {
+            targetRefId = "hrisskar flat-foot";
+        } else if (taxmanStage < 10) {
             targetRefId = "processus vitellius";
         } else if (taxmanStage == 10) {
             targetRefId = "socucius ergalla";
@@ -1784,43 +2000,7 @@ bool App::tryActivateMorrowindScript() {
             targetRefId = "foryn gilnith";
         }
     }
-    if (targetRefId.empty()) {
-        return false;
-    }
-
-    const odai::game::ScriptCallResult activation = m_luaScriptRuntime.onActivate(targetRefId);
-    if (!m_luaScriptRuntime.lastError().empty()) {
-        VOX_LOGW("app") << "Lua activation failed for " << targetRefId
-                        << ": " << m_luaScriptRuntime.lastError();
-        return false;
-    }
-    if (activation.handled) {
-        m_lastScriptMessage = activation.message;
-        VOX_LOGI("app") << "quest activation: " << activation.message
-                        << " (journal MV_DeadTaxman="
-                        << m_gameState.journalStage("MV_DeadTaxman")
-                        << ", gold=" << m_gameState.gold() << ")";
-        return true;
-    }
-
-    odai::game::DialogueResult dialogue =
-        m_luaScriptRuntime.getDialogue(targetRefId, "murder of processus vitellius");
-    if (!m_luaScriptRuntime.lastError().empty()) {
-        VOX_LOGW("app") << "Lua dialogue failed for " << targetRefId
-                        << ": " << m_luaScriptRuntime.lastError();
-        return false;
-    }
-    if (!dialogue.handled) {
-        return false;
-    }
-    m_activeDialogueActorId = targetRefId;
-    m_activeDialogue = dialogue;
-    m_lastScriptMessage = dialogue.text;
-    VOX_LOGI("app") << "quest dialogue [" << targetRefId << "]: " << dialogue.text;
-    for (const odai::game::DialogueChoice& choice : dialogue.choices) {
-        VOX_LOGI("app") << "  choice: " << choice.id << " - " << choice.text;
-    }
-    return true;
+    return targetRefId;
 }
 
 bool App::tryActivateBalmoraDoor() {
@@ -1931,6 +2111,7 @@ bool App::enterMorrowindInterior(const odai::importer::MorrowindDoorReference& d
         VOX_LOGW("app") << "failed to upload interior scene for " << door.destination.destinationCell;
         return false;
     }
+    m_renderer.clearImportedActorAssets();
     m_renderer.setImportedSceneInteriorMode(true);
 
     m_importedScene = cachedInterior.scene;
@@ -1938,12 +2119,12 @@ bool App::enterMorrowindInterior(const odai::importer::MorrowindDoorReference& d
     m_gpuSceneRuntime = {};
     m_importedSceneCollision = cachedInterior.collision;
     m_currentMorrowindInteriorCell = destinationCell;
-    m_balmoraGuards.clear();
+    for (MorrowindActorInstance& actor : m_morrowindActors) {
+        actor.resident = false;
+    }
     m_balmoraGuardPrototype = {};
     m_balmoraNavmesh.clear();
-    m_balmoraGuardFrameVertices.clear();
-    m_balmoraGuardFrameIndices.clear();
-    m_balmoraGuardFrameDraws.clear();
+    m_balmoraGuardFrameInstances.clear();
 
     m_camera.x = door.destination.position[0];
     m_camera.y = door.destination.position[1] + kMorrowindInteriorSpawnEyeHeight;
@@ -1974,6 +2155,9 @@ bool App::leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& d
         VOX_LOGW("app") << "failed to upload Balmora exterior scene while leaving interior";
         return false;
     }
+    if (!uploadMorrowindActorRenderAsset()) {
+        return false;
+    }
     m_renderer.setImportedSceneInteriorMode(false);
 
     m_importedScene = m_balmoraExteriorScene;
@@ -1982,12 +2166,12 @@ bool App::leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& d
     odai::importer::rebuildGpuSceneWorldTransforms(m_gpuSceneRuntime);
     m_importedSceneCollision = m_balmoraExteriorCollision;
     m_currentMorrowindInteriorCell.clear();
-    m_balmoraGuards.clear();
+    for (MorrowindActorInstance& actor : m_morrowindActors) {
+        actor.resident = false;
+    }
     m_balmoraGuardPrototype = {};
     m_balmoraNavmesh.clear();
-    m_balmoraGuardFrameVertices.clear();
-    m_balmoraGuardFrameIndices.clear();
-    m_balmoraGuardFrameDraws.clear();
+    m_balmoraGuardFrameInstances.clear();
 
     m_camera.x = door.destination.position[0];
     m_camera.y = door.destination.position[1] + kImportedPlayerEyeHeight;
@@ -2006,9 +2190,13 @@ bool App::leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& d
     return true;
 }
 
-void App::initializeBalmoraGuards(bool reusePreparedNavmesh) {
-    m_balmoraGuards.clear();
+void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
+    for (MorrowindActorInstance& actor : m_morrowindActors) {
+        actor.resident = false;
+    }
     m_balmoraGuardPrototype = {};
+    m_importedActorPrototypeRanges.clear();
+    m_morrowindActorPrototypeCache.clear();
     if (!reusePreparedNavmesh) {
         m_balmoraNavmesh.clear();
     }
@@ -2037,12 +2225,6 @@ void App::initializeBalmoraGuards(bool reusePreparedNavmesh) {
          m_morrowindRuntimeLoadedCenterCellY + m_morrowindRuntimeExteriorRadius >= -3 &&
          m_morrowindRuntimeLoadedCenterCellY - m_morrowindRuntimeExteriorRadius <= -1);
     const char* guardSceneLabel = seydaNeenRegion ? "Seyda Neen" : (balmoraRegion ? "Balmora" : "Morrowind exterior");
-    if (exteriorRegionScene && !seydaNeenRegion && !balmoraRegion) {
-        if (reusePreparedNavmesh) {
-            m_balmoraNavmesh.clear();
-        }
-        return;
-    }
 
     const std::optional<std::filesystem::path> dataFilesPath = findMorrowindDataFilesPath();
     if (!dataFilesPath.has_value()) {
@@ -2050,6 +2232,16 @@ void App::initializeBalmoraGuards(bool reusePreparedNavmesh) {
                          << kMorrowindDataFilesEnvVar;
         m_balmoraNavmesh.clear();
         return;
+    }
+    odai::importer::MorrowindActorCatalog actorCatalog{};
+    if (!odai::importer::loadMorrowindActorCatalog(*dataFilesPath, actorCatalog)) {
+        VOX_LOGW("app") << "Morrowind actor catalog unavailable: "
+                        << odai::importer::getImportedSceneLastError();
+    }
+    odai::importer::MorrowindEquipmentCatalog equipmentCatalog{};
+    if (!odai::importer::loadMorrowindEquipmentCatalog(*dataFilesPath, equipmentCatalog)) {
+        VOX_LOGW("app") << "Morrowind equipment catalog unavailable: "
+                        << odai::importer::getImportedSceneLastError();
     }
 
     if (reusePreparedNavmesh) {
@@ -2114,17 +2306,22 @@ void App::initializeBalmoraGuards(bool reusePreparedNavmesh) {
         return textureIndex;
     };
 
-    auto appendNifToPrototype = [&](std::string_view relativeModelPath) {
+    std::size_t importedActorPartCount = 0u;
+    std::size_t missingActorPartCount = 0u;
+    std::size_t skippedActorPartCount = 0u;
+    auto appendNifToPrototype = [&](std::string_view relativeModelPath, bool disableProceduralDeform) {
         std::filesystem::path nifPath = *dataFilesPath / "Meshes" / std::filesystem::path(std::string(relativeModelPath));
         if (!std::filesystem::exists(nifPath)) {
-            VOX_LOGW("app") << guardSceneLabel << " guard mesh missing: " << nifPath.string();
+            ++missingActorPartCount;
+            VOX_LOGW("app") << guardSceneLabel << " actor mesh missing: " << nifPath.string();
             return;
         }
 
         odai::importer::ImportedNifResult nifResult{};
         std::string nifError;
         if (!odai::importer::loadMorrowindActorPartNif(nifPath, nifResult, nifError)) {
-            VOX_LOGW("app") << guardSceneLabel << " guard mesh skipped: " << nifPath.string()
+            ++skippedActorPartCount;
+            VOX_LOGW("app") << guardSceneLabel << " actor mesh skipped: " << nifPath.string()
                              << " (" << nifError << ")";
             return;
         }
@@ -2148,33 +2345,7 @@ void App::initializeBalmoraGuards(bool reusePreparedNavmesh) {
             }
         }
 
-        odai::math::Vector3 partBoundsMin{
-            std::numeric_limits<float>::max(),
-            std::numeric_limits<float>::max(),
-            std::numeric_limits<float>::max()
-        };
-        odai::math::Vector3 partBoundsMax{
-            std::numeric_limits<float>::lowest(),
-            std::numeric_limits<float>::lowest(),
-            std::numeric_limits<float>::lowest()
-        };
-        for (const odai::importer::ImportedSceneVertex& vertex : nifResult.mesh.vertices) {
-            partBoundsMin.x = std::min(partBoundsMin.x, vertex.position[0]);
-            partBoundsMin.y = std::min(partBoundsMin.y, vertex.position[1]);
-            partBoundsMin.z = std::min(partBoundsMin.z, vertex.position[2]);
-            partBoundsMax.x = std::max(partBoundsMax.x, vertex.position[0]);
-            partBoundsMax.y = std::max(partBoundsMax.y, vertex.position[1]);
-            partBoundsMax.z = std::max(partBoundsMax.z, vertex.position[2]);
-        }
-        VOX_LOGI("app") << guardSceneLabel << " guard part imported: " << relativeModelPath
-                        << " vertices=" << nifResult.mesh.vertices.size()
-                        << " indices=" << nifResult.mesh.indices.size()
-                        << " parts=" << nifResult.mesh.parts.size()
-                        << " boundsMin=(" << partBoundsMin.x << ","
-                        << partBoundsMin.y << "," << partBoundsMin.z << ")"
-                        << " boundsMax=(" << partBoundsMax.x << ","
-                        << partBoundsMax.y << "," << partBoundsMax.z << ")";
-
+        ++importedActorPartCount;
         for (const odai::importer::ImportedSceneMeshPart& part : nifResult.mesh.parts) {
             const std::uint32_t firstIndex = part.firstIndex;
             const std::uint32_t indexEnd = std::min<std::uint32_t>(
@@ -2206,9 +2377,14 @@ void App::initializeBalmoraGuards(bool reusePreparedNavmesh) {
                     vertex.color[1] = 0.72f;
                     vertex.color[2] = 0.62f;
                     vertex.textureIndex = part.textureIndex;
-                    vertex.flags = part.alphaTest ? 1u : 0u;
+                    vertex.flags =
+                        (part.alphaTest ? kImportedSceneMaterialFlagAlphaTest : 0u) |
+                        kImportedSceneMaterialFlagNpcGpuTransform |
+                        (disableProceduralDeform ? kImportedSceneMaterialFlagNpcNoDeform : 0u);
                     mappedIndex = static_cast<std::uint32_t>(m_balmoraGuardPrototype.vertices.size());
                     m_balmoraGuardPrototype.vertices.push_back(vertex);
+                    m_balmoraGuardPrototype.boneIndices.push_back({0u, 0u, 0u, 0u});
+                    m_balmoraGuardPrototype.boneWeights.push_back({0.0f, 0.0f, 0.0f, 0.0f});
                 }
                 m_balmoraGuardPrototype.indices.push_back(mappedIndex);
             }
@@ -2225,18 +2401,275 @@ void App::initializeBalmoraGuards(bool reusePreparedNavmesh) {
         }
     };
 
-    constexpr std::array<std::string_view, 8> kGuardModelParts = {
-        "b/B_N_Dark Elf_M_Skins.nif",
-        "b/B_N_Dark Elf_M_Neck.NIF",
-        "b/B_N_Dark Elf_M_Head_01.NIF",
-        "b/B_N_Dark Elf_M_Hair_17.nif",
-        "a/A_Bonemold_Cuirass_C.NIF",
-        "a/A_Bonemold_Bracer_W.nif",
-        "a/A_Bonemold_Boots_F.nif",
-        "a/A_Bonemold_Boots_A.nif"
+    auto appendPrototypeRange = [&](std::uint32_t firstDraw) -> std::uint32_t {
+        const std::uint32_t drawCount =
+            static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size()) - firstDraw;
+        if (drawCount == 0u) {
+            return std::numeric_limits<std::uint32_t>::max();
+        }
+        ImportedActorPrototypeRange range{};
+        range.firstDraw = firstDraw;
+        range.drawCount = drawCount;
+        const std::uint32_t prototypeIndex = static_cast<std::uint32_t>(m_importedActorPrototypeRanges.size());
+        m_importedActorPrototypeRanges.push_back(range);
+        return prototypeIndex;
     };
-    for (const std::string_view modelPart : kGuardModelParts) {
-        appendNifToPrototype(modelPart);
+
+    const std::filesystem::path baseAnimPath = *dataFilesPath / "Meshes" / "base_anim.nif";
+    odai::importer::ImportedSkinnedActorAsset humanoidSkeletonTemplate{};
+    std::string humanoidSkeletonError;
+    const bool humanoidSkeletonLoaded =
+        odai::importer::loadMorrowindSkinnedActorSkeleton(
+            baseAnimPath,
+            humanoidSkeletonTemplate,
+            humanoidSkeletonError);
+    if (!humanoidSkeletonLoaded) {
+        VOX_LOGW("app") << guardSceneLabel << " humanoid GPU skinning disabled: base_anim.nif failed ("
+                        << humanoidSkeletonError << ")";
+    }
+
+    auto appendSkinnedActorAssetToPrototype = [&](
+        const odai::importer::ImportedSkinnedActorAsset& actorAsset,
+        const std::string& actorId,
+        std::uint32_t firstDraw
+    ) -> std::uint32_t {
+        const std::uint32_t vertexBase = static_cast<std::uint32_t>(m_balmoraGuardPrototype.vertices.size());
+        const std::uint32_t indexBase = static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size());
+        const std::uint32_t drawBase = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
+
+        m_balmoraGuardPrototype.vertices.insert(
+            m_balmoraGuardPrototype.vertices.end(),
+            actorAsset.vertices.begin(),
+            actorAsset.vertices.end());
+        m_balmoraGuardPrototype.boneIndices.insert(
+            m_balmoraGuardPrototype.boneIndices.end(),
+            actorAsset.boneIndices.begin(),
+            actorAsset.boneIndices.end());
+        m_balmoraGuardPrototype.boneWeights.insert(
+            m_balmoraGuardPrototype.boneWeights.end(),
+            actorAsset.boneWeights.begin(),
+            actorAsset.boneWeights.end());
+        m_balmoraGuardPrototype.indices.reserve(m_balmoraGuardPrototype.indices.size() + actorAsset.indices.size());
+        for (const std::uint32_t index : actorAsset.indices) {
+            m_balmoraGuardPrototype.indices.push_back(vertexBase + index);
+        }
+        m_balmoraGuardPrototype.draws.reserve(m_balmoraGuardPrototype.draws.size() + actorAsset.draws.size());
+        for (const odai::importer::ImportedScenePackedDraw& sourceDraw : actorAsset.draws) {
+            odai::importer::ImportedScenePackedDraw draw = sourceDraw;
+            draw.firstIndex += indexBase;
+            m_balmoraGuardPrototype.draws.push_back(draw);
+        }
+
+        for (std::size_t localDrawIndex = 0; localDrawIndex < actorAsset.draws.size(); ++localDrawIndex) {
+            const std::size_t globalDrawIndex = static_cast<std::size_t>(drawBase) + localDrawIndex;
+            const std::string texturePath = localDrawIndex < actorAsset.partDiffuseTexturePaths.size()
+                ? actorAsset.partDiffuseTexturePaths[localDrawIndex]
+                : std::string{};
+            const std::uint32_t textureIndex = addActorTextureSlot(texturePath);
+            const odai::importer::ImportedScenePackedDraw& draw = m_balmoraGuardPrototype.draws[globalDrawIndex];
+            const std::uint32_t indexEnd = std::min<std::uint32_t>(
+                draw.firstIndex + draw.indexCount,
+                static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size()));
+            for (std::uint32_t indexOffset = draw.firstIndex; indexOffset < indexEnd; ++indexOffset) {
+                const std::uint32_t vertexIndex = m_balmoraGuardPrototype.indices[indexOffset];
+                if (vertexIndex < m_balmoraGuardPrototype.vertices.size()) {
+                    m_balmoraGuardPrototype.vertices[vertexIndex].textureIndex = textureIndex;
+                    m_balmoraGuardPrototype.vertices[vertexIndex].flags =
+                        kImportedSceneMaterialFlagNpcGpuTransform |
+                        kImportedSceneMaterialFlagNpcGpuSkinned;
+                }
+            }
+        }
+        m_balmoraGuardPrototype.gpuSkinned = true;
+        VOX_LOGI("app") << guardSceneLabel << " skinned NPC prototype imported"
+                        << " actor=" << actorId
+                        << " parts=" << actorAsset.partDiffuseTexturePaths.size()
+                        << " weightedVertices=" << actorAsset.weightedVertexCount
+                        << " unweightedVertices=" << actorAsset.unweightedVertexCount
+                        << " unknownInfluences=" << actorAsset.unknownBoneInfluenceCount
+                        << " droppedInfluences=" << actorAsset.droppedInfluenceCount;
+        return appendPrototypeRange(firstDraw);
+    };
+
+    auto appendGenericNpcPrototype = [&](const odai::importer::MorrowindActorRecord& actor) -> std::uint32_t {
+        const std::uint32_t firstDraw = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
+        std::vector<odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart> resolvedParts =
+            odai::importer::resolveMorrowindNpcParts(actor, equipmentCatalog);
+        if (resolvedParts.size() <= 4u) {
+            const std::vector<std::string> fallbackClothing = {
+                "c/C_M_Shirt_C_commonL04.NIF",
+                "c/C_M_Shirt_UA_commonL04.nif",
+                "c/C_M_Shirt_FA_commonL04.nif",
+                "c/C_M_Pants_G_common02.nif",
+                "c/C_M_Pants_UL_common02.nif",
+                "c/C_shoes_common_4.NIF"
+            };
+            for (const std::string& modelPath : fallbackClothing) {
+                resolvedParts.push_back({modelPath, "fallback", true});
+            }
+        }
+        std::unordered_set<std::string> seenModelPaths;
+        if (humanoidSkeletonLoaded) {
+            odai::importer::ImportedSkinnedActorAsset skinnedActor = humanoidSkeletonTemplate;
+            std::string skinnedError;
+            std::uint32_t missingPartCount = 0u;
+            std::uint32_t fallbackPartCount = 0u;
+            for (const odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart& part : resolvedParts) {
+                const std::string normalizedModelPath = lowerPathCopy(part.modelPath);
+                if (!seenModelPaths.insert(normalizedModelPath).second) {
+                    continue;
+                }
+                fallbackPartCount += part.fallback ? 1u : 0u;
+                const std::filesystem::path nifPath =
+                    *dataFilesPath / "Meshes" / std::filesystem::path(part.modelPath);
+                if (!std::filesystem::exists(nifPath) ||
+                    !odai::importer::appendMorrowindSkinnedActorPartNif(nifPath, skinnedActor, skinnedError)) {
+                    ++missingPartCount;
+                    VOX_LOGW("app") << guardSceneLabel << " skinned NPC part skipped"
+                                    << " actor=" << actor.id
+                                    << " part=" << part.modelPath
+                                    << " slot=" << part.slot
+                                    << " (" << (std::filesystem::exists(nifPath) ? skinnedError : "missing file") << ")";
+                }
+            }
+            const bool validSkinnedActor =
+                !skinnedActor.vertices.empty() &&
+                !skinnedActor.indices.empty() &&
+                !skinnedActor.draws.empty() &&
+                skinnedActor.boneIndices.size() == skinnedActor.vertices.size() &&
+                skinnedActor.boneWeights.size() == skinnedActor.vertices.size();
+            if (validSkinnedActor) {
+                VOX_LOGI("app") << guardSceneLabel << " NPC prototype summary"
+                                << " actor=" << actor.id
+                                << " race=" << actor.raceId
+                                << " resolvedParts=" << resolvedParts.size()
+                                << " fallbackParts=" << fallbackPartCount
+                                << " missingParts=" << missingPartCount;
+                return appendSkinnedActorAssetToPrototype(skinnedActor, actor.id, firstDraw);
+            }
+            VOX_LOGW("app") << guardSceneLabel << " skinned NPC fallback to static actor parts"
+                            << " actor=" << actor.id
+                            << " reason=" << skinnedError;
+        }
+
+        seenModelPaths.clear();
+        for (const odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart& part : resolvedParts) {
+            const std::string normalizedModelPath = lowerPathCopy(part.modelPath);
+            if (seenModelPaths.insert(normalizedModelPath).second) {
+                appendNifToPrototype(part.modelPath, true);
+            }
+        }
+        return appendPrototypeRange(firstDraw);
+    };
+
+    auto appendCreaturePrototype = [&](const odai::importer::MorrowindActorRecord& actor) -> std::uint32_t {
+        if (actor.modelPath.empty()) {
+            return std::numeric_limits<std::uint32_t>::max();
+        }
+        const std::uint32_t firstDraw = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
+        appendNifToPrototype(actor.modelPath, true);
+        return appendPrototypeRange(firstDraw);
+    };
+
+    std::uint32_t defaultActorPrototypeIndex = std::numeric_limits<std::uint32_t>::max();
+    if (seydaNeenRegion) {
+        const std::uint32_t firstDraw = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
+        const std::vector<std::string_view> fargothModelParts = {
+            "b/B_N_Wood Elf_M_Skins.nif",
+            "b/B_N_Wood Elf_M_Neck.NIF",
+            "b/B_N_Wood Elf_M_Head_02.nif",
+            "b/B_N_Wood Elf_M_Hair_03.nif",
+            "c/C_M_Shirt_C_commonL04.NIF",
+            "c/C_M_Shirt_UA_commonL04.nif",
+            "c/C_M_Shirt_FA_commonL04.nif",
+            "c/C_M_Shirt_W_commonL04.nif",
+            "c/C_M_Pants_G_common02.nif",
+            "c/C_M_pants_A_common02.nif",
+            "c/C_M_Pants_UL_common02.nif",
+            "c/C_M_Pants_K_common02.nif",
+            "c/C_shoes_common_4.NIF"
+        };
+        odai::importer::ImportedSkinnedActorAsset fargothAsset{};
+        std::string skinnedError;
+        const std::filesystem::path baseAnimPath = *dataFilesPath / "Meshes" / "base_anim.nif";
+        bool loadedSkinnedFargoth =
+            odai::importer::loadMorrowindSkinnedActorSkeleton(baseAnimPath, fargothAsset, skinnedError);
+        if (!loadedSkinnedFargoth) {
+            VOX_LOGW("app") << "Fargoth GPU skinning fallback: base_anim.nif failed ("
+                            << skinnedError << ")";
+        }
+        if (loadedSkinnedFargoth) {
+            for (const std::string_view modelPart : fargothModelParts) {
+                const std::filesystem::path nifPath =
+                    *dataFilesPath / "Meshes" / std::filesystem::path(std::string(modelPart));
+                if (!odai::importer::appendMorrowindSkinnedActorPartNif(nifPath, fargothAsset, skinnedError)) {
+                    VOX_LOGW("app") << "Fargoth skinned part skipped: " << nifPath.string()
+                                    << " (" << skinnedError << ")";
+                }
+            }
+            loadedSkinnedFargoth =
+                !fargothAsset.vertices.empty() &&
+                !fargothAsset.indices.empty() &&
+                !fargothAsset.draws.empty() &&
+                fargothAsset.boneIndices.size() == fargothAsset.vertices.size() &&
+                fargothAsset.boneWeights.size() == fargothAsset.vertices.size();
+        }
+        if (loadedSkinnedFargoth) {
+            m_balmoraGuardPrototype.vertices = std::move(fargothAsset.vertices);
+            m_balmoraGuardPrototype.indices = std::move(fargothAsset.indices);
+            m_balmoraGuardPrototype.draws = std::move(fargothAsset.draws);
+            m_balmoraGuardPrototype.boneIndices = std::move(fargothAsset.boneIndices);
+            m_balmoraGuardPrototype.boneWeights = std::move(fargothAsset.boneWeights);
+            m_balmoraGuardPrototype.gpuSkinned = true;
+            for (std::size_t drawIndex = 0; drawIndex < m_balmoraGuardPrototype.draws.size(); ++drawIndex) {
+                const std::string texturePath = drawIndex < fargothAsset.partDiffuseTexturePaths.size()
+                    ? fargothAsset.partDiffuseTexturePaths[drawIndex]
+                    : std::string{};
+                const std::uint32_t textureIndex = addActorTextureSlot(texturePath);
+                const odai::importer::ImportedScenePackedDraw& draw = m_balmoraGuardPrototype.draws[drawIndex];
+                const std::uint32_t indexEnd = std::min<std::uint32_t>(
+                    draw.firstIndex + draw.indexCount,
+                    static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size()));
+                for (std::uint32_t indexOffset = draw.firstIndex; indexOffset < indexEnd; ++indexOffset) {
+                    const std::uint32_t vertexIndex = m_balmoraGuardPrototype.indices[indexOffset];
+                    if (vertexIndex < m_balmoraGuardPrototype.vertices.size()) {
+                        m_balmoraGuardPrototype.vertices[vertexIndex].textureIndex = textureIndex;
+                        m_balmoraGuardPrototype.vertices[vertexIndex].flags =
+                            kImportedSceneMaterialFlagNpcGpuTransform |
+                            kImportedSceneMaterialFlagNpcGpuSkinned;
+                    }
+                }
+            }
+            VOX_LOGI("app") << "Fargoth GPU-skinned actor imported"
+                            << " skeletonNodes=" << fargothAsset.skeleton.size()
+                            << " animations=" << fargothAsset.nodeAnimations.size()
+                            << " clips=" << fargothAsset.animationClips.size()
+                            << " weightedVertices=" << fargothAsset.weightedVertexCount
+                            << " unweightedVertices=" << fargothAsset.unweightedVertexCount
+                            << " unknownInfluences=" << fargothAsset.unknownBoneInfluenceCount
+                            << " droppedInfluences=" << fargothAsset.droppedInfluenceCount;
+        } else {
+            for (const std::string_view modelPart : fargothModelParts) {
+                appendNifToPrototype(modelPart, true);
+            }
+        }
+        defaultActorPrototypeIndex = appendPrototypeRange(firstDraw);
+    } else {
+        const std::uint32_t firstDraw = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
+        const std::vector<std::string_view> actorModelParts = {
+            "b/B_N_Dark Elf_M_Skins.nif",
+            "b/B_N_Dark Elf_M_Neck.NIF",
+            "b/B_N_Dark Elf_M_Head_01.NIF",
+            "b/B_N_Dark Elf_M_Hair_17.nif",
+            "a/A_Bonemold_Cuirass_C.NIF",
+            "a/A_Bonemold_Bracer_W.nif",
+            "a/A_Bonemold_Boots_F.nif",
+            "a/A_Bonemold_Boots_A.nif"
+        };
+        for (const std::string_view modelPart : actorModelParts) {
+            appendNifToPrototype(modelPart, false);
+        }
+        defaultActorPrototypeIndex = appendPrototypeRange(firstDraw);
     }
     if (m_balmoraGuardPrototype.vertices.empty() ||
         m_balmoraGuardPrototype.indices.empty() ||
@@ -2250,26 +2683,14 @@ void App::initializeBalmoraGuards(bool reusePreparedNavmesh) {
     std::vector<odai::math::Vector3> guardSpawns;
     for (const odai::importer::ImportedSceneCellRef& ref : m_importedScene.unresolvedRefs) {
         const std::string refId = lowerPathCopy(ref.refId);
-        const bool useRef =
-            (balmoraRegion && refId == "hlaalu guard_outside") ||
-            (seydaNeenRegion && refId.find("guard") != std::string::npos);
+        const bool useRef = balmoraRegion && refId == "hlaalu guard_outside";
         if (!useRef) {
             continue;
         }
         guardSpawns.push_back({ref.position[0], ref.position[2], ref.position[1]});
     }
     if (guardSpawns.empty()) {
-        if (seydaNeenRegion) {
-            constexpr float kMorrowindCellSizeUnits = 8192.0f;
-            const float cellMinX = static_cast<float>(kSeydaNeenCellX) * kMorrowindCellSizeUnits;
-            const float cellMinZ = static_cast<float>(kSeydaNeenCellY) * kMorrowindCellSizeUnits;
-            guardSpawns = {
-                {cellMinX + 0.46f * kMorrowindCellSizeUnits, 0.0f, cellMinZ + 0.49f * kMorrowindCellSizeUnits},
-                {cellMinX + 0.55f * kMorrowindCellSizeUnits, 0.0f, cellMinZ + 0.54f * kMorrowindCellSizeUnits},
-                {cellMinX + 0.43f * kMorrowindCellSizeUnits, 0.0f, cellMinZ + 0.62f * kMorrowindCellSizeUnits},
-                {cellMinX + 0.61f * kMorrowindCellSizeUnits, 0.0f, cellMinZ + 0.41f * kMorrowindCellSizeUnits}
-            };
-        } else {
+        if (!seydaNeenRegion) {
             guardSpawns = {
                 {-17051.3105f, 228.6063f, -14461.3164f},
                 {-20190.7988f, 169.6947f, -13064.7422f},
@@ -2337,36 +2758,203 @@ void App::initializeBalmoraGuards(bool reusePreparedNavmesh) {
         }
     }
 
+    auto activateActorInstance = [&](
+        const std::string& actorId,
+        odai::importer::MorrowindActorKind kind,
+        int cellX,
+        int cellY,
+        std::uint32_t refNum,
+        bool hasRefNum,
+        const odai::math::Vector3& rawSpawn,
+        float yawRadians,
+        std::uint32_t prototypeIndex,
+        float speed,
+        const std::vector<odai::math::Vector3>& actorRoute
+    ) {
+        const std::string normalizedActorId = lowerPathCopy(actorId);
+        const std::string refKey = morrowindActorRefKeyString(
+            cellX,
+            cellY,
+            refNum,
+            hasRefNum,
+            normalizedActorId,
+            rawSpawn);
+        const auto existing = m_morrowindActorIndexByRefKey.find(refKey);
+        if (existing != m_morrowindActorIndexByRefKey.end() &&
+            existing->second < m_morrowindActors.size()) {
+            MorrowindActorInstance& actor = m_morrowindActors[existing->second];
+            actor.resident = true;
+            actor.actorPrototypeIndex = prototypeIndex;
+            actor.kind = kind;
+            actor.sourceCellX = cellX;
+            actor.sourceCellY = cellY;
+            actor.dialogueActorId = normalizedActorId;
+            if (actor.route.empty() && !actorRoute.empty()) {
+                actor.route = actorRoute;
+            }
+            return;
+        }
+
+        odai::math::Vector3 snappedSpawn{};
+        if (!snapToNavmesh(rawSpawn, snappedSpawn)) {
+            snappedSpawn = rawSpawn;
+        }
+        MorrowindActorInstance actor{};
+        actor.refKey = {cellX, cellY, refNum, normalizedActorId};
+        actor.kind = kind;
+        actor.sourceCellX = cellX;
+        actor.sourceCellY = cellY;
+        actor.originalPosition = snappedSpawn;
+        actor.position = snappedSpawn;
+        actor.previousPosition = snappedSpawn;
+        actor.yawRadians = yawRadians;
+        actor.previousYawRadians = yawRadians;
+        actor.speed = speed;
+        actor.actorPrototypeIndex = prototypeIndex;
+        actor.route = actorRoute;
+        actor.routeIndex = actor.route.empty() ? 0u : (m_morrowindActors.size() % actor.route.size());
+        actor.actorId = normalizedActorId;
+        actor.dialogueActorId = normalizedActorId;
+        actor.resident = true;
+        m_morrowindActorIndexByRefKey.emplace(refKey, m_morrowindActors.size());
+        m_morrowindActors.push_back(std::move(actor));
+    };
+
     for (std::size_t guardIndex = 0; guardIndex < guardSpawns.size(); ++guardIndex) {
         odai::math::Vector3 snappedSpawn{};
         if (!snapToNavmesh(guardSpawns[guardIndex], snappedSpawn)) {
             continue;
         }
-        BalmoraGuardAgent guard{};
-        guard.position = snappedSpawn;
-        guard.previousPosition = snappedSpawn;
-        guard.route = route;
-        guard.routeIndex = route.empty() ? 0u : ((guardIndex * 2u) % route.size());
-        guard.speed = 84.0f + (static_cast<float>(guardIndex % 3u) * 9.0f);
-        guard.walkPhase = static_cast<float>(guardIndex) * 1.37f;
-        guard.previousWalkPhase = guard.walkPhase;
-        guard.scriptActorId =
-            std::string(seydaNeenRegion ? "seyda_neen_guard_" : "balmora_guard_") +
-            std::to_string(guardIndex);
-        m_balmoraGuards.push_back(std::move(guard));
+        activateActorInstance(
+            std::string(seydaNeenRegion ? "seyda_neen_guard_" : "balmora_guard_") + std::to_string(guardIndex),
+            odai::importer::MorrowindActorKind::Npc,
+            m_morrowindRuntimeLoadedCenterValid ? m_morrowindRuntimeLoadedCenterCellX : 0,
+            m_morrowindRuntimeLoadedCenterValid ? m_morrowindRuntimeLoadedCenterCellY : 0,
+            static_cast<std::uint32_t>(guardIndex),
+            false,
+            snappedSpawn,
+            0.0f,
+            defaultActorPrototypeIndex == std::numeric_limits<std::uint32_t>::max() ? 0u : defaultActorPrototypeIndex,
+            84.0f + (static_cast<float>(guardIndex % 3u) * 9.0f),
+            route);
+    }
+
+    if (seydaNeenRegion) {
+        constexpr float kMorrowindCellSizeUnits = 8192.0f;
+        const float cellMinX = static_cast<float>(kSeydaNeenCellX) * kMorrowindCellSizeUnits;
+        const float cellMinZ = static_cast<float>(kSeydaNeenCellY) * kMorrowindCellSizeUnits;
+        odai::math::Vector3 fargothSpawn{
+            cellMinX + 0.49f * kMorrowindCellSizeUnits,
+            0.0f,
+            cellMinZ + 0.50f * kMorrowindCellSizeUnits
+        };
+        for (const odai::importer::ImportedSceneCellRef& ref : m_importedScene.unresolvedRefs) {
+            if (lowerPathCopy(ref.refId) != "fargoth") {
+                continue;
+            }
+            fargothSpawn = {ref.position[0], ref.position[2], ref.position[1]};
+            break;
+        }
+
+        odai::math::Vector3 snappedFargoth{};
+        if (snapToNavmesh(fargothSpawn, snappedFargoth)) {
+            activateActorInstance(
+                "fargoth",
+                odai::importer::MorrowindActorKind::Npc,
+                kSeydaNeenCellX,
+                kSeydaNeenCellY,
+                0u,
+                false,
+                snappedFargoth,
+                odai::math::radians(180.0f),
+                defaultActorPrototypeIndex == std::numeric_limits<std::uint32_t>::max()
+                    ? 0u
+                    : defaultActorPrototypeIndex,
+                0.0f,
+                {});
+            VOX_LOGI("app") << "Seyda Neen NPC enabled: Fargoth at ("
+                            << snappedFargoth.x << ","
+                            << snappedFargoth.y << ","
+                            << snappedFargoth.z << ")";
+        } else {
+            VOX_LOGW("app") << "Fargoth NPC disabled: could not snap spawn to navmesh";
+        }
+    }
+
+    std::unordered_map<std::string, std::uint32_t> actorPrototypeById;
+    std::size_t placedCatalogActors = 0u;
+    constexpr std::size_t kMaxPlacedCatalogActors = 96u;
+    for (const odai::importer::ImportedSceneCellRef& ref : m_importedScene.unresolvedRefs) {
+        if (placedCatalogActors >= kMaxPlacedCatalogActors) {
+            break;
+        }
+        const std::string actorId = lowerPathCopy(ref.refId);
+        if (actorId.empty() || actorId == "fargoth" || actorId.rfind("seyda_neen_guard_", 0u) == 0u) {
+            continue;
+        }
+        const auto actorIt = actorCatalog.actorsById.find(actorId);
+        if (actorIt == actorCatalog.actorsById.end()) {
+            continue;
+        }
+        const odai::importer::MorrowindActorRecord& actorRecord = actorIt->second;
+        std::string prototypeSignature = actorRecord.kind == odai::importer::MorrowindActorKind::Creature
+            ? ("creature:" + actorRecord.modelPath)
+            : ("npc:" + actorRecord.raceId + ":" + actorRecord.headBodyPartId + ":" + actorRecord.hairBodyPartId);
+        for (const std::string& itemId : actorRecord.inventoryItemIds) {
+            prototypeSignature += ":" + itemId;
+        }
+        std::uint32_t prototypeIndex = std::numeric_limits<std::uint32_t>::max();
+        const auto existingPrototype = m_morrowindActorPrototypeCache.find(prototypeSignature);
+        if (existingPrototype != m_morrowindActorPrototypeCache.end()) {
+            prototypeIndex = existingPrototype->second.prototypeIndex;
+        } else {
+            prototypeIndex = actorRecord.kind == odai::importer::MorrowindActorKind::Creature
+                ? appendCreaturePrototype(actorRecord)
+                : appendGenericNpcPrototype(actorRecord);
+            if (prototypeIndex == std::numeric_limits<std::uint32_t>::max()) {
+                continue;
+            }
+            m_morrowindActorPrototypeCache.emplace(
+                prototypeSignature,
+                MorrowindActorPrototypeCacheEntry{prototypeIndex, prototypeSignature});
+            actorPrototypeById.emplace(actorId, prototypeIndex);
+        }
+
+        const odai::math::Vector3 rawSpawn{ref.position[0], ref.position[2], ref.position[1]};
+        activateActorInstance(
+            actorId,
+            actorRecord.kind,
+            ref.cellX,
+            ref.cellY,
+            ref.refNum,
+            ref.hasRefNum,
+            rawSpawn,
+            ref.rotationRadians[2],
+            prototypeIndex,
+            0.0f,
+            {});
+        ++placedCatalogActors;
+    }
+    if (placedCatalogActors > 0u) {
+        VOX_LOGI("app") << guardSceneLabel << " catalog actors enabled"
+                        << " placed=" << placedCatalogActors
+                        << " prototypes=" << actorPrototypeById.size();
     }
 
     const odai::world::Navmesh::Stats navmeshStats = m_balmoraNavmesh.stats();
     VOX_LOGI("app") << guardSceneLabel << " guards enabled"
-                    << " guards=" << m_balmoraGuards.size()
+                    << " actors=" << m_morrowindActors.size()
+                    << " actorParts=" << importedActorPartCount
+                    << " missingParts=" << missingActorPartCount
+                    << " skippedParts=" << skippedActorPartCount
                     << " actorVertices=" << m_balmoraGuardPrototype.vertices.size()
                     << " actorIndices=" << m_balmoraGuardPrototype.indices.size()
                     << " navmeshWalkable=" << navmeshStats.walkableTriangleCount
                     << " navmeshLinks=" << navmeshStats.linkCount;
 }
 
-void App::updateBalmoraGuards(float dt) {
-    if (m_balmoraGuards.empty() || m_balmoraGuardPrototype.vertices.empty() || m_balmoraNavmesh.empty()) {
+void App::updateMorrowindActors(float dt) {
+    if (m_morrowindActors.empty() || m_balmoraGuardPrototype.vertices.empty() || m_balmoraNavmesh.empty()) {
         return;
     }
 
@@ -2376,7 +2964,7 @@ void App::updateBalmoraGuards(float dt) {
             outPoint);
     };
 
-    auto chooseNextPath = [&](BalmoraGuardAgent& guard) -> bool {
+    auto chooseNextPath = [&](MorrowindActorInstance& guard) -> bool {
         guard.path.clear();
         guard.pathIndex = 0;
         if (guard.route.empty()) {
@@ -2403,7 +2991,10 @@ void App::updateBalmoraGuards(float dt) {
         return false;
     };
 
-    for (BalmoraGuardAgent& guard : m_balmoraGuards) {
+    for (MorrowindActorInstance& guard : m_morrowindActors) {
+        if (!guard.resident || guard.disabled || guard.dead) {
+            continue;
+        }
         guard.previousPosition = guard.position;
         guard.previousYawRadians = guard.yawRadians;
         guard.previousWalkPhase = guard.walkPhase;
@@ -2416,14 +3007,15 @@ void App::updateBalmoraGuards(float dt) {
 
         if (m_luaScriptRuntime.initialized() &&
             guard.scriptUpdateCooldownSeconds <= 0.0f &&
-            !guard.scriptActorId.empty()) {
+            !guard.actorId.empty()) {
             guard.scriptUpdateCooldownSeconds = 0.5f;
             const odai::game::LuaScriptRuntime::NpcUpdateCommand command =
                 m_luaScriptRuntime.updateNpc(
-                    guard.scriptActorId,
+                    guard.actorId,
                     guard.position.x,
                     guard.position.y,
-                    guard.position.z);
+                    guard.position.z,
+                    m_morrowindGameHour);
             if (command.handled) {
                 if (command.speed > 0.0f) {
                     guard.speed = command.speed;
@@ -2501,18 +3093,14 @@ void App::updateBalmoraGuards(float dt) {
     }
 }
 
-void App::rebuildBalmoraGuardRenderFrame(float simulationAlpha) {
-    m_balmoraGuardFrameVertices.clear();
-    m_balmoraGuardFrameIndices.clear();
-    m_balmoraGuardFrameDraws.clear();
-    if (m_balmoraGuards.empty() || m_balmoraGuardPrototype.vertices.empty()) {
+void App::rebuildMorrowindActorRenderFrame(float simulationAlpha) {
+    m_balmoraGuardFrameInstances.clear();
+    if (m_morrowindActors.empty() || m_balmoraGuardPrototype.vertices.empty()) {
         return;
     }
 
     const float alpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
-    m_balmoraGuardFrameVertices.reserve(m_balmoraGuardPrototype.vertices.size() * m_balmoraGuards.size());
-    m_balmoraGuardFrameIndices.reserve(m_balmoraGuardPrototype.indices.size() * m_balmoraGuards.size());
-    m_balmoraGuardFrameDraws.reserve(m_balmoraGuardPrototype.draws.size() * m_balmoraGuards.size());
+    m_balmoraGuardFrameInstances.reserve(m_morrowindActors.size());
 
     const auto lerpAngle = [](float from, float to, float t) {
         float delta = std::fmod(to - from, kTwoPi);
@@ -2523,34 +3111,55 @@ void App::rebuildBalmoraGuardRenderFrame(float simulationAlpha) {
         }
         return from + (delta * t);
     };
-    for (const BalmoraGuardAgent& guard : m_balmoraGuards) {
+    for (const MorrowindActorInstance& guard : m_morrowindActors) {
+        if (!guard.resident || guard.disabled || guard.dead) {
+            continue;
+        }
         const odai::math::Vector3 position =
             guard.previousPosition + ((guard.position - guard.previousPosition) * alpha);
         const float yawRadians = lerpAngle(guard.previousYawRadians, guard.yawRadians, alpha);
-        const std::uint32_t npcFlags =
-            kImportedSceneMaterialFlagNpcGpuTransform | encodeNpcYawFlagBits(yawRadians);
-
-        const std::uint32_t baseVertex = static_cast<std::uint32_t>(m_balmoraGuardFrameVertices.size());
-        for (const odai::importer::ImportedScenePackedVertex& sourceVertex : m_balmoraGuardPrototype.vertices) {
-            odai::importer::ImportedScenePackedVertex vertex = sourceVertex;
-            vertex.color[0] = position.x;
-            vertex.color[1] = position.y;
-            vertex.color[2] = position.z;
-            vertex.flags |= npcFlags;
-            m_balmoraGuardFrameVertices.push_back(vertex);
+        odai::render::ImportedActorInstanceData instance{};
+        instance.position[0] = position.x;
+        instance.position[1] = position.y;
+        instance.position[2] = position.z;
+        instance.yawRadians = yawRadians;
+        const float frameMoveDistanceSq =
+            ((guard.position.x - guard.previousPosition.x) * (guard.position.x - guard.previousPosition.x)) +
+            ((guard.position.z - guard.previousPosition.z) * (guard.position.z - guard.previousPosition.z));
+        instance.animationTime = frameMoveDistanceSq > 0.01f
+            ? (guard.previousWalkPhase + ((guard.walkPhase - guard.previousWalkPhase) * alpha))
+            : 0.0f;
+        instance.flags = kImportedSceneMaterialFlagNpcGpuTransform;
+        instance.assetIndex = 0u;
+        if (guard.actorPrototypeIndex < m_importedActorPrototypeRanges.size()) {
+            const ImportedActorPrototypeRange& range =
+                m_importedActorPrototypeRanges[guard.actorPrototypeIndex];
+            instance.firstDraw = range.firstDraw;
+            instance.drawCount = range.drawCount;
         }
-
-        const std::uint32_t firstActorIndex = static_cast<std::uint32_t>(m_balmoraGuardFrameIndices.size());
-        for (const std::uint32_t sourceIndex : m_balmoraGuardPrototype.indices) {
-            m_balmoraGuardFrameIndices.push_back(baseVertex + sourceIndex);
-        }
-        for (const odai::importer::ImportedScenePackedDraw& sourceDraw : m_balmoraGuardPrototype.draws) {
-            odai::importer::ImportedScenePackedDraw draw{};
-            draw.firstIndex = firstActorIndex + sourceDraw.firstIndex;
-            draw.indexCount = sourceDraw.indexCount;
-            m_balmoraGuardFrameDraws.push_back(draw);
-        }
+        m_balmoraGuardFrameInstances.push_back(instance);
     }
+}
+
+bool App::uploadMorrowindActorRenderAsset() {
+    if (m_balmoraGuardPrototype.vertices.empty() ||
+        m_balmoraGuardPrototype.indices.empty() ||
+        m_balmoraGuardPrototype.draws.empty()) {
+        m_renderer.clearImportedActorAssets();
+        return true;
+    }
+
+    odai::render::ImportedActorRenderAssetData actorAsset{};
+    actorAsset.vertices = m_balmoraGuardPrototype.vertices;
+    actorAsset.indices = m_balmoraGuardPrototype.indices;
+    actorAsset.draws = m_balmoraGuardPrototype.draws;
+    actorAsset.boneIndices = m_balmoraGuardPrototype.boneIndices;
+    actorAsset.boneWeights = m_balmoraGuardPrototype.boneWeights;
+    if (!m_renderer.uploadImportedActorAsset(actorAsset)) {
+        VOX_LOGW("app") << "failed to upload Balmora guard actor render asset";
+        return false;
+    }
+    return true;
 }
 
 void App::assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId) {
@@ -2641,12 +3250,7 @@ void App::startMorrowindExteriorStreamingPrepare(int centerCellX, int centerCell
     const int targetCellX = centerCellX;
     const int targetCellY = centerCellY;
     const int targetRadius = m_morrowindRuntimeExteriorRadius;
-    const bool prepareGuardNavmesh =
-        balmoraGuardsEnabledByEnvironment() &&
-        morrowindExteriorWindowHasWalkingGuards(
-            targetCellX,
-            targetCellY,
-            targetRadius);
+    const bool prepareGuardNavmesh = balmoraGuardsEnabledByEnvironment();
 
     VOX_LOGI("app") << "preparing Morrowind exterior cells around ("
                     << targetCellX << ", " << targetCellY
@@ -2747,28 +3351,29 @@ bool App::pollMorrowindExteriorStreamingPrepare() {
     m_morrowindRuntimeLoadedCenterCellX = prepared.centerCellX;
     m_morrowindRuntimeLoadedCenterCellY = prepared.centerCellY;
     m_morrowindRuntimeLoadedCenterValid = true;
-    if (balmoraGuardsEnabledByEnvironment() &&
-        morrowindExteriorWindowHasWalkingGuards(
-            prepared.centerCellX,
-            prepared.centerCellY,
-            m_morrowindRuntimeExteriorRadius)) {
+    if (balmoraGuardsEnabledByEnvironment()) {
         m_balmoraNavmesh = std::move(prepared.navmesh);
         if (!m_balmoraNavmesh.empty()) {
             VOX_LOGI("app") << "streamed guard navmesh "
                             << (prepared.navmeshCacheHit ? "loaded from cache" : "built and cached");
         }
-        initializeBalmoraGuards(true);
+        rebuildMorrowindActorsForLoadedRegion(!m_balmoraNavmesh.empty());
         if (!odai::importer::buildGpuSceneAssetFromImportedScene(m_importedScene, m_gpuSceneAsset)) {
             VOX_LOGW("app") << "failed to rebuild streamed exterior GPU scene after guard texture import";
             return false;
         }
     } else {
-        m_balmoraGuards.clear();
+        for (MorrowindActorInstance& actor : m_morrowindActors) {
+            actor.resident = false;
+        }
         m_balmoraGuardPrototype = {};
         m_balmoraNavmesh.clear();
     }
     if (!m_renderer.uploadGpuScene(m_gpuSceneAsset)) {
         VOX_LOGW("app") << "failed to upload prepared Morrowind exterior scene";
+        return false;
+    }
+    if (!uploadMorrowindActorRenderAsset()) {
         return false;
     }
     m_gpuSceneRuntime = odai::importer::createGpuSceneRuntime(m_gpuSceneAsset);
@@ -2788,6 +3393,50 @@ bool App::pollMorrowindExteriorStreamingPrepare() {
 }
 
 void App::update(float dt, float simulationAlpha) {
+    processGameplayUiCommand();
+    syncGameplayUiState();
+
+    if (m_dayCycleEnabled) {
+        m_dayCyclePhase += std::max(dt, 0.0f) * kDayCycleSpeedCyclesPerSecond;
+        m_dayCyclePhase -= std::floor(m_dayCyclePhase);
+        m_morrowindGameHour += std::max(dt, 0.0f) * kDayCycleSpeedCyclesPerSecond * 24.0f;
+        m_morrowindGameHour = std::fmod(m_morrowindGameHour, 24.0f);
+        if (m_morrowindGameHour < 0.0f) {
+            m_morrowindGameHour += 24.0f;
+        }
+        // Winter solar arc model:
+        // - fixed latitude + declination
+        // - hour angle advances through a full day
+        // - yields low sun altitude and modest azimuth drift (SE -> S -> SW)
+        const float latitudeRadians = odai::math::radians(kDayCycleLatitudeDegrees);
+        const float declinationRadians = odai::math::radians(kDayCycleWinterDeclinationDegrees);
+        const float hourAngleRadians = ((m_dayCyclePhase * 360.0f) - 180.0f) * (kTwoPi / 360.0f);
+
+        const float sinLat = std::sin(latitudeRadians);
+        const float cosLat = std::cos(latitudeRadians);
+        const float sinDec = std::sin(declinationRadians);
+        const float cosDec = std::cos(declinationRadians);
+        const float sinHour = std::sin(hourAngleRadians);
+        const float cosHour = std::cos(hourAngleRadians);
+
+        // Local ENU components of sun direction.
+        // Solar convention: negative hour angle = morning (east), positive = afternoon (west).
+        const float sunEast = -cosDec * sinHour;
+        const float sunNorth = (cosLat * sinDec) - (sinLat * cosDec * cosHour);
+        const float sunUp = (sinLat * sinDec) + (cosLat * cosDec * cosHour);
+
+        const float sunPitchDegrees = odai::math::degrees(std::asin(std::clamp(sunUp, -1.0f, 1.0f)));
+        float sunAzimuthDegrees = odai::math::degrees(std::atan2(sunEast, sunNorth));
+        if (sunAzimuthDegrees < 0.0f) {
+            sunAzimuthDegrees += 360.0f;
+        }
+
+        // Convert azimuth (north=0, east=90, south=180) to engine yaw
+        // where yaw 0 = +X (east), yaw 90 = +Z (south), yaw -90 = -Z (north).
+        const float sunYawDegrees = wrapDegreesSigned((sunAzimuthDegrees - 90.0f) + kDayCycleAzimuthOffsetDegrees);
+        m_renderer.setSunAngles(sunYawDegrees, sunPitchDegrees);
+    }
+
     if (m_importedSceneDemoEnabled) {
         (void)updateMorrowindExteriorStreaming(false);
         const float renderAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
@@ -2801,15 +3450,11 @@ void App::update(float dt, float simulationAlpha) {
         };
         m_visibleChunkIndices.clear();
         m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
-        rebuildBalmoraGuardRenderFrame(renderAlpha);
+        rebuildMorrowindActorRenderFrame(renderAlpha);
         odai::render::ImportedActorFrameData guardFrameData{};
         const odai::render::ImportedActorFrameData* guardFrameDataPtr = nullptr;
-        if (!m_balmoraGuardFrameVertices.empty() &&
-            !m_balmoraGuardFrameIndices.empty() &&
-            !m_balmoraGuardFrameDraws.empty()) {
-            guardFrameData.vertices = m_balmoraGuardFrameVertices;
-            guardFrameData.indices = m_balmoraGuardFrameIndices;
-            guardFrameData.draws = m_balmoraGuardFrameDraws;
+        if (!m_balmoraGuardFrameInstances.empty()) {
+            guardFrameData.instances = m_balmoraGuardFrameInstances;
             guardFrameDataPtr = &guardFrameData;
         }
         m_renderer.renderFrame(
@@ -2903,42 +3548,6 @@ void App::update(float dt, float simulationAlpha) {
                 m_worldAutosaveElapsedSeconds = 0.0f;
             }
         }
-    }
-
-    if (m_dayCycleEnabled) {
-        m_dayCyclePhase += std::max(dt, 0.0f) * kDayCycleSpeedCyclesPerSecond;
-        m_dayCyclePhase -= std::floor(m_dayCyclePhase);
-        // Winter solar arc model:
-        // - fixed latitude + declination
-        // - hour angle advances through a full day
-        // - yields low sun altitude and modest azimuth drift (SE -> S -> SW)
-        const float latitudeRadians = odai::math::radians(kDayCycleLatitudeDegrees);
-        const float declinationRadians = odai::math::radians(kDayCycleWinterDeclinationDegrees);
-        const float hourAngleRadians = ((m_dayCyclePhase * 360.0f) - 180.0f) * (kTwoPi / 360.0f);
-
-        const float sinLat = std::sin(latitudeRadians);
-        const float cosLat = std::cos(latitudeRadians);
-        const float sinDec = std::sin(declinationRadians);
-        const float cosDec = std::cos(declinationRadians);
-        const float sinHour = std::sin(hourAngleRadians);
-        const float cosHour = std::cos(hourAngleRadians);
-
-        // Local ENU components of sun direction.
-        // Solar convention: negative hour angle = morning (east), positive = afternoon (west).
-        const float sunEast = -cosDec * sinHour;
-        const float sunNorth = (cosLat * sinDec) - (sinLat * cosDec * cosHour);
-        const float sunUp = (sinLat * sinDec) + (cosLat * cosDec * cosHour);
-
-        const float sunPitchDegrees = odai::math::degrees(std::asin(std::clamp(sunUp, -1.0f, 1.0f)));
-        float sunAzimuthDegrees = odai::math::degrees(std::atan2(sunEast, sunNorth));
-        if (sunAzimuthDegrees < 0.0f) {
-            sunAzimuthDegrees += 360.0f;
-        }
-
-        // Convert azimuth (north=0, east=90, south=180) to engine yaw
-        // where yaw 0 = +X (east), yaw 90 = +Z (south), yaw -90 = -Z (north).
-        const float sunYawDegrees = wrapDegreesSigned((sunAzimuthDegrees - 90.0f) + kDayCycleAzimuthOffsetDegrees);
-        m_renderer.setSunAngles(sunYawDegrees, sunPitchDegrees);
     }
 
     const float renderAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
@@ -3224,7 +3833,10 @@ void App::pollInput() {
 
     const bool escapeKeyDown = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     if (escapeKeyDown && !m_wasEscapeKeyDown) {
-        if (m_debugUiVisible) {
+        if (!m_activeDialogueActorId.empty()) {
+            closeDialogue();
+            uiVisibilityChanged = true;
+        } else if (m_debugUiVisible) {
             toggleDebugUi();
             uiVisibilityChanged = true;
         }
@@ -3348,8 +3960,7 @@ void App::pollInput() {
         uiVisibilityChanged = true;
     }
     if (uiVisibilityChanged) {
-        glfwSetInputMode(m_window, GLFW_CURSOR, isAnyUiVisible() ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
-        m_hasMouseSample = false;
+        refreshUiCursorMode();
     }
 
     m_input.quitRequested = false;
@@ -3412,6 +4023,21 @@ void App::pollInput() {
     m_input.gamepadMoveRight = controllerMoveRight;
     m_input.gamepadLookX = controllerLookX;
     m_input.gamepadLookY = controllerLookY;
+    if (!m_activeDialogueActorId.empty()) {
+        m_input.moveForward = false;
+        m_input.moveBackward = false;
+        m_input.moveLeft = false;
+        m_input.moveRight = false;
+        m_input.moveUp = false;
+        m_input.moveDown = false;
+        m_input.sprintDown = false;
+        m_input.placeBlockDown = false;
+        m_input.removeBlockDown = false;
+        m_input.gamepadMoveForward = 0.0f;
+        m_input.gamepadMoveRight = 0.0f;
+        m_input.gamepadLookX = 0.0f;
+        m_input.gamepadLookY = 0.0f;
+    }
 
     double mouseX = 0.0;
     double mouseY = 0.0;

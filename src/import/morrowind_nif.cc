@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -1035,6 +1036,13 @@ bool isFiniteVector(const std::array<float, 3>& value) {
 struct GeometryTraversalState {
     std::array<float, 16> parentTransform = identityMatrix();
     const std::vector<std::array<float, 16>>* recordWorldTransforms = nullptr;
+    const std::unordered_map<std::string, std::uint32_t>* canonicalBoneIndexByName = nullptr;
+    std::vector<std::array<std::uint16_t, 4>>* outBoneIndices = nullptr;
+    std::vector<std::array<float, 4>>* outBoneWeights = nullptr;
+    std::uint32_t* weightedVertexCount = nullptr;
+    std::uint32_t* unweightedVertexCount = nullptr;
+    std::uint32_t* unknownBoneInfluenceCount = nullptr;
+    std::uint32_t* droppedInfluenceCount = nullptr;
     bool skipMeshes = false;
     bool discardRootTransform = false;
     bool includeHiddenGeometry = false;
@@ -1226,10 +1234,13 @@ void appendGeometry(
                         continue;
                     }
                     const NifSkinDataRecord::BoneData& bone = skinDataRecord.skinData.bones[boneIndex];
+                    // NiSkinData stores each bone transform as the inverse bind
+                    // matrix. Match OpenMW's solve order:
+                    // inverseBind * currentBoneWorld * skinTransform.
                     const std::array<float, 16> boneMatrix = multiplyMatrices(
                         multiplyMatrices(
-                            (*state.recordWorldTransforms)[static_cast<std::size_t>(boneRef)],
-                            makeTransformMatrix(bone.transform)),
+                            makeTransformMatrix(bone.transform),
+                            (*state.recordWorldTransforms)[static_cast<std::size_t>(boneRef)]),
                         skinMatrix);
                     for (const NifSkinDataRecord::VertexWeight& weight : bone.weights) {
                         if (weight.vertexIndex >= vertexCount || weight.weight <= 0.0f) {
@@ -1251,6 +1262,96 @@ void appendGeometry(
                         bakedSkinWeights[vertexIndex] += weight.weight;
                     }
                 }
+            }
+        }
+    }
+
+    std::vector<std::array<std::uint16_t, 4>> sourceBoneIndices;
+    std::vector<std::array<float, 4>> sourceBoneWeights;
+    if (state.outBoneIndices != nullptr && state.outBoneWeights != nullptr) {
+        const std::size_t vertexCount = dataRecord.triShapeData.vertices.size();
+        std::vector<std::vector<ImportedBoneInfluence>> allInfluences(vertexCount);
+        if (state.canonicalBoneIndexByName != nullptr &&
+            geometryRecord.geometry.skinInstanceRef >= 0 &&
+            static_cast<std::size_t>(geometryRecord.geometry.skinInstanceRef) < records.size()) {
+            const NifRecord& skinInstanceRecord =
+                records[static_cast<std::size_t>(geometryRecord.geometry.skinInstanceRef)];
+            if (skinInstanceRecord.kind == RecordKind::SkinInstance &&
+                skinInstanceRecord.skinInstance.skinDataRef >= 0 &&
+                static_cast<std::size_t>(skinInstanceRecord.skinInstance.skinDataRef) < records.size()) {
+                const NifRecord& skinDataRecord =
+                    records[static_cast<std::size_t>(skinInstanceRecord.skinInstance.skinDataRef)];
+                if (skinDataRecord.kind == RecordKind::SkinData) {
+                    const std::size_t boneCount = std::min(
+                        skinDataRecord.skinData.bones.size(),
+                        skinInstanceRecord.skinInstance.boneRefs.size());
+                    for (std::size_t skinBoneIndex = 0; skinBoneIndex < boneCount; ++skinBoneIndex) {
+                        const std::int32_t boneRef = skinInstanceRecord.skinInstance.boneRefs[skinBoneIndex];
+                        if (boneRef < 0 || static_cast<std::size_t>(boneRef) >= records.size()) {
+                            continue;
+                        }
+                        const NifRecord& boneRecord = records[static_cast<std::size_t>(boneRef)];
+                        const std::string boneName =
+                            boneRecord.kind == RecordKind::Node ? boneRecord.node.avObject.name : std::string{};
+                        const auto foundBone = state.canonicalBoneIndexByName->find(lowerAsciiCopy(boneName));
+                        if (foundBone == state.canonicalBoneIndexByName->end()) {
+                            if (state.unknownBoneInfluenceCount != nullptr) {
+                                *state.unknownBoneInfluenceCount += static_cast<std::uint32_t>(
+                                    skinDataRecord.skinData.bones[skinBoneIndex].weights.size());
+                            }
+                            continue;
+                        }
+                        const std::uint32_t canonicalBoneIndex = foundBone->second;
+                        if (canonicalBoneIndex > std::numeric_limits<std::uint16_t>::max()) {
+                            continue;
+                        }
+                        for (const NifSkinDataRecord::VertexWeight& weight :
+                             skinDataRecord.skinData.bones[skinBoneIndex].weights) {
+                            if (weight.vertexIndex >= vertexCount || weight.weight <= 0.0f) {
+                                continue;
+                            }
+                            allInfluences[weight.vertexIndex].push_back(
+                                ImportedBoneInfluence{
+                                    canonicalBoneIndex,
+                                    weight.weight
+                                });
+                        }
+                    }
+                }
+            }
+        }
+
+        sourceBoneIndices.assign(vertexCount, {0u, 0u, 0u, 0u});
+        sourceBoneWeights.assign(vertexCount, {0.0f, 0.0f, 0.0f, 0.0f});
+        for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+            std::vector<ImportedBoneInfluence>& influences = allInfluences[vertexIndex];
+            std::sort(
+                influences.begin(),
+                influences.end(),
+                [](const ImportedBoneInfluence& lhs, const ImportedBoneInfluence& rhs) {
+                    return lhs.weight > rhs.weight;
+                });
+            if (influences.size() > 4u && state.droppedInfluenceCount != nullptr) {
+                *state.droppedInfluenceCount += static_cast<std::uint32_t>(influences.size() - 4u);
+            }
+            float totalWeight = 0.0f;
+            const std::size_t keptInfluenceCount = std::min<std::size_t>(influences.size(), 4u);
+            for (std::size_t influenceIndex = 0; influenceIndex < keptInfluenceCount; ++influenceIndex) {
+                totalWeight += influences[influenceIndex].weight;
+            }
+            if (totalWeight > 0.00001f) {
+                const float invWeight = 1.0f / totalWeight;
+                for (std::size_t influenceIndex = 0; influenceIndex < keptInfluenceCount; ++influenceIndex) {
+                    sourceBoneIndices[vertexIndex][influenceIndex] =
+                        static_cast<std::uint16_t>(influences[influenceIndex].boneIndex);
+                    sourceBoneWeights[vertexIndex][influenceIndex] =
+                        influences[influenceIndex].weight * invWeight;
+                }
+                if (state.weightedVertexCount != nullptr) {
+                    ++(*state.weightedVertexCount);
+                }
+            } else if (state.unweightedVertexCount != nullptr) {
+                ++(*state.unweightedVertexCount);
             }
         }
     }
@@ -1307,6 +1408,15 @@ void appendGeometry(
             vertex.uv[1] = dataRecord.triShapeData.uv0[vertexIndex][1];
         }
         outResult.mesh.vertices.push_back(vertex);
+        if (state.outBoneIndices != nullptr && state.outBoneWeights != nullptr) {
+            if (vertexIndex < sourceBoneIndices.size()) {
+                state.outBoneIndices->push_back(sourceBoneIndices[vertexIndex]);
+                state.outBoneWeights->push_back(sourceBoneWeights[vertexIndex]);
+            } else {
+                state.outBoneIndices->push_back({0u, 0u, 0u, 0u});
+                state.outBoneWeights->push_back({0.0f, 0.0f, 0.0f, 0.0f});
+            }
+        }
     }
 
     outResult.mesh.indices.reserve(outResult.mesh.indices.size() + dataRecord.triShapeData.indices.size());
@@ -1515,6 +1625,13 @@ struct StaticNifLoadOptions {
     bool keepAlphaBlendOnlyParts = false;
     bool preserveRootTransform = false;
     bool bakeSkinBindPose = false;
+    const std::unordered_map<std::string, std::uint32_t>* canonicalBoneIndexByName = nullptr;
+    std::vector<std::array<std::uint16_t, 4>>* outBoneIndices = nullptr;
+    std::vector<std::array<float, 4>>* outBoneWeights = nullptr;
+    std::uint32_t* weightedVertexCount = nullptr;
+    std::uint32_t* unweightedVertexCount = nullptr;
+    std::uint32_t* unknownBoneInfluenceCount = nullptr;
+    std::uint32_t* droppedInfluenceCount = nullptr;
 };
 
 bool loadMorrowindStaticNifWithOptions(
@@ -1690,6 +1807,13 @@ bool loadMorrowindStaticNifWithOptions(
             traversalState.includeHiddenGeometry = options.includeHiddenGeometry;
             traversalState.keepAlphaBlendOnlyParts = options.keepAlphaBlendOnlyParts;
             traversalState.bakeSkinBindPose = options.bakeSkinBindPose;
+            traversalState.canonicalBoneIndexByName = options.canonicalBoneIndexByName;
+            traversalState.outBoneIndices = options.outBoneIndices;
+            traversalState.outBoneWeights = options.outBoneWeights;
+            traversalState.weightedVertexCount = options.weightedVertexCount;
+            traversalState.unweightedVertexCount = options.unweightedVertexCount;
+            traversalState.unknownBoneInfluenceCount = options.unknownBoneInfluenceCount;
+            traversalState.droppedInfluenceCount = options.droppedInfluenceCount;
             appendGeometry(records, rootRef, traversalState, outResult, sawGeometry);
         }
         if (!sawGeometry) {
@@ -1724,7 +1848,7 @@ bool loadMorrowindActorPartNif(
     std::string& outError
 ) {
     StaticNifLoadOptions options{};
-    options.includeHiddenGeometry = true;
+    options.includeHiddenGeometry = false;
     options.keepAlphaBlendOnlyParts = true;
     options.preserveRootTransform = true;
     options.bakeSkinBindPose = true;
@@ -1950,6 +2074,190 @@ bool loadMorrowindAnimatedNif(
         outResult = ImportedAnimatedNifResult{};
         return false;
     }
+}
+
+bool loadMorrowindSkinnedActorSkeleton(
+    const std::filesystem::path& baseAnimPath,
+    ImportedSkinnedActorAsset& outAsset,
+    std::string& outError
+) {
+    ImportedAnimatedNifResult baseAnim{};
+    if (!loadMorrowindAnimatedNif(baseAnimPath, baseAnim, outError)) {
+        if (!std::filesystem::exists(baseAnimPath)) {
+            return false;
+        }
+        outAsset.skeleton.clear();
+        outAsset.nodeAnimations.clear();
+        outAsset.animationClips.clear();
+        const std::vector<std::pair<std::string, std::int32_t>> fallbackBones = {
+            {"Bip01", -1},
+            {"Bip01 Pelvis", 0},
+            {"Bip01 Spine", 1},
+            {"Bip01 Spine1", 2},
+            {"Bip01 Neck", 3},
+            {"Bip01 Head", 4},
+            {"Bip01 L Clavicle", 3},
+            {"Bip01 L UpperArm", 6},
+            {"Bip01 L Forearm", 7},
+            {"Bip01 L Hand", 8},
+            {"Bip01 R Clavicle", 3},
+            {"Bip01 R UpperArm", 10},
+            {"Bip01 R Forearm", 11},
+            {"Bip01 R Hand", 12},
+            {"Bip01 L Thigh", 1},
+            {"Bip01 L Calf", 14},
+            {"Bip01 L Foot", 15},
+            {"Bip01 L Toe0", 16},
+            {"Bip01 R Thigh", 1},
+            {"Bip01 R Calf", 18},
+            {"Bip01 R Foot", 19},
+            {"Bip01 R Toe0", 20}
+        };
+        for (const auto& [name, parentIndex] : fallbackBones) {
+            ImportedSkeletonNode node{};
+            node.name = name;
+            node.parentIndex = parentIndex;
+            outAsset.skeleton.push_back(std::move(node));
+        }
+        ImportedNifNodeAnimation fallbackAnimation{};
+        fallbackAnimation.nodeIndex = 0u;
+        fallbackAnimation.startTime = 0.0f;
+        fallbackAnimation.stopTime = 1.0f;
+        outAsset.nodeAnimations.push_back(std::move(fallbackAnimation));
+        outAsset.animationClips.push_back(ImportedAnimationClip{"idle", 0.0f, 2.0f});
+        outAsset.animationClips.push_back(ImportedAnimationClip{"walk", 0.0f, 1.0f});
+        outError.clear();
+        return true;
+    }
+    outAsset.skeleton.clear();
+    outAsset.nodeAnimations = baseAnim.nodeAnimations;
+    outAsset.animationClips.clear();
+    outAsset.skeleton.reserve(baseAnim.nodes.size());
+    for (const ImportedAnimatedNifNode& node : baseAnim.nodes) {
+        ImportedSkeletonNode skeletonNode{};
+        skeletonNode.name = node.name;
+        skeletonNode.parentIndex = node.parentIndex;
+        std::memcpy(skeletonNode.localTransform, node.localTransform, sizeof(skeletonNode.localTransform));
+        outAsset.skeleton.push_back(std::move(skeletonNode));
+    }
+
+    float startTime = std::numeric_limits<float>::max();
+    float stopTime = 0.0f;
+    for (const ImportedNifNodeAnimation& animation : outAsset.nodeAnimations) {
+        startTime = std::min(startTime, animation.startTime);
+        stopTime = std::max(stopTime, animation.stopTime);
+    }
+    if (!outAsset.nodeAnimations.empty() && startTime < stopTime) {
+        const float duration = stopTime - startTime;
+        ImportedAnimationClip idleClip{};
+        idleClip.name = "idle";
+        idleClip.startTime = startTime;
+        idleClip.stopTime = startTime + std::min(duration, 2.0f);
+        outAsset.animationClips.push_back(idleClip);
+
+        ImportedAnimationClip walkClip{};
+        walkClip.name = "walk";
+        walkClip.startTime = startTime + std::min(duration * 0.15f, 2.0f);
+        walkClip.stopTime = stopTime;
+        outAsset.animationClips.push_back(walkClip);
+    }
+    return !outAsset.skeleton.empty();
+}
+
+bool appendMorrowindSkinnedActorPartNif(
+    const std::filesystem::path& nifPath,
+    ImportedSkinnedActorAsset& ioAsset,
+    std::string& outError
+) {
+    if (ioAsset.skeleton.empty()) {
+        outError = "Skinned actor skeleton must be loaded before actor parts";
+        return false;
+    }
+
+    std::unordered_map<std::string, std::uint32_t> boneIndexByName;
+    boneIndexByName.reserve(ioAsset.skeleton.size());
+    for (std::uint32_t boneIndex = 0; boneIndex < ioAsset.skeleton.size(); ++boneIndex) {
+        boneIndexByName.emplace(lowerAsciiCopy(ioAsset.skeleton[boneIndex].name), boneIndex);
+    }
+
+    ImportedNifResult partResult{};
+    std::vector<std::array<std::uint16_t, 4>> partBoneIndices;
+    std::vector<std::array<float, 4>> partBoneWeights;
+    StaticNifLoadOptions options{};
+    options.includeHiddenGeometry = false;
+    options.keepAlphaBlendOnlyParts = true;
+    options.preserveRootTransform = true;
+    // Body-part NIFs are authored in part-local spaces and rely on NiSkinData to
+    // place them onto the shared humanoid skeleton. Keep the weights for runtime
+    // animation, but bake the bind pose here so head, hair, clothing, hands, and
+    // feet assemble into one coherent NPC before per-frame deformation.
+    options.bakeSkinBindPose = true;
+    options.canonicalBoneIndexByName = &boneIndexByName;
+    options.outBoneIndices = &partBoneIndices;
+    options.outBoneWeights = &partBoneWeights;
+    options.weightedVertexCount = &ioAsset.weightedVertexCount;
+    options.unweightedVertexCount = &ioAsset.unweightedVertexCount;
+    options.unknownBoneInfluenceCount = &ioAsset.unknownBoneInfluenceCount;
+    options.droppedInfluenceCount = &ioAsset.droppedInfluenceCount;
+    if (!loadMorrowindStaticNifWithOptions(nifPath, partResult, outError, options)) {
+        return false;
+    }
+    if (partResult.mesh.vertices.empty() || partResult.mesh.indices.empty()) {
+        outError = "Skinned actor part had no geometry";
+        return false;
+    }
+    if (partBoneIndices.size() != partResult.mesh.vertices.size() ||
+        partBoneWeights.size() != partResult.mesh.vertices.size()) {
+        outError = "Skinned actor part influence count did not match vertex count";
+        return false;
+    }
+
+    const std::uint32_t vertexBase = static_cast<std::uint32_t>(ioAsset.vertices.size());
+    const std::uint32_t indexBase = static_cast<std::uint32_t>(ioAsset.indices.size());
+    ioAsset.vertices.reserve(ioAsset.vertices.size() + partResult.mesh.vertices.size());
+    ioAsset.boneIndices.reserve(ioAsset.boneIndices.size() + partBoneIndices.size());
+    ioAsset.boneWeights.reserve(ioAsset.boneWeights.size() + partBoneWeights.size());
+    for (std::size_t vertexIndex = 0; vertexIndex < partResult.mesh.vertices.size(); ++vertexIndex) {
+        const ImportedSceneVertex& srcVertex = partResult.mesh.vertices[vertexIndex];
+        ImportedScenePackedVertex dstVertex{};
+        std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
+        std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
+        dstVertex.color[0] = 0.78f;
+        dstVertex.color[1] = 0.72f;
+        dstVertex.color[2] = 0.62f;
+        std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
+        dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
+        ioAsset.vertices.push_back(dstVertex);
+        ioAsset.boneIndices.push_back(partBoneIndices[vertexIndex]);
+        ioAsset.boneWeights.push_back(partBoneWeights[vertexIndex]);
+    }
+    ioAsset.indices.reserve(ioAsset.indices.size() + partResult.mesh.indices.size());
+    for (const std::uint32_t index : partResult.mesh.indices) {
+        ioAsset.indices.push_back(vertexBase + index);
+    }
+
+    if (partResult.mesh.parts.empty()) {
+        ImportedScenePackedDraw draw{};
+        draw.firstIndex = indexBase;
+        draw.indexCount = static_cast<std::uint32_t>(partResult.mesh.indices.size());
+        ioAsset.draws.push_back(draw);
+        ioAsset.partDiffuseTexturePaths.push_back(partResult.diffuseTexturePath);
+    } else {
+        for (std::size_t partIndex = 0; partIndex < partResult.mesh.parts.size(); ++partIndex) {
+            const ImportedSceneMeshPart& srcPart = partResult.mesh.parts[partIndex];
+            ImportedScenePackedDraw draw{};
+            draw.firstIndex = indexBase + srcPart.firstIndex;
+            draw.indexCount = srcPart.indexCount;
+            ioAsset.draws.push_back(draw);
+            std::string texturePath = partResult.diffuseTexturePath;
+            if (partIndex < partResult.partDiffuseTexturePaths.size() &&
+                !partResult.partDiffuseTexturePaths[partIndex].empty()) {
+                texturePath = partResult.partDiffuseTexturePaths[partIndex];
+            }
+            ioAsset.partDiffuseTexturePaths.push_back(texturePath);
+        }
+    }
+    return true;
 }
 
 }  // namespace odai::importer
