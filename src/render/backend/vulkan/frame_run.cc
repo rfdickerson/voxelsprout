@@ -1462,11 +1462,55 @@ void RendererBackend::renderFrame(
     }
     m_debugCpuGiOccupancyBuildMs = voxelGiOccupancyCpuMs;
 
+    odai::render::ImportedActorBonePaletteMatrix fallbackActorBonePaletteMatrix{};
+    VkDescriptorBufferInfo importedActorBonePaletteBufferInfo{};
+    importedActorBonePaletteBufferInfo.buffer = autoExposureStateBuffer;
+    importedActorBonePaletteBufferInfo.offset = 0;
+    importedActorBonePaletteBufferInfo.range = sizeof(float) * 4u;
+    bool importedActorBonePaletteAvailable = false;
+    if (importedActors != nullptr && !importedActors->bonePalette.empty()) {
+        const VkDeviceSize paletteBytes =
+            static_cast<VkDeviceSize>(importedActors->bonePalette.size() *
+                                      sizeof(odai::render::ImportedActorBonePaletteMatrix));
+        const std::optional<FrameArenaSlice> paletteSliceOpt = m_frameArena.allocateUpload(
+            paletteBytes,
+            16u,
+            FrameArenaUploadKind::InstanceData
+        );
+        if (paletteSliceOpt.has_value() && paletteSliceOpt->mapped != nullptr) {
+            std::memcpy(paletteSliceOpt->mapped, importedActors->bonePalette.data(), paletteBytes);
+            importedActorBonePaletteBufferInfo.buffer = m_bufferAllocator.getBuffer(paletteSliceOpt->buffer);
+            importedActorBonePaletteBufferInfo.offset = paletteSliceOpt->offset;
+            importedActorBonePaletteBufferInfo.range = paletteBytes;
+            importedActorBonePaletteAvailable =
+                importedActorBonePaletteBufferInfo.buffer != VK_NULL_HANDLE;
+        } else {
+            VOX_LOGW("render") << "imported actor bone palette upload allocation failed";
+        }
+    }
+    if (!importedActorBonePaletteAvailable) {
+        const std::optional<FrameArenaSlice> fallbackPaletteSliceOpt = m_frameArena.allocateUpload(
+            sizeof(fallbackActorBonePaletteMatrix),
+            16u,
+            FrameArenaUploadKind::InstanceData
+        );
+        if (fallbackPaletteSliceOpt.has_value() && fallbackPaletteSliceOpt->mapped != nullptr) {
+            std::memcpy(
+                fallbackPaletteSliceOpt->mapped,
+                &fallbackActorBonePaletteMatrix,
+                sizeof(fallbackActorBonePaletteMatrix));
+            importedActorBonePaletteBufferInfo.buffer = m_bufferAllocator.getBuffer(fallbackPaletteSliceOpt->buffer);
+            importedActorBonePaletteBufferInfo.offset = fallbackPaletteSliceOpt->offset;
+            importedActorBonePaletteBufferInfo.range = sizeof(fallbackActorBonePaletteMatrix);
+        }
+    }
+
     const BoundDescriptorSets boundDescriptorSets = updateFrameDescriptorSets(
         aoFrameIndex,
         bufferInfo,
         autoExposureHistogramBuffer,
         autoExposureStateBuffer,
+        importedActorBonePaletteBufferInfo,
         voxelGiChunkMetaDescriptorInfo.has_value() ? &(*voxelGiChunkMetaDescriptorInfo) : nullptr,
         voxelGiChunkVoxelDescriptorInfo.has_value() ? &(*voxelGiChunkVoxelDescriptorInfo) : nullptr
     );
@@ -1830,6 +1874,7 @@ void RendererBackend::renderFrame(
     shadowPassInputs.importedActorIndexOffset = 0u;
     shadowPassInputs.importedActorMeshDraws = m_importedActorMeshDraws;
     shadowPassInputs.importedActorInstances = importedActorInstances;
+    shadowPassInputs.importedActorBonePaletteAvailable = importedActorBonePaletteAvailable;
     shadowPassInputs.importedPageCullingEnabled = importedPageCullingEnabled;
     if (importedPageCullingEnabled) {
         for (std::uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
@@ -2183,6 +2228,7 @@ void RendererBackend::renderFrame(
     prepassInputs.importedActorIndexOffset = 0u;
     prepassInputs.importedActorMeshDraws = m_importedActorMeshDraws;
     prepassInputs.importedActorInstances = importedActorInstances;
+    prepassInputs.importedActorBonePaletteAvailable = importedActorBonePaletteAvailable;
     prepassInputs.pipeInstanceCount = pipeInstanceCount;
     prepassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     prepassInputs.transportInstanceCount = transportInstanceCount;
@@ -2230,6 +2276,7 @@ void RendererBackend::renderFrame(
     mainPassInputs.importedActorIndexOffset = 0u;
     mainPassInputs.importedActorMeshDraws = m_importedActorMeshDraws;
     mainPassInputs.importedActorInstances = importedActorInstances;
+    mainPassInputs.importedActorBonePaletteAvailable = importedActorBonePaletteAvailable;
     mainPassInputs.pipeInstanceCount = pipeInstanceCount;
     mainPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
     mainPassInputs.transportInstanceCount = transportInstanceCount;

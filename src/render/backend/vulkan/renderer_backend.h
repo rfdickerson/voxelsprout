@@ -292,7 +292,7 @@ private:
     static constexpr uint32_t kGpuTimestampQueryFrameEnd = 33;
     static constexpr uint32_t kGpuTimestampQueryCount = 34;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
-    static constexpr std::size_t kMainDescriptorWriteKeyWordCount = 26;
+    static constexpr std::size_t kMainDescriptorWriteKeyWordCount = 29;
     static constexpr std::size_t kVoxelGiDescriptorWriteKeyWordCount = 27;
     static constexpr std::size_t kAutoExposureDescriptorWriteKeyWordCount = 6;
     static constexpr std::size_t kSunShaftDescriptorWriteKeyWordCount = 10;
@@ -339,6 +339,7 @@ private:
         const VkDescriptorBufferInfo& cameraBufferInfo,
         VkBuffer autoExposureHistogramBuffer,
         VkBuffer autoExposureStateBuffer,
+        const VkDescriptorBufferInfo& importedActorBonePaletteBufferInfo,
         const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo = nullptr,
         const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo = nullptr
     );
@@ -650,6 +651,7 @@ private:
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
         std::span<const odai::render::ImportedActorInstanceData> importedActorInstances;
+        bool importedActorBonePaletteAvailable = false;
         bool importedPageCullingEnabled = false;
         std::array<std::span<const ImportedMeshDraw>, kShadowCascadeCount> importedMeshDrawsByCascade;
         std::array<std::uint32_t, kShadowCascadeCount> importedTerrainDrawCountsByCascade{};
@@ -679,6 +681,7 @@ private:
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
         std::span<const odai::render::ImportedActorInstanceData> importedActorInstances;
+        bool importedActorBonePaletteAvailable = false;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -705,6 +708,7 @@ private:
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
         std::span<const odai::render::ImportedActorInstanceData> importedActorInstances;
+        bool importedActorBonePaletteAvailable = false;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;

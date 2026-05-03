@@ -24,6 +24,16 @@ struct VertexOutput
     nointerpolation uint outFlags : TEXCOORD5;
 };
 
+struct ActorBonePaletteMatrix
+{
+    float4 row0;
+    float4 row1;
+    float4 row2;
+};
+
+[[vk::binding(13, 0)]]
+StructuredBuffer<ActorBonePaletteMatrix> actorBonePalette;
+
 static const uint kImportedMaterialFlagSiltStrider = 1u << 1u;
 static const uint kSiltStriderMaskShift = 8u;
 static const uint kSiltStriderMaskMask = 0xffu;
@@ -107,12 +117,30 @@ float3 skinNpcLocalPosition(float3 position, uint flags, uint4 boneIndices, floa
     if ((flags & kImportedMaterialFlagNpcGpuSkinned) == 0u) {
         return position;
     }
+    if (chunkPc.actorData.y == 0u) {
+        return position;
+    }
     const float weightSum = boneWeights.x + boneWeights.y + boneWeights.z + boneWeights.w;
     if (weightSum <= 0.001) {
         return position;
     }
 
-    return position;
+    const float4 localPosition = float4(position, 1.0);
+    float3 skinned = float3(0.0);
+    const uint paletteBase = chunkPc.actorData.x;
+    ActorBonePaletteMatrix matrix = actorBonePalette[paletteBase + boneIndices.x];
+    skinned += float3(dot(matrix.row0, localPosition), dot(matrix.row1, localPosition), dot(matrix.row2, localPosition)) *
+        boneWeights.x;
+    matrix = actorBonePalette[paletteBase + boneIndices.y];
+    skinned += float3(dot(matrix.row0, localPosition), dot(matrix.row1, localPosition), dot(matrix.row2, localPosition)) *
+        boneWeights.y;
+    matrix = actorBonePalette[paletteBase + boneIndices.z];
+    skinned += float3(dot(matrix.row0, localPosition), dot(matrix.row1, localPosition), dot(matrix.row2, localPosition)) *
+        boneWeights.z;
+    matrix = actorBonePalette[paletteBase + boneIndices.w];
+    skinned += float3(dot(matrix.row0, localPosition), dot(matrix.row1, localPosition), dot(matrix.row2, localPosition)) *
+        boneWeights.w;
+    return skinned / weightSum;
 }
 
 float3 transformNpcPosition(float3 position, uint flags, uint4 boneIndices, float4 boneWeights)
@@ -123,7 +151,9 @@ float3 transformNpcPosition(float3 position, uint flags, uint4 boneIndices, floa
     const float3 worldOffset = chunkPc.chunkOffset.xyz;
     const float yaw = chunkPc.chunkOffset.w;
     float3 local = skinNpcLocalPosition(position, flags, boneIndices, boneWeights);
-    local = animateNpcLocalPosition(local, flags, chunkPc.cascadeData.x);
+    if ((flags & kImportedMaterialFlagNpcGpuSkinned) == 0u) {
+        local = animateNpcLocalPosition(local, flags, chunkPc.cascadeData.x);
+    }
     const float3 rotated = rotateNpcVector(local, yaw);
     return worldOffset + rotated;
 }

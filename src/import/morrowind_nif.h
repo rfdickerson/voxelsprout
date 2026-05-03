@@ -34,6 +34,11 @@ struct ImportedNifFloatKey {
     float value = 0.0f;
 };
 
+struct ImportedNifTextKey {
+    float time = 0.0f;
+    std::string text;
+};
+
 struct ImportedNifNodeAnimation {
     std::uint32_t nodeIndex = 0;
     float startTime = 0.0f;
@@ -75,6 +80,7 @@ struct ImportedAnimatedNifResult {
     std::vector<ImportedAnimatedNifPart> parts;
     std::vector<ImportedAnimatedNifNode> nodes;
     std::vector<ImportedNifNodeAnimation> nodeAnimations;
+    std::vector<ImportedNifTextKey> textKeys;
     std::string diffuseTexturePath;
     std::vector<std::string> partDiffuseTexturePaths;
     std::uint32_t skippedAlphaBlendOnlyParts = 0;

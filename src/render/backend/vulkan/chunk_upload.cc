@@ -507,6 +507,21 @@ bool RendererBackend::uploadImportedActorAsset(const odai::render::ImportedActor
         asset.draws.empty()) {
         return false;
     }
+    if ((!asset.boneIndices.empty() && asset.boneIndices.size() != asset.vertices.size()) ||
+        (!asset.boneWeights.empty() && asset.boneWeights.size() != asset.vertices.size())) {
+        VOX_LOGE("render") << "imported actor bone streams must match vertex count";
+        return false;
+    }
+    for (const odai::importer::ImportedScenePackedDraw& draw : asset.draws) {
+        if (draw.indexCount == 0u || draw.firstIndex >= asset.indices.size()) {
+            VOX_LOGE("render") << "imported actor draw range starts outside the index buffer";
+            return false;
+        }
+        if (draw.indexCount > static_cast<std::uint32_t>(asset.indices.size() - draw.firstIndex)) {
+            VOX_LOGE("render") << "imported actor draw range extends outside the index buffer";
+            return false;
+        }
+    }
 
     std::vector<ImportedMeshVertex> vertices;
     vertices.reserve(asset.vertices.size());

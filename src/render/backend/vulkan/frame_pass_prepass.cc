@@ -39,6 +39,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
     const std::span<const odai::render::ImportedActorInstanceData> importedActorInstances =
         inputs.importedActorInstances;
+    const bool importedActorBonePaletteAvailable = inputs.importedActorBonePaletteAvailable;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = inputs.transportInstanceCount;
@@ -240,6 +241,10 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 importedPushConstants.chunkOffset[2] = actorInstance.position[2];
                 importedPushConstants.chunkOffset[3] = actorInstance.yawRadians;
                 importedPushConstants.cascadeData[0] = actorInstance.animationTime;
+                importedPushConstants.actorData[0] = importedActorBonePaletteAvailable
+                    ? actorInstance.bonePaletteOffset
+                    : 0u;
+                importedPushConstants.actorData[1] = importedActorBonePaletteAvailable ? 1u : 0u;
                 vkCmdPushConstants(
                     commandBuffer,
                     m_pipelineLayout,

@@ -69,7 +69,7 @@ constexpr uint32_t kAutoExposureHistogramBins = 64u;
 bool RendererBackend::createDescriptorResources() {
     if (m_descriptorSetLayout == VK_NULL_HANDLE) {
         std::vector<VkDescriptorSetLayoutBinding> bindings;
-        bindings.reserve(13);
+        bindings.reserve(14);
 
         VkDescriptorSetLayoutBinding mvpBinding{};
         mvpBinding.binding = 0;
@@ -168,6 +168,13 @@ bool RendererBackend::createDescriptorResources() {
             bindings.push_back(shadowSceneBinding);
         }
 
+        VkDescriptorSetLayoutBinding actorBonePaletteBinding{};
+        actorBonePaletteBinding.binding = 13;
+        actorBonePaletteBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        actorBonePaletteBinding.descriptorCount = 1;
+        actorBonePaletteBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        bindings.push_back(actorBonePaletteBinding);
+
         if (!createDescriptorSetLayout(
                 bindings,
                 m_descriptorSetLayout,
@@ -190,7 +197,7 @@ bool RendererBackend::createDescriptorResources() {
             },
             VkDescriptorPoolSize{
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                kMaxFramesInFlight
+                2 * kMaxFramesInFlight
             }
         };
         if (m_rayTracingRuntimeEnabled) {
@@ -295,6 +302,7 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     const VkDescriptorBufferInfo& cameraBufferInfo,
     VkBuffer autoExposureHistogramBuffer,
     VkBuffer autoExposureStateBuffer,
+    const VkDescriptorBufferInfo& importedActorBonePaletteBufferInfo,
     const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo,
     const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo
 ) {
@@ -399,7 +407,7 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     rayTracingSceneWriteInfo.accelerationStructureCount = hasRayTracingSceneDescriptor ? 1u : 0u;
     rayTracingSceneWriteInfo.pAccelerationStructures = hasRayTracingSceneDescriptor ? &m_rtTlas.handle : nullptr;
 
-    std::array<VkWriteDescriptorSet, 13> writes{};
+    std::array<VkWriteDescriptorSet, 14> writes{};
     writes[0] = write;
     writes[0].dstSet = m_descriptorSets[m_currentFrame];
     writes[0].dstBinding = 0;
@@ -494,6 +502,13 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         writes[12].pNext = &rayTracingSceneWriteInfo;
         writeCount = 13;
     }
+    writes[writeCount] = write;
+    writes[writeCount].dstSet = m_descriptorSets[m_currentFrame];
+    writes[writeCount].dstBinding = 13;
+    writes[writeCount].descriptorCount = 1;
+    writes[writeCount].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[writeCount].pBufferInfo = &importedActorBonePaletteBufferInfo;
+    ++writeCount;
 
     if (m_descriptorSets[frameIndex] != VK_NULL_HANDLE) {
         const std::array<std::uint64_t, kMainDescriptorWriteKeyWordCount> mainDescriptorWriteKey = {
@@ -522,7 +537,10 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             vkHandleToUint64(sunShaftImageInfo.imageView),
             vkHandleToUint64(voxelGiOccupancyDebugImageInfo.sampler),
             vkHandleToUint64(voxelGiOccupancyDebugImageInfo.imageView),
-            vkHandleToUint64(hasRayTracingSceneDescriptor ? m_rtTlas.handle : VK_NULL_HANDLE)
+            vkHandleToUint64(hasRayTracingSceneDescriptor ? m_rtTlas.handle : VK_NULL_HANDLE),
+            vkHandleToUint64(importedActorBonePaletteBufferInfo.buffer),
+            static_cast<std::uint64_t>(importedActorBonePaletteBufferInfo.offset),
+            static_cast<std::uint64_t>(importedActorBonePaletteBufferInfo.range)
         };
         if (descriptorWriteKeyChanged(
                 m_mainDescriptorWriteKeys[frameIndex],

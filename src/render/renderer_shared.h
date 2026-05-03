@@ -126,6 +126,7 @@ struct alignas(16) CameraUniform {
 struct alignas(16) ChunkPushConstants {
     float chunkOffset[4];
     float cascadeData[4];
+    std::uint32_t actorData[4];
 };
 
 struct alignas(16) ChunkInstanceData {

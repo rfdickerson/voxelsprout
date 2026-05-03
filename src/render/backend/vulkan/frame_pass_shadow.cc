@@ -46,6 +46,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
     const std::span<const odai::render::ImportedActorInstanceData> importedActorInstances =
         inputs.importedActorInstances;
+    const bool importedActorBonePaletteAvailable = inputs.importedActorBonePaletteAvailable;
     const bool importedPageCullingEnabled = inputs.importedPageCullingEnabled;
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
@@ -332,6 +333,10 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     importedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
                     importedPushConstants.cascadeData[1] = actorInstance.animationTime;
                     importedPushConstants.cascadeData[2] = (std::abs(actorInstance.animationTime) > 0.001f) ? 1.0f : 0.0f;
+                    importedPushConstants.actorData[0] = importedActorBonePaletteAvailable
+                        ? actorInstance.bonePaletteOffset
+                        : 0u;
+                    importedPushConstants.actorData[1] = importedActorBonePaletteAvailable ? 1u : 0u;
                     vkCmdPushConstants(
                         commandBuffer,
                         m_pipelineLayout,

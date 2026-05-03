@@ -164,6 +164,10 @@ struct NifKeyframeDataRecord {
     std::vector<ImportedNifFloatKey> zRotationKeys;
 };
 
+struct NifTextKeyExtraDataRecord {
+    std::vector<ImportedNifTextKey> keys;
+};
+
 enum class RecordKind {
     Unknown,
     Node,
@@ -176,7 +180,8 @@ enum class RecordKind {
     SkinInstance,
     SkinData,
     KeyframeController,
-    KeyframeData
+    KeyframeData,
+    TextKeyExtraData
 };
 
 struct NifRecord {
@@ -191,6 +196,7 @@ struct NifRecord {
     NifSkinDataRecord skinData{};
     NifKeyframeControllerRecord keyframeController{};
     NifKeyframeDataRecord keyframeData{};
+    NifTextKeyExtraDataRecord textKeyExtraData{};
 };
 
 std::array<float, 16> identityMatrix() {
@@ -539,7 +545,60 @@ NifTimeControllerRecord readTimeControllerRecord(NifCursor& cursor) {
     return record;
 }
 
-NifAvObject readAvObject(NifCursor& cursor) {
+bool isKnownRecordType(std::string_view recordType) {
+    return recordType == "NiNode" || recordType == "RootCollisionNode" ||
+        recordType == "NiBSAnimationNode" || recordType == "NiBSParticleNode" ||
+        recordType == "NiBillboardNode" || recordType == "NiSwitchNode" ||
+        recordType == "NiLODNode" || recordType == "NiTriShape" ||
+        recordType == "NiParticles" || recordType == "NiRotatingParticles" ||
+        recordType == "NiTriShapeData" || recordType == "NiTriStrips" ||
+        recordType == "NiTriStripsData" || recordType == "NiRotatingParticlesData" ||
+        recordType == "NiTexturingProperty" || recordType == "NiSourceTexture" ||
+        recordType == "NiAlphaProperty" || recordType == "NiStringExtraData" ||
+        recordType == "NiTextKeyExtraData" || recordType == "NiKeyframeController" ||
+        recordType == "NiGeomMorpherController" || recordType == "NiUVController" ||
+        recordType == "NiKeyframeData" || recordType == "NiMorphData" ||
+        recordType == "NiParticleSystemController" || recordType == "NiParticleGrowFade" ||
+        recordType == "NiGravity" || recordType == "NiParticleColorModifier" ||
+        recordType == "NiColorData" || recordType == "NiSkinInstance" ||
+        recordType == "NiSkinData" || recordType == "NiSkinPartition" ||
+        recordType == "NiMaterialProperty" || recordType == "NiVertexColorProperty" ||
+        recordType == "NiZBufferProperty" || recordType == "NiSpecularProperty" ||
+        recordType == "NiWireframeProperty";
+}
+
+bool looksLikeKnownRecordAt(const NifCursor& cursor, std::size_t offset) {
+    if (offset + sizeof(std::uint32_t) > cursor.bytes.size()) {
+        return false;
+    }
+    std::uint32_t size = 0u;
+    std::memcpy(&size, cursor.bytes.data() + offset, sizeof(size));
+    if (size == 0u || size > 64u || offset + sizeof(std::uint32_t) + size > cursor.bytes.size()) {
+        return false;
+    }
+    const char* data = reinterpret_cast<const char*>(cursor.bytes.data() + offset + sizeof(std::uint32_t));
+    for (std::uint32_t index = 0; index < size; ++index) {
+        const unsigned char ch = static_cast<unsigned char>(data[index]);
+        if (ch < 32u || ch > 126u) {
+            return false;
+        }
+    }
+    return isKnownRecordType(std::string_view(data, size));
+}
+
+bool resyncToNextKnownRecord(NifCursor& cursor, std::size_t maxScanBytes) {
+    const std::size_t begin = cursor.offset;
+    const std::size_t end = std::min(cursor.bytes.size(), begin + maxScanBytes);
+    for (std::size_t offset = begin; offset < end; ++offset) {
+        if (looksLikeKnownRecordAt(cursor, offset)) {
+            cursor.offset = offset;
+            return true;
+        }
+    }
+    return false;
+}
+
+NifAvObject readAvObjectHeader(NifCursor& cursor) {
     NifAvObject object{};
     object.name = readObjectNetName(cursor);
     object.flags = cursor.readValue<std::uint16_t>();
@@ -552,15 +611,32 @@ NifAvObject readAvObject(NifCursor& cursor) {
     object.transform.scale = cursor.readValue<float>();
     cursor.skip(sizeof(float) * 3u);
     object.propertyRefs = readRefList(cursor);
+    return object;
+}
+
+void readAvObjectBounds(NifCursor& cursor) {
     if (cursor.readBool()) {
         skipBoundingVolume(cursor);
     }
+}
+
+NifAvObject readAvObject(NifCursor& cursor) {
+    NifAvObject object = readAvObjectHeader(cursor);
+    readAvObjectBounds(cursor);
     return object;
 }
 
 NifNodeRecord readNodeRecord(NifCursor& cursor) {
     NifNodeRecord node{};
-    node.avObject = readAvObject(cursor);
+    node.avObject = readAvObjectHeader(cursor);
+    if (equalsIgnoreCaseAscii(node.avObject.name, "bounding box")) {
+        if (!resyncToNextKnownRecord(cursor, 512u)) {
+            throw std::runtime_error("Failed to resynchronize after NIF Bounding Box node");
+        }
+        node.isRootCollisionNode = true;
+        return node;
+    }
+    readAvObjectBounds(cursor);
     node.childRefs = readRefList(cursor);
     readRefList(cursor);
     return node;
@@ -809,13 +885,18 @@ NifAlphaPropertyRecord readAlphaPropertyRecord(NifCursor& cursor) {
     return property;
 }
 
-void skipTextKeyExtraDataRecord(NifCursor& cursor) {
+NifTextKeyExtraDataRecord readTextKeyExtraDataRecord(NifCursor& cursor) {
+    NifTextKeyExtraDataRecord record{};
     skipExtraRecordHeader(cursor);
     const std::uint32_t keyCount = cursor.readValue<std::uint32_t>();
+    record.keys.reserve(keyCount);
     for (std::uint32_t i = 0; i < keyCount; ++i) {
-        cursor.readValue<float>();
-        cursor.readSizedString();
+        ImportedNifTextKey key{};
+        key.time = cursor.readValue<float>();
+        key.text = cursor.readSizedString();
+        record.keys.push_back(std::move(key));
     }
+    return record;
 }
 
 void skipKeyframeControllerRecord(NifCursor& cursor) {
@@ -1442,6 +1523,75 @@ void copyMatrixToFloatArray(const std::array<float, 16>& matrix, float out[16]) 
     std::copy(matrix.begin(), matrix.end(), out);
 }
 
+std::string trimAsciiWhitespace(std::string value) {
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t' ||
+                              value.back() == '\r' || value.back() == '\n')) {
+        value.pop_back();
+    }
+    std::size_t first = 0u;
+    while (first < value.size() && (value[first] == ' ' || value[first] == '\t' ||
+                                    value[first] == '\r' || value[first] == '\n')) {
+        ++first;
+    }
+    if (first != 0u) {
+        value.erase(0u, first);
+    }
+    return value;
+}
+
+bool parseAnimationMarkerText(
+    const std::string& text,
+    std::string& outName,
+    std::string& outMarker
+) {
+    const std::string lowerText = lowerAsciiCopy(text);
+    const std::size_t colon = lowerText.find(':');
+    if (colon == std::string::npos) {
+        return false;
+    }
+    outName = trimAsciiWhitespace(lowerText.substr(0u, colon));
+    outMarker = trimAsciiWhitespace(lowerText.substr(colon + 1u));
+    return !outName.empty() && !outMarker.empty();
+}
+
+std::array<float, 16> inverseAffineMatrix(const std::array<float, 16>& matrix) {
+    const float a00 = matrix[0];
+    const float a01 = matrix[1];
+    const float a02 = matrix[2];
+    const float a10 = matrix[4];
+    const float a11 = matrix[5];
+    const float a12 = matrix[6];
+    const float a20 = matrix[8];
+    const float a21 = matrix[9];
+    const float a22 = matrix[10];
+    const float det =
+        a00 * (a11 * a22 - a12 * a21) -
+        a01 * (a10 * a22 - a12 * a20) +
+        a02 * (a10 * a21 - a11 * a20);
+    if (std::abs(det) <= 0.000001f) {
+        return identityMatrix();
+    }
+    const float invDet = 1.0f / det;
+    std::array<float, 16> out = identityMatrix();
+    out[0] = (a11 * a22 - a12 * a21) * invDet;
+    out[1] = (a02 * a21 - a01 * a22) * invDet;
+    out[2] = (a01 * a12 - a02 * a11) * invDet;
+    out[4] = (a12 * a20 - a10 * a22) * invDet;
+    out[5] = (a00 * a22 - a02 * a20) * invDet;
+    out[6] = (a02 * a10 - a00 * a12) * invDet;
+    out[8] = (a10 * a21 - a11 * a20) * invDet;
+    out[9] = (a01 * a20 - a00 * a21) * invDet;
+    out[10] = (a00 * a11 - a01 * a10) * invDet;
+
+    const float tx = matrix[3];
+    const float ty = matrix[7];
+    const float tz = matrix[11];
+    out[3] = -(out[0] * tx + out[1] * ty + out[2] * tz);
+    out[7] = -(out[4] * tx + out[5] * ty + out[6] * tz);
+    out[11] = -(out[8] * tx + out[9] * ty + out[10] * tz);
+    return out;
+}
+
 void appendAnimatedGeometry(
     const std::vector<NifRecord>& records,
     std::int32_t recordIndex,
@@ -1731,7 +1881,7 @@ bool loadMorrowindStaticNifWithOptions(
             } else if (recordType == "NiStringExtraData") {
                 skipStringExtraDataRecord(cursor);
             } else if (recordType == "NiTextKeyExtraData") {
-                skipTextKeyExtraDataRecord(cursor);
+                readTextKeyExtraDataRecord(cursor);
             } else if (recordType == "NiKeyframeController") {
                 skipKeyframeControllerRecord(cursor);
             } else if (recordType == "NiGeomMorpherController") {
@@ -1823,9 +1973,11 @@ bool loadMorrowindStaticNifWithOptions(
     } catch (const std::exception& e) {
         outError = e.what();
         if (!currentRecordType.empty()) {
-            outError = "record " + std::to_string(currentRecordIndex) + " (" + currentRecordType + "): " + outError;
+            outError = "record " + std::to_string(currentRecordIndex) + " (" + currentRecordType + ") @"
+                + std::to_string(cursor.offset) + ": " + outError;
         } else if (currentRecordIndex != 0u) {
-            outError = "record " + std::to_string(currentRecordIndex) + ": " + outError;
+            outError = "record " + std::to_string(currentRecordIndex) + " @"
+                + std::to_string(cursor.offset) + ": " + outError;
         }
         outResult = ImportedNifResult{};
         return false;
@@ -1951,7 +2103,8 @@ bool loadMorrowindAnimatedNif(
             } else if (recordType == "NiStringExtraData") {
                 skipStringExtraDataRecord(cursor);
             } else if (recordType == "NiTextKeyExtraData") {
-                skipTextKeyExtraDataRecord(cursor);
+                record.kind = RecordKind::TextKeyExtraData;
+                record.textKeyExtraData = readTextKeyExtraDataRecord(cursor);
             } else if (recordType == "NiKeyframeController") {
                 record.kind = RecordKind::KeyframeController;
                 record.keyframeController = readKeyframeControllerRecord(cursor);
@@ -2031,11 +2184,17 @@ bool loadMorrowindAnimatedNif(
                 recordToAnimatedNodeIndex,
                 sawGeometry);
         }
-        if (!sawGeometry) {
-            throw std::runtime_error("NIF did not contain supported animated geometry");
+        if (!sawGeometry && outResult.nodes.empty()) {
+            throw std::runtime_error("NIF did not contain supported animated nodes or geometry");
         }
 
         for (const NifRecord& record : records) {
+            if (record.kind == RecordKind::TextKeyExtraData) {
+                outResult.textKeys.insert(
+                    outResult.textKeys.end(),
+                    record.textKeyExtraData.keys.begin(),
+                    record.textKeyExtraData.keys.end());
+            }
             if (record.kind != RecordKind::KeyframeController ||
                 record.keyframeController.time.targetRef < 0 ||
                 record.keyframeController.dataRef < 0 ||
@@ -2063,13 +2222,21 @@ bool loadMorrowindAnimatedNif(
             animation.zRotationKeys = dataRecord.keyframeData.zRotationKeys;
             outResult.nodeAnimations.push_back(std::move(animation));
         }
+        std::sort(
+            outResult.textKeys.begin(),
+            outResult.textKeys.end(),
+            [](const ImportedNifTextKey& lhs, const ImportedNifTextKey& rhs) {
+                return lhs.time < rhs.time;
+            });
         return true;
     } catch (const std::exception& e) {
         outError = e.what();
         if (!currentRecordType.empty()) {
-            outError = "record " + std::to_string(currentRecordIndex) + " (" + currentRecordType + "): " + outError;
+            outError = "record " + std::to_string(currentRecordIndex) + " (" + currentRecordType + ") @"
+                + std::to_string(cursor.offset) + ": " + outError;
         } else if (currentRecordIndex != 0u) {
-            outError = "record " + std::to_string(currentRecordIndex) + ": " + outError;
+            outError = "record " + std::to_string(currentRecordIndex) + " @"
+                + std::to_string(cursor.offset) + ": " + outError;
         }
         outResult = ImportedAnimatedNifResult{};
         return false;
@@ -2083,51 +2250,10 @@ bool loadMorrowindSkinnedActorSkeleton(
 ) {
     ImportedAnimatedNifResult baseAnim{};
     if (!loadMorrowindAnimatedNif(baseAnimPath, baseAnim, outError)) {
-        if (!std::filesystem::exists(baseAnimPath)) {
-            return false;
-        }
         outAsset.skeleton.clear();
         outAsset.nodeAnimations.clear();
         outAsset.animationClips.clear();
-        const std::vector<std::pair<std::string, std::int32_t>> fallbackBones = {
-            {"Bip01", -1},
-            {"Bip01 Pelvis", 0},
-            {"Bip01 Spine", 1},
-            {"Bip01 Spine1", 2},
-            {"Bip01 Neck", 3},
-            {"Bip01 Head", 4},
-            {"Bip01 L Clavicle", 3},
-            {"Bip01 L UpperArm", 6},
-            {"Bip01 L Forearm", 7},
-            {"Bip01 L Hand", 8},
-            {"Bip01 R Clavicle", 3},
-            {"Bip01 R UpperArm", 10},
-            {"Bip01 R Forearm", 11},
-            {"Bip01 R Hand", 12},
-            {"Bip01 L Thigh", 1},
-            {"Bip01 L Calf", 14},
-            {"Bip01 L Foot", 15},
-            {"Bip01 L Toe0", 16},
-            {"Bip01 R Thigh", 1},
-            {"Bip01 R Calf", 18},
-            {"Bip01 R Foot", 19},
-            {"Bip01 R Toe0", 20}
-        };
-        for (const auto& [name, parentIndex] : fallbackBones) {
-            ImportedSkeletonNode node{};
-            node.name = name;
-            node.parentIndex = parentIndex;
-            outAsset.skeleton.push_back(std::move(node));
-        }
-        ImportedNifNodeAnimation fallbackAnimation{};
-        fallbackAnimation.nodeIndex = 0u;
-        fallbackAnimation.startTime = 0.0f;
-        fallbackAnimation.stopTime = 1.0f;
-        outAsset.nodeAnimations.push_back(std::move(fallbackAnimation));
-        outAsset.animationClips.push_back(ImportedAnimationClip{"idle", 0.0f, 2.0f});
-        outAsset.animationClips.push_back(ImportedAnimationClip{"walk", 0.0f, 1.0f});
-        outError.clear();
-        return true;
+        return false;
     }
     outAsset.skeleton.clear();
     outAsset.nodeAnimations = baseAnim.nodeAnimations;
@@ -2140,6 +2266,23 @@ bool loadMorrowindSkinnedActorSkeleton(
         std::memcpy(skeletonNode.localTransform, node.localTransform, sizeof(skeletonNode.localTransform));
         outAsset.skeleton.push_back(std::move(skeletonNode));
     }
+    std::vector<std::array<float, 16>> worldTransforms(outAsset.skeleton.size(), identityMatrix());
+    for (std::size_t nodeIndex = 0; nodeIndex < outAsset.skeleton.size(); ++nodeIndex) {
+        std::array<float, 16> local{};
+        std::copy(
+            outAsset.skeleton[nodeIndex].localTransform,
+            outAsset.skeleton[nodeIndex].localTransform + 16,
+            local.begin());
+        const std::int32_t parentIndex = outAsset.skeleton[nodeIndex].parentIndex;
+        if (parentIndex >= 0 && static_cast<std::size_t>(parentIndex) < worldTransforms.size()) {
+            worldTransforms[nodeIndex] =
+                multiplyMatrices(worldTransforms[static_cast<std::size_t>(parentIndex)], local);
+        } else {
+            worldTransforms[nodeIndex] = local;
+        }
+        const std::array<float, 16> inverseBind = inverseAffineMatrix(worldTransforms[nodeIndex]);
+        copyMatrixToFloatArray(inverseBind, outAsset.skeleton[nodeIndex].inverseBindWorldTransform);
+    }
 
     float startTime = std::numeric_limits<float>::max();
     float stopTime = 0.0f;
@@ -2147,7 +2290,25 @@ bool loadMorrowindSkinnedActorSkeleton(
         startTime = std::min(startTime, animation.startTime);
         stopTime = std::max(stopTime, animation.stopTime);
     }
-    if (!outAsset.nodeAnimations.empty() && startTime < stopTime) {
+    std::unordered_map<std::string, float> pendingClipStarts;
+    for (std::size_t keyIndex = 0; keyIndex < baseAnim.textKeys.size(); ++keyIndex) {
+        const ImportedNifTextKey& key = baseAnim.textKeys[keyIndex];
+        std::string name;
+        std::string marker;
+        if (!parseAnimationMarkerText(key.text, name, marker)) {
+            continue;
+        }
+        if (marker == "start") {
+            pendingClipStarts[name] = key.time;
+        } else if (marker == "stop" || marker == "end") {
+            const auto startIt = pendingClipStarts.find(name);
+            if (startIt != pendingClipStarts.end() && key.time > startIt->second) {
+                outAsset.animationClips.push_back(ImportedAnimationClip{name, startIt->second, key.time});
+                pendingClipStarts.erase(startIt);
+            }
+        }
+    }
+    if (outAsset.animationClips.empty() && !outAsset.nodeAnimations.empty() && startTime < stopTime) {
         const float duration = stopTime - startTime;
         ImportedAnimationClip idleClip{};
         idleClip.name = "idle";

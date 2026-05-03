@@ -145,6 +145,15 @@ struct ImportedActorGpuAnimatedDraw {
     std::uint32_t _pad0 = 0;
 };
 
+struct ImportedActorBonePaletteMatrix {
+    // Row-major 3x4 affine matrix in engine actor-local space.
+    float rows[12] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f
+    };
+};
+
 struct ImportedActorGpuAnimationFrameData {
     std::span<const odai::importer::ImportedScenePackedVertex> localVertices;
     std::span<const std::uint32_t> indices;
@@ -169,10 +178,13 @@ struct ImportedActorInstanceData {
     std::uint32_t assetIndex = 0u;
     std::uint32_t firstDraw = 0u;
     std::uint32_t drawCount = 0u;
+    std::uint32_t bonePaletteOffset = 0u;
+    std::uint32_t clipIndex = 0u;
 };
 
 struct ImportedActorFrameData {
     std::span<const ImportedActorInstanceData> instances;
+    std::span<const ImportedActorBonePaletteMatrix> bonePalette;
     const ImportedActorGpuAnimationFrameData* gpuAnimation = nullptr;
 };
 

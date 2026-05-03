@@ -41,6 +41,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
     const std::span<const odai::render::ImportedActorInstanceData> importedActorInstances =
         inputs.importedActorInstances;
+    const bool importedActorBonePaletteAvailable = inputs.importedActorBonePaletteAvailable;
     const bool renderingImportedScene = !importedMeshDraws.empty() || !importedActorMeshDraws.empty();
     const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
     const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
@@ -377,6 +378,10 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             importedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
             importedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
             importedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
+            importedPushConstants.actorData[0] = importedActorBonePaletteAvailable
+                ? actorInstance.bonePaletteOffset
+                : 0u;
+            importedPushConstants.actorData[1] = importedActorBonePaletteAvailable ? 1u : 0u;
             vkCmdPushConstants(
                 commandBuffer,
                 m_pipelineLayout,

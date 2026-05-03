@@ -2427,6 +2427,92 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
         VOX_LOGW("app") << guardSceneLabel << " humanoid GPU skinning disabled: base_anim.nif failed ("
                         << humanoidSkeletonError << ")";
     }
+    auto skeletonBoneIndex = [](const odai::importer::ImportedSkinnedActorAsset& actorAsset,
+                                std::string_view boneName) -> std::uint16_t {
+        const std::string wanted = lowerPathCopy(std::string(boneName));
+        for (std::size_t boneIndex = 0; boneIndex < actorAsset.skeleton.size(); ++boneIndex) {
+            if (lowerPathCopy(actorAsset.skeleton[boneIndex].name) == wanted) {
+                return static_cast<std::uint16_t>(boneIndex);
+            }
+        }
+        return 0u;
+    };
+    auto rigidBoneForActorPartSlot = [&](const odai::importer::ImportedSkinnedActorAsset& actorAsset,
+                                         const std::string& slot,
+                                         float localX) -> std::uint16_t {
+        const std::string lowerSlot = lowerPathCopy(slot);
+        const bool leftSide = localX < 0.0f;
+        if (lowerSlot == "hair" || lowerSlot == "head" || lowerSlot == "helm") {
+            return skeletonBoneIndex(actorAsset, "Bip01 Head");
+        }
+        if (lowerSlot == "neck") {
+            return skeletonBoneIndex(actorAsset, "Bip01 Neck");
+        }
+        if (lowerSlot == "hand" || lowerSlot == "wrist") {
+            return skeletonBoneIndex(actorAsset, leftSide ? "Bip01 L Hand" : "Bip01 R Hand");
+        }
+        if (lowerSlot == "forearm") {
+            return skeletonBoneIndex(actorAsset, leftSide ? "Bip01 L Forearm" : "Bip01 R Forearm");
+        }
+        if (lowerSlot == "upperarm") {
+            return skeletonBoneIndex(actorAsset, leftSide ? "Bip01 L UpperArm" : "Bip01 R UpperArm");
+        }
+        if (lowerSlot == "foot" || lowerSlot == "shoe" || lowerSlot == "boot") {
+            return skeletonBoneIndex(actorAsset, leftSide ? "Bip01 L Foot" : "Bip01 R Foot");
+        }
+        if (lowerSlot == "ankle") {
+            return skeletonBoneIndex(actorAsset, leftSide ? "Bip01 L Calf" : "Bip01 R Calf");
+        }
+        if (lowerSlot == "knee" || lowerSlot == "upperleg") {
+            return skeletonBoneIndex(actorAsset, leftSide ? "Bip01 L Thigh" : "Bip01 R Thigh");
+        }
+        if (lowerSlot == "groin" || lowerSlot == "skirt") {
+            return skeletonBoneIndex(actorAsset, "Bip01 Pelvis");
+        }
+        return skeletonBoneIndex(actorAsset, "Bip01 Spine1");
+    };
+    auto inferActorPartSlotFromModelPath = [](const std::string& modelPath) -> std::string {
+        const std::string key = lowerPathCopy(modelPath);
+        if (key.find("hair") != std::string::npos) return "hair";
+        if (key.find("head") != std::string::npos || key.find("helm") != std::string::npos) return "head";
+        if (key.find("neck") != std::string::npos) return "neck";
+        if (key.find("hand") != std::string::npos || key.find("gauntlet") != std::string::npos) return "hand";
+        if (key.find("forearm") != std::string::npos || key.find("_fa_") != std::string::npos) return "forearm";
+        if (key.find("upperarm") != std::string::npos || key.find("_ua_") != std::string::npos) return "upperarm";
+        if (key.find("foot") != std::string::npos || key.find("shoe") != std::string::npos ||
+            key.find("boot") != std::string::npos) return "foot";
+        if (key.find("ankle") != std::string::npos || key.find("_a_") != std::string::npos) return "ankle";
+        if (key.find("knee") != std::string::npos || key.find("_k_") != std::string::npos) return "knee";
+        if (key.find("pants_g") != std::string::npos || key.find("skirt") != std::string::npos) return "groin";
+        return "body";
+    };
+    auto assignRigidWeightsForNewUnweightedVertices = [&](odai::importer::ImportedSkinnedActorAsset& actorAsset,
+                                                          std::size_t firstVertex,
+                                                          const std::string& slot) {
+        if (firstVertex >= actorAsset.vertices.size() ||
+            actorAsset.boneIndices.size() != actorAsset.vertices.size() ||
+            actorAsset.boneWeights.size() != actorAsset.vertices.size()) {
+            return;
+        }
+        std::uint32_t assignedCount = 0u;
+        for (std::size_t vertexIndex = firstVertex; vertexIndex < actorAsset.vertices.size(); ++vertexIndex) {
+            const std::array<float, 4>& weights = actorAsset.boneWeights[vertexIndex];
+            const float weightSum = weights[0] + weights[1] + weights[2] + weights[3];
+            if (weightSum > 0.0001f) {
+                continue;
+            }
+            const float localX = actorAsset.vertices[vertexIndex].position[0];
+            const std::uint16_t boneIndex = rigidBoneForActorPartSlot(actorAsset, slot, localX);
+            actorAsset.boneIndices[vertexIndex] = {boneIndex, 0u, 0u, 0u};
+            actorAsset.boneWeights[vertexIndex] = {1.0f, 0.0f, 0.0f, 0.0f};
+            ++assignedCount;
+        }
+        if (assignedCount != 0u) {
+            actorAsset.weightedVertexCount += assignedCount;
+            actorAsset.unweightedVertexCount =
+                assignedCount >= actorAsset.unweightedVertexCount ? 0u : actorAsset.unweightedVertexCount - assignedCount;
+        }
+    };
 
     auto appendSkinnedActorAssetToPrototype = [&](
         const odai::importer::ImportedSkinnedActorAsset& actorAsset,
@@ -2437,6 +2523,9 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
         const std::uint32_t indexBase = static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size());
         const std::uint32_t drawBase = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
 
+        if (m_balmoraGuardPrototype.skeleton.empty()) {
+            m_balmoraGuardPrototype.skeleton = actorAsset.skeleton;
+        }
         m_balmoraGuardPrototype.vertices.insert(
             m_balmoraGuardPrototype.vertices.end(),
             actorAsset.vertices.begin(),
@@ -2522,8 +2611,11 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
                 fallbackPartCount += part.fallback ? 1u : 0u;
                 const std::filesystem::path nifPath =
                     *dataFilesPath / "Meshes" / std::filesystem::path(part.modelPath);
-                if (!std::filesystem::exists(nifPath) ||
-                    !odai::importer::appendMorrowindSkinnedActorPartNif(nifPath, skinnedActor, skinnedError)) {
+                const std::size_t firstNewVertex = skinnedActor.vertices.size();
+                if (std::filesystem::exists(nifPath) &&
+                    odai::importer::appendMorrowindSkinnedActorPartNif(nifPath, skinnedActor, skinnedError)) {
+                    assignRigidWeightsForNewUnweightedVertices(skinnedActor, firstNewVertex, part.slot);
+                } else {
                     ++missingPartCount;
                     VOX_LOGW("app") << guardSceneLabel << " skinned NPC part skipped"
                                     << " actor=" << actor.id
@@ -2602,9 +2694,15 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
             for (const std::string_view modelPart : fargothModelParts) {
                 const std::filesystem::path nifPath =
                     *dataFilesPath / "Meshes" / std::filesystem::path(std::string(modelPart));
+                const std::size_t firstNewVertex = fargothAsset.vertices.size();
                 if (!odai::importer::appendMorrowindSkinnedActorPartNif(nifPath, fargothAsset, skinnedError)) {
                     VOX_LOGW("app") << "Fargoth skinned part skipped: " << nifPath.string()
                                     << " (" << skinnedError << ")";
+                } else {
+                    assignRigidWeightsForNewUnweightedVertices(
+                        fargothAsset,
+                        firstNewVertex,
+                        inferActorPartSlotFromModelPath(std::string(modelPart)));
                 }
             }
             loadedSkinnedFargoth =
@@ -2620,6 +2718,7 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
             m_balmoraGuardPrototype.draws = std::move(fargothAsset.draws);
             m_balmoraGuardPrototype.boneIndices = std::move(fargothAsset.boneIndices);
             m_balmoraGuardPrototype.boneWeights = std::move(fargothAsset.boneWeights);
+            m_balmoraGuardPrototype.skeleton = std::move(fargothAsset.skeleton);
             m_balmoraGuardPrototype.gpuSkinned = true;
             for (std::size_t drawIndex = 0; drawIndex < m_balmoraGuardPrototype.draws.size(); ++drawIndex) {
                 const std::string texturePath = drawIndex < fargothAsset.partDiffuseTexturePaths.size()
@@ -3093,8 +3192,152 @@ void App::updateMorrowindActors(float dt) {
     }
 }
 
+namespace {
+
+std::array<float, 16> identityActorMatrix() {
+    return {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+}
+
+std::array<float, 16> multiplyActorMatrices(
+    const std::array<float, 16>& lhs,
+    const std::array<float, 16>& rhs
+) {
+    std::array<float, 16> out{};
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            float sum = 0.0f;
+            for (int i = 0; i < 4; ++i) {
+                sum += lhs[static_cast<std::size_t>(row * 4 + i)] *
+                       rhs[static_cast<std::size_t>(i * 4 + col)];
+            }
+            out[static_cast<std::size_t>(row * 4 + col)] = sum;
+        }
+    }
+    return out;
+}
+
+std::array<float, 16> actorRotationX(float radians) {
+    std::array<float, 16> matrix = identityActorMatrix();
+    const float c = std::cos(radians);
+    const float s = std::sin(radians);
+    matrix[5] = c;
+    matrix[6] = -s;
+    matrix[9] = s;
+    matrix[10] = c;
+    return matrix;
+}
+
+std::array<float, 16> actorRotationZ(float radians) {
+    std::array<float, 16> matrix = identityActorMatrix();
+    const float c = std::cos(radians);
+    const float s = std::sin(radians);
+    matrix[0] = c;
+    matrix[1] = -s;
+    matrix[4] = s;
+    matrix[5] = c;
+    return matrix;
+}
+
+std::array<float, 16> actorMatrixFromArray(const float matrix[16]) {
+    std::array<float, 16> out{};
+    std::copy(matrix, matrix + 16, out.begin());
+    return out;
+}
+
+std::array<float, 16> nifMatrixToEngineMatrix(const std::array<float, 16>& nifMatrix) {
+    const std::array<float, 16> nifToEngine = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+    return multiplyActorMatrices(multiplyActorMatrices(nifToEngine, nifMatrix), nifToEngine);
+}
+
+std::array<float, 16> animatedActorLocalMatrix(
+    const odai::importer::ImportedSkeletonNode& node,
+    float animationTime
+) {
+    std::array<float, 16> local = actorMatrixFromArray(node.localTransform);
+    const std::string name = lowerPathCopy(node.name);
+    const bool walking = std::abs(animationTime) > 0.001f;
+    if (!walking) {
+        const float idlePhase = static_cast<float>(glfwGetTime()) * 2.0f;
+        if (name == "bip01 spine1" || name == "bip01 spine2") {
+            local = multiplyActorMatrices(local, actorRotationX(std::sin(idlePhase) * 0.012f));
+        } else if (name == "bip01 head") {
+            local = multiplyActorMatrices(local, actorRotationZ(std::sin(idlePhase * 0.7f) * 0.01f));
+        }
+        return local;
+    }
+
+    const float phase = animationTime;
+    const bool left = name.find(" l ") != std::string::npos;
+    const bool right = name.find(" r ") != std::string::npos;
+    const float sidePhase = left ? phase : (right ? phase + odai::math::kPi : phase);
+    if (name.find("thigh") != std::string::npos) {
+        local = multiplyActorMatrices(local, actorRotationX(std::sin(sidePhase) * 0.34f));
+    } else if (name.find("calf") != std::string::npos) {
+        local = multiplyActorMatrices(local, actorRotationX(std::max(0.0f, -std::sin(sidePhase)) * 0.34f));
+    } else if (name.find("foot") != std::string::npos) {
+        local = multiplyActorMatrices(local, actorRotationX(std::sin(sidePhase + 0.7f) * 0.14f));
+    } else if (name.find("upperarm") != std::string::npos) {
+        local = multiplyActorMatrices(local, actorRotationX(-std::sin(sidePhase) * 0.24f));
+    } else if (name.find("forearm") != std::string::npos) {
+        local = multiplyActorMatrices(local, actorRotationX(-std::sin(sidePhase) * 0.12f));
+    } else if (name == "bip01 spine1" || name == "bip01 spine2") {
+        local = multiplyActorMatrices(local, actorRotationZ(std::sin(phase * 2.0f) * 0.018f));
+    }
+    return local;
+}
+
+void appendActorBonePalette(
+    std::span<const odai::importer::ImportedSkeletonNode> skeleton,
+    float animationTime,
+    std::vector<odai::render::ImportedActorBonePaletteMatrix>& outPalette
+) {
+    std::vector<std::array<float, 16>> worldMatrices(skeleton.size(), identityActorMatrix());
+    for (std::size_t nodeIndex = 0; nodeIndex < skeleton.size(); ++nodeIndex) {
+        const std::array<float, 16> local = animatedActorLocalMatrix(skeleton[nodeIndex], animationTime);
+        const std::int32_t parentIndex = skeleton[nodeIndex].parentIndex;
+        if (parentIndex >= 0 && static_cast<std::size_t>(parentIndex) < worldMatrices.size()) {
+            worldMatrices[nodeIndex] =
+                multiplyActorMatrices(worldMatrices[static_cast<std::size_t>(parentIndex)], local);
+        } else {
+            worldMatrices[nodeIndex] = local;
+        }
+
+        const std::array<float, 16> inverseBind =
+            actorMatrixFromArray(skeleton[nodeIndex].inverseBindWorldTransform);
+        const std::array<float, 16> paletteNif = multiplyActorMatrices(worldMatrices[nodeIndex], inverseBind);
+        const std::array<float, 16> paletteEngine = nifMatrixToEngineMatrix(paletteNif);
+        odai::render::ImportedActorBonePaletteMatrix matrix{};
+        matrix.rows[0] = paletteEngine[0];
+        matrix.rows[1] = paletteEngine[1];
+        matrix.rows[2] = paletteEngine[2];
+        matrix.rows[3] = paletteEngine[3];
+        matrix.rows[4] = paletteEngine[4];
+        matrix.rows[5] = paletteEngine[5];
+        matrix.rows[6] = paletteEngine[6];
+        matrix.rows[7] = paletteEngine[7];
+        matrix.rows[8] = paletteEngine[8];
+        matrix.rows[9] = paletteEngine[9];
+        matrix.rows[10] = paletteEngine[10];
+        matrix.rows[11] = paletteEngine[11];
+        outPalette.push_back(matrix);
+    }
+}
+
+} // namespace
+
 void App::rebuildMorrowindActorRenderFrame(float simulationAlpha) {
     m_balmoraGuardFrameInstances.clear();
+    m_balmoraGuardBonePalette.clear();
     if (m_morrowindActors.empty() || m_balmoraGuardPrototype.vertices.empty()) {
         return;
     }
@@ -3131,6 +3374,13 @@ void App::rebuildMorrowindActorRenderFrame(float simulationAlpha) {
             : 0.0f;
         instance.flags = kImportedSceneMaterialFlagNpcGpuTransform;
         instance.assetIndex = 0u;
+        if (m_balmoraGuardPrototype.gpuSkinned && !m_balmoraGuardPrototype.skeleton.empty()) {
+            instance.bonePaletteOffset = static_cast<std::uint32_t>(m_balmoraGuardBonePalette.size());
+            appendActorBonePalette(
+                std::span<const odai::importer::ImportedSkeletonNode>(m_balmoraGuardPrototype.skeleton),
+                instance.animationTime,
+                m_balmoraGuardBonePalette);
+        }
         if (guard.actorPrototypeIndex < m_importedActorPrototypeRanges.size()) {
             const ImportedActorPrototypeRange& range =
                 m_importedActorPrototypeRanges[guard.actorPrototypeIndex];
@@ -3455,6 +3705,7 @@ void App::update(float dt, float simulationAlpha) {
         const odai::render::ImportedActorFrameData* guardFrameDataPtr = nullptr;
         if (!m_balmoraGuardFrameInstances.empty()) {
             guardFrameData.instances = m_balmoraGuardFrameInstances;
+            guardFrameData.bonePalette = m_balmoraGuardBonePalette;
             guardFrameDataPtr = &guardFrameData;
         }
         m_renderer.renderFrame(

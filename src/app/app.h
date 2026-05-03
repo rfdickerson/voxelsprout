@@ -5,6 +5,7 @@
 #include "game/game_state.h"
 #include "game/lua_script.h"
 #include "import/gpu_scene.h"
+#include "import/morrowind_nif.h"
 #include "render/renderer.h"
 #include "sim/simulation.h"
 #include "world/clipmap_index.h"
@@ -217,6 +218,7 @@ private:
         std::vector<odai::importer::ImportedScenePackedDraw> draws;
         std::vector<std::array<std::uint16_t, 4>> boneIndices;
         std::vector<std::array<float, 4>> boneWeights;
+        std::vector<odai::importer::ImportedSkeletonNode> skeleton;
         bool gpuSkinned = false;
     };
 
@@ -384,6 +386,7 @@ private:
     std::unordered_map<std::string, std::size_t> m_morrowindActorIndexByRefKey;
     std::unordered_map<std::string, MorrowindActorPrototypeCacheEntry> m_morrowindActorPrototypeCache;
     std::vector<odai::render::ImportedActorInstanceData> m_balmoraGuardFrameInstances;
+    std::vector<odai::render::ImportedActorBonePaletteMatrix> m_balmoraGuardBonePalette;
 };
 
 } // namespace odai::app

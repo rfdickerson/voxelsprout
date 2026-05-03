@@ -182,6 +182,36 @@ std::filesystem::path writeSyntheticRootCollisionNif() {
     return path;
 }
 
+void appendTextKeyExtraData(std::vector<std::uint8_t>& bytes) {
+    appendSizedString(bytes, "NiTextKeyExtraData");
+    appendBinaryValue(bytes, static_cast<std::int32_t>(-1));
+    appendBinaryValue(bytes, static_cast<std::uint32_t>(0));
+    appendBinaryValue(bytes, static_cast<std::uint32_t>(2));
+    appendBinaryValue(bytes, 0.0f);
+    appendSizedString(bytes, "idle: start");
+    appendBinaryValue(bytes, 1.0f);
+    appendSizedString(bytes, "idle: stop");
+}
+
+std::filesystem::path writeSyntheticSkeletonOnlyNif() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "odai_skeleton_only_actor.nif";
+    std::vector<std::uint8_t> bytes;
+    const std::string header = "NetImmerse File Format, Version 4.0.0.2\n";
+    bytes.insert(bytes.end(), header.begin(), header.end());
+    appendBinaryValue(bytes, static_cast<std::uint32_t>(0x04000002u));
+    appendBinaryValue(bytes, static_cast<std::uint32_t>(3));
+    appendNifNode(bytes, "Bip01", {1});
+    appendNifNode(bytes, "Bip01 Pelvis", {});
+    appendTextKeyExtraData(bytes);
+    appendBinaryValue(bytes, static_cast<std::uint32_t>(1));
+    appendBinaryValue(bytes, static_cast<std::int32_t>(0));
+
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    return path;
+}
+
 void testImportedSceneSerialization() {
     namespace fs = std::filesystem;
     using odai::importer::ImportedScene;
@@ -562,6 +592,30 @@ void testMorrowindNifSkipsNamedRootCollisionNode() {
         expectTrue(vertex.position[0] < 10.0f,
                    "Morrowind NIF loader excludes collision-only triangle positions");
     }
+
+    std::filesystem::remove(nifPath);
+}
+
+void testMorrowindSkeletonOnlyNifLoadsAndExtractsTextKeys() {
+    const std::filesystem::path nifPath = writeSyntheticSkeletonOnlyNif();
+
+    odai::importer::ImportedAnimatedNifResult animated{};
+    std::string error;
+    expectTrue(
+        odai::importer::loadMorrowindAnimatedNif(nifPath, animated, error),
+        "Morrowind animated NIF loader accepts skeleton-only NIFs");
+    expectTrue(animated.vertices.empty(), "Skeleton-only animated NIF has no geometry");
+    expectTrue(animated.nodes.size() == 2u, "Skeleton-only animated NIF exposes nodes");
+    expectTrue(animated.textKeys.size() == 2u, "Skeleton-only animated NIF extracts text keys");
+
+    odai::importer::ImportedSkinnedActorAsset actor{};
+    expectTrue(
+        odai::importer::loadMorrowindSkinnedActorSkeleton(nifPath, actor, error),
+        "Skeleton-only NIF loads as actor skeleton");
+    expectTrue(actor.skeleton.size() == 2u, "Actor skeleton keeps skeleton-only nodes");
+    expectTrue(!actor.animationClips.empty(), "Actor skeleton builds clips from text keys");
+    expectNear(actor.skeleton[0].inverseBindWorldTransform[0], 1.0f, 0.0001f,
+               "Actor skeleton computes inverse bind matrices");
 
     std::filesystem::remove(nifPath);
 }
@@ -1004,6 +1058,7 @@ int main() {
     testGpuSceneBuildFromImportedScene();
     testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain();
     testMorrowindNifSkipsNamedRootCollisionNode();
+    testMorrowindSkeletonOnlyNifLoadsAndExtractsTextKeys();
     testImportedSceneCollision();
     testMorrowindFargothActorPartsLoadWhenDataFilesAvailable();
     testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable();
