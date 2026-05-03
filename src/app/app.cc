@@ -135,9 +135,6 @@ constexpr std::size_t kMaxSeydaNeenGuardCount = 4u;
 constexpr int kSeydaNeenCellX = -2;
 constexpr int kSeydaNeenCellY = -9;
 constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
-constexpr std::uint32_t kImportedSceneMaterialFlagNpcGpuTransform = 1u << 24u;
-constexpr std::uint32_t kImportedSceneMaterialFlagNpcNoDeform = 1u << 25u;
-constexpr std::uint32_t kImportedSceneMaterialFlagNpcGpuSkinned = 1u << 26u;
 constexpr float kMorrowindCellSizeUnits = 8192.0f;
 
 constexpr float kDefaultPipeLength = 1.0f;
@@ -755,31 +752,6 @@ bool actorDebugSceneEnabledByEnvironment() {
     }
     const std::string normalized = lowerPathCopy(*value);
     return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
-}
-
-bool assignImportedActorDrawMaterial(
-    std::vector<odai::importer::ImportedScenePackedVertex>& vertices,
-    const std::vector<std::uint32_t>& indices,
-    const odai::importer::ImportedScenePackedDraw& draw,
-    std::uint32_t textureIndex,
-    std::uint32_t materialFlags
-) {
-    const std::size_t firstIndex = draw.firstIndex;
-    const std::size_t indexEnd = firstIndex + draw.indexCount;
-    if (draw.indexCount == 0u ||
-        firstIndex >= indices.size() ||
-        indexEnd > indices.size()) {
-        return false;
-    }
-    for (std::size_t indexOffset = firstIndex; indexOffset < indexEnd; ++indexOffset) {
-        const std::uint32_t vertexIndex = indices[indexOffset];
-        if (vertexIndex >= vertices.size()) {
-            return false;
-        }
-        vertices[vertexIndex].textureIndex = textureIndex;
-        vertices[vertexIndex].flags = materialFlags;
-    }
-    return true;
 }
 
 bool morrowindExteriorWindowContainsCell(
@@ -2222,9 +2194,8 @@ bool App::enterMorrowindInterior(const odai::importer::MorrowindDoorReference& d
     for (MorrowindActorInstance& actor : m_morrowindActors) {
         actor.resident = false;
     }
-    m_balmoraGuardPrototype = {};
+    m_morrowindActorSystem.clear();
     m_balmoraNavmesh.clear();
-    m_balmoraGuardFrameInstances.clear();
 
     m_camera.x = door.destination.position[0];
     m_camera.y = door.destination.position[1] + kMorrowindInteriorSpawnEyeHeight;
@@ -2269,9 +2240,8 @@ bool App::leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& d
     for (MorrowindActorInstance& actor : m_morrowindActors) {
         actor.resident = false;
     }
-    m_balmoraGuardPrototype = {};
+    m_morrowindActorSystem.clear();
     m_balmoraNavmesh.clear();
-    m_balmoraGuardFrameInstances.clear();
 
     m_camera.x = door.destination.position[0];
     m_camera.y = door.destination.position[1] + kImportedPlayerEyeHeight;
@@ -2297,14 +2267,9 @@ bool App::initializeActorDebugScene(const std::filesystem::path& dataFilesPath) 
     m_gpuSceneRuntime = {};
     m_importedSceneCollision = {};
     m_balmoraNavmesh.clear();
-    m_balmoraGuardPrototype = {};
-    m_importedActorPrototypeRanges.clear();
+    m_morrowindActorSystem.clear();
     m_morrowindActors.clear();
     m_morrowindActorIndexByRefKey.clear();
-    m_morrowindActorPrototypeCache.clear();
-    m_balmoraGuardFrameInstances.clear();
-    m_balmoraGuardBonePalette.clear();
-    m_balmoraGuardDebugBoneLines.clear();
 
     std::string actorId = "fargoth";
     if (const std::optional<std::string> requestedActor = readEnvironmentString(kActorDebugIdEnvVar);
@@ -2369,158 +2334,22 @@ bool App::initializeActorDebugScene(const std::filesystem::path& dataFilesPath) 
         return false;
     }
 
-    odai::importer::ImportedSkinnedActorAsset actorAsset{};
-    std::string skinnedError;
-    const std::filesystem::path baseAnimPath = dataFilesPath / "Meshes" / "base_anim.nif";
-    if (!odai::importer::loadMorrowindSkinnedActorSkeleton(baseAnimPath, actorAsset, skinnedError)) {
-        VOX_LOGE("app") << "actor debug scene failed: base_anim.nif load failed ("
-                        << skinnedError << ")";
+    std::string actorError;
+    const std::uint32_t prototypeIndex =
+        m_morrowindActorSystem.findOrBuildHumanoidPrototypeFromParts(
+            dataFilesPath,
+            actorId,
+            fargothParts,
+            addActorTextureSlot,
+            actorError);
+    if (prototypeIndex == std::numeric_limits<std::uint32_t>::max()) {
+        VOX_LOGE("app") << "actor debug scene failed: " << actorError;
         return false;
     }
-    const auto countZeroWeightVertices = [](const odai::importer::ImportedSkinnedActorAsset& asset,
-                                            std::size_t firstVertex) {
-        std::uint32_t count = 0u;
-        for (std::size_t vertexIndex = firstVertex; vertexIndex < asset.boneWeights.size(); ++vertexIndex) {
-            const std::array<float, 4>& weights = asset.boneWeights[vertexIndex];
-            const float weightSum = weights[0] + weights[1] + weights[2] + weights[3];
-            if (weightSum <= 0.0001f) {
-                ++count;
-            }
-        }
-        return count;
-    };
-    for (const odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart& part : fargothParts) {
-        const std::filesystem::path nifPath =
-            dataFilesPath / "Meshes" / std::filesystem::path(part.modelPath);
-        const std::size_t firstNewVertex = actorAsset.vertices.size();
-        const std::size_t firstNewIndex = actorAsset.indices.size();
-        const std::size_t firstNewDraw = actorAsset.draws.size();
-        const odai::importer::MorrowindActorPartMetadata metadata =
-            odai::importer::toMorrowindActorPartMetadata(part);
-        if (!odai::importer::appendMorrowindSkinnedActorPartNif(
-                nifPath,
-                metadata,
-                actorAsset,
-                skinnedError)) {
-            VOX_LOGE("app") << "actor debug scene failed: Fargoth part failed: " << nifPath.string()
-                            << " (" << skinnedError << ")";
-            return false;
-        }
-        const std::uint32_t zeroWeightFinal =
-            countZeroWeightVertices(actorAsset, firstNewVertex);
-        float minX = std::numeric_limits<float>::max();
-        float minY = std::numeric_limits<float>::max();
-        float minZ = std::numeric_limits<float>::max();
-        float maxX = -std::numeric_limits<float>::max();
-        float maxY = -std::numeric_limits<float>::max();
-        float maxZ = -std::numeric_limits<float>::max();
-        for (std::size_t vertexIndex = firstNewVertex; vertexIndex < actorAsset.vertices.size(); ++vertexIndex) {
-            const odai::importer::ImportedScenePackedVertex& vertex = actorAsset.vertices[vertexIndex];
-            minX = std::min(minX, vertex.position[0]);
-            minY = std::min(minY, vertex.position[1]);
-            minZ = std::min(minZ, vertex.position[2]);
-            maxX = std::max(maxX, vertex.position[0]);
-            maxY = std::max(maxY, vertex.position[1]);
-            maxZ = std::max(maxZ, vertex.position[2]);
-        }
-        std::string firstTexturePath;
-        if (firstNewDraw < actorAsset.partDiffuseTexturePaths.size()) {
-            firstTexturePath = actorAsset.partDiffuseTexturePaths[firstNewDraw];
-        }
-        VOX_LOGI("app") << "actor debug part loaded"
-                        << " part=" << part.modelPath
-                        << " bodyPart=" << part.bodyPartId
-                        << " partType=" << static_cast<int>(part.partReferenceType)
-                        << " slot=" << part.slot
-                        << " side=" << part.side
-                        << " attachBone=" << part.attachBone
-                        << " meshFilter=" << part.meshFilter
-                        << " vertices=" << (actorAsset.vertices.size() - firstNewVertex)
-                        << " indices=" << (actorAsset.indices.size() - firstNewIndex)
-                        << " draws=" << (actorAsset.draws.size() - firstNewDraw)
-                        << " zeroWeightFinal=" << zeroWeightFinal
-                        << " boundsMin=(" << minX << "," << minY << "," << minZ << ")"
-                        << " boundsMax=(" << maxX << "," << maxY << "," << maxZ << ")"
-                        << " texture=" << firstTexturePath;
-    }
-
-    const bool validActor =
-        !actorAsset.vertices.empty() &&
-        !actorAsset.indices.empty() &&
-        !actorAsset.draws.empty() &&
-        actorAsset.boneIndices.size() == actorAsset.vertices.size() &&
-        actorAsset.boneWeights.size() == actorAsset.vertices.size();
-    if (!validActor) {
-        VOX_LOGE("app") << "actor debug scene failed: invalid Fargoth actor asset"
-                        << " vertices=" << actorAsset.vertices.size()
-                        << " indices=" << actorAsset.indices.size()
-                        << " draws=" << actorAsset.draws.size()
-                        << " boneIndices=" << actorAsset.boneIndices.size()
-                        << " boneWeights=" << actorAsset.boneWeights.size();
-        return false;
-    }
-
-    const std::size_t weightedVertexCount = actorAsset.weightedVertexCount;
-    const std::size_t unweightedVertexCount = actorAsset.unweightedVertexCount;
-    const std::size_t skeletonNodeCount = actorAsset.skeleton.size();
-    const std::size_t nodeAnimationCount = actorAsset.nodeAnimations.size();
-    const std::size_t clipCount = actorAsset.animationClips.size();
-    const odai::importer::ImportedAnimationClip* debugWalkClip =
-        findActorDebugWalkClip(actorAsset.animationClips);
-    if (debugWalkClip == nullptr) {
+    if (m_morrowindActorSystem.walkClip() == nullptr) {
         VOX_LOGE("app") << "actor debug scene failed: base_anim.nif did not expose a walkforward clip";
         return false;
     }
-    const std::string debugWalkClipName = debugWalkClip != nullptr ? debugWalkClip->name : "none";
-    std::string firstBoneNames;
-    for (std::size_t i = 0; i < std::min<std::size_t>(actorAsset.skeleton.size(), 8u); ++i) {
-        if (!firstBoneNames.empty()) {
-            firstBoneNames += ", ";
-        }
-        firstBoneNames += actorAsset.skeleton[i].name;
-    }
-    constexpr bool kActorDebugSkinningPrepared = true;
-
-    m_balmoraGuardPrototype.vertices = std::move(actorAsset.vertices);
-    m_balmoraGuardPrototype.indices = std::move(actorAsset.indices);
-    m_balmoraGuardPrototype.draws = std::move(actorAsset.draws);
-    m_balmoraGuardPrototype.boneIndices = std::move(actorAsset.boneIndices);
-    m_balmoraGuardPrototype.boneWeights = std::move(actorAsset.boneWeights);
-    m_balmoraGuardPrototype.skeleton = std::move(actorAsset.skeleton);
-    m_balmoraGuardPrototype.nodeAnimations = std::move(actorAsset.nodeAnimations);
-    m_balmoraGuardPrototype.animationClips = std::move(actorAsset.animationClips);
-    m_balmoraGuardPrototype.gpuSkinned = kActorDebugSkinningPrepared;
-    for (std::size_t drawIndex = 0; drawIndex < m_balmoraGuardPrototype.draws.size(); ++drawIndex) {
-        const std::string texturePath = drawIndex < actorAsset.partDiffuseTexturePaths.size()
-            ? actorAsset.partDiffuseTexturePaths[drawIndex]
-            : std::string{};
-        const std::uint32_t textureIndex = addActorTextureSlot(texturePath);
-        if (textureIndex == std::numeric_limits<std::uint32_t>::max()) {
-            VOX_LOGE("app") << "actor debug scene failed: actor draw missing texture"
-                            << " draw=" << drawIndex
-                            << " texture=" << texturePath;
-            return false;
-        }
-        const odai::importer::ImportedScenePackedDraw& draw = m_balmoraGuardPrototype.draws[drawIndex];
-        if (!assignImportedActorDrawMaterial(
-                m_balmoraGuardPrototype.vertices,
-                m_balmoraGuardPrototype.indices,
-                draw,
-                textureIndex,
-                kImportedSceneMaterialFlagNpcGpuTransform |
-                    kImportedSceneMaterialFlagNpcGpuSkinned)) {
-            VOX_LOGE("app") << "actor debug scene failed: actor draw range is invalid"
-                            << " draw=" << drawIndex
-                            << " firstIndex=" << draw.firstIndex
-                            << " indexCount=" << draw.indexCount;
-            return false;
-        }
-    }
-
-    ImportedActorPrototypeRange range{};
-    range.firstDraw = 0u;
-    range.drawCount = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
-    m_importedActorPrototypeRanges.push_back(range);
 
     MorrowindActorInstance actor{};
     actor.refKey.actorId = actorId;
@@ -2531,7 +2360,7 @@ bool App::initializeActorDebugScene(const std::filesystem::path& dataFilesPath) 
     actor.yawRadians = 0.0f;
     actor.previousYawRadians = actor.yawRadians;
     actor.speed = 0.0f;
-    actor.actorPrototypeIndex = 0u;
+    actor.actorPrototypeIndex = prototypeIndex;
     actor.actorId = actorId;
     actor.dialogueActorId = actorId;
     actor.resident = true;
@@ -2556,18 +2385,19 @@ bool App::initializeActorDebugScene(const std::filesystem::path& dataFilesPath) 
 
     VOX_LOGI("app") << "actor debug scene enabled"
                     << " actor=" << actorId
-                    << " vertices=" << m_balmoraGuardPrototype.vertices.size()
-                    << " indices=" << m_balmoraGuardPrototype.indices.size()
-                    << " draws=" << m_balmoraGuardPrototype.draws.size()
-                    << " skeletonNodes=" << skeletonNodeCount
-                    << " animations=" << nodeAnimationCount
-                    << " clips=" << clipCount
-                    << " paletteMatricesPerActor=" << skeletonNodeCount
-                    << " weightedVertices=" << weightedVertexCount
-                    << " unweightedVertices=" << unweightedVertexCount
-                    << " gpuSkinningPrepared=" << (kActorDebugSkinningPrepared ? "on" : "off")
-                    << " walkClip=" << debugWalkClipName
-                    << " firstBones=[" << firstBoneNames << "]";
+                    << " prototypes=" << m_morrowindActorSystem.prototypeCount()
+                    << " vertices=" << m_morrowindActorSystem.vertexCount()
+                    << " indices=" << m_morrowindActorSystem.indexCount()
+                    << " draws=" << m_morrowindActorSystem.drawCount()
+                    << " skeletonNodes=" << m_morrowindActorSystem.stats().skeletonNodeCount
+                    << " animations=" << m_morrowindActorSystem.stats().nodeAnimationCount
+                    << " clips=" << m_morrowindActorSystem.stats().clipCount
+                    << " paletteMatricesPerActor=" << m_morrowindActorSystem.stats().skeletonNodeCount
+                    << " weightedVertices=" << m_morrowindActorSystem.stats().weightedVertexCount
+                    << " unweightedVertices=" << m_morrowindActorSystem.stats().unweightedVertexCount
+                    << " walkClip=" << m_morrowindActorSystem.walkClip()->name
+                    << " firstBones=[" << m_morrowindActorSystem.stats().firstBoneNames << "]"
+                    << " firstClips=[" << m_morrowindActorSystem.stats().firstClipNames << "]";
     return true;
 }
 
@@ -2575,9 +2405,7 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
     for (MorrowindActorInstance& actor : m_morrowindActors) {
         actor.resident = false;
     }
-    m_balmoraGuardPrototype = {};
-    m_importedActorPrototypeRanges.clear();
-    m_morrowindActorPrototypeCache.clear();
+    m_morrowindActorSystem.clear();
     if (!reusePreparedNavmesh) {
         m_balmoraNavmesh.clear();
     }
@@ -2689,400 +2517,31 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
         return textureIndex;
     };
 
-    std::size_t importedActorPartCount = 0u;
-    std::size_t missingActorPartCount = 0u;
-    std::size_t failedActorPartCount = 0u;
-    auto appendNifToPrototype = [&](std::string_view relativeModelPath, bool disableProceduralDeform) -> bool {
-        std::filesystem::path nifPath = *dataFilesPath / "Meshes" / std::filesystem::path(std::string(relativeModelPath));
-        if (!std::filesystem::exists(nifPath)) {
-            ++missingActorPartCount;
-            VOX_LOGE("app") << guardSceneLabel << " actor mesh missing: " << nifPath.string();
-            return false;
+    std::uint32_t defaultActorPrototypeIndex = std::numeric_limits<std::uint32_t>::max();
+    const std::string defaultGuardActorId = seydaNeenRegion ? "imperial guard" : "hlaalu guard_outside";
+    const auto defaultGuardIt = actorCatalog.actorsById.find(defaultGuardActorId);
+    if (defaultGuardIt != actorCatalog.actorsById.end()) {
+        std::string actorError;
+        defaultActorPrototypeIndex =
+            m_morrowindActorSystem.findOrBuildHumanoidPrototype(
+                *dataFilesPath,
+                defaultGuardIt->second,
+                equipmentCatalog,
+                addActorTextureSlot,
+                actorError);
+        if (defaultActorPrototypeIndex == std::numeric_limits<std::uint32_t>::max()) {
+            VOX_LOGE("app") << guardSceneLabel << " default guard actor rejected: " << actorError;
+            m_balmoraNavmesh.clear();
+            return;
         }
-
-        odai::importer::ImportedNifResult nifResult{};
-        std::string nifError;
-        if (!odai::importer::loadMorrowindActorPartNif(nifPath, nifResult, nifError)) {
-            ++failedActorPartCount;
-            VOX_LOGE("app") << guardSceneLabel << " actor mesh failed: " << nifPath.string()
-                             << " (" << nifError << ")";
-            return false;
-        }
-
-        if (nifResult.mesh.parts.empty()) {
-            odai::importer::ImportedSceneMeshPart part{};
-            part.firstIndex = 0u;
-            part.indexCount = static_cast<std::uint32_t>(nifResult.mesh.indices.size());
-            part.textureIndex = addActorTextureSlot(nifResult.diffuseTexturePath);
-            if (part.textureIndex == std::numeric_limits<std::uint32_t>::max()) {
-                VOX_LOGE("app") << guardSceneLabel << " actor mesh failed: texture missing"
-                                << " mesh=" << relativeModelPath
-                                << " texture=" << nifResult.diffuseTexturePath;
-                return false;
-            }
-            part.alphaTest = nifResult.alphaTest;
-            nifResult.mesh.parts.push_back(part);
-        } else {
-            for (std::size_t partIndex = 0; partIndex < nifResult.mesh.parts.size(); ++partIndex) {
-                odai::importer::ImportedSceneMeshPart& part = nifResult.mesh.parts[partIndex];
-                std::string texturePath = nifResult.diffuseTexturePath;
-                if (partIndex < nifResult.partDiffuseTexturePaths.size() &&
-                    !nifResult.partDiffuseTexturePaths[partIndex].empty()) {
-                    texturePath = nifResult.partDiffuseTexturePaths[partIndex];
-                }
-                part.textureIndex = addActorTextureSlot(texturePath);
-                if (part.textureIndex == std::numeric_limits<std::uint32_t>::max()) {
-                    VOX_LOGE("app") << guardSceneLabel << " actor mesh failed: texture missing"
-                                    << " mesh=" << relativeModelPath
-                                    << " texture=" << texturePath;
-                    return false;
-                }
-            }
-        }
-
-        ++importedActorPartCount;
-        for (const odai::importer::ImportedSceneMeshPart& part : nifResult.mesh.parts) {
-            const std::uint32_t firstIndex = part.firstIndex;
-            const std::uint32_t indexEnd = std::min<std::uint32_t>(
-                firstIndex + part.indexCount,
-                static_cast<std::uint32_t>(nifResult.mesh.indices.size()));
-            if (firstIndex >= indexEnd) {
-                continue;
-            }
-
-            const std::uint32_t drawFirstIndex =
-                static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size());
-            std::vector<std::uint32_t> remap(
-                nifResult.mesh.vertices.size(),
-                std::numeric_limits<std::uint32_t>::max());
-            for (std::uint32_t indexOffset = firstIndex; indexOffset < indexEnd; ++indexOffset) {
-                const std::uint32_t sourceVertexIndex = nifResult.mesh.indices[indexOffset];
-                if (sourceVertexIndex >= nifResult.mesh.vertices.size()) {
-                    continue;
-                }
-                std::uint32_t& mappedIndex = remap[sourceVertexIndex];
-                if (mappedIndex == std::numeric_limits<std::uint32_t>::max()) {
-                    const odai::importer::ImportedSceneVertex& sourceVertex =
-                        nifResult.mesh.vertices[sourceVertexIndex];
-                    odai::importer::ImportedScenePackedVertex vertex{};
-                    std::copy(std::begin(sourceVertex.position), std::end(sourceVertex.position), std::begin(vertex.position));
-                    std::copy(std::begin(sourceVertex.normal), std::end(sourceVertex.normal), std::begin(vertex.normal));
-                    std::copy(std::begin(sourceVertex.uv), std::end(sourceVertex.uv), std::begin(vertex.uv));
-                    vertex.color[0] = 0.78f;
-                    vertex.color[1] = 0.72f;
-                    vertex.color[2] = 0.62f;
-                    vertex.textureIndex = part.textureIndex;
-                    vertex.flags =
-                        (part.alphaTest ? kImportedSceneMaterialFlagAlphaTest : 0u) |
-                        kImportedSceneMaterialFlagNpcGpuTransform |
-                        (disableProceduralDeform ? kImportedSceneMaterialFlagNpcNoDeform : 0u);
-                    mappedIndex = static_cast<std::uint32_t>(m_balmoraGuardPrototype.vertices.size());
-                    m_balmoraGuardPrototype.vertices.push_back(vertex);
-                    m_balmoraGuardPrototype.boneIndices.push_back({0u, 0u, 0u, 0u});
-                    m_balmoraGuardPrototype.boneWeights.push_back({0.0f, 0.0f, 0.0f, 0.0f});
-                }
-                m_balmoraGuardPrototype.indices.push_back(mappedIndex);
-            }
-
-            const std::uint32_t drawIndexCount =
-                static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size()) - drawFirstIndex;
-            if (drawIndexCount == 0u) {
-                continue;
-            }
-            odai::importer::ImportedScenePackedDraw draw{};
-            draw.firstIndex = drawFirstIndex;
-            draw.indexCount = drawIndexCount;
-            m_balmoraGuardPrototype.draws.push_back(draw);
-        }
-        return true;
-    };
-
-    auto appendPrototypeRange = [&](std::uint32_t firstDraw) -> std::uint32_t {
-        const std::uint32_t drawCount =
-            static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size()) - firstDraw;
-        if (drawCount == 0u) {
-            return std::numeric_limits<std::uint32_t>::max();
-        }
-        ImportedActorPrototypeRange range{};
-        range.firstDraw = firstDraw;
-        range.drawCount = drawCount;
-        const std::uint32_t prototypeIndex = static_cast<std::uint32_t>(m_importedActorPrototypeRanges.size());
-        m_importedActorPrototypeRanges.push_back(range);
-        return prototypeIndex;
-    };
-
-    const std::filesystem::path baseAnimPath = *dataFilesPath / "Meshes" / "base_anim.nif";
-    odai::importer::ImportedSkinnedActorAsset humanoidSkeletonTemplate{};
-    std::string humanoidSkeletonError;
-    const bool humanoidSkeletonLoaded =
-        odai::importer::loadMorrowindSkinnedActorSkeleton(
-            baseAnimPath,
-            humanoidSkeletonTemplate,
-            humanoidSkeletonError);
-    if (!humanoidSkeletonLoaded) {
-        VOX_LOGE("app") << guardSceneLabel << " actor import failed: base_anim.nif failed ("
-                        << humanoidSkeletonError << ")";
+    } else if (balmoraRegion || seydaNeenRegion) {
+        VOX_LOGE("app") << guardSceneLabel << " default guard actor rejected: actor catalog missing "
+                        << defaultGuardActorId;
+        m_balmoraNavmesh.clear();
         return;
     }
-
-    auto appendSkinnedActorAssetToPrototype = [&](
-        const odai::importer::ImportedSkinnedActorAsset& actorAsset,
-        const std::string& actorId,
-        std::uint32_t firstDraw
-    ) -> std::uint32_t {
-        const std::uint32_t vertexBase = static_cast<std::uint32_t>(m_balmoraGuardPrototype.vertices.size());
-        const std::uint32_t indexBase = static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size());
-        const std::uint32_t drawBase = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
-
-        if (m_balmoraGuardPrototype.skeleton.empty()) {
-            m_balmoraGuardPrototype.skeleton = actorAsset.skeleton;
-            m_balmoraGuardPrototype.nodeAnimations = actorAsset.nodeAnimations;
-            m_balmoraGuardPrototype.animationClips = actorAsset.animationClips;
-        }
-        m_balmoraGuardPrototype.vertices.insert(
-            m_balmoraGuardPrototype.vertices.end(),
-            actorAsset.vertices.begin(),
-            actorAsset.vertices.end());
-        m_balmoraGuardPrototype.boneIndices.insert(
-            m_balmoraGuardPrototype.boneIndices.end(),
-            actorAsset.boneIndices.begin(),
-            actorAsset.boneIndices.end());
-        m_balmoraGuardPrototype.boneWeights.insert(
-            m_balmoraGuardPrototype.boneWeights.end(),
-            actorAsset.boneWeights.begin(),
-            actorAsset.boneWeights.end());
-        m_balmoraGuardPrototype.indices.reserve(m_balmoraGuardPrototype.indices.size() + actorAsset.indices.size());
-        for (const std::uint32_t index : actorAsset.indices) {
-            m_balmoraGuardPrototype.indices.push_back(vertexBase + index);
-        }
-        m_balmoraGuardPrototype.draws.reserve(m_balmoraGuardPrototype.draws.size() + actorAsset.draws.size());
-        for (const odai::importer::ImportedScenePackedDraw& sourceDraw : actorAsset.draws) {
-            odai::importer::ImportedScenePackedDraw draw = sourceDraw;
-            draw.firstIndex += indexBase;
-            m_balmoraGuardPrototype.draws.push_back(draw);
-        }
-
-        for (std::size_t localDrawIndex = 0; localDrawIndex < actorAsset.draws.size(); ++localDrawIndex) {
-            const std::size_t globalDrawIndex = static_cast<std::size_t>(drawBase) + localDrawIndex;
-            const std::string texturePath = localDrawIndex < actorAsset.partDiffuseTexturePaths.size()
-                ? actorAsset.partDiffuseTexturePaths[localDrawIndex]
-                : std::string{};
-            const std::uint32_t textureIndex = addActorTextureSlot(texturePath);
-            if (textureIndex == std::numeric_limits<std::uint32_t>::max()) {
-                VOX_LOGE("app") << guardSceneLabel << " skinned NPC prototype rejected"
-                                << " actor=" << actorId
-                                << " draw=" << localDrawIndex
-                                << " texture=" << texturePath;
-                return std::numeric_limits<std::uint32_t>::max();
-            }
-            const odai::importer::ImportedScenePackedDraw& draw = m_balmoraGuardPrototype.draws[globalDrawIndex];
-            if (!assignImportedActorDrawMaterial(
-                    m_balmoraGuardPrototype.vertices,
-                    m_balmoraGuardPrototype.indices,
-                    draw,
-                    textureIndex,
-                    kImportedSceneMaterialFlagNpcGpuTransform |
-                        kImportedSceneMaterialFlagNpcGpuSkinned)) {
-                VOX_LOGE("app") << guardSceneLabel << " skinned NPC prototype rejected"
-                                << " actor=" << actorId
-                                << " draw=" << localDrawIndex
-                                << " firstIndex=" << draw.firstIndex
-                                << " indexCount=" << draw.indexCount;
-                return std::numeric_limits<std::uint32_t>::max();
-            }
-        }
-        m_balmoraGuardPrototype.gpuSkinned = true;
-        VOX_LOGI("app") << guardSceneLabel << " skinned NPC prototype imported"
-                        << " actor=" << actorId
-                        << " parts=" << actorAsset.partDiffuseTexturePaths.size()
-                        << " weightedVertices=" << actorAsset.weightedVertexCount
-                        << " unweightedVertices=" << actorAsset.unweightedVertexCount
-                        << " unknownInfluences=" << actorAsset.unknownBoneInfluenceCount
-                        << " droppedInfluences=" << actorAsset.droppedInfluenceCount;
-        return appendPrototypeRange(firstDraw);
-    };
-
-    auto appendGenericNpcPrototype = [&](const odai::importer::MorrowindActorRecord& actor) -> std::uint32_t {
-        const std::uint32_t firstDraw = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
-        std::vector<odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart> resolvedParts =
-            odai::importer::resolveMorrowindNpcParts(actor, equipmentCatalog);
-        std::unordered_set<std::string> seenActorPartKeys;
-        if (humanoidSkeletonLoaded) {
-            odai::importer::ImportedSkinnedActorAsset skinnedActor = humanoidSkeletonTemplate;
-            std::string skinnedError;
-            for (const odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart& part : resolvedParts) {
-                const std::string actorPartKey =
-                    lowerPathCopy(
-                        part.modelPath + "|" +
-                        part.slot + "|" +
-                        part.side + "|" +
-                        part.bodyPartId + "|" +
-                        part.attachBone + "|" +
-                        part.meshFilter + "|" +
-                        std::to_string(part.partReferenceType));
-                if (!seenActorPartKeys.insert(actorPartKey).second) {
-                    continue;
-                }
-                const std::filesystem::path nifPath =
-                    *dataFilesPath / "Meshes" / std::filesystem::path(part.modelPath);
-                if (!std::filesystem::exists(nifPath)) {
-                    VOX_LOGE("app") << guardSceneLabel << " skinned NPC prototype rejected"
-                                    << " actor=" << actor.id
-                                    << " part=" << part.modelPath
-                                    << " slot=" << part.slot
-                                    << " (missing file)";
-                    return std::numeric_limits<std::uint32_t>::max();
-                }
-                if (!odai::importer::appendMorrowindSkinnedActorPartNif(
-                        nifPath,
-                        odai::importer::toMorrowindActorPartMetadata(part),
-                        skinnedActor,
-                        skinnedError)) {
-                    VOX_LOGE("app") << guardSceneLabel << " skinned NPC prototype rejected"
-                                    << " actor=" << actor.id
-                                    << " part=" << part.modelPath
-                                    << " slot=" << part.slot
-                                    << " (" << skinnedError << ")";
-                    return std::numeric_limits<std::uint32_t>::max();
-                }
-            }
-            const bool validSkinnedActor =
-                !skinnedActor.vertices.empty() &&
-                !skinnedActor.indices.empty() &&
-                !skinnedActor.draws.empty() &&
-                skinnedActor.boneIndices.size() == skinnedActor.vertices.size() &&
-                skinnedActor.boneWeights.size() == skinnedActor.vertices.size();
-            if (validSkinnedActor) {
-                VOX_LOGI("app") << guardSceneLabel << " NPC prototype summary"
-                                << " actor=" << actor.id
-                                << " race=" << actor.raceId
-                                << " resolvedParts=" << resolvedParts.size();
-                return appendSkinnedActorAssetToPrototype(skinnedActor, actor.id, firstDraw);
-            }
-            VOX_LOGE("app") << guardSceneLabel << " skinned NPC prototype rejected"
-                            << " actor=" << actor.id
-                            << " reason=" << skinnedError;
-            return std::numeric_limits<std::uint32_t>::max();
-        }
-
-        VOX_LOGE("app") << guardSceneLabel << " NPC prototype rejected"
-                        << " actor=" << actor.id
-                        << " reason=base_anim.nif skeleton unavailable";
-        return std::numeric_limits<std::uint32_t>::max();
-    };
-
-    auto appendCreaturePrototype = [&](const odai::importer::MorrowindActorRecord& actor) -> std::uint32_t {
-        if (actor.modelPath.empty()) {
-            return std::numeric_limits<std::uint32_t>::max();
-        }
-        const std::uint32_t firstDraw = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
-        if (!appendNifToPrototype(actor.modelPath, true)) {
-            return std::numeric_limits<std::uint32_t>::max();
-        }
-        return appendPrototypeRange(firstDraw);
-    };
-
-    std::uint32_t defaultActorPrototypeIndex = std::numeric_limits<std::uint32_t>::max();
-    if (seydaNeenRegion) {
-        const std::uint32_t firstDraw = static_cast<std::uint32_t>(m_balmoraGuardPrototype.draws.size());
-        std::vector<odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart> fargothParts;
-        const auto fargothRecordIt = actorCatalog.actorsById.find("fargoth");
-        if (fargothRecordIt != actorCatalog.actorsById.end()) {
-            fargothParts =
-                odai::importer::resolveMorrowindNpcParts(fargothRecordIt->second, equipmentCatalog);
-        }
-        if (fargothParts.empty()) {
-            VOX_LOGE("app") << "Fargoth actor rejected: Fargoth resolved no catalog-driven actor parts";
-            return;
-        }
-        odai::importer::ImportedSkinnedActorAsset fargothAsset{};
-        std::string skinnedError;
-        const std::filesystem::path baseAnimPath = *dataFilesPath / "Meshes" / "base_anim.nif";
-        bool loadedSkinnedFargoth =
-            odai::importer::loadMorrowindSkinnedActorSkeleton(baseAnimPath, fargothAsset, skinnedError);
-        if (!loadedSkinnedFargoth) {
-            VOX_LOGE("app") << "Fargoth GPU-skinned actor rejected: base_anim.nif failed ("
-                            << skinnedError << ")";
-        }
-        if (loadedSkinnedFargoth && !fargothParts.empty()) {
-            for (const odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart& part : fargothParts) {
-                const std::filesystem::path nifPath =
-                    *dataFilesPath / "Meshes" / std::filesystem::path(part.modelPath);
-                if (!odai::importer::appendMorrowindSkinnedActorPartNif(
-                        nifPath,
-                        odai::importer::toMorrowindActorPartMetadata(part),
-                        fargothAsset,
-                        skinnedError)) {
-                    VOX_LOGE("app") << "Fargoth GPU-skinned actor rejected: part failed: " << nifPath.string()
-                                    << " (" << skinnedError << ")";
-                    loadedSkinnedFargoth = false;
-                    break;
-                }
-            }
-            loadedSkinnedFargoth =
-                !fargothAsset.vertices.empty() &&
-                !fargothAsset.indices.empty() &&
-                !fargothAsset.draws.empty() &&
-                fargothAsset.boneIndices.size() == fargothAsset.vertices.size() &&
-                fargothAsset.boneWeights.size() == fargothAsset.vertices.size();
-        }
-        if (loadedSkinnedFargoth) {
-            m_balmoraGuardPrototype.vertices = std::move(fargothAsset.vertices);
-            m_balmoraGuardPrototype.indices = std::move(fargothAsset.indices);
-            m_balmoraGuardPrototype.draws = std::move(fargothAsset.draws);
-            m_balmoraGuardPrototype.boneIndices = std::move(fargothAsset.boneIndices);
-            m_balmoraGuardPrototype.boneWeights = std::move(fargothAsset.boneWeights);
-            m_balmoraGuardPrototype.skeleton = std::move(fargothAsset.skeleton);
-            m_balmoraGuardPrototype.nodeAnimations = std::move(fargothAsset.nodeAnimations);
-            m_balmoraGuardPrototype.animationClips = std::move(fargothAsset.animationClips);
-            m_balmoraGuardPrototype.gpuSkinned = true;
-            for (std::size_t drawIndex = 0; drawIndex < m_balmoraGuardPrototype.draws.size(); ++drawIndex) {
-                const std::string texturePath = drawIndex < fargothAsset.partDiffuseTexturePaths.size()
-                    ? fargothAsset.partDiffuseTexturePaths[drawIndex]
-                    : std::string{};
-                const std::uint32_t textureIndex = addActorTextureSlot(texturePath);
-                if (textureIndex == std::numeric_limits<std::uint32_t>::max()) {
-                    VOX_LOGE("app") << "Fargoth GPU-skinned actor rejected: draw missing texture"
-                                    << " draw=" << drawIndex
-                                    << " texture=" << texturePath;
-                    return;
-                }
-                const odai::importer::ImportedScenePackedDraw& draw = m_balmoraGuardPrototype.draws[drawIndex];
-                if (!assignImportedActorDrawMaterial(
-                        m_balmoraGuardPrototype.vertices,
-                        m_balmoraGuardPrototype.indices,
-                        draw,
-                        textureIndex,
-                        kImportedSceneMaterialFlagNpcGpuTransform |
-                            kImportedSceneMaterialFlagNpcGpuSkinned)) {
-                    VOX_LOGE("app") << "Fargoth GPU-skinned actor rejected: draw range is invalid"
-                                    << " draw=" << drawIndex
-                                    << " firstIndex=" << draw.firstIndex
-                                    << " indexCount=" << draw.indexCount;
-                    return;
-                }
-            }
-            VOX_LOGI("app") << "Fargoth GPU-skinned actor imported"
-                            << " skeletonNodes=" << fargothAsset.skeleton.size()
-                            << " animations=" << fargothAsset.nodeAnimations.size()
-                            << " clips=" << fargothAsset.animationClips.size()
-                            << " weightedVertices=" << fargothAsset.weightedVertexCount
-                            << " unweightedVertices=" << fargothAsset.unweightedVertexCount
-                            << " unknownInfluences=" << fargothAsset.unknownBoneInfluenceCount
-                            << " droppedInfluences=" << fargothAsset.droppedInfluenceCount;
-        } else {
-            VOX_LOGE("app") << "Fargoth actor rejected: catalog-driven GPU-skinned actor could not be built";
-            return;
-        }
-        if (m_balmoraGuardPrototype.draws.size() > firstDraw) {
-            defaultActorPrototypeIndex = appendPrototypeRange(firstDraw);
-        }
-    }
-    if (m_balmoraGuardPrototype.vertices.empty() ||
-        m_balmoraGuardPrototype.indices.empty() ||
-        m_balmoraGuardPrototype.draws.empty()) {
-        VOX_LOGE("app") << guardSceneLabel << " actor import failed: no guard actor geometry imported";
-        m_balmoraGuardPrototype = {};
+    if (!m_morrowindActorSystem.hasRenderableAsset()) {
+        VOX_LOGE("app") << guardSceneLabel << " actor import failed: no humanoid actor geometry imported";
         m_balmoraNavmesh.clear();
         return;
     }
@@ -3249,7 +2708,26 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
             route);
     }
 
-    if (seydaNeenRegion && defaultActorPrototypeIndex != std::numeric_limits<std::uint32_t>::max()) {
+    if (seydaNeenRegion) {
+        const auto fargothRecordIt = actorCatalog.actorsById.find("fargoth");
+        if (fargothRecordIt == actorCatalog.actorsById.end()) {
+            VOX_LOGE("app") << "Fargoth actor rejected: actor catalog did not contain Fargoth";
+            m_balmoraNavmesh.clear();
+            return;
+        }
+        std::string fargothActorError;
+        const std::uint32_t fargothPrototypeIndex =
+            m_morrowindActorSystem.findOrBuildHumanoidPrototype(
+                *dataFilesPath,
+                fargothRecordIt->second,
+                equipmentCatalog,
+                addActorTextureSlot,
+                fargothActorError);
+        if (fargothPrototypeIndex == std::numeric_limits<std::uint32_t>::max()) {
+            VOX_LOGE("app") << "Fargoth actor rejected: " << fargothActorError;
+            m_balmoraNavmesh.clear();
+            return;
+        }
         constexpr float kMorrowindCellSizeUnits = 8192.0f;
         const float cellMinX = static_cast<float>(kSeydaNeenCellX) * kMorrowindCellSizeUnits;
         const float cellMinZ = static_cast<float>(kSeydaNeenCellY) * kMorrowindCellSizeUnits;
@@ -3277,7 +2755,7 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
                 false,
                 snappedFargoth,
                 odai::math::radians(180.0f),
-                defaultActorPrototypeIndex,
+                fargothPrototypeIndex,
                 0.0f,
                 {});
             VOX_LOGI("app") << "Seyda Neen NPC enabled: Fargoth at ("
@@ -3305,28 +2783,23 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
             continue;
         }
         const odai::importer::MorrowindActorRecord& actorRecord = actorIt->second;
-        std::string prototypeSignature = actorRecord.kind == odai::importer::MorrowindActorKind::Creature
-            ? ("creature:" + actorRecord.modelPath)
-            : ("npc:" + actorRecord.raceId + ":" + actorRecord.headBodyPartId + ":" + actorRecord.hairBodyPartId);
-        for (const std::string& itemId : actorRecord.inventoryItemIds) {
-            prototypeSignature += ":" + itemId;
+        if (actorRecord.kind != odai::importer::MorrowindActorKind::Npc) {
+            continue;
         }
-        std::uint32_t prototypeIndex = std::numeric_limits<std::uint32_t>::max();
-        const auto existingPrototype = m_morrowindActorPrototypeCache.find(prototypeSignature);
-        if (existingPrototype != m_morrowindActorPrototypeCache.end()) {
-            prototypeIndex = existingPrototype->second.prototypeIndex;
-        } else {
-            prototypeIndex = actorRecord.kind == odai::importer::MorrowindActorKind::Creature
-                ? appendCreaturePrototype(actorRecord)
-                : appendGenericNpcPrototype(actorRecord);
-            if (prototypeIndex == std::numeric_limits<std::uint32_t>::max()) {
-                continue;
-            }
-            m_morrowindActorPrototypeCache.emplace(
-                prototypeSignature,
-                MorrowindActorPrototypeCacheEntry{prototypeIndex, prototypeSignature});
-            actorPrototypeById.emplace(actorId, prototypeIndex);
+        std::string actorError;
+        const std::uint32_t prototypeIndex =
+            m_morrowindActorSystem.findOrBuildHumanoidPrototype(
+                *dataFilesPath,
+                actorRecord,
+                equipmentCatalog,
+                addActorTextureSlot,
+                actorError);
+        if (prototypeIndex == std::numeric_limits<std::uint32_t>::max()) {
+            VOX_LOGE("app") << guardSceneLabel << " catalog humanoid actor rejected: " << actorError;
+            m_balmoraNavmesh.clear();
+            return;
         }
+        actorPrototypeById.emplace(actorId, prototypeIndex);
 
         const odai::math::Vector3 rawSpawn{ref.position[0], ref.position[2], ref.position[1]};
         activateActorInstance(
@@ -3352,17 +2825,17 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
     const odai::world::Navmesh::Stats navmeshStats = m_balmoraNavmesh.stats();
     VOX_LOGI("app") << guardSceneLabel << " guards enabled"
                     << " actors=" << m_morrowindActors.size()
-                << " actorParts=" << importedActorPartCount
-                << " missingParts=" << missingActorPartCount
-                << " failedParts=" << failedActorPartCount
-                << " actorVertices=" << m_balmoraGuardPrototype.vertices.size()
-                    << " actorIndices=" << m_balmoraGuardPrototype.indices.size()
+                    << " prototypes=" << m_morrowindActorSystem.prototypeCount()
+                    << " actorVertices=" << m_morrowindActorSystem.vertexCount()
+                    << " actorIndices=" << m_morrowindActorSystem.indexCount()
+                    << " actorDraws=" << m_morrowindActorSystem.drawCount()
+                    << " skeletonNodes=" << m_morrowindActorSystem.skeletonNodeCount()
                     << " navmeshWalkable=" << navmeshStats.walkableTriangleCount
                     << " navmeshLinks=" << navmeshStats.linkCount;
 }
 
 void App::updateMorrowindActors(float dt) {
-    if (m_morrowindActors.empty() || m_balmoraGuardPrototype.vertices.empty() || m_balmoraNavmesh.empty()) {
+    if (m_morrowindActors.empty() || !m_morrowindActorSystem.hasRenderableAsset() || m_balmoraNavmesh.empty()) {
         return;
     }
 
@@ -3895,7 +3368,7 @@ std::array<float, 3> actorBoneDebugColor(std::string_view boneName) {
     return {1.0f, 0.90f, 0.25f};
 }
 
-void appendActorBonePalette(
+[[maybe_unused]] void appendActorBonePalette(
     std::span<const odai::importer::ImportedSkeletonNode> skeleton,
     std::span<const odai::importer::ImportedNifNodeAnimation> nodeAnimations,
     const odai::importer::ImportedAnimationClip* animationClip,
@@ -3978,15 +3451,13 @@ void appendActorBonePalette(
 } // namespace
 
 void App::rebuildMorrowindActorRenderFrame(float simulationAlpha) {
-    m_balmoraGuardFrameInstances.clear();
-    m_balmoraGuardBonePalette.clear();
-    m_balmoraGuardDebugBoneLines.clear();
-    if (m_morrowindActors.empty() || m_balmoraGuardPrototype.vertices.empty()) {
+    if (m_morrowindActors.empty() || !m_morrowindActorSystem.hasRenderableAsset()) {
+        m_morrowindActorSystem.beginFrame(0u, false);
         return;
     }
 
     const float alpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
-    m_balmoraGuardFrameInstances.reserve(m_morrowindActors.size());
+    m_morrowindActorSystem.beginFrame(m_morrowindActors.size(), m_actorDebugSceneEnabled);
 
     const auto lerpAngle = [](float from, float to, float t) {
         float delta = std::fmod(to - from, kTwoPi);
@@ -4004,75 +3475,44 @@ void App::rebuildMorrowindActorRenderFrame(float simulationAlpha) {
         const odai::math::Vector3 position =
             guard.previousPosition + ((guard.position - guard.previousPosition) * alpha);
         const float yawRadians = lerpAngle(guard.previousYawRadians, guard.yawRadians, alpha);
-        odai::render::ImportedActorInstanceData instance{};
-        instance.position[0] = position.x;
-        instance.position[1] = position.y;
-        instance.position[2] = position.z;
-        instance.yawRadians = yawRadians;
         const float frameMoveDistanceSq =
             ((guard.position.x - guard.previousPosition.x) * (guard.position.x - guard.previousPosition.x)) +
             ((guard.position.z - guard.previousPosition.z) * (guard.position.z - guard.previousPosition.z));
-        instance.animationTime = frameMoveDistanceSq > 0.01f
+        const float animationTime = frameMoveDistanceSq > 0.01f
             ? (guard.previousWalkPhase + ((guard.walkPhase - guard.previousWalkPhase) * alpha))
             : 0.0f;
-        bool enableProceduralPose = true;
-        const odai::importer::ImportedAnimationClip* animationClip = nullptr;
+        MorrowindActorSystem::PoseMode poseMode = MorrowindActorSystem::PoseMode::Movement;
         if (m_actorDebugSceneEnabled) {
-            const int poseMode = m_renderer.actorDebugPoseMode();
-            if (poseMode == 1) {
-                animationClip = findActorDebugWalkClip(m_balmoraGuardPrototype.animationClips);
-                enableProceduralPose = animationClip == nullptr;
-                instance.animationTime = animationClip != nullptr
-                    ? static_cast<float>(glfwGetTime())
-                    : (static_cast<float>(glfwGetTime()) * 5.4f);
-            } else {
-                enableProceduralPose = false;
-                instance.animationTime = 0.0f;
-            }
+            poseMode = m_renderer.actorDebugPoseMode() == 1
+                ? MorrowindActorSystem::PoseMode::WalkClip
+                : MorrowindActorSystem::PoseMode::BindPose;
         }
-        instance.flags = kImportedSceneMaterialFlagNpcGpuTransform;
-        instance.assetIndex = 0u;
-        if (m_balmoraGuardPrototype.gpuSkinned && !m_balmoraGuardPrototype.skeleton.empty()) {
-            instance.bonePaletteOffset = static_cast<std::uint32_t>(m_balmoraGuardBonePalette.size());
-            appendActorBonePalette(
-                std::span<const odai::importer::ImportedSkeletonNode>(m_balmoraGuardPrototype.skeleton),
-                std::span<const odai::importer::ImportedNifNodeAnimation>(m_balmoraGuardPrototype.nodeAnimations),
-                animationClip,
-                instance.animationTime,
-                m_balmoraGuardBonePalette,
-                m_actorDebugSceneEnabled ? &m_balmoraGuardDebugBoneLines : nullptr,
-                position,
-                yawRadians,
-                enableProceduralPose);
-        }
-        if (guard.actorPrototypeIndex < m_importedActorPrototypeRanges.size()) {
-            const ImportedActorPrototypeRange& range =
-                m_importedActorPrototypeRanges[guard.actorPrototypeIndex];
-            instance.firstDraw = range.firstDraw;
-            instance.drawCount = range.drawCount;
-        }
-        m_balmoraGuardFrameInstances.push_back(instance);
+        MorrowindActorSystem::FrameInput frameInput{};
+        frameInput.prototypeIndex = guard.actorPrototypeIndex;
+        frameInput.position = position;
+        frameInput.yawRadians = yawRadians;
+        frameInput.animationTime = animationTime;
+        frameInput.moving = frameMoveDistanceSq > 0.01f;
+        m_morrowindActorSystem.appendFrameInstance(
+            frameInput,
+            poseMode,
+            static_cast<float>(glfwGetTime()));
     }
 }
 
 bool App::uploadMorrowindActorRenderAsset() {
-    if (m_balmoraGuardPrototype.vertices.empty() ||
-        m_balmoraGuardPrototype.indices.empty() ||
-        m_balmoraGuardPrototype.draws.empty()) {
+    if (!m_morrowindActorSystem.hasRenderableAsset()) {
         m_renderer.clearImportedActorAssets();
         return true;
     }
-
-    odai::render::ImportedActorRenderAssetData actorAsset{};
-    actorAsset.vertices = m_balmoraGuardPrototype.vertices;
-    actorAsset.indices = m_balmoraGuardPrototype.indices;
-    actorAsset.draws = m_balmoraGuardPrototype.draws;
-    actorAsset.boneIndices = m_balmoraGuardPrototype.boneIndices;
-    actorAsset.boneWeights = m_balmoraGuardPrototype.boneWeights;
-    if (!m_renderer.uploadImportedActorAsset(actorAsset)) {
-        VOX_LOGW("app") << "failed to upload Balmora guard actor render asset";
+    if (!m_morrowindActorSystem.assetDirty()) {
+        return true;
+    }
+    if (!m_renderer.uploadImportedActorAsset(m_morrowindActorSystem.renderAssetData())) {
+        VOX_LOGW("app") << "failed to upload Morrowind humanoid actor render asset";
         return false;
     }
+    m_morrowindActorSystem.markAssetUploaded();
     return true;
 }
 
@@ -4280,7 +3720,7 @@ bool App::pollMorrowindExteriorStreamingPrepare() {
         for (MorrowindActorInstance& actor : m_morrowindActors) {
             actor.resident = false;
         }
-        m_balmoraGuardPrototype = {};
+        m_morrowindActorSystem.clear();
         m_balmoraNavmesh.clear();
     }
     if (!m_renderer.uploadGpuScene(m_gpuSceneAsset)) {
@@ -4365,14 +3805,10 @@ void App::update(float dt, float simulationAlpha) {
         m_visibleChunkIndices.clear();
         m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
         rebuildMorrowindActorRenderFrame(renderAlpha);
-        odai::render::ImportedActorFrameData guardFrameData{};
-        const odai::render::ImportedActorFrameData* guardFrameDataPtr = nullptr;
-        if (!m_balmoraGuardFrameInstances.empty()) {
-            guardFrameData.instances = m_balmoraGuardFrameInstances;
-            guardFrameData.bonePalette = m_balmoraGuardBonePalette;
-            guardFrameData.debugBoneLines = m_balmoraGuardDebugBoneLines;
-            guardFrameDataPtr = &guardFrameData;
-        }
+        const odai::render::ImportedActorFrameData actorFrameData =
+            m_morrowindActorSystem.frameData();
+        const odai::render::ImportedActorFrameData* actorFrameDataPtr =
+            actorFrameData.instances.empty() ? nullptr : &actorFrameData;
         m_renderer.renderFrame(
             m_world.chunkGrid(),
             m_simulation,
@@ -4380,7 +3816,7 @@ void App::update(float dt, float simulationAlpha) {
             odai::render::VoxelPreview{},
             simulationAlpha,
             std::span<const std::size_t>(m_visibleChunkIndices),
-            guardFrameDataPtr
+            actorFrameDataPtr
         );
         m_camera.fovDegrees = m_renderer.cameraFovDegrees();
         return;

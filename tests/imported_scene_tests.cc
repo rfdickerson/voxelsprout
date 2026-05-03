@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "app/morrowind_actor_system.h"
 #include "import/gpu_scene.h"
 #include "import/imported_scene.h"
 #include "import/morrowind_nif.h"
@@ -1208,6 +1209,132 @@ void testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable() {
     }
 }
 
+void testMorrowindHumanoidActorSystemPacksAndDeduplicatesFargothWhenDataFilesAvailable() {
+    const std::filesystem::path dataFilesPath = "C:/GOG Games/Morrowind/Data Files";
+    if (!std::filesystem::exists(dataFilesPath / "Meshes" / "base_anim.nif")) {
+        std::cout << "[imported scene test] skipping humanoid actor system test: "
+                  << dataFilesPath.string() << " not found\n";
+        return;
+    }
+
+    odai::importer::MorrowindActorCatalog actorCatalog{};
+    odai::importer::MorrowindEquipmentCatalog equipmentCatalog{};
+    expectTrue(
+        odai::importer::loadMorrowindActorCatalog(dataFilesPath, actorCatalog),
+        "Actor system test loads Morrowind actor catalog");
+    expectTrue(
+        odai::importer::loadMorrowindEquipmentCatalog(dataFilesPath, equipmentCatalog),
+        "Actor system test loads Morrowind equipment catalog");
+    const auto fargothIt = actorCatalog.actorsById.find("fargoth");
+    expectTrue(fargothIt != actorCatalog.actorsById.end(), "Actor system test finds Fargoth");
+    if (fargothIt == actorCatalog.actorsById.end()) {
+        return;
+    }
+
+    odai::app::MorrowindActorSystem actorSystem{};
+    std::unordered_set<std::string> texturePaths;
+    const auto textureSlotFn = [&](const std::string& texturePath) -> std::uint32_t {
+        if (texturePath.empty()) {
+            return std::numeric_limits<std::uint32_t>::max();
+        }
+        const auto inserted = texturePaths.insert(texturePath);
+        if (inserted.second) {
+            return static_cast<std::uint32_t>(texturePaths.size() - 1u);
+        }
+        return static_cast<std::uint32_t>(
+            std::distance(texturePaths.begin(), texturePaths.find(texturePath)));
+    };
+
+    std::string error;
+    const std::uint32_t firstPrototype =
+        actorSystem.findOrBuildHumanoidPrototype(
+            dataFilesPath,
+            fargothIt->second,
+            equipmentCatalog,
+            textureSlotFn,
+            error);
+    if (firstPrototype == std::numeric_limits<std::uint32_t>::max()) {
+        std::cerr << "[imported scene test] actor system failed: " << error << '\n';
+    }
+    expectTrue(firstPrototype != std::numeric_limits<std::uint32_t>::max(),
+               "Actor system builds Fargoth prototype");
+    const std::uint32_t secondPrototype =
+        actorSystem.findOrBuildHumanoidPrototype(
+            dataFilesPath,
+            fargothIt->second,
+            equipmentCatalog,
+            textureSlotFn,
+            error);
+    expectTrue(secondPrototype == firstPrototype,
+               "Actor system deduplicates repeated Fargoth appearance");
+    expectTrue(actorSystem.prototypeCount() == 1u, "Actor system stores one Fargoth prototype");
+    expectTrue(actorSystem.hasRenderableAsset(), "Actor system has packed renderable actor asset");
+    expectTrue(actorSystem.stats().unweightedVertexCount == 0u,
+               "Actor system Fargoth prototype has no unweighted vertices");
+    expectTrue(actorSystem.walkClip() != nullptr, "Actor system finds a humanoid walk clip");
+    expectTrue(actorSystem.idleClip() != nullptr, "Actor system finds a humanoid idle clip");
+
+    const odai::render::ImportedActorRenderAssetData renderData = actorSystem.renderAssetData();
+    expectTrue(renderData.vertices.size() == renderData.boneIndices.size(),
+               "Actor system packed bone index stream matches vertices");
+    expectTrue(renderData.vertices.size() == renderData.boneWeights.size(),
+               "Actor system packed bone weight stream matches vertices");
+    for (const odai::importer::ImportedScenePackedDraw& draw : renderData.draws) {
+        expectTrue(draw.firstIndex < renderData.indices.size(),
+                   "Actor system draw starts inside packed index buffer");
+        expectTrue(draw.firstIndex + draw.indexCount <= renderData.indices.size(),
+                   "Actor system draw remains inside packed index buffer");
+    }
+
+    actorSystem.beginFrame(1u, true);
+    odai::app::MorrowindActorSystem::FrameInput frameInput{};
+    frameInput.prototypeIndex = firstPrototype;
+    frameInput.position = {0.0f, 0.0f, 0.0f};
+    frameInput.moving = true;
+    frameInput.animationTime = 0.25f;
+    actorSystem.appendFrameInstance(
+        frameInput,
+        odai::app::MorrowindActorSystem::PoseMode::Movement,
+        0.25f);
+    const odai::render::ImportedActorFrameData frameData = actorSystem.frameData();
+    expectTrue(frameData.instances.size() == 1u, "Actor system emits one frame instance");
+    expectTrue(frameData.bonePalette.size() == actorSystem.skeletonNodeCount(),
+               "Actor system emits one contiguous palette per instance");
+    expectTrue(!frameData.debugBoneLines.empty(), "Actor system emits debug bone lines");
+
+    actorSystem.beginFrame(1u, false);
+    frameInput.moving = false;
+    frameInput.animationTime = 0.0f;
+    actorSystem.appendFrameInstance(
+        frameInput,
+        odai::app::MorrowindActorSystem::PoseMode::Movement,
+        12.5f);
+    const odai::render::ImportedActorFrameData idleFrameData = actorSystem.frameData();
+    expectTrue(idleFrameData.instances.size() == 1u, "Actor system emits idle frame instance");
+    expectNear(idleFrameData.instances.front().animationTime, 12.5f, 0.0001f,
+               "Actor system uses wall-clock time for idle actors");
+    expectTrue(idleFrameData.bonePalette.size() == actorSystem.skeletonNodeCount(),
+               "Actor system emits one contiguous idle palette per instance");
+
+    odai::app::MorrowindActorSystem strictFailureSystem{};
+    std::vector<odai::importer::MorrowindEquipmentCatalog::ResolvedActorPart> invalidParts(1u);
+    invalidParts[0].modelPath = "missing/actor_part_that_should_not_exist.nif";
+    invalidParts[0].slot = "head";
+    invalidParts[0].attachBone = "Head";
+    invalidParts[0].meshFilter = "Head";
+    const std::uint32_t invalidPrototype =
+        strictFailureSystem.findOrBuildHumanoidPrototypeFromParts(
+            dataFilesPath,
+            "strict_failure_actor",
+            invalidParts,
+            textureSlotFn,
+            error);
+    expectTrue(invalidPrototype == std::numeric_limits<std::uint32_t>::max(),
+               "Actor system hard-fails missing humanoid actor parts");
+    expectTrue(error.find("missing file") != std::string::npos,
+               "Actor system strict failure reports missing file");
+}
+
 void testMorrowindActorCatalogLoadsNpcAndCreatureRecordsWhenDataFilesAvailable() {
     const std::filesystem::path dataFilesPath = "C:/GOG Games/Morrowind/Data Files";
     const std::filesystem::path masterPath = dataFilesPath / "Morrowind.esm";
@@ -1382,6 +1509,7 @@ int main() {
     testImportedSceneCollision();
     testMorrowindFargothActorPartsLoadWhenDataFilesAvailable();
     testMorrowindFargothSkinnedActorLoadsWhenDataFilesAvailable();
+    testMorrowindHumanoidActorSystemPacksAndDeduplicatesFargothWhenDataFilesAvailable();
     testMorrowindActorCatalogLoadsNpcAndCreatureRecordsWhenDataFilesAvailable();
     testMorrowindEquipmentCatalogLoadsKnownClothingWhenDataFilesAvailable();
     testMorrowindGenericHumanoidSkinnedActorLoadsWhenDataFilesAvailable();

@@ -2795,6 +2795,8 @@ bool appendMorrowindSkinnedActorPartNif(
     ImportedSkinnedActorAsset& ioAsset,
     std::string& outError
 ) {
+    (void)nifPath;
+    (void)ioAsset;
     outError = "Skinned actor part metadata is required; path-inferred actor assembly is disabled";
     return false;
 }

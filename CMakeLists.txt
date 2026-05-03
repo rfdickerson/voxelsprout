@@ -165,6 +165,7 @@ if(ODAI_BUILD_APP)
     add_executable(odai
         src/app/main.cc
         src/app/app.cc
+        src/app/morrowind_actor_system.cc
         src/audio/sound_engine.cc
         src/core/log.cc
         src/game/game_state.cc
@@ -391,6 +392,7 @@ if(BUILD_TESTING)
 
     add_executable(odai_imported_scene_tests
         tests/imported_scene_tests.cc
+        src/app/morrowind_actor_system.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc

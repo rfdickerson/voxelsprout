@@ -1,6 +1,7 @@
 #pragma once
 
 #include "audio/sound_engine.h"
+#include "app/morrowind_actor_system.h"
 #include "core/input.h"
 #include "game/game_state.h"
 #include "game/lua_script.h"
@@ -213,23 +214,6 @@ private:
         bool onGround = false;
     };
 
-    struct BalmoraGuardPrototype {
-        std::vector<odai::importer::ImportedScenePackedVertex> vertices;
-        std::vector<std::uint32_t> indices;
-        std::vector<odai::importer::ImportedScenePackedDraw> draws;
-        std::vector<std::array<std::uint16_t, 4>> boneIndices;
-        std::vector<std::array<float, 4>> boneWeights;
-        std::vector<odai::importer::ImportedSkeletonNode> skeleton;
-        std::vector<odai::importer::ImportedNifNodeAnimation> nodeAnimations;
-        std::vector<odai::importer::ImportedAnimationClip> animationClips;
-        bool gpuSkinned = false;
-    };
-
-    struct ImportedActorPrototypeRange {
-        std::uint32_t firstDraw = 0u;
-        std::uint32_t drawCount = 0u;
-    };
-
     struct MorrowindActorRefKey {
         int cellX = 0;
         int cellY = 0;
@@ -262,11 +246,6 @@ private:
         bool resident = false;
         bool disabled = false;
         bool dead = false;
-    };
-
-    struct MorrowindActorPrototypeCacheEntry {
-        std::uint32_t prototypeIndex = 0u;
-        std::string signature;
     };
 
     struct MorrowindInteriorCacheEntry {
@@ -384,14 +363,9 @@ private:
     odai::importer::GpuSceneRuntime m_gpuSceneRuntime;
     odai::world::ImportedSceneCollision m_importedSceneCollision;
     odai::world::Navmesh m_balmoraNavmesh;
-    BalmoraGuardPrototype m_balmoraGuardPrototype;
-    std::vector<ImportedActorPrototypeRange> m_importedActorPrototypeRanges;
+    MorrowindActorSystem m_morrowindActorSystem;
     std::vector<MorrowindActorInstance> m_morrowindActors;
     std::unordered_map<std::string, std::size_t> m_morrowindActorIndexByRefKey;
-    std::unordered_map<std::string, MorrowindActorPrototypeCacheEntry> m_morrowindActorPrototypeCache;
-    std::vector<odai::render::ImportedActorInstanceData> m_balmoraGuardFrameInstances;
-    std::vector<odai::render::ImportedActorBonePaletteMatrix> m_balmoraGuardBonePalette;
-    std::vector<odai::render::ImportedActorDebugLineVertex> m_balmoraGuardDebugBoneLines;
 };
 
 } // namespace odai::app

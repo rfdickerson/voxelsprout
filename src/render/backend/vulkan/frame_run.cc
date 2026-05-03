@@ -456,6 +456,15 @@ void RendererBackend::renderFrame(
         m_importedActorVertexBufferHandle != kInvalidBufferHandle &&
         m_importedActorIndexBufferHandle != kInvalidBufferHandle &&
         !m_importedActorMeshDraws.empty();
+    if (rayTracingRuntimeReady() &&
+        m_shadowStats.activeMode == ShadowMode::RayTraced &&
+        m_shadowStats.mainPassRayTracingReady) {
+        if (!updateImportedActorRayTracingGeometry(renderingImportedActors ? importedActors : nullptr)) {
+            VOX_LOGE("render") << "imported actor RT geometry update failed";
+        } else if (m_rtSceneDirty && !rebuildRayTracingScene()) {
+            VOX_LOGE("render") << "imported actor RT scene rebuild failed";
+        }
+    }
     const bool renderingImportedScene = !m_importedMeshDraws.empty() || renderingImportedActors;
     const bool legacyVoxelRenderingEnabled = !renderingImportedScene;
     const bool importedInteriorGiEnabled =

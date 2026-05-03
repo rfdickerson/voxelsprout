@@ -393,6 +393,9 @@ private:
     bool createMorrowindSkyTextureResources();
     void destroyTransferResources();
     bool rebuildRayTracingScene();
+    bool updateImportedActorRayTracingGeometry(
+        const odai::render::ImportedActorFrameData* importedActors
+    );
     void destroyRayTracingScene();
     void markRayTracingSceneDirty();
     void destroyPipeline();
@@ -1056,6 +1059,8 @@ private:
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
     std::vector<ImportedMeshDraw> m_importedMeshDraws;
     std::vector<ImportedMeshDraw> m_importedActorMeshDraws;
+    std::vector<ImportedMeshVertex> m_importedActorCpuVertices;
+    std::vector<std::uint32_t> m_importedActorCpuIndices;
     std::vector<ImportedScenePageDrawRange> m_importedPageDrawRanges;
     std::vector<ImportedMeshDraw> m_visibleImportedMeshDraws;
     std::array<std::vector<ImportedMeshDraw>, kShadowCascadeCount> m_visibleImportedShadowMeshDraws;
@@ -1067,6 +1072,7 @@ private:
     std::vector<ImportedLocalLight> m_importedLocalLights;
     std::vector<RtChunkSceneRecord> m_rtChunkSceneRecords;
     std::vector<RtImportedSceneRecord> m_rtImportedSceneRecords;
+    RtImportedSceneRecord m_rtImportedActorFrameRecord{};
     std::vector<RtGeometryBuffers> m_rtMagicaGeometries;
     std::vector<RtAccelerationStructure> m_rtMagicaBlases;
     RtAccelerationStructure m_rtTlas{};
@@ -1075,6 +1081,9 @@ private:
     std::uint32_t m_rtSceneBuildCount = 0;
     std::uint32_t m_rtBlasBuildCount = 0;
     std::uint32_t m_rtTlasBuildCount = 0;
+    std::uint32_t m_rtImportedActorBuildCount = 0;
+    std::uint32_t m_rtImportedActorLastInstanceCount = 0;
+    double m_rtImportedActorLastUpdateSeconds = -1.0;
     std::uint32_t m_rtDirtyChunkCount = 0;
     bool m_chunkLodMeshCacheValid = false;
     odai::world::MeshingOptions m_chunkMeshingOptions{};

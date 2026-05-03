@@ -38,6 +38,7 @@ namespace odai::render {
 namespace {
 
 constexpr std::uint32_t kImportedRtMaterialFlagAlphaTest = 1u;
+constexpr double kImportedActorRtUpdateIntervalSeconds = 1.0 / 15.0;
 
 struct ImportedDrawBounds {
     float min[3] = {
@@ -497,6 +498,24 @@ void RendererBackend::clearImportedActorAssets() {
         m_importedActorIndexBufferHandle = kInvalidBufferHandle;
     }
     m_importedActorMeshDraws.clear();
+    m_importedActorCpuVertices.clear();
+    m_importedActorCpuIndices.clear();
+    if (m_rtImportedActorFrameRecord.blas.handle != VK_NULL_HANDLE && m_destroyAccelerationStructureKhr != nullptr) {
+        m_destroyAccelerationStructureKhr(m_device, m_rtImportedActorFrameRecord.blas.handle, nullptr);
+        m_rtImportedActorFrameRecord.blas.handle = VK_NULL_HANDLE;
+    }
+    if (m_rtImportedActorFrameRecord.blas.storageBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_rtImportedActorFrameRecord.blas.storageBufferHandle);
+        m_rtImportedActorFrameRecord.blas.storageBufferHandle = kInvalidBufferHandle;
+    }
+    m_rtImportedActorFrameRecord.blas.deviceAddress = 0;
+    m_rtImportedActorFrameRecord.blas.primitiveCount = 0;
+    destroyRtGeometryBuffers(m_bufferAllocator, m_rtImportedActorFrameRecord.geometry);
+    m_rtImportedActorFrameRecord.geometryResident = false;
+    m_rtImportedActorFrameRecord.dirty = true;
+    m_rtImportedActorLastInstanceCount = 0;
+    m_rtImportedActorLastUpdateSeconds = -1.0;
+    markRayTracingSceneDirty();
 }
 
 bool RendererBackend::uploadImportedActorAsset(const odai::render::ImportedActorRenderAssetData& asset) {
@@ -574,6 +593,8 @@ bool RendererBackend::uploadImportedActorAsset(const odai::render::ImportedActor
 
     m_importedActorVertexBufferHandle = vertexHandle;
     m_importedActorIndexBufferHandle = indexHandle;
+    m_importedActorCpuVertices = vertices;
+    m_importedActorCpuIndices.assign(asset.indices.begin(), asset.indices.end());
     m_importedActorMeshDraws.reserve(asset.draws.size());
     for (const odai::importer::ImportedScenePackedDraw& srcDraw : asset.draws) {
         if (srcDraw.indexCount == 0u || srcDraw.firstIndex >= asset.indices.size()) {
@@ -2565,6 +2586,8 @@ void RendererBackend::destroyRayTracingScene() {
         m_rtTlas.handle != VK_NULL_HANDLE ||
         !m_rtChunkSceneRecords.empty() ||
         !m_rtImportedSceneRecords.empty() ||
+        m_rtImportedActorFrameRecord.geometryResident ||
+        m_rtImportedActorFrameRecord.blas.handle != VK_NULL_HANDLE ||
         !m_rtMagicaBlases.empty();
     if (hasExistingScene && m_device != VK_NULL_HANDLE && m_graphicsQueue != VK_NULL_HANDLE) {
         const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
@@ -2599,6 +2622,13 @@ void RendererBackend::destroyRayTracingScene() {
         destroyRtGeometryBuffers(m_bufferAllocator, importedRecord.geometry);
     }
     m_rtImportedSceneRecords.clear();
+    destroyAs(m_rtImportedActorFrameRecord.blas);
+    destroyRtGeometryBuffers(m_bufferAllocator, m_rtImportedActorFrameRecord.geometry);
+    m_rtImportedActorFrameRecord.geometryResident = false;
+    m_rtImportedActorFrameRecord.dirty = false;
+    m_rtImportedActorBuildCount = 0;
+    m_rtImportedActorLastInstanceCount = 0;
+    m_rtImportedActorLastUpdateSeconds = -1.0;
     for (RtAccelerationStructure& blas : m_rtMagicaBlases) {
         destroyAs(blas);
     }
@@ -2614,6 +2644,219 @@ void RendererBackend::destroyRayTracingScene() {
     m_rtDirtyChunkCount = 0;
     m_rtChunkSceneRecords.clear();
     refreshShadowStats();
+}
+
+bool RendererBackend::updateImportedActorRayTracingGeometry(
+    const odai::render::ImportedActorFrameData* importedActors
+) {
+    if (!rayTracingRuntimeReady() ||
+        m_shadowStats.activeMode != ShadowMode::RayTraced ||
+        !m_shadowStats.mainPassRayTracingReady) {
+        return true;
+    }
+
+    const bool hasActors =
+        importedActors != nullptr &&
+        !importedActors->instances.empty() &&
+        !importedActors->bonePalette.empty() &&
+        !m_importedActorCpuVertices.empty() &&
+        !m_importedActorCpuIndices.empty() &&
+        !m_importedActorMeshDraws.empty();
+
+    auto destroyActorFrameAs = [&]() {
+        if (m_rtImportedActorFrameRecord.blas.handle != VK_NULL_HANDLE &&
+            m_destroyAccelerationStructureKhr != nullptr) {
+            m_destroyAccelerationStructureKhr(m_device, m_rtImportedActorFrameRecord.blas.handle, nullptr);
+            m_rtImportedActorFrameRecord.blas.handle = VK_NULL_HANDLE;
+        }
+        if (m_rtImportedActorFrameRecord.blas.storageBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(m_rtImportedActorFrameRecord.blas.storageBufferHandle);
+            m_rtImportedActorFrameRecord.blas.storageBufferHandle = kInvalidBufferHandle;
+        }
+        m_rtImportedActorFrameRecord.blas.deviceAddress = 0;
+        m_rtImportedActorFrameRecord.blas.primitiveCount = 0;
+    };
+
+    if (!hasActors) {
+        if (m_rtImportedActorFrameRecord.geometryResident ||
+            m_rtImportedActorFrameRecord.blas.handle != VK_NULL_HANDLE) {
+            const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
+            if (waitResult != VK_SUCCESS) {
+                VOX_LOGE("render") << "failed to idle graphics queue before clearing imported actor RT geometry";
+                return false;
+            }
+            destroyActorFrameAs();
+            destroyRtGeometryBuffers(m_bufferAllocator, m_rtImportedActorFrameRecord.geometry);
+            m_rtImportedActorFrameRecord.geometryResident = false;
+            m_rtImportedActorFrameRecord.dirty = true;
+            m_rtImportedActorLastInstanceCount = 0;
+            m_rtImportedActorLastUpdateSeconds = -1.0;
+            markRayTracingSceneDirty();
+        }
+        return true;
+    }
+
+    const double nowSeconds = glfwGetTime();
+    const std::uint32_t actorInstanceCount = static_cast<std::uint32_t>(
+        std::min<std::size_t>(
+            importedActors->instances.size(),
+            std::numeric_limits<std::uint32_t>::max()));
+    const bool actorTopologyChanged =
+        !m_rtImportedActorFrameRecord.geometryResident ||
+        actorInstanceCount != m_rtImportedActorLastInstanceCount;
+    if (!actorTopologyChanged &&
+        m_rtImportedActorLastUpdateSeconds >= 0.0 &&
+        nowSeconds - m_rtImportedActorLastUpdateSeconds < kImportedActorRtUpdateIntervalSeconds) {
+        return true;
+    }
+
+    const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
+    if (waitResult != VK_SUCCESS) {
+        VOX_LOGE("render") << "failed to idle graphics queue before updating imported actor RT geometry";
+        return false;
+    }
+    destroyActorFrameAs();
+
+    std::vector<RtVertex> rtVertices;
+    std::vector<std::uint32_t> rtIndices;
+    const std::size_t estimatedTriangleCount = m_importedActorCpuIndices.size() *
+        importedActors->instances.size() / 3u;
+    rtVertices.reserve(estimatedTriangleCount * 3u);
+    rtIndices.reserve(estimatedTriangleCount * 3u);
+
+    const auto transformLocalToWorld = [](
+        const float local[3],
+        const odai::render::ImportedActorInstanceData& instance,
+        RtVertex& outVertex
+    ) {
+        const float c = std::cos(instance.yawRadians);
+        const float s = std::sin(instance.yawRadians);
+        outVertex.position[0] = instance.position[0] + (local[0] * c) + (local[2] * s);
+        outVertex.position[1] = instance.position[1] + local[1];
+        outVertex.position[2] = instance.position[2] + (-local[0] * s) + (local[2] * c);
+    };
+    const auto skinLocalPosition = [](
+        const ImportedMeshVertex& vertex,
+        std::span<const odai::render::ImportedActorBonePaletteMatrix> palette,
+        std::uint32_t paletteOffset,
+        float outPosition[3]
+    ) {
+        const float weightSum =
+            vertex.boneWeights[0] +
+            vertex.boneWeights[1] +
+            vertex.boneWeights[2] +
+            vertex.boneWeights[3];
+        if (weightSum <= 0.001f || palette.empty()) {
+            outPosition[0] = vertex.position[0];
+            outPosition[1] = vertex.position[1];
+            outPosition[2] = vertex.position[2];
+            return;
+        }
+        float skinned[3] = {};
+        const float local[4] = {vertex.position[0], vertex.position[1], vertex.position[2], 1.0f};
+        for (std::size_t influenceIndex = 0; influenceIndex < 4u; ++influenceIndex) {
+            const float weight = vertex.boneWeights[influenceIndex];
+            if (weight <= 0.0001f) {
+                continue;
+            }
+            const std::size_t matrixIndex =
+                static_cast<std::size_t>(paletteOffset) + vertex.boneIndices[influenceIndex];
+            if (matrixIndex >= palette.size()) {
+                continue;
+            }
+            const odai::render::ImportedActorBonePaletteMatrix& matrix = palette[matrixIndex];
+            skinned[0] +=
+                ((matrix.rows[0] * local[0]) +
+                 (matrix.rows[1] * local[1]) +
+                 (matrix.rows[2] * local[2]) +
+                 (matrix.rows[3] * local[3])) * weight;
+            skinned[1] +=
+                ((matrix.rows[4] * local[0]) +
+                 (matrix.rows[5] * local[1]) +
+                 (matrix.rows[6] * local[2]) +
+                 (matrix.rows[7] * local[3])) * weight;
+            skinned[2] +=
+                ((matrix.rows[8] * local[0]) +
+                 (matrix.rows[9] * local[1]) +
+                 (matrix.rows[10] * local[2]) +
+                 (matrix.rows[11] * local[3])) * weight;
+        }
+        const float invWeightSum = 1.0f / weightSum;
+        outPosition[0] = skinned[0] * invWeightSum;
+        outPosition[1] = skinned[1] * invWeightSum;
+        outPosition[2] = skinned[2] * invWeightSum;
+    };
+
+    for (const odai::render::ImportedActorInstanceData& instance : importedActors->instances) {
+        const std::size_t drawBegin = std::min<std::size_t>(instance.firstDraw, m_importedActorMeshDraws.size());
+        const std::size_t drawEnd = std::min<std::size_t>(
+            drawBegin + instance.drawCount,
+            m_importedActorMeshDraws.size());
+        for (std::size_t drawIndex = drawBegin; drawIndex < drawEnd; ++drawIndex) {
+            const ImportedMeshDraw& draw = m_importedActorMeshDraws[drawIndex];
+            const std::size_t indexBegin = std::min<std::size_t>(draw.firstIndex, m_importedActorCpuIndices.size());
+            const std::size_t indexEnd = std::min<std::size_t>(
+                indexBegin + draw.indexCount,
+                m_importedActorCpuIndices.size());
+            for (std::size_t indexOffset = indexBegin; indexOffset + 2u < indexEnd; indexOffset += 3u) {
+                const std::uint32_t srcIndices[3] = {
+                    m_importedActorCpuIndices[indexOffset + 0u],
+                    m_importedActorCpuIndices[indexOffset + 1u],
+                    m_importedActorCpuIndices[indexOffset + 2u]
+                };
+                if (srcIndices[0] >= m_importedActorCpuVertices.size() ||
+                    srcIndices[1] >= m_importedActorCpuVertices.size() ||
+                    srcIndices[2] >= m_importedActorCpuVertices.size()) {
+                    continue;
+                }
+                const std::uint32_t triangleFlags =
+                    m_importedActorCpuVertices[srcIndices[0]].flags |
+                    m_importedActorCpuVertices[srcIndices[1]].flags |
+                    m_importedActorCpuVertices[srcIndices[2]].flags;
+                if ((triangleFlags & kImportedRtMaterialFlagAlphaTest) != 0u) {
+                    continue;
+                }
+                for (const std::uint32_t srcIndex : srcIndices) {
+                    float localPosition[3] = {};
+                    skinLocalPosition(
+                        m_importedActorCpuVertices[srcIndex],
+                        importedActors->bonePalette,
+                        instance.bonePaletteOffset,
+                        localPosition);
+                    RtVertex rtVertex{};
+                    transformLocalToWorld(localPosition, instance, rtVertex);
+                    rtIndices.push_back(static_cast<std::uint32_t>(rtVertices.size()));
+                    rtVertices.push_back(rtVertex);
+                }
+            }
+        }
+    }
+
+    destroyRtGeometryBuffers(m_bufferAllocator, m_rtImportedActorFrameRecord.geometry);
+    if (rtIndices.empty()) {
+        m_rtImportedActorFrameRecord.geometryResident = false;
+        m_rtImportedActorFrameRecord.dirty = true;
+        m_rtImportedActorLastInstanceCount = 0;
+        m_rtImportedActorLastUpdateSeconds = nowSeconds;
+        markRayTracingSceneDirty();
+        return true;
+    }
+    if (!createRtGeometryBuffers(
+            m_bufferAllocator,
+            rtVertices,
+            rtIndices,
+            m_rtImportedActorFrameRecord.geometry)) {
+        m_rtImportedActorFrameRecord.geometryResident = false;
+        VOX_LOGE("render") << "failed to create imported actor RT geometry";
+        return false;
+    }
+    m_rtImportedActorFrameRecord.geometryResident = true;
+    m_rtImportedActorFrameRecord.dirty = true;
+    m_rtImportedActorFrameRecord.debugName = "imported actors";
+    m_rtImportedActorLastInstanceCount = actorInstanceCount;
+    m_rtImportedActorLastUpdateSeconds = nowSeconds;
+    markRayTracingSceneDirty();
+    return true;
 }
 
 bool RendererBackend::rebuildRayTracingScene() {
@@ -2691,6 +2934,11 @@ bool RendererBackend::rebuildRayTracingScene() {
             }
         }
     }
+    if (!needsGraphicsIdle &&
+        m_rtImportedActorFrameRecord.blas.handle != VK_NULL_HANDLE &&
+        (!m_rtImportedActorFrameRecord.geometryResident || m_rtImportedActorFrameRecord.dirty)) {
+        needsGraphicsIdle = true;
+    }
     if (!needsGraphicsIdle && m_rtTlas.handle != VK_NULL_HANDLE && m_rtSceneDirty) {
         needsGraphicsIdle = true;
     }
@@ -2728,6 +2976,18 @@ bool RendererBackend::rebuildRayTracingScene() {
             destroyAs(importedRecord.blas);
             buildGeometries.push_back({&importedRecord.geometry, &importedRecord.blas});
         }
+    }
+    if (!m_rtImportedActorFrameRecord.geometryResident ||
+        m_rtImportedActorFrameRecord.geometry.vertexCount == 0 ||
+        m_rtImportedActorFrameRecord.geometry.indexCount == 0) {
+        destroyAs(m_rtImportedActorFrameRecord.blas);
+    } else if (m_rtImportedActorFrameRecord.dirty ||
+               m_rtImportedActorFrameRecord.blas.handle == VK_NULL_HANDLE) {
+        destroyAs(m_rtImportedActorFrameRecord.blas);
+        buildGeometries.push_back({
+            &m_rtImportedActorFrameRecord.geometry,
+            &m_rtImportedActorFrameRecord.blas
+        });
     }
     if (m_rtMagicaBlases.size() > m_rtMagicaGeometries.size()) {
         for (std::size_t i = m_rtMagicaGeometries.size(); i < m_rtMagicaBlases.size(); ++i) {
@@ -2781,8 +3041,15 @@ bool RendererBackend::rebuildRayTracingScene() {
             ++estimatedInstanceCount;
         }
     }
+    if (m_rtImportedActorFrameRecord.geometryResident &&
+        m_rtImportedActorFrameRecord.geometry.indexCount > 0) {
+        ++estimatedInstanceCount;
+    }
     std::vector<VkAccelerationStructureInstanceKHR> tlasInstances;
     tlasInstances.reserve(estimatedInstanceCount);
+    const bool actorOnlyRtRebuild =
+        buildGeometries.size() == 1u &&
+        buildGeometries.front().first == &m_rtImportedActorFrameRecord.geometry;
     bool buildOk = true;
     bool commandBufferBegun = false;
 
@@ -2904,6 +3171,9 @@ bool RendererBackend::rebuildRayTracingScene() {
                 continue;
             }
             appendTlasInstance(importedRecord.blas);
+        }
+        if (m_rtImportedActorFrameRecord.geometryResident) {
+            appendTlasInstance(m_rtImportedActorFrameRecord.blas);
         }
         for (const RtAccelerationStructure& blas : m_rtMagicaBlases) {
             appendTlasInstance(blas);
@@ -3038,6 +3308,7 @@ bool RendererBackend::rebuildRayTracingScene() {
         for (RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
             destroyAs(importedRecord.blas);
         }
+        destroyAs(m_rtImportedActorFrameRecord.blas);
         for (RtAccelerationStructure& blas : m_rtMagicaBlases) {
             destroyAs(blas);
         }
@@ -3055,14 +3326,24 @@ bool RendererBackend::rebuildRayTracingScene() {
     for (RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
         importedRecord.dirty = false;
     }
+    m_rtImportedActorFrameRecord.dirty = false;
     refreshShadowStats();
-    VOX_LOGI("render") << "ray tracing scene rebuilt: blas=" << m_rtBlasBuildCount
-                       << ", tlas=" << m_rtTlasBuildCount
-                       << ", instances=" << tlasInstances.size()
-                       << ", importedRecords=" << m_rtImportedSceneRecords.size()
-                       << ", residentChunks=" << m_rtChunkSceneRecords.size()
-                       << ", dirtyChunks=" << m_rtDirtyChunkCount
-                       << ", sceneBuilds=" << m_rtSceneBuildCount << "\n";
+    if (actorOnlyRtRebuild) {
+        ++m_rtImportedActorBuildCount;
+        VOX_LOGD("render") << "ray tracing actor shadows updated: blas=" << m_rtBlasBuildCount
+                           << ", tlas=" << m_rtTlasBuildCount
+                           << ", instances=" << tlasInstances.size()
+                           << ", actorBuilds=" << m_rtImportedActorBuildCount
+                           << ", sceneBuilds=" << m_rtSceneBuildCount << "\n";
+    } else {
+        VOX_LOGI("render") << "ray tracing scene rebuilt: blas=" << m_rtBlasBuildCount
+                           << ", tlas=" << m_rtTlasBuildCount
+                           << ", instances=" << tlasInstances.size()
+                           << ", importedRecords=" << m_rtImportedSceneRecords.size()
+                           << ", residentChunks=" << m_rtChunkSceneRecords.size()
+                           << ", dirtyChunks=" << m_rtDirtyChunkCount
+                           << ", sceneBuilds=" << m_rtSceneBuildCount << "\n";
+    }
     return true;
 }
 } // namespace odai::render
