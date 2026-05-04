@@ -1592,6 +1592,26 @@ bool RendererBackend::createImGuiResources() {
     ImGui::StyleColorsDark();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.Fonts->AddFontDefault();
+    m_dialogueFont = nullptr;
+    if (m_dialogueFontConfig.enabled) {
+        const std::string fontPath = m_dialogueFontConfig.fontPath.string();
+        m_dialogueFont = io.Fonts->AddFontFromFileTTF(
+            fontPath.c_str(),
+            m_dialogueFontConfig.sizePixels);
+        if (m_dialogueFont != nullptr) {
+            VOX_LOGI("imgui") << "dialogue font loaded from " << fontPath
+                              << " at " << m_dialogueFontConfig.sizePixels
+                              << " px"
+                              << (m_dialogueFontConfig.sourceLabel.empty()
+                                      ? ""
+                                      : (" (" + m_dialogueFontConfig.sourceLabel + ")"));
+        } else {
+            VOX_LOGW("imgui") << "dialogue font failed to load from " << fontPath
+                              << " at " << m_dialogueFontConfig.sizePixels
+                              << " px; using ImGui default font";
+        }
+    }
 
     if (!ImGui_ImplGlfw_InitForVulkan(m_window, true)) {
         VOX_LOGE("imgui") << "ImGui_ImplGlfw_InitForVulkan failed\n";
@@ -1688,6 +1708,7 @@ void RendererBackend::destroyImGuiResources() {
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
+    m_dialogueFont = nullptr;
 
     if (m_imguiDescriptorPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);

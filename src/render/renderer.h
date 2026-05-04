@@ -12,6 +12,7 @@
 #include <memory>
 #include <span>
 
+#include "render/dialogue_font_config.h"
 #include "render/renderer_types.h"
 
 struct GLFWwindow;
@@ -44,6 +45,7 @@ public:
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
     bool useSpatialPartitioningQueries() const;
     odai::world::ClipmapConfig clipmapQueryConfig() const;
+    void setDialogueFontConfig(const DialogueFontConfig& config);
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void setGameplayUiState(const GameplayUiState& state);
     GameplayUiCommand consumeGameplayUiCommand();

@@ -2,6 +2,7 @@
 
 #include "import/imported_scene.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -194,18 +195,6 @@ struct ImportedActorFrameData {
     const ImportedActorGpuAnimationFrameData* gpuAnimation = nullptr;
 };
 
-enum class InventoryItemId : std::uint8_t {
-    Empty = 0,
-    Stone = 1,
-    Dirt = 2,
-    Grass = 3,
-    Wood = 4,
-    Red = 5,
-};
-
-static constexpr std::size_t kGameplayHotbarSlotCount = 9;
-static constexpr std::size_t kCreativeInventoryItemCount = 5;
-
 struct GameplayUiRect {
     float minX = 0.0f;
     float minY = 0.0f;
@@ -218,10 +207,7 @@ struct GameplayUiRect {
 };
 
 struct GameplayUiLayout {
-    GameplayUiRect hotbarPanel{};
-    std::array<GameplayUiRect, kGameplayHotbarSlotCount> hotbarSlots{};
     GameplayUiRect inventoryPanel{};
-    std::array<GameplayUiRect, kCreativeInventoryItemCount> inventorySlots{};
 };
 
 struct GameplayUiState {
@@ -234,15 +220,6 @@ struct GameplayUiState {
     int gold = 0;
     bool playerDead = false;
     bool inventoryVisible = false;
-    std::uint32_t selectedHotbarSlot = 0;
-    std::array<InventoryItemId, kGameplayHotbarSlotCount> hotbarItems{};
-    std::array<InventoryItemId, kCreativeInventoryItemCount> creativeInventoryItems = {
-        InventoryItemId::Stone,
-        InventoryItemId::Dirt,
-        InventoryItemId::Grass,
-        InventoryItemId::Wood,
-        InventoryItemId::Red,
-    };
     bool dialogueVisible = false;
     std::string dialogueActorName;
     std::string dialogueText;
@@ -254,6 +231,10 @@ struct GameplayUiState {
     std::vector<std::pair<std::string, std::string>> inventoryEntries;
     std::vector<std::pair<std::string, std::string>> questEntries;
     std::string trackedQuestText;
+    std::string dialogueFont;
+    float dialogueFontSize = 18.0f;
+    bool dialogueFontSizeConfigured = false;
+    std::string resolvedDialogueFontPath;
 };
 
 enum class GameplayUiCommandType : std::uint8_t {
@@ -261,62 +242,28 @@ enum class GameplayUiCommandType : std::uint8_t {
     CloseDialogue = 1,
     SelectDialogueTopic = 2,
     SelectDialogueChoice = 3,
+    SetDialogueFont = 4,
+    ClearDialogueFont = 5,
 };
 
 struct GameplayUiCommand {
     GameplayUiCommandType type = GameplayUiCommandType::None;
     std::string id;
+    float value = 0.0f;
 };
 
 inline GameplayUiLayout buildGameplayUiLayout(float displayWidth, float displayHeight) {
     GameplayUiLayout layout{};
-    const float hotbarSlotSize = 52.0f;
-    const float hotbarGap = 8.0f;
-    const float hotbarWidth =
-        (hotbarSlotSize * static_cast<float>(kGameplayHotbarSlotCount)) +
-        (hotbarGap * static_cast<float>(kGameplayHotbarSlotCount - 1));
-    const float hotbarMinX = (displayWidth - hotbarWidth) * 0.5f;
-    const float hotbarMinY = displayHeight - 84.0f;
-    layout.hotbarPanel = {
-        hotbarMinX - 14.0f,
-        hotbarMinY - 14.0f,
-        hotbarMinX + hotbarWidth + 14.0f,
-        hotbarMinY + hotbarSlotSize + 14.0f
-    };
-    for (std::size_t slotIndex = 0; slotIndex < kGameplayHotbarSlotCount; ++slotIndex) {
-        const float slotMinX = hotbarMinX + (static_cast<float>(slotIndex) * (hotbarSlotSize + hotbarGap));
-        layout.hotbarSlots[slotIndex] = {
-            slotMinX,
-            hotbarMinY,
-            slotMinX + hotbarSlotSize,
-            hotbarMinY + hotbarSlotSize
-        };
-    }
-
-    const float inventorySlotSize = 76.0f;
-    const float inventoryGap = 18.0f;
-    const float inventoryWidth =
-        (inventorySlotSize * static_cast<float>(kCreativeInventoryItemCount)) +
-        (inventoryGap * static_cast<float>(kCreativeInventoryItemCount - 1));
-    const float inventoryPanelMinX = (displayWidth - (inventoryWidth + 56.0f)) * 0.5f;
-    const float inventoryPanelMinY = (displayHeight - 214.0f) * 0.5f;
+    const float inventoryPanelWidth = std::clamp(displayWidth * 0.72f, 620.0f, 1040.0f);
+    const float inventoryPanelHeight = std::clamp(displayHeight * 0.62f, 420.0f, 680.0f);
+    const float inventoryPanelMinX = (displayWidth - inventoryPanelWidth) * 0.5f;
+    const float inventoryPanelMinY = (displayHeight - inventoryPanelHeight) * 0.5f;
     layout.inventoryPanel = {
         inventoryPanelMinX,
         inventoryPanelMinY,
-        inventoryPanelMinX + inventoryWidth + 56.0f,
-        inventoryPanelMinY + 214.0f
+        inventoryPanelMinX + inventoryPanelWidth,
+        inventoryPanelMinY + inventoryPanelHeight
     };
-    const float inventorySlotMinX = layout.inventoryPanel.minX + 28.0f;
-    const float inventorySlotMinY = layout.inventoryPanel.minY + 84.0f;
-    for (std::size_t itemIndex = 0; itemIndex < kCreativeInventoryItemCount; ++itemIndex) {
-        const float slotMinX = inventorySlotMinX + (static_cast<float>(itemIndex) * (inventorySlotSize + inventoryGap));
-        layout.inventorySlots[itemIndex] = {
-            slotMinX,
-            inventorySlotMinY,
-            slotMinX + inventorySlotSize,
-            inventorySlotMinY + inventorySlotSize
-        };
-    }
     return layout;
 }
 

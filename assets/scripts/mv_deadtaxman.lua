@@ -36,6 +36,7 @@ local EYDIA = "eydis fire-eye"
 local AJIRA = "ajira"
 local SOTtilde = "sottilde"
 local NILENO = "nileno dorvayn"
+local ARRILLE = "arrille"
 
 local function result(message)
     return { handled = true, message = message }
@@ -100,6 +101,13 @@ local ITEM_NAMES = {
     ["nerano_key"] = "Nerano Manor Key",
     ["hlaalu_records"] = "Hlaalu Records",
     ["debt_note"] = "Debt Note",
+    ["iron_dagger"] = "Iron Dagger",
+    ["chitin_armor"] = "Chitin Armor",
+    ["standard_restore_health_potion"] = "Standard Restore Health Potion",
+    ["scroll_healing"] = "Scroll of Healing",
+    ["standard_restore_magicka_potion"] = "Standard Restore Magicka Potion",
+    ["firebite_scroll"] = "Scroll of Firebite",
+    ["almsivi_intervention_scroll"] = "Scroll of ALMSIVI Intervention",
 }
 
 local QUEST_DEFS = {
@@ -176,6 +184,59 @@ local function actor_info(actor)
     return SEYDA_NEEN_PEOPLE[actor] or BALMORA_PEOPLE[actor]
 end
 
+local SHOP_INVENTORIES = {
+    [ARRILLE] = {
+        { id = "iron_dagger", name = "Iron Dagger", price = 18, count = 1 },
+        { id = "chitin_armor", name = "Chitin Armor", price = 65, count = 1 },
+        { id = "standard_restore_health_potion", name = "Standard Restore Health Potion", price = 35, count = 3 },
+        { id = "scroll_healing", name = "Scroll of Healing", price = 42, count = 2 },
+    },
+    [AJIRA] = {
+        { id = "standard_restore_magicka_potion", name = "Standard Restore Magicka Potion", price = 50, count = 3 },
+        { id = "firebite_scroll", name = "Scroll of Firebite", price = 75, count = 2 },
+        { id = "almsivi_intervention_scroll", name = "Scroll of ALMSIVI Intervention", price = 95, count = 1 },
+        { id = "luminous_russula", name = "Luminous Russula", price = 12, count = 4 },
+    },
+}
+
+local function shop_inventory(actor)
+    return SHOP_INVENTORIES[lower(actor)]
+end
+
+local function shop_item(actor, item_id)
+    local inventory = shop_inventory(actor)
+    if inventory == nil then return nil end
+    item_id = lower(item_id)
+    for _, item in ipairs(inventory) do
+        if item.id == item_id then return item end
+    end
+    return nil
+end
+
+local function shop_choices(actor)
+    local choices = {}
+    local inventory = shop_inventory(actor)
+    if inventory == nil then return choices end
+    for _, item in ipairs(inventory) do
+        choices[#choices + 1] = choice(
+            "buy:" .. lower(actor) .. ":" .. item.id,
+            "Buy " .. item.name .. " (" .. tostring(item.price) .. " gold).")
+    end
+    return choices
+end
+
+local function buy_item(actor, item_id)
+    actor = lower(actor)
+    local info = actor_info(actor)
+    local item = shop_item(actor, item_id)
+    if info == nil or not info.merchant or item == nil then return ignored() end
+    if not game.spend_gold(item.price) then
+        return result("You need " .. tostring(item.price) .. " gold for " .. item.name .. ".")
+    end
+    game.add_item(item.id, item.count or 1)
+    return result("Bought " .. item.name .. " for " .. tostring(item.price) .. " gold.")
+end
+
 local function append_actor_service_choices(actor, choices)
     local info = actor_info(actor)
     choices = choices or {}
@@ -192,6 +253,9 @@ local function actor_topics(actor)
     local info = actor_info(actor)
     if info ~= nil and (info.trainer or info.merchant or info.spell_merchant or info.travel) then
         append_topic(topics, "training", "Training")
+    end
+    if info ~= nil and info.merchant and shop_inventory(actor) ~= nil then
+        append_topic(topics, "barter", "Barter")
     end
     return topics
 end
@@ -465,6 +529,13 @@ function get_dialogue(actor_id, topic_id)
         local services = actor_services_text(actor)
         if services ~= nil then return dialogue(services, actor_topics(actor), append_actor_service_choices(actor, {})) end
     end
+    if topic_id == "barter" then
+        local inventory = shop_inventory(actor)
+        local info = actor_info(actor)
+        if info ~= nil and info.merchant and inventory ~= nil then
+            return dialogue(actor .. " has goods for sale. You have " .. tostring(game.gold()) .. " gold.", actor_topics(actor), shop_choices(actor))
+        end
+    end
 
     local balmora = balmora_dialogue(actor, topic_id)
     if balmora ~= nil then return balmora end
@@ -536,6 +607,14 @@ end
 
 function choose_dialogue(response_id)
     local response = lower(response_id)
+    if string.sub(response, 1, 4) == "buy:" then
+        local rest = string.sub(response, 5)
+        local separator = string.find(rest, ":", 1, true)
+        if separator == nil then return ignored() end
+        local actor = string.sub(rest, 1, separator - 1)
+        local item_id = string.sub(rest, separator + 1)
+        return buy_item(actor, item_id)
+    end
     if string.sub(response, 1, 7) == "combat:" then
         local target = string.sub(response, 8)
         if target == FORYN then return resolve_combat(FORYN, PROCESSUS_RING, 500, TAXMAN_QUEST, 70, "Foryn is dead. Report back to Socucius.") end

@@ -174,6 +174,7 @@ if(ODAI_BUILD_APP)
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
+        src/render/dialogue_font_config.cc
         src/render/frame_graph.cc
         src/render/renderer.cc
         src/world/magica_voxel.cc
@@ -446,6 +447,7 @@ if(BUILD_TESTING)
     add_executable(odai_foundation_tests
         tests/foundation_tests.cc
         src/core/log.cc
+        src/render/dialogue_font_config.cc
         src/world/chunk_grid_worldgen.cc
         src/world/magica_voxel.cc
         src/world/chunk_mesher.cc

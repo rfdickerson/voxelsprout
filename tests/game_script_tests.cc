@@ -297,6 +297,49 @@ void testSeydaNeenActorStatsAndServices() {
     expectTrue(runtime.chooseDialogue("travel:darvame hleran").handled, "Travel choice is handled");
 }
 
+void testCuratedMerchantBuying() {
+    odai::game::GameState state;
+    odai::game::LuaScriptRuntime runtime;
+    expectTrue(runtime.init(state), "Curated merchant runtime initializes");
+    const std::filesystem::path scriptPath =
+        std::filesystem::path(ODAI_PROJECT_SOURCE_DIR) / "assets" / "scripts" / "mv_deadtaxman.lua";
+    expectTrue(runtime.loadScriptFile(scriptPath), "Curated merchant script loads");
+
+    const odai::game::DialogueResult arrilleBarter = runtime.getDialogue("arrille", "barter");
+    expectTrue(arrilleBarter.handled, "Arrille barter dialogue handled");
+    bool hasDagger = false;
+    for (const odai::game::DialogueChoice& choice : arrilleBarter.choices) {
+        hasDagger = hasDagger || choice.id == "buy:arrille:iron_dagger";
+    }
+    expectTrue(hasDagger, "Arrille barter exposes buy choices");
+
+    state.addGold(20);
+    const odai::game::ScriptCallResult boughtDagger =
+        runtime.chooseDialogue("buy:arrille:iron_dagger");
+    expectTrue(boughtDagger.handled, "Arrille purchase is handled");
+    expectTrue(state.itemCount("iron_dagger") == 1, "Arrille purchase adds item");
+    expectTrue(state.gold() == 2, "Arrille purchase spends gold");
+
+    const int beforeFailedGold = state.gold();
+    const int beforeFailedCount = state.itemCount("chitin_armor");
+    const odai::game::ScriptCallResult expensivePurchase =
+        runtime.chooseDialogue("buy:arrille:chitin_armor");
+    expectTrue(expensivePurchase.handled, "Insufficient gold purchase gives feedback");
+    expectTrue(state.gold() == beforeFailedGold, "Insufficient gold purchase keeps gold");
+    expectTrue(state.itemCount("chitin_armor") == beforeFailedCount, "Insufficient gold purchase adds no item");
+
+    const odai::game::DialogueResult ajiraBarter = runtime.getDialogue("ajira", "barter");
+    expectTrue(ajiraBarter.handled, "Ajira barter dialogue handled");
+    bool hasMagickaPotion = false;
+    for (const odai::game::DialogueChoice& choice : ajiraBarter.choices) {
+        hasMagickaPotion = hasMagickaPotion || choice.id == "buy:ajira:standard_restore_magicka_potion";
+    }
+    expectTrue(hasMagickaPotion, "Ajira barter exposes buy choices");
+
+    expectTrue(!runtime.chooseDialogue("barter:fargoth").handled, "Non-merchant barter is ignored");
+    expectTrue(!runtime.chooseDialogue("buy:fargoth:iron_dagger").handled, "Non-merchant buy is ignored");
+}
+
 void testBalmoraPlayableQuestSlice() {
     odai::game::GameState state;
     odai::game::LuaScriptRuntime runtime;
@@ -341,6 +384,7 @@ int main() {
     testFargothNightRoutineAndStashQuest();
     testSeydaNeenScheduleCommands();
     testSeydaNeenActorStatsAndServices();
+    testCuratedMerchantBuying();
     testBalmoraPlayableQuestSlice();
 
     if (g_failures != 0) {

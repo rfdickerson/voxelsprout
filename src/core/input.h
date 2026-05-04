@@ -16,10 +16,7 @@ struct InputState {
     bool sprintDown = false;
     bool sneakDown = false;
     bool toggleHoverDown = false;
-    bool toggleVoxelEditModeDown = false;
     bool regenerateWorldDown = false;
-    bool placeBlockDown = false;
-    bool removeBlockDown = false;
 
     float mouseDeltaX = 0.0f;
     float mouseDeltaY = 0.0f;

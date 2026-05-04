@@ -48,6 +48,9 @@ private:
         bool enableSsao = true;
         bool enableMusic = true;
         float musicVolume = 0.35f;
+        std::string dialogueFont;
+        float dialogueFontSize = 18.0f;
+        bool dialogueFontSizeConfigured = false;
     };
 
     struct CameraRaycastResult {
@@ -96,9 +99,9 @@ private:
     void updateCamera(float dt);
     void syncGameplayUiState();
     void refreshUiCursorMode();
-    void assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId);
-    void handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight);
     void processGameplayUiCommand();
+    void applyDialogueFontSelection(const std::string& fontNameOrPath, float sizePixels);
+    void clearDialogueFontSelection();
     void closeDialogue();
     [[nodiscard]] bool openDialogue(const std::string& actorId);
     [[nodiscard]] bool requestDialogueTopic(const std::string& topicId);
@@ -159,18 +162,7 @@ private:
         int& outAxisZ
     ) const;
     [[nodiscard]] bool isWorldVoxelInBounds(int x, int y, int z) const;
-    void cycleSelectedHotbar(int direction);
-    void selectHotbarSlot(int hotbarIndex);
     void toggleDebugUi();
-    [[nodiscard]] odai::world::Voxel selectedPlaceVoxel() const;
-    [[nodiscard]] bool computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const;
-    [[nodiscard]] bool applyVoxelEdit(
-        int targetX,
-        int targetY,
-        int targetZ,
-        odai::world::Voxel voxel,
-        std::vector<std::size_t>& outDirtyChunkIndices
-    );
     [[nodiscard]] bool isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const;
     [[nodiscard]] bool isBeltAtWorld(int worldX, int worldY, int worldZ, std::size_t* outBeltIndex) const;
     [[nodiscard]] bool isTrackAtWorld(int worldX, int worldY, int worldZ, std::size_t* outTrackIndex) const;
@@ -178,15 +170,12 @@ private:
     bool saveConfig(const std::filesystem::path& configPath) const;
     void regenerateWorld();
     void refreshStreamingWindow(bool forceRendererUpload);
-    [[nodiscard]] bool tryPlaceVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices);
-    [[nodiscard]] bool tryRemoveVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices);
     [[nodiscard]] bool tryPlacePipeFromCameraRay();
     [[nodiscard]] bool tryRemovePipeFromCameraRay();
     [[nodiscard]] bool tryPlaceBeltFromCameraRay();
     [[nodiscard]] bool tryRemoveBeltFromCameraRay();
     [[nodiscard]] bool tryPlaceTrackFromCameraRay();
     [[nodiscard]] bool tryRemoveTrackFromCameraRay();
-    void resetVoxelBreakProgress();
     [[nodiscard]] bool initializeActorDebugScene(const std::filesystem::path& dataFilesPath);
     void rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh = false);
     void updateMorrowindActors(float dt);
@@ -345,8 +334,6 @@ private:
     float m_pendingMouseDeltaX = 0.0f;
     float m_pendingMouseDeltaY = 0.0f;
     bool m_hasMouseSample = false;
-    bool m_wasPlaceBlockDown = false;
-    bool m_wasRemoveBlockDown = false;
     bool m_debugUiVisible = false;
     bool m_inventoryVisible = false;
     bool m_wasToggleConfigUiDown = false;
@@ -367,17 +354,11 @@ private:
     bool m_wasToggleImportedWaterDebugDown = false;
     bool m_wasInspectImportedSceneDown = false;
     bool m_wasActivateDoorDown = false;
-    bool m_wasPrevBlockDown = false;
-    bool m_wasNextBlockDown = false;
     bool m_gamepadConnected = false;
     bool m_worldDirty = false;
     float m_worldAutosaveElapsedSeconds = 0.0f;
-    bool m_voxelBreakTargetValid = false;
-    int m_voxelBreakTargetX = 0;
-    int m_voxelBreakTargetY = 0;
-    int m_voxelBreakTargetZ = 0;
-    int m_voxelBreakClicks = 0;
     AppConfig m_config{};
+    odai::render::DialogueFontConfig m_dialogueFontConfig{};
     odai::render::GameplayUiState m_gameplayUiState{};
     std::vector<std::size_t> m_visibleChunkIndices;
     std::vector<std::uint8_t> m_visibleChunkGraceFrames;

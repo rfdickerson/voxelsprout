@@ -99,11 +99,9 @@ constexpr float kDayCycleLatitudeDegrees = 52.0f;
 constexpr float kDayCycleWinterDeclinationDegrees = -23.0f;
 constexpr float kDayCycleAzimuthOffsetDegrees = 0.0f;
 constexpr float kTwoPi = 6.28318530718f;
-constexpr float kGamepadTriggerPressedThreshold = 0.30f;
 constexpr float kGamepadMoveDeadzone = 0.18f;
 constexpr float kGamepadLookDeadzone = 0.14f;
 constexpr float kGamepadLookDegreesPerSecond = 160.0f;
-constexpr int kVoxelBreakClicksRequired = 2;
 constexpr const char* kWorldFilePath = "world.vxw";
 constexpr const char* kConfigFilePath = "odai.cfg";
 constexpr const char* kMagicaCastlePath = "assets/magicka/castle.vox";
@@ -216,35 +214,6 @@ bool aabbOverlaps(const Aabb3f& lhs, const Aabb3f& rhs) {
         lhs.minY < (rhs.maxY - kCollisionEpsilon) &&
         lhs.maxZ > (rhs.minZ + kCollisionEpsilon) &&
         lhs.minZ < (rhs.maxZ - kCollisionEpsilon);
-}
-
-const char* inventoryItemLabel(odai::render::InventoryItemId itemId) {
-    switch (itemId) {
-    case odai::render::InventoryItemId::Stone: return "stone";
-    case odai::render::InventoryItemId::Dirt: return "dirt";
-    case odai::render::InventoryItemId::Grass: return "grass";
-    case odai::render::InventoryItemId::Wood: return "wood";
-    case odai::render::InventoryItemId::Red: return "red";
-    case odai::render::InventoryItemId::Empty:
-    default:
-        return "empty";
-    }
-}
-
-odai::world::Voxel itemToVoxel(odai::render::InventoryItemId itemId) {
-    using odai::render::InventoryItemId;
-    using odai::world::Voxel;
-    using odai::world::VoxelType;
-    switch (itemId) {
-    case InventoryItemId::Stone: return Voxel{VoxelType::Stone};
-    case InventoryItemId::Dirt: return Voxel{VoxelType::Dirt};
-    case InventoryItemId::Grass: return Voxel{VoxelType::Grass};
-    case InventoryItemId::Wood: return Voxel{VoxelType::Wood};
-    case InventoryItemId::Red: return Voxel{VoxelType::SolidRed};
-    case InventoryItemId::Empty:
-    default:
-        return Voxel{VoxelType::Empty};
-    }
 }
 
 odai::world::NavmeshSettings morrowindGuardNavmeshSettings() {
@@ -823,6 +792,29 @@ std::optional<std::filesystem::path> findMorrowindDataFilesPath() {
         }
     }
     return std::nullopt;
+}
+
+std::filesystem::path projectFontsDirectory() {
+#ifdef ODAI_PROJECT_SOURCE_DIR
+    return std::filesystem::path(ODAI_PROJECT_SOURCE_DIR) / "assets" / "fonts";
+#else
+    return std::filesystem::path("assets") / "fonts";
+#endif
+}
+
+odai::render::DialogueFontConfig resolveAppDialogueFontConfig(
+    std::string_view dialogueFont,
+    std::optional<float> dialogueFontSize
+) {
+    odai::render::DialogueFontResolveInput input{};
+    input.requestedFont = std::string(dialogueFont);
+    input.requestedSizePixels = dialogueFontSize;
+    if (const std::optional<std::filesystem::path> dataFilesPath = findMorrowindDataFilesPath();
+        dataFilesPath.has_value()) {
+        input.fontDirectories.push_back(*dataFilesPath / "Fonts");
+    }
+    input.fontDirectories.push_back(projectFontsDirectory());
+    return odai::render::resolveDialogueFontConfig(input);
 }
 
 std::optional<std::filesystem::path> findMorrowindMusicDirectoryPath() {
@@ -1443,6 +1435,22 @@ bool App::loadConfig(const std::filesystem::path& configPath) {
             loadedConfig.musicVolume = std::clamp(parsedValue, 0.0f, 1.0f);
             continue;
         }
+        if (key == "dialogue_font") {
+            loadedConfig.dialogueFont = value;
+            continue;
+        }
+        if (key == "dialogue_font_size") {
+            float parsedValue = loadedConfig.dialogueFontSize;
+            if (!parseFloatConfigValue(value, parsedValue)) {
+                VOX_LOGW("app") << "invalid config dialogue_font_size='" << value
+                                << "' at " << configPath.string() << "; keeping "
+                                << loadedConfig.dialogueFontSize;
+                continue;
+            }
+            loadedConfig.dialogueFontSize = parsedValue;
+            loadedConfig.dialogueFontSizeConfigured = true;
+            continue;
+        }
     }
     m_config = loadedConfig;
     VOX_LOGI("app") << "config loaded from " << configPath.string()
@@ -1450,6 +1458,9 @@ bool App::loadConfig(const std::filesystem::path& configPath) {
                     << ", enable_ssao=" << boolConfigName(m_config.enableSsao)
                     << ", enable_music=" << boolConfigName(m_config.enableMusic)
                     << ", music_volume=" << m_config.musicVolume
+                    << ", dialogue_font=" << (m_config.dialogueFont.empty() ? "<auto>" : m_config.dialogueFont)
+                    << ", dialogue_font_size="
+                    << (m_config.dialogueFontSizeConfigured ? std::to_string(m_config.dialogueFontSize) : "<auto>")
                     << ", parsedLines=" << parsedLineCount << ")";
     return true;
 }
@@ -1464,6 +1475,12 @@ bool App::saveConfig(const std::filesystem::path& configPath) const {
     file << "enable_ssao=" << boolConfigName(m_config.enableSsao) << "\n";
     file << "enable_music=" << boolConfigName(m_config.enableMusic) << "\n";
     file << "music_volume=" << m_config.musicVolume << "\n";
+    if (!m_config.dialogueFont.empty()) {
+        file << "dialogue_font=" << m_config.dialogueFont << "\n";
+    }
+    if (m_config.dialogueFontSizeConfigured) {
+        file << "dialogue_font_size=" << m_config.dialogueFontSize << "\n";
+    }
     return true;
 }
 
@@ -1509,6 +1526,17 @@ bool App::init() {
         glfwTerminate();
         return false;
     }
+    m_dialogueFontConfig = resolveAppDialogueFontConfig(
+        m_config.dialogueFont,
+        m_config.dialogueFontSizeConfigured ? std::optional<float>(m_config.dialogueFontSize) : std::nullopt);
+    if (m_dialogueFontConfig.enabled) {
+        VOX_LOGI("app") << "dialogue font resolved to " << m_dialogueFontConfig.fontPath.string()
+                        << " at " << m_dialogueFontConfig.sizePixels << " px";
+    } else if (!m_config.dialogueFont.empty()) {
+        VOX_LOGW("app") << "dialogue font '" << m_config.dialogueFont
+                        << "' could not be resolved; using ImGui default font";
+    }
+    m_renderer.setDialogueFontConfig(m_dialogueFontConfig);
     m_renderer.setShadowSettings(odai::render::ShadowSettings{m_config.shadowMode});
     m_renderer.setSsaoEnabled(m_config.enableSsao);
     const bool actorDebugSceneRequested = actorDebugSceneEnabledByEnvironment();
@@ -1526,19 +1554,6 @@ bool App::init() {
                             << kMorrowindMusicDirEnvVar << " or " << kMorrowindDataFilesEnvVar;
         }
     }
-    m_gameplayUiState.selectedHotbarSlot = 0;
-    m_gameplayUiState.hotbarItems = {
-        odai::render::InventoryItemId::Stone,
-        odai::render::InventoryItemId::Dirt,
-        odai::render::InventoryItemId::Grass,
-        odai::render::InventoryItemId::Wood,
-        odai::render::InventoryItemId::Red,
-        odai::render::InventoryItemId::Empty,
-        odai::render::InventoryItemId::Empty,
-        odai::render::InventoryItemId::Empty,
-        odai::render::InventoryItemId::Empty,
-    };
-
     bool importedSceneLoaded = false;
     std::string importedSceneSourceLabel;
     const auto importedSceneLoadStart = Clock::now();
@@ -1897,6 +1912,11 @@ void App::syncGameplayUiState() {
             m_gameplayUiState.dialogueChoices.emplace_back(choice.id, choice.text);
         }
     }
+    m_gameplayUiState.dialogueFont = m_config.dialogueFont;
+    m_gameplayUiState.dialogueFontSize = m_config.dialogueFontSize;
+    m_gameplayUiState.dialogueFontSizeConfigured = m_config.dialogueFontSizeConfigured;
+    m_gameplayUiState.resolvedDialogueFontPath =
+        m_dialogueFontConfig.enabled ? m_dialogueFontConfig.fontPath.string() : std::string{};
     m_renderer.setGameplayUiState(m_gameplayUiState);
 }
 
@@ -1975,6 +1995,11 @@ void App::processGameplayUiCommand() {
         if (command.id.empty() || !m_luaScriptRuntime.initialized()) {
             return;
         }
+        if (command.id.rfind("barter:", 0u) == 0u) {
+            if (requestDialogueTopic("barter")) {
+                return;
+            }
+        }
         const odai::game::ScriptCallResult result = m_luaScriptRuntime.chooseDialogue(command.id);
         if (!m_luaScriptRuntime.lastError().empty()) {
             VOX_LOGW("app") << "Lua dialogue choice failed: " << m_luaScriptRuntime.lastError();
@@ -1989,7 +2014,61 @@ void App::processGameplayUiCommand() {
         if (!requestDialogueTopic(m_activeDialogueTopicId)) {
             (void)requestDialogueTopic("");
         }
+        return;
     }
+    if (command.type == odai::render::GameplayUiCommandType::SetDialogueFont) {
+        applyDialogueFontSelection(command.id, command.value);
+        return;
+    }
+    if (command.type == odai::render::GameplayUiCommandType::ClearDialogueFont) {
+        clearDialogueFontSelection();
+    }
+}
+
+void App::applyDialogueFontSelection(const std::string& fontNameOrPath, float sizePixels) {
+    const std::string trimmedFont = trimConfigString(fontNameOrPath);
+    if (trimmedFont.empty()) {
+        clearDialogueFontSelection();
+        return;
+    }
+
+    m_config.dialogueFont = trimmedFont;
+    m_config.dialogueFontSize = std::clamp(sizePixels, 8.0f, 48.0f);
+    m_config.dialogueFontSizeConfigured = true;
+    m_dialogueFontConfig = resolveAppDialogueFontConfig(m_config.dialogueFont, m_config.dialogueFontSize);
+    m_renderer.setDialogueFontConfig(m_dialogueFontConfig);
+    syncGameplayUiState();
+
+    const std::filesystem::path configPath{kConfigFilePath};
+    if (!saveConfig(configPath)) {
+        VOX_LOGE("app") << "failed to save dialogue font config to " << configPath.string();
+        return;
+    }
+    if (m_dialogueFontConfig.enabled) {
+        VOX_LOGI("app") << "dialogue font saved: " << m_config.dialogueFont
+                        << " -> " << m_dialogueFontConfig.fontPath.string()
+                        << " at " << m_dialogueFontConfig.sizePixels
+                        << " px; restart to apply to ImGui font atlas";
+    } else {
+        VOX_LOGW("app") << "dialogue font saved as '" << m_config.dialogueFont
+                        << "', but it did not resolve; restart will use default unless the font becomes available";
+    }
+}
+
+void App::clearDialogueFontSelection() {
+    m_config.dialogueFont.clear();
+    m_config.dialogueFontSize = 18.0f;
+    m_config.dialogueFontSizeConfigured = false;
+    m_dialogueFontConfig = {};
+    m_renderer.setDialogueFontConfig(m_dialogueFontConfig);
+    syncGameplayUiState();
+
+    const std::filesystem::path configPath{kConfigFilePath};
+    if (!saveConfig(configPath)) {
+        VOX_LOGE("app") << "failed to save cleared dialogue font config to " << configPath.string();
+        return;
+    }
+    VOX_LOGI("app") << "dialogue font config cleared; restart to use ImGui default font";
 }
 
 void App::initializeMorrowindGameplayScripts() {
@@ -2015,14 +2094,6 @@ void App::initializeMorrowindGameplayScripts() {
         return;
     }
     VOX_LOGI("app") << "Lua gameplay script loaded: " << scriptPath.string();
-}
-
-void App::resetVoxelBreakProgress() {
-    m_voxelBreakTargetValid = false;
-    m_voxelBreakTargetX = 0;
-    m_voxelBreakTargetY = 0;
-    m_voxelBreakTargetZ = 0;
-    m_voxelBreakClicks = 0;
 }
 
 void App::initializeBalmoraDoorActivation() {
@@ -4139,38 +4210,6 @@ bool App::uploadMorrowindActorRenderAsset() {
     return true;
 }
 
-void App::assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId) {
-    const std::size_t hotbarIndex = std::min<std::size_t>(
-        m_gameplayUiState.selectedHotbarSlot,
-        m_gameplayUiState.hotbarItems.size() - 1
-    );
-    if (m_gameplayUiState.hotbarItems[hotbarIndex] == itemId) {
-        return;
-    }
-    m_gameplayUiState.hotbarItems[hotbarIndex] = itemId;
-    VOX_LOGI("app") << "assigned hotbar " << (hotbarIndex + 1) << ": " << inventoryItemLabel(itemId);
-    syncGameplayUiState();
-}
-
-void App::handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight) {
-    const odai::render::GameplayUiLayout layout =
-        odai::render::buildGameplayUiLayout(displayWidth, displayHeight);
-    for (std::size_t slotIndex = 0; slotIndex < layout.hotbarSlots.size(); ++slotIndex) {
-        if (!layout.hotbarSlots[slotIndex].contains(mouseX, mouseY)) {
-            continue;
-        }
-        selectHotbarSlot(static_cast<int>(slotIndex));
-        return;
-    }
-    for (std::size_t itemIndex = 0; itemIndex < layout.inventorySlots.size(); ++itemIndex) {
-        if (!layout.inventorySlots[itemIndex].contains(mouseX, mouseY)) {
-            continue;
-        }
-        assignInventoryItemToSelectedHotbar(m_gameplayUiState.creativeInventoryItems[itemIndex]);
-        return;
-    }
-}
-
 std::pair<int, int> App::currentMorrowindExteriorCell() const {
     constexpr float kMorrowindCellSizeUnits = 8192.0f;
     return {
@@ -4456,63 +4495,6 @@ void App::update(float dt, float simulationAlpha) {
         regenerateWorld();
     }
 
-    const CameraRaycastResult raycast = raycastFromCamera();
-    if (m_voxelBreakTargetValid) {
-        const bool blockTargetStillValid =
-            !isAnyUiVisible() &&
-            raycast.hitSolid &&
-            raycast.hitDistance <= kBlockInteractMaxDistance &&
-            raycast.solidX == m_voxelBreakTargetX &&
-            raycast.solidY == m_voxelBreakTargetY &&
-            raycast.solidZ == m_voxelBreakTargetZ;
-        if (!blockTargetStillValid) {
-            resetVoxelBreakProgress();
-        }
-    }
-
-    int windowWidth = 0;
-    int windowHeight = 0;
-    glfwGetWindowSize(m_window, &windowWidth, &windowHeight);
-    double mouseX = 0.0;
-    double mouseY = 0.0;
-    glfwGetCursorPos(m_window, &mouseX, &mouseY);
-
-    const bool inventoryClickPressedThisFrame = m_inventoryVisible && m_input.removeBlockDown && !m_wasRemoveBlockDown;
-    if (inventoryClickPressedThisFrame) {
-        handleInventoryClick(
-            static_cast<float>(mouseX),
-            static_cast<float>(mouseY),
-            static_cast<float>(std::max(windowWidth, 1)),
-            static_cast<float>(std::max(windowHeight, 1))
-        );
-    }
-
-    const bool blockInteractionEnabled = !isAnyUiVisible();
-    const bool placePressedThisFrame = blockInteractionEnabled && m_input.placeBlockDown && !m_wasPlaceBlockDown;
-    const bool removePressedThisFrame = blockInteractionEnabled && m_input.removeBlockDown && !m_wasRemoveBlockDown;
-    m_wasPlaceBlockDown = m_input.placeBlockDown;
-    m_wasRemoveBlockDown = m_input.removeBlockDown;
-
-    bool voxelChunkEdited = false;
-    std::vector<std::size_t> editedChunkIndices;
-    if (placePressedThisFrame) {
-        resetVoxelBreakProgress();
-        if (tryPlaceVoxelFromCameraRay(editedChunkIndices)) {
-            voxelChunkEdited = true;
-        }
-    }
-    if (removePressedThisFrame && tryRemoveVoxelFromCameraRay(editedChunkIndices)) {
-        voxelChunkEdited = true;
-    }
-
-    if (voxelChunkEdited) {
-        if (!m_renderer.updateChunkMesh(m_world.chunkGrid(), std::span<const std::size_t>(editedChunkIndices))) {
-            VOX_LOGE("app") << "chunk mesh update failed after voxel edit";
-        }
-        m_worldDirty = true;
-        m_worldAutosaveElapsedSeconds = 0.0f;
-    }
-
     if (m_worldDirty) {
         m_worldAutosaveElapsedSeconds += std::max(0.0f, dt);
         if (m_worldAutosaveElapsedSeconds >= kWorldAutosaveDelaySeconds) {
@@ -4535,46 +4517,6 @@ void App::update(float dt, float simulationAlpha) {
         lerpWrappedDegrees(m_cameraPrevious.yawDegrees, m_camera.yawDegrees, renderAlpha);
     const float renderCameraPitchDegrees =
         m_cameraPrevious.pitchDegrees + ((m_camera.pitchDegrees - m_cameraPrevious.pitchDegrees) * renderAlpha);
-
-    odai::render::VoxelPreview preview{};
-    if (!isAnyUiVisible()) {
-        if (raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
-            if (raycast.hasHitFaceNormal) {
-                auto normalToFaceId = [](int nx, int ny, int nz) -> uint32_t {
-                    if (nx > 0) { return 0u; }
-                    if (nx < 0) { return 1u; }
-                    if (ny > 0) { return 2u; }
-                    if (ny < 0) { return 3u; }
-                    if (nz > 0) { return 4u; }
-                    return 5u;
-                };
-                preview.faceVisible = true;
-                preview.faceX = raycast.solidX;
-                preview.faceY = raycast.solidY;
-                preview.faceZ = raycast.solidZ;
-                preview.faceId = normalToFaceId(raycast.hitFaceNormalX, raycast.hitFaceNormalY, raycast.hitFaceNormalZ);
-                preview.mode = m_input.removeBlockDown
-                    ? odai::render::VoxelPreview::Mode::Remove
-                    : odai::render::VoxelPreview::Mode::Add;
-            }
-
-            if (!m_input.removeBlockDown) {
-                int targetX = 0;
-                int targetY = 0;
-                int targetZ = 0;
-                if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
-                    if (isWorldVoxelInBounds(targetX, targetY, targetZ) &&
-                        selectedPlaceVoxel().type != odai::world::VoxelType::Empty) {
-                        // Face highlight is enough for placement; do not show a ghost voxel cube.
-                    } else {
-                        preview.faceVisible = false;
-                    }
-                } else {
-                    preview.faceVisible = false;
-                }
-            }
-        }
-    }
 
     const odai::render::CameraPose cameraPose{
         renderCameraX,
@@ -4736,7 +4678,7 @@ void App::update(float dt, float simulationAlpha) {
         m_world.chunkGrid(),
         m_simulation,
         cameraPose,
-        preview,
+        odai::render::VoxelPreview{},
         simulationAlpha,
         std::span<const std::size_t>(m_visibleChunkIndices)
     );
@@ -4968,8 +4910,6 @@ void App::pollInput() {
         glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
     m_input.toggleHoverDown = glfwGetKey(m_window, GLFW_KEY_H) == GLFW_PRESS;
     m_input.regenerateWorldDown = glfwGetKey(m_window, GLFW_KEY_R) == GLFW_PRESS;
-    bool controllerPlaceDown = false;
-    bool controllerRemoveDown = false;
     bool controllerMoveUpDown = false;
     bool controllerMoveDownDown = false;
     float controllerMoveForward = 0.0f;
@@ -4983,14 +4923,12 @@ void App::pollInput() {
     if (hasGamepad != m_gamepadConnected) {
         m_gamepadConnected = hasGamepad;
         if (m_gamepadConnected) {
-            VOX_LOGI("app") << "gamepad connected: RT place, LT remove";
+            VOX_LOGI("app") << "gamepad connected";
         } else {
             VOX_LOGI("app") << "gamepad disconnected";
         }
     }
     if (hasGamepad) {
-        controllerPlaceDown = gamepadState.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > kGamepadTriggerPressedThreshold;
-        controllerRemoveDown = gamepadState.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER] > kGamepadTriggerPressedThreshold;
         controllerMoveUpDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_A] == GLFW_PRESS;
         controllerMoveDownDown = gamepadState.buttons[GLFW_GAMEPAD_BUTTON_B] == GLFW_PRESS;
         controllerMoveForward = -applyStickDeadzone(gamepadState.axes[GLFW_GAMEPAD_AXIS_LEFT_Y], kGamepadMoveDeadzone);
@@ -4999,12 +4937,6 @@ void App::pollInput() {
         controllerLookY = -applyStickDeadzone(gamepadState.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y], kGamepadLookDeadzone);
     }
 
-    m_input.placeBlockDown =
-        glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS ||
-        controllerPlaceDown;
-    m_input.removeBlockDown =
-        glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS ||
-        controllerRemoveDown;
     m_input.moveUp = m_input.moveUp || controllerMoveUpDown;
     m_input.moveDown = m_input.moveDown || controllerMoveDownDown;
     m_input.gamepadMoveForward = controllerMoveForward;
@@ -5019,8 +4951,6 @@ void App::pollInput() {
         m_input.moveUp = false;
         m_input.moveDown = false;
         m_input.sprintDown = false;
-        m_input.placeBlockDown = false;
-        m_input.removeBlockDown = false;
         m_input.gamepadMoveForward = 0.0f;
         m_input.gamepadMoveRight = 0.0f;
         m_input.gamepadLookX = 0.0f;
@@ -6184,60 +6114,6 @@ bool App::isWorldVoxelInBounds(int x, int y, int z) const {
     return worldToChunkLocal(x, y, z, chunkIndex, localX, localY, localZ);
 }
 
-void App::cycleSelectedHotbar(int direction) {
-    const int hotbarSlotCount = static_cast<int>(odai::render::kGameplayHotbarSlotCount);
-    if (hotbarSlotCount <= 0) {
-        m_gameplayUiState.selectedHotbarSlot = 0;
-        return;
-    }
-    const int currentSlot = static_cast<int>(m_gameplayUiState.selectedHotbarSlot);
-    const int next = (currentSlot + direction) % hotbarSlotCount;
-    selectHotbarSlot(next < 0 ? next + hotbarSlotCount : next);
-}
-
-void App::selectHotbarSlot(int hotbarIndex) {
-    const int clampedIndex = std::clamp(
-        hotbarIndex,
-        0,
-        static_cast<int>(odai::render::kGameplayHotbarSlotCount) - 1
-    );
-    if (m_gameplayUiState.selectedHotbarSlot == static_cast<std::uint32_t>(clampedIndex)) {
-        return;
-    }
-    m_gameplayUiState.selectedHotbarSlot = static_cast<std::uint32_t>(clampedIndex);
-    syncGameplayUiState();
-    const odai::render::InventoryItemId itemId =
-        m_gameplayUiState.hotbarItems[static_cast<std::size_t>(clampedIndex)];
-    VOX_LOGI("app") << "selected hotbar " << (clampedIndex + 1)
-                    << ": " << inventoryItemLabel(itemId);
-}
-
-odai::world::Voxel App::selectedPlaceVoxel() const {
-    const std::size_t hotbarIndex = std::min<std::size_t>(
-        m_gameplayUiState.selectedHotbarSlot,
-        m_gameplayUiState.hotbarItems.size() - 1
-    );
-    return itemToVoxel(m_gameplayUiState.hotbarItems[hotbarIndex]);
-}
-
-bool App::computePlacementVoxelFromRaycast(const CameraRaycastResult& raycast, int& outX, int& outY, int& outZ) const {
-    if (!raycast.hitSolid || !raycast.hasHitFaceNormal) {
-        return false;
-    }
-
-    const int candidateX = raycast.solidX + raycast.hitFaceNormalX;
-    const int candidateY = raycast.solidY + raycast.hitFaceNormalY;
-    const int candidateZ = raycast.solidZ + raycast.hitFaceNormalZ;
-    if (!isWorldVoxelInBounds(candidateX, candidateY, candidateZ)) {
-        return false;
-    }
-
-    outX = candidateX;
-    outY = candidateY;
-    outZ = candidateZ;
-    return true;
-}
-
 bool App::computePipePlacementFromInteractionRaycast(
     const InteractionRaycastResult& raycast,
     int& outX,
@@ -6507,70 +6383,6 @@ bool App::computeTrackPlacementFromInteractionRaycast(
     return true;
 }
 
-bool App::applyVoxelEdit(
-    int targetX,
-    int targetY,
-    int targetZ,
-    odai::world::Voxel voxel,
-    std::vector<std::size_t>& outDirtyChunkIndices
-) {
-    int localX = 0;
-    int localY = 0;
-    int localZ = 0;
-    std::size_t editedChunkIndex = 0;
-    if (!worldToChunkLocal(targetX, targetY, targetZ, editedChunkIndex, localX, localY, localZ)) {
-        return false;
-    }
-
-    const odai::world::Voxel existingVoxel =
-        m_world.chunkGrid().chunks()[editedChunkIndex].voxelAt(localX, localY, localZ);
-    if (existingVoxel.type == voxel.type) {
-        return false;
-    }
-    if (!m_world.setVoxelAtWorld(targetX, targetY, targetZ, voxel)) {
-        return false;
-    }
-
-    auto appendUniqueChunkIndex = [&outDirtyChunkIndices](std::size_t chunkIndex) {
-        if (std::find(outDirtyChunkIndices.begin(), outDirtyChunkIndices.end(), chunkIndex) != outDirtyChunkIndices.end()) {
-            return;
-        }
-        outDirtyChunkIndices.push_back(chunkIndex);
-    };
-    appendUniqueChunkIndex(editedChunkIndex);
-
-    auto appendNeighborChunkForWorldVoxel = [this, &appendUniqueChunkIndex](int worldX, int worldY, int worldZ) {
-        std::size_t chunkIndex = 0;
-        int neighborLocalX = 0;
-        int neighborLocalY = 0;
-        int neighborLocalZ = 0;
-        if (worldToChunkLocal(worldX, worldY, worldZ, chunkIndex, neighborLocalX, neighborLocalY, neighborLocalZ)) {
-            appendUniqueChunkIndex(chunkIndex);
-        }
-    };
-
-    if (localX == 0) {
-        appendNeighborChunkForWorldVoxel(targetX - 1, targetY, targetZ);
-    }
-    if (localX == (odai::world::Chunk::kSizeX - 1)) {
-        appendNeighborChunkForWorldVoxel(targetX + 1, targetY, targetZ);
-    }
-    if (localY == 0) {
-        appendNeighborChunkForWorldVoxel(targetX, targetY - 1, targetZ);
-    }
-    if (localY == (odai::world::Chunk::kSizeY - 1)) {
-        appendNeighborChunkForWorldVoxel(targetX, targetY + 1, targetZ);
-    }
-    if (localZ == 0) {
-        appendNeighborChunkForWorldVoxel(targetX, targetY, targetZ - 1);
-    }
-    if (localZ == (odai::world::Chunk::kSizeZ - 1)) {
-        appendNeighborChunkForWorldVoxel(targetX, targetY, targetZ + 1);
-    }
-
-    return true;
-}
-
 bool App::isPipeAtWorld(int worldX, int worldY, int worldZ, std::size_t* outPipeIndex) const {
     const std::vector<odai::sim::Pipe>& pipes = m_simulation.pipes();
     for (std::size_t pipeIndex = 0; pipeIndex < pipes.size(); ++pipeIndex) {
@@ -6675,69 +6487,6 @@ void App::refreshStreamingWindow(bool forceRendererUpload) {
                     << ", entered=" << streamingStats.enteredChunkCount
                     << ", exited=" << streamingStats.exitedChunkCount
                     << ", meshUpload=" << (streamingUpdate.requiresFullMeshUpload || forceRendererUpload ? "full" : "partial");
-}
-
-bool App::tryPlaceVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices) {
-    if (m_world.chunkGrid().chunks().empty()) {
-        return false;
-    }
-    const odai::world::Voxel placeVoxel = selectedPlaceVoxel();
-    if (placeVoxel.type == odai::world::VoxelType::Empty) {
-        return false;
-    }
-
-    const CameraRaycastResult raycast = raycastFromCamera();
-    if (!raycast.hitSolid || raycast.hitDistance > kBlockInteractMaxDistance) {
-        return false;
-    }
-
-    int targetX = 0;
-    int targetY = 0;
-    int targetZ = 0;
-    if (!computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
-        return false;
-    }
-
-    return applyVoxelEdit(targetX, targetY, targetZ, placeVoxel, outDirtyChunkIndices);
-}
-
-bool App::tryRemoveVoxelFromCameraRay(std::vector<std::size_t>& outDirtyChunkIndices) {
-    if (m_world.chunkGrid().chunks().empty()) {
-        return false;
-    }
-
-    const CameraRaycastResult raycast = raycastFromCamera();
-    if (!raycast.hitSolid || raycast.hitDistance > kBlockInteractMaxDistance) {
-        return false;
-    }
-
-    const bool sameTarget =
-        m_voxelBreakTargetValid &&
-        m_voxelBreakTargetX == raycast.solidX &&
-        m_voxelBreakTargetY == raycast.solidY &&
-        m_voxelBreakTargetZ == raycast.solidZ;
-    if (!sameTarget) {
-        m_voxelBreakTargetValid = true;
-        m_voxelBreakTargetX = raycast.solidX;
-        m_voxelBreakTargetY = raycast.solidY;
-        m_voxelBreakTargetZ = raycast.solidZ;
-        m_voxelBreakClicks = 0;
-    }
-
-    ++m_voxelBreakClicks;
-    if (m_voxelBreakClicks < kVoxelBreakClicksRequired) {
-        return false;
-    }
-
-    resetVoxelBreakProgress();
-
-    return applyVoxelEdit(
-        raycast.solidX,
-        raycast.solidY,
-        raycast.solidZ,
-        odai::world::Voxel{odai::world::VoxelType::Empty},
-        outDirtyChunkIndices
-    );
 }
 
 bool App::tryPlacePipeFromCameraRay() {

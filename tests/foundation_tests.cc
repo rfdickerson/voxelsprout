@@ -1,7 +1,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #include "core/grid3.h"
@@ -10,6 +13,7 @@
 #include "sim/network_procedural.h"
 #include "sim/simulation.h"
 #include "render/frame_arena_alias.h"
+#include "render/dialogue_font_config.h"
 #include "world/clipmap_index.h"
 #include "world/chunk.h"
 #include "world/chunk_mesher.h"
@@ -65,6 +69,68 @@ bool isTerrainSurfaceVoxel(odai::world::VoxelType type) {
     return type == odai::world::VoxelType::Stone ||
            type == odai::world::VoxelType::Dirt ||
            type == odai::world::VoxelType::Grass;
+}
+
+void writeTextFile(const std::filesystem::path& path, const std::string& contents) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream file(path, std::ios::trunc);
+    file << contents;
+}
+
+void testDialogueFontConfigResolution() {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "odai_dialogue_font_tests";
+    std::filesystem::remove_all(root);
+    const std::filesystem::path fonts = root / "Fonts";
+    std::filesystem::create_directories(fonts);
+
+    const std::filesystem::path directFont = fonts / "Direct.ttf";
+    writeTextFile(directFont, "not a real font; resolver only checks paths");
+
+    odai::render::DialogueFontResolveInput directInput{};
+    directInput.requestedFont = "Direct.ttf";
+    directInput.requestedSizePixels = 20.0f;
+    directInput.fontDirectories.push_back(fonts);
+    const odai::render::DialogueFontConfig directConfig =
+        odai::render::resolveDialogueFontConfig(directInput);
+    expectTrue(directConfig.enabled, "Dialogue direct TTF path resolves");
+    expectTrue(directConfig.fontPath.filename() == "Direct.ttf", "Dialogue direct TTF filename");
+    expectNear(directConfig.sizePixels, 20.0f, 0.001f, "Dialogue direct TTF size override");
+
+    const std::filesystem::path journalFont = fonts / "Journal.ttf";
+    writeTextFile(journalFont, "not a real font; resolver only checks paths");
+    writeTextFile(
+        fonts / "morrowind.omwfont",
+        "[Journalbook]\n"
+        "Type=FreeType\n"
+        "TrueType Font=Journal.ttf\n"
+        "Size=17\n");
+
+    odai::render::DialogueFontResolveInput omwInput{};
+    omwInput.fontDirectories.push_back(fonts);
+    const odai::render::DialogueFontConfig omwConfig =
+        odai::render::resolveDialogueFontConfig(omwInput);
+    expectTrue(omwConfig.enabled, "Dialogue .omwfont Journalbook fallback resolves");
+    expectTrue(omwConfig.fontPath.filename() == "Journal.ttf", "Dialogue .omwfont TTF filename");
+    expectNear(omwConfig.sizePixels, 17.0f, 0.001f, "Dialogue .omwfont size");
+
+    odai::render::DialogueFontResolveInput overrideInput{};
+    overrideInput.requestedFont = "Journalbook";
+    overrideInput.requestedSizePixels = 22.0f;
+    overrideInput.fontDirectories.push_back(fonts);
+    const odai::render::DialogueFontConfig overrideConfig =
+        odai::render::resolveDialogueFontConfig(overrideInput);
+    expectTrue(overrideConfig.enabled, "Dialogue .omwfont named section resolves");
+    expectNear(overrideConfig.sizePixels, 22.0f, 0.001f, "Dialogue config size overrides .omwfont size");
+
+    odai::render::DialogueFontResolveInput missingInput{};
+    missingInput.requestedFont = "MissingFont.ttf";
+    missingInput.fontDirectories.push_back(root / "MissingFonts");
+    const odai::render::DialogueFontConfig missingConfig =
+        odai::render::resolveDialogueFontConfig(missingInput);
+    expectTrue(!missingConfig.enabled, "Dialogue missing font falls back");
+
+    std::filesystem::remove_all(root);
 }
 
 void testGridPrimitives() {
@@ -572,6 +638,7 @@ void testMagicaVoxelChunkedMeshing() {
 
 int main() {
     testGridPrimitives();
+    testDialogueFontConfigResolution();
     testNetworkGraphAndProceduralUtilities();
     testCsgCommands();
     testFrameArenaAliasUtilities();

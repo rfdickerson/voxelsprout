@@ -80,6 +80,10 @@ odai::world::ClipmapConfig Renderer::clipmapQueryConfig() const {
     return m_backend->clipmapQueryConfig();
 }
 
+void Renderer::setDialogueFontConfig(const DialogueFontConfig& config) {
+    m_backend->setDialogueFontConfig(config);
+}
+
 void Renderer::setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount) {
     m_backend->setSpatialQueryStats(used, stats, visibleChunkCount);
 }

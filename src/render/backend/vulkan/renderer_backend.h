@@ -4,6 +4,7 @@
 #include "import/imported_scene.h"
 #include "render/backend/vulkan/buffer_helpers.h"
 #include "render/backend/vulkan/descriptor_manager.h"
+#include "render/dialogue_font_config.h"
 #include "render/frame_graph.h"
 #include "render/backend/vulkan/pipeline_manager.h"
 #include "render/renderer_types.h"
@@ -26,6 +27,7 @@
 #include <vulkan/vulkan.h>
 
 struct GLFWwindow;
+struct ImFont;
 
 // Render subsystem
 // Responsible for: owning the rendering interface used by the app.
@@ -208,6 +210,7 @@ public:
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
     bool useSpatialPartitioningQueries() const;
     odai::world::ClipmapConfig clipmapQueryConfig() const;
+    void setDialogueFontConfig(const DialogueFontConfig& config);
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void setGameplayUiState(const GameplayUiState& state);
     GameplayUiCommand consumeGameplayUiCommand();
@@ -1156,6 +1159,11 @@ private:
     bool m_showSunPanel = false;
     GameplayUiState m_gameplayUiState{};
     GameplayUiCommand m_pendingGameplayUiCommand{};
+    DialogueFontConfig m_dialogueFontConfig{};
+    ImFont* m_dialogueFont = nullptr;
+    std::array<char, 260> m_dialogueFontInput{};
+    float m_dialogueFontSizeInput = 18.0f;
+    bool m_dialogueFontInputInitialized = false;
     float m_debugCameraFovDegrees = 90.0f;
     bool m_debugCameraFovInitialized = false;
     bool m_debugEnableVertexAo = true;

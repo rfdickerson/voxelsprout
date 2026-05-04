@@ -56,6 +56,14 @@ const char* shadowFallbackReasonName(ShadowFallbackReason reason) {
     return "none";
 }
 
+template <std::size_t N>
+void copyTextToBuffer(std::array<char, N>& buffer, const std::string& text) {
+    static_assert(N > 0);
+    std::fill(buffer.begin(), buffer.end(), '\0');
+    const std::size_t copyCount = std::min(buffer.size() - 1u, text.size());
+    std::copy_n(text.data(), copyCount, buffer.data());
+}
+
 constexpr int kPostLookPresetNeutral = 0;
 constexpr int kPostLookPresetPunchy = 1;
 constexpr int kPostLookPresetStylizedVivid = 2;
@@ -163,6 +171,10 @@ void RendererBackend::setDebugUiVisible(bool visible) {
 
 void RendererBackend::setGameplayUiState(const GameplayUiState& state) {
     m_gameplayUiState = state;
+}
+
+void RendererBackend::setDialogueFontConfig(const DialogueFontConfig& config) {
+    m_dialogueFontConfig = config;
 }
 
 GameplayUiCommand RendererBackend::consumeGameplayUiCommand() {
@@ -442,6 +454,50 @@ void RendererBackend::buildFrameStatsUi() {
                 m_debugImportedActorBoneLineVertexCount);
         } else if (!importedSceneLoaded) {
             ImGui::TextDisabled("Imported-scene geometry not loaded.");
+        }
+        ImGui::EndTabItem();
+    }
+
+    if (ImGui::BeginTabItem("UI")) {
+        if (!m_dialogueFontInputInitialized) {
+            const std::string& configuredFont = m_gameplayUiState.dialogueFont;
+            if (!configuredFont.empty()) {
+                copyTextToBuffer(m_dialogueFontInput, configuredFont);
+            } else {
+                copyTextToBuffer(m_dialogueFontInput, std::string("Journalbook"));
+            }
+            m_dialogueFontSizeInput = m_gameplayUiState.dialogueFontSizeConfigured
+                ? m_gameplayUiState.dialogueFontSize
+                : 18.0f;
+            m_dialogueFontInputInitialized = true;
+        }
+
+        ImGui::SeparatorText("Dialogue Font");
+        ImGui::InputText("Font name or path", m_dialogueFontInput.data(), m_dialogueFontInput.size());
+        ImGui::SliderFloat("Font size", &m_dialogueFontSizeInput, 8.0f, 48.0f, "%.1f px");
+        if (ImGui::Button("Use For Dialogue")) {
+            m_pendingGameplayUiCommand = {
+                GameplayUiCommandType::SetDialogueFont,
+                std::string(m_dialogueFontInput.data()),
+                m_dialogueFontSizeInput
+            };
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset Dialogue Font")) {
+            m_pendingGameplayUiCommand = {GameplayUiCommandType::ClearDialogueFont, {}, 0.0f};
+            copyTextToBuffer(m_dialogueFontInput, std::string("Journalbook"));
+            m_dialogueFontSizeInput = 18.0f;
+        }
+        ImGui::TextDisabled("Searches Morrowind Data Files/Fonts, then assets/fonts. Restart to apply.");
+        if (!m_gameplayUiState.dialogueFont.empty()) {
+            ImGui::Text("Configured: %s (%.1f px)", m_gameplayUiState.dialogueFont.c_str(), m_gameplayUiState.dialogueFontSize);
+        } else {
+            ImGui::Text("Configured: default ImGui font");
+        }
+        if (!m_gameplayUiState.resolvedDialogueFontPath.empty()) {
+            ImGui::TextWrapped("Resolved: %s", m_gameplayUiState.resolvedDialogueFontPath.c_str());
+        } else if (!m_gameplayUiState.dialogueFont.empty()) {
+            ImGui::TextDisabled("Resolved: missing or unsupported font");
         }
         ImGui::EndTabItem();
     }
@@ -1288,8 +1344,14 @@ void RendererBackend::buildDialogueUi() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+    if (m_dialogueFont != nullptr) {
+        ImGui::PushFont(m_dialogueFont);
+    }
     if (!ImGui::Begin("Dialogue", nullptr, kFlags)) {
         ImGui::End();
+        if (m_dialogueFont != nullptr) {
+            ImGui::PopFont();
+        }
         ImGui::PopStyleVar(3);
         ImGui::PopStyleColor(6);
         return;
@@ -1348,6 +1410,9 @@ void RendererBackend::buildDialogueUi() {
     }
 
     ImGui::End();
+    if (m_dialogueFont != nullptr) {
+        ImGui::PopFont();
+    }
     ImGui::PopStyleVar(3);
     ImGui::PopStyleColor(6);
 }
@@ -1358,34 +1423,8 @@ void RendererBackend::buildGameplayHudUi() {
         return;
     }
 
-    auto itemLabel = [](InventoryItemId itemId) -> const char* {
-        switch (itemId) {
-        case InventoryItemId::Stone: return "Stone";
-        case InventoryItemId::Dirt: return "Dirt";
-        case InventoryItemId::Grass: return "Grass";
-        case InventoryItemId::Wood: return "Wood";
-        case InventoryItemId::Red: return "Red";
-        case InventoryItemId::Empty:
-        default:
-            return "";
-        }
-    };
-    auto itemTint = [](InventoryItemId itemId) -> ImU32 {
-        switch (itemId) {
-        case InventoryItemId::Stone: return IM_COL32(170, 176, 184, 255);
-        case InventoryItemId::Dirt: return IM_COL32(145, 100, 62, 255);
-        case InventoryItemId::Grass: return IM_COL32(95, 167, 82, 255);
-        case InventoryItemId::Wood: return IM_COL32(162, 127, 88, 255);
-        case InventoryItemId::Red: return IM_COL32(220, 86, 74, 255);
-        case InventoryItemId::Empty:
-        default:
-            return IM_COL32(80, 86, 96, 255);
-        }
-    };
-
     const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
     const GameplayUiLayout layout = buildGameplayUiLayout(displaySize.x, displaySize.y);
-    const ImU32 slotColor = IM_COL32(28, 32, 40, 230);
     const ImU32 borderColor = IM_COL32(110, 120, 136, 255);
     const ImU32 textColor = IM_COL32(236, 241, 248, 255);
     const ImU32 emptyTextColor = IM_COL32(152, 160, 172, 255);
@@ -1427,36 +1466,6 @@ void RendererBackend::buildGameplayHudUi() {
         drawList->AddText(ImVec2(boxMin.x + 24.0f, boxMin.y + 18.0f), IM_COL32(255, 230, 220, 255), message);
     }
 
-    for (std::size_t slotIndex = 0; slotIndex < layout.hotbarSlots.size(); ++slotIndex) {
-        const GameplayUiRect& slot = layout.hotbarSlots[slotIndex];
-        const InventoryItemId itemId = m_gameplayUiState.hotbarItems[slotIndex];
-        const bool selected = slotIndex == m_gameplayUiState.selectedHotbarSlot;
-        drawList->AddRectFilled(
-            ImVec2(slot.minX, slot.minY),
-            ImVec2(slot.maxX, slot.maxY),
-            slotColor,
-            6.0f
-        );
-        drawList->AddRect(
-            ImVec2(slot.minX, slot.minY),
-            ImVec2(slot.maxX, slot.maxY),
-            selected ? IM_COL32(240, 206, 106, 255) : borderColor,
-            6.0f,
-            0,
-            selected ? 2.4f : 1.4f
-        );
-        const float centerX = (slot.minX + slot.maxX) * 0.5f;
-        const float centerY = (slot.minY + slot.maxY) * 0.5f;
-        drawList->AddCircleFilled(ImVec2(centerX, centerY - 7.0f), 13.0f, itemTint(itemId), 20);
-        const char* label = itemLabel(itemId);
-        const ImVec2 textSize = ImGui::CalcTextSize(label);
-        drawList->AddText(
-            ImVec2(centerX - (textSize.x * 0.5f), slot.maxY - 18.0f),
-            textColor,
-            label
-        );
-    }
-
     if (!m_gameplayUiState.inventoryVisible) {
         return;
     }
@@ -1464,35 +1473,22 @@ void RendererBackend::buildGameplayHudUi() {
     drawList->AddRectFilled(ImVec2(0.0f, 0.0f), ImVec2(displaySize.x, displaySize.y), IM_COL32(4, 6, 10, 130));
     drawList->AddRectFilled(
         ImVec2(layout.inventoryPanel.minX, layout.inventoryPanel.minY),
-        ImVec2(layout.inventoryPanel.maxX + 360.0f, layout.inventoryPanel.maxY + 180.0f),
+        ImVec2(layout.inventoryPanel.maxX, layout.inventoryPanel.maxY),
         IM_COL32(18, 22, 30, 235),
         8.0f
     );
     drawList->AddRect(
         ImVec2(layout.inventoryPanel.minX, layout.inventoryPanel.minY),
-        ImVec2(layout.inventoryPanel.maxX + 360.0f, layout.inventoryPanel.maxY + 180.0f),
+        ImVec2(layout.inventoryPanel.maxX, layout.inventoryPanel.maxY),
         borderColor,
         8.0f,
         0,
         2.0f
     );
     drawList->AddText(ImVec2(layout.inventoryPanel.minX + 24.0f, layout.inventoryPanel.minY + 20.0f), textColor, "Inventory");
-    drawList->AddText(ImVec2(layout.inventoryPanel.minX + 24.0f, layout.inventoryPanel.minY + 44.0f), emptyTextColor, "Click a block item to assign it to the selected hotbar slot.");
-    for (std::size_t itemIndex = 0; itemIndex < kCreativeInventoryItemCount; ++itemIndex) {
-        const GameplayUiRect& slot = layout.inventorySlots[itemIndex];
-        const InventoryItemId itemId = m_gameplayUiState.creativeInventoryItems[itemIndex];
-        const char* label = itemLabel(itemId);
-        drawList->AddRectFilled(ImVec2(slot.minX, slot.minY), ImVec2(slot.maxX, slot.maxY), slotColor, 6.0f);
-        drawList->AddRect(ImVec2(slot.minX, slot.minY), ImVec2(slot.maxX, slot.maxY), borderColor, 6.0f, 0, 1.5f);
-        const float centerX = (slot.minX + slot.maxX) * 0.5f;
-        const float centerY = (slot.minY + slot.maxY) * 0.5f;
-        drawList->AddCircleFilled(ImVec2(centerX, centerY - 8.0f), 16.0f, itemTint(itemId), 20);
-        const ImVec2 textSize = ImGui::CalcTextSize(label);
-        drawList->AddText(ImVec2(centerX - (textSize.x * 0.5f), slot.maxY - 22.0f), textColor, label);
-    }
 
     float listX = layout.inventoryPanel.minX + 24.0f;
-    float listY = layout.inventoryPanel.maxY + 18.0f;
+    float listY = layout.inventoryPanel.minY + 56.0f;
     drawList->AddText(ImVec2(listX, listY), textColor, "Items");
     listY += 24.0f;
     if (m_gameplayUiState.inventoryEntries.empty()) {
@@ -1504,7 +1500,7 @@ void RendererBackend::buildGameplayHudUi() {
         }
     }
 
-    float questX = layout.inventoryPanel.maxX + 34.0f;
+    const float questX = layout.inventoryPanel.minX + ((layout.inventoryPanel.maxX - layout.inventoryPanel.minX) * 0.48f);
     float questY = layout.inventoryPanel.minY + 20.0f;
     drawList->AddText(ImVec2(questX, questY), textColor, "Journal");
     questY += 26.0f;
