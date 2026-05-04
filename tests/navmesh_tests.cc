@@ -121,7 +121,7 @@ void testStepClimbLimit() {
         "Too-high step path fails");
 }
 
-void testWallBlocksContinuousFloor() {
+void testWallBlocksDirectSegmentQuery() {
     std::vector<odai::world::NavmeshBuildTriangle> triangles;
     appendQuad(triangles, 0.0f, 5.0f, 0.0f, 0.0f, 10.0f);
     appendQuad(triangles, 5.0f, 10.0f, 0.0f, 0.0f, 10.0f);
@@ -133,8 +133,11 @@ void testWallBlocksContinuousFloor() {
 
     std::vector<odai::world::NavmeshPathPoint> path;
     expectTrue(
-        !navmesh.findPath({1.0f, 1.0f, 5.0f}, {9.0f, 1.0f, 5.0f}, path),
-        "Vertical wall blocks path across continuous floor edge");
+        navmesh.findPath({1.0f, 1.0f, 5.0f}, {9.0f, 1.0f, 5.0f}, path),
+        "Continuous floor path remains connected without navmesh carving");
+    expectTrue(
+        navmesh.isSegmentBlocked({1.0f, 1.0f, 5.0f}, {9.0f, 1.0f, 5.0f}),
+        "Vertical wall blocks direct segment query");
 }
 
 void testNearestPoint() {
@@ -196,7 +199,7 @@ void testBuildFromGpuSceneAsset() {
 int main() {
     testFlatPlanePath();
     testStepClimbLimit();
-    testWallBlocksContinuousFloor();
+    testWallBlocksDirectSegmentQuery();
     testNearestPoint();
     testBuildFromGpuSceneAsset();
 
