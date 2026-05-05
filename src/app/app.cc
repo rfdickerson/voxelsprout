@@ -1576,6 +1576,9 @@ bool App::init() {
     if (!importedSceneLoaded && morrowindRuntimeExteriorEnabledByEnvironment()) {
         if (const std::optional<std::filesystem::path> dataFilesPath = findMorrowindDataFilesPath();
             dataFilesPath.has_value()) {
+            odai::importer::MorrowindContentLoadOrder loadOrder =
+                odai::importer::resolveMorrowindContentLoadOrder(*dataFilesPath);
+            odai::importer::MorrowindContentSession contentSession{};
             constexpr int kSeydaNeenCellX = -2;
             constexpr int kSeydaNeenCellY = -9;
             odai::importer::MorrowindExteriorRuntimeLoadOptions runtimeLoadOptions{};
@@ -1586,14 +1589,17 @@ bool App::init() {
             runtimeLoadOptions.cacheRoot = morrowindCellCacheRoot();
             runtimeLoadOptions.useCellCache = true;
             odai::importer::MorrowindExteriorRuntimeLoadResult runtimeLoadResult{};
-            if (odai::importer::loadMorrowindExteriorCellsRuntime(
-                    *dataFilesPath,
+            if (odai::importer::createMorrowindContentSession(loadOrder, runtimeLoadOptions.cacheRoot, contentSession) &&
+                odai::importer::loadMorrowindExteriorCellsRuntime(
+                    contentSession,
                     runtimeLoadOptions,
                     runtimeLoadResult)) {
                 m_importedScene = std::move(runtimeLoadResult.scene);
                 m_importedScenePath = *dataFilesPath / "Morrowind.esm";
                 m_morrowindRuntimeDataFilesPath = *dataFilesPath;
                 m_morrowindRuntimeCellCacheRoot = runtimeLoadOptions.cacheRoot;
+                m_morrowindRuntimeLoadOrder = std::move(loadOrder);
+                m_morrowindRuntimeContentSession = std::move(contentSession);
                 m_morrowindRuntimeExteriorRadius = morrowindRuntimeExteriorRadius();
                 m_morrowindRuntimeLoadedCenterCellX = kSeydaNeenCellX;
                 m_morrowindRuntimeLoadedCenterCellY = kSeydaNeenCellY;
@@ -1601,11 +1607,13 @@ bool App::init() {
                 m_morrowindRuntimeExteriorStreamingEnabled = true;
                 importedSceneLoaded = true;
                 importedSceneSourceLabel =
-                    "Morrowind.esm runtime exterior cells from " + std::filesystem::absolute(*dataFilesPath).string();
+                    "Morrowind runtime exterior cells (" + m_morrowindRuntimeLoadOrder.profileName +
+                    ") from " + std::filesystem::absolute(*dataFilesPath).string();
                 VOX_LOGI("app") << "runtime Morrowind exterior loaded "
                                 << runtimeLoadResult.loadedCells.size() << " cells"
                                 << " (cache hits=" << runtimeLoadResult.cacheHitCount
                                 << ", misses=" << runtimeLoadResult.cacheMissCount
+                                << ", contentProfile=" << m_morrowindRuntimeLoadOrder.profileName
                                 << ", cacheRoot=" << std::filesystem::absolute(runtimeLoadOptions.cacheRoot).string()
                                 << ")";
             } else {
@@ -1636,7 +1644,7 @@ bool App::init() {
             VOX_LOGE("app") << "failed to build GPU scene asset from imported scene";
             return false;
         }
-        initializeBalmoraDoorActivation();
+        initializeMorrowindDoorActivation();
         if ((m_importedScene.sourceTag == "morrowind_balmora" ||
              m_importedScene.sourceTag == "morrowind_exterior_region") &&
             balmoraGuardsEnabledByEnvironment()) {
@@ -1649,7 +1657,8 @@ bool App::init() {
         m_gpuSceneRuntime = odai::importer::createGpuSceneRuntime(m_gpuSceneAsset);
         odai::importer::rebuildGpuSceneWorldTransforms(m_gpuSceneRuntime);
         m_importedSceneCollision.build(m_gpuSceneAsset);
-        if (m_importedScene.sourceTag == "morrowind_balmora") {
+        if (m_importedScene.sourceTag == "morrowind_balmora" ||
+            m_importedScene.sourceTag == "morrowind_exterior_region") {
             m_balmoraExteriorCached = true;
             m_balmoraExteriorScene = m_importedScene;
             m_balmoraExteriorGpuSceneAsset = m_gpuSceneAsset;
@@ -2098,10 +2107,57 @@ void App::initializeMorrowindGameplayScripts() {
     VOX_LOGI("app") << "Lua gameplay script loaded: " << scriptPath.string();
 }
 
-void App::initializeBalmoraDoorActivation() {
+void App::initializeMorrowindDoorActivation() {
     m_balmoraDoors.clear();
     m_balmoraInteriorCache.clear();
-    if (m_importedScene.sourceTag != "morrowind_balmora") {
+    if (m_importedScene.sourceTag != "morrowind_balmora" &&
+        m_importedScene.sourceTag != "morrowind_exterior_region") {
+        return;
+    }
+
+    if (m_importedScene.sourceTag == "morrowind_exterior_region") {
+        if (!m_morrowindRuntimeContentSession.index) {
+            VOX_LOGW("app") << "runtime exterior doors disabled: missing Morrowind content session";
+            return;
+        }
+
+        const auto doorLoadStart = std::chrono::steady_clock::now();
+        const std::vector<std::pair<int, int>> loadedCells = makeMorrowindRuntimeExteriorCells(
+            m_morrowindRuntimeLoadedCenterCellX,
+            m_morrowindRuntimeLoadedCenterCellY,
+            m_morrowindRuntimeExteriorRadius);
+        if (!odai::importer::loadMorrowindExteriorDoorReferences(
+                m_morrowindRuntimeContentSession,
+                loadedCells,
+                m_balmoraDoors)) {
+            VOX_LOGW("app") << "runtime exterior doors disabled: "
+                            << odai::importer::getImportedSceneLastError();
+            m_balmoraDoors.clear();
+            return;
+        }
+
+        for (const odai::importer::MorrowindDoorReference& door : m_balmoraDoors) {
+            const std::string normalizedCell = lowerPathCopy(door.destination.destinationCell);
+            if (normalizedCell.empty() || m_balmoraInteriorCache.contains(normalizedCell)) {
+                continue;
+            }
+            MorrowindInteriorCacheEntry entry{};
+            entry.buildFromContentSession = true;
+            if (!odai::importer::loadMorrowindInteriorDoorReferences(
+                    m_morrowindRuntimeContentSession,
+                    door.destination.destinationCell,
+                    entry.doors)) {
+                entry.doors.clear();
+            }
+            m_balmoraInteriorCache.emplace(normalizedCell, std::move(entry));
+        }
+
+        const auto doorLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - doorLoadStart).count();
+        VOX_LOGI("app") << "runtime exterior door activation ready (doors=" << m_balmoraDoors.size()
+                        << ", lazyInteriors=" << m_balmoraInteriorCache.size()
+                        << ", contentProfile=" << m_morrowindRuntimeLoadOrder.profileName
+                        << ", elapsedMs=" << doorLoadMs << ")";
         return;
     }
 
@@ -2311,7 +2367,7 @@ std::string App::resolveMorrowindScriptTargetRefId() const {
     return targetRefId;
 }
 
-bool App::tryActivateBalmoraDoor() {
+bool App::tryActivateMorrowindDoor() {
     if (!m_importedSceneDemoEnabled) {
         return false;
     }
@@ -2325,9 +2381,6 @@ bool App::tryActivateBalmoraDoor() {
         const odai::importer::MorrowindDoorReference* bestDoor = nullptr;
         float bestDistanceSq = kBalmoraDoorActivationRadius * kBalmoraDoorActivationRadius;
         for (const odai::importer::MorrowindDoorReference& door : cacheIt->second.doors) {
-            if (lowerPathCopy(door.destination.destinationCell) != "balmora") {
-                continue;
-            }
             const float dx = door.position[0] - m_camera.x;
             const float dy = door.position[1] - (m_camera.y - kImportedPlayerEyeHeight);
             const float dz = door.position[2] - m_camera.z;
@@ -2343,7 +2396,9 @@ bool App::tryActivateBalmoraDoor() {
         return leaveMorrowindInterior(*bestDoor);
     }
 
-    if (m_importedScene.sourceTag != "morrowind_balmora" || m_balmoraDoors.empty()) {
+    if ((m_importedScene.sourceTag != "morrowind_balmora" &&
+         m_importedScene.sourceTag != "morrowind_exterior_region") ||
+        m_balmoraDoors.empty()) {
         return false;
     }
 
@@ -2377,42 +2432,61 @@ bool App::enterMorrowindInterior(const odai::importer::MorrowindDoorReference& d
     }
     MorrowindInteriorCacheEntry& cachedInterior = cacheIt->second;
     if (!cachedInterior.sceneLoaded) {
-        const std::filesystem::path cachePath = balmoraInteriorCachePath(destinationCell);
         const auto interiorLoadStart = std::chrono::steady_clock::now();
-        if (!odai::importer::loadImportedSceneRuntime(cachePath, cachedInterior.scene)) {
-            VOX_LOGW("app") << "failed to load cached interior " << door.destination.destinationCell
-                            << " from " << cachePath.string()
-                            << ": " << odai::importer::getImportedSceneLastError();
-            return false;
-        }
-        if (cachedInterior.scene.sourceTag != "morrowind_interior" ||
-            cachedInterior.scene.sourceMeshCount != 0u ||
-            cachedInterior.scene.sourceInstanceCount != 0u ||
-            cachedInterior.scene.sourceLandscapeCellCount != 0u ||
-            cachedInterior.scene.sourceWaterPatchCount != 0u ||
-            cachedInterior.scene.packedVertices.empty() ||
-            cachedInterior.scene.packedIndices.empty() ||
-            cachedInterior.scene.packedDraws.empty()) {
-            VOX_LOGW("app") << "stale cached interior " << cachePath.string()
-                            << "; regenerate it with odai_balmora_interior_cache --force";
-            cachedInterior.scene = {};
-            return false;
+        if (cachedInterior.buildFromContentSession) {
+            if (!odai::importer::cookMorrowindInteriorCellScene(
+                    m_morrowindRuntimeContentSession,
+                    door.destination.destinationCell,
+                    cachedInterior.scene)) {
+                VOX_LOGW("app") << "failed to build interior " << door.destination.destinationCell
+                                << ": " << odai::importer::getImportedSceneLastError();
+                return false;
+            }
+            if (cachedInterior.doors.empty()) {
+                (void)odai::importer::loadMorrowindInteriorDoorReferences(
+                    m_morrowindRuntimeContentSession,
+                    door.destination.destinationCell,
+                    cachedInterior.doors);
+            }
+        } else {
+            const std::filesystem::path cachePath = balmoraInteriorCachePath(destinationCell);
+            if (!odai::importer::loadImportedSceneRuntime(cachePath, cachedInterior.scene)) {
+                VOX_LOGW("app") << "failed to load cached interior " << door.destination.destinationCell
+                                << " from " << cachePath.string()
+                                << ": " << odai::importer::getImportedSceneLastError();
+                return false;
+            }
+            if (cachedInterior.scene.sourceTag != "morrowind_interior" ||
+                cachedInterior.scene.sourceMeshCount != 0u ||
+                cachedInterior.scene.sourceInstanceCount != 0u ||
+                cachedInterior.scene.sourceLandscapeCellCount != 0u ||
+                cachedInterior.scene.sourceWaterPatchCount != 0u ||
+                cachedInterior.scene.packedVertices.empty() ||
+                cachedInterior.scene.packedIndices.empty() ||
+                cachedInterior.scene.packedDraws.empty()) {
+                VOX_LOGW("app") << "stale cached interior " << cachePath.string()
+                                << "; regenerate it with odai_balmora_interior_cache --force";
+                cachedInterior.scene = {};
+                return false;
+            }
         }
         if (!cachedInterior.collision.buildFromPackedScene(cachedInterior.scene)) {
-            VOX_LOGW("app") << "failed to build collision for cached interior " << cachePath.string();
+            VOX_LOGW("app") << "failed to build collision for interior "
+                            << door.destination.destinationCell;
             cachedInterior.scene = {};
             return false;
         }
         if (cachedInterior.doors.empty()) {
-            VOX_LOGW("app") << "cached interior " << door.destination.destinationCell
-                            << " has no exit doors in " << balmoraDoorCachePath().string()
-                            << "; regenerate the door manifest with odai_balmora_interior_cache";
+            VOX_LOGW("app") << "interior " << door.destination.destinationCell
+                            << " has no exit doors";
         }
         cachedInterior.sceneLoaded = true;
         const auto interiorLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - interiorLoadStart).count();
-        VOX_LOGI("app") << "loaded cached interior '" << door.destination.destinationCell
-                        << "' on demand in " << interiorLoadMs << " ms";
+        VOX_LOGI("app") << "loaded interior '" << door.destination.destinationCell
+                        << "' on demand in " << interiorLoadMs << " ms"
+                        << " (source=" << (cachedInterior.buildFromContentSession ? "content_session" : "cache")
+                        << ")";
     }
 
     if (!m_renderer.uploadImportedScene(cachedInterior.scene)) {
@@ -2684,13 +2758,19 @@ void App::rebuildMorrowindActorsForLoadedRegion(bool reusePreparedNavmesh) {
         return;
     }
     odai::importer::MorrowindActorCatalog actorCatalog{};
-    if (!odai::importer::loadMorrowindActorCatalog(*dataFilesPath, actorCatalog)) {
+    const bool actorCatalogLoaded = m_morrowindRuntimeContentSession.index
+        ? odai::importer::loadMorrowindActorCatalog(m_morrowindRuntimeContentSession, actorCatalog)
+        : odai::importer::loadMorrowindActorCatalog(*dataFilesPath, actorCatalog);
+    if (!actorCatalogLoaded) {
         VOX_LOGE("app") << "Morrowind actor catalog unavailable: "
                         << odai::importer::getImportedSceneLastError();
         return;
     }
     odai::importer::MorrowindEquipmentCatalog equipmentCatalog{};
-    if (!odai::importer::loadMorrowindEquipmentCatalog(*dataFilesPath, equipmentCatalog)) {
+    const bool equipmentCatalogLoaded = m_morrowindRuntimeContentSession.index
+        ? odai::importer::loadMorrowindEquipmentCatalog(m_morrowindRuntimeContentSession, equipmentCatalog)
+        : odai::importer::loadMorrowindEquipmentCatalog(*dataFilesPath, equipmentCatalog);
+    if (!equipmentCatalogLoaded) {
         VOX_LOGE("app") << "Morrowind equipment catalog unavailable: "
                         << odai::importer::getImportedSceneLastError();
         return;
@@ -4265,6 +4345,18 @@ void App::startMorrowindExteriorStreamingPrepare(int centerCellX, int centerCell
         : m_morrowindRuntimeCellCacheRoot;
     runtimeLoadOptions.useCellCache = true;
     const std::filesystem::path dataFilesPath = m_morrowindRuntimeDataFilesPath;
+    odai::importer::MorrowindContentSession contentSession = m_morrowindRuntimeContentSession;
+    if (!contentSession.index) {
+        const odai::importer::MorrowindContentLoadOrder loadOrder =
+            m_morrowindRuntimeLoadOrder.files.empty()
+                ? odai::importer::resolveMorrowindContentLoadOrder(dataFilesPath)
+                : m_morrowindRuntimeLoadOrder;
+        if (!odai::importer::createMorrowindContentSession(loadOrder, runtimeLoadOptions.cacheRoot, contentSession)) {
+            VOX_LOGW("app") << "failed to prepare Morrowind content session: "
+                            << odai::importer::getImportedSceneLastError();
+            return;
+        }
+    }
     const int targetCellX = centerCellX;
     const int targetCellY = centerCellY;
     const int targetRadius = m_morrowindRuntimeExteriorRadius;
@@ -4272,13 +4364,14 @@ void App::startMorrowindExteriorStreamingPrepare(int centerCellX, int centerCell
 
     VOX_LOGI("app") << "preparing Morrowind exterior cells around ("
                     << targetCellX << ", " << targetCellY
-                    << "), radius=" << m_morrowindRuntimeExteriorRadius;
+                    << "), radius=" << m_morrowindRuntimeExteriorRadius
+                    << ", contentProfile=" << contentSession.loadOrder.profileName;
     m_morrowindRuntimePrepareCenterCellX = targetCellX;
     m_morrowindRuntimePrepareCenterCellY = targetCellY;
     m_morrowindRuntimePrepareActive = true;
     m_morrowindRuntimePrepareFuture = std::async(
         std::launch::async,
-        [dataFilesPath, runtimeLoadOptions, targetCellX, targetCellY, targetRadius, prepareGuardNavmesh]() mutable {
+        [contentSession, runtimeLoadOptions, targetCellX, targetCellY, targetRadius, prepareGuardNavmesh]() mutable {
             MorrowindExteriorPreparedRegion prepared{};
             prepared.centerCellX = targetCellX;
             prepared.centerCellY = targetCellY;
@@ -4286,7 +4379,7 @@ void App::startMorrowindExteriorStreamingPrepare(int centerCellX, int centerCell
             try {
                 odai::importer::MorrowindExteriorRuntimeLoadResult runtimeLoadResult{};
                 if (!odai::importer::loadMorrowindExteriorCellsRuntime(
-                        dataFilesPath,
+                        contentSession,
                         runtimeLoadOptions,
                         runtimeLoadResult)) {
                     prepared.error = odai::importer::getImportedSceneLastError();
@@ -4370,6 +4463,8 @@ bool App::pollMorrowindExteriorStreamingPrepare() {
     m_morrowindRuntimeLoadedCenterCellX = prepared.centerCellX;
     m_morrowindRuntimeLoadedCenterCellY = prepared.centerCellY;
     m_morrowindRuntimeLoadedCenterValid = true;
+    m_currentMorrowindInteriorCell.clear();
+    initializeMorrowindDoorActivation();
     if (balmoraGuardsEnabledByEnvironment()) {
         m_balmoraNavmesh = std::move(prepared.navmesh);
         if (!m_balmoraNavmesh.empty()) {
@@ -4389,6 +4484,10 @@ bool App::pollMorrowindExteriorStreamingPrepare() {
         stopMorrowindActorPathWorker();
         m_balmoraNavmesh.clear();
     }
+    m_balmoraExteriorCached = true;
+    m_balmoraExteriorScene = m_importedScene;
+    m_balmoraExteriorGpuSceneAsset = m_gpuSceneAsset;
+    m_balmoraExteriorCollision = m_importedSceneCollision;
     if (!m_renderer.uploadGpuScene(m_gpuSceneAsset)) {
         VOX_LOGW("app") << "failed to upload prepared Morrowind exterior scene";
         return false;
@@ -4998,7 +5097,7 @@ void App::updateCamera(float dt) {
         glfwGetKey(m_window, GLFW_KEY_R) == GLFW_PRESS &&
         !m_wasActivateDoorDown;
     m_wasActivateDoorDown = glfwGetKey(m_window, GLFW_KEY_R) == GLFW_PRESS;
-    if (activateDoorPressedThisStep && (tryActivateMorrowindScript() || tryActivateBalmoraDoor())) {
+    if (activateDoorPressedThisStep && (tryActivateMorrowindScript() || tryActivateMorrowindDoor())) {
         return;
     }
 

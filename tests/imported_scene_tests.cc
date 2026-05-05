@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -8,7 +9,9 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "app/morrowind_actor_system.h"
@@ -35,6 +38,150 @@ void expectNear(float actual, float expected, float epsilon, const char* message
                   << ", got " << actual << ")\n";
         ++g_failures;
     }
+}
+
+template <typename T>
+void appendValue(std::vector<std::uint8_t>& bytes, const T& value) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    const auto* ptr = reinterpret_cast<const std::uint8_t*>(&value);
+    bytes.insert(bytes.end(), ptr, ptr + sizeof(T));
+}
+
+void appendBytes(std::vector<std::uint8_t>& bytes, const void* data, std::size_t size) {
+    const auto* ptr = static_cast<const std::uint8_t*>(data);
+    bytes.insert(bytes.end(), ptr, ptr + size);
+}
+
+void appendSubrecord(std::vector<std::uint8_t>& record, const char name[4], const std::vector<std::uint8_t>& payload) {
+    appendBytes(record, name, 4u);
+    appendValue(record, static_cast<std::uint32_t>(payload.size()));
+    record.insert(record.end(), payload.begin(), payload.end());
+}
+
+void appendStringSubrecord(std::vector<std::uint8_t>& record, const char name[4], const std::string& value) {
+    std::vector<std::uint8_t> payload(value.begin(), value.end());
+    appendSubrecord(record, name, payload);
+}
+
+void appendRecord(std::vector<std::uint8_t>& file, const char name[4], const std::vector<std::uint8_t>& payload) {
+    appendBytes(file, name, 4u);
+    appendValue(file, static_cast<std::uint32_t>(payload.size()));
+    appendValue(file, static_cast<std::uint32_t>(0u));
+    appendValue(file, static_cast<std::uint32_t>(0u));
+    file.insert(file.end(), payload.begin(), payload.end());
+}
+
+std::vector<std::uint8_t> makeModelRecordPayload(const std::string& id, const std::string& modelPath) {
+    std::vector<std::uint8_t> record;
+    appendStringSubrecord(record, "NAME", id);
+    appendStringSubrecord(record, "MODL", modelPath);
+    return record;
+}
+
+std::vector<std::uint8_t> makeLtexRecordPayload(std::uint32_t index, const std::string& texturePath) {
+    std::vector<std::uint8_t> record;
+    std::vector<std::uint8_t> indexPayload;
+    appendValue(indexPayload, index);
+    appendSubrecord(record, "INTV", indexPayload);
+    appendStringSubrecord(record, "DATA", texturePath);
+    return record;
+}
+
+std::vector<std::uint8_t> makeCellRecordPayload(
+    const std::string& name,
+    int gridX,
+    int gridY,
+    const std::vector<std::pair<std::uint32_t, std::string>>& refs,
+    const std::vector<std::uint32_t>& deletedRefs,
+    float refX
+) {
+    std::vector<std::uint8_t> record;
+    appendStringSubrecord(record, "NAME", name);
+    std::vector<std::uint8_t> dataPayload;
+    appendValue(dataPayload, static_cast<std::int32_t>(0));
+    appendValue(dataPayload, static_cast<std::int32_t>(gridX));
+    appendValue(dataPayload, static_cast<std::int32_t>(gridY));
+    appendSubrecord(record, "DATA", dataPayload);
+    for (const auto& [refNum, refId] : refs) {
+        std::vector<std::uint8_t> frmrPayload;
+        appendValue(frmrPayload, refNum);
+        appendSubrecord(record, "FRMR", frmrPayload);
+        appendStringSubrecord(record, "NAME", refId);
+        std::vector<std::uint8_t> refDataPayload;
+        const float position[3] = {refX + static_cast<float>(refNum), 2.0f, 3.0f};
+        const float rotation[3] = {};
+        appendBytes(refDataPayload, position, sizeof(position));
+        appendBytes(refDataPayload, rotation, sizeof(rotation));
+        appendSubrecord(record, "DATA", refDataPayload);
+    }
+    for (const std::uint32_t refNum : deletedRefs) {
+        std::vector<std::uint8_t> frmrPayload;
+        appendValue(frmrPayload, refNum);
+        appendSubrecord(record, "FRMR", frmrPayload);
+        appendSubrecord(record, "DELE", std::vector<std::uint8_t>(4u, 0u));
+    }
+    return record;
+}
+
+std::vector<std::uint8_t> makeLandRecordPayload(int gridX, int gridY, float heightOffset, std::uint16_t textureIndex) {
+    std::vector<std::uint8_t> record;
+    std::vector<std::uint8_t> intvPayload;
+    appendValue(intvPayload, static_cast<std::int32_t>(gridX));
+    appendValue(intvPayload, static_cast<std::int32_t>(gridY));
+    appendSubrecord(record, "INTV", intvPayload);
+    std::vector<std::uint8_t> dataPayload;
+    appendValue(dataPayload, static_cast<std::uint32_t>(0u));
+    appendSubrecord(record, "DATA", dataPayload);
+    std::vector<std::uint8_t> vhgtPayload;
+    appendValue(vhgtPayload, heightOffset);
+    vhgtPayload.resize(vhgtPayload.size() + (65u * 65u) + 3u, 0u);
+    appendSubrecord(record, "VHGT", vhgtPayload);
+    std::vector<std::uint8_t> vtexPayload;
+    for (std::size_t i = 0; i < 16u * 16u; ++i) {
+        appendValue(vtexPayload, textureIndex);
+    }
+    appendSubrecord(record, "VTEX", vtexPayload);
+    return record;
+}
+
+void writeSyntheticTes3File(
+    const std::filesystem::path& path,
+    const std::vector<std::pair<std::string, std::vector<std::uint8_t>>>& records
+) {
+    std::vector<std::uint8_t> file;
+    appendRecord(file, "TES3", {});
+    for (const auto& [name, payload] : records) {
+        appendRecord(file, name.c_str(), payload);
+    }
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+}
+
+void writeBmp32File(const std::filesystem::path& path, std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) {
+    std::vector<std::uint8_t> bytes;
+    const std::uint32_t fileSize = 14u + 40u + 4u;
+    appendBytes(bytes, "BM", 2u);
+    appendValue(bytes, fileSize);
+    appendValue(bytes, static_cast<std::uint16_t>(0u));
+    appendValue(bytes, static_cast<std::uint16_t>(0u));
+    appendValue(bytes, static_cast<std::uint32_t>(54u));
+    appendValue(bytes, static_cast<std::uint32_t>(40u));
+    appendValue(bytes, static_cast<std::int32_t>(1));
+    appendValue(bytes, static_cast<std::int32_t>(-1));
+    appendValue(bytes, static_cast<std::uint16_t>(1u));
+    appendValue(bytes, static_cast<std::uint16_t>(32u));
+    appendValue(bytes, static_cast<std::uint32_t>(0u));
+    appendValue(bytes, static_cast<std::uint32_t>(4u));
+    appendValue(bytes, static_cast<std::int32_t>(2835));
+    appendValue(bytes, static_cast<std::int32_t>(2835));
+    appendValue(bytes, static_cast<std::uint32_t>(0u));
+    appendValue(bytes, static_cast<std::uint32_t>(0u));
+    bytes.push_back(b);
+    bytes.push_back(g);
+    bytes.push_back(r);
+    bytes.push_back(a);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
 }
 
 std::array<float, 16> multiplyMatrices(
@@ -1497,6 +1644,245 @@ void testMorrowindGenericHumanoidSkinnedActorLoadsWhenDataFilesAvailable() {
     expectTrue(actor.weightedVertexCount > 0u, "Generic humanoid has weighted vertices");
 }
 
+void testMorrowindLoadOrderMergesSyntheticExteriorCells() {
+    const std::filesystem::path testRoot =
+        std::filesystem::temp_directory_path() / "odai_morrowind_load_order_tests";
+    std::error_code cleanupError;
+    std::filesystem::remove_all(testRoot, cleanupError);
+    std::filesystem::create_directories(testRoot);
+
+    const std::filesystem::path basePath = testRoot / "Base.esm";
+    const std::filesystem::path overridePath = testRoot / "Override.esm";
+    writeSyntheticTes3File(
+        basePath,
+        {
+            {"STAT", makeModelRecordPayload("tr_test_static", "a/test_static_a.nif")},
+            {"STAT", makeModelRecordPayload("tr_deleted_static", "a/deleted.nif")},
+            {"LTEX", makeLtexRecordPayload(1u, "textures/a.dds")},
+            {"CELL", makeCellRecordPayload("Base Cell", 42, -17, {{7u, "tr_test_static"}, {8u, "tr_deleted_static"}}, {}, 0.0f)},
+            {"LAND", makeLandRecordPayload(42, -17, 1.0f, 1u)}
+        });
+    writeSyntheticTes3File(
+        overridePath,
+        {
+            {"STAT", makeModelRecordPayload("tr_test_static", "b/test_static_b.nif")},
+            {"LTEX", makeLtexRecordPayload(1u, "textures/b.dds")},
+            {"CELL", makeCellRecordPayload("Override Cell", 42, -17, {{7u, "tr_test_static"}}, {8u}, 100.0f)},
+            {"LAND", makeLandRecordPayload(42, -17, 2.0f, 1u)}
+        });
+
+    odai::importer::MorrowindContentLoadOrder loadOrder{};
+    loadOrder.dataFilesPath = testRoot;
+    loadOrder.profileName = "synthetic";
+    loadOrder.files = {
+        odai::importer::MorrowindContentFile{basePath, "Base.esm"},
+        odai::importer::MorrowindContentFile{overridePath, "Override.esm"}
+    };
+
+    odai::importer::MorrowindExteriorRuntimeLoadOptions options{};
+    options.cells = {{42, -17}};
+    options.cacheRoot = testRoot / "cache";
+    options.useCellCache = true;
+
+    odai::importer::MorrowindExteriorRuntimeLoadResult firstResult{};
+    expectTrue(
+        odai::importer::loadMorrowindExteriorCellsRuntime(loadOrder, options, firstResult),
+        "Synthetic load-order exterior cell load succeeds");
+    expectTrue(firstResult.cacheMissCount == 1u, "First synthetic exterior load misses cache");
+    expectTrue(firstResult.scene.landscapeCells.size() == 1u, "Synthetic load-order keeps one LAND for requested cell");
+    if (!firstResult.scene.landscapeCells.empty() && !firstResult.scene.landscapeCells.front().heights.empty()) {
+        expectNear(firstResult.scene.landscapeCells.front().heights.front(), 16.0f, 0.001f, "Later LAND replaces earlier LAND");
+    }
+    expectTrue(firstResult.scene.unresolvedRefs.size() == 1u, "Synthetic CELL merge replaces one FRMR and removes deleted FRMR");
+    if (!firstResult.scene.unresolvedRefs.empty()) {
+        const odai::importer::ImportedSceneCellRef& ref = firstResult.scene.unresolvedRefs.front();
+        expectTrue(ref.refNum == 7u, "Synthetic CELL merge keeps replacement FRMR");
+        expectTrue(ref.modelPath == "b/test_static_b.nif", "Later model record overrides earlier model id");
+        expectNear(ref.position[0], 107.0f, 0.001f, "Later FRMR replaces earlier placed ref transform");
+    }
+    const auto textureIt = std::find_if(
+        firstResult.scene.textures.begin(),
+        firstResult.scene.textures.end(),
+        [](const odai::importer::ImportedSceneTexture& texture) {
+            return texture.sourcePath == "textures/b.dds";
+        });
+    expectTrue(textureIt != firstResult.scene.textures.end(), "Later LTEX record overrides earlier texture index");
+
+    odai::importer::MorrowindExteriorRuntimeLoadResult secondResult{};
+    expectTrue(
+        odai::importer::loadMorrowindExteriorCellsRuntime(loadOrder, options, secondResult),
+        "Synthetic load-order exterior cell cache reload succeeds");
+    expectTrue(secondResult.cacheHitCount == 1u, "Second synthetic exterior load hits cache");
+
+    const auto oldWriteTime = std::filesystem::last_write_time(overridePath);
+    std::filesystem::last_write_time(overridePath, oldWriteTime + std::chrono::seconds(2));
+    odai::importer::MorrowindExteriorRuntimeLoadResult thirdResult{};
+    expectTrue(
+        odai::importer::loadMorrowindExteriorCellsRuntime(loadOrder, options, thirdResult),
+        "Synthetic load-order exterior cell reload after mtime change succeeds");
+    expectTrue(thirdResult.cacheMissCount == 1u, "Synthetic exterior cache key changes when content file mtime changes");
+
+    std::filesystem::remove_all(testRoot, cleanupError);
+}
+
+void testMorrowindAutoContentLoadOrderDetectsTamrielRebuiltWhenAvailable() {
+    const std::filesystem::path dataFilesPath = "C:/GOG Games/Morrowind/Data Files";
+    if (!std::filesystem::exists(dataFilesPath / "Morrowind.esm")) {
+        std::cout << "[imported scene test] skipping auto content load order smoke: "
+                  << dataFilesPath.string() << " not found\n";
+        return;
+    }
+
+    const odai::importer::MorrowindContentLoadOrder loadOrder =
+        odai::importer::resolveMorrowindAutoContentLoadOrder(dataFilesPath);
+    const bool hasTamrielData = std::filesystem::exists(dataFilesPath / "Tamriel_Data.esm");
+    const bool hasTrMainland = std::filesystem::exists(dataFilesPath / "TR_Mainland.esm");
+    const bool expectTamrielRebuilt = hasTamrielData && hasTrMainland;
+    expectTrue(
+        loadOrder.profileName == (expectTamrielRebuilt ? "tamriel_rebuilt" : "vanilla"),
+        "Auto content load order selects expected profile");
+    expectTrue(!loadOrder.files.empty(), "Auto content load order contains files");
+    expectTrue(loadOrder.files.front().displayName == "Morrowind.esm", "Auto content load order starts with Morrowind.esm");
+    if (expectTamrielRebuilt) {
+        const auto containsFile = [&](const char* displayName) {
+            return std::any_of(
+                loadOrder.files.begin(),
+                loadOrder.files.end(),
+                [&](const odai::importer::MorrowindContentFile& file) {
+                    return file.displayName == displayName;
+                });
+        };
+        expectTrue(containsFile("Tamriel_Data.esm"), "Auto TR profile includes Tamriel_Data.esm");
+        expectTrue(containsFile("TR_Mainland.esm"), "Auto TR profile includes TR_Mainland.esm");
+        if (std::filesystem::exists(dataFilesPath / "TR_Factions.esp")) {
+            expectTrue(containsFile("TR_Factions.esp"), "Auto TR profile includes optional TR_Factions.esp");
+        }
+    }
+}
+
+void testMorrowindSeydaNeenArrilleDoorLoadsWhenDataFilesAvailable() {
+    const std::filesystem::path dataFilesPath = "C:/GOG Games/Morrowind/Data Files";
+    if (!std::filesystem::exists(dataFilesPath / "Morrowind.esm")) {
+        std::cout << "[imported scene test] skipping Seyda Neen Arrille door smoke: "
+                  << dataFilesPath.string() << " not found\n";
+        return;
+    }
+
+    odai::importer::MorrowindContentSession session{};
+    expectTrue(
+        odai::importer::createMorrowindContentSession(
+            odai::importer::resolveMorrowindContentLoadOrder(dataFilesPath),
+            {},
+            session),
+        "Local Morrowind content session builds for Arrille door smoke");
+
+    std::vector<odai::importer::MorrowindDoorReference> doors;
+    expectTrue(
+        odai::importer::loadMorrowindExteriorDoorReferences(session, {{-2, -9}}, doors),
+        "Seyda Neen exterior door references load from content session");
+    const auto arrilleDoorIt = std::find_if(
+        doors.begin(),
+        doors.end(),
+        [](const odai::importer::MorrowindDoorReference& door) {
+            return door.destination.destinationCell == "Seyda Neen, Arrille's Tradehouse";
+        });
+    expectTrue(arrilleDoorIt != doors.end(), "Seyda Neen includes an Arrille's Tradehouse exterior door");
+
+    std::vector<odai::importer::MorrowindDoorReference> interiorDoors;
+    expectTrue(
+        odai::importer::loadMorrowindInteriorDoorReferences(
+            session,
+            "Seyda Neen, Arrille's Tradehouse",
+            interiorDoors),
+        "Arrille's Tradehouse interior door references load from content session");
+    expectTrue(!interiorDoors.empty(), "Arrille's Tradehouse has an exit door");
+
+    odai::importer::ImportedScene interiorScene{};
+    expectTrue(
+        odai::importer::cookMorrowindInteriorCellScene(
+            session,
+            "Seyda Neen, Arrille's Tradehouse",
+            interiorScene),
+        "Arrille's Tradehouse interior cooks from content session");
+    expectTrue(interiorScene.sourceTag == "morrowind_interior", "Arrille's Tradehouse cooks as an interior scene");
+    expectTrue(!interiorScene.packedDraws.empty(), "Arrille's Tradehouse interior has renderable geometry");
+}
+
+void testMorrowindOpenMwConfigAndMultiRootPrecedence() {
+    const std::filesystem::path testRoot =
+        std::filesystem::temp_directory_path() / "odai_morrowind_openmw_config_tests";
+    std::error_code cleanupError;
+    std::filesystem::remove_all(testRoot, cleanupError);
+    const std::filesystem::path rootA = testRoot / "root_a";
+    const std::filesystem::path rootB = testRoot / "root_b";
+    std::filesystem::create_directories(rootA / "Textures");
+    std::filesystem::create_directories(rootB / "Textures");
+    writeBmp32File(rootA / "Textures" / "shared.bmp", 255u, 0u, 0u, 255u);
+    writeBmp32File(rootB / "Textures" / "shared.bmp", 0u, 0u, 255u, 255u);
+
+    const std::filesystem::path basePath = rootA / "Morrowind.esm";
+    const std::filesystem::path overridePath = rootB / "Override.esp";
+    writeSyntheticTes3File(
+        basePath,
+        {
+            {"LTEX", makeLtexRecordPayload(1u, "textures/shared.bmp")},
+            {"CELL", makeCellRecordPayload("Base Cell", 5, 6, {}, {}, 0.0f)},
+            {"LAND", makeLandRecordPayload(5, 6, 1.0f, 1u)}
+        });
+    writeSyntheticTes3File(
+        overridePath,
+        {
+            {"LAND", makeLandRecordPayload(5, 6, 3.0f, 1u)}
+        });
+
+    const std::filesystem::path configPath = testRoot / "openmw.cfg";
+    {
+        std::ofstream config(configPath, std::ios::trunc);
+        config << "data=\"" << rootA.generic_string() << "\"\n";
+        config << "data=\"" << rootB.generic_string() << "\"\n";
+        config << "content=Morrowind.esm\n";
+        config << "content=ignored.omwscripts\n";
+        config << "content=Override.esp\n";
+    }
+
+    const odai::importer::MorrowindContentLoadOrder loadOrder =
+        odai::importer::resolveMorrowindOpenMwContentLoadOrder(configPath, {});
+    expectTrue(loadOrder.profileName == "openmw", "Synthetic OpenMW config selects openmw profile");
+    expectTrue(loadOrder.dataRoots.size() == 2u, "Synthetic OpenMW config preserves data roots");
+    expectTrue(loadOrder.files.size() == 2u, "Synthetic OpenMW config skips non-TES3 content");
+    if (loadOrder.files.size() == 2u) {
+        expectTrue(loadOrder.files[0].displayName == "Morrowind.esm", "Synthetic OpenMW config keeps content order");
+        expectTrue(loadOrder.files[1].displayName == "Override.esp", "Synthetic OpenMW config keeps plugin order");
+    }
+
+    odai::importer::MorrowindContentSession session{};
+    expectTrue(
+        odai::importer::createMorrowindContentSession(loadOrder, {}, session),
+        "Synthetic OpenMW content session builds");
+    odai::importer::MorrowindSceneRequest request{};
+    request.exteriorCells = {{5, 6}};
+    odai::importer::MorrowindSceneBuildResult result{};
+    expectTrue(
+        odai::importer::buildMorrowindScene(session, request, result),
+        "Synthetic OpenMW scene builds from content session");
+    if (!result.scene.landscapeCells.empty() && !result.scene.landscapeCells.front().heights.empty()) {
+        expectNear(result.scene.landscapeCells.front().heights.front(), 24.0f, 0.001f, "OpenMW content session applies later LAND");
+    }
+    const auto textureIt = std::find_if(
+        result.scene.textures.begin(),
+        result.scene.textures.end(),
+        [](const odai::importer::ImportedSceneTexture& texture) {
+            return texture.sourcePath == "textures/shared.bmp";
+        });
+    expectTrue(textureIt != result.scene.textures.end(), "OpenMW multi-root scene includes shared texture");
+    if (textureIt != result.scene.textures.end() && textureIt->rgba8.size() >= 4u) {
+        expectTrue(textureIt->rgba8[0] == 0u && textureIt->rgba8[1] == 0u && textureIt->rgba8[2] == 255u,
+                   "OpenMW later data root overrides earlier loose texture");
+    }
+
+    std::filesystem::remove_all(testRoot, cleanupError);
+}
+
 }  // namespace
 
 int main() {
@@ -1513,6 +1899,10 @@ int main() {
     testMorrowindActorCatalogLoadsNpcAndCreatureRecordsWhenDataFilesAvailable();
     testMorrowindEquipmentCatalogLoadsKnownClothingWhenDataFilesAvailable();
     testMorrowindGenericHumanoidSkinnedActorLoadsWhenDataFilesAvailable();
+    testMorrowindLoadOrderMergesSyntheticExteriorCells();
+    testMorrowindAutoContentLoadOrderDetectsTamrielRebuiltWhenAvailable();
+    testMorrowindSeydaNeenArrilleDoorLoadsWhenDataFilesAvailable();
+    testMorrowindOpenMwConfigAndMultiRootPrecedence();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";

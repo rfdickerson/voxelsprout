@@ -189,11 +189,11 @@ private:
         const odai::math::Vector3& target,
         const std::string& cacheKey
     );
-    void initializeBalmoraDoorActivation();
+    void initializeMorrowindDoorActivation();
     void initializeMorrowindGameplayScripts();
     [[nodiscard]] bool tryActivateMorrowindScript();
     [[nodiscard]] std::string resolveMorrowindScriptTargetRefId() const;
-    [[nodiscard]] bool tryActivateBalmoraDoor();
+    [[nodiscard]] bool tryActivateMorrowindDoor();
     [[nodiscard]] bool enterMorrowindInterior(const odai::importer::MorrowindDoorReference& door);
     [[nodiscard]] bool leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& door);
     [[nodiscard]] std::pair<int, int> currentMorrowindExteriorCell() const;
@@ -308,6 +308,7 @@ private:
         odai::world::ImportedSceneCollision collision;
         std::vector<odai::importer::MorrowindDoorReference> doors;
         bool sceneLoaded = false;
+        bool buildFromContentSession = false;
     };
 
     struct MorrowindExteriorPreparedRegion {
@@ -383,6 +384,8 @@ private:
     std::filesystem::path m_importedScenePath;
     std::filesystem::path m_morrowindRuntimeDataFilesPath;
     std::filesystem::path m_morrowindRuntimeCellCacheRoot;
+    odai::importer::MorrowindContentLoadOrder m_morrowindRuntimeLoadOrder;
+    odai::importer::MorrowindContentSession m_morrowindRuntimeContentSession;
     bool m_morrowindRuntimeExteriorStreamingEnabled = false;
     int m_morrowindRuntimeExteriorRadius = 1;
     int m_morrowindRuntimeLoadedCenterCellX = 0;

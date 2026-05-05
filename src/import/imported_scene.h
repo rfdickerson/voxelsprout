@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -161,6 +162,56 @@ struct MorrowindEquipmentCatalog {
     std::unordered_map<std::string, std::vector<ResolvedActorPart>> actorPartsByItemId;
 };
 
+struct MorrowindContentFile {
+    std::filesystem::path path;
+    std::string displayName;
+};
+
+struct MorrowindDataRoot {
+    std::filesystem::path path;
+    std::string displayName;
+};
+
+struct MorrowindContentLoadOrder {
+    std::filesystem::path dataFilesPath;
+    std::vector<MorrowindDataRoot> dataRoots;
+    std::vector<MorrowindContentFile> files;
+    std::string profileName;
+};
+
+struct MorrowindContentIndex;
+
+struct MorrowindContentIndexStats {
+    std::uint32_t modelRecordCount = 0;
+    std::uint32_t lightRecordCount = 0;
+    std::uint32_t landscapeTextureCount = 0;
+    std::uint32_t exteriorCellRecordCount = 0;
+    std::uint32_t landRecordCount = 0;
+    std::uint32_t interiorCellRecordCount = 0;
+    std::uint32_t actorRecordCount = 0;
+    std::uint32_t bodyRecordCount = 0;
+    std::uint32_t equipmentRecordCount = 0;
+    std::uint32_t dialogueRecordCount = 0;
+    std::uint32_t scriptRecordCount = 0;
+};
+
+struct MorrowindContentSession {
+    MorrowindContentLoadOrder loadOrder;
+    std::uint64_t contentFingerprint = 0u;
+    bool indexCacheHit = false;
+    MorrowindContentIndexStats indexStats;
+    std::shared_ptr<const MorrowindContentIndex> index;
+};
+
+struct MorrowindSceneRequest {
+    std::vector<std::pair<int, int>> exteriorCells;
+    std::string interiorCellName;
+    bool includeStatics = true;
+    bool includeTerrain = true;
+    bool includeWater = true;
+    bool includeLights = true;
+};
+
 struct MorrowindActorPartMetadata {
     std::string modelPath;
     std::string bodyPartId;
@@ -192,6 +243,13 @@ struct ImportedScene {
     std::uint32_t sourceUnresolvedRefCount = 0;
     float boundsMin[3] = {};
     float boundsMax[3] = {};
+};
+
+struct MorrowindSceneBuildResult {
+    ImportedScene scene;
+    std::vector<std::pair<int, int>> loadedExteriorCells;
+    std::string loadedInteriorCellName;
+    std::string diagnostics;
 };
 
 struct MorrowindBalmoraCookResult {
@@ -236,6 +294,26 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
 bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedScene& outScene);
 const std::string& getImportedSceneLastError();
 void buildImportedScenePackedRenderData(ImportedScene& scene);
+MorrowindContentLoadOrder resolveMorrowindAutoContentLoadOrder(
+    const std::filesystem::path& morrowindDataFilesPath
+);
+MorrowindContentLoadOrder resolveMorrowindOpenMwContentLoadOrder(
+    const std::filesystem::path& openMwConfigPath,
+    const std::filesystem::path& fallbackDataFilesPath = {}
+);
+MorrowindContentLoadOrder resolveMorrowindContentLoadOrder(
+    const std::filesystem::path& fallbackDataFilesPath
+);
+bool createMorrowindContentSession(
+    const MorrowindContentLoadOrder& loadOrder,
+    const std::filesystem::path& cacheRoot,
+    MorrowindContentSession& outSession
+);
+bool buildMorrowindScene(
+    const MorrowindContentSession& session,
+    const MorrowindSceneRequest& request,
+    MorrowindSceneBuildResult& outResult
+);
 bool loadMorrowindTexture(
     const std::filesystem::path& morrowindDataFilesPath,
     const std::string& sourcePath,
@@ -245,8 +323,24 @@ bool loadMorrowindActorCatalog(
     const std::filesystem::path& morrowindDataFilesPath,
     MorrowindActorCatalog& outCatalog
 );
+bool loadMorrowindActorCatalog(
+    const MorrowindContentLoadOrder& loadOrder,
+    MorrowindActorCatalog& outCatalog
+);
+bool loadMorrowindActorCatalog(
+    const MorrowindContentSession& session,
+    MorrowindActorCatalog& outCatalog
+);
 bool loadMorrowindEquipmentCatalog(
     const std::filesystem::path& morrowindDataFilesPath,
+    MorrowindEquipmentCatalog& outCatalog
+);
+bool loadMorrowindEquipmentCatalog(
+    const MorrowindContentLoadOrder& loadOrder,
+    MorrowindEquipmentCatalog& outCatalog
+);
+bool loadMorrowindEquipmentCatalog(
+    const MorrowindContentSession& session,
     MorrowindEquipmentCatalog& outCatalog
 );
 std::vector<std::string> resolveMorrowindNpcPartModelPaths(
@@ -268,8 +362,23 @@ bool cookMorrowindExteriorRegionScene(
     const MorrowindExteriorCellSelection& selection,
     MorrowindExteriorCookResult& outResult
 );
+bool cookMorrowindExteriorRegionScene(
+    const MorrowindContentLoadOrder& loadOrder,
+    const MorrowindExteriorCellSelection& selection,
+    MorrowindExteriorCookResult& outResult
+);
 bool loadMorrowindExteriorCellsRuntime(
     const std::filesystem::path& morrowindDataFilesPath,
+    const MorrowindExteriorRuntimeLoadOptions& options,
+    MorrowindExteriorRuntimeLoadResult& outResult
+);
+bool loadMorrowindExteriorCellsRuntime(
+    const MorrowindContentLoadOrder& loadOrder,
+    const MorrowindExteriorRuntimeLoadOptions& options,
+    MorrowindExteriorRuntimeLoadResult& outResult
+);
+bool loadMorrowindExteriorCellsRuntime(
+    const MorrowindContentSession& session,
     const MorrowindExteriorRuntimeLoadOptions& options,
     MorrowindExteriorRuntimeLoadResult& outResult
 );
@@ -281,8 +390,18 @@ bool loadMorrowindBalmoraDoorReferences(
     const std::filesystem::path& morrowindDataFilesPath,
     std::vector<MorrowindDoorReference>& outDoors
 );
+bool loadMorrowindExteriorDoorReferences(
+    const MorrowindContentSession& session,
+    const std::vector<std::pair<int, int>>& exteriorCells,
+    std::vector<MorrowindDoorReference>& outDoors
+);
 bool loadMorrowindInteriorDoorReferences(
     const std::filesystem::path& morrowindDataFilesPath,
+    const std::string& cellName,
+    std::vector<MorrowindDoorReference>& outDoors
+);
+bool loadMorrowindInteriorDoorReferences(
+    const MorrowindContentSession& session,
     const std::string& cellName,
     std::vector<MorrowindDoorReference>& outDoors
 );
@@ -290,6 +409,11 @@ bool saveMorrowindDoorCache(const MorrowindDoorCache& cache, const std::filesyst
 bool loadMorrowindDoorCache(const std::filesystem::path& inputPath, MorrowindDoorCache& outCache);
 bool cookMorrowindInteriorCellScene(
     const std::filesystem::path& morrowindDataFilesPath,
+    const std::string& cellName,
+    ImportedScene& outScene
+);
+bool cookMorrowindInteriorCellScene(
+    const MorrowindContentSession& session,
     const std::string& cellName,
     ImportedScene& outScene
 );
