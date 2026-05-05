@@ -1935,6 +1935,7 @@ void App::closeDialogue() {
     m_activeDialogue = {};
     m_activeDialogueActorId.clear();
     m_activeDialogueTopicId.clear();
+    m_lastScriptMessage.clear();
     syncGameplayUiState();
     refreshUiCursorMode();
 }
@@ -1955,7 +1956,6 @@ bool App::requestDialogueTopic(const std::string& topicId) {
     }
     m_activeDialogueTopicId = topicId;
     m_activeDialogue = std::move(dialogue);
-    m_lastScriptMessage = m_activeDialogue.text;
     syncGameplayUiState();
     return true;
 }
@@ -1966,10 +1966,12 @@ bool App::openDialogue(const std::string& actorId) {
     }
     m_activeDialogueActorId = lowerPathCopy(actorId);
     m_activeDialogueTopicId.clear();
+    m_lastScriptMessage.clear();
     if (!requestDialogueTopic("")) {
         m_activeDialogue = {};
         m_activeDialogueActorId.clear();
         m_activeDialogueTopicId.clear();
+        m_lastScriptMessage.clear();
         syncGameplayUiState();
         return false;
     }

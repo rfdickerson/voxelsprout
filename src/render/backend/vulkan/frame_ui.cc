@@ -1341,9 +1341,14 @@ void RendererBackend::buildDialogueUi() {
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.18f, 0.10f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.42f, 0.31f, 0.16f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.56f, 0.42f, 0.22f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.30f, 0.22f, 0.12f, 0.86f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.47f, 0.35f, 0.18f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.62f, 0.46f, 0.24f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 3.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 4.0f));
     if (m_dialogueFont != nullptr) {
         ImGui::PushFont(m_dialogueFont);
     }
@@ -1352,8 +1357,8 @@ void RendererBackend::buildDialogueUi() {
         if (m_dialogueFont != nullptr) {
             ImGui::PopFont();
         }
-        ImGui::PopStyleVar(3);
-        ImGui::PopStyleColor(6);
+        ImGui::PopStyleVar(5);
+        ImGui::PopStyleColor(9);
         return;
     }
 
@@ -1378,17 +1383,20 @@ void RendererBackend::buildDialogueUi() {
     ImGui::BeginChild("DialogueTopics", ImVec2(topicWidth, contentHeight), true);
     ImGui::TextUnformatted("Topics");
     ImGui::Separator();
+    const float optionRowHeight = ImGui::GetTextLineHeightWithSpacing() + 4.0f;
     for (const auto& topic : m_gameplayUiState.dialogueTopics) {
         const bool selected = topic.first == m_gameplayUiState.dialogueSelectedTopicId;
+        ImGui::PushID(topic.first.c_str());
         if (selected) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.88f, 0.50f, 1.0f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.87f, 0.78f, 0.54f, 1.0f));
         }
-        if (ImGui::Selectable(topic.second.c_str(), selected)) {
+        if (ImGui::Selectable(topic.second.c_str(), selected, 0, ImVec2(0.0f, optionRowHeight))) {
             m_pendingGameplayUiCommand = {GameplayUiCommandType::SelectDialogueTopic, topic.first};
         }
-        if (selected) {
-            ImGui::PopStyleColor();
-        }
+        ImGui::PopStyleColor();
+        ImGui::PopID();
     }
     ImGui::EndChild();
 
@@ -1401,20 +1409,22 @@ void RendererBackend::buildDialogueUi() {
     if (!m_gameplayUiState.dialogueChoices.empty()) {
         ImGui::Separator();
         for (const auto& choice : m_gameplayUiState.dialogueChoices) {
-            if (ImGui::Button(choice.second.c_str(), ImVec2(0.0f, 0.0f))) {
+            ImGui::PushID(choice.first.c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.87f, 0.78f, 0.54f, 1.0f));
+            if (ImGui::Selectable(choice.second.c_str(), false, 0, ImVec2(0.0f, optionRowHeight))) {
                 m_pendingGameplayUiCommand = {GameplayUiCommandType::SelectDialogueChoice, choice.first};
             }
-            ImGui::SameLine();
+            ImGui::PopStyleColor();
+            ImGui::PopID();
         }
-        ImGui::NewLine();
     }
 
     ImGui::End();
     if (m_dialogueFont != nullptr) {
         ImGui::PopFont();
     }
-    ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(6);
+    ImGui::PopStyleVar(5);
+    ImGui::PopStyleColor(9);
 }
 
 void RendererBackend::buildGameplayHudUi() {

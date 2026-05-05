@@ -263,14 +263,27 @@ end
 local function actor_summary(actor)
     local info = actor_info(actor)
     if info == nil then return nil end
-    local faction = ""
     if info.faction ~= nil then
-        faction = " " .. info.faction
-        if info.rank ~= nil then faction = faction .. " (" .. info.rank .. ")" end
-        faction = faction .. "."
+        local rank = ""
+        if info.rank ~= nil then rank = " " .. info.rank end
+        return "I am " .. actor .. "," .. rank .. " of the " .. info.faction .. "."
     end
-    return actor .. " is a level " .. tostring(info.level) .. " " .. info.gender .. " " ..
-        info.race .. " " .. info.class .. " found at " .. info.location .. "." .. faction
+    if info.merchant then return "Take a look. I may have something you need." end
+    if info.trainer then return "I can offer training, if you have the coin and the patience." end
+    if info.travel then return "If you need passage, the silt strider is ready." end
+    return "Well met, outlander. What do you want?"
+end
+
+local function actor_background_text(actor)
+    local info = actor_info(actor)
+    if info == nil then return nil end
+    if info.faction ~= nil then
+        local rank = ""
+        if info.rank ~= nil then rank = " I hold the rank of " .. info.rank .. "." end
+        return "I serve with the " .. info.faction .. "." .. rank
+    end
+    if info.class == "Commoner" then return "I live here. That is background enough." end
+    return "My trade is " .. info.class .. "."
 end
 
 local function actor_statistics_text(actor)
@@ -518,8 +531,8 @@ function get_dialogue(actor_id, topic_id)
         return dialogue("People talk about Fargoth's ring, the dead taxman, guild work in Balmora, and Caius Cosades waiting for a package.", common_topics(), {})
     end
     if topic_id == "background" then
-        local summary = actor_summary(actor)
-        if summary ~= nil then return dialogue(summary, actor_topics(actor), append_actor_service_choices(actor, {})) end
+        local background = actor_background_text(actor)
+        if background ~= nil then return dialogue(background, actor_topics(actor), append_actor_service_choices(actor, {})) end
     end
     if topic_id == "statistics" then
         local stats = actor_statistics_text(actor)

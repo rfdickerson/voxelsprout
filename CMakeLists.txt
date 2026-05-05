@@ -194,6 +194,7 @@ if(ODAI_BUILD_APP)
     if(ODAI_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
         list(APPEND RENDER_BACKEND_SOURCES
             src/render/backend/vulkan/frame_ui.cc
+            src/render/backend/vulkan/renderer_shared.cc
             src/render/backend/vulkan/buffer_helpers.cc
             src/render/backend/vulkan/device.cc
             src/render/backend/vulkan/frame.cc
