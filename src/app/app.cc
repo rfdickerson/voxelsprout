@@ -10,9 +10,14 @@
 #include "core/log.h"
 #include "math/math.h"
 #include "sim/network_procedural.h"
+#include "ui/icon_atlas.h"
 #include "ui/widgets/button.h"
 #include "ui/widgets/label.h"
 #include "ui/widgets/panel.h"
+#include "ui/widgets/rich_text_view.h"
+#include "ui/widgets/window.h"
+
+#include <stb_image.h>
 
 #include <memory>
 
@@ -550,6 +555,33 @@ std::optional<std::filesystem::path> findImportedSceneDemoPath() {
     return std::nullopt;
 }
 
+// Resolve a project-relative asset path. Mirrors the renderer's resolver: prefer
+// the compiled-in source dir, then walk up from the working directory (the app is
+// commonly launched from a build subdirectory). Returns the relative path as-is if
+// nothing matches, so callers can still probe std::filesystem::exists.
+std::filesystem::path resolveAssetPath(const std::filesystem::path& relativePath) {
+    std::vector<std::filesystem::path> baseCandidates;
+#if defined(ODAI_PROJECT_SOURCE_DIR)
+    baseCandidates.emplace_back(std::filesystem::path{ODAI_PROJECT_SOURCE_DIR});
+#endif
+    std::error_code cwdError;
+    const std::filesystem::path cwd = std::filesystem::current_path(cwdError);
+    if (!cwdError) {
+        baseCandidates.push_back(cwd);
+        baseCandidates.push_back(cwd / "..");
+        baseCandidates.push_back(cwd / ".." / "..");
+        baseCandidates.push_back(cwd / ".." / ".." / "..");
+    }
+    for (const std::filesystem::path& base : baseCandidates) {
+        const std::filesystem::path candidate = base / relativePath;
+        std::error_code existsError;
+        if (std::filesystem::exists(candidate, existsError) && !existsError) {
+            return candidate;
+        }
+    }
+    return relativePath;
+}
+
 std::optional<std::filesystem::path> findStrategyMapPath() {
     if (const std::optional<std::string> envPathValue = readEnvironmentString(kStrategyMapEnvVar);
         envPathValue.has_value() && !envPathValue->empty()) {
@@ -675,13 +707,16 @@ ImportedSceneCameraPose configureImportedSceneCamera(const odai::importer::Impor
 
     const float spanX = maxX - minX;
     const float spanZ = maxZ - minZ;
-    const float offset = std::max(spanX, spanZ) * 0.38f;
-    pose.x = centerX - offset;
-    pose.y = maxY + std::max(spanX, spanZ) * 0.18f + 1200.0f;
-    pose.z = centerZ - offset * 0.75f;
-    pose.yawDegrees = 48.0f;
-    pose.pitchDegrees = -24.0f;
-    return pose;
+    const float span = std::max(spanX, spanZ);
+    // Civ 6 style: steep top-down angle (~60°), camera centered above the map
+    const float height = span * 0.65f;
+    const float tilt   = height * 0.58f; // ~60° pitch: atan2(height, tilt) ≈ 60°
+    return makeImportedSceneLookAtPose(
+        centerX,
+        centerY + height,
+        centerZ - tilt,
+        centerX, centerY, centerZ
+    );
 }
 
 float applyStickDeadzone(float value, float deadzone) {
@@ -975,11 +1010,11 @@ bool App::init() {
 
     // Load the hex strategy map. If no .smap file is found via the ODAI_STRATEGY_MAP
     // env-var or the default "strategy_map.smap" path, log a hint and exit.
-    odai::game::StrategyMap strategyMap;
+    m_strategyMap = {};
     const std::optional<std::filesystem::path> strategyMapPath = findStrategyMapPath();
     if (strategyMapPath.has_value()) {
         m_importedScenePath = *strategyMapPath;
-        if (!odai::game::loadStrategyMap(*strategyMapPath, strategyMap)) {
+        if (!odai::game::loadStrategyMap(*strategyMapPath, m_strategyMap)) {
             VOX_LOGE("app") << "failed to load strategy map from "
                             << std::filesystem::absolute(*strategyMapPath).string()
                             << ": " << odai::game::getStrategyMapLastError();
@@ -987,8 +1022,8 @@ bool App::init() {
         }
         VOX_LOGI("app") << "strategy map loaded from "
                         << std::filesystem::absolute(*strategyMapPath).string()
-                        << " (" << strategyMap.width << "x" << strategyMap.height
-                        << ", settlements=" << strategyMap.settlements.size() << ")";
+                        << " (" << m_strategyMap.width << "x" << m_strategyMap.height
+                        << ", settlements=" << m_strategyMap.settlements.size() << ")";
     } else {
         VOX_LOGE("app") << "no strategy map found; run odai_strategy_map_gen.exe to generate one, "
                            "then set ODAI_STRATEGY_MAP=strategy_map.smap or place strategy_map.smap "
@@ -996,7 +1031,7 @@ bool App::init() {
         return false;
     }
 
-    m_importedScene = odai::game::buildStrategyMapScene(strategyMap);
+    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap);
     m_importedSceneDemoEnabled = true;
     m_hoverEnabled = true;
 
@@ -1009,6 +1044,10 @@ bool App::init() {
     m_cameraPrevious = m_camera;
 
     m_renderer.setStrategyMapMode(true);
+    // Strategy map is cursor-driven: show the OS cursor and stop mouselook so the
+    // player can click HUD elements.
+    m_strategyMapMode = true;
+    glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     const auto rendererInitStart = Clock::now();
     if (!m_renderer.init(m_window, m_world.chunkGrid())) {
         VOX_LOGE("app") << "renderer init failed";
@@ -1815,7 +1854,7 @@ void App::update([[maybe_unused]] float dt, float simulationAlpha) {
     };
     m_visibleChunkIndices.clear();
     m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
-    updateUiOverlay();
+    updateUiOverlay(dt);
     m_renderer.renderFrame(
         m_world.chunkGrid(),
         m_simulation,
@@ -1873,10 +1912,7 @@ void App::pollInput() {
 
     const bool escapeKeyDown = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     if (escapeKeyDown && !m_wasEscapeKeyDown) {
-        if (m_debugUiVisible) {
-            toggleDebugUi();
-            uiVisibilityChanged = true;
-        }
+        glfwSetWindowShouldClose(m_window, GLFW_TRUE);
     }
     m_wasEscapeKeyDown = escapeKeyDown;
 
@@ -1997,7 +2033,8 @@ void App::pollInput() {
         uiVisibilityChanged = true;
     }
     if (uiVisibilityChanged) {
-        glfwSetInputMode(m_window, GLFW_CURSOR, isAnyUiVisible() ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+        const bool showCursor = m_strategyMapMode || isAnyUiVisible();
+        glfwSetInputMode(m_window, GLFW_CURSOR, showCursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
         m_hasMouseSample = false;
     }
 
@@ -2105,10 +2142,15 @@ void App::updateCamera(float dt) {
         return;
     }
 
-    const float mouseDeltaX = m_pendingMouseDeltaX;
-    const float mouseDeltaY = m_pendingMouseDeltaY;
+    float mouseDeltaX = m_pendingMouseDeltaX;
+    float mouseDeltaY = m_pendingMouseDeltaY;
     m_pendingMouseDeltaX = 0.0f;
     m_pendingMouseDeltaY = 0.0f;
+    // Strategy map is cursor-driven: never rotate the camera from raw mouse motion.
+    if (m_strategyMapMode) {
+        mouseDeltaX = 0.0f;
+        mouseDeltaY = 0.0f;
+    }
 
     const float mouseSmoothingAlpha = 1.0f - std::exp(-dt / kMouseSmoothingSeconds);
     m_camera.smoothedMouseDeltaX += (mouseDeltaX - m_camera.smoothedMouseDeltaX) * mouseSmoothingAlpha;
@@ -3937,66 +3979,322 @@ bool App::tryRemoveTrackFromCameraRay() {
     return true;
 }
 
-void App::setupDemoUi() {
-    // Load a UI font; fall back through a couple of common locations. If none is
-    // found the panel/button still render (text is simply skipped).
-    const std::array<const char*, 3> kFontCandidates = {
+namespace {
+
+// Procedurally generate a square RGBA window-frame texture for 9-slice rendering:
+// a rounded-corner bronze border around a dark translucent interior. Authored in
+// straight-alpha sRGB (the UI shader linearizes on output). The 9-slice keeps the
+// rounded corners fixed while stretching the straight edges and centre.
+std::vector<std::uint8_t> makeWindowFrameRgba(int size) {
+    const float half = static_cast<float>(size) * 0.5f;
+    const float radius = static_cast<float>(size) * 0.22f;   // corner radius (texels).
+    const float borderW = static_cast<float>(size) * 0.05f;  // border line thickness (texels).
+    const float border[3] = {0.74f, 0.60f, 0.34f};           // bronze.
+    const float fill[3] = {0.045f, 0.065f, 0.10f};           // dark interior.
+    const float fillA = 0.93f;
+    const float borderA = 1.0f;
+
+    const auto clamp01 = [](float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); };
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(size) * size * 4u, 0u);
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            // Signed distance to a rounded box covering the whole texture.
+            const float px = (static_cast<float>(x) + 0.5f) - half;
+            const float py = (static_cast<float>(y) + 0.5f) - half;
+            const float qx = std::abs(px) - (half - radius);
+            const float qy = std::abs(py) - (half - radius);
+            const float mx = std::max(qx, 0.0f);
+            const float my = std::max(qy, 0.0f);
+            const float d = std::sqrt(mx * mx + my * my) + std::min(std::max(qx, qy), 0.0f) - radius;
+
+            const float coverage = clamp01(0.5f - d);                      // 1 inside, 0 outside (1px AA).
+            const float borderAmt = clamp01((d + borderW + 0.5f) / borderW);  // 1 near edge, 0 deep inside.
+
+            const float r = fill[0] + (border[0] - fill[0]) * borderAmt;
+            const float g = fill[1] + (border[1] - fill[1]) * borderAmt;
+            const float b = fill[2] + (border[2] - fill[2]) * borderAmt;
+            const float a = (fillA + (borderA - fillA) * borderAmt) * coverage;
+
+            const auto byte = [&](float v) { return static_cast<std::uint8_t>(clamp01(v) * 255.0f + 0.5f); };
+            const std::size_t i = (static_cast<std::size_t>(y) * size + x) * 4u;
+            pixels[i + 0] = byte(r);
+            pixels[i + 1] = byte(g);
+            pixels[i + 2] = byte(b);
+            pixels[i + 3] = byte(a);
+        }
+    }
+    return pixels;
+}
+
+const char* terrainName(odai::game::TerrainType t) {
+    switch (t) {
+        case odai::game::TerrainType::Ocean:     return "Ocean";
+        case odai::game::TerrainType::Coast:     return "Coast";
+        case odai::game::TerrainType::Grassland: return "Grassland";
+        case odai::game::TerrainType::Plains:    return "Plains";
+        case odai::game::TerrainType::Forest:    return "Forest";
+        case odai::game::TerrainType::Hills:     return "Hills";
+        case odai::game::TerrainType::Mountains: return "Mountains";
+        case odai::game::TerrainType::Desert:    return "Desert";
+        case odai::game::TerrainType::Tundra:    return "Tundra";
+        case odai::game::TerrainType::Snow:      return "Snow";
+        default:                                 return "Unknown";
+    }
+}
+
+}  // namespace
+
+void App::setupDemoUi(float viewW, float viewH) {
+    // DPI scale: framebuffer pixels per logical pixel. On a 125%-scaled display the
+    // framebuffer is 1.25× the GLFW window size, so all hardcoded pixel values must
+    // be multiplied by this factor so the UI looks the same physical size on screen.
+    int windowW = 0;
+    glfwGetWindowSize(m_window, &windowW, nullptr);
+    const float s = (windowW > 0) ? viewW / static_cast<float>(windowW) : 1.0f;
+    m_uiScale = s;
+    VOX_LOGI("ui") << "HUD setup: framebuffer=" << viewW << "x" << viewH
+                   << " window=" << windowW << " dpiScale=" << s;
+
+    const float kBaseFontPx = 22.0f;
+
+    // Load the regular face into the built-in atlas (kUiFontAtlas). Fall back to a
+    // system font so the HUD still renders text if the bundled TTF is missing.
+    const std::array<const char*, 3> kRegularCandidates = {
         "assets/fonts/EBGaramond-Regular.ttf",
         "C:/Windows/Fonts/segoeui.ttf",
         "C:/Windows/Fonts/arial.ttf",
     };
-    for (const char* candidate : kFontCandidates) {
-        if (std::filesystem::exists(candidate) && m_uiFont.loadFromFile(candidate, 18.0f)) {
+    for (const char* candidate : kRegularCandidates) {
+        const std::filesystem::path resolved = resolveAssetPath(candidate);
+        if (std::filesystem::exists(resolved) &&
+            m_uiFont.loadFromFile(resolved.string(), kBaseFontPx * s)) {
             m_uiFontReady = m_uiFont.atlasWidth() > 0 &&
                             m_renderer.setUiFontAtlas(m_uiFont.atlasPixels().data(),
                                                       m_uiFont.atlasWidth(), m_uiFont.atlasHeight());
+            VOX_LOGI("ui") << "UI regular font: " << resolved.string();
             break;
         }
     }
-    const odai::ui::Font* labelFont = m_uiFontReady ? &m_uiFont : nullptr;
+    m_uiFonts = {};
+    if (m_uiFontReady) {
+        m_uiFont.setTextureId(odai::ui::kUiFontAtlas);
+        m_uiFonts.regular = &m_uiFont;
+
+        // Bold and italic faces each get their own atlas texture so glyph quads
+        // can bind the right coverage map per run.
+        const auto loadVariant = [&](odai::ui::Font& font, const char* relPath) -> const odai::ui::Font* {
+            const std::filesystem::path path = resolveAssetPath(relPath);
+            if (!std::filesystem::exists(path) || !font.loadFromFile(path.string(), kBaseFontPx * s) ||
+                font.atlasWidth() == 0) {
+                return nullptr;
+            }
+            const odai::ui::UiTextureId id = m_renderer.registerUiFontAtlas(
+                font.atlasPixels().data(), font.atlasWidth(), font.atlasHeight());
+            if (id == odai::ui::kUiNoTexture) {
+                return nullptr;
+            }
+            font.setTextureId(id);
+            return &font;
+        };
+        m_uiFonts.bold = loadVariant(m_uiFontBold, "assets/fonts/EBGaramond-Bold.ttf");
+        m_uiFonts.italic = loadVariant(m_uiFontItalic, "assets/fonts/EBGaramond-Italic.ttf");
+        VOX_LOGI("ui") << "fonts loaded: regular=yes bold=" << (m_uiFonts.bold ? "yes" : "no")
+                       << " italic=" << (m_uiFonts.italic ? "yes" : "no");
+    }
+    const odai::ui::FontSet& fonts = m_uiFonts;
+
+    // Register the procedural 9-slice window-frame texture and build the slice
+    // (16-texel corners of a 64-texel source, drawn at 16*dpi destination corners).
+    constexpr int kFrameTexSize = 64;
+    const std::vector<std::uint8_t> framePixels = makeWindowFrameRgba(kFrameTexSize);
+    m_windowFrameTexture = m_renderer.registerUiTextureRgba8(framePixels.data(), kFrameTexSize, kFrameTexSize);
+    odai::ui::UiNineSlice windowFrame{};
+    windowFrame.textureId = m_windowFrameTexture;
+    windowFrame.uv = odai::ui::UiRect{0.0f, 0.0f, 1.0f, 1.0f};
+    const float frameCornerTex = 16.0f;
+    const float frameCornerDst = frameCornerTex * s;
+    windowFrame.borderLeftPx = windowFrame.borderRightPx = frameCornerDst;
+    windowFrame.borderTopPx = windowFrame.borderBottomPx = frameCornerDst;
+    const float frameUvBorder = frameCornerTex / static_cast<float>(kFrameTexSize);
+    windowFrame.uvBorderLeft = windowFrame.uvBorderRight = frameUvBorder;
+    windowFrame.uvBorderTop = windowFrame.uvBorderBottom = frameUvBorder;
+    const bool windowFrameReady = m_windowFrameTexture != odai::ui::kUiNoTexture;
+
+    // Load religion icon with mipmaps; registered globally for [icon=religion] in rich text.
+    {
+        const std::filesystem::path iconPath = resolveAssetPath("assets/icons/religion.png");
+        int iw = 0, ih = 0;
+        stbi_uc* ipx = stbi_load(iconPath.string().c_str(), &iw, &ih, nullptr, 4);
+        if (ipx && iw > 0 && ih > 0) {
+            const odai::ui::UiTextureId iconTex = m_renderer.registerUiTextureRgba8Mipmapped(
+                ipx, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih));
+            stbi_image_free(ipx);
+            if (iconTex != odai::ui::kUiNoTexture) {
+                const std::string meta =
+                    "{\"iconSize\":" + std::to_string(std::max(iw, ih)) +
+                    ",\"icons\":{\"religion\":[0,0]}}";
+                odai::ui::UiIconRegistry::global().registerAtlas(
+                    iconTex, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih), meta.c_str());
+            }
+        }
+    }
 
     auto root = std::make_unique<odai::ui::Widget>();
 
-    auto panel = std::make_unique<odai::ui::Panel>();
-    panel->setRect(odai::ui::UiRect::fromXYWH(40.0f, 90.0f, 300.0f, 170.0f));
+    // Bottom HUD bar — full-width strip at the bottom of the screen.
+    const float kBarH = 64.0f * s;
+    const float barY = viewH - kBarH;
+    auto bar = std::make_unique<odai::ui::Panel>();
+    bar->setRect(odai::ui::UiRect::fromXYWH(0.0f, barY, viewW, kBarH));
+    bar->background  = odai::ui::UiColor{0.04f, 0.06f, 0.09f, 0.92f};
+    bar->borderColor = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.40f};
 
-    auto title = std::make_unique<odai::ui::Label>(labelFont, "<color=#ecd39a>Command View</color>");
-    title->setRect(odai::ui::UiRect::fromXYWH(56.0f, 104.0f, 270.0f, 28.0f));
+    auto turnLabel = std::make_unique<odai::ui::Label>(fonts, "Turn 1");
+    turnLabel->setRect(odai::ui::UiRect::fromXYWH(20.0f * s, barY + 12.0f * s, 200.0f * s, 40.0f * s));
+    m_hudTurnLabel = turnLabel.get();
+    bar->addChild(std::move(turnLabel));
+
+    auto statsLabel = std::make_unique<odai::ui::Label>(fonts, "");
+    statsLabel->setRect(odai::ui::UiRect::fromXYWH(viewW * 0.5f - 160.0f * s, barY + 12.0f * s, 320.0f * s, 40.0f * s));
+    statsLabel->align = odai::ui::UiTextAlign::Center;
+    m_hudStatsLabel = statsLabel.get();
+    bar->addChild(std::move(statsLabel));
+
+    auto endTurnBtn = std::make_unique<odai::ui::Button>(fonts.regular, "End Turn", [this]() {
+        ++m_currentTurn;
+        VOX_LOGI("ui") << "turn advanced to " << m_currentTurn;
+    });
+    endTurnBtn->setRect(odai::ui::UiRect::fromXYWH(viewW - 172.0f * s, barY + 10.0f * s, 152.0f * s, 44.0f * s));
+    bar->addChild(std::move(endTurnBtn));
+    root->addChild(std::move(bar));
+
+    // Left command panel.
+    const float kPanelW = 310.0f * s;
+    const float kPanelH = 258.0f * s;
+    const float kPanelX = 16.0f * s;
+    const float kPanelY = 16.0f * s;
+    auto panel = std::make_unique<odai::ui::Panel>();
+    panel->setRect(odai::ui::UiRect::fromXYWH(kPanelX, kPanelY, kPanelW, kPanelH));
+
+    auto title = std::make_unique<odai::ui::Label>(fonts, "<b><color=#ecd39a>Command View</color></b>");
+    title->setRect(odai::ui::UiRect::fromXYWH(kPanelX + 12.0f * s, kPanelY + 10.0f * s, kPanelW - 24.0f * s, 30.0f * s));
     panel->addChild(std::move(title));
 
-    auto status = std::make_unique<odai::ui::Label>(labelFont, "Clicks: 0");
-    status->setRect(odai::ui::UiRect::fromXYWH(56.0f, 210.0f, 270.0f, 28.0f));
-    m_uiStatusLabel = status.get();
-    panel->addChild(std::move(status));
+    auto foundCityBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Found City", [this]() {
+        ++m_uiDemoClicks;
+        VOX_LOGI("ui") << "founded city (" << m_uiDemoClicks << ")";
+    });
+    foundCityBtn->setRect(odai::ui::UiRect::fromXYWH(kPanelX + 12.0f * s, kPanelY + 52.0f * s, 200.0f * s, 46.0f * s));
+    panel->addChild(std::move(foundCityBtn));
 
-    auto button = std::make_unique<odai::ui::Button>(
-        labelFont, "Found City", [this]() {
-            ++m_uiDemoClicks;
-            VOX_LOGI("ui") << "demo button clicked (" << m_uiDemoClicks << ")";
-        });
-    button->setRect(odai::ui::UiRect::fromXYWH(56.0f, 150.0f, 200.0f, 44.0f));
-    panel->addChild(std::move(button));
+    auto pediaBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Open CivPedia", [this]() {
+        if (m_civpediaWindow != nullptr) {
+            m_civpediaWindow->visible = true;
+        }
+    });
+    pediaBtn->setRect(odai::ui::UiRect::fromXYWH(kPanelX + 12.0f * s, kPanelY + 106.0f * s, 200.0f * s, 46.0f * s));
+    panel->addChild(std::move(pediaBtn));
+
+    auto citiesLabel = std::make_unique<odai::ui::Label>(fonts, "Cities founded: 0");
+    citiesLabel->setRect(odai::ui::UiRect::fromXYWH(kPanelX + 12.0f * s, kPanelY + 166.0f * s, kPanelW - 24.0f * s, 30.0f * s));
+    m_uiStatusLabel = citiesLabel.get();
+    panel->addChild(std::move(citiesLabel));
+
+    auto faithLabel = std::make_unique<odai::ui::Label>(fonts, "[icon=religion 44] <color=#c8963a>Faith  +3</color>");
+    faithLabel->setRect(odai::ui::UiRect::fromXYWH(kPanelX + 12.0f * s, kPanelY + 196.0f * s, kPanelW - 24.0f * s, 48.0f * s));
+    panel->addChild(std::move(faithLabel));
 
     root->addChild(std::move(panel));
+
+    // Tile info window (bottom-right, hidden until a tile is hovered).
+    const float tileWinW = 250.0f * s;
+    const float tileWinH = 130.0f * s;
+    const float tileWinX = viewW - tileWinW - 16.0f * s;
+    const float tileWinY = viewH - kBarH - tileWinH - 12.0f * s;
+    auto tileWin = std::make_unique<odai::ui::Window>(fonts.regular, "Tile Info");
+    tileWin->setRect(odai::ui::UiRect::fromXYWH(tileWinX, tileWinY, tileWinW, tileWinH));
+    tileWin->titleBarH = odai::ui::Window::kDefaultTitleBarH * s;
+    tileWin->showCloseButton = false;
+    tileWin->draggable = false;
+    tileWin->visible = false;
+
+    const float titleBarH = tileWin->titleBarH;
+    auto tileInfoLabel = std::make_unique<odai::ui::Label>(fonts, "");
+    tileInfoLabel->setRect(odai::ui::UiRect::fromXYWH(
+        tileWinX + 10.0f * s,
+        tileWinY + titleBarH + 8.0f * s,
+        tileWinW - 20.0f * s,
+        tileWinH - titleBarH - 16.0f * s));
+    m_hudTileInfoLabel = tileInfoLabel.get();
+    tileWin->addChild(std::move(tileInfoLabel));
+
+    m_hudTileInfoWindow = root->addChild(std::move(tileWin));
+
+    // CivPedia window (top-right): a draggable 9-slice-framed window with a toolbar,
+    // close button, margin + padding. Also demonstrates regular/italic/bold + colored
+    // text and hoverable <tip=...> terms (bold orange) that raise a tooltip overlay.
+    const float pediaW = 360.0f * s;
+    const float pediaH = 232.0f * s;
+    const float pediaX = viewW - pediaW - 16.0f * s;
+    const float pediaY = 16.0f * s;
+    const float pediaTitleH = odai::ui::Window::kDefaultTitleBarH * s;
+    auto pediaWin = std::make_unique<odai::ui::Window>(
+        fonts.regular, "CivPedia",
+        [this]() {
+            if (m_civpediaWindow != nullptr) {
+                m_civpediaWindow->visible = false;
+            }
+        });
+    pediaWin->setRect(odai::ui::UiRect::fromXYWH(pediaX, pediaY, pediaW, pediaH));
+    pediaWin->titleBarH = pediaTitleH;
+    pediaWin->margin = 0.0f;
+    pediaWin->padding = {14.0f * s, 10.0f * s};
+    pediaWin->showCloseButton = true;
+    pediaWin->draggable = true;
+    if (windowFrameReady) {
+        pediaWin->frame = windowFrame;
+    }
+
+    const std::string pediaText =
+        "The <tip=Spearman \xe2\x80\x94 25 HP, melee. +100% vs mounted units.>"
+        "<b><color=#ff9933>Spearman</color></b></tip> is an <i>ancient</i> melee unit. "
+        "It stands firm against <tip=Cavalry \xe2\x80\x94 fast mounted units, weak to spears.>"
+        "<b><color=#ff9933>Cavalry</color></b></tip>, anchoring your early army. "
+        "Train one in any <tip=Cities grow your empire and produce units and wonders.>"
+        "<b><color=#ff9933>City</color></b></tip> that has built a <i>Barracks</i>.";
+    auto pediaBody = std::make_unique<odai::ui::RichTextView>(fonts, pediaText);
+    pediaBody->setRect(odai::ui::UiRect::fromXYWH(
+        pediaX + 14.0f * s,
+        pediaY + pediaTitleH + 10.0f * s,
+        pediaW - 28.0f * s,
+        pediaH - pediaTitleH - 20.0f * s));
+    m_civpediaView = pediaBody.get();
+    pediaWin->addChild(std::move(pediaBody));
+    m_civpediaWindow = root->addChild(std::move(pediaWin));
+
+    // Tooltip fade: ease-in-out over ~0.16s.
+    m_tooltipFade.durationSec = 0.16f;
+    m_tooltipFade.easing = odai::ui::Easing::EaseInOut;
+
     m_uiContext.setRoot(std::move(root));
 }
 
-void App::updateUiOverlay() {
+void App::updateUiOverlay(float dt) {
     if (m_window == nullptr) {
         return;
     }
-    if (m_uiContext.root() == nullptr) {
-        setupDemoUi();
-    }
 
-    int framebufferWidth = 0;
-    int framebufferHeight = 0;
-    glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
-    if (framebufferWidth <= 0 || framebufferHeight <= 0) {
+    int fbW = 0, fbH = 0;
+    glfwGetFramebufferSize(m_window, &fbW, &fbH);
+    if (fbW <= 0 || fbH <= 0) {
         return;
     }
-    double mouseX = 0.0;
-    double mouseY = 0.0;
+
+    if (m_uiContext.root() == nullptr) {
+        setupDemoUi(static_cast<float>(fbW), static_cast<float>(fbH));
+    }
+
+    double mouseX = 0.0, mouseY = 0.0;
     glfwGetCursorPos(m_window, &mouseX, &mouseY);
     const bool leftDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
 
@@ -4004,15 +4302,202 @@ void App::updateUiOverlay() {
     m_uiInput.mousePx = {static_cast<float>(mouseX), static_cast<float>(mouseY)};
     m_uiInput.setButton(odai::ui::UiMouseButton::Left, leftDown);
 
-    m_uiContext.setViewport({static_cast<float>(framebufferWidth), static_cast<float>(framebufferHeight)});
+    // Time the UI update + geometry build (the CPU cost that grows with a
+    // text-heavy UI). With layout/geometry caching this stays near-flat per frame.
+    const auto uiBuildStart = std::chrono::steady_clock::now();
+
+    m_uiContext.setViewport({static_cast<float>(fbW), static_cast<float>(fbH)});
     m_uiContext.update(m_uiInput);
 
+    // Update turn label.
+    if (m_hudTurnLabel != nullptr) {
+        m_hudTurnLabel->setText("<b><color=#ecd39a>Turn " + std::to_string(m_currentTurn) + "</color></b>");
+    }
+
+    // Update map stats label.
+    if (m_hudStatsLabel != nullptr && m_strategyMap.width > 0) {
+        const auto cnt = static_cast<int>(m_strategyMap.settlements.size());
+        m_hudStatsLabel->setText(
+            std::to_string(m_strategyMap.width) + " \xc3\x97 " +
+            std::to_string(m_strategyMap.height) + "  \xe2\x80\xa2  " +
+            std::to_string(cnt) + (cnt == 1 ? " settlement" : " settlements"));
+    }
+
+    // Update cities-founded label.
     if (m_uiStatusLabel != nullptr) {
-        m_uiStatusLabel->setText("Clicks: " + std::to_string(m_uiDemoClicks));
+        m_uiStatusLabel->setText("Cities founded: " + std::to_string(m_uiDemoClicks));
+    }
+
+    // Hex hover: pick the tile under the mouse and update the tile info panel.
+    if (m_hudTileInfoWindow != nullptr && m_hudTileInfoLabel != nullptr) {
+        int hCol = -1, hRow = -1;
+        if (!m_uiContext.wantsMouse() &&
+            pickHexFromMouse(mouseX, mouseY, fbW, fbH, hCol, hRow)) {
+            m_hoveredHexCol = hCol;
+            m_hoveredHexRow = hRow;
+            m_hudTileInfoWindow->visible = true;
+
+            const odai::game::MapTile& tile = m_strategyMap.at(
+                static_cast<std::uint32_t>(hCol),
+                static_cast<std::uint32_t>(hRow));
+
+            std::string info = "<b><color=#ecd39a>";
+            info += terrainName(tile.terrain);
+            info += "</color></b>";
+            if (tile.elevation != 0) {
+                info += "\nElev. " + std::to_string(static_cast<int>(tile.elevation));
+            }
+            // Find settlement at this tile.
+            for (const auto& s : m_strategyMap.settlements) {
+                if (static_cast<int>(s.col) == hCol && static_cast<int>(s.row) == hRow) {
+                    info += "\n<color=#c0e8c0>" + s.name + "</color>";
+                    break;
+                }
+            }
+            if (tile.flags & odai::game::TileFlag_River) info += "\nRiver";
+            if (tile.flags & odai::game::TileFlag_Road)  info += "\nRoad";
+
+            m_hudTileInfoLabel->setText(info);
+        } else {
+            m_hoveredHexCol = -1;
+            m_hoveredHexRow = -1;
+            m_hudTileInfoWindow->visible = false;
+        }
     }
 
     m_uiContext.build(m_uiDrawList);
+
+    // Tooltip overlay: drawn after the widget tree (so it sits on top, unclipped),
+    // with an ease-in-out fade. Latch the text/anchor while hovering so the tooltip
+    // can keep fading out for a moment after the cursor leaves the term.
+    const bool tipActive = m_uiFontReady && m_civpediaView != nullptr && m_civpediaView->hasTooltip();
+    if (tipActive) {
+        m_lastTooltipText = m_civpediaView->tooltipText();
+        m_lastTooltipAnchor = m_civpediaView->tooltipAnchor();
+    }
+    m_tooltipFade.setTarget(tipActive ? 1.0f : 0.0f);
+    m_tooltipFade.update(dt);
+    const float tipAlpha = m_tooltipFade.eased();
+
+    if (tipAlpha > 0.001f && !m_lastTooltipText.empty()) {
+        const float s = m_uiScale;
+        const odai::ui::UiVec2 anchor = m_lastTooltipAnchor;
+        const odai::ui::FontSet& fonts = m_uiFonts;
+
+        const float padX = 10.0f * s;
+        const float padY = 8.0f * s;
+        const float maxW = 280.0f * s;
+        const odai::ui::RichTextLayout tip = odai::ui::layoutRichText(
+            m_lastTooltipText, odai::ui::UiColor{0.92f, 0.93f, 0.95f, 1.0f},
+            fonts, maxW - padX * 2.0f, odai::ui::UiTextAlign::Left);
+
+        const float boxW = tip.width + padX * 2.0f;
+        const float boxH = tip.height + padY * 2.0f;
+        float boxX = anchor.x + 16.0f * s;
+        float boxY = anchor.y + 18.0f * s;
+        // Clamp inside the framebuffer.
+        boxX = std::min(boxX, static_cast<float>(fbW) - boxW - 4.0f * s);
+        boxY = std::min(boxY, static_cast<float>(fbH) - boxH - 4.0f * s);
+        boxX = std::max(boxX, 4.0f * s);
+        boxY = std::max(boxY, 4.0f * s);
+
+        const odai::ui::UiRect box{boxX, boxY, boxX + boxW, boxY + boxH};
+        m_uiDrawList.pushOpacity(tipAlpha);
+        m_uiDrawList.addRectFilled(box, odai::ui::UiColor{0.05f, 0.07f, 0.10f, 0.96f});
+        m_uiDrawList.addRect(box, odai::ui::UiColor{0.85f, 0.62f, 0.30f, 0.75f}, 1.0f);
+        odai::ui::drawRichText(m_uiDrawList, tip, fonts, odai::ui::UiVec2{boxX + padX, boxY + padY});
+        m_uiDrawList.popOpacity();
+    }
+
     m_renderer.setUiDrawData(m_uiDrawList.data());
+
+    const auto uiBuildEnd = std::chrono::steady_clock::now();
+    const float uiBuildMs =
+        std::chrono::duration<float, std::milli>(uiBuildEnd - uiBuildStart).count();
+    m_uiBuildMsEma = (m_uiBuildMsEma <= 0.0f) ? uiBuildMs : (m_uiBuildMsEma * 0.95f + uiBuildMs * 0.05f);
+    if (++m_uiBuildLogCounter >= 120) {
+        m_uiBuildLogCounter = 0;
+        VOX_LOGD("ui") << "UI build CPU: " << m_uiBuildMsEma << " ms (ema), "
+                       << m_uiDrawList.data().vertices.size() << " verts, "
+                       << m_uiDrawList.data().commands.size() << " draws";
+    }
+}
+
+bool App::pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
+                           int& outCol, int& outRow) const {
+    if (!m_strategyMap.width || !m_strategyMap.height) return false;
+    if (fbW <= 0 || fbH <= 0) return false;
+
+    // Build camera basis from yaw/pitch (same convention as computeCameraForward).
+    const float yaw   = odai::math::radians(m_camera.yawDegrees);
+    const float pitch = odai::math::radians(m_camera.pitchDegrees);
+    const float cp = std::cos(pitch);
+    const float sp = std::sin(pitch);
+    const float cy = std::cos(yaw);
+    const float sy = std::sin(yaw);
+
+    // Forward, right, up in world space.
+    const float fwdX =  cy * cp,  fwdY = sp,   fwdZ = sy * cp;
+    const float rgtX = -sy,        rgtY = 0.0f, rgtZ = cy;
+    const float upX  = -cy * sp,  upY  = cp,   upZ  = -sy * sp;
+
+    // NDC of the mouse pixel (+Y up).
+    const float ndcX = static_cast<float>(mouseX) / static_cast<float>(fbW) * 2.0f - 1.0f;
+    const float ndcY = 1.0f - static_cast<float>(mouseY) / static_cast<float>(fbH) * 2.0f;
+
+    const float tanHalfFov = std::tan(odai::math::radians(m_camera.fovDegrees) * 0.5f);
+    const float aspect = static_cast<float>(fbW) / static_cast<float>(fbH);
+    const float scaleX = ndcX * tanHalfFov * aspect;
+    const float scaleY = ndcY * tanHalfFov;
+
+    float rdX = fwdX + rgtX * scaleX + upX * scaleY;
+    float rdY = fwdY + rgtY * scaleX + upY * scaleY;
+    float rdZ = fwdZ + rgtZ * scaleX + upZ * scaleY;
+    const float rdLen = std::sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
+    if (rdLen < 1e-6f) return false;
+    rdX /= rdLen; rdY /= rdLen; rdZ /= rdLen;
+
+    // Intersect with y = 0 (base hex plane).
+    if (std::abs(rdY) < 1e-4f) return false;
+    const float t = -m_camera.y / rdY;
+    if (t < 0.0f) return false;
+
+    const float wx = m_camera.x + t * rdX;
+    const float wz = m_camera.z + t * rdZ;
+
+    // World → approximate hex (col, row). Search a 3×3 neighborhood for the
+    // nearest center to handle the non-rectangular hex grid correctly.
+    const float hexSize = m_strategyMap.hexSize;
+    constexpr float kSqrt3 = 1.7320508075688772f;
+
+    const int approxRow = static_cast<int>(std::round(wz / (hexSize * 1.5f)));
+
+    float bestDist2 = 1e30f;
+    int bestCol = -1, bestRow = -1;
+    for (int dr = -1; dr <= 1; ++dr) {
+        const int r = approxRow + dr;
+        if (r < 0 || r >= static_cast<int>(m_strategyMap.height)) continue;
+        const float ro = (r & 1) ? 0.5f : 0.0f;
+        const int cBase = static_cast<int>(std::round(wx / (hexSize * kSqrt3) - ro));
+        for (int dc = -1; dc <= 1; ++dc) {
+            const int c = cBase + dc;
+            if (c < 0 || c >= static_cast<int>(m_strategyMap.width)) continue;
+            const auto ctr = odai::game::tileCenterWorld(
+                m_strategyMap, static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(r));
+            const float dx = ctr.x - wx, dz = ctr.z - wz;
+            const float d2 = dx*dx + dz*dz;
+            if (d2 < bestDist2) {
+                bestDist2 = d2;
+                bestCol = c;
+                bestRow = r;
+            }
+        }
+    }
+
+    if (bestCol < 0) return false;
+    outCol = bestCol;
+    outRow = bestRow;
+    return true;
 }
 
 } // namespace odai::app

@@ -39,8 +39,14 @@ public:
     // Register textures for use by UiDrawCmd::textureId. White (kUiNoTexture) is
     // created automatically in init(). Returns kUiNoTexture on failure.
     odai::ui::UiTextureId registerTextureRgba8(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
+    // Same as registerTextureRgba8 but generates a full mip chain via CPU box-filter.
+    // Use for large icons rendered much smaller than their source resolution.
+    odai::ui::UiTextureId registerTextureRgba8Mipmapped(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
     // Define/replace the font atlas (kUiFontAtlas), an R8 coverage atlas.
     bool setFontAtlasR8(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
+    // Register an additional R8 coverage atlas (e.g. bold/italic faces) under a
+    // fresh texture id. Returns kUiNoTexture on failure.
+    odai::ui::UiTextureId registerFontAtlasR8(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
 
     // Record the UI geometry into an already-begun rendering pass on `cmd`.
     void record(VkCommandBuffer cmd, std::uint32_t frameIndex, FrameArena& frameArena,
@@ -58,6 +64,8 @@ private:
     VkShaderModule loadShaderModule(const std::string& fileName) const;
     bool uploadTexturePixels(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height,
                              VkFormat format, std::uint32_t bytesPerPixel, Texture& outTexture);
+    bool uploadTexturePixelsMipmapped(const std::uint8_t* pixels, std::uint32_t width,
+                                      std::uint32_t height, Texture& outTexture);
     VkDescriptorSet allocateTextureDescriptor(VkImageView view);
     void destroyTexture(Texture& texture);
 

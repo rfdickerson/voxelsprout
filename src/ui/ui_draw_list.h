@@ -45,6 +45,19 @@ struct UiDrawData {
     [[nodiscard]] bool empty() const { return commands.empty(); }
 };
 
+// A reusable, pre-generated chunk of UI geometry in local coordinates (origin at
+// 0,0). Cached by a widget so an unchanged frame can re-emit it via
+// UiDrawList::appendCached without re-running text layout or quad generation.
+// Indices are 0-based into `vertices`; command clip rects are ignored on replay
+// (the live clip from the draw list is applied instead).
+struct UiGeometryBlock {
+    std::vector<UiVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    std::vector<UiDrawCmd> commands;
+
+    [[nodiscard]] bool empty() const { return commands.empty(); }
+};
+
 // A 9-slice (scalable border) source description. Corner insets are given both
 // in destination pixels (how big the corners are drawn) and in UV fractions of
 // the source sub-rect (which texels map to the corners).
@@ -92,6 +105,13 @@ public:
     void popClip();
     [[nodiscard]] const UiRect& currentClip() const { return m_clipStack.back(); }
 
+    // Opacity stack: multiplies the alpha of all subsequently emitted geometry
+    // (nested multiplicatively). Used to fade widgets/overlays in and out. Applied
+    // by addQuad and appendCached, so cached geometry fades correctly too.
+    void pushOpacity(float opacity);
+    void popOpacity();
+    [[nodiscard]] float currentOpacity() const;
+
     [[nodiscard]] const UiDrawData& data() const { return m_data; }
     [[nodiscard]] UiDrawData& data() { return m_data; }
 
@@ -100,6 +120,11 @@ public:
     void addQuad(const UiRect& dst, const UiRect& uv, std::uint32_t rgba8, UiDrawMode mode,
                  UiTextureId textureId);
 
+    // Append a cached geometry block, translating its vertices by `translate` and
+    // re-emitting its commands under the current clip (rebasing indices). Lets a
+    // widget skip layout + quad generation when nothing but position changed.
+    void appendCached(const UiGeometryBlock& block, const UiVec2& translate);
+
 private:
     // Ensure the current command matches (textureId, current clip); start a new
     // one otherwise. Returns the index base for appended geometry.
@@ -107,6 +132,7 @@ private:
 
     UiDrawData m_data;
     std::vector<UiRect> m_clipStack;
+    std::vector<float> m_opacityStack;
 };
 
 }  // namespace odai::ui

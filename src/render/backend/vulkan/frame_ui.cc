@@ -78,6 +78,22 @@ bool RendererBackend::setUiFontAtlas(const std::uint8_t* pixels, std::uint32_t w
     return m_uiRenderer.setFontAtlasR8(pixels, width, height);
 }
 
+odai::ui::UiTextureId RendererBackend::registerUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width,
+                                                           std::uint32_t height) {
+    return m_uiRenderer.registerFontAtlasR8(pixels, width, height);
+}
+
+odai::ui::UiTextureId RendererBackend::registerUiTextureRgba8(const std::uint8_t* pixels, std::uint32_t width,
+                                                              std::uint32_t height) {
+    return m_uiRenderer.registerTextureRgba8(pixels, width, height);
+}
+
+odai::ui::UiTextureId RendererBackend::registerUiTextureRgba8Mipmapped(const std::uint8_t* pixels,
+                                                                         std::uint32_t width,
+                                                                         std::uint32_t height) {
+    return m_uiRenderer.registerTextureRgba8Mipmapped(pixels, width, height);
+}
+
 
 bool RendererBackend::isDebugUiVisible() const {
     return m_debugUiVisible && m_showFrameStatsPanel;
@@ -889,6 +905,7 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::Text("SSAO Blur: %.2f", m_debugGpuSsaoBlurTimeMs);
             ImGui::Text("Main: %.2f", m_debugGpuMainTimeMs);
             ImGui::Text("Post: %.2f", m_debugGpuPostTimeMs);
+            ImGui::Text("UI: %.2f", m_debugGpuUiTimeMs);
             ImGui::TreePop();
         }
         if (ImGui::TreeNodeEx("Draw Calls", ImGuiTreeNodeFlags_DefaultOpen)) {

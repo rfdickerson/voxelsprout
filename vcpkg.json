@@ -11,6 +11,7 @@
         "vulkan-binding"
       ]
     },
+    "nlohmann-json",
     "stb",
     "vulkan",
     "vulkan-memory-allocator"

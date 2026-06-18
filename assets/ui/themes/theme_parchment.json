@@ -1,0 +1,43 @@
+{
+  "name": "AncientParchment",
+  "fonts": {
+    "body":      { "path": "assets/fonts/EBGaramond-Medium.ttf",      "size": 18 },
+    "bold":      { "path": "assets/fonts/EBGaramond-Bold.ttf",        "size": 18 },
+    "italic":    { "path": "assets/fonts/EBGaramond-MediumItalic.ttf","size": 18 },
+    "boldItalic":{ "path": "assets/fonts/EBGaramond-BoldItalic.ttf",  "size": 18 },
+    "heading":   { "path": "assets/fonts/EBGaramond-Bold.ttf",        "size": 24 },
+    "caption":   { "path": "assets/fonts/EBGaramond-Medium.ttf",      "size": 14 }
+  },
+  "colors": {
+    "text":           "#E8D9B0",
+    "text.dim":       "#A08060",
+    "text.positive":  "#7EC850",
+    "text.negative":  "#E05050",
+    "text.gold":      "#F0C040",
+    "panel.bg":       "#2C1F0E",
+    "panel.border":   "#7A5C2A",
+    "accent":         "#C8963A",
+    "accent.hover":   "#E0B050",
+    "tooltip.bg":     "#1E140A",
+    "selection":      "#60401880",
+    "scrollbar":      "#7A5C2A60",
+    "scrollbar.bg":   "#00000030"
+  },
+  "frames": {
+    "Panel.Default":  { "texture": "assets/ui/frames/parchment_panel.png", "border": [12, 12, 12, 12] },
+    "Panel.Inset":    { "texture": "assets/ui/frames/parchment_inset.png",  "border": [8,  8,  8,  8] },
+    "Tooltip":        { "texture": "assets/ui/frames/tooltip_parchment.png","border": [6,  6,  6,  6] },
+    "Button.Default": { "texture": "assets/ui/frames/button_parchment.png", "border": [8,  8,  8,  8] }
+  },
+  "icons": {
+    "religion": { "path": "assets/icons/religion.png" }
+  },
+  "sizes": {
+    "padding":       [12, 8],
+    "titleBarH":     30,
+    "gap":           6,
+    "iconSize":      20,
+    "borderRadius":  4,
+    "scrollBarW":    6
+  }
+}

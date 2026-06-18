@@ -207,6 +207,9 @@ public:
     void setGameplayUiState(const GameplayUiState& state);
     void setUiDrawData(const odai::ui::UiDrawData& drawData);
     bool setUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
+    odai::ui::UiTextureId registerUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
+    odai::ui::UiTextureId registerUiTextureRgba8(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
+    odai::ui::UiTextureId registerUiTextureRgba8Mipmapped(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
     void renderFrame(
         const odai::world::ChunkGrid& chunkGrid,
         const odai::sim::Simulation& simulation,
@@ -244,7 +247,7 @@ public:
     void shutdown();
 
 private:
-    static constexpr uint32_t kMaxFramesInFlight = 3;
+    static constexpr uint32_t kMaxFramesInFlight = 2;
     static constexpr uint32_t kShadowCascadeCount = 4;
     static constexpr uint32_t kShadowAtlasSize = 8192;
     static constexpr int kGrassActiveChunkRadius = 1;
@@ -286,7 +289,9 @@ private:
     static constexpr uint32_t kGpuTimestampQueryPostStart = 31;
     static constexpr uint32_t kGpuTimestampQueryPostEnd = 32;
     static constexpr uint32_t kGpuTimestampQueryFrameEnd = 33;
-    static constexpr uint32_t kGpuTimestampQueryCount = 34;
+    static constexpr uint32_t kGpuTimestampQueryUiStart = 34;
+    static constexpr uint32_t kGpuTimestampQueryUiEnd = 35;
+    static constexpr uint32_t kGpuTimestampQueryCount = 36;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
     static constexpr std::size_t kMainDescriptorWriteKeyWordCount = 26;
     static constexpr std::size_t kVoxelGiDescriptorWriteKeyWordCount = 27;
@@ -1182,6 +1187,7 @@ private:
     float m_debugGpuSsaoBlurTimeMs = 0.0f;
     float m_debugGpuMainTimeMs = 0.0f;
     float m_debugGpuPostTimeMs = 0.0f;
+    float m_debugGpuUiTimeMs = 0.0f;
     float m_debugResolvedExposure = 1.0f;
     float m_debugTargetExposure = 1.0f;
     float m_debugAverageSceneLuminance = 1.0f;

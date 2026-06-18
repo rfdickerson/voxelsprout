@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ui/ui_draw_list.h"
 #include "ui/ui_input.h"
 #include "ui/ui_types.h"
 
@@ -10,8 +11,6 @@
 // Layout is absolute: each widget is given a rect; containers position children
 // by assigning rects when the tree is built. Vertical/auto layout is a follow-on.
 namespace odai::ui {
-
-class UiDrawList;
 
 struct UiEvent {
     enum class Type { MouseMove, MouseDown, MouseUp, Scroll, Text };
@@ -29,6 +28,15 @@ public:
 
     void setRect(const UiRect& rect) { rect_ = rect; }
     [[nodiscard]] const UiRect& rect() const { return rect_; }
+
+    // Shift this widget and all descendants by (dx, dy). Used to move a window and
+    // its content together when the title bar is dragged.
+    void translate(float dx, float dy) {
+        rect_ = UiRect{rect_.minX + dx, rect_.minY + dy, rect_.maxX + dx, rect_.maxY + dy};
+        for (const std::unique_ptr<Widget>& child : children_) {
+            child->translate(dx, dy);
+        }
+    }
 
     Widget* addChild(std::unique_ptr<Widget> child) {
         Widget* raw = child.get();
@@ -68,12 +76,21 @@ public:
     }
 
     bool visible = true;
+    float opacity = 1.0f;  // Drives fades; multiplies this widget's drawn alpha.
 
 protected:
     void drawChildren(UiDrawList& drawList) const {
         for (const std::unique_ptr<Widget>& child : children_) {
-            if (child->visible) {
-                child->draw(drawList);
+            if (!child->visible || child->opacity <= 0.0f) {
+                continue;
+            }
+            const bool fade = child->opacity < 1.0f;
+            if (fade) {
+                drawList.pushOpacity(child->opacity);
+            }
+            child->draw(drawList);
+            if (fade) {
+                drawList.popOpacity();
             }
         }
     }

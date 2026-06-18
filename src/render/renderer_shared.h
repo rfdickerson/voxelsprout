@@ -1344,16 +1344,37 @@ VkSurfaceFormatKHR chooseSwapchainFormat(const std::vector<VkSurfaceFormatKHR>& 
     return formats.front();
 }
 
-VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR>& presentModes) {
-    const bool fifoAdvertised = std::find(
-        presentModes.begin(),
-        presentModes.end(),
-        VK_PRESENT_MODE_FIFO_KHR
-    ) != presentModes.end();
-    if (!fifoAdvertised) {
-        VOX_LOGW("render") << "surface did not advertise FIFO present mode; forcing VK_PRESENT_MODE_FIFO_KHR";
+inline const char* presentModeName(VkPresentModeKHR mode) {
+    switch (mode) {
+        case VK_PRESENT_MODE_MAILBOX_KHR:      return "MAILBOX";
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "FIFO_RELAXED";
+        case VK_PRESENT_MODE_IMMEDIATE_KHR:    return "IMMEDIATE";
+        case VK_PRESENT_MODE_FIFO_KHR:         return "FIFO";
+        default:                               return "UNKNOWN";
     }
-    return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR>& presentModes) {
+    const auto has = [&](VkPresentModeKHR mode) {
+        return std::find(presentModes.begin(), presentModes.end(), mode) != presentModes.end();
+    };
+    // Prefer clean vsync (dual buffering) for steady pacing and no tearing:
+    //   FIFO_RELAXED  - vsynced; if a frame is late it presents immediately rather
+    //                   than waiting a full extra vblank (best of both worlds).
+    //   FIFO          - strict vsync; guaranteed by spec.
+    //   MAILBOX       - vsynced but requires a third image and wastes GPU on
+    //                   frames that get discarded.
+    //   IMMEDIATE     - no vsync fallback (tears; uncapped frame rate).
+    if (has(VK_PRESENT_MODE_FIFO_RELAXED_KHR)) {
+        return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+    }
+    if (has(VK_PRESENT_MODE_FIFO_KHR)) {
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+    if (has(VK_PRESENT_MODE_MAILBOX_KHR)) {
+        return VK_PRESENT_MODE_MAILBOX_KHR;
+    }
+    return VK_PRESENT_MODE_IMMEDIATE_KHR;
 }
 
 VkExtent2D chooseExtent(GLFWwindow* window, const VkSurfaceCapabilitiesKHR& capabilities) {

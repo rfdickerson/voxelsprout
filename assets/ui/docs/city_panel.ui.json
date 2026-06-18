@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "type": "Panel",
+  "id": "city_panel",
+  "x": 0, "y": 0, "width": 420, "height": 600,
+  "background": "panel.bg",
+  "frame": "Panel.Default",
+  "children": [
+    {
+      "type": "Label",
+      "id": "city_name",
+      "text": "{city.name}",
+      "style": "heading",
+      "x": 12, "y": 12, "width": 396, "height": 34
+    },
+    {
+      "type": "Label",
+      "id": "city_owner",
+      "text": "{city.owner}",
+      "style": "caption",
+      "color": "#A08060",
+      "x": 12, "y": 50, "width": 200, "height": 20
+    },
+    {
+      "type": "HorizontalStack",
+      "id": "yield_row",
+      "gap": 16,
+      "x": 12, "y": 80, "width": 396, "height": 28,
+      "children": [
+        { "type": "Label", "text": "[icon=food] {city.foodPerTurn:+0}",       "width": 60, "height": 28 },
+        { "type": "Label", "text": "[icon=gold] {city.goldPerTurn:+0}",       "width": 60, "height": 28 },
+        { "type": "Label", "text": "[icon=production] {city.productionPerTurn:+0}", "width": 80, "height": 28 },
+        { "type": "Label", "text": "[icon=science] {city.sciencePerTurn:+0}", "width": 60, "height": 28 }
+      ]
+    },
+    {
+      "type": "ProgressBar",
+      "id": "health_bar",
+      "value": 0.72,
+      "x": 12, "y": 120, "width": 396, "height": 12,
+      "foreground": "#7EC850",
+      "background": "#331100"
+    },
+    {
+      "type": "Label",
+      "id": "construction_label",
+      "text": "Building: <b>{city.currentConstruction}</b> — {city.constructionTurnsLeft} turns",
+      "x": 12, "y": 142, "width": 396, "height": 24
+    },
+    {
+      "type": "ScrollView",
+      "id": "buildings_scroll",
+      "x": 12, "y": 178, "width": 396, "height": 300,
+      "childGap": 4,
+      "children": []
+    },
+    {
+      "type": "Label",
+      "id": "description",
+      "text": "{city.description}",
+      "x": 12, "y": 490, "width": 396, "height": 98
+    }
+  ]
+}

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -16,6 +17,31 @@ struct UiPushConstants {
     float invScreenSize[2];
     float pad[2];
 };
+
+// Box-filter 2x2 → 1 downsample for one RGBA8 mip level.
+// Handles odd dimensions by clamping the second sample coordinate.
+std::vector<std::uint8_t> downsampleRgba8(const std::uint8_t* src, std::uint32_t w, std::uint32_t h) {
+    const std::uint32_t nw = std::max(1u, w / 2u);
+    const std::uint32_t nh = std::max(1u, h / 2u);
+    std::vector<std::uint8_t> dst(nw * nh * 4u);
+    for (std::uint32_t y = 0; y < nh; ++y) {
+        const std::uint32_t sy0 = 2u * y;
+        const std::uint32_t sy1 = std::min(sy0 + 1u, h - 1u);
+        for (std::uint32_t x = 0; x < nw; ++x) {
+            const std::uint32_t sx0 = 2u * x;
+            const std::uint32_t sx1 = std::min(sx0 + 1u, w - 1u);
+            for (int c = 0; c < 4; ++c) {
+                const std::uint32_t sum =
+                    src[(sy0 * w + sx0) * 4u + c] +
+                    src[(sy0 * w + sx1) * 4u + c] +
+                    src[(sy1 * w + sx0) * 4u + c] +
+                    src[(sy1 * w + sx1) * 4u + c];
+                dst[(y * nw + x) * 4u + c] = static_cast<std::uint8_t>(sum / 4u);
+            }
+        }
+    }
+    return dst;
+}
 
 }  // namespace
 
@@ -31,11 +57,11 @@ bool UiRenderer::init(const InitInfo& info) {
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     samplerInfo.magFilter = VK_FILTER_LINEAR;
     samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.maxLod = 0.0f;
+    samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
     samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
     if (vkCreateSampler(m_info.device, &samplerInfo, nullptr, &m_sampler) != VK_SUCCESS) {
         VOX_LOGE("ui") << "failed to create UI sampler";
@@ -57,7 +83,7 @@ bool UiRenderer::init(const InitInfo& info) {
         return false;
     }
 
-    constexpr std::uint32_t kMaxUiTextures = 64;
+    constexpr std::uint32_t kMaxUiTextures = 256;
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSize.descriptorCount = kMaxUiTextures;
@@ -348,11 +374,9 @@ bool UiRenderer::uploadTexturePixels(const std::uint8_t* pixels, std::uint32_t w
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = format;
     viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    if (format == VK_FORMAT_R8_UNORM) {
-        // Replicate coverage into rgb so the shader's .r read is unambiguous.
-        viewInfo.components = {VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_ONE,
-                               VK_COMPONENT_SWIZZLE_R};
-    }
+    // Identity swizzle: for R8_UNORM the shader's `.r` read returns the stored
+    // glyph coverage directly. (An earlier swizzle mapped R->ONE, which made every
+    // glyph texel sample as fully opaque -- text rendered as solid blocks.)
     if (vkCreateImageView(m_info.device, &viewInfo, nullptr, &outTexture.view) != VK_SUCCESS) {
         return false;
     }
@@ -396,6 +420,160 @@ odai::ui::UiTextureId UiRenderer::registerTextureRgba8(const std::uint8_t* pixel
     return id;
 }
 
+bool UiRenderer::uploadTexturePixelsMipmapped(const std::uint8_t* pixels, std::uint32_t width,
+                                               std::uint32_t height, Texture& outTexture) {
+    if (width == 0 || height == 0 || pixels == nullptr) return false;
+
+    const std::uint32_t mipLevels = std::bit_width(std::max(width, height));
+
+    // Generate all mip levels in CPU memory.
+    std::vector<std::vector<std::uint8_t>> mips;
+    mips.reserve(mipLevels);
+    mips.emplace_back(pixels, pixels + static_cast<std::size_t>(width) * height * 4u);
+    std::uint32_t mw = width, mh = height;
+    for (std::uint32_t i = 1; i < mipLevels; ++i) {
+        mips.push_back(downsampleRgba8(mips.back().data(), mw, mh));
+        mw = std::max(1u, mw / 2u);
+        mh = std::max(1u, mh / 2u);
+    }
+
+    // Compute per-level offsets into the staging buffer.
+    std::vector<VkDeviceSize> offsets(mipLevels);
+    VkDeviceSize totalBytes = 0;
+    mw = width; mh = height;
+    for (std::uint32_t i = 0; i < mipLevels; ++i) {
+        offsets[i] = totalBytes;
+        totalBytes += static_cast<VkDeviceSize>(mw) * mh * 4u;
+        mw = std::max(1u, mw / 2u);
+        mh = std::max(1u, mh / 2u);
+    }
+
+    // Pack all mip data into one staging buffer.
+    std::vector<std::uint8_t> stagingData(static_cast<std::size_t>(totalBytes));
+    mw = width; mh = height;
+    for (std::uint32_t i = 0; i < mipLevels; ++i) {
+        const std::size_t levelBytes = static_cast<std::size_t>(mw) * mh * 4u;
+        std::memcpy(stagingData.data() + offsets[i], mips[i].data(), levelBytes);
+        mw = std::max(1u, mw / 2u);
+        mh = std::max(1u, mh / 2u);
+    }
+
+    BufferCreateDesc stagingDesc{};
+    stagingDesc.size = totalBytes;
+    stagingDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    stagingDesc.initialData = stagingData.data();
+    const BufferHandle staging = m_info.bufferAllocator->createBuffer(stagingDesc);
+    if (staging == kInvalidBufferHandle) return false;
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageInfo.extent = {width, height, 1};
+    imageInfo.mipLevels = mipLevels;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    if (vmaCreateImage(m_info.vmaAllocator, &imageInfo, &allocInfo, &outTexture.image, &outTexture.allocation,
+                       nullptr) != VK_SUCCESS) {
+        m_info.bufferAllocator->destroyBuffer(staging);
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo cmdAlloc{};
+    cmdAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAlloc.commandPool = m_uploadPool;
+    cmdAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAlloc.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(m_info.device, &cmdAlloc, &cmd);
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    // Transition all mip levels to TRANSFER_DST in one barrier.
+    VkImageMemoryBarrier toCopy{};
+    toCopy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toCopy.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toCopy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toCopy.image = outTexture.image;
+    toCopy.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1};
+    toCopy.srcAccessMask = 0;
+    toCopy.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toCopy);
+
+    // Copy each mip level from the staging buffer.
+    mw = width; mh = height;
+    for (std::uint32_t i = 0; i < mipLevels; ++i) {
+        VkBufferImageCopy copy{};
+        copy.bufferOffset = offsets[i];
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1};
+        copy.imageExtent = {mw, mh, 1};
+        vkCmdCopyBufferToImage(cmd, m_info.bufferAllocator->getBuffer(staging), outTexture.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        mw = std::max(1u, mw / 2u);
+        mh = std::max(1u, mh / 2u);
+    }
+
+    // Transition all mip levels to SHADER_READ_ONLY.
+    VkImageMemoryBarrier toShader = toCopy;
+    toShader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toShader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toShader);
+
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+    vkCreateFence(m_info.device, &fenceInfo, nullptr, &fence);
+    vkQueueSubmit(m_info.uploadQueue, 1, &submit, fence);
+    vkWaitForFences(m_info.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(m_info.device, fence, nullptr);
+    vkFreeCommandBuffers(m_info.device, m_uploadPool, 1, &cmd);
+    m_info.bufferAllocator->destroyBuffer(staging);
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = outTexture.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1};
+    if (vkCreateImageView(m_info.device, &viewInfo, nullptr, &outTexture.view) != VK_SUCCESS) {
+        return false;
+    }
+    outTexture.descriptorSet = allocateTextureDescriptor(outTexture.view);
+    return outTexture.descriptorSet != VK_NULL_HANDLE;
+}
+
+odai::ui::UiTextureId UiRenderer::registerTextureRgba8Mipmapped(const std::uint8_t* pixels,
+                                                                  std::uint32_t width,
+                                                                  std::uint32_t height) {
+    Texture texture{};
+    if (!uploadTexturePixelsMipmapped(pixels, width, height, texture)) {
+        return odai::ui::kUiNoTexture;
+    }
+    const odai::ui::UiTextureId id = m_nextTextureId++;
+    m_textures[id] = texture;
+    return id;
+}
+
 bool UiRenderer::setFontAtlasR8(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height) {
     const auto existing = m_textures.find(odai::ui::kUiFontAtlas);
     if (existing != m_textures.end()) {
@@ -408,6 +586,17 @@ bool UiRenderer::setFontAtlasR8(const std::uint8_t* pixels, std::uint32_t width,
     }
     m_textures[odai::ui::kUiFontAtlas] = texture;
     return true;
+}
+
+odai::ui::UiTextureId UiRenderer::registerFontAtlasR8(const std::uint8_t* pixels, std::uint32_t width,
+                                                      std::uint32_t height) {
+    Texture texture{};
+    if (!uploadTexturePixels(pixels, width, height, VK_FORMAT_R8_UNORM, 1, texture)) {
+        return odai::ui::kUiNoTexture;
+    }
+    const odai::ui::UiTextureId id = m_nextTextureId++;
+    m_textures[id] = texture;
+    return id;
 }
 
 void UiRenderer::record(VkCommandBuffer cmd, std::uint32_t /*frameIndex*/, FrameArena& frameArena,
