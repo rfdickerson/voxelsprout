@@ -722,6 +722,23 @@ bool RendererBackend::createPipePipeline() {
               << ", rtVariant=" << (importedStaticPipelineRt != VK_NULL_HANDLE ? "yes" : "no")
               << "\n";
 
+    if (m_strategyMapMode) {
+        if (m_pipePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_pipePipeline, nullptr); }
+        if (m_importedStaticPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr); }
+        if (m_importedStaticPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr); }
+        m_pipePipeline = pipePipeline;
+        m_importedStaticPipeline = importedStaticPipeline;
+        m_importedStaticPipelineRt = importedStaticPipelineRt;
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipePipeline), "pipeline.pipe.lit");
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipeline), "pipeline.importedStatic");
+        if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
+            setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipelineRt), "pipeline.importedStatic.rt");
+        }
+        m_rtMainPassImplemented = m_rayTracingRuntimeEnabled && (m_importedStaticPipelineRt != VK_NULL_HANDLE);
+        refreshShadowStats();
+        return true;
+    }
+
     std::array<VkShaderModule, 2> skyCloudShaderModules = {
         VK_NULL_HANDLE,
         VK_NULL_HANDLE
@@ -2774,6 +2791,8 @@ bool RendererBackend::createGraphicsPipeline() {
               << ", depthBias=" << (grassShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
               << "\n";
 
+    VkPipeline terrainTessPipeline = VK_NULL_HANDLE;
+    if (!m_strategyMapMode) {
     std::array<VkShaderModule, 4> terrainShaderModules = {
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
@@ -2859,7 +2878,6 @@ bool RendererBackend::createGraphicsPipeline() {
     terrainPipelineCreateInfo.pTessellationState = &terrainTessellationState;
     terrainPipelineCreateInfo.pRasterizationState = &terrainRasterizer;
 
-    VkPipeline terrainTessPipeline = VK_NULL_HANDLE;
     const VkResult terrainPipelineResult = vkCreateGraphicsPipelines(
         m_device,
         VK_NULL_HANDLE,
@@ -2878,6 +2896,7 @@ bool RendererBackend::createGraphicsPipeline() {
               << ", patchControlPoints=" << terrainTessellationState.patchControlPoints
               << ", cullMode=" << static_cast<uint32_t>(terrainRasterizer.cullMode)
               << "\n";
+    } // if (!m_strategyMapMode) terrain block
 
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
@@ -2953,7 +2972,7 @@ bool RendererBackend::createGraphicsPipeline() {
         vkHandleToUint64(m_previewFaceOutlinePipeline),
         "pipeline.preview.faceOutline"
     );
-    if (!createMagicaPipeline()) {
+    if (!m_strategyMapMode && !createMagicaPipeline()) {
         VOX_LOGE("render") << "createGraphicsPipeline failed: createMagicaPipeline\n";
         return false;
     }

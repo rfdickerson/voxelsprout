@@ -16,6 +16,10 @@
 
 struct GLFWwindow;
 
+namespace odai::ui {
+struct UiDrawData;
+}
+
 namespace odai::render {
 
 class RendererBackend;
@@ -43,7 +47,12 @@ public:
     bool useSpatialPartitioningQueries() const;
     odai::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
+    void setStrategyMapMode(bool enabled);
     void setGameplayUiState(const GameplayUiState& state);
+    // Hand the renderer the UI geometry to draw over the scene this frame.
+    void setUiDrawData(const odai::ui::UiDrawData& drawData);
+    // Upload the UI font's R8 coverage atlas (call once after init / on font change).
+    bool setUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
     void renderFrame(
         const odai::world::ChunkGrid& chunkGrid,
         const odai::sim::Simulation& simulation,

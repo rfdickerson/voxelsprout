@@ -11,6 +11,7 @@
         "vulkan-binding"
       ]
     },
+    "stb",
     "vulkan",
     "vulkan-memory-allocator"
   ]

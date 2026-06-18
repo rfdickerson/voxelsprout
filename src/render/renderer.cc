@@ -76,8 +76,20 @@ void Renderer::setSpatialQueryStats(bool used, const odai::world::SpatialQuerySt
     m_backend->setSpatialQueryStats(used, stats, visibleChunkCount);
 }
 
+void Renderer::setStrategyMapMode(bool enabled) {
+    m_backend->setStrategyMapMode(enabled);
+}
+
 void Renderer::setGameplayUiState(const GameplayUiState& state) {
     m_backend->setGameplayUiState(state);
+}
+
+void Renderer::setUiDrawData(const odai::ui::UiDrawData& drawData) {
+    m_backend->setUiDrawData(drawData);
+}
+
+bool Renderer::setUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height) {
+    return m_backend->setUiFontAtlas(pixels, width, height);
 }
 
 void Renderer::renderFrame(

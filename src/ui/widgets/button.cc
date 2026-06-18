@@ -1,0 +1,79 @@
+#include "ui/widgets/button.h"
+
+namespace odai::ui {
+
+void Button::setEnabled(bool enabled) {
+    enabled_ = enabled;
+    if (!enabled_) {
+        hovered_ = false;
+        pressedInside_ = false;
+        state_ = State::Disabled;
+    } else if (state_ == State::Disabled) {
+        state_ = State::Normal;
+    }
+}
+
+UiColor Button::backgroundForState() const {
+    switch (state_) {
+        case State::Hover:    return colorHover;
+        case State::Pressed:  return colorPressed;
+        case State::Disabled: return colorDisabled;
+        case State::Normal:   break;
+    }
+    return colorNormal;
+}
+
+void Button::draw(UiDrawList& drawList) const {
+    drawList.addRectFilled(rect_, backgroundForState());
+    if (borderThicknessPx > 0.0f && borderColor.a > 0.0f) {
+        drawList.addRect(rect_, borderColor, borderThicknessPx);
+    }
+    if (font_ != nullptr && !label_.empty()) {
+        const float textWidth = font_->measureText(label_);
+        const float textX = rect_.minX + ((rect_.width() - textWidth) * 0.5f);
+        const float textY = rect_.minY + ((rect_.height() - font_->lineHeightPx()) * 0.5f);
+        drawList.pushClip(rect_);
+        drawList.addText(*font_, label_, UiVec2{textX, textY}, labelColor);
+        drawList.popClip();
+    }
+}
+
+bool Button::onEvent(UiEvent& event) {
+    if (!enabled_) {
+        return false;
+    }
+    const bool inside = rect_.contains(event.mousePx);
+    switch (event.type) {
+        case UiEvent::Type::MouseMove:
+            hovered_ = inside;
+            if (!pressedInside_) {
+                state_ = inside ? State::Hover : State::Normal;
+            }
+            return false;
+        case UiEvent::Type::MouseDown:
+            if (inside && event.button == UiMouseButton::Left) {
+                pressedInside_ = true;
+                state_ = State::Pressed;
+                event.handled = true;
+                return true;
+            }
+            return false;
+        case UiEvent::Type::MouseUp:
+            if (event.button == UiMouseButton::Left && pressedInside_) {
+                pressedInside_ = false;
+                state_ = inside ? State::Hover : State::Normal;
+                event.handled = true;
+                if (inside && onClick_) {
+                    onClick_();
+                }
+                return true;
+            }
+            return false;
+        case UiEvent::Type::Scroll:
+        case UiEvent::Type::Text:
+            return false;
+    }
+    return false;
+}
+
+}  // namespace odai::ui

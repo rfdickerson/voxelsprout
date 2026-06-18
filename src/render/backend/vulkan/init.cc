@@ -232,7 +232,7 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
-    if (!runStep("createAoPipelines", [&] { return createAoPipelines(); })) {
+    if (!m_strategyMapMode && !runStep("createAoPipelines", [&] { return createAoPipelines(); })) {
         VOX_LOGE("render") << "init failed at createAoPipelines\n";
         shutdown();
         return false;
@@ -269,6 +269,22 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
     }
     if (!runStep("createImGuiResources", [&] { return createImGuiResources(); })) {
         VOX_LOGE("render") << "init failed at createImGuiResources\n";
+        shutdown();
+        return false;
+    }
+    if (!runStep("createUiRenderer", [&] {
+            UiRenderer::InitInfo uiInfo{};
+            uiInfo.device = m_device;
+            uiInfo.physicalDevice = m_physicalDevice;
+            uiInfo.vmaAllocator = m_vmaAllocator;
+            uiInfo.bufferAllocator = &m_bufferAllocator;
+            uiInfo.uploadQueue = m_graphicsQueue;
+            uiInfo.uploadQueueFamily = m_graphicsQueueFamilyIndex;
+            uiInfo.colorFormat = m_swapchainFormat;
+            uiInfo.shaderDir = "../src/render/shaders";
+            return m_uiRenderer.init(uiInfo);
+        })) {
+        VOX_LOGE("render") << "init failed at createUiRenderer\n";
         shutdown();
         return false;
     }
@@ -1966,6 +1982,7 @@ void RendererBackend::shutdown() {
     }
 
     if (m_device != VK_NULL_HANDLE) {
+        m_uiRenderer.shutdown();
         destroyImGuiResources();
         destroyFrameResources();
         destroyGpuTimestampResources();

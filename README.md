@@ -107,6 +107,130 @@ This currently validates imported-scene save/load round-tripping and terrain OBJ
 4. Optionally inspect `balmora_terrain.obj`
 5. Continue implementing NIF mesh import and runtime Vulkan rendering
 
+## Strategic Map Prototype
+
+The repo also hosts the first vertical slice of a Civ / Total War-inspired strategy
+layer: an explorable 3D hex map rendered with the existing Vulkan engine. It is a
+small, self-contained game layer that reuses the imported-scene render path, so no
+renderer or shader changes were required.
+
+### Architecture
+
+Game code lives under `src/game/` and stays free of any Vulkan/renderer types
+(the engine's reusable code remains in `core/`, `math/`, `render/`, `world/`,
+`import/`; offline generators in `tools/`; tests in `tests/`):
+
+- `src/game/strategy_map.{h,cc}` — the data model: a pointy-top hex grid in odd-r
+  offset coordinates, per-tile terrain type, elevation, river/road/border flags,
+  fog-of-war visibility, territory owner, and settlement markers. Pure CPU data.
+- `src/game/strategy_map_io.{h,cc}` — versioned binary serialization (`.smap`).
+- `src/game/strategy_map_mesh.{h,cc}` — meshes a map into an `ImportedScene`
+  (terrain prisms colored per terrain, a debug grid overlay, and settlement
+  markers) using the engine's packed vertex-color render stream.
+
+The map is drawn by feeding the meshed scene to the existing imported-scene
+pipeline, which already provides an angled camera and free-fly pan/zoom/orbit.
+
+### Build
+
+```powershell
+cmake -S . -B cmake-build-release
+cmake --build cmake-build-release --target odai_strategy_map_gen
+cmake --build cmake-build-release --target odai_strategy_map_tests
+cmake --build cmake-build-release --target odai            # the runtime viewer
+```
+
+Tools and tests also build on Linux/WSL2 with `-DODAI_BUILD_TOOLS=ON
+-DBUILD_TESTING=ON` (see the tool-only build above).
+
+### Generate and view a map
+
+```powershell
+# 1. Generate a sample hex map: writes strategy_map.smap and strategy_map_scene.bin
+#    Optional args: <smap> <bin> <width> <height> <seed>
+cmake-build-release\odai_strategy_map_gen.exe
+
+# 2. Run the viewer. The app loads strategy_map.smap from the working directory,
+#    or set ODAI_STRATEGY_MAP to an explicit path.
+$env:ODAI_STRATEGY_MAP = "strategy_map.smap"
+cmake-build-release\odai.exe
+```
+
+Camera controls reuse the imported-scene fly camera: `WASD` to pan, mouse to
+orbit/look, `Space` to rise and `Shift` to descend (altitude "zoom"), and `Ctrl`
+to move faster.
+
+The generated `strategy_map_scene.bin` is also a plain imported scene, so it can
+alternatively be viewed via `ODAI_IMPORTED_SCENE=strategy_map_scene.bin` with no
+strategy-map support compiled in.
+
+### Tests
+
+```powershell
+cmake-build-release\odai_strategy_map_tests.exe
+# or via CTest:
+ctest --test-dir cmake-build-release -R odai_strategy_map_tests
+```
+
+Covers hex indexing/bounds, neighbor symmetry, hex geometry (corner distance and
+elevation), `.smap` serialization round-trip, malformed-file rejection, and that
+the mesher produces a valid, terrain-colored, renderable scene.
+
+### Known limitations
+
+- Square topology was not implemented; the model is hex-only for now.
+- Rivers/roads are shown as tile tint and borders as colored hex edges, rather
+  than true edge-following river/road geometry.
+- The map is meshed offline by the generator and at app startup; there is no
+  in-app map editing or live regeneration yet.
+- Fog-of-war state is stored per tile but not yet consumed by the renderer.
+- The `src/game` + `src/app` runtime wiring was verified by building and running
+  the model, serialization, mesher, and generator headlessly; the full Vulkan app
+  build requires the vcpkg Vulkan/GLFW/imgui dependencies on your machine.
+
+## Custom UI Framework
+
+A first-party (non-ImGui) UI framework renders the game's own interface. ImGui is
+kept only as the dev/debug overlay. The framework is split so all UI logic is
+Vulkan-free and unit-testable, with a thin renderer that draws it:
+
+- `src/ui/` — pure CPU, no Vulkan:
+  - `ui_types.h`, `ui_input.h` — primitives (`UiVec2/UiRect/UiColor`), per-frame input.
+  - `ui_draw_list.{h,cc}` — immediate draw list emitting `UiDrawData` (quads, 9-slice,
+    images, glyph quads) with per-command texture + clip. This is the renderer seam.
+  - `font.{h,cc}` — bitmap-alpha glyph atlas via `stb_truetype` + metrics/measure.
+  - `rich_text.{h,cc}` — `<b>/<i>/<color=#hex>/<br>` markup, word-wrap, alignment.
+  - `widget.h`, `widgets/{panel,label,button}.{h,cc}`, `ui_context.{h,cc}` — a retained
+    widget tree; `Button` holds a `std::function<void()> onClick`; `UiContext` dispatches
+    input to callbacks and emits geometry.
+- `src/render/backend/vulkan/ui_renderer.{h,cc}` — the only UI file that touches Vulkan:
+  owns the UI pipeline (alpha blend, no depth, dynamic rendering), per-texture descriptor
+  sets, atlas uploads, and per-frame geometry streaming via the existing `FrameArena`. It
+  draws in the post pass right after the ImGui overlay (`frame_run.cc`).
+- `src/render/shaders/ui.{vert,frag}.slang` — pixel-space → NDC; solid / textured /
+  glyph-alpha modes; authors colors as sRGB hex and linearizes for the `*_SRGB` swapchain.
+
+The app side (`App::setupDemoUi` / `updateUiOverlay`) builds a demo panel with a clickable
+"Found City" button whose callback increments an on-screen counter, drawn over the
+strategic map. The renderer seam is `Renderer::setUiDrawData(...)` and
+`Renderer::setUiFontAtlas(...)`, mirroring `setGameplayUiState`.
+
+Dependency: the vcpkg `stb` port (`stb_truetype.h`, `stb_rect_pack.h`) was added to
+`vcpkg.json`. A UI font is loaded from `assets/fonts/ui.ttf` if present, otherwise a
+system font (`segoeui.ttf`/`arial.ttf`); without a font the panel/button still render
+(text is skipped).
+
+### Tests
+
+```powershell
+cmake --build cmake-build-release --target odai_ui_tests
+ctest --test-dir cmake-build-release -R odai_ui_tests
+```
+
+Covers 9-slice quad generation, font measurement, rich-text wrap/spans, color packing,
+and button hit-test + callback dispatch. The `src/ui` core compiles and tests run
+headlessly (MSVC); the Vulkan `ui_renderer` is verified visually.
+
 ## Next Planned Engine Work
 
 - Minimal NIF static mesh import for Balmora buildings and props

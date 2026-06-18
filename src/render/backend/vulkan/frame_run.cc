@@ -2712,6 +2712,11 @@ void RendererBackend::renderFrame(
     if (m_imguiInitialized) {
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
     }
+    if (m_uiRenderer.ready() && !m_uiDrawData.commands.empty()) {
+        beginDebugLabel(commandBuffer, "Pass: UI", 0.85f, 0.72f, 0.44f);
+        m_uiRenderer.record(commandBuffer, 0, m_frameArena, m_uiDrawData, m_swapchainExtent);
+        endDebugLabel(commandBuffer);
+    }
 
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
