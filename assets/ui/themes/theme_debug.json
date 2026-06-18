@@ -1,0 +1,29 @@
+{
+  "name": "Debug",
+  "_comment": "Flat grey theme — works without font or texture assets, uses system-level fallbacks.",
+  "fonts": {},
+  "colors": {
+    "text":           "#DDDDDD",
+    "text.dim":       "#888888",
+    "text.positive":  "#44CC44",
+    "text.negative":  "#CC4444",
+    "text.gold":      "#CCAA44",
+    "panel.bg":       "#222222",
+    "panel.border":   "#555555",
+    "accent":         "#4488CC",
+    "accent.hover":   "#66AAEE",
+    "tooltip.bg":     "#111111",
+    "selection":      "#4488CC40",
+    "scrollbar":      "#66666660",
+    "scrollbar.bg":   "#00000030"
+  },
+  "frames": {},
+  "sizes": {
+    "padding":       [8, 8],
+    "titleBarH":     26,
+    "gap":           4,
+    "iconSize":      16,
+    "borderRadius":  2,
+    "scrollBarW":    5
+  }
+}

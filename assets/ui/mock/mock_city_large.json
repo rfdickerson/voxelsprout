@@ -1,0 +1,31 @@
+{
+  "name": "Balmora",
+  "population": 4200,
+  "tier": 3,
+  "owner": "House Hlaalu",
+  "food": 23,
+  "foodPerTurn": 4,
+  "gold": 1439,
+  "goldPerTurn": 12,
+  "production": 8,
+  "productionPerTurn": 3,
+  "science": 5,
+  "sciencePerTurn": 2,
+  "culture": 3,
+  "culturePerTurn": 1,
+  "health": 0.72,
+  "currentConstruction": "Market",
+  "constructionTurnsLeft": 3,
+  "buildings": [
+    { "id": "granary",    "name": "Granary",    "icon": "food",       "yield": "+2 Food" },
+    { "id": "market",     "name": "Market",     "icon": "gold",       "yield": "+4 Gold" },
+    { "id": "smithy",     "name": "Smithy",     "icon": "production", "yield": "+2 Production" },
+    { "id": "temple",     "name": "Temple",     "icon": "culture",    "yield": "+1 Culture" },
+    { "id": "lighthouse", "name": "Lighthouse", "icon": "science",    "yield": "+1 Science" }
+  ],
+  "units": [
+    { "id": "warrior_1",  "name": "Warrior",    "icon": "sword",  "hp": 80, "maxHp": 100 },
+    { "id": "archer_1",   "name": "Archer",     "icon": "bow",    "hp": 60, "maxHp": 60  }
+  ],
+  "description": "A prosperous trade city on the Odai River, known for <b>kwama egg merchants</b> and <color=#C8963A>Hlaalu politics</color>."
+}

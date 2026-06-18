@@ -92,6 +92,22 @@ bool Renderer::setUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width, s
     return m_backend->setUiFontAtlas(pixels, width, height);
 }
 
+odai::ui::UiTextureId Renderer::registerUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width,
+                                                    std::uint32_t height) {
+    return m_backend->registerUiFontAtlas(pixels, width, height);
+}
+
+odai::ui::UiTextureId Renderer::registerUiTextureRgba8(const std::uint8_t* pixels, std::uint32_t width,
+                                                       std::uint32_t height) {
+    return m_backend->registerUiTextureRgba8(pixels, width, height);
+}
+
+odai::ui::UiTextureId Renderer::registerUiTextureRgba8Mipmapped(const std::uint8_t* pixels,
+                                                                  std::uint32_t width,
+                                                                  std::uint32_t height) {
+    return m_backend->registerUiTextureRgba8Mipmapped(pixels, width, height);
+}
+
 void Renderer::renderFrame(
     const odai::world::ChunkGrid& chunkGrid,
     const odai::sim::Simulation& simulation,

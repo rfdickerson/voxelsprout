@@ -1,0 +1,25 @@
+{
+  "name": "House Hlaalu",
+  "treasury": 8432,
+  "income": 47,
+  "expenses": 61,
+  "balance": -14,
+  "scienceRate": 0.30,
+  "cultureRate": 0.10,
+  "era": "Classical",
+  "cities": [
+    { "name": "Balmora",   "population": 4200, "tier": 3 },
+    { "name": "Vivec",     "population": 8100, "tier": 5 },
+    { "name": "Sadrith Mora", "population": 2300, "tier": 2 },
+    { "name": "Ald'ruhn",  "population": 1900, "tier": 2 }
+  ],
+  "researchQueue": [
+    { "id": "writing",       "name": "Writing",       "turnsLeft": 5  },
+    { "id": "philosophy",    "name": "Philosophy",    "turnsLeft": 8  },
+    { "id": "mathematics",   "name": "Mathematics",   "turnsLeft": 11 }
+  ],
+  "warnings": [
+    { "type": "deficit",  "message": "Treasury running a <color=#E05050>14 gold deficit</color> per turn." },
+    { "type": "unrest",   "message": "Unrest in <b>Ald'ruhn</b> — needs a Garrison." }
+  ]
+}

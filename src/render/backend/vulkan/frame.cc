@@ -322,6 +322,7 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuSsaoBlurTimeMs = durationMs(kGpuTimestampQuerySsaoBlurStart, kGpuTimestampQuerySsaoBlurEnd);
     m_debugGpuMainTimeMs = durationMs(kGpuTimestampQueryMainStart, kGpuTimestampQueryMainEnd);
     m_debugGpuPostTimeMs = durationMs(kGpuTimestampQueryPostStart, kGpuTimestampQueryPostEnd);
+    m_debugGpuUiTimeMs = durationMs(kGpuTimestampQueryUiStart, kGpuTimestampQueryUiEnd);
     m_debugGpuFrameTimingMsHistory[m_debugGpuFrameTimingMsHistoryWrite] = m_debugGpuFrameTimeMs;
     m_debugGpuFrameTimingMsHistoryWrite =
         (m_debugGpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;

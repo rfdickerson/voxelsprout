@@ -11,6 +11,7 @@ option(ODAI_BUILD_TOOLS "Build offline content tools." ON)
 # stb (stb_truetype.h, stb_rect_pack.h) for the UI font rasterizer. Provided by
 # the vcpkg `stb` port in normal builds; ODAI_STB_INCLUDE_DIR overrides it for
 # headless checks without vcpkg.
+find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Stb QUIET)
 if(Stb_FOUND)
     set(ODAI_STB_INCLUDE_DIRS "${Stb_INCLUDE_DIR}")
@@ -161,10 +162,24 @@ if(ODAI_BUILD_APP)
         src/ui/ui_draw_list.cc
         src/ui/font.cc
         src/ui/rich_text.cc
+        src/ui/cached_rich_text.cc
         src/ui/ui_context.cc
+        src/ui/icon_atlas.cc
+        src/ui/tooltip.cc
+        src/ui/theme/ui_theme.cc
+        src/ui/document/ui_binding.cc
+        src/ui/document/ui_document.cc
+        src/ui/document/ui_hot_reload.cc
         src/ui/widgets/panel.cc
         src/ui/widgets/label.cc
         src/ui/widgets/button.cc
+        src/ui/widgets/window.cc
+        src/ui/widgets/rich_text_view.cc
+        src/ui/widgets/image.cc
+        src/ui/widgets/progress_bar.cc
+        src/ui/widgets/stack_layout.cc
+        src/ui/widgets/scroll_view.cc
+        src/ui/widgets/repeater.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
@@ -272,6 +287,8 @@ if(ODAI_BUILD_APP)
     endif()
 
     find_package(glfw3 CONFIG QUIET)
+
+    target_link_libraries(odai PRIVATE nlohmann_json::nlohmann_json)
 
     if(VULKAN_RENDER_BACKEND)
         find_package(Vulkan REQUIRED)
@@ -524,12 +541,24 @@ if(BUILD_TESTING)
         src/ui/ui_draw_list.cc
         src/ui/font.cc
         src/ui/rich_text.cc
+        src/ui/cached_rich_text.cc
         src/ui/ui_context.cc
+        src/ui/icon_atlas.cc
+        src/ui/document/ui_binding.cc
         src/ui/widgets/panel.cc
         src/ui/widgets/label.cc
         src/ui/widgets/button.cc
+        src/ui/widgets/window.cc
+        src/ui/widgets/rich_text_view.cc
+        src/ui/widgets/image.cc
+        src/ui/widgets/progress_bar.cc
+        src/ui/widgets/stack_layout.cc
+        src/ui/widgets/scroll_view.cc
+        src/ui/widgets/repeater.cc
+        src/core/log.cc
     )
     target_include_directories(odai_ui_tests PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+    target_link_libraries(odai_ui_tests PRIVATE nlohmann_json::nlohmann_json)
 
     if(MSVC)
         target_compile_options(odai_ui_tests PRIVATE

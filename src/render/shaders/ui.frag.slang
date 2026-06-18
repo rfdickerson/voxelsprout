@@ -15,6 +15,12 @@ static const uint kModeSolid = 0u;
 static const uint kModeTextured = 1u;
 static const uint kModeGlyphAlpha = 2u;
 
+// Stem darkening: the swapchain is *_SRGB so glyph coverage blends in linear
+// space, which makes anti-aliased text read as thin/faint (esp. light-on-dark).
+// Raising coverage to a power <1 thickens the AA edges back to a perceptual
+// weight closer to gamma-space text renderers. >1 = heavier; tune ~1.25..1.6.
+static const float kTextGamma = 1.4;
+
 float srgbToLinear1(float c)
 {
     return c <= 0.04045 ? (c / 12.92) : pow((c + 0.055) / 1.055, 2.4);
@@ -34,7 +40,8 @@ float4 main(FragmentInput input) : SV_Target0
     }
     else if (input.inMode == kModeGlyphAlpha)
     {
-        const float coverage = uiTexture.Sample(input.inUv).r;
+        float coverage = uiTexture.Sample(input.inUv).r;
+        coverage = pow(coverage, 1.0 / kTextGamma);  // stem darkening
         straight = float4(input.inColor.rgb, input.inColor.a * coverage);
     }
 

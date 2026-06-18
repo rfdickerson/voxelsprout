@@ -18,6 +18,7 @@ struct GLFWwindow;
 
 namespace odai::ui {
 struct UiDrawData;
+using UiTextureId = std::uint32_t;
 }
 
 namespace odai::render {
@@ -53,6 +54,14 @@ public:
     void setUiDrawData(const odai::ui::UiDrawData& drawData);
     // Upload the UI font's R8 coverage atlas (call once after init / on font change).
     bool setUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
+    // Register an extra UI font atlas (e.g. bold/italic) and return its texture id
+    // (kUiNoTexture on failure). Assign it to the Font via Font::setTextureId.
+    odai::ui::UiTextureId registerUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
+    // Register an RGBA8 UI texture (e.g. a 9-slice window frame) and return its
+    // texture id (kUiNoTexture on failure).
+    odai::ui::UiTextureId registerUiTextureRgba8(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
+    // Same as registerUiTextureRgba8 but generates a full mip chain via CPU box-filter.
+    odai::ui::UiTextureId registerUiTextureRgba8Mipmapped(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
     void renderFrame(
         const odai::world::ChunkGrid& chunkGrid,
         const odai::sim::Simulation& simulation,

@@ -1,7 +1,9 @@
 #pragma once
 
 #include "core/input.h"
+#include "game/strategy_map.h"
 #include "import/gpu_scene.h"
+#include "ui/animation.h"
 #include "render/renderer.h"
 #include "sim/simulation.h"
 #include "ui/font.h"
@@ -22,6 +24,7 @@ struct GLFWwindow;
 
 namespace odai::ui {
 class Label;
+class RichTextView;
 }
 
 // App subsystem
@@ -86,8 +89,10 @@ private:
 
     void pollInput();
     void updateCamera(float dt);
-    void setupDemoUi();
-    void updateUiOverlay();
+    void setupDemoUi(float viewW, float viewH);
+    void updateUiOverlay(float dt);
+    bool pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
+                          int& outCol, int& outRow) const;
     void syncGameplayUiState();
     void assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId);
     void handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight);
@@ -277,12 +282,37 @@ private:
     bool m_hasAppliedClipmapConfig = false;
 
     odai::ui::Font m_uiFont;
+    odai::ui::Font m_uiFontBold;
+    odai::ui::Font m_uiFontItalic;
+    odai::ui::FontSet m_uiFonts{};
     odai::ui::UiContext m_uiContext;
     odai::ui::UiDrawList m_uiDrawList;
     odai::ui::UiInput m_uiInput;
     odai::ui::Label* m_uiStatusLabel = nullptr;
+    odai::ui::Label* m_hudTurnLabel = nullptr;
+    odai::ui::Label* m_hudStatsLabel = nullptr;
+    odai::ui::Label* m_hudTileInfoLabel = nullptr;
+    odai::ui::Widget* m_hudTileInfoWindow = nullptr;
+    odai::ui::RichTextView* m_civpediaView = nullptr;
+    odai::ui::Widget* m_civpediaWindow = nullptr;
+    std::uint32_t m_windowFrameTexture = 0;  // odai::ui::UiTextureId for the 9-slice frame.
+    // Tooltip fade animation + latched content so it can fade out after the hover ends.
+    odai::ui::Tween m_tooltipFade{};
+    std::string m_lastTooltipText;
+    odai::ui::UiVec2 m_lastTooltipAnchor{};
+    float m_uiScale = 1.0f;
+    float m_uiBuildMsEma = 0.0f;   // Smoothed CPU cost of UI update+build (ms).
+    int m_uiBuildLogCounter = 0;
     bool m_uiFontReady = false;
+    // Strategy-map mode: the cursor stays visible for clicking UI and the mouse
+    // never rotates the camera (no FPS-style mouselook).
+    bool m_strategyMapMode = false;
     int m_uiDemoClicks = 0;
+    int m_currentTurn = 1;
+    int m_hoveredHexCol = -1;
+    int m_hoveredHexRow = -1;
+
+    odai::game::StrategyMap m_strategyMap;
 
     odai::sim::Simulation m_simulation;
     odai::world::World m_world;

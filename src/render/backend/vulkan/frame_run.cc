@@ -2712,11 +2712,15 @@ void RendererBackend::renderFrame(
     if (m_imguiInitialized) {
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
     }
+    // Bracket the custom-UI pass with its own GPU timestamps (unconditional so the
+    // duration reads ~0 on frames with no UI, rather than stale values).
+    writeGpuTimestampTop(kGpuTimestampQueryUiStart);
     if (m_uiRenderer.ready() && !m_uiDrawData.commands.empty()) {
         beginDebugLabel(commandBuffer, "Pass: UI", 0.85f, 0.72f, 0.44f);
         m_uiRenderer.record(commandBuffer, 0, m_frameArena, m_uiDrawData, m_swapchainExtent);
         endDebugLabel(commandBuffer);
     }
+    writeGpuTimestampBottom(kGpuTimestampQueryUiEnd);
 
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
