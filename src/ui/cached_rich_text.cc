@@ -48,6 +48,31 @@ void CachedRichText::emit(UiDrawList& drawList, const UiRect& rect) {
     drawList.popClip();
 }
 
+void CachedRichText::drawHighlightedTooltip(UiDrawList& dl, const UiRect& rect,
+                                             std::string_view tooltip,
+                                             const UiColor& highlightColor) const {
+    if (fonts_.regular == nullptr || layout_.lines.empty()) {
+        return;
+    }
+    const UiVec2 origin = contentOrigin(rect);
+    const float refAscent = fonts_.regular->ascentPx();
+    dl.pushClip(rect);
+    for (const RichLine& line : layout_.lines) {
+        for (const RichRun& run : line.runs) {
+            if (run.tooltip != tooltip || run.text.empty()) {
+                continue;
+            }
+            const Font* runFont = fonts_.select(run.bold, run.italic);
+            if (runFont == nullptr) {
+                continue;
+            }
+            const float topY = origin.y + line.y + (refAscent - runFont->ascentPx());
+            dl.addText(*runFont, run.text, UiVec2{origin.x + run.x, topY}, highlightColor);
+        }
+    }
+    dl.popClip();
+}
+
 std::vector<RichTextLink> CachedRichText::linksFor(const UiRect& rect) const {
     const UiVec2 origin = contentOrigin(rect);
     std::vector<RichTextLink> out;

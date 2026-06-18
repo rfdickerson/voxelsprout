@@ -19,6 +19,16 @@ UiRect Window::titleBarRect() const {
 
 UiRect Window::closeBtnRect() const {
     const UiRect f = frameRect();
+    // With a 9-slice frame the title bar overlaps the ornate top border, so the
+    // close button is sized independently and tucked inside the top-right corner
+    // of the frame interior rather than scaled from the (possibly tall) title bar.
+    if (frame.has_value()) {
+        const float sz = (font_ != nullptr ? font_->lineHeightPx() : 20.0f) + 4.0f;
+        const float pad = sz * 0.25f;
+        const float r = f.maxX - frame->borderRightPx - pad;
+        const float t = f.minY + frame->borderTopPx + pad;
+        return UiRect{r - sz, t, r, t + sz};
+    }
     const float inset = titleBarH * 0.14f;
     const float sz = titleBarH - inset * 2.0f;
     return UiRect{f.maxX - inset - sz, f.minY + inset, f.maxX - inset, f.minY + inset + sz};
@@ -33,6 +43,10 @@ void Window::draw(UiDrawList& dl) const {
     const UiRect f = frameRect();
     const float edge = titleBarH * 0.14f;  // Keep the toolbar/separator inside the frame border.
 
+    if (showShadow) {
+        dl.addDropShadow(f, shadowColor, shadowBlurPx, shadowOffsetX, shadowOffsetY);
+    }
+
     // Frame: 9-slice if provided, else a solid fill + 1px border.
     if (frame.has_value()) {
         dl.add9Slice(f, *frame, frameTint);
@@ -45,11 +59,22 @@ void Window::draw(UiDrawList& dl) const {
     const UiRect toolbar{f.minX + edge, f.minY + edge, f.maxX - edge, f.minY + titleBarH};
     dl.addRectFilled(toolbar, titleBarColor);
     const float sepY = f.minY + titleBarH;
-    dl.addRectFilled(UiRect{f.minX + edge, sepY, f.maxX - edge, sepY + 1.0f}, borderColor);
+    dl.addRectFilled(UiRect{f.minX + edge, sepY, f.maxX - edge, sepY + 2.0f}, borderColor);
 
     if (font_ != nullptr && !title_.empty()) {
-        const float textY = f.minY + (titleBarH - font_->lineHeightPx()) * 0.5f;
-        dl.addText(*font_, title_, UiVec2{toolbar.minX + edge + 4.0f, textY}, titleColor);
+        // When a 9-slice frame is present the top/left borders are ornate art, so
+        // the title is seated below the top border inset. Without a frame the title
+        // is horizontally centered in the toolbar.
+        const float topInset  = frame.has_value() ? frame->borderTopPx  : 0.0f;
+        const float leftInset = frame.has_value() ? frame->borderLeftPx : 0.0f;
+        const float textY = f.minY + topInset + (titleBarH - topInset - font_->lineHeightPx()) * 0.5f;
+        if (frame.has_value()) {
+            dl.addText(*font_, title_, UiVec2{toolbar.minX + edge + 4.0f + leftInset, textY}, titleColor);
+        } else {
+            const float tw = font_->measureText(title_);
+            const float centerX = toolbar.minX + (toolbar.width() - tw) * 0.5f;
+            dl.addText(*font_, title_, UiVec2{centerX, textY}, titleColor);
+        }
     }
 
     if (showCloseButton) {

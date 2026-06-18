@@ -68,6 +68,11 @@ public:
     // Tooltip-run rects translated into screen space for `rect`.
     [[nodiscard]] std::vector<RichTextLink> linksFor(const UiRect& rect) const;
 
+    // Re-draw only the runs whose tooltip matches `tooltip`, using `highlightColor`
+    // instead of their stored color. Called after emit() to tint hovered link text.
+    void drawHighlightedTooltip(UiDrawList& dl, const UiRect& rect,
+                                std::string_view tooltip, const UiColor& highlightColor) const;
+
     // Count of (re)builds; used by tests to assert caching behaviour.
     [[nodiscard]] std::uint32_t rebuildCount() const { return rebuildCount_; }
 

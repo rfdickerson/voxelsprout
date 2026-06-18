@@ -8,14 +8,11 @@ void RichTextView::draw(UiDrawList& drawList) const {
     }
     syncCache();
     cache_.emit(drawList, rect_);
-    // Underline the hovered link as an affordance that it is interactive.
+    // Hover: re-draw the hovered tooltip runs in a bright highlight color so the
+    // text brightens rather than the background.
     if (hovered_) {
-        const float underlineY = hoveredRect_.maxY - 2.0f;
-        drawList.pushClip(rect_);
-        drawList.addRectFilled(
-            UiRect{hoveredRect_.minX, underlineY, hoveredRect_.maxX, underlineY + 1.0f},
-            UiColor{1.0f, 0.6f, 0.2f, 0.85f});
-        drawList.popClip();
+        cache_.drawHighlightedTooltip(drawList, rect_, hoveredTooltip_,
+                                      UiColor{1.0f, 0.88f, 0.52f, 1.0f});
     }
 }
 

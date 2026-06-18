@@ -12,9 +12,13 @@
 #include "sim/network_procedural.h"
 #include "ui/icon_atlas.h"
 #include "ui/widgets/button.h"
+#include "ui/widgets/image.h"
 #include "ui/widgets/label.h"
 #include "ui/widgets/panel.h"
+#include "ui/widgets/progress_bar.h"
 #include "ui/widgets/rich_text_view.h"
+#include "ui/widgets/text_box.h"
+#include "ui/widgets/toolbar.h"
 #include "ui/widgets/window.h"
 
 #include <stb_image.h>
@@ -985,6 +989,14 @@ bool App::init() {
     glfwSetWindowUserPointer(m_window, this);
     glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
+    // Character input for editable UI text fields. GLFW delivers fully-composed
+    // Unicode codepoints here; they are drained into the UI input each frame.
+    glfwSetCharCallback(m_window, [](GLFWwindow* win, unsigned int codepoint) {
+        if (auto* self = static_cast<App*>(glfwGetWindowUserPointer(win))) {
+            self->m_pendingTextInput.push_back(codepoint);
+        }
+    });
+
     const std::filesystem::path configPath{kConfigFilePath};
     if (!loadConfig(configPath)) {
         VOX_LOGE("app") << "failed to load config from " << configPath.string();
@@ -1031,16 +1043,17 @@ bool App::init() {
         return false;
     }
 
-    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap);
+    // Map mesh build is disabled for fast startup — UI work only.
+    // m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap);
     m_importedSceneDemoEnabled = true;
     m_hoverEnabled = true;
 
-    const ImportedSceneCameraPose cameraPose = configureImportedSceneCamera(m_importedScene);
-    m_camera.x = cameraPose.x;
-    m_camera.y = cameraPose.y;
-    m_camera.z = cameraPose.z;
-    m_camera.yawDegrees = cameraPose.yawDegrees;
-    m_camera.pitchDegrees = cameraPose.pitchDegrees;
+    // Fixed overhead camera instead of scene-derived pose (scene is empty).
+    m_camera.x = 0.0f;
+    m_camera.y = 2000.0f;
+    m_camera.z = 0.0f;
+    m_camera.yawDegrees = 0.0f;
+    m_camera.pitchDegrees = -70.0f;
     m_cameraPrevious = m_camera;
 
     m_renderer.setStrategyMapMode(true);
@@ -1054,10 +1067,8 @@ bool App::init() {
         return false;
     }
     VOX_LOGI("app") << "init step renderer init took " << elapsedMs(rendererInitStart) << " ms";
-    if (!m_renderer.uploadImportedScene(m_importedScene)) {
-        VOX_LOGE("app") << "failed to upload strategy map scene geometry";
-        return false;
-    }
+    // Skip scene upload — 3D map rendering is disabled for fast startup.
+    // if (!m_renderer.uploadImportedScene(m_importedScene)) { ... }
     m_renderer.setImportedSceneInteriorMode(false);
     m_renderer.setSunAngles(kImportedSceneSunYawDegrees, kImportedSceneSunPitchDegrees);
     m_renderer.setImportedSceneDebugState(
@@ -1067,9 +1078,7 @@ bool App::init() {
         m_importedFlatShading,
         m_importedWaterDebug);
 
-    VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms"
-                    << " (vertices=" << m_importedScene.packedVertices.size()
-                    << ", draws=" << m_importedScene.packedDraws.size() << ")";
+    VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms (3D map disabled)";
     return true;
 }
 
@@ -4138,8 +4147,182 @@ void App::setupDemoUi(float viewW, float viewH) {
             }
         }
     }
+    // Load top-toolbar resource icons. The toolbar sizes these from its own band height.
+    {
+        const std::filesystem::path iconPath = resolveAssetPath("assets/icons/toolbar_yields.png");
+        int iw = 0, ih = 0;
+        stbi_uc* ipx = stbi_load(iconPath.string().c_str(), &iw, &ih, nullptr, 4);
+        if (ipx && iw > 0 && ih > 0) {
+            const odai::ui::UiTextureId iconTex = m_renderer.registerUiTextureRgba8Mipmapped(
+                ipx, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih));
+            stbi_image_free(ipx);
+            if (iconTex != odai::ui::kUiNoTexture) {
+                constexpr int kToolbarIconSize = 128;
+                const std::string meta =
+                    "{\"iconSize\":" + std::to_string(kToolbarIconSize) +
+                    ",\"icons\":{\"science\":[0,0],\"culture\":[1,0],\"gold\":[2,0],"
+                    "\"faith\":[0,1],\"food\":[1,1],\"production\":[2,1]}}";
+                odai::ui::UiIconRegistry::global().registerAtlas(
+                    iconTex, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih), meta.c_str());
+            }
+        } else if (ipx != nullptr) {
+            stbi_image_free(ipx);
+        }
+    }
+
+    // Load civilization empire icons atlas (12 civs, 4×3, 128px).
+    {
+        const std::filesystem::path imgPath = resolveAssetPath("assets/icons/civ_empires.png");
+        const std::filesystem::path jsonPath = resolveAssetPath("assets/icons/civ_empires.json");
+        int iw = 0, ih = 0;
+        stbi_uc* ipx = stbi_load(imgPath.string().c_str(), &iw, &ih, nullptr, 4);
+        if (ipx && iw > 0 && ih > 0) {
+            const odai::ui::UiTextureId tex = m_renderer.registerUiTextureRgba8Mipmapped(
+                ipx, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih));
+            stbi_image_free(ipx);
+            if (tex != odai::ui::kUiNoTexture) {
+                std::ifstream f(jsonPath);
+                std::string meta((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                odai::ui::UiIconRegistry::global().registerAtlas(
+                    tex, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih), meta.c_str());
+            }
+        } else if (ipx) {
+            stbi_image_free(ipx);
+        }
+    }
+    // Load unit icons atlas (9 units, 3×3 grid, 128px per icon).
+    {
+        const std::filesystem::path imgPath = resolveAssetPath("assets/icons/unit_icons.png");
+        const std::filesystem::path jsonPath = resolveAssetPath("assets/icons/unit_icons.json");
+        int iw = 0, ih = 0;
+        stbi_uc* ipx = stbi_load(imgPath.string().c_str(), &iw, &ih, nullptr, 4);
+        if (ipx && iw > 0 && ih > 0) {
+            const odai::ui::UiTextureId tex = m_renderer.registerUiTextureRgba8Mipmapped(
+                ipx, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih));
+            stbi_image_free(ipx);
+            if (tex != odai::ui::kUiNoTexture) {
+                std::ifstream f(jsonPath);
+                std::string meta((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                odai::ui::UiIconRegistry::global().registerAtlas(
+                    tex, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih), meta.c_str());
+            }
+        } else if (ipx) {
+            stbi_image_free(ipx);
+        }
+    }
+
+    // Load civilization leader portraits atlas (12 leaders, 4×3, 256px).
+    odai::ui::UiTextureId civLeaderTex = odai::ui::kUiNoTexture;
+    {
+        const std::filesystem::path imgPath = resolveAssetPath("assets/leaders/civ_leaders.png");
+        const std::filesystem::path jsonPath = resolveAssetPath("assets/leaders/civ_leaders.json");
+        int iw = 0, ih = 0;
+        stbi_uc* ipx = stbi_load(imgPath.string().c_str(), &iw, &ih, nullptr, 4);
+        if (ipx && iw > 0 && ih > 0) {
+            civLeaderTex = m_renderer.registerUiTextureRgba8Mipmapped(
+                ipx, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih));
+            stbi_image_free(ipx);
+            if (civLeaderTex != odai::ui::kUiNoTexture) {
+                std::ifstream f(jsonPath);
+                std::string meta((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                odai::ui::UiIconRegistry::global().registerAtlas(
+                    civLeaderTex, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih), meta.c_str());
+            }
+        } else if (ipx) {
+            stbi_image_free(ipx);
+        }
+    }
+
+    // Load the UI sprite sheet and build 9-slice descriptors for the dark ornate frame
+    // and the parchment frame. Both live in the same 1024×1536 texture atlas.
+    odai::ui::UiNineSlice darkPanelSlice{};
+    odai::ui::UiNineSlice parchmentSlice{};
+    bool darkSliceReady = false;
+    bool parchmentSliceReady = false;
+    {
+        const std::filesystem::path sheetPath = resolveAssetPath("assets/ui/images/uisheet.png");
+        int sw = 0, sh = 0;
+        stbi_uc* spx = stbi_load(sheetPath.string().c_str(), &sw, &sh, nullptr, 4);
+        if (spx && sw > 0 && sh > 0) {
+            m_uiSheetTexture = m_renderer.registerUiTextureRgba8Mipmapped(
+                spx, static_cast<std::uint32_t>(sw), static_cast<std::uint32_t>(sh));
+            stbi_image_free(spx);
+            if (m_uiSheetTexture != odai::ui::kUiNoTexture) {
+                const float shW = static_cast<float>(sw);
+                const float shH = static_cast<float>(sh);
+                // Build a 9-slice from a sprite sub-rect of the sheet. Sprite bounds
+                // and border insets are measured in absolute sheet pixels; the
+                // uvBorder* values are fractions of the *sub-rect*, not the sheet.
+                // Borders are sized to fully contain the ornate corner artwork so the
+                // stretched middle edges only ever sample plain frame/interior.
+                const auto makeSlice = [&](float x0, float y0, float x1, float y1,
+                                           float bL, float bT, float bR, float bB) {
+                    const float sprW = x1 - x0;
+                    const float sprH = y1 - y0;
+                    odai::ui::UiNineSlice ns{};
+                    ns.textureId      = m_uiSheetTexture;
+                    ns.uv             = {x0 / shW, y0 / shH, x1 / shW, y1 / shH};
+                    ns.borderLeftPx   = bL * s;
+                    ns.borderTopPx    = bT * s;
+                    ns.borderRightPx  = bR * s;
+                    ns.borderBottomPx = bB * s;
+                    ns.uvBorderLeft   = bL / sprW;
+                    ns.uvBorderTop    = bT / sprH;
+                    ns.uvBorderRight  = bR / sprW;
+                    ns.uvBorderBottom = bB / sprH;
+                    return ns;
+                };
+                // Dark ornate panel: tight sprite bounds x=27..695, y=51..403.
+                // (The old UVs started at 0,0 and ran to 670x450, pulling in the
+                // transparent margin and the next sprite — corners floated inward
+                // with transparent gaps along the top/right edges.) 74px corners
+                // contain the top-left medallion and the bottom flourishes.
+                darkPanelSlice = makeSlice(27.0f, 51.0f, 695.0f, 403.0f,
+                                           74.0f, 74.0f, 74.0f, 74.0f);
+                darkSliceReady = true;
+                // Parchment panel: tight body bounds x=731..993, y=52..411. The body
+                // starts at x=731 — a small decorative finial sits detached at
+                // x=700..709 with a transparent gap, so it is excluded from the slice
+                // (including it left a magenta/empty strip down the left frame).
+                parchmentSlice = makeSlice(731.0f, 52.0f, 993.0f, 411.0f,
+                                           46.0f, 52.0f, 42.0f, 40.0f);
+                parchmentSliceReady = true;
+            }
+        } else if (spx) {
+            stbi_image_free(spx);
+        }
+    }
 
     auto root = std::make_unique<odai::ui::Widget>();
+
+    // Top resource toolbar — a full-width strip of icon+value badges (gold,
+    // science, culture, faith, food, production) in the style of a 4X game's
+    // status bar. Other top-anchored panels are pushed down by its height.
+    const float kToolbarH = 40.0f * s;
+    {
+        using TB = odai::ui::Toolbar;
+        auto tb = std::make_unique<TB>(fonts.regular);
+        tb->setRect(odai::ui::UiRect::fromXYWH(0.0f, 0.0f, viewW, kToolbarH));
+        tb->paddingXPx = 16.0f * s;
+        tb->itemGapPx  = 26.0f * s;
+        tb->iconGapPx  = 8.0f * s;
+        tb->iconScale  = 0.68f;
+        const odai::ui::UiColor textCol{0.92f, 0.95f, 0.97f, 1.0f};
+        m_tbScienceItem = tb->addItem(TB::IconKind::Science, {0.31f, 0.64f, 0.82f, 1.0f}, "+14.4", textCol);
+        tb->addItem(TB::IconKind::Culture, {0.69f, 0.44f, 0.84f, 1.0f}, "+8.2", textCol);
+        m_tbGoldItem = tb->addItem(TB::IconKind::Coin, {0.94f, 0.75f, 0.25f, 1.0f}, "240  +39", textCol);
+        m_tbFaithItem = tb->addItem(TB::IconKind::Faith, {0.90f, 0.88f, 0.96f, 1.0f}, "+11.5", textCol);
+        tb->addItem(TB::IconKind::Food, {0.49f, 0.78f, 0.31f, 1.0f}, "+5.6", textCol);
+        tb->addItem(TB::IconKind::Production, {0.85f, 0.54f, 0.23f, 1.0f}, "+6.7", textCol);
+        m_toolbar = static_cast<TB*>(root->addChild(std::move(tb)));
+
+        // Right-aligned turn readout on the toolbar.
+        auto turn = std::make_unique<odai::ui::Label>(fonts, "");
+        turn->align = odai::ui::UiTextAlign::Right;
+        turn->setRect(odai::ui::UiRect::fromXYWH(viewW - 240.0f * s, (kToolbarH - 24.0f * s) * 0.5f,
+                                                 224.0f * s, 24.0f * s));
+        m_toolbarTurnLabel = static_cast<odai::ui::Label*>(m_toolbar->addChild(std::move(turn)));
+    }
 
     // Bottom HUD bar — full-width strip at the bottom of the screen.
     const float kBarH = 64.0f * s;
@@ -4165,26 +4348,42 @@ void App::setupDemoUi(float viewW, float viewH) {
         VOX_LOGI("ui") << "turn advanced to " << m_currentTurn;
     });
     endTurnBtn->setRect(odai::ui::UiRect::fromXYWH(viewW - 172.0f * s, barY + 10.0f * s, 152.0f * s, 44.0f * s));
+    endTurnBtn->cornerRadiusPx = 10.0f * s;  // vector (SDF) rounded corners, DPI-scaled
+    endTurnBtn->glowSizePx = 16.0f * s;      // mouse-over glow
     bar->addChild(std::move(endTurnBtn));
     root->addChild(std::move(bar));
 
-    // Left command panel.
-    const float kPanelW = 310.0f * s;
-    const float kPanelH = 258.0f * s;
-    const float kPanelX = 16.0f * s;
-    const float kPanelY = 16.0f * s;
+    // Left command panel. When the dark ornate frame is available the panel is enlarged
+    // to accommodate the 95px top and 85px bottom border artwork; content is inset
+    // accordingly. Falls back to the solid slate-gray panel if the sheet is missing.
+    const float kPanelW = darkSliceReady ? 380.0f * s : 310.0f * s;
+    const float kPanelH = darkSliceReady ? 440.0f * s : 258.0f * s;
+    const float kPanelX = 0.0f;
+    const float kPanelY = kToolbarH;  // sit below the top toolbar
+    const float kCntPadX = darkSliceReady ? 74.0f * s : 12.0f * s;
+    const float kCntPadY = darkSliceReady ? 104.0f * s : 10.0f * s;
+    const float kCntW    = kPanelW - kCntPadX * 2.0f;
     auto panel = std::make_unique<odai::ui::Panel>();
     panel->setRect(odai::ui::UiRect::fromXYWH(kPanelX, kPanelY, kPanelW, kPanelH));
+    if (darkSliceReady) {
+        panel->nineSlice  = darkPanelSlice;
+        panel->background = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 1.0f};
+    } else {
+        panel->background = odai::ui::UiColor{0.27f, 0.31f, 0.35f, 1.0f};
+        panel->opacity    = 0.80f;
+    }
 
     auto title = std::make_unique<odai::ui::Label>(fonts, "<b><color=#ecd39a>Command View</color></b>");
-    title->setRect(odai::ui::UiRect::fromXYWH(kPanelX + 12.0f * s, kPanelY + 10.0f * s, kPanelW - 24.0f * s, 30.0f * s));
+    title->setRect(odai::ui::UiRect::fromXYWH(kPanelX + kCntPadX, kPanelY + kCntPadY, kCntW, 30.0f * s));
     panel->addChild(std::move(title));
 
     auto foundCityBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Found City", [this]() {
         ++m_uiDemoClicks;
         VOX_LOGI("ui") << "founded city (" << m_uiDemoClicks << ")";
     });
-    foundCityBtn->setRect(odai::ui::UiRect::fromXYWH(kPanelX + 12.0f * s, kPanelY + 52.0f * s, 200.0f * s, 46.0f * s));
+    foundCityBtn->setRect(odai::ui::UiRect::fromXYWH(kPanelX + kCntPadX, kPanelY + kCntPadY + 42.0f * s, 200.0f * s, 46.0f * s));
+    foundCityBtn->cornerRadiusPx = 10.0f * s;
+    foundCityBtn->glowSizePx = 16.0f * s;
     panel->addChild(std::move(foundCityBtn));
 
     auto pediaBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Open CivPedia", [this]() {
@@ -4192,16 +4391,18 @@ void App::setupDemoUi(float viewW, float viewH) {
             m_civpediaWindow->visible = true;
         }
     });
-    pediaBtn->setRect(odai::ui::UiRect::fromXYWH(kPanelX + 12.0f * s, kPanelY + 106.0f * s, 200.0f * s, 46.0f * s));
+    pediaBtn->setRect(odai::ui::UiRect::fromXYWH(kPanelX + kCntPadX, kPanelY + kCntPadY + 96.0f * s, 200.0f * s, 46.0f * s));
+    pediaBtn->cornerRadiusPx = 10.0f * s;
+    pediaBtn->glowSizePx = 16.0f * s;
     panel->addChild(std::move(pediaBtn));
 
     auto citiesLabel = std::make_unique<odai::ui::Label>(fonts, "Cities founded: 0");
-    citiesLabel->setRect(odai::ui::UiRect::fromXYWH(kPanelX + 12.0f * s, kPanelY + 166.0f * s, kPanelW - 24.0f * s, 30.0f * s));
+    citiesLabel->setRect(odai::ui::UiRect::fromXYWH(kPanelX + kCntPadX, kPanelY + kCntPadY + 156.0f * s, kCntW, 30.0f * s));
     m_uiStatusLabel = citiesLabel.get();
     panel->addChild(std::move(citiesLabel));
 
     auto faithLabel = std::make_unique<odai::ui::Label>(fonts, "[icon=religion 44] <color=#c8963a>Faith  +3</color>");
-    faithLabel->setRect(odai::ui::UiRect::fromXYWH(kPanelX + 12.0f * s, kPanelY + 196.0f * s, kPanelW - 24.0f * s, 48.0f * s));
+    faithLabel->setRect(odai::ui::UiRect::fromXYWH(kPanelX + kCntPadX, kPanelY + kCntPadY + 196.0f * s, kCntW, 48.0f * s));
     panel->addChild(std::move(faithLabel));
 
     root->addChild(std::move(panel));
@@ -4230,16 +4431,98 @@ void App::setupDemoUi(float viewW, float viewH) {
 
     m_hudTileInfoWindow = root->addChild(std::move(tileWin));
 
-    // CivPedia window (top-right): a draggable 9-slice-framed window with a toolbar,
-    // close button, margin + padding. Also demonstrates regular/italic/bold + colored
-    // text and hoverable <tip=...> terms (bold orange) that raise a tooltip overlay.
-    const float pediaW = 360.0f * s;
-    const float pediaH = 232.0f * s;
+    // Civilizations panel (left side): empire icon grid + selected leader portrait.
+    {
+        const float civPadX    = 12.0f * s;
+        const float civIconSz  = 52.0f * s;
+        const float civPortSz  = 160.0f * s;
+        const float civW       = civPadX + 4.0f * civIconSz + civPadX;
+        const float civX       = 16.0f * s;
+        const float civY       = kToolbarH + 12.0f * s;
+        const float civH       = 12.0f * s         // top padding
+                               + 20.0f * s         // title label
+                               + 6.0f  * s         // gap
+                               + 3.0f * civIconSz  // 3 rows of icons
+                               + 10.0f * s         // gap
+                               + civPortSz          // leader portrait
+                               + 6.0f  * s         // gap
+                               + 18.0f * s         // name label
+                               + 12.0f * s;        // bottom padding
+
+        auto civPanel = std::make_unique<odai::ui::Panel>();
+        civPanel->setRect(odai::ui::UiRect::fromXYWH(civX, civY, civW, civH));
+        civPanel->cornerRadiusPx = 8.0f * s;
+        civPanel->background = odai::ui::UiColor{0.08f, 0.10f, 0.13f, 0.88f};
+
+        float cy = civY + 12.0f * s;
+
+        // "Civilizations" title label.
+        auto civTitle = std::make_unique<odai::ui::Label>(fonts.bold, "Civilizations");
+        civTitle->color = odai::ui::UiColor{0.82f, 0.72f, 0.50f, 1.0f};
+        civTitle->setRect(odai::ui::UiRect::fromXYWH(civX, cy, civW, 20.0f * s));
+        civTitle->align = odai::ui::UiTextAlign::Center;
+        civPanel->addChild(std::move(civTitle));
+        cy += 20.0f * s + 6.0f * s;
+
+        // 4×3 grid of empire icons — 12 civilizations.
+        static const std::array<const char*, 12> kCivIds = {{
+            "babylon", "aztec",    "british", "egypt",
+            "rome",    "greece",   "china",   "japan",
+            "france",  "mongolia", "persia",  "india",
+        }};
+        for (std::size_t ci = 0; ci < kCivIds.size(); ++ci) {
+            odai::ui::UiIconEntry entry{};
+            if (odai::ui::UiIconRegistry::global().resolve(kCivIds[ci], entry)) {
+                const float ix = civX + civPadX + static_cast<float>(ci % 4) * civIconSz;
+                const float iy = cy  + static_cast<float>(ci / 4) * civIconSz;
+                auto img = std::make_unique<odai::ui::Image>(entry.textureId);
+                img->uvRect = entry.uv;
+                img->setRect(odai::ui::UiRect::fromXYWH(ix, iy, civIconSz, civIconSz));
+                civPanel->addChild(std::move(img));
+            }
+        }
+        cy += 3.0f * civIconSz + 10.0f * s;
+
+        // Leader portrait for the currently selected civilization (default: caesar/rome).
+        const float portX = civX + (civW - civPortSz) * 0.5f;
+        auto portrait = std::make_unique<odai::ui::Image>();
+        {
+            odai::ui::UiIconEntry pe{};
+            if (odai::ui::UiIconRegistry::global().resolve("caesar", pe)) {
+                portrait->textureId = pe.textureId;
+                portrait->uvRect = pe.uv;
+            }
+        }
+        portrait->setRect(odai::ui::UiRect::fromXYWH(portX, cy, civPortSz, civPortSz));
+        m_civPortraitImage = portrait.get();
+        civPanel->addChild(std::move(portrait));
+        cy += civPortSz + 6.0f * s;
+
+        // Leader name label.
+        auto nameLabel = std::make_unique<odai::ui::Label>(fonts.regular, "Caesar \xe2\x80\x94 Rome");
+        nameLabel->color = odai::ui::UiColor{0.90f, 0.85f, 0.70f, 1.0f};
+        nameLabel->setRect(odai::ui::UiRect::fromXYWH(civX, cy, civW, 18.0f * s));
+        nameLabel->align = odai::ui::UiTextAlign::Center;
+        m_civLeaderNameLabel = nameLabel.get();
+        civPanel->addChild(std::move(nameLabel));
+
+        root->addChild(std::move(civPanel));
+    }
+
+    // CivPedia window (top-right): a draggable framed window. When the parchment
+    // 9-slice is loaded, it replaces the solid fill and the title bar / body colors
+    // are made transparent so the parchment texture shows through. Text colors shift
+    // to dark-brown so they read on the light background.
+    const float pediaW = parchmentSliceReady ? 430.0f * s : 360.0f * s;
+    const float pediaH = parchmentSliceReady ? 310.0f * s : 232.0f * s;
     const float pediaX = viewW - pediaW - 16.0f * s;
-    const float pediaY = 16.0f * s;
-    const float pediaTitleH = odai::ui::Window::kDefaultTitleBarH * s;
+    const float pediaY = kToolbarH + 12.0f * s;
+    // The parchment frame's top border is ornate gold, so the title bar is made
+    // tall enough to seat the "CivPedia" title in the cream just below it.
+    const float pediaTitleH = parchmentSliceReady ? 86.0f * s
+                                                  : odai::ui::Window::kDefaultTitleBarH * s;
     auto pediaWin = std::make_unique<odai::ui::Window>(
-        fonts.regular, "CivPedia",
+        fonts.bold, "CivPedia",
         [this]() {
             if (m_civpediaWindow != nullptr) {
                 m_civpediaWindow->visible = false;
@@ -4248,29 +4531,185 @@ void App::setupDemoUi(float viewW, float viewH) {
     pediaWin->setRect(odai::ui::UiRect::fromXYWH(pediaX, pediaY, pediaW, pediaH));
     pediaWin->titleBarH = pediaTitleH;
     pediaWin->margin = 0.0f;
-    pediaWin->padding = {14.0f * s, 10.0f * s};
     pediaWin->showCloseButton = true;
     pediaWin->draggable = true;
-    if (windowFrameReady) {
-        pediaWin->frame = windowFrame;
+    if (parchmentSliceReady) {
+        pediaWin->frame        = parchmentSlice;
+        pediaWin->padding      = {56.0f * s, 8.0f * s};
+        pediaWin->titleBarColor = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.0f};
+        pediaWin->bodyColor     = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.0f};
+        pediaWin->borderColor   = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.0f};
+        pediaWin->titleColor    = odai::ui::UiColor{0.25f, 0.14f, 0.05f, 1.0f};
+        pediaWin->closeColor    = odai::ui::UiColor{0.55f, 0.18f, 0.08f, 0.90f};
+        pediaWin->closeHoverColor = odai::ui::UiColor{0.80f, 0.10f, 0.05f, 1.0f};
+    } else {
+        pediaWin->padding      = {14.0f * s, 10.0f * s};
+        pediaWin->titleBarColor = odai::ui::UiColor{0.22f, 0.26f, 0.30f, 1.0f};
+        pediaWin->bodyColor     = odai::ui::UiColor{0.27f, 0.31f, 0.35f, 1.0f};
+        pediaWin->opacity       = 0.80f;
+        if (windowFrameReady) {
+            pediaWin->frame = windowFrame;
+        }
     }
 
+    const float pBodyPadX   = parchmentSliceReady ? 56.0f * s : 18.0f * s;
+    const float pBodyPadY   = parchmentSliceReady ? 8.0f * s  : 12.0f * s;
+    const float pBodyBotPad = parchmentSliceReady ? 48.0f * s : 24.0f * s;
+
+    // Unit portrait header: 54-px icon on the left, unit name + class on the right.
+    const float headerIconSz = 54.0f * s;
+    const float headerGap    = 8.0f * s;
+    const float headerH      = headerIconSz + headerGap;
+    const float headerY      = pediaY + pediaTitleH + pBodyPadY;
+    {
+        auto portrait = std::make_unique<odai::ui::Image>();
+        odai::ui::UiIconEntry pe{};
+        if (odai::ui::UiIconRegistry::global().resolve("spearman", pe)) {
+            portrait->textureId = pe.textureId;
+            portrait->uvRect    = pe.uv;
+        }
+        portrait->setRect(odai::ui::UiRect::fromXYWH(
+            pediaX + pBodyPadX, headerY, headerIconSz, headerIconSz));
+        pediaWin->addChild(std::move(portrait));
+
+        const float nameLabelX = pediaX + pBodyPadX + headerIconSz + 8.0f * s;
+        const float nameLabelW = pediaW - pBodyPadX - headerIconSz - 8.0f * s - pBodyPadX;
+        auto nameLabel = std::make_unique<odai::ui::Label>(
+            fonts, "<b><color=#c06820>Spearman</color></b>\n<color=#9fa8a8><i>Ancient Melee Unit</i></color>");
+        nameLabel->setRect(odai::ui::UiRect::fromXYWH(nameLabelX, headerY, nameLabelW, headerIconSz));
+        pediaWin->addChild(std::move(nameLabel));
+    }
+
+    // Rich-text body — inline unit icons prefix each hoverable term.
     const std::string pediaText =
         "The <tip=Spearman \xe2\x80\x94 25 HP, melee. +100% vs mounted units.>"
-        "<b><color=#ff9933>Spearman</color></b></tip> is an <i>ancient</i> melee unit. "
+        "[icon=spearman 18]<b><color=#c06820>Spearman</color></b></tip> is an <i>ancient</i> melee unit. "
         "It stands firm against <tip=Cavalry \xe2\x80\x94 fast mounted units, weak to spears.>"
-        "<b><color=#ff9933>Cavalry</color></b></tip>, anchoring your early army. "
+        "[icon=cavalry 18]<b><color=#c06820>Cavalry</color></b></tip>, anchoring your early army. "
         "Train one in any <tip=Cities grow your empire and produce units and wonders.>"
-        "<b><color=#ff9933>City</color></b></tip> that has built a <i>Barracks</i>.";
+        "<b><color=#c06820>City</color></b></tip> that has built a <i>Barracks</i>.";
     auto pediaBody = std::make_unique<odai::ui::RichTextView>(fonts, pediaText);
+    pediaBody->padding = {6.0f * s, 0.0f};
     pediaBody->setRect(odai::ui::UiRect::fromXYWH(
-        pediaX + 14.0f * s,
-        pediaY + pediaTitleH + 10.0f * s,
-        pediaW - 28.0f * s,
-        pediaH - pediaTitleH - 20.0f * s));
+        pediaX + pBodyPadX,
+        headerY + headerH,
+        pediaW - pBodyPadX * 2.0f,
+        pediaH - pediaTitleH - pBodyPadY - headerH - pBodyBotPad));
     m_civpediaView = pediaBody.get();
     pediaWin->addChild(std::move(pediaBody));
     m_civpediaWindow = root->addChild(std::move(pediaWin));
+
+    // Unit roster panel — all 9 unit icons in a horizontal strip below the CivPedia.
+    {
+        static const std::array<const char*, 9> kUnitIds = {{
+            "spearman", "warrior", "archer",
+            "scout",    "settler", "builder",
+            "cavalry",  "ship",    "siege",
+        }};
+        const float rosterW       = pediaW;
+        const float rosterX       = pediaX;
+        const float rosterY       = pediaY + pediaH + 10.0f * s;
+        const float rosterIconSz  = 44.0f * s;
+        const float rosterPadX    = 14.0f * s;
+        const float rosterTitleH  = 26.0f * s;
+        const float rosterH       = rosterTitleH + rosterIconSz + 10.0f * s;
+
+        auto rosterPanel = std::make_unique<odai::ui::Panel>();
+        rosterPanel->setRect(odai::ui::UiRect::fromXYWH(rosterX, rosterY, rosterW, rosterH));
+        rosterPanel->cornerRadiusPx     = 8.0f * s;
+        rosterPanel->background         = odai::ui::UiColor{0.08f, 0.10f, 0.13f, 0.88f};
+        rosterPanel->borderColor        = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.40f};
+        rosterPanel->borderThicknessPx  = 1.0f * s;
+
+        auto rosterTitle = std::make_unique<odai::ui::Label>(fonts.bold, "Military Units");
+        rosterTitle->color = odai::ui::UiColor{0.82f, 0.72f, 0.50f, 1.0f};
+        rosterTitle->align = odai::ui::UiTextAlign::Center;
+        rosterTitle->setRect(odai::ui::UiRect::fromXYWH(rosterX, rosterY + 4.0f * s, rosterW, 18.0f * s));
+        rosterPanel->addChild(std::move(rosterTitle));
+
+        const float gridLeft = rosterX + rosterPadX;
+        const float gridW    = rosterW - 2.0f * rosterPadX;
+        const float iconStep = gridW / static_cast<float>(kUnitIds.size());
+        const float iconY    = rosterY + rosterTitleH;
+        for (std::size_t ui = 0; ui < kUnitIds.size(); ++ui) {
+            odai::ui::UiIconEntry entry{};
+            if (odai::ui::UiIconRegistry::global().resolve(kUnitIds[ui], entry)) {
+                const float ix = gridLeft + static_cast<float>(ui) * iconStep
+                                 + (iconStep - rosterIconSz) * 0.5f;
+                auto img = std::make_unique<odai::ui::Image>(entry.textureId);
+                img->uvRect = entry.uv;
+                img->setRect(odai::ui::UiRect::fromXYWH(ix, iconY, rosterIconSz, rosterIconSz));
+                rosterPanel->addChild(std::move(img));
+            }
+        }
+        root->addChild(std::move(rosterPanel));
+    }
+
+    // --- Vector UI demo card: a rounded panel containing labels, an icon, an
+    // editable textbox, and a progress bar -- all drawn with the DPI-aware SDF
+    // rounded-rect primitives (no bitmaps). Anchored bottom-centre above the HUD. ---
+    {
+        const float cardW = 420.0f * s;
+        const float cardH = 250.0f * s;
+        const float cardX = viewW * 0.5f - cardW * 0.5f;
+        const float cardY = viewH - kBarH - cardH - 20.0f * s;
+        const float padX  = 20.0f * s;
+        float cy = cardY + 18.0f * s;
+
+        auto card = std::make_unique<odai::ui::Panel>();
+        card->setRect(odai::ui::UiRect::fromXYWH(cardX, cardY, cardW, cardH));
+        card->background       = odai::ui::UiColor{0.06f, 0.12f, 0.18f, 0.96f};
+        card->borderColor      = odai::ui::UiColor{0.40f, 0.55f, 0.62f, 0.55f};
+        card->borderThicknessPx = 1.5f * s;
+        card->cornerRadiusPx   = 16.0f * s;
+        card->showShadow       = true;
+        card->shadowColor      = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.45f};
+        card->shadowBlurPx     = 10.0f * s;
+
+        auto heading = std::make_unique<odai::ui::Label>(
+            fonts, "<b><color=#ecd39a>Vector UI Demo</color></b>");
+        heading->setRect(odai::ui::UiRect::fromXYWH(cardX + padX, cy, cardW - padX * 2.0f, 28.0f * s));
+        card->addChild(std::move(heading));
+
+        // Icon + caption (the icon comes from the global icon atlas via rich text).
+        auto iconRow = std::make_unique<odai::ui::Label>(
+            fonts, "[icon=religion 26] <color=#9fb4bd>Labels, icons &amp; live text input</color>");
+        iconRow->setRect(odai::ui::UiRect::fromXYWH(cardX + padX, cy + 30.0f * s, cardW - padX * 2.0f, 30.0f * s));
+        card->addChild(std::move(iconRow));
+
+        cy += 76.0f * s;
+
+        auto box = std::make_unique<odai::ui::TextBox>(
+            fonts.regular, "Type here, then Backspace / Enter...");
+        box->setRect(odai::ui::UiRect::fromXYWH(cardX + padX, cy, cardW - padX * 2.0f, 44.0f * s));
+        box->cornerRadiusPx    = 12.0f * s;
+        box->borderThicknessPx = 1.5f * s;
+        box->padding           = {16.0f * s, 0.0f};
+        m_demoTextBox = box.get();
+        card->addChild(std::move(box));
+
+        cy += 56.0f * s;
+
+        auto echo = std::make_unique<odai::ui::Label>(fonts, "<color=#7f9098>You typed: </color>");
+        echo->setRect(odai::ui::UiRect::fromXYWH(cardX + padX, cy, cardW - padX * 2.0f, 26.0f * s));
+        m_demoEchoLabel = echo.get();
+        card->addChild(std::move(echo));
+
+        cy += 34.0f * s;
+
+        auto prog = std::make_unique<odai::ui::ProgressBar>();
+        prog->setRect(odai::ui::UiRect::fromXYWH(cardX + padX, cy, cardW - padX * 2.0f, 16.0f * s));
+        prog->cornerRadiusPx    = 8.0f * s;   // half-height -> pill
+        prog->background        = odai::ui::UiColor{0.12f, 0.18f, 0.22f, 1.0f};
+        prog->foreground        = odai::ui::UiColor{0.91f, 0.55f, 0.22f, 1.0f};
+        prog->borderColor       = odai::ui::UiColor{0.40f, 0.55f, 0.62f, 0.50f};
+        prog->borderThicknessPx = 1.0f * s;
+        prog->value             = m_demoProgressValue;
+        m_demoProgress = prog.get();
+        card->addChild(std::move(prog));
+
+        root->addChild(std::move(card));
+    }
 
     // Tooltip fade: ease-in-out over ~0.16s.
     m_tooltipFade.durationSec = 0.16f;
@@ -4302,6 +4741,23 @@ void App::updateUiOverlay(float dt) {
     m_uiInput.mousePx = {static_cast<float>(mouseX), static_cast<float>(mouseY)};
     m_uiInput.setButton(odai::ui::UiMouseButton::Left, leftDown);
 
+    // Feed typed characters into the UI, plus synthetic codepoints for the editing
+    // keys GLFW reports as keys rather than characters (8 = backspace, 13 = enter).
+    for (std::uint32_t cp : m_pendingTextInput) {
+        m_uiInput.textInput.push_back(cp);
+    }
+    m_pendingTextInput.clear();
+    const bool backspaceDown = glfwGetKey(m_window, GLFW_KEY_BACKSPACE) == GLFW_PRESS;
+    if (backspaceDown && !m_backspacePrev) {
+        m_uiInput.textInput.push_back(8u);
+    }
+    m_backspacePrev = backspaceDown;
+    const bool enterDown = glfwGetKey(m_window, GLFW_KEY_ENTER) == GLFW_PRESS;
+    if (enterDown && !m_enterPrev) {
+        m_uiInput.textInput.push_back(13u);
+    }
+    m_enterPrev = enterDown;
+
     // Time the UI update + geometry build (the CPU cost that grows with a
     // text-heavy UI). With layout/geometry caching this stays near-flat per frame.
     const auto uiBuildStart = std::chrono::steady_clock::now();
@@ -4326,6 +4782,32 @@ void App::updateUiOverlay(float dt) {
     // Update cities-founded label.
     if (m_uiStatusLabel != nullptr) {
         m_uiStatusLabel->setText("Cities founded: " + std::to_string(m_uiDemoClicks));
+    }
+
+    // Vector UI demo: animate the progress bar and echo the textbox contents.
+    m_demoProgressValue += dt * 0.15f;
+    if (m_demoProgressValue > 1.0f) {
+        m_demoProgressValue -= 1.0f;
+    }
+    if (m_demoProgress != nullptr) {
+        m_demoProgress->value = m_demoProgressValue;
+    }
+    if (m_demoEchoLabel != nullptr && m_demoTextBox != nullptr) {
+        const std::string& typed = m_demoTextBox->value();
+        m_demoEchoLabel->setText(
+            "<color=#7f9098>You typed:</color> <color=#e8d9b0>" +
+            (typed.empty() ? std::string("<i>(nothing yet)</i>") : typed) + "</color>");
+    }
+
+    // Top toolbar: accumulate gold and reflect the current turn.
+    if (m_toolbar != nullptr) {
+        m_tbGold += dt * 39.0f / 60.0f;  // ~+39/turn at ~60 fps
+        m_toolbar->setValue(m_tbGoldItem, std::to_string(static_cast<int>(m_tbGold)) + "  +39");
+    }
+    if (m_toolbarTurnLabel != nullptr) {
+        m_toolbarTurnLabel->setText(
+            "<color=#c9b896>Turn</color> <b><color=#ecd39a>" +
+            std::to_string(m_currentTurn) + "</color></b>");
     }
 
     // Hex hover: pick the tile under the mouse and update the tile info panel.
@@ -4384,9 +4866,9 @@ void App::updateUiOverlay(float dt) {
         const odai::ui::UiVec2 anchor = m_lastTooltipAnchor;
         const odai::ui::FontSet& fonts = m_uiFonts;
 
-        const float padX = 10.0f * s;
-        const float padY = 8.0f * s;
-        const float maxW = 280.0f * s;
+        const float padX = 14.0f * s;
+        const float padY = 10.0f * s;
+        const float maxW = 300.0f * s;
         const odai::ui::RichTextLayout tip = odai::ui::layoutRichText(
             m_lastTooltipText, odai::ui::UiColor{0.92f, 0.93f, 0.95f, 1.0f},
             fonts, maxW - padX * 2.0f, odai::ui::UiTextAlign::Left);
