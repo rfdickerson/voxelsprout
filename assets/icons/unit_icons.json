@@ -1,0 +1,50 @@
+{
+  "iconSize": 128,
+  "columns": 3,
+  "rows": 3,
+  "icons": {
+    "spearman": [
+      0,
+      0
+    ],
+    "warrior": [
+      1,
+      0
+    ],
+    "archer": [
+      2,
+      0
+    ],
+    "scout": [
+      0,
+      1
+    ],
+    "settler": [
+      1,
+      1
+    ],
+    "builder": [
+      2,
+      1
+    ],
+    "cavalry": [
+      0,
+      2
+    ],
+    "ship": [
+      1,
+      2
+    ],
+    "siege": [
+      2,
+      2
+    ]
+  },
+  "aliases": {
+    "worker": "builder",
+    "worker_builder": "builder",
+    "boat": "ship",
+    "catapult": "siege",
+    "ballista": "siege"
+  }
+}
