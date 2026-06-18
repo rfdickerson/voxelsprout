@@ -6,6 +6,7 @@
 #include "render/backend/vulkan/descriptor_manager.h"
 #include "render/frame_graph.h"
 #include "render/backend/vulkan/pipeline_manager.h"
+#include "render/backend/vulkan/ui_renderer.h"
 #include "render/renderer_types.h"
 #include "sim/simulation.h"
 #include "world/clipmap_index.h"
@@ -188,6 +189,7 @@ public:
         int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo, 5 = imported lights
     };
 
+    void setStrategyMapMode(bool enabled) { m_strategyMapMode = enabled; }
     bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
@@ -203,6 +205,8 @@ public:
     odai::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void setGameplayUiState(const GameplayUiState& state);
+    void setUiDrawData(const odai::ui::UiDrawData& drawData);
+    bool setUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
     void renderFrame(
         const odai::world::ChunkGrid& chunkGrid,
         const odai::sim::Simulation& simulation,
@@ -874,6 +878,7 @@ private:
     std::vector<std::size_t> m_voxelGiDirtyChunkIndices;
     BufferHandle m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
+    bool m_strategyMapMode = false;
     bool m_autoExposureComputeAvailable = false;
     bool m_autoExposureHistoryValid = false;
     uint64_t m_autoExposureUpdateFrameIndex = 0u;
@@ -1120,6 +1125,8 @@ private:
     bool m_showShadowPanel = false;
     bool m_showSunPanel = false;
     GameplayUiState m_gameplayUiState{};
+    UiRenderer m_uiRenderer;
+    odai::ui::UiDrawData m_uiDrawData;
     float m_debugCameraFovDegrees = 90.0f;
     bool m_debugCameraFovInitialized = false;
     bool m_debugEnableVertexAo = true;

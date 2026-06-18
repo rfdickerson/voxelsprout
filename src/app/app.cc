@@ -1,12 +1,20 @@
-#include "app/app.h"
+﻿#include "app/app.h"
 
 #include <GLFW/glfw3.h>
 
 #include "core/grid3.h"
+#include "game/strategy_map.h"
+#include "game/strategy_map_io.h"
+#include "game/strategy_map_mesh.h"
 #include "import/morrowind_nif.h"
 #include "core/log.h"
 #include "math/math.h"
 #include "sim/network_procedural.h"
+#include "ui/widgets/button.h"
+#include "ui/widgets/label.h"
+#include "ui/widgets/panel.h"
+
+#include <memory>
 
 #include <algorithm>
 #include <array>
@@ -109,6 +117,7 @@ constexpr const char* kMagicaTeapotPath = "assets/magicka/teapot.vox";
 constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 constexpr const char* kImportedSceneEnvVar = "ODAI_IMPORTED_SCENE";
+constexpr const char* kStrategyMapEnvVar = "ODAI_STRATEGY_MAP";
 constexpr const char* kMorrowindDataFilesEnvVar = "ODAI_MORROWIND_DATA_FILES";
 constexpr const char* kBalmoraGuardsEnvVar = "ODAI_ENABLE_BALMORA_GUARDS";
 constexpr const char* kBalmoraInteriorCacheEnvVar = "ODAI_BALMORA_INTERIOR_CACHE";
@@ -541,6 +550,19 @@ std::optional<std::filesystem::path> findImportedSceneDemoPath() {
     return std::nullopt;
 }
 
+std::optional<std::filesystem::path> findStrategyMapPath() {
+    if (const std::optional<std::string> envPathValue = readEnvironmentString(kStrategyMapEnvVar);
+        envPathValue.has_value() && !envPathValue->empty()) {
+        return std::filesystem::path(*envPathValue);
+    }
+
+    const std::filesystem::path fallback("strategy_map.smap");
+    if (std::filesystem::exists(fallback)) {
+        return fallback;
+    }
+    return std::nullopt;
+}
+
 bool balmoraGuardsEnabledByEnvironment() {
     const std::optional<std::string> value = readEnvironmentString(kBalmoraGuardsEnvVar);
     if (!value.has_value()) {
@@ -951,157 +973,64 @@ bool App::init() {
         odai::render::InventoryItemId::Empty,
     };
 
-    if (const std::optional<std::filesystem::path> importedScenePath = findImportedSceneDemoPath();
-        importedScenePath.has_value()) {
-        m_importedScenePath = *importedScenePath;
-        const auto importedSceneLoadStart = Clock::now();
-        if (!odai::importer::loadImportedScene(m_importedScenePath, m_importedScene)) {
-            VOX_LOGE("app") << "failed to load imported scene from "
-                            << std::filesystem::absolute(m_importedScenePath).string()
-                            << ": " << odai::importer::getImportedSceneLastError();
+    // Load the hex strategy map. If no .smap file is found via the ODAI_STRATEGY_MAP
+    // env-var or the default "strategy_map.smap" path, log a hint and exit.
+    odai::game::StrategyMap strategyMap;
+    const std::optional<std::filesystem::path> strategyMapPath = findStrategyMapPath();
+    if (strategyMapPath.has_value()) {
+        m_importedScenePath = *strategyMapPath;
+        if (!odai::game::loadStrategyMap(*strategyMapPath, strategyMap)) {
+            VOX_LOGE("app") << "failed to load strategy map from "
+                            << std::filesystem::absolute(*strategyMapPath).string()
+                            << ": " << odai::game::getStrategyMapLastError();
             return false;
         }
-        if (!odai::importer::buildGpuSceneAssetFromImportedScene(m_importedScene, m_gpuSceneAsset)) {
-            VOX_LOGE("app") << "failed to build GPU scene asset from imported scene";
-            return false;
-        }
-        initializeBalmoraDoorActivation();
-        if (balmoraGuardsEnabledByEnvironment()) {
-            initializeBalmoraGuards();
-            if (!odai::importer::buildGpuSceneAssetFromImportedScene(m_importedScene, m_gpuSceneAsset)) {
-                VOX_LOGE("app") << "failed to rebuild GPU scene asset after guard texture import";
-                return false;
-            }
-        } else {
-            VOX_LOGI("app") << "Balmora guards disabled by default; set "
-                            << kBalmoraGuardsEnvVar << "=1 to enable experimental guards";
-        }
-        m_gpuSceneRuntime = odai::importer::createGpuSceneRuntime(m_gpuSceneAsset);
-        odai::importer::rebuildGpuSceneWorldTransforms(m_gpuSceneRuntime);
-        m_importedSceneCollision.build(m_gpuSceneAsset);
-        if (m_importedScene.sourceTag == "morrowind_balmora") {
-            m_balmoraExteriorCached = true;
-            m_balmoraExteriorScene = m_importedScene;
-            m_balmoraExteriorGpuSceneAsset = m_gpuSceneAsset;
-            m_balmoraExteriorCollision = m_importedSceneCollision;
-            m_currentMorrowindInteriorCell.clear();
-        }
-        const odai::world::ImportedSceneCollision::BuildStats collisionStats =
-            m_importedSceneCollision.stats();
-        const ImportedSceneCameraPose importedCameraPose = configureImportedSceneCamera(m_importedScene);
-        m_camera.x = importedCameraPose.x;
-        m_camera.y = importedCameraPose.y;
-        m_camera.z = importedCameraPose.z;
-        m_camera.yawDegrees = importedCameraPose.yawDegrees;
-        m_camera.pitchDegrees = importedCameraPose.pitchDegrees;
-        m_cameraPrevious = m_camera;
-        m_importedSceneDemoEnabled = true;
-        VOX_LOGI("app") << "imported scene demo enabled from "
-                        << std::filesystem::absolute(m_importedScenePath).string()
-                        << " in " << elapsedMs(importedSceneLoadStart) << " ms"
-                        << " (version=" << m_importedScene.sourceFileVersion
-                        << ", meshes=" << m_importedScene.sourceMeshCount
-                        << ", instances=" << m_importedScene.sourceInstanceCount
-                        << ", terrainCells=" << m_importedScene.sourceLandscapeCellCount
-                        << ", lights=" << m_importedScene.sourceLightCount
-                        << ", objects=" << m_gpuSceneAsset.objects.rootTransformIndices.size()
-                        << ", pages=" << m_gpuSceneAsset.pages.size()
-                        << ", renderVertices=" << m_gpuSceneAsset.renderCache.packedVertices.size()
-                        << ", renderIndices=" << m_gpuSceneAsset.renderCache.packedIndices.size()
-                        << ", collisionTriangles=" << collisionStats.triangleCount
-                        << ", collisionTiles=" << collisionStats.tileCount << ")";
-    }
-
-    if (m_importedSceneDemoEnabled) {
-        const auto rendererInitStart = Clock::now();
-        const bool rendererOk = m_renderer.init(m_window, m_world.chunkGrid());
-        const auto rendererInitMs = elapsedMs(rendererInitStart);
-        VOX_LOGI("app") << "init step renderer init took " << rendererInitMs << " ms";
-        if (!rendererOk) {
-            VOX_LOGE("app") << "renderer init failed";
-            return false;
-        }
-        if (!m_renderer.uploadGpuScene(m_gpuSceneAsset)) {
-            VOX_LOGE("app") << "failed to upload GPU scene demo geometry";
-            return false;
-        }
-        m_renderer.setImportedSceneInteriorMode(false);
-        m_renderer.setSunAngles(kImportedSceneSunYawDegrees, kImportedSceneSunPitchDegrees);
-        m_renderer.setImportedSceneDebugState(
-            m_importedShowTerrain,
-            m_importedShowStatics,
-            m_importedShowTextures,
-            m_importedFlatShading,
-            m_importedWaterDebug);
-        VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms";
-        return true;
-    }
-
-    const auto worldLoadStart = Clock::now();
-    const std::filesystem::path worldPath{kWorldFilePath};
-    odai::world::World::LoadResult worldLoadResult{};
-    if (m_world.loadOrInitialize(worldPath, &worldLoadResult)) {
-        const auto worldLoadMs = elapsedMs(worldLoadStart);
-        VOX_LOGI("app") << "loaded world from " << std::filesystem::absolute(worldPath).string()
-                        << " in " << worldLoadMs << " ms";
-    } else if (worldLoadResult.initializedFallback) {
-        const auto worldLoadMs = elapsedMs(worldLoadStart);
-        VOX_LOGW("app") << "world file missing/invalid at " << std::filesystem::absolute(worldPath).string()
-                        << "; starting procedural chunk streaming window in " << worldLoadMs << " ms";
-    }
-
-    const auto magicaStampStart = Clock::now();
-    constexpr std::array<odai::world::World::MagicaStampSpec, 3> kMagicaLoadSpecs = {
-        odai::world::World::MagicaStampSpec{kMagicaCastlePath, 0.0f, 0.0f, 0.0f, 1.0f},
-        odai::world::World::MagicaStampSpec{kMagicaTeapotPath, 64.0f, 0.0f, 0.0f, 0.36f},
-        odai::world::World::MagicaStampSpec{kMagicaMonu2Path, -72.0f, 0.0f, 16.0f, 0.25f},
-    };
-    const odai::world::World::MagicaStampResult stampResult = m_world.stampMagicaResources(kMagicaLoadSpecs);
-    VOX_LOGI("app") << "stamped " << stampResult.stampedResourceCount << "/" << kMagicaLoadSpecs.size()
-                    << " magica resources into world (voxels=" << stampResult.stampedVoxelCount
-                    << ", clipped=" << stampResult.clippedVoxelCount
-                    << ", paletteColors=" << static_cast<std::uint32_t>(stampResult.baseColorPaletteCount)
-                    << ") in " << elapsedMs(magicaStampStart) << " ms";
-    if (stampResult.stampedResourceCount != kMagicaLoadSpecs.size()) {
-        VOX_LOGW("app") << "release runtime missing one or more Magica assets; world stamp count is incomplete";
-    }
-    m_renderer.setVoxelBaseColorPalette(stampResult.baseColorPalette);
-
-    m_world.setStreamingConfig(odai::world::World::ChunkStreamingConfig{2, 2});
-    const odai::world::World::ChunkStreamingUpdate initialStreamingUpdate =
-        m_world.updateStreamingWindowForWorldPosition(m_camera.x, m_camera.z);
-    const odai::world::World::ChunkStreamingStats& initialStreamingStats = initialStreamingUpdate.stats;
-    VOX_LOGI("app") << "chunk streaming ready (center="
-                    << initialStreamingStats.centerChunkX << "," << initialStreamingStats.centerChunkZ
-                    << ", resident=" << initialStreamingStats.residentChunkCount
-                    << ", stored=" << initialStreamingStats.storedChunkCount
-                    << ", generated=" << initialStreamingUpdate.generatedChunkKeys.size()
-                    << ", radius=" << m_world.streamingConfig().radiusChunksX
-                    << "x" << m_world.streamingConfig().radiusChunksZ
-                    << ")";
-
-    const auto clipmapStart = Clock::now();
-    m_appliedClipmapConfig = m_renderer.clipmapQueryConfig();
-    m_hasAppliedClipmapConfig = true;
-    m_chunkClipmapIndex.setConfig(m_appliedClipmapConfig);
-    m_chunkClipmapIndex.rebuild(m_world.chunkGrid());
-    VOX_LOGI("app") << "chunk clipmap index rebuilt (" << m_chunkClipmapIndex.chunkCount()
-                    << " chunks) in " << elapsedMs(clipmapStart) << " ms";
-
-    const auto simInitStart = Clock::now();
-    m_simulation.initializeSingleBelt();
-    VOX_LOGI("app") << "init step simulation initialize took " << elapsedMs(simInitStart) << " ms";
-
-    const auto rendererInitStart = Clock::now();
-    const bool rendererOk = m_renderer.init(m_window, m_world.chunkGrid());
-    const auto rendererInitMs = elapsedMs(rendererInitStart);
-    VOX_LOGI("app") << "init step renderer init took " << rendererInitMs << " ms";
-    if (!rendererOk) {
-        VOX_LOGE("app") << "renderer init failed";
+        VOX_LOGI("app") << "strategy map loaded from "
+                        << std::filesystem::absolute(*strategyMapPath).string()
+                        << " (" << strategyMap.width << "x" << strategyMap.height
+                        << ", settlements=" << strategyMap.settlements.size() << ")";
+    } else {
+        VOX_LOGE("app") << "no strategy map found; run odai_strategy_map_gen.exe to generate one, "
+                           "then set ODAI_STRATEGY_MAP=strategy_map.smap or place strategy_map.smap "
+                           "in the working directory";
         return false;
     }
 
-    VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms";
+    m_importedScene = odai::game::buildStrategyMapScene(strategyMap);
+    m_importedSceneDemoEnabled = true;
+    m_hoverEnabled = true;
+
+    const ImportedSceneCameraPose cameraPose = configureImportedSceneCamera(m_importedScene);
+    m_camera.x = cameraPose.x;
+    m_camera.y = cameraPose.y;
+    m_camera.z = cameraPose.z;
+    m_camera.yawDegrees = cameraPose.yawDegrees;
+    m_camera.pitchDegrees = cameraPose.pitchDegrees;
+    m_cameraPrevious = m_camera;
+
+    m_renderer.setStrategyMapMode(true);
+    const auto rendererInitStart = Clock::now();
+    if (!m_renderer.init(m_window, m_world.chunkGrid())) {
+        VOX_LOGE("app") << "renderer init failed";
+        return false;
+    }
+    VOX_LOGI("app") << "init step renderer init took " << elapsedMs(rendererInitStart) << " ms";
+    if (!m_renderer.uploadImportedScene(m_importedScene)) {
+        VOX_LOGE("app") << "failed to upload strategy map scene geometry";
+        return false;
+    }
+    m_renderer.setImportedSceneInteriorMode(false);
+    m_renderer.setSunAngles(kImportedSceneSunYawDegrees, kImportedSceneSunPitchDegrees);
+    m_renderer.setImportedSceneDebugState(
+        m_importedShowTerrain,
+        m_importedShowStatics,
+        m_importedShowTextures,
+        m_importedFlatShading,
+        m_importedWaterDebug);
+
+    VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms"
+                    << " (vertices=" << m_importedScene.packedVertices.size()
+                    << ", draws=" << m_importedScene.packedDraws.size() << ")";
     return true;
 }
 
@@ -1131,11 +1060,6 @@ void App::run() {
                simulationStepCount < kMaxSimulationStepsPerFrame) {
             m_cameraPrevious = m_camera;
             updateCamera(static_cast<float>(kSimulationFixedStepSeconds));
-            if (m_importedSceneDemoEnabled) {
-                updateBalmoraGuards(static_cast<float>(kSimulationFixedStepSeconds));
-            } else {
-                m_simulation.update(static_cast<float>(kSimulationFixedStepSeconds));
-            }
             simulationAccumulatorSeconds -= kSimulationFixedStepSeconds;
             ++simulationStepCount;
         }
@@ -1879,369 +1803,24 @@ void App::handleInventoryClick(float mouseX, float mouseY, float displayWidth, f
     }
 }
 
-void App::update(float dt, float simulationAlpha) {
-    if (m_importedSceneDemoEnabled) {
-        const float renderAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
-        const odai::render::CameraPose cameraPose{
-            m_cameraPrevious.x + ((m_camera.x - m_cameraPrevious.x) * renderAlpha),
-            m_cameraPrevious.y + ((m_camera.y - m_cameraPrevious.y) * renderAlpha),
-            m_cameraPrevious.z + ((m_camera.z - m_cameraPrevious.z) * renderAlpha),
-            lerpWrappedDegrees(m_cameraPrevious.yawDegrees, m_camera.yawDegrees, renderAlpha),
-            m_cameraPrevious.pitchDegrees + ((m_camera.pitchDegrees - m_cameraPrevious.pitchDegrees) * renderAlpha),
-            m_camera.fovDegrees
-        };
-        m_visibleChunkIndices.clear();
-        m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
-        rebuildBalmoraGuardRenderFrame(renderAlpha);
-        odai::render::ImportedActorFrameData guardFrameData{};
-        const odai::render::ImportedActorFrameData* guardFrameDataPtr = nullptr;
-        if (!m_balmoraGuardFrameVertices.empty() &&
-            !m_balmoraGuardFrameIndices.empty() &&
-            !m_balmoraGuardFrameDraws.empty()) {
-            guardFrameData.vertices = m_balmoraGuardFrameVertices;
-            guardFrameData.indices = m_balmoraGuardFrameIndices;
-            guardFrameData.draws = m_balmoraGuardFrameDraws;
-            guardFrameDataPtr = &guardFrameData;
-        }
-        m_renderer.renderFrame(
-            m_world.chunkGrid(),
-            m_simulation,
-            cameraPose,
-            odai::render::VoxelPreview{},
-            simulationAlpha,
-            std::span<const std::size_t>(m_visibleChunkIndices),
-            guardFrameDataPtr
-        );
-        m_camera.fovDegrees = m_renderer.cameraFovDegrees();
-        return;
-    }
-
-    refreshStreamingWindow(false);
-
-    const bool regeneratePressedThisFrame =
-        !isAnyUiVisible() && m_input.regenerateWorldDown && !m_wasRegenerateWorldDown;
-    m_wasRegenerateWorldDown = m_input.regenerateWorldDown;
-    if (regeneratePressedThisFrame) {
-        regenerateWorld();
-    }
-
-    const CameraRaycastResult raycast = raycastFromCamera();
-    if (m_voxelBreakTargetValid) {
-        const bool blockTargetStillValid =
-            !isAnyUiVisible() &&
-            raycast.hitSolid &&
-            raycast.hitDistance <= kBlockInteractMaxDistance &&
-            raycast.solidX == m_voxelBreakTargetX &&
-            raycast.solidY == m_voxelBreakTargetY &&
-            raycast.solidZ == m_voxelBreakTargetZ;
-        if (!blockTargetStillValid) {
-            resetVoxelBreakProgress();
-        }
-    }
-
-    int windowWidth = 0;
-    int windowHeight = 0;
-    glfwGetWindowSize(m_window, &windowWidth, &windowHeight);
-    double mouseX = 0.0;
-    double mouseY = 0.0;
-    glfwGetCursorPos(m_window, &mouseX, &mouseY);
-
-    const bool inventoryClickPressedThisFrame = m_inventoryVisible && m_input.removeBlockDown && !m_wasRemoveBlockDown;
-    if (inventoryClickPressedThisFrame) {
-        handleInventoryClick(
-            static_cast<float>(mouseX),
-            static_cast<float>(mouseY),
-            static_cast<float>(std::max(windowWidth, 1)),
-            static_cast<float>(std::max(windowHeight, 1))
-        );
-    }
-
-    const bool blockInteractionEnabled = !isAnyUiVisible();
-    const bool placePressedThisFrame = blockInteractionEnabled && m_input.placeBlockDown && !m_wasPlaceBlockDown;
-    const bool removePressedThisFrame = blockInteractionEnabled && m_input.removeBlockDown && !m_wasRemoveBlockDown;
-    m_wasPlaceBlockDown = m_input.placeBlockDown;
-    m_wasRemoveBlockDown = m_input.removeBlockDown;
-
-    bool voxelChunkEdited = false;
-    std::vector<std::size_t> editedChunkIndices;
-    if (placePressedThisFrame) {
-        resetVoxelBreakProgress();
-        if (tryPlaceVoxelFromCameraRay(editedChunkIndices)) {
-            voxelChunkEdited = true;
-        }
-    }
-    if (removePressedThisFrame && tryRemoveVoxelFromCameraRay(editedChunkIndices)) {
-        voxelChunkEdited = true;
-    }
-
-    if (voxelChunkEdited) {
-        if (!m_renderer.updateChunkMesh(m_world.chunkGrid(), std::span<const std::size_t>(editedChunkIndices))) {
-            VOX_LOGE("app") << "chunk mesh update failed after voxel edit";
-        }
-        m_worldDirty = true;
-        m_worldAutosaveElapsedSeconds = 0.0f;
-    }
-
-    if (m_worldDirty) {
-        m_worldAutosaveElapsedSeconds += std::max(0.0f, dt);
-        if (m_worldAutosaveElapsedSeconds >= kWorldAutosaveDelaySeconds) {
-            const std::filesystem::path worldPath{kWorldFilePath};
-            if (!m_world.save(worldPath)) {
-                VOX_LOGE("app") << "failed to autosave world to " << worldPath.string();
-            } else {
-                VOX_LOGD("app") << "autosaved world to " << worldPath.string();
-                m_worldDirty = false;
-                m_worldAutosaveElapsedSeconds = 0.0f;
-            }
-        }
-    }
-
-    if (m_dayCycleEnabled) {
-        m_dayCyclePhase += std::max(dt, 0.0f) * kDayCycleSpeedCyclesPerSecond;
-        m_dayCyclePhase -= std::floor(m_dayCyclePhase);
-        // Winter solar arc model:
-        // - fixed latitude + declination
-        // - hour angle advances through a full day
-        // - yields low sun altitude and modest azimuth drift (SE -> S -> SW)
-        const float latitudeRadians = odai::math::radians(kDayCycleLatitudeDegrees);
-        const float declinationRadians = odai::math::radians(kDayCycleWinterDeclinationDegrees);
-        const float hourAngleRadians = ((m_dayCyclePhase * 360.0f) - 180.0f) * (kTwoPi / 360.0f);
-
-        const float sinLat = std::sin(latitudeRadians);
-        const float cosLat = std::cos(latitudeRadians);
-        const float sinDec = std::sin(declinationRadians);
-        const float cosDec = std::cos(declinationRadians);
-        const float sinHour = std::sin(hourAngleRadians);
-        const float cosHour = std::cos(hourAngleRadians);
-
-        // Local ENU components of sun direction.
-        // Solar convention: negative hour angle = morning (east), positive = afternoon (west).
-        const float sunEast = -cosDec * sinHour;
-        const float sunNorth = (cosLat * sinDec) - (sinLat * cosDec * cosHour);
-        const float sunUp = (sinLat * sinDec) + (cosLat * cosDec * cosHour);
-
-        const float sunPitchDegrees = odai::math::degrees(std::asin(std::clamp(sunUp, -1.0f, 1.0f)));
-        float sunAzimuthDegrees = odai::math::degrees(std::atan2(sunEast, sunNorth));
-        if (sunAzimuthDegrees < 0.0f) {
-            sunAzimuthDegrees += 360.0f;
-        }
-
-        // Convert azimuth (north=0, east=90, south=180) to engine yaw
-        // where yaw 0 = +X (east), yaw 90 = +Z (south), yaw -90 = -Z (north).
-        const float sunYawDegrees = wrapDegreesSigned((sunAzimuthDegrees - 90.0f) + kDayCycleAzimuthOffsetDegrees);
-        m_renderer.setSunAngles(sunYawDegrees, sunPitchDegrees);
-    }
-
+void App::update([[maybe_unused]] float dt, float simulationAlpha) {
     const float renderAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
-    const float renderCameraX = m_cameraPrevious.x + ((m_camera.x - m_cameraPrevious.x) * renderAlpha);
-    const float renderCameraY = m_cameraPrevious.y + ((m_camera.y - m_cameraPrevious.y) * renderAlpha);
-    const float renderCameraZ = m_cameraPrevious.z + ((m_camera.z - m_cameraPrevious.z) * renderAlpha);
-    const float renderCameraYawDegrees =
-        lerpWrappedDegrees(m_cameraPrevious.yawDegrees, m_camera.yawDegrees, renderAlpha);
-    const float renderCameraPitchDegrees =
-        m_cameraPrevious.pitchDegrees + ((m_camera.pitchDegrees - m_cameraPrevious.pitchDegrees) * renderAlpha);
-
-    odai::render::VoxelPreview preview{};
-    if (!isAnyUiVisible()) {
-        if (raycast.hitSolid && raycast.hitDistance <= kBlockInteractMaxDistance) {
-            if (raycast.hasHitFaceNormal) {
-                auto normalToFaceId = [](int nx, int ny, int nz) -> uint32_t {
-                    if (nx > 0) { return 0u; }
-                    if (nx < 0) { return 1u; }
-                    if (ny > 0) { return 2u; }
-                    if (ny < 0) { return 3u; }
-                    if (nz > 0) { return 4u; }
-                    return 5u;
-                };
-                preview.faceVisible = true;
-                preview.faceX = raycast.solidX;
-                preview.faceY = raycast.solidY;
-                preview.faceZ = raycast.solidZ;
-                preview.faceId = normalToFaceId(raycast.hitFaceNormalX, raycast.hitFaceNormalY, raycast.hitFaceNormalZ);
-                preview.mode = m_input.removeBlockDown
-                    ? odai::render::VoxelPreview::Mode::Remove
-                    : odai::render::VoxelPreview::Mode::Add;
-            }
-
-            if (!m_input.removeBlockDown) {
-                int targetX = 0;
-                int targetY = 0;
-                int targetZ = 0;
-                if (computePlacementVoxelFromRaycast(raycast, targetX, targetY, targetZ)) {
-                    if (isWorldVoxelInBounds(targetX, targetY, targetZ) &&
-                        selectedPlaceVoxel().type != odai::world::VoxelType::Empty) {
-                        // Face highlight is enough for placement; do not show a ghost voxel cube.
-                    } else {
-                        preview.faceVisible = false;
-                    }
-                } else {
-                    preview.faceVisible = false;
-                }
-            }
-        }
-    }
-
     const odai::render::CameraPose cameraPose{
-        renderCameraX,
-        renderCameraY,
-        renderCameraZ,
-        renderCameraYawDegrees,
-        renderCameraPitchDegrees,
+        m_cameraPrevious.x + ((m_camera.x - m_cameraPrevious.x) * renderAlpha),
+        m_cameraPrevious.y + ((m_camera.y - m_cameraPrevious.y) * renderAlpha),
+        m_cameraPrevious.z + ((m_camera.z - m_cameraPrevious.z) * renderAlpha),
+        lerpWrappedDegrees(m_cameraPrevious.yawDegrees, m_camera.yawDegrees, renderAlpha),
+        m_cameraPrevious.pitchDegrees + ((m_camera.pitchDegrees - m_cameraPrevious.pitchDegrees) * renderAlpha),
         m_camera.fovDegrees
     };
-    syncGameplayUiState();
-
-    const odai::world::ClipmapConfig requestedClipmapConfig = m_renderer.clipmapQueryConfig();
-    if (!m_hasAppliedClipmapConfig ||
-        requestedClipmapConfig.levelCount != m_appliedClipmapConfig.levelCount ||
-        requestedClipmapConfig.gridResolution != m_appliedClipmapConfig.gridResolution ||
-        requestedClipmapConfig.baseVoxelSize != m_appliedClipmapConfig.baseVoxelSize ||
-        requestedClipmapConfig.brickResolution != m_appliedClipmapConfig.brickResolution) {
-        m_appliedClipmapConfig = requestedClipmapConfig;
-        m_hasAppliedClipmapConfig = true;
-        m_chunkClipmapIndex.setConfig(m_appliedClipmapConfig);
-        m_chunkClipmapIndex.rebuild(m_world.chunkGrid());
-        VOX_LOGI("app") << "clipmap config changed, rebuilt clipmap index (levels="
-                        << m_appliedClipmapConfig.levelCount
-                        << ", grid=" << m_appliedClipmapConfig.gridResolution
-                        << ", baseVoxel=" << m_appliedClipmapConfig.baseVoxelSize
-                        << ", brick=" << m_appliedClipmapConfig.brickResolution
-                        << ")";
-    }
-
     m_visibleChunkIndices.clear();
-    odai::world::SpatialQueryStats spatialQueryStats{};
-    bool spatialQueriesUsed = false;
-    if (m_renderer.useSpatialPartitioningQueries()) {
-        int framebufferWidth = 0;
-        int framebufferHeight = 0;
-        glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
-        const float aspectRatio =
-            (framebufferWidth > 0 && framebufferHeight > 0)
-                ? static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight)
-                : kRenderAspectFallback;
-        const CameraFrustum cameraFrustum = buildCameraFrustum(
-            odai::math::Vector3{renderCameraX, renderCameraY, renderCameraZ},
-            renderCameraYawDegrees,
-            renderCameraPitchDegrees,
-            m_camera.fovDegrees,
-            aspectRatio
-        );
-        const CameraFrustum keepAliveFrustum = buildCameraFrustum(
-            odai::math::Vector3{renderCameraX, renderCameraY, renderCameraZ},
-            renderCameraYawDegrees,
-            renderCameraPitchDegrees,
-            m_camera.fovDegrees,
-            aspectRatio
-        );
-        if (cameraFrustum.valid && m_chunkClipmapIndex.valid()) {
-            m_chunkClipmapIndex.updateCamera(renderCameraX, renderCameraY, renderCameraZ, &spatialQueryStats);
-            std::vector<std::size_t> candidateChunkIndices =
-                m_chunkClipmapIndex.queryChunksIntersecting(cameraFrustum.broadPhaseBounds, &spatialQueryStats);
-            spatialQueriesUsed = true;
-            const std::vector<odai::world::Chunk>& chunks = m_world.chunkGrid().chunks();
-            if (m_visibleChunkGraceFrames.size() != chunks.size() ||
-                m_previousVisibleChunkMask.size() != chunks.size() ||
-                m_currentVisibleChunkMask.size() != chunks.size() ||
-                m_directlyVisibleChunkMask.size() != chunks.size()) {
-                m_visibleChunkGraceFrames.assign(chunks.size(), 0u);
-                m_previousVisibleChunkMask.assign(chunks.size(), 0u);
-                m_currentVisibleChunkMask.assign(chunks.size(), 0u);
-                m_directlyVisibleChunkMask.assign(chunks.size(), 0u);
-                m_visibleChunkIndices.clear();
-            }
-            std::fill(m_currentVisibleChunkMask.begin(), m_currentVisibleChunkMask.end(), 0u);
-            std::fill(m_directlyVisibleChunkMask.begin(), m_directlyVisibleChunkMask.end(), 0u);
-            for (std::size_t chunkIndex : candidateChunkIndices) {
-                if (chunkIndex >= chunks.size()) {
-                    continue;
-                }
-                if (chunkIntersectsFrustum(chunks[chunkIndex], cameraFrustum.planes, kRenderFrustumPlaneSlackVoxels)) {
-                    m_directlyVisibleChunkMask[chunkIndex] = 1u;
-                }
-            }
-            std::uint32_t retainedChunkCount = 0;
-            std::uint32_t newlyVisibleChunkCount = 0;
-            std::uint32_t evictedChunkCount = 0;
-            for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
-                const bool directlyVisible = m_directlyVisibleChunkMask[chunkIndex] != 0u;
-                if (directlyVisible) {
-                    m_visibleChunkGraceFrames[chunkIndex] = kSpatialQueryVisibilityGraceFrames;
-                    m_currentVisibleChunkMask[chunkIndex] = 1u;
-                } else {
-                    const bool previouslyVisible = m_previousVisibleChunkMask[chunkIndex] != 0u;
-                    const bool keepAliveVisible =
-                        previouslyVisible &&
-                        keepAliveFrustum.valid &&
-                        chunkIntersectsFrustum(
-                            chunks[chunkIndex],
-                            keepAliveFrustum.planes,
-                            kRenderFrustumKeepAlivePlaneSlackVoxels
-                        );
-                    std::uint8_t& graceFrames = m_visibleChunkGraceFrames[chunkIndex];
-                    if (keepAliveVisible) {
-                        graceFrames = kSpatialQueryVisibilityGraceFrames;
-                        m_currentVisibleChunkMask[chunkIndex] = 1u;
-                    } else if (graceFrames > 0) {
-                        --graceFrames;
-                        m_currentVisibleChunkMask[chunkIndex] = 1u;
-                    }
-                }
-
-                if (m_currentVisibleChunkMask[chunkIndex] != 0u && !directlyVisible) {
-                    ++retainedChunkCount;
-                }
-                if (m_currentVisibleChunkMask[chunkIndex] != 0u && m_previousVisibleChunkMask[chunkIndex] == 0u) {
-                    ++newlyVisibleChunkCount;
-                }
-                if (m_currentVisibleChunkMask[chunkIndex] == 0u && m_previousVisibleChunkMask[chunkIndex] != 0u) {
-                    ++evictedChunkCount;
-                }
-            }
-            if (m_currentVisibleChunkMask != m_previousVisibleChunkMask) {
-                m_visibleChunkIndices.clear();
-                m_visibleChunkIndices.reserve(candidateChunkIndices.size() + retainedChunkCount);
-                for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
-                    if (m_currentVisibleChunkMask[chunkIndex] != 0u) {
-                        m_visibleChunkIndices.push_back(chunkIndex);
-                    }
-                }
-            }
-            spatialQueryStats.visibleChunkCount = static_cast<std::uint32_t>(m_visibleChunkIndices.size());
-            spatialQueryStats.retainedChunkCount = retainedChunkCount;
-            spatialQueryStats.newlyVisibleChunkCount = newlyVisibleChunkCount;
-            spatialQueryStats.evictedChunkCount = evictedChunkCount;
-            m_previousVisibleChunkMask.swap(m_currentVisibleChunkMask);
-        }
-    }
-
-    if (m_visibleChunkIndices.empty() && (!spatialQueriesUsed || !m_chunkClipmapIndex.valid())) {
-        const std::size_t chunkCount = m_world.chunkGrid().chunks().size();
-        m_visibleChunkIndices.resize(chunkCount);
-        for (std::size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
-            m_visibleChunkIndices[chunkIndex] = chunkIndex;
-        }
-        m_visibleChunkGraceFrames.assign(chunkCount, 0u);
-        m_previousVisibleChunkMask.assign(chunkCount, 1u);
-        m_currentVisibleChunkMask.assign(chunkCount, 0u);
-        m_directlyVisibleChunkMask.assign(chunkCount, 0u);
-    } else if (!spatialQueriesUsed) {
-        m_visibleChunkGraceFrames.clear();
-        m_previousVisibleChunkMask.clear();
-        m_currentVisibleChunkMask.clear();
-        m_directlyVisibleChunkMask.clear();
-    }
-    m_renderer.setSpatialQueryStats(
-        spatialQueriesUsed,
-        spatialQueryStats,
-        static_cast<std::uint32_t>(m_visibleChunkIndices.size())
-    );
-
+    m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
+    updateUiOverlay();
     m_renderer.renderFrame(
         m_world.chunkGrid(),
         m_simulation,
         cameraPose,
-        preview,
+        odai::render::VoxelPreview{},
         simulationAlpha,
         std::span<const std::size_t>(m_visibleChunkIndices)
     );
@@ -2262,16 +1841,6 @@ void App::shutdown() {
                         << ", enable_ssao=" << boolConfigName(m_config.enableSsao) << ")";
     }
 
-    if (m_worldDirty) {
-        const std::filesystem::path worldPath{kWorldFilePath};
-        if (!m_world.save(worldPath)) {
-            VOX_LOGE("app") << "failed to save dirty world on shutdown to " << worldPath.string();
-        } else {
-            VOX_LOGI("app") << "saved dirty world on shutdown to " << worldPath.string();
-            m_worldDirty = false;
-            m_worldAutosaveElapsedSeconds = 0.0f;
-        }
-    }
 
     m_renderer.shutdown();
 
@@ -4366,6 +3935,84 @@ bool App::tryRemoveTrackFromCameraRay() {
     }
     tracks.erase(tracks.begin() + static_cast<std::ptrdiff_t>(trackIndex));
     return true;
+}
+
+void App::setupDemoUi() {
+    // Load a UI font; fall back through a couple of common locations. If none is
+    // found the panel/button still render (text is simply skipped).
+    const std::array<const char*, 3> kFontCandidates = {
+        "assets/fonts/EBGaramond-Regular.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    };
+    for (const char* candidate : kFontCandidates) {
+        if (std::filesystem::exists(candidate) && m_uiFont.loadFromFile(candidate, 18.0f)) {
+            m_uiFontReady = m_uiFont.atlasWidth() > 0 &&
+                            m_renderer.setUiFontAtlas(m_uiFont.atlasPixels().data(),
+                                                      m_uiFont.atlasWidth(), m_uiFont.atlasHeight());
+            break;
+        }
+    }
+    const odai::ui::Font* labelFont = m_uiFontReady ? &m_uiFont : nullptr;
+
+    auto root = std::make_unique<odai::ui::Widget>();
+
+    auto panel = std::make_unique<odai::ui::Panel>();
+    panel->setRect(odai::ui::UiRect::fromXYWH(40.0f, 90.0f, 300.0f, 170.0f));
+
+    auto title = std::make_unique<odai::ui::Label>(labelFont, "<color=#ecd39a>Command View</color>");
+    title->setRect(odai::ui::UiRect::fromXYWH(56.0f, 104.0f, 270.0f, 28.0f));
+    panel->addChild(std::move(title));
+
+    auto status = std::make_unique<odai::ui::Label>(labelFont, "Clicks: 0");
+    status->setRect(odai::ui::UiRect::fromXYWH(56.0f, 210.0f, 270.0f, 28.0f));
+    m_uiStatusLabel = status.get();
+    panel->addChild(std::move(status));
+
+    auto button = std::make_unique<odai::ui::Button>(
+        labelFont, "Found City", [this]() {
+            ++m_uiDemoClicks;
+            VOX_LOGI("ui") << "demo button clicked (" << m_uiDemoClicks << ")";
+        });
+    button->setRect(odai::ui::UiRect::fromXYWH(56.0f, 150.0f, 200.0f, 44.0f));
+    panel->addChild(std::move(button));
+
+    root->addChild(std::move(panel));
+    m_uiContext.setRoot(std::move(root));
+}
+
+void App::updateUiOverlay() {
+    if (m_window == nullptr) {
+        return;
+    }
+    if (m_uiContext.root() == nullptr) {
+        setupDemoUi();
+    }
+
+    int framebufferWidth = 0;
+    int framebufferHeight = 0;
+    glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+    if (framebufferWidth <= 0 || framebufferHeight <= 0) {
+        return;
+    }
+    double mouseX = 0.0;
+    double mouseY = 0.0;
+    glfwGetCursorPos(m_window, &mouseX, &mouseY);
+    const bool leftDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+
+    m_uiInput.beginFrame();
+    m_uiInput.mousePx = {static_cast<float>(mouseX), static_cast<float>(mouseY)};
+    m_uiInput.setButton(odai::ui::UiMouseButton::Left, leftDown);
+
+    m_uiContext.setViewport({static_cast<float>(framebufferWidth), static_cast<float>(framebufferHeight)});
+    m_uiContext.update(m_uiInput);
+
+    if (m_uiStatusLabel != nullptr) {
+        m_uiStatusLabel->setText("Clicks: " + std::to_string(m_uiDemoClicks));
+    }
+
+    m_uiContext.build(m_uiDrawList);
+    m_renderer.setUiDrawData(m_uiDrawList.data());
 }
 
 } // namespace odai::app

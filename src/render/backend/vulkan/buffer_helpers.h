@@ -108,7 +108,8 @@ enum class FrameArenaUploadKind : uint8_t {
     Unknown = 0,
     CameraUniform = 1,
     InstanceData = 2,
-    PreviewData = 3
+    PreviewData = 3,
+    UiGeometry = 4
 };
 
 struct FrameArenaSlice {

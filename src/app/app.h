@@ -4,6 +4,10 @@
 #include "import/gpu_scene.h"
 #include "render/renderer.h"
 #include "sim/simulation.h"
+#include "ui/font.h"
+#include "ui/ui_context.h"
+#include "ui/ui_draw_list.h"
+#include "ui/ui_input.h"
 #include "world/clipmap_index.h"
 #include "world/imported_scene_collision.h"
 #include "world/navmesh.h"
@@ -15,6 +19,10 @@
 #include <vector>
 
 struct GLFWwindow;
+
+namespace odai::ui {
+class Label;
+}
 
 // App subsystem
 // Responsible for: coordinating startup, per-frame update flow, and shutdown.
@@ -78,6 +86,8 @@ private:
 
     void pollInput();
     void updateCamera(float dt);
+    void setupDemoUi();
+    void updateUiOverlay();
     void syncGameplayUiState();
     void assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId);
     void handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight);
@@ -265,6 +275,14 @@ private:
     std::vector<std::uint8_t> m_directlyVisibleChunkMask;
     odai::world::ClipmapConfig m_appliedClipmapConfig{};
     bool m_hasAppliedClipmapConfig = false;
+
+    odai::ui::Font m_uiFont;
+    odai::ui::UiContext m_uiContext;
+    odai::ui::UiDrawList m_uiDrawList;
+    odai::ui::UiInput m_uiInput;
+    odai::ui::Label* m_uiStatusLabel = nullptr;
+    bool m_uiFontReady = false;
+    int m_uiDemoClicks = 0;
 
     odai::sim::Simulation m_simulation;
     odai::world::World m_world;

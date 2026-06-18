@@ -70,6 +70,14 @@ void RendererBackend::setGameplayUiState(const GameplayUiState& state) {
     m_gameplayUiState = state;
 }
 
+void RendererBackend::setUiDrawData(const odai::ui::UiDrawData& drawData) {
+    m_uiDrawData = drawData;
+}
+
+bool RendererBackend::setUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height) {
+    return m_uiRenderer.setFontAtlasR8(pixels, width, height);
+}
+
 
 bool RendererBackend::isDebugUiVisible() const {
     return m_debugUiVisible && m_showFrameStatsPanel;

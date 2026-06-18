@@ -8,6 +8,18 @@ include(CTest)
 option(ODAI_BUILD_APP "Build the main Vulkan toy application." ON)
 option(ODAI_BUILD_TOOLS "Build offline content tools." ON)
 
+# stb (stb_truetype.h, stb_rect_pack.h) for the UI font rasterizer. Provided by
+# the vcpkg `stb` port in normal builds; ODAI_STB_INCLUDE_DIR overrides it for
+# headless checks without vcpkg.
+find_package(Stb QUIET)
+if(Stb_FOUND)
+    set(ODAI_STB_INCLUDE_DIRS "${Stb_INCLUDE_DIR}")
+elseif(DEFINED ODAI_STB_INCLUDE_DIR)
+    set(ODAI_STB_INCLUDE_DIRS "${ODAI_STB_INCLUDE_DIR}")
+else()
+    set(ODAI_STB_INCLUDE_DIRS "")
+endif()
+
 # Optional Slang shader compilation (to SPIR-V for Vulkan).
 # Produces .slang.spv files next to the source shaders.
 find_program(SLANGC_EXECUTABLE NAMES slangc)
@@ -79,6 +91,8 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sky_cloud.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/tone_map.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/tone_map.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ui.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ui.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/shadow_depth.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/shadow_depth.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_shadow.vert.slang" vertex)
@@ -141,6 +155,16 @@ if(ODAI_BUILD_APP)
         src/app/main.cc
         src/app/app.cc
         src/core/log.cc
+        src/game/strategy_map.cc
+        src/game/strategy_map_io.cc
+        src/game/strategy_map_mesh.cc
+        src/ui/ui_draw_list.cc
+        src/ui/font.cc
+        src/ui/rich_text.cc
+        src/ui/ui_context.cc
+        src/ui/widgets/panel.cc
+        src/ui/widgets/label.cc
+        src/ui/widgets/button.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/import/morrowind_nif.cc
@@ -163,6 +187,7 @@ if(ODAI_BUILD_APP)
     if(ODAI_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
         list(APPEND RENDER_BACKEND_SOURCES
             src/render/backend/vulkan/frame_ui.cc
+            src/render/backend/vulkan/ui_renderer.cc
             src/render/backend/vulkan/buffer_helpers.cc
             src/render/backend/vulkan/device.cc
             src/render/backend/vulkan/frame.cc
@@ -210,7 +235,7 @@ if(ODAI_BUILD_APP)
         add_dependencies(odai slang_shaders)
     endif()
 
-    target_include_directories(odai PRIVATE src)
+    target_include_directories(odai PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
     target_compile_definitions(
         odai PRIVATE
         ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
@@ -319,6 +344,24 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_imported_scene_preview PRIVATE /W4 /permissive-)
     else()
         target_compile_options(odai_imported_scene_preview PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    # Offline generator for the strategic-map prototype. Writes a native .smap and
+    # a renderable .bin ImportedScene.
+    add_executable(odai_strategy_map_gen
+        src/game/strategy_map.cc
+        src/game/strategy_map_io.cc
+        src/game/strategy_map_mesh.cc
+        src/import/gpu_scene.cc
+        src/import/imported_scene.cc
+        src/import/morrowind_nif.cc
+        src/tools/strategy_map_gen_main.cc
+    )
+    target_include_directories(odai_strategy_map_gen PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_strategy_map_gen PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_strategy_map_gen PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
 
@@ -437,6 +480,86 @@ if(BUILD_TESTING)
     endif()
 
     add_test(NAME odai_navmesh_tests COMMAND odai_navmesh_tests)
+
+    add_executable(odai_strategy_map_tests
+        tests/strategy_map_tests.cc
+        src/game/strategy_map.cc
+        src/game/strategy_map_io.cc
+        src/game/strategy_map_mesh.cc
+    )
+    target_include_directories(odai_strategy_map_tests PRIVATE src)
+
+    if(MSVC)
+        target_compile_options(odai_strategy_map_tests PRIVATE
+            /W4
+            /permissive-
+            /w14242
+            /w14254
+            /w14263
+            /w14265
+            /w14287
+            /we4289
+            /w14296
+            /w14311
+            /w14545
+            /w14546
+            /w14547
+            /w14549
+            /w14555
+            /w14619
+            /w14640
+            /w14826
+            /w14905
+            /w14906
+            /w14928
+        )
+    else()
+        target_compile_options(odai_strategy_map_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_test(NAME odai_strategy_map_tests COMMAND odai_strategy_map_tests)
+
+    add_executable(odai_ui_tests
+        tests/ui_tests.cc
+        src/ui/ui_draw_list.cc
+        src/ui/font.cc
+        src/ui/rich_text.cc
+        src/ui/ui_context.cc
+        src/ui/widgets/panel.cc
+        src/ui/widgets/label.cc
+        src/ui/widgets/button.cc
+    )
+    target_include_directories(odai_ui_tests PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+
+    if(MSVC)
+        target_compile_options(odai_ui_tests PRIVATE
+            /W4
+            /permissive-
+            /w14242
+            /w14254
+            /w14263
+            /w14265
+            /w14287
+            /we4289
+            /w14296
+            /w14311
+            /w14545
+            /w14546
+            /w14547
+            /w14549
+            /w14555
+            /w14619
+            /w14640
+            /w14826
+            /w14905
+            /w14906
+            /w14928
+        )
+    else()
+        target_compile_options(odai_ui_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_test(NAME odai_ui_tests COMMAND odai_ui_tests)
 
     find_package(GTest CONFIG QUIET)
     if(NOT GTest_FOUND)
