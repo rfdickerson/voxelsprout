@@ -38,7 +38,6 @@ ctest --test-dir cmake-build-release -R odai_ui_tests -V
 - `odai_ui_tests` — draw list, font metrics, rich text, widgets (headless, no Vulkan)
 - `odai_strategy_map_tests` — hex grid model, serialization, mesher
 - `odai_imported_scene_tests` — scene import/export round-trip
-- `odai_navmesh_tests` — navigation mesh
 - `odai_stability_gtests` — GTest suite covering frame graph, render math, sim network (requires GTest via vcpkg)
 
 **Content generation tools:**
@@ -69,7 +68,7 @@ Read **`AGENTS.md`** first — it defines the project's non-negotiable rules (Vu
 ```
 app/      — lifecycle, input routing, per-frame coordination
 core/     — math, time, logging (VOX_LOGE/W/I/D/T macros), input state
-world/    — terrain, chunk grids, voxels, navmesh, static placement
+world/    — terrain, chunk grids, voxels, static placement
 import/   — Morrowind asset parsing (ESM, terrain, scene serialization)
 game/     — strategy map model, hex grid, serialization, mesh building
 sim/      — factory simulation (pipes, belts, items)

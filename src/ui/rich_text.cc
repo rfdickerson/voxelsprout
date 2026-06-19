@@ -45,9 +45,16 @@ std::vector<RichSpan> parseRichText(std::string_view markup, const UiColor& defa
     int bold = 0;
     int italic = 0;
 
+    // sRGB #6ab0f5 — a readable light-blue used for navigation hyperlinks.
+    static const UiColor kLinkBlue = UiColor::fromRgbHex(0x6ab0f5);
+
     const auto flush = [&]() {
         if (!buffer.empty()) {
-            spans.push_back(RichSpan{buffer, color, bold > 0, italic > 0, tooltip, {}, 0.0f});
+            // Auto-apply link blue to <tip=link:…> spans when no explicit <color> is active,
+            // so navigation links are visually distinct without requiring markup color tags.
+            const bool isLink = tooltip.rfind("link:", 0) == 0;
+            const UiColor spanColor = (isLink && colorStack.empty()) ? kLinkBlue : color;
+            spans.push_back(RichSpan{buffer, spanColor, bold > 0, italic > 0, tooltip, {}, 0.0f});
             buffer.clear();
         }
     };

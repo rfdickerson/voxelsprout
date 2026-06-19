@@ -400,7 +400,7 @@ const std::string& getPediaArticle(const std::string& id) {
             " turn raw recruits into disciplined soldiers, giving every unit trained here"
             " a head start in combat experience.\n\n"
             "The most fundamental graduate of the Barracks is the"
-            " <tip=link:warrior><color=#dba94a>Warrior</color></tip> --"
+            " <tip=link:warrior>Warriors</tip> --"
             " the backbone of every early army. With a Barracks in place, Warriors emerge"
             " already hardened by months of drilling, formation work, and mock combat,"
             " making them meaningfully more durable than unblooded levies.\n\n"

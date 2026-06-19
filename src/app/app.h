@@ -12,7 +12,6 @@
 #include "ui/ui_input.h"
 #include "world/clipmap_index.h"
 #include "world/imported_scene_collision.h"
-#include "world/navmesh.h"
 #include "world/world.h"
 
 #include <filesystem>
