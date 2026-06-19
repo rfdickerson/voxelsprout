@@ -400,7 +400,7 @@ bool RendererBackend::createInstance() {
     applicationInfo.applicationVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
     applicationInfo.pEngineName = "none";
     applicationInfo.engineVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
-    applicationInfo.apiVersion = VK_API_VERSION_1_3;
+    applicationInfo.apiVersion = VK_API_VERSION_1_4;
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -558,9 +558,12 @@ bool RendererBackend::pickPhysicalDevice() {
         VkPhysicalDeviceVulkan13Features vulkan13Features{};
         vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
         vulkan13Features.pNext = &vulkan12Features;
+        VkPhysicalDeviceVulkan14Features vulkan14Features{};
+        vulkan14Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
+        vulkan14Features.pNext = &vulkan13Features;
         VkPhysicalDeviceMemoryPriorityFeaturesEXT memoryPriorityFeatures{};
         memoryPriorityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT;
-        memoryPriorityFeatures.pNext = &vulkan13Features;
+        memoryPriorityFeatures.pNext = &vulkan14Features;
         VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures{};
         accelerationStructureFeatures.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
@@ -575,9 +578,12 @@ bool RendererBackend::pickPhysicalDevice() {
         VkPhysicalDeviceAccelerationStructurePropertiesKHR accelerationStructureProperties{};
         accelerationStructureProperties.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+        VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptorBufferProperties{};
+        descriptorBufferProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT;
+        descriptorBufferProperties.pNext = &accelerationStructureProperties;
         VkPhysicalDeviceProperties2 properties2{};
         properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-        properties2.pNext = &accelerationStructureProperties;
+        properties2.pNext = &descriptorBufferProperties;
         vkGetPhysicalDeviceProperties2(candidate, &properties2);
         if (vulkan13Features.dynamicRendering != VK_TRUE) {
             VOX_LOGI("render") << "skip GPU: dynamicRendering not supported\n";
@@ -645,8 +651,8 @@ bool RendererBackend::pickPhysicalDevice() {
             isDeviceExtensionAvailable(candidate, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
         const bool supportsDisplayTiming = displayTimingExtensionAvailable;
         DesktopCapabilityProbe capabilityProbe{};
-        capabilityProbe.descriptorHeapExtension =
-            isDeviceExtensionAvailable(candidate, "VK_EXT_descriptor_heap");
+        capabilityProbe.descriptorBufferExtension =
+            isDeviceExtensionAvailable(candidate, VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
         capabilityProbe.unifiedImageLayoutsExtension =
             isDeviceExtensionAvailable(candidate, "VK_KHR_unified_image_layouts");
         capabilityProbe.hostImageCopyExtension =
@@ -728,7 +734,7 @@ bool RendererBackend::pickPhysicalDevice() {
                            << ", displayTimingSupport=" << (candidateSelection.supportsDisplayTiming ? "yes" : "no")
                            << "(ext=" << (candidateSelection.hasDisplayTimingExtension ? "yes" : "no") << ")\n";
         VOX_LOGI("render") << "candidate roadmap2026 probe: gpu=" << properties.deviceName
-                           << ", descriptorHeap=" << (capabilityProbe.descriptorHeapExtension ? "yes" : "no")
+                           << ", descriptorHeap=" << (capabilityProbe.descriptorBufferExtension ? "yes" : "no")
                            << ", unifiedImageLayouts=" << (capabilityProbe.unifiedImageLayoutsExtension ? "yes" : "no")
                            << ", hostImageCopy=" << (capabilityProbe.hostImageCopyExtension ? "yes" : "no")
                            << ", shaderClock=" << (capabilityProbe.shaderClockExtension ? "yes" : "no")
@@ -807,7 +813,7 @@ bool RendererBackend::pickPhysicalDevice() {
                            << ", ssaoFormat=" << static_cast<int>(m_ssaoFormat)
                            << "\n";
         VOX_LOGI("render") << "selected roadmap2026 probe: descriptorHeap="
-                           << (m_desktopCapabilityProbe.descriptorHeapExtension ? "yes" : "no")
+                           << (m_desktopCapabilityProbe.descriptorBufferExtension ? "yes" : "no")
                            << ", unifiedImageLayouts=" << (m_desktopCapabilityProbe.unifiedImageLayoutsExtension ? "yes" : "no")
                            << ", hostImageCopy=" << (m_desktopCapabilityProbe.hostImageCopyExtension ? "yes" : "no")
                            << ", shaderClock=" << (m_desktopCapabilityProbe.shaderClockExtension ? "yes" : "no")
@@ -911,9 +917,16 @@ bool RendererBackend::createLogicalDevice() {
     vulkan13Features.synchronization2 = VK_TRUE;
     vulkan13Features.maintenance4 = VK_TRUE;
 
+    VkPhysicalDeviceVulkan14Features vulkan14Features{};
+    vulkan14Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
+    vulkan14Features.pNext = &vulkan13Features;
+    if (m_desktopCapabilityProbe.hostImageCopyExtension) {
+        vulkan14Features.hostImageCopy = VK_TRUE;
+    }
+
     VkPhysicalDeviceMemoryPriorityFeaturesEXT memoryPriorityFeatures{};
     memoryPriorityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT;
-    memoryPriorityFeatures.pNext = &vulkan13Features;
+    memoryPriorityFeatures.pNext = &vulkan14Features;
     memoryPriorityFeatures.memoryPriority = VK_TRUE;
     m_enabledAccelerationStructureFeatures = {};
     m_enabledAccelerationStructureFeatures.sType =
@@ -933,6 +946,12 @@ bool RendererBackend::createLogicalDevice() {
     std::vector<const char*> enabledDeviceExtensions(kDeviceExtensions.begin(), kDeviceExtensions.end());
     if (m_supportsDisplayTiming && m_hasDisplayTimingExtension) {
         appendDeviceExtensionIfMissing(enabledDeviceExtensions, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+    }
+    if (m_desktopCapabilityProbe.descriptorBufferExtension) {
+        // Enable the extension so vkGetDeviceProcAddr returns function pointers.
+        // Do NOT enable descriptorBuffer = VK_TRUE here; defer to Phase 3 when
+        // the DescriptorManager is fully migrated to buffer-backed descriptors.
+        appendDeviceExtensionIfMissing(enabledDeviceExtensions, VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
     }
     if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
         appendDeviceExtensionIfMissing(enabledDeviceExtensions, "VK_KHR_deferred_host_operations");
@@ -954,6 +973,7 @@ bool RendererBackend::createLogicalDevice() {
         logVkFailure("vkCreateDevice", result);
         return false;
     }
+    VOX_LOGI("render") << "Vulkan 1.4 device created\n";
     VOX_LOGI("render") << "device features enabled: dynamicRendering=1, synchronization2=1, maintenance4=1, "
         << "timelineSemaphore=1, bufferDeviceAddress=1, memoryPriority=1, shaderDrawParameters=1, drawIndirectFirstInstance=1, "
         << "multiDrawIndirect=" << (m_supportsMultiDrawIndirect ? 1 : 0)
@@ -975,6 +995,21 @@ bool RendererBackend::createLogicalDevice() {
             extensionLog += enabledDeviceExtensions[i];
         }
         VOX_LOGI("render") << "device extensions enabled: " << extensionLog << "\n";
+    }
+    if (m_desktopCapabilityProbe.descriptorBufferExtension) {
+        m_descriptorBufferProperties = {};
+        m_descriptorBufferProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT;
+        VkPhysicalDeviceProperties2 dbPropertiesQuery{};
+        dbPropertiesQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        dbPropertiesQuery.pNext = &m_descriptorBufferProperties;
+        vkGetPhysicalDeviceProperties2(m_physicalDevice, &dbPropertiesQuery);
+        VOX_LOGI("render") << "descriptor buffer sizes: "
+            << "uniformBuffer=" << m_descriptorBufferProperties.uniformBufferDescriptorSize
+            << " combinedImageSampler=" << m_descriptorBufferProperties.combinedImageSamplerDescriptorSize
+            << " storageBuffer=" << m_descriptorBufferProperties.storageBufferDescriptorSize
+            << " storageImage=" << m_descriptorBufferProperties.storageImageDescriptorSize
+            << " offsetAlignment=" << m_descriptorBufferProperties.descriptorBufferOffsetAlignment
+            << "\n";
     }
     if (m_supportsBindlessDescriptors) {
         VOX_LOGI("render") << "bindless descriptor support enabled (capacity="
@@ -998,6 +1033,8 @@ bool RendererBackend::createLogicalDevice() {
         m_enableDisplayTiming = false;
     }
     m_rayTracingRuntimeEnabled = loadRayTracingFunctions();
+    loadHostImageCopyFunctions();
+    loadDescriptorBufferFunctions();
     if (m_strategyMapMode) {
         // The flat hex map needs no ray-traced shadows/GI. Disabling the RT
         // runtime skips the BLAS/TLAS acceleration-structure build (multi-second
@@ -1063,7 +1100,7 @@ bool RendererBackend::createLogicalDevice() {
         allocatorCreateInfo.physicalDevice = m_physicalDevice;
         allocatorCreateInfo.device = m_device;
         allocatorCreateInfo.instance = m_instance;
-        allocatorCreateInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+        allocatorCreateInfo.vulkanApiVersion = VK_API_VERSION_1_4;
         const VkResult allocatorResult = vmaCreateAllocator(&allocatorCreateInfo, &m_vmaAllocator);
         if (allocatorResult != VK_SUCCESS) {
             logVkFailure("vmaCreateAllocator", allocatorResult);
@@ -1110,6 +1147,79 @@ bool RendererBackend::loadRayTracingFunctions() {
         m_getAccelerationStructureDeviceAddressKhr != nullptr;
 }
 
+void RendererBackend::loadHostImageCopyFunctions() {
+    m_copyMemoryToImage = nullptr;
+    m_transitionImageLayout = nullptr;
+    if (!m_desktopCapabilityProbe.hostImageCopyExtension || m_device == VK_NULL_HANDLE) {
+        return;
+    }
+    // Vulkan 1.4 promotes these to core without EXT suffix; try both.
+    m_copyMemoryToImage = reinterpret_cast<PFN_vkCopyMemoryToImageEXT>(
+        vkGetDeviceProcAddr(m_device, "vkCopyMemoryToImage")
+    );
+    if (!m_copyMemoryToImage) {
+        m_copyMemoryToImage = reinterpret_cast<PFN_vkCopyMemoryToImageEXT>(
+            vkGetDeviceProcAddr(m_device, "vkCopyMemoryToImageEXT")
+        );
+    }
+    m_transitionImageLayout = reinterpret_cast<PFN_vkTransitionImageLayoutEXT>(
+        vkGetDeviceProcAddr(m_device, "vkTransitionImageLayout")
+    );
+    if (!m_transitionImageLayout) {
+        m_transitionImageLayout = reinterpret_cast<PFN_vkTransitionImageLayoutEXT>(
+            vkGetDeviceProcAddr(m_device, "vkTransitionImageLayoutEXT")
+        );
+    }
+    if (m_copyMemoryToImage != nullptr && m_transitionImageLayout != nullptr) {
+        VOX_LOGI("render") << "host image copy enabled (VK_EXT_host_image_copy)\n";
+    } else {
+        m_copyMemoryToImage = nullptr;
+        m_transitionImageLayout = nullptr;
+        VOX_LOGW("render") << "host image copy unavailable: function pointers missing\n";
+    }
+}
+
+void RendererBackend::loadDescriptorBufferFunctions() {
+    m_getDescriptorSetLayoutSize = nullptr;
+    m_getDescriptorSetLayoutBindingOffset = nullptr;
+    m_getDescriptor = nullptr;
+    m_cmdBindDescriptorBuffers = nullptr;
+    m_cmdSetDescriptorBufferOffsets = nullptr;
+    if (!m_desktopCapabilityProbe.descriptorBufferExtension || m_device == VK_NULL_HANDLE) {
+        return;
+    }
+    m_getDescriptorSetLayoutSize = reinterpret_cast<PFN_vkGetDescriptorSetLayoutSizeEXT>(
+        vkGetDeviceProcAddr(m_device, "vkGetDescriptorSetLayoutSizeEXT")
+    );
+    m_getDescriptorSetLayoutBindingOffset = reinterpret_cast<PFN_vkGetDescriptorSetLayoutBindingOffsetEXT>(
+        vkGetDeviceProcAddr(m_device, "vkGetDescriptorSetLayoutBindingOffsetEXT")
+    );
+    m_getDescriptor = reinterpret_cast<PFN_vkGetDescriptorEXT>(
+        vkGetDeviceProcAddr(m_device, "vkGetDescriptorEXT")
+    );
+    m_cmdBindDescriptorBuffers = reinterpret_cast<PFN_vkCmdBindDescriptorBuffersEXT>(
+        vkGetDeviceProcAddr(m_device, "vkCmdBindDescriptorBuffersEXT")
+    );
+    m_cmdSetDescriptorBufferOffsets = reinterpret_cast<PFN_vkCmdSetDescriptorBufferOffsetsEXT>(
+        vkGetDeviceProcAddr(m_device, "vkCmdSetDescriptorBufferOffsetsEXT")
+    );
+    const bool allLoaded =
+        m_getDescriptorSetLayoutSize != nullptr &&
+        m_getDescriptorSetLayoutBindingOffset != nullptr &&
+        m_getDescriptor != nullptr &&
+        m_cmdBindDescriptorBuffers != nullptr &&
+        m_cmdSetDescriptorBufferOffsets != nullptr;
+    if (allLoaded) {
+        VOX_LOGI("render") << "descriptor buffer functions loaded (VK_EXT_descriptor_buffer)\n";
+    } else {
+        m_getDescriptorSetLayoutSize = nullptr;
+        m_getDescriptorSetLayoutBindingOffset = nullptr;
+        m_getDescriptor = nullptr;
+        m_cmdBindDescriptorBuffers = nullptr;
+        m_cmdSetDescriptorBufferOffsets = nullptr;
+        VOX_LOGW("render") << "descriptor buffer function pointers incomplete; disabling\n";
+    }
+}
 
 void RendererBackend::loadDebugUtilsFunctions() {
     m_setDebugUtilsObjectName = nullptr;
@@ -1650,7 +1760,7 @@ bool RendererBackend::createImGuiResources() {
     }
 
     ImGui_ImplVulkan_InitInfo initInfo{};
-    initInfo.ApiVersion = VK_API_VERSION_1_3;
+    initInfo.ApiVersion = VK_API_VERSION_1_4;
     initInfo.Instance = m_instance;
     initInfo.PhysicalDevice = m_physicalDevice;
     initInfo.Device = m_device;

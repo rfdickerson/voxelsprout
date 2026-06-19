@@ -19,7 +19,13 @@ void Panel::draw(UiDrawList& drawList) const {
             drawList.addRect(rect_, borderColor, borderThicknessPx);
         }
     }
-    drawChildren(drawList);
+    if (clipContents) {
+        drawList.pushClip(rect_);
+        drawChildren(drawList);
+        drawList.popClip();
+    } else {
+        drawChildren(drawList);
+    }
 }
 
 }  // namespace odai::ui

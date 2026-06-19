@@ -25,6 +25,15 @@ float ScrollView::maxScroll() const {
     return std::max(0.0f, m_contentHeight - rect_.height());
 }
 
+UiRect ScrollView::thumbRect() const {
+    const float trackX = rect_.maxX - scrollBarWidthPx;
+    const float viewFrac = rect_.height() / m_contentHeight;
+    const float thumbH = std::max(20.0f, rect_.height() * viewFrac);
+    const float scrollFrac = (maxScroll() > 0.0f) ? scrollOffsetY / maxScroll() : 0.0f;
+    const float thumbY = rect_.minY + scrollFrac * (rect_.height() - thumbH);
+    return UiRect{trackX, thumbY, rect_.maxX, thumbY + thumbH};
+}
+
 void ScrollView::scrollTo(float y) {
     scrollOffsetY = std::clamp(y, 0.0f, std::max(0.0f, m_contentHeight - rect_.height()));
 }
@@ -60,12 +69,13 @@ void ScrollView::draw(UiDrawList& dl) const {
         const UiRect track{trackX, rect_.minY, rect_.maxX, rect_.maxY};
         dl.addRectFilled(track, scrollBarBg);
 
-        const float viewFrac = rect_.height() / m_contentHeight;
-        const float thumbH = std::max(20.0f, rect_.height() * viewFrac);
-        const float scrollFrac = (maxScroll() > 0.0f) ? scrollOffsetY / maxScroll() : 0.0f;
-        const float thumbY = rect_.minY + scrollFrac * (rect_.height() - thumbH);
-        const UiRect thumb{trackX, thumbY, rect_.maxX, thumbY + thumbH};
-        dl.addRectFilled(thumb, scrollBarColor);
+        const UiRect thumb = thumbRect();
+        // Brighten the thumb while hovering or dragging so it reads as interactive.
+        const UiColor thumbC = (m_thumbHovered || m_thumbDragging)
+            ? UiColor{scrollBarColor.r * 1.4f, scrollBarColor.g * 1.4f,
+                      scrollBarColor.b * 1.4f, std::min(scrollBarColor.a + 0.25f, 1.0f)}
+            : scrollBarColor;
+        dl.addRoundRectFilled(thumb, thumbC, scrollBarWidthPx * 0.5f);
     }
 
     // Fade edges.
@@ -95,8 +105,10 @@ void ScrollView::draw(UiDrawList& dl) const {
 }
 
 bool ScrollView::onEvent(UiEvent& ev) {
+    if (!visible) return false;
+
+    // Scroll-wheel anywhere over the view.
     if (ev.type == UiEvent::Type::Scroll && rect_.contains(ev.mousePx)) {
-        // Scroll-wheel: 40px per tick.
         scrollOffsetY = std::clamp(
             scrollOffsetY - ev.scroll * 40.0f,
             0.0f,
@@ -104,6 +116,60 @@ bool ScrollView::onEvent(UiEvent& ev) {
         ev.handled = true;
         return true;
     }
+
+    // Scrollbar interaction — only when content overflows.
+    if (showScrollBar && m_contentHeight > rect_.height()) {
+        const UiRect track{rect_.maxX - scrollBarWidthPx, rect_.minY, rect_.maxX, rect_.maxY};
+
+        // Track hover for visual feedback.
+        if (ev.type == UiEvent::Type::MouseMove) {
+            m_thumbHovered = thumbRect().contains(ev.mousePx);
+        }
+
+        if (ev.type == UiEvent::Type::MouseDown && ev.button == UiMouseButton::Left) {
+            const UiRect thumb = thumbRect();
+            if (thumb.contains(ev.mousePx)) {
+                // Begin thumb drag.
+                m_thumbDragging       = true;
+                m_thumbDragStartMouseY  = ev.mousePx.y;
+                m_thumbDragStartOffset  = scrollOffsetY;
+                ev.handled = true;
+                return true;
+            }
+            if (track.contains(ev.mousePx)) {
+                // Click on track outside thumb: jump so thumb center lands at click.
+                const float viewFrac = rect_.height() / m_contentHeight;
+                const float thumbH   = std::max(20.0f, rect_.height() * viewFrac);
+                const float trackH   = rect_.height() - thumbH;
+                const float relY     = ev.mousePx.y - rect_.minY - thumbH * 0.5f;
+                scrollTo(trackH > 0.0f ? (relY / trackH) * maxScroll() : 0.0f);
+                ev.handled = true;
+                return true;
+            }
+        }
+
+        // Continue drag even when mouse leaves the track area.
+        if (ev.type == UiEvent::Type::MouseMove && m_thumbDragging) {
+            const float viewFrac = rect_.height() / m_contentHeight;
+            const float thumbH   = std::max(20.0f, rect_.height() * viewFrac);
+            const float trackH   = rect_.height() - thumbH;
+            const float deltaY   = ev.mousePx.y - m_thumbDragStartMouseY;
+            const float delta    = trackH > 0.0f ? (deltaY / trackH) * maxScroll() : 0.0f;
+            scrollTo(m_thumbDragStartOffset + delta);
+            return true;
+        }
+
+        if (ev.type == UiEvent::Type::MouseUp) {
+            m_thumbDragging = false;
+        }
+
+        // Consume all events while dragging so children don't receive stray clicks.
+        if (m_thumbDragging) {
+            ev.handled = true;
+            return true;
+        }
+    }
+
     return Widget::onEvent(ev);
 }
 

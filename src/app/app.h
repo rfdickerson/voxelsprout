@@ -23,11 +23,13 @@
 struct GLFWwindow;
 
 namespace odai::ui {
+class Button;
 class DonutChart;
 class IconButton;
 class Image;
 class Label;
 class LineChart;
+class Panel;
 class ProductionPanel;
 class RichTextView;
 class StatBadgeRow;
@@ -268,6 +270,12 @@ private:
     odai::ui::Widget* m_civpediaWindow = nullptr;
     odai::ui::Image* m_civpediaPortrait = nullptr;   // Unit/building portrait in CivPedia header.
     odai::ui::Label* m_civpediaNameLabel = nullptr;  // Name + class label in CivPedia header.
+    odai::ui::Panel*  m_civPanel = nullptr;
+    odai::ui::Button* m_civCollapseBtn = nullptr;
+    bool              m_civExpanded = true;
+    odai::ui::Tween   m_civExpandTween{};
+    float             m_civFullH = 0.0f;
+    float             m_civHeaderH = 0.0f;
     odai::ui::Image* m_civPortraitImage = nullptr;
     odai::ui::Label* m_civLeaderNameLabel = nullptr;
     odai::ui::ProductionPanel* m_productionPanel = nullptr;

@@ -27,6 +27,10 @@ public:
     float   shadowOffsetX = 0.0f;
     float   shadowOffsetY = 4.0f;
 
+    // When true, child drawing is clipped to rect_ — useful for animated panels
+    // whose height changes each frame (accordion, slide-in drawers, etc.).
+    bool clipContents = false;
+
     void draw(UiDrawList& drawList) const override;
 };
 

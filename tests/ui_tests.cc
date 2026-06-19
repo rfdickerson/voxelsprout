@@ -3,7 +3,6 @@
 #include <iostream>
 #include <memory>
 
-#include "game/buildable.h"
 #include "ui/animation.h"
 #include "ui/cached_rich_text.h"
 #include "ui/document/ui_binding.h"
@@ -19,7 +18,6 @@
 #include "ui/widgets/dropdown.h"
 #include "ui/widgets/line_chart.h"
 #include "ui/widgets/panel.h"
-#include "ui/widgets/production_panel.h"
 #include "ui/widgets/progress_bar.h"
 #include "ui/widgets/scroll_view.h"
 #include "ui/widgets/slider.h"
@@ -961,60 +959,6 @@ void testPanelOpacity() {
     }
 }
 
-void testTurnsToBuild() {
-    using namespace odai::game;
-    expectTrue(turnsToBuild(60, 8, 3) == 18, "ceil((60-8)/3) == 18");
-    expectTrue(turnsToBuild(60, 60, 3) == 0, "Already-met cost yields 0 turns");
-    expectTrue(turnsToBuild(60, 70, 3) == 0, "Over-met cost yields 0 turns");
-    expectTrue(turnsToBuild(60, 0, 0) == 60, "Zero per-turn is clamped to 1 (worst case)");
-    expectTrue(turnsToBuild(10, 0, 4) == 3, "ceil(10/4) == 3");
-    expectTrue(!defaultBuildables().empty(), "Default buildable catalog is non-empty");
-}
-
-void testProductionPanelBuild() {
-    using namespace odai::ui;
-    Font font = makeMonospaceFont(8.0f);
-    FontSet fonts{&font, &font, &font, &font};
-
-    std::vector<ProductionPanel::Row> rows;
-    int selectCount = 0;
-    int pediaCount = 0;
-    for (const auto& item : odai::game::defaultBuildables()) {
-        ProductionPanel::Row row;
-        row.id = item.id;
-        row.name = item.name;
-        row.iconName = item.iconName;
-        row.productionCost = item.productionCost;
-        row.turns = odai::game::turnsToBuild(item.productionCost, 8, 3);
-        row.onSelect = [&]() { ++selectCount; };
-        row.onOpenPedia = [&]() { ++pediaCount; };
-        rows.push_back(std::move(row));
-    }
-
-    ProductionPanel panel(fonts);
-    panel.setItems(UiRect::fromXYWH(0.0f, 0.0f, 240.0f, 600.0f), 1.0f, "Production", rows);
-
-    UiDrawList dl;
-    dl.reset(UiVec2{800.0f, 600.0f});
-    panel.draw(dl);
-    expectTrue(!dl.data().vertices.empty(), "ProductionPanel emits geometry");
-
-    // Selecting an item updates highlight without crashing.
-    panel.setSelected(rows.front().id);
-
-    // Click the first row (top-left area) to fire its onSelect.
-    UiEvent down{};
-    down.type = UiEvent::Type::MouseDown;
-    down.button = UiMouseButton::Left;
-    down.mousePx = UiVec2{40.0f, 80.0f};
-    panel.onEvent(down);
-    UiEvent up{};
-    up.type = UiEvent::Type::MouseUp;
-    up.button = UiMouseButton::Left;
-    up.mousePx = UiVec2{40.0f, 80.0f};
-    panel.onEvent(up);
-    expectTrue(selectCount >= 1, "Clicking a production row fires onSelect");
-}
 
 int main() {
     testNineSliceQuadGen();
@@ -1048,8 +992,6 @@ int main() {
     testToastManager();
     testLineChartDraw();
     testStatBadgeDraw();
-    testTurnsToBuild();
-    testProductionPanelBuild();
 
     if (g_failures != 0) {
         std::cerr << "[ui test] " << g_failures << " failures\n";

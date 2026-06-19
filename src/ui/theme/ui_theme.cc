@@ -1,7 +1,6 @@
 #include "ui/theme/ui_theme.h"
 
 #include "core/log.h"
-#include "render/renderer.h"
 #include "ui/icon_atlas.h"
 
 #include <nlohmann/json.hpp>
@@ -40,7 +39,7 @@ UiColor parseHexColor(std::string_view hex) {
 
 }  // namespace
 
-bool UiTheme::loadFromFile(const std::filesystem::path& path, odai::render::Renderer& renderer) {
+bool UiTheme::loadFromFile(const std::filesystem::path& path, const UiTextureUploadFn& upload) {
     std::ifstream file(path);
     if (!file) {
         VOX_LOGE("ui") << "UiTheme: cannot open " << path.string() << "\n";
@@ -120,8 +119,8 @@ bool UiTheme::loadFromFile(const std::filesystem::path& path, odai::render::Rend
                                << "' from " << resolved.string() << "\n";
                 continue;
             }
-            const UiTextureId texId = renderer.registerUiTextureRgba8(
-                pixels, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
+            const UiTextureId texId = upload(
+                pixels, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), false);
             stbi_image_free(pixels);
             if (texId == kUiNoTexture) {
                 VOX_LOGW("ui") << "UiTheme: failed to register frame texture '" << key << "'\n";
@@ -182,8 +181,8 @@ bool UiTheme::loadFromFile(const std::filesystem::path& path, odai::render::Rend
                                << "' from " << resolved.string() << "\n";
                 continue;
             }
-            const UiTextureId texId = renderer.registerUiTextureRgba8Mipmapped(
-                pixels, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
+            const UiTextureId texId = upload(
+                pixels, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), true);
             stbi_image_free(pixels);
             if (texId == kUiNoTexture) {
                 VOX_LOGW("ui") << "UiTheme: failed to register icon '" << key << "'\n";
