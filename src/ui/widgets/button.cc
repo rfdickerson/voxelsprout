@@ -1,5 +1,7 @@
 #include "ui/widgets/button.h"
 
+#include <algorithm>
+
 namespace odai::ui {
 
 void Button::setEnabled(bool enabled) {
@@ -24,9 +26,18 @@ UiColor Button::backgroundForState() const {
 }
 
 void Button::draw(UiDrawList& drawList) const {
-    drawList.addRectFilled(rect_, backgroundForState());
+    // Mouse-over glow behind the fill (pressed glows a touch brighter).
+    if (glowSizePx > 0.0f && glowColor.a > 0.0f &&
+        (state_ == State::Hover || state_ == State::Pressed)) {
+        UiColor glow = glowColor;
+        if (state_ == State::Pressed) {
+            glow.a = std::min(1.0f, glow.a * 1.4f);
+        }
+        drawList.addRoundRectGlow(rect_, glow, cornerRadiusPx, glowSizePx);
+    }
+    drawList.addRoundRectFilled(rect_, backgroundForState(), cornerRadiusPx);
     if (borderThicknessPx > 0.0f && borderColor.a > 0.0f) {
-        drawList.addRect(rect_, borderColor, borderThicknessPx);
+        drawList.addRoundRect(rect_, borderColor, cornerRadiusPx, borderThicknessPx);
     }
     if (font_ != nullptr && !label_.empty()) {
         const float textWidth = font_->measureText(label_);

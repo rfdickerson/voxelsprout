@@ -89,25 +89,6 @@ struct ImportedSceneLight {
     std::uint32_t flags = 0u;
 };
 
-struct MorrowindDoorDestination {
-    std::string destinationCell;
-    float position[3] = {};
-    float rotationRadians[3] = {};
-};
-
-struct MorrowindDoorReference {
-    std::string refId;
-    std::string sourceCell;
-    float position[3] = {};
-    float rotationRadians[3] = {};
-    MorrowindDoorDestination destination;
-};
-
-struct MorrowindDoorCache {
-    std::vector<MorrowindDoorReference> exteriorDoors;
-    std::unordered_map<std::string, std::vector<MorrowindDoorReference>> interiorDoorsByCell;
-};
-
 struct ImportedScene {
     std::string sourceTag;
     std::vector<ImportedSceneTexture> textures;
@@ -132,46 +113,12 @@ struct ImportedScene {
     float boundsMax[3] = {};
 };
 
-struct MorrowindBalmoraCookResult {
-    ImportedScene scene;
-    std::vector<std::pair<int, int>> balmoraCells;
-    std::vector<std::pair<int, int>> includedCells;
-    std::unordered_map<std::string, std::string> modelPathById;
-    std::unordered_map<std::uint32_t, std::string> texturePathByLandscapeIndex;
-};
-
 bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& outputPath);
 bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& outScene);
 bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedScene& outScene);
 const std::string& getImportedSceneLastError();
 void buildImportedScenePackedRenderData(ImportedScene& scene);
-bool loadMorrowindTexture(
-    const std::filesystem::path& morrowindDataFilesPath,
-    const std::string& sourcePath,
-    ImportedSceneTexture& outTexture
-);
 
 bool exportImportedSceneTerrainObj(const ImportedScene& scene, const std::filesystem::path& outputObjPath);
-
-bool cookMorrowindBalmoraScene(
-    const std::filesystem::path& morrowindDataFilesPath,
-    MorrowindBalmoraCookResult& outResult
-);
-bool loadMorrowindBalmoraDoorReferences(
-    const std::filesystem::path& morrowindDataFilesPath,
-    std::vector<MorrowindDoorReference>& outDoors
-);
-bool loadMorrowindInteriorDoorReferences(
-    const std::filesystem::path& morrowindDataFilesPath,
-    const std::string& cellName,
-    std::vector<MorrowindDoorReference>& outDoors
-);
-bool saveMorrowindDoorCache(const MorrowindDoorCache& cache, const std::filesystem::path& outputPath);
-bool loadMorrowindDoorCache(const std::filesystem::path& inputPath, MorrowindDoorCache& outCache);
-bool cookMorrowindInteriorCellScene(
-    const std::filesystem::path& morrowindDataFilesPath,
-    const std::string& cellName,
-    ImportedScene& outScene
-);
 
 }  // namespace odai::importer

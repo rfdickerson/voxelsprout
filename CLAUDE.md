@@ -114,7 +114,7 @@ The seam between `src/ui/` and the renderer is `Renderer::setUiDrawData(const ui
 - `Widget` → `Panel / Label / Button`; callbacks are `std::function<void()>`; `UiContext` owns the root and dispatches input
 - `render/backend/vulkan/ui_renderer.cc` is the only UI file touching Vulkan: owns the alpha-blend pipeline, per-texture descriptor sets, and per-frame geometry streaming
 
-Swapchain format is `*_SRGB`; the fragment shader converts sRGB→linear on author colors so hex values are WYSIWYG.
+Swapchain format is `B8G8R8A8_UNORM` (driver presents raw bytes, display interprets as sRGB). The UI fragment shader works in linear space and applies a manual `linearToSrgb` encode before output — matching the `pow(1/2.2)` the tonemapper applies for the 3-D pass. Vertex colors authored as sRGB hex are decoded to linear on entry so hex values are WYSIWYG. Color textures use `VK_FORMAT_R8G8B8A8_SRGB` image views so the sampler returns linear values.
 
 ### Hex strategy map
 

@@ -13,6 +13,9 @@
 // mouse-over of a tooltip-bearing run it records the tooltip text + cursor anchor
 // (queried by the app to draw a tooltip overlay) and underlines the hovered run.
 // Layout/geometry are cached via CachedRichText.
+//
+// When content is taller than the widget rect, the view becomes scrollable:
+// mouse-wheel scrolls the text, and a thin scrollbar is drawn on the right edge.
 namespace odai::ui {
 
 class RichTextView : public Widget {
@@ -24,7 +27,19 @@ public:
     bool wrap = true;
     UiVec2 padding{0.0f, 0.0f};
 
+    // Scrollbar appearance.
+    float   scrollBarWidthPx = 6.0f;
+    UiColor scrollBarTrackColor{0.0f, 0.0f, 0.0f, 0.20f};
+    UiColor scrollBarThumbColor{0.70f, 0.58f, 0.30f, 0.55f};
+    bool    showScrollBar = true;
+
+    // Current vertical scroll offset in pixels (clamped to [0, maxScroll]).
+    float scrollOffsetY = 0.0f;
+
     void setText(std::string markup) { cache_.setMarkup(std::move(markup)); }
+
+    // Natural content height (padding excluded) — only accurate after first draw.
+    [[nodiscard]] float contentHeight() const { return cache_.naturalHeight(); }
 
     void draw(UiDrawList& drawList) const override;
     bool onEvent(UiEvent& event) override;
@@ -40,6 +55,8 @@ private:
         cache_.setWrap(wrap);
         cache_.setPadding(padding);
     }
+
+    float maxScroll() const;
 
     mutable CachedRichText cache_;
 

@@ -3,21 +3,24 @@
 #include <GLFW/glfw3.h>
 
 #include "core/grid3.h"
+#include "game/buildable.h"
 #include "game/strategy_map.h"
 #include "game/strategy_map_io.h"
 #include "game/strategy_map_mesh.h"
-#include "import/morrowind_nif.h"
 #include "core/log.h"
 #include "math/math.h"
 #include "sim/network_procedural.h"
 #include "ui/icon_atlas.h"
 #include "ui/widgets/button.h"
+#include "ui/widgets/donut_chart.h"
 #include "ui/widgets/image.h"
 #include "ui/widgets/label.h"
+#include "ui/widgets/line_chart.h"
+#include "ui/widgets/icon_button.h"
 #include "ui/widgets/panel.h"
-#include "ui/widgets/progress_bar.h"
+#include "ui/widgets/production_panel.h"
 #include "ui/widgets/rich_text_view.h"
-#include "ui/widgets/text_box.h"
+#include "ui/widgets/stat_badge.h"
 #include "ui/widgets/toolbar.h"
 #include "ui/widgets/window.h"
 
@@ -125,17 +128,8 @@ constexpr const char* kMagicaCastlePath = "assets/magicka/castle.vox";
 constexpr const char* kMagicaTeapotPath = "assets/magicka/teapot.vox";
 constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
-constexpr const char* kImportedSceneEnvVar = "ODAI_IMPORTED_SCENE";
 constexpr const char* kStrategyMapEnvVar = "ODAI_STRATEGY_MAP";
-constexpr const char* kMorrowindDataFilesEnvVar = "ODAI_MORROWIND_DATA_FILES";
-constexpr const char* kBalmoraGuardsEnvVar = "ODAI_ENABLE_BALMORA_GUARDS";
-constexpr const char* kBalmoraInteriorCacheEnvVar = "ODAI_BALMORA_INTERIOR_CACHE";
-constexpr float kBalmoraDoorActivationRadius = 180.0f;
-constexpr float kMorrowindInteriorSpawnEyeHeight = 112.0f;
 constexpr float kImportedInspectRayMaxDistance = 4096.0f;
-constexpr float kBalmoraGuardRouteReachRadius = 54.0f;
-constexpr float kBalmoraGuardNavmeshProbeHeight = 96.0f;
-constexpr float kBalmoraGuardWalkCycleScale = 0.046f;
 constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
 
 constexpr float kDefaultPipeLength = 1.0f;
@@ -487,78 +481,6 @@ std::optional<std::string> readEnvironmentString(const char* name) {
 #endif
 }
 
-std::string lowerPathCopy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        if (ch == '\\') {
-            return '/';
-        }
-        return static_cast<char>(std::tolower(ch));
-    });
-    return value;
-}
-
-std::uint64_t fnv1a64(std::string_view value) {
-    std::uint64_t hash = 14695981039346656037ull;
-    for (const char ch : value) {
-        hash ^= static_cast<std::uint8_t>(ch);
-        hash *= 1099511628211ull;
-    }
-    return hash;
-}
-
-std::filesystem::path balmoraInteriorCacheRoot() {
-    if (const std::optional<std::string> envPath = readEnvironmentString(kBalmoraInteriorCacheEnvVar);
-        envPath.has_value() && !envPath->empty()) {
-        return std::filesystem::path(*envPath);
-    }
-#ifdef ODAI_PROJECT_SOURCE_DIR
-    return std::filesystem::path(ODAI_PROJECT_SOURCE_DIR) / "balmora_interior_cache";
-#else
-    return std::filesystem::path("balmora_interior_cache");
-#endif
-}
-
-std::filesystem::path balmoraInteriorCachePath(std::string_view normalizedCellName) {
-    return balmoraInteriorCacheRoot() /
-        ("interior_" + std::to_string(fnv1a64(normalizedCellName)) + ".bin");
-}
-
-std::filesystem::path balmoraDoorCachePath() {
-    return balmoraInteriorCacheRoot() / "balmora_doors.bin";
-}
-
-std::optional<std::filesystem::path> findMorrowindDataFilesPath() {
-    if (const std::optional<std::string> envPath = readEnvironmentString(kMorrowindDataFilesEnvVar);
-        envPath.has_value() && !envPath->empty()) {
-        const std::filesystem::path path(*envPath);
-        if (std::filesystem::exists(path / "Morrowind.esm")) {
-            return path;
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::filesystem::path> findImportedSceneDemoPath() {
-    if (const std::optional<std::string> envPathValue = readEnvironmentString(kImportedSceneEnvVar);
-        envPathValue.has_value() && !envPathValue->empty()) {
-        return std::filesystem::path(*envPathValue);
-    }
-
-    constexpr std::array<const char*, 4> kFallbackPaths = {
-        "balmora_scene.bin",
-        "C:/temp/balmora_scene.bin",
-        "/mnt/c/temp/balmora_scene.bin",
-        "/tmp/balmora_scene.bin"
-    };
-    for (const char* candidate : kFallbackPaths) {
-        const std::filesystem::path path(candidate);
-        if (std::filesystem::exists(path)) {
-            return path;
-        }
-    }
-    return std::nullopt;
-}
-
 // Resolve a project-relative asset path. Mirrors the renderer's resolver: prefer
 // the compiled-in source dir, then walk up from the working directory (the app is
 // commonly launched from a build subdirectory). Returns the relative path as-is if
@@ -597,130 +519,6 @@ std::optional<std::filesystem::path> findStrategyMapPath() {
         return fallback;
     }
     return std::nullopt;
-}
-
-bool balmoraGuardsEnabledByEnvironment() {
-    const std::optional<std::string> value = readEnvironmentString(kBalmoraGuardsEnvVar);
-    if (!value.has_value()) {
-        return false;
-    }
-    const std::string normalized = lowerPathCopy(*value);
-    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
-}
-
-struct ImportedSceneCameraPose {
-    float x = 0.0f;
-    float y = 2200.0f;
-    float z = -2200.0f;
-    float yawDegrees = 45.0f;
-    float pitchDegrees = -18.0f;
-};
-
-ImportedSceneCameraPose makeImportedSceneLookAtPose(
-    float eyeX,
-    float eyeY,
-    float eyeZ,
-    float targetX,
-    float targetY,
-    float targetZ
-) {
-    ImportedSceneCameraPose pose{};
-    pose.x = eyeX;
-    pose.y = eyeY;
-    pose.z = eyeZ;
-    const float dx = targetX - eyeX;
-    const float dy = targetY - eyeY;
-    const float dz = targetZ - eyeZ;
-    const float horizontalDistance = std::sqrt((dx * dx) + (dz * dz));
-    pose.yawDegrees = odai::math::degrees(std::atan2(dz, dx));
-    pose.pitchDegrees = odai::math::degrees(std::atan2(dy, std::max(horizontalDistance, 0.001f)));
-    return pose;
-}
-
-ImportedSceneCameraPose configureImportedSceneCamera(const odai::importer::ImportedScene& scene) {
-    ImportedSceneCameraPose pose{};
-    const bool haveBounds =
-        scene.boundsMax[0] > scene.boundsMin[0] ||
-        scene.boundsMax[1] > scene.boundsMin[1] ||
-        scene.boundsMax[2] > scene.boundsMin[2];
-
-    float minX = std::numeric_limits<float>::max();
-    float minY = std::numeric_limits<float>::max();
-    float minZ = std::numeric_limits<float>::max();
-    float maxX = std::numeric_limits<float>::lowest();
-    float maxY = std::numeric_limits<float>::lowest();
-    float maxZ = std::numeric_limits<float>::lowest();
-    if (haveBounds) {
-        minX = scene.boundsMin[0];
-        minY = scene.boundsMin[1];
-        minZ = scene.boundsMin[2];
-        maxX = scene.boundsMax[0];
-        maxY = scene.boundsMax[1];
-        maxZ = scene.boundsMax[2];
-    } else {
-        if (scene.landscapeCells.empty()) {
-            return pose;
-        }
-        constexpr float kCellSizeUnits = 8192.0f;
-        for (const odai::importer::ImportedSceneLandscapeCell& cell : scene.landscapeCells) {
-            minX = std::min(minX, static_cast<float>(cell.gridX) * kCellSizeUnits);
-            minZ = std::min(minZ, static_cast<float>(cell.gridY) * kCellSizeUnits);
-            maxX = std::max(maxX, static_cast<float>(cell.gridX + 1) * kCellSizeUnits);
-            maxZ = std::max(maxZ, static_cast<float>(cell.gridY + 1) * kCellSizeUnits);
-            for (const float height : cell.heights) {
-                minY = std::min(minY, height);
-                maxY = std::max(maxY, height);
-            }
-        }
-    }
-
-    const float centerX = (minX + maxX) * 0.5f;
-    const float centerZ = (minZ + maxZ) * 0.5f;
-    const float centerY = (minY + maxY) * 0.5f;
-
-    if (scene.sourceTag == "morrowind_balmora" && !scene.waterPatches.empty()) {
-        const odai::importer::ImportedSceneWaterPatch* bridgePatch = nullptr;
-        float bestScore = std::numeric_limits<float>::max();
-        for (const odai::importer::ImportedSceneWaterPatch& patch : scene.waterPatches) {
-            const float patchCenterX = patch.originX + (patch.sizeX * 0.5f);
-            const float patchCenterZ = patch.originZ + (patch.sizeZ * 0.5f);
-            const float dx = patchCenterX - centerX;
-            const float dz = patchCenterZ - centerZ;
-            const float score = (dx * dx) + (dz * dz);
-            if (score < bestScore) {
-                bestScore = score;
-                bridgePatch = &patch;
-            }
-        }
-        if (bridgePatch != nullptr) {
-            const float bridgeCenterX = bridgePatch->originX + (bridgePatch->sizeX * 0.5f);
-            const float bridgeCenterZ = bridgePatch->originZ + (bridgePatch->sizeZ * 0.5f);
-            const float bridgeY = bridgePatch->waterLevel + 260.0f;
-            const float eyeX = bridgeCenterX - 520.0f;
-            const float eyeY = bridgeY;
-            const float eyeZ = bridgeCenterZ - 180.0f;
-            return makeImportedSceneLookAtPose(
-                eyeX,
-                eyeY,
-                eyeZ,
-                centerX + 420.0f,
-                centerY + 260.0f,
-                centerZ);
-        }
-    }
-
-    const float spanX = maxX - minX;
-    const float spanZ = maxZ - minZ;
-    const float span = std::max(spanX, spanZ);
-    // Civ 6 style: steep top-down angle (~60°), camera centered above the map
-    const float height = span * 0.65f;
-    const float tilt   = height * 0.58f; // ~60° pitch: atan2(height, tilt) ≈ 60°
-    return makeImportedSceneLookAtPose(
-        centerX,
-        centerY + height,
-        centerZ - tilt,
-        centerX, centerY, centerZ
-    );
 }
 
 float applyStickDeadzone(float value, float deadzone) {
@@ -949,7 +747,7 @@ bool App::saveConfig(const std::filesystem::path& configPath) const {
     if (!file) {
         return false;
     }
-    file << "# Morrowind renderer runtime config\n";
+    file << "# Renderer runtime config\n";
     file << "shadow_mode=" << shadowModeConfigName(m_config.shadowMode) << "\n";
     file << "enable_ssao=" << boolConfigName(m_config.enableSsao) << "\n";
     return true;
@@ -994,6 +792,13 @@ bool App::init() {
     glfwSetCharCallback(m_window, [](GLFWwindow* win, unsigned int codepoint) {
         if (auto* self = static_cast<App*>(glfwGetWindowUserPointer(win))) {
             self->m_pendingTextInput.push_back(codepoint);
+        }
+    });
+
+    // Scroll wheel input â€” accumulated between frames and drained into UiInput.
+    glfwSetScrollCallback(m_window, [](GLFWwindow* win, double /*xoffset*/, double yoffset) {
+        if (auto* self = static_cast<App*>(glfwGetWindowUserPointer(win))) {
+            self->m_pendingScrollDelta += static_cast<float>(yoffset);
         }
     });
 
@@ -1043,17 +848,28 @@ bool App::init() {
         return false;
     }
 
-    // Map mesh build is disabled for fast startup — UI work only.
-    // m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap);
+    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap);
     m_importedSceneDemoEnabled = true;
     m_hoverEnabled = true;
 
-    // Fixed overhead camera instead of scene-derived pose (scene is empty).
-    m_camera.x = 0.0f;
-    m_camera.y = 2000.0f;
-    m_camera.z = 0.0f;
+    // Compute map world extents for camera centering and pan clamping.
+    constexpr float kStratMapSqrt3 = 1.7320508075688772f;
+    const float mapWorldW = m_strategyMap.hexSize * kStratMapSqrt3 *
+        (static_cast<float>(m_strategyMap.width) + 0.5f);
+    const float mapWorldH = m_strategyMap.hexSize * 1.5f *
+        static_cast<float>(m_strategyMap.height);
+    m_mapMinX = 0.0f;
+    m_mapMaxX = mapWorldW;
+    m_mapMinZ = 0.0f;
+    m_mapMaxZ = mapWorldH;
+    m_mapOrthoHalfHeight = std::max(mapWorldH * 0.6f, m_strategyMap.hexSize * 2.0f);
+
+    // True top-down orthographic camera centered on the map.
+    m_camera.x = mapWorldW * 0.5f;
+    m_camera.y = 5000.0f;
+    m_camera.z = mapWorldH * 0.5f;
     m_camera.yawDegrees = 0.0f;
-    m_camera.pitchDegrees = -70.0f;
+    m_camera.pitchDegrees = -89.0f;  // Near-vertical; -90 degenerates lookAt(up=Y)
     m_cameraPrevious = m_camera;
 
     m_renderer.setStrategyMapMode(true);
@@ -1067,8 +883,10 @@ bool App::init() {
         return false;
     }
     VOX_LOGI("app") << "init step renderer init took " << elapsedMs(rendererInitStart) << " ms";
-    // Skip scene upload — 3D map rendering is disabled for fast startup.
-    // if (!m_renderer.uploadImportedScene(m_importedScene)) { ... }
+    if (!m_renderer.uploadImportedScene(m_importedScene)) {
+        VOX_LOGE("app") << "strategy map scene upload failed";
+        return false;
+    }
     m_renderer.setImportedSceneInteriorMode(false);
     m_renderer.setSunAngles(kImportedSceneSunYawDegrees, kImportedSceneSunPitchDegrees);
     m_renderer.setImportedSceneDebugState(
@@ -1078,13 +896,13 @@ bool App::init() {
         m_importedFlatShading,
         m_importedWaterDebug);
 
-    VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms (3D map disabled)";
+    VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms";
     return true;
 }
 
 void App::run() {
     VOX_LOGI("app") << "run begin";
-    VOX_LOGI("app") << "morrowind viewer ready (WASD move, R activate door, Space jump/up, Shift down, F/C renderer panel, F5 terrain, F6 statics, K textures, F7 flat shading, F8 water debug)";
+    VOX_LOGI("app") << "strategy map ready (scroll/drag to pan, F/C renderer panel)";
     double previousTime = glfwGetTime();
     double simulationAccumulatorSeconds = 0.0;
     m_cameraPrevious = m_camera;
@@ -1148,676 +966,6 @@ void App::resetVoxelBreakProgress() {
     m_voxelBreakClicks = 0;
 }
 
-void App::initializeBalmoraDoorActivation() {
-    m_balmoraDoors.clear();
-    m_balmoraInteriorCache.clear();
-    if (m_importedScene.sourceTag != "morrowind_balmora") {
-        return;
-    }
-
-    odai::importer::MorrowindDoorCache doorCache{};
-    const auto doorLoadStart = std::chrono::steady_clock::now();
-    const bool loadedDoorCache =
-        odai::importer::loadMorrowindDoorCache(balmoraDoorCachePath(), doorCache);
-    if (loadedDoorCache) {
-        m_balmoraDoors = doorCache.exteriorDoors;
-    } else {
-        VOX_LOGW("app") << "Balmora doors disabled: missing cooked door manifest "
-                        << balmoraDoorCachePath().string()
-                        << " (" << odai::importer::getImportedSceneLastError()
-                        << "); run odai_balmora_interior_cache";
-        m_balmoraDoors.clear();
-        return;
-    }
-    const auto doorLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - doorLoadStart).count();
-
-    VOX_LOGI("app") << "Balmora door activation ready (doors=" << m_balmoraDoors.size()
-                    << ", source=cache"
-                    << ", elapsedMs=" << doorLoadMs
-                    << ", manifest=" << balmoraDoorCachePath().string() << ")";
-
-    std::vector<std::string> destinationCells;
-    destinationCells.reserve(m_balmoraDoors.size());
-    for (const odai::importer::MorrowindDoorReference& door : m_balmoraDoors) {
-        const std::string normalizedCell = lowerPathCopy(door.destination.destinationCell);
-        if (normalizedCell.empty() ||
-            std::find(destinationCells.begin(), destinationCells.end(), normalizedCell) != destinationCells.end()) {
-            continue;
-        }
-        destinationCells.push_back(normalizedCell);
-    }
-
-    const auto cacheLoadStart = std::chrono::steady_clock::now();
-    std::uint32_t cachedInteriorFileCount = 0;
-    std::uint32_t preparedInteriorCount = 0;
-    std::uint32_t missingDoorCount = 0;
-    for (const std::string& destinationCell : destinationCells) {
-        const std::filesystem::path cachePath = balmoraInteriorCachePath(destinationCell);
-        if (!std::filesystem::exists(cachePath)) {
-            continue;
-        }
-        ++cachedInteriorFileCount;
-
-        MorrowindInteriorCacheEntry entry{};
-        if (loadedDoorCache) {
-            if (const auto doorIt = doorCache.interiorDoorsByCell.find(destinationCell);
-                doorIt != doorCache.interiorDoorsByCell.end()) {
-                entry.doors = doorIt->second;
-            } else {
-                ++missingDoorCount;
-            }
-        }
-        m_balmoraInteriorCache.emplace(destinationCell, std::move(entry));
-        ++preparedInteriorCount;
-    }
-
-    const auto cacheLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - cacheLoadStart).count();
-    VOX_LOGI("app") << "Balmora interior disk cache ready (prepared=" << preparedInteriorCount
-                    << ", cachedFiles=" << cachedInteriorFileCount
-                    << "/" << destinationCells.size()
-                    << ", lazyLoad=true"
-                    << ", missingDoorManifests=" << missingDoorCount
-                    << ", elapsedMs=" << cacheLoadMs
-                    << ", directory=" << balmoraInteriorCacheRoot().string() << ")";
-}
-
-bool App::tryActivateBalmoraDoor() {
-    if (!m_importedSceneDemoEnabled) {
-        return false;
-    }
-
-    if (m_importedScene.sourceTag == "morrowind_interior") {
-        auto cacheIt = m_balmoraInteriorCache.find(m_currentMorrowindInteriorCell);
-        if (cacheIt == m_balmoraInteriorCache.end() || cacheIt->second.doors.empty()) {
-            return false;
-        }
-
-        const odai::importer::MorrowindDoorReference* bestDoor = nullptr;
-        float bestDistanceSq = kBalmoraDoorActivationRadius * kBalmoraDoorActivationRadius;
-        for (const odai::importer::MorrowindDoorReference& door : cacheIt->second.doors) {
-            if (lowerPathCopy(door.destination.destinationCell) != "balmora") {
-                continue;
-            }
-            const float dx = door.position[0] - m_camera.x;
-            const float dy = door.position[1] - (m_camera.y - kImportedPlayerEyeHeight);
-            const float dz = door.position[2] - m_camera.z;
-            const float distanceSq = (dx * dx) + (dy * dy * 0.25f) + (dz * dz);
-            if (distanceSq < bestDistanceSq) {
-                bestDistanceSq = distanceSq;
-                bestDoor = &door;
-            }
-        }
-        if (bestDoor == nullptr) {
-            return false;
-        }
-        return leaveMorrowindInterior(*bestDoor);
-    }
-
-    if (m_importedScene.sourceTag != "morrowind_balmora" || m_balmoraDoors.empty()) {
-        return false;
-    }
-
-    const odai::importer::MorrowindDoorReference* bestDoor = nullptr;
-    float bestDistanceSq = kBalmoraDoorActivationRadius * kBalmoraDoorActivationRadius;
-    for (const odai::importer::MorrowindDoorReference& door : m_balmoraDoors) {
-        const float dx = door.position[0] - m_camera.x;
-        const float dy = door.position[1] - (m_camera.y - kImportedPlayerEyeHeight);
-        const float dz = door.position[2] - m_camera.z;
-        const float distanceSq = (dx * dx) + (dy * dy * 0.25f) + (dz * dz);
-        if (distanceSq < bestDistanceSq) {
-            bestDistanceSq = distanceSq;
-            bestDoor = &door;
-        }
-    }
-
-    if (bestDoor == nullptr) {
-        return false;
-    }
-    return enterMorrowindInterior(*bestDoor);
-}
-
-bool App::enterMorrowindInterior(const odai::importer::MorrowindDoorReference& door) {
-    const std::string destinationCell = lowerPathCopy(door.destination.destinationCell);
-    auto cacheIt = m_balmoraInteriorCache.find(destinationCell);
-    if (cacheIt == m_balmoraInteriorCache.end()) {
-        VOX_LOGW("app") << "failed to enter " << door.destination.destinationCell
-                        << ": cached interior is missing; run odai_balmora_interior_cache for "
-                        << balmoraInteriorCacheRoot().string();
-        return false;
-    }
-    MorrowindInteriorCacheEntry& cachedInterior = cacheIt->second;
-    if (!cachedInterior.sceneLoaded) {
-        const std::filesystem::path cachePath = balmoraInteriorCachePath(destinationCell);
-        const auto interiorLoadStart = std::chrono::steady_clock::now();
-        if (!odai::importer::loadImportedSceneRuntime(cachePath, cachedInterior.scene)) {
-            VOX_LOGW("app") << "failed to load cached interior " << door.destination.destinationCell
-                            << " from " << cachePath.string()
-                            << ": " << odai::importer::getImportedSceneLastError();
-            return false;
-        }
-        if (cachedInterior.scene.sourceTag != "morrowind_interior" ||
-            cachedInterior.scene.sourceMeshCount != 0u ||
-            cachedInterior.scene.sourceInstanceCount != 0u ||
-            cachedInterior.scene.sourceLandscapeCellCount != 0u ||
-            cachedInterior.scene.sourceWaterPatchCount != 0u ||
-            cachedInterior.scene.packedVertices.empty() ||
-            cachedInterior.scene.packedIndices.empty() ||
-            cachedInterior.scene.packedDraws.empty()) {
-            VOX_LOGW("app") << "stale cached interior " << cachePath.string()
-                            << "; regenerate it with odai_balmora_interior_cache --force";
-            cachedInterior.scene = {};
-            return false;
-        }
-        if (!cachedInterior.collision.buildFromPackedScene(cachedInterior.scene)) {
-            VOX_LOGW("app") << "failed to build collision for cached interior " << cachePath.string();
-            cachedInterior.scene = {};
-            return false;
-        }
-        if (cachedInterior.doors.empty()) {
-            VOX_LOGW("app") << "cached interior " << door.destination.destinationCell
-                            << " has no exit doors in " << balmoraDoorCachePath().string()
-                            << "; regenerate the door manifest with odai_balmora_interior_cache";
-        }
-        cachedInterior.sceneLoaded = true;
-        const auto interiorLoadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - interiorLoadStart).count();
-        VOX_LOGI("app") << "loaded cached interior '" << door.destination.destinationCell
-                        << "' on demand in " << interiorLoadMs << " ms";
-    }
-
-    if (!m_renderer.uploadImportedScene(cachedInterior.scene)) {
-        VOX_LOGW("app") << "failed to upload interior scene for " << door.destination.destinationCell;
-        return false;
-    }
-    m_renderer.setImportedSceneInteriorMode(true);
-
-    m_importedScene = cachedInterior.scene;
-    m_gpuSceneAsset = {};
-    m_gpuSceneRuntime = {};
-    m_importedSceneCollision = cachedInterior.collision;
-    m_currentMorrowindInteriorCell = destinationCell;
-    m_balmoraGuards.clear();
-    m_balmoraGuardPrototype = {};
-    m_balmoraNavmesh.clear();
-    m_balmoraGuardFrameVertices.clear();
-    m_balmoraGuardFrameIndices.clear();
-    m_balmoraGuardFrameDraws.clear();
-    if (balmoraGuardsEnabledByEnvironment()) {
-        initializeBalmoraGuards();
-    }
-
-    m_camera.x = door.destination.position[0];
-    m_camera.y = door.destination.position[1] + kMorrowindInteriorSpawnEyeHeight;
-    m_camera.z = door.destination.position[2];
-    m_camera.yawDegrees = odai::math::degrees(door.destination.rotationRadians[2]);
-    m_camera.pitchDegrees = 0.0f;
-    m_camera.velocityX = 0.0f;
-    m_camera.velocityY = 0.0f;
-    m_camera.velocityZ = 0.0f;
-    m_camera.onGround = false;
-    m_cameraPrevious = m_camera;
-
-    VOX_LOGI("app") << "entered interior '" << door.destination.destinationCell
-                    << "' from door " << door.refId
-                    << " (renderVertices=" << m_importedScene.packedVertices.size()
-                    << ", renderIndices=" << m_importedScene.packedIndices.size()
-                    << ", collisionTriangles=" << m_importedSceneCollision.stats().triangleCount << ")";
-    return true;
-}
-
-bool App::leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& door) {
-    if (!m_balmoraExteriorCached) {
-        VOX_LOGW("app") << "failed to leave interior: Balmora exterior scene is not cached";
-        return false;
-    }
-
-    if (!m_renderer.uploadGpuScene(m_balmoraExteriorGpuSceneAsset)) {
-        VOX_LOGW("app") << "failed to upload Balmora exterior scene while leaving interior";
-        return false;
-    }
-    m_renderer.setImportedSceneInteriorMode(false);
-
-    m_importedScene = m_balmoraExteriorScene;
-    m_gpuSceneAsset = m_balmoraExteriorGpuSceneAsset;
-    m_gpuSceneRuntime = odai::importer::createGpuSceneRuntime(m_gpuSceneAsset);
-    odai::importer::rebuildGpuSceneWorldTransforms(m_gpuSceneRuntime);
-    m_importedSceneCollision = m_balmoraExteriorCollision;
-    m_currentMorrowindInteriorCell.clear();
-    m_balmoraGuards.clear();
-    m_balmoraGuardPrototype = {};
-    m_balmoraNavmesh.clear();
-    m_balmoraGuardFrameVertices.clear();
-    m_balmoraGuardFrameIndices.clear();
-    m_balmoraGuardFrameDraws.clear();
-
-    m_camera.x = door.destination.position[0];
-    m_camera.y = door.destination.position[1] + kImportedPlayerEyeHeight;
-    m_camera.z = door.destination.position[2];
-    m_camera.yawDegrees = odai::math::degrees(door.destination.rotationRadians[2]);
-    m_camera.pitchDegrees = 0.0f;
-    m_camera.velocityX = 0.0f;
-    m_camera.velocityY = 0.0f;
-    m_camera.velocityZ = 0.0f;
-    m_camera.onGround = false;
-    m_cameraPrevious = m_camera;
-
-    VOX_LOGI("app") << "left interior '" << door.sourceCell
-                    << "' through door " << door.refId
-                    << " to " << door.destination.destinationCell;
-    return true;
-}
-
-void App::initializeBalmoraGuards() {
-    m_balmoraGuards.clear();
-    m_balmoraGuardPrototype = {};
-    m_balmoraNavmesh.clear();
-
-    if (m_importedScene.sourceTag != "morrowind_balmora") {
-        return;
-    }
-
-    const std::optional<std::filesystem::path> dataFilesPath = findMorrowindDataFilesPath();
-    if (!dataFilesPath.has_value()) {
-        VOX_LOGW("app") << "Balmora guards disabled: Morrowind Data Files not found; set "
-                         << kMorrowindDataFilesEnvVar;
-        return;
-    }
-
-    std::unordered_map<std::string, std::uint32_t> textureSlotByPath;
-    for (std::uint32_t textureIndex = 0; textureIndex < m_importedScene.textures.size(); ++textureIndex) {
-        textureSlotByPath.emplace(
-            lowerPathCopy(m_importedScene.textures[textureIndex].sourcePath),
-            textureIndex);
-    }
-    auto addActorTextureSlot = [&](const std::string& sourcePath) -> std::uint32_t {
-        if (sourcePath.empty()) {
-            return std::numeric_limits<std::uint32_t>::max();
-        }
-        const std::string key = lowerPathCopy(sourcePath);
-        const auto existing = textureSlotByPath.find(key);
-        if (existing != textureSlotByPath.end()) {
-            return existing->second;
-        }
-
-        odai::importer::ImportedSceneTexture texture{};
-        if (!odai::importer::loadMorrowindTexture(*dataFilesPath, sourcePath, texture)) {
-            VOX_LOGW("app") << "Balmora guard texture skipped: " << sourcePath
-                             << " (" << odai::importer::getImportedSceneLastError() << ")";
-            return std::numeric_limits<std::uint32_t>::max();
-        }
-        const std::uint32_t textureIndex = static_cast<std::uint32_t>(m_importedScene.textures.size());
-        textureSlotByPath.emplace(lowerPathCopy(texture.sourcePath), textureIndex);
-        m_importedScene.textures.push_back(std::move(texture));
-        return textureIndex;
-    };
-
-    auto appendNifToPrototype = [&](std::string_view relativeModelPath) {
-        std::filesystem::path nifPath = *dataFilesPath / "Meshes" / std::filesystem::path(std::string(relativeModelPath));
-        if (!std::filesystem::exists(nifPath)) {
-            VOX_LOGW("app") << "Balmora guard mesh missing: " << nifPath.string();
-            return;
-        }
-
-        odai::importer::ImportedNifResult nifResult{};
-        std::string nifError;
-        if (!odai::importer::loadMorrowindStaticNif(nifPath, nifResult, nifError)) {
-            VOX_LOGW("app") << "Balmora guard mesh skipped: " << nifPath.string()
-                             << " (" << nifError << ")";
-            return;
-        }
-
-        if (nifResult.mesh.parts.empty()) {
-            odai::importer::ImportedSceneMeshPart part{};
-            part.firstIndex = 0u;
-            part.indexCount = static_cast<std::uint32_t>(nifResult.mesh.indices.size());
-            part.textureIndex = addActorTextureSlot(nifResult.diffuseTexturePath);
-            part.alphaTest = nifResult.alphaTest;
-            nifResult.mesh.parts.push_back(part);
-        } else {
-            for (std::size_t partIndex = 0; partIndex < nifResult.mesh.parts.size(); ++partIndex) {
-                odai::importer::ImportedSceneMeshPart& part = nifResult.mesh.parts[partIndex];
-                std::string texturePath = nifResult.diffuseTexturePath;
-                if (partIndex < nifResult.partDiffuseTexturePaths.size() &&
-                    !nifResult.partDiffuseTexturePaths[partIndex].empty()) {
-                    texturePath = nifResult.partDiffuseTexturePaths[partIndex];
-                }
-                part.textureIndex = addActorTextureSlot(texturePath);
-            }
-        }
-
-        for (const odai::importer::ImportedSceneMeshPart& part : nifResult.mesh.parts) {
-            const std::uint32_t firstIndex = part.firstIndex;
-            const std::uint32_t indexEnd = std::min<std::uint32_t>(
-                firstIndex + part.indexCount,
-                static_cast<std::uint32_t>(nifResult.mesh.indices.size()));
-            if (firstIndex >= indexEnd) {
-                continue;
-            }
-
-            const std::uint32_t drawFirstIndex =
-                static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size());
-            std::vector<std::uint32_t> remap(
-                nifResult.mesh.vertices.size(),
-                std::numeric_limits<std::uint32_t>::max());
-            for (std::uint32_t indexOffset = firstIndex; indexOffset < indexEnd; ++indexOffset) {
-                const std::uint32_t sourceVertexIndex = nifResult.mesh.indices[indexOffset];
-                if (sourceVertexIndex >= nifResult.mesh.vertices.size()) {
-                    continue;
-                }
-                std::uint32_t& mappedIndex = remap[sourceVertexIndex];
-                if (mappedIndex == std::numeric_limits<std::uint32_t>::max()) {
-                    const odai::importer::ImportedSceneVertex& sourceVertex =
-                        nifResult.mesh.vertices[sourceVertexIndex];
-                    odai::importer::ImportedScenePackedVertex vertex{};
-                    std::copy(std::begin(sourceVertex.position), std::end(sourceVertex.position), std::begin(vertex.position));
-                    std::copy(std::begin(sourceVertex.normal), std::end(sourceVertex.normal), std::begin(vertex.normal));
-                    std::copy(std::begin(sourceVertex.uv), std::end(sourceVertex.uv), std::begin(vertex.uv));
-                    vertex.color[0] = 0.78f;
-                    vertex.color[1] = 0.72f;
-                    vertex.color[2] = 0.62f;
-                    vertex.textureIndex = part.textureIndex;
-                    vertex.flags = part.alphaTest ? 1u : 0u;
-                    mappedIndex = static_cast<std::uint32_t>(m_balmoraGuardPrototype.vertices.size());
-                    m_balmoraGuardPrototype.vertices.push_back(vertex);
-                }
-                m_balmoraGuardPrototype.indices.push_back(mappedIndex);
-            }
-
-            const std::uint32_t drawIndexCount =
-                static_cast<std::uint32_t>(m_balmoraGuardPrototype.indices.size()) - drawFirstIndex;
-            if (drawIndexCount == 0u) {
-                continue;
-            }
-            odai::importer::ImportedScenePackedDraw draw{};
-            draw.firstIndex = drawFirstIndex;
-            draw.indexCount = drawIndexCount;
-            m_balmoraGuardPrototype.draws.push_back(draw);
-        }
-    };
-
-    constexpr std::array<std::string_view, 13> kGuardModelParts = {
-        "b/B_N_Dark Elf_M_Neck.NIF",
-        "b/B_N_Dark Elf_M_Head_01.NIF",
-        "b/B_N_Dark Elf_M_Hair_17.nif",
-        "a/A_Bonemold_Armun_An_helm.nif",
-        "a/A_Bonemold_Cuirass_C.NIF",
-        "a/A_Bonemold_Armun_An_UA.nif",
-        "a/A_Bonemold_Armun_An_CL.nif",
-        "a/A_Bonemold_Bracer_W.nif",
-        "a/A_Bonemold_Greaves_G.nif",
-        "a/A_Bonemold_Greaves_UL.nif",
-        "a/A_Bonemold_Greaves_K.nif",
-        "a/A_Bonemold_Boots_F.nif",
-        "a/A_Bonemold_Boots_A.nif"
-    };
-    for (const std::string_view modelPart : kGuardModelParts) {
-        appendNifToPrototype(modelPart);
-    }
-    if (m_balmoraGuardPrototype.vertices.empty() ||
-        m_balmoraGuardPrototype.indices.empty() ||
-        m_balmoraGuardPrototype.draws.empty()) {
-        VOX_LOGW("app") << "Balmora guards disabled: no guard actor geometry imported";
-        m_balmoraGuardPrototype = {};
-        return;
-    }
-
-    odai::world::NavmeshSettings navmeshSettings{};
-    navmeshSettings.agentRadius = 32.0f;
-    navmeshSettings.agentHeight = 128.0f;
-    navmeshSettings.maxClimb = 72.0f;
-    navmeshSettings.maxSlopeDegrees = 52.0f;
-    navmeshSettings.nearestPointMaxDistance = 1200.0f;
-    navmeshSettings.edgeMergeEpsilon = 0.35f;
-    if (!m_balmoraNavmesh.buildFromGpuSceneAsset(m_gpuSceneAsset, navmeshSettings)) {
-        VOX_LOGW("app") << "Balmora guards disabled: navmesh build failed";
-        m_balmoraGuardPrototype = {};
-        return;
-    }
-
-    std::vector<odai::math::Vector3> guardSpawns;
-    for (const odai::importer::ImportedSceneCellRef& ref : m_importedScene.unresolvedRefs) {
-        if (lowerPathCopy(ref.refId) != "hlaalu guard_outside") {
-            continue;
-        }
-        guardSpawns.push_back({ref.position[0], ref.position[2], ref.position[1]});
-    }
-    if (guardSpawns.empty()) {
-        guardSpawns = {
-            {-17051.3105f, 228.6063f, -14461.3164f},
-            {-20190.7988f, 169.6947f, -13064.7422f},
-            {-22458.5312f, 576.0219f, -14094.3115f},
-            {-24606.0293f, 971.5856f, -12884.6289f}
-        };
-    }
-
-    const auto snapToNavmesh = [&](const odai::math::Vector3& point, odai::math::Vector3& outPoint) {
-        return m_balmoraNavmesh.findNearestPoint(
-            {point.x, point.y + kBalmoraGuardNavmeshProbeHeight, point.z},
-            outPoint);
-    };
-
-    std::vector<odai::math::Vector3> route;
-    constexpr std::array<odai::math::Vector3, 8> kRawRoute = {
-        odai::math::Vector3{-17051.3105f, 228.6063f, -14461.3164f},
-        odai::math::Vector3{-18470.0f, 260.0f, -14440.0f},
-        odai::math::Vector3{-20190.7988f, 169.6947f, -13064.7422f},
-        odai::math::Vector3{-21340.0f, 330.0f, -13780.0f},
-        odai::math::Vector3{-22458.5312f, 576.0219f, -14094.3115f},
-        odai::math::Vector3{-23640.0f, 810.0f, -13520.0f},
-        odai::math::Vector3{-24606.0293f, 971.5856f, -12884.6289f},
-        odai::math::Vector3{-21760.0f, 640.0f, -15440.0f}
-    };
-    for (const odai::math::Vector3& rawPoint : kRawRoute) {
-        odai::math::Vector3 snapped{};
-        if (snapToNavmesh(rawPoint, snapped)) {
-            route.push_back(snapped);
-        }
-    }
-
-    for (std::size_t guardIndex = 0; guardIndex < guardSpawns.size(); ++guardIndex) {
-        odai::math::Vector3 snappedSpawn{};
-        if (!snapToNavmesh(guardSpawns[guardIndex], snappedSpawn)) {
-            continue;
-        }
-        BalmoraGuardAgent guard{};
-        guard.position = snappedSpawn;
-        guard.previousPosition = snappedSpawn;
-        guard.route = route;
-        guard.routeIndex = route.empty() ? 0u : ((guardIndex * 2u) % route.size());
-        guard.speed = 84.0f + (static_cast<float>(guardIndex % 3u) * 9.0f);
-        guard.walkPhase = static_cast<float>(guardIndex) * 1.37f;
-        guard.previousWalkPhase = guard.walkPhase;
-        m_balmoraGuards.push_back(std::move(guard));
-    }
-
-    const odai::world::Navmesh::Stats navmeshStats = m_balmoraNavmesh.stats();
-    VOX_LOGI("app") << "Balmora guards enabled"
-                    << " guards=" << m_balmoraGuards.size()
-                    << " actorVertices=" << m_balmoraGuardPrototype.vertices.size()
-                    << " actorIndices=" << m_balmoraGuardPrototype.indices.size()
-                    << " navmeshWalkable=" << navmeshStats.walkableTriangleCount
-                    << " navmeshLinks=" << navmeshStats.linkCount;
-}
-
-void App::updateBalmoraGuards(float dt) {
-    if (m_balmoraGuards.empty() || m_balmoraGuardPrototype.vertices.empty() || m_balmoraNavmesh.empty()) {
-        return;
-    }
-
-    auto chooseNextPath = [&](BalmoraGuardAgent& guard) {
-        guard.path.clear();
-        guard.pathIndex = 0;
-        if (guard.route.empty()) {
-            return;
-        }
-        for (std::size_t attempt = 0; attempt < guard.route.size(); ++attempt) {
-            const odai::math::Vector3 target = guard.route[guard.routeIndex];
-            guard.routeIndex = (guard.routeIndex + 1u) % guard.route.size();
-            const odai::math::Vector3 delta = target - guard.position;
-            if ((delta.x * delta.x) + (delta.z * delta.z) <
-                (kBalmoraGuardRouteReachRadius * kBalmoraGuardRouteReachRadius)) {
-                continue;
-            }
-            guard.path.push_back({guard.position});
-            guard.path.push_back({target});
-            guard.pathIndex = 1u;
-            return;
-        }
-    };
-
-    for (BalmoraGuardAgent& guard : m_balmoraGuards) {
-        guard.previousPosition = guard.position;
-        guard.previousYawRadians = guard.yawRadians;
-        guard.previousWalkPhase = guard.walkPhase;
-
-        if (guard.path.empty() || guard.pathIndex >= guard.path.size()) {
-            chooseNextPath(guard);
-        }
-        if (guard.path.empty() || guard.pathIndex >= guard.path.size()) {
-            continue;
-        }
-
-        float remainingStep = std::max(guard.speed * std::max(dt, 0.0f), 0.0f);
-        while (remainingStep > 0.0f && guard.pathIndex < guard.path.size()) {
-            const odai::math::Vector3 target = guard.path[guard.pathIndex].position;
-            const odai::math::Vector3 delta{target.x - guard.position.x, 0.0f, target.z - guard.position.z};
-            const float distance = std::sqrt((delta.x * delta.x) + (delta.z * delta.z));
-            if (distance <= kBalmoraGuardRouteReachRadius) {
-                ++guard.pathIndex;
-                if (guard.pathIndex >= guard.path.size()) {
-                    chooseNextPath(guard);
-                    break;
-                }
-                continue;
-            }
-
-            const float moveDistance = std::min(remainingStep, distance);
-            const odai::math::Vector3 direction = delta / std::max(distance, 0.001f);
-            odai::math::Vector3 moved{
-                guard.position.x + (direction.x * moveDistance),
-                guard.position.y,
-                guard.position.z + (direction.z * moveDistance)
-            };
-            odai::math::Vector3 snapped{};
-            if (m_balmoraNavmesh.findNearestPoint(
-                    {moved.x, moved.y + kBalmoraGuardNavmeshProbeHeight, moved.z},
-                    snapped)) {
-                moved = snapped;
-            }
-            guard.position = moved;
-            guard.yawRadians = std::atan2(direction.x, direction.z);
-            guard.walkPhase += moveDistance * kBalmoraGuardWalkCycleScale;
-            remainingStep -= moveDistance;
-            if (moveDistance < 0.001f) {
-                break;
-            }
-        }
-    }
-}
-
-void App::rebuildBalmoraGuardRenderFrame(float simulationAlpha) {
-    m_balmoraGuardFrameVertices.clear();
-    m_balmoraGuardFrameIndices.clear();
-    m_balmoraGuardFrameDraws.clear();
-    if (m_balmoraGuards.empty() || m_balmoraGuardPrototype.vertices.empty()) {
-        return;
-    }
-
-    const float alpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
-    m_balmoraGuardFrameVertices.reserve(m_balmoraGuardPrototype.vertices.size() * m_balmoraGuards.size());
-    m_balmoraGuardFrameIndices.reserve(m_balmoraGuardPrototype.indices.size() * m_balmoraGuards.size());
-    m_balmoraGuardFrameDraws.reserve(m_balmoraGuardPrototype.draws.size() * m_balmoraGuards.size());
-
-    const auto lerpAngle = [](float from, float to, float t) {
-        float delta = std::fmod(to - from, kTwoPi);
-        if (delta <= -odai::math::kPi) {
-            delta += kTwoPi;
-        } else if (delta > odai::math::kPi) {
-            delta -= kTwoPi;
-        }
-        return from + (delta * t);
-    };
-    const auto rotateX = [](odai::math::Vector3 value, float pivotY, float pivotZ, float radians) {
-        const float c = std::cos(radians);
-        const float s = std::sin(radians);
-        const float y = value.y - pivotY;
-        const float z = value.z - pivotZ;
-        value.y = pivotY + (y * c) - (z * s);
-        value.z = pivotZ + (y * s) + (z * c);
-        return value;
-    };
-    const auto applyWalkSkin = [&](odai::math::Vector3& position,
-                                   odai::math::Vector3& normal,
-                                   float walkPhase) {
-        const float side = position.x < 0.0f ? -1.0f : 1.0f;
-        if (position.y < 82.0f) {
-            const float legWeight = std::clamp((82.0f - position.y) / 82.0f, 0.0f, 1.0f) *
-                std::clamp((std::abs(position.x) - 2.0f) / 18.0f, 0.0f, 1.0f);
-            const float legSwing = std::sin(walkPhase + (side > 0.0f ? odai::math::kPi : 0.0f)) * 0.34f * legWeight;
-            position = rotateX(position, 72.0f, 0.0f, legSwing);
-            normal = rotateX(normal, 0.0f, 0.0f, legSwing * 0.65f);
-        }
-        if (position.y > 42.0f && position.y < 128.0f) {
-            const float armWeight = std::clamp((std::abs(position.x) - 18.0f) / 18.0f, 0.0f, 1.0f) *
-                std::clamp((128.0f - position.y) / 58.0f, 0.0f, 1.0f);
-            const float armSwing = std::sin(walkPhase + (side > 0.0f ? 0.0f : odai::math::kPi)) * 0.28f * armWeight;
-            position = rotateX(position, 104.0f, 0.0f, armSwing);
-            normal = rotateX(normal, 0.0f, 0.0f, armSwing * 0.65f);
-        }
-    };
-
-    for (const BalmoraGuardAgent& guard : m_balmoraGuards) {
-        const odai::math::Vector3 position =
-            guard.previousPosition + ((guard.position - guard.previousPosition) * alpha);
-        const float yawRadians = lerpAngle(guard.previousYawRadians, guard.yawRadians, alpha);
-        const float walkPhase = guard.previousWalkPhase + ((guard.walkPhase - guard.previousWalkPhase) * alpha);
-        const float c = std::cos(yawRadians);
-        const float s = std::sin(yawRadians);
-        const float bob = std::abs(std::sin(walkPhase * 2.0f)) * 1.6f;
-
-        const std::uint32_t baseVertex = static_cast<std::uint32_t>(m_balmoraGuardFrameVertices.size());
-        for (const odai::importer::ImportedScenePackedVertex& sourceVertex : m_balmoraGuardPrototype.vertices) {
-            odai::math::Vector3 localPosition{
-                sourceVertex.position[0],
-                sourceVertex.position[1],
-                sourceVertex.position[2]
-            };
-            odai::math::Vector3 localNormal{
-                sourceVertex.normal[0],
-                sourceVertex.normal[1],
-                sourceVertex.normal[2]
-            };
-            applyWalkSkin(localPosition, localNormal, walkPhase);
-
-            odai::importer::ImportedScenePackedVertex vertex = sourceVertex;
-            vertex.position[0] = position.x + (localPosition.x * c) + (localPosition.z * s);
-            vertex.position[1] = position.y + localPosition.y + bob;
-            vertex.position[2] = position.z + (-localPosition.x * s) + (localPosition.z * c);
-            const odai::math::Vector3 worldNormal = odai::math::normalize({
-                (localNormal.x * c) + (localNormal.z * s),
-                localNormal.y,
-                (-localNormal.x * s) + (localNormal.z * c)
-            });
-            vertex.normal[0] = worldNormal.x;
-            vertex.normal[1] = worldNormal.y;
-            vertex.normal[2] = worldNormal.z;
-            m_balmoraGuardFrameVertices.push_back(vertex);
-        }
-
-        const std::uint32_t firstActorIndex = static_cast<std::uint32_t>(m_balmoraGuardFrameIndices.size());
-        for (const std::uint32_t sourceIndex : m_balmoraGuardPrototype.indices) {
-            m_balmoraGuardFrameIndices.push_back(baseVertex + sourceIndex);
-        }
-        for (const odai::importer::ImportedScenePackedDraw& sourceDraw : m_balmoraGuardPrototype.draws) {
-            odai::importer::ImportedScenePackedDraw draw{};
-            draw.firstIndex = firstActorIndex + sourceDraw.firstIndex;
-            draw.indexCount = sourceDraw.indexCount;
-            m_balmoraGuardFrameDraws.push_back(draw);
-        }
-    }
-}
 
 void App::assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId) {
     const std::size_t hotbarIndex = std::min<std::size_t>(
@@ -1853,7 +1001,7 @@ void App::handleInventoryClick(float mouseX, float mouseY, float displayWidth, f
 
 void App::update([[maybe_unused]] float dt, float simulationAlpha) {
     const float renderAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
-    const odai::render::CameraPose cameraPose{
+    odai::render::CameraPose cameraPose{
         m_cameraPrevious.x + ((m_camera.x - m_cameraPrevious.x) * renderAlpha),
         m_cameraPrevious.y + ((m_camera.y - m_cameraPrevious.y) * renderAlpha),
         m_cameraPrevious.z + ((m_camera.z - m_cameraPrevious.z) * renderAlpha),
@@ -1861,6 +1009,8 @@ void App::update([[maybe_unused]] float dt, float simulationAlpha) {
         m_cameraPrevious.pitchDegrees + ((m_camera.pitchDegrees - m_cameraPrevious.pitchDegrees) * renderAlpha),
         m_camera.fovDegrees
     };
+    cameraPose.orthographic = m_strategyMapMode;
+    cameraPose.orthoHalfHeight = m_mapOrthoHalfHeight;
     m_visibleChunkIndices.clear();
     m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
     updateUiOverlay(dt);
@@ -2141,22 +1291,37 @@ void App::updateCamera(float dt) {
     }
     m_wasToggleHoverDown = m_input.toggleHoverDown;
 
-    const bool activateDoorPressedThisStep =
-        m_importedSceneDemoEnabled &&
-        !isAnyUiVisible() &&
-        glfwGetKey(m_window, GLFW_KEY_R) == GLFW_PRESS &&
-        !m_wasActivateDoorDown;
-    m_wasActivateDoorDown = glfwGetKey(m_window, GLFW_KEY_R) == GLFW_PRESS;
-    if (activateDoorPressedThisStep && tryActivateBalmoraDoor()) {
-        return;
-    }
-
     float mouseDeltaX = m_pendingMouseDeltaX;
     float mouseDeltaY = m_pendingMouseDeltaY;
     m_pendingMouseDeltaX = 0.0f;
     m_pendingMouseDeltaY = 0.0f;
-    // Strategy map is cursor-driven: never rotate the camera from raw mouse motion.
+    // Strategy map is cursor-driven: left-drag pans, no mouselook rotation.
     if (m_strategyMapMode) {
+        // Pan: left-mouse drag translates camera in world XZ.
+        if (m_input.removeBlockDown && !m_uiContext.wantsMouse()) {
+            int fbW = 0, fbH = 0;
+            glfwGetFramebufferSize(m_window, &fbW, &fbH);
+            if (fbH > 0) {
+                const float worldPerPixel = (2.0f * m_mapOrthoHalfHeight) / static_cast<float>(fbH);
+                m_camera.x -= mouseDeltaX * worldPerPixel;
+                m_camera.z -= mouseDeltaY * worldPerPixel;
+            }
+        }
+
+        // Clamp so view cannot scroll past map edges.
+        int fbW = 0, fbH = 0;
+        glfwGetFramebufferSize(m_window, &fbW, &fbH);
+        if (fbW > 0 && fbH > 0) {
+            const float halfH = m_mapOrthoHalfHeight;
+            const float halfW = halfH * (static_cast<float>(fbW) / static_cast<float>(fbH));
+            const float cxMin = m_mapMinX + halfW, cxMax = m_mapMaxX - halfW;
+            const float czMin = m_mapMinZ + halfH, czMax = m_mapMaxZ - halfH;
+            m_camera.x = (cxMin <= cxMax)
+                ? std::clamp(m_camera.x, cxMin, cxMax) : (m_mapMinX + m_mapMaxX) * 0.5f;
+            m_camera.z = (czMin <= czMax)
+                ? std::clamp(m_camera.z, czMin, czMax) : (m_mapMinZ + m_mapMaxZ) * 0.5f;
+        }
+
         mouseDeltaX = 0.0f;
         mouseDeltaY = 0.0f;
     }
@@ -4042,6 +3207,7 @@ const char* terrainName(odai::game::TerrainType t) {
         case odai::game::TerrainType::Grassland: return "Grassland";
         case odai::game::TerrainType::Plains:    return "Plains";
         case odai::game::TerrainType::Forest:    return "Forest";
+        case odai::game::TerrainType::Jungle:    return "Jungle";
         case odai::game::TerrainType::Hills:     return "Hills";
         case odai::game::TerrainType::Mountains: return "Mountains";
         case odai::game::TerrainType::Desert:    return "Desert";
@@ -4055,7 +3221,7 @@ const char* terrainName(odai::game::TerrainType t) {
 
 void App::setupDemoUi(float viewW, float viewH) {
     // DPI scale: framebuffer pixels per logical pixel. On a 125%-scaled display the
-    // framebuffer is 1.25× the GLFW window size, so all hardcoded pixel values must
+    // framebuffer is 1.25ï¿½ the GLFW window size, so all hardcoded pixel values must
     // be multiplied by this factor so the UI looks the same physical size on screen.
     int windowW = 0;
     glfwGetWindowSize(m_window, &windowW, nullptr);
@@ -4107,27 +3273,38 @@ void App::setupDemoUi(float viewW, float viewH) {
         };
         m_uiFonts.bold = loadVariant(m_uiFontBold, "assets/fonts/EBGaramond-Bold.ttf");
         m_uiFonts.italic = loadVariant(m_uiFontItalic, "assets/fonts/EBGaramond-Italic.ttf");
+
+        // Title font - same face as regular but baked ~40% larger for window headers.
+        const float kTitleFontPx = kBaseFontPx * 1.4f;
+        const std::array<const char*, 3> kTitleCandidates = {
+            "assets/fonts/EBGaramond-Bold.ttf",
+            "assets/fonts/EBGaramond-Regular.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+        };
+        for (const char* candidate : kTitleCandidates) {
+            const std::filesystem::path tp = resolveAssetPath(candidate);
+            if (std::filesystem::exists(tp) &&
+                m_uiFontTitle.loadFromFile(tp.string(), kTitleFontPx * s) &&
+                m_uiFontTitle.atlasWidth() > 0) {
+                const odai::ui::UiTextureId tid = m_renderer.registerUiFontAtlas(
+                    m_uiFontTitle.atlasPixels().data(), m_uiFontTitle.atlasWidth(), m_uiFontTitle.atlasHeight());
+                if (tid != odai::ui::kUiNoTexture) {
+                    m_uiFontTitle.setTextureId(tid);
+                }
+                break;
+            }
+        }
+
         VOX_LOGI("ui") << "fonts loaded: regular=yes bold=" << (m_uiFonts.bold ? "yes" : "no")
-                       << " italic=" << (m_uiFonts.italic ? "yes" : "no");
+                       << " italic=" << (m_uiFonts.italic ? "yes" : "no")
+                       << " title=" << (m_uiFontTitle.valid() ? "yes" : "no");
     }
     const odai::ui::FontSet& fonts = m_uiFonts;
 
-    // Register the procedural 9-slice window-frame texture and build the slice
-    // (16-texel corners of a 64-texel source, drawn at 16*dpi destination corners).
+    // Register the procedural 9-slice window-frame texture (kept for future use).
     constexpr int kFrameTexSize = 64;
     const std::vector<std::uint8_t> framePixels = makeWindowFrameRgba(kFrameTexSize);
     m_windowFrameTexture = m_renderer.registerUiTextureRgba8(framePixels.data(), kFrameTexSize, kFrameTexSize);
-    odai::ui::UiNineSlice windowFrame{};
-    windowFrame.textureId = m_windowFrameTexture;
-    windowFrame.uv = odai::ui::UiRect{0.0f, 0.0f, 1.0f, 1.0f};
-    const float frameCornerTex = 16.0f;
-    const float frameCornerDst = frameCornerTex * s;
-    windowFrame.borderLeftPx = windowFrame.borderRightPx = frameCornerDst;
-    windowFrame.borderTopPx = windowFrame.borderBottomPx = frameCornerDst;
-    const float frameUvBorder = frameCornerTex / static_cast<float>(kFrameTexSize);
-    windowFrame.uvBorderLeft = windowFrame.uvBorderRight = frameUvBorder;
-    windowFrame.uvBorderTop = windowFrame.uvBorderBottom = frameUvBorder;
-    const bool windowFrameReady = m_windowFrameTexture != odai::ui::kUiNoTexture;
 
     // Load religion icon with mipmaps; registered globally for [icon=religion] in rich text.
     {
@@ -4170,7 +3347,7 @@ void App::setupDemoUi(float viewW, float viewH) {
         }
     }
 
-    // Load civilization empire icons atlas (12 civs, 4×3, 128px).
+    // Load civilization empire icons atlas (12 civs, 4ï¿½3, 128px).
     {
         const std::filesystem::path imgPath = resolveAssetPath("assets/icons/civ_empires.png");
         const std::filesystem::path jsonPath = resolveAssetPath("assets/icons/civ_empires.json");
@@ -4190,7 +3367,7 @@ void App::setupDemoUi(float viewW, float viewH) {
             stbi_image_free(ipx);
         }
     }
-    // Load unit icons atlas (9 units, 3×3 grid, 128px per icon).
+    // Load unit icons atlas (9 units, 3ï¿½3 grid, 128px per icon).
     {
         const std::filesystem::path imgPath = resolveAssetPath("assets/icons/unit_icons.png");
         const std::filesystem::path jsonPath = resolveAssetPath("assets/icons/unit_icons.json");
@@ -4211,7 +3388,28 @@ void App::setupDemoUi(float viewW, float viewH) {
         }
     }
 
-    // Load civilization leader portraits atlas (12 leaders, 4×3, 256px).
+    // Load unit action icons atlas (12 actions, 4ï¿½3 grid, 128px per icon).
+    {
+        const std::filesystem::path imgPath = resolveAssetPath("assets/icons/unit_action_icons.png");
+        const std::filesystem::path jsonPath = resolveAssetPath("assets/icons/unit_action_icons.json");
+        int iw = 0, ih = 0;
+        stbi_uc* ipx = stbi_load(imgPath.string().c_str(), &iw, &ih, nullptr, 4);
+        if (ipx && iw > 0 && ih > 0) {
+            const odai::ui::UiTextureId tex = m_renderer.registerUiTextureRgba8Mipmapped(
+                ipx, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih));
+            stbi_image_free(ipx);
+            if (tex != odai::ui::kUiNoTexture) {
+                std::ifstream f(jsonPath);
+                std::string meta((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                odai::ui::UiIconRegistry::global().registerAtlas(
+                    tex, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih), meta.c_str());
+            }
+        } else if (ipx) {
+            stbi_image_free(ipx);
+        }
+    }
+
+    // Load civilization leader portraits atlas (12 leaders, 4ï¿½3, 256px).
     odai::ui::UiTextureId civLeaderTex = odai::ui::kUiNoTexture;
     {
         const std::filesystem::path imgPath = resolveAssetPath("assets/leaders/civ_leaders.png");
@@ -4234,10 +3432,8 @@ void App::setupDemoUi(float viewW, float viewH) {
     }
 
     // Load the UI sprite sheet and build 9-slice descriptors for the dark ornate frame
-    // and the parchment frame. Both live in the same 1024×1536 texture atlas.
-    odai::ui::UiNineSlice darkPanelSlice{};
+    // and the parchment frame. Both live in the same 1024ï¿½1536 texture atlas.
     odai::ui::UiNineSlice parchmentSlice{};
-    bool darkSliceReady = false;
     bool parchmentSliceReady = false;
     {
         const std::filesystem::path sheetPath = resolveAssetPath("assets/ui/images/uisheet.png");
@@ -4272,16 +3468,8 @@ void App::setupDemoUi(float viewW, float viewH) {
                     ns.uvBorderBottom = bB / sprH;
                     return ns;
                 };
-                // Dark ornate panel: tight sprite bounds x=27..695, y=51..403.
-                // (The old UVs started at 0,0 and ran to 670x450, pulling in the
-                // transparent margin and the next sprite — corners floated inward
-                // with transparent gaps along the top/right edges.) 74px corners
-                // contain the top-left medallion and the bottom flourishes.
-                darkPanelSlice = makeSlice(27.0f, 51.0f, 695.0f, 403.0f,
-                                           74.0f, 74.0f, 74.0f, 74.0f);
-                darkSliceReady = true;
                 // Parchment panel: tight body bounds x=731..993, y=52..411. The body
-                // starts at x=731 — a small decorative finial sits detached at
+                // starts at x=731 - a small decorative finial sits detached at
                 // x=700..709 with a transparent gap, so it is excluded from the slice
                 // (including it left a magenta/empty strip down the left frame).
                 parchmentSlice = makeSlice(731.0f, 52.0f, 993.0f, 411.0f,
@@ -4295,7 +3483,7 @@ void App::setupDemoUi(float viewW, float viewH) {
 
     auto root = std::make_unique<odai::ui::Widget>();
 
-    // Top resource toolbar — a full-width strip of icon+value badges (gold,
+    // Top resource toolbar - a full-width strip of icon+value badges (gold,
     // science, culture, faith, food, production) in the style of a 4X game's
     // status bar. Other top-anchored panels are pushed down by its height.
     const float kToolbarH = 40.0f * s;
@@ -4310,7 +3498,7 @@ void App::setupDemoUi(float viewW, float viewH) {
         const odai::ui::UiColor textCol{0.92f, 0.95f, 0.97f, 1.0f};
         m_tbScienceItem = tb->addItem(TB::IconKind::Science, {0.31f, 0.64f, 0.82f, 1.0f}, "+14.4", textCol);
         tb->addItem(TB::IconKind::Culture, {0.69f, 0.44f, 0.84f, 1.0f}, "+8.2", textCol);
-        m_tbGoldItem = tb->addItem(TB::IconKind::Coin, {0.94f, 0.75f, 0.25f, 1.0f}, "240  +39", textCol);
+        m_tbGoldItem = tb->addItem(TB::IconKind::Coin, {0.94f, 0.75f, 0.25f, 1.0f}, "240 (+39)", textCol);
         m_tbFaithItem = tb->addItem(TB::IconKind::Faith, {0.90f, 0.88f, 0.96f, 1.0f}, "+11.5", textCol);
         tb->addItem(TB::IconKind::Food, {0.49f, 0.78f, 0.31f, 1.0f}, "+5.6", textCol);
         tb->addItem(TB::IconKind::Production, {0.85f, 0.54f, 0.23f, 1.0f}, "+6.7", textCol);
@@ -4324,18 +3512,13 @@ void App::setupDemoUi(float viewW, float viewH) {
         m_toolbarTurnLabel = static_cast<odai::ui::Label*>(m_toolbar->addChild(std::move(turn)));
     }
 
-    // Bottom HUD bar — full-width strip at the bottom of the screen.
+    // Bottom HUD bar - full-width strip at the bottom of the screen.
     const float kBarH = 64.0f * s;
     const float barY = viewH - kBarH;
     auto bar = std::make_unique<odai::ui::Panel>();
     bar->setRect(odai::ui::UiRect::fromXYWH(0.0f, barY, viewW, kBarH));
     bar->background  = odai::ui::UiColor{0.04f, 0.06f, 0.09f, 0.92f};
     bar->borderColor = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.40f};
-
-    auto turnLabel = std::make_unique<odai::ui::Label>(fonts, "Turn 1");
-    turnLabel->setRect(odai::ui::UiRect::fromXYWH(20.0f * s, barY + 12.0f * s, 200.0f * s, 40.0f * s));
-    m_hudTurnLabel = turnLabel.get();
-    bar->addChild(std::move(turnLabel));
 
     auto statsLabel = std::make_unique<odai::ui::Label>(fonts, "");
     statsLabel->setRect(odai::ui::UiRect::fromXYWH(viewW * 0.5f - 160.0f * s, barY + 12.0f * s, 320.0f * s, 40.0f * s));
@@ -4347,65 +3530,18 @@ void App::setupDemoUi(float viewW, float viewH) {
         ++m_currentTurn;
         VOX_LOGI("ui") << "turn advanced to " << m_currentTurn;
     });
-    endTurnBtn->setRect(odai::ui::UiRect::fromXYWH(viewW - 172.0f * s, barY + 10.0f * s, 152.0f * s, 44.0f * s));
-    endTurnBtn->cornerRadiusPx = 10.0f * s;  // vector (SDF) rounded corners, DPI-scaled
-    endTurnBtn->glowSizePx = 16.0f * s;      // mouse-over glow
+    endTurnBtn->setRect(odai::ui::UiRect::fromXYWH(viewW - 196.0f * s, barY + 8.0f * s, 180.0f * s, 48.0f * s));
+    endTurnBtn->cornerRadiusPx    = 12.0f * s;
+    endTurnBtn->colorNormal       = odai::ui::UiColor{0.28f, 0.20f, 0.06f, 0.95f};
+    endTurnBtn->colorHover        = odai::ui::UiColor{0.42f, 0.30f, 0.08f, 1.00f};
+    endTurnBtn->colorPressed      = odai::ui::UiColor{0.20f, 0.14f, 0.04f, 1.00f};
+    endTurnBtn->borderColor       = odai::ui::UiColor{0.88f, 0.70f, 0.28f, 0.90f};
+    endTurnBtn->borderThicknessPx = 2.0f * s;
+    endTurnBtn->glowColor         = odai::ui::UiColor{0.95f, 0.75f, 0.30f, 0.70f};
+    endTurnBtn->glowSizePx        = 22.0f * s;
     bar->addChild(std::move(endTurnBtn));
     root->addChild(std::move(bar));
 
-    // Left command panel. When the dark ornate frame is available the panel is enlarged
-    // to accommodate the 95px top and 85px bottom border artwork; content is inset
-    // accordingly. Falls back to the solid slate-gray panel if the sheet is missing.
-    const float kPanelW = darkSliceReady ? 380.0f * s : 310.0f * s;
-    const float kPanelH = darkSliceReady ? 440.0f * s : 258.0f * s;
-    const float kPanelX = 0.0f;
-    const float kPanelY = kToolbarH;  // sit below the top toolbar
-    const float kCntPadX = darkSliceReady ? 74.0f * s : 12.0f * s;
-    const float kCntPadY = darkSliceReady ? 104.0f * s : 10.0f * s;
-    const float kCntW    = kPanelW - kCntPadX * 2.0f;
-    auto panel = std::make_unique<odai::ui::Panel>();
-    panel->setRect(odai::ui::UiRect::fromXYWH(kPanelX, kPanelY, kPanelW, kPanelH));
-    if (darkSliceReady) {
-        panel->nineSlice  = darkPanelSlice;
-        panel->background = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 1.0f};
-    } else {
-        panel->background = odai::ui::UiColor{0.27f, 0.31f, 0.35f, 1.0f};
-        panel->opacity    = 0.80f;
-    }
-
-    auto title = std::make_unique<odai::ui::Label>(fonts, "<b><color=#ecd39a>Command View</color></b>");
-    title->setRect(odai::ui::UiRect::fromXYWH(kPanelX + kCntPadX, kPanelY + kCntPadY, kCntW, 30.0f * s));
-    panel->addChild(std::move(title));
-
-    auto foundCityBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Found City", [this]() {
-        ++m_uiDemoClicks;
-        VOX_LOGI("ui") << "founded city (" << m_uiDemoClicks << ")";
-    });
-    foundCityBtn->setRect(odai::ui::UiRect::fromXYWH(kPanelX + kCntPadX, kPanelY + kCntPadY + 42.0f * s, 200.0f * s, 46.0f * s));
-    foundCityBtn->cornerRadiusPx = 10.0f * s;
-    foundCityBtn->glowSizePx = 16.0f * s;
-    panel->addChild(std::move(foundCityBtn));
-
-    auto pediaBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Open CivPedia", [this]() {
-        if (m_civpediaWindow != nullptr) {
-            m_civpediaWindow->visible = true;
-        }
-    });
-    pediaBtn->setRect(odai::ui::UiRect::fromXYWH(kPanelX + kCntPadX, kPanelY + kCntPadY + 96.0f * s, 200.0f * s, 46.0f * s));
-    pediaBtn->cornerRadiusPx = 10.0f * s;
-    pediaBtn->glowSizePx = 16.0f * s;
-    panel->addChild(std::move(pediaBtn));
-
-    auto citiesLabel = std::make_unique<odai::ui::Label>(fonts, "Cities founded: 0");
-    citiesLabel->setRect(odai::ui::UiRect::fromXYWH(kPanelX + kCntPadX, kPanelY + kCntPadY + 156.0f * s, kCntW, 30.0f * s));
-    m_uiStatusLabel = citiesLabel.get();
-    panel->addChild(std::move(citiesLabel));
-
-    auto faithLabel = std::make_unique<odai::ui::Label>(fonts, "[icon=religion 44] <color=#c8963a>Faith  +3</color>");
-    faithLabel->setRect(odai::ui::UiRect::fromXYWH(kPanelX + kCntPadX, kPanelY + kCntPadY + 196.0f * s, kCntW, 48.0f * s));
-    panel->addChild(std::move(faithLabel));
-
-    root->addChild(std::move(panel));
 
     // Tile info window (bottom-right, hidden until a tile is hovered).
     const float tileWinW = 250.0f * s;
@@ -4414,7 +3550,12 @@ void App::setupDemoUi(float viewW, float viewH) {
     const float tileWinY = viewH - kBarH - tileWinH - 12.0f * s;
     auto tileWin = std::make_unique<odai::ui::Window>(fonts.regular, "Tile Info");
     tileWin->setRect(odai::ui::UiRect::fromXYWH(tileWinX, tileWinY, tileWinW, tileWinH));
-    tileWin->titleBarH = odai::ui::Window::kDefaultTitleBarH * s;
+    if (m_uiFontTitle.valid()) {
+        tileWin->titleFont = &m_uiFontTitle;
+        tileWin->titleBarH = m_uiFontTitle.lineHeightPx() + 12.0f * s;
+    } else {
+        tileWin->titleBarH = odai::ui::Window::kDefaultTitleBarH * s;
+    }
     tileWin->showCloseButton = false;
     tileWin->draggable = false;
     tileWin->visible = false;
@@ -4437,34 +3578,41 @@ void App::setupDemoUi(float viewW, float viewH) {
         const float civIconSz  = 52.0f * s;
         const float civPortSz  = 160.0f * s;
         const float civW       = civPadX + 4.0f * civIconSz + civPadX;
-        const float civX       = 16.0f * s;
-        const float civY       = kToolbarH + 12.0f * s;
-        const float civH       = 12.0f * s         // top padding
-                               + 20.0f * s         // title label
-                               + 6.0f  * s         // gap
+        const float civX       = 0.0f;
+        const float civY       = kToolbarH;
+        const float civH       = 14.0f * s         // top padding
+                               + 22.0f * s         // title label
+                               + 8.0f  * s         // gap
                                + 3.0f * civIconSz  // 3 rows of icons
-                               + 10.0f * s         // gap
+                               + 12.0f * s         // gap
                                + civPortSz          // leader portrait
                                + 6.0f  * s         // gap
                                + 18.0f * s         // name label
-                               + 12.0f * s;        // bottom padding
+                               + 14.0f * s;        // bottom padding
 
         auto civPanel = std::make_unique<odai::ui::Panel>();
         civPanel->setRect(odai::ui::UiRect::fromXYWH(civX, civY, civW, civH));
-        civPanel->cornerRadiusPx = 8.0f * s;
-        civPanel->background = odai::ui::UiColor{0.08f, 0.10f, 0.13f, 0.88f};
+        civPanel->cornerRadiusPx    = 0.0f;  // flush to screen edges
+        civPanel->background        = odai::ui::UiColor{0.08f, 0.10f, 0.13f, 0.95f};
+        civPanel->borderColor       = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.55f};
+        civPanel->borderThicknessPx = 1.5f * s;
+        civPanel->showShadow        = true;
+        civPanel->shadowBlurPx      = 12.0f * s;
+        civPanel->shadowOffsetX     = 4.0f * s;
+        civPanel->shadowOffsetY     = 0.0f;
+        civPanel->shadowColor       = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.50f};
 
-        float cy = civY + 12.0f * s;
+        float cy = civY + 14.0f * s;
 
         // "Civilizations" title label.
         auto civTitle = std::make_unique<odai::ui::Label>(fonts.bold, "Civilizations");
-        civTitle->color = odai::ui::UiColor{0.82f, 0.72f, 0.50f, 1.0f};
-        civTitle->setRect(odai::ui::UiRect::fromXYWH(civX, cy, civW, 20.0f * s));
+        civTitle->color = odai::ui::UiColor{0.91f, 0.80f, 0.48f, 1.0f};
+        civTitle->setRect(odai::ui::UiRect::fromXYWH(civX, cy, civW, 22.0f * s));
         civTitle->align = odai::ui::UiTextAlign::Center;
         civPanel->addChild(std::move(civTitle));
-        cy += 20.0f * s + 6.0f * s;
+        cy += 22.0f * s + 8.0f * s;
 
-        // 4×3 grid of empire icons — 12 civilizations.
+        // 4ï¿½3 grid of empire icons - 12 civilizations.
         static const std::array<const char*, 12> kCivIds = {{
             "babylon", "aztec",    "british", "egypt",
             "rome",    "greece",   "china",   "japan",
@@ -4481,7 +3629,7 @@ void App::setupDemoUi(float viewW, float viewH) {
                 civPanel->addChild(std::move(img));
             }
         }
-        cy += 3.0f * civIconSz + 10.0f * s;
+        cy += 3.0f * civIconSz + 12.0f * s;
 
         // Leader portrait for the currently selected civilization (default: caesar/rome).
         const float portX = civX + (civW - civPortSz) * 0.5f;
@@ -4499,8 +3647,8 @@ void App::setupDemoUi(float viewW, float viewH) {
         cy += civPortSz + 6.0f * s;
 
         // Leader name label.
-        auto nameLabel = std::make_unique<odai::ui::Label>(fonts.regular, "Caesar \xe2\x80\x94 Rome");
-        nameLabel->color = odai::ui::UiColor{0.90f, 0.85f, 0.70f, 1.0f};
+        auto nameLabel = std::make_unique<odai::ui::Label>(fonts.regular, "Caesar â€” Rome");
+        nameLabel->color = odai::ui::UiColor{0.90f, 0.85f, 0.72f, 1.0f};
         nameLabel->setRect(odai::ui::UiRect::fromXYWH(civX, cy, civW, 18.0f * s));
         nameLabel->align = odai::ui::UiTextAlign::Center;
         m_civLeaderNameLabel = nameLabel.get();
@@ -4509,18 +3657,109 @@ void App::setupDemoUi(float viewW, float viewH) {
         root->addChild(std::move(civPanel));
     }
 
+    // City production panel (right column, Civ 6 style).
+    // Buildings first, then Units, each in a labelled section.
+    // Clicking a row selects it as the city's active build.
+    // Clicking the info (i) button opens CivPedia for that specific item.
+    {
+        const float prodW   = 320.0f * s;
+        const float prodX   = viewW - prodW - 10.0f * s;
+        const float prodTop = kToolbarH + 8.0f * s;
+        const float prodH   = barY - prodTop - 8.0f * s;
+
+        // City production values (mock city: 8 accumulated, +3/turn).
+        const int kAccumulated = 8;
+        const int kPerTurn     = 3;
+
+        if (m_cityProductionId.empty()) {
+            m_cityProductionId = odai::game::defaultBuildables().front().id;
+        }
+
+        auto makeRow = [&](const odai::game::BuildableItem& item,
+                           const std::string& section) {
+            odai::ui::ProductionPanel::Row row;
+            row.id             = item.id;
+            row.name           = item.name;
+            row.iconName       = item.iconName;
+            row.productionCost = item.productionCost;
+            row.turns          = odai::game::turnsToBuild(item.productionCost, kAccumulated, kPerTurn);
+            row.selected       = (item.id == m_cityProductionId);
+            row.section        = section;
+
+            const std::string itemId = item.id;
+            row.onSelect = [this, itemId]() {
+                m_cityProductionId = itemId;
+                if (m_productionPanel != nullptr) m_productionPanel->setSelected(itemId);
+                VOX_LOGI("ui") << "city production set to " << itemId;
+            };
+
+            // Capture item fields by value so the lambda owns them.
+            const std::string pName    = item.name;
+            const std::string pIcon    = item.iconName;
+            const bool        pIsUnit  = (item.kind == odai::game::BuildableKind::Unit);
+            const std::string pArticle = odai::game::getPediaArticle(item.id);
+            row.onOpenPedia = [this, pName, pIcon, pIsUnit, pArticle]() {
+                if (m_civpediaWindow != nullptr) m_civpediaWindow->visible = true;
+
+                // Update portrait icon.
+                if (m_civpediaPortrait != nullptr) {
+                    odai::ui::UiIconEntry pe{};
+                    if (odai::ui::UiIconRegistry::global().resolve(pIcon, pe)) {
+                        m_civpediaPortrait->textureId = pe.textureId;
+                        m_civpediaPortrait->uvRect    = pe.uv;
+                    }
+                }
+
+                // Update name + class label.
+                const std::string kindStr = pIsUnit ? "Ancient Era Unit" : "City Building";
+                if (m_civpediaNameLabel != nullptr) {
+                    m_civpediaNameLabel->setText(
+                        "<b><color=#c06820>" + pName + "</color></b>\n"
+                        "<color=#9fa8a8><i>" + kindStr + "</i></color>");
+                }
+
+                // Update body text with the item's article.
+                if (m_civpediaView != nullptr) {
+                    m_civpediaView->setText(pArticle);
+                    m_civpediaView->scrollOffsetY = 0.0f;
+                }
+            };
+            return row;
+        };
+
+        // Buildings first ("Districts & Buildings"), then Units.
+        std::vector<odai::ui::ProductionPanel::Row> rows;
+        for (const odai::game::BuildableItem& item : odai::game::defaultBuildables()) {
+            if (item.kind == odai::game::BuildableKind::Building)
+                rows.push_back(makeRow(item, "Districts & Buildings"));
+        }
+        for (const odai::game::BuildableItem& item : odai::game::defaultBuildables()) {
+            if (item.kind == odai::game::BuildableKind::Unit)
+                rows.push_back(makeRow(item, "Units"));
+        }
+
+        auto prodPanel = std::make_unique<odai::ui::ProductionPanel>(fonts);
+        prodPanel->setItems(odai::ui::UiRect::fromXYWH(prodX, prodTop, prodW, prodH),
+                            s, "Choose Production", rows);
+        m_productionPanel = static_cast<odai::ui::ProductionPanel*>(root->addChild(std::move(prodPanel)));
+    }
+
     // CivPedia window (top-right): a draggable framed window. When the parchment
     // 9-slice is loaded, it replaces the solid fill and the title bar / body colors
     // are made transparent so the parchment texture shows through. Text colors shift
     // to dark-brown so they read on the light background.
     const float pediaW = parchmentSliceReady ? 430.0f * s : 360.0f * s;
-    const float pediaH = parchmentSliceReady ? 310.0f * s : 232.0f * s;
+    const float pediaH = parchmentSliceReady ? 310.0f * s : 320.0f * s;
     const float pediaX = viewW - pediaW - 16.0f * s;
     const float pediaY = kToolbarH + 12.0f * s;
-    // The parchment frame's top border is ornate gold, so the title bar is made
-    // tall enough to seat the "CivPedia" title in the cream just below it.
-    const float pediaTitleH = parchmentSliceReady ? 86.0f * s
-                                                  : odai::ui::Window::kDefaultTitleBarH * s;
+    // Title bar height - tall enough for the title font.  The parchment frame's top
+    // border is ornate art (86px), so that case is fixed; otherwise derive from font.
+    const odai::ui::Font* pediaTitleFontPtr = m_uiFontTitle.valid() ? &m_uiFontTitle : fonts.bold;
+    const float kTitlePad = 12.0f * s;
+    const float pediaTitleH = parchmentSliceReady
+        ? 86.0f * s
+        : (pediaTitleFontPtr ? pediaTitleFontPtr->lineHeightPx() + kTitlePad * 2.0f
+                             : odai::ui::Window::kDefaultTitleBarH * s);
     auto pediaWin = std::make_unique<odai::ui::Window>(
         fonts.bold, "CivPedia",
         [this]() {
@@ -4530,6 +3769,7 @@ void App::setupDemoUi(float viewW, float viewH) {
         });
     pediaWin->setRect(odai::ui::UiRect::fromXYWH(pediaX, pediaY, pediaW, pediaH));
     pediaWin->titleBarH = pediaTitleH;
+    if (m_uiFontTitle.valid()) pediaWin->titleFont = &m_uiFontTitle;
     pediaWin->margin = 0.0f;
     pediaWin->showCloseButton = true;
     pediaWin->draggable = true;
@@ -4543,13 +3783,13 @@ void App::setupDemoUi(float viewW, float viewH) {
         pediaWin->closeColor    = odai::ui::UiColor{0.55f, 0.18f, 0.08f, 0.90f};
         pediaWin->closeHoverColor = odai::ui::UiColor{0.80f, 0.10f, 0.05f, 1.0f};
     } else {
-        pediaWin->padding      = {14.0f * s, 10.0f * s};
-        pediaWin->titleBarColor = odai::ui::UiColor{0.22f, 0.26f, 0.30f, 1.0f};
-        pediaWin->bodyColor     = odai::ui::UiColor{0.27f, 0.31f, 0.35f, 1.0f};
-        pediaWin->opacity       = 0.80f;
-        if (windowFrameReady) {
-            pediaWin->frame = windowFrame;
-        }
+        // Solid fill path - use corner radius, no 9-slice frame (avoids heavy rounding).
+        pediaWin->padding       = {14.0f * s, 10.0f * s};
+        pediaWin->titleBarColor = odai::ui::UiColor{0.12f, 0.16f, 0.22f, 1.0f};
+        pediaWin->bodyColor     = odai::ui::UiColor{0.07f, 0.10f, 0.14f, 0.96f};
+        pediaWin->borderColor   = odai::ui::UiColor{0.65f, 0.52f, 0.28f, 0.70f};
+        pediaWin->cornerRadiusPx = 4.0f * s;
+        pediaWin->opacity       = 0.95f;
     }
 
     const float pBodyPadX   = parchmentSliceReady ? 56.0f * s : 18.0f * s;
@@ -4570,26 +3810,24 @@ void App::setupDemoUi(float viewW, float viewH) {
         }
         portrait->setRect(odai::ui::UiRect::fromXYWH(
             pediaX + pBodyPadX, headerY, headerIconSz, headerIconSz));
-        pediaWin->addChild(std::move(portrait));
+        m_civpediaPortrait = static_cast<odai::ui::Image*>(pediaWin->addChild(std::move(portrait)));
 
         const float nameLabelX = pediaX + pBodyPadX + headerIconSz + 8.0f * s;
         const float nameLabelW = pediaW - pBodyPadX - headerIconSz - 8.0f * s - pBodyPadX;
         auto nameLabel = std::make_unique<odai::ui::Label>(
             fonts, "<b><color=#c06820>Spearman</color></b>\n<color=#9fa8a8><i>Ancient Melee Unit</i></color>");
         nameLabel->setRect(odai::ui::UiRect::fromXYWH(nameLabelX, headerY, nameLabelW, headerIconSz));
-        pediaWin->addChild(std::move(nameLabel));
+        m_civpediaNameLabel = static_cast<odai::ui::Label*>(pediaWin->addChild(std::move(nameLabel)));
     }
 
-    // Rich-text body — inline unit icons prefix each hoverable term.
-    const std::string pediaText =
-        "The <tip=Spearman \xe2\x80\x94 25 HP, melee. +100% vs mounted units.>"
-        "[icon=spearman 18]<b><color=#c06820>Spearman</color></b></tip> is an <i>ancient</i> melee unit. "
-        "It stands firm against <tip=Cavalry \xe2\x80\x94 fast mounted units, weak to spears.>"
-        "[icon=cavalry 18]<b><color=#c06820>Cavalry</color></b></tip>, anchoring your early army. "
-        "Train one in any <tip=Cities grow your empire and produce units and wonders.>"
-        "<b><color=#c06820>City</color></b></tip> that has built a <i>Barracks</i>.";
-    auto pediaBody = std::make_unique<odai::ui::RichTextView>(fonts, pediaText);
-    pediaBody->padding = {6.0f * s, 0.0f};
+    // Rich-text body -- populated from the article registry; shown when the user
+    // clicks (i) on a production row. Starts with the Spearman article so the
+    // window has real content if it is ever made visible without a selection.
+    auto pediaBody = std::make_unique<odai::ui::RichTextView>(
+        fonts, odai::game::getPediaArticle("spearman"));
+    pediaBody->padding = {6.0f * s, 4.0f * s};
+    pediaBody->scrollBarThumbColor = odai::ui::UiColor{0.70f, 0.56f, 0.28f, 0.65f};
+    pediaBody->scrollBarTrackColor = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.15f};
     pediaBody->setRect(odai::ui::UiRect::fromXYWH(
         pediaX + pBodyPadX,
         headerY + headerH,
@@ -4598,117 +3836,68 @@ void App::setupDemoUi(float viewW, float viewH) {
     m_civpediaView = pediaBody.get();
     pediaWin->addChild(std::move(pediaBody));
     m_civpediaWindow = root->addChild(std::move(pediaWin));
+    m_civpediaWindow->visible = false;  // Hidden until user clicks the info button on a row.
 
-    // Unit roster panel — all 9 unit icons in a horizontal strip below the CivPedia.
+    // Unit action bar - floats above the bottom bar at the left, shown when a unit
+    // is selected. Layout: [unit portrait] [unit name] | [action btn 0..5]
+    // Slots are pre-built and hidden; updateUiOverlay sets their icons and visibility.
     {
-        static const std::array<const char*, 9> kUnitIds = {{
-            "spearman", "warrior", "archer",
-            "scout",    "settler", "builder",
-            "cavalry",  "ship",    "siege",
-        }};
-        const float rosterW       = pediaW;
-        const float rosterX       = pediaX;
-        const float rosterY       = pediaY + pediaH + 10.0f * s;
-        const float rosterIconSz  = 44.0f * s;
-        const float rosterPadX    = 14.0f * s;
-        const float rosterTitleH  = 26.0f * s;
-        const float rosterH       = rosterTitleH + rosterIconSz + 10.0f * s;
+        // Actions available per unit type - ordered for display left-to-right.
+        // Defined as static data; lookup in updateUiOverlay by m_selectedUnitType.
 
-        auto rosterPanel = std::make_unique<odai::ui::Panel>();
-        rosterPanel->setRect(odai::ui::UiRect::fromXYWH(rosterX, rosterY, rosterW, rosterH));
-        rosterPanel->cornerRadiusPx     = 8.0f * s;
-        rosterPanel->background         = odai::ui::UiColor{0.08f, 0.10f, 0.13f, 0.88f};
-        rosterPanel->borderColor        = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.40f};
-        rosterPanel->borderThicknessPx  = 1.0f * s;
+        const float portSz   = 48.0f * s;
+        const float btnSz    = 48.0f * s;
+        const float btnGap   = 6.0f  * s;
+        const float padX     = 10.0f * s;
+        const float padY     = 8.0f  * s;
+        const float nameW    = 96.0f * s;
+        const float sepW     = 10.0f * s;
+        const float panelH   = portSz + padY * 2.0f;
+        const float panelW   = padX + portSz + padX + nameW + sepW
+                             + kMaxActionSlots * (btnSz + btnGap) + padX;
+        const float panelX   = 0.0f;
+        const float panelY   = barY - panelH - 6.0f * s;
 
-        auto rosterTitle = std::make_unique<odai::ui::Label>(fonts.bold, "Military Units");
-        rosterTitle->color = odai::ui::UiColor{0.82f, 0.72f, 0.50f, 1.0f};
-        rosterTitle->align = odai::ui::UiTextAlign::Center;
-        rosterTitle->setRect(odai::ui::UiRect::fromXYWH(rosterX, rosterY + 4.0f * s, rosterW, 18.0f * s));
-        rosterPanel->addChild(std::move(rosterTitle));
+        auto ap = std::make_unique<odai::ui::Panel>();
+        ap->setRect(odai::ui::UiRect::fromXYWH(panelX, panelY, panelW, panelH));
+        ap->background        = odai::ui::UiColor{0.06f, 0.07f, 0.10f, 0.94f};
+        ap->borderColor       = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.55f};
+        ap->borderThicknessPx = 1.5f * s;
+        ap->visible           = false;  // hidden until a unit is selected
 
-        const float gridLeft = rosterX + rosterPadX;
-        const float gridW    = rosterW - 2.0f * rosterPadX;
-        const float iconStep = gridW / static_cast<float>(kUnitIds.size());
-        const float iconY    = rosterY + rosterTitleH;
-        for (std::size_t ui = 0; ui < kUnitIds.size(); ++ui) {
-            odai::ui::UiIconEntry entry{};
-            if (odai::ui::UiIconRegistry::global().resolve(kUnitIds[ui], entry)) {
-                const float ix = gridLeft + static_cast<float>(ui) * iconStep
-                                 + (iconStep - rosterIconSz) * 0.5f;
-                auto img = std::make_unique<odai::ui::Image>(entry.textureId);
-                img->uvRect = entry.uv;
-                img->setRect(odai::ui::UiRect::fromXYWH(ix, iconY, rosterIconSz, rosterIconSz));
-                rosterPanel->addChild(std::move(img));
-            }
+        // Unit portrait image.
+        const float portX = panelX + padX;
+        const float portY = panelY + padY;
+        auto portrait = std::make_unique<odai::ui::Image>();
+        portrait->setRect(odai::ui::UiRect::fromXYWH(portX, portY, portSz, portSz));
+        m_unitActionPortrait = portrait.get();
+        ap->addChild(std::move(portrait));
+
+        // Unit name label.
+        const float nameX = portX + portSz + padX * 0.5f;
+        const float nameY = panelY + (panelH - 16.0f * s) * 0.5f;
+        auto nameLabel = std::make_unique<odai::ui::Label>(fonts.bold, "");
+        nameLabel->color = odai::ui::UiColor{0.91f, 0.80f, 0.48f, 1.0f};
+        nameLabel->setRect(odai::ui::UiRect::fromXYWH(nameX, nameY, nameW, 20.0f * s));
+        m_unitActionName = nameLabel.get();
+        ap->addChild(std::move(nameLabel));
+
+        // Pre-built action slot buttons (icon-only, hidden until assigned).
+        const float slotsX = nameX + nameW + sepW;
+        for (int si = 0; si < kMaxActionSlots; ++si) {
+            const float bx = slotsX + static_cast<float>(si) * (btnSz + btnGap);
+            const float by = panelY + padY;
+            auto btn = std::make_unique<odai::ui::IconButton>([]() {});
+            btn->setRect(odai::ui::UiRect::fromXYWH(bx, by, btnSz, btnSz));
+            btn->cornerRadiusPx = 8.0f * s;
+            btn->glowSizePx     = 12.0f * s;
+            btn->iconPaddingPx  = 5.0f * s;
+            btn->visible        = false;
+            m_actionSlotBtns[si] = btn.get();
+            ap->addChild(std::move(btn));
         }
-        root->addChild(std::move(rosterPanel));
-    }
 
-    // --- Vector UI demo card: a rounded panel containing labels, an icon, an
-    // editable textbox, and a progress bar -- all drawn with the DPI-aware SDF
-    // rounded-rect primitives (no bitmaps). Anchored bottom-centre above the HUD. ---
-    {
-        const float cardW = 420.0f * s;
-        const float cardH = 250.0f * s;
-        const float cardX = viewW * 0.5f - cardW * 0.5f;
-        const float cardY = viewH - kBarH - cardH - 20.0f * s;
-        const float padX  = 20.0f * s;
-        float cy = cardY + 18.0f * s;
-
-        auto card = std::make_unique<odai::ui::Panel>();
-        card->setRect(odai::ui::UiRect::fromXYWH(cardX, cardY, cardW, cardH));
-        card->background       = odai::ui::UiColor{0.06f, 0.12f, 0.18f, 0.96f};
-        card->borderColor      = odai::ui::UiColor{0.40f, 0.55f, 0.62f, 0.55f};
-        card->borderThicknessPx = 1.5f * s;
-        card->cornerRadiusPx   = 16.0f * s;
-        card->showShadow       = true;
-        card->shadowColor      = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.45f};
-        card->shadowBlurPx     = 10.0f * s;
-
-        auto heading = std::make_unique<odai::ui::Label>(
-            fonts, "<b><color=#ecd39a>Vector UI Demo</color></b>");
-        heading->setRect(odai::ui::UiRect::fromXYWH(cardX + padX, cy, cardW - padX * 2.0f, 28.0f * s));
-        card->addChild(std::move(heading));
-
-        // Icon + caption (the icon comes from the global icon atlas via rich text).
-        auto iconRow = std::make_unique<odai::ui::Label>(
-            fonts, "[icon=religion 26] <color=#9fb4bd>Labels, icons &amp; live text input</color>");
-        iconRow->setRect(odai::ui::UiRect::fromXYWH(cardX + padX, cy + 30.0f * s, cardW - padX * 2.0f, 30.0f * s));
-        card->addChild(std::move(iconRow));
-
-        cy += 76.0f * s;
-
-        auto box = std::make_unique<odai::ui::TextBox>(
-            fonts.regular, "Type here, then Backspace / Enter...");
-        box->setRect(odai::ui::UiRect::fromXYWH(cardX + padX, cy, cardW - padX * 2.0f, 44.0f * s));
-        box->cornerRadiusPx    = 12.0f * s;
-        box->borderThicknessPx = 1.5f * s;
-        box->padding           = {16.0f * s, 0.0f};
-        m_demoTextBox = box.get();
-        card->addChild(std::move(box));
-
-        cy += 56.0f * s;
-
-        auto echo = std::make_unique<odai::ui::Label>(fonts, "<color=#7f9098>You typed: </color>");
-        echo->setRect(odai::ui::UiRect::fromXYWH(cardX + padX, cy, cardW - padX * 2.0f, 26.0f * s));
-        m_demoEchoLabel = echo.get();
-        card->addChild(std::move(echo));
-
-        cy += 34.0f * s;
-
-        auto prog = std::make_unique<odai::ui::ProgressBar>();
-        prog->setRect(odai::ui::UiRect::fromXYWH(cardX + padX, cy, cardW - padX * 2.0f, 16.0f * s));
-        prog->cornerRadiusPx    = 8.0f * s;   // half-height -> pill
-        prog->background        = odai::ui::UiColor{0.12f, 0.18f, 0.22f, 1.0f};
-        prog->foreground        = odai::ui::UiColor{0.91f, 0.55f, 0.22f, 1.0f};
-        prog->borderColor       = odai::ui::UiColor{0.40f, 0.55f, 0.62f, 0.50f};
-        prog->borderThicknessPx = 1.0f * s;
-        prog->value             = m_demoProgressValue;
-        m_demoProgress = prog.get();
-        card->addChild(std::move(prog));
-
-        root->addChild(std::move(card));
+        m_unitActionPanel = root->addChild(std::move(ap));
     }
 
     // Tooltip fade: ease-in-out over ~0.16s.
@@ -4740,6 +3929,8 @@ void App::updateUiOverlay(float dt) {
     m_uiInput.beginFrame();
     m_uiInput.mousePx = {static_cast<float>(mouseX), static_cast<float>(mouseY)};
     m_uiInput.setButton(odai::ui::UiMouseButton::Left, leftDown);
+    m_uiInput.scrollDelta = m_pendingScrollDelta;
+    m_pendingScrollDelta = 0.0f;
 
     // Feed typed characters into the UI, plus synthetic codepoints for the editing
     // keys GLFW reports as keys rather than characters (8 = backspace, 13 = enter).
@@ -4765,44 +3956,86 @@ void App::updateUiOverlay(float dt) {
     m_uiContext.setViewport({static_cast<float>(fbW), static_cast<float>(fbH)});
     m_uiContext.update(m_uiInput);
 
-    // Update turn label.
-    if (m_hudTurnLabel != nullptr) {
-        m_hudTurnLabel->setText("<b><color=#ecd39a>Turn " + std::to_string(m_currentTurn) + "</color></b>");
+    // Unit action bar: rebuild slots when selection changes.
+    if (m_selectedUnitType != m_prevSelectedUnitType) {
+        m_prevSelectedUnitType = m_selectedUnitType;
+
+        // Actions per unit type - ordered for display.
+        static const std::unordered_map<std::string, std::vector<std::string>> kUnitActions = {
+            {"warrior",  {"move", "attack",        "fortify", "wait", "sleep"}},
+            {"archer",   {"move", "ranged_attack",  "fortify", "wait", "sleep"}},
+            {"spearman", {"move", "attack",         "fortify", "wait", "sleep"}},
+            {"scout",    {"move", "explore",        "wait",    "sleep"}},
+            {"settler",  {"move", "found_city",     "wait"}},
+            {"builder",  {"move", "build",          "wait"}},
+            {"cavalry",  {"move", "attack",         "fortify", "wait", "sleep"}},
+            {"ship",     {"move", "attack",         "embark",  "wait"}},
+            {"siege",    {"move", "attack",         "wait"}},
+        };
+
+        // Display name for each unit type.
+        static const std::unordered_map<std::string, std::string> kUnitNames = {
+            {"warrior",  "Warrior"},  {"archer",   "Archer"},
+            {"spearman", "Spearman"}, {"scout",    "Scout"},
+            {"settler",  "Settler"},  {"builder",  "Builder"},
+            {"cavalry",  "Cavalry"},  {"ship",     "Ship"},
+            {"siege",    "Siege"},
+        };
+
+        const bool hasSelection = !m_selectedUnitType.empty();
+        if (m_unitActionPanel != nullptr) {
+            m_unitActionPanel->visible = hasSelection;
+        }
+
+        if (hasSelection) {
+            // Update portrait.
+            if (m_unitActionPortrait != nullptr) {
+                odai::ui::UiIconEntry pe{};
+                if (odai::ui::UiIconRegistry::global().resolve(m_selectedUnitType, pe)) {
+                    m_unitActionPortrait->textureId = pe.textureId;
+                    m_unitActionPortrait->uvRect    = pe.uv;
+                }
+            }
+            // Update name label.
+            if (m_unitActionName != nullptr) {
+                const auto nit = kUnitNames.find(m_selectedUnitType);
+                m_unitActionName->setText(nit != kUnitNames.end() ? nit->second : m_selectedUnitType);
+            }
+            // Update action slots.
+            const auto ait = kUnitActions.find(m_selectedUnitType);
+            const std::vector<std::string>* actions =
+                (ait != kUnitActions.end()) ? &ait->second : nullptr;
+            for (int si = 0; si < kMaxActionSlots; ++si) {
+                if (m_actionSlotBtns[si] == nullptr) continue;
+                const bool slotUsed = actions && si < static_cast<int>(actions->size());
+                m_actionSlotBtns[si]->visible = slotUsed;
+                if (slotUsed) {
+                    odai::ui::UiIconEntry ae{};
+                    if (odai::ui::UiIconRegistry::global().resolve((*actions)[si], ae)) {
+                        m_actionSlotBtns[si]->textureId = ae.textureId;
+                        m_actionSlotBtns[si]->uvRect    = ae.uv;
+                    }
+                    // Re-bind click handler to log the action name.
+                    const std::string actionName = (*actions)[si];
+                    // (Action callbacks can be wired to game logic here.)
+                }
+            }
+        }
     }
 
     // Update map stats label.
     if (m_hudStatsLabel != nullptr && m_strategyMap.width > 0) {
         const auto cnt = static_cast<int>(m_strategyMap.settlements.size());
         m_hudStatsLabel->setText(
-            std::to_string(m_strategyMap.width) + " \xc3\x97 " +
-            std::to_string(m_strategyMap.height) + "  \xe2\x80\xa2  " +
+            std::to_string(m_strategyMap.width) + " Ã— " +
+            std::to_string(m_strategyMap.height) + "  â€¢  " +
             std::to_string(cnt) + (cnt == 1 ? " settlement" : " settlements"));
-    }
-
-    // Update cities-founded label.
-    if (m_uiStatusLabel != nullptr) {
-        m_uiStatusLabel->setText("Cities founded: " + std::to_string(m_uiDemoClicks));
-    }
-
-    // Vector UI demo: animate the progress bar and echo the textbox contents.
-    m_demoProgressValue += dt * 0.15f;
-    if (m_demoProgressValue > 1.0f) {
-        m_demoProgressValue -= 1.0f;
-    }
-    if (m_demoProgress != nullptr) {
-        m_demoProgress->value = m_demoProgressValue;
-    }
-    if (m_demoEchoLabel != nullptr && m_demoTextBox != nullptr) {
-        const std::string& typed = m_demoTextBox->value();
-        m_demoEchoLabel->setText(
-            "<color=#7f9098>You typed:</color> <color=#e8d9b0>" +
-            (typed.empty() ? std::string("<i>(nothing yet)</i>") : typed) + "</color>");
     }
 
     // Top toolbar: accumulate gold and reflect the current turn.
     if (m_toolbar != nullptr) {
         m_tbGold += dt * 39.0f / 60.0f;  // ~+39/turn at ~60 fps
-        m_toolbar->setValue(m_tbGoldItem, std::to_string(static_cast<int>(m_tbGold)) + "  +39");
+        m_toolbar->setValue(m_tbGoldItem, std::to_string(static_cast<int>(m_tbGold)) + " (+39)");
     }
     if (m_toolbarTurnLabel != nullptr) {
         m_toolbarTurnLabel->setText(
@@ -4910,6 +4143,34 @@ bool App::pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
     if (!m_strategyMap.width || !m_strategyMap.height) return false;
     if (fbW <= 0 || fbH <= 0) return false;
 
+    // Shared hex lookup: world XZ ? nearest hex cell.
+    const float hexSize = m_strategyMap.hexSize;
+    constexpr float kSqrt3 = 1.7320508075688772f;
+    auto findHex = [&](float wx, float wz) -> bool {
+        const int approxRow = static_cast<int>(std::round(wz / (hexSize * 1.5f)));
+        float bestDist2 = 1e30f;
+        int bestCol = -1, bestRow = -1;
+        for (int dr = -1; dr <= 1; ++dr) {
+            const int r = approxRow + dr;
+            if (r < 0 || r >= static_cast<int>(m_strategyMap.height)) continue;
+            const float ro = (r & 1) ? 0.5f : 0.0f;
+            const int cBase = static_cast<int>(std::round(wx / (hexSize * kSqrt3) - ro));
+            for (int dc = -1; dc <= 1; ++dc) {
+                const int c = cBase + dc;
+                if (c < 0 || c >= static_cast<int>(m_strategyMap.width)) continue;
+                const auto ctr = odai::game::tileCenterWorld(
+                    m_strategyMap, static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(r));
+                const float dx = ctr.x - wx, dz = ctr.z - wz;
+                const float d2 = dx*dx + dz*dz;
+                if (d2 < bestDist2) { bestDist2 = d2; bestCol = c; bestRow = r; }
+            }
+        }
+        if (bestCol < 0) return false;
+        outCol = bestCol;
+        outRow = bestRow;
+        return true;
+    };
+
     // Build camera basis from yaw/pitch (same convention as computeCameraForward).
     const float yaw   = odai::math::radians(m_camera.yawDegrees);
     const float pitch = odai::math::radians(m_camera.pitchDegrees);
@@ -4926,60 +4187,35 @@ bool App::pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
     // NDC of the mouse pixel (+Y up).
     const float ndcX = static_cast<float>(mouseX) / static_cast<float>(fbW) * 2.0f - 1.0f;
     const float ndcY = 1.0f - static_cast<float>(mouseY) / static_cast<float>(fbH) * 2.0f;
-
-    const float tanHalfFov = std::tan(odai::math::radians(m_camera.fovDegrees) * 0.5f);
     const float aspect = static_cast<float>(fbW) / static_cast<float>(fbH);
+
+    if (m_strategyMapMode) {
+        // Orthographic: ray origin offset per pixel, direction = forward.
+        const float halfH = m_mapOrthoHalfHeight;
+        const float halfW = halfH * aspect;
+        const float roX = m_camera.x + rgtX * ndcX * halfW + upX * ndcY * halfH;
+        const float roY = m_camera.y + rgtY * ndcX * halfW + upY * ndcY * halfH;
+        const float roZ = m_camera.z + rgtZ * ndcX * halfW + upZ * ndcY * halfH;
+        if (std::abs(fwdY) < 1e-4f) return false;
+        const float t = -roY / fwdY;
+        if (t < 0.0f) return false;
+        return findHex(roX + t * fwdX, roZ + t * fwdZ);
+    }
+
+    // Perspective: build ray through pixel and intersect with y = 0.
+    const float tanHalfFov = std::tan(odai::math::radians(m_camera.fovDegrees) * 0.5f);
     const float scaleX = ndcX * tanHalfFov * aspect;
     const float scaleY = ndcY * tanHalfFov;
-
     float rdX = fwdX + rgtX * scaleX + upX * scaleY;
     float rdY = fwdY + rgtY * scaleX + upY * scaleY;
     float rdZ = fwdZ + rgtZ * scaleX + upZ * scaleY;
     const float rdLen = std::sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
     if (rdLen < 1e-6f) return false;
     rdX /= rdLen; rdY /= rdLen; rdZ /= rdLen;
-
-    // Intersect with y = 0 (base hex plane).
     if (std::abs(rdY) < 1e-4f) return false;
     const float t = -m_camera.y / rdY;
     if (t < 0.0f) return false;
-
-    const float wx = m_camera.x + t * rdX;
-    const float wz = m_camera.z + t * rdZ;
-
-    // World → approximate hex (col, row). Search a 3×3 neighborhood for the
-    // nearest center to handle the non-rectangular hex grid correctly.
-    const float hexSize = m_strategyMap.hexSize;
-    constexpr float kSqrt3 = 1.7320508075688772f;
-
-    const int approxRow = static_cast<int>(std::round(wz / (hexSize * 1.5f)));
-
-    float bestDist2 = 1e30f;
-    int bestCol = -1, bestRow = -1;
-    for (int dr = -1; dr <= 1; ++dr) {
-        const int r = approxRow + dr;
-        if (r < 0 || r >= static_cast<int>(m_strategyMap.height)) continue;
-        const float ro = (r & 1) ? 0.5f : 0.0f;
-        const int cBase = static_cast<int>(std::round(wx / (hexSize * kSqrt3) - ro));
-        for (int dc = -1; dc <= 1; ++dc) {
-            const int c = cBase + dc;
-            if (c < 0 || c >= static_cast<int>(m_strategyMap.width)) continue;
-            const auto ctr = odai::game::tileCenterWorld(
-                m_strategyMap, static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(r));
-            const float dx = ctr.x - wx, dz = ctr.z - wz;
-            const float d2 = dx*dx + dz*dz;
-            if (d2 < bestDist2) {
-                bestDist2 = d2;
-                bestCol = c;
-                bestRow = r;
-            }
-        }
-    }
-
-    if (bestCol < 0) return false;
-    outCol = bestCol;
-    outRow = bestRow;
-    return true;
+    return findHex(m_camera.x + t * rdX, m_camera.z + t * rdZ);
 }
 
 } // namespace odai::app

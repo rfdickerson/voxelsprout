@@ -136,18 +136,6 @@ void RendererBackend::buildShadowDebugUi() {
 
     if (ImGui::BeginTabBar("ShadowsTabs")) {
         if (ImGui::BeginTabItem("Shadows")) {
-            ImGui::Text(
-                "Macro Cells U/R4/R1: %u / %u / %u",
-                m_debugMacroCellUniformCount,
-                m_debugMacroCellRefined4Count,
-                m_debugMacroCellRefined1Count
-            );
-            ImGui::Text(
-                "Drawn LOD ranges 0/1/2: %u / %u / %u",
-                m_debugDrawnLod0Ranges,
-                m_debugDrawnLod1Ranges,
-                m_debugDrawnLod2Ranges
-            );
             ImGui::Text("Cascade Splits: %.1f / %.1f / %.1f / %.1f",
                 m_shadowCascadeSplits[0],
                 m_shadowCascadeSplits[1],
@@ -157,18 +145,8 @@ void RendererBackend::buildShadowDebugUi() {
             ImGui::Separator();
             ImGui::Checkbox("Shadow Occluder Culling", &m_shadowDebugSettings.enableOccluderCulling);
             ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
-            ImGui::SeparatorText("RT Main Pass");
-            ImGui::SliderInt("RT Samples", &m_shadowDebugSettings.rtShadowSampleCount, 1, 8);
-            ImGui::SliderFloat(
-                "RT Sun Radius (deg)",
-                &m_shadowDebugSettings.rtSunAngularRadiusDegrees,
-                0.0f,
-                1.0f,
-                "%.2f"
-            );
             ImGui::SliderFloat("Cascade Blend Min", &m_shadowDebugSettings.cascadeBlendMin, 1.0f, 20.0f, "%.2f");
             ImGui::SliderFloat("Cascade Blend Factor", &m_shadowDebugSettings.cascadeBlendFactor, 0.05f, 0.60f, "%.2f");
-            ImGui::SliderInt("Grass Shadow Cascades", &m_shadowDebugSettings.grassShadowCascadeCount, 0, static_cast<int>(kShadowCascadeCount));
             if (ImGui::CollapsingHeader("Advanced Bias Controls")) {
                 ImGui::Text("Receiver Bias");
                 ImGui::SliderFloat("Normal Offset Near", &m_shadowDebugSettings.receiverNormalOffsetNear, 0.0f, 0.20f, "%.3f");
@@ -191,46 +169,7 @@ void RendererBackend::buildShadowDebugUi() {
         }
 
         if (ImGui::BeginTabItem("AO + GI")) {
-            ImGui::Checkbox("Enable Vertex AO", &m_debugEnableVertexAo);
-            ImGui::Checkbox("Enable SSAO", &m_debugEnableSsao);
-            ImGui::SliderFloat("SSAO Radius", &m_shadowDebugSettings.ssaoRadius, 1.0f, 96.0f, "%.1f");
-            ImGui::SliderFloat("SSAO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 6.0f, "%.2f");
-            ImGui::SliderFloat("SSAO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 2.0f, "%.2f");
-            if (ImGui::CollapsingHeader("Advanced AO Debug")) {
-                ImGui::Checkbox("Visualize SSAO", &m_debugVisualizeSsao);
-                ImGui::Checkbox("Visualize AO Normals", &m_debugVisualizeAoNormals);
-            }
-
-            ImGui::Separator();
-            ImGui::Text("Voxel GI");
-            ImGui::Text("Compute: %s", m_voxelGiComputeAvailable ? "on" : "fallback");
-            ImGui::SliderFloat("Bounce Strength", &m_voxelGiDebugSettings.bounceStrength, 0.0f, 2.50f, "%.2f");
-            ImGui::SliderFloat("Diffusion Softness", &m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f, "%.2f");
-            int giSurfaceMode = static_cast<int>(m_voxelGiDebugSettings.surfaceMode);
-            ImGui::Combo("GI Surface Mode", &giSurfaceMode, "Legacy\0RT Surface\0ReSTIR Surface\0");
-            m_voxelGiDebugSettings.surfaceMode = static_cast<VoxelGiSurfaceMode>(giSurfaceMode);
-            ImGui::SliderInt("RT Surface Samples", &m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2);
-            ImGui::SliderFloat("RT Surface Bias", &m_voxelGiDebugSettings.rtSurfaceBiasScale, 0.25f, 4.0f, "%.2f");
-            ImGui::SeparatorText("ReSTIR GI");
-            ImGui::SliderInt("ReSTIR Candidates", &m_voxelGiDebugSettings.restirCandidateCount, 1, 8);
-            ImGui::Checkbox("ReSTIR Temporal", &m_voxelGiDebugSettings.restirEnableTemporalReuse);
-            ImGui::Checkbox("ReSTIR Spatial", &m_voxelGiDebugSettings.restirEnableSpatialReuse);
-            ImGui::SliderInt("ReSTIR Radius", &m_voxelGiDebugSettings.restirSpatialRadius, 1, 2);
-            if (ImGui::Button("Reset ReSTIR History")) {
-                m_voxelGiDebugSettings.restirHistoryResetRequested = true;
-            }
-            if (ImGui::CollapsingHeader("Advanced GI Debug")) {
-                const char* giVisualizationModes =
-                    "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0Imported Lights\0";
-                ImGui::Combo("GI Visualize", &m_voxelGiDebugSettings.visualizationMode, giVisualizationModes);
-                if (m_voxelGiDebugSettings.visualizationMode > 0) {
-                    m_debugVisualizeSsao = false;
-                    m_debugVisualizeAoNormals = false;
-                }
-            }
-            if (ImGui::Button("Reset GI Defaults")) {
-                m_voxelGiDebugSettings = VoxelGiDebugSettings{};
-            }
+            ImGui::TextDisabled("SSAO and voxel GI are not active in strategy map mode.");
             ImGui::EndTabItem();
         }
 
@@ -261,10 +200,6 @@ void RendererBackend::buildSunDebugUi() {
 
     if (ImGui::BeginTabBar("SunSkyTabs")) {
         if (ImGui::BeginTabItem("Sun & Atmosphere")) {
-            ImGui::Checkbox("Enable DoF", &m_skyDebugSettings.depthOfFieldEnabled);
-            ImGui::SliderFloat("DoF Intensity", &m_skyDebugSettings.depthOfFieldMaxRadiusPixels, 0.0f, 14.0f, "%.1f");
-            ImGui::SliderFloat("DoF Target Distance", &m_skyDebugSettings.depthOfFieldFocusDistance, 1.0f, 240.0f, "%.1f");
-            ImGui::Separator();
             ImGui::SliderFloat("Sun Yaw", &m_skyDebugSettings.sunYawDegrees, -180.0f, 180.0f, "%.1f deg");
             ImGui::SliderFloat("Sun Pitch", &m_skyDebugSettings.sunPitchDegrees, -89.0f, 5.0f, "%.1f deg");
             ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
@@ -355,36 +290,13 @@ void RendererBackend::buildSunDebugUi() {
             ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Fog & Foliage")) {
+        if (ImGui::BeginTabItem("Fog")) {
             ImGui::SliderFloat("Fog Density", &m_skyDebugSettings.volumetricFogDensity, 0.0f, 0.03f, "%.4f");
             ImGui::SliderFloat("Fog Sun Scatter", &m_skyDebugSettings.volumetricSunScattering, 0.0f, 3.0f, "%.2f");
             if (ImGui::CollapsingHeader("Advanced Fog")) {
                 ImGui::SliderFloat("Fog Height Falloff", &m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 0.30f, "%.4f");
                 ImGui::SliderFloat("Fog Base Height", &m_skyDebugSettings.volumetricFogBaseHeight, -32.0f, 320.0f, "%.1f");
             }
-            ImGui::Separator();
-            ImGui::Text("Water");
-            ImGui::SliderFloat("Water Speed", &m_skyDebugSettings.waterAnimationSpeed, 0.25f, 4.0f, "%.2f");
-            ImGui::SliderFloat("Water Normal Strength", &m_skyDebugSettings.waterNormalStrength, 0.25f, 2.5f, "%.2f");
-            ImGui::SliderFloat("Water Reflection", &m_skyDebugSettings.waterReflectionStrength, 0.25f, 4.0f, "%.2f");
-            ImGui::SliderFloat("Water Absorption", &m_skyDebugSettings.waterRefractionDecay, 0.25f, 5.0f, "%.2f");
-            const char* waterDebugViews =
-                "Final\0Normals\0Depth/Thickness\0Scene Refraction\0Refraction UV Offset\0Reflection\0Fresnel\0";
-            ImGui::Combo("Water Debug View", &m_skyDebugSettings.waterDebugMode, waterDebugViews);
-            ImGui::SliderFloat(
-                "Water Refraction Strength",
-                &m_skyDebugSettings.waterRefractionStrength,
-                0.0f,
-                3.0f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Refraction Distortion",
-                &m_skyDebugSettings.waterRefractionDistortionPixels,
-                0.0f,
-                160.0f,
-                "%.0f px");
-            ImGui::Separator();
-            ImGui::SliderFloat("Plant Quad Directionality", &m_skyDebugSettings.plantQuadDirectionality, 0.0f, 1.0f, "%.2f");
             ImGui::Text("Active: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",
                 m_skyTuningRuntime.rayleighStrength,
                 m_skyTuningRuntime.mieStrength,

@@ -48,6 +48,41 @@ void CachedRichText::emit(UiDrawList& drawList, const UiRect& rect) {
     drawList.popClip();
 }
 
+void CachedRichText::emitScrolled(UiDrawList& drawList, const UiRect& viewportRect,
+                                  float scrollOffsetY) {
+    if (fonts_.regular == nullptr) return;
+    ensure(viewportRect);
+    const UiVec2 origin = contentOrigin(viewportRect);
+    const UiVec2 translate{origin.x, origin.y - scrollOffsetY};
+    // Visible local-Y window: invert the translate to find which local coords map
+    // into [viewportRect.minY, viewportRect.maxY] after translation.
+    const float yLocalMin = viewportRect.minY - translate.y;
+    const float yLocalMax = viewportRect.maxY - translate.y;
+    drawList.pushClip(viewportRect);
+    drawList.appendCachedClipped(block_, translate, yLocalMin, yLocalMax);
+    drawList.popClip();
+}
+
+void CachedRichText::drawHighlightedTooltipScrolled(UiDrawList& dl, const UiRect& viewportRect,
+                                                     float scrollOffsetY,
+                                                     std::string_view tooltip,
+                                                     const UiColor& highlightColor) const {
+    if (fonts_.regular == nullptr || layout_.lines.empty()) return;
+    const UiVec2 origin = contentOrigin(viewportRect);
+    const float refAscent = fonts_.regular->ascentPx();
+    dl.pushClip(viewportRect);
+    for (const RichLine& line : layout_.lines) {
+        for (const RichRun& run : line.runs) {
+            if (run.tooltip != tooltip || run.text.empty()) continue;
+            const Font* runFont = fonts_.select(run.bold, run.italic);
+            if (runFont == nullptr) continue;
+            const float topY = origin.y - scrollOffsetY + line.y + (refAscent - runFont->ascentPx());
+            dl.addText(*runFont, run.text, UiVec2{origin.x + run.x, topY}, highlightColor);
+        }
+    }
+    dl.popClip();
+}
+
 void CachedRichText::drawHighlightedTooltip(UiDrawList& dl, const UiRect& rect,
                                              std::string_view tooltip,
                                              const UiColor& highlightColor) const {

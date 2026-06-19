@@ -23,8 +23,15 @@
 struct GLFWwindow;
 
 namespace odai::ui {
+class DonutChart;
+class IconButton;
+class Image;
 class Label;
+class LineChart;
+class ProductionPanel;
 class RichTextView;
+class StatBadgeRow;
+class Toolbar;
 }
 
 // App subsystem
@@ -181,13 +188,6 @@ private:
     [[nodiscard]] bool tryPlaceTrackFromCameraRay();
     [[nodiscard]] bool tryRemoveTrackFromCameraRay();
     void resetVoxelBreakProgress();
-    void initializeBalmoraGuards();
-    void updateBalmoraGuards(float dt);
-    void rebuildBalmoraGuardRenderFrame(float simulationAlpha);
-    void initializeBalmoraDoorActivation();
-    [[nodiscard]] bool tryActivateBalmoraDoor();
-    [[nodiscard]] bool enterMorrowindInterior(const odai::importer::MorrowindDoorReference& door);
-    [[nodiscard]] bool leaveMorrowindInterior(const odai::importer::MorrowindDoorReference& door);
 
     struct CameraState {
         float x = 0.0f;
@@ -202,33 +202,6 @@ private:
         float smoothedMouseDeltaY = 0.0f;
         float fovDegrees = 90.0f;
         bool onGround = false;
-    };
-
-    struct BalmoraGuardPrototype {
-        std::vector<odai::importer::ImportedScenePackedVertex> vertices;
-        std::vector<std::uint32_t> indices;
-        std::vector<odai::importer::ImportedScenePackedDraw> draws;
-    };
-
-    struct BalmoraGuardAgent {
-        odai::math::Vector3 position{};
-        odai::math::Vector3 previousPosition{};
-        float yawRadians = 0.0f;
-        float previousYawRadians = 0.0f;
-        float walkPhase = 0.0f;
-        float previousWalkPhase = 0.0f;
-        float speed = 92.0f;
-        std::vector<odai::math::Vector3> route;
-        std::vector<odai::world::NavmeshPathPoint> path;
-        std::size_t routeIndex = 0;
-        std::size_t pathIndex = 0;
-    };
-
-    struct MorrowindInteriorCacheEntry {
-        odai::importer::ImportedScene scene;
-        odai::world::ImportedSceneCollision collision;
-        std::vector<odai::importer::MorrowindDoorReference> doors;
-        bool sceneLoaded = false;
     };
 
     GLFWwindow* m_window = nullptr;
@@ -260,7 +233,6 @@ private:
     bool m_wasToggleImportedFlatShadingDown = false;
     bool m_wasToggleImportedWaterDebugDown = false;
     bool m_wasInspectImportedSceneDown = false;
-    bool m_wasActivateDoorDown = false;
     bool m_wasPrevBlockDown = false;
     bool m_wasNextBlockDown = false;
     bool m_gamepadConnected = false;
@@ -284,18 +256,44 @@ private:
     odai::ui::Font m_uiFont;
     odai::ui::Font m_uiFontBold;
     odai::ui::Font m_uiFontItalic;
+    odai::ui::Font m_uiFontTitle;  // Larger size for window title bars.
     odai::ui::FontSet m_uiFonts{};
     odai::ui::UiContext m_uiContext;
     odai::ui::UiDrawList m_uiDrawList;
     odai::ui::UiInput m_uiInput;
-    odai::ui::Label* m_uiStatusLabel = nullptr;
-    odai::ui::Label* m_hudTurnLabel = nullptr;
     odai::ui::Label* m_hudStatsLabel = nullptr;
     odai::ui::Label* m_hudTileInfoLabel = nullptr;
     odai::ui::Widget* m_hudTileInfoWindow = nullptr;
     odai::ui::RichTextView* m_civpediaView = nullptr;
     odai::ui::Widget* m_civpediaWindow = nullptr;
+    odai::ui::Image* m_civpediaPortrait = nullptr;   // Unit/building portrait in CivPedia header.
+    odai::ui::Label* m_civpediaNameLabel = nullptr;  // Name + class label in CivPedia header.
+    odai::ui::Image* m_civPortraitImage = nullptr;
+    odai::ui::Label* m_civLeaderNameLabel = nullptr;
+    odai::ui::ProductionPanel* m_productionPanel = nullptr;
+    std::string m_cityProductionId;  // City's currently selected build.
+    // Unit selection and action bar.
+    std::string m_selectedUnitType;      // e.g. "warrior", "" = nothing selected
+    std::string m_prevSelectedUnitType;  // for change detection in updateUiOverlay
+    odai::ui::Widget* m_unitActionPanel = nullptr;
+    odai::ui::Image*  m_unitActionPortrait = nullptr;
+    odai::ui::Label*  m_unitActionName = nullptr;
+    static constexpr int kMaxActionSlots = 6;
+    odai::ui::IconButton* m_actionSlotBtns[kMaxActionSlots]{};
+    // Top resource toolbar + its live readouts.
+    odai::ui::Toolbar* m_toolbar = nullptr;
+    odai::ui::Label* m_toolbarTurnLabel = nullptr;
+    std::size_t m_tbGoldItem = 0;
+    std::size_t m_tbScienceItem = 0;
+    std::size_t m_tbFaithItem = 0;
+    float m_tbGold = 240.0f;
+    // Pending typed characters (filled by the GLFW char callback) and edit-key edges.
+    std::vector<std::uint32_t> m_pendingTextInput;
+    float m_pendingScrollDelta = 0.0f;  // Accumulated scroll wheel ticks (GLFW callback).
+    bool m_backspacePrev = false;
+    bool m_enterPrev = false;
     std::uint32_t m_windowFrameTexture = 0;  // odai::ui::UiTextureId for the 9-slice frame.
+    std::uint32_t m_uiSheetTexture = 0;     // odai::ui::UiTextureId for the uisheet sprite atlas.
     // Tooltip fade animation + latched content so it can fade out after the hover ends.
     odai::ui::Tween m_tooltipFade{};
     std::string m_lastTooltipText;
@@ -307,6 +305,11 @@ private:
     // Strategy-map mode: the cursor stays visible for clicking UI and the mouse
     // never rotates the camera (no FPS-style mouselook).
     bool m_strategyMapMode = false;
+    float m_mapOrthoHalfHeight = 2000.0f;
+    float m_mapMinX = 0.0f;
+    float m_mapMaxX = 0.0f;
+    float m_mapMinZ = 0.0f;
+    float m_mapMaxZ = 0.0f;
     int m_uiDemoClicks = 0;
     int m_currentTurn = 1;
     int m_hoveredHexCol = -1;
@@ -325,23 +328,8 @@ private:
     bool m_importedFlatShading = false;
     bool m_importedWaterDebug = false;
     std::filesystem::path m_importedScenePath;
-    std::vector<odai::importer::MorrowindDoorReference> m_balmoraDoors;
-    std::unordered_map<std::string, MorrowindInteriorCacheEntry> m_balmoraInteriorCache;
-    std::string m_currentMorrowindInteriorCell;
-    bool m_balmoraExteriorCached = false;
-    odai::importer::ImportedScene m_balmoraExteriorScene;
-    odai::importer::GpuSceneAsset m_balmoraExteriorGpuSceneAsset;
-    odai::world::ImportedSceneCollision m_balmoraExteriorCollision;
     odai::importer::ImportedScene m_importedScene;
-    odai::importer::GpuSceneAsset m_gpuSceneAsset;
-    odai::importer::GpuSceneRuntime m_gpuSceneRuntime;
     odai::world::ImportedSceneCollision m_importedSceneCollision;
-    odai::world::Navmesh m_balmoraNavmesh;
-    BalmoraGuardPrototype m_balmoraGuardPrototype;
-    std::vector<BalmoraGuardAgent> m_balmoraGuards;
-    std::vector<odai::importer::ImportedScenePackedVertex> m_balmoraGuardFrameVertices;
-    std::vector<std::uint32_t> m_balmoraGuardFrameIndices;
-    std::vector<odai::importer::ImportedScenePackedDraw> m_balmoraGuardFrameDraws;
 };
 
 } // namespace odai::app

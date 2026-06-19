@@ -460,8 +460,11 @@ void RendererBackend::renderFrame(
         !m_importedGiTriangles.empty();
     const bool voxelGiSceneEnabled = legacyVoxelRenderingEnabled || importedInteriorGiEnabled;
     const float farPlane = renderingImportedScene ? 50000.0f : 500.0f;
-    const float halfFovRadians = odai::math::radians(activeFovDegrees) * 0.5f;
-    const float tanHalfFov = std::tan(halfFovRadians);
+    // tanHalfFov feeds shadow cascade sphere sizing. In ortho mode approximate
+    // from the view half-height so cascade coverage matches the visible area.
+    const float tanHalfFov = camera.orthographic
+        ? (camera.orthoHalfHeight / farPlane)
+        : std::tan(odai::math::radians(activeFovDegrees) * 0.5f);
     const odai::math::Vector3 eye{camera.x, camera.y, camera.z};
     const CameraFrameDerived cameraFrame = computeCameraFrame(camera);
     const int cameraChunkX = cameraFrame.chunkX;
@@ -470,7 +473,14 @@ void RendererBackend::renderFrame(
     const odai::math::Vector3 forward = cameraFrame.forward;
 
     const odai::math::Matrix4 view = lookAt(eye, eye + forward, odai::math::Vector3{0.0f, 1.0f, 0.0f});
-    const odai::math::Matrix4 projection = perspectiveVulkan(odai::math::radians(activeFovDegrees), aspectRatio, nearPlane, farPlane);
+    odai::math::Matrix4 projection;
+    if (camera.orthographic) {
+        const float halfH = camera.orthoHalfHeight;
+        const float halfW = halfH * aspectRatio;
+        projection = orthographicVulkan(-halfW, halfW, -halfH, halfH, nearPlane, farPlane);
+    } else {
+        projection = perspectiveVulkan(odai::math::radians(activeFovDegrees), aspectRatio, nearPlane, farPlane);
+    }
     const odai::math::Matrix4 mvp = projection * view;
     const odai::math::Matrix4 mvpColumnMajor = transpose(mvp);
     const odai::math::Matrix4 viewColumnMajor = transpose(view);

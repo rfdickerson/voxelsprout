@@ -91,6 +91,28 @@ std::vector<RichSpan> parseRichText(std::string_view markup, const UiColor& defa
             continue;
         }
 
+        // HTML entity decoding: &amp; → &, &lt; → <, &gt; → >, &quot; → ", &apos; → '
+        if (c == '&') {
+            const std::size_t semi = markup.find(';', i + 1);
+            if (semi != std::string_view::npos && (semi - i) <= 6) {
+                const std::string_view entity = markup.substr(i + 1, semi - i - 1);
+                char decoded = 0;
+                if (entity == "amp")       decoded = '&';
+                else if (entity == "lt")   decoded = '<';
+                else if (entity == "gt")   decoded = '>';
+                else if (entity == "quot") decoded = '"';
+                else if (entity == "apos") decoded = '\'';
+                if (decoded != 0) {
+                    buffer.push_back(decoded);
+                    i = semi + 1;
+                    continue;
+                }
+            }
+            buffer.push_back(c);
+            ++i;
+            continue;
+        }
+
         if (c != '<') {
             buffer.push_back(c);
             ++i;

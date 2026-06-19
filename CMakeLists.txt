@@ -156,6 +156,7 @@ if(ODAI_BUILD_APP)
         src/app/main.cc
         src/app/app.cc
         src/core/log.cc
+        src/game/buildable.cc
         src/game/strategy_map.cc
         src/game/strategy_map_io.cc
         src/game/strategy_map_mesh.cc
@@ -177,12 +178,23 @@ if(ODAI_BUILD_APP)
         src/ui/widgets/rich_text_view.cc
         src/ui/widgets/image.cc
         src/ui/widgets/progress_bar.cc
+        src/ui/widgets/text_box.cc
+        src/ui/widgets/toolbar.cc
         src/ui/widgets/stack_layout.cc
         src/ui/widgets/scroll_view.cc
         src/ui/widgets/repeater.cc
+        src/ui/widgets/slider.cc
+        src/ui/widgets/toggle.cc
+        src/ui/widgets/tab_bar.cc
+        src/ui/widgets/dropdown.cc
+        src/ui/widgets/donut_chart.cc
+        src/ui/widgets/toast.cc
+        src/ui/widgets/line_chart.cc
+        src/ui/widgets/stat_badge.cc
+        src/ui/widgets/icon_button.cc
+        src/ui/widgets/production_panel.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
-        src/import/morrowind_nif.cc
         src/render/frame_graph.cc
         src/render/renderer.cc
         src/world/magica_voxel.cc
@@ -322,47 +334,6 @@ if(ODAI_BUILD_APP)
 endif()
 
 if(ODAI_BUILD_TOOLS)
-    add_executable(odai_balmora_cooker
-        src/import/gpu_scene.cc
-        src/import/imported_scene.cc
-        src/import/morrowind_nif.cc
-        src/tools/morrowind_balmora_cooker_main.cc
-    )
-    target_include_directories(odai_balmora_cooker PRIVATE src)
-    set_target_properties(odai_balmora_cooker PROPERTIES OUTPUT_NAME odai_balmora_cooker)
-    if(MSVC)
-        target_compile_options(odai_balmora_cooker PRIVATE /W4 /permissive-)
-    else()
-        target_compile_options(odai_balmora_cooker PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-
-    add_executable(odai_balmora_interior_cache
-        src/import/gpu_scene.cc
-        src/import/imported_scene.cc
-        src/import/morrowind_nif.cc
-        src/tools/morrowind_balmora_interior_cache_main.cc
-    )
-    target_include_directories(odai_balmora_interior_cache PRIVATE src)
-    set_target_properties(odai_balmora_interior_cache PROPERTIES OUTPUT_NAME odai_balmora_interior_cache)
-    if(MSVC)
-        target_compile_options(odai_balmora_interior_cache PRIVATE /W4 /permissive-)
-    else()
-        target_compile_options(odai_balmora_interior_cache PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-
-    add_executable(odai_imported_scene_preview
-        src/import/gpu_scene.cc
-        src/import/imported_scene.cc
-        src/import/morrowind_nif.cc
-        src/tools/imported_scene_preview_main.cc
-    )
-    target_include_directories(odai_imported_scene_preview PRIVATE src)
-    if(MSVC)
-        target_compile_options(odai_imported_scene_preview PRIVATE /W4 /permissive-)
-    else()
-        target_compile_options(odai_imported_scene_preview PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-
     # Offline generator for the strategic-map prototype. Writes a native .smap and
     # a renderable .bin ImportedScene.
     add_executable(odai_strategy_map_gen
@@ -371,7 +342,6 @@ if(ODAI_BUILD_TOOLS)
         src/game/strategy_map_mesh.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
-        src/import/morrowind_nif.cc
         src/tools/strategy_map_gen_main.cc
     )
     target_include_directories(odai_strategy_map_gen PRIVATE src)
@@ -387,7 +357,6 @@ if(BUILD_TESTING)
         tests/imported_scene_tests.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
-        src/import/morrowind_nif.cc
         src/world/imported_scene_collision.cc
     )
     target_include_directories(odai_imported_scene_tests PRIVATE src)
@@ -552,9 +521,22 @@ if(BUILD_TESTING)
         src/ui/widgets/rich_text_view.cc
         src/ui/widgets/image.cc
         src/ui/widgets/progress_bar.cc
+        src/ui/widgets/text_box.cc
+        src/ui/widgets/toolbar.cc
         src/ui/widgets/stack_layout.cc
         src/ui/widgets/scroll_view.cc
         src/ui/widgets/repeater.cc
+        src/ui/widgets/slider.cc
+        src/ui/widgets/toggle.cc
+        src/ui/widgets/tab_bar.cc
+        src/ui/widgets/dropdown.cc
+        src/ui/widgets/donut_chart.cc
+        src/ui/widgets/toast.cc
+        src/ui/widgets/line_chart.cc
+        src/ui/widgets/stat_badge.cc
+        src/ui/widgets/icon_button.cc
+        src/ui/widgets/production_panel.cc
+        src/game/buildable.cc
         src/core/log.cc
     )
     target_include_directories(odai_ui_tests PRIVATE src ${ODAI_STB_INCLUDE_DIRS})

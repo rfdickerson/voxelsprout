@@ -330,9 +330,7 @@ private:
     bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
-    bool createMorrowindSkyCloudMeshResources();
     bool createWaterNormalTextureResources();
-    bool createTerrainDetailTextureResources();
     bool createDescriptorResources();
     using BoundDescriptorSets = DescriptorManager<kMaxFramesInFlight>::BoundDescriptorSets;
     BoundDescriptorSets updateFrameDescriptorSets(
@@ -388,7 +386,6 @@ private:
     void destroyPreviewBuffers();
     void destroyEnvironmentResources();
     void destroyDiffuseTextureResources();
-    bool createMorrowindSkyTextureResources();
     void destroyTransferResources();
     bool rebuildRayTracingScene();
     void destroyRayTracingScene();

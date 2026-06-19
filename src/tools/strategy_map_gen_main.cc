@@ -94,6 +94,10 @@ TerrainType classifyTerrain(std::int16_t elevation, float latitude01, float mois
     if (polar < 0.18f && moisture < 0.42f) {
         return TerrainType::Desert;
     }
+    // Tropical wet lowlands read as jungle; temperate wet areas as forest.
+    if (polar < 0.28f && moisture > 0.55f) {
+        return TerrainType::Jungle;
+    }
     if (moisture > 0.62f) {
         return TerrainType::Forest;
     }

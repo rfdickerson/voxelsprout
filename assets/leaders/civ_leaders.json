@@ -1,0 +1,165 @@
+{
+  "iconSize": 256,
+  "columns": 4,
+  "rows": 3,
+  "icons": {
+    "hammurabi": [
+      0,
+      0
+    ],
+    "montezuma": [
+      1,
+      0
+    ],
+    "victoria": [
+      2,
+      0
+    ],
+    "cleopatra": [
+      3,
+      0
+    ],
+    "caesar": [
+      0,
+      1
+    ],
+    "pericles": [
+      1,
+      1
+    ],
+    "qin_shi_huang": [
+      2,
+      1
+    ],
+    "tokugawa": [
+      3,
+      1
+    ],
+    "napoleon": [
+      0,
+      2
+    ],
+    "genghis_khan": [
+      1,
+      2
+    ],
+    "cyrus": [
+      2,
+      2
+    ],
+    "ashoka": [
+      3,
+      2
+    ]
+  },
+  "leaders": [
+    {
+      "id": "hammurabi",
+      "name": "Hammurabi",
+      "civilization": "babylon",
+      "cell": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": "montezuma",
+      "name": "Montezuma-inspired ruler",
+      "civilization": "aztec",
+      "cell": [
+        1,
+        0
+      ]
+    },
+    {
+      "id": "victoria",
+      "name": "Queen Victoria-inspired monarch",
+      "civilization": "british",
+      "cell": [
+        2,
+        0
+      ]
+    },
+    {
+      "id": "cleopatra",
+      "name": "Cleopatra-inspired queen",
+      "civilization": "egypt",
+      "cell": [
+        3,
+        0
+      ]
+    },
+    {
+      "id": "caesar",
+      "name": "Julius Caesar-inspired leader",
+      "civilization": "rome",
+      "cell": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": "pericles",
+      "name": "Pericles-inspired statesman",
+      "civilization": "greece",
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "id": "qin_shi_huang",
+      "name": "Qin Shi Huang-inspired emperor",
+      "civilization": "china",
+      "cell": [
+        2,
+        1
+      ]
+    },
+    {
+      "id": "tokugawa",
+      "name": "Tokugawa-inspired shogun",
+      "civilization": "japan",
+      "cell": [
+        3,
+        1
+      ]
+    },
+    {
+      "id": "napoleon",
+      "name": "Napoleon-inspired emperor",
+      "civilization": "france",
+      "cell": [
+        0,
+        2
+      ]
+    },
+    {
+      "id": "genghis_khan",
+      "name": "Genghis Khan-inspired khan",
+      "civilization": "mongolia",
+      "cell": [
+        1,
+        2
+      ]
+    },
+    {
+      "id": "cyrus",
+      "name": "Cyrus-inspired king",
+      "civilization": "persia",
+      "cell": [
+        2,
+        2
+      ]
+    },
+    {
+      "id": "ashoka",
+      "name": "Ashoka-inspired emperor",
+      "civilization": "india",
+      "cell": [
+        3,
+        2
+      ]
+    }
+  ]
+}

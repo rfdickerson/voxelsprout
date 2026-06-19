@@ -4,6 +4,7 @@
 #include "ui/ui_input.h"
 #include "ui/ui_types.h"
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -77,32 +78,46 @@ public:
 
     bool visible = true;
     float opacity = 1.0f;  // Drives fades; multiplies this widget's drawn alpha.
+    // Drawing and event-dispatch order within a parent's child list. Children with
+    // higher zOrder are drawn on top and receive input events first. Within the same
+    // zOrder, insertion order is preserved (later-added children drawn last / on top).
+    int zOrder = 0;
 
 protected:
     void drawChildren(UiDrawList& drawList) const {
-        for (const std::unique_ptr<Widget>& child : children_) {
-            if (!child->visible || child->opacity <= 0.0f) {
-                continue;
+        // Collect visible children into a stable-sorted pointer list (ascending zOrder).
+        // Lowest z draws first, highest z draws last (appears on top).
+        std::vector<const Widget*> sorted;
+        sorted.reserve(children_.size());
+        for (const auto& child : children_) {
+            if (child->visible && child->opacity > 0.0f) {
+                sorted.push_back(child.get());
             }
+        }
+        std::stable_sort(sorted.begin(), sorted.end(), [](const Widget* a, const Widget* b) {
+            return a->zOrder < b->zOrder;
+        });
+        for (const Widget* child : sorted) {
             const bool fade = child->opacity < 1.0f;
-            if (fade) {
-                drawList.pushOpacity(child->opacity);
-            }
+            if (fade) drawList.pushOpacity(child->opacity);
             child->draw(drawList);
-            if (fade) {
-                drawList.popOpacity();
-            }
+            if (fade) drawList.popOpacity();
         }
     }
 
     bool dispatchToChildren(UiEvent& event) {
-        for (auto it = children_.rbegin(); it != children_.rend(); ++it) {
-            if (!(*it)->visible) {
-                continue;
-            }
-            if ((*it)->onEvent(event) || event.handled) {
-                return true;
-            }
+        // Dispatch to highest-z children first; within same z, reverse insertion order
+        // so later-added (visually on top) children consume events before earlier ones.
+        std::vector<Widget*> sorted;
+        sorted.reserve(children_.size());
+        for (const auto& child : children_) {
+            if (child->visible) sorted.push_back(child.get());
+        }
+        std::stable_sort(sorted.begin(), sorted.end(), [](const Widget* a, const Widget* b) {
+            return a->zOrder > b->zOrder;  // descending — highest z first
+        });
+        for (Widget* child : sorted) {
+            if (child->onEvent(event) || event.handled) return true;
         }
         return false;
     }

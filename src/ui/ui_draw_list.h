@@ -20,13 +20,20 @@ enum class UiDrawMode : std::uint32_t {
     SolidColor = 0,  // Use vertex color, ignore texture.
     Textured = 1,    // Sample rgba texture, multiply by vertex color.
     GlyphAlpha = 2,  // Sample R8 atlas as coverage; rgb from vertex color.
+    Shadow = 3,      // Gaussian drop shadow; uv = normalized distance from inner rect edge.
+    RoundRect = 4,   // Analytic rounded-box SDF; uv = pixel pos from center, sdf = params.
+    RoundRectGlow = 5,  // Soft outer glow around a rounded box; sdf.w = glow falloff px.
 };
 
-struct UiVertex {            // 24 bytes; matches the renderer's vertex input layout.
+struct UiVertex {            // 40 bytes; matches the renderer's vertex input layout.
     float posPx[2] = {};      // Pixel space, top-left origin, +Y down. offset 0
-    float uv[2] = {};         // 0..1 atlas coordinates.                offset 8
+    float uv[2] = {};         // Atlas coords, or (RoundRect) px from center. offset 8
     std::uint32_t rgba8 = 0;  // Packed ABGR8 vertex color.             offset 16
     std::uint32_t mode = 0;   // UiDrawMode.                            offset 20
+    // Mode-specific params. RoundRect: {halfWidthPx, halfHeightPx, cornerRadiusPx,
+    // borderPx} where borderPx <= 0 fills the shape and > 0 strokes it (centered
+    // on the edge). Unused (zero) for all other modes.
+    float sdf[4] = {};        //                                        offset 24
 };
 
 struct UiDrawCmd {
@@ -93,9 +100,33 @@ public:
 
     void addRectFilled(const UiRect& rect, const UiColor& color);
     void addRect(const UiRect& rect, const UiColor& color, float thicknessPx = 1.0f);
+
+    // --- Vector primitives (resolution-independent, anti-aliased SDF) ---
+    // All radii/thicknesses are in pixels; callers scale by the DPI factor so the
+    // shapes stay crisp at any framebuffer scale. `radius` is clamped to half the
+    // shorter side, so passing a large radius yields a pill/stadium or circle.
+    void addRoundRectFilled(const UiRect& rect, const UiColor& color, float radiusPx);
+    // Stroke a rounded rect; the line is centered on the rounded edge path.
+    void addRoundRect(const UiRect& rect, const UiColor& color, float radiusPx, float thicknessPx);
+    void addCircleFilled(const UiVec2& center, float radiusPx, const UiColor& color);
+    void addCircle(const UiVec2& center, float radiusPx, const UiColor& color, float thicknessPx);
+    // Soft outer glow that hugs a rounded rect: solid under `rect`, fading to zero
+    // `glowSizePx` outside the rounded edge. Draw it behind the shape it lights.
+    void addRoundRectGlow(const UiRect& rect, const UiColor& color, float radiusPx, float glowSizePx);
+    // Gaussian drop shadow behind `rect`, offset by (offsetX, offsetY) pixels.
+    // blurSigma controls softness; shadow fades to ~1% at 3*blurSigma from the edge.
+    void addDropShadow(const UiRect& rect, const UiColor& color, float blurSigma,
+                       float offsetX = 0.0f, float offsetY = 4.0f);
     void addImage(const UiRect& rect, UiTextureId textureId, const UiColor& tint = {},
                   const UiRect& uv = UiRect{0.0f, 0.0f, 1.0f, 1.0f});
     void add9Slice(const UiRect& rect, const UiNineSlice& slice, const UiColor& color = {});
+
+    // Draw a filled annular sector (pie or donut wedge). Angles in radians; 0 = +X,
+    // increasing clockwise (+Y down). innerRadiusPx = 0 → solid pie wedge; > 0 → ring.
+    // numSteps controls arc smoothness (32 is good for most UI sizes).
+    void addSectorFilled(const UiVec2& center, float innerRadiusPx, float outerRadiusPx,
+                         float startAngleRad, float endAngleRad, const UiColor& color,
+                         int numSteps = 32);
 
     // Draw a single line of text with the top-left baseline box at posPx; returns
     // the pen x advance. Newlines are not interpreted (use RichText for layout).
@@ -118,12 +149,20 @@ public:
     // Low-level quad emission, used by addText/RichText. Vertices are p00 (min),
     // p10, p11, p01 with matching UVs; emitted as two triangles.
     void addQuad(const UiRect& dst, const UiRect& uv, std::uint32_t rgba8, UiDrawMode mode,
-                 UiTextureId textureId);
+                 UiTextureId textureId, const float sdf[4] = nullptr);
 
     // Append a cached geometry block, translating its vertices by `translate` and
     // re-emitting its commands under the current clip (rebasing indices). Lets a
     // widget skip layout + quad generation when nothing but position changed.
     void appendCached(const UiGeometryBlock& block, const UiVec2& translate);
+
+    // Like appendCached, but performs CPU-side quad culling: quads whose local-space
+    // Y extent falls entirely outside [yLocalMin, yLocalMax] are skipped (indices not
+    // emitted). Vertices are still translated and pushed so rebased indices stay valid.
+    // "Local" means pre-translate coordinates — the same space the block was built in.
+    // Remainder indices (non-multiple of 6, e.g. sector triangles) are passed through.
+    void appendCachedClipped(const UiGeometryBlock& block, const UiVec2& translate,
+                             float yLocalMin, float yLocalMax);
 
 private:
     // Ensure the current command matches (textureId, current clip); start a new
