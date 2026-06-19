@@ -223,7 +223,7 @@ void UiDocumentLoader::registerBuiltins() {
     });
 
     // ---- Spacer ----
-    registerType("Spacer", [](const json& n, const UiDocumentLoader&, const BindingContext&) {
+    registerType("Spacer", [](const json& /*n*/, const UiDocumentLoader&, const BindingContext&) {
         auto w = std::make_unique<Spacer>();
         return w;
     });
@@ -254,7 +254,7 @@ void UiDocumentLoader::registerBuiltins() {
     // ---- Repeater ----
     // A Repeater with a static template child. In a real app the factory and items
     // are set from C++ after load(); this only wires up the JSON template.
-    registerType("Repeater", [](const json& n, const UiDocumentLoader& L, const BindingContext& ctx) {
+    registerType("Repeater", [](const json& n, const UiDocumentLoader& /*L*/, const BindingContext& /*ctx*/) {
         auto w = std::make_unique<Repeater>();
         w->itemHeight = n.value("itemHeight", w->itemHeight);
         w->itemGap    = n.value("itemGap",    w->itemGap);

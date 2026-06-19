@@ -33,9 +33,7 @@ void Dropdown::draw(UiDrawList& dl) const {
         if (valid) {
             dl.addText(*font_, items[selectedIndex], UiVec2{rect_.minX + paddingX, ty}, textColor);
         }
-        // Chevron indicator.
-        const std::string_view chevron = open_ ? "\xE2\x96\xB2" : "\xE2\x96\xBC";  // ▲ / ▼
-        // Fall back to ASCII if the font might not have these: use ^ / v.
+        // Chevron indicator — fall back to ASCII ^ / v for broad font compatibility.
         const std::string_view arrow = open_ ? "^" : "v";
         const float aw = font_->measureText(arrow);
         dl.addText(*font_, arrow, UiVec2{rect_.maxX - paddingX - aw, ty}, chevronColor);

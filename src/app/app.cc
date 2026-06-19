@@ -302,7 +302,7 @@ void orientPlaneTowardForward(FrustumPlane& plane, const odai::math::Vector3& fo
     }
 }
 
-CameraFrustum buildCameraFrustum(
+[[maybe_unused]] CameraFrustum buildCameraFrustum(
     const odai::math::Vector3& eye,
     float yawDegrees,
     float pitchDegrees,
@@ -415,7 +415,7 @@ CameraFrustum buildCameraFrustum(
     return frustum;
 }
 
-bool chunkIntersectsFrustum(
+[[maybe_unused]] bool chunkIntersectsFrustum(
     const odai::world::Chunk& chunk,
     const std::array<FrustumPlane, 6>& planes,
     float planeSlack

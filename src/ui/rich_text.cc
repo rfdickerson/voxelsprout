@@ -47,7 +47,7 @@ std::vector<RichSpan> parseRichText(std::string_view markup, const UiColor& defa
 
     const auto flush = [&]() {
         if (!buffer.empty()) {
-            spans.push_back(RichSpan{buffer, color, bold > 0, italic > 0, tooltip});
+            spans.push_back(RichSpan{buffer, color, bold > 0, italic > 0, tooltip, {}, 0.0f});
             buffer.clear();
         }
     };
