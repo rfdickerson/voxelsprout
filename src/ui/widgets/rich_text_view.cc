@@ -96,7 +96,7 @@ bool RichTextView::onEvent(UiEvent& event) {
         rect_.contains(event.mousePx) && onLinkClick) {
         syncCache();
         cache_.ensure(rect_);
-        const float barReserve = showScrollBar ? scrollBarWidthPx + 2.0f : 0.0f;
+        const float barReserve = (showScrollBar && maxScroll() > 0.5f) ? scrollBarWidthPx + 2.0f : 0.0f;
         const UiRect vp{rect_.minX, rect_.minY, rect_.maxX - barReserve, rect_.maxY};
         for (RichTextLink lnk : cache_.linksFor(vp)) {
             lnk.rect.minY -= scrollOffsetY;
@@ -105,7 +105,7 @@ bool RichTextView::onEvent(UiEvent& event) {
             if (lnk.rect.contains(event.mousePx) &&
                 lnk.tooltip.size() > kPrefix.size() &&
                 std::string_view{lnk.tooltip}.substr(0, kPrefix.size()) == kPrefix) {
-                onLinkClick(lnk.tooltip.substr(kPrefix.size()));
+                onLinkClick(std::string(lnk.tooltip).substr(kPrefix.size()));
                 event.handled = true;
                 return true;
             }
@@ -120,7 +120,7 @@ bool RichTextView::onEvent(UiEvent& event) {
     hoveredTooltip_.clear();
 
     // Translate tooltip link rects by the scroll offset before hit-testing.
-    const float barReserve = showScrollBar ? scrollBarWidthPx + 2.0f : 0.0f;
+    const float barReserve = (showScrollBar && maxScroll() > 0.5f) ? scrollBarWidthPx + 2.0f : 0.0f;
     const UiRect viewport{rect_.minX, rect_.minY, rect_.maxX - barReserve, rect_.maxY};
 
     for (RichTextLink link : cache_.linksFor(viewport)) {
