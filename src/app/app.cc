@@ -854,6 +854,7 @@ bool App::init() {
     m_strategyMap3D = true;
     odai::game::StrategyMapMeshOptions meshOptions{};
     meshOptions.extruded = true;
+    meshOptions.drawSettlements = false;
     m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap, meshOptions);
     m_importedSceneDemoEnabled = true;
     m_hoverEnabled = true;
@@ -4283,6 +4284,7 @@ void App::setStrategyMap3D(bool enabled) {
     // and re-upload. The renderer rebuilds its GPU buffers on uploadImportedScene.
     odai::game::StrategyMapMeshOptions meshOptions{};
     meshOptions.extruded = enabled;
+    meshOptions.drawSettlements = false;
     m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap, meshOptions);
     if (!m_renderer.uploadImportedScene(m_importedScene)) {
         VOX_LOGE("app") << "strategy map re-upload failed on view toggle";
