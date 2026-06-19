@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 
 namespace odai::ui {
 
@@ -86,6 +87,28 @@ bool RichTextView::onEvent(UiEvent& event) {
             scrollOffsetY = std::clamp(scrollOffsetY - event.scroll * 40.0f, 0.0f, ms);
             event.handled = true;
             return true;
+        }
+    }
+
+    // Click on a link: <tip=link:ID>...</tip> — fire the onLinkClick callback.
+    if (event.type == UiEvent::Type::MouseDown &&
+        event.button == UiMouseButton::Left &&
+        rect_.contains(event.mousePx) && onLinkClick) {
+        syncCache();
+        cache_.ensure(rect_);
+        const float barReserve = showScrollBar ? scrollBarWidthPx + 2.0f : 0.0f;
+        const UiRect vp{rect_.minX, rect_.minY, rect_.maxX - barReserve, rect_.maxY};
+        for (RichTextLink lnk : cache_.linksFor(vp)) {
+            lnk.rect.minY -= scrollOffsetY;
+            lnk.rect.maxY -= scrollOffsetY;
+            static constexpr std::string_view kPrefix = "link:";
+            if (lnk.rect.contains(event.mousePx) &&
+                lnk.tooltip.size() > kPrefix.size() &&
+                std::string_view{lnk.tooltip}.substr(0, kPrefix.size()) == kPrefix) {
+                onLinkClick(lnk.tooltip.substr(kPrefix.size()));
+                event.handled = true;
+                return true;
+            }
         }
     }
 

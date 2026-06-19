@@ -7,6 +7,7 @@
 #include "ui/ui_types.h"
 #include "ui/widget.h"
 
+#include <functional>
 #include <string>
 
 // A multi-line rich-text widget that also tracks hoverable <tip=...> runs. On
@@ -40,6 +41,10 @@ public:
 
     // Natural content height (padding excluded) — only accurate after first draw.
     [[nodiscard]] float contentHeight() const { return cache_.naturalHeight(); }
+
+    // Called when the user clicks a <tip=link:ID>...</tip> span. The argument is
+    // the ID part (everything after the "link:" prefix).
+    std::function<void(std::string)> onLinkClick;
 
     void draw(UiDrawList& drawList) const override;
     bool onEvent(UiEvent& event) override;
