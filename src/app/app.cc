@@ -775,7 +775,21 @@ bool App::init() {
     // Vulkan renderer path requires no OpenGL context.
     const auto windowStart = Clock::now();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    m_window = glfwCreateWindow(1920, 1080, "odai", nullptr, nullptr);
+
+    // Size the window to the primary monitor's logical (DPI-scaled) resolution so
+    // it fills the screen regardless of the OS scaling factor (125 %, 150 %, 200 % …).
+    // On a 4K display at 200 % DPI: physical=3840×2160, logical=1920×1080 → fills screen.
+    // On a 4K display at 100 % DPI: physical=3840×2160, logical=3840×2160 → fills screen.
+    int winW = 1920, winH = 1080;
+    if (GLFWmonitor* mon = glfwGetPrimaryMonitor()) {
+        float xs = 1.0f, ys = 1.0f;
+        glfwGetMonitorContentScale(mon, &xs, &ys);
+        if (const GLFWvidmode* mode = glfwGetVideoMode(mon)) {
+            winW = static_cast<int>(std::round(mode->width  / std::max(xs, 1.0f)));
+            winH = static_cast<int>(std::round(mode->height / std::max(ys, 1.0f)));
+        }
+    }
+    m_window = glfwCreateWindow(winW, winH, "odai", nullptr, nullptr);
     if (m_window == nullptr) {
         VOX_LOGE("app") << "glfwCreateWindow failed";
         glfwTerminate();
@@ -3223,14 +3237,23 @@ void App::setupDemoUi(float viewW, float viewH) {
     // DPI scale: framebuffer pixels per logical pixel. On a 125%-scaled display the
     // framebuffer is 1.25ï¿½ the GLFW window size, so all hardcoded pixel values must
     // be multiplied by this factor so the UI looks the same physical size on screen.
+    // DPI scale: use glfwGetWindowContentScale (the OS-reported factor, e.g. 1.5× at
+    // 150 % DPI) as the authoritative multiplier. Cross-check with the framebuffer-to-
+    // window pixel ratio; take the larger so layout is correct on all driver configs.
+    float xscale = 1.0f;
+    glfwGetWindowContentScale(m_window, &xscale, nullptr);
     int windowW = 0;
     glfwGetWindowSize(m_window, &windowW, nullptr);
-    const float s = (windowW > 0) ? viewW / static_cast<float>(windowW) : 1.0f;
+    const float pixelRatio = (windowW > 0) ? viewW / static_cast<float>(windowW) : 1.0f;
+    const float s = std::max(pixelRatio, xscale);
     m_uiScale = s;
     VOX_LOGI("ui") << "HUD setup: framebuffer=" << viewW << "x" << viewH
-                   << " window=" << windowW << " dpiScale=" << s;
+                   << " window=" << windowW << " contentScale=" << xscale
+                   << " pixelRatio=" << pixelRatio << " effective=" << s;
 
-    const float kBaseFontPx = 22.0f;
+    // Base font size in logical pixels at 100 % DPI (multiplied by s at bake time).
+    // 28 px gives comfortable readability; scales up cleanly on 4K/HiDPI displays.
+    const float kBaseFontPx = 28.0f;
 
     // Load the regular face into the built-in atlas (kUiFontAtlas). Fall back to a
     // system font so the HUD still renders text if the bundled TTF is missing.
