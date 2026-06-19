@@ -1,4 +1,4 @@
-﻿#include "app/app.h"
+#include "app/app.h"
 
 #include <GLFW/glfw3.h>
 
@@ -63,11 +63,6 @@ constexpr float kSprintSpeedMultiplier = 1.35f;
 constexpr float kImportedSceneMoveSpeed = 1800.0f;
 constexpr float kImportedSceneSprintSpeedMultiplier = 3.0f;
 constexpr float kImportedSceneVerticalMoveSpeed = 1400.0f;
-constexpr float kImportedSceneWalkSpeed = 650.0f;
-constexpr float kImportedSceneWalkSprintSpeedMultiplier = 1.6f;
-constexpr float kImportedSceneJumpSpeed = 950.0f;
-constexpr float kImportedSceneGravity = -3600.0f;
-constexpr float kImportedSceneMaxFallSpeed = -2600.0f;
 constexpr float kImportedSceneSunYawDegrees = 62.0f;
 constexpr float kImportedSceneSunPitchDegrees = -61.0f;
 constexpr float kSneakSpeedMultiplier = 0.35f;
@@ -97,16 +92,6 @@ constexpr float kPlayerEyeHeight = kPlayerEyeHeightVoxels;
 constexpr float kPlayerHeight = kPlayerHeightVoxels;
 constexpr float kPlayerTopOffset = kPlayerHeight - kPlayerEyeHeight;
 constexpr float kCollisionEpsilon = 0.001f;
-constexpr float kImportedPlayerHeight = 128.0f;
-constexpr float kImportedPlayerEyeHeight = 112.0f;
-constexpr float kImportedPlayerTopOffset = kImportedPlayerHeight - kImportedPlayerEyeHeight;
-constexpr float kImportedPlayerRadius = 28.0f;
-constexpr float kImportedPlayerStepHeight = 28.0f;
-constexpr float kImportedPlayerGroundSnapDistance = 24.0f;
-constexpr float kImportedPlayerMinStepHeight = 1.0f;
-constexpr float kImportedPlayerWalkableNormalY = 0.65f;
-constexpr float kImportedPlayerCollisionSkin = 0.5f;
-constexpr float kImportedPlayerCollisionSubstepDistance = 24.0f;
 constexpr float kHoverHeightAboveGround = 0.15f;
 constexpr float kHoverResponse = 8.0f;
 constexpr float kHoverMaxVerticalSpeed = 12.0f;
@@ -1372,7 +1357,7 @@ void App::updateCamera(float dt) {
     moveForwardInput = std::clamp(moveForwardInput, -1.0f, 1.0f);
     moveRightInput = std::clamp(moveRightInput, -1.0f, 1.0f);
 
-    if (m_importedSceneDemoEnabled && (m_hoverEnabled || m_importedSceneCollision.empty())) {
+    if (m_importedSceneDemoEnabled) {
         moveDirection += forward * moveForwardInput;
         moveDirection += right * moveRightInput;
         if (m_input.moveUp) {
@@ -1402,33 +1387,6 @@ void App::updateCamera(float dt) {
         m_camera.y += m_camera.velocityY * dt;
         m_camera.z += m_camera.velocityZ * dt;
         m_camera.onGround = false;
-        return;
-    }
-
-    if (m_importedSceneDemoEnabled) {
-        moveDirection += forward * moveForwardInput;
-        moveDirection += right * moveRightInput;
-
-        const float moveLengthSq = odai::math::lengthSquared(moveDirection);
-        if (moveLengthSq > 0.0f) {
-            moveDirection /= std::sqrt(moveLengthSq);
-        }
-
-        float moveSpeed = kImportedSceneWalkSpeed;
-        if (m_input.sprintDown) {
-            moveSpeed *= kImportedSceneWalkSprintSpeedMultiplier;
-        }
-
-        m_camera.velocityX = moveDirection.x * moveSpeed;
-        m_camera.velocityZ = moveDirection.z * moveSpeed;
-        if (m_input.moveUp && m_camera.onGround) {
-            m_camera.velocityY = kImportedSceneJumpSpeed;
-            m_camera.onGround = false;
-        }
-        m_camera.velocityY = std::max(
-            m_camera.velocityY + (kImportedSceneGravity * dt),
-            kImportedSceneMaxFallSpeed);
-        resolveImportedScenePlayerCollisions(dt);
         return;
     }
 
@@ -1838,172 +1796,6 @@ void App::resolvePlayerCollisions(float dt) {
         resolveHorizontalX(stepDx);
         resolveHorizontalZ(stepDz);
         resolveVerticalY(stepDy);
-    }
-
-    m_camera.onGround = groundedThisFrame;
-}
-
-void App::resolveImportedScenePlayerCollisions(float dt) {
-    const float totalDx = m_camera.velocityX * dt;
-    const float totalDy = m_camera.velocityY * dt;
-    const float totalDz = m_camera.velocityZ * dt;
-    const float maxDelta = std::max({std::fabs(totalDx), std::fabs(totalDy), std::fabs(totalDz)});
-    const int steps = std::max(1, static_cast<int>(std::ceil(maxDelta / kImportedPlayerCollisionSubstepDistance)));
-    const float stepDx = totalDx / static_cast<float>(steps);
-    const float stepDy = totalDy / static_cast<float>(steps);
-    const float stepDz = totalDz / static_cast<float>(steps);
-
-    bool groundedThisFrame = false;
-
-    auto feetY = [&]() {
-        return m_camera.y - kImportedPlayerEyeHeight;
-    };
-    auto topY = [&]() {
-        return m_camera.y + kImportedPlayerTopOffset;
-    };
-
-    auto hasCeilingAtCurrentPosition = [&]() {
-        odai::world::ImportedSceneCollision::CeilingHit ceilingHit{};
-        return m_importedSceneCollision.findCeiling(
-            m_camera.x,
-            topY(),
-            m_camera.z,
-            kImportedPlayerRadius,
-            kImportedPlayerCollisionSkin,
-            ceilingHit);
-    };
-
-    auto tryStepUp = [&]() {
-        if (!m_camera.onGround && !groundedThisFrame) {
-            return false;
-        }
-
-        odai::world::ImportedSceneCollision::GroundHit groundHit{};
-        if (!m_importedSceneCollision.findGroundSupport(
-                m_camera.x,
-                feetY(),
-                m_camera.z,
-                kImportedPlayerRadius,
-                kImportedPlayerCollisionSkin,
-                kImportedPlayerStepHeight,
-                kImportedPlayerWalkableNormalY,
-                groundHit)) {
-            return false;
-        }
-
-        const float currentFeetY = feetY();
-        const float stepHeight = groundHit.y - currentFeetY;
-        if (stepHeight < kImportedPlayerMinStepHeight ||
-            stepHeight > kImportedPlayerStepHeight) {
-            return false;
-        }
-
-        const float previousEyeY = m_camera.y;
-        m_camera.y = groundHit.y + kImportedPlayerEyeHeight + kImportedPlayerCollisionSkin;
-        if (hasCeilingAtCurrentPosition()) {
-            m_camera.y = previousEyeY;
-            return false;
-        }
-
-        groundedThisFrame = true;
-        if (m_camera.velocityY < 0.0f) {
-            m_camera.velocityY = 0.0f;
-        }
-        return true;
-    };
-
-    auto resolveHorizontal = [&]() {
-        odai::math::Vector3 correction{};
-        if (!m_importedSceneCollision.resolveHorizontalCylinder(
-                m_camera.x,
-                feetY(),
-                m_camera.z,
-                kImportedPlayerRadius,
-                kImportedPlayerHeight,
-                kImportedPlayerWalkableNormalY,
-                correction)) {
-            return;
-        }
-
-        if (tryStepUp() &&
-            !m_importedSceneCollision.resolveHorizontalCylinder(
-                m_camera.x,
-                feetY(),
-                m_camera.z,
-                kImportedPlayerRadius,
-                kImportedPlayerHeight,
-                kImportedPlayerWalkableNormalY,
-                correction)) {
-            return;
-        }
-
-        m_camera.x += correction.x;
-        m_camera.z += correction.z;
-        if (std::fabs(correction.x) > kImportedPlayerCollisionSkin) {
-            m_camera.velocityX = 0.0f;
-        }
-        if (std::fabs(correction.z) > kImportedPlayerCollisionSkin) {
-            m_camera.velocityZ = 0.0f;
-        }
-    };
-
-    auto snapToGround = [&](float maxDrop, float maxStepUp) {
-        odai::world::ImportedSceneCollision::GroundHit groundHit{};
-        if (!m_importedSceneCollision.findGroundSupport(
-                m_camera.x,
-                feetY(),
-                m_camera.z,
-                kImportedPlayerRadius,
-                maxDrop,
-                maxStepUp,
-                kImportedPlayerWalkableNormalY,
-                groundHit)) {
-            return false;
-        }
-
-        m_camera.y = groundHit.y + kImportedPlayerEyeHeight + kImportedPlayerCollisionSkin;
-        groundedThisFrame = true;
-        if (m_camera.velocityY < 0.0f) {
-            m_camera.velocityY = 0.0f;
-        }
-        return true;
-    };
-
-    for (int step = 0; step < steps; ++step) {
-        if (stepDx != 0.0f) {
-            m_camera.x += stepDx;
-            resolveHorizontal();
-        }
-        if (stepDz != 0.0f) {
-            m_camera.z += stepDz;
-            resolveHorizontal();
-        }
-
-        if (m_camera.onGround || groundedThisFrame) {
-            snapToGround(kImportedPlayerGroundSnapDistance, kImportedPlayerStepHeight);
-        }
-
-        if (stepDy != 0.0f) {
-            m_camera.y += stepDy;
-        }
-
-        if (stepDy > 0.0f) {
-            odai::world::ImportedSceneCollision::CeilingHit ceilingHit{};
-            if (m_importedSceneCollision.findCeiling(
-                    m_camera.x,
-                    topY(),
-                    m_camera.z,
-                    kImportedPlayerRadius,
-                    std::fabs(stepDy) + kImportedPlayerCollisionSkin,
-                    ceilingHit)) {
-                m_camera.y = ceilingHit.y - kImportedPlayerTopOffset - kImportedPlayerCollisionSkin;
-                m_camera.velocityY = 0.0f;
-            }
-        } else {
-            snapToGround(
-                std::fabs(stepDy) + kImportedPlayerGroundSnapDistance,
-                std::fabs(stepDy) + kImportedPlayerCollisionSkin);
-        }
     }
 
     m_camera.onGround = groundedThisFrame;

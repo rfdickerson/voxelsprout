@@ -11,7 +11,6 @@
 #include "ui/ui_draw_list.h"
 #include "ui/ui_input.h"
 #include "world/clipmap_index.h"
-#include "world/imported_scene_collision.h"
 #include "world/world.h"
 
 #include <filesystem>
@@ -128,7 +127,6 @@ private:
     [[nodiscard]] bool doesPlayerOverlapSolid(float eyeX, float eyeY, float eyeZ) const;
     [[nodiscard]] bool doesPlayerOverlapConveyorBelt(float eyeX, float eyeY, float eyeZ) const;
     void resolvePlayerCollisions(float dt);
-    void resolveImportedScenePlayerCollisions(float dt);
     [[nodiscard]] CameraRaycastResult raycastFromCamera() const;
     [[nodiscard]] InteractionRaycastResult raycastInteractionFromCamera(bool includePipes) const;
     [[nodiscard]] ImportedSceneInspectHit raycastImportedSceneFromCamera() const;
@@ -336,7 +334,6 @@ private:
     bool m_importedWaterDebug = false;
     std::filesystem::path m_importedScenePath;
     odai::importer::ImportedScene m_importedScene;
-    odai::world::ImportedSceneCollision m_importedSceneCollision;
 };
 
 } // namespace odai::app
