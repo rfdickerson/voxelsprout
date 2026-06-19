@@ -73,10 +73,13 @@ public:
                 return hit;
             }
         }
-        return this;
+        return mousePassthrough ? nullptr : this;
     }
 
     bool visible = true;
+    // When true, this widget is transparent to hit testing: only its children
+    // can claim the mouse. Use for pure container widgets (e.g. the UI root).
+    bool mousePassthrough = false;
     float opacity = 1.0f;  // Drives fades; multiplies this widget's drawn alpha.
     // Drawing and event-dispatch order within a parent's child list. Children with
     // higher zOrder are drawn on top and receive input events first. Within the same
