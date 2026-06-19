@@ -3839,8 +3839,8 @@ void App::setupDemoUi(float viewW, float viewH) {
     // to dark-brown so they read on the light background.
     const float pediaW = parchmentSliceReady ? 520.0f * s : 440.0f * s;
     const float pediaH = parchmentSliceReady ? 500.0f * s : 500.0f * s;
-    const float pediaX = viewW - pediaW - 16.0f * s;
-    const float pediaY = kToolbarH + 12.0f * s;
+    const float pediaX = (viewW - pediaW) * 0.5f;
+    const float pediaY = (viewH - pediaH) * 0.5f;
     // Title bar height - tall enough for the title font.  The parchment frame's top
     // border is ornate art (86px), so that case is fixed; otherwise derive from font.
     const odai::ui::Font* pediaTitleFontPtr = m_uiFontTitle.valid() ? &m_uiFontTitle : fonts.bold;
@@ -3923,6 +3923,27 @@ void App::setupDemoUi(float viewW, float viewH) {
         pediaW - pBodyPadX * 2.0f,
         pediaH - pediaTitleH - pBodyPadY - headerH - pBodyBotPad));
     m_civpediaView = pediaBody.get();
+
+    // Wire hyperlink navigation: <tip=link:ID>text</tip> spans in articles.
+    m_civpediaView->onLinkClick = [this](std::string id) {
+        const std::string& article = odai::game::getPediaArticle(id);
+        if (article.empty()) return;
+        for (const auto& item : odai::game::defaultBuildables()) {
+            if (item.id != id) continue;
+            if (m_civpediaNameLabel) m_civpediaNameLabel->setText("<b>" + item.name + "</b>");
+            if (m_civpediaPortrait) {
+                odai::ui::UiIconEntry pe{};
+                if (odai::ui::UiIconRegistry::global().resolve(item.iconName, pe)) {
+                    m_civpediaPortrait->textureId = pe.textureId;
+                    m_civpediaPortrait->uvRect    = pe.uv;
+                }
+            }
+            break;
+        }
+        m_civpediaView->setText(article);
+        m_civpediaView->scrollOffsetY = 0.0f;
+    };
+
     pediaWin->addChild(std::move(pediaBody));
     m_civpediaWindow = root->addChild(std::move(pediaWin));
     m_civpediaWindow->visible = false;  // Hidden until user clicks the info button on a row.

@@ -28,6 +28,7 @@ const std::vector<BuildableItem>& defaultBuildables() {
         {"market",   "Market",   "gold",       BuildableKind::Building, 100,  "market"},
         {"temple",   "Temple",   "culture",    BuildableKind::Building,  90,  "temple"},
         {"library",  "Library",  "science",    BuildableKind::Building,  90,  "library"},
+        {"barracks", "Barracks", "warrior",    BuildableKind::Building,  80,  "barracks"},
     };
     return kItems;
 }
@@ -388,6 +389,43 @@ const std::string& getPediaArticle(const std::string& id) {
             " work there gave us both the word 'algorithm' (a Latinisation of his name)"
             " and the foundations of the mathematical notation used in every computer"
             " on Earth today."},
+
+        // ------------------------------------------------------------------ //
+        // BUILDINGS (continued)
+        // ------------------------------------------------------------------ //
+
+        {"barracks",
+            "[icon=warrior 18] The <b><color=#c06820>Barracks</color></b> is a military"
+            " training facility built in the heart of a city. Its veteran drill instructors"
+            " turn raw recruits into disciplined soldiers, giving every unit trained here"
+            " a head start in combat experience.\n\n"
+            "The most fundamental graduate of the Barracks is the"
+            " <tip=link:warrior><color=#dba94a>Warrior</color></tip> --"
+            " the backbone of every early army. With a Barracks in place, Warriors emerge"
+            " already hardened by months of drilling, formation work, and mock combat,"
+            " making them meaningfully more durable than unblooded levies.\n\n"
+            "<b><color=#9a7a3a>Effects</color></b>\n"
+            "<color=#c8b888>+15 XP</color> for every unit trained in this city.\n"
+            "<color=#c8b888>+1</color> Great General point per turn.\n\n"
+            "<b><color=#9a7a3a>Production Cost</color></b>  <b>80 shields</b>\n"
+            "<b><color=#9a7a3a>Maintenance</color></b>  <b>1</b> gold / turn\n\n"
+            "<b><color=#9a7a3a>Historical Notes</color></b>\n"
+            "The word <i>barracks</i> derives from the Spanish <i>barraca</i> -- a rough hut."
+            " Early armies billeted soldiers wherever shelter existed: commandeered"
+            " inns, church halls, stables. Dedicated military barracks only became"
+            " widespread in the 18th century, driven by the need to house the large"
+            " standing armies of absolute monarchies without letting them dissolve into"
+            " civilian life between campaigns.\n\n"
+            "Frederick the Great of Prussia built barracks across Brandenburg and Silesia"
+            " specifically to prevent desertions -- a soldier in a barracks is under constant"
+            " supervision; a soldier quartered with a townsman has a hundred opportunities to"
+            " slip away. The same logic applies in every age: the barracks is as much a"
+            " mechanism of control as a place of training.\n\n"
+            "Before the modern barracks era, training happened in the open. Roman legionaries"
+            " swung weighted swords at wooden posts in the <i>campus martius</i>. Greek"
+            " <i>epheboi</i> drilled in the gymnasium under the eye of retired veterans."
+            " In both cases the goal was the same: to replace instinct with habit so that"
+            " the trained soldier acts correctly even when terrified."},
     };
 
     static const std::string kEmpty;
