@@ -82,15 +82,22 @@ public:
 
         dl.pushClip(UiRect{textX, rect_.minY, textMaxX, rect_.maxY});
 
+        // Stack name + info vertically and centre the block within the row so
+        // they never overlap regardless of font size.
         const Font* nameFont = fonts_.bold ? fonts_.bold : fonts_.regular;
+        const float nameH = nameFont       ? nameFont->lineHeightPx()       : 0.0f;
+        const float infoH = fonts_.regular ? fonts_.regular->lineHeightPx() : 0.0f;
+        const float gap   = 3.0f * s_;
+        const float blockH = nameH + (infoH > 0.0f ? gap + infoH : 0.0f);
+        const float blockY = rect_.minY + (rect_.height() - blockH) * 0.5f;
+
         if (nameFont) {
-            const float gy = rect_.minY + 10.0f * s_;
-            dl.addText(*nameFont, name, UiVec2{textX, gy}, UiColor{0.94f, 0.88f, 0.72f, 1.0f});
+            dl.addText(*nameFont, name, UiVec2{textX, blockY},
+                       UiColor{0.94f, 0.88f, 0.72f, 1.0f});
         }
         if (fonts_.regular) {
-            const float h = fonts_.regular->lineHeightPx();
-            const float gy = rect_.maxY - 10.0f * s_ - h;
-            dl.addText(*fonts_.regular, info, UiVec2{textX, gy}, UiColor{0.60f, 0.68f, 0.78f, 1.0f});
+            dl.addText(*fonts_.regular, info, UiVec2{textX, blockY + nameH + gap},
+                       UiColor{0.60f, 0.68f, 0.78f, 1.0f});
         }
 
         dl.popClip();
@@ -330,8 +337,15 @@ void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& t
     sv->scrollBarColor = UiColor{0.72f, 0.58f, 0.30f, 0.55f};
     sv->scrollBarBg    = UiColor{0.0f, 0.0f, 0.0f, 0.20f};
 
-    const float rowH     = 64.0f * s;
-    const float sectionH = 26.0f * s;
+    // Row height: tall enough to fit name + info stacked, with equal top/bottom
+    // padding. Using font metrics means the row scales correctly with any DPI.
+    const Font* nameFontRef = fonts_.bold ? fonts_.bold : fonts_.regular;
+    const float nameLineH   = nameFontRef       ? nameFontRef->lineHeightPx()       : 28.0f * s;
+    const float infoLineH   = fonts_.regular    ? fonts_.regular->lineHeightPx()    : 22.0f * s;
+    const float rowPad      = 18.0f * s;  // total vertical whitespace (top + bottom)
+    const float rowH        = std::max(nameLineH + infoLineH + 3.0f * s + rowPad,
+                                       52.0f * s);  // never shorter than the icon
+    const float sectionH = std::max(26.0f * s, infoLineH + 10.0f * s);
     const float rowW     = sv->rect().width();
     std::string currentSection;
 
