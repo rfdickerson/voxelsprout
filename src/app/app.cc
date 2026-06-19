@@ -3738,9 +3738,19 @@ void App::setupDemoUi(float viewW, float viewH) {
                 rows.push_back(makeRow(item, "Units"));
         }
 
+        odai::ui::ProductionPanel::CityInfo cityInfo;
+        cityInfo.name         = "Rome";
+        cityInfo.food         = 4;
+        cityInfo.production   = 3;
+        cityInfo.gold         = 7;
+        cityInfo.science      = 3;
+        cityInfo.faith        = 2;
+        cityInfo.culture      = 4;
+        cityInfo.governorName = "Magnus";
+
         auto prodPanel = std::make_unique<odai::ui::ProductionPanel>(fonts);
         prodPanel->setItems(odai::ui::UiRect::fromXYWH(prodX, prodTop, prodW, prodH),
-                            s, "Choose Production", rows);
+                            s, "Choose Production", rows, cityInfo);
         m_productionPanel = static_cast<odai::ui::ProductionPanel*>(root->addChild(std::move(prodPanel)));
     }
 

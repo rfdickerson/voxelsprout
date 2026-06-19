@@ -165,16 +165,118 @@ private:
     bool pressedPedia_  = false;
 };
 
+// City info header: city name, yield badges, and governor. Drawn directly on
+// top of the panel background — no separate background fill to preserve the
+// panel's rounded corners.
+class CityHeader : public Widget {
+public:
+    CityHeader(const FontSet& fonts, float s, const ProductionPanel::CityInfo& city)
+        : fonts_(fonts), s_(s), name_(city.name),
+          govName_(city.governorName.empty() ? "Unassigned" : city.governorName) {
+
+        const char* kNames[6] = {"food","production","gold","science","faith","culture"};
+        const int   kVals[6]  = {city.food, city.production, city.gold,
+                                  city.science, city.faith, city.culture};
+        for (int i = 0; i < 6; ++i) {
+            Yield y{};
+            y.label = std::to_string(kVals[i]);
+            UiIconEntry entry{};
+            if (UiIconRegistry::global().resolve(kNames[i], entry)) {
+                y.tex = entry.textureId;
+                y.uv  = entry.uv;
+            }
+            yields_.push_back(y);
+        }
+    }
+
+    void draw(UiDrawList& dl) const override {
+        const Font* bf  = fonts_.bold    ? fonts_.bold    : fonts_.regular;
+        const Font* rf  = fonts_.regular;
+        const Font* itf = fonts_.italic  ? fonts_.italic  : rf;
+
+        float y = rect_.minY + 8.0f * s_;
+
+        // City name — bold gold, centered
+        if (bf && !name_.empty()) {
+            const float nameW = bf->measureText(name_);
+            dl.addText(*bf, name_,
+                       UiVec2{rect_.minX + (rect_.width() - nameW) * 0.5f, y},
+                       UiColor{1.0f, 0.88f, 0.48f, 1.0f});
+            y += bf->lineHeightPx() + 7.0f * s_;
+        }
+
+        // Yield badges: [icon][value] × 6, centered as a group
+        if (!yields_.empty()) {
+            const float iconSide = 16.0f * s_;
+            const float iconGap  = 2.0f * s_;
+            const float itemGap  = 9.0f * s_;
+
+            // Measure total width for centering
+            float totalW = 0.0f;
+            for (int i = 0; i < 6; ++i) {
+                totalW += iconSide + iconGap + (rf ? rf->measureText(yields_[i].label) : 18.0f);
+                if (i < 5) totalW += itemGap;
+            }
+            float x = rect_.minX + (rect_.width() - totalW) * 0.5f;
+
+            const float rowH    = iconSide;
+            const float textOffY = y + (rowH - (rf ? rf->lineHeightPx() : 0.0f)) * 0.5f;
+
+            for (int i = 0; i < 6; ++i) {
+                const Yield& yld = yields_[i];
+                const UiRect ir{x, y, x + iconSide, y + iconSide};
+                if (yld.tex != kUiNoTexture) {
+                    dl.addImage(ir, yld.tex, UiColor{1.0f, 1.0f, 1.0f, 1.0f}, yld.uv);
+                } else {
+                    dl.addRoundRectFilled(ir, UiColor{0.35f, 0.38f, 0.42f, 0.6f}, 2.0f * s_);
+                }
+                x += iconSide + iconGap;
+                if (rf) {
+                    dl.addText(*rf, yld.label, UiVec2{x, textOffY},
+                               UiColor{0.92f, 0.88f, 0.72f, 1.0f});
+                    x += rf->measureText(yld.label) + itemGap;
+                }
+            }
+            y += rowH + 7.0f * s_;
+        }
+
+        // Governor row — italic, muted blue-grey, centered
+        if (itf) {
+            const std::string govStr = "Governor:  " + govName_;
+            const float gw = itf->measureText(govStr);
+            dl.addText(*itf, govStr,
+                       UiVec2{rect_.minX + (rect_.width() - gw) * 0.5f, y},
+                       UiColor{0.60f, 0.68f, 0.80f, 0.88f});
+        }
+    }
+
+private:
+    struct Yield {
+        std::string label;
+        UiTextureId tex = kUiNoTexture;
+        UiRect uv{0.0f, 0.0f, 1.0f, 1.0f};
+    };
+
+    FontSet fonts_;
+    float s_;
+    std::string name_;
+    std::string govName_;
+    std::vector<Yield> yields_;
+};
+
 }  // namespace
 
 void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& title,
-                               const std::vector<Row>& rows) {
+                               const std::vector<Row>& rows,
+                               const CityInfo& city) {
     children_.clear();
     rows_.clear();
     title_ = title;
     setRect(rect);
 
-    const float pad = 10.0f * s;
+    const float pad    = 10.0f * s;
+    const float cityH  = 88.0f * s;   // name + yields + governor
+    const float titleH = 30.0f * s;   // "Choose Production" label
 
     // Outer background panel
     auto bg = std::make_unique<Panel>();
@@ -186,26 +288,40 @@ void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& t
     bg->showShadow        = true;
     bg_ = static_cast<Panel*>(addChild(std::move(bg)));
 
-    // Title label — centred, two-line when a build is active
-    const float titleH = 42.0f * s;
+    // City info header (name, yields, governor)
+    auto cityHdr = std::make_unique<CityHeader>(fonts_, s, city);
+    cityHdr->setRect(UiRect::fromXYWH(rect.minX, rect.minY, rect.width(), cityH));
+    addChild(std::move(cityHdr));
+
+    // Gold separator below city header
+    auto sep1 = std::make_unique<Panel>();
+    sep1->setRect(UiRect::fromXYWH(rect.minX + pad, rect.minY + cityH,
+                                    rect.width() - 2.0f * pad, 1.5f * s));
+    sep1->background        = UiColor{0.78f, 0.62f, 0.30f, 0.38f};
+    sep1->borderThicknessPx = 0.0f;
+    sep1->cornerRadiusPx    = 0.0f;
+    addChild(std::move(sep1));
+
+    // "Choose Production" title label — centred, two-line when a build is active
+    const float titleY = rect.minY + cityH + 1.5f * s;
     auto tl = std::make_unique<Label>(
         fonts_, "<b><color=#ceb96a>" + title + "</color></b>");
     tl->align = UiTextAlign::Center;
-    tl->setRect(UiRect::fromXYWH(rect.minX + pad, rect.minY + 6.0f * s,
+    tl->setRect(UiRect::fromXYWH(rect.minX + pad, titleY + 4.0f * s,
                                   rect.width() - 2.0f * pad, titleH));
     titleLabel_ = static_cast<Label*>(addChild(std::move(tl)));
 
     // Gold separator line below title
-    auto sep = std::make_unique<Panel>();
-    sep->setRect(UiRect::fromXYWH(rect.minX + pad, rect.minY + titleH + 4.0f * s,
-                                   rect.width() - 2.0f * pad, 1.5f * s));
-    sep->background        = UiColor{0.78f, 0.62f, 0.30f, 0.40f};
-    sep->borderThicknessPx = 0.0f;
-    sep->cornerRadiusPx    = 0.0f;
-    addChild(std::move(sep));
+    auto sep2 = std::make_unique<Panel>();
+    sep2->setRect(UiRect::fromXYWH(rect.minX + pad, titleY + titleH + 2.0f * s,
+                                    rect.width() - 2.0f * pad, 1.5f * s));
+    sep2->background        = UiColor{0.78f, 0.62f, 0.30f, 0.40f};
+    sep2->borderThicknessPx = 0.0f;
+    sep2->cornerRadiusPx    = 0.0f;
+    addChild(std::move(sep2));
 
     // Scrollable list
-    const float listTop = rect.minY + titleH + 10.0f * s;
+    const float listTop = titleY + titleH + 10.0f * s;
     auto sv = std::make_unique<ScrollView>();
     sv->setRect(UiRect::fromXYWH(rect.minX + 4.0f * s, listTop,
                                   rect.width() - 8.0f * s,

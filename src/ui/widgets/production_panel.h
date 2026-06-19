@@ -35,11 +35,23 @@ public:
         std::function<void()> onOpenPedia;  // Link clicked -> open CivPedia.
     };
 
+    struct CityInfo {
+        std::string name;          // e.g. "Rome"
+        int food = 0;
+        int production = 0;
+        int gold = 0;
+        int science = 0;
+        int faith = 0;
+        int culture = 0;
+        std::string governorName;  // "" = unassigned
+    };
+
     explicit ProductionPanel(const FontSet& fonts) : fonts_(fonts) {}
 
-    // (Re)build the panel into `rect` at DPI scale `s` with the given rows.
+    // (Re)build the panel into `rect` at DPI scale `s` with the given rows and city info.
     void setItems(const UiRect& rect, float s, const std::string& title,
-                  const std::vector<Row>& rows);
+                  const std::vector<Row>& rows,
+                  const CityInfo& city = {});
 
     // Highlight the row with this id as the city's active build and update the
     // header to name it. No-op if no row matches.
