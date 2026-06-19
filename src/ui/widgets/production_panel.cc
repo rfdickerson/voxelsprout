@@ -275,7 +275,7 @@ private:
 
 void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& title,
                                const std::vector<Row>& rows,
-                               const CityInfo& city) {
+                               const CityInfo city) {
     children_.clear();
     rows_.clear();
     title_ = title;

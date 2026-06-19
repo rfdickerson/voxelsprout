@@ -41,7 +41,7 @@ std::uint32_t findOtTable(const std::uint8_t* data, std::uint32_t fontStart, con
 }
 
 // Coverage table: returns the coverage index (>=0) if glyphId is covered, else -1.
-int coverageIdx(const std::uint8_t* cov, std::uint32_t glyphId) {
+[[maybe_unused]] int coverageIdx(const std::uint8_t* cov, std::uint32_t glyphId) {
     const std::uint16_t fmt = u16be(cov);
     if (fmt == 1) {
         const std::uint16_t n = u16be(cov + 2);
@@ -65,7 +65,7 @@ int coverageIdx(const std::uint8_t* cov, std::uint32_t glyphId) {
 }
 
 // ClassDef table: returns the class of glyphId (0 if not listed).
-std::uint16_t classDef(const std::uint8_t* cdef, std::uint32_t glyphId) {
+[[maybe_unused]] std::uint16_t classDef(const std::uint8_t* cdef, std::uint32_t glyphId) {
     const std::uint16_t fmt = u16be(cdef);
     if (fmt == 1) {
         const std::uint16_t start = u16be(cdef + 2), n = u16be(cdef + 4);

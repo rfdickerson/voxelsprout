@@ -51,7 +51,7 @@ public:
     // (Re)build the panel into `rect` at DPI scale `s` with the given rows and city info.
     void setItems(const UiRect& rect, float s, const std::string& title,
                   const std::vector<Row>& rows,
-                  const CityInfo& city = {});
+                  CityInfo city = {});
 
     // Highlight the row with this id as the city's active build and update the
     // header to name it. No-op if no row matches.
