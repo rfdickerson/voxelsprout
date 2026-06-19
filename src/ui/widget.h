@@ -113,6 +113,9 @@ protected:
         for (const auto& child : children_) {
             if (child->visible) sorted.push_back(child.get());
         }
+        // Reverse first so stable_sort keeps later-added children ahead of earlier
+        // ones within the same z — matching draw order (last drawn = on top = first served).
+        std::reverse(sorted.begin(), sorted.end());
         std::stable_sort(sorted.begin(), sorted.end(), [](const Widget* a, const Widget* b) {
             return a->zOrder > b->zOrder;  // descending — highest z first
         });
