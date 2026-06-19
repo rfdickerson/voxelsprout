@@ -65,6 +65,9 @@ constexpr float kImportedSceneSprintSpeedMultiplier = 3.0f;
 constexpr float kImportedSceneVerticalMoveSpeed = 1400.0f;
 constexpr float kImportedSceneSunYawDegrees = 62.0f;
 constexpr float kImportedSceneSunPitchDegrees = -61.0f;
+// Fixed orientation/FOV for the strategy map's 3D relief camera.
+constexpr float kMap3DYawDegrees = -90.0f;
+constexpr float kMap3DFovDegrees = 50.0f;
 constexpr float kSneakSpeedMultiplier = 0.35f;
 constexpr float kMoveAcceleration = 14.0f;
 constexpr float kMoveDeceleration = 18.0f;
@@ -847,7 +850,11 @@ bool App::init() {
         return false;
     }
 
-    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap);
+    // Start in 3D relief mode; toggling (M) re-meshes flat for the 2D board view.
+    m_strategyMap3D = true;
+    odai::game::StrategyMapMeshOptions meshOptions{};
+    meshOptions.extruded = true;
+    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap, meshOptions);
     m_importedSceneDemoEnabled = true;
     m_hoverEnabled = true;
 
@@ -861,14 +868,27 @@ bool App::init() {
     m_mapMaxX = mapWorldW;
     m_mapMinZ = 0.0f;
     m_mapMaxZ = mapWorldH;
-    m_mapOrthoHalfHeight = std::max(mapWorldH * 0.6f, m_strategyMap.hexSize * 2.0f);
+    // Start zoomed in so the map is bigger than the viewport; the player pans to explore.
+    m_mapOrthoHalfHeight = m_strategyMap.hexSize * 8.0f;
 
-    // True top-down orthographic camera centered on the map.
-    m_camera.x = mapWorldW * 0.5f;
-    m_camera.y = 5000.0f;
-    m_camera.z = mapWorldH * 0.5f;
-    m_camera.yawDegrees = 0.0f;
-    m_camera.pitchDegrees = -89.0f;  // Near-vertical; -90 degenerates lookAt(up=Y)
+    // 3D relief view orbits this focus point; seed it on the map center.
+    m_map3DFocusX = mapWorldW * 0.5f;
+    m_map3DFocusZ = mapWorldH * 0.5f;
+    m_map3DDistance = std::max(mapWorldH, mapWorldW) * 0.30f;
+
+    // Default to the tilted perspective 3D camera (M toggles to 2D top-down ortho).
+    m_camera.yawDegrees = kMap3DYawDegrees;
+    m_camera.pitchDegrees = m_map3DPitchDeg;
+    m_camera.fovDegrees = kMap3DFovDegrees;
+    {
+        const float yawR = odai::math::radians(kMap3DYawDegrees);
+        const float pitchR = odai::math::radians(m_map3DPitchDeg);
+        const float cpv = std::cos(pitchR);
+        const odai::math::Vector3 fwd{cpv * std::cos(yawR), std::sin(pitchR), cpv * std::sin(yawR)};
+        m_camera.x = m_map3DFocusX - fwd.x * m_map3DDistance;
+        m_camera.y = -fwd.y * m_map3DDistance;  // focus sits on the y=0 plane
+        m_camera.z = m_map3DFocusZ - fwd.z * m_map3DDistance;
+    }
     m_cameraPrevious = m_camera;
 
     m_renderer.setStrategyMapMode(true);
@@ -887,6 +907,9 @@ bool App::init() {
         return false;
     }
     m_renderer.setImportedSceneInteriorMode(false);
+    // SSAO deepens land-against-water seams in 3D relief; we default to 3D, so on.
+    // The flat 2D board has no occlusion to compute and turns it off on the M toggle.
+    m_renderer.setSsaoEnabled(true);
     m_renderer.setSunAngles(kImportedSceneSunYawDegrees, kImportedSceneSunPitchDegrees);
     m_renderer.setImportedSceneDebugState(
         m_importedShowTerrain,
@@ -1008,7 +1031,7 @@ void App::update([[maybe_unused]] float dt, float simulationAlpha) {
         m_cameraPrevious.pitchDegrees + ((m_camera.pitchDegrees - m_cameraPrevious.pitchDegrees) * renderAlpha),
         m_camera.fovDegrees
     };
-    cameraPose.orthographic = m_strategyMapMode;
+    cameraPose.orthographic = m_strategyMapMode && !m_strategyMap3D;
     cameraPose.orthoHalfHeight = m_mapOrthoHalfHeight;
     m_visibleChunkIndices.clear();
     m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
@@ -1082,6 +1105,14 @@ void App::pollInput() {
                         << " decl=" << kDayCycleWinterDeclinationDegrees << ")";
     }
     m_wasToggleDayCycleDown = toggleDayCycleDown;
+
+    // M toggles the strategy map between 2D flat board and 3D relief. Handled here
+    // (before updateCamera) so the camera reframes the same frame the mode changes.
+    const bool toggleMapViewDown = glfwGetKey(m_window, GLFW_KEY_M) == GLFW_PRESS;
+    if (m_strategyMapMode && toggleMapViewDown && !m_wasToggleMapViewDown) {
+        setStrategyMap3D(!m_strategyMap3D);
+    }
+    m_wasToggleMapViewDown = toggleMapViewDown;
 
     const bool toggleImportedTerrainDown = glfwGetKey(m_window, GLFW_KEY_F5) == GLFW_PRESS;
     if (m_importedSceneDemoEnabled && toggleImportedTerrainDown && !m_wasToggleImportedTerrainDown) {
@@ -1294,31 +1325,119 @@ void App::updateCamera(float dt) {
     float mouseDeltaY = m_pendingMouseDeltaY;
     m_pendingMouseDeltaX = 0.0f;
     m_pendingMouseDeltaY = 0.0f;
-    // Strategy map is cursor-driven: left-drag pans, no mouselook rotation.
+    // Strategy map is cursor-driven: left-drag pans, scroll zooms, no mouselook.
     if (m_strategyMapMode) {
-        // Pan: left-mouse drag translates camera in world XZ.
-        if (m_input.removeBlockDown && !m_uiContext.wantsMouse()) {
-            int fbW = 0, fbH = 0;
-            glfwGetFramebufferSize(m_window, &fbW, &fbH);
-            if (fbH > 0) {
-                const float worldPerPixel = (2.0f * m_mapOrthoHalfHeight) / static_cast<float>(fbH);
-                m_camera.x -= mouseDeltaX * worldPerPixel;
-                m_camera.z -= mouseDeltaY * worldPerPixel;
-            }
-        }
-
-        // Clamp so view cannot scroll past map edges.
         int fbW = 0, fbH = 0;
         glfwGetFramebufferSize(m_window, &fbW, &fbH);
-        if (fbW > 0 && fbH > 0) {
-            const float halfH = m_mapOrthoHalfHeight;
-            const float halfW = halfH * (static_cast<float>(fbW) / static_cast<float>(fbH));
-            const float cxMin = m_mapMinX + halfW, cxMax = m_mapMaxX - halfW;
-            const float czMin = m_mapMinZ + halfH, czMax = m_mapMaxZ - halfH;
-            m_camera.x = (cxMin <= cxMax)
-                ? std::clamp(m_camera.x, cxMin, cxMax) : (m_mapMinX + m_mapMaxX) * 0.5f;
-            m_camera.z = (czMin <= czMax)
-                ? std::clamp(m_camera.z, czMin, czMax) : (m_mapMinZ + m_mapMaxZ) * 0.5f;
+        const bool overUi = m_uiContext.wantsMouse() || isAnyUiVisible();
+
+        // Scroll zoom (consumed here, before the UI overlay reads m_pendingScrollDelta).
+        if (!overUi && m_pendingScrollDelta != 0.0f) {
+            const float zoomFactor = std::pow(0.88f, m_pendingScrollDelta);  // wheel up zooms in
+            if (m_strategyMap3D) {
+                const float minDist = m_strategyMap.hexSize * 4.0f;
+                const float maxDist = std::max(m_mapMaxX - m_mapMinX, m_mapMaxZ - m_mapMinZ) * 2.0f;
+                m_map3DDistance = std::clamp(m_map3DDistance * zoomFactor, minDist, maxDist);
+            } else {
+                const float minHalf = m_strategyMap.hexSize * 2.0f;
+                const float maxHalf = std::max((m_mapMaxZ - m_mapMinZ) * 0.6f, minHalf);
+                m_mapOrthoHalfHeight = std::clamp(m_mapOrthoHalfHeight * zoomFactor, minHalf, maxHalf);
+            }
+            m_pendingScrollDelta = 0.0f;
+        }
+
+        if (m_strategyMap3D) {
+            // Grab-point pan: keep the world point under the cursor pinned.
+            const bool mapDragging3D = m_input.removeBlockDown && !overUi && fbW > 0 && fbH > 0;
+            if (mapDragging3D && !m_wasStrategyMapDragging) {
+                m_mapFocusVelocityX = 0.0f;
+                m_mapFocusVelocityZ = 0.0f;
+            }
+            if (mapDragging3D) {
+                const double curX = m_lastMouseX, curY = m_lastMouseY;
+                const double prevX = curX - static_cast<double>(mouseDeltaX);
+                const double prevY = curY - static_cast<double>(mouseDeltaY);
+                float pX = 0.0f, pZ = 0.0f, cX = 0.0f, cZ = 0.0f;
+                if (rayToGroundPlane(prevX, prevY, fbW, fbH, pX, pZ) &&
+                    rayToGroundPlane(curX, curY, fbW, fbH, cX, cZ)) {
+                    const float dispX = pX - cX;
+                    const float dispZ = pZ - cZ;
+                    m_map3DFocusX += dispX;
+                    m_map3DFocusZ += dispZ;
+                    if (dt > 1e-5f) {
+                        const float alpha = std::min(1.0f, dt * 20.0f);
+                        m_mapFocusVelocityX += alpha * (dispX / dt - m_mapFocusVelocityX);
+                        m_mapFocusVelocityZ += alpha * (dispZ / dt - m_mapFocusVelocityZ);
+                    }
+                }
+            } else {
+                m_map3DFocusX += m_mapFocusVelocityX * dt;
+                m_map3DFocusZ += m_mapFocusVelocityZ * dt;
+                const float drag = std::exp(-4.0f * dt);
+                m_mapFocusVelocityX *= drag;
+                m_mapFocusVelocityZ *= drag;
+            }
+            m_wasStrategyMapDragging = mapDragging3D;
+            // Clamp to map bounds; kill velocity on the hit axis so inertia stops cleanly.
+            const float clampedFocusX = std::clamp(m_map3DFocusX, m_mapMinX, m_mapMaxX);
+            if (clampedFocusX != m_map3DFocusX) { m_mapFocusVelocityX = 0.0f; }
+            m_map3DFocusX = clampedFocusX;
+            const float clampedFocusZ = std::clamp(m_map3DFocusZ, m_mapMinZ, m_mapMaxZ);
+            if (clampedFocusZ != m_map3DFocusZ) { m_mapFocusVelocityZ = 0.0f; }
+            m_map3DFocusZ = clampedFocusZ;
+
+            // Derive the eye from focus + tilt + distance each frame.
+            m_camera.yawDegrees = kMap3DYawDegrees;
+            m_camera.pitchDegrees = m_map3DPitchDeg;
+            m_camera.fovDegrees = kMap3DFovDegrees;
+            const float yawR = odai::math::radians(kMap3DYawDegrees);
+            const float pitchR = odai::math::radians(m_map3DPitchDeg);
+            const float cp = std::cos(pitchR);
+            const odai::math::Vector3 fwd{cp * std::cos(yawR), std::sin(pitchR), cp * std::sin(yawR)};
+            m_camera.x = m_map3DFocusX - fwd.x * m_map3DDistance;
+            m_camera.y = -fwd.y * m_map3DDistance;  // focus sits on the y=0 plane
+            m_camera.z = m_map3DFocusZ - fwd.z * m_map3DDistance;
+        } else {
+            // 2D top-down ortho pan: left-drag translates the camera in world XZ.
+            const bool mapDragging2D = m_input.removeBlockDown && !overUi && fbH > 0;
+            if (mapDragging2D && !m_wasStrategyMapDragging) {
+                m_mapFocusVelocityX = 0.0f;
+                m_mapFocusVelocityZ = 0.0f;
+            }
+            if (mapDragging2D) {
+                const float worldPerPixel = (2.0f * m_mapOrthoHalfHeight) / static_cast<float>(fbH);
+                const float dispX = -mouseDeltaX * worldPerPixel;
+                const float dispZ = -mouseDeltaY * worldPerPixel;
+                m_camera.x += dispX;
+                m_camera.z += dispZ;
+                if (dt > 1e-5f) {
+                    const float alpha = std::min(1.0f, dt * 20.0f);
+                    m_mapFocusVelocityX += alpha * (dispX / dt - m_mapFocusVelocityX);
+                    m_mapFocusVelocityZ += alpha * (dispZ / dt - m_mapFocusVelocityZ);
+                }
+            } else {
+                m_camera.x += m_mapFocusVelocityX * dt;
+                m_camera.z += m_mapFocusVelocityZ * dt;
+                const float drag = std::exp(-4.0f * dt);
+                m_mapFocusVelocityX *= drag;
+                m_mapFocusVelocityZ *= drag;
+            }
+            m_wasStrategyMapDragging = mapDragging2D;
+            // Clamp to map edges; kill velocity on the hit axis so inertia stops at the boundary.
+            if (fbW > 0 && fbH > 0) {
+                const float halfH = m_mapOrthoHalfHeight;
+                const float halfW = halfH * (static_cast<float>(fbW) / static_cast<float>(fbH));
+                const float cxMin = m_mapMinX + halfW, cxMax = m_mapMaxX - halfW;
+                const float czMin = m_mapMinZ + halfH, czMax = m_mapMaxZ - halfH;
+                const float clampedX = (cxMin <= cxMax)
+                    ? std::clamp(m_camera.x, cxMin, cxMax) : (m_mapMinX + m_mapMaxX) * 0.5f;
+                const float clampedZ = (czMin <= czMax)
+                    ? std::clamp(m_camera.z, czMin, czMax) : (m_mapMinZ + m_mapMaxZ) * 0.5f;
+                if (clampedX != m_camera.x) { m_mapFocusVelocityX = 0.0f; }
+                if (clampedZ != m_camera.z) { m_mapFocusVelocityZ = 0.0f; }
+                m_camera.x = clampedX;
+                m_camera.z = clampedZ;
+            }
         }
 
         mouseDeltaX = 0.0f;
@@ -1357,7 +1476,9 @@ void App::updateCamera(float dt) {
     moveForwardInput = std::clamp(moveForwardInput, -1.0f, 1.0f);
     moveRightInput = std::clamp(moveRightInput, -1.0f, 1.0f);
 
-    if (m_importedSceneDemoEnabled) {
+    // In 3D relief the eye is derived from the focus point every frame, so free-fly
+    // WASD would be overwritten (and jitter); skip it. 2D keeps WASD as an alt-pan.
+    if (m_importedSceneDemoEnabled && !(m_strategyMapMode && m_strategyMap3D)) {
         moveDirection += forward * moveForwardInput;
         moveDirection += right * moveRightInput;
         if (m_input.moveUp) {
@@ -3297,6 +3418,7 @@ void App::setupDemoUi(float viewW, float viewH) {
     }
 
     auto root = std::make_unique<odai::ui::Widget>();
+    root->mousePassthrough = true;  // Container only; children claim the mouse, not the root.
 
     // Top resource toolbar - a full-width strip of icon+value badges (gold,
     // science, culture, faith, food, production) in the style of a 4X game's
@@ -4086,6 +4208,17 @@ bool App::pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
         return true;
     };
 
+    float wx = 0.0f, wz = 0.0f;
+    if (!rayToGroundPlane(mouseX, mouseY, fbW, fbH, wx, wz)) {
+        return false;
+    }
+    return findHex(wx, wz);
+}
+
+bool App::rayToGroundPlane(double mouseX, double mouseY, int fbW, int fbH,
+                           float& outX, float& outZ) const {
+    if (fbW <= 0 || fbH <= 0) return false;
+
     // Build camera basis from yaw/pitch (same convention as computeCameraForward).
     const float yaw   = odai::math::radians(m_camera.yawDegrees);
     const float pitch = odai::math::radians(m_camera.pitchDegrees);
@@ -4104,7 +4237,7 @@ bool App::pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
     const float ndcY = 1.0f - static_cast<float>(mouseY) / static_cast<float>(fbH) * 2.0f;
     const float aspect = static_cast<float>(fbW) / static_cast<float>(fbH);
 
-    if (m_strategyMapMode) {
+    if (m_strategyMapMode && !m_strategyMap3D) {
         // Orthographic: ray origin offset per pixel, direction = forward.
         const float halfH = m_mapOrthoHalfHeight;
         const float halfW = halfH * aspect;
@@ -4114,7 +4247,9 @@ bool App::pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
         if (std::abs(fwdY) < 1e-4f) return false;
         const float t = -roY / fwdY;
         if (t < 0.0f) return false;
-        return findHex(roX + t * fwdX, roZ + t * fwdZ);
+        outX = roX + t * fwdX;
+        outZ = roZ + t * fwdZ;
+        return true;
     }
 
     // Perspective: build ray through pixel and intersect with y = 0.
@@ -4130,7 +4265,59 @@ bool App::pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
     if (std::abs(rdY) < 1e-4f) return false;
     const float t = -m_camera.y / rdY;
     if (t < 0.0f) return false;
-    return findHex(m_camera.x + t * rdX, m_camera.z + t * rdZ);
+    outX = m_camera.x + t * rdX;
+    outZ = m_camera.z + t * rdZ;
+    return true;
+}
+
+void App::setStrategyMap3D(bool enabled) {
+    if (!m_strategyMapMode || enabled == m_strategyMap3D) {
+        return;
+    }
+    m_strategyMap3D = enabled;
+    m_mapFocusVelocityX = 0.0f;
+    m_mapFocusVelocityZ = 0.0f;
+    m_wasStrategyMapDragging = false;
+
+    // Re-mesh with the matching geometry (3D extrudes prisms + skirts, 2D is flat)
+    // and re-upload. The renderer rebuilds its GPU buffers on uploadImportedScene.
+    odai::game::StrategyMapMeshOptions meshOptions{};
+    meshOptions.extruded = enabled;
+    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap, meshOptions);
+    if (!m_renderer.uploadImportedScene(m_importedScene)) {
+        VOX_LOGE("app") << "strategy map re-upload failed on view toggle";
+    }
+    // SSAO deepens land-against-water seams in 3D relief; off for the flat board.
+    m_renderer.setSsaoEnabled(enabled);
+
+    if (enabled) {
+        // Center the 3D focus on the point the 2D view was looking at, then derive
+        // the tilted eye now so there's no interpolation streak this frame.
+        m_map3DFocusX = std::clamp(m_camera.x, m_mapMinX, m_mapMaxX);
+        m_map3DFocusZ = std::clamp(m_camera.z, m_mapMinZ, m_mapMaxZ);
+        m_camera.yawDegrees = kMap3DYawDegrees;
+        m_camera.pitchDegrees = m_map3DPitchDeg;
+        m_camera.fovDegrees = kMap3DFovDegrees;
+        const float yawR = odai::math::radians(kMap3DYawDegrees);
+        const float pitchR = odai::math::radians(m_map3DPitchDeg);
+        const float cpv = std::cos(pitchR);
+        const odai::math::Vector3 fwd{cpv * std::cos(yawR), std::sin(pitchR), cpv * std::sin(yawR)};
+        m_camera.x = m_map3DFocusX - fwd.x * m_map3DDistance;
+        m_camera.y = -fwd.y * m_map3DDistance;
+        m_camera.z = m_map3DFocusZ - fwd.z * m_map3DDistance;
+    } else {
+        // Restore the top-down orthographic camera over the 3D focus point.
+        m_camera.x = m_map3DFocusX;
+        m_camera.z = m_map3DFocusZ;
+        m_camera.y = 5000.0f;
+        m_camera.yawDegrees = 0.0f;
+        m_camera.pitchDegrees = -89.0f;
+        m_camera.fovDegrees = kMap3DFovDegrees;
+    }
+    // Avoid a one-frame interpolation streak across the discontinuous jump.
+    m_cameraPrevious = m_camera;
+
+    VOX_LOGI("app") << "strategy map view: " << (enabled ? "3D relief" : "2D flat") << " (M)";
 }
 
 } // namespace odai::app

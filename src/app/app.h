@@ -100,6 +100,13 @@ private:
     void updateUiOverlay(float dt);
     bool pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
                           int& outCol, int& outRow) const;
+    // World XZ where the ray through the cursor pixel meets the y=0 ground plane.
+    // Picks the orthographic (2D) or perspective (3D) basis from the current mode.
+    bool rayToGroundPlane(double mouseX, double mouseY, int fbW, int fbH,
+                          float& outX, float& outZ) const;
+    // Switch the strategy map between 2D (flat ortho) and 3D (extruded perspective):
+    // re-mesh + re-upload the scene, toggle SSAO, and reframe the camera.
+    void setStrategyMap3D(bool enabled);
     void syncGameplayUiState();
     void assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId);
     void handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight);
@@ -315,6 +322,17 @@ private:
     float m_mapMaxX = 0.0f;
     float m_mapMinZ = 0.0f;
     float m_mapMaxZ = 0.0f;
+    // 3D relief view: tilted perspective camera orbiting a focus point on the
+    // ground. 2D is the flat top-down orthographic default.
+    bool m_strategyMap3D = false;
+    bool m_wasToggleMapViewDown = false;
+    float m_map3DPitchDeg = -45.0f;   // Downward tilt of the 3D camera.
+    float m_map3DDistance = 3000.0f;  // Eye distance from the focus point.
+    float m_map3DFocusX = 0.0f;       // Ground point the 3D camera centers on.
+    float m_map3DFocusZ = 0.0f;
+    float m_mapFocusVelocityX = 0.0f; // Pan inertia velocity (world units/s).
+    float m_mapFocusVelocityZ = 0.0f;
+    bool m_wasStrategyMapDragging = false;
     int m_uiDemoClicks = 0;
     int m_currentTurn = 1;
     int m_hoveredHexCol = -1;

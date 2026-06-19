@@ -149,8 +149,8 @@ std::vector<std::array<std::uint32_t, 2>> hexWalk(
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::uint32_t width = 40;
-    std::uint32_t height = 30;
+    std::uint32_t width = 80;
+    std::uint32_t height = 60;
     std::uint32_t seed = 1337u;
     std::string smapPath = "strategy_map.smap";
     std::string scenePath = "strategy_map_scene.bin";
