@@ -5,16 +5,20 @@
 #include "ui/ui_types.h"
 
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 
-namespace odai::render {
-class Renderer;
-}
-
 namespace odai::ui {
+
+// Callback used by UiTheme::loadFromFile to upload frame/icon textures without
+// coupling the headless UI library to any specific renderer.
+// pixels — RGBA8 data, w/h — dimensions, mipmapped — generate mip chain.
+// Returns kUiNoTexture on failure.
+using UiTextureUploadFn =
+    std::function<UiTextureId(const std::uint8_t* pixels, std::uint32_t w, std::uint32_t h, bool mipmapped)>;
 
 // A theme is a named set of design tokens loaded from a JSON file.
 // It provides fonts, colors, frame styles, and numeric sizes to the
@@ -52,9 +56,9 @@ namespace odai::ui {
 // }
 class UiTheme {
 public:
-    // Load from a JSON file. Fonts are baked immediately; frame textures are
-    // registered with the renderer. Returns false on parse/IO failure.
-    bool loadFromFile(const std::filesystem::path& path, odai::render::Renderer& renderer);
+    // Load from a JSON file. Fonts are baked immediately; frame/icon textures
+    // are uploaded via the provided callback. Returns false on parse/IO failure.
+    bool loadFromFile(const std::filesystem::path& path, const UiTextureUploadFn& upload);
 
     // Look up a color token (e.g. "text", "panel.bg"). Returns transparent black
     // if the key is not found.

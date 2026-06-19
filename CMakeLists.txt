@@ -151,47 +151,77 @@ else()
     message(STATUS "slangc not found; skipping Slang shader target")
 endif()
 
+# ---------------------------------------------------------------------------
+# odai_ui — headless, Vulkan-free UI library
+# ---------------------------------------------------------------------------
+# Compiling warning flags into a reusable list avoids repetition across targets.
+set(ODAI_WARN_FLAGS_MSVC
+    /W4 /permissive-
+    /w14242 /w14254 /w14263 /w14265 /w14287 /we4289
+    /w14296 /w14311 /w14545 /w14546 /w14547 /w14549
+    /w14555 /w14619 /w14640 /w14826 /w14905 /w14906 /w14928
+)
+
+add_library(odai_ui STATIC
+    src/core/log.cc
+    src/ui/ui_draw_list.cc
+    src/ui/font.cc
+    src/ui/rich_text.cc
+    src/ui/cached_rich_text.cc
+    src/ui/ui_context.cc
+    src/ui/icon_atlas.cc
+    src/ui/tooltip.cc
+    src/ui/theme/ui_theme.cc
+    src/ui/document/ui_binding.cc
+    src/ui/document/ui_document.cc
+    src/ui/document/ui_hot_reload.cc
+    src/ui/widgets/panel.cc
+    src/ui/widgets/label.cc
+    src/ui/widgets/button.cc
+    src/ui/widgets/window.cc
+    src/ui/widgets/rich_text_view.cc
+    src/ui/widgets/image.cc
+    src/ui/widgets/progress_bar.cc
+    src/ui/widgets/text_box.cc
+    src/ui/widgets/toolbar.cc
+    src/ui/widgets/stack_layout.cc
+    src/ui/widgets/scroll_view.cc
+    src/ui/widgets/repeater.cc
+    src/ui/widgets/slider.cc
+    src/ui/widgets/toggle.cc
+    src/ui/widgets/tab_bar.cc
+    src/ui/widgets/dropdown.cc
+    src/ui/widgets/donut_chart.cc
+    src/ui/widgets/toast.cc
+    src/ui/widgets/line_chart.cc
+    src/ui/widgets/stat_badge.cc
+    src/ui/widgets/icon_button.cc
+    # Game-domain widgets (production_panel, etc.) are NOT included here;
+    # they live in the app source list and link against odai_ui.
+)
+target_include_directories(odai_ui
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${ODAI_STB_INCLUDE_DIRS}
+)
+target_link_libraries(odai_ui PUBLIC nlohmann_json::nlohmann_json)
+target_compile_features(odai_ui PUBLIC cxx_std_20)
+if(MSVC)
+    target_compile_options(odai_ui PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+else()
+    target_compile_options(odai_ui PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 if(ODAI_BUILD_APP)
     add_executable(odai
         src/app/main.cc
         src/app/app.cc
-        src/core/log.cc
         src/game/buildable.cc
         src/game/strategy_map.cc
         src/game/strategy_map_io.cc
         src/game/strategy_map_mesh.cc
-        src/ui/ui_draw_list.cc
-        src/ui/font.cc
-        src/ui/rich_text.cc
-        src/ui/cached_rich_text.cc
-        src/ui/ui_context.cc
-        src/ui/icon_atlas.cc
-        src/ui/tooltip.cc
-        src/ui/theme/ui_theme.cc
-        src/ui/document/ui_binding.cc
-        src/ui/document/ui_document.cc
-        src/ui/document/ui_hot_reload.cc
-        src/ui/widgets/panel.cc
-        src/ui/widgets/label.cc
-        src/ui/widgets/button.cc
-        src/ui/widgets/window.cc
-        src/ui/widgets/rich_text_view.cc
-        src/ui/widgets/image.cc
-        src/ui/widgets/progress_bar.cc
-        src/ui/widgets/text_box.cc
-        src/ui/widgets/toolbar.cc
-        src/ui/widgets/stack_layout.cc
-        src/ui/widgets/scroll_view.cc
-        src/ui/widgets/repeater.cc
-        src/ui/widgets/slider.cc
-        src/ui/widgets/toggle.cc
-        src/ui/widgets/tab_bar.cc
-        src/ui/widgets/dropdown.cc
-        src/ui/widgets/donut_chart.cc
-        src/ui/widgets/toast.cc
-        src/ui/widgets/line_chart.cc
-        src/ui/widgets/stat_badge.cc
-        src/ui/widgets/icon_button.cc
         src/ui/widgets/production_panel.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
@@ -212,9 +242,30 @@ if(ODAI_BUILD_APP)
     set(RENDER_BACKEND_SOURCES)
 
     if(ODAI_RENDER_BACKEND_UPPER STREQUAL "VULKAN")
-        list(APPEND RENDER_BACKEND_SOURCES
-            src/render/backend/vulkan/frame_ui.cc
+        # ---------------------------------------------------------------------------
+        # odai_ui_vulkan — Vulkan rendering backend for the UI library
+        # ---------------------------------------------------------------------------
+        find_package(Vulkan REQUIRED)
+        find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+        add_library(odai_ui_vulkan STATIC
             src/render/backend/vulkan/ui_renderer.cc
+            src/render/backend/vulkan/frame_ui.cc
+        )
+        target_include_directories(odai_ui_vulkan PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+            $<INSTALL_INTERFACE:include>
+        )
+        target_link_libraries(odai_ui_vulkan
+            PUBLIC  odai_ui
+            PRIVATE Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator
+        )
+        if(MSVC)
+            target_compile_options(odai_ui_vulkan PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_ui_vulkan PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
+        list(APPEND RENDER_BACKEND_SOURCES
             src/render/backend/vulkan/buffer_helpers.cc
             src/render/backend/vulkan/device.cc
             src/render/backend/vulkan/frame.cc
@@ -271,41 +322,21 @@ if(ODAI_BUILD_APP)
     )
 
     if(MSVC)
-        target_compile_options(odai PRIVATE
-            /W4
-            /permissive-
-            /w14242
-            /w14254
-            /w14263
-            /w14265
-            /w14287
-            /we4289
-            /w14296
-            /w14311
-            /w14545
-            /w14546
-            /w14547
-            /w14549
-            /w14555
-            /w14619
-            /w14640
-            /w14826
-            /w14905
-            /w14906
-            /w14928
-        )
+        target_compile_options(odai PRIVATE ${ODAI_WARN_FLAGS_MSVC})
     else()
         target_compile_options(odai PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
+    # UI libraries (Vulkan + VMA already found in the VULKAN block above)
+    target_link_libraries(odai PRIVATE odai_ui)
+    if(VULKAN_RENDER_BACKEND)
+        target_link_libraries(odai PRIVATE odai_ui_vulkan)
+    endif()
+
     find_package(glfw3 CONFIG QUIET)
 
-    target_link_libraries(odai PRIVATE nlohmann_json::nlohmann_json)
-
     if(VULKAN_RENDER_BACKEND)
-        find_package(Vulkan REQUIRED)
         find_package(imgui CONFIG REQUIRED)
-        find_package(VulkanMemoryAllocator CONFIG REQUIRED)
         target_link_libraries(odai PRIVATE Vulkan::Vulkan)
         target_link_libraries(odai PRIVATE GPUOpen::VulkanMemoryAllocator)
         target_link_libraries(odai PRIVATE imgui::imgui)
@@ -333,6 +364,43 @@ if(ODAI_BUILD_APP)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# Install / CMake package export for odai_ui and odai_ui_vulkan
+# ---------------------------------------------------------------------------
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+set(ODAI_UI_INSTALL_TARGETS odai_ui)
+if(TARGET odai_ui_vulkan)
+    list(APPEND ODAI_UI_INSTALL_TARGETS odai_ui_vulkan)
+endif()
+
+install(TARGETS ${ODAI_UI_INSTALL_TARGETS}
+    EXPORT odai_ui_targets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(DIRECTORY src/ui/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/odai_ui
+    FILES_MATCHING PATTERN "*.h"
+)
+install(DIRECTORY src/core/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/odai_ui/core
+    FILES_MATCHING PATTERN "log.h"
+)
+install(EXPORT odai_ui_targets
+    FILE odai_ui-targets.cmake
+    NAMESPACE odai::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/odai_ui
+)
+configure_package_config_file(
+    cmake/odai_ui-config.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/odai_ui-config.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/odai_ui
+)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/odai_ui-config.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/odai_ui
+)
+
 if(ODAI_BUILD_TOOLS)
     # Offline generator for the strategic-map prototype. Writes a native .smap and
     # a renderable .bin ImportedScene.
@@ -349,6 +417,18 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_strategy_map_gen PRIVATE /W4 /permissive-)
     else()
         target_compile_options(odai_strategy_map_gen PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    # Theme viewer — artist tool for iterating on theme JSON files with live
+    # hot-reload. Terminal-based: prints all color/font/size tokens with ANSI
+    # color swatches and re-dumps whenever the theme file changes on disk.
+    add_executable(odai_theme_viewer src/tools/theme_viewer_main.cc)
+    target_link_libraries(odai_theme_viewer PRIVATE odai_ui)
+    target_include_directories(odai_theme_viewer PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_theme_viewer PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_theme_viewer PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
 
@@ -505,71 +585,13 @@ if(BUILD_TESTING)
 
     add_test(NAME odai_strategy_map_tests COMMAND odai_strategy_map_tests)
 
-    add_executable(odai_ui_tests
-        tests/ui_tests.cc
-        src/ui/ui_draw_list.cc
-        src/ui/font.cc
-        src/ui/rich_text.cc
-        src/ui/cached_rich_text.cc
-        src/ui/ui_context.cc
-        src/ui/icon_atlas.cc
-        src/ui/document/ui_binding.cc
-        src/ui/widgets/panel.cc
-        src/ui/widgets/label.cc
-        src/ui/widgets/button.cc
-        src/ui/widgets/window.cc
-        src/ui/widgets/rich_text_view.cc
-        src/ui/widgets/image.cc
-        src/ui/widgets/progress_bar.cc
-        src/ui/widgets/text_box.cc
-        src/ui/widgets/toolbar.cc
-        src/ui/widgets/stack_layout.cc
-        src/ui/widgets/scroll_view.cc
-        src/ui/widgets/repeater.cc
-        src/ui/widgets/slider.cc
-        src/ui/widgets/toggle.cc
-        src/ui/widgets/tab_bar.cc
-        src/ui/widgets/dropdown.cc
-        src/ui/widgets/donut_chart.cc
-        src/ui/widgets/toast.cc
-        src/ui/widgets/line_chart.cc
-        src/ui/widgets/stat_badge.cc
-        src/ui/widgets/icon_button.cc
-        src/ui/widgets/production_panel.cc
-        src/game/buildable.cc
-        src/core/log.cc
-    )
-    target_include_directories(odai_ui_tests PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
-    target_link_libraries(odai_ui_tests PRIVATE nlohmann_json::nlohmann_json)
-
+    add_executable(odai_ui_tests tests/ui_tests.cc)
+    target_link_libraries(odai_ui_tests PRIVATE odai_ui)
     if(MSVC)
-        target_compile_options(odai_ui_tests PRIVATE
-            /W4
-            /permissive-
-            /w14242
-            /w14254
-            /w14263
-            /w14265
-            /w14287
-            /we4289
-            /w14296
-            /w14311
-            /w14545
-            /w14546
-            /w14547
-            /w14549
-            /w14555
-            /w14619
-            /w14640
-            /w14826
-            /w14905
-            /w14906
-            /w14928
-        )
+        target_compile_options(odai_ui_tests PRIVATE ${ODAI_WARN_FLAGS_MSVC})
     else()
         target_compile_options(odai_ui_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
-
     add_test(NAME odai_ui_tests COMMAND odai_ui_tests)
 
     find_package(GTest CONFIG QUIET)

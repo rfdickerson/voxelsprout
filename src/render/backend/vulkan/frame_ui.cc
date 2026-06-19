@@ -772,7 +772,7 @@ void RendererBackend::buildFrameStatsUi() {
         }
         if (ImGui::TreeNodeEx("Desktop Capabilities", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Roadmap 2026 Core Ready: %s", m_desktopCapabilityProbe.roadmap2026CoreReady ? "yes" : "no");
-            ImGui::Text("Descriptor Heap: %s", m_desktopCapabilityProbe.descriptorHeapExtension ? "yes" : "no");
+            ImGui::Text("Descriptor Buffer: %s", m_desktopCapabilityProbe.descriptorBufferExtension ? "yes" : "no");
             ImGui::Text(
                 "Unified Image Layouts: %s",
                 m_desktopCapabilityProbe.unifiedImageLayoutsExtension ? "yes" : "no"

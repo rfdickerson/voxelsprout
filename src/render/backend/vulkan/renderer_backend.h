@@ -446,6 +446,8 @@ private:
     bool shouldThrottleFrameStart(uint64_t completedValue, float* outCpuWaitMs) const;
     uint64_t computeDesiredPresentTimeNs(std::uint64_t nowNs) const;
     bool loadRayTracingFunctions();
+    void loadHostImageCopyFunctions();
+    void loadDescriptorBufferFunctions();
     [[nodiscard]] bool rayTracingRuntimeReady() const;
     [[nodiscard]] const char* rayTracingReleaseStatusName() const;
     struct DeferredBufferRelease {
@@ -454,7 +456,7 @@ private:
     };
 
     struct DesktopCapabilityProbe {
-        bool descriptorHeapExtension = false;
+        bool descriptorBufferExtension = false;
         bool unifiedImageLayoutsExtension = false;
         bool hostImageCopyExtension = false;
         bool shaderClockExtension = false;
@@ -1001,6 +1003,14 @@ private:
     PFN_vkGetAccelerationStructureBuildSizesKHR m_getAccelerationStructureBuildSizesKhr = nullptr;
     PFN_vkCmdBuildAccelerationStructuresKHR m_cmdBuildAccelerationStructuresKhr = nullptr;
     PFN_vkGetAccelerationStructureDeviceAddressKHR m_getAccelerationStructureDeviceAddressKhr = nullptr;
+    PFN_vkCopyMemoryToImageEXT m_copyMemoryToImage = nullptr;
+    PFN_vkTransitionImageLayoutEXT m_transitionImageLayout = nullptr;
+    VkPhysicalDeviceDescriptorBufferPropertiesEXT m_descriptorBufferProperties{};
+    PFN_vkGetDescriptorSetLayoutSizeEXT m_getDescriptorSetLayoutSize = nullptr;
+    PFN_vkGetDescriptorSetLayoutBindingOffsetEXT m_getDescriptorSetLayoutBindingOffset = nullptr;
+    PFN_vkGetDescriptorEXT m_getDescriptor = nullptr;
+    PFN_vkCmdBindDescriptorBuffersEXT m_cmdBindDescriptorBuffers = nullptr;
+    PFN_vkCmdSetDescriptorBufferOffsetsEXT m_cmdSetDescriptorBufferOffsets = nullptr;
     uint32_t m_bindlessTextureCapacity = 0;
     bool m_gpuTimestampsSupported = false;
     float m_gpuTimestampPeriodNs = 0.0f;

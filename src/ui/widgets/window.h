@@ -31,7 +31,7 @@ public:
     std::optional<UiNineSlice> frame;
     UiColor frameTint{1.0f, 1.0f, 1.0f, 1.0f};  // 9-slice tint (white = texture as-is).
 
-    UiColor titleBarColor{0.10f, 0.14f, 0.20f, 0.95f};
+    UiColor titleBarColor{0.22f, 0.25f, 0.30f, 0.95f};
     UiColor bodyColor{0.04f, 0.07f, 0.11f, 0.92f};       // Solid-fallback body.
     UiColor borderColor{0.75f, 0.62f, 0.34f, 0.55f};     // Solid-fallback border + separator.
     UiColor titleColor{0.91f, 0.80f, 0.48f, 1.0f};
@@ -46,10 +46,10 @@ public:
     bool draggable = true;
 
     bool    showShadow    = true;
-    UiColor shadowColor   {0.0f, 0.0f, 0.0f, 0.35f};
-    float   shadowBlurPx  = 6.0f;
-    float   shadowOffsetX = 4.0f;
-    float   shadowOffsetY = 4.0f;
+    UiColor shadowColor   {0.0f, 0.0f, 0.0f, 0.20f};
+    float   shadowBlurPx  = 3.0f;
+    float   shadowOffsetX = 2.0f;
+    float   shadowOffsetY = 3.0f;
 
     void setTitle(std::string t) { title_ = std::move(t); }
 

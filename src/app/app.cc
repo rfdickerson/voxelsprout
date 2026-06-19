@@ -3491,7 +3491,7 @@ void App::setupDemoUi(float viewW, float viewH) {
         using TB = odai::ui::Toolbar;
         auto tb = std::make_unique<TB>(fonts.regular);
         tb->setRect(odai::ui::UiRect::fromXYWH(0.0f, 0.0f, viewW, kToolbarH));
-        tb->paddingXPx = 16.0f * s;
+        tb->paddingXPx = 54.0f * s;  // extra left margin for the civ-panel toggle icon
         tb->itemGapPx  = 26.0f * s;
         tb->iconGapPx  = 8.0f * s;
         tb->iconScale  = 0.68f;
@@ -3503,6 +3503,27 @@ void App::setupDemoUi(float viewW, float viewH) {
         tb->addItem(TB::IconKind::Food, {0.49f, 0.78f, 0.31f, 1.0f}, "+5.6", textCol);
         tb->addItem(TB::IconKind::Production, {0.85f, 0.54f, 0.23f, 1.0f}, "+6.7", textCol);
         m_toolbar = static_cast<TB*>(root->addChild(std::move(tb)));
+
+        // Civilizations-panel toggle icon — always visible in the toolbar so the
+        // panel can be re-opened after it is collapsed.
+        {
+            auto civBtn = std::make_unique<odai::ui::Button>(
+                fonts.regular, "Civ",
+                [this]() {
+                    m_civExpanded = !m_civExpanded;
+                    m_civExpandTween.setTarget(m_civExpanded ? 1.0f : 0.0f);
+                });
+            const float btnSz = kToolbarH - 6.0f * s;
+            civBtn->setRect(odai::ui::UiRect::fromXYWH(4.0f * s, 3.0f * s, btnSz, btnSz));
+            civBtn->colorNormal   = odai::ui::UiColor{0.14f, 0.20f, 0.28f, 0.85f};
+            civBtn->colorHover    = odai::ui::UiColor{0.24f, 0.32f, 0.42f, 0.95f};
+            civBtn->colorPressed  = odai::ui::UiColor{0.10f, 0.14f, 0.20f, 1.00f};
+            civBtn->borderColor   = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.55f};
+            civBtn->labelColor    = odai::ui::UiColor{0.91f, 0.80f, 0.48f, 1.0f};
+            civBtn->glowSizePx    = 8.0f * s;
+            civBtn->cornerRadiusPx = 3.0f * s;
+            m_toolbar->addChild(std::move(civBtn));
+        }
 
         // Right-aligned turn readout on the toolbar.
         auto turn = std::make_unique<odai::ui::Label>(fonts, "");
@@ -3597,10 +3618,11 @@ void App::setupDemoUi(float viewW, float viewH) {
         civPanel->borderColor       = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.55f};
         civPanel->borderThicknessPx = 1.5f * s;
         civPanel->showShadow        = true;
-        civPanel->shadowBlurPx      = 12.0f * s;
-        civPanel->shadowOffsetX     = 4.0f * s;
+        civPanel->shadowBlurPx      = 5.0f * s;
+        civPanel->shadowOffsetX     = 3.0f * s;
         civPanel->shadowOffsetY     = 0.0f;
-        civPanel->shadowColor       = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.50f};
+        civPanel->shadowColor       = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.25f};
+        civPanel->clipContents      = true;
 
         float cy = civY + 14.0f * s;
 
@@ -3654,7 +3676,41 @@ void App::setupDemoUi(float viewW, float viewH) {
         m_civLeaderNameLabel = nameLabel.get();
         civPanel->addChild(std::move(nameLabel));
 
-        root->addChild(std::move(civPanel));
+        // Collapse/expand chevron button in the header row (right-aligned).
+        {
+            auto colBtn = std::make_unique<odai::ui::Button>(
+                fonts.regular, "^",
+                [this]() {
+                    m_civExpanded = !m_civExpanded;
+                    m_civExpandTween.setTarget(m_civExpanded ? 1.0f : 0.0f);
+                });
+            const float btnW = 22.0f * s;
+            const float btnH = 22.0f * s;
+            colBtn->setRect(odai::ui::UiRect::fromXYWH(
+                civX + civW - btnW - 5.0f * s,
+                civY + (14.0f - 1.0f) * s,
+                btnW, btnH));
+            colBtn->colorNormal   = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.0f};
+            colBtn->colorHover    = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.08f};
+            colBtn->colorPressed  = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.18f};
+            colBtn->borderColor   = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.0f};
+            colBtn->labelColor    = odai::ui::UiColor{0.91f, 0.80f, 0.48f, 0.80f};
+            colBtn->glowSizePx    = 0.0f;
+            colBtn->cornerRadiusPx = 3.0f * s;
+            m_civCollapseBtn = static_cast<odai::ui::Button*>(civPanel->addChild(std::move(colBtn)));
+        }
+
+        // Store dimensions for accordion animation.
+        m_civFullH   = civH;
+        m_civHeaderH = (14.0f + 22.0f + 8.0f) * s;  // top pad + title label + gap
+
+        // Initialize tween in the fully-expanded state.
+        m_civExpandTween.durationSec = 0.25f;
+        m_civExpandTween.easing      = odai::ui::Easing::EaseInOut;
+        m_civExpandTween.value       = 1.0f;
+        m_civExpandTween.setTarget(1.0f);
+
+        m_civPanel = static_cast<odai::ui::Panel*>(root->addChild(std::move(civPanel)));
     }
 
     // City production panel (right column, Civ 6 style).
@@ -3758,8 +3814,8 @@ void App::setupDemoUi(float viewW, float viewH) {
     // 9-slice is loaded, it replaces the solid fill and the title bar / body colors
     // are made transparent so the parchment texture shows through. Text colors shift
     // to dark-brown so they read on the light background.
-    const float pediaW = parchmentSliceReady ? 430.0f * s : 360.0f * s;
-    const float pediaH = parchmentSliceReady ? 310.0f * s : 320.0f * s;
+    const float pediaW = parchmentSliceReady ? 520.0f * s : 440.0f * s;
+    const float pediaH = parchmentSliceReady ? 500.0f * s : 500.0f * s;
     const float pediaX = viewW - pediaW - 16.0f * s;
     const float pediaY = kToolbarH + 12.0f * s;
     // Title bar height - tall enough for the title font.  The parchment frame's top
@@ -3795,7 +3851,7 @@ void App::setupDemoUi(float viewW, float viewH) {
     } else {
         // Solid fill path - use corner radius, no 9-slice frame (avoids heavy rounding).
         pediaWin->padding       = {14.0f * s, 10.0f * s};
-        pediaWin->titleBarColor = odai::ui::UiColor{0.12f, 0.16f, 0.22f, 1.0f};
+        pediaWin->titleBarColor = odai::ui::UiColor{0.22f, 0.26f, 0.32f, 1.0f};
         pediaWin->bodyColor     = odai::ui::UiColor{0.07f, 0.10f, 0.14f, 0.96f};
         pediaWin->borderColor   = odai::ui::UiColor{0.65f, 0.52f, 0.28f, 0.70f};
         pediaWin->cornerRadiusPx = 4.0f * s;
@@ -4088,6 +4144,19 @@ void App::updateUiOverlay(float dt) {
             m_hoveredHexRow = -1;
             m_hudTileInfoWindow->visible = false;
         }
+    }
+
+    // Animate the civ-panel accordion expand/collapse.
+    m_civExpandTween.update(dt);
+    if (m_civPanel != nullptr && m_civFullH > 0.0f) {
+        const float frac = m_civExpandTween.eased();
+        const float h = m_civHeaderH + frac * (m_civFullH - m_civHeaderH);
+        const odai::ui::UiRect cr = m_civPanel->rect();
+        m_civPanel->setRect(odai::ui::UiRect::fromXYWH(cr.minX, cr.minY, cr.width(), h));
+    }
+    // Sync the chevron label to match expand state.
+    if (m_civCollapseBtn != nullptr) {
+        m_civCollapseBtn->setLabel(m_civExpandTween.value > 0.5f ? "^" : "v");
     }
 
     m_uiContext.build(m_uiDrawList);

@@ -34,8 +34,15 @@ public:
 private:
     mutable float m_contentHeight = 0.0f;
 
+    // Scrollbar thumb drag state.
+    bool  m_thumbDragging      = false;
+    float m_thumbDragStartMouseY  = 0.0f;
+    float m_thumbDragStartOffset  = 0.0f;
+    mutable bool m_thumbHovered   = false;
+
     void layoutChildren() const;
     float maxScroll() const;
+    [[nodiscard]] UiRect thumbRect() const;
 };
 
 }  // namespace odai::ui

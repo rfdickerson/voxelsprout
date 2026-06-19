@@ -6,12 +6,12 @@
 namespace {
 
 constexpr std::array<const char*, 1> kValidationLayers = {"VK_LAYER_KHRONOS_validation"};
-constexpr std::array<const char*, 7> kDeviceExtensions = {
+// Only extensions not yet promoted to Vulkan 1.4 core are listed here.
+// Promoted-to-core features (timelineSemaphore/1.2, synchronization2/1.3,
+// dynamicRendering/1.3, maintenance4/1.3) are enabled via VkPhysicalDeviceVulkan1xFeatures
+// chains in init.cc and do not need extension strings at 1.4+.
+constexpr std::array<const char*, 3> kDeviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-    VK_KHR_MAINTENANCE_4_EXTENSION_NAME,
-    VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
-    VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
-    VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
     VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,
     VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME,
 };

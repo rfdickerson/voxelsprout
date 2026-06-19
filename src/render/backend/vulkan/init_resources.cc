@@ -495,7 +495,9 @@ bool RendererBackend::createWaterNormalTextureResources() {
                         imageCreateInfo.arrayLayers = 1;
                         imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
                         imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-                        imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+                        imageCreateInfo.usage = (m_copyMemoryToImage != nullptr)
+                            ? (VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | VK_IMAGE_USAGE_SAMPLED_BIT)
+                            : (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
                         imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
                         imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
                         if (m_vmaAllocator != VK_NULL_HANDLE) {
@@ -542,7 +544,57 @@ bool RendererBackend::createWaterNormalTextureResources() {
                                 "water.normal.image"
                             );
 
+                            const bool useDdsHostCopy =
+                                m_copyMemoryToImage != nullptr && m_transitionImageLayout != nullptr;
+                            if (useDdsHostCopy) {
+                                VkImageSubresourceRange subresourceRange{};
+                                subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                                subresourceRange.baseMipLevel = 0;
+                                subresourceRange.levelCount = ddsImage.mipLevels;
+                                subresourceRange.baseArrayLayer = 0;
+                                subresourceRange.layerCount = 1;
+
+                                VkHostImageLayoutTransitionInfoEXT transition{};
+                                transition.sType = VK_STRUCTURE_TYPE_HOST_IMAGE_LAYOUT_TRANSITION_INFO_EXT;
+                                transition.image = m_waterNormalTextureImage;
+                                transition.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                                transition.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                                transition.subresourceRange = subresourceRange;
+                                result = m_transitionImageLayout(m_device, 1, &transition);
+
+                                if (result == VK_SUCCESS) {
+                                    std::vector<VkMemoryToImageCopyEXT> copyRegions;
+                                    copyRegions.reserve(ddsImage.mipInfos.size());
+                                    for (const DdsMipInfo& mipInfo : ddsImage.mipInfos) {
+                                        VkMemoryToImageCopyEXT region{};
+                                        region.sType = VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY_EXT;
+                                        region.pHostPointer = ddsImage.pixelData.data() + mipInfo.offset;
+                                        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                                        region.imageSubresource.mipLevel =
+                                            static_cast<uint32_t>(copyRegions.size());
+                                        region.imageSubresource.baseArrayLayer = 0;
+                                        region.imageSubresource.layerCount = 1;
+                                        region.imageExtent = {mipInfo.width, mipInfo.height, 1u};
+                                        copyRegions.push_back(region);
+                                    }
+
+                                    VkCopyMemoryToImageInfoEXT copyInfo{};
+                                    copyInfo.sType = VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO_EXT;
+                                    copyInfo.dstImage = m_waterNormalTextureImage;
+                                    copyInfo.dstImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                                    copyInfo.regionCount = static_cast<uint32_t>(copyRegions.size());
+                                    copyInfo.pRegions = copyRegions.data();
+                                    result = m_copyMemoryToImage(m_device, &copyInfo);
+                                }
+                                if (result == VK_SUCCESS) {
+                                    transition.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                                    transition.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                    result = m_transitionImageLayout(m_device, 1, &transition);
+                                }
+                            }
+
                             VkCommandPool commandPool = VK_NULL_HANDLE;
+                            if (!useDdsHostCopy) {
                             VkCommandPoolCreateInfo commandPoolCreateInfo{};
                             commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
                             commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -642,6 +694,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
                                     }
                                 }
                             }
+                            } // end if (!useDdsHostCopy)
 
                             if (result == VK_SUCCESS) {
                                 VkImageViewCreateInfo viewCreateInfo{};
@@ -722,62 +775,6 @@ bool RendererBackend::createWaterNormalTextureResources() {
     }
 
     const std::vector<std::uint8_t> pixelData = generateWaterNormalTexturePixels();
-    const VkDeviceSize textureBytes = static_cast<VkDeviceSize>(pixelData.size());
-
-    VkBuffer stagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
-    VkBufferCreateInfo stagingCreateInfo{};
-    stagingCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    stagingCreateInfo.size = textureBytes;
-    stagingCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    stagingCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    VkResult result = vkCreateBuffer(m_device, &stagingCreateInfo, nullptr, &stagingBuffer);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkCreateBuffer(waterNormalStaging)", result);
-        return false;
-    }
-    setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(stagingBuffer), "water.normal.staging.buffer");
-
-    VkMemoryRequirements stagingMemReq{};
-    vkGetBufferMemoryRequirements(m_device, stagingBuffer, &stagingMemReq);
-    uint32_t memoryTypeIndex = findMemoryTypeIndex(
-        m_physicalDevice,
-        stagingMemReq.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        VOX_LOGW("render") << "no staging memory type for water normal texture";
-        return false;
-    }
-
-    VkMemoryAllocateInfo stagingAllocInfo{};
-    stagingAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    stagingAllocInfo.allocationSize = stagingMemReq.size;
-    stagingAllocInfo.memoryTypeIndex = memoryTypeIndex;
-    result = vkAllocateMemory(m_device, &stagingAllocInfo, nullptr, &stagingMemory);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkAllocateMemory(waterNormalStaging)", result);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
-    result = vkBindBufferMemory(m_device, stagingBuffer, stagingMemory, 0);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkBindBufferMemory(waterNormalStaging)", result);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
-
-    void* mapped = nullptr;
-    result = vkMapMemory(m_device, stagingMemory, 0, textureBytes, 0, &mapped);
-    if (result != VK_SUCCESS || mapped == nullptr) {
-        logVkFailure("vkMapMemory(waterNormalStaging)", result);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
-    std::memcpy(mapped, pixelData.data(), pixelData.size());
-    vkUnmapMemory(m_device, stagingMemory);
 
     VkImageCreateInfo imageCreateInfo{};
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -788,10 +785,14 @@ bool RendererBackend::createWaterNormalTextureResources() {
     imageCreateInfo.arrayLayers = 1;
     imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    const bool useHostCopy = m_copyMemoryToImage != nullptr && m_transitionImageLayout != nullptr;
+    imageCreateInfo.usage = useHostCopy
+        ? (VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | VK_IMAGE_USAGE_SAMPLED_BIT)
+        : (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
+    VkResult result = VK_SUCCESS;
     if (m_vmaAllocator != VK_NULL_HANDLE) {
         VmaAllocationCreateInfo allocationCreateInfo{};
         allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -805,29 +806,23 @@ bool RendererBackend::createWaterNormalTextureResources() {
             nullptr);
         if (result != VK_SUCCESS) {
             logVkFailure("vmaCreateImage(waterNormal)", result);
-            vkFreeMemory(m_device, stagingMemory, nullptr);
-            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
             return false;
         }
     } else {
         result = vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_waterNormalTextureImage);
         if (result != VK_SUCCESS) {
             logVkFailure("vkCreateImage(waterNormal)", result);
-            vkFreeMemory(m_device, stagingMemory, nullptr);
-            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
             return false;
         }
         VkMemoryRequirements imageMemReq{};
         vkGetImageMemoryRequirements(m_device, m_waterNormalTextureImage, &imageMemReq);
-        memoryTypeIndex = findMemoryTypeIndex(
+        uint32_t memoryTypeIndex = findMemoryTypeIndex(
             m_physicalDevice,
             imageMemReq.memoryTypeBits,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
             vkDestroyImage(m_device, m_waterNormalTextureImage, nullptr);
             m_waterNormalTextureImage = VK_NULL_HANDLE;
-            vkFreeMemory(m_device, stagingMemory, nullptr);
-            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
             VOX_LOGW("render") << "no device-local memory for water normal texture";
             return false;
         }
@@ -840,8 +835,6 @@ bool RendererBackend::createWaterNormalTextureResources() {
             logVkFailure("vkAllocateMemory(waterNormal)", result);
             vkDestroyImage(m_device, m_waterNormalTextureImage, nullptr);
             m_waterNormalTextureImage = VK_NULL_HANDLE;
-            vkFreeMemory(m_device, stagingMemory, nullptr);
-            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
             return false;
         }
         result = vkBindImageMemory(m_device, m_waterNormalTextureImage, m_waterNormalTextureMemory, 0);
@@ -851,142 +844,185 @@ bool RendererBackend::createWaterNormalTextureResources() {
             m_waterNormalTextureImage = VK_NULL_HANDLE;
             vkFreeMemory(m_device, m_waterNormalTextureMemory, nullptr);
             m_waterNormalTextureMemory = VK_NULL_HANDLE;
-            vkFreeMemory(m_device, stagingMemory, nullptr);
-            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
             return false;
         }
     }
     setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_waterNormalTextureImage), "water.normal.image");
 
-    VkCommandPool commandPool = VK_NULL_HANDLE;
-    VkCommandPoolCreateInfo commandPoolCreateInfo{};
-    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-    commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
-    result = vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkCreateCommandPool(waterNormalUpload)", result);
+    if (useHostCopy) {
+        VkImageSubresourceRange subresourceRange{};
+        subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        subresourceRange.baseMipLevel = 0;
+        subresourceRange.levelCount = 1;
+        subresourceRange.baseArrayLayer = 0;
+        subresourceRange.layerCount = 1;
+
+        VkHostImageLayoutTransitionInfoEXT transition{};
+        transition.sType = VK_STRUCTURE_TYPE_HOST_IMAGE_LAYOUT_TRANSITION_INFO_EXT;
+        transition.image = m_waterNormalTextureImage;
+        transition.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        transition.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        transition.subresourceRange = subresourceRange;
+        result = m_transitionImageLayout(m_device, 1, &transition);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkTransitionImageLayoutEXT(waterNormal UNDEFINED→GENERAL)", result);
+            return false;
+        }
+
+        VkMemoryToImageCopyEXT copyRegion{};
+        copyRegion.sType = VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY_EXT;
+        copyRegion.pHostPointer = pixelData.data();
+        copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copyRegion.imageSubresource.mipLevel = 0;
+        copyRegion.imageSubresource.baseArrayLayer = 0;
+        copyRegion.imageSubresource.layerCount = 1;
+        copyRegion.imageExtent = {kGeneratedWaterNormalTextureSize, kGeneratedWaterNormalTextureSize, 1u};
+
+        VkCopyMemoryToImageInfoEXT copyInfo{};
+        copyInfo.sType = VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO_EXT;
+        copyInfo.dstImage = m_waterNormalTextureImage;
+        copyInfo.dstImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        copyInfo.regionCount = 1;
+        copyInfo.pRegions = &copyRegion;
+        result = m_copyMemoryToImage(m_device, &copyInfo);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkCopyMemoryToImageEXT(waterNormal)", result);
+            return false;
+        }
+
+        transition.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        transition.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        result = m_transitionImageLayout(m_device, 1, &transition);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkTransitionImageLayoutEXT(waterNormal GENERAL→SHADER_READ_ONLY)", result);
+            return false;
+        }
+    } else {
+        // Staging buffer fallback for drivers without host image copy.
+        const VkDeviceSize textureBytes = static_cast<VkDeviceSize>(pixelData.size());
+        VkBuffer stagingBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        VkBufferCreateInfo stagingCreateInfo{};
+        stagingCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        stagingCreateInfo.size = textureBytes;
+        stagingCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        stagingCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        result = vkCreateBuffer(m_device, &stagingCreateInfo, nullptr, &stagingBuffer);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkCreateBuffer(waterNormalStaging)", result);
+            return false;
+        }
+
+        VkMemoryRequirements stagingMemReq{};
+        vkGetBufferMemoryRequirements(m_device, stagingBuffer, &stagingMemReq);
+        const uint32_t stagingMemType = findMemoryTypeIndex(
+            m_physicalDevice,
+            stagingMemReq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (stagingMemType == std::numeric_limits<uint32_t>::max()) {
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            VOX_LOGW("render") << "no staging memory type for water normal texture";
+            return false;
+        }
+
+        VkMemoryAllocateInfo stagingAllocInfo{};
+        stagingAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        stagingAllocInfo.allocationSize = stagingMemReq.size;
+        stagingAllocInfo.memoryTypeIndex = stagingMemType;
+        result = vkAllocateMemory(m_device, &stagingAllocInfo, nullptr, &stagingMemory);
+        if (result == VK_SUCCESS) {
+            result = vkBindBufferMemory(m_device, stagingBuffer, stagingMemory, 0);
+        }
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory/BindBuffer(waterNormalStaging)", result);
+            if (stagingMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(m_device, stagingMemory, nullptr);
+            }
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+
+        void* mapped = nullptr;
+        result = vkMapMemory(m_device, stagingMemory, 0, textureBytes, 0, &mapped);
+        if (result != VK_SUCCESS || mapped == nullptr) {
+            logVkFailure("vkMapMemory(waterNormalStaging)", result);
+            vkFreeMemory(m_device, stagingMemory, nullptr);
+            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+            return false;
+        }
+        std::memcpy(mapped, pixelData.data(), pixelData.size());
+        vkUnmapMemory(m_device, stagingMemory);
+
+        VkCommandPool commandPool = VK_NULL_HANDLE;
+        VkCommandPoolCreateInfo commandPoolCreateInfo{};
+        commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+        result = vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool);
+        if (result == VK_SUCCESS) {
+            VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+            VkCommandBufferAllocateInfo cbAllocInfo{};
+            cbAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            cbAllocInfo.commandPool = commandPool;
+            cbAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cbAllocInfo.commandBufferCount = 1;
+            result = vkAllocateCommandBuffers(m_device, &cbAllocInfo, &commandBuffer);
+            if (result == VK_SUCCESS) {
+                VkCommandBufferBeginInfo beginInfo{};
+                beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+                if (result == VK_SUCCESS) {
+                    VkImageMemoryBarrier barrier{};
+                    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    barrier.image = m_waterNormalTextureImage;
+                    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    barrier.srcAccessMask = 0;
+                    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    vkCmdPipelineBarrier(commandBuffer,
+                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+                    VkBufferImageCopy copyRegion{};
+                    copyRegion.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    copyRegion.imageExtent = {kGeneratedWaterNormalTextureSize, kGeneratedWaterNormalTextureSize, 1u};
+                    vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, m_waterNormalTextureImage,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+                    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    vkCmdPipelineBarrier(commandBuffer,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+                    result = vkEndCommandBuffer(commandBuffer);
+                    if (result == VK_SUCCESS) {
+                        VkSubmitInfo submitInfo{};
+                        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                        submitInfo.commandBufferCount = 1;
+                        submitInfo.pCommandBuffers = &commandBuffer;
+                        result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+                        if (result == VK_SUCCESS) {
+                            result = vkQueueWaitIdle(m_graphicsQueue);
+                        }
+                    }
+                }
+            }
+            vkDestroyCommandPool(m_device, commandPool, nullptr);
+        }
         vkFreeMemory(m_device, stagingMemory, nullptr);
         vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
+        if (result != VK_SUCCESS) {
+            logVkFailure("waterNormal staging upload", result);
+            return false;
+        }
     }
-
-    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
-    commandBufferAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    commandBufferAllocateInfo.commandPool = commandPool;
-    commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    commandBufferAllocateInfo.commandBufferCount = 1;
-    result = vkAllocateCommandBuffers(m_device, &commandBufferAllocateInfo, &commandBuffer);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkAllocateCommandBuffers(waterNormalUpload)", result);
-        vkDestroyCommandPool(m_device, commandPool, nullptr);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
-
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkBeginCommandBuffer(waterNormalUpload)", result);
-        vkDestroyCommandPool(m_device, commandPool, nullptr);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
-
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = m_waterNormalTextureImage;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(
-        commandBuffer,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        1,
-        &barrier);
-
-    VkBufferImageCopy copyRegion{};
-    copyRegion.bufferOffset = 0;
-    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copyRegion.imageSubresource.mipLevel = 0;
-    copyRegion.imageSubresource.baseArrayLayer = 0;
-    copyRegion.imageSubresource.layerCount = 1;
-    copyRegion.imageExtent = {kGeneratedWaterNormalTextureSize, kGeneratedWaterNormalTextureSize, 1u};
-    vkCmdCopyBufferToImage(
-        commandBuffer,
-        stagingBuffer,
-        m_waterNormalTextureImage,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        1,
-        &copyRegion);
-
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(
-        commandBuffer,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        0,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        1,
-        &barrier);
-
-    result = vkEndCommandBuffer(commandBuffer);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkEndCommandBuffer(waterNormalUpload)", result);
-        vkDestroyCommandPool(m_device, commandPool, nullptr);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
-
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-    result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkQueueSubmit(waterNormalUpload)", result);
-        vkDestroyCommandPool(m_device, commandPool, nullptr);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
-    result = vkQueueWaitIdle(m_graphicsQueue);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkQueueWaitIdle(waterNormalUpload)", result);
-        vkDestroyCommandPool(m_device, commandPool, nullptr);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        return false;
-    }
-    vkDestroyCommandPool(m_device, commandPool, nullptr);
-    vkFreeMemory(m_device, stagingMemory, nullptr);
-    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
 
     VkImageViewCreateInfo viewCreateInfo{};
     viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
