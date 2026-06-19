@@ -49,7 +49,7 @@ struct DebugBounds {
     bool valid = false;
 };
 
-void expandBounds(DebugBounds& bounds, const std::array<float, 3>& point) {
+[[maybe_unused]] void expandBounds(DebugBounds& bounds, const std::array<float, 3>& point) {
     bounds.valid = true;
     for (int axis = 0; axis < 3; ++axis) {
         bounds.min[axis] = std::min(bounds.min[axis], point[axis]);
