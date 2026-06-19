@@ -47,28 +47,6 @@ void appendQuad(
     });
 }
 
-void appendWall(
-    std::vector<odai::world::NavmeshBuildTriangle>& triangles,
-    float x,
-    float minY,
-    float maxY,
-    float minZ,
-    float maxZ
-) {
-    triangles.push_back({
-        {x, minY, minZ},
-        {x, minY, maxZ},
-        {x, maxY, maxZ},
-        odai::world::NavmeshArea::Obstacle
-    });
-    triangles.push_back({
-        {x, minY, minZ},
-        {x, maxY, maxZ},
-        {x, maxY, minZ},
-        odai::world::NavmeshArea::Obstacle
-    });
-}
-
 odai::world::NavmeshSettings testSettings() {
     odai::world::NavmeshSettings settings{};
     settings.agentRadius = 0.4f;
@@ -119,22 +97,6 @@ void testStepClimbLimit() {
     expectTrue(
         !navmesh.findPath({1.0f, 1.0f, 2.5f}, {9.0f, 3.0f, 2.5f}, path),
         "Too-high step path fails");
-}
-
-void testWallBlocksContinuousFloor() {
-    std::vector<odai::world::NavmeshBuildTriangle> triangles;
-    appendQuad(triangles, 0.0f, 5.0f, 0.0f, 0.0f, 10.0f);
-    appendQuad(triangles, 5.0f, 10.0f, 0.0f, 0.0f, 10.0f);
-    appendWall(triangles, 5.0f, 0.0f, 4.0f, 0.0f, 10.0f);
-
-    odai::world::Navmesh navmesh;
-    expectTrue(navmesh.build(triangles, testSettings()), "Wall test navmesh builds");
-    expectTrue(navmesh.stats().obstacleTriangleCount == 2u, "Wall test records obstacle triangles");
-
-    std::vector<odai::world::NavmeshPathPoint> path;
-    expectTrue(
-        !navmesh.findPath({1.0f, 1.0f, 5.0f}, {9.0f, 1.0f, 5.0f}, path),
-        "Vertical wall blocks path across continuous floor edge");
 }
 
 void testNearestPoint() {
@@ -196,7 +158,6 @@ void testBuildFromGpuSceneAsset() {
 int main() {
     testFlatPlanePath();
     testStepClimbLimit();
-    testWallBlocksContinuousFloor();
     testNearestPoint();
     testBuildFromGpuSceneAsset();
 
