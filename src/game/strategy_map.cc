@@ -27,6 +27,7 @@ TileColor terrainColor(TerrainType terrain) {
         case TerrainType::Grassland:  return {0.32f, 0.54f, 0.24f};
         case TerrainType::Plains:     return {0.56f, 0.60f, 0.30f};
         case TerrainType::Forest:     return {0.18f, 0.38f, 0.20f};
+        case TerrainType::Jungle:     return {0.13f, 0.45f, 0.16f};
         case TerrainType::Hills:      return {0.46f, 0.42f, 0.26f};
         case TerrainType::Mountains:  return {0.46f, 0.44f, 0.43f};
         case TerrainType::Desert:     return {0.82f, 0.73f, 0.44f};

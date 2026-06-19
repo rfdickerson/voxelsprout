@@ -13,6 +13,7 @@ struct VertexInput
     [[vk::location(1)]] float2 inUv : TEXCOORD1;
     [[vk::location(2)]] float4 inColor : TEXCOORD2;  // R8G8B8A8_UNORM -> 0..1 straight alpha.
     [[vk::location(3)]] uint inMode : TEXCOORD3;
+    [[vk::location(4)]] float4 inSdf : TEXCOORD4;     // Mode-specific params (RoundRect).
 };
 
 struct VertexOutput
@@ -21,6 +22,7 @@ struct VertexOutput
     float4 outColor : TEXCOORD0;
     float2 outUv : TEXCOORD1;
     nointerpolation uint outMode : TEXCOORD2;
+    nointerpolation float4 outSdf : TEXCOORD3;
 };
 
 VertexOutput main(VertexInput input)
@@ -32,5 +34,6 @@ VertexOutput main(VertexInput input)
     output.outColor = input.inColor;
     output.outUv = input.inUv;
     output.outMode = input.inMode;
+    output.outSdf = input.inSdf;
     return output;
 }

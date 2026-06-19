@@ -299,70 +299,15 @@ void RendererBackend::buildFrameStatsUi() {
     constexpr ImGuiWindowFlags kPanelFlags =
         ImGuiWindowFlags_AlwaysAutoResize |
         ImGuiWindowFlags_NoSavedSettings;
-    if (!ImGui::Begin("Morrowind Renderer", &m_showFrameStatsPanel, kPanelFlags)) {
+    if (!ImGui::Begin("Strategy Map", &m_showFrameStatsPanel, kPanelFlags)) {
         ImGui::End();
         return;
     }
 
-    const bool importedSceneLoaded = !m_importedMeshDraws.empty() || m_importedWaterIndexCount > 0;
     const float autoScale = std::numeric_limits<float>::max();
     if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Text("Viewer: Morrowind scene");
         ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
-        if (importedSceneLoaded) {
-            ImGui::Checkbox("Show Terrain", &m_debugShowImportedTerrain);
-            ImGui::Checkbox("Show Statics", &m_debugShowImportedStatics);
-            ImGui::Checkbox("Show Textures", &m_debugShowImportedTextures);
-            ImGui::Checkbox("Flat Static Shading", &m_debugImportedFlatShading);
-            ImGui::Checkbox("Solid Water Debug", &m_debugImportedWaterSolid);
-            const char* waterDebugViews =
-                "Final\0Normals\0Depth/Thickness\0Scene Refraction\0Refraction UV Offset\0Reflection\0Fresnel\0";
-            ImGui::Combo("Water Debug View", &m_skyDebugSettings.waterDebugMode, waterDebugViews);
-            ImGui::SliderFloat(
-                "Water Animation Speed",
-                &m_skyDebugSettings.waterAnimationSpeed,
-                0.25f,
-                4.0f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Normal Strength",
-                &m_skyDebugSettings.waterNormalStrength,
-                0.25f,
-                2.5f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Reflection Strength",
-                &m_skyDebugSettings.waterReflectionStrength,
-                0.25f,
-                4.0f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Refraction Decay",
-                &m_skyDebugSettings.waterRefractionDecay,
-                0.25f,
-                5.0f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Refraction Strength",
-                &m_skyDebugSettings.waterRefractionStrength,
-                0.0f,
-                3.0f,
-                "%.2f");
-            ImGui::SliderFloat(
-                "Water Refraction Distortion",
-                &m_skyDebugSettings.waterRefractionDistortionPixels,
-                0.0f,
-                160.0f,
-                "%.0f px");
-            ImGui::TextDisabled("Hotkeys: F5 terrain, F6 statics, K textures, F7 flat shading, F8 water debug");
-            ImGui::Text(
-                "Imported Draws / Water Indices: %u / %u",
-                static_cast<unsigned>(m_importedMeshDraws.size()),
-                m_importedWaterIndexCount
-            );
-        } else {
-            ImGui::TextDisabled("Imported-scene geometry not loaded.");
-        }
+        ImGui::Text("Map Draws: %u", static_cast<unsigned>(m_importedMeshDraws.size()));
     }
 
     if (ImGui::CollapsingHeader("Frame Pacing", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -418,33 +363,6 @@ void RendererBackend::buildFrameStatsUi() {
         if (ImGui::Combo("Shadow Backend", &shadowMode, "Shadow Maps\0Ray Traced (Beta)\0Auto (Beta)\0")) {
             setShadowSettings(ShadowSettings{static_cast<ShadowMode>(shadowMode)});
         }
-        const char* activeModeLabel = "Shadow Maps";
-        if (m_shadowStats.activeMode == ShadowMode::RayTraced) {
-            activeModeLabel = "Ray Traced";
-        } else if (m_shadowStats.activeMode == ShadowMode::Auto) {
-            activeModeLabel = "Auto";
-        }
-        ImGui::Text("Active: %s", activeModeLabel);
-        ImGui::Text("Fallback Active: %s", m_shadowStats.fallbackActive ? "yes" : "no");
-        ImGui::Text("Fallback Reason: %s", shadowFallbackReasonName(m_shadowStats.fallbackReason));
-        ImGui::Text("RT Release Status: %s", rayTracingReleaseStatusName());
-        ImGui::Text("RT Core Ready: %s", m_shadowStats.rayTracingSupported ? "yes" : "no");
-        ImGui::Text("RT Runtime Enabled: %s", m_shadowStats.rayTracingRuntimeEnabled ? "yes" : "no");
-        ImGui::Text("Main Pass RT Ready: %s", m_shadowStats.mainPassRayTracingReady ? "yes" : "no");
-        ImGui::Text("Main Pass RT Active: %s", m_shadowStats.mainPassRayTracingActive ? "yes" : "no");
-        ImGui::Text(
-            "RT Samples / Sun Radius: %d / %.2f deg",
-            std::clamp(m_shadowDebugSettings.rtShadowSampleCount, 1, 8),
-            m_shadowDebugSettings.rtSunAngularRadiusDegrees
-        );
-        ImGui::Text("RT Beta Scope: main-pass geometry + imported scene");
-        ImGui::Text(
-            "RT Scene Builds / BLAS / TLAS: %u / %u / %u",
-            m_rtSceneBuildCount,
-            m_rtBlasBuildCount,
-            m_rtTlasBuildCount
-        );
-        ImGui::Text("Imported RT Geometries: %u", static_cast<unsigned>(m_rtImportedSceneRecords.size()));
         ImGui::Text(
             "Cascade Splits: %.1f / %.1f / %.1f / %.1f",
             m_shadowCascadeSplits[0],
@@ -457,33 +375,10 @@ void RendererBackend::buildFrameStatsUi() {
         ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
         ImGui::SliderFloat("Sun Disk Intensity", &m_skyDebugSettings.sunDiskIntensity, 300.0f, 2200.0f, "%.0f");
         ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");
-        ImGui::SeparatorText("Imported Lights");
-        ImGui::Checkbox("Enable Imported Lights", &m_debugImportedLightsEnabled);
-        ImGui::SliderFloat("Imported Light Intensity", &m_debugImportedLightIntensity, 0.0f, 4.0f, "%.2f");
-        ImGui::SliderFloat("Imported Light Radius", &m_debugImportedLightRadiusScale, 0.25f, 8.0f, "%.2fx");
-        ImGui::Text(
-            "Imported Lights: %u total / %u selected",
-            static_cast<unsigned>(m_importedLocalLights.size()),
-            static_cast<unsigned>(m_debugImportedLightSelectedCount)
-        );
         ImGui::Checkbox("Shadow Occluder Culling", &m_shadowDebugSettings.enableOccluderCulling);
         ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
-        ImGui::SliderInt("RT Samples", &m_shadowDebugSettings.rtShadowSampleCount, 1, 8);
-        ImGui::SliderFloat(
-            "RT Sun Radius (deg)",
-            &m_shadowDebugSettings.rtSunAngularRadiusDegrees,
-            0.0f,
-            1.0f,
-            "%.2f"
-        );
         ImGui::SliderFloat("Cascade Blend Min", &m_shadowDebugSettings.cascadeBlendMin, 1.0f, 20.0f, "%.2f");
         ImGui::SliderFloat("Cascade Blend Factor", &m_shadowDebugSettings.cascadeBlendFactor, 0.05f, 0.60f, "%.2f");
-        ImGui::SliderInt(
-            "Grass Shadow Cascades",
-            &m_shadowDebugSettings.grassShadowCascadeCount,
-            0,
-            static_cast<int>(kShadowCascadeCount)
-        );
         if (ImGui::TreeNodeEx("Advanced Shadow Bias", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Receiver Bias");
             ImGui::SliderFloat(
@@ -565,75 +460,6 @@ void RendererBackend::buildFrameStatsUi() {
         }
     }
 
-    if (ImGui::CollapsingHeader("Global Illumination", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Checkbox("Enable SSAO", &m_debugEnableSsao);
-        ImGui::SliderFloat("SSAO Radius", &m_shadowDebugSettings.ssaoRadius, 1.0f, 96.0f, "%.1f");
-        ImGui::SliderFloat("SSAO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 6.0f, "%.2f");
-        ImGui::SliderFloat("SSAO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 2.0f, "%.2f");
-        if (ImGui::TreeNodeEx("Advanced AO Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Checkbox("Visualize SSAO", &m_debugVisualizeSsao);
-            ImGui::Checkbox("Visualize AO Normals", &m_debugVisualizeAoNormals);
-            ImGui::TreePop();
-        }
-
-        ImGui::Separator();
-        ImGui::Text("Scene GI");
-        ImGui::Text("Compute: %s", m_voxelGiComputeAvailable ? "on" : "fallback");
-        int giSurfaceMode = static_cast<int>(m_voxelGiDebugSettings.surfaceMode);
-        ImGui::Combo("GI Surface Mode", &giSurfaceMode, "Legacy\0RT Surface\0ReSTIR Surface\0");
-        m_voxelGiDebugSettings.surfaceMode = static_cast<VoxelGiSurfaceMode>(giSurfaceMode);
-        ImGui::Text(
-            "GI Active: %s",
-            m_voxelGiRestirActiveThisFrame
-                ? "ReSTIR Surface"
-                : (m_voxelGiRtSurfaceActiveThisFrame ? "RT Surface" : "Legacy")
-        );
-        ImGui::Text(
-            "GI Readiness: RT=%s ReSTIR=%s TLAS=%s",
-            m_voxelGiRtSurfaceReady ? "yes" : "no",
-            m_voxelGiRestirReady ? "yes" : "no",
-            m_rtTlas.handle != VK_NULL_HANDLE ? "yes" : "no"
-        );
-        if (m_importedSceneInteriorMode) {
-            ImGui::Text(
-                "Imported GI: %u tris / %u voxels / %u lights",
-                static_cast<unsigned>(m_debugImportedGiTriangleCount),
-                static_cast<unsigned>(m_debugImportedGiVoxelizedCellCount),
-                static_cast<unsigned>(m_debugImportedLightSelectedCount)
-            );
-        }
-        ImGui::SliderFloat("Bounce Strength", &m_voxelGiDebugSettings.bounceStrength, 0.0f, 2.50f, "%.2f");
-        ImGui::SliderFloat("Diffusion Softness", &m_voxelGiDebugSettings.diffusionSoftness, 0.0f, 1.0f, "%.2f");
-        ImGui::SliderInt("RT Surface Samples", &m_voxelGiDebugSettings.rtSurfaceSampleCount, 1, 2);
-        ImGui::SliderFloat("RT Surface Bias", &m_voxelGiDebugSettings.rtSurfaceBiasScale, 0.25f, 4.0f, "%.2f");
-        ImGui::SeparatorText("ReSTIR GI");
-        ImGui::SliderInt("ReSTIR Candidates", &m_voxelGiDebugSettings.restirCandidateCount, 1, 8);
-        ImGui::Checkbox("ReSTIR Temporal", &m_voxelGiDebugSettings.restirEnableTemporalReuse);
-        ImGui::Checkbox("ReSTIR Spatial", &m_voxelGiDebugSettings.restirEnableSpatialReuse);
-        ImGui::SliderInt("ReSTIR Radius", &m_voxelGiDebugSettings.restirSpatialRadius, 1, 2);
-        ImGui::Text(
-            "History: %s (%s)",
-            m_voxelGiRestirHistoryValid ? "valid" : "reset",
-            m_voxelGiRestirHistoryResetReason.c_str()
-        );
-        if (ImGui::Button("Reset ReSTIR History")) {
-            m_voxelGiDebugSettings.restirHistoryResetRequested = true;
-        }
-        if (ImGui::TreeNodeEx("Advanced GI Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
-            const char* giVisualizationModes =
-                "Off\0Radiance\0False Color Luma\0Radiance (Gray)\0Occupancy Albedo\0Imported Lights\0";
-            ImGui::Combo("GI Visualize", &m_voxelGiDebugSettings.visualizationMode, giVisualizationModes);
-            if (m_voxelGiDebugSettings.visualizationMode > 0) {
-                m_debugVisualizeSsao = false;
-                m_debugVisualizeAoNormals = false;
-            }
-            ImGui::TreePop();
-        }
-        if (ImGui::Button("Reset GI Defaults")) {
-            m_voxelGiDebugSettings = VoxelGiDebugSettings{};
-        }
-    }
-
     if (ImGui::CollapsingHeader("Sky & Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::TreeNodeEx("Advanced Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Auto Sunrise Tuning", &m_skyDebugSettings.autoSunriseTuning);
@@ -666,13 +492,6 @@ void RendererBackend::buildFrameStatsUi() {
             );
             ImGui::TreePop();
         }
-        ImGui::SliderFloat(
-            "Plant Quad Directionality",
-            &m_skyDebugSettings.plantQuadDirectionality,
-            0.0f,
-            1.0f,
-            "%.2f"
-        );
         ImGui::Text(
             "Runtime: Rayleigh %.2f, Mie %.2f, Exposure %.2f, Disk %.2f",
             m_skyTuningRuntime.rayleighStrength,
@@ -890,19 +709,9 @@ void RendererBackend::buildFrameStatsUi() {
         }
         if (ImGui::TreeNodeEx("GPU Stages (ms)", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
-            ImGui::Text("GI Occupancy (compute): %.2f", m_debugGpuGiOccupancyTimeMs);
-            ImGui::Text("GI Surface (compute): %.2f", m_debugGpuGiSurfaceTimeMs);
-            ImGui::Text("GI ReSTIR Candidate (compute): %.2f", m_debugGpuGiSurfaceCandidateTimeMs);
-            ImGui::Text("GI ReSTIR Temporal (compute): %.2f", m_debugGpuGiSurfaceTemporalTimeMs);
-            ImGui::Text("GI ReSTIR Spatial (compute): %.2f", m_debugGpuGiSurfaceSpatialTimeMs);
-            ImGui::Text("GI ReSTIR Resolve (compute): %.2f", m_debugGpuGiSurfaceResolveTimeMs);
-            ImGui::Text("GI Inject (compute): %.2f", m_debugGpuGiInjectTimeMs);
-            ImGui::Text("GI Propagate (compute): %.2f", m_debugGpuGiPropagateTimeMs);
             ImGui::Text("Auto Exposure (compute): %.2f", m_debugGpuAutoExposureTimeMs);
             ImGui::Text("Sun Shafts (compute): %.2f", m_debugGpuSunShaftTimeMs);
             ImGui::Text("Prepass: %.2f", m_debugGpuPrepassTimeMs);
-            ImGui::Text("SSAO: %.2f", m_debugGpuSsaoTimeMs);
-            ImGui::Text("SSAO Blur: %.2f", m_debugGpuSsaoBlurTimeMs);
             ImGui::Text("Main: %.2f", m_debugGpuMainTimeMs);
             ImGui::Text("Post: %.2f", m_debugGpuPostTimeMs);
             ImGui::Text("UI: %.2f", m_debugGpuUiTimeMs);
@@ -992,39 +801,6 @@ void RendererBackend::buildFrameStatsUi() {
                 m_desktopCapabilityProbe.maxFragmentCombinedOutputResources
             );
             ImGui::Text("Storage Image Limit: %u", m_desktopCapabilityProbe.maxDescriptorSetStorageImages);
-            ImGui::TreePop();
-        }
-        if (ImGui::TreeNodeEx("Ray Tracing Capabilities", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Text(
-                "Acceleration Structure: %s",
-                m_rayTracingCapabilityProbe.accelerationStructureExtension ? "yes" : "no"
-            );
-            ImGui::Text("Ray Query: %s", m_rayTracingCapabilityProbe.rayQueryExtension ? "yes" : "no");
-            ImGui::Text(
-                "Deferred Host Operations: %s",
-                m_rayTracingCapabilityProbe.deferredHostOperationsExtension ? "yes" : "no"
-            );
-            ImGui::Text("RT Pipeline: %s", m_rayTracingCapabilityProbe.rayTracingPipelineExtension ? "yes" : "no");
-            ImGui::Text(
-                "RT Maintenance1: %s",
-                m_rayTracingCapabilityProbe.rayTracingMaintenance1Extension ? "yes" : "no"
-            );
-            ImGui::Text(
-                "RT Position Fetch: %s",
-                m_rayTracingCapabilityProbe.rayTracingPositionFetchExtension ? "yes" : "no"
-            );
-            ImGui::Text(
-                "Acceleration Structure Feature: %s",
-                m_rayTracingCapabilityProbe.accelerationStructureFeature ? "yes" : "no"
-            );
-            ImGui::Text("Ray Query Feature: %s", m_rayTracingCapabilityProbe.rayQueryFeature ? "yes" : "no");
-            ImGui::Text("RT Core Ready: %s", m_rayTracingCapabilityProbe.rayTracingCoreReady ? "yes" : "no");
-            ImGui::Text(
-                "Scratch Alignment: %llu",
-                static_cast<unsigned long long>(m_rayTracingCapabilityProbe.scratchAlignment)
-            );
-            ImGui::Text("Imported RT Geometries: %u", static_cast<unsigned>(m_rtImportedSceneRecords.size()));
-            ImGui::Text("Magica RT Geometries: %u", static_cast<unsigned>(m_rtMagicaGeometries.size()));
             ImGui::TreePop();
         }
     }

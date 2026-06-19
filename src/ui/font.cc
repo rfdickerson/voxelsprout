@@ -316,9 +316,10 @@ static std::vector<std::uint16_t> prescanGsubLigaGlyphs(const std::uint8_t* data
     std::vector<std::uint16_t> lookupIdx;
     for (std::uint16_t fi = 0; fi < featCount; ++fi) {
         const std::uint8_t* rec = featureList + 2 + 6u * fi;
+        // Only 'liga' (standard ligatures: fi, fl, ff, ffi, ffl).
+        // Skip 'dlig' (discretionary/historical: st, ct, ck, Th, etc.).
         const bool isLiga = (rec[0]=='l' && rec[1]=='i' && rec[2]=='g' && rec[3]=='a');
-        const bool isDlig = (rec[0]=='d' && rec[1]=='l' && rec[2]=='i' && rec[3]=='g');
-        if (isLiga || isDlig) {
+        if (isLiga) {
             const std::uint8_t* feat = featureList + u16be(rec + 4);
             const std::uint16_t n = u16be(feat + 2);
             for (std::uint16_t j = 0; j < n; ++j)
@@ -377,13 +378,13 @@ static void parseGsub(Font::ShapingData& sd,
     const std::uint8_t* featureList = gsub + u16be(gsub + 6);
     const std::uint16_t featCount = u16be(featureList);
 
-    // Collect LookupList indices for 'liga' (standard) and 'dlig' (discretionary) features.
+    // Collect LookupList indices for 'liga' (standard ligatures: fi, fl, ff) only.
+    // Exclude 'dlig' (discretionary/historical: st, ct, ck, Th).
     std::vector<std::uint16_t> lookupIdx;
     for (std::uint16_t fi = 0; fi < featCount; ++fi) {
         const std::uint8_t* rec = featureList + 2 + 6u * fi;
         const bool isLiga = (rec[0]=='l' && rec[1]=='i' && rec[2]=='g' && rec[3]=='a');
-        const bool isDlig = (rec[0]=='d' && rec[1]=='l' && rec[2]=='i' && rec[3]=='g');
-        if (isLiga || isDlig) {
+        if (isLiga) {
             const std::uint8_t* feat = featureList + u16be(rec + 4);
             const std::uint16_t n = u16be(feat + 2);
             for (std::uint16_t j = 0; j < n; ++j)

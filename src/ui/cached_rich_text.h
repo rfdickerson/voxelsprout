@@ -68,10 +68,21 @@ public:
     // Tooltip-run rects translated into screen space for `rect`.
     [[nodiscard]] std::vector<RichTextLink> linksFor(const UiRect& rect) const;
 
+    // Like emit(), but shifts the content up by scrollOffsetY so the viewport
+    // shows a scrolled window into the full laid-out text.
+    void emitScrolled(UiDrawList& drawList, const UiRect& viewportRect, float scrollOffsetY);
+
+    // Natural height of the laid-out content in pixels (valid after ensure()).
+    // Does NOT include padding — add padding.y*2 for the full preferred height.
+    [[nodiscard]] float naturalHeight() const { return layout_.height; }
+
     // Re-draw only the runs whose tooltip matches `tooltip`, using `highlightColor`
     // instead of their stored color. Called after emit() to tint hovered link text.
     void drawHighlightedTooltip(UiDrawList& dl, const UiRect& rect,
                                 std::string_view tooltip, const UiColor& highlightColor) const;
+    void drawHighlightedTooltipScrolled(UiDrawList& dl, const UiRect& viewportRect,
+                                        float scrollOffsetY, std::string_view tooltip,
+                                        const UiColor& highlightColor) const;
 
     // Count of (re)builds; used by tests to assert caching behaviour.
     [[nodiscard]] std::uint32_t rebuildCount() const { return rebuildCount_; }

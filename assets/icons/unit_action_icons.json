@@ -1,0 +1,64 @@
+{
+  "iconSize": 128,
+  "columns": 4,
+  "rows": 3,
+  "icons": {
+    "move": [
+      0,
+      0
+    ],
+    "attack": [
+      1,
+      0
+    ],
+    "ranged_attack": [
+      2,
+      0
+    ],
+    "fortify": [
+      3,
+      0
+    ],
+    "wait": [
+      0,
+      1
+    ],
+    "sleep": [
+      1,
+      1
+    ],
+    "explore": [
+      2,
+      1
+    ],
+    "found_city": [
+      3,
+      1
+    ],
+    "build": [
+      0,
+      2
+    ],
+    "embark": [
+      1,
+      2
+    ],
+    "disembark": [
+      2,
+      2
+    ],
+    "cancel": [
+      3,
+      2
+    ]
+  },
+  "aliases": {
+    "ranged": "ranged_attack",
+    "found": "found_city",
+    "found_settlement": "found_city",
+    "construct": "build",
+    "board_ship": "embark",
+    "land": "disembark",
+    "stop": "cancel"
+  }
+}

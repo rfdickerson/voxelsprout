@@ -998,6 +998,13 @@ bool RendererBackend::createLogicalDevice() {
         m_enableDisplayTiming = false;
     }
     m_rayTracingRuntimeEnabled = loadRayTracingFunctions();
+    if (m_strategyMapMode) {
+        // The flat hex map needs no ray-traced shadows/GI. Disabling the RT
+        // runtime skips the BLAS/TLAS acceleration-structure build (multi-second
+        // on first frames) and forces voxel GI to its cheap legacy path.
+        m_rayTracingRuntimeEnabled = false;
+        m_voxelGiDebugSettings.surfaceMode = VoxelGiSurfaceMode::Legacy;
+    }
     VOX_LOGI("render") << "present runtime: displayTimingSupport=" << (m_supportsDisplayTiming ? "yes" : "no")
         << ", displayTimingExtension=" << (m_hasDisplayTimingExtension ? "yes" : "no")
         << ", displayTimingEnabled=" << (m_enableDisplayTiming ? "yes" : "no")

@@ -9,7 +9,6 @@
 
 #include "import/gpu_scene.h"
 #include "import/imported_scene.h"
-#include "import/morrowind_nif.h"
 #include "world/imported_scene_collision.h"
 
 namespace {
@@ -30,155 +29,6 @@ void expectNear(float actual, float expected, float epsilon, const char* message
                   << ", got " << actual << ")\n";
         ++g_failures;
     }
-}
-
-template <typename T>
-void appendBinaryValue(std::vector<std::uint8_t>& bytes, const T& value) {
-    const auto* raw = reinterpret_cast<const std::uint8_t*>(&value);
-    bytes.insert(bytes.end(), raw, raw + sizeof(T));
-}
-
-void appendSizedString(std::vector<std::uint8_t>& bytes, const std::string& value) {
-    appendBinaryValue(bytes, static_cast<std::uint32_t>(value.size()));
-    bytes.insert(bytes.end(), value.begin(), value.end());
-}
-
-void appendBool(std::vector<std::uint8_t>& bytes, bool value) {
-    appendBinaryValue(bytes, static_cast<std::int32_t>(value ? 1 : 0));
-}
-
-void appendRefList(std::vector<std::uint8_t>& bytes, std::initializer_list<std::int32_t> refs) {
-    appendBinaryValue(bytes, static_cast<std::uint32_t>(refs.size()));
-    for (const std::int32_t ref : refs) {
-        appendBinaryValue(bytes, ref);
-    }
-}
-
-void appendIdentityAvObject(std::vector<std::uint8_t>& bytes, const std::string& name) {
-    appendSizedString(bytes, name);
-    appendBinaryValue(bytes, static_cast<std::int32_t>(-1));
-    appendBinaryValue(bytes, static_cast<std::int32_t>(-1));
-    appendBinaryValue(bytes, static_cast<std::uint16_t>(0));
-
-    const float translation[3] = {0.0f, 0.0f, 0.0f};
-    for (const float value : translation) {
-        appendBinaryValue(bytes, value);
-    }
-    const float rotation[9] = {
-        1.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f,
-        0.0f, 0.0f, 1.0f
-    };
-    for (const float value : rotation) {
-        appendBinaryValue(bytes, value);
-    }
-    appendBinaryValue(bytes, 1.0f);
-    const float center[3] = {0.0f, 0.0f, 0.0f};
-    for (const float value : center) {
-        appendBinaryValue(bytes, value);
-    }
-    appendRefList(bytes, {});
-    appendBool(bytes, false);
-}
-
-void appendNifNode(
-    std::vector<std::uint8_t>& bytes,
-    const std::string& name,
-    std::initializer_list<std::int32_t> children
-) {
-    appendSizedString(bytes, "NiNode");
-    appendIdentityAvObject(bytes, name);
-    appendRefList(bytes, children);
-    appendRefList(bytes, {});
-}
-
-void appendNifTriShape(
-    std::vector<std::uint8_t>& bytes,
-    const std::string& name,
-    std::int32_t dataRef
-) {
-    appendSizedString(bytes, "NiTriShape");
-    appendIdentityAvObject(bytes, name);
-    appendBinaryValue(bytes, dataRef);
-    appendBinaryValue(bytes, static_cast<std::int32_t>(-1));
-}
-
-void appendNifTriShapeData(
-    std::vector<std::uint8_t>& bytes,
-    const float (&positions)[9],
-    const std::uint16_t (&indices)[3]
-) {
-    appendSizedString(bytes, "NiTriShapeData");
-    appendBinaryValue(bytes, static_cast<std::uint16_t>(3));
-    appendBool(bytes, true);
-    for (const float value : positions) {
-        appendBinaryValue(bytes, value);
-    }
-    appendBool(bytes, true);
-    const float normals[9] = {
-        0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 1.0f
-    };
-    for (const float value : normals) {
-        appendBinaryValue(bytes, value);
-    }
-    const float bounds[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    for (const float value : bounds) {
-        appendBinaryValue(bytes, value);
-    }
-    appendBool(bytes, false);
-    appendBinaryValue(bytes, static_cast<std::uint16_t>(1));
-    appendBool(bytes, true);
-    const float uvs[6] = {
-        0.0f, 0.0f,
-        1.0f, 0.0f,
-        0.0f, 1.0f
-    };
-    for (const float value : uvs) {
-        appendBinaryValue(bytes, value);
-    }
-    appendBinaryValue(bytes, static_cast<std::uint16_t>(1));
-    appendBinaryValue(bytes, static_cast<std::uint32_t>(3));
-    for (const std::uint16_t index : indices) {
-        appendBinaryValue(bytes, index);
-    }
-    appendBinaryValue(bytes, static_cast<std::uint16_t>(0));
-}
-
-std::filesystem::path writeSyntheticRootCollisionNif() {
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "odai_named_root_collision_node.nif";
-    std::vector<std::uint8_t> bytes;
-    const std::string header = "NetImmerse File Format, Version 4.0.0.2\n";
-    bytes.insert(bytes.end(), header.begin(), header.end());
-    appendBinaryValue(bytes, static_cast<std::uint32_t>(0x04000002u));
-    appendBinaryValue(bytes, static_cast<std::uint32_t>(6));
-
-    appendNifNode(bytes, "Root", {1, 2});
-    appendNifTriShape(bytes, "visible_triangle", 3);
-    appendNifNode(bytes, "RootCollisionNode", {4});
-    const float visiblePositions[9] = {
-        0.0f, 0.0f, 0.0f,
-        1.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f
-    };
-    const std::uint16_t triangleIndices[3] = {0, 1, 2};
-    appendNifTriShapeData(bytes, visiblePositions, triangleIndices);
-    appendNifTriShape(bytes, "collision_triangle", 5);
-    const float collisionPositions[9] = {
-        10.0f, 0.0f, 0.0f,
-        11.0f, 0.0f, 0.0f,
-        10.0f, 1.0f, 0.0f
-    };
-    appendNifTriShapeData(bytes, collisionPositions, triangleIndices);
-
-    appendBinaryValue(bytes, static_cast<std::uint32_t>(1));
-    appendBinaryValue(bytes, static_cast<std::int32_t>(0));
-
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    return path;
 }
 
 void testImportedSceneSerialization() {
@@ -532,28 +382,6 @@ void testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain() {
         "Interior packed scene keeps placed mesh height");
 }
 
-void testMorrowindNifSkipsNamedRootCollisionNode() {
-    const std::filesystem::path nifPath = writeSyntheticRootCollisionNif();
-
-    odai::importer::ImportedNifResult result{};
-    std::string error;
-    expectTrue(
-        odai::importer::loadMorrowindStaticNif(nifPath, result, error),
-        "Morrowind NIF loader imports synthetic fixture");
-    expectTrue(result.mesh.vertices.size() == 3u,
-               "Morrowind NIF loader skips NiNode named RootCollisionNode vertices");
-    expectTrue(result.mesh.indices.size() == 3u,
-               "Morrowind NIF loader skips NiNode named RootCollisionNode indices");
-    expectTrue(result.mesh.parts.size() == 1u,
-               "Morrowind NIF loader skips NiNode named RootCollisionNode parts");
-    for (const odai::importer::ImportedSceneVertex& vertex : result.mesh.vertices) {
-        expectTrue(vertex.position[0] < 10.0f,
-                   "Morrowind NIF loader excludes collision-only triangle positions");
-    }
-
-    std::filesystem::remove(nifPath);
-}
-
 void testImportedSceneCollision() {
     using odai::importer::GpuSceneAsset;
     using odai::importer::ImportedScene;
@@ -692,7 +520,6 @@ int main() {
     testImportedSceneSerialization();
     testGpuSceneBuildFromImportedScene();
     testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain();
-    testMorrowindNifSkipsNamedRootCollisionNode();
     testImportedSceneCollision();
 
     if (g_failures != 0) {

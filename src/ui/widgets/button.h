@@ -26,6 +26,13 @@ public:
     UiColor borderColor{0.85f, 0.72f, 0.44f, 0.55f};
     UiColor labelColor{0.91f, 0.82f, 0.51f, 1.0f};
     float borderThicknessPx = 1.0f;
+    // Corner radius in pixels (DPI-scaled by the caller). Drawn as an anti-aliased
+    // SDF rounded rect; a very large value yields a pill. 0 = sharp corners.
+    float cornerRadiusPx = 6.0f;
+    // Mouse-over glow: a soft SDF halo drawn behind the button while hovered or
+    // pressed. Set glowSizePx to 0 to disable. Caller scales glowSizePx by DPI.
+    UiColor glowColor{0.95f, 0.72f, 0.35f, 0.55f};
+    float glowSizePx = 12.0f;
 
     void setEnabled(bool enabled);
     [[nodiscard]] bool enabled() const { return enabled_; }

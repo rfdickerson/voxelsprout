@@ -3,6 +3,7 @@
 #include <iostream>
 #include <memory>
 
+#include "game/buildable.h"
 #include "ui/animation.h"
 #include "ui/cached_rich_text.h"
 #include "ui/document/ui_binding.h"
@@ -14,10 +15,22 @@
 #include "ui/ui_input.h"
 #include "ui/ui_types.h"
 #include "ui/widgets/button.h"
+#include "ui/widgets/donut_chart.h"
+#include "ui/widgets/dropdown.h"
+#include "ui/widgets/line_chart.h"
+#include "ui/widgets/panel.h"
+#include "ui/widgets/production_panel.h"
 #include "ui/widgets/progress_bar.h"
 #include "ui/widgets/scroll_view.h"
+#include "ui/widgets/slider.h"
 #include "ui/widgets/spacer.h"
 #include "ui/widgets/stack_layout.h"
+#include "ui/widgets/stat_badge.h"
+#include "ui/widgets/tab_bar.h"
+#include "ui/widgets/text_box.h"
+#include "ui/widgets/toast.h"
+#include "ui/widgets/toggle.h"
+#include "ui/widgets/toolbar.h"
 
 #include <cstddef>
 
@@ -179,6 +192,251 @@ void testButtonCallbackAndHitTest() {
     UiInput away = inputAt(380.0f, 280.0f);
     ctx.update(away);
     expectTrue(!ctx.wantsMouse(), "context does not want mouse when cursor is off all widgets");
+}
+
+void testSliderDrag() {
+    using namespace odai::ui;
+    Slider sl;
+    sl.setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 24.0f));
+    sl.value = 0.0f;
+
+    float reported = -1.0f;
+    sl.onChange = [&](float v) { reported = v; };
+
+    // Click on the track at x=100 → value ≈ 0.5.
+    UiEvent down{};
+    down.type = UiEvent::Type::MouseDown;
+    down.button = UiMouseButton::Left;
+    down.mousePx = UiVec2{100.0f, 12.0f};
+    sl.onEvent(down);
+    expectTrue(reported > 0.4f && reported < 0.6f, "Slider: click mid-track yields ~0.5");
+
+    // Drag to the right edge.
+    UiEvent move{};
+    move.type = UiEvent::Type::MouseMove;
+    move.mousePx = UiVec2{200.0f, 12.0f};
+    sl.onEvent(move);
+    expectNear(sl.value, 1.0f, 0.01f, "Slider: drag to right edge clamps to 1.0");
+
+    // Release stops the drag.
+    UiEvent up{};
+    up.type = UiEvent::Type::MouseUp;
+    up.mousePx = UiVec2{200.0f, 12.0f};
+    sl.onEvent(up);
+    // Move without dragging should not change value.
+    UiEvent move2{};
+    move2.type = UiEvent::Type::MouseMove;
+    move2.mousePx = UiVec2{0.0f, 12.0f};
+    sl.onEvent(move2);
+    expectNear(sl.value, 1.0f, 0.01f, "Slider: value unchanged after MouseUp (drag released)");
+
+    // Emits geometry without crashing.
+    UiDrawList dl;
+    dl.reset(UiVec2{400.0f, 200.0f});
+    sl.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "Slider: emits geometry");
+}
+
+void testToggleClick() {
+    using namespace odai::ui;
+    Toggle tog;
+    tog.setRect(UiRect::fromXYWH(0.0f, 0.0f, 50.0f, 24.0f));
+
+    bool lastChecked = false;
+    int callCount = 0;
+    tog.onChange = [&](bool v) { lastChecked = v; ++callCount; };
+
+    expectTrue(!tog.checked, "Toggle: starts unchecked");
+
+    UiEvent click{};
+    click.type = UiEvent::Type::MouseDown;
+    click.button = UiMouseButton::Left;
+    click.mousePx = UiVec2{25.0f, 12.0f};
+    tog.onEvent(click);
+    expectTrue(tog.checked, "Toggle: click flips to checked");
+    expectTrue(callCount == 1, "Toggle: onChange fired once");
+    expectTrue(lastChecked, "Toggle: onChange receives true");
+
+    tog.onEvent(click);
+    expectTrue(!tog.checked, "Toggle: second click flips back to unchecked");
+    expectTrue(!lastChecked, "Toggle: onChange receives false");
+
+    // Emits geometry without crashing.
+    UiDrawList dl;
+    dl.reset(UiVec2{400.0f, 200.0f});
+    tog.update(0.0f);
+    tog.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "Toggle: emits geometry");
+}
+
+void testTabBarSwitch() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    TabBar bar(&font);
+    bar.setRect(UiRect::fromXYWH(0.0f, 0.0f, 300.0f, 32.0f));
+    const int t0 = bar.addTab("Overview");
+    const int t1 = bar.addTab("Units");
+    const int t2 = bar.addTab("History");
+    expectTrue(t0 == 0 && t1 == 1 && t2 == 2, "TabBar: addTab returns sequential indices");
+    expectTrue(bar.activeTab == 0, "TabBar: starts at tab 0");
+
+    int changed = -1;
+    bar.onTabChanged = [&](int i) { changed = i; };
+
+    // Click in the third tab's region (x ≈ 200..300 for 300px / 3 tabs).
+    UiEvent click{};
+    click.type = UiEvent::Type::MouseDown;
+    click.button = UiMouseButton::Left;
+    click.mousePx = UiVec2{250.0f, 16.0f};
+    bar.onEvent(click);
+    expectTrue(bar.activeTab == 2, "TabBar: click third tab activates index 2");
+    expectTrue(changed == 2, "TabBar: onTabChanged fires with correct index");
+
+    // Clicking the already-active tab does not fire the callback again.
+    changed = -1;
+    bar.onEvent(click);
+    expectTrue(changed == -1, "TabBar: clicking active tab does not re-fire callback");
+
+    // Geometry.
+    UiDrawList dl;
+    dl.reset(UiVec2{800.0f, 600.0f});
+    bar.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "TabBar: emits geometry");
+}
+
+void testDropdownSelect() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    Dropdown dd(&font);
+    dd.setRect(UiRect::fromXYWH(10.0f, 10.0f, 150.0f, 28.0f));
+    dd.items = {"Warrior", "Spearman", "Archer"};
+    dd.itemHeightPx = 24.0f;
+
+    int selected = -1;
+    dd.onSelect = [&](int i) { selected = i; };
+
+    expectTrue(!dd.isOpen(), "Dropdown: starts closed");
+
+    // Click header → open.
+    UiEvent click{};
+    click.type = UiEvent::Type::MouseDown;
+    click.button = UiMouseButton::Left;
+    click.mousePx = UiVec2{80.0f, 20.0f};
+    dd.onEvent(click);
+    expectTrue(dd.isOpen(), "Dropdown: click header opens popup");
+
+    // Click on item 1 (Spearman) at popup rect row 1.
+    // Popup starts at rect_.maxY = 38; item 1 occupies y=[62, 86], mid = 74.
+    UiEvent pick{};
+    pick.type = UiEvent::Type::MouseDown;
+    pick.button = UiMouseButton::Left;
+    pick.mousePx = UiVec2{80.0f, 74.0f};
+    dd.onEvent(pick);
+    expectTrue(!dd.isOpen(), "Dropdown: selecting an item closes popup");
+    expectTrue(selected == 1, "Dropdown: onSelect fires with correct index");
+    expectTrue(dd.selectedIndex == 1, "Dropdown: selectedIndex updates");
+
+    // Geometry.
+    UiDrawList dl;
+    dl.reset(UiVec2{800.0f, 600.0f});
+    dd.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "Dropdown: emits geometry");
+}
+
+void testDonutChartDraw() {
+    using namespace odai::ui;
+    DonutChart chart;
+    chart.setRect(UiRect::fromXYWH(0.0f, 0.0f, 100.0f, 100.0f));
+    chart.segments = {
+        DonutSegment{0.4f, UiColor{0.8f, 0.2f, 0.2f, 1.0f}, "A"},
+        DonutSegment{0.6f, UiColor{0.2f, 0.6f, 0.8f, 1.0f}, "B"},
+    };
+    chart.innerRadiusFraction = 0.5f;
+
+    UiDrawList dl;
+    dl.reset(UiVec2{200.0f, 200.0f});
+    chart.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "DonutChart: emits geometry for 2 segments");
+    // Two segments × 32 steps × 4 vertices each = 256 vertices minimum.
+    expectTrue(dl.data().vertices.size() >= 128u,
+               "DonutChart: enough vertices for 32-step sectors");
+}
+
+void testSectorFilledGeometry() {
+    using namespace odai::ui;
+    // A solid wedge (innerR = 0) over a quarter circle produces 32 triangles = 96 indices.
+    UiDrawList dl;
+    dl.reset(UiVec2{200.0f, 200.0f});
+    constexpr float kPi = 3.14159265f;
+    dl.addSectorFilled(UiVec2{100.0f, 100.0f}, 0.0f, 40.0f,
+                       0.0f, kPi * 0.5f, UiColor{1, 0, 0, 1}, 32);
+    expectTrue(dl.data().indices.size() == 3u * 32u,
+               "addSectorFilled (solid): 32 steps × 3 indices each");
+    expectTrue(dl.data().vertices.size() == 3u * 32u,
+               "addSectorFilled (solid): 32 steps × 3 vertices each");
+
+    // A ring sector produces 32 quads = 192 indices.
+    dl.reset(UiVec2{200.0f, 200.0f});
+    dl.addSectorFilled(UiVec2{100.0f, 100.0f}, 20.0f, 40.0f,
+                       0.0f, kPi * 0.5f, UiColor{1, 0, 0, 1}, 32);
+    expectTrue(dl.data().indices.size() == 6u * 32u,
+               "addSectorFilled (ring): 32 steps × 6 indices each");
+}
+
+void testToastManager() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    ToastManager mgr(&font);
+    mgr.setRect(UiRect::fromXYWH(0.0f, 0.0f, 400.0f, 300.0f));
+    mgr.displaySeconds = 1.0f;
+
+    expectTrue(mgr.activeCount() == 0, "ToastManager: starts empty");
+    mgr.push("", "City captured!");
+    expectTrue(mgr.activeCount() == 1, "ToastManager: push adds a toast");
+    mgr.push("", "New era reached!");
+    expectTrue(mgr.activeCount() == 2, "ToastManager: two toasts active");
+
+    // Advance past display time (1s display + 0.3s fade = 1.3s lifetime).
+    mgr.update(1.4f);
+    expectTrue(mgr.activeCount() == 0, "ToastManager: toasts expire after displaySeconds");
+
+    // Emits geometry.
+    mgr.push("", "Testing...");
+    UiDrawList dl;
+    dl.reset(UiVec2{800.0f, 600.0f});
+    mgr.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "ToastManager: emits geometry for active toast");
+}
+
+void testLineChartDraw() {
+    using namespace odai::ui;
+    LineChart chart;
+    chart.setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 100.0f));
+    chart.series.push_back(ChartSeries{{10.0f, 50.0f, 30.0f, 80.0f},
+                                       UiColor{0.4f, 0.8f, 0.4f, 1.0f}, "Score"});
+    chart.series.push_back(ChartSeries{{5.0f, 25.0f, 60.0f, 40.0f},
+                                       UiColor{0.8f, 0.4f, 0.4f, 1.0f}, "Rival"});
+
+    UiDrawList dl;
+    dl.reset(UiVec2{400.0f, 300.0f});
+    chart.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "LineChart: emits geometry for two series");
+}
+
+void testStatBadgeDraw() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    StatBadgeRow row(&font);
+    row.setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 24.0f));
+    row.stats = {
+        Stat{"", "ATK: 12", UiColor{1.0f, 0.6f, 0.2f, 1.0f}},
+        Stat{"", "DEF: 8",  UiColor{0.4f, 0.8f, 1.0f, 1.0f}},
+    };
+
+    UiDrawList dl;
+    dl.reset(UiVec2{400.0f, 200.0f});
+    row.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "StatBadgeRow: emits geometry for two stats");
 }
 
 }  // namespace
@@ -438,6 +696,326 @@ void testProgressBarDraw() {
     expectTrue(!dl.data().vertices.empty(), "ProgressBar emits geometry");
 }
 
+void testVectorPrimitives() {
+    using namespace odai::ui;
+    constexpr auto kRoundRect = static_cast<std::uint32_t>(UiDrawMode::RoundRect);
+
+    // Filled rounded rect: one quad, RoundRect mode, sdf = {halfW, halfH, r, 0}.
+    {
+        UiDrawList dl;
+        dl.reset(UiVec2{200.0f, 200.0f});
+        dl.addRoundRectFilled(UiRect::fromXYWH(20.0f, 30.0f, 100.0f, 40.0f), UiColor{1, 1, 1, 1}, 8.0f);
+        const UiDrawData& d = dl.data();
+        expectTrue(d.vertices.size() == 4u, "RoundRectFilled emits one quad");
+        expectTrue(d.indices.size() == 6u, "RoundRectFilled emits 6 indices");
+        const UiVertex& v = d.vertices[0];
+        expectTrue(v.mode == kRoundRect, "RoundRectFilled uses RoundRect mode");
+        expectNear(v.sdf[0], 50.0f, 0.01f, "RoundRect halfWidth");
+        expectNear(v.sdf[1], 20.0f, 0.01f, "RoundRect halfHeight");
+        expectNear(v.sdf[2], 8.0f, 0.01f, "RoundRect radius");
+        expectNear(v.sdf[3], 0.0f, 0.01f, "RoundRectFilled has zero border");
+    }
+
+    // Radius is clamped to half the shorter side (pill from an oversized radius).
+    {
+        UiDrawList dl;
+        dl.reset(UiVec2{200.0f, 200.0f});
+        dl.addRoundRectFilled(UiRect::fromXYWH(0.0f, 0.0f, 120.0f, 40.0f), UiColor{1, 1, 1, 1}, 999.0f);
+        expectNear(dl.data().vertices[0].sdf[2], 20.0f, 0.01f, "Oversized radius clamps to half-height (pill)");
+    }
+
+    // Stroke carries thickness in sdf.w; the quad grows to fit the outer half.
+    {
+        UiDrawList dl;
+        dl.reset(UiVec2{200.0f, 200.0f});
+        dl.addRoundRect(UiRect::fromXYWH(50.0f, 50.0f, 60.0f, 60.0f), UiColor{1, 1, 1, 1}, 10.0f, 4.0f);
+        const UiVertex& v = dl.data().vertices[0];
+        expectNear(v.sdf[3], 4.0f, 0.01f, "RoundRect stroke records thickness");
+        expectTrue(v.posPx[0] < 50.0f, "Stroke quad grows outward for AA + outer half");
+    }
+
+    // Circle: square bounds centred on the point, sdf radius == circle radius.
+    {
+        UiDrawList dl;
+        dl.reset(UiVec2{200.0f, 200.0f});
+        dl.addCircleFilled(UiVec2{100.0f, 100.0f}, 25.0f, UiColor{1, 1, 1, 1});
+        const UiVertex& v = dl.data().vertices[0];
+        expectTrue(v.mode == kRoundRect, "Circle uses RoundRect SDF mode");
+        expectNear(v.sdf[0], 25.0f, 0.01f, "Circle halfWidth == radius");
+        expectNear(v.sdf[1], 25.0f, 0.01f, "Circle halfHeight == radius");
+        expectNear(v.sdf[2], 25.0f, 0.01f, "Circle radius");
+    }
+
+    // Glow: one quad in RoundRectGlow mode, grown beyond the rect, sdf.w = glow px.
+    {
+        UiDrawList dl;
+        dl.reset(UiVec2{200.0f, 200.0f});
+        dl.addRoundRectGlow(UiRect::fromXYWH(40.0f, 40.0f, 80.0f, 30.0f), UiColor{1, 0.8f, 0.3f, 0.6f},
+                            8.0f, 14.0f);
+        const UiDrawData& d = dl.data();
+        expectTrue(d.vertices.size() == 4u, "Glow emits one quad");
+        const UiVertex& v = d.vertices[0];
+        expectTrue(v.mode == static_cast<std::uint32_t>(UiDrawMode::RoundRectGlow), "Glow uses glow mode");
+        expectNear(v.sdf[3], 14.0f, 0.01f, "Glow records falloff size in sdf.w");
+        expectTrue(v.posPx[0] < 40.0f, "Glow quad extends outside the rect for the halo");
+    }
+
+    // Degenerate inputs emit nothing.
+    {
+        UiDrawList dl;
+        dl.reset(UiVec2{200.0f, 200.0f});
+        dl.addCircleFilled(UiVec2{10.0f, 10.0f}, 0.0f, UiColor{1, 1, 1, 1});
+        dl.addRoundRectFilled(UiRect{0, 0, 0, 0}, UiColor{1, 1, 1, 1}, 4.0f);
+        dl.addRoundRect(UiRect::fromXYWH(0, 0, 10, 10), UiColor{1, 1, 1, 1}, 2.0f, 0.0f);
+        dl.addRoundRectGlow(UiRect::fromXYWH(0, 0, 10, 10), UiColor{1, 1, 1, 1}, 2.0f, 0.0f);
+        expectTrue(dl.data().vertices.empty(), "Degenerate vector primitives emit no geometry");
+    }
+}
+
+void testButtonHoverGlow() {
+    using namespace odai::ui;
+    const Font font = makeMonospaceFont(8.0f);
+    Button btn(&font, "Go", []() {});
+    btn.setRect(UiRect::fromXYWH(20.0f, 20.0f, 100.0f, 40.0f));
+    btn.cornerRadiusPx = 8.0f;
+    btn.glowSizePx = 14.0f;
+
+    auto glowVerts = [](const UiDrawList& dl) {
+        std::size_t n = 0;
+        for (const auto& v : dl.data().vertices) {
+            if (v.mode == static_cast<std::uint32_t>(UiDrawMode::RoundRectGlow)) ++n;
+        }
+        return n;
+    };
+
+    // Normal state: no glow.
+    {
+        UiDrawList dl; dl.reset(UiVec2{400.0f, 300.0f});
+        btn.draw(dl);
+        expectTrue(glowVerts(dl) == 0u, "Button has no glow when not hovered");
+    }
+    // Hover the button -> glow appears (one quad = 4 vertices).
+    {
+        UiEvent move{}; move.type = UiEvent::Type::MouseMove; move.mousePx = UiVec2{50.0f, 35.0f};
+        btn.onEvent(move);
+        UiDrawList dl; dl.reset(UiVec2{400.0f, 300.0f});
+        btn.draw(dl);
+        expectTrue(glowVerts(dl) == 4u, "Hovered button draws a glow halo");
+    }
+    // glowSizePx = 0 disables it even when hovered.
+    {
+        btn.glowSizePx = 0.0f;
+        UiDrawList dl; dl.reset(UiVec2{400.0f, 300.0f});
+        btn.draw(dl);
+        expectTrue(glowVerts(dl) == 0u, "glowSizePx=0 disables the glow");
+    }
+}
+
+void testTextBox() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    TextBox box(&font, "placeholder");
+    box.setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 40.0f));
+
+    auto sendText = [&](std::uint32_t cp) {
+        UiEvent e{}; e.type = UiEvent::Type::Text; e.codepoint = cp; box.onEvent(e); return e.handled;
+    };
+    auto click = [&](float x, float y) {
+        UiEvent e{}; e.type = UiEvent::Type::MouseDown; e.button = UiMouseButton::Left;
+        e.mousePx = UiVec2{x, y}; box.onEvent(e); return e.handled;
+    };
+
+    // Typing is ignored until the box is focused.
+    expectTrue(!sendText('a'), "Unfocused TextBox ignores text");
+    expectTrue(box.value().empty(), "Unfocused TextBox stays empty");
+
+    // Click inside focuses; subsequent characters are appended.
+    expectTrue(click(20.0f, 20.0f), "Click inside focuses TextBox");
+    expectTrue(box.focused(), "TextBox is focused after click inside");
+    sendText('H'); sendText('i'); sendText('!');
+    expectTrue(box.value() == "Hi!", "Focused TextBox appends typed characters");
+
+    // Backspace (codepoint 8) deletes the last character.
+    sendText(8u);
+    expectTrue(box.value() == "Hi", "Backspace deletes the last character");
+
+    // Enter (codepoint 13) fires onSubmit and does not modify the value.
+    bool submitted = false;
+    box.onSubmit = [&]() { submitted = true; };
+    sendText(13u);
+    expectTrue(submitted, "Enter fires onSubmit");
+    expectTrue(box.value() == "Hi", "Enter leaves the value unchanged");
+
+    // Clicking outside removes focus and stops accepting text.
+    click(500.0f, 500.0f);
+    expectTrue(!box.focused(), "Click outside unfocuses TextBox");
+    expectTrue(!sendText('x'), "Unfocused-again TextBox ignores text");
+    expectTrue(box.value() == "Hi", "Value unchanged while unfocused");
+
+    // It emits geometry (vector frame + text) without crashing.
+    UiDrawList dl;
+    dl.reset(UiVec2{400.0f, 300.0f});
+    box.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "TextBox emits geometry");
+}
+
+void testToolbar() {
+    using namespace odai::ui;
+    constexpr auto kTextured = static_cast<std::uint32_t>(UiDrawMode::Textured);
+    Font font = makeMonospaceFont(8.0f);
+    UiIconRegistry::global().registerAtlas(
+        42u, 384u, 256u,
+        "{\"iconSize\":128,\"icons\":{\"science\":[0,0],\"gold\":[2,0]}}");
+
+    Toolbar tb(&font);
+    tb.setRect(UiRect::fromXYWH(0.0f, 0.0f, 600.0f, 40.0f));
+    const std::size_t gold = tb.addItem(Toolbar::IconKind::Coin, UiColor{1, 1, 0, 1}, "240", UiColor{1, 1, 1, 1});
+    tb.addItem(Toolbar::IconKind::Science, UiColor{0, 0.5f, 1, 1}, "+14", UiColor{1, 1, 1, 1});
+    expectTrue(tb.itemCount() == 2u, "Toolbar tracks added items");
+
+    UiDrawList dl;
+    dl.reset(UiVec2{800.0f, 600.0f});
+    tb.draw(dl);
+    const UiDrawData& d = dl.data();
+    expectTrue(!d.vertices.empty(), "Toolbar emits geometry");
+
+    bool hasTexturedIcon = false;
+    for (const auto& v : d.vertices) {
+        if (v.mode == kTextured) { hasTexturedIcon = true; break; }
+    }
+    expectTrue(hasTexturedIcon, "Toolbar icons use registered atlas textures");
+
+    // setValue is bounds-checked and updates the badge without crashing.
+    tb.setValue(gold, "999");
+    tb.setValue(99u, "ignored");  // out of range: no-op
+    UiDrawList dl2;
+    dl2.reset(UiVec2{800.0f, 600.0f});
+    tb.draw(dl2);
+    expectTrue(!dl2.data().vertices.empty(), "Toolbar redraws after setValue");
+}
+
+void testPanelOpacity() {
+    using namespace odai::ui;
+
+    // A Panel with opacity=0.5 emits background geometry at half alpha.
+    {
+        auto panel = std::make_unique<Panel>();
+        panel->setRect(UiRect::fromXYWH(0.0f, 0.0f, 100.0f, 100.0f));
+        panel->background = UiColor{1.0f, 1.0f, 1.0f, 1.0f};
+        panel->opacity = 0.5f;
+
+        UiContext ctx;
+        ctx.setViewport(UiVec2{800.0f, 600.0f});
+        ctx.setRoot(std::move(panel));
+
+        UiDrawList dl;
+        ctx.build(dl);
+
+        const std::uint32_t a = (dl.data().vertices[0].rgba8 >> 24) & 0xFFu;
+        expectTrue(a >= 126u && a <= 128u, "Panel opacity=0.5 halves background alpha");
+    }
+
+    // A nested Panel with opacity=0.5 inside an opaque Panel also halves alpha.
+    {
+        auto root = std::make_unique<Panel>();
+        root->setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 200.0f));
+        root->background = UiColor{0.0f, 0.0f, 0.0f, 0.0f}; // transparent root
+
+        auto child = std::make_unique<Panel>();
+        child->setRect(UiRect::fromXYWH(10.0f, 10.0f, 80.0f, 80.0f));
+        child->background = UiColor{1.0f, 1.0f, 1.0f, 1.0f};
+        child->opacity = 0.5f;
+        root->addChild(std::move(child));
+
+        UiContext ctx;
+        ctx.setViewport(UiVec2{800.0f, 600.0f});
+        ctx.setRoot(std::move(root));
+
+        UiDrawList dl;
+        ctx.build(dl);
+
+        // Scan all vertices: the child background quad should have alpha ~127.
+        bool foundHalfAlpha = false;
+        for (const auto& v : dl.data().vertices) {
+            const std::uint32_t a = (v.rgba8 >> 24) & 0xFFu;
+            if (a >= 126u && a <= 128u) { foundHalfAlpha = true; break; }
+        }
+        expectTrue(foundHalfAlpha, "Child Panel opacity=0.5 halves its background alpha");
+    }
+
+    // opacity=0 hides the panel entirely (alpha=0).
+    {
+        auto panel = std::make_unique<Panel>();
+        panel->setRect(UiRect::fromXYWH(0.0f, 0.0f, 100.0f, 100.0f));
+        panel->background = UiColor{1.0f, 1.0f, 1.0f, 1.0f};
+        panel->opacity = 0.0f;
+
+        UiContext ctx;
+        ctx.setViewport(UiVec2{800.0f, 600.0f});
+        ctx.setRoot(std::move(panel));
+
+        UiDrawList dl;
+        ctx.build(dl);
+
+        expectTrue(dl.data().vertices.empty(), "Panel opacity=0 emits no geometry (invisible)");
+    }
+}
+
+void testTurnsToBuild() {
+    using namespace odai::game;
+    expectTrue(turnsToBuild(60, 8, 3) == 18, "ceil((60-8)/3) == 18");
+    expectTrue(turnsToBuild(60, 60, 3) == 0, "Already-met cost yields 0 turns");
+    expectTrue(turnsToBuild(60, 70, 3) == 0, "Over-met cost yields 0 turns");
+    expectTrue(turnsToBuild(60, 0, 0) == 60, "Zero per-turn is clamped to 1 (worst case)");
+    expectTrue(turnsToBuild(10, 0, 4) == 3, "ceil(10/4) == 3");
+    expectTrue(!defaultBuildables().empty(), "Default buildable catalog is non-empty");
+}
+
+void testProductionPanelBuild() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    FontSet fonts{&font, &font, &font, &font};
+
+    std::vector<ProductionPanel::Row> rows;
+    int selectCount = 0;
+    int pediaCount = 0;
+    for (const auto& item : odai::game::defaultBuildables()) {
+        ProductionPanel::Row row;
+        row.id = item.id;
+        row.name = item.name;
+        row.iconName = item.iconName;
+        row.productionCost = item.productionCost;
+        row.turns = odai::game::turnsToBuild(item.productionCost, 8, 3);
+        row.onSelect = [&]() { ++selectCount; };
+        row.onOpenPedia = [&]() { ++pediaCount; };
+        rows.push_back(std::move(row));
+    }
+
+    ProductionPanel panel(fonts);
+    panel.setItems(UiRect::fromXYWH(0.0f, 0.0f, 240.0f, 600.0f), 1.0f, "Production", rows);
+
+    UiDrawList dl;
+    dl.reset(UiVec2{800.0f, 600.0f});
+    panel.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "ProductionPanel emits geometry");
+
+    // Selecting an item updates highlight without crashing.
+    panel.setSelected(rows.front().id);
+
+    // Click the first row (top-left area) to fire its onSelect.
+    UiEvent down{};
+    down.type = UiEvent::Type::MouseDown;
+    down.button = UiMouseButton::Left;
+    down.mousePx = UiVec2{40.0f, 80.0f};
+    panel.onEvent(down);
+    UiEvent up{};
+    up.type = UiEvent::Type::MouseUp;
+    up.button = UiMouseButton::Left;
+    up.mousePx = UiVec2{40.0f, 80.0f};
+    panel.onEvent(up);
+    expectTrue(selectCount >= 1, "Clicking a production row fires onSelect");
+}
+
 int main() {
     testNineSliceQuadGen();
     testFontMeasure();
@@ -456,6 +1034,22 @@ int main() {
     testHorizontalStackLayout();
     testScrollViewLayout();
     testProgressBarDraw();
+    testVectorPrimitives();
+    testButtonHoverGlow();
+    testTextBox();
+    testToolbar();
+    testPanelOpacity();
+    testSliderDrag();
+    testToggleClick();
+    testTabBarSwitch();
+    testDropdownSelect();
+    testDonutChartDraw();
+    testSectorFilledGeometry();
+    testToastManager();
+    testLineChartDraw();
+    testStatBadgeDraw();
+    testTurnsToBuild();
+    testProductionPanelBuild();
 
     if (g_failures != 0) {
         std::cerr << "[ui test] " << g_failures << " failures\n";

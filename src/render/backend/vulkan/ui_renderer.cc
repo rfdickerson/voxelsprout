@@ -18,29 +18,54 @@ struct UiPushConstants {
     float pad[2];
 };
 
-// Box-filter 2x2 → 1 downsample for one RGBA8 mip level.
-// Handles odd dimensions by clamping the second sample coordinate.
-std::vector<std::uint8_t> downsampleRgba8(const std::uint8_t* src, std::uint32_t w, std::uint32_t h) {
-    const std::uint32_t nw = std::max(1u, w / 2u);
-    const std::uint32_t nh = std::max(1u, h / 2u);
-    std::vector<std::uint8_t> dst(nw * nh * 4u);
-    for (std::uint32_t y = 0; y < nh; ++y) {
-        const std::uint32_t sy0 = 2u * y;
-        const std::uint32_t sy1 = std::min(sy0 + 1u, h - 1u);
-        for (std::uint32_t x = 0; x < nw; ++x) {
-            const std::uint32_t sx0 = 2u * x;
-            const std::uint32_t sx1 = std::min(sx0 + 1u, w - 1u);
-            for (int c = 0; c < 4; ++c) {
-                const std::uint32_t sum =
-                    src[(sy0 * w + sx0) * 4u + c] +
-                    src[(sy0 * w + sx1) * 4u + c] +
-                    src[(sy1 * w + sx0) * 4u + c] +
-                    src[(sy1 * w + sx1) * 4u + c];
-                dst[(y * nw + x) * 4u + c] = static_cast<std::uint8_t>(sum / 4u);
+// Edge-extend ("alpha bleed") an RGBA8 image: copy color outward into fully
+// transparent texels from their nearest opaque neighbours, leaving alpha
+// untouched. GPU blit mip generation filters RGB per-channel without
+// premultiplying, so transparent-*black* border texels would otherwise bleed
+// dark halos into minified icons. This is a one-time preprocess of mip 0, not a
+// resample. A bounded pass count keeps it cheap (the filter footprint of the
+// sizes we draw at only reaches a few texels past each edge).
+void bleedTransparentRgb(std::vector<std::uint8_t>& px, std::uint32_t w, std::uint32_t h) {
+    constexpr int kPasses = 16;
+    const std::size_t n = static_cast<std::size_t>(w) * h;
+    std::vector<std::uint8_t> known(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        known[i] = px[i * 4u + 3u] > 8u ? 1u : 0u;
+    }
+    for (int pass = 0; pass < kPasses; ++pass) {
+        std::vector<std::uint8_t> filled = known;
+        bool any = false;
+        for (std::uint32_t y = 0; y < h; ++y) {
+            for (std::uint32_t x = 0; x < w; ++x) {
+                const std::size_t idx = static_cast<std::size_t>(y) * w + x;
+                if (known[idx]) continue;
+                std::uint32_t r = 0, g = 0, b = 0, cnt = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) continue;
+                        const int nx = static_cast<int>(x) + dx;
+                        const int ny = static_cast<int>(y) + dy;
+                        if (nx < 0 || ny < 0 || nx >= static_cast<int>(w) || ny >= static_cast<int>(h)) continue;
+                        const std::size_t nidx = static_cast<std::size_t>(ny) * w + nx;
+                        if (!known[nidx]) continue;
+                        r += px[nidx * 4u + 0u];
+                        g += px[nidx * 4u + 1u];
+                        b += px[nidx * 4u + 2u];
+                        ++cnt;
+                    }
+                }
+                if (cnt != 0) {
+                    px[idx * 4u + 0u] = static_cast<std::uint8_t>(r / cnt);
+                    px[idx * 4u + 1u] = static_cast<std::uint8_t>(g / cnt);
+                    px[idx * 4u + 2u] = static_cast<std::uint8_t>(b / cnt);
+                    filled[idx] = 1u;
+                    any = true;
+                }
             }
         }
+        known.swap(filled);
+        if (!any) break;
     }
-    return dst;
 }
 
 }  // namespace
@@ -160,13 +185,14 @@ bool UiRenderer::createPipeline() {
 
     VkVertexInputBindingDescription bindingDesc{};
     bindingDesc.binding = 0;
-    bindingDesc.stride = sizeof(odai::ui::UiVertex);  // 24 bytes
+    bindingDesc.stride = sizeof(odai::ui::UiVertex);  // 40 bytes
     bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    std::array<VkVertexInputAttributeDescription, 4> attrs{};
+    std::array<VkVertexInputAttributeDescription, 5> attrs{};
     attrs[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, 0};                              // posPx
     attrs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, 8};                              // uv
     attrs[2] = {2, 0, VK_FORMAT_R8G8B8A8_UNORM, 16};                            // rgba8 -> float4
     attrs[3] = {3, 0, VK_FORMAT_R32_UINT, 20};                                  // mode
+    attrs[4] = {4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 24};                       // sdf params
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInput.vertexBindingDescriptionCount = 1;
@@ -412,7 +438,9 @@ VkDescriptorSet UiRenderer::allocateTextureDescriptor(VkImageView view) {
 odai::ui::UiTextureId UiRenderer::registerTextureRgba8(const std::uint8_t* pixels, std::uint32_t width,
                                                        std::uint32_t height) {
     Texture texture{};
-    if (!uploadTexturePixels(pixels, width, height, VK_FORMAT_R8G8B8A8_UNORM, 4, texture)) {
+    // sRGB so the sampler returns linear values, matching the UI shader (which no
+    // longer linearizes textured samples). Color PNGs are authored in sRGB.
+    if (!uploadTexturePixels(pixels, width, height, VK_FORMAT_R8G8B8A8_SRGB, 4, texture)) {
         return odai::ui::kUiNoTexture;
     }
     const odai::ui::UiTextureId id = m_nextTextureId++;
@@ -426,56 +454,38 @@ bool UiRenderer::uploadTexturePixelsMipmapped(const std::uint8_t* pixels, std::u
 
     const std::uint32_t mipLevels = std::bit_width(std::max(width, height));
 
-    // Generate all mip levels in CPU memory.
-    std::vector<std::vector<std::uint8_t>> mips;
-    mips.reserve(mipLevels);
-    mips.emplace_back(pixels, pixels + static_cast<std::size_t>(width) * height * 4u);
-    std::uint32_t mw = width, mh = height;
-    for (std::uint32_t i = 1; i < mipLevels; ++i) {
-        mips.push_back(downsampleRgba8(mips.back().data(), mw, mh));
-        mw = std::max(1u, mw / 2u);
-        mh = std::max(1u, mh / 2u);
-    }
+    // sRGB image format: vkCmdBlitImage's linear filter decodes to linear,
+    // filters, and re-encodes to sRGB, so the GPU-generated mip chain is
+    // gamma-correct. The sampler reads it back through an sRGB view (returns
+    // linear) -- the fragment shader does not re-linearize textured samples.
+    constexpr VkFormat kFormat = VK_FORMAT_R8G8B8A8_SRGB;
 
-    // Compute per-level offsets into the staging buffer.
-    std::vector<VkDeviceSize> offsets(mipLevels);
-    VkDeviceSize totalBytes = 0;
-    mw = width; mh = height;
-    for (std::uint32_t i = 0; i < mipLevels; ++i) {
-        offsets[i] = totalBytes;
-        totalBytes += static_cast<VkDeviceSize>(mw) * mh * 4u;
-        mw = std::max(1u, mw / 2u);
-        mh = std::max(1u, mh / 2u);
-    }
-
-    // Pack all mip data into one staging buffer.
-    std::vector<std::uint8_t> stagingData(static_cast<std::size_t>(totalBytes));
-    mw = width; mh = height;
-    for (std::uint32_t i = 0; i < mipLevels; ++i) {
-        const std::size_t levelBytes = static_cast<std::size_t>(mw) * mh * 4u;
-        std::memcpy(stagingData.data() + offsets[i], mips[i].data(), levelBytes);
-        mw = std::max(1u, mw / 2u);
-        mh = std::max(1u, mh / 2u);
-    }
+    // Stage only mip 0; the GPU derives the rest by successive half-res blits.
+    // Alpha-bleed the base level first so blit filtering never averages in the
+    // transparent-black border (kept alive until createBuffer copies it).
+    const VkDeviceSize level0Bytes = static_cast<VkDeviceSize>(width) * height * 4u;
+    std::vector<std::uint8_t> base(pixels, pixels + static_cast<std::size_t>(level0Bytes));
+    bleedTransparentRgb(base, width, height);
 
     BufferCreateDesc stagingDesc{};
-    stagingDesc.size = totalBytes;
+    stagingDesc.size = level0Bytes;
     stagingDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     stagingDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    stagingDesc.initialData = stagingData.data();
+    stagingDesc.initialData = base.data();
     const BufferHandle staging = m_info.bufferAllocator->createBuffer(stagingDesc);
     if (staging == kInvalidBufferHandle) return false;
 
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageInfo.format = kFormat;
     imageInfo.extent = {width, height, 1};
     imageInfo.mipLevels = mipLevels;
     imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VmaAllocationCreateInfo allocInfo{};
@@ -498,41 +508,68 @@ bool UiRenderer::uploadTexturePixelsMipmapped(const std::uint8_t* pixels, std::u
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &beginInfo);
 
-    // Transition all mip levels to TRANSFER_DST in one barrier.
-    VkImageMemoryBarrier toCopy{};
-    toCopy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toCopy.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    toCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    toCopy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toCopy.image = outTexture.image;
-    toCopy.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1};
-    toCopy.srcAccessMask = 0;
-    toCopy.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &toCopy);
+    // Single-mip layout-transition helper.
+    const auto barrierMip = [&](std::uint32_t baseMip, VkImageLayout oldL, VkImageLayout newL,
+                                VkAccessFlags srcA, VkAccessFlags dstA, VkPipelineStageFlags srcS,
+                                VkPipelineStageFlags dstS) {
+        VkImageMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout = oldL;
+        b.newLayout = newL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = outTexture.image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, baseMip, 1, 0, 1};
+        b.srcAccessMask = srcA;
+        b.dstAccessMask = dstA;
+        vkCmdPipelineBarrier(cmd, srcS, dstS, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
 
-    // Copy each mip level from the staging buffer.
-    mw = width; mh = height;
-    for (std::uint32_t i = 0; i < mipLevels; ++i) {
-        VkBufferImageCopy copy{};
-        copy.bufferOffset = offsets[i];
-        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1};
-        copy.imageExtent = {mw, mh, 1};
-        vkCmdCopyBufferToImage(cmd, m_info.bufferAllocator->getBuffer(staging), outTexture.image,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-        mw = std::max(1u, mw / 2u);
-        mh = std::max(1u, mh / 2u);
+    // Upload mip 0.
+    barrierMip(0, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+               VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+               VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {width, height, 1};
+    vkCmdCopyBufferToImage(cmd, m_info.bufferAllocator->getBuffer(staging), outTexture.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+    // Blit chain: each level i is filtered down from level i-1. After serving as
+    // a blit source, level i-1 is moved to its final SHADER_READ layout.
+    std::int32_t mw = static_cast<std::int32_t>(width);
+    std::int32_t mh = static_cast<std::int32_t>(height);
+    for (std::uint32_t i = 1; i < mipLevels; ++i) {
+        barrierMip(i - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        barrierMip(i, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                   VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        const std::int32_t nw = std::max(1, mw / 2);
+        const std::int32_t nh = std::max(1, mh / 2);
+        VkImageBlit blit{};
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {mw, mh, 1};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, 1};
+        blit.dstOffsets[0] = {0, 0, 0};
+        blit.dstOffsets[1] = {nw, nh, 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1};
+        vkCmdBlitImage(cmd, outTexture.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, outTexture.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+
+        barrierMip(i - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        mw = nw;
+        mh = nh;
     }
-
-    // Transition all mip levels to SHADER_READ_ONLY.
-    VkImageMemoryBarrier toShader = toCopy;
-    toShader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    toShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    toShader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &toShader);
+    // The final (smallest) level is still TRANSFER_DST -> move it to SHADER_READ.
+    barrierMip(mipLevels - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+               VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
     vkEndCommandBuffer(cmd);
     VkSubmitInfo submit{};
@@ -553,7 +590,7 @@ bool UiRenderer::uploadTexturePixelsMipmapped(const std::uint8_t* pixels, std::u
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = outTexture.image;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewInfo.format = kFormat;
     viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1};
     if (vkCreateImageView(m_info.device, &viewInfo, nullptr, &outTexture.view) != VK_SUCCESS) {
         return false;

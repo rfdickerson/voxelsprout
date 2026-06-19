@@ -70,7 +70,14 @@ void UiContext::update(const UiInput& input) {
 
 void UiContext::build(UiDrawList& drawList) const {
     drawList.reset(viewport_);
-    if (root_ != nullptr) {
+    if (root_ == nullptr || root_->opacity <= 0.0f || !root_->visible) {
+        return;
+    }
+    if (root_->opacity < 1.0f) {
+        drawList.pushOpacity(root_->opacity);
+        root_->draw(drawList);
+        drawList.popOpacity();
+    } else {
         root_->draw(drawList);
     }
 }

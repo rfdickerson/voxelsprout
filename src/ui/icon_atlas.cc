@@ -58,6 +58,16 @@ bool UiIconRegistry::registerAtlas(UiTextureId textureId,
         m_icons.emplace(name, entry);
     }
 
+    // Register aliases (alternate names that resolve to an existing icon).
+    if (j.contains("aliases") && j["aliases"].is_object()) {
+        for (const auto& [alias, target] : j["aliases"].items()) {
+            const auto it = m_icons.find(target.get<std::string>());
+            if (it != m_icons.end()) {
+                m_icons.emplace(alias, it->second);
+            }
+        }
+    }
+
     return true;
 }
 

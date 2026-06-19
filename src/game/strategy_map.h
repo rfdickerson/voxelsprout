@@ -19,6 +19,7 @@ enum class TerrainType : std::uint8_t {
     Grassland,
     Plains,
     Forest,
+    Jungle,
     Hills,
     Mountains,
     Desert,

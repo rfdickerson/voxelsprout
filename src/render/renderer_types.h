@@ -88,6 +88,8 @@ struct CameraPose {
     float yawDegrees;
     float pitchDegrees;
     float fovDegrees;
+    bool orthographic = false;
+    float orthoHalfHeight = 1000.0f;
 };
 
 struct VoxelPreview {

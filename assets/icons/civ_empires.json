@@ -1,0 +1,55 @@
+{
+  "iconSize": 128,
+  "columns": 4,
+  "rows": 3,
+  "icons": {
+    "babylon": [
+      0,
+      0
+    ],
+    "aztec": [
+      1,
+      0
+    ],
+    "british": [
+      2,
+      0
+    ],
+    "egypt": [
+      3,
+      0
+    ],
+    "rome": [
+      0,
+      1
+    ],
+    "greece": [
+      1,
+      1
+    ],
+    "china": [
+      2,
+      1
+    ],
+    "japan": [
+      3,
+      1
+    ],
+    "france": [
+      0,
+      2
+    ],
+    "mongolia": [
+      1,
+      2
+    ],
+    "persia": [
+      2,
+      2
+    ],
+    "india": [
+      3,
+      2
+    ]
+  }
+}

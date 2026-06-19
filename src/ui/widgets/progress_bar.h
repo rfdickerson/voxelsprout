@@ -15,6 +15,9 @@ public:
     UiColor background{0.1f, 0.1f, 0.1f, 0.8f};
     UiColor borderColor{0.0f, 0.0f, 0.0f, 0.5f};
     float borderThicknessPx = 1.0f;
+    // Corner radius in pixels (DPI-scaled by the caller). > 0 draws the track and
+    // fill as anti-aliased SDF rounded rects; a large value yields a pill bar.
+    float cornerRadiusPx = 0.0f;
     std::optional<UiNineSlice> frame;
 
     void draw(UiDrawList& dl) const override;

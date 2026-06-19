@@ -35,10 +35,21 @@ public:
     UiColor bodyColor{0.04f, 0.07f, 0.11f, 0.92f};       // Solid-fallback body.
     UiColor borderColor{0.75f, 0.62f, 0.34f, 0.55f};     // Solid-fallback border + separator.
     UiColor titleColor{0.91f, 0.80f, 0.48f, 1.0f};
+    // When non-null, the title text is drawn with this font instead of font_.
+    // Allows a larger/bolder typeface for window titles vs body content.
+    const Font* titleFont = nullptr;
+    // Corner radius for the solid-fill path (no effect when a 9-slice frame is set).
+    float cornerRadiusPx = 3.0f;
     UiColor closeColor{0.85f, 0.55f, 0.35f, 0.85f};
     UiColor closeHoverColor{0.95f, 0.45f, 0.30f, 1.0f};
     bool showCloseButton = true;
     bool draggable = true;
+
+    bool    showShadow    = true;
+    UiColor shadowColor   {0.0f, 0.0f, 0.0f, 0.35f};
+    float   shadowBlurPx  = 6.0f;
+    float   shadowOffsetX = 4.0f;
+    float   shadowOffsetY = 4.0f;
 
     void setTitle(std::string t) { title_ = std::move(t); }
 
