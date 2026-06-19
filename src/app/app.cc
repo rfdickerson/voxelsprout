@@ -775,7 +775,7 @@ bool App::init() {
     // Vulkan renderer path requires no OpenGL context.
     const auto windowStart = Clock::now();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    m_window = glfwCreateWindow(1280, 720, "odai", nullptr, nullptr);
+    m_window = glfwCreateWindow(1920, 1080, "odai", nullptr, nullptr);
     if (m_window == nullptr) {
         VOX_LOGE("app") << "glfwCreateWindow failed";
         glfwTerminate();
