@@ -1039,6 +1039,10 @@ private:
     PFN_vkGetAccelerationStructureDeviceAddressKHR m_getAccelerationStructureDeviceAddressKhr = nullptr;
     PFN_vkCopyMemoryToImageEXT m_copyMemoryToImage = nullptr;
     PFN_vkTransitionImageLayoutEXT m_transitionImageLayout = nullptr;
+    // Layout used for the final host-image-copy transition (UNDEFINED→GENERAL→this).
+    // Ideally SHADER_READ_ONLY_OPTIMAL, but some drivers (Intel Arc on 1.4) only list
+    // GENERAL in pCopyDstLayouts, so we query at init and pick the supported one.
+    VkImageLayout m_hostCopyFinalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkPhysicalDeviceDescriptorBufferPropertiesEXT m_descriptorBufferProperties{};
     PFN_vkGetDescriptorSetLayoutSizeEXT m_getDescriptorSetLayoutSize = nullptr;
     PFN_vkGetDescriptorSetLayoutBindingOffsetEXT m_getDescriptorSetLayoutBindingOffset = nullptr;

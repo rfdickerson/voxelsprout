@@ -1198,7 +1198,31 @@ void RendererBackend::loadHostImageCopyFunctions() {
         );
     }
     if (m_copyMemoryToImage != nullptr && m_transitionImageLayout != nullptr) {
-        VOX_LOGI("render") << "host image copy enabled (VK_EXT_host_image_copy)\n";
+        // Query which image layouts the driver supports as copy-destination for
+        // vkTransitionImageLayout. Not all drivers expose SHADER_READ_ONLY_OPTIMAL
+        // here (VUID-09057); fall back to GENERAL (always valid for sampling) when it
+        // isn't listed so the final host-copy layout transition does not error.
+        VkPhysicalDeviceHostImageCopyPropertiesEXT hostCopyProps{};
+        hostCopyProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_PROPERTIES_EXT;
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &hostCopyProps;
+        vkGetPhysicalDeviceProperties2(m_physicalDevice, &props2);
+        std::vector<VkImageLayout> copyDstLayouts(hostCopyProps.copyDstLayoutCount);
+        hostCopyProps.pCopyDstLayouts = copyDstLayouts.data();
+        vkGetPhysicalDeviceProperties2(m_physicalDevice, &props2);
+        m_hostCopyFinalLayout = VK_IMAGE_LAYOUT_GENERAL;
+        for (VkImageLayout layout : copyDstLayouts) {
+            if (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+                m_hostCopyFinalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                break;
+            }
+        }
+        VOX_LOGI("render") << "host image copy enabled (VK_EXT_host_image_copy)"
+                           << " finalLayout="
+                           << (m_hostCopyFinalLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                   ? "SHADER_READ_ONLY_OPTIMAL" : "GENERAL")
+                           << "\n";
     } else {
         m_copyMemoryToImage = nullptr;
         m_transitionImageLayout = nullptr;
