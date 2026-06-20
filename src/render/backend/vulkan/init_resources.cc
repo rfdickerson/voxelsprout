@@ -586,9 +586,9 @@ bool RendererBackend::createWaterNormalTextureResources() {
                                     copyInfo.pRegions = copyRegions.data();
                                     result = m_copyMemoryToImage(m_device, &copyInfo);
                                 }
-                                if (result == VK_SUCCESS) {
+                                if (result == VK_SUCCESS && m_hostCopyFinalLayout != VK_IMAGE_LAYOUT_GENERAL) {
                                     transition.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-                                    transition.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                    transition.newLayout = m_hostCopyFinalLayout;
                                     result = m_transitionImageLayout(m_device, 1, &transition);
                                 }
                             }
@@ -890,12 +890,14 @@ bool RendererBackend::createWaterNormalTextureResources() {
             return false;
         }
 
-        transition.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        transition.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        result = m_transitionImageLayout(m_device, 1, &transition);
-        if (result != VK_SUCCESS) {
-            logVkFailure("vkTransitionImageLayoutEXT(waterNormal GENERAL→SHADER_READ_ONLY)", result);
-            return false;
+        if (m_hostCopyFinalLayout != VK_IMAGE_LAYOUT_GENERAL) {
+            transition.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+            transition.newLayout = m_hostCopyFinalLayout;
+            result = m_transitionImageLayout(m_device, 1, &transition);
+            if (result != VK_SUCCESS) {
+                logVkFailure("vkTransitionImageLayoutEXT(waterNormal GENERAL→SHADER_READ_ONLY)", result);
+                return false;
+            }
         }
     } else {
         // Staging buffer fallback for drivers without host image copy.

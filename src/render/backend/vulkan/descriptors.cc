@@ -338,7 +338,7 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         (m_waterNormalTextureSampler != VK_NULL_HANDLE) ? m_waterNormalTextureSampler : m_diffuseTextureSampler;
     waterNormalTextureImageInfo.imageView =
         (m_waterNormalTextureImageView != VK_NULL_HANDLE) ? m_waterNormalTextureImageView : m_diffuseTextureImageView;
-    waterNormalTextureImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    waterNormalTextureImageInfo.imageLayout = m_hostCopyFinalLayout;
 
     VkDescriptorImageInfo terrainDetailTextureImageInfo{};
     terrainDetailTextureImageInfo.sampler =
