@@ -3671,23 +3671,9 @@ void App::setupDemoUi(float viewW, float viewH) {
     bar->addChild(std::move(statsLabel));
 
     auto endTurnBtn = std::make_unique<odai::ui::Button>(fonts.regular, "End Turn", [this]() {
-        if (idleCount() > 0) {
-            cycleToNextIdle();
-            return;
-        }
-        ++m_currentTurn;
-        m_visitedUnitIds.clear();
-        // Resolve supply/attrition/regen for every unit, then re-mesh so the unit
-        // tokens reflect new health (wounded units redden, the dead disappear).
-        odai::game::advanceTurn(m_gameState, m_strategyMap);
-        rebuildStrategyMapScene();
-        // Close any open production panel — the city's state may have changed.
-        if (m_productionPanel != nullptr) m_productionPanel->visible = false;
-        m_selectedCityCol = -1;
-        m_selectedCityRow = -1;
-        VOX_LOGI("ui") << "turn advanced to " << m_currentTurn;
+        fireEndTurn();
     });
-    // Apply styling before moving into the tree.
+    endTurnBtn->setRect(odai::ui::UiRect::fromXYWH(viewW - 196.0f * s, barY + 8.0f * s, 180.0f * s, 48.0f * s));
     endTurnBtn->cornerRadiusPx    = 12.0f * s;
     endTurnBtn->colorNormal       = odai::ui::UiColor{0.28f, 0.20f, 0.06f, 0.95f};
     endTurnBtn->colorHover        = odai::ui::UiColor{0.42f, 0.30f, 0.08f, 1.00f};
@@ -4342,7 +4328,11 @@ void App::updateUiOverlay(float dt) {
     m_backspacePrev = backspaceDown;
     const bool enterDown = glfwGetKey(m_window, GLFW_KEY_ENTER) == GLFW_PRESS;
     if (enterDown && !m_enterPrev) {
-        m_uiInput.textInput.push_back(13u);
+        if (m_strategyMapMode) {
+            fireEndTurn();
+        } else {
+            m_uiInput.textInput.push_back(13u);
+        }
     }
     m_enterPrev = enterDown;
 
@@ -4982,6 +4972,21 @@ int App::idleCount() const {
         }
     }
     return count;
+}
+
+void App::fireEndTurn() {
+    if (idleCount() > 0) {
+        cycleToNextIdle();
+        return;
+    }
+    ++m_currentTurn;
+    m_visitedUnitIds.clear();
+    odai::game::advanceTurn(m_gameState, m_strategyMap);
+    rebuildStrategyMapScene();
+    if (m_productionPanel != nullptr) m_productionPanel->visible = false;
+    m_selectedCityCol = -1;
+    m_selectedCityRow = -1;
+    VOX_LOGI("ui") << "turn advanced to " << m_currentTurn;
 }
 
 void App::cycleToNextIdle() {
