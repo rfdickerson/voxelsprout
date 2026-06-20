@@ -136,6 +136,9 @@ private:
     void focusOnHex(std::uint32_t col, std::uint32_t row);
     // Jump to the next idle city (opens production panel) or idle unit (selects it).
     void cycleToNextIdle();
+    // Fire the End Turn / Next Idle action — same logic as the button callback,
+    // also called from the Enter key handler.
+    void fireEndTurn();
     void syncGameplayUiState();
     void assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId);
     void handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight);
