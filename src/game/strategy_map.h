@@ -107,4 +107,12 @@ struct StrategyMap {
 // Count of in-bounds neighbors (6 for interior tiles, fewer at edges).
 [[nodiscard]] int tileNeighborCount(const StrategyMap& map, int col, int row);
 
+// Odd-r offset <-> axial conversion. Axial {q, r} is the canonical hex coordinate
+// the distance formula operates on; exposed for tests and future pathfinding.
+[[nodiscard]] std::array<int, 2> offsetToAxial(int col, int row);
+[[nodiscard]] std::array<int, 2> axialToOffset(int q, int r);
+
+// Grid distance in hex steps between two odd-r offset tiles (cube distance).
+[[nodiscard]] int hexDistance(int colA, int rowA, int colB, int rowB);
+
 }  // namespace odai::game

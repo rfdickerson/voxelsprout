@@ -57,6 +57,18 @@ struct ImportedScenePackedDraw {
     std::uint32_t indexCount = 0;
 };
 
+// Optional spatial grouping of packed draws for per-chunk frustum culling.
+// When non-empty, the renderer treats each entry as a cullable page covering the
+// contiguous draw range [firstDraw, firstDraw + drawCount). Empty => no culling
+// (the whole scene draws every frame, legacy behavior).
+struct ImportedScenePageRange {
+    std::uint32_t firstDraw = 0;
+    std::uint32_t drawCount = 0;
+    std::uint32_t terrainDrawCount = 0;
+    float boundsMin[3] = {};
+    float boundsMax[3] = {};
+};
+
 struct ImportedSceneCellRef {
     std::string refId;
     std::string modelPath;
@@ -101,6 +113,7 @@ struct ImportedScene {
     std::vector<ImportedScenePackedVertex> packedVertices;
     std::vector<std::uint32_t> packedIndices;
     std::vector<ImportedScenePackedDraw> packedDraws;
+    std::vector<ImportedScenePageRange> pageRanges;
     std::uint32_t sourceTextureCount = 0;
     std::uint32_t sourceFileVersion = 0;
     std::uint32_t sourceMeshCount = 0;

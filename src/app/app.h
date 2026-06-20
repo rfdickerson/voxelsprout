@@ -2,6 +2,7 @@
 
 #include "core/input.h"
 #include "game/strategy_map.h"
+#include "game/units.h"
 #include "import/gpu_scene.h"
 #include "ui/animation.h"
 #include "render/renderer.h"
@@ -16,6 +17,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct GLFWwindow;
@@ -98,6 +100,7 @@ private:
     void updateCamera(float dt);
     void setupDemoUi(float viewW, float viewH);
     void updateUiOverlay(float dt);
+    void drawStrategyMapLabels(float fbW, float fbH);
     bool pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
                           int& outCol, int& outRow) const;
     // World XZ where the ray through the cursor pixel meets the y=0 ground plane.
@@ -107,6 +110,32 @@ private:
     // Switch the strategy map between 2D (flat ortho) and 3D (extruded perspective):
     // re-mesh + re-upload the scene, toggle SSAO, and reframe the camera.
     void setStrategyMap3D(bool enabled);
+    // Re-mesh the strategy map (terrain + live unit tokens) for the current relief
+    // mode and re-upload to the renderer. Called after unit moves and end-of-turn.
+    void rebuildStrategyMapScene();
+    // Seed a few playable units on friendly settlements so the supply mechanic has
+    // something to drive in the prototype.
+    void spawnDemoUnits();
+    // Left click on hex (col,row): select the unit standing there, or clear the
+    // current selection when clicking empty ground.
+    void selectUnitAtHex(int col, int row);
+    // While the right button is held: resolve what a release at (col,row) would do
+    // for the selected unit (march along an A* path, or attack an enemy in reach)
+    // and stash it for the preview overlay.
+    void updateMoveAttackPreview(int targetCol, int targetRow);
+    // On right-button release: carry out the previewed move order or attack.
+    void commitMoveAttackPreview();
+    // Drop any pending move/attack preview.
+    void clearMoveAttackPreview();
+    // Open (or refresh) the city production panel for the city on (col,row).
+    void openProductionPanelForCity(int col, int row);
+    // Number of idle cities (no production queued) + unvisited idle units.
+    // Zero = End Turn is safe to press.
+    [[nodiscard]] int idleCount() const;
+    // Pan the camera to a hex tile.
+    void focusOnHex(std::uint32_t col, std::uint32_t row);
+    // Jump to the next idle city (opens production panel) or idle unit (selects it).
+    void cycleToNextIdle();
     void syncGameplayUiState();
     void assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId);
     void handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight);
@@ -283,7 +312,16 @@ private:
     odai::ui::Image* m_civPortraitImage = nullptr;
     odai::ui::Label* m_civLeaderNameLabel = nullptr;
     odai::ui::ProductionPanel* m_productionPanel = nullptr;
-    std::string m_cityProductionId;  // City's currently selected build.
+    std::string m_cityProductionId;  // City's currently selected build (legacy mock).
+    // Per-city production control: which city the panel currently shows.
+    odai::ui::Button* m_endTurnBtn = nullptr;
+    int m_selectedCityCol = -1;
+    int m_selectedCityRow = -1;
+    float m_setupViewW = 0.0f;
+    float m_setupViewH = 0.0f;
+    // Unit ids the player has "visited" this turn (via Next Idle); visited units
+    // leave the idle count so they don't block End Turn without explicit orders.
+    std::unordered_set<std::uint32_t> m_visitedUnitIds;
     // Unit selection and action bar.
     std::string m_selectedUnitType;      // e.g. "warrior", "" = nothing selected
     std::string m_prevSelectedUnitType;  // for change detection in updateUiOverlay
@@ -332,13 +370,34 @@ private:
     float m_map3DFocusZ = 0.0f;
     float m_mapFocusVelocityX = 0.0f; // Pan inertia velocity (world units/s).
     float m_mapFocusVelocityZ = 0.0f;
+    float m_panDispSmoothX = 0.0f;    // Low-passed per-frame pan displacement (world units).
+    float m_panDispSmoothZ = 0.0f;
     bool m_wasStrategyMapDragging = false;
+    odai::render::CameraPose m_renderCameraPose{};
     int m_uiDemoClicks = 0;
     int m_currentTurn = 1;
     int m_hoveredHexCol = -1;
     int m_hoveredHexRow = -1;
 
     odai::game::StrategyMap m_strategyMap;
+    odai::game::GameState m_gameState;       // Live units marching on the map.
+    std::uint32_t m_selectedUnitId = 0;      // Currently selected unit id; 0 == none.
+    // Click edge detection for unit select (left) and move orders (right). A
+    // press+release with little movement is a click; a left drag stays a map pan.
+    bool m_mapLeftPrevDown = false;
+    bool m_mapPressOverUi = false;
+    float m_mapPressX = 0.0f;
+    float m_mapPressY = 0.0f;
+    bool m_mapRightPrevDown = false;
+    bool m_mapRightPressOverUi = false;
+    float m_mapRightPressX = 0.0f;
+    float m_mapRightPressY = 0.0f;
+    // Pending right-drag move/attack preview for the selected unit.
+    bool m_previewActive = false;
+    bool m_previewIsAttack = false;
+    std::uint32_t m_previewTargetCol = 0;
+    std::uint32_t m_previewTargetRow = 0;
+    std::vector<std::array<std::uint32_t, 2>> m_previewPath;
 
     odai::sim::Simulation m_simulation;
     odai::world::World m_world;
@@ -352,6 +411,13 @@ private:
     bool m_importedWaterDebug = false;
     std::filesystem::path m_importedScenePath;
     odai::importer::ImportedScene m_importedScene;
+    // Terrain textures loaded once at init; copied into StrategyMapMeshOptions on each
+    // re-mesh to avoid repeated disk I/O and mip-chain generation.
+    std::vector<odai::importer::ImportedSceneTexture> m_terrainTextures;
+    // GPU-instanced, tessellated hex land surface. Active only in 3D relief mode on a
+    // tessellation-capable device; otherwise the flat imported-static land is kept.
+    odai::importer::HexTerrainData m_hexTerrain;
+    bool m_useHexTerrain = false;
 };
 
 } // namespace odai::app

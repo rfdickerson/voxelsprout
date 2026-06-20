@@ -70,7 +70,7 @@ float main(FragmentInput input) : SV_Target0
             const float sampleAo = ssaoRawTexture.Sample(suv).x;
 
             const float normalWeight = pow(max(dot(centerNormal, sampleNormal), 0.0), 8.0);
-            const float depthWeight = exp(-abs(sampleDepth - centerDepth) * 1.5);
+            const float depthWeight = exp(-abs(sampleDepth - centerDepth) * 4.0);
             const float weight = spatialWeight * normalWeight * depthWeight;
 
             weightedAo += sampleAo * weight;

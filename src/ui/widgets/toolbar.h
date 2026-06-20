@@ -25,6 +25,7 @@ public:
         UiColor iconColor{1.0f, 1.0f, 1.0f, 1.0f};
         std::string value;
         UiColor valueColor{0.92f, 0.95f, 0.97f, 1.0f};
+        std::string tooltip;  // Rich-text markup shown on hover; empty = no tooltip.
     };
 
     explicit Toolbar(const Font* font) : font_(font) {}
@@ -48,15 +49,31 @@ public:
             items_[index].value = std::move(value);
         }
     }
+    void setTooltip(std::size_t index, std::string tooltip) {
+        if (index < items_.size()) {
+            items_[index].tooltip = std::move(tooltip);
+        }
+    }
     [[nodiscard]] std::size_t itemCount() const { return items_.size(); }
 
+    [[nodiscard]] bool hasHoveredTooltip() const {
+        return hoveredItem_ >= 0 && !items_[static_cast<std::size_t>(hoveredItem_)].tooltip.empty();
+    }
+    [[nodiscard]] const std::string& hoveredTooltipText() const {
+        return items_[static_cast<std::size_t>(hoveredItem_)].tooltip;
+    }
+    [[nodiscard]] UiVec2 hoveredTooltipAnchor() const { return hoveredAnchor_; }
+
     void draw(UiDrawList& dl) const override;
+    bool onEvent(UiEvent& event) override;
 
 private:
     void drawIcon(UiDrawList& dl, IconKind kind, const UiColor& color, const UiRect& box) const;
 
     const Font* font_ = nullptr;
     std::vector<Item> items_;
+    mutable int hoveredItem_ = -1;
+    mutable UiVec2 hoveredAnchor_{};
 };
 
 }  // namespace odai::ui

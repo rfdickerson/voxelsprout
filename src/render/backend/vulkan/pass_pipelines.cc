@@ -722,22 +722,8 @@ bool RendererBackend::createPipePipeline() {
               << ", rtVariant=" << (importedStaticPipelineRt != VK_NULL_HANDLE ? "yes" : "no")
               << "\n";
 
-    if (m_strategyMapMode) {
-        if (m_pipePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_pipePipeline, nullptr); }
-        if (m_importedStaticPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr); }
-        if (m_importedStaticPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr); }
-        m_pipePipeline = pipePipeline;
-        m_importedStaticPipeline = importedStaticPipeline;
-        m_importedStaticPipelineRt = importedStaticPipelineRt;
-        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipePipeline), "pipeline.pipe.lit");
-        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipeline), "pipeline.importedStatic");
-        if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
-            setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipelineRt), "pipeline.importedStatic.rt");
-        }
-        m_rtMainPassImplemented = m_rayTracingRuntimeEnabled && (m_importedStaticPipelineRt != VK_NULL_HANDLE);
-        refreshShadowStats();
-        return true;
-    }
+    // Strategy map needs the imported-static AND water pipelines (animated ocean),
+    // plus sky; the early-return that skips the rest is below, after water creation.
 
     std::array<VkShaderModule, 2> skyCloudShaderModules = {
         VK_NULL_HANDLE,
@@ -908,6 +894,22 @@ bool RendererBackend::createPipePipeline() {
     importedWaterColorBlending.pAttachments = &importedWaterColorBlendAttachment;
     importedWaterPipelineCreateInfo.pColorBlendState = &importedWaterColorBlending;
 
+    // Vulkan Roadmap 2026 VRS: give the water pipeline a dynamic fragment shading
+    // rate so the low-frequency water surface can be shaded coarsely at draw time.
+    // Only when the device supports it (else the dynamic state would be invalid).
+    std::array<VkDynamicState, 3> importedWaterDynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR,
+    };
+    VkPipelineDynamicStateCreateInfo importedWaterDynamicState{};
+    importedWaterDynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    importedWaterDynamicState.dynamicStateCount = static_cast<uint32_t>(importedWaterDynamicStates.size());
+    importedWaterDynamicState.pDynamicStates = importedWaterDynamicStates.data();
+    if (m_supportsVrs) {
+        importedWaterPipelineCreateInfo.pDynamicState = &importedWaterDynamicState;
+    }
+
     VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
     const VkResult importedWaterPipelineResult = vkCreateGraphicsPipelines(
         m_device,
@@ -960,6 +962,36 @@ bool RendererBackend::createPipePipeline() {
               << ", depthCompare=" << static_cast<uint32_t>(importedWaterDepthStencil.depthCompareOp)
               << ", rtVariant=" << (importedWaterPipelineRt != VK_NULL_HANDLE ? "yes" : "no")
               << "\n";
+
+    if (m_strategyMapMode) {
+        // The hex map renders imported-static terrain + animated water + sky cloud and
+        // skips voxel/terrain-tess/magica/grass pipelines it never uses.
+        if (m_pipePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_pipePipeline, nullptr); }
+        if (m_importedStaticPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr); }
+        if (m_importedStaticPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr); }
+        if (m_skyCloudPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_skyCloudPipeline, nullptr); }
+        if (m_importedWaterPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedWaterPipeline, nullptr); }
+        if (m_importedWaterPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedWaterPipelineRt, nullptr); }
+        m_pipePipeline = pipePipeline;
+        m_importedStaticPipeline = importedStaticPipeline;
+        m_importedStaticPipelineRt = importedStaticPipelineRt;
+        m_skyCloudPipeline = skyCloudPipeline;
+        m_importedWaterPipeline = importedWaterPipeline;
+        m_importedWaterPipelineRt = importedWaterPipelineRt;
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipePipeline), "pipeline.pipe.lit");
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipeline), "pipeline.importedStatic");
+        if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
+            setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipelineRt), "pipeline.importedStatic.rt");
+        }
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyCloudPipeline), "pipeline.skyCloud");
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipeline), "pipeline.importedWater");
+        if (m_importedWaterPipelineRt != VK_NULL_HANDLE) {
+            setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipelineRt), "pipeline.importedWater.rt");
+        }
+        m_rtMainPassImplemented = m_rayTracingRuntimeEnabled && (m_importedStaticPipelineRt != VK_NULL_HANDLE);
+        refreshShadowStats();
+        return true;
+    }
 
     constexpr const char* kGrassBillboardVertexShaderPath = "../src/render/shaders/grass_billboard.vert.slang.spv";
     constexpr const char* kGrassBillboardFragmentShaderPath = "../src/render/shaders/grass_billboard.frag.slang.spv";
@@ -1872,6 +1904,10 @@ bool RendererBackend::createGraphicsPipeline() {
     constexpr const char* kTerrainTessControlShaderPath = "../src/render/shaders/terrain_heightmap.tesc.slang.spv";
     constexpr const char* kTerrainTessEvalShaderPath = "../src/render/shaders/terrain_heightmap.tese.slang.spv";
     constexpr const char* kTerrainFragmentShaderPath = "../src/render/shaders/terrain_heightmap.frag.slang.spv";
+    constexpr const char* kHexTerrainVertexShaderPath = "../src/render/shaders/hex_terrain.vert.slang.spv";
+    constexpr const char* kHexTerrainTessControlShaderPath = "../src/render/shaders/hex_terrain.tesc.slang.spv";
+    constexpr const char* kHexTerrainTessEvalShaderPath = "../src/render/shaders/hex_terrain.tese.slang.spv";
+    constexpr const char* kHexTerrainFragmentShaderPath = "../src/render/shaders/hex_terrain.frag.slang.spv";
     constexpr const char* kSkyboxVertexShaderPath = "../src/render/shaders/skybox.vert.slang.spv";
     constexpr const char* kSkyboxFragmentShaderPath = "../src/render/shaders/skybox.frag.slang.spv";
     constexpr const char* kToneMapVertexShaderPath = "../src/render/shaders/tone_map.vert.slang.spv";
@@ -2898,6 +2934,117 @@ bool RendererBackend::createGraphicsPipeline() {
               << "\n";
     } // if (!m_strategyMapMode) terrain block
 
+    // Hex strategy-map land surface: one shared subdivided hex base mesh instanced per
+    // land tile, tessellated and height-displaced on the GPU. Created only in strategy
+    // map mode when tessellation is supported; a failure here is non-fatal (the app
+    // keeps the flat imported-static land via hexTerrainReady() == false).
+    VkPipeline hexTerrainPipeline = VK_NULL_HANDLE;
+    if (m_strategyMapMode && m_supportsTessellationShader) {
+        std::array<VkShaderModule, 4> hexShaderModules = {
+            VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE
+        };
+        const std::array<ShaderModuleLoadSpec, 4> hexShaderLoadSpecs = {{
+            {kHexTerrainVertexShaderPath, "hex_terrain.vert"},
+            {kHexTerrainTessControlShaderPath, "hex_terrain.tesc"},
+            {kHexTerrainTessEvalShaderPath, "hex_terrain.tese"},
+            {kHexTerrainFragmentShaderPath, "hex_terrain.frag"},
+        }};
+        if (!createShaderModulesFromFiles(m_device, hexShaderLoadSpecs, hexShaderModules)) {
+            VOX_LOGW("render") << "hex terrain pipeline disabled: shader modules failed to load";
+        } else {
+            std::array<VkPipelineShaderStageCreateInfo, 4> hexShaderStages{};
+            const std::array<VkShaderStageFlagBits, 4> hexStageBits = {
+                VK_SHADER_STAGE_VERTEX_BIT,
+                VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
+                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+            };
+            for (std::size_t i = 0; i < 4; ++i) {
+                hexShaderStages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                hexShaderStages[i].stage = hexStageBits[i];
+                hexShaderStages[i].module = hexShaderModules[i];
+                hexShaderStages[i].pName = "main";
+            }
+
+            VkVertexInputBindingDescription hexBindings[2]{};
+            hexBindings[0].binding = 0;
+            hexBindings[0].stride = sizeof(odai::importer::HexBaseVertex);
+            hexBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+            hexBindings[1].binding = 1;
+            hexBindings[1].stride = sizeof(odai::importer::HexTileInstance);
+            hexBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+            VkVertexInputAttributeDescription hexAttributes[7]{};
+            hexAttributes[0].location = 0;  // localXZ
+            hexAttributes[0].binding = 0;
+            hexAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
+            hexAttributes[0].offset = static_cast<uint32_t>(offsetof(odai::importer::HexBaseVertex, localXZ));
+            hexAttributes[1].location = 1;  // cornerIndex
+            hexAttributes[1].binding = 0;
+            hexAttributes[1].format = VK_FORMAT_R32_UINT;
+            hexAttributes[1].offset = static_cast<uint32_t>(offsetof(odai::importer::HexBaseVertex, cornerIndex));
+            hexAttributes[2].location = 2;  // centerXZ
+            hexAttributes[2].binding = 1;
+            hexAttributes[2].format = VK_FORMAT_R32G32_SFLOAT;
+            hexAttributes[2].offset = static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, centerXZ));
+            hexAttributes[3].location = 3;  // classFlags
+            hexAttributes[3].binding = 1;
+            hexAttributes[3].format = VK_FORMAT_R32_UINT;
+            hexAttributes[3].offset = static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, classFlags));
+            hexAttributes[4].location = 4;  // detailParams
+            hexAttributes[4].binding = 1;
+            hexAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            hexAttributes[4].offset = static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, detailParams));
+            hexAttributes[5].location = 5;  // ownAndNear = {ownElevY, neighborElevY[0..2]}
+            hexAttributes[5].binding = 1;
+            hexAttributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            hexAttributes[5].offset = static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, ownElevY));
+            hexAttributes[6].location = 6;  // farAndSize = {neighborElevY[3..5], hexSize}
+            hexAttributes[6].binding = 1;
+            hexAttributes[6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            hexAttributes[6].offset =
+                static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, neighborElevY) + (3u * sizeof(float)));
+
+            VkPipelineVertexInputStateCreateInfo hexVertexInputInfo{};
+            hexVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            hexVertexInputInfo.vertexBindingDescriptionCount = 2;
+            hexVertexInputInfo.pVertexBindingDescriptions = hexBindings;
+            hexVertexInputInfo.vertexAttributeDescriptionCount = 7;
+            hexVertexInputInfo.pVertexAttributeDescriptions = hexAttributes;
+
+            VkPipelineInputAssemblyStateCreateInfo hexInputAssembly{};
+            hexInputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            hexInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+
+            VkPipelineTessellationStateCreateInfo hexTessellationState{};
+            hexTessellationState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+            hexTessellationState.patchControlPoints = 3;
+
+            VkPipelineRasterizationStateCreateInfo hexRasterizer = rasterizer;
+            hexRasterizer.cullMode = VK_CULL_MODE_NONE;
+
+            VkGraphicsPipelineCreateInfo hexPipelineCreateInfo = pipelineCreateInfo;
+            hexPipelineCreateInfo.stageCount = static_cast<uint32_t>(hexShaderStages.size());
+            hexPipelineCreateInfo.pStages = hexShaderStages.data();
+            hexPipelineCreateInfo.pVertexInputState = &hexVertexInputInfo;
+            hexPipelineCreateInfo.pInputAssemblyState = &hexInputAssembly;
+            hexPipelineCreateInfo.pTessellationState = &hexTessellationState;
+            hexPipelineCreateInfo.pRasterizationState = &hexRasterizer;
+
+            const VkResult hexPipelineResult = vkCreateGraphicsPipelines(
+                m_device, VK_NULL_HANDLE, 1, &hexPipelineCreateInfo, nullptr, &hexTerrainPipeline);
+            destroyShaderModules(m_device, hexShaderModules);
+            if (hexPipelineResult != VK_SUCCESS) {
+                logVkFailure("vkCreateGraphicsPipelines(hexTerrain)", hexPipelineResult);
+                hexTerrainPipeline = VK_NULL_HANDLE;
+            } else {
+                VOX_LOGI("render") << "pipeline config (hexTerrain): topology=patch_list"
+                          << ", patchControlPoints=" << hexTessellationState.patchControlPoints
+                          << ", cullMode=" << static_cast<uint32_t>(hexRasterizer.cullMode) << "\n";
+            }
+        }
+    }
+
     if (m_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeline, nullptr);
     }
@@ -2934,9 +3081,13 @@ bool RendererBackend::createGraphicsPipeline() {
     if (m_terrainTessPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_terrainTessPipeline, nullptr);
     }
+    if (m_hexTerrainPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_hexTerrainPipeline, nullptr);
+    }
     m_pipeline = worldPipeline;
     m_pipelineRt = worldRtPipeline;
     m_terrainTessPipeline = terrainTessPipeline;
+    m_hexTerrainPipeline = hexTerrainPipeline;
     m_skyboxPipeline = skyboxPipeline;
     m_shadowPipeline = shadowPipeline;
     m_pipeShadowPipeline = pipeShadowPipeline;
@@ -2951,6 +3102,9 @@ bool RendererBackend::createGraphicsPipeline() {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipelineRt), "pipeline.world.rt");
     }
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_terrainTessPipeline), "pipeline.terrainHeightmapTess");
+    if (m_hexTerrainPipeline != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_hexTerrainPipeline), "pipeline.hexTerrain");
+    }
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyboxPipeline), "pipeline.skybox");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_shadowPipeline), "pipeline.shadow.voxels");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeShadowPipeline), "pipeline.shadow.pipes");

@@ -210,7 +210,8 @@ bool RendererBackend::createAoTargets() {
                                   std::vector<TransientImageHandle>& outHandles,
                                   const char* debugLabel,
                                   FrameArenaPass firstPass,
-                                  FrameArenaPass lastPass) -> bool {
+                                  FrameArenaPass lastPass,
+                                  VkExtent2D extent) -> bool {
         outImages.assign(frameTargetCount, VK_NULL_HANDLE);
         outMemories.assign(frameTargetCount, VK_NULL_HANDLE);
         outViews.assign(frameTargetCount, VK_NULL_HANDLE);
@@ -220,7 +221,7 @@ bool RendererBackend::createAoTargets() {
             imageDesc.imageType = VK_IMAGE_TYPE_2D;
             imageDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
             imageDesc.format = format;
-            imageDesc.extent = {m_aoExtent.width, m_aoExtent.height, 1u};
+            imageDesc.extent = {extent.width, extent.height, 1u};
             imageDesc.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
             imageDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             imageDesc.mipLevels = 1;
@@ -271,7 +272,8 @@ bool RendererBackend::createAoTargets() {
             m_normalDepthTransientHandles,
             "ao.normalDepth",
             FrameArenaPass::Ssao,
-            FrameArenaPass::Ssao
+            FrameArenaPass::Ssao,
+            m_aoExtent
         )) {
         return false;
     }
@@ -328,7 +330,8 @@ bool RendererBackend::createAoTargets() {
             m_ssaoRawTransientHandles,
             "ao.ssaoRaw",
             FrameArenaPass::Ssao,
-            FrameArenaPass::Ssao
+            FrameArenaPass::Ssao,
+            m_aoExtent
         )) {
         return false;
     }
@@ -340,7 +343,8 @@ bool RendererBackend::createAoTargets() {
             m_ssaoBlurTransientHandles,
             "ao.ssaoBlur",
             FrameArenaPass::Ssao,
-            FrameArenaPass::Main
+            FrameArenaPass::Main,
+            m_aoExtent
         )) {
         return false;
     }

@@ -232,7 +232,10 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
-    if (!m_strategyMapMode && !runStep("createAoPipelines", [&] { return createAoPipelines(); })) {
+    // AO pipelines are needed whenever SSAO can be enabled at runtime. The strategy
+    // map's 3D relief mode turns SSAO on to deepen land-against-water seams, so create
+    // them unconditionally; runtime on/off is governed by setSsaoEnabled().
+    if (!runStep("createAoPipelines", [&] { return createAoPipelines(); })) {
         VOX_LOGE("render") << "init failed at createAoPipelines\n";
         shutdown();
         return false;
@@ -928,6 +931,20 @@ bool RendererBackend::createLogicalDevice() {
     memoryPriorityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT;
     memoryPriorityFeatures.pNext = &vulkan14Features;
     memoryPriorityFeatures.memoryPriority = VK_TRUE;
+
+    // Vulkan Roadmap 2026: variable rate shading. Gated on the chosen device's probe
+    // so we never require it. Enables coarse shading of the low-frequency water pass.
+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR fragmentShadingRateFeatures{};
+    fragmentShadingRateFeatures.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR;
+    const bool enableVrs = m_desktopCapabilityProbe.fragmentShadingRateExtension;
+    if (enableVrs) {
+        fragmentShadingRateFeatures.pipelineFragmentShadingRate = VK_TRUE;
+        fragmentShadingRateFeatures.pNext = &memoryPriorityFeatures;
+    }
+    VkBaseOutStructure* const featureChainTail = enableVrs
+        ? reinterpret_cast<VkBaseOutStructure*>(&fragmentShadingRateFeatures)
+        : reinterpret_cast<VkBaseOutStructure*>(&memoryPriorityFeatures);
     m_enabledAccelerationStructureFeatures = {};
     m_enabledAccelerationStructureFeatures.sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
@@ -937,10 +954,10 @@ bool RendererBackend::createLogicalDevice() {
         m_enabledAccelerationStructureFeatures.accelerationStructure = VK_TRUE;
         m_enabledRayQueryFeatures.rayQuery = VK_TRUE;
         m_enabledRayQueryFeatures.pNext = &m_enabledAccelerationStructureFeatures;
-        m_enabledAccelerationStructureFeatures.pNext = &memoryPriorityFeatures;
+        m_enabledAccelerationStructureFeatures.pNext = reinterpret_cast<void*>(featureChainTail);
         enabledFeatures2.pNext = &m_enabledRayQueryFeatures;
     } else {
-        enabledFeatures2.pNext = &memoryPriorityFeatures;
+        enabledFeatures2.pNext = reinterpret_cast<void*>(featureChainTail);
     }
 
     std::vector<const char*> enabledDeviceExtensions(kDeviceExtensions.begin(), kDeviceExtensions.end());
@@ -957,6 +974,9 @@ bool RendererBackend::createLogicalDevice() {
         appendDeviceExtensionIfMissing(enabledDeviceExtensions, "VK_KHR_deferred_host_operations");
         appendDeviceExtensionIfMissing(enabledDeviceExtensions, "VK_KHR_acceleration_structure");
         appendDeviceExtensionIfMissing(enabledDeviceExtensions, "VK_KHR_ray_query");
+    }
+    if (enableVrs) {
+        appendDeviceExtensionIfMissing(enabledDeviceExtensions, VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
     }
 
     VkDeviceCreateInfo createInfo{};
@@ -1035,6 +1055,13 @@ bool RendererBackend::createLogicalDevice() {
     m_rayTracingRuntimeEnabled = loadRayTracingFunctions();
     loadHostImageCopyFunctions();
     loadDescriptorBufferFunctions();
+    if (enableVrs) {
+        m_cmdSetFragmentShadingRate = reinterpret_cast<PFN_vkCmdSetFragmentShadingRateKHR>(
+            vkGetDeviceProcAddr(m_device, "vkCmdSetFragmentShadingRateKHR"));
+        m_supportsVrs = m_cmdSetFragmentShadingRate != nullptr;
+        VOX_LOGI("render") << "fragment shading rate (VRS): "
+                           << (m_supportsVrs ? "enabled" : "extension present but entrypoint missing") << "\n";
+    }
     if (m_strategyMapMode) {
         // The flat hex map needs no ray-traced shadows/GI. Disabling the RT
         // runtime skips the BLAS/TLAS acceleration-structure build (multi-second
@@ -1100,7 +1127,7 @@ bool RendererBackend::createLogicalDevice() {
         allocatorCreateInfo.physicalDevice = m_physicalDevice;
         allocatorCreateInfo.device = m_device;
         allocatorCreateInfo.instance = m_instance;
-        allocatorCreateInfo.vulkanApiVersion = VK_API_VERSION_1_4;
+        allocatorCreateInfo.vulkanApiVersion = VK_API_VERSION_1_3;
         const VkResult allocatorResult = vmaCreateAllocator(&allocatorCreateInfo, &m_vmaAllocator);
         if (allocatorResult != VK_SUCCESS) {
             logVkFailure("vmaCreateAllocator", allocatorResult);

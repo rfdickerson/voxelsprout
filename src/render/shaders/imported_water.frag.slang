@@ -19,9 +19,9 @@ static const float kAirIor = 1.0;
 static const float kWaterIor = 1.333;
 static const float kAirToWaterEta = kAirIor / kWaterIor;
 static const uint kBindlessTextureIndexWaterNormal = 8u;
-static const float3 kWaterShallowTint = float3(0.025, 0.58, 0.52);
-static const float3 kWaterDeepTint = float3(0.005, 0.16, 0.19);
-static const float3 kWaterAbsorption = float3(0.070, 0.028, 0.010);
+static const float3 kWaterShallowTint = float3(0.10, 0.50, 0.82);   // Mediterranean azure
+static const float3 kWaterDeepTint = float3(0.008, 0.14, 0.42);   // deep cobalt
+static const float3 kWaterAbsorption = float3(0.065, 0.018, 0.006); // blue-shifted for Med clarity
 
 struct FragmentInput
 {
@@ -316,10 +316,10 @@ float3 waterNormal(float3 worldPosition, float2 uv)
     const float microRipple = sin((uv.x * 6.28318 * 0.72) + (uv.y * 6.28318 * 0.58) + (time * 0.58 * animationSpeed));
     const float dx = (swell0 * 0.0140) + (swell1 * 0.0090) + (windRipple * 0.0056) + (microRipple * 0.0028 * detailFade);
     const float dz = (swell1 * 0.0120) - (windRipple * 0.0056) - (microRipple * 0.0028 * detailFade);
-    const float2 worldUv = float2(worldPosition.x, worldPosition.z) * 0.00195;
+    const float2 worldUv = float2(worldPosition.x, worldPosition.z) * 0.00095;
     const float2 warp = float2(
-        stableWaterNoise((worldUv * 19.0) + float2(time * 0.030, 0.0)),
-        stableWaterNoise((worldUv.yx * 17.0) + float2(0.0, -time * 0.026))) - 0.5;
+        stableWaterNoise((worldUv * 5.0) + float2(time * 0.030, 0.0)),
+        stableWaterNoise((worldUv.yx * 4.5) + float2(0.0, -time * 0.026))) - 0.5;
     const float2 scroll0 = float2(time * 0.030, -time * 0.021) * animationSpeed;
     const float2 scroll1 = float2(-time * 0.020, time * 0.027) * animationSpeed;
     const float2 scroll2 = float2(time * 0.014, time * 0.018) * animationSpeed;

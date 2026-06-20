@@ -518,6 +518,16 @@ std::vector<ShapedGlyph> Font::shape(std::string_view utf8) const {
     while (i < utf8.size())
         codepoints.push_back(decodeUtf8(utf8, i));
 
+    // Software ligature: -- → em dash (U+2014).
+    for (std::size_t j = 0; j + 1 < codepoints.size(); ) {
+        if (codepoints[j] == '-' && codepoints[j + 1] == '-') {
+            codepoints[j] = 0x2014u;
+            codepoints.erase(codepoints.begin() + static_cast<std::ptrdiff_t>(j) + 1);
+        } else {
+            ++j;
+        }
+    }
+
     if (!m_shaping ||
         (m_shaping->ligatures.empty() && m_shaping->kernPairs.empty() && m_shaping->kernClasses.empty())) {
         // No shaping data — return plain codepoints.
@@ -662,8 +672,9 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
     // blocky text at UI sizes.
     std::vector<stbtt_packedchar> packed0(glyphCount);
     std::vector<stbtt_packedchar> packed1(7); // FB00-FB06
+    std::vector<stbtt_packedchar> packed2(2); // U+2013 en dash, U+2014 em dash
 
-    stbtt_pack_range ranges[2];
+    stbtt_pack_range ranges[3];
     ranges[0] = {};
     ranges[0].font_size = pixelHeight;
     ranges[0].first_unicode_codepoint_in_range = static_cast<int>(firstCodepoint);
@@ -676,8 +687,14 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
     ranges[1].num_chars = 7;
     ranges[1].chardata_for_range = packed1.data();
 
+    ranges[2] = {};
+    ranges[2].font_size = pixelHeight;
+    ranges[2].first_unicode_codepoint_in_range = 0x2013; // en dash
+    ranges[2].num_chars = 2;
+    ranges[2].chardata_for_range = packed2.data();
+
     stbtt_PackSetOversampling(&packContext, 3, 1);
-    const int packOk = stbtt_PackFontRanges(&packContext, ttfData, 0, ranges, 2);
+    const int packOk = stbtt_PackFontRanges(&packContext, ttfData, 0, ranges, 3);
     if (!packOk) {
         VOX_LOGW("Font") << "Atlas packing incomplete at " << pixelHeight
                          << "px (atlasSize=" << atlasSize
@@ -751,6 +768,21 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
         g.advance = packed1[i].xadvance;
         g.uv = UiRect{q.s0, q.t0, q.s1, q.t1};
         m_glyphs[0xFB00u + i] = g;
+    }
+
+    // Range 2: U+2013 (en dash) and U+2014 (em dash).
+    for (std::uint32_t i = 0; i < 2u; ++i) {
+        if (packed2[i].xadvance == 0.0f) continue;
+        float penX = 0.0f, penY = 0.0f;
+        stbtt_aligned_quad q{};
+        stbtt_GetPackedQuad(packed2.data(), static_cast<int>(atlasSize), static_cast<int>(atlasSize),
+                            static_cast<int>(i), &penX, &penY, &q, 1);
+        Glyph g{};
+        g.size = {q.x1 - q.x0, q.y1 - q.y0};
+        g.bearing = {q.x0, -q.y0};
+        g.advance = packed2[i].xadvance;
+        g.uv = UiRect{q.s0, q.t0, q.s1, q.t1};
+        m_glyphs[0x2013u + i] = g;
     }
 
     // PUA ligature glyphs (manual 1x rasterization).

@@ -79,6 +79,10 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.tesc.slang" hull)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.tese.slang" domain)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/hex_terrain.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/hex_terrain.tesc.slang" hull)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/hex_terrain.tese.slang" domain)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/hex_terrain.frag.slang" fragment)
     add_slang_shader_variant(
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang"
         fragment
@@ -222,6 +226,8 @@ if(ODAI_BUILD_APP)
         src/game/strategy_map.cc
         src/game/strategy_map_io.cc
         src/game/strategy_map_mesh.cc
+        src/game/strategy_hex_terrain.cc
+        src/game/units.cc
         src/ui/widgets/production_panel.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
@@ -417,6 +423,22 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_strategy_map_gen PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
+    # Headless strategic-economy playtest harness. Pure CPU (no Vulkan): runs a
+    # whole multi-empire match for N turns and prints fun-factor metrics.
+    #   odai_civ_sim [turns] [seed] [empires] [--quiet|--sweep N]
+    add_executable(odai_civ_sim
+        src/game/strategy_map.cc
+        src/game/economy.cc
+        src/game/game_sim.cc
+        src/tools/civ_sim_main.cc
+    )
+    target_include_directories(odai_civ_sim PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_civ_sim PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_civ_sim PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
     # Theme viewer — artist tool for iterating on theme JSON files with live
     # hot-reload. Terminal-based: prints all color/font/size tokens with ANSI
     # color swatches and re-dumps whenever the theme file changes on disk.
@@ -510,9 +532,12 @@ if(BUILD_TESTING)
 
     add_executable(odai_strategy_map_tests
         tests/strategy_map_tests.cc
+        src/game/buildable.cc
         src/game/strategy_map.cc
         src/game/strategy_map_io.cc
         src/game/strategy_map_mesh.cc
+        src/game/strategy_hex_terrain.cc
+        src/game/units.cc
     )
     target_include_directories(odai_strategy_map_tests PRIVATE src)
 
@@ -545,6 +570,22 @@ if(BUILD_TESTING)
     endif()
 
     add_test(NAME odai_strategy_map_tests COMMAND odai_strategy_map_tests)
+
+    # Strategic economy + headless 4X simulation (yields, growth, happiness,
+    # research, wonders, AI). Pure CPU; no Vulkan.
+    add_executable(odai_economy_tests
+        tests/economy_tests.cc
+        src/game/economy.cc
+        src/game/game_sim.cc
+        src/game/strategy_map.cc
+    )
+    target_include_directories(odai_economy_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_economy_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_economy_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_economy_tests COMMAND odai_economy_tests)
 
     add_executable(odai_ui_tests tests/ui_tests.cc)
     target_link_libraries(odai_ui_tests PRIVATE odai_ui)

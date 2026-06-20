@@ -48,6 +48,22 @@ bool Renderer::uploadImportedScene(const odai::importer::ImportedScene& scene) {
     return m_backend->uploadImportedScene(scene);
 }
 
+void Renderer::clearHexTerrain() {
+    m_backend->clearHexTerrain();
+}
+
+bool Renderer::uploadHexTerrain(const odai::importer::HexTerrainData& data) {
+    return m_backend->uploadHexTerrain(data);
+}
+
+bool Renderer::hexTerrainReady() const {
+    return m_backend->hexTerrainReady();
+}
+
+void Renderer::setHexTerrainEnabled(bool enabled) {
+    m_backend->setHexTerrainEnabled(enabled);
+}
+
 void Renderer::setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba) {
     m_backend->setVoxelBaseColorPalette(paletteRgba);
 }

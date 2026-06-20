@@ -4,6 +4,7 @@
 
 #include "core/grid3.h"
 #include "game/buildable.h"
+#include "game/strategy_hex_terrain.h"
 #include "game/strategy_map.h"
 #include "game/strategy_map_io.h"
 #include "game/strategy_map_mesh.h"
@@ -68,6 +69,10 @@ constexpr float kImportedSceneSunPitchDegrees = -61.0f;
 // Fixed orientation/FOV for the strategy map's 3D relief camera.
 constexpr float kMap3DYawDegrees = -90.0f;
 constexpr float kMap3DFovDegrees = 50.0f;
+// Time constant for low-passing per-frame pan displacement. Filters the beat
+// between the mouse report rate (125/500/1000 Hz) and the frame rate, which
+// makes per-frame deltas uneven, without adding perceptible grab lag.
+constexpr float kStrategyPanSmoothingSeconds = 0.022f;
 constexpr float kSneakSpeedMultiplier = 0.35f;
 constexpr float kMoveAcceleration = 14.0f;
 constexpr float kMoveDeceleration = 18.0f;
@@ -670,6 +675,77 @@ odai::core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, odai::core::Dir6
     return preferredAxis;
 }
 
+// Load a PNG as an ImportedSceneTexture with a full box-filter mip chain.
+// Returns an empty texture (width==0) if the file is missing or unreadable.
+odai::importer::ImportedSceneTexture loadTerrainTextureWithMips(
+    const std::filesystem::path& path)
+{
+    odai::importer::ImportedSceneTexture tex{};
+    tex.sourcePath = path.string();
+    int w = 0, h = 0;
+    stbi_uc* pixels = stbi_load(path.string().c_str(), &w, &h, nullptr, 4);
+    if (!pixels || w <= 0 || h <= 0) {
+        if (pixels) stbi_image_free(pixels);
+        return tex;
+    }
+    tex.width  = static_cast<std::uint32_t>(w);
+    tex.height = static_cast<std::uint32_t>(h);
+
+    const std::size_t baseBytes =
+        static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u;
+    tex.rgba8.assign(pixels, pixels + baseBytes);
+    stbi_image_free(pixels);
+
+    // Box-filter mip chain; the renderer validates size by inferring mip count
+    // from rgba8.size(), so the chain must be packed in full down to 1x1.
+    std::vector<std::uint8_t> cur(tex.rgba8);
+    std::uint32_t mw = tex.width;
+    std::uint32_t mh = tex.height;
+    tex.mipLevelCount = 1u;
+    while (mw > 1u || mh > 1u) {
+        const std::uint32_t pw = mw;
+        const std::uint32_t ph = mh;
+        mw = std::max(1u, mw >> 1u);
+        mh = std::max(1u, mh >> 1u);
+        std::vector<std::uint8_t> next(
+            static_cast<std::size_t>(mw) * static_cast<std::size_t>(mh) * 4u);
+        for (std::uint32_t y = 0; y < mh; ++y) {
+            for (std::uint32_t x = 0; x < mw; ++x) {
+                const std::uint32_t sx0 = x * 2u;
+                const std::uint32_t sy0 = y * 2u;
+                const std::uint32_t sx1 = std::min(sx0 + 1u, pw - 1u);
+                const std::uint32_t sy1 = std::min(sy0 + 1u, ph - 1u);
+                for (int c = 0; c < 4; ++c) {
+                    const int s00 = cur[(sy0 * pw + sx0) * 4u + c];
+                    const int s10 = cur[(sy0 * pw + sx1) * 4u + c];
+                    const int s01 = cur[(sy1 * pw + sx0) * 4u + c];
+                    const int s11 = cur[(sy1 * pw + sx1) * 4u + c];
+                    next[(y * mw + x) * 4u + c] =
+                        static_cast<std::uint8_t>((s00 + s10 + s01 + s11 + 2) / 4);
+                }
+            }
+        }
+        tex.rgba8.insert(tex.rgba8.end(), next.begin(), next.end());
+        cur = std::move(next);
+        ++tex.mipLevelCount;
+    }
+    return tex;
+}
+
+// Build the strategy-map mesh options for the given relief mode. Terrain textures are
+// passed in from the App's cached copies (loaded once at init) to avoid repeated disk
+// I/O and mip-chain generation on every re-mesh (M toggle, end-turn, unit moves).
+odai::game::StrategyMapMeshOptions makeStrategyMapMeshOptions(
+    bool extruded,
+    const std::vector<odai::importer::ImportedSceneTexture>& terrainTextures)
+{
+    odai::game::StrategyMapMeshOptions meshOptions{};
+    meshOptions.extruded = extruded;
+    meshOptions.drawSettlements = false;
+    meshOptions.terrainTextures = terrainTextures;
+    return meshOptions;
+}
+
 } // namespace
 
 namespace odai::app {
@@ -850,12 +926,43 @@ bool App::init() {
         return false;
     }
 
+    // Load terrain textures once. Forest/Jungle share grassland; Hills/Mountains share
+    // rock. These are copied into StrategyMapMeshOptions on each re-mesh so the mesh
+    // builder can move them into the scene without needing another disk read.
+    {
+        using T = odai::game::TerrainType;
+        m_terrainTextures.resize(static_cast<std::size_t>(T::Count));
+        std::unordered_map<std::string, std::size_t> pathToSlot;
+        auto load = [&](T t, const char* rel) {
+            const std::size_t slot = static_cast<std::size_t>(t);
+            const std::string key = resolveAssetPath(rel).string();
+            const auto it = pathToSlot.find(key);
+            if (it == pathToSlot.end()) {
+                pathToSlot.emplace(key, slot);
+                m_terrainTextures[slot] = loadTerrainTextureWithMips(resolveAssetPath(rel));
+            } else {
+                m_terrainTextures[slot] = m_terrainTextures[it->second];
+            }
+        };
+        load(T::Grassland, "assets/textures/terrain_grassland.png");
+        load(T::Plains,    "assets/textures/terrain_plains.png");
+        load(T::Forest,    "assets/textures/terrain_grassland.png");
+        load(T::Jungle,    "assets/textures/terrain_grassland.png");
+        load(T::Hills,     "assets/textures/terrain_rock.png");
+        load(T::Mountains, "assets/textures/terrain_rock.png");
+        load(T::Desert,    "assets/textures/terrain_desert.png");
+        load(T::Tundra,    "assets/textures/terrain_tundra.png");
+        load(T::Snow,      "assets/textures/terrain_snow.png");
+    }
+
+    // Seed a few playable units on friendly settlements so the supply mechanic has
+    // something to drive; meshed below so they appear on the board from the start.
+    spawnDemoUnits();
+
     // Start in 3D relief mode; toggling (M) re-meshes flat for the 2D board view.
     m_strategyMap3D = true;
-    odai::game::StrategyMapMeshOptions meshOptions{};
-    meshOptions.extruded = true;
-    meshOptions.drawSettlements = false;
-    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap, meshOptions);
+    odai::game::StrategyMapMeshOptions meshOptions = makeStrategyMapMeshOptions(/*extruded=*/true, m_terrainTextures);
+    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap, m_gameState.units, std::move(meshOptions));
     m_importedSceneDemoEnabled = true;
     m_hoverEnabled = true;
 
@@ -908,6 +1015,23 @@ bool App::init() {
         return false;
     }
     m_renderer.setImportedSceneInteriorMode(false);
+
+    // GPU hex land: when the device created the tessellation pipeline, upload the
+    // instanced, height-displaced hex terrain and re-mesh so the imported-static path
+    // drops the land tops (the hex pipeline owns them). Falls back to flat land
+    // otherwise. Active in 3D relief only; the flat 2D board keeps the imported land.
+    m_useHexTerrain = m_renderer.hexTerrainReady();
+    if (m_useHexTerrain) {
+        m_hexTerrain = odai::game::buildHexTerrain(m_strategyMap, odai::game::HexTerrainOptions{});
+        if (m_renderer.uploadHexTerrain(m_hexTerrain)) {
+            m_renderer.setHexTerrainEnabled(m_strategyMap3D);
+            rebuildStrategyMapScene();
+        } else {
+            m_useHexTerrain = false;
+            VOX_LOGW("app") << "hex terrain upload failed; keeping flat land";
+        }
+    }
+
     // SSAO deepens land-against-water seams in 3D relief; we default to 3D, so on.
     // The flat 2D board has no occlusion to compute and turns it off on the M toggle.
     m_renderer.setSsaoEnabled(true);
@@ -944,23 +1068,36 @@ void App::run() {
             break;
         }
 
-        int simulationStepCount = 0;
-        while (simulationAccumulatorSeconds >= kSimulationFixedStepSeconds &&
-               simulationStepCount < kMaxSimulationStepsPerFrame) {
+        float simulationAlpha = 0.0f;
+        if (m_strategyMapMode) {
+            // The strategy-map camera is purely kinematic (pan + inertia + zoom) with
+            // no dependency on the fixed-step voxel physics. Driving it through the
+            // fixed accumulator would sample the per-frame mouse delta at 0/1/2 steps
+            // per rendered frame (a beat against vsync) and then render-interpolate the
+            // result, smearing input-driven motion into micro-stutter. Update it once
+            // per rendered frame with the real dt and render it directly (prev==current
+            // makes interpolation a no-op) for stutter-free 1:1 mouse tracking.
+            updateCamera(dt);
             m_cameraPrevious = m_camera;
-            updateCamera(static_cast<float>(kSimulationFixedStepSeconds));
-            simulationAccumulatorSeconds -= kSimulationFixedStepSeconds;
-            ++simulationStepCount;
+            simulationAccumulatorSeconds = 0.0;
+        } else {
+            int simulationStepCount = 0;
+            while (simulationAccumulatorSeconds >= kSimulationFixedStepSeconds &&
+                   simulationStepCount < kMaxSimulationStepsPerFrame) {
+                m_cameraPrevious = m_camera;
+                updateCamera(static_cast<float>(kSimulationFixedStepSeconds));
+                simulationAccumulatorSeconds -= kSimulationFixedStepSeconds;
+                ++simulationStepCount;
+            }
+            if (simulationStepCount == kMaxSimulationStepsPerFrame &&
+                simulationAccumulatorSeconds >= kSimulationFixedStepSeconds) {
+                // Drop excess backlog to keep simulation responsive after long stalls.
+                simulationAccumulatorSeconds = std::fmod(simulationAccumulatorSeconds, kSimulationFixedStepSeconds);
+            }
+            simulationAlpha = static_cast<float>(
+                std::clamp(simulationAccumulatorSeconds / kSimulationFixedStepSeconds, 0.0, 1.0)
+            );
         }
-        if (simulationStepCount == kMaxSimulationStepsPerFrame &&
-            simulationAccumulatorSeconds >= kSimulationFixedStepSeconds) {
-            // Drop excess backlog to keep simulation responsive after long stalls.
-            simulationAccumulatorSeconds = std::fmod(simulationAccumulatorSeconds, kSimulationFixedStepSeconds);
-        }
-
-        const float simulationAlpha = static_cast<float>(
-            std::clamp(simulationAccumulatorSeconds / kSimulationFixedStepSeconds, 0.0, 1.0)
-        );
         update(dt, simulationAlpha);
         ++frameCount;
     }
@@ -1036,6 +1173,7 @@ void App::update([[maybe_unused]] float dt, float simulationAlpha) {
     cameraPose.orthoHalfHeight = m_mapOrthoHalfHeight;
     m_visibleChunkIndices.clear();
     m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
+    m_renderCameraPose = cameraPose;
     updateUiOverlay(dt);
     m_renderer.renderFrame(
         m_world.chunkGrid(),
@@ -1361,14 +1499,21 @@ void App::updateCamera(float dt) {
                 float pX = 0.0f, pZ = 0.0f, cX = 0.0f, cZ = 0.0f;
                 if (rayToGroundPlane(prevX, prevY, fbW, fbH, pX, pZ) &&
                     rayToGroundPlane(curX, curY, fbW, fbH, cX, cZ)) {
-                    const float dispX = pX - cX;
-                    const float dispZ = pZ - cZ;
-                    m_map3DFocusX += dispX;
-                    m_map3DFocusZ += dispZ;
+                    const float rawDispX = pX - cX;
+                    const float rawDispZ = pZ - cZ;
+                    // Low-pass the per-frame displacement to even out mouse-report jitter.
+                    // Seed with the raw value on the first drag frame for an immediate 1:1
+                    // grab, then smooth thereafter.
+                    const float smoothAlpha = m_wasStrategyMapDragging
+                        ? (1.0f - std::exp(-dt / kStrategyPanSmoothingSeconds)) : 1.0f;
+                    m_panDispSmoothX += (rawDispX - m_panDispSmoothX) * smoothAlpha;
+                    m_panDispSmoothZ += (rawDispZ - m_panDispSmoothZ) * smoothAlpha;
+                    m_map3DFocusX += m_panDispSmoothX;
+                    m_map3DFocusZ += m_panDispSmoothZ;
                     if (dt > 1e-5f) {
-                        const float alpha = std::min(1.0f, dt * 20.0f);
-                        m_mapFocusVelocityX += alpha * (dispX / dt - m_mapFocusVelocityX);
-                        m_mapFocusVelocityZ += alpha * (dispZ / dt - m_mapFocusVelocityZ);
+                        const float velAlpha = std::min(1.0f, dt * 20.0f);
+                        m_mapFocusVelocityX += velAlpha * (m_panDispSmoothX / dt - m_mapFocusVelocityX);
+                        m_mapFocusVelocityZ += velAlpha * (m_panDispSmoothZ / dt - m_mapFocusVelocityZ);
                     }
                 }
             } else {
@@ -1407,14 +1552,21 @@ void App::updateCamera(float dt) {
             }
             if (mapDragging2D) {
                 const float worldPerPixel = (2.0f * m_mapOrthoHalfHeight) / static_cast<float>(fbH);
-                const float dispX = -mouseDeltaX * worldPerPixel;
-                const float dispZ = -mouseDeltaY * worldPerPixel;
-                m_camera.x += dispX;
-                m_camera.z += dispZ;
+                const float rawDispX = -mouseDeltaX * worldPerPixel;
+                const float rawDispZ = -mouseDeltaY * worldPerPixel;
+                // Low-pass the per-frame displacement to even out mouse-report jitter.
+                // Seed with the raw value on the first drag frame for an immediate 1:1
+                // grab, then smooth thereafter.
+                const float smoothAlpha = m_wasStrategyMapDragging
+                    ? (1.0f - std::exp(-dt / kStrategyPanSmoothingSeconds)) : 1.0f;
+                m_panDispSmoothX += (rawDispX - m_panDispSmoothX) * smoothAlpha;
+                m_panDispSmoothZ += (rawDispZ - m_panDispSmoothZ) * smoothAlpha;
+                m_camera.x += m_panDispSmoothX;
+                m_camera.z += m_panDispSmoothZ;
                 if (dt > 1e-5f) {
-                    const float alpha = std::min(1.0f, dt * 20.0f);
-                    m_mapFocusVelocityX += alpha * (dispX / dt - m_mapFocusVelocityX);
-                    m_mapFocusVelocityZ += alpha * (dispZ / dt - m_mapFocusVelocityZ);
+                    const float velAlpha = std::min(1.0f, dt * 20.0f);
+                    m_mapFocusVelocityX += velAlpha * (m_panDispSmoothX / dt - m_mapFocusVelocityX);
+                    m_mapFocusVelocityZ += velAlpha * (m_panDispSmoothZ / dt - m_mapFocusVelocityZ);
                 }
             } else {
                 m_camera.x += m_mapFocusVelocityX * dt;
@@ -3148,6 +3300,8 @@ const char* terrainName(odai::game::TerrainType t) {
 }  // namespace
 
 void App::setupDemoUi(float viewW, float viewH) {
+    m_setupViewW = viewW;
+    m_setupViewH = viewH;
     // DPI scale: framebuffer pixels per logical pixel. On a 125%-scaled display the
     // framebuffer is 1.25ï¿½ the GLFW window size, so all hardcoded pixel values must
     // be multiplied by this factor so the UI looks the same physical size on screen.
@@ -3434,12 +3588,43 @@ void App::setupDemoUi(float viewW, float viewH) {
         tb->iconGapPx  = 8.0f * s;
         tb->iconScale  = 0.68f;
         const odai::ui::UiColor textCol{0.92f, 0.95f, 0.97f, 1.0f};
-        m_tbScienceItem = tb->addItem(TB::IconKind::Science, {0.31f, 0.64f, 0.82f, 1.0f}, "+14.4", textCol);
-        tb->addItem(TB::IconKind::Culture, {0.69f, 0.44f, 0.84f, 1.0f}, "+8.2", textCol);
+        m_tbScienceItem = tb->addItem(TB::IconKind::Science, {0.31f, 0.64f, 0.82f, 1.0f}, "+14", textCol);
+        tb->addItem(TB::IconKind::Culture, {0.69f, 0.44f, 0.84f, 1.0f}, "+8", textCol);
         m_tbGoldItem = tb->addItem(TB::IconKind::Coin, {0.94f, 0.75f, 0.25f, 1.0f}, "240 (+39)", textCol);
-        m_tbFaithItem = tb->addItem(TB::IconKind::Faith, {0.90f, 0.88f, 0.96f, 1.0f}, "+11.5", textCol);
-        tb->addItem(TB::IconKind::Food, {0.49f, 0.78f, 0.31f, 1.0f}, "+5.6", textCol);
-        tb->addItem(TB::IconKind::Production, {0.85f, 0.54f, 0.23f, 1.0f}, "+6.7", textCol);
+        m_tbFaithItem = tb->addItem(TB::IconKind::Faith, {0.90f, 0.88f, 0.96f, 1.0f}, "+12", textCol);
+        tb->addItem(TB::IconKind::Food, {0.49f, 0.78f, 0.31f, 1.0f}, "+6", textCol);
+        tb->addItem(TB::IconKind::Production, {0.85f, 0.54f, 0.23f, 1.0f}, "+7", textCol);
+        // Hover breakdown tooltips for each yield badge.
+        tb->setTooltip(0,
+            "<b><color=#5bb0d8>Science  +14 / turn</color></b>\n"
+            "Capital city       <color=#5bb0d8>+8</color>\n"
+            "Library            <color=#5bb0d8>+4</color>\n"
+            "Academy tile       <color=#5bb0d8>+2</color>");
+        tb->setTooltip(1,
+            "<b><color=#b070e0>Culture  +8 / turn</color></b>\n"
+            "Capital city       <color=#b070e0>+4</color>\n"
+            "Monument           <color=#b070e0>+2</color>\n"
+            "Amphitheatre       <color=#b070e0>+2</color>");
+        tb->setTooltip(2,
+            "<b><color=#f0c040>Gold  240 in treasury</color></b>\n"
+            "Income / turn      <color=#f0c040>+39</color>\n"
+            "  Capital city     <color=#f0c040>+20</color>\n"
+            "  Trade routes     <color=#f0c040>+15</color>\n"
+            "  Market           <color=#f0c040>+4</color>");
+        tb->setTooltip(3,
+            "<b><color=#d8d0f0>Faith  +12 / turn</color></b>\n"
+            "Capital city       <color=#d8d0f0>+6</color>\n"
+            "Shrine             <color=#d8d0f0>+3</color>\n"
+            "Holy site tile     <color=#d8d0f0>+3</color>");
+        tb->setTooltip(4,
+            "<b><color=#7dca4f>Food  +6 / turn</color></b>\n"
+            "Capital city       <color=#7dca4f>+4</color>\n"
+            "Farms              <color=#7dca4f>+2</color>");
+        tb->setTooltip(5,
+            "<b><color=#da8a3a>Production  +7 / turn</color></b>\n"
+            "Capital city       <color=#da8a3a>+4</color>\n"
+            "Mine               <color=#da8a3a>+2</color>\n"
+            "Forest harvest     <color=#da8a3a>+1</color>");
         m_toolbar = static_cast<TB*>(root->addChild(std::move(tb)));
 
         // Civilizations-panel toggle icon — always visible in the toolbar so the
@@ -3486,10 +3671,23 @@ void App::setupDemoUi(float viewW, float viewH) {
     bar->addChild(std::move(statsLabel));
 
     auto endTurnBtn = std::make_unique<odai::ui::Button>(fonts.regular, "End Turn", [this]() {
+        if (idleCount() > 0) {
+            cycleToNextIdle();
+            return;
+        }
         ++m_currentTurn;
+        m_visitedUnitIds.clear();
+        // Resolve supply/attrition/regen for every unit, then re-mesh so the unit
+        // tokens reflect new health (wounded units redden, the dead disappear).
+        odai::game::advanceTurn(m_gameState, m_strategyMap);
+        rebuildStrategyMapScene();
+        // Close any open production panel — the city's state may have changed.
+        if (m_productionPanel != nullptr) m_productionPanel->visible = false;
+        m_selectedCityCol = -1;
+        m_selectedCityRow = -1;
         VOX_LOGI("ui") << "turn advanced to " << m_currentTurn;
     });
-    endTurnBtn->setRect(odai::ui::UiRect::fromXYWH(viewW - 196.0f * s, barY + 8.0f * s, 180.0f * s, 48.0f * s));
+    // Apply styling before moving into the tree.
     endTurnBtn->cornerRadiusPx    = 12.0f * s;
     endTurnBtn->colorNormal       = odai::ui::UiColor{0.28f, 0.20f, 0.06f, 0.95f};
     endTurnBtn->colorHover        = odai::ui::UiColor{0.42f, 0.30f, 0.08f, 1.00f};
@@ -3498,7 +3696,7 @@ void App::setupDemoUi(float viewW, float viewH) {
     endTurnBtn->borderThicknessPx = 2.0f * s;
     endTurnBtn->glowColor         = odai::ui::UiColor{0.95f, 0.75f, 0.30f, 0.70f};
     endTurnBtn->glowSizePx        = 22.0f * s;
-    bar->addChild(std::move(endTurnBtn));
+    m_endTurnBtn = static_cast<odai::ui::Button*>(bar->addChild(std::move(endTurnBtn)));
     root->addChild(std::move(bar));
 
 
@@ -3746,6 +3944,7 @@ void App::setupDemoUi(float viewW, float viewH) {
         prodPanel->setItems(odai::ui::UiRect::fromXYWH(prodX, prodTop, prodW, prodH),
                             s, "Choose Production", rows, cityInfo);
         m_productionPanel = static_cast<odai::ui::ProductionPanel*>(root->addChild(std::move(prodPanel)));
+        m_productionPanel->visible = false;  // hidden until the player clicks a city
     }
 
     // CivPedia window (top-right): a draggable framed window. When the parchment
@@ -3932,6 +4131,175 @@ void App::setupDemoUi(float viewW, float viewH) {
     m_uiContext.setRoot(std::move(root));
 }
 
+void App::drawStrategyMapLabels(float fbW, float fbH) {
+    if (!m_strategyMapMode || !m_uiFontReady) return;
+    if (m_strategyMap.settlements.empty() && m_gameState.units.empty()) return;
+
+    const auto& cam = m_renderCameraPose;
+    const float aspectRatio = fbW / fbH;
+    const float nearPlane = 1.0f;
+    const float farPlane = 50000.0f;
+
+    // Build VP matrix matching frame_run.cc.
+    const float yawR   = odai::math::radians(cam.yawDegrees);
+    const float pitchR = odai::math::radians(cam.pitchDegrees);
+    const float cosPitch = std::cos(pitchR);
+    const odai::math::Vector3 eye{cam.x, cam.y, cam.z};
+    const odai::math::Vector3 fwd{std::cos(yawR) * cosPitch, std::sin(pitchR), std::sin(yawR) * cosPitch};
+    const odai::math::Matrix4 view = odai::math::lookAt(eye, eye + fwd, {0.f, 1.f, 0.f});
+
+    odai::math::Matrix4 proj;
+    if (cam.orthographic) {
+        const float halfH = cam.orthoHalfHeight;
+        const float halfW = halfH * aspectRatio;
+        proj = odai::math::orthographicVulkan(-halfW, halfW, -halfH, halfH, nearPlane, farPlane);
+    } else {
+        proj = odai::math::perspectiveVulkan(
+            odai::math::radians(cam.fovDegrees), aspectRatio, nearPlane, farPlane);
+    }
+    const odai::math::Matrix4 vp = proj * view;
+
+    const odai::ui::UiColor shadowColor{0.f, 0.f, 0.f, 0.65f};
+    const odai::ui::UiColor textColor{1.f, 0.95f, 0.82f, 1.f};
+    const odai::ui::Font& font = m_uiFont;
+    const float halfLineH = font.lineHeightPx() * 0.5f;
+
+    for (const auto& s : m_strategyMap.settlements) {
+        const float rowOffset = (s.row % 2 == 0) ? 0.0f : 0.5f;
+        const float wx = m_strategyMap.hexSize * std::sqrt(3.0f)
+                         * (static_cast<float>(s.col) + rowOffset);
+        const float wz = m_strategyMap.hexSize * 1.5f * static_cast<float>(s.row);
+        float wy = 0.0f;
+        if (s.col < m_strategyMap.width && s.row < m_strategyMap.height) {
+            wy = static_cast<float>(
+                     m_strategyMap.tiles[s.row * m_strategyMap.width + s.col].elevation)
+                 * m_strategyMap.elevationStep;
+        }
+        wy += m_strategyMap.hexSize * 0.5f;
+
+        const odai::math::Vector4 clip = vp * odai::math::Vector4{wx, wy, wz, 1.0f};
+        if (clip.w <= 0.0f) continue;
+
+        const float ndcX = clip.x / clip.w;
+        const float ndcY = clip.y / clip.w;
+        if (ndcX < -1.1f || ndcX > 1.1f || ndcY < -1.1f || ndcY > 1.1f) continue;
+
+        // Vulkan NDC: -1 = top-left, +1 = bottom-right.
+        const float sx = (ndcX + 1.0f) * 0.5f * fbW;
+        const float sy = (ndcY + 1.0f) * 0.5f * fbH;
+
+        const float textW = font.measureText(s.name);
+        const float tx = sx - textW * 0.5f;
+        const float ty = sy - halfLineH;
+
+        m_uiDrawList.addText(font, s.name, {tx + 1.0f, ty + 1.0f}, shadowColor);
+        m_uiDrawList.addText(font, s.name, {tx, ty}, textColor);
+    }
+
+    // Floating "HP/maxHP  supply/maxSupply" over each unit token; reddened when
+    // starving, bracketed + bright when selected.
+    const odai::ui::UiColor starveColor{1.0f, 0.40f, 0.36f, 1.0f};
+    const odai::ui::UiColor selColor{0.72f, 0.86f, 1.0f, 1.0f};
+    for (const odai::game::Unit& u : m_gameState.units) {
+        if (!u.alive() || u.col >= m_strategyMap.width || u.row >= m_strategyMap.height) continue;
+        const float rowOffset = (u.row % 2 == 0) ? 0.0f : 0.5f;
+        const float wx = m_strategyMap.hexSize * std::sqrt(3.0f)
+                         * (static_cast<float>(u.col) + rowOffset);
+        const float wz = m_strategyMap.hexSize * 1.5f * static_cast<float>(u.row);
+        float wy = static_cast<float>(
+                       m_strategyMap.tiles[u.row * m_strategyMap.width + u.col].elevation)
+                   * m_strategyMap.elevationStep;
+        wy += m_strategyMap.hexSize * 1.3f;  // float above the token box
+
+        const odai::math::Vector4 clip = vp * odai::math::Vector4{wx, wy, wz, 1.0f};
+        if (clip.w <= 0.0f) continue;
+        const float ndcX = clip.x / clip.w;
+        const float ndcY = clip.y / clip.w;
+        if (ndcX < -1.1f || ndcX > 1.1f || ndcY < -1.1f || ndcY > 1.1f) continue;
+        const float sx = (ndcX + 1.0f) * 0.5f * fbW;
+        const float sy = (ndcY + 1.0f) * 0.5f * fbH;
+
+        std::string label = std::to_string(u.hp) + "/" + std::to_string(u.maxHp) + "  "
+                          + std::to_string(u.supply) + "/" + std::to_string(u.maxSupply);
+        if (u.id == m_selectedUnitId) label = "[" + label + "]";
+        const odai::ui::UiColor col = (u.supply == 0)
+            ? starveColor
+            : (u.id == m_selectedUnitId ? selColor : textColor);
+
+        const float textW = font.measureText(label);
+        const float tx = sx - textW * 0.5f;
+        const float ty = sy - halfLineH;
+        m_uiDrawList.addText(font, label, {tx + 1.0f, ty + 1.0f}, shadowColor);
+        m_uiDrawList.addText(font, label, {tx, ty}, col);
+    }
+
+    // Planned-route preview: a small dot at each remaining waypoint of the selected
+    // unit's A* move order, so the player can see where it is headed.
+    if (m_selectedUnitId != 0) {
+        if (const odai::game::Unit* sel = m_gameState.findUnit(m_selectedUnitId)) {
+            const odai::ui::UiColor dotColor{0.95f, 0.85f, 0.35f, 0.85f};
+            for (const auto& wp : sel->path) {
+                if (wp[0] >= m_strategyMap.width || wp[1] >= m_strategyMap.height) continue;
+                const float rowOffset = (wp[1] % 2 == 0) ? 0.0f : 0.5f;
+                const float wx = m_strategyMap.hexSize * std::sqrt(3.0f)
+                                 * (static_cast<float>(wp[0]) + rowOffset);
+                const float wz = m_strategyMap.hexSize * 1.5f * static_cast<float>(wp[1]);
+                float wy = static_cast<float>(
+                               m_strategyMap.tiles[wp[1] * m_strategyMap.width + wp[0]].elevation)
+                           * m_strategyMap.elevationStep;
+                wy += m_strategyMap.hexSize * 0.55f;
+
+                const odai::math::Vector4 clip = vp * odai::math::Vector4{wx, wy, wz, 1.0f};
+                if (clip.w <= 0.0f) continue;
+                const float ndcX = clip.x / clip.w;
+                const float ndcY = clip.y / clip.w;
+                if (ndcX < -1.1f || ndcX > 1.1f || ndcY < -1.1f || ndcY > 1.1f) continue;
+                const float sx = (ndcX + 1.0f) * 0.5f * fbW;
+                const float sy = (ndcY + 1.0f) * 0.5f * fbH;
+                constexpr float kDotR = 4.0f;
+                m_uiDrawList.addRectFilled(
+                    odai::ui::UiRect::fromXYWH(sx - kDotR, sy - kDotR, 2.0f * kDotR, 2.0f * kDotR),
+                    dotColor);
+            }
+        }
+    }
+
+    // Live right-drag preview: cyan dots along the candidate march route, or a red
+    // marker over an enemy the selected unit would attack on release.
+    if (m_previewActive) {
+        const odai::ui::UiColor previewDot{0.45f, 0.85f, 0.95f, 0.90f};
+        const odai::ui::UiColor attackMark{0.95f, 0.30f, 0.25f, 0.95f};
+        auto projectAndDraw = [&](std::uint32_t col, std::uint32_t row,
+                                  const odai::ui::UiColor& color, float radius) {
+            if (col >= m_strategyMap.width || row >= m_strategyMap.height) return;
+            const float rowOffset = (row % 2 == 0) ? 0.0f : 0.5f;
+            const float wx = m_strategyMap.hexSize * std::sqrt(3.0f)
+                             * (static_cast<float>(col) + rowOffset);
+            const float wz = m_strategyMap.hexSize * 1.5f * static_cast<float>(row);
+            float wy = static_cast<float>(
+                           m_strategyMap.tiles[row * m_strategyMap.width + col].elevation)
+                       * m_strategyMap.elevationStep;
+            wy += m_strategyMap.hexSize * 0.55f;
+            const odai::math::Vector4 clip = vp * odai::math::Vector4{wx, wy, wz, 1.0f};
+            if (clip.w <= 0.0f) return;
+            const float ndcX = clip.x / clip.w;
+            const float ndcY = clip.y / clip.w;
+            if (ndcX < -1.1f || ndcX > 1.1f || ndcY < -1.1f || ndcY > 1.1f) return;
+            const float sx = (ndcX + 1.0f) * 0.5f * fbW;
+            const float sy = (ndcY + 1.0f) * 0.5f * fbH;
+            m_uiDrawList.addRectFilled(
+                odai::ui::UiRect::fromXYWH(sx - radius, sy - radius, 2.0f * radius, 2.0f * radius), color);
+        };
+        if (m_previewIsAttack) {
+            projectAndDraw(m_previewTargetCol, m_previewTargetRow, attackMark, 8.0f);
+        } else {
+            for (const auto& wp : m_previewPath) {
+                projectAndDraw(wp[0], wp[1], previewDot, 4.0f);
+            }
+        }
+    }
+}
+
 void App::updateUiOverlay(float dt) {
     if (m_window == nullptr) {
         return;
@@ -3942,6 +4310,10 @@ void App::updateUiOverlay(float dt) {
     if (fbW <= 0 || fbH <= 0) {
         return;
     }
+    // Keep the cached viewport current so openProductionPanelForCity always
+    // computes its rect from the live framebuffer size, not the setup-time size.
+    m_setupViewW = static_cast<float>(fbW);
+    m_setupViewH = static_cast<float>(fbH);
 
     if (m_uiContext.root() == nullptr) {
         setupDemoUi(static_cast<float>(fbW), static_cast<float>(fbH));
@@ -4052,20 +4424,38 @@ void App::updateUiOverlay(float dt) {
     if (m_hudStatsLabel != nullptr && m_strategyMap.width > 0) {
         const auto cnt = static_cast<int>(m_strategyMap.settlements.size());
         m_hudStatsLabel->setText(
-            std::to_string(m_strategyMap.width) + " Ã— " +
-            std::to_string(m_strategyMap.height) + "  â€¢  " +
+            std::to_string(m_strategyMap.width) + " \xc3\x97 " +
+            std::to_string(m_strategyMap.height) + "  \xc2\xb7  " +
             std::to_string(cnt) + (cnt == 1 ? " settlement" : " settlements"));
     }
 
     // Top toolbar: accumulate gold and reflect the current turn.
     if (m_toolbar != nullptr) {
         m_tbGold += dt * 39.0f / 60.0f;  // ~+39/turn at ~60 fps
-        m_toolbar->setValue(m_tbGoldItem, std::to_string(static_cast<int>(m_tbGold)) + " (+39)");
+        const int goldInt = static_cast<int>(m_tbGold);
+        m_toolbar->setValue(m_tbGoldItem, std::to_string(goldInt) + " (+39)");
+        m_toolbar->setTooltip(2,
+            "<b><color=#f0c040>Gold  " + std::to_string(goldInt) + " in treasury</color></b>\n"
+            "Income / turn      <color=#f0c040>+39</color>\n"
+            "  Capital city     <color=#f0c040>+20</color>\n"
+            "  Trade routes     <color=#f0c040>+15</color>\n"
+            "  Market           <color=#f0c040>+4</color>");
     }
     if (m_toolbarTurnLabel != nullptr) {
         m_toolbarTurnLabel->setText(
             "<color=#c9b896>Turn</color> <b><color=#ecd39a>" +
             std::to_string(m_currentTurn) + "</color></b>");
+    }
+
+    // End Turn / Next Idle: label changes to show idle count while there are
+    // cities without production or unvisited units waiting for orders.
+    if (m_endTurnBtn != nullptr && m_strategyMapMode) {
+        const int idle = idleCount();
+        if (idle > 0) {
+            m_endTurnBtn->setLabel("Next Idle (" + std::to_string(idle) + ")");
+        } else {
+            m_endTurnBtn->setLabel("End Turn");
+        }
     }
 
     // Hex hover: pick the tile under the mouse and update the tile info panel.
@@ -4097,12 +4487,118 @@ void App::updateUiOverlay(float dt) {
             if (tile.flags & odai::game::TileFlag_River) info += "\nRiver";
             if (tile.flags & odai::game::TileFlag_Road)  info += "\nRoad";
 
+            // City production: what this settlement is building, plus its buildings.
+            if (const odai::game::CityState* city = m_gameState.cityAt(
+                    static_cast<std::uint32_t>(hCol), static_cast<std::uint32_t>(hRow))) {
+                if (!city->producing.empty()) {
+                    const odai::game::BuildableItem* bi = odai::game::findBuildable(city->producing);
+                    const std::string pname = (bi != nullptr) ? bi->name : city->producing;
+                    const std::string cost = (bi != nullptr) ? std::to_string(bi->productionCost) : "?";
+                    info += "\n<color=#cfe0ff>Building " + pname + " (" +
+                            std::to_string(city->accumulated) + "/" + cost + ")</color>";
+                }
+                if (!city->buildings.empty()) {
+                    std::string blds;
+                    for (std::size_t i = 0; i < city->buildings.size(); ++i) {
+                        if (i != 0) blds += ", ";
+                        blds += city->buildings[i];
+                    }
+                    info += "\n<color=#9fb0c8>" + blds + "</color>";
+                }
+            }
+
+            // Unit standing here: health, provisions, combat stats, warnings.
+            if (const odai::game::Unit* u = m_gameState.unitAt(
+                    static_cast<std::uint32_t>(hCol), static_cast<std::uint32_t>(hRow))) {
+                std::string uname = u->typeId;
+                if (!uname.empty()) uname[0] = static_cast<char>(std::toupper(uname[0]));
+                info += "\n<b><color=#ffe0a0>" + uname + "</color></b>";
+                if (u->id == m_selectedUnitId) info += " <color=#a0d0ff>[selected]</color>";
+                info += "\nHP " + std::to_string(u->hp) + "/" + std::to_string(u->maxHp);
+                info += "\nSupply " + std::to_string(u->supply) + "/" + std::to_string(u->maxSupply);
+
+                const odai::game::UnitStats& us = odai::game::unitStatsFor(u->typeId);
+                std::string combat = "\nAtk " + std::to_string(us.attack);
+                if (us.rangedAttack > 0) {
+                    combat += "  Ranged " + std::to_string(us.rangedAttack) +
+                              " (rng " + std::to_string(us.range) + ")";
+                }
+                if (u->armor > 0) combat += "  Armor " + std::to_string(u->armor);
+                info += combat;
+                if (u->supply == 0) info += "\n<color=#ff5a5a>STARVING</color>";
+            }
+
             m_hudTileInfoLabel->setText(info);
         } else {
             m_hoveredHexCol = -1;
             m_hoveredHexRow = -1;
             m_hudTileInfoWindow->visible = false;
         }
+    }
+
+    // Strategy-map mouse: left-click (press+release, negligible drag) selects the
+    // unit under the cursor — a real left drag stays a map pan. The right button is
+    // a hold gesture: press and hold to preview a move route or attack for the
+    // selected unit, then release to commit it.
+    if (m_strategyMapMode) {
+        const bool rightDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+        const bool overUiNow = m_uiContext.wantsMouse() || isAnyUiVisible();
+        constexpr float kClickSlopPx = 6.0f;
+
+        // Left click: select.
+        if (leftDown && !m_mapLeftPrevDown) {
+            m_mapPressX = static_cast<float>(mouseX);
+            m_mapPressY = static_cast<float>(mouseY);
+            m_mapPressOverUi = overUiNow;
+        }
+        if (!leftDown && m_mapLeftPrevDown && !m_mapPressOverUi && !overUiNow) {
+            const float dx = static_cast<float>(mouseX) - m_mapPressX;
+            const float dy = static_cast<float>(mouseY) - m_mapPressY;
+            if ((dx * dx + dy * dy) <= (kClickSlopPx * kClickSlopPx)) {
+                int cCol = -1, cRow = -1;
+                if (pickHexFromMouse(mouseX, mouseY, fbW, fbH, cCol, cRow)) {
+                    selectUnitAtHex(cCol, cRow);
+                    if (m_selectedUnitId != 0) {
+                        // A unit was clicked: close any open city panel.
+                        if (m_productionPanel != nullptr) m_productionPanel->visible = false;
+                        m_selectedCityCol = -1;
+                        m_selectedCityRow = -1;
+                    } else {
+                        // No unit here: check for a city and open its production panel.
+                        if (m_gameState.cityAt(static_cast<std::uint32_t>(cCol),
+                                               static_cast<std::uint32_t>(cRow)) != nullptr) {
+                            openProductionPanelForCity(cCol, cRow);
+                        } else {
+                            if (m_productionPanel != nullptr) m_productionPanel->visible = false;
+                            m_selectedCityCol = -1;
+                            m_selectedCityRow = -1;
+                        }
+                    }
+                }
+            }
+        }
+        m_mapLeftPrevDown = leftDown;
+
+        // Right button: remember whether the press began over UI, refresh the
+        // move/attack preview while held, and commit it on release.
+        if (rightDown && !m_mapRightPrevDown) {
+            m_mapRightPressOverUi = overUiNow;
+        }
+        if (rightDown && !m_mapRightPressOverUi) {
+            int tc = -1, tr = -1;
+            if (!overUiNow && pickHexFromMouse(mouseX, mouseY, fbW, fbH, tc, tr)) {
+                updateMoveAttackPreview(tc, tr);
+            } else {
+                clearMoveAttackPreview();
+            }
+        }
+        if (!rightDown && m_mapRightPrevDown) {
+            if (!m_mapRightPressOverUi) {
+                commitMoveAttackPreview();
+            }
+            clearMoveAttackPreview();
+        }
+        m_mapRightPrevDown = rightDown;
     }
 
     // Animate the civ-panel accordion expand/collapse.
@@ -4118,15 +4614,22 @@ void App::updateUiOverlay(float dt) {
         m_civCollapseBtn->setLabel(m_civExpandTween.value > 0.5f ? "^" : "v");
     }
 
-    m_uiContext.build(m_uiDrawList);
+    // Reset the draw list here so map labels can be drawn first (behind the UI).
+    m_uiDrawList.reset({static_cast<float>(fbW), static_cast<float>(fbH)});
+    drawStrategyMapLabels(static_cast<float>(fbW), static_cast<float>(fbH));
+    m_uiContext.buildAppend(m_uiDrawList);
 
     // Tooltip overlay: drawn after the widget tree (so it sits on top, unclipped),
     // with an ease-in-out fade. Latch the text/anchor while hovering so the tooltip
     // can keep fading out for a moment after the cursor leaves the term.
-    const bool tipActive = m_uiFontReady && m_civpediaView != nullptr && m_civpediaView->hasTooltip();
+    bool tipActive = m_uiFontReady && m_civpediaView != nullptr && m_civpediaView->hasTooltip();
     if (tipActive) {
         m_lastTooltipText = m_civpediaView->tooltipText();
         m_lastTooltipAnchor = m_civpediaView->tooltipAnchor();
+    } else if (m_uiFontReady && m_toolbar != nullptr && m_toolbar->hasHoveredTooltip()) {
+        m_lastTooltipText = m_toolbar->hoveredTooltipText();
+        m_lastTooltipAnchor = m_toolbar->hoveredTooltipAnchor();
+        tipActive = true;
     }
     m_tooltipFade.setTarget(tipActive ? 1.0f : 0.0f);
     m_tooltipFade.update(dt);
@@ -4271,6 +4774,122 @@ bool App::rayToGroundPlane(double mouseX, double mouseY, int fbW, int fbH,
     return true;
 }
 
+void App::rebuildStrategyMapScene() {
+    odai::game::StrategyMapMeshOptions meshOptions = makeStrategyMapMeshOptions(m_strategyMap3D, m_terrainTextures);
+    // The GPU hex pipeline owns the land surface in 3D relief; skip the imported-static
+    // land tops/skirts there so it is not drawn twice. The flat 2D board keeps them.
+    meshOptions.emitLandSurface = !(m_useHexTerrain && m_strategyMap3D);
+    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap, m_gameState.units, std::move(meshOptions));
+    if (!m_renderer.uploadImportedScene(m_importedScene)) {
+        VOX_LOGE("app") << "strategy map scene re-upload failed";
+    }
+}
+
+void App::spawnDemoUnits() {
+    m_gameState = {};
+    m_selectedUnitId = 0;
+    clearMoveAttackPreview();
+    m_gameState.initCities(m_strategyMap);
+    if (m_strategyMap.settlements.empty()) {
+        return;
+    }
+
+    // Seed demo buildings so cities can immediately pump out units and the build
+    // prerequisites are visible: the capital gets the full kit (and a smithy for
+    // armor); other cities get a single military building so they specialize.
+    for (std::size_t i = 0; i < m_gameState.cities.size(); ++i) {
+        odai::game::CityState& city = m_gameState.cities[i];
+        city.perTurn = 20;  // demo pace: a unit every few End Turns
+        if (i == 0) {
+            city.buildings = {"barracks", "fletcher", "smithy"};
+        } else if (i % 3 == 1) {
+            city.buildings = {"barracks"};  // melee only
+        } else if (i % 3 == 2) {
+            city.buildings = {"fletcher"};  // archers only
+        }
+        // Remaining cities have no military building and stay idle.
+    }
+
+    // A warrior garrisons each of the first few settlements (starts fully supplied).
+    const std::size_t garrisons = std::min<std::size_t>(m_strategyMap.settlements.size(), 3u);
+    for (std::size_t i = 0; i < garrisons; ++i) {
+        const odai::game::Settlement& s = m_strategyMap.settlements[i];
+        m_gameState.spawnUnit("warrior", s.col, s.row, s.owner);
+    }
+
+    // Give the capital a scout on a free neighbor so the player has a longer-range
+    // unit to march into the wilderness immediately.
+    const odai::game::Settlement& home = m_strategyMap.settlements.front();
+    const odai::game::FreeTile scoutTile = odai::game::findFreeNeighbor(m_strategyMap, m_gameState, home.col, home.row);
+    if (scoutTile.found) {
+        m_gameState.spawnUnit("scout", scoutTile.col, scoutTile.row, home.owner);
+    }
+    VOX_LOGI("app") << "spawned " << m_gameState.units.size() << " demo units across "
+                    << m_gameState.cities.size() << " cities";
+}
+
+void App::selectUnitAtHex(int col, int row) {
+    if (!m_strategyMap.inBounds(col, row)) {
+        return;
+    }
+    odai::game::Unit* onTile = m_gameState.unitAt(static_cast<std::uint32_t>(col), static_cast<std::uint32_t>(row));
+    if (onTile != nullptr) {
+        // Select the unit here (and drive the existing unit action bar).
+        m_selectedUnitId = onTile->id;
+        m_selectedUnitType = onTile->typeId;
+    } else {
+        // Clicking empty ground clears the selection.
+        m_selectedUnitId = 0;
+    }
+}
+
+void App::clearMoveAttackPreview() {
+    m_previewActive = false;
+    m_previewIsAttack = false;
+    m_previewPath.clear();
+}
+
+void App::updateMoveAttackPreview(int targetCol, int targetRow) {
+    clearMoveAttackPreview();
+    odai::game::Unit* sel = m_gameState.findUnit(m_selectedUnitId);
+    if (sel == nullptr || !m_strategyMap.inBounds(targetCol, targetRow)) {
+        return;
+    }
+    const std::uint32_t tc = static_cast<std::uint32_t>(targetCol);
+    const std::uint32_t tr = static_cast<std::uint32_t>(targetRow);
+    m_previewActive = true;
+    m_previewTargetCol = tc;
+    m_previewTargetRow = tr;
+
+    const odai::game::Unit* enemy = m_gameState.unitAt(tc, tr);
+    if (enemy != nullptr && enemy->owner != sel->owner &&
+        odai::game::canAttack(m_gameState, *sel, *enemy)) {
+        m_previewIsAttack = true;  // release will fire/charge
+    } else {
+        // Show the A* route the unit would march on release.
+        m_previewPath = odai::game::findHexPath(m_strategyMap, m_gameState, sel->col, sel->row, tc, tr);
+    }
+}
+
+void App::commitMoveAttackPreview() {
+    odai::game::Unit* sel = m_gameState.findUnit(m_selectedUnitId);
+    if (sel == nullptr || !m_previewActive) {
+        return;
+    }
+    if (m_previewIsAttack) {
+        const odai::game::Unit* target = m_gameState.unitAt(m_previewTargetCol, m_previewTargetRow);
+        if (target != nullptr) {
+            odai::game::resolveAttack(m_gameState, m_strategyMap, sel->id, target->id);
+            rebuildStrategyMapScene();
+        }
+    } else if (sel->col != m_previewTargetCol || sel->row != m_previewTargetRow) {
+        // Plan an A* path and begin marching; the order continues across turns
+        // until the unit arrives (advanceTurn keeps following the path).
+        odai::game::issueMoveOrder(m_gameState, m_strategyMap, *sel, m_previewTargetCol, m_previewTargetRow);
+        rebuildStrategyMapScene();
+    }
+}
+
 void App::setStrategyMap3D(bool enabled) {
     if (!m_strategyMapMode || enabled == m_strategyMap3D) {
         return;
@@ -4278,17 +4897,16 @@ void App::setStrategyMap3D(bool enabled) {
     m_strategyMap3D = enabled;
     m_mapFocusVelocityX = 0.0f;
     m_mapFocusVelocityZ = 0.0f;
+    m_panDispSmoothX = 0.0f;
+    m_panDispSmoothZ = 0.0f;
     m_wasStrategyMapDragging = false;
 
     // Re-mesh with the matching geometry (3D extrudes prisms + skirts, 2D is flat)
-    // and re-upload. The renderer rebuilds its GPU buffers on uploadImportedScene.
-    odai::game::StrategyMapMeshOptions meshOptions{};
-    meshOptions.extruded = enabled;
-    meshOptions.drawSettlements = false;
-    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap, meshOptions);
-    if (!m_renderer.uploadImportedScene(m_importedScene)) {
-        VOX_LOGE("app") << "strategy map re-upload failed on view toggle";
-    }
+    // and re-upload. m_strategyMap3D is already set to `enabled` above, so the
+    // shared rebuild path picks the right relief mode.
+    rebuildStrategyMapScene();
+    // The displaced hex land is 3D-only; the flat 2D board uses the imported-static land.
+    m_renderer.setHexTerrainEnabled(m_useHexTerrain && enabled);
     // SSAO deepens land-against-water seams in 3D relief; off for the flat board.
     m_renderer.setSsaoEnabled(enabled);
 
@@ -4320,6 +4938,186 @@ void App::setStrategyMap3D(bool enabled) {
     m_cameraPrevious = m_camera;
 
     VOX_LOGI("app") << "strategy map view: " << (enabled ? "3D relief" : "2D flat") << " (M)";
+}
+
+void App::focusOnHex(std::uint32_t col, std::uint32_t row) {
+    if (!m_strategyMap.inBounds(static_cast<int>(col), static_cast<int>(row))) {
+        return;
+    }
+    const odai::math::Vector3 ctr = odai::game::tileCenterWorld(m_strategyMap, col, row);
+    m_mapFocusVelocityX = 0.0f;
+    m_mapFocusVelocityZ = 0.0f;
+    if (m_strategyMap3D) {
+        m_map3DFocusX = ctr.x;
+        m_map3DFocusZ = ctr.z;
+        // Reposition eye so the focus is centred with no interpolation streak.
+        const float yawR   = odai::math::radians(kMap3DYawDegrees);
+        const float pitchR = odai::math::radians(m_map3DPitchDeg);
+        const float cpv = std::cos(pitchR);
+        const odai::math::Vector3 fwd{cpv * std::cos(yawR), std::sin(pitchR), cpv * std::sin(yawR)};
+        m_camera.x = m_map3DFocusX - fwd.x * m_map3DDistance;
+        m_camera.y = -fwd.y * m_map3DDistance;
+        m_camera.z = m_map3DFocusZ - fwd.z * m_map3DDistance;
+    } else {
+        m_camera.x = ctr.x;
+        m_camera.z = ctr.z;
+    }
+    m_cameraPrevious = m_camera;
+}
+
+int App::idleCount() const {
+    if (!m_strategyMapMode) {
+        return 0;
+    }
+    int count = 0;
+    for (const auto& city : m_gameState.cities) {
+        if (city.producing.empty()) {
+            count++;
+        }
+    }
+    for (const auto& unit : m_gameState.units) {
+        if (unit.alive() && unit.path.empty() && unit.movementLeft > 0 &&
+            m_visitedUnitIds.find(unit.id) == m_visitedUnitIds.end()) {
+            count++;
+        }
+    }
+    return count;
+}
+
+void App::cycleToNextIdle() {
+    // Idle cities take priority: open the production panel for the first one found.
+    for (const auto& city : m_gameState.cities) {
+        if (city.producing.empty()) {
+            focusOnHex(city.col, city.row);
+            openProductionPanelForCity(static_cast<int>(city.col), static_cast<int>(city.row));
+            return;
+        }
+    }
+    // Then idle units (have moves, no path, not yet visited this turn).
+    for (const auto& unit : m_gameState.units) {
+        if (unit.alive() && unit.path.empty() && unit.movementLeft > 0 &&
+            m_visitedUnitIds.find(unit.id) == m_visitedUnitIds.end()) {
+            m_visitedUnitIds.insert(unit.id);
+            focusOnHex(unit.col, unit.row);
+            m_selectedUnitId = unit.id;
+            m_selectedUnitType = unit.typeId;
+            if (m_productionPanel != nullptr) m_productionPanel->visible = false;
+            m_selectedCityCol = -1;
+            m_selectedCityRow = -1;
+            return;
+        }
+    }
+}
+
+void App::openProductionPanelForCity(int col, int row) {
+    if (m_productionPanel == nullptr || m_setupViewW <= 0.0f) {
+        return;
+    }
+    odai::game::CityState* city = m_gameState.cityAt(
+        static_cast<std::uint32_t>(col), static_cast<std::uint32_t>(row));
+    if (city == nullptr) {
+        return;
+    }
+    m_selectedCityCol = col;
+    m_selectedCityRow = row;
+
+    // Find the settlement name.
+    std::string cityName;
+    for (const auto& s : m_strategyMap.settlements) {
+        if (static_cast<int>(s.col) == col && static_cast<int>(s.row) == row) {
+            cityName = s.name;
+            break;
+        }
+    }
+    if (cityName.empty()) {
+        cityName = "City";
+    }
+
+    const float s      = m_uiScale;
+    const float kToolbarH = 40.0f * s;
+    const float kBarH  = 64.0f * s;
+    const float barY   = m_setupViewH - kBarH;
+    const float prodW  = 320.0f * s;
+    const float prodX  = m_setupViewW - prodW - 10.0f * s;
+    const float prodTop = kToolbarH + 8.0f * s;
+    const float prodH  = barY - prodTop - 8.0f * s;
+
+    const odai::ui::UiRect rect = odai::ui::UiRect::fromXYWH(prodX, prodTop, prodW, prodH);
+
+    auto makeRow = [&](const odai::game::BuildableItem& item, const std::string& section) {
+        odai::ui::ProductionPanel::Row row;
+        row.id             = item.id;
+        row.name           = item.name;
+        row.iconName       = item.iconName;
+        row.productionCost = item.productionCost;
+        row.turns          = odai::game::turnsToBuild(item.productionCost, city->accumulated, city->perTurn);
+        row.selected       = (item.id == city->producing);
+        row.section        = section;
+
+        const std::string itemId = item.id;
+        row.onSelect = [this, itemId]() {
+            odai::game::CityState* c = m_gameState.cityAt(
+                static_cast<std::uint32_t>(m_selectedCityCol),
+                static_cast<std::uint32_t>(m_selectedCityRow));
+            if (c == nullptr) {
+                return;
+            }
+            if (c->producing != itemId) {
+                c->producing    = itemId;
+                c->accumulated  = 0;
+            }
+            if (m_productionPanel != nullptr) {
+                m_productionPanel->setSelected(itemId);
+            }
+            VOX_LOGI("ui") << "city " << m_selectedCityCol << "," << m_selectedCityRow
+                           << " production set to " << itemId;
+        };
+
+        const std::string pName    = item.name;
+        const std::string pIcon    = item.iconName;
+        const bool        pIsUnit  = (item.kind == odai::game::BuildableKind::Unit);
+        const std::string pArticle = odai::game::getPediaArticle(item.id);
+        row.onOpenPedia = [this, pName, pIcon, pIsUnit, pArticle]() {
+            if (m_civpediaWindow != nullptr) m_civpediaWindow->visible = true;
+            if (m_civpediaPortrait != nullptr) {
+                odai::ui::UiIconEntry pe{};
+                if (odai::ui::UiIconRegistry::global().resolve(pIcon, pe)) {
+                    m_civpediaPortrait->textureId = pe.textureId;
+                    m_civpediaPortrait->uvRect    = pe.uv;
+                }
+            }
+            const std::string kindStr = pIsUnit ? "Ancient Era Unit" : "City Building";
+            if (m_civpediaNameLabel != nullptr) {
+                m_civpediaNameLabel->setText(
+                    "<b><color=#c06820>" + pName + "</color></b>\n"
+                    "<color=#9fa8a8><i>" + kindStr + "</i></color>");
+            }
+            if (m_civpediaView != nullptr) {
+                m_civpediaView->setText(pArticle);
+                m_civpediaView->scrollOffsetY = 0.0f;
+            }
+        };
+        return row;
+    };
+
+    std::vector<odai::ui::ProductionPanel::Row> rows;
+    for (const auto& item : odai::game::defaultBuildables()) {
+        if (item.kind == odai::game::BuildableKind::Building && !city->hasBuilding(item.id)) {
+            rows.push_back(makeRow(item, "Districts & Buildings"));
+        }
+    }
+    for (const auto& item : odai::game::defaultBuildables()) {
+        if (item.kind == odai::game::BuildableKind::Unit && odai::game::cityCanProduce(*city, item.id)) {
+            rows.push_back(makeRow(item, "Units"));
+        }
+    }
+
+    odai::ui::ProductionPanel::CityInfo cityInfo;
+    cityInfo.name       = cityName;
+    cityInfo.production = city->perTurn;
+
+    m_productionPanel->setItems(rect, s, "Choose Production", rows, cityInfo);
+    m_productionPanel->visible = true;
 }
 
 } // namespace odai::app

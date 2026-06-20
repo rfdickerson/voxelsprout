@@ -561,29 +561,6 @@ odai::math::Matrix4 orthographicVulkan(
     return odai::math::orthographicVulkanReverseZ(left, right, bottom, top, nearPlane, farPlane);
 }
 
-odai::math::Matrix4 lookAt(const odai::math::Vector3& eye, const odai::math::Vector3& target, const odai::math::Vector3& up) {
-    const odai::math::Vector3 forward = odai::math::normalize(target - eye);
-    const odai::math::Vector3 right = odai::math::normalize(odai::math::cross(forward, up));
-    const odai::math::Vector3 cameraUp = odai::math::cross(right, forward);
-
-    odai::math::Matrix4 view = odai::math::Matrix4::identity();
-    view(0, 0) = right.x;
-    view(0, 1) = right.y;
-    view(0, 2) = right.z;
-    view(0, 3) = -odai::math::dot(right, eye);
-
-    view(1, 0) = cameraUp.x;
-    view(1, 1) = cameraUp.y;
-    view(1, 2) = cameraUp.z;
-    view(1, 3) = -odai::math::dot(cameraUp, eye);
-
-    view(2, 0) = -forward.x;
-    view(2, 1) = -forward.y;
-    view(2, 2) = -forward.z;
-    view(2, 3) = odai::math::dot(forward, eye);
-    return view;
-}
-
 bool chunkIntersectsShadowCascadeClip(
     const odai::world::Chunk& chunk,
     const odai::math::Matrix4& lightViewProj,

@@ -70,6 +70,10 @@ void UiContext::update(const UiInput& input) {
 
 void UiContext::build(UiDrawList& drawList) const {
     drawList.reset(viewport_);
+    buildAppend(drawList);
+}
+
+void UiContext::buildAppend(UiDrawList& drawList) const {
     if (root_ == nullptr || root_->opacity <= 0.0f || !root_->visible) {
         return;
     }
