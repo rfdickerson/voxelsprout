@@ -80,6 +80,32 @@ void Toolbar::drawIcon(UiDrawList& dl, IconKind kind, const UiColor& color, cons
     }
 }
 
+bool Toolbar::onEvent(UiEvent& event) {
+    if (event.type == UiEvent::Type::MouseMove) {
+        hoveredItem_ = -1;
+        if (font_ != nullptr && rect_.contains(event.mousePx)) {
+            const float iconSz = rect_.height() * iconScale;
+            float x = rect_.minX + paddingXPx;
+            for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
+                const float textW = font_->measureText(items_[i].value);
+                const float badgeW = iconSz + iconGapPx + textW;
+                const UiRect badgeRect{x, rect_.minY, x + badgeW, rect_.maxY};
+                if (!items_[i].tooltip.empty() && badgeRect.contains(event.mousePx)) {
+                    hoveredItem_ = i;
+                    hoveredAnchor_ = {event.mousePx.x, rect_.maxY};
+                    break;
+                }
+                x += badgeW + itemGapPx;
+            }
+        }
+        for (const auto& child : children_) {
+            if (child->visible) child->onEvent(event);
+        }
+        return false;
+    }
+    return Widget::onEvent(event);
+}
+
 void Toolbar::draw(UiDrawList& dl) const {
     if (!visible) {
         return;

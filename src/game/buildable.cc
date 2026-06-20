@@ -29,8 +29,18 @@ const std::vector<BuildableItem>& defaultBuildables() {
         {"temple",   "Temple",   "culture",    BuildableKind::Building,  90,  "temple"},
         {"library",  "Library",  "science",    BuildableKind::Building,  90,  "library"},
         {"barracks", "Barracks", "warrior",    BuildableKind::Building,  80,  "barracks"},
+        {"fletcher", "Fletcher", "archer",     BuildableKind::Building,  70,  "fletcher"},
     };
     return kItems;
+}
+
+const BuildableItem* findBuildable(const std::string& id) {
+    for (const BuildableItem& item : defaultBuildables()) {
+        if (item.id == id) {
+            return &item;
+        }
+    }
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------

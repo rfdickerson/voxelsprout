@@ -26,6 +26,10 @@ public:
     // Reset the draw list and emit the tree's geometry.
     void build(UiDrawList& drawList) const;
 
+    // Emit the tree's geometry without resetting the draw list first, so callers
+    // can pre-populate the list with background content (e.g. world-space labels).
+    void buildAppend(UiDrawList& drawList) const;
+
     // True when the cursor is over a widget this frame; the app uses this to keep
     // the OS cursor visible and to stop clicks reaching the 3D scene.
     [[nodiscard]] bool wantsMouse() const { return wantsMouse_; }

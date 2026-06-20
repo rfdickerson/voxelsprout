@@ -1,6 +1,7 @@
 #pragma once
 
 #include "import/gpu_scene.h"
+#include "import/hex_terrain_data.h"
 #include "import/imported_scene.h"
 #include "render/backend/vulkan/buffer_helpers.h"
 #include "render/backend/vulkan/descriptor_manager.h"
@@ -189,7 +190,26 @@ public:
         int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo, 5 = imported lights
     };
 
-    void setStrategyMapMode(bool enabled) { m_strategyMapMode = enabled; }
+    void setStrategyMapMode(bool enabled) {
+        m_strategyMapMode = enabled;
+        if (enabled) {
+            // The hex map is a single-level plateau over a flat sea: one enormous
+            // coplanar surface, the worst case for SSAO self-occlusion. Across a sample
+            // disk the flat top's own depth varies by ~radius*sin(tilt); if that exceeds
+            // the bias (clamped to 8) the whole top occludes itself and goes black. So
+            // keep the radius SMALL and the bias high — the only real occluder we want is
+            // the tall coastline cliff, which still reads at this radius.
+            m_shadowDebugSettings.ssaoRadius = 7.0f;
+            m_shadowDebugSettings.ssaoBias = 6.0f;
+            m_shadowDebugSettings.ssaoIntensity = 0.5f;
+            // Water in strategy mode sits very shallow (0.06*hexSize) over the sea floor.
+            // The default 96-pixel refraction distortion at that depth smears the hex geometry
+            // underneath into a stippled/pixelated pattern. Reduce to gentle visual shimmer.
+            m_skyDebugSettings.waterRefractionDistortionPixels = 14.0f;
+            m_skyDebugSettings.waterNormalStrength = 0.55f;
+            m_skyDebugSettings.waterAnimationSpeed = 0.65f;
+        }
+    }
     bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
@@ -197,6 +217,14 @@ public:
     bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
+    // GPU-instanced, tessellated, height-displaced hex land surface. Available only
+    // when the device supports tessellation (hexTerrainReady()); the caller keeps the
+    // flat imported-static land otherwise. setHexTerrainEnabled gates the draw at
+    // runtime (e.g. off for the flat 2D board view).
+    void clearHexTerrain();
+    bool uploadHexTerrain(const odai::importer::HexTerrainData& data);
+    [[nodiscard]] bool hexTerrainReady() const { return m_hexTerrainPipeline != VK_NULL_HANDLE; }
+    void setHexTerrainEnabled(bool enabled) { m_hexTerrainEnabled = enabled; }
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
@@ -924,6 +952,7 @@ private:
     VkPipeline& m_pipeline = m_pipelineManager.pipeline;
     VkPipeline& m_pipelineRt = m_pipelineManager.pipelineRt;
     VkPipeline& m_terrainTessPipeline = m_pipelineManager.terrainTessPipeline;
+    VkPipeline& m_hexTerrainPipeline = m_pipelineManager.hexTerrainPipeline;
     VkPipeline& m_shadowPipeline = m_pipelineManager.shadowPipeline;
     VkPipeline& m_pipeShadowPipeline = m_pipelineManager.pipeShadowPipeline;
     VkPipeline& m_grassBillboardShadowPipeline = m_pipelineManager.grassBillboardShadowPipeline;
@@ -984,6 +1013,11 @@ private:
     bool m_supportsMultiDrawIndirect = false;
     bool m_supportsTessellationShader = false;
     bool m_supportsBindlessDescriptors = false;
+    // Vulkan Roadmap 2026: pipeline fragment shading rate (VRS). Gated on device
+    // support; when on, the water pass shades at a coarse rate to reclaim GPU.
+    bool m_supportsVrs = false;
+    bool m_debugWaterVrsCoarse = true;
+    PFN_vkCmdSetFragmentShadingRateKHR m_cmdSetFragmentShadingRate = nullptr;
     bool m_supportsDisplayTiming = false;
     bool m_hasDisplayTimingExtension = false;
     bool m_enableDisplayTiming = false;
@@ -1036,6 +1070,9 @@ private:
     BufferHandle m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_hexBaseVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_hexBaseIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_hexInstanceBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_skyCloudVertexBufferHandle = kInvalidBufferHandle;
@@ -1077,6 +1114,9 @@ private:
     uint32_t m_grassBillboardIndexCount = 0;
     uint32_t m_grassBillboardInstanceCount = 0;
     uint32_t m_importedIndexCount = 0;
+    uint32_t m_hexIndexCount = 0;
+    uint32_t m_hexInstanceCount = 0;
+    bool m_hexTerrainEnabled = true;
     uint32_t m_importedTerrainDrawCount = 0;
     uint32_t m_importedStaticDrawCount = 0;
     uint32_t m_importedWaterIndexCount = 0;

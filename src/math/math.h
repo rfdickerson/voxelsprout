@@ -363,4 +363,16 @@ inline Matrix4 inverse(const Matrix4& matrix) {
     return inverseMatrix;
 }
 
+inline Matrix4 lookAt(const Vector3& eye, const Vector3& target, const Vector3& up) {
+    const Vector3 fwd   = normalize(target - eye);
+    const Vector3 right = normalize(cross(fwd, up));
+    const Vector3 camUp = cross(right, fwd);
+    Matrix4 m{};
+    m(0,0) = right.x;  m(0,1) = right.y;  m(0,2) = right.z;  m(0,3) = -dot(right, eye);
+    m(1,0) = camUp.x;  m(1,1) = camUp.y;  m(1,2) = camUp.z;  m(1,3) = -dot(camUp, eye);
+    m(2,0) = -fwd.x;   m(2,1) = -fwd.y;   m(2,2) = -fwd.z;   m(2,3) =  dot(fwd, eye);
+    m(3,3) = 1.0f;
+    return m;
+}
+
 } // namespace odai::math

@@ -463,6 +463,88 @@ void RendererBackend::clearImportedSceneMeshes() {
     clearGpuScene();
 }
 
+void RendererBackend::clearHexTerrain() {
+    const auto release = [&](BufferHandle& handle) {
+        if (handle == kInvalidBufferHandle) {
+            return;
+        }
+        if (m_lastGraphicsTimelineValue == 0) {
+            m_bufferAllocator.destroyBuffer(handle);
+        } else {
+            scheduleBufferRelease(handle, m_lastGraphicsTimelineValue);
+        }
+        handle = kInvalidBufferHandle;
+    };
+    release(m_hexBaseVertexBufferHandle);
+    release(m_hexBaseIndexBufferHandle);
+    release(m_hexInstanceBufferHandle);
+    m_hexIndexCount = 0;
+    m_hexInstanceCount = 0;
+}
+
+bool RendererBackend::uploadHexTerrain(const odai::importer::HexTerrainData& data) {
+    if (m_device == VK_NULL_HANDLE) {
+        return false;
+    }
+    clearHexTerrain();
+    if (data.baseVertices.empty() || data.baseIndices.empty() || data.instances.empty()) {
+        return true;  // e.g. an all-water map: nothing to displace, not an error.
+    }
+
+    BufferCreateDesc vertexDesc{};
+    vertexDesc.size = static_cast<VkDeviceSize>(data.baseVertices.size() * sizeof(odai::importer::HexBaseVertex));
+    vertexDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vertexDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vertexDesc.initialData = data.baseVertices.data();
+    const BufferHandle vertexHandle = m_bufferAllocator.createBuffer(vertexDesc);
+
+    BufferCreateDesc indexDesc{};
+    indexDesc.size = static_cast<VkDeviceSize>(data.baseIndices.size() * sizeof(std::uint32_t));
+    indexDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    indexDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    indexDesc.initialData = data.baseIndices.data();
+    const BufferHandle indexHandle = m_bufferAllocator.createBuffer(indexDesc);
+
+    BufferCreateDesc instanceDesc{};
+    instanceDesc.size = static_cast<VkDeviceSize>(data.instances.size() * sizeof(odai::importer::HexTileInstance));
+    instanceDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    instanceDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    instanceDesc.initialData = data.instances.data();
+    const BufferHandle instanceHandle = m_bufferAllocator.createBuffer(instanceDesc);
+
+    if (vertexHandle == kInvalidBufferHandle || indexHandle == kInvalidBufferHandle ||
+        instanceHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "hex terrain buffer allocation failed";
+        if (vertexHandle != kInvalidBufferHandle) m_bufferAllocator.destroyBuffer(vertexHandle);
+        if (indexHandle != kInvalidBufferHandle) m_bufferAllocator.destroyBuffer(indexHandle);
+        if (instanceHandle != kInvalidBufferHandle) m_bufferAllocator.destroyBuffer(instanceHandle);
+        return false;
+    }
+
+    m_hexBaseVertexBufferHandle = vertexHandle;
+    m_hexBaseIndexBufferHandle = indexHandle;
+    m_hexInstanceBufferHandle = instanceHandle;
+    m_hexIndexCount = static_cast<uint32_t>(data.baseIndices.size());
+    m_hexInstanceCount = static_cast<uint32_t>(data.instances.size());
+
+    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
+    if (vertexBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(vertexBuffer), "hex.terrain.baseVertex");
+    }
+    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
+    if (indexBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "hex.terrain.baseIndex");
+    }
+    const VkBuffer instanceBuffer = m_bufferAllocator.getBuffer(instanceHandle);
+    if (instanceBuffer != VK_NULL_HANDLE) {
+        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(instanceBuffer), "hex.terrain.instance");
+    }
+
+    VOX_LOGI("render") << "uploaded hex terrain: instances=" << m_hexInstanceCount
+                       << ", baseIndices=" << m_hexIndexCount;
+    return true;
+}
+
 bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene) {
     odai::importer::ImportedScene compatibilityScene{};
     compatibilityScene.sourceTag = scene.sourceTag;
@@ -874,6 +956,45 @@ bool RendererBackend::uploadImportedSceneInternal(
             const odai::importer::GpuSceneBounds& bounds = gpuScene->pages[sourceRange.pageIndex].bounds;
             std::memcpy(rendererRange.boundsMin, bounds.min, sizeof(rendererRange.boundsMin));
             std::memcpy(rendererRange.boundsMax, bounds.max, sizeof(rendererRange.boundsMax));
+            const std::uint32_t rendererRangeIndex = static_cast<std::uint32_t>(pageDrawRanges.size());
+            pageDrawRanges.push_back(rendererRange);
+
+            const std::uint32_t sourceDrawEnd = static_cast<std::uint32_t>(std::min<std::size_t>(
+                static_cast<std::size_t>(sourceRange.firstDraw) + static_cast<std::size_t>(sourceRange.drawCount),
+                uploadScene.packedDraws.size()));
+            for (std::uint32_t drawIndex = sourceRange.firstDraw; drawIndex < sourceDrawEnd; ++drawIndex) {
+                sourceDrawPageRangeIndices[drawIndex] = rendererRangeIndex;
+            }
+        }
+
+        bool pageRangesCoverDraws = !pageDrawRanges.empty();
+        for (std::uint32_t drawIndex = 0; drawIndex < uploadScene.packedDraws.size(); ++drawIndex) {
+            if (uploadScene.packedDraws[drawIndex].indexCount != 0u &&
+                sourceDrawPageRangeIndices[drawIndex] == kInvalidImportedPageRangeIndex) {
+                pageRangesCoverDraws = false;
+                break;
+            }
+        }
+        if (!pageRangesCoverDraws) {
+            pageDrawRanges.clear();
+            std::fill(
+                sourceDrawPageRangeIndices.begin(),
+                sourceDrawPageRangeIndices.end(),
+                kInvalidImportedPageRangeIndex);
+        }
+    } else if (gpuScene == nullptr && !uploadScene.pageRanges.empty()) {
+        // Native page ranges supplied directly on the ImportedScene (e.g. the hex
+        // strategy map emits one page per chunk). Mirror the GpuScene translation so
+        // the same downstream per-page frustum-cull consumer is reused unchanged.
+        pageDrawRanges.reserve(uploadScene.pageRanges.size());
+        for (const odai::importer::ImportedScenePageRange& sourceRange : uploadScene.pageRanges) {
+            if (sourceRange.drawCount == 0u ||
+                sourceRange.firstDraw >= uploadScene.packedDraws.size()) {
+                continue;
+            }
+            ImportedScenePageDrawRange rendererRange{};
+            std::memcpy(rendererRange.boundsMin, sourceRange.boundsMin, sizeof(rendererRange.boundsMin));
+            std::memcpy(rendererRange.boundsMax, sourceRange.boundsMax, sizeof(rendererRange.boundsMax));
             const std::uint32_t rendererRangeIndex = static_cast<std::uint32_t>(pageDrawRanges.size());
             pageDrawRanges.push_back(rendererRange);
 

@@ -28,6 +28,9 @@ int turnsToBuild(int productionCost, int accumulated, int perTurn);
 // in the icon registry. Replace with data-driven content later.
 const std::vector<BuildableItem>& defaultBuildables();
 
+// Catalog entry for an id (e.g. "archer", "barracks"), or nullptr if unknown.
+const BuildableItem* findBuildable(const std::string& id);
+
 // Returns the rich-text CivPedia article for the given item id (e.g. "granary",
 // "spearman"). Returns an empty string when no article is registered.
 const std::string& getPediaArticle(const std::string& id);

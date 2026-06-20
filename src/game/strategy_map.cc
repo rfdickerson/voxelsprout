@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 
 namespace odai::game {
 
@@ -110,6 +111,27 @@ int tileNeighborCount(const StrategyMap& map, int col, int row) {
         }
     }
     return count;
+}
+
+std::array<int, 2> offsetToAxial(int col, int row) {
+    // Pointy-top, odd-r: shove odd rows half a column. (row & 1) handles negatives
+    // the same way the neighbor tables above do.
+    const int q = col - ((row - (row & 1)) / 2);
+    return {q, row};
+}
+
+std::array<int, 2> axialToOffset(int q, int r) {
+    const int col = q + ((r - (r & 1)) / 2);
+    return {col, r};
+}
+
+int hexDistance(int colA, int rowA, int colB, int rowB) {
+    const std::array<int, 2> a = offsetToAxial(colA, rowA);
+    const std::array<int, 2> b = offsetToAxial(colB, rowB);
+    const int dq = a[0] - b[0];
+    const int dr = a[1] - b[1];
+    // Cube distance: (|dq| + |dq + dr| + |dr|) / 2, with ds = -(dq + dr).
+    return (std::abs(dq) + std::abs(dq + dr) + std::abs(dr)) / 2;
 }
 
 }  // namespace odai::game

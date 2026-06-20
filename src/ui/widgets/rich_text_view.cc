@@ -98,6 +98,7 @@ bool RichTextView::onEvent(UiEvent& event) {
         cache_.ensure(rect_);
         const float barReserve = (showScrollBar && maxScroll() > 0.5f) ? scrollBarWidthPx + 2.0f : 0.0f;
         const UiRect vp{rect_.minX, rect_.minY, rect_.maxX - barReserve, rect_.maxY};
+        cache_.ensure(vp);  // Match the layout used by draw() / emitScrolled().
         for (RichTextLink lnk : cache_.linksFor(vp)) {
             lnk.rect.minY -= scrollOffsetY;
             lnk.rect.maxY -= scrollOffsetY;
@@ -122,6 +123,7 @@ bool RichTextView::onEvent(UiEvent& event) {
     // Translate tooltip link rects by the scroll offset before hit-testing.
     const float barReserve = (showScrollBar && maxScroll() > 0.5f) ? scrollBarWidthPx + 2.0f : 0.0f;
     const UiRect viewport{rect_.minX, rect_.minY, rect_.maxX - barReserve, rect_.maxY};
+    cache_.ensure(viewport);  // Match the layout used by draw() / emitScrolled().
 
     for (RichTextLink link : cache_.linksFor(viewport)) {
         link.rect.minY -= scrollOffsetY;

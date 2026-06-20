@@ -10,6 +10,7 @@ public:
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipeline pipelineRt = VK_NULL_HANDLE;
     VkPipeline terrainTessPipeline = VK_NULL_HANDLE;
+    VkPipeline hexTerrainPipeline = VK_NULL_HANDLE;
     VkPipeline shadowPipeline = VK_NULL_HANDLE;
     VkPipeline pipeShadowPipeline = VK_NULL_HANDLE;
     VkPipeline grassBillboardShadowPipeline = VK_NULL_HANDLE;
@@ -159,6 +160,10 @@ public:
         if (terrainTessPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, terrainTessPipeline, nullptr);
             terrainTessPipeline = VK_NULL_HANDLE;
+        }
+        if (hexTerrainPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, hexTerrainPipeline, nullptr);
+            hexTerrainPipeline = VK_NULL_HANDLE;
         }
         if (pipelineLayout != VK_NULL_HANDLE) {
             vkDestroyPipelineLayout(device, pipelineLayout, nullptr);

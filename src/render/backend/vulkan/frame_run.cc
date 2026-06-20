@@ -1721,13 +1721,25 @@ void RendererBackend::renderFrame(
         float ndcMaxY = std::numeric_limits<float>::lowest();
         float ndcMaxZ = std::numeric_limits<float>::lowest();
         for (const odai::math::Vector3& corner : corners) {
-            const odai::math::Vector3 clip = odai::math::transformPoint(clipMatrix, corner);
-            ndcMinX = std::min(ndcMinX, clip.x);
-            ndcMinY = std::min(ndcMinY, clip.y);
-            ndcMinZ = std::min(ndcMinZ, clip.z);
-            ndcMaxX = std::max(ndcMaxX, clip.x);
-            ndcMaxY = std::max(ndcMaxY, clip.y);
-            ndcMaxZ = std::max(ndcMaxZ, clip.z);
+            const odai::math::Vector4 clip =
+                odai::math::multiply(clipMatrix, odai::math::Vector4{corner, 1.0f});
+            // Any corner at/behind the near plane makes the perspective divide
+            // (sign-flipped w) produce garbage NDC, which would wrongly cull pages
+            // straddling the camera — common for foreground chunks and the whole-map
+            // overlay under the tilted 3D camera. Treat such pages as visible.
+            if (clip.w <= 1e-4f) {
+                return true;
+            }
+            const float invW = 1.0f / clip.w;
+            const float ndcX = clip.x * invW;
+            const float ndcY = clip.y * invW;
+            const float ndcZ = clip.z * invW;
+            ndcMinX = std::min(ndcMinX, ndcX);
+            ndcMinY = std::min(ndcMinY, ndcY);
+            ndcMinZ = std::min(ndcMinZ, ndcZ);
+            ndcMaxX = std::max(ndcMaxX, ndcX);
+            ndcMaxY = std::max(ndcMaxY, ndcY);
+            ndcMaxZ = std::max(ndcMaxZ, ndcZ);
         }
 
         return !(ndcMaxX < (-1.0f - clipMargin) ||
@@ -2173,6 +2185,7 @@ void RendererBackend::renderFrame(
     frameExecutionContext.aoExtent = aoExtent;
     frameExecutionContext.aoViewport = aoViewport;
     frameExecutionContext.aoScissor = aoScissor;
+
 
     PrepassInputs prepassInputs{};
     prepassInputs.frameChunkDrawData = &frameChunkDrawData;

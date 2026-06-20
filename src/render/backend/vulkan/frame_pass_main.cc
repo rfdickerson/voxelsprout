@@ -208,6 +208,35 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         );
     }
 
+    // Hex strategy-map land: one instanced, tessellated, height-displaced draw of the
+    // shared base hex fan (one instance per land tile). The TESC collapses distant
+    // tiles to the base fan, so a single all-instances draw is cheap.
+    if (m_hexTerrainEnabled && m_hexTerrainPipeline != VK_NULL_HANDLE && m_hexInstanceCount > 0) {
+        const VkBuffer hexBaseVertexBuffer = m_bufferAllocator.getBuffer(m_hexBaseVertexBufferHandle);
+        const VkBuffer hexBaseIndexBuffer = m_bufferAllocator.getBuffer(m_hexBaseIndexBufferHandle);
+        const VkBuffer hexInstanceBuffer = m_bufferAllocator.getBuffer(m_hexInstanceBufferHandle);
+        if (hexBaseVertexBuffer != VK_NULL_HANDLE && hexBaseIndexBuffer != VK_NULL_HANDLE &&
+            hexInstanceBuffer != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_hexTerrainPipeline);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout,
+                0,
+                boundDescriptorSetCount,
+                boundDescriptorSets.sets.data(),
+                1,
+                &mvpDynamicOffset
+            );
+            const VkBuffer hexVertexBuffers[2] = {hexBaseVertexBuffer, hexInstanceBuffer};
+            const VkDeviceSize hexVertexOffsets[2] = {0, 0};
+            vkCmdBindVertexBuffers(commandBuffer, 0, 2, hexVertexBuffers, hexVertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, hexBaseIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDrawIndexed(commandBuffer, m_hexIndexCount, m_hexInstanceCount, 0, 0, 0);
+        }
+    }
+
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, useRtVoxelShadows ? m_pipelineRt : m_pipeline);
     vkCmdBindDescriptorSets(
         commandBuffer,
@@ -633,6 +662,18 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             );
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, waterVertexBuffers, waterVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, waterIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            // Vulkan Roadmap 2026 VRS: shade the low-frequency water surface coarsely
+            // (2x2) to reclaim GPU. The water pipeline carries the dynamic shading-rate
+            // state, so the rate must be set before drawing it when VRS is available.
+            if (m_supportsVrs && m_cmdSetFragmentShadingRate != nullptr) {
+                const uint32_t rate = m_debugWaterVrsCoarse ? 2u : 1u;
+                const VkExtent2D fragmentSize{rate, rate};
+                const VkFragmentShadingRateCombinerOpKHR combinerOps[2] = {
+                    VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
+                    VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
+                };
+                m_cmdSetFragmentShadingRate(commandBuffer, &fragmentSize, combinerOps);
+            }
             countDrawCalls(m_debugDrawCallsMain, 1);
             vkCmdDrawIndexed(commandBuffer, m_importedWaterIndexCount, 1, 0, 0, 0);
         }

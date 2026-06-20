@@ -1,0 +1,28 @@
+{
+  "productionIcons": {
+    "image": "icons/ancient_wonders.png",
+    "iconSize": 627,
+    "icons": {
+      "wonder_statue_of_zeus": [0, 0],
+      "wonder_hanging_gardens": [1, 0],
+      "wonder_great_pyramid": [0, 1],
+      "wonder_colossus": [1, 1]
+    }
+  },
+  "civPediaArt": {
+    "image": "civpedia/ancient_wonders.png",
+    "cellSize": 627,
+    "articles": {
+      "wonder_statue_of_zeus": [0, 0],
+      "wonder_hanging_gardens": [1, 0],
+      "wonder_great_pyramid": [0, 1],
+      "wonder_colossus": [1, 1]
+    }
+  },
+  "completionAnnouncements": {
+    "wonder_statue_of_zeus": "announcements/statue_of_zeus.png",
+    "wonder_hanging_gardens": "announcements/hanging_gardens.png",
+    "wonder_great_pyramid": "announcements/great_pyramid.png",
+    "wonder_colossus": "announcements/colossus.png"
+  }
+}

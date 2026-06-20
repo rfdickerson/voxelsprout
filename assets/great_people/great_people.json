@@ -1,0 +1,19 @@
+{
+  "image": "great_people.png",
+  "portraitSize": 362,
+  "grid": [4, 3],
+  "people": {
+    "euclid": { "cell": [0, 0], "class": "Great Scientist" },
+    "homer": { "cell": [1, 0], "class": "Great Writer" },
+    "archimedes": { "cell": [2, 0], "class": "Great Engineer" },
+    "aristotle": { "cell": [3, 0], "class": "Great Scientist" },
+    "hypatia": { "cell": [0, 1], "class": "Great Scientist" },
+    "sappho": { "cell": [1, 1], "class": "Great Writer" },
+    "sun_tzu": { "cell": [2, 1], "class": "Great General" },
+    "confucius": { "cell": [3, 1], "class": "Great Philosopher" },
+    "herodotus": { "cell": [0, 2], "class": "Great Writer" },
+    "pythagoras": { "cell": [1, 2], "class": "Great Scientist" },
+    "zhang_heng": { "cell": [2, 2], "class": "Great Engineer" },
+    "aesop": { "cell": [3, 2], "class": "Great Writer" }
+  }
+}

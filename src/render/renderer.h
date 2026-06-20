@@ -2,6 +2,7 @@
 
 #include "sim/simulation.h"
 #include "import/gpu_scene.h"
+#include "import/hex_terrain_data.h"
 #include "import/imported_scene.h"
 #include "world/chunk_grid.h"
 #include "world/chunk_mesher.h"
@@ -41,6 +42,13 @@ public:
     bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
+    // GPU-instanced, tessellated, height-displaced hex land surface (strategy map).
+    // hexTerrainReady() reports whether the device created the pipeline (tessellation
+    // support); the caller keeps the flat imported-static land otherwise.
+    void clearHexTerrain();
+    bool uploadHexTerrain(const odai::importer::HexTerrainData& data);
+    [[nodiscard]] bool hexTerrainReady() const;
+    void setHexTerrainEnabled(bool enabled);
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
