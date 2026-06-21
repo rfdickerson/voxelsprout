@@ -179,7 +179,7 @@ bool RendererBackend::createComputePipeline(
     pipelineCreateInfo.stage = stage;
     pipelineCreateInfo.layout = pipelineLayout;
     const VkResult pipelineResult =
-        vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &outPipeline);
+        vkCreateComputePipelines(m_device, m_pipelineCache, 1, &pipelineCreateInfo, nullptr, &outPipeline);
     if (pipelineResult != VK_SUCCESS) {
         logVkFailure(failureContext, pipelineResult);
         return false;

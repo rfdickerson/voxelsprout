@@ -293,6 +293,8 @@ private:
         const char* failureContext,
         const char* debugName
     );
+    bool createPipelineCache();
+    void destroyPipelineCache();
     void setObjectName(VkObjectType objectType, uint64_t objectHandle, const char* name) const;
     void beginDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
     void endDebugLabel(VkCommandBuffer commandBuffer) const;
@@ -620,6 +622,7 @@ private:
     std::array<VkDescriptorSet, kMaxFramesInFlight> m_sunShaftDescriptorSets{};
     VkPipelineLayout m_sunShaftPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_sunShaftPipeline = VK_NULL_HANDLE;
+    VkPipelineCache m_pipelineCache = VK_NULL_HANDLE;
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;

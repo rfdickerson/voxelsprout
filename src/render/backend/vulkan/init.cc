@@ -141,6 +141,11 @@ bool RendererBackend::init(GLFWwindow* window, const voxelsprout::world::ChunkGr
         shutdown();
         return false;
     }
+    if (!runStep("createPipelineCache", [&] { return createPipelineCache(); })) {
+        VOX_LOGE("render") << "init failed at createPipelineCache\n";
+        shutdown();
+        return false;
+    }
     if (!runStep("createTimelineSemaphore", [&] { return createTimelineSemaphore(); })) {
         VOX_LOGE("render") << "init failed at createTimelineSemaphore\n";
         shutdown();
@@ -261,6 +266,79 @@ bool RendererBackend::init(GLFWwindow* window, const voxelsprout::world::ChunkGr
 
     VOX_LOGI("render") << "init complete in " << elapsedMs(initStart) << " ms\n";
     return true;
+}
+
+
+namespace {
+constexpr const char* kPipelineCacheFileName = "voxelsprout_pipeline_cache.bin";
+} // namespace
+
+bool RendererBackend::createPipelineCache() {
+    if (m_device == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    // Best-effort load of a previously serialized cache. A missing file is the
+    // normal first-run case; a stale/mismatched blob is validated and ignored
+    // by the driver (it is keyed by vendor/device UUID), so no manual
+    // invalidation is required.
+    std::vector<std::uint8_t> initialData;
+    {
+        std::ifstream file(kPipelineCacheFileName, std::ios::binary | std::ios::ate);
+        if (file) {
+            const std::streamsize size = file.tellg();
+            if (size > 0) {
+                file.seekg(0, std::ios::beg);
+                initialData.resize(static_cast<size_t>(size));
+                if (!file.read(reinterpret_cast<char*>(initialData.data()), size)) {
+                    initialData.clear();
+                }
+            }
+        }
+    }
+
+    VkPipelineCacheCreateInfo cacheCreateInfo{};
+    cacheCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    cacheCreateInfo.initialDataSize = initialData.size();
+    cacheCreateInfo.pInitialData = initialData.empty() ? nullptr : initialData.data();
+
+    const VkResult result = vkCreatePipelineCache(m_device, &cacheCreateInfo, nullptr, &m_pipelineCache);
+    if (result != VK_SUCCESS) {
+        // Non-fatal: pipeline creation still works with a null cache handle.
+        logVkFailure("vkCreatePipelineCache", result);
+        m_pipelineCache = VK_NULL_HANDLE;
+        return true;
+    }
+
+    setObjectName(VK_OBJECT_TYPE_PIPELINE_CACHE, vkHandleToUint64(m_pipelineCache), "renderer.pipelineCache");
+    VOX_LOGI("render") << "pipeline cache created (loaded " << initialData.size() << " bytes from disk)\n";
+    return true;
+}
+
+void RendererBackend::destroyPipelineCache() {
+    if (m_device == VK_NULL_HANDLE || m_pipelineCache == VK_NULL_HANDLE) {
+        return;
+    }
+
+    // Serialize the warmed cache to disk (best-effort).
+    size_t dataSize = 0;
+    VkResult result = vkGetPipelineCacheData(m_device, m_pipelineCache, &dataSize, nullptr);
+    if (result == VK_SUCCESS && dataSize > 0) {
+        std::vector<std::uint8_t> data(dataSize);
+        result = vkGetPipelineCacheData(m_device, m_pipelineCache, &dataSize, data.data());
+        if (result == VK_SUCCESS) {
+            data.resize(dataSize);
+            std::ofstream file(kPipelineCacheFileName, std::ios::binary | std::ios::trunc);
+            if (file && file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()))) {
+                VOX_LOGI("render") << "pipeline cache written (" << data.size() << " bytes)\n";
+            } else {
+                VOX_LOGI("render") << "pipeline cache write failed for " << kPipelineCacheFileName << "\n";
+            }
+        }
+    }
+
+    vkDestroyPipelineCache(m_device, m_pipelineCache, nullptr);
+    m_pipelineCache = VK_NULL_HANDLE;
 }
 
 
@@ -1648,6 +1726,8 @@ void RendererBackend::shutdown() {
         if (rendererOwnedLiveImages == 0) {
             VOX_LOGI("render") << "shutdown leak check: no renderer-owned live VkImage handles\n";
         }
+
+        destroyPipelineCache();
 
         if (m_vmaAllocator != VK_NULL_HANDLE) {
             vmaDestroyAllocator(m_vmaAllocator);

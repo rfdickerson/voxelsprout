@@ -329,7 +329,7 @@ bool RendererBackend::createMagicaPipeline() {
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
     const VkResult pipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -512,7 +512,7 @@ bool RendererBackend::createPipePipeline() {
     VkPipeline pipePipeline = VK_NULL_HANDLE;
     const VkResult pipePipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -617,7 +617,7 @@ bool RendererBackend::createPipePipeline() {
     VkPipeline grassBillboardPipeline = VK_NULL_HANDLE;
     const VkResult grassPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &grassPipelineCreateInfo,
         nullptr,
@@ -840,7 +840,7 @@ bool RendererBackend::createAoPipelines() {
     pipelineCreateInfo.pVertexInputState = &voxelVertexInputInfo;
     const VkResult voxelPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -913,7 +913,7 @@ bool RendererBackend::createAoPipelines() {
     pipelineCreateInfo.pRasterizationState = &pipeRasterizer;
     const VkResult pipePipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -982,7 +982,7 @@ bool RendererBackend::createAoPipelines() {
     pipelineCreateInfo.pRasterizationState = &grassRasterizer;
     const VkResult grassNormalDepthPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -1089,7 +1089,7 @@ bool RendererBackend::createAoPipelines() {
 
     const VkResult ssaoPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &ssaoPipelineCreateInfo,
         nullptr,
@@ -1110,7 +1110,7 @@ bool RendererBackend::createAoPipelines() {
     ssaoStageInfos[1].pSpecializationInfo = &ssaoBlurSpecializationInfo;
     const VkResult ssaoBlurPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &ssaoPipelineCreateInfo,
         nullptr,
@@ -1410,7 +1410,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline worldPipeline = VK_NULL_HANDLE;
     const VkResult worldPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -1461,7 +1461,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline previewAddPipeline = VK_NULL_HANDLE;
     const VkResult previewAddPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &previewAddPipelineCreateInfo,
         nullptr,
@@ -1482,7 +1482,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline previewRemovePipeline = VK_NULL_HANDLE;
     const VkResult previewRemovePipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &previewRemovePipelineCreateInfo,
         nullptr,
@@ -1538,7 +1538,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline skyboxPipeline = VK_NULL_HANDLE;
     const VkResult skyboxPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &skyboxPipelineCreateInfo,
         nullptr,
@@ -1620,7 +1620,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline toneMapPipeline = VK_NULL_HANDLE;
     const VkResult toneMapPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &toneMapPipelineCreateInfo,
         nullptr,
@@ -1720,7 +1720,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline shadowPipeline = VK_NULL_HANDLE;
     const VkResult shadowPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &shadowPipelineCreateInfo,
         nullptr,
@@ -1820,7 +1820,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline pipeShadowPipeline = VK_NULL_HANDLE;
     const VkResult pipeShadowPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipeShadowPipelineCreateInfo,
         nullptr,
@@ -1930,7 +1930,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline grassShadowPipeline = VK_NULL_HANDLE;
     const VkResult grassShadowPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &grassShadowPipelineCreateInfo,
         nullptr,
@@ -2153,7 +2153,7 @@ bool RendererBackend::createSdfPipelines() {
 
     const VkResult mainPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &mainPipelineCreateInfo,
         nullptr,
@@ -2193,7 +2193,7 @@ bool RendererBackend::createSdfPipelines() {
 
     const VkResult prepassPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &prepassPipelineCreateInfo,
         nullptr,
@@ -2254,7 +2254,7 @@ bool RendererBackend::createSdfPipelines() {
 
     const VkResult shadowPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &shadowPipelineCreateInfo,
         nullptr,
