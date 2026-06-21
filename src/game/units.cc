@@ -1,5 +1,6 @@
 #include "game/units.h"
 
+#include "content/content_database.h"
 #include "game/buildable.h"
 
 #include <algorithm>
@@ -36,29 +37,12 @@ int pathStepCost(const StrategyMap& map,
 }  // namespace
 
 const std::vector<UnitStats>& defaultUnitStats() {
-    // id          maxHp move supply atk ranged range melee  requiredBuilding
-    // Numbers seeded from the CivPedia prose in buildable.cc. Scouts forage and
-    // range farther; civilians carry less. Melee soldiers need a Barracks; archers
-    // a Fletcher. The spearman is the pike unit that screens archers.
-    static const std::vector<UnitStats> kStats = {
-        {"warrior",  30, 2, 5, 5, 0, 0, true,  "barracks"},
-        {"spearman", 30, 2, 5, 7, 0, 0, true,  "barracks"},
-        {"archer",   25, 2, 5, 4, 5, 2, false, "fletcher"},
-        {"scout",    20, 3, 8, 2, 0, 0, false, ""},
-        {"settler",  20, 2, 4, 0, 0, 0, false, ""},
-        {"builder",  20, 2, 4, 0, 0, 0, false, ""},
-    };
-    return kStats;
+    // Data-driven: the unit stats table lives in mods/base/data/units.json.
+    return content::activeContent().units();
 }
 
 const UnitStats& unitStatsFor(const std::string& id) {
-    for (const UnitStats& stats : defaultUnitStats()) {
-        if (stats.id == id) {
-            return stats;
-        }
-    }
-    static const UnitStats kFallback{"", 30, 2, 5};
-    return kFallback;
+    return content::activeContent().unitStatsFor(id);
 }
 
 Unit& GameState::spawnUnit(const std::string& typeId, std::uint32_t col, std::uint32_t row, std::uint8_t owner) {

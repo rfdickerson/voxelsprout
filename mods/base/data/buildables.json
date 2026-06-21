@@ -1,0 +1,17 @@
+{
+  "buildables": [
+    { "id": "warrior",  "name": "Warrior",  "iconName": "warrior",    "kind": "Unit",     "productionCost": 40,  "civpediaId": "warrior" },
+    { "id": "spearman", "name": "Spearman", "iconName": "spearman",   "kind": "Unit",     "productionCost": 60,  "civpediaId": "spearman" },
+    { "id": "archer",   "name": "Archer",   "iconName": "archer",     "kind": "Unit",     "productionCost": 60,  "civpediaId": "archer" },
+    { "id": "scout",    "name": "Scout",    "iconName": "scout",      "kind": "Unit",     "productionCost": 25,  "civpediaId": "scout" },
+    { "id": "settler",  "name": "Settler",  "iconName": "settler",    "kind": "Unit",     "productionCost": 80,  "civpediaId": "settler" },
+    { "id": "builder",  "name": "Builder",  "iconName": "builder",    "kind": "Unit",     "productionCost": 50,  "civpediaId": "builder" },
+    { "id": "granary",  "name": "Granary",  "iconName": "food",       "kind": "Building", "productionCost": 60,  "civpediaId": "granary" },
+    { "id": "smithy",   "name": "Smithy",   "iconName": "production", "kind": "Building", "productionCost": 80,  "civpediaId": "smithy" },
+    { "id": "market",   "name": "Market",   "iconName": "gold",       "kind": "Building", "productionCost": 100, "civpediaId": "market" },
+    { "id": "temple",   "name": "Temple",   "iconName": "culture",    "kind": "Building", "productionCost": 90,  "civpediaId": "temple" },
+    { "id": "library",  "name": "Library",  "iconName": "science",    "kind": "Building", "productionCost": 90,  "civpediaId": "library" },
+    { "id": "barracks", "name": "Barracks", "iconName": "warrior",    "kind": "Building", "productionCost": 80,  "civpediaId": "barracks" },
+    { "id": "fletcher", "name": "Fletcher", "iconName": "archer",     "kind": "Building", "productionCost": 70,  "civpediaId": "fletcher" }
+  ]
+}

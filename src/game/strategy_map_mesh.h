@@ -64,4 +64,11 @@ odai::importer::ImportedScene buildStrategyMapScene(
     const std::vector<Unit>& units,
     StrategyMapMeshOptions options = {});
 
+// Class -> scene-texture-index map for a terrain-texture set, deduplicated by source
+// path (entries with no pixels map to 0xFFFFFFFF). The mesher uploads textures in this
+// exact index order, so the hex-terrain builder uses the same mapping to reference the
+// same bindless slots. Result length == TerrainType::Count.
+[[nodiscard]] std::vector<std::uint32_t> terrainTextureSceneIndices(
+    const std::vector<odai::importer::ImportedSceneTexture>& terrainTextures);
+
 }  // namespace odai::game

@@ -4,6 +4,8 @@
 
 #include "core/grid3.h"
 #include "game/buildable.h"
+#include "game/economy.h"
+#include "game/great_people.h"
 #include "game/strategy_hex_terrain.h"
 #include "game/strategy_map.h"
 #include "game/strategy_map_io.h"
@@ -14,16 +16,21 @@
 #include "ui/icon_atlas.h"
 #include "ui/widgets/button.h"
 #include "ui/widgets/donut_chart.h"
+#include "ui/widgets/great_people_panel.h"
 #include "ui/widgets/image.h"
 #include "ui/widgets/label.h"
 #include "ui/widgets/line_chart.h"
+#include "ui/widgets/command_view_panel.h"
 #include "ui/widgets/icon_button.h"
 #include "ui/widgets/panel.h"
 #include "ui/widgets/production_panel.h"
 #include "ui/widgets/rich_text_view.h"
 #include "ui/widgets/stat_badge.h"
+#include "ui/widgets/tech_tree_panel.h"
+#include "ui/widgets/toast.h"
 #include "ui/widgets/toolbar.h"
 #include "ui/widgets/window.h"
+#include "ui/widgets/world_tracker_panel.h"
 
 #include <stb_image.h>
 
@@ -761,6 +768,17 @@ bool App::loadConfig(const std::filesystem::path& configPath) {
     AppConfig loadedConfig = m_config;
     std::string line;
     std::uint32_t parsedLineCount = 0;
+    auto parseVolume = [](const std::string& v, float& out) -> bool {
+        try {
+            std::size_t consumed = 0;
+            const float parsed = std::stof(v, &consumed);
+            if (consumed == 0) return false;
+            out = std::clamp(parsed, 0.0f, 1.0f);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    };
     while (std::getline(file, line)) {
         ++parsedLineCount;
         const std::size_t commentPos = line.find('#');
@@ -796,6 +814,40 @@ bool App::loadConfig(const std::filesystem::path& configPath) {
                 continue;
             }
             loadedConfig.enableSsao = parsedValue;
+            continue;
+        }
+        if (key == "master_volume") {
+            if (!parseVolume(value, loadedConfig.masterVolume)) {
+                VOX_LOGW("app") << "invalid config master_volume='" << value << "'; keeping prior";
+            }
+            continue;
+        }
+        if (key == "music_volume") {
+            if (!parseVolume(value, loadedConfig.musicVolume)) {
+                VOX_LOGW("app") << "invalid config music_volume='" << value << "'; keeping prior";
+            }
+            continue;
+        }
+        if (key == "ambient_volume") {
+            if (!parseVolume(value, loadedConfig.ambientVolume)) {
+                VOX_LOGW("app") << "invalid config ambient_volume='" << value << "'; keeping prior";
+            }
+            continue;
+        }
+        if (key == "ui_volume") {
+            if (!parseVolume(value, loadedConfig.uiVolume)) {
+                VOX_LOGW("app") << "invalid config ui_volume='" << value << "'; keeping prior";
+            }
+            continue;
+        }
+        if (key == "audio_muted") {
+            bool parsedValue = loadedConfig.audioMuted;
+            if (!parseBoolConfigValue(value, parsedValue)) {
+                VOX_LOGW("app") << "invalid config audio_muted='" << value << "'; keeping "
+                                << boolConfigName(loadedConfig.audioMuted);
+                continue;
+            }
+            loadedConfig.audioMuted = parsedValue;
         }
     }
     m_config = loadedConfig;
@@ -814,6 +866,11 @@ bool App::saveConfig(const std::filesystem::path& configPath) const {
     file << "# Renderer runtime config\n";
     file << "shadow_mode=" << shadowModeConfigName(m_config.shadowMode) << "\n";
     file << "enable_ssao=" << boolConfigName(m_config.enableSsao) << "\n";
+    file << "master_volume=" << m_config.masterVolume << "\n";
+    file << "music_volume=" << m_config.musicVolume << "\n";
+    file << "ambient_volume=" << m_config.ambientVolume << "\n";
+    file << "ui_volume=" << m_config.uiVolume << "\n";
+    file << "audio_muted=" << boolConfigName(m_config.audioMuted) << "\n";
     return true;
 }
 
@@ -827,6 +884,15 @@ bool App::init() {
     VOX_LOGI("app") << "init begin"
                     << " version=" << ODAI_APP_VERSION
                     << " profile=" << ODAI_RELEASE_PROFILE;
+
+    // Install the Lua mod host so the strategy simulation (stepTurn) fires script
+    // event hooks and applies Lua-authored effects from mods/base/scripts.
+    m_scriptHost = odai::script::createBaseScriptHost();
+    odai::game::setModHost(m_scriptHost.get());
+    for (const std::string& scriptErr : m_scriptHost->errors()) {
+        VOX_LOGW("app") << "mod script: " << scriptErr;
+    }
+
     glfwSetErrorCallback(glfwErrorCallback);
 
     const auto glfwStart = Clock::now();
@@ -958,11 +1024,15 @@ bool App::init() {
     // Seed a few playable units on friendly settlements so the supply mechanic has
     // something to drive; meshed below so they appear on the board from the start.
     spawnDemoUnits();
+    // Build the live economy world from the settlements spawnDemoUnits established
+    // (it sets m_playerOwner). The strategy-map mesh renders m_gameWorld.map so the
+    // territory the sim paints (tile owners) shows up as borders on the board.
+    seedGameWorldFromSettlements();
 
     // Start in 3D relief mode; toggling (M) re-meshes flat for the 2D board view.
     m_strategyMap3D = true;
     odai::game::StrategyMapMeshOptions meshOptions = makeStrategyMapMeshOptions(/*extruded=*/true, m_terrainTextures);
-    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap, m_gameState.units, std::move(meshOptions));
+    m_importedScene = odai::game::buildStrategyMapScene(m_gameWorld.map, m_gameState.units, std::move(meshOptions));
     m_importedSceneDemoEnabled = true;
     m_hoverEnabled = true;
 
@@ -1022,13 +1092,16 @@ bool App::init() {
     // otherwise. Active in 3D relief only; the flat 2D board keeps the imported land.
     m_useHexTerrain = m_renderer.hexTerrainReady();
     if (m_useHexTerrain) {
-        m_hexTerrain = odai::game::buildHexTerrain(m_strategyMap, odai::game::HexTerrainOptions{});
+        // Re-mesh first so the imported scene drops the land/grid and (re-)uploads the
+        // terrain textures; the hex builder then references those same bindless slots.
+        rebuildStrategyMapScene();
+        m_hexTerrain = odai::game::buildHexTerrain(m_gameWorld.map, m_terrainTextures, odai::game::HexTerrainOptions{});
         if (m_renderer.uploadHexTerrain(m_hexTerrain)) {
             m_renderer.setHexTerrainEnabled(m_strategyMap3D);
-            rebuildStrategyMapScene();
         } else {
             m_useHexTerrain = false;
             VOX_LOGW("app") << "hex terrain upload failed; keeping flat land";
+            rebuildStrategyMapScene();  // restore the imported-static land
         }
     }
 
@@ -1042,6 +1115,28 @@ bool App::init() {
         m_importedShowTextures,
         m_importedFlatShading,
         m_importedWaterDebug);
+
+    // Audio: bring up the subsystem (silent if no device), load the starter
+    // clips, wire the global UI click sound, and start the launch ambience +
+    // theme. Missing asset files leave invalid handles, so the guarded play
+    // calls below simply do nothing until the content is supplied.
+    odai::audio::AudioConfig audioCfg;
+    audioCfg.masterVolume = m_config.masterVolume;
+    audioCfg.musicVolume = m_config.musicVolume;
+    audioCfg.ambientVolume = m_config.ambientVolume;
+    audioCfg.uiVolume = m_config.uiVolume;
+    audioCfg.muted = m_config.audioMuted;
+    m_audio.init(audioCfg);
+    m_uiClickSfx = m_audio.loadSound(
+        resolveAssetPath("assets/audio/ui/click.wav"), odai::audio::SoundCategory::Ui);
+    m_endTurnSfx = m_audio.loadSound(
+        resolveAssetPath("assets/audio/ui/end_turn.wav"), odai::audio::SoundCategory::Ui);
+    m_ambientLoop = m_audio.loadSound(
+        resolveAssetPath("assets/audio/ambient/wind.wav"), odai::audio::SoundCategory::Ambient);
+    m_menuMusic = m_audio.loadMusic(resolveAssetPath("assets/audio/music/theme_01.mp3"));
+    m_uiContext.setClickFeedback([this]() { m_audio.playSound(m_uiClickSfx); });
+    if (m_menuMusic.valid()) m_audio.playMusic(m_menuMusic, 2.0f, /*loop=*/true);
+    if (m_ambientLoop.valid()) m_audio.startAmbient(m_ambientLoop, 1.5f);
 
     VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms";
     return true;
@@ -1159,7 +1254,8 @@ void App::handleInventoryClick(float mouseX, float mouseY, float displayWidth, f
     }
 }
 
-void App::update([[maybe_unused]] float dt, float simulationAlpha) {
+void App::update(float dt, float simulationAlpha) {
+    m_audio.update(dt);
     const float renderAlpha = std::clamp(simulationAlpha, 0.0f, 1.0f);
     odai::render::CameraPose cameraPose{
         m_cameraPrevious.x + ((m_camera.x - m_cameraPrevious.x) * renderAlpha),
@@ -1189,8 +1285,24 @@ void App::update([[maybe_unused]] float dt, float simulationAlpha) {
 void App::shutdown() {
     VOX_LOGI("app") << "shutdown begin";
 
+    // Uninstall the Lua host before it is destroyed so no later code path can call
+    // a dangling IModHost.
+    odai::game::setModHost(nullptr);
+    m_scriptHost.reset();
+
     m_config.shadowMode = m_renderer.shadowSettings().mode;
     m_config.enableSsao = m_renderer.isSsaoEnabled();
+
+    // Capture the live audio volumes for persistence, then tear the audio
+    // subsystem down first: ma_engine_uninit joins the device-callback thread,
+    // so it must happen before the renderer/GLFW teardown below.
+    m_config.masterVolume = m_audio.categoryVolume(odai::audio::SoundCategory::Master);
+    m_config.musicVolume = m_audio.categoryVolume(odai::audio::SoundCategory::Music);
+    m_config.ambientVolume = m_audio.categoryVolume(odai::audio::SoundCategory::Ambient);
+    m_config.uiVolume = m_audio.categoryVolume(odai::audio::SoundCategory::Ui);
+    m_config.audioMuted = m_audio.muted();
+    m_audio.shutdown();
+
     const std::filesystem::path configPath{kConfigFilePath};
     if (!saveConfig(configPath)) {
         VOX_LOGE("app") << "failed to save config to " << configPath.string();
@@ -3320,8 +3432,8 @@ void App::setupDemoUi(float viewW, float viewH) {
                    << " pixelRatio=" << pixelRatio << " effective=" << s;
 
     // Base font size in logical pixels at 100 % DPI (multiplied by s at bake time).
-    // 28 px gives comfortable readability; scales up cleanly on 4K/HiDPI displays.
-    const float kBaseFontPx = 28.0f;
+    // 23 px reads cleanly without dominating the HUD; scales up on 4K/HiDPI displays.
+    const float kBaseFontPx = 23.0f;
 
     // Load the regular face into the built-in atlas (kUiFontAtlas). Fall back to a
     // system font so the HUD still renders text if the bundled TTF is missing.
@@ -3438,7 +3550,30 @@ void App::setupDemoUi(float viewW, float viewH) {
         }
     }
 
-    // Load civilization empire icons atlas (12 civs, 4ï¿½3, 128px).
+    // Load Compass & Crown's branded navigation icon atlas. The combined emblem
+    // is used by the HUD lockup; the other marks are available to future map and
+    // empire screens through the shared icon registry.
+    {
+        const std::filesystem::path imgPath = resolveAssetPath("assets/icons/compass_crown.png");
+        const std::filesystem::path jsonPath = resolveAssetPath("assets/icons/compass_crown.json");
+        int iw = 0, ih = 0;
+        stbi_uc* ipx = stbi_load(imgPath.string().c_str(), &iw, &ih, nullptr, 4);
+        if (ipx && iw > 0 && ih > 0) {
+            const odai::ui::UiTextureId tex = m_renderer.registerUiTextureRgba8Mipmapped(
+                ipx, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih));
+            stbi_image_free(ipx);
+            if (tex != odai::ui::kUiNoTexture) {
+                std::ifstream f(jsonPath);
+                std::string meta((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                odai::ui::UiIconRegistry::global().registerAtlas(
+                    tex, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih), meta.c_str());
+            }
+        } else if (ipx) {
+            stbi_image_free(ipx);
+        }
+    }
+
+    // Load civilization empire icons atlas (12 civs, 4x3, 128px).
     {
         const std::filesystem::path imgPath = resolveAssetPath("assets/icons/civ_empires.png");
         const std::filesystem::path jsonPath = resolveAssetPath("assets/icons/civ_empires.json");
@@ -3522,6 +3657,37 @@ void App::setupDemoUi(float viewW, float viewH) {
         }
     }
 
+    // Load the Great People portrait atlas (4x3 grid). The art<->code contract is the
+    // great-people catalog: each figure's portraitCol/Row indexes a cell, and we
+    // register the figure id as the icon name so portraitName == id resolves.
+    {
+        const std::filesystem::path imgPath = resolveAssetPath("assets/great_people/great_people.png");
+        int iw = 0, ih = 0;
+        stbi_uc* ipx = stbi_load(imgPath.string().c_str(), &iw, &ih, nullptr, 4);
+        if (ipx && iw > 0 && ih > 0) {
+            const odai::ui::UiTextureId tex = m_renderer.registerUiTextureRgba8Mipmapped(
+                ipx, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih));
+            stbi_image_free(ipx);
+            if (tex != odai::ui::kUiNoTexture) {
+                // Square cells: a 4-column grid, so iconSize = width / 4.
+                const int iconSize = std::max(1, iw / 4);
+                std::string meta = "{\"iconSize\":" + std::to_string(iconSize) + ",\"icons\":{";
+                bool first = true;
+                for (const odai::game::GreatPersonDef& g : odai::game::greatPeopleCatalog()) {
+                    if (!first) meta += ",";
+                    first = false;
+                    meta += "\"" + g.id + "\":[" + std::to_string(g.portraitCol) + "," +
+                            std::to_string(g.portraitRow) + "]";
+                }
+                meta += "}}";
+                odai::ui::UiIconRegistry::global().registerAtlas(
+                    tex, static_cast<std::uint32_t>(iw), static_cast<std::uint32_t>(ih), meta.c_str());
+            }
+        } else if (ipx) {
+            stbi_image_free(ipx);
+        }
+    }
+
     // Load the UI sprite sheet and build 9-slice descriptors for the dark ornate frame
     // and the parchment frame. Both live in the same 1024ï¿½1536 texture atlas.
     odai::ui::UiNineSlice parchmentSlice{};
@@ -3579,21 +3745,39 @@ void App::setupDemoUi(float viewW, float viewH) {
     // science, culture, faith, food, production) in the style of a 4X game's
     // status bar. Other top-anchored panels are pushed down by its height.
     const float kToolbarH = 40.0f * s;
+    // Ornate backing strip behind the resource toolbar so the top bar reads as
+    // parchment/gilt like the side rails (the Toolbar widget itself only does a
+    // flat fill, so we give it a gradient + gilded double border underneath and
+    // make the toolbar's own background transparent).
+    {
+        auto topBg = std::make_unique<odai::ui::Panel>();
+        topBg->setRect(odai::ui::UiRect::fromXYWH(0.0f, 0.0f, viewW, kToolbarH));
+        topBg->bgTop              = odai::ui::UiColor{0.176f, 0.133f, 0.078f, 0.97f};
+        topBg->bgBottom           = odai::ui::UiColor{0.063f, 0.043f, 0.020f, 0.98f};
+        topBg->background         = *topBg->bgBottom;
+        topBg->borderColor        = odai::ui::UiColor{0.478f, 0.361f, 0.165f, 0.85f};
+        topBg->borderThicknessPx  = 2.0f * s;
+        topBg->innerBorderColor   = odai::ui::UiColor{0.784f, 0.588f, 0.227f, 0.40f};
+        topBg->innerBorderInsetPx = 3.0f * s;
+        root->addChild(std::move(topBg));
+    }
     {
         using TB = odai::ui::Toolbar;
         auto tb = std::make_unique<TB>(fonts.regular);
+        tb->background = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.0f};  // backing strip shows through
+        tb->accentLine = odai::ui::UiColor{0.784f, 0.588f, 0.227f, 0.65f};
         tb->setRect(odai::ui::UiRect::fromXYWH(0.0f, 0.0f, viewW, kToolbarH));
         tb->paddingXPx = 54.0f * s;  // extra left margin for the civ-panel toggle icon
         tb->itemGapPx  = 26.0f * s;
         tb->iconGapPx  = 8.0f * s;
         tb->iconScale  = 0.68f;
         const odai::ui::UiColor textCol{0.92f, 0.95f, 0.97f, 1.0f};
-        m_tbScienceItem = tb->addItem(TB::IconKind::Science, {0.31f, 0.64f, 0.82f, 1.0f}, "+14", textCol);
-        tb->addItem(TB::IconKind::Culture, {0.69f, 0.44f, 0.84f, 1.0f}, "+8", textCol);
-        m_tbGoldItem = tb->addItem(TB::IconKind::Coin, {0.94f, 0.75f, 0.25f, 1.0f}, "240 (+39)", textCol);
-        m_tbFaithItem = tb->addItem(TB::IconKind::Faith, {0.90f, 0.88f, 0.96f, 1.0f}, "+12", textCol);
-        tb->addItem(TB::IconKind::Food, {0.49f, 0.78f, 0.31f, 1.0f}, "+6", textCol);
-        tb->addItem(TB::IconKind::Production, {0.85f, 0.54f, 0.23f, 1.0f}, "+7", textCol);
+        m_tbScienceItem = tb->addItem(TB::IconKind::Science, {0.31f, 0.64f, 0.82f, 1.0f}, "+0", textCol);
+        m_tbCultureItem = tb->addItem(TB::IconKind::Culture, {0.69f, 0.44f, 0.84f, 1.0f}, "+0", textCol);
+        m_tbGoldItem = tb->addItem(TB::IconKind::Coin, {0.94f, 0.75f, 0.25f, 1.0f}, "0 (+0)", textCol);
+        m_tbFaithItem = tb->addItem(TB::IconKind::Faith, {0.90f, 0.88f, 0.96f, 1.0f}, "\xE2\x80\x94", textCol);
+        m_tbFoodItem = tb->addItem(TB::IconKind::Food, {0.49f, 0.78f, 0.31f, 1.0f}, "+0", textCol);
+        m_tbProdItem = tb->addItem(TB::IconKind::Production, {0.85f, 0.54f, 0.23f, 1.0f}, "+0", textCol);
         // Hover breakdown tooltips for each yield badge.
         tb->setTooltip(0,
             "<b><color=#5bb0d8>Science  +14 / turn</color></b>\n"
@@ -3633,8 +3817,9 @@ void App::setupDemoUi(float viewW, float viewH) {
             auto civBtn = std::make_unique<odai::ui::Button>(
                 fonts.regular, "Civ",
                 [this]() {
-                    m_civExpanded = !m_civExpanded;
-                    m_civExpandTween.setTarget(m_civExpanded ? 1.0f : 0.0f);
+                    // The World Tracker is now the default left rail; this button
+                    // toggles the legacy civilizations leader-grid overlay.
+                    if (m_civPanel != nullptr) m_civPanel->visible = !m_civPanel->visible;
                 });
             const float btnSz = kToolbarH - 6.0f * s;
             civBtn->setRect(odai::ui::UiRect::fromXYWH(4.0f * s, 3.0f * s, btnSz, btnSz));
@@ -3656,19 +3841,64 @@ void App::setupDemoUi(float viewW, float viewH) {
         m_toolbarTurnLabel = static_cast<odai::ui::Label*>(m_toolbar->addChild(std::move(turn)));
     }
 
+    // Centered game identity, kept outside the resource toolbar so it never
+    // competes with yield readouts. Small viewports retain the full playable HUD.
+    if (viewW / s >= 1000.0f) {
+        constexpr float kBrandW = 390.0f;
+        const float brandX = viewW * 0.5f - kBrandW * s * 0.5f;
+        const float brandY = kToolbarH + 7.0f * s;
+
+        odai::ui::UiIconEntry brandIcon{};
+        if (odai::ui::UiIconRegistry::global().resolve("compass_crown", brandIcon)) {
+            auto emblem = std::make_unique<odai::ui::Image>(brandIcon.textureId);
+            emblem->uvRect = brandIcon.uv;
+            emblem->setRect(odai::ui::UiRect::fromXYWH(brandX, brandY + 3.0f * s,
+                                                         40.0f * s, 40.0f * s));
+            root->addChild(std::move(emblem));
+        }
+
+        auto brand = std::make_unique<odai::ui::Label>(
+            fonts,
+            "<b><color=#d9b75e>Compass & Crown</color></b>\n"
+            "<color=#9aaabd><i>Where Maps Become Empires.</i></color>");
+        brand->setRect(odai::ui::UiRect::fromXYWH(brandX + 50.0f * s, brandY,
+                                                    (kBrandW - 50.0f) * s, 48.0f * s));
+        root->addChild(std::move(brand));
+    }
+
     // Bottom HUD bar - full-width strip at the bottom of the screen.
     const float kBarH = 64.0f * s;
     const float barY = viewH - kBarH;
     auto bar = std::make_unique<odai::ui::Panel>();
     bar->setRect(odai::ui::UiRect::fromXYWH(0.0f, barY, viewW, kBarH));
-    bar->background  = odai::ui::UiColor{0.04f, 0.06f, 0.09f, 0.92f};
-    bar->borderColor = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.40f};
+    // Parchment/gilt strip: vertical gradient + a gilded double border (no corner
+    // accents — they read oddly on a wide thin bar).
+    bar->bgTop              = odai::ui::UiColor{0.176f, 0.133f, 0.078f, 0.96f};
+    bar->bgBottom           = odai::ui::UiColor{0.063f, 0.043f, 0.020f, 0.97f};
+    bar->background         = *bar->bgBottom;
+    bar->borderColor        = odai::ui::UiColor{0.478f, 0.361f, 0.165f, 0.85f};
+    bar->borderThicknessPx  = 2.0f * s;
+    bar->innerBorderColor   = odai::ui::UiColor{0.784f, 0.588f, 0.227f, 0.40f};
+    bar->innerBorderInsetPx = 3.0f * s;
 
-    auto statsLabel = std::make_unique<odai::ui::Label>(fonts, "");
-    statsLabel->setRect(odai::ui::UiRect::fromXYWH(viewW * 0.5f - 160.0f * s, barY + 12.0f * s, 320.0f * s, 40.0f * s));
-    statsLabel->align = odai::ui::UiTextAlign::Center;
-    m_hudStatsLabel = statsLabel.get();
-    bar->addChild(std::move(statsLabel));
+    // Turn Summary card (bottom-right, just above the bar) replaces the old centered
+    // debug readout. m_hudStatsLabel lives inside it; updateUiOverlay fills the text.
+    {
+        const float sumW = 360.0f * s;
+        const float sumH = 60.0f * s;
+        const float sumX = viewW - sumW - 12.0f * s;
+        const float sumY = barY - sumH - 8.0f * s;
+        auto sumPanel = std::make_unique<odai::ui::Panel>();
+        sumPanel->setRect(odai::ui::UiRect::fromXYWH(sumX, sumY, sumW, sumH));
+        sumPanel->styleOrnate(s, 0.92f);
+        auto* sumPtr = static_cast<odai::ui::Panel*>(root->addChild(std::move(sumPanel)));
+
+        auto statsLabel = std::make_unique<odai::ui::Label>(fonts, "");
+        statsLabel->setRect(odai::ui::UiRect::fromXYWH(sumX + 14.0f * s, sumY + 8.0f * s,
+                                                       sumW - 28.0f * s, sumH - 16.0f * s));
+        statsLabel->align = odai::ui::UiTextAlign::Left;
+        m_hudStatsLabel = static_cast<odai::ui::Label*>(sumPtr->addChild(std::move(statsLabel)));
+    }
 
     auto endTurnBtn = std::make_unique<odai::ui::Button>(fonts.regular, "End Turn", [this]() {
         fireEndTurn();
@@ -3683,6 +3913,43 @@ void App::setupDemoUi(float viewW, float viewH) {
     endTurnBtn->glowColor         = odai::ui::UiColor{0.95f, 0.75f, 0.30f, 0.70f};
     endTurnBtn->glowSizePx        = 22.0f * s;
     m_endTurnBtn = static_cast<odai::ui::Button*>(bar->addChild(std::move(endTurnBtn)));
+
+    // Research button (bottom-left): toggles the Technology Tree window.
+    auto researchBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Research", [this]() {
+        if (m_techTreeWindow == nullptr) return;
+        const bool show = !m_techTreeWindow->visible;
+        m_techTreeWindow->visible = show;
+        if (show) refreshTechTree();
+    });
+    researchBtn->setRect(odai::ui::UiRect::fromXYWH(16.0f * s, barY + 8.0f * s, 160.0f * s, 48.0f * s));
+    researchBtn->cornerRadiusPx    = 12.0f * s;
+    researchBtn->colorNormal       = odai::ui::UiColor{0.09f, 0.18f, 0.28f, 0.95f};
+    researchBtn->colorHover        = odai::ui::UiColor{0.16f, 0.30f, 0.44f, 1.00f};
+    researchBtn->colorPressed      = odai::ui::UiColor{0.06f, 0.13f, 0.21f, 1.00f};
+    researchBtn->borderColor       = odai::ui::UiColor{0.40f, 0.70f, 0.95f, 0.85f};
+    researchBtn->borderThicknessPx = 2.0f * s;
+    researchBtn->glowColor         = odai::ui::UiColor{0.35f, 0.65f, 0.95f, 0.60f};
+    researchBtn->glowSizePx        = 18.0f * s;
+    bar->addChild(std::move(researchBtn));
+
+    // Great People button (bottom-left, beside Research): toggles the roster window.
+    auto greatBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Great People", [this]() {
+        if (m_greatPeopleWindow == nullptr) return;
+        const bool show = !m_greatPeopleWindow->visible;
+        m_greatPeopleWindow->visible = show;
+        if (show) refreshGreatPeople();
+    });
+    greatBtn->setRect(odai::ui::UiRect::fromXYWH(184.0f * s, barY + 8.0f * s, 160.0f * s, 48.0f * s));
+    greatBtn->cornerRadiusPx    = 12.0f * s;
+    greatBtn->colorNormal       = odai::ui::UiColor{0.22f, 0.14f, 0.26f, 0.95f};
+    greatBtn->colorHover        = odai::ui::UiColor{0.34f, 0.22f, 0.40f, 1.00f};
+    greatBtn->colorPressed      = odai::ui::UiColor{0.16f, 0.10f, 0.20f, 1.00f};
+    greatBtn->borderColor       = odai::ui::UiColor{0.78f, 0.58f, 0.92f, 0.85f};
+    greatBtn->borderThicknessPx = 2.0f * s;
+    greatBtn->glowColor         = odai::ui::UiColor{0.72f, 0.45f, 0.92f, 0.55f};
+    greatBtn->glowSizePx        = 18.0f * s;
+    bar->addChild(std::move(greatBtn));
+
     root->addChild(std::move(bar));
 
 
@@ -3833,6 +4100,9 @@ void App::setupDemoUi(float viewW, float viewH) {
         m_civExpandTween.setTarget(1.0f);
 
         m_civPanel = static_cast<odai::ui::Panel*>(root->addChild(std::move(civPanel)));
+        // Hidden by default — the World Tracker owns the left rail now. Re-openable
+        // via the toolbar "Civ" toggle as an overlay.
+        m_civPanel->visible = false;
     }
 
     // City production panel (right column, Civ 6 style).
@@ -4048,6 +4318,72 @@ void App::setupDemoUi(float viewW, float viewH) {
     m_civpediaWindow = root->addChild(std::move(pediaWin));
     m_civpediaWindow->visible = false;  // Hidden until user clicks the info button on a row.
 
+    // Tech Tree window (center-left): a draggable, closeable window whose content is
+    // a TechTreePanel. Rebuilt from research state by refreshTechTree(). Hidden until
+    // the player presses the Research button.
+    {
+        const float techW = 430.0f * s;
+        const float techH = std::min(viewH - kToolbarH - kBarH - 24.0f * s, 600.0f * s);
+        const float techX = std::max(12.0f * s, viewW * 0.5f - techW - 16.0f * s);
+        const float techY = kToolbarH + 12.0f * s;
+        auto techWin = std::make_unique<odai::ui::Window>(
+            fonts.bold, "Technology Tree",
+            [this]() { if (m_techTreeWindow != nullptr) m_techTreeWindow->visible = false; });
+        techWin->setRect(odai::ui::UiRect::fromXYWH(techX, techY, techW, techH));
+        if (m_uiFontTitle.valid()) {
+            techWin->titleFont = &m_uiFontTitle;
+            techWin->titleBarH = m_uiFontTitle.lineHeightPx() + 12.0f * s;
+        } else {
+            techWin->titleBarH = odai::ui::Window::kDefaultTitleBarH * s;
+        }
+        techWin->padding         = {8.0f * s, 8.0f * s};
+        techWin->titleBarColor   = odai::ui::UiColor{0.20f, 0.26f, 0.34f, 1.0f};
+        techWin->bodyColor       = odai::ui::UiColor{0.06f, 0.09f, 0.13f, 0.97f};
+        techWin->borderColor     = odai::ui::UiColor{0.40f, 0.62f, 0.85f, 0.65f};
+        techWin->cornerRadiusPx  = 4.0f * s;
+        techWin->showCloseButton = true;
+        techWin->draggable       = true;
+
+        auto panel = std::make_unique<odai::ui::TechTreePanel>(fonts);
+        m_techTreePanel  = static_cast<odai::ui::TechTreePanel*>(techWin->addChild(std::move(panel)));
+        m_techTreeWindow = static_cast<odai::ui::Window*>(root->addChild(std::move(techWin)));
+        m_techTreeWindow->visible = false;
+        refreshTechTree();
+    }
+
+    // Great People window (center): a draggable, closeable window whose content is a
+    // GreatPeoplePanel. Rebuilt from the player's roster by refreshGreatPeople().
+    // Hidden until the player presses the Great People button.
+    {
+        const float gpW = 560.0f * s;
+        const float gpH = std::min(viewH - kToolbarH - kBarH - 24.0f * s, 560.0f * s);
+        const float gpX = std::max(12.0f * s, viewW * 0.5f - gpW * 0.5f);
+        const float gpY = kToolbarH + 16.0f * s;
+        auto gpWin = std::make_unique<odai::ui::Window>(
+            fonts.bold, "Great People",
+            [this]() { if (m_greatPeopleWindow != nullptr) m_greatPeopleWindow->visible = false; });
+        gpWin->setRect(odai::ui::UiRect::fromXYWH(gpX, gpY, gpW, gpH));
+        if (m_uiFontTitle.valid()) {
+            gpWin->titleFont = &m_uiFontTitle;
+            gpWin->titleBarH = m_uiFontTitle.lineHeightPx() + 12.0f * s;
+        } else {
+            gpWin->titleBarH = odai::ui::Window::kDefaultTitleBarH * s;
+        }
+        gpWin->padding         = {8.0f * s, 8.0f * s};
+        gpWin->titleBarColor   = odai::ui::UiColor{0.26f, 0.18f, 0.30f, 1.0f};
+        gpWin->bodyColor       = odai::ui::UiColor{0.07f, 0.06f, 0.04f, 0.97f};
+        gpWin->borderColor     = odai::ui::UiColor{0.78f, 0.58f, 0.92f, 0.65f};
+        gpWin->cornerRadiusPx  = 4.0f * s;
+        gpWin->showCloseButton = true;
+        gpWin->draggable       = true;
+
+        auto panel = std::make_unique<odai::ui::GreatPeoplePanel>(fonts);
+        m_greatPeoplePanel  = static_cast<odai::ui::GreatPeoplePanel*>(gpWin->addChild(std::move(panel)));
+        m_greatPeopleWindow = static_cast<odai::ui::Window*>(root->addChild(std::move(gpWin)));
+        m_greatPeopleWindow->visible = false;
+        refreshGreatPeople();
+    }
+
     // Unit action bar - floats above the bottom bar at the left, shown when a unit
     // is selected. Layout: [unit portrait] [unit name] | [action btn 0..5]
     // Slots are pre-built and hidden; updateUiOverlay sets their icons and visibility.
@@ -4114,7 +4450,94 @@ void App::setupDemoUi(float viewW, float viewH) {
     m_tooltipFade.durationSec = 0.16f;
     m_tooltipFade.easing = odai::ui::Easing::EaseInOut;
 
+    // Narrated event feed — a scrolling chronicle of world.events anchored lower-left,
+    // above the unit action bar — plus a toast stack (eureka / era banners) top-right.
+    {
+        const float feedW = 380.0f * s;
+        const float feedH = 152.0f * s;
+        const float feedX = 10.0f * s;
+        const float feedBottom = (viewH - kBarH) - 80.0f * s;  // clear of the unit action bar
+        const float feedY = feedBottom - feedH;
+
+        auto feedBg = std::make_unique<odai::ui::Panel>();
+        feedBg->setRect(odai::ui::UiRect::fromXYWH(feedX, feedY, feedW, feedH));
+        feedBg->background        = odai::ui::UiColor{0.05f, 0.07f, 0.10f, 0.86f};
+        feedBg->borderColor       = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.45f};
+        feedBg->borderThicknessPx = 1.0f * s;
+        feedBg->cornerRadiusPx    = 4.0f * s;
+        auto* feedBgPtr = static_cast<odai::ui::Panel*>(root->addChild(std::move(feedBg)));
+
+        auto feedTitle = std::make_unique<odai::ui::Label>(
+            fonts, "<b><color=#c9b896>Chronicle</color></b>");
+        feedTitle->setRect(odai::ui::UiRect::fromXYWH(feedX + 10.0f * s, feedY + 5.0f * s,
+                                                      feedW - 20.0f * s, 20.0f * s));
+        feedBgPtr->addChild(std::move(feedTitle));
+
+        auto feed = std::make_unique<odai::ui::RichTextView>(fonts, "");
+        feed->setRect(odai::ui::UiRect::fromXYWH(feedX + 10.0f * s, feedY + 28.0f * s,
+                                                 feedW - 16.0f * s, feedH - 34.0f * s));
+        feed->wrap = true;
+        m_eventFeedView = static_cast<odai::ui::RichTextView*>(feedBgPtr->addChild(std::move(feed)));
+
+        auto toasts = std::make_unique<odai::ui::ToastManager>(
+            fonts.bold ? fonts.bold : fonts.regular);
+        toasts->setRect(odai::ui::UiRect::fromXYWH(viewW - 280.0f * s, kToolbarH + 10.0f * s,
+                                                   270.0f * s, viewH * 0.5f));
+        m_toasts = static_cast<odai::ui::ToastManager*>(root->addChild(std::move(toasts)));
+    }
+
+    // --- Ornate left "World Tracker" rail ------------------------------------
+    // Sits under the toolbar and ends above the lower-left Chronicle feed.
+    {
+        const float wtX = 0.0f;
+        const float wtY = kToolbarH + 6.0f * s;
+        const float wtW = 296.0f * s;
+        const float wtBottom = viewH - kBarH - 244.0f * s;  // clearance above the Chronicle
+        const float wtH = std::max(wtBottom - wtY, 220.0f * s);
+        m_worldTrackerRect = odai::ui::UiRect::fromXYWH(wtX, wtY, wtW, wtH);
+        auto wt = std::make_unique<odai::ui::WorldTrackerPanel>(fonts);
+        wt->setRect(m_worldTrackerRect);
+        m_worldTracker = static_cast<odai::ui::WorldTrackerPanel*>(root->addChild(std::move(wt)));
+    }
+
+    // --- Ornate right "Command View" rail ------------------------------------
+    {
+        const float cvW = 330.0f * s;
+        const float cvX = viewW - cvW - 8.0f * s;
+        const float cvY = kToolbarH + 6.0f * s;
+        const float cvH = barY - cvY - 8.0f * s;
+        m_commandViewRect = odai::ui::UiRect::fromXYWH(cvX, cvY, cvW, cvH);
+        auto cv = std::make_unique<odai::ui::CommandViewPanel>(fonts);
+        cv->setRect(m_commandViewRect);
+        m_commandView = static_cast<odai::ui::CommandViewPanel*>(root->addChild(std::move(cv)));
+    }
+
+    // --- Lens (minimap) placeholder, bottom-center ---------------------------
+    // A framed stand-in; a real rendered minimap is a follow-up map-pass item.
+    {
+        const float lensW = 230.0f * s;
+        const float lensH = 150.0f * s;
+        const float lensX = viewW * 0.5f - lensW * 0.5f;
+        const float lensY = barY - lensH - 8.0f * s;
+        auto lens = std::make_unique<odai::ui::Panel>();
+        lens->setRect(odai::ui::UiRect::fromXYWH(lensX, lensY, lensW, lensH));
+        lens->styleOrnate(s, 0.92f);
+        auto* lensPtr = static_cast<odai::ui::Panel*>(root->addChild(std::move(lens)));
+        auto lensLabel = std::make_unique<odai::ui::Label>(
+            fonts, "<b><color=#f0c040>LENS</color></b>\n<color=#a08060>Off</color>");
+        lensLabel->align = odai::ui::UiTextAlign::Center;
+        lensLabel->setRect(odai::ui::UiRect::fromXYWH(lensX, lensY + lensH * 0.5f - 22.0f * s,
+                                                      lensW, 44.0f * s));
+        lensPtr->addChild(std::move(lensLabel));
+    }
+
     m_uiContext.setRoot(std::move(root));
+
+    // Prime the live readouts now that the widgets exist.
+    refreshToolbar();
+    refreshWorldTracker();
+    refreshCommandView();
+    refreshEventFeed();
 }
 
 void App::drawStrategyMapLabels(float fbW, float fbH) {
@@ -4410,31 +4833,42 @@ void App::updateUiOverlay(float dt) {
         }
     }
 
-    // Update map stats label.
+    // Turn Summary card content: pending orders + a one-line empire status.
     if (m_hudStatsLabel != nullptr && m_strategyMap.width > 0) {
-        const auto cnt = static_cast<int>(m_strategyMap.settlements.size());
-        m_hudStatsLabel->setText(
-            std::to_string(m_strategyMap.width) + " \xc3\x97 " +
-            std::to_string(m_strategyMap.height) + "  \xc2\xb7  " +
-            std::to_string(cnt) + (cnt == 1 ? " settlement" : " settlements"));
+        odai::game::Empire* pe = playerEmpire();
+        const int idle = m_strategyMapMode ? idleCount() : 0;
+        std::string txt = "<b><color=#c9b896>Turn Summary</color></b>\n";
+        if (idle > 0) {
+            txt += "<color=#e0b050>" + std::to_string(idle) + " unit" +
+                   (idle == 1 ? "" : "s") + " need orders.</color>  ";
+        } else {
+            txt += "<color=#7ec850>Ready to advance.</color>  ";
+        }
+        if (pe != nullptr) {
+            txt += "<color=#9fb0c8>" + std::to_string(pe->cityIndices.size()) +
+                   (pe->cityIndices.size() == 1 ? " city" : " cities") +
+                   "  \xc2\xb7  Score " + std::to_string(pe->score) + "</color>";
+        }
+        m_hudStatsLabel->setText(txt);
     }
 
-    // Top toolbar: accumulate gold and reflect the current turn.
-    if (m_toolbar != nullptr) {
-        m_tbGold += dt * 39.0f / 60.0f;  // ~+39/turn at ~60 fps
-        const int goldInt = static_cast<int>(m_tbGold);
-        m_toolbar->setValue(m_tbGoldItem, std::to_string(goldInt) + " (+39)");
-        m_toolbar->setTooltip(2,
-            "<b><color=#f0c040>Gold  " + std::to_string(goldInt) + " in treasury</color></b>\n"
-            "Income / turn      <color=#f0c040>+39</color>\n"
-            "  Capital city     <color=#f0c040>+20</color>\n"
-            "  Trade routes     <color=#f0c040>+15</color>\n"
-            "  Market           <color=#f0c040>+4</color>");
-    }
+    // Toolbar yields are pushed by refreshToolbar() (init + each End Turn). Here we
+    // only keep the turn label current and animate any active toasts.
     if (m_toolbarTurnLabel != nullptr) {
         m_toolbarTurnLabel->setText(
             "<color=#c9b896>Turn</color> <b><color=#ecd39a>" +
-            std::to_string(m_currentTurn) + "</color></b>");
+            std::to_string(m_gameWorld.turn + 1) + "</color></b>");
+    }
+    if (m_toasts != nullptr) {
+        m_toasts->update(dt);
+    }
+
+    // Deferred Great People rebuild: a rail selection or a settle action sets the
+    // dirty flag from inside a click callback; we rebuild the tree here, safely
+    // outside that callback (rebuilding clears the very widget whose click we're in).
+    if (m_greatPeopleDirty) {
+        m_greatPeopleDirty = false;
+        refreshGreatPeople();
     }
 
     // End Turn / Next Idle: label changes to show idle count while there are
@@ -4444,7 +4878,7 @@ void App::updateUiOverlay(float dt) {
         if (idle > 0) {
             m_endTurnBtn->setLabel("Next Idle (" + std::to_string(idle) + ")");
         } else {
-            m_endTurnBtn->setLabel("End Turn");
+            m_endTurnBtn->setLabel("Next Turn");
         }
     }
 
@@ -4455,7 +4889,9 @@ void App::updateUiOverlay(float dt) {
             pickHexFromMouse(mouseX, mouseY, fbW, fbH, hCol, hRow)) {
             m_hoveredHexCol = hCol;
             m_hoveredHexRow = hRow;
-            m_hudTileInfoWindow->visible = true;
+            // The selected-hex card now lives in the Command View rail; the old
+            // bottom-right tile-info window stays hidden to avoid duplication.
+            m_hudTileInfoWindow->visible = false;
 
             const odai::game::MapTile& tile = m_strategyMap.at(
                 static_cast<std::uint32_t>(hCol),
@@ -4526,6 +4962,11 @@ void App::updateUiOverlay(float dt) {
         }
     }
 
+    // Refresh the right Command View rail from the current hex/unit selection.
+    // The call is internally gated on a change in (hex, unit, turn), so running it
+    // every frame is cheap.
+    refreshCommandView();
+
     // Strategy-map mouse: left-click (press+release, negligible drag) selects the
     // unit under the cursor — a real left drag stays a map pan. The right button is
     // a hold gesture: press and hold to preview a move route or attack for the
@@ -4554,9 +4995,10 @@ void App::updateUiOverlay(float dt) {
                         m_selectedCityCol = -1;
                         m_selectedCityRow = -1;
                     } else {
-                        // No unit here: check for a city and open its production panel.
-                        if (m_gameState.cityAt(static_cast<std::uint32_t>(cCol),
-                                               static_cast<std::uint32_t>(cRow)) != nullptr) {
+                        // No unit here: open production only for the player's own city.
+                        const odai::game::CityState* clicked = m_gameState.cityAt(
+                            static_cast<std::uint32_t>(cCol), static_cast<std::uint32_t>(cRow));
+                        if (clicked != nullptr && clicked->owner == m_playerOwner) {
                             openProductionPanelForCity(cCol, cRow);
                         } else {
                             if (m_productionPanel != nullptr) m_productionPanel->visible = false;
@@ -4766,10 +5208,16 @@ bool App::rayToGroundPlane(double mouseX, double mouseY, int fbW, int fbH,
 
 void App::rebuildStrategyMapScene() {
     odai::game::StrategyMapMeshOptions meshOptions = makeStrategyMapMeshOptions(m_strategyMap3D, m_terrainTextures);
-    // The GPU hex pipeline owns the land surface in 3D relief; skip the imported-static
-    // land tops/skirts there so it is not drawn twice. The flat 2D board keeps them.
-    meshOptions.emitLandSurface = !(m_useHexTerrain && m_strategyMap3D);
-    m_importedScene = odai::game::buildStrategyMapScene(m_strategyMap, m_gameState.units, std::move(meshOptions));
+    // The GPU hex pipeline owns the land surface in 3D relief: skip the imported-static
+    // land tops/skirts there so it is not drawn twice, and skip the flat grid overlay
+    // (the hex shader draws borders that ride the displaced surface). The flat 2D board
+    // keeps both.
+    const bool hexOwnsLand = m_useHexTerrain && m_strategyMap3D;
+    meshOptions.emitLandSurface = !hexOwnsLand;
+    if (hexOwnsLand) {
+        meshOptions.drawGridOverlay = false;
+    }
+    m_importedScene = odai::game::buildStrategyMapScene(m_gameWorld.map, m_gameState.units, std::move(meshOptions));
     if (!m_renderer.uploadImportedScene(m_importedScene)) {
         VOX_LOGE("app") << "strategy map scene re-upload failed";
     }
@@ -4783,6 +5231,10 @@ void App::spawnDemoUnits() {
     if (m_strategyMap.settlements.empty()) {
         return;
     }
+
+    // The human player controls the home settlement's faction; every other
+    // settlement on the map belongs to an AI faction the player does not manage.
+    m_playerOwner = m_strategyMap.settlements.front().owner;
 
     // Seed demo buildings so cities can immediately pump out units and the build
     // prerequisites are visible: the capital gets the full kit (and a smithy for
@@ -4955,18 +5407,467 @@ void App::focusOnHex(std::uint32_t col, std::uint32_t row) {
     m_cameraPrevious = m_camera;
 }
 
+namespace {
+// Player era index from a tech id: 0 Ancient, 1 Classical, 2 Medieval. Derived
+// from the tech's data-driven `era` field (mirrors techEra()).
+int eraIndexForTech(const std::string& id) {
+    const odai::game::TechDef* t = odai::game::findTech(id);
+    const std::string era = (t != nullptr) ? t->era : std::string();
+    if (era == "Ancient Era") return 0;
+    if (era == "Classical Era") return 1;
+    return 2;
+}
+const char* eraNameForIndex(int idx) {
+    switch (idx) { case 0: return "Ancient Era"; case 1: return "Classical Era"; default: return "Medieval Era"; }
+}
+// Rich-text open tag (color) for an event kind; pair it with a literal "</color>".
+const char* eventColorTag(odai::game::GameEvent::Kind k) {
+    using K = odai::game::GameEvent::Kind;
+    switch (k) {
+        case K::Eureka:     return "<color=#5bd8e0>";  // cyan: inspiration
+        case K::Unlock:     return "<color=#86d86a>";  // green: new branch
+        case K::Tech:       return "<color=#7fbfe0>";  // blue: discovery
+        case K::Wonder:     return "<color=#e8c45a>";  // gold: wonder
+        case K::WonderLost: return "<color=#a07a4a>";
+        case K::Founded:    return "<color=#d8b08a>";
+        case K::Growth:     return "<color=#9ad06a>";
+        case K::Building:   return "<color=#b9c2cc>";
+        case K::FireSale:   return "<color=#e07a5a>";
+        case K::Starve:     return "<color=#e06a6a>";
+        case K::Disorder:   return "<color=#e0a050>";
+        case K::Conquest:   return "<color=#e05a5a>";
+    }
+    return "<color=#b9c2cc>";
+}
+}  // namespace
+
+odai::game::Empire* App::playerEmpire() {
+    return m_gameWorld.empireById(m_playerOwner);
+}
+
+odai::game::City* App::playerCityAt(int col, int row) {
+    for (odai::game::City& c : m_gameWorld.cities) {
+        if (c.owner == m_playerOwner &&
+            static_cast<int>(c.col) == col && static_cast<int>(c.row) == row) {
+            return &c;
+        }
+    }
+    return nullptr;
+}
+
+void App::seedGameWorldFromSettlements() {
+    m_gameWorld = {};
+    m_samples.clear();
+    m_lastEventCount = 0;
+    m_lastEraIndex = -1;
+    m_gameWorld.map = m_strategyMap;  // terrain copy; tile owners evolve with borders
+    m_gameWorld.turn = 0;
+    if (m_strategyMap.settlements.empty()) return;
+
+    // Named leaders + playstyles keyed by owner id. Self-contained (mirrors the
+    // presets in game_sim.cc makeWorld) so seeding is robust while the leaders.json
+    // refactor is in flight. Personality fields: name, expansion, wonderLove,
+    // science, gold, religion, culture.
+    struct Preset { const char* civ; const char* leader; odai::game::Personality p;
+                    const char* names[8]; };
+    static const Preset kPresets[6] = {
+        {"Egypt", "Ramesses", {"Builder / Religion", 0.8f, 1.8f, 0.8f, 1.0f, 2.0f, 1.2f},
+         {"Memphis","Thebes","Heliopolis","Luxor","Alexandria","Abydos","Karnak","Giza"}},
+        {"Mongols", "Genghis", {"Expansionist", 1.8f, 0.3f, 0.7f, 1.0f, 0.5f, 0.3f},
+         {"Karakorum","Samarkand","Bukhara","Merv","Urgench","Otrar","Kashgar","Balkh"}},
+        {"Greece", "Pericles", {"Scientist / Culture", 0.8f, 1.3f, 2.0f, 0.8f, 0.6f, 1.9f},
+         {"Athens","Sparta","Corinth","Argos","Olympia","Delphi","Miletos","Eretria"}},
+        {"Phoenicia", "Hiram", {"Merchant", 1.2f, 0.9f, 0.9f, 2.1f, 0.6f, 0.5f},
+         {"Tyre","Sidon","Byblos","Carthage","Utica","Kition","Akko","Arwad"}},
+        {"Rome", "Augustus", {"Builder", 1.5f, 1.1f, 1.0f, 1.2f, 1.0f, 0.8f},
+         {"Rome","Neapolis","Mediolanum","Lugdunum","Londinium","Aquileia","Capua","Ravenna"}},
+        {"India", "Ashoka", {"Religion / Culture", 0.6f, 1.4f, 1.2f, 0.8f, 2.3f, 1.9f},
+         {"Pataliputra","Taxila","Ujjain","Varanasi","Mathura","Rajgriha","Nalanda","Sarnath"}},
+    };
+
+    // One Empire per distinct settlement owner.
+    for (const odai::game::Settlement& s : m_strategyMap.settlements) {
+        if (m_gameWorld.empireById(s.owner) != nullptr) continue;
+        const Preset& pr = kPresets[(s.owner >= 1 ? (s.owner - 1) : 0) % 6];
+        odai::game::Empire emp{};
+        emp.id          = s.owner;
+        emp.name        = pr.civ;
+        emp.leaderName  = pr.leader;
+        emp.personality = pr.p;
+        emp.treasury    = 30;
+        for (int n = 0; n < 8; ++n) emp.cityNames.push_back(pr.names[n]);
+        emp.nextCityName = 1;
+        emp.aiManaged    = (s.owner != m_playerOwner);  // the player drives their own empire
+        m_gameWorld.empires.push_back(emp);
+    }
+
+    // One City per settlement, attached to its empire, with starting territory.
+    for (const odai::game::Settlement& s : m_strategyMap.settlements) {
+        odai::game::Empire* emp = m_gameWorld.empireById(s.owner);
+        if (emp == nullptr) continue;
+        odai::game::City c{};
+        c.name        = s.name.empty()
+                          ? (emp->cityNames.empty() ? std::string("City") : emp->cityNames[0])
+                          : s.name;
+        c.col         = s.col;
+        c.row         = s.row;
+        c.owner       = s.owner;
+        c.population  = 2 + static_cast<int>(s.tier);
+        c.focus       = odai::game::CityFocus::Balanced;
+        c.foundedThisGame = false;
+        m_gameWorld.cities.push_back(c);
+        emp->cityIndices.push_back(m_gameWorld.cities.size() - 1);
+        odai::game::claimCityTerritory(m_gameWorld, m_gameWorld.cities.back());
+    }
+
+    // Prime cached yields (so the toolbar/panels show real numbers before turn 1)
+    // and starting borders, then score.
+    for (odai::game::City& c : m_gameWorld.cities) odai::game::computeCityYields(m_gameWorld, c);
+    for (odai::game::Empire& emp : m_gameWorld.empires) odai::game::recomputeScore(m_gameWorld, emp);
+    recomputeBorderFlags(m_gameWorld.map);
+}
+
+void App::recomputeBorderFlags(odai::game::StrategyMap& map) const {
+    for (std::uint32_t row = 0; row < map.height; ++row) {
+        for (std::uint32_t col = 0; col < map.width; ++col) {
+            odai::game::MapTile& t = map.at(col, row);
+            bool frontier = false;
+            if (t.owner != 0) {
+                for (int dir = 0; dir < 6 && !frontier; ++dir) {
+                    int nc = 0, nr = 0;
+                    if (!odai::game::tileNeighbor(map, static_cast<int>(col), static_cast<int>(row),
+                                                  dir, nc, nr)) {
+                        frontier = true;  // map edge of owned land reads as a frontier
+                    } else if (map.at(static_cast<std::uint32_t>(nc),
+                                      static_cast<std::uint32_t>(nr)).owner != t.owner) {
+                        frontier = true;
+                    }
+                }
+            }
+            if (frontier) t.flags |= odai::game::TileFlag_Border;
+            else          t.flags &= static_cast<std::uint8_t>(~odai::game::TileFlag_Border);
+        }
+    }
+}
+
+void App::syncSettlementsWithCities() {
+    for (const odai::game::City& c : m_gameWorld.cities) {
+        bool have = false;
+        for (const odai::game::Settlement& s : m_strategyMap.settlements) {
+            if (static_cast<int>(s.col) == static_cast<int>(c.col) &&
+                static_cast<int>(s.row) == static_cast<int>(c.row)) { have = true; break; }
+        }
+        if (have) continue;
+        odai::game::Settlement s{};
+        s.name  = c.name;
+        s.col   = c.col;
+        s.row   = c.row;
+        s.tier  = 1;
+        s.owner = c.owner;
+        m_strategyMap.settlements.push_back(s);
+    }
+}
+
+void App::refreshToolbar() {
+    if (m_toolbar == nullptr) return;
+    odai::game::Empire* emp = playerEmpire();
+
+    int food = 0, prod = 0, goldYield = 0, sci = 0, cul = 0, maint = 0, cityN = 0;
+    if (emp != nullptr) {
+        for (std::size_t ci : emp->cityIndices) {
+            if (ci >= m_gameWorld.cities.size()) continue;
+            const odai::game::City& c = m_gameWorld.cities[ci];
+            food += c.yields.food;
+            prod += c.yields.production;
+            goldYield += c.yields.gold;
+            sci += c.yields.science;
+            cul += c.yields.culture;
+            for (const std::string& b : c.buildings) {
+                const odai::game::BuildingDef* d = odai::game::findBuildingDef(b);
+                if (d != nullptr) maint += d->maintenance;
+            }
+            ++cityN;
+        }
+    }
+    const int adminUpkeep = std::max(0, cityN - 1) * 2;  // kCivicUpkeepPerCity
+    const int goldNet  = goldYield - maint - adminUpkeep;
+    const int treasury = emp != nullptr ? emp->treasury : 0;
+
+    auto sign = [](int v) -> std::string { return (v >= 0 ? "+" : "") + std::to_string(v); };
+
+    m_toolbar->setValue(m_tbScienceItem, sign(sci));
+    m_toolbar->setValue(m_tbCultureItem, sign(cul));
+    m_toolbar->setValue(m_tbGoldItem, std::to_string(treasury) + " (" + sign(goldNet) + ")");
+    m_toolbar->setValue(m_tbFaithItem, "\xE2\x80\x94");  // em dash: faith not modelled in the economy
+    m_toolbar->setValue(m_tbFoodItem, sign(food));
+    m_toolbar->setValue(m_tbProdItem, sign(prod));
+
+    m_toolbar->setTooltip(0, "<b><color=#5bb0d8>Science  " + sign(sci) + " / turn</color></b>\n"
+        "Banked toward research  <color=#5bb0d8>" +
+        std::to_string(emp ? emp->sciencePool : 0) + "</color>");
+    m_toolbar->setTooltip(1, "<b><color=#b070e0>Culture  " + sign(cul) + " / turn</color></b>\n"
+        "Accumulated  <color=#b070e0>" + std::to_string(emp ? emp->culturePoints : 0) + "</color>");
+    m_toolbar->setTooltip(2, "<b><color=#f0c040>Gold  " + std::to_string(treasury) +
+        " in treasury</color></b>\nNet income / turn  <color=#f0c040>" + sign(goldNet) + "</color>");
+    m_toolbar->setTooltip(4, "<b><color=#7dca4f>Food surplus  " + sign(food) + " / turn</color></b>");
+    m_toolbar->setTooltip(5, "<b><color=#da8a3a>Production  " + sign(prod) + " / turn</color></b>");
+
+    if (m_toolbarTurnLabel != nullptr) {
+        m_toolbarTurnLabel->setText("<color=#c9b896>Turn</color> <b><color=#ecd39a>" +
+            std::to_string(m_gameWorld.turn + 1) + "</color></b>");
+    }
+
+    refreshWorldTracker();
+}
+
+void App::refreshWorldTracker() {
+    if (m_worldTracker == nullptr) return;
+    using Entry = odai::ui::WorldTrackerPanel::Entry;
+    odai::game::Empire* emp = playerEmpire();
+    std::vector<Entry> entries;
+
+    // Research.
+    {
+        Entry e;
+        e.iconName = "science";
+        e.subtitle = "RESEARCH";
+        const odai::game::TechDef* tech =
+            m_researchTechId.empty() ? nullptr : odai::game::findTech(m_researchTechId);
+        if (tech != nullptr) {
+            e.title = tech->name;
+            const int left    = std::max(0, tech->cost - m_scienceAccumulated);
+            const int perTurn = std::max(1, m_sciencePerTurn);
+            const int turns   = (left + perTurn - 1) / perTurn;
+            e.description = std::to_string(m_scienceAccumulated) + " / " +
+                            std::to_string(tech->cost) + " science  \xc2\xb7  " +
+                            std::to_string(turns) + " turns left";
+        } else {
+            e.title = "No Research";
+            e.description = "Open the tech tree to choose a study.";
+        }
+        entries.push_back(e);
+    }
+
+    // Production (first player city).
+    {
+        Entry e;
+        e.iconName = "production";
+        e.subtitle = "PRODUCTION";
+        const odai::game::City* city = nullptr;
+        if (emp != nullptr) {
+            for (std::size_t ci : emp->cityIndices) {
+                if (ci < m_gameWorld.cities.size()) { city = &m_gameWorld.cities[ci]; break; }
+            }
+        }
+        if (city != nullptr && !city->producing.empty()) {
+            const odai::game::BuildableItem* bi = odai::game::findBuildable(city->producing);
+            e.title = bi != nullptr ? bi->name : city->producing;
+            e.description = city->name + "  \xc2\xb7  " +
+                            std::to_string(city->turnsToFinish) + " turns left";
+        } else if (city != nullptr) {
+            e.title = "Idle";
+            e.description = city->name + " has nothing queued.";
+        } else {
+            e.title = "No City";
+            e.description = "Found a city to begin building.";
+        }
+        entries.push_back(e);
+    }
+
+    // Society (population + culture).
+    {
+        Entry e;
+        e.iconName = "culture";
+        e.subtitle = "SOCIETY";
+        int pop = 0, cities = 0;
+        if (emp != nullptr) {
+            for (std::size_t ci : emp->cityIndices) {
+                if (ci < m_gameWorld.cities.size()) { pop += m_gameWorld.cities[ci].population; ++cities; }
+            }
+        }
+        e.title = "Population " + std::to_string(pop);
+        e.description = std::to_string(cities) + (cities == 1 ? " city" : " cities") +
+                        "  \xc2\xb7  Culture " + std::to_string(emp ? emp->culturePoints : 0);
+        entries.push_back(e);
+    }
+
+    // Next action.
+    {
+        Entry e;
+        e.iconName = "compass_crown";
+        e.subtitle = "NEXT ACTION";
+        const int idle = m_strategyMapMode ? idleCount() : 0;
+        if (idle > 0) {
+            e.title = "Give Orders";
+            e.description = std::to_string(idle) + " unit" + (idle == 1 ? "" : "s") +
+                            " await your command.";
+        } else {
+            e.title = "Advance Turn";
+            e.description = "Press Next Turn to continue.";
+        }
+        entries.push_back(e);
+    }
+
+    m_worldTracker->setEntries(m_worldTrackerRect, m_uiScale, "WORLD TRACKER", entries);
+}
+
+void App::refreshCommandView() {
+    if (m_commandView == nullptr) return;
+
+    const int col = m_hoveredHexCol;
+    const int row = m_hoveredHexRow;
+    odai::game::Unit* unit =
+        (m_selectedUnitId != 0) ? m_gameState.findUnit(m_selectedUnitId) : nullptr;
+    const std::uint32_t unitKey = unit != nullptr ? unit->id : 0xFFFFFFFFu;
+
+    // Skip the (child-tree) rebuild when the selection hasn't changed.
+    if (col == m_cvHexCol && row == m_cvHexRow && unitKey == m_cvUnitId &&
+        m_gameWorld.turn == m_cvTurn) {
+        return;
+    }
+    m_cvHexCol = col;
+    m_cvHexRow = row;
+    m_cvUnitId = unitKey;
+    m_cvTurn   = m_gameWorld.turn;
+
+    odai::ui::CommandViewPanel::State st;
+    st.emptyHint = "<i><color=#a08060>Hover a hex or select a unit to inspect it.</color></i>";
+
+    // Selected-hex card.
+    if (col >= 0 && row >= 0 && m_strategyMap.inBounds(col, row)) {
+        const odai::game::MapTile& tile =
+            m_strategyMap.at(static_cast<std::uint32_t>(col), static_cast<std::uint32_t>(row));
+        st.hasHex = true;
+        st.hex.name = terrainName(tile.terrain);
+        const odai::game::Yields y = odai::game::terrainYields(tile.terrain, tile.flags);
+        auto addYield = [&](const char* icon, int v) {
+            if (v != 0) {
+                st.hex.yields.push_back({icon, (v >= 0 ? "+" : "") + std::to_string(v)});
+            }
+        };
+        addYield("food", y.food);
+        addYield("production", y.production);
+        addYield("gold", y.gold);
+        addYield("science", y.science);
+        addYield("culture", y.culture);
+    }
+
+    // Selected-unit card + recommended action.
+    if (unit != nullptr) {
+        st.hasUnit = true;
+        const odai::game::UnitStats& us = odai::game::unitStatsFor(unit->typeId);
+        std::string nm = unit->typeId;
+        if (!nm.empty()) nm[0] = static_cast<char>(std::toupper(nm[0]));
+        st.unit.portraitName = unit->typeId;
+        st.unit.name  = nm;
+        st.unit.klass = us.melee ? "Melee Unit"
+                                  : (us.rangedAttack > 0 ? "Ranged Unit" : "Civilian");
+        st.unit.primaryStats = {
+            {"HP", std::to_string(unit->hp) + "/" + std::to_string(unit->maxHp)},
+            {"MOV", std::to_string(unit->movementLeft) + "/" + std::to_string(us.movement)},
+            {"SUPPLY", std::to_string(unit->supply) + "/" + std::to_string(unit->maxSupply)},
+        };
+        st.unit.combatStats = {
+            {"ATK", std::to_string(us.attack)},
+            {"RNG", us.rangedAttack > 0 ? std::to_string(us.rangedAttack) : "\xE2\x80\x94"},
+            {"ARM", std::to_string(unit->armor)},
+        };
+        std::string ab;
+        if (us.rangedAttack > 0) {
+            ab += "<color=#c8b080>Ranged</color> — reach " + std::to_string(us.range) + " hexes.\n";
+        }
+        if (unit->supply == 0) ab += "<color=#e05050>Starving — out of supply.</color>\n";
+        st.unit.abilities = ab.empty() ? "<color=#a08060>No special abilities.</color>" : ab;
+
+        if (unit->typeId == "settler") {
+            st.action.title = "Found City";
+            st.action.description = "Settle here to claim territory and begin production.";
+            st.unit.settlementPreview =
+                "<color=#c9b896>Site quality:</color> <b>Good</b>\n"
+                "<color=#9fb0c8>Founding here claims the surrounding tiles.</color>";
+        } else if (us.attack > 0 || us.rangedAttack > 0) {
+            st.action.title = "Patrol";
+            st.action.description = "Scout the frontier or engage nearby threats.";
+        } else {
+            st.action.title = "Explore";
+            st.action.description = "Move to reveal the surrounding lands.";
+        }
+    } else if (st.hasHex) {
+        for (const odai::game::Settlement& settle : m_strategyMap.settlements) {
+            if (static_cast<int>(settle.col) == col && static_cast<int>(settle.row) == row) {
+                st.action.title = "Manage City";
+                st.action.description = settle.name + " — open production to queue buildings.";
+                break;
+            }
+        }
+    }
+
+    m_commandView->setState(m_commandViewRect, m_uiScale, st);
+}
+
+void App::refreshEventFeed() {
+    if (m_eventFeedView == nullptr) return;
+    const std::vector<odai::game::GameEvent>& ev = m_gameWorld.events;
+    if (ev.empty()) {
+        m_eventFeedView->setText(
+            "<i><color=#7a8a8a>The chronicle is empty. Press End Turn to write the first "
+            "lines of your civilization's history.</color></i>");
+        m_eventFeedView->scrollOffsetY = 0.0f;
+        return;
+    }
+    const std::size_t maxLines = 14;
+    const std::size_t count = std::min(maxLines, ev.size());
+    std::string md;
+    for (std::size_t k = 0; k < count; ++k) {            // newest first
+        const odai::game::GameEvent& e = ev[ev.size() - 1 - k];
+        md += "<color=#6a6a6a>T" + std::to_string(e.turn) + "</color>  " +
+              eventColorTag(e.kind) + e.text + "</color>\n";
+    }
+    m_eventFeedView->setText(md);
+    m_eventFeedView->scrollOffsetY = 0.0f;
+}
+
+void App::fireTurnBanners() {
+    if (odai::game::Empire* emp = playerEmpire()) {
+        int era = 0;
+        for (const std::string& id : emp->researched) era = std::max(era, eraIndexForTech(id));
+        if (m_lastEraIndex < 0) {
+            m_lastEraIndex = era;  // initialise silently
+        } else if (era > m_lastEraIndex) {
+            if (m_toasts != nullptr) m_toasts->push("science", std::string("Entering the ") + eraNameForIndex(era));
+            m_lastEraIndex = era;
+        }
+    }
+    const std::vector<odai::game::GameEvent>& ev = m_gameWorld.events;
+    for (std::size_t i = m_lastEventCount; i < ev.size(); ++i) {
+        const odai::game::GameEvent& e = ev[i];
+        if (e.empire != m_playerOwner || m_toasts == nullptr) continue;
+        switch (e.kind) {
+            case odai::game::GameEvent::Eureka:  m_toasts->push("science", "EUREKA!  " + e.text); break;
+            case odai::game::GameEvent::Unlock:  m_toasts->push("science", "DISCOVERY!  " + e.text); break;
+            case odai::game::GameEvent::Tech:    m_toasts->push("science", e.text); break;
+            case odai::game::GameEvent::Wonder:  m_toasts->push("production", e.text); break;
+            case odai::game::GameEvent::Founded: m_toasts->push("food", e.text); break;
+            case odai::game::GameEvent::GreatPerson: m_toasts->push("culture", e.text); break;
+            default: break;
+        }
+    }
+    m_lastEventCount = ev.size();
+}
+
 int App::idleCount() const {
     if (!m_strategyMapMode) {
         return 0;
     }
     int count = 0;
-    for (const auto& city : m_gameState.cities) {
-        if (city.producing.empty()) {
+    for (const auto& city : m_gameWorld.cities) {
+        if (city.owner == m_playerOwner && city.producing.empty()) {
             count++;
         }
     }
     for (const auto& unit : m_gameState.units) {
-        if (unit.alive() && unit.path.empty() && unit.movementLeft > 0 &&
+        if (unit.owner == m_playerOwner && unit.alive() && unit.path.empty() &&
+            unit.movementLeft > 0 &&
             m_visitedUnitIds.find(unit.id) == m_visitedUnitIds.end()) {
             count++;
         }
@@ -4975,32 +5876,74 @@ int App::idleCount() const {
 }
 
 void App::fireEndTurn() {
-    if (idleCount() > 0) {
+    const int idle = idleCount();
+    if (idle > 0) {
         cycleToNextIdle();
         return;
     }
-    ++m_currentTurn;
+
+    // Hand the player's choices to their empire; the AI never overrides an
+    // aiManaged=false empire, so the research target and city queues stick.
+    if (odai::game::Empire* emp = playerEmpire()) {
+        emp->researching = m_researchTechId;  // "" banks science until the player picks
+    }
+
+    // Advance the whole 4X world one turn (yields, growth, production, research,
+    // expansion, wonders) and the unit layer (movement / supply).
+    odai::game::stepTurn(m_gameWorld, m_samples);
     m_visitedUnitIds.clear();
     odai::game::advanceTurn(m_gameState, m_strategyMap);
+
+    // The player's research may have completed mid-step; reflect what is now in
+    // progress (the AI auto-picked a follow-up, which the player can change).
+    if (odai::game::Empire* emp = playerEmpire()) {
+        m_researchTechId = emp->researching;
+    }
+
+    // Keep labels and borders consistent with the evolved world, then re-mesh.
+    syncSettlementsWithCities();
+    recomputeBorderFlags(m_gameWorld.map);
     rebuildStrategyMapScene();
-    if (m_productionPanel != nullptr) m_productionPanel->visible = false;
-    m_selectedCityCol = -1;
-    m_selectedCityRow = -1;
+    if (m_useHexTerrain) {
+        m_hexTerrain = odai::game::buildHexTerrain(
+            m_gameWorld.map, m_terrainTextures, odai::game::HexTerrainOptions{});
+        if (!m_renderer.uploadHexTerrain(m_hexTerrain)) {
+            VOX_LOGW("app") << "hex terrain re-upload failed after end turn";
+        }
+    }
+
+    m_currentTurn = m_gameWorld.turn + 1;
+    refreshToolbar();
+    refreshEventFeed();
+    fireTurnBanners();
+    if (m_techTreeWindow != nullptr && m_techTreeWindow->visible) refreshTechTree();
+    if (m_greatPeopleWindow != nullptr && m_greatPeopleWindow->visible) refreshGreatPeople();
+
+    // Refresh the open city panel in place (its yields / queue moved this turn).
+    if (m_productionPanel != nullptr && m_productionPanel->visible &&
+        m_selectedCityCol >= 0 && playerCityAt(m_selectedCityCol, m_selectedCityRow) != nullptr) {
+        openProductionPanelForCity(m_selectedCityCol, m_selectedCityRow);
+    }
+    m_audio.playSound(m_endTurnSfx);
     VOX_LOGI("ui") << "turn advanced to " << m_currentTurn;
 }
 
 void App::cycleToNextIdle() {
-    // Idle cities take priority: open the production panel for the first one found.
-    for (const auto& city : m_gameState.cities) {
-        if (city.producing.empty()) {
+    // Idle cities take priority: open the production panel for the first economy
+    // city of the player's with nothing queued.
+    for (const auto& city : m_gameWorld.cities) {
+        if (city.owner == m_playerOwner && city.producing.empty()) {
+            VOX_LOGI("prod") << "cycleToNextIdle -> CITY (" << city.col << "," << city.row << ")";
             focusOnHex(city.col, city.row);
             openProductionPanelForCity(static_cast<int>(city.col), static_cast<int>(city.row));
             return;
         }
     }
+    VOX_LOGI("prod") << "cycleToNextIdle -> no idle player city; checking units";
     // Then idle units (have moves, no path, not yet visited this turn).
     for (const auto& unit : m_gameState.units) {
-        if (unit.alive() && unit.path.empty() && unit.movementLeft > 0 &&
+        if (unit.owner == m_playerOwner && unit.alive() && unit.path.empty() &&
+            unit.movementLeft > 0 &&
             m_visitedUnitIds.find(unit.id) == m_visitedUnitIds.end()) {
             m_visitedUnitIds.insert(unit.id);
             focusOnHex(unit.col, unit.row);
@@ -5018,25 +5961,17 @@ void App::openProductionPanelForCity(int col, int row) {
     if (m_productionPanel == nullptr || m_setupViewW <= 0.0f) {
         return;
     }
-    odai::game::CityState* city = m_gameState.cityAt(
-        static_cast<std::uint32_t>(col), static_cast<std::uint32_t>(row));
+    odai::game::City* city = playerCityAt(col, row);
     if (city == nullptr) {
-        return;
+        return;  // only the player's own economy cities are managed here
     }
+    odai::game::Empire* emp = playerEmpire();
     m_selectedCityCol = col;
     m_selectedCityRow = row;
 
-    // Find the settlement name.
-    std::string cityName;
-    for (const auto& s : m_strategyMap.settlements) {
-        if (static_cast<int>(s.col) == col && static_cast<int>(s.row) == row) {
-            cityName = s.name;
-            break;
-        }
-    }
-    if (cityName.empty()) {
-        cityName = "City";
-    }
+    const std::string cityName = city->name.empty() ? std::string("City") : city->name;
+    const int prodPerTurn  = std::max(0, city->yields.production);
+    const int ownedWonders = emp != nullptr ? static_cast<int>(emp->wonders.size()) : 0;
 
     const float s      = m_uiScale;
     const float kToolbarH = 40.0f * s;
@@ -5049,40 +5984,41 @@ void App::openProductionPanelForCity(int col, int row) {
 
     const odai::ui::UiRect rect = odai::ui::UiRect::fromXYWH(prodX, prodTop, prodW, prodH);
 
-    auto makeRow = [&](const odai::game::BuildableItem& item, const std::string& section) {
-        odai::ui::ProductionPanel::Row row;
-        row.id             = item.id;
-        row.name           = item.name;
-        row.iconName       = item.iconName;
-        row.productionCost = item.productionCost;
-        row.turns          = odai::game::turnsToBuild(item.productionCost, city->accumulated, city->perTurn);
-        row.selected       = (item.id == city->producing);
-        row.section        = section;
+    // Reuse the buildable catalog's icon when an id matches (granary, library, ...);
+    // otherwise fall back to a generic icon.
+    auto iconFor = [](const std::string& id, const char* fallback) -> std::string {
+        for (const auto& b : odai::game::defaultBuildables())
+            if (b.id == id) return b.iconName;
+        return fallback;
+    };
 
-        const std::string itemId = item.id;
-        row.onSelect = [this, itemId]() {
-            odai::game::CityState* c = m_gameState.cityAt(
-                static_cast<std::uint32_t>(m_selectedCityCol),
-                static_cast<std::uint32_t>(m_selectedCityRow));
-            if (c == nullptr) {
-                return;
-            }
-            if (c->producing != itemId) {
-                c->producing    = itemId;
-                c->accumulated  = 0;
-            }
-            if (m_productionPanel != nullptr) {
-                m_productionPanel->setSelected(itemId);
-            }
-            VOX_LOGI("ui") << "city " << m_selectedCityCol << "," << m_selectedCityRow
-                           << " production set to " << itemId;
+    auto makeRow = [&](const std::string& id, const std::string& name, int cost,
+                       const std::string& iconName, const std::string& section,
+                       const std::string& kindLabel) {
+        odai::ui::ProductionPanel::Row r;
+        r.id             = id;
+        r.name           = name;
+        r.iconName       = iconName;
+        r.productionCost = cost;
+        r.turns          = odai::game::turnsToBuild(cost, city->accumulated, prodPerTurn);
+        r.selected       = (id == city->producing);
+        r.section        = section;
+
+        const std::string pid = id;
+        r.onSelect = [this, pid]() {
+            odai::game::City* c = playerCityAt(m_selectedCityCol, m_selectedCityRow);
+            if (c == nullptr) return;
+            if (c->producing != pid) { c->producing = pid; c->accumulated = 0; }
+            if (m_productionPanel != nullptr) m_productionPanel->setSelected(pid);
+            VOX_LOGI("ui") << "city (" << m_selectedCityCol << "," << m_selectedCityRow
+                           << ") production set to " << pid;
         };
 
-        const std::string pName    = item.name;
-        const std::string pIcon    = item.iconName;
-        const bool        pIsUnit  = (item.kind == odai::game::BuildableKind::Unit);
-        const std::string pArticle = odai::game::getPediaArticle(item.id);
-        row.onOpenPedia = [this, pName, pIcon, pIsUnit, pArticle]() {
+        const std::string pName    = name;
+        const std::string pIcon    = iconName;
+        const std::string pKind    = kindLabel;
+        const std::string pArticle = odai::game::getPediaArticle(id);
+        r.onOpenPedia = [this, pName, pIcon, pKind, pArticle]() {
             if (m_civpediaWindow != nullptr) m_civpediaWindow->visible = true;
             if (m_civpediaPortrait != nullptr) {
                 odai::ui::UiIconEntry pe{};
@@ -5091,38 +6027,430 @@ void App::openProductionPanelForCity(int col, int row) {
                     m_civpediaPortrait->uvRect    = pe.uv;
                 }
             }
-            const std::string kindStr = pIsUnit ? "Ancient Era Unit" : "City Building";
             if (m_civpediaNameLabel != nullptr) {
                 m_civpediaNameLabel->setText(
                     "<b><color=#c06820>" + pName + "</color></b>\n"
-                    "<color=#9fa8a8><i>" + kindStr + "</i></color>");
+                    "<color=#9fa8a8><i>" + pKind + "</i></color>");
             }
             if (m_civpediaView != nullptr) {
-                m_civpediaView->setText(pArticle);
+                m_civpediaView->setText(
+                    pArticle.empty() ? ("<i>No CivPedia entry for " + pName + " yet.</i>") : pArticle);
                 m_civpediaView->scrollOffsetY = 0.0f;
             }
         };
-        return row;
+        return r;
     };
 
     std::vector<odai::ui::ProductionPanel::Row> rows;
-    for (const auto& item : odai::game::defaultBuildables()) {
-        if (item.kind == odai::game::BuildableKind::Building && !city->hasBuilding(item.id)) {
-            rows.push_back(makeRow(item, "Districts & Buildings"));
-        }
+    // Expansion: a settler founds a new city (and costs this city a population point).
+    rows.push_back(makeRow("settler", "Settler", 72, iconFor("settler", "food"),
+                           "Expansion", "Civilian"));
+    // Economy buildings the city can still build with the player's known techs.
+    for (const odai::game::BuildingDef& d : odai::game::buildingDefs()) {
+        if (d.isWonder || city->hasBuilding(d.id)) continue;
+        if (!d.requiredTech.empty() && (emp == nullptr || !emp->knows(d.requiredTech))) continue;
+        rows.push_back(makeRow(d.id, d.name, d.productionCost, iconFor(d.id, "production"),
+                               "Buildings", "City Building"));
     }
-    for (const auto& item : odai::game::defaultBuildables()) {
-        if (item.kind == odai::game::BuildableKind::Unit && odai::game::cityCanProduce(*city, item.id)) {
-            rows.push_back(makeRow(item, "Units"));
-        }
+    // World wonders not yet claimed (cost shown includes this empire's wonder fatigue).
+    for (const odai::game::BuildingDef& d : odai::game::buildingDefs()) {
+        if (!d.isWonder || m_gameWorld.wonderTaken(d.id) || city->hasBuilding(d.id)) continue;
+        if (!d.requiredTech.empty() && (emp == nullptr || !emp->knows(d.requiredTech))) continue;
+        const int cost = d.productionCost + (d.productionCost * 30 * ownedWonders) / 100;
+        rows.push_back(makeRow(d.id, d.name, cost, iconFor(d.id, "production"),
+                               "Wonders", "World Wonder"));
     }
 
     odai::ui::ProductionPanel::CityInfo cityInfo;
-    cityInfo.name       = cityName;
-    cityInfo.production = city->perTurn;
+    cityInfo.name         = cityName;
+    cityInfo.food         = city->yields.food;
+    cityInfo.production   = city->yields.production;
+    cityInfo.gold         = city->yields.gold;
+    cityInfo.science      = city->yields.science;
+    cityInfo.faith        = 0;
+    cityInfo.culture      = city->yields.culture;
+    cityInfo.governorName = emp != nullptr ? emp->leaderName : std::string{};
 
-    m_productionPanel->setItems(rect, s, "Choose Production", rows, cityInfo);
+    const std::string title = "Pop " + std::to_string(city->population) +
+                              (city->inDisorder ? "  (Disorder)" : "");
+    m_productionPanel->setItems(rect, s, title, rows, cityInfo);
     m_productionPanel->visible = true;
+}
+
+// --- Tech tree --------------------------------------------------------------
+
+namespace {
+
+// Era grouping for the tech list. Data-driven: the era is the tech's `era` field
+// from techs.json (falls back to Medieval for an unknown/eraless tech).
+const char* techEra(const std::string& id) {
+    const odai::game::TechDef* t = odai::game::findTech(id);
+    if (t != nullptr && !t->era.empty()) return t->era.c_str();
+    return "Medieval Era";
+}
+
+
+// Build the current-research header (progress bar + status + description).
+// `cost` is the EFFECTIVE cost (already discounted if a eureka was earned).
+odai::ui::TechTreePanel::Research makeResearchHeader(
+    const odai::game::TechDef* cur, int cost, int accumulated, int perTurn, const std::string& desc) {
+    odai::ui::TechTreePanel::Research r;
+    if (cur == nullptr) {
+        r.title = "";
+        r.fraction = 0.0f;
+        r.status = "Pick a technology below to begin researching.";
+        r.description =
+            "<i><color=#9fa8a8>Select a technology to see its cost, what it unlocks, and "
+            "any branch it opens. Locked branches show the in-game deed that unlocks them."
+            "</color></i>";
+        return r;
+    }
+    r.title = cur->name;
+    r.fraction = cost > 0 ? std::min(1.0f, static_cast<float>(accumulated) /
+                                              static_cast<float>(cost))
+                          : 0.0f;
+    const int turns = odai::game::turnsToBuild(cost, accumulated, perTurn);
+    r.status = std::to_string(accumulated) + " / " + std::to_string(cost) +
+               " science  \xC2\xB7  " + std::to_string(turns) +
+               (turns == 1 ? " turn left" : " turns left") +
+               "   (+" + std::to_string(perTurn) + "/turn)";
+    r.description = desc;
+    return r;
+}
+
+// Player's science output per turn (sum of their cities' science yields).
+int playerSciencePerTurn(odai::game::World& world, const odai::game::Empire* emp) {
+    int sci = 0;
+    if (emp != nullptr) {
+        for (std::size_t ci : emp->cityIndices)
+            if (ci < world.cities.size()) sci += std::max(0, world.cities[ci].yields.science);
+    }
+    return sci;
+}
+
+// Effective (eureka-discounted) science cost of a tech for an empire.
+int techCostFor(const odai::game::Empire* emp, const odai::game::TechDef& t) {
+    if (emp != nullptr && t.gate.kind == odai::game::GateKind::Boost && emp->techBoosted(t.id))
+        return t.cost * (100 - t.gate.boostPct) / 100;
+    return t.cost;
+}
+
+}  // namespace
+
+bool App::techGateSatisfiedInApp(const odai::game::TechGate& g) const {
+    if (g.kind != odai::game::GateKind::Locked) return true;
+    const std::string& c = g.condition;
+
+    if (c == "coastal_city") {
+        for (const auto& city : m_gameState.cities) {
+            const int cc = static_cast<int>(city.col), cr = static_cast<int>(city.row);
+            for (int r = cr - 2; r <= cr + 2; ++r)
+                for (int col = cc - 2; col <= cc + 2; ++col) {
+                    if (!m_strategyMap.inBounds(col, r)) continue;
+                    if (odai::game::hexDistance(cc, cr, col, r) > 2) continue;
+                    if (odai::game::terrainIsWater(
+                            m_strategyMap.at(static_cast<std::uint32_t>(col),
+                                             static_cast<std::uint32_t>(r)).terrain))
+                        return true;
+                }
+        }
+        return false;
+    }
+    if (c.rfind("building:", 0) == 0) {
+        const std::string id = c.substr(9);
+        bool inCatalog = false;
+        for (const auto& it : odai::game::defaultBuildables())
+            if (it.id == id && it.kind == odai::game::BuildableKind::Building) { inCatalog = true; break; }
+        if (!inCatalog) return true;  // app can't model this building -> gate on prereqs alone
+        int n = 0;
+        for (const auto& city : m_gameState.cities)
+            if (city.hasBuilding(id)) ++n;
+        return n >= std::max(1, g.amount);
+    }
+    // own_wonder / meet_rival / treasury / culture / work_terrain: not modeled by the
+    // app's game state -> treat as satisfied so the tech gates on prerequisites only.
+    return true;
+}
+
+std::string App::techDescription(const odai::game::TechDef& t) const {
+    std::string md = "<b><color=#c06820>" + t.name + "</color></b>  <color=#9fa8a8><i>" +
+                     techEra(t.id) + "</i></color>\n";
+    md += "<color=#c8b888>Research cost</color>  <b>" + std::to_string(t.cost) + "</b> science\n";
+    if (!t.unlocks.empty()) {
+        std::string names;
+        for (std::size_t i = 0; i < t.unlocks.size(); ++i) {
+            const odai::game::BuildingDef* d = odai::game::findBuildingDef(t.unlocks[i]);
+            names += (i ? ", " : "") + std::string(d ? d->name : t.unlocks[i]);
+        }
+        md += "<color=#c8b888>Unlocks</color>  " + names + "\n";
+    }
+    if (!t.prereqs.empty()) {
+        std::string names;
+        for (std::size_t i = 0; i < t.prereqs.size(); ++i) {
+            const odai::game::TechDef* p = odai::game::findTech(t.prereqs[i]);
+            names += (i ? ", " : "") + std::string(p ? p->name : t.prereqs[i]);
+        }
+        md += "<color=#c8b888>Requires</color>  " + names + "\n";
+    }
+    if (t.gate.kind == odai::game::GateKind::Locked) {
+        md += "<color=#9a7a3a>Unlocks branch when you</color>  <b>" +
+              odai::game::gateRequirement(t.gate) + "</b>\n";
+    } else if (t.gate.kind == odai::game::GateKind::Boost) {
+        md += "<color=#9a7a3a>Eureka:</color>  " + odai::game::gateRequirement(t.gate) +
+              " for -" + std::to_string(t.gate.boostPct) + "% cost\n";
+    }
+    return md;
+}
+
+void App::refreshTechTree() {
+    if (m_techTreePanel == nullptr || m_techTreeWindow == nullptr) return;
+
+    const odai::ui::UiRect rect = m_techTreeWindow->contentRect();
+    using TS = odai::ui::TechTreePanel::TechState;
+
+    odai::game::Empire* emp = playerEmpire();
+    const int sciPool    = emp != nullptr ? emp->sciencePool : 0;
+    const int sciPerTurn = playerSciencePerTurn(m_gameWorld, emp);
+
+    std::vector<odai::ui::TechTreePanel::Row> rows;
+    for (const odai::game::TechDef& t : odai::game::techTree()) {
+        odai::ui::TechTreePanel::Row row;
+        row.id      = t.id;
+        row.name    = t.name;
+        row.section = techEra(t.id);
+
+        bool prereqsMet = true;
+        std::string missing;
+        for (const std::string& p : t.prereqs) {
+            if (emp == nullptr || !emp->knows(p)) {
+                const odai::game::TechDef* pd = odai::game::findTech(p);
+                missing += (missing.empty() ? "" : ", ") + std::string(pd ? pd->name : p);
+                prereqsMet = false;
+            }
+        }
+        // A Locked branch is dark until the empire earns it in play.
+        const bool branchUnlocked = (t.gate.kind != odai::game::GateKind::Locked) ||
+                                    (emp != nullptr && emp->techUnlocked(t.id));
+        const bool boosted = (emp != nullptr && t.gate.kind == odai::game::GateKind::Boost &&
+                              emp->techBoosted(t.id));
+        const int  cost    = techCostFor(emp, t);
+        const std::string eureka = boosted
+            ? "  \xC2\xB7  <color=#5bd8e0>\xE2\x9A\xA1 Eureka -" + std::to_string(t.gate.boostPct) + "%</color>"
+            : std::string{};
+
+        if (emp != nullptr && emp->knows(t.id)) {
+            row.state = TS::Researched;
+            row.info  = "Researched";
+        } else if (!prereqsMet) {
+            row.state = TS::Locked;
+            row.info  = "Requires " + missing;
+        } else if (!branchUnlocked) {
+            row.state = TS::Locked;
+            row.info  = "Locked: " + odai::game::gateRequirement(t.gate);
+        } else if (t.id == m_researchTechId) {
+            row.state = TS::Selected;
+            const int turns = odai::game::turnsToBuild(cost, sciPool, sciPerTurn);
+            row.info = std::to_string(sciPool) + " / " + std::to_string(cost) +
+                       " science  \xC2\xB7  " + std::to_string(turns) + (turns == 1 ? " turn" : " turns") +
+                       eureka;
+        } else {
+            row.state = TS::Available;
+            const int turns = odai::game::turnsToBuild(cost, 0, sciPerTurn);
+            row.info = std::to_string(cost) + " science  \xC2\xB7  " + std::to_string(turns) +
+                       (turns == 1 ? " turn" : " turns") + eureka;
+        }
+
+        if (row.state == TS::Available) {
+            const std::string id = t.id;
+            row.onSelect = [this, id]() { selectResearch(id); };
+        }
+
+        const std::string pName    = t.name;
+        const std::string pArticle = odai::game::getPediaArticle(t.id);
+        row.onOpenPedia = [this, pName, pArticle]() {
+            if (m_civpediaWindow != nullptr) m_civpediaWindow->visible = true;
+            if (m_civpediaPortrait != nullptr) {
+                odai::ui::UiIconEntry pe{};
+                if (odai::ui::UiIconRegistry::global().resolve("science", pe)) {
+                    m_civpediaPortrait->textureId = pe.textureId;
+                    m_civpediaPortrait->uvRect    = pe.uv;
+                }
+            }
+            if (m_civpediaNameLabel != nullptr) {
+                m_civpediaNameLabel->setText(
+                    "<b><color=#c06820>" + pName + "</color></b>\n"
+                    "<color=#9fa8a8><i>Technology</i></color>");
+            }
+            if (m_civpediaView != nullptr) {
+                m_civpediaView->setText(
+                    pArticle.empty() ? ("<i>No CivPedia entry for " + pName + " yet.</i>") : pArticle);
+                m_civpediaView->scrollOffsetY = 0.0f;
+            }
+        };
+        rows.push_back(std::move(row));
+    }
+
+    const odai::game::TechDef* cur =
+        m_researchTechId.empty() ? nullptr : odai::game::findTech(m_researchTechId);
+    const std::string desc = (cur != nullptr) ? techDescription(*cur) : std::string{};
+    const int curCost = cur != nullptr ? techCostFor(emp, *cur) : 0;
+    const odai::ui::TechTreePanel::Research research =
+        makeResearchHeader(cur, curCost, sciPool, sciPerTurn, desc);
+
+    m_techTreePanel->setItems(rect, m_uiScale, rows, research);
+}
+
+odai::game::City* App::greatPersonHostCity() {
+    // Prefer the city the player is currently looking at (its production panel open);
+    // otherwise the player's largest city is a sensible default home.
+    if (odai::game::City* sel = playerCityAt(m_selectedCityCol, m_selectedCityRow)) {
+        return sel;
+    }
+    odai::game::City* best = nullptr;
+    if (odai::game::Empire* emp = playerEmpire()) {
+        for (std::size_t ci : emp->cityIndices) {
+            odai::game::City& c = m_gameWorld.cities[ci];
+            if (best == nullptr || c.population > best->population) best = &c;
+        }
+    }
+    return best;
+}
+
+void App::refreshGreatPeople() {
+    if (m_greatPeoplePanel == nullptr || m_greatPeopleWindow == nullptr) return;
+    const odai::ui::UiRect rect = m_greatPeopleWindow->contentRect();
+    odai::game::Empire* emp = playerEmpire();
+
+    // Where does the player's empire stand on each figure?
+    auto playerHasPending = [&](const std::string& id) {
+        return emp != nullptr && std::find(emp->pendingGreatPeople.begin(),
+                                           emp->pendingGreatPeople.end(), id) !=
+                                     emp->pendingGreatPeople.end();
+    };
+    auto settledCityName = [&](const std::string& id) -> std::string {
+        if (emp == nullptr) return "";
+        for (std::size_t ci : emp->cityIndices) {
+            const odai::game::City& c = m_gameWorld.cities[ci];
+            if (std::find(c.greatPeople.begin(), c.greatPeople.end(), id) != c.greatPeople.end())
+                return c.name;
+        }
+        return "";
+    };
+
+    // Default / repair the rail selection: surface a figure awaiting placement first.
+    if (m_selectedGreatPersonId.empty() ||
+        odai::game::findGreatPerson(m_selectedGreatPersonId) == nullptr) {
+        m_selectedGreatPersonId.clear();
+        if (emp != nullptr && !emp->pendingGreatPeople.empty())
+            m_selectedGreatPersonId = emp->pendingGreatPeople.front();
+        else if (!odai::game::greatPeopleCatalog().empty())
+            m_selectedGreatPersonId = odai::game::greatPeopleCatalog().front().id;
+    }
+
+    std::vector<odai::ui::GreatPeoplePanel::Entry> entries;
+    for (const odai::game::GreatPersonDef& g : odai::game::greatPeopleCatalog()) {
+        odai::ui::GreatPeoplePanel::Entry e;
+        e.id           = g.id;
+        e.name         = g.name;
+        e.portraitName = g.id;
+        const std::string cls  = odai::game::greatPersonClassName(g.cls);
+        const std::string host = settledCityName(g.id);
+        if (!host.empty()) {
+            e.subtitle = cls + " - " + host;
+        } else if (playerHasPending(g.id)) {
+            e.subtitle = cls + " - awaiting a home";
+            e.pending  = true;
+        } else if (m_gameWorld.greatPersonTaken(g.id)) {
+            e.subtitle = cls + " - claimed by a rival";
+        } else {
+            e.subtitle = cls + " - not yet emerged";
+        }
+        // Selection rebuilds the panel next frame (safe out of a row's own callback).
+        e.onSelect = [this, id = g.id]() {
+            m_selectedGreatPersonId = id;
+            m_greatPeopleDirty = true;
+        };
+        entries.push_back(std::move(e));
+    }
+
+    // Build the detail pane for the selected figure.
+    odai::ui::GreatPeoplePanel::Detail detail;
+    if (const odai::game::GreatPersonDef* g = odai::game::findGreatPerson(m_selectedGreatPersonId)) {
+        detail.id           = g->id;
+        detail.name         = g->name;
+        detail.title        = g->title + "  -  " + odai::game::greatPersonClassName(g->cls);
+        detail.portraitName = g->id;
+
+        const std::string host = settledCityName(g->id);
+        std::string status;
+        if (!host.empty())                          status = "Residing in <b>" + host + "</b>.";
+        else if (playerHasPending(g->id))           status = "<color=#e0b84a>Awaiting a city to honor them.</color>";
+        else if (m_gameWorld.greatPersonTaken(g->id)) status = "Claimed by a rival empire.";
+        else                                        status = "Not yet emerged in the world.";
+
+        detail.body = g->description + "\n\n" +
+                      "<b><color=#cdb88f>Bonus</color></b>  " + g->bonusSummary + "\n" +
+                      "<b><color=#cdb88f>Status</color></b>  " + status;
+
+        // Offer the settle button only for a figure of ours awaiting a home.
+        if (playerHasPending(g->id)) {
+            odai::game::City* hostCity = greatPersonHostCity();
+            detail.showIntegrate    = true;
+            detail.integrateEnabled = hostCity != nullptr;
+            detail.integrateLabel   = hostCity != nullptr
+                ? ("Settle in " + hostCity->name)
+                : std::string("No city available");
+            detail.onIntegrate = [this, id = g->id]() {
+                odai::game::City* dest = greatPersonHostCity();
+                if (dest == nullptr) return;
+                const std::string cityName = dest->name;
+                odai::game::integrateGreatPerson(m_gameWorld, *dest, id);
+                if (m_toasts != nullptr) {
+                    const odai::game::GreatPersonDef* gp = odai::game::findGreatPerson(id);
+                    m_toasts->push("culture",
+                                   (gp != nullptr ? gp->name : id) + " settles in " + cityName);
+                }
+                // Suppress the duplicate banner at the next End Turn for this event.
+                m_lastEventCount = m_gameWorld.events.size();
+                m_greatPeopleDirty = true;  // rebuild the roster next frame
+            };
+        }
+    }
+
+    m_greatPeoplePanel->setEntries(rect, m_uiScale, entries, detail);
+}
+
+void App::selectResearch(const std::string& id) {
+    m_researchTechId = id;  // applied to the player's empire at the next End Turn
+    odai::game::Empire* emp = playerEmpire();
+    const odai::game::TechDef* cur = odai::game::findTech(id);
+    const std::string desc = (cur != nullptr) ? techDescription(*cur) : std::string{};
+    const int sciPool    = emp != nullptr ? emp->sciencePool : 0;
+    const int sciPerTurn = playerSciencePerTurn(m_gameWorld, emp);
+    const int curCost    = cur != nullptr ? techCostFor(emp, *cur) : 0;
+    const odai::ui::TechTreePanel::Research research =
+        makeResearchHeader(cur, curCost, sciPool, sciPerTurn, desc);
+    // In-place update: this runs inside the clicked row's callback, so the row
+    // widget must not be destroyed by a rebuild.
+    if (m_techTreePanel != nullptr) m_techTreePanel->applyResearch(id, research);
+    VOX_LOGI("ui") << "research target set to " << id;
+}
+
+void App::advanceResearch() {
+    if (m_researchTechId.empty()) return;
+    const odai::game::TechDef* cur = odai::game::findTech(m_researchTechId);
+    if (cur == nullptr) { m_researchTechId.clear(); return; }
+
+    m_scienceAccumulated += m_sciencePerTurn;
+    if (m_scienceAccumulated >= cur->cost) {
+        m_researchedTechs.push_back(cur->id);
+        m_scienceAccumulated -= cur->cost;  // carry the remainder toward the next tech
+        VOX_LOGI("ui") << "research complete: " << cur->id;
+        m_researchTechId.clear();  // let the player choose the next technology
+    }
+    // Full rebuild is safe here (called from End Turn, not a row callback) and
+    // surfaces any branches that just unlocked.
+    if (m_techTreeWindow != nullptr && m_techTreeWindow->visible) refreshTechTree();
 }
 
 } // namespace odai::app

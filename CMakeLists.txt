@@ -29,6 +29,7 @@ if(SLANGC_EXECUTABLE)
         "${CMAKE_SOURCE_DIR}/src/render/shaders/camera_uniform.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/chunk_push_constants.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/fullscreen_triangle.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/noise.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/sh_lighting.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_decode.slang"
     )
@@ -200,6 +201,8 @@ add_library(odai_ui STATIC
     src/ui/widgets/line_chart.cc
     src/ui/widgets/stat_badge.cc
     src/ui/widgets/icon_button.cc
+    src/ui/widgets/world_tracker_panel.cc
+    src/ui/widgets/command_view_panel.cc
     # Game-domain widgets (production_panel, etc.) are NOT included here;
     # they live in the app source list and link against odai_ui.
 )
@@ -218,17 +221,130 @@ else()
     target_compile_options(odai_ui PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# ---------------------------------------------------------------------------
+# odai_audio — audio subsystem (miniaudio backend behind a PIMPL facade)
+# ---------------------------------------------------------------------------
+# Always built, even in headless tools/tests configs: the NullBackend has no
+# third-party dependency and gives every consumer a valid, silent Audio. The
+# real miniaudio backend is compiled only when the vcpkg miniaudio package is
+# present, so a missing package degrades to silence rather than failing config.
+add_library(odai_audio STATIC
+    src/audio/audio.cc
+    src/audio/null_backend.cc
+)
+target_include_directories(odai_audio
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+        $<INSTALL_INTERFACE:include>
+)
+target_compile_features(odai_audio PUBLIC cxx_std_20)
+
+# The vcpkg miniaudio port is header-only and ships no CMake config package, so
+# locate the header directly rather than via find_package. Header found -> the
+# real backend is compiled; not found -> the silent NullBackend-only build.
+find_path(ODAI_MINIAUDIO_INCLUDE_DIR NAMES miniaudio.h)
+if(ODAI_MINIAUDIO_INCLUDE_DIR)
+    target_sources(odai_audio PRIVATE
+        src/audio/miniaudio_backend.cc
+        src/audio/miniaudio_impl.cc
+    )
+    target_include_directories(odai_audio PRIVATE ${ODAI_MINIAUDIO_INCLUDE_DIR})
+    target_compile_definitions(odai_audio PRIVATE ODAI_AUDIO_HAVE_MINIAUDIO)
+    if(NOT WIN32 AND NOT APPLE)
+        # miniaudio dlopen()s ALSA/PulseAudio at runtime; only threads + libdl to build.
+        find_package(Threads REQUIRED)
+        target_link_libraries(odai_audio PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    endif()
+    message(STATUS "odai_audio: miniaudio backend enabled (${ODAI_MINIAUDIO_INCLUDE_DIR})")
+else()
+    message(STATUS "odai_audio: miniaudio.h not found - building silent NullBackend only")
+endif()
+
+# Project warning flags apply to our own sources only; the miniaudio
+# implementation TU keeps compiler defaults (mirrors vma_usage.cc).
+if(MSVC)
+    set_source_files_properties(
+        src/audio/audio.cc src/audio/null_backend.cc src/audio/miniaudio_backend.cc
+        PROPERTIES COMPILE_OPTIONS "${ODAI_WARN_FLAGS_MSVC}")
+else()
+    set_source_files_properties(
+        src/audio/audio.cc src/audio/null_backend.cc src/audio/miniaudio_backend.cc
+        PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic")
+endif()
+
+# ---------------------------------------------------------------------------
+# odai_content — data-driven game content (JSON). Vulkan-free, app-free, so the
+# game core, tools, and tests can all load mods/base/data/*.json. The game
+# accessors (techTree, buildingDefs, getPediaArticle, balance, ...) delegate to
+# the active ContentDatabase served by this library.
+# ---------------------------------------------------------------------------
+add_library(odai_content STATIC
+    src/content/content_database.cc
+    src/content/content_loader.cc
+    src/content/content_paths.cc
+    src/content/mod_loader.cc
+)
+target_include_directories(odai_content PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(odai_content PUBLIC nlohmann_json::nlohmann_json)
+target_compile_features(odai_content PUBLIC cxx_std_20)
+# So tools/tests resolve mods/base regardless of working directory (mirrors odai).
+target_compile_definitions(odai_content PRIVATE ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\")
+if(MSVC)
+    target_compile_options(odai_content PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+else()
+    target_compile_options(odai_content PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# ---------------------------------------------------------------------------
+# odai_script — Lua scripting engine (sol2). The ONLY place Lua is included.
+# Implements odai::game::IModHost (src/game/mod_host.h) so mods attach to gameplay
+# events and author wonder/building effects in Lua. Targets that must stay Lua-free
+# and deterministic (headless tools, content/economy tests) do NOT link this; they
+# run on the no-op NullModHost. Relaxed warning flags: sol2's headers are heavily
+# templated and not /W4-clean, but no warnings-as-errors are in play.
+# ---------------------------------------------------------------------------
+find_package(Lua REQUIRED)
+find_package(sol2 CONFIG REQUIRED)
+add_library(odai_script STATIC
+    src/script/script_engine.cc
+    src/script/lua_bindings.cc
+    src/script/lua_api.cc
+    src/script/lua_mod_host.cc
+)
+target_include_directories(odai_script
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${LUA_INCLUDE_DIR}
+)
+target_link_libraries(odai_script PUBLIC odai_content)
+target_link_libraries(odai_script PRIVATE sol2 ${LUA_LIBRARIES})
+target_compile_features(odai_script PUBLIC cxx_std_20)
+target_compile_definitions(odai_script PRIVATE ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\")
+
 if(ODAI_BUILD_APP)
     add_executable(odai
         src/app/main.cc
         src/app/app.cc
+        src/game/advisor.cc
         src/game/buildable.cc
+        src/game/economy.cc
+        src/game/game_sim.cc
+        src/game/great_people.cc
+        src/game/mod_host.cc
         src/game/strategy_map.cc
         src/game/strategy_map_io.cc
         src/game/strategy_map_mesh.cc
         src/game/strategy_hex_terrain.cc
         src/game/units.cc
+        src/ui/widgets/advisors_panel.cc
+        src/ui/widgets/great_people_panel.cc
         src/ui/widgets/production_panel.cc
+        src/ui/widgets/tech_tree_panel.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/render/frame_graph.cc
@@ -333,6 +449,9 @@ if(ODAI_BUILD_APP)
 
     # UI libraries (Vulkan + VMA already found in the VULKAN block above)
     target_link_libraries(odai PRIVATE odai_ui)
+    target_link_libraries(odai PRIVATE odai_content)
+    target_link_libraries(odai PRIVATE odai_script)
+    target_link_libraries(odai PRIVATE odai_audio)
     if(VULKAN_RENDER_BACKEND)
         target_link_libraries(odai PRIVATE odai_ui_vulkan)
     endif()
@@ -430,9 +549,12 @@ if(ODAI_BUILD_TOOLS)
         src/game/strategy_map.cc
         src/game/economy.cc
         src/game/game_sim.cc
+        src/game/great_people.cc
+        src/game/mod_host.cc
         src/tools/civ_sim_main.cc
     )
     target_include_directories(odai_civ_sim PRIVATE src)
+    target_link_libraries(odai_civ_sim PRIVATE odai_content)
     if(MSVC)
         target_compile_options(odai_civ_sim PRIVATE /W4 /permissive-)
     else()
@@ -533,6 +655,7 @@ if(BUILD_TESTING)
     add_executable(odai_strategy_map_tests
         tests/strategy_map_tests.cc
         src/game/buildable.cc
+        src/game/great_people.cc
         src/game/strategy_map.cc
         src/game/strategy_map_io.cc
         src/game/strategy_map_mesh.cc
@@ -540,6 +663,7 @@ if(BUILD_TESTING)
         src/game/units.cc
     )
     target_include_directories(odai_strategy_map_tests PRIVATE src)
+    target_link_libraries(odai_strategy_map_tests PRIVATE odai_content)
 
     if(MSVC)
         target_compile_options(odai_strategy_map_tests PRIVATE
@@ -577,15 +701,91 @@ if(BUILD_TESTING)
         tests/economy_tests.cc
         src/game/economy.cc
         src/game/game_sim.cc
+        src/game/great_people.cc
+        src/game/mod_host.cc
         src/game/strategy_map.cc
     )
     target_include_directories(odai_economy_tests PRIVATE src)
+    target_link_libraries(odai_economy_tests PRIVATE odai_content)
     if(MSVC)
         target_compile_options(odai_economy_tests PRIVATE /W4 /permissive-)
     else()
         target_compile_options(odai_economy_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_economy_tests COMMAND odai_economy_tests)
+
+    # Council of Houses advisor rule engine (catalog + evaluateAdvisors). Pure CPU;
+    # no Vulkan, no UI.
+    add_executable(odai_advisor_tests
+        tests/advisor_tests.cc
+        src/game/advisor.cc
+    )
+    target_include_directories(odai_advisor_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_advisor_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_advisor_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_advisor_tests COMMAND odai_advisor_tests)
+
+    # Great People: data-driven catalog, the city-bonus application, global
+    # uniqueness, and great-person-point birth/integration in the headless sim.
+    # Pure CPU; no Vulkan, no UI.
+    add_executable(odai_great_people_tests
+        tests/great_people_tests.cc
+        src/game/economy.cc
+        src/game/game_sim.cc
+        src/game/great_people.cc
+        src/game/mod_host.cc
+        src/game/strategy_map.cc
+    )
+    target_include_directories(odai_great_people_tests PRIVATE src)
+    target_link_libraries(odai_great_people_tests PRIVATE odai_content)
+    if(MSVC)
+        target_compile_options(odai_great_people_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_great_people_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_great_people_tests COMMAND odai_great_people_tests)
+
+    # Content/mod system: base game loads cleanly from JSON, referential integrity
+    # holds, and the loaded values match the pre-migration hardcoded tables
+    # (parity oracle). Pure CPU; no Vulkan.
+    add_executable(odai_content_tests
+        tests/content_tests.cc
+        src/game/economy.cc
+        src/game/game_sim.cc
+        src/game/great_people.cc
+        src/game/mod_host.cc
+        src/game/strategy_map.cc
+        src/game/units.cc
+        src/game/buildable.cc
+    )
+    target_include_directories(odai_content_tests PRIVATE src)
+    target_link_libraries(odai_content_tests PRIVATE odai_content)
+    if(MSVC)
+        target_compile_options(odai_content_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_content_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_content_tests COMMAND odai_content_tests)
+
+    # Lua scripting engine: event hooks fire with the right counts/order, and a
+    # scripted run is deterministic (same seed+mod -> identical TurnSamples; a
+    # no-op mod matches a NullModHost run). Links odai_script (Lua).
+    add_executable(odai_lua_hook_tests
+        tests/lua_hook_tests.cc
+        src/game/economy.cc
+        src/game/game_sim.cc
+        src/game/great_people.cc
+        src/game/mod_host.cc
+        src/game/strategy_map.cc
+        src/game/units.cc
+        src/game/buildable.cc
+    )
+    target_include_directories(odai_lua_hook_tests PRIVATE src)
+    target_link_libraries(odai_lua_hook_tests PRIVATE odai_script)
+    add_test(NAME odai_lua_hook_tests COMMAND odai_lua_hook_tests)
 
     add_executable(odai_ui_tests tests/ui_tests.cc)
     target_link_libraries(odai_ui_tests PRIVATE odai_ui)
@@ -595,6 +795,22 @@ if(BUILD_TESTING)
         target_compile_options(odai_ui_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_ui_tests COMMAND odai_ui_tests)
+
+    # Audio subsystem: headless NullBackend behavior (no device, no miniaudio).
+    # Compiles only the facade + null backend so it builds/runs anywhere.
+    add_executable(odai_audio_tests
+        tests/audio_tests.cc
+        src/audio/audio.cc
+        src/audio/null_backend.cc
+        src/core/log.cc
+    )
+    target_include_directories(odai_audio_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_audio_tests PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_audio_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_audio_tests COMMAND odai_audio_tests)
 
     find_package(GTest CONFIG QUIET)
     if(NOT GTest_FOUND)

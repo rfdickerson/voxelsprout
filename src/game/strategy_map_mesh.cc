@@ -147,28 +147,16 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
         return scene;
     }
 
-    // Deduplicate options.terrainTextures by sourcePath and move unique entries into
-    // scene.textures. terrainToTexIdx[i] = scene.textures index for TerrainType i,
-    // or kInvalidTextureIndex when no texture is provided (falls back to vertex color).
-    constexpr std::size_t kTerrainCount = static_cast<std::size_t>(TerrainType::Count);
-    std::vector<std::uint32_t> terrainToTexIdx(kTerrainCount, kInvalidTextureIndex);
+    // Resolve class -> scene-texture-index (shared with the hex-terrain builder), then
+    // move each unique texture into scene.textures in that index order.
+    const std::vector<std::uint32_t> terrainToTexIdx = terrainTextureSceneIndices(options.terrainTextures);
     {
-        std::unordered_map<std::string, std::uint32_t> pathToSceneIdx;
-        const std::size_t inputCount = std::min(options.terrainTextures.size(), kTerrainCount);
+        const std::size_t inputCount = std::min(options.terrainTextures.size(), terrainToTexIdx.size());
         for (std::size_t i = 0; i < inputCount; ++i) {
-            if (options.terrainTextures[i].width == 0u ||
-                options.terrainTextures[i].height == 0u ||
-                options.terrainTextures[i].rgba8.empty()) {
-                continue;
-            }
-            const std::string& path = options.terrainTextures[i].sourcePath;
-            const auto it = pathToSceneIdx.find(path);
-            if (it != pathToSceneIdx.end()) {
-                terrainToTexIdx[i] = it->second;
-            } else {
-                const std::uint32_t sceneIdx = static_cast<std::uint32_t>(scene.textures.size());
-                pathToSceneIdx.emplace(path, sceneIdx);
-                terrainToTexIdx[i] = sceneIdx;
+            // First occurrence of a unique texture: its scene index equals the current
+            // count, so push it now; duplicates already point at an earlier entry.
+            if (terrainToTexIdx[i] != kInvalidTextureIndex &&
+                terrainToTexIdx[i] == static_cast<std::uint32_t>(scene.textures.size())) {
                 scene.textures.push_back(std::move(options.terrainTextures[i]));
             }
         }
@@ -475,6 +463,30 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
     scene.sourceMeshCount = 1u;
     scene.sourceInstanceCount = static_cast<std::uint32_t>(map.settlements.size());
     return scene;
+}
+
+std::vector<std::uint32_t> terrainTextureSceneIndices(
+    const std::vector<odai::importer::ImportedSceneTexture>& terrainTextures) {
+    constexpr std::size_t kTerrainCount = static_cast<std::size_t>(TerrainType::Count);
+    std::vector<std::uint32_t> indices(kTerrainCount, kInvalidTextureIndex);
+    std::unordered_map<std::string, std::uint32_t> pathToSceneIdx;
+    std::uint32_t nextSceneIdx = 0u;
+    const std::size_t inputCount = std::min(terrainTextures.size(), kTerrainCount);
+    for (std::size_t i = 0; i < inputCount; ++i) {
+        const odai::importer::ImportedSceneTexture& tex = terrainTextures[i];
+        if (tex.width == 0u || tex.height == 0u || tex.rgba8.empty()) {
+            continue;
+        }
+        const auto it = pathToSceneIdx.find(tex.sourcePath);
+        if (it != pathToSceneIdx.end()) {
+            indices[i] = it->second;
+        } else {
+            indices[i] = nextSceneIdx;
+            pathToSceneIdx.emplace(tex.sourcePath, nextSceneIdx);
+            ++nextSceneIdx;
+        }
+    }
+    return indices;
 }
 
 ImportedScene buildStrategyMapScene(const StrategyMap& map, StrategyMapMeshOptions options) {

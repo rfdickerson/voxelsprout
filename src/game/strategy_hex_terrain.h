@@ -2,6 +2,9 @@
 
 #include "game/strategy_map.h"
 #include "import/hex_terrain_data.h"
+#include "import/imported_scene.h"
+
+#include <vector>
 
 // Converts a StrategyMap into HexTerrainData: one shared subdivided hex base mesh
 // plus one instance per land tile, a continuous elevation field texture, and the
@@ -26,7 +29,13 @@ struct HexTerrainOptions {
     bool demoStripMines = false;
 };
 
-odai::importer::HexTerrainData buildHexTerrain(const StrategyMap& map,
-                                               HexTerrainOptions options = {});
+// terrainTextures (indexed by TerrainType, same set passed to the strategy-map mesher)
+// lets the builder tag each instance with its terrain's scene-texture index, packed
+// into classFlags bits 16-31. The renderer remaps that to a bindless slot at upload;
+// the hex fragment shader samples it (palette fallback when 0xFFFF).
+odai::importer::HexTerrainData buildHexTerrain(
+    const StrategyMap& map,
+    const std::vector<odai::importer::ImportedSceneTexture>& terrainTextures = {},
+    HexTerrainOptions options = {});
 
 }  // namespace odai::game

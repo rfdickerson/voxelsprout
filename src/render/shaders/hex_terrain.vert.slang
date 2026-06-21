@@ -8,22 +8,24 @@
 
 struct VertexInput
 {
-    [[vk::location(0)]] float2 localXZ : TEXCOORD0;       // base-mesh corner (per vertex)
-    [[vk::location(1)]] uint cornerIndex : TEXCOORD1;     // 0..5 corner, 6 center (per vertex)
-    [[vk::location(2)]] float2 centerXZ : TEXCOORD2;      // tile center world XZ (per instance)
-    [[vk::location(3)]] uint classFlags : TEXCOORD3;      // terrain class + flags (per instance)
-    [[vk::location(4)]] float4 detailParams : TEXCOORD4;  // {feature, amplitude, windowEnd, noiseFreq}
-    [[vk::location(5)]] float4 ownAndNear : TEXCOORD5;    // {ownElevY, neighborElevY[0..2]}
-    [[vk::location(6)]] float4 farAndSize : TEXCOORD6;    // {neighborElevY[3..5], hexSize}
+    [[vk::location(0)]] float2 localXZ : TEXCOORD0;              // base-mesh corner (per vertex)
+    [[vk::location(1)]] uint cornerIndex : TEXCOORD1;            // 0..5 corner, 6 center (per vertex)
+    [[vk::location(2)]] float2 centerXZ : TEXCOORD2;             // tile center world XZ (per instance)
+    [[vk::location(3)]] uint classFlags : TEXCOORD3;             // terrain class + flags (per instance)
+    [[vk::location(4)]] float4 detailParams : TEXCOORD4;         // {feature, amplitude, windowEnd, noiseFreq}
+    [[vk::location(5)]] float4 ownAndNear : TEXCOORD5;           // {ownElevY, neighborElevY[0..2]}
+    [[vk::location(6)]] float4 farAndSize : TEXCOORD6;           // {neighborElevY[3..5], hexSize}
+    [[vk::location(7)]] uint neighborTerrainPacked : TEXCOORD7;  // 4-bit terrain type per edge (k=0..5)
 };
 
 struct VertexOutput
 {
-    float3 worldPos : TEXCOORD0;       // (x, continuous base height, z)
+    float3 worldPos : TEXCOORD0;              // (x, continuous base height, z)
     float2 centerXZ : TEXCOORD1;
     float4 detailParams : TEXCOORD2;
     uint classFlags : TEXCOORD3;
     float hexSize : TEXCOORD4;
+    uint neighborTerrainPacked : TEXCOORD5;
 };
 
 VertexOutput main(VertexInput input)
@@ -55,5 +57,6 @@ VertexOutput main(VertexInput input)
     output.detailParams = input.detailParams;
     output.classFlags = input.classFlags;
     output.hexSize = input.farAndSize.w;
+    output.neighborTerrainPacked = input.neighborTerrainPacked;
     return output;
 }

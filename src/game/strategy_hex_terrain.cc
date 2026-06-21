@@ -1,5 +1,7 @@
 #include "game/strategy_hex_terrain.h"
 
+#include "game/strategy_map_mesh.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -18,26 +20,30 @@ using odai::importer::HexTileInstance;
 
 constexpr float kInradiusFrac = 0.8660254f;  // sqrt(3)/2: inradius / circumradius
 
-// Per-tile detail amplitude as a fraction of hexSize, by terrain. Water terrains
-// produce no land instance and are never indexed here.
+// Per-tile detail amplitude as a fraction of hexSize, by terrain. Kept modest so the
+// surface reads as rolling relief rather than spikes (the shader smooths further).
+// Water terrains produce no land instance and are never indexed here.
 float terrainDetailAmplitudeFrac(TerrainType terrain) {
     switch (terrain) {
-        case TerrainType::Mountains: return 0.55f;
-        case TerrainType::Hills:     return 0.22f;
-        case TerrainType::Forest:    return 0.12f;
-        case TerrainType::Jungle:    return 0.12f;
-        case TerrainType::Snow:      return 0.08f;
-        case TerrainType::Desert:    return 0.06f;
-        case TerrainType::Plains:    return 0.05f;
-        case TerrainType::Grassland: return 0.05f;
-        case TerrainType::Tundra:    return 0.05f;
+        case TerrainType::Mountains: return 0.45f;
+        case TerrainType::Hills:     return 0.20f;
+        case TerrainType::Forest:    return 0.09f;
+        case TerrainType::Jungle:    return 0.09f;
+        case TerrainType::Snow:      return 0.06f;
+        case TerrainType::Desert:    return 0.05f;
+        case TerrainType::Plains:    return 0.035f;
+        case TerrainType::Grassland: return 0.035f;
+        case TerrainType::Tundra:    return 0.035f;
         default:                     return 0.0f;
     }
 }
 
 }  // namespace
 
-HexTerrainData buildHexTerrain(const StrategyMap& map, HexTerrainOptions options) {
+HexTerrainData buildHexTerrain(
+    const StrategyMap& map,
+    const std::vector<odai::importer::ImportedSceneTexture>& terrainTextures,
+    HexTerrainOptions options) {
     HexTerrainData data{};
     const float H = map.hexSize;
     data.hexSize = H;
@@ -45,6 +51,10 @@ HexTerrainData buildHexTerrain(const StrategyMap& map, HexTerrainOptions options
     if (map.width == 0u || map.height == 0u || map.tiles.empty() || H <= 0.0f) {
         return data;
     }
+
+    // Class -> scene-texture index (same dedup the mesher uses). Packed into classFlags
+    // bits 16-31; the renderer remaps it to a bindless slot at upload. 0xFFFF == none.
+    const std::vector<std::uint32_t> texSceneIdx = terrainTextureSceneIndices(terrainTextures);
 
     // --- Shared base hex fan in local XZ: center + 6 corners (corner k at -30+60k
     //     deg), six 3-control-point triangle patches. cornerIndex 6 marks the center. ---
@@ -118,21 +128,33 @@ HexTerrainData buildHexTerrain(const StrategyMap& map, HexTerrainOptions options
                     const odai::math::Vector3 center = tileCenterWorld(map, col, row);
                     const float ownY = tileHeightY(col, row);
 
+                    const std::size_t terrainClass = static_cast<std::size_t>(tile.terrain);
+                    std::uint32_t texIndex16 = 0xFFFFu;  // none -> palette fallback
+                    if (terrainClass < texSceneIdx.size() &&
+                        texSceneIdx[terrainClass] != 0xFFFFFFFFu) {
+                        texIndex16 = texSceneIdx[terrainClass] & 0xFFFFu;
+                    }
+
                     HexTileInstance inst{};
                     inst.centerXZ[0] = center.x;
                     inst.centerXZ[1] = center.z;
                     inst.classFlags = static_cast<std::uint32_t>(tile.terrain) |
-                                      (static_cast<std::uint32_t>(tile.flags) << 8u);
+                                      (static_cast<std::uint32_t>(tile.flags) << 8u) |
+                                      (texIndex16 << 16u);
                     inst.ownElevY = ownY;
                     inst.hexSize = H;
 
-                    // Neighbour heights indexed by hex edge (edge k faces physical
-                    // direction 60k deg). Default to ownY so map-edge tiles flatten
-                    // outward; fill in-bounds neighbours by their physical angle so the
-                    // shader's corner adjacency (k-1, k) lines up with the mesher.
+                    // Neighbour heights and terrain types indexed by hex edge (edge k
+                    // faces physical direction 60k deg). Default to own values so map-
+                    // edge tiles flatten outward and blend to themselves.
                     for (int k = 0; k < 6; ++k) {
                         inst.neighborElevY[k] = ownY;
                     }
+                    const std::uint32_t ownTerrainNibble = static_cast<std::uint32_t>(tile.terrain) & 0xFu;
+                    inst.neighborTerrainPacked =
+                        ownTerrainNibble | (ownTerrainNibble << 4u) | (ownTerrainNibble << 8u) |
+                        (ownTerrainNibble << 12u) | (ownTerrainNibble << 16u) | (ownTerrainNibble << 20u);
+
                     for (int dir = 0; dir < 6; ++dir) {
                         int nc = 0;
                         int nr = 0;
@@ -148,6 +170,12 @@ HexTerrainData buildHexTerrain(const StrategyMap& map, HexTerrainOptions options
                         const int edge = static_cast<int>(std::lround(degrees / 60.0f)) % 6;
                         inst.neighborElevY[edge] =
                             tileHeightY(static_cast<std::uint32_t>(nc), static_cast<std::uint32_t>(nr));
+                        const std::uint32_t nTerrainNibble =
+                            static_cast<std::uint32_t>(map.at(static_cast<std::uint32_t>(nc),
+                                                               static_cast<std::uint32_t>(nr)).terrain) & 0xFu;
+                        const std::uint32_t shift = static_cast<std::uint32_t>(edge) * 4u;
+                        inst.neighborTerrainPacked =
+                            (inst.neighborTerrainPacked & ~(0xFu << shift)) | (nTerrainNibble << shift);
                     }
 
                     std::uint32_t feature = HexDetailFeature::HexDetail_Rough;
@@ -158,7 +186,7 @@ HexTerrainData buildHexTerrain(const StrategyMap& map, HexTerrainOptions options
                     inst.detailParams[0] = static_cast<float>(feature);
                     inst.detailParams[1] = terrainDetailAmplitudeFrac(tile.terrain) * H * exaggeration;
                     inst.detailParams[2] = 0.95f * kInradiusFrac * H;  // window end < inradius -> crack-free
-                    inst.detailParams[3] = 3.0f / H;                   // detail noise frequency
+                    inst.detailParams[3] = 1.6f / H;                   // detail noise frequency (broad/smooth)
                     data.instances.push_back(inst);
 
                     loX = std::min(loX, center.x - H);

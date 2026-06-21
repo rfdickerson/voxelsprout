@@ -99,6 +99,9 @@ public:
     void reset(const UiVec2& framebufferSizePx);
 
     void addRectFilled(const UiRect& rect, const UiColor& color);
+    // Solid quad with a vertical gradient: the top edge uses `top`, the bottom
+    // edge `bottom`, interpolated per fragment. Used for parchment/gilt panel fills.
+    void addRectFilledVGradient(const UiRect& rect, const UiColor& top, const UiColor& bottom);
     void addRect(const UiRect& rect, const UiColor& color, float thicknessPx = 1.0f);
 
     // --- Vector primitives (resolution-independent, anti-aliased SDF) ---

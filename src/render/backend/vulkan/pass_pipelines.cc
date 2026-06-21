@@ -2974,7 +2974,7 @@ bool RendererBackend::createGraphicsPipeline() {
             hexBindings[1].stride = sizeof(odai::importer::HexTileInstance);
             hexBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-            VkVertexInputAttributeDescription hexAttributes[7]{};
+            VkVertexInputAttributeDescription hexAttributes[8]{};
             hexAttributes[0].location = 0;  // localXZ
             hexAttributes[0].binding = 0;
             hexAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
@@ -3004,12 +3004,17 @@ bool RendererBackend::createGraphicsPipeline() {
             hexAttributes[6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
             hexAttributes[6].offset =
                 static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, neighborElevY) + (3u * sizeof(float)));
+            hexAttributes[7].location = 7;  // neighborTerrainPacked: 4-bit terrain type per edge (k=0..5)
+            hexAttributes[7].binding = 1;
+            hexAttributes[7].format = VK_FORMAT_R32_UINT;
+            hexAttributes[7].offset =
+                static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, neighborTerrainPacked));
 
             VkPipelineVertexInputStateCreateInfo hexVertexInputInfo{};
             hexVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
             hexVertexInputInfo.vertexBindingDescriptionCount = 2;
             hexVertexInputInfo.pVertexBindingDescriptions = hexBindings;
-            hexVertexInputInfo.vertexAttributeDescriptionCount = 7;
+            hexVertexInputInfo.vertexAttributeDescriptionCount = 8;
             hexVertexInputInfo.pVertexAttributeDescriptions = hexAttributes;
 
             VkPipelineInputAssemblyStateCreateInfo hexInputAssembly{};

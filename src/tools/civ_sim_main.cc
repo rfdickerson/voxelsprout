@@ -74,7 +74,7 @@ MatchSummary analyze(const World& world, const std::vector<TurnSample>& samples,
     for (const GameEvent& ev : world.events) {
         if (ev.empire != 1) continue;
         if (ev.kind == GameEvent::Growth || ev.kind == GameEvent::Building || ev.kind == GameEvent::Wonder ||
-            ev.kind == GameEvent::Tech || ev.kind == GameEvent::Founded)
+            ev.kind == GameEvent::Tech || ev.kind == GameEvent::Founded || ev.kind == GameEvent::Unlock)
             rewardTurns.push_back(ev.turn);
         if (ev.kind == GameEvent::FireSale) ++m.playerFireSales;
         if (ev.kind == GameEvent::Starve) ++m.playerStarves;
@@ -103,6 +103,9 @@ const char* kindTag(GameEvent::Kind k) {
         case GameEvent::Starve:     return "STRV";
         case GameEvent::Disorder:   return "DISO";
         case GameEvent::Conquest:   return "WAR ";
+        case GameEvent::Unlock:     return "OPEN";
+        case GameEvent::Eureka:     return "EURK";
+        case GameEvent::GreatPerson: return "GRTP";
     }
     return "????";
 }
@@ -204,7 +207,8 @@ int main(int argc, char** argv) {
         for (const GameEvent& ev : world.events) {
             const bool notable = ev.kind == GameEvent::Wonder || ev.kind == GameEvent::WonderLost ||
                                  ev.kind == GameEvent::Founded || ev.kind == GameEvent::FireSale ||
-                                 ev.kind == GameEvent::Starve;
+                                 ev.kind == GameEvent::Starve || ev.kind == GameEvent::Unlock ||
+                                 ev.kind == GameEvent::GreatPerson;
             if (!notable) continue;
             std::cout << "  T" << std::setw(3) << ev.turn << " [" << kindTag(ev.kind) << "] " << ev.text << "\n";
         }
@@ -310,7 +314,7 @@ int main(int argc, char** argv) {
             if (ev.empire != player) continue;
             const bool reward = ev.kind == GameEvent::Growth || ev.kind == GameEvent::Building ||
                                 ev.kind == GameEvent::Wonder || ev.kind == GameEvent::Tech ||
-                                ev.kind == GameEvent::Founded;
+                                ev.kind == GameEvent::Founded || ev.kind == GameEvent::Unlock;
             if (reward) rewardTurns.push_back(ev.turn);
         }
         std::sort(rewardTurns.begin(), rewardTurns.end());

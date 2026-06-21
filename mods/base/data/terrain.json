@@ -1,0 +1,18 @@
+{
+  "cityCenter": { "food": 2, "production": 1, "gold": 1, "science": 1, "culture": 0 },
+  "riverGold": 1,
+  "roadGold": 1,
+  "terrain": {
+    "Ocean":     { "food": 1, "gold": 1, "workable": true },
+    "Coast":     { "food": 1, "gold": 2, "workable": true },
+    "Grassland": { "food": 3, "workable": true },
+    "Plains":    { "food": 1, "production": 1, "workable": true },
+    "Forest":    { "food": 1, "production": 2, "workable": true },
+    "Jungle":    { "food": 1, "science": 1, "workable": true },
+    "Hills":     { "production": 2, "workable": true },
+    "Mountains": { "workable": false },
+    "Desert":    { "production": 0, "workable": true },
+    "Tundra":    { "food": 1, "workable": true },
+    "Snow":      { "workable": false }
+  }
+}

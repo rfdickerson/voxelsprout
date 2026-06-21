@@ -4,6 +4,7 @@
 #include "ui/ui_types.h"
 #include "ui/widget.h"
 
+#include <functional>
 #include <memory>
 
 // Owns the widget tree and drives it each frame: dispatch input -> events ->
@@ -34,10 +35,16 @@ public:
     // the OS cursor visible and to stop clicks reaching the 3D scene.
     [[nodiscard]] bool wantsMouse() const { return wantsMouse_; }
 
+    // Optional callback fired once whenever a left-click is consumed by a widget
+    // this frame (e.g. a button activation). Lets the app play a UI click sound
+    // without the Vulkan-free UI library depending on the audio module.
+    void setClickFeedback(std::function<void()> cb) { clickFeedback_ = std::move(cb); }
+
 private:
     std::unique_ptr<Widget> root_;
     UiVec2 viewport_{};
     bool wantsMouse_ = false;
+    std::function<void()> clickFeedback_;
 };
 
 }  // namespace odai::ui
