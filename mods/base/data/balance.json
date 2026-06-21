@@ -1,0 +1,20 @@
+{
+  "citizenFoodUpkeep": 2,
+  "foodBoxBase": 12,
+  "foodBoxPerPop": 7,
+  "baseHappyCap": 8,
+  "settlerPopCost": 1,
+  "settlerFoundPop": 1,
+  "settlerCost": 72,
+  "capitalStartPop": 2,
+  "rushGoldPerShield": 4,
+  "cityWorkRadius": 2,
+  "settleMinSpacing": 3,
+  "sciencePerPopDiv": 3,
+  "maxGrowthBonus": 80,
+  "civicUpkeepPerCity": 2,
+  "starveBuffer": 8,
+  "greatPersonBaseCost": 200,
+  "greatPersonCostGrowth": 120,
+  "greatPersonSciencePointDiv": 2
+}

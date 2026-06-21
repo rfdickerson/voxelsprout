@@ -67,6 +67,52 @@ void testCatalogIntegrity() {
     expectTrue(wonderCount >= 8, "catalog has a healthy number of wonders");
 }
 
+void testTechGates() {
+    // Catalog shape: gated techs carry a real condition + a readable requirement;
+    // Open techs carry neither. And gateKindName round-trips.
+    int locked = 0, boosted = 0;
+    for (const TechDef& t : techTree()) {
+        if (t.gate.kind == GateKind::Open) {
+            expectTrue(t.gate.condition.empty(), "open techs carry no gate condition");
+            expectTrue(gateRequirement(t.gate).empty(), "open techs have no requirement string");
+        } else {
+            expectTrue(!t.gate.condition.empty(), "a gated tech names a condition");
+            expectTrue(!gateRequirement(t.gate).empty(), "a gated tech has a readable requirement");
+            if (t.gate.kind == GateKind::Locked) ++locked; else ++boosted;
+        }
+    }
+    expectTrue(locked >= 3, "tree has several locked branches");
+    expectTrue(boosted >= 3, "tree has several boost techs");
+    expectTrue(std::string(gateKindName(GateKind::Locked)) == "Locked", "gateKindName(Locked)");
+
+    // Functional run: the gate machinery must fire and never be bypassed.
+    WorldConfig cfg{};
+    cfg.seed = 2026u;
+    cfg.empireCount = 4;
+    World world = makeWorld(cfg);
+    std::vector<TurnSample> samples;
+    for (int t = 0; t < 250; ++t) stepTurn(world, samples);
+
+    // Core invariant: a Locked tech is only ever researched after its branch was
+    // unlocked. Unlocks latch, so this must hold across the whole match.
+    for (const Empire& e : world.empires) {
+        for (const TechDef& t : techTree()) {
+            if (t.gate.kind != GateKind::Locked) continue;
+            if (e.knows(t.id))
+                expectTrue(e.techUnlocked(t.id), "a researched locked tech was unlocked first");
+        }
+    }
+
+    // The feature visibly happens: locked branches light up and boosts get earned.
+    int unlockEvents = 0, eurekaEvents = 0;
+    for (const GameEvent& ev : world.events) {
+        if (ev.kind == GameEvent::Unlock) ++unlockEvents;
+        if (ev.kind == GameEvent::Eureka) ++eurekaEvents;
+    }
+    expectTrue(unlockEvents > 0, "at least one locked branch unlocks during a match");
+    expectTrue(eurekaEvents > 0, "at least one boost (eureka) is earned during a match");
+}
+
 void testWorldGenIsFair() {
     WorldConfig cfg{};
     cfg.seed = 4242u;
@@ -143,6 +189,7 @@ void testDeterminism() {
 int main() {
     testTerrainYields();
     testCatalogIntegrity();
+    testTechGates();
     testWorldGenIsFair();
     testSimSmokeAndInvariants();
     testDeterminism();

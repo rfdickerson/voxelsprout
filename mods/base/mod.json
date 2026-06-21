@@ -1,0 +1,19 @@
+{
+  "id": "base",
+  "name": "Base Game",
+  "version": "1.0.0",
+  "description": "The built-in ODAI 4X ruleset: techs, buildings, wonders, units, terrain, balance, CivPedia, and civilizations. Loaded through the same path user mods use.",
+  "dependencies": [],
+  "loadOrder": 0,
+  "data": [
+    "data/balance.json",
+    "data/terrain.json",
+    "data/techs.json",
+    "data/buildings.json",
+    "data/units.json",
+    "data/buildables.json",
+    "data/civpedia.json",
+    "data/leaders.json"
+  ],
+  "scripts": []
+}

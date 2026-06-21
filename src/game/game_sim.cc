@@ -1,5 +1,9 @@
 #include "game/game_sim.h"
 
+#include "content/content_database.h"
+#include "game/great_people.h"
+#include "game/mod_host.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -11,16 +15,9 @@ namespace odai::game {
 
 namespace {
 
-// --- tunables specific to the driver (rules tunables live in economy.h) -----
-constexpr int kSettlerCost = 72;        // production for a settler
-constexpr int kCapitalStartPop = 2;     // founding population of a capital
-constexpr int kRushGoldPerShield = 4;   // gold to rush-buy one production point
-constexpr int kCityWorkRadius = 2;      // hex radius a city works tiles within
-constexpr int kSettleMinSpacing = 3;    // min hex distance between any two cities
-constexpr int kSciencePerPopDiv = 3;    // science = base + population / this
-constexpr int kMaxGrowthBonus = 80;     // cap on stacked food-box carryover %
-constexpr int kCivicUpkeepPerCity = 2;  // gold/turn per city past the first
-constexpr int kStarveBuffer = 8;        // food debt a city absorbs before losing pop
+// Rules + driver tunables are data-driven now: they come from balance() (loaded
+// from mods/base/data/balance.json). See struct Balance in economy.h. Leaders and
+// wonder effects likewise live in data (leaders.json, buildings.json).
 
 // --- map generation noise (compact port of the strategy_map_gen tool) -------
 std::uint32_t hashCoords(std::int32_t x, std::int32_t y, std::uint32_t seed) {
@@ -90,7 +87,7 @@ float focusScore(CityFocus f, const Yields& y) {
 }
 
 int foodToGrow(int population) {
-    return balance::kFoodBoxBase + (balance::kFoodBoxPerPop * population);
+    return balance().foodBoxBase + (balance().foodBoxPerPop * population);
 }
 
 // Wonder fatigue: every wonder an empire already owns raises the cost of its
@@ -148,11 +145,20 @@ bool City::hasBuilding(const std::string& id) const {
 bool Empire::knows(const std::string& techId) const {
     return std::find(researched.begin(), researched.end(), techId) != researched.end();
 }
+bool Empire::techUnlocked(const std::string& techId) const {
+    return std::find(unlockedTechs.begin(), unlockedTechs.end(), techId) != unlockedTechs.end();
+}
+bool Empire::techBoosted(const std::string& techId) const {
+    return std::find(boostedTechs.begin(), boostedTechs.end(), techId) != boostedTechs.end();
+}
 bool Empire::ownsWonder(const World& /*world*/, const std::string& wonderId) const {
     return std::find(wonders.begin(), wonders.end(), wonderId) != wonders.end();
 }
 bool World::wonderTaken(const std::string& id) const {
     return std::find(builtWonders.begin(), builtWonders.end(), id) != builtWonders.end();
+}
+bool World::greatPersonTaken(const std::string& id) const {
+    return std::find(bornGreatPeople.begin(), bornGreatPeople.end(), id) != bornGreatPeople.end();
 }
 Empire* World::empireById(std::uint8_t id) {
     for (Empire& e : empires) {
@@ -170,21 +176,19 @@ int World::cityCount(std::uint8_t empireId) const {
 
 // --- territory --------------------------------------------------------------
 
-namespace {
-void claimTerritory(World& world, const City& city) {
+void claimCityTerritory(World& world, const City& city) {
     StrategyMap& map = world.map;
     const int cc = static_cast<int>(city.col);
     const int cr = static_cast<int>(city.row);
-    for (int r = cr - kCityWorkRadius - 1; r <= cr + kCityWorkRadius + 1; ++r) {
-        for (int c = cc - kCityWorkRadius - 1; c <= cc + kCityWorkRadius + 1; ++c) {
+    for (int r = cr - balance().cityWorkRadius - 1; r <= cr + balance().cityWorkRadius + 1; ++r) {
+        for (int c = cc - balance().cityWorkRadius - 1; c <= cc + balance().cityWorkRadius + 1; ++c) {
             if (!map.inBounds(c, r)) continue;
-            if (hexDistance(cc, cr, c, r) > kCityWorkRadius) continue;
+            if (hexDistance(cc, cr, c, r) > balance().cityWorkRadius) continue;
             MapTile& t = map.at(static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(r));
             if (t.owner == 0) t.owner = city.owner;
         }
     }
 }
-}  // namespace
 
 // --- yields / happiness -----------------------------------------------------
 
@@ -198,11 +202,11 @@ void computeCityYields(World& world, City& city) {
     std::vector<Cand> cands;
     const int cc = static_cast<int>(city.col);
     const int cr = static_cast<int>(city.row);
-    for (int r = cr - kCityWorkRadius - 1; r <= cr + kCityWorkRadius + 1; ++r) {
-        for (int c = cc - kCityWorkRadius - 1; c <= cc + kCityWorkRadius + 1; ++c) {
+    for (int r = cr - balance().cityWorkRadius - 1; r <= cr + balance().cityWorkRadius + 1; ++r) {
+        for (int c = cc - balance().cityWorkRadius - 1; c <= cc + balance().cityWorkRadius + 1; ++c) {
             if (!map.inBounds(c, r)) continue;
             if (c == cc && r == cr) continue;
-            if (hexDistance(cc, cr, c, r) > kCityWorkRadius) continue;
+            if (hexDistance(cc, cr, c, r) > balance().cityWorkRadius) continue;
             const MapTile& t = map.at(static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(r));
             if (!tileIsWorkable(t.terrain)) continue;
             if (t.owner != city.owner) continue;
@@ -212,16 +216,16 @@ void computeCityYields(World& world, City& city) {
     }
     std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
 
-    Yields y = kCityCenterYields;
+    Yields y = cityCenterYields();
     const int workers = std::min<int>(city.population, static_cast<int>(cands.size()));
     for (int i = 0; i < workers; ++i) addYields(y, cands[static_cast<std::size_t>(i)].y);
 
     // Population is itself a knowledge engine.
-    y.science += city.population / kSciencePerPopDiv;
+    y.science += city.population / balance().sciencePerPopDiv;
 
     // 2. Buildings: flat yields + accumulating percentage bonuses + happiness.
     int prodPct = 0, goldPct = 0, sciPct = 0;
-    int happy = balance::kBaseHappyCap;
+    int happy = balance().baseHappyCap;
     int growBonus = 0;
     for (const std::string& b : city.buildings) {
         const BuildingDef* d = findBuildingDef(b);
@@ -234,21 +238,58 @@ void computeCityYields(World& world, City& city) {
         growBonus += d->growthBonus;
     }
 
-    // 3. Wonders apply to every city in the owning empire.
+    // 3. Wonders apply empire-wide (effects.scope == Empire). Their bonuses are
+    //    declared in data (buildings.json effects block) rather than hardcoded, so
+    //    a mod can author a new wonder without touching the simulation.
     if (emp != nullptr) {
         for (const std::string& w : emp->wonders) {
-            if (w == "pyramids")              prodPct += 25;
-            else if (w == "hanging_gardens") { y.food += 1; happy += 2; }
-            else if (w == "colossus")          y.gold += 2;
-            else if (w == "oracle")          { y.science += 2; y.culture += 1; }
-            else if (w == "great_library")   { y.science += 3; sciPct += 25; }
-            else if (w == "parthenon")         y.culture += 3;
-            else if (w == "colosseum")         happy += 3;
-            else if (w == "great_wall")        happy += 2;
-            else if (w == "grand_temple")    { y.culture += 2; happy += 1; }
-            else if (w == "copernicus")      { y.science += 3; sciPct += 25; }
-            else if (w == "grand_bazaar")    { y.gold += 3; goldPct += 25; }
+            const BuildingDef* d = findBuildingDef(w);
+            if (d == nullptr || !d->effects.present) continue;
+            if (d->effects.scope != BuildingEffects::Scope::Empire) continue;
+            addYields(y, d->effects.flat);
+            prodPct   += d->effects.prodPct;
+            goldPct   += d->effects.goldPct;
+            sciPct    += d->effects.sciencePct;
+            happy     += d->effects.happiness;
+            growBonus += d->effects.growthBonus;
         }
+    }
+
+    // 3a. Great people settled in this city confer a permanent, city-scoped bonus
+    //     (the same BuildingEffects block buildings/wonders use), so they stack into
+    //     the very same flat + percentage accumulators.
+    for (const std::string& gpId : city.greatPeople) {
+        const GreatPersonDef* gp = findGreatPerson(gpId);
+        if (gp == nullptr || !gp->bonus.present) continue;
+        addYields(y, gp->bonus.flat);
+        prodPct   += gp->bonus.prodPct;
+        goldPct   += gp->bonus.goldPct;
+        sciPct    += gp->bonus.sciencePct;
+        happy     += gp->bonus.happiness;
+        growBonus += gp->bonus.growthBonus;
+    }
+
+    // 3b. Scripts may adjust this city's yields before the percentage multipliers
+    //     apply (the per-building Effects.register / city_yields hook). A no-op
+    //     host leaves every field untouched, so the base game is unchanged.
+    {
+        YieldContext ctx;
+        ctx.world = &world;
+        ctx.city = &city;
+        ctx.empire = emp;
+        ctx.flat = y;
+        ctx.prodPct = prodPct;
+        ctx.goldPct = goldPct;
+        ctx.sciencePct = sciPct;
+        ctx.happy = happy;
+        ctx.growBonus = growBonus;
+        modHost().onCityYields(ctx);
+        y = ctx.flat;
+        prodPct = ctx.prodPct;
+        goldPct = ctx.goldPct;
+        sciPct = ctx.sciencePct;
+        happy = ctx.happy;
+        growBonus = ctx.growBonus;
     }
 
     // 4. Apply percentage multipliers.
@@ -259,7 +300,7 @@ void computeCityYields(World& world, City& city) {
     // 5. Happiness: an over-large city falls into disorder (no growth, production
     //    penalty) until more happiness infrastructure is built. THE squeeze.
     city.happyCap = happy;
-    city.growthBonusPct = std::min(growBonus, kMaxGrowthBonus);
+    city.growthBonusPct = std::min(growBonus, balance().maxGrowthBonus);
     const int deficit = std::max(0, city.population - happy);
     city.inDisorder = deficit > 0;
     if (deficit > 0) {
@@ -268,10 +309,127 @@ void computeCityYields(World& world, City& city) {
     }
 
     // 6. Citizen food upkeep -> net food (drives growth / starvation).
-    y.food -= city.population * balance::kCitizenFoodUpkeep;
+    y.food -= city.population * balance().citizenFoodUpkeep;
 
     city.yields = y;
 }
+
+// --- Tech gates: branches that unlock by doing things in game ---------------
+
+namespace {
+
+// True if a city has water within its work radius (the same test the harbor
+// suggestion uses). The basis for the "found a coastal city" sea-branch gate.
+bool cityIsCoastal(const World& world, const City& city) {
+    const int cc = static_cast<int>(city.col), cr = static_cast<int>(city.row);
+    for (int r = cr - balance().cityWorkRadius; r <= cr + balance().cityWorkRadius; ++r)
+        for (int c = cc - balance().cityWorkRadius; c <= cc + balance().cityWorkRadius; ++c)
+            if (world.map.inBounds(c, r) && hexDistance(cc, cr, c, r) <= balance().cityWorkRadius &&
+                terrainIsWater(world.map.at(static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(r)).terrain))
+                return true;
+    return false;
+}
+
+TerrainType terrainFromName(const std::string& name) {
+    if (name == "grassland") return TerrainType::Grassland;
+    if (name == "plains")    return TerrainType::Plains;
+    if (name == "forest")    return TerrainType::Forest;
+    if (name == "jungle")    return TerrainType::Jungle;
+    if (name == "hills")     return TerrainType::Hills;
+    if (name == "mountains") return TerrainType::Mountains;
+    if (name == "desert")    return TerrainType::Desert;
+    if (name == "tundra")    return TerrainType::Tundra;
+    if (name == "snow")      return TerrainType::Snow;
+    if (name == "coast")     return TerrainType::Coast;
+    if (name == "ocean")     return TerrainType::Ocean;
+    return TerrainType::Count;  // never matches a real tile
+}
+
+int empireBuildingCount(const World& world, const Empire& emp, const std::string& id) {
+    int n = 0;
+    for (std::size_t ci : emp.cityIndices)
+        if (world.cities[ci].hasBuilding(id)) ++n;
+    return n;
+}
+
+// Evaluate a gate's accomplishment against the live world. Pure read; the caller
+// latches the result so a once-true condition stays true.
+bool gateConditionMet(const World& world, const Empire& emp, const TechGate& g) {
+    const std::string& c = g.condition;
+    const auto hasPrefix = [&](const char* p) { return c.starts_with(p); };
+
+    if (c == "coastal_city") {
+        for (std::size_t ci : emp.cityIndices)
+            if (cityIsCoastal(world, world.cities[ci])) return true;
+        return false;
+    }
+    if (c == "own_wonder") return !emp.wonders.empty();
+    if (c == "meet_rival") {
+        const StrategyMap& map = world.map;
+        for (std::uint32_t row = 0; row < map.height; ++row)
+            for (std::uint32_t col = 0; col < map.width; ++col) {
+                if (map.at(col, row).owner != emp.id) continue;
+                for (int d = 0; d < 6; ++d) {
+                    int nc = 0, nr = 0;
+                    if (!tileNeighbor(map, static_cast<int>(col), static_cast<int>(row), d, nc, nr)) continue;
+                    const std::uint8_t o = map.at(static_cast<std::uint32_t>(nc), static_cast<std::uint32_t>(nr)).owner;
+                    if (o != 0 && o != emp.id) return true;
+                }
+            }
+        return false;
+    }
+    if (c == "treasury") return emp.treasury >= g.amount;
+    if (c == "culture")  return emp.culturePoints >= g.amount;
+    if (c == "cities")   return world.cityCount(emp.id) >= g.amount;
+    if (c == "pop") {
+        for (std::size_t ci : emp.cityIndices)
+            if (world.cities[ci].population >= g.amount) return true;
+        return false;
+    }
+    if (hasPrefix("building:"))
+        return empireBuildingCount(world, emp, c.substr(9)) >= std::max(1, g.amount);
+    if (hasPrefix("work_terrain:")) {
+        const TerrainType want = terrainFromName(c.substr(13));
+        const StrategyMap& map = world.map;
+        for (std::uint32_t row = 0; row < map.height; ++row)
+            for (std::uint32_t col = 0; col < map.width; ++col) {
+                const MapTile& t = map.at(col, row);
+                if (t.owner == emp.id && t.terrain == want) return true;
+            }
+        return false;
+    }
+    return false;  // unknown condition: never opens (fail safe)
+}
+
+// Science cost after any earned Boost discount.
+int effectiveTechCost(const Empire& emp, const TechDef& t) {
+    if (t.gate.kind == GateKind::Boost && emp.techBoosted(t.id))
+        return t.cost - (t.cost * t.gate.boostPct) / 100;
+    return t.cost;
+}
+
+// Latch newly-satisfied gates and announce them. A Locked tech becomes
+// researchable; a Boost tech becomes cheaper. Both are juicy event-log moments.
+void updateTechGates(World& world, Empire& emp) {
+    for (const TechDef& t : techTree()) {
+        if (t.gate.kind == GateKind::Open) continue;
+        if (!gateConditionMet(world, emp, t.gate)) continue;
+        if (t.gate.kind == GateKind::Locked) {
+            if (!emp.techUnlocked(t.id)) {
+                emp.unlockedTechs.push_back(t.id);
+                logEvent(world, emp.id, GameEvent::Unlock,
+                         emp.name + " unlocks " + t.name + " (" + gateRequirement(t.gate) + ")");
+            }
+        } else if (!emp.techBoosted(t.id)) {
+            emp.boostedTechs.push_back(t.id);
+            logEvent(world, emp.id, GameEvent::Eureka,
+                     emp.name + " sparks a eureka toward " + t.name + " (-" +
+                         std::to_string(t.gate.boostPct) + "% science)");
+        }
+    }
+}
+
+}  // namespace
 
 // --- AI: research -----------------------------------------------------------
 
@@ -282,13 +440,16 @@ void pickResearch(World& world, Empire& emp) {
     float bestScore = -1e9f;
     for (const TechDef& t : techTree()) {
         if (emp.knows(t.id)) continue;
+        // A Locked branch is invisible to research until its deed is done.
+        if (t.gate.kind == GateKind::Locked && !emp.techUnlocked(t.id)) continue;
         bool prereqsMet = true;
         for (const std::string& p : t.prereqs) {
             if (!emp.knows(p)) { prereqsMet = false; break; }
         }
         if (!prereqsMet) continue;
 
-        float score = -0.04f * static_cast<float>(t.cost);  // cheaper is sooner
+        // Earned Boosts make a tech cheaper, so the AI naturally chases its eurekas.
+        float score = -0.04f * static_cast<float>(effectiveTechCost(emp, t));  // cheaper is sooner
         for (const std::string& u : t.unlocks) {
             const BuildingDef* d = findBuildingDef(u);
             if (d == nullptr) continue;
@@ -323,16 +484,7 @@ std::string chooseBuilding(const World& world, const Empire& emp, const City& ci
         // via the relief path). This is what stops the build-then-fire-sale spiral.
         if (emp.treasury < 6 && d.maintenance >= 2) continue;
         // Only suggest a coastal building if the city actually has coast nearby.
-        if (d.id == "harbor") {
-            bool coastal = false;
-            const int cc = static_cast<int>(city.col), cr = static_cast<int>(city.row);
-            for (int r = cr - 2; r <= cr + 2 && !coastal; ++r)
-                for (int c = cc - 2; c <= cc + 2 && !coastal; ++c)
-                    if (world.map.inBounds(c, r) && hexDistance(cc, cr, c, r) <= 2 &&
-                        terrainIsWater(world.map.at(static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(r)).terrain))
-                        coastal = true;
-            if (!coastal) continue;
-        }
+        if (d.id == "harbor" && !cityIsCoastal(world, city)) continue;
         float score = 1.0f;
         // Religious leaders build happiness infrastructure proactively (one tier
         // earlier) and score it much higher. Everyone else reacts at the last moment.
@@ -398,7 +550,7 @@ bool findSettleSpot(const World& world, const Empire& emp, std::uint32_t& outCol
             for (const City& c : world.cities) {
                 const int dist = hexDistance(static_cast<int>(col), static_cast<int>(row),
                                              static_cast<int>(c.col), static_cast<int>(c.row));
-                if (dist < kSettleMinSpacing) { spacingOk = false; break; }
+                if (dist < balance().settleMinSpacing) { spacingOk = false; break; }
                 if (c.owner == emp.id && dist <= 6) nearOwn = true;
             }
             if (!spacingOk || !nearOwn) continue;
@@ -515,19 +667,20 @@ bool foundCityFromSettler(World& world, Empire& emp, std::size_t parentIndex) {
     c.col = col;
     c.row = row;
     c.owner = emp.id;
-    c.population = balance::kSettlerFoundPop;
+    c.population = balance().settlerFoundPop;
     c.focus = CityFocus::Food;
     c.foundedThisGame = true;
     world.cities.push_back(c);
     const std::size_t newIndex = world.cities.size() - 1;
     emp.cityIndices.push_back(newIndex);
-    claimTerritory(world, world.cities.back());
+    claimCityTerritory(world, world.cities.back());
 
     // Settler cost in population is paid by the parent city.
     City& parent = world.cities[parentIndex];
-    parent.population = std::max(1, parent.population - balance::kSettlerPopCost);
+    parent.population = std::max(1, parent.population - balance().settlerPopCost);
     logEvent(world, emp.id, GameEvent::Founded,
              emp.name + " founds " + c.name + " (pop " + std::to_string(c.population) + ")");
+    modHost().onCityFounded(world, world.cities[newIndex]);
     return true;
 }
 
@@ -543,10 +696,10 @@ void applyProduction(World& world, Empire& emp, std::size_t cityIndex) {
     city.accumulated += prod;
 
     if (city.producing == "settler") {
-        if (city.accumulated < kSettlerCost) return;
-        city.accumulated -= kSettlerCost;
+        if (city.accumulated < balance().settlerCost) return;
+        city.accumulated -= balance().settlerCost;
         if (!foundCityFromSettler(world, emp, cityIndex)) {
-            emp.treasury += kSettlerCost / 3;  // no room: salvage some gold
+            emp.treasury += balance().settlerCost / 3;  // no room: salvage some gold
         }
         world.cities[cityIndex].producing.clear();
         return;
@@ -571,10 +724,10 @@ void applyProduction(World& world, Empire& emp, std::size_t cityIndex) {
     if (city.accumulated < cost && (wonderRush || buildingRush)) {
         const int reserve = d->isWonder ? 100 : 200;
         const int need = cost - city.accumulated;
-        const int afford = (emp.treasury - reserve) / kRushGoldPerShield;
+        const int afford = (emp.treasury - reserve) / balance().rushGoldPerShield;
         const int buy = std::min(need, std::max(0, afford));
         city.accumulated += buy;
-        emp.treasury -= buy * kRushGoldPerShield;
+        emp.treasury -= buy * balance().rushGoldPerShield;
     }
 
     if (city.accumulated < cost) return;
@@ -593,9 +746,11 @@ void applyProduction(World& world, Empire& emp, std::size_t cityIndex) {
         emp.wonders.push_back(d->id);
         world.builtWonders.push_back(d->id);
         logEvent(world, emp.id, GameEvent::Wonder, emp.name + " completes the " + d->name + "!");
+        modHost().onWonderBuilt(world, emp, d->id);
     } else {
         if (!city.hasBuilding(d->id)) city.buildings.push_back(d->id);
         logEvent(world, emp.id, GameEvent::Building, city.name + " builds a " + d->name);
+        modHost().onBuildingBuilt(world, city, d->id);
     }
     city.accumulated = std::max(0, city.accumulated - cost);
     city.producing.clear();
@@ -611,7 +766,7 @@ void growCity(World& world, City& city) {
         // A small buffer means a one-turn dip won't cost a citizen -- the focus
         // guard gets a chance to switch back to Food first. Only a sustained
         // famine actually shrinks the city.
-        if (city.foodStored < -kStarveBuffer && city.population > 1) {
+        if (city.foodStored < -balance().starveBuffer && city.population > 1) {
             city.population -= 1;
             city.foodStored = 0;
             logEvent(world, city.owner, GameEvent::Starve, city.name + " starves (-1 pop)");
@@ -667,12 +822,82 @@ void goldSqueeze(World& world, Empire& emp) {
     }
 }
 
+// --- great people -----------------------------------------------------------
+
+// How drawn an empire is to a given class of figure, from its leader's personality.
+// A science-loving leader attracts scientists; a culture-loving one writers; etc.
+// Used to decide which (still-unborn) figure a empire claims when it crosses the
+// great-person-point threshold.
+float greatPersonAffinity(GreatPersonClass cls, const Personality& p) {
+    switch (cls) {
+        case GreatPersonClass::Scientist:   return p.science;
+        case GreatPersonClass::Writer:      return p.culture;
+        case GreatPersonClass::Engineer:    return 0.5f * p.wonderLove + 0.5f * p.gold;
+        case GreatPersonClass::General:     return p.expansion;
+        case GreatPersonClass::Philosopher: return 0.5f * p.religion + 0.5f * p.culture;
+        case GreatPersonClass::Count:       break;
+    }
+    return 1.0f;
+}
+
+// Choose the unborn figure this empire is most drawn to (deterministic: catalog
+// order breaks ties). Empty string if every great person has already been born.
+std::string pickGreatPersonForEmpire(const World& world, const Empire& emp) {
+    const GreatPersonDef* best = nullptr;
+    float bestScore = -1.0f;
+    for (const GreatPersonDef& g : greatPeopleCatalog()) {
+        if (world.greatPersonTaken(g.id)) continue;
+        const float s = greatPersonAffinity(g.cls, emp.personality);
+        if (s > bestScore) { bestScore = s; best = &g; }
+    }
+    return best != nullptr ? best->id : std::string();
+}
+
+// The AI's host city for a new figure: its largest by population (lowest city index
+// breaks ties). Null only if the empire holds no cities.
+City* bestCityForGreatPerson(World& world, const Empire& emp) {
+    City* best = nullptr;
+    for (std::size_t ci : emp.cityIndices) {
+        City& c = world.cities[ci];
+        if (best == nullptr || c.population > best->population) best = &c;
+    }
+    return best;
+}
+
+// Birth as many figures as the empire's banked points (and the rising cost) allow.
+// AI empires settle each at once into their best city; the human player's births are
+// parked in pendingGreatPeople for the app to place.
+void resolveGreatPeople(World& world, Empire& emp) {
+    while (true) {
+        const int cost = greatPersonCost(emp);
+        if (emp.greatPersonPoints < cost) break;
+        const std::string id = pickGreatPersonForEmpire(world, emp);
+        if (id.empty()) break;  // every great person already born this game
+        emp.greatPersonPoints -= cost;
+        world.bornGreatPeople.push_back(id);
+        emp.greatPeopleBorn += 1;
+        const GreatPersonDef* def = findGreatPerson(id);
+        const std::string nm = def != nullptr ? def->name : id;
+        const std::string cls = def != nullptr ? greatPersonClassName(def->cls) : "Great Person";
+        City* host = emp.aiManaged ? bestCityForGreatPerson(world, emp) : nullptr;
+        if (host != nullptr) {
+            host->greatPeople.push_back(id);
+            logEvent(world, emp.id, GameEvent::GreatPerson,
+                     nm + ", " + cls + ", settles in " + host->name);
+        } else {
+            emp.pendingGreatPeople.push_back(id);
+            logEvent(world, emp.id, GameEvent::GreatPerson,
+                     emp.name + " attracts " + nm + " (" + cls + ") -- choose a city to honor them");
+        }
+    }
+}
+
 }  // namespace
 
 // --- scoring ----------------------------------------------------------------
 
 void recomputeScore(World& world, Empire& emp) {
-    int pop = 0, cityN = 0, buildings = 0, wonderScore = 0;
+    int pop = 0, cityN = 0, buildings = 0, wonderScore = 0, greatPeople = 0;
     for (std::size_t ci : emp.cityIndices) {
         const City& c = world.cities[ci];
         pop += c.population;
@@ -682,25 +907,56 @@ void recomputeScore(World& world, Empire& emp) {
             if (d != nullptr && d->isWonder) wonderScore += d->score;
             else ++buildings;
         }
+        greatPeople += static_cast<int>(c.greatPeople.size());
     }
     emp.totalPopulation = pop;
-    emp.score = pop * 4 + cityN * 6 + buildings * 2 + wonderScore +
+    emp.score = pop * 4 + cityN * 6 + buildings * 2 + wonderScore + greatPeople * 8 +
                 static_cast<int>(emp.researched.size()) * 10 + emp.futureTechs * 10 +
                 emp.culturePoints / 8 + emp.treasury / 25;
+}
+
+// --- great people (public API) ----------------------------------------------
+
+int greatPersonCost(const Empire& emp) {
+    return balance().greatPersonBaseCost + emp.greatPeopleBorn * balance().greatPersonCostGrowth;
+}
+
+void integrateGreatPerson(World& world, City& city, const std::string& greatPersonId) {
+    // Drop it from the owner's pending queue if it was waiting there.
+    if (Empire* emp = world.empireById(city.owner); emp != nullptr) {
+        auto it = std::find(emp->pendingGreatPeople.begin(), emp->pendingGreatPeople.end(),
+                            greatPersonId);
+        if (it != emp->pendingGreatPeople.end()) emp->pendingGreatPeople.erase(it);
+    }
+    if (!world.greatPersonTaken(greatPersonId)) world.bornGreatPeople.push_back(greatPersonId);
+    if (std::find(city.greatPeople.begin(), city.greatPeople.end(), greatPersonId) ==
+        city.greatPeople.end()) {
+        city.greatPeople.push_back(greatPersonId);
+        const GreatPersonDef* def = findGreatPerson(greatPersonId);
+        logEvent(world, city.owner, GameEvent::GreatPerson,
+                 (def != nullptr ? def->name : greatPersonId) + " takes up residence in " + city.name);
+    }
 }
 
 // --- the turn ---------------------------------------------------------------
 
 void stepTurn(World& world, std::vector<TurnSample>& samples) {
-    // 1. AI: pick research, then per-city focus + production queue.
+    modHost().onTurnStart(world);
+
+    // 1. AI: refresh tech gates (open locked branches / earn boosts from last
+    //    turn's accomplishments), then pick research and per-city focus + queue.
     for (Empire& emp : world.empires) {
         if (!emp.alive) continue;
-        pickResearch(world, emp);
+        // Tech gates always update (the player earns eurekas / branch unlocks from
+        // their own play too); only the AI auto-picks a research target.
+        updateTechGates(world, emp);
+        if (emp.aiManaged) pickResearch(world, emp);
     }
     // Snapshot the city-index lists (foundCityFromSettler may append new cities;
-    // those new cities act starting next turn).
+    // those new cities act starting next turn). The human player's cities are
+    // left exactly as the app set them (focus + production queue).
     for (Empire& emp : world.empires) {
-        if (!emp.alive) continue;
+        if (!emp.alive || !emp.aiManaged) continue;
         const std::vector<std::size_t> indices = emp.cityIndices;
         for (std::size_t ci : indices) {
             cityChooseFocusAndProduction(world, emp, world.cities[ci]);
@@ -719,16 +975,23 @@ void stepTurn(World& world, std::vector<TurnSample>& samples) {
             emp.sciencePool += std::max(0, c.yields.science);
             emp.culturePoints += std::max(0, c.yields.culture);
             emp.treasury += c.yields.gold - cityMaintenance(c);
+            // Great-person points: a city's culture, plus a slice of its science,
+            // feed the empire's pool toward attracting its next great figure.
+            emp.greatPersonPoints += std::max(0, c.yields.culture) +
+                std::max(0, c.yields.science) / balance().greatPersonSciencePointDiv;
             applyProduction(world, emp, ci);   // may found new cities
         }
         // Administrative upkeep scales with empire size, so endless expansion
         // runs you into the red -- the pressure that forces fire-sales.
         const int adminCities = std::max(0, world.cityCount(emp.id) - 1);
-        emp.treasury -= adminCities * kCivicUpkeepPerCity;
+        emp.treasury -= adminCities * balance().civicUpkeepPerCity;
         // Growth after production so a settler's pop cost lands first.
         for (std::size_t ci : indices) {
             growCity(world, world.cities[ci]);
         }
+        // Great people: birth any the empire's banked points now afford. AI empires
+        // settle them immediately; the human player's wait in pendingGreatPeople.
+        resolveGreatPeople(world, emp);
     }
 
     // 3. Research completion (may resolve several cheap techs in one turn).
@@ -752,10 +1015,12 @@ void stepTurn(World& world, std::vector<TurnSample>& samples) {
             }
             const TechDef* t = findTech(emp.researching);
             if (t == nullptr) { emp.researching.clear(); break; }
-            if (emp.sciencePool >= t->cost) {
-                emp.sciencePool -= t->cost;
+            const int cost = effectiveTechCost(emp, *t);
+            if (emp.sciencePool >= cost) {
+                emp.sciencePool -= cost;
                 emp.researched.push_back(t->id);
                 logEvent(world, emp.id, GameEvent::Tech, emp.name + " discovers " + t->name);
+                modHost().onTechResearched(world, emp, t->id);
                 emp.researching.clear();
                 pickResearch(world, emp);
                 progressed = true;
@@ -792,6 +1057,7 @@ void stepTurn(World& world, std::vector<TurnSample>& samples) {
     sample.leader = leader;
     samples.push_back(std::move(sample));
 
+    modHost().onTurnEnd(world);
     world.turn += 1;
 }
 
@@ -850,37 +1116,12 @@ World makeWorld(const WorldConfig& config) {
         }
     }
 
-    // Named leaders, each with a distinct playstyle. The player is always empire 1
-    // (Egypt/Ramesses by default -- the builder/religion archetype).
-    struct Preset {
-        const char* civName;
-        const char* leaderName;
-        Personality p;
-        const char* cityNames[8];
-    };
-    // Personality fields: name, expansion, wonderLove, science, gold, religion, culture
-    const std::array<Preset, 6> presets = {{
-        // Egypt / Ramesses: monument builder + temples everywhere; loves happiness wonders.
-        {"Egypt",    "Ramesses", {"Builder / Religion",  0.8f, 1.8f, 0.8f, 1.0f, 2.0f, 1.2f},
-         {"Memphis","Thebes","Heliopolis","Luxor","Alexandria","Abydos","Karnak","Giza"}},
-        // Mongols / Genghis: pure land-grab; skips wonders and temples entirely.
-        {"Mongols",  "Genghis",  {"Expansionist",        1.8f, 0.3f, 0.7f, 1.0f, 0.5f, 0.3f},
-         {"Karakorum","Samarkand","Bukhara","Merv","Urgench","Otrar","Kashgar","Balkh"}},
-        // Greece / Pericles: science + culture; loves Great Library and Parthenon.
-        {"Greece",   "Pericles", {"Scientist / Culture", 0.8f, 1.3f, 2.0f, 0.8f, 0.6f, 1.9f},
-         {"Athens","Sparta","Corinth","Argos","Olympia","Delphi","Miletos","Eretria"}},
-        // Phoenicia / Hiram: gold and trade; harbors, Grand Bazaar, coastal cities.
-        {"Phoenicia","Hiram",    {"Merchant",            1.2f, 0.9f, 0.9f, 2.1f, 0.6f, 0.5f},
-         {"Tyre","Sidon","Byblos","Carthage","Utica","Kition","Akko","Arwad"}},
-        // Rome / Augustus: steady builder-expansionist; Colosseum + good infrastructure.
-        {"Rome",     "Augustus", {"Builder",             1.5f, 1.1f, 1.0f, 1.2f, 1.0f, 0.8f},
-         {"Rome","Neapolis","Mediolanum","Lugdunum","Londinium","Aquileia","Capua","Ravenna"}},
-        // India / Ashoka: religion + culture pacifist; max happiness, Hanging Gardens.
-        {"India",    "Ashoka",   {"Religion / Culture",  0.6f, 1.4f, 1.2f, 0.8f, 2.3f, 1.9f},
-         {"Pataliputra","Taxila","Ujjain","Varanasi","Mathura","Rajgriha","Nalanda","Sarnath"}},
-    }};
-
-    const int empireCount = std::clamp(config.empireCount, 1, 6);
+    // Named leaders, each with a distinct playstyle, loaded from data
+    // (mods/base/data/leaders.json). The player is always empire 1 (Egypt/Ramesses
+    // by default -- the builder/religion archetype).
+    const std::vector<LeaderDef>& leaders = content::activeContent().leaders();
+    const int maxEmpires = std::max(1, std::min<int>(6, static_cast<int>(leaders.size())));
+    const int empireCount = std::clamp(config.empireCount, 1, maxEmpires);
 
     // Pick capital sites: best-scoring habitable land, spaced well apart.
     auto siteScore = [&](std::uint32_t col, std::uint32_t row) -> float {
@@ -926,30 +1167,31 @@ World makeWorld(const WorldConfig& config) {
         if (ok) capitals.emplace_back(bcol, brow);
     }
 
-    for (std::size_t e = 0; e < capitals.size(); ++e) {
+    for (std::size_t e = 0; e < capitals.size() && e < leaders.size(); ++e) {
+        const LeaderDef& preset = leaders[e];
         Empire emp{};
         emp.id = static_cast<std::uint8_t>(e + 1);
-        emp.name = presets[e].civName;
-        emp.leaderName = presets[e].leaderName;
-        emp.personality = presets[e].p;
+        emp.name = preset.civName;
+        emp.leaderName = preset.leaderName;
+        emp.personality = preset.personality;
         emp.treasury = 20;
-        for (int n = 0; n < 8 && presets[e].cityNames[n] != nullptr; ++n)
-            emp.cityNames.push_back(presets[e].cityNames[n]);
+        for (const std::string& cityName : preset.cityNames)
+            emp.cityNames.push_back(cityName);
         emp.nextCityName = 1;  // 0 = capital (already placed below)
         world.empires.push_back(emp);
 
         City c{};
         c.name = !emp.cityNames.empty() ? emp.cityNames[0]
-                                        : (std::string(presets[e].leaderName) + "'s Capital");
+                                        : (preset.leaderName + "'s Capital");
         c.col = capitals[e].first;
         c.row = capitals[e].second;
         c.owner = emp.id;
-        c.population = kCapitalStartPop;
+        c.population = balance().capitalStartPop;
         c.focus = CityFocus::Balanced;
         c.foundedThisGame = false;
         world.cities.push_back(c);
         world.empires.back().cityIndices.push_back(world.cities.size() - 1);
-        claimTerritory(world, world.cities.back());
+        claimCityTerritory(world, world.cities.back());
     }
 
     for (Empire& emp : world.empires) recomputeScore(world, emp);

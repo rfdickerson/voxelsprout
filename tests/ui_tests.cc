@@ -14,6 +14,7 @@
 #include "ui/ui_input.h"
 #include "ui/ui_types.h"
 #include "ui/widgets/button.h"
+#include "ui/widgets/command_view_panel.h"
 #include "ui/widgets/donut_chart.h"
 #include "ui/widgets/dropdown.h"
 #include "ui/widgets/line_chart.h"
@@ -29,6 +30,7 @@
 #include "ui/widgets/toast.h"
 #include "ui/widgets/toggle.h"
 #include "ui/widgets/toolbar.h"
+#include "ui/widgets/world_tracker_panel.h"
 
 #include <cstddef>
 
@@ -960,8 +962,110 @@ void testPanelOpacity() {
 }
 
 
+void testGradientPrimitive() {
+    using namespace odai::ui;
+    UiDrawList dl;
+    dl.reset(UiVec2{100.0f, 100.0f});
+    const UiColor top{1.0f, 0.0f, 0.0f, 1.0f};
+    const UiColor bot{0.0f, 0.0f, 1.0f, 1.0f};
+    dl.addRectFilledVGradient(UiRect::fromXYWH(0.0f, 0.0f, 50.0f, 40.0f), top, bot);
+
+    const UiDrawData& data = dl.data();
+    expectTrue(data.vertices.size() == 4u, "gradient quad emits 4 vertices");
+    expectTrue(data.indices.size() == 6u, "gradient quad emits 6 indices");
+    expectTrue(data.commands.size() == 1u, "gradient quad is one command");
+    // v0/v1 are the top edge (red); v2/v3 the bottom edge (blue).
+    expectTrue(data.vertices[0].rgba8 == top.packAbgr8(), "top-left vertex uses top color");
+    expectTrue(data.vertices[1].rgba8 == top.packAbgr8(), "top-right vertex uses top color");
+    expectTrue(data.vertices[2].rgba8 == bot.packAbgr8(), "bottom-right vertex uses bottom color");
+    expectTrue(data.vertices[3].rgba8 == bot.packAbgr8(), "bottom-left vertex uses bottom color");
+}
+
+void testOrnatePanelDraw() {
+    using namespace odai::ui;
+    Panel p;
+    p.setRect(UiRect::fromXYWH(10.0f, 10.0f, 200.0f, 120.0f));
+    p.styleOrnate(1.0f);
+    expectTrue(p.bgTop.has_value() && p.bgBottom.has_value(), "styleOrnate sets a gradient fill");
+
+    UiDrawList dl;
+    dl.reset(UiVec2{400.0f, 400.0f});
+    p.draw(dl);
+    // Shadow + gradient fill + outer border + inner border + 8 corner-accent bars.
+    expectTrue(!dl.data().commands.empty(), "ornate panel emits geometry");
+    expectTrue(dl.data().vertices.size() > 12u, "ornate panel emits gradient + borders + accents");
+}
+
+void testWorldTrackerPanelBuild() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont();
+    FontSet fonts{&font, &font, &font, &font};
+    WorldTrackerPanel panel(fonts);
+    std::vector<WorldTrackerPanel::Entry> entries = {
+        {"", "Oral Tradition", "RESEARCH", "18c left"},
+        {"", "No City", "PRODUCTION", "Produce a city"},
+    };
+    panel.setEntries(UiRect::fromXYWH(0.0f, 0.0f, 260.0f, 420.0f), 1.0f, "WORLD TRACKER", entries);
+    expectTrue(panel.rect().width() == 260.0f, "world tracker keeps its assigned rect");
+
+    UiDrawList dl;
+    dl.reset(UiVec2{1280.0f, 720.0f});
+    panel.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "world tracker draws geometry");
+
+    // Rebuilding with fewer entries must not crash or leak stale geometry intent.
+    panel.setEntries(UiRect::fromXYWH(0.0f, 0.0f, 260.0f, 420.0f), 1.0f, "WORLD TRACKER", {});
+    UiDrawList dl2;
+    dl2.reset(UiVec2{1280.0f, 720.0f});
+    panel.draw(dl2);
+    expectTrue(!dl2.data().vertices.empty(), "world tracker still draws frame + heading when empty");
+}
+
+void testCommandViewPanelBuild() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont();
+    FontSet fonts{&font, &font, &font, &font};
+    CommandViewPanel panel(fonts);
+
+    // Empty selection -> still draws the frame + hint.
+    CommandViewPanel::State empty;
+    empty.emptyHint = "<i>Select a unit.</i>";
+    panel.setState(UiRect::fromXYWH(0.0f, 0.0f, 300.0f, 600.0f), 1.0f, empty);
+    UiDrawList dl0;
+    dl0.reset(UiVec2{1280.0f, 720.0f});
+    panel.draw(dl0);
+    expectTrue(!dl0.data().vertices.empty(), "command view draws hint when nothing selected");
+
+    // Full selection: hex + action + unit.
+    CommandViewPanel::State st;
+    st.hasHex = true;
+    st.hex.name = "Forest";
+    st.hex.yields = {{"food", "+7"}, {"production", "+2"}};
+    st.action.title = "Found City";
+    st.action.description = "Strategic location.";
+    st.action.actions = {{"", nullptr}, {"", nullptr}};
+    st.hasUnit = true;
+    st.unit.name = "Clan Settler";
+    st.unit.klass = "Human Scout";
+    st.unit.primaryStats = {{"HP", "100/100"}, {"MOV", "2/2"}, {"ORDERS", "Ready"}};
+    st.unit.combatStats = {{"STR", "1"}, {"DEF", "0"}, {"COSTS", "0"}};
+    st.unit.abilities = "Aquatic 2";
+    st.unit.settlementPreview = "Site quality: Excellent";
+    panel.setState(UiRect::fromXYWH(0.0f, 0.0f, 300.0f, 600.0f), 1.0f, st);
+    UiDrawList dl1;
+    dl1.reset(UiVec2{1280.0f, 720.0f});
+    panel.draw(dl1);
+    expectTrue(!dl1.data().vertices.empty(), "command view draws full selection");
+    expectTrue(dl1.data().vertices.size() > dl0.data().vertices.size(),
+               "full selection emits more geometry than the empty hint");
+}
+
 int main() {
     testNineSliceQuadGen();
+    testGradientPrimitive();
+    testOrnatePanelDraw();
+    testWorldTrackerPanelBuild();
+    testCommandViewPanelBuild();
     testFontMeasure();
     testRichTextWrap();
     testRichTextSpans();

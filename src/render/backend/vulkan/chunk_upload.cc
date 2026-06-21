@@ -505,11 +505,25 @@ bool RendererBackend::uploadHexTerrain(const odai::importer::HexTerrainData& dat
     indexDesc.initialData = data.baseIndices.data();
     const BufferHandle indexHandle = m_bufferAllocator.createBuffer(indexDesc);
 
+    // Remap each instance's packed terrain texture index (a scene index in classFlags
+    // bits 16-31, written by the builder) to its bindless slot, resolved when the
+    // imported-scene textures were uploaded. 0xFFFF keeps the fragment palette fallback.
+    std::vector<odai::importer::HexTileInstance> instances = data.instances;
+    for (odai::importer::HexTileInstance& inst : instances) {
+        const std::uint32_t sceneIdx = (inst.classFlags >> 16u) & 0xFFFFu;
+        std::uint32_t bindlessSlot = 0xFFFFu;
+        if (sceneIdx != 0xFFFFu && sceneIdx < m_importedTextureSlots.size() &&
+            m_importedTextureSlots[sceneIdx] != std::numeric_limits<std::uint32_t>::max()) {
+            bindlessSlot = m_importedTextureSlots[sceneIdx] & 0xFFFFu;
+        }
+        inst.classFlags = (inst.classFlags & 0x0000FFFFu) | (bindlessSlot << 16u);
+    }
+
     BufferCreateDesc instanceDesc{};
-    instanceDesc.size = static_cast<VkDeviceSize>(data.instances.size() * sizeof(odai::importer::HexTileInstance));
+    instanceDesc.size = static_cast<VkDeviceSize>(instances.size() * sizeof(odai::importer::HexTileInstance));
     instanceDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     instanceDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    instanceDesc.initialData = data.instances.data();
+    instanceDesc.initialData = instances.data();
     const BufferHandle instanceHandle = m_bufferAllocator.createBuffer(instanceDesc);
 
     if (vertexHandle == kInvalidBufferHandle || indexHandle == kInvalidBufferHandle ||

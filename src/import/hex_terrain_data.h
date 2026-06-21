@@ -36,19 +36,27 @@ struct HexBaseVertex {
 };
 
 // Per-tile instance attributes. Field order is also the vertex-attribute layout for a
-// VK_VERTEX_INPUT_RATE_INSTANCE binding (all 4-byte, tightly packed, stride 60):
-//   centerXZ      RG32F   @0
-//   classFlags    R32_UINT@8
-//   detailParams  RGBA32F @12   {feature, amplitude, windowEnd(world), noiseFreq}
-//   ownAndNear    RGBA32F @28   {ownElevY, neighborElevY[0..2]}
-//   farAndSize    RGBA32F @44   {neighborElevY[3..5], hexSize}
+// VK_VERTEX_INPUT_RATE_INSTANCE binding (all 4-byte, tightly packed, stride 64):
+//   centerXZ             RG32F   @0
+//   classFlags           R32_UINT@8
+//   detailParams         RGBA32F @12   {feature, amplitude, windowEnd(world), noiseFreq}
+//   ownAndNear           RGBA32F @28   {ownElevY, neighborElevY[0..2]}
+//   farAndSize           RGBA32F @44   {neighborElevY[3..5], hexSize}
+//   neighborTerrainPacked R32_UINT@60  bits 4k..4k+3 = TerrainType of neighbor k (k=0..5)
 struct HexTileInstance {
     float centerXZ[2] = {};
-    std::uint32_t classFlags = 0u;       // low 8 bits TerrainType, high bits TileFlag_*
+    // bits 0-7 TerrainType, bits 8-15 TileFlag_*, bits 16-31 terrain texture index
+    // (builder writes a scene index; the renderer remaps it to a bindless slot at
+    // upload, 0xFFFF == none -> palette fallback in the fragment shader).
+    std::uint32_t classFlags = 0u;
     float detailParams[4] = {};
     float ownElevY = 0.0f;               // world Y of this tile's own elevation
     float neighborElevY[6] = {};         // world Y per hex edge (edge k faces dir 60k deg)
     float hexSize = 0.0f;                // circumradius, for tessellation LOD scaling
+    // Neighbor terrain types packed 4 bits each: bits (4k)..(4k+3) = TerrainType of
+    // the neighbor in edge direction k (k=0..5, same indexing as neighborElevY).
+    // Defaults to own terrain type on all 6 edges so map-border tiles blend to themselves.
+    std::uint32_t neighborTerrainPacked = 0u;
 };
 
 // detailParams[0] feature selectors (the evaluation shader switches on these).

@@ -1,0 +1,89 @@
+{
+  "buildings": [
+    { "id": "granary", "name": "Granary", "productionCost": 58, "maintenance": 1,
+      "flat": { "food": 2 }, "happiness": 1, "growthBonus": 50, "requiredTech": "pottery" },
+
+    { "id": "library", "name": "Library", "productionCost": 76, "maintenance": 1,
+      "flat": { "science": 1, "culture": 1 }, "sciencePct": 50, "requiredTech": "writing" },
+
+    { "id": "smithy", "name": "Smithy", "productionCost": 72, "maintenance": 1,
+      "flat": { "production": 2 }, "prodPct": 25, "requiredTech": "bronze_working" },
+
+    { "id": "barracks", "name": "Barracks", "productionCost": 64, "maintenance": 1,
+      "requiredTech": "bronze_working" },
+
+    { "id": "harbor", "name": "Harbor", "productionCost": 66, "maintenance": 1,
+      "flat": { "food": 1, "gold": 1 }, "requiredTech": "sailing" },
+
+    { "id": "walls", "name": "Walls", "productionCost": 60, "maintenance": 1,
+      "happiness": 2, "requiredTech": "masonry" },
+
+    { "id": "market", "name": "Market", "productionCost": 96, "maintenance": 2,
+      "flat": { "gold": 2 }, "goldPct": 40, "requiredTech": "currency" },
+
+    { "id": "temple", "name": "Temple", "productionCost": 82, "maintenance": 1,
+      "flat": { "culture": 2 }, "happiness": 3, "requiredTech": "philosophy" },
+
+    { "id": "aqueduct", "name": "Aqueduct", "productionCost": 108, "maintenance": 2,
+      "flat": { "food": 1 }, "happiness": 2, "growthBonus": 25, "requiredTech": "mathematics" },
+
+    { "id": "cathedral", "name": "Cathedral", "productionCost": 120, "maintenance": 2,
+      "flat": { "culture": 2 }, "happiness": 3, "requiredTech": "theology" },
+
+    { "id": "university", "name": "University", "productionCost": 150, "maintenance": 2,
+      "flat": { "science": 2 }, "sciencePct": 50, "requiredTech": "engineering" },
+
+    { "id": "bank", "name": "Bank", "productionCost": 170, "maintenance": 2,
+      "flat": { "gold": 3 }, "goldPct": 40, "requiredTech": "banking" },
+
+    { "id": "observatory", "name": "Observatory", "productionCost": 180, "maintenance": 2,
+      "flat": { "science": 3 }, "sciencePct": 25, "requiredTech": "astronomy" },
+
+    { "id": "guildhall", "name": "Guild Hall", "productionCost": 150, "maintenance": 2,
+      "flat": { "production": 1, "gold": 2 }, "goldPct": 20, "requiredTech": "guilds" },
+
+    { "id": "hanging_gardens", "name": "Hanging Gardens", "productionCost": 230, "maintenance": 0,
+      "isWonder": true, "score": 22, "requiredTech": "pottery",
+      "effects": { "scope": "empire", "flat": { "food": 1 }, "happiness": 2 } },
+
+    { "id": "pyramids", "name": "Pyramids", "productionCost": 260, "maintenance": 0,
+      "isWonder": true, "score": 25, "requiredTech": "masonry",
+      "effects": { "scope": "empire", "prodPct": 25 } },
+
+    { "id": "colossus", "name": "Colossus", "productionCost": 200, "maintenance": 0,
+      "isWonder": true, "score": 20, "requiredTech": "sailing",
+      "effects": { "scope": "empire", "flat": { "gold": 2 } } },
+
+    { "id": "oracle", "name": "Oracle", "productionCost": 240, "maintenance": 0,
+      "isWonder": true, "score": 24, "requiredTech": "philosophy",
+      "effects": { "scope": "empire", "flat": { "science": 2, "culture": 1 } } },
+
+    { "id": "great_library", "name": "Great Library", "productionCost": 300, "maintenance": 0,
+      "isWonder": true, "score": 30, "requiredTech": "literature",
+      "effects": { "scope": "empire", "flat": { "science": 3 }, "sciencePct": 25 } },
+
+    { "id": "parthenon", "name": "Parthenon", "productionCost": 240, "maintenance": 0,
+      "isWonder": true, "score": 24, "requiredTech": "literature",
+      "effects": { "scope": "empire", "flat": { "culture": 3 } } },
+
+    { "id": "colosseum", "name": "Colosseum", "productionCost": 220, "maintenance": 0,
+      "isWonder": true, "score": 22, "requiredTech": "construction",
+      "effects": { "scope": "empire", "happiness": 3 } },
+
+    { "id": "great_wall", "name": "Great Wall", "productionCost": 210, "maintenance": 0,
+      "isWonder": true, "score": 20, "requiredTech": "construction",
+      "effects": { "scope": "empire", "happiness": 2 } },
+
+    { "id": "grand_temple", "name": "Grand Temple", "productionCost": 250, "maintenance": 0,
+      "isWonder": true, "score": 24, "requiredTech": "theology",
+      "effects": { "scope": "empire", "flat": { "culture": 2 }, "happiness": 1 } },
+
+    { "id": "copernicus", "name": "Copernicus' Observatory", "productionCost": 300, "maintenance": 0,
+      "isWonder": true, "score": 30, "requiredTech": "astronomy",
+      "effects": { "scope": "empire", "flat": { "science": 3 }, "sciencePct": 25 } },
+
+    { "id": "grand_bazaar", "name": "Grand Bazaar", "productionCost": 280, "maintenance": 0,
+      "isWonder": true, "score": 28, "requiredTech": "guilds",
+      "effects": { "scope": "empire", "flat": { "gold": 3 }, "goldPct": 25 } }
+  ]
+}

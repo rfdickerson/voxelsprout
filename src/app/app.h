@@ -1,9 +1,14 @@
 #pragma once
 
+#include "audio/audio.h"
 #include "core/input.h"
+#include "game/advisor.h"
+#include "game/economy.h"
+#include "game/game_sim.h"
 #include "game/strategy_map.h"
 #include "game/units.h"
 #include "import/gpu_scene.h"
+#include "script/script_engine.h"
 #include "ui/animation.h"
 #include "render/renderer.h"
 #include "sim/simulation.h"
@@ -15,6 +20,7 @@
 #include "world/world.h"
 
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -23,8 +29,11 @@
 struct GLFWwindow;
 
 namespace odai::ui {
+class AdvisorsPanel;
 class Button;
+class CommandViewPanel;
 class DonutChart;
+class GreatPeoplePanel;
 class IconButton;
 class Image;
 class Label;
@@ -33,7 +42,11 @@ class Panel;
 class ProductionPanel;
 class RichTextView;
 class StatBadgeRow;
+class TechTreePanel;
+class ToastManager;
 class Toolbar;
+class Window;
+class WorldTrackerPanel;
 }
 
 // App subsystem
@@ -52,6 +65,11 @@ private:
     struct AppConfig {
         odai::render::ShadowMode shadowMode = odai::render::ShadowMode::Auto;
         bool enableSsao = true;
+        float masterVolume = 1.0f;
+        float musicVolume = 0.6f;
+        float ambientVolume = 0.5f;
+        float uiVolume = 0.8f;
+        bool audioMuted = false;
     };
 
     struct CameraRaycastResult {
@@ -129,6 +147,27 @@ private:
     void clearMoveAttackPreview();
     // Open (or refresh) the city production panel for the city on (col,row).
     void openProductionPanelForCity(int col, int row);
+    // Rebuild the tech-tree window rows from current research state. Safe to call
+    // anywhere except inside a tech row's own click callback.
+    void refreshTechTree();
+    // Rebuild the Great People window from the player's roster (settled figures +
+    // any awaiting placement). Safe to call anywhere except inside a rail row's own
+    // click callback (use m_greatPeopleDirty to defer in that case).
+    void refreshGreatPeople();
+    // The city a newly-settled great person should join: the city whose production
+    // panel is currently open, else the player's largest city. Null if none.
+    [[nodiscard]] odai::game::City* greatPersonHostCity();
+    // Set `id` as the active research target (resets banked science if it changes)
+    // and update the window in place. Safe to call from a row's click callback.
+    void selectResearch(const std::string& id);
+    // Accrue science for one turn and complete the current research if funded.
+    void advanceResearch();
+    // True if a Locked-gate tech's accomplishment is satisfied by current app
+    // state. Conditions the app's game model can't observe are treated as met so
+    // those techs gate on prerequisites alone.
+    [[nodiscard]] bool techGateSatisfiedInApp(const odai::game::TechGate& gate) const;
+    // Concise rich-text description (era, cost, unlocks, gate) for a technology.
+    [[nodiscard]] std::string techDescription(const odai::game::TechDef& tech) const;
     // Number of idle cities (no production queued) + unvisited idle units.
     // Zero = End Turn is safe to press.
     [[nodiscard]] int idleCount() const;
@@ -139,6 +178,33 @@ private:
     // Fire the End Turn / Next Idle action — same logic as the button callback,
     // also called from the Enter key handler.
     void fireEndTurn();
+    // Seed the economy World (m_gameWorld) from the loaded strategy map's
+    // settlements: one Empire per owner, one City per settlement, starting
+    // territory claimed. The player's empire is marked aiManaged=false.
+    void seedGameWorldFromSettlements();
+    // Player's empire in m_gameWorld (the one with id == m_playerOwner), or null.
+    [[nodiscard]] odai::game::Empire* playerEmpire();
+    // The player-owned economy city on (col,row) in m_gameWorld, or null.
+    [[nodiscard]] odai::game::City* playerCityAt(int col, int row);
+    // Push live player-empire yields/treasury/turn into the top toolbar badges.
+    void refreshToolbar();
+    // Rebuild the left World Tracker rail (research / production / society / next
+    // action) from the live game world. Cheap; called on turn + selection changes.
+    void refreshWorldTracker();
+    // Rebuild the right Command View rail from the hovered hex + selected unit.
+    // Gated on a change in (hex, unit, turn) to avoid per-frame rebuilds.
+    void refreshCommandView();
+    // Rebuild the event-feed text from the tail of m_gameWorld.events.
+    void refreshEventFeed();
+    // After a turn step: raise eureka/unlock toasts and era-transition banners for
+    // any new player events, and advance m_lastEventCount / m_lastEraIndex.
+    void fireTurnBanners();
+    // Set/clear TileFlag_Border on map tiles that lie on a territory frontier (a
+    // neighbour with a different owner), so the renderer draws empire boundaries.
+    void recomputeBorderFlags(odai::game::StrategyMap& map) const;
+    // Append settlement markers for any economy city that lacks one (e.g. cities the
+    // AI founds with settlers) so the on-map labels stay consistent with the world.
+    void syncSettlementsWithCities();
     void syncGameplayUiState();
     void assignInventoryItemToSelectedHotbar(odai::render::InventoryItemId itemId);
     void handleInventoryClick(float mouseX, float mouseY, float displayWidth, float displayHeight);
@@ -316,10 +382,28 @@ private:
     odai::ui::Label* m_civLeaderNameLabel = nullptr;
     odai::ui::ProductionPanel* m_productionPanel = nullptr;
     std::string m_cityProductionId;  // City's currently selected build (legacy mock).
+
+    // Tech-tree research window.
+    odai::ui::Window*        m_techTreeWindow = nullptr;
+    odai::ui::TechTreePanel* m_techTreePanel  = nullptr;
+
+    // Great People window: the player's roster of famous figures + the settle flow.
+    odai::ui::Window*           m_greatPeopleWindow = nullptr;
+    odai::ui::GreatPeoplePanel* m_greatPeoplePanel  = nullptr;
+    std::string m_selectedGreatPersonId;  // rail selection in the Great People window
+    bool m_greatPeopleDirty = false;      // rebuild requested (deferred out of a click callback)
+    std::vector<std::string> m_researchedTechs;  // completed tech ids
+    std::string m_researchTechId;                // current research target ("" = none)
+    int m_scienceAccumulated = 0;                // science banked toward m_researchTechId
+    int m_sciencePerTurn     = 14;               // mock science output (matches toolbar)
     // Per-city production control: which city the panel currently shows.
     odai::ui::Button* m_endTurnBtn = nullptr;
     int m_selectedCityCol = -1;
     int m_selectedCityRow = -1;
+    // The faction the human player controls. Only this owner's cities/units count
+    // toward the idle gate and may have production assigned; AI factions share the
+    // map (and the CityState list) but are never the player's to manage.
+    std::uint8_t m_playerOwner = 1;
     float m_setupViewW = 0.0f;
     float m_setupViewH = 0.0f;
     // Unit ids the player has "visited" this turn (via Next Idle); visited units
@@ -333,13 +417,29 @@ private:
     odai::ui::Label*  m_unitActionName = nullptr;
     static constexpr int kMaxActionSlots = 6;
     odai::ui::IconButton* m_actionSlotBtns[kMaxActionSlots]{};
+    // Left "World Tracker" rail and right "Command View" rail (ornate HUD panels).
+    odai::ui::WorldTrackerPanel* m_worldTracker = nullptr;
+    odai::ui::CommandViewPanel*  m_commandView  = nullptr;
+    odai::ui::UiRect m_worldTrackerRect{};  // Stored so refresh* can rebuild in place.
+    odai::ui::UiRect m_commandViewRect{};
+    // Change-detection keys so refreshCommandView only rebuilds when the selection
+    // actually changes (col, row, unit id, turn).
+    int m_cvHexCol = -2;
+    int m_cvHexRow = -2;
+    std::uint32_t m_cvUnitId = 0xFFFFFFFFu;
+    int m_cvTurn = -1;
     // Top resource toolbar + its live readouts.
     odai::ui::Toolbar* m_toolbar = nullptr;
     odai::ui::Label* m_toolbarTurnLabel = nullptr;
-    std::size_t m_tbGoldItem = 0;
     std::size_t m_tbScienceItem = 0;
+    std::size_t m_tbCultureItem = 0;
+    std::size_t m_tbGoldItem = 0;
     std::size_t m_tbFaithItem = 0;
-    float m_tbGold = 240.0f;
+    std::size_t m_tbFoodItem = 0;
+    std::size_t m_tbProdItem = 0;
+    // Narrated event feed (scrolling history of world.events) + transient banners.
+    odai::ui::RichTextView* m_eventFeedView = nullptr;
+    odai::ui::ToastManager* m_toasts = nullptr;
     // Pending typed characters (filled by the GLFW char callback) and edit-key edges.
     std::vector<std::uint32_t> m_pendingTextInput;
     float m_pendingScrollDelta = 0.0f;  // Accumulated scroll wheel ticks (GLFW callback).
@@ -383,6 +483,16 @@ private:
     int m_hoveredHexRow = -1;
 
     odai::game::StrategyMap m_strategyMap;
+    // Live 4X economy: cities grow/found/produce, empires research and race for
+    // wonders. Its `map` is a copy of m_strategyMap whose tile owners change as
+    // borders expand; the strategy-map mesh is rebuilt from m_gameWorld.map.
+    odai::game::World m_gameWorld;
+    std::vector<odai::game::TurnSample> m_samples;  // per-turn metrics from stepTurn
+    // Lua scripting host: loaded from mods/base/scripts and installed via
+    // odai::game::setModHost so stepTurn fires mod event hooks. Null until init().
+    std::unique_ptr<odai::script::ScriptHost> m_scriptHost;
+    std::size_t m_lastEventCount = 0;  // events already shown as banners
+    int m_lastEraIndex = -1;           // player's last-seen era (for era-transition banners)
     odai::game::GameState m_gameState;       // Live units marching on the map.
     std::uint32_t m_selectedUnitId = 0;      // Currently selected unit id; 0 == none.
     // Click edge detection for unit select (left) and move orders (right). A
@@ -406,6 +516,12 @@ private:
     odai::world::World m_world;
     odai::world::ChunkClipmapIndex m_chunkClipmapIndex;
     odai::render::Renderer m_renderer;
+
+    odai::audio::Audio m_audio;
+    odai::audio::SoundHandle m_uiClickSfx;
+    odai::audio::SoundHandle m_endTurnSfx;
+    odai::audio::SoundHandle m_ambientLoop;
+    odai::audio::MusicHandle m_menuMusic;
     bool m_importedSceneDemoEnabled = false;
     bool m_importedShowTerrain = true;
     bool m_importedShowStatics = true;

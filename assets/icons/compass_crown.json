@@ -1,0 +1,9 @@
+{
+  "iconSize": 627,
+  "icons": {
+    "compass_crown": [0, 0],
+    "compass_rose": [1, 0],
+    "crown": [0, 1],
+    "charted_world": [1, 1]
+  }
+}

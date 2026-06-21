@@ -1,0 +1,27 @@
+{
+  "leaders": [
+    { "civName": "Egypt", "leaderName": "Ramesses",
+      "personality": { "name": "Builder / Religion", "expansion": 0.8, "wonderLove": 1.8, "science": 0.8, "gold": 1.0, "religion": 2.0, "culture": 1.2 },
+      "cityNames": ["Memphis", "Thebes", "Heliopolis", "Luxor", "Alexandria", "Abydos", "Karnak", "Giza"] },
+
+    { "civName": "Mongols", "leaderName": "Genghis",
+      "personality": { "name": "Expansionist", "expansion": 1.8, "wonderLove": 0.3, "science": 0.7, "gold": 1.0, "religion": 0.5, "culture": 0.3 },
+      "cityNames": ["Karakorum", "Samarkand", "Bukhara", "Merv", "Urgench", "Otrar", "Kashgar", "Balkh"] },
+
+    { "civName": "Greece", "leaderName": "Pericles",
+      "personality": { "name": "Scientist / Culture", "expansion": 0.8, "wonderLove": 1.3, "science": 2.0, "gold": 0.8, "religion": 0.6, "culture": 1.9 },
+      "cityNames": ["Athens", "Sparta", "Corinth", "Argos", "Olympia", "Delphi", "Miletos", "Eretria"] },
+
+    { "civName": "Phoenicia", "leaderName": "Hiram",
+      "personality": { "name": "Merchant", "expansion": 1.2, "wonderLove": 0.9, "science": 0.9, "gold": 2.1, "religion": 0.6, "culture": 0.5 },
+      "cityNames": ["Tyre", "Sidon", "Byblos", "Carthage", "Utica", "Kition", "Akko", "Arwad"] },
+
+    { "civName": "Rome", "leaderName": "Augustus",
+      "personality": { "name": "Builder", "expansion": 1.5, "wonderLove": 1.1, "science": 1.0, "gold": 1.2, "religion": 1.0, "culture": 0.8 },
+      "cityNames": ["Rome", "Neapolis", "Mediolanum", "Lugdunum", "Londinium", "Aquileia", "Capua", "Ravenna"] },
+
+    { "civName": "India", "leaderName": "Ashoka",
+      "personality": { "name": "Religion / Culture", "expansion": 0.6, "wonderLove": 1.4, "science": 1.2, "gold": 0.8, "religion": 2.3, "culture": 1.9 },
+      "cityNames": ["Pataliputra", "Taxila", "Ujjain", "Varanasi", "Mathura", "Rajgriha", "Nalanda", "Sarnath"] }
+  ]
+}

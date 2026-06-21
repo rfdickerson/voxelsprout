@@ -1,0 +1,60 @@
+{
+  "techs": [
+    { "id": "pottery", "name": "Pottery", "cost": 22, "era": "Ancient Era",
+      "prereqs": [], "unlocks": ["granary", "hanging_gardens"] },
+
+    { "id": "writing", "name": "Writing", "cost": 34, "era": "Ancient Era",
+      "prereqs": [], "unlocks": ["library"],
+      "gate": { "kind": "boost", "condition": "meet_rival", "amount": 0, "boostPct": 50 } },
+
+    { "id": "bronze_working", "name": "Bronze Working", "cost": 40, "era": "Ancient Era",
+      "prereqs": [], "unlocks": ["smithy", "barracks"] },
+
+    { "id": "sailing", "name": "Sailing", "cost": 48, "era": "Ancient Era",
+      "prereqs": [], "unlocks": ["harbor", "colossus"],
+      "gate": { "kind": "locked", "condition": "coastal_city", "amount": 0, "boostPct": 0 } },
+
+    { "id": "masonry", "name": "Masonry", "cost": 54, "era": "Ancient Era",
+      "prereqs": ["pottery"], "unlocks": ["walls", "pyramids"],
+      "gate": { "kind": "boost", "condition": "work_terrain:hills", "amount": 0, "boostPct": 50 } },
+
+    { "id": "currency", "name": "Currency", "cost": 72, "era": "Classical Era",
+      "prereqs": ["bronze_working"], "unlocks": ["market"],
+      "gate": { "kind": "boost", "condition": "treasury", "amount": 120, "boostPct": 50 } },
+
+    { "id": "philosophy", "name": "Philosophy", "cost": 90, "era": "Classical Era",
+      "prereqs": ["writing"], "unlocks": ["temple", "oracle"] },
+
+    { "id": "mathematics", "name": "Mathematics", "cost": 108, "era": "Classical Era",
+      "prereqs": ["masonry", "currency"], "unlocks": ["aqueduct"],
+      "gate": { "kind": "boost", "condition": "building:walls", "amount": 1, "boostPct": 50 } },
+
+    { "id": "literature", "name": "Literature", "cost": 128, "era": "Classical Era",
+      "prereqs": ["philosophy"], "unlocks": ["great_library", "parthenon"],
+      "gate": { "kind": "boost", "condition": "building:library", "amount": 2, "boostPct": 50 } },
+
+    { "id": "construction", "name": "Construction", "cost": 160, "era": "Classical Era",
+      "prereqs": ["mathematics"], "unlocks": ["colosseum", "great_wall"],
+      "gate": { "kind": "locked", "condition": "own_wonder", "amount": 0, "boostPct": 0 } },
+
+    { "id": "theology", "name": "Theology", "cost": 165, "era": "Medieval Era",
+      "prereqs": ["philosophy"], "unlocks": ["cathedral", "grand_temple"],
+      "gate": { "kind": "locked", "condition": "building:temple", "amount": 2, "boostPct": 0 } },
+
+    { "id": "engineering", "name": "Engineering", "cost": 190, "era": "Medieval Era",
+      "prereqs": ["mathematics"], "unlocks": ["university"],
+      "gate": { "kind": "boost", "condition": "building:aqueduct", "amount": 1, "boostPct": 50 } },
+
+    { "id": "banking", "name": "Banking", "cost": 215, "era": "Medieval Era",
+      "prereqs": ["currency", "mathematics"], "unlocks": ["bank"],
+      "gate": { "kind": "boost", "condition": "building:market", "amount": 3, "boostPct": 50 } },
+
+    { "id": "astronomy", "name": "Astronomy", "cost": 250, "era": "Medieval Era",
+      "prereqs": ["literature", "sailing"], "unlocks": ["observatory", "copernicus"],
+      "gate": { "kind": "locked", "condition": "building:harbor", "amount": 1, "boostPct": 0 } },
+
+    { "id": "guilds", "name": "Guilds", "cost": 290, "era": "Medieval Era",
+      "prereqs": ["banking"], "unlocks": ["guildhall", "grand_bazaar"],
+      "gate": { "kind": "boost", "condition": "building:bank", "amount": 1, "boostPct": 50 } }
+  ]
+}

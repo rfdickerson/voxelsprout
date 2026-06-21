@@ -10,6 +10,7 @@ struct HexControl
     float4 detailParams : TEXCOORD2;
     uint classFlags : TEXCOORD3;
     float hexSize : TEXCOORD4;
+    uint neighborTerrainPacked : TEXCOORD5;
 };
 
 struct PatchConstants

@@ -46,6 +46,11 @@ void UiContext::update(const UiInput& input) {
             up.mousePx = input.mousePx;
             up.button = button;
             root_->onEvent(up);
+            // A consumed left release is a widget activation (see Button::onEvent);
+            // give the app a chance to play a click sound.
+            if (up.handled && button == UiMouseButton::Left && clickFeedback_) {
+                clickFeedback_();
+            }
         }
     }
 

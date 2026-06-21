@@ -879,7 +879,7 @@ void testHexTerrainInstancesAndPages() {
     const StrategyMap map = makeReliefMap();
     HexTerrainOptions options{};
     options.chunkSize = 2u;
-    const odai::importer::HexTerrainData data = buildHexTerrain(map, options);
+    const odai::importer::HexTerrainData data = buildHexTerrain(map, {}, options);
 
     expectEqualU32(static_cast<std::uint32_t>(data.instances.size()), countLandTiles(map),
                    "one instance per land tile");
@@ -930,7 +930,7 @@ void testHexTerrainCrackFreeCorners() {
     }
     HexTerrainOptions options{};
     options.chunkSize = 8u;  // one chunk -> instance index == row*width + col
-    const odai::importer::HexTerrainData data = buildHexTerrain(map, options);
+    const odai::importer::HexTerrainData data = buildHexTerrain(map, {}, options);
     expectEqualU32(static_cast<std::uint32_t>(data.instances.size()), map.width * map.height,
                    "all-land single-chunk map instances every tile in order");
 

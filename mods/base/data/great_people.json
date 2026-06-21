@@ -1,0 +1,128 @@
+{
+  "_comment": "Great People catalog. Layout (portraitCell [col,row], 4x3 grid of 362px cells) is the art<->code contract with assets/great_people/great_people.png. Each great person, when integrated into a city, applies its `bonus` (a city-scoped BuildingEffects block: flat yields + percentage bonuses + happiness/growth) to that one city for the rest of the game. They are globally unique -- only one of each may be born in a match (like a wonder).",
+  "atlas": "assets/great_people/great_people.png",
+  "portraitSize": 362,
+  "grid": [4, 3],
+  "greatPeople": [
+    {
+      "id": "euclid",
+      "name": "Euclid",
+      "title": "Father of Geometry",
+      "class": "Great Scientist",
+      "portraitCell": [0, 0],
+      "bonus": { "flat": { "science": 2 }, "sciencePct": 20 },
+      "bonusSummary": "+2 science and +20% science in this city",
+      "description": "<b><color=#9a7bc8>Euclid</color></b> lays out his <i>Elements</i> on the table, and a city's scholars never reason the same way again. <color=#cdb88f>+2 science and a 20% boost to all science produced here.</color>"
+    },
+    {
+      "id": "aristotle",
+      "name": "Aristotle",
+      "title": "The First Teacher",
+      "class": "Great Scientist",
+      "portraitCell": [3, 0],
+      "bonus": { "flat": { "science": 2, "culture": 1 }, "sciencePct": 10 },
+      "bonusSummary": "+2 science, +1 culture, and +10% science in this city",
+      "description": "<b><color=#9a7bc8>Aristotle</color></b> founds a Lyceum where every question is fair game. <color=#cdb88f>+2 science, +1 culture, and a 10% boost to science here.</color>"
+    },
+    {
+      "id": "hypatia",
+      "name": "Hypatia",
+      "title": "Philosopher of Alexandria",
+      "class": "Great Scientist",
+      "portraitCell": [0, 1],
+      "bonus": { "flat": { "science": 3, "gold": 1 } },
+      "bonusSummary": "+3 science and +1 gold in this city",
+      "description": "<b><color=#9a7bc8>Hypatia</color></b> charts the heavens and the ledgers alike. <color=#cdb88f>+3 science and +1 gold here.</color>"
+    },
+    {
+      "id": "pythagoras",
+      "name": "Pythagoras",
+      "title": "Master of Number and Harmony",
+      "class": "Great Scientist",
+      "portraitCell": [1, 2],
+      "bonus": { "flat": { "science": 1, "culture": 2 }, "sciencePct": 10 },
+      "bonusSummary": "+1 science, +2 culture, and +10% science in this city",
+      "description": "<b><color=#9a7bc8>Pythagoras</color></b> hears music in the motion of the spheres, and his school blurs the line between art and proof. <color=#cdb88f>+1 science, +2 culture, and a 10% boost to science here.</color>"
+    },
+    {
+      "id": "homer",
+      "name": "Homer",
+      "title": "Poet of the Epics",
+      "class": "Great Writer",
+      "portraitCell": [1, 0],
+      "bonus": { "flat": { "culture": 3 }, "happiness": 1 },
+      "bonusSummary": "+3 culture and +1 happiness in this city",
+      "description": "<b><color=#d8b86a>Homer</color></b> gives a people their songs, and a people with songs hold fast. <color=#cdb88f>+3 culture and +1 happiness here.</color>"
+    },
+    {
+      "id": "sappho",
+      "name": "Sappho",
+      "title": "The Tenth Muse",
+      "class": "Great Writer",
+      "portraitCell": [1, 1],
+      "bonus": { "flat": { "culture": 2, "gold": 1 }, "happiness": 1 },
+      "bonusSummary": "+2 culture, +1 gold, and +1 happiness in this city",
+      "description": "<b><color=#d8b86a>Sappho</color></b> turns longing into verse that travels every trade road. <color=#cdb88f>+2 culture, +1 gold, and +1 happiness here.</color>"
+    },
+    {
+      "id": "herodotus",
+      "name": "Herodotus",
+      "title": "Father of History",
+      "class": "Great Writer",
+      "portraitCell": [0, 2],
+      "bonus": { "flat": { "culture": 2, "science": 1, "gold": 1 } },
+      "bonusSummary": "+2 culture, +1 science, and +1 gold in this city",
+      "description": "<b><color=#d8b86a>Herodotus</color></b> wanders the known world and writes it all down -- inquiry, gossip, and wonder together. <color=#cdb88f>+2 culture, +1 science, and +1 gold here.</color>"
+    },
+    {
+      "id": "aesop",
+      "name": "Aesop",
+      "title": "Teller of Fables",
+      "class": "Great Writer",
+      "portraitCell": [3, 2],
+      "bonus": { "flat": { "culture": 1 }, "happiness": 2 },
+      "bonusSummary": "+1 culture and +2 happiness in this city",
+      "description": "<b><color=#d8b86a>Aesop</color></b> hides hard truths inside the tales of beasts, and the people laugh, and learn, and keep the peace. <color=#cdb88f>+1 culture and +2 happiness here.</color>"
+    },
+    {
+      "id": "archimedes",
+      "name": "Archimedes",
+      "title": "Master of Machines",
+      "class": "Great Engineer",
+      "portraitCell": [2, 0],
+      "bonus": { "flat": { "production": 3 }, "prodPct": 15 },
+      "bonusSummary": "+3 production and +15% production in this city",
+      "description": "<b><color=#c46a4a>Archimedes</color></b> rigs levers, screws, and engines until the city's workshops do the work of ten. <color=#cdb88f>+3 production and a 15% boost to production here.</color>"
+    },
+    {
+      "id": "zhang_heng",
+      "name": "Zhang Heng",
+      "title": "Polymath of Han",
+      "class": "Great Engineer",
+      "portraitCell": [2, 2],
+      "bonus": { "flat": { "production": 2, "science": 2 } },
+      "bonusSummary": "+2 production and +2 science in this city",
+      "description": "<b><color=#c46a4a>Zhang Heng</color></b> builds the seismograph and the armillary sphere -- an engineer who is also a stargazer. <color=#cdb88f>+2 production and +2 science here.</color>"
+    },
+    {
+      "id": "sun_tzu",
+      "name": "Sun Tzu",
+      "title": "Author of The Art of War",
+      "class": "Great General",
+      "portraitCell": [2, 1],
+      "bonus": { "flat": { "production": 2 }, "happiness": 2 },
+      "bonusSummary": "+2 production and +2 happiness in this city",
+      "description": "<b><color=#c46a4a>Sun Tzu</color></b> drills the garrison into a disciplined arsenal, and an orderly city sleeps soundly behind it. <color=#cdb88f>+2 production and +2 happiness here.</color>"
+    },
+    {
+      "id": "confucius",
+      "name": "Confucius",
+      "title": "The Great Sage",
+      "class": "Great Philosopher",
+      "portraitCell": [3, 1],
+      "bonus": { "flat": { "culture": 2, "science": 1 }, "happiness": 1, "growthBonus": 20 },
+      "bonusSummary": "+2 culture, +1 science, +1 happiness, and faster growth in this city",
+      "description": "<b><color=#cdb88f>Confucius</color></b> teaches harmony between ruler and ruled, and a city in harmony prospers and swells. <color=#cdb88f>+2 culture, +1 science, +1 happiness, and +20% growth carryover here.</color>"
+    }
+  ]
+}

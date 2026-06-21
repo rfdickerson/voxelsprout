@@ -1,0 +1,10 @@
+{
+  "units": [
+    { "id": "warrior",  "maxHp": 30, "movement": 2, "maxSupply": 5, "attack": 5, "rangedAttack": 0, "range": 0, "melee": true,  "requiredBuilding": "barracks" },
+    { "id": "spearman", "maxHp": 30, "movement": 2, "maxSupply": 5, "attack": 7, "rangedAttack": 0, "range": 0, "melee": true,  "requiredBuilding": "barracks" },
+    { "id": "archer",   "maxHp": 25, "movement": 2, "maxSupply": 5, "attack": 4, "rangedAttack": 5, "range": 2, "melee": false, "requiredBuilding": "fletcher" },
+    { "id": "scout",    "maxHp": 20, "movement": 3, "maxSupply": 8, "attack": 2, "rangedAttack": 0, "range": 0, "melee": false, "requiredBuilding": "" },
+    { "id": "settler",  "maxHp": 20, "movement": 2, "maxSupply": 4, "attack": 0, "rangedAttack": 0, "range": 0, "melee": false, "requiredBuilding": "" },
+    { "id": "builder",  "maxHp": 20, "movement": 2, "maxSupply": 4, "attack": 0, "rangedAttack": 0, "range": 0, "melee": false, "requiredBuilding": "" }
+  ]
+}

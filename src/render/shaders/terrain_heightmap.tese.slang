@@ -1,4 +1,5 @@
 import camera_uniform;
+import noise;
 
 struct HullOutput
 {
@@ -30,34 +31,11 @@ struct TerrainSample
     float cliff;
 };
 
-float hashNoise(float2 p)
-{
-    return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453);
-}
-
-float valueNoise(float2 p)
-{
-    const float2 i = floor(p);
-    const float2 f = frac(p);
-    const float2 u = f * f * (3.0 - (2.0 * f));
-    const float a = hashNoise(i);
-    const float b = hashNoise(i + float2(1.0, 0.0));
-    const float c = hashNoise(i + float2(0.0, 1.0));
-    const float d = hashNoise(i + float2(1.0, 1.0));
-    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y) * 2.0 - 1.0;
-}
-
-float ridgedNoise(float2 p)
-{
-    return 1.0 - abs(valueNoise(p));
-}
-
+// Noise primitives (hashNoise / valueNoise / ridgedNoise / fbm3) live in the
+// shared `noise` module. `fbm` here is the three-octave variant.
 float fbm(float2 p)
 {
-    return
-        (valueNoise(p) * 0.52) +
-        (valueNoise((p * 2.03) + float2(19.3, -8.7)) * 0.30) +
-        (valueNoise((p * 4.11) + float2(-31.1, 24.6)) * 0.18);
+    return fbm3(p);
 }
 
 float2 domainWarp(float2 worldXz)

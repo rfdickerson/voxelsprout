@@ -1,0 +1,17 @@
+{
+  "iconSize": 256,
+  "columns": 2,
+  "rows": 2,
+  "icons": {
+    "hlaalu": [0, 0],
+    "redoran": [1, 0],
+    "telvanni": [0, 1],
+    "temple": [1, 1]
+  },
+  "advisors": [
+    { "id": "hlaalu_councilor",  "portrait": "hlaalu",   "cell": [0, 0] },
+    { "id": "redoran_warlord",   "portrait": "redoran",  "cell": [1, 0] },
+    { "id": "telvanni_magister", "portrait": "telvanni", "cell": [0, 1] },
+    { "id": "temple_almoner",    "portrait": "temple",   "cell": [1, 1] }
+  ]
+}

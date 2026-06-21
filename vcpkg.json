@@ -12,7 +12,10 @@
         "vulkan-binding"
       ]
     },
+    "lua",
+    "miniaudio",
     "nlohmann-json",
+    "sol2",
     "stb",
     "vulkan",
     "vulkan-memory-allocator"

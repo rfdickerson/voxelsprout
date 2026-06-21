@@ -190,6 +190,31 @@ void UiDrawList::addRectFilled(const UiRect& rect, const UiColor& color) {
     addQuad(rect, UiRect{0.0f, 0.0f, 0.0f, 0.0f}, color.packAbgr8(), UiDrawMode::SolidColor, kUiNoTexture);
 }
 
+void UiDrawList::addRectFilledVGradient(const UiRect& rect, const UiColor& top,
+                                        const UiColor& bottom) {
+    if (!rect.valid()) {
+        return;
+    }
+    const float opacity = currentOpacity();
+    const std::uint32_t topRgba = scaleAlpha(top.packAbgr8(), opacity);
+    const std::uint32_t botRgba = scaleAlpha(bottom.packAbgr8(), opacity);
+    UiDrawCmd& cmd = currentCommand(kUiNoTexture);
+    const auto base = static_cast<std::uint32_t>(m_data.vertices.size());
+    const auto mode = static_cast<std::uint32_t>(UiDrawMode::SolidColor);
+    // v00 / v10 top edge -> top color; v11 / v01 bottom edge -> bottom color.
+    m_data.vertices.push_back(UiVertex{{rect.minX, rect.minY}, {0, 0}, topRgba, mode, {}});
+    m_data.vertices.push_back(UiVertex{{rect.maxX, rect.minY}, {0, 0}, topRgba, mode, {}});
+    m_data.vertices.push_back(UiVertex{{rect.maxX, rect.maxY}, {0, 0}, botRgba, mode, {}});
+    m_data.vertices.push_back(UiVertex{{rect.minX, rect.maxY}, {0, 0}, botRgba, mode, {}});
+    m_data.indices.push_back(base + 0);
+    m_data.indices.push_back(base + 1);
+    m_data.indices.push_back(base + 2);
+    m_data.indices.push_back(base + 0);
+    m_data.indices.push_back(base + 2);
+    m_data.indices.push_back(base + 3);
+    cmd.indexCount += 6;
+}
+
 void UiDrawList::addRect(const UiRect& rect, const UiColor& color, float thicknessPx) {
     if (thicknessPx <= 0.0f) {
         return;
