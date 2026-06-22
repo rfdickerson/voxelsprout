@@ -311,11 +311,12 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
                     if (!options.emitLandSurface && !terrainIsWater(tile.terrain)) {
                         continue;
                     }
-                    // Hidden land tiles: emit a flat dark shroud at just above the
-                    // water surface so the player sees featureless darkness — no
-                    // elevation, no terrain type, no hex outline (grid skips them).
-                    if (options.fogOfWar && !terrainIsWater(tile.terrain) &&
-                        tile.visibility == TileVisibility::Hidden) {
+                    // Hidden tiles (land or water): emit a flat dark shroud at just
+                    // above the water surface so the player sees featureless darkness —
+                    // no elevation, no terrain type, no coastline outline, no hex grid.
+                    // Water tiles need the same treatment so the ocean shape doesn't
+                    // leak information about unexplored land masses.
+                    if (options.fogOfWar && tile.visibility == TileVisibility::Hidden) {
                         constexpr TileColor kShroud{0.03f, 0.03f, 0.05f};
                         const float shroudY = waterSurfaceY + std::max(H * 0.005f, 0.2f);
                         const Vector3 sc = atY(tileCenterWorld(map, col, row), shroudY);
@@ -512,6 +513,12 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
             for (std::uint32_t col = 0; col < map.width; ++col) {
                 const MapTile& tile = map.at(col, row);
                 if (!terrainIsWater(tile.terrain)) {
+                    continue;
+                }
+                // Hidden water tiles get a dark shroud from the terrain pass above;
+                // don't add a water patch or the animated water shader would render
+                // on top of the shroud and reveal the ocean shape.
+                if (options.fogOfWar && tile.visibility == TileVisibility::Hidden) {
                     continue;
                 }
                 const Vector3 center = tileCenterWorld(map, col, row);

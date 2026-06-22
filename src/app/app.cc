@@ -5061,6 +5061,14 @@ void App::drawStrategyMapLabels(float fbW, float fbH, float dt) {
     const float halfLineH = font.lineHeightPx() * 0.5f;
 
     for (const auto& s : m_strategyMap.settlements) {
+        // Don't reveal city names on tiles the player hasn't discovered yet.
+        // Visibility is tracked on m_gameWorld.map (the live economy copy).
+        if (m_fogOfWarEnabled &&
+            m_gameWorld.map.inBounds(static_cast<int>(s.col), static_cast<int>(s.row)) &&
+            m_gameWorld.map.at(s.col, s.row).visibility == odai::game::TileVisibility::Hidden) {
+            continue;
+        }
+
         const float rowOffset = (s.row % 2 == 0) ? 0.0f : 0.5f;
         const float wx = m_strategyMap.hexSize * std::sqrt(3.0f)
                          * (static_cast<float>(s.col) + rowOffset);
