@@ -137,6 +137,17 @@ struct ImportedScene {
     std::uint32_t sourceUnresolvedRefCount = 0;
     float boundsMin[3] = {};
     float boundsMax[3] = {};
+
+    // Fog-of-war visibility map for the strategy map. R8 data, fogMapW×fogMapH
+    // texels (one per hex tile). Values: 0=hidden, 100=explored, 255=visible,
+    // blurred across 2 passes so bilinear sampling gives smooth fog edges.
+    // fogMapInvExtentX/Z are the world-space UV scale factors (1/(extent in X/Z).
+    // Empty when fog of war is disabled.
+    std::vector<std::uint8_t> fogMap;
+    std::uint32_t fogMapW = 0;
+    std::uint32_t fogMapH = 0;
+    float fogMapInvExtentX = 0.0f;
+    float fogMapInvExtentZ = 0.0f;
 };
 
 bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& outputPath);

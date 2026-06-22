@@ -953,6 +953,11 @@ void RendererBackend::renderFrame(
     mvpUniform.importedLightConfig[2] = m_debugImportedLightsEnabled ? 1.0f : 0.0f;
     mvpUniform.importedLightConfig[3] = static_cast<float>(m_importedLocalLights.size());
 
+    mvpUniform.fogMapConfig[0] = m_fogMapInvExtentX;
+    mvpUniform.fogMapConfig[1] = m_fogMapInvExtentZ;
+    mvpUniform.fogMapConfig[2] = 0.0f;
+    mvpUniform.fogMapConfig[3] = m_fogMapEnabled ? 1.0f : 0.0f;
+
     const float voxelGiGridSpan = static_cast<float>(kVoxelGiGridResolution) * kVoxelGiCellSize;
     const float voxelGiHalfSpan = voxelGiGridSpan * 0.5f;
     const float voxelGiDesiredOriginX = computeVoxelGiAxisOrigin(camera.x, voxelGiHalfSpan, kVoxelGiCellSize);

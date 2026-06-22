@@ -2021,6 +2021,19 @@ void RendererBackend::destroyImportedBuffers() {
         vkDestroySampler(m_device, m_importedTextureSampler, nullptr);
         m_importedTextureSampler = VK_NULL_HANDLE;
     }
+    if (m_fogMapTextureResource.imageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, m_fogMapTextureResource.imageView, nullptr);
+        m_fogMapTextureResource.imageView = VK_NULL_HANDLE;
+    }
+    if (m_fogMapTextureResource.image != VK_NULL_HANDLE && m_vmaAllocator != VK_NULL_HANDLE) {
+        vmaDestroyImage(m_vmaAllocator, m_fogMapTextureResource.image, m_fogMapTextureResource.allocation);
+        m_fogMapTextureResource.image = VK_NULL_HANDLE;
+        m_fogMapTextureResource.allocation = VK_NULL_HANDLE;
+    }
+    if (m_fogMapSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_fogMapSampler, nullptr);
+        m_fogMapSampler = VK_NULL_HANDLE;
+    }
     if (m_importedIndexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_importedIndexBufferHandle);
         m_importedIndexBufferHandle = kInvalidBufferHandle;

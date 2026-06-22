@@ -1127,6 +1127,11 @@ private:
     uint32_t m_skyCloudIndexCount = 0;
     std::vector<ImportedTextureResource> m_importedTextureResources;
     VkSampler m_importedTextureSampler = VK_NULL_HANDLE;
+    ImportedTextureResource m_fogMapTextureResource{};
+    VkSampler m_fogMapSampler = VK_NULL_HANDLE;
+    float m_fogMapInvExtentX = 0.0f;
+    float m_fogMapInvExtentZ = 0.0f;
+    bool m_fogMapEnabled = false;
     std::array<std::uint32_t, 16> m_voxelBaseColorPaletteRgba{};
     VkImage m_diffuseTextureImage = VK_NULL_HANDLE;
     VkDeviceMemory m_diffuseTextureMemory = VK_NULL_HANDLE;
