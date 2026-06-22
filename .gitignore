@@ -67,5 +67,8 @@ assets/mods
 # Generated font atlas caches
 *.fontcache
 
+# Generated DDS texture sidecars (produced by odai_dds_bundler)
+*.dds
+
 # Scratch directory
 /tmp/

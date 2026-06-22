@@ -1,4 +1,4 @@
-#include "ui/widgets/command_view_panel.h"
+#include "ui/widgets/selection_inspector_panel.h"
 
 #include "ui/icon_atlas.h"
 #include "ui/ui_draw_list.h"
@@ -24,7 +24,7 @@ constexpr UiColor kCardBorder{0.478f, 0.361f, 0.165f, 0.55f};
 
 }  // namespace
 
-void CommandViewPanel::setState(const UiRect& rect, float s, const State& state) {
+void SelectionInspectorPanel::setState(const UiRect& rect, float s, const State& state) {
     children_.clear();
     setRect(rect);
 
@@ -35,7 +35,6 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
     const float regH  = rf ? rf->lineHeightPx() : 20.0f * s;
     const float capH  = std::max(regH * 0.8f, 12.0f * s);
 
-    // Flat clean-modern card background with bevel for depth.
     auto bg = std::make_unique<Panel>();
     bg->setRect(rect);
     bg->styleCard(s);
@@ -48,7 +47,6 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
     const float x0  = rect.minX + pad;
     const float wIn = rect.width() - 2.0f * pad;
 
-    // --- small helpers -------------------------------------------------------
     auto addLabel = [&](const std::string& markup, const UiColor& col, const FontSet& fs,
                         UiTextAlign align, const UiRect& r) {
         auto l = std::make_unique<Label>(fs, markup);
@@ -58,6 +56,7 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
         addChild(std::move(l));
     };
     auto addCaption = [&](const std::string& text, float& y) {
+        if (text.empty()) return;
         addLabel("<b>" + text + "</b>", kDim, fonts_, UiTextAlign::Left,
                  UiRect::fromXYWH(x0, y, wIn, capH));
         y += capH + 4.0f * s;
@@ -88,7 +87,6 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
             addChild(std::move(img));
         }
     };
-    // A 3-up stat grid: each cell shows a dim caption over a bold value.
     auto addStatGrid = [&](const std::vector<Stat>& stats, float& y) {
         if (stats.empty()) return;
         const int n = static_cast<int>(stats.size());
@@ -114,8 +112,9 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
 
     float y = rect.minY + pad;
 
-    // Heading + underline.
-    addLabel("<b>Command View</b>", kGold, fonts_, UiTextAlign::Left,
+    // Panel heading
+    const std::string heading = state.title.empty() ? "Inspector" : state.title;
+    addLabel("<b>" + heading + "</b>", kGold, fonts_, UiTextAlign::Left,
              UiRect::fromXYWH(x0, y, wIn, boldH));
     y += boldH + 6.0f * s;
     {
@@ -127,19 +126,18 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
         y += 1.5f * s + 10.0f * s;
     }
 
-    // Nothing selected -> hint and stop.
-    if (!state.hasHex && !state.hasUnit) {
-        addLabel(state.emptyHint.empty() ? "<i>Select a unit or hex.</i>" : state.emptyHint,
+    if (!state.hasTile && !state.hasEntity) {
+        addLabel(state.emptyHint.empty() ? "<i>Select a unit or tile.</i>" : state.emptyHint,
                  kDim, fonts_, UiTextAlign::Left, UiRect::fromXYWH(x0, y, wIn, regH * 3.0f));
         return;
     }
 
-    // --- Selected hex card ---------------------------------------------------
-    if (state.hasHex) {
-        addCaption("Selected Hex", y);
+    // Selected tile card
+    if (state.hasTile) {
+        addCaption(state.tileCaption, y);
         const float medR    = 16.0f * s;
         const float cpad    = 10.0f * s;
-        const float preview = state.hex.previewTexture != kUiNoTexture
+        const float preview = state.tile.previewTexture != kUiNoTexture
                                   ? std::min(wIn - 2.0f * cpad, 180.0f * s)
                                   : 0.0f;
         const float textH   = std::max(medR * 2.0f, boldH + capH + 8.0f * s);
@@ -148,7 +146,7 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
         const float cardTop = y;
         addCardBg(cardTop, cardH);
         if (preview > 0.0f) {
-            auto image = std::make_unique<Image>(state.hex.previewTexture);
+            auto image = std::make_unique<Image>(state.tile.previewTexture);
             image->setRect(UiRect::fromXYWH(x0 + (wIn - preview) * 0.5f,
                                              cardTop + cpad, preview, preview));
             addChild(std::move(image));
@@ -156,35 +154,34 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
         const float textTop = cardTop + cpad + preview + (preview > 0.0f ? 8.0f * s : 0.0f);
         const float medCx = x0 + cpad + medR;
         const float medCy = textTop + medR;
-        addMedallion(state.hex.iconName,
+        addMedallion(state.tile.iconName,
                      UiRect{medCx - medR, medCy - medR, medCx + medR, medCy + medR});
         const float tx = medCx + medR + 10.0f * s;
-        addLabel("<b>" + state.hex.name + "</b>", kText, fonts_, UiTextAlign::Left,
+        addLabel("<b>" + state.tile.name + "</b>", kText, fonts_, UiTextAlign::Left,
                  UiRect::fromXYWH(tx, textTop, rect.maxX - pad - tx, boldH));
-        // Yields row beneath the name.
         float yx = tx;
-        const float yieldY = textTop + boldH + 4.0f * s;
+        const float yieldY  = textTop + boldH + 4.0f * s;
         const float chipIcon = capH;
-        for (const Yield& yld : state.hex.yields) {
+        for (const ResourceValue& rv : state.tile.yields) {
             UiIconEntry icon{};
-            if (!yld.iconName.empty() && UiIconRegistry::global().resolve(yld.iconName, icon)) {
+            if (!rv.iconName.empty() && UiIconRegistry::global().resolve(rv.iconName, icon)) {
                 auto img = std::make_unique<Image>(icon.textureId);
                 img->uvRect = icon.uv;
                 img->setRect(UiRect::fromXYWH(yx, yieldY, chipIcon, chipIcon));
                 addChild(std::move(img));
                 yx += chipIcon + 3.0f * s;
             }
-            const float vw = rf ? rf->measureText(yld.value) + 6.0f * s : 24.0f * s;
-            addLabel(yld.value, kText, fonts_, UiTextAlign::Left,
+            const float vw = rf ? rf->measureText(rv.value) + 6.0f * s : 24.0f * s;
+            addLabel(rv.value, kText, fonts_, UiTextAlign::Left,
                      UiRect::fromXYWH(yx, yieldY, vw, capH));
             yx += vw + 8.0f * s;
         }
         y = cardTop + cardH + 10.0f * s;
     }
 
-    // --- Recommended action card --------------------------------------------
+    // Recommended action card
     if (!state.action.title.empty()) {
-        addCaption("Recommended Action", y);
+        addCaption(state.actionCaption, y);
         const float descH = regH * 2.0f;
         const float btn   = 30.0f * s;
         const bool hasBtns = !state.action.actions.empty();
@@ -218,31 +215,31 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
         y = cardTop + cardH + 10.0f * s;
     }
 
-    // --- Unit card -----------------------------------------------------------
-    if (state.hasUnit) {
+    // Entity card
+    if (state.hasEntity) {
+        if (!state.entityCaption.empty()) addCaption(state.entityCaption, y);
         const float portR   = 22.0f * s;
         const float headTop = y;
-        addMedallion(state.unit.portraitName,
+        addMedallion(state.entity.portraitName,
                      UiRect{x0, headTop, x0 + portR * 2.0f, headTop + portR * 2.0f});
         const float tx = x0 + portR * 2.0f + 12.0f * s;
-        addLabel("<b>" + state.unit.name + "</b>", kText, fonts_, UiTextAlign::Left,
+        addLabel("<b>" + state.entity.name + "</b>", kText, fonts_, UiTextAlign::Left,
                  UiRect::fromXYWH(tx, headTop + 2.0f * s, rect.maxX - pad - tx, boldH));
-        addLabel(state.unit.klass, kDim, fonts_, UiTextAlign::Left,
+        addLabel(state.entity.klass, kDim, fonts_, UiTextAlign::Left,
                  UiRect::fromXYWH(tx, headTop + 2.0f * s + boldH + 2.0f * s,
                                   rect.maxX - pad - tx, capH));
         y = headTop + portR * 2.0f + 10.0f * s;
 
-        addStatGrid(state.unit.primaryStats, y);
-        addStatGrid(state.unit.combatStats, y);
+        addStatGrid(state.entity.primaryStats, y);
+        addStatGrid(state.entity.secondaryStats, y);
 
-        if (!state.unit.abilities.empty()) {
-            addLabel(state.unit.abilities, kDesc, fonts_, UiTextAlign::Left,
+        if (!state.entity.abilities.empty()) {
+            addLabel(state.entity.abilities, kDesc, fonts_, UiTextAlign::Left,
                      UiRect::fromXYWH(x0, y, wIn, regH * 3.0f));
             y += regH * 3.0f + 8.0f * s;
         }
-        if (!state.unit.settlementPreview.empty()) {
-            addCaption("Settlement Preview", y);
-            addLabel(state.unit.settlementPreview, kDesc, fonts_, UiTextAlign::Left,
+        if (!state.entity.placementPreview.empty()) {
+            addLabel(state.entity.placementPreview, kDesc, fonts_, UiTextAlign::Left,
                      UiRect::fromXYWH(x0, y, wIn, regH * 5.0f));
             y += regH * 5.0f;
         }

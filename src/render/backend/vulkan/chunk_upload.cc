@@ -93,6 +93,52 @@ VkDeviceSize importedTextureMipOffset(
     return offset;
 }
 
+std::uint32_t blockBytesForImportedFormat(odai::importer::TextureFormat format) {
+    switch (format) {
+        case odai::importer::TextureFormat::BC1:
+        case odai::importer::TextureFormat::BC4: return 8u;
+        case odai::importer::TextureFormat::BC3:
+        case odai::importer::TextureFormat::BC5:
+        case odai::importer::TextureFormat::BC7: return 16u;
+        default:                                 return 0u;
+    }
+}
+
+VkFormat vkFormatForImportedTexture(odai::importer::TextureFormat format) {
+    switch (format) {
+        // Color albedo (BC1/BC3/BC7) holds sRGB-encoded bytes, so use the _SRGB views:
+        // the sampler decodes sRGB -> linear, matching the linear lighting + tonemap
+        // pipeline. Without this the raw sRGB values are read as linear (~2x too bright)
+        // and terrain renders as washed-out pastel. BC4/BC5 are data (single/dual
+        // channel — e.g. the water normal map) and must stay UNORM/linear.
+        case odai::importer::TextureFormat::BC1: return VK_FORMAT_BC1_RGB_SRGB_BLOCK;
+        case odai::importer::TextureFormat::BC3: return VK_FORMAT_BC3_SRGB_BLOCK;
+        case odai::importer::TextureFormat::BC4: return VK_FORMAT_BC4_UNORM_BLOCK;
+        case odai::importer::TextureFormat::BC5: return VK_FORMAT_BC5_UNORM_BLOCK;
+        case odai::importer::TextureFormat::BC7: return VK_FORMAT_BC7_SRGB_BLOCK;
+        default:                                 return VK_FORMAT_R8G8B8A8_UNORM;
+    }
+}
+
+// Byte offset of mipLevel in a packed mip chain, respecting block-compressed layout.
+VkDeviceSize importedTextureMipOffsetFmt(
+    std::uint32_t width, std::uint32_t height,
+    std::uint32_t mipLevel, odai::importer::TextureFormat format
+) {
+    if (format == odai::importer::TextureFormat::RGBA8) {
+        return importedTextureMipOffset(width, height, mipLevel);
+    }
+    const std::uint32_t bpb = blockBytesForImportedFormat(format);
+    VkDeviceSize offset = 0;
+    for (std::uint32_t level = 0; level < mipLevel; ++level) {
+        offset += static_cast<VkDeviceSize>(std::max(1u, (width  + 3u) / 4u))
+                * std::max(1u, (height + 3u) / 4u) * bpb;
+        width  = std::max(1u, width  >> 1u);
+        height = std::max(1u, height >> 1u);
+    }
+    return offset;
+}
+
 std::uint32_t inferImportedTextureMipLevelCount(
     std::uint32_t width,
     std::uint32_t height,
@@ -152,6 +198,9 @@ std::array<float, 3> sampleImportedTextureBaseColor(
         return {vertex.color[0], vertex.color[1], vertex.color[2]};
     }
     const odai::importer::ImportedSceneTexture& texture = textures[vertex.textureIndex];
+    if (texture.format != odai::importer::TextureFormat::RGBA8) {
+        return {vertex.color[0], vertex.color[1], vertex.color[2]};
+    }
     if (texture.width == 0u ||
         texture.height == 0u ||
         texture.rgba8.size() < static_cast<std::size_t>(texture.width) *
@@ -698,17 +747,29 @@ bool RendererBackend::uploadImportedSceneInternal(
             }
             const std::uint32_t inferredMipLevelCount =
                 inferImportedTextureMipLevelCount(srcTexture.width, srcTexture.height, srcTexture.rgba8.size());
-            if (inferredMipLevelCount == 0u) {
-                VOX_LOGW("render") << "imported texture mip chain size invalid for "
-                                   << srcTexture.sourcePath << "; skipping texture";
-                continue;
-            }
-            const std::uint32_t mipLevelCount = inferredMipLevelCount;
-            if (srcTexture.mipLevelCount != 0u && srcTexture.mipLevelCount != inferredMipLevelCount) {
-                VOX_LOGW("render") << "imported texture mip metadata mismatch for "
-                                   << srcTexture.sourcePath << "; stored=" << srcTexture.mipLevelCount
-                                   << ", inferred=" << inferredMipLevelCount
-                                   << " (using inferred chain)";
+
+            std::uint32_t mipLevelCount;
+            if (srcTexture.format != odai::importer::TextureFormat::RGBA8) {
+                // Block-compressed: trust the mip count stored by the DDS loader.
+                if (srcTexture.mipLevelCount == 0u || srcTexture.rgba8.empty()) {
+                    VOX_LOGW("render") << "block-compressed texture missing mip data: "
+                                       << srcTexture.sourcePath << "; skipping";
+                    continue;
+                }
+                mipLevelCount = srcTexture.mipLevelCount;
+            } else {
+                if (inferredMipLevelCount == 0u) {
+                    VOX_LOGW("render") << "imported texture mip chain size invalid for "
+                                       << srcTexture.sourcePath << "; skipping texture";
+                    continue;
+                }
+                mipLevelCount = inferredMipLevelCount;
+                if (srcTexture.mipLevelCount != 0u && srcTexture.mipLevelCount != inferredMipLevelCount) {
+                    VOX_LOGW("render") << "imported texture mip metadata mismatch for "
+                                       << srcTexture.sourcePath << "; stored=" << srcTexture.mipLevelCount
+                                       << ", inferred=" << inferredMipLevelCount
+                                       << " (using inferred chain)";
+                }
             }
 
             BufferCreateDesc stagingCreateDesc{};
@@ -729,7 +790,7 @@ bool RendererBackend::uploadImportedSceneInternal(
             VkImageCreateInfo imageCreateInfo{};
             imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
             imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-            imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+            imageCreateInfo.format = vkFormatForImportedTexture(srcTexture.format);
             imageCreateInfo.extent = {srcTexture.width, srcTexture.height, 1};
             imageCreateInfo.mipLevels = mipLevelCount;
             imageCreateInfo.arrayLayers = 1;
@@ -760,7 +821,7 @@ bool RendererBackend::uploadImportedSceneInternal(
             viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
             viewCreateInfo.image = resource.image;
             viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            viewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+            viewCreateInfo.format = vkFormatForImportedTexture(srcTexture.format);
             viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             viewCreateInfo.subresourceRange.baseMipLevel = 0;
             viewCreateInfo.subresourceRange.levelCount = mipLevelCount;
@@ -815,7 +876,8 @@ bool RendererBackend::uploadImportedSceneInternal(
             copyRegions.reserve(mipLevelCount);
             for (std::uint32_t mipLevel = 0; mipLevel < mipLevelCount; ++mipLevel) {
                 VkBufferImageCopy copyRegion{};
-                copyRegion.bufferOffset = importedTextureMipOffset(srcTexture.width, srcTexture.height, mipLevel);
+                copyRegion.bufferOffset = importedTextureMipOffsetFmt(
+                    srcTexture.width, srcTexture.height, mipLevel, srcTexture.format);
                 copyRegion.bufferRowLength = 0;
                 copyRegion.bufferImageHeight = 0;
                 copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;

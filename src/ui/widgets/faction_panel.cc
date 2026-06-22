@@ -1,4 +1,4 @@
-#include "ui/widgets/religion_panel.h"
+#include "ui/widgets/faction_panel.h"
 
 #include "ui/ui_draw_list.h"
 #include "ui/widgets/button.h"
@@ -15,14 +15,14 @@ namespace odai::ui {
 namespace {
 
 // Row in the left rail. Draws its own background, name, and a status pip.
-class ReligionRow : public Widget {
+class FactionRow : public Widget {
 public:
-    ReligionRow(const FontSet& fonts, float scale) : fonts_(fonts), s_(scale) {}
+    FactionRow(const FontSet& fonts, float scale) : fonts_(fonts), s_(scale) {}
 
     std::string id;
     std::string name;
     std::string subtitle;
-    ReligionPanel::Status status = ReligionPanel::Status::NotYet;
+    FactionPanel::Status status = FactionPanel::Status::NotYet;
     bool showSelected = false;
     std::function<void()> onSelect;
 
@@ -39,46 +39,45 @@ public:
             dl.addRoundRectFilled(rect_, UiColor{0.09f, 0.07f, 0.04f, 0.55f}, radius);
         }
 
-        // Status pip on the left edge.
+        // Status pip.
         const float pipR = 5.0f * s_;
         const float pipCX = rect_.minX + pad + pipR;
         const float pipCY = (rect_.minY + rect_.maxY) * 0.5f;
         UiColor pipColor{0.40f, 0.40f, 0.40f, 0.5f};
         switch (status) {
-            case ReligionPanel::Status::Current:
-                pipColor = UiColor{0.90f, 0.78f, 0.20f, 1.0f}; break;  // gold
-            case ReligionPanel::Status::Available:
-                pipColor = UiColor{0.28f, 0.82f, 0.36f, 1.0f}; break;  // green
-            case ReligionPanel::Status::Locked:
-                pipColor = UiColor{0.70f, 0.40f, 0.20f, 0.7f}; break;  // amber
-            case ReligionPanel::Status::NotYet:
-                pipColor = UiColor{0.35f, 0.35f, 0.40f, 0.5f}; break;  // grey
+            case FactionPanel::Status::Current:
+                pipColor = UiColor{0.90f, 0.78f, 0.20f, 1.0f}; break;
+            case FactionPanel::Status::Available:
+                pipColor = UiColor{0.28f, 0.82f, 0.36f, 1.0f}; break;
+            case FactionPanel::Status::Locked:
+                pipColor = UiColor{0.70f, 0.40f, 0.20f, 0.7f}; break;
+            case FactionPanel::Status::NotYet:
+                pipColor = UiColor{0.35f, 0.35f, 0.40f, 0.5f}; break;
         }
         dl.addRoundRectFilled(
             UiRect{pipCX - pipR, pipCY - pipR, pipCX + pipR, pipCY + pipR},
             pipColor, pipR);
 
-        // Name and subtitle text.
-        const float textX  = pipCX + pipR + 8.0f * s_;
+        const float textX    = pipCX + pipR + 8.0f * s_;
         const float textMaxX = rect_.maxX - pad;
         const Font* nameFont = fonts_.bold ? fonts_.bold : fonts_.regular;
-        const float nameH = nameFont        ? nameFont->lineHeightPx()        : 0.0f;
-        const float infoH = fonts_.regular  ? fonts_.regular->lineHeightPx()  : 0.0f;
+        const float nameH = nameFont       ? nameFont->lineHeightPx()       : 0.0f;
+        const float infoH = fonts_.regular ? fonts_.regular->lineHeightPx() : 0.0f;
         const float gap   = 2.0f * s_;
         const float blockH = nameH + (infoH > 0.0f ? gap + infoH : 0.0f);
         const float blockY = rect_.minY + (rect_.height() - blockH) * 0.5f;
 
-        UiColor nameColor = (status == ReligionPanel::Status::NotYet)
+        UiColor nameColor = (status == FactionPanel::Status::NotYet)
             ? UiColor{0.52f, 0.48f, 0.38f, 1.0f}
             : UiColor{0.92f, 0.88f, 0.74f, 1.0f};
-        UiColor subColor  = UiColor{0.62f, 0.58f, 0.46f, 1.0f};
 
         dl.pushClip(UiRect{textX, rect_.minY, textMaxX, rect_.maxY});
         if (nameFont)
             dl.addText(*nameFont, name, UiVec2{textX, blockY}, nameColor);
         if (fonts_.regular && !subtitle.empty())
             dl.addText(*fonts_.regular, subtitle,
-                       UiVec2{textX, blockY + nameH + gap}, subColor);
+                       UiVec2{textX, blockY + nameH + gap},
+                       UiColor{0.62f, 0.58f, 0.46f, 1.0f});
         dl.popClip();
     }
 
@@ -117,7 +116,7 @@ private:
 
 }  // namespace
 
-void ReligionPanel::applyDetailContent(const Detail& detail) {
+void FactionPanel::applyDetailContent(const Detail& detail) {
     if (nameLabel_ != nullptr)
         nameLabel_->setText("<b><color=#e6d6a4>" + detail.name + "</color></b>");
     if (bonusLabel_ != nullptr)
@@ -126,25 +125,25 @@ void ReligionPanel::applyDetailContent(const Detail& detail) {
         bodyView_->setText(detail.body);
         bodyView_->scrollOffsetY = 0.0f;
     }
-    adoptAction_ = detail.onAdopt;
-    if (adoptBtn_ != nullptr) {
-        adoptBtn_->visible = detail.showAdopt;
-        adoptBtn_->setEnabled(detail.adoptEnabled);
-        adoptBtn_->setLabel(detail.adoptLabel.empty() ? std::string("Adopt this Faith")
-                                                      : detail.adoptLabel);
+    joinAction_ = detail.onJoin;
+    if (joinBtn_ != nullptr) {
+        joinBtn_->visible = detail.showJoin;
+        joinBtn_->setEnabled(detail.joinEnabled);
+        joinBtn_->setLabel(detail.joinLabel.empty() ? std::string("Join this Faction")
+                                                    : detail.joinLabel);
     }
 }
 
-void ReligionPanel::applyDetail(const std::string& selectedId, const Detail& detail) {
+void FactionPanel::applyDetail(const std::string& selectedId, const Detail& detail) {
     for (Widget* w : rows_) {
-        auto* row = static_cast<ReligionRow*>(w);
+        auto* row = static_cast<FactionRow*>(w);
         row->showSelected = (row->id == selectedId);
     }
     applyDetailContent(detail);
 }
 
-void ReligionPanel::setEntries(const UiRect& rect, float s,
-                               const std::vector<Entry>& entries, const Detail& detail) {
+void FactionPanel::setEntries(const UiRect& rect, float s,
+                              const std::vector<Entry>& entries, const Detail& detail) {
     children_.clear();
     rows_.clear();
     scale_ = s;
@@ -164,7 +163,7 @@ void ReligionPanel::setEntries(const UiRect& rect, float s,
     const float boldH = bf             ? bf->lineHeightPx()             : 22.0f * s;
     const float regH  = fonts_.regular ? fonts_.regular->lineHeightPx() : 20.0f * s;
 
-    // --- Left rail -----------------------------------------------------------
+    // Left rail
     const float railW = 190.0f * s;
     auto sv = std::make_unique<ScrollView>();
     sv->setRect(UiRect::fromXYWH(rect.minX + pad, rect.minY + pad,
@@ -176,7 +175,7 @@ void ReligionPanel::setEntries(const UiRect& rect, float s,
     const float rowH = 50.0f * s;
     const float rowW = sv->rect().width();
     for (const Entry& e : entries) {
-        auto row = std::make_unique<ReligionRow>(fonts_, s);
+        auto row = std::make_unique<FactionRow>(fonts_, s);
         row->setRect(UiRect::fromXYWH(0.0f, 0.0f, rowW, rowH));
         row->id           = e.id;
         row->name         = e.name;
@@ -189,7 +188,7 @@ void ReligionPanel::setEntries(const UiRect& rect, float s,
     }
     rail_ = static_cast<ScrollView*>(addChild(std::move(sv)));
 
-    // --- Right detail pane ---------------------------------------------------
+    // Right detail pane
     const float detailX = rect.minX + pad + railW + pad;
     const float detailW = rect.maxX - pad - detailX;
     float y = rect.minY + pad;
@@ -204,7 +203,6 @@ void ReligionPanel::setEntries(const UiRect& rect, float s,
     bonusLabel_ = static_cast<Label*>(addChild(std::move(bonusL)));
     y += regH + 6.0f * s;
 
-    // Separator.
     auto sep = std::make_unique<Panel>();
     sep->setRect(UiRect::fromXYWH(detailX, y, detailW, 1.5f * s));
     sep->background        = UiColor{0.78f, 0.62f, 0.30f, 0.40f};
@@ -213,8 +211,8 @@ void ReligionPanel::setEntries(const UiRect& rect, float s,
     addChild(std::move(sep));
     y += 1.5f * s + 8.0f * s;
 
-    const float btnH     = 34.0f * s;
-    const float btnBand  = btnH + 10.0f * s;
+    const float btnH    = 34.0f * s;
+    const float btnBand = btnH + 10.0f * s;
     const float bodyBottom = rect.maxY - pad - btnBand;
 
     auto body = std::make_unique<RichTextView>(fonts_, "");
@@ -225,8 +223,8 @@ void ReligionPanel::setEntries(const UiRect& rect, float s,
     bodyView_ = static_cast<RichTextView*>(addChild(std::move(body)));
 
     const Font* btnFont = fonts_.bold ? fonts_.bold : fonts_.regular;
-    auto btn = std::make_unique<Button>(btnFont, "Adopt this Faith", [this]() {
-        if (adoptAction_) adoptAction_();
+    auto btn = std::make_unique<Button>(btnFont, "Join this Faction", [this]() {
+        if (joinAction_) joinAction_();
     });
     btn->setRect(UiRect::fromXYWH(detailX, rect.maxY - pad - btnH, detailW, btnH));
     btn->cornerRadiusPx     = 2.0f * s;
@@ -235,7 +233,7 @@ void ReligionPanel::setEntries(const UiRect& rect, float s,
     btn->colorHover         = UiColor{0.22f, 0.38f, 0.18f, 1.00f};
     btn->colorPressed       = UiColor{0.10f, 0.18f, 0.09f, 1.00f};
     btn->borderColor        = UiColor{0.40f, 0.78f, 0.36f, 0.80f};
-    adoptBtn_ = static_cast<Button*>(addChild(std::move(btn)));
+    joinBtn_ = static_cast<Button*>(addChild(std::move(btn)));
 
     applyDetailContent(detail);
 }

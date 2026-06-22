@@ -21,6 +21,24 @@ using odai::math::Vector3;
 
 constexpr std::uint32_t kInvalidTextureIndex = 0xffffffffu;
 
+// Key for the per-corner vertex deduplication map.
+// Includes both world-space position (quantised) and terrain texture index so
+// two adjacent tiles that share a physical corner but render different terrain
+// textures each get their own vertex — preventing the first tile's texture from
+// bleeding onto its neighbour's geometry.
+struct CornerTexKey {
+    std::uint64_t pos;
+    std::uint32_t tex;
+    bool operator==(const CornerTexKey& o) const noexcept {
+        return pos == o.pos && tex == o.tex;
+    }
+};
+struct CornerTexKeyHash {
+    std::size_t operator()(const CornerTexKey& k) const noexcept {
+        return k.pos ^ (static_cast<std::uint64_t>(k.tex + 1u) * 0x9e3779b97f4a7c15ULL);
+    }
+};
+
 // Distinct, muted faction colors for territory borders and settlement markers.
 constexpr std::array<TileColor, 8> kOwnerColors = {{
     {0.78f, 0.24f, 0.22f},  // 0 (also used as "unowned" border fallback).
@@ -173,31 +191,95 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
     const float H = map.hexSize;
     // World-space UV scale: one texture repeat per hexSize so terrain tiles naturally.
     const float invHexSize = (H > 0.0f) ? (1.0f / H) : 0.0f;
-    const float landTopY = extruded ? 0.45f * H : 0.0f;       // single land plateau top
-    const float seaFloorY = 0.0f;                             // coastal shallows floor (just under the surface)
-    // Water is a single continuous surface; the sea FLOOR sinks with depth (below).
-    // The land plateau towers above the surface for the "land higher than water" read.
+    const float seaFloorY = 0.0f;
     const float waterSurfaceY = extruded ? 0.06f * H : 0.04f * H;
-    const float baseY = extruded ? -0.20f * H : 0.0f;        // land slab bottom for skirts
-    // Sea floor drop per elevation step below coast, and the deep slab bottom that
-    // the sea-floor skirts descend to (kept below the deepest possible floor).
+    const float baseY = extruded ? -0.20f * H : 0.0f;
     const float seaDepthPerStep = extruded ? 0.20f * H : 0.0f;
     const float seaBaseY = extruded ? -0.85f * H : 0.0f;
+    // Lowest land sits just above the water surface so coastlines read as raised plateaus.
+    const float landFloorY = 0.12f * H;
 
-    // Sea floor sinks with depth so open ocean reads deep-cobalt while coastal
-    // shallows stay azure — this is what drives the water shader's depth-based
-    // absorption/tint gradient. Coast (elevation 1) sits at the shallow seaFloorY;
-    // each elevation step below that drops the floor by seaDepthPerStep.
     const auto seaFloorAt = [&](const MapTile& t) -> float {
         const int stepsBelowCoast = 1 - std::clamp<int>(t.elevation, -2, 1);
         return seaFloorY - (static_cast<float>(stepsBelowCoast) * seaDepthPerStep);
     };
-    // Top-face Y for a tile: raised for land, depth-sunk sea floor for water (flat in 2D).
+
+    // Elevation range over land tiles only (drives the welded continuous surface).
+    int minElev = std::numeric_limits<int>::max();
+    int maxElev = std::numeric_limits<int>::min();
+    for (const MapTile& tile : map.tiles) {
+        if (!terrainIsWater(tile.terrain)) {
+            minElev = std::min(minElev, static_cast<int>(tile.elevation));
+            maxElev = std::max(maxElev, static_cast<int>(tile.elevation));
+        }
+    }
+    if (minElev > maxElev) { minElev = maxElev = 0; }
+    const float elevRange = static_cast<float>(std::max(1, maxElev - minElev));
+    const float reliefWorld =
+        static_cast<float>(maxElev - minElev) * map.elevationStep * options.heightExaggeration;
+
+    // Top-face Y for a tile: elevation-scaled for land, depth-sunk sea floor for water.
     const auto tileTopY = [&](const MapTile& t) -> float {
         if (!extruded) return 0.0f;
-        return terrainIsWater(t.terrain) ? seaFloorAt(t) : landTopY;
+        if (terrainIsWater(t.terrain)) return seaFloorAt(t);
+        const float norm =
+            (static_cast<float>(t.elevation) - static_cast<float>(minElev)) / elevRange;
+        return landFloorY + std::clamp(norm, 0.0f, 1.0f) * reliefWorld;
     };
     const auto atY = [](Vector3 v, float y) -> Vector3 { v.y = y; return v; };
+
+    // Weld: for each land-tile corner world-XZ, accumulate heights from every tile
+    // that claims that corner (2-3 tiles per interior corner). The averaged height
+    // makes adjacent tiles agree on corner Y so the surface is crack-free and reads
+    // as one continuous terrain instead of isolated per-tile plateaus.
+    // Water tiles are intentionally excluded so coastline corners are only pulled by
+    // the land-tile height (not dragged down to sea-floor level).
+    // Quantise world-XZ to a 64-bit key for corner deduplication. Precision is
+    // relative to hexSize (8 steps per hex) so the key stays valid regardless of
+    // the map scale — unlike a fixed 1/8-unit grid, which breaks at small hexSize.
+    auto cornerKey64 = [invHexSize](float x, float z) -> std::uint64_t {
+        const auto ix = static_cast<std::uint32_t>(static_cast<std::int32_t>(x * invHexSize * 8.0f));
+        const auto iz = static_cast<std::uint32_t>(static_cast<std::int32_t>(z * invHexSize * 8.0f));
+        return static_cast<std::uint64_t>(ix) | (static_cast<std::uint64_t>(iz) << 32);
+    };
+    struct CornerAccum { float sum = 0.0f; int count = 0; };
+    std::unordered_map<std::uint64_t, CornerAccum> cornerHeightMap;
+    cornerHeightMap.reserve(map.width * map.height * 3u);
+    for (std::uint32_t r = 0; r < map.height; ++r) {
+        for (std::uint32_t c = 0; c < map.width; ++c) {
+            const MapTile& t = map.at(c, r);
+            if (terrainIsWater(t.terrain)) { continue; }
+            // Hidden land tiles render as a flat dark surface (not welded terrain),
+            // so exclude them from height averaging to avoid dragging adjacent
+            // visible tiles' shared corners down to sea level.
+            if (options.fogOfWar && t.visibility == TileVisibility::Hidden) { continue; }
+            const float y = tileTopY(t);
+            for (int k = 0; k < 6; ++k) {
+                const Vector3 cp = tileCornerWorld(map, c, r, k);
+                auto& acc = cornerHeightMap[cornerKey64(cp.x, cp.z)];
+                acc.sum += y;
+                acc.count++;
+            }
+        }
+    }
+    const auto avgCornerY = [&](float x, float z, float fallback) -> float {
+        const auto it = cornerHeightMap.find(cornerKey64(x, z));
+        return (it != cornerHeightMap.end()) ? (it->second.sum / it->second.count) : fallback;
+    };
+
+    // Global corner vertex deduplication: a corner shared by adjacent tiles (and
+    // chunks) is stored once in scene.packedVertices, referenced by both draws.
+    // Smooth normals (computed after all terrain triangles are emitted) will then
+    // accumulate contributions from all triangles sharing each vertex.
+    // The key includes terrainTexIdx so different-terrain neighbours each get their
+    // own vertex — preventing the first tile's texture from bleeding onto adjacent
+    // terrain of a different type at shared boundary corners.
+    std::unordered_map<CornerTexKey, std::uint32_t, CornerTexKeyHash> cornerVertexMap;
+    cornerVertexMap.reserve(map.width * map.height * 3u);
+
+    // Track the terrain vertex/index range for the post-pass normal computation.
+    const auto terrainVertBase = static_cast<std::uint32_t>(scene.packedVertices.size());
+    const auto terrainIdxBase  = static_cast<std::uint32_t>(scene.packedIndices.size());
 
     // Per-chunk axis-aligned bounds, accumulated as a chunk's tiles are emitted, so
     // the renderer can frustum-cull each chunk page independently.
@@ -229,18 +311,52 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
                     if (!options.emitLandSurface && !terrainIsWater(tile.terrain)) {
                         continue;
                     }
-                    const TileColor topColor = tileTopColor(tile);
+                    // Hidden land tiles: emit a flat dark shroud at just above the
+                    // water surface so the player sees featureless darkness — no
+                    // elevation, no terrain type, no hex outline (grid skips them).
+                    if (options.fogOfWar && !terrainIsWater(tile.terrain) &&
+                        tile.visibility == TileVisibility::Hidden) {
+                        constexpr TileColor kShroud{0.03f, 0.03f, 0.05f};
+                        const float shroudY = waterSurfaceY + std::max(H * 0.005f, 0.2f);
+                        const Vector3 sc = atY(tileCenterWorld(map, col, row), shroudY);
+                        bounds.expand(sc);
+                        const std::uint32_t ci = builder.addVertex(sc, up, kShroud);
+                        std::array<std::uint32_t, 6> si{};
+                        for (int k = 0; k < 6; ++k) {
+                            const Vector3 cp = atY(tileCornerWorld(map, col, row, k), shroudY);
+                            bounds.expand(cp);
+                            si[static_cast<std::size_t>(k)] = builder.addVertex(cp, up, kShroud);
+                        }
+                        for (int k = 0; k < 6; ++k) {
+                            const std::size_t nxt = static_cast<std::size_t>((k + 1) % 6);
+                            builder.addTriangle(ci, si[nxt], si[static_cast<std::size_t>(k)]);
+                        }
+                        continue;
+                    }
+
+                    TileColor topColor = tileTopColor(tile);
+                    if (options.fogOfWar && tile.visibility == TileVisibility::Explored) {
+                        const float luma = topColor.r * 0.299f
+                                         + topColor.g * 0.587f
+                                         + topColor.b * 0.114f;
+                        topColor = {luma * 0.38f, luma * 0.40f, luma * 0.48f};
+                    }
                     const float topY = tileTopY(tile);
                     const Vector3 center = atY(tileCenterWorld(map, col, row), topY);
 
+                    // Land corners are welded: use the mean height across all tiles that
+                    // share each corner so adjacent tiles agree on corner Y (no cracks).
+                    // Water corners keep the tile's own sea-floor Y (not averaged with land).
                     std::array<Vector3, 6> corners{};
                     for (int corner = 0; corner < 6; ++corner) {
-                        corners[static_cast<std::size_t>(corner)] = atY(tileCornerWorld(map, col, row, corner), topY);
+                        const Vector3 rawCorner = tileCornerWorld(map, col, row, corner);
+                        const float cornerY = terrainIsWater(tile.terrain)
+                            ? topY
+                            : avgCornerY(rawCorner.x, rawCorner.z, topY);
+                        corners[static_cast<std::size_t>(corner)] = atY(rawCorner, cornerY);
                     }
 
                     // Top face as a fan from the center.
-                    // Use world-space XZ as UV (one tile = one repeat) and bind the
-                    // terrain texture when one was loaded for this terrain type.
                     const std::uint32_t terrainTexIdx =
                         static_cast<std::size_t>(tile.terrain) < terrainToTexIdx.size()
                         ? terrainToTexIdx[static_cast<std::size_t>(tile.terrain)]
@@ -254,13 +370,33 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
                     for (int corner = 0; corner < 6; ++corner) {
                         const Vector3& cp = corners[static_cast<std::size_t>(corner)];
                         bounds.expand(cp);
-                        cornerIndices[static_cast<std::size_t>(corner)] = builder.addVertex(
-                            cp, up, topColor,
-                            cp.x * invHexSize, cp.z * invHexSize,
-                            terrainTexIdx);
+                        if (!terrainIsWater(tile.terrain)) {
+                            // Land: deduplicate so the vertex is shared with adjacent tiles
+                            // of the same terrain type. Different-terrain neighbours each
+                            // get their own vertex (keyed by texIdx) so the first tile's
+                            // texture cannot bleed onto its neighbour at a shared corner.
+                            const CornerTexKey ckey{cornerKey64(cp.x, cp.z), terrainTexIdx};
+                            const auto it = cornerVertexMap.find(ckey);
+                            if (it != cornerVertexMap.end()) {
+                                cornerIndices[static_cast<std::size_t>(corner)] = it->second;
+                            } else {
+                                const std::uint32_t idx = builder.addVertex(
+                                    cp, up, topColor,
+                                    cp.x * invHexSize, cp.z * invHexSize,
+                                    terrainTexIdx);
+                                cornerVertexMap[ckey] = idx;
+                                cornerIndices[static_cast<std::size_t>(corner)] = idx;
+                            }
+                        } else {
+                            // Water: isolated corners; sea-floor geometry is rarely visible
+                            // and not shared across tile boundaries.
+                            cornerIndices[static_cast<std::size_t>(corner)] = builder.addVertex(
+                                cp, up, topColor,
+                                cp.x * invHexSize, cp.z * invHexSize,
+                                terrainTexIdx);
+                        }
                     }
-                    // Wind the top fan so the face points up (+Y) — front-facing for the
-                    // imported-static pipeline's CCW/back-cull convention.
+                    // Wind the top fan so the face points up (+Y).
                     for (int corner = 0; corner < 6; ++corner) {
                         const std::size_t next = static_cast<std::size_t>((corner + 1) % 6);
                         builder.addTriangle(centerIndex, cornerIndices[next], cornerIndices[static_cast<std::size_t>(corner)]);
@@ -301,6 +437,65 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
             }
         }
     }
+    // --- Post-pass: smooth per-vertex normals for all terrain geometry. ---
+    // Each vertex accumulates the area-weighted cross-products of every triangle
+    // that references it. After normalization, shared corner vertices get a proper
+    // blend of their neighbouring faces (smooth shading at elevation transitions)
+    // and the hex fan centre gets a stable near-up normal from all 6 fan triangles.
+    // This eliminates the tessellation-path topology singularity entirely.
+    {
+        const auto terrainVertEnd = static_cast<std::uint32_t>(scene.packedVertices.size());
+        const auto terrainIdxEnd  = static_cast<std::uint32_t>(scene.packedIndices.size());
+        const std::uint32_t nVerts = terrainVertEnd - terrainVertBase;
+        if (nVerts > 0u) {
+            std::vector<float> normAccum(static_cast<std::size_t>(nVerts) * 3u, 0.0f);
+            for (std::uint32_t i = terrainIdxBase; i + 2u < terrainIdxEnd; i += 3u) {
+                const std::uint32_t i0 = scene.packedIndices[i];
+                const std::uint32_t i1 = scene.packedIndices[i + 1u];
+                const std::uint32_t i2 = scene.packedIndices[i + 2u];
+                if (i0 < terrainVertBase || i0 >= terrainVertEnd ||
+                    i1 < terrainVertBase || i1 >= terrainVertEnd ||
+                    i2 < terrainVertBase || i2 >= terrainVertEnd) { continue; }
+                const auto& v0 = scene.packedVertices[i0];
+                const auto& v1 = scene.packedVertices[i1];
+                const auto& v2 = scene.packedVertices[i2];
+                const float ax = v1.position[0] - v0.position[0];
+                const float ay = v1.position[1] - v0.position[1];
+                const float az = v1.position[2] - v0.position[2];
+                const float bx = v2.position[0] - v0.position[0];
+                const float by = v2.position[1] - v0.position[1];
+                const float bz = v2.position[2] - v0.position[2];
+                const float nx = (ay * bz) - (az * by);
+                const float ny = (az * bx) - (ax * bz);
+                const float nz = (ax * by) - (ay * bx);
+                const std::array<std::uint32_t, 3> vis = {i0, i1, i2};
+                for (std::uint32_t vi : vis) {
+                    const std::uint32_t off = (vi - terrainVertBase) * 3u;
+                    normAccum[off]      += nx;
+                    normAccum[off + 1u] += ny;
+                    normAccum[off + 2u] += nz;
+                }
+            }
+            for (std::uint32_t vi = terrainVertBase; vi < terrainVertEnd; ++vi) {
+                const std::uint32_t off = (vi - terrainVertBase) * 3u;
+                const float nx = normAccum[off];
+                const float ny = normAccum[off + 1u];
+                const float nz = normAccum[off + 2u];
+                const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+                auto& v = scene.packedVertices[vi];
+                if (len > 1e-6f) {
+                    v.normal[0] = nx / len;
+                    v.normal[1] = ny / len;
+                    v.normal[2] = nz / len;
+                } else {
+                    v.normal[0] = 0.0f;
+                    v.normal[1] = 1.0f;
+                    v.normal[2] = 0.0f;
+                }
+            }
+        }
+    }
+
     // Terrain chunk draws occupy the contiguous prefix [0, terrainDrawCount); the
     // renderer keys its terrain/static split off sourceLandscapeCellCount.
     const std::uint32_t terrainDrawCount = static_cast<std::uint32_t>(scene.packedDraws.size());
@@ -340,11 +535,10 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
         for (std::uint32_t row = 0; row < map.height; ++row) {
             for (std::uint32_t col = 0; col < map.width; ++col) {
                 const MapTile& tile = map.at(col, row);
-                // Skip water tiles: the animated water surface covers them and
-                // thin edge quads create visible artifacts on the reflective surface.
-                if (terrainIsWater(tile.terrain)) {
-                    continue;
-                }
+                // Skip water tiles and Hidden land tiles: water has the animated
+                // surface above it; Hidden tiles get the flat shroud (no hex outline).
+                if (terrainIsWater(tile.terrain)) { continue; }
+                if (options.fogOfWar && tile.visibility == TileVisibility::Hidden) { continue; }
                 const bool isBorder = (tile.flags & TileFlag_Border) != 0u;
                 const TileColor tileColor = tileTopColor(tile);
                 // Extremely subtle: darken the tile's own color just 8-12%, with a
@@ -355,10 +549,10 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
                     : blend(tileColor, darkTint, 0.08f);
                 const float topY = tileTopY(tile);
                 for (int corner = 0; corner < 6; ++corner) {
-                    Vector3 a = atY(tileCornerWorld(map, col, row, corner), topY);
-                    Vector3 b = atY(tileCornerWorld(map, col, row, (corner + 1) % 6), topY);
-                    a.y += lift;
-                    b.y += lift;
+                    const Vector3 rawA = tileCornerWorld(map, col, row, corner);
+                    const Vector3 rawB = tileCornerWorld(map, col, row, (corner + 1) % 6);
+                    Vector3 a{rawA.x, avgCornerY(rawA.x, rawA.z, topY) + lift, rawA.z};
+                    Vector3 b{rawB.x, avgCornerY(rawB.x, rawB.z, topY) + lift, rawB.z};
                     const Vector3 edge = odai::math::normalize(b - a);
                     const Vector3 side = odai::math::cross(up, edge) * halfWidth;
                     builder.addQuad(a - side, b - side, b + side, a + side, lineColor);
@@ -376,6 +570,8 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
                 continue;
             }
             const MapTile& tile = map.at(settlement.col, settlement.row);
+            // Don't reveal settlements the player hasn't discovered.
+            if (options.fogOfWar && tile.visibility == TileVisibility::Hidden) { continue; }
             const Vector3 center = atY(tileCenterWorld(map, settlement.col, settlement.row), tileTopY(tile));
             const float halfExtent = map.hexSize * 0.35f;
             const float height = options.settlementHeight * static_cast<float>(std::max<std::uint8_t>(settlement.tier, 1));
@@ -412,6 +608,12 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
                 continue;
             }
             const MapTile& tile = map.at(unit.col, unit.row);
+            // Hide enemy units on tiles that aren't currently visible to the player.
+            if (options.fogOfWar && options.playerOwner != 0 &&
+                unit.owner != options.playerOwner &&
+                tile.visibility != TileVisibility::Visible) {
+                continue;
+            }
             const Vector3 base = atY(tileCenterWorld(map, unit.col, unit.row), tileTopY(tile));
             const float halfExtent = map.hexSize * 0.22f;
             const float boxHeight = map.hexSize * 0.5f;
@@ -441,6 +643,38 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
             builder.addQuad(corners[1], corners[2], corners[6], corners[5], color);  // +X
         }
         builder.finishDraw(unitFirstIndex);
+    }
+
+    // --- Draw N: observation fort markers (narrow stone watchtowers). ---
+    {
+        const auto fortFirstIndex = static_cast<std::uint32_t>(scene.packedIndices.size());
+        const TileColor fortWall{0.50f, 0.47f, 0.44f};
+        const TileColor fortTop{0.60f, 0.58f, 0.54f};
+        for (std::uint32_t row = 0; row < map.height; ++row) {
+            for (std::uint32_t col = 0; col < map.width; ++col) {
+                const MapTile& tile = map.at(col, row);
+                if (!(tile.flags & TileFlag_Fort)) continue;
+                if (options.fogOfWar && tile.visibility == TileVisibility::Hidden) continue;
+                const Vector3 base = atY(tileCenterWorld(map, col, row), tileTopY(tile));
+                const float he = map.hexSize * 0.12f;  // narrow footprint
+                const float towerH = map.hexSize * 1.1f;
+                const float lift = std::max(H * 0.02f, 0.5f);
+                const float minX = base.x - he;   const float maxX = base.x + he;
+                const float minZ = base.z - he;   const float maxZ = base.z + he;
+                const float minY = base.y + lift;  const float maxY = base.y + lift + towerH;
+                const Vector3 fc[8] = {
+                    {minX,minY,minZ},{maxX,minY,minZ},{maxX,minY,maxZ},{minX,minY,maxZ},
+                    {minX,maxY,minZ},{maxX,maxY,minZ},{maxX,maxY,maxZ},{minX,maxY,maxZ},
+                };
+                builder.addQuad(fc[4],fc[5],fc[6],fc[7], fortTop);   // top
+                builder.addQuad(fc[3],fc[2],fc[1],fc[0], fortWall);  // bottom
+                builder.addQuad(fc[0],fc[1],fc[5],fc[4], fortWall);  // -Z
+                builder.addQuad(fc[2],fc[3],fc[7],fc[6], fortWall);  // +Z
+                builder.addQuad(fc[3],fc[0],fc[4],fc[7], fortWall);  // -X
+                builder.addQuad(fc[1],fc[2],fc[6],fc[5], fortWall);  // +X
+            }
+        }
+        builder.finishDraw(fortFirstIndex);
     }
 
     // Grid overlay + settlement draws are not spatially chunked; cover them with a

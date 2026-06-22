@@ -24,16 +24,18 @@ constexpr float kInradiusFrac = 0.8660254f;  // sqrt(3)/2: inradius / circumradi
 // surface reads as rolling relief rather than spikes (the shader smooths further).
 // Water terrains produce no land instance and are never indexed here.
 float terrainDetailAmplitudeFrac(TerrainType terrain) {
+    // Clean flat-ish tiles: keep just enough relief for mountains/hills to read as
+    // raised, but well below the level where the per-tile fan facets become visible.
     switch (terrain) {
-        case TerrainType::Mountains: return 0.45f;
-        case TerrainType::Hills:     return 0.20f;
-        case TerrainType::Forest:    return 0.09f;
-        case TerrainType::Jungle:    return 0.09f;
-        case TerrainType::Snow:      return 0.06f;
-        case TerrainType::Desert:    return 0.05f;
-        case TerrainType::Plains:    return 0.035f;
-        case TerrainType::Grassland: return 0.035f;
-        case TerrainType::Tundra:    return 0.035f;
+        case TerrainType::Mountains: return 0.16f;
+        case TerrainType::Hills:     return 0.07f;
+        case TerrainType::Forest:    return 0.03f;
+        case TerrainType::Jungle:    return 0.03f;
+        case TerrainType::Snow:      return 0.02f;
+        case TerrainType::Desert:    return 0.015f;
+        case TerrainType::Plains:    return 0.012f;
+        case TerrainType::Grassland: return 0.012f;
+        case TerrainType::Tundra:    return 0.012f;
         default:                     return 0.0f;
     }
 }

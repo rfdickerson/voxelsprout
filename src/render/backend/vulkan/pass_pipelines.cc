@@ -1154,6 +1154,11 @@ bool RendererBackend::createPipePipeline() {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipelineRt), "pipeline.importedWater.rt");
     }
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_grassBillboardPipeline), "pipeline.grass.billboard");
+    // Legacy pipe lit pipeline (prior factory sim) is bound by no render pass anymore.
+    if (m_pipePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
+        m_pipePipeline = VK_NULL_HANDLE;
+    }
     m_rtMainPassImplemented =
         m_rayTracingRuntimeEnabled &&
         (m_pipelineRt != VK_NULL_HANDLE ||
@@ -1845,6 +1850,16 @@ bool RendererBackend::createAoPipelines() {
     );
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_ssaoPipeline), "pipeline.ssao");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_ssaoBlurPipeline), "pipeline.ssaoBlur");
+    // Legacy voxel + pipe normal-depth prepass pipelines (prior game) are bound by no
+    // pass anymore; free the freshly built handles and null the members.
+    if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_voxelNormalDepthPipeline, nullptr);
+        m_voxelNormalDepthPipeline = VK_NULL_HANDLE;
+    }
+    if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_pipeNormalDepthPipeline, nullptr);
+        m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
+    }
     return true;
 }
 
@@ -3131,6 +3146,19 @@ bool RendererBackend::createGraphicsPipeline() {
         vkHandleToUint64(m_previewFaceOutlinePipeline),
         "pipeline.preview.faceOutline"
     );
+    // Legacy voxel world/shadow + voxel-edit preview + pipe-shadow pipelines (prior
+    // voxel/factory game) are bound by no render pass anymore. Free the freshly built
+    // handles and null the members so nothing can bind them; the strategy map renders via
+    // the hex/imported/sky/tonemap path. (The creation code itself stays in this shared
+    // builder — removing it is a separate, larger refactor.)
+    for (VkPipeline* deadPipeline : {&m_pipeline, &m_pipelineRt, &m_shadowPipeline,
+                                     &m_pipeShadowPipeline, &m_previewAddPipeline,
+                                     &m_previewRemovePipeline, &m_previewFaceOutlinePipeline}) {
+        if (*deadPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, *deadPipeline, nullptr);
+            *deadPipeline = VK_NULL_HANDLE;
+        }
+    }
     if (!m_strategyMapMode && !createMagicaPipeline()) {
         VOX_LOGE("render") << "createGraphicsPipeline failed: createMagicaPipeline\n";
         return false;

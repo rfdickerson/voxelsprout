@@ -3,6 +3,7 @@
 #include <GLFW/glfw3.h>
 
 #include "core/grid3.h"
+#include "game/ai_units.h"
 #include "game/buildable.h"
 #include "game/economy.h"
 #include "game/great_people.h"
@@ -17,24 +18,26 @@
 #include "ui/icon_atlas.h"
 #include "ui/widgets/button.h"
 #include "ui/widgets/donut_chart.h"
-#include "ui/widgets/great_people_panel.h"
-#include "ui/widgets/religion_panel.h"
+#include "ui/widgets/notable_entity_panel.h"
+#include "ui/widgets/faction_panel.h"
 #include "ui/widgets/image.h"
 #include "ui/widgets/label.h"
 #include "ui/widgets/line_chart.h"
-#include "ui/widgets/command_view_panel.h"
+#include "ui/widgets/selection_inspector_panel.h"
 #include "ui/widgets/icon_button.h"
 #include "ui/widgets/minimap_panel.h"
 #include "ui/widgets/panel.h"
-#include "ui/widgets/production_panel.h"
+#include "ui/widgets/build_queue_panel.h"
 #include "ui/widgets/rich_text_view.h"
 #include "ui/widgets/stat_badge.h"
-#include "ui/widgets/tech_tree_panel.h"
+#include "ui/widgets/research_panel.h"
 #include "ui/widgets/toast.h"
 #include "ui/widgets/toolbar.h"
 #include "ui/widgets/window.h"
-#include "ui/widgets/world_tracker_panel.h"
-#include "ui/yield_style.h"
+#include "ui/widgets/event_tracker_panel.h"
+#include "app/yield_style.h"
+
+#include "import/dds.h"
 
 #include <stb_image.h>
 
@@ -688,10 +691,21 @@ odai::core::Dir6 resolveStraightAxisFromMask(std::uint8_t mask, odai::core::Dir6
 }
 
 // Load a PNG as an ImportedSceneTexture with a full box-filter mip chain.
+// Checks for a .dds sidecar first — block-compressed with prebuilt mip chain,
+// much faster to load and uses 4× less GPU memory. Falls back to PNG + CPU mips.
 // Returns an empty texture (width==0) if the file is missing or unreadable.
 odai::importer::ImportedSceneTexture loadTerrainTextureWithMips(
     const std::filesystem::path& path)
 {
+    {
+        auto ddsPath = path;
+        ddsPath.replace_extension(".dds");
+        odai::importer::ImportedSceneTexture dds{};
+        if (odai::importer::loadDds(ddsPath, dds)) {
+            return dds;
+        }
+    }
+
     odai::importer::ImportedSceneTexture tex{};
     tex.sourcePath = path.string();
     int w = 0, h = 0;
@@ -747,13 +761,84 @@ odai::importer::ImportedSceneTexture loadTerrainTextureWithMips(
 // Build the strategy-map mesh options for the given relief mode. Terrain textures are
 // passed in from the App's cached copies (loaded once at init) to avoid repeated disk
 // I/O and mip-chain generation on every re-mesh (M toggle, end-turn, unit moves).
+// Hex distance between two tiles in odd-r offset coordinates (pointy-top hex grid).
+static int hexDistOddR(int c1, int r1, int c2, int r2) {
+    const int x1 = c1 - (r1 - (r1 & 1)) / 2;
+    const int y1 = -x1 - r1;
+    const int x2 = c2 - (r2 - (r2 & 1)) / 2;
+    const int y2 = -x2 - r2;
+    return (std::abs(x1 - x2) + std::abs(y1 - y2) + std::abs(r1 - r2)) / 2;
+}
+
+// Reveal all tiles within `radius` hexes of (sc, sr), marking them Visible.
+// Clamps the scan window to the map so the inner loop is tight.
+static void revealRadius(odai::game::StrategyMap& map, int sc, int sr, int radius) {
+    const int c0 = std::max(0, sc - radius);
+    const int c1 = std::min(static_cast<int>(map.width)  - 1, sc + radius);
+    const int r0 = std::max(0, sr - radius);
+    const int r1 = std::min(static_cast<int>(map.height) - 1, sr + radius);
+    for (int r = r0; r <= r1; ++r) {
+        for (int c = c0; c <= c1; ++c) {
+            if (hexDistOddR(sc, sr, c, r) <= radius) {
+                map.at(static_cast<std::uint32_t>(c),
+                       static_cast<std::uint32_t>(r)).visibility =
+                    odai::game::TileVisibility::Visible;
+            }
+        }
+    }
+}
+
+// Recompute per-tile fog-of-war visibility from current city/unit/fort positions.
+//   • Previously Visible tiles demote to Explored (keeps exploration memory).
+//   • Player settlements reveal radius 4.
+//   • Player units reveal radius 2; scouts reveal radius 3.
+//   • Tiles with TileFlag_Fort reveal radius 5.
+// Call before every rebuildStrategyMapScene() when fog is enabled.
+static void recomputeFogOfWarVisibility(
+    odai::game::StrategyMap& map,
+    const std::vector<odai::game::Unit>& units,
+    std::uint8_t playerOwner)
+{
+    // Demote all currently-visible tiles to Explored so moving units shrink the
+    // revealed area without erasing already-explored terrain from the record.
+    for (auto& tile : map.tiles) {
+        if (tile.visibility == odai::game::TileVisibility::Visible) {
+            tile.visibility = odai::game::TileVisibility::Explored;
+        }
+    }
+    // Cities — radius 4.
+    for (const auto& s : map.settlements) {
+        if (s.owner != playerOwner) continue;
+        revealRadius(map, static_cast<int>(s.col), static_cast<int>(s.row), 4);
+    }
+    // Units — radius 2 (scouts: 3).
+    for (const auto& u : units) {
+        if (u.owner != playerOwner || !u.alive()) continue;
+        if (!map.inBounds(static_cast<int>(u.col), static_cast<int>(u.row))) continue;
+        const int sight = (u.typeId == "scout") ? 3 : 2;
+        revealRadius(map, static_cast<int>(u.col), static_cast<int>(u.row), sight);
+    }
+    // Observation forts — radius 5.
+    for (std::uint32_t row = 0; row < map.height; ++row) {
+        for (std::uint32_t col = 0; col < map.width; ++col) {
+            if (map.at(col, row).flags & odai::game::TileFlag_Fort) {
+                revealRadius(map, static_cast<int>(col), static_cast<int>(row), 5);
+            }
+        }
+    }
+}
+
 odai::game::StrategyMapMeshOptions makeStrategyMapMeshOptions(
     bool extruded,
+    bool fogOfWar,
+    std::uint8_t playerOwner,
     const std::vector<odai::importer::ImportedSceneTexture>& terrainTextures)
 {
     odai::game::StrategyMapMeshOptions meshOptions{};
     meshOptions.extruded = extruded;
     meshOptions.drawSettlements = false;
+    meshOptions.fogOfWar = fogOfWar;
+    meshOptions.playerOwner = playerOwner;
     meshOptions.terrainTextures = terrainTextures;
     return meshOptions;
 }
@@ -1059,10 +1144,14 @@ bool App::init() {
     // (it sets m_playerOwner). The strategy-map mesh renders m_gameWorld.map so the
     // territory the sim paints (tile owners) shows up as borders on the board.
     seedGameWorldFromSettlements();
+    // Seed per-tile fog-of-war visibility (cities + starting units). Tiles outside
+    // LOS start as Hidden so enabling fog immediately shows a meaningful frontier.
+    recomputeFogOfWarVisibility(m_gameWorld.map, m_gameState.units, m_playerOwner);
 
     // Start in 3D relief mode; toggling (M) re-meshes flat for the 2D board view.
     m_strategyMap3D = true;
-    odai::game::StrategyMapMeshOptions meshOptions = makeStrategyMapMeshOptions(/*extruded=*/true, m_terrainTextures);
+    odai::game::StrategyMapMeshOptions meshOptions = makeStrategyMapMeshOptions(
+        /*extruded=*/true, m_fogOfWarEnabled, m_playerOwner, m_terrainTextures);
     m_importedScene = odai::game::buildStrategyMapScene(m_gameWorld.map, m_gameState.units, std::move(meshOptions));
     m_importedSceneDemoEnabled = true;
     m_hoverEnabled = true;
@@ -1117,12 +1206,11 @@ bool App::init() {
     }
     m_renderer.setImportedSceneInteriorMode(false);
 
-    // GPU hex land: when the device created the tessellation pipeline, upload the
-    // instanced, height-displaced hex terrain and re-mesh so the imported-static path
-    // drops the land tops (the hex pipeline owns them). Falls back to flat land
-    // otherwise. Active in 3D relief only; the flat 2D board keeps the imported land.
-    m_useHexTerrain = m_renderer.hexTerrainReady();
-    if (m_useHexTerrain) {
+    // The welded CPU terrain (buildStrategyMapScene with heightExaggeration) now owns
+    // the land surface, so the GPU tessellation path is retired. Set m_useHexTerrain=false
+    // so hexOwnsLand=false → emitLandSurface=true, and no instanced hex draw is issued.
+    m_useHexTerrain = false;
+    if (false) {  // tessellation path retired — kept for reference
         // Re-mesh first so the imported scene drops the land/grid and (re-)uploads the
         // terrain textures; the hex builder then references those same bindless slots.
         rebuildStrategyMapScene();
@@ -3444,6 +3532,16 @@ const char* terrainName(odai::game::TerrainType t) {
     }
 }
 
+// Shared display name table for unit typeIds. Used in both the combat preview
+// battle card and the unit-action bar title. Single source of truth.
+const std::unordered_map<std::string, std::string> kUnitNames = {
+    {"warrior",  "Warrior"},  {"archer",   "Archer"},
+    {"spearman", "Spearman"}, {"scout",    "Scout"},
+    {"settler",  "Settler"},  {"builder",  "Builder"},
+    {"cavalry",  "Cavalry"},  {"ship",     "Ship"},
+    {"siege",    "Siege"},
+};
+
 }  // namespace
 
 void App::setupHud(float viewW, float viewH) {
@@ -3968,6 +4066,38 @@ void App::setupHud(float viewW, float viewH) {
             m_toolbar->addChild(std::move(logoBtn));
         }
 
+        // Fog-of-war toggle button — sits just left of the turn readout.
+        {
+            const float fogW = 80.0f * s;
+            const float fogH = 24.0f * s;
+            const float fogX = viewW - 336.0f * s;
+            const float fogY = (kToolbarH - fogH) * 0.5f;
+            auto fogBtn = std::make_unique<odai::ui::Button>(
+                fonts.regular, "Fog: ON",
+                [this]() {
+                    m_fogOfWarEnabled = !m_fogOfWarEnabled;
+                    if (m_fogButton != nullptr) {
+                        m_fogButton->setLabel(m_fogOfWarEnabled ? "Fog: ON" : "Fog: OFF");
+                        // Active = blue tint; inactive = quiet gray.
+                        m_fogButton->colorNormal = m_fogOfWarEnabled
+                            ? odai::ui::UiColor{0.10f, 0.22f, 0.42f, 0.92f}
+                            : odai::ui::UiColor{0.10f, 0.12f, 0.14f, 0.80f};
+                    }
+                    rebuildStrategyMapScene();
+                });
+            fogBtn->setRect(odai::ui::UiRect::fromXYWH(fogX, fogY, fogW, fogH));
+            fogBtn->colorNormal       = odai::ui::UiColor{0.10f, 0.22f, 0.42f, 0.92f};
+            fogBtn->colorHover        = odai::ui::UiColor{0.18f, 0.24f, 0.34f, 0.95f};
+            fogBtn->colorPressed      = odai::ui::UiColor{0.07f, 0.09f, 0.12f, 0.95f};
+            fogBtn->borderColor       = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.18f};
+            fogBtn->borderThicknessPx = 1.0f * s;
+            fogBtn->labelColor        = odai::ui::UiColor{0.75f, 0.80f, 0.88f, 1.0f};
+            fogBtn->glowSizePx        = 0.0f;
+            fogBtn->cornerRadiusPx    = 2.0f * s;
+            fogBtn->showBevel         = false;
+            m_fogButton = static_cast<odai::ui::Button*>(m_toolbar->addChild(std::move(fogBtn)));
+        }
+
         // Right-aligned turn readout on the toolbar.
         auto turn = std::make_unique<odai::ui::Label>(fonts, "");
         turn->align = odai::ui::UiTextAlign::Right;
@@ -4291,14 +4421,14 @@ void App::setupHud(float viewW, float viewH) {
 
         auto makeRow = [&](const odai::game::BuildableItem& item,
                            const std::string& section) {
-            odai::ui::ProductionPanel::Row row;
-            row.id             = item.id;
-            row.name           = item.name;
-            row.iconName       = item.iconName;
-            row.productionCost = item.productionCost;
-            row.turns          = odai::game::turnsToBuild(item.productionCost, kAccumulated, kPerTurn);
-            row.selected       = (item.id == m_cityProductionId);
-            row.section        = section;
+            odai::ui::BuildQueuePanel::Row row;
+            row.id       = item.id;
+            row.name     = item.name;
+            row.iconName = item.iconName;
+            row.cost     = item.productionCost;
+            row.turns    = odai::game::turnsToBuild(item.productionCost, kAccumulated, kPerTurn);
+            row.selected = (item.id == m_cityProductionId);
+            row.section  = section;
 
             const std::string itemId = item.id;
             row.onSelect = [this, itemId]() {
@@ -4312,7 +4442,7 @@ void App::setupHud(float viewW, float viewH) {
             const std::string pIcon    = item.iconName;
             const bool        pIsUnit  = (item.kind == odai::game::BuildableKind::Unit);
             const std::string pArticle = odai::game::getPediaArticle(item.id);
-            row.onOpenPedia = [this, pName, pIcon, pIsUnit, pArticle]() {
+            row.onOpenDetail = [this, pName, pIcon, pIsUnit, pArticle]() {
                 if (m_civpediaWindow != nullptr) m_civpediaWindow->visible = true;
 
                 // Update portrait icon.
@@ -4342,7 +4472,7 @@ void App::setupHud(float viewW, float viewH) {
         };
 
         // Buildings first ("Districts & Buildings"), then Units.
-        std::vector<odai::ui::ProductionPanel::Row> rows;
+        std::vector<odai::ui::BuildQueuePanel::Row> rows;
         for (const odai::game::BuildableItem& item : odai::game::defaultBuildables()) {
             if (item.kind == odai::game::BuildableKind::Building)
                 rows.push_back(makeRow(item, "Districts & Buildings"));
@@ -4352,20 +4482,16 @@ void App::setupHud(float viewW, float viewH) {
                 rows.push_back(makeRow(item, "Units"));
         }
 
-        odai::ui::ProductionPanel::CityInfo cityInfo;
-        cityInfo.name         = "Rome";
-        cityInfo.food         = 4;
-        cityInfo.production   = 3;
-        cityInfo.gold         = 7;
-        cityInfo.science      = 3;
-        cityInfo.faith        = 2;
-        cityInfo.culture      = 4;
-        cityInfo.governorName = "Magnus";
+        odai::ui::BuildQueuePanel::LocationInfo cityInfo;
+        cityInfo.name        = "Rome";
+        cityInfo.stats       = {{"food", "4"}, {"production", "3"}, {"gold", "7"},
+                                {"science", "3"}, {"faith", "2"}, {"culture", "4"}};
+        cityInfo.managerName = "Magnus";
 
-        auto prodPanel = std::make_unique<odai::ui::ProductionPanel>(fonts);
+        auto prodPanel = std::make_unique<odai::ui::BuildQueuePanel>(fonts);
         prodPanel->setItems(odai::ui::UiRect::fromXYWH(prodX, prodTop, prodW, prodH),
                             s, "Choose Production", rows, cityInfo);
-        m_productionPanel = static_cast<odai::ui::ProductionPanel*>(root->addChild(std::move(prodPanel)));
+        m_productionPanel = static_cast<odai::ui::BuildQueuePanel*>(root->addChild(std::move(prodPanel)));
         m_productionPanel->visible = false;  // hidden until the player clicks a city
     }
 
@@ -4419,6 +4545,30 @@ void App::setupHud(float viewW, float viewH) {
                         }
                     }
                 });
+            // Click or drag on the map image: pan the camera to that world position.
+            m_minimap->onMapClick = [this](float nx, float ny) {
+                const float worldX = m_mapMinX + nx * (m_mapMaxX - m_mapMinX);
+                const float worldZ = m_mapMinZ + ny * (m_mapMaxZ - m_mapMinZ);
+                m_mapFocusVelocityX = 0.0f;
+                m_mapFocusVelocityZ = 0.0f;
+                if (m_strategyMap3D) {
+                    m_map3DFocusX = worldX;
+                    m_map3DFocusZ = worldZ;
+                    const float yawR   = odai::math::radians(kMap3DYawDegrees);
+                    const float pitchR = odai::math::radians(m_map3DPitchDeg);
+                    const float cpv = std::cos(pitchR);
+                    const odai::math::Vector3 fwd{cpv * std::cos(yawR),
+                                                  std::sin(pitchR),
+                                                  cpv * std::sin(yawR)};
+                    m_camera.x = m_map3DFocusX - fwd.x * m_map3DDistance;
+                    m_camera.y = -fwd.y * m_map3DDistance;
+                    m_camera.z = m_map3DFocusZ - fwd.z * m_map3DDistance;
+                } else {
+                    m_camera.x = worldX;
+                    m_camera.z = worldZ;
+                }
+                m_cameraPrevious = m_camera;
+            };
         }
     }
 
@@ -4430,9 +4580,9 @@ void App::setupHud(float viewW, float viewH) {
         // Stop above the Turn Summary footer (not at the bar) so they don't overlap.
         const float cvH = summaryTopY - cvY - kPanelGap;
         m_commandViewRect = odai::ui::UiRect::fromXYWH(cvX, cvY, cvW, cvH);
-        auto cv = std::make_unique<odai::ui::CommandViewPanel>(fonts);
+        auto cv = std::make_unique<odai::ui::SelectionInspectorPanel>(fonts);
         cv->setRect(m_commandViewRect);
-        m_commandView = static_cast<odai::ui::CommandViewPanel*>(root->addChild(std::move(cv)));
+        m_commandView = static_cast<odai::ui::SelectionInspectorPanel*>(root->addChild(std::move(cv)));
     }
 
     // CivPedia window (top-right): a draggable framed window. When the parchment
@@ -4582,8 +4732,8 @@ void App::setupHud(float viewW, float viewH) {
         techWin->showCloseButton = true;
         techWin->draggable       = true;
 
-        auto panel = std::make_unique<odai::ui::TechTreePanel>(fonts);
-        m_techTreePanel  = static_cast<odai::ui::TechTreePanel*>(techWin->addChild(std::move(panel)));
+        auto panel = std::make_unique<odai::ui::ResearchPanel>(fonts);
+        m_techTreePanel  = static_cast<odai::ui::ResearchPanel*>(techWin->addChild(std::move(panel)));
         m_techTreeWindow = static_cast<odai::ui::Window*>(root->addChild(std::move(techWin)));
         m_techTreeWindow->visible = false;
         refreshTechTree();
@@ -4618,8 +4768,8 @@ void App::setupHud(float viewW, float viewH) {
         gpWin->showCloseButton = true;
         gpWin->draggable       = true;
 
-        auto panel = std::make_unique<odai::ui::GreatPeoplePanel>(fonts);
-        m_greatPeoplePanel  = static_cast<odai::ui::GreatPeoplePanel*>(gpWin->addChild(std::move(panel)));
+        auto panel = std::make_unique<odai::ui::NotableEntityPanel>(fonts);
+        m_greatPeoplePanel  = static_cast<odai::ui::NotableEntityPanel*>(gpWin->addChild(std::move(panel)));
         m_greatPeopleWindow = static_cast<odai::ui::Window*>(root->addChild(std::move(gpWin)));
         m_greatPeopleWindow->visible = false;
         refreshGreatPeople();
@@ -4653,8 +4803,8 @@ void App::setupHud(float viewW, float viewH) {
         relWin->showCloseButton = true;
         relWin->draggable       = true;
 
-        auto panel = std::make_unique<odai::ui::ReligionPanel>(fonts);
-        m_religionPanel  = static_cast<odai::ui::ReligionPanel*>(relWin->addChild(std::move(panel)));
+        auto panel = std::make_unique<odai::ui::FactionPanel>(fonts);
+        m_religionPanel  = static_cast<odai::ui::FactionPanel*>(relWin->addChild(std::move(panel)));
         m_religionWindow = static_cast<odai::ui::Window*>(root->addChild(std::move(relWin)));
         m_religionWindow->visible = false;
         refreshReligion();
@@ -4708,11 +4858,18 @@ void App::setupHud(float viewW, float viewH) {
         ap->addChild(std::move(nameLabel));
 
         // Pre-built action slot buttons (icon-only, hidden until assigned).
+        // onClick dispatches through m_slotCallbacks so the callback can be rewired
+        // each time the unit selection changes without rebuilding the widget tree.
         const float slotsX = nameX + nameW + sepW;
         for (int si = 0; si < kMaxActionSlots; ++si) {
             const float bx = slotsX + static_cast<float>(si) * (btnSz + btnGap);
             const float by = panelY + padY;
-            auto btn = std::make_unique<odai::ui::IconButton>([]() {});
+            const int capturedSi = si;
+            auto btn = std::make_unique<odai::ui::IconButton>([this, capturedSi]() {
+                if (capturedSi < kMaxActionSlots && m_slotCallbacks[capturedSi]) {
+                    m_slotCallbacks[capturedSi]();
+                }
+            });
             btn->setRect(odai::ui::UiRect::fromXYWH(bx, by, btnSz, btnSz));
             btn->cornerRadiusPx = 2.0f * s;
             btn->glowSizePx     = 12.0f * s;
@@ -4871,9 +5028,8 @@ void App::setupHud(float viewW, float viewH) {
     refreshEventFeed();
 }
 
-void App::drawStrategyMapLabels(float fbW, float fbH) {
+void App::drawStrategyMapLabels(float fbW, float fbH, float dt) {
     if (!m_strategyMapMode || !m_uiFontReady) return;
-    if (m_strategyMap.settlements.empty() && m_gameState.units.empty()) return;
 
     const auto& cam = m_renderCameraPose;
     const float aspectRatio = fbW / fbH;
@@ -5038,6 +5194,151 @@ void App::drawStrategyMapLabels(float fbW, float fbH) {
             }
         }
     }
+
+    // --- Floating damage labels (world-space, rise and fade post-combat) ---
+    // Project each label's world position (with upward drift over time) and draw.
+    {
+        for (auto& fl : m_floatingLabels) {
+            fl.age += dt;
+            const float t   = std::min(fl.age / fl.duration, 1.0f);
+            const float alpha = (1.0f - t) * (1.0f - t);  // quadratic fade
+            const float riseY = fl.worldY + t * m_strategyMap.hexSize * 0.9f;
+
+            const odai::math::Vector4 clip = vp * odai::math::Vector4{fl.worldX, riseY, fl.worldZ, 1.0f};
+            if (clip.w <= 0.0f) continue;
+            const float ndcX = clip.x / clip.w;
+            const float ndcY = clip.y / clip.w;
+            if (ndcX < -1.2f || ndcX > 1.2f || ndcY < -1.2f || ndcY > 1.2f) continue;
+            const float sx = (ndcX + 1.0f) * 0.5f * fbW;
+            const float sy = (ndcY + 1.0f) * 0.5f * fbH;
+
+            const float textW = font.measureText(fl.text);
+            const float tx = sx - textW * 0.5f;
+            const float ty = sy - halfLineH;
+            odai::ui::UiColor col = fl.color;
+            col.a = alpha;
+            const odai::ui::UiColor shad{0.f, 0.f, 0.f, alpha * 0.7f};
+            m_uiDrawList.addText(font, fl.text, {tx + 1.5f, ty + 1.5f}, shad);
+            m_uiDrawList.addText(font, fl.text, {tx, ty}, col);
+        }
+        m_floatingLabels.erase(
+            std::remove_if(m_floatingLabels.begin(), m_floatingLabels.end(),
+                           [](const FloatingLabel& fl) { return fl.age >= fl.duration; }),
+            m_floatingLabels.end());
+    }
+
+    drawCombatOverlay(fbW, fbH);
+}
+
+void App::drawCombatOverlay(float fbW, float fbH) {
+    if (!m_combatPreview.valid) return;
+
+    const odai::ui::Font& font = m_uiFont;
+
+    // Look up display name from the shared kUnitNames table; fall back to raw id.
+    const auto dispName = [](const std::string& id) -> const std::string& {
+        const auto it = kUnitNames.find(id);
+        return (it != kUnitNames.end()) ? it->second : id;
+    };
+
+    constexpr float kCardW  = 440.0f;
+    constexpr float kCardH  = 74.0f;
+    constexpr float kHpBarH = 7.0f;
+    constexpr float kBarW   = 118.0f;
+    constexpr float kPad    = 10.0f;
+    // Place the card just above the bottom HUD bar. Use the stored DPI scale so
+    // the offset tracks the bar height on high-DPI displays (kBarH = 64 * s).
+    const float kHudBarH = 64.0f * m_uiScale;
+    const float cardX = (fbW - kCardW) * 0.5f;
+    const float cardY = fbH - kCardH - kHudBarH - 10.0f;
+
+    // Panel background + border.
+    m_uiDrawList.addRoundRectFilled(
+        odai::ui::UiRect::fromXYWH(cardX, cardY, kCardW, kCardH),
+        odai::ui::UiColor{0.06f, 0.07f, 0.10f, 0.92f}, 4.0f);
+    m_uiDrawList.addRoundRect(
+        odai::ui::UiRect::fromXYWH(cardX, cardY, kCardW, kCardH),
+        odai::ui::UiColor{0.75f, 0.60f, 0.28f, 0.70f}, 4.0f, 1.2f);
+
+    // Helper: draw an HP bar with a red "predicted loss" segment.
+    const auto drawHpBar = [&](float x, float y, float w,
+                               int hp, int maxHp, int loss) {
+        const float frac = maxHp > 0 ? float(hp) / float(maxHp) : 0.0f;
+        const float lossFrac = maxHp > 0
+            ? float(std::min(loss, hp)) / float(maxHp) : 0.0f;
+        m_uiDrawList.addRoundRectFilled(
+            odai::ui::UiRect::fromXYWH(x, y, w, kHpBarH),
+            odai::ui::UiColor{0.15f, 0.15f, 0.18f, 1.0f}, 3.0f);
+        if (frac > 0.0f)
+            m_uiDrawList.addRoundRectFilled(
+                odai::ui::UiRect::fromXYWH(x, y, w * frac, kHpBarH),
+                odai::ui::UiColor{0.22f, 0.72f, 0.32f, 1.0f}, 3.0f);
+        if (lossFrac > 0.0f)
+            m_uiDrawList.addRoundRectFilled(
+                odai::ui::UiRect::fromXYWH(x + w * (frac - lossFrac), y, w * lossFrac, kHpBarH),
+                odai::ui::UiColor{0.82f, 0.18f, 0.12f, 0.9f}, 3.0f);
+    };
+
+    const odai::ui::UiColor nameColor  {0.92f, 0.80f, 0.48f, 1.0f};
+    const odai::ui::UiColor hpColor    {0.72f, 0.88f, 0.72f, 1.0f};
+    const odai::ui::UiColor dmgColor   {1.00f, 0.28f, 0.22f, 1.0f};
+    const odai::ui::UiColor retColor   {1.00f, 0.62f, 0.18f, 1.0f};
+    const odai::ui::UiColor dimColor   {0.60f, 0.60f, 0.65f, 1.0f};
+    const float lineH = font.lineHeightPx();
+
+    // -- Left block: attacker --
+    const float attNameX = cardX + kPad;
+    const float attNameY = cardY + kPad;
+    m_uiDrawList.addText(font, dispName(m_combatPreview.attackerName),
+                         {attNameX, attNameY}, nameColor);
+
+    const float attBarY = attNameY + lineH + 4.0f;
+    drawHpBar(attNameX, attBarY, kBarW,
+              m_combatPreview.attackerHp, m_combatPreview.attackerMaxHp,
+              m_combatPreview.retaliation);
+
+    const std::string attHpStr = std::to_string(m_combatPreview.attackerHp)
+                               + "/" + std::to_string(m_combatPreview.attackerMaxHp);
+    m_uiDrawList.addText(font, attHpStr, {attNameX, attBarY + kHpBarH + 4.0f}, hpColor);
+
+    // -- Right block: defender (right-aligned) --
+    const float defBlockRight = cardX + kCardW - kPad;
+    const float defNameStrW = font.measureText(dispName(m_combatPreview.defenderName));
+    m_uiDrawList.addText(font, dispName(m_combatPreview.defenderName),
+                         {defBlockRight - defNameStrW, attNameY}, nameColor);
+
+    const float defBarX = defBlockRight - kBarW;
+    drawHpBar(defBarX, attBarY, kBarW,
+              m_combatPreview.defenderHp, m_combatPreview.defenderMaxHp,
+              m_combatPreview.damageToDefender);
+
+    const int defHpAfter = std::max(0, m_combatPreview.defenderHp - m_combatPreview.damageToDefender);
+    const std::string defHpStr = std::to_string(defHpAfter)
+                               + "/" + std::to_string(m_combatPreview.defenderMaxHp);
+    const float defHpStrW = font.measureText(defHpStr);
+    m_uiDrawList.addText(font, defHpStr,
+                         {defBlockRight - defHpStrW, attBarY + kHpBarH + 4.0f}, hpColor);
+
+    // -- Center block: damage numbers --
+    const float centerX = cardX + kCardW * 0.5f;
+    const std::string dmgStr  = "-" + std::to_string(m_combatPreview.damageToDefender);
+    const std::string retStr  = m_combatPreview.retaliation > 0
+                                ? "-" + std::to_string(m_combatPreview.retaliation)
+                                : (m_combatPreview.isRanged ? "ranged" : "");
+    const float dmgW = font.measureText(dmgStr);
+    const float retW = font.measureText(retStr);
+
+    const float centerY1 = cardY + kPad;
+    const float centerY2 = centerY1 + lineH + 6.0f;
+    m_uiDrawList.addText(font, dmgStr,  {centerX - dmgW * 0.5f, centerY1}, dmgColor);
+    if (!retStr.empty()) {
+        const odai::ui::UiColor& rc = m_combatPreview.isRanged ? dimColor : retColor;
+        m_uiDrawList.addText(font, retStr, {centerX - retW * 0.5f, centerY2}, rc);
+    }
+    const std::string typeStr = m_combatPreview.isRanged ? "RANGED ATTACK" : "MELEE ATTACK";
+    const float typeW = font.measureText(typeStr);
+    m_uiDrawList.addText(font, typeStr,
+                         {centerX - typeW * 0.5f, centerY2 + lineH + 2.0f}, dimColor);
 }
 
 void App::updateUiOverlay(float dt) {
@@ -5106,22 +5407,14 @@ void App::updateUiOverlay(float dt) {
             {"warrior",  {"move", "attack",        "fortify", "wait", "sleep"}},
             {"archer",   {"move", "ranged_attack",  "fortify", "wait", "sleep"}},
             {"spearman", {"move", "attack",         "fortify", "wait", "sleep"}},
-            {"scout",    {"move", "explore",        "wait",    "sleep"}},
-            {"settler",  {"move", "found_city",     "wait"}},
-            {"builder",  {"move", "build",          "wait"}},
+            {"scout",    {"move", "explore",    "build_fort", "wait", "sleep"}},
+            {"settler",  {"move", "found_city", "wait"}},
+            {"builder",  {"move", "build",      "build_fort", "wait"}},
             {"cavalry",  {"move", "attack",         "fortify", "wait", "sleep"}},
             {"ship",     {"move", "attack",         "embark",  "wait"}},
             {"siege",    {"move", "attack",         "wait"}},
         };
 
-        // Display name for each unit type.
-        static const std::unordered_map<std::string, std::string> kUnitNames = {
-            {"warrior",  "Warrior"},  {"archer",   "Archer"},
-            {"spearman", "Spearman"}, {"scout",    "Scout"},
-            {"settler",  "Settler"},  {"builder",  "Builder"},
-            {"cavalry",  "Cavalry"},  {"ship",     "Ship"},
-            {"siege",    "Siege"},
-        };
 
         const bool hasSelection = !m_selectedUnitType.empty();
         if (m_unitActionPanel != nullptr) {
@@ -5156,9 +5449,26 @@ void App::updateUiOverlay(float dt) {
                         m_actionSlotBtns[si]->textureId = ae.textureId;
                         m_actionSlotBtns[si]->uvRect    = ae.uv;
                     }
-                    // Re-bind click handler to log the action name.
+                    // Wire the per-action callback (dispatched via m_slotCallbacks).
                     const std::string actionName = (*actions)[si];
-                    // (Action callbacks can be wired to game logic here.)
+                    if (actionName == "build_fort") {
+                        m_slotCallbacks[si] = [this]() {
+                            odai::game::Unit* sel = m_gameState.findUnit(m_selectedUnitId);
+                            if (sel == nullptr) return;
+                            auto& tile = m_gameWorld.map.at(sel->col, sel->row);
+                            if (tile.flags & odai::game::TileFlag_Fort) return;
+                            tile.flags |= odai::game::TileFlag_Fort;
+                            if (m_fogOfWarEnabled) {
+                                recomputeFogOfWarVisibility(
+                                    m_gameWorld.map, m_gameState.units, m_playerOwner);
+                            }
+                            rebuildStrategyMapScene();
+                        };
+                    } else {
+                        m_slotCallbacks[si] = nullptr;
+                    }
+                } else {
+                    m_slotCallbacks[si] = nullptr;
                 }
             }
         }
@@ -5287,6 +5597,62 @@ void App::updateUiOverlay(float dt) {
         }
     }
 
+    // Push the camera viewport rectangle onto the minimap overlay each frame so
+    // the player always sees which part of the world the main view covers.
+    if (m_minimap != nullptr && m_strategyMapMode) {
+        const float mapW = m_mapMaxX - m_mapMinX;
+        const float mapH = m_mapMaxZ - m_mapMinZ;
+        if (mapW > 0.0f && mapH > 0.0f && fbW > 0 && fbH > 0) {
+            odai::ui::UiRect vp{};
+            if (!m_strategyMap3D) {
+                // Orthographic: exact viewport rect from camera centre + half-extents.
+                const float halfH = m_mapOrthoHalfHeight;
+                const float halfWv = halfH * (static_cast<float>(fbW) / static_cast<float>(fbH));
+                vp.minX = (m_camera.x - halfWv - m_mapMinX) / mapW;
+                vp.minY = (m_camera.z - halfH  - m_mapMinZ) / mapH;
+                vp.maxX = (m_camera.x + halfWv - m_mapMinX) / mapW;
+                vp.maxY = (m_camera.z + halfH  - m_mapMinZ) / mapH;
+            } else {
+                // Perspective: project 4 screen-corner rays onto the y=0 ground plane.
+                const float yawR   = odai::math::radians(m_camera.yawDegrees);
+                const float pitchR = odai::math::radians(m_camera.pitchDegrees);
+                const float cp = std::cos(pitchR), sp = std::sin(pitchR);
+                const float cyaw = std::cos(yawR), syaw = std::sin(yawR);
+                // Camera basis (same math as rayToGroundPlane).
+                const float fwdX =  cyaw * cp, fwdY = sp,  fwdZ = syaw * cp;
+                const float rgtX = -syaw,       rgtZ = cyaw;  // rgtY == 0 (horizontal)
+                const float upX  = -cyaw * sp,  upY  = cp, upZ  = -syaw * sp;
+                const float tanHalf = std::tan(odai::math::radians(m_camera.fovDegrees) * 0.5f);
+                const float aspect3d = static_cast<float>(fbW) / static_cast<float>(fbH);
+                float minNX = 1.0f, maxNX = 0.0f, minNY = 1.0f, maxNY = 0.0f;
+                bool anyHit = false;
+                for (int signY = -1; signY <= 1; signY += 2) {
+                    for (int signX = -1; signX <= 1; signX += 2) {
+                        const float sx = static_cast<float>(signX);
+                        const float sy2 = static_cast<float>(signY);
+                        const float rdX = fwdX + sx * tanHalf * aspect3d * rgtX + sy2 * tanHalf * upX;
+                        const float rdY = fwdY                                   + sy2 * tanHalf * upY;
+                        const float rdZ = fwdZ + sx * tanHalf * aspect3d * rgtZ + sy2 * tanHalf * upZ;
+                        if (std::abs(rdY) < 1e-6f) continue;
+                        const float t = -m_camera.y / rdY;
+                        if (t < 0.0f) continue;
+                        const float hx = m_camera.x + t * rdX;
+                        const float hz = m_camera.z + t * rdZ;
+                        const float nx = (hx - m_mapMinX) / mapW;
+                        const float nz = (hz - m_mapMinZ) / mapH;
+                        minNX = std::min(minNX, nx); maxNX = std::max(maxNX, nx);
+                        minNY = std::min(minNY, nz); maxNY = std::max(maxNY, nz);
+                        anyHit = true;
+                    }
+                }
+                if (anyHit) {
+                    vp = odai::ui::UiRect{minNX, minNY, maxNX, maxNY};
+                }
+            }
+            m_minimap->setViewport(vp);
+        }
+    }
+
     // Refresh the right Command View rail from the current hex/unit selection.
     // The call is internally gated on a change in (hex, unit, turn), so running it
     // every frame is cheap.
@@ -5381,7 +5747,7 @@ void App::updateUiOverlay(float dt) {
 
     // Reset the draw list here so map labels can be drawn first (behind the UI).
     m_uiDrawList.reset({static_cast<float>(fbW), static_cast<float>(fbH)});
-    drawStrategyMapLabels(static_cast<float>(fbW), static_cast<float>(fbH));
+    drawStrategyMapLabels(static_cast<float>(fbW), static_cast<float>(fbH), dt);
     m_uiContext.buildAppend(m_uiDrawList);
 
     // Tooltip overlay: drawn after the widget tree (so it sits on top, unclipped),
@@ -5540,7 +5906,7 @@ bool App::rayToGroundPlane(double mouseX, double mouseY, int fbW, int fbH,
 }
 
 void App::rebuildStrategyMapScene() {
-    odai::game::StrategyMapMeshOptions meshOptions = makeStrategyMapMeshOptions(m_strategyMap3D, m_terrainTextures);
+    odai::game::StrategyMapMeshOptions meshOptions = makeStrategyMapMeshOptions(m_strategyMap3D, m_fogOfWarEnabled, m_playerOwner, m_terrainTextures);
     // The GPU hex pipeline owns the land surface in 3D relief: skip the imported-static
     // land tops/skirts there so it is not drawn twice, and skip the flat grid overlay
     // (the hex shader draws borders that ride the displaced surface). The flat 2D board
@@ -5622,6 +5988,7 @@ void App::clearMoveAttackPreview() {
     m_previewActive = false;
     m_previewIsAttack = false;
     m_previewPath.clear();
+    m_combatPreview.valid = false;
 }
 
 void App::updateMoveAttackPreview(int targetCol, int targetRow) {
@@ -5640,7 +6007,29 @@ void App::updateMoveAttackPreview(int targetCol, int targetRow) {
     if (enemy != nullptr && enemy->owner != sel->owner &&
         odai::game::canAttack(m_gameState, *sel, *enemy)) {
         m_previewIsAttack = true;  // release will fire/charge
+
+        // Replicate resolveAttack formula to predict outcome for the battle card.
+        const odai::game::UnitStats& as = odai::game::unitStatsFor(sel->typeId);
+        const odai::game::UnitStats& ds = odai::game::unitStatsFor(enemy->typeId);
+        m_combatPreview.valid          = true;
+        m_combatPreview.attackerName   = sel->typeId;
+        m_combatPreview.attackerHp     = sel->hp;
+        m_combatPreview.attackerMaxHp  = sel->maxHp;
+        m_combatPreview.defenderName   = enemy->typeId;
+        m_combatPreview.defenderHp     = enemy->hp;
+        m_combatPreview.defenderMaxHp  = enemy->maxHp;
+        m_combatPreview.isRanged       = (as.rangedAttack > 0 && as.range >= 1);
+        if (m_combatPreview.isRanged) {
+            const int bonus = odai::game::archerAdjacencyBonus(m_gameState, m_strategyMap, *sel);
+            m_combatPreview.damageToDefender = std::max(1, as.rangedAttack + bonus - enemy->armor);
+            m_combatPreview.retaliation      = 0;
+        } else {
+            m_combatPreview.damageToDefender = std::max(1, as.attack - enemy->armor);
+            m_combatPreview.retaliation      = (ds.attack > 0)
+                                               ? std::max(1, ds.attack - sel->armor) : 0;
+        }
     } else {
+        m_combatPreview.valid = false;
         // Show the A* route the unit would march on release.
         m_previewPath = odai::game::findHexPath(m_strategyMap, m_gameState, sel->col, sel->row, tc, tr);
     }
@@ -5654,13 +6043,44 @@ void App::commitMoveAttackPreview() {
     if (m_previewIsAttack) {
         const odai::game::Unit* target = m_gameState.unitAt(m_previewTargetCol, m_previewTargetRow);
         if (target != nullptr) {
+            // Capture world positions before resolveAttack may delete the target.
+            const auto hexWorldXZ = [&](std::uint32_t col, std::uint32_t row) {
+                const float rowOffset = (row % 2 == 0) ? 0.0f : 0.5f;
+                const float wx = m_strategyMap.hexSize * std::sqrt(3.0f)
+                                 * (static_cast<float>(col) + rowOffset);
+                const float wz = m_strategyMap.hexSize * 1.5f * static_cast<float>(row);
+                return std::pair{wx, wz};
+            };
+            const float labelY = m_strategyMap.hexSize * 1.4f;
+            const auto [defX, defZ] = hexWorldXZ(target->col, target->row);
+            const auto [attX, attZ] = hexWorldXZ(sel->col, sel->row);
+
             odai::game::resolveAttack(m_gameState, m_strategyMap, sel->id, target->id);
+
+            // Spawn damage number over the defender.
+            if (m_combatPreview.valid && m_combatPreview.damageToDefender > 0) {
+                m_floatingLabels.push_back({
+                    "-" + std::to_string(m_combatPreview.damageToDefender),
+                    odai::ui::UiColor{1.0f, 0.22f, 0.18f, 1.0f},
+                    defX, labelY, defZ});
+            }
+            // Spawn retaliation number over the attacker (melee only).
+            if (m_combatPreview.valid && m_combatPreview.retaliation > 0) {
+                m_floatingLabels.push_back({
+                    "-" + std::to_string(m_combatPreview.retaliation),
+                    odai::ui::UiColor{1.0f, 0.58f, 0.14f, 1.0f},
+                    attX, labelY, attZ});
+            }
+
             rebuildStrategyMapScene();
         }
     } else if (sel->col != m_previewTargetCol || sel->row != m_previewTargetRow) {
         // Plan an A* path and begin marching; the order continues across turns
         // until the unit arrives (advanceTurn keeps following the path).
         odai::game::issueMoveOrder(m_gameState, m_strategyMap, *sel, m_previewTargetCol, m_previewTargetRow);
+        if (m_fogOfWarEnabled) {
+            recomputeFogOfWarVisibility(m_gameWorld.map, m_gameState.units, m_playerOwner);
+        }
         rebuildStrategyMapScene();
     }
 }
@@ -5955,7 +6375,7 @@ void App::refreshToolbar() {
 
 void App::refreshWorldTracker() {
     if (m_worldTracker == nullptr) return;
-    using Entry = odai::ui::WorldTrackerPanel::Entry;
+    using Entry = odai::ui::EventTrackerPanel::Entry;
     odai::game::Empire* emp = playerEmpire();
     std::vector<Entry> entries;
 
@@ -6093,23 +6513,23 @@ void App::refreshCommandView() {
     m_cvUnitId = unitKey;
     m_cvTurn   = m_gameWorld.turn;
 
-    odai::ui::CommandViewPanel::State st;
+    odai::ui::SelectionInspectorPanel::State st;
     st.emptyHint = "<i><color=#a08060>Hover a hex or select a unit to inspect it.</color></i>";
 
-    // Selected-hex card.
+    // Selected-tile card.
     if (col >= 0 && row >= 0 && m_strategyMap.inBounds(col, row)) {
         const odai::game::MapTile& tile =
             m_strategyMap.at(static_cast<std::uint32_t>(col), static_cast<std::uint32_t>(row));
-        st.hasHex = true;
-        st.hex.name = terrainName(tile.terrain);
+        st.hasTile = true;
+        st.tile.name = terrainName(tile.terrain);
         const std::size_t terrainIndex = static_cast<std::size_t>(tile.terrain);
         if (terrainIndex < m_terrainPreviewTextures.size()) {
-            st.hex.previewTexture = m_terrainPreviewTextures[terrainIndex];
+            st.tile.previewTexture = m_terrainPreviewTextures[terrainIndex];
         }
         const odai::game::Yields y = odai::game::terrainYields(tile.terrain, tile.flags);
         auto addYield = [&](const char* icon, int v) {
             if (v != 0) {
-                st.hex.yields.push_back({icon, (v >= 0 ? "+" : "") + std::to_string(v)});
+                st.tile.yields.push_back({icon, (v >= 0 ? "+" : "") + std::to_string(v)});
             }
         };
         addYield("food", y.food);
@@ -6117,13 +6537,13 @@ void App::refreshCommandView() {
         addYield("gold", y.gold);
         addYield("science", y.science);
         addYield("culture", y.culture);
-        // If a city sits on this tile, add a religion badge to the hex yields.
+        // If a city sits on this tile, add a religion badge to the tile yields.
         for (const odai::game::City& c : m_gameWorld.cities) {
             if (c.col == static_cast<std::uint32_t>(col) && c.row == static_cast<std::uint32_t>(row)) {
                 for (const odai::game::Empire& emp : m_gameWorld.empires) {
                     if (emp.id == c.owner && !emp.stateReligion.empty()) {
                         const odai::game::ReligionDef* rel = odai::game::findReligionDef(emp.stateReligion);
-                        st.hex.yields.push_back({"religion", rel != nullptr ? rel->name : emp.stateReligion});
+                        st.tile.yields.push_back({"religion", rel != nullptr ? rel->name : emp.stateReligion});
                     }
                 }
                 break;
@@ -6131,22 +6551,22 @@ void App::refreshCommandView() {
         }
     }
 
-    // Selected-unit card + recommended action.
+    // Selected-entity card + recommended action.
     if (unit != nullptr) {
-        st.hasUnit = true;
+        st.hasEntity = true;
         const odai::game::UnitStats& us = odai::game::unitStatsFor(unit->typeId);
         std::string nm = unit->typeId;
         if (!nm.empty()) nm[0] = static_cast<char>(std::toupper(nm[0]));
-        st.unit.portraitName = unit->typeId;
-        st.unit.name  = nm;
-        st.unit.klass = us.melee ? "Melee Unit"
-                                  : (us.rangedAttack > 0 ? "Ranged Unit" : "Civilian");
-        st.unit.primaryStats = {
+        st.entity.portraitName = unit->typeId;
+        st.entity.name  = nm;
+        st.entity.klass = us.melee ? "Melee Unit"
+                                   : (us.rangedAttack > 0 ? "Ranged Unit" : "Civilian");
+        st.entity.primaryStats = {
             {"HP", std::to_string(unit->hp) + "/" + std::to_string(unit->maxHp)},
             {"Move", std::to_string(unit->movementLeft) + "/" + std::to_string(us.movement)},
             {"Supply", std::to_string(unit->supply) + "/" + std::to_string(unit->maxSupply)},
         };
-        st.unit.combatStats = {
+        st.entity.secondaryStats = {
             {"Attack", std::to_string(us.attack)},
             {"Range", us.rangedAttack > 0 ? std::to_string(us.rangedAttack) : "\xE2\x80\x94"},
             {"Armor", std::to_string(unit->armor)},
@@ -6156,12 +6576,12 @@ void App::refreshCommandView() {
             ab += "<color=#c8b080>Ranged</color> — reach " + std::to_string(us.range) + " hexes.\n";
         }
         if (unit->supply == 0) ab += "<color=#e05050>Starving — out of supply.</color>\n";
-        st.unit.abilities = ab.empty() ? "<color=#a08060>No special abilities.</color>" : ab;
+        st.entity.abilities = ab.empty() ? "<color=#a08060>No special abilities.</color>" : ab;
 
         if (unit->typeId == "settler") {
             st.action.title = "Found City";
             st.action.description = "Settle here to claim territory and begin production.";
-            st.unit.settlementPreview =
+            st.entity.placementPreview =
                 "<color=#c9b896>Site quality:</color> <b>Good</b>\n"
                 "<color=#9fb0c8>Founding here claims the surrounding tiles.</color>";
         } else if (us.attack > 0 || us.rangedAttack > 0) {
@@ -6171,7 +6591,7 @@ void App::refreshCommandView() {
             st.action.title = "Explore";
             st.action.description = "Move to reveal the surrounding lands.";
         }
-    } else if (st.hasHex) {
+    } else if (st.hasTile) {
         for (const odai::game::Settlement& settle : m_strategyMap.settlements) {
             if (static_cast<int>(settle.col) == col && static_cast<int>(settle.row) == row) {
                 st.action.title = "Manage City";
@@ -6434,8 +6854,22 @@ void App::fireEndTurn() {
     // Advance the whole 4X world one turn (yields, growth, production, research,
     // expansion, wonders) and the unit layer (movement / supply).
     odai::game::stepTurn(m_gameWorld, m_samples);
+
+    // Spawn units completed this turn by city production (economy layer → tactical layer).
+    for (const odai::game::PendingUnit& pu : m_gameWorld.pendingUnits) {
+        const odai::game::FreeTile spot = odai::game::findFreeNeighbor(
+            m_gameWorld.map, m_gameState, pu.col, pu.row);
+        if (spot.found) {
+            m_gameState.spawnUnit(pu.typeId, spot.col, spot.row, pu.owner);
+        }
+    }
+    m_gameWorld.pendingUnits.clear();
+
     m_visitedUnitIds.clear();
     odai::game::advanceTurn(m_gameState, m_strategyMap);
+
+    // AI military: set production queues for military units and issue movement/attack orders.
+    odai::game::stepAiUnits(m_gameWorld, m_gameState, m_playerOwner);
 
     // The player's research may have completed mid-step; reflect what is now in
     // progress (the AI auto-picked a follow-up, which the player can change).
@@ -6446,6 +6880,9 @@ void App::fireEndTurn() {
     // Keep labels and borders consistent with the evolved world, then re-mesh.
     syncSettlementsWithCities();
     recomputeBorderFlags(m_gameWorld.map);
+    if (m_fogOfWarEnabled) {
+        recomputeFogOfWarVisibility(m_gameWorld.map, m_gameState.units, m_playerOwner);
+    }
     rebuildStrategyMapScene();
     if (m_useHexTerrain) {
         m_hexTerrain = odai::game::buildHexTerrain(
@@ -6539,14 +6976,14 @@ void App::openProductionPanelForCity(int col, int row) {
     auto makeRow = [&](const std::string& id, const std::string& name, int cost,
                        const std::string& iconName, const std::string& section,
                        const std::string& kindLabel) {
-        odai::ui::ProductionPanel::Row r;
-        r.id             = id;
-        r.name           = name;
-        r.iconName       = iconName;
-        r.productionCost = cost;
-        r.turns          = odai::game::turnsToBuild(cost, city->accumulated, prodPerTurn);
-        r.selected       = (id == city->producing);
-        r.section        = section;
+        odai::ui::BuildQueuePanel::Row r;
+        r.id       = id;
+        r.name     = name;
+        r.iconName = iconName;
+        r.cost     = cost;
+        r.turns    = odai::game::turnsToBuild(cost, city->accumulated, prodPerTurn);
+        r.selected = (id == city->producing);
+        r.section  = section;
 
         const std::string pid = id;
         r.onSelect = [this, pid]() {
@@ -6562,7 +6999,7 @@ void App::openProductionPanelForCity(int col, int row) {
         const std::string pIcon    = iconName;
         const std::string pKind    = kindLabel;
         const std::string pArticle = odai::game::getPediaArticle(id);
-        r.onOpenPedia = [this, pName, pIcon, pKind, pArticle]() {
+        r.onOpenDetail = [this, pName, pIcon, pKind, pArticle]() {
             if (m_civpediaWindow != nullptr) m_civpediaWindow->visible = true;
             if (m_civpediaPortrait != nullptr) {
                 odai::ui::UiIconEntry pe{};
@@ -6585,7 +7022,7 @@ void App::openProductionPanelForCity(int col, int row) {
         return r;
     };
 
-    std::vector<odai::ui::ProductionPanel::Row> rows;
+    std::vector<odai::ui::BuildQueuePanel::Row> rows;
     // Expansion: a settler founds a new city (and costs this city a population point).
     rows.push_back(makeRow("settler", "Settler", 72, iconFor("settler", "food"),
                            "Expansion", "Civilian"));
@@ -6617,15 +7054,15 @@ void App::openProductionPanelForCity(int col, int row) {
                                wSection, "World Wonder"));
     }
 
-    odai::ui::ProductionPanel::CityInfo cityInfo;
-    cityInfo.name         = cityName;
-    cityInfo.food         = city->yields.food;
-    cityInfo.production   = city->yields.production;
-    cityInfo.gold         = city->yields.gold;
-    cityInfo.science      = city->yields.science;
-    cityInfo.faith        = 0;
-    cityInfo.culture      = city->yields.culture;
-    cityInfo.governorName = emp != nullptr ? emp->leaderName : std::string{};
+    odai::ui::BuildQueuePanel::LocationInfo cityInfo;
+    cityInfo.name        = cityName;
+    cityInfo.stats       = {{"food",       std::to_string(city->yields.food)},
+                            {"production", std::to_string(city->yields.production)},
+                            {"gold",       std::to_string(city->yields.gold)},
+                            {"science",    std::to_string(city->yields.science)},
+                            {"faith",      "0"},
+                            {"culture",    std::to_string(city->yields.culture)}};
+    cityInfo.managerName = emp != nullptr ? emp->leaderName : std::string{};
 
     const std::string title = "Pop " + std::to_string(city->population) +
                               (city->inDisorder ? "  (Disorder)" : "");
@@ -6648,9 +7085,9 @@ const char* techEra(const std::string& id) {
 
 // Build the current-research header (progress bar + status + description).
 // `cost` is the EFFECTIVE cost (already discounted if a eureka was earned).
-odai::ui::TechTreePanel::Research makeResearchHeader(
+odai::ui::ResearchPanel::ResearchProgress makeResearchHeader(
     const odai::game::TechDef* cur, int cost, int accumulated, int perTurn, const std::string& desc) {
-    odai::ui::TechTreePanel::Research r;
+    odai::ui::ResearchPanel::ResearchProgress r;
     if (cur == nullptr) {
         r.title = "";
         r.fraction = 0.0f;
@@ -6770,15 +7207,15 @@ void App::refreshTechTree() {
     if (m_techTreePanel == nullptr || m_techTreeWindow == nullptr) return;
 
     const odai::ui::UiRect rect = m_techTreeWindow->contentRect();
-    using TS = odai::ui::TechTreePanel::TechState;
+    using TS = odai::ui::ResearchPanel::ItemState;
 
     odai::game::Empire* emp = playerEmpire();
     const int sciPool    = emp != nullptr ? emp->sciencePool : 0;
     const int sciPerTurn = playerSciencePerTurn(m_gameWorld, emp);
 
-    std::vector<odai::ui::TechTreePanel::Row> rows;
+    std::vector<odai::ui::ResearchPanel::Row> rows;
     for (const odai::game::TechDef& t : odai::game::techTree()) {
-        odai::ui::TechTreePanel::Row row;
+        odai::ui::ResearchPanel::Row row;
         row.id      = t.id;
         row.name    = t.name;
         row.section = techEra(t.id);
@@ -6803,7 +7240,7 @@ void App::refreshTechTree() {
             : std::string{};
 
         if (emp != nullptr && emp->knows(t.id)) {
-            row.state = TS::Researched;
+            row.state = TS::Completed;
             row.info  = "Researched";
         } else if (!prereqsMet) {
             row.state = TS::Locked;
@@ -6831,7 +7268,7 @@ void App::refreshTechTree() {
 
         const std::string pName    = t.name;
         const std::string pArticle = odai::game::getPediaArticle(t.id);
-        row.onOpenPedia = [this, pName, pArticle]() {
+        row.onOpenDetail = [this, pName, pArticle]() {
             if (m_civpediaWindow != nullptr) m_civpediaWindow->visible = true;
             if (m_civpediaPortrait != nullptr) {
                 odai::ui::UiIconEntry pe{};
@@ -6858,7 +7295,7 @@ void App::refreshTechTree() {
         m_researchTechId.empty() ? nullptr : odai::game::findTech(m_researchTechId);
     const std::string desc = (cur != nullptr) ? techDescription(*cur) : std::string{};
     const int curCost = cur != nullptr ? techCostFor(emp, *cur) : 0;
-    const odai::ui::TechTreePanel::Research research =
+    const odai::ui::ResearchPanel::ResearchProgress research =
         makeResearchHeader(cur, curCost, sciPool, sciPerTurn, desc);
 
     m_techTreePanel->setItems(rect, m_uiScale, rows, research);
@@ -6911,9 +7348,9 @@ void App::refreshGreatPeople() {
             m_selectedGreatPersonId = odai::game::greatPeopleCatalog().front().id;
     }
 
-    std::vector<odai::ui::GreatPeoplePanel::Entry> entries;
+    std::vector<odai::ui::NotableEntityPanel::Entry> entries;
     for (const odai::game::GreatPersonDef& g : odai::game::greatPeopleCatalog()) {
-        odai::ui::GreatPeoplePanel::Entry e;
+        odai::ui::NotableEntityPanel::Entry e;
         e.id           = g.id;
         e.name         = g.name;
         e.portraitName = g.id;
@@ -6938,7 +7375,7 @@ void App::refreshGreatPeople() {
     }
 
     // Build the detail pane for the selected figure.
-    odai::ui::GreatPeoplePanel::Detail detail;
+    odai::ui::NotableEntityPanel::Detail detail;
     if (const odai::game::GreatPersonDef* g = odai::game::findGreatPerson(m_selectedGreatPersonId)) {
         detail.id           = g->id;
         detail.name         = g->name;
@@ -6959,12 +7396,12 @@ void App::refreshGreatPeople() {
         // Offer the settle button only for a figure of ours awaiting a home.
         if (playerHasPending(g->id)) {
             odai::game::City* hostCity = greatPersonHostCity();
-            detail.showIntegrate    = true;
-            detail.integrateEnabled = hostCity != nullptr;
-            detail.integrateLabel   = hostCity != nullptr
+            detail.showAction    = true;
+            detail.actionEnabled = hostCity != nullptr;
+            detail.actionLabel   = hostCity != nullptr
                 ? ("Settle in " + hostCity->name)
                 : std::string("No city available");
-            detail.onIntegrate = [this, id = g->id]() {
+            detail.onAction = [this, id = g->id]() {
                 odai::game::City* dest = greatPersonHostCity();
                 if (dest == nullptr) return;
                 const std::string cityName = dest->name;
@@ -7023,18 +7460,18 @@ void App::refreshReligion() {
     }
 
     // Determine availability of each religion for the player.
-    auto religionStatus = [&](const odai::game::ReligionDef& r) -> odai::ui::ReligionPanel::Status {
-        if (currentReligion == r.id) return odai::ui::ReligionPanel::Status::Current;
+    auto religionStatus = [&](const odai::game::ReligionDef& r) -> odai::ui::FactionPanel::Status {
+        if (currentReligion == r.id) return odai::ui::FactionPanel::Status::Current;
         // Must have the required tech.
         if (!r.requiredTech.empty() && (emp == nullptr || !emp->knows(r.requiredTech)))
-            return odai::ui::ReligionPanel::Status::NotYet;
+            return odai::ui::FactionPanel::Status::NotYet;
         // If this religion has a parent, the player must currently practice it.
         if (!r.parentReligion.empty() && currentReligion != r.parentReligion)
-            return odai::ui::ReligionPanel::Status::Locked;
+            return odai::ui::FactionPanel::Status::Locked;
         // Must not already have a non-parent religion (only reform along the lineage).
         if (!currentReligion.empty() && r.parentReligion.empty())
-            return odai::ui::ReligionPanel::Status::Locked;
-        return odai::ui::ReligionPanel::Status::Available;
+            return odai::ui::FactionPanel::Status::Locked;
+        return odai::ui::FactionPanel::Status::Available;
     };
 
     // Build a one-line yield/happiness summary for a religion.
@@ -7055,19 +7492,19 @@ void App::refreshReligion() {
         return s.empty() ? "No yield bonus" : s;
     };
 
-    std::vector<odai::ui::ReligionPanel::Entry> entries;
+    std::vector<odai::ui::FactionPanel::Entry> entries;
     for (const odai::game::ReligionDef& r : odai::game::religionDefs()) {
-        const odai::ui::ReligionPanel::Status st = religionStatus(r);
-        odai::ui::ReligionPanel::Entry e;
+        const odai::ui::FactionPanel::Status st = religionStatus(r);
+        odai::ui::FactionPanel::Entry e;
         e.id     = r.id;
         e.name   = r.name;
         e.status = st;
         switch (st) {
-            case odai::ui::ReligionPanel::Status::Current:
+            case odai::ui::FactionPanel::Status::Current:
                 e.subtitle = "Your state religion"; break;
-            case odai::ui::ReligionPanel::Status::Available:
+            case odai::ui::FactionPanel::Status::Available:
                 e.subtitle = r.parentReligion.empty() ? "Available" : "Reform available"; break;
-            case odai::ui::ReligionPanel::Status::Locked:
+            case odai::ui::FactionPanel::Status::Locked:
                 if (!r.parentReligion.empty()) {
                     const odai::game::ReligionDef* par = odai::game::findReligionDef(r.parentReligion);
                     e.subtitle = "Requires " + (par != nullptr ? par->name : r.parentReligion);
@@ -7075,7 +7512,7 @@ void App::refreshReligion() {
                     e.subtitle = "Incompatible lineage";
                 }
                 break;
-            case odai::ui::ReligionPanel::Status::NotYet: {
+            case odai::ui::FactionPanel::Status::NotYet: {
                 const odai::game::TechDef* t = odai::game::findTech(r.requiredTech);
                 e.subtitle = "Requires " + (t != nullptr ? t->name : r.requiredTech);
                 break;
@@ -7089,7 +7526,7 @@ void App::refreshReligion() {
     }
 
     // Build detail for the selected religion.
-    odai::ui::ReligionPanel::Detail detail;
+    odai::ui::FactionPanel::Detail detail;
     const odai::game::ReligionDef* sel = odai::game::findReligionDef(m_selectedReligionId);
     if (sel != nullptr) {
         detail.id          = sel->id;
@@ -7143,17 +7580,17 @@ void App::refreshReligion() {
         detail.body = body;
 
         const auto st = religionStatus(*sel);
-        if (st == odai::ui::ReligionPanel::Status::Available) {
-            detail.showAdopt   = true;
-            detail.adoptEnabled = true;
-            detail.adoptLabel  = sel->parentReligion.empty()
+        if (st == odai::ui::FactionPanel::Status::Available) {
+            detail.showJoin   = true;
+            detail.joinEnabled = true;
+            detail.joinLabel  = sel->parentReligion.empty()
                 ? "Adopt this Faith"
                 : ("Reform to " + sel->name);
-            detail.onAdopt = [this, id = sel->id]() { adoptReligion(id); };
-        } else if (st == odai::ui::ReligionPanel::Status::Current) {
-            detail.showAdopt   = true;
-            detail.adoptEnabled = false;
-            detail.adoptLabel  = "Currently Practicing";
+            detail.onJoin = [this, id = sel->id]() { adoptReligion(id); };
+        } else if (st == odai::ui::FactionPanel::Status::Current) {
+            detail.showJoin   = true;
+            detail.joinEnabled = false;
+            detail.joinLabel  = "Currently Practicing";
         }
     }
 
@@ -7163,7 +7600,7 @@ void App::refreshReligion() {
         m_faithButton->setLabel(curRel != nullptr ? curRel->name : std::string("Religion"));
         bool reformAvail = false;
         for (const odai::game::ReligionDef& r : odai::game::religionDefs())
-            if (religionStatus(r) == odai::ui::ReligionPanel::Status::Available) { reformAvail = true; break; }
+            if (religionStatus(r) == odai::ui::FactionPanel::Status::Available) { reformAvail = true; break; }
         m_faithButton->glowColor = reformAvail
             ? odai::ui::UiColor{0.92f, 0.72f, 0.20f, 0.90f}
             : odai::ui::UiColor{0.92f, 0.72f, 0.20f, 0.50f};
@@ -7180,11 +7617,11 @@ void App::selectResearch(const std::string& id) {
     const int sciPool    = emp != nullptr ? emp->sciencePool : 0;
     const int sciPerTurn = playerSciencePerTurn(m_gameWorld, emp);
     const int curCost    = cur != nullptr ? techCostFor(emp, *cur) : 0;
-    const odai::ui::TechTreePanel::Research research =
+    const odai::ui::ResearchPanel::ResearchProgress research =
         makeResearchHeader(cur, curCost, sciPool, sciPerTurn, desc);
     // In-place update: this runs inside the clicked row's callback, so the row
     // widget must not be destroyed by a rebuild.
-    if (m_techTreePanel != nullptr) m_techTreePanel->applyResearch(id, research);
+    if (m_techTreePanel != nullptr) m_techTreePanel->applyProgress(id, research);
     VOX_LOGI("ui") << "research target set to " << id;
 }
 

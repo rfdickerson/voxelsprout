@@ -326,16 +326,17 @@ float3 waterNormal(float3 worldPosition, float2 uv)
     const float2 sampleUv0 = (worldUv * 1.07) + scroll0 + (warp * 0.022);
     const float2 sampleUv1 = (worldUv * 1.69) + scroll1 - (warp * 0.015);
     const float2 sampleUv2 = (float2(worldUv.y, -worldUv.x) * 1.41) + scroll2 + (warp.yx * 0.012);
-    const float2 waterNormalRg0 = bindlessTextures[kBindlessTextureIndexWaterNormal].SampleLevel(sampleUv0, 0.0).xy * 2.0 - 1.0;
-    const float2 waterNormalRg1 = bindlessTextures[kBindlessTextureIndexWaterNormal].SampleLevel(sampleUv1, 0.0).xy * 2.0 - 1.0;
-    const float2 waterNormalRg2 = bindlessTextures[kBindlessTextureIndexWaterNormal].SampleLevel(sampleUv2, 0.0).xy * 2.0 - 1.0;
+    const float2 waterNormalRg0 = bindlessTextures[kBindlessTextureIndexWaterNormal].Sample(sampleUv0).xy * 2.0 - 1.0;
+    const float2 waterNormalRg1 = bindlessTextures[kBindlessTextureIndexWaterNormal].Sample(sampleUv1).xy * 2.0 - 1.0;
+    const float2 waterNormalRg2 = bindlessTextures[kBindlessTextureIndexWaterNormal].Sample(sampleUv2).xy * 2.0 - 1.0;
     const float2 blendedNormalRg =
         (waterNormalRg0 * 0.42) +
         (waterNormalRg1 * 0.36) +
         (waterNormalRg2 * 0.22);
     const float2 textureSlope = blendedNormalRg * (0.46 + (0.28 * detailFade)) * normalStrength;
     const float2 proceduralSlope = float2(-dx, -dz) * normalStrength;
-    const float2 waveSlope = (textureSlope * 0.95) + (proceduralSlope * 1.65);
+    const float distanceFlattenFactor = 1.0 - smoothstep(500.0, 3500.0, viewDistance) * 0.72;
+    const float2 waveSlope = ((textureSlope * 0.95) + (proceduralSlope * 1.65)) * distanceFlattenFactor;
     return normalize(float3(waveSlope.x, 1.0, waveSlope.y));
 }
 
@@ -432,6 +433,16 @@ float3 traceWaterRefraction(
 }
 #endif
 
+float3 largeScaleWaterColor(float3 worldPosition, float3 shallowWater, float3 deepWater)
+{
+    const float v0 = stableWaterNoise(worldPosition.xz * 0.00110);
+    const float v1 = stableWaterNoise(worldPosition.zx * 0.00175 + float2(17.3, -8.6));
+    const float v2 = stableWaterNoise(worldPosition.xz * 0.00062 + float2(-5.1, 22.4));
+    const float variation = (v0 * 0.50) + (v1 * 0.32) + (v2 * 0.18);
+    const float3 midTone = lerp(deepWater * 1.45, shallowWater * 0.85, variation);
+    return lerp(deepWater, midTone, variation * 0.60);
+}
+
 float4 main(FragmentInput input) : SV_Target0
 {
     if (chunkPc.cascadeData.z > 0.5)
@@ -476,7 +487,8 @@ float4 main(FragmentInput input) : SV_Target0
     float refractedHitDistance = 18.0;
     float rtDepthFactor = 0.0;
     float rtShallowFactor = shoreFactor;
-    const float3 waterBody = lerp(deepWater, shallowWater, shoreFactor);
+    const float3 largeScaleColor = largeScaleWaterColor(input.inWorldPosition, shallowWater, deepWater);
+    const float3 waterBody = lerp(lerp(deepWater, largeScaleColor, 0.55), shallowWater, shoreFactor);
 
     const float3 skyReflection = proceduralWaterReflectionSky(reflectionDir);
     float3 reflectionColor = skyReflection;
@@ -633,5 +645,26 @@ float4 main(FragmentInput input) : SV_Target0
     litColor += camera.sunColorShadow.xyz * directionalSpecular;
     litColor += sunScatterTint;
     litColor += lerp(shallowWater * 0.080, deepWater * 0.035, bottomDepthFactor);
+
+    // --- Civ-6 style shoreline -------------------------------------------------
+    // A soft turquoise shallows band fading to a bright foam crest right at the
+    // waterline (broken up with animated noise) so the coast reads as a living shore
+    // instead of a hard neon ring. Driven by the depth-based contact factor (strongest
+    // where land sits just under the surface), with a shallow-water fallback so it
+    // survives when the scene-depth sample is unavailable. Stays offshore of the deeper
+    // ocean, so the zoomed-in open-water look is untouched.
+    const float shoreBand = saturate(max(sceneWater.contact, saturate((rtShallowFactor - 0.55) * 2.2)));
+    const float shoreWashA = stableWaterNoise((input.inWorldPosition.xz * 0.085) + float2(camera.skyConfig1.z * 0.020, 0.0));
+    const float shoreWashB = stableWaterNoise((input.inWorldPosition.zx * 0.150) - float2(0.0, camera.skyConfig1.z * 0.014));
+    const float3 turquoiseShallows = float3(0.20, 0.56, 0.60);
+    const float3 shoreFoamColor = float3(0.84, 0.92, 0.94);
+    litColor = lerp(litColor, turquoiseShallows, shoreBand * shoreBand * 0.40);
+    const float foamCrest = saturate((shoreBand - 0.62) * 2.6) * (0.5 + (0.5 * shoreWashA));
+    const float foamLace = saturate((shoreBand - 0.30) * 1.3) * saturate(shoreWashB - 0.05) * 0.6;
+    litColor = lerp(litColor, shoreFoamColor, saturate(foamCrest + foamLace));
+
+    const float3 cameraWorldPos = camera.shadowVoxelGridSize.xyz;
+    const float waterViewDist = length(cameraWorldPos - input.inWorldPosition);
+    litColor = applyAtmosphericFog(litColor, input.inWorldPosition, waterViewDist, normalize(camera.sunDirectionIntensity.xyz));
     return float4(litColor, 1.0);
 }

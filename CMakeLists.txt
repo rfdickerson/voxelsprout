@@ -201,11 +201,19 @@ add_library(odai_ui STATIC
     src/ui/widgets/line_chart.cc
     src/ui/widgets/stat_badge.cc
     src/ui/widgets/icon_button.cc
-    src/ui/widgets/world_tracker_panel.cc
-    src/ui/widgets/command_view_panel.cc
+    src/ui/resource_style.cc
     src/ui/widgets/minimap_panel.cc
-    # Game-domain widgets (production_panel, etc.) are NOT included here;
-    # they live in the app source list and link against odai_ui.
+    # Renamed panels (genre-neutral names, data-agnostic, no game-type deps):
+    src/ui/widgets/advisors_panel.cc
+    src/ui/widgets/build_queue_panel.cc
+    src/ui/widgets/event_tracker_panel.cc
+    src/ui/widgets/faction_panel.cc
+    src/ui/widgets/grid_picker_panel.cc
+    src/ui/widgets/notable_entity_panel.cc
+    src/ui/widgets/research_panel.cc
+    src/ui/widgets/resource_bar_panel.cc
+    src/ui/widgets/selection_inspector_panel.cc
+    src/ui/widgets/sim_controls_panel.cc
 )
 target_include_directories(odai_ui
     PUBLIC
@@ -343,11 +351,8 @@ if(ODAI_BUILD_APP)
         src/game/strategy_map_mesh.cc
         src/game/strategy_hex_terrain.cc
         src/game/units.cc
-        src/ui/widgets/advisors_panel.cc
-        src/ui/widgets/great_people_panel.cc
-        src/ui/widgets/production_panel.cc
-        src/ui/widgets/religion_panel.cc
-        src/ui/widgets/tech_tree_panel.cc
+        src/game/ai_units.cc
+        src/import/dds.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
         src/render/frame_graph.cc
@@ -565,6 +570,21 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_civ_sim PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
+    # DDS bundler — offline PNG → BC3 compressor. Run once per asset directory to
+    # produce .dds sidecars; the runtime loader prefers .dds over the source .png.
+    #   odai_dds_bundler <file.png> [...]
+    #   odai_dds_bundler --dir <directory>
+    add_executable(odai_dds_bundler
+        src/import/dds.cc
+        src/tools/dds_bundler_main.cc
+    )
+    target_include_directories(odai_dds_bundler PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+    if(MSVC)
+        target_compile_options(odai_dds_bundler PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_dds_bundler PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
     # Theme viewer — artist tool for iterating on theme JSON files with live
     # hot-reload. Terminal-based: prints all color/font/size tokens with ANSI
     # color swatches and re-dumps whenever the theme file changes on disk.
@@ -581,6 +601,7 @@ endif()
 if(BUILD_TESTING)
     add_executable(odai_imported_scene_tests
         tests/imported_scene_tests.cc
+        src/import/dds.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
     )
@@ -703,12 +724,15 @@ if(BUILD_TESTING)
     # research, wonders, AI). Pure CPU; no Vulkan.
     add_executable(odai_economy_tests
         tests/economy_tests.cc
+        src/game/ai_units.cc
+        src/game/buildable.cc
         src/game/economy.cc
         src/game/game_sim.cc
         src/game/great_people.cc
         src/game/mod_host.cc
         src/game/religion.cc
         src/game/strategy_map.cc
+        src/game/units.cc
     )
     target_include_directories(odai_economy_tests PRIVATE src)
     target_link_libraries(odai_economy_tests PRIVATE odai_content)

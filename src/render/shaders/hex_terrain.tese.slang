@@ -98,8 +98,8 @@ float detailHeight(float2 worldXz, float2 centerXz, float4 detailParams)
 // agree along their shared radial edge. At a flat boundary the exponent is 1, which
 // reproduces the original linear blend, so flat terrain is unchanged.
 
-static const float kCliffMaxExponent = 4.0;  // radial-profile pow() exponent at a full cliff
-static const float kCliffDeltaScale = 0.22;  // |centre-corner| / (hexSize*this) -> full strength
+static const float kCliffMaxExponent = 2.0;  // radial-profile pow() exponent at a full cliff
+static const float kCliffDeltaScale = 0.90;  // |centre-corner| / (hexSize*this) -> full strength
 
 // Map a centre->corner height delta to the radial-profile exponent (1 = linear ramp,
 // higher = flatter plateau top with a steeper rim).
@@ -199,8 +199,20 @@ DomainOutput main(
         (detailHeight(basePos.xz + float2(0.0, s), centerXz, detailParams) -
          detailHeight(basePos.xz - float2(0.0, s), centerXz, detailParams)) / (2.0 * s);
 
-    const float3 normal = normalize(float3(
+    float3 normal = normalize(float3(
         -(baseGradX + detailGradX), 1.0, -(baseGradZ + detailGradZ)));
+    // The six fan triangles meet at the tile centre, and each derives its base-height
+    // gradient from its OWN wedge's two corners, so the normal handed to the fragment is
+    // genuinely multivalued at the apex -- the dark dot at every tile centre. (It is NOT
+    // SSAO: hex terrain is not in the normal-depth prepass, so AO is forced to 1.0 over
+    // land.) A narrow blend-to-up only moved the discontinuity into a ring/seam. Instead,
+    // shade the whole tile INTERIOR with a single stable up normal and reserve the gradient
+    // (sloped) normal for the rim: the strategy map is near-top-down, so flat interior
+    // lighting reads cleanly and cliffs still show at tile edges. This removes the apex
+    // singularity as a shaded location entirely -- every fragment near the centre is up.
+    const float distFromCenter = length(basePos.xz - centerXz);
+    const float rimT = smoothstep(hexSize * 0.55, hexSize * 0.85, distFromCenter);
+    normal = normalize(lerp(float3(0.0, 1.0, 0.0), normal, rimT));
     const float3 worldPosition = float3(basePos.x, baseH + detail, basePos.z);
 
     DomainOutput output;

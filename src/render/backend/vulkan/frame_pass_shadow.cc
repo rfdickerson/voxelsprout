@@ -25,15 +25,8 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
     CoreFrameGraphOrderValidator& coreFramePassOrderValidator = *context.frameOrderValidator;
     const CoreFrameGraphPlan& coreFrameGraphPlan = *context.frameGraphPlan;
-    const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
-    const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt = *inputs.chunkInstanceSliceOpt;
-    const std::optional<FrameArenaSlice>& shadowChunkInstanceSliceOpt = *inputs.shadowChunkInstanceSliceOpt;
-    const VkBuffer chunkInstanceBuffer = inputs.chunkInstanceBuffer;
-    const VkBuffer shadowChunkInstanceBuffer = inputs.shadowChunkInstanceBuffer;
-    const VkBuffer chunkVertexBuffer = inputs.chunkVertexBuffer;
-    const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
-    const bool canDrawMagica = inputs.canDrawMagica;
-    const std::span<const ReadyMagicaDraw> readyMagicaDraws = inputs.readyMagicaDraws;
+    // Legacy voxel/magica/pipe shadow inputs remain on ShadowPassInputs but are no longer
+    // consumed here — those shadow-caster draws were removed (prior voxel/factory game).
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
@@ -44,12 +37,6 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
     const bool importedPageCullingEnabled = inputs.importedPageCullingEnabled;
-    const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
-    const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
-    const uint32_t transportInstanceCount = inputs.transportInstanceCount;
-    const std::optional<FrameArenaSlice>& transportInstanceSliceOpt = *inputs.transportInstanceSliceOpt;
-    const uint32_t beltCargoInstanceCount = inputs.beltCargoInstanceCount;
-    const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt = *inputs.beltCargoInstanceSliceOpt;
 
     const uint32_t boundDescriptorSetCount = boundDescriptorSets.count;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
@@ -101,19 +88,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     shadowDepthClearValue.depthStencil.depth = 0.0f;
     shadowDepthClearValue.depthStencil.stencil = 0;
 
-    if (m_shadowPipeline != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
-
+    // Shadow caster pass. Gated on the imported-static shadow pipeline (strategy-map
+    // settlements/units); the prior game's voxel chunk + magica shadow draws were removed.
+    if (m_importedStaticShadowPipeline != VK_NULL_HANDLE) {
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
             if (m_cmdInsertDebugUtilsLabel != nullptr) {
                 const std::string cascadeLabel = "Shadow Cascade " + std::to_string(cascadeIndex);
@@ -164,75 +141,8 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
             // Reverse-Z uses GREATER depth tests, so flip bias sign.
             vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
 
-            if (cascadeIndex < kShadowCascadeCount &&
-                frameChunkDrawData.canDrawShadowChunksIndirectByCascade[cascadeIndex] &&
-                shadowChunkInstanceSliceOpt.has_value() &&
-                shadowChunkInstanceBuffer != VK_NULL_HANDLE &&
-                chunkVertexBuffer != VK_NULL_HANDLE &&
-                chunkIndexBuffer != VK_NULL_HANDLE) {
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
-                vkCmdBindDescriptorSets(
-                    commandBuffer,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_pipelineLayout,
-                    0,
-                    boundDescriptorSetCount,
-                    boundDescriptorSets.sets.data(),
-                    1,
-                    &mvpDynamicOffset
-                );
-                const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, shadowChunkInstanceBuffer};
-                const VkDeviceSize voxelVertexOffsets[2] = {0, shadowChunkInstanceSliceOpt->offset};
-                vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
-                vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                ChunkPushConstants chunkPushConstants{};
-                chunkPushConstants.chunkOffset[0] = 0.0f;
-                chunkPushConstants.chunkOffset[1] = 0.0f;
-                chunkPushConstants.chunkOffset[2] = 0.0f;
-                chunkPushConstants.chunkOffset[3] = 0.0f;
-                chunkPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                chunkPushConstants.cascadeData[1] = 0.0f;
-                chunkPushConstants.cascadeData[2] = 0.0f;
-                chunkPushConstants.cascadeData[3] = 0.0f;
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &chunkPushConstants
-                );
-                drawIndirectShadowChunkRanges(commandBuffer, m_debugDrawCallsShadow, cascadeIndex, frameChunkDrawData);
-            }
-            if (canDrawMagica) {
-                for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
-                    const VkBuffer magicaVertexBuffers[2] = {magicaDraw.vertexBuffer, chunkInstanceBuffer};
-                    const VkDeviceSize magicaVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-                    vkCmdBindVertexBuffers(commandBuffer, 0, 2, magicaVertexBuffers, magicaVertexOffsets);
-                    vkCmdBindIndexBuffer(commandBuffer, magicaDraw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                    ChunkPushConstants magicaPushConstants{};
-                    magicaPushConstants.chunkOffset[0] = magicaDraw.offsetX;
-                    magicaPushConstants.chunkOffset[1] = magicaDraw.offsetY;
-                    magicaPushConstants.chunkOffset[2] = magicaDraw.offsetZ;
-                    magicaPushConstants.chunkOffset[3] = 0.0f;
-                    magicaPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                    magicaPushConstants.cascadeData[1] = 0.0f;
-                    magicaPushConstants.cascadeData[2] = 0.0f;
-                    magicaPushConstants.cascadeData[3] = 0.0f;
-                    vkCmdPushConstants(
-                        commandBuffer,
-                        m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0,
-                        sizeof(ChunkPushConstants),
-                        &magicaPushConstants
-                    );
-                    countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
-                }
-            }
+            // (removed) voxel chunk + magica model shadow-caster draws — legacy from the
+            // prior voxel/factory game.
             const std::span<const ImportedMeshDraw> cascadeImportedMeshDraws =
                 importedPageCullingEnabled ? inputs.importedMeshDrawsByCascade[cascadeIndex] : importedMeshDraws;
             const std::uint32_t cascadeImportedTerrainDrawCount =
@@ -336,79 +246,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
             }
 
-            if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
-                auto drawShadowInstances = [&](BufferHandle vertexHandle,
-                                               BufferHandle indexHandle,
-                                               uint32_t indexCount,
-                                               uint32_t instanceCount,
-                                               const std::optional<FrameArenaSlice>& instanceSlice) {
-                    if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
-                        return;
-                    }
-                    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
-                    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
-                    const VkBuffer instanceBuffer = m_bufferAllocator.getBuffer(instanceSlice->buffer);
-                    if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE || instanceBuffer == VK_NULL_HANDLE) {
-                        return;
-                    }
-                    const VkBuffer vertexBuffers[2] = {vertexBuffer, instanceBuffer};
-                    const VkDeviceSize vertexOffsets[2] = {0, instanceSlice->offset};
-                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeShadowPipeline);
-                    vkCmdBindDescriptorSets(
-                        commandBuffer,
-                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        m_pipelineLayout,
-                        0,
-                        boundDescriptorSetCount,
-                        boundDescriptorSets.sets.data(),
-                        1,
-                        &mvpDynamicOffset
-                    );
-                    vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-                    vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                    ChunkPushConstants pipeShadowPushConstants{};
-                    pipeShadowPushConstants.chunkOffset[0] = 0.0f;
-                    pipeShadowPushConstants.chunkOffset[1] = 0.0f;
-                    pipeShadowPushConstants.chunkOffset[2] = 0.0f;
-                    pipeShadowPushConstants.chunkOffset[3] = 0.0f;
-                    pipeShadowPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                    pipeShadowPushConstants.cascadeData[1] = 0.0f;
-                    pipeShadowPushConstants.cascadeData[2] = 0.0f;
-                    pipeShadowPushConstants.cascadeData[3] = 0.0f;
-                    vkCmdPushConstants(
-                        commandBuffer,
-                        m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0,
-                        sizeof(ChunkPushConstants),
-                        &pipeShadowPushConstants
-                    );
-                    countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
-                };
-                drawShadowInstances(
-                    m_pipeVertexBufferHandle,
-                    m_pipeIndexBufferHandle,
-                    m_pipeIndexCount,
-                    pipeInstanceCount,
-                    pipeInstanceSliceOpt
-                );
-                drawShadowInstances(
-                    m_transportVertexBufferHandle,
-                    m_transportIndexBufferHandle,
-                    m_transportIndexCount,
-                    transportInstanceCount,
-                    transportInstanceSliceOpt
-                );
-                drawShadowInstances(
-                    m_transportVertexBufferHandle,
-                    m_transportIndexBufferHandle,
-                    m_transportIndexCount,
-                    beltCargoInstanceCount,
-                    beltCargoInstanceSliceOpt
-                );
-            }
+            // (removed) pipe / belt / transport shadow-caster draws — legacy factory sim.
 
             const uint32_t grassShadowCascadeCount = static_cast<uint32_t>(std::clamp(
                 m_shadowDebugSettings.grassShadowCascadeCount,

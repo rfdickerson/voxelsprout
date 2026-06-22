@@ -1,6 +1,7 @@
 #include "game/game_sim.h"
 
 #include "content/content_database.h"
+#include "game/buildable.h"
 #include "game/great_people.h"
 #include "game/mod_host.h"
 #include "game/religion.h"
@@ -714,6 +715,18 @@ void applyProduction(World& world, Empire& emp, std::size_t cityIndex) {
             emp.treasury += balance().settlerCost / 3;  // no room: salvage some gold
         }
         world.cities[cityIndex].producing.clear();
+        return;
+    }
+
+    // Check if the queue item is a unit (units are not in the building catalog).
+    const BuildableItem* bitem = findBuildable(city.producing);
+    if (bitem != nullptr && bitem->kind == BuildableKind::Unit) {
+        if (city.accumulated < bitem->productionCost) return;
+        city.accumulated -= bitem->productionCost;
+        world.pendingUnits.push_back({city.producing, emp.id, city.col, city.row});
+        logEvent(world, emp.id, GameEvent::UnitProduced,
+                 city.name + " trains a " + bitem->name);
+        city.producing.clear();
         return;
     }
 

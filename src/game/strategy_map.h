@@ -43,10 +43,14 @@ bool terrainIsWater(TerrainType terrain);
 // Per-tile overlay flags. Rivers/roads/borders are intentionally simple bits so
 // the data model stays topology-agnostic; the mesher decides how to draw them.
 enum TileFlagBits : std::uint8_t {
-    TileFlag_None = 0u,
-    TileFlag_River = 1u << 0,
-    TileFlag_Road = 1u << 1,
+    TileFlag_None   = 0u,
+    TileFlag_River  = 1u << 0,
+    TileFlag_Road   = 1u << 1,
     TileFlag_Border = 1u << 2,
+    // An observation fort built by a player unit. Extends fog-of-war vision
+    // radius to 5 hexes from its tile (vs. 2 for units, 4 for cities).
+    // Persists until razed; drawn as a narrow stone tower in the mesh.
+    TileFlag_Fort   = 1u << 3,
 };
 
 // Fog-of-war state. Stored per tile so a future gameplay layer can drive

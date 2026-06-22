@@ -42,6 +42,25 @@ struct StrategyMapMeshOptions {
     // the existing animated reflective/refractive water shader renders them.
     bool emitWaterPatches = true;
 
+    // Vertical exaggeration for elevation-based land height. 0 = flat plateau;
+    // 0.35 = subtle relief so terrain types read as raised/sunken without steep
+    // faceting. Matches HexTerrainOptions::heightExaggeration so the two builders
+    // can be swapped without a camera-framing jump. Ignored in 2D board mode.
+    float heightExaggeration = 0.35f;
+
+    // When true, tile visibility (Hidden/Explored/Visible) controls top-face color:
+    // Hidden tiles are rendered near-black; Explored tiles are desaturated blue-gray;
+    // Visible tiles keep their full terrain color. Skirt colors follow the top face.
+    // The caller must set MapTile::visibility before each mesh build; the option simply
+    // reads that field and applies it, so toggling re-meshes cleanly.
+    bool fogOfWar = false;
+
+    // When fogOfWar is true and playerOwner != 0, enemy units whose tile has
+    // visibility != Visible are hidden (the player can't see what they can't see).
+    // 0 disables the filter so all units are always drawn (preserves current behavior
+    // when fog is off or playerOwner is unknown).
+    std::uint8_t playerOwner = 0;
+
     // Per-terrain-type textures indexed by TerrainType cast to int. Entries with
     // width==0 fall back to vertex color. Multiple terrain types may share a file
     // (same sourcePath); the mesher deduplicates so each unique path uploads once.

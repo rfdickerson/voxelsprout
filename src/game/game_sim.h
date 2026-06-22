@@ -108,7 +108,16 @@ struct GameEvent {
     int turn = 0;
     std::uint8_t empire = 0;
     std::string text;
-    enum Kind { Growth, Building, Wonder, WonderLost, Tech, Founded, FireSale, Starve, Disorder, Conquest, Unlock, Eureka, GreatPerson } kind = Building;
+    enum Kind { Growth, Building, Wonder, WonderLost, Tech, Founded, FireSale, Starve, Disorder, Conquest, Unlock, Eureka, GreatPerson, UnitProduced } kind = Building;
+};
+
+// A unit that was completed by city production this turn and needs to be spawned
+// into the GameState. The app clears this vector after integrating the units.
+struct PendingUnit {
+    std::string typeId;    // e.g. "warrior", "scout", "archer"
+    std::uint8_t owner = 0;
+    std::uint32_t col = 0;
+    std::uint32_t row = 0;
 };
 
 struct World {
@@ -121,6 +130,10 @@ struct World {
     std::uint32_t rng = 0x1234567u;
 
     std::vector<GameEvent> events;            // chronological event log
+
+    // Units completed by city production this turn; cleared by the app after
+    // integrating them into GameState (so this is reset at the start of each turn).
+    std::vector<PendingUnit> pendingUnits;
 
     [[nodiscard]] bool wonderTaken(const std::string& id) const;
     [[nodiscard]] bool greatPersonTaken(const std::string& id) const;  // already born this game

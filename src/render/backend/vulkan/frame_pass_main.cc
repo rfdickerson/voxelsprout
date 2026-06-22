@@ -23,13 +23,8 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkRect2D& scissor = context.scissor;
     const BoundDescriptorSets& boundDescriptorSets = *context.boundDescriptorSets;
     const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
-    const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
-    const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt = *inputs.chunkInstanceSliceOpt;
-    const VkBuffer chunkInstanceBuffer = inputs.chunkInstanceBuffer;
-    const VkBuffer chunkVertexBuffer = inputs.chunkVertexBuffer;
-    const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
-    const bool canDrawMagica = inputs.canDrawMagica;
-    const std::span<const ReadyMagicaDraw> readyMagicaDraws = inputs.readyMagicaDraws;
+    // Legacy voxel/magica/pipe per-frame draw inputs are still present on MainPassInputs
+    // but no longer consumed here — those passes were removed (prior voxel/factory game).
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
@@ -40,18 +35,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
     const bool renderingImportedScene = !importedMeshDraws.empty() || !importedActorMeshDraws.empty();
-    const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
-    const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
-    const uint32_t transportInstanceCount = inputs.transportInstanceCount;
-    const std::optional<FrameArenaSlice>& transportInstanceSliceOpt = *inputs.transportInstanceSliceOpt;
-    const uint32_t beltCargoInstanceCount = inputs.beltCargoInstanceCount;
-    const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt = *inputs.beltCargoInstanceSliceOpt;
-    const VoxelPreview& preview = *inputs.preview;
     const bool useRtMainShadows =
         m_shadowStats.activeMode == ShadowMode::RayTraced &&
         m_shadowStats.mainPassRayTracingReady;
-    const bool useRtVoxelShadows = useRtMainShadows && m_pipelineRt != VK_NULL_HANDLE;
-    const bool useRtMagicaShadows = useRtMainShadows && m_magicaPipelineRt != VK_NULL_HANDLE;
     m_shadowStats.mainPassRayTracingActive = useRtMainShadows;
 
     if (useRtMainShadows) {
@@ -237,85 +223,8 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         }
     }
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, useRtVoxelShadows ? m_pipelineRt : m_pipeline);
-    vkCmdBindDescriptorSets(
-        commandBuffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        m_pipelineLayout,
-        0,
-        boundDescriptorSetCount,
-        boundDescriptorSets.sets.data(),
-        1,
-        &mvpDynamicOffset
-    );
-    if (frameChunkDrawData.canDrawChunksIndirect && m_terrainTessPipeline == VK_NULL_HANDLE) {
-        const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, chunkInstanceBuffer};
-        const VkDeviceSize voxelVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-        vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
-        vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-        ChunkPushConstants chunkPushConstants{};
-        chunkPushConstants.chunkOffset[0] = 0.0f;
-        chunkPushConstants.chunkOffset[1] = 0.0f;
-        chunkPushConstants.chunkOffset[2] = 0.0f;
-        chunkPushConstants.chunkOffset[3] = 0.0f;
-        chunkPushConstants.cascadeData[0] = 0.0f;
-        chunkPushConstants.cascadeData[1] = 0.0f;
-        chunkPushConstants.cascadeData[2] = 0.0f;
-        chunkPushConstants.cascadeData[3] = 0.0f;
-        vkCmdPushConstants(
-            commandBuffer,
-            m_pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(ChunkPushConstants),
-            &chunkPushConstants
-        );
-        drawIndirectChunkRanges(commandBuffer, m_debugDrawCallsMain, frameChunkDrawData);
-    }
-    if (canDrawMagica) {
-        vkCmdBindPipeline(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            useRtMagicaShadows ? m_magicaPipelineRt : m_magicaPipeline
-        );
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
-        for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
-            const VkBuffer magicaVertexBuffers[2] = {magicaDraw.vertexBuffer, chunkInstanceBuffer};
-            const VkDeviceSize magicaVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, magicaVertexBuffers, magicaVertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, magicaDraw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-            ChunkPushConstants magicaPushConstants{};
-            magicaPushConstants.chunkOffset[0] = magicaDraw.offsetX;
-            magicaPushConstants.chunkOffset[1] = magicaDraw.offsetY;
-            magicaPushConstants.chunkOffset[2] = magicaDraw.offsetZ;
-            magicaPushConstants.chunkOffset[3] = 0.0f;
-            magicaPushConstants.cascadeData[0] = 0.0f;
-            magicaPushConstants.cascadeData[1] = 0.0f;
-            magicaPushConstants.cascadeData[2] = 0.0f;
-            magicaPushConstants.cascadeData[3] = 0.0f;
-            vkCmdPushConstants(
-                commandBuffer,
-                m_pipelineLayout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0,
-                sizeof(ChunkPushConstants),
-                &magicaPushConstants
-            );
-            countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
-        }
-    }
+    // (removed) voxel chunk + magica model main-pass draws — legacy from the prior
+    // voxel/factory game; the strategy map renders hex terrain + imported scene instead.
     if (m_importedStaticPipeline != VK_NULL_HANDLE &&
         importedVertexBuffer != VK_NULL_HANDLE &&
         importedIndexBuffer != VK_NULL_HANDLE &&
@@ -411,62 +320,8 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         }
     }
 
-    if (m_pipePipeline != VK_NULL_HANDLE) {
-        auto drawLitInstances = [&](BufferHandle vertexHandle,
-                                    BufferHandle indexHandle,
-                                    uint32_t indexCount,
-                                    uint32_t instanceCount,
-                                    const std::optional<FrameArenaSlice>& instanceSlice) {
-            if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
-                return;
-            }
-            const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
-            const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
-            const VkBuffer instanceBuffer = m_bufferAllocator.getBuffer(instanceSlice->buffer);
-            if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE || instanceBuffer == VK_NULL_HANDLE) {
-                return;
-            }
-            const VkBuffer vertexBuffers[2] = {vertexBuffer, instanceBuffer};
-            const VkDeviceSize vertexOffsets[2] = {0, instanceSlice->offset};
-
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipePipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-                1,
-                &mvpDynamicOffset
-            );
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
-        };
-        drawLitInstances(
-            m_pipeVertexBufferHandle,
-            m_pipeIndexBufferHandle,
-            m_pipeIndexCount,
-            pipeInstanceCount,
-            pipeInstanceSliceOpt
-        );
-        drawLitInstances(
-            m_transportVertexBufferHandle,
-            m_transportIndexBufferHandle,
-            m_transportIndexCount,
-            transportInstanceCount,
-            transportInstanceSliceOpt
-        );
-        drawLitInstances(
-            m_transportVertexBufferHandle,
-            m_transportIndexBufferHandle,
-            m_transportIndexCount,
-            beltCargoInstanceCount,
-            beltCargoInstanceSliceOpt
-        );
-    }
+    // (removed) pipe / belt / transport instanced main-pass draws — legacy factory-sim
+    // rendering from the prior game; the strategy map has no pipes or conveyors.
 
     if (m_grassBillboardPipeline != VK_NULL_HANDLE &&
         m_grassBillboardIndexCount > 0 &&
@@ -678,189 +533,8 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             vkCmdDrawIndexed(commandBuffer, m_importedWaterIndexCount, 1, 0, 0, 0);
         }
     }
-    const VkPipeline activePreviewPipeline =
-        (preview.mode == VoxelPreview::Mode::Remove) ? m_previewRemovePipeline : m_previewAddPipeline;
-    const bool drawCubePreview = !preview.pipeStyle && preview.visible && activePreviewPipeline != VK_NULL_HANDLE;
-    const bool drawFacePreview =
-        !preview.pipeStyle && preview.faceVisible && preview.brushSize == 1 && m_previewFaceOutlinePipeline != VK_NULL_HANDLE;
-
-    if (preview.pipeStyle && preview.visible && m_pipePipeline != VK_NULL_HANDLE) {
-        PipeInstance previewInstance{};
-        previewInstance.originLength[0] = static_cast<float>(preview.x);
-        previewInstance.originLength[1] = static_cast<float>(preview.y);
-        previewInstance.originLength[2] = static_cast<float>(preview.z);
-        previewInstance.originLength[3] = 1.0f;
-        odai::math::Vector3 previewAxis =
-            odai::math::normalize(odai::math::Vector3{preview.pipeAxisX, preview.pipeAxisY, preview.pipeAxisZ});
-        if (odai::math::lengthSquared(previewAxis) <= 0.0001f) {
-            previewAxis = odai::math::Vector3{0.0f, 1.0f, 0.0f};
-        }
-        previewInstance.axisRadius[0] = previewAxis.x;
-        previewInstance.axisRadius[1] = previewAxis.y;
-        previewInstance.axisRadius[2] = previewAxis.z;
-        previewInstance.axisRadius[3] = std::clamp(preview.pipeRadius, 0.02f, 0.5f);
-        if (preview.mode == VoxelPreview::Mode::Remove) {
-            previewInstance.tint[0] = 1.0f;
-            previewInstance.tint[1] = 0.32f;
-            previewInstance.tint[2] = 0.26f;
-        } else {
-            previewInstance.tint[0] = 0.30f;
-            previewInstance.tint[1] = 0.95f;
-            previewInstance.tint[2] = 1.0f;
-        }
-        previewInstance.tint[3] = std::clamp(preview.pipeStyleId, 0.0f, 2.0f);
-        previewInstance.extensions[0] = 0.0f;
-        previewInstance.extensions[1] = 0.0f;
-        previewInstance.extensions[2] = 1.0f;
-        previewInstance.extensions[3] = 1.0f;
-        if (preview.pipeStyleId > 0.5f && preview.pipeStyleId < 1.5f) {
-            previewInstance.extensions[2] = 2.0f;
-            previewInstance.extensions[3] = 0.25f;
-        }
-        if (preview.pipeStyleId > 1.5f) {
-            previewInstance.extensions[2] = 2.0f;
-            previewInstance.extensions[3] = 0.25f;
-        }
-
-        const std::optional<FrameArenaSlice> previewInstanceSlice =
-            m_frameArena.allocateUpload(
-                sizeof(PipeInstance),
-                static_cast<VkDeviceSize>(alignof(PipeInstance)),
-                FrameArenaUploadKind::PreviewData
-            );
-        if (previewInstanceSlice.has_value() && previewInstanceSlice->mapped != nullptr) {
-            std::memcpy(previewInstanceSlice->mapped, &previewInstance, sizeof(PipeInstance));
-            const bool previewUsesPipeMesh = preview.pipeStyleId < 0.5f;
-            const BufferHandle previewVertexHandle =
-                previewUsesPipeMesh ? m_pipeVertexBufferHandle : m_transportVertexBufferHandle;
-            const BufferHandle previewIndexHandle =
-                previewUsesPipeMesh ? m_pipeIndexBufferHandle : m_transportIndexBufferHandle;
-            const uint32_t previewIndexCount = previewUsesPipeMesh ? m_pipeIndexCount : m_transportIndexCount;
-            if (previewIndexCount == 0) {
-                // No mesh data allocated for this preview style.
-            }
-            const VkBuffer pipeVertexBuffer = m_bufferAllocator.getBuffer(previewVertexHandle);
-            const VkBuffer pipeIndexBuffer = m_bufferAllocator.getBuffer(previewIndexHandle);
-            const VkBuffer pipeInstanceBuffer = m_bufferAllocator.getBuffer(previewInstanceSlice->buffer);
-            if (pipeVertexBuffer != VK_NULL_HANDLE &&
-                pipeIndexBuffer != VK_NULL_HANDLE &&
-                pipeInstanceBuffer != VK_NULL_HANDLE &&
-                previewIndexCount > 0) {
-                const VkBuffer vertexBuffers[2] = {pipeVertexBuffer, pipeInstanceBuffer};
-                const VkDeviceSize vertexOffsets[2] = {0, previewInstanceSlice->offset};
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipePipeline);
-                vkCmdBindDescriptorSets(
-                    commandBuffer,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_pipelineLayout,
-                    0,
-                    boundDescriptorSetCount,
-                    boundDescriptorSets.sets.data(),
-                    1,
-                    &mvpDynamicOffset
-                );
-                vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-                vkCmdBindIndexBuffer(commandBuffer, pipeIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                countDrawCalls(m_debugDrawCallsMain, 1);
-                vkCmdDrawIndexed(commandBuffer, previewIndexCount, 1, 0, 0, 0);
-            }
-        }
-    }
-
-    if (drawCubePreview || drawFacePreview) {
-        constexpr uint32_t kPreviewCubeIndexCount = 36u;
-        constexpr uint32_t kPreviewFaceOutlineIndexCount = 8u;
-        constexpr uint32_t kAddCubeFirstIndex = 0u;
-        constexpr uint32_t kRemoveCubeFirstIndex = 36u;
-        constexpr uint32_t kAddFaceOutlineFirstIndexBase = 72u;
-        constexpr uint32_t kRemoveFaceOutlineFirstIndexBase = 120u;
-        constexpr float kChunkCoordinateScale = 1.0f;
-
-        const VkBuffer previewVertexBuffer = m_bufferAllocator.getBuffer(m_previewVertexBufferHandle);
-        const VkBuffer previewIndexBuffer = m_bufferAllocator.getBuffer(m_previewIndexBufferHandle);
-        if (previewVertexBuffer != VK_NULL_HANDLE &&
-            previewIndexBuffer != VK_NULL_HANDLE &&
-            chunkInstanceSliceOpt.has_value() &&
-            chunkInstanceBuffer != VK_NULL_HANDLE) {
-            const VkBuffer previewVertexBuffers[2] = {previewVertexBuffer, chunkInstanceBuffer};
-            const VkDeviceSize previewVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, previewVertexBuffers, previewVertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, previewIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-            auto drawPreviewRange = [&](VkPipeline pipeline, uint32_t indexCount, uint32_t firstIndex, int x, int y, int z) {
-                if (pipeline == VK_NULL_HANDLE || indexCount == 0) {
-                    return;
-                }
-                ChunkPushConstants previewChunkPushConstants{};
-                previewChunkPushConstants.chunkOffset[0] = static_cast<float>(x) * kChunkCoordinateScale;
-                previewChunkPushConstants.chunkOffset[1] = static_cast<float>(y) * kChunkCoordinateScale;
-                previewChunkPushConstants.chunkOffset[2] = static_cast<float>(z) * kChunkCoordinateScale;
-                previewChunkPushConstants.chunkOffset[3] = 0.0f;
-                previewChunkPushConstants.cascadeData[0] = 0.0f;
-                previewChunkPushConstants.cascadeData[1] = 0.0f;
-                previewChunkPushConstants.cascadeData[2] = 0.0f;
-                previewChunkPushConstants.cascadeData[3] = 0.0f;
-
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-                vkCmdBindDescriptorSets(
-                    commandBuffer,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_pipelineLayout,
-                    0,
-                    boundDescriptorSetCount,
-                    boundDescriptorSets.sets.data(),
-                    1,
-                    &mvpDynamicOffset
-                );
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &previewChunkPushConstants
-                );
-                countDrawCalls(m_debugDrawCallsMain, 1);
-                vkCmdDrawIndexed(commandBuffer, indexCount, 1, firstIndex, 0, 0);
-            };
-
-            if (drawCubePreview) {
-                const uint32_t cubeFirstIndex =
-                    (preview.mode == VoxelPreview::Mode::Add) ? kAddCubeFirstIndex : kRemoveCubeFirstIndex;
-                const int brushSize = std::max(preview.brushSize, 1);
-                for (int localY = 0; localY < brushSize; ++localY) {
-                    for (int localZ = 0; localZ < brushSize; ++localZ) {
-                        for (int localX = 0; localX < brushSize; ++localX) {
-                            drawPreviewRange(
-                                activePreviewPipeline,
-                                kPreviewCubeIndexCount,
-                                cubeFirstIndex,
-                                preview.x + localX,
-                                preview.y + localY,
-                                preview.z + localZ
-                            );
-                        }
-                    }
-                }
-            }
-
-            if (drawFacePreview) {
-                const uint32_t faceFirstIndex =
-                    ((preview.mode == VoxelPreview::Mode::Add)
-                         ? kAddFaceOutlineFirstIndexBase
-                         : kRemoveFaceOutlineFirstIndexBase) +
-                    (std::min(preview.faceId, 5u) * kPreviewFaceOutlineIndexCount);
-                drawPreviewRange(
-                    m_previewFaceOutlinePipeline,
-                    kPreviewFaceOutlineIndexCount,
-                    faceFirstIndex,
-                    preview.faceX,
-                    preview.faceY,
-                    preview.faceZ
-                );
-            }
-        }
-    }
+    // (removed) voxel/pipe placement-preview draws — legacy editor overlays from the
+    // prior game (cube/face brush + pipe ghost); the strategy map has no voxel editing.
 
     // Draw skybox last with depth-test so sun/sky only appears where no geometry wrote depth.
     if (m_skyboxPipeline != VK_NULL_HANDLE) {
