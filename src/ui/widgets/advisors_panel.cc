@@ -176,7 +176,7 @@ void AdvisorsPanel::setAdvisors(const UiRect& rect, float s,
     bg->background        = UiColor{0.07f, 0.06f, 0.04f, 0.92f};
     bg->borderColor       = UiColor{0.75f, 0.62f, 0.34f, 0.45f};
     bg->borderThicknessPx = 1.0f * s;
-    bg->cornerRadiusPx    = 4.0f * s;
+    bg->cornerRadiusPx    = 2.0f * s;
     bg_ = static_cast<Panel*>(addChild(std::move(bg)));
 
     const Font* bf    = fonts_.bold ? fonts_.bold : fonts_.regular;

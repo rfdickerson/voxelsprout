@@ -27,7 +27,7 @@ public:
     UiColor textColor{0.90f, 0.94f, 0.96f, 1.0f};
     UiColor placeholderColor{0.55f, 0.62f, 0.66f, 1.0f};
     UiColor caretColor{0.95f, 0.80f, 0.45f, 1.0f};
-    float cornerRadiusPx = 8.0f;
+    float cornerRadiusPx = 2.0f;
     float borderThicknessPx = 1.5f;
     UiVec2 padding{12.0f, 0.0f};  // x: horizontal text inset; y unused (centred).
     float leftInset = 0.0f;       // Extra left space, e.g. to clear a search icon.

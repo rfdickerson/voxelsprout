@@ -3,7 +3,7 @@
 #include "ui/font.h"
 #include "ui/ui_draw_list.h"
 
-#include <algorithm>
+#include <cctype>
 
 namespace odai::ui {
 
@@ -41,12 +41,18 @@ void Window::draw(UiDrawList& dl) const {
         dl.addDropShadow(f, shadowColor, shadowBlurPx, shadowOffsetX, shadowOffsetY);
     }
 
-    // Frame: 9-slice if provided, else rounded solid fill + border.
+    // Frame: 9-slice if provided, else rounded solid fill + layered border.
     if (frame.has_value()) {
         dl.add9Slice(f, *frame, frameTint);
     } else {
         const float r = cornerRadiusPx;
         dl.addRoundRectFilled(f, bodyColor, r);
+        // Top-lit bevel just inside the silhouette: a soft highlight along the top
+        // edge and a recessed shadow along the bottom give the frame physical depth
+        // before the defining stroke is laid over it.
+        dl.addBevel(f, UiColor{1.0f, 1.0f, 1.0f, 0.14f}, UiColor{0.0f, 0.0f, 0.0f, 0.45f},
+                    r, 1.5f);
+        // Crisp defining edge — the window's accent color reads as a thin gilt rule.
         dl.addRoundRect(f, borderColor, r, 1.5f);
     }
 
@@ -85,46 +91,58 @@ void Window::draw(UiDrawList& dl) const {
         const float textY = f.minY + topInset + (titleBarH - topInset - tf.lineHeightPx()) * 0.5f;
         // Reserve space for close button so title doesn't underlap it.
         const float closeReserve = showCloseButton ? titleBarH : 0.0f;
+        const Font& sc = (titleSmallCapsFont != nullptr) ? *titleSmallCapsFont : tf;
+        const auto isLower = [](unsigned char c) { return c >= 'a' && c <= 'z'; };
+        const auto measureSmallCaps = [&]() {
+            float width = 0.0f;
+            for (unsigned char c : title_) {
+                const char uppercase = static_cast<char>(std::toupper(c));
+                width += isLower(c) ? sc.measureText(std::string_view(&uppercase, 1))
+                                    : tf.measureText(std::string_view(&uppercase, 1));
+            }
+            return width;
+        };
+        const auto drawSmallCaps = [&](float x) {
+            for (unsigned char c : title_) {
+                const char uppercase = static_cast<char>(std::toupper(c));
+                const Font& glyphFont = isLower(c) ? sc : tf;
+                const float glyphY = textY + tf.ascentPx() - glyphFont.ascentPx();
+                x += dl.addText(glyphFont, std::string_view(&uppercase, 1), UiVec2{x, glyphY}, titleColor);
+            }
+        };
         if (frame.has_value()) {
-            dl.addText(tf, title_, UiVec2{toolbar.minX + edge + 4.0f + leftInset, textY}, titleColor);
+            drawSmallCaps(toolbar.minX + edge + 4.0f + leftInset);
         } else {
             const float usableW = toolbar.width() - closeReserve;
-            const float tw = tf.measureText(title_);
+            const float tw = measureSmallCaps();
             const float centerX = toolbar.minX + (usableW - tw) * 0.5f;
-            dl.addText(tf, title_, UiVec2{centerX, textY}, titleColor);
+            drawSmallCaps(centerX);
         }
     }
 
     // Close button: beveled rounded square with a "×" glyph.
-    // The bevel is drawn as lighter top/left edges and darker bottom/right edges —
-    // classic raised-button look using only solid filled rects (no textures).
+    // No drop shadow — the bevel alone carries the elevation. Resting state reads as
+    // a raised key (top-lit highlight, bottom shadow); on hover it turns warm red and
+    // the bevel flips inward so the button visibly depresses.
     if (showCloseButton && font_ != nullptr) {
         const UiRect cb = closeBtnRect();
-        const float r = cb.width() * 0.20f;
+        const float r = cb.width() * 0.14f;  // subtle, squared-off corners
         const float bev = 1.5f;  // bevel edge width in pixels
 
-        // Drop shadow cast behind the button — gives it physical elevation above the titlebar.
-        dl.addDropShadow(cb, UiColor{0.0f, 0.0f, 0.0f, closeHovered_ ? 0.35f : 0.55f},
-                         2.5f, 0.5f, 1.5f);
-
-        // Base fill: neutral gray, darkened on hover to signal press-readiness.
+        // Base fill: neutral slate at rest, warm red on hover.
         const UiColor baseFill = closeHovered_
-            ? UiColor{0.48f, 0.14f, 0.10f, 0.98f}
-            : UiColor{0.30f, 0.32f, 0.36f, 0.92f};
+            ? UiColor{0.55f, 0.16f, 0.12f, 1.0f}
+            : UiColor{0.27f, 0.30f, 0.35f, 1.0f};
         dl.addRoundRectFilled(cb, baseFill, r);
 
-        // Outer dark border (recessed feel).
-        dl.addRoundRect(cb, UiColor{0.0f, 0.0f, 0.0f, 0.60f}, r, 1.0f);
+        // Bevel: stronger now that it does the elevation work on its own. The `inward`
+        // flag on hover swaps highlight/shadow for a pressed look.
+        const UiColor hlColor{1.0f, 1.0f, 1.0f, 0.35f};
+        const UiColor shColor{0.0f, 0.0f, 0.0f, 0.55f};
+        dl.addBevel(cb, hlColor, shColor, r, bev, /*inward=*/closeHovered_);
 
-        // Bevel highlight: top and left inner edges — lighter, simulates top-light.
-        const UiColor hlColor{1.0f, 1.0f, 1.0f, closeHovered_ ? 0.10f : 0.30f};
-        dl.addRectFilled(UiRect{cb.minX + bev, cb.minY + bev, cb.maxX - bev, cb.minY + bev + bev}, hlColor);
-        dl.addRectFilled(UiRect{cb.minX + bev, cb.minY + bev, cb.minX + bev + bev, cb.maxY - bev}, hlColor);
-
-        // Bevel shadow: bottom and right inner edges — darker, simulates depth.
-        const UiColor shColor{0.0f, 0.0f, 0.0f, closeHovered_ ? 0.15f : 0.50f};
-        dl.addRectFilled(UiRect{cb.minX + bev, cb.maxY - bev - bev, cb.maxX - bev, cb.maxY - bev}, shColor);
-        dl.addRectFilled(UiRect{cb.maxX - bev - bev, cb.minY + bev, cb.maxX - bev, cb.maxY - bev}, shColor);
+        // Thin defining edge over the bevel.
+        dl.addRoundRect(cb, UiColor{0.0f, 0.0f, 0.0f, 0.45f}, r, 1.0f);
 
         // "×" glyph centered in the button.
         const char kTimes[] = "\xc3\x97";

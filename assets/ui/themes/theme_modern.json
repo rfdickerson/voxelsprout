@@ -1,0 +1,42 @@
+{
+  "name": "CleanModern",
+  "fonts": {
+    "body":      { "path": "assets/fonts/Inter-Regular.ttf",          "size": 18 },
+    "bold":      { "path": "assets/fonts/Inter-Bold.ttf",             "size": 18 },
+    "italic":    { "path": "assets/fonts/Inter-Italic.ttf",           "size": 18 },
+    "boldItalic":{ "path": "assets/fonts/Inter-Bold.ttf",             "size": 18 },
+    "heading":   { "path": "assets/fonts/EBGaramond-Bold.ttf",        "size": 24 },
+    "caption":   { "path": "assets/fonts/Inter-Regular.ttf",          "size": 14 },
+    "numeric":   { "path": "assets/fonts/JetBrainsMono-Regular.ttf",  "size": 18 }
+  },
+  "colors": {
+    "text":            "#E6EAF0",
+    "text.dim":        "#93A0B4",
+    "text.positive":   "#6FCF7B",
+    "text.negative":   "#E06A5A",
+    "text.gold":       "#C9A24B",
+    "panel.bg":        "#12161CCC",
+    "panel.bgRaised":  "#1A2029DD",
+    "panel.border":    "#FFFFFF1A",
+    "accent":          "#C9A24B",
+    "accent.hover":    "#E0BE6E",
+    "tooltip.bg":      "#0C0F14EE",
+    "selection":       "#C9A24B33",
+    "scrollbar":       "#FFFFFF30",
+    "scrollbar.bg":    "#00000030",
+    "yield.food":       "#6FCF7B",
+    "yield.production": "#EFB24A",
+    "yield.gold":       "#F2D24A",
+    "yield.science":    "#5AA6EF",
+    "yield.culture":    "#B58BD6",
+    "yield.faith":      "#D8DCE2"
+  },
+  "sizes": {
+    "padding":       [14, 10],
+    "titleBarH":     34,
+    "gap":           8,
+    "iconSize":      22,
+    "borderRadius":  10,
+    "scrollBarW":    6
+  }
+}

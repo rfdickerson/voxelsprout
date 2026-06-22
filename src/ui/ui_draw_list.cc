@@ -215,6 +215,65 @@ void UiDrawList::addRectFilledVGradient(const UiRect& rect, const UiColor& top,
     cmd.indexCount += 6;
 }
 
+void UiDrawList::addRectFilledHGradient(const UiRect& rect, const UiColor& left,
+                                        const UiColor& right) {
+    if (!rect.valid()) return;
+    const float opacity = currentOpacity();
+    const std::uint32_t lRgba = scaleAlpha(left.packAbgr8(), opacity);
+    const std::uint32_t rRgba = scaleAlpha(right.packAbgr8(), opacity);
+    UiDrawCmd& cmd = currentCommand(kUiNoTexture);
+    const auto base = static_cast<std::uint32_t>(m_data.vertices.size());
+    const auto mode = static_cast<std::uint32_t>(UiDrawMode::SolidColor);
+    // Left vertices → left color; right vertices → right color.
+    m_data.vertices.push_back(UiVertex{{rect.minX, rect.minY}, {0, 0}, lRgba, mode, {}});
+    m_data.vertices.push_back(UiVertex{{rect.maxX, rect.minY}, {0, 0}, rRgba, mode, {}});
+    m_data.vertices.push_back(UiVertex{{rect.maxX, rect.maxY}, {0, 0}, rRgba, mode, {}});
+    m_data.vertices.push_back(UiVertex{{rect.minX, rect.maxY}, {0, 0}, lRgba, mode, {}});
+    m_data.indices.push_back(base + 0);
+    m_data.indices.push_back(base + 1);
+    m_data.indices.push_back(base + 2);
+    m_data.indices.push_back(base + 0);
+    m_data.indices.push_back(base + 2);
+    m_data.indices.push_back(base + 3);
+    cmd.indexCount += 6;
+}
+
+void UiDrawList::addRoundRectFilledHGradient(const UiRect& rect, const UiColor& left,
+                                              const UiColor& right, float radiusPx) {
+    if (!rect.valid() || (left.a <= 0.0f && right.a <= 0.0f)) return;
+    const float halfW  = rect.width()  * 0.5f;
+    const float halfH  = rect.height() * 0.5f;
+    const float r      = std::min(std::max(radiusPx, 0.0f), std::min(halfW, halfH));
+    const float feather = 1.5f;
+    const UiRect dst{rect.minX - feather, rect.minY - feather,
+                     rect.maxX + feather, rect.maxY + feather};
+    // sdf: {halfW, halfH, cornerRadius, borderPx=0 (fill)}
+    const float sdf[4] = {halfW, halfH, r, 0.0f};
+
+    const float opacity = currentOpacity();
+    const std::uint32_t lRgba = scaleAlpha(left.packAbgr8(),  opacity);
+    const std::uint32_t rRgba = scaleAlpha(right.packAbgr8(), opacity);
+
+    UiDrawCmd& cmd = currentCommand(kUiNoTexture);
+    const auto base     = static_cast<std::uint32_t>(m_data.vertices.size());
+    const auto modeBits = static_cast<std::uint32_t>(UiDrawMode::RoundRect);
+
+    // UV encodes the pixel offset from the rect center (same convention as emitRoundRect).
+    // The GPU interpolates vertex colors across the quad; the SDF mask clips to the
+    // rounded shape. Left edge → left color, right edge → right color.
+    m_data.vertices.push_back(UiVertex{{dst.minX, dst.minY}, {-halfW - feather, -halfH - feather}, lRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
+    m_data.vertices.push_back(UiVertex{{dst.maxX, dst.minY}, { halfW + feather, -halfH - feather}, rRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
+    m_data.vertices.push_back(UiVertex{{dst.maxX, dst.maxY}, { halfW + feather,  halfH + feather}, rRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
+    m_data.vertices.push_back(UiVertex{{dst.minX, dst.maxY}, {-halfW - feather,  halfH + feather}, lRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
+    m_data.indices.push_back(base + 0);
+    m_data.indices.push_back(base + 1);
+    m_data.indices.push_back(base + 2);
+    m_data.indices.push_back(base + 0);
+    m_data.indices.push_back(base + 2);
+    m_data.indices.push_back(base + 3);
+    cmd.indexCount += 6;
+}
+
 void UiDrawList::addRect(const UiRect& rect, const UiColor& color, float thicknessPx) {
     if (thicknessPx <= 0.0f) {
         return;
@@ -380,6 +439,47 @@ void UiDrawList::add9Slice(const UiRect& rect, const UiNineSlice& slice, const U
             addQuad(dst, uv, rgba, mode, slice.textureId);
         }
     }
+}
+
+void UiDrawList::addBevel(const UiRect& rect, const UiColor& highlightColor,
+                          const UiColor& shadowColor, float radiusPx,
+                          float thicknessPx, bool inward) {
+    if (!rect.valid() || thicknessPx <= 0.0f) return;
+
+    const UiColor& hlCol = inward ? shadowColor    : highlightColor;
+    const UiColor& shCol = inward ? highlightColor : shadowColor;
+
+    // The SDF quad for addRoundRect is grown by (thicknessPx*0.5 + 1.5) beyond
+    // `rect` so the anti-aliased outer edge isn't clipped by its own geometry.
+    // Expand the clip regions by the same feather so the outer anti-aliased fringe
+    // isn't scissored away before it gets to the screen.
+    const float feather = thicknessPx * 0.5f + 1.5f;
+    const float midX    = (rect.minX + rect.maxX) * 0.5f;
+    const float midY    = (rect.minY + rect.maxY) * 0.5f;
+
+    // Diagonal key light from the upper-left. Highlight first along the top and left
+    // edge bands, then shadow over the bottom and right edge bands. Where the shadow
+    // bands overlap a lit edge (the top-right of the top edge, the bottom of the left
+    // edge) they win, so the lit edges fade toward the bottom-right corner — selling a
+    // diagonal light rather than a flat overhead one.
+
+    // Highlight — top edge band.
+    pushClip(UiRect{rect.minX - feather, rect.minY - feather, rect.maxX + feather, midY});
+    addRoundRect(rect, hlCol, radiusPx, thicknessPx);
+    popClip();
+    // Highlight — left edge band.
+    pushClip(UiRect{rect.minX - feather, rect.minY - feather, midX, rect.maxY + feather});
+    addRoundRect(rect, hlCol, radiusPx, thicknessPx);
+    popClip();
+
+    // Shadow — bottom edge band.
+    pushClip(UiRect{rect.minX - feather, midY, rect.maxX + feather, rect.maxY + feather});
+    addRoundRect(rect, shCol, radiusPx, thicknessPx);
+    popClip();
+    // Shadow — right edge band.
+    pushClip(UiRect{midX, rect.minY - feather, rect.maxX + feather, rect.maxY + feather});
+    addRoundRect(rect, shCol, radiusPx, thicknessPx);
+    popClip();
 }
 
 void UiDrawList::addSectorFilled(const UiVec2& center, float innerRadiusPx, float outerRadiusPx,

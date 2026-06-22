@@ -3,6 +3,7 @@
 #include <iostream>
 #include <memory>
 
+#include "game/turn_action.h"
 #include "ui/animation.h"
 #include "ui/cached_rich_text.h"
 #include "ui/document/ui_binding.h"
@@ -13,11 +14,13 @@
 #include "ui/ui_draw_list.h"
 #include "ui/ui_input.h"
 #include "ui/ui_types.h"
+#include "ui/yield_style.h"
 #include "ui/widgets/button.h"
 #include "ui/widgets/command_view_panel.h"
 #include "ui/widgets/donut_chart.h"
 #include "ui/widgets/dropdown.h"
 #include "ui/widgets/line_chart.h"
+#include "ui/widgets/minimap_panel.h"
 #include "ui/widgets/panel.h"
 #include "ui/widgets/progress_bar.h"
 #include "ui/widgets/scroll_view.h"
@@ -125,6 +128,24 @@ void testRichTextSpans() {
         expectNear(spans[1].color.g, 1.0f, 1e-3f, "second span default green");
         expectTrue(spans[1].text == " plain", "second span text is ' plain'");
     }
+}
+
+void testRichTextNumericFont() {
+    using namespace odai::ui;
+    const Font body = makeMonospaceFont(10.0f);
+    const Font numeric = makeMonospaceFont(7.0f);
+    const FontSet fonts{&body, &body, &body, &body, &numeric};
+    const std::vector<RichSpan> spans =
+        parseRichText("Gold <num>240</num>", UiColor{1, 1, 1, 1});
+
+    expectTrue(spans.size() == 2u, "numeric markup parses into a separate span");
+    if (spans.size() == 2u) {
+        expectTrue(!spans[0].numeric, "body text preserves the body font role");
+        expectTrue(spans[1].numeric, "numeric markup selects the numeric font role");
+    }
+
+    const RichTextLayout layout = layoutRichText(spans, fonts, 0.0f);
+    expectNear(layout.width, 71.0f, 1e-4f, "numeric run uses the numeric font advance");
 }
 
 void testColorPacking() {
@@ -772,6 +793,58 @@ void testVectorPrimitives() {
     }
 }
 
+void testBevelDraw() {
+    using namespace odai::ui;
+    UiDrawList dl;
+    dl.reset(UiVec2{200.0f, 200.0f});
+
+    const UiRect r = UiRect::fromXYWH(20.0f, 20.0f, 100.0f, 60.0f);
+    const UiColor hl{1.0f, 1.0f, 1.0f, 0.3f};
+    const UiColor sh{0.0f, 0.0f, 0.0f, 0.5f};
+
+    // Diagonal (upper-left) bevel: one addRoundRect per edge band — top, left, bottom,
+    // right — each under its own clip → exactly 4 draw commands.
+    dl.addBevel(r, hl, sh, 0.0f, 2.0f);
+    expectTrue(dl.data().vertices.size() > 0u, "addBevel emits vertices");
+    expectTrue(dl.data().commands.size() == 4u, "addBevel (sharp) emits exactly 4 draw commands");
+
+    // Rounded corners: same command structure, different SDF radius param.
+    dl.reset(UiVec2{200.0f, 200.0f});
+    dl.addBevel(r, hl, sh, 8.0f, 2.0f);
+    expectTrue(dl.data().commands.size() == 4u, "addBevel (rounded) emits exactly 4 draw commands");
+
+    // Inward bevel: same structure, colours swapped internally — 4 commands.
+    dl.reset(UiVec2{200.0f, 200.0f});
+    dl.addBevel(r, hl, sh, 8.0f, 2.0f, /*inward=*/true);
+    expectTrue(dl.data().commands.size() == 4u, "addBevel (inward) emits same command structure");
+
+    // Panel with bevel enabled.
+    Panel p;
+    p.setRect(r);
+    p.cornerRadiusPx = 8.0f;
+    p.showBevel = true;
+    p.bevelThicknessPx = 2.0f;
+    dl.reset(UiVec2{200.0f, 200.0f});
+    p.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "Panel with showBevel emits geometry");
+
+    // Button with bevel enabled should emit more geometry than without.
+    const Font font = makeMonospaceFont(8.0f);
+    Button btn(&font, "OK", []() {});
+    btn.setRect(r);
+    btn.cornerRadiusPx = 6.0f;
+
+    dl.reset(UiVec2{200.0f, 200.0f});
+    btn.draw(dl);
+    const std::size_t vertsNoBevel = dl.data().vertices.size();
+
+    btn.showBevel = true;
+    dl.reset(UiVec2{200.0f, 200.0f});
+    btn.draw(dl);
+    expectTrue(dl.data().vertices.size() > vertsNoBevel,
+               "Button with showBevel emits more geometry than without");
+}
+
 void testButtonHoverGlow() {
     using namespace odai::ui;
     const Font font = makeMonospaceFont(8.0f);
@@ -996,6 +1069,101 @@ void testOrnatePanelDraw() {
     expectTrue(dl.data().vertices.size() > 12u, "ornate panel emits gradient + borders + accents");
 }
 
+void testMinimapPanelBuild() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont();
+    FontSet fonts{&font, &font, &font, &font};
+    MinimapPanel panel(fonts);
+    int clicked = -1;
+    panel.setMinimap(UiRect::fromXYWH(0.0f, 0.0f, 250.0f, 170.0f), 1.0f, "Map",
+                     /*image*/ 7u, /*aspect*/ 1.5f,
+                     {"Terrain", "Owner", "Relief"}, 0,
+                     [&clicked](int i) { clicked = i; });
+
+    UiDrawList dl;
+    dl.reset(UiVec2{1280.0f, 720.0f});
+    panel.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "minimap panel emits geometry");
+    bool sawImage = false;
+    for (const auto& cmd : dl.data().commands) {
+        if (cmd.textureId == 7u) { sawImage = true; break; }
+    }
+    expectTrue(sawImage, "minimap draws the active lens texture");
+
+    // Switching lens swaps the drawn texture id without rebuilding the tree.
+    panel.setActive(1, 9u);
+    UiDrawList dl2;
+    dl2.reset(UiVec2{1280.0f, 720.0f});
+    panel.draw(dl2);
+    bool sawNew = false;
+    for (const auto& cmd : dl2.data().commands) {
+        if (cmd.textureId == 9u) { sawNew = true; break; }
+    }
+    expectTrue(sawNew, "setActive swaps the drawn minimap texture");
+}
+
+void testNextTurnAction() {
+    using odai::game::TurnAction;
+    using odai::game::nextTurnAction;
+    // First unmet requirement wins: research > production > units > advance.
+    expectTrue(nextTurnAction(false, 0, 0) == TurnAction::ChooseResearch,
+               "no research chosen -> ChooseResearch");
+    expectTrue(nextTurnAction(false, 3, 5) == TurnAction::ChooseResearch,
+               "research outranks idle cities/units");
+    expectTrue(nextTurnAction(true, 2, 4) == TurnAction::ChooseProduction,
+               "idle city -> ChooseProduction (outranks units)");
+    expectTrue(nextTurnAction(true, 0, 1) == TurnAction::UnitNeedsOrders,
+               "no idle city, idle unit -> UnitNeedsOrders");
+    expectTrue(nextTurnAction(true, 0, 0) == TurnAction::NextTurn,
+               "nothing pending -> NextTurn");
+}
+
+void testStyleCardPanelDraw() {
+    using namespace odai::ui;
+    Panel p;
+    p.setRect(UiRect::fromXYWH(10.0f, 10.0f, 200.0f, 120.0f));
+    p.styleCard(1.0f);
+
+    // styleCard is the flat clean-modern look: rounded fill, no gilt.
+    expectTrue(!p.bgTop.has_value() && !p.bgBottom.has_value(),
+               "styleCard clears the ornate gradient fill");
+    expectTrue(p.cornerRadiusPx > 0.0f, "styleCard rounds the corners");
+    expectTrue(p.innerBorderInsetPx == 0.0f && p.cornerAccentPx == 0.0f,
+               "styleCard drops the inner border and corner accents");
+    expectTrue(p.showShadow, "styleCard keeps a soft drop shadow");
+
+    UiDrawList dl;
+    dl.reset(UiVec2{400.0f, 400.0f});
+    p.draw(dl);
+    expectTrue(!dl.data().commands.empty(), "card panel emits geometry");
+    // Shadow + rounded fill + hairline border, all via the RoundRect SDF path.
+    bool sawRoundRect = false;
+    for (const auto& v : dl.data().vertices) {
+        if (v.mode == static_cast<std::uint32_t>(UiDrawMode::RoundRect)) { sawRoundRect = true; break; }
+    }
+    expectTrue(sawRoundRect, "card panel uses the rounded-rect fill path");
+}
+
+void testYieldStyleFormat() {
+    using namespace odai::ui;
+
+    // Each yield has a stable icon key + accent color.
+    expectTrue(std::string(yieldIconName(Yield::Food)) == "food", "food icon key");
+    expectTrue(std::string(yieldIconName(Yield::Science)) == "science", "science icon key");
+    expectTrue(std::string(yieldIconName(Yield::Production)) == "production", "production icon key");
+    expectTrue(yieldColor(Yield::Gold).a == 1.0f, "yield color is opaque");
+    // Colors are distinct per yield (sanity: food != gold).
+    const UiColor food = yieldColor(Yield::Food);
+    const UiColor gold = yieldColor(Yield::Gold);
+    expectTrue(food.packAbgr8() != gold.packAbgr8(), "yields have distinct colors");
+
+    // Signed-delta formatting: '+' on positive, '-' carried, em dash on zero.
+    expectTrue(yieldText(7) == "+7", "positive rate gets a leading +");
+    expectTrue(yieldText(-2) == "-2", "negative rate keeps its sign");
+    expectTrue(yieldText(0) == "\xE2\x80\x94", "zero renders as an em dash");
+    expectTrue(yieldText(7, false) == "7", "unsigned format omits the +");
+}
+
 void testWorldTrackerPanelBuild() {
     using namespace odai::ui;
     Font font = makeMonospaceFont();
@@ -1060,15 +1228,126 @@ void testCommandViewPanelBuild() {
                "full selection emits more geometry than the empty hint");
 }
 
+void testColorTween() {
+    using namespace odai::ui;
+
+    // snap() jumps instantly to a color.
+    ColorTween ct;
+    ct.snap(UiColor{1.0f, 0.0f, 0.0f, 1.0f});
+    expectTrue(ct.idle(), "snap leaves tween idle");
+    const UiColor snapped = ct.current();
+    expectTrue(std::abs(snapped.r - 1.0f) < 1e-5f && snapped.g < 1e-5f,
+               "snap: current() is the snapped color");
+
+    // set() + no update: should still be at the from color.
+    ct.set(UiColor{0.0f, 1.0f, 0.0f, 1.0f}, 0.5f);
+    expectTrue(!ct.idle(), "set() makes tween non-idle");
+    const UiColor atStart = ct.current();
+    expectTrue(std::abs(atStart.r - 1.0f) < 1e-5f, "at t=0 current() == from color");
+
+    // update to completion.
+    ct.update(0.5f);  // 0.5s / 0.5s = 1.0 → complete
+    expectTrue(ct.idle(), "tween idle after full dt");
+    const UiColor atEnd = ct.current();
+    expectTrue(atEnd.g > 0.99f && atEnd.r < 1e-5f, "at t=1 current() == to color");
+
+    // static lerp helper.
+    const UiColor mid = ColorTween::lerp(UiColor{0.0f,0.0f,0.0f,1.0f},
+                                         UiColor{1.0f,1.0f,1.0f,1.0f}, 0.5f);
+    expectTrue(std::abs(mid.r - 0.5f) < 1e-5f, "lerp(black, white, 0.5) == grey");
+}
+
+void testHGradientPrimitive() {
+    using namespace odai::ui;
+    UiDrawList dl;
+    dl.reset(UiVec2{100.0f, 100.0f});
+    const UiColor left{1.0f, 0.0f, 0.0f, 1.0f};
+    const UiColor right{0.0f, 0.0f, 1.0f, 1.0f};
+    dl.addRectFilledHGradient(UiRect::fromXYWH(0.0f, 0.0f, 50.0f, 40.0f), left, right);
+
+    const UiDrawData& data = dl.data();
+    expectTrue(data.vertices.size() == 4u, "H-gradient quad emits 4 vertices");
+    expectTrue(data.indices.size()  == 6u, "H-gradient quad emits 6 indices");
+    // v0 (top-left) and v3 (bottom-left) → left color; v1 and v2 → right color.
+    expectTrue(data.vertices[0].rgba8 == left.packAbgr8(),  "H-gradient top-left uses left color");
+    expectTrue(data.vertices[1].rgba8 == right.packAbgr8(), "H-gradient top-right uses right color");
+    expectTrue(data.vertices[2].rgba8 == right.packAbgr8(), "H-gradient bottom-right uses right color");
+    expectTrue(data.vertices[3].rgba8 == left.packAbgr8(),  "H-gradient bottom-left uses left color");
+}
+
+void testProgressBarGradient() {
+    using namespace odai::ui;
+    ProgressBar bar;
+    bar.setRect(UiRect::fromXYWH(0.0f, 0.0f, 100.0f, 10.0f));
+    bar.value          = 0.5f;
+    bar.foreground     = UiColor{0.0f, 1.0f, 0.0f, 1.0f};  // green
+    bar.foregroundEnd  = UiColor{1.0f, 0.0f, 0.0f, 1.0f};  // red at full
+    bar.cornerRadiusPx = 0.0f;                               // sharp — H-gradient rect path
+
+    UiDrawList dl;
+    dl.reset(UiVec2{200.0f, 100.0f});
+    bar.draw(dl);
+
+    const UiDrawData& data = dl.data();
+    // Expect at least 2 quads: background fill + gradient fill.
+    expectTrue(data.vertices.size() >= 8u, "gradient progress bar emits background + gradient fill");
+    // The fill quad should be the last 4 vertices.  Left edge = green, right = lerp(green,red,0.5).
+    const std::size_t fillBase = data.vertices.size() - 4;
+    expectTrue(data.vertices[fillBase].rgba8 == bar.foreground.packAbgr8(),
+               "gradient fill left vertex is foreground color");
+    // Right edge color should be midway between green and red (yellow-ish, not pure red).
+    const UiColor rightExpected = ColorTween::lerp(bar.foreground, bar.foregroundEnd, 0.5f);
+    expectTrue(data.vertices[fillBase + 1].rgba8 == rightExpected.packAbgr8(),
+               "gradient fill right vertex is lerped at fill fraction");
+
+    // Animated tween: set a new foreground color and advance past the duration.
+    bar.foregroundAnim.set(UiColor{0.0f, 0.0f, 1.0f, 1.0f}, 0.2f);
+    bar.update(0.2f);
+    expectTrue(bar.foregroundAnim.idle(), "foregroundAnim idle after full update");
+}
+
+void testPanelAnimatedBackground() {
+    using namespace odai::ui;
+    Panel p;
+    p.setRect(UiRect::fromXYWH(0.0f, 0.0f, 80.0f, 60.0f));
+    p.background = UiColor{0.1f, 0.1f, 0.1f, 1.0f};
+
+    // Seed the tween so it starts from the panel's current background, then animate.
+    p.backgroundAnim.snap(p.background);
+    p.backgroundAnim.set(UiColor{0.9f, 0.9f, 0.9f, 1.0f}, 0.4f);
+    expectTrue(!p.backgroundAnim.idle(), "backgroundAnim non-idle after set");
+
+    // Half-way through: draw should use the interpolated color, not the static one.
+    p.update(0.2f);  // 0.2 / 0.4 = 0.5 progress
+    expectTrue(!p.backgroundAnim.idle(), "backgroundAnim still in flight at halfway");
+    const UiColor mid = p.backgroundAnim.current();
+    expectTrue(mid.r > 0.1f && mid.r < 0.9f, "animated background at halfway is between start and end");
+
+    // Complete.
+    p.update(0.2f);
+    expectTrue(p.backgroundAnim.idle(), "backgroundAnim idle at completion");
+    const UiColor fin = p.backgroundAnim.current();
+    expectTrue(std::abs(fin.r - 0.9f) < 1e-5f, "animated background reached target");
+}
+
 int main() {
     testNineSliceQuadGen();
     testGradientPrimitive();
+    testHGradientPrimitive();
+    testColorTween();
+    testProgressBarGradient();
+    testPanelAnimatedBackground();
     testOrnatePanelDraw();
+    testStyleCardPanelDraw();
+    testYieldStyleFormat();
+    testNextTurnAction();
+    testMinimapPanelBuild();
     testWorldTrackerPanelBuild();
     testCommandViewPanelBuild();
     testFontMeasure();
     testRichTextWrap();
     testRichTextSpans();
+    testRichTextNumericFont();
     testColorPacking();
     testButtonCallbackAndHitTest();
     testCachedRichTextRebuilds();
@@ -1083,6 +1362,7 @@ int main() {
     testScrollViewLayout();
     testProgressBarDraw();
     testVectorPrimitives();
+    testBevelDraw();
     testButtonHoverGlow();
     testTextBox();
     testToolbar();

@@ -35,10 +35,14 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
     const float regH  = rf ? rf->lineHeightPx() : 20.0f * s;
     const float capH  = std::max(regH * 0.8f, 12.0f * s);
 
-    // Ornate background frame.
+    // Flat clean-modern card background with bevel for depth.
     auto bg = std::make_unique<Panel>();
     bg->setRect(rect);
-    bg->styleOrnate(s);
+    bg->styleCard(s);
+    bg->showBevel           = true;
+    bg->bevelHighlightColor = UiColor{1.0f, 1.0f, 1.0f, 0.18f};
+    bg->bevelShadowColor    = UiColor{0.0f, 0.0f, 0.0f, 0.40f};
+    bg->bevelThicknessPx    = 1.5f;
     bg_ = static_cast<Panel*>(addChild(std::move(bg)));
 
     const float x0  = rect.minX + pad;
@@ -64,7 +68,7 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
         card->background        = kCardFill;
         card->borderColor       = kCardBorder;
         card->borderThicknessPx = 1.0f * s;
-        card->cornerRadiusPx    = 4.0f * s;
+        card->cornerRadiusPx    = 2.0f * s;
         addChild(std::move(card));
     };
     auto addMedallion = [&](const std::string& iconName, const UiRect& r) {
@@ -98,7 +102,7 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
             cell->background        = UiColor{0.094f, 0.067f, 0.031f, 0.70f};
             cell->borderColor       = UiColor{0.478f, 0.361f, 0.165f, 0.50f};
             cell->borderThicknessPx = 1.0f * s;
-            cell->cornerRadiusPx    = 3.0f * s;
+            cell->cornerRadiusPx    = 2.0f * s;
             addChild(std::move(cell));
             addLabel(stats[i].label, kDim, fonts_, UiTextAlign::Center,
                      UiRect::fromXYWH(cx, y + 5.0f * s, cellW, capH));
@@ -111,7 +115,7 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
     float y = rect.minY + pad;
 
     // Heading + underline.
-    addLabel("<b>COMMAND VIEW</b>", kGold, fonts_, UiTextAlign::Left,
+    addLabel("<b>Command View</b>", kGold, fonts_, UiTextAlign::Left,
              UiRect::fromXYWH(x0, y, wIn, boldH));
     y += boldH + 6.0f * s;
     {
@@ -132,22 +136,34 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
 
     // --- Selected hex card ---------------------------------------------------
     if (state.hasHex) {
-        addCaption("SELECTED HEX", y);
+        addCaption("Selected Hex", y);
         const float medR    = 16.0f * s;
-        const float cardH   = std::max(medR * 2.0f, boldH + capH + 8.0f * s) + 12.0f * s;
+        const float cpad    = 10.0f * s;
+        const float preview = state.hex.previewTexture != kUiNoTexture
+                                  ? std::min(wIn - 2.0f * cpad, 180.0f * s)
+                                  : 0.0f;
+        const float textH   = std::max(medR * 2.0f, boldH + capH + 8.0f * s);
+        const float cardH   = cpad + preview + (preview > 0.0f ? 8.0f * s : 0.0f)
+                              + textH + cpad;
         const float cardTop = y;
         addCardBg(cardTop, cardH);
-        const float cpad = 10.0f * s;
+        if (preview > 0.0f) {
+            auto image = std::make_unique<Image>(state.hex.previewTexture);
+            image->setRect(UiRect::fromXYWH(x0 + (wIn - preview) * 0.5f,
+                                             cardTop + cpad, preview, preview));
+            addChild(std::move(image));
+        }
+        const float textTop = cardTop + cpad + preview + (preview > 0.0f ? 8.0f * s : 0.0f);
         const float medCx = x0 + cpad + medR;
-        const float medCy = cardTop + cpad + medR;
+        const float medCy = textTop + medR;
         addMedallion(state.hex.iconName,
                      UiRect{medCx - medR, medCy - medR, medCx + medR, medCy + medR});
         const float tx = medCx + medR + 10.0f * s;
         addLabel("<b>" + state.hex.name + "</b>", kText, fonts_, UiTextAlign::Left,
-                 UiRect::fromXYWH(tx, cardTop + cpad, rect.maxX - pad - tx, boldH));
+                 UiRect::fromXYWH(tx, textTop, rect.maxX - pad - tx, boldH));
         // Yields row beneath the name.
         float yx = tx;
-        const float yieldY = cardTop + cpad + boldH + 4.0f * s;
+        const float yieldY = textTop + boldH + 4.0f * s;
         const float chipIcon = capH;
         for (const Yield& yld : state.hex.yields) {
             UiIconEntry icon{};
@@ -168,7 +184,7 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
 
     // --- Recommended action card --------------------------------------------
     if (!state.action.title.empty()) {
-        addCaption("RECOMMENDED ACTION", y);
+        addCaption("Recommended Action", y);
         const float descH = regH * 2.0f;
         const float btn   = 30.0f * s;
         const bool hasBtns = !state.action.actions.empty();
@@ -191,7 +207,7 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
                                   && UiIconRegistry::global().resolve(a.iconName, icon);
             auto ib = std::make_unique<IconButton>(a.onClick ? a.onClick : [] {});
             if (resolved) { ib->textureId = icon.textureId; ib->uvRect = icon.uv; }
-            ib->cornerRadiusPx    = 4.0f * s;
+            ib->cornerRadiusPx    = 2.0f * s;
             ib->borderThicknessPx = 1.5f * s;
             ib->iconPaddingPx     = 4.0f * s;
             ib->glowSizePx        = 10.0f * s;
@@ -225,7 +241,7 @@ void CommandViewPanel::setState(const UiRect& rect, float s, const State& state)
             y += regH * 3.0f + 8.0f * s;
         }
         if (!state.unit.settlementPreview.empty()) {
-            addCaption("SETTLEMENT PREVIEW", y);
+            addCaption("Settlement Preview", y);
             addLabel(state.unit.settlementPreview, kDesc, fonts_, UiTextAlign::Left,
                      UiRect::fromXYWH(x0, y, wIn, regH * 5.0f));
             y += regH * 5.0f;

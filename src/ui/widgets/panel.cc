@@ -23,28 +23,66 @@ void Panel::styleOrnate(float s, float alpha) {
     cornerRadiusPx = 0.0f;  // ornate frames are angular
 }
 
+void Panel::styleCard(float s, float alpha) {
+    // Clean-modern palette mirroring assets/ui/themes/theme_modern.json: a
+    // translucent slate card so the colorful map glows through, separated by a
+    // hairline edge and a single soft shadow. No gilt frame, inner line, or
+    // corner ticks — the rounded fill carries the whole look.
+    bgTop.reset();    // no gradient -> draw() takes the rounded-fill path
+    bgBottom.reset();
+    background        = UiColor{0.071f, 0.086f, 0.110f, alpha};  // slate #12161C
+    borderColor       = UiColor{1.0f, 1.0f, 1.0f, 0.10f};        // hairline edge
+    borderThicknessPx = 1.0f * s;
+    cornerRadiusPx    = 2.0f * s;  // squared-off Victorian look; just softens the edge
+    innerBorderColor   = UiColor{};  // clear the engraved inner frame
+    innerBorderInsetPx = 0.0f;
+    cornerAccentColor       = UiColor{};  // clear the gold corner ticks
+    cornerAccentPx          = 0.0f;
+    showShadow    = true;
+    shadowColor   = UiColor{0.0f, 0.0f, 0.0f, 0.45f};
+    shadowBlurPx  = 8.0f * s;   // tighter, less diffuse than before
+    shadowOffsetX = 0.0f;
+    shadowOffsetY = 3.0f * s;
+}
+
+void Panel::update(float dt) {
+    backgroundAnim.update(dt);
+    bgTopAnim.update(dt);
+    bgBotAnim.update(dt);
+}
+
 void Panel::draw(UiDrawList& drawList) const {
     if (showShadow) {
         drawList.addDropShadow(rect_, shadowColor, shadowBlurPx, shadowOffsetX, shadowOffsetY);
     }
-    const bool gradient = bgTop.has_value() && bgBottom.has_value();
+    // Resolve animated colors: if a tween is in flight use current(), else use the static field.
+    const UiColor effectiveBg  = backgroundAnim.idle() ? background   : backgroundAnim.current();
+    const UiColor effectiveBgT = bgTopAnim.idle()      ? bgTop.value_or(UiColor{}) : bgTopAnim.current();
+    const UiColor effectiveBgB = bgBotAnim.idle()      ? bgBottom.value_or(UiColor{}) : bgBotAnim.current();
+    const bool gradient = (bgTop.has_value() && bgBottom.has_value())
+                       || (!bgTopAnim.idle() && !bgBotAnim.idle());
     if (nineSlice.has_value()) {
-        drawList.add9Slice(rect_, *nineSlice, background);
+        drawList.add9Slice(rect_, *nineSlice, effectiveBg);
     } else if (gradient) {
-        drawList.addRectFilledVGradient(rect_, *bgTop, *bgBottom);
+        drawList.addRectFilledVGradient(rect_, effectiveBgT, effectiveBgB);
         if (borderThicknessPx > 0.0f && borderColor.a > 0.0f) {
             drawList.addRect(rect_, borderColor, borderThicknessPx);
         }
     } else if (cornerRadiusPx > 0.0f) {
-        drawList.addRoundRectFilled(rect_, background, cornerRadiusPx);
+        drawList.addRoundRectFilled(rect_, effectiveBg, cornerRadiusPx);
         if (borderThicknessPx > 0.0f && borderColor.a > 0.0f) {
             drawList.addRoundRect(rect_, borderColor, cornerRadiusPx, borderThicknessPx);
         }
     } else {
-        drawList.addRectFilled(rect_, background);
+        drawList.addRectFilled(rect_, effectiveBg);
         if (borderThicknessPx > 0.0f && borderColor.a > 0.0f) {
             drawList.addRect(rect_, borderColor, borderThicknessPx);
         }
+    }
+
+    if (showBevel) {
+        drawList.addBevel(rect_, bevelHighlightColor, bevelShadowColor,
+                          cornerRadiusPx, bevelThicknessPx, bevelInward);
     }
 
     // Inner gilt border line (the engraved second frame).

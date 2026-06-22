@@ -12,7 +12,7 @@
 // out into wrapped/aligned lines using a Font, and emits glyph quads to a draw
 // list.
 //
-// Angle-bracket markup: <b>..</b>, <i>..</i>, <color=#RRGGBB>..</color>,
+// Angle-bracket markup: <b>..</b>, <i>..</i>, <num>..</num>, <color=#RRGGBB>..</color>,
 //   <tip=text>..</tip>, <br>
 // Square-bracket inline icons: [icon=food] or [icon=food 48] (optional pixel size override)
 //
@@ -24,13 +24,15 @@ struct RichSpan {
     UiColor color{};
     bool bold = false;
     bool italic = false;
+    bool numeric = false;
     std::string tooltip;    // Non-empty => hoverable; shown on mouse-over.
     std::string iconName;   // Non-empty => this span is an inline icon, text is empty.
     float iconSizePx = 0.0f; // Override icon size (0 = use lineHeight).
 };
 
 // Parse markup into contiguous styled spans. Unknown tags are ignored.
-// Markup: <b>, <i>, <color=#RRGGBB>, <tip=text...>, <br>. <tip=...> marks a
+// Markup: <b>, <i>, <num>, <color=#RRGGBB>, <tip=text...>, <br>. <num> selects
+// FontSet::numeric when supplied. <tip=...> marks a
 // hoverable span whose tooltip is the text up to the closing '>'.
 std::vector<RichSpan> parseRichText(std::string_view markup, const UiColor& defaultColor);
 
@@ -39,6 +41,7 @@ struct RichRun {
     UiColor color{};
     bool bold = false;
     bool italic = false;
+    bool numeric = false;
     float x = 0.0f;      // Pen x within the layout box (alignment already applied).
     float width = 0.0f;  // Pixel width of this run (for hit-testing).
     std::string tooltip;

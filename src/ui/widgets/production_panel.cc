@@ -285,14 +285,10 @@ void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& t
     const float cityH  = 88.0f * s;   // name + yields + governor
     const float titleH = 30.0f * s;   // "Choose Production" label
 
-    // Outer background panel
+    // Outer background panel — flat clean-modern card (matches the inspector slot).
     auto bg = std::make_unique<Panel>();
     bg->setRect(rect);
-    bg->background        = UiColor{0.07f, 0.09f, 0.13f, 0.97f};
-    bg->borderColor       = UiColor{0.75f, 0.62f, 0.34f, 0.55f};
-    bg->borderThicknessPx = 1.5f * s;
-    bg->cornerRadiusPx    = 4.0f * s;
-    bg->showShadow        = true;
+    bg->styleCard(s);
     bg_ = static_cast<Panel*>(addChild(std::move(bg)));
 
     // City info header (name, yields, governor)
@@ -300,11 +296,11 @@ void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& t
     cityHdr->setRect(UiRect::fromXYWH(rect.minX, rect.minY, rect.width(), cityH));
     addChild(std::move(cityHdr));
 
-    // Gold separator below city header
+    // Hairline separator below city header
     auto sep1 = std::make_unique<Panel>();
     sep1->setRect(UiRect::fromXYWH(rect.minX + pad, rect.minY + cityH,
-                                    rect.width() - 2.0f * pad, 1.5f * s));
-    sep1->background        = UiColor{0.78f, 0.62f, 0.30f, 0.38f};
+                                    rect.width() - 2.0f * pad, 1.0f * s));
+    sep1->background        = UiColor{1.0f, 1.0f, 1.0f, 0.10f};
     sep1->borderThicknessPx = 0.0f;
     sep1->cornerRadiusPx    = 0.0f;
     addChild(std::move(sep1));
@@ -318,11 +314,11 @@ void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& t
                                   rect.width() - 2.0f * pad, titleH));
     titleLabel_ = static_cast<Label*>(addChild(std::move(tl)));
 
-    // Gold separator line below title
+    // Hairline separator line below title
     auto sep2 = std::make_unique<Panel>();
     sep2->setRect(UiRect::fromXYWH(rect.minX + pad, titleY + titleH + 2.0f * s,
-                                    rect.width() - 2.0f * pad, 1.5f * s));
-    sep2->background        = UiColor{0.78f, 0.62f, 0.30f, 0.40f};
+                                    rect.width() - 2.0f * pad, 1.0f * s));
+    sep2->background        = UiColor{1.0f, 1.0f, 1.0f, 0.10f};
     sep2->borderThicknessPx = 0.0f;
     sep2->cornerRadiusPx    = 0.0f;
     addChild(std::move(sep2));

@@ -44,6 +44,7 @@ std::vector<RichSpan> parseRichText(std::string_view markup, const UiColor& defa
     std::vector<std::string> tooltipStack;
     int bold = 0;
     int italic = 0;
+    int numeric = 0;
 
     // sRGB #6ab0f5 — a readable light-blue used for navigation hyperlinks.
     static const UiColor kLinkBlue = UiColor::fromRgbHex(0x6ab0f5);
@@ -54,7 +55,8 @@ std::vector<RichSpan> parseRichText(std::string_view markup, const UiColor& defa
             // so navigation links are visually distinct without requiring markup color tags.
             const bool isLink = tooltip.rfind("link:", 0) == 0;
             const UiColor spanColor = (isLink && colorStack.empty()) ? kLinkBlue : color;
-            spans.push_back(RichSpan{buffer, spanColor, bold > 0, italic > 0, tooltip, {}, 0.0f});
+            spans.push_back(RichSpan{buffer, spanColor, bold > 0, italic > 0, numeric > 0,
+                                     tooltip, {}, 0.0f});
             buffer.clear();
         }
     };
@@ -148,6 +150,14 @@ std::vector<RichSpan> parseRichText(std::string_view markup, const UiColor& defa
             if (italic > 0) {
                 --italic;
             }
+        } else if (tag == "num") {
+            flush();
+            ++numeric;
+        } else if (tag == "/num") {
+            flush();
+            if (numeric > 0) {
+                --numeric;
+            }
         } else if (tag == "br") {
             buffer.push_back('\n');
         } else if (tag.rfind("color=", 0) == 0) {
@@ -207,6 +217,7 @@ RichTextLayout layoutRichText(const std::vector<RichSpan>& spans, const FontSet&
         run.color = span.color;
         run.bold = span.bold;
         run.italic = span.italic;
+        run.numeric = span.numeric;
         run.x = penX;
         run.width = tokenWidth;
         run.tooltip = span.tooltip;
@@ -248,7 +259,8 @@ RichTextLayout layoutRichText(const std::vector<RichSpan>& spans, const FontSet&
                 ++end;
             }
             const std::string_view token(span.text.data() + i, end - i);
-            const Font* spanFont = fonts.select(span.bold, span.italic);
+            const Font* spanFont = span.numeric && fonts.numeric != nullptr
+                ? fonts.numeric : fonts.select(span.bold, span.italic);
             const float tokenWidth = (spanFont != nullptr) ? spanFont->measureText(token) : 0.0f;
 
             if (isSpace) {
@@ -327,7 +339,8 @@ void drawRichText(UiDrawList& drawList, const RichTextLayout& layout, const Font
                 continue;
             }
 
-            const Font* runFont = fonts.select(run.bold, run.italic);
+            const Font* runFont = run.numeric && fonts.numeric != nullptr
+                ? fonts.numeric : fonts.select(run.bold, run.italic);
             if (runFont == nullptr) {
                 continue;
             }

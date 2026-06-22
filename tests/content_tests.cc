@@ -62,8 +62,8 @@ void testCleanLoad() {
     for (const std::string& e : db.errors()) std::cerr << "  load error: " << e << "\n";
     expectTrue(db.ok(), "base game content loads without errors");
 
-    expectEqInt(static_cast<long long>(techTree().size()), 15, "tech count");
-    expectEqInt(static_cast<long long>(buildingDefs().size()), 25, "building count");
+    expectEqInt(static_cast<long long>(techTree().size()), 20, "tech count");
+    expectEqInt(static_cast<long long>(buildingDefs().size()), 29, "building count");
     expectEqInt(static_cast<long long>(defaultUnitStats().size()), 6, "unit count");
     expectEqInt(static_cast<long long>(defaultBuildables().size()), 13, "buildable count");
     expectEqInt(static_cast<long long>(db.leaders().size()), 6, "leader count");
@@ -71,7 +71,7 @@ void testCleanLoad() {
 
     int wonders = 0;
     for (const BuildingDef& d : buildingDefs()) if (d.isWonder) ++wonders;
-    expectEqInt(wonders, 11, "wonder count");
+    expectEqInt(wonders, 12, "wonder count");
 }
 
 // Referential integrity, ported from economy_tests::testCatalogIntegrity so the
@@ -176,7 +176,7 @@ void testTechParity() {
     // Spot-check across all three gate kinds and eras (full numeric coverage comes
     // from the sweep diff). Order is also checked: the first/last ids must match.
     expectEqStr(techTree().front().id, "pottery", "first tech id");
-    expectEqStr(techTree().back().id, "guilds", "last tech id");
+    expectEqStr(techTree().back().id, "algebra", "last tech id");
     checkTech("pottery", "Pottery", 22, "Ancient Era", GateKind::Open, "", 0, 50);
     checkTech("writing", "Writing", 34, "Ancient Era", GateKind::Boost, "meet_rival", 0, 50);
     checkTech("sailing", "Sailing", 48, "Ancient Era", GateKind::Locked, "coastal_city", 0, 0);

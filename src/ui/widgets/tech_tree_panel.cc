@@ -219,7 +219,7 @@ void TechTreePanel::setItems(const UiRect& rect, float s,
     bg->background        = UiColor{0.07f, 0.09f, 0.13f, 0.92f};
     bg->borderColor       = UiColor{0.75f, 0.62f, 0.34f, 0.45f};
     bg->borderThicknessPx = 1.0f * s;
-    bg->cornerRadiusPx    = 4.0f * s;
+    bg->cornerRadiusPx    = 2.0f * s;
     bg_ = static_cast<Panel*>(addChild(std::move(bg)));
 
     const float x0   = rect.minX + pad;
@@ -242,7 +242,7 @@ void TechTreePanel::setItems(const UiRect& rect, float s,
     pb->foreground      = UiColor{0.33f, 0.66f, 0.86f, 1.0f};
     pb->background      = UiColor{0.05f, 0.07f, 0.10f, 0.95f};
     pb->borderColor     = UiColor{0.50f, 0.66f, 0.88f, 0.45f};
-    pb->cornerRadiusPx  = 4.0f * s;
+    pb->cornerRadiusPx  = 2.0f * s;
     progress_ = static_cast<ProgressBar*>(addChild(std::move(pb)));
     y += 16.0f * s + 4.0f * s;
 

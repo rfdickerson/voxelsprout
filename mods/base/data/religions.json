@@ -1,0 +1,69 @@
+{
+  "religions": [
+    {
+      "id": "canaanite",
+      "name": "Canaanite Faith",
+      "description": "The ancient religions of Canaan — worship of Baal, Asherah, El, and Moloch — centered on fertility, rain, and the agricultural cycle. Powerful for food production but seen as abhorrent by neighboring monotheists.",
+      "parentReligion": "",
+      "requiredTech": "philosophy",
+      "flatBonus": { "food": 2, "production": 1 },
+      "happinessBonus": 0,
+      "happinessPenalty": 1,
+      "unlocksTechs": ["sacred_groves"],
+      "uniqueBuildings": [],
+      "flavorText": "Baal sends the rains; Asherah blesses the harvest; Moloch demands the flame. In Ugarit and Carthage alike, the gods were hungry and the cities grew fat. Neighboring peoples called the rites an abomination — and could not deny the granaries were full."
+    },
+    {
+      "id": "zoroastrianism",
+      "name": "Zoroastrianism",
+      "description": "The faith of Ahura Mazda, God of Truth and Light, locked in eternal struggle with Angra Mainyu, the Destructive Spirit. Truth, order, and purity are sacred. Persia's state religion and a likely influence on later Abrahamic faiths.",
+      "parentReligion": "",
+      "requiredTech": "philosophy",
+      "flatBonus": { "science": 1 },
+      "happinessBonus": 2,
+      "happinessPenalty": 0,
+      "unlocksTechs": ["avestan_calendar"],
+      "uniqueBuildings": [],
+      "flavorText": "Speak truth, hate the lie. The Achaemenid kings ruled from Persepolis under the protection of Ahura Mazda, whose eternal flame required no idols — only a pure heart and an honest tongue. Zoroastrian magi became the astronomers, philosophers, and advisors of the ancient world."
+    },
+    {
+      "id": "judaism",
+      "name": "Judaism",
+      "description": "The first enduring monotheism: one God, one covenant, one people. Torah literacy was expected of every male from childhood. Sabbath rest structured the week. Though a small population, Jewish communities carried knowledge and commerce across continents.",
+      "parentReligion": "",
+      "requiredTech": "philosophy",
+      "flatBonus": { "science": 2, "culture": 1 },
+      "happinessBonus": 1,
+      "happinessPenalty": 0,
+      "unlocksTechs": ["covenant_law"],
+      "uniqueBuildings": [],
+      "flavorText": "In the beginning was the Word, and the Word demanded it be read, debated, and argued. The Tanakh created a literate civilization: where other empires built temples to silent gods, Judaism built schools. Scattered across the ancient world, Jewish merchants and scholars were vectors of knowledge in every direction."
+    },
+    {
+      "id": "christianity",
+      "name": "Christianity",
+      "description": "Founded on the teachings of Jesus of Nazareth, Christianity spread through the Roman trade network and became the dominant faith of medieval Europe. Monasteries preserved classical learning through the Dark Ages. The Cathedral became civilization's most ambitious architectural expression.",
+      "parentReligion": "judaism",
+      "requiredTech": "theology",
+      "flatBonus": { "culture": 2, "science": 1 },
+      "happinessBonus": 2,
+      "happinessPenalty": 0,
+      "unlocksTechs": ["monasticism"],
+      "uniqueBuildings": ["cathedral", "monastery"],
+      "flavorText": "Love your neighbor; turn the other cheek; render unto Caesar what is Caesar's. In three centuries a persecuted sect became an empire's official faith. Monks copied Plato by candlelight. Cathedrals climbed toward heaven in stone and glass. For a thousand years the Church was the keeper of the written word."
+    },
+    {
+      "id": "islam",
+      "name": "Islam",
+      "description": "Revealed to Muhammad in 7th-century Arabia, Islam united the peninsula within a generation and within a century stretched from Spain to Persia. The Islamic Golden Age produced algebra, advanced astronomy, and preserved Greek philosophy when Europe had forgotten it.",
+      "parentReligion": "christianity",
+      "requiredTech": "theology",
+      "flatBonus": { "gold": 2, "science": 2 },
+      "happinessBonus": 1,
+      "happinessPenalty": 0,
+      "unlocksTechs": ["algebra"],
+      "uniqueBuildings": ["house_of_wisdom"],
+      "flavorText": "Read! In the name of your Lord who created. Al-Khwarizmi gave the world algebra; Ibn al-Haytham founded optics; Ibn Rushd reintroduced Aristotle to Europe. The Silk Road ran under Abbasid protection. In Baghdad's House of Wisdom, scholars from every conquered civilization translated the accumulated knowledge of antiquity."
+    }
+  ]
+}

@@ -22,13 +22,15 @@
       "flat": { "gold": 2 }, "goldPct": 40, "requiredTech": "currency" },
 
     { "id": "temple", "name": "Temple", "productionCost": 82, "maintenance": 1,
-      "flat": { "culture": 2 }, "happiness": 3, "requiredTech": "philosophy" },
+      "flat": { "culture": 2 }, "happiness": 3, "requiredTech": "philosophy",
+      "requiredReligion": "*" },
 
     { "id": "aqueduct", "name": "Aqueduct", "productionCost": 108, "maintenance": 2,
       "flat": { "food": 1 }, "happiness": 2, "growthBonus": 25, "requiredTech": "mathematics" },
 
     { "id": "cathedral", "name": "Cathedral", "productionCost": 120, "maintenance": 2,
-      "flat": { "culture": 2 }, "happiness": 3, "requiredTech": "theology" },
+      "flat": { "culture": 2 }, "happiness": 3, "requiredTech": "theology",
+      "requiredReligion": "christianity" },
 
     { "id": "university", "name": "University", "productionCost": 150, "maintenance": 2,
       "flat": { "science": 2 }, "sciencePct": 50, "requiredTech": "engineering" },
@@ -41,6 +43,18 @@
 
     { "id": "guildhall", "name": "Guild Hall", "productionCost": 150, "maintenance": 2,
       "flat": { "production": 1, "gold": 2 }, "goldPct": 20, "requiredTech": "guilds" },
+
+    { "id": "sacred_grove_shrine", "name": "Sacred Grove", "productionCost": 90, "maintenance": 1,
+      "flat": { "food": 2, "production": 1 }, "requiredTech": "sacred_groves",
+      "requiredReligion": "canaanite" },
+
+    { "id": "hall_of_records", "name": "Hall of Records", "productionCost": 100, "maintenance": 1,
+      "flat": { "science": 2, "gold": 1 }, "requiredTech": "covenant_law",
+      "requiredReligion": "judaism" },
+
+    { "id": "monastery", "name": "Monastery", "productionCost": 130, "maintenance": 1,
+      "flat": { "science": 2, "culture": 1 }, "happiness": 1,
+      "requiredTech": "monasticism", "requiredReligion": "christianity" },
 
     { "id": "hanging_gardens", "name": "Hanging Gardens", "productionCost": 230, "maintenance": 0,
       "isWonder": true, "score": 22, "requiredTech": "pottery",
@@ -84,6 +98,11 @@
 
     { "id": "grand_bazaar", "name": "Grand Bazaar", "productionCost": 280, "maintenance": 0,
       "isWonder": true, "score": 28, "requiredTech": "guilds",
-      "effects": { "scope": "empire", "flat": { "gold": 3 }, "goldPct": 25 } }
+      "effects": { "scope": "empire", "flat": { "gold": 3 }, "goldPct": 25 } },
+
+    { "id": "house_of_wisdom", "name": "House of Wisdom", "productionCost": 320, "maintenance": 0,
+      "isWonder": true, "score": 32, "requiredTech": "algebra",
+      "requiredReligion": "islam",
+      "effects": { "scope": "empire", "flat": { "science": 3 }, "sciencePct": 25 } }
   ]
 }

@@ -63,15 +63,17 @@ const char* gateKindName(GateKind kind);
 // A condition tied to in-game accomplishment that opens (Locked) or discounts
 // (Boost) a tech. `condition` is a tiny DSL the simulation evaluates against the
 // live World; recognized forms:
-//   "coastal_city"        own a city adjacent to water
-//   "own_wonder"          own any world wonder
-//   "meet_rival"          your borders touch another empire's
-//   "treasury"            empire treasury >= amount
-//   "culture"             accumulated culture >= amount
-//   "cities"              number of cities >= amount
-//   "pop"                 some city's population >= amount
-//   "building:<id>"       own >= amount cities that have building <id>
-//   "work_terrain:<name>" own a tile of that terrain (e.g. "hills")
+//   "coastal_city"          own a city adjacent to water
+//   "own_wonder"            own any world wonder
+//   "meet_rival"            your borders touch another empire's
+//   "treasury"              empire treasury >= amount
+//   "culture"               accumulated culture >= amount
+//   "cities"                number of cities >= amount
+//   "pop"                   some city's population >= amount
+//   "building:<id>"         own >= amount cities that have building <id>
+//   "work_terrain:<name>"   own a tile of that terrain (e.g. "hills")
+//   "religion_established"  empire has any state religion
+//   "state_religion:<id>"   empire's state religion matches the given id
 // A condition latches: once satisfied it stays satisfied for the rest of the game.
 struct TechGate {
     GateKind kind = GateKind::Open;
@@ -130,6 +132,7 @@ struct BuildingDef {
     int happiness = 0;             // raises the city's happiness cap
     int growthBonus = 0;           // % of the food box kept after a city grows
     std::string requiredTech;      // "" == available from the first turn
+    std::string requiredReligion;  // "" = none; "*" = any state religion; "<id>" = specific religion
     bool isWonder = false;         // world-unique; only one civ may own it
     int score = 0;                 // points the wonder adds to its owner's score
     BuildingEffects effects{};     // empire-/city-wide bonuses (mainly wonders)

@@ -7,6 +7,7 @@ namespace odai::content {
 using odai::game::BuildableItem;
 using odai::game::BuildingDef;
 using odai::game::GreatPersonDef;
+using odai::game::ReligionDef;
 using odai::game::TechDef;
 using odai::game::TerrainType;
 using odai::game::UnitStats;
@@ -51,6 +52,13 @@ const BuildableItem* ContentDatabase::findBuildable(const std::string& id) const
 const GreatPersonDef* ContentDatabase::findGreatPerson(const std::string& id) const {
     for (const GreatPersonDef& g : m_greatPeople) {
         if (g.id == id) return &g;
+    }
+    return nullptr;
+}
+
+const ReligionDef* ContentDatabase::findReligion(const std::string& id) const {
+    for (const ReligionDef& r : m_religions) {
+        if (r.id == id) return &r;
     }
     return nullptr;
 }

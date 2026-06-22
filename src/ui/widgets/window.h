@@ -38,8 +38,12 @@ public:
     // When non-null, the title text is drawn with this font instead of font_.
     // Allows a larger/bolder typeface for window titles vs body content.
     const Font* titleFont = nullptr;
+    // Smaller companion face used for lowercase letters in a small-cap title.
+    // Uppercase source letters retain the full titleFont height.
+    const Font* titleSmallCapsFont = nullptr;
     // Corner radius for the solid-fill path (no effect when a 9-slice frame is set).
-    float cornerRadiusPx = 3.0f;
+    // Kept small for the squared-off Victorian look.
+    float cornerRadiusPx = 2.0f;
     UiColor closeColor{0.85f, 0.55f, 0.35f, 0.85f};
     UiColor closeHoverColor{0.95f, 0.45f, 0.30f, 1.0f};
     bool showCloseButton = true;

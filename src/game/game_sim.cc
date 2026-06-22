@@ -3,6 +3,7 @@
 #include "content/content_database.h"
 #include "game/great_people.h"
 #include "game/mod_host.h"
+#include "game/religion.h"
 
 #include <algorithm>
 #include <array>
@@ -292,6 +293,15 @@ void computeCityYields(World& world, City& city) {
         growBonus = ctx.growBonus;
     }
 
+    // 3c. State religion: flat per-city bonus and happiness modifier.
+    if (emp != nullptr && !emp->stateReligion.empty()) {
+        const ReligionDef* rel = findReligionDef(emp->stateReligion);
+        if (rel != nullptr) {
+            addYields(y, rel->flatBonus);
+            happy += rel->happinessBonus - rel->happinessPenalty;
+        }
+    }
+
     // 4. Apply percentage multipliers.
     y.production += (y.production * prodPct) / 100;
     y.gold       += (y.gold * goldPct) / 100;
@@ -388,6 +398,8 @@ bool gateConditionMet(const World& world, const Empire& emp, const TechGate& g) 
     }
     if (hasPrefix("building:"))
         return empireBuildingCount(world, emp, c.substr(9)) >= std::max(1, g.amount);
+    if (c == "religion_established") return !emp.stateReligion.empty();
+    if (hasPrefix("state_religion:")) return emp.stateReligion == c.substr(15);
     if (hasPrefix("work_terrain:")) {
         const TerrainType want = terrainFromName(c.substr(13));
         const StrategyMap& map = world.map;
@@ -952,6 +964,23 @@ void stepTurn(World& world, std::vector<TurnSample>& samples) {
         updateTechGates(world, emp);
         if (emp.aiManaged) pickResearch(world, emp);
     }
+    // AI: adopt a religion when eligible. Empires with high religion personality
+    // adopt the best available faith; low-religion empires may skip entirely.
+    for (Empire& emp : world.empires) {
+        if (!emp.alive || !emp.aiManaged) continue;
+        if (!emp.stateReligion.empty()) continue;  // already has a faith
+        for (const ReligionDef& rel : religionDefs()) {
+            if (!rel.requiredTech.empty() && !emp.knows(rel.requiredTech)) continue;
+            if (!rel.parentReligion.empty() && emp.stateReligion != rel.parentReligion) continue;
+            // Religion bias: high-religion empires adopt proactively.
+            if (emp.personality.religion < 0.7f) continue;
+            emp.stateReligion = rel.id;
+            logEvent(world, emp.id, GameEvent::Building,
+                     emp.name + " adopts " + rel.name);
+            break;
+        }
+    }
+
     // Snapshot the city-index lists (foundCityFromSettler may append new cities;
     // those new cities act starting next turn). The human player's cities are
     // left exactly as the app set them (focus + production queue).

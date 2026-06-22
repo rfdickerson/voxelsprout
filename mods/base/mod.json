@@ -13,7 +13,8 @@
     "data/units.json",
     "data/buildables.json",
     "data/civpedia.json",
-    "data/leaders.json"
+    "data/leaders.json",
+    "data/religions.json"
   ],
   "scripts": []
 }

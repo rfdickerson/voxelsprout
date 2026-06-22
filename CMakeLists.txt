@@ -203,6 +203,7 @@ add_library(odai_ui STATIC
     src/ui/widgets/icon_button.cc
     src/ui/widgets/world_tracker_panel.cc
     src/ui/widgets/command_view_panel.cc
+    src/ui/widgets/minimap_panel.cc
     # Game-domain widgets (production_panel, etc.) are NOT included here;
     # they live in the app source list and link against odai_ui.
 )
@@ -336,6 +337,7 @@ if(ODAI_BUILD_APP)
         src/game/game_sim.cc
         src/game/great_people.cc
         src/game/mod_host.cc
+        src/game/religion.cc
         src/game/strategy_map.cc
         src/game/strategy_map_io.cc
         src/game/strategy_map_mesh.cc
@@ -344,6 +346,7 @@ if(ODAI_BUILD_APP)
         src/ui/widgets/advisors_panel.cc
         src/ui/widgets/great_people_panel.cc
         src/ui/widgets/production_panel.cc
+        src/ui/widgets/religion_panel.cc
         src/ui/widgets/tech_tree_panel.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
@@ -551,6 +554,7 @@ if(ODAI_BUILD_TOOLS)
         src/game/game_sim.cc
         src/game/great_people.cc
         src/game/mod_host.cc
+        src/game/religion.cc
         src/tools/civ_sim_main.cc
     )
     target_include_directories(odai_civ_sim PRIVATE src)
@@ -703,6 +707,7 @@ if(BUILD_TESTING)
         src/game/game_sim.cc
         src/game/great_people.cc
         src/game/mod_host.cc
+        src/game/religion.cc
         src/game/strategy_map.cc
     )
     target_include_directories(odai_economy_tests PRIVATE src)
@@ -737,6 +742,7 @@ if(BUILD_TESTING)
         src/game/game_sim.cc
         src/game/great_people.cc
         src/game/mod_host.cc
+        src/game/religion.cc
         src/game/strategy_map.cc
     )
     target_include_directories(odai_great_people_tests PRIVATE src)
@@ -757,6 +763,7 @@ if(BUILD_TESTING)
         src/game/game_sim.cc
         src/game/great_people.cc
         src/game/mod_host.cc
+        src/game/religion.cc
         src/game/strategy_map.cc
         src/game/units.cc
         src/game/buildable.cc
@@ -779,6 +786,7 @@ if(BUILD_TESTING)
         src/game/game_sim.cc
         src/game/great_people.cc
         src/game/mod_host.cc
+        src/game/religion.cc
         src/game/strategy_map.cc
         src/game/units.cc
         src/game/buildable.cc
