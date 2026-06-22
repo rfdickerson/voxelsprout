@@ -47,7 +47,12 @@ public:
         hasViewport_ = normalized.valid();
     }
 
+    // Called when the user clicks or drags on the map image. Arguments are
+    // normalized [0,1] coordinates within the image rect (origin top-left).
+    std::function<void(float, float)> onMapClick;
+
     void draw(UiDrawList& drawList) const override;
+    bool onEvent(UiEvent& event) override;
 
 private:
     FontSet fonts_;
@@ -60,6 +65,7 @@ private:
     float radius_ = 0.0f;
     UiRect viewport_{};
     bool hasViewport_ = false;
+    bool m_dragging_ = false;
 };
 
 }  // namespace odai::ui

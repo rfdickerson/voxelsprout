@@ -21,6 +21,7 @@
 #include "world/world.h"
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -31,25 +32,25 @@ struct GLFWwindow;
 
 namespace odai::ui {
 class AdvisorsPanel;
+class BuildQueuePanel;
 class Button;
-class CommandViewPanel;
 class DonutChart;
-class GreatPeoplePanel;
+class EventTrackerPanel;
+class FactionPanel;
 class IconButton;
 class Image;
 class Label;
 class LineChart;
 class MinimapPanel;
+class NotableEntityPanel;
 class Panel;
-class ProductionPanel;
-class ReligionPanel;
+class ResearchPanel;
 class RichTextView;
+class SelectionInspectorPanel;
 class StatBadgeRow;
-class TechTreePanel;
 class ToastManager;
 class Toolbar;
 class Window;
-class WorldTrackerPanel;
 }
 
 // App subsystem
@@ -121,7 +122,8 @@ private:
     void updateCamera(float dt);
     void setupHud(float viewW, float viewH);
     void updateUiOverlay(float dt);
-    void drawStrategyMapLabels(float fbW, float fbH);
+    void drawStrategyMapLabels(float fbW, float fbH, float dt);
+    void drawCombatOverlay(float fbW, float fbH);
     bool pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
                           int& outCol, int& outRow) const;
     // World XZ where the ray through the cursor pixel meets the y=0 ground plane.
@@ -403,21 +405,21 @@ private:
     float             m_civHeaderH = 0.0f;
     odai::ui::Image* m_civPortraitImage = nullptr;
     odai::ui::Label* m_civLeaderNameLabel = nullptr;
-    odai::ui::ProductionPanel* m_productionPanel = nullptr;
+    odai::ui::BuildQueuePanel* m_productionPanel = nullptr;
     std::string m_cityProductionId;  // City's currently selected build (legacy mock).
 
     // Tech-tree research window.
-    odai::ui::Window*        m_techTreeWindow = nullptr;
-    odai::ui::TechTreePanel* m_techTreePanel  = nullptr;
+    odai::ui::Window*       m_techTreeWindow = nullptr;
+    odai::ui::ResearchPanel* m_techTreePanel  = nullptr;
 
-    // Great People window: the player's roster of famous figures + the settle flow.
-    odai::ui::Window*           m_greatPeopleWindow = nullptr;
-    odai::ui::GreatPeoplePanel* m_greatPeoplePanel  = nullptr;
-    std::string m_selectedGreatPersonId;  // rail selection in the Great People window
+    // Notable entities window: the player's roster of famous figures + the settle flow.
+    odai::ui::Window*             m_greatPeopleWindow = nullptr;
+    odai::ui::NotableEntityPanel* m_greatPeoplePanel  = nullptr;
+    std::string m_selectedGreatPersonId;  // rail selection in the Notable Entities window
     bool m_greatPeopleDirty = false;      // rebuild requested (deferred out of a click callback)
-    // Religion window: faith catalog, lineage, and the adopt/reform flow.
-    odai::ui::Window*        m_religionWindow = nullptr;
-    odai::ui::ReligionPanel* m_religionPanel  = nullptr;
+    // Faction window: faith catalog, lineage, and the adopt/reform flow.
+    odai::ui::Window*       m_religionWindow = nullptr;
+    odai::ui::FactionPanel* m_religionPanel  = nullptr;
     odai::ui::Button*        m_faithButton    = nullptr;  // HUD button; label synced in refreshReligion
     std::string m_selectedReligionId;  // rail selection in the Religion window
     std::vector<std::string> m_researchedTechs;  // completed tech ids
@@ -445,9 +447,13 @@ private:
     odai::ui::Label*  m_unitActionName = nullptr;
     static constexpr int kMaxActionSlots = 6;
     odai::ui::IconButton* m_actionSlotBtns[kMaxActionSlots]{};
-    // Left "World Tracker" rail and right "Command View" rail (ornate HUD panels).
-    odai::ui::WorldTrackerPanel* m_worldTracker = nullptr;
-    odai::ui::CommandViewPanel*  m_commandView  = nullptr;
+    // Per-slot callbacks updated each time the unit selection changes. Slot buttons
+    // dispatch through this array so their onClick can be rewired without touching
+    // the retained widget tree (IconButton::onClick_ is private).
+    std::function<void()> m_slotCallbacks[kMaxActionSlots]{};
+    // Left "Event Tracker" rail and right "Selection Inspector" rail (HUD panels).
+    odai::ui::EventTrackerPanel*       m_worldTracker = nullptr;
+    odai::ui::SelectionInspectorPanel* m_commandView  = nullptr;
     odai::ui::UiRect m_worldTrackerRect{};  // Stored so refresh* can rebuild in place.
     odai::ui::UiRect m_commandViewRect{};
     // Main menu modal (shown by the logo button or Escape; hidden by Resume/close).
@@ -547,6 +553,34 @@ private:
     std::uint32_t m_previewTargetRow = 0;
     std::vector<std::array<std::uint32_t, 2>> m_previewPath;
 
+    // Predicted combat outcome shown in the battle card while the attack
+    // preview is active (right mouse held over an attackable enemy).
+    struct CombatPreview {
+        bool valid = false;
+        std::string attackerName;
+        int attackerHp = 0;
+        int attackerMaxHp = 0;
+        int damageToDefender = 0;
+        std::string defenderName;
+        int defenderHp = 0;
+        int defenderMaxHp = 0;
+        int retaliation = 0;   // 0 for ranged attacks (no counter-strike)
+        bool isRanged = false;
+    };
+    CombatPreview m_combatPreview;
+
+    // World-space floating labels (damage numbers) that rise and fade after combat.
+    struct FloatingLabel {
+        std::string text;
+        odai::ui::UiColor color{};
+        float worldX = 0.0f;
+        float worldY = 0.0f;
+        float worldZ = 0.0f;
+        float age = 0.0f;
+        float duration = 1.6f;
+    };
+    std::vector<FloatingLabel> m_floatingLabels;
+
     odai::sim::Simulation m_simulation;
     odai::world::World m_world;
     odai::world::ChunkClipmapIndex m_chunkClipmapIndex;
@@ -572,6 +606,12 @@ private:
     // tessellation-capable device; otherwise the flat imported-static land is kept.
     odai::importer::HexTerrainData m_hexTerrain;
     bool m_useHexTerrain = false;
+    // Fog of war: when true, tile visibility (Hidden/Explored/Visible) drives mesh color.
+    // Disabled by default; toolbar button toggles it and triggers a re-mesh.
+    bool m_fogOfWarEnabled = true;
+    // Raw pointer into the retained widget tree (owned by UiContext). Valid for the
+    // lifetime of the UI; null before the UI setup block runs.
+    odai::ui::Button* m_fogButton = nullptr;
 };
 
 } // namespace odai::app

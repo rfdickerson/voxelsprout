@@ -42,7 +42,17 @@ VertexOutput main(VertexInput input)
     float baseHeight;
     if (input.cornerIndex >= 6u)
     {
-        baseHeight = ownY;  // center
+        // Center sits at the mean of the six corner heights, not the tile's own
+        // elevation. Pinning it to ownY made every tile a tent/pit with a spike at the
+        // fan apex, which SSAO darkened (the dark dot) and the sun caught (the bright
+        // star), with the six triangle seams radiating out. The corner mean keeps the
+        // centre coplanar with the rim, so each tile reads as a clean near-planar hex.
+        // corner k height = (ownY + neighborY[k-1] + neighborY[k]) / 3, so the mean of
+        // all six is (6*ownY + 2*sum(neighborY)) / 18 = ownY/3 + sum(neighborY)/9.
+        const float neighborSum =
+            neighborY[0] + neighborY[1] + neighborY[2] +
+            neighborY[3] + neighborY[4] + neighborY[5];
+        baseHeight = (ownY / 3.0) + (neighborSum / 9.0);
     }
     else
     {

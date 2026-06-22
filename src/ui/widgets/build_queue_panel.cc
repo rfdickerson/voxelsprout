@@ -1,4 +1,4 @@
-#include "ui/widgets/production_panel.h"
+#include "ui/widgets/build_queue_panel.h"
 
 #include "ui/icon_atlas.h"
 #include "ui/ui_draw_list.h"
@@ -36,26 +36,24 @@ private:
     float s_ = 1.0f;
 };
 
-// A single production-queue row. Self-drawing, self-hit-testing. The parent
-// ScrollView reassigns rects as it scrolls, so all layout is rect-relative.
-class ProductionRow : public Widget {
+// A single build-queue row. Self-drawing, self-hit-testing.
+class BuildQueueRow : public Widget {
 public:
-    ProductionRow(const FontSet& fonts, float scale) : fonts_(fonts), s_(scale) {}
+    BuildQueueRow(const FontSet& fonts, float scale) : fonts_(fonts), s_(scale) {}
 
     std::string id;
     std::string name;
-    std::string info;  // "60 shields · 18 turns"
+    std::string info;  // E.g. "60 shields · 18 turns"
     UiTextureId iconTex = kUiNoTexture;
     UiRect iconUv{0.0f, 0.0f, 1.0f, 1.0f};
     bool selected = false;
     std::function<void()> onSelect;
-    std::function<void()> onOpenPedia;
+    std::function<void()> onOpenDetail;
 
     void draw(UiDrawList& dl) const override {
         const float pad = 8.0f * s_;
         const float radius = 4.0f * s_;
 
-        // Row background
         if (selected) {
             dl.addRoundRectFilled(rect_, UiColor{0.20f, 0.16f, 0.06f, 0.95f}, radius);
             dl.addRoundRect(rect_, UiColor{0.90f, 0.74f, 0.30f, 0.88f}, radius, 1.5f * s_);
@@ -73,17 +71,12 @@ public:
             dl.addRoundRectFilled(iconRect, UiColor{0.20f, 0.22f, 0.26f, 1.0f}, 3.0f * s_);
         }
 
-        // CivPedia info button (compute before text so we know the right boundary)
-        const UiRect pr = pediaRect();
+        const UiRect pr = detailRect();
 
-        // Text region: from after icon to just before the info button
         const float textX = iconRect.maxX + 10.0f * s_;
         const float textMaxX = pr.minX - 8.0f * s_;
-
         dl.pushClip(UiRect{textX, rect_.minY, textMaxX, rect_.maxY});
 
-        // Stack name + info vertically and centre the block within the row so
-        // they never overlap regardless of font size.
         const Font* nameFont = fonts_.bold ? fonts_.bold : fonts_.regular;
         const float nameH = nameFont       ? nameFont->lineHeightPx()       : 0.0f;
         const float infoH = fonts_.regular ? fonts_.regular->lineHeightPx() : 0.0f;
@@ -99,12 +92,11 @@ public:
             dl.addText(*fonts_.regular, info, UiVec2{textX, blockY + nameH + gap},
                        UiColor{0.60f, 0.68f, 0.78f, 1.0f});
         }
-
         dl.popClip();
 
         // Info button — circle with "i" glyph
-        const UiColor fill = pediaHovered_ ? UiColor{0.30f, 0.46f, 0.68f, 1.0f}
-                                           : UiColor{0.16f, 0.24f, 0.36f, 0.92f};
+        const UiColor fill = detailHovered_ ? UiColor{0.30f, 0.46f, 0.68f, 1.0f}
+                                            : UiColor{0.16f, 0.24f, 0.36f, 0.92f};
         dl.addRoundRectFilled(pr, fill, pr.width() * 0.5f);
         dl.addRoundRect(pr, UiColor{0.50f, 0.66f, 0.88f, 0.72f}, pr.width() * 0.5f, 1.2f * s_);
         if (fonts_.regular) {
@@ -120,12 +112,12 @@ public:
     bool onEvent(UiEvent& ev) override {
         switch (ev.type) {
             case UiEvent::Type::MouseMove:
-                hovered_ = rect_.contains(ev.mousePx);
-                pediaHovered_ = pediaRect().contains(ev.mousePx);
+                hovered_      = rect_.contains(ev.mousePx);
+                detailHovered_ = detailRect().contains(ev.mousePx);
                 return false;
             case UiEvent::Type::MouseDown:
                 if (ev.button == UiMouseButton::Left && rect_.contains(ev.mousePx)) {
-                    pressedPedia_ = pediaRect().contains(ev.mousePx);
+                    pressedDetail_ = detailRect().contains(ev.mousePx);
                     pressedInside_ = true;
                     ev.handled = true;
                     return true;
@@ -133,12 +125,12 @@ public:
                 return false;
             case UiEvent::Type::MouseUp: {
                 if (ev.button != UiMouseButton::Left || !pressedInside_) return false;
-                const bool inPedia = pediaRect().contains(ev.mousePx);
-                const bool wasPedia = pressedPedia_;
+                const bool inDetail  = detailRect().contains(ev.mousePx);
+                const bool wasDetail = pressedDetail_;
                 pressedInside_ = false;
-                pressedPedia_ = false;
-                if (inPedia && wasPedia) {
-                    if (onOpenPedia) onOpenPedia();
+                pressedDetail_ = false;
+                if (inDetail && wasDetail) {
+                    if (onOpenDetail) onOpenDetail();
                     ev.handled = true;
                     return true;
                 }
@@ -155,8 +147,7 @@ public:
     }
 
 private:
-    // Info button: 24px circle, 14px from the right edge, vertically centered.
-    UiRect pediaRect() const {
+    UiRect detailRect() const {
         const float side   = 24.0f * s_;
         const float margin = 14.0f * s_;
         const float cy     = (rect_.minY + rect_.maxY) * 0.5f;
@@ -167,43 +158,38 @@ private:
     FontSet fonts_;
     float s_ = 1.0f;
     bool hovered_       = false;
-    bool pediaHovered_  = false;
+    bool detailHovered_ = false;
     bool pressedInside_ = false;
-    bool pressedPedia_  = false;
+    bool pressedDetail_ = false;
 };
 
-// City info header: city name, yield badges, and governor. Drawn directly on
-// top of the panel background — no separate background fill to preserve the
-// panel's rounded corners.
-class CityHeader : public Widget {
+// Location info header: name, generic stats row, and manager label.
+class LocationHeader : public Widget {
 public:
-    CityHeader(const FontSet& fonts, float s, const ProductionPanel::CityInfo& city)
-        : fonts_(fonts), s_(s), name_(city.name),
-          govName_(city.governorName.empty() ? "Unassigned" : city.governorName) {
+    LocationHeader(const FontSet& fonts, float s, const BuildQueuePanel::LocationInfo& loc)
+        : fonts_(fonts), s_(s), name_(loc.name),
+          managerName_(loc.managerName.empty() ? "Unassigned" : loc.managerName) {
 
-        const char* kNames[6] = {"food","production","gold","science","faith","culture"};
-        const int   kVals[6]  = {city.food, city.production, city.gold,
-                                  city.science, city.faith, city.culture};
-        for (int i = 0; i < 6; ++i) {
-            Yield y{};
-            y.label = std::to_string(kVals[i]);
+        for (const auto& stat : loc.stats) {
+            StatEntry se{};
+            se.label = stat.value;
             UiIconEntry entry{};
-            if (UiIconRegistry::global().resolve(kNames[i], entry)) {
-                y.tex = entry.textureId;
-                y.uv  = entry.uv;
+            if (UiIconRegistry::global().resolve(stat.iconName, entry)) {
+                se.tex = entry.textureId;
+                se.uv  = entry.uv;
             }
-            yields_.push_back(y);
+            stats_.push_back(se);
         }
     }
 
     void draw(UiDrawList& dl) const override {
-        const Font* bf  = fonts_.bold    ? fonts_.bold    : fonts_.regular;
+        const Font* bf  = fonts_.bold   ? fonts_.bold   : fonts_.regular;
         const Font* rf  = fonts_.regular;
-        const Font* itf = fonts_.italic  ? fonts_.italic  : rf;
+        const Font* itf = fonts_.italic ? fonts_.italic : rf;
 
         float y = rect_.minY + 8.0f * s_;
 
-        // City name — bold gold, centered
+        // Location name — bold gold, centered
         if (bf && !name_.empty()) {
             const float nameW = bf->measureText(name_);
             dl.addText(*bf, name_,
@@ -212,53 +198,50 @@ public:
             y += bf->lineHeightPx() + 7.0f * s_;
         }
 
-        // Yield badges: [icon][value] × 6, centered as a group
-        if (!yields_.empty()) {
+        // Stats row: [icon][value] pairs, centered as a group
+        if (!stats_.empty() && rf) {
             const float iconSide = 16.0f * s_;
             const float iconGap  = 2.0f * s_;
             const float itemGap  = 9.0f * s_;
 
-            // Measure total width for centering
             float totalW = 0.0f;
-            for (int i = 0; i < 6; ++i) {
-                totalW += iconSide + iconGap + (rf ? rf->measureText(yields_[i].label) : 18.0f);
-                if (i < 5) totalW += itemGap;
+            for (const auto& se : stats_) {
+                totalW += iconSide + iconGap + rf->measureText(se.label);
+                totalW += itemGap;
             }
+            if (!stats_.empty()) totalW -= itemGap;
             float x = rect_.minX + (rect_.width() - totalW) * 0.5f;
 
-            const float rowH    = iconSide;
-            const float textOffY = y + (rowH - (rf ? rf->lineHeightPx() : 0.0f)) * 0.5f;
+            const float rowH     = iconSide;
+            const float textOffY = y + (rowH - rf->lineHeightPx()) * 0.5f;
 
-            for (int i = 0; i < 6; ++i) {
-                const Yield& yld = yields_[i];
+            for (const auto& se : stats_) {
                 const UiRect ir{x, y, x + iconSide, y + iconSide};
-                if (yld.tex != kUiNoTexture) {
-                    dl.addImage(ir, yld.tex, UiColor{1.0f, 1.0f, 1.0f, 1.0f}, yld.uv);
+                if (se.tex != kUiNoTexture) {
+                    dl.addImage(ir, se.tex, UiColor{1.0f, 1.0f, 1.0f, 1.0f}, se.uv);
                 } else {
                     dl.addRoundRectFilled(ir, UiColor{0.35f, 0.38f, 0.42f, 0.6f}, 2.0f * s_);
                 }
                 x += iconSide + iconGap;
-                if (rf) {
-                    dl.addText(*rf, yld.label, UiVec2{x, textOffY},
-                               UiColor{0.92f, 0.88f, 0.72f, 1.0f});
-                    x += rf->measureText(yld.label) + itemGap;
-                }
+                dl.addText(*rf, se.label, UiVec2{x, textOffY},
+                           UiColor{0.92f, 0.88f, 0.72f, 1.0f});
+                x += rf->measureText(se.label) + itemGap;
             }
             y += rowH + 7.0f * s_;
         }
 
-        // Governor row — italic, muted blue-grey, centered
+        // Manager row — italic, muted blue-grey, centered
         if (itf) {
-            const std::string govStr = "Governor:  " + govName_;
-            const float gw = itf->measureText(govStr);
-            dl.addText(*itf, govStr,
+            const std::string mgr = "Manager:  " + managerName_;
+            const float gw = itf->measureText(mgr);
+            dl.addText(*itf, mgr,
                        UiVec2{rect_.minX + (rect_.width() - gw) * 0.5f, y},
                        UiColor{0.60f, 0.68f, 0.80f, 0.88f});
         }
     }
 
 private:
-    struct Yield {
+    struct StatEntry {
         std::string label;
         UiTextureId tex = kUiNoTexture;
         UiRect uv{0.0f, 0.0f, 1.0f, 1.0f};
@@ -267,46 +250,42 @@ private:
     FontSet fonts_;
     float s_;
     std::string name_;
-    std::string govName_;
-    std::vector<Yield> yields_;
+    std::string managerName_;
+    std::vector<StatEntry> stats_;
 };
 
 }  // namespace
 
-void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& title,
+void BuildQueuePanel::setItems(const UiRect& rect, float s, const std::string& title,
                                const std::vector<Row>& rows,
-                               const CityInfo& city) {
+                               const LocationInfo& location) {
     children_.clear();
     rows_.clear();
     title_ = title;
     setRect(rect);
 
     const float pad    = 10.0f * s;
-    const float cityH  = 88.0f * s;   // name + yields + governor
-    const float titleH = 30.0f * s;   // "Choose Production" label
+    const float locH   = 88.0f * s;   // name + stats + manager
+    const float titleH = 30.0f * s;
 
-    // Outer background panel — flat clean-modern card (matches the inspector slot).
     auto bg = std::make_unique<Panel>();
     bg->setRect(rect);
     bg->styleCard(s);
     bg_ = static_cast<Panel*>(addChild(std::move(bg)));
 
-    // City info header (name, yields, governor)
-    auto cityHdr = std::make_unique<CityHeader>(fonts_, s, city);
-    cityHdr->setRect(UiRect::fromXYWH(rect.minX, rect.minY, rect.width(), cityH));
-    addChild(std::move(cityHdr));
+    auto locHdr = std::make_unique<LocationHeader>(fonts_, s, location);
+    locHdr->setRect(UiRect::fromXYWH(rect.minX, rect.minY, rect.width(), locH));
+    addChild(std::move(locHdr));
 
-    // Hairline separator below city header
     auto sep1 = std::make_unique<Panel>();
-    sep1->setRect(UiRect::fromXYWH(rect.minX + pad, rect.minY + cityH,
+    sep1->setRect(UiRect::fromXYWH(rect.minX + pad, rect.minY + locH,
                                     rect.width() - 2.0f * pad, 1.0f * s));
     sep1->background        = UiColor{1.0f, 1.0f, 1.0f, 0.10f};
     sep1->borderThicknessPx = 0.0f;
     sep1->cornerRadiusPx    = 0.0f;
     addChild(std::move(sep1));
 
-    // "Choose Production" title label — centred, two-line when a build is active
-    const float titleY = rect.minY + cityH + 1.5f * s;
+    const float titleY = rect.minY + locH + 1.5f * s;
     auto tl = std::make_unique<Label>(
         fonts_, "<b><color=#ceb96a>" + title + "</color></b>");
     tl->align = UiTextAlign::Center;
@@ -314,7 +293,6 @@ void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& t
                                   rect.width() - 2.0f * pad, titleH));
     titleLabel_ = static_cast<Label*>(addChild(std::move(tl)));
 
-    // Hairline separator line below title
     auto sep2 = std::make_unique<Panel>();
     sep2->setRect(UiRect::fromXYWH(rect.minX + pad, titleY + titleH + 2.0f * s,
                                     rect.width() - 2.0f * pad, 1.0f * s));
@@ -323,7 +301,6 @@ void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& t
     sep2->cornerRadiusPx    = 0.0f;
     addChild(std::move(sep2));
 
-    // Scrollable list
     const float listTop = titleY + titleH + 10.0f * s;
     auto sv = std::make_unique<ScrollView>();
     sv->setRect(UiRect::fromXYWH(rect.minX + 4.0f * s, listTop,
@@ -333,20 +310,17 @@ void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& t
     sv->scrollBarColor = UiColor{0.72f, 0.58f, 0.30f, 0.55f};
     sv->scrollBarBg    = UiColor{0.0f, 0.0f, 0.0f, 0.20f};
 
-    // Row height: tall enough to fit name + info stacked, with equal top/bottom
-    // padding. Using font metrics means the row scales correctly with any DPI.
     const Font* nameFontRef = fonts_.bold ? fonts_.bold : fonts_.regular;
-    const float nameLineH   = nameFontRef       ? nameFontRef->lineHeightPx()       : 28.0f * s;
-    const float infoLineH   = fonts_.regular    ? fonts_.regular->lineHeightPx()    : 22.0f * s;
-    const float rowPad      = 18.0f * s;  // total vertical whitespace (top + bottom)
+    const float nameLineH   = nameFontRef    ? nameFontRef->lineHeightPx()    : 28.0f * s;
+    const float infoLineH   = fonts_.regular ? fonts_.regular->lineHeightPx() : 22.0f * s;
+    const float rowPad      = 18.0f * s;
     const float rowH        = std::max(nameLineH + infoLineH + 3.0f * s + rowPad,
-                                       52.0f * s);  // never shorter than the icon
+                                       52.0f * s);
     const float sectionH = std::max(26.0f * s, infoLineH + 10.0f * s);
     const float rowW     = sv->rect().width();
     std::string currentSection;
 
     for (const Row& r : rows) {
-        // Insert a section header when the section label changes
         if (r.section != currentSection && !r.section.empty()) {
             currentSection = r.section;
             const Font* sf = fonts_.bold ? fonts_.bold : fonts_.regular;
@@ -355,15 +329,15 @@ void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& t
             sv->addChild(std::move(hdr));
         }
 
-        auto row = std::make_unique<ProductionRow>(fonts_, s);
+        auto row = std::make_unique<BuildQueueRow>(fonts_, s);
         row->setRect(UiRect::fromXYWH(0.0f, 0.0f, rowW, rowH));
         row->id       = r.id;
         row->name     = r.name;
-        row->info     = std::to_string(r.productionCost) + " shields  \xC2\xB7  " +
+        row->info     = std::to_string(r.cost) + " cost  \xC2\xB7  " +
                         std::to_string(r.turns) + (r.turns == 1 ? " turn" : " turns");
         row->selected = r.selected;
         row->onSelect     = r.onSelect;
-        row->onOpenPedia  = r.onOpenPedia;
+        row->onOpenDetail = r.onOpenDetail;
 
         UiIconEntry entry{};
         if (UiIconRegistry::global().resolve(r.iconName, entry)) {
@@ -376,10 +350,10 @@ void ProductionPanel::setItems(const UiRect& rect, float s, const std::string& t
     list_ = static_cast<ScrollView*>(addChild(std::move(sv)));
 }
 
-void ProductionPanel::setSelected(const std::string& id) {
+void BuildQueuePanel::setSelected(const std::string& id) {
     std::string currentName;
     for (Widget* w : rows_) {
-        auto* row = static_cast<ProductionRow*>(w);
+        auto* row = static_cast<BuildQueueRow*>(w);
         row->selected = (row->id == id);
         if (row->selected) currentName = row->name;
     }

@@ -1,4 +1,4 @@
-#include "ui/widgets/great_people_panel.h"
+#include "ui/widgets/notable_entity_panel.h"
 
 #include "ui/icon_atlas.h"
 #include "ui/ui_draw_list.h"
@@ -16,12 +16,10 @@
 namespace odai::ui {
 namespace {
 
-// One selectable figure in the left rail. Self-drawing and self-hit-testing; the
-// parent ScrollView reassigns rects as it scrolls, so layout stays rect-relative.
-// Modeled on AdvisorRow, with a "pending" amber dot in place of an advice count.
-class GreatPersonRow : public Widget {
+// One selectable entity in the left rail.
+class EntityRow : public Widget {
 public:
-    GreatPersonRow(const FontSet& fonts, float scale) : fonts_(fonts), s_(scale) {}
+    EntityRow(const FontSet& fonts, float scale) : fonts_(fonts), s_(scale) {}
 
     std::string id;
     std::string name;
@@ -56,7 +54,6 @@ public:
         }
         dl.addRoundRect(pr, UiColor{0.70f, 0.56f, 0.28f, 0.55f}, 3.0f * s_, 1.0f * s_);
 
-        // Name + subtitle text, clipped so a long name never spills over the dot.
         const float textX    = pr.maxX + 8.0f * s_;
         const float dotW     = pending ? 20.0f * s_ : 0.0f;
         const float textMaxX = rect_.maxX - pad - dotW;
@@ -75,7 +72,7 @@ public:
                        UiColor{0.62f, 0.58f, 0.46f, 1.0f});
         dl.popClip();
 
-        // "Awaiting placement" amber dot on the right.
+        // "Pending" amber dot on the right.
         if (pending) {
             const float r  = 6.0f * s_;
             const float cx = rect_.maxX - pad - r;
@@ -121,7 +118,7 @@ private:
 
 }  // namespace
 
-void GreatPeoplePanel::applyHeaderAndBody(const Detail& detail) {
+void NotableEntityPanel::applyHeaderAndBody(const Detail& detail) {
     if (portrait_ != nullptr) {
         UiIconEntry icon;
         if (!detail.portraitName.empty() &&
@@ -143,25 +140,25 @@ void GreatPeoplePanel::applyHeaderAndBody(const Detail& detail) {
         bodyView_->setText(detail.body);
         bodyView_->scrollOffsetY = 0.0f;
     }
-    integrateAction_ = detail.onIntegrate;
-    if (integrateBtn_ != nullptr) {
-        integrateBtn_->visible = detail.showIntegrate;
-        integrateBtn_->setEnabled(detail.integrateEnabled);
-        integrateBtn_->setLabel(detail.integrateLabel.empty() ? std::string("Settle in city")
-                                                              : detail.integrateLabel);
+    action_ = detail.onAction;
+    if (actionBtn_ != nullptr) {
+        actionBtn_->visible = detail.showAction;
+        actionBtn_->setEnabled(detail.actionEnabled);
+        actionBtn_->setLabel(detail.actionLabel.empty() ? std::string("Use ability")
+                                                        : detail.actionLabel);
     }
 }
 
-void GreatPeoplePanel::applyDetail(const std::string& selectedId, const Detail& detail) {
+void NotableEntityPanel::applyDetail(const std::string& selectedId, const Detail& detail) {
     for (Widget* w : rows_) {
-        auto* row = static_cast<GreatPersonRow*>(w);
+        auto* row = static_cast<EntityRow*>(w);
         row->showSelected = (row->id == selectedId);
     }
     applyHeaderAndBody(detail);
 }
 
-void GreatPeoplePanel::setEntries(const UiRect& rect, float s,
-                                  const std::vector<Entry>& entries, const Detail& detail) {
+void NotableEntityPanel::setEntries(const UiRect& rect, float s,
+                                    const std::vector<Entry>& entries, const Detail& detail) {
     children_.clear();
     rows_.clear();
     scale_ = s;
@@ -169,7 +166,6 @@ void GreatPeoplePanel::setEntries(const UiRect& rect, float s,
 
     const float pad = 12.0f * s;
 
-    // Background panel (kept so the widget is self-sufficient outside a Window).
     auto bg = std::make_unique<Panel>();
     bg->setRect(rect);
     bg->background        = UiColor{0.07f, 0.06f, 0.04f, 0.92f};
@@ -179,10 +175,10 @@ void GreatPeoplePanel::setEntries(const UiRect& rect, float s,
     bg_ = static_cast<Panel*>(addChild(std::move(bg)));
 
     const Font* bf    = fonts_.bold ? fonts_.bold : fonts_.regular;
-    const float boldH = bf            ? bf->lineHeightPx()            : 22.0f * s;
+    const float boldH = bf             ? bf->lineHeightPx()             : 22.0f * s;
     const float regH  = fonts_.regular ? fonts_.regular->lineHeightPx() : 20.0f * s;
 
-    // --- Left rail: scrollable list of portraits. ---------------------------
+    // Left rail
     const float railW = 200.0f * s;
     auto sv = std::make_unique<ScrollView>();
     sv->setRect(UiRect::fromXYWH(rect.minX + pad, rect.minY + pad, railW,
@@ -194,7 +190,7 @@ void GreatPeoplePanel::setEntries(const UiRect& rect, float s,
     const float rowH = 56.0f * s;
     const float rowW = sv->rect().width();
     for (const Entry& e : entries) {
-        auto row = std::make_unique<GreatPersonRow>(fonts_, s);
+        auto row = std::make_unique<EntityRow>(fonts_, s);
         row->setRect(UiRect::fromXYWH(0.0f, 0.0f, rowW, rowH));
         row->id           = e.id;
         row->name         = e.name;
@@ -208,7 +204,7 @@ void GreatPeoplePanel::setEntries(const UiRect& rect, float s,
     }
     rail_ = static_cast<ScrollView*>(addChild(std::move(sv)));
 
-    // --- Right detail pane. -------------------------------------------------
+    // Right detail pane
     const float detailX = rect.minX + pad + railW + pad;
     const float portSz  = 96.0f * s;
     float y = rect.minY + pad;
@@ -230,7 +226,6 @@ void GreatPeoplePanel::setEntries(const UiRect& rect, float s,
 
     y += portSz + 10.0f * s;
 
-    // Separator under the header.
     const float detailW = rect.maxX - pad - detailX;
     auto sep = std::make_unique<Panel>();
     sep->setRect(UiRect::fromXYWH(detailX, y, detailW, 1.5f * s));
@@ -240,8 +235,6 @@ void GreatPeoplePanel::setEntries(const UiRect& rect, float s,
     addChild(std::move(sep));
     y += 1.5f * s + 8.0f * s;
 
-    // Reserve a fixed band at the bottom for the settle button (shown/hidden per
-    // selection) so the body view's height stays stable across selections.
     const float btnH = 34.0f * s;
     const float btnBand = btnH + 10.0f * s;
     const float bodyBottom = rect.maxY - pad - btnBand;
@@ -253,18 +246,15 @@ void GreatPeoplePanel::setEntries(const UiRect& rect, float s,
     body->setRect(UiRect::fromXYWH(detailX, y, detailW, std::max(0.0f, bodyBottom - y)));
     bodyView_ = static_cast<RichTextView*>(addChild(std::move(body)));
 
-    // The single persistent settle button. Its action is swapped per selection via
-    // integrateAction_, so it can serve any figure without rebuilding the tree.
     const Font* btnFont = fonts_.bold ? fonts_.bold : fonts_.regular;
-    auto btn = std::make_unique<Button>(btnFont, "Settle in city", [this]() {
-        if (integrateAction_) integrateAction_();
+    auto btn = std::make_unique<Button>(btnFont, "Use ability", [this]() {
+        if (action_) action_();
     });
     btn->setRect(UiRect::fromXYWH(detailX, rect.maxY - pad - btnH, detailW, btnH));
     btn->cornerRadiusPx = 2.0f * s;
     btn->borderThicknessPx = 1.0f * s;
-    integrateBtn_ = static_cast<Button*>(addChild(std::move(btn)));
+    actionBtn_ = static_cast<Button*>(addChild(std::move(btn)));
 
-    // Fill the detail pane for the selected figure (rail highlight set per-row above).
     applyHeaderAndBody(detail);
 }
 

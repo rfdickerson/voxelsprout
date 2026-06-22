@@ -35,12 +35,25 @@ struct ImportedSceneInstance {
     std::string modelPath;
 };
 
+// Pixel or block-compression format of a texture's data blob.
+// RGBA8: 4 bytes per pixel, mip levels packed largest-first.
+// BC*: 4×4-texel blocks; 8 bytes/block for BC1/BC4, 16 bytes/block for BC3/BC5/BC7.
+enum class TextureFormat : std::uint8_t {
+    RGBA8 = 0,  // 4 bytes per pixel
+    BC1   = 1,  // DXT1 — 8 bytes per block (opaque or 1-bit alpha)
+    BC3   = 2,  // DXT5 — 16 bytes per block (RGBA)
+    BC4   = 3,  // ATI1 — 8 bytes per block (single channel)
+    BC5   = 4,  // ATI2 — 16 bytes per block (dual channel)
+    BC7   = 5,  // 16 bytes per block (high-quality RGBA)
+};
+
 struct ImportedSceneTexture {
     std::string sourcePath;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint32_t mipLevelCount = 1;
-    std::vector<std::uint8_t> rgba8;
+    TextureFormat format = TextureFormat::RGBA8;
+    std::vector<std::uint8_t> rgba8; // pixel or block data, mip chain packed largest-first
 };
 
 struct ImportedScenePackedVertex {

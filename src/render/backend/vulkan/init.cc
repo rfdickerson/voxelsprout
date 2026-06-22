@@ -896,6 +896,11 @@ bool RendererBackend::createLogicalDevice() {
     enabledFeatures2.features.multiDrawIndirect = m_supportsMultiDrawIndirect ? VK_TRUE : VK_FALSE;
     enabledFeatures2.features.drawIndirectFirstInstance = VK_TRUE;
     enabledFeatures2.features.tessellationShader = VK_TRUE;
+    // Required to sample the BC1/BC3/BC5/BC7 block-compressed terrain DDS textures.
+    // Core in Vulkan 1.0 and universally supported on desktop GPUs; without it,
+    // creating a VK_FORMAT_BC*_BLOCK image is undefined and strict drivers fail the
+    // create, dropping terrain to the flat palette fallback.
+    enabledFeatures2.features.textureCompressionBC = VK_TRUE;
 
     VkPhysicalDeviceVulkan11Features vulkan11Features{};
     vulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;

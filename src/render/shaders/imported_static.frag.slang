@@ -48,7 +48,11 @@ float4 sampleImportedAlbedo(FragmentInput input)
     {
         return float4(input.inColor, 1.0);
     }
-    return float4(sampled.rgb, sampled.a);
+    // Tint the texture toward the vertex color (terrain palette for terrain tiles,
+    // material color for imported meshes). Matches the blend the hex terrain shader
+    // used so terrain types remain identifiable under the texture detail.
+    const float3 tinted = lerp(sampled.rgb, sampled.rgb * input.inColor * 1.6, 0.25);
+    return float4(tinted, sampled.a);
 }
 
 float3 sampleImportedVoxelGi(float3 worldPosition, float3 normal)
@@ -402,11 +406,18 @@ float sampleImportedCascadedShadow(float3 worldPosition, float3 normal, float vi
 
 float4 main(FragmentInput input) : SV_Target0
 {
-    const float4 albedo = sampleImportedAlbedo(input);
+    const float4 albedoFull = sampleImportedAlbedo(input);
     if (chunkPc.cascadeData.w > 0.5) {
-        return float4(saturate(albedo.rgb * 1.25), 1.0);
+        return float4(saturate(albedoFull.rgb * 1.25), 1.0);
     }
     const float3 normal = normalize(input.inWorldNormal);
+    // Slope-based rock/cliff blending. Steep faces (terrain skirts, cliff rims)
+    // read as exposed rock or lighter cliff stone; flat faces are unaffected.
+    // The welded terrain's smooth normals make this correct at elevation transitions.
+    const float slope = saturate(1.0 - normal.y);
+    float3 albedo = albedoFull.rgb;
+    albedo = lerp(albedo, float3(0.40, 0.39, 0.36), smoothstep(0.35, 0.66, slope) * 0.6);
+    albedo = lerp(albedo, float3(0.52, 0.51, 0.47), smoothstep(0.66, 0.92, slope) * 0.5);
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
     const float3 shNormalIrradiance = evaluateShIrradiance(normal);
@@ -488,7 +499,7 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
     const float rim = pow(1.0 - saturate(dot(normal, viewDir)), 2.0);
     const float3 shaded =
-        ((((ambient * ambientOcclusion) + voxelGi + direct + importedLights) * albedo.rgb) +
+        ((((ambient * ambientOcclusion) + voxelGi + direct + importedLights) * albedo) +
          (float3(1.0, 0.98, 0.94) * (rim * (interiorMode ? 0.010 : 0.022))));
-    return float4(shaded, 1.0);
+    return float4(shaded, albedoFull.a);
 }

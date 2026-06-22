@@ -21,13 +21,8 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkRect2D& aoScissor = context.aoScissor;
     const BoundDescriptorSets& boundDescriptorSets = *context.boundDescriptorSets;
     const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
-    const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
-    const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt = *inputs.chunkInstanceSliceOpt;
-    const VkBuffer chunkInstanceBuffer = inputs.chunkInstanceBuffer;
-    const VkBuffer chunkVertexBuffer = inputs.chunkVertexBuffer;
-    const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
-    const bool canDrawMagica = inputs.canDrawMagica;
-    const std::span<const ReadyMagicaDraw> readyMagicaDraws = inputs.readyMagicaDraws;
+    // Legacy voxel/magica/pipe prepass inputs remain on PrepassInputs but are no longer
+    // consumed here — those normal-depth draws were removed (prior voxel/factory game).
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
@@ -37,12 +32,6 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
-    const uint32_t pipeInstanceCount = inputs.pipeInstanceCount;
-    const std::optional<FrameArenaSlice>& pipeInstanceSliceOpt = *inputs.pipeInstanceSliceOpt;
-    const uint32_t transportInstanceCount = inputs.transportInstanceCount;
-    const std::optional<FrameArenaSlice>& transportInstanceSliceOpt = *inputs.transportInstanceSliceOpt;
-    const uint32_t beltCargoInstanceCount = inputs.beltCargoInstanceCount;
-    const std::optional<FrameArenaSlice>& beltCargoInstanceSliceOpt = *inputs.beltCargoInstanceSliceOpt;
 
     const uint32_t boundDescriptorSetCount = boundDescriptorSets.count;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
@@ -114,71 +103,10 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &aoScissor);
 
-    if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_voxelNormalDepthPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
-        if (frameChunkDrawData.canDrawChunksIndirect) {
-            const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, chunkInstanceBuffer};
-            const VkDeviceSize voxelVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-            ChunkPushConstants chunkPushConstants{};
-            chunkPushConstants.chunkOffset[0] = 0.0f;
-            chunkPushConstants.chunkOffset[1] = 0.0f;
-            chunkPushConstants.chunkOffset[2] = 0.0f;
-            chunkPushConstants.chunkOffset[3] = 0.0f;
-            chunkPushConstants.cascadeData[0] = 0.0f;
-            chunkPushConstants.cascadeData[1] = 0.0f;
-            chunkPushConstants.cascadeData[2] = 0.0f;
-            chunkPushConstants.cascadeData[3] = 0.0f;
-            vkCmdPushConstants(
-                commandBuffer,
-                m_pipelineLayout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0,
-                sizeof(ChunkPushConstants),
-                &chunkPushConstants
-            );
-            drawIndirectChunkRanges(commandBuffer, m_debugDrawCallsPrepass, frameChunkDrawData);
-        }
-        if (canDrawMagica) {
-            for (const ReadyMagicaDraw& magicaDraw : readyMagicaDraws) {
-                const VkBuffer magicaVertexBuffers[2] = {magicaDraw.vertexBuffer, chunkInstanceBuffer};
-                const VkDeviceSize magicaVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-                vkCmdBindVertexBuffers(commandBuffer, 0, 2, magicaVertexBuffers, magicaVertexOffsets);
-                vkCmdBindIndexBuffer(commandBuffer, magicaDraw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                ChunkPushConstants magicaPushConstants{};
-                magicaPushConstants.chunkOffset[0] = magicaDraw.offsetX;
-                magicaPushConstants.chunkOffset[1] = magicaDraw.offsetY;
-                magicaPushConstants.chunkOffset[2] = magicaDraw.offsetZ;
-                magicaPushConstants.chunkOffset[3] = 0.0f;
-                magicaPushConstants.cascadeData[0] = 0.0f;
-                magicaPushConstants.cascadeData[1] = 0.0f;
-                magicaPushConstants.cascadeData[2] = 0.0f;
-                magicaPushConstants.cascadeData[3] = 0.0f;
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &magicaPushConstants
-                );
-                countDrawCalls(m_debugDrawCallsPrepass, 1);
-                vkCmdDrawIndexed(commandBuffer, magicaDraw.indexCount, 1, 0, 0, 0);
-            }
-        }
+    // Opaque normal+depth for SSAO. Gated on the imported-static normal-depth pipeline
+    // (the strategy map's settlements/units/grid); the prior game's voxel chunk + magica
+    // normal-depth draws were removed.
+    if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
         if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&
             importedVertexBuffer != VK_NULL_HANDLE &&
             importedIndexBuffer != VK_NULL_HANDLE &&
@@ -238,61 +166,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
         // Transparent water samples this prepass to estimate the opaque scene below it.
     }
 
-    if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
-        auto drawNormalDepthInstances = [&](BufferHandle vertexHandle,
-                                            BufferHandle indexHandle,
-                                            uint32_t indexCount,
-                                            uint32_t instanceCount,
-                                            const std::optional<FrameArenaSlice>& instanceSlice) {
-            if (instanceCount == 0 || !instanceSlice.has_value() || indexCount == 0) {
-                return;
-            }
-            const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
-            const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
-            const VkBuffer instanceBuffer = m_bufferAllocator.getBuffer(instanceSlice->buffer);
-            if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE || instanceBuffer == VK_NULL_HANDLE) {
-                return;
-            }
-            const VkBuffer vertexBuffers[2] = {vertexBuffer, instanceBuffer};
-            const VkDeviceSize vertexOffsets[2] = {0, instanceSlice->offset};
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeNormalDepthPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-                1,
-                &mvpDynamicOffset
-            );
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            countDrawCalls(m_debugDrawCallsPrepass, 1);
-            vkCmdDrawIndexed(commandBuffer, indexCount, instanceCount, 0, 0, 0);
-        };
-        drawNormalDepthInstances(
-            m_pipeVertexBufferHandle,
-            m_pipeIndexBufferHandle,
-            m_pipeIndexCount,
-            pipeInstanceCount,
-            pipeInstanceSliceOpt
-        );
-        drawNormalDepthInstances(
-            m_transportVertexBufferHandle,
-            m_transportIndexBufferHandle,
-            m_transportIndexCount,
-            transportInstanceCount,
-            transportInstanceSliceOpt
-        );
-        drawNormalDepthInstances(
-            m_transportVertexBufferHandle,
-            m_transportIndexBufferHandle,
-            m_transportIndexCount,
-            beltCargoInstanceCount,
-            beltCargoInstanceSliceOpt
-        );
-    }
+    // (removed) pipe / belt / transport normal-depth prepass draws — legacy factory sim.
     if (m_grassBillboardNormalDepthPipeline != VK_NULL_HANDLE &&
         m_grassBillboardIndexCount > 0 &&
         m_grassBillboardInstanceCount > 0 &&

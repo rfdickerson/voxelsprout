@@ -14,9 +14,9 @@
 #include "ui/ui_draw_list.h"
 #include "ui/ui_input.h"
 #include "ui/ui_types.h"
-#include "ui/yield_style.h"
+#include "ui/resource_style.h"
 #include "ui/widgets/button.h"
-#include "ui/widgets/command_view_panel.h"
+#include "ui/widgets/selection_inspector_panel.h"
 #include "ui/widgets/donut_chart.h"
 #include "ui/widgets/dropdown.h"
 #include "ui/widgets/line_chart.h"
@@ -33,7 +33,7 @@
 #include "ui/widgets/toast.h"
 #include "ui/widgets/toggle.h"
 #include "ui/widgets/toolbar.h"
-#include "ui/widgets/world_tracker_panel.h"
+#include "ui/widgets/event_tracker_panel.h"
 
 #include <cstddef>
 
@@ -1144,86 +1144,90 @@ void testStyleCardPanelDraw() {
     expectTrue(sawRoundRect, "card panel uses the rounded-rect fill path");
 }
 
-void testYieldStyleFormat() {
+void testResourceStyleFormat() {
     using namespace odai::ui;
 
-    // Each yield has a stable icon key + accent color.
-    expectTrue(std::string(yieldIconName(Yield::Food)) == "food", "food icon key");
-    expectTrue(std::string(yieldIconName(Yield::Science)) == "science", "science icon key");
-    expectTrue(std::string(yieldIconName(Yield::Production)) == "production", "production icon key");
-    expectTrue(yieldColor(Yield::Gold).a == 1.0f, "yield color is opaque");
-    // Colors are distinct per yield (sanity: food != gold).
-    const UiColor food = yieldColor(Yield::Food);
-    const UiColor gold = yieldColor(Yield::Gold);
-    expectTrue(food.packAbgr8() != gold.packAbgr8(), "yields have distinct colors");
+    // Register a couple of resource styles and verify lookup.
+    registerResourceStyle("gold",  ResourceStyle{"gold",  UiColor{1.0f, 0.85f, 0.1f, 1.0f}});
+    registerResourceStyle("food",  ResourceStyle{"food",  UiColor{0.4f, 0.9f, 0.4f, 1.0f}});
+    const ResourceStyle* g = resourceStyle("gold");
+    const ResourceStyle* f = resourceStyle("food");
+    expectTrue(g != nullptr, "registered resource is found");
+    expectTrue(f != nullptr, "second registered resource is found");
+    expectTrue(std::string(g->iconName) == "gold", "gold icon key");
+    expectTrue(g->color.a == 1.0f, "resource color is opaque");
+    // Colors are distinct (sanity check).
+    expectTrue(g->color.packAbgr8() != f->color.packAbgr8(), "resources have distinct colors");
+    // Unknown key returns nullptr.
+    expectTrue(resourceStyle("unknown_xyz") == nullptr, "unknown resource returns nullptr");
 
     // Signed-delta formatting: '+' on positive, '-' carried, em dash on zero.
-    expectTrue(yieldText(7) == "+7", "positive rate gets a leading +");
-    expectTrue(yieldText(-2) == "-2", "negative rate keeps its sign");
-    expectTrue(yieldText(0) == "\xE2\x80\x94", "zero renders as an em dash");
-    expectTrue(yieldText(7, false) == "7", "unsigned format omits the +");
+    expectTrue(resourceText(7)        == "+7",           "positive rate gets a leading +");
+    expectTrue(resourceText(-2)       == "-2",           "negative rate keeps its sign");
+    expectTrue(resourceText(0)        == "\xE2\x80\x94", "zero renders as an em dash");
+    expectTrue(resourceText(7, false) == "7",            "unsigned format omits the +");
 }
 
-void testWorldTrackerPanelBuild() {
+void testEventTrackerPanelBuild() {
     using namespace odai::ui;
     Font font = makeMonospaceFont();
     FontSet fonts{&font, &font, &font, &font};
-    WorldTrackerPanel panel(fonts);
-    std::vector<WorldTrackerPanel::Entry> entries = {
+    EventTrackerPanel panel(fonts);
+    std::vector<EventTrackerPanel::Entry> entries = {
         {"", "Oral Tradition", "RESEARCH", "18c left"},
         {"", "No City", "PRODUCTION", "Produce a city"},
     };
-    panel.setEntries(UiRect::fromXYWH(0.0f, 0.0f, 260.0f, 420.0f), 1.0f, "WORLD TRACKER", entries);
-    expectTrue(panel.rect().width() == 260.0f, "world tracker keeps its assigned rect");
+    panel.setEntries(UiRect::fromXYWH(0.0f, 0.0f, 260.0f, 420.0f), 1.0f, "EVENT TRACKER", entries);
+    expectTrue(panel.rect().width() == 260.0f, "event tracker keeps its assigned rect");
 
     UiDrawList dl;
     dl.reset(UiVec2{1280.0f, 720.0f});
     panel.draw(dl);
-    expectTrue(!dl.data().vertices.empty(), "world tracker draws geometry");
+    expectTrue(!dl.data().vertices.empty(), "event tracker draws geometry");
 
     // Rebuilding with fewer entries must not crash or leak stale geometry intent.
-    panel.setEntries(UiRect::fromXYWH(0.0f, 0.0f, 260.0f, 420.0f), 1.0f, "WORLD TRACKER", {});
+    panel.setEntries(UiRect::fromXYWH(0.0f, 0.0f, 260.0f, 420.0f), 1.0f, "EVENT TRACKER", {});
     UiDrawList dl2;
     dl2.reset(UiVec2{1280.0f, 720.0f});
     panel.draw(dl2);
-    expectTrue(!dl2.data().vertices.empty(), "world tracker still draws frame + heading when empty");
+    expectTrue(!dl2.data().vertices.empty(), "event tracker still draws frame + heading when empty");
 }
 
-void testCommandViewPanelBuild() {
+void testSelectionInspectorPanelBuild() {
     using namespace odai::ui;
     Font font = makeMonospaceFont();
     FontSet fonts{&font, &font, &font, &font};
-    CommandViewPanel panel(fonts);
+    SelectionInspectorPanel panel(fonts);
 
     // Empty selection -> still draws the frame + hint.
-    CommandViewPanel::State empty;
+    SelectionInspectorPanel::State empty;
     empty.emptyHint = "<i>Select a unit.</i>";
     panel.setState(UiRect::fromXYWH(0.0f, 0.0f, 300.0f, 600.0f), 1.0f, empty);
     UiDrawList dl0;
     dl0.reset(UiVec2{1280.0f, 720.0f});
     panel.draw(dl0);
-    expectTrue(!dl0.data().vertices.empty(), "command view draws hint when nothing selected");
+    expectTrue(!dl0.data().vertices.empty(), "inspector draws hint when nothing selected");
 
-    // Full selection: hex + action + unit.
-    CommandViewPanel::State st;
-    st.hasHex = true;
-    st.hex.name = "Forest";
-    st.hex.yields = {{"food", "+7"}, {"production", "+2"}};
+    // Full selection: tile + action + entity.
+    SelectionInspectorPanel::State st;
+    st.hasTile = true;
+    st.tile.name = "Forest";
+    st.tile.yields = {{"food", "+7"}, {"production", "+2"}};
     st.action.title = "Found City";
     st.action.description = "Strategic location.";
     st.action.actions = {{"", nullptr}, {"", nullptr}};
-    st.hasUnit = true;
-    st.unit.name = "Clan Settler";
-    st.unit.klass = "Human Scout";
-    st.unit.primaryStats = {{"HP", "100/100"}, {"MOV", "2/2"}, {"ORDERS", "Ready"}};
-    st.unit.combatStats = {{"STR", "1"}, {"DEF", "0"}, {"COSTS", "0"}};
-    st.unit.abilities = "Aquatic 2";
-    st.unit.settlementPreview = "Site quality: Excellent";
+    st.hasEntity = true;
+    st.entity.name = "Clan Settler";
+    st.entity.klass = "Human Scout";
+    st.entity.primaryStats   = {{"HP", "100/100"}, {"MOV", "2/2"}, {"ORDERS", "Ready"}};
+    st.entity.secondaryStats = {{"STR", "1"}, {"DEF", "0"}, {"COSTS", "0"}};
+    st.entity.abilities = "Aquatic 2";
+    st.entity.placementPreview = "Site quality: Excellent";
     panel.setState(UiRect::fromXYWH(0.0f, 0.0f, 300.0f, 600.0f), 1.0f, st);
     UiDrawList dl1;
     dl1.reset(UiVec2{1280.0f, 720.0f});
     panel.draw(dl1);
-    expectTrue(!dl1.data().vertices.empty(), "command view draws full selection");
+    expectTrue(!dl1.data().vertices.empty(), "inspector draws full selection");
     expectTrue(dl1.data().vertices.size() > dl0.data().vertices.size(),
                "full selection emits more geometry than the empty hint");
 }
@@ -1339,11 +1343,11 @@ int main() {
     testPanelAnimatedBackground();
     testOrnatePanelDraw();
     testStyleCardPanelDraw();
-    testYieldStyleFormat();
+    testResourceStyleFormat();
     testNextTurnAction();
     testMinimapPanelBuild();
-    testWorldTrackerPanelBuild();
-    testCommandViewPanelBuild();
+    testEventTrackerPanelBuild();
+    testSelectionInspectorPanelBuild();
     testFontMeasure();
     testRichTextWrap();
     testRichTextSpans();

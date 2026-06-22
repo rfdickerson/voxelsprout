@@ -55,7 +55,18 @@ float4 main(FragmentInput input) : SV_Target0
     if (texSlot != kHexNoTexture)
     {
         const float2 uv = input.inWorldPosition.xz * kHexTexTiling;
-        const float3 sampled = bindlessTextures[texSlot].Sample(uv).rgb;
+        // Sample with an explicit distance-based gradient rather than Sample()'s implicit
+        // screen-space derivatives. At the hex fan's centre vertex six tessellated wedges
+        // meet; the rasteriser's 2x2-quad derivatives degenerate there (sub-pixel
+        // triangles), producing a garbage mip LOD that sampled the texture as black -- the
+        // dark dot at every tile centre. An always-finite gradient keeps mip selection
+        // stable (and is plenty for a near-top-down strategy view).
+        const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
+        const float viewDist = max(length(cameraWorld - input.inWorldPosition), 1.0);
+        const float worldPerPixel = viewDist * 0.00077;  // ~1080p / 45-deg-FOV heuristic
+        const float2 du = float2(worldPerPixel * kHexTexTiling, 0.0);
+        const float2 dv = float2(0.0, worldPerPixel * kHexTexTiling);
+        const float3 sampled = bindlessTextures[texSlot].SampleGrad(uv, du, dv).rgb;
         // Texture supplies the surface detail; keep a touch of palette identity so the
         // terrain type still reads at a glance.
         albedo = lerp(sampled, sampled * terrainPalette(terrain) * 1.6, 0.25);

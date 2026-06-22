@@ -89,6 +89,39 @@ void MinimapPanel::setActive(int index, UiTextureId image) {
     }
 }
 
+bool MinimapPanel::onEvent(UiEvent& event) {
+    // Let lens chips consume clicks first.
+    if (dispatchToChildren(event)) return true;
+
+    if (!imageRect_.valid() || !onMapClick) return false;
+
+    // Track drag start/end so moving the cursor while held pans continuously.
+    if (event.type == UiEvent::Type::MouseDown && event.button == UiMouseButton::Left) {
+        if (imageRect_.contains(event.mousePx)) {
+            m_dragging_ = true;
+        }
+    }
+    if (event.type == UiEvent::Type::MouseUp && event.button == UiMouseButton::Left) {
+        m_dragging_ = false;
+    }
+
+    const bool fireNow =
+        (event.type == UiEvent::Type::MouseDown && event.button == UiMouseButton::Left
+         && imageRect_.contains(event.mousePx)) ||
+        (event.type == UiEvent::Type::MouseMove && m_dragging_);
+
+    if (fireNow) {
+        const float nx = std::clamp(
+            (event.mousePx.x - imageRect_.minX) / imageRect_.width(), 0.0f, 1.0f);
+        const float ny = std::clamp(
+            (event.mousePx.y - imageRect_.minY) / imageRect_.height(), 0.0f, 1.0f);
+        onMapClick(nx, ny);
+        event.handled = true;
+        return true;
+    }
+    return false;
+}
+
 void MinimapPanel::draw(UiDrawList& drawList) const {
     if (!visible) {
         return;

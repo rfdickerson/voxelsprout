@@ -21,8 +21,10 @@ struct HexTerrainOptions {
     // the strategy-map mesher's chunkSize so land and overlays page identically.
     std::uint32_t chunkSize = 16;
 
-    // Vertical exaggeration applied to the elevation relief (1.0 == literal).
-    float heightExaggeration = 1.0f;
+    // Vertical exaggeration applied to the elevation relief (1.0 == literal). Kept low
+    // so the strategy map reads as clean, near-flat hex tiles with only subtle elevation
+    // rather than steep per-tile relief (which facets badly through the center fan).
+    float heightExaggeration = 0.35f;
 
     // When true, mark a sparse deterministic set of Hills tiles as strip mines so the
     // stepped-terrace detail feature is visible in the demo map. Off by default.
