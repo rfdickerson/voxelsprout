@@ -1,5 +1,6 @@
 #include "ui/document/ui_document.h"
 
+#include "ui/widgets/button.h"
 #include "ui/widgets/image.h"
 #include "ui/widgets/label.h"
 #include "ui/widgets/panel.h"
@@ -115,15 +116,19 @@ std::unique_ptr<Widget> UiDocumentLoader::instantiate(const json& node,
 
     // Custom factory?
     auto it = m_factories.find(type);
+    std::unique_ptr<Widget> w;
     if (it != m_factories.end()) {
-        auto w = it->second(node, *this, ctx);
-        if (w) w->setRect(rect);
-        return w;
+        w = it->second(node, *this, ctx);
+    } else {
+        w = std::make_unique<Widget>();
     }
-    // Unknown type → empty widget.
-    auto fallback = std::make_unique<Widget>();
-    fallback->setRect(rect);
-    return fallback;
+    if (w) {
+        w->setRect(rect);
+        if (node.contains("id"))       w->id       = node["id"].get<std::string>();
+        if (node.contains("on_click")) w->slotName = node["on_click"].get<std::string>();
+        else if (node.contains("on_change")) w->slotName = node["on_change"].get<std::string>();
+    }
+    return w;
 }
 
 // --------------------------------------------------------------------------
@@ -141,6 +146,19 @@ static void buildChildren(const json& node, Widget& parent,
 }
 
 void UiDocumentLoader::registerBuiltins() {
+    // ---- Button ----
+    registerType("Button", [](const json& n, const UiDocumentLoader& L, const BindingContext& ctx) {
+        const std::string label = ctx.empty() ? n.value("label", "")
+                                              : ctx.resolve(n.value("label", ""));
+        auto w = std::make_unique<Button>(L.theme().font("body"), label, nullptr);
+        if (n.contains("background"))   w->colorNormal  = parseColor(n["background"].get<std::string>(), w->colorNormal);
+        if (n.contains("borderColor"))  w->borderColor  = parseColor(n["borderColor"].get<std::string>(), w->borderColor);
+        if (n.contains("labelColor"))   w->labelColor   = parseColor(n["labelColor"].get<std::string>(), w->labelColor);
+        if (n.contains("cornerRadius")) w->cornerRadiusPx = n["cornerRadius"].get<float>();
+        buildChildren(n, *w, L, ctx);
+        return w;
+    });
+
     // ---- Panel ----
     registerType("Panel", [](const json& n, const UiDocumentLoader& L, const BindingContext& ctx) {
         auto w = std::make_unique<Panel>();

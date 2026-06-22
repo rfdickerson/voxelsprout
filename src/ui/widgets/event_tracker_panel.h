@@ -36,6 +36,9 @@ public:
     void setEntries(const UiRect& rect, float s, std::string_view heading,
                     const std::vector<Entry>& entries);
 
+    // Expose the background Panel for per-game styling overrides.
+    Panel* bgPanel() const { return bg_; }
+
 private:
     FontSet fonts_;
     Panel* bg_ = nullptr;
