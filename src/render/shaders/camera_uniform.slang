@@ -40,6 +40,7 @@ public struct CameraUniform
     public float4 voxelBaseColorPalette[16];
     public float4 voxelGiGridOriginCellSize;
     public float4 voxelGiGridExtentStrength;
+    public float4 fogMapConfig; // x=invExtentX, y=invExtentZ, z=unused, w=enabled
 };
 
 [[vk::binding(0, 0)]]

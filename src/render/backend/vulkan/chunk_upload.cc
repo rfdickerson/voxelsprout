@@ -418,7 +418,8 @@ void RendererBackend::clearMagicaVoxelMeshes() {
 }
 
 void RendererBackend::clearGpuScene() {
-    if (!m_importedTextureResources.empty() && m_device != VK_NULL_HANDLE) {
+    if ((!m_importedTextureResources.empty() ||
+         m_fogMapTextureResource.image != VK_NULL_HANDLE) && m_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(m_device);
         for (ImportedTextureResource& texture : m_importedTextureResources) {
             if (texture.imageView != VK_NULL_HANDLE) {
@@ -436,6 +437,16 @@ void RendererBackend::clearGpuScene() {
             }
         }
         m_importedTextureResources.clear();
+        if (m_fogMapTextureResource.imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, m_fogMapTextureResource.imageView, nullptr);
+            m_fogMapTextureResource.imageView = VK_NULL_HANDLE;
+        }
+        if (m_fogMapTextureResource.image != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, m_fogMapTextureResource.image, m_fogMapTextureResource.allocation);
+            m_fogMapTextureResource.image = VK_NULL_HANDLE;
+            m_fogMapTextureResource.allocation = VK_NULL_HANDLE;
+        }
+        m_fogMapEnabled = false;
     }
     if (m_importedVertexBufferHandle != kInvalidBufferHandle) {
         if (m_lastGraphicsTimelineValue == 0) {
@@ -967,6 +978,176 @@ bool RendererBackend::uploadImportedSceneInternal(
         VOX_LOGW("render") << "imported textures unavailable because bindless texture sampling is not ready";
     }
     m_importedTextureSlots = importedTextureSlots;
+
+    // Upload fog-of-war visibility texture when the scene carries one.
+    m_fogMapEnabled = false;
+    m_fogMapInvExtentX = 0.0f;
+    m_fogMapInvExtentZ = 0.0f;
+    if (!uploadScene.fogMap.empty() &&
+        uploadScene.fogMapW > 0 && uploadScene.fogMapH > 0 &&
+        m_supportsBindlessDescriptors && m_bindlessDescriptorSet != VK_NULL_HANDLE &&
+        m_vmaAllocator != VK_NULL_HANDLE) {
+
+        // Destroy previous fog texture so we always use the latest.
+        if (m_fogMapTextureResource.imageView != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(m_device);
+            vkDestroyImageView(m_device, m_fogMapTextureResource.imageView, nullptr);
+            m_fogMapTextureResource.imageView = VK_NULL_HANDLE;
+        }
+        if (m_fogMapTextureResource.image != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_vmaAllocator, m_fogMapTextureResource.image, m_fogMapTextureResource.allocation);
+            m_fogMapTextureResource.image = VK_NULL_HANDLE;
+            m_fogMapTextureResource.allocation = VK_NULL_HANDLE;
+        }
+
+        // Linear, clamp-to-edge sampler (created once, reused on re-uploads).
+        if (m_fogMapSampler == VK_NULL_HANDLE) {
+            VkSamplerCreateInfo si{};
+            si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            si.magFilter = VK_FILTER_LINEAR;
+            si.minFilter = VK_FILTER_LINEAR;
+            si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            si.maxLod = 0.0f;
+            si.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+            if (vkCreateSampler(m_device, &si, nullptr, &m_fogMapSampler) != VK_SUCCESS) {
+                VOX_LOGE("render") << "fog map sampler creation failed";
+            }
+        }
+
+        const std::uint32_t fogW = uploadScene.fogMapW;
+        const std::uint32_t fogH = uploadScene.fogMapH;
+        bool fogUploadOk = false;
+
+        BufferCreateDesc fogStagingDesc{};
+        fogStagingDesc.size = static_cast<VkDeviceSize>(uploadScene.fogMap.size());
+        fogStagingDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        fogStagingDesc.memoryProperties =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        fogStagingDesc.initialData = uploadScene.fogMap.data();
+        const BufferHandle fogStaging = m_bufferAllocator.createBuffer(fogStagingDesc);
+
+        if (fogStaging != kInvalidBufferHandle) {
+            VkImageCreateInfo ici{};
+            ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            ici.imageType = VK_IMAGE_TYPE_2D;
+            ici.format = VK_FORMAT_R8_UNORM;
+            ici.extent = {fogW, fogH, 1};
+            ici.mipLevels = 1;
+            ici.arrayLayers = 1;
+            ici.samples = VK_SAMPLE_COUNT_1_BIT;
+            ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+            ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            VmaAllocationCreateInfo fogAllocInfo{};
+            fogAllocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            fogAllocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+            if (vmaCreateImage(m_vmaAllocator, &ici, &fogAllocInfo,
+                               &m_fogMapTextureResource.image,
+                               &m_fogMapTextureResource.allocation, nullptr) == VK_SUCCESS) {
+                VkImageViewCreateInfo vci{};
+                vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                vci.image = m_fogMapTextureResource.image;
+                vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                vci.format = VK_FORMAT_R8_UNORM;
+                vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                if (vkCreateImageView(m_device, &vci, nullptr,
+                                      &m_fogMapTextureResource.imageView) == VK_SUCCESS) {
+                    // Upload via a transient command buffer.
+                    VkCommandPool fogPool = VK_NULL_HANDLE;
+                    VkCommandPoolCreateInfo pi{};
+                    pi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+                    pi.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+                    pi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+                    if (vkCreateCommandPool(m_device, &pi, nullptr, &fogPool) == VK_SUCCESS) {
+                        VkCommandBuffer fogCmd = VK_NULL_HANDLE;
+                        VkCommandBufferAllocateInfo cai{};
+                        cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+                        cai.commandPool = fogPool;
+                        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                        cai.commandBufferCount = 1;
+                        if (vkAllocateCommandBuffers(m_device, &cai, &fogCmd) == VK_SUCCESS) {
+                            VkCommandBufferBeginInfo bi{};
+                            bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                            if (vkBeginCommandBuffer(fogCmd, &bi) == VK_SUCCESS) {
+                                VkImageMemoryBarrier toCopy{};
+                                toCopy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                                toCopy.srcAccessMask = 0;
+                                toCopy.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                                toCopy.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                                toCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                                toCopy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                toCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                toCopy.image = m_fogMapTextureResource.image;
+                                toCopy.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                                vkCmdPipelineBarrier(fogCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                     0, 0, nullptr, 0, nullptr, 1, &toCopy);
+
+                                VkBufferImageCopy bic{};
+                                bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                                bic.imageExtent = {fogW, fogH, 1};
+                                vkCmdCopyBufferToImage(
+                                    fogCmd,
+                                    m_bufferAllocator.getBuffer(fogStaging),
+                                    m_fogMapTextureResource.image,
+                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+
+                                VkImageMemoryBarrier toRead{toCopy};
+                                toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                                toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                                toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                                toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                vkCmdPipelineBarrier(fogCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                                     0, 0, nullptr, 0, nullptr, 1, &toRead);
+
+                                if (vkEndCommandBuffer(fogCmd) == VK_SUCCESS) {
+                                    VkSubmitInfo si2{};
+                                    si2.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                                    si2.commandBufferCount = 1;
+                                    si2.pCommandBuffers = &fogCmd;
+                                    if (vkQueueSubmit(m_graphicsQueue, 1, &si2, VK_NULL_HANDLE) == VK_SUCCESS &&
+                                        vkQueueWaitIdle(m_graphicsQueue) == VK_SUCCESS) {
+                                        fogUploadOk = true;
+                                    }
+                                }
+                            }
+                        }
+                        vkDestroyCommandPool(m_device, fogPool, nullptr);
+                    }
+                }
+            }
+            m_bufferAllocator.destroyBuffer(fogStaging);
+        }
+
+        if (fogUploadOk) {
+            m_fogMapEnabled = true;
+            m_fogMapInvExtentX = uploadScene.fogMapInvExtentX;
+            m_fogMapInvExtentZ = uploadScene.fogMapInvExtentZ;
+            setObjectName(VK_OBJECT_TYPE_IMAGE,
+                          vkHandleToUint64(m_fogMapTextureResource.image), "fog.map.image");
+            setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW,
+                          vkHandleToUint64(m_fogMapTextureResource.imageView), "fog.map.view");
+            VOX_LOGI("render") << "uploaded fog map: " << fogW << "x" << fogH;
+        } else {
+            if (m_fogMapTextureResource.imageView != VK_NULL_HANDLE) {
+                vkDestroyImageView(m_device, m_fogMapTextureResource.imageView, nullptr);
+                m_fogMapTextureResource.imageView = VK_NULL_HANDLE;
+            }
+            if (m_fogMapTextureResource.image != VK_NULL_HANDLE) {
+                vmaDestroyImage(m_vmaAllocator, m_fogMapTextureResource.image, m_fogMapTextureResource.allocation);
+                m_fogMapTextureResource.image = VK_NULL_HANDLE;
+                m_fogMapTextureResource.allocation = VK_NULL_HANDLE;
+            }
+            VOX_LOGE("render") << "fog map upload failed";
+        }
+    }
 
     std::vector<ImportedMeshVertex> vertices;
     std::vector<std::uint32_t> indices;

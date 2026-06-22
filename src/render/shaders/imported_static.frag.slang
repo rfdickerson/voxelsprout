@@ -5,6 +5,9 @@ import sh_lighting;
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
 
+// Fixed bindless slot for the fog-of-war R8 texture.
+static const int kBindlessIndexFogMap = 10;
+
 [[vk::binding(4, 0)]]
 Sampler2DShadow shadowMap;
 
@@ -498,8 +501,61 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
     const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
     const float rim = pow(1.0 - saturate(dot(normal, viewDir)), 2.0);
-    const float3 shaded =
+    float3 shaded =
         ((((ambient * ambientOcclusion) + voxelGi + direct + importedLights) * albedo) +
          (float3(1.0, 0.98, 0.94) * (rim * (interiorMode ? 0.010 : 0.022))));
+
+    // Fog-of-war visibility blend. Only applied when the fog map is active
+    // (strategy map mode). The fog texture is a blurred per-tile R8 map where
+    // 0=hidden, ~0.39=explored, 1=visible. Bilinear sampling gives smooth
+    // gradients at tile boundaries. Animated noise at mid-values creates a
+    // wispy, rolling-clouds effect at the explored/hidden boundary.
+    if (camera.fogMapConfig.w > 0.5)
+    {
+        const float2 fogUv = float2(
+            input.inWorldPosition.x * camera.fogMapConfig.x,
+            input.inWorldPosition.z * camera.fogMapConfig.y
+        );
+        const float fogRaw = bindlessTextures[kBindlessIndexFogMap].Sample(fogUv).x;
+
+        // Animated noise: strongest at the mid-range boundary zone.
+        const float time = camera.skyConfig1.z;
+        const float wx = input.inWorldPosition.x;
+        const float wz = input.inWorldPosition.z;
+        const float noise =
+            sin(wx * 0.017 + time * 0.008) * cos(wz * 0.015 - time * 0.006) * 0.5
+            + sin(wx * 0.031 - time * 0.005) * cos(wz * 0.027 + time * 0.007) * 0.5;
+        // Mask noise to the transitional zone (roughly 0.1–0.7 in fogRaw).
+        const float boundaryMask =
+            smoothstep(0.05, 0.45, fogRaw) * (1.0 - smoothstep(0.45, 0.80, fogRaw));
+        const float fogFactor = saturate(fogRaw + boundaryMask * noise * 0.22);
+
+        // Color zones:
+        //   fogFactor ≈ 0.00 → dark animated shroud (hidden, incl. terrain near boundary)
+        //   fogFactor ≈ 0.39 → cool desaturated blue-grey (explored, not visible)
+        //   fogFactor ≈ 1.00 → full shaded terrain color (visible)
+        const float grayscale = dot(shaded, float3(0.299, 0.587, 0.114));
+        const float3 exploredColor =
+            float3(grayscale * 0.50, grayscale * 0.55, grayscale * 0.68) * 0.50;
+        const float3 shroudColor = float3(0.030, 0.030, 0.048);
+
+        float3 foggedColor;
+        if (fogFactor < 0.30)
+        {
+            // Hidden zone: blend shroud to explored.
+            foggedColor = lerp(shroudColor, exploredColor, fogFactor / 0.30);
+        }
+        else if (fogFactor < 0.72)
+        {
+            // Explored zone: blend explored to full visible.
+            foggedColor = lerp(exploredColor, shaded, (fogFactor - 0.30) / 0.42);
+        }
+        else
+        {
+            foggedColor = shaded;
+        }
+        return float4(foggedColor, albedoFull.a);
+    }
+
     return float4(shaded, albedoFull.a);
 }

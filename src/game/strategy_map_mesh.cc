@@ -703,6 +703,67 @@ static ImportedScene buildStrategyMapSceneImpl(const StrategyMap& map,
 
     scene.sourceMeshCount = 1u;
     scene.sourceInstanceCount = static_cast<std::uint32_t>(map.settlements.size());
+
+    // Build fog-of-war visibility texture.
+    // One byte per tile: 0=hidden, 100=explored, 255=visible.
+    // A two-pass 3x3 box blur widens the soft boundary zone so bilinear
+    // sampling in the fragment shader gives a smooth gradient across ~2 tiles.
+    if (options.fogOfWar && map.width > 0 && map.height > 0) {
+        const std::uint32_t W = map.width;
+        const std::uint32_t H = map.height;
+        scene.fogMapW = W;
+        scene.fogMapH = H;
+        scene.fogMap.resize(static_cast<std::size_t>(W * H));
+
+        for (std::uint32_t r = 0; r < H; ++r) {
+            for (std::uint32_t c = 0; c < W; ++c) {
+                const MapTile& tile = map.at(c, r);
+                std::uint8_t val = 0u;
+                switch (tile.visibility) {
+                    case TileVisibility::Explored: val = 100u; break;
+                    case TileVisibility::Visible:  val = 255u; break;
+                    default:                       val = 0u;   break;
+                }
+                scene.fogMap[static_cast<std::size_t>(r) * W + c] = val;
+            }
+        }
+
+        std::vector<std::uint8_t> tmp(static_cast<std::size_t>(W * H));
+        const auto boxBlur = [W, H](const std::vector<std::uint8_t>& src,
+                                    std::vector<std::uint8_t>& dst) {
+            for (std::uint32_t r = 0; r < H; ++r) {
+                for (std::uint32_t c = 0; c < W; ++c) {
+                    int sum = 0, cnt = 0;
+                    for (int dr = -1; dr <= 1; ++dr) {
+                        for (int dc = -1; dc <= 1; ++dc) {
+                            const int rr = static_cast<int>(r) + dr;
+                            const int cc = static_cast<int>(c) + dc;
+                            if (rr >= 0 && rr < static_cast<int>(H) &&
+                                cc >= 0 && cc < static_cast<int>(W)) {
+                                sum += static_cast<int>(
+                                    src[static_cast<std::size_t>(rr) * W + cc]);
+                                ++cnt;
+                            }
+                        }
+                    }
+                    dst[static_cast<std::size_t>(r) * W + c] =
+                        static_cast<std::uint8_t>(sum / cnt);
+                }
+            }
+        };
+        boxBlur(scene.fogMap, tmp);
+        boxBlur(tmp, scene.fogMap);
+
+        // UV scale: worldX * invExtentX maps to [0,1] across the map.
+        constexpr float kSqrt3 = 1.7320508f;
+        scene.fogMapInvExtentX = (map.hexSize > 0.0f)
+            ? 1.0f / (map.hexSize * kSqrt3 * static_cast<float>(W))
+            : 0.0f;
+        scene.fogMapInvExtentZ = (map.hexSize > 0.0f)
+            ? 1.0f / (map.hexSize * 1.5f * static_cast<float>(H))
+            : 0.0f;
+    }
+
     return scene;
 }
 

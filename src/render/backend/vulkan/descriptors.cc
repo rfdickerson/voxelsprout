@@ -61,7 +61,8 @@ constexpr uint32_t kBindlessTextureIndexPlantDiffuse = 6u;
 constexpr uint32_t kBindlessTextureIndexSkyDaylight = 7u;
 constexpr uint32_t kBindlessTextureIndexWaterNormal = 8u;
 constexpr uint32_t kBindlessTextureIndexTerrainDetail = 9u;
-constexpr uint32_t kBindlessTextureStaticCount = 10u;
+constexpr uint32_t kBindlessTextureIndexFogMap = 10u;
+constexpr uint32_t kBindlessTextureStaticCount = 11u;
 constexpr uint32_t kAutoExposureHistogramBins = 64u;
 
 } // namespace
@@ -346,6 +347,13 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     terrainDetailTextureImageInfo.imageView =
         (m_terrainDetailTextureImageView != VK_NULL_HANDLE) ? m_terrainDetailTextureImageView : m_diffuseTextureImageView;
     terrainDetailTextureImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkDescriptorImageInfo fogMapTextureImageInfo{};
+    fogMapTextureImageInfo.sampler =
+        (m_fogMapSampler != VK_NULL_HANDLE) ? m_fogMapSampler : m_diffuseTextureSampler;
+    fogMapTextureImageInfo.imageView =
+        (m_fogMapTextureResource.imageView != VK_NULL_HANDLE) ? m_fogMapTextureResource.imageView : m_diffuseTextureImageView;
+    fogMapTextureImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo shadowMapImageInfo{};
     shadowMapImageInfo.sampler = m_shadowDepthSampler;
@@ -949,6 +957,7 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
         bindlessImageInfos[kBindlessTextureIndexSkyDaylight] = morrowindSkyTextureImageInfo;
         bindlessImageInfos[kBindlessTextureIndexWaterNormal] = waterNormalTextureImageInfo;
         bindlessImageInfos[kBindlessTextureIndexTerrainDetail] = terrainDetailTextureImageInfo;
+        bindlessImageInfos[kBindlessTextureIndexFogMap] = fogMapTextureImageInfo;
         for (std::size_t textureIndex = 0; textureIndex < m_importedTextureResources.size(); ++textureIndex) {
             const std::size_t bindlessIndex = kBindlessTextureStaticCount + textureIndex;
             if (bindlessIndex >= bindlessImageInfos.size()) {

@@ -123,6 +123,7 @@ struct alignas(16) CameraUniform {
     float voxelBaseColorPalette[16][4];
     float voxelGiGridOriginCellSize[4];
     float voxelGiGridExtentStrength[4];
+    float fogMapConfig[4]; // [0]=invExtentX, [1]=invExtentZ, [2]=unused, [3]=enabled
 };
 
 struct alignas(16) ChunkPushConstants {
