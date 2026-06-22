@@ -1,12 +1,13 @@
 {
   "name": "AncientParchment",
   "fonts": {
-    "body":      { "path": "assets/fonts/EBGaramond-Medium.ttf",      "size": 18 },
-    "bold":      { "path": "assets/fonts/EBGaramond-Bold.ttf",        "size": 18 },
-    "italic":    { "path": "assets/fonts/EBGaramond-MediumItalic.ttf","size": 18 },
-    "boldItalic":{ "path": "assets/fonts/EBGaramond-BoldItalic.ttf",  "size": 18 },
+    "body":      { "path": "assets/fonts/Inter-Regular.ttf",          "size": 18 },
+    "bold":      { "path": "assets/fonts/Inter-Bold.ttf",             "size": 18 },
+    "italic":    { "path": "assets/fonts/Inter-Italic.ttf",           "size": 18 },
+    "boldItalic":{ "path": "assets/fonts/Inter-Bold.ttf",             "size": 18 },
     "heading":   { "path": "assets/fonts/EBGaramond-Bold.ttf",        "size": 24 },
-    "caption":   { "path": "assets/fonts/EBGaramond-Medium.ttf",      "size": 14 }
+    "caption":   { "path": "assets/fonts/Inter-Regular.ttf",          "size": 14 },
+    "numeric":   { "path": "assets/fonts/JetBrainsMono-Regular.ttf",  "size": 18 }
   },
   "colors": {
     "text":           "#E8D9B0",

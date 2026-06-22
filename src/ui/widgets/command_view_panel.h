@@ -31,6 +31,7 @@ public:
     struct HexInfo {
         std::string name;             // "Forest".
         std::string iconName;         // Optional terrain icon medallion.
+        UiTextureId previewTexture = kUiNoTexture;  // Optional square terrain artwork.
         std::vector<Yield> yields;    // Per-yield icon + value chips.
     };
     struct Action {

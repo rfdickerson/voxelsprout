@@ -6,6 +6,7 @@
 #include "game/economy.h"
 #include "game/game_sim.h"
 #include "game/strategy_map.h"
+#include "game/turn_action.h"
 #include "game/units.h"
 #include "import/gpu_scene.h"
 #include "script/script_engine.h"
@@ -38,8 +39,10 @@ class IconButton;
 class Image;
 class Label;
 class LineChart;
+class MinimapPanel;
 class Panel;
 class ProductionPanel;
+class ReligionPanel;
 class RichTextView;
 class StatBadgeRow;
 class TechTreePanel;
@@ -116,7 +119,7 @@ private:
 
     void pollInput();
     void updateCamera(float dt);
-    void setupDemoUi(float viewW, float viewH);
+    void setupHud(float viewW, float viewH);
     void updateUiOverlay(float dt);
     void drawStrategyMapLabels(float fbW, float fbH);
     bool pickHexFromMouse(double mouseX, double mouseY, int fbW, int fbH,
@@ -154,6 +157,10 @@ private:
     // any awaiting placement). Safe to call anywhere except inside a rail row's own
     // click callback (use m_greatPeopleDirty to defer in that case).
     void refreshGreatPeople();
+    // Rebuild the Religion window from the catalog + player's current state religion.
+    void refreshReligion();
+    // Adopt (or reform to) the religion with the given id. Fires an event and rebuilds.
+    void adoptReligion(const std::string& id);
     // The city a newly-settled great person should join: the city whose production
     // panel is currently open, else the player's largest city. Null if none.
     [[nodiscard]] odai::game::City* greatPersonHostCity();
@@ -168,16 +175,29 @@ private:
     [[nodiscard]] bool techGateSatisfiedInApp(const odai::game::TechGate& gate) const;
     // Concise rich-text description (era, cost, unlocks, gate) for a technology.
     [[nodiscard]] std::string techDescription(const odai::game::TechDef& tech) const;
-    // Number of idle cities (no production queued) + unvisited idle units.
-    // Zero = End Turn is safe to press.
+    // Player cities with an empty production queue (need a Choose Production).
+    [[nodiscard]] int idleCityCount() const;
+    // Player units that still have moves and no orders (need orders this turn).
+    [[nodiscard]] int idleUnitCount() const;
+    // idleCityCount() + idleUnitCount(); zero = End Turn is safe to press.
     [[nodiscard]] int idleCount() const;
+    // The highest-priority action the player must take next (drives the smart
+    // turn button label/accent and fireTurnAction's dispatch).
+    [[nodiscard]] odai::game::TurnAction computeTurnState();
     // Pan the camera to a hex tile.
     void focusOnHex(std::uint32_t col, std::uint32_t row);
     // Jump to the next idle city (opens production panel) or idle unit (selects it).
     void cycleToNextIdle();
-    // Fire the End Turn / Next Idle action — same logic as the button callback,
-    // also called from the Enter key handler.
+    // Advance the turn: cycle idle cities/units first, else step the world.
     void fireEndTurn();
+    // Dispatch the smart turn button / Enter key on computeTurnState(): open
+    // research, jump to an idle city/unit, or advance the turn.
+    void fireTurnAction();
+    // Per-frame: set the smart turn button's label, accent, and glow from state.
+    void updateSmartTurnButton();
+    // Bake an RGBA8 (width*height, one pixel per tile) minimap image of the
+    // strategy map for the given lens mode (0=Terrain, 1=Owner, 2=Relief).
+    [[nodiscard]] std::vector<std::uint8_t> bakeMinimapRgba(int mode) const;
     // Seed the economy World (m_gameWorld) from the loaded strategy map's
     // settlements: one Empire per owner, one City per settlement, starting
     // territory claimed. The player's empire is marked aiManaged=false.
@@ -361,6 +381,8 @@ private:
     odai::ui::Font m_uiFontBold;
     odai::ui::Font m_uiFontItalic;
     odai::ui::Font m_uiFontTitle;  // Larger size for window title bars.
+    odai::ui::Font m_uiFontTitleSmallCaps;
+    odai::ui::Font m_uiFontNumeric;
     odai::ui::FontSet m_uiFonts{};
     odai::ui::UiContext m_uiContext;
     odai::ui::UiDrawList m_uiDrawList;
@@ -368,6 +390,7 @@ private:
     odai::ui::Label* m_hudStatsLabel = nullptr;
     odai::ui::Label* m_hudTileInfoLabel = nullptr;
     odai::ui::Widget* m_hudTileInfoWindow = nullptr;
+    std::vector<odai::ui::UiTextureId> m_terrainPreviewTextures;
     odai::ui::RichTextView* m_civpediaView = nullptr;
     odai::ui::Widget* m_civpediaWindow = nullptr;
     odai::ui::Image* m_civpediaPortrait = nullptr;   // Unit/building portrait in CivPedia header.
@@ -392,6 +415,11 @@ private:
     odai::ui::GreatPeoplePanel* m_greatPeoplePanel  = nullptr;
     std::string m_selectedGreatPersonId;  // rail selection in the Great People window
     bool m_greatPeopleDirty = false;      // rebuild requested (deferred out of a click callback)
+    // Religion window: faith catalog, lineage, and the adopt/reform flow.
+    odai::ui::Window*        m_religionWindow = nullptr;
+    odai::ui::ReligionPanel* m_religionPanel  = nullptr;
+    odai::ui::Button*        m_faithButton    = nullptr;  // HUD button; label synced in refreshReligion
+    std::string m_selectedReligionId;  // rail selection in the Religion window
     std::vector<std::string> m_researchedTechs;  // completed tech ids
     std::string m_researchTechId;                // current research target ("" = none)
     int m_scienceAccumulated = 0;                // science banked toward m_researchTechId
@@ -422,6 +450,13 @@ private:
     odai::ui::CommandViewPanel*  m_commandView  = nullptr;
     odai::ui::UiRect m_worldTrackerRect{};  // Stored so refresh* can rebuild in place.
     odai::ui::UiRect m_commandViewRect{};
+    // Main menu modal (shown by the logo button or Escape; hidden by Resume/close).
+    odai::ui::Panel* m_mainMenuModal = nullptr;
+    // Bottom-center strategy minimap + its per-lens baked textures.
+    odai::ui::MinimapPanel* m_minimap = nullptr;
+    std::vector<odai::ui::UiTextureId> m_minimapTex;  // one texture per lens mode
+    int m_minimapMode = 0;
+    float m_turnPulsePhase = 0.0f;  // advances each frame; pulses the Next Turn glow
     // Change-detection keys so refreshCommandView only rebuilds when the selection
     // actually changes (col, row, unit id, turn).
     int m_cvHexCol = -2;

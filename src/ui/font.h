@@ -78,6 +78,17 @@ public:
     struct ShapingData;
 
 private:
+    // Font cache: serialises the baked atlas + glyph metrics + shaping tables to a
+    // binary file alongside the source TTF. Subsequent loadFromFile calls restore
+    // from cache instead of re-running stb_truetype, cutting first-frame stall by
+    // ~50-70 ms per font. Cache is invalidated when the TTF's size or mtime changes.
+    static std::string makeCachePath(const std::string& ttfPath, float pixelHeight,
+                                     std::uint32_t atlasSize, std::uint32_t firstCodepoint,
+                                     std::uint32_t lastCodepoint);
+    bool saveCache(const std::string& cachePath, const std::string& ttfPath) const;
+    bool loadCache(const std::string& cachePath, const std::string& ttfPath,
+                   float pixelHeight, std::uint32_t atlasSize,
+                   std::uint32_t firstCodepoint, std::uint32_t lastCodepoint);
     // Refresh the printable-ASCII fast-path cache from m_glyphs. Called after any
     // bulk change to the glyph set.
     void rebuildAsciiCache();
@@ -109,6 +120,9 @@ struct FontSet {
     const Font* bold = nullptr;
     const Font* italic = nullptr;
     const Font* boldItalic = nullptr;
+    // Used explicitly by <num> markup for resource totals, turns, and other
+    // values that benefit from fixed-width digits.
+    const Font* numeric = nullptr;
 
     [[nodiscard]] const Font* select(bool wantBold, bool wantItalic) const {
         if (wantBold && wantItalic && boldItalic != nullptr) return boldItalic;

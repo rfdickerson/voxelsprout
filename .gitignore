@@ -63,3 +63,9 @@ Thumbs.db
 *.spv
 
 assets/mods
+
+# Generated font atlas caches
+*.fontcache
+
+# Scratch directory
+/tmp/

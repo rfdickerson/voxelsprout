@@ -4,6 +4,7 @@
 #include "game/economy.h"
 #include "game/game_sim.h"
 #include "game/great_people.h"
+#include "game/religion.h"
 #include "game/strategy_map.h"
 #include "game/units.h"
 
@@ -56,6 +57,9 @@ public:
     const std::vector<odai::game::GreatPersonDef>& greatPeople() const { return m_greatPeople; }
     const odai::game::GreatPersonDef* findGreatPerson(const std::string& id) const;
 
+    const std::vector<odai::game::ReligionDef>& religions() const { return m_religions; }
+    const odai::game::ReligionDef* findReligion(const std::string& id) const;
+
     const odai::game::Balance& balance() const { return m_balance; }
 
     odai::game::Yields terrainYields(odai::game::TerrainType terrain, std::uint8_t tileFlags) const;
@@ -75,6 +79,7 @@ public:
     void setPediaArticle(const std::string& id, std::string text) { m_pedia[id] = std::move(text); }
     void addLeader(odai::game::LeaderDef l) { m_leaders.push_back(std::move(l)); }
     void addGreatPerson(odai::game::GreatPersonDef g) { m_greatPeople.push_back(std::move(g)); }
+    void addReligion(odai::game::ReligionDef r) { m_religions.push_back(std::move(r)); }
     void setTerrain(odai::game::TerrainType t, const TerrainYieldDef& def);
     void setCityCenterYields(const odai::game::Yields& y) { m_cityCenter = y; }
     void setRiverGold(int g) { m_riverGold = g; }
@@ -92,6 +97,7 @@ private:
     std::unordered_map<std::string, std::string> m_pedia;
     std::vector<odai::game::LeaderDef> m_leaders;
     std::vector<odai::game::GreatPersonDef> m_greatPeople;
+    std::vector<odai::game::ReligionDef> m_religions;
     odai::game::Balance m_balance{};
     std::array<TerrainYieldDef, kTerrainCount> m_terrain{};
     odai::game::Yields m_cityCenter{2, 1, 1, 1, 0};

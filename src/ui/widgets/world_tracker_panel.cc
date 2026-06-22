@@ -19,10 +19,14 @@ void WorldTrackerPanel::setEntries(const UiRect& rect, float s, std::string_view
 
     const float pad = 14.0f * s;
 
-    // Ornate background frame.
+    // Flat clean-modern card background with bevel for depth.
     auto bg = std::make_unique<Panel>();
     bg->setRect(rect);
-    bg->styleOrnate(s);
+    bg->styleCard(s);
+    bg->showBevel           = true;
+    bg->bevelHighlightColor = UiColor{1.0f, 1.0f, 1.0f, 0.18f};
+    bg->bevelShadowColor    = UiColor{0.0f, 0.0f, 0.0f, 0.40f};
+    bg->bevelThicknessPx    = 1.5f;
     bg_ = static_cast<Panel*>(addChild(std::move(bg)));
 
     const float x0  = rect.minX + pad;
@@ -35,7 +39,7 @@ void WorldTrackerPanel::setEntries(const UiRect& rect, float s, std::string_view
 
     float y = rect.minY + pad;
 
-    // Heading ("WORLD TRACKER").
+    // Heading ("World Tracker").
     auto head = std::make_unique<Label>(fonts_, std::string("<b>") + std::string(heading) + "</b>");
     head->color = UiColor{0.941f, 0.753f, 0.251f, 1.0f};  // gold
     head->setRect(UiRect::fromXYWH(x0, y, wIn, boldH));
@@ -56,8 +60,9 @@ void WorldTrackerPanel::setEntries(const UiRect& rect, float s, std::string_view
     const float textGap  = 2.0f * s;
     const float captionH = std::max(regH * 0.8f, 12.0f * s);
 
+    const float descBudget = regH * 2.0f;  // room for the description to wrap to two lines
     for (const Entry& e : entries) {
-        const float blockH = captionH + textGap + boldH + textGap + regH;
+        const float blockH = captionH + textGap + boldH + textGap + descBudget;
         const float rowH    = std::max(blockH, discR * 2.0f);
         const float rowCy   = y + rowH * 0.5f;
 
@@ -100,7 +105,7 @@ void WorldTrackerPanel::setEntries(const UiRect& rect, float s, std::string_view
 
         auto desc = std::make_unique<Label>(rf, e.description);
         desc->color = UiColor{0.741f, 0.682f, 0.557f, 1.0f};
-        desc->setRect(UiRect::fromXYWH(tx, ty, tw, regH * 2.0f));
+        desc->setRect(UiRect::fromXYWH(tx, ty, tw, descBudget));
         addChild(std::move(desc));
 
         y += rowH + rowGap;

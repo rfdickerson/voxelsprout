@@ -51,10 +51,36 @@
 
     { "id": "astronomy", "name": "Astronomy", "cost": 250, "era": "Medieval Era",
       "prereqs": ["literature", "sailing"], "unlocks": ["observatory", "copernicus"],
-      "gate": { "kind": "locked", "condition": "building:harbor", "amount": 1, "boostPct": 0 } },
+      "gate": { "kind": "locked", "condition": "building:harbor", "amount": 1, "boostPct": 0 },
+      "description": "Systematic observation of the heavens, enabled by the astrolabe and the development of trigonometry. Civilizations with an Avestan Calendar tradition gain a head start — Zoroastrian astronomical methods flowed directly into Islamic and then European astronomy." },
 
     { "id": "guilds", "name": "Guilds", "cost": 290, "era": "Medieval Era",
       "prereqs": ["banking"], "unlocks": ["guildhall", "grand_bazaar"],
-      "gate": { "kind": "boost", "condition": "building:bank", "amount": 1, "boostPct": 50 } }
+      "gate": { "kind": "boost", "condition": "building:bank", "amount": 1, "boostPct": 50 } },
+
+    { "id": "sacred_groves", "name": "Sacred Groves", "cost": 110, "era": "Classical Era",
+      "prereqs": ["philosophy"], "unlocks": ["sacred_grove_shrine"],
+      "gate": { "kind": "locked", "condition": "state_religion:canaanite", "amount": 0, "boostPct": 0 },
+      "description": "Fertility shrines deep in ancient forests appeased the gods of rain and harvest. Canaanite priests maintained these groves as places of sacrifice, communion, and agricultural prayer." },
+
+    { "id": "avestan_calendar", "name": "Avestan Calendar", "cost": 120, "era": "Classical Era",
+      "prereqs": ["philosophy"], "unlocks": [],
+      "gate": { "kind": "locked", "condition": "state_religion:zoroastrianism", "amount": 0, "boostPct": 0 },
+      "description": "Zoroastrian magi tracked the movements of stars and planets to set sacred fire festivals, developing a solar calendar of remarkable accuracy. Their astronomical work laid the groundwork for later Persian and Islamic science." },
+
+    { "id": "covenant_law", "name": "Covenant Law", "cost": 130, "era": "Classical Era",
+      "prereqs": ["philosophy"], "unlocks": ["hall_of_records"],
+      "gate": { "kind": "locked", "condition": "state_religion:judaism", "amount": 0, "boostPct": 0 },
+      "description": "The Torah established a comprehensive legal code: property rights, labor law, debt forgiveness, and the rights of foreigners. Jewish communities maintained detailed records of contracts, genealogies, and rulings — literacy as a religious duty." },
+
+    { "id": "monasticism", "name": "Monasticism", "cost": 190, "era": "Medieval Era",
+      "prereqs": ["theology"], "unlocks": ["monastery"],
+      "gate": { "kind": "locked", "condition": "state_religion:christianity", "amount": 0, "boostPct": 0 },
+      "description": "Christian monasteries became refuges of learning when the Western Roman Empire collapsed. Monks copied manuscripts, maintained gardens, taught grammar, and preserved the corpus of classical knowledge through centuries of turmoil." },
+
+    { "id": "algebra", "name": "Algebra", "cost": 230, "era": "Medieval Era",
+      "prereqs": ["theology"], "unlocks": ["house_of_wisdom"],
+      "gate": { "kind": "locked", "condition": "state_religion:islam", "amount": 0, "boostPct": 0 },
+      "description": "Al-Khwarizmi's Kitab al-mukhtasar fi hisab al-jabr, written in Baghdad around 820 CE, gave the world algebra and algorithms. The Islamic Golden Age systematized mathematics, optics, medicine, and astronomy — translating and extending the Greek corpus that had been lost to the Latin West." }
   ]
 }

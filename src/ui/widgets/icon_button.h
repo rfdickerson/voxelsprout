@@ -27,7 +27,7 @@ public:
     UiColor borderHoverColor{0.88f, 0.72f, 0.28f, 0.80f};
     UiColor glowColor    {0.95f, 0.75f, 0.30f, 0.55f};
 
-    float cornerRadiusPx    = 6.0f;
+    float cornerRadiusPx    = 2.0f;
     float borderThicknessPx = 1.5f;
     float glowSizePx        = 0.0f;  // 0 = no glow; caller sets to e.g. 12*s
     float iconPaddingPx     = 4.0f;  // inset between border and icon image

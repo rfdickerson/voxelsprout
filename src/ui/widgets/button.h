@@ -28,11 +28,30 @@ public:
     float borderThicknessPx = 1.0f;
     // Corner radius in pixels (DPI-scaled by the caller). Drawn as an anti-aliased
     // SDF rounded rect; a very large value yields a pill. 0 = sharp corners.
-    float cornerRadiusPx = 6.0f;
+    // Kept small for the squared-off Victorian look — just enough to soften aliasing.
+    float cornerRadiusPx = 2.0f;
     // Mouse-over glow: a soft SDF halo drawn behind the button while hovered or
     // pressed. Set glowSizePx to 0 to disable. Caller scales glowSizePx by DPI.
     UiColor glowColor{0.95f, 0.72f, 0.35f, 0.55f};
     float glowSizePx = 12.0f;
+    // When true, the glow is drawn even at rest (not only on hover/press) — used
+    // by the smart turn button to pulse a "ready to advance" halo. Caller animates
+    // glowSizePx/glowColor.a over time for the pulse.
+    bool drawGlowAtRest = false;
+    // Bevel: two-tone border drawn over the fill, simulating a top-left light source.
+    // highlightColor lights the top edge; shadowColor darkens the bottom edge.
+    // Both follow cornerRadiusPx. Set bevelInward=true for a pressed/recessed look.
+    bool    showBevel           = false;
+    UiColor bevelHighlightColor {1.0f, 1.0f, 1.0f, 0.28f};
+    UiColor bevelShadowColor    {0.0f, 0.0f, 0.0f, 0.45f};
+    float   bevelThicknessPx    = 2.0f;
+    bool    bevelInward         = false;
+    // Optional state accent: a thin vertical stripe just inside the left edge.
+    // Used by the smart turn button to signal the current required action by
+    // color. Drawn only when accentColor.a > 0, so default buttons are unchanged.
+    // Caller scales accentWidthPx by DPI.
+    UiColor accentColor{0.0f, 0.0f, 0.0f, 0.0f};
+    float accentWidthPx = 4.0f;
 
     void setEnabled(bool enabled);
     [[nodiscard]] bool enabled() const { return enabled_; }

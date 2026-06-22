@@ -1,6 +1,7 @@
 #include "content/content_loader.h"
 
 #include "content/content_database.h"
+#include "game/religion.h"
 
 #include <nlohmann/json.hpp>
 
@@ -15,6 +16,7 @@ namespace {
 
 using json = nlohmann::json;
 using namespace odai::game;
+using odai::game::ReligionDef;
 
 // Read one JSON file. A missing file is not an error (mods may omit files); a
 // file that exists but fails to parse records an error and returns false.
@@ -181,6 +183,7 @@ void loadBuildings(const std::filesystem::path& dir, ContentDatabase& db) {
         d.happiness = bj.value("happiness", 0);
         d.growthBonus = bj.value("growthBonus", 0);
         d.requiredTech = bj.value("requiredTech", "");
+        d.requiredReligion = bj.value("requiredReligion", "");
         d.isWonder = bj.value("isWonder", false);
         d.score = bj.value("score", 0);
         if (bj.contains("effects") && bj["effects"].is_object()) {
@@ -291,6 +294,27 @@ void loadGreatPeople(const std::filesystem::path& dir, ContentDatabase& db) {
     }
 }
 
+void loadReligions(const std::filesystem::path& dir, ContentDatabase& db) {
+    json j;
+    if (!tryReadJson(dir / "religions.json", j, db)) return;
+    if (!j.contains("religions") || !j["religions"].is_array()) return;
+    for (const json& rj : j["religions"]) {
+        ReligionDef r{};
+        r.id              = rj.value("id", "");
+        r.name            = rj.value("name", "");
+        r.description     = rj.value("description", "");
+        r.parentReligion  = rj.value("parentReligion", "");
+        r.requiredTech    = rj.value("requiredTech", "");
+        if (rj.contains("flatBonus")) r.flatBonus = parseYields(rj["flatBonus"]);
+        r.happinessBonus   = rj.value("happinessBonus", 0);
+        r.happinessPenalty = rj.value("happinessPenalty", 0);
+        r.unlocksTechs     = parseStringArray(rj, "unlocksTechs");
+        r.uniqueBuildings  = parseStringArray(rj, "uniqueBuildings");
+        r.flavorText       = rj.value("flavorText", "");
+        db.addReligion(std::move(r));
+    }
+}
+
 }  // namespace
 
 void loadModData(ContentDatabase& db, const std::filesystem::path& modDir) {
@@ -304,6 +328,7 @@ void loadModData(ContentDatabase& db, const std::filesystem::path& modDir) {
     loadCivpedia(dataDir, db);
     loadLeaders(dataDir, db);
     loadGreatPeople(dataDir, db);
+    loadReligions(dataDir, db);
 }
 
 }  // namespace odai::content

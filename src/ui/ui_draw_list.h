@@ -102,6 +102,13 @@ public:
     // Solid quad with a vertical gradient: the top edge uses `top`, the bottom
     // edge `bottom`, interpolated per fragment. Used for parchment/gilt panel fills.
     void addRectFilledVGradient(const UiRect& rect, const UiColor& top, const UiColor& bottom);
+    // Solid quad with a horizontal gradient: left edge uses `left`, right edge uses `right`.
+    void addRectFilledHGradient(const UiRect& rect, const UiColor& left, const UiColor& right);
+    // Rounded-rect fill with a horizontal gradient (left→right). The SDF mask is
+    // applied over the per-vertex color gradient so the rounded corners clip the
+    // gradient cleanly. Use for progress bar fills with cornerRadiusPx > 0.
+    void addRoundRectFilledHGradient(const UiRect& rect, const UiColor& left,
+                                     const UiColor& right, float radiusPx);
     void addRect(const UiRect& rect, const UiColor& color, float thicknessPx = 1.0f);
 
     // --- Vector primitives (resolution-independent, anti-aliased SDF) ---
@@ -120,6 +127,19 @@ public:
     // blurSigma controls softness; shadow fades to ~1% at 3*blurSigma from the edge.
     void addDropShadow(const UiRect& rect, const UiColor& color, float blurSigma,
                        float offsetX = 0.0f, float offsetY = 4.0f);
+
+    // Draw a bevel border around `rect`, simulating a diagonal key light from the
+    // upper-left. The top and left edges catch `highlightColor`; the bottom and right
+    // edges fall into `shadowColor`. Because the shadow bands overpaint the lower-right,
+    // the top and left edges fade from lit (near the top-left corner) to dark (near the
+    // bottom-right) — a believable diagonal light, not a flat overhead one. radiusPx
+    // matches the Panel/Button cornerRadiusPx so the bevel follows the same rounded-
+    // corner arc. Pass inward=true for a pressed/recessed look (swaps highlight and
+    // shadow). Each edge band is an anti-aliased SDF stroke via addRoundRect, scissored
+    // to that edge's region.
+    void addBevel(const UiRect& rect, const UiColor& highlightColor,
+                  const UiColor& shadowColor, float radiusPx,
+                  float thicknessPx, bool inward = false);
     void addImage(const UiRect& rect, UiTextureId textureId, const UiColor& tint = {},
                   const UiRect& uv = UiRect{0.0f, 0.0f, 1.0f, 1.0f});
     void add9Slice(const UiRect& rect, const UiNineSlice& slice, const UiColor& color = {});

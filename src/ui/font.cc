@@ -4,6 +4,9 @@
 #include "ui/ui_text_util.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <ios>
 
@@ -103,6 +106,16 @@ struct LigatureRule {
     std::uint32_t result = 0;       // Result codepoint (Unicode ligature).
 };
 
+// Binary serialisation helpers for the font cache.
+template<class T>
+static bool wPod(std::ostream& os, T v) {
+    return !!os.write(reinterpret_cast<const char*>(&v), sizeof(v));
+}
+template<class T>
+static bool rPod(std::istream& is, T& v) {
+    return !!is.read(reinterpret_cast<char*>(&v), sizeof(v));
+}
+
 struct KernClass {
     std::vector<std::uint16_t> classDef1; // [glyphId] = class1
     std::vector<std::uint16_t> classDef2; // [glyphId] = class2
@@ -125,6 +138,9 @@ struct Font::ShapingData {
     std::vector<LigatureRule> ligatures;
     std::unordered_map<std::uint64_t, float> kernPairs; // packed(g1<<16|g2) -> xAdv px
     std::vector<KernClass> kernClasses;
+    // Precomputed codepoint→glyphId so shape() avoids stbtt_FindGlyphIndex at runtime.
+    // Populated after loadFromMemory; populated from cache when loading cached fonts.
+    std::unordered_map<std::uint32_t, std::uint32_t> cpToGlyph;
 
     float kernAdvance(std::uint32_t g1, std::uint32_t g2) const {
         float k = 0.0f;
@@ -562,15 +578,24 @@ std::vector<ShapedGlyph> Font::shape(std::string_view utf8) const {
     }
 
     // GPOS: kern pairs between adjacent shaped glyphs.
+    // Prefer the precomputed cpToGlyph map (avoids stbtt_FindGlyphIndex at runtime);
+    // fall back to stbtt when the map is absent (e.g. synthetic or legacy paths).
+    auto lookupGlyph = [&](std::uint32_t cp) -> std::uint32_t {
+        if (!sd.cpToGlyph.empty()) {
+            const auto it = sd.cpToGlyph.find(cp);
+            return it != sd.cpToGlyph.end() ? it->second : 0u;
+        }
+        return static_cast<std::uint32_t>(std::max(0, stbtt_FindGlyphIndex(&sd.fontInfo, static_cast<int>(cp))));
+    };
+
     std::vector<ShapedGlyph> result(shaped.size());
     for (std::size_t j = 0; j < shaped.size(); ++j) {
         result[j].codepoint = shaped[j];
         if (j + 1 < shaped.size()) {
-            const int g1 = stbtt_FindGlyphIndex(&sd.fontInfo, static_cast<int>(shaped[j]));
-            const int g2 = stbtt_FindGlyphIndex(&sd.fontInfo, static_cast<int>(shaped[j + 1]));
+            const std::uint32_t g1 = lookupGlyph(shaped[j]);
+            const std::uint32_t g2 = lookupGlyph(shaped[j + 1]);
             if (g1 > 0 && g2 > 0)
-                result[j].kern = sd.kernAdvance(static_cast<std::uint32_t>(g1),
-                                                 static_cast<std::uint32_t>(g2));
+                result[j].kern = sd.kernAdvance(g1, g2);
         }
     }
     return result;
@@ -850,11 +875,29 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
                      << m_shaping->kernPairs.size() << " kern pairs, "
                      << m_shaping->kernClasses.size() << " kern classes";
 
+    // Build codepoint→glyphId map over all glyphs that landed in the atlas so
+    // shape() can kern without calling stbtt_FindGlyphIndex at runtime.
+    for (const auto& [cp, _] : m_glyphs) {
+        const int gid = stbtt_FindGlyphIndex(&info, static_cast<int>(cp));
+        if (gid > 0) m_shaping->cpToGlyph[cp] = static_cast<std::uint32_t>(gid);
+    }
+    // Release the TTF copy; shape() uses cpToGlyph instead of stbtt going forward.
+    m_shaping->ttfData.clear();
+    m_shaping->ttfData.shrink_to_fit();
+    m_shaping->fontInfo = {};
+
     return true;
 }
 
 bool Font::loadFromFile(const std::string& path, float pixelHeight, std::uint32_t atlasSize,
                         std::uint32_t firstCodepoint, std::uint32_t lastCodepoint) {
+    const std::string cachePath =
+        makeCachePath(path, pixelHeight, atlasSize, firstCodepoint, lastCodepoint);
+    if (loadCache(cachePath, path, pixelHeight, atlasSize, firstCodepoint, lastCodepoint)) {
+        VOX_LOGI("Font") << "Cache hit: " << cachePath;
+        return true;
+    }
+
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
         return false;
@@ -868,7 +911,236 @@ bool Font::loadFromFile(const std::string& path, float pixelHeight, std::uint32_
     if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
         return false;
     }
-    return loadFromMemory(bytes.data(), bytes.size(), pixelHeight, atlasSize, firstCodepoint, lastCodepoint);
+    if (!loadFromMemory(bytes.data(), bytes.size(), pixelHeight, atlasSize, firstCodepoint,
+                        lastCodepoint)) {
+        return false;
+    }
+    if (!saveCache(cachePath, path)) {
+        VOX_LOGW("Font") << "Failed to write font cache: " << cachePath;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Font cache — binary serialisation of baked atlas + metrics + shaping tables.
+//
+// File format "ODAIFNT1":
+//   [8]  magic "ODAIFNT1"
+//   [8]  TTF file size (uint64)  ─┐ cache key: both must match the source TTF
+//   [8]  TTF mtime ticks (int64) ─┘
+//   [4]  ascent   [4] descent  [4] lineHeight  (float)
+//   [4]  atlasWidth  [4] atlasHeight  (uint32)
+//   [W*H] atlas pixels (R8)
+//   [4]  glyph count N; N × { cp(4) size.x(4) size.y(4) bearing.x(4) bearing.y(4)
+//                              advance(4) uv.minX(4) uv.minY(4) uv.maxX(4) uv.maxY(4) }
+//   [4]  ligature count; each: seqLen(4) + seqLen*cp(4) + result(4)
+//   [4]  kern pair count; each: key(8) + value(4)
+//   [4]  kern class count; each: def1Size(4)+def1[](2) def2Size(4)+def2[](2)
+//                                class2Count(4) matrixSize(4)+matrix[](4)
+//   [4]  cpToGlyph count; each: cp(4) + glyphId(4)
+// ---------------------------------------------------------------------------
+
+static constexpr char kCacheMagic[8] = {'O','D','A','I','F','N','T','1'};
+
+std::string Font::makeCachePath(const std::string& ttfPath, float pixelHeight,
+                                std::uint32_t atlasSize, std::uint32_t firstCodepoint,
+                                std::uint32_t lastCodepoint) {
+    namespace fs = std::filesystem;
+    const fs::path p(ttfPath);
+    // Encode parameters in the filename so different sizes use different cache files.
+    // pixelHeight stored as integer×10 to avoid float formatting edge cases.
+    char suffix[64];
+    std::snprintf(suffix, sizeof(suffix), "_%dpx_%u_%u_%u.fontcache",
+                  static_cast<int>(std::roundf(pixelHeight * 10.0f)),
+                  atlasSize, firstCodepoint, lastCodepoint);
+    return (p.parent_path() / (p.stem().string() + suffix)).string();
+}
+
+bool Font::saveCache(const std::string& cachePath, const std::string& ttfPath) const {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const auto ttfFileSize = fs::file_size(ttfPath, ec);
+    if (ec) return false;
+    const auto ttfMtime = fs::last_write_time(ttfPath, ec);
+    if (ec) return false;
+    const auto mtimeTicks = static_cast<std::int64_t>(ttfMtime.time_since_epoch().count());
+
+    std::ofstream out(cachePath, std::ios::binary);
+    if (!out) return false;
+
+    out.write(kCacheMagic, 8);
+    wPod(out, static_cast<std::uint64_t>(ttfFileSize));
+    wPod(out, mtimeTicks);
+
+    wPod(out, m_ascent);
+    wPod(out, m_descent);
+    wPod(out, m_lineHeight);
+    wPod(out, m_atlasWidth);
+    wPod(out, m_atlasHeight);
+    out.write(reinterpret_cast<const char*>(m_atlas.data()),
+              static_cast<std::streamsize>(m_atlas.size()));
+
+    wPod(out, static_cast<std::uint32_t>(m_glyphs.size()));
+    for (const auto& [cp, g] : m_glyphs) {
+        wPod(out, cp);
+        wPod(out, g.size.x);      wPod(out, g.size.y);
+        wPod(out, g.bearing.x);   wPod(out, g.bearing.y);
+        wPod(out, g.advance);
+        wPod(out, g.uv.minX);     wPod(out, g.uv.minY);
+        wPod(out, g.uv.maxX);     wPod(out, g.uv.maxY);
+    }
+
+    if (m_shaping) {
+        wPod(out, static_cast<std::uint32_t>(m_shaping->ligatures.size()));
+        for (const auto& rule : m_shaping->ligatures) {
+            wPod(out, static_cast<std::uint32_t>(rule.seq.size()));
+            for (const auto cp : rule.seq) wPod(out, cp);
+            wPod(out, rule.result);
+        }
+
+        wPod(out, static_cast<std::uint32_t>(m_shaping->kernPairs.size()));
+        for (const auto& [key, val] : m_shaping->kernPairs) {
+            wPod(out, key);
+            wPod(out, val);
+        }
+
+        wPod(out, static_cast<std::uint32_t>(m_shaping->kernClasses.size()));
+        for (const auto& kc : m_shaping->kernClasses) {
+            wPod(out, static_cast<std::uint32_t>(kc.classDef1.size()));
+            out.write(reinterpret_cast<const char*>(kc.classDef1.data()),
+                      static_cast<std::streamsize>(kc.classDef1.size() * 2));
+            wPod(out, static_cast<std::uint32_t>(kc.classDef2.size()));
+            out.write(reinterpret_cast<const char*>(kc.classDef2.data()),
+                      static_cast<std::streamsize>(kc.classDef2.size() * 2));
+            wPod(out, static_cast<std::uint32_t>(kc.class2Count));
+            wPod(out, static_cast<std::uint32_t>(kc.matrix.size()));
+            out.write(reinterpret_cast<const char*>(kc.matrix.data()),
+                      static_cast<std::streamsize>(kc.matrix.size() * 4));
+        }
+
+        wPod(out, static_cast<std::uint32_t>(m_shaping->cpToGlyph.size()));
+        for (const auto& [cp, gid] : m_shaping->cpToGlyph) {
+            wPod(out, cp);
+            wPod(out, gid);
+        }
+    } else {
+        wPod(out, std::uint32_t{0}); // ligCount
+        wPod(out, std::uint32_t{0}); // kernPairCount
+        wPod(out, std::uint32_t{0}); // kernClassCount
+        wPod(out, std::uint32_t{0}); // cpToGlyphCount
+    }
+
+    return out.good();
+}
+
+bool Font::loadCache(const std::string& cachePath, const std::string& ttfPath,
+                     float pixelHeight, std::uint32_t /*atlasSize*/,
+                     std::uint32_t /*firstCodepoint*/, std::uint32_t /*lastCodepoint*/) {
+    namespace fs = std::filesystem;
+
+    std::ifstream in(cachePath, std::ios::binary);
+    if (!in) return false;
+
+    char magic[8];
+    if (!in.read(magic, 8) || std::memcmp(magic, kCacheMagic, 8) != 0) return false;
+
+    std::uint64_t storedSize = 0;
+    std::int64_t  storedMtime = 0;
+    if (!rPod(in, storedSize) || !rPod(in, storedMtime)) return false;
+
+    std::error_code ec;
+    const auto ttfFileSize = fs::file_size(ttfPath, ec);
+    if (ec || ttfFileSize != storedSize) return false;
+    const auto ttfMtime = fs::last_write_time(ttfPath, ec);
+    if (ec || static_cast<std::int64_t>(ttfMtime.time_since_epoch().count()) != storedMtime)
+        return false;
+
+    if (!rPod(in, m_ascent) || !rPod(in, m_descent) || !rPod(in, m_lineHeight)) return false;
+
+    std::uint32_t aw = 0, ah = 0;
+    if (!rPod(in, aw) || !rPod(in, ah)) return false;
+    m_atlasWidth = aw;
+    m_atlasHeight = ah;
+    m_atlas.resize(static_cast<std::size_t>(aw) * ah);
+    if (!in.read(reinterpret_cast<char*>(m_atlas.data()),
+                 static_cast<std::streamsize>(m_atlas.size()))) return false;
+
+    std::uint32_t glyphCount = 0;
+    if (!rPod(in, glyphCount)) return false;
+    m_glyphs.clear();
+    m_glyphs.reserve(glyphCount);
+    for (std::uint32_t i = 0; i < glyphCount; ++i) {
+        std::uint32_t cp = 0;
+        Glyph g{};
+        if (!rPod(in, cp))           return false;
+        if (!rPod(in, g.size.x)    || !rPod(in, g.size.y))    return false;
+        if (!rPod(in, g.bearing.x) || !rPod(in, g.bearing.y)) return false;
+        if (!rPod(in, g.advance))    return false;
+        if (!rPod(in, g.uv.minX)   || !rPod(in, g.uv.minY))   return false;
+        if (!rPod(in, g.uv.maxX)   || !rPod(in, g.uv.maxY))   return false;
+        m_glyphs[cp] = g;
+    }
+    rebuildAsciiCache();
+    {
+        const auto it = m_glyphs.find(static_cast<std::uint32_t>(' '));
+        m_missing = Glyph{};
+        m_missing.advance = (it != m_glyphs.end()) ? it->second.advance : (pixelHeight * 0.4f);
+    }
+
+    m_shaping = std::make_unique<ShapingData>();
+
+    std::uint32_t ligCount = 0;
+    if (!rPod(in, ligCount)) return false;
+    m_shaping->ligatures.resize(ligCount);
+    for (auto& rule : m_shaping->ligatures) {
+        std::uint32_t seqLen = 0;
+        if (!rPod(in, seqLen)) return false;
+        rule.seq.resize(seqLen);
+        for (auto& cp : rule.seq) if (!rPod(in, cp)) return false;
+        if (!rPod(in, rule.result)) return false;
+    }
+
+    std::uint32_t pairCount = 0;
+    if (!rPod(in, pairCount)) return false;
+    m_shaping->kernPairs.reserve(pairCount);
+    for (std::uint32_t i = 0; i < pairCount; ++i) {
+        std::uint64_t key = 0;
+        float val = 0.0f;
+        if (!rPod(in, key) || !rPod(in, val)) return false;
+        m_shaping->kernPairs[key] = val;
+    }
+
+    std::uint32_t classCount = 0;
+    if (!rPod(in, classCount)) return false;
+    m_shaping->kernClasses.resize(classCount);
+    for (auto& kc : m_shaping->kernClasses) {
+        std::uint32_t d1sz = 0, d2sz = 0, cls2 = 0, mSz = 0;
+        if (!rPod(in, d1sz)) return false;
+        kc.classDef1.resize(d1sz);
+        if (!in.read(reinterpret_cast<char*>(kc.classDef1.data()),
+                     static_cast<std::streamsize>(d1sz * 2))) return false;
+        if (!rPod(in, d2sz)) return false;
+        kc.classDef2.resize(d2sz);
+        if (!in.read(reinterpret_cast<char*>(kc.classDef2.data()),
+                     static_cast<std::streamsize>(d2sz * 2))) return false;
+        if (!rPod(in, cls2)) return false;
+        kc.class2Count = cls2;
+        if (!rPod(in, mSz)) return false;
+        kc.matrix.resize(mSz);
+        if (!in.read(reinterpret_cast<char*>(kc.matrix.data()),
+                     static_cast<std::streamsize>(mSz * 4))) return false;
+    }
+
+    std::uint32_t cpgCount = 0;
+    if (!rPod(in, cpgCount)) return false;
+    m_shaping->cpToGlyph.reserve(cpgCount);
+    for (std::uint32_t i = 0; i < cpgCount; ++i) {
+        std::uint32_t cp = 0, gid = 0;
+        if (!rPod(in, cp) || !rPod(in, gid)) return false;
+        m_shaping->cpToGlyph[cp] = gid;
+    }
+
+    return in.good();
 }
 
 }  // namespace odai::ui

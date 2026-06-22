@@ -86,6 +86,7 @@ struct Empire {
     int greatPersonPoints = 0;               // banked great-person points
     int greatPeopleBorn = 0;                 // count birthed (raises the next cost)
     std::vector<std::string> pendingGreatPeople;  // born, awaiting a host city
+    std::string stateReligion;  // id of adopted religion, "" if none
     bool alive = true;
     bool aiManaged = true;                    // false for the human player's empire: the AI
                                               // will not pick its research target, city focus,

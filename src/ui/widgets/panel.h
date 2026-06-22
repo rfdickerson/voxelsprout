@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ui/animation.h"
 #include "ui/ui_draw_list.h"
 #include "ui/ui_types.h"
 #include "ui/widget.h"
@@ -41,6 +42,24 @@ public:
     // `s` is the DPI scale; pass `alpha` to tune translucency over the map.
     void styleOrnate(float s, float alpha = 0.95f);
 
+    // Configure this panel with the clean-modern "flat card" look: a translucent
+    // slate fill, rounded corners, a hairline border, and one soft drop shadow.
+    // Deliberately flat — clears the gilt gradient, inner border, and corner
+    // accents that styleOrnate sets. `s` is the DPI scale; `alpha` tunes how much
+    // of the map shows through.
+    void styleCard(float s, float alpha = 0.82f);
+
+    // --- Bevel (raised / recessed 3-D edge) -----------------------------------
+    // When showBevel is true, a two-tone border is drawn over the fill using
+    // addBevel(). highlightColor lights the top edge; shadowColor darkens the
+    // bottom edge. Both follow the panel's cornerRadiusPx. Set bevelInward=true
+    // for a pressed/recessed look. Coexists with the uniform borderColor stroke.
+    bool    showBevel             = false;
+    UiColor bevelHighlightColor   {1.0f, 1.0f, 1.0f, 0.28f};
+    UiColor bevelShadowColor      {0.0f, 0.0f, 0.0f, 0.45f};
+    float   bevelThicknessPx      = 2.0f;
+    bool    bevelInward           = false;
+
     bool    showShadow    = false;
     UiColor shadowColor   {0.0f, 0.0f, 0.0f, 0.55f};
     float   shadowBlurPx  = 8.0f;
@@ -50,6 +69,20 @@ public:
     // When true, child drawing is clipped to rect_ — useful for animated panels
     // whose height changes each frame (accordion, slide-in drawers, etc.).
     bool clipContents = false;
+
+    // --- Animated background --------------------------------------------------
+    // Call backgroundAnim.set(targetColor, durationSec) to smoothly cross-fade the
+    // panel's background to a new color. While the tween is in flight, the draw
+    // method uses backgroundAnim.current() instead of `background`. Drive with
+    // update(dt) once per frame (or let the caller update and write current() to
+    // `background` directly if no built-in update is needed).
+    // bgTopAnim / bgBotAnim animate the ornate gradient stops independently.
+    ColorTween backgroundAnim;
+    ColorTween bgTopAnim;
+    ColorTween bgBotAnim;
+
+    // Step all active color tweens forward by dt seconds. Call once per frame.
+    void update(float dt);
 
     void draw(UiDrawList& drawList) const override;
 };

@@ -28,7 +28,7 @@ public:
     float toastWidthPx = 260.0f;
     float toastHeightPx = 44.0f;
     float toastGapPx = 6.0f;
-    float cornerRadiusPx = 6.0f;
+    float cornerRadiusPx = 2.0f;
     float paddingX = 10.0f;
 
     UiColor background{0.12f, 0.12f, 0.12f, 0.92f};

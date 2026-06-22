@@ -222,6 +222,7 @@ FontSet UiTheme::bodyFontSet() const {
     fs.bold       = font("bold");
     fs.italic     = font("italic");
     fs.boldItalic = font("boldItalic");
+    fs.numeric    = font("numeric");
     if (fs.bold       == nullptr) fs.bold       = body;
     if (fs.italic     == nullptr) fs.italic     = body;
     if (fs.boldItalic == nullptr) fs.boldItalic = body;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui/ui_types.h"
+
 #include <algorithm>
 
 // Lightweight UI animation utilities: easing curves and a normalized [0,1] tween
@@ -54,6 +56,63 @@ struct Tween {
 
     [[nodiscard]] float eased() const { return applyEasing(easing, value); }
     [[nodiscard]] bool idle() const { return value == target; }
+};
+
+// Smoothly interpolates a UiColor from one value toward another over durationSec.
+// Drive with update(dt); read current() for the interpolated color each frame.
+// Calling set() mid-flight captures the current color as the new start, so
+// re-targeting during a transition is seamless with no discontinuity.
+struct ColorTween {
+    UiColor from{};
+    UiColor to{};
+    Tween   tween;
+
+    // Snap to `color` immediately (no animation).
+    void snap(const UiColor& color) {
+        from = color;
+        to   = color;
+        tween.value  = 1.0f;
+        tween.target = 1.0f;
+    }
+
+    // Begin a smooth transition to `target` starting from the current interpolated
+    // color. Re-calling while in flight starts the new transition from wherever the
+    // color currently is, avoiding jumps.
+    void set(const UiColor& target, float durationSec = 0.25f,
+             Easing easing = Easing::EaseInOut) {
+        from              = current();
+        to                = target;
+        tween.value       = 0.0f;
+        tween.target      = 1.0f;
+        tween.durationSec = durationSec;
+        tween.easing      = easing;
+    }
+
+    void update(float dt) { tween.update(dt); }
+    [[nodiscard]] bool idle() const { return tween.idle(); }
+
+    [[nodiscard]] UiColor current() const {
+        const float t = tween.eased();
+        return UiColor{
+            from.r + (to.r - from.r) * t,
+            from.g + (to.g - from.g) * t,
+            from.b + (to.b - from.b) * t,
+            from.a + (to.a - from.a) * t,
+        };
+    }
+
+    // Lerp a color between two points given an external t in [0,1]. Does not
+    // modify this tween's state; useful for value-driven color ramps (e.g. a
+    // progress bar that goes green→red as it fills).
+    [[nodiscard]] static UiColor lerp(const UiColor& a, const UiColor& b, float t) {
+        t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+        return UiColor{
+            a.r + (b.r - a.r) * t,
+            a.g + (b.g - a.g) * t,
+            a.b + (b.b - a.b) * t,
+            a.a + (b.a - a.a) * t,
+        };
+    }
 };
 
 }  // namespace odai::ui
