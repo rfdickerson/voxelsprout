@@ -177,6 +177,7 @@ add_library(odai_ui STATIC
     src/ui/icon_atlas.cc
     src/ui/tooltip.cc
     src/ui/theme/ui_theme.cc
+    src/ui/signal.cc
     src/ui/document/ui_binding.cc
     src/ui/document/ui_document.cc
     src/ui/document/ui_hot_reload.cc
@@ -493,6 +494,188 @@ if(ODAI_BUILD_APP)
             message(FATAL_ERROR "GLFW is required. Install via vcpkg or provide glfw3 to CMake.")
         endif()
     endif()
+
+    # ---------------------------------------------------------------------------
+    # odai_game_stellaris — Stellaris-style space 4X (Vulkan, GPU-rendered)
+    # ---------------------------------------------------------------------------
+    if(VULKAN_RENDER_BACKEND)
+        add_executable(odai_game_stellaris
+            src/games/stellaris/stellaris_main.cc
+            src/games/stellaris/stellaris_app.cc
+            src/engine/game_app.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_game_stellaris PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_game_stellaris PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_game_stellaris PRIVATE
+            odai_ui
+            odai_ui_vulkan
+            odai_audio
+            Vulkan::Vulkan
+            GPUOpen::VulkanMemoryAllocator
+            imgui::imgui
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_game_stellaris PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_game_stellaris PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_game_stellaris slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_game_stellaris PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_game_stellaris PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
+    # ---------------------------------------------------------------------------
+    # odai_game_swtor — Star Wars: The Old Republic mock MMO UI (Vulkan)
+    # ---------------------------------------------------------------------------
+        add_executable(odai_game_swtor
+            src/games/swtor/swtor_main.cc
+            src/games/swtor/swtor_app.cc
+            src/engine/game_app.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_game_swtor PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_game_swtor PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_game_swtor PRIVATE
+            odai_ui odai_ui_vulkan odai_audio
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_game_swtor PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_game_swtor PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_game_swtor slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_game_swtor PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_game_swtor PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
+    # ---------------------------------------------------------------------------
+    # odai_game_snake — Snake / Nibbles (Vulkan)
+    # ---------------------------------------------------------------------------
+        add_executable(odai_game_snake
+            src/games/snake/snake_main.cc
+            src/games/snake/snake_app.cc
+            src/engine/game_app.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_game_snake PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_game_snake PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_game_snake PRIVATE
+            odai_ui odai_ui_vulkan odai_audio
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_game_snake PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_game_snake PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_game_snake slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_game_snake PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_game_snake PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
+    # ---------------------------------------------------------------------------
+    # odai_ui_editor — Drag-and-drop UI editor for artists (Vulkan)
+    # ---------------------------------------------------------------------------
+        add_executable(odai_ui_editor
+            src/tools/ui_editor/ui_editor_main.cc
+            src/tools/ui_editor/ui_editor_app.cc
+            src/engine/game_app.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_ui_editor PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_ui_editor PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_ui_editor PRIVATE
+            odai_ui odai_ui_vulkan odai_audio
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_ui_editor PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_ui_editor PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_ui_editor slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_ui_editor PRIVATE ${ODAI_WARN_FLAGS_MSVC} /FS)
+        else()
+            target_compile_options(odai_ui_editor PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -568,6 +751,22 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_civ_sim PRIVATE /W4 /permissive-)
     else()
         target_compile_options(odai_civ_sim PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    # Headless Stellaris-style space 4X playtest harness. Pure CPU (no Vulkan):
+    # runs a multi-empire galaxy for N turns, prints fun-factor metrics, then
+    # constructs all strategy-4x UI panels with sci-fi resource types to verify
+    # the panel kit is genre-agnostic. Pairs with theme_stellaris.json.
+    #   odai_stellaris_sim [turns] [seed] [empires] [--quiet|--sweep N]
+    add_executable(odai_stellaris_sim
+        src/tools/stellaris_sim_main.cc
+    )
+    target_include_directories(odai_stellaris_sim PRIVATE src)
+    target_link_libraries(odai_stellaris_sim PRIVATE odai_ui)
+    if(MSVC)
+        target_compile_options(odai_stellaris_sim PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_stellaris_sim PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
     # DDS bundler — offline PNG → BC3 compressor. Run once per asset directory to

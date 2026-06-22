@@ -89,8 +89,9 @@ bool Button::onEvent(UiEvent& event) {
                 pressedInside_ = false;
                 state_ = inside ? State::Hover : State::Normal;
                 event.handled = true;
-                if (inside && onClick_) {
-                    onClick_();
+                if (inside) {
+                    if (onClick_) onClick_();
+                    activated.emit();
                 }
                 return true;
             }

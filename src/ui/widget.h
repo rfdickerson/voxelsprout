@@ -1,11 +1,13 @@
 #pragma once
 
+#include "ui/signal.h"
 #include "ui/ui_draw_list.h"
 #include "ui/ui_input.h"
 #include "ui/ui_types.h"
 
 #include <algorithm>
 #include <memory>
+#include <string>
 #include <vector>
 
 // Retained widget tree. Widgets own their children (explicit RAII ownership).
@@ -45,6 +47,8 @@ public:
         return raw;
     }
 
+    [[nodiscard]] const std::vector<std::unique_ptr<Widget>>& children() const { return children_; }
+
     // Draw self then children. Override to render a widget's own visuals (call
     // drawChildren() afterwards to keep descendants visible).
     virtual void draw(UiDrawList& drawList) const { drawChildren(drawList); }
@@ -75,6 +79,17 @@ public:
         }
         return mousePassthrough ? nullptr : this;
     }
+
+    // Stable identifier for this widget instance. Used by SlotRegistry for
+    // slot wiring and by the editor for round-trip JSON serialization.
+    std::string id;
+    // When non-empty, SlotRegistry::wire() will connect this name to activated.
+    // Set from JSON "on_click" / "on_change" fields; typically empty in C++ trees.
+    std::string slotName;
+    // Fired by interactive widgets (Button on click, Toggle on change, etc.).
+    // Connect callbacks here directly in C++, or let SlotRegistry wire them from
+    // JSON slot names. Both paths produce the same live signal.
+    Signal<> activated;
 
     bool visible = true;
     // When true, this widget is transparent to hit testing: only its children

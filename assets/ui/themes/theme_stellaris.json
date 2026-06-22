@@ -1,0 +1,44 @@
+{
+  "name": "GalacticFrontier",
+  "fonts": {
+    "body":      { "path": "assets/fonts/Inter-Regular.ttf",          "size": 16 },
+    "bold":      { "path": "assets/fonts/Inter-Bold.ttf",             "size": 16 },
+    "italic":    { "path": "assets/fonts/Inter-Italic.ttf",           "size": 16 },
+    "boldItalic":{ "path": "assets/fonts/Inter-Bold.ttf",             "size": 16 },
+    "heading":   { "path": "assets/fonts/Inter-Bold.ttf",             "size": 20 },
+    "caption":   { "path": "assets/fonts/Inter-Regular.ttf",          "size": 12 },
+    "numeric":   { "path": "assets/fonts/JetBrainsMono-Regular.ttf",  "size": 15 }
+  },
+  "colors": {
+    "text":             "#C8D8F0",
+    "text.dim":         "#4E6888",
+    "text.positive":    "#00D4A0",
+    "text.negative":    "#FF5050",
+    "text.gold":        "#FFD050",
+    "panel.bg":         "#060C1ADD",
+    "panel.bgRaised":   "#0C1828EE",
+    "panel.border":     "#00C8FF22",
+    "accent":           "#00C8FF",
+    "accent.hover":     "#40DCFF",
+    "tooltip.bg":       "#030810F0",
+    "selection":        "#00C8FF2A",
+    "scrollbar":        "#00C8FF28",
+    "scrollbar.bg":     "#00000050",
+    "yield.energy":     "#FFD050",
+    "yield.minerals":   "#C87848",
+    "yield.alloys":     "#7EC8E0",
+    "yield.food":       "#70D890",
+    "yield.research":   "#A080FF",
+    "yield.influence":  "#C060FF",
+    "yield.unity":      "#00B4D8",
+    "yield.consumer_goods": "#88E080"
+  },
+  "sizes": {
+    "padding":       [10, 7],
+    "titleBarH":     28,
+    "gap":           5,
+    "iconSize":      18,
+    "borderRadius":  3,
+    "scrollBarW":    4
+  }
+}

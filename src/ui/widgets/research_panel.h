@@ -63,6 +63,9 @@ public:
     // a row's onSelect callback.
     void applyProgress(const std::string& selectedId, const ResearchProgress& progress);
 
+    // Expose the background Panel for per-game styling overrides.
+    Panel* bgPanel() const { return bg_; }
+
 private:
     void applyHeader(const ResearchProgress& progress);
 

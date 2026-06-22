@@ -38,6 +38,9 @@ public:
     void setResources(const UiRect& rect, float s,
                       const std::vector<ResourceEntry>& entries);
 
+    // Expose the background Panel for per-game styling overrides.
+    Panel* bgPanel() const { return bg_; }
+
 private:
     FontSet fonts_;
     Panel* bg_ = nullptr;

@@ -54,6 +54,9 @@ public:
     // Swap the speed highlight without a full rebuild. Call from onSpeedChange.
     void setSpeed(SimSpeed speed);
 
+    // Expose the background Panel for per-game styling overrides.
+    Panel* bgPanel() const { return bg_; }
+
 private:
     FontSet fonts_;
     Panel*  bg_          = nullptr;
