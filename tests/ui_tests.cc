@@ -954,7 +954,7 @@ void testToolbar() {
 
     bool hasTexturedIcon = false;
     for (const auto& v : d.vertices) {
-        if (v.mode == kTextured) { hasTexturedIcon = true; break; }
+        if ((v.mode & 0xFFu) == kTextured) { hasTexturedIcon = true; break; }
     }
     expectTrue(hasTexturedIcon, "Toolbar icons use registered atlas textures");
 
@@ -1069,6 +1069,26 @@ void testOrnatePanelDraw() {
     expectTrue(dl.data().vertices.size() > 12u, "ornate panel emits gradient + borders + accents");
 }
 
+void testBindlessTextureBatching() {
+    using namespace odai::ui;
+    UiDrawList dl;
+    dl.reset(UiVec2{320.0f, 200.0f});
+    dl.addImage(UiRect::fromXYWH(0.0f, 0.0f, 32.0f, 32.0f), 7u);
+    dl.addImage(UiRect::fromXYWH(40.0f, 0.0f, 32.0f, 32.0f), 9u);
+    expectTrue(dl.data().commands.size() == 1u,
+               "different bindless textures under one clip share a draw command");
+    expectTrue((dl.data().vertices[0].mode >> 8u) == 7u,
+               "first image stores its bindless texture slot per vertex");
+    expectTrue((dl.data().vertices[4].mode >> 8u) == 9u,
+               "second image stores its bindless texture slot per vertex");
+
+    dl.pushClip(UiRect::fromXYWH(0.0f, 0.0f, 80.0f, 40.0f));
+    dl.addImage(UiRect::fromXYWH(0.0f, 40.0f, 32.0f, 32.0f), 11u);
+    dl.popClip();
+    expectTrue(dl.data().commands.size() == 2u,
+               "clip changes retain their own scissor command");
+}
+
 void testMinimapPanelBuild() {
     using namespace odai::ui;
     Font font = makeMonospaceFont();
@@ -1085,8 +1105,8 @@ void testMinimapPanelBuild() {
     panel.draw(dl);
     expectTrue(!dl.data().vertices.empty(), "minimap panel emits geometry");
     bool sawImage = false;
-    for (const auto& cmd : dl.data().commands) {
-        if (cmd.textureId == 7u) { sawImage = true; break; }
+    for (const auto& vertex : dl.data().vertices) {
+        if ((vertex.mode >> 8u) == 7u) { sawImage = true; break; }
     }
     expectTrue(sawImage, "minimap draws the active lens texture");
 
@@ -1096,8 +1116,8 @@ void testMinimapPanelBuild() {
     dl2.reset(UiVec2{1280.0f, 720.0f});
     panel.draw(dl2);
     bool sawNew = false;
-    for (const auto& cmd : dl2.data().commands) {
-        if (cmd.textureId == 9u) { sawNew = true; break; }
+    for (const auto& vertex : dl2.data().vertices) {
+        if ((vertex.mode >> 8u) == 9u) { sawNew = true; break; }
     }
     expectTrue(sawNew, "setActive swaps the drawn minimap texture");
 }
@@ -1345,6 +1365,7 @@ int main() {
     testStyleCardPanelDraw();
     testResourceStyleFormat();
     testNextTurnAction();
+    testBindlessTextureBatching();
     testMinimapPanelBuild();
     testEventTrackerPanelBuild();
     testSelectionInspectorPanelBuild();

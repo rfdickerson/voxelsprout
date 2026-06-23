@@ -13,6 +13,7 @@ struct InvItem {
     int type;    // 0–7 icon type (blaster, helm, chest, legs, belt, boots, accessory, implant)
     int quality; // 0=grey 1=white 2=green 3=blue 4=purple 5=gold
     int count;   // stack count shown in corner; 0 = no label
+    int variant; // deterministic material/silhouette variation within the item category
 };
 
 class SwtorApp : public engine::GameApp {
@@ -42,7 +43,9 @@ private:
     // ── Character / inventory window ──────────────────────────────────────────
     void drawCharWindow(float x, float y, float w, float h, float s);
     void drawGearIcon(float cx, float cy, float sz, int type, float s);
-    void drawGearSlot(float x, float y, float sz, int iconType, int quality, float s);
+    void drawGearSlot(float x, float y, float sz, int iconType, int quality, int variant, float s);
+    void drawTopNavigation(float fbW, float s);
+    void drawSpaceportInterior(float fbW, float fbH, float s);
 
     // ── Combat / HUD state ────────────────────────────────────────────────────
     float m_playerHp    = 0.82f;
@@ -68,6 +71,7 @@ private:
     bool    m_prevCKey       = false;
     InvItem m_inventory[kInvCapacity]{};
     int     m_invCount       = 67;
+    ui::UiTextureId m_iconSheet = ui::kUiNoTexture;
 
     render::CameraPose m_camera{};
 };

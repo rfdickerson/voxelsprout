@@ -1,8 +1,7 @@
-// UI fragment shader. The renderer binds one texture per draw command at
-// (set 0, binding 0): an opaque white 1x1 for solid fills, an RGBA atlas for
-// images/9-slice, or the R8 glyph atlas for text.
+// UI fragment shader. Textures live in one bindless table so clip/scissor state,
+// not texture switches, defines draw command boundaries.
 [[vk::binding(0, 0)]]
-Sampler2D<float4> uiTexture;
+Sampler2D<float4> uiTextures[];
 
 struct FragmentInput
 {
@@ -10,6 +9,7 @@ struct FragmentInput
     float2 inUv : TEXCOORD1;
     nointerpolation uint inMode : TEXCOORD2;
     nointerpolation float4 inSdf : TEXCOORD3;
+    nointerpolation uint inTextureSlot : TEXCOORD4;
 };
 
 static const uint kModeSolid = 0u;
@@ -70,13 +70,13 @@ float4 main(FragmentInput input) : SV_Target0
 
     if (input.inMode == kModeTextured)
     {
-        float4 tex = uiTexture.Sample(input.inUv);  // already linear (sRGB view)
+        float4 tex = uiTextures[NonUniformResourceIndex(input.inTextureSlot)].Sample(input.inUv);
         rgb = tex.rgb * baseLin;
         alpha *= tex.a;
     }
     else if (input.inMode == kModeGlyphAlpha)
     {
-        float coverage = uiTexture.Sample(input.inUv).r;  // R8 coverage (not color)
+        float coverage = uiTextures[NonUniformResourceIndex(input.inTextureSlot)].Sample(input.inUv).r;
         coverage = pow(coverage, 1.0 / kTextGamma);       // stem darkening
         alpha *= coverage;
     }

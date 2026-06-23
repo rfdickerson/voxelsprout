@@ -164,6 +164,10 @@ FramePacingStats Renderer::framePacingStats() const {
     return m_backend->framePacingStats();
 }
 
+UiRenderStats Renderer::uiRenderStats() const {
+    return m_backend->uiRenderStats();
+}
+
 void Renderer::setVertexAoEnabled(bool enabled) {
     m_backend->setVertexAoEnabled(enabled);
 }

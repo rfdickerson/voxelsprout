@@ -254,6 +254,7 @@ public:
     void setFramePacingSettings(const FramePacingSettings& settings);
     [[nodiscard]] FramePacingSettings framePacingSettings() const;
     [[nodiscard]] FramePacingStats framePacingStats() const;
+    [[nodiscard]] UiRenderStats uiRenderStats() const;
     void setVertexAoEnabled(bool enabled);
     [[nodiscard]] bool isVertexAoEnabled() const;
     void setSsaoEnabled(bool enabled);

@@ -23,6 +23,7 @@ struct VertexOutput
     float2 outUv : TEXCOORD1;
     nointerpolation uint outMode : TEXCOORD2;
     nointerpolation float4 outSdf : TEXCOORD3;
+    nointerpolation uint outTextureSlot : TEXCOORD4;
 };
 
 VertexOutput main(VertexInput input)
@@ -33,7 +34,8 @@ VertexOutput main(VertexInput input)
     output.position = float4(ndc, 0.0, 1.0);
     output.outColor = input.inColor;
     output.outUv = input.inUv;
-    output.outMode = input.inMode;
+    output.outMode = input.inMode & 0xFFu;
     output.outSdf = input.inSdf;
+    output.outTextureSlot = input.inMode >> 8u;
     return output;
 }

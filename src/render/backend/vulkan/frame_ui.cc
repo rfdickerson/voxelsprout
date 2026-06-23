@@ -123,6 +123,17 @@ FramePacingStats RendererBackend::framePacingStats() const {
     return m_framePacingStats;
 }
 
+UiRenderStats RendererBackend::uiRenderStats() const {
+    const UiRenderer::Stats& stats = m_uiRenderer.stats();
+    return {
+        stats.textureSlots,
+        stats.commandCount,
+        stats.drawCallCount,
+        stats.dynamicUploadBytes,
+        stats.skippedDrawCalls,
+    };
+}
+
 void RendererBackend::setVertexAoEnabled(bool enabled) {
     m_debugEnableVertexAo = enabled;
 }
@@ -715,6 +726,18 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::Text("Main: %.2f", m_debugGpuMainTimeMs);
             ImGui::Text("Post: %.2f", m_debugGpuPostTimeMs);
             ImGui::Text("UI: %.2f", m_debugGpuUiTimeMs);
+            const UiRenderer::Stats& uiStats = m_uiRenderer.stats();
+            ImGui::Text(
+                "UI batches/draws/textures: %u / %u / %u",
+                uiStats.commandCount,
+                uiStats.drawCallCount,
+                uiStats.textureSlots
+            );
+            ImGui::Text(
+                "UI dynamic upload: %.2f KiB (skipped draws: %llu)",
+                static_cast<double>(uiStats.dynamicUploadBytes) / 1024.0,
+                static_cast<unsigned long long>(uiStats.skippedDrawCalls)
+            );
             ImGui::TreePop();
         }
         if (ImGui::TreeNodeEx("Draw Calls", ImGuiTreeNodeFlags_DefaultOpen)) {
