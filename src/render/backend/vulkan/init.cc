@@ -284,6 +284,7 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
             uiInfo.uploadQueue = m_graphicsQueue;
             uiInfo.uploadQueueFamily = m_graphicsQueueFamilyIndex;
             uiInfo.colorFormat = m_swapchainFormat;
+            uiInfo.maxTextureCount = std::min(m_bindlessTextureCapacity, 2048u);
             uiInfo.shaderDir = "../src/render/shaders";
             return m_uiRenderer.init(uiInfo);
         })) {
@@ -628,7 +629,8 @@ bool RendererBackend::pickPhysicalDevice() {
             vulkan12Features.descriptorIndexing == VK_TRUE &&
             vulkan12Features.runtimeDescriptorArray == VK_TRUE &&
             vulkan12Features.shaderSampledImageArrayNonUniformIndexing == VK_TRUE &&
-            vulkan12Features.descriptorBindingPartiallyBound == VK_TRUE;
+            vulkan12Features.descriptorBindingPartiallyBound == VK_TRUE &&
+            vulkan12Features.descriptorBindingSampledImageUpdateAfterBind == VK_TRUE;
         if (!supportsBindlessDescriptors) {
             VOX_LOGI("render") << "skip GPU: bindless descriptor indexing not supported\n";
             continue;
@@ -916,6 +918,7 @@ bool RendererBackend::createLogicalDevice() {
         vulkan12Features.runtimeDescriptorArray = VK_TRUE;
         vulkan12Features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
         vulkan12Features.descriptorBindingPartiallyBound = VK_TRUE;
+        vulkan12Features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     }
 
     VkPhysicalDeviceVulkan13Features vulkan13Features{};
@@ -1329,23 +1332,80 @@ bool RendererBackend::createTimelineSemaphore() {
     semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     semaphoreCreateInfo.pNext = &timelineCreateInfo;
 
-    const VkResult result = vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &m_renderTimelineSemaphore);
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkCreateSemaphore(timeline)", result);
-        return false;
+    auto tryCreate = [&]() -> bool {
+        const VkResult r = vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &m_renderTimelineSemaphore);
+        if (r != VK_SUCCESS) {
+            logVkFailure("vkCreateSemaphore(timeline)", r);
+            return false;
+        }
+        setObjectName(VK_OBJECT_TYPE_SEMAPHORE, vkHandleToUint64(m_renderTimelineSemaphore),
+                      "renderer.timeline.render");
+        return true;
+    };
+
+    if (!tryCreate()) return false;
+
+    // Canary GPU probe — detect a kernel-poisoned timeline semaphore.
+    //
+    // After a VK_ERROR_DEVICE_LOST crash on NVIDIA/Windows (WDDM), the kernel
+    // semaphore object can be left with its timeline payload stuck at UINT64_MAX
+    // and then RECYCLED back into the next process (observably: identical handle
+    // value every launch). The host-side vkGetSemaphoreCounterValue reads a fresh
+    // zeroed host shadow and lies (returns 0), so a host query cannot detect this.
+    // The only reliable probe is to actually touch the timeline on the GPU queue:
+    // signal it to 1 and wait. On a healthy device this succeeds; on a poisoned
+    // device the submit/wait fails (signal value 1 is not > current UINT64_MAX),
+    // letting us abort init with an actionable message instead of crashing every
+    // frame. m_graphicsQueue is valid here (created in createLogicalDevice).
+    {
+        constexpr uint64_t kCanaryValue = 1;
+        VkSemaphoreSubmitInfo signalInfo{};
+        signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalInfo.semaphore = m_renderTimelineSemaphore;
+        signalInfo.value = kCanaryValue;
+        signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+        VkSubmitInfo2 canarySubmit{};
+        canarySubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        canarySubmit.signalSemaphoreInfoCount = 1;
+        canarySubmit.pSignalSemaphoreInfos = &signalInfo;
+
+        const VkResult submitResult =
+            vkQueueSubmit2(m_graphicsQueue, 1, &canarySubmit, VK_NULL_HANDLE);
+
+        VkResult waitResult = VK_ERROR_DEVICE_LOST;
+        if (submitResult == VK_SUCCESS) {
+            uint64_t waitValue = kCanaryValue;
+            VkSemaphoreWaitInfo waitInfo{};
+            waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+            waitInfo.semaphoreCount = 1;
+            waitInfo.pSemaphores = &m_renderTimelineSemaphore;
+            waitInfo.pValues = &waitValue;
+            waitResult = vkWaitSemaphores(m_device, &waitInfo, 2'000'000'000ull /* 2s */);
+        }
+
+        if (submitResult != VK_SUCCESS || waitResult != VK_SUCCESS) {
+            VOX_LOGE("render")
+                << "GPU timeline canary failed (submit=" << submitResult
+                << ", wait=" << waitResult << "). The graphics device is in a "
+                << "bad state — almost always leftover from a previous "
+                << "device-lost crash that Windows has not yet reset. "
+                << "REBOOT the machine (or disable/re-enable the GPU in Device "
+                << "Manager) to clear it, then relaunch. This is not recoverable "
+                << "from within the application.";
+            vkDestroySemaphore(m_device, m_renderTimelineSemaphore, nullptr);
+            m_renderTimelineSemaphore = VK_NULL_HANDLE;
+            return false;
+        }
     }
-    setObjectName(
-        VK_OBJECT_TYPE_SEMAPHORE,
-        vkHandleToUint64(m_renderTimelineSemaphore),
-        "renderer.timeline.render"
-    );
 
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;
     m_transferCommandBufferInFlightValue = 0;
     m_lastGraphicsTimelineValue = 0;
-    m_nextTimelineValue = 1;
+    // The canary consumed value 1; continue strictly above it.
+    m_nextTimelineValue = 2;
     return true;
 }
 

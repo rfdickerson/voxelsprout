@@ -26,21 +26,20 @@ void UiDrawList::reset(const UiVec2& framebufferSizePx) {
     m_opacityStack.clear();
 }
 
-UiDrawCmd& UiDrawList::currentCommand(UiTextureId textureId) {
+UiDrawCmd& UiDrawList::currentCommand() {
     // reset() always seeds the clip stack; fall back to the framebuffer rect if a
     // caller emits geometry before reset().
     const UiRect fallback{0.0f, 0.0f, m_data.framebufferSizePx.x, m_data.framebufferSizePx.y};
     const UiRect& clip = m_clipStack.empty() ? fallback : m_clipStack.back();
     if (!m_data.commands.empty()) {
         UiDrawCmd& last = m_data.commands.back();
-        if (last.textureId == textureId && rectsEqual(last.clipRect, clip)) {
+        if (rectsEqual(last.clipRect, clip)) {
             return last;
         }
     }
     UiDrawCmd cmd{};
     cmd.indexOffset = static_cast<std::uint32_t>(m_data.indices.size());
     cmd.indexCount = 0;
-    cmd.textureId = textureId;
     cmd.clipRect = clip;
     m_data.commands.push_back(cmd);
     return m_data.commands.back();
@@ -64,9 +63,9 @@ std::uint32_t scaleAlpha(std::uint32_t rgba8, float opacity) {
 void UiDrawList::addQuad(const UiRect& dst, const UiRect& uv, std::uint32_t rgba8, UiDrawMode mode,
                          UiTextureId textureId, const float sdf[4]) {
     rgba8 = scaleAlpha(rgba8, currentOpacity());
-    UiDrawCmd& cmd = currentCommand(textureId);
+    UiDrawCmd& cmd = currentCommand();
     const auto base = static_cast<std::uint32_t>(m_data.vertices.size());
-    const auto modeBits = static_cast<std::uint32_t>(mode);
+    const auto modeBits = static_cast<std::uint32_t>(mode) | (textureId << 8u);
     const float s0 = sdf ? sdf[0] : 0.0f;
     const float s1 = sdf ? sdf[1] : 0.0f;
     const float s2 = sdf ? sdf[2] : 0.0f;
@@ -111,7 +110,7 @@ void UiDrawList::appendCached(const UiGeometryBlock& block, const UiVec2& transl
         if (blockCmd.indexCount == 0) {
             continue;
         }
-        UiDrawCmd& dst = currentCommand(blockCmd.textureId);
+        UiDrawCmd& dst = currentCommand();
         m_data.indices.reserve(m_data.indices.size() + blockCmd.indexCount);
         for (std::uint32_t k = 0; k < blockCmd.indexCount; ++k) {
             m_data.indices.push_back(base + block.indices[blockCmd.indexOffset + k]);
@@ -143,7 +142,7 @@ void UiDrawList::appendCachedClipped(const UiGeometryBlock& block, const UiVec2&
         if (blockCmd.indexCount == 0) {
             continue;
         }
-        UiDrawCmd& dst = currentCommand(blockCmd.textureId);
+        UiDrawCmd& dst = currentCommand();
 
         // Process in groups of 6 indices (one quad = two triangles = 4 vertices).
         // For each group check whether the quad's local Y range overlaps the window.
@@ -198,7 +197,7 @@ void UiDrawList::addRectFilledVGradient(const UiRect& rect, const UiColor& top,
     const float opacity = currentOpacity();
     const std::uint32_t topRgba = scaleAlpha(top.packAbgr8(), opacity);
     const std::uint32_t botRgba = scaleAlpha(bottom.packAbgr8(), opacity);
-    UiDrawCmd& cmd = currentCommand(kUiNoTexture);
+    UiDrawCmd& cmd = currentCommand();
     const auto base = static_cast<std::uint32_t>(m_data.vertices.size());
     const auto mode = static_cast<std::uint32_t>(UiDrawMode::SolidColor);
     // v00 / v10 top edge -> top color; v11 / v01 bottom edge -> bottom color.
@@ -221,7 +220,7 @@ void UiDrawList::addRectFilledHGradient(const UiRect& rect, const UiColor& left,
     const float opacity = currentOpacity();
     const std::uint32_t lRgba = scaleAlpha(left.packAbgr8(), opacity);
     const std::uint32_t rRgba = scaleAlpha(right.packAbgr8(), opacity);
-    UiDrawCmd& cmd = currentCommand(kUiNoTexture);
+    UiDrawCmd& cmd = currentCommand();
     const auto base = static_cast<std::uint32_t>(m_data.vertices.size());
     const auto mode = static_cast<std::uint32_t>(UiDrawMode::SolidColor);
     // Left vertices → left color; right vertices → right color.
@@ -254,7 +253,7 @@ void UiDrawList::addRoundRectFilledHGradient(const UiRect& rect, const UiColor& 
     const std::uint32_t lRgba = scaleAlpha(left.packAbgr8(),  opacity);
     const std::uint32_t rRgba = scaleAlpha(right.packAbgr8(), opacity);
 
-    UiDrawCmd& cmd = currentCommand(kUiNoTexture);
+    UiDrawCmd& cmd = currentCommand();
     const auto base     = static_cast<std::uint32_t>(m_data.vertices.size());
     const auto modeBits = static_cast<std::uint32_t>(UiDrawMode::RoundRect);
 
@@ -490,7 +489,7 @@ void UiDrawList::addSectorFilled(const UiVec2& center, float innerRadiusPx, floa
         return;
     }
     const std::uint32_t rgba = scaleAlpha(color.packAbgr8(), currentOpacity());
-    UiDrawCmd& cmd = currentCommand(kUiNoTexture);
+    UiDrawCmd& cmd = currentCommand();
     const auto solid = static_cast<std::uint32_t>(UiDrawMode::SolidColor);
     const float da = (endAngleRad - startAngleRad) / static_cast<float>(numSteps);
     const bool ring = innerRadiusPx > 0.0f;

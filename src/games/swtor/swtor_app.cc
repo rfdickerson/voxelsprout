@@ -2,6 +2,7 @@
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <stb_image.h>
 
 #include <algorithm>
 #include <cmath>
@@ -14,16 +15,16 @@ using namespace ui;
 static constexpr float kPi = 3.14159265f;
 
 // ─── Colour palette ──────────────────────────────────────────────────────────
-static constexpr UiColor kPanel  {0.047f, 0.078f, 0.125f, 0.88f};
-static constexpr UiColor kBorder {0.847f, 0.482f, 0.110f, 0.45f};
-static constexpr UiColor kText   {0.784f, 0.831f, 0.909f, 1.00f};
-static constexpr UiColor kDim    {0.376f, 0.471f, 0.596f, 1.00f};
-static constexpr UiColor kGold   {0.910f, 0.565f, 0.188f, 1.00f};
-static constexpr UiColor kGreen  {0.133f, 0.816f, 0.275f, 1.00f};
-static constexpr UiColor kBlue   {0.094f, 0.314f, 0.878f, 1.00f};
+static constexpr UiColor kPanel  {0.018f, 0.105f, 0.145f, 0.91f};
+static constexpr UiColor kBorder {0.100f, 0.820f, 0.970f, 0.58f};
+static constexpr UiColor kText   {0.785f, 0.920f, 0.955f, 1.00f};
+static constexpr UiColor kDim    {0.360f, 0.650f, 0.720f, 1.00f};
+static constexpr UiColor kGold   {0.980f, 0.760f, 0.270f, 1.00f};
+static constexpr UiColor kGreen  {0.180f, 0.900f, 0.520f, 1.00f};
+static constexpr UiColor kBlue   {0.070f, 0.660f, 0.940f, 1.00f};
 static constexpr UiColor kRed    {0.847f, 0.173f, 0.110f, 1.00f};
 static constexpr UiColor kXpGold {0.847f, 0.627f, 0.125f, 1.00f};
-static constexpr UiColor kSlotBg {0.047f, 0.078f, 0.157f, 0.92f};
+static constexpr UiColor kSlotBg {0.018f, 0.090f, 0.130f, 0.94f};
 static constexpr UiColor kShadow {0.000f, 0.000f, 0.000f, 0.60f};
 
 // Quality border colors: grey / white / green / blue / purple / gold
@@ -59,10 +60,12 @@ static constexpr int kNumChatMsgs = 8;
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 void SwtorApp::drawPanelBg(float x, float y, float w, float h, float s, float radius) {
     UiRect r = UiRect::fromXYWH(x, y, w, h);
-    m_uiDrawList.addDropShadow(r, kShadow, 8.0f*s, 0, 4);
+    m_uiDrawList.addDropShadow(r, kShadow, 10.0f*s, 0, 5);
+    m_uiDrawList.addRoundRectGlow(r, {kBorder.r, kBorder.g, kBorder.b, 0.13f}, radius*s, 10.0f*s);
     m_uiDrawList.addRoundRectFilled(r, kPanel, radius*s);
-    m_uiDrawList.addRectFilledVGradient(r, {1.0f,1.0f,1.0f,0.05f}, {0.0f,0.0f,0.0f,0.08f});
+    m_uiDrawList.addRectFilledVGradient(r, {0.10f,0.75f,0.92f,0.14f}, {0.0f,0.01f,0.03f,0.20f});
     m_uiDrawList.addRoundRect(r, kBorder, radius*s, s);
+    m_uiDrawList.addRectFilled(UiRect::fromXYWH(x + 8*s, y + 2*s, w - 16*s, s), {0.42f,0.94f,1.0f,0.32f});
 }
 
 void SwtorApp::drawBar(float x, float y, float w, float h, float frac,
@@ -254,28 +257,39 @@ void SwtorApp::drawGearIcon(float cx, float cy, float sz, int type, float s) {
 }
 
 // ─── Gear / inventory slot ────────────────────────────────────────────────────
-void SwtorApp::drawGearSlot(float x, float y, float sz, int iconType, int quality, float s) {
+void SwtorApp::drawGearSlot(float x, float y, float sz, int iconType, int quality, int variant, float s) {
     UiRect slot = UiRect::fromXYWH(x, y, sz, sz);
 
     // Outer frame
-    m_uiDrawList.addRoundRectFilled(slot, {0.06f,0.08f,0.14f,0.94f}, 3.0f*s);
+    const float variantTint = 0.035f * static_cast<float>(variant % 4);
+    m_uiDrawList.addRoundRectFilled(slot, {0.025f + variantTint,0.105f + variantTint,0.145f + variantTint,0.96f}, 3.0f*s);
     // Inner well (darker recess)
     m_uiDrawList.addRoundRectFilled(
         UiRect::fromXYWH(x+2*s, y+2*s, sz-4*s, sz-4*s),
-        {0.04f,0.05f,0.10f,0.96f}, 2.0f*s);
+        {0.015f,0.045f + variantTint,0.080f + variantTint,0.97f}, 2.0f*s);
     // Top-light sheen
     m_uiDrawList.addRectFilledVGradient(
         UiRect::fromXYWH(x+2*s, y+2*s, sz-4*s, (sz-4*s)*0.4f),
         {1.0f,1.0f,1.0f,0.05f}, {1.0f,1.0f,1.0f,0.0f});
 
-    // Clip icon to the inner well so it doesn't bleed over the border
+    // Clip the icon to the inner well so it doesn't bleed over the border.
     m_uiDrawList.pushClip(UiRect::fromXYWH(x+2*s, y+2*s, sz-4*s, sz-4*s));
-    drawGearIcon(x + sz*0.5f, y + sz*0.5f, sz - 6*s, iconType, s);
+    if (m_iconSheet != kUiNoTexture) {
+        static constexpr int kIconBase[] = {0, 5, 8, 16, 24, 28, 24, 32};
+        const int iconIndex = kIconBase[iconType % 8] + (variant % 4);
+        const float cell = 1.0f / 8.0f;
+        const float u = static_cast<float>(iconIndex % 8) * cell;
+        const float v = static_cast<float>(iconIndex / 8) * cell;
+        m_uiDrawList.addImage(UiRect::fromXYWH(x + 3*s, y + 3*s, sz - 6*s, sz - 6*s),
+            m_iconSheet, {1.0f, 1.0f, 1.0f, 1.0f}, {u, v, u + cell, v + cell});
+    } else {
+        drawGearIcon(x + sz*0.5f, y + sz*0.5f, sz - 6*s, iconType + variant, s);
+    }
     m_uiDrawList.popClip();
 
     // Quality border
     const UiColor& qc = kQualityColor[std::min(quality, 5)];
-    m_uiDrawList.addRoundRect(slot, {qc.r, qc.g, qc.b, 0.70f}, 3.0f*s, s);
+    m_uiDrawList.addRoundRect(slot, {qc.r, qc.g, qc.b, 0.82f}, 3.0f*s, s);
 
     // Glow on purple+ quality
     if (quality >= 4) {
@@ -301,32 +315,34 @@ void SwtorApp::drawCharWindow(float x, float y, float w, float h, float s) {
     m_uiDrawList.addRoundRect(win, kBorder, 4.0f*s, s);
 
     // ── Title row
-    const float titleH = 36.0f * s;
+    const float titleH = 42.0f * s;
     m_uiDrawList.addRoundRectFilledHGradient(
         UiRect::fromXYWH(x, y, w, titleH),
-        {0.09f,0.16f,0.26f,0.96f}, {0.04f,0.07f,0.12f,0.96f}, 4.0f*s);
+        {0.03f,0.28f,0.38f,0.98f}, {0.01f,0.08f,0.13f,0.98f}, 4.0f*s);
     const char* charName = "SCYA";
     float nameW = m_uiFontBold.measureText(charName);
-    m_uiDrawList.addText(m_uiFontBold, charName, {x + (w - nameW)*0.5f, y + 10.0f*s}, kText);
+    m_uiDrawList.addText(m_uiFontBold, charName, {x + (w - nameW)*0.5f, y + 13.0f*s}, kText);
+    m_uiDrawList.addCircleFilled({x + 17*s, y + titleH*0.5f}, 5*s, kBlue);
+    m_uiDrawList.addCircle({x + 17*s, y + titleH*0.5f}, 8*s, {kBorder.r,kBorder.g,kBorder.b,0.48f}, s);
     // Close X
     m_uiDrawList.addText(m_uiFont, "[C]", {x + w - 36*s, y + 11.0f*s}, kDim);
 
     // ── Tabs row
     static const char* kTabs[] = {"GEAR","COMBAT STYLE","OUTFITTER","COMPANION","LOADOUTS"};
     const float tabY = y + titleH + 2*s;
-    const float tabH = 26.0f * s;
+    const float tabH = 28.0f * s;
     float tabX = x + 6.0f*s;
     for (int t = 0; t < 5; ++t) {
         bool active = (t == 0);
         float tw = m_uiFont.measureText(kTabs[t]) + 20.0f*s;
         UiRect tabR = UiRect::fromXYWH(tabX, tabY, tw, tabH);
         if (active) {
-            m_uiDrawList.addRoundRectFilled(tabR, {0.10f,0.20f,0.34f,0.92f}, 2*s);
+            m_uiDrawList.addRoundRectFilled(tabR, {0.04f,0.34f,0.46f,0.95f}, 2*s);
             // Underline bar
             m_uiDrawList.addRectFilled(
-                UiRect::fromXYWH(tabX, tabY + tabH - 2*s, tw, 2*s), kBorder);
+                UiRect::fromXYWH(tabX, tabY + tabH - 2*s, tw, 2*s), {0.45f,0.96f,1.0f,0.96f});
         } else {
-            m_uiDrawList.addRoundRectFilled(tabR, {0.06f,0.10f,0.16f,0.60f}, 2*s);
+            m_uiDrawList.addRoundRectFilled(tabR, {0.02f,0.11f,0.16f,0.76f}, 2*s);
         }
         m_uiDrawList.addText(m_uiFont, kTabs[t],
             {tabX + 10*s, tabY + (tabH - m_uiFont.lineHeightPx())*0.5f},
@@ -337,8 +353,8 @@ void SwtorApp::drawCharWindow(float x, float y, float w, float h, float s) {
     // ── Content area
     const float contY = tabY + tabH + 4.0f*s;
     const float contH = (y + h - 4.0f*s) - contY;
-    const float leftW  = w * 0.275f;   // character + stats
-    const float midW   = w * 0.265f;   // gear slots
+    const float leftW  = w * 0.350f;   // character + stats
+    const float midW   = w * 0.225f;   // gear slots
     const float rightW = w - leftW - midW; // inventory
     const float midX   = x + leftW;
     const float rightX = midX + midW;
@@ -352,10 +368,10 @@ void SwtorApp::drawCharWindow(float x, float y, float w, float h, float s) {
     // ─────────────────────────────────────────────────────────────────────────
     {
         const float padX = x + 10*s;
-        const float charAreaH = contH * 0.62f;
+        const float charAreaH = contH - 20*s;
 
         // Character viewport box
-        UiRect cvp = UiRect::fromXYWH(padX, contY + 8*s, leftW - 18*s, charAreaH - 8*s);
+        UiRect cvp = UiRect::fromXYWH(padX, contY + 8*s, (leftW - 28*s) * 0.57f, charAreaH - 8*s);
         m_uiDrawList.addRoundRectFilled(cvp, {0.06f,0.09f,0.15f,0.95f}, 3*s);
         m_uiDrawList.addRoundRect(cvp, {0.18f,0.28f,0.48f,0.28f}, 3*s, s);
 
@@ -445,9 +461,9 @@ void SwtorApp::drawCharWindow(float x, float y, float w, float h, float s) {
         m_uiDrawList.addCircleFilled({lvlCX, lvlCY - lvlR - 6*s}, 3.5f*s, {0.26f,0.56f,1.00f,0.90f});
 
         // ── Stats
-        const float statX  = padX;
+        const float statX  = cvp.maxX + 10*s;
         const float statX2 = midX - 12*s;  // right-align values here
-        float statY = cvp.maxY + 16*s;
+        float statY = cvp.minY + 28*s;
         const float lh = m_uiFont.lineHeightPx();
         struct StatRow { const char* label; const char* value; };
         static const StatRow kStats[] = {
@@ -478,8 +494,8 @@ void SwtorApp::drawCharWindow(float x, float y, float w, float h, float s) {
             gy += lh + 4*s;
         };
         auto row2 = [&](int ta, int qa, int tb, int qb) {
-            drawGearSlot(gx,              gy, slotSz, ta, qa, s);
-            drawGearSlot(gx + slotSz + slotGap, gy, slotSz, tb, qb, s);
+            drawGearSlot(gx,              gy, slotSz, ta, qa, (ta + qa) % 4, s);
+            drawGearSlot(gx + slotSz + slotGap, gy, slotSz, tb, qb, (tb + qb + 1) % 4, s);
             gy += slotSz + slotGap + 4*s;
         };
 
@@ -516,9 +532,9 @@ void SwtorApp::drawCharWindow(float x, float y, float w, float h, float s) {
         // ── Inventory tabs
         static const char* kInvTabs[] = {"INVENTORY","MISSION ITEMS","CURRENCY"};
         static const UiColor kTabAccent[] = {
-            {0.84f,0.48f,0.11f,1.0f},
-            {0.30f,0.72f,0.90f,1.0f},
-            {0.28f,0.82f,0.34f,1.0f},
+            {0.18f,0.88f,1.00f,1.0f},
+            {0.34f,0.72f,0.90f,1.0f},
+            {0.34f,0.88f,0.60f,1.0f},
         };
         float itx = rx;
         for (int t = 0; t < 3; ++t) {
@@ -526,9 +542,9 @@ void SwtorApp::drawCharWindow(float x, float y, float w, float h, float s) {
             bool active = (t == 0);
             UiRect tabR = UiRect::fromXYWH(itx, ry, tw, 26*s);
             if (active)
-                m_uiDrawList.addRoundRectFilled(tabR, {0.12f,0.20f,0.34f,0.90f}, 2*s);
+                m_uiDrawList.addRoundRectFilled(tabR, {0.03f,0.30f,0.40f,0.95f}, 2*s);
             else
-                m_uiDrawList.addRoundRectFilled(tabR, {0.06f,0.10f,0.16f,0.60f}, 2*s);
+                m_uiDrawList.addRoundRectFilled(tabR, {0.02f,0.11f,0.16f,0.76f}, 2*s);
             m_uiDrawList.addText(m_uiFont, kInvTabs[t],
                 {itx + 9*s, ry + (26*s - lh)*0.5f},
                 active ? kTabAccent[t] : kDim);
@@ -571,9 +587,9 @@ void SwtorApp::drawCharWindow(float x, float y, float w, float h, float s) {
         ry += filterH + 7*s;
 
         // ── Inventory grid
-        const float itemSz  = 44.0f * s;
         const float itemGap =  3.0f * s;
-        const int   cols    = std::min(6, (int)((rw + itemGap) / (itemSz + itemGap)));
+        const int   cols    = std::max(6, std::min(8, (int)((rw + itemGap) / (38.0f*s + itemGap))));
+        const float itemSz  = std::min(44.0f * s, (rw - itemGap * (cols - 1)) / cols);
         const float gridW   = cols * (itemSz + itemGap) - itemGap;
         const float gridX   = rx + (rw - gridW) * 0.5f;
         const float gridBot = y + h - 26*s;
@@ -587,7 +603,7 @@ void SwtorApp::drawCharWindow(float x, float y, float w, float h, float s) {
             if (iy + itemSz > gridBot) break;
 
             const InvItem& it = m_inventory[i];
-            drawGearSlot(ix, iy, itemSz, it.type, it.quality, s);
+            drawGearSlot(ix, iy, itemSz, it.type, it.quality, it.variant, s);
 
             if (it.count > 1) {
                 char cnt[8];
@@ -921,6 +937,68 @@ void SwtorApp::drawXpBar(float x, float y, float w, float h, float frac, int lev
 }
 
 // ─── Lifecycle ───────────────────────────────────────────────────────────────
+void SwtorApp::drawSpaceportInterior(float fbW, float fbH, float s) {
+    m_uiDrawList.addRectFilledVGradient(UiRect::fromXYWH(0, 0, fbW, fbH),
+        {0.025f, 0.050f, 0.070f, 1.0f}, {0.004f, 0.012f, 0.022f, 1.0f});
+    const float horizon = fbH * 0.46f;
+    m_uiDrawList.addRectFilled(UiRect::fromXYWH(0, horizon, fbW, fbH - horizon),
+        {0.025f,0.070f,0.085f,1.0f});
+    for (int i = 0; i < 7; ++i) {
+        const float x = (fbW / 7.0f) * i;
+        m_uiDrawList.addRectFilledVGradient(UiRect::fromXYWH(x + 7*s, 0, 5*s, horizon),
+            {0.10f,0.45f,0.52f,0.45f}, {0.01f,0.05f,0.08f,0.15f});
+        m_uiDrawList.addRectFilled(UiRect::fromXYWH(x + 12*s, 0, fbW/7.0f - 24*s, 4*s),
+            {0.10f,0.55f,0.64f,0.36f});
+    }
+    for (int i = 0; i < 4; ++i) {
+        const float lightX = fbW * (0.16f + i * 0.23f);
+        m_uiDrawList.addCircleFilled({lightX, horizon * 0.34f}, 34*s, {1.0f,0.57f,0.13f,0.08f});
+        m_uiDrawList.addCircleFilled({lightX, horizon * 0.34f}, 5*s, {1.0f,0.72f,0.26f,0.82f});
+    }
+    for (int row = 0; row < 5; ++row) {
+        const float y = horizon + (fbH - horizon) * (row / 5.0f);
+        m_uiDrawList.addRectFilled(UiRect::fromXYWH(0, y, fbW, s), {0.15f,0.62f,0.68f,0.18f});
+    }
+    for (int i = -4; i <= 4; ++i) {
+        const float baseX = fbW * 0.5f + i * fbW * 0.18f;
+        const float topX = fbW * 0.5f + i * fbW * 0.045f;
+        const float width = std::max(1.0f*s, std::abs(baseX - topX) * 0.015f);
+        m_uiDrawList.addRectFilled(UiRect::fromXYWH(topX, horizon, width, fbH - horizon),
+            {0.10f,0.62f,0.70f,0.20f});
+    }
+    m_uiDrawList.addRectFilledVGradient(UiRect::fromXYWH(0, 0, fbW, fbH),
+        {0.0f,0.0f,0.0f,0.08f}, {0.0f,0.0f,0.0f,0.38f});
+}
+
+void SwtorApp::drawTopNavigation(float fbW, float s) {
+    const float w = std::min(390.0f*s, fbW * 0.42f);
+    const float h = 31.0f*s;
+    const float x = (fbW - w) * 0.5f;
+    const float y = 9.0f*s;
+    UiRect ribbon = UiRect::fromXYWH(x, y, w, h);
+    m_uiDrawList.addDropShadow(ribbon, kShadow, 8*s, 0, 3*s);
+    m_uiDrawList.addRoundRectFilledHGradient(ribbon,
+        {0.02f,0.26f,0.36f,0.95f}, {0.01f,0.10f,0.16f,0.96f}, 10*s);
+    m_uiDrawList.addRoundRect(ribbon, kBorder, 10*s, s);
+    static const char* kNav[] = {"CHAR", "STYLE", "MAP", "SOCIAL", "SET"};
+    float nx = x + 13*s;
+    for (int i = 0; i < 5; ++i) {
+        m_uiDrawList.addCircleFilled({nx + 5*s, y + h*0.5f}, 4*s,
+            i == 0 ? kBlue : UiColor{0.33f,0.68f,0.76f,0.76f});
+        nx += 12*s;
+        const float tw = m_uiFont.measureText(kNav[i]);
+        m_uiDrawList.addText(m_uiFont, kNav[i], {nx, y + (h - m_uiFont.lineHeightPx())*0.5f},
+            i == 0 ? kText : kDim);
+        nx += tw + 13*s;
+    }
+    UiRect status = UiRect::fromXYWH(10*s, 10*s, 174*s, 26*s);
+    m_uiDrawList.addRoundRectFilled(status, {0.01f,0.12f,0.18f,0.92f}, 5*s);
+    m_uiDrawList.addRoundRect(status, kBorder, 5*s, s);
+    m_uiDrawList.addText(m_uiFontBold, "55", {status.minX + 9*s, status.minY + 5*s}, kText);
+    m_uiDrawList.addCircleFilled({status.minX + 42*s, status.minY + 13*s}, 4*s, kGreen);
+    m_uiDrawList.addText(m_uiFont, "SCYA  |  8,044,558", {status.minX + 52*s, status.minY + 5*s}, kDim);
+}
+
 bool SwtorApp::onInit() {
     const float s = contentScale();
     if (!loadFonts(
@@ -930,6 +1008,20 @@ bool SwtorApp::onInit() {
             resolveAssetPath("assets/fonts/Inter-Regular.ttf"),
             std::round(17.0f * s), std::round(15.0f * s)))
         return false;
+
+    const std::string iconSheetPath =
+        resolveAssetPath("assets/ui/swtor/swtor_icon_sheet.png");
+    int iconSheetW = 0;
+    int iconSheetH = 0;
+    int iconSheetChannels = 0;
+    stbi_uc* iconSheetPixels = stbi_load(
+        iconSheetPath.c_str(), &iconSheetW, &iconSheetH, &iconSheetChannels, 4);
+    if (iconSheetPixels != nullptr) {
+        m_iconSheet = m_renderer.registerUiTextureRgba8Mipmapped(
+            iconSheetPixels, static_cast<std::uint32_t>(iconSheetW),
+            static_cast<std::uint32_t>(iconSheetH));
+        stbi_image_free(iconSheetPixels);
+    }
 
     auto root = std::make_unique<Widget>();
     root->mousePassthrough = true;
@@ -952,6 +1044,7 @@ bool SwtorApp::onInit() {
         float qr = (lcg() >> 8) / float(1 << 24);
         m_inventory[i].quality = qr < 0.12f ? 0 : qr < 0.35f ? 1 : qr < 0.60f ? 2 : qr < 0.85f ? 3 : 4;
         m_inventory[i].count   = (lcg() % 7 == 0) ? static_cast<int>(lcg() % 98 + 2) : 0;
+        m_inventory[i].variant = static_cast<int>(lcg() % 4);
     }
 
     return true;
@@ -1041,19 +1134,14 @@ void SwtorApp::onRender(float /*dt*/) {
     const float fw = (float)fbW, fh = (float)fbH;
     const float s  = contentScale();
 
-    // Space background
-    m_uiDrawList.addRectFilledVGradient(
-        UiRect::fromXYWH(0, 0, fw, fh),
-        {0.030f, 0.040f, 0.065f, 1.0f},
-        {0.010f, 0.015f, 0.030f, 1.0f});
-    m_uiDrawList.addCircleFilled({fw * 0.35f, fh * 0.45f},
-        fh * 0.45f, {0.05f, 0.03f, 0.10f, 0.25f});
+    drawSpaceportInterior(fw, fh, s);
+    drawTopNavigation(fw, s);
 
     // ── HUD ───────────────────────────────────────────────────────────────────
-    drawUnitFrame(10*s, 10*s, 222*s, 90*s, "Jyn Erso",       m_playerHp, m_playerForce, true,  55, s);
-    drawBuffRow  (10*s, 106*s, 8, 24*s, s);
-    drawUnitFrame(240*s, 10*s, 222*s, 90*s, "Kaliyo Djannis", m_targetHp, 0.0f,          false, 52, s);
-    drawBuffRow  (240*s, 106*s, 3, 22*s, s);
+    drawUnitFrame(10*s, 48*s, 222*s, 90*s, "Jyn Erso",       m_playerHp, m_playerForce, true,  55, s);
+    drawBuffRow  (10*s, 144*s, 8, 24*s, s);
+    drawUnitFrame(10*s, 178*s, 222*s, 90*s, "Kaliyo Djannis", m_targetHp, 0.0f,          false, 52, s);
+    drawBuffRow  (10*s, 274*s, 3, 22*s, s);
 
     float mmR  = 88.0f * s;
     float mmCX = fw - mmR - 15.0f * s;

@@ -13,9 +13,9 @@ namespace odai::ui {
 
 class Font;
 
-// Per-vertex draw mode. Texture binding is per-command (UiDrawCmd::textureId),
-// but the shading mode is per-vertex so one command may mix solid fills and
-// glyph quads that share a texture binding and clip rect.
+// Per-vertex draw mode. The low 8 bits of UiVertex::mode select this mode; the
+// remaining bits hold the bindless UI texture slot. One command can therefore
+// mix icons, font atlases, and solid geometry under one shared clip rect.
 enum class UiDrawMode : std::uint32_t {
     SolidColor = 0,  // Use vertex color, ignore texture.
     Textured = 1,    // Sample rgba texture, multiply by vertex color.
@@ -29,7 +29,7 @@ struct UiVertex {            // 40 bytes; matches the renderer's vertex input la
     float posPx[2] = {};      // Pixel space, top-left origin, +Y down. offset 0
     float uv[2] = {};         // Atlas coords, or (RoundRect) px from center. offset 8
     std::uint32_t rgba8 = 0;  // Packed ABGR8 vertex color.             offset 16
-    std::uint32_t mode = 0;   // UiDrawMode.                            offset 20
+    std::uint32_t mode = 0;   // UiDrawMode in low 8 bits; texture slot above. offset 20
     // Mode-specific params. RoundRect: {halfWidthPx, halfHeightPx, cornerRadiusPx,
     // borderPx} where borderPx <= 0 fills the shape and > 0 strokes it (centered
     // on the edge). Unused (zero) for all other modes.
@@ -39,6 +39,8 @@ struct UiVertex {            // 40 bytes; matches the renderer's vertex input la
 struct UiDrawCmd {
     std::uint32_t indexOffset = 0;       // First index into UiDrawData::indices.
     std::uint32_t indexCount = 0;        // Number of indices to draw.
+    // Legacy source texture for cached geometry. Runtime batching is clip-only;
+    // texture selection is encoded per vertex.
     UiTextureId textureId = kUiNoTexture;
     UiRect clipRect{};                   // Pixel-space scissor.
 };
@@ -188,9 +190,9 @@ public:
                              float yLocalMin, float yLocalMax);
 
 private:
-    // Ensure the current command matches (textureId, current clip); start a new
-    // one otherwise. Returns the index base for appended geometry.
-    UiDrawCmd& currentCommand(UiTextureId textureId);
+    // Ensure the current command matches the current clip; texture selection is
+    // per-vertex through the bindless UI texture table.
+    UiDrawCmd& currentCommand();
 
     UiDrawData m_data;
     std::vector<UiRect> m_clipStack;

@@ -2715,6 +2715,12 @@ void RendererBackend::renderFrame(
     toneMapRenderingInfo.colorAttachmentCount = 1;
     toneMapRenderingInfo.pColorAttachments = &toneMapColorAttachment;
 
+    // Upload UI geometry and emit HOST→VERTEX barrier before entering the
+    // rendering pass (VERTEX_INPUT_BIT is not a framebuffer-space stage and
+    // cannot be used in a barrier inside vkCmdBeginRendering).
+    if (m_uiRenderer.ready()) {
+        m_uiRenderer.uploadGeometry(commandBuffer, m_frameArena, m_uiDrawData);
+    }
     writeGpuTimestampTop(kGpuTimestampQueryPostStart);
     coreFramePassOrderValidator.markPassEntered(coreFrameGraphPlan->post, "post");
     beginDebugLabel(commandBuffer, "Pass: Tonemap + UI", 0.24f, 0.24f, 0.24f, 1.0f);
@@ -2743,9 +2749,9 @@ void RendererBackend::renderFrame(
     // Bracket the custom-UI pass with its own GPU timestamps (unconditional so the
     // duration reads ~0 on frames with no UI, rather than stale values).
     writeGpuTimestampTop(kGpuTimestampQueryUiStart);
-    if (m_uiRenderer.ready() && !m_uiDrawData.commands.empty()) {
+    if (m_uiRenderer.ready()) {
         beginDebugLabel(commandBuffer, "Pass: UI", 0.85f, 0.72f, 0.44f);
-        m_uiRenderer.record(commandBuffer, 0, m_frameArena, m_uiDrawData, m_swapchainExtent);
+        m_uiRenderer.record(commandBuffer, 0, m_uiDrawData, m_swapchainExtent);
         endDebugLabel(commandBuffer);
     }
     writeGpuTimestampBottom(kGpuTimestampQueryUiEnd);

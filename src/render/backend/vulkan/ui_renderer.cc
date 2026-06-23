@@ -73,9 +73,10 @@ void bleedTransparentRgb(std::vector<std::uint8_t>& px, std::uint32_t w, std::ui
 bool UiRenderer::init(const InitInfo& info) {
     m_info = info;
     if (m_info.device == VK_NULL_HANDLE || m_info.bufferAllocator == nullptr ||
-        m_info.vmaAllocator == VK_NULL_HANDLE) {
+        m_info.vmaAllocator == VK_NULL_HANDLE || m_info.maxTextureCount < 2) {
         return false;
     }
+    m_maxTextureCount = m_info.maxTextureCount;
 
     // Sampler shared by all UI textures.
     VkSamplerCreateInfo samplerInfo{};
@@ -93,33 +94,53 @@ bool UiRenderer::init(const InitInfo& info) {
         return false;
     }
 
-    // One descriptor set per texture: a single combined image sampler at binding 0.
+    // One update-after-bind descriptor array for every UI texture. Texture slots
+    // are stored in vertex mode bits, so changing icons/fonts does not split a
+    // clip batch or bind a descriptor set per draw.
     VkDescriptorSetLayoutBinding binding{};
     binding.binding = 0;
     binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = 1;
+    binding.descriptorCount = m_maxTextureCount;
     binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    const VkDescriptorBindingFlags bindingFlags =
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+        VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+    VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
+    bindingFlagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    bindingFlagsInfo.bindingCount = 1;
+    bindingFlagsInfo.pBindingFlags = &bindingFlags;
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
     layoutInfo.bindingCount = 1;
     layoutInfo.pBindings = &binding;
+    layoutInfo.pNext = &bindingFlagsInfo;
     if (vkCreateDescriptorSetLayout(m_info.device, &layoutInfo, nullptr, &m_setLayout) != VK_SUCCESS) {
         VOX_LOGE("ui") << "failed to create UI descriptor set layout";
         return false;
     }
 
-    constexpr std::uint32_t kMaxUiTextures = 256;
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = kMaxUiTextures;
+    poolSize.descriptorCount = m_maxTextureCount;
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolInfo.maxSets = kMaxUiTextures;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+    poolInfo.maxSets = 1;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &poolSize;
     if (vkCreateDescriptorPool(m_info.device, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
         VOX_LOGE("ui") << "failed to create UI descriptor pool";
+        return false;
+    }
+
+    VkDescriptorSetAllocateInfo setAlloc{};
+    setAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    setAlloc.descriptorPool = m_descriptorPool;
+    setAlloc.descriptorSetCount = 1;
+    setAlloc.pSetLayouts = &m_setLayout;
+    if (vkAllocateDescriptorSets(m_info.device, &setAlloc, &m_descriptorSet) != VK_SUCCESS) {
+        VOX_LOGE("ui") << "failed to allocate bindless UI descriptor set";
         return false;
     }
 
@@ -142,6 +163,11 @@ bool UiRenderer::init(const InitInfo& info) {
     Texture white{};
     if (!uploadTexturePixels(whitePixel.data(), 1, 1, VK_FORMAT_R8G8B8A8_UNORM, 4, white)) {
         VOX_LOGE("ui") << "failed to create UI white texture";
+        return false;
+    }
+    if (!writeTextureDescriptor(odai::ui::kUiNoTexture, white.view)) {
+        destroyTexture(white);
+        VOX_LOGE("ui") << "failed to write UI white texture descriptor";
         return false;
     }
     m_textures[odai::ui::kUiNoTexture] = white;
@@ -380,19 +406,9 @@ bool UiRenderer::uploadTexturePixels(const std::uint8_t* pixels, std::uint32_t w
                          nullptr, 0, nullptr, 1, &toShader);
 
     vkEndCommandBuffer(cmd);
-    VkSubmitInfo submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    VkFence fence = VK_NULL_HANDLE;
-    vkCreateFence(m_info.device, &fenceInfo, nullptr, &fence);
-    vkQueueSubmit(m_info.uploadQueue, 1, &submit, fence);
-    vkWaitForFences(m_info.device, 1, &fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(m_info.device, fence, nullptr);
-    vkFreeCommandBuffers(m_info.device, m_uploadPool, 1, &cmd);
-    m_info.bufferAllocator->destroyBuffer(staging);
+    if (!submitUpload(cmd, staging)) {
+        return false;
+    }
 
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -406,19 +422,53 @@ bool UiRenderer::uploadTexturePixels(const std::uint8_t* pixels, std::uint32_t w
     if (vkCreateImageView(m_info.device, &viewInfo, nullptr, &outTexture.view) != VK_SUCCESS) {
         return false;
     }
-    outTexture.descriptorSet = allocateTextureDescriptor(outTexture.view);
-    return outTexture.descriptorSet != VK_NULL_HANDLE;
+    return true;
 }
 
-VkDescriptorSet UiRenderer::allocateTextureDescriptor(VkImageView view) {
-    VkDescriptorSetAllocateInfo alloc{};
-    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    alloc.descriptorPool = m_descriptorPool;
-    alloc.descriptorSetCount = 1;
-    alloc.pSetLayouts = &m_setLayout;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(m_info.device, &alloc, &set) != VK_SUCCESS) {
-        return VK_NULL_HANDLE;
+bool UiRenderer::submitUpload(VkCommandBuffer commandBuffer, BufferHandle stagingBuffer) {
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+    if (vkCreateFence(m_info.device, &fenceInfo, nullptr, &fence) != VK_SUCCESS) {
+        vkFreeCommandBuffers(m_info.device, m_uploadPool, 1, &commandBuffer);
+        m_info.bufferAllocator->destroyBuffer(stagingBuffer);
+        return false;
+    }
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &commandBuffer;
+    if (vkQueueSubmit(m_info.uploadQueue, 1, &submit, fence) != VK_SUCCESS) {
+        vkDestroyFence(m_info.device, fence, nullptr);
+        vkFreeCommandBuffers(m_info.device, m_uploadPool, 1, &commandBuffer);
+        m_info.bufferAllocator->destroyBuffer(stagingBuffer);
+        return false;
+    }
+    m_pendingUploads.push_back({stagingBuffer, commandBuffer, fence});
+    return true;
+}
+
+void UiRenderer::collectCompletedUploads() {
+    auto out = m_pendingUploads.begin();
+    for (auto it = m_pendingUploads.begin(); it != m_pendingUploads.end(); ++it) {
+        const VkResult status = vkGetFenceStatus(m_info.device, it->fence);
+        if (status == VK_NOT_READY) {
+            *out++ = *it;
+            continue;
+        }
+        if (status != VK_SUCCESS) {
+            VOX_LOGW("ui") << "UI texture upload fence returned " << status;
+        }
+        vkDestroyFence(m_info.device, it->fence, nullptr);
+        vkFreeCommandBuffers(m_info.device, m_uploadPool, 1, &it->commandBuffer);
+        m_info.bufferAllocator->destroyBuffer(it->stagingBuffer);
+    }
+    m_pendingUploads.erase(out, m_pendingUploads.end());
+}
+
+bool UiRenderer::writeTextureDescriptor(odai::ui::UiTextureId slot, VkImageView view) {
+    if (slot >= m_maxTextureCount || m_descriptorSet == VK_NULL_HANDLE || view == VK_NULL_HANDLE) {
+        return false;
     }
     VkDescriptorImageInfo imageInfo{};
     imageInfo.sampler = m_sampler;
@@ -426,13 +476,14 @@ VkDescriptorSet UiRenderer::allocateTextureDescriptor(VkImageView view) {
     imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = set;
+    write.dstSet = m_descriptorSet;
     write.dstBinding = 0;
+    write.dstArrayElement = slot;
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.pImageInfo = &imageInfo;
     vkUpdateDescriptorSets(m_info.device, 1, &write, 0, nullptr);
-    return set;
+    return true;
 }
 
 odai::ui::UiTextureId UiRenderer::registerTextureRgba8(const std::uint8_t* pixels, std::uint32_t width,
@@ -443,7 +494,16 @@ odai::ui::UiTextureId UiRenderer::registerTextureRgba8(const std::uint8_t* pixel
     if (!uploadTexturePixels(pixels, width, height, VK_FORMAT_R8G8B8A8_SRGB, 4, texture)) {
         return odai::ui::kUiNoTexture;
     }
+    if (m_nextTextureId >= m_maxTextureCount) {
+        destroyTexture(texture);
+        VOX_LOGW("ui") << "bindless UI texture table exhausted";
+        return odai::ui::kUiNoTexture;
+    }
     const odai::ui::UiTextureId id = m_nextTextureId++;
+    if (!writeTextureDescriptor(id, texture.view)) {
+        destroyTexture(texture);
+        return odai::ui::kUiNoTexture;
+    }
     m_textures[id] = texture;
     return id;
 }
@@ -572,19 +632,9 @@ bool UiRenderer::uploadTexturePixelsMipmapped(const std::uint8_t* pixels, std::u
                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
     vkEndCommandBuffer(cmd);
-    VkSubmitInfo submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cmd;
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    VkFence fence = VK_NULL_HANDLE;
-    vkCreateFence(m_info.device, &fenceInfo, nullptr, &fence);
-    vkQueueSubmit(m_info.uploadQueue, 1, &submit, fence);
-    vkWaitForFences(m_info.device, 1, &fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(m_info.device, fence, nullptr);
-    vkFreeCommandBuffers(m_info.device, m_uploadPool, 1, &cmd);
-    m_info.bufferAllocator->destroyBuffer(staging);
+    if (!submitUpload(cmd, staging)) {
+        return false;
+    }
 
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -595,8 +645,7 @@ bool UiRenderer::uploadTexturePixelsMipmapped(const std::uint8_t* pixels, std::u
     if (vkCreateImageView(m_info.device, &viewInfo, nullptr, &outTexture.view) != VK_SUCCESS) {
         return false;
     }
-    outTexture.descriptorSet = allocateTextureDescriptor(outTexture.view);
-    return outTexture.descriptorSet != VK_NULL_HANDLE;
+    return true;
 }
 
 odai::ui::UiTextureId UiRenderer::registerTextureRgba8Mipmapped(const std::uint8_t* pixels,
@@ -606,7 +655,16 @@ odai::ui::UiTextureId UiRenderer::registerTextureRgba8Mipmapped(const std::uint8
     if (!uploadTexturePixelsMipmapped(pixels, width, height, texture)) {
         return odai::ui::kUiNoTexture;
     }
+    if (m_nextTextureId >= m_maxTextureCount) {
+        destroyTexture(texture);
+        VOX_LOGW("ui") << "bindless UI texture table exhausted";
+        return odai::ui::kUiNoTexture;
+    }
     const odai::ui::UiTextureId id = m_nextTextureId++;
+    if (!writeTextureDescriptor(id, texture.view)) {
+        destroyTexture(texture);
+        return odai::ui::kUiNoTexture;
+    }
     m_textures[id] = texture;
     return id;
 }
@@ -621,6 +679,10 @@ bool UiRenderer::setFontAtlasR8(const std::uint8_t* pixels, std::uint32_t width,
     if (!uploadTexturePixels(pixels, width, height, VK_FORMAT_R8_UNORM, 1, texture)) {
         return false;
     }
+    if (!writeTextureDescriptor(odai::ui::kUiFontAtlas, texture.view)) {
+        destroyTexture(texture);
+        return false;
+    }
     m_textures[odai::ui::kUiFontAtlas] = texture;
     return true;
 }
@@ -631,37 +693,79 @@ odai::ui::UiTextureId UiRenderer::registerFontAtlasR8(const std::uint8_t* pixels
     if (!uploadTexturePixels(pixels, width, height, VK_FORMAT_R8_UNORM, 1, texture)) {
         return odai::ui::kUiNoTexture;
     }
+    if (m_nextTextureId >= m_maxTextureCount) {
+        destroyTexture(texture);
+        VOX_LOGW("ui") << "bindless UI texture table exhausted";
+        return odai::ui::kUiNoTexture;
+    }
     const odai::ui::UiTextureId id = m_nextTextureId++;
+    // Bind the atlas into the bindless table. Without this the descriptor slot
+    // stays unwritten, and the first glyph drawn from this font samples an
+    // unbound partially-bound descriptor -> GPU fault / VK_ERROR_DEVICE_LOST.
+    if (!writeTextureDescriptor(id, texture.view)) {
+        destroyTexture(texture);
+        return odai::ui::kUiNoTexture;
+    }
     m_textures[id] = texture;
     return id;
 }
 
-void UiRenderer::record(VkCommandBuffer cmd, std::uint32_t /*frameIndex*/, FrameArena& frameArena,
-                        const odai::ui::UiDrawData& drawData, VkExtent2D extent) {
-    if (m_pipeline == VK_NULL_HANDLE || drawData.commands.empty() || extent.width == 0 || extent.height == 0) {
-        return;
-    }
+void UiRenderer::uploadGeometry(VkCommandBuffer cmd, FrameArena& frameArena,
+                                 const odai::ui::UiDrawData& drawData) {
+    m_geometryReady = false;
+    collectCompletedUploads();
+    if (m_pipeline == VK_NULL_HANDLE || drawData.commands.empty()) return;
 
     const VkDeviceSize vertexBytes = drawData.vertices.size() * sizeof(odai::ui::UiVertex);
-    const VkDeviceSize indexBytes = drawData.indices.size() * sizeof(std::uint32_t);
-    const std::optional<FrameArenaSlice> vertexSlice =
-        frameArena.allocateUpload(vertexBytes, 16, FrameArenaUploadKind::UiGeometry);
-    const std::optional<FrameArenaSlice> indexSlice =
-        frameArena.allocateUpload(indexBytes, 4, FrameArenaUploadKind::UiGeometry);
-    if (!vertexSlice.has_value() || !indexSlice.has_value()) {
+    const VkDeviceSize indexBytes  = drawData.indices.size()  * sizeof(std::uint32_t);
+    const auto vertexSlice = frameArena.allocateUpload(vertexBytes, 16, FrameArenaUploadKind::UiGeometry);
+    const auto indexSlice  = frameArena.allocateUpload(indexBytes,  4,  FrameArenaUploadKind::UiGeometry);
+    if (!vertexSlice || !indexSlice) {
         VOX_LOGW("ui") << "frame arena exhausted; dropping UI geometry this frame";
         return;
     }
     std::memcpy(vertexSlice->mapped, drawData.vertices.data(), static_cast<std::size_t>(vertexBytes));
-    std::memcpy(indexSlice->mapped, drawData.indices.data(), static_cast<std::size_t>(indexBytes));
+    std::memcpy(indexSlice->mapped,  drawData.indices.data(),  static_cast<std::size_t>(indexBytes));
 
-    const VkBuffer vertexBuffer = m_info.bufferAllocator->getBuffer(vertexSlice->buffer);
-    const VkBuffer indexBuffer = m_info.bufferAllocator->getBuffer(indexSlice->buffer);
+    m_uploadedVertexBuffer = m_info.bufferAllocator->getBuffer(vertexSlice->buffer);
+    m_uploadedIndexBuffer  = m_info.bufferAllocator->getBuffer(indexSlice->buffer);
+    m_uploadedVertexOffset = vertexSlice->offset;
+    m_uploadedIndexOffset  = indexSlice->offset;
+
+    // HOST→VERTEX barrier: must happen outside the dynamic rendering pass
+    // (VERTEX_INPUT_BIT is not a framebuffer-space stage).
+    VkMemoryBarrier2 hostToVertex{};
+    hostToVertex.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    hostToVertex.srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT;
+    hostToVertex.srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT;
+    hostToVertex.dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT;
+    hostToVertex.dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT;
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &hostToVertex;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+    m_geometryReady = true;
+}
+
+void UiRenderer::record(VkCommandBuffer cmd, std::uint32_t /*frameIndex*/,
+                         const odai::ui::UiDrawData& drawData, VkExtent2D extent) {
+    m_stats = {};
+    m_stats.textureSlots = static_cast<std::uint32_t>(m_textures.size());
+    m_stats.commandCount = static_cast<std::uint32_t>(drawData.commands.size());
+    if (!m_geometryReady || m_pipeline == VK_NULL_HANDLE ||
+        drawData.commands.empty() || extent.width == 0 || extent.height == 0) {
+        return;
+    }
+    m_stats.dynamicUploadBytes =
+        drawData.vertices.size() * sizeof(odai::ui::UiVertex) +
+        drawData.indices.size()  * sizeof(std::uint32_t);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
-    const VkDeviceSize vertexOffset = vertexSlice->offset;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, &vertexOffset);
-    vkCmdBindIndexBuffer(cmd, indexBuffer, indexSlice->offset, VK_INDEX_TYPE_UINT32);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &m_uploadedVertexBuffer, &m_uploadedVertexOffset);
+    vkCmdBindIndexBuffer(cmd, m_uploadedIndexBuffer, m_uploadedIndexOffset, VK_INDEX_TYPE_UINT32);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1,
+                            &m_descriptorSet, 0, nullptr);
 
     VkViewport viewport{};
     viewport.width = static_cast<float>(extent.width);
@@ -674,21 +778,17 @@ void UiRenderer::record(VkCommandBuffer cmd, std::uint32_t /*frameIndex*/, Frame
     push.invScreenSize[1] = 2.0f / static_cast<float>(extent.height);
     vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
 
-    const Texture& white = m_textures.at(odai::ui::kUiNoTexture);
     for (const odai::ui::UiDrawCmd& command : drawData.commands) {
         if (command.indexCount == 0) {
+            ++m_stats.skippedDrawCalls;
             continue;
         }
-        const auto textureIt = m_textures.find(command.textureId);
-        const VkDescriptorSet set =
-            (textureIt != m_textures.end()) ? textureIt->second.descriptorSet : white.descriptorSet;
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &set, 0, nullptr);
-
         const float clipMinX = std::max(command.clipRect.minX, 0.0f);
         const float clipMinY = std::max(command.clipRect.minY, 0.0f);
         const float clipMaxX = std::min(command.clipRect.maxX, static_cast<float>(extent.width));
         const float clipMaxY = std::min(command.clipRect.maxY, static_cast<float>(extent.height));
         if (clipMaxX <= clipMinX || clipMaxY <= clipMinY) {
+            ++m_stats.skippedDrawCalls;
             continue;
         }
         VkRect2D scissor{};
@@ -698,14 +798,11 @@ void UiRenderer::record(VkCommandBuffer cmd, std::uint32_t /*frameIndex*/, Frame
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
         vkCmdDrawIndexed(cmd, command.indexCount, 1, command.indexOffset, 0, 0);
+        ++m_stats.drawCallCount;
     }
 }
 
 void UiRenderer::destroyTexture(Texture& texture) {
-    if (texture.descriptorSet != VK_NULL_HANDLE) {
-        vkFreeDescriptorSets(m_info.device, m_descriptorPool, 1, &texture.descriptorSet);
-        texture.descriptorSet = VK_NULL_HANDLE;
-    }
     if (texture.view != VK_NULL_HANDLE) {
         vkDestroyImageView(m_info.device, texture.view, nullptr);
         texture.view = VK_NULL_HANDLE;
@@ -721,6 +818,10 @@ void UiRenderer::shutdown() {
     if (m_info.device == VK_NULL_HANDLE) {
         return;
     }
+    if (!m_pendingUploads.empty()) {
+        vkQueueWaitIdle(m_info.uploadQueue);
+        collectCompletedUploads();
+    }
     for (auto& [id, texture] : m_textures) {
         destroyTexture(texture);
     }
@@ -734,9 +835,11 @@ void UiRenderer::shutdown() {
     m_pipeline = VK_NULL_HANDLE;
     m_pipelineLayout = VK_NULL_HANDLE;
     m_descriptorPool = VK_NULL_HANDLE;
+    m_descriptorSet = VK_NULL_HANDLE;
     m_setLayout = VK_NULL_HANDLE;
     m_uploadPool = VK_NULL_HANDLE;
     m_sampler = VK_NULL_HANDLE;
+    m_maxTextureCount = 0;
 }
 
 }  // namespace odai::render

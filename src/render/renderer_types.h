@@ -18,7 +18,7 @@ enum class FramePacingMode : std::uint8_t {
 struct FramePacingSettings {
     FramePacingMode mode = FramePacingMode::Passive;
     std::uint32_t cadenceDivisor = 1;
-    std::uint32_t maxQueuedFrames = 2;
+    std::uint32_t maxQueuedFrames = 1;
 };
 
 struct FramePacingStats {
@@ -42,6 +42,14 @@ struct FramePacingStats {
     float cpuWaitTransferMs = 0.0f;
     bool gpuTimestampsPending = false;
     std::uint64_t desiredPresentTimeNs = 0;
+};
+
+struct UiRenderStats {
+    std::uint32_t textureSlots = 0;
+    std::uint32_t commandCount = 0;
+    std::uint32_t drawCallCount = 0;
+    std::uint64_t dynamicUploadBytes = 0;
+    std::uint64_t skippedDrawCalls = 0;
 };
 
 enum class ShadowMode : std::uint8_t {
