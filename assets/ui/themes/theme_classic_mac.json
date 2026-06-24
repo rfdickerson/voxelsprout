@@ -46,5 +46,12 @@
     "iconSize":     16,
     "borderRadius":  4,
     "scrollBarW":   15
+  },
+  "svgIcons": {
+    "mac.folder":     { "path": "assets/ui/icons/classic_mac/folder.svg",     "size": 32 },
+    "mac.document":   { "path": "assets/ui/icons/classic_mac/document.svg",   "size": 26 },
+    "mac.trash":      { "path": "assets/ui/icons/classic_mac/trash.svg",      "size": 28 },
+    "mac.arrow_up":   { "path": "assets/ui/icons/classic_mac/arrow_up.svg",   "size": 10 },
+    "mac.arrow_down": { "path": "assets/ui/icons/classic_mac/arrow_down.svg", "size": 10 }
   }
 }

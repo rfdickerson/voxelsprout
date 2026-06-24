@@ -46,5 +46,12 @@
     "iconSize":     18,
     "borderRadius":  0,
     "scrollBarW":   16
+  },
+  "svgIcons": {
+    "motif.close":    { "path": "assets/ui/icons/motif/close.svg",    "size": 12 },
+    "motif.iconify":  { "path": "assets/ui/icons/motif/iconify.svg",  "size": 12 },
+    "motif.maximize": { "path": "assets/ui/icons/motif/maximize.svg", "size": 12 },
+    "motif.folder":   { "path": "assets/ui/icons/motif/folder.svg",   "size": 32 },
+    "motif.document": { "path": "assets/ui/icons/motif/document.svg", "size": 26 }
   }
 }

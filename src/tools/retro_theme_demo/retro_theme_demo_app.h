@@ -40,6 +40,11 @@ private:
     // ── Interactive controls ──────────────────────────────────────────────────
     // Draw a button in hover/pressed state; returns true the frame it is clicked.
     bool drawButton(ui::UiRect r, const char* label, float s);
+    // Draw a bevel button with a vector icon centered inside it.
+    bool drawIconButton(ui::UiRect r, std::string_view iconName, float s);
+    // Draw a desktop icon (vector icon + label below). Label may be null.
+    void drawDesktopIcon(float x, float y, float sz,
+                         std::string_view iconName, const char* label, float s);
 
     // Draws a horizontal menu-title strip.  Handles hover, click-to-open, and
     // hover-switching between open menus.  Writes m_dropdownX/Y when a menu

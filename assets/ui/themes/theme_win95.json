@@ -46,5 +46,14 @@
     "iconSize":     16,
     "borderRadius":  0,
     "scrollBarW":   17
+  },
+  "svgIcons": {
+    "win95.close":    { "path": "assets/ui/icons/win95/close.svg",    "size": 11 },
+    "win95.minimize": { "path": "assets/ui/icons/win95/minimize.svg", "size": 11 },
+    "win95.maximize": { "path": "assets/ui/icons/win95/maximize.svg", "size": 11 },
+    "win95.restore":  { "path": "assets/ui/icons/win95/restore.svg",  "size": 11 },
+    "win95.folder":   { "path": "assets/ui/icons/win95/folder.svg",   "size": 32 },
+    "win95.document": { "path": "assets/ui/icons/win95/document.svg", "size": 26 },
+    "win95.drive":    { "path": "assets/ui/icons/win95/drive.svg",    "size": 28 }
   }
 }
