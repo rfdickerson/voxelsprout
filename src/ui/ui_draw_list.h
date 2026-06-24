@@ -1,7 +1,9 @@
 #pragma once
 
 #include "ui/ui_types.h"
+#include "ui/vector/vector_path.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 #include <vector>
@@ -12,6 +14,7 @@
 namespace odai::ui {
 
 class Font;
+struct StrokeOptions;  // ui/vector/vector_tessellator.h
 
 // Per-vertex draw mode. The low 8 bits of UiVertex::mode select this mode; the
 // remaining bits hold the bindless UI texture slot. One command can therefore
@@ -111,6 +114,10 @@ public:
     // gradient cleanly. Use for progress bar fills with cornerRadiusPx > 0.
     void addRoundRectFilledHGradient(const UiRect& rect, const UiColor& left,
                                      const UiColor& right, float radiusPx);
+    // Rounded-rect fill with a vertical gradient (top→bottom). Same SDF-masked
+    // path as the horizontal variant; use for soft duotone "gradient cards".
+    void addRoundRectFilledVGradient(const UiRect& rect, const UiColor& top,
+                                     const UiColor& bottom, float radiusPx);
     void addRect(const UiRect& rect, const UiColor& color, float thicknessPx = 1.0f);
 
     // --- Vector primitives (resolution-independent, anti-aliased SDF) ---
@@ -153,6 +160,18 @@ public:
                          float startAngleRad, float endAngleRad, const UiColor& color,
                          int numSteps = 32);
 
+    // --- Procedural vector paths (CPU-tessellated, anti-aliased) ---
+    // Fill an arbitrary path (curves/arcs/polygons). Subpaths are treated as
+    // closed; holes and concave shapes are handled per the fill rule. The result
+    // is a triangle mesh with a feathered AA fringe, emitted as SolidColor.
+    void addPathFilled(const VectorPath& path, const UiColor& color,
+                       FillRule fillRule = FillRule::NonZero);
+    // Stroke an arbitrary path with width/join/cap from `opts`.
+    void addPathStroked(const VectorPath& path, const UiColor& color, const StrokeOptions& opts);
+    // Convenience: stroke a polyline of `count` points with a round-join/cap line.
+    void addPolylineAA(const UiVec2* points, std::size_t count, const UiColor& color,
+                       float widthPx, bool closed = false);
+
     // Draw a single line of text with the top-left baseline box at posPx; returns
     // the pen x advance. Newlines are not interpreted (use RichText for layout).
     float addText(const Font& font, std::string_view utf8, const UiVec2& posPx, const UiColor& color);
@@ -176,6 +195,12 @@ public:
     void addQuad(const UiRect& dst, const UiRect& uv, std::uint32_t rgba8, UiDrawMode mode,
                  UiTextureId textureId, const float sdf[4] = nullptr);
 
+    // Low-level triangle-mesh emission. Vertices are taken as-is (pixel space);
+    // the current opacity scales their alpha and indices are rebased into the
+    // live buffer. Used by the vector tessellator (addPath*) and cached icons.
+    void addTriangleMesh(const UiVertex* vertices, std::size_t vertexCount,
+                         const std::uint32_t* indices, std::size_t indexCount);
+
     // Append a cached geometry block, translating its vertices by `translate` and
     // re-emitting its commands under the current clip (rebasing indices). Lets a
     // widget skip layout + quad generation when nothing but position changed.
@@ -188,6 +213,17 @@ public:
     // Remainder indices (non-multiple of 6, e.g. sector triangles) are passed through.
     void appendCachedClipped(const UiGeometryBlock& block, const UiVec2& translate,
                              float yLocalMin, float yLocalMax);
+
+    // Like appendCached, but multiplies every vertex color (channel-wise, incl.
+    // alpha) by `tintMul` before emission. Recolors a monochrome cached glyph
+    // without re-tessellating. Pass white (1,1,1,1) for no tint.
+    void appendCachedTinted(const UiGeometryBlock& block, const UiVec2& translate,
+                            const UiColor& tintMul);
+
+    // Resolve a vector icon by name from VectorIconRegistry::global() and draw it
+    // fitted into `dst` (uniform aspect-preserving scale). `tint` multiplies the
+    // baked colors; pass default white to draw the icon's own colors.
+    void addVectorIcon(std::string_view name, const UiRect& dst, const UiColor& tint = UiColor{});
 
 private:
     // Ensure the current command matches the current clip; texture selection is

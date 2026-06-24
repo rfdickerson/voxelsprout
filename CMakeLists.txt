@@ -21,6 +21,21 @@ else()
     set(ODAI_STB_INCLUDE_DIRS "")
 endif()
 
+# nanosvg (nanosvg.h) for the SVG icon importer. Header-only like stb, so we just
+# need its include dir; src/ui/vector/svg_document.cc guards its body with
+# __has_include so odai_ui still builds (the importer degrades to a no-op) when
+# nanosvg is absent. ODAI_NANOSVG_INCLUDE_DIR overrides for headless builds.
+find_path(ODAI_NANOSVG_INCLUDE_DIR NAMES nanosvg.h nanosvg/nanosvg.h)
+if(ODAI_NANOSVG_INCLUDE_DIR)
+    set(ODAI_NANOSVG_INCLUDE_DIRS "${ODAI_NANOSVG_INCLUDE_DIR}")
+    message(STATUS "odai_ui: nanosvg found (${ODAI_NANOSVG_INCLUDE_DIR})")
+elseif(DEFINED ODAI_NANOSVG_INCLUDE_DIR_OVERRIDE)
+    set(ODAI_NANOSVG_INCLUDE_DIRS "${ODAI_NANOSVG_INCLUDE_DIR_OVERRIDE}")
+else()
+    set(ODAI_NANOSVG_INCLUDE_DIRS "")
+    message(STATUS "odai_ui: nanosvg.h not found - SVG importer compiles as a no-op")
+endif()
+
 # Optional Slang shader compilation (to SPIR-V for Vulkan).
 # Produces .slang.spv files next to the source shaders.
 find_program(SLANGC_EXECUTABLE NAMES slangc)
@@ -215,6 +230,11 @@ add_library(odai_ui STATIC
     src/ui/widgets/resource_bar_panel.cc
     src/ui/widgets/selection_inspector_panel.cc
     src/ui/widgets/sim_controls_panel.cc
+    src/ui/vector/vector_path.cc
+    src/ui/vector/vector_tessellator.cc
+    src/ui/vector/vector_icon_registry.cc
+    src/ui/vector/vector_cache_io.cc
+    src/ui/vector/svg_document.cc
 )
 target_include_directories(odai_ui
     PUBLIC
@@ -222,6 +242,7 @@ target_include_directories(odai_ui
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${ODAI_STB_INCLUDE_DIRS}
+        ${ODAI_NANOSVG_INCLUDE_DIRS}
 )
 target_link_libraries(odai_ui PUBLIC nlohmann_json::nlohmann_json)
 target_compile_features(odai_ui PUBLIC cxx_std_20)
@@ -719,6 +740,50 @@ if(ODAI_BUILD_APP)
         else()
             target_compile_options(odai_ui_editor PRIVATE -Wall -Wextra -Wpedantic)
         endif()
+
+    # ---------------------------------------------------------------------------
+    # odai_retro_theme_demo — Windows 95 / Motif-CDE theme showcase (Vulkan)
+    # ---------------------------------------------------------------------------
+        add_executable(odai_retro_theme_demo
+            src/tools/retro_theme_demo/retro_theme_demo_main.cc
+            src/tools/retro_theme_demo/retro_theme_demo_app.cc
+            src/engine/game_app.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_retro_theme_demo PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_retro_theme_demo PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_retro_theme_demo PRIVATE
+            odai_ui odai_ui_vulkan odai_audio
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_retro_theme_demo PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_retro_theme_demo PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_retro_theme_demo slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_retro_theme_demo PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_retro_theme_demo PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
     endif()
 endif()
 
@@ -826,6 +891,19 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_dds_bundler PRIVATE ${ODAI_WARN_FLAGS_MSVC})
     else()
         target_compile_options(odai_dds_bundler PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    # SVG bundler — offline .svg → .odaivec tessellated geometry cache. Run once
+    # per icon directory; VectorIconRegistry prefers a fresh .odaivec sidecar.
+    #   odai_svg_bundler <file.svg> [...]
+    #   odai_svg_bundler --dir <directory> [--sizes 16,32,64] [--out <dir>]
+    add_executable(odai_svg_bundler src/tools/svg_bundler_main.cc)
+    target_link_libraries(odai_svg_bundler PRIVATE odai_ui)
+    target_include_directories(odai_svg_bundler PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_svg_bundler PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_svg_bundler PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
     # Theme viewer — artist tool for iterating on theme JSON files with live
@@ -1070,6 +1148,17 @@ if(BUILD_TESTING)
         target_compile_options(odai_ui_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_ui_tests COMMAND odai_ui_tests)
+
+    # Vector graphics + SVG importer: path flattening, fill/stroke tessellation,
+    # AA fringe, cache round-trip, inline-SVG parse. Headless, links only odai_ui.
+    add_executable(odai_svg_vector_tests tests/svg_vector_tests.cc)
+    target_link_libraries(odai_svg_vector_tests PRIVATE odai_ui)
+    if(MSVC)
+        target_compile_options(odai_svg_vector_tests PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_svg_vector_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_svg_vector_tests COMMAND odai_svg_vector_tests)
 
     # Audio subsystem: headless NullBackend behavior (no device, no miniaudio).
     # Compiles only the facade + null backend so it builds/runs anywhere.

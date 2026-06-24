@@ -3,6 +3,7 @@
 #include "ui/font.h"
 #include "ui/ui_draw_list.h"
 #include "ui/ui_types.h"
+#include "ui/vector/vector_icon_registry.h"
 
 #include <filesystem>
 #include <functional>
@@ -10,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace odai::ui {
 
@@ -76,6 +78,11 @@ public:
     // Returns nullopt if not found.
     std::optional<UiNineSlice> frame(std::string_view key) const;
 
+    // Look up a vector (SVG) icon declared in this theme's "svgIcons" section.
+    // Returns nullptr if the key was not registered by this theme. The geometry
+    // lives in VectorIconRegistry::global(); draw it via UiDrawList::addVectorIcon.
+    const VectorIcon* vectorIcon(std::string_view key) const;
+
     // Look up a numeric size token (e.g. "titleBarH", "gap"). Returns 0 if not found.
     float size(std::string_view key) const;
 
@@ -93,6 +100,7 @@ private:
     std::unordered_map<std::string, UiNineSlice>          m_frames;
     std::unordered_map<std::string, float>                m_sizes;
     std::unordered_map<std::string, UiVec2>               m_sizeVec2s;
+    std::unordered_set<std::string>                       m_vectorIcons;
 };
 
 }  // namespace odai::ui

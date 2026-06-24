@@ -1,0 +1,50 @@
+{
+  "name": "MacClassic",
+  "fonts": {
+    "body":      { "path": "assets/fonts/Inter-Bold.ttf",     "size": 13 },
+    "bold":      { "path": "assets/fonts/Inter-Bold.ttf",     "size": 13 },
+    "italic":    { "path": "assets/fonts/Inter-Italic.ttf",   "size": 13 },
+    "boldItalic":{ "path": "assets/fonts/Inter-Bold.ttf",     "size": 13 },
+    "heading":   { "path": "assets/fonts/Inter-Bold.ttf",     "size": 16 },
+    "caption":   { "path": "assets/fonts/Inter-Regular.ttf",  "size": 12 },
+    "numeric":   { "path": "assets/fonts/Inter-Regular.ttf",  "size": 12 }
+  },
+  "colors": {
+    "text":            "#000000",
+    "text.dim":        "#666666",
+    "text.positive":   "#006600",
+    "text.negative":   "#CC0000",
+    "text.gold":       "#664400",
+
+    "panel.bg":        "#FFFFFF",
+    "panel.bgRaised":  "#EEEEEE",
+    "panel.border":    "#000000",
+
+    "accent":          "#000000",
+    "accent.hover":    "#333333",
+
+    "tooltip.bg":      "#FFFFE0",
+    "tooltip.text":    "#000000",
+
+    "selection":       "#000000",
+    "selection.text":  "#FFFFFF",
+
+    "scrollbar":       "#FFFFFF",
+    "scrollbar.bg":    "#DDDDDD",
+
+    "yield.food":       "#006600",
+    "yield.production": "#664400",
+    "yield.gold":       "#886600",
+    "yield.science":    "#000088",
+    "yield.culture":    "#660066",
+    "yield.faith":      "#444444"
+  },
+  "sizes": {
+    "padding":      [8, 6],
+    "titleBarH":    20,
+    "gap":           4,
+    "iconSize":     16,
+    "borderRadius":  4,
+    "scrollBarW":   15
+  }
+}

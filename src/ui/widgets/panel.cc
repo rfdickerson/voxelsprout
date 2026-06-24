@@ -45,6 +45,112 @@ void Panel::styleCard(float s, float alpha) {
     shadowOffsetY = 3.0f * s;
 }
 
+void Panel::styleSoft(float s, UiColor tint) {
+    // Soft "neumorphic" card: a light fill that sits on a same-family light
+    // background, lifted by a symmetric pair of soft shadows — dark down-right,
+    // light up-left — for a gently extruded, low-contrast look. Mirrors the
+    // reference palette (fill #E4EBF1, dark shadow #161B1D@23%, light #FAFBFF).
+    bgTop.reset();    // solid fill -> draw() takes the rounded-fill path
+    bgBottom.reset();
+    background        = tint;
+    borderColor       = UiColor{};   // no hard border; the shadows define the edge
+    borderThicknessPx = 0.0f;
+    cornerRadiusPx    = 18.0f * s;   // generously rounded, the soft-UI signature
+    innerBorderColor   = UiColor{};
+    innerBorderInsetPx = 0.0f;
+    cornerAccentColor  = UiColor{};
+    cornerAccentPx     = 0.0f;
+    showBevel     = false;
+    showShadow    = true;
+    shadowColor   = UiColor{0.086f, 0.106f, 0.114f, 0.23f};  // #161B1D @ 23%
+    shadowBlurPx  = 9.0f * s;
+    shadowOffsetX = 6.0f * s;        // cast down-right...
+    shadowOffsetY = 6.0f * s;
+    liftShadowColor = UiColor{0.980f, 0.984f, 1.0f, 0.9f};   // #FAFBFF highlight up-left
+}
+
+void Panel::styleGradientCard(float s, const UiColor& top, const UiColor& bottom,
+                              float alpha) {
+    // Full-bleed duotone tile: a vertical gradient clipped to rounded corners,
+    // no border, one soft shadow for separation. The gradient stops carry the
+    // whole look (e.g. sunset orange→pink, ocean blue→teal).
+    bgTop    = UiColor{top.r,    top.g,    top.b,    top.a    * alpha};
+    bgBottom = UiColor{bottom.r, bottom.g, bottom.b, bottom.a * alpha};
+    background = *bgBottom;           // fallback if the gradient path is bypassed
+    borderColor       = UiColor{};
+    borderThicknessPx = 0.0f;
+    cornerRadiusPx    = 14.0f * s;
+    innerBorderColor   = UiColor{};
+    innerBorderInsetPx = 0.0f;
+    cornerAccentColor  = UiColor{};
+    cornerAccentPx     = 0.0f;
+    showBevel     = false;
+    showShadow    = true;
+    shadowColor   = UiColor{0.0f, 0.0f, 0.0f, 0.30f};
+    shadowBlurPx  = 12.0f * s;
+    shadowOffsetX = 0.0f;
+    shadowOffsetY = 6.0f * s;
+    liftShadowColor = UiColor{};
+}
+
+void Panel::styleWin95(float s, bool raised) {
+    // Win95 "Redmond" palette: COLOR_BTNFACE silver fill, outer black border,
+    // two-tone bevel (white highlight / #808080 shadow). No gradient, no radius.
+    bgTop.reset();
+    bgBottom.reset();
+    background           = UiColor{0.753f, 0.753f, 0.753f, 1.0f};  // #C0C0C0
+    borderColor          = UiColor{0.0f,   0.0f,   0.0f,   1.0f};  // #000000
+    borderThicknessPx    = 1.0f * s;
+    cornerRadiusPx       = 0.0f;
+    innerBorderColor     = UiColor{};
+    innerBorderInsetPx   = 0.0f;
+    cornerAccentColor    = UiColor{};
+    cornerAccentPx       = 0.0f;
+    showBevel            = true;
+    bevelHighlightColor  = UiColor{1.0f,   1.0f,   1.0f,   1.0f};  // #FFFFFF
+    bevelShadowColor     = UiColor{0.502f, 0.502f, 0.502f, 1.0f};  // #808080
+    bevelThicknessPx     = 2.0f * s;
+    bevelInward          = !raised;
+    showShadow           = false;
+}
+
+void Panel::styleMotif(float s, bool raised) {
+    // Motif / CDE palette: blue-gray fill (#AEB2C3), dark outer stroke,
+    // two-tone bevel using the characteristic CDE lighter/darker tones.
+    bgTop.reset();
+    bgBottom.reset();
+    background           = UiColor{0.682f, 0.698f, 0.765f, 1.0f};  // #AEB2C3
+    borderColor          = UiColor{0.298f, 0.314f, 0.376f, 1.0f};  // #4C5060
+    borderThicknessPx    = 1.0f * s;
+    cornerRadiusPx       = 0.0f;
+    innerBorderColor     = UiColor{};
+    innerBorderInsetPx   = 0.0f;
+    cornerAccentColor    = UiColor{};
+    cornerAccentPx       = 0.0f;
+    showBevel            = true;
+    bevelHighlightColor  = UiColor{0.871f, 0.878f, 0.914f, 1.0f};  // #DDE0EB
+    bevelShadowColor     = UiColor{0.416f, 0.431f, 0.498f, 1.0f};  // #6A6E7F
+    bevelThicknessPx     = 2.0f * s;
+    bevelInward          = !raised;
+    showShadow           = false;
+}
+
+void Panel::styleClassicMac(float s) {
+    bgTop.reset();
+    bgBottom.reset();
+    background           = UiColor{1.0f, 1.0f, 1.0f, 1.0f};  // white
+    borderColor          = UiColor{0.0f, 0.0f, 0.0f, 1.0f};  // black
+    borderThicknessPx    = 1.0f * s;
+    cornerRadiusPx       = 0.0f;
+    innerBorderColor     = UiColor{};
+    innerBorderInsetPx   = 0.0f;
+    cornerAccentColor    = UiColor{};
+    cornerAccentPx       = 0.0f;
+    showBevel            = false;
+    bevelInward          = false;
+    showShadow           = false;  // callers draw Mac window shadows manually
+}
+
 void Panel::update(float dt) {
     backgroundAnim.update(dt);
     bgTopAnim.update(dt);
@@ -52,6 +158,12 @@ void Panel::update(float dt) {
 }
 
 void Panel::draw(UiDrawList& drawList) const {
+    // Neumorphic lift highlight: a light shadow cast opposite the main one, drawn
+    // first so the darker main shadow layers over it where they meet.
+    if (liftShadowColor.a > 0.0f && shadowBlurPx > 0.0f) {
+        drawList.addDropShadow(rect_, liftShadowColor, shadowBlurPx,
+                               -shadowOffsetX, -shadowOffsetY);
+    }
     if (showShadow) {
         drawList.addDropShadow(rect_, shadowColor, shadowBlurPx, shadowOffsetX, shadowOffsetY);
     }
@@ -63,6 +175,13 @@ void Panel::draw(UiDrawList& drawList) const {
                        || (!bgTopAnim.idle() && !bgBotAnim.idle());
     if (nineSlice.has_value()) {
         drawList.add9Slice(rect_, *nineSlice, effectiveBg);
+    } else if (gradient && cornerRadiusPx > 0.0f) {
+        // Rounded duotone gradient card: the SDF fill clips the gradient to the
+        // corners; a matching rounded stroke when a border is configured.
+        drawList.addRoundRectFilledVGradient(rect_, effectiveBgT, effectiveBgB, cornerRadiusPx);
+        if (borderThicknessPx > 0.0f && borderColor.a > 0.0f) {
+            drawList.addRoundRect(rect_, borderColor, cornerRadiusPx, borderThicknessPx);
+        }
     } else if (gradient) {
         drawList.addRectFilledVGradient(rect_, effectiveBgT, effectiveBgB);
         if (borderThicknessPx > 0.0f && borderColor.a > 0.0f) {

@@ -2,6 +2,9 @@
 
 #include "ui/font.h"
 #include "ui/ui_text_util.h"
+#include "ui/vector/vector_icon_registry.h"
+#include "ui/vector/vector_mesh_sink.h"
+#include "ui/vector/vector_tessellator.h"
 
 #include <algorithm>
 #include <cmath>
@@ -87,6 +90,27 @@ void UiDrawList::addQuad(const UiRect& dst, const UiRect& uv, std::uint32_t rgba
     m_data.indices.push_back(base + 2);
     m_data.indices.push_back(base + 3);
     cmd.indexCount += 6;
+}
+
+void UiDrawList::addTriangleMesh(const UiVertex* vertices, std::size_t vertexCount,
+                                 const std::uint32_t* indices, std::size_t indexCount) {
+    if (vertexCount == 0 || indexCount == 0 || vertices == nullptr || indices == nullptr) {
+        return;
+    }
+    const float opacity = currentOpacity();
+    UiDrawCmd& cmd = currentCommand();
+    const auto base = static_cast<std::uint32_t>(m_data.vertices.size());
+    m_data.vertices.reserve(m_data.vertices.size() + vertexCount);
+    for (std::size_t i = 0; i < vertexCount; ++i) {
+        UiVertex v = vertices[i];
+        v.rgba8 = scaleAlpha(v.rgba8, opacity);
+        m_data.vertices.push_back(v);
+    }
+    m_data.indices.reserve(m_data.indices.size() + indexCount);
+    for (std::size_t i = 0; i < indexCount; ++i) {
+        m_data.indices.push_back(base + indices[i]);
+    }
+    cmd.indexCount += static_cast<std::uint32_t>(indexCount);
 }
 
 void UiDrawList::appendCached(const UiGeometryBlock& block, const UiVec2& translate) {
@@ -182,6 +206,54 @@ void UiDrawList::appendCachedClipped(const UiGeometryBlock& block, const UiVec2&
     }
 }
 
+namespace {
+
+// Multiply a packed ABGR8 color by a per-channel tint (each 0..1). Used to
+// recolor cached geometry. Tinting alpha by tint.a folds the icon's own
+// translucency together with the requested tint.
+std::uint32_t tintAbgr8(std::uint32_t rgba8, const UiColor& tint) {
+    auto mul = [](std::uint32_t c, float f) -> std::uint32_t {
+        const float v = static_cast<float>(c) * (f < 0.0f ? 0.0f : f);
+        const auto r = static_cast<std::uint32_t>(v + 0.5f);
+        return r > 255u ? 255u : r;
+    };
+    const std::uint32_t r = mul(rgba8 & 0xFFu, tint.r);
+    const std::uint32_t g = mul((rgba8 >> 8) & 0xFFu, tint.g);
+    const std::uint32_t b = mul((rgba8 >> 16) & 0xFFu, tint.b);
+    const std::uint32_t a = mul((rgba8 >> 24) & 0xFFu, tint.a);
+    return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+}  // namespace
+
+void UiDrawList::appendCachedTinted(const UiGeometryBlock& block, const UiVec2& translate,
+                                    const UiColor& tintMul) {
+    if (block.vertices.empty() || block.commands.empty()) {
+        return;
+    }
+    const auto base = static_cast<std::uint32_t>(m_data.vertices.size());
+    const float opacity = currentOpacity();
+    m_data.vertices.reserve(m_data.vertices.size() + block.vertices.size());
+    for (const UiVertex& v : block.vertices) {
+        UiVertex out = v;
+        out.posPx[0] += translate.x;
+        out.posPx[1] += translate.y;
+        out.rgba8 = scaleAlpha(tintAbgr8(out.rgba8, tintMul), opacity);
+        m_data.vertices.push_back(out);
+    }
+    for (const UiDrawCmd& blockCmd : block.commands) {
+        if (blockCmd.indexCount == 0) {
+            continue;
+        }
+        UiDrawCmd& dst = currentCommand();
+        m_data.indices.reserve(m_data.indices.size() + blockCmd.indexCount);
+        for (std::uint32_t k = 0; k < blockCmd.indexCount; ++k) {
+            m_data.indices.push_back(base + block.indices[blockCmd.indexOffset + k]);
+        }
+        dst.indexCount += blockCmd.indexCount;
+    }
+}
+
 void UiDrawList::addRectFilled(const UiRect& rect, const UiColor& color) {
     if (!rect.valid()) {
         return;
@@ -264,6 +336,42 @@ void UiDrawList::addRoundRectFilledHGradient(const UiRect& rect, const UiColor& 
     m_data.vertices.push_back(UiVertex{{dst.maxX, dst.minY}, { halfW + feather, -halfH - feather}, rRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
     m_data.vertices.push_back(UiVertex{{dst.maxX, dst.maxY}, { halfW + feather,  halfH + feather}, rRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
     m_data.vertices.push_back(UiVertex{{dst.minX, dst.maxY}, {-halfW - feather,  halfH + feather}, lRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
+    m_data.indices.push_back(base + 0);
+    m_data.indices.push_back(base + 1);
+    m_data.indices.push_back(base + 2);
+    m_data.indices.push_back(base + 0);
+    m_data.indices.push_back(base + 2);
+    m_data.indices.push_back(base + 3);
+    cmd.indexCount += 6;
+}
+
+void UiDrawList::addRoundRectFilledVGradient(const UiRect& rect, const UiColor& top,
+                                             const UiColor& bottom, float radiusPx) {
+    if (!rect.valid() || (top.a <= 0.0f && bottom.a <= 0.0f)) return;
+    const float halfW  = rect.width()  * 0.5f;
+    const float halfH  = rect.height() * 0.5f;
+    const float r      = std::min(std::max(radiusPx, 0.0f), std::min(halfW, halfH));
+    const float feather = 1.5f;
+    const UiRect dst{rect.minX - feather, rect.minY - feather,
+                     rect.maxX + feather, rect.maxY + feather};
+    // sdf: {halfW, halfH, cornerRadius, borderPx=0 (fill)}
+    const float sdf[4] = {halfW, halfH, r, 0.0f};
+
+    const float opacity = currentOpacity();
+    const std::uint32_t tRgba = scaleAlpha(top.packAbgr8(),    opacity);
+    const std::uint32_t bRgba = scaleAlpha(bottom.packAbgr8(), opacity);
+
+    UiDrawCmd& cmd = currentCommand();
+    const auto base     = static_cast<std::uint32_t>(m_data.vertices.size());
+    const auto modeBits = static_cast<std::uint32_t>(UiDrawMode::RoundRect);
+
+    // UV encodes the pixel offset from the rect center (same convention as
+    // emitRoundRect). Top edge → top color, bottom edge → bottom color; the SDF
+    // mask clips the interpolated gradient to the rounded shape.
+    m_data.vertices.push_back(UiVertex{{dst.minX, dst.minY}, {-halfW - feather, -halfH - feather}, tRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
+    m_data.vertices.push_back(UiVertex{{dst.maxX, dst.minY}, { halfW + feather, -halfH - feather}, tRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
+    m_data.vertices.push_back(UiVertex{{dst.maxX, dst.maxY}, { halfW + feather,  halfH + feather}, bRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
+    m_data.vertices.push_back(UiVertex{{dst.minX, dst.maxY}, {-halfW - feather,  halfH + feather}, bRgba, modeBits, {sdf[0], sdf[1], sdf[2], sdf[3]}});
     m_data.indices.push_back(base + 0);
     m_data.indices.push_back(base + 1);
     m_data.indices.push_back(base + 2);
@@ -531,6 +639,64 @@ void UiDrawList::addSectorFilled(const UiVec2& center, float innerRadiusPx, floa
             m_data.indices.push_back(base + 3);
             cmd.indexCount += 6;
         }
+    }
+}
+
+void UiDrawList::addPathFilled(const VectorPath& path, const UiColor& color, FillRule fillRule) {
+    if (color.a <= 0.0f || path.empty()) {
+        return;
+    }
+    TessOptions opts;
+    opts.fillRule = fillRule;
+    DrawListMeshSink sink(*this);
+    tessellateFill(path, color.packAbgr8(), opts, sink);
+}
+
+void UiDrawList::addPathStroked(const VectorPath& path, const UiColor& color,
+                                const StrokeOptions& opts) {
+    if (color.a <= 0.0f || path.empty() || opts.widthPx <= 0.0f) {
+        return;
+    }
+    DrawListMeshSink sink(*this);
+    tessellateStroke(path, color.packAbgr8(), opts, sink);
+}
+
+void UiDrawList::addPolylineAA(const UiVec2* points, std::size_t count, const UiColor& color,
+                               float widthPx, bool closed) {
+    if (points == nullptr || count < 2 || color.a <= 0.0f || widthPx <= 0.0f) {
+        return;
+    }
+    VectorPath path;
+    path.moveTo(points[0].x, points[0].y);
+    for (std::size_t i = 1; i < count; ++i) {
+        path.lineTo(points[i].x, points[i].y);
+    }
+    if (closed) {
+        path.close();
+    }
+    StrokeOptions opts;
+    opts.widthPx = widthPx;
+    opts.join = LineJoin::Round;
+    opts.cap = LineCap::Round;
+    addPathStroked(path, color, opts);
+}
+
+void UiDrawList::addVectorIcon(std::string_view name, const UiRect& dst, const UiColor& tint) {
+    if (!dst.valid()) {
+        return;
+    }
+    const VectorIcon* icon = VectorIconRegistry::global().resolve(name);
+    if (icon == nullptr || icon->geometry.empty() || icon->sizePx <= 0.0f) {
+        return;
+    }
+    // Geometry is baked at icon->sizePx in a [0..sizePx] box. Translate so the
+    // box's top-left lands at dst's top-left (uniform scale handled at bake time;
+    // mismatched dst sizes are positioned, not rescaled — see registry docs).
+    const UiVec2 translate{dst.minX, dst.minY};
+    if (tint.r == 1.0f && tint.g == 1.0f && tint.b == 1.0f && tint.a == 1.0f) {
+        appendCached(icon->geometry, translate);
+    } else {
+        appendCachedTinted(icon->geometry, translate, tint);
     }
 }
 

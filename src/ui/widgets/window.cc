@@ -121,28 +121,31 @@ void Window::draw(UiDrawList& dl) const {
     }
 
     // Close button: beveled rounded square with a "×" glyph.
-    // No drop shadow — the bevel alone carries the elevation. Resting state reads as
-    // a raised key (top-lit highlight, bottom shadow); on hover it turns warm red and
-    // the bevel flips inward so the button visibly depresses.
+    // Resting: raised key (top-lit highlight, bottom shadow). Hover: warm red,
+    // bevel flips inward so the button visibly depresses.
     if (showCloseButton && font_ != nullptr) {
         const UiRect cb = closeBtnRect();
-        const float r = cb.width() * 0.14f;  // subtle, squared-off corners
-        const float bev = 1.5f;  // bevel edge width in pixels
+        const float r = cb.width() * 0.18f;
 
-        // Base fill: neutral slate at rest, warm red on hover.
+        // Base fill.
         const UiColor baseFill = closeHovered_
             ? UiColor{0.55f, 0.16f, 0.12f, 1.0f}
             : UiColor{0.27f, 0.30f, 0.35f, 1.0f};
         dl.addRoundRectFilled(cb, baseFill, r);
 
-        // Bevel: stronger now that it does the elevation work on its own. The `inward`
-        // flag on hover swaps highlight/shadow for a pressed look.
-        const UiColor hlColor{1.0f, 1.0f, 1.0f, 0.35f};
-        const UiColor shColor{0.0f, 0.0f, 0.0f, 0.55f};
-        dl.addBevel(cb, hlColor, shColor, r, bev, /*inward=*/closeHovered_);
+        // Outer silhouette drawn first so the bevel highlight isn't occluded by it.
+        dl.addRoundRect(cb, UiColor{0.0f, 0.0f, 0.0f, 0.55f}, r, 1.0f);
 
-        // Thin defining edge over the bevel.
-        dl.addRoundRect(cb, UiColor{0.0f, 0.0f, 0.0f, 0.45f}, r, 1.0f);
+        // Bevel drawn on an inset rect so it sits cleanly inside the silhouette
+        // and the two don't compete on the same pixels.
+        constexpr float kInset = 1.0f;
+        constexpr float kBev   = 1.5f;
+        const UiRect inner{cb.minX + kInset, cb.minY + kInset,
+                           cb.maxX - kInset, cb.maxY - kInset};
+        const float ri = std::max(0.0f, r - kInset);
+        const UiColor hlColor{1.0f, 1.0f, 1.0f, 0.50f};
+        const UiColor shColor{0.0f, 0.0f, 0.0f, 0.65f};
+        dl.addBevel(inner, hlColor, shColor, ri, kBev, /*inward=*/closeHovered_);
 
         // "×" glyph centered in the button.
         const char kTimes[] = "\xc3\x97";

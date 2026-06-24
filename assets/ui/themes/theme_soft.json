@@ -1,0 +1,53 @@
+{
+  "name": "SoftNeumorphic",
+  "fonts": {
+    "body":      { "path": "assets/fonts/Inter-Regular.ttf",   "size": 16 },
+    "bold":      { "path": "assets/fonts/Inter-Bold.ttf",      "size": 16 },
+    "italic":    { "path": "assets/fonts/Inter-Italic.ttf",    "size": 16 },
+    "boldItalic":{ "path": "assets/fonts/Inter-Bold.ttf",      "size": 16 },
+    "heading":   { "path": "assets/fonts/Inter-Bold.ttf",      "size": 22 },
+    "caption":   { "path": "assets/fonts/Inter-Regular.ttf",   "size": 13 },
+    "numeric":   { "path": "assets/fonts/Inter-Regular.ttf",   "size": 16 }
+  },
+  "colors": {
+    "text":            "#3A4754",
+    "text.dim":        "#6E7F8D",
+    "text.positive":   "#5FB07A",
+    "text.negative":   "#D77A6E",
+    "text.gold":       "#B59A55",
+
+    "panel.bg":        "#E4EBF1",
+    "panel.bgRaised":  "#EFF2F9",
+    "panel.border":    "#FFFFFF00",
+
+    "accent":          "#6E7F8D",
+    "accent.hover":    "#8A99A6",
+
+    "tooltip.bg":      "#EFF2F9",
+    "tooltip.text":    "#3A4754",
+
+    "selection":       "#6E7F8D33",
+    "selection.text":  "#3A4754",
+
+    "scrollbar":       "#B5BFC6",
+    "scrollbar.bg":    "#E4EBF1",
+
+    "shadow.dark":     "#161B1D3B",
+    "shadow.light":    "#FAFBFFFF",
+
+    "yield.food":       "#5FB07A",
+    "yield.production": "#B59A55",
+    "yield.gold":       "#C9A24B",
+    "yield.science":    "#5A8FC0",
+    "yield.culture":    "#9B7FC0",
+    "yield.faith":      "#8A99A6"
+  },
+  "sizes": {
+    "padding":      [16, 12],
+    "titleBarH":    34,
+    "gap":           10,
+    "iconSize":     20,
+    "borderRadius": 18,
+    "scrollBarW":    8
+  }
+}

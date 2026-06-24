@@ -1,0 +1,50 @@
+{
+  "name": "MotifCDE",
+  "fonts": {
+    "body":      { "path": "assets/fonts/Inter-Regular.ttf",  "size": 15 },
+    "bold":      { "path": "assets/fonts/Inter-Bold.ttf",     "size": 15 },
+    "italic":    { "path": "assets/fonts/Inter-Italic.ttf",   "size": 15 },
+    "boldItalic":{ "path": "assets/fonts/Inter-Bold.ttf",     "size": 15 },
+    "heading":   { "path": "assets/fonts/Inter-Bold.ttf",     "size": 18 },
+    "caption":   { "path": "assets/fonts/Inter-Regular.ttf",  "size": 13 },
+    "numeric":   { "path": "assets/fonts/Inter-Regular.ttf",  "size": 15 }
+  },
+  "colors": {
+    "text":            "#000000",
+    "text.dim":        "#5A5A6A",
+    "text.positive":   "#007700",
+    "text.negative":   "#880000",
+    "text.gold":       "#7A6600",
+
+    "panel.bg":        "#AEB2C3",
+    "panel.bgRaised":  "#C5C8D6",
+    "panel.border":    "#4C5060",
+
+    "accent":          "#5F5F9E",
+    "accent.hover":    "#7878BB",
+
+    "tooltip.bg":      "#FFFFC0",
+    "tooltip.text":    "#000000",
+
+    "selection":       "#5F5F9E",
+    "selection.text":  "#FFFFFF",
+
+    "scrollbar":       "#AEB2C3",
+    "scrollbar.bg":    "#7A7E8E",
+
+    "yield.food":       "#2E8B2E",
+    "yield.production": "#8B5A2E",
+    "yield.gold":       "#8B7D00",
+    "yield.science":    "#2E4E8B",
+    "yield.culture":    "#6E2E8B",
+    "yield.faith":      "#5A5A7A"
+  },
+  "sizes": {
+    "padding":      [10, 6],
+    "titleBarH":    24,
+    "gap":           6,
+    "iconSize":     18,
+    "borderRadius":  0,
+    "scrollBarW":   16
+  }
+}

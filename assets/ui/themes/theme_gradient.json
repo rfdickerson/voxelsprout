@@ -1,0 +1,59 @@
+{
+  "name": "DuotoneGradient",
+  "fonts": {
+    "body":      { "path": "assets/fonts/Inter-Regular.ttf",   "size": 16 },
+    "bold":      { "path": "assets/fonts/Inter-Bold.ttf",      "size": 16 },
+    "italic":    { "path": "assets/fonts/Inter-Italic.ttf",    "size": 16 },
+    "boldItalic":{ "path": "assets/fonts/Inter-Bold.ttf",      "size": 16 },
+    "heading":   { "path": "assets/fonts/Inter-Bold.ttf",      "size": 26 },
+    "caption":   { "path": "assets/fonts/Inter-Regular.ttf",   "size": 13 },
+    "numeric":   { "path": "assets/fonts/Inter-Bold.ttf",      "size": 16 }
+  },
+  "colors": {
+    "text":            "#FFFFFF",
+    "text.dim":        "#FFFFFFB0",
+    "text.positive":   "#A6F0C6",
+    "text.negative":   "#F6B3A8",
+    "text.gold":       "#FFE6A1",
+
+    "panel.bg":        "#1E2230",
+    "panel.bgRaised":  "#2A3042",
+    "panel.border":    "#FFFFFF1A",
+
+    "accent":          "#F2994A",
+    "accent.hover":    "#F2C94C",
+
+    "tooltip.bg":      "#1E2230EE",
+    "tooltip.text":    "#FFFFFF",
+
+    "selection":       "#FFFFFF33",
+    "selection.text":  "#FFFFFF",
+
+    "scrollbar":       "#FFFFFF40",
+    "scrollbar.bg":    "#00000030",
+
+    "gradient.sunset.top":    "#F2C94C",
+    "gradient.sunset.bottom": "#F2682A",
+    "gradient.ocean.top":     "#2D9CDB",
+    "gradient.ocean.bottom":  "#1B7A8C",
+    "gradient.berry.top":     "#C86DD7",
+    "gradient.berry.bottom":  "#3023AE",
+    "gradient.dusk.top":      "#5B5BD6",
+    "gradient.dusk.bottom":   "#1A1A2E",
+
+    "yield.food":       "#6FCF97",
+    "yield.production": "#F2994A",
+    "yield.gold":       "#F2C94C",
+    "yield.science":    "#56CCF2",
+    "yield.culture":    "#BB6BD9",
+    "yield.faith":      "#E0E0E0"
+  },
+  "sizes": {
+    "padding":      [16, 12],
+    "titleBarH":    34,
+    "gap":           12,
+    "iconSize":     22,
+    "borderRadius": 14,
+    "scrollBarW":    6
+  }
+}
