@@ -1,10 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 26 32">
-  <path d="M0,0 L18,0 L26,8 L26,32 L0,32 Z"
-        fill="#FFFFFF" stroke="#000000" stroke-width="1" stroke-linejoin="round"/>
-  <polygon points="18,0 18,8 26,8" fill="#808080"/>
-  <line x1="18" y1="0" x2="18" y2="8" stroke="#000000" stroke-width="1"/>
-  <line x1="18" y1="8" x2="26" y2="8" stroke="#000000" stroke-width="1"/>
-  <line x1="3" y1="14" x2="23" y2="14" stroke="#B0B0B0" stroke-width="1"/>
-  <line x1="3" y1="19" x2="23" y2="19" stroke="#B0B0B0" stroke-width="1"/>
-  <line x1="3" y1="24" x2="15" y2="24" stroke="#B0B0B0" stroke-width="1"/>
+  <!-- Page -->
+  <path d="M1,1 L17,1 L25,9 L25,31 L1,31 Z"
+        fill="#FFFFFF" stroke="#5A5A5A" stroke-width="1" stroke-linejoin="round"/>
+  <!-- Folded corner (shaded) -->
+  <path d="M17,1 L17,9 L25,9 Z"
+        fill="#D6D6D6" stroke="#5A5A5A" stroke-width="1" stroke-linejoin="round"/>
+  <!-- Blue text lines -->
+  <rect x="4" y="14" width="17" height="1.6" fill="#3F6FB5"/>
+  <rect x="4" y="18" width="17" height="1.6" fill="#3F6FB5"/>
+  <rect x="4" y="22" width="17" height="1.6" fill="#3F6FB5"/>
+  <rect x="4" y="26" width="11" height="1.6" fill="#3F6FB5"/>
 </svg>

@@ -460,7 +460,61 @@ bool RetroDemoApp::onInit() {
     reg1("retros.minimize", "assets/ui/icons/retros/minimize.svg", 11.f);
     reg1("retros.maximize", "assets/ui/icons/retros/maximize.svg", 11.f);
 
+    // Host real interactive widgets (sliders, text fields) skinned per theme.
+    m_retroUi.init();
+
     return true;
+}
+
+WidgetSkin RetroDemoApp::widgetSkin() const {
+    const ThemePalette& pal = palette();
+    const float s = contentScale();
+    auto lighten = [](UiColor c, float a) {
+        return UiColor{std::min(1.f, c.r + a), std::min(1.f, c.g + a), std::min(1.f, c.b + a), c.a};
+    };
+    auto darken = [](UiColor c, float a) {
+        return UiColor{std::max(0.f, c.r - a), std::max(0.f, c.g - a), std::max(0.f, c.b - a), c.a};
+    };
+
+    WidgetSkin k;
+    k.scale = s;
+    k.face = pal.face;
+    k.faceHover = lighten(pal.face, 0.06f);
+    k.facePressed = darken(pal.face, 0.08f);
+    k.text = pal.text;
+    k.textDim = pal.textDim;
+    k.accent = pal.highlight;
+    k.field = {1, 1, 1, 1};
+    k.border = {0, 0, 0, 1};
+    k.bevelLight = {1, 1, 1, 1};
+    k.bevelDark = darken(pal.face, 0.33f);
+
+    switch (m_theme) {
+        case Theme::Win95:
+        case Theme::Motif:
+            k.bevel = true;
+            k.cornerRadius = 0.f;
+            k.trough = darken(pal.face, 0.18f);
+            break;
+        case Theme::ClassicMac:
+            k.bevel = false;
+            k.cornerRadius = 0.f;
+            k.trough = {0.85f, 0.85f, 0.85f, 1};
+            break;
+        case Theme::FlatRetro:
+            k.bevel = false;
+            k.cornerRadius = std::round(kFlatR * 0.6f * s);
+            k.trough = {0.80f, 0.78f, 0.72f, 1};
+            k.border = kFlatInk;
+            break;
+        case Theme::RetroOS:
+            k.bevel = false;
+            k.cornerRadius = std::round(4.f * s);
+            k.trough = {0.88f, 0.88f, 0.88f, 1};
+            k.border = {0.70f, 0.70f, 0.70f, 1};
+            break;
+    }
+    return k;
 }
 
 // ─── Input (mouse + keyboard) ─────────────────────────────────────────────────
@@ -479,12 +533,19 @@ void RetroDemoApp::onTick(float dt) {
     if (k5 && !m_prevKey5) { m_theme = Theme::RetroOS;    m_openMenu = -1; m_macWinPosInit = false; }
     m_prevKey1 = k1; m_prevKey2 = k2; m_prevKey3 = k3; m_prevKey4 = k4; m_prevKey5 = k5;
 
-    // Mouse — convert GLFW logical coords to framebuffer coords
+    // Mouse — convert GLFW cursor (screen coords) to framebuffer pixels. The
+    // correct factor is framebuffer/window, NOT the DPI content scale: on Windows
+    // (no GLFW_SCALE_TO_MONITOR) the framebuffer already equals the window in
+    // pixels, so cursor maps 1:1; on macOS-retina the ratio is the backing scale.
     double cx, cy;
     glfwGetCursorPos(m_window, &cx, &cy);
-    const float sc = contentScale();
-    m_mouseX = static_cast<float>(cx) * sc;
-    m_mouseY = static_cast<float>(cy) * sc;
+    int winW = 0, winH = 0, fbW = 0, fbH = 0;
+    glfwGetWindowSize(m_window, &winW, &winH);
+    glfwGetFramebufferSize(m_window, &fbW, &fbH);
+    const float msx = winW > 0 ? static_cast<float>(fbW) / static_cast<float>(winW) : 1.0f;
+    const float msy = winH > 0 ? static_cast<float>(fbH) / static_cast<float>(winH) : 1.0f;
+    m_mouseX = static_cast<float>(cx) * msx;
+    m_mouseY = static_cast<float>(cy) * msy;
 
     m_lmbWasDown   = m_lmbDown;
     m_lmbDown      = (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS);
@@ -729,7 +790,7 @@ void RetroDemoApp::drawWindow(float wx, float wy, float ww, float wh, float s) {
 
 // ─── Render ───────────────────────────────────────────────────────────────────
 
-void RetroDemoApp::onRender(float /*dt*/) {
+void RetroDemoApp::onRender(float dt) {
     beginFrameDraw();
 
     const ThemePalette& pal  = palette();
@@ -742,6 +803,10 @@ void RetroDemoApp::onRender(float /*dt*/) {
     framebufferSize(fwi, fhi);
     const float fw = static_cast<float>(fwi);
     const float fh = static_cast<float>(fhi);
+
+    // Start the interactive-widget frame: hide all, reskin for the current theme.
+    // Scene draw calls below re-show the widgets they reference.
+    m_retroUi.beginFrame(widgetSkin());
 
     m_uiDrawList.addRectFilled(UiRect::fromXYWH(0, 0, fw, fh), pal.desktop);
 
@@ -789,6 +854,11 @@ void RetroDemoApp::onRender(float /*dt*/) {
                                                  : UiColor{1,1,1, isMac ? 0.5f : 0.75f};
         m_uiDrawList.addText(fn, buf, {std::round((fw-tw)*0.5f), ty}, hintCol);
     }
+
+    // Dispatch input to the interactive widgets (framebuffer-space mouse + the
+    // frame's text codepoints), then append their geometry above the chrome.
+    m_retroUi.update({m_mouseX, m_mouseY}, m_lmbDown, {fw, fh}, m_uiInput.textInput, dt);
+    m_retroUi.append(m_uiDrawList);
 
     // ── Dropdown drawn LAST so it always layers above all content ─────────────
     drawMenuDropdown(s);
@@ -1375,15 +1445,11 @@ void RetroDemoApp::drawFlatInterface(float fw, float fh, float s) {
         m_uiDrawList.addSectorFilled(pc,            0, 12.f*s, -0.6f, 0.6f, ink, 8);
         m_uiDrawList.addSectorFilled({pc.x+22.f*s, pc.y}, 0, 8.f*s, -0.6f, 0.6f, ink, 8);
         m_uiDrawList.addSectorFilled({pc.x+30.f*s, pc.y}, 0, 8.f*s, -0.6f, 0.6f, ink, 8);
-        // Slider
-        const float sy = ct.minY + disc + std::round(2.f*s);
-        const float sx0 = ct.minX, sx1 = ct.maxX;
-        m_uiDrawList.addRoundRectFilled({sx0, sy, sx1, sy+std::round(6.f*s)},
-            {0.80f,0.78f,0.72f,1.f}, 3.f*s);
-        const float knobX = sx0 + (sx1-sx0)*0.4f;
-        m_uiDrawList.addRoundRectFilled({sx0, sy, knobX, sy+std::round(6.f*s)}, kFlatBlue, 3.f*s);
-        m_uiDrawList.addCircleFilled({knobX, sy+std::round(3.f*s)}, std::round(7.f*s), {1,1,1,1});
-        m_uiDrawList.addCircle({knobX, sy+std::round(3.f*s)}, std::round(7.f*s), ink, std::round(2.f*s));
+        // Slider — real, draggable widget (skinned for the active theme).
+        const float scy = ct.minY + disc + std::round(8.f*s);
+        const float knobR = std::round(7.f*s);
+        m_retroUi.slider("flat.audio.pos",
+            {ct.minX, scy - knobR, ct.maxX, scy + knobR});
         textLine(fn, "Band - Track#_01.mp3", ct.minX, ct.maxY-lh, dim);
     }
 
@@ -1394,11 +1460,12 @@ void RetroDemoApp::drawFlatInterface(float fw, float fh, float s) {
         drawIconAvatar(ct.minX+(ct.width()-av)*0.5f, ct.minY, av, s);
         const float fh2 = std::round(24.f*s);
         float fy = ct.minY + av + std::round(8.f*s);
-        drawFlatField(UiRect::fromXYWH(ct.minX, fy, ct.width(), fh2), false, s);
-        textLine(fn, "LOGIN", ct.minX+8.f*s, fy+(fh2-lh)*0.5f, dim);
+        // Real, typeable text fields (placeholder shows the label until typed).
+        m_retroUi.textBox("flat.signin.login",
+            UiRect::fromXYWH(ct.minX, fy, ct.width(), fh2), &fn, "LOGIN");
         fy += fh2 + std::round(8.f*s);
-        drawFlatField(UiRect::fromXYWH(ct.minX, fy, ct.width(), fh2), false, s);
-        textLine(fn, "Password", ct.minX+8.f*s, fy+(fh2-lh)*0.5f, dim);
+        m_retroUi.textBox("flat.signin.pwd",
+            UiRect::fromXYWH(ct.minX, fy, ct.width(), fh2), &fn, "Password");
         fy += fh2 + std::round(6.f*s);
         textLine(fn, "Forgot password?", ct.minX, fy, dim);
         const float bh = std::round(26.f*s), bw = std::round(70.f*s);
@@ -1413,9 +1480,11 @@ void RetroDemoApp::drawFlatInterface(float fw, float fh, float s) {
         textLine(fnB, "Mail To:", ct.minX, ct.minY, ink);
         const float fh2 = std::round(22.f*s);
         float fy = ct.minY + lh*1.3f;
-        drawFlatField(UiRect::fromXYWH(ct.minX, fy, ct.width(), fh2), true, s);
+        m_retroUi.textBox("flat.mail.to",
+            UiRect::fromXYWH(ct.minX, fy, ct.width(), fh2), &fn, "recipient@host");
         fy += fh2 + std::round(7.f*s);
-        drawFlatField(UiRect::fromXYWH(ct.minX, fy, ct.width(), fh2), true, s);
+        m_retroUi.textBox("flat.mail.subject",
+            UiRect::fromXYWH(ct.minX, fy, ct.width(), fh2), &fn, "Subject");
         fy += fh2 + std::round(8.f*s);
         // Message body lines
         for (int i = 0; i < 3; ++i)
@@ -1713,14 +1782,7 @@ void RetroDemoApp::drawRetroOsInterface(float fw, float fh, float s) {
 
         lcy = label("INPUT", x0, lcy);
         const UiRect inp = UiRect::fromXYWH(x0, lcy, colW, std::round(30.f*s));
-        m_uiDrawList.addRectFilled(inp, {1,1,1,1});
-        m_uiDrawList.addRect(inp, kOsBlue, t);
-        m_uiDrawList.addText(fn, "Type command",
-            {inp.minX+std::round(8.f*s), inp.minY+(inp.height()-lh)*0.5f}, kOsGray);
-        m_uiDrawList.addRectFilled(
-            {inp.minX+std::round(8.f*s)+fn.measureText("Type command")+2.f*s,
-             inp.minY+std::round(6.f*s), inp.minX+std::round(8.f*s)+fn.measureText("Type command")+2.f*s+t,
-             inp.maxY-std::round(6.f*s)}, kOsInk);
+        m_retroUi.textBox("os.input", inp, &fn, "Type command");
         lcy += std::round(30.f*s) + gap;
 
         lcy = label("CHECKBOX", x0, lcy);

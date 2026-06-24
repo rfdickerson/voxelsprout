@@ -1,6 +1,7 @@
 #pragma once
 #include "engine/game_app.h"
 #include "render/renderer_types.h"
+#include "tools/retro_theme_demo/retro_widgets.h"
 #include "ui/font.h"
 #include "ui/ui_types.h"
 
@@ -21,6 +22,9 @@ protected:
 
 private:
     const ThemePalette& palette() const;
+    // Build the interactive-widget skin for the current theme (maps the palette
+    // onto RetroUi's WidgetSkin so the real widgets match the procedural chrome).
+    WidgetSkin widgetSkin() const;
     const ui::Font& themeFont() const;
     const ui::Font& themeFontBold() const;
     // Returns the item list (null-terminated) for menu index idx in the current theme.
@@ -95,6 +99,9 @@ private:
     void drawRetroOsInterface(float fw, float fh, float s);
     // Monochrome line icon. kind: 0=folder 1=gear 2=doc 3=chart 4=trash 5=image
     void drawOsIcon(int kind, float x, float y, float sz, ui::UiColor col, float s);
+
+    // ── Interactive widgets (real ui:: components, skinned per theme) ──────────
+    RetroUi  m_retroUi;
 
     // ── Theme ─────────────────────────────────────────────────────────────────
     Theme    m_theme   = Theme::Win95;
