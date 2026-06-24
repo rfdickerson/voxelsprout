@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Neck -->
+  <rect x="13" y="3" width="6" height="5" rx="2" fill="#9A70C5"/>
+  <!-- Rim -->
+  <rect x="10" y="7" width="12" height="3" rx="1.5" fill="#9A70C5"/>
+  <!-- Amphora body -->
+  <path d="M12 10 Q5 14 5 20 Q5 28 16 28 Q27 28 27 20 Q27 14 20 10Z" fill="#B58BD6"/>
+  <!-- Left handle -->
+  <path d="M12 13 Q5 17 8 22" stroke="#9A70C5" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <!-- Right handle -->
+  <path d="M20 13 Q27 17 24 22" stroke="#9A70C5" stroke-width="3" fill="none" stroke-linecap="round"/>
+</svg>

@@ -3,6 +3,7 @@
 #include "ui/font.h"
 #include "ui/icon_atlas.h"
 #include "ui/ui_draw_list.h"
+#include "ui/vector/vector_icon_registry.h"
 
 namespace odai::ui {
 
@@ -39,11 +40,19 @@ const char* iconName(Toolbar::IconKind kind) {
 }  // namespace
 
 void Toolbar::drawIcon(UiDrawList& dl, IconKind kind, const UiColor& color, const UiRect& box) const {
-    UiIconEntry entry;
     const char* name = iconName(kind);
-    if (name[0] != '\0' && UiIconRegistry::global().resolve(name, entry)) {
-        dl.addImage(box, entry.textureId, UiColor{1.0f, 1.0f, 1.0f, color.a}, entry.uv);
-        return;
+    if (name[0] != '\0') {
+        // Vector icons scale crisp at any DPI; check registry first.
+        if (VectorIconRegistry::global().resolve(name) != nullptr) {
+            dl.addVectorIcon(name, box);
+            return;
+        }
+        // Fall back to PNG atlas.
+        UiIconEntry entry;
+        if (UiIconRegistry::global().resolve(name, entry)) {
+            dl.addImage(box, entry.textureId, UiColor{1.0f, 1.0f, 1.0f, color.a}, entry.uv);
+            return;
+        }
     }
 
     const UiVec2 c{(box.minX + box.maxX) * 0.5f, (box.minY + box.maxY) * 0.5f};

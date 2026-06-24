@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Neck -->
+  <rect x="12" y="3" width="8" height="9" rx="2" fill="#4A8AD0"/>
+  <!-- Collar bar -->
+  <rect x="10" y="10" width="12" height="3" rx="1" fill="#3A7AC0"/>
+  <!-- Flask body -->
+  <path d="M10 13 L5 25 Q5 29 16 29 Q27 29 27 25 L22 13Z" fill="#5AA6EF"/>
+  <!-- Bubble large -->
+  <circle cx="12" cy="23" r="2.5" fill="#8EC4F8"/>
+  <!-- Bubble small -->
+  <circle cx="20" cy="20" r="1.8" fill="#8EC4F8"/>
+</svg>

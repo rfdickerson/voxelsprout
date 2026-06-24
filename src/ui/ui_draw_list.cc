@@ -689,14 +689,50 @@ void UiDrawList::addVectorIcon(std::string_view name, const UiRect& dst, const U
     if (icon == nullptr || icon->geometry.empty() || icon->sizePx <= 0.0f) {
         return;
     }
-    // Geometry is baked at icon->sizePx in a [0..sizePx] box. Translate so the
-    // box's top-left lands at dst's top-left (uniform scale handled at bake time;
-    // mismatched dst sizes are positioned, not rescaled — see registry docs).
-    const UiVec2 translate{dst.minX, dst.minY};
-    if (tint.r == 1.0f && tint.g == 1.0f && tint.b == 1.0f && tint.a == 1.0f) {
-        appendCached(icon->geometry, translate);
-    } else {
-        appendCachedTinted(icon->geometry, translate, tint);
+    // Scale geometry baked at icon->sizePx to fill dst (uniform, centered).
+    const float dstW = dst.width();
+    const float dstH = dst.height();
+    const float scale = std::min(dstW, dstH) / icon->sizePx;
+    const float ox = dst.minX + (dstW - icon->sizePx * scale) * 0.5f;
+    const float oy = dst.minY + (dstH - icon->sizePx * scale) * 0.5f;
+
+    const bool identityScale = std::abs(scale - 1.0f) < 0.001f;
+    const bool identityTint  = (tint.r == 1.0f && tint.g == 1.0f && tint.b == 1.0f && tint.a == 1.0f);
+
+    if (identityScale) {
+        const UiVec2 translate{ox, oy};
+        if (identityTint)
+            appendCached(icon->geometry, translate);
+        else
+            appendCachedTinted(icon->geometry, translate, tint);
+        return;
+    }
+
+    // Scaled replay: apply (scale, translate) per vertex.
+    const UiGeometryBlock& block = icon->geometry;
+    const auto base = static_cast<std::uint32_t>(m_data.vertices.size());
+    const float opacity = currentOpacity();
+    m_data.vertices.reserve(m_data.vertices.size() + block.vertices.size());
+    for (const UiVertex& v : block.vertices) {
+        UiVertex out = v;
+        out.posPx[0] = ox + v.posPx[0] * scale;
+        out.posPx[1] = oy + v.posPx[1] * scale;
+        const std::uint32_t c = identityTint
+            ? scaleAlpha(v.rgba8, opacity)
+            : tintAbgr8(scaleAlpha(v.rgba8, opacity), tint);
+        out.rgba8 = c;
+        m_data.vertices.push_back(out);
+    }
+    for (const UiDrawCmd& blockCmd : block.commands) {
+        if (blockCmd.indexCount == 0) {
+            continue;
+        }
+        UiDrawCmd& dstCmd = currentCommand();
+        m_data.indices.reserve(m_data.indices.size() + blockCmd.indexCount);
+        for (std::uint32_t k = 0; k < blockCmd.indexCount; ++k) {
+            m_data.indices.push_back(base + block.indices[blockCmd.indexOffset + k]);
+        }
+        dstCmd.indexCount += blockCmd.indexCount;
     }
 }
 
