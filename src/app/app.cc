@@ -16,6 +16,7 @@
 #include "math/math.h"
 #include "sim/network_procedural.h"
 #include "ui/icon_atlas.h"
+#include "ui/vector/vector_icon_registry.h"
 #include "ui/widgets/button.h"
 #include "ui/widgets/donut_chart.h"
 #include "ui/widgets/notable_entity_panel.h"
@@ -3729,6 +3730,27 @@ void App::setupHud(float viewW, float viewH) {
             }
         } else if (ipx != nullptr) {
             stbi_image_free(ipx);
+        }
+    }
+
+    // SVG vector yield icons — tessellated on first load, cached as .odaivec.
+    // The toolbar prefers these over the PNG atlas so icons stay crisp at any DPI.
+    {
+        constexpr float iconSz = 48.0f;
+        constexpr float dpiSc  = 1.0f;
+        static constexpr std::array<std::pair<const char*, const char*>, 6> kYieldSvgs = {{
+            {"food",       "assets/icons/yields/food.svg"},
+            {"production", "assets/icons/yields/production.svg"},
+            {"gold",       "assets/icons/yields/gold.svg"},
+            {"science",    "assets/icons/yields/science.svg"},
+            {"culture",    "assets/icons/yields/culture.svg"},
+            {"faith",      "assets/icons/yields/faith.svg"},
+        }};
+        for (const auto& [svgName, rel] : kYieldSvgs) {
+            const std::filesystem::path svgPath = resolveAssetPath(rel);
+            if (!odai::ui::VectorIconRegistry::global().registerFromFile(svgName, svgPath, iconSz, dpiSc)) {
+                VOX_LOGW("ui") << "yield SVG unavailable: " << svgPath.string();
+            }
         }
     }
 

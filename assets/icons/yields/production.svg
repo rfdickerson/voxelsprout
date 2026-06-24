@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Hammer head -->
+  <rect x="4" y="4" width="24" height="13" rx="3" fill="#EFB24A"/>
+  <!-- Face highlight -->
+  <rect x="4" y="4" width="9" height="13" rx="3" fill="#F8C870"/>
+  <!-- Handle -->
+  <rect x="13" y="16" width="6" height="13" rx="3" fill="#8B6030"/>
+</svg>

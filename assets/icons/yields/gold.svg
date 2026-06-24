@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Coin shadow/depth -->
+  <circle cx="16" cy="17" r="13" fill="#C8901A"/>
+  <!-- Coin face -->
+  <circle cx="16" cy="16" r="13" fill="#F2D24A"/>
+  <!-- Inner ring -->
+  <circle cx="16" cy="16" r="8" fill="none" stroke="#C8901A" stroke-width="2"/>
+  <!-- Shine -->
+  <circle cx="11" cy="11" r="3" fill="#FDE880"/>
+</svg>
