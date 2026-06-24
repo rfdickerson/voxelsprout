@@ -747,6 +747,7 @@ if(ODAI_BUILD_APP)
         add_executable(odai_retro_theme_demo
             src/tools/retro_theme_demo/retro_theme_demo_main.cc
             src/tools/retro_theme_demo/retro_theme_demo_app.cc
+            src/tools/retro_theme_demo/retro_widgets.cc
             src/engine/game_app.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
@@ -1159,6 +1160,21 @@ if(BUILD_TESTING)
         target_compile_options(odai_svg_vector_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_svg_vector_tests COMMAND odai_svg_vector_tests)
+
+    # Retro demo's RetroUi widget wrapper: slider drag, textbox typing, toggle,
+    # visibility/skin. Headless (links odai_ui + the Vulkan-free retro_widgets.cc).
+    add_executable(odai_retro_widgets_tests
+        tests/retro_widgets_tests.cc
+        src/tools/retro_theme_demo/retro_widgets.cc
+    )
+    target_include_directories(odai_retro_widgets_tests PRIVATE src)
+    target_link_libraries(odai_retro_widgets_tests PRIVATE odai_ui)
+    if(MSVC)
+        target_compile_options(odai_retro_widgets_tests PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_retro_widgets_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_retro_widgets_tests COMMAND odai_retro_widgets_tests)
 
     # Audio subsystem: headless NullBackend behavior (no device, no miniaudio).
     # Compiles only the facade + null backend so it builds/runs anywhere.
