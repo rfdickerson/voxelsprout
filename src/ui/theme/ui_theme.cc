@@ -2,6 +2,7 @@
 
 #include "core/log.h"
 #include "ui/icon_atlas.h"
+#include "ui/vector/vector_icon_registry.h"
 
 #include <nlohmann/json.hpp>
 
@@ -200,9 +201,42 @@ bool UiTheme::loadFromFile(const std::filesystem::path& path, const UiTextureUpl
         }
     }
 
+    // --- Vector icons (SVG, tessellated into geometry — no GPU upload) ---
+    if (j.contains("svgIcons") && j["svgIcons"].is_object()) {
+        for (const auto& [key, val] : j["svgIcons"].items()) {
+            if (!val.is_object()) continue;
+            const std::string svgPath = val.value("path", "");
+            if (svgPath.empty()) continue;
+            const float sizePx = val.value("size", 32.0f);
+
+            std::filesystem::path resolved = svgPath;
+            if (resolved.is_relative()) {
+                const std::filesystem::path candidate = baseDir / resolved;
+                if (std::filesystem::exists(candidate)) {
+                    resolved = candidate;
+                }
+            }
+            if (VectorIconRegistry::global().registerFromFile(key, resolved, sizePx)) {
+                m_vectorIcons.insert(key);
+                VOX_LOGI("ui") << "UiTheme: registered svg icon '" << key << "' ("
+                               << static_cast<int>(sizePx) << "px)\n";
+            } else {
+                VOX_LOGW("ui") << "UiTheme: failed to load svg icon '" << key << "' from "
+                               << resolved.string() << "\n";
+            }
+        }
+    }
+
     m_loaded = true;
     VOX_LOGI("ui") << "UiTheme: loaded '" << m_name << "'\n";
     return true;
+}
+
+const VectorIcon* UiTheme::vectorIcon(std::string_view key) const {
+    if (m_vectorIcons.find(std::string(key)) == m_vectorIcons.end()) {
+        return nullptr;
+    }
+    return VectorIconRegistry::global().resolve(key);
 }
 
 UiColor UiTheme::color(std::string_view key) const {

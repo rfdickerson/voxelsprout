@@ -1164,6 +1164,66 @@ void testStyleCardPanelDraw() {
     expectTrue(sawRoundRect, "card panel uses the rounded-rect fill path");
 }
 
+void testStyleSoftPanelDraw() {
+    using namespace odai::ui;
+    Panel p;
+    p.setRect(UiRect::fromXYWH(10.0f, 10.0f, 200.0f, 120.0f));
+    p.styleSoft(1.0f);
+
+    // styleSoft is the neumorphic look: rounded solid fill, no border, and a
+    // pair of shadows (dark down-right + light lift up-left).
+    expectTrue(!p.bgTop.has_value() && !p.bgBottom.has_value(),
+               "styleSoft uses a solid fill, not a gradient");
+    expectTrue(p.cornerRadiusPx > 0.0f, "styleSoft rounds the corners generously");
+    expectTrue(p.borderThicknessPx == 0.0f, "styleSoft draws no hard border");
+    expectTrue(p.showShadow && p.liftShadowColor.a > 0.0f,
+               "styleSoft sets both the dark shadow and the light lift highlight");
+
+    UiDrawList dl;
+    dl.reset(UiVec2{400.0f, 400.0f});
+    p.draw(dl);
+    expectTrue(!dl.data().commands.empty(), "soft panel emits geometry");
+    bool sawRoundRect = false;
+    for (const auto& v : dl.data().vertices) {
+        if (v.mode == static_cast<std::uint32_t>(UiDrawMode::RoundRect)) { sawRoundRect = true; break; }
+    }
+    expectTrue(sawRoundRect, "soft panel uses the rounded-rect fill path");
+}
+
+void testStyleGradientCardPanelDraw() {
+    using namespace odai::ui;
+    Panel p;
+    p.setRect(UiRect::fromXYWH(10.0f, 10.0f, 200.0f, 120.0f));
+    p.styleGradientCard(1.0f, UiColor{0.95f, 0.79f, 0.30f, 1.0f},
+                              UiColor{0.95f, 0.41f, 0.16f, 1.0f});
+
+    // styleGradientCard is a duotone tile: a vertical gradient clipped to rounded
+    // corners, no border, one soft shadow.
+    expectTrue(p.bgTop.has_value() && p.bgBottom.has_value(),
+               "styleGradientCard sets both gradient stops");
+    expectTrue(p.cornerRadiusPx > 0.0f, "styleGradientCard rounds the corners");
+    expectTrue(p.showShadow, "styleGradientCard keeps a soft drop shadow");
+
+    UiDrawList dl;
+    dl.reset(UiVec2{400.0f, 400.0f});
+    p.draw(dl);
+    expectTrue(!dl.data().commands.empty(), "gradient card emits geometry");
+    // Rounded gradient fill routes through the RoundRect SDF path; the two stops
+    // must produce vertices of differing color.
+    bool sawRoundRect = false;
+    std::uint32_t firstRr = 0;
+    bool gotFirst = false, sawDistinctColor = false;
+    for (const auto& v : dl.data().vertices) {
+        if (v.mode == static_cast<std::uint32_t>(UiDrawMode::RoundRect)) {
+            sawRoundRect = true;
+            if (!gotFirst) { firstRr = v.rgba8; gotFirst = true; }
+            else if (v.rgba8 != firstRr) { sawDistinctColor = true; }
+        }
+    }
+    expectTrue(sawRoundRect, "gradient card uses the rounded-rect fill path");
+    expectTrue(sawDistinctColor, "gradient card emits a top/bottom color gradient");
+}
+
 void testResourceStyleFormat() {
     using namespace odai::ui;
 
@@ -1363,6 +1423,8 @@ int main() {
     testPanelAnimatedBackground();
     testOrnatePanelDraw();
     testStyleCardPanelDraw();
+    testStyleSoftPanelDraw();
+    testStyleGradientCardPanelDraw();
     testResourceStyleFormat();
     testNextTurnAction();
     testBindlessTextureBatching();

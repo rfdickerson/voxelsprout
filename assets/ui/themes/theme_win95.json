@@ -1,0 +1,50 @@
+{
+  "name": "Windows95",
+  "fonts": {
+    "body":      { "path": "assets/fonts/Inter-Regular.ttf",  "size": 14 },
+    "bold":      { "path": "assets/fonts/Inter-Bold.ttf",     "size": 14 },
+    "italic":    { "path": "assets/fonts/Inter-Italic.ttf",   "size": 14 },
+    "boldItalic":{ "path": "assets/fonts/Inter-Bold.ttf",     "size": 14 },
+    "heading":   { "path": "assets/fonts/Inter-Bold.ttf",     "size": 16 },
+    "caption":   { "path": "assets/fonts/Inter-Regular.ttf",  "size": 12 },
+    "numeric":   { "path": "assets/fonts/Inter-Regular.ttf",  "size": 14 }
+  },
+  "colors": {
+    "text":            "#000000",
+    "text.dim":        "#808080",
+    "text.positive":   "#008000",
+    "text.negative":   "#800000",
+    "text.gold":       "#808000",
+
+    "panel.bg":        "#C0C0C0",
+    "panel.bgRaised":  "#C0C0C0",
+    "panel.border":    "#000000",
+
+    "accent":          "#000080",
+    "accent.hover":    "#1084D0",
+
+    "tooltip.bg":      "#FFFFE1",
+    "tooltip.text":    "#000000",
+
+    "selection":       "#000080",
+    "selection.text":  "#FFFFFF",
+
+    "scrollbar":       "#C0C0C0",
+    "scrollbar.bg":    "#808080",
+
+    "yield.food":       "#008000",
+    "yield.production": "#804000",
+    "yield.gold":       "#808000",
+    "yield.science":    "#000080",
+    "yield.culture":    "#800080",
+    "yield.faith":      "#606060"
+  },
+  "sizes": {
+    "padding":      [8, 4],
+    "titleBarH":    22,
+    "gap":           4,
+    "iconSize":     16,
+    "borderRadius":  0,
+    "scrollBarW":   17
+  }
+}

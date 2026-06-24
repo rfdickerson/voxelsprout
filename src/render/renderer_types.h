@@ -18,7 +18,7 @@ enum class FramePacingMode : std::uint8_t {
 struct FramePacingSettings {
     FramePacingMode mode = FramePacingMode::Passive;
     std::uint32_t cadenceDivisor = 1;
-    std::uint32_t maxQueuedFrames = 1;
+    std::uint32_t maxQueuedFrames = 2;
 };
 
 struct FramePacingStats {

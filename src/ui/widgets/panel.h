@@ -49,6 +49,39 @@ public:
     // of the map shows through.
     void styleCard(float s, float alpha = 0.82f);
 
+    // Configure this panel with the soft "neumorphic" look: a light, near-opaque
+    // fill, generously rounded corners, no hard border, and a *pair* of soft
+    // shadows — a dark shadow cast down-right plus a light highlight lifted
+    // up-left (see liftShadowColor) — so the card reads as gently extruded from
+    // the surface. Works only over a light background of the same family. `s` is
+    // the DPI scale; pass the panel's fill `tint` to recolor it (defaults to the
+    // #E4EBF1 cool-grey from the reference palette).
+    void styleSoft(float s, UiColor tint = UiColor{0.894f, 0.922f, 0.945f, 1.0f});
+
+    // Configure this panel as a "duotone gradient card": a vertical color
+    // gradient fill (top→bottom) clipped to rounded corners, no border, and one
+    // soft drop shadow. Use for full-bleed feature tiles in the modern/travel
+    // style. `s` is the DPI scale; `top`/`bottom` are the gradient stops and
+    // `alpha` tunes overall translucency.
+    void styleGradientCard(float s, const UiColor& top, const UiColor& bottom,
+                           float alpha = 1.0f);
+
+    // Configure this panel with the Windows 95 / Redmond look: opaque silver-gray
+    // fill, square corners, a thin black outer border, and a two-tone raised bevel
+    // (white top-left / #808080 bottom-right). Pass raised=false for a recessed /
+    // pressed look (e.g. group-boxes or sunken fields).
+    void styleWin95(float s, bool raised = true);
+
+    // Configure this panel with the Motif / CDE look: opaque blue-gray fill,
+    // square corners, a dark outer stroke, and a two-tone raised bevel using the
+    // characteristic CDE highlight and shadow tones.
+    void styleMotif(float s, bool raised = true);
+
+    // Configure this panel with the Mac System 6/7 "Platinum" look: opaque white
+    // fill, 1px black border, square corners, no bevel. Drop shadows on windows
+    // are drawn manually as offset solid-black rects in the calling code.
+    void styleClassicMac(float s);
+
     // --- Bevel (raised / recessed 3-D edge) -----------------------------------
     // When showBevel is true, a two-tone border is drawn over the fill using
     // addBevel(). highlightColor lights the top edge; shadowColor darkens the
@@ -65,6 +98,12 @@ public:
     float   shadowBlurPx  = 8.0f;
     float   shadowOffsetX = 0.0f;
     float   shadowOffsetY = 4.0f;
+
+    // Optional second "lift" shadow for the soft/neumorphic look: a light
+    // highlight cast in the direction *opposite* the main shadow (the main
+    // offsets are negated), sharing shadowBlurPx. Drawn under the main shadow
+    // only when its alpha > 0. Off by default; set by styleSoft.
+    UiColor liftShadowColor{};
 
     // When true, child drawing is clipped to rect_ — useful for animated panels
     // whose height changes each frame (accordion, slide-in drawers, etc.).
