@@ -1,5 +1,6 @@
 #include "tools/retro_theme_demo/retro_theme_demo_app.h"
 
+#include "ui/vector/vector_icon_registry.h"
 #include "ui/vector/vector_path.h"
 #include "ui/vector/vector_tessellator.h"
 
@@ -233,6 +234,41 @@ bool RetroDemoApp::drawButton(UiRect r, const char* label, float s) {
     return hit;
 }
 
+// ─── Icon button ──────────────────────────────────────────────────────────────
+
+bool RetroDemoApp::drawIconButton(UiRect r, std::string_view iconName, float s) {
+    const bool hov = isHovered(r);
+    const bool dn  = isPressed(r);
+    const bool hit = m_justClicked && hov;
+    if (hit) m_clickHandled = true;
+    drawBevelPanel(r, !dn, s);
+    const float pad = std::round(3.f * s);
+    const float off = dn ? std::max(1.f, std::round(s)) : 0.f;
+    m_uiDrawList.addVectorIcon(iconName,
+        UiRect::fromXYWH(r.minX + pad + off, r.minY + pad + off,
+                         r.width()  - 2.f * pad,
+                         r.height() - 2.f * pad));
+    return hit;
+}
+
+// ─── Desktop icon (vector icon + label) ──────────────────────────────────────
+
+void RetroDemoApp::drawDesktopIcon(float x, float y, float sz,
+                                    std::string_view iconName,
+                                    const char* label, float s) {
+    m_uiDrawList.addVectorIcon(iconName, UiRect::fromXYWH(x, y, sz, sz));
+    if (label && *label) {
+        const Font& fn = themeFont();
+        const float tw = fn.measureText(label);
+        const UiColor bg{0,0,0,0.55f};
+        const float lh = fn.lineHeightPx();
+        const float lx = x + (sz - tw) * 0.5f;
+        const float ly = y + sz + 2.f * s;
+        m_uiDrawList.addRectFilled(UiRect::fromXYWH(lx - 2.f, ly, tw + 4.f, lh), bg);
+        m_uiDrawList.addText(fn, label, {lx, ly}, {1, 1, 1, 1});
+    }
+}
+
 // ─── Menu strip (horizontal title bar) ───────────────────────────────────────
 
 void RetroDemoApp::drawMenuStrip(float barX, float barY, float barW, float barH,
@@ -392,6 +428,38 @@ bool RetroDemoApp::onInit() {
     loadHeading(m_osH1, 34.f);
     loadHeading(m_osH2, 22.f);
     loadHeading(m_osH3, 16.f);
+
+    // Register SVG icons for all retro themes. Sizes are at DPI=1; the registry
+    // bakes at sizePx logical units and the draw call scales to the dest rect.
+    auto& reg = ui::VectorIconRegistry::global();
+    auto reg1 = [&](std::string_view name, const char* rel, float sz) {
+        reg.registerFromFile(name, resolveAssetPath(rel), sz * s, s);
+    };
+    // Win95 window controls + desktop icons
+    reg1("win95.close",    "assets/ui/icons/win95/close.svg",    11.f);
+    reg1("win95.minimize", "assets/ui/icons/win95/minimize.svg", 11.f);
+    reg1("win95.maximize", "assets/ui/icons/win95/maximize.svg", 11.f);
+    reg1("win95.restore",  "assets/ui/icons/win95/restore.svg",  11.f);
+    reg1("win95.folder",   "assets/ui/icons/win95/folder.svg",   32.f);
+    reg1("win95.document", "assets/ui/icons/win95/document.svg", 26.f);
+    reg1("win95.drive",    "assets/ui/icons/win95/drive.svg",    28.f);
+    // Motif window controls + desktop icons
+    reg1("motif.close",    "assets/ui/icons/motif/close.svg",    12.f);
+    reg1("motif.iconify",  "assets/ui/icons/motif/iconify.svg",  12.f);
+    reg1("motif.maximize", "assets/ui/icons/motif/maximize.svg", 12.f);
+    reg1("motif.folder",   "assets/ui/icons/motif/folder.svg",   32.f);
+    reg1("motif.document", "assets/ui/icons/motif/document.svg", 26.f);
+    // Mac Classic Finder icons + scrollbar arrows
+    reg1("mac.folder",     "assets/ui/icons/classic_mac/folder.svg",     32.f);
+    reg1("mac.document",   "assets/ui/icons/classic_mac/document.svg",   26.f);
+    reg1("mac.trash",      "assets/ui/icons/classic_mac/trash.svg",      28.f);
+    reg1("mac.arrow_up",   "assets/ui/icons/classic_mac/arrow_up.svg",   10.f);
+    reg1("mac.arrow_down", "assets/ui/icons/classic_mac/arrow_down.svg", 10.f);
+    // Retro-OS (Win10-flat) white icons for blue title bars
+    reg1("retros.close",    "assets/ui/icons/retros/close.svg",    11.f);
+    reg1("retros.minimize", "assets/ui/icons/retros/minimize.svg", 11.f);
+    reg1("retros.maximize", "assets/ui/icons/retros/maximize.svg", 11.f);
+
     return true;
 }
 
@@ -549,13 +617,19 @@ void RetroDemoApp::drawWindow(float wx, float wy, float ww, float wh, float s) {
         m_uiDrawList.addText(fnB, "Display Properties",
             {titleRect.minX+6.f*s, titleRect.minY+(titleH-lhB)*0.5f}, pal.titleText);
 
-        // Control buttons (X, □, _) — interactive
+        // Control buttons with SVG icons — close, maximize, minimize
         const float cbSz = std::round(18.f*s);
+        const bool isWin = (m_theme == Theme::Win95);
+        const std::string_view kBtnIcons[3] = {
+            isWin ? "win95.close"    : "motif.close",
+            isWin ? "win95.maximize" : "motif.maximize",
+            isWin ? "win95.minimize" : "motif.iconify",
+        };
         float cbX = titleRect.maxX - cbSz - std::round(2.f*s);
-        for (const char* lbl : {"X", "\xe2\x96\xa1", "_"}) {
+        for (const auto& icon : kBtnIcons) {
             const UiRect cb = UiRect::fromXYWH(
                 cbX, titleRect.minY+(titleH-cbSz)*0.5f, cbSz, cbSz);
-            drawButton(cb, lbl, s);
+            drawIconButton(cb, icon, s);
             cbX -= cbSz + std::round(2.f*s);
         }
 
@@ -687,6 +761,19 @@ void RetroDemoApp::onRender(float /*dt*/) {
         const float winX = std::round((fw-winW)*0.5f);
         const float winY = std::round((fh-tbH-winH)*0.5f);
         drawWindow(winX, winY, winW, winH, s);
+
+        // Desktop icons (top-right column)
+        const bool isWin = (m_theme == Theme::Win95);
+        const float isz  = std::round(32.f * s);
+        const float lh   = fn.lineHeightPx();
+        const float iStep = isz + lh + std::round(14.f * s);
+        const float ix   = fw - isz - std::round(22.f * s);
+        float iy = std::round(16.f * s);
+        drawDesktopIcon(ix, iy, isz, isWin ? "win95.folder"   : "motif.folder",   "My Documents", s);
+        iy += iStep;
+        drawDesktopIcon(ix, iy, isz, isWin ? "win95.document" : "motif.document", "Read Me",      s);
+        iy += iStep;
+        drawDesktopIcon(ix, iy, isz, isWin ? "win95.drive"    : "motif.folder",   "Floppy (A:)",  s);
     }
 
     // Hint text
@@ -713,97 +800,34 @@ void RetroDemoApp::onRender(float /*dt*/) {
     submitFrame(m_camera);
 }
 
-// ─── Mac Classic: folder icon ─────────────────────────────────────────────────
+// ─── Mac Classic: folder icon (SVG) ──────────────────────────────────────────
 
 void RetroDemoApp::drawMacFolderIcon(float x, float y, const char* label, float s) {
-    const float t   = std::max(1.f, std::round(s));
-    const Font& fn  = themeFont();
-    const float iw  = std::round(32.f*s), ibH = std::round(22.f*s);
-    const float tabW = std::round(14.f*s), tabH = std::round(4.f*s);
-
-    // Tab
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(x, y, tabW, tabH+t), {1,1,1,1});
-    m_uiDrawList.addRectFilled({x,     y,      x+tabW,   y+t    }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x,     y,      x+t,      y+tabH }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x+tabW, y,     x+tabW+t, y+tabH+t}, {0,0,0,1});
-    // Body
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(x, y+tabH, iw, ibH), {1,1,1,1});
-    m_uiDrawList.addRectFilled({x,    y+tabH,    x+t,  y+tabH+ibH}, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x,    y+tabH,    x+iw, y+tabH+t  }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x,    y+tabH+ibH-t, x+iw, y+tabH+ibH}, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x+iw-t, y+tabH, x+iw, y+tabH+ibH}, {0,0,0,1});
-
+    const float iw = std::round(32.f*s), ih = std::round(26.f*s);
+    m_uiDrawList.addVectorIcon("mac.folder", UiRect::fromXYWH(x, y, iw, ih));
+    const Font& fn = themeFont();
     const float tw = fn.measureText(label);
-    m_uiDrawList.addText(fn, label,
-        {x + (iw-tw)*0.5f, y+tabH+ibH+2.f*s}, {0,0,0,1});
+    m_uiDrawList.addText(fn, label, {x + (iw-tw)*0.5f, y+ih+2.f*s}, {0,0,0,1});
 }
 
-// ─── Mac Classic: document icon ───────────────────────────────────────────────
+// ─── Mac Classic: document icon (SVG) ────────────────────────────────────────
 
 void RetroDemoApp::drawMacDocIcon(float x, float y, const char* label, float s) {
-    const float t    = std::max(1.f, std::round(s));
-    const Font& fn   = themeFont();
-    const float iw   = std::round(26.f*s), ih = std::round(32.f*s);
-    const float fold = std::round(8.f*s);
-
-    // White body (split around dog-ear)
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(x,        y,       iw-fold, ih  ), {1,1,1,1});
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(x,        y+fold,  iw,      ih-fold), {1,1,1,1});
-    // Dog-ear triangle (gray fill, framed)
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(x+iw-fold, y, fold, fold), {0.82f,0.82f,0.82f,1.f});
-    // Borders
-    m_uiDrawList.addRectFilled({x,          y,       x+t,        y+ih       }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x,          y,       x+iw-fold,  y+t        }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x,          y+ih-t,  x+iw,       y+ih       }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x+iw-t,     y+fold,  x+iw,       y+ih       }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x+iw-fold,  y,       x+iw-fold+t,y+fold     }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x+iw-fold,  y+fold-t,x+iw,       y+fold     }, {0,0,0,1});
-    // Interior lines (document content suggestion)
-    for (int i = 0; i < 3; ++i) {
-        const float ly = y + fold + std::round((4+i*5)*s);
-        const float lw = (i < 2) ? iw-5.f*s : (iw-5.f*s)*0.6f;
-        m_uiDrawList.addRectFilled({x+3.f*s, ly, x+3.f*s+lw, ly+t}, {0.72f,0.72f,0.72f,1.f});
-    }
-
+    const float iw = std::round(26.f*s), ih = std::round(32.f*s);
+    m_uiDrawList.addVectorIcon("mac.document", UiRect::fromXYWH(x, y, iw, ih));
+    const Font& fn = themeFont();
     const float tw = fn.measureText(label);
-    m_uiDrawList.addText(fn, label, {x+(iw-tw)*0.5f, y+ih+2.f*s}, {0,0,0,1});
+    m_uiDrawList.addText(fn, label, {x + (iw-tw)*0.5f, y+ih+2.f*s}, {0,0,0,1});
 }
 
-// ─── Mac Classic: Trash icon ──────────────────────────────────────────────────
+// ─── Mac Classic: Trash icon (SVG) ───────────────────────────────────────────
 
 void RetroDemoApp::drawMacTrash(float x, float y, float s) {
-    const float t  = std::max(1.f, std::round(s));
+    const float iw = std::round(28.f*s), ih = std::round(34.f*s);
+    m_uiDrawList.addVectorIcon("mac.trash", UiRect::fromXYWH(x, y, iw, ih));
     const Font& fn = themeFont();
-    const float iw = std::round(26.f*s), ih = std::round(30.f*s);
-    const float lidH = std::round(5.f*s);
-    const float bodyY = y + lidH + 2.f*s;
-    const float bodyH = ih - lidH - 2.f*s;
-
-    // Body (white fill, black border, slightly tapered)
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(x, bodyY, iw, bodyH), {1,1,1,1});
-    m_uiDrawList.addRectFilled({x,    bodyY,          x+t,  bodyY+bodyH}, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x+iw-t, bodyY,        x+iw, bodyY+bodyH}, {0,0,0,1});
-    m_uiDrawList.addRectFilled({x,    bodyY+bodyH-t,  x+iw, bodyY+bodyH}, {0,0,0,1});
-    // Vertical ribs
-    for (float rx = x + iw*0.35f; rx < x+iw*0.7f; rx += iw*0.32f)
-        m_uiDrawList.addRectFilled({std::round(rx), bodyY+3.f*s, std::round(rx)+t, bodyY+bodyH-3.f*s}, {0,0,0,1});
-
-    // Lid (wider than body)
-    const float lidX = x - 2.f*s;
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(lidX, y, iw+4.f*s, lidH), {1,1,1,1});
-    m_uiDrawList.addRectFilled({lidX,       y,      lidX+iw+4.f*s, y+t    }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({lidX,       y,      lidX+t,        y+lidH }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({lidX+iw+4.f*s-t, y, lidX+iw+4.f*s, y+lidH}, {0,0,0,1});
-    m_uiDrawList.addRectFilled({lidX,       y+lidH-t, lidX+iw+4.f*s, y+lidH}, {0,0,0,1});
-    // Handle on lid
-    const float hx = x + iw*0.35f;
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(hx, y-3.f*s, iw*0.3f, 4.f*s), {1,1,1,1});
-    m_uiDrawList.addRectFilled({hx,           y-3.f*s, hx+t,           y+t    }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({hx+iw*0.3f-t, y-3.f*s, hx+iw*0.3f,    y+t    }, {0,0,0,1});
-    m_uiDrawList.addRectFilled({hx,           y-3.f*s, hx+iw*0.3f, y-3.f*s+t  }, {0,0,0,1});
-
     const float tw = fn.measureText("Trash");
-    m_uiDrawList.addText(fn, "Trash", {x+(iw-tw)*0.5f, bodyY+bodyH+2.f*s}, {0,0,0,1});
+    m_uiDrawList.addText(fn, "Trash", {x + (iw-tw)*0.5f, y+ih+2.f*s}, {0,0,0,1});
 }
 
 // ─── Mac Classic: Finder window ───────────────────────────────────────────────
@@ -926,26 +950,24 @@ void RetroDemoApp::drawMacFinderWindow(float wx, float wy, float ww, float wh,
     m_uiDrawList.addRectFilled(UiRect::fromXYWH(sbX, contentY+sbArrowH, sbW, sbH-2.f*sbArrowH),
         {0.80f,0.80f,0.80f,1.f});
 
-    // Up arrow button
+    // Up arrow button — SVG vector arrow
     const UiRect upBtn = UiRect::fromXYWH(sbX, contentY, sbW, sbArrowH);
     drawBevelPanel(upBtn, !isPressed(upBtn), s);
-    {   // Up triangle (rows widening from top)
-        const float cx = upBtn.minX + sbW*0.5f, cy = upBtn.minY + sbArrowH*0.5f;
-        for (int i = 0; i < 4; ++i) {
-            const float hw = (i+1)*s;
-            m_uiDrawList.addRectFilled({cx-hw, cy-(3-i)*t, cx+hw, cy-(2-i)*t}, {0,0,0,1});
-        }
+    {
+        const float pad = std::round(3.f * s);
+        m_uiDrawList.addVectorIcon("mac.arrow_up",
+            UiRect::fromXYWH(upBtn.minX+pad, upBtn.minY+pad,
+                              upBtn.width()-2.f*pad, upBtn.height()-2.f*pad));
     }
 
-    // Down arrow button
+    // Down arrow button — SVG vector arrow
     const UiRect dnBtn = UiRect::fromXYWH(sbX, contentY+sbH-sbArrowH, sbW, sbArrowH);
     drawBevelPanel(dnBtn, !isPressed(dnBtn), s);
-    {   // Down triangle (rows widening downward)
-        const float cx = dnBtn.minX + sbW*0.5f, cy = dnBtn.minY + sbArrowH*0.5f;
-        for (int i = 0; i < 4; ++i) {
-            const float hw = (4-i)*s;
-            m_uiDrawList.addRectFilled({cx-hw, cy+(i-1)*t, cx+hw, cy+i*t}, {0,0,0,1});
-        }
+    {
+        const float pad = std::round(3.f * s);
+        m_uiDrawList.addVectorIcon("mac.arrow_down",
+            UiRect::fromXYWH(dnBtn.minX+pad, dnBtn.minY+pad,
+                              dnBtn.width()-2.f*pad, dnBtn.height()-2.f*pad));
     }
 
     // Scroll thumb (static, at top of track)
@@ -1675,15 +1697,16 @@ void RetroDemoApp::drawRetroOsInterface(float fw, float fh, float s) {
         const UiRect win = UiRect::fromXYWH(x0, lcy, colW, winH);
         fillBorder(win, kOsWhite, kOsBorder, t);
         m_uiDrawList.addRectFilled({win.minX, win.minY, win.maxX, win.minY+titleH}, kOsBlue);
-        // window buttons _ □ ×
+        // window buttons — SVG icons on blue title bar
         float bx = win.maxX - std::round(22.f*s);
-        for (const char* g : {"\xc3\x97", "\xe2\x96\xa1", "_"}) {
+        for (std::string_view icon : {"retros.close", "retros.maximize", "retros.minimize"}) {
             const UiRect gb = UiRect::fromXYWH(bx, win.minY+std::round(3.f*s),
                                                std::round(18.f*s), titleH-std::round(6.f*s));
             m_uiDrawList.addRect(gb, {1,1,1,0.6f}, t);
-            const float gw = fn.measureText(g);
-            m_uiDrawList.addText(fn, g, {gb.minX+(gb.width()-gw)*0.5f,
-                gb.minY+(gb.height()-lh)*0.5f}, {1,1,1,1});
+            const float pad = std::round(3.f*s);
+            m_uiDrawList.addVectorIcon(icon,
+                UiRect::fromXYWH(gb.minX+pad, gb.minY+pad,
+                                 gb.width()-2.f*pad, gb.height()-2.f*pad));
             bx -= std::round(21.f*s);
         }
         lcy += winH + gap;
@@ -1783,9 +1806,10 @@ void RetroDemoApp::drawRetroOsInterface(float fw, float fh, float s) {
         { const UiRect xb = UiRect::fromXYWH(modal.maxX-std::round(20.f*s),
             modal.minY+std::round(3.f*s), std::round(16.f*s), mTitle-std::round(6.f*s));
           m_uiDrawList.addRect(xb, {1,1,1,0.6f}, t);
-          const float w = fn.measureText("\xc3\x97");
-          m_uiDrawList.addText(fn,"\xc3\x97",{xb.minX+(xb.width()-w)*0.5f,
-            xb.minY+(xb.height()-lh)*0.5f},{1,1,1,1}); }
+          const float pad = std::round(3.f*s);
+          m_uiDrawList.addVectorIcon("retros.close",
+              UiRect::fromXYWH(xb.minX+pad, xb.minY+pad,
+                               xb.width()-2.f*pad, xb.height()-2.f*pad)); }
         m_uiDrawList.addText(fnB, "Confirm Action?",
             {modal.minX+std::round(14.f*s), modal.minY+mTitle+std::round(12.f*s)}, kOsInk);
         const float mbW = std::round(82.f*s), mbH = std::round(28.f*s);
