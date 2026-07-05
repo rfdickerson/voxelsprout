@@ -430,6 +430,8 @@ if(ODAI_BUILD_APP)
 
         if(ODAI_BUILD_EXAMPLES)
             add_subdirectory(examples/vulkan_ui_integration)
+            add_subdirectory(examples/ui_stress_test/harness)
+            add_subdirectory(examples/ui_stress_test/smoke_test)
         endif()
 
         list(APPEND RENDER_BACKEND_SOURCES
