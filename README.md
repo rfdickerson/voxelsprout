@@ -190,46 +190,14 @@ the mesher produces a valid, terrain-colored, renderable scene.
 
 ## Custom UI Framework
 
-A first-party (non-ImGui) UI framework renders the game's own interface. ImGui is
-kept only as the dev/debug overlay. The framework is split so all UI logic is
-Vulkan-free and unit-testable, with a thin renderer that draws it:
-
-- `src/ui/` — pure CPU, no Vulkan:
-  - `ui_types.h`, `ui_input.h` — primitives (`UiVec2/UiRect/UiColor`), per-frame input.
-  - `ui_draw_list.{h,cc}` — immediate draw list emitting `UiDrawData` (quads, 9-slice,
-    images, glyph quads) with per-command texture + clip. This is the renderer seam.
-  - `font.{h,cc}` — bitmap-alpha glyph atlas via `stb_truetype` + metrics/measure.
-  - `rich_text.{h,cc}` — `<b>/<i>/<color=#hex>/<br>` markup, word-wrap, alignment.
-  - `widget.h`, `widgets/{panel,label,button}.{h,cc}`, `ui_context.{h,cc}` — a retained
-    widget tree; `Button` holds a `std::function<void()> onClick`; `UiContext` dispatches
-    input to callbacks and emits geometry.
-- `src/render/backend/vulkan/ui_renderer.{h,cc}` — the only UI file that touches Vulkan:
-  owns the UI pipeline (alpha blend, no depth, dynamic rendering), per-texture descriptor
-  sets, atlas uploads, and per-frame geometry streaming via the existing `FrameArena`. It
-  draws in the post pass right after the ImGui overlay (`frame_run.cc`).
-- `src/render/shaders/ui.{vert,frag}.slang` — pixel-space → NDC; solid / textured /
-  glyph-alpha modes; authors colors as sRGB hex and linearizes for the `*_SRGB` swapchain.
-
-The app side (`App::setupDemoUi` / `updateUiOverlay`) builds a demo panel with a clickable
-"Found City" button whose callback increments an on-screen counter, drawn over the
-strategic map. The renderer seam is `Renderer::setUiDrawData(...)` and
-`Renderer::setUiFontAtlas(...)`, mirroring `setGameplayUiState`.
-
-Dependency: the vcpkg `stb` port (`stb_truetype.h`, `stb_rect_pack.h`) was added to
-`vcpkg.json`. A UI font is loaded from `assets/fonts/ui.ttf` if present, otherwise a
-system font (`segoeui.ttf`/`arial.ttf`); without a font the panel/button still render
-(text is skipped).
-
-### Tests
-
-```powershell
-cmake --build cmake-build-release --target odai_ui_tests
-ctest --test-dir cmake-build-release -R odai_ui_tests
-```
-
-Covers 9-slice quad generation, font measurement, rich-text wrap/spans, color packing,
-and button hit-test + callback dispatch. The `src/ui` core compiles and tests run
-headlessly (MSVC); the Vulkan `ui_renderer` is verified visually.
+A first-party, retained-mode UI library (`odai_ui` + `odai_ui_vulkan`) renders the
+game's own interface — ImGui is kept only as a dev/debug overlay, a separate system
+with no code in common. `odai_ui` is Vulkan-free, unit-testable, and packaged to be
+vendored into other Vulkan engines (CMake install/export targets, a standalone
+integration sample). See [`docs/UI_LIBRARY.md`](docs/UI_LIBRARY.md) for the full
+architecture, widget catalog, theming guide, and integration walkthrough, and
+[`examples/vulkan_ui_integration/`](examples/vulkan_ui_integration/) for a from-scratch
+embedding with no dependency on this repo's app/game/world code.
 
 ## Next Planned Engine Work
 

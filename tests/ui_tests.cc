@@ -16,16 +16,20 @@
 #include "ui/ui_types.h"
 #include "ui/resource_style.h"
 #include "ui/widgets/button.h"
+#include "ui/widgets/context_menu.h"
 #include "ui/widgets/selection_inspector_panel.h"
 #include "ui/widgets/donut_chart.h"
 #include "ui/widgets/dropdown.h"
 #include "ui/widgets/line_chart.h"
 #include "ui/widgets/minimap_panel.h"
+#include "ui/widgets/modal.h"
 #include "ui/widgets/panel.h"
 #include "ui/widgets/progress_bar.h"
+#include "ui/widgets/radio_button.h"
 #include "ui/widgets/scroll_view.h"
 #include "ui/widgets/slider.h"
 #include "ui/widgets/spacer.h"
+#include "ui/widgets/spinner.h"
 #include "ui/widgets/stack_layout.h"
 #include "ui/widgets/stat_badge.h"
 #include "ui/widgets/tab_bar.h"
@@ -362,6 +366,166 @@ void testDropdownSelect() {
     dl.reset(UiVec2{800.0f, 600.0f});
     dd.draw(dl);
     expectTrue(!dl.data().vertices.empty(), "Dropdown: emits geometry");
+}
+
+void testRadioButtonGroupExclusiveSelect() {
+    using namespace odai::ui;
+    RadioButton a, b, c;
+    a.setRect(UiRect::fromXYWH(0.0f, 0.0f, 20.0f, 20.0f));
+    b.setRect(UiRect::fromXYWH(0.0f, 30.0f, 20.0f, 20.0f));
+    c.setRect(UiRect::fromXYWH(0.0f, 60.0f, 20.0f, 20.0f));
+
+    ButtonGroup group;
+    group.add(&a);
+    group.add(&b);
+    group.add(&c);
+
+    int changed = -1;
+    group.onChange = [&](int i) { changed = i; };
+
+    expectTrue(group.selectedIndex() == -1, "ButtonGroup: nothing selected initially");
+
+    UiEvent click{};
+    click.type = UiEvent::Type::MouseDown;
+    click.button = UiMouseButton::Left;
+    click.mousePx = UiVec2{10.0f, 10.0f};
+    a.onEvent(click);
+    expectTrue(a.selected && !b.selected && !c.selected, "ButtonGroup: clicking a selects only a");
+    expectTrue(changed == 0, "ButtonGroup: onChange fires with index 0");
+
+    UiEvent click2{};
+    click2.type = UiEvent::Type::MouseDown;
+    click2.button = UiMouseButton::Left;
+    click2.mousePx = UiVec2{10.0f, 40.0f};
+    b.onEvent(click2);
+    expectTrue(!a.selected && b.selected && !c.selected, "ButtonGroup: clicking b deselects a");
+    expectTrue(changed == 1, "ButtonGroup: onChange fires with index 1");
+
+    UiDrawList dl;
+    dl.reset(UiVec2{200.0f, 200.0f});
+    a.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "RadioButton: emits geometry");
+}
+
+void testSpinnerStepAndClamp() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    Spinner spinner(&font);
+    spinner.setRect(UiRect::fromXYWH(10.0f, 10.0f, 80.0f, 24.0f));
+    spinner.minValue = 0.0;
+    spinner.maxValue = 5.0;
+    spinner.step = 1.0;
+    spinner.value = 4.0;
+
+    double lastChange = -1.0;
+    spinner.onChange = [&](double v) { lastChange = v; };
+
+    UiEvent up{};
+    up.type = UiEvent::Type::MouseDown;
+    up.button = UiMouseButton::Left;
+    up.mousePx = UiVec2{88.0f, 14.0f};  // Inside the up nub.
+    spinner.onEvent(up);
+    expectTrue(spinner.value == 5.0, "Spinner: step up increments");
+    expectTrue(lastChange == 5.0, "Spinner: onChange fires on step up");
+
+    spinner.onEvent(up);
+    expectTrue(spinner.value == 5.0, "Spinner: clamps at maxValue");
+
+    UiEvent release{};
+    release.type = UiEvent::Type::MouseUp;
+    spinner.onEvent(release);
+
+    UiEvent down{};
+    down.type = UiEvent::Type::MouseDown;
+    down.button = UiMouseButton::Left;
+    down.mousePx = UiVec2{88.0f, 28.0f};  // Inside the down nub.
+    spinner.onEvent(down);
+    expectTrue(spinner.value == 4.0, "Spinner: step down decrements");
+
+    UiDrawList dl;
+    dl.reset(UiVec2{200.0f, 200.0f});
+    spinner.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "Spinner: emits geometry");
+}
+
+void testContextMenuOpenSelectDismiss() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    ContextMenu menu(&font);
+    menu.itemHeightPx = 20.0f;
+
+    int clicked = -1;
+    menu.items.push_back({"Move", [&]() { clicked = 0; }, false, true});
+    menu.items.push_back({"", {}, true, true});  // Separator.
+    menu.items.push_back({"Delete", [&]() { clicked = 1; }, false, true});
+
+    expectTrue(!menu.isOpen(), "ContextMenu: starts closed");
+    menu.openAt(UiVec2{50.0f, 50.0f});
+    expectTrue(menu.isOpen(), "ContextMenu: openAt() opens the menu");
+
+    // First item occupies y=[50, 70]; click its middle.
+    UiEvent pick{};
+    pick.type = UiEvent::Type::MouseDown;
+    pick.button = UiMouseButton::Left;
+    pick.mousePx = UiVec2{60.0f, 60.0f};
+    menu.onEvent(pick);
+    expectTrue(clicked == 0, "ContextMenu: clicking an item fires onClick");
+    expectTrue(!menu.isOpen(), "ContextMenu: selecting an item closes the menu");
+
+    menu.openAt(UiVec2{50.0f, 50.0f});
+    UiEvent outside{};
+    outside.type = UiEvent::Type::MouseDown;
+    outside.button = UiMouseButton::Left;
+    outside.mousePx = UiVec2{500.0f, 500.0f};
+    menu.onEvent(outside);
+    expectTrue(!menu.isOpen(), "ContextMenu: clicking outside dismisses without selecting");
+    expectTrue(clicked == 0, "ContextMenu: outside click does not fire onClick");
+
+    UiDrawList dl;
+    dl.reset(UiVec2{800.0f, 600.0f});
+    menu.openAt(UiVec2{50.0f, 50.0f});
+    menu.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "ContextMenu: emits geometry when open");
+}
+
+void testModalOpenCloseBlocking() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    Modal modal(&font, "Confirm");
+    modal.setRect(UiRect::fromXYWH(0.0f, 0.0f, 800.0f, 600.0f));
+    modal.dialogSizePx = UiVec2{300.0f, 160.0f};
+
+    bool closed = false;
+    Modal modalWithCallback(&font, "Confirm", [&]() { closed = true; });
+    modalWithCallback.setRect(UiRect::fromXYWH(0.0f, 0.0f, 800.0f, 600.0f));
+
+    expectTrue(!modal.isOpen(), "Modal: starts closed");
+    modal.open();
+    expectTrue(modal.isOpen(), "Modal: open() shows the modal");
+
+    UiRect dialogRect = modal.dialog().rect();
+    expectNear(dialogRect.width(), 300.0f, 0.01f, "Modal: dialog width matches dialogSizePx");
+    expectNear((dialogRect.minX + dialogRect.maxX) * 0.5f, 400.0f, 0.01f,
+               "Modal: dialog centered horizontally in viewport");
+
+    // A click on the backdrop (outside the dialog) should still be swallowed
+    // when blocking, so it never reaches whatever sits behind the modal.
+    UiEvent backdropClick{};
+    backdropClick.type = UiEvent::Type::MouseDown;
+    backdropClick.button = UiMouseButton::Left;
+    backdropClick.mousePx = UiVec2{10.0f, 10.0f};
+    const bool consumed = modal.onEvent(backdropClick);
+    expectTrue(consumed, "Modal: blocking swallows clicks outside the dialog");
+
+    modalWithCallback.open();
+    modalWithCallback.close();
+    expectTrue(!modalWithCallback.isOpen(), "Modal: close() hides the modal");
+    expectTrue(closed, "Modal: close() fires onClose callback");
+
+    UiDrawList dl;
+    dl.reset(UiVec2{800.0f, 600.0f});
+    modal.draw(dl);
+    expectTrue(!dl.data().vertices.empty(), "Modal: emits backdrop + dialog geometry");
 }
 
 void testDonutChartDraw() {
@@ -1458,6 +1622,10 @@ int main() {
     testToggleClick();
     testTabBarSwitch();
     testDropdownSelect();
+    testRadioButtonGroupExclusiveSelect();
+    testSpinnerStepAndClamp();
+    testContextMenuOpenSelectDismiss();
+    testModalOpenCloseBlocking();
     testDonutChartDraw();
     testSectorFilledGeometry();
     testToastManager();

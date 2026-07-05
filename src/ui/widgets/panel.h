@@ -103,7 +103,11 @@ public:
     // highlight cast in the direction *opposite* the main shadow (the main
     // offsets are negated), sharing shadowBlurPx. Drawn under the main shadow
     // only when its alpha > 0. Off by default; set by styleSoft.
-    UiColor liftShadowColor{};
+    // NOTE: UiColor{} default-constructs to OPAQUE WHITE, not transparent, so
+    // the alpha must be zeroed explicitly here or every panel (styleCard,
+    // styleOrnate, plain Panel) draws an unwanted white lift-shadow underneath
+    // its real shadow, since none of them ever touch this field.
+    UiColor liftShadowColor{1.0f, 1.0f, 1.0f, 0.0f};
 
     // When true, child drawing is clipped to rect_ — useful for animated panels
     // whose height changes each frame (accordion, slide-in drawers, etc.).
