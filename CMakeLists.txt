@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 option(ODAI_BUILD_APP "Build the main Vulkan toy application." ON)
 option(ODAI_BUILD_TOOLS "Build offline content tools." ON)
+option(ODAI_BUILD_EXAMPLES "Build standalone odai_ui SDK integration samples." OFF)
 
 # stb (stb_truetype.h, stb_rect_pack.h) for the UI font rasterizer. Provided by
 # the vcpkg `stb` port in normal builds; ODAI_STB_INCLUDE_DIR overrides it for
@@ -212,6 +213,10 @@ add_library(odai_ui STATIC
     src/ui/widgets/toggle.cc
     src/ui/widgets/tab_bar.cc
     src/ui/widgets/dropdown.cc
+    src/ui/widgets/radio_button.cc
+    src/ui/widgets/spinner.cc
+    src/ui/widgets/context_menu.cc
+    src/ui/widgets/modal.cc
     src/ui/widgets/donut_chart.cc
     src/ui/widgets/toast.cc
     src/ui/widgets/line_chart.cc
@@ -400,14 +405,22 @@ if(ODAI_BUILD_APP)
         add_library(odai_ui_vulkan STATIC
             src/render/backend/vulkan/ui_renderer.cc
             src/render/backend/vulkan/frame_ui.cc
+            # buffer_helpers.cc defines BufferAllocator/FrameArena, which
+            # ui_renderer.h's public API (UiRenderer::InitInfo, uploadGeometry)
+            # depends on directly — it belongs here, not in the app's own
+            # RENDER_BACKEND_SOURCES, so a consumer linking only odai_ui_vulkan
+            # gets a complete, self-sufficient SDK with no missing symbols.
+            src/render/backend/vulkan/buffer_helpers.cc
         )
         target_include_directories(odai_ui_vulkan PUBLIC
             $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
             $<INSTALL_INTERFACE:include>
         )
         target_link_libraries(odai_ui_vulkan
-            PUBLIC  odai_ui
-            PRIVATE Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator
+            # PUBLIC: ui_renderer.h is an installed public header that directly
+            # includes <vulkan/vulkan.h> and <vk_mem_alloc.h> and exposes VkDevice /
+            # VmaAllocator in InitInfo, so consumers need these propagated to compile.
+            PUBLIC odai_ui Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator
         )
         if(MSVC)
             target_compile_options(odai_ui_vulkan PRIVATE ${ODAI_WARN_FLAGS_MSVC})
@@ -415,8 +428,11 @@ if(ODAI_BUILD_APP)
             target_compile_options(odai_ui_vulkan PRIVATE -Wall -Wextra -Wpedantic)
         endif()
 
+        if(ODAI_BUILD_EXAMPLES)
+            add_subdirectory(examples/vulkan_ui_integration)
+        endif()
+
         list(APPEND RENDER_BACKEND_SOURCES
-            src/render/backend/vulkan/buffer_helpers.cc
             src/render/backend/vulkan/device.cc
             src/render/backend/vulkan/frame.cc
             src/render/backend/vulkan/frame_run.cc
@@ -795,8 +811,10 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 set(ODAI_UI_INSTALL_TARGETS odai_ui)
+set(ODAI_UI_HAS_VULKAN FALSE)
 if(TARGET odai_ui_vulkan)
     list(APPEND ODAI_UI_INSTALL_TARGETS odai_ui_vulkan)
+    set(ODAI_UI_HAS_VULKAN TRUE)
 endif()
 
 install(TARGETS ${ODAI_UI_INSTALL_TARGETS}
