@@ -38,10 +38,13 @@ void SelectionInspectorPanel::setState(const UiRect& rect, float s, const State&
     auto bg = std::make_unique<Panel>();
     bg->setRect(rect);
     bg->styleCard(s);
+    bg->borderColor         = borderColor;
+    bg->borderThicknessPx   = borderThicknessPx * s;
     bg->showBevel           = true;
-    bg->bevelHighlightColor = UiColor{1.0f, 1.0f, 1.0f, 0.18f};
-    bg->bevelShadowColor    = UiColor{0.0f, 0.0f, 0.0f, 0.40f};
-    bg->bevelThicknessPx    = 1.5f;
+    bg->bevelHighlightColor = bevelHighlightColor;
+    bg->bevelShadowColor    = bevelShadowColor;
+    bg->bevelThicknessPx    = bevelThicknessPx * s;
+    bg->bevelInward         = bevelInward;
     bg_ = static_cast<Panel*>(addChild(std::move(bg)));
 
     const float x0  = rect.minX + pad;

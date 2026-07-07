@@ -28,6 +28,11 @@ void IconButton::draw(UiDrawList& dl) const {
         dl.addRoundRect(r, bc, cornerRadiusPx, borderThicknessPx);
     }
 
+    if (showBevel) {
+        dl.addBevel(r, bevelHighlightColor, bevelShadowColor, cornerRadiusPx,
+                   bevelThicknessPx, bevelInward || isPressed);
+    }
+
     // Icon image.
     if (textureId != kUiNoTexture) {
         const float pad = iconPaddingPx;

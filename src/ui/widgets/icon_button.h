@@ -32,6 +32,13 @@ public:
     float glowSizePx        = 0.0f;  // 0 = no glow; caller sets to e.g. 12*s
     float iconPaddingPx     = 4.0f;  // inset between border and icon image
 
+    // Optional two-tone bevel (off by default), matching Button::showBevel.
+    bool    showBevel           = false;
+    UiColor bevelHighlightColor {1.0f, 1.0f, 1.0f, 0.28f};
+    UiColor bevelShadowColor    {0.0f, 0.0f, 0.0f, 0.45f};
+    float   bevelThicknessPx    = 2.0f;
+    bool    bevelInward         = false;
+
     void setEnabled(bool enabled) { enabled_ = enabled; }
     [[nodiscard]] bool enabled() const { return enabled_; }
 

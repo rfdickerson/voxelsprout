@@ -54,6 +54,11 @@ public:
     void draw(UiDrawList& drawList) const override;
     bool onEvent(UiEvent& event) override;
 
+    // Expose the background Panel and lens chip Buttons for per-game styling
+    // overrides (mirrors ResearchPanel::bgPanel()).
+    [[nodiscard]] Panel* bgPanel() const { return bg_; }
+    [[nodiscard]] const std::vector<Button*>& chipButtons() const { return chips_; }
+
 private:
     FontSet fonts_;
     Panel* bg_ = nullptr;
