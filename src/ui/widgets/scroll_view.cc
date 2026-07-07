@@ -15,7 +15,7 @@ void ScrollView::layoutChildren() const {
         const float h = child->rect().height();
         if (!first) pen += childGap;
         first = false;
-        child->setRect(UiRect{rect_.minX, pen, rect_.maxX - scrollBarWidthPx, pen + h});
+        child->repositionAndResize(UiRect{rect_.minX, pen, rect_.maxX - scrollBarWidthPx, pen + h});
         pen += h;
     }
     m_contentHeight = (pen + scrollOffsetY) - rect_.minY;

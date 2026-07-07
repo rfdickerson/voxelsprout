@@ -561,32 +561,76 @@ void UiDrawList::addBevel(const UiRect& rect, const UiColor& highlightColor,
     // Expand the clip regions by the same feather so the outer anti-aliased fringe
     // isn't scissored away before it gets to the screen.
     const float feather = thicknessPx * 0.5f + 1.5f;
-    const float midX    = (rect.minX + rect.maxX) * 0.5f;
-    const float midY    = (rect.minY + rect.maxY) * 0.5f;
 
-    // Diagonal key light from the upper-left. Highlight first along the top and left
-    // edge bands, then shadow over the bottom and right edge bands. Where the shadow
-    // bands overlap a lit edge (the top-right of the top edge, the bottom of the left
-    // edge) they win, so the lit edges fade toward the bottom-right corner — selling a
-    // diagonal light rather than a flat overhead one.
+    // Each band clip is a thin strip only as deep as the stroke itself (plus
+    // feather) — NOT a half of the rect extending to the midpoint. addRoundRect
+    // always draws the *entire* perimeter stroke, so a clip reaching the
+    // midpoint lets a "top" band show most of the left/right edges too; when
+    // the "left"/"right" bands are drawn afterward and overlap that same
+    // territory, the later draw wins across a huge swath, producing a blocky
+    // 4-quadrant checkerboard instead of a bevel. Clamping to the stroke's own
+    // depth keeps each band confined to its actual edge, so bands only meet
+    // in a small patch at the two rounded corners they legitimately share.
+    const float bandDepth = std::min(thicknessPx + feather, std::min(rect.width(), rect.height()) * 0.5f);
+
+    // Diagonal key light from the upper-left: highlight hugs the top and left
+    // edges, shadow hugs the bottom and right edges.
 
     // Highlight — top edge band.
-    pushClip(UiRect{rect.minX - feather, rect.minY - feather, rect.maxX + feather, midY});
+    pushClip(UiRect{rect.minX - feather, rect.minY - feather, rect.maxX + feather, rect.minY + bandDepth});
     addRoundRect(rect, hlCol, radiusPx, thicknessPx);
     popClip();
     // Highlight — left edge band.
-    pushClip(UiRect{rect.minX - feather, rect.minY - feather, midX, rect.maxY + feather});
+    pushClip(UiRect{rect.minX - feather, rect.minY - feather, rect.minX + bandDepth, rect.maxY + feather});
     addRoundRect(rect, hlCol, radiusPx, thicknessPx);
     popClip();
 
     // Shadow — bottom edge band.
-    pushClip(UiRect{rect.minX - feather, midY, rect.maxX + feather, rect.maxY + feather});
+    pushClip(UiRect{rect.minX - feather, rect.maxY - bandDepth, rect.maxX + feather, rect.maxY + feather});
     addRoundRect(rect, shCol, radiusPx, thicknessPx);
     popClip();
     // Shadow — right edge band.
-    pushClip(UiRect{midX, rect.minY - feather, rect.maxX + feather, rect.maxY + feather});
+    pushClip(UiRect{rect.maxX - bandDepth, rect.minY - feather, rect.maxX + feather, rect.maxY + feather});
     addRoundRect(rect, shCol, radiusPx, thicknessPx);
     popClip();
+
+    // The highlight and shadow pairs meet at the top-right and bottom-left
+    // rounded corners. Left as-is, that meeting is a single hard cut from
+    // hlCol straight to shCol right at the corner. Redraw those two small
+    // corner patches as a short stepped ramp between the two colors instead,
+    // so the transition reads as a soft diagonal fade rather than a seam.
+    // Axis-aligned clipping can't produce a true per-pixel gradient here, but
+    // a handful of thin sub-bands is a close, cheap approximation — each
+    // patch is only ~bandDepth pixels across, so the steps blend together at
+    // typical (1-3px) bevel thicknesses.
+    constexpr int kCornerSteps = 6;
+    const auto lerpColor = [](const UiColor& a, const UiColor& b, float t) {
+        return UiColor{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                       a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+    };
+
+    // Top-right corner: sweep left→right from hlCol to shCol.
+    for (int i = 0; i < kCornerSteps; ++i) {
+        const float t0 = static_cast<float>(i) / static_cast<float>(kCornerSteps);
+        const float t1 = static_cast<float>(i + 1) / static_cast<float>(kCornerSteps);
+        const float x0 = rect.maxX - bandDepth + t0 * bandDepth;
+        const float x1 = (i == kCornerSteps - 1) ? (rect.maxX + feather)
+                                                  : (rect.maxX - bandDepth + t1 * bandDepth);
+        pushClip(UiRect{x0, rect.minY - feather, x1, rect.minY + bandDepth});
+        addRoundRect(rect, lerpColor(hlCol, shCol, (t0 + t1) * 0.5f), radiusPx, thicknessPx);
+        popClip();
+    }
+    // Bottom-left corner: sweep top→bottom from hlCol to shCol.
+    for (int i = 0; i < kCornerSteps; ++i) {
+        const float t0 = static_cast<float>(i) / static_cast<float>(kCornerSteps);
+        const float t1 = static_cast<float>(i + 1) / static_cast<float>(kCornerSteps);
+        const float y0 = rect.maxY - bandDepth + t0 * bandDepth;
+        const float y1 = (i == kCornerSteps - 1) ? (rect.maxY + feather)
+                                                  : (rect.maxY - bandDepth + t1 * bandDepth);
+        pushClip(UiRect{rect.minX - feather, y0, rect.minX + bandDepth, y1});
+        addRoundRect(rect, lerpColor(hlCol, shCol, (t0 + t1) * 0.5f), radiusPx, thicknessPx);
+        popClip();
+    }
 }
 
 void UiDrawList::addSectorFilled(const UiVec2& center, float innerRadiusPx, float outerRadiusPx,

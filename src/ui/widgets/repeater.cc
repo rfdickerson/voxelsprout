@@ -33,7 +33,7 @@ void Repeater::draw(UiDrawList& dl) const {
     float pen = rect_.minY;
     for (const std::unique_ptr<Widget>& child : children_) {
         if (!child->visible) continue;
-        child->setRect(UiRect::fromXYWH(rect_.minX, pen, rect_.width(), child->rect().height()));
+        child->repositionAndResize(UiRect::fromXYWH(rect_.minX, pen, rect_.width(), child->rect().height()));
         pen += child->rect().height() + itemGap;
         child->draw(dl);
     }
