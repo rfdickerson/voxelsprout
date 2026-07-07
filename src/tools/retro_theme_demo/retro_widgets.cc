@@ -57,9 +57,6 @@ ui::TextBox& RetroUi::textBox(std::string_view id, const ui::UiRect& rect, const
 
 ui::Toggle& RetroUi::toggle(std::string_view id, const ui::UiRect& rect) {
     auto& w = acquire<ui::Toggle>(id, [] { return std::make_unique<ui::Toggle>(); });
-    if (std::find(toggles_.begin(), toggles_.end(), &w) == toggles_.end()) {
-        toggles_.push_back(&w);
-    }
     w.setRect(rect);
     applySkin(w);
     return w;
@@ -92,11 +89,7 @@ ui::TabBar& RetroUi::tabs(std::string_view id, const ui::UiRect& rect, const ui:
 
 void RetroUi::update(const ui::UiVec2& mousePx, bool leftDown, const ui::UiVec2& viewportPx,
                      const std::vector<std::uint32_t>& textInput, float dt) {
-    for (ui::Toggle* t : toggles_) {
-        if (t->visible) {
-            t->update(dt);
-        }
-    }
+    ctx_.tick(dt);
     input_.beginFrame();
     input_.mousePx = mousePx;
     input_.setButton(ui::UiMouseButton::Left, leftDown);

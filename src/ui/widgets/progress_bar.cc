@@ -6,9 +6,10 @@
 
 namespace odai::ui {
 
-void ProgressBar::update(float dt) {
+void ProgressBar::onTick(float dt) {
     foregroundAnim.update(dt);
     foregroundEndAnim.update(dt);
+    tickChildren(dt);
 }
 
 UiColor ProgressBar::effectiveForeground() const {

@@ -8,8 +8,9 @@
 
 namespace odai::ui {
 
-// Pill-shaped on/off switch with a smoothly animated sliding thumb.
-// Call update(dt) each frame to advance the thumb animation.
+// Pill-shaped on/off switch with a smoothly animated sliding thumb. The thumb
+// animation advances automatically each frame via onTick (UiContext::tick(dt)
+// drives this from the root) — no manual per-toggle update call needed.
 class Toggle : public Widget {
 public:
     bool checked = false;
@@ -20,8 +21,10 @@ public:
 
     std::function<void(bool)> onChange;
 
-    // Advance the thumb animation. Call once per frame before draw().
-    void update(float dt) { thumbTween_.update(dt); }
+    void onTick(float dt) override {
+        thumbTween_.update(dt);
+        tickChildren(dt);
+    }
 
     void draw(UiDrawList& dl) const override;
     bool onEvent(UiEvent& ev) override;

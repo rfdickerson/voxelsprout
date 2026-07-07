@@ -116,17 +116,15 @@ public:
     // --- Animated background --------------------------------------------------
     // Call backgroundAnim.set(targetColor, durationSec) to smoothly cross-fade the
     // panel's background to a new color. While the tween is in flight, the draw
-    // method uses backgroundAnim.current() instead of `background`. Drive with
-    // update(dt) once per frame (or let the caller update and write current() to
-    // `background` directly if no built-in update is needed).
+    // method uses backgroundAnim.current() instead of `background`. Advanced
+    // automatically each frame via onTick (UiContext::tick(dt) drives this from
+    // the root) — no manual per-panel update call needed.
     // bgTopAnim / bgBotAnim animate the ornate gradient stops independently.
     ColorTween backgroundAnim;
     ColorTween bgTopAnim;
     ColorTween bgBotAnim;
 
-    // Step all active color tweens forward by dt seconds. Call once per frame.
-    void update(float dt);
-
+    void onTick(float dt) override;
     void draw(UiDrawList& drawList) const override;
 };
 

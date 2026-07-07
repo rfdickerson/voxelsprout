@@ -18,8 +18,9 @@ struct ToastEntry {
 };
 
 // Stack of self-dismissing notification panels. Anchor this widget in the top-
-// right of the root so toasts stack downward. Call update(dt) each frame before
-// drawing, and push() to enqueue a new notification.
+// right of the root so toasts stack downward. Fade/expiry is advanced
+// automatically each frame via onTick (UiContext::tick(dt) drives this from the
+// root); call push() to enqueue a new notification.
 class ToastManager : public Widget {
 public:
     explicit ToastManager(const Font* font) : font_(font) {}
@@ -36,7 +37,7 @@ public:
     UiColor textColor{0.92f, 0.92f, 0.92f, 1.0f};
 
     void push(std::string iconName, std::string message);
-    void update(float dt);
+    void onTick(float dt) override;
 
     int activeCount() const { return static_cast<int>(toasts_.size()); }
 

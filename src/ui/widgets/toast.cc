@@ -17,7 +17,7 @@ void ToastManager::push(std::string iconName, std::string message) {
     toasts_.push_back(std::move(entry));
 }
 
-void ToastManager::update(float dt) {
+void ToastManager::onTick(float dt) {
     for (ToastEntry& t : toasts_) {
         t.fadeTween.update(dt);
         t.lifetimeRemaining -= dt;
@@ -30,6 +30,7 @@ void ToastManager::update(float dt) {
         std::remove_if(toasts_.begin(), toasts_.end(),
                        [](const ToastEntry& e) { return e.lifetimeRemaining <= 0.0f; }),
         toasts_.end());
+    tickChildren(dt);
 }
 
 void ToastManager::draw(UiDrawList& dl) const {

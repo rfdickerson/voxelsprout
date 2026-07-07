@@ -95,7 +95,6 @@ private:
     ui::Widget* root_ = nullptr;
     WidgetSkin skin_{};
     std::unordered_map<std::string, ui::Widget*> byId_;
-    std::vector<ui::Toggle*> toggles_;  // tracked for per-frame update(dt)
 };
 
 }  // namespace odai::tools::retro_theme_demo

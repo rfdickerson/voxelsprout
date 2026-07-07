@@ -73,6 +73,12 @@ void UiContext::update(const UiInput& input) {
     wantsMouse_ = root_->hitTest(input.mousePx) != nullptr;
 }
 
+void UiContext::tick(float dt) {
+    if (root_ != nullptr) {
+        root_->onTick(dt);
+    }
+}
+
 void UiContext::build(UiDrawList& drawList) const {
     drawList.reset(viewport_);
     buildAppend(drawList);

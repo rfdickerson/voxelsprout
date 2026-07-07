@@ -24,6 +24,12 @@ public:
     // Dispatch a frame of input to the tree, firing widget callbacks.
     void update(const UiInput& input);
 
+    // Advance every widget's animation state (tweens, Sequences) by dt seconds.
+    // Call once per frame, independent of update(input) — this replaces having
+    // to remember to call update(dt) on each animated widget (Panel, Toggle,
+    // ToastManager, ...) individually.
+    void tick(float dt);
+
     // Reset the draw list and emit the tree's geometry.
     void build(UiDrawList& drawList) const;
 

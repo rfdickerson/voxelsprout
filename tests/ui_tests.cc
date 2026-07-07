@@ -300,7 +300,7 @@ void testToggleClick() {
     // Emits geometry without crashing.
     UiDrawList dl;
     dl.reset(UiVec2{400.0f, 200.0f});
-    tog.update(0.0f);
+    tog.onTick(0.0f);
     tog.draw(dl);
     expectTrue(!dl.data().vertices.empty(), "Toggle: emits geometry");
 }
@@ -593,7 +593,7 @@ void testToastManager() {
     expectTrue(mgr.activeCount() == 2, "ToastManager: two toasts active");
 
     // Advance past display time (1s display + 0.3s fade = 1.3s lifetime).
-    mgr.update(1.4f);
+    mgr.onTick(1.4f);
     expectTrue(mgr.activeCount() == 0, "ToastManager: toasts expire after displaySeconds");
 
     // Emits geometry.
@@ -752,6 +752,142 @@ void testTween() {
     t.setTarget(0.0f);
     t.update(0.25f);
     expectNear(t.value, 0.75f, 1e-5f, "tween fades back out");
+}
+
+void testNewEasingCurves() {
+    using namespace odai::ui;
+    expectNear(applyEasing(Easing::CubicIn, 0.0f), 0.0f, 1e-5f, "cubicIn start");
+    expectNear(applyEasing(Easing::CubicIn, 1.0f), 1.0f, 1e-5f, "cubicIn end");
+    expectTrue(applyEasing(Easing::CubicIn, 0.5f) < applyEasing(Easing::EaseIn, 0.5f),
+               "cubicIn lags easeIn at mid (sharper slow start)");
+
+    expectNear(applyEasing(Easing::CubicOut, 0.0f), 0.0f, 1e-5f, "cubicOut start");
+    expectNear(applyEasing(Easing::CubicOut, 1.0f), 1.0f, 1e-5f, "cubicOut end");
+    expectTrue(applyEasing(Easing::CubicOut, 0.5f) > applyEasing(Easing::EaseOut, 0.5f),
+               "cubicOut leads easeOut at mid (sharper slow stop)");
+
+    expectNear(applyEasing(Easing::BackOut, 0.0f), 0.0f, 1e-5f, "backOut start");
+    expectNear(applyEasing(Easing::BackOut, 1.0f), 1.0f, 1e-5f, "backOut end");
+    bool overshoots = false;
+    for (float t = 0.0f; t <= 1.0f; t += 0.05f) {
+        if (applyEasing(Easing::BackOut, t) > 1.0f) overshoots = true;
+    }
+    expectTrue(overshoots, "backOut overshoots past 1.0 mid-flight");
+
+    expectNear(applyEasing(Easing::Spring, 0.0f), 0.0f, 1e-5f, "spring start");
+    // Critically-damped spring approaches 1.0 asymptotically and never exactly
+    // reaches it in finite time — kOmega=8 leaves ~0.3% error at t=1, which is
+    // visually indistinguishable from settled.
+    expectNear(applyEasing(Easing::Spring, 1.0f), 1.0f, 5e-3f, "spring settles near 1.0");
+    float prevSpring = -1.0f;
+    bool springMonotonic = true;
+    for (float t = 0.0f; t <= 1.0f; t += 0.05f) {
+        const float v = applyEasing(Easing::Spring, t);
+        if (v < prevSpring) springMonotonic = false;
+        prevSpring = v;
+    }
+    expectTrue(springMonotonic, "spring (critically damped) never overshoots or oscillates");
+}
+
+void testVec2Tween() {
+    using namespace odai::ui;
+    Vec2Tween vt;
+    vt.snap(UiVec2{10.0f, 20.0f});
+    expectTrue(vt.idle(), "Vec2Tween: snap leaves tween idle");
+    expectNear(vt.current().x, 10.0f, 1e-5f, "Vec2Tween: snap sets x");
+    expectNear(vt.current().y, 20.0f, 1e-5f, "Vec2Tween: snap sets y");
+
+    vt.set(UiVec2{110.0f, 20.0f}, 1.0f, Easing::Linear);
+    expectTrue(!vt.idle(), "Vec2Tween: set() makes tween non-idle");
+    vt.update(0.5f);
+    expectNear(vt.current().x, 60.0f, 1e-5f, "Vec2Tween: halfway interpolates x");
+
+    // Retarget mid-flight: current position becomes the new `from`, so there is
+    // no jump — current() immediately after retarget must equal current() just
+    // before it.
+    const UiVec2 beforeRetarget = vt.current();
+    vt.set(UiVec2{0.0f, 20.0f}, 1.0f, Easing::Linear);
+    const UiVec2 afterRetarget = vt.current();
+    expectNear(afterRetarget.x, beforeRetarget.x, 1e-5f, "Vec2Tween: retarget has no positional jump");
+}
+
+void testRectTween() {
+    using namespace odai::ui;
+    RectTween rt;
+    rt.snap(UiRect::fromXYWH(0.0f, 0.0f, 100.0f, 50.0f));
+    expectTrue(rt.idle(), "RectTween: snap leaves tween idle");
+
+    rt.set(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 100.0f), 1.0f, Easing::Linear);
+    rt.update(0.5f);
+    const UiRect mid = rt.current();
+    expectNear(mid.maxX, 150.0f, 1e-5f, "RectTween: halfway width is between start and end");
+    expectNear(mid.maxY, 75.0f, 1e-5f, "RectTween: halfway height is between start and end");
+
+    expectNear(RectTween::lerp(UiRect::fromXYWH(0, 0, 0, 0), UiRect::fromXYWH(0, 0, 10, 20), 0.5f).maxX,
+               5.0f, 1e-5f, "RectTween::lerp is an independent static helper");
+}
+
+void testSequence() {
+    using namespace odai::ui;
+    Sequence seq;
+    float backdrop = -1.0f;
+    float dialog = -1.0f;
+    bool dialogDone = false;
+
+    // append(): backdrop fades over [0, 0.2). join(): dialog runs in parallel
+    // with backdrop (both start at t=0), over [0, 0.5).
+    seq.append(0.2f, [&](float t) { backdrop = t; });
+    seq.join(0.5f, [&](float t) { dialog = t; }, [&] { dialogDone = true; });
+
+    expectTrue(!seq.done(), "Sequence: not done before any update");
+
+    seq.update(0.1f);
+    expectNear(backdrop, 0.5f, 1e-5f, "Sequence: backdrop step progresses (0.1/0.2)");
+    expectNear(dialog, 0.2f, 1e-5f, "Sequence: joined dialog step runs in parallel, not after");
+    expectTrue(!dialogDone, "Sequence: onComplete not fired before step ends");
+
+    seq.update(0.3f);
+    expectNear(dialog, 0.8f, 1e-5f, "Sequence: dialog step continues (0.4/0.5)");
+    expectTrue(!seq.done(), "Sequence: not done until the longest step finishes");
+
+    seq.update(0.2f);
+    expectTrue(dialogDone, "Sequence: onComplete fires once the step's window closes");
+    expectTrue(seq.done(), "Sequence: done() once elapsed reaches the timeline end");
+
+    // delay() + append(): a zero-length step still fires fn(1) and onComplete.
+    Sequence gated;
+    bool gateOpened = false;
+    gated.delay(0.1f);
+    gated.append(0.0f, [](float) {}, [&] { gateOpened = true; });
+    gated.update(0.05f);
+    expectTrue(!gateOpened, "Sequence: zero-length step does not fire before its start time");
+    gated.update(0.1f);
+    expectTrue(gateOpened, "Sequence: zero-length step fires once its start time is crossed");
+}
+
+void testWidgetOnTickPropagation() {
+    using namespace odai::ui;
+
+    // A plain container Widget has no animation of its own; onTick should still
+    // reach animated descendants (Panel::backgroundAnim here) without the app
+    // needing to know the tree's shape or tick each widget by hand.
+    auto root = std::make_unique<Widget>();
+    auto* panel = static_cast<Panel*>(root->addChild(std::make_unique<Panel>()));
+    panel->background = UiColor{0.0f, 0.0f, 0.0f, 1.0f};
+    panel->backgroundAnim.snap(panel->background);
+    panel->backgroundAnim.set(UiColor{1.0f, 1.0f, 1.0f, 1.0f}, 1.0f, Easing::Linear);
+
+    UiContext ctx;
+    ctx.setRoot(std::move(root));
+    ctx.tick(0.5f);
+    expectNear(panel->backgroundAnim.current().r, 0.5f, 1e-5f,
+               "UiContext::tick reaches a nested Panel's backgroundAnim");
+
+    // Invisible subtrees are skipped, matching draw()/hitTest()'s visibility gate.
+    panel->visible = false;
+    panel->backgroundAnim.set(UiColor{0.0f, 0.0f, 0.0f, 1.0f}, 1.0f, Easing::Linear);
+    ctx.tick(0.5f);
+    expectTrue(!panel->backgroundAnim.idle(), "UiContext::tick does not advance a hidden widget's tween");
 }
 
 void testDrawListOpacity() {
@@ -1694,7 +1830,7 @@ void testProgressBarGradient() {
 
     // Animated tween: set a new foreground color and advance past the duration.
     bar.foregroundAnim.set(UiColor{0.0f, 0.0f, 1.0f, 1.0f}, 0.2f);
-    bar.update(0.2f);
+    bar.onTick(0.2f);
     expectTrue(bar.foregroundAnim.idle(), "foregroundAnim idle after full update");
 }
 
@@ -1710,13 +1846,13 @@ void testPanelAnimatedBackground() {
     expectTrue(!p.backgroundAnim.idle(), "backgroundAnim non-idle after set");
 
     // Half-way through: draw should use the interpolated color, not the static one.
-    p.update(0.2f);  // 0.2 / 0.4 = 0.5 progress
+    p.onTick(0.2f);  // 0.2 / 0.4 = 0.5 progress
     expectTrue(!p.backgroundAnim.idle(), "backgroundAnim still in flight at halfway");
     const UiColor mid = p.backgroundAnim.current();
     expectTrue(mid.r > 0.1f && mid.r < 0.9f, "animated background at halfway is between start and end");
 
     // Complete.
-    p.update(0.2f);
+    p.onTick(0.2f);
     expectTrue(p.backgroundAnim.idle(), "backgroundAnim idle at completion");
     const UiColor fin = p.backgroundAnim.current();
     expectTrue(std::abs(fin.r - 0.9f) < 1e-5f, "animated background reached target");
@@ -1749,6 +1885,11 @@ int main() {
     testAppendCachedParity();
     testEasing();
     testTween();
+    testNewEasingCurves();
+    testVec2Tween();
+    testRectTween();
+    testSequence();
+    testWidgetOnTickPropagation();
     testDrawListOpacity();
     testInlineIconParsing();
     testInlineIconLayout();

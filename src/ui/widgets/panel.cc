@@ -151,10 +151,11 @@ void Panel::styleClassicMac(float s) {
     showShadow           = false;  // callers draw Mac window shadows manually
 }
 
-void Panel::update(float dt) {
+void Panel::onTick(float dt) {
     backgroundAnim.update(dt);
     bgTopAnim.update(dt);
     bgBotAnim.update(dt);
+    tickChildren(dt);
 }
 
 void Panel::draw(UiDrawList& drawList) const {
