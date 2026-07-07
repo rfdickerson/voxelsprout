@@ -71,6 +71,14 @@ public:
     // drawChildren() afterwards to keep descendants visible).
     virtual void draw(UiDrawList& drawList) const { drawChildren(drawList); }
 
+    // Advance this widget's own animation state (tweens, Sequences) by dt
+    // seconds, then propagate to visible children. Override to drive this
+    // widget's animations and call tickChildren(dt) at the end (or rely on the
+    // default, which just propagates) — UiContext::tick(dt) calls this once on
+    // the root every frame, so widgets no longer need a bespoke update(dt) that
+    // the app remembers to call by hand.
+    virtual void onTick(float dt) { tickChildren(dt); }
+
     // Handle an event. Return true to consume it (stops propagation to siblings
     // below). Default: forward to children.
     virtual bool onEvent(UiEvent& event) {
@@ -120,6 +128,14 @@ public:
     int zOrder = 0;
 
 protected:
+    void tickChildren(float dt) {
+        for (const std::unique_ptr<Widget>& child : children_) {
+            if (child->visible) {
+                child->onTick(dt);
+            }
+        }
+    }
+
     void drawChildren(UiDrawList& drawList) const {
         // Collect visible children into a stable-sorted pointer list (ascending zOrder).
         // Lowest z draws first, highest z draws last (appears on top).

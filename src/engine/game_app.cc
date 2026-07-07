@@ -1,5 +1,6 @@
 #include "engine/game_app.h"
 #include "core/log.h"
+#include "core/win_timer_resolution.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -37,6 +38,8 @@ static void glfwErrorCb(int code, const char* msg) {
 }
 
 bool GameApp::init(const char* title) {
+    core::requestHighResTimer();
+
     glfwSetErrorCallback(glfwErrorCb);
 
     if (glfwInit() == GLFW_FALSE) {
@@ -136,6 +139,7 @@ void GameApp::run() {
 
         m_uiContext.setViewport({static_cast<float>(fbW), static_cast<float>(fbH)});
         m_uiContext.update(m_uiInput);
+        m_uiContext.tick(dt);
 
         onTick(dt);
         onRender(dt);
@@ -150,6 +154,7 @@ void GameApp::shutdown() {
         m_window = nullptr;
     }
     glfwTerminate();
+    core::releaseHighResTimer();
 }
 
 bool GameApp::loadFonts(const std::string& regularPath,

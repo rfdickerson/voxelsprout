@@ -3,6 +3,7 @@
 #include <GLFW/glfw3.h>
 
 #include "core/grid3.h"
+#include "core/win_timer_resolution.h"
 #include "game/ai_units.h"
 #include "game/buildable.h"
 #include "game/economy.h"
@@ -966,6 +967,8 @@ bool App::saveConfig(const std::filesystem::path& configPath) const {
 }
 
 bool App::init() {
+    odai::core::requestHighResTimer();
+
     using Clock = std::chrono::steady_clock;
     const auto initStart = Clock::now();
     auto elapsedMs = [](const Clock::time_point& start) -> std::int64_t {
@@ -1404,6 +1407,7 @@ void App::update(float dt, float simulationAlpha) {
 
 void App::shutdown() {
     VOX_LOGI("app") << "shutdown begin";
+    odai::core::releaseHighResTimer();
 
     // Uninstall the Lua host before it is destroyed so no later code path can call
     // a dangling IModHost.
@@ -5625,15 +5629,14 @@ void App::updateUiOverlay(float dt) {
     }
 
     // Toolbar yields are pushed by refreshToolbar() (init + each End Turn). Here we
-    // only keep the turn label current and animate any active toasts.
+    // only keep the turn label current; UI-wide animation (toasts, panel color
+    // tweens, ...) is advanced below via m_uiContext.tick(dt).
     if (m_toolbarTurnLabel != nullptr) {
         m_toolbarTurnLabel->setText(
             "<color=#c9b896>Turn</color> <b><color=#ecd39a><num>" +
             std::to_string(m_gameWorld.turn + 1) + "</num></color></b>");
     }
-    if (m_toasts != nullptr) {
-        m_toasts->update(dt);
-    }
+    m_uiContext.tick(dt);
 
     // Deferred Great People rebuild: a rail selection or a settle action sets the
     // dirty flag from inside a click callback; we rebuild the tree here, safely

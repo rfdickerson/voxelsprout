@@ -15,7 +15,7 @@ namespace odai::ui {
 // {0,0,0,0} for a solid fill using `foreground`.
 //
 // Animated colors: call foregroundAnim.set(targetColor, durationSec) to smoothly
-// transition the fill color, then drive it with update(dt) each frame.
+// transition the fill color; it advances automatically each frame via onTick.
 // foregroundEndAnim drives the right-end color of the gradient independently.
 // While either tween is in flight, its current() overrides the static field.
 class ProgressBar : public Widget {
@@ -36,15 +36,14 @@ public:
     float cornerRadiusPx = 0.0f;
     std::optional<UiNineSlice> frame;
 
-    // Animated color tweens. Set a target color with .set(color, durationSec),
-    // then call update(dt) each frame. While in flight, current() overrides the
+    // Animated color tweens. Set a target color with .set(color, durationSec);
+    // it's advanced automatically each frame via onTick (UiContext::tick(dt)
+    // drives this from the root). While in flight, current() overrides the
     // corresponding static color field.
     ColorTween foregroundAnim;
     ColorTween foregroundEndAnim;
 
-    // Step all active color tweens forward by dt seconds. Call once per frame.
-    void update(float dt);
-
+    void onTick(float dt) override;
     void draw(UiDrawList& dl) const override;
 
 private:
