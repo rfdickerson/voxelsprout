@@ -41,6 +41,24 @@ public:
         }
     }
 
+    // Reposition AND resize this widget in one step, correctly shifting all
+    // descendants by the resulting position delta. setRect() alone only
+    // overwrites this widget's own rect and never touches children_, so a
+    // composite child (one with its own children) repositioned that way has
+    // its contents silently stranded at their old coordinates — see
+    // docs/UI_LIBRARY.md's "Container Reflow Contract". Use this instead of
+    // setRect() in any container that recomputes a child's absolute rect
+    // from scratch every frame (a size-only change, with position unchanged,
+    // correctly leaves descendants untouched).
+    void repositionAndResize(const UiRect& newRect) {
+        const float dx = newRect.minX - rect_.minX;
+        const float dy = newRect.minY - rect_.minY;
+        rect_ = newRect;
+        for (const std::unique_ptr<Widget>& child : children_) {
+            child->translate(dx, dy);
+        }
+    }
+
     Widget* addChild(std::unique_ptr<Widget> child) {
         Widget* raw = child.get();
         children_.push_back(std::move(child));

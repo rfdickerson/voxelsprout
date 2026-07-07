@@ -44,6 +44,18 @@ public:
     // Corner radius for the solid-fill path (no effect when a 9-slice frame is set).
     // Kept small for the squared-off Victorian look.
     float cornerRadiusPx = 2.0f;
+    // Frame bevel: two-tone highlight/shadow drawn just inside the body silhouette
+    // (no effect when a 9-slice frame is set). Defaults give the subtle raised
+    // ledge used by the dark HUD theme; raise the alpha toward opaque and swap in
+    // a stronger highlight/shadow pair (e.g. Panel::styleMotif()'s palette) for a
+    // punchier CDE/Motif-style bevel.
+    UiColor frameBevelHighlightColor{1.0f, 1.0f, 1.0f, 0.14f};
+    UiColor frameBevelShadowColor{0.0f, 0.0f, 0.0f, 0.45f};
+    float   frameBevelThicknessPx = 1.5f;
+    // Title bar ledge bevel: same idea, one edge each along the top and bottom of
+    // the title bar strip (no effect when a 9-slice frame is set).
+    UiColor toolbarBevelHighlightColor{1.0f, 1.0f, 1.0f, 0.18f};
+    UiColor toolbarBevelShadowColor{0.0f, 0.0f, 0.0f, 0.35f};
     UiColor closeColor{0.85f, 0.55f, 0.35f, 0.85f};
     UiColor closeHoverColor{0.95f, 0.45f, 0.30f, 1.0f};
     bool showCloseButton = true;

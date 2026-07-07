@@ -50,8 +50,7 @@ void Window::draw(UiDrawList& dl) const {
         // Top-lit bevel just inside the silhouette: a soft highlight along the top
         // edge and a recessed shadow along the bottom give the frame physical depth
         // before the defining stroke is laid over it.
-        dl.addBevel(f, UiColor{1.0f, 1.0f, 1.0f, 0.14f}, UiColor{0.0f, 0.0f, 0.0f, 0.45f},
-                    r, 1.5f);
+        dl.addBevel(f, frameBevelHighlightColor, frameBevelShadowColor, r, frameBevelThicknessPx);
         // Crisp defining edge — the window's accent color reads as a thin gilt rule.
         dl.addRoundRect(f, borderColor, r, 1.5f);
     }
@@ -74,11 +73,11 @@ void Window::draw(UiDrawList& dl) const {
         // Bevel: 1.5 px highlight along top edge — simulates top-lit raised ledge.
         dl.addRectFilled(
             UiRect{toolbar.minX, toolbar.minY, toolbar.maxX, toolbar.minY + 1.5f},
-            UiColor{1.0f, 1.0f, 1.0f, 0.18f});
+            toolbarBevelHighlightColor);
         // Bevel: 1 px darkening along bottom edge — where the ledge recedes.
         dl.addRectFilled(
             UiRect{toolbar.minX, toolbar.maxY - 1.5f, toolbar.maxX, toolbar.maxY},
-            UiColor{0.0f, 0.0f, 0.0f, 0.35f});
+            toolbarBevelShadowColor);
     }
     const float sepY = f.minY + titleBarH;
     dl.addRectFilled(UiRect{f.minX + edge, sepY, f.maxX - edge, sepY + 1.5f}, borderColor);
@@ -125,7 +124,7 @@ void Window::draw(UiDrawList& dl) const {
     // bevel flips inward so the button visibly depresses.
     if (showCloseButton && font_ != nullptr) {
         const UiRect cb = closeBtnRect();
-        const float r = cb.width() * 0.18f;
+        const float r = cb.width() * 0.08f;
 
         // Base fill.
         const UiColor baseFill = closeHovered_

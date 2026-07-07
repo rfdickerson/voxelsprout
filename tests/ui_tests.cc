@@ -20,12 +20,14 @@
 #include "ui/widgets/selection_inspector_panel.h"
 #include "ui/widgets/donut_chart.h"
 #include "ui/widgets/dropdown.h"
+#include "ui/widgets/label.h"
 #include "ui/widgets/line_chart.h"
 #include "ui/widgets/minimap_panel.h"
 #include "ui/widgets/modal.h"
 #include "ui/widgets/panel.h"
 #include "ui/widgets/progress_bar.h"
 #include "ui/widgets/radio_button.h"
+#include "ui/widgets/repeater.h"
 #include "ui/widgets/scroll_view.h"
 #include "ui/widgets/slider.h"
 #include "ui/widgets/spacer.h"
@@ -59,6 +61,15 @@ void expectNear(float actual, float expected, float epsilon, const char* message
         ++g_failures;
     }
 }
+
+// Placeholder DataNode for Repeater tests that only care about layout, not data.
+class DummyDataNode : public odai::ui::DataNode {
+public:
+    std::string getString(std::string_view) const override { return {}; }
+    float getFloat(std::string_view) const override { return 0.0f; }
+    std::shared_ptr<odai::ui::DataNode> getChild(std::string_view) const override { return nullptr; }
+    std::vector<std::shared_ptr<odai::ui::DataNode>> getList(std::string_view) const override { return {}; }
+};
 
 odai::ui::Font makeMonospaceFont(float advance = 10.0f) {
     odai::ui::Font font;
@@ -831,6 +842,7 @@ void testBindingContextResolve() {
 
 void testHorizontalStackLayout() {
     using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
     auto stack = std::make_unique<HorizontalStack>();
     stack->gap = 4.0f;
     stack->setRect(UiRect::fromXYWH(0.0f, 0.0f, 300.0f, 40.0f));
@@ -840,33 +852,159 @@ void testHorizontalStackLayout() {
     Widget* aPtr = stack->addChild(std::move(a));
     Widget* bPtr = stack->addChild(std::move(b));
 
+    // Composite third child: a Panel with its own Label child, offset (10, 6)
+    // from the panel's local origin. If the stack reflows the panel via
+    // setRect() instead of translate()-based repositioning, the label stays
+    // stranded at its original (10, 6) absolute position instead of tracking
+    // the panel to its new stacked location.
+    auto panel = std::make_unique<Panel>();
+    panel->setRect(UiRect::fromXYWH(0.0f, 0.0f, 50.0f, 40.0f));
+    auto label = std::make_unique<Label>(&font, "x");
+    label->setRect(UiRect::fromXYWH(10.0f, 6.0f, 30.0f, 20.0f));
+    Label* labelPtr = static_cast<Label*>(panel->addChild(std::move(label)));
+    Panel* panelPtr = static_cast<Panel*>(stack->addChild(std::move(panel)));
+
     UiDrawList dl;
     dl.reset(UiVec2{800.0f, 600.0f});
     stack->draw(dl);
 
     expectNear(aPtr->rect().minX, 0.0f, 0.5f, "HStack: first child starts at 0");
     expectNear(bPtr->rect().minX, 84.0f, 0.5f, "HStack: second child starts after first + gap");
+    expectNear(panelPtr->rect().minX, 148.0f, 0.5f, "HStack: third (composite) child starts after first two + gaps");
+    expectNear(labelPtr->rect().minX, panelPtr->rect().minX + 10.0f, 0.5f,
+               "HStack: composite child's grandchild label tracks its panel's new X");
+    expectNear(labelPtr->rect().minY, panelPtr->rect().minY + 6.0f, 0.5f,
+               "HStack: composite child's grandchild label tracks its panel's new Y");
+}
+
+void testVerticalStackLayout() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    auto stack = std::make_unique<VerticalStack>();
+    stack->gap = 4.0f;
+    stack->setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 300.0f));
+
+    auto a = std::make_unique<Widget>(); a->setRect(UiRect::fromXYWH(0, 0, 200, 30));
+    auto b = std::make_unique<Widget>(); b->setRect(UiRect::fromXYWH(0, 0, 200, 20));
+    Widget* aPtr = stack->addChild(std::move(a));
+    Widget* bPtr = stack->addChild(std::move(b));
+
+    // Same composite-child check as the horizontal test, stacked on Y instead.
+    auto panel = std::make_unique<Panel>();
+    panel->setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 25.0f));
+    auto label = std::make_unique<Label>(&font, "x");
+    label->setRect(UiRect::fromXYWH(10.0f, 6.0f, 100.0f, 15.0f));
+    Label* labelPtr = static_cast<Label*>(panel->addChild(std::move(label)));
+    Panel* panelPtr = static_cast<Panel*>(stack->addChild(std::move(panel)));
+
+    UiDrawList dl;
+    dl.reset(UiVec2{800.0f, 600.0f});
+    stack->draw(dl);
+
+    expectNear(aPtr->rect().minY, 0.0f, 0.5f, "VStack: first child starts at 0");
+    expectNear(bPtr->rect().minY, 34.0f, 0.5f, "VStack: second child starts after first + gap");
+    expectNear(panelPtr->rect().minY, 58.0f, 0.5f, "VStack: third (composite) child starts after first two + gaps");
+    expectNear(labelPtr->rect().minX, panelPtr->rect().minX + 10.0f, 0.5f,
+               "VStack: composite child's grandchild label tracks its panel's new X");
+    expectNear(labelPtr->rect().minY, panelPtr->rect().minY + 6.0f, 0.5f,
+               "VStack: composite child's grandchild label tracks its panel's new Y");
 }
 
 void testScrollViewLayout() {
     using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
     auto sv = std::make_unique<ScrollView>();
     sv->setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 100.0f));
     sv->childGap = 4.0f;
 
+    std::vector<Widget*> leafPtrs;
     for (int i = 0; i < 5; ++i) {
         auto child = std::make_unique<Widget>();
         child->setRect(UiRect::fromXYWH(0, 0, 200, 30));
-        sv->addChild(std::move(child));
+        leafPtrs.push_back(sv->addChild(std::move(child)));
     }
+
+    // Composite child appended last: a Panel with its own Label, to check that
+    // scrolling reflows the grandchild along with its panel.
+    auto panel = std::make_unique<Panel>();
+    panel->setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 30.0f));
+    auto label = std::make_unique<Label>(&font, "x");
+    label->setRect(UiRect::fromXYWH(10.0f, 6.0f, 100.0f, 18.0f));
+    Label* labelPtr = static_cast<Label*>(panel->addChild(std::move(label)));
+    Panel* panelPtr = static_cast<Panel*>(sv->addChild(std::move(panel)));
 
     UiDrawList dl;
     dl.reset(UiVec2{800.0f, 600.0f});
     sv->draw(dl);
 
-    // 5 children of 30px + 4 gaps of 4px = 166px total content height.
-    expectNear(sv->contentHeight(), 166.0f, 0.5f,
-               "ScrollView: content height = 5*30 + 4*4 = 166");
+    // 6 children of 30px + 5 gaps of 4px = 200px total content height.
+    expectNear(sv->contentHeight(), 200.0f, 0.5f,
+               "ScrollView: content height = 6*30 + 5*4 = 200");
+    expectNear(leafPtrs[0]->rect().minY, 0.0f, 0.5f, "ScrollView: first child at y=0");
+    expectNear(leafPtrs[1]->rect().minY, 34.0f, 0.5f, "ScrollView: second child at y=34");
+    expectNear(panelPtr->rect().minY, 170.0f, 0.5f, "ScrollView: composite child at y=170 before scroll");
+    expectNear(labelPtr->rect().minY, panelPtr->rect().minY + 6.0f, 0.5f,
+               "ScrollView: grandchild label tracks its panel before scroll");
+
+    // Scroll down by 50px and redraw; every child (including the composite
+    // one's grandchild) should shift up by the same 50px.
+    sv->scrollOffsetY = 50.0f;
+    sv->draw(dl);
+    expectNear(leafPtrs[0]->rect().minY, -50.0f, 0.5f, "ScrollView: first child follows scroll offset");
+    expectNear(panelPtr->rect().minY, 120.0f, 0.5f, "ScrollView: composite child follows scroll offset");
+    expectNear(labelPtr->rect().minY, panelPtr->rect().minY + 6.0f, 0.5f,
+               "ScrollView: grandchild label tracks its panel after scroll");
+}
+
+void testRepeaterLayout() {
+    using namespace odai::ui;
+    Font font = makeMonospaceFont(8.0f);
+    auto rep = std::make_unique<Repeater>();
+    rep->setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 0.0f));
+    rep->itemHeight = 30.0f;
+    rep->itemGap = 4.0f;
+
+    Label* labelPtr = nullptr;
+    Panel* panelPtr = nullptr;
+    rep->setItemFactory([&](const std::shared_ptr<DataNode>&, std::size_t index) -> std::unique_ptr<Widget> {
+        auto panel = std::make_unique<Panel>();
+        panel->setRect(UiRect::fromXYWH(0.0f, 0.0f, 200.0f, 30.0f));
+        auto label = std::make_unique<Label>(&font, "row");
+        label->setRect(UiRect::fromXYWH(10.0f, 6.0f, 100.0f, 18.0f));
+        Label* lp = static_cast<Label*>(panel->addChild(std::move(label)));
+        if (index == 1) {
+            labelPtr = lp;
+        }
+        if (index == 1) {
+            panelPtr = panel.get();
+        }
+        return panel;
+    });
+
+    std::vector<std::shared_ptr<DataNode>> items;
+    items.push_back(std::make_shared<DummyDataNode>());
+    items.push_back(std::make_shared<DummyDataNode>());
+    items.push_back(std::make_shared<DummyDataNode>());
+    rep->setItems(std::move(items));
+
+    UiDrawList dl;
+    dl.reset(UiVec2{800.0f, 600.0f});
+    rep->draw(dl);
+
+    // Item 1 (0-indexed) sits after item 0's 30px height + 4px gap.
+    expectNear(panelPtr->rect().minY, 34.0f, 0.5f, "Repeater: second item positioned after first + gap");
+    expectNear(labelPtr->rect().minX, panelPtr->rect().minX + 10.0f, 0.5f,
+               "Repeater: grandchild label X tracks its row panel");
+    expectNear(labelPtr->rect().minY, panelPtr->rect().minY + 6.0f, 0.5f,
+               "Repeater: grandchild label Y tracks its row panel");
+
+    // Simulate an ancestor (e.g. a ScrollView) repositioning the whole
+    // Repeater, then redraw — every row and its grandchildren must follow.
+    rep->setRect(UiRect::fromXYWH(0.0f, 100.0f, 200.0f, rep->rect().height()));
+    rep->draw(dl);
+    expectNear(panelPtr->rect().minY, 134.0f, 0.5f, "Repeater: item follows parent reposition + redraw");
+    expectNear(labelPtr->rect().minY, panelPtr->rect().minY + 6.0f, 0.5f,
+               "Repeater: grandchild label still tracks its row panel after reposition");
 }
 
 void testProgressBarDraw() {
@@ -966,21 +1104,27 @@ void testBevelDraw() {
     const UiColor hl{1.0f, 1.0f, 1.0f, 0.3f};
     const UiColor sh{0.0f, 0.0f, 0.0f, 0.5f};
 
-    // Diagonal (upper-left) bevel: one addRoundRect per edge band — top, left, bottom,
-    // right — each under its own clip → exactly 4 draw commands.
+    // Diagonal (upper-left) bevel: one addRoundRect per edge band — top, left,
+    // bottom, right — plus a 6-step gradient ramp at each of the two shared
+    // corners (top-right, bottom-left) that smooths the highlight/shadow
+    // transition, instead of a hard cut → 4 + 6*2 = 16 draw commands.
+    constexpr std::size_t kExpectedBevelCommands = 16u;
     dl.addBevel(r, hl, sh, 0.0f, 2.0f);
     expectTrue(dl.data().vertices.size() > 0u, "addBevel emits vertices");
-    expectTrue(dl.data().commands.size() == 4u, "addBevel (sharp) emits exactly 4 draw commands");
+    expectTrue(dl.data().commands.size() == kExpectedBevelCommands,
+               "addBevel (sharp) emits exactly 16 draw commands");
 
     // Rounded corners: same command structure, different SDF radius param.
     dl.reset(UiVec2{200.0f, 200.0f});
     dl.addBevel(r, hl, sh, 8.0f, 2.0f);
-    expectTrue(dl.data().commands.size() == 4u, "addBevel (rounded) emits exactly 4 draw commands");
+    expectTrue(dl.data().commands.size() == kExpectedBevelCommands,
+               "addBevel (rounded) emits exactly 16 draw commands");
 
-    // Inward bevel: same structure, colours swapped internally — 4 commands.
+    // Inward bevel: same structure, colours swapped internally.
     dl.reset(UiVec2{200.0f, 200.0f});
     dl.addBevel(r, hl, sh, 8.0f, 2.0f, /*inward=*/true);
-    expectTrue(dl.data().commands.size() == 4u, "addBevel (inward) emits same command structure");
+    expectTrue(dl.data().commands.size() == kExpectedBevelCommands,
+               "addBevel (inward) emits same command structure");
 
     // Panel with bevel enabled.
     Panel p;
@@ -1610,7 +1754,9 @@ int main() {
     testInlineIconLayout();
     testBindingContextResolve();
     testHorizontalStackLayout();
+    testVerticalStackLayout();
     testScrollViewLayout();
+    testRepeaterLayout();
     testProgressBarDraw();
     testVectorPrimitives();
     testBevelDraw();

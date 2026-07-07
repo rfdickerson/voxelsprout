@@ -152,6 +152,45 @@ period-accurate retro looks (`styleWin95()`, `styleMotif()`,
 `kits/colony_sim_kit.h` — pre-curated widget selections per genre, for
 projects that want a starting point rather than assembling from primitives.
 
+## Container Reflow Contract
+
+`Widget::rect_` is absolute screen-space everywhere — there is no
+parent-relative coordinate space. This has one sharp edge: **repositioning a
+widget does not automatically reposition its children unless you use the
+right primitive.**
+
+- `Widget::setRect(rect)` overwrites only the widget's own `rect_`. It never
+  touches `children_`.
+- `Widget::translate(dx, dy)` shifts the widget *and recursively every
+  descendant* by the same delta. Safe to call every frame — pure delta
+  arithmetic, no accumulation drift, no side effects beyond the shift.
+- `Widget::repositionAndResize(newRect)` is the primitive containers should
+  use: it resizes the widget to `newRect`, computes the resulting position
+  delta, and `translate()`s every child by that delta. A size-only change
+  (position unchanged) correctly leaves children untouched.
+
+If a container repositions a child with `setRect()` instead of
+`repositionAndResize()`/`translate()`, and that child is itself a composite
+(has its own children — e.g. a `Panel` containing a `Label`), the
+container moves the child's own box correctly but silently strands the
+child's *contents* at their old coordinates. There is no crash or assert —
+the draw list still builds, and the wrong (or missing) pixels render with
+no diagnostic signal. This exact bug was independently hit by three
+different implementations built against this library before being fixed;
+see `examples/ui_stress_test/JUDGMENT.md` for the full writeup.
+
+`HorizontalStack`/`VerticalStack` (`StackLayout::layoutChildren()`),
+`ScrollView` (`ScrollView::layoutChildren()`), and `Repeater`
+(`Repeater::draw()`) all reflow their direct children every frame and all
+use `repositionAndResize()` for it. `Window`'s title-bar drag handler moves
+itself (not a child) and uses `translate()` directly, since it already knows
+its own delta.
+
+**Rule of thumb for a new container widget**: if you compute a child's new
+absolute rect from scratch every frame, call `repositionAndResize()`, never
+`setRect()`, unless the child is guaranteed to always be a leaf (no children
+of its own).
+
 ## Tests
 
 ```powershell

@@ -32,7 +32,7 @@ void StackLayout::layoutChildren(bool isHorizontal) const {
         } else {
             newRect = UiRect{crossOffset, pen, crossOffset + childCross, pen + childMain};
         }
-        child->setRect(newRect);
+        child->repositionAndResize(newRect);
         pen += childMain;
     }
 }
