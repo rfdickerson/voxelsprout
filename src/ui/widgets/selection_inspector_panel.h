@@ -75,8 +75,26 @@ public:
 
     explicit SelectionInspectorPanel(const FontSet& fonts) : fonts_(fonts) {}
 
+    // Background card frame styling. setState() rebuilds bg_ from scratch on
+    // every call (it's the only way to refresh this panel), so per-game style
+    // overrides must live here as persistent members rather than being poked
+    // onto bgPanel() after construction — they'd be wiped on the next refresh.
+    // Defaults match the panel's original hardcoded look.
+    UiColor borderColor{1.0f, 1.0f, 1.0f, 0.10f};
+    float   borderThicknessPx = 1.0f;
+    UiColor bevelHighlightColor{1.0f, 1.0f, 1.0f, 0.18f};
+    UiColor bevelShadowColor{0.0f, 0.0f, 0.0f, 0.40f};
+    float   bevelThicknessPx = 1.5f;
+    bool    bevelInward = false;  // true = sunken "well" look instead of raised.
+
     // (Re)build the whole panel from the current selection state.
     void setState(const UiRect& rect, float s, const State& state);
+
+    // Expose the background Panel for per-game styling overrides (mirrors
+    // ResearchPanel::bgPanel()). Safe to read after setState(); anything
+    // touching bevel/border colors should go through the persistent fields
+    // above instead, since this pointer is replaced on every setState() call.
+    [[nodiscard]] Panel* bgPanel() const { return bg_; }
 
 private:
     FontSet fonts_;

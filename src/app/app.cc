@@ -3991,8 +3991,16 @@ void App::setupHud(float viewW, float viewH) {
         auto topBg = std::make_unique<odai::ui::Panel>();
         topBg->setRect(odai::ui::UiRect::fromXYWH(0.0f, 0.0f, viewW, kToolbarH));
         topBg->background         = odai::ui::UiColor{0.047f, 0.055f, 0.071f, 0.92f};
-        topBg->borderColor        = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.06f};
+        // Motif framing: square corners, dark-slate border, and a bottom-edge
+        // bevel — keeps the dark fill (so bright yield text/tooltips stay legible)
+        // while giving the strip the same raised-ledge bevel as Motif chrome.
+        topBg->cornerRadiusPx     = 0.0f;
+        topBg->borderColor        = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 0.85f};  // #4C5060
         topBg->borderThicknessPx  = 1.0f * s;
+        topBg->showBevel          = true;
+        topBg->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.35f};  // #DDE0EB
+        topBg->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 0.55f};  // #6A6E7F
+        topBg->bevelThicknessPx    = 2.0f * s;
         root->addChild(std::move(topBg));
     }
     {
@@ -4056,6 +4064,16 @@ void App::setupHud(float viewW, float viewH) {
             const float iconX  = 6.0f * s;
             const float iconY  = (kToolbarH - iconSz) * 0.5f;
 
+            // Motif-style raised plate behind the icon+label lockup: a small
+            // beveled badge (blue-gray fill, square corners, two-tone bevel)
+            // rather than the logo sitting flat against the toolbar.
+            auto logoPlate = std::make_unique<odai::ui::Panel>();
+            logoPlate->setRect(odai::ui::UiRect::fromXYWH(
+                2.0f * s, 3.0f * s, logoW - 4.0f * s, kToolbarH - 6.0f * s));
+            logoPlate->styleMotif(s, /*raised=*/true);
+            logoPlate->background.a = 0.55f;  // Let the toolbar's own dark backdrop show through.
+            m_toolbar->addChild(std::move(logoPlate));
+
             odai::ui::UiIconEntry logoIcon{};
             if (odai::ui::UiIconRegistry::global().resolve("compass_crown", logoIcon)) {
                 auto img = std::make_unique<odai::ui::Image>(logoIcon.textureId);
@@ -4094,29 +4112,34 @@ void App::setupHud(float viewW, float viewH) {
             const float fogH = 24.0f * s;
             const float fogX = viewW - 336.0f * s;
             const float fogY = (kToolbarH - fogH) * 0.5f;
+            // Motif button: opaque blue-gray fill, square corners, raised bevel.
+            // Active/inactive state reads via fill tint (Motif accent vs. plain
+            // gray) rather than a hue swap, keeping it in-palette.
             auto fogBtn = std::make_unique<odai::ui::Button>(
                 fonts.regular, "Fog: ON",
                 [this]() {
                     m_fogOfWarEnabled = !m_fogOfWarEnabled;
                     if (m_fogButton != nullptr) {
                         m_fogButton->setLabel(m_fogOfWarEnabled ? "Fog: ON" : "Fog: OFF");
-                        // Active = blue tint; inactive = quiet gray.
                         m_fogButton->colorNormal = m_fogOfWarEnabled
-                            ? odai::ui::UiColor{0.10f, 0.22f, 0.42f, 0.92f}
-                            : odai::ui::UiColor{0.10f, 0.12f, 0.14f, 0.80f};
+                            ? odai::ui::UiColor{0.373f, 0.373f, 0.620f, 1.0f}   // #5F5F9E accent
+                            : odai::ui::UiColor{0.682f, 0.698f, 0.765f, 1.0f};  // #AEB2C3
                     }
                     rebuildStrategyMapScene();
                 });
             fogBtn->setRect(odai::ui::UiRect::fromXYWH(fogX, fogY, fogW, fogH));
-            fogBtn->colorNormal       = odai::ui::UiColor{0.10f, 0.22f, 0.42f, 0.92f};
-            fogBtn->colorHover        = odai::ui::UiColor{0.18f, 0.24f, 0.34f, 0.95f};
-            fogBtn->colorPressed      = odai::ui::UiColor{0.07f, 0.09f, 0.12f, 0.95f};
-            fogBtn->borderColor       = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.18f};
+            fogBtn->colorNormal       = odai::ui::UiColor{0.373f, 0.373f, 0.620f, 1.0f};  // #5F5F9E accent (fog ON)
+            fogBtn->colorHover        = odai::ui::UiColor{0.471f, 0.471f, 0.733f, 1.0f};  // #7878BB
+            fogBtn->colorPressed      = odai::ui::UiColor{0.298f, 0.298f, 0.500f, 1.0f};
+            fogBtn->borderColor       = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 1.0f};  // #4C5060
             fogBtn->borderThicknessPx = 1.0f * s;
-            fogBtn->labelColor        = odai::ui::UiColor{0.75f, 0.80f, 0.88f, 1.0f};
+            fogBtn->labelColor        = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 1.0f};
             fogBtn->glowSizePx        = 0.0f;
-            fogBtn->cornerRadiusPx    = 2.0f * s;
-            fogBtn->showBevel         = false;
+            fogBtn->cornerRadiusPx    = 0.0f;
+            fogBtn->showBevel         = true;
+            fogBtn->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 1.0f};  // #DDE0EB
+            fogBtn->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 1.0f};  // #6A6E7F
+            fogBtn->bevelThicknessPx    = 2.0f * s;
             m_fogButton = static_cast<odai::ui::Button*>(m_toolbar->addChild(std::move(fogBtn)));
         }
 
@@ -4155,10 +4178,16 @@ void App::setupHud(float viewW, float viewH) {
 
     auto bar = std::make_unique<odai::ui::Panel>();
     bar->setRect(odai::ui::UiRect::fromXYWH(0.0f, barY, viewW, kBarH));
-    // Clean-modern flat strip: translucent slate with a hairline top edge, no gilt.
+    // Keep the dark, translucent fill (map-readable, matches the top strip) but
+    // frame it Motif-style: square corners + a raised bevel along the top edge.
     bar->background         = odai::ui::UiColor{0.047f, 0.055f, 0.071f, 0.92f};
-    bar->borderColor        = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.06f};
+    bar->cornerRadiusPx      = 0.0f;
+    bar->borderColor        = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 0.85f};  // #4C5060
     bar->borderThicknessPx  = 1.0f * s;
+    bar->showBevel           = true;
+    bar->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.35f};  // #DDE0EB
+    bar->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 0.55f};  // #6A6E7F
+    bar->bevelThicknessPx    = 2.0f * s;
 
     // Turn Summary card (bottom-right, just above the bar) replaces the old centered
     // debug readout. m_hudStatsLabel lives inside it; updateUiOverlay fills the text.
@@ -4170,7 +4199,17 @@ void App::setupHud(float viewW, float viewH) {
         summaryTopY = sumY;
         auto sumPanel = std::make_unique<odai::ui::Panel>();
         sumPanel->setRect(odai::ui::UiRect::fromXYWH(sumX, sumY, sumW, sumH));
-        sumPanel->styleCard(s, 0.92f);
+        // Same Motif frame treatment as the toolbar/bar strips: dark map-readable
+        // fill (the stats label's rich-text colors are tuned for it), square
+        // corners, raised bevel.
+        sumPanel->background          = odai::ui::UiColor{0.047f, 0.055f, 0.071f, 0.92f};
+        sumPanel->cornerRadiusPx      = 0.0f;
+        sumPanel->borderColor         = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 0.85f};  // #4C5060
+        sumPanel->borderThicknessPx   = 1.0f * s;
+        sumPanel->showBevel           = true;
+        sumPanel->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.35f};  // #DDE0EB
+        sumPanel->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 0.55f};  // #6A6E7F
+        sumPanel->bevelThicknessPx    = 2.0f * s;
         auto* sumPtr = static_cast<odai::ui::Panel*>(root->addChild(std::move(sumPanel)));
 
         auto statsLabel = std::make_unique<odai::ui::Label>(fonts, "");
@@ -4180,13 +4219,22 @@ void App::setupHud(float viewW, float viewH) {
         m_hudStatsLabel = static_cast<odai::ui::Label*>(sumPtr->addChild(std::move(statsLabel)));
     }
 
-    // Keep action buttons flat: their color and a single quiet outline define the
-    // shape more cleanly than a simulated raised edge.
-    const auto styleActionButton = [s](odai::ui::Button* btn) {
+    // Motif buttons: opaque blue-gray fill, square corners, a raised two-tone
+    // bevel. Each button keeps a distinct (Motif-muted) accent border color so
+    // they stay visually distinguishable from one another.
+    const auto styleActionButton = [s](odai::ui::Button* btn, const odai::ui::UiColor& accentBorder) {
         if (btn == nullptr) return;
-        btn->showBevel = false;
-        btn->borderThicknessPx = 1.0f * s;
-        btn->cornerRadiusPx = 4.0f * s;
+        btn->cornerRadiusPx      = 0.0f;
+        btn->colorNormal         = odai::ui::UiColor{0.682f, 0.698f, 0.765f, 1.0f};  // #AEB2C3
+        btn->colorHover          = odai::ui::UiColor{0.773f, 0.784f, 0.839f, 1.0f};  // #C5C8D6
+        btn->colorPressed        = odai::ui::UiColor{0.580f, 0.596f, 0.663f, 1.0f};
+        btn->borderColor         = accentBorder;
+        btn->borderThicknessPx   = 2.0f * s;
+        btn->labelColor          = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 1.0f};
+        btn->showBevel           = true;
+        btn->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 1.0f};  // #DDE0EB
+        btn->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 1.0f};  // #6A6E7F
+        btn->bevelThicknessPx    = 2.0f * s;
     };
 
     // Smart turn button: a neutral dark base; the per-state color comes from the
@@ -4196,16 +4244,9 @@ void App::setupHud(float viewW, float viewH) {
         fireTurnAction();
     });
     endTurnBtn->setRect(odai::ui::UiRect::fromXYWH(viewW - 200.0f * s, barY + 8.0f * s, 184.0f * s, 48.0f * s));
-    endTurnBtn->cornerRadiusPx    = 2.0f * s;
-    endTurnBtn->colorNormal       = odai::ui::UiColor{0.105f, 0.125f, 0.157f, 0.96f};
-    endTurnBtn->colorHover        = odai::ui::UiColor{0.150f, 0.180f, 0.220f, 1.00f};
-    endTurnBtn->colorPressed      = odai::ui::UiColor{0.080f, 0.095f, 0.120f, 1.00f};
-    endTurnBtn->borderColor       = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.14f};
-    endTurnBtn->borderThicknessPx = 1.0f * s;
-    endTurnBtn->labelColor        = odai::ui::UiColor{0.90f, 0.93f, 0.97f, 1.0f};
     endTurnBtn->glowSizePx        = 20.0f * s;
     endTurnBtn->accentWidthPx     = 4.0f * s;
-    styleActionButton(endTurnBtn.get());
+    styleActionButton(endTurnBtn.get(), odai::ui::UiColor{0.373f, 0.373f, 0.620f, 1.0f});  // #5F5F9E accent
     m_endTurnBtn = static_cast<odai::ui::Button*>(bar->addChild(std::move(endTurnBtn)));
 
     // Research button (bottom-left): toggles the Technology Tree window.
@@ -4216,15 +4257,9 @@ void App::setupHud(float viewW, float viewH) {
         if (show) refreshTechTree();
     });
     researchBtn->setRect(odai::ui::UiRect::fromXYWH(16.0f * s, barY + 8.0f * s, 160.0f * s, 48.0f * s));
-    researchBtn->cornerRadiusPx    = 2.0f * s;
-    researchBtn->colorNormal       = odai::ui::UiColor{0.09f, 0.18f, 0.28f, 0.95f};
-    researchBtn->colorHover        = odai::ui::UiColor{0.16f, 0.30f, 0.44f, 1.00f};
-    researchBtn->colorPressed      = odai::ui::UiColor{0.06f, 0.13f, 0.21f, 1.00f};
-    researchBtn->borderColor       = odai::ui::UiColor{0.40f, 0.70f, 0.95f, 0.85f};
-    researchBtn->borderThicknessPx = 2.0f * s;
-    researchBtn->glowColor         = odai::ui::UiColor{0.35f, 0.65f, 0.95f, 0.60f};
-    researchBtn->glowSizePx        = 18.0f * s;
-    styleActionButton(researchBtn.get());
+    researchBtn->glowColor  = odai::ui::UiColor{0.18f, 0.31f, 0.55f, 0.50f};  // yield.science-ish
+    researchBtn->glowSizePx = 12.0f * s;
+    styleActionButton(researchBtn.get(), odai::ui::UiColor{0.18f, 0.31f, 0.55f, 1.0f});  // #2E4E8B-ish
     bar->addChild(std::move(researchBtn));
 
     // Great People button (bottom-left, beside Research): toggles the roster window.
@@ -4235,15 +4270,9 @@ void App::setupHud(float viewW, float viewH) {
         if (show) refreshGreatPeople();
     });
     greatBtn->setRect(odai::ui::UiRect::fromXYWH(184.0f * s, barY + 8.0f * s, 160.0f * s, 48.0f * s));
-    greatBtn->cornerRadiusPx    = 2.0f * s;
-    greatBtn->colorNormal       = odai::ui::UiColor{0.22f, 0.14f, 0.26f, 0.95f};
-    greatBtn->colorHover        = odai::ui::UiColor{0.34f, 0.22f, 0.40f, 1.00f};
-    greatBtn->colorPressed      = odai::ui::UiColor{0.16f, 0.10f, 0.20f, 1.00f};
-    greatBtn->borderColor       = odai::ui::UiColor{0.78f, 0.58f, 0.92f, 0.85f};
-    greatBtn->borderThicknessPx = 2.0f * s;
-    greatBtn->glowColor         = odai::ui::UiColor{0.72f, 0.45f, 0.92f, 0.55f};
-    greatBtn->glowSizePx        = 18.0f * s;
-    styleActionButton(greatBtn.get());
+    greatBtn->glowColor  = odai::ui::UiColor{0.43f, 0.18f, 0.55f, 0.45f};  // yield.culture-ish
+    greatBtn->glowSizePx = 12.0f * s;
+    styleActionButton(greatBtn.get(), odai::ui::UiColor{0.43f, 0.18f, 0.55f, 1.0f});  // #6E2E8B-ish
     bar->addChild(std::move(greatBtn));
 
     // Religion button (bottom-left, beside Great People): toggles the faith catalog.
@@ -4254,15 +4283,9 @@ void App::setupHud(float viewW, float viewH) {
         if (show) refreshReligion();
     });
     faithBtn->setRect(odai::ui::UiRect::fromXYWH(352.0f * s, barY + 8.0f * s, 140.0f * s, 48.0f * s));
-    faithBtn->cornerRadiusPx    = 2.0f * s;
-    faithBtn->colorNormal       = odai::ui::UiColor{0.22f, 0.16f, 0.08f, 0.95f};
-    faithBtn->colorHover        = odai::ui::UiColor{0.36f, 0.26f, 0.12f, 1.00f};
-    faithBtn->colorPressed      = odai::ui::UiColor{0.16f, 0.12f, 0.06f, 1.00f};
-    faithBtn->borderColor       = odai::ui::UiColor{0.92f, 0.78f, 0.36f, 0.85f};
-    faithBtn->borderThicknessPx = 2.0f * s;
-    faithBtn->glowColor         = odai::ui::UiColor{0.92f, 0.72f, 0.20f, 0.55f};
-    faithBtn->glowSizePx        = 18.0f * s;
-    styleActionButton(faithBtn.get());
+    faithBtn->glowColor  = odai::ui::UiColor{0.48f, 0.42f, 0.10f, 0.45f};  // yield.gold-ish
+    faithBtn->glowSizePx = 12.0f * s;
+    styleActionButton(faithBtn.get(), odai::ui::UiColor{0.48f, 0.42f, 0.10f, 1.0f});  // #7A6600-ish (text.gold)
     m_faithButton = static_cast<odai::ui::Button*>(bar->addChild(std::move(faithBtn)));
 
     root->addChild(std::move(bar));
@@ -4320,13 +4343,16 @@ void App::setupHud(float viewW, float viewH) {
         civPanel->setRect(odai::ui::UiRect::fromXYWH(civX, civY, civW, civH));
         civPanel->cornerRadiusPx    = 0.0f;  // flush to screen edges
         civPanel->background        = odai::ui::UiColor{0.08f, 0.10f, 0.13f, 0.95f};
-        civPanel->borderColor       = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.55f};
+        // Motif framing: dark-slate border + raised bevel instead of the gilt
+        // outline + drop shadow, while keeping the dark fill (gold title/name
+        // text stays legible against it).
+        civPanel->borderColor       = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 0.85f};  // #4C5060
         civPanel->borderThicknessPx = 1.5f * s;
-        civPanel->showShadow        = true;
-        civPanel->shadowBlurPx      = 5.0f * s;
-        civPanel->shadowOffsetX     = 3.0f * s;
-        civPanel->shadowOffsetY     = 0.0f;
-        civPanel->shadowColor       = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.25f};
+        civPanel->showShadow        = false;
+        civPanel->showBevel           = true;
+        civPanel->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.35f};  // #DDE0EB
+        civPanel->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 0.55f};  // #6A6E7F
+        civPanel->bevelThicknessPx    = 2.0f * s;
         civPanel->clipContents      = true;
 
         float cy = civY + 14.0f * s;
@@ -4591,6 +4617,21 @@ void App::setupHud(float viewW, float viewH) {
                 }
                 m_cameraPrevious = m_camera;
             };
+
+            // Recessed Motif "well" for the map image, matching the Tech Tree
+            // window's content treatment: keep the panel's own dark fill (its
+            // title/chip colors are tuned for it) and recolor just the frame to
+            // an inward Motif bevel. Applied after setMinimap() since it rebuilds
+            // bg_ from scratch; setActive() (the lens-switch path) does not.
+            if (odai::ui::Panel* mmBg = m_minimap->bgPanel(); mmBg != nullptr) {
+                mmBg->borderColor         = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 1.0f};  // #4C5060
+                mmBg->borderThicknessPx   = 2.0f * s;
+                mmBg->showBevel           = true;
+                mmBg->bevelHighlightColor = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 0.9f};  // #6A6E7F
+                mmBg->bevelShadowColor    = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.5f};  // #DDE0EB
+                mmBg->bevelThicknessPx    = 2.0f * s;
+                mmBg->bevelInward         = true;  // Sunken well, not a raised card.
+            }
         }
     }
 
@@ -4604,6 +4645,15 @@ void App::setupHud(float viewW, float viewH) {
         m_commandViewRect = odai::ui::UiRect::fromXYWH(cvX, cvY, cvW, cvH);
         auto cv = std::make_unique<odai::ui::SelectionInspectorPanel>(fonts);
         cv->setRect(m_commandViewRect);
+        // Motif bevel/border for the background card. These are persistent
+        // fields (not the transient bgPanel()) since setState() rebuilds the
+        // card from scratch on every refresh.
+        cv->borderColor         = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 1.0f};  // #4C5060
+        cv->borderThicknessPx   = 2.0f;
+        cv->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.5f};  // #DDE0EB
+        cv->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 0.9f};  // #6A6E7F
+        cv->bevelThicknessPx    = 2.0f;
+        cv->bevelInward         = true;  // Sunken well (styleCard()'s own bg stays dark and legible).
         m_commandView = static_cast<odai::ui::SelectionInspectorPanel*>(root->addChild(std::move(cv)));
     }
 
@@ -4747,15 +4797,35 @@ void App::setupHud(float viewW, float viewH) {
             techWin->titleBarH = odai::ui::Window::kDefaultTitleBarH * s;
         }
         techWin->padding         = {8.0f * s, 8.0f * s};
-        techWin->titleBarColor   = odai::ui::UiColor{0.20f, 0.26f, 0.34f, 1.0f};
-        techWin->bodyColor       = odai::ui::UiColor{0.06f, 0.09f, 0.13f, 0.97f};
-        techWin->borderColor     = odai::ui::UiColor{0.40f, 0.62f, 0.85f, 0.65f};
-        techWin->cornerRadiusPx  = 2.0f * s;
+        // Motif/CDE chrome: opaque blue-gray title bar + body, square corners, a
+        // strong two-tone bevel instead of the dark HUD's subtle translucent one.
+        techWin->titleBarColor           = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 1.0f};  // #4C5060
+        techWin->bodyColor               = odai::ui::UiColor{0.682f, 0.698f, 0.765f, 1.0f};  // #AEB2C3
+        techWin->borderColor             = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 1.0f};  // #4C5060
+        techWin->titleColor              = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 1.0f};  // #DDE0EB
+        techWin->cornerRadiusPx          = 0.0f;
+        techWin->frameBevelHighlightColor    = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 1.0f};  // #DDE0EB
+        techWin->frameBevelShadowColor       = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 1.0f};  // #6A6E7F
+        techWin->frameBevelThicknessPx       = 2.0f * s;
+        techWin->toolbarBevelHighlightColor  = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.85f};
+        techWin->toolbarBevelShadowColor     = odai::ui::UiColor{0.173f, 0.184f, 0.239f, 0.55f};
         techWin->showCloseButton = true;
         techWin->draggable       = true;
 
         auto panel = std::make_unique<odai::ui::ResearchPanel>(fonts);
         m_techTreePanel  = static_cast<odai::ui::ResearchPanel*>(techWin->addChild(std::move(panel)));
+        // Leave bgPanel's own dark fill alone (its text/row colors are tuned for
+        // it) and instead recolor just the frame to read as a recessed Motif
+        // "well" holding the content — the classic CDE sunken list/text look.
+        if (odai::ui::Panel* bg = m_techTreePanel->bgPanel(); bg != nullptr) {
+            bg->borderColor       = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 1.0f};  // #4C5060
+            bg->borderThicknessPx = 2.0f * s;
+            bg->showBevel         = true;
+            bg->bevelHighlightColor = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 0.9f};  // #6A6E7F
+            bg->bevelShadowColor    = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.5f};  // #DDE0EB
+            bg->bevelThicknessPx    = 2.0f * s;
+            bg->bevelInward         = true;  // Sunken well, not a raised card.
+        }
         m_techTreeWindow = static_cast<odai::ui::Window*>(root->addChild(std::move(techWin)));
         m_techTreeWindow->visible = false;
         refreshTechTree();
@@ -4783,10 +4853,17 @@ void App::setupHud(float viewW, float viewH) {
             gpWin->titleBarH = odai::ui::Window::kDefaultTitleBarH * s;
         }
         gpWin->padding         = {8.0f * s, 8.0f * s};
-        gpWin->titleBarColor   = odai::ui::UiColor{0.26f, 0.18f, 0.30f, 1.0f};
-        gpWin->bodyColor       = odai::ui::UiColor{0.07f, 0.06f, 0.04f, 0.97f};
-        gpWin->borderColor     = odai::ui::UiColor{0.78f, 0.58f, 0.92f, 0.65f};
-        gpWin->cornerRadiusPx  = 2.0f * s;
+        // Motif/CDE chrome — see the matching Tech Tree window above for the palette.
+        gpWin->titleBarColor           = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 1.0f};  // #4C5060
+        gpWin->bodyColor               = odai::ui::UiColor{0.682f, 0.698f, 0.765f, 1.0f};  // #AEB2C3
+        gpWin->borderColor             = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 1.0f};  // #4C5060
+        gpWin->titleColor              = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 1.0f};  // #DDE0EB
+        gpWin->cornerRadiusPx          = 0.0f;
+        gpWin->frameBevelHighlightColor    = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 1.0f};  // #DDE0EB
+        gpWin->frameBevelShadowColor       = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 1.0f};  // #6A6E7F
+        gpWin->frameBevelThicknessPx       = 2.0f * s;
+        gpWin->toolbarBevelHighlightColor  = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.85f};
+        gpWin->toolbarBevelShadowColor     = odai::ui::UiColor{0.173f, 0.184f, 0.239f, 0.55f};
         gpWin->showCloseButton = true;
         gpWin->draggable       = true;
 
@@ -4856,8 +4933,13 @@ void App::setupHud(float viewW, float viewH) {
         auto ap = std::make_unique<odai::ui::Panel>();
         ap->setRect(odai::ui::UiRect::fromXYWH(panelX, panelY, panelW, panelH));
         ap->background        = odai::ui::UiColor{0.06f, 0.07f, 0.10f, 0.94f};
-        ap->borderColor       = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.55f};
-        ap->borderThicknessPx = 1.5f * s;
+        ap->cornerRadiusPx      = 0.0f;
+        ap->borderColor         = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 0.85f};  // #4C5060
+        ap->borderThicknessPx   = 1.5f * s;
+        ap->showBevel           = true;
+        ap->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.35f};  // #DDE0EB
+        ap->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 0.55f};  // #6A6E7F
+        ap->bevelThicknessPx    = 2.0f * s;
         ap->visible           = false;  // hidden until a unit is selected
 
         // Unit portrait image.
@@ -4893,7 +4975,17 @@ void App::setupHud(float viewW, float viewH) {
                 }
             });
             btn->setRect(odai::ui::UiRect::fromXYWH(bx, by, btnSz, btnSz));
-            btn->cornerRadiusPx = 2.0f * s;
+            btn->cornerRadiusPx = 0.0f;
+            btn->colorNormal    = odai::ui::UiColor{0.682f, 0.698f, 0.765f, 0.85f};  // #AEB2C3
+            btn->colorHover     = odai::ui::UiColor{0.773f, 0.784f, 0.839f, 0.95f};  // #C5C8D6
+            btn->colorPressed   = odai::ui::UiColor{0.580f, 0.596f, 0.663f, 1.0f};
+            btn->borderColor    = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 0.85f};  // #4C5060
+            btn->borderHoverColor = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 1.0f};
+            btn->borderThicknessPx = 1.5f * s;
+            btn->showBevel        = true;
+            btn->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.9f};  // #DDE0EB
+            btn->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 0.9f};  // #6A6E7F
+            btn->bevelThicknessPx    = 1.5f * s;
             btn->glowSizePx     = 12.0f * s;
             btn->iconPaddingPx  = 5.0f * s;
             btn->visible        = false;
@@ -4922,9 +5014,13 @@ void App::setupHud(float viewW, float viewH) {
         auto feedBg = std::make_unique<odai::ui::Panel>();
         feedBg->setRect(odai::ui::UiRect::fromXYWH(feedX, feedY, feedW, feedH));
         feedBg->background        = odai::ui::UiColor{0.05f, 0.07f, 0.10f, 0.86f};
-        feedBg->borderColor       = odai::ui::UiColor{0.75f, 0.62f, 0.34f, 0.45f};
-        feedBg->borderThicknessPx = 1.0f * s;
-        feedBg->cornerRadiusPx    = 2.0f * s;
+        feedBg->cornerRadiusPx      = 0.0f;
+        feedBg->borderColor         = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 0.75f};  // #4C5060
+        feedBg->borderThicknessPx   = 1.0f * s;
+        feedBg->showBevel           = true;
+        feedBg->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 0.30f};  // #DDE0EB
+        feedBg->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 0.50f};  // #6A6E7F
+        feedBg->bevelThicknessPx    = 2.0f * s;
         auto* feedBgPtr = static_cast<odai::ui::Panel*>(root->addChild(std::move(feedBg)));
 
         const odai::ui::Font* feedTitleFont = fonts.bold ? fonts.bold : fonts.regular;
@@ -4985,7 +5081,7 @@ void App::setupHud(float viewW, float viewH) {
 
         auto card = std::make_unique<odai::ui::Panel>();
         card->setRect(odai::ui::UiRect::fromXYWH(cardX, cardY, cardW, cardH));
-        card->styleCard(s, 0.97f);
+        card->styleMotif(s, /*raised=*/true);
 
         float cy = cardY + padTop;
 
@@ -5000,14 +5096,14 @@ void App::setupHud(float viewW, float viewH) {
         cy += logoSz + logoGap;
 
         auto title = std::make_unique<odai::ui::Label>(
-            fonts, "<b><color=#d9b75e>Compass & Crown</color></b>");
+            fonts, "<b><color=#2c2f3d>Compass & Crown</color></b>");
         title->align = odai::ui::UiTextAlign::Center;
         title->setRect(odai::ui::UiRect::fromXYWH(cardX + 12.0f * s, cy, cardW - 24.0f * s, titleH));
         card->addChild(std::move(title));
         cy += titleH + titleGap;
 
         auto sub = std::make_unique<odai::ui::Label>(
-            fonts, "<color=#93a0b4><i>Where Maps Become Empires.</i></color>");
+            fonts, "<color=#4c5060><i>Where Maps Become Empires.</i></color>");
         sub->align = odai::ui::UiTextAlign::Center;
         sub->setRect(odai::ui::UiRect::fromXYWH(cardX + 12.0f * s, cy, cardW - 24.0f * s, subH));
         card->addChild(std::move(sub));
@@ -5016,18 +5112,23 @@ void App::setupHud(float viewW, float viewH) {
         const float btnW = cardW - 48.0f * s;
         const float btnX = cardX + (cardW - btnW) * 0.5f;
 
+        // Motif-style raised buttons: square corners, blue-gray fill, a
+        // two-tone bevel that flips inward on press for a tactile CDE feel.
         auto makeMenuBtn = [&](const char* label, std::function<void()> cb) {
             auto btn = std::make_unique<odai::ui::Button>(fonts.regular, label, std::move(cb));
             btn->setRect(odai::ui::UiRect::fromXYWH(btnX, cy, btnW, btnH));
-            btn->cornerRadiusPx    = 2.0f * s;
-            btn->colorNormal       = odai::ui::UiColor{0.105f, 0.125f, 0.157f, 0.90f};
-            btn->colorHover        = odai::ui::UiColor{0.150f, 0.180f, 0.220f, 1.00f};
-            btn->colorPressed      = odai::ui::UiColor{0.080f, 0.095f, 0.120f, 1.00f};
-            btn->borderColor       = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.10f};
+            btn->cornerRadiusPx    = 0.0f;
+            btn->colorNormal       = odai::ui::UiColor{0.682f, 0.698f, 0.765f, 1.0f};  // #AEB2C3
+            btn->colorHover        = odai::ui::UiColor{0.737f, 0.753f, 0.816f, 1.0f};
+            btn->colorPressed      = odai::ui::UiColor{0.616f, 0.631f, 0.694f, 1.0f};
+            btn->borderColor       = odai::ui::UiColor{0.298f, 0.314f, 0.376f, 1.0f};  // #4C5060
             btn->borderThicknessPx = 1.0f * s;
-            btn->labelColor        = odai::ui::UiColor{0.90f, 0.93f, 0.97f, 1.0f};
+            btn->labelColor        = odai::ui::UiColor{0.173f, 0.184f, 0.239f, 1.0f};  // #2C2F3D
+            btn->showBevel         = true;
+            btn->bevelHighlightColor = odai::ui::UiColor{0.871f, 0.878f, 0.914f, 1.0f};  // #DDE0EB
+            btn->bevelShadowColor    = odai::ui::UiColor{0.416f, 0.431f, 0.498f, 1.0f};  // #6A6E7F
+            btn->bevelThicknessPx    = 2.0f * s;
             btn->glowSizePx        = 0.0f;
-            styleActionButton(btn.get());
             card->addChild(std::move(btn));
             cy += btnH + btnGap;
         };
