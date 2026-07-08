@@ -912,6 +912,7 @@ if(ODAI_BUILD_TOOLS)
     #   odai_civ_sim [turns] [seed] [empires] [--quiet|--sweep N]
     add_executable(odai_civ_sim
         src/game/strategy_map.cc
+        src/game/buildable.cc
         src/game/economy.cc
         src/game/game_sim.cc
         src/game/great_people.cc
