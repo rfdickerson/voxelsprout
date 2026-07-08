@@ -85,6 +85,24 @@ std::uint32_t findOtTable(const std::uint8_t* data, std::uint32_t fontStart, con
     return 0;
 }
 
+// stbtt_GetPackedQuad's align_to_integer snaps BOTH q.x0 and q.y0 to the
+// nearest pixel. Snapping y0 is what we want (addText rounds the text
+// baseline to an integer row for crisp horizontal strokes, so an integer
+// top-bearing keeps every glyph on that same row). Snapping x0 is not: it
+// rounds away the glyph's fractional left-side-bearing, which is exactly the
+// sub-pixel precision the 3x horizontal oversampling bake exists to make safe
+// to render off-grid — addText deliberately leaves its pen X fractional (see
+// the comment there) so that precision can flow through, but it never gets
+// the chance if the bearing baked into the atlas metrics was already rounded.
+// Call stbtt_GetPackedQuad with align_to_integer=0 (raw fractional quad) and
+// use this to snap only the Y axis, replicating stb's own floor(v+0.5) rule.
+void snapQuadYOnly(stbtt_aligned_quad& q) {
+    const float snappedY0 = std::floor(q.y0 + 0.5f);
+    const float dy = snappedY0 - q.y0;
+    q.y0 += dy;
+    q.y1 += dy;
+}
+
 // Count bytes occupied by a ValueRecord given its ValueFormat bitmask.
 int valueRecordBytes(std::uint16_t fmt) {
     int bits = 0;
@@ -846,7 +864,8 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
         float penY = 0.0f;
         stbtt_aligned_quad q{};
         stbtt_GetPackedQuad(packed0.data(), static_cast<int>(atlasSize), static_cast<int>(atlasSize),
-                            static_cast<int>(i), &penX, &penY, &q, /*align_to_integer=*/1);
+                            static_cast<int>(i), &penX, &penY, &q, /*align_to_integer=*/0);
+        snapQuadYOnly(q);
         Glyph g{};
         g.size = {q.x1 - q.x0, q.y1 - q.y0};
         g.bearing = {q.x0, -q.y0};  // q.y0 is negative (above the baseline).
@@ -861,7 +880,8 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
         float penX = 0.0f, penY = 0.0f;
         stbtt_aligned_quad q{};
         stbtt_GetPackedQuad(packed1.data(), static_cast<int>(atlasSize), static_cast<int>(atlasSize),
-                            static_cast<int>(i), &penX, &penY, &q, 1);
+                            static_cast<int>(i), &penX, &penY, &q, 0);
+        snapQuadYOnly(q);
         Glyph g{};
         g.size = {q.x1 - q.x0, q.y1 - q.y0};
         g.bearing = {q.x0, -q.y0};
@@ -876,7 +896,8 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
         float penX = 0.0f, penY = 0.0f;
         stbtt_aligned_quad q{};
         stbtt_GetPackedQuad(packed2.data(), static_cast<int>(atlasSize), static_cast<int>(atlasSize),
-                            static_cast<int>(i), &penX, &penY, &q, 1);
+                            static_cast<int>(i), &penX, &penY, &q, 0);
+        snapQuadYOnly(q);
         Glyph g{};
         g.size = {q.x1 - q.x0, q.y1 - q.y0};
         g.bearing = {q.x0, -q.y0};
@@ -1027,8 +1048,8 @@ bool Font::loadFromFile(const std::string& path, float pixelHeight, std::uint32_
 // ---------------------------------------------------------------------------
 // Font cache — binary serialisation of baked atlas + metrics + shaping tables.
 //
-// File format "ODAIFNT2":
-//   [8]  magic "ODAIFNT2"
+// File format "ODAIFNT3":
+//   [8]  magic "ODAIFNT3"
 //   [8]  TTF file size (uint64)  ─┐ cache key: both must match the source TTF
 //   [8]  TTF mtime ticks (int64) ─┘
 //   [4]  ascent   [4] descent  [4] lineHeight  (float)
@@ -1044,7 +1065,7 @@ bool Font::loadFromFile(const std::string& path, float pixelHeight, std::uint32_
 //   [4]  cpToGlyph count; each: cp(4) + glyphId(4)
 // ---------------------------------------------------------------------------
 
-static constexpr char kCacheMagic[8] = {'O','D','A','I','F','N','T','2'};
+static constexpr char kCacheMagic[8] = {'O','D','A','I','F','N','T','3'};
 
 std::string Font::makeCachePath(const std::string& ttfPath, float pixelHeight,
                                 std::uint32_t atlasSize, std::uint32_t firstCodepoint,
