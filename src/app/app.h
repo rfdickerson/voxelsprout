@@ -218,6 +218,14 @@ private:
     void refreshCommandView();
     // Rebuild the event-feed text from the tail of m_gameWorld.events.
     void refreshEventFeed();
+    // Open the main menu: backdrop fades in while the card pops from its
+    // collapsed rect via m_mainMenuCardTween (BackOut).
+    void openMainMenu();
+    // Close the main menu: card collapses (CubicIn) while the backdrop fades
+    // out; the modal is hidden once the fade-out finishes.
+    void closeMainMenu();
+    // Open or close the main menu depending on m_mainMenuOpen.
+    void toggleMainMenu();
     // After a turn step: raise eureka/unlock toasts and era-transition banners for
     // any new player events, and advance m_lastEventCount / m_lastEraIndex.
     void fireTurnBanners();
@@ -458,6 +466,15 @@ private:
     odai::ui::UiRect m_commandViewRect{};
     // Main menu modal (shown by the logo button or Escape; hidden by Resume/close).
     odai::ui::Panel* m_mainMenuModal = nullptr;
+    // The centered card inside the dimmer; animated by m_mainMenuCardTween
+    // (see openMainMenu/closeMainMenu). clipContents = true so the card visually
+    // pops open/closed instead of its children jumping to new positions.
+    odai::ui::Panel* m_mainMenuCard = nullptr;
+    odai::ui::UiRect m_mainMenuCardOpenRect{};
+    odai::ui::UiRect m_mainMenuCardClosedRect{};
+    odai::ui::RectTween m_mainMenuCardTween{};
+    odai::ui::Sequence m_mainMenuBackdropSeq{};
+    bool m_mainMenuOpen = false;
     // Bottom-center strategy minimap + its per-lens baked textures.
     odai::ui::MinimapPanel* m_minimap = nullptr;
     std::vector<odai::ui::UiTextureId> m_minimapTex;  // one texture per lens mode
