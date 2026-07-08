@@ -1149,6 +1149,7 @@ if(BUILD_TESTING)
     # Pure CPU; no Vulkan, no UI.
     add_executable(odai_great_people_tests
         tests/great_people_tests.cc
+        src/game/buildable.cc
         src/game/economy.cc
         src/game/game_sim.cc
         src/game/great_people.cc
