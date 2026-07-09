@@ -135,6 +135,31 @@ void Panel::styleMotif(float s, bool raised) {
     showShadow           = false;
 }
 
+void Panel::styleCiv6(float s, float alpha) {
+    // Civ 6 "dark glass + brass trim" palette: a desaturated navy gradient that
+    // lightens toward the top edge, framed by a thin warm-gold outer stroke and
+    // a dim gold inner line. Angular corners; a soft shadow lifts the panel off
+    // the map. No bevel — the trim is the frame.
+    bgTop    = UiColor{0.106f, 0.157f, 0.204f, alpha};  // #1B2834 lit navy
+    bgBottom = UiColor{0.043f, 0.071f, 0.102f, alpha};  // #0B121A deep navy
+    background = *bgBottom;                              // fallback if gradient unused
+    borderColor          = UiColor{0.722f, 0.580f, 0.282f, 0.85f};  // brass #B89448
+    borderThicknessPx    = 1.5f * s;
+    cornerRadiusPx       = 0.0f;
+    innerBorderColor     = UiColor{0.478f, 0.373f, 0.169f, 0.55f};  // dim gold #7A5F2B
+    innerBorderInsetPx   = 3.0f * s;
+    cornerAccentColor    = UiColor{};
+    cornerAccentPx       = 0.0f;
+    showBevel            = false;
+    bevelInward          = false;
+    showShadow           = true;
+    shadowColor          = UiColor{0.0f, 0.0f, 0.0f, 0.50f};
+    shadowBlurPx         = 8.0f * s;
+    shadowOffsetX        = 0.0f;
+    shadowOffsetY        = 3.0f * s;
+    liftShadowColor      = UiColor{1.0f, 1.0f, 1.0f, 0.0f};
+}
+
 void Panel::styleClassicMac(float s) {
     bgTop.reset();
     bgBottom.reset();

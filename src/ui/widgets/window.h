@@ -69,6 +69,13 @@ public:
 
     void setTitle(std::string t) { title_ = std::move(t); }
 
+    // Raise this window above all other windows sharing its parent by assigning
+    // it the next value from a shared monotonic counter. Called automatically
+    // when the window is clicked into (see onEvent) or shown; call directly
+    // when a window is made visible programmatically (e.g. a toolbar button
+    // toggling `visible = true`) so it also jumps to the front.
+    void bringToFront();
+
     void draw(UiDrawList& dl) const override;
     bool onEvent(UiEvent& e) override;
 

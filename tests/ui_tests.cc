@@ -39,6 +39,7 @@
 #include "ui/widgets/toast.h"
 #include "ui/widgets/toggle.h"
 #include "ui/widgets/toolbar.h"
+#include "ui/widgets/window.h"
 #include "ui/widgets/event_tracker_panel.h"
 
 #include <cstddef>
@@ -537,6 +538,78 @@ void testModalOpenCloseBlocking() {
     dl.reset(UiVec2{800.0f, 600.0f});
     modal.draw(dl);
     expectTrue(!dl.data().vertices.empty(), "Modal: emits backdrop + dialog geometry");
+}
+
+void testWindowOpenBringsToFront() {
+    using namespace odai::ui;
+
+    auto root = std::make_unique<Widget>();
+    root->mousePassthrough = true;
+
+    // Mirrors App::setupHud: the CivPedia window is added to the tree before the
+    // Tech Tree window, so with insertion order as the only tiebreak the tech
+    // tree window always renders on top -- even when CivPedia is the one the
+    // player most recently opened. This reproduces that regression.
+    auto civpedia = std::make_unique<Window>(nullptr, "CivPedia");
+    Window* civpediaPtr = civpedia.get();
+    root->addChild(std::move(civpedia));
+
+    auto techTree = std::make_unique<Window>(nullptr, "Technology Tree");
+    Window* techTreePtr = techTree.get();
+    root->addChild(std::move(techTree));
+
+    expectTrue(techTreePtr->zOrder >= civpediaPtr->zOrder,
+               "window added later starts at or above one added earlier");
+
+    // Reopening CivPedia (what every app.cc call site that shows a window now
+    // does) must raise it above every other window, including ones added
+    // later in the tree.
+    civpediaPtr->bringToFront();
+    expectTrue(civpediaPtr->zOrder > techTreePtr->zOrder,
+               "reopening a window brings it above windows added later in the tree");
+}
+
+void testWindowClickBringsToFront() {
+    using namespace odai::ui;
+
+    auto winA = std::make_unique<Window>(nullptr, "A");
+    winA->setRect(UiRect::fromXYWH(0.0f, 0.0f, 120.0f, 100.0f));
+    winA->showCloseButton = false;
+    Window* aPtr = winA.get();
+
+    auto winB = std::make_unique<Window>(nullptr, "B");
+    winB->setRect(UiRect::fromXYWH(200.0f, 0.0f, 120.0f, 100.0f));  // disjoint from A
+    winB->showCloseButton = false;
+    Window* bPtr = winB.get();
+
+    auto root = std::make_unique<Widget>();
+    root->mousePassthrough = true;
+    root->addChild(std::move(winA));
+    root->addChild(std::move(winB));  // added after A -> starts on top
+
+    UiContext ctx;
+    ctx.setViewport(UiVec2{400.0f, 300.0f});
+    ctx.setRoot(std::move(root));
+
+    expectTrue(bPtr->zOrder >= aPtr->zOrder, "later-added window starts at or above the earlier one");
+
+    // Click A's title bar. B sits on top by insertion order, but the click only
+    // lands inside A's rect (B is disjoint), so it must reach and focus A.
+    UiInput clickA = inputAt(60.0f, 10.0f);  // inside A's default 30px title bar
+    clickA.setButton(UiMouseButton::Left, true);
+    ctx.update(clickA);
+    expectTrue(aPtr->zOrder > bPtr->zOrder, "clicking a window's title bar brings it to front");
+
+    UiInput releaseA = inputAt(60.0f, 10.0f);
+    releaseA.buttons[static_cast<std::size_t>(UiMouseButton::Left)].down = true;
+    releaseA.setButton(UiMouseButton::Left, false);
+    ctx.update(releaseA);
+
+    // Clicking B's title bar should re-focus it above A.
+    UiInput clickB = inputAt(260.0f, 10.0f);
+    clickB.setButton(UiMouseButton::Left, true);
+    ctx.update(clickB);
+    expectTrue(bPtr->zOrder > aPtr->zOrder, "clicking another window's title bar re-focuses it");
 }
 
 void testDonutChartDraw() {
@@ -1913,6 +1986,8 @@ int main() {
     testSpinnerStepAndClamp();
     testContextMenuOpenSelectDismiss();
     testModalOpenCloseBlocking();
+    testWindowOpenBringsToFront();
+    testWindowClickBringsToFront();
     testDonutChartDraw();
     testSectorFilledGeometry();
     testToastManager();
