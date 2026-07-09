@@ -71,9 +71,11 @@ public:
 
     // Raise this window above all other windows sharing its parent by assigning
     // it the next value from a shared monotonic counter. Called automatically
-    // when the window is clicked into (see onEvent) or shown; call directly
-    // when a window is made visible programmatically (e.g. a toolbar button
-    // toggling `visible = true`) so it also jumps to the front.
+    // whenever the window is clicked into (see onEvent). There is no automatic
+    // hook on `visible` flipping true, so any call site that shows a window
+    // programmatically (e.g. a toolbar button toggling `visible = true`) must
+    // call this explicitly right alongside it, or the window won't jump to
+    // the front until the player clicks it.
     void bringToFront();
 
     void draw(UiDrawList& dl) const override;

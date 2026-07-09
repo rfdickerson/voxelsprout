@@ -216,8 +216,21 @@ bool Window::onEvent(UiEvent& e) {
         dragging_ = false;
     }
 
-    if (!contentRect().contains(e.mousePx) && e.type != UiEvent::Type::MouseMove) {
-        return false;
+    if (e.type != UiEvent::Type::MouseMove) {
+        if (!frameRect().contains(e.mousePx)) {
+            // Outside this window entirely — let the event fall through to
+            // whatever's behind it (a sibling window, or the map).
+            return false;
+        }
+        if (!contentRect().contains(e.mousePx)) {
+            // Inside the window's padding/chrome (e.g. the margin around the
+            // content area) but not a specific control. That's still part of
+            // the window's opaque body, so the event must stop here — letting
+            // it fall through would leak clicks near the window's edges
+            // through to whatever's behind it (typically the 3D map).
+            e.handled = true;
+            return true;
+        }
     }
     return dispatchToChildren(e);
 }
