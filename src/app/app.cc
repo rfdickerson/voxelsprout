@@ -1469,7 +1469,7 @@ void App::pollInput() {
     const bool escapeKeyDown = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     if (escapeKeyDown && !m_wasEscapeKeyDown) {
         if (m_mainMenuModal != nullptr) {
-            m_mainMenuModal->visible = !m_mainMenuModal->visible;
+            toggleMainMenu();
         } else {
             glfwSetWindowShouldClose(m_window, GLFW_TRUE);
         }
@@ -4026,6 +4026,18 @@ void App::setupHud(float viewW, float viewH) {
     auto root = std::make_unique<odai::ui::Widget>();
     root->mousePassthrough = true;  // Container only; children claim the mouse, not the root.
 
+    // Shared "dark slate gray" HUD palette for this pass's modern chrome: a
+    // true slate (not near-black) so panels read as material rather than a
+    // void, and opaque-enough chip fills so buttons carry visual weight
+    // instead of washing out over the map. Reused across the toolbar, bottom
+    // bar, action buttons, unit-action panel, and the event feed.
+    const odai::ui::UiColor kSlatePanelTop    {0.176f, 0.204f, 0.243f, 0.96f};  // #2D343E
+    const odai::ui::UiColor kSlatePanelBottom {0.098f, 0.114f, 0.137f, 0.97f};  // #191D23
+    const odai::ui::UiColor kSlateChipFill    {0.169f, 0.196f, 0.235f, 0.92f};  // #2B323C
+    const odai::ui::UiColor kSlateChipHover   {0.220f, 0.247f, 0.294f, 0.96f};  // #383F4B
+    const odai::ui::UiColor kSlateChipPressed {0.122f, 0.141f, 0.169f, 0.96f};  // #1F242B
+    const odai::ui::UiColor kSlateHairline    {1.0f, 1.0f, 1.0f, 0.12f};
+
     // Top resource toolbar - a full-width strip of icon+value badges (gold,
     // science, culture, faith, food, production) in the style of a 4X game's
     // status bar. Other top-anchored panels are pushed down by its height.
@@ -4036,27 +4048,40 @@ void App::setupHud(float viewW, float viewH) {
     {
         auto topBg = std::make_unique<odai::ui::Panel>();
         topBg->setRect(odai::ui::UiRect::fromXYWH(0.0f, 0.0f, viewW, kToolbarH));
-        // Civ 6 status strip: a navy glass gradient (lit toward the top edge) with
-        // no box border — the Toolbar widget draws the brass rule along the bottom.
-        topBg->bgTop              = kCivNavyTop;
-        topBg->bgBottom           = kCivNavyBot;
-        topBg->background         = kCivNavyBot;
-        topBg->cornerRadiusPx     = 0.0f;
-        topBg->borderThicknessPx  = 0.0f;
-        topBg->borderColor        = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.0f};
+        // Modern flat bar: a subtle vertical gradient (not a flat plate) with a
+        // soft drop shadow cast onto the map below for separation, instead of
+        // the old Motif two-tone bevel/border. Square corners — a full-width
+        // edge-to-edge bar shouldn't round where it meets the screen edge.
+        topBg->bgTop    = kSlatePanelTop;
+        topBg->bgBottom = kSlatePanelBottom;
+        topBg->cornerRadiusPx    = 0.0f;
+        topBg->borderThicknessPx = 0.0f;
+        topBg->showShadow    = true;
+        topBg->shadowColor   = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.40f};
+        topBg->shadowBlurPx  = 10.0f * s;
+        topBg->shadowOffsetX = 0.0f;
+        topBg->shadowOffsetY = 6.0f * s;
         root->addChild(std::move(topBg));
     }
     {
         using TB = odai::ui::Toolbar;
         auto tb = std::make_unique<TB>(fonts.numeric ? fonts.numeric : fonts.regular);
         tb->background = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.0f};  // backing strip shows through
-        tb->accentLine = kCivBrass;  // Civ 6 brass rule along the strip's bottom edge
-        tb->accentThicknessPx = 2.0f * s;
+        tb->accentLine = odai::ui::UiColor{0.86f, 0.70f, 0.40f, 0.40f};  // warm gold divider rule
+        tb->accentThicknessPx = 1.5f * s;
         tb->setRect(odai::ui::UiRect::fromXYWH(0.0f, 0.0f, viewW, kToolbarH));
         tb->paddingXPx = 216.0f * s;  // left margin reserved for the logo button
-        tb->itemGapPx  = 26.0f * s;
+        tb->itemGapPx  = 30.0f * s;   // room for the chip padding on each side
         tb->iconGapPx  = 8.0f * s;
         tb->iconScale  = 0.68f;
+        tb->chipRadiusPx    = 9.0f * s;
+        tb->chipInsetYPx    = 5.0f * s;
+        tb->chipPadXPx      = 9.0f * s;
+        tb->chipTrimThicknessPx = 2.0f * s;
+        // More opaque slate fill + a visible hairline so the resource chips
+        // read as solid pieces, matching the rest of this pass's HUD chrome.
+        tb->chipBackground = kSlateChipFill;
+        tb->chipBorder     = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.14f};
         const odai::ui::UiColor textCol{0.92f, 0.95f, 0.97f, 1.0f};
         using Y = odai::ui::Yield;
         m_tbScienceItem = tb->addItem(TB::IconKind::Science, odai::ui::yieldColor(Y::Science), "+0", textCol);
@@ -4107,15 +4132,16 @@ void App::setupHud(float viewW, float viewH) {
             const float iconX  = 6.0f * s;
             const float iconY  = (kToolbarH - iconSz) * 0.5f;
 
-            // Subtle brass-framed plate behind the icon+label lockup so the logo
-            // reads as a badge without breaking the strip's glass look.
+            // Modern chip behind the icon+label lockup, matching the resource
+            // badges' language: a neutral rounded pill with a hairline border
+            // and a gold bottom trim tying it to the "Compass & Crown" brand.
             auto logoPlate = std::make_unique<odai::ui::Panel>();
             logoPlate->setRect(odai::ui::UiRect::fromXYWH(
                 2.0f * s, 3.0f * s, logoW - 4.0f * s, kToolbarH - 6.0f * s));
-            logoPlate->background        = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.30f};
-            logoPlate->borderColor       = kCivBrassDim;
+            logoPlate->background        = kSlateChipFill;
+            logoPlate->borderColor       = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.08f};
             logoPlate->borderThicknessPx = 1.0f * s;
-            logoPlate->cornerRadiusPx    = 3.0f * s;
+            logoPlate->cornerRadiusPx    = 9.0f * s;
             m_toolbar->addChild(std::move(logoPlate));
 
             odai::ui::UiIconEntry logoIcon{};
@@ -4137,8 +4163,7 @@ void App::setupHud(float viewW, float viewH) {
             auto logoBtn = std::make_unique<odai::ui::Button>(
                 nullptr, "",
                 [this]() {
-                    if (m_mainMenuModal != nullptr)
-                        m_mainMenuModal->visible = !m_mainMenuModal->visible;
+                    if (m_mainMenuModal != nullptr) toggleMainMenu();
                 });
             logoBtn->setRect(odai::ui::UiRect::fromXYWH(0.0f, 0.0f, logoW, kToolbarH));
             logoBtn->colorNormal       = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.0f};
@@ -4156,30 +4181,30 @@ void App::setupHud(float viewW, float viewH) {
             const float fogH = 24.0f * s;
             const float fogX = viewW - 336.0f * s;
             const float fogY = (kToolbarH - fogH) * 0.5f;
-            // Civ 6 chip button: dark navy fill with a brass outline; the active
-            // state reads via a teal-tinted fill (Civ 6's accent turquoise family)
-            // and a brighter border rather than a hue swap.
-            const odai::ui::UiColor fogOnFill {0.118f, 0.290f, 0.353f, 1.0f};  // #1E4A5A teal navy
-            const odai::ui::UiColor fogOffFill = kCivBtnFill;
+            // Rounded chip matching the toolbar's resource badges. Active/inactive
+            // state reads via fill tint (a muted teal accent vs. a neutral dark
+            // chip) instead of a bevel/hue swap.
+            const odai::ui::UiColor fogOnColor  {0.243f, 0.443f, 0.510f, 0.92f};  // muted teal
+            const odai::ui::UiColor fogOffColor = kSlateChipFill;
             auto fogBtn = std::make_unique<odai::ui::Button>(
                 fonts.regular, "Fog: ON",
-                [this, fogOnFill, fogOffFill]() {
+                [this, fogOnColor, fogOffColor]() {
                     m_fogOfWarEnabled = !m_fogOfWarEnabled;
                     if (m_fogButton != nullptr) {
                         m_fogButton->setLabel(m_fogOfWarEnabled ? "Fog: ON" : "Fog: OFF");
-                        m_fogButton->colorNormal = m_fogOfWarEnabled ? fogOnFill : fogOffFill;
+                        m_fogButton->colorNormal = m_fogOfWarEnabled ? fogOnColor : fogOffColor;
                     }
                     rebuildStrategyMapScene();
                 });
             fogBtn->setRect(odai::ui::UiRect::fromXYWH(fogX, fogY, fogW, fogH));
-            fogBtn->colorNormal       = fogOnFill;
-            fogBtn->colorHover        = kCivBtnHover;
-            fogBtn->colorPressed      = kCivBtnPress;
-            fogBtn->borderColor       = kCivBrass;
+            fogBtn->colorNormal       = fogOnColor;
+            fogBtn->colorHover        = odai::ui::UiColor{0.314f, 0.541f, 0.616f, 0.95f};
+            fogBtn->colorPressed      = odai::ui::UiColor{0.192f, 0.365f, 0.427f, 0.95f};
+            fogBtn->borderColor       = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.10f};
             fogBtn->borderThicknessPx = 1.0f * s;
-            fogBtn->labelColor        = kCivParchment;
+            fogBtn->labelColor        = odai::ui::UiColor{0.92f, 0.95f, 0.97f, 1.0f};
             fogBtn->glowSizePx        = 0.0f;
-            fogBtn->cornerRadiusPx    = 3.0f * s;
+            fogBtn->cornerRadiusPx    = 9.0f * s;
             fogBtn->showBevel         = false;
             m_fogButton = static_cast<odai::ui::Button*>(m_toolbar->addChild(std::move(fogBtn)));
         }
@@ -4217,23 +4242,19 @@ void App::setupHud(float viewW, float viewH) {
 
     auto bar = std::make_unique<odai::ui::Panel>();
     bar->setRect(odai::ui::UiRect::fromXYWH(0.0f, barY, viewW, kBarH));
-    // Civ 6 action strip: navy glass gradient matching the top strip, framed by a
-    // single brass rule along its top edge (drawn as an inset panel below).
-    bar->bgTop             = kCivNavyTop;
-    bar->bgBottom          = kCivNavyBot;
-    bar->background        = kCivNavyBot;
+    // Modern flat gradient bar mirroring the top toolbar: lighter near the
+    // map-facing edge (top), darker toward the screen edge (bottom), with a
+    // soft shadow cast upward onto the map for separation — replaces the old
+    // Motif two-tone bevel/border.
+    bar->bgTop    = kSlatePanelTop;
+    bar->bgBottom = kSlatePanelBottom;
     bar->cornerRadiusPx    = 0.0f;
     bar->borderThicknessPx = 0.0f;
-    bar->borderColor       = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.0f};
-    {
-        // Brass top rule, mirroring the toolbar's bottom accent line.
-        auto barRule = std::make_unique<odai::ui::Panel>();
-        barRule->setRect(odai::ui::UiRect::fromXYWH(0.0f, barY, viewW, 2.0f * s));
-        barRule->background        = kCivBrass;
-        barRule->borderThicknessPx = 0.0f;
-        barRule->mousePassthrough  = true;
-        bar->addChild(std::move(barRule));
-    }
+    bar->showShadow    = true;
+    bar->shadowColor   = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.40f};
+    bar->shadowBlurPx  = 10.0f * s;
+    bar->shadowOffsetX = 0.0f;
+    bar->shadowOffsetY = -6.0f * s;  // cast upward onto the map, above the bar
 
     // Turn Summary card (bottom-right, just above the bar) replaces the old centered
     // debug readout. m_hudStatsLabel lives inside it; updateUiOverlay fills the text.
@@ -4241,9 +4262,12 @@ void App::setupHud(float viewW, float viewH) {
         const odai::ui::UiRect sumRect = rail.summary;
         auto sumPanel = std::make_unique<odai::ui::Panel>();
         sumPanel->setRect(sumRect);
-        // Civ 6 glass card: navy gradient + brass trim (the stats label's
-        // rich-text colors are tuned for the dark fill).
-        sumPanel->styleCiv6(s, 0.92f);
+        // Reuse the toolkit's "clean-modern flat card" preset (translucent slate
+        // fill, hairline border, one soft shadow) instead of the old Motif frame;
+        // just round the corners a touch more for the rail's floating-card feel.
+        sumPanel->styleCard(s, 0.92f);
+        sumPanel->cornerRadiusPx = 10.0f * s;
+        sumPanel->background     = kSlateChipFill;
         auto* sumPtr = static_cast<odai::ui::Panel*>(root->addChild(std::move(sumPanel)));
 
         auto statsLabel = std::make_unique<odai::ui::Label>(fonts, "");
@@ -4254,27 +4278,32 @@ void App::setupHud(float viewW, float viewH) {
         m_hudStatsLabel = static_cast<odai::ui::Label*>(sumPtr->addChild(std::move(statsLabel)));
     }
 
-    // Civ 6 action buttons: dark navy fill, a brass outline, parchment label.
-    // Each button keeps its distinct accent as a thin left-edge stripe so they
-    // stay distinguishable without breaking the uniform gold-trim chrome.
-    const auto styleActionButton = [&](odai::ui::Button* btn, const odai::ui::UiColor& accentStripe) {
+    // Modern rounded chip buttons: an opaque-enough dark-slate fill (matching
+    // the rail cards) so they read as solid, tactile chips rather than a wash
+    // over the map, with a bolder accent-colored border for identity/weight.
+    // No bevel. Each button keeps a distinct accent border color so they stay
+    // visually distinguishable from one another.
+    const auto styleActionButton = [s, kSlateChipFill, kSlateChipHover, kSlateChipPressed](
+        odai::ui::Button* btn, const odai::ui::UiColor& accentBorder) {
         if (btn == nullptr) return;
-        btn->cornerRadiusPx    = 3.0f * s;
-        btn->colorNormal       = kCivBtnFill;
-        btn->colorHover        = kCivBtnHover;
-        btn->colorPressed      = kCivBtnPress;
-        btn->borderColor       = kCivBrass;
-        btn->borderThicknessPx = 1.5f * s;
-        btn->labelColor        = kCivParchment;
-        btn->showBevel         = false;
-        btn->accentColor       = accentStripe;
-        btn->accentWidthPx     = 3.0f * s;
+        btn->cornerRadiusPx      = 10.0f * s;
+        btn->colorNormal         = kSlateChipFill;
+        btn->colorHover          = kSlateChipHover;
+        btn->colorPressed        = kSlateChipPressed;
+        btn->borderColor         = odai::ui::UiColor{accentBorder.r, accentBorder.g, accentBorder.b, 0.85f};
+        btn->borderThicknessPx   = 2.0f * s;
+        btn->labelColor          = odai::ui::UiColor{0.95f, 0.97f, 0.99f, 1.0f};
+        btn->showBevel           = false;
     };
+
+    // Bold face for the bottom-bar chip labels — reads with more weight than
+    // the regular face, matching the heavier chip fill/border.
+    const odai::ui::Font* actionBtnFont = fonts.bold ? fonts.bold : fonts.regular;
 
     // Smart turn button: a neutral dark base; the per-state color comes from the
     // left accent stripe + label set each frame by updateSmartTurnButton(). The
     // click and the Enter key both route through fireTurnAction().
-    auto endTurnBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Next Turn", [this]() {
+    auto endTurnBtn = std::make_unique<odai::ui::Button>(actionBtnFont, "Next Turn", [this]() {
         fireTurnAction();
     });
     endTurnBtn->setRect(odai::ui::UiRect::fromXYWH(viewW - 200.0f * s, barY + 8.0f * s, 184.0f * s, 48.0f * s));
@@ -4289,7 +4318,7 @@ void App::setupHud(float viewW, float viewH) {
     m_endTurnBtn = static_cast<odai::ui::Button*>(bar->addChild(std::move(endTurnBtn)));
 
     // Research button (bottom-left): toggles the Technology Tree window.
-    auto researchBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Research", [this]() {
+    auto researchBtn = std::make_unique<odai::ui::Button>(actionBtnFont, "Research", [this]() {
         if (m_techTreeWindow == nullptr) return;
         const bool show = !m_techTreeWindow->visible;
         m_techTreeWindow->visible = show;
@@ -4305,7 +4334,7 @@ void App::setupHud(float viewW, float viewH) {
     bar->addChild(std::move(researchBtn));
 
     // Great People button (bottom-left, beside Research): toggles the roster window.
-    auto greatBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Great People", [this]() {
+    auto greatBtn = std::make_unique<odai::ui::Button>(actionBtnFont, "Great People", [this]() {
         if (m_greatPeopleWindow == nullptr) return;
         const bool show = !m_greatPeopleWindow->visible;
         m_greatPeopleWindow->visible = show;
@@ -4321,7 +4350,7 @@ void App::setupHud(float viewW, float viewH) {
     bar->addChild(std::move(greatBtn));
 
     // Religion button (bottom-left, beside Great People): toggles the faith catalog.
-    auto faithBtn = std::make_unique<odai::ui::Button>(fonts.regular, "Religion", [this]() {
+    auto faithBtn = std::make_unique<odai::ui::Button>(actionBtnFont, "Religion", [this]() {
         if (m_religionWindow == nullptr) return;
         const bool show = !m_religionWindow->visible;
         m_religionWindow->visible = show;
@@ -4953,8 +4982,18 @@ void App::setupHud(float viewW, float viewH) {
 
         auto ap = std::make_unique<odai::ui::Panel>();
         ap->setRect(odai::ui::UiRect::fromXYWH(panelX, panelY, panelW, panelH));
-        ap->styleCiv6(s, 0.94f);
-        ap->visible = false;  // hidden until a unit is selected
+        // Modern slate card matching the rest of this pass's HUD chrome — flat
+        // fill, hairline border, soft shadow — instead of the old Motif bevel.
+        ap->background        = kSlateChipFill;
+        ap->cornerRadiusPx    = 10.0f * s;
+        ap->borderColor       = kSlateHairline;
+        ap->borderThicknessPx = 1.0f * s;
+        ap->showBevel         = false;
+        ap->showShadow        = true;
+        ap->shadowColor       = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.35f};
+        ap->shadowBlurPx      = 8.0f * s;
+        ap->shadowOffsetY     = 3.0f * s;
+        ap->visible           = false;  // hidden until a unit is selected
 
         // Unit portrait image.
         const float portX = panelX + padX;
@@ -4989,14 +5028,17 @@ void App::setupHud(float viewW, float viewH) {
                 }
             });
             btn->setRect(odai::ui::UiRect::fromXYWH(bx, by, btnSz, btnSz));
-            btn->cornerRadiusPx = 4.0f * s;
-            btn->colorNormal    = odai::ui::UiColor{kCivBtnFill.r, kCivBtnFill.g, kCivBtnFill.b, 0.92f};
-            btn->colorHover     = odai::ui::UiColor{kCivBtnHover.r, kCivBtnHover.g, kCivBtnHover.b, 0.96f};
-            btn->colorPressed   = kCivBtnPress;
-            btn->borderColor    = kCivBrassDim;
-            btn->borderHoverColor = kCivBrass;
-            btn->borderThicknessPx = 1.5f * s;
-            btn->showBevel      = false;
+            // Modern slate chip matching the rest of the HUD — the old light
+            // silver Motif square read as a disconnected leftover against the
+            // dark theme.
+            btn->cornerRadiusPx      = 8.0f * s;
+            btn->colorNormal         = kSlateChipFill;
+            btn->colorHover          = kSlateChipHover;
+            btn->colorPressed        = kSlateChipPressed;
+            btn->borderColor         = kSlateHairline;
+            btn->borderHoverColor    = odai::ui::UiColor{1.0f, 1.0f, 1.0f, 0.24f};
+            btn->borderThicknessPx   = 1.5f * s;
+            btn->showBevel           = false;
             btn->glowSizePx     = 12.0f * s;
             btn->iconPaddingPx  = 5.0f * s;
             btn->visible        = false;
@@ -5024,7 +5066,15 @@ void App::setupHud(float viewW, float viewH) {
 
         auto feedBg = std::make_unique<odai::ui::Panel>();
         feedBg->setRect(odai::ui::UiRect::fromXYWH(feedX, feedY, feedW, feedH));
-        feedBg->styleCiv6(s, 0.88f);
+        feedBg->background        = kSlateChipFill;
+        feedBg->cornerRadiusPx    = 10.0f * s;
+        feedBg->borderColor       = kSlateHairline;
+        feedBg->borderThicknessPx = 1.0f * s;
+        feedBg->showBevel         = false;
+        feedBg->showShadow        = true;
+        feedBg->shadowColor       = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.35f};
+        feedBg->shadowBlurPx      = 8.0f * s;
+        feedBg->shadowOffsetY     = 3.0f * s;
         auto* feedBgPtr = static_cast<odai::ui::Panel*>(root->addChild(std::move(feedBg)));
 
         const odai::ui::Font* feedTitleFont = fonts.bold ? fonts.bold : fonts.regular;
@@ -5081,11 +5131,19 @@ void App::setupHud(float viewW, float viewH) {
         dimmer->setRect(odai::ui::UiRect::fromXYWH(0.0f, 0.0f, viewW, viewH));
         dimmer->background = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.62f};
         dimmer->visible = false;
-        auto* dimmerPtr = dimmer.get();
+        dimmer->opacity = 0.0f;
+
+        m_mainMenuCardOpenRect = odai::ui::UiRect::fromXYWH(cardX, cardY, cardW, cardH);
+        // Same top-left as the open rect: repositionAndResize() only translates
+        // children by the delta between successive top-left corners, so a closed
+        // rect pinned to that corner means the card's already-laid-out children
+        // never move — only the clip window (clipContents) grows on open.
+        m_mainMenuCardClosedRect = odai::ui::UiRect::fromXYWH(cardX, cardY, 1.0f, 1.0f);
 
         auto card = std::make_unique<odai::ui::Panel>();
-        card->setRect(odai::ui::UiRect::fromXYWH(cardX, cardY, cardW, cardH));
-        card->styleCiv6(s, 0.97f);
+        card->setRect(m_mainMenuCardOpenRect);
+        card->styleMotif(s, /*raised=*/true);
+        card->clipContents = true;
 
         float cy = cardY + padTop;
 
@@ -5135,12 +5193,14 @@ void App::setupHud(float viewW, float viewH) {
             cy += btnH + btnGap;
         };
 
-        makeMenuBtn("Resume Game", [dimmerPtr]() { dimmerPtr->visible = false; });
+        makeMenuBtn("Resume Game", [this]() { closeMainMenu(); });
         makeMenuBtn("Settings",    []() { /* TODO: settings panel */ });
         makeMenuBtn("New Game",    []() { /* TODO: new-game flow */ });
         makeMenuBtn("Quit Game",   [this]() { glfwSetWindowShouldClose(m_window, GLFW_TRUE); });
 
-        dimmer->addChild(std::move(card));
+        m_mainMenuCard = static_cast<odai::ui::Panel*>(dimmer->addChild(std::move(card)));
+        m_mainMenuCard->setRect(m_mainMenuCardClosedRect);
+        m_mainMenuCardTween.snap(m_mainMenuCardClosedRect);
         m_mainMenuModal = static_cast<odai::ui::Panel*>(root->addChild(std::move(dimmer)));
     }
 
@@ -5311,13 +5371,25 @@ void App::drawStrategyMapLabels(float fbW, float fbH, float dt) {
     }
 
     // Floating "HP/maxHP  supply/maxSupply" over each unit token; reddened when
-    // starving, bracketed + bright when selected.
+    // starving, outlined + brighter when selected. Geometry is cached per unit
+    // (see buildUnitLabelBlock) so a label is only re-tessellated when its
+    // content, selection, or DPI scale changes; a per-frame anti-overlap pass
+    // then nudges the cached block's screen position up by a line height
+    // whenever its plate would collide with an already-placed one — handles
+    // both units stacked on one tile and units on separate but
+    // screen-adjacent tiles whose labels would otherwise run into each other
+    // at this zoom level.
     const odai::ui::UiColor starveColor{1.0f, 0.40f, 0.36f, 1.0f};
     const odai::ui::UiColor selColor{0.72f, 0.86f, 1.0f, 1.0f};
+    const float labelPadX = 6.0f * uiS;
+    const float labelPadY = 2.0f * uiS;
+    const float labelBoxH = font.lineHeightPx() + 2.0f * labelPadY;
 
     // Builds one unit label's geometry in LOCAL coordinates (label center at
     // 0,0) into a cacheable block — same rationale as buildCityBannerBlock.
-    const auto buildUnitLabelBlock = [&](const odai::game::Unit& u, bool selected) {
+    // Also reports the plate's half-width so the anti-overlap pass below can
+    // reconstruct each label's screen-space box without re-measuring text.
+    const auto buildUnitLabelBlock = [&](const odai::game::Unit& u, bool selected, float& outHalfWidth) {
         const std::string label = std::to_string(u.hp) + "/" + std::to_string(u.maxHp) + "  "
                                 + std::to_string(u.supply) + "/" + std::to_string(u.maxSupply);
         const odai::ui::UiColor col = (u.supply == 0)
@@ -5325,10 +5397,9 @@ void App::drawStrategyMapLabels(float fbW, float fbH, float dt) {
             : (selected ? selColor : textColor);
 
         const float textW = font.measureText(label);
-        const float padX = 6.0f * uiS;
-        const float padY = 2.0f * uiS;
-        const odai::ui::UiRect plate{-textW * 0.5f - padX, -halfLineH - padY,
-                                     textW * 0.5f + padX, halfLineH + padY};
+        outHalfWidth = textW * 0.5f + labelPadX;
+        const odai::ui::UiRect plate{-outHalfWidth, -halfLineH - labelPadY,
+                                     outHalfWidth, halfLineH + labelPadY};
         const float tx = -textW * 0.5f;
         const float ty = -halfLineH;
 
@@ -5349,6 +5420,7 @@ void App::drawStrategyMapLabels(float fbW, float fbH, float dt) {
         return block;
     };
 
+    std::vector<odai::ui::UiRect> placedUnitLabelRects;
     for (const odai::game::Unit& u : m_gameState.units) {
         if (!u.alive() || u.col >= m_strategyMap.width || u.row >= m_strategyMap.height) continue;
         const float rowOffset = (u.row % 2 == 0) ? 0.0f : 0.5f;
@@ -5379,18 +5451,47 @@ void App::drawStrategyMapLabels(float fbW, float fbH, float dt) {
             cache.maxSupply = u.maxSupply;
             cache.selected = selected;
             cache.builtForScale = uiS;
-            cache.block = buildUnitLabelBlock(u, selected);
+            cache.block = buildUnitLabelBlock(u, selected, cache.plateHalfWidth);
         }
-        m_uiDrawList.appendCached(cache.block, odai::ui::UiVec2{sx, sy});
+
+        // Anti-overlap: nudge this label's screen position up by a line height
+        // whenever its plate would collide with an already-placed one. Uses the
+        // cached plate half-width, so it never re-measures text.
+        float adjustedSy = sy;
+        odai::ui::UiRect box = odai::ui::UiRect::fromXYWH(
+            sx - cache.plateHalfWidth, adjustedSy - halfLineH - labelPadY,
+            cache.plateHalfWidth * 2.0f, labelBoxH);
+        for (bool moved = true; moved;) {
+            moved = false;
+            for (const odai::ui::UiRect& placed : placedUnitLabelRects) {
+                if (odai::ui::UiRect::intersect(box, placed).valid()) {
+                    adjustedSy -= font.lineHeightPx() + 2.0f;
+                    box = odai::ui::UiRect::fromXYWH(
+                        sx - cache.plateHalfWidth, adjustedSy - halfLineH - labelPadY,
+                        cache.plateHalfWidth * 2.0f, labelBoxH);
+                    moved = true;
+                    break;
+                }
+            }
+        }
+        placedUnitLabelRects.push_back(box);
+
+        m_uiDrawList.appendCached(cache.block, odai::ui::UiVec2{sx, adjustedSy});
     }
 
     // Units are erased from m_gameState.units on death, so without this the
-    // label cache would keep one stale entry per unit ever killed. Throttled
-    // since it's O(cache size) with a findUnit() lookup per entry.
+    // label cache would keep one stale entry per unit ever killed. Throttled,
+    // and checks membership against a hash set of live ids (built once per
+    // prune) rather than calling GameState::findUnit() — an O(units) linear
+    // scan — for every cached entry, so the pass costs O(units + cache size)
+    // instead of O(units * cache size).
     if (++m_unitLabelCachePruneCounter >= 300) {
         m_unitLabelCachePruneCounter = 0;
+        std::unordered_set<std::uint32_t> liveUnitIds;
+        liveUnitIds.reserve(m_gameState.units.size());
+        for (const odai::game::Unit& u : m_gameState.units) liveUnitIds.insert(u.id);
         for (auto it = m_unitLabelCache.begin(); it != m_unitLabelCache.end();) {
-            it = (m_gameState.findUnit(it->first) == nullptr) ? m_unitLabelCache.erase(it) : std::next(it);
+            it = liveUnitIds.contains(it->first) ? std::next(it) : m_unitLabelCache.erase(it);
         }
     }
 
@@ -6008,6 +6109,14 @@ void App::updateUiOverlay(float dt) {
     if (m_civCollapseBtn != nullptr) {
         m_civCollapseBtn->setLabel(m_civExpandTween.value > 0.5f ? "^" : "v");
     }
+
+    // Animate the main menu: card pop (RectTween) + independently-timed backdrop
+    // fade (Sequence), driven from openMainMenu()/closeMainMenu().
+    m_mainMenuCardTween.update(dt);
+    if (m_mainMenuCard != nullptr) {
+        m_mainMenuCard->repositionAndResize(m_mainMenuCardTween.current());
+    }
+    m_mainMenuBackdropSeq.update(dt);
 
     // Reset the draw list here so map labels can be drawn first (behind the UI).
     m_uiDrawList.reset({static_cast<float>(fbW), static_cast<float>(fbH)});
@@ -6901,6 +7010,33 @@ void App::refreshEventFeed() {
     }
     m_eventFeedView->setText(md);
     m_eventFeedView->scrollOffsetY = 0.0f;
+}
+
+void App::openMainMenu() {
+    if (m_mainMenuModal == nullptr || m_mainMenuCard == nullptr) return;
+    m_mainMenuOpen = true;
+    m_mainMenuModal->visible = true;
+    m_mainMenuCardTween.set(m_mainMenuCardOpenRect, 0.28f, odai::ui::Easing::BackOut);
+    m_mainMenuBackdropSeq = odai::ui::Sequence{};
+    m_mainMenuBackdropSeq.append(0.18f, [this](float t) { m_mainMenuModal->opacity = t; });
+}
+
+void App::closeMainMenu() {
+    if (m_mainMenuModal == nullptr || m_mainMenuCard == nullptr) return;
+    m_mainMenuOpen = false;
+    m_mainMenuCardTween.set(m_mainMenuCardClosedRect, 0.20f, odai::ui::Easing::CubicIn);
+    m_mainMenuBackdropSeq = odai::ui::Sequence{};
+    m_mainMenuBackdropSeq.append(
+        0.20f, [this](float t) { m_mainMenuModal->opacity = 1.0f - t; },
+        [this] { m_mainMenuModal->visible = false; });
+}
+
+void App::toggleMainMenu() {
+    if (m_mainMenuOpen) {
+        closeMainMenu();
+    } else {
+        openMainMenu();
+    }
 }
 
 void App::fireTurnBanners() {

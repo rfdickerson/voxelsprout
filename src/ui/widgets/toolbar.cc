@@ -141,6 +141,25 @@ void Toolbar::draw(UiDrawList& dl) const {
 
         dl.pushClip(rect_);
         for (const Item& item : items_) {
+            const float textW = font_->measureText(item.value);
+            const float badgeW = iconSz + iconGapPx + textW;
+
+            if (showItemChips) {
+                const UiRect chipRect{x - chipPadXPx, rect_.minY + chipInsetYPx,
+                                      x + badgeW + chipPadXPx, rect_.maxY - chipInsetYPx};
+                dl.addRoundRectFilled(chipRect, chipBackground, chipRadiusPx);
+                if (chipBorder.a > 0.0f) {
+                    dl.addRoundRect(chipRect, chipBorder, chipRadiusPx, 1.0f);
+                }
+                // Thin bottom trim tinted to this item's icon color — the one
+                // touch of per-stat identity on an otherwise neutral chip.
+                const UiColor trim{item.iconColor.r, item.iconColor.g, item.iconColor.b, chipTrimAlpha};
+                const float trimInset = chipRadiusPx * 0.6f;
+                dl.addRectFilled(UiRect{chipRect.minX + trimInset, chipRect.maxY - chipTrimThicknessPx,
+                                        chipRect.maxX - trimInset, chipRect.maxY},
+                                 trim);
+            }
+
             const UiRect iconBox{x, iconTop, x + iconSz, iconTop + iconSz};
             drawIcon(dl, item.icon, item.iconColor, iconBox);
             x += iconSz + iconGapPx;

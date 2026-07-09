@@ -85,6 +85,24 @@ std::uint32_t findOtTable(const std::uint8_t* data, std::uint32_t fontStart, con
     return 0;
 }
 
+// stbtt_GetPackedQuad's align_to_integer snaps BOTH q.x0 and q.y0 to the
+// nearest pixel. Snapping y0 is what we want (addText rounds the text
+// baseline to an integer row for crisp horizontal strokes, so an integer
+// top-bearing keeps every glyph on that same row). Snapping x0 is not: it
+// rounds away the glyph's fractional left-side-bearing, which is exactly the
+// sub-pixel precision the 3x horizontal oversampling bake exists to make safe
+// to render off-grid — addText deliberately leaves its pen X fractional (see
+// the comment there) so that precision can flow through, but it never gets
+// the chance if the bearing baked into the atlas metrics was already rounded.
+// Call stbtt_GetPackedQuad with align_to_integer=0 (raw fractional quad) and
+// use this to snap only the Y axis, replicating stb's own floor(v+0.5) rule.
+void snapQuadYOnly(stbtt_aligned_quad& q) {
+    const float snappedY0 = std::floor(q.y0 + 0.5f);
+    const float dy = snappedY0 - q.y0;
+    q.y0 += dy;
+    q.y1 += dy;
+}
+
 // Count bytes occupied by a ValueRecord given its ValueFormat bitmask.
 int valueRecordBytes(std::uint16_t fmt) {
     int bits = 0;
@@ -116,12 +134,47 @@ static bool rPod(std::istream& is, T& v) {
     return !!is.read(reinterpret_cast<char*>(&v), sizeof(v));
 }
 
-struct KernClass {
-    std::vector<std::uint16_t> classDef1; // [glyphId] = class1
-    std::vector<std::uint16_t> classDef2; // [glyphId] = class2
+// One GPOS PairAdjustment subtable, kept in its position within its lookup.
+// format 1 stores explicit glyph-pair values; format 2 stores a class matrix
+// plus the subtable's first-glyph coverage — a format-2 subtable only applies
+// when the first glyph is covered, otherwise the next subtable in the lookup
+// is tried.
+struct KernSubtable {
+    std::uint8_t format = 2;
+    std::unordered_map<std::uint64_t, float> pairs; // format 1: packed(g1<<16|g2) -> xAdv px
+    std::vector<std::uint16_t> coverage;   // format 2: sorted first-glyph ids
+    std::vector<std::uint16_t> classDef1;  // format 2: [glyphId] = class1
+    std::vector<std::uint16_t> classDef2;  // format 2: [glyphId] = class2
     std::uint32_t class2Count = 0;
-    std::vector<float> matrix; // [c1 * class2Count + c2] = xAdv in pixels
+    std::vector<float> matrix;             // [c1 * class2Count + c2] = xAdv px
 };
+
+// A GPOS 'kern' lookup: its subtables in table order. Within a lookup only the
+// first matching subtable applies to a given pair; separate lookups accumulate.
+struct KernLookup {
+    std::vector<KernSubtable> subtables;
+};
+
+// Parse a coverage table into a sorted glyph-id list we can own after the TTF
+// bytes are released (shape() runs long after ttfData is freed).
+std::vector<std::uint16_t> parseCoverage(const std::uint8_t* cov) {
+    std::vector<std::uint16_t> out;
+    const std::uint16_t fmt = u16be(cov);
+    if (fmt == 1) {
+        const std::uint16_t n = u16be(cov + 2);
+        out.reserve(n);
+        for (std::uint16_t i = 0; i < n; ++i) out.push_back(u16be(cov + 4 + 2u * i));
+    } else if (fmt == 2) {
+        const std::uint16_t n = u16be(cov + 2);
+        for (std::uint16_t i = 0; i < n; ++i) {
+            const std::uint8_t* r = cov + 4 + 6u * i;
+            for (std::uint32_t g = u16be(r); g <= u16be(r + 2); ++g)
+                out.push_back(static_cast<std::uint16_t>(g));
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
 
 }  // anonymous namespace
 
@@ -136,22 +189,46 @@ struct Font::ShapingData {
     stbtt_fontinfo fontInfo{};
     float scale = 1.0f;
     std::vector<LigatureRule> ligatures;
-    std::unordered_map<std::uint64_t, float> kernPairs; // packed(g1<<16|g2) -> xAdv px
-    std::vector<KernClass> kernClasses;
+    // GPOS 'kern' lookups in application order (or one synthesized lookup from
+    // the legacy TrueType 'kern' table when the font has no GPOS kerning).
+    std::vector<KernLookup> kernLookups;
     // Precomputed codepoint→glyphId so shape() avoids stbtt_FindGlyphIndex at runtime.
     // Populated after loadFromMemory; populated from cache when loading cached fonts.
     std::unordered_map<std::uint32_t, std::uint32_t> cpToGlyph;
 
     float kernAdvance(std::uint32_t g1, std::uint32_t g2) const {
+        // OpenType application model: each lookup contributes at most one
+        // adjustment — its first subtable (in table order) that matches the
+        // pair — and adjustments from separate lookups accumulate. Fonts encode
+        // hand-tuned pair exceptions as an early format-1 subtable and the
+        // general class matrix as a later format-2 one in the same lookup, so
+        // first-match-wins is what makes the exception REPLACE the class value
+        // instead of stacking on top of it (stacking double-applies the
+        // correction and over-tightens pairs like "W" + lowercase).
         float k = 0.0f;
-        const auto it = kernPairs.find((static_cast<std::uint64_t>(g1) << 16) | g2);
-        if (it != kernPairs.end()) k += it->second;
-        for (const KernClass& kc : kernClasses) {
-            const std::uint16_t c1 = (g1 < kc.classDef1.size()) ? kc.classDef1[g1] : 0;
-            const std::uint16_t c2 = (g2 < kc.classDef2.size()) ? kc.classDef2[g2] : 0;
-            const std::size_t class1Count = kc.class2Count > 0 ? kc.matrix.size() / kc.class2Count : 0;
-            if (c1 < class1Count && c2 < kc.class2Count)
-                k += kc.matrix[static_cast<std::size_t>(c1) * kc.class2Count + c2];
+        const std::uint64_t key = (static_cast<std::uint64_t>(g1) << 16) | g2;
+        for (const KernLookup& lu : kernLookups) {
+            for (const KernSubtable& st : lu.subtables) {
+                if (st.format == 1) {
+                    const auto it = st.pairs.find(key);
+                    if (it != st.pairs.end()) {
+                        k += it->second;
+                        break;
+                    }
+                } else {
+                    if (!std::binary_search(st.coverage.begin(), st.coverage.end(),
+                                            static_cast<std::uint16_t>(g1))) {
+                        continue;
+                    }
+                    const std::uint16_t c1 = (g1 < st.classDef1.size()) ? st.classDef1[g1] : 0;
+                    const std::uint16_t c2 = (g2 < st.classDef2.size()) ? st.classDef2[g2] : 0;
+                    const std::size_t class1Count =
+                        st.class2Count > 0 ? st.matrix.size() / st.class2Count : 0;
+                    if (c1 < class1Count && c2 < st.class2Count)
+                        k += st.matrix[static_cast<std::size_t>(c1) * st.class2Count + c2];
+                    break;  // Covered pair: this subtable decides, even if the value is 0.
+                }
+            }
         }
         return k;
     }
@@ -189,6 +266,10 @@ static void parseGpos(Font::ShapingData& sd, const std::uint8_t* data, std::uint
         }
     }
     if (lookupIdx.empty()) return;
+    // Lookups apply in LookupList index order (not feature-record order), and a
+    // lookup referenced from several language systems must only apply once.
+    std::sort(lookupIdx.begin(), lookupIdx.end());
+    lookupIdx.erase(std::unique(lookupIdx.begin(), lookupIdx.end()), lookupIdx.end());
 
     const std::uint8_t* lookupList = gpos + u16be(gpos + 8);
     const std::uint16_t lookupCount = u16be(lookupList);
@@ -198,6 +279,8 @@ static void parseGpos(Font::ShapingData& sd, const std::uint8_t* data, std::uint
         const std::uint8_t* lookup = lookupList + u16be(lookupList + 2 + 2u * li);
         std::uint16_t ltype = u16be(lookup);
         const std::uint16_t subCount = u16be(lookup + 4);
+
+        KernLookup outLookup;
 
         for (std::uint16_t si = 0; si < subCount; ++si) {
             const std::uint8_t* sub = lookup + u16be(lookup + 6 + 2u * si);
@@ -216,11 +299,17 @@ static void parseGpos(Font::ShapingData& sd, const std::uint8_t* data, std::uint
             const int vr2sz = valueRecordBytes(vf2);
 
             if (fmt == 1) {
-                // Format 1: individual glyph-pair sets.
+                // Format 1: individual glyph-pair sets. Zero-value records are
+                // kept — an explicit pair still matches (halting this lookup)
+                // even when its adjustment happens to be zero.
+                KernSubtable st;
+                st.format = 1;
                 const std::uint8_t* cov = sub + u16be(sub + 2);
                 const std::uint16_t psCount = u16be(sub + 8);
 
-                // Build the covered glyph list from the coverage table.
+                // Build the covered glyph list from the coverage table. PairSets
+                // are indexed by coverage order, so build in table order (which
+                // the spec already requires to be sorted) rather than re-sorting.
                 std::vector<std::uint16_t> covGlyphs;
                 {
                     const std::uint16_t cf = u16be(cov);
@@ -246,12 +335,11 @@ static void parseGpos(Font::ShapingData& sd, const std::uint8_t* data, std::uint
                     for (std::uint16_t ki = 0; ki < pairCount; ++ki) {
                         const std::uint8_t* r = ps + 2 + recSz * ki;
                         const std::int16_t xa = xAdvance(r + 2, vf1);
-                        if (xa) {
-                            const std::uint64_t key = (static_cast<std::uint64_t>(g1) << 16) | u16be(r);
-                            sd.kernPairs[key] = static_cast<float>(xa) * sd.scale;
-                        }
+                        const std::uint64_t key = (static_cast<std::uint64_t>(g1) << 16) | u16be(r);
+                        st.pairs.emplace(key, static_cast<float>(xa) * sd.scale);
                     }
                 }
+                if (!st.pairs.empty()) outLookup.subtables.push_back(std::move(st));
             } else if (fmt == 2) {
                 // Format 2: class-based kern matrix.
                 const std::uint16_t c1Count = u16be(sub + 12);
@@ -259,9 +347,11 @@ static void parseGpos(Font::ShapingData& sd, const std::uint8_t* data, std::uint
                 const std::uint8_t* cdef1 = sub + u16be(sub + 8);
                 const std::uint8_t* cdef2 = sub + u16be(sub + 10);
 
-                KernClass kc;
-                kc.class2Count = c2Count;
-                kc.matrix.resize(static_cast<std::size_t>(c1Count) * c2Count, 0.0f);
+                KernSubtable st;
+                st.format = 2;
+                st.coverage = parseCoverage(sub + u16be(sub + 2));
+                st.class2Count = c2Count;
+                st.matrix.resize(static_cast<std::size_t>(c1Count) * c2Count, 0.0f);
 
                 // Read the kern matrix.
                 const std::uint8_t* rows = sub + 16;
@@ -271,7 +361,7 @@ static void parseGpos(Font::ShapingData& sd, const std::uint8_t* data, std::uint
                                                 static_cast<std::size_t>(vr1sz + vr2sz);
                         const std::int16_t xa = xAdvance(rows + off, vf1);
                         if (xa)
-                            kc.matrix[static_cast<std::size_t>(c1) * c2Count + c2] =
+                            st.matrix[static_cast<std::size_t>(c1) * c2Count + c2] =
                                 static_cast<float>(xa) * sd.scale;
                     }
                 }
@@ -290,8 +380,8 @@ static void parseGpos(Font::ShapingData& sd, const std::uint8_t* data, std::uint
                 scanCdef(cdef1);
                 scanCdef(cdef2);
                 maxG = std::min(maxG, std::uint32_t{65535});
-                kc.classDef1.assign(maxG + 1, 0);
-                kc.classDef2.assign(maxG + 1, 0);
+                st.classDef1.assign(maxG + 1, 0);
+                st.classDef2.assign(maxG + 1, 0);
 
                 const auto fillCdef = [&](const std::uint8_t* cd, std::vector<std::uint16_t>& out) {
                     if (u16be(cd) == 1) {
@@ -307,11 +397,14 @@ static void parseGpos(Font::ShapingData& sd, const std::uint8_t* data, std::uint
                         }
                     }
                 };
-                fillCdef(cdef1, kc.classDef1);
-                fillCdef(cdef2, kc.classDef2);
-                sd.kernClasses.push_back(std::move(kc));
+                fillCdef(cdef1, st.classDef1);
+                fillCdef(cdef2, st.classDef2);
+                outLookup.subtables.push_back(std::move(st));
             }
         }
+
+        if (!outLookup.subtables.empty())
+            sd.kernLookups.push_back(std::move(outLookup));
     }
 }
 
@@ -545,7 +638,7 @@ std::vector<ShapedGlyph> Font::shape(std::string_view utf8) const {
     }
 
     if (!m_shaping ||
-        (m_shaping->ligatures.empty() && m_shaping->kernPairs.empty() && m_shaping->kernClasses.empty())) {
+        (m_shaping->ligatures.empty() && m_shaping->kernLookups.empty())) {
         // No shaping data — return plain codepoints.
         std::vector<ShapedGlyph> result(codepoints.size());
         for (std::size_t j = 0; j < codepoints.size(); ++j)
@@ -771,7 +864,8 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
         float penY = 0.0f;
         stbtt_aligned_quad q{};
         stbtt_GetPackedQuad(packed0.data(), static_cast<int>(atlasSize), static_cast<int>(atlasSize),
-                            static_cast<int>(i), &penX, &penY, &q, /*align_to_integer=*/1);
+                            static_cast<int>(i), &penX, &penY, &q, /*align_to_integer=*/0);
+        snapQuadYOnly(q);
         Glyph g{};
         g.size = {q.x1 - q.x0, q.y1 - q.y0};
         g.bearing = {q.x0, -q.y0};  // q.y0 is negative (above the baseline).
@@ -786,7 +880,8 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
         float penX = 0.0f, penY = 0.0f;
         stbtt_aligned_quad q{};
         stbtt_GetPackedQuad(packed1.data(), static_cast<int>(atlasSize), static_cast<int>(atlasSize),
-                            static_cast<int>(i), &penX, &penY, &q, 1);
+                            static_cast<int>(i), &penX, &penY, &q, 0);
+        snapQuadYOnly(q);
         Glyph g{};
         g.size = {q.x1 - q.x0, q.y1 - q.y0};
         g.bearing = {q.x0, -q.y0};
@@ -801,7 +896,8 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
         float penX = 0.0f, penY = 0.0f;
         stbtt_aligned_quad q{};
         stbtt_GetPackedQuad(packed2.data(), static_cast<int>(atlasSize), static_cast<int>(atlasSize),
-                            static_cast<int>(i), &penX, &penY, &q, 1);
+                            static_cast<int>(i), &penX, &penY, &q, 0);
+        snapQuadYOnly(q);
         Glyph g{};
         g.size = {q.x1 - q.x0, q.y1 - q.y0};
         g.bearing = {q.x0, -q.y0};
@@ -868,12 +964,40 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
                      << ")";
 
     parseGpos(*m_shaping, m_shaping->ttfData.data(), static_cast<std::uint32_t>(fontOffset));
+    // Fonts without GPOS kerning often carry the legacy TrueType 'kern' table
+    // instead; fall back to it so those fonts don't silently lose kerning.
+    if (m_shaping->kernLookups.empty()) {
+        const int kernLen = stbtt_GetKerningTableLength(&info);
+        if (kernLen > 0) {
+            std::vector<stbtt_kerningentry> entries(static_cast<std::size_t>(kernLen));
+            stbtt_GetKerningTable(&info, entries.data(), kernLen);
+            KernSubtable st;
+            st.format = 1;
+            for (const stbtt_kerningentry& e : entries) {
+                if (e.advance == 0) continue;
+                const std::uint64_t key = (static_cast<std::uint64_t>(e.glyph1) << 16) |
+                                          static_cast<std::uint32_t>(e.glyph2);
+                st.pairs.emplace(key, static_cast<float>(e.advance) * scale);
+            }
+            if (!st.pairs.empty()) {
+                KernLookup lu;
+                lu.subtables.push_back(std::move(st));
+                m_shaping->kernLookups.push_back(std::move(lu));
+                VOX_LOGI("Font") << "Kerning from legacy 'kern' table: "
+                                 << m_shaping->kernLookups.back().subtables[0].pairs.size()
+                                 << " pairs";
+            }
+        }
+    }
     parseGsub(*m_shaping, glyphToCP, ligGlyphToCP, m_shaping->ttfData.data(),
               static_cast<std::uint32_t>(fontOffset));
 
+    std::size_t kernSubtableCount = 0;
+    for (const KernLookup& lu : m_shaping->kernLookups)
+        kernSubtableCount += lu.subtables.size();
     VOX_LOGI("Font") << "Shaping: " << m_shaping->ligatures.size() << " liga rules, "
-                     << m_shaping->kernPairs.size() << " kern pairs, "
-                     << m_shaping->kernClasses.size() << " kern classes";
+                     << m_shaping->kernLookups.size() << " kern lookups ("
+                     << kernSubtableCount << " subtables)";
 
     // Build codepoint→glyphId map over all glyphs that landed in the atlas so
     // shape() can kern without calling stbtt_FindGlyphIndex at runtime.
@@ -924,8 +1048,8 @@ bool Font::loadFromFile(const std::string& path, float pixelHeight, std::uint32_
 // ---------------------------------------------------------------------------
 // Font cache — binary serialisation of baked atlas + metrics + shaping tables.
 //
-// File format "ODAIFNT1":
-//   [8]  magic "ODAIFNT1"
+// File format "ODAIFNT3":
+//   [8]  magic "ODAIFNT3"
 //   [8]  TTF file size (uint64)  ─┐ cache key: both must match the source TTF
 //   [8]  TTF mtime ticks (int64) ─┘
 //   [4]  ascent   [4] descent  [4] lineHeight  (float)
@@ -934,13 +1058,14 @@ bool Font::loadFromFile(const std::string& path, float pixelHeight, std::uint32_
 //   [4]  glyph count N; N × { cp(4) size.x(4) size.y(4) bearing.x(4) bearing.y(4)
 //                              advance(4) uv.minX(4) uv.minY(4) uv.maxX(4) uv.maxY(4) }
 //   [4]  ligature count; each: seqLen(4) + seqLen*cp(4) + result(4)
-//   [4]  kern pair count; each: key(8) + value(4)
-//   [4]  kern class count; each: def1Size(4)+def1[](2) def2Size(4)+def2[](2)
-//                                class2Count(4) matrixSize(4)+matrix[](4)
+//   [4]  kern lookup count; each: subtable count(4), then per subtable:
+//          format(1) + pairCount(4)+pairs{key(8) val(4)}
+//          + covSize(4)+cov[](2) + def1Size(4)+def1[](2) + def2Size(4)+def2[](2)
+//          + class2Count(4) + matrixSize(4)+matrix[](4)
 //   [4]  cpToGlyph count; each: cp(4) + glyphId(4)
 // ---------------------------------------------------------------------------
 
-static constexpr char kCacheMagic[8] = {'O','D','A','I','F','N','T','1'};
+static constexpr char kCacheMagic[8] = {'O','D','A','I','F','N','T','3'};
 
 std::string Font::makeCachePath(const std::string& ttfPath, float pixelHeight,
                                 std::uint32_t atlasSize, std::uint32_t firstCodepoint,
@@ -998,24 +1123,31 @@ bool Font::saveCache(const std::string& cachePath, const std::string& ttfPath) c
             wPod(out, rule.result);
         }
 
-        wPod(out, static_cast<std::uint32_t>(m_shaping->kernPairs.size()));
-        for (const auto& [key, val] : m_shaping->kernPairs) {
-            wPod(out, key);
-            wPod(out, val);
-        }
-
-        wPod(out, static_cast<std::uint32_t>(m_shaping->kernClasses.size()));
-        for (const auto& kc : m_shaping->kernClasses) {
-            wPod(out, static_cast<std::uint32_t>(kc.classDef1.size()));
-            out.write(reinterpret_cast<const char*>(kc.classDef1.data()),
-                      static_cast<std::streamsize>(kc.classDef1.size() * 2));
-            wPod(out, static_cast<std::uint32_t>(kc.classDef2.size()));
-            out.write(reinterpret_cast<const char*>(kc.classDef2.data()),
-                      static_cast<std::streamsize>(kc.classDef2.size() * 2));
-            wPod(out, static_cast<std::uint32_t>(kc.class2Count));
-            wPod(out, static_cast<std::uint32_t>(kc.matrix.size()));
-            out.write(reinterpret_cast<const char*>(kc.matrix.data()),
-                      static_cast<std::streamsize>(kc.matrix.size() * 4));
+        wPod(out, static_cast<std::uint32_t>(m_shaping->kernLookups.size()));
+        for (const auto& lu : m_shaping->kernLookups) {
+            wPod(out, static_cast<std::uint32_t>(lu.subtables.size()));
+            for (const auto& st : lu.subtables) {
+                wPod(out, st.format);
+                wPod(out, static_cast<std::uint32_t>(st.pairs.size()));
+                for (const auto& [key, val] : st.pairs) {
+                    wPod(out, key);
+                    wPod(out, val);
+                }
+                const auto writeU16s = [&out](const std::vector<std::uint16_t>& v) {
+                    wPod(out, static_cast<std::uint32_t>(v.size()));
+                    if (!v.empty())
+                        out.write(reinterpret_cast<const char*>(v.data()),
+                                  static_cast<std::streamsize>(v.size() * 2));
+                };
+                writeU16s(st.coverage);
+                writeU16s(st.classDef1);
+                writeU16s(st.classDef2);
+                wPod(out, st.class2Count);
+                wPod(out, static_cast<std::uint32_t>(st.matrix.size()));
+                if (!st.matrix.empty())
+                    out.write(reinterpret_cast<const char*>(st.matrix.data()),
+                              static_cast<std::streamsize>(st.matrix.size() * 4));
+            }
         }
 
         wPod(out, static_cast<std::uint32_t>(m_shaping->cpToGlyph.size()));
@@ -1025,8 +1157,7 @@ bool Font::saveCache(const std::string& cachePath, const std::string& ttfPath) c
         }
     } else {
         wPod(out, std::uint32_t{0}); // ligCount
-        wPod(out, std::uint32_t{0}); // kernPairCount
-        wPod(out, std::uint32_t{0}); // kernClassCount
+        wPod(out, std::uint32_t{0}); // kernLookupCount
         wPod(out, std::uint32_t{0}); // cpToGlyphCount
     }
 
@@ -1100,35 +1231,43 @@ bool Font::loadCache(const std::string& cachePath, const std::string& ttfPath,
         if (!rPod(in, rule.result)) return false;
     }
 
-    std::uint32_t pairCount = 0;
-    if (!rPod(in, pairCount)) return false;
-    m_shaping->kernPairs.reserve(pairCount);
-    for (std::uint32_t i = 0; i < pairCount; ++i) {
-        std::uint64_t key = 0;
-        float val = 0.0f;
-        if (!rPod(in, key) || !rPod(in, val)) return false;
-        m_shaping->kernPairs[key] = val;
-    }
-
-    std::uint32_t classCount = 0;
-    if (!rPod(in, classCount)) return false;
-    m_shaping->kernClasses.resize(classCount);
-    for (auto& kc : m_shaping->kernClasses) {
-        std::uint32_t d1sz = 0, d2sz = 0, cls2 = 0, mSz = 0;
-        if (!rPod(in, d1sz)) return false;
-        kc.classDef1.resize(d1sz);
-        if (!in.read(reinterpret_cast<char*>(kc.classDef1.data()),
-                     static_cast<std::streamsize>(d1sz * 2))) return false;
-        if (!rPod(in, d2sz)) return false;
-        kc.classDef2.resize(d2sz);
-        if (!in.read(reinterpret_cast<char*>(kc.classDef2.data()),
-                     static_cast<std::streamsize>(d2sz * 2))) return false;
-        if (!rPod(in, cls2)) return false;
-        kc.class2Count = cls2;
-        if (!rPod(in, mSz)) return false;
-        kc.matrix.resize(mSz);
-        if (!in.read(reinterpret_cast<char*>(kc.matrix.data()),
-                     static_cast<std::streamsize>(mSz * 4))) return false;
+    std::uint32_t lookupCount = 0;
+    if (!rPod(in, lookupCount)) return false;
+    m_shaping->kernLookups.resize(lookupCount);
+    for (auto& lu : m_shaping->kernLookups) {
+        std::uint32_t subCount = 0;
+        if (!rPod(in, subCount)) return false;
+        lu.subtables.resize(subCount);
+        for (auto& st : lu.subtables) {
+            if (!rPod(in, st.format)) return false;
+            std::uint32_t pairCount = 0;
+            if (!rPod(in, pairCount)) return false;
+            st.pairs.reserve(pairCount);
+            for (std::uint32_t i = 0; i < pairCount; ++i) {
+                std::uint64_t key = 0;
+                float val = 0.0f;
+                if (!rPod(in, key) || !rPod(in, val)) return false;
+                st.pairs[key] = val;
+            }
+            const auto readU16s = [&in](std::vector<std::uint16_t>& v) -> bool {
+                std::uint32_t n = 0;
+                if (!rPod(in, n)) return false;
+                v.resize(n);
+                return v.empty() ||
+                       !!in.read(reinterpret_cast<char*>(v.data()),
+                                 static_cast<std::streamsize>(n) * 2);
+            };
+            if (!readU16s(st.coverage))  return false;
+            if (!readU16s(st.classDef1)) return false;
+            if (!readU16s(st.classDef2)) return false;
+            if (!rPod(in, st.class2Count)) return false;
+            std::uint32_t mSz = 0;
+            if (!rPod(in, mSz)) return false;
+            st.matrix.resize(mSz);
+            if (!st.matrix.empty() &&
+                !in.read(reinterpret_cast<char*>(st.matrix.data()),
+                         static_cast<std::streamsize>(mSz) * 4)) return false;
+        }
     }
 
     std::uint32_t cpgCount = 0;

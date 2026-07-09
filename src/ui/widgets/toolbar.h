@@ -39,6 +39,20 @@ public:
     float iconGapPx = 8.0f;       // space between an icon and its value text
     float iconScale = 0.52f;      // icon diameter as a fraction of the band height
 
+    // "Chip" backing: a rounded pill grouping each icon+value pair, in the style
+    // of a modern 4X resource bar (e.g. Civ 6) instead of the bare icon/text
+    // floating directly on the band. Kept neutral/dark so it doesn't compete
+    // with the icon's own color; a thin bottom trim tinted to the item's
+    // iconColor still gives each stat its own identity.
+    bool showItemChips = true;
+    UiColor chipBackground{0.0f, 0.0f, 0.0f, 0.24f};
+    UiColor chipBorder{1.0f, 1.0f, 1.0f, 0.08f};
+    float chipRadiusPx = 9.0f;
+    float chipInsetYPx = 5.0f;   // vertical inset from the band's top/bottom edges
+    float chipPadXPx = 9.0f;     // horizontal padding beyond the icon/text bounds
+    float chipTrimThicknessPx = 2.0f;
+    float chipTrimAlpha = 0.75f;  // alpha of the per-item colored bottom trim
+
     std::size_t addItem(IconKind icon, const UiColor& iconColor, std::string value,
                         const UiColor& valueColor) {
         items_.push_back(Item{icon, iconColor, std::move(value), valueColor});
