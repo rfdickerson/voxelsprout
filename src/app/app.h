@@ -118,6 +118,23 @@ private:
         std::uint32_t flags = 0u;
     };
 
+    // Single source of truth for the right-edge rail's vertical stacking: the
+    // minimap docks at the top, the summary card docks at the bottom (fixed
+    // height, flush above the bottom bar), and contentSlot fills the space
+    // between them. The Command View and the city Production panel share
+    // contentSlot (only one is ever visible at a time) — computing it here
+    // once, rather than re-deriving it independently at each of their build
+    // sites, is what stops the two from drifting out of sync and overlapping
+    // the minimap, as they previously did. Both setupHud() and
+    // openProductionPanelForCity() call this so the rail can never disagree
+    // with itself about where each slot sits.
+    struct RightRailLayout {
+        odai::ui::UiRect minimap;
+        odai::ui::UiRect contentSlot;  // Command View or the Production panel.
+        odai::ui::UiRect summary;
+    };
+    [[nodiscard]] RightRailLayout computeRightRailLayout(float viewW, float viewH) const;
+
     void pollInput();
     void updateCamera(float dt);
     void setupHud(float viewW, float viewH);
@@ -402,7 +419,7 @@ private:
     odai::ui::Widget* m_hudTileInfoWindow = nullptr;
     std::vector<odai::ui::UiTextureId> m_terrainPreviewTextures;
     odai::ui::RichTextView* m_civpediaView = nullptr;
-    odai::ui::Widget* m_civpediaWindow = nullptr;
+    odai::ui::Window* m_civpediaWindow = nullptr;
     odai::ui::Image* m_civpediaPortrait = nullptr;   // Unit/building portrait in CivPedia header.
     odai::ui::Label* m_civpediaNameLabel = nullptr;  // Name + class label in CivPedia header.
     odai::ui::Panel*  m_civPanel = nullptr;
@@ -597,6 +614,44 @@ private:
         float duration = 1.6f;
     };
     std::vector<FloatingLabel> m_floatingLabels;
+
+    // Cached city-banner geometry (drop shadow + gradient plate + border + pop
+    // chip + text), keyed 1:1 with m_strategyMap.settlements by index. Rebuilt
+    // only when a settlement's name/tier/owner or the DPI scale changes; every
+    // other frame just re-translates the baked block to the current screen
+    // position via UiDrawList::appendCached, skipping measureText and all quad
+    // tessellation. See drawStrategyMapLabels().
+    struct CityBannerCache {
+        std::string name;
+        std::uint8_t tier = 0;
+        std::uint8_t owner = 0;
+        float builtForScale = -1.0f;
+        odai::ui::UiGeometryBlock block;
+    };
+    std::vector<CityBannerCache> m_cityBannerCache;
+
+    // Cached per-unit HP/supply label geometry (backing plate + text), keyed by
+    // the unit's stable id. Rebuilt only when the label content, selection, or
+    // starving state changes. See drawStrategyMapLabels().
+    struct UnitLabelCache {
+        int hp = -1;
+        int maxHp = -1;
+        int supply = -1;
+        int maxSupply = -1;
+        bool selected = false;
+        float builtForScale = -1.0f;
+        odai::ui::UiGeometryBlock block;
+        // Half-width of the label's backing plate (content-derived, so it's
+        // baked once alongside `block`). Lets the anti-overlap nudge in
+        // drawStrategyMapLabels() reconstruct each label's screen-space box
+        // without re-measuring text every frame.
+        float plateHalfWidth = 0.0f;
+    };
+    std::unordered_map<std::uint32_t, UnitLabelCache> m_unitLabelCache;
+    // Throttles the dead-unit cache prune in drawStrategyMapLabels() — units are
+    // erased from m_gameState.units on death, so without this the cache map
+    // would grow by one stale entry per unit killed over a long session.
+    int m_unitLabelCachePruneCounter = 0;
 
     odai::sim::Simulation m_simulation;
     odai::world::World m_world;

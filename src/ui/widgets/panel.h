@@ -77,6 +77,13 @@ public:
     // characteristic CDE highlight and shadow tones.
     void styleMotif(float s, bool raised = true);
 
+    // Configure this panel with the Civilization 6 HUD look: a dark navy glass
+    // gradient (lighter at the top so panels read as backlit), a thin brass/gold
+    // outer trim with a darker gold inner line, angular corners, and a soft drop
+    // shadow. No bevel — the gold trim carries the frame. `alpha` tunes how much
+    // of the map shows through the glass.
+    void styleCiv6(float s, float alpha = 0.92f);
+
     // Configure this panel with the Mac System 6/7 "Platinum" look: opaque white
     // fill, 1px black border, square corners, no bevel. Drop shadows on windows
     // are drawn manually as offset solid-black rects in the calling code.

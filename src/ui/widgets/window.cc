@@ -160,6 +160,16 @@ void Window::draw(UiDrawList& dl) const {
     dl.popClip();
 }
 
+void Window::bringToFront() {
+    // Shared across every Window instance: siblings compare zOrder directly
+    // (see Widget::drawChildren / dispatchToChildren), so a single ever-
+    // increasing counter is enough to place whichever window last claimed it
+    // above all others, regardless of the order windows were originally added
+    // to their parent.
+    static int s_topZOrder = 0;
+    zOrder = ++s_topZOrder;
+}
+
 bool Window::onEvent(UiEvent& e) {
     if (!visible) {
         return false;
@@ -167,6 +177,16 @@ bool Window::onEvent(UiEvent& e) {
 
     if (e.type == UiEvent::Type::MouseMove) {
         closeHovered_ = showCloseButton && closeBtnRect().contains(e.mousePx);
+    }
+
+    // Clicking anywhere inside the window's silhouette — title bar, close
+    // button, or content — brings it to the front of its sibling windows,
+    // matching desktop window-manager behavior. Checked before the specific
+    // close/drag handling below so it applies regardless of which of those
+    // paths (if any) ends up consuming the event.
+    if (e.type == UiEvent::Type::MouseDown && e.button == UiMouseButton::Left &&
+        frameRect().contains(e.mousePx)) {
+        bringToFront();
     }
 
     if (e.type == UiEvent::Type::MouseDown && e.button == UiMouseButton::Left) {
@@ -196,8 +216,21 @@ bool Window::onEvent(UiEvent& e) {
         dragging_ = false;
     }
 
-    if (!contentRect().contains(e.mousePx) && e.type != UiEvent::Type::MouseMove) {
-        return false;
+    if (e.type != UiEvent::Type::MouseMove) {
+        if (!frameRect().contains(e.mousePx)) {
+            // Outside this window entirely — let the event fall through to
+            // whatever's behind it (a sibling window, or the map).
+            return false;
+        }
+        if (!contentRect().contains(e.mousePx)) {
+            // Inside the window's padding/chrome (e.g. the margin around the
+            // content area) but not a specific control. That's still part of
+            // the window's opaque body, so the event must stop here — letting
+            // it fall through would leak clicks near the window's edges
+            // through to whatever's behind it (typically the 3D map).
+            e.handled = true;
+            return true;
+        }
     }
     return dispatchToChildren(e);
 }
