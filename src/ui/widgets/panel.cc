@@ -176,6 +176,26 @@ void Panel::styleClassicMac(float s) {
     showShadow           = false;  // callers draw Mac window shadows manually
 }
 
+void Panel::styleRetroOS(float s, UiColor accent) {
+    // Windows-10-era flat chrome: near-white fill, a crisp solid accent border,
+    // a small radius (not the pill-shaped "soft" look), no bevel, no shadow —
+    // the styleguide's own rule is "avoid heavy shadows."
+    bgTop.reset();
+    bgBottom.reset();
+    background           = UiColor::fromRgbHex(0xF0F0F0);
+    borderColor          = accent;
+    borderThicknessPx    = 1.0f * s;
+    cornerRadiusPx       = 4.0f * s;
+    innerBorderColor     = UiColor{};
+    innerBorderInsetPx   = 0.0f;
+    cornerAccentColor    = UiColor{};
+    cornerAccentPx       = 0.0f;
+    showBevel            = false;
+    bevelInward          = false;
+    showShadow           = false;
+    liftShadowColor      = UiColor{1.0f, 1.0f, 1.0f, 0.0f};
+}
+
 void Panel::onTick(float dt) {
     backgroundAnim.update(dt);
     bgTopAnim.update(dt);
@@ -188,10 +208,11 @@ void Panel::draw(UiDrawList& drawList) const {
     // first so the darker main shadow layers over it where they meet.
     if (liftShadowColor.a > 0.0f && shadowBlurPx > 0.0f) {
         drawList.addDropShadow(rect_, liftShadowColor, shadowBlurPx,
-                               -shadowOffsetX, -shadowOffsetY);
+                               -shadowOffsetX, -shadowOffsetY, cornerRadiusPx);
     }
     if (showShadow) {
-        drawList.addDropShadow(rect_, shadowColor, shadowBlurPx, shadowOffsetX, shadowOffsetY);
+        drawList.addDropShadow(rect_, shadowColor, shadowBlurPx, shadowOffsetX, shadowOffsetY,
+                               cornerRadiusPx);
     }
     // Resolve animated colors: if a tween is in flight use current(), else use the static field.
     const UiColor effectiveBg  = backgroundAnim.idle() ? background   : backgroundAnim.current();

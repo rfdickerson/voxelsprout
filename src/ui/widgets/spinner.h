@@ -30,7 +30,9 @@ public:
 
     float nubWidthPx = 18.0f;
     float paddingX = 8.0f;
-    float cornerRadiusPx = 3.0f;
+    // 2px matches the shared corner-radius token used by Button/Window/TextBox/
+    // Panel/Toast/IconButton/Dropdown/Slider — was 3px, a stray one-off value.
+    float cornerRadiusPx = 2.0f;
 
     // Delay before repeat kicks in, and the interval between repeats, in seconds.
     float repeatDelaySec = 0.4f;

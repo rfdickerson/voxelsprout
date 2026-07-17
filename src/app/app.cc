@@ -3399,7 +3399,7 @@ bool App::tryPlaceBeltFromCameraRay() {
     if (axisDir == odai::core::Dir6::PosY || axisDir == odai::core::Dir6::NegY) {
         axisDir = horizontalDirFromYaw(m_camera.yawDegrees);
     }
-    m_simulation.belts().emplace_back(targetX, targetY, targetZ, dir6ToBeltDirection(axisDir));
+    m_simulation.addBelt(targetX, targetY, targetZ, dir6ToBeltDirection(axisDir));
     return true;
 }
 
@@ -3414,12 +3414,7 @@ bool App::tryRemoveBeltFromCameraRay() {
         return false;
     }
 
-    std::vector<odai::sim::Belt>& belts = m_simulation.belts();
-    if (beltIndex >= belts.size()) {
-        return false;
-    }
-    belts.erase(belts.begin() + static_cast<std::ptrdiff_t>(beltIndex));
-    return true;
+    return m_simulation.removeBeltAt(beltIndex);
 }
 
 bool App::tryPlaceTrackFromCameraRay() {
@@ -3678,10 +3673,22 @@ void App::setupHud(float viewW, float viewH) {
             }
         }
 
+        // CivPedia body faces: EB Garamond at body reading size so parchment
+        // article text (regular/bold/italic runs) matches the title's serif family.
+        m_pediaFonts.regular = loadVariant(m_pediaFontRegular, "assets/fonts/EBGaramond-Regular.ttf");
+        m_pediaFonts.bold = loadVariant(m_pediaFontBold, "assets/fonts/EBGaramond-Bold.ttf");
+        m_pediaFonts.italic = loadVariant(m_pediaFontItalic, "assets/fonts/EBGaramond-Italic.ttf");
+        m_pediaFonts.boldItalic = loadVariant(m_pediaFontBoldItalic, "assets/fonts/EBGaramond-BoldItalic.ttf");
+        m_pediaFonts.numeric = m_uiFonts.numeric;
+        if (m_pediaFonts.regular == nullptr) {
+            m_pediaFonts = m_uiFonts;  // Fall back to Inter if Garamond body faces failed to load.
+        }
+
         VOX_LOGI("ui") << "fonts loaded: body=Inter bold=" << (m_uiFonts.bold ? "yes" : "no")
                        << " italic=" << (m_uiFonts.italic ? "yes" : "no")
                        << " numeric=" << (m_uiFonts.numeric ? "JetBrains Mono" : "no")
-                       << " title=" << (m_uiFontTitle.valid() ? "EB Garamond small caps" : "no");
+                       << " title=" << (m_uiFontTitle.valid() ? "EB Garamond small caps" : "no")
+                       << " pedia=" << (m_pediaFonts.regular == &m_pediaFontRegular ? "EB Garamond" : "Inter");
     }
     const odai::ui::FontSet& fonts = m_uiFonts;
 
@@ -4425,8 +4432,9 @@ void App::setupHud(float viewW, float viewH) {
 
         float cy = civY + 14.0f * s;
 
-        // "Civilizations" title label.
-        auto civTitle = std::make_unique<odai::ui::Label>(fonts.bold, "Civilizations");
+        // "Civilizations" title label — EB Garamond for a Civ 6-style serif header.
+        const odai::ui::Font* civTitleFont = m_uiFontTitle.valid() ? &m_uiFontTitle : fonts.bold;
+        auto civTitle = std::make_unique<odai::ui::Label>(civTitleFont, "Civilizations");
         civTitle->color = odai::ui::UiColor{0.91f, 0.80f, 0.48f, 1.0f};
         civTitle->setRect(odai::ui::UiRect::fromXYWH(civX, cy, civW, 22.0f * s));
         civTitle->align = odai::ui::UiTextAlign::Center;
@@ -4785,7 +4793,7 @@ void App::setupHud(float viewW, float viewH) {
         const float nameLabelX = pediaX + pBodyPadX + headerIconSz + 8.0f * s;
         const float nameLabelW = pediaW - pBodyPadX - headerIconSz - 8.0f * s - pBodyPadX;
         auto nameLabel = std::make_unique<odai::ui::Label>(
-            fonts, "<b><color=#c06820>Spearman</color></b>\n<color=#9fa8a8><i>Ancient Melee Unit</i></color>");
+            m_pediaFonts, "<b><color=#c06820>Spearman</color></b>\n<color=#9fa8a8><i>Ancient Melee Unit</i></color>");
         nameLabel->setRect(odai::ui::UiRect::fromXYWH(nameLabelX, headerY, nameLabelW, headerIconSz));
         m_civpediaNameLabel = static_cast<odai::ui::Label*>(pediaWin->addChild(std::move(nameLabel)));
     }
@@ -4794,7 +4802,7 @@ void App::setupHud(float viewW, float viewH) {
     // clicks (i) on a production row. Starts with the Spearman article so the
     // window has real content if it is ever made visible without a selection.
     auto pediaBody = std::make_unique<odai::ui::RichTextView>(
-        fonts, odai::game::getPediaArticle("spearman"));
+        m_pediaFonts, odai::game::getPediaArticle("spearman"));
     pediaBody->padding = {6.0f * s, 4.0f * s};
     pediaBody->scrollBarThumbColor = odai::ui::UiColor{0.70f, 0.56f, 0.28f, 0.65f};
     pediaBody->scrollBarTrackColor = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.15f};
@@ -5077,10 +5085,12 @@ void App::setupHud(float viewW, float viewH) {
         feedBg->shadowOffsetY     = 3.0f * s;
         auto* feedBgPtr = static_cast<odai::ui::Panel*>(root->addChild(std::move(feedBg)));
 
-        const odai::ui::Font* feedTitleFont = fonts.bold ? fonts.bold : fonts.regular;
+        // "Chronicle" title label — EB Garamond for a Civ 6-style serif header.
+        const odai::ui::Font* feedTitleFont =
+            m_uiFontTitle.valid() ? &m_uiFontTitle : (fonts.bold ? fonts.bold : fonts.regular);
         const float feedTitleH = feedTitleFont ? feedTitleFont->lineHeightPx() + 4.0f * s : 20.0f * s;
-        auto feedTitle = std::make_unique<odai::ui::Label>(
-            fonts, "<b><color=#e2c879>Chronicle</color></b>");
+        auto feedTitle = std::make_unique<odai::ui::Label>(feedTitleFont, "Chronicle");
+        feedTitle->color = odai::ui::UiColor{0.886f, 0.784f, 0.475f, 1.0f};  // #E2C879
         feedTitle->setRect(odai::ui::UiRect::fromXYWH(feedX + 10.0f * s, feedY + 5.0f * s,
                                                       feedW - 20.0f * s, feedTitleH));
         feedBgPtr->addChild(std::move(feedTitle));

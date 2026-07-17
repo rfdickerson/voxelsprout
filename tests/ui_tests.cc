@@ -1,7 +1,11 @@
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <string>
 
 #include "game/turn_action.h"
 #include "ui/animation.h"
@@ -113,6 +117,96 @@ void testFontMeasure() {
     dl.reset(UiVec2{100.0f, 100.0f});
     const float advance = dl.addText(font, "AB", UiVec2{0.0f, 0.0f}, UiColor{1, 1, 1, 1});
     expectNear(advance, 20.0f, 1e-4f, "addText advance matches measureText");
+}
+
+// Bakes a real TTF twice -- once through the existing coverage path, once
+// through the new opt-in SDF path (Font::loadFromMemory(..., sdf=true)) -- and
+// asserts on the SDF atlas's structure. There is no Vulkan on this machine to
+// render a glyph and eyeball it, so this instead: (1) confirms the coverage
+// path is unaffected (isSdf() stays false by default), (2) confirms the SDF
+// atlas has the requested dimensions and real pixel data, and (3) samples the
+// brightest/darkest raw bytes inside a baked glyph's packed rect and decodes
+// both to a signed pixel distance via the exact formula
+// (sdfDistBias - sample*sdfDistScale) the fragment shader's kModeGlyphSdf uses
+// -- the brightest byte (deep in the glyph's ink) must decode negative
+// (inside) and the darkest (a padding corner, guaranteed background) must
+// decode positive (outside), which is the whole point of a signed distance
+// field: a real inside/outside test recoverable at any sample point.
+void testSdfFontAtlasBake() {
+    using namespace odai::ui;
+#ifdef ODAI_TEST_ASSETS_DIR
+    const std::string ttfPath = std::string(ODAI_TEST_ASSETS_DIR) + "/fonts/Inter-Regular.ttf";
+    std::ifstream file(ttfPath, std::ios::binary | std::ios::ate);
+    if (!file) {
+        std::cerr << "[ui test] SKIP: testSdfFontAtlasBake (missing " << ttfPath << ")\n";
+        return;
+    }
+    const std::streamoff size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<std::uint8_t> ttfBytes(static_cast<std::size_t>(size));
+    if (!file.read(reinterpret_cast<char*>(ttfBytes.data()), size)) {
+        expectTrue(false, "read Inter-Regular.ttf for SDF bake test");
+        return;
+    }
+    file.close();
+
+    constexpr float kPixelHeight = 32.0f;
+    constexpr std::uint32_t kAtlasSize = 512;
+    constexpr std::uint32_t kFirst = 32, kLast = 126;
+
+    Font coverageFont;
+    expectTrue(coverageFont.loadFromMemory(ttfBytes.data(), ttfBytes.size(), kPixelHeight,
+                                           kAtlasSize, kFirst, kLast, /*sdf=*/false),
+              "coverage bake still succeeds unchanged");
+    expectTrue(!coverageFont.isSdf(), "default (coverage) bake is not flagged as SDF");
+
+    Font sdfFont;
+    expectTrue(sdfFont.loadFromMemory(ttfBytes.data(), ttfBytes.size(), kPixelHeight,
+                                      kAtlasSize, kFirst, kLast, /*sdf=*/true),
+              "SDF bake succeeds");
+    expectTrue(sdfFont.valid(), "SDF font has glyphs");
+    expectTrue(sdfFont.isSdf(), "SDF bake is flagged as SDF");
+    expectTrue(sdfFont.atlasWidth() == kAtlasSize && sdfFont.atlasHeight() == kAtlasSize,
+              "SDF atlas dimensions match requested atlasSize");
+    expectTrue(!sdfFont.atlasPixels().empty(), "SDF atlas has pixel data");
+
+    const Glyph& gA = sdfFont.glyph(static_cast<std::uint32_t>('A'));
+    expectTrue(gA.size.x > 0.0f && gA.size.y > 0.0f, "SDF 'A' glyph has a non-zero packed rect");
+
+    const std::uint32_t atlasW = sdfFont.atlasWidth();
+    const auto toPx = [atlasW](float uv) {
+        return static_cast<std::uint32_t>(uv * static_cast<float>(atlasW) + 0.5f);
+    };
+    const std::uint32_t x0 = toPx(gA.uv.minX);
+    const std::uint32_t y0 = toPx(gA.uv.minY);
+    const std::uint32_t x1 = toPx(gA.uv.maxX);
+    const std::uint32_t y1 = toPx(gA.uv.maxY);
+    const auto& pixels = sdfFont.atlasPixels();
+    std::uint8_t minV = 255, maxV = 0;
+    for (std::uint32_t y = y0; y < y1; ++y) {
+        for (std::uint32_t x = x0; x < x1; ++x) {
+            const std::uint8_t v = pixels[static_cast<std::size_t>(y) * atlasW + x];
+            minV = std::min(minV, v);
+            maxV = std::max(maxV, v);
+        }
+    }
+    expectTrue(maxV > minV, "SDF 'A' rect contains both ink and background bytes");
+
+    const float scale = sdfFont.sdfDistScale();
+    const float bias = sdfFont.sdfDistBias();
+    const float dInside = bias - (static_cast<float>(maxV) / 255.0f) * scale;
+    const float dOutside = bias - (static_cast<float>(minV) / 255.0f) * scale;
+    expectTrue(dInside < 0.0f, "brightest sampled byte decodes to a negative (inside) distance");
+    expectTrue(dOutside > 0.0f, "darkest sampled byte decodes to a positive (outside) distance");
+
+    // Advances come from the same glyph hmetrics * scale in both paths (the SDF
+    // path just skips baking GSUB ligature/en-dash-em-dash glyphs), so plain
+    // ASCII word width should match almost exactly between the two atlases.
+    expectNear(sdfFont.measureText("Hello"), coverageFont.measureText("Hello"), 1e-3f,
+              "SDF and coverage bakes agree on plain-ASCII advance widths");
+#else
+    std::cerr << "[ui test] SKIP: testSdfFontAtlasBake (ODAI_TEST_ASSETS_DIR not defined)\n";
+#endif
 }
 
 void testRichTextWrap() {
@@ -1304,6 +1398,49 @@ void testVectorPrimitives() {
     }
 }
 
+void testDropShadowGeometry() {
+    using namespace odai::ui;
+
+    // Sharp shadow (cornerRadiusPx=0, the historical call shape): single SDF
+    // quad, not the old 9-quad grid.
+    {
+        UiDrawList dl;
+        dl.reset(UiVec2{200.0f, 200.0f});
+        dl.addDropShadow(UiRect::fromXYWH(20.0f, 30.0f, 100.0f, 40.0f), UiColor{0, 0, 0, 0.5f}, 8.0f,
+                         0.0f, 4.0f, 0.0f);
+        const UiDrawData& d = dl.data();
+        expectTrue(d.vertices.size() == 4u, "addDropShadow emits one quad (not the old 9-quad grid)");
+        expectTrue(d.indices.size() == 6u, "addDropShadow emits 6 indices");
+        const UiVertex& v = d.vertices[0];
+        expectTrue(v.mode == static_cast<std::uint32_t>(UiDrawMode::Shadow), "Shadow quad uses Shadow mode");
+        expectNear(v.sdf[0], 50.0f, 0.01f, "Shadow sdf halfWidth");
+        expectNear(v.sdf[1], 20.0f, 0.01f, "Shadow sdf halfHeight");
+        expectNear(v.sdf[2], 0.0f, 0.01f, "cornerRadiusPx=0 records a sharp-box radius");
+        expectNear(v.sdf[3], 8.0f, 0.01f, "Shadow sdf.w carries blurSigma");
+    }
+
+    // Rounded shadow: same single-quad shape, radius now threaded through so the
+    // shader's SDF matches the caster's rounded fill.
+    {
+        UiDrawList dl;
+        dl.reset(UiVec2{200.0f, 200.0f});
+        dl.addDropShadow(UiRect::fromXYWH(20.0f, 30.0f, 100.0f, 40.0f), UiColor{0, 0, 0, 0.5f}, 8.0f,
+                         0.0f, 4.0f, 12.0f);
+        const UiDrawData& d = dl.data();
+        expectTrue(d.vertices.size() == 4u, "Rounded shadow still emits one quad");
+        expectNear(d.vertices[0].sdf[2], 12.0f, 0.01f, "cornerRadiusPx threads through to the shadow SDF");
+    }
+
+    // Degenerate inputs emit nothing.
+    {
+        UiDrawList dl;
+        dl.reset(UiVec2{200.0f, 200.0f});
+        dl.addDropShadow(UiRect::fromXYWH(0, 0, 50, 50), UiColor{0, 0, 0, 0.0f}, 8.0f);
+        dl.addDropShadow(UiRect::fromXYWH(0, 0, 50, 50), UiColor{0, 0, 0, 0.5f}, 0.0f);
+        expectTrue(dl.data().vertices.empty(), "Zero alpha or zero blur emits no shadow geometry");
+    }
+}
+
 void testBevelDraw() {
     using namespace odai::ui;
     UiDrawList dl;
@@ -1399,6 +1536,52 @@ void testButtonHoverGlow() {
         btn.draw(dl);
         expectTrue(glowVerts(dl) == 0u, "glowSizePx=0 disables the glow");
     }
+}
+
+void testButtonHoverTween() {
+    using namespace odai::ui;
+    const Font font = makeMonospaceFont(8.0f);
+    Button btn(&font, "Go", []() {});
+    btn.setRect(UiRect::fromXYWH(20.0f, 20.0f, 100.0f, 40.0f));
+    btn.cornerRadiusPx = 0.0f;  // isolate the fill quad; no border/bevel/accent geometry
+    btn.glowSizePx = 0.0f;      // no hover glow quad ahead of the fill quad
+
+    // Unpack the fill quad's ABGR8 vertex color back to a float RGB triple —
+    // packAbgr8() has no inverse in UiColor, so decode the bit layout directly.
+    const auto fillRgb = [](const Button& b) {
+        UiDrawList dl;
+        dl.reset(UiVec2{400.0f, 300.0f});
+        b.draw(dl);
+        const std::uint32_t rgba8 = dl.data().vertices[0].rgba8;
+        return std::array<float, 3>{
+            static_cast<float>(rgba8 & 0xFFu) / 255.0f,
+            static_cast<float>((rgba8 >> 8) & 0xFFu) / 255.0f,
+            static_cast<float>((rgba8 >> 16) & 0xFFu) / 255.0f,
+        };
+    };
+
+    const auto normal = fillRgb(btn);
+    expectNear(normal[0], btn.colorNormal.r, 0.01f, "Idle button fills with colorNormal before any hover");
+
+    // Hover: color should be mid-transition immediately after the event, not
+    // already snapped to colorHover — proving the fill is tween-driven.
+    UiEvent move{};
+    move.type = UiEvent::Type::MouseMove;
+    move.mousePx = UiVec2{50.0f, 35.0f};
+    btn.onEvent(move);
+    const auto midHover = fillRgb(btn);
+    expectTrue(std::abs(midHover[0] - btn.colorHover.r) > 0.01f ||
+                   std::abs(midHover[1] - btn.colorHover.g) > 0.01f ||
+                   std::abs(midHover[2] - btn.colorHover.b) > 0.01f,
+               "Fill color is mid-transition right after hover, not snapped to colorHover");
+
+    // Tick past the tween's full duration: the fill should now have settled on
+    // colorHover.
+    btn.onTick(0.5f);
+    const auto settledHover = fillRgb(btn);
+    expectNear(settledHover[0], btn.colorHover.r, 0.01f, "Fill settles on colorHover after the tween completes");
+    expectNear(settledHover[1], btn.colorHover.g, 0.01f, "Fill settles on colorHover after the tween completes");
+    expectNear(settledHover[2], btn.colorHover.b, 0.01f, "Fill settles on colorHover after the tween completes");
 }
 
 void testTextBox() {
@@ -1949,6 +2132,7 @@ int main() {
     testEventTrackerPanelBuild();
     testSelectionInspectorPanelBuild();
     testFontMeasure();
+    testSdfFontAtlasBake();
     testRichTextWrap();
     testRichTextSpans();
     testRichTextNumericFont();
@@ -1975,6 +2159,8 @@ int main() {
     testVectorPrimitives();
     testBevelDraw();
     testButtonHoverGlow();
+    testButtonHoverTween();
+    testDropShadowGeometry();
     testTextBox();
     testToolbar();
     testPanelOpacity();

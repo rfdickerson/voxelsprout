@@ -18,6 +18,7 @@ static const uint kModeGlyphAlpha = 2u;
 static const uint kModeShadow = 3u;
 static const uint kModeRoundRect = 4u;
 static const uint kModeRoundRectGlow = 5u;
+static const uint kModeGlyphSdf = 6u;
 
 // Signed distance to a rounded box centred at the origin, half-size b, corner
 // radius r. Negative inside, positive outside, magnitude in pixels.
@@ -80,11 +81,29 @@ float4 main(FragmentInput input) : SV_Target0
         coverage = pow(coverage, 1.0 / kTextGamma);       // stem darkening
         alpha *= coverage;
     }
+    else if (input.inMode == kModeGlyphSdf)
+    {
+        // R8 sample is a normalized (0..1) signed-distance-field byte baked by
+        // stbtt_GetGlyphSDF (Font::loadFrom*(..., sdf=true)). Recover a signed
+        // pixel distance the same way Font::sdfDistScale()/sdfDistBias() define
+        // it CPU-side: inSdf.x = sdfDistScale, inSdf.y = sdfDistBias.
+        // Negative = inside the glyph, matching sdRoundBox's sign convention, so
+        // this reuses the exact RoundRect AA formula below instead of the
+        // GlyphAlpha gamma/stem-darkening hack -- real analytic AA at any scale.
+        float sample = uiTextures[NonUniformResourceIndex(input.inTextureSlot)].Sample(input.inUv).r;
+        float d = input.inSdf.y - sample * input.inSdf.x;
+        float aa = max(fwidth(d), 1e-4);
+        alpha *= clamp(0.5 - d / aa, 0.0, 1.0);
+    }
     else if (input.inMode == kModeShadow)
     {
-        // inUv = normalized distance from the inner rect edge (0 on/inside, >0 outside).
-        // Gaussian falloff: sigma=1 in UV space; outer edge at uv=3 gives ~1% alpha.
-        alpha *= exp(-dot(input.inUv, input.inUv) * 0.5);
+        // inUv = pixel offset from the shadow-rect centre; inSdf = (halfW, halfH,
+        // radius, blurSigma). Distance-to-rounded-rect Gaussian falloff: 0 on/inside
+        // the rounded box, growing outward; ~1% alpha at 3*blurSigma from the edge.
+        float d = sdRoundBox(input.inUv, input.inSdf.xy, input.inSdf.z);
+        float sigma = max(input.inSdf.w, 1e-3);
+        float dn = max(d, 0.0) / sigma;
+        alpha *= exp(-dn * dn * 0.5);
     }
     else if (input.inMode == kModeRoundRect)
     {

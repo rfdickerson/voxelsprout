@@ -38,7 +38,7 @@ void Window::draw(UiDrawList& dl) const {
     const UiRect f = frameRect();
 
     if (showShadow) {
-        dl.addDropShadow(f, shadowColor, shadowBlurPx, shadowOffsetX, shadowOffsetY);
+        dl.addDropShadow(f, shadowColor, shadowBlurPx, shadowOffsetX, shadowOffsetY, cornerRadiusPx);
     }
 
     // Frame: 9-slice if provided, else rounded solid fill + layered border.

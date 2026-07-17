@@ -20,7 +20,9 @@ public:
     UiColor glowColor{0.42f, 0.72f, 0.35f, 0.35f};
 
     float knobRadiusPx = 8.0f;
-    float cornerRadiusPx = 3.0f;
+    // 2px matches the shared corner-radius token used by Button/Window/TextBox/
+    // Panel/Toast/IconButton/Dropdown — was 3px, a stray one-off value.
+    float cornerRadiusPx = 2.0f;
 
     std::function<void(float)> onChange;
 

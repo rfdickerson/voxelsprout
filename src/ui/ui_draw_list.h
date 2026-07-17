@@ -23,9 +23,15 @@ enum class UiDrawMode : std::uint32_t {
     SolidColor = 0,  // Use vertex color, ignore texture.
     Textured = 1,    // Sample rgba texture, multiply by vertex color.
     GlyphAlpha = 2,  // Sample R8 atlas as coverage; rgb from vertex color.
-    Shadow = 3,      // Gaussian drop shadow; uv = normalized distance from inner rect edge.
+    Shadow = 3,      // Rounded-box SDF drop shadow; uv = pixel pos from center, sdf = params.
     RoundRect = 4,   // Analytic rounded-box SDF; uv = pixel pos from center, sdf = params.
     RoundRectGlow = 5,  // Soft outer glow around a rounded box; sdf.w = glow falloff px.
+    // Sample R8 atlas as a signed distance field (Font::isSdf() fonts); rgb from
+    // vertex color. sdf.x/sdf.y carry Font::sdfDistScale()/sdfDistBias() so the
+    // shader can recover a signed pixel distance from the normalized sample and
+    // threshold it with fwidth-based AA, the same idiom as RoundRect -- crisp at
+    // any render size, unlike GlyphAlpha which is only crisp near its bake height.
+    GlyphSdf = 6,
 };
 
 struct UiVertex {            // 40 bytes; matches the renderer's vertex input layout.
@@ -134,8 +140,10 @@ public:
     void addRoundRectGlow(const UiRect& rect, const UiColor& color, float radiusPx, float glowSizePx);
     // Gaussian drop shadow behind `rect`, offset by (offsetX, offsetY) pixels.
     // blurSigma controls softness; shadow fades to ~1% at 3*blurSigma from the edge.
+    // cornerRadiusPx matches the shadow's rounded-box SDF to the caster's fill
+    // radius (0 = sharp rect, the historical behavior).
     void addDropShadow(const UiRect& rect, const UiColor& color, float blurSigma,
-                       float offsetX = 0.0f, float offsetY = 4.0f);
+                       float offsetX = 0.0f, float offsetY = 4.0f, float cornerRadiusPx = 0.0f);
 
     // Draw a bevel border around `rect`, simulating a diagonal key light from the
     // upper-left. The top and left edges catch `highlightColor`; the bottom and right
