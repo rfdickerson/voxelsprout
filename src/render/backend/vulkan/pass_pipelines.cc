@@ -2954,7 +2954,7 @@ bool RendererBackend::createGraphicsPipeline() {
     // map mode when tessellation is supported; a failure here is non-fatal (the app
     // keeps the flat imported-static land via hexTerrainReady() == false).
     VkPipeline hexTerrainPipeline = VK_NULL_HANDLE;
-    if (m_strategyMapMode && m_supportsTessellationShader) {
+    if (m_strategyMapMode && m_supportsTessellationShader && !m_minimalRenderMode) {
         std::array<VkShaderModule, 4> hexShaderModules = {
             VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE
         };

@@ -1,6 +1,7 @@
 #include "engine/game_app.h"
 #include "core/log.h"
 #include "core/win_timer_resolution.h"
+#include "ui/ui_cursor.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -68,7 +69,8 @@ bool GameApp::init(const char* title) {
     }
 
     glfwSetWindowUserPointer(m_window, this);
-    glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    // Hide the OS cursor; the custom-rendered one takes over (see submitFrame).
+    glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
 
     glfwSetCharCallback(m_window, [](GLFWwindow* win, unsigned int cp) {
         if (auto* self = static_cast<GameApp*>(glfwGetWindowUserPointer(win)))
@@ -80,6 +82,9 @@ bool GameApp::init(const char* title) {
     });
 
     m_renderer.setStrategyMapMode(true);
+    if (wantsMinimalRendering()) {
+        m_renderer.setMinimalRenderMode(true);
+    }
     if (!m_renderer.init(m_window, m_emptyGrid)) {
         VOX_LOGE("engine") << "renderer init failed";
         glfwDestroyWindow(m_window);
@@ -213,6 +218,9 @@ void GameApp::beginFrameDraw() {
 
 void GameApp::submitFrame(const render::CameraPose& camera, float simulationAlpha) {
     m_uiContext.buildAppend(m_uiDrawList);
+    // Custom cursor: drawn last so it renders above every widget. GameApp tools
+    // have no mouselook mode, so it's always shown.
+    odai::ui::drawCursor(m_uiDrawList, m_uiInput.mousePx, contentScale());
     m_renderer.setUiDrawData(m_uiDrawList.data());
     const render::VoxelPreview noPreview{};
     m_renderer.renderFrame(

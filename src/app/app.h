@@ -411,6 +411,15 @@ private:
     odai::ui::Font m_uiFontTitleSmallCaps;
     odai::ui::Font m_uiFontNumeric;
     odai::ui::FontSet m_uiFonts{};
+
+    // EB Garamond body faces for the CivPedia parchment window, baked at body
+    // reading size (not the larger title size) so article text reads as one
+    // serif system without <b>/<i> runs jumping in scale.
+    odai::ui::Font m_pediaFontRegular;
+    odai::ui::Font m_pediaFontBold;
+    odai::ui::Font m_pediaFontItalic;
+    odai::ui::Font m_pediaFontBoldItalic;
+    odai::ui::FontSet m_pediaFonts{};
     odai::ui::UiContext m_uiContext;
     odai::ui::UiDrawList m_uiDrawList;
     odai::ui::UiInput m_uiInput;

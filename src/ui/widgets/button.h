@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ui/animation.h"
 #include "ui/font.h"
 #include "ui/ui_draw_list.h"
 #include "ui/ui_types.h"
@@ -59,6 +60,7 @@ public:
     void setLabel(std::string label) { label_ = std::move(label); }
 
     void draw(UiDrawList& drawList) const override;
+    void onTick(float dt) override;
     bool onEvent(UiEvent& event) override;
 
 private:
@@ -71,6 +73,9 @@ private:
     bool enabled_ = true;
     bool hovered_ = false;
     bool pressedInside_ = false;
+    // Animates backgroundForState() transitions (hover/press/release/enable) so
+    // the fill eases instead of popping; see Panel::backgroundAnim for the idiom.
+    ColorTween backgroundTween_;
 };
 
 }  // namespace odai::ui

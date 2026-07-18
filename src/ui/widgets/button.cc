@@ -5,6 +5,7 @@
 namespace odai::ui {
 
 void Button::setEnabled(bool enabled) {
+    const State prev = state_;
     enabled_ = enabled;
     if (!enabled_) {
         hovered_ = false;
@@ -12,6 +13,9 @@ void Button::setEnabled(bool enabled) {
         state_ = State::Disabled;
     } else if (state_ == State::Disabled) {
         state_ = State::Normal;
+    }
+    if (state_ != prev) {
+        backgroundTween_.set(backgroundForState(), 0.12f, Easing::EaseOut);
     }
 }
 
@@ -25,6 +29,11 @@ UiColor Button::backgroundForState() const {
     return colorNormal;
 }
 
+void Button::onTick(float dt) {
+    backgroundTween_.update(dt);
+    tickChildren(dt);
+}
+
 void Button::draw(UiDrawList& drawList) const {
     // Mouse-over glow behind the fill (pressed glows a touch brighter). With
     // drawGlowAtRest, the glow shows even when idle (smart turn button pulse).
@@ -36,7 +45,8 @@ void Button::draw(UiDrawList& drawList) const {
         }
         drawList.addRoundRectGlow(rect_, glow, cornerRadiusPx, glowSizePx);
     }
-    drawList.addRoundRectFilled(rect_, backgroundForState(), cornerRadiusPx);
+    const UiColor bg = backgroundTween_.idle() ? backgroundForState() : backgroundTween_.current();
+    drawList.addRoundRectFilled(rect_, bg, cornerRadiusPx);
     if (borderThicknessPx > 0.0f && borderColor.a > 0.0f) {
         drawList.addRoundRect(rect_, borderColor, cornerRadiusPx, borderThicknessPx);
     }
@@ -58,8 +68,17 @@ void Button::draw(UiDrawList& drawList) const {
         const float textWidth = font_->measureText(label_);
         const float textX = rect_.minX + ((rect_.width() - textWidth) * 0.5f);
         const float textY = rect_.minY + ((rect_.height() - font_->lineHeightPx()) * 0.5f);
+        // Disabled state demotes label contrast the same way IconButton already
+        // dims its icon tint to 0.45x when disabled (see IconButton::draw). Without
+        // this the label kept full saturation while only the fill dimmed, so a
+        // disabled button's text out-competed its own background for attention
+        // and the state read as still-interactive at a glance.
+        UiColor effectiveLabelColor = labelColor;
+        if (state_ == State::Disabled) {
+            effectiveLabelColor.a *= 0.45f;
+        }
         drawList.pushClip(rect_);
-        drawList.addText(*font_, label_, UiVec2{textX, textY}, labelColor);
+        drawList.addText(*font_, label_, UiVec2{textX, textY}, effectiveLabelColor);
         drawList.popClip();
     }
 }
@@ -73,13 +92,18 @@ bool Button::onEvent(UiEvent& event) {
         case UiEvent::Type::MouseMove:
             hovered_ = inside;
             if (!pressedInside_) {
-                state_ = inside ? State::Hover : State::Normal;
+                const State next = inside ? State::Hover : State::Normal;
+                if (next != state_) {
+                    state_ = next;
+                    backgroundTween_.set(backgroundForState(), 0.12f, Easing::EaseOut);
+                }
             }
             return false;
         case UiEvent::Type::MouseDown:
             if (inside && event.button == UiMouseButton::Left) {
                 pressedInside_ = true;
                 state_ = State::Pressed;
+                backgroundTween_.set(backgroundForState(), 0.10f, Easing::EaseOut);
                 event.handled = true;
                 return true;
             }
@@ -88,6 +112,7 @@ bool Button::onEvent(UiEvent& event) {
             if (event.button == UiMouseButton::Left && pressedInside_) {
                 pressedInside_ = false;
                 state_ = inside ? State::Hover : State::Normal;
+                backgroundTween_.set(backgroundForState(), 0.12f, Easing::EaseOut);
                 event.handled = true;
                 if (inside) {
                     if (onClick_) onClick_();

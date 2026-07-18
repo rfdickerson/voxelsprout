@@ -28,8 +28,13 @@ float3 reconstructViewPosition(float2 uv, float viewDepth)
     if (abs(projX) < 1e-6) projX = (projX < 0.0) ? -1e-6 : 1e-6;
     if (abs(projY) < 1e-6) projY = (projY < 0.0) ? -1e-6 : 1e-6;
 
-    const float viewX = (ndcXY.x * viewDepth) / projX;
-    const float viewY = (ndcXY.y * viewDepth) / projY;
+    // Perspective: view-space XY scale with depth (ndc = view * proj / -viewZ).
+    // Orthographic: they do not — ndc = view * proj directly. Detect via the
+    // projection's [3][3] diagonal (1 for ortho, 0 for perspective; diagonal
+    // entries are invariant under the CPU-side transpose).
+    const float depthScale = (camera.proj[3][3] > 0.5) ? 1.0 : viewDepth;
+    const float viewX = (ndcXY.x * depthScale) / projX;
+    const float viewY = (ndcXY.y * depthScale) / projY;
     return float3(viewX, viewY, -viewDepth);
 }
 

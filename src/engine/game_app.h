@@ -34,6 +34,12 @@ protected:
     virtual void onRender(float dt) = 0;
     virtual void onShutdown() {}
 
+    // Opt in to UI-only rendering: skip building the 3D scene pipelines the renderer
+    // otherwise creates (pipe/imported/sky-cloud/water/grass, SSAO, hex terrain).
+    // Override to return true in tools that draw nothing but the 2D UI overlay.
+    // Checked in init() before the renderer is initialized. Default: false.
+    virtual bool wantsMinimalRendering() const { return false; }
+
     // Load four font faces from disk and register their atlases with the renderer.
     // Call from onInit() after the renderer is up.
     bool loadFonts(const std::string& regularPath,

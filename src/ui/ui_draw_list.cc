@@ -474,32 +474,21 @@ void UiDrawList::addImage(const UiRect& rect, UiTextureId textureId, const UiCol
 }
 
 void UiDrawList::addDropShadow(const UiRect& rect, const UiColor& color, float blurSigma,
-                               float offsetX, float offsetY) {
+                               float offsetX, float offsetY, float cornerRadiusPx) {
     if (!rect.valid() || blurSigma <= 0.0f || color.a <= 0.0f) {
         return;
     }
-    const float pad = blurSigma * 3.0f;
-    const float k   = 3.0f;  // pad / blurSigma — normalized distance at outer edge
-    const std::uint32_t rgba = color.packAbgr8();
-
-    const float cx[4] = {rect.minX + offsetX - pad, rect.minX + offsetX,
-                          rect.maxX + offsetX,       rect.maxX + offsetX + pad};
-    const float cy[4] = {rect.minY + offsetY - pad, rect.minY + offsetY,
-                          rect.maxY + offsetY,       rect.maxY + offsetY + pad};
-    // UV encodes normalized distance from the inner rect edge: 0 on/inside, k at outer edge.
-    const float ux[4] = {k, 0.0f, 0.0f, k};
-    const float uy[4] = {k, 0.0f, 0.0f, k};
-
-    for (int row = 0; row < 3; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            const UiRect dst{cx[col], cy[row], cx[col + 1], cy[row + 1]};
-            if (!dst.valid()) {
-                continue;
-            }
-            addQuad(dst, {ux[col], uy[row], ux[col + 1], uy[row + 1]},
-                    rgba, UiDrawMode::Shadow, kUiNoTexture);
-        }
-    }
+    const UiRect shadowRect{rect.minX + offsetX, rect.minY + offsetY,
+                            rect.maxX + offsetX, rect.maxY + offsetY};
+    const float halfW = shadowRect.width() * 0.5f;
+    const float halfH = shadowRect.height() * 0.5f;
+    const float r = std::min(std::max(cornerRadiusPx, 0.0f), std::min(halfW, halfH));
+    const float pad = blurSigma * 3.0f;  // shadow fades to ~1% at 3*blurSigma from the edge
+    const UiRect dst{shadowRect.minX - pad, shadowRect.minY - pad,
+                     shadowRect.maxX + pad, shadowRect.maxY + pad};
+    const UiRect local{-halfW - pad, -halfH - pad, halfW + pad, halfH + pad};
+    const float sdf[4] = {halfW, halfH, r, blurSigma};
+    addQuad(dst, local, color.packAbgr8(), UiDrawMode::Shadow, kUiNoTexture, sdf);
 }
 
 void UiDrawList::add9Slice(const UiRect& rect, const UiNineSlice& slice, const UiColor& color) {
@@ -787,6 +776,16 @@ float UiDrawList::addText(const Font& font, std::string_view utf8, const UiVec2&
     // the grid (crisper text). X stays fractional so the atlas's horizontal
     // oversampling still reconstructs sub-pixel glyph placement.
     const float baselineY = std::round(posPx.y + font.ascentPx());
+    // SDF-baked fonts (Font::isSdf()) render through GlyphSdf, which recovers a
+    // signed pixel distance from the atlas sample and thresholds it with
+    // fwidth-based AA -- crisp at any render size, unlike GlyphAlpha's coverage
+    // sample which is only crisp near the atlas's baked pixel height. The two
+    // constants needed to recover that distance are per-font (same for every
+    // glyph), so they ride along in the same per-vertex sdf slot RoundRect uses
+    // for its shape params rather than needing new uniform plumbing.
+    const bool sdf = font.isSdf();
+    const UiDrawMode mode = sdf ? UiDrawMode::GlyphSdf : UiDrawMode::GlyphAlpha;
+    const float sdfParams[4] = {font.sdfDistScale(), font.sdfDistBias(), 0.0f, 0.0f};
     for (const ShapedGlyph& sg : font.shape(utf8)) {
         const Glyph& g = font.glyph(sg.codepoint);
         if (g.size.x > 0.0f && g.size.y > 0.0f) {
@@ -796,7 +795,7 @@ float UiDrawList::addText(const Font& font, std::string_view utf8, const UiVec2&
                 penX + g.bearing.x + g.size.x,
                 baselineY - g.bearing.y + g.size.y,
             };
-            addQuad(dst, g.uv, rgba, UiDrawMode::GlyphAlpha, font.textureId());
+            addQuad(dst, g.uv, rgba, mode, font.textureId(), sdf ? sdfParams : nullptr);
         }
         penX += g.advance + sg.kern;
     }

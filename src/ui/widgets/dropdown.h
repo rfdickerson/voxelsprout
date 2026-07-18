@@ -32,7 +32,11 @@ public:
 
     float itemHeightPx = 24.0f;
     float paddingX = 8.0f;
-    float cornerRadiusPx = 3.0f;
+    // 2px matches the shared corner-radius token used by Button/Window/TextBox/
+    // Panel/Toast/IconButton — was 3px, a stray one-off value with no stated
+    // rationale that fought the rest of the family when a Dropdown sat next to
+    // those widgets in the same control row.
+    float cornerRadiusPx = 2.0f;
 
     std::function<void(int)> onSelect;
 

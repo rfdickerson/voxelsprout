@@ -96,6 +96,10 @@ void Renderer::setStrategyMapMode(bool enabled) {
     m_backend->setStrategyMapMode(enabled);
 }
 
+void Renderer::setMinimalRenderMode(bool enabled) {
+    m_backend->setMinimalRenderMode(enabled);
+}
+
 void Renderer::setGameplayUiState(const GameplayUiState& state) {
     m_backend->setGameplayUiState(state);
 }
@@ -182,6 +186,10 @@ void Renderer::setSsaoEnabled(bool enabled) {
 
 bool Renderer::isSsaoEnabled() const {
     return m_backend->isSsaoEnabled();
+}
+
+void Renderer::setAmbientOcclusionTuning(float radius, float bias, float intensity) {
+    m_backend->setAmbientOcclusionTuning(radius, bias, intensity);
 }
 
 void Renderer::setShadowSettings(const ShadowSettings& settings) {

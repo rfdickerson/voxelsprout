@@ -14,13 +14,21 @@ class Panel : public Widget {
 public:
     Panel() = default;
 
-    UiColor background{0.05f, 0.10f, 0.14f, 0.86f};
-    UiColor borderColor{0.85f, 0.72f, 0.44f, 0.25f};
+    // Color defaults match styleRetroOS (the toolkit's default theme: Windows-10-
+    // era flat chrome) so a bare, unstyled Panel already looks intentional. Any
+    // style*() call below fully overrides every field it touches, so this only
+    // affects panels that never call one.
+    UiColor background{0.941f, 0.941f, 0.941f, 1.0f};  // #F0F0F0
+    UiColor borderColor{0.0f, 0.471f, 0.843f, 1.0f};   // #0078D7
     float borderThicknessPx = 1.0f;
     // Corner radius in pixels (DPI-scaled by the caller). > 0 draws the solid fill
     // and border as anti-aliased SDF rounded rects. Ignored when nineSlice is set,
     // and ignored for the gradient (ornate) fill, which is always sharp-cornered.
-    float cornerRadiusPx = 0.0f;
+    // Defaults to the same 2px corner-radius token as Button/IconButton/Window/
+    // TextBox/Toast (not styleRetroOS's own 4px) so a plain, unstyled Panel
+    // shares its sibling widgets' corner language; styleRetroOS() still sets its
+    // own 4px explicitly when called.
+    float cornerRadiusPx = 2.0f;
     std::optional<UiNineSlice> nineSlice;  // If set, used instead of the solid fill.
 
     // --- Ornate (gilt-frame) styling, all off by default ---------------------
@@ -88,6 +96,13 @@ public:
     // fill, 1px black border, square corners, no bevel. Drop shadows on windows
     // are drawn manually as offset solid-black rects in the calling code.
     void styleClassicMac(float s);
+
+    // Configure this panel with the Retro-OS / Windows 10 "flat UI" look: a
+    // near-white #F0F0F0 fill, a crisp 1px solid accent-blue (#0078D7) border,
+    // a small 4px corner radius, and no bevel or drop shadow — flat chrome, not
+    // skeuomorphic. `s` is the DPI scale; pass `accent` to retheme the border
+    // (e.g. the palette's red #E81123 for a destructive/alert variant).
+    void styleRetroOS(float s, UiColor accent = UiColor::fromRgbHex(0x0078D7));
 
     // --- Bevel (raised / recessed 3-D edge) -----------------------------------
     // When showBevel is true, a two-tone border is drawn over the fill using

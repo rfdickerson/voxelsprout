@@ -1,3 +1,6 @@
+#include <cstdlib>
+#include <cstring>
+
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
@@ -1339,6 +1342,20 @@ VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR>& presentM
     const auto has = [&](VkPresentModeKHR mode) {
         return std::find(presentModes.begin(), presentModes.end(), mode) != presentModes.end();
     };
+    // Escape hatch for A/B-testing latency vs. pacing (e.g. "is FIFO's queuing
+    // delay the reason a UI-rendered cursor feels laggier than the OS cursor")
+    // without changing the shipped default below. Unset or unsupported/invalid
+    // values fall through to the normal preference order untouched.
+    if (const char* override = std::getenv("ODAI_PRESENT_MODE")) {
+        VkPresentModeKHR requested = VK_PRESENT_MODE_MAX_ENUM_KHR;
+        if (std::strcmp(override, "immediate") == 0) requested = VK_PRESENT_MODE_IMMEDIATE_KHR;
+        else if (std::strcmp(override, "mailbox") == 0) requested = VK_PRESENT_MODE_MAILBOX_KHR;
+        else if (std::strcmp(override, "fifo") == 0) requested = VK_PRESENT_MODE_FIFO_KHR;
+        else if (std::strcmp(override, "fifo_relaxed") == 0) requested = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+        if (requested != VK_PRESENT_MODE_MAX_ENUM_KHR && has(requested)) {
+            return requested;
+        }
+    }
     // Prefer clean vsync (dual buffering) for steady pacing and no tearing:
     //   FIFO_RELAXED  - vsynced; if a frame is late it presents immediately rather
     //                   than waiting a full extra vblank (best of both worlds).

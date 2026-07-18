@@ -420,8 +420,8 @@ void testSimulationBeltCargoDeterminism() {
     simB.initializeSingleBelt();
 
     // Extend the seed with a second belt to exercise cross-segment handoff.
-    simA.belts().emplace_back(1, 1, 0, odai::sim::BeltDirection::East);
-    simB.belts().emplace_back(1, 1, 0, odai::sim::BeltDirection::East);
+    simA.addBelt(1, 1, 0, odai::sim::BeltDirection::East);
+    simB.addBelt(1, 1, 0, odai::sim::BeltDirection::East);
 
     constexpr float kFixedDt = 1.0f / 60.0f;
     for (int tick = 0; tick < 300; ++tick) {

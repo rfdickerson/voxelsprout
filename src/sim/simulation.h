@@ -27,6 +27,14 @@ public:
     std::size_t beltCount() const;
     std::vector<Belt>& belts();
     const std::vector<Belt>& belts() const;
+    // Preferred over `belts().emplace_back(...)` / `belts().erase(...)`: these two
+    // methods bump `m_beltTopologyVersion` so `update()` can detect layout changes in
+    // O(1) instead of re-hashing every belt every tick. The raw `belts()` reference is
+    // still exposed for read-only iteration (rendering, hit-testing) and legacy callers;
+    // any *other* code path that adds/removes/moves belts through it will silently skip
+    // topology invalidation.
+    void addBelt(int x, int y, int z, BeltDirection direction);
+    bool removeBeltAt(std::size_t index);
     std::vector<Pipe>& pipes();
     std::size_t pipeCount() const;
     const std::vector<Pipe>& pipes() const;
@@ -52,12 +60,12 @@ private:
 
     static odai::core::Cell3i beltDirectionOffset(BeltDirection direction);
     static std::uint64_t beltCellKey(const odai::core::Cell3i& cell);
-    std::uint64_t computeBeltLayoutSignature() const;
     void rebuildBeltTopology();
     void seedBeltCargo();
     void trySpawnBeltCargo();
     void updateCargoWorldPosition(BeltCargo& cargo);
     void updateBeltCargo(float dt);
+    bool hasCargoBlockingEntry(std::int32_t entryIndex) const;
 
     std::vector<Belt> m_belts;
     std::vector<Pipe> m_pipes;
@@ -65,8 +73,18 @@ private:
     std::vector<BeltTopologyNode> m_beltTopology;
     std::unordered_map<std::uint64_t, std::size_t> m_beltCellToIndex;
     std::vector<std::int32_t> m_beltEntryIndices;
+    // Maps a belt-topology index to its slot in m_beltEntryIndices (-1 if the belt is
+    // not an entry point). Rebuilt only alongside m_beltTopology (rare); lets the
+    // per-tick spawn-spacing check below run in O(1) instead of O(cargo count).
+    std::vector<std::int32_t> m_beltIndexToEntrySlot;
+    // Minimum alongQ16 seen this tick among cargo currently on each entry belt.
+    // Repopulated once per tick as a side effect of the cargo-advance pass in
+    // updateBeltCargo() (which already visits every cargo item), so trySpawnBeltCargo()
+    // never needs its own O(cargo) scan.
+    std::vector<std::uint32_t> m_entrySlotMinAlongQ16;
     std::vector<BeltCargo> m_beltCargoes;
-    std::uint64_t m_beltLayoutSignature = 0;
+    std::uint64_t m_beltTopologyVersion = 0;
+    std::uint64_t m_beltTopologyBuiltVersion = 0;
     std::uint32_t m_nextCargoId = 1;
     std::uint32_t m_tickCounter = 0;
 };
@@ -89,19 +107,38 @@ inline void Simulation::initializeSingleBelt() {
 
     m_nextCargoId = 1;
     m_tickCounter = 0;
-    m_beltLayoutSignature = computeBeltLayoutSignature();
+    ++m_beltTopologyVersion;
     rebuildBeltTopology();
+    m_beltTopologyBuiltVersion = m_beltTopologyVersion;
     seedBeltCargo();
 }
 
 inline void Simulation::update(float dt) {
-    const std::uint64_t layoutSignature = computeBeltLayoutSignature();
-    if (layoutSignature != m_beltLayoutSignature) {
-        m_beltLayoutSignature = layoutSignature;
+    // O(1) dirty check: m_beltTopologyVersion is only bumped by addBelt()/removeBeltAt(),
+    // so this replaces what used to be an unconditional O(belts.size()) FNV hash of every
+    // belt, every tick, purely to detect layout changes that in practice only happen on
+    // discrete editor placement actions. See addBelt()/removeBeltAt() doc comment for the
+    // caveat: mutating m_belts through the raw belts() reference bypasses this.
+    if (m_beltTopologyBuiltVersion != m_beltTopologyVersion) {
+        m_beltTopologyBuiltVersion = m_beltTopologyVersion;
         rebuildBeltTopology();
         seedBeltCargo();
     }
     updateBeltCargo(std::max(dt, 0.0f));
+}
+
+inline void Simulation::addBelt(int x, int y, int z, BeltDirection direction) {
+    m_belts.emplace_back(x, y, z, direction);
+    ++m_beltTopologyVersion;
+}
+
+inline bool Simulation::removeBeltAt(std::size_t index) {
+    if (index >= m_belts.size()) {
+        return false;
+    }
+    m_belts.erase(m_belts.begin() + static_cast<std::ptrdiff_t>(index));
+    ++m_beltTopologyVersion;
+    return true;
 }
 
 inline std::size_t Simulation::beltCount() const {
@@ -166,28 +203,14 @@ inline std::uint64_t Simulation::beltCellKey(const odai::core::Cell3i& cell) {
     return x | (y << 21u) | (z << 42u);
 }
 
-inline std::uint64_t Simulation::computeBeltLayoutSignature() const {
-    std::uint64_t hash = 1469598103934665603ull;
-    auto mixValue = [&hash](std::uint64_t value) {
-        hash ^= value;
-        hash *= 1099511628211ull;
-    };
-    mixValue(static_cast<std::uint64_t>(m_belts.size()));
-    for (const Belt& belt : m_belts) {
-        mixValue(static_cast<std::uint64_t>(static_cast<std::uint32_t>(belt.x)));
-        mixValue(static_cast<std::uint64_t>(static_cast<std::uint32_t>(belt.y)));
-        mixValue(static_cast<std::uint64_t>(static_cast<std::uint32_t>(belt.z)));
-        mixValue(static_cast<std::uint64_t>(belt.direction));
-    }
-    return hash;
-}
-
 inline void Simulation::rebuildBeltTopology() {
     m_beltTopology.assign(m_belts.size(), {});
     m_beltCellToIndex.clear();
     m_beltEntryIndices.clear();
+    m_beltIndexToEntrySlot.assign(m_belts.size(), -1);
 
     if (m_belts.empty()) {
+        m_entrySlotMinAlongQ16.clear();
         return;
     }
 
@@ -220,6 +243,14 @@ inline void Simulation::rebuildBeltTopology() {
     if (m_beltEntryIndices.empty()) {
         m_beltEntryIndices.push_back(0);
     }
+
+    for (std::size_t slot = 0; slot < m_beltEntryIndices.size(); ++slot) {
+        const std::int32_t entryIndex = m_beltEntryIndices[slot];
+        if (entryIndex >= 0 && static_cast<std::size_t>(entryIndex) < m_beltIndexToEntrySlot.size()) {
+            m_beltIndexToEntrySlot[static_cast<std::size_t>(entryIndex)] = static_cast<std::int32_t>(slot);
+        }
+    }
+    m_entrySlotMinAlongQ16.assign(m_beltEntryIndices.size(), kSpanQ16);
 }
 
 inline void Simulation::updateCargoWorldPosition(BeltCargo& cargo) {
@@ -281,10 +312,8 @@ inline void Simulation::trySpawnBeltCargo() {
         return;
     }
 
-    for (const BeltCargo& existing : m_beltCargoes) {
-        if (existing.beltIndex == entryIndex && existing.alongQ16 < kSpawnMinSpacingQ16) {
-            return;
-        }
+    if (hasCargoBlockingEntry(entryIndex)) {
+        return;
     }
 
     BeltCargo cargo{};
@@ -297,6 +326,23 @@ inline void Simulation::trySpawnBeltCargo() {
     cargo.prevWorldPos[1] = cargo.currWorldPos[1];
     cargo.prevWorldPos[2] = cargo.currWorldPos[2];
     m_beltCargoes.push_back(cargo);
+}
+
+inline bool Simulation::hasCargoBlockingEntry(std::int32_t entryIndex) const {
+    // O(1) lookup instead of scanning every live cargo item: m_entrySlotMinAlongQ16 is
+    // kept up to date as a side effect of the per-cargo pass in updateBeltCargo(), which
+    // already visits every cargo item once per tick regardless. At thousands of cargo
+    // and hundreds of belt entry points, the old linear scan over m_beltCargoes cost
+    // O(total cargo) on every spawn-interval tick; this is O(1) here plus O(numEntries)
+    // amortized in the pass that was happening anyway.
+    if (entryIndex < 0 || static_cast<std::size_t>(entryIndex) >= m_beltIndexToEntrySlot.size()) {
+        return false;
+    }
+    const std::int32_t slot = m_beltIndexToEntrySlot[static_cast<std::size_t>(entryIndex)];
+    if (slot < 0 || static_cast<std::size_t>(slot) >= m_entrySlotMinAlongQ16.size()) {
+        return false;
+    }
+    return m_entrySlotMinAlongQ16[static_cast<std::size_t>(slot)] < kSpawnMinSpacingQ16;
 }
 
 inline void Simulation::updateBeltCargo(float dt) {
@@ -316,6 +362,8 @@ inline void Simulation::updateBeltCargo(float dt) {
         cargo.prevWorldPos[1] = cargo.currWorldPos[1];
         cargo.prevWorldPos[2] = cargo.currWorldPos[2];
     }
+
+    std::fill(m_entrySlotMinAlongQ16.begin(), m_entrySlotMinAlongQ16.end(), kSpanQ16);
 
     std::erase_if(m_beltCargoes, [&](BeltCargo& cargo) {
         if (cargo.beltIndex < 0 || static_cast<std::size_t>(cargo.beltIndex) >= m_beltTopology.size()) {
@@ -341,6 +389,14 @@ inline void Simulation::updateBeltCargo(float dt) {
         cargo.beltIndex = beltIndex;
         cargo.alongQ16 = alongQ16;
         updateCargoWorldPosition(cargo);
+
+        if (beltIndex >= 0 && static_cast<std::size_t>(beltIndex) < m_beltIndexToEntrySlot.size()) {
+            const std::int32_t slot = m_beltIndexToEntrySlot[static_cast<std::size_t>(beltIndex)];
+            if (slot >= 0 && static_cast<std::size_t>(slot) < m_entrySlotMinAlongQ16.size()) {
+                std::uint32_t& slotMin = m_entrySlotMinAlongQ16[static_cast<std::size_t>(slot)];
+                slotMin = std::min(slotMin, alongQ16);
+            }
+        }
         return false;
     });
 

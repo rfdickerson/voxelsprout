@@ -227,18 +227,30 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
-    if (!runStep("createPipePipeline", [&] { return createPipePipeline(); })) {
-        VOX_LOGE("render") << "init failed at createPipePipeline\n";
-        shutdown();
-        return false;
-    }
-    // AO pipelines are needed whenever SSAO can be enabled at runtime. The strategy
-    // map's 3D relief mode turns SSAO on to deepen land-against-water seams, so create
-    // them unconditionally; runtime on/off is governed by setSsaoEnabled().
-    if (!runStep("createAoPipelines", [&] { return createAoPipelines(); })) {
-        VOX_LOGE("render") << "init failed at createAoPipelines\n";
-        shutdown();
-        return false;
+    if (m_minimalRenderMode) {
+        // UI-only executables (e.g. the design system demo) draw nothing but the 2D
+        // overlay: no pipes/imported statics/sky-clouds/water/grass, so skip that
+        // pipeline builder, and no scene geometry to occlude, so skip the SSAO/normal-
+        // depth builder too. The SSAO pass still runs each frame but, with a null
+        // pipeline, its color attachment is cleared to 1.0 (no occlusion) and tonemap
+        // samples that harmlessly; the AO images themselves are allocated elsewhere.
+        VOX_LOGI("render") << "minimal render mode: skipping createPipePipeline + "
+                              "createAoPipelines (pipe/importedStatic/skyCloud/"
+                              "importedWater/grass + SSAO/normalDepth pipelines)\n";
+    } else {
+        if (!runStep("createPipePipeline", [&] { return createPipePipeline(); })) {
+            VOX_LOGE("render") << "init failed at createPipePipeline\n";
+            shutdown();
+            return false;
+        }
+        // AO pipelines are needed whenever SSAO can be enabled at runtime. The strategy
+        // map's 3D relief mode turns SSAO on to deepen land-against-water seams, so create
+        // them unconditionally; runtime on/off is governed by setSsaoEnabled().
+        if (!runStep("createAoPipelines", [&] { return createAoPipelines(); })) {
+            VOX_LOGE("render") << "init failed at createAoPipelines\n";
+            shutdown();
+            return false;
+        }
     }
     {
         const auto frameArenaStart = Clock::now();
@@ -1841,6 +1853,13 @@ bool RendererBackend::createImGuiResources() {
     ImGui::StyleColorsDark();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // The GLFW backend's NewFrame() (called every frame in frame_run.cc, even
+    // when the debug panel is hidden) otherwise re-asserts GLFW_CURSOR_NORMAL
+    // each frame, undoing our own GLFW_CURSOR_HIDDEN so the custom-rendered UI
+    // cursor (ui/ui_cursor.h) sits underneath a reappearing OS arrow. This flag
+    // stops the backend from touching cursor shape/visibility at all, leaving
+    // our own glfwSetInputMode(..., GLFW_CURSOR) calls in full control.
+    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
     if (!ImGui_ImplGlfw_InitForVulkan(m_window, true)) {
         VOX_LOGE("imgui") << "ImGui_ImplGlfw_InitForVulkan failed\n";
@@ -1964,13 +1983,17 @@ bool RendererBackend::recreateSwapchain() {
         VOX_LOGE("render") << "recreateSwapchain failed: createGraphicsPipeline\n";
         return false;
     }
-    if (!createPipePipeline()) {
-        VOX_LOGE("render") << "recreateSwapchain failed: createPipePipeline\n";
-        return false;
-    }
-    if (!createAoPipelines()) {
-        VOX_LOGE("render") << "recreateSwapchain failed: createAoPipelines\n";
-        return false;
+    // Mirror init()'s minimal-render gating so a resize does not resurrect the
+    // 3D scene pipelines a UI-only executable opted out of.
+    if (!m_minimalRenderMode) {
+        if (!createPipePipeline()) {
+            VOX_LOGE("render") << "recreateSwapchain failed: createPipePipeline\n";
+            return false;
+        }
+        if (!createAoPipelines()) {
+            VOX_LOGE("render") << "recreateSwapchain failed: createAoPipelines\n";
+            return false;
+        }
     }
     if (m_imguiInitialized) {
         ImGui_ImplVulkan_SetMinImageCount(std::max<uint32_t>(2u, static_cast<uint32_t>(m_swapchainImages.size())));

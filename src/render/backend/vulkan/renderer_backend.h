@@ -210,6 +210,14 @@ public:
             m_skyDebugSettings.waterAnimationSpeed = 0.65f;
         }
     }
+    // Opt-in "UI-only" mode for showcase/tooling executables (e.g. the design
+    // system demo) that draw nothing but the 2D UI overlay. When enabled, init()
+    // and recreateSwapchain() skip building the pipelines those tools structurally
+    // cannot use: the pipe/imported-static/sky-cloud/imported-water/grass builder
+    // (createPipePipeline), the SSAO/normal-depth builder (createAoPipelines), and
+    // the tessellated hex-terrain pipeline. The UI/skybox/tonemap/present path is
+    // untouched. Must be set BEFORE init(); persists across swapchain recreation.
+    void setMinimalRenderMode(bool enabled) { m_minimalRenderMode = enabled; }
     bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
@@ -259,6 +267,16 @@ public:
     [[nodiscard]] bool isVertexAoEnabled() const;
     void setSsaoEnabled(bool enabled);
     [[nodiscard]] bool isSsaoEnabled() const;
+    // Overrides the SSAO radius/bias/intensity after setStrategyMapMode(true)
+    // has applied its hex-map-scale tuning (see setStrategyMapMode above) --
+    // for a GameApp whose world scale is nothing like the hex strategy map's
+    // (e.g. CityBuilder's 1-world-unit tiles vs. the hex map's much larger
+    // plateau), that tuning actively breaks SSAO rather than helping it.
+    void setAmbientOcclusionTuning(float radius, float bias, float intensity) {
+        m_shadowDebugSettings.ssaoRadius = radius;
+        m_shadowDebugSettings.ssaoBias = bias;
+        m_shadowDebugSettings.ssaoIntensity = intensity;
+    }
     void setShadowSettings(const ShadowSettings& settings);
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
@@ -912,6 +930,7 @@ private:
     BufferHandle m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     bool m_strategyMapMode = false;
+    bool m_minimalRenderMode = false;
     bool m_autoExposureComputeAvailable = false;
     bool m_autoExposureHistoryValid = false;
     uint64_t m_autoExposureUpdateFrameIndex = 0u;
@@ -1197,6 +1216,12 @@ private:
     bool m_debugShowImportedStatics = true;
     bool m_debugShowImportedTextures = true;
     bool m_debugImportedFlatShading = false;
+    // Bounding sphere of the uploaded imported scene (terrain + statics), used to
+    // fit shadow cascades for orthographic cameras where a perspective-frustum
+    // fit is meaningless (frame_run.cc cascade loop).
+    float m_importedSceneBoundsCenter[3] = {0.0f, 0.0f, 0.0f};
+    float m_importedSceneBoundsRadius = 0.0f;
+    bool m_importedSceneBoundsValid = false;
     bool m_debugImportedWaterSolid = false;
     bool m_importedSceneInteriorMode = false;
     bool m_debugImportedLightsEnabled = true;

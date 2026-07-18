@@ -520,6 +520,7 @@ void RendererBackend::clearGpuScene() {
 }
 
 void RendererBackend::clearImportedSceneMeshes() {
+    m_importedSceneBoundsValid = false;
     clearGpuScene();
 }
 
@@ -1674,6 +1675,30 @@ bool RendererBackend::uploadImportedSceneInternal(
     } else {
         VOX_LOGW("render") << "imported scene contained no static bounds after upload";
     }
+    {
+        ImportedDrawBounds sceneBounds = terrainBounds;
+        if (staticBounds.valid) {
+            if (sceneBounds.valid) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    sceneBounds.min[axis] = std::min(sceneBounds.min[axis], staticBounds.min[axis]);
+                    sceneBounds.max[axis] = std::max(sceneBounds.max[axis], staticBounds.max[axis]);
+                }
+            } else {
+                sceneBounds = staticBounds;
+            }
+        }
+        m_importedSceneBoundsValid = sceneBounds.valid;
+        if (sceneBounds.valid) {
+            float radiusSq = 0.0f;
+            for (int axis = 0; axis < 3; ++axis) {
+                m_importedSceneBoundsCenter[axis] =
+                    (sceneBounds.min[axis] + sceneBounds.max[axis]) * 0.5f;
+                const float halfExtent = (sceneBounds.max[axis] - sceneBounds.min[axis]) * 0.5f;
+                radiusSq += halfExtent * halfExtent;
+            }
+            m_importedSceneBoundsRadius = std::sqrt(radiusSq);
+        }
+    }
     m_voxelGiWorldDirty = false;
     m_voxelGiOccupancyFullRebuildInProgress = false;
     m_voxelGiOccupancyFullRebuildNeedsClear = false;
@@ -1703,7 +1728,15 @@ bool RendererBackend::uploadImportedSceneInternal(
                                << ")";
         }
     }
-    if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
+    // Gate on rayTracingRuntimeReady() (extensions loaded + function pointers resolved),
+    // not just rayTracingCoreReady() (hardware/driver merely supports the extensions).
+    // rebuildRayTracingScene() -- the only consumer of RtImportedSceneRecord::geometry --
+    // already requires rayTracingRuntimeReady() before it will touch these buffers, so on
+    // hardware that advertises RT support but fails to load the runtime function pointers
+    // (e.g. runtimeEnabled=no in the ray tracing runtime probe log), building this GPU-resident
+    // geometry on every uploadImportedScene() call was pure wasted work -- a measured 40-70ms
+    // stutter per call with no reader on the other end.
+    if (rayTracingRuntimeReady()) {
         auto appendImportedRtRecord = [&](
                                           std::span<const odai::importer::ImportedScenePackedDraw> sourceDraws,
                                           const char* debugName

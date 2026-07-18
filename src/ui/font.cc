@@ -710,6 +710,9 @@ void Font::initSyntheticMonospace(float advance, float ascent, float descent,
     m_atlas.clear();
     m_atlasWidth = 0;
     m_atlasHeight = 0;
+    m_isSdf = false;
+    m_sdfDistScale = 0.0f;
+    m_sdfDistBias = 0.0f;
     m_ascent = ascent;
     m_descent = descent;
     m_lineHeight = ascent + descent;
@@ -729,9 +732,16 @@ void Font::initSyntheticMonospace(float advance, float ascent, float descent,
 
 bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, float pixelHeight,
                           std::uint32_t atlasSize, std::uint32_t firstCodepoint,
-                          std::uint32_t lastCodepoint) {
+                          std::uint32_t lastCodepoint, bool sdf) {
     if (ttfData == nullptr || ttfSize == 0 || lastCodepoint < firstCodepoint || atlasSize == 0) {
         return false;
+    }
+    m_isSdf = false;
+    m_sdfDistScale = 0.0f;
+    m_sdfDistBias = 0.0f;
+    if (sdf) {
+        return loadSdfFromMemory(ttfData, ttfSize, pixelHeight, atlasSize, firstCodepoint,
+                                 lastCodepoint);
     }
 
     stbtt_fontinfo info{};
@@ -1013,11 +1023,189 @@ bool Font::loadFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, floa
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// SDF bake path.
+// ---------------------------------------------------------------------------
+
+namespace {
+// Padding pixels of distance field carried around each glyph's tight ink
+// bounding box. Larger padding = more room for outline/glow effects and a
+// gentler AA gradient, at the cost of atlas space. onEdgeValue=128 (mid-gray)
+// is the isocontour stb_truetype reconstructs the glyph outline at;
+// pixelDistScale follows stb's own documented rule of thumb (~onEdgeValue /
+// padding) so the full 0..255 byte range is used without clipping within one
+// padding's distance of the edge.
+constexpr int kSdfPadding = 4;
+constexpr unsigned char kSdfOnEdgeValue = 128;
+constexpr float kSdfPixelDistScale = static_cast<float>(kSdfOnEdgeValue) / static_cast<float>(kSdfPadding);
+}  // namespace
+
+bool Font::loadSdfFromMemory(const std::uint8_t* ttfData, std::size_t ttfSize, float pixelHeight,
+                             std::uint32_t atlasSize, std::uint32_t firstCodepoint,
+                             std::uint32_t lastCodepoint) {
+    (void)ttfSize;
+    stbtt_fontinfo info{};
+    const int fontOffset = stbtt_GetFontOffsetForIndex(ttfData, 0);
+    if (fontOffset < 0 || stbtt_InitFont(&info, ttfData, fontOffset) == 0) {
+        return false;
+    }
+
+    m_atlas.assign(static_cast<std::size_t>(atlasSize) * static_cast<std::size_t>(atlasSize), 0u);
+    m_atlasWidth = atlasSize;
+    m_atlasHeight = atlasSize;
+
+    int ascent = 0, descent = 0, lineGap = 0;
+    stbtt_GetFontVMetrics(&info, &ascent, &descent, &lineGap);
+    const float scale = stbtt_ScaleForPixelHeight(&info, pixelHeight);
+    m_ascent = static_cast<float>(ascent) * scale;
+    m_descent = static_cast<float>(-descent) * scale;
+    m_lineHeight = static_cast<float>(ascent - descent + lineGap) * scale;
+
+    // Recover a signed pixel distance from a normalized (0..1) R8 sample:
+    //   raw byte V = sample * 255
+    //   distancePx = (onEdgeValue - V) / pixelDistScale     (negative = inside,
+    //                                                         matching sdRoundBox)
+    //              = sdfDistBias - sample * sdfDistScale
+    m_isSdf = true;
+    m_sdfDistScale = 255.0f / kSdfPixelDistScale;
+    m_sdfDistBias = static_cast<float>(kSdfOnEdgeValue) / kSdfPixelDistScale;
+
+    // Per-glyph SDF bitmaps (stbtt_GetGlyphSDF), collected before packing since
+    // stb_rect_pack needs every rect size up front.
+    struct SdfEntry {
+        std::uint32_t codepoint = 0;
+        unsigned char* bitmap = nullptr;  // Owned; freed via stbtt_FreeSDF below.
+        int w = 0, h = 0, xoff = 0, yoff = 0;
+        float advance = 0.0f;
+    };
+    std::vector<SdfEntry> entries;
+    entries.reserve(static_cast<std::size_t>(lastCodepoint - firstCodepoint) + 1);
+
+    for (std::uint32_t cp = firstCodepoint; cp <= lastCodepoint; ++cp) {
+        const int gid = stbtt_FindGlyphIndex(&info, static_cast<int>(cp));
+        int advanceI = 0, lsb = 0;
+        stbtt_GetCodepointHMetrics(&info, static_cast<int>(cp), &advanceI, &lsb);
+        SdfEntry e{};
+        e.codepoint = cp;
+        e.advance = static_cast<float>(advanceI) * scale;
+        if (gid > 0) {
+            e.bitmap = stbtt_GetGlyphSDF(&info, scale, gid, kSdfPadding, kSdfOnEdgeValue,
+                                        kSdfPixelDistScale, &e.w, &e.h, &e.xoff, &e.yoff);
+        }
+        entries.push_back(e);
+    }
+
+    // Pack every non-empty glyph bitmap into the shared atlas. stbtt_PackFontRanges
+    // owns its own stb_rect_pack context internally and only accepts its own
+    // coverage rasterization, so SDF glyphs need their own stbrp_context here.
+    std::vector<stbrp_rect> rects;
+    rects.reserve(entries.size());
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i].bitmap == nullptr) continue;
+        stbrp_rect r{};
+        r.id = static_cast<int>(i);
+        r.w = entries[i].w;
+        r.h = entries[i].h;
+        rects.push_back(r);
+    }
+
+    std::vector<stbrp_node> nodes(atlasSize);
+    stbrp_context rpCtx{};
+    stbrp_init_target(&rpCtx, static_cast<int>(atlasSize), static_cast<int>(atlasSize), nodes.data(),
+                      static_cast<int>(atlasSize));
+    if (!rects.empty()) {
+        stbrp_pack_rects(&rpCtx, rects.data(), static_cast<int>(rects.size()));
+    }
+
+    m_glyphs.clear();
+    const float atlasF = static_cast<float>(atlasSize);
+    bool anyFailed = false;
+    for (const stbrp_rect& r : rects) {
+        SdfEntry& e = entries[static_cast<std::size_t>(r.id)];
+        if (!r.was_packed) {
+            anyFailed = true;
+            stbtt_FreeSDF(e.bitmap, nullptr);
+            e.bitmap = nullptr;
+            continue;
+        }
+        for (int y = 0; y < e.h; ++y) {
+            std::memcpy(m_atlas.data() + static_cast<std::size_t>(r.y + y) * atlasSize +
+                            static_cast<std::size_t>(r.x),
+                        e.bitmap + static_cast<std::size_t>(y) * static_cast<std::size_t>(e.w),
+                        static_cast<std::size_t>(e.w));
+        }
+        Glyph g{};
+        g.size = {static_cast<float>(e.w), static_cast<float>(e.h)};
+        // Same convention as the coverage path's manual PUA raster: xoff/yoff
+        // place the bitmap's top-left relative to the glyph origin (baseline),
+        // with +y down, so yoff is negative for anything above the baseline.
+        g.bearing = {static_cast<float>(e.xoff), static_cast<float>(-e.yoff)};
+        g.advance = e.advance;
+        const float u0 = static_cast<float>(r.x) / atlasF;
+        const float v0 = static_cast<float>(r.y) / atlasF;
+        g.uv = UiRect{u0, v0, u0 + static_cast<float>(e.w) / atlasF, v0 + static_cast<float>(e.h) / atlasF};
+        m_glyphs[e.codepoint] = g;
+        stbtt_FreeSDF(e.bitmap, nullptr);
+        e.bitmap = nullptr;
+    }
+    if (anyFailed) {
+        VOX_LOGW("Font") << "SDF atlas packing incomplete at " << pixelHeight
+                         << "px (atlasSize=" << atlasSize
+                         << "). Consider increasing atlasSize.";
+    }
+
+    // Whitespace / advance-only codepoints (no ink, stbtt_GetGlyphSDF returned null).
+    for (const SdfEntry& e : entries) {
+        if (m_glyphs.count(e.codepoint)) continue;
+        Glyph g{};
+        g.advance = e.advance;
+        m_glyphs[e.codepoint] = g;
+    }
+
+    const auto spaceIt = m_glyphs.find(static_cast<std::uint32_t>(' '));
+    m_missing = Glyph{};
+    m_missing.advance = (spaceIt != m_glyphs.end()) ? spaceIt->second.advance : (pixelHeight * 0.4f);
+    rebuildAsciiCache();
+
+    // Shaping: GPOS/legacy kerning only. GSUB ligature substitution (liga/dlig)
+    // is not baked in this path yet -- coverage-only feature for now (see
+    // font.h's class comment).
+    m_shaping = std::make_unique<ShapingData>();
+    m_shaping->scale = scale;
+    for (std::uint32_t cp = firstCodepoint; cp <= lastCodepoint; ++cp) {
+        const int gid = stbtt_FindGlyphIndex(&info, static_cast<int>(cp));
+        if (gid > 0) m_shaping->cpToGlyph[cp] = static_cast<std::uint32_t>(gid);
+    }
+    parseGpos(*m_shaping, ttfData, static_cast<std::uint32_t>(fontOffset));
+    if (m_shaping->kernLookups.empty()) {
+        const int kernLen = stbtt_GetKerningTableLength(&info);
+        if (kernLen > 0) {
+            std::vector<stbtt_kerningentry> kentries(static_cast<std::size_t>(kernLen));
+            stbtt_GetKerningTable(&info, kentries.data(), kernLen);
+            KernSubtable st;
+            st.format = 1;
+            for (const stbtt_kerningentry& e : kentries) {
+                if (e.advance == 0) continue;
+                const std::uint64_t key = (static_cast<std::uint64_t>(e.glyph1) << 16) |
+                                          static_cast<std::uint32_t>(e.glyph2);
+                st.pairs.emplace(key, static_cast<float>(e.advance) * scale);
+            }
+            if (!st.pairs.empty()) {
+                KernLookup lu;
+                lu.subtables.push_back(std::move(st));
+                m_shaping->kernLookups.push_back(std::move(lu));
+            }
+        }
+    }
+
+    return true;
+}
+
 bool Font::loadFromFile(const std::string& path, float pixelHeight, std::uint32_t atlasSize,
-                        std::uint32_t firstCodepoint, std::uint32_t lastCodepoint) {
+                        std::uint32_t firstCodepoint, std::uint32_t lastCodepoint, bool sdf) {
     const std::string cachePath =
-        makeCachePath(path, pixelHeight, atlasSize, firstCodepoint, lastCodepoint);
-    if (loadCache(cachePath, path, pixelHeight, atlasSize, firstCodepoint, lastCodepoint)) {
+        makeCachePath(path, pixelHeight, atlasSize, firstCodepoint, lastCodepoint, sdf);
+    if (loadCache(cachePath, path, pixelHeight, atlasSize, firstCodepoint, lastCodepoint, sdf)) {
         VOX_LOGI("Font") << "Cache hit: " << cachePath;
         return true;
     }
@@ -1036,7 +1224,7 @@ bool Font::loadFromFile(const std::string& path, float pixelHeight, std::uint32_
         return false;
     }
     if (!loadFromMemory(bytes.data(), bytes.size(), pixelHeight, atlasSize, firstCodepoint,
-                        lastCodepoint)) {
+                        lastCodepoint, sdf)) {
         return false;
     }
     if (!saveCache(cachePath, path)) {
@@ -1048,13 +1236,14 @@ bool Font::loadFromFile(const std::string& path, float pixelHeight, std::uint32_
 // ---------------------------------------------------------------------------
 // Font cache — binary serialisation of baked atlas + metrics + shaping tables.
 //
-// File format "ODAIFNT3":
-//   [8]  magic "ODAIFNT3"
+// File format "ODAIFNT4":
+//   [8]  magic "ODAIFNT4"
 //   [8]  TTF file size (uint64)  ─┐ cache key: both must match the source TTF
 //   [8]  TTF mtime ticks (int64) ─┘
 //   [4]  ascent   [4] descent  [4] lineHeight  (float)
+//   [1]  isSdf (uint8 0/1)  [4] sdfDistScale  [4] sdfDistBias  (float; 0 when !isSdf)
 //   [4]  atlasWidth  [4] atlasHeight  (uint32)
-//   [W*H] atlas pixels (R8)
+//   [W*H] atlas pixels (R8; coverage or signed distance per isSdf)
 //   [4]  glyph count N; N × { cp(4) size.x(4) size.y(4) bearing.x(4) bearing.y(4)
 //                              advance(4) uv.minX(4) uv.minY(4) uv.maxX(4) uv.maxY(4) }
 //   [4]  ligature count; each: seqLen(4) + seqLen*cp(4) + result(4)
@@ -1063,21 +1252,26 @@ bool Font::loadFromFile(const std::string& path, float pixelHeight, std::uint32_
 //          + covSize(4)+cov[](2) + def1Size(4)+def1[](2) + def2Size(4)+def2[](2)
 //          + class2Count(4) + matrixSize(4)+matrix[](4)
 //   [4]  cpToGlyph count; each: cp(4) + glyphId(4)
+//
+// Bumped from ODAIFNT3 -> ODAIFNT4 when the isSdf/sdfDistScale/sdfDistBias
+// fields were added, so a stale coverage-era cache file is never misread as
+// (or over) an SDF bake -- the magic mismatch forces a full re-bake instead.
 // ---------------------------------------------------------------------------
 
-static constexpr char kCacheMagic[8] = {'O','D','A','I','F','N','T','3'};
+static constexpr char kCacheMagic[8] = {'O','D','A','I','F','N','T','4'};
 
 std::string Font::makeCachePath(const std::string& ttfPath, float pixelHeight,
                                 std::uint32_t atlasSize, std::uint32_t firstCodepoint,
-                                std::uint32_t lastCodepoint) {
+                                std::uint32_t lastCodepoint, bool sdf) {
     namespace fs = std::filesystem;
     const fs::path p(ttfPath);
-    // Encode parameters in the filename so different sizes use different cache files.
+    // Encode parameters in the filename so different sizes -- and coverage vs.
+    // SDF bakes of the same size -- use different cache files.
     // pixelHeight stored as integer×10 to avoid float formatting edge cases.
-    char suffix[64];
-    std::snprintf(suffix, sizeof(suffix), "_%dpx_%u_%u_%u.fontcache",
+    char suffix[72];
+    std::snprintf(suffix, sizeof(suffix), "_%dpx_%u_%u_%u%s.fontcache",
                   static_cast<int>(std::roundf(pixelHeight * 10.0f)),
-                  atlasSize, firstCodepoint, lastCodepoint);
+                  atlasSize, firstCodepoint, lastCodepoint, sdf ? "_sdf" : "");
     return (p.parent_path() / (p.stem().string() + suffix)).string();
 }
 
@@ -1100,6 +1294,9 @@ bool Font::saveCache(const std::string& cachePath, const std::string& ttfPath) c
     wPod(out, m_ascent);
     wPod(out, m_descent);
     wPod(out, m_lineHeight);
+    wPod(out, static_cast<std::uint8_t>(m_isSdf ? 1 : 0));
+    wPod(out, m_sdfDistScale);
+    wPod(out, m_sdfDistBias);
     wPod(out, m_atlasWidth);
     wPod(out, m_atlasHeight);
     out.write(reinterpret_cast<const char*>(m_atlas.data()),
@@ -1166,7 +1363,7 @@ bool Font::saveCache(const std::string& cachePath, const std::string& ttfPath) c
 
 bool Font::loadCache(const std::string& cachePath, const std::string& ttfPath,
                      float pixelHeight, std::uint32_t /*atlasSize*/,
-                     std::uint32_t /*firstCodepoint*/, std::uint32_t /*lastCodepoint*/) {
+                     std::uint32_t /*firstCodepoint*/, std::uint32_t /*lastCodepoint*/, bool sdf) {
     namespace fs = std::filesystem;
 
     std::ifstream in(cachePath, std::ios::binary);
@@ -1187,6 +1384,16 @@ bool Font::loadCache(const std::string& cachePath, const std::string& ttfPath,
         return false;
 
     if (!rPod(in, m_ascent) || !rPod(in, m_descent) || !rPod(in, m_lineHeight)) return false;
+
+    std::uint8_t storedIsSdf = 0;
+    if (!rPod(in, storedIsSdf) || !rPod(in, m_sdfDistScale) || !rPod(in, m_sdfDistBias))
+        return false;
+    m_isSdf = storedIsSdf != 0;
+    // Belt-and-suspenders: makeCachePath already keys the filename on `sdf`, but
+    // a mismatch here means this cache file cannot back the request being made
+    // (coverage atlas asked to serve as SDF or vice versa) -- reject and rebake
+    // rather than silently feeding the wrong atlas encoding to the renderer.
+    if (m_isSdf != sdf) return false;
 
     std::uint32_t aw = 0, ah = 0;
     if (!rPod(in, aw) || !rPod(in, ah)) return false;
