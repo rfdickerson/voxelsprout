@@ -57,6 +57,10 @@ public:
     odai::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void setStrategyMapMode(bool enabled);
+    // Opt-in UI-only rendering for showcase/tooling executables. Skips building the
+    // 3D scene pipelines (pipe/imported/sky-cloud/water/grass, SSAO, hex terrain)
+    // those tools cannot use. Must be called BEFORE init(); off by default.
+    void setMinimalRenderMode(bool enabled);
     void setGameplayUiState(const GameplayUiState& state);
     // Hand the renderer the UI geometry to draw over the scene this frame.
     void setUiDrawData(const odai::ui::UiDrawData& drawData);
@@ -91,6 +95,7 @@ public:
     [[nodiscard]] bool isVertexAoEnabled() const;
     void setSsaoEnabled(bool enabled);
     [[nodiscard]] bool isSsaoEnabled() const;
+    void setAmbientOcclusionTuning(float radius, float bias, float intensity);
     void setShadowSettings(const ShadowSettings& settings);
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;

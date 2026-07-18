@@ -17,6 +17,7 @@
 #include "math/math.h"
 #include "sim/network_procedural.h"
 #include "ui/icon_atlas.h"
+#include "ui/ui_cursor.h"
 #include "ui/vector/vector_icon_registry.h"
 #include "ui/widgets/button.h"
 #include "ui/widgets/donut_chart.h"
@@ -1194,10 +1195,11 @@ bool App::init() {
     m_cameraPrevious = m_camera;
 
     m_renderer.setStrategyMapMode(true);
-    // Strategy map is cursor-driven: show the OS cursor and stop mouselook so the
-    // player can click HUD elements.
+    // Strategy map is cursor-driven: hide the OS cursor (the custom-rendered one
+    // takes over, see updateUiOverlay) and stop mouselook so the player can click
+    // HUD elements.
     m_strategyMapMode = true;
-    glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    glfwSetInputMode(m_window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
     const auto rendererInitStart = Clock::now();
     if (!m_renderer.init(m_window, m_world.chunkGrid())) {
         VOX_LOGE("app") << "renderer init failed";
@@ -1468,8 +1470,8 @@ void App::pollInput() {
 
     const bool escapeKeyDown = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     if (escapeKeyDown && !m_wasEscapeKeyDown) {
-        if (m_mainMenuModal != nullptr) {
-            toggleMainMenu();
+        if (m_mainMenuOpen) {
+            closeMainMenu();
         } else {
             glfwSetWindowShouldClose(m_window, GLFW_TRUE);
         }
@@ -1602,7 +1604,7 @@ void App::pollInput() {
     }
     if (uiVisibilityChanged) {
         const bool showCursor = m_strategyMapMode || isAnyUiVisible();
-        glfwSetInputMode(m_window, GLFW_CURSOR, showCursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+        glfwSetInputMode(m_window, GLFW_CURSOR, showCursor ? GLFW_CURSOR_HIDDEN : GLFW_CURSOR_DISABLED);
         m_hasMouseSample = false;
     }
 
@@ -6177,6 +6179,13 @@ void App::updateUiOverlay(float dt) {
         m_uiDrawList.addRect(box, odai::ui::UiColor{0.85f, 0.62f, 0.30f, 0.75f}, 1.0f);
         odai::ui::drawRichText(m_uiDrawList, tip, fonts, odai::ui::UiVec2{boxX + padX, boxY + padY});
         m_uiDrawList.popOpacity();
+    }
+
+    // Custom cursor: drawn last so it renders above every widget/tooltip.
+    // Gated identically to the OS-cursor-visibility toggle below (never shown
+    // during mouselook, where the position is relative/meaningless).
+    if (m_strategyMapMode || isAnyUiVisible()) {
+        odai::ui::drawCursor(m_uiDrawList, m_uiInput.mousePx, m_uiScale);
     }
 
     m_renderer.setUiDrawData(m_uiDrawList.data());

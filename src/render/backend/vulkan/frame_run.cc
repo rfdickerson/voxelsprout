@@ -611,15 +611,32 @@ void RendererBackend::renderFrame(
         const float farHalfWidth = farHalfHeight * aspectRatio;
 
         // Camera-position-only cascades: only translation moves cascade centers; rotation does not.
-        const odai::math::Vector3 frustumCenter = eye;
+        odai::math::Vector3 frustumCenter = eye;
         float boundingRadius =
             std::sqrt((cascadeFar * cascadeFar) + (farHalfWidth * farHalfWidth) + (farHalfHeight * farHalfHeight));
-        boundingRadius = std::max(boundingRadius * 1.04f, 24.0f);
+        // Orthographic cameras have no perspective frustum to slice: the fov-derived
+        // radius above balloons toward farPlane, making shadow texels larger than
+        // entire scene objects (a 56-unit city under a 50000-unit farPlane gets
+        // ~2-world-unit texels — every building sub-texel, shadows unresolvable).
+        // Fit every cascade to the uploaded scene's bounding sphere instead; all
+        // cascades match, so chooseShadowCascade() may pick any of them safely.
+        const bool orthoSceneFit = camera.orthographic && m_importedSceneBoundsValid;
+        if (orthoSceneFit) {
+            frustumCenter = odai::math::Vector3{
+                m_importedSceneBoundsCenter[0],
+                m_importedSceneBoundsCenter[1],
+                m_importedSceneBoundsCenter[2]};
+            boundingRadius = m_importedSceneBoundsRadius * 1.05f;
+        }
+        boundingRadius = std::max(boundingRadius * 1.04f, orthoSceneFit ? 8.0f : 24.0f);
         boundingRadius = std::ceil(boundingRadius * 16.0f) / 16.0f;
         if (m_shadowStableCascadeRadii[cascadeIndex] <= 0.0f) {
             m_shadowStableCascadeRadii[cascadeIndex] = boundingRadius;
         }
-        const float cascadeRadius = m_shadowStableCascadeRadii[cascadeIndex];
+        // Scene-fitted ortho cascades bypass the stable-radius cache: the cache
+        // only invalidates on projection changes, not on scene re-uploads.
+        const float cascadeRadius =
+            orthoSceneFit ? boundingRadius : m_shadowStableCascadeRadii[cascadeIndex];
         const float orthoWidth = 2.0f * cascadeRadius;
         const float texelSize = orthoWidth / static_cast<float>(kShadowCascadeResolution[cascadeIndex]);
 

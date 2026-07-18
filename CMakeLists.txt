@@ -186,6 +186,7 @@ set(ODAI_WARN_FLAGS_MSVC
 add_library(odai_ui STATIC
     src/core/log.cc
     src/ui/ui_draw_list.cc
+    src/ui/ui_cursor.cc
     src/ui/font.cc
     src/ui/rich_text.cc
     src/ui/cached_rich_text.cc
@@ -666,7 +667,7 @@ if(ODAI_BUILD_APP)
             add_dependencies(odai_game_citybuilder slang_shaders)
         endif()
         if(MSVC)
-            target_compile_options(odai_game_citybuilder PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+            target_compile_options(odai_game_citybuilder PRIVATE ${ODAI_WARN_FLAGS_MSVC} /FS)
         else()
             target_compile_options(odai_game_citybuilder PRIVATE -Wall -Wextra -Wpedantic)
         endif()
@@ -713,6 +714,50 @@ if(ODAI_BUILD_APP)
             target_compile_options(odai_game_snake PRIVATE ${ODAI_WARN_FLAGS_MSVC})
         else()
             target_compile_options(odai_game_snake PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
+    # ---------------------------------------------------------------------------
+    # odai_game_minesweeper — Minesweeper (UI-only, Vulkan)
+    # ---------------------------------------------------------------------------
+        add_executable(odai_game_minesweeper
+            src/games/minesweeper/minesweeper_main.cc
+            src/games/minesweeper/minesweeper_app.cc
+            src/engine/game_app.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_game_minesweeper PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_game_minesweeper PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_game_minesweeper PRIVATE
+            odai_ui odai_ui_vulkan odai_audio
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_game_minesweeper PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_game_minesweeper PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_game_minesweeper slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_game_minesweeper PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_game_minesweeper PRIVATE -Wall -Wextra -Wpedantic)
         endif()
 
     # ---------------------------------------------------------------------------

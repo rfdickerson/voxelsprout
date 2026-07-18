@@ -524,6 +524,7 @@ void RetroDemoApp::onTick(float dt) {
 
     // Keyboard — switch themes, close any open menu on switch
     auto key = [&](int k){ return glfwGetKey(m_window, k) == GLFW_PRESS; };
+    if (key(GLFW_KEY_ESCAPE)) glfwSetWindowShouldClose(m_window, GLFW_TRUE);
     const bool k1 = key(GLFW_KEY_1), k2 = key(GLFW_KEY_2), k3 = key(GLFW_KEY_3),
                k4 = key(GLFW_KEY_4), k5 = key(GLFW_KEY_5);
     if (k1 && !m_prevKey1) { m_theme = Theme::Win95;      m_openMenu = -1; m_macWinPosInit = false; }

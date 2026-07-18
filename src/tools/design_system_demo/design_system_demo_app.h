@@ -42,6 +42,9 @@ protected:
     bool onInit() override;
     void onTick(float dt) override;
     void onRender(float dt) override;
+    // Pure UI showcase: no 3D scene, so skip the pipe/imported/sky-cloud/water/
+    // grass, SSAO, and hex-terrain pipelines the renderer otherwise builds.
+    bool wantsMinimalRendering() const override { return true; }
 
 private:
     // One easing-curve lane in the Animation tab's gallery (same idea as

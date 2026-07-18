@@ -6,6 +6,9 @@
 #include "ui/widgets/spacer.h"
 #include "ui/widgets/stack_layout.h"
 
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -1153,6 +1156,10 @@ void DesignSystemDemoApp::updateFrameStats(float dt) {
 }
 
 void DesignSystemDemoApp::onTick(float dt) {
+    if (glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+        glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+    }
+
     updateFrameStats(dt);
     tickGallery(dt);
 

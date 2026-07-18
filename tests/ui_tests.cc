@@ -15,6 +15,7 @@
 #include "ui/icon_atlas.h"
 #include "ui/rich_text.h"
 #include "ui/ui_context.h"
+#include "ui/ui_cursor.h"
 #include "ui/ui_draw_list.h"
 #include "ui/ui_input.h"
 #include "ui/ui_types.h"
@@ -1322,6 +1323,39 @@ void testProgressBarDraw() {
     expectTrue(!dl.data().vertices.empty(), "ProgressBar emits geometry");
 }
 
+void testCursorDraw() {
+    using namespace odai::ui;
+
+    UiDrawList dl;
+    dl.reset(UiVec2{800.0f, 600.0f});
+    const UiVec2 hotspot{100.0f, 120.0f};
+    drawCursor(dl, hotspot, 1.0f);
+
+    const UiDrawData& d = dl.data();
+    expectTrue(!d.vertices.empty(), "drawCursor emits geometry");
+    expectTrue(!d.commands.empty(), "drawCursor emits draw commands");
+
+    // Every vertex should land within a small box around the hotspot (the
+    // arrow glyph is ~11x19 local units at scale=1.0) -- catches gross
+    // mistakes like drawing at the origin instead of at posPx.
+    float minX = d.vertices[0].posPx[0], maxX = minX;
+    float minY = d.vertices[0].posPx[1], maxY = minY;
+    for (const UiVertex& v : d.vertices) {
+        minX = std::min(minX, v.posPx[0]);
+        maxX = std::max(maxX, v.posPx[0]);
+        minY = std::min(minY, v.posPx[1]);
+        maxY = std::max(maxY, v.posPx[1]);
+    }
+    expectTrue(minX >= hotspot.x - 4.0f && maxX <= hotspot.x + 20.0f,
+               "drawCursor geometry stays within expected X range of the hotspot");
+    expectTrue(minY >= hotspot.y - 4.0f && maxY <= hotspot.y + 25.0f,
+               "drawCursor geometry stays within expected Y range of the hotspot");
+    // The hotspot corner itself should be part of the emitted geometry (tip of
+    // the arrow, allowing for the AA stroke fringe around it).
+    expectNear(minX, hotspot.x, 3.0f, "drawCursor's tip sits at the hotspot X");
+    expectNear(minY, hotspot.y, 3.0f, "drawCursor's tip sits at the hotspot Y");
+}
+
 void testVectorPrimitives() {
     using namespace odai::ui;
     constexpr auto kRoundRect = static_cast<std::uint32_t>(UiDrawMode::RoundRect);
@@ -2156,6 +2190,7 @@ int main() {
     testScrollViewLayout();
     testRepeaterLayout();
     testProgressBarDraw();
+    testCursorDraw();
     testVectorPrimitives();
     testBevelDraw();
     testButtonHoverGlow();

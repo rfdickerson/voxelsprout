@@ -2,6 +2,9 @@
 
 #include "ui/widgets/button.h"
 
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -290,6 +293,10 @@ void TweenDemoApp::updateFrameStats(float dt) {
 }
 
 void TweenDemoApp::onTick(float dt) {
+    if (glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+        glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+    }
+
     updateFrameStats(dt);
     tickGallery(dt);
 

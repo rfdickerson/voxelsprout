@@ -1,5 +1,6 @@
 #include "games/citybuilder/citybuilder_app.h"
 
+#include "math/math.h"
 #include "ui/font.h"
 
 #define GLFW_INCLUDE_NONE
@@ -9,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -18,12 +20,14 @@ using ui::UiColor;
 using ui::UiRect;
 using ui::UiVec2;
 using ui::UiMouseButton;
+using odai::importer::ImportedScene;
+using odai::importer::ImportedScenePackedDraw;
+using odai::importer::ImportedScenePackedVertex;
+using odai::math::Vector3;
 
 namespace {
 
 // ── Palette (clean-modern flat HUD direction) ────────────────────────────────
-constexpr UiColor kAppBg     = UiColor::fromRgbHex(0x0E1217);
-constexpr UiColor kVoid      = UiColor::fromRgbHex(0x0B0F14);
 constexpr UiColor kGrass     = UiColor::fromRgbHex(0x5E8C3E);
 constexpr UiColor kGrassAlt  = UiColor::fromRgbHex(0x547E37);
 constexpr UiColor kWater     = UiColor::fromRgbHex(0x2D5C8C);
@@ -50,6 +54,11 @@ constexpr float kMonthInterval = 0.55f;  // real seconds per simulated month at 
 constexpr float kDevEps        = 0.06f;
 constexpr int   kHistMax       = 180;
 
+// Fixed isometric camera tilt (yaw rotates in 90 deg steps via Q/E).
+constexpr float kCamPitchDeg = -52.0f;
+constexpr float kCamMinZoom  = 6.0f;
+constexpr float kCamMaxZoom  = 70.0f;
+
 struct ToolMeta {
     const char* tag;
     const char* name;
@@ -60,18 +69,106 @@ struct ToolMeta {
 
 // Indexed by CityBuilderApp::Tool, in declaration order.
 const ToolMeta kTools[] = {
-    {"DEMO", "Bulldoze",    "X", 4.0,    kBad},
-    {"R",    "Residential", "1", 25.0,   kZoneR},
-    {"C",    "Commercial",  "2", 25.0,   kZoneC},
-    {"I",    "Industrial",  "3", 25.0,   kZoneI},
-    {"ROAD", "Road",        "R", 12.0,   UiColor::fromRgbHex(0x6B7079)},
-    {"POL",  "Police",      "4", 500.0,  UiColor::fromRgbHex(0x2F6BD6)},
-    {"FIRE", "Fire Dept",   "5", 500.0,  UiColor::fromRgbHex(0xC0392B)},
-    {"CLN",  "Clinic",      "6", 450.0,  UiColor::fromRgbHex(0x21A89A)},
-    {"SCH",  "School",      "7", 650.0,  UiColor::fromRgbHex(0xE0852E)},
-    {"PRK",  "Park",        "8", 120.0,  UiColor::fromRgbHex(0x35863A)},
-    {"PWR",  "Power Plant", "9", 1200.0, UiColor::fromRgbHex(0xC9A227)},
+    {"DEMO", "Bulldoze",     "X", 4.0,    kBad},
+    {"R",    "Residential",  "1", 25.0,   kZoneR},
+    {"C",    "Commercial",   "2", 25.0,   kZoneC},
+    {"I",    "Industrial",   "3", 25.0,   kZoneI},
+    {"ROAD", "Road",         "R", 12.0,   UiColor::fromRgbHex(0x6B7079)},
+    {"POL",  "Police",       "4", 500.0,  UiColor::fromRgbHex(0x2F6BD6)},
+    {"FIRE", "Fire Dept",    "5", 500.0,  UiColor::fromRgbHex(0xC0392B)},
+    {"CLN",  "Clinic",       "6", 450.0,  UiColor::fromRgbHex(0x21A89A)},
+    {"SCH",  "School",       "7", 650.0,  UiColor::fromRgbHex(0xE0852E)},
+    {"PRK",  "Park",         "8", 120.0,  UiColor::fromRgbHex(0x35863A)},
+    {"LIB",  "Library",      "9", 550.0,  UiColor::fromRgbHex(0x8A5C3E)},
+    {"AMPH", "Amphitheater", "0", 800.0,  UiColor::fromRgbHex(0xB08CD6)},
+    {"PWR",  "Power Plant",  "-", 1200.0, UiColor::fromRgbHex(0xC9A227)},
 };
+
+// ── Building "character" flavor: deterministic per-tile hash so a parcel's
+// business name / neighbourhood class is stable across frames without needing
+// to store extra per-tile state — position + a per-table salt is enough.
+std::uint32_t tileHash(int c, int r, std::uint32_t salt) {
+    std::uint32_t h = static_cast<std::uint32_t>(c) * 374761393u ^
+                       static_cast<std::uint32_t>(r) * 668265263u ^ salt;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
+
+struct FlavorEntry {
+    const char* name;
+    UiColor     tint;
+};
+
+// Commercial parcels: a small, silly, memorable business per tile.
+constexpr FlavorEntry kCommercialFlavors[] = {
+    {"Lotus Yoga Studio",           UiColor::fromRgbHex(0xC9A6D6)},
+    {"Glazed & Confused Donuts",    UiColor::fromRgbHex(0xE8A6C4)},
+    {"Llama Laundry Cleaners",      UiColor::fromRgbHex(0xA6D6C9)},
+    {"Boo Crew Ghost Exterminators",UiColor::fromRgbHex(0x8E8CC4)},
+    {"Madame Zora's Fortunes",      UiColor::fromRgbHex(0x7A4FA0)},
+    {"Rusty Wrench Auto",           UiColor::fromRgbHex(0x9AA0A8)},
+    {"Pixel Palace Arcade",         UiColor::fromRgbHex(0x4FC4E0)},
+    {"Bark Ave Pet Spa",            UiColor::fromRgbHex(0xE0B24F)},
+    {"Slurp Noodle House",          UiColor::fromRgbHex(0xE0714F)},
+    {"Ink & Iron Tattoo",           UiColor::fromRgbHex(0x4A4A57)},
+    {"Corner Bookshop",             UiColor::fromRgbHex(0x8A5C3E)},
+    {"Sunrise Diner",               UiColor::fromRgbHex(0xE0C24A)},
+    {"The Daily Grind Coffee",      UiColor::fromRgbHex(0x6B4A32)},
+    {"Moonlight Lanes Bowling",     UiColor::fromRgbHex(0x4A5FE0)},
+    {"Thrift & Vintage",            UiColor::fromRgbHex(0xA0824F)},
+};
+constexpr int kNumCommercialFlavors = static_cast<int>(sizeof(kCommercialFlavors) / sizeof(kCommercialFlavors[0]));
+
+// Industrial parcels: less silly, but still varied instead of one flat block.
+constexpr FlavorEntry kIndustrialFlavors[] = {
+    {"Ironclad Steel Works",  UiColor::fromRgbHex(0x8A7A6B)},
+    {"Assembly Plant",        UiColor::fromRgbHex(0xA0A6AA)},
+    {"Freight Depot",         UiColor::fromRgbHex(0xB0862E)},
+    {"Cascade Chem Yard",     UiColor::fromRgbHex(0x7A9A5C)},
+    {"Timberline Lumber Mill",UiColor::fromRgbHex(0x9A6B3E)},
+};
+constexpr int kNumIndustrialFlavors = static_cast<int>(sizeof(kIndustrialFlavors) / sizeof(kIndustrialFlavors[0]));
+
+const FlavorEntry& pickFlavor(const FlavorEntry* table, int count, int c, int r, std::uint32_t salt) {
+    return table[tileHash(c, r, salt) % static_cast<std::uint32_t>(count)];
+}
+
+// Residential parcels don't get individual "shop names" — instead the whole
+// block reads as a class of neighbourhood, driven by the existing land-value
+// (desirability) field: poor land stays a trailer park / RV court even after
+// it develops, prime land becomes an estate. tier 0 = low, 1 = mid, 2 = high.
+int residentialTier(float desirability) {
+    return desirability < 0.35f ? 0 : (desirability < 0.65f ? 1 : 2);
+}
+
+const char* residentialFlavorName(int c, int r, float desirability) {
+    static const char* const kNames[3][3] = {
+        {"Trailer Park", "RV Court", "Mobile Homes"},
+        {"Suburbia", "Split-Level Homes", "Rowhouses"},
+        {"Uptown Estates", "Hillside Manors", "Luxury Condos"},
+    };
+    const int tier = residentialTier(desirability);
+    const int idx = static_cast<int>(tileHash(c, r, 0x51DE17u) % 3u);
+    return kNames[tier][idx];
+}
+
+UiColor residentialTierTint(float desirability) {
+    switch (residentialTier(desirability)) {
+        case 0:  return UiColor::fromRgbHex(0xA88A6B);  // rust / weathered siding
+        case 2:  return UiColor::fromRgbHex(0xE8DCC0);  // pale stone / stucco
+        default: return UiColor::fromRgbHex(0x6FCB7E);  // everyday suburban green-trim
+    }
+}
+
+// Trailer parks/RVs sit low and flat; upper-class homes stand taller on the
+// same develop-level footprint so the skyline itself signals wealth.
+float residentialHeightMul(float desirability) {
+    switch (residentialTier(desirability)) {
+        case 0:  return 0.55f;
+        case 2:  return 1.35f;
+        default: return 1.0f;
+    }
+}
 
 const char* kMonths[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
@@ -90,6 +187,8 @@ Building toolBuilding(Tool t) {
         case Tool::Clinic: return Building::Clinic;
         case Tool::School: return Building::School;
         case Tool::Park:   return Building::Park;
+        case Tool::Library: return Building::Library;
+        case Tool::Amphitheater: return Building::Amphitheater;
         case Tool::Power:  return Building::Power;
         default:           return Building::None;
     }
@@ -104,6 +203,8 @@ UiColor buildingRoof(Building b) {
         case Building::Clinic: return UiColor::fromRgbHex(0x21A89A);
         case Building::School: return UiColor::fromRgbHex(0xE0852E);
         case Building::Park:   return UiColor::fromRgbHex(0x35863A);
+        case Building::Library: return UiColor::fromRgbHex(0x8A5C3E);
+        case Building::Amphitheater: return UiColor::fromRgbHex(0xB08CD6);
         case Building::Power:  return UiColor::fromRgbHex(0xC9A227);
         default:               return kBtn;
     }
@@ -115,6 +216,8 @@ const char* buildingTag(Building b) {
         case Building::Fire:   return "FIRE";
         case Building::Clinic: return "CLN";
         case Building::School: return "SCH";
+        case Building::Library: return "LIB";
+        case Building::Amphitheater: return "AMPH";
         case Building::Power:  return "PWR";
         default:               return "";
     }
@@ -127,6 +230,88 @@ UiColor mix(const UiColor& a, const UiColor& b, float t) {
     return {lerpf(a.r, b.r, t), lerpf(a.g, b.g, t), lerpf(a.b, b.b, t), lerpf(a.a, b.a, t)};
 }
 UiColor withA(const UiColor& c, float a) { return {c.r, c.g, c.b, a}; }
+
+// Red → amber → green ramp for the land-value overlay (0 = poor, 1 = prime).
+UiColor heat(float d) {
+    const UiColor lo  = UiColor::fromRgbHex(0xD64B3E);
+    const UiColor mid = UiColor::fromRgbHex(0xE7C24A);
+    const UiColor hi  = UiColor::fromRgbHex(0x46C46B);
+    return d < 0.5f ? mix(lo, mid, d * 2.0f) : mix(mid, hi, (d - 0.5f) * 2.0f);
+}
+
+// World-unit roof height for each building's extruded box (see buildCityScene).
+float buildingHeight(Building b) {
+    switch (b) {
+        case Building::Police: return 1.5f;
+        case Building::Fire:   return 1.5f;
+        case Building::Clinic: return 1.6f;
+        case Building::School: return 1.8f;
+        case Building::Park:   return 0.12f;
+        case Building::Library: return 1.6f;
+        case Building::Amphitheater: return 0.35f;
+        case Building::Power:  return 2.6f;
+        default:                return 1.0f;
+    }
+}
+
+// Accumulates flat-shaded packed geometry into an ImportedScene — the same
+// "MeshBuilder" pattern strategy_map_mesh.cc uses to feed the renderer's
+// packed vertex-color path (textureIndex left at its 0xFFFFFFFF default, so
+// the imported-static shader uses per-vertex color instead of sampling).
+struct CityMeshBuilder {
+    ImportedScene& scene;
+    explicit CityMeshBuilder(ImportedScene& target) : scene(target) {}
+
+    std::uint32_t addVertex(const Vector3& p, const Vector3& n, const UiColor& c) {
+        ImportedScenePackedVertex v{};
+        v.position[0] = p.x; v.position[1] = p.y; v.position[2] = p.z;
+        v.normal[0] = n.x;   v.normal[1] = n.y;   v.normal[2] = n.z;
+        v.color[0] = c.r;    v.color[1] = c.g;    v.color[2] = c.b;
+        const auto index = static_cast<std::uint32_t>(scene.packedVertices.size());
+        scene.packedVertices.push_back(v);
+        scene.boundsMin[0] = std::min(scene.boundsMin[0], p.x);
+        scene.boundsMin[1] = std::min(scene.boundsMin[1], p.y);
+        scene.boundsMin[2] = std::min(scene.boundsMin[2], p.z);
+        scene.boundsMax[0] = std::max(scene.boundsMax[0], p.x);
+        scene.boundsMax[1] = std::max(scene.boundsMax[1], p.y);
+        scene.boundsMax[2] = std::max(scene.boundsMax[2], p.z);
+        return index;
+    }
+    void addTriangle(std::uint32_t a, std::uint32_t b, std::uint32_t c) {
+        scene.packedIndices.push_back(a);
+        scene.packedIndices.push_back(b);
+        scene.packedIndices.push_back(c);
+    }
+    void addFlatTriangle(const Vector3& a, const Vector3& b, const Vector3& c, const UiColor& color) {
+        const Vector3 n = odai::math::normalize(odai::math::cross(b - a, c - a));
+        addTriangle(addVertex(a, n, color), addVertex(b, n, color), addVertex(c, n, color));
+    }
+    // a-b-c-d must wind counter-clockwise when viewed from the face's outward
+    // side (this engine's view/projection is a conventional right-handed,
+    // Y-up, CCW-front setup — lookAt() is textbook right-handed and both
+    // perspective/orthographic projections negate Y to correct for Vulkan's
+    // flipped NDC, so no extra handedness quirk to account for here).
+    void addQuad(const Vector3& a, const Vector3& b, const Vector3& c, const Vector3& d, const UiColor& color) {
+        addFlatTriangle(a, d, c, color);
+        addFlatTriangle(a, c, b, color);
+    }
+};
+
+// Six-face box, corners wound counter-clockwise when viewed from outside
+// (mirrors the settlement/unit marker boxes in strategy_map_mesh.cc).
+void addBox(CityMeshBuilder& builder, float minX, float minZ, float maxX, float maxZ,
+            float minY, float maxY, const UiColor& color) {
+    const Vector3 corners[8] = {
+        {minX, minY, minZ}, {maxX, minY, minZ}, {maxX, minY, maxZ}, {minX, minY, maxZ},
+        {minX, maxY, minZ}, {maxX, maxY, minZ}, {maxX, maxY, maxZ}, {minX, maxY, maxZ},
+    };
+    builder.addQuad(corners[4], corners[5], corners[6], corners[7], color);  // top
+    builder.addQuad(corners[3], corners[2], corners[1], corners[0], color);  // bottom
+    builder.addQuad(corners[0], corners[1], corners[5], corners[4], color);  // -Z
+    builder.addQuad(corners[2], corners[3], corners[7], corners[6], color);  // +Z
+    builder.addQuad(corners[3], corners[0], corners[4], corners[7], color);  // -X
+    builder.addQuad(corners[1], corners[2], corners[6], corners[5], color);  // +X
+}
 
 std::string commaInt(long long v) {
     const bool neg = v < 0;
@@ -166,6 +351,28 @@ bool CityBuilderApp::onInit() {
     auto root = std::make_unique<ui::Widget>();
     root->mousePassthrough = true;
     m_uiContext.setRoot(std::move(root));
+
+    // Sunlight + shadow maps + AO carry the visual read here (there's no
+    // texture detail on these flat-shaded boxes to fall back on). Ray tracing
+    // is explicitly off — this scene doesn't need it, and building RT
+    // acceleration structures on every scene re-upload was the actual source
+    // of the stutter reported earlier, not shadows/AO themselves.
+    m_renderer.setSsaoEnabled(true);
+    m_renderer.setVertexAoEnabled(true);
+    m_renderer.setShadowSettings(render::ShadowSettings{render::ShadowMode::ShadowMaps});
+    // Pixar-Up-style lighting direction: a warm mid-morning sun (the physical
+    // sky model turns golden at lower elevations while the SH ambient stays
+    // sky-blue, giving the warm-key / cool-fill contrast that look leans on)
+    // at 38 deg elevation so buildings cast readable shadows ~1.3x their
+    // height, angled across the iso view rather than straight down it.
+    m_renderer.setSunAngles(50.0f, -38.0f);
+    // GameApp::init() always calls setStrategyMapMode(true), which tunes SSAO
+    // radius/bias for the hex strategy map's much larger, flatter scale
+    // (radius=7, bias=6). At this world's kTileWorldSize=1 with ~1-3 unit
+    // building heights, that bias is larger than any real depth step in the
+    // scene, so occlusion can never trigger. Re-tune for this scale: a
+    // ~1.5-tile radius reads as soft contact shading between buildings.
+    m_renderer.setAmbientOcclusionTuning(1.6f, 0.06f, 0.95f);
 
     generateTerrain();
     seedCity();
@@ -248,6 +455,7 @@ void CityBuilderApp::recomputeStats() {
     for (Tile& t : m_tiles) { t.powered = false; t.nearRoad = false; }
 
     m_numRoad = m_numPolice = m_numFire = m_numClinic = m_numSchool = m_numPark = m_numPower = 0;
+    m_numLibrary = m_numAmphitheater = 0;
     float residents = 0.0f, comJobs = 0.0f, indJobs = 0.0f;
 
     constexpr int kRoadReach   = 3;   // Chebyshev tiles a road services
@@ -270,6 +478,8 @@ void CityBuilderApp::recomputeStats() {
                     case Building::Clinic: ++m_numClinic; break;
                     case Building::School: ++m_numSchool; break;
                     case Building::Park:   ++m_numPark;   break;
+                    case Building::Library: ++m_numLibrary; break;
+                    case Building::Amphitheater: ++m_numAmphitheater; break;
                     case Building::Power:  ++m_numPower;  break;
                     default: break;
                 }
@@ -306,18 +516,87 @@ void CityBuilderApp::recomputeStats() {
     m_indDemand = clamp01(0.27f + (residents * 0.50f - indJobs) / 1300.0f);
 
     const float pop = std::max(residents, 1.0f);
-    const float eduTarget    = clamp01(m_numSchool * 700.0f / pop) * 100.0f;
+    const float eduTarget    = clamp01((m_numSchool * 700.0f + m_numLibrary * 380.0f) / pop) * 100.0f;
     const float healthTarget = clamp01(m_numClinic * 900.0f / pop) * 100.0f;
     const float safety       = clamp01((m_numPolice + m_numFire) * 650.0f / pop);
     const float parkCov      = clamp01(m_numPark * 450.0f / pop);
+    const float cultureCov   = clamp01(m_numAmphitheater * 600.0f / pop);
 
     m_education = lerpf(m_education, eduTarget, m_statEase);
     m_health    = lerpf(m_health, healthTarget, m_statEase);
 
     float happyTarget = 46.0f + 0.15f * m_education + 0.15f * m_health +
-                        20.0f * parkCov + 12.0f * safety + (m_powerCoverage - 1.0f) * 35.0f - 4.0f;
+                        20.0f * parkCov + 12.0f * safety + 14.0f * cultureCov +
+                        (m_powerCoverage - 1.0f) * 35.0f - 4.0f;
     happyTarget = std::clamp(happyTarget, 0.0f, 100.0f);
     m_happiness = lerpf(m_happiness, happyTarget, m_statEase);
+
+    computeDesirability();
+}
+
+// Per-tile land value: scatter "amenity" (nice) and "nuisance" (bad) influence
+// from things already modelled here — parks, service coverage and waterfront lift
+// desirability; power plants and developed industry drag it down. The growth step
+// reads this so WHERE you zone finally matters, and the overlay makes it readable.
+// This is the SimCity move: turn an invisible spatial pressure into a field the
+// player can see, reason about, and set their own goals against.
+void CityBuilderApp::computeDesirability() {
+    std::array<float, static_cast<std::size_t>(kGridW) * kGridH> amenity{};
+    std::array<float, static_cast<std::size_t>(kGridW) * kGridH> nuisance{};
+
+    auto splat = [&](std::array<float, static_cast<std::size_t>(kGridW) * kGridH>& field,
+                     int c, int r, int radius, float peak) {
+        for (int dr = -radius; dr <= radius; ++dr) {
+            for (int dc = -radius; dc <= radius; ++dc) {
+                if (!inBounds(c + dc, r + dr)) continue;
+                const float d = std::sqrt(static_cast<float>(dc * dc + dr * dr));
+                if (d > radius) continue;
+                const float w = 1.0f - d / static_cast<float>(radius);  // linear falloff
+                field[static_cast<std::size_t>(r + dr) * kGridW + (c + dc)] += peak * w;
+            }
+        }
+    };
+
+    // Scatter influence from every source into the two fields.
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            const Tile& t = tile(c, r);
+            if (t.terrain == Terrain::Water) splat(amenity, c, r, 3, 0.10f);  // scenic waterfront
+            if (t.bldgOrigin) {
+                switch (t.building) {
+                    case Building::Park:   splat(amenity, c, r, 5, 0.55f); break;
+                    case Building::Police: splat(amenity, c, r, 6, 0.28f); break;
+                    case Building::Fire:   splat(amenity, c, r, 6, 0.24f); break;
+                    case Building::Clinic: splat(amenity, c, r, 6, 0.24f); break;
+                    case Building::School: splat(amenity, c, r, 6, 0.30f); break;
+                    case Building::Library: splat(amenity, c, r, 5, 0.26f); break;
+                    case Building::Amphitheater: splat(amenity, c, r, 7, 0.50f); break;  // culture draw
+                    case Building::Power:  splat(nuisance, c, r, 5, 0.45f); break;  // dirty neighbour
+                    default: break;
+                }
+            }
+            if (t.zone == Zone::Industrial && t.develop > kDevEps) {
+                splat(nuisance, c, r, 4, 0.16f * t.develop);  // pollution / heavy traffic
+            }
+        }
+    }
+
+    // Fold the fields into a per-tile score. Homes and shops crave amenities and
+    // flee nuisances; industry mostly ignores scenery and tolerates its own kind,
+    // so its land value stays flatter (it just needs power + roads elsewhere).
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            Tile& t = tile(c, r);
+            const std::size_t i = static_cast<std::size_t>(r) * kGridW + c;
+            float score;
+            if (t.zone == Zone::Industrial) {
+                score = 0.55f + 0.25f * amenity[i] - 0.10f * nuisance[i];
+            } else {  // residential, commercial, and open land shown as res-potential
+                score = 0.42f + amenity[i] - 0.85f * nuisance[i];
+            }
+            t.desirability = clamp01(score);
+        }
+    }
 }
 
 void CityBuilderApp::pushHistory() {
@@ -344,7 +623,12 @@ void CityBuilderApp::stepMonth() {
                           : t.zone == Zone::Commercial ? m_comDemand
                                                        : m_indDemand;
         if (t.powered && t.nearRoad) {
-            const float target = dem * 3.0f;
+            // Citywide demand sets the ceiling; per-tile desirability decides how
+            // much of it each parcel actually captures. A 0.5 land value is neutral
+            // (multiplier 1.0), prime land overshoots (clamped to full build-out),
+            // and poor land stagnates even in a hot market.
+            const float desMul = 0.4f + 1.2f * t.desirability;
+            const float target = std::min(3.0f, dem * 3.0f * desMul);
             t.develop += (target - t.develop) * 0.16f;
         } else {
             t.develop += (0.0f - t.develop) * 0.10f;  // decay toward abandonment
@@ -360,12 +644,14 @@ void CityBuilderApp::stepMonth() {
     const double income = m_population * 0.10 + m_jobs * 0.07;
     const double upkeep = m_numRoad * 0.6 + m_numPolice * 45.0 + m_numFire * 45.0 +
                           m_numClinic * 38.0 + m_numSchool * 48.0 + m_numPark * 9.0 +
+                          m_numLibrary * 32.0 + m_numAmphitheater * 40.0 +
                           m_numPower * 75.0;
     m_lastNet = income - upkeep;
     m_money += m_lastNet;
 
     if (++m_month >= 12) { m_month = 0; ++m_year; }
     pushHistory();
+    m_growthDirty = true;  // develop levels changed; re-extrude on the next cooldown tick
 }
 
 bool CityBuilderApp::charge(double cost) {
@@ -399,14 +685,14 @@ void CityBuilderApp::applyTool(int c, int r) {
             if (t.terrain == Terrain::Water) { flash("Can't zone water"); break; }
             if (t.building != Building::None || t.road) { flash("Bulldoze first"); break; }
             if (t.zone == z) break;  // idempotent — no charge while dragging
-            if (charge(cost)) { t.zone = z; t.develop = 0.0f; }
+            if (charge(cost)) { t.zone = z; t.develop = 0.0f; m_sceneDirty = true; }
             break;
         }
         case Tool::Road:
             if (t.terrain == Terrain::Water) { flash("Can't pave water"); break; }
             if (t.building != Building::None) { flash("Bulldoze first"); break; }
             if (t.road) break;
-            if (charge(cost)) { t.road = true; t.zone = Zone::None; t.develop = 0.0f; }
+            if (charge(cost)) { t.road = true; t.zone = Zone::None; t.develop = 0.0f; m_sceneDirty = true; }
             break;
         default:
             placeBuilding(c, r, toolBuilding(m_tool));
@@ -415,6 +701,7 @@ void CityBuilderApp::applyTool(int c, int r) {
 }
 
 void CityBuilderApp::bulldoze(int c, int r) {
+    m_sceneDirty = true;
     Tile& t = tile(c, r);
     if (t.building != Building::None) {
         int oc = t.bOriginC >= 0 ? t.bOriginC : c;
@@ -457,10 +744,13 @@ bool CityBuilderApp::placeBuilding(int c, int r, Building b) {
         case Building::Clinic: cost = 450.0;  break;
         case Building::School: cost = 650.0;  break;
         case Building::Park:   cost = 120.0;  break;
+        case Building::Library: cost = 550.0; break;
+        case Building::Amphitheater: cost = 800.0; break;
         case Building::Power:  cost = 1200.0; break;
         default: break;
     }
     if (!charge(cost)) return false;
+    m_sceneDirty = true;
 
     for (int dy = 0; dy < fp; ++dy) {
         for (int dx = 0; dx < fp; ++dx) {
@@ -494,6 +784,7 @@ bool CityBuilderApp::edgeDown(int key) {
 void CityBuilderApp::onTick(float dt) {
     m_time += dt;
     if (m_flashTimer > 0.0f) m_flashTimer -= dt;
+    if (m_sceneRebuildCooldown > 0.0f) m_sceneRebuildCooldown -= dt;
 
     if (edgeDown(GLFW_KEY_X)) m_tool = Tool::Bulldoze;
     if (edgeDown(GLFW_KEY_1)) m_tool = Tool::ZoneR;
@@ -505,10 +796,17 @@ void CityBuilderApp::onTick(float dt) {
     if (edgeDown(GLFW_KEY_6)) m_tool = Tool::Clinic;
     if (edgeDown(GLFW_KEY_7)) m_tool = Tool::School;
     if (edgeDown(GLFW_KEY_8)) m_tool = Tool::Park;
-    if (edgeDown(GLFW_KEY_9)) m_tool = Tool::Power;
+    if (edgeDown(GLFW_KEY_9)) m_tool = Tool::Library;
+    if (edgeDown(GLFW_KEY_0)) m_tool = Tool::Amphitheater;
+    if (edgeDown(GLFW_KEY_MINUS)) m_tool = Tool::Power;
 
     if (edgeDown(GLFW_KEY_SPACE)) m_paused = !m_paused;
     if (edgeDown(GLFW_KEY_G)) m_reportsOpen = !m_reportsOpen;
+    if (edgeDown(GLFW_KEY_L)) { m_showLandValue = !m_showLandValue; m_sceneDirty = true; }
+
+    // Rotate the isometric view in 90 deg steps, SimCity/Cities-style.
+    if (edgeDown(GLFW_KEY_Q)) m_camYawDeg -= 90.0f;
+    if (edgeDown(GLFW_KEY_E)) m_camYawDeg += 90.0f;
 
     if (edgeDown(GLFW_KEY_ESCAPE)) {
         if (m_reportsOpen) m_reportsOpen = false;
@@ -540,7 +838,7 @@ CityBuilderApp::Layout CityBuilderApp::computeLayout() const {
     lo.palette = UiRect::fromXYWH(0.0f, topH, palW, lo.fh - topH);
     lo.map     = UiRect::fromXYWH(palW, topH, lo.fw - palW, lo.fh - topH);
 
-    const float ctlW = 452.0f * s, ctlH = 46.0f * s;
+    const float ctlW = 566.0f * s, ctlH = 46.0f * s;
     lo.controls = UiRect::fromXYWH(lo.map.minX + 14.0f * s, lo.fh - ctlH - 14.0f * s, ctlW, ctlH);
 
     const float mmS = 190.0f * s;
@@ -552,42 +850,58 @@ CityBuilderApp::Layout CityBuilderApp::computeLayout() const {
     return lo;
 }
 
-void CityBuilderApp::clampCamera(const UiRect& map) {
-    const float gw = kGridW * m_tilePx;
-    const float gh = kGridH * m_tilePx;
-    auto clampAxis = [](float cam, float vMin, float vMax, float gridLen) {
-        const float vLen = vMax - vMin;
-        if (gridLen <= vLen) return vMin + (vLen - gridLen) * 0.5f;  // smaller than view → centre
-        return std::clamp(cam, vMax - gridLen, vMin);
-    };
-    m_camX = clampAxis(m_camX, map.minX, map.maxX, gw);
-    m_camY = clampAxis(m_camY, map.minY, map.maxY, gh);
+void CityBuilderApp::clampCameraFocus() {
+    // Keep the look-at point roughly over the grid (plus a zoom-scaled margin)
+    // so panning/zooming can't lose the city entirely off-camera.
+    const float margin = m_camZoom * 0.5f;
+    const float loX = -margin, hiX = kGridW * kTileWorldSize + margin;
+    const float loZ = -margin, hiZ = kGridH * kTileWorldSize + margin;
+    m_camFocusX = std::clamp(m_camFocusX, loX, hiX);
+    m_camFocusZ = std::clamp(m_camFocusZ, loZ, hiZ);
 }
 
 void CityBuilderApp::handleCamera(const Layout& lo) {
-    const bool overMap = lo.map.contains(m_uiInput.mousePx) && !m_mouseOverUi;
+    const bool overWorld = !m_mouseOverUi;
+    m_camera = computeCameraPose();
 
-    if (overMap && m_uiInput.scrollDelta != 0.0f) {
-        const float oldT = m_tilePx;
-        const float nt = std::clamp(oldT * (1.0f + 0.12f * m_uiInput.scrollDelta),
-                                    11.0f * lo.s, 36.0f * lo.s);
-        if (nt != oldT) {
-            const UiVec2 m = m_uiInput.mousePx;
-            m_camX = m.x - (m.x - m_camX) * nt / oldT;
-            m_camY = m.y - (m.y - m_camY) * nt / oldT;
-            m_tilePx = nt;
+    // Zoom toward the cursor: keep whatever ground point is under the mouse
+    // fixed on screen as orthoHalfHeight changes.
+    if (overWorld && m_uiInput.scrollDelta != 0.0f) {
+        float oldGX = 0.0f, oldGZ = 0.0f;
+        const bool hadGround = screenToGroundXZ(m_uiInput.mousePx, lo, oldGX, oldGZ);
+        const float newZoom = std::clamp(m_camZoom * (1.0f - 0.12f * m_uiInput.scrollDelta),
+                                         kCamMinZoom, kCamMaxZoom);
+        if (newZoom != m_camZoom) {
+            m_camZoom = newZoom;
+            m_camera = computeCameraPose();
+            float newGX = 0.0f, newGZ = 0.0f;
+            if (hadGround && screenToGroundXZ(m_uiInput.mousePx, lo, newGX, newGZ)) {
+                m_camFocusX += (oldGX - newGX);
+                m_camFocusZ += (oldGZ - newGZ);
+                m_camera = computeCameraPose();
+            }
         }
     }
 
-    if (overMap && m_uiInput.button(UiMouseButton::Right).down) {
-        m_camX += m_uiInput.mouseDeltaPx.x;
-        m_camY += m_uiInput.mouseDeltaPx.y;
+    // Right-drag pan: whatever ground point was under the cursor last frame
+    // tracks the cursor this frame (robust under any yaw/pitch/zoom).
+    if (overWorld && m_uiInput.button(UiMouseButton::Right).down) {
+        const UiVec2 newPos = m_uiInput.mousePx;
+        const UiVec2 oldPos{newPos.x - m_uiInput.mouseDeltaPx.x, newPos.y - m_uiInput.mouseDeltaPx.y};
+        float oldGX = 0.0f, oldGZ = 0.0f, newGX = 0.0f, newGZ = 0.0f;
+        if (screenToGroundXZ(oldPos, lo, oldGX, oldGZ) && screenToGroundXZ(newPos, lo, newGX, newGZ)) {
+            m_camFocusX -= (newGX - oldGX);
+            m_camFocusZ -= (newGZ - oldGZ);
+            m_camera = computeCameraPose();
+        }
     }
-    clampCamera(lo.map);
+
+    clampCameraFocus();
+    m_camera = computeCameraPose();
 }
 
-void CityBuilderApp::handleMapPaint(const Layout& lo) {
-    if (m_mouseOverUi || !lo.map.contains(m_uiInput.mousePx) || m_hoverC < 0) return;
+void CityBuilderApp::handleMapPaint(const Layout& /*lo*/) {
+    if (m_mouseOverUi || m_hoverC < 0) return;
     if (isPaintTool(m_tool)) {
         if (m_uiInput.button(UiMouseButton::Left).down) applyTool(m_hoverC, m_hoverR);
     } else {
@@ -606,21 +920,11 @@ void CityBuilderApp::onRender(float /*dt*/) {
     const Layout lo = computeLayout();
 
     if (!m_camInit) {
-        // Cover the viewport (the larger ratio) so the square grid fills the wide
-        // map area instead of letterboxing; the camera clamps/pans from there.
-        m_tilePx = std::clamp(std::max(lo.map.width() / kGridW, lo.map.height() / kGridH),
-                              14.0f * lo.s, 40.0f * lo.s);
-        m_camX = lo.map.minX + (lo.map.width() - kGridW * m_tilePx) * 0.5f;
-        m_camY = lo.map.minY + (lo.map.height() - kGridH * m_tilePx) * 0.5f;
+        m_camFocusX = kGridW * kTileWorldSize * 0.5f;
+        m_camFocusZ = kGridH * kTileWorldSize * 0.5f;
+        m_camZoom   = kGridW * kTileWorldSize * 0.95f;  // conservative: fits the whole grid
+        m_camYawDeg = 45.0f;                             // classic diagonal city-builder view
         m_camInit = true;
-    }
-
-    // Hover tile.
-    m_hoverC = m_hoverR = -1;
-    if (lo.map.contains(m_uiInput.mousePx)) {
-        const int c = static_cast<int>(std::floor((m_uiInput.mousePx.x - m_camX) / m_tilePx));
-        const int r = static_cast<int>(std::floor((m_uiInput.mousePx.y - m_camY) / m_tilePx));
-        if (inBounds(c, r)) { m_hoverC = c; m_hoverR = r; }
     }
 
     m_mouseOverUi = lo.topBar.contains(m_uiInput.mousePx) ||
@@ -630,78 +934,126 @@ void CityBuilderApp::onRender(float /*dt*/) {
                     (m_reportsOpen && lo.reports.contains(m_uiInput.mousePx));
 
     handleCamera(lo);
+
+    // Hover tile: cast the mouse pixel onto the ground plane (y=0) and floor
+    // into grid coordinates — the 3-D analogue of the old pixel/tilePx divide.
+    m_hoverC = m_hoverR = -1;
+    if (!m_mouseOverUi) {
+        float gx = 0.0f, gz = 0.0f;
+        if (screenToGroundXZ(m_uiInput.mousePx, lo, gx, gz)) {
+            const int c = static_cast<int>(std::floor(gx / kTileWorldSize));
+            const int r = static_cast<int>(std::floor(gz / kTileWorldSize));
+            if (inBounds(c, r)) { m_hoverC = c; m_hoverR = r; }
+        }
+    }
+
     handleMapPaint(lo);
 
+    // Growth-driven rebuilds are cadence-limited (see m_sceneRebuildCooldown);
+    // player edits set m_sceneDirty directly and skip the wait.
+    if (m_growthDirty && m_sceneRebuildCooldown <= 0.0f) {
+        m_sceneDirty = true;
+        m_growthDirty = false;
+        m_sceneRebuildCooldown = 1.2f;
+    }
+
+    // The 3-D scene is a GPU buffer upload, not a per-frame draw call: only
+    // rebuild it when a tile actually changed (see the m_sceneDirty sites).
+    if (m_sceneDirty) {
+        m_renderer.uploadImportedScene(buildCityScene());
+        m_sceneDirty = false;
+    }
+
     beginFrameDraw();
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(0, 0, lo.fw, lo.fh), kAppBg);
-    drawMap(lo);
     drawTopBar(lo);
     drawPalette(lo);
     drawControls(lo);
     drawMinimap(lo);
     if (m_reportsOpen) drawReports(lo);
+    drawWorldOverlay(lo);
     drawFlash(lo);
 
     submitFrame(m_camera);
 }
 
-void CityBuilderApp::drawMap(const Layout& lo) {
-    const float tp = m_tilePx;
-    const float s = lo.s;
-    m_uiDrawList.pushClip(lo.map);
-    m_uiDrawList.addRectFilled(lo.map, kVoid);
+ImportedScene CityBuilderApp::buildCityScene() const {
+    ImportedScene scene{};
+    scene.sourceTag = "citybuilder";
+    scene.boundsMin[0] = scene.boundsMin[1] = scene.boundsMin[2] = std::numeric_limits<float>::max();
+    scene.boundsMax[0] = scene.boundsMax[1] = scene.boundsMax[2] = std::numeric_limits<float>::lowest();
+    CityMeshBuilder builder(scene);
+    const float ts = kTileWorldSize;
 
-    const int c0 = std::max(0, static_cast<int>(std::floor((lo.map.minX - m_camX) / tp)));
-    const int c1 = std::min(kGridW - 1, static_cast<int>(std::floor((lo.map.maxX - m_camX) / tp)));
-    const int r0 = std::max(0, static_cast<int>(std::floor((lo.map.minY - m_camY) / tp)));
-    const int r1 = std::min(kGridH - 1, static_cast<int>(std::floor((lo.map.maxY - m_camY) / tp)));
-
-    for (int r = r0; r <= r1; ++r) {
-        for (int c = c0; c <= c1; ++c) {
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
             const Tile& t = tile(c, r);
-            const float x = m_camX + c * tp;
-            const float y = m_camY + r * tp;
-            const UiRect cell = UiRect::fromXYWH(x, y, tp, tp);
-            const bool checker = ((c + r) & 1) != 0;
+            const float x0 = c * ts, z0 = r * ts, x1 = x0 + ts, z1 = z0 + ts;
 
             if (t.terrain == Terrain::Water) {
-                m_uiDrawList.addRectFilled(cell, checker ? kWater : kWaterAlt);
+                const UiColor wc = ((c + r) & 1) ? kWater : kWaterAlt;
+                builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1}, wc);
                 continue;
             }
-            m_uiDrawList.addRectFilled(cell, checker ? kGrass : kGrassAlt);
+
+            // Ground: land-value heat map when toggled, otherwise grass tinted
+            // by the baked scenicPhase jitter so a block reads as organic.
+            if (m_showLandValue) {
+                builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1},
+                                heat(t.desirability));
+            } else {
+                builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1},
+                                mix(kGrassAlt, kGrass, t.scenicPhase));
+            }
 
             if (t.road) {
-                const UiRect rd = UiRect::fromXYWH(x + tp * 0.06f, y + tp * 0.06f,
-                                                   tp * 0.88f, tp * 0.88f);
-                m_uiDrawList.addRectFilled(rd, kRoad);
-                m_uiDrawList.addRectFilled(
-                    UiRect::fromXYWH(x + tp * 0.46f, y + tp * 0.2f, tp * 0.08f, tp * 0.6f),
-                    withA(kRoadLine, 0.5f));
+                const float pad = ts * 0.06f;
+                builder.addQuad({x0 + pad, 0.02f, z0 + pad}, {x1 - pad, 0.02f, z0 + pad},
+                                {x1 - pad, 0.02f, z1 - pad}, {x0 + pad, 0.02f, z1 - pad}, kRoad);
+
+                // Centre-line strip toward each connected neighbour: straight runs
+                // read as a continuous line, turns/junctions as a cross, and a lone
+                // paved tile as a stub dot.
+                const bool nN = inBounds(c, r - 1) && tile(c, r - 1).road;
+                const bool nS = inBounds(c, r + 1) && tile(c, r + 1).road;
+                const bool nW = inBounds(c - 1, r) && tile(c - 1, r).road;
+                const bool nE = inBounds(c + 1, r) && tile(c + 1, r).road;
+                const float lw = ts * 0.08f, ly = 0.03f;
+                const float cx = (x0 + x1) * 0.5f, cz = (z0 + z1) * 0.5f;
+                if (nN || nS) {
+                    const float zTop = nN ? z0 : cz - lw * 0.5f;
+                    const float zBot = nS ? z1 : cz + lw * 0.5f;
+                    builder.addQuad({cx - lw * 0.5f, ly, zTop}, {cx + lw * 0.5f, ly, zTop},
+                                    {cx + lw * 0.5f, ly, zBot}, {cx - lw * 0.5f, ly, zBot}, kRoadLine);
+                }
+                if (nW || nE) {
+                    const float xL = nW ? x0 : cx - lw * 0.5f;
+                    const float xR = nE ? x1 : cx + lw * 0.5f;
+                    builder.addQuad({xL, ly, cz - lw * 0.5f}, {xR, ly, cz - lw * 0.5f},
+                                    {xR, ly, cz + lw * 0.5f}, {xL, ly, cz + lw * 0.5f}, kRoadLine);
+                }
+                if (!nN && !nS && !nW && !nE) {
+                    builder.addQuad({cx - lw * 0.5f, ly, cz - lw * 0.5f}, {cx + lw * 0.5f, ly, cz - lw * 0.5f},
+                                    {cx + lw * 0.5f, ly, cz + lw * 0.5f}, {cx - lw * 0.5f, ly, cz + lw * 0.5f},
+                                    kRoadLine);
+                }
                 continue;
             }
 
             if (t.building != Building::None) {
                 if (!t.bldgOrigin) continue;  // drawn by the origin cell
                 const int fp = std::max<int>(1, t.footprint);
-                const UiRect br = UiRect::fromXYWH(x, y, tp * fp, tp * fp);
-                const float pad = tp * 0.12f;
-                const UiRect roof = UiRect{br.minX + pad, br.minY + pad, br.maxX - pad, br.maxY - pad};
-                const UiColor roofCol = buildingRoof(t.building);
-                m_uiDrawList.addRoundRectFilled(roof, mix(roofCol, UiColor(0, 0, 0, 1), 0.15f),
-                                                3.0f * s);
+                const float bx1 = x0 + fp * ts, bz1 = z0 + fp * ts;
+                const float pad = ts * 0.10f;
+                const float height = buildingHeight(t.building);
+                const UiColor roofCol = mix(buildingRoof(t.building), UiColor(0, 0, 0, 1), 0.12f);
+                addBox(builder, x0 + pad, z0 + pad, bx1 - pad, bz1 - pad, 0.0f, height, roofCol);
                 if (t.building == Building::Park) {
+                    // A few little tree blobs so the lone-tile park doesn't read as a slab.
                     for (int i = 0; i < 4; ++i) {
-                        const float px = roof.minX + roof.width() * (0.28f + 0.45f * (i & 1));
-                        const float py = roof.minY + roof.height() * (0.28f + 0.45f * (i >> 1));
-                        m_uiDrawList.addCircleFilled({px, py}, tp * 0.12f,
-                                                     UiColor::fromRgbHex(0x2A6F2E));
-                    }
-                } else {
-                    m_uiDrawList.addRoundRect(roof, withA(UiColor(1, 1, 1, 1), 0.18f), 3.0f * s, s);
-                    if (tp * fp > 26.0f * s) {
-                        textCenter(m_uiFontBold, buildingTag(t.building),
-                                   (roof.minX + roof.maxX) * 0.5f, (roof.minY + roof.maxY) * 0.5f,
-                                   kText);
+                        const float px = x0 + (0.28f + 0.45f * (i & 1)) * (bx1 - x0);
+                        const float pz = z0 + (0.28f + 0.45f * (i >> 1)) * (bz1 - z0);
+                        addBox(builder, px - ts * 0.12f, pz - ts * 0.12f, px + ts * 0.12f, pz + ts * 0.12f,
+                              height, height + ts * 0.35f, UiColor::fromRgbHex(0x2A6F2E));
                     }
                 }
                 continue;
@@ -713,46 +1065,119 @@ void CityBuilderApp::drawMap(const Layout& lo) {
                                                                 : kZoneI;
                 if (t.develop > kDevEps) {
                     const float lvl = clamp01(t.develop / 3.0f);
-                    const float pad = tp * (0.18f - 0.08f * lvl);
-                    const UiRect b = UiRect{x + pad, y + pad, x + tp - pad, y + tp - pad};
-                    m_uiDrawList.addRoundRectFilled(b, mix(zc, UiColor(1, 1, 1, 1), 0.10f * lvl),
-                                                    2.0f * s);
-                    m_uiDrawList.addRoundRect(b, withA(UiColor(0, 0, 0, 1), 0.25f), 2.0f * s, s);
-                    if (!t.powered) {  // brown-out marker
-                        m_uiDrawList.addCircleFilled({x + tp * 0.5f, y + tp * 0.5f}, tp * 0.13f,
-                                                     withA(kBad, 0.9f));
+
+                    // Give the block "character": residential reads as a class of
+                    // neighbourhood (trailer park -> suburbia -> estates, driven by
+                    // land value), commercial/industrial each get a distinct little
+                    // business per tile — same growth-level math, different skin.
+                    float heightMul = 1.0f;
+                    UiColor flavorTint = zc;
+                    if (t.zone == Zone::Residential) {
+                        heightMul = residentialHeightMul(t.desirability);
+                        flavorTint = residentialTierTint(t.desirability);
+                    } else if (t.zone == Zone::Commercial) {
+                        flavorTint = pickFlavor(kCommercialFlavors, kNumCommercialFlavors, c, r, 0xC0FFEE1Cu).tint;
+                    } else {
+                        flavorTint = pickFlavor(kIndustrialFlavors, kNumIndustrialFlavors, c, r, 0x57EE1u).tint;
                     }
+
+                    const float pad = ts * (0.14f - 0.05f * lvl);
+                    const float height = (0.25f + lvl * 2.0f) * heightMul;
+                    UiColor col = mix(mix(zc, flavorTint, 0.55f), UiColor(1, 1, 1, 1), 0.10f * lvl);
+                    if (!t.powered) col = mix(col, kBad, 0.5f);  // brown-out tint
+                    addBox(builder, x0 + pad, z0 + pad, x1 - pad, z1 - pad, 0.0f, height, col);
                 } else {
-                    // Zoned but undeveloped: translucent tint + dashed border.
-                    m_uiDrawList.addRectFilled(UiRect::fromXYWH(x + 1, y + 1, tp - 2, tp - 2),
-                                               withA(zc, 0.22f));
-                    m_uiDrawList.addRoundRect(UiRect::fromXYWH(x + tp * 0.16f, y + tp * 0.16f,
-                                                               tp * 0.68f, tp * 0.68f),
-                                              withA(zc, 0.7f), 1.0f, std::max(1.0f, s));
+                    // Zoned but undeveloped: a faint tinted marker flush with the ground.
+                    const UiColor tint = mix(mix(kGrassAlt, kGrass, t.scenicPhase), zc, 0.35f);
+                    const float pad = ts * 0.08f;
+                    builder.addQuad({x0 + pad, 0.015f, z0 + pad}, {x1 - pad, 0.015f, z0 + pad},
+                                    {x1 - pad, 0.015f, z1 - pad}, {x0 + pad, 0.015f, z1 - pad}, tint);
                 }
             }
         }
     }
 
-    // Grid lines when zoomed in.
-    if (tp > 15.0f * s) {
-        const UiColor gl = withA(UiColor(0, 0, 0, 1), 0.10f);
-        for (int c = c0; c <= c1 + 1; ++c) {
-            const float x = m_camX + c * tp;
-            m_uiDrawList.addRectFilled(UiRect{x, lo.map.minY, x + 1.0f, lo.map.maxY}, gl);
-        }
-        for (int r = r0; r <= r1 + 1; ++r) {
-            const float y = m_camY + r * tp;
-            m_uiDrawList.addRectFilled(UiRect{lo.map.minX, y, lo.map.maxX, y + 1.0f}, gl);
-        }
+    if (!scene.packedIndices.empty()) {
+        scene.packedDraws.push_back(
+            ImportedScenePackedDraw{0, static_cast<std::uint32_t>(scene.packedIndices.size())});
     }
+    return scene;
+}
 
-    // Hover footprint preview.
+render::CameraPose CityBuilderApp::computeCameraPose() const {
+    render::CameraPose cam{};
+    cam.orthographic = true;
+    cam.orthoHalfHeight = m_camZoom;
+    cam.yawDegrees = m_camYawDeg;
+    cam.pitchDegrees = kCamPitchDeg;
+    cam.fovDegrees = 50.0f;  // unused in orthographic mode, kept sane regardless
+
+    const float yawR = odai::math::radians(cam.yawDegrees);
+    const float pitchR = odai::math::radians(cam.pitchDegrees);
+    const float cp = std::cos(pitchR);
+    const Vector3 fwd{std::cos(yawR) * cp, std::sin(pitchR), std::sin(yawR) * cp};
+    const float distance = m_camZoom * 2.5f + 40.0f;  // orthographic: exact value doesn't affect scale
+    cam.x = m_camFocusX - fwd.x * distance;
+    cam.y = -fwd.y * distance;  // focus point sits on the y=0 ground plane
+    cam.z = m_camFocusZ - fwd.z * distance;
+    return cam;
+}
+
+bool CityBuilderApp::screenToGroundXZ(UiVec2 screenPx, const Layout& lo, float& outX, float& outZ) const {
+    if (lo.fw <= 0.0f || lo.fh <= 0.0f) return false;
+    const float yaw = odai::math::radians(m_camera.yawDegrees);
+    const float pitch = odai::math::radians(m_camera.pitchDegrees);
+    const float cp = std::cos(pitch), sp = std::sin(pitch);
+    const float cy = std::cos(yaw), sy = std::sin(yaw);
+    const float fwdX = cy * cp, fwdY = sp, fwdZ = sy * cp;
+    const float rgtX = -sy, rgtZ = cy;                     // rgtY is always 0
+    const float upX = -cy * sp, upY = cp, upZ = -sy * sp;
+    if (std::abs(fwdY) < 1e-4f) return false;
+
+    const float ndcX = screenPx.x / lo.fw * 2.0f - 1.0f;
+    const float ndcY = 1.0f - screenPx.y / lo.fh * 2.0f;
+    const float aspect = lo.fw / lo.fh;
+    const float halfH = m_camera.orthoHalfHeight;
+    const float halfW = halfH * aspect;
+
+    const float roX = m_camera.x + rgtX * ndcX * halfW + upX * ndcY * halfH;
+    const float roY = m_camera.y + upY * ndcY * halfH;
+    const float roZ = m_camera.z + rgtZ * ndcX * halfW + upZ * ndcY * halfH;
+    const float t = -roY / fwdY;
+    if (t < 0.0f) return false;
+    outX = roX + t * fwdX;
+    outZ = roZ + t * fwdZ;
+    return true;
+}
+
+UiVec2 CityBuilderApp::worldToScreen(float wx, float wy, float wz, const Layout& lo) const {
+    const float yaw = odai::math::radians(m_camera.yawDegrees);
+    const float pitch = odai::math::radians(m_camera.pitchDegrees);
+    const float cp = std::cos(pitch), sp = std::sin(pitch);
+    const float cy = std::cos(yaw), sy = std::sin(yaw);
+    const float rgtX = -sy, rgtZ = cy;                     // rgtY is always 0
+    const float upX = -cy * sp, upY = cp, upZ = -sy * sp;
+
+    const float dx = wx - m_camera.x, dy = wy - m_camera.y, dz = wz - m_camera.z;
+    const float camX = dx * rgtX + dz * rgtZ;
+    const float camY = dx * upX + dy * upY + dz * upZ;
+
+    const float aspect = lo.fw / lo.fh;
+    const float halfH = m_camera.orthoHalfHeight;
+    const float halfW = halfH * aspect;
+    const float ndcX = halfW > 0.0f ? camX / halfW : 0.0f;
+    const float ndcY = halfH > 0.0f ? camY / halfH : 0.0f;
+    return UiVec2{(ndcX * 0.5f + 0.5f) * lo.fw, (1.0f - (ndcY * 0.5f + 0.5f)) * lo.fh};
+}
+
+void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
+    const float s = lo.s;
+
+    // Hover footprint preview: project the ground-plane quad corners to screen
+    // and stroke them, since the tile is a parallelogram under the iso camera.
     if (!m_mouseOverUi && m_hoverC >= 0) {
         const Building b = toolBuilding(m_tool);
         const int fp = b != Building::None ? footprintOf(b) : 1;
-        const float x = m_camX + m_hoverC * tp;
-        const float y = m_camY + m_hoverR * tp;
         bool valid = true;
         for (int dy = 0; dy < fp && valid; ++dy)
             for (int dx = 0; dx < fp && valid; ++dx)
@@ -760,12 +1185,105 @@ void CityBuilderApp::drawMap(const Layout& lo) {
                         !(tile(m_hoverC + dx, m_hoverR + dy).terrain == Terrain::Water &&
                           m_tool != Tool::Bulldoze);
         const UiColor hc = valid ? kTools[static_cast<int>(m_tool)].color : kBad;
-        const UiRect hr = UiRect::fromXYWH(x, y, tp * fp, tp * fp);
-        m_uiDrawList.addRectFilled(hr, withA(hc, 0.22f));
-        m_uiDrawList.addRoundRect(hr, withA(hc, 0.95f), 2.0f * s, std::max(2.0f, 2.0f * s));
+        const float x0 = m_hoverC * kTileWorldSize, z0 = m_hoverR * kTileWorldSize;
+        const float x1 = x0 + fp * kTileWorldSize, z1 = z0 + fp * kTileWorldSize;
+        const UiVec2 poly[4] = {
+            worldToScreen(x0, 0.05f, z0, lo), worldToScreen(x1, 0.05f, z0, lo),
+            worldToScreen(x1, 0.05f, z1, lo), worldToScreen(x0, 0.05f, z1, lo),
+        };
+        m_uiDrawList.addPolylineAA(poly, 4, withA(hc, 0.95f), 2.5f * s, true);
     }
 
-    m_uiDrawList.popClip();
+    // Stalled-tile tooltip: name the one blocking cause so a parcel that refuses
+    // to grow reads as "no road access" instead of an unexplained dead lot. A
+    // parcel that isn't stalled instead names its character — the shop or
+    // neighbourhood class living on that tile — so hovering a built lot tells
+    // you what it actually is.
+    if (!m_mouseOverUi && m_hoverC >= 0) {
+        const Tile& ht = tile(m_hoverC, m_hoverR);
+        if (ht.zone != Zone::None) {
+            const char* cause = nullptr;
+            if (!ht.nearRoad) cause = "No road access";
+            else if (!ht.powered) cause = "No power";
+            else if (ht.develop < 2.4f) {
+                const float dem = ht.zone == Zone::Residential ? m_resDemand
+                                  : ht.zone == Zone::Commercial ? m_comDemand
+                                                                 : m_indDemand;
+                if (dem < 0.18f) cause = "Low demand";
+                else if (ht.desirability < 0.4f) cause = "Low land value";
+            }
+            std::string label;
+            UiColor labelColor = kBad;
+            if (cause) {
+                label = cause;
+            } else if (ht.develop > kDevEps) {
+                labelColor = kText;
+                if (ht.zone == Zone::Residential) {
+                    label = residentialFlavorName(m_hoverC, m_hoverR, ht.desirability);
+                } else if (ht.zone == Zone::Commercial) {
+                    label = pickFlavor(kCommercialFlavors, kNumCommercialFlavors,
+                                       m_hoverC, m_hoverR, 0xC0FFEE1Cu).name;
+                } else {
+                    label = pickFlavor(kIndustrialFlavors, kNumIndustrialFlavors,
+                                       m_hoverC, m_hoverR, 0x57EE1u).name;
+                }
+            }
+            if (!label.empty()) {
+                const UiVec2 mp = m_uiInput.mousePx;
+                const float tw = m_uiFont.measureText(label);
+                const UiRect tip = UiRect::fromXYWH(mp.x + 16.0f * s, mp.y + 16.0f * s,
+                                                    tw + 16.0f * s, 24.0f * s);
+                m_uiDrawList.addRoundRectFilled(tip, withA(UiColor::fromRgbHex(0x14181F), 0.92f),
+                                                5.0f * s);
+                m_uiDrawList.addRoundRect(tip, kEdge, 5.0f * s, s);
+                textCenter(m_uiFont, label, (tip.minX + tip.maxX) * 0.5f,
+                           (tip.minY + tip.maxY) * 0.5f, labelColor);
+            }
+        }
+    }
+
+    // Floating building tags, projected from each building's roof-top centre —
+    // the 3-D analogue of the scrim-backed tag drawn directly on the old 2-D roof.
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            const Tile& t = tile(c, r);
+            if (t.building == Building::None || !t.bldgOrigin) continue;
+            const char* tag = buildingTag(t.building);
+            if (!tag || !*tag) continue;
+            const int fp = std::max<int>(1, t.footprint);
+            const float cx = (c + fp * 0.5f) * kTileWorldSize;
+            const float cz = (r + fp * 0.5f) * kTileWorldSize;
+            const UiVec2 sp = worldToScreen(cx, buildingHeight(t.building) + 0.12f, cz, lo);
+            if (sp.x < 0.0f || sp.y < 0.0f || sp.x > lo.fw || sp.y > lo.fh) continue;
+            const float tw = m_uiFontBold.measureText(tag);
+            const float th = m_uiFontBold.lineHeightPx();
+            const UiRect scrim = UiRect::fromXYWH(sp.x - tw * 0.5f - 4.0f * s, sp.y - th * 0.5f - 2.0f * s,
+                                                  tw + 8.0f * s, th + 4.0f * s);
+            m_uiDrawList.addRoundRectFilled(scrim, withA(UiColor(0, 0, 0, 1), 0.45f), 3.0f * s);
+            textCenter(m_uiFontBold, tag, sp.x, sp.y, kText);
+        }
+    }
+
+    // Land-value legend: a red→green gradient key so the overlay reads at a glance.
+    if (m_showLandValue) {
+        const float lw = 168.0f * s, lh = 12.0f * s;
+        const float lx = lo.map.minX + 14.0f * s;
+        const float ly = lo.map.minY + 32.0f * s;
+        const UiRect chip = UiRect::fromXYWH(lx - 8.0f * s, ly - 24.0f * s, lw + 16.0f * s,
+                                             lh + 44.0f * s);
+        m_uiDrawList.addRoundRectFilled(chip, withA(kPanel, 0.92f), 7.0f * s);
+        m_uiDrawList.addRoundRect(chip, kEdge, 7.0f * s, s);
+        textLeft(m_uiFontBold, "Land Value", lx, ly - 12.0f * s, kText);
+        const int seg = 24;
+        for (int i = 0; i < seg; ++i) {
+            const float f0 = static_cast<float>(i) / seg;
+            m_uiDrawList.addRectFilled(
+                UiRect::fromXYWH(lx + f0 * lw, ly, lw / seg + 1.0f, lh), heat(f0));
+        }
+        m_uiDrawList.addRect(UiRect::fromXYWH(lx, ly, lw, lh), kEdge, s);
+        textLeft(m_uiFont, "poor", lx, ly + lh + 9.0f * s, kTextDim);
+        textRight(m_uiFont, "prime", lx + lw, ly + lh + 9.0f * s, kTextDim);
+    }
 }
 
 void CityBuilderApp::drawTopBar(const Layout& lo) {
@@ -889,6 +1407,8 @@ void CityBuilderApp::drawPalette(const Layout& lo) {
     toolRow(Tool::Clinic);
     toolRow(Tool::School);
     toolRow(Tool::Park);
+    toolRow(Tool::Library);
+    toolRow(Tool::Amphitheater);
     toolRow(Tool::Power);
 }
 
@@ -925,6 +1445,12 @@ void CityBuilderApp::drawControls(const Layout& lo) {
     const std::string date = std::string(kMonths[m_month]) + " Yr " + std::to_string(m_year);
     textLeft(m_uiFontBold, date, x, r.minY + r.height() * 0.5f, kText);
     x += 96.0f * s;
+
+    if (uiButton(UiRect::fromXYWH(r.maxX - 96.0f * s - 116.0f * s, by, 108.0f * s, bh),
+                 "Land Value", m_showLandValue, kAccent)) {
+        m_showLandValue = !m_showLandValue;
+        m_sceneDirty = true;
+    }
 
     if (uiButton(UiRect::fromXYWH(r.maxX - 96.0f * s, by, 88.0f * s, bh), "Reports",
                  m_reportsOpen, kGold)) {
@@ -969,23 +1495,33 @@ void CityBuilderApp::drawMinimap(const Layout& lo) {
         }
     }
 
-    // Camera viewport rectangle.
-    const float vx0 = ox + std::clamp((lo.map.minX - m_camX) / m_tilePx, 0.0f, float(kGridW)) * cell;
-    const float vy0 = oy + std::clamp((lo.map.minY - m_camY) / m_tilePx, 0.0f, float(kGridH)) * cell;
-    const float vx1 = ox + std::clamp((lo.map.maxX - m_camX) / m_tilePx, 0.0f, float(kGridW)) * cell;
-    const float vy1 = oy + std::clamp((lo.map.maxY - m_camY) / m_tilePx, 0.0f, float(kGridH)) * cell;
-    m_uiDrawList.addRect(UiRect{vx0, vy0, vx1, vy1}, withA(UiColor(1, 1, 1, 1), 0.85f),
-                         std::max(1.0f, 1.5f * s));
+    // Camera viewport: unproject the four screen corners onto the ground plane
+    // and draw the resulting quadrilateral — under the tilted iso camera it's
+    // a parallelogram, not an axis-aligned rect. Deliberately NOT clamped per
+    // corner to the grid range: the true view often extends past the map
+    // edges, and clamping each corner independently warps the shape into
+    // something that no longer matches the real frustum. The active clip
+    // rect (pushClip above) already crops the outline to the minimap panel.
+    const UiVec2 screenCorners[4] = {{0.0f, 0.0f}, {lo.fw, 0.0f}, {lo.fw, lo.fh}, {0.0f, lo.fh}};
+    UiVec2 viewCorners[4];
+    bool viewHit = true;
+    for (int i = 0; i < 4; ++i) {
+        float wx = 0.0f, wz = 0.0f;
+        viewHit = viewHit && screenToGroundXZ(screenCorners[i], lo, wx, wz);
+        viewCorners[i] = {ox + (wx / kTileWorldSize) * cell, oy + (wz / kTileWorldSize) * cell};
+    }
+    if (viewHit) {
+        m_uiDrawList.addPolylineAA(viewCorners, 4, withA(UiColor(1, 1, 1, 1), 0.85f),
+                                   std::max(1.0f, 1.5f * s), true);
+    }
     m_uiDrawList.popClip();
 
-    // Click to recentre the camera.
+    // Click to recentre the camera on the corresponding ground point.
     const UiRect inner = UiRect::fromXYWH(ox, oy, mapW, mapH);
     if (inner.contains(m_uiInput.mousePx) && m_uiInput.button(UiMouseButton::Left).down) {
-        const float nx = (m_uiInput.mousePx.x - ox) / mapW;
-        const float ny = (m_uiInput.mousePx.y - oy) / mapH;
-        m_camX = lo.map.minX + lo.map.width() * 0.5f - nx * kGridW * m_tilePx;
-        m_camY = lo.map.minY + lo.map.height() * 0.5f - ny * kGridH * m_tilePx;
-        clampCamera(lo.map);
+        m_camFocusX = (m_uiInput.mousePx.x - ox) / cell * kTileWorldSize;
+        m_camFocusZ = (m_uiInput.mousePx.y - oy) / cell * kTileWorldSize;
+        clampCameraFocus();
     }
 }
 
@@ -1063,8 +1599,19 @@ void CityBuilderApp::drawReports(const Layout& lo) {
     for (float v : h) { mn = std::min(mn, v); mx = std::max(mx, v); }
     const bool pct = m_metric == Metric::Education || m_metric == Metric::Health ||
                      m_metric == Metric::Happiness;
-    if (pct) { mn = 0.0f; mx = 100.0f; }
-    else {
+    if (pct) {
+        // Percent metrics move slowly month to month; pinning the axis to a fixed
+        // 0-100% box makes a healthy, gently-trending city read as a dead flat
+        // line. Zoom to the data with a floor on the span so real movement is
+        // still visible, while a metric that genuinely swings keeps its full range.
+        const float dataMn = mn, dataMx = mx;
+        constexpr float kMinSpan = 20.0f;
+        const float span = std::clamp((dataMx - dataMn) * 1.35f, kMinSpan, 100.0f);
+        const float center = (dataMn + dataMx) * 0.5f;
+        mn = std::clamp(center - span * 0.5f, 0.0f, 100.0f - span);
+        mx = mn + span;
+        if (mx > 100.0f) { mx = 100.0f; mn = std::max(0.0f, mx - span); }
+    } else {
         const float padR = std::max(1.0f, (mx - mn) * 0.12f);
         mn -= padR; mx += padR;
         if (m_metric != Metric::Treasury && mn < 0.0f) mn = 0.0f;
@@ -1108,7 +1655,7 @@ void CityBuilderApp::drawReports(const Layout& lo) {
         const float v = lerpf(h[static_cast<std::size_t>(i0)], h[static_cast<std::size_t>(i0) + 1], frac);
         const float yy = valToY(v);
         m_uiDrawList.addRectFilled(UiRect{static_cast<float>(px), yy, static_cast<float>(px) + 1.0f,
-                                          area.maxY}, withA(mc, 0.12f));
+                                          area.maxY}, withA(mc, 0.20f));
     }
 
     // Line.
