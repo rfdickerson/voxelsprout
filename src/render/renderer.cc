@@ -96,6 +96,10 @@ void Renderer::setStrategyMapMode(bool enabled) {
     m_backend->setStrategyMapMode(enabled);
 }
 
+void Renderer::setRayTracingEnabled(bool enabled) {
+    m_backend->setRayTracingEnabled(enabled);
+}
+
 void Renderer::setMinimalRenderMode(bool enabled) {
     m_backend->setMinimalRenderMode(enabled);
 }
@@ -206,6 +210,11 @@ ShadowStats Renderer::shadowStats() const {
 
 void Renderer::setSunAngles(float yawDegrees, float pitchDegrees) {
     m_backend->setSunAngles(yawDegrees, pitchDegrees);
+}
+
+void Renderer::setDepthOfField(bool enabled, float focusDistance, float focusRange,
+                               float maxRadiusPixels) {
+    m_backend->setDepthOfField(enabled, focusDistance, focusRange, maxRadiusPixels);
 }
 
 void Renderer::setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug) {

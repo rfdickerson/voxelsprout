@@ -638,6 +638,11 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/procgen/csg.cc
+            src/procgen/primitives.cc
+            src/procgen/mesh_emit.cc
+            src/procgen/building_generator.cc
+            src/procgen/props.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -1219,6 +1224,24 @@ if(BUILD_TESTING)
         target_compile_options(odai_economy_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_economy_tests COMMAND odai_economy_tests)
+
+    # BSP CSG toolkit + low-poly building primitives (procgen). Pure CPU;
+    # no Vulkan, no UI.
+    add_executable(odai_procgen_tests
+        tests/procgen_tests.cc
+        src/procgen/csg.cc
+        src/procgen/primitives.cc
+        src/procgen/mesh_emit.cc
+        src/procgen/building_generator.cc
+        src/procgen/props.cc
+    )
+    target_include_directories(odai_procgen_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_procgen_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_procgen_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_procgen_tests COMMAND odai_procgen_tests)
 
     # Council of Houses advisor rule engine (catalog + evaluateAdvisors). Pure CPU;
     # no Vulkan, no UI.

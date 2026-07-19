@@ -210,6 +210,18 @@ public:
             m_skyDebugSettings.waterAnimationSpeed = 0.65f;
         }
     }
+    // App-level opt-out of the ray-traced BLAS/TLAS scene. false always wins;
+    // true restores whatever init()'s hardware/driver capability probe already
+    // determined (m_rayTracingHardwareCapable) -- this can only opt further out
+    // of ray tracing, never force it on where the device doesn't support it.
+    // strategyMapMode's own hex-terrain tuning above also disables RT (for a
+    // different reason: skipping the multi-second BLAS/TLAS build on a scene
+    // that's a flat plateau with no use for it); this is the same underlying
+    // flag but a dedicated, explicit lever apps can reach for on their own
+    // terms instead of relying on that side effect.
+    void setRayTracingEnabled(bool enabled) {
+        m_rayTracingRuntimeEnabled = enabled && m_rayTracingHardwareCapable;
+    }
     // Opt-in "UI-only" mode for showcase/tooling executables (e.g. the design
     // system demo) that draw nothing but the 2D UI overlay. When enabled, init()
     // and recreateSwapchain() skip building the pipelines those tools structurally
@@ -281,6 +293,15 @@ public:
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
+    // Drives the same DoF state the sky debug panel edits; clamping happens
+    // where the values feed the frame uniform.
+    void setDepthOfField(bool enabled, float focusDistance, float focusRange,
+                         float maxRadiusPixels) {
+        m_skyDebugSettings.depthOfFieldEnabled = enabled;
+        m_skyDebugSettings.depthOfFieldFocusDistance = focusDistance;
+        m_skyDebugSettings.depthOfFieldFocusRange = focusRange;
+        m_skyDebugSettings.depthOfFieldMaxRadiusPixels = maxRadiusPixels;
+    }
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
     void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(
@@ -1048,6 +1069,11 @@ private:
     DesktopCapabilityProbe m_desktopCapabilityProbe{};
     RayTracingCapabilityProbe m_rayTracingCapabilityProbe{};
     bool m_rayTracingRuntimeEnabled = false;
+    // Snapshot of m_rayTracingRuntimeEnabled taken right after init()'s
+    // loadRayTracingFunctions() call, before any app/mode-driven override
+    // (strategyMapMode, setRayTracingEnabled) can force it off. The floor
+    // setRayTracingEnabled(true) restores to.
+    bool m_rayTracingHardwareCapable = false;
     bool m_rtMainPassImplemented = false;
     bool m_rtShaderVariantFileAvailable = false;
     VkPhysicalDeviceAccelerationStructureFeaturesKHR m_enabledAccelerationStructureFeatures{};

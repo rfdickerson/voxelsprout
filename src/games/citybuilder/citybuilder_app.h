@@ -2,6 +2,8 @@
 
 #include "engine/game_app.h"
 #include "import/imported_scene.h"
+#include "procgen/building_generator.h"
+#include "procgen/props.h"
 #include "ui/ui_types.h"
 
 #include <array>
@@ -42,7 +44,8 @@ struct Tile {
     short bOriginC = -1;         // origin tile of the building this cell belongs to
     short bOriginR = -1;
     float develop  = 0.0f;       // 0..3 growth level for zoned tiles
-    bool  powered  = false;      // within range of a power plant
+    bool  powered  = false;      // within range of a power plant (direct or via the grid)
+    bool  poweredRoad = false;   // road tile carrying power from a plant (drives pole/wire art)
     bool  nearRoad = false;      // within reach of a road (required to develop)
     float desirability = 0.5f;   // 0..1 spatial land value; modulates growth target
     float scenicPhase = 0.0f;    // per-tile jitter so a block doesn't look uniform
@@ -106,6 +109,54 @@ private:
     static constexpr float kTileWorldSize = 1.0f;  // world units per grid tile
 
     [[nodiscard]] odai::importer::ImportedScene buildCityScene() const;
+    // Memoized era-styled zone buildings keyed by (kind, level, tier, variant,
+    // plot size, orientation parity) — generated lazily on first use. swapDims
+    // generates the building with lot extents exchanged so an odd quarter-turn
+    // rotation lands it back onto the plot footprint. mutable because
+    // buildCityScene() is const.
+    const procgen::TriMesh& cachedBuilding(procgen::BuildingKind kind, int level, int tier,
+                                           std::uint32_t variant, int plotW, int plotD,
+                                           bool swapDims) const;
+    // Trees are cached per (season, variant) so the whole canopy repaints on a
+    // season change without regenerating on every scene rebuild.
+    const procgen::TriMesh& cachedTree(std::uint32_t variant) const;
+    const procgen::TriMesh& cachedPumpkin(std::uint32_t variant) const;
+    const procgen::TriMesh& cachedPowerPole(std::uint32_t variant) const;
+    const procgen::TriMesh& cachedStreetlamp(std::uint32_t variant) const;
+
+    // ── Ambient traffic ──────────────────────────────────────────────────────
+    // Cars follow the road graph tile-to-tile on the right-hand lane; their
+    // geometry is rebuilt each frame from cached car meshes and streamed to
+    // the renderer via ImportedActorFrameData (a FrameArena upload), so the
+    // static city scene is never re-uploaded for animation.
+    struct Vehicle {
+        short cx = 0, cr = 0;          // tile currently being traversed
+        signed char inX = 1, inZ = 0;  // direction the car entered with
+        signed char outX = 1, outZ = 0;  // direction it will leave with
+        float t = 0.0f;                // 0..1 progress across the tile
+        float speed = 1.2f;            // tiles per second
+        std::uint8_t variant = 0;      // index into m_carMeshes
+    };
+    void updateVehicles(float dt);
+    void respawnVehicle(Vehicle& v);
+    bool pickExit(Vehicle& v);         // choose outX/outZ at the current tile
+
+    // ── Weather ──────────────────────────────────────────────────────────────
+    // A simple state machine rolls the sky every ~half minute with seasonal
+    // odds (winter precipitates as snow). Precipitation is a particle field
+    // around the camera focus, streamed with the cars — never a scene upload.
+    enum class Weather : std::uint8_t { Clear, Rain, Snow };
+    struct WeatherDrop {
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        float phase = 0.0f;  // per-drop drift phase (snow sway)
+        float speed = 1.0f;  // fall speed multiplier
+    };
+    void updateWeather(float dt);
+    void respawnDrop(WeatherDrop& d, bool atTop);
+
+    // Appends this frame's transformed car geometry and weather particles into
+    // the actor scratch buffers and returns the frame data for submitFrame.
+    render::ImportedActorFrameData buildActorFrameData();
     [[nodiscard]] render::CameraPose computeCameraPose() const;
     // Orthographic ray from a screen pixel to the world y=0 ground plane.
     bool screenToGroundXZ(ui::UiVec2 screenPx, const Layout& lo, float& outX, float& outZ) const;
@@ -171,6 +222,27 @@ private:
     // player edits (bulldoze/zone/road/building) still set m_sceneDirty instantly.
     bool  m_growthDirty = false;
     float m_sceneRebuildCooldown = 0.0f;
+    mutable std::unordered_map<std::uint32_t, procgen::TriMesh> m_buildingCache;
+    mutable std::unordered_map<std::uint32_t, procgen::TriMesh> m_treeCache;
+    mutable std::vector<procgen::TriMesh> m_pumpkinMeshes;
+    mutable std::vector<procgen::TriMesh> m_poleMeshes;
+    mutable std::vector<procgen::TriMesh> m_lampMeshes;
+
+    procgen::Season m_season = procgen::Season::Winter;  // recomputed in onInit
+    Weather m_weather = Weather::Clear;
+    Weather m_weatherTarget = Weather::Clear;
+    float m_weatherIntensity = 0.0f;   // 0..1 ramp so precipitation fades in/out
+    float m_weatherTimer = 14.0f;      // seconds until the next sky roll
+    std::uint32_t m_weatherRng = 0xBAD5EEDu;
+    std::vector<WeatherDrop> m_drops;
+
+    std::vector<Vehicle> m_vehicles;
+    std::vector<procgen::TriMesh> m_carMeshes;             // lazily filled variants
+    std::uint32_t m_trafficRng = 0x51CA7B1u;
+    // Per-frame actor stream scratch, reused to avoid per-frame allocation.
+    std::vector<odai::importer::ImportedScenePackedVertex> m_actorVertices;
+    std::vector<std::uint32_t> m_actorIndices;
+    std::vector<odai::importer::ImportedScenePackedDraw> m_actorDraws;
 
     int m_hoverC = -1, m_hoverR = -1;
     bool m_mouseOverUi = false;

@@ -1,6 +1,7 @@
 #include "games/citybuilder/citybuilder_app.h"
 
 #include "math/math.h"
+#include "procgen/props.h"
 #include "ui/font.h"
 
 #define GLFW_INCLUDE_NONE
@@ -10,9 +11,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace odai::games::citybuilder {
 
@@ -32,8 +36,15 @@ constexpr UiColor kGrass     = UiColor::fromRgbHex(0x5E8C3E);
 constexpr UiColor kGrassAlt  = UiColor::fromRgbHex(0x547E37);
 constexpr UiColor kWater     = UiColor::fromRgbHex(0x2D5C8C);
 constexpr UiColor kWaterAlt  = UiColor::fromRgbHex(0x23507E);
-constexpr UiColor kRoad      = UiColor::fromRgbHex(0x393B43);
-constexpr UiColor kRoadLine  = UiColor::fromRgbHex(0xCDBA63);
+constexpr std::uint32_t kTreeVariants = 6;
+constexpr std::uint32_t kCarVariants = 8;
+constexpr std::uint32_t kPoleVariants = 3;
+constexpr std::uint32_t kLampVariants = 3;
+constexpr UiColor kAsphalt   = UiColor::fromRgbHex(0x303237);
+constexpr UiColor kSidewalk  = UiColor::fromRgbHex(0x8E9092);
+constexpr UiColor kLaneDash  = UiColor::fromRgbHex(0xD9C15A);
+constexpr UiColor kCrosswalk = UiColor::fromRgbHex(0xC9CCCE);
+constexpr UiColor kWire      = UiColor::fromRgbHex(0x1C1E22);
 constexpr UiColor kPanel     = UiColor::fromRgbHex(0x161B22, 0.97f);
 constexpr UiColor kPanelRise = UiColor::fromRgbHex(0x1E2530, 0.98f);
 constexpr UiColor kBtn       = UiColor::fromRgbHex(0x232B36, 0.98f);
@@ -56,6 +67,10 @@ constexpr int   kHistMax       = 180;
 
 // Fixed isometric camera tilt (yaw rotates in 90 deg steps via Q/E).
 constexpr float kCamPitchDeg = -52.0f;
+// Diorama camera: a long lens from far away keeps the isometric composition
+// but adds the subtle vanishing-line convergence that makes model cities read
+// as miniatures. 20 deg is the renderer's minimum FOV clamp.
+constexpr float kDioramaFovDeg = 20.0f;
 constexpr float kCamMinZoom  = 6.0f;
 constexpr float kCamMaxZoom  = 70.0f;
 
@@ -152,26 +167,24 @@ const char* residentialFlavorName(int c, int r, float desirability) {
     return kNames[tier][idx];
 }
 
-UiColor residentialTierTint(float desirability) {
-    switch (residentialTier(desirability)) {
-        case 0:  return UiColor::fromRgbHex(0xA88A6B);  // rust / weathered siding
-        case 2:  return UiColor::fromRgbHex(0xE8DCC0);  // pale stone / stucco
-        default: return UiColor::fromRgbHex(0x6FCB7E);  // everyday suburban green-trim
-    }
-}
-
-// Trailer parks/RVs sit low and flat; upper-class homes stand taller on the
-// same develop-level footprint so the skyline itself signals wealth.
-float residentialHeightMul(float desirability) {
-    switch (residentialTier(desirability)) {
-        case 0:  return 0.55f;
-        case 2:  return 1.35f;
-        default: return 1.0f;
-    }
-}
-
 const char* kMonths[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+procgen::Season seasonForMonth(int month) {
+    if (month <= 1 || month == 11) return procgen::Season::Winter;   // Dec-Feb
+    if (month <= 4) return procgen::Season::Spring;                  // Mar-May
+    if (month <= 7) return procgen::Season::Summer;                  // Jun-Aug
+    return procgen::Season::Autumn;                                  // Sep-Nov
+}
+
+const char* seasonName(procgen::Season s) {
+    switch (s) {
+        case procgen::Season::Spring: return "Spring";
+        case procgen::Season::Summer: return "Summer";
+        case procgen::Season::Autumn: return "Autumn";
+        default:                      return "Winter";
+    }
+}
 
 using Tool = CityBuilderApp::Tool;
 
@@ -333,6 +346,23 @@ std::string moneyStr(double v) {
     return (c < 0 ? "-$" : "$") + commaInt(c < 0 ? -c : c);
 }
 
+// Same _dupenv_s-on-Windows pattern as core/log.cc's getEnvironmentVariable.
+std::string readEnv(const char* name) {
+#if defined(_WIN32)
+    char* value = nullptr;
+    std::size_t valueLength = 0;
+    if (_dupenv_s(&value, &valueLength, name) != 0 || value == nullptr) {
+        return {};
+    }
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : std::string();
+#endif
+}
+
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -354,9 +384,16 @@ bool CityBuilderApp::onInit() {
 
     // Sunlight + shadow maps + AO carry the visual read here (there's no
     // texture detail on these flat-shaded boxes to fall back on). Ray tracing
-    // is explicitly off — this scene doesn't need it, and building RT
-    // acceleration structures on every scene re-upload was the actual source
-    // of the stutter reported earlier, not shadows/AO themselves.
+    // is explicitly off — this scene never uses RT shadows/reflections/GI (see
+    // ShadowMode::ShadowMaps below), so building and tearing down a BLAS/TLAS
+    // on every scene re-upload was pure wasted GPU work — and, until a
+    // synchronization bug in that teardown path was fixed at the engine level,
+    // the actual source of an intermittent hang on quit. GameApp::init()
+    // already disables this as an accidental side effect of setStrategyMapMode
+    // (borrowed for its SSAO tuning, see below), but that's the wrong flag to
+    // depend on for intent — opt out directly so it can't silently come back
+    // if that side effect ever changes.
+    m_renderer.setRayTracingEnabled(false);
     m_renderer.setSsaoEnabled(true);
     m_renderer.setVertexAoEnabled(true);
     m_renderer.setShadowSettings(render::ShadowSettings{render::ShadowMode::ShadowMaps});
@@ -374,8 +411,27 @@ bool CityBuilderApp::onInit() {
     // ~1.5-tile radius reads as soft contact shading between buildings.
     m_renderer.setAmbientOcclusionTuning(1.6f, 0.06f, 0.95f);
 
+    m_season = seasonForMonth(m_month);
     generateTerrain();
     seedCity();
+    // ODAI_CITY_DEMO=1: force the seeded zone bands to development levels
+    // 1/2/3 (south rows denser) so all three architectural eras — 1890s brick,
+    // 1930s deco setbacks, 1960s curtain-wall — are on screen immediately.
+    // Purely a dev/visual-verification aid; normal play grows into the same
+    // levels over simulated months.
+    if (const std::string demo = readEnv("ODAI_CITY_DEMO"); !demo.empty() && demo != "0") {
+        for (int r = 25; r <= 31; ++r) {
+            const float dev = r <= 26 ? 0.5f : (r <= 28 ? 1.5f : 2.5f);
+            for (int c = 16; c <= 31; ++c) {
+                Tile& t = tile(c, r);
+                if (t.zone != Zone::None) t.develop = dev;
+            }
+        }
+        // Start the demo in October: autumn foliage and pumpkins on screen
+        // immediately (press N to skip months and tour the other seasons).
+        m_month = 9;
+        m_season = seasonForMonth(m_month);
+    }
     recomputeStats();   // snap initial city stats to their targets
     pushHistory();      // first sample so the report charts open with data
     return true;
@@ -452,14 +508,16 @@ void CityBuilderApp::seedCity() {
 // ─────────────────────────────────────────────────────────────────────────────
 void CityBuilderApp::recomputeStats() {
     // Pass 1: clear coverage flags.
-    for (Tile& t : m_tiles) { t.powered = false; t.nearRoad = false; }
+    for (Tile& t : m_tiles) { t.powered = false; t.poweredRoad = false; t.nearRoad = false; }
 
     m_numRoad = m_numPolice = m_numFire = m_numClinic = m_numSchool = m_numPark = m_numPower = 0;
     m_numLibrary = m_numAmphitheater = 0;
     float residents = 0.0f, comJobs = 0.0f, indJobs = 0.0f;
 
     constexpr int kRoadReach   = 3;   // Chebyshev tiles a road services
-    constexpr int kPowerRadius = 9;
+    constexpr int kPowerRadius = 9;   // a plant's own direct glow, roads or not
+
+    std::vector<std::pair<int, int>> powerPlants;
 
     // Pass 2: counts, census, and stamp road / power coverage outward.
     for (int r = 0; r < kGridH; ++r) {
@@ -484,6 +542,7 @@ void CityBuilderApp::recomputeStats() {
                     default: break;
                 }
                 if (t.building == Building::Power) {
+                    powerPlants.emplace_back(c, r);
                     for (int dr = -kPowerRadius; dr <= kPowerRadius; ++dr)
                         for (int dc = -kPowerRadius; dc <= kPowerRadius; ++dc)
                             if (inBounds(c + dc, r + dr)) tile(c + dc, r + dr).powered = true;
@@ -495,6 +554,53 @@ void CityBuilderApp::recomputeStats() {
         }
     }
     const float jobs = comJobs + indJobs;
+
+    // Pass 2.5: power grid. A plant's direct glow (above) only reaches a fixed
+    // radius, which stranded any zone built further out even when it was
+    // properly road-connected back to the plant — the "No power" complaint on
+    // a perfectly reasonable layout. Real power distribution follows wires
+    // along the street grid, so flood outward from each plant along connected
+    // road tiles (4-directional, matching how road segments actually join)
+    // and light up a short halo around every tile the grid reaches. This is
+    // additive on top of the direct radius, never subtractive.
+    constexpr int kPlantFeedReach = 2;   // plant's own substation reach onto nearby roads
+    constexpr int kPowerLineReach = 2;   // how far power reaches off a powered road tile
+    const auto stampPowerAround = [&](int cc, int rr) {
+        for (int dr = -kPowerLineReach; dr <= kPowerLineReach; ++dr)
+            for (int dc = -kPowerLineReach; dc <= kPowerLineReach; ++dc)
+                if (inBounds(cc + dc, rr + dr)) tile(cc + dc, rr + dr).powered = true;
+    };
+    std::vector<int> frontier;  // encodes tile index as r * kGridW + c
+    for (const auto& [pc, pr] : powerPlants) {
+        for (int dr = -kPlantFeedReach; dr <= kPlantFeedReach; ++dr) {
+            for (int dc = -kPlantFeedReach; dc <= kPlantFeedReach; ++dc) {
+                const int cc = pc + dc, rr = pr + dr;
+                if (!inBounds(cc, rr)) continue;
+                Tile& rt = tile(cc, rr);
+                if (rt.road && !rt.poweredRoad) {
+                    rt.poweredRoad = true;
+                    stampPowerAround(cc, rr);
+                    frontier.push_back(rr * kGridW + cc);
+                }
+            }
+        }
+    }
+    for (std::size_t qi = 0; qi < frontier.size(); ++qi) {
+        const int idx = frontier[qi];
+        const int rr = idx / kGridW, cc = idx % kGridW;
+        static constexpr int kDc[4] = {1, -1, 0, 0};
+        static constexpr int kDr[4] = {0, 0, 1, -1};
+        for (int k = 0; k < 4; ++k) {
+            const int nc = cc + kDc[k], nr = rr + kDr[k];
+            if (!inBounds(nc, nr)) continue;
+            Tile& nt = tile(nc, nr);
+            if (nt.road && !nt.poweredRoad) {
+                nt.poweredRoad = true;
+                stampPowerAround(nc, nr);
+                frontier.push_back(nr * kGridW + nc);
+            }
+        }
+    }
 
     // Pass 3: powered coverage of developed land.
     int developed = 0, poweredDeveloped = 0;
@@ -650,6 +756,14 @@ void CityBuilderApp::stepMonth() {
     m_money += m_lastNet;
 
     if (++m_month >= 12) { m_month = 0; ++m_year; }
+    // Season boundary: repaint the whole scene right away (4x/year, so no need
+    // for the growth cooldown) — foliage, ground tint, and autumn decorations
+    // all change with it.
+    const procgen::Season season = seasonForMonth(m_month);
+    if (season != m_season) {
+        m_season = season;
+        m_sceneDirty = true;
+    }
     pushHistory();
     m_growthDirty = true;  // develop levels changed; re-extrude on the next cooldown tick
 }
@@ -803,6 +917,8 @@ void CityBuilderApp::onTick(float dt) {
     if (edgeDown(GLFW_KEY_SPACE)) m_paused = !m_paused;
     if (edgeDown(GLFW_KEY_G)) m_reportsOpen = !m_reportsOpen;
     if (edgeDown(GLFW_KEY_L)) { m_showLandValue = !m_showLandValue; m_sceneDirty = true; }
+    // Debug: N skips a month — handy for eyeballing season transitions.
+    if (edgeDown(GLFW_KEY_N)) stepMonth();
 
     // Rotate the isometric view in 90 deg steps, SimCity/Cities-style.
     if (edgeDown(GLFW_KEY_Q)) m_camYawDeg -= 90.0f;
@@ -820,7 +936,12 @@ void CityBuilderApp::onTick(float dt) {
             m_simAccum -= kMonthInterval;
             stepMonth();
         }
+        // Ambient traffic runs on real time (not sim speed) so cars cruise at
+        // a believable pace at every game speed.
+        updateVehicles(dt);
     }
+    // Weather is pure atmosphere — it keeps falling even while paused.
+    updateWeather(dt);
 }
 
 CityBuilderApp::Layout CityBuilderApp::computeLayout() const {
@@ -973,7 +1094,17 @@ void CityBuilderApp::onRender(float /*dt*/) {
     drawWorldOverlay(lo);
     drawFlash(lo);
 
-    submitFrame(m_camera);
+    // Tilt-shift depth of field completes the diorama read: the ground at the
+    // focus point stays sharp and the frame's near/far edges melt away like a
+    // macro photo of a model. Focus tracks the camera pull-back distance.
+    const float focusDist = m_camZoom / std::tan(odai::math::radians(kDioramaFovDeg) * 0.5f);
+    m_renderer.setDepthOfField(true, focusDist, std::max(8.0f, m_camZoom * 0.85f), 6.0f);
+
+    // Cars and weather particles are per-frame streamed geometry (FrameArena),
+    // not part of the uploaded scene — animation never triggers a scene
+    // re-upload.
+    const render::ImportedActorFrameData actorData = buildActorFrameData();
+    submitFrame(m_camera, 0.0f, actorData.vertices.empty() ? nullptr : &actorData);
 }
 
 ImportedScene CityBuilderApp::buildCityScene() const {
@@ -984,13 +1115,108 @@ ImportedScene CityBuilderApp::buildCityScene() const {
     CityMeshBuilder builder(scene);
     const float ts = kTileWorldSize;
 
+    // Seasonal ground palette: winter buries grass under snow and skims the
+    // water with ice; autumn browns off; spring reads fresher.
+    auto seasonalGrass = [&](const UiColor& g) {
+        switch (m_season) {
+            case procgen::Season::Winter: return mix(g, UiColor::fromRgbHex(0xDCE2E6), 0.78f);
+            case procgen::Season::Autumn: return mix(g, UiColor::fromRgbHex(0x9A7A38), 0.32f);
+            case procgen::Season::Spring: return mix(g, UiColor::fromRgbHex(0x74A93F), 0.28f);
+            default:                      return g;
+        }
+    };
+    const bool winter = m_season == procgen::Season::Winter;
+    const bool autumn = m_season == procgen::Season::Autumn;
+
+    // ── Parceling: group contiguous same-zone tiles into rectangular plots
+    // (1x1 up to 3x2, weighted per zone — industry runs biggest) so blocks
+    // read as varied city lots instead of a stamp of identical squares.
+    // Deterministic greedy row-major scan re-derived from the zone map on
+    // every rebuild; repainting zones naturally re-parcels. The sim itself
+    // stays per-tile — a plot renders one building sized to the merged lot,
+    // using the member tiles' average development / land value.
+    struct Plot {
+        short c = 0, r = 0;
+        std::uint8_t w = 1, d = 1;
+        float develop = 0.0f;
+        float desirability = 0.5f;
+        bool powered = false;
+    };
+    std::vector<Plot> plots;
+    std::vector<short> plotIndex(static_cast<std::size_t>(kGridW) * kGridH, -1);
+    const auto parcelable = [&](int c, int r, Zone z) {
+        if (!inBounds(c, r)) return false;
+        const Tile& pt = tile(c, r);
+        return pt.terrain == Terrain::Grass && pt.zone == z && !pt.road &&
+               pt.building == Building::None &&
+               plotIndex[static_cast<std::size_t>(r) * kGridW + c] < 0;
+    };
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            const Tile& t = tile(c, r);
+            if (!parcelable(c, r, t.zone) || t.zone == Zone::None) continue;
+            const std::uint32_t roll = tileHash(c, r, 0x9107C0DEu) % 100u;
+            int pw = 1, pd = 1;
+            if (t.zone == Zone::Industrial) {
+                if (roll >= 15 && roll < 40) { pw = 2; pd = 1; }
+                else if (roll < 60) { pw = 1; pd = 2; }
+                else if (roll < 80) { pw = 2; pd = 2; }
+                else if (roll < 92) { pw = 3; pd = 2; }
+                else if (roll >= 92) { pw = 2; pd = 3; }
+            } else if (t.zone == Zone::Commercial) {
+                if (roll >= 30 && roll < 55) { pw = 2; pd = 1; }
+                else if (roll < 75) { pw = 1; pd = 2; }
+                else if (roll < 92) { pw = 2; pd = 2; }
+                else if (roll >= 92) { pw = 3; pd = 2; }
+            } else {
+                if (roll >= 45 && roll < 68) { pw = 2; pd = 1; }
+                else if (roll < 88) { pw = 1; pd = 2; }
+                else if (roll >= 88) { pw = 2; pd = 2; }
+            }
+            const auto rectOk = [&](int w, int d) {
+                for (int dr = 0; dr < d; ++dr)
+                    for (int dc = 0; dc < w; ++dc)
+                        if ((dr != 0 || dc != 0) && !parcelable(c + dc, r + dr, t.zone)) return false;
+                return true;
+            };
+            while (!rectOk(pw, pd)) {
+                if (pw >= pd && pw > 1) --pw;
+                else if (pd > 1) --pd;
+                else break;  // 1x1 always fits (only the origin, already checked)
+            }
+            Plot plot;
+            plot.c = static_cast<short>(c);
+            plot.r = static_cast<short>(r);
+            plot.w = static_cast<std::uint8_t>(pw);
+            plot.d = static_cast<std::uint8_t>(pd);
+            int poweredCount = 0;
+            float devSum = 0.0f, desSum = 0.0f;
+            for (int dr = 0; dr < pd; ++dr) {
+                for (int dc = 0; dc < pw; ++dc) {
+                    const Tile& member = tile(c + dc, r + dr);
+                    plotIndex[static_cast<std::size_t>(r + dr) * kGridW + (c + dc)] =
+                        static_cast<short>(plots.size());
+                    devSum += member.develop;
+                    desSum += member.desirability;
+                    if (member.powered) ++poweredCount;
+                }
+            }
+            const int count = pw * pd;
+            plot.develop = devSum / static_cast<float>(count);
+            plot.desirability = desSum / static_cast<float>(count);
+            plot.powered = poweredCount * 2 >= count;
+            plots.push_back(plot);
+        }
+    }
+
     for (int r = 0; r < kGridH; ++r) {
         for (int c = 0; c < kGridW; ++c) {
             const Tile& t = tile(c, r);
             const float x0 = c * ts, z0 = r * ts, x1 = x0 + ts, z1 = z0 + ts;
 
             if (t.terrain == Terrain::Water) {
-                const UiColor wc = ((c + r) & 1) ? kWater : kWaterAlt;
+                UiColor wc = ((c + r) & 1) ? kWater : kWaterAlt;
+                if (winter) wc = mix(wc, UiColor::fromRgbHex(0xA8C4D4), 0.55f);
                 builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1}, wc);
                 continue;
             }
@@ -1002,39 +1228,118 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                                 heat(t.desirability));
             } else {
                 builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1},
-                                mix(kGrassAlt, kGrass, t.scenicPhase));
+                                seasonalGrass(mix(kGrassAlt, kGrass, t.scenicPhase)));
             }
 
             if (t.road) {
-                const float pad = ts * 0.06f;
-                builder.addQuad({x0 + pad, 0.02f, z0 + pad}, {x1 - pad, 0.02f, z0 + pad},
-                                {x1 - pad, 0.02f, z1 - pad}, {x0 + pad, 0.02f, z1 - pad}, kRoad);
-
-                // Centre-line strip toward each connected neighbour: straight runs
-                // read as a continuous line, turns/junctions as a cross, and a lone
-                // paved tile as a stub dot.
                 const bool nN = inBounds(c, r - 1) && tile(c, r - 1).road;
                 const bool nS = inBounds(c, r + 1) && tile(c, r + 1).road;
                 const bool nW = inBounds(c - 1, r) && tile(c - 1, r).road;
                 const bool nE = inBounds(c + 1, r) && tile(c + 1, r).road;
-                const float lw = ts * 0.08f, ly = 0.03f;
+                const float side = ts * 0.16f;   // sidewalk band width from the tile edge
+                const float ry = 0.02f;          // asphalt surface height
+                const float sy = 0.045f;         // sidewalk top (raised curb above asphalt)
                 const float cx = (x0 + x1) * 0.5f, cz = (z0 + z1) * 0.5f;
-                if (nN || nS) {
-                    const float zTop = nN ? z0 : cz - lw * 0.5f;
-                    const float zBot = nS ? z1 : cz + lw * 0.5f;
-                    builder.addQuad({cx - lw * 0.5f, ly, zTop}, {cx + lw * 0.5f, ly, zTop},
-                                    {cx + lw * 0.5f, ly, zBot}, {cx - lw * 0.5f, ly, zBot}, kRoadLine);
+
+                // Asphalt: runs to the tile edge on connected sides so
+                // neighbouring road tiles pave seamlessly; stops at the
+                // sidewalk band elsewhere.
+                const float ax0 = nW ? x0 : x0 + side, ax1 = nE ? x1 : x1 - side;
+                const float az0 = nN ? z0 : z0 + side, az1 = nS ? z1 : z1 - side;
+                builder.addQuad({ax0, ry, az0}, {ax1, ry, az0}, {ax1, ry, az1}, {ax0, ry, az1},
+                                kAsphalt);
+
+                // Raised sidewalk slabs along the unconnected edges. Boxes (not
+                // flat quads) so the curb face catches shadow/AO. The N/S
+                // strips span the full tile width; E/W strips are clipped to
+                // avoid double-covering the corners.
+                auto walk = [&](float wx0, float wz0, float wx1, float wz1) {
+                    addBox(builder, wx0, wz0, wx1, wz1, 0.0f, sy, kSidewalk);
+                };
+                if (!nN) walk(x0, z0, x1, z0 + side);
+                if (!nS) walk(x0, z1 - side, x1, z1);
+                if (!nW) walk(x0, nN ? z0 : z0 + side, x0 + side, nS ? z1 : z1 - side);
+                if (!nE) walk(x1 - side, nN ? z0 : z0 + side, x1, nS ? z1 : z1 - side);
+
+                const bool ns = nN || nS, ew = nW || nE;
+                const float ly = 0.03f;  // markings float just above the asphalt
+                if (ns && ew) {
+                    // Intersection: zebra crosswalk bands across each entrance.
+                    auto zebra = [&](bool alongX, float edge) {
+                        for (int i = 0; i < 4; ++i) {
+                            const float o = -0.21f + 0.14f * static_cast<float>(i) + 0.02f;
+                            if (alongX) {
+                                builder.addQuad({cx + o, ly, edge}, {cx + o + 0.10f, ly, edge},
+                                                {cx + o + 0.10f, ly, edge + 0.05f},
+                                                {cx + o, ly, edge + 0.05f}, kCrosswalk);
+                            } else {
+                                builder.addQuad({edge, ly, cz + o}, {edge + 0.05f, ly, cz + o},
+                                                {edge + 0.05f, ly, cz + o + 0.10f},
+                                                {edge, ly, cz + o + 0.10f}, kCrosswalk);
+                            }
+                        }
+                    };
+                    if (nN) zebra(true, z0 + 0.04f);
+                    if (nS) zebra(true, z1 - 0.09f);
+                    if (nW) zebra(false, x0 + 0.04f);
+                    if (nE) zebra(false, x1 - 0.09f);
+                } else if (ns) {
+                    // Straight N-S run: dashed yellow centre line.
+                    const float lw = ts * 0.032f;
+                    for (int i = 0; i < 3; ++i) {
+                        const float dz0 = z0 + ts * (0.10f + 0.34f * static_cast<float>(i));
+                        const float dz1 = dz0 + ts * 0.15f;
+                        builder.addQuad({cx - lw, ly, dz0}, {cx + lw, ly, dz0},
+                                        {cx + lw, ly, dz1}, {cx - lw, ly, dz1}, kLaneDash);
+                    }
+                } else if (ew) {
+                    const float lw = ts * 0.032f;
+                    for (int i = 0; i < 3; ++i) {
+                        const float dx0 = x0 + ts * (0.10f + 0.34f * static_cast<float>(i));
+                        const float dx1 = dx0 + ts * 0.15f;
+                        builder.addQuad({dx0, ly, cz - lw}, {dx1, ly, cz - lw},
+                                        {dx1, ly, cz + lw}, {dx0, ly, cz + lw}, kLaneDash);
+                    }
                 }
-                if (nW || nE) {
-                    const float xL = nW ? x0 : cx - lw * 0.5f;
-                    const float xR = nE ? x1 : cx + lw * 0.5f;
-                    builder.addQuad({xL, ly, cz - lw * 0.5f}, {xR, ly, cz - lw * 0.5f},
-                                    {xR, ly, cz + lw * 0.5f}, {xL, ly, cz + lw * 0.5f}, kRoadLine);
+
+                // Utility corridor: poles + wire spans follow the north/west
+                // sidewalk band of every road tile the power grid actually
+                // reaches (t.poweredRoad, flood-filled from each plant in
+                // recomputeStats). Rail positions are fixed fractions of the
+                // tile edge, so segments in the same row/column join up into
+                // one continuous line rather than looking tile-stamped.
+                if (t.poweredRoad) {
+                    const bool pnN = inBounds(c, r - 1) && tile(c, r - 1).road && tile(c, r - 1).poweredRoad;
+                    const bool pnS = inBounds(c, r + 1) && tile(c, r + 1).road && tile(c, r + 1).poweredRoad;
+                    const bool pnW = inBounds(c - 1, r) && tile(c - 1, r).road && tile(c - 1, r).poweredRoad;
+                    const bool pnE = inBounds(c + 1, r) && tile(c + 1, r).road && tile(c + 1, r).poweredRoad;
+                    const float rail = ts * 0.10f;   // inset from the tile edge, inside the sidewalk band
+                    const float railX = x0 + rail;   // constant per column: vertical spans align tile-to-tile
+                    const float railZ = z0 + rail;   // constant per row: horizontal spans align tile-to-tile
+                    const float wireY = 0.30f, wireT = 0.010f, wireHalf = ts * 0.010f;
+                    if (pnN || pnS) {
+                        const float zA = pnN ? z0 : cz, zB = pnS ? z1 : cz;
+                        addBox(builder, railX - wireHalf, zA, railX + wireHalf, zB, wireY, wireY + wireT,
+                              kWire);
+                    }
+                    if (pnW || pnE) {
+                        const float xA = pnW ? x0 : cx, xB = pnE ? x1 : cx;
+                        addBox(builder, xA, railZ - wireHalf, xB, railZ + wireHalf, wireY, wireY + wireT,
+                              kWire);
+                    }
+                    if ((pnN || pnS || pnW || pnE) && (c + r) % 2 == 0) {
+                        const std::uint32_t pv = tileHash(c, r, 0x901EDu) % kPoleVariants;
+                        procgen::appendTriMesh(cachedPowerPole(pv), {railX, sy, railZ},
+                                               {1.0f, 1.0f, 1.0f}, scene);
+                    }
                 }
-                if (!nN && !nS && !nW && !nE) {
-                    builder.addQuad({cx - lw * 0.5f, ly, cz - lw * 0.5f}, {cx + lw * 0.5f, ly, cz - lw * 0.5f},
-                                    {cx + lw * 0.5f, ly, cz + lw * 0.5f}, {cx - lw * 0.5f, ly, cz + lw * 0.5f},
-                                    kRoadLine);
+
+                // Streetlamps along the opposite (south/east) sidewalk —
+                // ambience only, present on any road regardless of power.
+                if (tileHash(c, r, 0x1A4Fu) % 1000u < 340u) {
+                    const std::uint32_t lv = tileHash(c, r, 0x7A4Fu) % kLampVariants;
+                    procgen::appendTriMesh(cachedStreetlamp(lv), {x1 - ts * 0.10f, sy, z1 - ts * 0.10f},
+                                           {1.0f, 1.0f, 1.0f}, scene);
                 }
                 continue;
             }
@@ -1048,12 +1353,13 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                 const UiColor roofCol = mix(buildingRoof(t.building), UiColor(0, 0, 0, 1), 0.12f);
                 addBox(builder, x0 + pad, z0 + pad, bx1 - pad, bz1 - pad, 0.0f, height, roofCol);
                 if (t.building == Building::Park) {
-                    // A few little tree blobs so the lone-tile park doesn't read as a slab.
+                    // Proper procgen trees so the lone-tile park doesn't read as a slab.
                     for (int i = 0; i < 4; ++i) {
                         const float px = x0 + (0.28f + 0.45f * (i & 1)) * (bx1 - x0);
                         const float pz = z0 + (0.28f + 0.45f * (i >> 1)) * (bz1 - z0);
-                        addBox(builder, px - ts * 0.12f, pz - ts * 0.12f, px + ts * 0.12f, pz + ts * 0.12f,
-                              height, height + ts * 0.35f, UiColor::fromRgbHex(0x2A6F2E));
+                        const std::uint32_t tv = tileHash(c, r, 0x9A7Cu + static_cast<std::uint32_t>(i));
+                        procgen::appendTriMesh(cachedTree(tv % kTreeVariants), {px, height, pz},
+                                               {1.0f, 1.0f, 1.0f}, scene);
                     }
                 }
                 continue;
@@ -1063,35 +1369,123 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                 const UiColor zc = t.zone == Zone::Residential ? kZoneR
                                    : t.zone == Zone::Commercial ? kZoneC
                                                                 : kZoneI;
-                if (t.develop > kDevEps) {
-                    const float lvl = clamp01(t.develop / 3.0f);
+                const short pi = plotIndex[static_cast<std::size_t>(r) * kGridW + c];
+                const Plot* plot = pi >= 0 ? &plots[static_cast<std::size_t>(pi)] : nullptr;
+                const float dev = plot ? plot->develop : t.develop;
+                if (dev > kDevEps) {
+                    // Era-styled CSG building, one per plot, drawn by the
+                    // plot's origin tile. The development level picks the
+                    // architectural era (the city visibly modernizes as
+                    // parcels densify), land value picks the residential
+                    // wealth tier, and a stable per-tile hash picks the
+                    // variant — so a plot keeps its building identity across
+                    // rebuilds with no extra stored state.
+                    if (plot && (plot->c != c || plot->r != r)) continue;  // member tile: covered by origin
+                    const int pw = plot ? plot->w : 1, pd = plot ? plot->d : 1;
+                    const int level = 1 + std::min(2, static_cast<int>(dev));
+                    const auto kind = t.zone == Zone::Residential ? procgen::BuildingKind::Residential
+                                      : t.zone == Zone::Commercial ? procgen::BuildingKind::Commercial
+                                                                   : procgen::BuildingKind::Industrial;
+                    const float desirability = plot ? plot->desirability : t.desirability;
+                    const int tier = t.zone == Zone::Residential ? residentialTier(desirability) : 1;
+                    const std::uint32_t variant = tileHash(c, r, 0xB17D5EEDu) % 8u;
+                    procgen::Color3 tint{1.0f, 1.0f, 1.0f};
+                    const bool powered = plot ? plot->powered : t.powered;
+                    if (!powered) tint = procgen::Color3{0.55f, 0.45f, 0.40f};  // brown-out tint
 
-                    // Give the block "character": residential reads as a class of
-                    // neighbourhood (trailer park -> suburbia -> estates, driven by
-                    // land value), commercial/industrial each get a distinct little
-                    // business per tile — same growth-level math, different skin.
-                    float heightMul = 1.0f;
-                    UiColor flavorTint = zc;
-                    if (t.zone == Zone::Residential) {
-                        heightMul = residentialHeightMul(t.desirability);
-                        flavorTint = residentialTierTint(t.desirability);
-                    } else if (t.zone == Zone::Commercial) {
-                        flavorTint = pickFlavor(kCommercialFlavors, kNumCommercialFlavors, c, r, 0xC0FFEE1Cu).tint;
-                    } else {
-                        flavorTint = pickFlavor(kIndustrialFlavors, kNumIndustrialFlavors, c, r, 0x57EE1u).tint;
+                    // Face the door toward a road on the plot perimeter
+                    // (hash-picked when it fronts several). Turn k rotates
+                    // local -Z to: 0 -> -Z (north), 1 -> -X (west),
+                    // 2 -> +Z (south), 3 -> +X (east).
+                    const auto anyRoad = [&](int cc0, int rr0, int cc1, int rr1) {
+                        for (int rr = rr0; rr <= rr1; ++rr)
+                            for (int cc = cc0; cc <= cc1; ++cc)
+                                if (inBounds(cc, rr) && tile(cc, rr).road) return true;
+                        return false;
+                    };
+                    int facings[4];
+                    int numFacings = 0;
+                    if (anyRoad(c, r - 1, c + pw - 1, r - 1)) facings[numFacings++] = 0;
+                    if (anyRoad(c - 1, r, c - 1, r + pd - 1)) facings[numFacings++] = 1;
+                    if (anyRoad(c, r + pd, c + pw - 1, r + pd)) facings[numFacings++] = 2;
+                    if (anyRoad(c + pw, r, c + pw, r + pd - 1)) facings[numFacings++] = 3;
+                    const std::uint32_t fh = tileHash(c, r, 0xFACE5u);
+                    const int turns = numFacings > 0
+                                          ? facings[fh % static_cast<std::uint32_t>(numFacings)]
+                                          : static_cast<int>(fh & 3u);
+
+                    // Odd turns need the building generated with swapped lot
+                    // extents so the quarter-turn lands it back on the plot;
+                    // the per-turn offsets rebase the origin-rotated mesh
+                    // onto the lot rectangle.
+                    const bool swapDims = (turns & 1) != 0;
+                    const procgen::TriMesh& bm =
+                        cachedBuilding(kind, level, tier, variant, pw, pd, swapDims);
+                    const float pad = ts * 0.10f;
+                    const float lotX = x0 + pad, lotZ = z0 + pad;
+                    const float lotW = pw * ts - 2.0f * pad, lotD = pd * ts - 2.0f * pad;
+                    const float genW = swapDims ? lotD : lotW;
+                    const float genD = swapDims ? lotW : lotD;
+                    switch (turns) {
+                        case 1:
+                            procgen::appendTriMeshRotated(bm, {lotX, 0.0f, lotZ + genW}, 1,
+                                                          {0.0f, 0.0f, 0.0f}, tint, scene);
+                            break;
+                        case 2:
+                            procgen::appendTriMeshRotated(bm, {lotX + genW, 0.0f, lotZ + genD}, 2,
+                                                          {0.0f, 0.0f, 0.0f}, tint, scene);
+                            break;
+                        case 3:
+                            procgen::appendTriMeshRotated(bm, {lotX + genD, 0.0f, lotZ}, 3,
+                                                          {0.0f, 0.0f, 0.0f}, tint, scene);
+                            break;
+                        default:
+                            procgen::appendTriMesh(bm, {lotX, 0.0f, lotZ}, tint, scene);
+                            break;
                     }
-
-                    const float pad = ts * (0.14f - 0.05f * lvl);
-                    const float height = (0.25f + lvl * 2.0f) * heightMul;
-                    UiColor col = mix(mix(zc, flavorTint, 0.55f), UiColor(1, 1, 1, 1), 0.10f * lvl);
-                    if (!t.powered) col = mix(col, kBad, 0.5f);  // brown-out tint
-                    addBox(builder, x0 + pad, z0 + pad, x1 - pad, z1 - pad, 0.0f, height, col);
                 } else {
                     // Zoned but undeveloped: a faint tinted marker flush with the ground.
-                    const UiColor tint = mix(mix(kGrassAlt, kGrass, t.scenicPhase), zc, 0.35f);
+                    const UiColor tint = mix(seasonalGrass(mix(kGrassAlt, kGrass, t.scenicPhase)), zc, 0.35f);
                     const float pad = ts * 0.08f;
                     builder.addQuad({x0 + pad, 0.015f, z0 + pad}, {x1 - pad, 0.015f, z0 + pad},
                                     {x1 - pad, 0.015f, z1 - pad}, {x0 + pad, 0.015f, z1 - pad}, tint);
+                }
+            } else {
+                // Pure grass parcel: deterministic ambient trees. Parcels that
+                // face a road get street trees at a high rate; open meadow
+                // gets a sparse scatter. Hash-driven, so placement is stable
+                // across rebuilds without stored state.
+                const bool byRoad = (inBounds(c, r - 1) && tile(c, r - 1).road) ||
+                                    (inBounds(c, r + 1) && tile(c, r + 1).road) ||
+                                    (inBounds(c - 1, r) && tile(c - 1, r).road) ||
+                                    (inBounds(c + 1, r) && tile(c + 1, r).road);
+                const std::uint32_t h = tileHash(c, r, 0x7EE0F00Du);
+                if (h % 1000u < (byRoad ? 450u : 90u)) {
+                    const std::uint32_t variant = (h >> 10) % kTreeVariants;
+                    const float jx = 0.30f + 0.40f * static_cast<float>((h >> 13) & 0xffu) / 255.0f;
+                    const float jz = 0.30f + 0.40f * static_cast<float>((h >> 21) & 0xffu) / 255.0f;
+                    procgen::appendTriMesh(cachedTree(variant), {x0 + jx * ts, 0.0f, z0 + jz * ts},
+                                           {1.0f, 1.0f, 1.0f}, scene);
+                    // A second tree on some road-facing parcels reads as a planted row.
+                    if (byRoad && (h & 1u)) {
+                        procgen::appendTriMesh(cachedTree((variant + 3u) % kTreeVariants),
+                                               {x0 + (1.0f - jx) * ts, 0.0f, z0 + (1.0f - jz) * ts},
+                                               {1.0f, 1.0f, 1.0f}, scene);
+                    }
+                }
+                // Autumn: pumpkins appear in yards along the streets — a
+                // little cluster per lucky parcel.
+                const std::uint32_t hp = tileHash(c, r, 0xF00D5EEDu);
+                if (autumn && hp % 1000u < (byRoad ? 280u : 50u)) {
+                    const int count = 1 + static_cast<int>((hp >> 12) % 3u);
+                    for (int i = 0; i < count; ++i) {
+                        const std::uint32_t hi = hp ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                        const float px = 0.18f + 0.64f * static_cast<float>(hi & 0xffu) / 255.0f;
+                        const float pz = 0.18f + 0.64f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f;
+                        procgen::appendTriMesh(cachedPumpkin(hi >> 16),
+                                               {x0 + px * ts, 0.0f, z0 + pz * ts},
+                                               {1.0f, 1.0f, 1.0f}, scene);
+                    }
                 }
             }
         }
@@ -1104,19 +1498,399 @@ ImportedScene CityBuilderApp::buildCityScene() const {
     return scene;
 }
 
+const procgen::TriMesh& CityBuilderApp::cachedBuilding(procgen::BuildingKind kind, int level,
+                                                       int tier, std::uint32_t variant, int plotW,
+                                                       int plotD, bool swapDims) const {
+    const std::uint32_t key = ((static_cast<std::uint32_t>(kind) & 0xfu) << 24) |
+                              ((static_cast<std::uint32_t>(level) & 0xfu) << 20) |
+                              ((static_cast<std::uint32_t>(tier) & 0xfu) << 16) |
+                              ((variant & 0xfu) << 12) |
+                              ((static_cast<std::uint32_t>(plotW) & 0xfu) << 8) |
+                              ((static_cast<std::uint32_t>(plotD) & 0xfu) << 4) |
+                              (swapDims ? 1u : 0u);
+    const auto it = m_buildingCache.find(key);
+    if (it != m_buildingCache.end()) {
+        return it->second;
+    }
+    procgen::BuildingDesc desc;
+    // Development level doubles as the architectural era: parcels start as
+    // 1890s brick, densify into 1930s deco setbacks, and top out as 1960s
+    // curtain-wall modernism.
+    desc.era = level <= 1   ? procgen::Era::E1890s
+               : level == 2 ? procgen::Era::E1930s
+                            : procgen::Era::E1960s;
+    desc.kind = kind;
+    desc.level = level;
+    desc.wealthTier = tier;
+    const float pad = kTileWorldSize * 0.10f;
+    const float lotW = static_cast<float>(plotW) * kTileWorldSize - 2.0f * pad;
+    const float lotD = static_cast<float>(plotD) * kTileWorldSize - 2.0f * pad;
+    desc.lotWidth = swapDims ? lotD : lotW;
+    desc.lotDepth = swapDims ? lotW : lotD;
+    desc.seed = key * 0x9E3779B9u;
+    return m_buildingCache.emplace(key, procgen::generateBuilding(desc)).first->second;
+}
+
+const procgen::TriMesh& CityBuilderApp::cachedTree(std::uint32_t variant) const {
+    variant %= kTreeVariants;
+    const std::uint32_t key = (static_cast<std::uint32_t>(m_season) << 8) | variant;
+    const auto it = m_treeCache.find(key);
+    if (it != m_treeCache.end()) {
+        return it->second;
+    }
+    return m_treeCache
+        .emplace(key, procgen::generateTree(variant, 0xA11CE5u + variant * 977u, m_season))
+        .first->second;
+}
+
+const procgen::TriMesh& CityBuilderApp::cachedPumpkin(std::uint32_t variant) const {
+    constexpr std::uint32_t kPumpkinVariants = 4;
+    if (m_pumpkinMeshes.empty()) {
+        m_pumpkinMeshes.reserve(kPumpkinVariants);
+        for (std::uint32_t i = 0; i < kPumpkinVariants; ++i) {
+            m_pumpkinMeshes.push_back(procgen::generatePumpkin(0xF00Du + i * 131u));
+        }
+    }
+    return m_pumpkinMeshes[variant % kPumpkinVariants];
+}
+
+const procgen::TriMesh& CityBuilderApp::cachedPowerPole(std::uint32_t variant) const {
+    if (m_poleMeshes.empty()) {
+        m_poleMeshes.reserve(kPoleVariants);
+        for (std::uint32_t i = 0; i < kPoleVariants; ++i) {
+            m_poleMeshes.push_back(procgen::generatePowerPole(0xB01Eu + i * 197u));
+        }
+    }
+    return m_poleMeshes[variant % kPoleVariants];
+}
+
+const procgen::TriMesh& CityBuilderApp::cachedStreetlamp(std::uint32_t variant) const {
+    if (m_lampMeshes.empty()) {
+        m_lampMeshes.reserve(kLampVariants);
+        for (std::uint32_t i = 0; i < kLampVariants; ++i) {
+            m_lampMeshes.push_back(procgen::generateStreetlamp(0x7A4Fu + i * 211u));
+        }
+    }
+    return m_lampMeshes[variant % kLampVariants];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ambient traffic
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+// Right-hand lane offset from the road centre, in tile units. Asphalt spans
+// 0.16..0.84 across a tile, so lane centres sit at ±0.17 from the middle.
+constexpr float kLaneOffset = 0.17f;
+constexpr float kCarsPerRoadTile = 0.18f;
+constexpr int kMaxCars = 44;
+}  // namespace
+
+void CityBuilderApp::respawnVehicle(Vehicle& v) {
+    // Reservoir-sample a random road tile so we don't need a stored road list.
+    int found = 0;
+    short pickC = -1, pickR = -1;
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            if (!tile(c, r).road) continue;
+            ++found;
+            m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+            if (static_cast<int>((m_trafficRng >> 8) % static_cast<std::uint32_t>(found)) == 0) {
+                pickC = static_cast<short>(c);
+                pickR = static_cast<short>(r);
+            }
+        }
+    }
+    v.cx = pickC;
+    v.cr = pickR;
+    v.t = 0.0f;
+    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    v.variant = static_cast<std::uint8_t>((m_trafficRng >> 8) % kCarVariants);
+    v.speed = 1.0f + 0.5f * static_cast<float>((m_trafficRng >> 16) & 0xffu) / 255.0f;
+    v.inX = 1;
+    v.inZ = 0;
+    if (pickC >= 0) {
+        pickExit(v);
+        v.inX = v.outX;
+        v.inZ = v.outZ;
+    }
+}
+
+bool CityBuilderApp::pickExit(Vehicle& v) {
+    struct Dir {
+        signed char x, z;
+    };
+    constexpr Dir kDirs[4] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    Dir options[4];
+    int optionCount = 0;
+    bool straightAvailable = false;
+    for (const Dir& d : kDirs) {
+        if (d.x == -v.inX && d.z == -v.inZ) continue;  // no U-turns unless dead end
+        if (!inBounds(v.cx + d.x, v.cr + d.z) || !tile(v.cx + d.x, v.cr + d.z).road) continue;
+        options[optionCount++] = d;
+        if (d.x == v.inX && d.z == v.inZ) straightAvailable = true;
+    }
+    if (optionCount == 0) {
+        // Dead end: turn back if the road behind still exists.
+        if (inBounds(v.cx - v.inX, v.cr - v.inZ) && tile(v.cx - v.inX, v.cr - v.inZ).road) {
+            v.outX = static_cast<signed char>(-v.inX);
+            v.outZ = static_cast<signed char>(-v.inZ);
+            return true;
+        }
+        return false;
+    }
+    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    const std::uint32_t roll = m_trafficRng >> 8;
+    if (straightAvailable && roll % 100u < 62u) {
+        v.outX = v.inX;
+        v.outZ = v.inZ;
+    } else {
+        const Dir d = options[roll % static_cast<std::uint32_t>(optionCount)];
+        v.outX = d.x;
+        v.outZ = d.z;
+    }
+    return true;
+}
+
+void CityBuilderApp::updateVehicles(float dt) {
+    // Fleet size tracks the road network; cars fade in as the city grows.
+    const int target = std::min(kMaxCars, static_cast<int>(kCarsPerRoadTile * static_cast<float>(m_numRoad)));
+    while (static_cast<int>(m_vehicles.size()) < target) {
+        Vehicle v;
+        respawnVehicle(v);
+        if (v.cx < 0) break;  // no roads at all
+        m_vehicles.push_back(v);
+    }
+    if (static_cast<int>(m_vehicles.size()) > target) {
+        m_vehicles.resize(static_cast<std::size_t>(target));
+    }
+
+    for (Vehicle& v : m_vehicles) {
+        // Road bulldozed underneath: find a new home.
+        if (!inBounds(v.cx, v.cr) || !tile(v.cx, v.cr).road) {
+            respawnVehicle(v);
+            if (v.cx < 0) continue;
+        }
+        v.t += v.speed * dt;
+        int guard = 0;
+        while (v.t >= 1.0f && guard++ < 4) {
+            v.t -= 1.0f;
+            v.cx = static_cast<short>(v.cx + v.outX);
+            v.cr = static_cast<short>(v.cr + v.outZ);
+            v.inX = v.outX;
+            v.inZ = v.outZ;
+            if (!inBounds(v.cx, v.cr) || !tile(v.cx, v.cr).road || !pickExit(v)) {
+                respawnVehicle(v);
+                break;
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Weather
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+constexpr int kMaxRainDrops = 520;
+constexpr int kMaxSnowDrops = 380;
+}  // namespace
+
+void CityBuilderApp::respawnDrop(WeatherDrop& d, bool atTop) {
+    m_weatherRng = m_weatherRng * 1664525u + 1013904223u;
+    const std::uint32_t h = m_weatherRng >> 8;
+    // Spawn box tracks the camera focus so precipitation always fills the view.
+    const float span = m_camZoom * 1.25f + 4.0f;
+    d.x = m_camFocusX + span * (static_cast<float>(h & 0x3ffu) / 511.5f - 1.0f);
+    d.z = m_camFocusZ + span * (static_cast<float>((h >> 10) & 0x3ffu) / 511.5f - 1.0f);
+    d.phase = static_cast<float>((h >> 20) & 0xffu) * 0.0246f;
+    d.speed = 0.8f + 0.4f * static_cast<float>((h >> 4) & 0xffu) / 255.0f;
+    d.y = atTop ? 5.5f + 2.5f * static_cast<float>((h >> 14) & 0xffu) / 255.0f
+                : 8.0f * static_cast<float>((h >> 6) & 0x3ffu) / 1023.0f;
+}
+
+void CityBuilderApp::updateWeather(float dt) {
+    m_weatherTimer -= dt;
+    if (m_weatherTimer <= 0.0f) {
+        m_weatherRng = m_weatherRng * 1664525u + 1013904223u;
+        const std::uint32_t roll = (m_weatherRng >> 8) % 100u;
+        std::uint32_t wetChance = 25u;
+        switch (m_season) {
+            case procgen::Season::Spring: wetChance = 40u; break;
+            case procgen::Season::Summer: wetChance = 22u; break;
+            case procgen::Season::Autumn: wetChance = 38u; break;
+            case procgen::Season::Winter: wetChance = 45u; break;
+        }
+        const bool wet = roll < wetChance;
+        m_weatherTarget = !wet ? Weather::Clear
+                               : (m_season == procgen::Season::Winter ? Weather::Snow : Weather::Rain);
+        m_weatherTimer = 18.0f + static_cast<float>((m_weatherRng >> 16) % 22u);
+    }
+
+    // Intensity ramps so storms roll in and clear out instead of popping.
+    if (m_weatherTarget != Weather::Clear) m_weather = m_weatherTarget;
+    const float target = m_weatherTarget == Weather::Clear ? 0.0f : 1.0f;
+    const float step = 0.5f * dt;
+    m_weatherIntensity += std::clamp(target - m_weatherIntensity, -step, step);
+    if (m_weatherTarget == Weather::Clear && m_weatherIntensity <= 0.01f) {
+        m_weather = Weather::Clear;
+    }
+
+    const bool snow = m_weather == Weather::Snow;
+    const int maxDrops = snow ? kMaxSnowDrops : kMaxRainDrops;
+    const int active = static_cast<int>(m_weatherIntensity * static_cast<float>(maxDrops));
+    while (static_cast<int>(m_drops.size()) < active) {
+        WeatherDrop d;
+        respawnDrop(d, false);
+        m_drops.push_back(d);
+    }
+    if (static_cast<int>(m_drops.size()) > active) {
+        m_drops.resize(static_cast<std::size_t>(active));
+    }
+
+    const float fall = snow ? 1.1f : 7.5f;
+    for (WeatherDrop& d : m_drops) {
+        d.y -= fall * d.speed * dt;
+        if (snow) {
+            // Lazy sinusoidal sway so flakes drift instead of plummeting.
+            d.x += std::sin(m_time * 1.7f + d.phase) * 0.35f * dt;
+            d.z += std::cos(m_time * 1.3f + d.phase) * 0.25f * dt;
+        }
+        if (d.y < 0.0f) respawnDrop(d, true);
+    }
+}
+
+render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
+    m_actorVertices.clear();
+    m_actorIndices.clear();
+    m_actorDraws.clear();
+    if (m_carMeshes.empty()) {
+        m_carMeshes.reserve(kCarVariants);
+        for (std::uint32_t i = 0; i < kCarVariants; ++i) {
+            m_carMeshes.push_back(procgen::generateVehicle(0xCA5133Du + i * 7919u));
+        }
+    }
+
+    const float ts = kTileWorldSize;
+    for (const Vehicle& v : m_vehicles) {
+        if (v.cx < 0) continue;
+        // Quadratic bezier across the tile: entry/exit points sit on the
+        // right-hand lane of the incoming/outgoing directions; the control
+        // point is the intersection of the two lane lines, which folds turns
+        // into smooth arcs and leaves straights linear.
+        const float cx = (static_cast<float>(v.cx) + 0.5f) * ts;
+        const float cz = (static_cast<float>(v.cr) + 0.5f) * ts;
+        const float inX = static_cast<float>(v.inX), inZ = static_cast<float>(v.inZ);
+        const float outX = static_cast<float>(v.outX), outZ = static_cast<float>(v.outZ);
+        // Right-hand perpendicular of a direction (x,z) is (-z, x).
+        const float p0x = cx - 0.5f * inX * ts + (-inZ) * kLaneOffset * ts;
+        const float p0z = cz - 0.5f * inZ * ts + (inX)*kLaneOffset * ts;
+        const float p2x = cx + 0.5f * outX * ts + (-outZ) * kLaneOffset * ts;
+        const float p2z = cz + 0.5f * outZ * ts + (outX)*kLaneOffset * ts;
+        float p1x, p1z;
+        if (v.inX == v.outX && v.inZ == v.outZ) {
+            p1x = 0.5f * (p0x + p2x);
+            p1z = 0.5f * (p0z + p2z);
+        } else {
+            p1x = cx + (-inZ) * kLaneOffset * ts + (-outZ) * kLaneOffset * ts;
+            p1z = cz + (inX)*kLaneOffset * ts + (outX)*kLaneOffset * ts;
+        }
+        const float t = v.t, u = 1.0f - t;
+        const float px = u * u * p0x + 2.0f * u * t * p1x + t * t * p2x;
+        const float pz = u * u * p0z + 2.0f * u * t * p1z + t * t * p2z;
+        float vx = 2.0f * u * (p1x - p0x) + 2.0f * t * (p2x - p1x);
+        float vz = 2.0f * u * (p1z - p0z) + 2.0f * t * (p2z - p1z);
+        const float vlen = std::sqrt(vx * vx + vz * vz);
+        if (vlen > 1e-5f) {
+            vx /= vlen;
+            vz /= vlen;
+        } else {
+            vx = inX;
+            vz = inZ;
+        }
+
+        // Rotate the +X-facing car mesh onto the velocity heading and place it.
+        const procgen::TriMesh& mesh = m_carMeshes[v.variant % m_carMeshes.size()];
+        const std::uint32_t base = static_cast<std::uint32_t>(m_actorVertices.size());
+        for (const ImportedScenePackedVertex& src : mesh.vertices) {
+            ImportedScenePackedVertex dst = src;
+            const float lx = src.position[0], lz = src.position[2];
+            dst.position[0] = px + lx * vx - lz * vz;
+            dst.position[2] = pz + lx * vz + lz * vx;
+            dst.position[1] = src.position[1] + 0.02f;  // ride on the asphalt surface
+            const float nx = src.normal[0], nz = src.normal[2];
+            dst.normal[0] = nx * vx - nz * vz;
+            dst.normal[2] = nx * vz + nz * vx;
+            m_actorVertices.push_back(dst);
+        }
+        for (const std::uint32_t index : mesh.indices) {
+            m_actorIndices.push_back(base + index);
+        }
+    }
+
+    // Precipitation: crossed double-sided quads per drop (thin tall streaks
+    // for rain, small flakes for snow), lit as upward-facing so they stay
+    // uniformly bright at any camera yaw.
+    if (!m_drops.empty()) {
+        const bool snow = m_weather == Weather::Snow;
+        const float w = snow ? 0.014f : 0.0045f;
+        const float len = snow ? 0.016f : 0.17f;
+        const float cr = snow ? 0.93f : 0.60f;
+        const float cg = snow ? 0.95f : 0.68f;
+        const float cb = snow ? 0.98f : 0.78f;
+        auto pushQuad = [&](const Vector3& a, const Vector3& b, const Vector3& cVert,
+                            const Vector3& dVert) {
+            const std::uint32_t base = static_cast<std::uint32_t>(m_actorVertices.size());
+            for (const Vector3& p : {a, b, cVert, dVert}) {
+                ImportedScenePackedVertex v{};
+                v.position[0] = p.x;
+                v.position[1] = p.y;
+                v.position[2] = p.z;
+                v.normal[1] = 1.0f;
+                v.color[0] = cr;
+                v.color[1] = cg;
+                v.color[2] = cb;
+                m_actorVertices.push_back(v);
+            }
+            // Both windings so the quad survives backface culling from any yaw.
+            for (const std::uint32_t i :
+                 {base, base + 1u, base + 2u, base, base + 2u, base + 3u,
+                  base, base + 2u, base + 1u, base, base + 3u, base + 2u}) {
+                m_actorIndices.push_back(i);
+            }
+        };
+        for (const WeatherDrop& d : m_drops) {
+            pushQuad({d.x - w, d.y, d.z}, {d.x + w, d.y, d.z}, {d.x + w, d.y + len, d.z},
+                     {d.x - w, d.y + len, d.z});
+            pushQuad({d.x, d.y, d.z - w}, {d.x, d.y, d.z + w}, {d.x, d.y + len, d.z + w},
+                     {d.x, d.y + len, d.z - w});
+        }
+    }
+
+    if (!m_actorIndices.empty()) {
+        m_actorDraws.push_back(
+            ImportedScenePackedDraw{0, static_cast<std::uint32_t>(m_actorIndices.size())});
+    }
+    render::ImportedActorFrameData data;
+    data.vertices = m_actorVertices;
+    data.indices = m_actorIndices;
+    data.draws = m_actorDraws;
+    return data;
+}
+
 render::CameraPose CityBuilderApp::computeCameraPose() const {
     render::CameraPose cam{};
-    cam.orthographic = true;
-    cam.orthoHalfHeight = m_camZoom;
+    cam.orthographic = false;
+    cam.orthoHalfHeight = m_camZoom;  // kept meaningful for any ortho fallback math
     cam.yawDegrees = m_camYawDeg;
     cam.pitchDegrees = kCamPitchDeg;
-    cam.fovDegrees = 50.0f;  // unused in orthographic mode, kept sane regardless
+    cam.fovDegrees = kDioramaFovDeg;
 
     const float yawR = odai::math::radians(cam.yawDegrees);
     const float pitchR = odai::math::radians(cam.pitchDegrees);
     const float cp = std::cos(pitchR);
     const Vector3 fwd{std::cos(yawR) * cp, std::sin(pitchR), std::sin(yawR) * cp};
-    const float distance = m_camZoom * 2.5f + 40.0f;  // orthographic: exact value doesn't affect scale
+    // Pull back until the narrow frustum's half-height at the focus point
+    // equals m_camZoom, so the zoom control keeps its orthographic meaning.
+    const float distance = m_camZoom / std::tan(odai::math::radians(kDioramaFovDeg) * 0.5f);
     cam.x = m_camFocusX - fwd.x * distance;
     cam.y = -fwd.y * distance;  // focus point sits on the y=0 ground plane
     cam.z = m_camFocusZ - fwd.z * distance;
@@ -1132,21 +1906,37 @@ bool CityBuilderApp::screenToGroundXZ(UiVec2 screenPx, const Layout& lo, float& 
     const float fwdX = cy * cp, fwdY = sp, fwdZ = sy * cp;
     const float rgtX = -sy, rgtZ = cy;                     // rgtY is always 0
     const float upX = -cy * sp, upY = cp, upZ = -sy * sp;
-    if (std::abs(fwdY) < 1e-4f) return false;
 
     const float ndcX = screenPx.x / lo.fw * 2.0f - 1.0f;
     const float ndcY = 1.0f - screenPx.y / lo.fh * 2.0f;
     const float aspect = lo.fw / lo.fh;
-    const float halfH = m_camera.orthoHalfHeight;
-    const float halfW = halfH * aspect;
 
-    const float roX = m_camera.x + rgtX * ndcX * halfW + upX * ndcY * halfH;
-    const float roY = m_camera.y + upY * ndcY * halfH;
-    const float roZ = m_camera.z + rgtZ * ndcX * halfW + upZ * ndcY * halfH;
-    const float t = -roY / fwdY;
+    float roX, roY, roZ, rdX, rdY, rdZ;
+    if (m_camera.orthographic) {
+        const float halfH = m_camera.orthoHalfHeight;
+        const float halfW = halfH * aspect;
+        roX = m_camera.x + rgtX * ndcX * halfW + upX * ndcY * halfH;
+        roY = m_camera.y + upY * ndcY * halfH;
+        roZ = m_camera.z + rgtZ * ndcX * halfW + upZ * ndcY * halfH;
+        rdX = fwdX;
+        rdY = fwdY;
+        rdZ = fwdZ;
+    } else {
+        // Perspective: rays fan out from the eye through the image plane,
+        // matching perspectiveVulkan(fovY, aspect) in the renderer.
+        const float tanHalf = std::tan(odai::math::radians(m_camera.fovDegrees) * 0.5f);
+        roX = m_camera.x;
+        roY = m_camera.y;
+        roZ = m_camera.z;
+        rdX = fwdX + rgtX * ndcX * tanHalf * aspect + upX * ndcY * tanHalf;
+        rdY = fwdY + upY * ndcY * tanHalf;
+        rdZ = fwdZ + rgtZ * ndcX * tanHalf * aspect + upZ * ndcY * tanHalf;
+    }
+    if (std::abs(rdY) < 1e-5f) return false;
+    const float t = -roY / rdY;
     if (t < 0.0f) return false;
-    outX = roX + t * fwdX;
-    outZ = roZ + t * fwdZ;
+    outX = roX + t * rdX;
+    outZ = roZ + t * rdZ;
     return true;
 }
 
@@ -1155,6 +1945,7 @@ UiVec2 CityBuilderApp::worldToScreen(float wx, float wy, float wz, const Layout&
     const float pitch = odai::math::radians(m_camera.pitchDegrees);
     const float cp = std::cos(pitch), sp = std::sin(pitch);
     const float cy = std::cos(yaw), sy = std::sin(yaw);
+    const float fwdX = cy * cp, fwdY = sp, fwdZ = sy * cp;
     const float rgtX = -sy, rgtZ = cy;                     // rgtY is always 0
     const float upX = -cy * sp, upY = cp, upZ = -sy * sp;
 
@@ -1163,10 +1954,20 @@ UiVec2 CityBuilderApp::worldToScreen(float wx, float wy, float wz, const Layout&
     const float camY = dx * upX + dy * upY + dz * upZ;
 
     const float aspect = lo.fw / lo.fh;
-    const float halfH = m_camera.orthoHalfHeight;
-    const float halfW = halfH * aspect;
-    const float ndcX = halfW > 0.0f ? camX / halfW : 0.0f;
-    const float ndcY = halfH > 0.0f ? camY / halfH : 0.0f;
+    float ndcX = 0.0f, ndcY = 0.0f;
+    if (m_camera.orthographic) {
+        const float halfH = m_camera.orthoHalfHeight;
+        const float halfW = halfH * aspect;
+        ndcX = halfW > 0.0f ? camX / halfW : 0.0f;
+        ndcY = halfH > 0.0f ? camY / halfH : 0.0f;
+    } else {
+        const float camFwd = dx * fwdX + dy * fwdY + dz * fwdZ;  // view depth
+        if (camFwd > 1e-4f) {
+            const float tanHalf = std::tan(odai::math::radians(m_camera.fovDegrees) * 0.5f);
+            ndcX = camX / (camFwd * tanHalf * aspect);
+            ndcY = camY / (camFwd * tanHalf);
+        }
+    }
     return UiVec2{(ndcX * 0.5f + 0.5f) * lo.fw, (1.0f - (ndcY * 0.5f + 0.5f)) * lo.fh};
 }
 
@@ -1294,7 +2095,10 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
     const float cy = lo.topBar.minY + lo.topBar.height() * 0.5f;
 
     textLeft(m_uiFontBold, "OdaiCity", 16.0f * s, cy - 9.0f * s, kText);
-    const std::string date = std::string(kMonths[m_month]) + " · Year " + std::to_string(m_year);
+    std::string date = std::string(kMonths[m_month]) + " · Year " + std::to_string(m_year) +
+                       " · " + seasonName(m_season);
+    if (m_weather == Weather::Rain) date += " · Rain";
+    else if (m_weather == Weather::Snow) date += " · Snow";
     textLeft(m_uiFont, date, 16.0f * s, cy + 9.0f * s, kTextDim);
 
     auto chip = [&](float x, std::string_view label, std::string_view value, const UiColor& col) {

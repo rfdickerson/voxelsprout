@@ -499,24 +499,16 @@ void RendererBackend::clearGpuScene() {
     m_importedTerrainDrawCount = 0;
     m_importedStaticDrawCount = 0;
     m_importedWaterIndexCount = 0;
-    for (RtImportedSceneRecord& record : m_rtImportedSceneRecords) {
-        if (record.blas.handle != VK_NULL_HANDLE && m_destroyAccelerationStructureKhr != nullptr) {
-            m_destroyAccelerationStructureKhr(m_device, record.blas.handle, nullptr);
-            record.blas.handle = VK_NULL_HANDLE;
-        }
-        if (record.blas.storageBufferHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(record.blas.storageBufferHandle);
-            record.blas.storageBufferHandle = kInvalidBufferHandle;
-        }
-        record.blas.deviceAddress = 0;
-        record.blas.primitiveCount = 0;
-        destroyRtGeometryBuffers(m_bufferAllocator, record.geometry);
-        record.geometryResident = false;
-        record.dirty = true;
-    }
-    if (!m_rtImportedSceneRecords.empty()) {
-        markRayTracingSceneDirty();
-    }
+    // m_rtImportedSceneRecords (BLAS + geometry buffers) are intentionally NOT
+    // touched here. Every real caller of clearGpuScene() (via
+    // clearImportedSceneMeshes()) calls destroyRayTracingScene() immediately
+    // afterward, which tears down the same records safely behind a
+    // vkQueueWaitIdle(). Destroying them here first — with no wait — used to
+    // race an in-flight frame that could still be reading the BLAS during
+    // acceleration-structure builds or RT shading, and rendered that later
+    // wait useless since the handles were already gone. On heavier scenes
+    // (longer frame times widen the race window) this surfaced as GPU hangs,
+    // including on shutdown's subsequent vkDeviceWaitIdle().
 }
 
 void RendererBackend::clearImportedSceneMeshes() {

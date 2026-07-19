@@ -66,7 +66,13 @@ protected:
 
     // Flush the UI tree onto the draw list (appending, not resetting) then submit
     // the frame to the renderer. Call at the end of onRender().
-    void submitFrame(const render::CameraPose& camera, float simulationAlpha = 0.0f);
+    // importedActors, when non-null, is per-frame dynamic geometry (packed
+    // vertex-color format) streamed through the FrameArena — use it for small
+    // animated meshes (vehicles, units) that would be far too expensive to
+    // re-upload via uploadImportedScene() every frame. The spans must stay
+    // alive through the call only.
+    void submitFrame(const render::CameraPose& camera, float simulationAlpha = 0.0f,
+                     const render::ImportedActorFrameData* importedActors = nullptr);
 
     GLFWwindow*    m_window = nullptr;
     render::Renderer m_renderer;
