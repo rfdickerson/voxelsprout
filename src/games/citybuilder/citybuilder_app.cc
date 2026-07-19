@@ -74,6 +74,29 @@ constexpr float kDioramaFovDeg = 20.0f;
 constexpr float kCamMinZoom  = 6.0f;
 constexpr float kCamMaxZoom  = 70.0f;
 
+// ── Tuning knobs ─────────────────────────────────────────────────────────────
+// The systemic feel of the city lives in these numbers — balance by turning
+// them while playing, not by editing formulas inline.
+constexpr int   kPowerRadius          = 9;       // a plant's direct glow, roads or not
+constexpr int   kFireProtectRadius    = 6;       // fire dept coverage splat (also its amenity ring)
+constexpr float kFireBaseChance       = 0.0001f; // per developed tile per month
+constexpr float kFireIndustrialMul    = 3.0f;    // industry burns easiest
+constexpr float kFireOldEraMul        = 2.0f;    // 1890s wood/brick (low develop) is tinder
+constexpr float kFireDrySummerMul     = 1.8f;    // clear summer months are fire season
+constexpr float kFireCoverageCut      = 0.75f;   // ignition removed by full fire coverage
+constexpr float kFireSpreadChance     = 0.50f;   // per burning neighbour per month
+constexpr float kFireSpreadWetCut     = 0.55f;   // rain/snow damps spread
+constexpr float kFireSpreadCoverCut   = 0.70f;   // fire dept coverage damps spread
+constexpr int   kFireBurnMonths       = 4;       // uncovered burn duration
+constexpr int   kFireBurnMonthsCovered = 2;      // fire dept nearby: knocked down fast
+constexpr int   kCharClearMonths      = 10;      // rubble self-clears after ~a year (+hash jitter)
+constexpr int   kCharNuisanceRadius   = 3;       // burnt lots drag the neighbourhood
+constexpr float kCharNuisancePeak     = 0.30f;
+constexpr float kCongestionStart      = 1.2f;    // trafficLoad where a road reads as jammed
+constexpr float kCongestionDecay      = 0.25f;   // per-second EMA decay of trafficLoad
+constexpr int   kCongestionNuisanceRadius = 2;   // jammed arterials hurt frontage land value
+constexpr float kCongestionNuisancePeak   = 0.12f;
+
 struct ToolMeta {
     const char* tag;
     const char* name;
@@ -264,6 +287,30 @@ float buildingHeight(Building b) {
         case Building::Amphitheater: return 0.35f;
         case Building::Power:  return 2.6f;
         default:                return 1.0f;
+    }
+}
+
+// Spatial influence each municipal building splats into the desirability
+// fields (computeDesirability) — shared with the placement-time ring preview
+// in drawWorldOverlay so what the player is shown is exactly what the sim
+// uses. radius 0 = no influence.
+struct InfluenceSpec {
+    int   radius = 0;
+    float peak = 0.0f;
+    bool  nuisance = false;
+};
+
+constexpr InfluenceSpec buildingInfluence(Building b) {
+    switch (b) {
+        case Building::Park:         return {5, 0.55f, false};
+        case Building::Police:       return {6, 0.28f, false};
+        case Building::Fire:         return {kFireProtectRadius, 0.24f, false};
+        case Building::Clinic:       return {6, 0.24f, false};
+        case Building::School:       return {6, 0.30f, false};
+        case Building::Library:      return {5, 0.26f, false};
+        case Building::Amphitheater: return {7, 0.50f, false};  // culture draw
+        case Building::Power:        return {5, 0.45f, true};   // dirty neighbour
+        default:                     return {};
     }
 }
 
@@ -514,8 +561,7 @@ void CityBuilderApp::recomputeStats() {
     m_numLibrary = m_numAmphitheater = 0;
     float residents = 0.0f, comJobs = 0.0f, indJobs = 0.0f;
 
-    constexpr int kRoadReach   = 3;   // Chebyshev tiles a road services
-    constexpr int kPowerRadius = 9;   // a plant's own direct glow, roads or not
+    constexpr int kRoadReach = 3;   // Chebyshev tiles a road services
 
     std::vector<std::pair<int, int>> powerPlants;
 
@@ -634,6 +680,9 @@ void CityBuilderApp::recomputeStats() {
     float happyTarget = 46.0f + 0.15f * m_education + 0.15f * m_health +
                         20.0f * parkCov + 12.0f * safety + 14.0f * cultureCov +
                         (m_powerCoverage - 1.0f) * 35.0f - 4.0f;
+    // Active fires and standing rubble weigh on the city's mood.
+    happyTarget -= std::min(12.0f, static_cast<float>(m_burningTiles) * 1.5f +
+                                       static_cast<float>(m_charredTiles) * 0.4f);
     happyTarget = std::clamp(happyTarget, 0.0f, 100.0f);
     m_happiness = lerpf(m_happiness, happyTarget, m_statEase);
 
@@ -669,20 +718,20 @@ void CityBuilderApp::computeDesirability() {
             const Tile& t = tile(c, r);
             if (t.terrain == Terrain::Water) splat(amenity, c, r, 3, 0.10f);  // scenic waterfront
             if (t.bldgOrigin) {
-                switch (t.building) {
-                    case Building::Park:   splat(amenity, c, r, 5, 0.55f); break;
-                    case Building::Police: splat(amenity, c, r, 6, 0.28f); break;
-                    case Building::Fire:   splat(amenity, c, r, 6, 0.24f); break;
-                    case Building::Clinic: splat(amenity, c, r, 6, 0.24f); break;
-                    case Building::School: splat(amenity, c, r, 6, 0.30f); break;
-                    case Building::Library: splat(amenity, c, r, 5, 0.26f); break;
-                    case Building::Amphitheater: splat(amenity, c, r, 7, 0.50f); break;  // culture draw
-                    case Building::Power:  splat(nuisance, c, r, 5, 0.45f); break;  // dirty neighbour
-                    default: break;
-                }
+                const InfluenceSpec inf = buildingInfluence(t.building);
+                if (inf.radius > 0) splat(inf.nuisance ? nuisance : amenity, c, r, inf.radius, inf.peak);
             }
             if (t.zone == Zone::Industrial && t.develop > kDevEps) {
                 splat(nuisance, c, r, 4, 0.16f * t.develop);  // pollution / heavy traffic
+            }
+            if (t.charred) {
+                splat(nuisance, c, r, kCharNuisanceRadius, kCharNuisancePeak);  // burnt-out blight
+            }
+            if (t.road && t.trafficLoad > kCongestionStart) {
+                // Jammed arterials hurt the lots that front them — growth begets
+                // traffic begets falling land value, the classic feedback loop.
+                const float over = std::min(1.0f, (t.trafficLoad - kCongestionStart) / 2.5f);
+                splat(nuisance, c, r, kCongestionNuisanceRadius, kCongestionNuisancePeak * over);
             }
         }
     }
@@ -725,6 +774,11 @@ void CityBuilderApp::stepMonth() {
     // Grow / abandon each zoned parcel.
     for (Tile& t : m_tiles) {
         if (t.zone == Zone::None) continue;
+        if (t.fireTicks > 0) {  // burning down, not growing
+            t.develop = std::max(0.0f, t.develop - 0.25f);
+            continue;
+        }
+        if (t.charred) { t.develop = 0.0f; continue; }
         const float dem = t.zone == Zone::Residential ? m_resDemand
                           : t.zone == Zone::Commercial ? m_comDemand
                                                        : m_indDemand;
@@ -741,6 +795,8 @@ void CityBuilderApp::stepMonth() {
         }
         t.develop = std::clamp(t.develop, 0.0f, 3.0f);
     }
+
+    stepFire();
 
     // Post-growth census, easing the city quality stats toward their targets.
     m_statEase = 0.12f;
@@ -766,6 +822,117 @@ void CityBuilderApp::stepMonth() {
     }
     pushHistory();
     m_growthDirty = true;  // develop levels changed; re-extrude on the next cooldown tick
+}
+
+// Fire is the mechanic that couples the whole board: ignition odds read the
+// building era, zone, season, and weather; spread reads density; suppression
+// reads fire-dept coverage; and the charred aftermath feeds back into land
+// value (computeDesirability). Runs once per simulated month from stepMonth.
+void CityBuilderApp::stepFire() {
+    // Fire-dept coverage field, same linear-falloff splat as computeDesirability.
+    std::array<float, static_cast<std::size_t>(kGridW) * kGridH> cov{};
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            const Tile& t = tile(c, r);
+            if (!t.bldgOrigin || t.building != Building::Fire) continue;
+            for (int dr = -kFireProtectRadius; dr <= kFireProtectRadius; ++dr) {
+                for (int dc = -kFireProtectRadius; dc <= kFireProtectRadius; ++dc) {
+                    if (!inBounds(c + dc, r + dr)) continue;
+                    const float d = std::sqrt(static_cast<float>(dc * dc + dr * dr));
+                    if (d > kFireProtectRadius) continue;
+                    cov[static_cast<std::size_t>(r + dr) * kGridW + (c + dc)] +=
+                        1.0f - d / static_cast<float>(kFireProtectRadius);
+                }
+            }
+        }
+    }
+    const auto covAt = [&](int c, int r) {
+        return std::min(1.0f, cov[static_cast<std::size_t>(r) * kGridW + c]);
+    };
+    const auto rnd01 = [&]() -> float {
+        m_rng = m_rng * 1664525u + 1013904223u;
+        return static_cast<float>((m_rng >> 8) & 0xFFFFFFu) / 16777216.0f;
+    };
+    const auto ignite = [&](int c, int r) {
+        Tile& t = tile(c, r);
+        t.fireTicks = static_cast<std::uint8_t>(covAt(c, r) > 0.45f ? kFireBurnMonthsCovered
+                                                                    : kFireBurnMonths);
+    };
+    const float wet = m_weatherIntensity;  // 0 clear .. 1 full rain/snow
+
+    // Snapshot the currently burning tiles first so this month's new ignitions
+    // don't spread or burn down in the same month they start.
+    std::vector<std::pair<int, int>> burning;
+    for (int r = 0; r < kGridH; ++r)
+        for (int c = 0; c < kGridW; ++c)
+            if (tile(c, r).fireTicks > 0) burning.emplace_back(c, r);
+
+    // Spread pass: each burning tile rolls against its 4-neighbours.
+    static constexpr int kDc[4] = {1, -1, 0, 0};
+    static constexpr int kDr[4] = {0, 0, 1, -1};
+    for (const auto& [bc, br] : burning) {
+        for (int k = 0; k < 4; ++k) {
+            const int nc = bc + kDc[k], nr = br + kDr[k];
+            if (!inBounds(nc, nr)) continue;
+            const Tile& nt = tile(nc, nr);
+            if (nt.zone == Zone::None || nt.develop <= kDevEps || nt.fireTicks > 0 || nt.charred)
+                continue;
+            const float chance = kFireSpreadChance * (1.0f - kFireSpreadWetCut * wet) *
+                                 (1.0f - kFireSpreadCoverCut * covAt(nc, nr));
+            if (rnd01() < chance) ignite(nc, nr);
+        }
+    }
+
+    // Burn down the snapshot; a tile that runs out becomes charred rubble.
+    for (const auto& [bc, br] : burning) {
+        Tile& t = tile(bc, br);
+        if (--t.fireTicks == 0) {
+            t.charred = true;
+            t.charTicks = 0;
+            t.develop = 0.0f;
+        }
+    }
+
+    // Fresh ignitions across the developed city.
+    const bool drySummer = m_season == procgen::Season::Summer && m_weather == Weather::Clear;
+    int newIgnitions = 0;
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            const Tile& t = tile(c, r);
+            if (t.zone == Zone::None || t.develop <= kDevEps || t.fireTicks > 0 || t.charred)
+                continue;
+            float chance = kFireBaseChance;
+            if (t.zone == Zone::Industrial) chance *= kFireIndustrialMul;
+            if (t.develop < 1.5f) chance *= kFireOldEraMul;  // 1890s-era wood/brick
+            if (drySummer) chance *= kFireDrySummerMul;
+            chance *= 1.0f - 0.8f * wet;
+            chance *= 1.0f - kFireCoverageCut * covAt(c, r);
+            if (rnd01() < chance) {
+                ignite(c, r);
+                ++newIgnitions;
+            }
+        }
+    }
+
+    // Rubble slowly clears itself (hash-jittered so a burnt block doesn't
+    // vanish in one frame), and the fire census refreshes for the HUD/mood.
+    int burningNow = 0, charredNow = 0;
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            Tile& t = tile(c, r);
+            if (t.charred) {
+                if (++t.charTicks > kCharClearMonths + static_cast<int>(tileHash(c, r, 0xA5Bu) % 8u)) {
+                    t.charred = false;
+                    t.charTicks = 0;
+                }
+            }
+            if (t.fireTicks > 0) ++burningNow;
+            if (t.charred) ++charredNow;
+        }
+    }
+    if (newIgnitions > 0 && m_burningTiles == 0) flash("Fire reported!");
+    m_burningTiles = burningNow;
+    m_charredTiles = charredNow;
 }
 
 bool CityBuilderApp::charge(double cost) {
@@ -799,7 +966,11 @@ void CityBuilderApp::applyTool(int c, int r) {
             if (t.terrain == Terrain::Water) { flash("Can't zone water"); break; }
             if (t.building != Building::None || t.road) { flash("Bulldoze first"); break; }
             if (t.zone == z) break;  // idempotent — no charge while dragging
-            if (charge(cost)) { t.zone = z; t.develop = 0.0f; m_sceneDirty = true; }
+            if (charge(cost)) {
+                t.zone = z; t.develop = 0.0f;
+                t.fireTicks = 0; t.charred = false; t.charTicks = 0;  // re-zoning clears the lot
+                m_sceneDirty = true;
+            }
             break;
         }
         case Tool::Road:
@@ -837,6 +1008,11 @@ void CityBuilderApp::bulldoze(int c, int r) {
         t.zone = Zone::None;
         t.develop = 0.0f;
     }
+    // Bulldozing extinguishes and clears the lot — dozing a lane of parcels
+    // ahead of a spreading fire is a deliberate firebreak play.
+    t.fireTicks = 0;
+    t.charred = false;
+    t.charTicks = 0;
 }
 
 bool CityBuilderApp::placeBuilding(int c, int r, Building b) {
@@ -1148,7 +1324,7 @@ ImportedScene CityBuilderApp::buildCityScene() const {
         if (!inBounds(c, r)) return false;
         const Tile& pt = tile(c, r);
         return pt.terrain == Terrain::Grass && pt.zone == z && !pt.road &&
-               pt.building == Building::None &&
+               pt.building == Building::None && pt.fireTicks == 0 && !pt.charred &&
                plotIndex[static_cast<std::size_t>(r) * kGridW + c] < 0;
     };
     for (int r = 0; r < kGridH; ++r) {
@@ -1366,6 +1542,25 @@ ImportedScene CityBuilderApp::buildCityScene() const {
             }
 
             if (t.zone != Zone::None) {
+                if (t.charred) {
+                    // Burnt-out lot: a low ash slab plus a couple of debris
+                    // chunks, hash-jittered so a burned block reads as ruin,
+                    // not a tidy grid of grey tiles.
+                    const UiColor ash  = UiColor::fromRgbHex(0x2E2A26);
+                    const UiColor soot = UiColor::fromRgbHex(0x453D34);
+                    const float pad = ts * 0.10f;
+                    addBox(builder, x0 + pad, z0 + pad, x1 - pad, z1 - pad, 0.0f, 0.09f, ash);
+                    const std::uint32_t h = tileHash(c, r, 0xC1DE7u);
+                    for (int i = 0; i < 2; ++i) {
+                        const std::uint32_t hi = h ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                        const float dx = 0.22f + 0.42f * static_cast<float>(hi & 0xffu) / 255.0f;
+                        const float dz = 0.22f + 0.42f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f;
+                        const float dh = 0.16f + 0.16f * static_cast<float>((hi >> 16) & 0xffu) / 255.0f;
+                        addBox(builder, x0 + dx * ts - 0.08f, z0 + dz * ts - 0.08f,
+                               x0 + dx * ts + 0.08f, z0 + dz * ts + 0.08f, 0.0f, dh, soot);
+                    }
+                    continue;
+                }
                 const UiColor zc = t.zone == Zone::Residential ? kZoneR
                                    : t.zone == Zone::Commercial ? kZoneC
                                                                 : kZoneI;
@@ -1392,6 +1587,7 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                     procgen::Color3 tint{1.0f, 1.0f, 1.0f};
                     const bool powered = plot ? plot->powered : t.powered;
                     if (!powered) tint = procgen::Color3{0.55f, 0.45f, 0.40f};  // brown-out tint
+                    if (t.fireTicks > 0) tint = procgen::Color3{0.42f, 0.28f, 0.20f};  // scorched
 
                     // Face the door toward a road on the plot perimeter
                     // (hash-picked when it fronts several). Turn k rotates
@@ -1581,20 +1777,31 @@ namespace {
 // Right-hand lane offset from the road centre, in tile units. Asphalt spans
 // 0.16..0.84 across a tile, so lane centres sit at ±0.17 from the middle.
 constexpr float kLaneOffset = 0.17f;
-constexpr float kCarsPerRoadTile = 0.18f;
-constexpr int kMaxCars = 44;
+// Fleet size tracks population (not road count) so traffic is a truthful
+// signal of city activity — an empty grid of roads stays quiet.
+constexpr int kMaxCars = 72;
+constexpr int kCarsBase = 4;
+constexpr int kPopPerCar = 55;
 }  // namespace
 
 void CityBuilderApp::respawnVehicle(Vehicle& v) {
-    // Reservoir-sample a random road tile so we don't need a stored road list.
-    int found = 0;
+    // Weighted reservoir-sample over road tiles (no stored road list): a road's
+    // weight is the development around it, so downtown streets are busy and a
+    // dead industrial cul-de-sac stays quiet — traffic as a truthful heat map.
+    float totalW = 0.0f;
     short pickC = -1, pickR = -1;
     for (int r = 0; r < kGridH; ++r) {
         for (int c = 0; c < kGridW; ++c) {
             if (!tile(c, r).road) continue;
-            ++found;
+            float dev = 0.0f;
+            for (int dr = -1; dr <= 1; ++dr)
+                for (int dc = -1; dc <= 1; ++dc)
+                    if (inBounds(c + dc, r + dr)) dev += tile(c + dc, r + dr).develop;
+            const float w = 0.3f + dev;
+            totalW += w;
             m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
-            if (static_cast<int>((m_trafficRng >> 8) % static_cast<std::uint32_t>(found)) == 0) {
+            const float roll = static_cast<float>((m_trafficRng >> 8) & 0xFFFFFFu) / 16777216.0f;
+            if (roll <= w / totalW) {
                 pickC = static_cast<short>(c);
                 pickR = static_cast<short>(r);
             }
@@ -1622,12 +1829,10 @@ bool CityBuilderApp::pickExit(Vehicle& v) {
     constexpr Dir kDirs[4] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
     Dir options[4];
     int optionCount = 0;
-    bool straightAvailable = false;
     for (const Dir& d : kDirs) {
         if (d.x == -v.inX && d.z == -v.inZ) continue;  // no U-turns unless dead end
         if (!inBounds(v.cx + d.x, v.cr + d.z) || !tile(v.cx + d.x, v.cr + d.z).road) continue;
         options[optionCount++] = d;
-        if (d.x == v.inX && d.z == v.inZ) straightAvailable = true;
     }
     if (optionCount == 0) {
         // Dead end: turn back if the road behind still exists.
@@ -1638,22 +1843,41 @@ bool CityBuilderApp::pickExit(Vehicle& v) {
         }
         return false;
     }
-    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
-    const std::uint32_t roll = m_trafficRng >> 8;
-    if (straightAvailable && roll % 100u < 62u) {
-        v.outX = v.inX;
-        v.outZ = v.inZ;
-    } else {
-        const Dir d = options[roll % static_cast<std::uint32_t>(optionCount)];
-        v.outX = d.x;
-        v.outZ = d.z;
+    // Commute-ish routing: weight each exit by the development around its
+    // destination tile (cars drift toward busy districts) with a straight-on
+    // preference so traffic still flows instead of jittering at every corner.
+    float weights[4];
+    float totalW = 0.0f;
+    for (int i = 0; i < optionCount; ++i) {
+        const Dir d = options[i];
+        const int tc = v.cx + d.x, tr = v.cr + d.z;
+        float dev = 0.0f;
+        static constexpr int kDc[4] = {1, -1, 0, 0};
+        static constexpr int kDr[4] = {0, 0, 1, -1};
+        for (int k = 0; k < 4; ++k)
+            if (inBounds(tc + kDc[k], tr + kDr[k])) dev += tile(tc + kDc[k], tr + kDr[k]).develop;
+        float w = 0.4f + 0.3f * dev;
+        if (d.x == v.inX && d.z == v.inZ) w *= 2.0f;  // keep-straight bias
+        weights[i] = w;
+        totalW += w;
     }
+    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    float roll = static_cast<float>((m_trafficRng >> 8) & 0xFFFFFFu) / 16777216.0f * totalW;
+    int chosen = optionCount - 1;
+    for (int i = 0; i < optionCount; ++i) {
+        if (roll < weights[i]) { chosen = i; break; }
+        roll -= weights[i];
+    }
+    v.outX = options[chosen].x;
+    v.outZ = options[chosen].z;
     return true;
 }
 
 void CityBuilderApp::updateVehicles(float dt) {
-    // Fleet size tracks the road network; cars fade in as the city grows.
-    const int target = std::min(kMaxCars, static_cast<int>(kCarsPerRoadTile * static_cast<float>(m_numRoad)));
+    // Fleet size tracks population, capped by the road network, so traffic
+    // density is a readout of how much city there actually is.
+    const int target = std::min({kMaxCars, m_numRoad / 2,
+                                 kCarsBase + m_population / kPopPerCar});
     while (static_cast<int>(m_vehicles.size()) < target) {
         Vehicle v;
         respawnVehicle(v);
@@ -1664,13 +1888,24 @@ void CityBuilderApp::updateVehicles(float dt) {
         m_vehicles.resize(static_cast<std::size_t>(target));
     }
 
+    // trafficLoad is an exponential moving average of car-seconds spent on
+    // each road tile: cars deposit dt below, the whole field decays here.
+    // computeDesirability reads it as a nuisance source on jammed roads.
+    const float decay = 1.0f - kCongestionDecay * dt;
+    for (Tile& t : m_tiles) t.trafficLoad *= decay;
+
     for (Vehicle& v : m_vehicles) {
         // Road bulldozed underneath: find a new home.
         if (!inBounds(v.cx, v.cr) || !tile(v.cx, v.cr).road) {
             respawnVehicle(v);
             if (v.cx < 0) continue;
         }
-        v.t += v.speed * dt;
+        Tile& here = tile(v.cx, v.cr);
+        here.trafficLoad += dt;
+        // Congestion is visible: cars slow down and queue on loaded tiles.
+        const float jam = std::max(0.0f, here.trafficLoad - kCongestionStart);
+        const float mul = std::max(0.4f, 1.0f / (1.0f + 0.35f * jam));
+        v.t += v.speed * mul * dt;
         int guard = 0;
         while (v.t >= 1.0f && guard++ < 4) {
             v.t -= 1.0f;
@@ -1826,18 +2061,14 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
         }
     }
 
-    // Precipitation: crossed double-sided quads per drop (thin tall streaks
-    // for rain, small flakes for snow), lit as upward-facing so they stay
-    // uniformly bright at any camera yaw.
-    if (!m_drops.empty()) {
-        const bool snow = m_weather == Weather::Snow;
-        const float w = snow ? 0.014f : 0.0045f;
-        const float len = snow ? 0.016f : 0.17f;
-        const float cr = snow ? 0.93f : 0.60f;
-        const float cg = snow ? 0.95f : 0.68f;
-        const float cb = snow ? 0.98f : 0.78f;
-        auto pushQuad = [&](const Vector3& a, const Vector3& b, const Vector3& cVert,
-                            const Vector3& dVert) {
+    // Shared crossed-quad particle emitter: two vertical quads at right angles,
+    // both windings so they survive backface culling from any yaw, lit as
+    // upward-facing so they stay uniformly bright. Used by precipitation,
+    // flames, and smoke — all stateless, driven by position + m_time.
+    const auto pushCross = [&](float x, float y, float z, float halfW, float len, float cr,
+                               float cg, float cb) {
+        const auto pushQuad = [&](const Vector3& a, const Vector3& b, const Vector3& cVert,
+                                  const Vector3& dVert) {
             const std::uint32_t base = static_cast<std::uint32_t>(m_actorVertices.size());
             for (const Vector3& p : {a, b, cVert, dVert}) {
                 ImportedScenePackedVertex v{};
@@ -1850,18 +2081,91 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
                 v.color[2] = cb;
                 m_actorVertices.push_back(v);
             }
-            // Both windings so the quad survives backface culling from any yaw.
             for (const std::uint32_t i :
                  {base, base + 1u, base + 2u, base, base + 2u, base + 3u,
                   base, base + 2u, base + 1u, base, base + 3u, base + 2u}) {
                 m_actorIndices.push_back(i);
             }
         };
+        pushQuad({x - halfW, y, z}, {x + halfW, y, z}, {x + halfW, y + len, z},
+                 {x - halfW, y + len, z});
+        pushQuad({x, y, z - halfW}, {x, y, z + halfW}, {x, y + len, z + halfW},
+                 {x, y + len, z - halfW});
+    };
+    const auto fract = [](float x) { return x - std::floor(x); };
+
+    // Fires and working smoke: stateless per-tile particles keyed off the grid
+    // each frame (no particle state to store — position, phase, and size all
+    // derive from the tile hash and m_time).
+    const float ts2 = kTileWorldSize;
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            const Tile& t = tile(c, r);
+            const float x0 = c * ts2, z0 = r * ts2;
+            if (t.fireTicks > 0) {
+                // Flickering flame tongues plus dark smoke climbing off the roof.
+                const std::uint32_t h0 = tileHash(c, r, 0xF1AEu);
+                for (int i = 0; i < 4; ++i) {
+                    const std::uint32_t hi = h0 ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                    const float fx = x0 + (0.20f + 0.60f * static_cast<float>(hi & 0xffu) / 255.0f) * ts2;
+                    const float fz = z0 + (0.20f + 0.60f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f) * ts2;
+                    const float flick = 0.55f + 0.45f * std::sin(m_time * (5.0f + static_cast<float>(hi & 7u)) +
+                                                                 static_cast<float>((hi >> 3) & 0xffu) * 0.1f);
+                    const float fh = (0.45f + 0.35f * static_cast<float>((hi >> 16) & 0xffu) / 255.0f) *
+                                     (0.6f + 0.4f * flick);
+                    if ((i & 1) != 0) pushCross(fx, 0.06f, fz, 0.09f, fh, 1.0f, 0.72f, 0.14f);
+                    else              pushCross(fx, 0.06f, fz, 0.11f, fh, 0.95f, 0.36f, 0.08f);
+                }
+                for (int i = 0; i < 2; ++i) {
+                    const std::uint32_t hi = h0 ^ (0x5851F42Du * static_cast<std::uint32_t>(i + 1));
+                    const float phase = static_cast<float>(hi & 0xffu) / 255.0f;
+                    const float f = fract(m_time * 0.18f + phase);
+                    const float sx = x0 + 0.5f * ts2 + std::sin(m_time * 0.6f + phase * 6.28f) * 0.15f * f;
+                    const float sz = z0 + 0.5f * ts2;
+                    const float g = 0.20f + 0.12f * f;  // dark soot brightening as it thins
+                    pushCross(sx, 0.8f + f * 1.8f, sz, 0.10f + 0.14f * f, 0.16f + 0.10f * f, g, g, g);
+                }
+            } else if (t.zone == Zone::Industrial && t.develop > 1.1f && t.powered &&
+                       tileHash(c, r, 0x580CEu) % 100u < 30u) {
+                // Where there's smoke there's economic activity: powered,
+                // developed industry puffs grey working smoke.
+                const std::uint32_t h0 = tileHash(c, r, 0x5A0CEu);
+                for (int i = 0; i < 3; ++i) {
+                    const std::uint32_t hi = h0 ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                    const float phase = static_cast<float>(hi & 0xffu) / 255.0f + static_cast<float>(i) / 3.0f;
+                    const float f = fract(m_time * 0.12f + phase);
+                    const float sx = x0 + (0.35f + 0.30f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f) * ts2;
+                    const float sz = z0 + (0.35f + 0.30f * static_cast<float>((hi >> 16) & 0xffu) / 255.0f) * ts2;
+                    const float baseY = 0.9f + 0.5f * std::min(2.0f, t.develop);
+                    const float g = 0.48f + 0.18f * f;
+                    pushCross(sx, baseY + f * 1.5f, sz, 0.05f + 0.09f * f, 0.09f + 0.07f * f, g, g, g);
+                }
+            } else if (t.bldgOrigin && t.building == Building::Power) {
+                // The plant's steam column — a lighter, taller plume.
+                const std::uint32_t h0 = tileHash(c, r, 0x57EAAu);
+                for (int i = 0; i < 3; ++i) {
+                    const std::uint32_t hi = h0 ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                    const float phase = static_cast<float>(hi & 0xffu) / 255.0f + static_cast<float>(i) / 3.0f;
+                    const float f = fract(m_time * 0.10f + phase);
+                    const float sx = x0 + 0.9f * ts2 + std::sin(m_time * 0.4f + phase * 6.28f) * 0.12f * f;
+                    const float sz = z0 + 0.9f * ts2;
+                    const float g = 0.72f + 0.14f * f;
+                    pushCross(sx, 2.6f + f * 2.2f, sz, 0.10f + 0.20f * f, 0.14f + 0.12f * f, g, g, g);
+                }
+            }
+        }
+    }
+
+    // Precipitation: thin tall streaks for rain, small flakes for snow.
+    if (!m_drops.empty()) {
+        const bool snow = m_weather == Weather::Snow;
+        const float w = snow ? 0.014f : 0.0045f;
+        const float len = snow ? 0.016f : 0.17f;
+        const float cr = snow ? 0.93f : 0.60f;
+        const float cg = snow ? 0.95f : 0.68f;
+        const float cb = snow ? 0.98f : 0.78f;
         for (const WeatherDrop& d : m_drops) {
-            pushQuad({d.x - w, d.y, d.z}, {d.x + w, d.y, d.z}, {d.x + w, d.y + len, d.z},
-                     {d.x - w, d.y + len, d.z});
-            pushQuad({d.x, d.y, d.z - w}, {d.x, d.y, d.z + w}, {d.x, d.y + len, d.z + w},
-                     {d.x, d.y + len, d.z - w});
+            pushCross(d.x, d.y, d.z, w, len, cr, cg, cb);
         }
     }
 
@@ -1974,6 +2278,39 @@ UiVec2 CityBuilderApp::worldToScreen(float wx, float wy, float wz, const Layout&
 void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
     const float s = lo.s;
 
+    // Influence preview: with a building tool selected, show the exact radius
+    // its desirability splat will cover (and, for the power plant, its direct
+    // powered radius) as rings projected onto the ground — the invisible
+    // spatial rule becomes a visible promise before money is spent.
+    const auto strokeGroundRing = [&](float cx, float cz, float radiusWorld, const UiColor& col,
+                                      float widthPx) {
+        constexpr int kSeg = 48;
+        UiVec2 pts[kSeg];
+        for (int i = 0; i < kSeg; ++i) {
+            const float a = static_cast<float>(i) / kSeg * 6.2831853f;
+            pts[i] = worldToScreen(cx + std::cos(a) * radiusWorld, 0.03f,
+                                   cz + std::sin(a) * radiusWorld, lo);
+        }
+        m_uiDrawList.addPolylineAA(pts, kSeg, col, widthPx, true);
+    };
+    if (!m_mouseOverUi && m_hoverC >= 0) {
+        const Building tb = toolBuilding(m_tool);
+        if (tb != Building::None) {
+            const int fp = footprintOf(tb);
+            const float ccx = (static_cast<float>(m_hoverC) + fp * 0.5f) * kTileWorldSize;
+            const float ccz = (static_cast<float>(m_hoverR) + fp * 0.5f) * kTileWorldSize;
+            const InfluenceSpec inf = buildingInfluence(tb);
+            if (inf.radius > 0) {
+                const UiColor rc = inf.nuisance ? kBad : kTools[static_cast<int>(m_tool)].color;
+                strokeGroundRing(ccx, ccz, inf.radius * kTileWorldSize, withA(rc, 0.85f), 2.0f * s);
+            }
+            if (tb == Building::Power) {
+                strokeGroundRing(ccx, ccz, kPowerRadius * kTileWorldSize, withA(kGold, 0.9f),
+                                 2.0f * s);
+            }
+        }
+    }
+
     // Hover footprint preview: project the ground-plane quad corners to screen
     // and stroke them, since the tile is a parallelogram under the iso camera.
     if (!m_mouseOverUi && m_hoverC >= 0) {
@@ -2004,7 +2341,9 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
         const Tile& ht = tile(m_hoverC, m_hoverR);
         if (ht.zone != Zone::None) {
             const char* cause = nullptr;
-            if (!ht.nearRoad) cause = "No road access";
+            if (ht.fireTicks > 0) cause = "ON FIRE!";
+            else if (ht.charred) cause = "Burnt-out ruins";
+            else if (!ht.nearRoad) cause = "No road access";
             else if (!ht.powered) cause = "No power";
             else if (ht.develop < 2.4f) {
                 const float dem = ht.zone == Zone::Residential ? m_resDemand
@@ -2288,6 +2627,8 @@ void CityBuilderApp::drawMinimap(const Layout& lo) {
             const Tile& t = tile(gc, gr);
             UiColor col;
             if (t.terrain == Terrain::Water) col = kWater;
+            else if (t.fireTicks > 0) col = UiColor::fromRgbHex(0xFF7A2E);  // burning: it pops
+            else if (t.charred) col = UiColor::fromRgbHex(0x3A3430);
             else if (t.building != Building::None) col = buildingRoof(t.building);
             else if (t.road) col = UiColor::fromRgbHex(0x55595F);
             else if (t.zone == Zone::Residential) col = withA(kZoneR, t.develop > kDevEps ? 1.0f : 0.4f);

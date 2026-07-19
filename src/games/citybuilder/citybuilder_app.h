@@ -49,6 +49,10 @@ struct Tile {
     bool  nearRoad = false;      // within reach of a road (required to develop)
     float desirability = 0.5f;   // 0..1 spatial land value; modulates growth target
     float scenicPhase = 0.0f;    // per-tile jitter so a block doesn't look uniform
+    float trafficLoad = 0.0f;    // EMA of car occupancy on this road tile (congestion)
+    std::uint8_t fireTicks = 0;  // months of burning left; 0 = not on fire
+    std::uint8_t charTicks = 0;  // months since burning out (charred rubble ages away)
+    bool  charred = false;       // burnt-out ruin: develop = 0, drags neighbours down
 };
 
 class CityBuilderApp : public engine::GameApp {
@@ -88,6 +92,7 @@ private:
     void computeDesirability();  // per-tile spatial land value (amenities vs. nuisances)
     void pushHistory();      // append a sample to each metric series
     void stepMonth();
+    void stepFire();         // ignition, spread, burn-out, and rubble aging
     void applyTool(int c, int r);
     void bulldoze(int c, int r);
     bool placeBuilding(int c, int r, Building b);
@@ -204,6 +209,7 @@ private:
     int m_numRoad = 0, m_numPolice = 0, m_numFire = 0, m_numClinic = 0;
     int m_numSchool = 0, m_numPark = 0, m_numPower = 0;
     int m_numLibrary = 0, m_numAmphitheater = 0;
+    int m_burningTiles = 0, m_charredTiles = 0;  // refreshed by stepFire()
     float m_statEase = 1.0f;               // easing rate applied to city quality stats
 
     int   m_speed = 1;                     // 1 / 2 / 3
