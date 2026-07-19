@@ -1073,6 +1073,8 @@ bool RendererBackend::createLogicalDevice() {
         m_enableDisplayTiming = false;
     }
     m_rayTracingRuntimeEnabled = loadRayTracingFunctions();
+    // Snapshot before strategyMapMode/setRayTracingEnabled can override it below.
+    m_rayTracingHardwareCapable = m_rayTracingRuntimeEnabled;
     loadHostImageCopyFunctions();
     loadDescriptorBufferFunctions();
     if (enableVrs) {
@@ -2488,6 +2490,7 @@ void RendererBackend::shutdown() {
     m_desktopCapabilityProbe = {};
     m_rayTracingCapabilityProbe = {};
     m_rayTracingRuntimeEnabled = false;
+    m_rayTracingHardwareCapable = false;
     m_rtMainPassImplemented = false;
     m_enabledAccelerationStructureFeatures = {};
     m_enabledRayQueryFeatures = {};

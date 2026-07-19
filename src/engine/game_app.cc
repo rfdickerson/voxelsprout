@@ -216,7 +216,8 @@ void GameApp::beginFrameDraw() {
     m_uiDrawList.reset({static_cast<float>(fbW), static_cast<float>(fbH)});
 }
 
-void GameApp::submitFrame(const render::CameraPose& camera, float simulationAlpha) {
+void GameApp::submitFrame(const render::CameraPose& camera, float simulationAlpha,
+                          const render::ImportedActorFrameData* importedActors) {
     m_uiContext.buildAppend(m_uiDrawList);
     // Custom cursor: drawn last so it renders above every widget. GameApp tools
     // have no mouselook mode, so it's always shown.
@@ -224,7 +225,7 @@ void GameApp::submitFrame(const render::CameraPose& camera, float simulationAlph
     m_renderer.setUiDrawData(m_uiDrawList.data());
     const render::VoxelPreview noPreview{};
     m_renderer.renderFrame(
-        m_emptyGrid, m_emptySimulation, camera, noPreview, simulationAlpha, {});
+        m_emptyGrid, m_emptySimulation, camera, noPreview, simulationAlpha, {}, importedActors);
 }
 
 } // namespace odai::engine

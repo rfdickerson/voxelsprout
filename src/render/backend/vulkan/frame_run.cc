@@ -620,7 +620,13 @@ void RendererBackend::renderFrame(
         // ~2-world-unit texels — every building sub-texel, shadows unresolvable).
         // Fit every cascade to the uploaded scene's bounding sphere instead; all
         // cascades match, so chooseShadowCascade() may pick any of them safely.
-        const bool orthoSceneFit = camera.orthographic && m_importedSceneBoundsValid;
+        // The same ballooning hits narrow-FOV perspective cameras over small
+        // scenes (CityBuilder's diorama camera), so scene-fit those too; large
+        // imported worlds keep the sliced perspective cascades.
+        constexpr float kSceneFitMaxRadius = 200.0f;
+        const bool orthoSceneFit =
+            m_importedSceneBoundsValid &&
+            (camera.orthographic || m_importedSceneBoundsRadius < kSceneFitMaxRadius);
         if (orthoSceneFit) {
             frustumCenter = odai::math::Vector3{
                 m_importedSceneBoundsCenter[0],

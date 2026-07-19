@@ -57,6 +57,15 @@ public:
     odai::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void setStrategyMapMode(bool enabled);
+    // App-level opt-out of the ray-traced BLAS/TLAS scene (shadows/reflections/
+    // voxel GI over ray queries). false unconditionally skips building and
+    // tearing down per-scene acceleration structures on every uploadImportedScene()
+    // call, even on hardware that supports it -- for apps (like CityBuilder) that
+    // never enable ShadowMode::RayTraced/Auto or RT-backed voxel GI, that
+    // per-upload BLAS churn is pure wasted GPU work. true only restores whatever
+    // the hardware/driver capability probe already determined at init() time; it
+    // can never force RT on where it isn't supported. Call any time after init().
+    void setRayTracingEnabled(bool enabled);
     // Opt-in UI-only rendering for showcase/tooling executables. Skips building the
     // 3D scene pipelines (pipe/imported/sky-cloud/water/grass, SSAO, hex terrain)
     // those tools cannot use. Must be called BEFORE init(); off by default.
@@ -100,6 +109,10 @@ public:
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
+    // Post-process depth of field (tilt-shift/diorama look). Focus is a view
+    // distance in world units; geometry within +-focusRange stays sharp and
+    // blur ramps to maxRadiusPixels beyond it.
+    void setDepthOfField(bool enabled, float focusDistance, float focusRange, float maxRadiusPixels);
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
     void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(
