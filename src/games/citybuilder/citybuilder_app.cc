@@ -128,6 +128,7 @@ const ToolMeta kTools[] = {
     {"LIB",  "Library",      "9", 550.0,  UiColor::fromRgbHex(0x8A5C3E)},
     {"AMPH", "Amphitheater", "0", 800.0,  UiColor::fromRgbHex(0xB08CD6)},
     {"PWR",  "Power Plant",  "-", 1200.0, UiColor::fromRgbHex(0xC9A227)},
+    {"MTCH", "Match",        "F", 25.0,   UiColor::fromRgbHex(0xE0642E)},
 };
 
 // ── Building "character" flavor: deterministic per-tile hash so a parcel's
@@ -374,6 +375,25 @@ procgen::TriMesh buildSimMesh(std::uint32_t variant) {
         emitPropBox(m, -0.020f, 0.0f, dz - 0.012f, -0.010f, 0.020f, dz + 0.012f, paw);
         emitPropBox(m, 0.016f, 0.0f, dz - 0.012f, 0.026f, 0.020f, dz + 0.012f, paw);
     }
+    return m;
+}
+
+// The fire truck: a proper red engine with a cab, a silver ladder on the back,
+// and dark wheel rails — facing +X like the other vehicles so the same heading
+// rotation applies. The flashing light bar is a per-frame particle, not mesh.
+procgen::TriMesh buildFireTruckMesh() {
+    const UiColor red    = UiColor::fromRgbHex(0xD6382A);
+    const UiColor darkRed = UiColor::fromRgbHex(0xA02A20);
+    const UiColor silver = UiColor::fromRgbHex(0xDCE2E6);
+    const UiColor tire   = UiColor::fromRgbHex(0x24262B);
+    procgen::TriMesh m;
+    m.boundsMin = {1e9f, 1e9f, 1e9f};
+    m.boundsMax = {-1e9f, -1e9f, -1e9f};
+    emitPropBox(m, -0.100f, 0.014f, -0.045f, 0.100f, 0.070f, 0.045f, red);     // body
+    emitPropBox(m, 0.030f, 0.070f, -0.040f, 0.095f, 0.108f, 0.040f, darkRed);  // cab
+    emitPropBox(m, -0.092f, 0.070f, -0.014f, 0.020f, 0.086f, 0.014f, silver);  // ladder
+    emitPropBox(m, -0.080f, 0.0f, -0.048f, -0.040f, 0.030f, 0.048f, tire);     // rear wheels
+    emitPropBox(m, 0.040f, 0.0f, -0.048f, 0.080f, 0.030f, 0.048f, tire);       // front wheels
     return m;
 }
 
@@ -981,16 +1001,20 @@ void CityBuilderApp::stepFire() {
             const Tile& nt = tile(nc, nr);
             if (nt.zone == Zone::None || nt.develop <= kDevEps || nt.fireTicks > 0 || nt.charred)
                 continue;
-            const float chance = kFireSpreadChance * (1.0f - kFireSpreadWetCut * wet) *
-                                 (1.0f - kFireSpreadCoverCut * covAt(nc, nr));
+            float chance = kFireSpreadChance * (1.0f - kFireSpreadWetCut * wet) *
+                           (1.0f - kFireSpreadCoverCut * covAt(nc, nr));
+            if (truckSuppressed(nc, nr)) chance *= 0.1f;  // the hose holds the line
             if (rnd01() < chance) ignite(nc, nr);
         }
     }
 
     // Burn down the snapshot; a tile that runs out becomes charred rubble.
+    // A parked truck hosing the tile knocks it down twice as fast.
     for (const auto& [bc, br] : burning) {
         Tile& t = tile(bc, br);
-        if (--t.fireTicks == 0) {
+        const std::uint8_t dec = truckSuppressed(bc, br) ? 2 : 1;
+        t.fireTicks = t.fireTicks > dec ? static_cast<std::uint8_t>(t.fireTicks - dec) : 0;
+        if (t.fireTicks == 0) {
             t.charred = true;
             t.charTicks = 0;
             t.develop = 0.0f;
@@ -1101,6 +1125,18 @@ void CityBuilderApp::applyTool(int c, int r) {
                 addFx((c + 0.5f) * kTileWorldSize, (r + 0.5f) * kTileWorldSize,
                       UiColor::fromRgbHex(0x9AA0A8), 0);
                 m_sceneDirty = true;
+            }
+            break;
+        case Tool::Match:
+            // The disaster button. Arson costs pocket money, works only on a
+            // developed parcel, and from there the fire is entirely systemic —
+            // your own fire department (and the weather) has to deal with it.
+            if (t.zone == Zone::None || t.develop <= kDevEps) { flash("Nothing to burn"); break; }
+            if (t.fireTicks > 0 || t.charred) break;
+            if (charge(cost)) {
+                t.fireTicks = kFireBurnMonths;
+                m_sceneDirty = true;
+                flash("Whoops! How did THAT happen?");
             }
             break;
         default:
@@ -1214,6 +1250,7 @@ void CityBuilderApp::onTick(float dt) {
     if (edgeDown(GLFW_KEY_9)) m_tool = Tool::Library;
     if (edgeDown(GLFW_KEY_0)) m_tool = Tool::Amphitheater;
     if (edgeDown(GLFW_KEY_MINUS)) m_tool = Tool::Power;
+    if (edgeDown(GLFW_KEY_F)) m_tool = Tool::Match;
 
     if (edgeDown(GLFW_KEY_SPACE)) m_paused = !m_paused;
     if (edgeDown(GLFW_KEY_G)) m_reportsOpen = !m_reportsOpen;
@@ -1241,6 +1278,7 @@ void CityBuilderApp::onTick(float dt) {
         // a believable pace at every game speed.
         updateVehicles(dt);
         updateSims(dt);
+        updateFireTrucks(dt);
     }
     // Weather is pure atmosphere — it keeps falling even while paused.
     updateWeather(dt);
@@ -2238,6 +2276,150 @@ void CityBuilderApp::updateSims(float dt) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Fire trucks
+// ─────────────────────────────────────────────────────────────────────────────
+bool CityBuilderApp::truckSuppressed(int c, int r) const {
+    for (const FireTruck& tk : m_trucks) {
+        if (!tk.parked) continue;
+        if (std::abs(tk.cx - c) <= 1 && std::abs(tk.cr - r) <= 1) return true;
+    }
+    return false;
+}
+
+bool CityBuilderApp::pickTruckExit(FireTruck& tk) {
+    if (tk.tgtC < 0) return false;
+    struct Dir {
+        signed char x, z;
+    };
+    constexpr Dir kDirs[4] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    int bestDist = std::numeric_limits<int>::max();
+    Dir best{0, 0};
+    bool found = false;
+    bool bestStraight = false;
+    for (const Dir& d : kDirs) {
+        if (d.x == -tk.inX && d.z == -tk.inZ) continue;  // prefer not to U-turn
+        const int nc = tk.cx + d.x, nr = tk.cr + d.z;
+        if (!inBounds(nc, nr) || !tile(nc, nr).road) continue;
+        const int dist = std::abs(nc - tk.tgtC) + std::abs(nr - tk.tgtR);
+        const bool straight = d.x == tk.inX && d.z == tk.inZ;
+        if (dist < bestDist || (dist == bestDist && straight && !bestStraight)) {
+            bestDist = dist;
+            best = d;
+            bestStraight = straight;
+            found = true;
+        }
+    }
+    if (!found) {
+        // Dead end: back out the way we came if the road still exists.
+        if (inBounds(tk.cx - tk.inX, tk.cr - tk.inZ) && tile(tk.cx - tk.inX, tk.cr - tk.inZ).road) {
+            tk.outX = static_cast<signed char>(-tk.inX);
+            tk.outZ = static_cast<signed char>(-tk.inZ);
+            return true;
+        }
+        return false;
+    }
+    tk.outX = best.x;
+    tk.outZ = best.z;
+    return true;
+}
+
+void CityBuilderApp::updateFireTrucks(float dt) {
+    if (m_burningTiles == 0 || m_numFire == 0) {
+        m_trucks.clear();
+        return;
+    }
+    // Nearest burning tile to a point — fires are few, so a grid scan is fine.
+    const auto nearestFire = [&](int fromC, int fromR, short& outC, short& outR) {
+        int bestDist = std::numeric_limits<int>::max();
+        outC = outR = -1;
+        for (int r = 0; r < kGridH; ++r) {
+            for (int c = 0; c < kGridW; ++c) {
+                if (tile(c, r).fireTicks == 0) continue;
+                const int dist = std::abs(c - fromC) + std::abs(r - fromR);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    outC = static_cast<short>(c);
+                    outR = static_cast<short>(r);
+                }
+            }
+        }
+        return outC >= 0;
+    };
+
+    // Roll trucks out of the stations while fires outnumber them (one truck
+    // per station, three tops). A truck stages on a road tile near its house —
+    // a station with no road nearby can't respond, which is systemic, not a bug.
+    const int want = std::min({3, m_numFire, m_burningTiles});
+    if (static_cast<int>(m_trucks.size()) < want) {
+        for (int r = 0; r < kGridH && static_cast<int>(m_trucks.size()) < want; ++r) {
+            for (int c = 0; c < kGridW && static_cast<int>(m_trucks.size()) < want; ++c) {
+                const Tile& t = tile(c, r);
+                if (!t.bldgOrigin || t.building != Building::Fire) continue;
+                short roadC = -1, roadR = -1;
+                for (int dr = -2; dr <= 2 && roadC < 0; ++dr)
+                    for (int dc = -2; dc <= 2 && roadC < 0; ++dc)
+                        if (inBounds(c + dc, r + dr) && tile(c + dc, r + dr).road) {
+                            roadC = static_cast<short>(c + dc);
+                            roadR = static_cast<short>(r + dr);
+                        }
+                if (roadC < 0) continue;
+                FireTruck tk;
+                tk.cx = roadC;
+                tk.cr = roadR;
+                if (!nearestFire(roadC, roadR, tk.tgtC, tk.tgtR)) continue;
+                if (pickTruckExit(tk)) {
+                    tk.inX = tk.outX;
+                    tk.inZ = tk.outZ;
+                }
+                m_trucks.push_back(tk);
+            }
+        }
+    }
+    if (static_cast<int>(m_trucks.size()) > want) {
+        m_trucks.resize(static_cast<std::size_t>(want));
+    }
+
+    for (FireTruck& tk : m_trucks) {
+        // Target went out (or was bulldozed): pick the next fire, or go home.
+        if (tk.tgtC < 0 || !inBounds(tk.tgtC, tk.tgtR) || tile(tk.tgtC, tk.tgtR).fireTicks == 0) {
+            tk.parked = false;
+            if (!nearestFire(tk.cx, tk.cr, tk.tgtC, tk.tgtR)) {
+                tk.tgtC = -1;  // updateFireTrucks clears the fleet once fires hit zero
+                continue;
+            }
+        }
+        if (tk.parked) continue;  // hosing — water arc handled in the actor pass
+        // Arrived next to the fire? Park and fight it.
+        if (std::abs(tk.cx - tk.tgtC) <= 1 && std::abs(tk.cr - tk.tgtR) <= 1) {
+            tk.parked = true;
+            continue;
+        }
+        if (!inBounds(tk.cx, tk.cr) || !tile(tk.cx, tk.cr).road) {
+            tk.tgtC = -1;  // road vanished under us; retarget next frame
+            continue;
+        }
+        tk.t += tk.speed * dt;
+        int guard = 0;
+        while (tk.t >= 1.0f && guard++ < 4) {
+            tk.t -= 1.0f;
+            tk.cx = static_cast<short>(tk.cx + tk.outX);
+            tk.cr = static_cast<short>(tk.cr + tk.outZ);
+            tk.inX = tk.outX;
+            tk.inZ = tk.outZ;
+            if (std::abs(tk.cx - tk.tgtC) <= 1 && std::abs(tk.cr - tk.tgtR) <= 1) {
+                tk.parked = true;
+                tk.t = 0.5f;  // stop mid-tile beside the blaze
+                break;
+            }
+            if (!inBounds(tk.cx, tk.cr) || !tile(tk.cx, tk.cr).road || !pickTruckExit(tk)) {
+                tk.tgtC = -1;
+                break;
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Weather
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
@@ -2325,6 +2507,7 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
             m_simMeshes.push_back(buildSimMesh(i));
         }
     }
+    if (m_truckMesh.vertices.empty()) m_truckMesh = buildFireTruckMesh();
 
     const float ts = kTileWorldSize;
     for (const Vehicle& v : m_vehicles) {
@@ -2468,6 +2651,74 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
                  {x, y + len, z - halfW});
     };
     const auto fract = [](float x) { return x - std::floor(x); };
+
+    // Fire trucks: same lane-bezier as the cars, plus a flashing red/blue
+    // light bar and — when parked at a blaze — a pulsing water arc from the
+    // truck to the burning tile.
+    for (const FireTruck& tk : m_trucks) {
+        if (tk.cx < 0) continue;
+        const float cx = (static_cast<float>(tk.cx) + 0.5f) * ts;
+        const float cz = (static_cast<float>(tk.cr) + 0.5f) * ts;
+        const float inX = static_cast<float>(tk.inX), inZ = static_cast<float>(tk.inZ);
+        const float outX = static_cast<float>(tk.outX), outZ = static_cast<float>(tk.outZ);
+        const float p0x = cx - 0.5f * inX * ts + (-inZ) * kLaneOffset * ts;
+        const float p0z = cz - 0.5f * inZ * ts + (inX)*kLaneOffset * ts;
+        const float p2x = cx + 0.5f * outX * ts + (-outZ) * kLaneOffset * ts;
+        const float p2z = cz + 0.5f * outZ * ts + (outX)*kLaneOffset * ts;
+        float p1x, p1z;
+        if (tk.inX == tk.outX && tk.inZ == tk.outZ) {
+            p1x = 0.5f * (p0x + p2x);
+            p1z = 0.5f * (p0z + p2z);
+        } else {
+            p1x = cx + (-inZ) * kLaneOffset * ts + (-outZ) * kLaneOffset * ts;
+            p1z = cz + (inX)*kLaneOffset * ts + (outX)*kLaneOffset * ts;
+        }
+        const float t = tk.t, u = 1.0f - t;
+        const float px = u * u * p0x + 2.0f * u * t * p1x + t * t * p2x;
+        const float pz = u * u * p0z + 2.0f * u * t * p1z + t * t * p2z;
+        float vx = 2.0f * u * (p1x - p0x) + 2.0f * t * (p2x - p1x);
+        float vz = 2.0f * u * (p1z - p0z) + 2.0f * t * (p2z - p1z);
+        const float vlen = std::sqrt(vx * vx + vz * vz);
+        if (vlen > 1e-5f) {
+            vx /= vlen;
+            vz /= vlen;
+        } else {
+            vx = inX;
+            vz = inZ;
+        }
+        const std::uint32_t base = static_cast<std::uint32_t>(m_actorVertices.size());
+        for (const ImportedScenePackedVertex& src : m_truckMesh.vertices) {
+            ImportedScenePackedVertex dst = src;
+            const float lx = src.position[0], lz = src.position[2];
+            dst.position[0] = px + lx * vx - lz * vz;
+            dst.position[2] = pz + lx * vz + lz * vx;
+            dst.position[1] = src.position[1] + 0.02f;
+            const float nx = src.normal[0], nz = src.normal[2];
+            dst.normal[0] = nx * vx - nz * vz;
+            dst.normal[2] = nx * vz + nz * vx;
+            m_actorVertices.push_back(dst);
+        }
+        for (const std::uint32_t index : m_truckMesh.indices) {
+            m_actorIndices.push_back(base + index);
+        }
+        // Light bar strobe above the cab: red / blue alternating.
+        const bool phase = fract(m_time * 4.0f) < 0.5f;
+        const float lbx = px + 0.06f * vx, lbz = pz + 0.06f * vz;
+        if (phase) pushCross(lbx, 0.145f, lbz, 0.020f, 0.028f, 1.0f, 0.15f, 0.10f);
+        else       pushCross(lbx, 0.145f, lbz, 0.020f, 0.028f, 0.20f, 0.35f, 1.0f);
+        // Water arc: droplets along a parabola from the truck to the fire.
+        if (tk.parked && tk.tgtC >= 0) {
+            const float tx = (static_cast<float>(tk.tgtC) + 0.5f) * ts;
+            const float tz = (static_cast<float>(tk.tgtR) + 0.5f) * ts;
+            for (int i = 0; i < 8; ++i) {
+                const float w = fract(m_time * 1.1f + static_cast<float>(i) / 8.0f);
+                const float wx = lerpf(px, tx, w);
+                const float wz = lerpf(pz, tz, w);
+                const float wy = 0.10f + std::sin(w * 3.14159f) * 0.55f;
+                pushCross(wx, wy, wz, 0.018f, 0.026f, 0.55f, 0.75f, 0.95f);
+            }
+        }
+    }
 
     // Fires and working smoke: stateless per-tile particles keyed off the grid
     // each frame (no particle state to store — position, phase, and size all
@@ -2970,6 +3221,7 @@ void CityBuilderApp::drawPalette(const Layout& lo) {
     };
 
     toolRow(Tool::Bulldoze);
+    toolRow(Tool::Match);
     y += 4.0f * s;
     header("ZONES");
     toolRow(Tool::ZoneR);

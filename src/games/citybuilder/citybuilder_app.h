@@ -65,6 +65,7 @@ public:
         ZoneR, ZoneC, ZoneI,
         Road,
         Police, Fire, Clinic, School, Park, Library, Amphitheater, Power,
+        Match,   // arson-on-demand: set one developed parcel alight, on purpose
         Count
     };
 
@@ -163,6 +164,25 @@ private:
     void updateSims(float dt);
     void respawnSim(Sim& s);
     bool pickSimExit(Sim& s);          // wander-y routing: parks and shops attract
+
+    // ── Fire trucks ──────────────────────────────────────────────────────────
+    // When something burns and the city has a Fire Dept, red trucks roll out
+    // from the station, navigate the road graph toward the nearest fire, park
+    // beside it, and hose it down (stepFire treats a parked truck as maximum
+    // coverage on the tiles around it). Light bar and water arc are stateless
+    // per-frame particles.
+    struct FireTruck {
+        short cx = 0, cr = 0;
+        signed char inX = 1, inZ = 0;
+        signed char outX = 1, outZ = 0;
+        float t = 0.0f;
+        float speed = 1.9f;            // sirens on — faster than traffic, no jams
+        bool  parked = false;
+        short tgtC = -1, tgtR = -1;    // burning tile being fought
+    };
+    void updateFireTrucks(float dt);
+    bool pickTruckExit(FireTruck& tk);  // goal-directed: descend distance to target
+    [[nodiscard]] bool truckSuppressed(int c, int r) const;  // parked truck hosing this tile?
 
     // ── Celebration FX ───────────────────────────────────────────────────────
     // Short-lived stateless particle bursts (zone puffs, build bursts, level-up
@@ -275,6 +295,8 @@ private:
     std::vector<procgen::TriMesh> m_carMeshes;             // lazily filled variants
     std::vector<Sim> m_sims;
     std::vector<procgen::TriMesh> m_simMeshes;             // lazily filled variants
+    std::vector<FireTruck> m_trucks;
+    procgen::TriMesh m_truckMesh;                          // lazily built
     std::vector<Fx> m_fx;
     std::uint32_t m_trafficRng = 0x51CA7B1u;
     // Per-frame actor stream scratch, reused to avoid per-frame allocation.
