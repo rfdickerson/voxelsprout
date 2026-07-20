@@ -92,7 +92,18 @@ constexpr float kFireIndustrialMul    = 3.0f;    // industry burns easiest
 constexpr float kFireOldEraMul        = 2.0f;    // 1890s wood/brick (low develop) is tinder
 constexpr float kFireDrySummerMul     = 1.8f;    // clear summer months are fire season
 constexpr float kFireCoverageCut      = 0.75f;   // ignition removed by full fire coverage
-constexpr float kFireSpreadChance     = 0.50f;   // per burning neighbour per month
+// Spread is kept below the ~0.5 site-percolation threshold on a square grid,
+// so an uncontained fire in a dense zone typically flares and burns out
+// locally rather than reliably spanning the whole connected cluster (0.50
+// used to sit exactly at that threshold, which is why one match could take
+// out an entire city). The dry-summer and industrial-target multipliers can
+// push it back toward — and past — that threshold, but only when the player
+// has actually stacked the bad conditions: a hot dry summer over an
+// uncovered all-industrial quarter. That's "something really bad happened,"
+// not baseline risk.
+constexpr float kFireSpreadChance     = 0.22f;   // per burning neighbour per month
+constexpr float kFireSpreadDrySummerMul = 1.6f;  // dry summer feeds spread, not just ignition
+constexpr float kFireSpreadIndustrialMul = 1.4f; // fuel/chemicals: industrial neighbours catch easier
 constexpr float kFireSpreadWetCut     = 0.55f;   // rain/snow damps spread
 constexpr float kFireSpreadCoverCut   = 0.70f;   // fire dept coverage damps spread
 constexpr int   kFireBurnMonths       = 4;       // uncovered burn duration
@@ -1045,6 +1056,7 @@ void CityBuilderApp::stepFire() {
                                                                     : kFireBurnMonths);
     };
     const float wet = m_weatherIntensity;  // 0 clear .. 1 full rain/snow
+    const bool drySummer = m_season == procgen::Season::Summer && m_weather == Weather::Clear;
 
     // Snapshot the currently burning tiles first so this month's new ignitions
     // don't spread or burn down in the same month they start.
@@ -1063,8 +1075,10 @@ void CityBuilderApp::stepFire() {
             const Tile& nt = tile(nc, nr);
             if (nt.zone == Zone::None || nt.develop <= kDevEps || nt.fireTicks > 0 || nt.charred)
                 continue;
-            float chance = kFireSpreadChance * (1.0f - kFireSpreadWetCut * wet) *
-                           (1.0f - kFireSpreadCoverCut * covAt(nc, nr));
+            float chance = kFireSpreadChance;
+            if (drySummer) chance *= kFireSpreadDrySummerMul;
+            if (nt.zone == Zone::Industrial) chance *= kFireSpreadIndustrialMul;
+            chance *= (1.0f - kFireSpreadWetCut * wet) * (1.0f - kFireSpreadCoverCut * covAt(nc, nr));
             if (truckSuppressed(nc, nr)) chance *= 0.1f;  // the hose holds the line
             if (rnd01() < chance) ignite(nc, nr);
         }
@@ -1105,7 +1119,6 @@ void CityBuilderApp::stepFire() {
     }
 
     // Fresh ignitions across the developed city.
-    const bool drySummer = m_season == procgen::Season::Summer && m_weather == Weather::Clear;
     for (int r = 0; r < kGridH; ++r) {
         for (int c = 0; c < kGridW; ++c) {
             const Tile& t = tile(c, r);
