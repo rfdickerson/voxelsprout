@@ -111,6 +111,27 @@ constexpr float kSimLaneOffset        = 0.40f;   // sidewalk band centre, from t
 constexpr std::uint32_t kSimVariants  = 10;      // last two are dog-walkers
 constexpr float kFxLife               = 1.15f;   // seconds a celebration burst lives
 constexpr std::size_t kMaxFx          = 96;
+// Severe weather: atmosphere first, funnel second. Indexed by procgen::Season
+// (Spring, Summer, Autumn, Winter).
+constexpr float kAtmoHeatSeason[4]    = {0.50f, 0.85f, 0.50f, 0.15f};
+constexpr float kAtmoCityHeatScale    = 0.0015f; // heat per unit of industrial develop/plants
+constexpr float kAtmoHeatEase         = 0.02f;   // per-second ease of heat toward its target
+constexpr float kAtmoChargeRate       = 0.010f;  // instability gain/sec in clear skies, x heat
+constexpr float kAtmoRainRelease      = 0.022f;  // instability spent/sec while raining
+constexpr float kStormSeverityThreshold   = 0.35f;  // above: thunderstorm (wind, lightning)
+constexpr float kTornadoSeverityThreshold = 0.55f;  // above: the storm carries a funnel
+constexpr float kLightningChance      = 0.40f;   // per-month strike odds scale at severity 1
+constexpr float kTornadoRadius        = 1.6f;    // damage radius, tiles
+constexpr float kTornadoDamageRate    = 0.9f;    // develop stripped per month at intensity 1
+constexpr float kTornadoIgniteChance  = 0.15f;   // downed lines: rubble catches fire
+constexpr float kTornadoWreckChance   = 0.45f;   // municipal building flattened per month in core
+constexpr float kTornadoDecay         = 0.012f;  // intensity lost per second, baseline
+constexpr float kTornadoCoolGroundDecay = 0.05f; // extra decay over water/parks/open land
+constexpr float kTornadoSpeed         = 1.1f;    // ground speed, tiles per second
+constexpr float kTornadoWanderRate    = 1.7f;    // heading random-walk strength
+constexpr float kTornadoWindFollow    = 0.20f;   // per-second blend toward the front wind
+constexpr float kTornadoHeatPull      = 0.35f;   // per-second blend toward warmer ground
+constexpr float kTornadoFleeRadius    = 6.0f;    // sims panic and run within this range
 
 struct ToolMeta {
     const char* tag;
@@ -593,6 +614,18 @@ bool CityBuilderApp::onInit() {
         m_month = 9;
         m_season = seasonForMonth(m_month);
     }
+    // ODAI_CITY_STORM=1: prime the atmosphere so the first rain front arrives
+    // severe — a dev aid for eyeballing the tornado without waiting a summer.
+    if (const std::string storm = readEnv("ODAI_CITY_STORM"); !storm.empty() && storm != "0") {
+        m_atmoHeat = 0.95f;
+        m_atmoInstability = 0.95f;
+        m_weatherTimer = 3.0f;
+        m_debugForceStorm = true;
+        if (m_season == procgen::Season::Winter) {  // snow fronts can't carry a funnel
+            m_month = 6;
+            m_season = seasonForMonth(m_month);
+        }
+    }
     recomputeStats();   // snap initial city stats to their targets
     pushHistory();      // first sample so the report charts open with data
     return true;
@@ -714,6 +747,10 @@ void CityBuilderApp::recomputeStats() {
         }
     }
     const float jobs = comJobs + indJobs;
+    // The city's heat island: dense industry and power plants warm the local
+    // atmosphere (indJobs is develop x 26, so this is the develop sum). Severe
+    // weather reads this — the player's own zoning helps brew its storms.
+    m_cityHeat = indJobs / 26.0f + static_cast<float>(m_numPower) * 3.0f;
 
     // Pass 2.5: power grid. A plant's direct glow (above) only reaches a fixed
     // radius, which stranded any zone built further out even when it was
@@ -927,6 +964,7 @@ void CityBuilderApp::stepMonth() {
         }
     }
 
+    stepTornadoDamage();
     stepFire();
 
     // Post-growth census, easing the city quality stats toward their targets.
@@ -1028,9 +1066,29 @@ void CityBuilderApp::stepFire() {
         }
     }
 
+    // Lightning: a severe storm overhead throws a strike or two at the
+    // developed city — and then its own rain suppresses the spread of the
+    // fires it started. Both halves are the existing systems.
+    int newIgnitions = 0;
+    if (m_weather == Weather::Rain && m_stormSeverity > kStormSeverityThreshold) {
+        for (int strike = 0; strike < 2; ++strike) {
+            if (rnd01() >= kLightningChance * m_stormSeverity) continue;
+            for (int attempt = 0; attempt < 24; ++attempt) {
+                const int c = static_cast<int>(rnd01() * kGridW);
+                const int r = static_cast<int>(rnd01() * kGridH);
+                if (!inBounds(c, r)) continue;
+                const Tile& t = tile(c, r);
+                if (t.zone == Zone::None || t.develop <= kDevEps || t.fireTicks > 0 || t.charred)
+                    continue;
+                ignite(c, r);
+                ++newIgnitions;
+                break;
+            }
+        }
+    }
+
     // Fresh ignitions across the developed city.
     const bool drySummer = m_season == procgen::Season::Summer && m_weather == Weather::Clear;
-    int newIgnitions = 0;
     for (int r = 0; r < kGridH; ++r) {
         for (int c = 0; c < kGridW; ++c) {
             const Tile& t = tile(c, r);
@@ -1286,6 +1344,9 @@ void CityBuilderApp::onTick(float dt) {
         updateVehicles(dt);
         updateSims(dt);
         updateFireTrucks(dt);
+        // The funnel is a sim object, not atmosphere: it must freeze on pause
+        // (pausing to gawk at a frozen tornado is a feature).
+        updateSevereWeather(dt);
     }
     // Weather is pure atmosphere — it keeps falling even while paused.
     updateWeather(dt);
@@ -1440,6 +1501,12 @@ void CityBuilderApp::onRender(float /*dt*/) {
     if (m_reportsOpen) drawReports(lo);
     drawWorldOverlay(lo);
     drawFlash(lo);
+
+    // Storm gloom: as a severe front rolls overhead the sun sinks toward the
+    // horizon, so the physical sky model golds and darkens the whole diorama —
+    // the light itself says the weather turned.
+    const float gloom = std::min(1.0f, m_stormSeverity * 1.3f) * m_weatherIntensity;
+    m_renderer.setSunAngles(50.0f, -38.0f + 16.0f * gloom);
 
     // Tilt-shift depth of field completes the diorama read: the ground at the
     // focus point stays sharp and the frame's near/far edges melt away like a
@@ -2232,6 +2299,18 @@ bool CityBuilderApp::pickSimExit(Sim& s) {
         }
         float w = 0.5f + pull;
         if (d.x == s.inX && d.z == s.inZ) w *= 1.3f;
+        // Flight: an active funnel nearby is the strongest repulsor on the
+        // board — steps toward it are all but refused, steps away favored.
+        // (This is the "everyone's little dogs run away" scene, produced by
+        // the same steering weights that make parks attractive.)
+        for (const Tornado& tor : m_tornadoes) {
+            const float curDx = (s.cx + 0.5f) - tor.x, curDz = (s.cr + 0.5f) - tor.z;
+            if (curDx * curDx + curDz * curDz > kTornadoFleeRadius * kTornadoFleeRadius) continue;
+            const float nextDx = (tc + 0.5f) - tor.x, nextDz = (tr + 0.5f) - tor.z;
+            const bool closingIn = nextDx * nextDx + nextDz * nextDz <
+                                   curDx * curDx + curDz * curDz;
+            w *= closingIn ? 0.1f : 2.5f;
+        }
         weights[i] = w;
         totalW += w;
     }
@@ -2249,8 +2328,13 @@ bool CityBuilderApp::pickSimExit(Sim& s) {
 
 void CityBuilderApp::updateSims(float dt) {
     // Foot traffic scales with population — a hamlet has a dog-walker or two,
-    // a boomtown has bustling sidewalks.
-    const int target = std::min({kMaxSims, m_numRoad, kSimsBase + m_population / kPopPerSim});
+    // a boomtown has bustling sidewalks. A severe storm empties them: people
+    // hurry indoors as it builds, which is itself a visible forecast.
+    const float stormQuiet =
+        1.0f - 0.7f * std::min(1.0f, m_stormSeverity * 1.5f) * m_weatherIntensity;
+    const int target = std::min(
+        {kMaxSims, m_numRoad,
+         static_cast<int>(static_cast<float>(kSimsBase + m_population / kPopPerSim) * stormQuiet)});
     while (static_cast<int>(m_sims.size()) < target) {
         Sim s;
         respawnSim(s);
@@ -2266,7 +2350,13 @@ void CityBuilderApp::updateSims(float dt) {
             respawnSim(s);
             if (s.cx < 0) continue;
         }
-        s.t += s.speed * dt;
+        // Panic: anyone (and their dog) near an active funnel breaks into a run.
+        float pace = 1.0f;
+        for (const Tornado& tor : m_tornadoes) {
+            const float dx = (s.cx + 0.5f) - tor.x, dz = (s.cr + 0.5f) - tor.z;
+            if (dx * dx + dz * dz < kTornadoFleeRadius * kTornadoFleeRadius) pace = 2.1f;
+        }
+        s.t += s.speed * pace * dt;
         int guard = 0;
         while (s.t >= 1.0f && guard++ < 4) {
             s.t -= 1.0f;
@@ -2331,8 +2421,8 @@ bool CityBuilderApp::pickTruckExit(FireTruck& tk) {
 }
 
 void CityBuilderApp::updateFireTrucks(float dt) {
-    if (m_burningTiles == 0 || m_numFire == 0) {
-        m_trucks.clear();
+    if (m_numFire == 0) {
+        m_trucks.clear();  // stations bulldozed out from under the fleet
         return;
     }
     // Nearest burning tile to a point — fires are few, so a grid scan is fine.
@@ -2357,7 +2447,7 @@ void CityBuilderApp::updateFireTrucks(float dt) {
     // per station, three tops). A truck stages on a road tile near its house —
     // a station with no road nearby can't respond, which is systemic, not a bug.
     const int want = std::min({3, m_numFire, m_burningTiles});
-    if (static_cast<int>(m_trucks.size()) < want) {
+    if (m_burningTiles > 0 && static_cast<int>(m_trucks.size()) < want) {
         for (int r = 0; r < kGridH && static_cast<int>(m_trucks.size()) < want; ++r) {
             for (int c = 0; c < kGridW && static_cast<int>(m_trucks.size()) < want; ++c) {
                 const Tile& t = tile(c, r);
@@ -2373,6 +2463,8 @@ void CityBuilderApp::updateFireTrucks(float dt) {
                 FireTruck tk;
                 tk.cx = roadC;
                 tk.cr = roadR;
+                tk.homeC = roadC;
+                tk.homeR = roadR;
                 if (!nearestFire(roadC, roadR, tk.tgtC, tk.tgtR)) continue;
                 if (pickTruckExit(tk)) {
                     tk.inX = tk.outX;
@@ -2382,27 +2474,44 @@ void CityBuilderApp::updateFireTrucks(float dt) {
             }
         }
     }
-    if (static_cast<int>(m_trucks.size()) > want) {
-        m_trucks.resize(static_cast<std::size_t>(want));
+    if (m_trucks.size() > 3u) {
+        m_trucks.resize(3u);  // hard fleet cap; returning trucks finish their drive
     }
 
     for (FireTruck& tk : m_trucks) {
-        // Target went out (or was bulldozed): pick the next fire, or go home.
-        if (tk.tgtC < 0 || !inBounds(tk.tgtC, tk.tgtR) || tile(tk.tgtC, tk.tgtR).fireTicks == 0) {
-            tk.parked = false;
-            if (!nearestFire(tk.cx, tk.cr, tk.tgtC, tk.tgtR)) {
-                tk.tgtC = -1;  // updateFireTrucks clears the fleet once fires hit zero
-                continue;
+        if (!tk.returning) {
+            // Target went out (or was bulldozed): next fire, or head home. The
+            // return trip uses the same descend-distance seeker — home is just
+            // another target — so the heroes visibly drive back to the station
+            // instead of vanishing the moment the last fire dies.
+            if (tk.tgtC < 0 || !inBounds(tk.tgtC, tk.tgtR) ||
+                tile(tk.tgtC, tk.tgtR).fireTicks == 0) {
+                tk.parked = false;
+                if (!nearestFire(tk.cx, tk.cr, tk.tgtC, tk.tgtR)) {
+                    tk.returning = true;
+                    tk.tgtC = tk.homeC;
+                    tk.tgtR = tk.homeR;
+                }
+            }
+        } else if (m_burningTiles > 0) {
+            // A new fire broke out mid-drive-home: turn the truck around.
+            short fc = -1, fr = -1;
+            if (nearestFire(tk.cx, tk.cr, fc, fr)) {
+                tk.returning = false;
+                tk.tgtC = fc;
+                tk.tgtR = fr;
             }
         }
+        if (tk.tgtC < 0) { tk.cx = -1; continue; }  // nowhere to go at all
         if (tk.parked) continue;  // hosing — water arc handled in the actor pass
-        // Arrived next to the fire? Park and fight it.
+        // Arrived? Beside a fire: park and fight. At the station: done.
         if (std::abs(tk.cx - tk.tgtC) <= 1 && std::abs(tk.cr - tk.tgtR) <= 1) {
-            tk.parked = true;
+            if (tk.returning) tk.cx = -1;  // backed into the bay; despawn below
+            else tk.parked = true;
             continue;
         }
         if (!inBounds(tk.cx, tk.cr) || !tile(tk.cx, tk.cr).road) {
-            tk.tgtC = -1;  // road vanished under us; retarget next frame
+            tk.cx = -1;  // road vanished under us
             continue;
         }
         tk.t += tk.speed * dt;
@@ -2414,16 +2523,21 @@ void CityBuilderApp::updateFireTrucks(float dt) {
             tk.inX = tk.outX;
             tk.inZ = tk.outZ;
             if (std::abs(tk.cx - tk.tgtC) <= 1 && std::abs(tk.cr - tk.tgtR) <= 1) {
-                tk.parked = true;
-                tk.t = 0.5f;  // stop mid-tile beside the blaze
+                if (tk.returning) {
+                    tk.cx = -1;
+                } else {
+                    tk.parked = true;
+                    tk.t = 0.5f;  // stop mid-tile beside the blaze
+                }
                 break;
             }
             if (!inBounds(tk.cx, tk.cr) || !tile(tk.cx, tk.cr).road || !pickTruckExit(tk)) {
-                tk.tgtC = -1;
+                tk.cx = -1;
                 break;
             }
         }
     }
+    std::erase_if(m_trucks, [](const FireTruck& tk) { return tk.cx < 0; });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2448,6 +2562,21 @@ void CityBuilderApp::respawnDrop(WeatherDrop& d, bool atTop) {
 }
 
 void CityBuilderApp::updateWeather(float dt) {
+    // Atmosphere: heat eases toward season + the city's own heat island, and
+    // is cooled by whatever is currently falling; instability charges during
+    // hot clear spells and is spent as rain. Neither is a dice roll — they are
+    // state the player can watch build (top-bar watch chip) and partly shapes
+    // (industrial sprawl warms, parks and water cool).
+    const float heatTarget =
+        clamp01(kAtmoHeatSeason[static_cast<int>(m_season)] + m_cityHeat * kAtmoCityHeatScale -
+                0.35f * m_weatherIntensity);
+    m_atmoHeat += (heatTarget - m_atmoHeat) * std::min(1.0f, kAtmoHeatEase * dt * 10.0f);
+    if (m_weatherIntensity < 0.1f) {
+        m_atmoInstability = clamp01(m_atmoInstability + kAtmoChargeRate * m_atmoHeat * dt);
+    } else {
+        m_atmoInstability = clamp01(m_atmoInstability - kAtmoRainRelease * m_weatherIntensity * dt);
+    }
+
     m_weatherTimer -= dt;
     if (m_weatherTimer <= 0.0f) {
         m_weatherRng = m_weatherRng * 1664525u + 1013904223u;
@@ -2459,10 +2588,28 @@ void CityBuilderApp::updateWeather(float dt) {
             case procgen::Season::Autumn: wetChance = 38u; break;
             case procgen::Season::Winter: wetChance = 45u; break;
         }
-        const bool wet = roll < wetChance;
+        bool wet = roll < wetChance;
+        if (m_debugForceStorm && !wet) { wet = true; m_debugForceStorm = false; }
         m_weatherTarget = !wet ? Weather::Clear
                                : (m_season == procgen::Season::Winter ? Weather::Snow : Weather::Rain);
+        // Each front carries a prevailing wind, and its severity is simply the
+        // atmosphere's state at the moment it arrives: heat x instability puts
+        // this front somewhere on the drizzle -> thunderstorm -> tornado
+        // continuum. Randomness only decides WHEN a front passes, never what
+        // the atmosphere had stored up for it.
+        if (wet) {
+            const float windAngle =
+                static_cast<float>((m_weatherRng >> 10) & 0xffu) / 255.0f * 6.2831853f;
+            m_windX = std::cos(windAngle);
+            m_windZ = std::sin(windAngle);
+            if (m_weatherTarget == Weather::Rain) {
+                m_stormSeverity = m_atmoHeat * m_atmoInstability;
+            }
+        }
         m_weatherTimer = 18.0f + static_cast<float>((m_weatherRng >> 16) % 22u);
+    }
+    if (m_weatherTarget == Weather::Clear && m_weatherIntensity <= 0.05f) {
+        m_stormSeverity = 0.0f;
     }
 
     // Intensity ramps so storms roll in and clear out instead of popping.
@@ -2487,8 +2634,14 @@ void CityBuilderApp::updateWeather(float dt) {
     }
 
     const float fall = snow ? 1.1f : 7.5f;
+    // A severe front's wind shoves the rain sideways — the slant is the
+    // earliest full-screen cue that this storm is different, and the funnel
+    // (if one comes) drifts with the same wind, so the rain points its way.
+    const float gust = m_stormSeverity * m_weatherIntensity * (snow ? 0.6f : 3.2f);
     for (WeatherDrop& d : m_drops) {
         d.y -= fall * d.speed * dt;
+        d.x += m_windX * gust * d.speed * dt;
+        d.z += m_windZ * gust * d.speed * dt;
         if (snow) {
             // Lazy sinusoidal sway so flakes drift instead of plummeting.
             d.x += std::sin(m_time * 1.7f + d.phase) * 0.35f * dt;
@@ -2496,6 +2649,178 @@ void CityBuilderApp::updateWeather(float dt) {
         }
         if (d.y < 0.0f) respawnDrop(d, true);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Severe weather: the funnel
+// ─────────────────────────────────────────────────────────────────────────────
+void CityBuilderApp::updateSevereWeather(float dt) {
+    const auto rnd01 = [&]() -> float {
+        m_weatherRng = m_weatherRng * 1664525u + 1013904223u;
+        return static_cast<float>((m_weatherRng >> 8) & 0xFFFFFFu) / 16777216.0f;
+    };
+    // Ground heat at a world position: developed land (industry especially)
+    // runs warm, pavement a little, water and parks cold. The funnel feeds on
+    // warm ground and starves over cool — this one function is why greenbelts
+    // and lakes deflect and kill tornadoes without any special-case rule.
+    const auto groundHeat = [&](float wx, float wz) -> float {
+        const int c = static_cast<int>(std::floor(wx / kTileWorldSize));
+        const int r = static_cast<int>(std::floor(wz / kTileWorldSize));
+        if (!inBounds(c, r)) return -0.5f;
+        const Tile& t = tile(c, r);
+        if (t.terrain == Terrain::Water) return -1.0f;
+        if (t.building == Building::Park) return -0.6f;
+        float h = 0.05f;
+        if (t.road) h += 0.15f;
+        if (t.zone == Zone::Industrial) h += t.develop * 0.5f;
+        else h += t.develop * 0.25f;
+        return h;
+    };
+
+    // Touchdown: a rain front whose severity clears the tornado threshold and
+    // an atmosphere still holding charge. Spawning consumes the instability —
+    // conservation, not cooldown, is what prevents back-to-back funnels.
+    if (m_tornadoes.empty() && m_weather == Weather::Rain && m_weatherIntensity > 0.55f &&
+        m_stormSeverity >= kTornadoSeverityThreshold && m_atmoInstability > 0.25f) {
+        // Touch down where the heat is: weighted reservoir over tiles by their
+        // contribution to the heat island (with a small floor everywhere), so
+        // funnels statistically find the industrial quarter the player built.
+        float totalW = 0.0f;
+        float spawnX = kGridW * 0.5f, spawnZ = kGridH * 0.5f;
+        for (int r = 4; r < kGridH - 4; ++r) {
+            for (int c = 4; c < kGridW - 4; ++c) {
+                const Tile& t = tile(c, r);
+                float w = 0.05f;
+                if (t.zone == Zone::Industrial) w += t.develop;
+                if (t.bldgOrigin && t.building == Building::Power) w += 3.0f;
+                totalW += w;
+                if (rnd01() <= w / totalW) {
+                    spawnX = (c + 0.5f) * kTileWorldSize;
+                    spawnZ = (r + 0.5f) * kTileWorldSize;
+                }
+            }
+        }
+        Tornado tor;
+        tor.x = spawnX;
+        tor.z = spawnZ;
+        tor.heading = std::atan2(m_windZ, m_windX) + (rnd01() - 0.5f);
+        tor.intensity = 1.0f;
+        m_tornadoes.push_back(tor);
+        m_atmoInstability *= 0.2f;  // the valve opens; the charge is spent
+        flash("TORNADO!");
+    }
+
+    const auto blendAngle = [](float from, float to, float amount) {
+        float d = to - from;
+        while (d > 3.14159265f) d -= 6.2831853f;
+        while (d < -3.14159265f) d += 6.2831853f;
+        return from + d * amount;
+    };
+
+    for (Tornado& tor : m_tornadoes) {
+        // Heading: smooth random wander, drift with the front wind, and a pull
+        // up the local heat gradient (sampled by finite difference).
+        tor.heading += (rnd01() - 0.5f) * kTornadoWanderRate * dt;
+        tor.heading = blendAngle(tor.heading, std::atan2(m_windZ, m_windX),
+                                 std::min(1.0f, kTornadoWindFollow * dt));
+        const float probe = 1.5f * kTileWorldSize;
+        const float gx = groundHeat(tor.x + probe, tor.z) - groundHeat(tor.x - probe, tor.z);
+        const float gz = groundHeat(tor.x, tor.z + probe) - groundHeat(tor.x, tor.z - probe);
+        if (gx * gx + gz * gz > 0.01f) {
+            tor.heading = blendAngle(tor.heading, std::atan2(gz, gx),
+                                     std::min(1.0f, kTornadoHeatPull * dt));
+        }
+        tor.x += std::cos(tor.heading) * kTornadoSpeed * dt;
+        tor.z += std::sin(tor.heading) * kTornadoSpeed * dt;
+        tor.x = std::clamp(tor.x, 0.0f, kGridW * kTileWorldSize);
+        tor.z = std::clamp(tor.z, 0.0f, kGridH * kTileWorldSize);
+
+        // Lifetime is an energy budget: cool ground drains it, and losing the
+        // storm overhead (front moved on) ropes it out fast.
+        const float cool = clamp01(-groundHeat(tor.x, tor.z));
+        float decay = kTornadoDecay + kTornadoCoolGroundDecay * cool;
+        if (m_weather != Weather::Rain || m_weatherIntensity < 0.4f) decay *= 3.0f;
+        tor.intensity -= decay * dt;
+    }
+    std::erase_if(m_tornadoes, [](const Tornado& tor) { return tor.intensity <= 0.15f; });
+}
+
+// Monthly damage pass, run from stepMonth beside stepFire so destruction lives
+// in the sim timebase. Everything downstream reuses existing loops: stripped
+// develop, charred rubble (nuisance splat, happiness drag, self-clear,
+// rebuild), fire ignition from downed lines, and the municipal cascades
+// (losing the power plant browns out the grid via recomputeStats; losing a
+// fire station weakens the response to the fires the storm itself starts).
+void CityBuilderApp::stepTornadoDamage() {
+    if (m_tornadoes.empty()) return;
+    const auto rnd01 = [&]() -> float {
+        m_rng = m_rng * 1664525u + 1013904223u;
+        return static_cast<float>((m_rng >> 8) & 0xFFFFFFu) / 16777216.0f;
+    };
+    for (const Tornado& tor : m_tornadoes) {
+        const int c0 = std::max(0, static_cast<int>(std::floor(tor.x - kTornadoRadius)));
+        const int c1 = std::min(kGridW - 1, static_cast<int>(std::ceil(tor.x + kTornadoRadius)));
+        const int r0 = std::max(0, static_cast<int>(std::floor(tor.z - kTornadoRadius)));
+        const int r1 = std::min(kGridH - 1, static_cast<int>(std::ceil(tor.z + kTornadoRadius)));
+        for (int r = r0; r <= r1; ++r) {
+            for (int c = c0; c <= c1; ++c) {
+                const float dx = (c + 0.5f) - tor.x, dz = (r + 0.5f) - tor.z;
+                const float dist = std::sqrt(dx * dx + dz * dz);
+                if (dist > kTornadoRadius) continue;
+                const float falloff = 1.0f - dist / kTornadoRadius;
+                Tile& t = tile(c, r);
+                if (t.zone != Zone::None && t.develop > 0.0f) {
+                    const bool wasBuilt = t.develop > kDevEps;
+                    t.develop = std::max(0.0f, t.develop -
+                                                   kTornadoDamageRate * tor.intensity * falloff);
+                    if (wasBuilt && t.develop <= kDevEps) {
+                        t.develop = 0.0f;
+                        t.charred = true;   // from here it IS fire rubble — same loop
+                        t.charTicks = 0;
+                        t.fireTicks = 0;
+                    }
+                    if (wasBuilt && !t.charred && t.fireTicks == 0 &&
+                        rnd01() < kTornadoIgniteChance * tor.intensity * falloff) {
+                        t.fireTicks = kFireBurnMonths;  // downed lines spark
+                    }
+                } else if (t.building != Building::None && falloff > 0.4f &&
+                           rnd01() < kTornadoWreckChance * tor.intensity) {
+                    // Municipal building flattened: clear the footprint (no
+                    // refund) and leave it charred. The knock-on effects —
+                    // brown-outs, weakened services — fall out of the census.
+                    const int oc = t.bOriginC >= 0 ? t.bOriginC : c;
+                    const int orr = t.bOriginR >= 0 ? t.bOriginR : r;
+                    const int fp = inBounds(oc, orr) ? std::max<int>(1, tile(oc, orr).footprint) : 1;
+                    for (int dy = 0; dy < fp; ++dy) {
+                        for (int dx2 = 0; dx2 < fp; ++dx2) {
+                            if (!inBounds(oc + dx2, orr + dy)) continue;
+                            Tile& cell = tile(oc + dx2, orr + dy);
+                            cell.building = Building::None;
+                            cell.bldgOrigin = false;
+                            cell.footprint = 0;
+                            cell.bOriginC = cell.bOriginR = -1;
+                            cell.develop = 0.0f;
+                            cell.charred = true;
+                            cell.charTicks = 0;
+                            cell.fireTicks = 0;
+                        }
+                    }
+                    m_sceneDirty = true;  // rare, and a landmark just vanished
+                }
+            }
+        }
+        // Cars caught in the core get tossed — respawn elsewhere with a puff.
+        for (Vehicle& v : m_vehicles) {
+            if (v.cx < 0) continue;
+            const float dx = (v.cx + 0.5f) - tor.x, dz = (v.cr + 0.5f) - tor.z;
+            if (dx * dx + dz * dz < kTornadoRadius * kTornadoRadius) {
+                addFx((v.cx + 0.5f) * kTileWorldSize, (v.cr + 0.5f) * kTileWorldSize,
+                      UiColor::fromRgbHex(0x9AA0A8), 1);
+                respawnVehicle(v);
+            }
+        }
+    }
+    m_growthDirty = true;  // rubble trail catches up on the next cooldown tick
 }
 
 render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
@@ -2708,11 +3033,14 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
         for (const std::uint32_t index : m_truckMesh.indices) {
             m_actorIndices.push_back(base + index);
         }
-        // Light bar strobe above the cab: red / blue alternating.
-        const bool phase = fract(m_time * 4.0f) < 0.5f;
-        const float lbx = px + 0.06f * vx, lbz = pz + 0.06f * vz;
-        if (phase) pushCross(lbx, 0.145f, lbz, 0.020f, 0.028f, 1.0f, 0.15f, 0.10f);
-        else       pushCross(lbx, 0.145f, lbz, 0.020f, 0.028f, 0.20f, 0.35f, 1.0f);
+        // Light bar strobe above the cab: red / blue alternating. Off on the
+        // drive home — the emergency is over.
+        if (!tk.returning) {
+            const bool phase = fract(m_time * 4.0f) < 0.5f;
+            const float lbx = px + 0.06f * vx, lbz = pz + 0.06f * vz;
+            if (phase) pushCross(lbx, 0.145f, lbz, 0.020f, 0.028f, 1.0f, 0.15f, 0.10f);
+            else       pushCross(lbx, 0.145f, lbz, 0.020f, 0.028f, 0.20f, 0.35f, 1.0f);
+        }
         // Water arc: droplets along a parabola from the truck to the fire.
         if (tk.parked && tk.tgtC >= 0) {
             const float tx = (static_cast<float>(tk.tgtC) + 0.5f) * ts;
@@ -2846,6 +3174,37 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
         }
     }
     m_fx.resize(fxKeep);
+
+    // The funnel: a spiral stack of gray crossed quads, radius widening with
+    // height, spinning fast at the base and slower aloft, wobbling as it
+    // walks. A tan debris ring churns at the foot. Entirely derived from
+    // (x, z, intensity, m_time) — no particle state.
+    for (const Tornado& tor : m_tornadoes) {
+        constexpr int kSegs = 16;
+        for (int i = 0; i < kSegs; ++i) {
+            const float f = static_cast<float>(i) / (kSegs - 1);
+            const float y = f * 4.4f;
+            const float rad = (0.16f + 2.1f * f * f) * (0.55f + 0.45f * tor.intensity);
+            for (int arm = 0; arm < 2; ++arm) {
+                const float ang = m_time * (6.5f - 3.5f * f) + f * 5.0f +
+                                  static_cast<float>(arm) * 3.14159f;
+                const float wob = std::sin(m_time * 1.3f + f * 4.0f) * 0.35f * f;
+                const float px = tor.x + std::cos(ang) * rad + wob;
+                const float pz = tor.z + std::sin(ang) * rad +
+                                 std::cos(m_time * 1.1f + f * 3.0f) * 0.30f * f;
+                const float size = 0.11f + 0.34f * f;
+                const float g = 0.34f + 0.26f * f;
+                pushCross(px, y, pz, size, size * 1.5f, g, g, g * 1.06f);
+            }
+        }
+        for (int i = 0; i < 8; ++i) {
+            const float ang = m_time * 4.5f + static_cast<float>(i) * 0.785f;
+            const float rad = 0.45f + 0.45f * fract(m_time * 0.9f + static_cast<float>(i) * 0.37f);
+            const float y = 0.05f + 0.5f * fract(m_time * 1.3f + static_cast<float>(i) * 0.61f);
+            pushCross(tor.x + std::cos(ang) * rad, y, tor.z + std::sin(ang) * rad, 0.05f, 0.05f,
+                      0.55f, 0.47f, 0.36f);
+        }
+    }
 
     // Precipitation: thin tall streaks for rain, small flakes for snow.
     if (!m_drops.empty()) {
@@ -3132,6 +3491,29 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
     else if (m_weather == Weather::Snow) date += " · Snow";
     textLeft(m_uiFont, date, 16.0f * s, cy + 9.0f * s, kTextDim);
 
+    // Severe-weather alert beside the title: the watch states surface the
+    // atmosphere's charge BEFORE anything happens, so a tornado always feels
+    // forecast — the player who ignores a Tornado watch chose to.
+    const char* alert = nullptr;
+    UiColor alertCol = kGold;
+    const float charge = m_atmoHeat * m_atmoInstability;
+    if (!m_tornadoes.empty()) { alert = "TORNADO!"; alertCol = kBad; }
+    else if (m_weather == Weather::Rain && m_stormSeverity >= kTornadoSeverityThreshold) {
+        alert = "Tornado warning"; alertCol = kBad;
+    } else if (m_weather == Weather::Rain && m_stormSeverity >= kStormSeverityThreshold) {
+        alert = "Severe storm"; alertCol = kGold;
+    } else if (m_weatherIntensity < 0.1f && charge >= kTornadoSeverityThreshold) {
+        alert = "Tornado watch"; alertCol = kGold;
+    } else if (m_weatherIntensity < 0.1f && charge >= kStormSeverityThreshold) {
+        alert = "Storm watch"; alertCol = kTextDim;
+    }
+    const float titleW = m_uiFontBold.measureText("OdaiCity");
+    float identityW = titleW;
+    if (alert) {
+        textLeft(m_uiFontBold, alert, 16.0f * s + titleW + 12.0f * s, cy - 9.0f * s, alertCol);
+        identityW = titleW + 12.0f * s + m_uiFontBold.measureText(alert);
+    }
+
     // RCI demand meter geometry (drawn last, right-anchored) — needed up front
     // so chips know where they must stop.
     const float barW = 14.0f * s, stepX = 22.0f * s, barH = 22.0f * s;
@@ -3144,9 +3526,7 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
     // raw widths every frame would make the whole row wobble). Chips that
     // would collide with the demand meter are dropped, rightmost first.
     const float slotStep = 24.0f * s;
-    float x = 16.0f * s +
-              std::max(m_uiFontBold.measureText("OdaiCity"), m_uiFont.measureText(date)) +
-              28.0f * s;
+    float x = 16.0f * s + std::max(identityW, m_uiFont.measureText(date)) + 28.0f * s;
     x = std::ceil(x / slotStep) * slotStep;
 
     auto chip = [&](std::string_view label, std::string_view value, const UiColor& col,
@@ -3413,6 +3793,14 @@ void CityBuilderApp::drawMinimap(const Layout& lo) {
     if (viewHit) {
         m_uiDrawList.addPolylineAA(viewCorners, 4, withA(UiColor(1, 1, 1, 1), 0.85f),
                                    std::max(1.0f, 1.5f * s), true);
+    }
+    // Active funnel: a pulsing white dot — its rubble trail already shows in
+    // the charred tile color for free.
+    for (const Tornado& tor : m_tornadoes) {
+        const UiVec2 tp{ox + tor.x / kTileWorldSize * cell, oy + tor.z / kTileWorldSize * cell};
+        const float pulse = 0.7f + 0.3f * std::sin(m_time * 6.0f);
+        m_uiDrawList.addCircleFilled(tp, 3.0f * s, withA(UiColor(1, 1, 1, 1), pulse));
+        m_uiDrawList.addCircle(tp, 5.5f * s, withA(UiColor(1, 1, 1, 1), 0.5f * pulse), s);
     }
     m_uiDrawList.popClip();
 

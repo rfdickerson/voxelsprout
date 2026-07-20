@@ -178,7 +178,9 @@ private:
         float t = 0.0f;
         float speed = 1.9f;            // sirens on — faster than traffic, no jams
         bool  parked = false;
-        short tgtC = -1, tgtR = -1;    // burning tile being fought
+        bool  returning = false;       // fires are out; driving home to despawn
+        short tgtC = -1, tgtR = -1;    // burning tile being fought (or home, returning)
+        short homeC = -1, homeR = -1;  // staging road tile it rolled out from
     };
     void updateFireTrucks(float dt);
     bool pickTruckExit(FireTruck& tk);  // goal-directed: descend distance to target
@@ -207,6 +209,23 @@ private:
     };
     void updateWeather(float dt);
     void respawnDrop(WeatherDrop& d, bool atTop);
+
+    // ── Severe weather ───────────────────────────────────────────────────────
+    // Two continuous atmosphere variables — surface heat (season + the city's
+    // own industrial heat island, cooled by rain) and convective instability
+    // (charges in hot clear spells, discharges as rain) — place each incoming
+    // front on a continuum: drizzle, thunderstorm, or a tornado-bearing storm.
+    // The funnel is the release valve of energy the simulation (and partly the
+    // player's zoning) accumulated, never a scripted event: spawning one
+    // consumes the stored instability, so the atmosphere must recharge before
+    // another is possible.
+    struct Tornado {
+        float x = 0.0f, z = 0.0f;   // world position
+        float heading = 0.0f;       // radians; wanders, follows wind + warm ground
+        float intensity = 1.0f;     // decays; faster over water/parks/open land
+    };
+    void updateSevereWeather(float dt);  // funnel spawn/motion — sim-time, respects pause
+    void stepTornadoDamage();            // monthly damage, feeds the charred/fire loops
 
     // Appends this frame's transformed car geometry and weather particles into
     // the actor scratch buffers and returns the frame data for submitFrame.
@@ -290,6 +309,14 @@ private:
     float m_weatherTimer = 14.0f;      // seconds until the next sky roll
     std::uint32_t m_weatherRng = 0xBAD5EEDu;
     std::vector<WeatherDrop> m_drops;
+
+    float m_atmoHeat = 0.3f;           // surface heat: season + city heat island - rain
+    float m_atmoInstability = 0.2f;    // convective energy: charges clear, spends as storms
+    float m_stormSeverity = 0.0f;      // heat x instability, sampled when a front rolls in
+    float m_cityHeat = 0.0f;           // industrial develop + power plants (recomputeStats)
+    float m_windX = 1.0f, m_windZ = 0.0f;  // prevailing wind, rolled per front
+    bool  m_debugForceStorm = false;   // ODAI_CITY_STORM=1: prime the atmosphere for testing
+    std::vector<Tornado> m_tornadoes;
 
     std::vector<Vehicle> m_vehicles;
     std::vector<procgen::TriMesh> m_carMeshes;             // lazily filled variants
