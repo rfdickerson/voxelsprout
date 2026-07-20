@@ -573,6 +573,7 @@ bool CityBuilderApp::onInit() {
     static constexpr const char* kIconFiles[] = {
         "bulldoze", "zone_r", "zone_c", "zone_i", "road", "police", "fire",
         "clinic", "school", "park", "library", "amphitheater", "power", "match",
+        "play", "pause", "mouse_drag", "mouse_wheel", "rotate",
     };
     for (const char* n : kIconFiles) {
         ui::VectorIconRegistry::global().registerFromFile(
@@ -3540,16 +3541,21 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
     // and each line retires itself the first time the action happens — the
     // chip teaches, then leaves. (Rotate also has visible buttons below.)
     {
-        const char* hints[3];
+        struct HintLine {
+            const char* icon;
+            const char* text;
+        };
+        HintLine hints[3];
         int hintCount = 0;
-        if (!m_usedPan) hints[hintCount++] = "Move view · hold RIGHT mouse + drag";
-        if (!m_usedZoom) hints[hintCount++] = "Zoom · mouse wheel";
-        if (!m_usedRotate) hints[hintCount++] = "Rotate · Q / E";
+        if (!m_usedPan) hints[hintCount++] = {"cb_mouse_drag", "drag to move"};
+        if (!m_usedZoom) hints[hintCount++] = {"cb_mouse_wheel", "zoom"};
+        if (!m_usedRotate) hints[hintCount++] = {"cb_rotate", "Q / E"};
         if (hintCount > 0) {
-            const float lineH = 18.0f * s;
+            const float lineH = 22.0f * s;
+            const float iconS = 16.0f * s;
             float w = 0.0f;
             for (int i = 0; i < hintCount; ++i) {
-                w = std::max(w, m_uiFont.measureText(hints[i]));
+                w = std::max(w, iconS + 8.0f * s + m_uiFont.measureText(hints[i].text));
             }
             const UiRect chip = UiRect::fromXYWH(lo.map.maxX - w - 40.0f * s,
                                                  lo.map.minY + 12.0f * s, w + 24.0f * s,
@@ -3557,8 +3563,14 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
             m_uiDrawList.addRoundRectFilled(chip, withA(kPanel, 0.85f), kRadiusCtl * s);
             m_uiDrawList.addRoundRect(chip, kEdge, kRadiusCtl * s, s);
             for (int i = 0; i < hintCount; ++i) {
-                textLeft(m_uiFont, hints[i], chip.minX + 12.0f * s,
-                         chip.minY + 7.0f * s + (i + 0.5f) * lineH, kTextDim);
+                const float cyLine = chip.minY + 7.0f * s + (i + 0.5f) * lineH;
+                m_uiDrawList.addVectorIcon(hints[i].icon,
+                                           UiRect{chip.minX + 12.0f * s, cyLine - iconS * 0.5f,
+                                                  chip.minX + 12.0f * s + iconS,
+                                                  cyLine + iconS * 0.5f},
+                                           kText);
+                textLeft(m_uiFont, hints[i].text, chip.minX + 12.0f * s + iconS + 8.0f * s,
+                         cyLine, kTextDim);
             }
         }
     }
@@ -3828,12 +3840,18 @@ void CityBuilderApp::drawControls(const Layout& lo) {
 
     // Left cluster: 4px gaps inside the transport group, 12px between groups —
     // intra-group spacing tighter than inter-group so proximity does the
-    // grouping.
-    if (uiButton(UiRect::fromXYWH(x, by, 80.0f * s, bh), m_paused ? "Play" : "Pause",
-                 !m_paused, kAccent)) {
-        m_paused = !m_paused;
+    // grouping. Play/pause is the universal triangle-and-bars, not a word.
+    {
+        const UiRect pb = UiRect::fromXYWH(x, by, 52.0f * s, bh);
+        if (uiButton(pb, "", !m_paused, kAccent)) m_paused = !m_paused;
+        const float gi = bh * 0.22f;
+        m_uiDrawList.addVectorIcon(m_paused ? "cb_play" : "cb_pause",
+                                   UiRect{pb.minX + (pb.width() - (bh - 2.0f * gi)) * 0.5f,
+                                          pb.minY + gi, pb.minX + (pb.width() + (bh - 2.0f * gi)) * 0.5f,
+                                          pb.maxY - gi},
+                                   kText);
+        x += 52.0f * s + 4.0f * s;
     }
-    x += 80.0f * s + 4.0f * s;
 
     for (int sp = 1; sp <= 3; ++sp) {
         char lbl[4];
