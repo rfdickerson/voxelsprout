@@ -308,7 +308,9 @@ private:
     bool m_mouseOverUi = false;
     bool m_dragPainting = false;
 
-    bool   m_reportsOpen = true;
+    // Reports start closed: the first thing a new mayor should see is their
+    // city, not a chart floating over it (G or the Reports button opens it).
+    bool   m_reportsOpen = false;
     bool   m_showLandValue = false;        // toggle the desirability data overlay
     Metric m_metric = Metric::Population;
 

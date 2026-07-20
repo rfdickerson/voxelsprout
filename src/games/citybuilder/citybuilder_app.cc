@@ -61,6 +61,13 @@ constexpr UiColor kZoneC     = UiColor::fromRgbHex(0x3B90E0);
 constexpr UiColor kZoneI     = UiColor::fromRgbHex(0xE0A22E);
 constexpr UiColor kAccent    = UiColor::fromRgbHex(0x4BA0E0);
 
+// Corner radius scale (at 1x, multiply by content scale). Three deliberate
+// steps — floating panel, control, tiny inline chip — instead of the ad-hoc
+// 3/5/7/8/9/10 mix, matching the unified widget-radius direction.
+constexpr float kRadiusPanel = 8.0f;   // controls bar, minimap, reports, flash
+constexpr float kRadiusCtl   = 6.0f;   // buttons, tool rows, tooltips, legend
+constexpr float kRadiusChip  = 3.0f;   // hotkey badges, tag scrims
+
 constexpr float kMonthInterval = 0.55f;  // real seconds per simulated month at 1x
 constexpr float kDevEps        = 0.06f;
 constexpr int   kHistMax       = 180;
@@ -3058,8 +3065,8 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
                 const UiRect tip = UiRect::fromXYWH(mp.x + 16.0f * s, mp.y + 16.0f * s,
                                                     tw + 16.0f * s, 24.0f * s);
                 m_uiDrawList.addRoundRectFilled(tip, withA(UiColor::fromRgbHex(0x14181F), 0.92f),
-                                                5.0f * s);
-                m_uiDrawList.addRoundRect(tip, kEdge, 5.0f * s, s);
+                                                kRadiusCtl * s);
+                m_uiDrawList.addRoundRect(tip, kEdge, kRadiusCtl * s, s);
                 textCenter(m_uiFont, label, (tip.minX + tip.maxX) * 0.5f,
                            (tip.minY + tip.maxY) * 0.5f, labelColor);
             }
@@ -3083,7 +3090,8 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
             const float th = m_uiFontBold.lineHeightPx();
             const UiRect scrim = UiRect::fromXYWH(sp.x - tw * 0.5f - 4.0f * s, sp.y - th * 0.5f - 2.0f * s,
                                                   tw + 8.0f * s, th + 4.0f * s);
-            m_uiDrawList.addRoundRectFilled(scrim, withA(UiColor(0, 0, 0, 1), 0.45f), 3.0f * s);
+            m_uiDrawList.addRoundRectFilled(scrim, withA(UiColor(0, 0, 0, 1), 0.45f),
+                                            kRadiusChip * s);
             textCenter(m_uiFontBold, tag, sp.x, sp.y, kText);
         }
     }
@@ -3095,8 +3103,8 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
         const float ly = lo.map.minY + 32.0f * s;
         const UiRect chip = UiRect::fromXYWH(lx - 8.0f * s, ly - 24.0f * s, lw + 16.0f * s,
                                              lh + 44.0f * s);
-        m_uiDrawList.addRoundRectFilled(chip, withA(kPanel, 0.92f), 7.0f * s);
-        m_uiDrawList.addRoundRect(chip, kEdge, 7.0f * s, s);
+        m_uiDrawList.addRoundRectFilled(chip, withA(kPanel, 0.92f), kRadiusCtl * s);
+        m_uiDrawList.addRoundRect(chip, kEdge, kRadiusCtl * s, s);
         textLeft(m_uiFontBold, "Land Value", lx, ly - 12.0f * s, kText);
         const int seg = 24;
         for (int i = 0; i < seg; ++i) {
@@ -3124,50 +3132,70 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
     else if (m_weather == Weather::Snow) date += " · Snow";
     textLeft(m_uiFont, date, 16.0f * s, cy + 9.0f * s, kTextDim);
 
-    auto chip = [&](float x, std::string_view label, std::string_view value, const UiColor& col) {
+    // RCI demand meter geometry (drawn last, right-anchored) — needed up front
+    // so chips know where they must stop.
+    const float barW = 14.0f * s, stepX = 22.0f * s, barH = 22.0f * s;
+    const float rciX = lo.topBar.maxX - 16.0f * s - (stepX * 2.0f + barW);
+    const float chipLimit = rciX - 12.0f * s - m_uiFont.measureText("Demand") - 20.0f * s;
+
+    // Stat chips: label over value. Each slot is as wide as its content
+    // demands, rounded up to a 24px step so the row only reflows when a value
+    // genuinely outgrows its slot (months tick ~2x/sec at speed 1 — measuring
+    // raw widths every frame would make the whole row wobble). Chips that
+    // would collide with the demand meter are dropped, rightmost first.
+    const float slotStep = 24.0f * s;
+    float x = 16.0f * s +
+              std::max(m_uiFontBold.measureText("OdaiCity"), m_uiFont.measureText(date)) +
+              28.0f * s;
+    x = std::ceil(x / slotStep) * slotStep;
+
+    auto chip = [&](std::string_view label, std::string_view value, const UiColor& col,
+                    std::string_view note = {}, const UiColor& noteCol = kTextDim) {
+        const float valueW = m_uiFontNumeric.measureText(value);
+        const float noteW = note.empty() ? 0.0f : 8.0f * s + m_uiFont.measureText(note);
+        float w = std::max(m_uiFont.measureText(label), valueW + noteW) + slotStep;
+        w = std::ceil(w / slotStep) * slotStep;
+        if (x + w > chipLimit) return;
         textLeft(m_uiFont, label, x, cy - 9.0f * s, kTextDim);
         textLeft(m_uiFontNumeric, value, x, cy + 9.0f * s, col);
+        if (!note.empty()) {
+            textLeft(m_uiFont, note, x + valueW + 8.0f * s, cy + 9.0f * s, noteCol);
+        }
+        x += w;
     };
 
-    float x = 168.0f * s;
-    const float gap = 138.0f * s;
-    chip(x, "Treasury", moneyStr(m_money), kGold);
-    {  // monthly net under treasury label, to the right of the value
-        const std::string net = (m_lastNet >= 0 ? "+" : "") + moneyStr(m_lastNet) + "/mo";
-        textLeft(m_uiFont, net, x, cy + 24.0f * s, m_lastNet >= 0 ? kGood : kBad);
-    }
-    x += gap;
-    chip(x, "Population", commaInt(m_population), kText);
-    x += gap * 0.74f;
-    chip(x, "Jobs", commaInt(m_jobs), kText);
-    x += gap * 0.74f;
+    // Monthly net rides the treasury value's baseline (a third text row does
+    // not fit the 54px bar — the old cy+24 placement clipped its descenders).
+    const std::string net = (m_lastNet >= 0 ? "+" : "") + moneyStr(m_lastNet) + "/mo";
+    chip("Treasury", moneyStr(m_money), kGold, net, m_lastNet >= 0 ? kGood : kBad);
+    chip("Population", commaInt(m_population), kText);
+    chip("Jobs", commaInt(m_jobs), kText);
     {
         char buf[16];
         std::snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(std::lround(m_powerCoverage * 100.0f)));
-        chip(x, "Power", buf, m_powerCoverage > 0.95f ? kGood : kBad);
+        chip("Power", buf, m_powerCoverage > 0.95f ? kGood : kBad);
     }
-    x += gap * 0.6f;
     {
         char buf[16];
         std::snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(std::lround(m_happiness)));
         const UiColor hc = m_happiness >= 55 ? kGood : (m_happiness >= 35 ? kGold : kBad);
-        chip(x, "Approval", buf, hc);
+        chip("Approval", buf, hc);
     }
 
-    // RCI demand bars on the far right.
-    const float rciX = lo.topBar.maxX - 132.0f * s;
-    textLeft(m_uiFont, "Demand", rciX, cy - 12.0f * s, kTextDim);
-    const float base = cy + 16.0f * s;
-    const float barW = 16.0f * s, barH = 26.0f * s, step = 30.0f * s;
+    // RCI demand bars, caption on the shared centre line. Bars + letters are
+    // budgeted to stay inside the bar's height (the old layout centred the
+    // R/C/I letters at cy+25, pushing their ink past the bar's bottom edge).
+    textRight(m_uiFont, "Demand", rciX - 12.0f * s, cy, kTextDim);
+    const float base = lo.topBar.maxY - 18.0f * s;
     const float dem[3] = {m_resDemand, m_comDemand, m_indDemand};
     const UiColor demc[3] = {kZoneR, kZoneC, kZoneI};
     const char* deml[3] = {"R", "C", "I"};
     for (int i = 0; i < 3; ++i) {
-        const float bx = rciX + i * step;
+        const float bx = rciX + i * stepX;
         m_uiDrawList.addRectFilled(UiRect{bx, base - barH, bx + barW, base}, withA(demc[i], 0.18f));
         const float h = barH * clamp01(dem[i]);
         m_uiDrawList.addRectFilled(UiRect{bx, base - h, bx + barW, base}, demc[i]);
-        textCenter(m_uiFont, deml[i], bx + barW * 0.5f, base + 9.0f * s, kTextDim);
+        textCenter(m_uiFont, deml[i], bx + barW * 0.5f, base + 8.0f * s, kTextDim);
     }
 }
 
@@ -3178,14 +3206,38 @@ void CityBuilderApp::drawPalette(const Layout& lo) {
                                       lo.palette.maxY}, kEdge);
 
     const float padX = 10.0f * s;
-    float y = lo.palette.minY + 12.0f * s;
-    const float btnH = 40.0f * s;
     const float btnW = lo.palette.width() - padX * 2.0f;
-    const float gap = 6.0f * s;
+
+    // 14 tool rows + 4 section headers must fit whatever height is left under
+    // the top bar. Solve the vertical rhythm for the space we actually have:
+    // start from the comfortable metrics and, when they would overflow,
+    // interpolate toward a compact set (28px single-line rows, tighter
+    // leading) so the palette degrades by tightening rhythm before anything
+    // clips. Tap targets never drop below 28px.
+    constexpr float kRows = 14.0f, kHeaders = 4.0f;
+    const float availH = lo.palette.height() - 20.0f * s;
+    const auto stackH = [&](float row, float rowGap, float hdr) {
+        return (kHeaders * hdr + kRows * (row + rowGap) - rowGap) * s;
+    };
+    const float comfyH = stackH(40.0f, 6.0f, 24.0f);
+    const float tightH = stackH(28.0f, 4.0f, 18.0f);
+    const float t = comfyH <= availH
+                        ? 0.0f
+                        : std::clamp((comfyH - availH) / std::max(1.0f, comfyH - tightH),
+                                     0.0f, 1.0f);
+    const float btnH = lerpf(40.0f, 28.0f, t) * s;
+    const float gap  = lerpf(6.0f, 4.0f, t) * s;
+    const float hdrH = lerpf(24.0f, 18.0f, t) * s;
+    const bool  twoLine = btnH >= 34.0f * s;
+
+    float y = lo.palette.minY + 10.0f * s;
 
     auto header = [&](const char* label) {
-        textLeft(m_uiFontBold, label, lo.palette.minX + padX, y + 8.0f * s, kTextFaint);
-        y += 20.0f * s;
+        // The label sits at the bottom of its band, tight against the rows it
+        // names — proximity, not size, carries the grouping; the faint colour
+        // keeps it a step below the tool names in the hierarchy.
+        textLeft(m_uiFontBold, label, lo.palette.minX + padX, y + hdrH - 9.0f * s, kTextFaint);
+        y += hdrH;
     };
 
     auto toolRow = [&](Tool tool) {
@@ -3194,35 +3246,49 @@ void CityBuilderApp::drawPalette(const Layout& lo) {
         const bool hover = r.contains(m_uiInput.mousePx);
         const bool active = m_tool == tool;
         const UiColor bg = active ? mix(kBtn, m.color, 0.32f) : (hover ? kBtnHover : kBtn);
-        m_uiDrawList.addRoundRectFilled(r, bg, 7.0f * s);
-        m_uiDrawList.addRoundRect(r, active ? withA(m.color, 0.95f) : kEdge, 7.0f * s,
+        m_uiDrawList.addRoundRectFilled(r, bg, kRadiusCtl * s);
+        m_uiDrawList.addRoundRect(r, active ? withA(m.color, 0.95f) : kEdge, kRadiusCtl * s,
                                   active ? 1.6f * s : s);
-        // colour swatch with tag
-        const UiRect sw = UiRect::fromXYWH(r.minX + 7.0f * s, r.minY + 6.0f * s,
-                                           btnH - 12.0f * s, btnH - 12.0f * s);
-        m_uiDrawList.addRoundRectFilled(sw, m.color, 5.0f * s);
-        textCenter(m_uiFontBold, m.tag, (sw.minX + sw.maxX) * 0.5f, (sw.minY + sw.maxY) * 0.5f,
-                   UiColor::fromRgbHex(0x0E1217));
-        // name + cost
-        const float tx = sw.maxX + 9.0f * s;
-        textLeft(m_uiFontBold, m.name, tx, r.minY + btnH * 0.36f, active ? kText : kText);
-        char cost[24];
-        std::snprintf(cost, sizeof(cost), "$%d", static_cast<int>(m.cost));
-        textLeft(m_uiFont, cost, tx, r.minY + btnH * 0.68f, kTextDim);
-        // hotkey chip
-        const UiRect key = UiRect::fromXYWH(r.maxX - 22.0f * s, r.minY + 6.0f * s, 16.0f * s,
-                                            16.0f * s);
-        m_uiDrawList.addRoundRectFilled(key, withA(UiColor(1, 1, 1, 1), 0.08f), 3.0f * s);
+        // Tool colour as a slim identity bar. (The old square swatch centred
+        // 4-letter tags like DEMO/AMPH that measure ~36px in a 28px square —
+        // clipped text — and the name column already names the tool, so the
+        // bar keeps the colour cue without the redundant, overflowing label.)
+        const UiRect bar = UiRect::fromXYWH(r.minX + 6.0f * s, r.minY + 6.0f * s, 4.0f * s,
+                                            btnH - 12.0f * s);
+        m_uiDrawList.addRoundRectFilled(bar, m.color, 2.0f * s);
+        // hotkey chip, vertically centred on the row
+        const float keyS = 16.0f * s;
+        const UiRect key = UiRect::fromXYWH(r.maxX - keyS - 6.0f * s,
+                                            r.minY + (btnH - keyS) * 0.5f, keyS, keyS);
+        m_uiDrawList.addRoundRectFilled(key, withA(UiColor(1, 1, 1, 1), 0.08f), kRadiusChip * s);
         textCenter(m_uiFont, m.key, (key.minX + key.maxX) * 0.5f, (key.minY + key.maxY) * 0.5f,
                    kTextDim);
+        // name + cost: stacked when the row affords two lines, otherwise a
+        // single line with the cost right-aligned (and dropped if a long name
+        // would collide with it — name beats price for identifying a tool).
+        char cost[24];
+        std::snprintf(cost, sizeof(cost), "$%d", static_cast<int>(m.cost));
+        const float tx = bar.maxX + 9.0f * s;
+        if (twoLine) {
+            textLeft(m_uiFontBold, m.name, tx, r.minY + btnH * 0.34f, kText);
+            textLeft(m_uiFont, cost, tx, r.minY + btnH * 0.70f, kTextDim);
+        } else {
+            const float rcy = (r.minY + r.maxY) * 0.5f;
+            textLeft(m_uiFontBold, m.name, tx, rcy, kText);
+            const float costRight = key.minX - 8.0f * s;
+            if (tx + m_uiFontBold.measureText(m.name) + 8.0f * s +
+                    m_uiFont.measureText(cost) <= costRight) {
+                textRight(m_uiFont, cost, costRight, rcy, kTextDim);
+            }
+        }
 
         if (hover && m_uiInput.button(UiMouseButton::Left).pressed) m_tool = tool;
         y += btnH + gap;
     };
 
+    header("DANGER");
     toolRow(Tool::Bulldoze);
     toolRow(Tool::Match);
-    y += 4.0f * s;
     header("ZONES");
     toolRow(Tool::ZoneR);
     toolRow(Tool::ZoneC);
@@ -3244,19 +3310,22 @@ void CityBuilderApp::drawControls(const Layout& lo) {
     const float s = lo.s;
     const UiRect& r = lo.controls;
     m_uiDrawList.addDropShadow(r, withA(UiColor(0, 0, 0, 1), 0.4f), 8.0f * s, 0.0f, 3.0f * s);
-    m_uiDrawList.addRoundRectFilled(r, kPanelRise, 9.0f * s);
-    m_uiDrawList.addRoundRect(r, kEdge, 9.0f * s, s);
+    m_uiDrawList.addRoundRectFilled(r, kPanelRise, kRadiusPanel * s);
+    m_uiDrawList.addRoundRect(r, kEdge, kRadiusPanel * s, s);
 
     const float pad = 8.0f * s;
     const float by = r.minY + pad;
     const float bh = r.height() - pad * 2.0f;
     float x = r.minX + pad;
 
+    // Left cluster: 4px gaps inside the transport group, 12px between groups —
+    // intra-group spacing tighter than inter-group so proximity does the
+    // grouping.
     if (uiButton(UiRect::fromXYWH(x, by, 80.0f * s, bh), m_paused ? "Play" : "Pause",
                  !m_paused, kAccent)) {
         m_paused = !m_paused;
     }
-    x += 86.0f * s;
+    x += 80.0f * s + 4.0f * s;
 
     for (int sp = 1; sp <= 3; ++sp) {
         char lbl[4];
@@ -3266,22 +3335,23 @@ void CityBuilderApp::drawControls(const Layout& lo) {
             m_speed = sp;
             m_paused = false;
         }
-        x += 40.0f * s;
+        x += 36.0f * s + 4.0f * s;
     }
 
-    x += 8.0f * s;
+    x += 8.0f * s;  // group gap (12px total with the trailing button gap)
     const std::string date = std::string(kMonths[m_month]) + " Yr " + std::to_string(m_year);
     textLeft(m_uiFontBold, date, x, r.minY + r.height() * 0.5f, kText);
-    x += 96.0f * s;
 
-    if (uiButton(UiRect::fromXYWH(r.maxX - 96.0f * s - 116.0f * s, by, 108.0f * s, bh),
-                 "Land Value", m_showLandValue, kAccent)) {
+    // Right cluster, anchored off the panel edge with the same 8px pad.
+    const UiRect reportsBtn = UiRect::fromXYWH(r.maxX - pad - 88.0f * s, by, 88.0f * s, bh);
+    const UiRect lvBtn = UiRect::fromXYWH(reportsBtn.minX - 8.0f * s - 108.0f * s, by,
+                                          108.0f * s, bh);
+    if (uiButton(lvBtn, "Land Value", m_showLandValue, kAccent)) {
         m_showLandValue = !m_showLandValue;
         m_sceneDirty = true;
     }
 
-    if (uiButton(UiRect::fromXYWH(r.maxX - 96.0f * s, by, 88.0f * s, bh), "Reports",
-                 m_reportsOpen, kGold)) {
+    if (uiButton(reportsBtn, "Reports", m_reportsOpen, kGold)) {
         m_reportsOpen = !m_reportsOpen;
     }
 }
@@ -3290,8 +3360,8 @@ void CityBuilderApp::drawMinimap(const Layout& lo) {
     const float s = lo.s;
     const UiRect& r = lo.minimap;
     m_uiDrawList.addDropShadow(r, withA(UiColor(0, 0, 0, 1), 0.4f), 8.0f * s, 0.0f, 3.0f * s);
-    m_uiDrawList.addRoundRectFilled(r, kPanelRise, 9.0f * s);
-    m_uiDrawList.addRoundRect(r, kEdge, 9.0f * s, s);
+    m_uiDrawList.addRoundRectFilled(r, kPanelRise, kRadiusPanel * s);
+    m_uiDrawList.addRoundRect(r, kEdge, kRadiusPanel * s, s);
 
     const float titleH = 22.0f * s;
     textLeft(m_uiFontBold, "City Map", r.minX + 10.0f * s, r.minY + titleH * 0.5f + 2.0f * s,
@@ -3369,13 +3439,19 @@ void CityBuilderApp::drawReports(const Layout& lo) {
     const float s = lo.s;
     const UiRect& r = lo.reports;
     m_uiDrawList.addDropShadow(r, withA(UiColor(0, 0, 0, 1), 0.5f), 14.0f * s, 0.0f, 6.0f * s);
-    m_uiDrawList.addRoundRectFilled(r, kPanel, 10.0f * s);
-    m_uiDrawList.addRoundRect(r, kEdge, 10.0f * s, s);
+    m_uiDrawList.addRoundRectFilled(r, kPanel, kRadiusPanel * s);
+    m_uiDrawList.addRoundRect(r, kEdge, kRadiusPanel * s, s);
 
-    // Title bar.
+    // Title bar: round only the top corners (square off the band's lower half
+    // so the raised strip doesn't show floating rounded corners mid-panel),
+    // and close it with the same 1px kEdge rule the top bar uses.
     const float titleH = 38.0f * s;
     m_uiDrawList.addRoundRectFilled(UiRect{r.minX, r.minY, r.maxX, r.minY + titleH}, kPanelRise,
-                                    10.0f * s);
+                                    kRadiusPanel * s);
+    m_uiDrawList.addRectFilled(UiRect{r.minX, r.minY + titleH * 0.5f, r.maxX, r.minY + titleH},
+                               kPanelRise);
+    m_uiDrawList.addRectFilled(UiRect{r.minX, r.minY + titleH - 1.0f, r.maxX, r.minY + titleH},
+                               kEdge);
     textLeft(m_uiFontBold, "City Reports", r.minX + 14.0f * s, r.minY + titleH * 0.5f, kText);
     if (uiButton(UiRect::fromXYWH(r.maxX - 30.0f * s, r.minY + 7.0f * s, 24.0f * s, 24.0f * s),
                  "X", false, kBad)) {
@@ -3413,8 +3489,8 @@ void CityBuilderApp::drawReports(const Layout& lo) {
     // Chart area.
     const UiRect chart = UiRect::fromXYWH(r.minX + 16.0f * s, valY + 34.0f * s,
                                           r.width() - 32.0f * s, r.maxY - (valY + 34.0f * s) - 34.0f * s);
-    m_uiDrawList.addRoundRectFilled(chart, withA(UiColor(0, 0, 0, 1), 0.25f), 6.0f * s);
-    m_uiDrawList.addRoundRect(chart, kEdge, 6.0f * s, s);
+    m_uiDrawList.addRoundRectFilled(chart, withA(UiColor(0, 0, 0, 1), 0.25f), kRadiusCtl * s);
+    m_uiDrawList.addRoundRect(chart, kEdge, kRadiusCtl * s, s);
 
     if (h.size() < 2) {
         textCenter(m_uiFont, "Collecting data… run the simulation",
@@ -3512,8 +3588,9 @@ void CityBuilderApp::drawFlash(const Layout& lo) {
     const float h = 34.0f * s;
     const UiRect r = UiRect::fromXYWH(lo.map.minX + (lo.map.width() - w) * 0.5f,
                                       lo.map.maxY - 90.0f * s, w, h);
-    m_uiDrawList.addRoundRectFilled(r, withA(UiColor::fromRgbHex(0x2A1A1A), 0.92f * a), 8.0f * s);
-    m_uiDrawList.addRoundRect(r, withA(kBad, 0.8f * a), 8.0f * s, s);
+    m_uiDrawList.addRoundRectFilled(r, withA(UiColor::fromRgbHex(0x2A1A1A), 0.92f * a),
+                                    kRadiusPanel * s);
+    m_uiDrawList.addRoundRect(r, withA(kBad, 0.8f * a), kRadiusPanel * s, s);
     textCenter(m_uiFontBold, m_flashMsg, (r.minX + r.maxX) * 0.5f, (r.minY + r.maxY) * 0.5f,
                withA(kText, a));
 }
@@ -3525,11 +3602,12 @@ bool CityBuilderApp::uiButton(const UiRect& r, std::string_view label, bool acti
                               const UiColor& accent, const ui::Font* font, bool enabled) {
     const ui::Font* f = font ? font : &m_uiFontBold;
     const bool hover = enabled && r.contains(m_uiInput.mousePx);
-    const float radius = std::min(8.0f, r.height() * 0.28f);
+    const float cs = contentScale();
+    const float radius = std::min(kRadiusCtl * cs, r.height() * 0.35f);
     UiColor bg = !enabled ? withA(kBtn, 0.5f)
                           : active ? mix(kBtn, accent, 0.45f) : (hover ? kBtnHover : kBtn);
     m_uiDrawList.addRoundRectFilled(r, bg, radius);
-    m_uiDrawList.addRoundRect(r, active ? withA(accent, 0.95f) : kEdge, radius, 1.0f);
+    m_uiDrawList.addRoundRect(r, active ? withA(accent, 0.95f) : kEdge, radius, cs);
     textCenter(*f, label, (r.minX + r.maxX) * 0.5f, (r.minY + r.maxY) * 0.5f,
                enabled ? kText : kTextFaint);
     return enabled && hover && m_uiInput.button(UiMouseButton::Left).pressed;
