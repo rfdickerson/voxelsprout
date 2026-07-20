@@ -343,6 +343,11 @@ private:
 
     float       m_flashTimer = 0.0f;
     std::string m_flashMsg;
+    float       m_moneyFlashTimer = 0.0f;  // pulses the treasury red when a charge fails
+    // Camera-controls hint chip: each line disappears once the player has
+    // actually performed that action, so the chip teaches then gets out of
+    // the way (and never nags someone who already knows).
+    bool m_usedPan = false, m_usedZoom = false, m_usedRotate = false;
     float       m_time = 0.0f;
 
     std::unordered_map<int, bool> m_keyPrev;

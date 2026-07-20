@@ -3,6 +3,7 @@
 #include "math/math.h"
 #include "procgen/props.h"
 #include "ui/font.h"
+#include "ui/vector/vector_icon_registry.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -139,24 +140,26 @@ struct ToolMeta {
     const char* key;
     double      cost;
     UiColor     color;
+    const char* icon;  // VectorIconRegistry key — the picture IS the label for
+                       // players who can't (or won't) read the word next to it
 };
 
 // Indexed by CityBuilderApp::Tool, in declaration order.
 const ToolMeta kTools[] = {
-    {"DEMO", "Bulldoze",     "X", 4.0,    kBad},
-    {"R",    "Residential",  "1", 25.0,   kZoneR},
-    {"C",    "Commercial",   "2", 25.0,   kZoneC},
-    {"I",    "Industrial",   "3", 25.0,   kZoneI},
-    {"ROAD", "Road",         "R", 12.0,   UiColor::fromRgbHex(0x6B7079)},
-    {"POL",  "Police",       "4", 500.0,  UiColor::fromRgbHex(0x2F6BD6)},
-    {"FIRE", "Fire Dept",    "5", 500.0,  UiColor::fromRgbHex(0xC0392B)},
-    {"CLN",  "Clinic",       "6", 450.0,  UiColor::fromRgbHex(0x21A89A)},
-    {"SCH",  "School",       "7", 650.0,  UiColor::fromRgbHex(0xE0852E)},
-    {"PRK",  "Park",         "8", 120.0,  UiColor::fromRgbHex(0x35863A)},
-    {"LIB",  "Library",      "9", 550.0,  UiColor::fromRgbHex(0x8A5C3E)},
-    {"AMPH", "Amphitheater", "0", 800.0,  UiColor::fromRgbHex(0xB08CD6)},
-    {"PWR",  "Power Plant",  "-", 1200.0, UiColor::fromRgbHex(0xC9A227)},
-    {"MTCH", "Match",        "F", 25.0,   UiColor::fromRgbHex(0xE0642E)},
+    {"DEMO", "Bulldoze",     "X", 4.0,    kBad,                             "cb_bulldoze"},
+    {"R",    "Residential",  "1", 25.0,   kZoneR,                           "cb_zone_r"},
+    {"C",    "Commercial",   "2", 25.0,   kZoneC,                           "cb_zone_c"},
+    {"I",    "Industrial",   "3", 25.0,   kZoneI,                           "cb_zone_i"},
+    {"ROAD", "Road",         "R", 12.0,   UiColor::fromRgbHex(0x6B7079),    "cb_road"},
+    {"POL",  "Police",       "4", 500.0,  UiColor::fromRgbHex(0x2F6BD6),    "cb_police"},
+    {"FIRE", "Fire Dept",    "5", 500.0,  UiColor::fromRgbHex(0xC0392B),    "cb_fire"},
+    {"CLN",  "Clinic",       "6", 450.0,  UiColor::fromRgbHex(0x21A89A),    "cb_clinic"},
+    {"SCH",  "School",       "7", 650.0,  UiColor::fromRgbHex(0xE0852E),    "cb_school"},
+    {"PRK",  "Park",         "8", 120.0,  UiColor::fromRgbHex(0x35863A),    "cb_park"},
+    {"LIB",  "Library",      "9", 550.0,  UiColor::fromRgbHex(0x8A5C3E),    "cb_library"},
+    {"AMPH", "Amphitheater", "0", 800.0,  UiColor::fromRgbHex(0xB08CD6),    "cb_amphitheater"},
+    {"PWR",  "Power Plant",  "-", 1200.0, UiColor::fromRgbHex(0xC9A227),    "cb_power"},
+    {"MTCH", "Match",        "F", 25.0,   UiColor::fromRgbHex(0xE0642E),    "cb_match"},
 };
 
 // ── Building "character" flavor: deterministic per-tile hash so a parcel's
@@ -563,6 +566,19 @@ bool CityBuilderApp::onInit() {
     auto root = std::make_unique<ui::Widget>();
     root->mousePassthrough = true;
     m_uiContext.setRoot(std::move(root));
+
+    // Tool icons: baked white so call sites can tint (zone colors on the
+    // demand meter, ink on light chips). Registration failure just leaves the
+    // colored chip + name, so a missing asset degrades, not breaks.
+    static constexpr const char* kIconFiles[] = {
+        "bulldoze", "zone_r", "zone_c", "zone_i", "road", "police", "fire",
+        "clinic", "school", "park", "library", "amphitheater", "power", "match",
+    };
+    for (const char* n : kIconFiles) {
+        ui::VectorIconRegistry::global().registerFromFile(
+            std::string("cb_") + n, resolveAssetPath(std::string("assets/icons/tools/") + n + ".svg"),
+            std::round(44.0f * s));
+    }
 
     // Sunlight + shadow maps + AO carry the visual read here (there's no
     // texture detail on these flat-shaded boxes to fall back on). Ray tracing
@@ -1131,6 +1147,7 @@ void CityBuilderApp::stepFire() {
 bool CityBuilderApp::charge(double cost) {
     if (m_money >= cost) { m_money -= cost; return true; }
     flash("Insufficient funds");
+    m_moneyFlashTimer = 1.8f;  // the treasury chip pulses red — look THERE
     return false;
 }
 
@@ -1300,6 +1317,7 @@ bool CityBuilderApp::edgeDown(int key) {
 void CityBuilderApp::onTick(float dt) {
     m_time += dt;
     if (m_flashTimer > 0.0f) m_flashTimer -= dt;
+    if (m_moneyFlashTimer > 0.0f) m_moneyFlashTimer -= dt;
     if (m_sceneRebuildCooldown > 0.0f) m_sceneRebuildCooldown -= dt;
 
     if (edgeDown(GLFW_KEY_X)) m_tool = Tool::Bulldoze;
@@ -1324,8 +1342,8 @@ void CityBuilderApp::onTick(float dt) {
     if (edgeDown(GLFW_KEY_N)) stepMonth();
 
     // Rotate the isometric view in 90 deg steps, SimCity/Cities-style.
-    if (edgeDown(GLFW_KEY_Q)) m_camYawDeg -= 90.0f;
-    if (edgeDown(GLFW_KEY_E)) m_camYawDeg += 90.0f;
+    if (edgeDown(GLFW_KEY_Q)) { m_camYawDeg -= 90.0f; m_usedRotate = true; }
+    if (edgeDown(GLFW_KEY_E)) { m_camYawDeg += 90.0f; m_usedRotate = true; }
 
     if (edgeDown(GLFW_KEY_ESCAPE)) {
         if (m_reportsOpen) m_reportsOpen = false;
@@ -1396,6 +1414,7 @@ void CityBuilderApp::handleCamera(const Layout& lo) {
     // Zoom toward the cursor: keep whatever ground point is under the mouse
     // fixed on screen as orthoHalfHeight changes.
     if (overWorld && m_uiInput.scrollDelta != 0.0f) {
+        m_usedZoom = true;
         float oldGX = 0.0f, oldGZ = 0.0f;
         const bool hadGround = screenToGroundXZ(m_uiInput.mousePx, lo, oldGX, oldGZ);
         const float newZoom = std::clamp(m_camZoom * (1.0f - 0.12f * m_uiInput.scrollDelta),
@@ -1415,6 +1434,7 @@ void CityBuilderApp::handleCamera(const Layout& lo) {
     // Right-drag pan: whatever ground point was under the cursor last frame
     // tracks the cursor this frame (robust under any yaw/pitch/zoom).
     if (overWorld && m_uiInput.button(UiMouseButton::Right).down) {
+        m_usedPan = true;
         const UiVec2 newPos = m_uiInput.mousePx;
         const UiVec2 oldPos{newPos.x - m_uiInput.mouseDeltaPx.x, newPos.y - m_uiInput.mouseDeltaPx.y};
         float oldGX = 0.0f, oldGZ = 0.0f, newGX = 0.0f, newGZ = 0.0f;
@@ -3359,6 +3379,67 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
                                  2.0f * s);
             }
         }
+        // Hovering an already-placed building shows its rings too — the radius
+        // isn't a secret you only get to see while shopping.
+        const Tile& ht = tile(m_hoverC, m_hoverR);
+        if (ht.building != Building::None) {
+            const int oc = ht.bOriginC >= 0 ? ht.bOriginC : m_hoverC;
+            const int orr = ht.bOriginR >= 0 ? ht.bOriginR : m_hoverR;
+            const int fp = inBounds(oc, orr) ? std::max<int>(1, tile(oc, orr).footprint) : 1;
+            const float bcx = (oc + fp * 0.5f) * kTileWorldSize;
+            const float bcz = (orr + fp * 0.5f) * kTileWorldSize;
+            const InfluenceSpec inf = buildingInfluence(ht.building);
+            if (inf.radius > 0) {
+                const UiColor rc = inf.nuisance ? kBad : buildingRoof(ht.building);
+                strokeGroundRing(bcx, bcz, inf.radius * kTileWorldSize, withA(rc, 0.75f), 2.0f * s);
+            }
+            if (ht.building == Building::Power) {
+                strokeGroundRing(bcx, bcz, kPowerRadius * kTileWorldSize, withA(kGold, 0.8f),
+                                 2.0f * s);
+            }
+        }
+    }
+
+    // Problem badges: a zoned district with no road or no power announces
+    // itself in the world — a little pulsing icon chip over the stalled area —
+    // instead of failing silently until someone thinks to hover a tile and
+    // read a tooltip. One badge per cluster corner (dedup against the
+    // neighbor above/left), gated by zoom so a far view doesn't shimmer.
+    if (m_camZoom < 36.0f) {
+        int badges = 0;
+        const float pulse = 0.62f + 0.38f * std::sin(m_time * 3.0f);
+        for (int r = 0; r < kGridH && badges < 40; ++r) {
+            for (int c = 0; c < kGridW && badges < 40; ++c) {
+                const Tile& t = tile(c, r);
+                if (t.zone == Zone::None) continue;
+                const bool noRoad = !t.nearRoad;
+                const bool noPower = t.nearRoad && !t.powered;
+                if (!noRoad && !noPower) continue;
+                const auto samePlight = [&](int cc, int rr) {
+                    if (!inBounds(cc, rr)) return false;
+                    const Tile& n = tile(cc, rr);
+                    if (n.zone == Zone::None) return false;
+                    return noRoad ? !n.nearRoad : (n.nearRoad && !n.powered);
+                };
+                if (samePlight(c - 1, r) || samePlight(c, r - 1)) continue;
+                const UiVec2 sp = worldToScreen((c + 0.5f) * kTileWorldSize, 0.6f,
+                                                (r + 0.5f) * kTileWorldSize, lo);
+                if (sp.x < lo.map.minX || sp.x > lo.map.maxX || sp.y < lo.map.minY ||
+                    sp.y > lo.map.maxY)
+                    continue;
+                const float bs = 24.0f * s;
+                const UiRect chip = UiRect::fromXYWH(sp.x - bs * 0.5f, sp.y - bs * 0.5f, bs, bs);
+                m_uiDrawList.addRoundRectFilled(chip, withA(UiColor::fromRgbHex(0x14181F),
+                                                            0.85f * pulse), kRadiusChip * s);
+                m_uiDrawList.addRoundRect(chip, withA(kBad, 0.9f * pulse), kRadiusChip * s, s);
+                const float ins = bs * 0.18f;
+                const UiRect iconR{chip.minX + ins, chip.minY + ins, chip.maxX - ins,
+                                   chip.maxY - ins};
+                m_uiDrawList.addVectorIcon(noRoad ? "cb_road" : "cb_power", iconR,
+                                           withA(noRoad ? UiColor(1, 1, 1, 1) : kGold, pulse));
+                ++badges;
+            }
+        }
     }
 
     // Hover footprint preview: project the ground-plane quad corners to screen
@@ -3455,6 +3536,33 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
         }
     }
 
+    // Camera hint chip: lists only the controls the player hasn't used yet,
+    // and each line retires itself the first time the action happens — the
+    // chip teaches, then leaves. (Rotate also has visible buttons below.)
+    {
+        const char* hints[3];
+        int hintCount = 0;
+        if (!m_usedPan) hints[hintCount++] = "Move view · hold RIGHT mouse + drag";
+        if (!m_usedZoom) hints[hintCount++] = "Zoom · mouse wheel";
+        if (!m_usedRotate) hints[hintCount++] = "Rotate · Q / E";
+        if (hintCount > 0) {
+            const float lineH = 18.0f * s;
+            float w = 0.0f;
+            for (int i = 0; i < hintCount; ++i) {
+                w = std::max(w, m_uiFont.measureText(hints[i]));
+            }
+            const UiRect chip = UiRect::fromXYWH(lo.map.maxX - w - 40.0f * s,
+                                                 lo.map.minY + 12.0f * s, w + 24.0f * s,
+                                                 hintCount * lineH + 14.0f * s);
+            m_uiDrawList.addRoundRectFilled(chip, withA(kPanel, 0.85f), kRadiusCtl * s);
+            m_uiDrawList.addRoundRect(chip, kEdge, kRadiusCtl * s, s);
+            for (int i = 0; i < hintCount; ++i) {
+                textLeft(m_uiFont, hints[i], chip.minX + 12.0f * s,
+                         chip.minY + 7.0f * s + (i + 0.5f) * lineH, kTextDim);
+            }
+        }
+    }
+
     // Land-value legend: a red→green gradient key so the overlay reads at a glance.
     if (m_showLandValue) {
         const float lw = 168.0f * s, lh = 12.0f * s;
@@ -3546,8 +3654,14 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
 
     // Monthly net rides the treasury value's baseline (a third text row does
     // not fit the 54px bar — the old cy+24 placement clipped its descenders).
+    // A failed purchase pulses the treasury red for a moment, so "Insufficient
+    // funds" points somewhere: at the money.
     const std::string net = (m_lastNet >= 0 ? "+" : "") + moneyStr(m_lastNet) + "/mo";
-    chip("Treasury", moneyStr(m_money), kGold, net, m_lastNet >= 0 ? kGood : kBad);
+    UiColor moneyCol = kGold;
+    if (m_moneyFlashTimer > 0.0f) {
+        moneyCol = mix(kGold, kBad, 0.5f + 0.5f * std::sin(m_time * 14.0f));
+    }
+    chip("Treasury", moneyStr(m_money), moneyCol, net, m_lastNet >= 0 ? kGood : kBad);
     chip("Population", commaInt(m_population), kText);
     chip("Jobs", commaInt(m_jobs), kText);
     {
@@ -3559,7 +3673,7 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
         char buf[16];
         std::snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(std::lround(m_happiness)));
         const UiColor hc = m_happiness >= 55 ? kGood : (m_happiness >= 35 ? kGold : kBad);
-        chip("Approval", buf, hc);
+        chip("Happy", buf, hc);  // a word every player can read
     }
 
     // RCI demand bars, caption on the shared centre line. Bars + letters are
@@ -3569,13 +3683,20 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
     const float base = lo.topBar.maxY - 18.0f * s;
     const float dem[3] = {m_resDemand, m_comDemand, m_indDemand};
     const UiColor demc[3] = {kZoneR, kZoneC, kZoneI};
-    const char* deml[3] = {"R", "C", "I"};
+    // Tiny house/shop/factory icons under the bars, tinted the matching zone
+    // color — the same picture as the palette button, so bar -> button needs
+    // no words (and no more "R" colliding with the Road hotkey).
+    static constexpr const char* kDemIcons[3] = {"cb_zone_r", "cb_zone_c", "cb_zone_i"};
     for (int i = 0; i < 3; ++i) {
         const float bx = rciX + i * stepX;
         m_uiDrawList.addRectFilled(UiRect{bx, base - barH, bx + barW, base}, withA(demc[i], 0.18f));
         const float h = barH * clamp01(dem[i]);
         m_uiDrawList.addRectFilled(UiRect{bx, base - h, bx + barW, base}, demc[i]);
-        textCenter(m_uiFont, deml[i], bx + barW * 0.5f, base + 8.0f * s, kTextDim);
+        const float is = 11.0f * s;
+        m_uiDrawList.addVectorIcon(kDemIcons[i],
+                                   UiRect{bx + (barW - is) * 0.5f, base + 2.0f * s,
+                                          bx + (barW + is) * 0.5f, base + 2.0f * s + is},
+                                   demc[i]);
     }
 }
 
@@ -3629,13 +3750,20 @@ void CityBuilderApp::drawPalette(const Layout& lo) {
         m_uiDrawList.addRoundRectFilled(r, bg, kRadiusCtl * s);
         m_uiDrawList.addRoundRect(r, active ? withA(m.color, 0.95f) : kEdge, kRadiusCtl * s,
                                   active ? 1.6f * s : s);
-        // Tool colour as a slim identity bar. (The old square swatch centred
-        // 4-letter tags like DEMO/AMPH that measure ~36px in a 28px square —
-        // clipped text — and the name column already names the tool, so the
-        // bar keeps the colour cue without the redundant, overflowing label.)
-        const UiRect bar = UiRect::fromXYWH(r.minX + 6.0f * s, r.minY + 6.0f * s, 4.0f * s,
-                                            btnH - 12.0f * s);
-        m_uiDrawList.addRoundRectFilled(bar, m.color, 2.0f * s);
+        // Colored chip with a picture: the icon IS the label for anyone who
+        // can't read the word next to it (a house, a shop, a match, a fire
+        // truck — so nobody mixes up the burn button and the save-me button).
+        // Icons are baked white; light chips get an ink tint for contrast.
+        const float chipS = btnH - 10.0f * s;
+        const UiRect bar = UiRect::fromXYWH(r.minX + 5.0f * s, r.minY + 5.0f * s, chipS, chipS);
+        m_uiDrawList.addRoundRectFilled(bar, m.color, kRadiusChip * s);
+        const float luma = 0.299f * m.color.r + 0.587f * m.color.g + 0.114f * m.color.b;
+        const UiColor glyphTint = luma > 0.62f ? UiColor::fromRgbHex(0x14181A) : UiColor(1, 1, 1, 1);
+        const float inset = chipS * 0.12f;
+        m_uiDrawList.addVectorIcon(m.icon,
+                                   UiRect{bar.minX + inset, bar.minY + inset, bar.maxX - inset,
+                                          bar.maxY - inset},
+                                   glyphTint);
         // hotkey chip, vertically centred on the row
         const float keyS = 16.0f * s;
         const UiRect key = UiRect::fromXYWH(r.maxX - keyS - 6.0f * s,
@@ -3719,6 +3847,45 @@ void CityBuilderApp::drawControls(const Layout& lo) {
     }
 
     x += 8.0f * s;  // group gap (12px total with the trailing button gap)
+
+    // Rotate-view buttons: the Q/E hotkeys were pure secret handshake — no
+    // pixel on screen hinted the city HAD a back side. Circular-arrow glyphs
+    // are drawn by hand (no font-glyph gamble) over plain buttons.
+    const auto rotateGlyph = [&](const UiRect& rr, bool cw) {
+        const float gx = (rr.minX + rr.maxX) * 0.5f;
+        const float gy = (rr.minY + rr.maxY) * 0.5f;
+        const float rad = rr.height() * 0.26f;
+        constexpr int kN = 12;
+        UiVec2 pts[kN];
+        for (int i = 0; i < kN; ++i) {
+            const float t = static_cast<float>(i) / (kN - 1);
+            const float a = (-0.35f + 1.55f * t) * 3.14159f;
+            const float ax = std::cos(a) * rad, ay = std::sin(a) * rad;
+            pts[i] = {gx + (cw ? ax : -ax), gy + ay};
+        }
+        m_uiDrawList.addPolylineAA(pts, kN, kText, 2.0f * s, false);
+        const float dxv = pts[0].x - pts[1].x, dyv = pts[0].y - pts[1].y;
+        const float len = std::sqrt(dxv * dxv + dyv * dyv) + 1e-5f;
+        const float ux = dxv / len, uy = dyv / len;
+        const float ah = 4.2f * s;
+        const UiVec2 head[3] = {
+            {pts[0].x + ux * ah, pts[0].y + uy * ah},
+            {pts[0].x - uy * ah * 0.8f, pts[0].y + ux * ah * 0.8f},
+            {pts[0].x + uy * ah * 0.8f, pts[0].y - ux * ah * 0.8f},
+        };
+        m_uiDrawList.addPolylineAA(head, 3, kText, 2.0f * s, true);
+    };
+    for (int dir = 0; dir < 2; ++dir) {
+        const UiRect rb = UiRect::fromXYWH(x, by, bh, bh);
+        if (uiButton(rb, "", false, kAccent)) {
+            m_camYawDeg += dir == 0 ? -90.0f : 90.0f;
+            m_usedRotate = true;
+        }
+        rotateGlyph(rb, dir == 1);
+        x += bh + 4.0f * s;
+    }
+
+    x += 8.0f * s;
     const std::string date = std::string(kMonths[m_month]) + " Yr " + std::to_string(m_year);
     textLeft(m_uiFontBold, date, x, r.minY + r.height() * 0.5f, kText);
 
@@ -3847,7 +4014,7 @@ void CityBuilderApp::drawReports(const Layout& lo) {
     }
 
     // Metric tabs.
-    const char* names[5] = {"Population", "Treasury", "Education", "Health", "Approval"};
+    const char* names[5] = {"Population", "Treasury", "Education", "Health", "Happy"};
     const UiColor cols[5] = {kAccent, kGold, UiColor::fromRgbHex(0x6FA0F0),
                              UiColor::fromRgbHex(0xE06A8A), kGood};
     const float tabY = r.minY + titleH + 8.0f * s;
@@ -3883,7 +4050,8 @@ void CityBuilderApp::drawReports(const Layout& lo) {
     if (h.size() < 2) {
         textCenter(m_uiFont, "Collecting data… run the simulation",
                    (chart.minX + chart.maxX) * 0.5f, (chart.minY + chart.maxY) * 0.5f, kTextDim);
-        textLeft(m_uiFont, "Switch metric: keys 1-5 on tabs, or G to toggle",
+        // (This hint once claimed "keys 1-5" switch metrics — they arm tools.)
+        textLeft(m_uiFont, "Click a tab to switch metric · G closes this window",
                  r.minX + 16.0f * s, r.maxY - 18.0f * s, kTextFaint);
         return;
     }
