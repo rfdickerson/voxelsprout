@@ -181,6 +181,13 @@ private:
         bool  returning = false;       // fires are out; driving home to despawn
         short tgtC = -1, tgtR = -1;    // burning tile being fought (or home, returning)
         short homeC = -1, homeR = -1;  // staging road tile it rolled out from
+        // Livelock guard: the exit picker is a memoryless greedy descent, so a
+        // road graph that requires temporarily moving AWAY from the target
+        // (e.g. around the river to the one bridge) can trap a truck pacing
+        // between two tiles forever. Track the best distance reached; too many
+        // moves without improving it means the target is unreachable — give up.
+        short bestDist = 32767;
+        std::uint8_t stallMoves = 0;
     };
     void updateFireTrucks(float dt);
     bool pickTruckExit(FireTruck& tk);  // goal-directed: descend distance to target

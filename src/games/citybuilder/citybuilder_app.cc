@@ -116,7 +116,7 @@ constexpr std::size_t kMaxFx          = 96;
 // (Spring, Summer, Autumn, Winter).
 constexpr float kAtmoHeatSeason[4]    = {0.50f, 0.85f, 0.50f, 0.15f};
 constexpr float kAtmoCityHeatScale    = 0.0015f; // heat per unit of industrial develop/plants
-constexpr float kAtmoHeatEase         = 0.02f;   // per-second ease of heat toward its target
+constexpr float kAtmoHeatEase         = 0.20f;   // per-second ease of heat toward its target
 constexpr float kAtmoChargeRate       = 0.010f;  // instability gain/sec in clear skies, x heat
 constexpr float kAtmoRainRelease      = 0.022f;  // instability spent/sec while raining
 constexpr float kStormSeverityThreshold   = 0.35f;  // above: thunderstorm (wind, lightning)
@@ -2500,6 +2500,12 @@ void CityBuilderApp::updateFireTrucks(float dt) {
     }
 
     for (FireTruck& tk : m_trucks) {
+        const auto retarget = [&](short c, short r) {
+            tk.tgtC = c;
+            tk.tgtR = r;
+            tk.bestDist = 32767;
+            tk.stallMoves = 0;
+        };
         if (!tk.returning) {
             // Target went out (or was bulldozed): next fire, or head home. The
             // return trip uses the same descend-distance seeker — home is just
@@ -2508,10 +2514,12 @@ void CityBuilderApp::updateFireTrucks(float dt) {
             if (tk.tgtC < 0 || !inBounds(tk.tgtC, tk.tgtR) ||
                 tile(tk.tgtC, tk.tgtR).fireTicks == 0) {
                 tk.parked = false;
-                if (!nearestFire(tk.cx, tk.cr, tk.tgtC, tk.tgtR)) {
+                short fc = -1, fr = -1;
+                if (nearestFire(tk.cx, tk.cr, fc, fr)) {
+                    retarget(fc, fr);
+                } else {
                     tk.returning = true;
-                    tk.tgtC = tk.homeC;
-                    tk.tgtR = tk.homeR;
+                    retarget(tk.homeC, tk.homeR);
                 }
             }
         } else if (m_burningTiles > 0) {
@@ -2519,8 +2527,7 @@ void CityBuilderApp::updateFireTrucks(float dt) {
             short fc = -1, fr = -1;
             if (nearestFire(tk.cx, tk.cr, fc, fr)) {
                 tk.returning = false;
-                tk.tgtC = fc;
-                tk.tgtR = fr;
+                retarget(fc, fr);
             }
         }
         if (tk.tgtC < 0) { tk.cx = -1; continue; }  // nowhere to go at all
@@ -2550,6 +2557,17 @@ void CityBuilderApp::updateFireTrucks(float dt) {
                     tk.parked = true;
                     tk.t = 0.5f;  // stop mid-tile beside the blaze
                 }
+                break;
+            }
+            // Livelock guard: no closer to the target after this many tile
+            // moves means the greedy seeker is trapped (target across the
+            // river, road washed out) — give up rather than pace forever.
+            const int dist = std::abs(tk.cx - tk.tgtC) + std::abs(tk.cr - tk.tgtR);
+            if (dist < tk.bestDist) {
+                tk.bestDist = static_cast<short>(dist);
+                tk.stallMoves = 0;
+            } else if (++tk.stallMoves > 24) {
+                tk.cx = -1;
                 break;
             }
             if (!inBounds(tk.cx, tk.cr) || !tile(tk.cx, tk.cr).road || !pickTruckExit(tk)) {
@@ -2587,15 +2605,21 @@ void CityBuilderApp::updateWeather(float dt) {
     // is cooled by whatever is currently falling; instability charges during
     // hot clear spells and is spent as rain. Neither is a dice roll — they are
     // state the player can watch build (top-bar watch chip) and partly shapes
-    // (industrial sprawl warms, parks and water cool).
-    const float heatTarget =
-        clamp01(kAtmoHeatSeason[static_cast<int>(m_season)] + m_cityHeat * kAtmoCityHeatScale -
-                0.35f * m_weatherIntensity);
-    m_atmoHeat += (heatTarget - m_atmoHeat) * std::min(1.0f, kAtmoHeatEase * dt * 10.0f);
-    if (m_weatherIntensity < 0.1f) {
-        m_atmoInstability = clamp01(m_atmoInstability + kAtmoChargeRate * m_atmoHeat * dt);
-    } else {
-        m_atmoInstability = clamp01(m_atmoInstability - kAtmoRainRelease * m_weatherIntensity * dt);
+    // (industrial sprawl warms, parks and water cool). Unlike the ambient
+    // rain/snow below, this energy accumulation is SIM state: it must freeze
+    // on pause, or ten paused minutes would come back as a fully charged sky
+    // and a free tornado.
+    if (!m_paused) {
+        const float heatTarget =
+            clamp01(kAtmoHeatSeason[static_cast<int>(m_season)] + m_cityHeat * kAtmoCityHeatScale -
+                    0.35f * m_weatherIntensity);
+        m_atmoHeat += (heatTarget - m_atmoHeat) * std::min(1.0f, kAtmoHeatEase * dt);
+        if (m_weatherIntensity < 0.1f) {
+            m_atmoInstability = clamp01(m_atmoInstability + kAtmoChargeRate * m_atmoHeat * dt);
+        } else {
+            m_atmoInstability =
+                clamp01(m_atmoInstability - kAtmoRainRelease * m_weatherIntensity * dt);
+        }
     }
 
     m_weatherTimer -= dt;
