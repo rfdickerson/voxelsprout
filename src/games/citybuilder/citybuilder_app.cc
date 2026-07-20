@@ -96,6 +96,14 @@ constexpr float kCongestionStart      = 1.2f;    // trafficLoad where a road rea
 constexpr float kCongestionDecay      = 0.25f;   // per-second EMA decay of trafficLoad
 constexpr int   kCongestionNuisanceRadius = 2;   // jammed arterials hurt frontage land value
 constexpr float kCongestionNuisancePeak   = 0.12f;
+constexpr float kConstructionDev      = 0.7f;    // develop below this renders as a building site
+constexpr int   kMaxSims              = 96;      // pedestrian cap
+constexpr int   kSimsBase             = 6;       // walkers even in a hamlet
+constexpr int   kPopPerSim            = 22;      // one walker per this many residents
+constexpr float kSimLaneOffset        = 0.40f;   // sidewalk band centre, from the road centre
+constexpr std::uint32_t kSimVariants  = 10;      // last two are dog-walkers
+constexpr float kFxLife               = 1.15f;   // seconds a celebration burst lives
+constexpr std::size_t kMaxFx          = 96;
 
 struct ToolMeta {
     const char* tag;
@@ -288,6 +296,85 @@ float buildingHeight(Building b) {
         case Building::Power:  return 2.6f;
         default:                return 1.0f;
     }
+}
+
+// ── Sim (pedestrian) meshes ─────────────────────────────────────────────────
+// Hand-assembled box-people in the same flat-shaded TriMesh format as the
+// procgen props: two legs, a bright shirt, a head, sometimes a cap — Minecraft
+// proportions read instantly at diorama scale. Facing +X like the car meshes
+// so the same heading rotation applies. Dog-walker variants get a little
+// box-dog trotting at their side.
+void emitPropBox(procgen::TriMesh& mesh, float minX, float minY, float minZ, float maxX,
+                 float maxY, float maxZ, const UiColor& c) {
+    const odai::procgen::Vector3 corners[8] = {
+        {minX, minY, minZ}, {maxX, minY, minZ}, {maxX, minY, maxZ}, {minX, minY, maxZ},
+        {minX, maxY, minZ}, {maxX, maxY, minZ}, {maxX, maxY, maxZ}, {minX, maxY, maxZ},
+    };
+    // (quad corner indices, face normal) per box face, wound CCW from outside.
+    static constexpr int kFaces[6][4] = {
+        {4, 5, 6, 7}, {3, 2, 1, 0}, {0, 1, 5, 4}, {2, 3, 7, 6}, {3, 0, 4, 7}, {1, 2, 6, 5},
+    };
+    static constexpr float kNormals[6][3] = {
+        {0, 1, 0}, {0, -1, 0}, {0, 0, -1}, {0, 0, 1}, {-1, 0, 0}, {1, 0, 0},
+    };
+    for (int f = 0; f < 6; ++f) {
+        const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
+        for (int i = 0; i < 4; ++i) {
+            ImportedScenePackedVertex v{};
+            const auto& p = corners[kFaces[f][i]];
+            v.position[0] = p.x; v.position[1] = p.y; v.position[2] = p.z;
+            v.normal[0] = kNormals[f][0]; v.normal[1] = kNormals[f][1]; v.normal[2] = kNormals[f][2];
+            v.color[0] = c.r; v.color[1] = c.g; v.color[2] = c.b;
+            mesh.vertices.push_back(v);
+        }
+        for (const std::uint32_t i : {base, base + 1u, base + 2u, base, base + 2u, base + 3u}) {
+            mesh.indices.push_back(i);
+        }
+    }
+    mesh.boundsMin.x = std::min(mesh.boundsMin.x, minX);
+    mesh.boundsMin.y = std::min(mesh.boundsMin.y, minY);
+    mesh.boundsMin.z = std::min(mesh.boundsMin.z, minZ);
+    mesh.boundsMax.x = std::max(mesh.boundsMax.x, maxX);
+    mesh.boundsMax.y = std::max(mesh.boundsMax.y, maxY);
+    mesh.boundsMax.z = std::max(mesh.boundsMax.z, maxZ);
+}
+
+procgen::TriMesh buildSimMesh(std::uint32_t variant) {
+    static constexpr std::uint32_t kShirts[] = {0xE0564C, 0x3B90E0, 0x4CB95E, 0xF0C24A,
+                                                0xB08CD6, 0xE0852E, 0x21A89A, 0xE8A6C4};
+    static constexpr std::uint32_t kPants[]  = {0x2E3845, 0x6B4A32, 0x4A4A57, 0x35471F};
+    static constexpr std::uint32_t kSkins[]  = {0xF0C8A0, 0xC89A6B, 0x8A5C3E, 0x5C3A24};
+    const std::uint32_t h = tileHash(static_cast<int>(variant), 77, 0x51A5EEDu);
+    const UiColor shirt = UiColor::fromRgbHex(kShirts[variant % 8u]);
+    const UiColor pants = UiColor::fromRgbHex(kPants[h % 4u]);
+    const UiColor skin  = UiColor::fromRgbHex(kSkins[(h >> 4) % 4u]);
+
+    procgen::TriMesh m;
+    m.boundsMin = {1e9f, 1e9f, 1e9f};
+    m.boundsMax = {-1e9f, -1e9f, -1e9f};
+    // Legs (two, straddling z), torso, head — total ~0.17 world units tall.
+    emitPropBox(m, -0.014f, 0.0f, -0.024f, 0.014f, 0.062f, -0.004f, pants);
+    emitPropBox(m, -0.014f, 0.0f, 0.004f, 0.014f, 0.062f, 0.024f, pants);
+    emitPropBox(m, -0.018f, 0.062f, -0.030f, 0.018f, 0.132f, 0.030f, shirt);
+    emitPropBox(m, -0.015f, 0.132f, -0.015f, 0.015f, 0.162f, 0.015f, skin);
+    if ((h >> 8) % 10u < 3u) {  // some folks wear a cap in the shirt's color family
+        const UiColor cap = mix(shirt, UiColor(0, 0, 0, 1), 0.25f);
+        emitPropBox(m, -0.017f, 0.162f, -0.017f, 0.017f, 0.174f, 0.017f, cap);
+        emitPropBox(m, 0.015f, 0.158f, -0.014f, 0.030f, 0.164f, 0.014f, cap);  // brim, facing +X
+    }
+    if (variant >= kSimVariants - 2u) {
+        // Dog-walker: a little dog trotting at the person's left side.
+        const UiColor fur = (variant & 1u) ? UiColor::fromRgbHex(0x8A5C3E)
+                                           : UiColor::fromRgbHex(0xE7E2D8);
+        const float dz = 0.062f;  // beside the person
+        emitPropBox(m, -0.024f, 0.018f, dz - 0.014f, 0.030f, 0.044f, dz + 0.014f, fur);   // body
+        emitPropBox(m, 0.026f, 0.036f, dz - 0.011f, 0.048f, 0.058f, dz + 0.011f, fur);    // head
+        emitPropBox(m, -0.036f, 0.038f, dz - 0.004f, -0.022f, 0.062f, dz + 0.004f, fur);  // tail up!
+        const UiColor paw = mix(fur, UiColor(0, 0, 0, 1), 0.3f);
+        emitPropBox(m, -0.020f, 0.0f, dz - 0.012f, -0.010f, 0.020f, dz + 0.012f, paw);
+        emitPropBox(m, 0.016f, 0.0f, dz - 0.012f, 0.026f, 0.020f, dz + 0.012f, paw);
+    }
+    return m;
 }
 
 // Spatial influence each municipal building splats into the desirability
@@ -772,28 +859,45 @@ void CityBuilderApp::stepMonth() {
     recomputeStats();
 
     // Grow / abandon each zoned parcel.
-    for (Tile& t : m_tiles) {
-        if (t.zone == Zone::None) continue;
-        if (t.fireTicks > 0) {  // burning down, not growing
-            t.develop = std::max(0.0f, t.develop - 0.25f);
-            continue;
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            Tile& t = tile(c, r);
+            if (t.zone == Zone::None) continue;
+            if (t.fireTicks > 0) {  // burning down, not growing
+                t.develop = std::max(0.0f, t.develop - 0.25f);
+                continue;
+            }
+            if (t.charred) { t.develop = 0.0f; continue; }
+            const float dem = t.zone == Zone::Residential ? m_resDemand
+                              : t.zone == Zone::Commercial ? m_comDemand
+                                                           : m_indDemand;
+            const float oldDev = t.develop;
+            if (t.powered && t.nearRoad) {
+                // Citywide demand sets the ceiling; per-tile desirability decides how
+                // much of it each parcel actually captures. A 0.5 land value is neutral
+                // (multiplier 1.0), prime land overshoots (clamped to full build-out),
+                // and poor land stagnates even in a hot market.
+                const float desMul = 0.4f + 1.2f * t.desirability;
+                const float target = std::min(3.0f, dem * 3.0f * desMul);
+                t.develop += (target - t.develop) * 0.16f;
+            } else {
+                t.develop += (0.0f - t.develop) * 0.10f;  // decay toward abandonment
+            }
+            t.develop = std::clamp(t.develop, 0.0f, 3.0f);
+            // Celebrate milestones: construction finishing (kConstructionDev)
+            // and each era jump throw a little confetti burst on the lot, so a
+            // freshly zoned district reads as a wave of grand openings.
+            static constexpr float kMilestones[3] = {kConstructionDev, 1.0f, 2.0f};
+            for (const float m : kMilestones) {
+                if (oldDev < m && t.develop >= m) {
+                    const UiColor zc = t.zone == Zone::Residential ? kZoneR
+                                       : t.zone == Zone::Commercial ? kZoneC
+                                                                    : kZoneI;
+                    addFx((c + 0.5f) * kTileWorldSize, (r + 0.5f) * kTileWorldSize, zc, 2);
+                    break;
+                }
+            }
         }
-        if (t.charred) { t.develop = 0.0f; continue; }
-        const float dem = t.zone == Zone::Residential ? m_resDemand
-                          : t.zone == Zone::Commercial ? m_comDemand
-                                                       : m_indDemand;
-        if (t.powered && t.nearRoad) {
-            // Citywide demand sets the ceiling; per-tile desirability decides how
-            // much of it each parcel actually captures. A 0.5 land value is neutral
-            // (multiplier 1.0), prime land overshoots (clamped to full build-out),
-            // and poor land stagnates even in a hot market.
-            const float desMul = 0.4f + 1.2f * t.desirability;
-            const float target = std::min(3.0f, dem * 3.0f * desMul);
-            t.develop += (target - t.develop) * 0.16f;
-        } else {
-            t.develop += (0.0f - t.develop) * 0.10f;  // decay toward abandonment
-        }
-        t.develop = std::clamp(t.develop, 0.0f, 3.0f);
     }
 
     stepFire();
@@ -946,6 +1050,19 @@ void CityBuilderApp::flash(std::string msg) {
     m_flashTimer = 1.8f;
 }
 
+void CityBuilderApp::addFx(float worldX, float worldZ, const UiColor& color, std::uint8_t kind) {
+    if (m_fx.size() >= kMaxFx) m_fx.erase(m_fx.begin());
+    Fx fx;
+    fx.x = worldX;
+    fx.z = worldZ;
+    fx.t0 = m_time;
+    fx.r = color.r;
+    fx.g = color.g;
+    fx.b = color.b;
+    fx.kind = kind;
+    m_fx.push_back(fx);
+}
+
 void CityBuilderApp::applyTool(int c, int r) {
     if (!inBounds(c, r)) return;
     Tile& t = tile(c, r);
@@ -969,6 +1086,8 @@ void CityBuilderApp::applyTool(int c, int r) {
             if (charge(cost)) {
                 t.zone = z; t.develop = 0.0f;
                 t.fireTicks = 0; t.charred = false; t.charTicks = 0;  // re-zoning clears the lot
+                addFx((c + 0.5f) * kTileWorldSize, (r + 0.5f) * kTileWorldSize,
+                      kTools[static_cast<int>(m_tool)].color, 0);
                 m_sceneDirty = true;
             }
             break;
@@ -977,7 +1096,12 @@ void CityBuilderApp::applyTool(int c, int r) {
             if (t.terrain == Terrain::Water) { flash("Can't pave water"); break; }
             if (t.building != Building::None) { flash("Bulldoze first"); break; }
             if (t.road) break;
-            if (charge(cost)) { t.road = true; t.zone = Zone::None; t.develop = 0.0f; m_sceneDirty = true; }
+            if (charge(cost)) {
+                t.road = true; t.zone = Zone::None; t.develop = 0.0f;
+                addFx((c + 0.5f) * kTileWorldSize, (r + 0.5f) * kTileWorldSize,
+                      UiColor::fromRgbHex(0x9AA0A8), 0);
+                m_sceneDirty = true;
+            }
             break;
         default:
             placeBuilding(c, r, toolBuilding(m_tool));
@@ -1058,6 +1182,7 @@ bool CityBuilderApp::placeBuilding(int c, int r, Building b) {
     Tile& origin = tile(c, r);
     origin.bldgOrigin = true;
     origin.footprint = static_cast<std::uint8_t>(fp);
+    addFx((c + fp * 0.5f) * kTileWorldSize, (r + fp * 0.5f) * kTileWorldSize, buildingRoof(b), 1);
     return true;
 }
 
@@ -1115,6 +1240,7 @@ void CityBuilderApp::onTick(float dt) {
         // Ambient traffic runs on real time (not sim speed) so cars cruise at
         // a believable pace at every game speed.
         updateVehicles(dt);
+        updateSims(dt);
     }
     // Weather is pure atmosphere — it keeps falling even while paused.
     updateWeather(dt);
@@ -1567,6 +1693,60 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                 const short pi = plotIndex[static_cast<std::size_t>(r) * kGridW + c];
                 const Plot* plot = pi >= 0 ? &plots[static_cast<std::size_t>(pi)] : nullptr;
                 const float dev = plot ? plot->develop : t.develop;
+                if (dev > kDevEps && dev < kConstructionDev && t.fireTicks == 0) {
+                    // Under construction: a dirt lot with a timber frame that
+                    // rises with develop, so a freshly zoned district reads as
+                    // a wave of building sites before the grand openings. Big
+                    // plots get a yellow tower crane.
+                    if (plot && (plot->c != c || plot->r != r)) continue;  // origin draws the site
+                    const int pw = plot ? plot->w : 1, pd = plot ? plot->d : 1;
+                    const float pad = ts * 0.10f;
+                    const float lx0 = x0 + pad, lz0 = z0 + pad;
+                    const float lx1 = x0 + pw * ts - pad, lz1 = z0 + pd * ts - pad;
+                    const UiColor dirt   = UiColor::fromRgbHex(0x8A6E4B);
+                    const UiColor lumber = UiColor::fromRgbHex(0xB08954);
+                    const UiColor timber = UiColor::fromRgbHex(0x8A6B42);
+                    const UiColor crane  = UiColor::fromRgbHex(0xE8B324);
+                    builder.addQuad({lx0, 0.012f, lz0}, {lx1, 0.012f, lz0},
+                                    {lx1, 0.012f, lz1}, {lx0, 0.012f, lz1}, dirt);
+                    // Corner posts + top beams, rising as the parcel develops.
+                    const float frameH = 0.18f + 0.55f * (dev / kConstructionDev);
+                    const float ps = 0.03f;  // post side
+                    addBox(builder, lx0, lz0, lx0 + ps, lz0 + ps, 0.0f, frameH, timber);
+                    addBox(builder, lx1 - ps, lz0, lx1, lz0 + ps, 0.0f, frameH, timber);
+                    addBox(builder, lx0, lz1 - ps, lx0 + ps, lz1, 0.0f, frameH, timber);
+                    addBox(builder, lx1 - ps, lz1 - ps, lx1, lz1, 0.0f, frameH, timber);
+                    const float bt = 0.022f;  // beam thickness
+                    addBox(builder, lx0, lz0, lx1, lz0 + bt, frameH, frameH + bt, lumber);
+                    addBox(builder, lx0, lz1 - bt, lx1, lz1, frameH, frameH + bt, lumber);
+                    addBox(builder, lx0, lz0, lx0 + bt, lz1, frameH, frameH + bt, lumber);
+                    addBox(builder, lx1 - bt, lz0, lx1, lz1, frameH, frameH + bt, lumber);
+                    // A pallet of materials, hash-placed inside the lot.
+                    const std::uint32_t h = tileHash(c, r, 0xB011Du);
+                    const float px = lx0 + (0.15f + 0.55f * static_cast<float>(h & 0xffu) / 255.0f) *
+                                               (lx1 - lx0);
+                    const float pz = lz0 + (0.15f + 0.55f * static_cast<float>((h >> 8) & 0xffu) / 255.0f) *
+                                               (lz1 - lz0);
+                    addBox(builder, px, pz, px + 0.10f, pz + 0.07f, 0.012f, 0.055f, lumber);
+                    if (pw * pd >= 4) {
+                        // Tower crane: mast in a hash-picked corner, jib out
+                        // over the lot, cable and hook dangling from the tip.
+                        const bool eastMast = (h & 0x100u) != 0;
+                        const float mx = eastMast ? lx1 - 0.05f : lx0 + 0.01f;
+                        const float mz = (h & 0x200u) ? lz1 - 0.05f : lz0 + 0.01f;
+                        addBox(builder, mx, mz, mx + 0.04f, mz + 0.04f, 0.0f, 1.25f, crane);
+                        const float jibLen = 0.75f;
+                        const float jx0 = eastMast ? mx + 0.04f - jibLen : mx;
+                        addBox(builder, jx0, mz + 0.005f, jx0 + jibLen, mz + 0.035f, 1.20f, 1.25f,
+                               crane);
+                        const float hookX = eastMast ? jx0 + 0.12f : jx0 + jibLen - 0.12f;
+                        addBox(builder, hookX - 0.004f, mz + 0.016f, hookX + 0.004f, mz + 0.024f,
+                               0.75f, 1.20f, kWire);
+                        addBox(builder, hookX - 0.015f, mz + 0.005f, hookX + 0.015f, mz + 0.035f,
+                               0.70f, 0.75f, crane);
+                    }
+                    continue;
+                }
                 if (dev > kDevEps) {
                     // Era-styled CSG building, one per plot, drawn by the
                     // plot's origin tile. The development level picks the
@@ -1922,6 +2102,142 @@ void CityBuilderApp::updateVehicles(float dt) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Sims
+// ─────────────────────────────────────────────────────────────────────────────
+void CityBuilderApp::respawnSim(Sim& s) {
+    // Weighted reservoir-sample over road tiles, like the cars, but people
+    // cluster where life happens: homes and shops nearby weigh most, and a
+    // park next door is a magnet.
+    float totalW = 0.0f;
+    short pickC = -1, pickR = -1;
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            if (!tile(c, r).road) continue;
+            float w = 0.15f;
+            for (int dr = -1; dr <= 1; ++dr) {
+                for (int dc = -1; dc <= 1; ++dc) {
+                    if (!inBounds(c + dc, r + dr)) continue;
+                    const Tile& n = tile(c + dc, r + dr);
+                    if (n.zone == Zone::Residential) w += n.develop;
+                    else if (n.zone == Zone::Commercial) w += n.develop * 1.2f;
+                    if (n.building == Building::Park) w += 1.5f;
+                }
+            }
+            totalW += w;
+            m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+            const float roll = static_cast<float>((m_trafficRng >> 8) & 0xFFFFFFu) / 16777216.0f;
+            if (roll <= w / totalW) {
+                pickC = static_cast<short>(c);
+                pickR = static_cast<short>(r);
+            }
+        }
+    }
+    s.cx = pickC;
+    s.cr = pickR;
+    s.t = 0.0f;
+    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    s.variant = static_cast<std::uint8_t>((m_trafficRng >> 8) % kSimVariants);
+    s.speed = 0.22f + 0.14f * static_cast<float>((m_trafficRng >> 16) & 0xffu) / 255.0f;
+    s.phase = static_cast<float>((m_trafficRng >> 4) & 0xffu) * 0.0246f;
+    s.inX = 1;
+    s.inZ = 0;
+    if (pickC >= 0) {
+        pickSimExit(s);
+        s.inX = s.outX;
+        s.inZ = s.outZ;
+    }
+}
+
+bool CityBuilderApp::pickSimExit(Sim& s) {
+    struct Dir {
+        signed char x, z;
+    };
+    constexpr Dir kDirs[4] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    Dir options[4];
+    int optionCount = 0;
+    for (const Dir& d : kDirs) {
+        if (d.x == -s.inX && d.z == -s.inZ) continue;  // no about-faces mid-stroll
+        if (!inBounds(s.cx + d.x, s.cr + d.z) || !tile(s.cx + d.x, s.cr + d.z).road) continue;
+        options[optionCount++] = d;
+    }
+    if (optionCount == 0) {
+        if (inBounds(s.cx - s.inX, s.cr - s.inZ) && tile(s.cx - s.inX, s.cr - s.inZ).road) {
+            s.outX = static_cast<signed char>(-s.inX);
+            s.outZ = static_cast<signed char>(-s.inZ);
+            return true;
+        }
+        return false;
+    }
+    // Wander toward the lively blocks: shops and parks pull hardest, homes a
+    // little, with only a mild keep-straight bias — pedestrians meander.
+    float weights[4];
+    float totalW = 0.0f;
+    for (int i = 0; i < optionCount; ++i) {
+        const Dir d = options[i];
+        const int tc = s.cx + d.x, tr = s.cr + d.z;
+        float pull = 0.0f;
+        static constexpr int kDc[4] = {1, -1, 0, 0};
+        static constexpr int kDr[4] = {0, 0, 1, -1};
+        for (int k = 0; k < 4; ++k) {
+            if (!inBounds(tc + kDc[k], tr + kDr[k])) continue;
+            const Tile& n = tile(tc + kDc[k], tr + kDr[k]);
+            if (n.zone == Zone::Commercial) pull += n.develop * 0.5f;
+            else if (n.zone == Zone::Residential) pull += n.develop * 0.3f;
+            if (n.building == Building::Park) pull += 1.0f;
+        }
+        float w = 0.5f + pull;
+        if (d.x == s.inX && d.z == s.inZ) w *= 1.3f;
+        weights[i] = w;
+        totalW += w;
+    }
+    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    float roll = static_cast<float>((m_trafficRng >> 8) & 0xFFFFFFu) / 16777216.0f * totalW;
+    int chosen = optionCount - 1;
+    for (int i = 0; i < optionCount; ++i) {
+        if (roll < weights[i]) { chosen = i; break; }
+        roll -= weights[i];
+    }
+    s.outX = options[chosen].x;
+    s.outZ = options[chosen].z;
+    return true;
+}
+
+void CityBuilderApp::updateSims(float dt) {
+    // Foot traffic scales with population — a hamlet has a dog-walker or two,
+    // a boomtown has bustling sidewalks.
+    const int target = std::min({kMaxSims, m_numRoad, kSimsBase + m_population / kPopPerSim});
+    while (static_cast<int>(m_sims.size()) < target) {
+        Sim s;
+        respawnSim(s);
+        if (s.cx < 0) break;  // no roads at all
+        m_sims.push_back(s);
+    }
+    if (static_cast<int>(m_sims.size()) > target) {
+        m_sims.resize(static_cast<std::size_t>(target));
+    }
+
+    for (Sim& s : m_sims) {
+        if (!inBounds(s.cx, s.cr) || !tile(s.cx, s.cr).road) {
+            respawnSim(s);
+            if (s.cx < 0) continue;
+        }
+        s.t += s.speed * dt;
+        int guard = 0;
+        while (s.t >= 1.0f && guard++ < 4) {
+            s.t -= 1.0f;
+            s.cx = static_cast<short>(s.cx + s.outX);
+            s.cr = static_cast<short>(s.cr + s.outZ);
+            s.inX = s.outX;
+            s.inZ = s.outZ;
+            if (!inBounds(s.cx, s.cr) || !tile(s.cx, s.cr).road || !pickSimExit(s)) {
+                respawnSim(s);
+                break;
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Weather
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
@@ -2003,6 +2319,12 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
             m_carMeshes.push_back(procgen::generateVehicle(0xCA5133Du + i * 7919u));
         }
     }
+    if (m_simMeshes.empty()) {
+        m_simMeshes.reserve(kSimVariants);
+        for (std::uint32_t i = 0; i < kSimVariants; ++i) {
+            m_simMeshes.push_back(buildSimMesh(i));
+        }
+    }
 
     const float ts = kTileWorldSize;
     for (const Vehicle& v : m_vehicles) {
@@ -2051,6 +2373,59 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
             dst.position[0] = px + lx * vx - lz * vz;
             dst.position[2] = pz + lx * vz + lz * vx;
             dst.position[1] = src.position[1] + 0.02f;  // ride on the asphalt surface
+            const float nx = src.normal[0], nz = src.normal[2];
+            dst.normal[0] = nx * vx - nz * vz;
+            dst.normal[2] = nx * vz + nz * vx;
+            m_actorVertices.push_back(dst);
+        }
+        for (const std::uint32_t index : mesh.indices) {
+            m_actorIndices.push_back(base + index);
+        }
+    }
+
+    // Sims stroll the sidewalk band with the same bezier-across-the-tile path
+    // as the cars, just further out from the road centre and much slower, with
+    // a little walk-cycle bob so the crowd reads as alive rather than sliding.
+    for (const Sim& sm : m_sims) {
+        if (sm.cx < 0) continue;
+        const float cx = (static_cast<float>(sm.cx) + 0.5f) * ts;
+        const float cz = (static_cast<float>(sm.cr) + 0.5f) * ts;
+        const float inX = static_cast<float>(sm.inX), inZ = static_cast<float>(sm.inZ);
+        const float outX = static_cast<float>(sm.outX), outZ = static_cast<float>(sm.outZ);
+        const float p0x = cx - 0.5f * inX * ts + (-inZ) * kSimLaneOffset * ts;
+        const float p0z = cz - 0.5f * inZ * ts + (inX)*kSimLaneOffset * ts;
+        const float p2x = cx + 0.5f * outX * ts + (-outZ) * kSimLaneOffset * ts;
+        const float p2z = cz + 0.5f * outZ * ts + (outX)*kSimLaneOffset * ts;
+        float p1x, p1z;
+        if (sm.inX == sm.outX && sm.inZ == sm.outZ) {
+            p1x = 0.5f * (p0x + p2x);
+            p1z = 0.5f * (p0z + p2z);
+        } else {
+            p1x = cx + (-inZ) * kSimLaneOffset * ts + (-outZ) * kSimLaneOffset * ts;
+            p1z = cz + (inX)*kSimLaneOffset * ts + (outX)*kSimLaneOffset * ts;
+        }
+        const float t = sm.t, u = 1.0f - t;
+        const float px = u * u * p0x + 2.0f * u * t * p1x + t * t * p2x;
+        const float pz = u * u * p0z + 2.0f * u * t * p1z + t * t * p2z;
+        float vx = 2.0f * u * (p1x - p0x) + 2.0f * t * (p2x - p1x);
+        float vz = 2.0f * u * (p1z - p0z) + 2.0f * t * (p2z - p1z);
+        const float vlen = std::sqrt(vx * vx + vz * vz);
+        if (vlen > 1e-5f) {
+            vx /= vlen;
+            vz /= vlen;
+        } else {
+            vx = inX;
+            vz = inZ;
+        }
+        const float bob = std::abs(std::sin(m_time * 9.0f * sm.speed / 0.3f + sm.phase)) * 0.012f;
+        const procgen::TriMesh& mesh = m_simMeshes[sm.variant % m_simMeshes.size()];
+        const std::uint32_t base = static_cast<std::uint32_t>(m_actorVertices.size());
+        for (const ImportedScenePackedVertex& src : mesh.vertices) {
+            ImportedScenePackedVertex dst = src;
+            const float lx = src.position[0], lz = src.position[2];
+            dst.position[0] = px + lx * vx - lz * vz;
+            dst.position[2] = pz + lx * vz + lz * vx;
+            dst.position[1] = src.position[1] + 0.045f + bob;  // on the sidewalk top
             const float nx = src.normal[0], nz = src.normal[2];
             dst.normal[0] = nx * vx - nz * vz;
             dst.normal[2] = nx * vz + nz * vx;
@@ -2152,9 +2527,67 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
                     const float g = 0.72f + 0.14f * f;
                     pushCross(sx, 2.6f + f * 2.2f, sz, 0.10f + 0.20f * f, 0.14f + 0.12f * f, g, g, g);
                 }
+            } else if (t.zone != Zone::None && t.develop > kDevEps &&
+                       t.develop < kConstructionDev && !t.charred &&
+                       tileHash(c, r, 0xD057u) % 100u < 45u) {
+                // Building sites kick up little tan dust puffs — the district
+                // audibly-in-the-eyes hums with work while it grows in.
+                const std::uint32_t h0 = tileHash(c, r, 0xD1157u);
+                for (int i = 0; i < 2; ++i) {
+                    const std::uint32_t hi = h0 ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                    const float phase = static_cast<float>(hi & 0xffu) / 255.0f;
+                    const float f = fract(m_time * 0.30f + phase + static_cast<float>(i) * 0.5f);
+                    const float sx = x0 + (0.25f + 0.50f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f) * ts2;
+                    const float sz = z0 + (0.25f + 0.50f * static_cast<float>((hi >> 16) & 0xffu) / 255.0f) * ts2;
+                    pushCross(sx, 0.04f + f * 0.28f, sz, 0.05f * (1.0f - 0.5f * f), 0.05f,
+                              0.62f, 0.54f, 0.42f);
+                }
             }
         }
     }
+
+    // Celebration FX: zone puffs, build bursts, and level-up confetti. Each
+    // burst is stateless — position, birth time, and color fully describe it —
+    // and expired bursts are compacted out in place.
+    std::size_t fxKeep = 0;
+    for (const Fx& fx : m_fx) {
+        const float age = m_time - fx.t0;
+        if (age < 0.0f || age >= kFxLife) continue;
+        m_fx[fxKeep++] = fx;
+        const float lifeT = age / kFxLife;
+        const std::uint32_t hb = static_cast<std::uint32_t>(fx.x * 131.0f + fx.z * 7919.0f);
+        if (fx.kind == 0) {
+            // Soft ring puff hugging the ground — tactile "I painted here".
+            for (int i = 0; i < 5; ++i) {
+                const float a = static_cast<float>(i) / 5.0f * 6.2831853f + fx.t0;
+                const float rad = 0.10f + lifeT * 0.42f;
+                const float size = 0.045f * (1.0f - lifeT);
+                if (size <= 0.004f) continue;
+                pushCross(fx.x + std::cos(a) * rad, 0.04f + lifeT * 0.30f, fx.z + std::sin(a) * rad,
+                          size, size, lerpf(fx.r, 1.0f, 0.3f), lerpf(fx.g, 1.0f, 0.3f),
+                          lerpf(fx.b, 1.0f, 0.3f));
+            }
+        } else {
+            // Confetti fountain: bits fly up and out, tumble over, and fade
+            // through the event color, white, and gold.
+            const int count = fx.kind == 1 ? 12 : 9;
+            for (int i = 0; i < count; ++i) {
+                const std::uint32_t hi = hb ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                const float a = static_cast<float>(i) / count * 6.2831853f +
+                                static_cast<float>(hi & 0xffu) * 0.02f;
+                const float vr = 0.8f + 0.8f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f;
+                const float rad = lifeT * vr;
+                const float y = 0.12f + lifeT * 2.0f - lifeT * lifeT * 1.9f;
+                const float size = 0.034f * (1.0f - 0.6f * lifeT);
+                float cr = fx.r, cg = fx.g, cb = fx.b;
+                if (i % 3 == 1) { cr = cg = cb = 1.0f; }                      // white
+                else if (i % 3 == 2) { cr = 0.94f; cg = 0.76f; cb = 0.29f; }  // gold
+                pushCross(fx.x + std::cos(a) * rad, y, fx.z + std::sin(a) * rad, size, size, cr,
+                          cg, cb);
+            }
+        }
+    }
+    m_fx.resize(fxKeep);
 
     // Precipitation: thin tall streaks for rain, small flakes for snow.
     if (!m_drops.empty()) {

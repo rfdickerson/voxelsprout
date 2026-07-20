@@ -146,6 +146,35 @@ private:
     void respawnVehicle(Vehicle& v);
     bool pickExit(Vehicle& v);         // choose outX/outZ at the current tile
 
+    // ── Sims ─────────────────────────────────────────────────────────────────
+    // Little box-people going about their day on the sidewalks: they spawn
+    // where the city is actually alive (developed homes and shops, parks) and
+    // wander the road graph on the sidewalk band, bobbing as they walk. Same
+    // per-frame actor stream as the cars — never a scene upload.
+    struct Sim {
+        short cx = 0, cr = 0;
+        signed char inX = 1, inZ = 0;
+        signed char outX = 1, outZ = 0;
+        float t = 0.0f;
+        float speed = 0.3f;            // tiles per second (walking pace)
+        float phase = 0.0f;            // bob/stride offset so crowds don't sync
+        std::uint8_t variant = 0;      // index into m_simMeshes
+    };
+    void updateSims(float dt);
+    void respawnSim(Sim& s);
+    bool pickSimExit(Sim& s);          // wander-y routing: parks and shops attract
+
+    // ── Celebration FX ───────────────────────────────────────────────────────
+    // Short-lived stateless particle bursts (zone puffs, build bursts, level-up
+    // confetti) rendered from (position, birth time, color) each frame.
+    struct Fx {
+        float x = 0.0f, z = 0.0f;
+        float t0 = 0.0f;
+        float r = 1.0f, g = 1.0f, b = 1.0f;
+        std::uint8_t kind = 0;         // 0 = small puff, 1 = build burst, 2 = confetti
+    };
+    void addFx(float worldX, float worldZ, const ui::UiColor& color, std::uint8_t kind);
+
     // ── Weather ──────────────────────────────────────────────────────────────
     // A simple state machine rolls the sky every ~half minute with seasonal
     // odds (winter precipitates as snow). Precipitation is a particle field
@@ -244,6 +273,9 @@ private:
 
     std::vector<Vehicle> m_vehicles;
     std::vector<procgen::TriMesh> m_carMeshes;             // lazily filled variants
+    std::vector<Sim> m_sims;
+    std::vector<procgen::TriMesh> m_simMeshes;             // lazily filled variants
+    std::vector<Fx> m_fx;
     std::uint32_t m_trafficRng = 0x51CA7B1u;
     // Per-frame actor stream scratch, reused to avoid per-frame allocation.
     std::vector<odai::importer::ImportedScenePackedVertex> m_actorVertices;
