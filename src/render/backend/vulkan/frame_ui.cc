@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -706,6 +707,24 @@ void RendererBackend::buildFrameStatsUi() {
                 m_debugGpuFrameP95Ms,
                 m_debugGpuFrameP99Ms
             );
+            // Rough bottleneck read: whichever of CPU-work / GPU-frame dominates. A
+            // wide margin is a confident bound; near-parity means it's balanced.
+            const float cpuMs = m_debugCpuFrameWorkMs;
+            const float gpuMs = m_debugGpuFrameTimeMs;
+            const float maxMs = std::max(cpuMs, gpuMs);
+            const char* bound = "balanced";
+            ImVec4 boundColor(0.85f, 0.85f, 0.35f, 1.0f);
+            if (maxMs > 0.0001f) {
+                const float ratio = std::fabs(cpuMs - gpuMs) / maxMs;
+                if (ratio > 0.15f) {
+                    const bool gpuBound = gpuMs > cpuMs;
+                    bound = gpuBound ? "GPU-bound" : "CPU-bound";
+                    boundColor = gpuBound ? ImVec4(0.95f, 0.45f, 0.30f, 1.0f)
+                                          : ImVec4(0.40f, 0.70f, 0.95f, 1.0f);
+                }
+            }
+            ImGui::TextColored(boundColor, "Bottleneck: %s (CPU %.2f vs GPU %.2f ms)",
+                               bound, cpuMs, gpuMs);
         } else {
             ImGui::Text("Frame GPU: n/a");
         }
@@ -718,14 +737,83 @@ void RendererBackend::buildFrameStatsUi() {
                 m_debugPresentedFrameP99Ms
             );
         }
-        if (ImGui::TreeNodeEx("GPU Stages (ms)", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Text("Shadow: %.2f", m_debugGpuShadowTimeMs);
-            ImGui::Text("Auto Exposure (compute): %.2f", m_debugGpuAutoExposureTimeMs);
-            ImGui::Text("Sun Shafts (compute): %.2f", m_debugGpuSunShaftTimeMs);
-            ImGui::Text("Prepass: %.2f", m_debugGpuPrepassTimeMs);
-            ImGui::Text("Main: %.2f", m_debugGpuMainTimeMs);
-            ImGui::Text("Post: %.2f", m_debugGpuPostTimeMs);
-            ImGui::Text("UI: %.2f", m_debugGpuUiTimeMs);
+        if (m_gpuTimestampsSupported &&
+            ImGui::TreeNodeEx("GPU Stages", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const float frameGpu = m_debugGpuFrameTimeMs;
+            // Voxel GI's per-frame cost is occupancy + surface + inject + propagate;
+            // the ReSTIR candidate/temporal/spatial/resolve timers are a breakdown of
+            // the surface pass, not separate additive stages.
+            const float giTotalMs =
+                m_debugGpuGiOccupancyTimeMs + m_debugGpuGiSurfaceTimeMs +
+                m_debugGpuGiInjectTimeMs + m_debugGpuGiPropagateTimeMs;
+
+            // Green (cheap) -> red (a large share of the frame), saturating near 40%.
+            auto stageColor = [](float frac) -> ImVec4 {
+                const float t = std::clamp(frac / 0.4f, 0.0f, 1.0f);
+                return ImVec4(0.20f + 0.70f * t, 0.20f + 0.70f * (1.0f - t), 0.16f, 1.0f);
+            };
+            auto stageRow = [&](const char* label, float ms, int indent) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                if (indent > 0) ImGui::Indent(static_cast<float>(indent) * 12.0f);
+                ImGui::TextUnformatted(label);
+                if (indent > 0) ImGui::Unindent(static_cast<float>(indent) * 12.0f);
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%6.3f", ms);
+                ImGui::TableSetColumnIndex(2);
+                const float frac = (frameGpu > 0.0001f) ? std::clamp(ms / frameGpu, 0.0f, 1.0f) : 0.0f;
+                char pct[16];
+                std::snprintf(pct, sizeof(pct), "%.1f%%", frac * 100.0f);
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, stageColor(frac));
+                ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 0.0f), pct);
+                ImGui::PopStyleColor();
+            };
+
+            constexpr ImGuiTableFlags kStageTableFlags =
+                ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit;
+            if (ImGui::BeginTable("gpuStages", 3, kStageTableFlags)) {
+                ImGui::TableSetupColumn("Stage", ImGuiTableColumnFlags_WidthFixed, 158.0f);
+                ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 52.0f);
+                ImGui::TableSetupColumn("share of GPU frame", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
+
+                // Compute passes (run before main lighting).
+                stageRow("Voxel GI", giTotalMs, 0);
+                stageRow("occupancy", m_debugGpuGiOccupancyTimeMs, 1);
+                stageRow("surface", m_debugGpuGiSurfaceTimeMs, 1);
+                if (m_voxelGiRestirActiveThisFrame) {
+                    stageRow("candidate", m_debugGpuGiSurfaceCandidateTimeMs, 2);
+                    stageRow("temporal", m_debugGpuGiSurfaceTemporalTimeMs, 2);
+                    stageRow("spatial", m_debugGpuGiSurfaceSpatialTimeMs, 2);
+                    stageRow("resolve", m_debugGpuGiSurfaceResolveTimeMs, 2);
+                }
+                stageRow("inject", m_debugGpuGiInjectTimeMs, 1);
+                stageRow("propagate", m_debugGpuGiPropagateTimeMs, 1);
+                stageRow("Auto Exposure", m_debugGpuAutoExposureTimeMs, 0);
+                stageRow("Sun Shafts", m_debugGpuSunShaftTimeMs, 0);
+                // Graphics passes.
+                stageRow("Shadow", m_debugGpuShadowTimeMs, 0);
+                stageRow("Prepass (nrm/depth)", m_debugGpuPrepassTimeMs, 0);
+                stageRow("SSAO", m_debugGpuSsaoTimeMs, 0);
+                stageRow("SSAO Blur", m_debugGpuSsaoBlurTimeMs, 0);
+                stageRow("Main", m_debugGpuMainTimeMs, 0);
+                stageRow("Post", m_debugGpuPostTimeMs, 0);
+                stageRow("UI", m_debugGpuUiTimeMs, 0);
+                ImGui::EndTable();
+            }
+
+            // Sum of top-level stages vs the measured frame; the remainder is barrier/idle
+            // gaps and any untimed work, useful for spotting pipeline bubbles.
+            const float accountedMs =
+                giTotalMs + m_debugGpuAutoExposureTimeMs + m_debugGpuSunShaftTimeMs +
+                m_debugGpuShadowTimeMs + m_debugGpuPrepassTimeMs + m_debugGpuSsaoTimeMs +
+                m_debugGpuSsaoBlurTimeMs + m_debugGpuMainTimeMs + m_debugGpuPostTimeMs +
+                m_debugGpuUiTimeMs;
+            const float otherMs = std::max(0.0f, frameGpu - accountedMs);
+            ImGui::Text(
+                "Accounted %.3f  |  Frame GPU %.3f  |  Other/idle %.3f ms",
+                accountedMs, frameGpu, otherMs);
+
             const UiRenderer::Stats& uiStats = m_uiRenderer.stats();
             ImGui::Text(
                 "UI batches/draws/textures: %u / %u / %u",
@@ -738,6 +826,38 @@ void RendererBackend::buildFrameStatsUi() {
                 static_cast<double>(uiStats.dynamicUploadBytes) / 1024.0,
                 static_cast<unsigned long long>(uiStats.skippedDrawCalls)
             );
+            ImGui::TreePop();
+        }
+
+        if (m_vmaAllocator != VK_NULL_HANDLE &&
+            ImGui::TreeNodeEx("GPU Memory", ImGuiTreeNodeFlags_DefaultOpen)) {
+            VkPhysicalDeviceMemoryProperties memProps{};
+            vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProps);
+            std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+            vmaGetHeapBudgets(m_vmaAllocator, budgets.data());
+            constexpr double kMiB = 1024.0 * 1024.0;
+            for (uint32_t heap = 0; heap < memProps.memoryHeapCount; ++heap) {
+                const bool deviceLocal =
+                    (memProps.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0;
+                const VmaBudget& b = budgets[heap];
+                const float frac = (b.budget > 0)
+                    ? std::clamp(static_cast<float>(static_cast<double>(b.usage) /
+                                                    static_cast<double>(b.budget)), 0.0f, 1.0f)
+                    : 0.0f;
+                char overlay[64];
+                std::snprintf(overlay, sizeof(overlay), "%.0f / %.0f MiB",
+                              static_cast<double>(b.usage) / kMiB,
+                              static_cast<double>(b.budget) / kMiB);
+                ImGui::Text("Heap %u %s", heap, deviceLocal ? "(device-local)" : "(host)");
+                ImGui::SameLine();
+                ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 0.0f), overlay);
+                ImGui::Text(
+                    "   VMA blocks %u (%.1f MiB), allocations %u (%.1f MiB)",
+                    b.statistics.blockCount,
+                    static_cast<double>(b.statistics.blockBytes) / kMiB,
+                    b.statistics.allocationCount,
+                    static_cast<double>(b.statistics.allocationBytes) / kMiB);
+            }
             ImGui::TreePop();
         }
         if (ImGui::TreeNodeEx("Draw Calls", ImGuiTreeNodeFlags_DefaultOpen)) {

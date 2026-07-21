@@ -57,6 +57,7 @@ constexpr uint32_t kHdrResolveBloomMipCount = 6u;
 constexpr uint32_t kAutoExposureHistogramBins = 64u;
 constexpr uint32_t kAutoExposureWorkgroupSize = 16u;
 constexpr uint32_t kSunShaftWorkgroupSize = 8u;
+constexpr uint32_t kSsaoComputeWorkgroupSize = 8u;
 constexpr float kVoxelGiCellSize = 1.0f;
 constexpr float kPipeTransferHalfExtent = 0.58f;
 constexpr float kPipeMinRadius = 0.02f;
@@ -935,6 +936,21 @@ void transitionBufferAccess(
     vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
 }
 
+// synchronization2 one-shot submit for the blocking init/upload paths: a single
+// command buffer, no wait/signal semaphores. Keeps these off the deprecated
+// VkSubmitInfo path so the whole backend speaks submit2.
+VkResult submitCommandBufferOneShot(VkQueue queue, VkCommandBuffer commandBuffer, VkFence fence) {
+    VkCommandBufferSubmitInfo commandBufferInfo{};
+    commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    commandBufferInfo.commandBuffer = commandBuffer;
+
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submitInfo.commandBufferInfoCount = 1;
+    submitInfo.pCommandBufferInfos = &commandBufferInfo;
+    return vkQueueSubmit2(queue, 1, &submitInfo, fence);
+}
+
 VkFormat findSupportedDepthFormat(VkPhysicalDevice physicalDevice) {
     constexpr std::array<VkFormat, 3> kDepthCandidates = {
         VK_FORMAT_D32_SFLOAT,
@@ -1016,7 +1032,7 @@ VkFormat findSupportedSsaoFormat(VkPhysicalDevice physicalDevice) {
         VkFormatProperties properties{};
         vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
         const VkFormatFeatureFlags requiredFeatures =
-            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
         if ((properties.optimalTilingFeatures & requiredFeatures) == requiredFeatures) {
             return format;
         }

@@ -670,7 +670,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         uploadScene.textures.size(),
         std::numeric_limits<std::uint32_t>::max());
     if (m_supportsBindlessDescriptors &&
-        m_bindlessDescriptorSet != VK_NULL_HANDLE &&
+        m_bindlessBufferSet.valid() &&
         m_bindlessTextureCapacity > kBindlessTextureStaticCount &&
         !uploadScene.textures.empty()) {
         if (m_importedTextureSampler == VK_NULL_HANDLE) {
@@ -850,31 +850,20 @@ bool RendererBackend::uploadImportedSceneInternal(
                 vkHandleToUint64(resource.imageView),
                 ("imported.texture.view." + std::to_string(textureIndex)).c_str());
 
-            VkImageMemoryBarrier transitionToCopy{};
-            transitionToCopy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            transitionToCopy.srcAccessMask = 0;
-            transitionToCopy.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            transitionToCopy.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            transitionToCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            transitionToCopy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            transitionToCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            transitionToCopy.image = resource.image;
-            transitionToCopy.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            transitionToCopy.subresourceRange.baseMipLevel = 0;
-            transitionToCopy.subresourceRange.levelCount = mipLevelCount;
-            transitionToCopy.subresourceRange.baseArrayLayer = 0;
-            transitionToCopy.subresourceRange.layerCount = 1;
-            vkCmdPipelineBarrier(
+            transitionImageLayout(
                 commandBuffer,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                resource.image,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_PIPELINE_STAGE_2_NONE,
+                VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_COPY_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
                 0,
-                0,
-                nullptr,
-                0,
-                nullptr,
                 1,
-                &transitionToCopy);
+                0,
+                mipLevelCount);
 
             std::vector<VkBufferImageCopy> copyRegions;
             copyRegions.reserve(mipLevelCount);
@@ -904,27 +893,20 @@ bool RendererBackend::uploadImportedSceneInternal(
                 static_cast<std::uint32_t>(copyRegions.size()),
                 copyRegions.data());
 
-            VkImageMemoryBarrier transitionToRead{};
-            transitionToRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            transitionToRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            transitionToRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            transitionToRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            transitionToRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            transitionToRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            transitionToRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            transitionToRead.image = resource.image;
-            transitionToRead.subresourceRange = transitionToCopy.subresourceRange;
-            vkCmdPipelineBarrier(
+            transitionImageLayout(
                 commandBuffer,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                resource.image,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_COPY_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
                 0,
-                0,
-                nullptr,
-                0,
-                nullptr,
                 1,
-                &transitionToRead);
+                0,
+                mipLevelCount);
 
             importedTextureSlots[textureIndex] =
                 static_cast<std::uint32_t>(kBindlessTextureStaticCount + m_importedTextureResources.size());
@@ -939,11 +921,7 @@ bool RendererBackend::uploadImportedSceneInternal(
             }
         }
         if (!textureUploadFailed && commandBuffer != VK_NULL_HANDLE) {
-            VkSubmitInfo submitInfo{};
-            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers = &commandBuffer;
-            if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS ||
+            if (submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE) != VK_SUCCESS ||
                 vkQueueWaitIdle(m_graphicsQueue) != VK_SUCCESS) {
                 VOX_LOGE("render") << "imported texture upload submit failed";
                 textureUploadFailed = true;
@@ -978,7 +956,7 @@ bool RendererBackend::uploadImportedSceneInternal(
     m_fogMapInvExtentZ = 0.0f;
     if (!uploadScene.fogMap.empty() &&
         uploadScene.fogMapW > 0 && uploadScene.fogMapH > 0 &&
-        m_supportsBindlessDescriptors && m_bindlessDescriptorSet != VK_NULL_HANDLE &&
+        m_supportsBindlessDescriptors && m_bindlessBufferSet.valid() &&
         m_vmaAllocator != VK_NULL_HANDLE) {
 
         // Destroy previous fog texture so we always use the latest.
@@ -1068,19 +1046,16 @@ bool RendererBackend::uploadImportedSceneInternal(
                             bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
                             bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                             if (vkBeginCommandBuffer(fogCmd, &bi) == VK_SUCCESS) {
-                                VkImageMemoryBarrier toCopy{};
-                                toCopy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                                toCopy.srcAccessMask = 0;
-                                toCopy.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                                toCopy.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                                toCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                                toCopy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                                toCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                                toCopy.image = m_fogMapTextureResource.image;
-                                toCopy.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                                vkCmdPipelineBarrier(fogCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                                     0, 0, nullptr, 0, nullptr, 1, &toCopy);
+                                transitionImageLayout(
+                                    fogCmd,
+                                    m_fogMapTextureResource.image,
+                                    VK_IMAGE_LAYOUT_UNDEFINED,
+                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                    VK_PIPELINE_STAGE_2_NONE,
+                                    VK_ACCESS_2_NONE,
+                                    VK_PIPELINE_STAGE_2_COPY_BIT,
+                                    VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                    VK_IMAGE_ASPECT_COLOR_BIT);
 
                                 VkBufferImageCopy bic{};
                                 bic.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -1091,21 +1066,19 @@ bool RendererBackend::uploadImportedSceneInternal(
                                     m_fogMapTextureResource.image,
                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
 
-                                VkImageMemoryBarrier toRead{toCopy};
-                                toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                                toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                                toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                                toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                                vkCmdPipelineBarrier(fogCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                                     0, 0, nullptr, 0, nullptr, 1, &toRead);
+                                transitionImageLayout(
+                                    fogCmd,
+                                    m_fogMapTextureResource.image,
+                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                    VK_PIPELINE_STAGE_2_COPY_BIT,
+                                    VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                    VK_IMAGE_ASPECT_COLOR_BIT);
 
                                 if (vkEndCommandBuffer(fogCmd) == VK_SUCCESS) {
-                                    VkSubmitInfo si2{};
-                                    si2.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                                    si2.commandBufferCount = 1;
-                                    si2.pCommandBuffers = &fogCmd;
-                                    if (vkQueueSubmit(m_graphicsQueue, 1, &si2, VK_NULL_HANDLE) == VK_SUCCESS &&
+                                    if (submitCommandBufferOneShot(m_graphicsQueue, fogCmd, VK_NULL_HANDLE) == VK_SUCCESS &&
                                         vkQueueWaitIdle(m_graphicsQueue) == VK_SUCCESS) {
                                         fogUploadOk = true;
                                     }
@@ -1456,13 +1429,9 @@ bool RendererBackend::uploadImportedSceneInternal(
         }
 
         if (!uploadFailed) {
-            VkSubmitInfo submitInfo{};
-            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers = &commandBuffer;
-            result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+            result = submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE);
             if (result != VK_SUCCESS) {
-                logVkFailure("vkQueueSubmit(importedGeometryUpload)", result);
+                logVkFailure("vkQueueSubmit2(importedGeometryUpload)", result);
                 uploadFailed = true;
             }
         }

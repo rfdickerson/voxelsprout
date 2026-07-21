@@ -21,7 +21,6 @@ constexpr float kImportedShadowSlopeBiasScale = 2.2f;
 void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context, const ShadowPassInputs& inputs) {
     VkCommandBuffer commandBuffer = context.commandBuffer;
     VkQueryPool gpuTimestampQueryPool = context.gpuTimestampQueryPool;
-    const BoundDescriptorSets& boundDescriptorSets = *context.boundDescriptorSets;
     const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
     CoreFrameGraphOrderValidator& coreFramePassOrderValidator = *context.frameOrderValidator;
     const CoreFrameGraphPlan& coreFrameGraphPlan = *context.frameGraphPlan;
@@ -38,7 +37,6 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
     const bool importedPageCullingEnabled = inputs.importedPageCullingEnabled;
 
-    const uint32_t boundDescriptorSetCount = boundDescriptorSets.count;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
         m_debugDrawCallsTotal += drawCount;
@@ -47,9 +45,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
         if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
             return;
         }
-        vkCmdWriteTimestamp(
+        vkCmdWriteTimestamp2(
             commandBuffer,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_2_NONE,
             gpuTimestampQueryPool,
             queryIndex
         );
@@ -58,9 +56,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
         if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
             return;
         }
-        vkCmdWriteTimestamp(
+        vkCmdWriteTimestamp2(
             commandBuffer,
-            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             gpuTimestampQueryPool,
             queryIndex
         );
@@ -162,16 +160,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     0.0f,
                     -(slopeBias * kImportedShadowSlopeBiasScale));
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
-                vkCmdBindDescriptorSets(
-                    commandBuffer,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_pipelineLayout,
-                    0,
-                    boundDescriptorSetCount,
-                    boundDescriptorSets.sets.data(),
-                    1,
-                    &mvpDynamicOffset
-                );
+                bindGraphicsDescriptorBuffers(commandBuffer);
                 const VkBuffer importedVertexBuffers[1] = {importedVertexBuffer};
                 const VkDeviceSize importedVertexOffsets[1] = {0};
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
@@ -215,16 +204,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     0.0f,
                     -(slopeBias * kImportedShadowSlopeBiasScale));
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
-                vkCmdBindDescriptorSets(
-                    commandBuffer,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_pipelineLayout,
-                    0,
-                    boundDescriptorSetCount,
-                    boundDescriptorSets.sets.data(),
-                    1,
-                    &mvpDynamicOffset
-                );
+                bindGraphicsDescriptorBuffers(commandBuffer);
                 const VkBuffer importedVertexBuffers[1] = {importedActorVertexBuffer};
                 const VkDeviceSize importedVertexOffsets[1] = {importedActorVertexOffset};
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
@@ -267,16 +247,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
                     const VkDeviceSize vertexOffsets[2] = {0, 0};
                     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardShadowPipeline);
-                    vkCmdBindDescriptorSets(
-                        commandBuffer,
-                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        m_pipelineLayout,
-                        0,
-                        boundDescriptorSetCount,
-                        boundDescriptorSets.sets.data(),
-                        1,
-                        &mvpDynamicOffset
-                    );
+                    bindGraphicsDescriptorBuffers(commandBuffer);
                     vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
                     vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 

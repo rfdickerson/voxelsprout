@@ -29,9 +29,30 @@ public:
         std::uint64_t dynamicUploadBytes = 0;
         std::uint64_t skippedDrawCalls = 0;
     };
+    // VK_EXT_descriptor_buffer function pointers + sizes, supplied by the renderer
+    // (which owns the extension). When funcs is populated the UI backs its texture
+    // set with a descriptor buffer instead of a pool-allocated descriptor set.
+    struct DescriptorBufferSupport {
+        PFN_vkGetDescriptorSetLayoutSizeEXT getLayoutSize = nullptr;
+        PFN_vkGetDescriptorSetLayoutBindingOffsetEXT getBindingOffset = nullptr;
+        PFN_vkGetDescriptorEXT getDescriptor = nullptr;
+        PFN_vkCmdBindDescriptorBuffersEXT cmdBindDescriptorBuffers = nullptr;
+        PFN_vkCmdSetDescriptorBufferOffsetsEXT cmdSetDescriptorBufferOffsets = nullptr;
+        VkDeviceSize offsetAlignment = 1;
+        VkDeviceSize combinedImageSamplerDescriptorSize = 0;
+        VkDeviceSize sampledImageDescriptorSize = 0;
+        VkDeviceSize samplerDescriptorSize = 0;
+        bool combinedImageSamplerSingleArray = true;
+        [[nodiscard]] bool enabled() const {
+            return getLayoutSize != nullptr && getBindingOffset != nullptr &&
+                   getDescriptor != nullptr && cmdBindDescriptorBuffers != nullptr &&
+                   cmdSetDescriptorBufferOffsets != nullptr;
+        }
+    };
     struct InitInfo {
         VkDevice device = VK_NULL_HANDLE;
         VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+        VkPipelineCache pipelineCache = VK_NULL_HANDLE;  // Optional; shared renderer cache.
         VmaAllocator vmaAllocator = VK_NULL_HANDLE;
         BufferAllocator* bufferAllocator = nullptr;
         VkQueue uploadQueue = VK_NULL_HANDLE;        // Graphics queue, for one-time image uploads.
@@ -39,6 +60,7 @@ public:
         VkFormat colorFormat = VK_FORMAT_UNDEFINED;  // Swapchain color format.
         std::uint32_t maxTextureCount = 0;           // Required bindless descriptor capacity.
         std::string shaderDir;                        // Directory holding ui.*.slang.spv.
+        DescriptorBufferSupport descriptorBuffer{};
     };
 
     bool init(const InitInfo& info);
@@ -98,8 +120,12 @@ private:
     bool         m_geometryReady = false;
     VkSampler m_sampler = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_setLayout = VK_NULL_HANDLE;
-    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
+    // Descriptor-buffer backing for the UI texture array (single region).
+    BufferHandle m_descriptorBufferHandle = kInvalidBufferHandle;
+    VkDeviceAddress m_descriptorBufferAddress = 0;
+    std::uint8_t* m_descriptorBufferMapped = nullptr;
+    VkBufferUsageFlags m_descriptorBufferUsage = 0;
+    VkDeviceSize m_descriptorBindingOffset = 0;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
     VkCommandPool m_uploadPool = VK_NULL_HANDLE;
