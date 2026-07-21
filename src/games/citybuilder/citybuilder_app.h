@@ -130,6 +130,27 @@ private:
     const procgen::TriMesh& cachedPowerPole(std::uint32_t variant) const;
     const procgen::TriMesh& cachedStreetlamp(std::uint32_t variant) const;
 
+    // ── Rising buildings ─────────────────────────────────────────────────────
+    // When a plot's building first appears (construction completes, or an era
+    // upgrade swaps the mesh), it isn't popped into the static scene — it
+    // rises out of the ground over ~1.5s with a dirt burst, drawn through the
+    // per-frame actor stream. buildCityScene() detects the appearance (it is
+    // the only place that knows when a plot renders a building), skips the
+    // static emit while the rise is live, and hands the exact placement
+    // parameters to buildActorFrameData(). All bookkeeping is mutable because
+    // buildCityScene() is const.
+    struct RisingBuilding {
+        short c = 0, r = 0;            // plot origin tile
+        std::uint8_t pw = 1, pd = 1;   // plot extent, tiles
+        std::uint8_t level = 1, tier = 1, turns = 0;
+        bool swapDims = false;
+        std::uint32_t variant = 0;
+        procgen::BuildingKind kind = procgen::BuildingKind::Residential;
+        procgen::Color3 tint{1.0f, 1.0f, 1.0f};
+        float t0 = 0.0f;               // rise start (m_time)
+        bool burst = false;            // dirt-burst fx fired yet?
+    };
+
     // ── Ambient traffic ──────────────────────────────────────────────────────
     // Cars follow the road graph tile-to-tile on the right-hand lane; their
     // geometry is rebuilt each frame from cached car meshes and streamed to
@@ -308,6 +329,16 @@ private:
     mutable std::vector<procgen::TriMesh> m_pumpkinMeshes;
     mutable std::vector<procgen::TriMesh> m_poleMeshes;
     mutable std::vector<procgen::TriMesh> m_lampMeshes;
+    // Rise-animation bookkeeping (see RisingBuilding). m_builtSeen remembers
+    // the highest building level each plot origin has shown, so appearances
+    // and era upgrades trigger a rise exactly once; entries are dropped when a
+    // plot stops rendering a building (charred / decayed / re-zoned) so a
+    // rebuilt lot rises again. m_riseScratch is a reused ImportedScene the
+    // actor pass appends the rotated mesh into, so placement math is shared
+    // with the static path rather than duplicated.
+    mutable std::vector<RisingBuilding> m_rising;
+    mutable std::unordered_map<std::uint32_t, std::uint8_t> m_builtSeen;
+    mutable odai::importer::ImportedScene m_riseScratch;
 
     procgen::Season m_season = procgen::Season::Winter;  // recomputed in onInit
     Weather m_weather = Weather::Clear;

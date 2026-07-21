@@ -123,6 +123,8 @@ constexpr float kSimLaneOffset        = 0.40f;   // sidewalk band centre, from t
 constexpr std::uint32_t kSimVariants  = 10;      // last two are dog-walkers
 constexpr float kFxLife               = 1.15f;   // seconds a celebration burst lives
 constexpr std::size_t kMaxFx          = 96;
+constexpr float kRiseDuration         = 1.5f;    // seconds a new building takes to rise
+constexpr std::size_t kMaxRising      = 14;      // rise animations in flight at once
 // Severe weather: atmosphere first, funnel second. Indexed by procgen::Season
 // (Spring, Summer, Autumn, Winter).
 constexpr float kAtmoHeatSeason[4]    = {0.50f, 0.85f, 0.50f, 0.15f};
@@ -1789,6 +1791,62 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                     procgen::appendTriMesh(cachedStreetlamp(lv), {x1 - ts * 0.10f, sy, z1 - ts * 0.10f},
                                            {1.0f, 1.0f, 1.0f}, scene);
                 }
+
+                // Street furniture — the little civic clutter that makes a
+                // block feel lived-in. All hash-stable, all cheap boxes.
+                const std::uint32_t sf = tileHash(c, r, 0xF0BB13u);
+                if (ns && ew && sf % 100u < 45u) {
+                    // Fire hydrant on an intersection corner: squat red post,
+                    // domed cap, two side nozzles. Iconic, and on-theme.
+                    const UiColor hyd = UiColor::fromRgbHex(0xC0392B);
+                    const float hx = x0 + ts * 0.075f, hz = z0 + ts * 0.075f;
+                    addBox(builder, hx - 0.012f, hz - 0.012f, hx + 0.012f, hz + 0.012f, sy,
+                           sy + 0.042f, hyd);
+                    addBox(builder, hx - 0.008f, hz - 0.008f, hx + 0.008f, hz + 0.008f, sy + 0.042f,
+                           sy + 0.052f, hyd);
+                    addBox(builder, hx - 0.020f, hz - 0.006f, hx + 0.020f, hz + 0.006f, sy + 0.024f,
+                           sy + 0.034f, hyd);
+                } else if (!(ns && ew) && sf % 100u < 30u) {
+                    // Manhole cover on straight runs: a dark disc-ish decal
+                    // just above the lane markings.
+                    const UiColor lid = UiColor::fromRgbHex(0x24262A);
+                    const float mxp = cx + (ns ? 0.10f : 0.0f), mzp = cz + (ew ? 0.10f : 0.0f);
+                    builder.addQuad({mxp - 0.045f, 0.032f, mzp - 0.045f}, {mxp + 0.045f, 0.032f, mzp - 0.045f},
+                                    {mxp + 0.045f, 0.032f, mzp + 0.045f}, {mxp - 0.045f, 0.032f, mzp + 0.045f},
+                                    lid);
+                }
+                if (sf % 1000u >= 620u && sf % 1000u < 720u) {
+                    // Trash can by the curb: dark drum with a lighter lid.
+                    const float tx2 = x0 + ts * 0.085f, tz2 = z1 - ts * 0.085f;
+                    addBox(builder, tx2 - 0.015f, tz2 - 0.015f, tx2 + 0.015f, tz2 + 0.015f, sy,
+                           sy + 0.05f, UiColor::fromRgbHex(0x3A4048));
+                    addBox(builder, tx2 - 0.017f, tz2 - 0.017f, tx2 + 0.017f, tz2 + 0.017f,
+                           sy + 0.05f, sy + 0.058f, UiColor::fromRgbHex(0x565E68));
+                }
+                {
+                    // Bench facing any adjacent park — seats where the people
+                    // actually gather.
+                    const bool parkN = inBounds(c, r - 1) && tile(c, r - 1).building == Building::Park;
+                    const bool parkS = inBounds(c, r + 1) && tile(c, r + 1).building == Building::Park;
+                    const bool parkW = inBounds(c - 1, r) && tile(c - 1, r).building == Building::Park;
+                    const bool parkE = inBounds(c + 1, r) && tile(c + 1, r).building == Building::Park;
+                    if ((parkN || parkS || parkW || parkE) && sf % 100u < 65u) {
+                        const UiColor slat = UiColor::fromRgbHex(0x8A5C3E);
+                        const UiColor leg  = UiColor::fromRgbHex(0x3A3430);
+                        float bx2 = cx, bz2 = cz;
+                        float wX = 0.05f, wZ = 0.016f;  // bench long axis
+                        if (parkN) { bz2 = z0 + ts * 0.08f; }
+                        else if (parkS) { bz2 = z1 - ts * 0.08f; }
+                        else if (parkW) { bx2 = x0 + ts * 0.08f; wX = 0.016f; wZ = 0.05f; }
+                        else { bx2 = x1 - ts * 0.08f; wX = 0.016f; wZ = 0.05f; }
+                        addBox(builder, bx2 - wX, bz2 - wZ, bx2 + wX, bz2 + wZ, sy + 0.020f,
+                               sy + 0.030f, slat);
+                        addBox(builder, bx2 - wX * 0.8f, bz2 - wZ * 0.8f, bx2 - wX * 0.5f,
+                               bz2 + wZ * 0.8f, sy, sy + 0.020f, leg);
+                        addBox(builder, bx2 + wX * 0.5f, bz2 - wZ * 0.8f, bx2 + wX * 0.8f,
+                               bz2 + wZ * 0.8f, sy, sy + 0.020f, leg);
+                    }
+                }
                 continue;
             }
 
@@ -1815,6 +1873,7 @@ ImportedScene CityBuilderApp::buildCityScene() const {
 
             if (t.zone != Zone::None) {
                 if (t.charred) {
+                    m_builtSeen.erase(static_cast<std::uint32_t>(r) * kGridW + c);
                     // Burnt-out lot: a low ash slab plus a couple of debris
                     // chunks, hash-jittered so a burned block reads as ruin,
                     // not a tidy grid of grey tiles.
@@ -1845,6 +1904,9 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                     // a wave of building sites before the grand openings. Big
                     // plots get a yellow tower crane.
                     if (plot && (plot->c != c || plot->r != r)) continue;  // origin draws the site
+                    // The previous building (if any) is gone — let a future
+                    // completion rise again instead of popping.
+                    m_builtSeen.erase(static_cast<std::uint32_t>(r) * kGridW + c);
                     const int pw = plot ? plot->w : 1, pd = plot ? plot->d : 1;
                     const float pad = ts * 0.10f;
                     const float lx0 = x0 + pad, lz0 = z0 + pad;
@@ -1874,6 +1936,78 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                     const float pz = lz0 + (0.15f + 0.55f * static_cast<float>((h >> 8) & 0xffu) / 255.0f) *
                                                (lz1 - lz0);
                     addBox(builder, px, pz, px + 0.10f, pz + 0.07f, 0.012f, 0.055f, lumber);
+
+                    // Site clutter — the stuff that makes it read as a real
+                    // work site instead of a diagram. Everything hash-placed
+                    // and gated by build progress so sites evolve: barricades
+                    // and cones on day one, mounds and rebar as digging
+                    // starts, barrels once the frame is up.
+                    const UiColor cone    = UiColor::fromRgbHex(0xE8641E);
+                    const UiColor coneBand = UiColor::fromRgbHex(0xF0EFE8);
+                    const UiColor mound   = UiColor::fromRgbHex(0x76583A);
+                    const UiColor steel   = UiColor::fromRgbHex(0x4E5560);
+                    // Barricade rail around the lot with a hash-picked gap for
+                    // the entrance (one edge segment left open).
+                    const float railY0 = 0.075f, railY1 = 0.10f, rw = 0.012f;
+                    const int gapEdge = static_cast<int>((h >> 10) & 3u);
+                    if (gapEdge != 0) addBox(builder, lx0, lz0 - 0.0f, lx1, lz0 + rw, railY0, railY1, lumber);
+                    if (gapEdge != 1) addBox(builder, lx0, lz1 - rw, lx1, lz1, railY0, railY1, lumber);
+                    if (gapEdge != 2) addBox(builder, lx0, lz0, lx0 + rw, lz1, railY0, railY1, lumber);
+                    if (gapEdge != 3) addBox(builder, lx1 - rw, lz0, lx1, lz1, railY0, railY1, lumber);
+                    // Traffic cones cluster near the open entrance.
+                    for (int i = 0; i < 3; ++i) {
+                        const std::uint32_t hi = h ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                        float cxp, czp;
+                        const float along = 0.2f + 0.6f * static_cast<float>(hi & 0xffu) / 255.0f;
+                        const float out = 0.05f + 0.05f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f;
+                        if (gapEdge == 0) { cxp = lx0 + along * (lx1 - lx0); czp = lz0 + out; }
+                        else if (gapEdge == 1) { cxp = lx0 + along * (lx1 - lx0); czp = lz1 - out; }
+                        else if (gapEdge == 2) { cxp = lx0 + out; czp = lz0 + along * (lz1 - lz0); }
+                        else { cxp = lx1 - out; czp = lz0 + along * (lz1 - lz0); }
+                        addBox(builder, cxp - 0.014f, czp - 0.014f, cxp + 0.014f, czp + 0.014f,
+                               0.012f, 0.020f, cone);
+                        addBox(builder, cxp - 0.009f, czp - 0.009f, cxp + 0.009f, czp + 0.009f,
+                               0.020f, 0.034f, cone);
+                        addBox(builder, cxp - 0.007f, czp - 0.007f, cxp + 0.007f, czp + 0.007f,
+                               0.034f, 0.040f, coneBand);
+                        addBox(builder, cxp - 0.005f, czp - 0.005f, cxp + 0.005f, czp + 0.005f,
+                               0.040f, 0.050f, cone);
+                    }
+                    // Dirt mounds from the dig.
+                    for (int i = 0; i < 2; ++i) {
+                        const std::uint32_t hi = h ^ (0x5851F42Du * static_cast<std::uint32_t>(i + 1));
+                        const float mx2 = lx0 + (0.15f + 0.6f * static_cast<float>(hi & 0xffu) / 255.0f) * (lx1 - lx0);
+                        const float mz2 = lz0 + (0.15f + 0.6f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f) * (lz1 - lz0);
+                        addBox(builder, mx2 - 0.06f, mz2 - 0.05f, mx2 + 0.06f, mz2 + 0.05f,
+                               0.012f, 0.045f, mound);
+                        addBox(builder, mx2 - 0.035f, mz2 - 0.028f, mx2 + 0.035f, mz2 + 0.028f,
+                               0.045f, 0.075f, dirt);
+                    }
+                    // Rebar bundle once footings are going in.
+                    if (dev > 0.28f) {
+                        const std::uint32_t hi = h ^ 0xC0FFEEu;
+                        const float rx = lx0 + (0.2f + 0.55f * static_cast<float>(hi & 0xffu) / 255.0f) * (lx1 - lx0);
+                        const float rz = lz0 + (0.2f + 0.55f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f) * (lz1 - lz0);
+                        for (int i = 0; i < 4; ++i) {
+                            const float ox = 0.012f * static_cast<float>(i % 2);
+                            const float oz = 0.012f * static_cast<float>(i / 2);
+                            addBox(builder, rx + ox, rz + oz, rx + ox + 0.006f, rz + oz + 0.006f,
+                                   0.012f, 0.24f + 0.03f * static_cast<float>(i), steel);
+                        }
+                    }
+                    // Barrels arrive with the frame.
+                    if (dev > 0.42f) {
+                        const std::uint32_t hi = h ^ 0xBA221Eu;
+                        const float bx2 = lx0 + (0.15f + 0.6f * static_cast<float>(hi & 0xffu) / 255.0f) * (lx1 - lx0);
+                        const float bz2 = lz0 + (0.15f + 0.6f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f) * (lz1 - lz0);
+                        addBox(builder, bx2, bz2, bx2 + 0.035f, bz2 + 0.035f, 0.012f, 0.062f,
+                               UiColor::fromRgbHex(0x9A4A2E));
+                        if (hi & 1u) {
+                            addBox(builder, bx2 + 0.042f, bz2, bx2 + 0.077f, bz2 + 0.035f, 0.012f,
+                                   0.062f, UiColor::fromRgbHex(0x3B6E90));
+                        }
+                    }
+
                     if (pw * pd >= 4) {
                         // Tower crane: mast in a hash-picked corner, jib out
                         // over the lot, cable and hook dangling from the tip.
@@ -1941,6 +2075,93 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                     // the per-turn offsets rebase the origin-rotated mesh
                     // onto the lot rectangle.
                     const bool swapDims = (turns & 1) != 0;
+
+                    // Yard charm on the nicer lots: bushes hug the building on
+                    // mid/high-tier homes, flower beds dot the estates. Ground
+                    // clutter, so it stays put while the building itself rises.
+                    if (kind == procgen::BuildingKind::Residential && tier >= 1) {
+                        const std::uint32_t hb = tileHash(c, r, 0xB0054u);
+                        const UiColor bush = winter ? UiColor::fromRgbHex(0xB9C9BC)
+                                                    : UiColor::fromRgbHex(0x3E7030);
+                        const UiColor bushLite = winter ? UiColor::fromRgbHex(0xCBD8CE)
+                                                        : UiColor::fromRgbHex(0x4C8A38);
+                        const int nBush = 2 + static_cast<int>(hb % 3u);
+                        for (int i = 0; i < nBush; ++i) {
+                            const std::uint32_t hi = hb ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                            // Perimeter walk: pick an edge and slide along it.
+                            const float along = 0.12f + 0.76f * static_cast<float>(hi & 0xffu) / 255.0f;
+                            const int edge = static_cast<int>((hi >> 8) & 3u);
+                            const float in = 0.13f;
+                            float bx = x0, bz = z0;
+                            const float w = pw * ts, d2 = pd * ts;
+                            if (edge == 0) { bx += along * w; bz += in; }
+                            else if (edge == 1) { bx += along * w; bz += d2 - in; }
+                            else if (edge == 2) { bx += in; bz += along * d2; }
+                            else { bx += w - in; bz += along * d2; }
+                            const float bs = 0.030f + 0.020f * static_cast<float>((hi >> 16) & 0xffu) / 255.0f;
+                            addBox(builder, bx - bs, bz - bs, bx + bs, bz + bs, 0.0f, bs * 1.6f, bush);
+                            addBox(builder, bx - bs * 0.6f, bz - bs * 0.6f, bx + bs * 0.6f,
+                                   bz + bs * 0.6f, bs * 1.6f, bs * 2.3f, bushLite);
+                        }
+                        if (tier == 2 && !winter) {
+                            // Flower beds: little bright quads in the yard corners.
+                            static constexpr std::uint32_t kPetals[3] = {0xE86A9A, 0xF0C24A, 0xE0564C};
+                            for (int i = 0; i < 3; ++i) {
+                                const std::uint32_t hi = hb ^ (0x5851F42Du * static_cast<std::uint32_t>(i + 1));
+                                const float fx = x0 + (0.10f + 0.80f * static_cast<float>(hi & 0xffu) / 255.0f) * pw * ts;
+                                const float fz = z0 + (0.10f + 0.80f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f) * pd * ts;
+                                const UiColor petal = UiColor::fromRgbHex(kPetals[hi % 3u]);
+                                builder.addQuad({fx - 0.03f, 0.018f, fz - 0.03f}, {fx + 0.03f, 0.018f, fz - 0.03f},
+                                                {fx + 0.03f, 0.018f, fz + 0.03f}, {fx - 0.03f, 0.018f, fz + 0.03f},
+                                                petal);
+                            }
+                        }
+                    }
+
+                    // Rise bookkeeping: buildCityScene is the only place that
+                    // knows a plot just rendered a building for the first time
+                    // (or swapped meshes on an era upgrade). New appearances
+                    // rise via the actor stream instead of popping in; the
+                    // very first scene build primes silently so the seeded
+                    // city doesn't erupt out of the ground at boot.
+                    const std::uint32_t plotKey = static_cast<std::uint32_t>(r) * kGridW + c;
+                    const auto seenIt = m_builtSeen.find(plotKey);
+                    if (seenIt == m_builtSeen.end() ||
+                        seenIt->second < static_cast<std::uint8_t>(level)) {
+                        m_builtSeen[plotKey] = static_cast<std::uint8_t>(level);
+                        if (m_time > 0.5f && m_rising.size() < kMaxRising) {
+                            RisingBuilding rb;
+                            rb.c = static_cast<short>(c);
+                            rb.r = static_cast<short>(r);
+                            rb.pw = static_cast<std::uint8_t>(pw);
+                            rb.pd = static_cast<std::uint8_t>(pd);
+                            rb.level = static_cast<std::uint8_t>(level);
+                            rb.tier = static_cast<std::uint8_t>(tier);
+                            rb.turns = static_cast<std::uint8_t>(turns);
+                            rb.swapDims = swapDims;
+                            rb.variant = variant;
+                            rb.kind = kind;
+                            rb.tint = tint;
+                            rb.t0 = m_time;
+                            m_rising.push_back(rb);
+                        }
+                    }
+                    bool risingNow = false;
+                    for (auto it = m_rising.begin(); it != m_rising.end();) {
+                        if (it->c == c && it->r == r) {
+                            if (m_time - it->t0 < kRiseDuration) {
+                                it->tint = tint;  // track power state mid-rise
+                                risingNow = true;
+                                ++it;
+                            } else {
+                                it = m_rising.erase(it);
+                            }
+                        } else {
+                            ++it;
+                        }
+                    }
+                    if (risingNow) continue;  // the actor stream draws it this frame
+
                     const procgen::TriMesh& bm =
                         cachedBuilding(kind, level, tier, variant, pw, pd, swapDims);
                     const float pad = ts * 0.10f;
@@ -1967,6 +2188,7 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                     }
                 } else {
                     // Zoned but undeveloped: a faint tinted marker flush with the ground.
+                    m_builtSeen.erase(static_cast<std::uint32_t>(r) * kGridW + c);
                     const UiColor tint = mix(seasonalGrass(mix(kGrassAlt, kGrass, t.scenicPhase)), zc, 0.35f);
                     const float pad = ts * 0.08f;
                     builder.addQuad({x0 + pad, 0.015f, z0 + pad}, {x1 - pad, 0.015f, z0 + pad},
@@ -3113,6 +3335,86 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
         }
     }
 
+    // Rising buildings: replay the cached mesh through a scratch scene using
+    // the same rotation/offset math as the static path, translated down and
+    // eased up with a slight overshoot (easeOutBack) so a finished building
+    // pushes out of the ground, pops a hair above grade, and settles — with a
+    // dirt burst on the first frame and churned dust at the base while it
+    // climbs. Depth-tests against the ground plane hide whatever is still
+    // below grade, so no clipping tricks are needed.
+    for (auto it = m_rising.begin(); it != m_rising.end();) {
+        RisingBuilding& rb = *it;
+        const float age = m_time - rb.t0;
+        const Tile& rt = tile(rb.c, rb.r);
+        if (rt.zone == Zone::None || rt.charred || rt.fireTicks > 0) {
+            it = m_rising.erase(it);  // plot vanished mid-rise (bulldoze / fire / tornado)
+            continue;
+        }
+        // Once the rise settles, hold the final pose and ask for a rebuild —
+        // buildCityScene retires the entry when it emits the static building,
+        // so the hand-off is seamless even if the game sat paused mid-rise.
+        if (age >= kRiseDuration) m_growthDirty = true;
+        if (!rb.burst) {
+            rb.burst = true;
+            addFx((rb.c + rb.pw * 0.5f) * ts, (rb.r + rb.pd * 0.5f) * ts,
+                  UiColor::fromRgbHex(0x8A6E4B), 3);
+        }
+        const procgen::TriMesh& bm =
+            cachedBuilding(rb.kind, rb.level, rb.tier, rb.variant, rb.pw, rb.pd, rb.swapDims);
+        const float u = std::min(1.0f, age / kRiseDuration);
+        const float k = 1.35f;  // easeOutBack overshoot strength
+        const float um1 = u - 1.0f;
+        const float ease = 1.0f + (k + 1.0f) * um1 * um1 * um1 + k * um1 * um1;
+        const float meshH = std::max(0.2f, bm.boundsMax.y);
+        const float yOff = -meshH * (1.0f - ease);
+        const float pad = ts * 0.10f;
+        const float lotX = rb.c * ts + pad, lotZ = rb.r * ts + pad;
+        const float lotW = rb.pw * ts - 2.0f * pad, lotD = rb.pd * ts - 2.0f * pad;
+        const float genW = rb.swapDims ? lotD : lotW;
+        const float genD = rb.swapDims ? lotW : lotD;
+        m_riseScratch.packedVertices.clear();
+        m_riseScratch.packedIndices.clear();
+        m_riseScratch.packedDraws.clear();
+        switch (rb.turns) {
+            case 1:
+                procgen::appendTriMeshRotated(bm, {lotX, yOff, lotZ + genW}, 1,
+                                              {0.0f, 0.0f, 0.0f}, rb.tint, m_riseScratch);
+                break;
+            case 2:
+                procgen::appendTriMeshRotated(bm, {lotX + genW, yOff, lotZ + genD}, 2,
+                                              {0.0f, 0.0f, 0.0f}, rb.tint, m_riseScratch);
+                break;
+            case 3:
+                procgen::appendTriMeshRotated(bm, {lotX + genD, yOff, lotZ}, 3,
+                                              {0.0f, 0.0f, 0.0f}, rb.tint, m_riseScratch);
+                break;
+            default:
+                procgen::appendTriMesh(bm, {lotX, yOff, lotZ}, rb.tint, m_riseScratch);
+                break;
+        }
+        const std::uint32_t vbase = static_cast<std::uint32_t>(m_actorVertices.size());
+        m_actorVertices.insert(m_actorVertices.end(), m_riseScratch.packedVertices.begin(),
+                               m_riseScratch.packedVertices.end());
+        for (const std::uint32_t index : m_riseScratch.packedIndices) {
+            m_actorIndices.push_back(vbase + index);
+        }
+        if (u < 1.0f) {
+            // Churned dust ring at the base while the building climbs.
+            const std::uint32_t h0 = tileHash(rb.c, rb.r, 0xD125Eu);
+            const float ccx = (rb.c + rb.pw * 0.5f) * ts;
+            const float ccz = (rb.r + rb.pd * 0.5f) * ts;
+            for (int i = 0; i < 6; ++i) {
+                const std::uint32_t hi = h0 ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                const float ang = static_cast<float>(i) / 6.0f * 6.2831853f + m_time * 0.8f;
+                const float rad = 0.30f + 0.28f * static_cast<float>(rb.pw + rb.pd) * 0.5f;
+                const float f = fract(m_time * 0.9f + static_cast<float>(hi & 0xffu) / 255.0f);
+                pushCross(ccx + std::cos(ang) * rad, 0.03f + f * 0.30f, ccz + std::sin(ang) * rad,
+                          0.055f * (1.0f - 0.5f * f), 0.05f, 0.58f, 0.50f, 0.38f);
+            }
+        }
+        ++it;
+    }
+
     // Fires and working smoke: stateless per-tile particles keyed off the grid
     // each frame (no particle state to store — position, phase, and size all
     // derive from the tile hash and m_time).
@@ -3210,6 +3512,20 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
                 pushCross(fx.x + std::cos(a) * rad, 0.04f + lifeT * 0.30f, fx.z + std::sin(a) * rad,
                           size, size, lerpf(fx.r, 1.0f, 0.3f), lerpf(fx.g, 1.0f, 0.3f),
                           lerpf(fx.b, 1.0f, 0.3f));
+            }
+        } else if (fx.kind == 3) {
+            // Dirt burst: a fat ring of earth thrown outward at ground level —
+            // the ground breaking open as a new building shoulders through.
+            for (int i = 0; i < 9; ++i) {
+                const std::uint32_t hi = hb ^ (0x9E3779B9u * static_cast<std::uint32_t>(i + 1));
+                const float a = static_cast<float>(i) / 9.0f * 6.2831853f +
+                                static_cast<float>(hi & 0xffu) * 0.015f;
+                const float rad = 0.15f + lifeT * (0.7f + 0.4f * static_cast<float>((hi >> 8) & 0xffu) / 255.0f);
+                const float y = 0.05f + lifeT * 0.9f - lifeT * lifeT * 0.85f;
+                const float size = 0.07f * (1.0f - 0.55f * lifeT);
+                const float shade = 0.9f + 0.2f * static_cast<float>((hi >> 16) & 0xffu) / 255.0f;
+                pushCross(fx.x + std::cos(a) * rad, y, fx.z + std::sin(a) * rad, size, size,
+                          fx.r * shade, fx.g * shade, fx.b * shade);
             }
         } else {
             // Confetti fountain: bits fly up and out, tumble over, and fade
