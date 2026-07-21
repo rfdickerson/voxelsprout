@@ -79,7 +79,6 @@ struct VoxelGiPassContext {
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     uint32_t mvpDynamicOffset = 0u;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
     VkPipeline occupancyPipeline = VK_NULL_HANDLE;
     VkPipeline skyExposurePipeline = VK_NULL_HANDLE;
     VkPipeline surfacePipeline = VK_NULL_HANDLE;
@@ -137,29 +136,21 @@ VoxelGiDispatchDims computeVoxelGiDispatchDims() {
 }
 
 void bindVoxelGiComputePass(const VoxelGiPassContext& context, VkPipeline pipeline) {
-    const uint32_t dynamicOffset = context.mvpDynamicOffset;
+    // Descriptor buffer + offset are bound once for the whole sequence in
+    // recordVoxelGiDispatchSequence (all GI pipelines share one layout), so here
+    // we only switch the pipeline.
     vkCmdBindPipeline(context.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    vkCmdBindDescriptorSets(
-        context.commandBuffer,
-        VK_PIPELINE_BIND_POINT_COMPUTE,
-        context.pipelineLayout,
-        0,
-        1,
-        &context.descriptorSet,
-        1,
-        &dynamicOffset
-    );
 }
 
 void writeTimestampIfEnabled(
     const VoxelGiPassContext& context,
-    VkPipelineStageFlagBits stage,
+    VkPipelineStageFlags2 stage,
     uint32_t queryIndex
 ) {
     if (context.timestampQueryPool == VK_NULL_HANDLE) {
         return;
     }
-    vkCmdWriteTimestamp(context.commandBuffer, stage, context.timestampQueryPool, queryIndex);
+    vkCmdWriteTimestamp2(context.commandBuffer, stage, context.timestampQueryPool, queryIndex);
 }
 
 void recordVoxelGiSkyExposurePass(
@@ -190,14 +181,14 @@ void recordVoxelGiOccupancyPass(
     uint32_t occupancyDispatchZ
 ) {
     if (occupancyDispatchZ == 0u) {
-        writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.occupancyStart);
-        writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.occupancyEnd);
+        writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, timestampQueries.occupancyStart);
+        writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampQueries.occupancyEnd);
         return;
     }
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.occupancyStart);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, timestampQueries.occupancyStart);
     bindVoxelGiComputePass(context, context.occupancyPipeline);
     vkCmdDispatch(context.commandBuffer, dims.occupancyX, dims.occupancyY, occupancyDispatchZ);
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.occupancyEnd);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampQueries.occupancyEnd);
     transitionImageLayout(
         context.commandBuffer,
         context.occupancyImage,
@@ -216,7 +207,7 @@ void recordVoxelGiSurfacePass(
     const VoxelGiDispatchDims& dims,
     const VoxelGiTimestampQueryIndices& timestampQueries
 ) {
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.surfaceStart);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, timestampQueries.surfaceStart);
     if (context.useRtSurfaceTracing) {
         VkMemoryBarrier2 rayTracingReadBarrier{};
         rayTracingReadBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
@@ -246,7 +237,7 @@ void recordVoxelGiSurfacePass(
             VK_IMAGE_ASPECT_COLOR_BIT
         );
     }
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.surfaceEnd);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampQueries.surfaceEnd);
 }
 
 void writeZeroDurationTimestampPair(
@@ -254,8 +245,8 @@ void writeZeroDurationTimestampPair(
     uint32_t startQuery,
     uint32_t endQuery
 ) {
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, startQuery);
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, endQuery);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, startQuery);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, endQuery);
 }
 
 void recordVoxelGiRestirSurfacePass(
@@ -263,7 +254,7 @@ void recordVoxelGiRestirSurfacePass(
     const VoxelGiDispatchDims& dims,
     const VoxelGiTimestampQueryIndices& timestampQueries
 ) {
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.surfaceStart);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, timestampQueries.surfaceStart);
     if (context.useRtSurfaceTracing) {
         VkMemoryBarrier2 rayTracingReadBarrier{};
         rayTracingReadBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
@@ -279,25 +270,25 @@ void recordVoxelGiRestirSurfacePass(
         vkCmdPipelineBarrier2(context.commandBuffer, &dependencyInfo);
     }
 
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.surfaceCandidateStart);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, timestampQueries.surfaceCandidateStart);
     bindVoxelGiComputePass(context, context.restirCandidatePipeline);
     vkCmdDispatch(context.commandBuffer, dims.volumeX, dims.volumeY, dims.volumeZ);
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.surfaceCandidateEnd);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampQueries.surfaceCandidateEnd);
     transitionComputeStorageAccess(context.commandBuffer);
 
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.surfaceTemporalStart);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, timestampQueries.surfaceTemporalStart);
     bindVoxelGiComputePass(context, context.restirTemporalPipeline);
     vkCmdDispatch(context.commandBuffer, dims.volumeX, dims.volumeY, dims.volumeZ);
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.surfaceTemporalEnd);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampQueries.surfaceTemporalEnd);
     transitionComputeStorageAccess(context.commandBuffer);
 
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.surfaceSpatialStart);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, timestampQueries.surfaceSpatialStart);
     bindVoxelGiComputePass(context, context.restirSpatialPipeline);
     vkCmdDispatch(context.commandBuffer, dims.volumeX, dims.volumeY, dims.volumeZ);
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.surfaceSpatialEnd);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampQueries.surfaceSpatialEnd);
     transitionComputeStorageAccess(context.commandBuffer);
 
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.surfaceResolveStart);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, timestampQueries.surfaceResolveStart);
     bindVoxelGiComputePass(context, context.restirResolvePipeline);
     vkCmdDispatch(context.commandBuffer, dims.volumeX, dims.volumeY, dims.volumeZ);
     for (const VkImage surfaceFaceImage : context.surfaceFaceImages) {
@@ -313,8 +304,8 @@ void recordVoxelGiRestirSurfacePass(
             VK_IMAGE_ASPECT_COLOR_BIT
         );
     }
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.surfaceResolveEnd);
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.surfaceEnd);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampQueries.surfaceResolveEnd);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampQueries.surfaceEnd);
 }
 
 void recordVoxelGiInjectPass(
@@ -322,12 +313,12 @@ void recordVoxelGiInjectPass(
     const VoxelGiDispatchDims& dims,
     const VoxelGiTimestampQueryIndices& timestampQueries
 ) {
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.injectStart);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, timestampQueries.injectStart);
 
     bindVoxelGiComputePass(context, context.injectPipeline);
     vkCmdDispatch(context.commandBuffer, dims.volumeX, dims.volumeY, dims.volumeZ);
 
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.injectEnd);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampQueries.injectEnd);
 }
 
 void recordVoxelGiPropagationPass(
@@ -346,7 +337,7 @@ void recordVoxelGiPropagationPass(
         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT
     );
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueries.propagateStart);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_NONE, timestampQueries.propagateStart);
 
     for (uint32_t propagateIteration = 0; propagateIteration < kVoxelGiPropagationIterations; ++propagateIteration) {
         bindVoxelGiComputePass(context, context.propagatePipeline);
@@ -429,7 +420,7 @@ void recordVoxelGiPropagationPass(
         );
     }
 
-    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueries.propagateEnd);
+    writeTimestampIfEnabled(context, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampQueries.propagateEnd);
 }
 
 void finalizeVoxelGiPass(
@@ -476,12 +467,16 @@ void RendererBackend::recordVoxelGiDispatchSequence(
         m_voxelGiRestirReservoirScratchBufferHandle != kInvalidBufferHandle;
     m_voxelGiRtSurfaceActiveThisFrame = useRtSurfaceTracing;
     m_voxelGiRestirActiveThisFrame = useRestirSurface;
+    // Bind the GI descriptor buffer once for the whole dispatch sequence; every GI
+    // pipeline shares m_voxelGiPipelineLayout so a single set-offset call covers all.
+    bindDescriptorBuffer(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_voxelGiPipelineLayout,
+        0, m_voxelGiBufferSet, m_currentFrame);
     const VoxelGiDispatchDims dispatchDims = computeVoxelGiDispatchDims();
     const VoxelGiPassContext passContext{
         commandBuffer,
         mvpDynamicOffset,
         m_voxelGiPipelineLayout,
-        m_voxelGiDescriptorSets[m_currentFrame],
         m_voxelGiOccupancyPipeline,
         m_voxelGiSkyExposurePipeline,
         useRtSurfaceTracing ? m_voxelGiSurfacePipelineRt : m_voxelGiSurfacePipeline,

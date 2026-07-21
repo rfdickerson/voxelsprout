@@ -74,7 +74,7 @@ bool RendererBackend::createDescriptorResources() {
 
         VkDescriptorSetLayoutBinding mvpBinding{};
         mvpBinding.binding = 0;
-        mvpBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        mvpBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         mvpBinding.descriptorCount = 1;
         mvpBinding.stageFlags =
             VK_SHADER_STAGE_VERTEX_BIT |
@@ -173,55 +173,28 @@ bool RendererBackend::createDescriptorResources() {
                 bindings,
                 m_descriptorSetLayout,
                 "vkCreateDescriptorSetLayout",
-                "renderer.descriptorSetLayout.main"
+                "renderer.descriptorSetLayout.main",
+                nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
             )) {
             return false;
         }
     }
 
-    if (m_descriptorPool == VK_NULL_HANDLE) {
-        std::vector<VkDescriptorPoolSize> poolSizes = {
-            VkDescriptorPoolSize{
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-                kMaxFramesInFlight
-            },
-            VkDescriptorPoolSize{
-                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                10 * kMaxFramesInFlight
-            },
-            VkDescriptorPoolSize{
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                kMaxFramesInFlight
-            }
-        };
-        if (m_rayTracingRuntimeEnabled) {
-            poolSizes.push_back(VkDescriptorPoolSize{
-                VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
-                kMaxFramesInFlight
-            });
-        }
-
-        if (!createDescriptorPool(
-                poolSizes,
+    // Descriptor-buffer backing for the main per-frame set (set 0): camera UBO +
+    // storage buffer + combined image samplers (+ optional accel structure).
+    if (!m_mainBufferSet.valid()) {
+        if (!createDescriptorBufferSet(
+                m_descriptorSetLayout,
                 kMaxFramesInFlight,
-                m_descriptorPool,
-                "vkCreateDescriptorPool",
-                "renderer.descriptorPool.main"
+                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                    VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT,
+                "renderer.descriptorBuffer.main",
+                m_mainBufferSet
             )) {
             return false;
         }
     }
-
-    if (!allocatePerFrameDescriptorSets(
-            m_descriptorPool,
-            m_descriptorSetLayout,
-            std::span<VkDescriptorSet>(m_descriptorSets),
-            "vkAllocateDescriptorSets",
-            "renderer.descriptorSet.frame"
-        )) {
-        return false;
-    }
-    m_mainDescriptorWriteKeyValid.fill(false);
 
     if (m_supportsBindlessDescriptors && m_bindlessTextureCapacity > 0) {
         if (m_bindlessDescriptorSetLayout == VK_NULL_HANDLE) {
@@ -243,55 +216,33 @@ bool RendererBackend::createDescriptorResources() {
                     m_bindlessDescriptorSetLayout,
                     "vkCreateDescriptorSetLayout(bindless)",
                     "renderer.descriptorSetLayout.bindless",
-                    &bindingFlagsCreateInfo
+                    &bindingFlagsCreateInfo,
+                    VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
                 )) {
                 return false;
             }
         }
 
-        if (m_bindlessDescriptorPool == VK_NULL_HANDLE) {
-            const std::array<VkDescriptorPoolSize, 1> bindlessPoolSizes = {VkDescriptorPoolSize{
-                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                m_bindlessTextureCapacity
-            }};
-            if (!createDescriptorPool(
-                    bindlessPoolSizes,
-                    1,
-                    m_bindlessDescriptorPool,
-                    "vkCreateDescriptorPool(bindless)",
-                    "renderer.descriptorPool.bindless"
+        // Descriptor-buffer backing for the bindless texture array (set 1). One
+        // region (shared across frames); partially-bound slots simply stay unwritten.
+        if (!m_bindlessBufferSet.valid()) {
+            if (!createDescriptorBufferSet(
+                    m_bindlessDescriptorSetLayout,
+                    1u,
+                    VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                        VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT,
+                    "renderer.descriptorBuffer.bindless",
+                    m_bindlessBufferSet
                 )) {
                 return false;
             }
-        }
-
-        if (m_bindlessDescriptorSet == VK_NULL_HANDLE) {
-            VkDescriptorSetAllocateInfo bindlessAllocateInfo{};
-            bindlessAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            bindlessAllocateInfo.descriptorPool = m_bindlessDescriptorPool;
-            bindlessAllocateInfo.descriptorSetCount = 1;
-            bindlessAllocateInfo.pSetLayouts = &m_bindlessDescriptorSetLayout;
-            const VkResult bindlessAllocateResult = vkAllocateDescriptorSets(
-                m_device,
-                &bindlessAllocateInfo,
-                &m_bindlessDescriptorSet
-            );
-            if (bindlessAllocateResult != VK_SUCCESS) {
-                logVkFailure("vkAllocateDescriptorSets(bindless)", bindlessAllocateResult);
-                return false;
-            }
-            setObjectName(
-                VK_OBJECT_TYPE_DESCRIPTOR_SET,
-                vkHandleToUint64(m_bindlessDescriptorSet),
-                "renderer.descriptorSet.bindless"
-            );
         }
     }
 
     return true;
 }
 
-RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
+void RendererBackend::updateFrameDescriptorSets(
     uint32_t aoFrameIndex,
     const VkDescriptorBufferInfo& cameraBufferInfo,
     VkBuffer autoExposureHistogramBuffer,
@@ -299,17 +250,14 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo,
     const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo
 ) {
-    const uint32_t frameIndex = m_currentFrame;
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    auto descriptorWriteKeyChanged = [](auto& cachedKey, bool& cachedValid, const auto& nextKey) {
-        if (cachedValid && cachedKey == nextKey) {
-            return false;
-        }
-        cachedKey = nextKey;
-        cachedValid = true;
-        return true;
-    };
+    // Camera UBO device address (frame-arena slice) for descriptor-buffer writes.
+    VkBufferDeviceAddressInfo cameraAddressInfo{};
+    cameraAddressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    cameraAddressInfo.buffer = cameraBufferInfo.buffer;
+    const VkDeviceAddress cameraDeviceAddress =
+        (cameraBufferInfo.buffer != VK_NULL_HANDLE)
+            ? vkGetBufferDeviceAddress(m_device, &cameraAddressInfo) + cameraBufferInfo.offset
+            : 0;
 
     VkDescriptorImageInfo hdrSceneImageInfo{};
     hdrSceneImageInfo.sampler = m_hdrResolveSampler;
@@ -407,180 +355,73 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
     rayTracingSceneWriteInfo.accelerationStructureCount = hasRayTracingSceneDescriptor ? 1u : 0u;
     rayTracingSceneWriteInfo.pAccelerationStructures = hasRayTracingSceneDescriptor ? &m_rtTlas.handle : nullptr;
 
-    std::array<VkWriteDescriptorSet, 13> writes{};
-    writes[0] = write;
-    writes[0].dstSet = m_descriptorSets[m_currentFrame];
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    writes[0].pBufferInfo = &cameraBufferInfo;
-
-    writes[1] = write;
-    writes[1].dstSet = m_descriptorSets[m_currentFrame];
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].pImageInfo = &diffuseTextureImageInfo;
-
-    writes[2] = write;
-    writes[2].dstSet = m_descriptorSets[m_currentFrame];
-    writes[2].dstBinding = 2;
-    writes[2].descriptorCount = 1;
-    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[2].pBufferInfo = &autoExposureStateBufferInfo;
-
-    writes[3] = write;
-    writes[3].dstSet = m_descriptorSets[m_currentFrame];
-    writes[3].dstBinding = 3;
-    writes[3].descriptorCount = 1;
-    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[3].pImageInfo = &hdrSceneImageInfo;
-
-    writes[4] = write;
-    writes[4].dstSet = m_descriptorSets[m_currentFrame];
-    writes[4].dstBinding = 4;
-    writes[4].descriptorCount = 1;
-    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[4].pImageInfo = &shadowMapImageInfo;
-
-    writes[5] = write;
-    writes[5].dstSet = m_descriptorSets[m_currentFrame];
-    writes[5].dstBinding = 5;
-    writes[5].descriptorCount = 1;
-    writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[5].pImageInfo = &waterRefractionImageInfo;
-
-    writes[6] = write;
-    writes[6].dstSet = m_descriptorSets[m_currentFrame];
-    writes[6].dstBinding = 6;
-    writes[6].descriptorCount = 1;
-    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[6].pImageInfo = &normalDepthImageInfo;
-
-    writes[7] = write;
-    writes[7].dstSet = m_descriptorSets[m_currentFrame];
-    writes[7].dstBinding = 7;
-    writes[7].descriptorCount = 1;
-    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[7].pImageInfo = &ssaoBlurImageInfo;
-
-    writes[8] = write;
-    writes[8].dstSet = m_descriptorSets[m_currentFrame];
-    writes[8].dstBinding = 8;
-    writes[8].descriptorCount = 1;
-    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[8].pImageInfo = &ssaoRawImageInfo;
-
-    writes[9] = write;
-    writes[9].dstSet = m_descriptorSets[m_currentFrame];
-    writes[9].dstBinding = 9;
-    writes[9].descriptorCount = 1;
-    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[9].pImageInfo = &voxelGiVolumeImageInfo;
-
-    writes[10] = write;
-    writes[10].dstSet = m_descriptorSets[m_currentFrame];
-    writes[10].dstBinding = 10;
-    writes[10].descriptorCount = 1;
-    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[10].pImageInfo = &sunShaftImageInfo;
-
-    writes[11] = write;
-    writes[11].dstSet = m_descriptorSets[m_currentFrame];
-    writes[11].dstBinding = 11;
-    writes[11].descriptorCount = 1;
-    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[11].pImageInfo = &voxelGiOccupancyDebugImageInfo;
-
-    std::uint32_t writeCount = 12;
-    if (hasRayTracingSceneDescriptor) {
-        writes[12] = write;
-        writes[12].dstSet = m_descriptorSets[m_currentFrame];
-        writes[12].dstBinding = 12;
-        writes[12].descriptorCount = 1;
-        writes[12].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        writes[12].pNext = &rayTracingSceneWriteInfo;
-        writeCount = 13;
-    }
-
-    if (m_descriptorSets[frameIndex] != VK_NULL_HANDLE) {
-        const std::array<std::uint64_t, kMainDescriptorWriteKeyWordCount> mainDescriptorWriteKey = {
-            vkHandleToUint64(m_descriptorSets[frameIndex]),
-            static_cast<std::uint64_t>(aoFrameIndex),
-            vkHandleToUint64(cameraBufferInfo.buffer),
-            static_cast<std::uint64_t>(cameraBufferInfo.offset),
-            static_cast<std::uint64_t>(cameraBufferInfo.range),
-            vkHandleToUint64(autoExposureStateBufferInfo.buffer),
-            vkHandleToUint64(diffuseTextureImageInfo.sampler),
-            vkHandleToUint64(diffuseTextureImageInfo.imageView),
-            vkHandleToUint64(hdrSceneImageInfo.sampler),
-            vkHandleToUint64(hdrSceneImageInfo.imageView),
-            vkHandleToUint64(shadowMapImageInfo.sampler),
-            vkHandleToUint64(shadowMapImageInfo.imageView),
-            vkHandleToUint64(waterRefractionImageInfo.sampler),
-            vkHandleToUint64(waterRefractionImageInfo.imageView),
-            vkHandleToUint64(normalDepthImageInfo.sampler),
-            vkHandleToUint64(normalDepthImageInfo.imageView),
-            vkHandleToUint64(ssaoBlurImageInfo.sampler),
-            vkHandleToUint64(ssaoBlurImageInfo.imageView),
-            vkHandleToUint64(ssaoRawImageInfo.imageView),
-            vkHandleToUint64(voxelGiVolumeImageInfo.sampler),
-            vkHandleToUint64(voxelGiVolumeImageInfo.imageView),
-            vkHandleToUint64(sunShaftImageInfo.sampler),
-            vkHandleToUint64(sunShaftImageInfo.imageView),
-            vkHandleToUint64(voxelGiOccupancyDebugImageInfo.sampler),
-            vkHandleToUint64(voxelGiOccupancyDebugImageInfo.imageView),
-            vkHandleToUint64(hasRayTracingSceneDescriptor ? m_rtTlas.handle : VK_NULL_HANDLE)
+    if (m_mainBufferSet.valid()) {
+        const uint32_t region = m_currentFrame;
+        const VkDescriptorSetLayout layout = m_descriptorSetLayout;
+        auto mainOffset = [&](uint32_t binding) { return descriptorBufferBindingOffset(layout, binding); };
+        auto sampler = [&](uint32_t binding, const VkDescriptorImageInfo& info) {
+            writeDescriptorBufferCombinedImageSampler(
+                m_mainBufferSet, region, mainOffset(binding), 0, info.imageView, info.sampler, info.imageLayout);
         };
-        if (descriptorWriteKeyChanged(
-                m_mainDescriptorWriteKeys[frameIndex],
-                m_mainDescriptorWriteKeyValid[frameIndex],
-                mainDescriptorWriteKey
-            )) {
-            vkUpdateDescriptorSets(m_device, writeCount, writes.data(), 0, nullptr);
+        // Camera UBO (binding 0) and exposure-state storage buffer (binding 2).
+        writeDescriptorBufferUniform(m_mainBufferSet, region, mainOffset(0), cameraDeviceAddress, cameraBufferInfo.range);
+        VkBufferDeviceAddressInfo exposureAddrInfo{};
+        exposureAddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        exposureAddrInfo.buffer = autoExposureStateBufferInfo.buffer;
+        const VkDeviceAddress exposureAddress = (autoExposureStateBufferInfo.buffer != VK_NULL_HANDLE)
+            ? vkGetBufferDeviceAddress(m_device, &exposureAddrInfo) : 0;
+        writeDescriptorBufferStorage(m_mainBufferSet, region, mainOffset(2), exposureAddress, autoExposureStateBufferInfo.range);
+        // Combined image samplers (bindings 1, 3-11).
+        sampler(1, diffuseTextureImageInfo);
+        sampler(3, hdrSceneImageInfo);
+        sampler(4, shadowMapImageInfo);
+        sampler(5, waterRefractionImageInfo);
+        sampler(6, normalDepthImageInfo);
+        sampler(7, ssaoBlurImageInfo);
+        sampler(8, ssaoRawImageInfo);
+        sampler(9, voxelGiVolumeImageInfo);
+        sampler(10, sunShaftImageInfo);
+        sampler(11, voxelGiOccupancyDebugImageInfo);
+        // Ray-traced scene acceleration structure (binding 12) when RT is live.
+        if (hasRayTracingSceneDescriptor) {
+            writeDescriptorBufferAccelerationStructure(m_mainBufferSet, region, mainOffset(12), m_rtTlas.deviceAddress);
         }
-    } else {
-        m_mainDescriptorWriteKeyValid[frameIndex] = false;
     }
 
-    if (m_voxelGiComputeAvailable && m_voxelGiDescriptorSets[m_currentFrame] != VK_NULL_HANDLE) {
-        VkDescriptorImageInfo voxelGiStorageAInfo{};
-        voxelGiStorageAInfo.sampler = VK_NULL_HANDLE;
-        voxelGiStorageAInfo.imageView = m_voxelGiImageViews[0];
-        voxelGiStorageAInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (m_voxelGiComputeAvailable && m_voxelGiBufferSet.valid()) {
+        const uint32_t region = m_currentFrame;
+        const VkDescriptorSetLayout layout = m_voxelGiDescriptorSetLayout;
+        auto bindOffset = [&](uint32_t binding) {
+            return descriptorBufferBindingOffset(layout, binding);
+        };
+        auto bufferAddress = [&](const VkDescriptorBufferInfo& info) -> VkDeviceAddress {
+            if (info.buffer == VK_NULL_HANDLE) {
+                return 0;
+            }
+            VkBufferDeviceAddressInfo addrInfo{};
+            addrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            addrInfo.buffer = info.buffer;
+            return vkGetBufferDeviceAddress(m_device, &addrInfo) + info.offset;
+        };
 
-        VkDescriptorImageInfo voxelGiStorageReadInfo{};
-        voxelGiStorageReadInfo.sampler = VK_NULL_HANDLE;
-        voxelGiStorageReadInfo.imageView = m_voxelGiImageViews[0];
-        voxelGiStorageReadInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo voxelGiStorageBInfo{};
-        voxelGiStorageBInfo.sampler = VK_NULL_HANDLE;
-        voxelGiStorageBInfo.imageView = m_voxelGiImageViews[1];
-        voxelGiStorageBInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo voxelGiOccupancyInfo{};
-        voxelGiOccupancyInfo.sampler = VK_NULL_HANDLE;
-        voxelGiOccupancyInfo.imageView = m_voxelGiOccupancyImageView;
-        voxelGiOccupancyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkDescriptorImageInfo voxelGiOccupancyStorageInfo{};
-        voxelGiOccupancyStorageInfo.sampler = VK_NULL_HANDLE;
-        voxelGiOccupancyStorageInfo.imageView = m_voxelGiOccupancyImageView;
-        voxelGiOccupancyStorageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        std::array<VkDescriptorImageInfo, 6> voxelGiSurfaceFaceInfos{};
-        for (std::size_t faceIndex = 0; faceIndex < voxelGiSurfaceFaceInfos.size(); ++faceIndex) {
-            voxelGiSurfaceFaceInfos[faceIndex].sampler = VK_NULL_HANDLE;
-            voxelGiSurfaceFaceInfos[faceIndex].imageView = m_voxelGiSurfaceFaceImageViews[faceIndex];
-            voxelGiSurfaceFaceInfos[faceIndex].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        // Camera UBO + shadow sampler.
+        writeDescriptorBufferUniform(m_voxelGiBufferSet, region, bindOffset(0), cameraDeviceAddress, cameraBufferInfo.range);
+        writeDescriptorBufferCombinedImageSampler(m_voxelGiBufferSet, region, bindOffset(1), 0,
+            shadowMapImageInfo.imageView, shadowMapImageInfo.sampler, shadowMapImageInfo.imageLayout);
+        // Radiance A (storage) / read (sampled) / B (storage).
+        writeDescriptorBufferStorageImage(m_voxelGiBufferSet, region, bindOffset(2), m_voxelGiImageViews[0], VK_IMAGE_LAYOUT_GENERAL);
+        writeDescriptorBufferSampledImage(m_voxelGiBufferSet, region, bindOffset(3), m_voxelGiImageViews[0], VK_IMAGE_LAYOUT_GENERAL);
+        writeDescriptorBufferStorageImage(m_voxelGiBufferSet, region, bindOffset(4), m_voxelGiImageViews[1], VK_IMAGE_LAYOUT_GENERAL);
+        // Occupancy sampled (read-only) then the 6 surface faces (storage).
+        writeDescriptorBufferSampledImage(m_voxelGiBufferSet, region, bindOffset(5), m_voxelGiOccupancyImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        for (uint32_t faceIndex = 0; faceIndex < 6u; ++faceIndex) {
+            writeDescriptorBufferStorageImage(m_voxelGiBufferSet, region, bindOffset(6u + faceIndex),
+                m_voxelGiSurfaceFaceImageViews[faceIndex], VK_IMAGE_LAYOUT_GENERAL);
         }
-
-        VkDescriptorImageInfo voxelGiSkyExposureInfo{};
-        voxelGiSkyExposureInfo.sampler = VK_NULL_HANDLE;
-        voxelGiSkyExposureInfo.imageView = m_voxelGiSkyExposureImageView;
-        voxelGiSkyExposureInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
+        // Sky exposure + occupancy storage view.
+        writeDescriptorBufferStorageImage(m_voxelGiBufferSet, region, bindOffset(12), m_voxelGiSkyExposureImageView, VK_IMAGE_LAYOUT_GENERAL);
+        writeDescriptorBufferStorageImage(m_voxelGiBufferSet, region, bindOffset(13), m_voxelGiOccupancyImageView, VK_IMAGE_LAYOUT_GENERAL);
+        // Chunk meta / voxel storage buffers (fall back to the exposure buffer when absent).
         VkDescriptorBufferInfo voxelGiFallbackStorageInfo{};
         voxelGiFallbackStorageInfo.buffer = autoExposureStateBufferInfo.buffer;
         voxelGiFallbackStorageInfo.offset = 0;
@@ -589,354 +430,112 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             (voxelGiChunkMetaBufferInfo != nullptr) ? *voxelGiChunkMetaBufferInfo : voxelGiFallbackStorageInfo;
         const VkDescriptorBufferInfo& voxelGiChunkVoxelInfo =
             (voxelGiChunkVoxelBufferInfo != nullptr) ? *voxelGiChunkVoxelBufferInfo : voxelGiFallbackStorageInfo;
+        writeDescriptorBufferStorage(m_voxelGiBufferSet, region, bindOffset(14),
+            bufferAddress(voxelGiChunkMetaInfo), voxelGiChunkMetaInfo.range);
+        writeDescriptorBufferStorage(m_voxelGiBufferSet, region, bindOffset(15),
+            bufferAddress(voxelGiChunkVoxelInfo), voxelGiChunkVoxelInfo.range);
 
-        const bool hasVoxelGiRayTracingSceneDescriptor = m_rayTracingRuntimeEnabled && m_rtTlas.handle != VK_NULL_HANDLE;
-        VkWriteDescriptorSetAccelerationStructureKHR voxelGiRayTracingSceneWriteInfo{};
-        voxelGiRayTracingSceneWriteInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
-        voxelGiRayTracingSceneWriteInfo.accelerationStructureCount = hasVoxelGiRayTracingSceneDescriptor ? 1u : 0u;
-        voxelGiRayTracingSceneWriteInfo.pAccelerationStructures =
-            hasVoxelGiRayTracingSceneDescriptor ? &m_rtTlas.handle : nullptr;
-
-        VkDescriptorBufferInfo voxelGiRestirCurrentInfo{};
-        voxelGiRestirCurrentInfo.buffer = m_bufferAllocator.getBuffer(m_voxelGiRestirReservoirCurrentBufferHandle);
-        voxelGiRestirCurrentInfo.offset = 0;
-        voxelGiRestirCurrentInfo.range = VK_WHOLE_SIZE;
-
-        VkDescriptorBufferInfo voxelGiRestirPreviousInfo{};
-        voxelGiRestirPreviousInfo.buffer = m_bufferAllocator.getBuffer(m_voxelGiRestirReservoirPreviousBufferHandle);
-        voxelGiRestirPreviousInfo.offset = 0;
-        voxelGiRestirPreviousInfo.range = VK_WHOLE_SIZE;
-
-        VkDescriptorBufferInfo voxelGiRestirScratchInfo{};
-        voxelGiRestirScratchInfo.buffer = m_bufferAllocator.getBuffer(m_voxelGiRestirReservoirScratchBufferHandle);
-        voxelGiRestirScratchInfo.offset = 0;
-        voxelGiRestirScratchInfo.range = VK_WHOLE_SIZE;
-
-        std::array<VkWriteDescriptorSet, 20> voxelGiWrites{};
-        voxelGiWrites[0] = write;
-        voxelGiWrites[0].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[0].dstBinding = 0;
-        voxelGiWrites[0].descriptorCount = 1;
-        voxelGiWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        voxelGiWrites[0].pBufferInfo = &cameraBufferInfo;
-
-        voxelGiWrites[1] = write;
-        voxelGiWrites[1].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[1].dstBinding = 1;
-        voxelGiWrites[1].descriptorCount = 1;
-        voxelGiWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        voxelGiWrites[1].pImageInfo = &shadowMapImageInfo;
-
-        voxelGiWrites[2] = write;
-        voxelGiWrites[2].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[2].dstBinding = 2;
-        voxelGiWrites[2].descriptorCount = 1;
-        voxelGiWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[2].pImageInfo = &voxelGiStorageAInfo;
-
-        voxelGiWrites[3] = write;
-        voxelGiWrites[3].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[3].dstBinding = 3;
-        voxelGiWrites[3].descriptorCount = 1;
-        voxelGiWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        voxelGiWrites[3].pImageInfo = &voxelGiStorageReadInfo;
-
-        voxelGiWrites[4] = write;
-        voxelGiWrites[4].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[4].dstBinding = 4;
-        voxelGiWrites[4].descriptorCount = 1;
-        voxelGiWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[4].pImageInfo = &voxelGiStorageBInfo;
-
-        voxelGiWrites[5] = write;
-        voxelGiWrites[5].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[5].dstBinding = 5;
-        voxelGiWrites[5].descriptorCount = 1;
-        voxelGiWrites[5].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        voxelGiWrites[5].pImageInfo = &voxelGiOccupancyInfo;
-
-        voxelGiWrites[6] = write;
-        voxelGiWrites[6].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[6].dstBinding = 6;
-        voxelGiWrites[6].descriptorCount = 1;
-        voxelGiWrites[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[6].pImageInfo = &voxelGiSurfaceFaceInfos[0];
-
-        voxelGiWrites[7] = write;
-        voxelGiWrites[7].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[7].dstBinding = 7;
-        voxelGiWrites[7].descriptorCount = 1;
-        voxelGiWrites[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[7].pImageInfo = &voxelGiSurfaceFaceInfos[1];
-
-        voxelGiWrites[8] = write;
-        voxelGiWrites[8].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[8].dstBinding = 8;
-        voxelGiWrites[8].descriptorCount = 1;
-        voxelGiWrites[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[8].pImageInfo = &voxelGiSurfaceFaceInfos[2];
-
-        voxelGiWrites[9] = write;
-        voxelGiWrites[9].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[9].dstBinding = 9;
-        voxelGiWrites[9].descriptorCount = 1;
-        voxelGiWrites[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[9].pImageInfo = &voxelGiSurfaceFaceInfos[3];
-
-        voxelGiWrites[10] = write;
-        voxelGiWrites[10].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[10].dstBinding = 10;
-        voxelGiWrites[10].descriptorCount = 1;
-        voxelGiWrites[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[10].pImageInfo = &voxelGiSurfaceFaceInfos[4];
-
-        voxelGiWrites[11] = write;
-        voxelGiWrites[11].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[11].dstBinding = 11;
-        voxelGiWrites[11].descriptorCount = 1;
-        voxelGiWrites[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[11].pImageInfo = &voxelGiSurfaceFaceInfos[5];
-
-        voxelGiWrites[12] = write;
-        voxelGiWrites[12].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[12].dstBinding = 12;
-        voxelGiWrites[12].descriptorCount = 1;
-        voxelGiWrites[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[12].pImageInfo = &voxelGiSkyExposureInfo;
-
-        voxelGiWrites[13] = write;
-        voxelGiWrites[13].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[13].dstBinding = 13;
-        voxelGiWrites[13].descriptorCount = 1;
-        voxelGiWrites[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        voxelGiWrites[13].pImageInfo = &voxelGiOccupancyStorageInfo;
-
-        voxelGiWrites[14] = write;
-        voxelGiWrites[14].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[14].dstBinding = 14;
-        voxelGiWrites[14].descriptorCount = 1;
-        voxelGiWrites[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        voxelGiWrites[14].pBufferInfo = &voxelGiChunkMetaInfo;
-
-        voxelGiWrites[15] = write;
-        voxelGiWrites[15].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-        voxelGiWrites[15].dstBinding = 15;
-        voxelGiWrites[15].descriptorCount = 1;
-        voxelGiWrites[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        voxelGiWrites[15].pBufferInfo = &voxelGiChunkVoxelInfo;
-
-        const bool hasVoxelGiRestirBuffers =
-            voxelGiRestirCurrentInfo.buffer != VK_NULL_HANDLE &&
-            voxelGiRestirPreviousInfo.buffer != VK_NULL_HANDLE &&
-            voxelGiRestirScratchInfo.buffer != VK_NULL_HANDLE;
-        std::uint32_t voxelGiWriteCount = 16;
+        // Ray-traced surface tracing + ReSTIR reservoirs (only when RT is live).
+        const bool hasVoxelGiRayTracingSceneDescriptor =
+            m_rayTracingRuntimeEnabled && m_rtTlas.handle != VK_NULL_HANDLE;
         if (hasVoxelGiRayTracingSceneDescriptor) {
-            const std::uint32_t writeIndex = voxelGiWriteCount++;
-            voxelGiWrites[writeIndex] = write;
-            voxelGiWrites[writeIndex].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-            voxelGiWrites[writeIndex].dstBinding = 16;
-            voxelGiWrites[writeIndex].descriptorCount = 1;
-            voxelGiWrites[writeIndex].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-            voxelGiWrites[writeIndex].pNext = &voxelGiRayTracingSceneWriteInfo;
+            writeDescriptorBufferAccelerationStructure(m_voxelGiBufferSet, region, bindOffset(16), m_rtTlas.deviceAddress);
         }
-        if (m_rayTracingRuntimeEnabled && hasVoxelGiRestirBuffers) {
-            const std::uint32_t currentWriteIndex = voxelGiWriteCount++;
-            voxelGiWrites[currentWriteIndex] = write;
-            voxelGiWrites[currentWriteIndex].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-            voxelGiWrites[currentWriteIndex].dstBinding = 17;
-            voxelGiWrites[currentWriteIndex].descriptorCount = 1;
-            voxelGiWrites[currentWriteIndex].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            voxelGiWrites[currentWriteIndex].pBufferInfo = &voxelGiRestirCurrentInfo;
-
-            const std::uint32_t previousWriteIndex = voxelGiWriteCount++;
-            voxelGiWrites[previousWriteIndex] = write;
-            voxelGiWrites[previousWriteIndex].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-            voxelGiWrites[previousWriteIndex].dstBinding = 18;
-            voxelGiWrites[previousWriteIndex].descriptorCount = 1;
-            voxelGiWrites[previousWriteIndex].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            voxelGiWrites[previousWriteIndex].pBufferInfo = &voxelGiRestirPreviousInfo;
-
-            const std::uint32_t scratchWriteIndex = voxelGiWriteCount++;
-            voxelGiWrites[scratchWriteIndex] = write;
-            voxelGiWrites[scratchWriteIndex].dstSet = m_voxelGiDescriptorSets[m_currentFrame];
-            voxelGiWrites[scratchWriteIndex].dstBinding = 19;
-            voxelGiWrites[scratchWriteIndex].descriptorCount = 1;
-            voxelGiWrites[scratchWriteIndex].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            voxelGiWrites[scratchWriteIndex].pBufferInfo = &voxelGiRestirScratchInfo;
+        const VkBuffer restirCurrent = m_bufferAllocator.getBuffer(m_voxelGiRestirReservoirCurrentBufferHandle);
+        const VkBuffer restirPrevious = m_bufferAllocator.getBuffer(m_voxelGiRestirReservoirPreviousBufferHandle);
+        const VkBuffer restirScratch = m_bufferAllocator.getBuffer(m_voxelGiRestirReservoirScratchBufferHandle);
+        if (m_rayTracingRuntimeEnabled &&
+            restirCurrent != VK_NULL_HANDLE && restirPrevious != VK_NULL_HANDLE && restirScratch != VK_NULL_HANDLE) {
+            writeDescriptorBufferStorage(m_voxelGiBufferSet, region, bindOffset(17),
+                m_bufferAllocator.getDeviceAddress(m_voxelGiRestirReservoirCurrentBufferHandle),
+                m_bufferAllocator.getSize(m_voxelGiRestirReservoirCurrentBufferHandle));
+            writeDescriptorBufferStorage(m_voxelGiBufferSet, region, bindOffset(18),
+                m_bufferAllocator.getDeviceAddress(m_voxelGiRestirReservoirPreviousBufferHandle),
+                m_bufferAllocator.getSize(m_voxelGiRestirReservoirPreviousBufferHandle));
+            writeDescriptorBufferStorage(m_voxelGiBufferSet, region, bindOffset(19),
+                m_bufferAllocator.getDeviceAddress(m_voxelGiRestirReservoirScratchBufferHandle),
+                m_bufferAllocator.getSize(m_voxelGiRestirReservoirScratchBufferHandle));
         }
-
-        const std::array<std::uint64_t, kVoxelGiDescriptorWriteKeyWordCount> voxelGiDescriptorWriteKey = {
-            vkHandleToUint64(m_voxelGiDescriptorSets[frameIndex]),
-            vkHandleToUint64(cameraBufferInfo.buffer),
-            static_cast<std::uint64_t>(cameraBufferInfo.offset),
-            static_cast<std::uint64_t>(cameraBufferInfo.range),
-            vkHandleToUint64(shadowMapImageInfo.sampler),
-            vkHandleToUint64(shadowMapImageInfo.imageView),
-            vkHandleToUint64(voxelGiStorageAInfo.imageView),
-            vkHandleToUint64(voxelGiStorageBInfo.imageView),
-            vkHandleToUint64(voxelGiOccupancyInfo.imageView),
-            vkHandleToUint64(voxelGiSurfaceFaceInfos[0].imageView),
-            vkHandleToUint64(voxelGiSurfaceFaceInfos[1].imageView),
-            vkHandleToUint64(voxelGiSurfaceFaceInfos[2].imageView),
-            vkHandleToUint64(voxelGiSurfaceFaceInfos[3].imageView),
-            vkHandleToUint64(voxelGiSurfaceFaceInfos[4].imageView),
-            vkHandleToUint64(voxelGiSurfaceFaceInfos[5].imageView),
-            vkHandleToUint64(voxelGiSkyExposureInfo.imageView),
-            vkHandleToUint64(voxelGiOccupancyStorageInfo.imageView),
-            vkHandleToUint64(voxelGiChunkMetaInfo.buffer),
-            static_cast<std::uint64_t>(voxelGiChunkMetaInfo.offset),
-            static_cast<std::uint64_t>(voxelGiChunkMetaInfo.range),
-            vkHandleToUint64(voxelGiChunkVoxelInfo.buffer),
-            static_cast<std::uint64_t>(voxelGiChunkVoxelInfo.offset),
-            static_cast<std::uint64_t>(voxelGiChunkVoxelInfo.range),
-            vkHandleToUint64(hasVoxelGiRayTracingSceneDescriptor ? m_rtTlas.handle : VK_NULL_HANDLE),
-            vkHandleToUint64(voxelGiRestirCurrentInfo.buffer),
-            vkHandleToUint64(voxelGiRestirPreviousInfo.buffer),
-            vkHandleToUint64(voxelGiRestirScratchInfo.buffer)
-        };
-        if (descriptorWriteKeyChanged(
-                m_voxelGiDescriptorWriteKeys[frameIndex],
-                m_voxelGiDescriptorWriteKeyValid[frameIndex],
-                voxelGiDescriptorWriteKey
-            )) {
-            vkUpdateDescriptorSets(
-                m_device,
-                voxelGiWriteCount,
-                voxelGiWrites.data(),
-                0,
-                nullptr
-            );
-        }
-    } else {
-        m_voxelGiDescriptorWriteKeyValid[frameIndex] = false;
     }
 
     if (m_autoExposureComputeAvailable &&
-        m_autoExposureDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
+        m_autoExposureBufferSet.valid() &&
         autoExposureHistogramBuffer != VK_NULL_HANDLE &&
         autoExposureStateBuffer != VK_NULL_HANDLE) {
-        VkDescriptorBufferInfo autoExposureHistogramBufferInfo{};
-        autoExposureHistogramBufferInfo.buffer = autoExposureHistogramBuffer;
-        autoExposureHistogramBufferInfo.offset = 0;
-        autoExposureHistogramBufferInfo.range = static_cast<VkDeviceSize>(kAutoExposureHistogramBins * sizeof(uint32_t));
-
-        VkDescriptorBufferInfo autoExposureStateComputeBufferInfo{};
-        autoExposureStateComputeBufferInfo.buffer = autoExposureStateBuffer;
-        autoExposureStateComputeBufferInfo.offset = 0;
-        autoExposureStateComputeBufferInfo.range = sizeof(float) * 4u;
-
-        std::array<VkWriteDescriptorSet, 3> autoExposureWrites{};
-        autoExposureWrites[0] = write;
-        autoExposureWrites[0].dstSet = m_autoExposureDescriptorSets[m_currentFrame];
-        autoExposureWrites[0].dstBinding = 0;
-        autoExposureWrites[0].descriptorCount = 1;
-        autoExposureWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        autoExposureWrites[0].pImageInfo = &hdrSceneImageInfo;
-
-        autoExposureWrites[1] = write;
-        autoExposureWrites[1].dstSet = m_autoExposureDescriptorSets[m_currentFrame];
-        autoExposureWrites[1].dstBinding = 1;
-        autoExposureWrites[1].descriptorCount = 1;
-        autoExposureWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        autoExposureWrites[1].pBufferInfo = &autoExposureHistogramBufferInfo;
-
-        autoExposureWrites[2] = write;
-        autoExposureWrites[2].dstSet = m_autoExposureDescriptorSets[m_currentFrame];
-        autoExposureWrites[2].dstBinding = 2;
-        autoExposureWrites[2].descriptorCount = 1;
-        autoExposureWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        autoExposureWrites[2].pBufferInfo = &autoExposureStateComputeBufferInfo;
-
-        const std::array<std::uint64_t, kAutoExposureDescriptorWriteKeyWordCount> autoExposureDescriptorWriteKey = {
-            vkHandleToUint64(m_autoExposureDescriptorSets[frameIndex]),
-            static_cast<std::uint64_t>(aoFrameIndex),
-            vkHandleToUint64(hdrSceneImageInfo.sampler),
-            vkHandleToUint64(hdrSceneImageInfo.imageView),
-            vkHandleToUint64(autoExposureHistogramBufferInfo.buffer),
-            vkHandleToUint64(autoExposureStateComputeBufferInfo.buffer)
-        };
-        if (descriptorWriteKeyChanged(
-                m_autoExposureDescriptorWriteKeys[frameIndex],
-                m_autoExposureDescriptorWriteKeyValid[frameIndex],
-                autoExposureDescriptorWriteKey
-            )) {
-            vkUpdateDescriptorSets(
-                m_device,
-                static_cast<uint32_t>(autoExposureWrites.size()),
-                autoExposureWrites.data(),
-                0,
-                nullptr
-            );
-        }
-    } else {
-        m_autoExposureDescriptorWriteKeyValid[frameIndex] = false;
+        // Descriptor-buffer writes are cheap (a memcpy into mapped memory), so we
+        // write the region unconditionally each frame rather than diff against a key.
+        const uint32_t region = m_currentFrame;
+        const VkDeviceSize hdrOffset = descriptorBufferBindingOffset(m_autoExposureDescriptorSetLayout, 0);
+        const VkDeviceSize histogramOffset = descriptorBufferBindingOffset(m_autoExposureDescriptorSetLayout, 1);
+        const VkDeviceSize stateOffset = descriptorBufferBindingOffset(m_autoExposureDescriptorSetLayout, 2);
+        writeDescriptorBufferCombinedImageSampler(
+            m_autoExposureBufferSet, region, hdrOffset, 0,
+            hdrSceneImageInfo.imageView, hdrSceneImageInfo.sampler, hdrSceneImageInfo.imageLayout);
+        writeDescriptorBufferStorage(
+            m_autoExposureBufferSet, region, histogramOffset,
+            m_bufferAllocator.getDeviceAddress(m_autoExposureHistogramBufferHandle),
+            static_cast<VkDeviceSize>(kAutoExposureHistogramBins * sizeof(uint32_t)));
+        writeDescriptorBufferStorage(
+            m_autoExposureBufferSet, region, stateOffset,
+            m_bufferAllocator.getDeviceAddress(m_autoExposureStateBufferHandle),
+            sizeof(float) * 4u);
     }
 
     if (m_sunShaftComputeAvailable &&
-        m_sunShaftDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
+        m_sunShaftBufferSet.valid() &&
         aoFrameIndex < m_sunShaftImageViews.size() &&
         m_sunShaftImageViews[aoFrameIndex] != VK_NULL_HANDLE) {
-        VkDescriptorImageInfo sunShaftOutputImageInfo{};
-        sunShaftOutputImageInfo.sampler = VK_NULL_HANDLE;
-        sunShaftOutputImageInfo.imageView = m_sunShaftImageViews[aoFrameIndex];
-        sunShaftOutputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        const uint32_t region = m_currentFrame;
+        const VkDeviceSize cameraOffset = descriptorBufferBindingOffset(m_sunShaftDescriptorSetLayout, 0);
+        const VkDeviceSize normalDepthOffset = descriptorBufferBindingOffset(m_sunShaftDescriptorSetLayout, 1);
+        const VkDeviceSize shadowOffset = descriptorBufferBindingOffset(m_sunShaftDescriptorSetLayout, 2);
+        const VkDeviceSize outputOffset = descriptorBufferBindingOffset(m_sunShaftDescriptorSetLayout, 3);
+        writeDescriptorBufferUniform(
+            m_sunShaftBufferSet, region, cameraOffset, cameraDeviceAddress, cameraBufferInfo.range);
+        writeDescriptorBufferCombinedImageSampler(
+            m_sunShaftBufferSet, region, normalDepthOffset, 0,
+            normalDepthImageInfo.imageView, normalDepthImageInfo.sampler, normalDepthImageInfo.imageLayout);
+        writeDescriptorBufferCombinedImageSampler(
+            m_sunShaftBufferSet, region, shadowOffset, 0,
+            shadowMapImageInfo.imageView, shadowMapImageInfo.sampler, shadowMapImageInfo.imageLayout);
+        writeDescriptorBufferStorageImage(
+            m_sunShaftBufferSet, region, outputOffset,
+            m_sunShaftImageViews[aoFrameIndex], VK_IMAGE_LAYOUT_GENERAL);
+    }
 
-        std::array<VkWriteDescriptorSet, 4> sunShaftWrites{};
-        sunShaftWrites[0] = write;
-        sunShaftWrites[0].dstSet = m_sunShaftDescriptorSets[m_currentFrame];
-        sunShaftWrites[0].dstBinding = 0;
-        sunShaftWrites[0].descriptorCount = 1;
-        sunShaftWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        sunShaftWrites[0].pBufferInfo = &cameraBufferInfo;
+    if (m_ssaoBufferSet.valid() &&
+        aoFrameIndex < m_ssaoRawImageViews.size() &&
+        m_ssaoRawImageViews[aoFrameIndex] != VK_NULL_HANDLE) {
+        const uint32_t region = m_currentFrame;
+        const VkDeviceSize cameraOffset = descriptorBufferBindingOffset(m_ssaoDescriptorSetLayout, 0);
+        const VkDeviceSize normalDepthOffset = descriptorBufferBindingOffset(m_ssaoDescriptorSetLayout, 1);
+        const VkDeviceSize outputOffset = descriptorBufferBindingOffset(m_ssaoDescriptorSetLayout, 2);
+        writeDescriptorBufferUniform(
+            m_ssaoBufferSet, region, cameraOffset, cameraDeviceAddress, cameraBufferInfo.range);
+        writeDescriptorBufferCombinedImageSampler(
+            m_ssaoBufferSet, region, normalDepthOffset, 0,
+            normalDepthImageInfo.imageView, normalDepthImageInfo.sampler, normalDepthImageInfo.imageLayout);
+        writeDescriptorBufferStorageImage(
+            m_ssaoBufferSet, region, outputOffset,
+            m_ssaoRawImageViews[aoFrameIndex], VK_IMAGE_LAYOUT_GENERAL);
+    }
 
-        sunShaftWrites[1] = write;
-        sunShaftWrites[1].dstSet = m_sunShaftDescriptorSets[m_currentFrame];
-        sunShaftWrites[1].dstBinding = 1;
-        sunShaftWrites[1].descriptorCount = 1;
-        sunShaftWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sunShaftWrites[1].pImageInfo = &normalDepthImageInfo;
-
-        sunShaftWrites[2] = write;
-        sunShaftWrites[2].dstSet = m_sunShaftDescriptorSets[m_currentFrame];
-        sunShaftWrites[2].dstBinding = 2;
-        sunShaftWrites[2].descriptorCount = 1;
-        sunShaftWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        sunShaftWrites[2].pImageInfo = &shadowMapImageInfo;
-
-        sunShaftWrites[3] = write;
-        sunShaftWrites[3].dstSet = m_sunShaftDescriptorSets[m_currentFrame];
-        sunShaftWrites[3].dstBinding = 3;
-        sunShaftWrites[3].descriptorCount = 1;
-        sunShaftWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        sunShaftWrites[3].pImageInfo = &sunShaftOutputImageInfo;
-
-        const std::array<std::uint64_t, kSunShaftDescriptorWriteKeyWordCount> sunShaftDescriptorWriteKey = {
-            vkHandleToUint64(m_sunShaftDescriptorSets[frameIndex]),
-            static_cast<std::uint64_t>(aoFrameIndex),
-            vkHandleToUint64(cameraBufferInfo.buffer),
-            static_cast<std::uint64_t>(cameraBufferInfo.offset),
-            static_cast<std::uint64_t>(cameraBufferInfo.range),
-            vkHandleToUint64(normalDepthImageInfo.sampler),
-            vkHandleToUint64(normalDepthImageInfo.imageView),
-            vkHandleToUint64(shadowMapImageInfo.sampler),
-            vkHandleToUint64(shadowMapImageInfo.imageView),
-            vkHandleToUint64(sunShaftOutputImageInfo.imageView)
-        };
-        if (descriptorWriteKeyChanged(
-                m_sunShaftDescriptorWriteKeys[frameIndex],
-                m_sunShaftDescriptorWriteKeyValid[frameIndex],
-                sunShaftDescriptorWriteKey
-            )) {
-            vkUpdateDescriptorSets(
-                m_device,
-                static_cast<uint32_t>(sunShaftWrites.size()),
-                sunShaftWrites.data(),
-                0,
-                nullptr
-            );
-        }
-    } else {
-        m_sunShaftDescriptorWriteKeyValid[frameIndex] = false;
+    if (m_ssaoBlurBufferSet.valid() &&
+        aoFrameIndex < m_ssaoBlurImageViews.size() &&
+        m_ssaoBlurImageViews[aoFrameIndex] != VK_NULL_HANDLE) {
+        const uint32_t region = m_currentFrame;
+        const VkDeviceSize normalDepthOffset = descriptorBufferBindingOffset(m_ssaoBlurDescriptorSetLayout, 0);
+        const VkDeviceSize ssaoRawOffset = descriptorBufferBindingOffset(m_ssaoBlurDescriptorSetLayout, 1);
+        const VkDeviceSize outputOffset = descriptorBufferBindingOffset(m_ssaoBlurDescriptorSetLayout, 2);
+        writeDescriptorBufferCombinedImageSampler(
+            m_ssaoBlurBufferSet, region, normalDepthOffset, 0,
+            normalDepthImageInfo.imageView, normalDepthImageInfo.sampler, normalDepthImageInfo.imageLayout);
+        writeDescriptorBufferCombinedImageSampler(
+            m_ssaoBlurBufferSet, region, ssaoRawOffset, 0,
+            ssaoRawImageInfo.imageView, ssaoRawImageInfo.sampler, ssaoRawImageInfo.imageLayout);
+        writeDescriptorBufferStorageImage(
+            m_ssaoBlurBufferSet, region, outputOffset,
+            m_ssaoBlurImageViews[aoFrameIndex], VK_IMAGE_LAYOUT_GENERAL);
     }
 
     const std::size_t bindlessTextureCount =
@@ -945,7 +544,7 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             (m_bindlessTextureCapacity > kBindlessTextureStaticCount)
                 ? static_cast<std::size_t>(m_bindlessTextureCapacity - kBindlessTextureStaticCount)
                 : 0u);
-    if (m_bindlessDescriptorSet != VK_NULL_HANDLE && m_bindlessTextureCapacity >= bindlessTextureCount) {
+    if (m_bindlessBufferSet.valid() && m_bindlessTextureCapacity >= bindlessTextureCount) {
         std::vector<VkDescriptorImageInfo> bindlessImageInfos(bindlessTextureCount);
         bindlessImageInfos[kBindlessTextureIndexDiffuse] = diffuseTextureImageInfo;
         bindlessImageInfos[kBindlessTextureIndexHdrResolved] = hdrSceneImageInfo;
@@ -972,18 +571,21 @@ RendererBackend::BoundDescriptorSets RendererBackend::updateFrameDescriptorSets(
             bindlessImageInfos[bindlessIndex].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
-        VkWriteDescriptorSet bindlessWrite{};
-        bindlessWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        bindlessWrite.dstSet = m_bindlessDescriptorSet;
-        bindlessWrite.dstBinding = 0;
-        bindlessWrite.dstArrayElement = 0;
-        bindlessWrite.descriptorCount = static_cast<uint32_t>(bindlessImageInfos.size());
-        bindlessWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindlessWrite.pImageInfo = bindlessImageInfos.data();
-        vkUpdateDescriptorSets(m_device, 1, &bindlessWrite, 0, nullptr);
+        // Bindless array binding 0: one combined-image-sampler descriptor per array
+        // element (single region shared across frames). Empty slots stay unwritten
+        // (partially bound); the shader never indexes them.
+        const VkDeviceSize bindlessBindingOffset = descriptorBufferBindingOffset(m_bindlessDescriptorSetLayout, 0);
+        for (std::size_t index = 0; index < bindlessImageInfos.size(); ++index) {
+            const VkDescriptorImageInfo& info = bindlessImageInfos[index];
+            if (info.imageView == VK_NULL_HANDLE || info.sampler == VK_NULL_HANDLE) {
+                continue;
+            }
+            writeDescriptorBufferCombinedImageSamplerArray(
+                m_bindlessBufferSet, 0u, bindlessBindingOffset,
+                static_cast<uint32_t>(index), m_bindlessTextureCapacity,
+                info.imageView, info.sampler, info.imageLayout);
+        }
     }
-
-    return m_descriptorManager.buildBoundDescriptorSets(m_currentFrame);
 }
 
 } // namespace odai::render

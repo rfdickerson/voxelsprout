@@ -34,55 +34,113 @@ namespace odai::render {
 
 #include "render/renderer_shared.h"
 
-bool RendererBackend::allocatePerFrameDescriptorSets(
-    VkDescriptorPool descriptorPool,
-    VkDescriptorSetLayout descriptorSetLayout,
-    std::span<VkDescriptorSet> outDescriptorSets,
-    const char* failureContext,
-    const char* debugNamePrefix
-) {
-    if (outDescriptorSets.empty()) {
+namespace {
+
+constexpr const char* kPipelineCacheFilePath = "odai_pipeline_cache.bin";
+
+} // namespace
+
+bool RendererBackend::createPipelineCache() {
+    if (m_pipelineCache != VK_NULL_HANDLE) {
         return true;
     }
 
-    std::vector<VkDescriptorSetLayout> setLayouts(outDescriptorSets.size(), descriptorSetLayout);
-    VkDescriptorSetAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocateInfo.descriptorPool = descriptorPool;
-    allocateInfo.descriptorSetCount = static_cast<uint32_t>(setLayouts.size());
-    allocateInfo.pSetLayouts = setLayouts.data();
-
-    const VkResult allocateResult = vkAllocateDescriptorSets(m_device, &allocateInfo, outDescriptorSets.data());
-    if (allocateResult != VK_SUCCESS) {
-        logVkFailure(failureContext, allocateResult);
-        return false;
-    }
-
-    if (debugNamePrefix != nullptr) {
-        for (std::size_t frameIndex = 0; frameIndex < outDescriptorSets.size(); ++frameIndex) {
-            const std::string setName = std::string(debugNamePrefix) + std::to_string(frameIndex);
-            setObjectName(
-                VK_OBJECT_TYPE_DESCRIPTOR_SET,
-                vkHandleToUint64(outDescriptorSets[frameIndex]),
-                setName.c_str()
-            );
+    // Prior-run cache data is only valid for the same device and driver build;
+    // the header check avoids feeding the driver stale bytes after an upgrade
+    // or a GPU swap (implementations must reject mismatches anyway, but a
+    // corrupt file could still fail cache creation outright).
+    std::vector<char> initialData;
+    std::ifstream cacheFile(kPipelineCacheFilePath, std::ios::binary | std::ios::ate);
+    if (cacheFile) {
+        const std::streamsize size = cacheFile.tellg();
+        if (size >= static_cast<std::streamsize>(sizeof(VkPipelineCacheHeaderVersionOne))) {
+            cacheFile.seekg(0, std::ios::beg);
+            initialData.resize(static_cast<std::size_t>(size));
+            if (cacheFile.read(initialData.data(), size)) {
+                VkPipelineCacheHeaderVersionOne header{};
+                std::memcpy(&header, initialData.data(), sizeof(header));
+                VkPhysicalDeviceProperties deviceProperties{};
+                vkGetPhysicalDeviceProperties(m_physicalDevice, &deviceProperties);
+                const bool headerMatches =
+                    header.headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+                    header.vendorID == deviceProperties.vendorID &&
+                    header.deviceID == deviceProperties.deviceID &&
+                    std::memcmp(header.pipelineCacheUUID, deviceProperties.pipelineCacheUUID, VK_UUID_SIZE) == 0;
+                if (!headerMatches) {
+                    VOX_LOGI("render") << "pipeline cache file stale (device/driver changed); starting empty\n";
+                    initialData.clear();
+                }
+            } else {
+                initialData.clear();
+            }
         }
     }
 
+    VkPipelineCacheCreateInfo cacheCreateInfo{};
+    cacheCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    cacheCreateInfo.initialDataSize = initialData.size();
+    cacheCreateInfo.pInitialData = initialData.empty() ? nullptr : initialData.data();
+
+    VkResult cacheResult = vkCreatePipelineCache(m_device, &cacheCreateInfo, nullptr, &m_pipelineCache);
+    if (cacheResult != VK_SUCCESS && !initialData.empty()) {
+        // A corrupt cache file must not block startup — retry empty.
+        cacheCreateInfo.initialDataSize = 0;
+        cacheCreateInfo.pInitialData = nullptr;
+        cacheResult = vkCreatePipelineCache(m_device, &cacheCreateInfo, nullptr, &m_pipelineCache);
+    }
+    if (cacheResult != VK_SUCCESS) {
+        logVkFailure("vkCreatePipelineCache", cacheResult);
+        m_pipelineCache = VK_NULL_HANDLE;
+        return false;
+    }
+
+    setObjectName(VK_OBJECT_TYPE_PIPELINE_CACHE, vkHandleToUint64(m_pipelineCache), "renderer.pipelineCache");
+    VOX_LOGI("render") << "pipeline cache ready (loaded " << initialData.size() << " bytes from "
+                       << kPipelineCacheFilePath << ")\n";
     return true;
 }
 
+void RendererBackend::savePipelineCache() {
+    if (m_pipelineCache == VK_NULL_HANDLE) {
+        return;
+    }
+
+    std::size_t dataSize = 0;
+    if (vkGetPipelineCacheData(m_device, m_pipelineCache, &dataSize, nullptr) == VK_SUCCESS && dataSize > 0) {
+        std::vector<char> data(dataSize);
+        if (vkGetPipelineCacheData(m_device, m_pipelineCache, &dataSize, data.data()) == VK_SUCCESS) {
+            std::ofstream cacheFile(kPipelineCacheFilePath, std::ios::binary | std::ios::trunc);
+            if (cacheFile && cacheFile.write(data.data(), static_cast<std::streamsize>(dataSize))) {
+                VOX_LOGI("render") << "pipeline cache saved (" << dataSize << " bytes to "
+                                   << kPipelineCacheFilePath << ")\n";
+            } else {
+                VOX_LOGW("render") << "failed writing pipeline cache file: " << kPipelineCacheFilePath << "\n";
+            }
+        }
+    }
+}
+
+void RendererBackend::destroyPipelineCache() {
+    if (m_pipelineCache == VK_NULL_HANDLE) {
+        return;
+    }
+    savePipelineCache();
+    vkDestroyPipelineCache(m_device, m_pipelineCache, nullptr);
+    m_pipelineCache = VK_NULL_HANDLE;
+}
 
 bool RendererBackend::createDescriptorSetLayout(
     std::span<const VkDescriptorSetLayoutBinding> bindings,
     VkDescriptorSetLayout& outDescriptorSetLayout,
     const char* failureContext,
     const char* debugName,
-    const void* pNext
+    const void* pNext,
+    VkDescriptorSetLayoutCreateFlags flags
 ) {
     VkDescriptorSetLayoutCreateInfo layoutCreateInfo{};
     layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutCreateInfo.pNext = pNext;
+    layoutCreateInfo.flags = flags;
     layoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
     layoutCreateInfo.pBindings = bindings.empty() ? nullptr : bindings.data();
 
@@ -164,7 +222,8 @@ bool RendererBackend::createComputePipeline(
     VkShaderModule shaderModule,
     VkPipeline& outPipeline,
     const char* failureContext,
-    const char* debugName
+    const char* debugName,
+    VkPipelineCreateFlags pipelineFlags
 ) {
     outPipeline = VK_NULL_HANDLE;
 
@@ -176,10 +235,11 @@ bool RendererBackend::createComputePipeline(
 
     VkComputePipelineCreateInfo pipelineCreateInfo{};
     pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.flags = pipelineFlags;
     pipelineCreateInfo.stage = stage;
     pipelineCreateInfo.layout = pipelineLayout;
     const VkResult pipelineResult =
-        vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &outPipeline);
+        vkCreateComputePipelines(m_device, m_pipelineCache, 1, &pipelineCreateInfo, nullptr, &outPipeline);
     if (pipelineResult != VK_SUCCESS) {
         logVkFailure(failureContext, pipelineResult);
         return false;

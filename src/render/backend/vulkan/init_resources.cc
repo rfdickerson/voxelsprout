@@ -614,31 +614,20 @@ bool RendererBackend::createWaterNormalTextureResources() {
                                     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                                     result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
                                     if (result == VK_SUCCESS) {
-                                        VkImageMemoryBarrier barrier{};
-                                        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                                        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                                        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                                        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                                        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                                        barrier.image = m_waterNormalTextureImage;
-                                        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                                        barrier.subresourceRange.baseMipLevel = 0;
-                                        barrier.subresourceRange.levelCount = ddsImage.mipLevels;
-                                        barrier.subresourceRange.baseArrayLayer = 0;
-                                        barrier.subresourceRange.layerCount = 1;
-                                        barrier.srcAccessMask = 0;
-                                        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                                        vkCmdPipelineBarrier(
+                                        transitionImageLayout(
                                             commandBuffer,
-                                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                            m_waterNormalTextureImage,
+                                            VK_IMAGE_LAYOUT_UNDEFINED,
+                                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                            VK_PIPELINE_STAGE_2_NONE,
+                                            VK_ACCESS_2_NONE,
+                                            VK_PIPELINE_STAGE_2_COPY_BIT,
+                                            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                            VK_IMAGE_ASPECT_COLOR_BIT,
                                             0,
-                                            0,
-                                            nullptr,
-                                            0,
-                                            nullptr,
                                             1,
-                                            &barrier
+                                            0,
+                                            ddsImage.mipLevels
                                         );
 
                                         std::vector<VkBufferImageCopy> copyRegions;
@@ -663,30 +652,25 @@ bool RendererBackend::createWaterNormalTextureResources() {
                                             copyRegions.data()
                                         );
 
-                                        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                                        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                                        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                                        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                                        vkCmdPipelineBarrier(
+                                        transitionImageLayout(
                                             commandBuffer,
-                                            VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                            m_waterNormalTextureImage,
+                                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                            VK_PIPELINE_STAGE_2_COPY_BIT,
+                                            VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                            VK_IMAGE_ASPECT_COLOR_BIT,
                                             0,
-                                            0,
-                                            nullptr,
-                                            0,
-                                            nullptr,
                                             1,
-                                            &barrier
+                                            0,
+                                            ddsImage.mipLevels
                                         );
 
                                         result = vkEndCommandBuffer(commandBuffer);
                                         if (result == VK_SUCCESS) {
-                                            VkSubmitInfo submitInfo{};
-                                            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                                            submitInfo.commandBufferCount = 1;
-                                            submitInfo.pCommandBuffers = &commandBuffer;
-                                            result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+                                            result = submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE);
                                             if (result == VK_SUCCESS) {
                                                 result = vkQueueWaitIdle(m_graphicsQueue);
                                             }
@@ -975,19 +959,11 @@ bool RendererBackend::createWaterNormalTextureResources() {
                 beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                 result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
                 if (result == VK_SUCCESS) {
-                    VkImageMemoryBarrier barrier{};
-                    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    barrier.image = m_waterNormalTextureImage;
-                    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                    barrier.srcAccessMask = 0;
-                    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                    vkCmdPipelineBarrier(commandBuffer,
-                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        0, 0, nullptr, 0, nullptr, 1, &barrier);
+                    transitionImageLayout(commandBuffer, m_waterNormalTextureImage,
+                        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                        VK_IMAGE_ASPECT_COLOR_BIT);
 
                     VkBufferImageCopy copyRegion{};
                     copyRegion.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -995,21 +971,15 @@ bool RendererBackend::createWaterNormalTextureResources() {
                     vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, m_waterNormalTextureImage,
                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
 
-                    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                    vkCmdPipelineBarrier(commandBuffer,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                        0, 0, nullptr, 0, nullptr, 1, &barrier);
+                    transitionImageLayout(commandBuffer, m_waterNormalTextureImage,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                        VK_IMAGE_ASPECT_COLOR_BIT);
 
                     result = vkEndCommandBuffer(commandBuffer);
                     if (result == VK_SUCCESS) {
-                        VkSubmitInfo submitInfo{};
-                        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                        submitInfo.commandBufferCount = 1;
-                        submitInfo.pCommandBuffers = &commandBuffer;
-                        result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+                        result = submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE);
                         if (result == VK_SUCCESS) {
                             result = vkQueueWaitIdle(m_graphicsQueue);
                         }
@@ -1364,13 +1334,9 @@ bool RendererBackend::createDiffuseTextureResources() {
                 return false;
             }
 
-            VkSubmitInfo submitInfo{};
-            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submitInfo.commandBufferCount = 1;
-            submitInfo.pCommandBuffers = &commandBuffer;
-            result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+            result = submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE);
             if (result != VK_SUCCESS) {
-                logVkFailure("vkQueueSubmit(diffuseDdsUpload)", result);
+                logVkFailure("vkQueueSubmit2(diffuseDdsUpload)", result);
                 vkDestroyCommandPool(m_device, commandPool, nullptr);
                 destroyDiffuseTextureResources();
                 vkFreeMemory(m_device, stagingMemory, nullptr);
@@ -1644,11 +1610,7 @@ bool RendererBackend::createDiffuseTextureResources() {
                                                     );
                                                     result = vkEndCommandBuffer(plantCommandBuffer);
                                                     if (result == VK_SUCCESS) {
-                                                        VkSubmitInfo plantSubmitInfo{};
-                                                        plantSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                                                        plantSubmitInfo.commandBufferCount = 1;
-                                                        plantSubmitInfo.pCommandBuffers = &plantCommandBuffer;
-                                                        result = vkQueueSubmit(m_graphicsQueue, 1, &plantSubmitInfo, VK_NULL_HANDLE);
+                                                        result = submitCommandBufferOneShot(m_graphicsQueue, plantCommandBuffer, VK_NULL_HANDLE);
                                                         if (result == VK_SUCCESS) {
                                                             result = vkQueueWaitIdle(m_graphicsQueue);
                                                         }
@@ -2312,13 +2274,9 @@ bool RendererBackend::createDiffuseTextureResources() {
         return false;
     }
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-    result = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    result = submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE);
     if (result != VK_SUCCESS) {
-        logVkFailure("vkQueueSubmit(diffuseUpload)", result);
+        logVkFailure("vkQueueSubmit2(diffuseUpload)", result);
         vkDestroyCommandPool(m_device, commandPool, nullptr);
         destroyDiffuseTextureResources();
         vkFreeMemory(m_device, stagingMemory, nullptr);
@@ -3126,7 +3084,7 @@ bool RendererBackend::createVoxelGiResources() {
     if (m_voxelGiDescriptorSetLayout == VK_NULL_HANDLE) {
         VkDescriptorSetLayoutBinding cameraBinding{};
         cameraBinding.binding = 0;
-        cameraBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        cameraBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         cameraBinding.descriptorCount = 1;
         cameraBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
@@ -3272,50 +3230,30 @@ bool RendererBackend::createVoxelGiResources() {
                 bindings,
                 m_voxelGiDescriptorSetLayout,
                 "vkCreateDescriptorSetLayout(voxelGi)",
-                "renderer.descriptorSetLayout.voxelGi"
+                "renderer.descriptorSetLayout.voxelGi",
+                nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
             )) {
             destroyVoxelGiResources();
             return false;
         }
     }
 
-    if (m_voxelGiDescriptorPool == VK_NULL_HANDLE) {
-        std::vector<VkDescriptorPoolSize> poolSizes = {
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10 * kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kMaxFramesInFlight}
-        };
-        if (m_rayTracingRuntimeEnabled) {
-            poolSizes.push_back(VkDescriptorPoolSize{
-                VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
-                kMaxFramesInFlight
-            });
-        }
-        if (!createDescriptorPool(
-                poolSizes,
+    // Descriptor-buffer backing: camera UBO + shadow sampler + sampled/storage images
+    // + storage buffers (+ optional accel structure). Needs resource + sampler usage.
+    if (!m_voxelGiBufferSet.valid()) {
+        if (!createDescriptorBufferSet(
+                m_voxelGiDescriptorSetLayout,
                 kMaxFramesInFlight,
-                m_voxelGiDescriptorPool,
-                "vkCreateDescriptorPool(voxelGi)",
-                "renderer.descriptorPool.voxelGi"
+                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                    VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT,
+                "renderer.descriptorBuffer.voxelGi",
+                m_voxelGiBufferSet
             )) {
             destroyVoxelGiResources();
             return false;
         }
     }
-
-    if (!allocatePerFrameDescriptorSets(
-            m_voxelGiDescriptorPool,
-            m_voxelGiDescriptorSetLayout,
-            std::span<VkDescriptorSet>(m_voxelGiDescriptorSets),
-            "vkAllocateDescriptorSets(voxelGi)",
-            "renderer.descriptorSet.voxelGi.frame"
-        )) {
-        destroyVoxelGiResources();
-        return false;
-    }
-    m_voxelGiDescriptorWriteKeyValid.fill(false);
 
     std::array<VkShaderModule, 10> shaderModules = {
         VK_NULL_HANDLE,
@@ -3449,7 +3387,8 @@ bool RendererBackend::createVoxelGiResources() {
             skyExposureShaderModule,
             m_voxelGiSkyExposurePipeline,
             "vkCreateComputePipelines(voxelGiSkyExposure)",
-            "pipeline.voxelGi.skyExposure"
+            "pipeline.voxelGi.skyExposure",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
         )) {
         destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
@@ -3460,7 +3399,8 @@ bool RendererBackend::createVoxelGiResources() {
             occupancyShaderModule,
             m_voxelGiOccupancyPipeline,
             "vkCreateComputePipelines(voxelGiOccupancy)",
-            "pipeline.voxelGi.occupancy"
+            "pipeline.voxelGi.occupancy",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
         )) {
         destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
@@ -3471,7 +3411,8 @@ bool RendererBackend::createVoxelGiResources() {
             surfaceShaderModule,
             m_voxelGiSurfacePipeline,
             "vkCreateComputePipelines(voxelGiSurface)",
-            "pipeline.voxelGi.surface"
+            "pipeline.voxelGi.surface",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
         )) {
         destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
@@ -3483,7 +3424,8 @@ bool RendererBackend::createVoxelGiResources() {
                 surfaceRtShaderModule,
                 m_voxelGiSurfacePipelineRt,
                 "vkCreateComputePipelines(voxelGiSurfaceRt)",
-                "pipeline.voxelGi.surface.rt"
+                "pipeline.voxelGi.surface.rt",
+                VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
             )) {
             destroyShaderModules(m_device, shaderModules);
             destroyVoxelGiResources();
@@ -3498,28 +3440,32 @@ bool RendererBackend::createVoxelGiResources() {
                 restirCandidateShaderModule,
                 m_voxelGiRestirCandidatePipeline,
                 "vkCreateComputePipelines(voxelGiRestirCandidate)",
-                "pipeline.voxelGi.restirCandidate"
+                "pipeline.voxelGi.restirCandidate",
+                VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
             ) ||
             !createComputePipeline(
                 m_voxelGiPipelineLayout,
                 restirTemporalShaderModule,
                 m_voxelGiRestirTemporalPipeline,
                 "vkCreateComputePipelines(voxelGiRestirTemporal)",
-                "pipeline.voxelGi.restirTemporal"
+                "pipeline.voxelGi.restirTemporal",
+                VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
             ) ||
             !createComputePipeline(
                 m_voxelGiPipelineLayout,
                 restirSpatialShaderModule,
                 m_voxelGiRestirSpatialPipeline,
                 "vkCreateComputePipelines(voxelGiRestirSpatial)",
-                "pipeline.voxelGi.restirSpatial"
+                "pipeline.voxelGi.restirSpatial",
+                VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
             ) ||
             !createComputePipeline(
                 m_voxelGiPipelineLayout,
                 restirResolveShaderModule,
                 m_voxelGiRestirResolvePipeline,
                 "vkCreateComputePipelines(voxelGiRestirResolve)",
-                "pipeline.voxelGi.restirResolve"
+                "pipeline.voxelGi.restirResolve",
+                VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
             )) {
             destroyShaderModules(m_device, shaderModules);
             destroyVoxelGiResources();
@@ -3532,7 +3478,8 @@ bool RendererBackend::createVoxelGiResources() {
             injectShaderModule,
             m_voxelGiInjectPipeline,
             "vkCreateComputePipelines(voxelGiInject)",
-            "pipeline.voxelGi.inject"
+            "pipeline.voxelGi.inject",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
         )) {
         destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
@@ -3543,7 +3490,8 @@ bool RendererBackend::createVoxelGiResources() {
             propagateShaderModule,
             m_voxelGiPropagatePipeline,
             "vkCreateComputePipelines(voxelGiPropagate)",
-            "pipeline.voxelGi.propagate"
+            "pipeline.voxelGi.propagate",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
         )) {
         destroyShaderModules(m_device, shaderModules);
         destroyVoxelGiResources();
@@ -3581,7 +3529,7 @@ bool RendererBackend::createVoxelGiResources() {
             reservoirCount * static_cast<VkDeviceSize>(sizeof(VoxelGiRestirReservoirInit));
         const BufferCreateDesc reservoirCreateDesc{
             reservoirBytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
             0,
             nullptr,
             0,
@@ -3768,8 +3716,8 @@ void RendererBackend::destroyShadowResources() {
 
 void RendererBackend::destroyVoxelGiResources() {
     m_pipelineManager.destroyVoxelGiPipelines(m_device);
+    destroyDescriptorBufferSet(m_voxelGiBufferSet);
     m_descriptorManager.destroyVoxelGi(m_device);
-    m_voxelGiDescriptorWriteKeyValid.fill(false);
     m_bufferAllocator.destroyBuffer(m_voxelGiRestirReservoirCurrentBufferHandle);
     m_bufferAllocator.destroyBuffer(m_voxelGiRestirReservoirPreviousBufferHandle);
     m_bufferAllocator.destroyBuffer(m_voxelGiRestirReservoirScratchBufferHandle);

@@ -160,6 +160,11 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
+    if (!runStep("createPipelineCache", [&] { return createPipelineCache(); })) {
+        VOX_LOGE("render") << "init failed at createPipelineCache\n";
+        shutdown();
+        return false;
+    }
     if (!runStep("createTimelineSemaphore", [&] { return createTimelineSemaphore(); })) {
         VOX_LOGE("render") << "init failed at createTimelineSemaphore\n";
         shutdown();
@@ -209,6 +214,11 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
     }
     if (!runStep("createSunShaftResources", [&] { return createSunShaftResources(); })) {
         VOX_LOGE("render") << "init failed at createSunShaftResources\n";
+        shutdown();
+        return false;
+    }
+    if (!runStep("createSsaoComputeResources", [&] { return createSsaoComputeResources(); })) {
+        VOX_LOGE("render") << "init failed at createSsaoComputeResources\n";
         shutdown();
         return false;
     }
@@ -291,6 +301,7 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
             UiRenderer::InitInfo uiInfo{};
             uiInfo.device = m_device;
             uiInfo.physicalDevice = m_physicalDevice;
+            uiInfo.pipelineCache = m_pipelineCache;
             uiInfo.vmaAllocator = m_vmaAllocator;
             uiInfo.bufferAllocator = &m_bufferAllocator;
             uiInfo.uploadQueue = m_graphicsQueue;
@@ -298,6 +309,20 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
             uiInfo.colorFormat = m_swapchainFormat;
             uiInfo.maxTextureCount = std::min(m_bindlessTextureCapacity, 2048u);
             uiInfo.shaderDir = "../src/render/shaders";
+            UiRenderer::DescriptorBufferSupport& uiDb = uiInfo.descriptorBuffer;
+            uiDb.getLayoutSize = m_getDescriptorSetLayoutSize;
+            uiDb.getBindingOffset = m_getDescriptorSetLayoutBindingOffset;
+            uiDb.getDescriptor = m_getDescriptor;
+            uiDb.cmdBindDescriptorBuffers = m_cmdBindDescriptorBuffers;
+            uiDb.cmdSetDescriptorBufferOffsets = m_cmdSetDescriptorBufferOffsets;
+            uiDb.offsetAlignment =
+                std::max<VkDeviceSize>(m_descriptorBufferProperties.descriptorBufferOffsetAlignment, 1u);
+            uiDb.combinedImageSamplerDescriptorSize =
+                m_descriptorBufferProperties.combinedImageSamplerDescriptorSize;
+            uiDb.sampledImageDescriptorSize = m_descriptorBufferProperties.sampledImageDescriptorSize;
+            uiDb.samplerDescriptorSize = m_descriptorBufferProperties.samplerDescriptorSize;
+            uiDb.combinedImageSamplerSingleArray =
+                m_descriptorBufferProperties.combinedImageSamplerDescriptorSingleArray == VK_TRUE;
             return m_uiRenderer.init(uiInfo);
         })) {
         VOX_LOGE("render") << "init failed at createUiRenderer\n";
@@ -309,6 +334,10 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
                        << ", requested=" << (m_shadowSettings.mode == ShadowMode::ShadowMaps ? "shadow_maps" : "rt_beta")
                        << ", optionalRtShaderVariant=" << (m_rtShaderVariantFileAvailable ? "yes" : "no")
                        << ", betaScope=main_pass_voxels_magica_only";
+
+    // Persist the pipeline cache now that the bulk of pipelines exist, so an
+    // unclean exit (crash, task kill) doesn't lose the compilation work.
+    savePipelineCache();
 
     VOX_LOGI("render") << "init complete in " << elapsedMs(initStart) << " ms\n";
     return true;
@@ -340,8 +369,8 @@ bool RendererBackend::validateReleaseRuntimeAssets() {
         {"../src/render/shaders/imported_water_normaldepth.frag.slang.spv", "imported water normal-depth shader", true},
         {"../src/render/shaders/pipe_normaldepth.frag.slang.spv", "pipe normal-depth shader", true},
         {"../src/render/shaders/voxel_normaldepth.frag.slang.spv", "voxel normal-depth shader", true},
-        {"../src/render/shaders/ssao.frag.slang.spv", "ssao shader", true},
-        {"../src/render/shaders/ssao_blur.frag.slang.spv", "ssao blur shader", true},
+        {"../src/render/shaders/ssao.comp.slang.spv", "ssao shader", true},
+        {"../src/render/shaders/ssao_blur.comp.slang.spv", "ssao blur shader", true},
     }};
     constexpr std::array<RuntimeAssetSpec, 3> kPostAndComputeAssetSpecs = {{
         {"../src/render/shaders/auto_exposure_histogram.comp.slang.spv", "auto exposure histogram shader", true},
@@ -952,6 +981,18 @@ bool RendererBackend::createLogicalDevice() {
     memoryPriorityFeatures.pNext = &vulkan14Features;
     memoryPriorityFeatures.memoryPriority = VK_TRUE;
 
+    // Enable the descriptor-buffer feature so the renderer can back all descriptor
+    // sets with mapped descriptor buffers (VK_EXT_descriptor_buffer) instead of
+    // pool-allocated sets. Inserted between memoryPriority and vulkan14 — every
+    // chain path (VRS/RT/base) flows through memoryPriorityFeatures.
+    VkPhysicalDeviceDescriptorBufferFeaturesEXT descriptorBufferFeatures{};
+    descriptorBufferFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT;
+    if (m_desktopCapabilityProbe.descriptorBufferExtension) {
+        descriptorBufferFeatures.descriptorBuffer = VK_TRUE;
+        descriptorBufferFeatures.pNext = &vulkan14Features;
+        memoryPriorityFeatures.pNext = &descriptorBufferFeatures;
+    }
+
     // Vulkan Roadmap 2026: variable rate shading. Gated on the chosen device's probe
     // so we never require it. Enables coarse shading of the low-frequency water pass.
     VkPhysicalDeviceFragmentShadingRateFeaturesKHR fragmentShadingRateFeatures{};
@@ -985,9 +1026,8 @@ bool RendererBackend::createLogicalDevice() {
         appendDeviceExtensionIfMissing(enabledDeviceExtensions, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
     }
     if (m_desktopCapabilityProbe.descriptorBufferExtension) {
-        // Enable the extension so vkGetDeviceProcAddr returns function pointers.
-        // Do NOT enable descriptorBuffer = VK_TRUE here; defer to Phase 3 when
-        // the DescriptorManager is fully migrated to buffer-backed descriptors.
+        // Extension + descriptorBuffer feature (enabled above in the feature chain):
+        // the renderer backs all descriptor sets with mapped descriptor buffers.
         appendDeviceExtensionIfMissing(enabledDeviceExtensions, VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
     }
     if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
@@ -1048,7 +1088,12 @@ bool RendererBackend::createLogicalDevice() {
             << " combinedImageSampler=" << m_descriptorBufferProperties.combinedImageSamplerDescriptorSize
             << " storageBuffer=" << m_descriptorBufferProperties.storageBufferDescriptorSize
             << " storageImage=" << m_descriptorBufferProperties.storageImageDescriptorSize
+            << " sampledImage=" << m_descriptorBufferProperties.sampledImageDescriptorSize
             << " offsetAlignment=" << m_descriptorBufferProperties.descriptorBufferOffsetAlignment
+            << " combinedSingleArray=" << (m_descriptorBufferProperties.combinedImageSamplerDescriptorSingleArray ? 1 : 0)
+            << " bufferlessPushDescriptors=" << (m_descriptorBufferProperties.bufferlessPushDescriptors ? 1 : 0)
+            << " maxDescriptorBufferBindings=" << m_descriptorBufferProperties.maxDescriptorBufferBindings
+            << " maxResourceDescriptorBufferRange=" << m_descriptorBufferProperties.maxResourceDescriptorBufferRange
             << "\n";
     }
     if (m_supportsBindlessDescriptors) {
@@ -1283,6 +1328,7 @@ void RendererBackend::loadDescriptorBufferFunctions() {
         m_cmdBindDescriptorBuffers != nullptr &&
         m_cmdSetDescriptorBufferOffsets != nullptr;
     if (allLoaded) {
+        m_descriptorBufferReady = true;
         VOX_LOGI("render") << "descriptor buffer functions loaded (VK_EXT_descriptor_buffer)\n";
     } else {
         m_getDescriptorSetLayoutSize = nullptr;
@@ -1290,6 +1336,7 @@ void RendererBackend::loadDescriptorBufferFunctions() {
         m_getDescriptor = nullptr;
         m_cmdBindDescriptorBuffers = nullptr;
         m_cmdSetDescriptorBufferOffsets = nullptr;
+        m_descriptorBufferReady = false;
         VOX_LOGW("render") << "descriptor buffer function pointers incomplete; disabling\n";
     }
 }
@@ -1434,7 +1481,9 @@ bool RendererBackend::createUploadRingBuffer() {
                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                          VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
-                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                         // Descriptor buffers reference the camera UBO by device address.
+                         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     const bool ok = m_frameArena.init(
         &m_bufferAllocator,
         m_physicalDevice,
@@ -2272,8 +2321,12 @@ void RendererBackend::shutdown() {
         destroyVoxelGiResources();
         destroyAutoExposureResources();
         destroySunShaftResources();
+        destroySsaoComputeResources();
         destroyChunkBuffers();
         destroyPipeline();
+        destroyPipelineCache();
+        destroyDescriptorBufferSet(m_mainBufferSet);
+        destroyDescriptorBufferSet(m_bindlessBufferSet);
         m_descriptorManager.destroyMain(m_device);
         destroySwapchain();
         const uint32_t liveFrameArenaImagesBeforeShutdown = m_frameArena.liveImageCount();
@@ -2412,10 +2465,6 @@ void RendererBackend::shutdown() {
     m_gpuTimestampPeriodNs = 0.0f;
     m_gpuTimestampQueryPools.fill(VK_NULL_HANDLE);
     m_gpuTimestampQuerySubmitted.fill(false);
-    m_mainDescriptorWriteKeyValid.fill(false);
-    m_voxelGiDescriptorWriteKeyValid.fill(false);
-    m_autoExposureDescriptorWriteKeyValid.fill(false);
-    m_sunShaftDescriptorWriteKeyValid.fill(false);
     m_debugGpuFrameTimeMs = 0.0f;
     m_debugGpuShadowTimeMs = 0.0f;
     m_debugGpuGiOccupancyTimeMs = 0.0f;
