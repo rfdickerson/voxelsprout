@@ -159,6 +159,11 @@ struct alignas(16) SunShaftPushConstants {
     uint32_t _pad0 = 0u;
 };
 
+struct alignas(16) SsaoComputePushConstants {
+    uint32_t width = 1u;
+    uint32_t height = 1u;
+};
+
 } // namespace
 
 bool RendererBackend::createAutoExposureResources() {
@@ -167,7 +172,8 @@ bool RendererBackend::createAutoExposureResources() {
         const std::array<float, 4> initialState = {initialExposure, initialExposure, 1.0f, 0.0f};
         BufferCreateDesc exposureStateBufferDesc{};
         exposureStateBufferDesc.size = sizeof(initialState);
-        exposureStateBufferDesc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        exposureStateBufferDesc.usage =
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         exposureStateBufferDesc.memoryProperties =
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         exposureStateBufferDesc.initialData = initialState.data();
@@ -188,7 +194,8 @@ bool RendererBackend::createAutoExposureResources() {
     if (m_autoExposureHistogramBufferHandle == kInvalidBufferHandle) {
         BufferCreateDesc histogramBufferDesc{};
         histogramBufferDesc.size = static_cast<VkDeviceSize>(kAutoExposureHistogramBins * sizeof(uint32_t));
-        histogramBufferDesc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        histogramBufferDesc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         histogramBufferDesc.memoryProperties =
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         m_autoExposureHistogramBufferHandle = m_bufferAllocator.createBuffer(histogramBufferDesc);
@@ -247,41 +254,30 @@ bool RendererBackend::createAutoExposureResources() {
                 bindings,
                 m_autoExposureDescriptorSetLayout,
                 "vkCreateDescriptorSetLayout(autoExposure)",
-                "renderer.descriptorSetLayout.autoExposure"
+                "renderer.descriptorSetLayout.autoExposure",
+                nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
             )) {
             destroyAutoExposureResources();
             return false;
         }
     }
 
-    if (m_autoExposureDescriptorPool == VK_NULL_HANDLE) {
-        const std::array<VkDescriptorPoolSize, 2> poolSizes = {
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kMaxFramesInFlight}
-        };
-        if (!createDescriptorPool(
-                poolSizes,
+    // Descriptor-buffer backing: one region per frame-in-flight. The set has a
+    // combined image sampler (hdr scene) so it needs both resource + sampler usage.
+    if (!m_autoExposureBufferSet.valid()) {
+        if (!createDescriptorBufferSet(
+                m_autoExposureDescriptorSetLayout,
                 kMaxFramesInFlight,
-                m_autoExposureDescriptorPool,
-                "vkCreateDescriptorPool(autoExposure)",
-                "renderer.descriptorPool.autoExposure"
+                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                    VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT,
+                "renderer.descriptorBuffer.autoExposure",
+                m_autoExposureBufferSet
             )) {
             destroyAutoExposureResources();
             return false;
         }
     }
-
-    if (!allocatePerFrameDescriptorSets(
-            m_autoExposureDescriptorPool,
-            m_autoExposureDescriptorSetLayout,
-            std::span<VkDescriptorSet>(m_autoExposureDescriptorSets),
-            "vkAllocateDescriptorSets(autoExposure)",
-            "renderer.descriptorSet.autoExposure.frame"
-        )) {
-        destroyAutoExposureResources();
-        return false;
-    }
-    m_autoExposureDescriptorWriteKeyValid.fill(false);
 
     std::array<VkShaderModule, 2> shaderModules = {
         VK_NULL_HANDLE,
@@ -336,7 +332,8 @@ bool RendererBackend::createAutoExposureResources() {
             histogramShaderModule,
             m_autoExposureHistogramPipeline,
             "vkCreateComputePipelines(autoExposureHistogram)",
-            "pipeline.autoExposure.histogram"
+            "pipeline.autoExposure.histogram",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
         )) {
         destroyShaderModules(m_device, shaderModules);
         destroyAutoExposureResources();
@@ -348,7 +345,8 @@ bool RendererBackend::createAutoExposureResources() {
             updateShaderModule,
             m_autoExposureUpdatePipeline,
             "vkCreateComputePipelines(autoExposureUpdate)",
-            "pipeline.autoExposure.update"
+            "pipeline.autoExposure.update",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
         )) {
         destroyShaderModules(m_device, shaderModules);
         destroyAutoExposureResources();
@@ -382,7 +380,7 @@ bool RendererBackend::createSunShaftResources() {
     if (m_sunShaftDescriptorSetLayout == VK_NULL_HANDLE) {
         VkDescriptorSetLayoutBinding cameraBinding{};
         cameraBinding.binding = 0;
-        cameraBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        cameraBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         cameraBinding.descriptorCount = 1;
         cameraBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
@@ -415,42 +413,29 @@ bool RendererBackend::createSunShaftResources() {
                 bindings,
                 m_sunShaftDescriptorSetLayout,
                 "vkCreateDescriptorSetLayout(sunShaft)",
-                "renderer.descriptorSetLayout.sunShaft"
+                "renderer.descriptorSetLayout.sunShaft",
+                nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
             )) {
             destroySunShaftResources();
             return false;
         }
     }
 
-    if (m_sunShaftDescriptorPool == VK_NULL_HANDLE) {
-        const std::array<VkDescriptorPoolSize, 3> poolSizes = {
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * kMaxFramesInFlight},
-            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxFramesInFlight}
-        };
-        if (!createDescriptorPool(
-                poolSizes,
+    // Descriptor-buffer backing: camera UBO + 2 combined image samplers + storage image.
+    if (!m_sunShaftBufferSet.valid()) {
+        if (!createDescriptorBufferSet(
+                m_sunShaftDescriptorSetLayout,
                 kMaxFramesInFlight,
-                m_sunShaftDescriptorPool,
-                "vkCreateDescriptorPool(sunShaft)",
-                "renderer.descriptorPool.sunShaft"
+                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                    VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT,
+                "renderer.descriptorBuffer.sunShaft",
+                m_sunShaftBufferSet
             )) {
             destroySunShaftResources();
             return false;
         }
     }
-
-    if (!allocatePerFrameDescriptorSets(
-            m_sunShaftDescriptorPool,
-            m_sunShaftDescriptorSetLayout,
-            std::span<VkDescriptorSet>(m_sunShaftDescriptorSets),
-            "vkAllocateDescriptorSets(sunShaft)",
-            "renderer.descriptorSet.sunShaft.frame"
-        )) {
-        destroySunShaftResources();
-        return false;
-    }
-    m_sunShaftDescriptorWriteKeyValid.fill(false);
 
     VkShaderModule sunShaftShaderModule = VK_NULL_HANDLE;
     if (!createShaderModuleFromFile(
@@ -486,7 +471,8 @@ bool RendererBackend::createSunShaftResources() {
             sunShaftShaderModule,
             m_sunShaftPipeline,
             "vkCreateComputePipelines(sunShaft)",
-            "pipeline.sunShaft.compute"
+            "pipeline.sunShaft.compute",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
         )) {
         vkDestroyShaderModule(m_device, sunShaftShaderModule, nullptr);
         destroySunShaftResources();
@@ -512,16 +498,11 @@ void RendererBackend::destroyAutoExposureResources() {
         vkDestroyPipelineLayout(m_device, m_autoExposurePipelineLayout, nullptr);
         m_autoExposurePipelineLayout = VK_NULL_HANDLE;
     }
-    if (m_autoExposureDescriptorPool != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(m_device, m_autoExposureDescriptorPool, nullptr);
-        m_autoExposureDescriptorPool = VK_NULL_HANDLE;
-    }
+    destroyDescriptorBufferSet(m_autoExposureBufferSet);
     if (m_autoExposureDescriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_device, m_autoExposureDescriptorSetLayout, nullptr);
         m_autoExposureDescriptorSetLayout = VK_NULL_HANDLE;
     }
-    m_autoExposureDescriptorSets.fill(VK_NULL_HANDLE);
-    m_autoExposureDescriptorWriteKeyValid.fill(false);
 
     if (m_autoExposureHistogramBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_autoExposureHistogramBufferHandle);
@@ -544,18 +525,230 @@ void RendererBackend::destroySunShaftResources() {
         vkDestroyPipelineLayout(m_device, m_sunShaftPipelineLayout, nullptr);
         m_sunShaftPipelineLayout = VK_NULL_HANDLE;
     }
-    if (m_sunShaftDescriptorPool != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(m_device, m_sunShaftDescriptorPool, nullptr);
-        m_sunShaftDescriptorPool = VK_NULL_HANDLE;
-    }
+    destroyDescriptorBufferSet(m_sunShaftBufferSet);
     if (m_sunShaftDescriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_device, m_sunShaftDescriptorSetLayout, nullptr);
         m_sunShaftDescriptorSetLayout = VK_NULL_HANDLE;
     }
-    m_sunShaftDescriptorSets.fill(VK_NULL_HANDLE);
-    m_sunShaftDescriptorWriteKeyValid.fill(false);
     m_sunShaftComputeAvailable = false;
     m_sunShaftShaderAvailable = false;
+}
+
+bool RendererBackend::createSsaoComputeResources() {
+    constexpr const char* kSsaoShaderPath = "../src/render/shaders/ssao.comp.slang.spv";
+    constexpr const char* kSsaoBlurShaderPath = "../src/render/shaders/ssao_blur.comp.slang.spv";
+
+    if (m_ssaoDescriptorSetLayout == VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding cameraBinding{};
+        cameraBinding.binding = 0;
+        cameraBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        cameraBinding.descriptorCount = 1;
+        cameraBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding normalDepthBinding{};
+        normalDepthBinding.binding = 1;
+        normalDepthBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        normalDepthBinding.descriptorCount = 1;
+        normalDepthBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding ssaoRawOutputBinding{};
+        ssaoRawOutputBinding.binding = 2;
+        ssaoRawOutputBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        ssaoRawOutputBinding.descriptorCount = 1;
+        ssaoRawOutputBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+            cameraBinding,
+            normalDepthBinding,
+            ssaoRawOutputBinding
+        };
+
+        if (!createDescriptorSetLayout(
+                bindings,
+                m_ssaoDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout(ssao)",
+                "renderer.descriptorSetLayout.ssao",
+                nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+            )) {
+            destroySsaoComputeResources();
+            return false;
+        }
+    }
+
+    // Descriptor-buffer backing: camera UBO + normal-depth sampler + storage image.
+    if (!m_ssaoBufferSet.valid()) {
+        if (!createDescriptorBufferSet(
+                m_ssaoDescriptorSetLayout,
+                kMaxFramesInFlight,
+                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                    VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT,
+                "renderer.descriptorBuffer.ssao",
+                m_ssaoBufferSet
+            )) {
+            destroySsaoComputeResources();
+            return false;
+        }
+    }
+
+    if (m_ssaoBlurDescriptorSetLayout == VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding normalDepthBinding{};
+        normalDepthBinding.binding = 0;
+        normalDepthBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        normalDepthBinding.descriptorCount = 1;
+        normalDepthBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding ssaoRawBinding{};
+        ssaoRawBinding.binding = 1;
+        ssaoRawBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        ssaoRawBinding.descriptorCount = 1;
+        ssaoRawBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding ssaoBlurOutputBinding{};
+        ssaoBlurOutputBinding.binding = 2;
+        ssaoBlurOutputBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        ssaoBlurOutputBinding.descriptorCount = 1;
+        ssaoBlurOutputBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+            normalDepthBinding,
+            ssaoRawBinding,
+            ssaoBlurOutputBinding
+        };
+
+        if (!createDescriptorSetLayout(
+                bindings,
+                m_ssaoBlurDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout(ssaoBlur)",
+                "renderer.descriptorSetLayout.ssaoBlur",
+                nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+            )) {
+            destroySsaoComputeResources();
+            return false;
+        }
+    }
+
+    // Descriptor-buffer backing: 2 combined image samplers + storage image (no camera).
+    if (!m_ssaoBlurBufferSet.valid()) {
+        if (!createDescriptorBufferSet(
+                m_ssaoBlurDescriptorSetLayout,
+                kMaxFramesInFlight,
+                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                    VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT,
+                "renderer.descriptorBuffer.ssaoBlur",
+                m_ssaoBlurBufferSet
+            )) {
+            destroySsaoComputeResources();
+            return false;
+        }
+    }
+
+    std::array<VkShaderModule, 2> shaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE
+    };
+    VkShaderModule& ssaoShaderModule = shaderModules[0];
+    VkShaderModule& ssaoBlurShaderModule = shaderModules[1];
+    if (!createShaderModuleFromFile(m_device, kSsaoShaderPath, "ssao.comp", ssaoShaderModule)) {
+        destroyShaderModules(m_device, shaderModules);
+        destroySsaoComputeResources();
+        return false;
+    }
+    if (!createShaderModuleFromFile(m_device, kSsaoBlurShaderPath, "ssao_blur.comp", ssaoBlurShaderModule)) {
+        destroyShaderModules(m_device, shaderModules);
+        destroySsaoComputeResources();
+        return false;
+    }
+
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(SsaoComputePushConstants);
+    const std::array<VkPushConstantRange, 1> pushConstantRanges = {pushConstantRange};
+
+    if (!createComputePipelineLayout(
+            m_ssaoDescriptorSetLayout,
+            pushConstantRanges,
+            m_ssaoPipelineLayout,
+            "vkCreatePipelineLayout(ssao)",
+            "renderer.pipelineLayout.ssao"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
+        destroySsaoComputeResources();
+        return false;
+    }
+    if (!createComputePipeline(
+            m_ssaoPipelineLayout,
+            ssaoShaderModule,
+            m_ssaoPipeline,
+            "vkCreateComputePipelines(ssao)",
+            "pipeline.ssao",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+        )) {
+        destroyShaderModules(m_device, shaderModules);
+        destroySsaoComputeResources();
+        return false;
+    }
+
+    if (!createComputePipelineLayout(
+            m_ssaoBlurDescriptorSetLayout,
+            pushConstantRanges,
+            m_ssaoBlurPipelineLayout,
+            "vkCreatePipelineLayout(ssaoBlur)",
+            "renderer.pipelineLayout.ssaoBlur"
+        )) {
+        destroyShaderModules(m_device, shaderModules);
+        destroySsaoComputeResources();
+        return false;
+    }
+    if (!createComputePipeline(
+            m_ssaoBlurPipelineLayout,
+            ssaoBlurShaderModule,
+            m_ssaoBlurPipeline,
+            "vkCreateComputePipelines(ssaoBlur)",
+            "pipeline.ssaoBlur",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+        )) {
+        destroyShaderModules(m_device, shaderModules);
+        destroySsaoComputeResources();
+        return false;
+    }
+
+    destroyShaderModules(m_device, shaderModules);
+
+    VOX_LOGI("render") << "ssao compute resources ready\n";
+    return true;
+}
+
+void RendererBackend::destroySsaoComputeResources() {
+    if (m_ssaoPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_ssaoPipeline, nullptr);
+        m_ssaoPipeline = VK_NULL_HANDLE;
+    }
+    if (m_ssaoBlurPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_ssaoBlurPipeline, nullptr);
+        m_ssaoBlurPipeline = VK_NULL_HANDLE;
+    }
+    if (m_ssaoPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device, m_ssaoPipelineLayout, nullptr);
+        m_ssaoPipelineLayout = VK_NULL_HANDLE;
+    }
+    destroyDescriptorBufferSet(m_ssaoBufferSet);
+    if (m_ssaoDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device, m_ssaoDescriptorSetLayout, nullptr);
+        m_ssaoDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+
+    if (m_ssaoBlurPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device, m_ssaoBlurPipelineLayout, nullptr);
+        m_ssaoBlurPipelineLayout = VK_NULL_HANDLE;
+    }
+    destroyDescriptorBufferSet(m_ssaoBlurBufferSet);
+    if (m_ssaoBlurDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device, m_ssaoBlurDescriptorSetLayout, nullptr);
+        m_ssaoBlurDescriptorSetLayout = VK_NULL_HANDLE;
+    }
 }
 
 } // namespace odai::render

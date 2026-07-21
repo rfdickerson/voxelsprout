@@ -21,7 +21,6 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const uint32_t imageIndex = context.imageIndex;
     const VkViewport& viewport = context.viewport;
     const VkRect2D& scissor = context.scissor;
-    const BoundDescriptorSets& boundDescriptorSets = *context.boundDescriptorSets;
     const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
     // Legacy voxel/magica/pipe per-frame draw inputs are still present on MainPassInputs
     // but no longer consumed here — those passes were removed (prior voxel/factory game).
@@ -55,7 +54,6 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
     }
 
-    const uint32_t boundDescriptorSetCount = boundDescriptorSets.count;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
         m_debugDrawCallsTotal += drawCount;
@@ -64,9 +62,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
             return;
         }
-        vkCmdWriteTimestamp(
+        vkCmdWriteTimestamp2(
             commandBuffer,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_2_NONE,
             gpuTimestampQueryPool,
             queryIndex
         );
@@ -75,9 +73,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
             return;
         }
-        vkCmdWriteTimestamp(
+        vkCmdWriteTimestamp2(
             commandBuffer,
-            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             gpuTimestampQueryPool,
             queryIndex
         );
@@ -174,16 +172,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         constexpr std::uint32_t kTerrainPatchGridResolution = 16u;
         constexpr std::uint32_t kTerrainPatchControlPointCount = 4u;
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_terrainTessPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
+        bindGraphicsDescriptorBuffers(commandBuffer);
         countDrawCalls(m_debugDrawCallsMain, 1);
         vkCmdDraw(
             commandBuffer,
@@ -204,16 +193,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         if (hexBaseVertexBuffer != VK_NULL_HANDLE && hexBaseIndexBuffer != VK_NULL_HANDLE &&
             hexInstanceBuffer != VK_NULL_HANDLE) {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_hexTerrainPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-                1,
-                &mvpDynamicOffset
-            );
+            bindGraphicsDescriptorBuffers(commandBuffer);
             const VkBuffer hexVertexBuffers[2] = {hexBaseVertexBuffer, hexInstanceBuffer};
             const VkDeviceSize hexVertexOffsets[2] = {0, 0};
             vkCmdBindVertexBuffers(commandBuffer, 0, 2, hexVertexBuffers, hexVertexOffsets);
@@ -242,16 +222,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 ? m_importedStaticPipelineRt
                 : m_importedStaticPipeline
         );
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
+        bindGraphicsDescriptorBuffers(commandBuffer);
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
         vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
         ChunkPushConstants importedPushConstants{};
@@ -290,16 +261,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 ? m_importedStaticPipelineRt
                 : m_importedStaticPipeline
         );
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
+        bindGraphicsDescriptorBuffers(commandBuffer);
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
         vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
         ChunkPushConstants importedPushConstants{};
@@ -336,16 +298,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
             const VkDeviceSize vertexOffsets[2] = {0, 0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-                1,
-                &mvpDynamicOffset
-            );
+            bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
             countDrawCalls(m_debugDrawCallsMain, 1);
@@ -495,16 +448,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 useRtWaterReflections ? m_importedWaterPipelineRt : m_importedWaterPipeline
             );
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-                1,
-                &mvpDynamicOffset
-            );
+            bindGraphicsDescriptorBuffers(commandBuffer);
             ChunkPushConstants waterPushConstants{};
             waterPushConstants.cascadeData[2] = m_debugImportedWaterSolid ? 1.0f : 0.0f;
             vkCmdPushConstants(
@@ -539,16 +483,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     // Draw skybox last with depth-test so sun/sky only appears where no geometry wrote depth.
     if (m_skyboxPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyboxPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
+        bindGraphicsDescriptorBuffers(commandBuffer);
         countDrawCalls(m_debugDrawCallsMain, 1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
@@ -563,16 +498,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             const VkBuffer skyCloudVertexBuffers[1] = {skyCloudVertexBuffer};
             const VkDeviceSize skyCloudVertexOffsets[1] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyCloudPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-                1,
-                &mvpDynamicOffset
-            );
+            bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, skyCloudVertexBuffers, skyCloudVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, skyCloudIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
             countDrawCalls(m_debugDrawCallsMain, 1);

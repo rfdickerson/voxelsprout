@@ -147,8 +147,8 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard_normaldepth.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_normaldepth.frag.slang" fragment)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.frag.slang" fragment)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao_blur.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao_blur.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_occupancy.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface.comp.slang" compute)
     add_slang_shader_variant(
@@ -453,6 +453,7 @@ if(ODAI_BUILD_APP)
             src/render/backend/vulkan/chunk_upload.cc
             src/render/backend/vulkan/shadow_culling_utils.cc
             src/render/backend/vulkan/descriptors.cc
+            src/render/backend/vulkan/descriptor_buffer.cc
             src/render/backend/vulkan/ui_panels.cc
             src/render/backend/vulkan/pass_pipelines.cc
             src/render/backend/vulkan/swapchain_targets.cc
