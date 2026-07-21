@@ -441,6 +441,146 @@ procgen::TriMesh buildFireTruckMesh() {
     return m;
 }
 
+// ── Civic building minis ────────────────────────────────────────────────────
+// Each municipal building gets a distinct hand-assembled silhouette in local
+// [0..1.8]^2 lot space (2x2 tiles minus lot padding), front facing -Z so the
+// same quarter-turn rotation as the zoned buildings points the door at the
+// street. Built from boxes, cached once, no art pipeline anywhere in sight.
+procgen::TriMesh buildCivicMesh(Building b) {
+    procgen::TriMesh m;
+    m.boundsMin = {1e9f, 1e9f, 1e9f};
+    m.boundsMax = {-1e9f, -1e9f, -1e9f};
+    const auto box = [&](float x0, float y0, float z0, float x1, float y1, float z1,
+                         std::uint32_t hex) {
+        emitPropBox(m, x0, y0, z0, x1, y1, z1, UiColor::fromRgbHex(hex));
+    };
+    switch (b) {
+        case Building::Police: {
+            box(0.15f, 0.0f, 0.25f, 1.65f, 1.00f, 1.65f, 0x3D5A8A);   // precinct block
+            box(0.13f, 1.00f, 0.23f, 1.67f, 1.12f, 1.67f, 0xD8DCE0);  // white band
+            box(0.30f, 1.12f, 0.40f, 1.50f, 1.50f, 1.55f, 0x33507E);  // upper floor
+            box(0.75f, 0.0f, 0.21f, 1.05f, 0.45f, 0.27f, 0x1E2530);   // door
+            box(0.28f, 0.55f, 0.22f, 0.65f, 0.75f, 0.26f, 0xBCD2E8);  // window strips
+            box(1.15f, 0.55f, 0.22f, 1.52f, 0.75f, 0.26f, 0xBCD2E8);
+            box(0.50f, 1.50f, 0.70f, 0.75f, 1.62f, 0.95f, 0x8A9098);  // rooftop AC
+            box(1.28f, 1.50f, 1.20f, 1.31f, 1.95f, 1.23f, 0x2A2E34);  // antenna
+            break;
+        }
+        case Building::Fire: {
+            box(0.12f, 0.0f, 0.25f, 1.68f, 1.50f, 1.65f, 0xB03A2C);   // fire hall
+            box(0.25f, 0.0f, 0.21f, 0.75f, 0.85f, 0.26f, 0xD8D0C8);   // garage door 1
+            box(0.95f, 0.0f, 0.21f, 1.45f, 0.85f, 0.26f, 0xD8D0C8);   // garage door 2
+            box(0.18f, 0.95f, 0.22f, 1.62f, 1.10f, 0.26f, 0xE8E4DC);  // fascia band
+            box(1.15f, 1.50f, 1.15f, 1.55f, 1.85f, 1.55f, 0x992F24);  // hose tower
+            box(0.25f, 1.50f, 1.40f, 0.28f, 2.10f, 1.43f, 0xC8CCD0);  // flagpole
+            box(0.28f, 1.95f, 1.40f, 0.50f, 2.08f, 1.42f, 0xD6382A);  // flag
+            break;
+        }
+        case Building::Clinic: {
+            box(0.15f, 0.0f, 0.30f, 1.65f, 1.60f, 1.65f, 0xE4E7E9);   // white block
+            box(0.55f, 0.70f, 0.12f, 1.25f, 0.80f, 0.34f, 0x21A89A);  // entrance canopy
+            box(0.72f, 0.0f, 0.26f, 1.08f, 0.60f, 0.32f, 0x9FC4D8);   // glass doors
+            box(0.65f, 1.60f, 0.85f, 1.15f, 1.72f, 0.99f, 0xD6382A);  // rooftop cross
+            box(0.83f, 1.60f, 0.67f, 0.97f, 1.72f, 1.17f, 0xD6382A);
+            break;
+        }
+        case Building::School: {
+            box(0.12f, 0.0f, 0.55f, 1.68f, 1.15f, 1.68f, 0x9A5B3C);   // brick main
+            box(0.95f, 0.0f, 0.75f, 1.68f, 1.80f, 1.68f, 0x84492E);   // gym wing
+            box(0.55f, 0.0f, 0.42f, 1.05f, 0.90f, 0.58f, 0xB27048);   // entry porch
+            box(0.72f, 0.0f, 0.40f, 0.88f, 0.55f, 0.44f, 0xE8E4DC);   // doors
+            box(0.28f, 0.0f, 0.30f, 0.31f, 1.30f, 0.33f, 0xC8CCD0);   // flagpole
+            box(0.31f, 1.12f, 0.30f, 0.55f, 1.28f, 0.32f, 0xF0C24A);  // school flag
+            break;
+        }
+        case Building::Library: {
+            box(0.35f, 0.0f, 0.16f, 1.45f, 0.08f, 0.42f, 0xCFC9BB);   // steps
+            box(0.40f, 0.08f, 0.22f, 1.40f, 0.16f, 0.42f, 0xCFC9BB);
+            box(0.25f, 0.0f, 0.40f, 1.55f, 1.30f, 1.60f, 0xB8B2A4);   // stone body
+            for (int i = 0; i < 4; ++i) {                              // portico columns
+                const float cx2 = 0.42f + 0.30f * static_cast<float>(i);
+                box(cx2, 0.16f, 0.28f, cx2 + 0.09f, 1.05f, 0.37f, 0xD8D2C4);
+            }
+            box(0.30f, 1.05f, 0.24f, 1.50f, 1.22f, 0.42f, 0xD8D2C4);  // architrave
+            box(0.42f, 1.22f, 0.26f, 1.38f, 1.34f, 0.40f, 0xCFC9BB);  // pediment
+            box(0.58f, 1.34f, 0.28f, 1.22f, 1.44f, 0.38f, 0xCFC9BB);
+            box(0.28f, 1.30f, 0.42f, 1.52f, 1.42f, 1.58f, 0xA69F90);  // roof slab
+            break;
+        }
+        case Building::Amphitheater: {
+            // Tiered stone bowl opening toward the street, stage at the mouth.
+            box(0.10f, 0.0f, 0.30f, 0.35f, 0.35f, 1.70f, 0xC7B9A2);   // outer ring
+            box(1.45f, 0.0f, 0.30f, 1.70f, 0.35f, 1.70f, 0xC7B9A2);
+            box(0.10f, 0.0f, 1.45f, 1.70f, 0.35f, 1.70f, 0xC7B9A2);
+            box(0.35f, 0.0f, 0.50f, 0.55f, 0.24f, 1.45f, 0xD4C7B0);   // middle ring
+            box(1.25f, 0.0f, 0.50f, 1.45f, 0.24f, 1.45f, 0xD4C7B0);
+            box(0.35f, 0.0f, 1.25f, 1.45f, 0.24f, 1.45f, 0xD4C7B0);
+            box(0.55f, 0.0f, 0.70f, 0.70f, 0.13f, 1.25f, 0xE0D4BC);   // inner ring
+            box(1.10f, 0.0f, 0.70f, 1.25f, 0.13f, 1.25f, 0xE0D4BC);
+            box(0.55f, 0.0f, 1.10f, 1.25f, 0.13f, 1.25f, 0xE0D4BC);
+            box(0.60f, 0.0f, 0.35f, 1.20f, 0.06f, 0.85f, 0x8A5C3E);   // wooden stage
+            break;
+        }
+        case Building::Power: {
+            box(0.10f, 0.0f, 0.55f, 1.70f, 1.10f, 1.70f, 0x8A8478);   // turbine hall
+            box(0.55f, 1.10f, 0.85f, 0.80f, 1.22f, 1.10f, 0x6A6E74);  // roof vent
+            for (int s2 = 0; s2 < 2; ++s2) {                           // twin stacks
+                const float sx = s2 == 0 ? 0.30f : 1.10f;
+                box(sx, 1.10f, 0.85f, sx + 0.32f, 1.90f, 1.17f, 0xB8B4AC);
+                box(sx + 0.04f, 1.90f, 0.89f, sx + 0.28f, 2.35f, 1.13f, 0xB8B4AC);
+                box(sx + 0.07f, 2.35f, 0.92f, sx + 0.25f, 2.52f, 1.10f, 0xB8B4AC);
+                box(sx + 0.07f, 2.52f, 0.92f, sx + 0.25f, 2.60f, 1.10f, 0xC04038);  // red band
+            }
+            box(0.20f, 0.0f, 0.18f, 0.45f, 0.30f, 0.42f, 0x6A6E74);   // transformer yard
+            box(0.55f, 0.0f, 0.18f, 0.80f, 0.30f, 0.42f, 0x6A6E74);
+            box(1.10f, 0.0f, 0.15f, 1.60f, 0.22f, 0.45f, 0x2E2A26);   // coal pile
+            box(1.20f, 0.22f, 0.20f, 1.50f, 0.34f, 0.40f, 0x3A342E);
+            break;
+        }
+        default:
+            box(0.15f, 0.0f, 0.15f, 1.65f, 1.0f, 1.65f, 0x6B7079);
+            break;
+    }
+    return m;
+}
+
+procgen::TriMesh buildSnowmanMesh(std::uint32_t variant) {
+    procgen::TriMesh m;
+    m.boundsMin = {1e9f, 1e9f, 1e9f};
+    m.boundsMax = {-1e9f, -1e9f, -1e9f};
+    const float s = 0.9f + 0.25f * static_cast<float>(variant % 3u) * 0.5f;
+    const UiColor snow = UiColor::fromRgbHex(0xF2F5F7);
+    const UiColor snowLo = UiColor::fromRgbHex(0xE2E9EC);
+    emitPropBox(m, -0.030f * s, 0.0f, -0.030f * s, 0.030f * s, 0.045f * s, 0.030f * s, snowLo);
+    emitPropBox(m, -0.022f * s, 0.045f * s, -0.022f * s, 0.022f * s, 0.082f * s, 0.022f * s, snow);
+    emitPropBox(m, -0.015f * s, 0.082f * s, -0.015f * s, 0.015f * s, 0.110f * s, 0.015f * s, snow);
+    emitPropBox(m, 0.015f * s, 0.092f * s, -0.004f * s, 0.032f * s, 0.100f * s, 0.004f * s,
+                UiColor::fromRgbHex(0xE0852E));  // carrot, facing +X
+    return m;
+}
+
+procgen::TriMesh buildBoatMesh(bool sail) {
+    procgen::TriMesh m;
+    m.boundsMin = {1e9f, 1e9f, 1e9f};
+    m.boundsMax = {-1e9f, -1e9f, -1e9f};
+    if (!sail) {
+        emitPropBox(m, -0.050f, 0.006f, -0.020f, 0.050f, 0.030f, 0.020f,
+                    UiColor::fromRgbHex(0x7A5230));  // rowboat hull
+        emitPropBox(m, -0.042f, 0.030f, -0.014f, 0.042f, 0.036f, 0.014f,
+                    UiColor::fromRgbHex(0x9A6B42));  // gunwale
+        emitPropBox(m, -0.006f, 0.030f, -0.016f, 0.006f, 0.040f, 0.016f,
+                    UiColor::fromRgbHex(0x5C3A24));  // thwart
+    } else {
+        emitPropBox(m, -0.055f, 0.006f, -0.018f, 0.055f, 0.028f, 0.018f,
+                    UiColor::fromRgbHex(0xE8E6E0));  // sailboat hull
+        emitPropBox(m, -0.003f, 0.028f, -0.003f, 0.003f, 0.160f, 0.003f,
+                    UiColor::fromRgbHex(0x5C4A38));  // mast
+        emitPropBox(m, 0.005f, 0.045f, -0.002f, 0.050f, 0.150f, 0.002f,
+                    UiColor::fromRgbHex(0xF2F0E8));  // sail
+    }
+    return m;
+}
+
 // Spatial influence each municipal building splats into the desirability
 // fields (computeDesirability) — shared with the placement-time ring preview
 // in drawWorldOverlay so what the player is shown is exactly what the sim
@@ -1679,6 +1819,23 @@ ImportedScene CityBuilderApp::buildCityScene() const {
             } else {
                 builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1},
                                 seasonalGrass(mix(kGrassAlt, kGrass, t.scenicPhase)));
+                // Shoreline: a sand strip along any edge that meets water, so
+                // the river and lake get beaches instead of a hard grass seam.
+                UiColor sand = UiColor::fromRgbHex(0xD6C08A);
+                if (winter) sand = mix(sand, UiColor::fromRgbHex(0xE4E0D0), 0.6f);
+                const float sw2 = ts * 0.14f, sy2 = 0.006f;
+                if (inBounds(c, r - 1) && tile(c, r - 1).terrain == Terrain::Water)
+                    builder.addQuad({x0, sy2, z0}, {x1, sy2, z0}, {x1, sy2, z0 + sw2},
+                                    {x0, sy2, z0 + sw2}, sand);
+                if (inBounds(c, r + 1) && tile(c, r + 1).terrain == Terrain::Water)
+                    builder.addQuad({x0, sy2, z1 - sw2}, {x1, sy2, z1 - sw2}, {x1, sy2, z1},
+                                    {x0, sy2, z1}, sand);
+                if (inBounds(c - 1, r) && tile(c - 1, r).terrain == Terrain::Water)
+                    builder.addQuad({x0, sy2, z0}, {x0 + sw2, sy2, z0}, {x0 + sw2, sy2, z1},
+                                    {x0, sy2, z1}, sand);
+                if (inBounds(c + 1, r) && tile(c + 1, r).terrain == Terrain::Water)
+                    builder.addQuad({x1 - sw2, sy2, z0}, {x1, sy2, z0}, {x1, sy2, z1},
+                                    {x1 - sw2, sy2, z1}, sand);
             }
 
             if (t.road) {
@@ -1855,11 +2012,11 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                 const int fp = std::max<int>(1, t.footprint);
                 const float bx1 = x0 + fp * ts, bz1 = z0 + fp * ts;
                 const float pad = ts * 0.10f;
-                const float height = buildingHeight(t.building);
-                const UiColor roofCol = mix(buildingRoof(t.building), UiColor(0, 0, 0, 1), 0.12f);
-                addBox(builder, x0 + pad, z0 + pad, bx1 - pad, bz1 - pad, 0.0f, height, roofCol);
                 if (t.building == Building::Park) {
-                    // Proper procgen trees so the lone-tile park doesn't read as a slab.
+                    // Park: lawn slab, procgen trees, a flower ring, a bench.
+                    const float height = buildingHeight(t.building);
+                    addBox(builder, x0 + pad, z0 + pad, bx1 - pad, bz1 - pad, 0.0f, height,
+                           mix(buildingRoof(t.building), UiColor(0, 0, 0, 1), 0.12f));
                     for (int i = 0; i < 4; ++i) {
                         const float px = x0 + (0.28f + 0.45f * (i & 1)) * (bx1 - x0);
                         const float pz = z0 + (0.28f + 0.45f * (i >> 1)) * (bz1 - z0);
@@ -1867,6 +2024,61 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                         procgen::appendTriMesh(cachedTree(tv % kTreeVariants), {px, height, pz},
                                                {1.0f, 1.0f, 1.0f}, scene);
                     }
+                    if (m_season != procgen::Season::Winter) {
+                        static constexpr std::uint32_t kPetals[3] = {0xE86A9A, 0xF0C24A, 0xE0564C};
+                        const std::uint32_t hp2 = tileHash(c, r, 0xF10AA5u);
+                        for (int i = 0; i < 4; ++i) {
+                            const float a = static_cast<float>(i) / 4.0f * 6.2831853f +
+                                            static_cast<float>(hp2 & 7u);
+                            const float fx = (x0 + bx1) * 0.5f + std::cos(a) * 0.22f;
+                            const float fz = (z0 + bz1) * 0.5f + std::sin(a) * 0.22f;
+                            const UiColor petal = UiColor::fromRgbHex(
+                                kPetals[(hp2 >> (i * 2)) % 3u]);
+                            builder.addQuad({fx - 0.025f, height + 0.006f, fz - 0.025f},
+                                            {fx + 0.025f, height + 0.006f, fz - 0.025f},
+                                            {fx + 0.025f, height + 0.006f, fz + 0.025f},
+                                            {fx - 0.025f, height + 0.006f, fz + 0.025f}, petal);
+                        }
+                    }
+                    continue;
+                }
+                // Civic mini, rotated so its front (local -Z) faces a street.
+                const auto anyRoadC = [&](int cc0, int rr0, int cc1, int rr1) {
+                    for (int rr = rr0; rr <= rr1; ++rr)
+                        for (int cc = cc0; cc <= cc1; ++cc)
+                            if (inBounds(cc, rr) && tile(cc, rr).road) return true;
+                    return false;
+                };
+                int facings[4];
+                int numFacings = 0;
+                if (anyRoadC(c, r - 1, c + fp - 1, r - 1)) facings[numFacings++] = 0;
+                if (anyRoadC(c - 1, r, c - 1, r + fp - 1)) facings[numFacings++] = 1;
+                if (anyRoadC(c, r + fp, c + fp - 1, r + fp)) facings[numFacings++] = 2;
+                if (anyRoadC(c + fp, r, c + fp, r + fp - 1)) facings[numFacings++] = 3;
+                const std::uint32_t fh2 = tileHash(c, r, 0xC1F1Cu);
+                const int cTurns = numFacings > 0
+                                       ? facings[fh2 % static_cast<std::uint32_t>(numFacings)]
+                                       : static_cast<int>(fh2 & 3u);
+                const procgen::TriMesh& cm = cachedCivic(t.building);
+                const float lot = fp * ts - 2.0f * pad;
+                const float lx = x0 + pad, lz = z0 + pad;
+                const procgen::Color3 white{1.0f, 1.0f, 1.0f};
+                switch (cTurns) {
+                    case 1:
+                        procgen::appendTriMeshRotated(cm, {lx, 0.0f, lz + lot}, 1,
+                                                      {0.0f, 0.0f, 0.0f}, white, scene);
+                        break;
+                    case 2:
+                        procgen::appendTriMeshRotated(cm, {lx + lot, 0.0f, lz + lot}, 2,
+                                                      {0.0f, 0.0f, 0.0f}, white, scene);
+                        break;
+                    case 3:
+                        procgen::appendTriMeshRotated(cm, {lx + lot, 0.0f, lz}, 3,
+                                                      {0.0f, 0.0f, 0.0f}, white, scene);
+                        break;
+                    default:
+                        procgen::appendTriMesh(cm, {lx, 0.0f, lz}, white, scene);
+                        break;
                 }
                 continue;
             }
@@ -2103,6 +2315,27 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                             addBox(builder, bx - bs * 0.6f, bz - bs * 0.6f, bx + bs * 0.6f,
                                    bz + bs * 0.6f, bs * 1.6f, bs * 2.3f, bushLite);
                         }
+                        if (tier == 1) {
+                            // White picket fence around the yard, gap on the
+                            // street side — pure Suburbia. Rail plus posts at
+                            // the corners and midpoints; the door-facing edge
+                            // (turns) stays open.
+                            const UiColor picket = UiColor::fromRgbHex(0xE8E6E0);
+                            const float fy0 = 0.015f, fy1 = 0.055f, fw2 = 0.010f;
+                            const float fx0 = x0 + ts * 0.045f, fz0 = z0 + ts * 0.045f;
+                            const float fx1 = x0 + pw * ts - ts * 0.045f;
+                            const float fz1 = z0 + pd * ts - ts * 0.045f;
+                            if (turns != 0) addBox(builder, fx0, fz0, fx1, fz0 + fw2, fy0 + 0.02f, fy1, picket);
+                            if (turns != 2) addBox(builder, fx0, fz1 - fw2, fx1, fz1, fy0 + 0.02f, fy1, picket);
+                            if (turns != 1) addBox(builder, fx0, fz0, fx0 + fw2, fz1, fy0 + 0.02f, fy1, picket);
+                            if (turns != 3) addBox(builder, fx1 - fw2, fz0, fx1, fz1, fy0 + 0.02f, fy1, picket);
+                            for (int i = 0; i < 4; ++i) {
+                                const float px2 = (i & 1) ? fx1 : fx0;
+                                const float pz2 = (i & 2) ? fz1 : fz0;
+                                addBox(builder, px2 - 0.008f, pz2 - 0.008f, px2 + 0.008f,
+                                       pz2 + 0.008f, 0.0f, fy1 + 0.012f, picket);
+                            }
+                        }
                         if (tier == 2 && !winter) {
                             // Flower beds: little bright quads in the yard corners.
                             static constexpr std::uint32_t kPetals[3] = {0xE86A9A, 0xF0C24A, 0xE0564C};
@@ -2217,6 +2450,16 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                                                {1.0f, 1.0f, 1.0f}, scene);
                     }
                 }
+                // Winter: snowmen appear in yards along the streets — the
+                // seasonal mirror of autumn's pumpkins.
+                const std::uint32_t hs = tileHash(c, r, 0x5104AA1u);
+                if (winter && hs % 1000u < (byRoad ? 180u : 30u)) {
+                    const float sx2 = 0.22f + 0.56f * static_cast<float>(hs & 0xffu) / 255.0f;
+                    const float sz2 = 0.22f + 0.56f * static_cast<float>((hs >> 8) & 0xffu) / 255.0f;
+                    procgen::appendTriMesh(cachedSnowman(hs >> 16),
+                                           {x0 + sx2 * ts, 0.0f, z0 + sz2 * ts},
+                                           {1.0f, 1.0f, 1.0f}, scene);
+                }
                 // Autumn: pumpkins appear in yards along the streets — a
                 // little cluster per lucky parcel.
                 const std::uint32_t hp = tileHash(c, r, 0xF00D5EEDu);
@@ -2306,6 +2549,24 @@ const procgen::TriMesh& CityBuilderApp::cachedPowerPole(std::uint32_t variant) c
         }
     }
     return m_poleMeshes[variant % kPoleVariants];
+}
+
+const procgen::TriMesh& CityBuilderApp::cachedCivic(Building b) const {
+    const int key = static_cast<int>(b);
+    const auto it = m_civicCache.find(key);
+    if (it != m_civicCache.end()) return it->second;
+    return m_civicCache.emplace(key, buildCivicMesh(b)).first->second;
+}
+
+const procgen::TriMesh& CityBuilderApp::cachedSnowman(std::uint32_t variant) const {
+    constexpr std::uint32_t kSnowmanVariants = 3;
+    if (m_snowmanMeshes.empty()) {
+        m_snowmanMeshes.reserve(kSnowmanVariants);
+        for (std::uint32_t i = 0; i < kSnowmanVariants; ++i) {
+            m_snowmanMeshes.push_back(buildSnowmanMesh(i));
+        }
+    }
+    return m_snowmanMeshes[variant % kSnowmanVariants];
 }
 
 const procgen::TriMesh& CityBuilderApp::cachedStreetlamp(std::uint32_t variant) const {
@@ -3332,6 +3593,88 @@ render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
                 const float wy = 0.10f + std::sin(w * 3.14159f) * 0.55f;
                 pushCross(wx, wy, wz, 0.018f, 0.026f, 0.55f, 0.75f, 0.95f);
             }
+        }
+    }
+
+    // Boats: anchors are hash-picked once from open-water tiles (terrain never
+    // changes), then each boat drifts a slow ellipse around its anchor with a
+    // bob and a heading that follows the drift — the lake and river read as
+    // used, not painted.
+    if (!m_boatSpotsBuilt) {
+        m_boatSpotsBuilt = true;
+        for (int r = 0; r < kGridH && m_boatSpots.size() < 8; ++r) {
+            for (int c = 0; c < kGridW && m_boatSpots.size() < 8; ++c) {
+                if (tile(c, r).terrain != Terrain::Water) continue;
+                const bool open = inBounds(c - 1, r) && tile(c - 1, r).terrain == Terrain::Water &&
+                                  inBounds(c + 1, r) && tile(c + 1, r).terrain == Terrain::Water &&
+                                  inBounds(c, r - 1) && tile(c, r - 1).terrain == Terrain::Water &&
+                                  inBounds(c, r + 1) && tile(c, r + 1).terrain == Terrain::Water;
+                if (!open) continue;
+                const std::uint32_t h = tileHash(c, r, 0xB0A7u);
+                if (h % 100u >= 9u) continue;
+                BoatSpot spot;
+                spot.x = (c + 0.5f) * ts;
+                spot.z = (r + 0.5f) * ts;
+                spot.phase = static_cast<float>(h & 0xffu) * 0.0246f;
+                spot.variant = static_cast<std::uint8_t>((h >> 8) & 1u);
+                m_boatSpots.push_back(spot);
+            }
+        }
+    }
+    if (m_boatMeshes.empty()) {
+        m_boatMeshes.push_back(buildBoatMesh(false));
+        m_boatMeshes.push_back(buildBoatMesh(true));
+    }
+    for (const BoatSpot& bs : m_boatSpots) {
+        const float dx = std::sin(m_time * 0.10f + bs.phase) * 0.25f;
+        const float dz = std::cos(m_time * 0.07f + bs.phase) * 0.18f;
+        const float px = bs.x + dx, pz = bs.z + dz;
+        // Heading follows the drift velocity (analytic derivative).
+        float vx = std::cos(m_time * 0.10f + bs.phase) * 0.025f;
+        float vz = -std::sin(m_time * 0.07f + bs.phase) * 0.0126f;
+        const float vlen = std::sqrt(vx * vx + vz * vz);
+        if (vlen > 1e-6f) { vx /= vlen; vz /= vlen; } else { vx = 1.0f; vz = 0.0f; }
+        const float bob = 0.006f * std::sin(m_time * 1.3f + bs.phase * 3.0f);
+        const procgen::TriMesh& mesh = m_boatMeshes[bs.variant % m_boatMeshes.size()];
+        const std::uint32_t base = static_cast<std::uint32_t>(m_actorVertices.size());
+        for (const ImportedScenePackedVertex& src : mesh.vertices) {
+            ImportedScenePackedVertex dst = src;
+            const float lx = src.position[0], lz = src.position[2];
+            dst.position[0] = px + lx * vx - lz * vz;
+            dst.position[2] = pz + lx * vz + lz * vx;
+            dst.position[1] = src.position[1] + bob;
+            const float nx = src.normal[0], nz = src.normal[2];
+            dst.normal[0] = nx * vx - nz * vz;
+            dst.normal[2] = nx * vz + nz * vx;
+            m_actorVertices.push_back(dst);
+        }
+        for (const std::uint32_t index : mesh.indices) {
+            m_actorIndices.push_back(base + index);
+        }
+    }
+
+    // Bird flocks: closed-form Lissajous paths over the map, a trailing V of
+    // little dark crossed quads whose width pulses as a wing-flap. Stateless.
+    for (int flock = 0; flock < 3; ++flock) {
+        const float fi = static_cast<float>(flock);
+        const float w2 = kGridW * ts, h2 = kGridH * ts;
+        const float fx = w2 * 0.5f + std::sin(m_time * 0.021f + fi * 2.2f) * w2 * 0.36f;
+        const float fz = h2 * 0.5f + std::sin(m_time * 0.027f + fi * 4.1f + 1.0f) * h2 * 0.33f;
+        const float fy = 3.6f + 0.5f * std::sin(m_time * 0.11f + fi);
+        // Flight direction from the path derivative.
+        float vx = std::cos(m_time * 0.021f + fi * 2.2f) * 0.021f * w2 * 0.36f;
+        float vz = std::cos(m_time * 0.027f + fi * 4.1f + 1.0f) * 0.027f * h2 * 0.33f;
+        const float vlen = std::sqrt(vx * vx + vz * vz);
+        if (vlen > 1e-6f) { vx /= vlen; vz /= vlen; } else { vx = 1.0f; vz = 0.0f; }
+        for (int bird = 0; bird < 6; ++bird) {
+            const float back = static_cast<float>((bird + 1) / 2) * 0.16f;
+            const float side = static_cast<float>((bird + 1) / 2) * 0.11f *
+                               ((bird & 1) != 0 ? 1.0f : -1.0f);
+            const float bx = fx - vx * back + (-vz) * side;
+            const float bz = fz - vz * back + (vx)*side;
+            const float flap = std::abs(std::sin(m_time * 9.0f + static_cast<float>(bird) * 1.1f + fi * 2.0f));
+            pushCross(bx, fy + 0.05f * flap, bz, 0.020f + 0.026f * flap, 0.016f, 0.14f, 0.15f,
+                      0.17f);
         }
     }
 

@@ -129,6 +129,12 @@ private:
     const procgen::TriMesh& cachedPumpkin(std::uint32_t variant) const;
     const procgen::TriMesh& cachedPowerPole(std::uint32_t variant) const;
     const procgen::TriMesh& cachedStreetlamp(std::uint32_t variant) const;
+    // Hand-assembled architectural minis for the municipal buildings (garage
+    // doors on the fire hall, columns on the library, twin stacks on the
+    // plant...) — the last placeholder slabs in the scene, replaced with the
+    // same cached-TriMesh pattern the props use. No art assets involved.
+    const procgen::TriMesh& cachedCivic(Building b) const;
+    const procgen::TriMesh& cachedSnowman(std::uint32_t variant) const;
 
     // ── Rising buildings ─────────────────────────────────────────────────────
     // When a plot's building first appears (construction completes, or an era
@@ -339,6 +345,23 @@ private:
     mutable std::vector<RisingBuilding> m_rising;
     mutable std::unordered_map<std::uint32_t, std::uint8_t> m_builtSeen;
     mutable odai::importer::ImportedScene m_riseScratch;
+    mutable std::unordered_map<int, procgen::TriMesh> m_civicCache;
+    mutable std::vector<procgen::TriMesh> m_snowmanMeshes;
+
+    // ── Ambient water & sky life ─────────────────────────────────────────────
+    // Boats bob and drift near fixed anchors hash-picked from open-water
+    // tiles (terrain is static, so the anchor scan runs once); bird flocks
+    // circle the map on closed-form paths. Both are stateless actor-stream
+    // geometry — position, heading, bob, and wing-flap all derive from
+    // (anchor, m_time), so there is nothing to simulate or store per frame.
+    struct BoatSpot {
+        float x = 0.0f, z = 0.0f;
+        float phase = 0.0f;
+        std::uint8_t variant = 0;      // 0 = rowboat, 1 = sailboat
+    };
+    std::vector<BoatSpot> m_boatSpots;
+    bool m_boatSpotsBuilt = false;
+    std::vector<procgen::TriMesh> m_boatMeshes;
 
     procgen::Season m_season = procgen::Season::Winter;  // recomputed in onInit
     Weather m_weather = Weather::Clear;
