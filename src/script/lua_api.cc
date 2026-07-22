@@ -62,22 +62,11 @@ void registerApi(EngineState& es) {
 
     // --- Rng: deterministic LCG seeded from world.rng on the first turn, advanced
     //     independently so it never perturbs the simulation's own random stream. ---
-    sol::table rng = lua.create_named_table("Rng");
-    rng.set_function("int", [&es](int lo, int hi) -> int {
-        if (hi < lo) std::swap(lo, hi);
-        es.rngState = es.rngState * 1664525u + 1013904223u;
-        const std::uint32_t span = static_cast<std::uint32_t>(hi - lo) + 1u;
-        return lo + static_cast<int>((es.rngState >> 16) % span);
-    });
-    rng.set_function("number", [&es]() -> double {
-        es.rngState = es.rngState * 1664525u + 1013904223u;
-        return static_cast<double>(es.rngState >> 8) / static_cast<double>(1u << 24);
-    });
+    registerRngTable(lua, es.rngState);
 
     // --- Log: goes to stderr, never the in-game event log, so modded logging can't
     //     skew the sim's reward-cadence metrics. ---
-    sol::table log = lua.create_named_table("Log");
-    log.set_function("info", [](const std::string& msg) { std::cerr << "[mod] " << msg << "\n"; });
+    registerLogTable(lua, "[mod] ");
 }
 
 }  // namespace odai::script

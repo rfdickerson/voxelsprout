@@ -1,0 +1,15 @@
+{
+  "id": "citybuilder",
+  "name": "CityBuilder Base Content",
+  "version": "1.0.0",
+  "description": "Base Lua content for the city builder: name generators, citizen story templates, need schedules, and tuning config. Edit these scripts (no rebuild needed) or copy the patterns into your own mod.",
+  "dependencies": [],
+  "loadOrder": 0,
+  "data": [],
+  "scripts": [
+    "scripts/00_names.lua",
+    "scripts/10_stories.lua",
+    "scripts/20_needs.lua",
+    "scripts/30_config.lua"
+  ]
+}

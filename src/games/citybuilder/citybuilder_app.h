@@ -1,6 +1,8 @@
 #pragma once
 
 #include "engine/game_app.h"
+#include "games/citybuilder/citybuilder_citizens.h"
+#include "games/citybuilder/script/city_script.h"
 #include "import/imported_scene.h"
 #include "procgen/building_generator.h"
 #include "procgen/props.h"
@@ -8,8 +10,10 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // A compact SimCity-2013-style city builder. Zone tiles (residential /
@@ -49,6 +53,7 @@ struct Tile {
     bool  nearRoad = false;      // within reach of a road (required to develop)
     float desirability = 0.5f;   // 0..1 spatial land value; modulates growth target
     float scenicPhase = 0.0f;    // per-tile jitter so a block doesn't look uniform
+    float zoneAge = 0.0f;        // real seconds connected+vacant since zoned (listing period)
 };
 
 class CityBuilderApp : public engine::GameApp {
@@ -84,11 +89,29 @@ private:
     // ── World / economy ──────────────────────────────────────────────────────
     void generateTerrain();
     void seedCity();
+    // Lua-namegen results, cached by seed so hover tooltips never re-enter Lua.
+    // The business category is load-bearing for the citizen sim: sims route to
+    // the same named storefront the tooltip shows. A whole building shares one
+    // name (keyed off its plot origin) rather than a different one per tile;
+    // strip-mall commercial plots (a linear row of storefronts) are the sole
+    // exception and keep a distinct name per tile.
+    const odai::citybuilder::BusinessName& businessNameAt(int c, int r, const Tile& t);
+    const std::string& blockNameAt(int c, int r, const Tile& t);
+    // Tile whose seed names the building (c,r) belongs to (its plot origin, or
+    // the tile itself for a strip-mall storefront / when no plot is known).
+    void nameAnchor(int c, int r, int& outC, int& outR) const;
+    // Street names key off the colinear road run the tile belongs to, so a
+    // whole avenue shares one name with no stored per-tile state.
+    const std::string& streetNameAt(int c, int r);
     void recomputeStats();   // power/road coverage, population, jobs, eased city stats
     void computeDesirability();  // per-tile spatial land value (amenities vs. nuisances)
     void pushHistory();      // append a sample to each metric series
     void stepMonth();
     void applyTool(int c, int r);
+    // Switches the active tool, cancelling (without applying) any box-select
+    // drag in progress so a hotkey or palette click mid-drag can't apply the
+    // wrong tool to a stale rectangle.
+    void setTool(Tool t);
     void bulldoze(int c, int r);
     bool placeBuilding(int c, int r, Building b);
     bool charge(double cost);
@@ -97,7 +120,7 @@ private:
     // ── Per-frame layout & input ─────────────────────────────────────────────
     struct Layout {
         float s = 1.0f, fw = 0.0f, fh = 0.0f;
-        ui::UiRect topBar{}, palette{}, map{}, controls{}, minimap{}, reports{};
+        ui::UiRect topBar{}, palette{}, map{}, controls{}, minimap{}, reports{}, ticker{};
     };
     [[nodiscard]] Layout computeLayout() const;
     void clampCameraFocus();
@@ -117,12 +140,21 @@ private:
     const procgen::TriMesh& cachedBuilding(procgen::BuildingKind kind, int level, int tier,
                                            std::uint32_t variant, int plotW, int plotD,
                                            bool swapDims) const;
+    // Civic buildings get recognizable CSG silhouettes (hose tower, colonnade,
+    // smokestacks, ...) — 4 seeded variants per service. Lots are square, so no
+    // swapped-extents variant is needed for rotation.
+    const procgen::TriMesh& cachedCivic(Building b, std::uint32_t variant) const;
     // Trees are cached per (season, variant) so the whole canopy repaints on a
     // season change without regenerating on every scene rebuild.
     const procgen::TriMesh& cachedTree(std::uint32_t variant) const;
     const procgen::TriMesh& cachedPumpkin(std::uint32_t variant) const;
     const procgen::TriMesh& cachedPowerPole(std::uint32_t variant) const;
     const procgen::TriMesh& cachedStreetlamp(std::uint32_t variant) const;
+    const procgen::TriMesh& cachedBench(std::uint32_t variant) const;
+    const procgen::TriMesh& cachedHydrant(std::uint32_t variant) const;
+    const procgen::TriMesh& cachedBillboard(std::uint32_t variant) const;
+    const procgen::TriMesh& cachedBusStop(std::uint32_t variant) const;
+    const procgen::TriMesh& cachedTrashCan(std::uint32_t variant) const;
 
     // ── Ambient traffic ──────────────────────────────────────────────────────
     // Cars follow the road graph tile-to-tile on the right-hand lane; their
@@ -136,10 +168,69 @@ private:
         float t = 0.0f;                // 0..1 progress across the tile
         float speed = 1.2f;            // tiles per second
         std::uint8_t variant = 0;      // index into m_carMeshes
+        // Citizen-trip route (BFS over the road graph, packed r*kGridW+c).
+        // Ambient cars leave this empty; routed cars despawn on arrival.
+        std::vector<std::uint16_t> route;
+        std::uint16_t routeIdx = 0;
     };
     void updateVehicles(float dt);
     void respawnVehicle(Vehicle& v);
     bool pickExit(Vehicle& v);         // choose outX/outZ at the current tile
+
+    // ── Citizen trips (destination-routed traffic) ───────────────────────────
+    void rebuildDestinations();        // named businesses + civic destinations
+    void reconcileCitizens();          // monthly roster churn + story rolls
+    void spawnCitizenTrip();           // roll a schedule-appropriate trip into a routed car
+    bool routeRoad(short fromC, short fromR, short toC, short toR,
+                   std::vector<std::uint16_t>& outRoute);   // BFS on road tiles
+    bool nearestRoad(short c, short r, short& outC, short& outR) const;
+    void updateRoutedVehicles(float dt);
+    void drawTicker(const Layout& lo);
+
+    // ── Day/week schedule (civic clock) ──────────────────────────────────────
+    // A theatrical clock, separate from the economic month: one day lasts
+    // kDayLengthSeconds at 1x and drives everything routine — commute waves,
+    // the school bus loop, trash day, Saturday soccer. See updateSchedule().
+    [[nodiscard]] float dayHour() const;            // 0..24
+    void updateSchedule(float dt);                  // clock + scheduled spawns
+    // Chain BFS legs through waypoints into one long route (school bus /
+    // garbage truck loops). Returns false if any leg is unroutable.
+    bool buildServiceRoute(const std::vector<std::pair<short, short>>& waypoints,
+                           std::vector<std::uint16_t>& outRoute);
+    void spawnSchoolBusRun();
+    void spawnGarbageRun();
+    // Advance a fleet of route-following vehicles; shared by citizen cars
+    // (which drop a pedestrian on arrival) and the service fleets (which
+    // simply despawn at the end of their loop).
+    void advanceRoutedFleet(std::vector<Vehicle>& fleet, float dt, bool arrivalPedestrian);
+
+    // ── Ambient pedestrians & boats ──────────────────────────────────────────
+    // Structurally slow vehicles: pedestrians walk the sidewalk rail of road
+    // tiles near developed frontage; boats drift the connected river/lake
+    // water (the terrain generator guarantees edge-to-edge connectivity, so
+    // they never strand). Both stream through the same actor path as cars.
+    struct Pedestrian {
+        short cx = 0, cr = 0;
+        signed char inX = 1, inZ = 0;
+        signed char outX = 1, outZ = 0;
+        float t = 0.0f;
+        float speed = 0.2f;            // tiles per second (strolling)
+        std::uint8_t variant = 0;      // index into m_pedMeshes
+    };
+    void updatePedestrians(float dt);
+    void respawnPedestrian(Pedestrian& p);
+
+    struct Boat {
+        short cx = 0, cr = 0;
+        signed char inX = 1, inZ = 0;
+        signed char outX = 1, outZ = 0;
+        float t = 0.0f;
+        float speed = 0.3f;
+        float bobPhase = 0.0f;         // per-boat offset into the bob sinusoid
+        std::uint8_t variant = 0;      // index into m_boatMeshes
+    };
+    void updateBoats(float dt);
+    void respawnBoat(Boat& b);
 
     // ── Weather ──────────────────────────────────────────────────────────────
     // A simple state machine rolls the sky every ~half minute with seasonal
@@ -185,6 +276,12 @@ private:
     // ── State ────────────────────────────────────────────────────────────────
     std::array<Tile, static_cast<std::size_t>(kGridW) * kGridH> m_tiles{};
 
+    // Per-tile plot membership, re-derived from the zone map every scene rebuild
+    // (see buildCityScene's parceling). Lets the hover tooltip and citizen
+    // destinations name a whole building consistently instead of per tile.
+    struct PlotInfo { short c = -1, r = -1; std::uint8_t w = 1, d = 1; };
+    mutable std::array<PlotInfo, static_cast<std::size_t>(kGridW) * kGridH> m_tilePlots{};
+
     Tool   m_tool = Tool::ZoneR;
     double m_money = 50000.0;
     int    m_population = 0;
@@ -223,6 +320,7 @@ private:
     bool  m_growthDirty = false;
     float m_sceneRebuildCooldown = 0.0f;
     mutable std::unordered_map<std::uint32_t, procgen::TriMesh> m_buildingCache;
+    mutable std::unordered_map<std::uint32_t, procgen::TriMesh> m_civicCache;
     mutable std::unordered_map<std::uint32_t, procgen::TriMesh> m_treeCache;
     mutable std::vector<procgen::TriMesh> m_pumpkinMeshes;
     mutable std::vector<procgen::TriMesh> m_poleMeshes;
@@ -238,6 +336,15 @@ private:
 
     std::vector<Vehicle> m_vehicles;
     std::vector<procgen::TriMesh> m_carMeshes;             // lazily filled variants
+    std::vector<Pedestrian> m_pedestrians;
+    std::vector<procgen::TriMesh> m_pedMeshes;
+    std::vector<Boat> m_boats;
+    std::vector<procgen::TriMesh> m_boatMeshes;
+    // Static scatter props, lazily generated like pumpkins/poles/lamps.
+    mutable std::vector<procgen::TriMesh> m_benchMeshes;
+    mutable std::vector<procgen::TriMesh> m_hydrantMeshes;
+    mutable std::vector<procgen::TriMesh> m_billboardMeshes;
+    mutable std::vector<procgen::TriMesh> m_busStopMeshes;
     std::uint32_t m_trafficRng = 0x51CA7B1u;
     // Per-frame actor stream scratch, reused to avoid per-frame allocation.
     std::vector<odai::importer::ImportedScenePackedVertex> m_actorVertices;
@@ -248,7 +355,14 @@ private:
     bool m_mouseOverUi = false;
     bool m_dragPainting = false;
 
-    bool   m_reportsOpen = true;
+    // Box-select zoning/bulldozing: drag from a corner tile to an opposite
+    // corner, release to apply the tool to every tile in the rectangle in one
+    // action (rather than painting whatever the cursor happens to cross).
+    bool m_boxSelecting = false;
+    int  m_boxStartC = -1, m_boxStartR = -1;
+    int  m_boxEndC = -1, m_boxEndR = -1;
+
+    bool   m_reportsOpen = false;
     bool   m_showLandValue = false;        // toggle the desirability data overlay
     Metric m_metric = Metric::Population;
 
@@ -258,6 +372,45 @@ private:
 
     std::unordered_map<int, bool> m_keyPrev;
     std::uint32_t m_rng = 0x1234567u;
+
+    // ── World generation & Lua content ───────────────────────────────────────
+    // All generated content (terrain, names, citizen stories) derives from
+    // m_worldSeed + position hashes, so it is stable within a session. If a
+    // save system is ever added, m_worldSeed must be serialized first.
+    std::uint32_t m_worldSeed = 1u;
+    short m_siteC = kGridW / 2;            // scored city-site anchor from terrain gen
+    short m_siteR = kGridH / 2;
+    std::array<float, static_cast<std::size_t>(kGridW) * kGridH> m_forest{};  // 0..1 tree density
+    std::vector<std::pair<short, short>> m_riverPath;  // ordered river centerline
+    // Lua content host: name generators, story templates, need schedules,
+    // tuning config (mods/citybuilder/scripts). Never called per-frame.
+    std::unique_ptr<odai::citybuilder::CityScriptHost> m_script;
+    std::string m_cityName = "OdaiCity";
+    std::unordered_map<std::uint32_t, odai::citybuilder::BusinessName> m_businessNames;
+    std::unordered_map<std::uint32_t, std::string> m_blockNames;
+    std::unordered_map<std::uint32_t, std::string> m_streetNames;
+
+    // ── Citizen sim ──────────────────────────────────────────────────────────
+    CitizenSim m_citizens;
+    std::vector<Destination> m_destinations;   // rebuilt each month
+    std::vector<HomeSite> m_homeSites;
+    std::vector<Vehicle> m_routedVehicles;     // citizen trips, above the ambient cap
+    float m_tripTimer = 3.0f;
+    float m_storyBoost = 1.0f;                 // ODAI_CITY_STORY=1 -> 10x events
+
+    // ── Day/week clock & scheduled services ──────────────────────────────────
+    float m_dayClock = 0.0f;                   // seconds into the current day
+    int m_weekday = 0;                         // 0=Mon .. 6=Sun
+    bool m_busMorningDone = false;             // one-shot flags, reset at day rollover
+    bool m_busAfternoonDone = false;
+    bool m_trashRunDone = false;
+    bool m_soccerStoryDone = false;
+    bool m_trashDayActive = false;             // curbside cans in the scene today
+    std::vector<Vehicle> m_busFleet;           // school bus runs in flight
+    std::vector<Vehicle> m_trashFleet;         // garbage truck runs in flight
+    mutable std::vector<procgen::TriMesh> m_busMeshes;
+    mutable std::vector<procgen::TriMesh> m_trashTruckMeshes;
+    mutable std::vector<procgen::TriMesh> m_trashCanMeshes;
 
     render::CameraPose m_camera{};
 };

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "procgen/primitives.h"
+#include "procgen/rng.h"
 
 // Buildings are assembled as a series of seeded "feature draws" — massing,
 // roof, crown, and facade details each picked from a per-era option pool — so
@@ -14,34 +15,6 @@
 namespace odai::procgen {
 
 namespace {
-
-// Deterministic per-building RNG (same LCG constants the citybuilder uses for
-// its ambient effects); the repo has no shared RNG utility.
-struct Rng {
-    std::uint32_t state;
-
-    explicit Rng(std::uint32_t seed) : state(seed ? seed : 1u) {}
-
-    std::uint32_t next() {
-        state = state * 1664525u + 1013904223u;
-        return state >> 8;
-    }
-
-    float uniform(float lo, float hi) {
-        return lo + (hi - lo) * (static_cast<float>(next() & 0xffffu) / 65535.0f);
-    }
-
-    int range(int lo, int hiInclusive) {
-        return lo + static_cast<int>(next() % static_cast<std::uint32_t>(hiInclusive - lo + 1));
-    }
-
-    bool chance(float p) { return uniform(0.0f, 1.0f) < p; }
-
-    template <typename T, std::size_t N>
-    const T& pick(const std::array<T, N>& pool) {
-        return pool[next() % N];
-    }
-};
 
 // ── Palettes (option pools, drawn per building) ─────────────────────────────
 // 1890s: brick and sandstone.
