@@ -131,10 +131,12 @@ void addWindowsBox(CsgMesh& windows, float x0, float y0, float z0, float x1, flo
         if (width < 0.12f) continue;
         switch (style) {
             case WindowStyle::kSash: {
-                const int rows = std::clamp(static_cast<int>((y1 - y0) / 0.17f), 1, 3);
+                const int rows = std::clamp(static_cast<int>((y1 - y0) / 0.17f), 1, 4);
                 const int cols = std::clamp(static_cast<int>(width / 0.145f), 1, 5);
                 const float rowH = (y1 - y0) / static_cast<float>(rows);
-                const float winW = 0.052f, winH = std::min(0.085f, rowH * 0.55f);
+                // Period 1/1 and 2/2 double-hung sash reads ~1:2 width:height;
+                // a squat near-square upper window is the tell of a remodel.
+                const float winW = 0.042f, winH = std::min(0.085f, rowH * 0.55f);
                 for (int r = 0; r < rows; ++r) {
                     const float wy0 = y0 + rowH * (static_cast<float>(r) + 0.30f);
                     for (int col = 0; col < cols; ++col) {
@@ -190,7 +192,10 @@ void add1890Roof(CsgMesh& solid, Rng& rng, float x0, float z0, float x1, float z
                  float wallH, float heightMul, const Color3& brick, const Color3& trim,
                  bool& outFlatTop) {
     outFlatTop = false;
-    const int roof = rng.range(0, 3);
+    // The Second Empire mansard was a holdover by 1890, not a fashion — gate
+    // it to ~12% of the stock so the skyline doesn't read 1875. Gables and
+    // parapets split the rest.
+    const int roof = rng.chance(0.12f) ? 3 : rng.range(0, 2);
     switch (roof) {
         case 0:  // gable, ridge along X
             solid = csgUnion(solid, makeGablePrism(x0, z0, x1, z1, wallH, wallH + 0.02f,
@@ -352,9 +357,12 @@ CsgMesh build1890Commercial(float w, float d, int level, Rng& rng, bool detail) 
     }
 
     // Ground-floor storefront band + sign band above it on the street face.
+    // The sign band draws from the awning pool — deep green / oxide red /
+    // blue are period sign-painting colors; the deco accents are forty years
+    // too modern for an 1890s frieze.
     merge(solid, makeBox({x0 + 0.02f, 0.0f, z0 - 0.012f}, {x1 - 0.02f, 0.15f, z0 + 0.03f}, trim));
     merge(solid, makeBox({x0 + 0.03f, 0.16f, z0 - 0.010f}, {x1 - 0.03f, 0.21f, z0 + 0.02f},
-                         rng.pick(kDecoAccentPool)));
+                         rng.pick(kAwningPool)));
     // Awnings: 0-3 colored canopies along the storefront.
     const int awnings = rng.range(0, 3);
     const Color3 awning = rng.pick(kAwningPool);
@@ -424,10 +432,11 @@ CsgMesh build1890Industrial(float w, float d, int level, Rng& rng, bool detail) 
                              mix(brick, kDarkRoof, 0.3f)));
     }
 
-    // Tall multipane mill windows — one sparse row.
+    // Tall window bays between brick piers — the 19th-century mill signature
+    // (full-height vertical strips, not squat domestic sash).
     if (detail) {
         CsgMesh windows;
-        addWindowsBox(windows, x0, 0.07f, z0, x1, wallH - 0.05f, z1, WindowStyle::kSash,
+        addWindowsBox(windows, x0, 0.07f, z0, x1, wallH - 0.05f, z1, WindowStyle::kRibbon,
                       kFactoryGlass, mix(brick, kDarkRoof, 0.4f));
         merge(solid, windows);
     }
@@ -719,7 +728,9 @@ CsgMesh build1960Tower(float w, float d, int level, int tier, bool commercial, R
             const float slabSpan = (x1 - x0 - w * 0.12f) * 0.5f;  // recompute each slab's width
             addWindowsBox(windows, x0, wy0, z0, x0 + slabSpan, wy1, z1, WindowStyle::kMullion,
                           kMullion, kMullion);
-            addWindowsBox(windows, x1 - slabSpan, wy0, z0, x1, wy1 * 0.8f, z1,
+            // The shorter slab tops out at 0.72h-0.9h; cap its grid below the
+            // minimum so mullions never float past the roofline.
+            addWindowsBox(windows, x1 - slabSpan, wy0, z0, x1, wy1 * 0.70f, z1,
                           WindowStyle::kMullion, kMullion, kMullion);
         } else {
             addWindowsBox(windows, x0, wy0, z0, x1, wy1, z1, WindowStyle::kMullion, kMullion,

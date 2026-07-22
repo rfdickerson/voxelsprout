@@ -30,7 +30,7 @@ const Color3 kSchoolTrim = fromRgbHex(0xE8D9B0);
 const Color3 kLibraryStone = fromRgbHex(0xC9B698);
 const Color3 kLibraryBrown = fromRgbHex(0x8A5C3E);
 const Color3 kWood = fromRgbHex(0x8A6B3E);
-const Color3 kStage = fromRgbHex(0xB08CD6);
+const Color3 kStage = fromRgbHex(0x8A6B3E);  // boardwalk stage, not mini-golf lavender
 const Color3 kSeatStone = fromRgbHex(0xAFAAA0);
 const Color3 kPowerDark = fromRgbHex(0x4A4E55);
 const Color3 kStackGrey = fromRgbHex(0x9AA0A8);
@@ -96,7 +96,9 @@ CsgMesh buildFire(float w, float d, Rng& rng) {
     const float z0 = 0.12f * d, z1 = d - 0.10f * d;
     const float h = rng.uniform(0.95f, 1.15f);
 
-    CsgMesh solid = makeBox({x0, 0.0f, z0}, {x1, h, z1}, mix(kFireRed, kWhiteWall, 0.35f));
+    // Brick-red body; the fire-engine red stays on the bay doors where it
+    // belongs (a 0.35 mix read as salmon, not firehouse).
+    CsgMesh solid = makeBox({x0, 0.0f, z0}, {x1, h, z1}, mix(kFireRed, kWhiteWall, 0.15f));
     merge(solid, makeBox({x0 - 0.01f, h, z0 - 0.01f}, {x1 + 0.01f, h + 0.035f, z1 + 0.01f},
                          kDarkRoof));
     // Signature: 2-3 tall garage doors on the street face.
@@ -323,13 +325,15 @@ CsgMesh buildAmphitheater(float w, float d, Rng& rng) {
                             kStage);
     const int tiers = rng.range(3, 4);
     const float tierD = (z1 - z0 - 0.30f * d) / static_cast<float>(tiers);
-    float inset = 0.0f;
+    float inset = 0.105f * w;
     for (int i = 0; i < tiers; ++i) {
         const float tz0 = z0 + 0.30f * d + tierD * static_cast<float>(i);
         const float th = 0.10f + 0.09f * static_cast<float>(i + 1);
         merge(solid, makeBox({x0 + inset, 0.0f, tz0}, {x1 - inset, th, tz0 + tierD + 0.01f},
                              i % 2 == 0 ? kSeatStone : mix(kSeatStone, kConcrete, 0.5f)));
-        inset += 0.035f * w;  // tiers narrow as they rise: a fan seen from above
+        // The fan splays OUTWARD as seating rises away from the stage — every
+        // Greek plan and WPA band shell widens with distance, never narrows.
+        inset -= 0.035f * w;
     }
     // Back wall with a seeded pair of stair notches left as raised blocks.
     const float backH = 0.10f + 0.09f * static_cast<float>(tiers) + 0.12f;
