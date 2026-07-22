@@ -1758,6 +1758,15 @@ void CityBuilderApp::onRender(float /*dt*/) {
 
     handleMapPaint(lo);
 
+    // Zoom LOD: swap in the windowed building meshes when the camera is close
+    // enough to read facades. Hysteresis (24 in / 30 out) keeps the scene from
+    // re-extruding while the player hovers near the threshold.
+    const int wantDetail = m_camZoom < (m_lodDetail == 1 ? 30.0f : 24.0f) ? 1 : 0;
+    if (wantDetail != m_lodDetail) {
+        m_lodDetail = wantDetail;
+        m_sceneDirty = true;
+    }
+
     // Growth-driven rebuilds are cadence-limited (see m_sceneRebuildCooldown);
     // player edits set m_sceneDirty directly and skip the wait.
     if (m_growthDirty && m_sceneRebuildCooldown <= 0.0f) {
@@ -2480,6 +2489,7 @@ const procgen::TriMesh& CityBuilderApp::cachedBuilding(procgen::BuildingKind kin
                               ((variant & 0xfu) << 12) |
                               ((static_cast<std::uint32_t>(plotW) & 0xfu) << 8) |
                               ((static_cast<std::uint32_t>(plotD) & 0xfu) << 4) |
+                              (m_lodDetail != 0 ? 2u : 0u) |
                               (swapDims ? 1u : 0u);
     const auto it = m_buildingCache.find(key);
     if (it != m_buildingCache.end()) {
@@ -2500,7 +2510,10 @@ const procgen::TriMesh& CityBuilderApp::cachedBuilding(procgen::BuildingKind kin
     const float lotD = static_cast<float>(plotD) * kTileWorldSize - 2.0f * pad;
     desc.lotWidth = swapDims ? lotD : lotW;
     desc.lotDepth = swapDims ? lotW : lotD;
-    desc.seed = key * 0x9E3779B9u;
+    desc.detail = m_lodDetail;
+    // Seed off the detail-independent bits so both LOD tiers of one building
+    // draw the same massing (the window pass is the only difference).
+    desc.seed = (key & ~2u) * 0x9E3779B9u;
     return m_buildingCache.emplace(key, procgen::generateBuilding(desc)).first->second;
 }
 

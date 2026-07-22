@@ -277,7 +277,7 @@ void testAllEraGeneratorsValid() {
                         const odai::procgen::TriMesh mesh = odai::procgen::generateBuilding(desc);
                         expectTrue(!mesh.vertices.empty(), "generator produces geometry");
                         expectTrue(mesh.indices.size() % 3 == 0, "index count is triangles");
-                        expectTrue(mesh.indices.size() / 3 < 600, "triangle budget");
+                        expectTrue(mesh.indices.size() / 3 < 900, "triangle budget (with windows)");
                         for (const std::uint32_t index : mesh.indices) {
                             expectTrue(index < mesh.vertices.size(), "indices in range");
                         }
@@ -296,6 +296,37 @@ void testAllEraGeneratorsValid() {
                     }
                 }
             }
+        }
+    }
+}
+
+void testWindowLod() {
+    // detail 0 is the far-zoom massing; detail 1 layers on the era windows.
+    // Same seed must produce the same silhouette (bounds) at both tiers, with
+    // strictly more geometry — and the far tier stays under the old budget.
+    const odai::procgen::Era eras[] = {odai::procgen::Era::E1890s, odai::procgen::Era::E1930s,
+                                       odai::procgen::Era::E1960s};
+    const odai::procgen::BuildingKind kinds[] = {odai::procgen::BuildingKind::Residential,
+                                                 odai::procgen::BuildingKind::Commercial,
+                                                 odai::procgen::BuildingKind::Industrial};
+    for (const auto era : eras) {
+        for (const auto kind : kinds) {
+            odai::procgen::BuildingDesc desc;
+            desc.era = era;
+            desc.kind = kind;
+            desc.level = 2;
+            desc.seed = 0x10DBEEFu;
+            desc.detail = 0;
+            const odai::procgen::TriMesh far = odai::procgen::generateBuilding(desc);
+            desc.detail = 1;
+            const odai::procgen::TriMesh near = odai::procgen::generateBuilding(desc);
+            expectTrue(far.indices.size() / 3 < 600, "far LOD stays under the massing budget");
+            expectTrue(near.indices.size() > far.indices.size(),
+                       "near LOD adds window geometry");
+            expectNear(far.boundsMax.y, near.boundsMax.y, 1e-4f,
+                       "LOD tiers share one silhouette (height)");
+            expectNear(far.boundsMin.x, near.boundsMin.x, 0.02f,
+                       "LOD tiers share one silhouette (footprint)");
         }
     }
 }
@@ -381,7 +412,7 @@ void testNonSquareLots() {
                     desc.seed = seed * 0x9E3779B9u + 3u;
                     const odai::procgen::TriMesh mesh = odai::procgen::generateBuilding(desc);
                     expectTrue(!mesh.vertices.empty(), "non-square lot produces geometry");
-                    expectTrue(mesh.indices.size() / 3 < 600, "non-square lot triangle budget");
+                    expectTrue(mesh.indices.size() / 3 < 900, "non-square lot triangle budget");
                     for (const auto& v : mesh.vertices) {
                         expectTrue(v.position[0] > -0.06f && v.position[0] < lot.w + 0.06f,
                                    "non-square lot: x within lot");
@@ -716,6 +747,7 @@ int main() {
     testTriangulateAndAppend();
     testGeneratorDeterminism();
     testAllEraGeneratorsValid();
+    testWindowLod();
     testVariantDiversity();
     testAppendRotated();
     testNonSquareLots();

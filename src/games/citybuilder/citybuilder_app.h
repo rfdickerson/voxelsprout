@@ -311,6 +311,10 @@ private:
     float m_camZoom = 18.0f;                        // orthoHalfHeight, world units
     float m_camYawDeg = 45.0f;                       // rotates in 90 deg steps (Q/E)
     bool  m_camInit = false;
+    // Zoom LOD tier for the era buildings: 1 adds the window pass when the
+    // camera is close enough to read facades; crossing the (hysteretic)
+    // threshold re-extrudes the scene through the normal rebuild path.
+    int   m_lodDetail = 0;
     bool  m_sceneDirty = true;                       // rebuild+upload buildCityScene() next frame
     // Growth (stepMonth) marks m_growthDirty instead of m_sceneDirty directly and
     // waits out m_sceneRebuildCooldown before promoting it — uploadImportedScene()
