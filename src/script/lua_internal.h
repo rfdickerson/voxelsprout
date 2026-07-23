@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game/mod_host.h"
+#include "script/script_core.h"
 
 #include <sol/sol.hpp>
 
@@ -42,9 +43,6 @@ struct EngineState {
 
     std::vector<std::string> errors;
 };
-
-// Set up the sandbox: open safe libraries, strip os/io/package/require/load/etc.
-void sandboxLua(sol::state& lua);
 
 // Register the C++ game types (World/Empire/City/Yields/YieldContext) as usertypes.
 void registerBindings(EngineState& es);

@@ -14,7 +14,10 @@
 #include "procgen/csg.h"
 #include "procgen/mesh_emit.h"
 #include "procgen/primitives.h"
+#include "procgen/city_terrain.h"
+#include "procgen/civic_generator.h"
 #include "procgen/props.h"
+#include "procgen/rng.h"
 
 namespace {
 
@@ -274,7 +277,7 @@ void testAllEraGeneratorsValid() {
                         const odai::procgen::TriMesh mesh = odai::procgen::generateBuilding(desc);
                         expectTrue(!mesh.vertices.empty(), "generator produces geometry");
                         expectTrue(mesh.indices.size() % 3 == 0, "index count is triangles");
-                        expectTrue(mesh.indices.size() / 3 < 600, "triangle budget");
+                        expectTrue(mesh.indices.size() / 3 < 900, "triangle budget (with windows)");
                         for (const std::uint32_t index : mesh.indices) {
                             expectTrue(index < mesh.vertices.size(), "indices in range");
                         }
@@ -293,6 +296,37 @@ void testAllEraGeneratorsValid() {
                     }
                 }
             }
+        }
+    }
+}
+
+void testWindowLod() {
+    // detail 0 is the far-zoom massing; detail 1 layers on the era windows.
+    // Same seed must produce the same silhouette (bounds) at both tiers, with
+    // strictly more geometry — and the far tier stays under the old budget.
+    const odai::procgen::Era eras[] = {odai::procgen::Era::E1890s, odai::procgen::Era::E1930s,
+                                       odai::procgen::Era::E1960s};
+    const odai::procgen::BuildingKind kinds[] = {odai::procgen::BuildingKind::Residential,
+                                                 odai::procgen::BuildingKind::Commercial,
+                                                 odai::procgen::BuildingKind::Industrial};
+    for (const auto era : eras) {
+        for (const auto kind : kinds) {
+            odai::procgen::BuildingDesc desc;
+            desc.era = era;
+            desc.kind = kind;
+            desc.level = 2;
+            desc.seed = 0x10DBEEFu;
+            desc.detail = 0;
+            const odai::procgen::TriMesh far = odai::procgen::generateBuilding(desc);
+            desc.detail = 1;
+            const odai::procgen::TriMesh near = odai::procgen::generateBuilding(desc);
+            expectTrue(far.indices.size() / 3 < 600, "far LOD stays under the massing budget");
+            expectTrue(near.indices.size() > far.indices.size(),
+                       "near LOD adds window geometry");
+            expectNear(far.boundsMax.y, near.boundsMax.y, 1e-4f,
+                       "LOD tiers share one silhouette (height)");
+            expectNear(far.boundsMin.x, near.boundsMin.x, 0.02f,
+                       "LOD tiers share one silhouette (footprint)");
         }
     }
 }
@@ -378,7 +412,7 @@ void testNonSquareLots() {
                     desc.seed = seed * 0x9E3779B9u + 3u;
                     const odai::procgen::TriMesh mesh = odai::procgen::generateBuilding(desc);
                     expectTrue(!mesh.vertices.empty(), "non-square lot produces geometry");
-                    expectTrue(mesh.indices.size() / 3 < 600, "non-square lot triangle budget");
+                    expectTrue(mesh.indices.size() / 3 < 900, "non-square lot triangle budget");
                     for (const auto& v : mesh.vertices) {
                         expectTrue(v.position[0] > -0.06f && v.position[0] < lot.w + 0.06f,
                                    "non-square lot: x within lot");
@@ -393,8 +427,181 @@ void testNonSquareLots() {
     }
 }
 
+void testRng() {
+    odai::procgen::Rng a(0xC0FFEEu);
+    odai::procgen::Rng b(0xC0FFEEu);
+    for (int i = 0; i < 64; ++i) {
+        expectEqualU32(a.next(), b.next(), "rng deterministic per seed");
+    }
+    odai::procgen::Rng r(7u);
+    for (int i = 0; i < 256; ++i) {
+        const int v = r.range(3, 9);
+        expectTrue(v >= 3 && v <= 9, "rng range bounds inclusive");
+        const float f = r.uniform(-2.0f, 5.0f);
+        expectTrue(f >= -2.0f && f <= 5.0f, "rng uniform bounds");
+    }
+    expectTrue(odai::procgen::Rng(0u).next() == odai::procgen::Rng(1u).next(),
+               "zero seed coerced to non-degenerate state");
+
+    // hash2d: distinct inputs and salts decorrelate. (All-zero input maps to
+    // zero by construction — callers salt position hashes, so that's fine.)
+    expectTrue(odai::procgen::hash2d(0, 0, 0xABCDu) != 0u, "hash2d salted origin not zero");
+    expectTrue(odai::procgen::hash2d(1, 0) != odai::procgen::hash2d(0, 1),
+               "hash2d asymmetric in x/z");
+    expectTrue(odai::procgen::hash2d(5, 9, 1u) != odai::procgen::hash2d(5, 9, 2u),
+               "hash2d salt changes output");
+    std::set<std::uint32_t> seen;
+    for (int x = 0; x < 16; ++x) {
+        for (int z = 0; z < 16; ++z) {
+            seen.insert(odai::procgen::hash2d(x, z, 0xABCDu));
+        }
+    }
+    expectTrue(seen.size() == 256u, "hash2d collision-free on a 16x16 patch");
+}
+
+void testCivicGenerators() {
+    using odai::procgen::CivicDesc;
+    using odai::procgen::CivicKind;
+    const CivicKind kinds[] = {CivicKind::Police, CivicKind::Fire, CivicKind::Clinic,
+                               CivicKind::School, CivicKind::Park, CivicKind::Library,
+                               CivicKind::Amphitheater, CivicKind::PowerPlant};
+    for (const CivicKind kind : kinds) {
+        std::set<std::pair<std::size_t, std::size_t>> signatures;
+        for (std::uint32_t variant = 0; variant < 4; ++variant) {
+            CivicDesc desc;
+            desc.kind = kind;
+            desc.lotWidth = kind == CivicKind::Park ? 0.8f : 1.8f;
+            desc.lotDepth = desc.lotWidth;
+            desc.seed = variant * 0x9E3779B9u + 41u;
+            const odai::procgen::TriMesh mesh = odai::procgen::generateCivicBuilding(desc);
+            expectTrue(!mesh.vertices.empty(), "civic generator produces geometry");
+            expectTrue(mesh.indices.size() % 3 == 0, "civic index count is triangles");
+            expectTrue(mesh.indices.size() / 3 < 600, "civic triangle budget");
+            for (const std::uint32_t index : mesh.indices) {
+                expectTrue(index < mesh.vertices.size(), "civic indices in range");
+            }
+            for (const auto& v : mesh.vertices) {
+                expectTrue(v.position[0] > -0.08f && v.position[0] < desc.lotWidth + 0.08f &&
+                               v.position[2] > -0.12f && v.position[2] < desc.lotDepth + 0.08f,
+                           "civic positions within lot bounds");
+                expectTrue(v.position[1] > -0.06f && v.position[1] < 4.0f,
+                           "civic heights within sane range");
+                const float len = std::sqrt(v.normal[0] * v.normal[0] + v.normal[1] * v.normal[1] +
+                                            v.normal[2] * v.normal[2]);
+                expectTrue(std::isfinite(len) && std::fabs(len - 1.0f) < 1e-3f,
+                           "civic normals finite and unit");
+            }
+            // Low kinds stay low; landmarks stay tall.
+            if (kind == CivicKind::Park || kind == CivicKind::Amphitheater) {
+                expectTrue(mesh.boundsMax.y < 0.9f, "park/amphitheater stays low");
+            } else if (kind == CivicKind::PowerPlant) {
+                expectTrue(mesh.boundsMax.y > 1.6f && mesh.boundsMax.y < 3.2f,
+                           "power plant reads as a landmark");
+            } else {
+                expectTrue(mesh.boundsMax.y > 0.8f && mesh.boundsMax.y < 2.4f,
+                           "civic mass height in band");
+            }
+            const odai::procgen::TriMesh again = odai::procgen::generateCivicBuilding(desc);
+            expectTrue(again.vertices.size() == mesh.vertices.size() &&
+                           again.indices == mesh.indices,
+                       "civic generator deterministic");
+            signatures.emplace(mesh.vertices.size(), mesh.indices.size());
+        }
+        expectTrue(signatures.size() >= 2, "4 civic variants span >= 2 distinct shapes");
+    }
+}
+
+void testCityTerrain() {
+    using odai::procgen::CityTerrain;
+    using odai::procgen::CityTerrainDesc;
+
+    std::set<std::uint32_t> mapHashes;
+    for (std::uint32_t seed = 1; seed <= 20; ++seed) {
+        CityTerrainDesc desc;
+        desc.seed = seed * 0x1F123BB5u + 7u;
+        const CityTerrain t = odai::procgen::generateCityTerrain(desc);
+        expectTrue(t.width == 56 && t.height == 56, "terrain dimensions");
+        expectTrue(t.water.size() == 56u * 56u && t.forest.size() == 56u * 56u,
+                   "terrain grids sized");
+        expectTrue(t.valid, "terrain invariants hold (or a retry found a valid map)");
+        expectTrue(!t.riverPath.empty(), "river path recorded");
+
+        // Determinism: bit-identical water grid and site on a second run.
+        const CityTerrain u = odai::procgen::generateCityTerrain(desc);
+        expectTrue(t.water == u.water, "terrain deterministic per seed");
+        expectTrue(t.siteC == u.siteC && t.siteR == u.siteR, "site deterministic per seed");
+
+        // Land fraction.
+        int land = 0;
+        for (const std::uint8_t w : t.water) land += (w == 0u) ? 1 : 0;
+        expectTrue(static_cast<float>(land) / static_cast<float>(t.water.size()) >= 0.55f,
+                   "terrain land fraction >= 55%");
+
+        // Forest mask in range.
+        for (const float f : t.forest) {
+            expectTrue(f >= 0.0f && f <= 1.0f, "forest mask within [0,1]");
+        }
+
+        // River connectivity: BFS over water from one map edge must reach the
+        // opposite edge (boats depend on this).
+        {
+            std::vector<int> dist(t.water.size(), -1);
+            std::vector<std::pair<int, int>> queue;
+            for (int r = 0; r < t.height; ++r) {
+                for (int c = 0; c < t.width; ++c) {
+                    const bool edge = c == 0 || c == t.width - 1 || r == 0 || r == t.height - 1;
+                    if (edge && t.water[static_cast<std::size_t>(r) * t.width + c] != 0u) {
+                        queue.push_back({c, r});
+                        dist[static_cast<std::size_t>(r) * t.width + c] = 0;
+                    }
+                }
+            }
+            for (std::size_t head = 0; head < queue.size(); ++head) {
+                const auto [c, r] = queue[head];
+                const int nc[4] = {c - 1, c + 1, c, c};
+                const int nr[4] = {r, r, r - 1, r + 1};
+                for (int k = 0; k < 4; ++k) {
+                    if (nc[k] < 0 || nc[k] >= t.width || nr[k] < 0 || nr[k] >= t.height) continue;
+                    const std::size_t idx = static_cast<std::size_t>(nr[k]) * t.width + nc[k];
+                    if (dist[idx] != -1 || t.water[idx] == 0u) continue;
+                    dist[idx] = 1;
+                    queue.push_back({nc[k], nr[k]});
+                }
+            }
+            bool allRiverReached = true;
+            for (const auto& [pc, pr] : t.riverPath) {
+                if (t.water[static_cast<std::size_t>(pr) * t.width + pc] == 0u ||
+                    dist[static_cast<std::size_t>(pr) * t.width + pc] == -1) {
+                    allRiverReached = false;
+                }
+            }
+            expectTrue(allRiverReached, "river path is wet and edge-connected");
+        }
+
+        // City site: a mostly-grass window around the anchor.
+        {
+            int grass = 0, total = 0;
+            for (int r = t.siteR - 8; r < t.siteR + 8; ++r) {
+                for (int c = t.siteC - 12; c < t.siteC + 12; ++c) {
+                    if (c < 0 || c >= t.width || r < 0 || r >= t.height) continue;
+                    ++total;
+                    if (t.water[static_cast<std::size_t>(r) * t.width + c] == 0u) ++grass;
+                }
+            }
+            expectTrue(total > 0 && grass * 10 >= total * 7, "site window is >= 70% buildable");
+        }
+
+        std::uint32_t hash = 2166136261u;
+        for (const std::uint8_t w : t.water) hash = (hash ^ w) * 16777619u;
+        mapHashes.insert(hash);
+    }
+    expectTrue(mapHashes.size() >= 18u, "different seeds produce different maps");
+}
+
 void testProps() {
-    for (std::uint32_t variant = 0; variant < 6; ++variant) {
+    // 8 species: broadleaf, conifer, birch, poplar, willow, blossom, oak, shrub.
+    std::set<std::pair<std::size_t, float>> treeShapes;
+    for (std::uint32_t variant = 0; variant < 8; ++variant) {
         const odai::procgen::TriMesh tree = odai::procgen::generateTree(variant, 42u + variant);
         expectTrue(!tree.vertices.empty(), "tree produces geometry");
         expectTrue(tree.indices.size() / 3 < 200, "tree triangle budget");
@@ -404,7 +611,17 @@ void testProps() {
         const odai::procgen::TriMesh again = odai::procgen::generateTree(variant, 42u + variant);
         expectEqualU32(static_cast<std::uint32_t>(again.vertices.size()),
                        static_cast<std::uint32_t>(tree.vertices.size()), "tree deterministic");
+        treeShapes.emplace(tree.vertices.size(), tree.boundsMax.y);
     }
+    expectTrue(treeShapes.size() >= 6, "species have distinct silhouettes");
+    // Species character: the poplar is the tallest narrow tree, the willow is
+    // wider than it is tall, the shrub stays knee-high.
+    const odai::procgen::TriMesh poplar = odai::procgen::generateTree(3, 7u);
+    expectTrue(poplar.boundsMax.y > 0.30f && poplar.boundsMax.x < 0.08f, "poplar tall and narrow");
+    const odai::procgen::TriMesh willow = odai::procgen::generateTree(4, 7u);
+    expectTrue(willow.boundsMax.x > willow.boundsMax.y * 0.6f, "willow reads wide");
+    const odai::procgen::TriMesh shrub = odai::procgen::generateTree(7, 7u);
+    expectTrue(shrub.boundsMax.y < 0.13f, "shrub stays knee-high");
     for (std::uint32_t seed = 0; seed < 8; ++seed) {
         const odai::procgen::TriMesh car = odai::procgen::generateVehicle(0xCA5133Du + seed * 7919u);
         expectTrue(!car.vertices.empty(), "car produces geometry");
@@ -418,7 +635,7 @@ void testProps() {
         odai::procgen::Season::Spring, odai::procgen::Season::Summer,
         odai::procgen::Season::Autumn, odai::procgen::Season::Winter};
     for (const auto season : seasons) {
-        for (std::uint32_t variant = 0; variant < 6; ++variant) {
+        for (std::uint32_t variant = 0; variant < 8; ++variant) {
             const odai::procgen::TriMesh tree = odai::procgen::generateTree(variant, 42u + variant, season);
             expectTrue(!tree.vertices.empty(), "seasonal tree produces geometry");
             expectTrue(tree.indices.size() / 3 < 200, "seasonal tree triangle budget");
@@ -454,6 +671,66 @@ void testProps() {
         expectTrue(lamp.boundsMin.y > -1e-4f && lamp.boundsMax.y > 0.15f && lamp.boundsMax.y < 0.30f,
                    "streetlamp height sane");
     }
+    for (std::uint32_t seed = 0; seed < 4; ++seed) {
+        const odai::procgen::TriMesh bench = odai::procgen::generateBench(0xBE7C4u + seed * 401u);
+        expectTrue(!bench.vertices.empty(), "bench produces geometry");
+        expectTrue(bench.indices.size() / 3 < 60, "bench triangle budget");
+        expectTrue(bench.boundsMin.y > -1e-4f && bench.boundsMax.y < 0.08f, "bench squat");
+
+        const odai::procgen::TriMesh hydrant = odai::procgen::generateHydrant(0x94D64u + seed * 613u);
+        expectTrue(!hydrant.vertices.empty(), "hydrant produces geometry");
+        expectTrue(hydrant.indices.size() / 3 < 60, "hydrant triangle budget");
+        expectTrue(hydrant.boundsMin.y > -1e-4f && hydrant.boundsMax.y < 0.06f, "hydrant tiny");
+
+        const odai::procgen::TriMesh billboard =
+            odai::procgen::generateBillboard(0xB111Bu + seed * 761u);
+        expectTrue(!billboard.vertices.empty(), "billboard produces geometry");
+        expectTrue(billboard.indices.size() / 3 < 70, "billboard triangle budget");
+        expectTrue(billboard.boundsMax.y > 0.20f && billboard.boundsMax.y < 0.36f,
+                   "billboard height sane");
+
+        const odai::procgen::TriMesh busStop = odai::procgen::generateBusStop(0xB0557u + seed * 883u);
+        expectTrue(!busStop.vertices.empty(), "bus stop produces geometry");
+        expectTrue(busStop.indices.size() / 3 < 110, "bus stop triangle budget");
+        expectTrue(busStop.boundsMax.y > 0.10f && busStop.boundsMax.y < 0.20f,
+                   "bus stop height sane");
+
+        const odai::procgen::TriMesh rowboat = odai::procgen::generateBoat(0, 0xB0A7u + seed * 4409u);
+        const odai::procgen::TriMesh barge = odai::procgen::generateBoat(1, 0xB0A7u + seed * 4409u);
+        expectTrue(!rowboat.vertices.empty() && !barge.vertices.empty(), "boats produce geometry");
+        expectTrue(rowboat.indices.size() / 3 < 90 && barge.indices.size() / 3 < 90,
+                   "boat triangle budgets");
+        expectTrue(barge.boundsMax.x - barge.boundsMin.x >
+                       rowboat.boundsMax.x - rowboat.boundsMin.x,
+                   "barge longer than rowboat");
+        expectTrue(rowboat.boundsMin.y < 0.0f, "boat hull sits below the waterline");
+
+        const odai::procgen::TriMesh ped = odai::procgen::generatePedestrian(0x9ED0u + seed * 331u);
+        expectTrue(!ped.vertices.empty(), "pedestrian produces geometry");
+        expectTrue(ped.indices.size() / 3 < 40, "pedestrian triangle budget");
+        expectTrue(ped.boundsMin.y > -1e-4f && ped.boundsMax.y > 0.05f && ped.boundsMax.y < 0.10f,
+                   "pedestrian height sane");
+        const odai::procgen::TriMesh pedAgain = odai::procgen::generatePedestrian(0x9ED0u + seed * 331u);
+        expectTrue(pedAgain.vertices.size() == ped.vertices.size(), "pedestrian deterministic");
+
+        const odai::procgen::TriMesh bus = odai::procgen::generateSchoolBus(0x5CB005u + seed * 577u);
+        expectTrue(!bus.vertices.empty(), "school bus produces geometry");
+        expectTrue(bus.indices.size() / 3 < 110, "school bus triangle budget");
+        expectTrue(bus.boundsMax.x - bus.boundsMin.x > 0.15f, "school bus reads long");
+        expectTrue(bus.boundsMin.y > -1e-4f && bus.boundsMax.y < 0.11f, "school bus height sane");
+
+        const odai::procgen::TriMesh truck =
+            odai::procgen::generateGarbageTruck(0x6A3BA6Eu + seed * 733u);
+        expectTrue(!truck.vertices.empty(), "garbage truck produces geometry");
+        expectTrue(truck.indices.size() / 3 < 110, "garbage truck triangle budget");
+        expectTrue(truck.boundsMin.y > -1e-4f && truck.boundsMax.y < 0.11f,
+                   "garbage truck height sane");
+
+        const odai::procgen::TriMesh can = odai::procgen::generateTrashCan(0x7245Cu + seed * 449u);
+        expectTrue(!can.vertices.empty(), "trash can produces geometry");
+        expectTrue(can.indices.size() / 3 < 50, "trash can triangle budget");
+        expectTrue(can.boundsMin.y > -1e-4f && can.boundsMax.y < 0.05f, "trash can tiny");
+    }
 }
 
 }  // namespace
@@ -470,9 +747,13 @@ int main() {
     testTriangulateAndAppend();
     testGeneratorDeterminism();
     testAllEraGeneratorsValid();
+    testWindowLod();
     testVariantDiversity();
     testAppendRotated();
     testNonSquareLots();
+    testRng();
+    testCivicGenerators();
+    testCityTerrain();
     testProps();
     if (g_failures != 0) {
         std::cerr << "[procgen test] " << g_failures << " failure(s)\n";

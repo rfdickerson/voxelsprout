@@ -345,6 +345,23 @@ endif()
 # ---------------------------------------------------------------------------
 find_package(Lua REQUIRED)
 find_package(sol2 CONFIG REQUIRED)
+
+# Game-agnostic Lua plumbing (sandbox, sorted script loading, Rng/Log tables)
+# shared by every script host: the 4X ScriptHost below and the citybuilder's
+# CityScriptHost. No game types.
+add_library(odai_script_core STATIC
+    src/script/script_core.cc
+)
+target_include_directories(odai_script_core
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${LUA_INCLUDE_DIR}
+)
+target_link_libraries(odai_script_core PRIVATE sol2 ${LUA_LIBRARIES})
+target_compile_features(odai_script_core PUBLIC cxx_std_20)
+
 add_library(odai_script STATIC
     src/script/script_engine.cc
     src/script/lua_bindings.cc
@@ -359,9 +376,27 @@ target_include_directories(odai_script
         ${LUA_INCLUDE_DIR}
 )
 target_link_libraries(odai_script PUBLIC odai_content)
-target_link_libraries(odai_script PRIVATE sol2 ${LUA_LIBRARIES})
+target_link_libraries(odai_script PRIVATE odai_script_core sol2 ${LUA_LIBRARIES})
 target_compile_features(odai_script PUBLIC cxx_std_20)
 target_compile_definitions(odai_script PRIVATE ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\")
+
+# The citybuilder's Lua content layer (names, story templates, need schedules,
+# tuning config). Public header is Lua-free; registration-based API with
+# compiled-in fallbacks so the game runs scriptless. See mods/citybuilder/.
+add_library(odai_city_script STATIC
+    src/games/citybuilder/script/city_script.cc
+)
+target_include_directories(odai_city_script
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${LUA_INCLUDE_DIR}
+)
+target_link_libraries(odai_city_script PUBLIC odai_content)
+target_link_libraries(odai_city_script PRIVATE odai_script_core sol2 ${LUA_LIBRARIES})
+target_compile_features(odai_city_script PUBLIC cxx_std_20)
+target_compile_definitions(odai_city_script PRIVATE ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\")
 
 if(ODAI_BUILD_APP)
     add_executable(odai
@@ -635,6 +670,7 @@ if(ODAI_BUILD_APP)
         add_executable(odai_game_citybuilder
             src/games/citybuilder/citybuilder_main.cc
             src/games/citybuilder/citybuilder_app.cc
+            src/games/citybuilder/citybuilder_citizens.cc
             src/engine/game_app.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
@@ -644,6 +680,8 @@ if(ODAI_BUILD_APP)
             src/procgen/mesh_emit.cc
             src/procgen/building_generator.cc
             src/procgen/props.cc
+            src/procgen/city_terrain.cc
+            src/procgen/civic_generator.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -661,7 +699,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_game_citybuilder PRIVATE
-            odai_ui odai_ui_vulkan odai_audio
+            odai_ui odai_ui_vulkan odai_audio odai_city_script
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -1235,6 +1273,8 @@ if(BUILD_TESTING)
         src/procgen/mesh_emit.cc
         src/procgen/building_generator.cc
         src/procgen/props.cc
+        src/procgen/city_terrain.cc
+        src/procgen/civic_generator.cc
     )
     target_include_directories(odai_procgen_tests PRIVATE src)
     if(MSVC)
@@ -1320,6 +1360,14 @@ if(BUILD_TESTING)
     target_include_directories(odai_lua_hook_tests PRIVATE src)
     target_link_libraries(odai_lua_hook_tests PRIVATE odai_script)
     add_test(NAME odai_lua_hook_tests COMMAND odai_lua_hook_tests)
+
+    # Citybuilder Lua content layer: sandbox holds, registrations round-trip,
+    # name generation is deterministic per seed, broken scripts fall back to the
+    # compiled-in defaults, and the shipped mods/citybuilder scripts load clean.
+    add_executable(odai_city_script_tests tests/city_script_tests.cc)
+    target_include_directories(odai_city_script_tests PRIVATE src)
+    target_link_libraries(odai_city_script_tests PRIVATE odai_city_script)
+    add_test(NAME odai_city_script_tests COMMAND odai_city_script_tests)
 
     add_executable(odai_ui_tests tests/ui_tests.cc)
     target_link_libraries(odai_ui_tests PRIVATE odai_ui)

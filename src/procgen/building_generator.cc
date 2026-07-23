@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "procgen/primitives.h"
+#include "procgen/rng.h"
 
 // Buildings are assembled as a series of seeded "feature draws" — massing,
 // roof, crown, and facade details each picked from a per-era option pool — so
@@ -14,34 +15,6 @@
 namespace odai::procgen {
 
 namespace {
-
-// Deterministic per-building RNG (same LCG constants the citybuilder uses for
-// its ambient effects); the repo has no shared RNG utility.
-struct Rng {
-    std::uint32_t state;
-
-    explicit Rng(std::uint32_t seed) : state(seed ? seed : 1u) {}
-
-    std::uint32_t next() {
-        state = state * 1664525u + 1013904223u;
-        return state >> 8;
-    }
-
-    float uniform(float lo, float hi) {
-        return lo + (hi - lo) * (static_cast<float>(next() & 0xffffu) / 65535.0f);
-    }
-
-    int range(int lo, int hiInclusive) {
-        return lo + static_cast<int>(next() % static_cast<std::uint32_t>(hiInclusive - lo + 1));
-    }
-
-    bool chance(float p) { return uniform(0.0f, 1.0f) < p; }
-
-    template <typename T, std::size_t N>
-    const T& pick(const std::array<T, N>& pool) {
-        return pool[next() % N];
-    }
-};
 
 // ── Palettes (option pools, drawn per building) ─────────────────────────────
 // 1890s: brick and sandstone.
@@ -106,6 +79,111 @@ void addChimney(CsgMesh& solid, float cx, float cz, float baseY, float topY) {
                          kSootBrick));
 }
 
+// ── Windows (LOD detail pass) ────────────────────────────────────────────────
+// Windows are "painted on": single outward-facing quads floated a hair off
+// the wall, colored like glass — 2 triangles each instead of a 12-triangle
+// box. Collected in a separate mesh and merged after all BSP ops (open quads
+// must never pass through csgUnion/csgSubtract). Deliberately rng-free so
+// detail 0 and detail 1 produce identical massing from the same seed.
+const Color3 kSashGlass = fromRgbHex(0x39434E);      // dark Victorian panes
+const Color3 kRibbonGlass = fromRgbHex(0x3E6A78);    // deco teal
+const Color3 kFactoryGlass = fromRgbHex(0x4E6070);   // industrial multipane
+
+enum class WindowStyle {
+    kSash,     // 1890s: punched grid with a light sill under each window
+    kRibbon,   // 1930s: continuous vertical strips between pilasters
+    kMullion,  // 1960s: thin dark verticals over an already-glass skin
+    kBand,     // wide horizontal glazing band per floor
+};
+
+void addFacadeQuad(CsgMesh& mesh, int face, float u0, float u1, float y0, float y1, float wall,
+                   const Color3& color) {
+    // face 0 = -Z, 1 = +Z, 2 = -X, 3 = +X; u runs along the face, wall is the
+    // fixed coordinate already offset off the surface.
+    Polygon p;
+    p.color = color;
+    const auto at = [&](float u, float y) -> Vector3 {
+        return face < 2 ? Vector3{u, y, wall} : Vector3{wall, y, u};
+    };
+    p.vertices = {at(u0, y0), at(u1, y0), at(u1, y1), at(u0, y1)};
+    p.plane = Plane::fromVertices(p.vertices);
+    const float outward = face == 0 ? -p.plane.normal.z
+                          : face == 1 ? p.plane.normal.z
+                          : face == 2 ? -p.plane.normal.x
+                                      : p.plane.normal.x;
+    if (outward < 0.0f) p.flip();
+    mesh.polygons.push_back(p);
+}
+
+// Decorate all four side faces of a box mass [x0..x1] x [y0..y1] x [z0..z1].
+void addWindowsBox(CsgMesh& windows, float x0, float y0, float z0, float x1, float y1, float z1,
+                   WindowStyle style, const Color3& glass, const Color3& trim) {
+    constexpr float kOff = 0.006f;  // float distance off the wall
+    if (y1 - y0 < 0.10f) return;
+    for (int face = 0; face < 4; ++face) {
+        const float fu0 = face < 2 ? x0 : z0;
+        const float fu1 = face < 2 ? x1 : z1;
+        const float wall = face == 0 ? z0 - kOff
+                           : face == 1 ? z1 + kOff
+                           : face == 2 ? x0 - kOff
+                                       : x1 + kOff;
+        const float width = fu1 - fu0;
+        if (width < 0.12f) continue;
+        switch (style) {
+            case WindowStyle::kSash: {
+                const int rows = std::clamp(static_cast<int>((y1 - y0) / 0.17f), 1, 4);
+                const int cols = std::clamp(static_cast<int>(width / 0.145f), 1, 5);
+                const float rowH = (y1 - y0) / static_cast<float>(rows);
+                // Period 1/1 and 2/2 double-hung sash reads ~1:2 width:height;
+                // a squat near-square upper window is the tell of a remodel.
+                const float winW = 0.042f, winH = std::min(0.085f, rowH * 0.55f);
+                for (int r = 0; r < rows; ++r) {
+                    const float wy0 = y0 + rowH * (static_cast<float>(r) + 0.30f);
+                    for (int col = 0; col < cols; ++col) {
+                        const float cu = fu0 + width * (static_cast<float>(col) + 0.5f) /
+                                                   static_cast<float>(cols);
+                        addFacadeQuad(windows, face, cu - winW * 0.5f, cu + winW * 0.5f, wy0,
+                                      wy0 + winH, wall, glass);
+                        addFacadeQuad(windows, face, cu - winW * 0.5f - 0.008f,
+                                      cu + winW * 0.5f + 0.008f, wy0 - 0.012f, wy0, wall, trim);
+                    }
+                }
+                break;
+            }
+            case WindowStyle::kRibbon: {
+                const int cols = std::clamp(static_cast<int>(width / 0.11f), 2, 6);
+                const float stripW = 0.042f;
+                for (int col = 0; col < cols; ++col) {
+                    const float cu = fu0 + width * (static_cast<float>(col) + 0.5f) /
+                                               static_cast<float>(cols);
+                    addFacadeQuad(windows, face, cu - stripW * 0.5f, cu + stripW * 0.5f, y0, y1,
+                                  wall, glass);
+                }
+                break;
+            }
+            case WindowStyle::kMullion: {
+                const int cols = std::clamp(static_cast<int>(width / 0.058f), 2, 14);
+                for (int col = 1; col < cols; ++col) {
+                    const float cu = fu0 + width * static_cast<float>(col) /
+                                               static_cast<float>(cols);
+                    addFacadeQuad(windows, face, cu - 0.004f, cu + 0.004f, y0, y1, wall, trim);
+                }
+                break;
+            }
+            case WindowStyle::kBand: {
+                const int rows = std::clamp(static_cast<int>((y1 - y0) / 0.22f), 1, 6);
+                const float rowH = (y1 - y0) / static_cast<float>(rows);
+                for (int r = 0; r < rows; ++r) {
+                    const float wy0 = y0 + rowH * (static_cast<float>(r) + 0.35f);
+                    addFacadeQuad(windows, face, fu0 + 0.02f, fu1 - 0.02f, wy0,
+                                  wy0 + std::min(0.055f, rowH * 0.42f), wall, glass);
+                }
+                break;
+            }
+        }
+    }
+}
+
 // ── 1890s ───────────────────────────────────────────────────────────────────
 
 // Roof draw shared by the residential masses: gable either way, flat parapet,
@@ -114,7 +192,10 @@ void add1890Roof(CsgMesh& solid, Rng& rng, float x0, float z0, float x1, float z
                  float wallH, float heightMul, const Color3& brick, const Color3& trim,
                  bool& outFlatTop) {
     outFlatTop = false;
-    const int roof = rng.range(0, 3);
+    // The Second Empire mansard was a holdover by 1890, not a fashion — gate
+    // it to ~12% of the stock so the skyline doesn't read 1875. Gables and
+    // parapets split the rest.
+    const int roof = rng.chance(0.12f) ? 3 : rng.range(0, 2);
     switch (roof) {
         case 0:  // gable, ridge along X
             solid = csgUnion(solid, makeGablePrism(x0, z0, x1, z1, wallH, wallH + 0.02f,
@@ -142,13 +223,20 @@ void add1890Roof(CsgMesh& solid, Rng& rng, float x0, float z0, float x1, float z
     }
 }
 
-CsgMesh build1890Residential(float w, float d, int level, int tier, Rng& rng) {
+CsgMesh build1890Residential(float w, float d, int level, int tier, Rng& rng, bool detail) {
     const float heightMul = tierHeightMul(tier);
     const float mx = 0.10f * w, mz = 0.10f * d;
     const float x0 = mx, x1 = w - mx, z0 = mz, z1 = d - mz;
     const Color3 brick = rng.pick(kBrickPool);
     const Color3 trim = rng.pick(kTrimPool);
     const float wallH = (0.26f + 0.15f * static_cast<float>(level) + rng.uniform(0.0f, 0.08f)) * heightMul;
+
+    // Wall rectangles the window pass decorates once the massing is settled.
+    struct Mass {
+        float x0, z0, x1, z1, h;
+    };
+    Mass masses[2];
+    int numMasses = 0;
 
     // Massing draw: one mass, a pair of attached row-houses, or an L-shaped
     // main mass + lower wing. (Trailer-park tier stays a single low mass.)
@@ -174,6 +262,8 @@ CsgMesh build1890Residential(float w, float d, int level, int tier, Rng& rng) {
         solid = std::move(a);
         merge(solid, b);
         flatTop = flatA;
+        masses[numMasses++] = {x0, z0, xm, z1, hA};
+        masses[numMasses++] = {xm, z0, x1, z1, hB};
     } else if (massing == kMainWing) {
         // Main mass on one side, lower wing filling the rest of the lot.
         const float split = x0 + (x1 - x0) * rng.uniform(0.52f, 0.66f);
@@ -185,9 +275,12 @@ CsgMesh build1890Residential(float w, float d, int level, int tier, Rng& rng) {
         bool wingFlat = false;
         add1890Roof(wing, rng, split, z0, x1, wingZ1, wingH, heightMul * 0.7f, brick, trim, wingFlat);
         merge(solid, wing);
+        masses[numMasses++] = {x0, z0, split, z1, wallH};
+        masses[numMasses++] = {split, z0, x1, wingZ1, wingH};
     } else {
         solid = makeBox({x0, 0.0f, z0}, {x1, wallH, z1}, brick);
         add1890Roof(solid, rng, x0, z0, x1, z1, wallH, heightMul, brick, trim, flatTop);
+        masses[numMasses++] = {x0, z0, x1, z1, wallH};
     }
 
     // Facade features, each its own draw.
@@ -219,10 +312,21 @@ CsgMesh build1890Residential(float w, float d, int level, int tier, Rng& rng) {
     const float doorX = 0.5f * (x0 + x1);
     solid = csgSubtract(solid, makeBox({doorX - 0.045f, -0.01f, z0 - 0.02f},
                                        {doorX + 0.045f, 0.12f * heightMul + 0.03f, z0 + 0.04f}, brick));
+
+    // Victorian sash windows on every mass, merged after the BSP ops.
+    if (detail) {
+        CsgMesh windows;
+        for (int i = 0; i < numMasses; ++i) {
+            const Mass& m = masses[i];
+            addWindowsBox(windows, m.x0, 0.10f * heightMul, m.z0, m.x1, m.h - 0.03f, m.z1,
+                          WindowStyle::kSash, kSashGlass, trim);
+        }
+        merge(solid, windows);
+    }
     return solid;
 }
 
-CsgMesh build1890Commercial(float w, float d, int level, Rng& rng) {
+CsgMesh build1890Commercial(float w, float d, int level, Rng& rng, bool detail) {
     const float mx = 0.08f * w, mz = 0.08f * d;
     const float x0 = mx, x1 = w - mx, z0 = mz, z1 = d - mz;
     const float wallH = 0.42f + 0.20f * static_cast<float>(level) + rng.uniform(0.0f, 0.12f);
@@ -253,9 +357,12 @@ CsgMesh build1890Commercial(float w, float d, int level, Rng& rng) {
     }
 
     // Ground-floor storefront band + sign band above it on the street face.
+    // The sign band draws from the awning pool — deep green / oxide red /
+    // blue are period sign-painting colors; the deco accents are forty years
+    // too modern for an 1890s frieze.
     merge(solid, makeBox({x0 + 0.02f, 0.0f, z0 - 0.012f}, {x1 - 0.02f, 0.15f, z0 + 0.03f}, trim));
     merge(solid, makeBox({x0 + 0.03f, 0.16f, z0 - 0.010f}, {x1 - 0.03f, 0.21f, z0 + 0.02f},
-                         rng.pick(kDecoAccentPool)));
+                         rng.pick(kAwningPool)));
     // Awnings: 0-3 colored canopies along the storefront.
     const int awnings = rng.range(0, 3);
     const Color3 awning = rng.pick(kAwningPool);
@@ -274,10 +381,18 @@ CsgMesh build1890Commercial(float w, float d, int level, Rng& rng) {
     const float doorX = 0.5f * (x0 + x1);
     solid = csgSubtract(solid, makeBox({doorX - 0.05f, -0.01f, z0 - 0.03f},
                                        {doorX + 0.05f, 0.11f, z0 + 0.05f}, brick));
+
+    // Upper-story sash windows above the storefront/sign bands.
+    if (detail) {
+        CsgMesh windows;
+        addWindowsBox(windows, x0, 0.24f, z0, x1, wallH - 0.06f, z1, WindowStyle::kSash,
+                      kSashGlass, trim);
+        merge(solid, windows);
+    }
     return solid;
 }
 
-CsgMesh build1890Industrial(float w, float d, int level, Rng& rng) {
+CsgMesh build1890Industrial(float w, float d, int level, Rng& rng, bool detail) {
     const float mx = 0.06f * w, mz = 0.06f * d;
     const float x0 = mx, x1 = w - mx, z0 = mz, z1 = d - mz;
     const float wallH = 0.30f + 0.10f * static_cast<float>(level);
@@ -316,12 +431,22 @@ CsgMesh build1890Industrial(float w, float d, int level, Rng& rng) {
         merge(solid, makeBox({x0 + 0.05f, 0.0f, z0 - 0.045f}, {x0 + 0.35f * w, wallH * 0.45f, z0 + 0.02f},
                              mix(brick, kDarkRoof, 0.3f)));
     }
+
+    // Tall window bays between brick piers — the 19th-century mill signature
+    // (full-height vertical strips, not squat domestic sash).
+    if (detail) {
+        CsgMesh windows;
+        addWindowsBox(windows, x0, 0.07f, z0, x1, wallH - 0.05f, z1, WindowStyle::kRibbon,
+                      kFactoryGlass, mix(brick, kDarkRoof, 0.4f));
+        merge(solid, windows);
+    }
     return solid;
 }
 
 // ── 1930s ───────────────────────────────────────────────────────────────────
 
-CsgMesh build1930Tower(float w, float d, int level, int tier, bool commercial, Rng& rng) {
+CsgMesh build1930Tower(float w, float d, int level, int tier, bool commercial, Rng& rng,
+                       bool detail) {
     const float heightMul = commercial ? 1.0f : tierHeightMul(tier);
     const Color3 body = rng.pick(kDecoBodyPool);
     const Color3 accent = rng.pick(kDecoAccentPool);
@@ -344,6 +469,12 @@ CsgMesh build1930Tower(float w, float d, int level, int tier, bool commercial, R
         weightSum += static_cast<float>(steps - i);
     }
     float baseTop = 0.0f;
+    // Extents of the two lowest setback tiers, kept for the window ribbons.
+    struct Tier {
+        float x0, z0, x1, z1, y0, y1;
+    };
+    Tier tiers[2];
+    int numTiers = 0;
     for (int i = 0; i < steps; ++i) {
         const float h = totalH * static_cast<float>(steps - i) / weightSum;
         CsgMesh step = makeBox({x0, y, z0}, {x1, y + h, z1}, body);
@@ -353,6 +484,7 @@ CsgMesh build1930Tower(float w, float d, int level, int tier, bool commercial, R
         } else {
             solid = csgUnion(solid, step);
         }
+        if (i < 2) tiers[numTiers++] = {x0, z0, x1, z1, y, y + h};
         y += h;
         const float insetX = rng.uniform(0.12f, 0.18f) * (x1 - x0) * 0.5f;
         const float insetZ = rng.uniform(0.12f, 0.18f) * (z1 - z0) * 0.5f;
@@ -427,10 +559,23 @@ CsgMesh build1930Tower(float w, float d, int level, int tier, bool commercial, R
                                  accent));
             break;
     }
+
+    // Deco window ribbons: continuous vertical strips running up the two
+    // lowest setback tiers (the corner chamfers only nick the base corners,
+    // clear of the ribbon margins).
+    if (detail) {
+        CsgMesh windows;
+        for (int i = 0; i < numTiers; ++i) {
+            const Tier& t = tiers[i];
+            addWindowsBox(windows, t.x0, t.y0 + (i == 0 ? 0.13f : 0.04f), t.z0, t.x1,
+                          t.y1 - 0.03f, t.z1, WindowStyle::kRibbon, kRibbonGlass, accent);
+        }
+        merge(solid, windows);
+    }
     return solid;
 }
 
-CsgMesh build1930Industrial(float w, float d, int level, Rng& rng) {
+CsgMesh build1930Industrial(float w, float d, int level, Rng& rng, bool detail) {
     const float mx = 0.06f * w, mz = 0.06f * d;
     const float x0 = mx, x1 = w - mx, z0 = mz, z1 = d - mz;
     const float wallH = 0.45f + 0.15f * static_cast<float>(level);
@@ -459,12 +604,21 @@ CsgMesh build1930Industrial(float w, float d, int level, Rng& rng) {
                                   0.045f, 0.60f + 0.10f * static_cast<float>(level) + rng.uniform(0.0f, 0.12f),
                                   8, kSootBrick));
     }
+
+    // Big factory glazing: two rows of wide multipane windows.
+    if (detail) {
+        CsgMesh windows;
+        addWindowsBox(windows, x0, 0.06f, z0, x1, wallH - 0.08f, z1, WindowStyle::kBand,
+                      kFactoryGlass, kMullion);
+        merge(solid, windows);
+    }
     return solid;
 }
 
 // ── 1960s ───────────────────────────────────────────────────────────────────
 
-CsgMesh build1960Tower(float w, float d, int level, int tier, bool commercial, Rng& rng) {
+CsgMesh build1960Tower(float w, float d, int level, int tier, bool commercial, Rng& rng,
+                       bool detail) {
     const float heightMul = commercial ? 1.0f : tierHeightMul(tier);
     const float h = (1.1f + 0.5f * static_cast<float>(level) + rng.uniform(0.0f, 0.25f)) * heightMul;
     const Color3 skin = rng.chance(0.78f) ? rng.pick(kGlassPool) : kGreyPanel;
@@ -564,10 +718,30 @@ CsgMesh build1960Tower(float w, float d, int level, int tier, bool commercial, R
         merge(solid, makeBox({px, h - 0.02f, z0 + (z1 - z0) * 0.2f},
                              {px + pw, h + rng.uniform(0.05f, 0.09f), z0 + (z1 - z0) * 0.8f}, kGreyPanel));
     }
+
+    // Curtain-wall mullion grid over the glass skin. Twin slabs span a gap, so
+    // they get their own grids; every other massing decorates the main slab.
+    if (detail) {
+        CsgMesh windows;
+        const float wy0 = towerBase + 0.16f, wy1 = h - 0.05f;
+        if (massing == kTwinSlabs) {
+            const float slabSpan = (x1 - x0 - w * 0.12f) * 0.5f;  // recompute each slab's width
+            addWindowsBox(windows, x0, wy0, z0, x0 + slabSpan, wy1, z1, WindowStyle::kMullion,
+                          kMullion, kMullion);
+            // The shorter slab tops out at 0.72h-0.9h; cap its grid below the
+            // minimum so mullions never float past the roofline.
+            addWindowsBox(windows, x1 - slabSpan, wy0, z0, x1, wy1 * 0.70f, z1,
+                          WindowStyle::kMullion, kMullion, kMullion);
+        } else {
+            addWindowsBox(windows, x0, wy0, z0, x1, wy1, z1, WindowStyle::kMullion, kMullion,
+                          kMullion);
+        }
+        merge(solid, windows);
+    }
     return solid;
 }
 
-CsgMesh build1960Industrial(float w, float d, int level, Rng& rng) {
+CsgMesh build1960Industrial(float w, float d, int level, Rng& rng, bool detail) {
     const float mx = 0.06f * w, mz = 0.10f * d;
     const float x0 = mx, x1 = w - mx, z0 = mz, z1 = d - 0.30f * d;
     const float wallH = 0.26f + 0.08f * static_cast<float>(level);
@@ -599,6 +773,14 @@ CsgMesh build1960Industrial(float w, float d, int level, Rng& rng) {
         merge(solid, makeBox({x0 + 0.30f * (x1 - x0), 0.12f, z0 - 0.05f},
                              {x0 + 0.70f * (x1 - x0), 0.145f, z0 + 0.02f}, kGreyPanel));
     }
+
+    // One clean glazing band around the shed walls.
+    if (detail) {
+        CsgMesh windows;
+        addWindowsBox(windows, x0, wallH * 0.45f, z0, x1, wallH * 0.80f, z1, WindowStyle::kBand,
+                      rng.pick(kGlassPool), kMullion);
+        merge(solid, windows);
+    }
     return solid;
 }
 
@@ -618,23 +800,31 @@ TriMesh generateBuilding(const BuildingDesc& desc) {
     const int tier = std::clamp(desc.wealthTier, 0, 2);
     const float w = desc.lotWidth;
     const float d = desc.lotDepth;
+    // The window pass runs after every massing draw in each builder, so both
+    // detail tiers produce bit-identical massing from the same seed — a LOD
+    // swap never changes a building's silhouette.
+    const bool detail = desc.detail != 0;
 
     CsgMesh solid;
     switch (desc.era) {
         case Era::E1890s:
-            solid = desc.kind == BuildingKind::Residential ? build1890Residential(w, d, level, tier, rng)
-                    : desc.kind == BuildingKind::Commercial ? build1890Commercial(w, d, level, rng)
-                                                            : build1890Industrial(w, d, level, rng);
+            solid = desc.kind == BuildingKind::Residential
+                        ? build1890Residential(w, d, level, tier, rng, detail)
+                    : desc.kind == BuildingKind::Commercial
+                        ? build1890Commercial(w, d, level, rng, detail)
+                        : build1890Industrial(w, d, level, rng, detail);
             break;
         case Era::E1930s:
             solid = desc.kind == BuildingKind::Industrial
-                        ? build1930Industrial(w, d, level, rng)
-                        : build1930Tower(w, d, level, tier, desc.kind == BuildingKind::Commercial, rng);
+                        ? build1930Industrial(w, d, level, rng, detail)
+                        : build1930Tower(w, d, level, tier,
+                                         desc.kind == BuildingKind::Commercial, rng, detail);
             break;
         case Era::E1960s:
             solid = desc.kind == BuildingKind::Industrial
-                        ? build1960Industrial(w, d, level, rng)
-                        : build1960Tower(w, d, level, tier, desc.kind == BuildingKind::Commercial, rng);
+                        ? build1960Industrial(w, d, level, rng, detail)
+                        : build1960Tower(w, d, level, tier,
+                                         desc.kind == BuildingKind::Commercial, rng, detail);
             break;
     }
     return triangulate(solid);

@@ -26,6 +26,10 @@ struct BuildingDesc {
     float lotWidth = 0.8f;    // world units, X extent of the buildable pad
     float lotDepth = 0.8f;    // world units, Z extent
     std::uint32_t seed = 0;   // same desc => bit-identical mesh
+    // LOD tier: 0 = massing only (far zoom), 1 = adds the era window pass —
+    // painted-on facade quads (Victorian sashes, deco ribbons, curtain-wall
+    // mullions), ~2 triangles per window. Identical massing at both tiers.
+    int detail = 1;
 };
 
 TriMesh generateBuilding(const BuildingDesc& desc);

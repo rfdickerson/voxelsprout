@@ -67,18 +67,7 @@ bool ScriptHost::runScriptFile(const std::filesystem::path& path) {
 }
 
 void ScriptHost::loadModScripts(const std::filesystem::path& modDir) {
-    const std::filesystem::path dir = modDir / "scripts";
-    std::error_code ec;
-    if (!std::filesystem::exists(dir, ec)) return;
-
-    std::vector<std::filesystem::path> files;
-    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".lua") {
-            files.push_back(entry.path());
-        }
-    }
-    std::sort(files.begin(), files.end());  // deterministic load order
-    for (const std::filesystem::path& f : files) runScriptFile(f);
+    for (const std::filesystem::path& f : collectModScripts(modDir)) runScriptFile(f);
 }
 
 // --- IModHost dispatch ------------------------------------------------------
