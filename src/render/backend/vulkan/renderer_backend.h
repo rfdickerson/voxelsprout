@@ -361,10 +361,6 @@ private:
     static constexpr uint32_t kGpuTimestampQueryUiEnd = 35;
     static constexpr uint32_t kGpuTimestampQueryCount = 36;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
-    static constexpr std::size_t kMainDescriptorWriteKeyWordCount = 26;
-    static constexpr std::size_t kVoxelGiDescriptorWriteKeyWordCount = 27;
-    static constexpr std::size_t kAutoExposureDescriptorWriteKeyWordCount = 6;
-    static constexpr std::size_t kSunShaftDescriptorWriteKeyWordCount = 10;
 
     struct FrameResources {
         // Per-frame command pool to allocate fresh command buffers every frame.
@@ -385,8 +381,12 @@ private:
     bool createAoTargets();
     bool createShadowResources();
     bool createVoxelGiResources();
+    bool createPipelineCache();
+    void savePipelineCache();
+    void destroyPipelineCache();
     bool createAutoExposureResources();
     bool createSunShaftResources();
+    bool createSsaoComputeResources();
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
     bool createMagicaPipeline();
@@ -400,8 +400,7 @@ private:
     bool createDiffuseTextureResources();
     bool createWaterNormalTextureResources();
     bool createDescriptorResources();
-    using BoundDescriptorSets = DescriptorManager<kMaxFramesInFlight>::BoundDescriptorSets;
-    BoundDescriptorSets updateFrameDescriptorSets(
+    void updateFrameDescriptorSets(
         uint32_t aoFrameIndex,
         const VkDescriptorBufferInfo& cameraBufferInfo,
         VkBuffer autoExposureHistogramBuffer,
@@ -446,6 +445,7 @@ private:
     void destroyVoxelGiResources();
     void destroyAutoExposureResources();
     void destroySunShaftResources();
+    void destroySsaoComputeResources();
     void destroyFrameResources();
     void destroyChunkBuffers();
     void destroyMagicaBuffers();
@@ -460,19 +460,13 @@ private:
     void markRayTracingSceneDirty();
     void destroyPipeline();
     void loadDebugUtilsFunctions();
-    bool allocatePerFrameDescriptorSets(
-        VkDescriptorPool descriptorPool,
-        VkDescriptorSetLayout descriptorSetLayout,
-        std::span<VkDescriptorSet> outDescriptorSets,
-        const char* failureContext,
-        const char* debugNamePrefix
-    );
     bool createDescriptorSetLayout(
         std::span<const VkDescriptorSetLayoutBinding> bindings,
         VkDescriptorSetLayout& outDescriptorSetLayout,
         const char* failureContext,
         const char* debugName,
-        const void* pNext = nullptr
+        const void* pNext = nullptr,
+        VkDescriptorSetLayoutCreateFlags flags = 0
     );
     bool createDescriptorPool(
         std::span<const VkDescriptorPoolSize> poolSizes,
@@ -494,8 +488,76 @@ private:
         VkShaderModule shaderModule,
         VkPipeline& outPipeline,
         const char* failureContext,
-        const char* debugName
+        const char* debugName,
+        VkPipelineCreateFlags pipelineFlags = 0
     );
+
+    // --- Descriptor buffers (VK_EXT_descriptor_buffer) ---
+    // A descriptor set backed by a mapped host-visible buffer instead of a
+    // pool-allocated VkDescriptorSet. Holds `regionCount` independently-addressable
+    // copies of one set layout (e.g. one per frame-in-flight), each region aligned
+    // to descriptorBufferOffsetAlignment. Descriptors are written directly into the
+    // mapping via vkGetDescriptorEXT; the shader/pipeline layout are unchanged.
+    struct DescriptorBufferSet {
+        BufferHandle buffer = kInvalidBufferHandle;
+        VkDeviceAddress baseAddress = 0;
+        std::uint8_t* mapped = nullptr;
+        VkDeviceSize layoutSize = 0;    // bytes for one set instance
+        VkDeviceSize regionStride = 0;  // aligned per-region stride
+        uint32_t regionCount = 0;
+        VkBufferUsageFlags usageFlags = 0;  // resource and/or sampler descriptor-buffer bits
+        [[nodiscard]] bool valid() const { return buffer != kInvalidBufferHandle; }
+        [[nodiscard]] VkDeviceSize regionOffset(uint32_t region) const {
+            return regionStride * static_cast<VkDeviceSize>(region);
+        }
+    };
+    // Allocate a descriptor buffer sized for `regionCount` copies of `layout`.
+    // `usageFlags` selects RESOURCE and/or SAMPLER descriptor-buffer usage (a set
+    // with any combined-image-sampler/sampler binding needs the SAMPLER bit).
+    bool createDescriptorBufferSet(
+        VkDescriptorSetLayout layout,
+        uint32_t regionCount,
+        VkBufferUsageFlags usageFlags,
+        const char* debugName,
+        DescriptorBufferSet& outSet
+    );
+    void destroyDescriptorBufferSet(DescriptorBufferSet& set);
+    [[nodiscard]] VkDeviceSize descriptorBufferBindingOffset(
+        VkDescriptorSetLayout layout, uint32_t binding) const;
+    // Descriptor writers: place one descriptor at
+    // region base + bindingOffset + arrayElement * descriptorSize.
+    void writeDescriptorBufferUniform(
+        const DescriptorBufferSet& set, uint32_t region, VkDeviceSize bindingOffset,
+        VkDeviceAddress address, VkDeviceSize range);
+    void writeDescriptorBufferStorage(
+        const DescriptorBufferSet& set, uint32_t region, VkDeviceSize bindingOffset,
+        VkDeviceAddress address, VkDeviceSize range);
+    void writeDescriptorBufferCombinedImageSampler(
+        const DescriptorBufferSet& set, uint32_t region, VkDeviceSize bindingOffset,
+        uint32_t arrayElement, VkImageView view, VkSampler sampler, VkImageLayout imageLayout);
+    void writeDescriptorBufferStorageImage(
+        const DescriptorBufferSet& set, uint32_t region, VkDeviceSize bindingOffset,
+        VkImageView view, VkImageLayout imageLayout);
+    void writeDescriptorBufferSampledImage(
+        const DescriptorBufferSet& set, uint32_t region, VkDeviceSize bindingOffset,
+        VkImageView view, VkImageLayout imageLayout);
+    void writeDescriptorBufferAccelerationStructure(
+        const DescriptorBufferSet& set, uint32_t region, VkDeviceSize bindingOffset,
+        VkDeviceAddress accelerationStructureAddress);
+    // Write one element of a combined-image-sampler *array* (e.g. the bindless
+    // texture array). Handles combinedImageSamplerDescriptorSingleArray == VK_FALSE
+    // by splitting the descriptor into separate image/sampler sub-arrays per spec.
+    void writeDescriptorBufferCombinedImageSamplerArray(
+        const DescriptorBufferSet& set, uint32_t region, VkDeviceSize bindingOffset,
+        uint32_t arrayElement, uint32_t arrayCapacity,
+        VkImageView view, VkSampler sampler, VkImageLayout imageLayout);
+    // Bind a single descriptor-buffer set at `firstSet` for `bindPoint`/`layout`,
+    // selecting `set`'s region. Covers the single-set compute passes.
+    void bindDescriptorBuffer(
+        VkCommandBuffer commandBuffer, VkPipelineBindPoint bindPoint, VkPipelineLayout layout,
+        uint32_t firstSet, const DescriptorBufferSet& set, uint32_t region);
+    // Bind the graphics set 0 (main, per-frame) + set 1 (bindless) for m_pipelineLayout.
+    void bindGraphicsDescriptorBuffers(VkCommandBuffer commandBuffer);
     void setObjectName(VkObjectType objectType, uint64_t objectHandle, const char* name) const;
     void beginDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
     void endDebugLabel(VkCommandBuffer commandBuffer) const;
@@ -684,7 +746,6 @@ private:
         VkQueryPool gpuTimestampQueryPool = VK_NULL_HANDLE;
         CoreFrameGraphOrderValidator* frameOrderValidator = nullptr;
         const CoreFrameGraphPlan* frameGraphPlan = nullptr;
-        const BoundDescriptorSets* boundDescriptorSets = nullptr;
         uint32_t mvpDynamicOffset = 0;
         uint32_t aoFrameIndex = 0;
         uint32_t imageIndex = 0;
@@ -820,6 +881,9 @@ private:
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
     // Logical device with a graphics queue (draw+present) and a transfer queue.
     VkDevice m_device = VK_NULL_HANDLE;
+    // Shared pipeline cache, persisted to disk between runs so pipeline
+    // compilation only pays full cost on first launch or driver change.
+    VkPipelineCache m_pipelineCache = VK_NULL_HANDLE;
     bool m_debugUtilsEnabled = false;
     PFN_vkSetDebugUtilsObjectNameEXT m_setDebugUtilsObjectName = nullptr;
     PFN_vkCmdBeginDebugUtilsLabelEXT m_cmdBeginDebugUtilsLabel = nullptr;
@@ -958,16 +1022,20 @@ private:
     bool m_sunShaftComputeAvailable = false;
     bool m_sunShaftShaderAvailable = false;
     VkDescriptorSetLayout m_autoExposureDescriptorSetLayout = VK_NULL_HANDLE;
-    VkDescriptorPool m_autoExposureDescriptorPool = VK_NULL_HANDLE;
-    std::array<VkDescriptorSet, kMaxFramesInFlight> m_autoExposureDescriptorSets{};
+    DescriptorBufferSet m_autoExposureBufferSet{};
     VkPipelineLayout m_autoExposurePipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_autoExposureHistogramPipeline = VK_NULL_HANDLE;
     VkPipeline m_autoExposureUpdatePipeline = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_sunShaftDescriptorSetLayout = VK_NULL_HANDLE;
-    VkDescriptorPool m_sunShaftDescriptorPool = VK_NULL_HANDLE;
-    std::array<VkDescriptorSet, kMaxFramesInFlight> m_sunShaftDescriptorSets{};
+    DescriptorBufferSet m_sunShaftBufferSet{};
     VkPipelineLayout m_sunShaftPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_sunShaftPipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_ssaoDescriptorSetLayout = VK_NULL_HANDLE;
+    DescriptorBufferSet m_ssaoBufferSet{};
+    VkPipelineLayout m_ssaoPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_ssaoBlurDescriptorSetLayout = VK_NULL_HANDLE;
+    DescriptorBufferSet m_ssaoBlurBufferSet{};
+    VkPipelineLayout m_ssaoBlurPipelineLayout = VK_NULL_HANDLE;
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;
@@ -1033,22 +1101,10 @@ private:
     VkDescriptorSetLayout& m_descriptorSetLayout = m_descriptorManager.descriptorSetLayout;
     VkDescriptorSetLayout& m_bindlessDescriptorSetLayout = m_descriptorManager.bindlessDescriptorSetLayout;
     VkDescriptorSetLayout& m_voxelGiDescriptorSetLayout = m_descriptorManager.voxelGiDescriptorSetLayout;
-    VkDescriptorPool& m_descriptorPool = m_descriptorManager.descriptorPool;
-    VkDescriptorPool& m_bindlessDescriptorPool = m_descriptorManager.bindlessDescriptorPool;
-    VkDescriptorPool& m_voxelGiDescriptorPool = m_descriptorManager.voxelGiDescriptorPool;
-    std::array<VkDescriptorSet, kMaxFramesInFlight>& m_descriptorSets = m_descriptorManager.descriptorSets;
-    std::array<VkDescriptorSet, kMaxFramesInFlight>& m_voxelGiDescriptorSets = m_descriptorManager.voxelGiDescriptorSets;
-    VkDescriptorSet& m_bindlessDescriptorSet = m_descriptorManager.bindlessDescriptorSet;
-    std::array<std::array<std::uint64_t, kMainDescriptorWriteKeyWordCount>, kMaxFramesInFlight> m_mainDescriptorWriteKeys{};
-    std::array<bool, kMaxFramesInFlight> m_mainDescriptorWriteKeyValid{};
-    std::array<std::array<std::uint64_t, kVoxelGiDescriptorWriteKeyWordCount>, kMaxFramesInFlight> m_voxelGiDescriptorWriteKeys{};
-    std::array<bool, kMaxFramesInFlight> m_voxelGiDescriptorWriteKeyValid{};
-    std::array<std::array<std::uint64_t, kAutoExposureDescriptorWriteKeyWordCount>, kMaxFramesInFlight>
-        m_autoExposureDescriptorWriteKeys{};
-    std::array<bool, kMaxFramesInFlight> m_autoExposureDescriptorWriteKeyValid{};
-    std::array<std::array<std::uint64_t, kSunShaftDescriptorWriteKeyWordCount>, kMaxFramesInFlight>
-        m_sunShaftDescriptorWriteKeys{};
-    std::array<bool, kMaxFramesInFlight> m_sunShaftDescriptorWriteKeyValid{};
+    DescriptorBufferSet m_voxelGiBufferSet{};
+    // Graphics path: main per-frame set (set 0) + bindless texture array (set 1).
+    DescriptorBufferSet m_mainBufferSet{};
+    DescriptorBufferSet m_bindlessBufferSet{};
     bool m_supportsWireframePreview = false;
     bool m_supportsSamplerAnisotropy = false;
     bool m_supportsMultiDrawIndirect = false;
@@ -1095,6 +1151,10 @@ private:
     PFN_vkGetDescriptorEXT m_getDescriptor = nullptr;
     PFN_vkCmdBindDescriptorBuffersEXT m_cmdBindDescriptorBuffers = nullptr;
     PFN_vkCmdSetDescriptorBufferOffsetsEXT m_cmdSetDescriptorBufferOffsets = nullptr;
+    // True once the extension is enabled and all function pointers loaded. The
+    // renderer requires descriptor buffers, so this is effectively always true
+    // on a successfully initialized device.
+    bool m_descriptorBufferReady = false;
     uint32_t m_bindlessTextureCapacity = 0;
     bool m_gpuTimestampsSupported = false;
     float m_gpuTimestampPeriodNs = 0.0f;

@@ -1,12 +1,22 @@
 import camera_uniform;
 
-[[vk::binding(6, 0)]]
+[[vk::binding(1, 0)]]
 Sampler2D<float4> normalDepthTexture;
 
-[[vk::constant_id(0)]]
-const int kSsaoSampleCount = 32;
-[[vk::constant_id(1)]]
-const float kSsaoPower = 1.4;
+[[vk::binding(2, 0)]]
+RWTexture2D<float> ssaoRawTexture;
+
+struct PushConstants
+{
+    uint width;
+    uint height;
+};
+
+[[vk::push_constant]]
+PushConstants pushConstants;
+
+static const int kSsaoSampleCount = 32;
+static const float kSsaoPower = 1.4;
 
 float hash12(float2 p)
 {
@@ -38,19 +48,26 @@ float3 reconstructViewPosition(float2 uv, float viewDepth)
     return float3(viewX, viewY, -viewDepth);
 }
 
-struct FragmentInput
+[numthreads(8, 8, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    float2 inUv : TEXCOORD0;
-};
+    if (dispatchThreadId.x >= pushConstants.width || dispatchThreadId.y >= pushConstants.height)
+    {
+        return;
+    }
 
-float main(FragmentInput input) : SV_Target0
-{
-    const float4 centerSample = normalDepthTexture.Sample(input.inUv);
+    const float2 uv = (float2(dispatchThreadId.xy) + 0.5) / float2(float(pushConstants.width), float(pushConstants.height));
+
+    const float4 centerSample = normalDepthTexture.SampleLevel(uv, 0.0);
     const float centerDepth = centerSample.w;
-    if (centerDepth <= 0.0001) return 1.0;
+    if (centerDepth <= 0.0001)
+    {
+        ssaoRawTexture[dispatchThreadId.xy] = 1.0;
+        return;
+    }
 
     const float3 centerNormal = decodeViewNormal(centerSample.xyz);
-    const float3 centerViewPos = reconstructViewPosition(input.inUv, centerDepth);
+    const float3 centerViewPos = reconstructViewPosition(uv, centerDepth);
 
     float3 tangent = normalize(cross(centerNormal, float3(0.0, 1.0, 0.0)));
     if (dot(tangent, tangent) <= 0.0001)
@@ -63,7 +80,7 @@ float main(FragmentInput input) : SV_Target0
     uint texH = 0;
     normalDepthTexture.GetDimensions(texW, texH);
     const float2 noiseScale = float2(float(texW), float(texH));
-    const float randomAngle = hash12(input.inUv * noiseScale) * 6.2831853;
+    const float randomAngle = hash12(uv * noiseScale) * 6.2831853;
     const float s = sin(randomAngle);
     const float c = cos(randomAngle);
     const float2x2 rot = float2x2(c, -s, s, c);
@@ -99,7 +116,7 @@ float main(FragmentInput input) : SV_Target0
         const float2 sampleUv = (sampleNdc.xy * 0.5) + 0.5;
         if (sampleUv.x <= 0.0 || sampleUv.x >= 1.0 || sampleUv.y <= 0.0 || sampleUv.y >= 1.0) continue;
 
-        const float sampleDepth = normalDepthTexture.Sample(sampleUv).w;
+        const float sampleDepth = normalDepthTexture.SampleLevel(sampleUv, 0.0).w;
         if (sampleDepth <= 0.0001) continue;
 
         const float3 sampleSceneViewPos = reconstructViewPosition(sampleUv, sampleDepth);
@@ -111,8 +128,12 @@ float main(FragmentInput input) : SV_Target0
         sampleCount += 1.0;
     }
 
-    if (sampleCount <= 0.0) return 1.0;
+    if (sampleCount <= 0.0)
+    {
+        ssaoRawTexture[dispatchThreadId.xy] = 1.0;
+        return;
+    }
 
     const float rawAo = 1.0 - (occlusion / sampleCount);
-    return pow(clamp(rawAo, 0.0, 1.0), kSsaoPower);
+    ssaoRawTexture[dispatchThreadId.xy] = pow(clamp(rawAo, 0.0, 1.0), kSsaoPower);
 }

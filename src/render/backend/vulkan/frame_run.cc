@@ -403,9 +403,9 @@ void RendererBackend::renderFrame(
         if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
             return;
         }
-        vkCmdWriteTimestamp(
+        vkCmdWriteTimestamp2(
             commandBuffer,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_2_NONE,
             gpuTimestampQueryPool,
             queryIndex
         );
@@ -414,9 +414,9 @@ void RendererBackend::renderFrame(
         if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
             return;
         }
-        vkCmdWriteTimestamp(
+        vkCmdWriteTimestamp2(
             commandBuffer,
-            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             gpuTimestampQueryPool,
             queryIndex
         );
@@ -1479,7 +1479,7 @@ void RendererBackend::renderFrame(
     }
     m_debugCpuGiOccupancyBuildMs = voxelGiOccupancyCpuMs;
 
-    const BoundDescriptorSets boundDescriptorSets = updateFrameDescriptorSets(
+    updateFrameDescriptorSets(
         aoFrameIndex,
         bufferInfo,
         autoExposureHistogramBuffer,
@@ -1487,7 +1487,6 @@ void RendererBackend::renderFrame(
         voxelGiChunkMetaDescriptorInfo.has_value() ? &(*voxelGiChunkMetaDescriptorInfo) : nullptr,
         voxelGiChunkVoxelDescriptorInfo.has_value() ? &(*voxelGiChunkVoxelDescriptorInfo) : nullptr
     );
-    const uint32_t boundDescriptorSetCount = boundDescriptorSets.count;
 
     if (m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
         m_voxelGiOccupancyFullRebuildNeedsClear &&
@@ -1853,7 +1852,6 @@ void RendererBackend::renderFrame(
     frameExecutionContext.gpuTimestampQueryPool = gpuTimestampQueryPool;
     frameExecutionContext.frameOrderValidator = &coreFramePassOrderValidator;
     frameExecutionContext.frameGraphPlan = &(*coreFrameGraphPlan);
-    frameExecutionContext.boundDescriptorSets = &boundDescriptorSets;
     frameExecutionContext.mvpDynamicOffset = mvpDynamicOffset;
 
     ShadowPassInputs shadowPassInputs{};
@@ -1916,7 +1914,7 @@ void RendererBackend::renderFrame(
         m_voxelGiInjectPipeline != VK_NULL_HANDLE &&
         m_voxelGiPropagatePipeline != VK_NULL_HANDLE &&
         m_voxelGiPipelineLayout != VK_NULL_HANDLE &&
-        m_voxelGiDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
+        m_voxelGiBufferSet.valid() &&
         voxelGiSurfaceFacesReady &&
         m_voxelGiSkyExposureImage != VK_NULL_HANDLE &&
         m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
@@ -2171,32 +2169,6 @@ void RendererBackend::renderFrame(
         VK_IMAGE_ASPECT_DEPTH_BIT
     );
 
-    const bool ssaoRawInitialized = m_ssaoRawImageInitialized[aoFrameIndex];
-    transitionImageLayout(
-        commandBuffer,
-        m_ssaoRawImages[aoFrameIndex],
-        ssaoRawInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        ssaoRawInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
-        ssaoRawInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT
-    );
-
-    const bool ssaoBlurInitialized = m_ssaoBlurImageInitialized[aoFrameIndex];
-    transitionImageLayout(
-        commandBuffer,
-        m_ssaoBlurImages[aoFrameIndex],
-        ssaoBlurInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        ssaoBlurInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
-        ssaoBlurInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT
-    );
-
     VkViewport aoViewport{};
     aoViewport.x = 0.0f;
     aoViewport.y = 0.0f;
@@ -2246,8 +2218,6 @@ void RendererBackend::renderFrame(
 
     m_normalDepthImageInitialized[aoFrameIndex] = true;
     m_aoDepthImageInitialized[imageIndex] = true;
-    m_ssaoRawImageInitialized[aoFrameIndex] = true;
-    m_ssaoBlurImageInitialized[aoFrameIndex] = true;
 
     VkViewport viewport{};
     viewport.x = 0.0f;
@@ -2420,7 +2390,7 @@ void RendererBackend::renderFrame(
         m_autoExposurePipelineLayout != VK_NULL_HANDLE &&
         m_autoExposureHistogramPipeline != VK_NULL_HANDLE &&
         m_autoExposureUpdatePipeline != VK_NULL_HANDLE &&
-        m_autoExposureDescriptorSets[m_currentFrame] != VK_NULL_HANDLE &&
+        m_autoExposureBufferSet.valid() &&
         autoExposureHistogramBuffer != VK_NULL_HANDLE &&
         autoExposureStateBuffer != VK_NULL_HANDLE;
     const bool shouldRunAutoExposureThisFrame =
@@ -2482,16 +2452,9 @@ void RendererBackend::renderFrame(
         histogramPushConstants.sourceMipLevel = static_cast<float>(histogramSourceMip);
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_autoExposureHistogramPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_COMPUTE,
-            m_autoExposurePipelineLayout,
-            0,
-            1,
-            &m_autoExposureDescriptorSets[m_currentFrame],
-            0,
-            nullptr
-        );
+        bindDescriptorBuffer(
+            commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_autoExposurePipelineLayout,
+            0, m_autoExposureBufferSet, m_currentFrame);
         vkCmdPushConstants(
             commandBuffer,
             m_autoExposurePipelineLayout,
@@ -2539,16 +2502,9 @@ void RendererBackend::renderFrame(
         updatePushConstants.deltaTimeSeconds = std::clamp(frameDeltaSeconds, 0.0f, 0.25f);
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_autoExposureUpdatePipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_COMPUTE,
-            m_autoExposurePipelineLayout,
-            0,
-            1,
-            &m_autoExposureDescriptorSets[m_currentFrame],
-            0,
-            nullptr
-        );
+        bindDescriptorBuffer(
+            commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_autoExposurePipelineLayout,
+            0, m_autoExposureBufferSet, m_currentFrame);
         vkCmdPushConstants(
             commandBuffer,
             m_autoExposurePipelineLayout,
@@ -2596,7 +2552,7 @@ void RendererBackend::renderFrame(
         if (m_sunShaftComputeAvailable &&
             m_sunShaftPipelineLayout != VK_NULL_HANDLE &&
             m_sunShaftPipeline != VK_NULL_HANDLE &&
-            m_sunShaftDescriptorSets[m_currentFrame] != VK_NULL_HANDLE) {
+            m_sunShaftBufferSet.valid()) {
             beginDebugLabel(commandBuffer, "Pass: Sun Shafts", 0.26f, 0.24f, 0.16f, 1.0f);
             transitionImageLayout(
                 commandBuffer,
@@ -2627,16 +2583,9 @@ void RendererBackend::renderFrame(
             sunShaftPushConstants.sampleCount = 20u;
 
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_sunShaftPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                m_sunShaftPipelineLayout,
-                0,
-                1,
-                &m_sunShaftDescriptorSets[m_currentFrame],
-                1,
-                &mvpDynamicOffset
-            );
+            bindDescriptorBuffer(
+                commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_sunShaftPipelineLayout,
+                0, m_sunShaftBufferSet, m_currentFrame);
             vkCmdPushConstants(
                 commandBuffer,
                 m_sunShaftPipelineLayout,
@@ -2753,16 +2702,7 @@ void RendererBackend::renderFrame(
 
     if (m_tonemapPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_tonemapPipeline);
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout,
-            0,
-            boundDescriptorSetCount,
-            boundDescriptorSets.sets.data(),
-            1,
-            &mvpDynamicOffset
-        );
+        bindGraphicsDescriptorBuffers(commandBuffer);
         countDrawCalls(m_debugDrawCallsPost, 1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }

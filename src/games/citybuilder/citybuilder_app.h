@@ -54,6 +54,10 @@ struct Tile {
     float desirability = 0.5f;   // 0..1 spatial land value; modulates growth target
     float scenicPhase = 0.0f;    // per-tile jitter so a block doesn't look uniform
     float zoneAge = 0.0f;        // real seconds connected+vacant since zoned (listing period)
+    float trafficLoad = 0.0f;    // EMA of car occupancy on this road tile (congestion)
+    std::uint8_t fireTicks = 0;  // months of burning left; 0 = not on fire
+    std::uint8_t charTicks = 0;  // months since burning out (charred rubble ages away)
+    bool  charred = false;       // burnt-out ruin: develop = 0, drags neighbours down
 };
 
 class CityBuilderApp : public engine::GameApp {
@@ -66,6 +70,7 @@ public:
         ZoneR, ZoneC, ZoneI,
         Road,
         Police, Fire, Clinic, School, Park, Library, Amphitheater, Power,
+        Match,   // arson-on-demand: set one developed parcel alight, on purpose
         Count
     };
 
@@ -107,6 +112,7 @@ private:
     void computeDesirability();  // per-tile spatial land value (amenities vs. nuisances)
     void pushHistory();      // append a sample to each metric series
     void stepMonth();
+    void stepFire();         // ignition, spread, burn-out, and rubble aging
     void applyTool(int c, int r);
     // Switches the active tool, cancelling (without applying) any box-select
     // drag in progress so a hotkey or palette click mid-drag can't apply the
@@ -155,6 +161,28 @@ private:
     const procgen::TriMesh& cachedBillboard(std::uint32_t variant) const;
     const procgen::TriMesh& cachedBusStop(std::uint32_t variant) const;
     const procgen::TriMesh& cachedTrashCan(std::uint32_t variant) const;
+    const procgen::TriMesh& cachedSnowman(std::uint32_t variant) const;
+
+    // ── Rising buildings ─────────────────────────────────────────────────────
+    // When a plot's building first appears (construction completes, or an era
+    // upgrade swaps the mesh), it isn't popped into the static scene — it
+    // rises out of the ground over ~1.5s with a dirt burst, drawn through the
+    // per-frame actor stream. buildCityScene() detects the appearance (it is
+    // the only place that knows when a plot renders a building), skips the
+    // static emit while the rise is live, and hands the exact placement
+    // parameters to buildActorFrameData(). All bookkeeping is mutable because
+    // buildCityScene() is const.
+    struct RisingBuilding {
+        short c = 0, r = 0;            // plot origin tile
+        std::uint8_t pw = 1, pd = 1;   // plot extent, tiles
+        std::uint8_t level = 1, tier = 1, turns = 0;
+        bool swapDims = false;
+        std::uint32_t variant = 0;
+        procgen::BuildingKind kind = procgen::BuildingKind::Residential;
+        procgen::Color3 tint{1.0f, 1.0f, 1.0f};
+        float t0 = 0.0f;               // rise start (m_time)
+        bool burst = false;            // dirt-burst fx fired yet?
+    };
 
     // ── Ambient traffic ──────────────────────────────────────────────────────
     // Cars follow the road graph tile-to-tile on the right-hand lane; their
@@ -204,11 +232,32 @@ private:
     // simply despawn at the end of their loop).
     void advanceRoutedFleet(std::vector<Vehicle>& fleet, float dt, bool arrivalPedestrian);
 
+    // ── Sims ─────────────────────────────────────────────────────────────────
+    // Little box-people going about their day on the sidewalks: they spawn
+    // where the city is actually alive (developed homes and shops, parks) and
+    // wander the road graph on the sidewalk band, bobbing as they walk. Same
+    // per-frame actor stream as the cars — never a scene upload. Distinct from
+    // the Pedestrian below: Sims are ambient population density, not tied to a
+    // citizen's routed trip.
+    struct Sim {
+        short cx = 0, cr = 0;
+        signed char inX = 1, inZ = 0;
+        signed char outX = 1, outZ = 0;
+        float t = 0.0f;
+        float speed = 0.3f;            // tiles per second (walking pace)
+        float phase = 0.0f;            // bob/stride offset so crowds don't sync
+        std::uint8_t variant = 0;      // index into m_simMeshes
+    };
+    void updateSims(float dt);
+    void respawnSim(Sim& s);
+    bool pickSimExit(Sim& s);          // wander-y routing: parks and shops attract
+
     // ── Ambient pedestrians & boats ──────────────────────────────────────────
     // Structurally slow vehicles: pedestrians walk the sidewalk rail of road
-    // tiles near developed frontage; boats drift the connected river/lake
-    // water (the terrain generator guarantees edge-to-edge connectivity, so
-    // they never strand). Both stream through the same actor path as cars.
+    // tiles near developed frontage (dropped off by an arriving citizen trip —
+    // see advanceRoutedFleet); boats drift the connected river/lake water (the
+    // terrain generator guarantees edge-to-edge connectivity, so they never
+    // strand). Both stream through the same actor path as cars.
     struct Pedestrian {
         short cx = 0, cr = 0;
         signed char inX = 1, inZ = 0;
@@ -232,6 +281,45 @@ private:
     void updateBoats(float dt);
     void respawnBoat(Boat& b);
 
+    // ── Fire trucks ──────────────────────────────────────────────────────────
+    // When something burns and the city has a Fire Dept, red trucks roll out
+    // from the station, navigate the road graph toward the nearest fire, park
+    // beside it, and hose it down (stepFire treats a parked truck as maximum
+    // coverage on the tiles around it). Light bar and water arc are stateless
+    // per-frame particles.
+    struct FireTruck {
+        short cx = 0, cr = 0;
+        signed char inX = 1, inZ = 0;
+        signed char outX = 1, outZ = 0;
+        float t = 0.0f;
+        float speed = 1.9f;            // sirens on — faster than traffic, no jams
+        bool  parked = false;
+        bool  returning = false;       // fires are out; driving home to despawn
+        short tgtC = -1, tgtR = -1;    // burning tile being fought (or home, returning)
+        short homeC = -1, homeR = -1;  // staging road tile it rolled out from
+        // Livelock guard: the exit picker is a memoryless greedy descent, so a
+        // road graph that requires temporarily moving AWAY from the target
+        // (e.g. around the river to the one bridge) can trap a truck pacing
+        // between two tiles forever. Track the best distance reached; too many
+        // moves without improving it means the target is unreachable — give up.
+        short bestDist = 32767;
+        std::uint8_t stallMoves = 0;
+    };
+    void updateFireTrucks(float dt);
+    bool pickTruckExit(FireTruck& tk);  // goal-directed: descend distance to target
+    [[nodiscard]] bool truckSuppressed(int c, int r) const;  // parked truck hosing this tile?
+
+    // ── Celebration FX ───────────────────────────────────────────────────────
+    // Short-lived stateless particle bursts (zone puffs, build bursts, level-up
+    // confetti) rendered from (position, birth time, color) each frame.
+    struct Fx {
+        float x = 0.0f, z = 0.0f;
+        float t0 = 0.0f;
+        float r = 1.0f, g = 1.0f, b = 1.0f;
+        std::uint8_t kind = 0;         // 0 = small puff, 1 = build burst, 2 = confetti
+    };
+    void addFx(float worldX, float worldZ, const ui::UiColor& color, std::uint8_t kind);
+
     // ── Weather ──────────────────────────────────────────────────────────────
     // A simple state machine rolls the sky every ~half minute with seasonal
     // odds (winter precipitates as snow). Precipitation is a particle field
@@ -244,6 +332,23 @@ private:
     };
     void updateWeather(float dt);
     void respawnDrop(WeatherDrop& d, bool atTop);
+
+    // ── Severe weather ───────────────────────────────────────────────────────
+    // Two continuous atmosphere variables — surface heat (season + the city's
+    // own industrial heat island, cooled by rain) and convective instability
+    // (charges in hot clear spells, discharges as rain) — place each incoming
+    // front on a continuum: drizzle, thunderstorm, or a tornado-bearing storm.
+    // The funnel is the release valve of energy the simulation (and partly the
+    // player's zoning) accumulated, never a scripted event: spawning one
+    // consumes the stored instability, so the atmosphere must recharge before
+    // another is possible.
+    struct Tornado {
+        float x = 0.0f, z = 0.0f;   // world position
+        float heading = 0.0f;       // radians; wanders, follows wind + warm ground
+        float intensity = 1.0f;     // decays; faster over water/parks/open land
+    };
+    void updateSevereWeather(float dt);  // funnel spawn/motion — sim-time, respects pause
+    void stepTornadoDamage();            // monthly damage, feeds the charred/fire loops
 
     // Appends this frame's transformed car geometry and weather particles into
     // the actor scratch buffers and returns the frame data for submitFrame.
@@ -301,6 +406,7 @@ private:
     int m_numRoad = 0, m_numPolice = 0, m_numFire = 0, m_numClinic = 0;
     int m_numSchool = 0, m_numPark = 0, m_numPower = 0;
     int m_numLibrary = 0, m_numAmphitheater = 0;
+    int m_burningTiles = 0, m_charredTiles = 0;  // refreshed by stepFire()
     float m_statEase = 1.0f;               // easing rate applied to city quality stats
 
     int   m_speed = 1;                     // 1 / 2 / 3
@@ -329,6 +435,17 @@ private:
     mutable std::vector<procgen::TriMesh> m_pumpkinMeshes;
     mutable std::vector<procgen::TriMesh> m_poleMeshes;
     mutable std::vector<procgen::TriMesh> m_lampMeshes;
+    // Rise-animation bookkeeping (see RisingBuilding). m_builtSeen remembers
+    // the highest building level each plot origin has shown, so appearances
+    // and era upgrades trigger a rise exactly once; entries are dropped when a
+    // plot stops rendering a building (charred / decayed / re-zoned) so a
+    // rebuilt lot rises again. m_riseScratch is a reused ImportedScene the
+    // actor pass appends the rotated mesh into, so placement math is shared
+    // with the static path rather than duplicated.
+    mutable std::vector<RisingBuilding> m_rising;
+    mutable std::unordered_map<std::uint32_t, std::uint8_t> m_builtSeen;
+    mutable odai::importer::ImportedScene m_riseScratch;
+    mutable std::vector<procgen::TriMesh> m_snowmanMeshes;
 
     procgen::Season m_season = procgen::Season::Winter;  // recomputed in onInit
     Weather m_weather = Weather::Clear;
@@ -337,6 +454,14 @@ private:
     float m_weatherTimer = 14.0f;      // seconds until the next sky roll
     std::uint32_t m_weatherRng = 0xBAD5EEDu;
     std::vector<WeatherDrop> m_drops;
+
+    float m_atmoHeat = 0.3f;           // surface heat: season + city heat island - rain
+    float m_atmoInstability = 0.2f;    // convective energy: charges clear, spends as storms
+    float m_stormSeverity = 0.0f;      // heat x instability, sampled when a front rolls in
+    float m_cityHeat = 0.0f;           // industrial develop + power plants (recomputeStats)
+    float m_windX = 1.0f, m_windZ = 0.0f;  // prevailing wind, rolled per front
+    bool  m_debugForceStorm = false;   // ODAI_CITY_STORM=1: prime the atmosphere for testing
+    std::vector<Tornado> m_tornadoes;
 
     std::vector<Vehicle> m_vehicles;
     std::vector<procgen::TriMesh> m_carMeshes;             // lazily filled variants
@@ -349,6 +474,11 @@ private:
     mutable std::vector<procgen::TriMesh> m_hydrantMeshes;
     mutable std::vector<procgen::TriMesh> m_billboardMeshes;
     mutable std::vector<procgen::TriMesh> m_busStopMeshes;
+    std::vector<Sim> m_sims;
+    std::vector<procgen::TriMesh> m_simMeshes;             // lazily filled variants
+    std::vector<FireTruck> m_trucks;
+    procgen::TriMesh m_truckMesh;                          // lazily built
+    std::vector<Fx> m_fx;
     std::uint32_t m_trafficRng = 0x51CA7B1u;
     // Per-frame actor stream scratch, reused to avoid per-frame allocation.
     std::vector<odai::importer::ImportedScenePackedVertex> m_actorVertices;
@@ -366,12 +496,19 @@ private:
     int  m_boxStartC = -1, m_boxStartR = -1;
     int  m_boxEndC = -1, m_boxEndR = -1;
 
+    // Reports start closed: the first thing a new mayor should see is their
+    // city, not a chart floating over it (G or the Reports button opens it).
     bool   m_reportsOpen = false;
     bool   m_showLandValue = false;        // toggle the desirability data overlay
     Metric m_metric = Metric::Population;
 
     float       m_flashTimer = 0.0f;
     std::string m_flashMsg;
+    float       m_moneyFlashTimer = 0.0f;  // pulses the treasury red when a charge fails
+    // Camera-controls hint chip: each line disappears once the player has
+    // actually performed that action, so the chip teaches then gets out of
+    // the way (and never nags someone who already knows).
+    bool m_usedPan = false, m_usedZoom = false, m_usedRotate = false;
     float       m_time = 0.0f;
 
     std::unordered_map<int, bool> m_keyPrev;

@@ -322,29 +322,80 @@ bool RendererBackend::createAoTargets() {
         }
     }
 
-    if (!createColorTargets(
-            m_ssaoFormat,
+    // SSAO raw + blur targets are written by compute (storage image) and sampled by
+    // later passes, so they skip the color-attachment usage createColorTargets assumes.
+    auto createSsaoComputeTarget = [&](std::vector<VkImage>& outImages,
+                                        std::vector<VkDeviceMemory>& outMemories,
+                                        std::vector<VkImageView>& outViews,
+                                        std::vector<TransientImageHandle>& outHandles,
+                                        const char* debugLabel,
+                                        FrameArenaPass firstPass,
+                                        FrameArenaPass lastPass) -> bool {
+        outImages.assign(frameTargetCount, VK_NULL_HANDLE);
+        outMemories.assign(frameTargetCount, VK_NULL_HANDLE);
+        outViews.assign(frameTargetCount, VK_NULL_HANDLE);
+        outHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
+        for (uint32_t i = 0; i < frameTargetCount; ++i) {
+            TransientImageDesc imageDesc{};
+            imageDesc.imageType = VK_IMAGE_TYPE_2D;
+            imageDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            imageDesc.format = m_ssaoFormat;
+            imageDesc.extent = {m_aoExtent.width, m_aoExtent.height, 1u};
+            imageDesc.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+            imageDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            imageDesc.mipLevels = 1;
+            imageDesc.arrayLayers = 1;
+            imageDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+            imageDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            imageDesc.firstPass = firstPass;
+            imageDesc.lastPass = lastPass;
+            imageDesc.debugName = std::string(debugLabel) + "[" + std::to_string(i) + "]";
+            const TransientImageHandle handle = m_frameArena.createTransientImage(
+                imageDesc,
+                FrameArenaImageLifetime::Persistent
+            );
+            if (handle == kInvalidTransientImageHandle) {
+                VOX_LOGE("render") << "failed creating transient image " << debugLabel << "\n";
+                return false;
+            }
+            const TransientImageInfo* imageInfo = m_frameArena.getTransientImage(handle);
+            if (imageInfo == nullptr || imageInfo->image == VK_NULL_HANDLE || imageInfo->view == VK_NULL_HANDLE) {
+                VOX_LOGE("render") << "invalid transient image " << debugLabel << "\n";
+                return false;
+            }
+            outHandles[i] = handle;
+            outImages[i] = imageInfo->image;
+            outViews[i] = imageInfo->view;
+            outMemories[i] = VK_NULL_HANDLE;
+            setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(outImages[i]), imageDesc.debugName.c_str());
+            {
+                const std::string viewName = std::string(debugLabel) + ".view[" + std::to_string(i) + "]";
+                setObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, vkHandleToUint64(outViews[i]), viewName.c_str());
+            }
+        }
+        return true;
+    };
+
+    if (!createSsaoComputeTarget(
             m_ssaoRawImages,
             m_ssaoRawImageMemories,
             m_ssaoRawImageViews,
             m_ssaoRawTransientHandles,
             "ao.ssaoRaw",
             FrameArenaPass::Ssao,
-            FrameArenaPass::Ssao,
-            m_aoExtent
+            FrameArenaPass::Ssao
         )) {
         return false;
     }
-    if (!createColorTargets(
-            m_ssaoFormat,
+    if (!createSsaoComputeTarget(
             m_ssaoBlurImages,
             m_ssaoBlurImageMemories,
             m_ssaoBlurImageViews,
             m_ssaoBlurTransientHandles,
             "ao.ssaoBlur",
             FrameArenaPass::Ssao,
-            FrameArenaPass::Main,
-            m_aoExtent
+            FrameArenaPass::Main
         )) {
         return false;
     }

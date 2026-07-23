@@ -19,7 +19,6 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkExtent2D aoExtent = context.aoExtent;
     const VkViewport& aoViewport = context.aoViewport;
     const VkRect2D& aoScissor = context.aoScissor;
-    const BoundDescriptorSets& boundDescriptorSets = *context.boundDescriptorSets;
     const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
     // Legacy voxel/magica/pipe prepass inputs remain on PrepassInputs but are no longer
     // consumed here — those normal-depth draws were removed (prior voxel/factory game).
@@ -33,7 +32,6 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
 
-    const uint32_t boundDescriptorSetCount = boundDescriptorSets.count;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
         m_debugDrawCallsTotal += drawCount;
@@ -42,9 +40,9 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
         if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
             return;
         }
-        vkCmdWriteTimestamp(
+        vkCmdWriteTimestamp2(
             commandBuffer,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_2_NONE,
             gpuTimestampQueryPool,
             queryIndex
         );
@@ -53,9 +51,9 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
         if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
             return;
         }
-        vkCmdWriteTimestamp(
+        vkCmdWriteTimestamp2(
             commandBuffer,
-            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             gpuTimestampQueryPool,
             queryIndex
         );
@@ -116,16 +114,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             const VkBuffer importedVertexBuffers[1] = {importedVertexBuffer};
             const VkDeviceSize importedVertexOffsets[1] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticNormalDepthPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-                1,
-                &mvpDynamicOffset
-            );
+            bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
             for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
@@ -146,16 +135,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             const VkBuffer importedVertexBuffers[1] = {importedActorVertexBuffer};
             const VkDeviceSize importedVertexOffsets[1] = {importedActorVertexOffset};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticNormalDepthPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-                1,
-                &mvpDynamicOffset
-            );
+            bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
             for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
@@ -180,16 +160,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
             const VkDeviceSize vertexOffsets[2] = {0, 0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardNormalDepthPipeline);
-            vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_pipelineLayout,
-                0,
-                boundDescriptorSetCount,
-                boundDescriptorSets.sets.data(),
-                1,
-                &mvpDynamicOffset
-            );
+            bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
             countDrawCalls(m_debugDrawCallsPrepass, 1);

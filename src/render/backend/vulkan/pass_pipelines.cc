@@ -332,6 +332,7 @@ bool RendererBackend::createMagicaPipeline() {
 
     VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
     pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     pipelineCreateInfo.pNext = &renderingCreateInfo;
     pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
     pipelineCreateInfo.pStages = shaderStages.data();
@@ -350,7 +351,7 @@ bool RendererBackend::createMagicaPipeline() {
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
     const VkResult pipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -378,7 +379,7 @@ bool RendererBackend::createMagicaPipeline() {
         rtPipelineCreateInfo.pStages = rtShaderStages.data();
         const VkResult rtPipelineResult = vkCreateGraphicsPipelines(
             m_device,
-            VK_NULL_HANDLE,
+            m_pipelineCache,
             1,
             &rtPipelineCreateInfo,
             nullptr,
@@ -555,6 +556,7 @@ bool RendererBackend::createPipePipeline() {
 
     VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
     pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     pipelineCreateInfo.pNext = &renderingCreateInfo;
     pipelineCreateInfo.stageCount = static_cast<uint32_t>(pipeShaderStages.size());
     pipelineCreateInfo.pStages = pipeShaderStages.data();
@@ -573,7 +575,7 @@ bool RendererBackend::createPipePipeline() {
     VkPipeline pipePipeline = VK_NULL_HANDLE;
     const VkResult pipePipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -683,7 +685,7 @@ bool RendererBackend::createPipePipeline() {
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
     const VkResult importedPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &importedPipelineCreateInfo,
         nullptr,
@@ -701,7 +703,7 @@ bool RendererBackend::createPipePipeline() {
         importedRtPipelineCreateInfo.pStages = importedRtShaderStages.data();
         const VkResult importedRtPipelineResult = vkCreateGraphicsPipelines(
             m_device,
-            VK_NULL_HANDLE,
+            m_pipelineCache,
             1,
             &importedRtPipelineCreateInfo,
             nullptr,
@@ -786,7 +788,7 @@ bool RendererBackend::createPipePipeline() {
     VkPipeline skyCloudPipeline = VK_NULL_HANDLE;
     const VkResult skyCloudPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &skyCloudPipelineCreateInfo,
         nullptr,
@@ -913,7 +915,7 @@ bool RendererBackend::createPipePipeline() {
     VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
     const VkResult importedWaterPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &importedWaterPipelineCreateInfo,
         nullptr,
@@ -937,7 +939,7 @@ bool RendererBackend::createPipePipeline() {
         importedWaterRtPipelineCreateInfo.pStages = importedWaterRtShaderStages.data();
         const VkResult importedWaterRtPipelineResult = vkCreateGraphicsPipelines(
             m_device,
-            VK_NULL_HANDLE,
+            m_pipelineCache,
             1,
             &importedWaterRtPipelineCreateInfo,
             nullptr,
@@ -1089,7 +1091,7 @@ bool RendererBackend::createPipePipeline() {
     VkPipeline grassBillboardPipeline = VK_NULL_HANDLE;
     const VkResult grassPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &grassPipelineCreateInfo,
         nullptr,
@@ -1190,14 +1192,8 @@ bool RendererBackend::createAoPipelines() {
     constexpr const char* kImportedWaterNormalDepthFragShaderPath = "../src/render/shaders/imported_water_normaldepth.frag.slang.spv";
     constexpr const char* kGrassBillboardVertShaderPath = "../src/render/shaders/grass_billboard.vert.slang.spv";
     constexpr const char* kGrassBillboardNormalDepthFragShaderPath = "../src/render/shaders/grass_billboard_normaldepth.frag.slang.spv";
-    constexpr const char* kFullscreenVertShaderPath = "../src/render/shaders/tone_map.vert.slang.spv";
-    constexpr const char* kSsaoFragShaderPath = "../src/render/shaders/ssao.frag.slang.spv";
-    constexpr const char* kSsaoBlurFragShaderPath = "../src/render/shaders/ssao_blur.frag.slang.spv";
 
-    std::array<VkShaderModule, 13> shaderModules = {
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
+    std::array<VkShaderModule, 10> shaderModules = {
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
@@ -1219,11 +1215,8 @@ bool RendererBackend::createAoPipelines() {
     VkShaderModule& importedStaticNormalDepthFragShaderModule = shaderModules[7];
     VkShaderModule& importedWaterVertShaderModule = shaderModules[8];
     VkShaderModule& importedWaterNormalDepthFragShaderModule = shaderModules[9];
-    VkShaderModule& fullscreenVertShaderModule = shaderModules[10];
-    VkShaderModule& ssaoFragShaderModule = shaderModules[11];
-    VkShaderModule& ssaoBlurFragShaderModule = shaderModules[12];
 
-    const std::array<ShaderModuleLoadSpec, 13> shaderLoadSpecs = {{
+    const std::array<ShaderModuleLoadSpec, 10> shaderLoadSpecs = {{
         {kVoxelVertShaderPath, "voxel_packed.vert"},
         {kVoxelNormalDepthFragShaderPath, "voxel_normaldepth.frag"},
         {kPipeVertShaderPath, "pipe_instanced.vert"},
@@ -1234,9 +1227,6 @@ bool RendererBackend::createAoPipelines() {
         {kImportedStaticNormalDepthFragShaderPath, "imported_static_normaldepth.frag"},
         {kImportedWaterVertShaderPath, "imported_water.vert"},
         {kImportedWaterNormalDepthFragShaderPath, "imported_water_normaldepth.frag"},
-        {kFullscreenVertShaderPath, "tone_map.vert"},
-        {kSsaoFragShaderPath, "ssao.frag"},
-        {kSsaoBlurFragShaderPath, "ssao_blur.frag"},
     }};
     if (!createShaderModulesFromFiles(m_device, shaderLoadSpecs, shaderModules)) {
         return false;
@@ -1247,17 +1237,7 @@ bool RendererBackend::createAoPipelines() {
     VkPipeline grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
-    VkPipeline ssaoPipeline = VK_NULL_HANDLE;
-    VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     auto destroyNewPipelines = [&]() {
-        if (ssaoBlurPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, ssaoBlurPipeline, nullptr);
-            ssaoBlurPipeline = VK_NULL_HANDLE;
-        }
-        if (ssaoPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, ssaoPipeline, nullptr);
-            ssaoPipeline = VK_NULL_HANDLE;
-        }
         if (pipeNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, pipeNormalDepthPipeline, nullptr);
             pipeNormalDepthPipeline = VK_NULL_HANDLE;
@@ -1336,6 +1316,7 @@ bool RendererBackend::createAoPipelines() {
 
     VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
     pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     pipelineCreateInfo.pNext = &normalDepthRenderingCreateInfo;
     pipelineCreateInfo.pInputAssemblyState = &inputAssembly;
     pipelineCreateInfo.pViewportState = &viewportState;
@@ -1387,7 +1368,7 @@ bool RendererBackend::createAoPipelines() {
     pipelineCreateInfo.pVertexInputState = &voxelVertexInputInfo;
     const VkResult voxelPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -1460,7 +1441,7 @@ bool RendererBackend::createAoPipelines() {
     pipelineCreateInfo.pRasterizationState = &pipeRasterizer;
     const VkResult pipePipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -1529,7 +1510,7 @@ bool RendererBackend::createAoPipelines() {
     pipelineCreateInfo.pRasterizationState = &grassRasterizer;
     const VkResult grassNormalDepthPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -1595,7 +1576,7 @@ bool RendererBackend::createAoPipelines() {
     pipelineCreateInfo.pRasterizationState = &rasterizer;
     const VkResult importedNormalDepthPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -1647,7 +1628,7 @@ bool RendererBackend::createAoPipelines() {
     pipelineCreateInfo.pRasterizationState = &importedWaterRasterizer;
     const VkResult importedWaterNormalDepthPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -1659,138 +1640,6 @@ bool RendererBackend::createAoPipelines() {
         destroyShaderModules(m_device, shaderModules);
         return false;
     }
-
-    // SSAO fullscreen pipelines.
-    VkPipelineShaderStageCreateInfo ssaoStageInfos[2]{};
-    ssaoStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    ssaoStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    ssaoStageInfos[0].module = fullscreenVertShaderModule;
-    ssaoStageInfos[0].pName = "main";
-    ssaoStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    ssaoStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    ssaoStageInfos[1].module = ssaoFragShaderModule;
-    ssaoStageInfos[1].pName = "main";
-
-    struct SsaoSpecializationData {
-        std::int32_t sampleCount = 32; // constant_id 0
-        float power = 1.4f;            // constant_id 1
-        std::int32_t blurRadius = 6;   // constant_id 2
-        float blurSigma = 3.0f;        // constant_id 3
-    };
-    const SsaoSpecializationData ssaoSpecializationData{};
-    const std::array<VkSpecializationMapEntry, 2> ssaoSpecializationMapEntries = {{
-        VkSpecializationMapEntry{
-            0u,
-            static_cast<uint32_t>(offsetof(SsaoSpecializationData, sampleCount)),
-            sizeof(std::int32_t)
-        },
-        VkSpecializationMapEntry{
-            1u,
-            static_cast<uint32_t>(offsetof(SsaoSpecializationData, power)),
-            sizeof(float)
-        }
-    }};
-    const VkSpecializationInfo ssaoSpecializationInfo{
-        static_cast<uint32_t>(ssaoSpecializationMapEntries.size()),
-        ssaoSpecializationMapEntries.data(),
-        sizeof(ssaoSpecializationData),
-        &ssaoSpecializationData
-    };
-    const std::array<VkSpecializationMapEntry, 2> ssaoBlurSpecializationMapEntries = {{
-        VkSpecializationMapEntry{
-            2u,
-            static_cast<uint32_t>(offsetof(SsaoSpecializationData, blurRadius)),
-            sizeof(std::int32_t)
-        },
-        VkSpecializationMapEntry{
-            3u,
-            static_cast<uint32_t>(offsetof(SsaoSpecializationData, blurSigma)),
-            sizeof(float)
-        }
-    }};
-    const VkSpecializationInfo ssaoBlurSpecializationInfo{
-        static_cast<uint32_t>(ssaoBlurSpecializationMapEntries.size()),
-        ssaoBlurSpecializationMapEntries.data(),
-        sizeof(ssaoSpecializationData),
-        &ssaoSpecializationData
-    };
-    ssaoStageInfos[1].pSpecializationInfo = &ssaoSpecializationInfo;
-
-    VkPipelineVertexInputStateCreateInfo fullscreenVertexInputInfo{};
-    fullscreenVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-
-    VkPipelineRasterizationStateCreateInfo fullscreenRasterizer = rasterizer;
-    fullscreenRasterizer.cullMode = VK_CULL_MODE_NONE;
-
-    VkPipelineDepthStencilStateCreateInfo fullscreenDepthStencil{};
-    fullscreenDepthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    fullscreenDepthStencil.depthTestEnable = VK_FALSE;
-    fullscreenDepthStencil.depthWriteEnable = VK_FALSE;
-    fullscreenDepthStencil.depthBoundsTestEnable = VK_FALSE;
-    fullscreenDepthStencil.stencilTestEnable = VK_FALSE;
-
-    VkPipelineRenderingCreateInfo ssaoRenderingCreateInfo{};
-    ssaoRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    ssaoRenderingCreateInfo.colorAttachmentCount = 1;
-    ssaoRenderingCreateInfo.pColorAttachmentFormats = &m_ssaoFormat;
-    ssaoRenderingCreateInfo.depthAttachmentFormat = VK_FORMAT_UNDEFINED;
-
-    VkGraphicsPipelineCreateInfo ssaoPipelineCreateInfo{};
-    ssaoPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    ssaoPipelineCreateInfo.pNext = &ssaoRenderingCreateInfo;
-    ssaoPipelineCreateInfo.stageCount = 2;
-    ssaoPipelineCreateInfo.pStages = ssaoStageInfos;
-    ssaoPipelineCreateInfo.pVertexInputState = &fullscreenVertexInputInfo;
-    ssaoPipelineCreateInfo.pInputAssemblyState = &inputAssembly;
-    ssaoPipelineCreateInfo.pViewportState = &viewportState;
-    ssaoPipelineCreateInfo.pRasterizationState = &fullscreenRasterizer;
-    ssaoPipelineCreateInfo.pMultisampleState = &multisampling;
-    ssaoPipelineCreateInfo.pDepthStencilState = &fullscreenDepthStencil;
-    ssaoPipelineCreateInfo.pColorBlendState = &colorBlending;
-    ssaoPipelineCreateInfo.pDynamicState = &dynamicState;
-    ssaoPipelineCreateInfo.layout = m_pipelineLayout;
-    ssaoPipelineCreateInfo.renderPass = VK_NULL_HANDLE;
-    ssaoPipelineCreateInfo.subpass = 0;
-
-    const VkResult ssaoPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        VK_NULL_HANDLE,
-        1,
-        &ssaoPipelineCreateInfo,
-        nullptr,
-        &ssaoPipeline
-    );
-    if (ssaoPipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateGraphicsPipelines(ssao)", ssaoPipelineResult);
-        destroyNewPipelines();
-        destroyShaderModules(m_device, shaderModules);
-        return false;
-    }
-    VOX_LOGI("render") << "pipeline config (ssao): sampleCount=" << ssaoSpecializationData.sampleCount
-              << ", power=" << ssaoSpecializationData.power
-              << ", format=" << static_cast<int>(m_ssaoFormat)
-              << "\n";
-
-    ssaoStageInfos[1].module = ssaoBlurFragShaderModule;
-    ssaoStageInfos[1].pSpecializationInfo = &ssaoBlurSpecializationInfo;
-    const VkResult ssaoBlurPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        VK_NULL_HANDLE,
-        1,
-        &ssaoPipelineCreateInfo,
-        nullptr,
-        &ssaoBlurPipeline
-    );
-    if (ssaoBlurPipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateGraphicsPipelines(ssaoBlur)", ssaoBlurPipelineResult);
-        destroyNewPipelines();
-        destroyShaderModules(m_device, shaderModules);
-        return false;
-    }
-    VOX_LOGI("render") << "pipeline config (ssaoBlur): radius=" << ssaoSpecializationData.blurRadius
-              << ", sigma=" << ssaoSpecializationData.blurSigma
-              << ", format=" << static_cast<int>(m_ssaoFormat)
-              << "\n";
 
     destroyShaderModules(m_device, shaderModules);
 
@@ -1809,20 +1658,12 @@ bool RendererBackend::createAoPipelines() {
     if (m_grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_grassBillboardNormalDepthPipeline, nullptr);
     }
-    if (m_ssaoPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_ssaoPipeline, nullptr);
-    }
-    if (m_ssaoBlurPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_ssaoBlurPipeline, nullptr);
-    }
 
     m_voxelNormalDepthPipeline = voxelNormalDepthPipeline;
     m_pipeNormalDepthPipeline = pipeNormalDepthPipeline;
     m_importedStaticNormalDepthPipeline = importedStaticNormalDepthPipeline;
     m_importedWaterNormalDepthPipeline = importedWaterNormalDepthPipeline;
     m_grassBillboardNormalDepthPipeline = grassBillboardNormalDepthPipeline;
-    m_ssaoPipeline = ssaoPipeline;
-    m_ssaoBlurPipeline = ssaoBlurPipeline;
     setObjectName(
         VK_OBJECT_TYPE_PIPELINE,
         vkHandleToUint64(m_voxelNormalDepthPipeline),
@@ -1848,8 +1689,6 @@ bool RendererBackend::createAoPipelines() {
         vkHandleToUint64(m_grassBillboardNormalDepthPipeline),
         "pipeline.prepass.grassBillboardNormalDepth"
     );
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_ssaoPipeline), "pipeline.ssao");
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_ssaoBlurPipeline), "pipeline.ssaoBlur");
     // Legacy voxel + pipe normal-depth prepass pipelines (prior game) are bound by no
     // pass anymore; free the freshly built handles and null the members.
     if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
@@ -2107,6 +1946,7 @@ bool RendererBackend::createGraphicsPipeline() {
 
     VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
     pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineCreateInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     pipelineCreateInfo.pNext = &renderingCreateInfo;
     pipelineCreateInfo.stageCount = static_cast<uint32_t>(worldShaderStages.size());
     pipelineCreateInfo.pStages = worldShaderStages.data();
@@ -2125,7 +1965,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline worldPipeline = VK_NULL_HANDLE;
     const VkResult worldPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipelineCreateInfo,
         nullptr,
@@ -2142,7 +1982,7 @@ bool RendererBackend::createGraphicsPipeline() {
         worldRtPipelineCreateInfo.pStages = worldRtShaderStages.data();
         const VkResult worldRtPipelineResult = vkCreateGraphicsPipelines(
             m_device,
-            VK_NULL_HANDLE,
+            m_pipelineCache,
             1,
             &worldRtPipelineCreateInfo,
             nullptr,
@@ -2196,7 +2036,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline previewAddPipeline = VK_NULL_HANDLE;
     const VkResult previewAddPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &previewAddPipelineCreateInfo,
         nullptr,
@@ -2217,7 +2057,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline previewRemovePipeline = VK_NULL_HANDLE;
     const VkResult previewRemovePipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &previewRemovePipelineCreateInfo,
         nullptr,
@@ -2253,7 +2093,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline previewFaceOutlinePipeline = VK_NULL_HANDLE;
     const VkResult previewFaceOutlinePipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &previewFaceOutlinePipelineCreateInfo,
         nullptr,
@@ -2309,7 +2149,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline skyboxPipeline = VK_NULL_HANDLE;
     const VkResult skyboxPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &skyboxPipelineCreateInfo,
         nullptr,
@@ -2374,6 +2214,7 @@ bool RendererBackend::createGraphicsPipeline() {
 
     VkGraphicsPipelineCreateInfo toneMapPipelineCreateInfo{};
     toneMapPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    toneMapPipelineCreateInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     toneMapPipelineCreateInfo.pNext = &toneMapRenderingCreateInfo;
     toneMapPipelineCreateInfo.stageCount = static_cast<uint32_t>(toneMapShaderStages.size());
     toneMapPipelineCreateInfo.pStages = toneMapShaderStages.data();
@@ -2392,7 +2233,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline toneMapPipeline = VK_NULL_HANDLE;
     const VkResult toneMapPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &toneMapPipelineCreateInfo,
         nullptr,
@@ -2476,6 +2317,7 @@ bool RendererBackend::createGraphicsPipeline() {
 
     VkGraphicsPipelineCreateInfo shadowPipelineCreateInfo{};
     shadowPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    shadowPipelineCreateInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     shadowPipelineCreateInfo.pNext = &shadowRenderingCreateInfo;
     shadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(shadowShaderStages.size());
     shadowPipelineCreateInfo.pStages = shadowShaderStages.data();
@@ -2494,7 +2336,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline shadowPipeline = VK_NULL_HANDLE;
     const VkResult shadowPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &shadowPipelineCreateInfo,
         nullptr,
@@ -2596,7 +2438,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline pipeShadowPipeline = VK_NULL_HANDLE;
     const VkResult pipeShadowPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &pipeShadowPipelineCreateInfo,
         nullptr,
@@ -2701,7 +2543,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline importedStaticShadowPipeline = VK_NULL_HANDLE;
     const VkResult importedShadowPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &importedShadowPipelineCreateInfo,
         nullptr,
@@ -2812,7 +2654,7 @@ bool RendererBackend::createGraphicsPipeline() {
     VkPipeline grassShadowPipeline = VK_NULL_HANDLE;
     const VkResult grassShadowPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &grassShadowPipelineCreateInfo,
         nullptr,
@@ -2931,7 +2773,7 @@ bool RendererBackend::createGraphicsPipeline() {
 
     const VkResult terrainPipelineResult = vkCreateGraphicsPipelines(
         m_device,
-        VK_NULL_HANDLE,
+        m_pipelineCache,
         1,
         &terrainPipelineCreateInfo,
         nullptr,
@@ -3052,7 +2894,7 @@ bool RendererBackend::createGraphicsPipeline() {
             hexPipelineCreateInfo.pRasterizationState = &hexRasterizer;
 
             const VkResult hexPipelineResult = vkCreateGraphicsPipelines(
-                m_device, VK_NULL_HANDLE, 1, &hexPipelineCreateInfo, nullptr, &hexTerrainPipeline);
+                m_device, m_pipelineCache, 1, &hexPipelineCreateInfo, nullptr, &hexTerrainPipeline);
             destroyShaderModules(m_device, hexShaderModules);
             if (hexPipelineResult != VK_SUCCESS) {
                 logVkFailure("vkCreateGraphicsPipelines(hexTerrain)", hexPipelineResult);
