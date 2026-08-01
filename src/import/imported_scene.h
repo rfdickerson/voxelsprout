@@ -156,6 +156,20 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
 const std::string& getImportedSceneLastError();
 void buildImportedScenePackedRenderData(ImportedScene& scene);
 
+// One Morrowind exterior cell (8192 units) — the natural culling granularity
+// for cooked exterior scenes.
+inline constexpr float kImportedSceneDefaultPageSize = 8192.0f;
+
+// Rebuilds pageRanges by partitioning packedDraws into XZ tiles of pageSize
+// world units. Reorders packedDraws (and rebuilds packedIndices to match) so
+// every page covers a contiguous draw range, keeping terrain draws in the
+// leading [0, terrainDrawCount) slots the renderer expects. Terrain and static
+// draws land in separate pages so the terrain-first invariant survives the
+// reorder. Both loaders call this automatically when a file carries no pages.
+void buildImportedScenePageRanges(
+    ImportedScene& scene,
+    float pageSize = kImportedSceneDefaultPageSize);
+
 bool exportImportedSceneTerrainObj(const ImportedScene& scene, const std::filesystem::path& outputObjPath);
 
 }  // namespace odai::importer
