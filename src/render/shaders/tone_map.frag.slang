@@ -149,9 +149,7 @@ float depthOfFieldRadiusPixels(float viewDepth)
 float3 sampleDepthOfField(
     float2 uv,
     float centerDepth,
-    float3 centerColor,
-    float ssaoEnable,
-    float ssaoIntensity
+    float3 centerColor
 )
 {
     const float centerRadiusPixels = depthOfFieldRadiusPixels(centerDepth);
@@ -197,10 +195,7 @@ float3 sampleDepthOfField(
         const float sameLayer = 1.0 - smoothstep(depthTolerance, depthTolerance * 2.0, abs(sampleDepth - centerDepth));
         const float blurWeight = max(sameLayer, smoothstep(0.0, centerRadiusPixels, sampleRadiusPixels));
         const float weight = lerp(0.35, 1.0, blurWeight) * lerp(0.5, 1.0, sampleGeometry);
-        const float sampleSsao = clamp(ssaoTexture.SampleLevel(sampleUv, 0.0).x, 0.0, 1.0);
-        const float sampleAo = pow(max(sampleSsao, 0.001), ssaoIntensity);
-        const float sampleAoFactor = lerp(1.0, sampleAo, ssaoEnable * sampleGeometry);
-        colorSum += (hdrSceneColor.SampleLevel(sampleUv, 0.0).xyz * sampleAoFactor) * weight;
+        colorSum += hdrSceneColor.SampleLevel(sampleUv, 0.0).xyz * weight;
         weightSum += weight;
     }
 
@@ -519,15 +514,14 @@ float4 main(FragmentInput input) : SV_Target0
         return float4(ssao * geometryMask, ssao * geometryMask, ssao * geometryMask, 1.0);
     }
 
-    const float ssaoEnable = step(0.5, ssaoMode);
-    const float ssaoIntensity = clamp(camera.shadowConfig2.z, 0.0, 2.0);
-    const float ssaoContribution = pow(max(ssao, 0.001), ssaoIntensity);
-    const float aoFactor = lerp(1.0, ssaoContribution, ssaoEnable);
-    hdrColor *= lerp(1.0, aoFactor, geometryMask);
-
+    // SSAO is no longer applied here as a flat multiply on final color (that darkened
+    // direct sun along with ambient, muddying sunlit low-poly faces). It's now baked
+    // into the ambient term in imported_static.frag.slang's main-pass shading, so
+    // hdrSceneColor already carries it for surfaces covered by the normal-depth prepass.
+    // `ssao`/`ssaoMode` above remain in use only for the debug visualize branches.
     if (geometryMask > 0.5)
     {
-        hdrColor = sampleDepthOfField(input.inUv, viewDepth, hdrColor, ssaoEnable, ssaoIntensity);
+        hdrColor = sampleDepthOfField(input.inUv, viewDepth, hdrColor);
     }
 
     const float3x3 invViewRotation = transpose((float3x3)camera.view);

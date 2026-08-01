@@ -38,10 +38,11 @@ the blend otherwise. Vertex shader passes the flag through already (it forwards
 
 ## 2. Baked per-vertex AO on procgen meshes  (medium, the signature SC2013 cue)
 
-Outdoors, the imported-static shader hardcodes `ambientOcclusion = 1.0` (~line 453 —
-only `interiorMode` computes AO). Screen-space SSAO composited in tone-map is the only
-darkening, and it can't give the stable, drawn-on corner shading that sells the toy
-look.
+Outdoors, the imported-static shader now multiplies the interior sky-visibility term by
+screen-space SSAO (`sampleSsaoAmbientFactor`, folded into `ambientOcclusion` — see
+`imported_static.frag.slang`), scoped to the ambient term only so direct sun stays
+clean. That's still screen-space and blur-radius-limited, and it can't give the stable,
+drawn-on corner shading that sells the toy look.
 
 The voxel path already proves the pattern: `src/world/chunk_mesher.cc` bakes 4-bit
 per-vertex AO (`cornerAoLevel`, weights 0.36/0.36/0.20), and
@@ -56,9 +57,9 @@ per-vertex AO (`cornerAoLevel`, weights 0.36/0.36/0.20), and
   works at this scale: darken vertices at concave edges and where a face meets the
   ground plane (y ≈ lot height), plus optional short ambient ray casts against the
   building's own CsgMesh for inner corners (setbacks, art-deco tiers).
-- **Consume:** in `imported_static.frag.slang`, replace the hardcoded outdoor `1.0`
-  with the vertex AO (multiply into the SH ambient term only, like the voxel policy —
-  direct sun should stay clean or corners look dirty instead of soft).
+- **Consume:** in `imported_static.frag.slang`, fold the vertex AO into the same
+  `ambientOcclusion` term the SSAO factor already multiplies (ambient only, like the
+  voxel policy — direct sun should stay clean or corners look dirty instead of soft).
 - **Test:** headless via `odai_procgen_tests` — assert AO ∈ [0,1], ground-adjacent
   vertices darker than roof vertices, determinism.
 

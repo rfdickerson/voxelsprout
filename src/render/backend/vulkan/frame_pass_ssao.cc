@@ -150,9 +150,9 @@ void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
         );
         vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1u);
 
-        // Final consumer of the blurred AO texture is the main lighting fragment
-        // shader (sampled via the shared bindless descriptor set), not another
-        // compute pass.
+        // Final consumer of the blurred AO texture is imported_static.frag.slang's
+        // main-pass ambient term (binding 7) and the tonemap debug-visualize modes,
+        // not another compute pass.
         transitionImageLayout(
             commandBuffer,
             m_ssaoBlurImages[aoFrameIndex],
