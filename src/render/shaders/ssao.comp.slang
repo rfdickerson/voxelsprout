@@ -18,11 +18,14 @@ PushConstants pushConstants;
 static const int kSsaoSampleCount = 32;
 static const float kSsaoPower = 1.4;
 
-float hash12(float2 p)
+// Interleaved gradient noise (Jimenez 2014): a blue-noise-like dither with a much
+// less correlated spatial spectrum than a per-pixel hash, so the residual SSAO
+// dither reads as fine grain instead of the diagonal streaking hash12 left behind
+// after the bilateral blur softened (but didn't remove) its structure.
+float interleavedGradientNoise(float2 pixelCoord)
 {
-    const float3 p3 = frac(float3(p.x, p.y, p.x) * 0.1031);
-    const float3 q3 = p3 + dot(p3, float3(p3.y, p3.z, p3.x) + 33.33);
-    return frac((q3.x + q3.y) * q3.z);
+    const float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
+    return frac(magic.z * frac(dot(pixelCoord, magic.xy)));
 }
 
 float3 decodeViewNormal(float3 encodedNormal)
@@ -76,11 +79,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
     const float3 bitangent = normalize(cross(centerNormal, tangent));
 
-    uint texW = 0;
-    uint texH = 0;
-    normalDepthTexture.GetDimensions(texW, texH);
-    const float2 noiseScale = float2(float(texW), float(texH));
-    const float randomAngle = hash12(uv * noiseScale) * 6.2831853;
+    const float randomAngle = interleavedGradientNoise(float2(dispatchThreadId.xy)) * 6.2831853;
     const float s = sin(randomAngle);
     const float c = cos(randomAngle);
     const float2x2 rot = float2x2(c, -s, s, c);

@@ -11,6 +11,9 @@ static const int kBindlessIndexFogMap = 10;
 [[vk::binding(4, 0)]]
 Sampler2DShadow shadowMap;
 
+[[vk::binding(7, 0)]]
+Sampler2D<float4> ssaoBlurTexture;
+
 [[vk::binding(9, 0)]]
 Sampler3D<float4> voxelGiVolume;
 
@@ -27,6 +30,7 @@ static const uint kInvalidImportedTextureIndex = 0xffffffffu;
 
 struct FragmentInput
 {
+    float4 inScreenPosition : SV_Position;
     float3 inWorldPosition : TEXCOORD0;
     float3 inWorldNormal : TEXCOORD1;
     float3 inColor : TEXCOORD2;
@@ -34,6 +38,22 @@ struct FragmentInput
     nointerpolation uint inTextureIndex : TEXCOORD4;
     nointerpolation uint inFlags : TEXCOORD5;
 };
+
+// Screen-space AO is baked at half resolution (see ao.ssaoBlur in swapchain_targets.cc);
+// this mirrors waterScreenUv() in imported_water.frag.slang so the two shaders derive the
+// same full-res-normalized UV from SV_Position without needing the extent as a uniform.
+float sampleSsaoAmbientFactor(float4 screenPosition)
+{
+    uint texW = 0u;
+    uint texH = 0u;
+    ssaoBlurTexture.GetDimensions(texW, texH);
+    const float2 fullResolutionExtent = float2(float(max(texW, 1u)), float(max(texH, 1u))) * 2.0;
+    const float2 ssaoUv = clamp(screenPosition.xy / fullResolutionExtent, float2(0.0, 0.0), float2(1.0, 1.0));
+    const float ssaoRaw = clamp(ssaoBlurTexture.SampleLevel(ssaoUv, 0.0).x, 0.0, 1.0);
+    const float ssaoIntensity = clamp(camera.shadowConfig2.z, 0.0, 2.0);
+    const float ssaoEnable = step(0.5, camera.shadowVoxelGridSize.w);
+    return lerp(1.0, pow(max(ssaoRaw, 0.001), ssaoIntensity), ssaoEnable);
+}
 
 float4 sampleImportedAlbedo(FragmentInput input)
 {
@@ -450,7 +470,12 @@ float4 main(FragmentInput input) : SV_Target0
         skyVisibility = sampleImportedCascadedShadow(input.inWorldPosition, skyProbeNormal, viewDepth, skyProbeNdotL);
 #endif
     }
-    const float ambientOcclusion = interiorMode ? lerp(0.28, 1.0, skyVisibility) : 1.0;
+    // Interior sky-visibility term stays as-is; screen-space AO layers on top and is the
+    // only source of contact/corner darkening for outdoor surfaces (previously hardcoded
+    // to 1.0 here — see docs/stylized_low_poly.md). Scoped to ambient only, not direct
+    // sun, so sunlit faces stay clean instead of muddying under an AO halo.
+    const float ambientOcclusion =
+        (interiorMode ? lerp(0.28, 1.0, skyVisibility) : 1.0) * sampleSsaoAmbientFactor(input.inScreenPosition);
     const float3 ambient =
         (interiorMode ? float3(0.045, 0.047, 0.052) : float3(0.18, 0.19, 0.21)) +
         (ambientIrradiance * float3(0.92, 0.95, 1.00) * (interiorMode ? 0.22 : 0.58));

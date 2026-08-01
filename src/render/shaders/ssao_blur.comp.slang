@@ -16,8 +16,8 @@ struct PushConstants
 [[vk::push_constant]]
 PushConstants pushConstants;
 
-static const int kSsaoBlurRadius = 6;
-static const float kSsaoBlurSigma = 3.0;
+static const int kSsaoBlurRadius = 4;
+static const float kSsaoBlurSigma = 2.2;
 
 float3 decodeViewNormal(float3 encodedNormal)
 {
@@ -60,21 +60,20 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
         const float2 offsetX = float2(texelSize.x * fi, 0.0);
         const float2 offsetY = float2(0.0, texelSize.y * fi);
-        const float2 offsetD1 = float2(texelSize.x * fi, texelSize.y * fi);
-        const float2 offsetD2 = float2(texelSize.x * fi, -texelSize.y * fi);
 
-        const float2 sampleUvs[8] = {
+        // Axis-only cross (no diagonals): the bilateral normal/depth weighting already
+        // rejects cross-edge contamination at this radius, so the diagonal taps added
+        // little beyond what the cross already captures. Dropping them takes the pass
+        // from 49 taps (6-ring cross+diagonal) to 17 (4-ring cross), the bulk of the
+        // per-frame SSAO blur cost, without a visible quality loss on flat low-poly faces.
+        const float2 sampleUvs[4] = {
             uv + offsetX,
             uv - offsetX,
             uv + offsetY,
-            uv - offsetY,
-            uv + offsetD1,
-            uv - offsetD1,
-            uv + offsetD2,
-            uv - offsetD2
+            uv - offsetY
         };
 
-        for (int j = 0; j < 8; ++j)
+        for (int j = 0; j < 4; ++j)
         {
             const float2 suv = sampleUvs[j];
             if (suv.x <= 0.0 || suv.x >= 1.0 || suv.y <= 0.0 || suv.y >= 1.0) continue;

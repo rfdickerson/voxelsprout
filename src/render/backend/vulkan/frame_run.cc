@@ -2214,7 +2214,9 @@ void RendererBackend::renderFrame(
     prepassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
     recordNormalDepthPrepass(frameExecutionContext, prepassInputs);
 
-    recordSsaoPasses(frameExecutionContext);
+    if (m_debugEnableSsao) {
+        recordSsaoPasses(frameExecutionContext);
+    }
 
     m_normalDepthImageInitialized[aoFrameIndex] = true;
     m_aoDepthImageInitialized[imageIndex] = true;
