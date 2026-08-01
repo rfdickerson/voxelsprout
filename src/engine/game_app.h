@@ -9,7 +9,9 @@
 #include "ui/ui_input.h"
 #include "world/chunk_grid.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -39,6 +41,16 @@ protected:
     // Override to return true in tools that draw nothing but the 2D UI overlay.
     // Checked in init() before the renderer is initialized. Default: false.
     virtual bool wantsMinimalRendering() const { return false; }
+
+    // Voxel chunk content for a game that renders real world/ terrain (as opposed to an
+    // ImportedScene or pure 2D/UI content). Pass a pointer to submitFrame() when the game
+    // has resident chunks to draw; leave it null (the default) to render nothing, which
+    // reproduces prior behavior exactly for every non-voxel game.
+    struct WorldFrameContent {
+        const world::ChunkGrid* chunkGrid = nullptr;
+        std::span<const std::size_t> visibleChunkIndices{};
+        render::VoxelPreview voxelPreview{};
+    };
 
     // Load four font faces from disk and register their atlases with the renderer.
     // Call from onInit() after the renderer is up.
@@ -72,7 +84,13 @@ protected:
     // re-upload via uploadImportedScene() every frame. The spans must stay
     // alive through the call only.
     void submitFrame(const render::CameraPose& camera, float simulationAlpha = 0.0f,
-                     const render::ImportedActorFrameData* importedActors = nullptr);
+                     const render::ImportedActorFrameData* importedActors = nullptr,
+                     const WorldFrameContent* worldContent = nullptr);
+
+    // Capture the mouse into relative/FPS-look mode (GLFW_CURSOR_DISABLED), or release it
+    // back to the default hidden-but-free cursor (GLFW_CURSOR_HIDDEN). Games with no
+    // mouselook mode never need to call this.
+    void setMouseCaptured(bool captured);
 
     GLFWwindow*    m_window = nullptr;
     render::Renderer m_renderer;

@@ -217,15 +217,26 @@ void GameApp::beginFrameDraw() {
 }
 
 void GameApp::submitFrame(const render::CameraPose& camera, float simulationAlpha,
-                          const render::ImportedActorFrameData* importedActors) {
+                          const render::ImportedActorFrameData* importedActors,
+                          const WorldFrameContent* worldContent) {
     m_uiContext.buildAppend(m_uiDrawList);
     // Custom cursor: drawn last so it renders above every widget. GameApp tools
     // have no mouselook mode, so it's always shown.
     odai::ui::drawCursor(m_uiDrawList, m_uiInput.mousePx, contentScale());
     m_renderer.setUiDrawData(m_uiDrawList.data());
-    const render::VoxelPreview noPreview{};
-    m_renderer.renderFrame(
-        m_emptyGrid, m_emptySimulation, camera, noPreview, simulationAlpha, {}, importedActors);
+
+    const world::ChunkGrid& grid = (worldContent && worldContent->chunkGrid)
+        ? *worldContent->chunkGrid : m_emptyGrid;
+    const render::VoxelPreview preview = worldContent ? worldContent->voxelPreview : render::VoxelPreview{};
+    const std::span<const std::size_t> visible =
+        worldContent ? worldContent->visibleChunkIndices : std::span<const std::size_t>{};
+
+    m_renderer.renderFrame(grid, m_emptySimulation, camera, preview, simulationAlpha, visible, importedActors);
+}
+
+void GameApp::setMouseCaptured(bool captured) {
+    if (!m_window) return;
+    glfwSetInputMode(m_window, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_HIDDEN);
 }
 
 } // namespace odai::engine

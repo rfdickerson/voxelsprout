@@ -813,6 +813,52 @@ if(ODAI_BUILD_APP)
         endif()
 
     # ---------------------------------------------------------------------------
+    # odai_game_voxelcraft — first-person voxel sandbox (Vulkan)
+    # ---------------------------------------------------------------------------
+        add_executable(odai_game_voxelcraft
+            src/games/voxelcraft/voxelcraft_main.cc
+            src/games/voxelcraft/voxelcraft_app.cc
+            src/games/voxelcraft/voxelcraft_player.cc
+            src/games/voxelcraft/voxelcraft_streaming.cc
+            src/engine/game_app.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_game_voxelcraft PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_game_voxelcraft PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_game_voxelcraft PRIVATE
+            odai_ui odai_ui_vulkan odai_audio
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_game_voxelcraft PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_game_voxelcraft PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_game_voxelcraft slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_game_voxelcraft PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_game_voxelcraft PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
+    # ---------------------------------------------------------------------------
     # odai_ui_editor — Drag-and-drop UI editor for artists (Vulkan)
     # ---------------------------------------------------------------------------
         add_executable(odai_ui_editor
@@ -1211,10 +1257,13 @@ if(BUILD_TESTING)
     add_executable(odai_foundation_tests
         tests/foundation_tests.cc
         src/core/log.cc
+        src/world/world.cc
         src/world/chunk_grid_worldgen.cc
         src/world/magica_voxel.cc
         src/world/chunk_mesher.cc
         src/world/clipmap_index.cc
+        src/games/voxelcraft/voxelcraft_player.cc
+        src/games/voxelcraft/voxelcraft_streaming.cc
     )
     target_include_directories(odai_foundation_tests PRIVATE src)
 
