@@ -4,16 +4,20 @@ This doc exists because a large feature wishlist for a "Modern Vulkan Strategy G
 
 ## What this repo actually is
 
-Per `AGENTS.md`, voxelsprout is a C++20/Vulkan engine for exploring and rendering Morrowind-style worlds (with a Fallout: New Vegas import path alongside it), built around four real pillars:
+Per `AGENTS.md`, this project's direction is defined by four reference touchstones — not generic engine categories, but specific games whose feel/systems are the actual target:
 
-- **World exploration** — voxel terrain, chunk streaming, and Bethesda-asset import (`src/world/`, `src/import/`)
-- **Hex strategy layer** — a turn-based 4X game on a hex grid (`src/game/`)
-- **Factory simulation** — a conveyor-belt/pipe sim (`src/sim/`)
-- **UI framework + mini-games** — a Vulkan-free retained UI toolkit and several small prototypes (`src/ui/`, `src/games/`)
+| Touchstone | What it means here | Where it lives |
+|---|---|---|
+| **Morrowind** | Open-world exploration, hand-placed regional identity, readable terrain/settlements | `src/world/`, `src/import/` |
+| **Civilization VI** | Turn-based hex-grid 4X: yields, tech, borders, diplomacy, map modes | `src/game/` |
+| **SimCity (2013)** | Agent-driven city sim: RCI zoning, traffic, land value, data overlays | `src/games/citybuilder/` |
+| **Dragon Age: Origins** | Party-based real-time-with-pause combat, branching dialogue, companion approval | greenfield — see below |
 
-`AGENTS.md` is also explicit about what this project is **not**: "a generic engine framework," "an ECS experiment," "an enterprise architecture exercise," or "a plugin-based platform." It prioritizes "practical implementation over generic engine architecture." That matters here because a large chunk of the wishlist assumes a different kind of engine — a real-time mass-battle RTS with netcode and a full scenario-editor suite — which isn't this project's direction.
+`AGENTS.md` is also explicit about what this project is **not**: "a generic engine framework," "an ECS experiment," "an enterprise architecture exercise," or "a plugin-based platform." It prioritizes "practical implementation over generic engine architecture." Those are style constraints on *how* things get built, not a cap on *which genres* get pursued — chasing four different touchstones is fine as long as each is built the same explicit, flat-data, no-generic-framework way the rest of the codebase already is.
 
-**Ground rule for what follows:** a feature earns a spot on this roadmap because it serves one of the four pillars above, not because a generic strategy-engine spec listed it.
+That said, a large chunk of the original wishlist assumes a different kind of engine entirely — a real-time mass-battle RTS with netcode and a full scenario-editor suite — which lines up with none of the four touchstones above and stays out of scope (see below).
+
+**Ground rule for what follows:** a feature earns a spot on this roadmap because it serves one of the four touchstones above, not because a generic strategy-engine spec listed it.
 
 ## Legend
 
@@ -91,12 +95,45 @@ Per `AGENTS.md`, voxelsprout is a C++20/Vulkan engine for exploring and renderin
 | Virtual texturing | ⬜ | Not implemented |
 | Nav-aware terrain data | ⬜ | Pathfinding lives entirely in the separate hex-grid layer, not derived from voxel terrain |
 
+### City Simulation (SimCity 2013 touchstone)
+
+This is further along than the original wishlist survey suggested — that survey only looked at `src/game/`/`src/sim/`; `src/games/citybuilder/` is a separate, substantial prototype (~6,600 lines across `citybuilder_app.{h,cc}` and `citybuilder_citizens.{h,cc}`) whose own header comment describes it as "a compact SimCity-2013-style city builder."
+
+| Feature | Status | Notes |
+|---|---|---|
+| RCI zoning | ✅ | `Zone` enum (Residential/Commercial/Industrial), `citybuilder_app.h` |
+| Traffic simulation | ✅ | Per-tile `trafficLoad` congestion EMA + destination-routed citizen trips (`citybuilder_app.h`, `citybuilder_citizens.h::rollTrip`) |
+| Land value / desirability overlay | ✅ | Toggleable data overlay, `m_showLandValue` in `citybuilder_app.h` |
+| Named-citizen roster with schedules | ✅ | Homes/workplaces/spouses/traits, commute-aware trip rolling (`citybuilder_citizens.h`) |
+| Moddable "tabloid" story system | ✅ | Lua-driven story templates/weights (`games/citybuilder/script/city_script.h`) so narrative text is data, not hardcoded |
+| Emergency services (traffic-aware dispatch) | 🟡 | Siren-speed unit exists (`citybuilder_app.h`); full coverage-radius service modeling not confirmed |
+| Population/economy/pollution heatmaps | 🟡 | Land-value overlay exists; other data layers from the original wishlist (pollution, education, health coverage) not confirmed present |
+| Regional play (multiple connected cities) | ⬜ | Not implemented — single city/map only |
+| Modular building growth stages (SimCity 2013's signature) | 🟡 | Zoning + citizen growth exist; whether buildings visually grow through density tiers wasn't confirmed without a deeper read |
+
+### Party RPG / Narrative (Dragon Age: Origins touchstone)
+
+This is the newest touchstone and, honestly, close to a blank page. The one thing in the repo that looks adjacent — `src/games/swtor/` — turns out not to be: it's a static UI-chrome mockup of an MMO HUD (`swtor_app.cc`, 1,178 lines) with **hardcoded** placeholder state (`m_playerHp = 0.82f`, fake chat log, fake cooldowns) and no underlying game logic. It demonstrates HUD layout patterns (unit frames, action bars, buff rows, character/inventory window) that are reusable, but none of Dragon Age: Origins' defining systems exist anywhere in the codebase.
+
+| Feature | Status | Notes |
+|---|---|---|
+| MMO-style HUD chrome (unit frames, action bars, chat, inventory grid) | 🟡 | Exists as static mockup only (`games/swtor/swtor_app.cc`) — layout is reusable, none of it is wired to real state |
+| Skeletal animation / GPU skinning | ⬜ | Foundational blocker — see Units and Armies above; nothing renders animated characters today |
+| Branching dialogue system | ⬜ | Not implemented. Closest adjacent infrastructure: `src/ui/rich_text.h` (markup rendering) and `src/ui/document/ui_document.h` (data-bound UI) could host dialogue UI once a dialogue-tree data format and state machine exist |
+| Companion approval / relationship system | ⬜ | Not implemented anywhere |
+| Real-time-with-pause tactical party combat | ⬜ | Not implemented. Distinct from — and much smaller in scope than — the mass-battle rendering that's out of scope below (4–8 characters, not thousands) |
+| Origin-story branching narrative structure | ⬜ | Not implemented; would likely build on the same dialogue-tree infrastructure above |
+
 ### Units and Armies
+
+Two different scales matter here and shouldn't be conflated: Civ6-scale strategic units (dozens on a hex map, already covered under Simulation/AI below) versus Dragon-Age-scale party combat (4–8 fully rendered, skeletally animated characters on screen at once). The wishlist's "rendering thousands of units" assumes RTS mass-battle scale, which neither touchstone calls for.
 
 | Feature | Status | Notes |
 |---|---|---|
 | Selection UI | 🟡 | `ui/widgets/selection_inspector_panel.h` is a UI-side inspector, not a 3D outline pass |
-| Rendering thousands of units, skinning, flocking, formations, batching/instancing for units | ⬜ / 🚫 | Current units are flat per-hex 4X data (`game/units.h`); no skinned-mesh rendering pipeline exists at all. Building a mass real-time battle renderer is a genre pivot away from the turn-based 4X + exploration identity this project has — see Out of Scope below. |
+| Hex-scale unit data (Civ6 touchstone) | ✅ | Flat per-hex unit data, HP/movement/supply (`game/units.h`) — adequate at this scale, no rendering gap to close |
+| Small-party skeletal animation + rendering (Dragon Age touchstone) | ⬜ | Does not exist. `import/fnv/nif_scene.cc` parses NIF skin-instance references but nothing consumes them — no bone hierarchy, no GPU skinning shader, no animation sampling anywhere in `render/`. This is the actual foundational gap for the Dragon Age pillar, not a "not needed" item. |
+| Mass real-time battle rendering (thousands of skinned units, flocking, formations) | 🚫 | Out of scope — see below. Distinct from the small-party rendering above; do not conflate the two when scoping work. |
 
 ### Simulation Architecture
 
@@ -229,7 +266,7 @@ This is the strongest area of the codebase relative to the wishlist — see `doc
 
 These wishlist items directly conflict with `AGENTS.md`'s stated non-goals and are **not planned** unless the project's stated focus changes:
 
-- **Mass real-time battle rendering** (thousands of skinned/animated units, flocking, formation systems, battlefield VFX at RTS scale) — this is a genre pivot away from the turn-based hex 4X + exploration identity the project actually has, and would require building an entire skeletal-animation and crowd-simulation stack from nothing.
+- **Mass real-time battle rendering** (thousands of skinned/animated units, flocking, formation systems, battlefield VFX at RTS scale) — none of the four reference touchstones call for this. Do not confuse this with small-party (4–8 character) skeletal animation for the Dragon Age touchstone, which *is* in scope (see Party RPG / Narrative above) — the "no crowd-simulation stack" line is drawn at scale, not at "any animated characters at all."
 - **Data-oriented ECS** — explicitly rejected: "This is not... an ECS experiment."
 - **Lockstep/deterministic multiplayer netcode** — conflicts with "prefer practical implementation over generic engine architecture" and "not an enterprise architecture exercise"; no current pillar needs it.
 - **Full in-engine editor suite** (world sculpting, scenario editor, faction/diplomacy editor, tech-tree editor, quest editor) — conflicts with the same practical-over-generic principle; the existing offline-cooker content pipeline is the intentional alternative.
@@ -237,21 +274,29 @@ These wishlist items directly conflict with `AGENTS.md`'s stated non-goals and a
 
 ## Prioritized next steps
 
-This is a starting recommendation, not a commitment — sequencing is the user's call.
+This is a starting recommendation, not a commitment — sequencing is the user's call. Ordered roughly by (existing maturity + cost) across the four touchstones, cheapest/most-built first:
 
-**Tier 1 — strategy-layer polish (near-term, high value, small/local).** The hex 4X layer already renders borders and fog of war and simulates supply/pathfinding, but gives the player no visual feedback loop for any of it:
+**Tier 1 — Civ6 strategy-layer polish (near-term, high value, small/local).** The hex 4X layer already renders borders and fog of war and simulates supply/pathfinding, but gives the player no visual feedback loop for any of it:
 - Strategic map labels (settlement names already stored, just not drawn)
 - Movement-range overlay (reachability already computed by `findHexPath`)
 - Supply-line overlay (supply cost already simulated in `game/units.h`)
 - Line-of-sight visualization
 
-**Tier 2 — rendering polish within the existing pass structure.**
+**Tier 2 — SimCity city-sim depth.** `citybuilder` is already the most mature of the four touchstone prototypes; the remaining gaps are additive data layers, not new architecture:
+- Pollution/education/health-coverage heatmaps alongside the existing land-value overlay
+- Service coverage-radius modeling (fire/police/hospital) building on the existing siren-dispatch unit
+- Confirm/finish modular building-growth visual tiers if not already complete
+- Regional play (multiple connected maps) — larger, do later within this tier
+
+**Tier 3 — Morrowind rendering fidelity (polish within the existing pass structure).**
 - TAA (jitter + reprojection added into the existing frame graph)
 - Terrain splat-map blending (replacing/augmenting the current slope-based blend)
 - Shader hot reload for the Slang pipeline
-- Live save/load for `GameState` (not just the static map)
-
-**Tier 3 — larger, still aligned with existing pillars.**
 - Metallic-roughness PBR terms layered onto the existing baked-GI model
 - GPU-side (compute) frustum/occlusion culling, replacing the current CPU-computed path
-- Offline mesh-LOD generation for imported static meshes
+
+**Tier 4 — Dragon Age foundation (biggest lift, start with infrastructure, not features).** Nothing here exists yet, so sequence bottom-up:
+1. GPU skeletal animation (bone buffers + skinning shader) — the actual blocker for everything else in this tier; finally consumes the NIF skin data `import/fnv/nif_scene.cc` already parses but discards
+2. Dialogue-tree data format + UI, built on the existing `ui/rich_text.h` + `ui/document/` data-binding infrastructure rather than a new UI stack
+3. Companion approval/relationship state and small-party (4–8 character) real-time-with-pause combat loop
+4. Live save/load for `GameState` generally (units, cities, empires, tech, and eventually companion/relationship state) — currently only the static map serializes
