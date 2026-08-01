@@ -257,6 +257,18 @@ void RendererBackend::renderFrame(
                        }) == chunkGrid.chunks().end();
         });
     }
+    if (!m_externalChunkMeshResults.empty()) {
+        std::erase_if(m_externalChunkMeshResults, [&](const odai::world::ChunkMeshResult& result) {
+            return std::find_if(
+                       chunkGrid.chunks().begin(),
+                       chunkGrid.chunks().end(),
+                       [&](const odai::world::Chunk& chunk) {
+                           return chunk.chunkX() == result.key.x &&
+                                  chunk.chunkY() == result.key.y &&
+                                  chunk.chunkZ() == result.key.z;
+                       }) == chunkGrid.chunks().end();
+        });
+    }
     m_debugChunkPendingRemeshCount = static_cast<std::uint32_t>(m_pendingChunkRemeshKeys.size());
     m_debugChunkRemeshBatchCount = 0;
     if (m_chunkMeshRebuildRequested || !m_pendingChunkRemeshKeys.empty()) {

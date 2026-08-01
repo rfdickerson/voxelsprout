@@ -6,6 +6,7 @@
 #include "math/math.h"
 #include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
+#include "world/grass_scatter.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -1896,6 +1897,85 @@ bool RendererBackend::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, s
 }
 
 
+bool RendererBackend::uploadChunkMeshes(
+    const odai::world::ChunkGrid& chunkGrid,
+    std::vector<odai::world::ChunkMeshResult> results
+) {
+    if (m_device == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (results.empty()) {
+        return true;
+    }
+    if (m_chunkMeshRebuildRequested) {
+        // A queued full rebuild re-meshes everything synchronously anyway.
+        return true;
+    }
+    // Map each result to its resident chunk index; drop results for chunks
+    // that streamed out between meshing and upload.
+    std::vector<std::size_t> chunkIndices;
+    chunkIndices.reserve(results.size());
+    for (const odai::world::ChunkMeshResult& result : results) {
+        for (std::size_t chunkIndex = 0; chunkIndex < chunkGrid.chunks().size(); ++chunkIndex) {
+            const odai::world::Chunk& chunk = chunkGrid.chunks()[chunkIndex];
+            if (chunk.chunkX() == result.key.x &&
+                chunk.chunkY() == result.key.y &&
+                chunk.chunkZ() == result.key.z) {
+                chunkIndices.push_back(chunkIndex);
+                break;
+            }
+        }
+    }
+    if (chunkIndices.empty()) {
+        return true;
+    }
+    for (odai::world::ChunkMeshResult& result : results) {
+        // Replace any older un-consumed result for the same chunk.
+        const auto existingIt = std::find_if(
+            m_externalChunkMeshResults.begin(),
+            m_externalChunkMeshResults.end(),
+            [&](const odai::world::ChunkMeshResult& existing) { return existing.key == result.key; });
+        if (existingIt != m_externalChunkMeshResults.end()) {
+            *existingIt = std::move(result);
+        } else {
+            m_externalChunkMeshResults.push_back(std::move(result));
+        }
+    }
+    // Queue through the existing per-frame remesh path so staging happens
+    // inside renderFrame with the frame arena in a valid state; the remesh
+    // loop consumes the stored meshes instead of running the mesher inline.
+    return updateChunkMesh(chunkGrid, std::span<const std::size_t>(chunkIndices));
+}
+
+
+bool RendererBackend::consumeExternalChunkMeshResult(
+    std::size_t chunkArrayIndex,
+    odai::world::ChunkMeshingStats& outStats
+) {
+    if (chunkArrayIndex >= m_chunkResidentKeys.size()) {
+        return false;
+    }
+    const ChunkResidentKey& residentKey = m_chunkResidentKeys[chunkArrayIndex];
+    const auto resultIt = std::find_if(
+        m_externalChunkMeshResults.begin(),
+        m_externalChunkMeshResults.end(),
+        [&](const odai::world::ChunkMeshResult& result) {
+            return result.key.x == residentKey.chunkX &&
+                   result.key.y == residentKey.chunkY &&
+                   result.key.z == residentKey.chunkZ;
+        });
+    if (resultIt == m_externalChunkMeshResults.end()) {
+        return false;
+    }
+    if (chunkArrayIndex < m_chunkLodMeshCache.size()) {
+        m_chunkLodMeshCache[chunkArrayIndex] = std::move(resultIt->meshes);
+    }
+    outStats = resultIt->stats;
+    m_externalChunkMeshResults.erase(resultIt);
+    return true;
+}
+
+
 bool RendererBackend::useSpatialPartitioningQueries() const {
     return m_debugEnableSpatialQueries;
 }
@@ -2078,104 +2158,26 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
         if (chunkArrayIndex >= chunks.size()) {
             return;
         }
-        const odai::world::Chunk& chunk = chunks[chunkArrayIndex];
-        const int grassDistanceX = std::abs(chunk.chunkX() - residentCenterChunkX);
-        const int grassDistanceZ = std::abs(chunk.chunkZ() - residentCenterChunkZ);
+        static_assert(
+            sizeof(odai::world::GrassInstance) == sizeof(GrassBillboardInstance),
+            "world::GrassInstance must match the renderer's per-instance vertex layout"
+        );
         std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
-        const bool previouslyGrassActive = !grassInstances.empty();
-        grassInstances.clear();
-        const int grassActiveRadius =
-            previouslyGrassActive ? kGrassRetainedChunkRadius : kGrassActiveChunkRadius;
-        if (grassDistanceX > grassActiveRadius || grassDistanceZ > grassActiveRadius) {
-            return;
-        }
-        grassInstances.reserve(448);
-
-        const float chunkWorldX = static_cast<float>(chunk.chunkX() * odai::world::Chunk::kSizeX);
-        const float chunkWorldY = static_cast<float>(chunk.chunkY() * odai::world::Chunk::kSizeY);
-        const float chunkWorldZ = static_cast<float>(chunk.chunkZ() * odai::world::Chunk::kSizeZ);
-
-        for (int y = 0; y < odai::world::Chunk::kSizeY - 1; ++y) {
-            for (int z = 0; z < odai::world::Chunk::kSizeZ; ++z) {
-                for (int x = 0; x < odai::world::Chunk::kSizeX; ++x) {
-                    if (chunk.voxelAt(x, y, z).type != odai::world::VoxelType::Grass) {
-                        continue;
-                    }
-                    if (chunk.voxelAt(x, y + 1, z).type != odai::world::VoxelType::Empty) {
-                        continue;
-                    }
-
-                    const std::uint32_t hash =
-                        static_cast<std::uint32_t>(x * 73856093) ^
-                        static_cast<std::uint32_t>(y * 19349663) ^
-                        static_cast<std::uint32_t>(z * 83492791) ^
-                        static_cast<std::uint32_t>((chunk.chunkX() + 101) * 2654435761u) ^
-                        static_cast<std::uint32_t>((chunk.chunkZ() + 193) * 2246822519u);
-                    // Keep grass sparse and deterministic so placement feels natural and stable.
-                    if ((hash % 100u) >= 22u) {
-                        continue;
-                    }
-                    const int clumpCount = 2 + static_cast<int>((hash >> 24u) & 0x1u);
-                    for (int clumpIndex = 0; clumpIndex < clumpCount; ++clumpIndex) {
-                        const std::uint32_t clumpHash = hash ^ (0x9E3779B9u * static_cast<std::uint32_t>(clumpIndex + 1));
-                        const float rand0 = static_cast<float>(clumpHash & 0xFFu) / 255.0f;
-                        const float rand1 = static_cast<float>((clumpHash >> 8u) & 0xFFu) / 255.0f;
-                        const float rand2 = static_cast<float>((clumpHash >> 16u) & 0xFFu) / 255.0f;
-                        const float rand3 = static_cast<float>((clumpHash >> 24u) & 0xFFu) / 255.0f;
-                        const std::uint32_t tintHash = clumpHash ^ 0x85EBCA6Bu;
-                        const float tintRand0 = static_cast<float>(tintHash & 0xFFu) / 255.0f;
-                        const float tintRand1 = static_cast<float>((tintHash >> 8u) & 0xFFu) / 255.0f;
-                        const float tintRand2 = static_cast<float>((tintHash >> 16u) & 0xFFu) / 255.0f;
-                        const float radial = 0.06f + (0.18f * rand2);
-                        const float angle = rand1 * (2.0f * 3.14159265f);
-                        const float jitterX = std::cos(angle) * radial;
-                        const float jitterZ = std::sin(angle) * radial;
-                        const float yawRadians = rand0 * (2.0f * 3.14159265f);
-                        const float yJitter = rand3 * 0.08f;
-
-                        GrassBillboardInstance instance{};
-                        instance.worldPosYaw[0] = chunkWorldX + static_cast<float>(x) + 0.5f + jitterX;
-                        // Lift slightly above the supporting voxel top to avoid depth tie flicker.
-                        instance.worldPosYaw[1] = chunkWorldY + static_cast<float>(y) + 1.02f + yJitter;
-                        instance.worldPosYaw[2] = chunkWorldZ + static_cast<float>(z) + 0.5f + jitterZ;
-                        instance.worldPosYaw[3] = yawRadians;
-                        // Mostly green bushes, with some flowers.
-                        const bool placeFlower = ((clumpHash >> 5u) % 100u) < 18u;
-                        if (placeFlower) {
-                            // Bias strongly toward poppies (tiles 1-2), with rarer lighter wildflowers (3-4).
-                            const bool choosePoppy = ((clumpHash >> 13u) % 100u) < 74u;
-                            const std::uint32_t flowerTile = choosePoppy
-                                ? (1u + ((clumpHash >> 9u) & 0x1u))
-                                : (3u + ((clumpHash >> 10u) & 0x1u));
-                            if (choosePoppy) {
-                                const float poppyBoost = 0.96f + (tintRand1 * 0.10f);
-                                instance.colorTint[0] = (0.92f + (tintRand0 * 0.14f)) * poppyBoost;
-                                instance.colorTint[1] = (0.92f + (tintRand2 * 0.14f)) * poppyBoost;
-                                instance.colorTint[2] = (0.92f + (tintRand1 * 0.14f)) * poppyBoost;
-                            } else {
-                                const float flowerBoost = 0.94f + (tintRand1 * 0.12f);
-                                instance.colorTint[0] = (0.94f + (tintRand0 * 0.14f)) * flowerBoost;
-                                instance.colorTint[1] = (0.94f + (tintRand2 * 0.14f)) * flowerBoost;
-                                instance.colorTint[2] = (0.94f + (tintRand1 * 0.14f)) * flowerBoost;
-                            }
-                            instance.colorTint[3] = static_cast<float>(flowerTile);
-                        } else {
-                            // Golden grass variation.
-                            const float warmBias = 0.50f + (0.50f * tintRand0);
-                            const float dryBias = tintRand2;
-                            const float brightness = 0.82f + (tintRand1 * 0.32f);
-                            const float redBase = std::lerp(0.90f, 1.28f, warmBias);
-                            const float greenBase = std::lerp(0.98f, 1.36f, (warmBias * 0.70f) + (dryBias * 0.30f));
-                            const float blueBase = std::lerp(0.56f, 0.20f, warmBias);
-                            instance.colorTint[0] = redBase * brightness;
-                            instance.colorTint[1] = greenBase * brightness;
-                            instance.colorTint[2] = blueBase * brightness;
-                            instance.colorTint[3] = 4.0f;
-                        }
-                        grassInstances.push_back(instance);
-                    }
-                }
-            }
+        odai::world::GrassScatterParams grassParams{};
+        grassParams.residentCenterChunkX = residentCenterChunkX;
+        grassParams.residentCenterChunkZ = residentCenterChunkZ;
+        grassParams.activeRadius = kGrassActiveChunkRadius;
+        grassParams.retainedRadius = kGrassRetainedChunkRadius;
+        grassParams.previouslyActive = !grassInstances.empty();
+        const std::vector<odai::world::GrassInstance> builtInstances =
+            odai::world::buildGrassInstances(chunks[chunkArrayIndex], grassParams);
+        grassInstances.resize(builtInstances.size());
+        if (!builtInstances.empty()) {
+            std::memcpy(
+                grassInstances.data(),
+                builtInstances.data(),
+                builtInstances.size() * sizeof(GrassBillboardInstance)
+            );
         }
     };
 
@@ -2197,8 +2199,10 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
     if (fullRemesh) {
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
             odai::world::ChunkMeshingStats meshingStats{};
-            m_chunkLodMeshCache[chunkArrayIndex] =
-                odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions, &meshingStats);
+            if (!consumeExternalChunkMeshResult(chunkArrayIndex, meshingStats)) {
+                m_chunkLodMeshCache[chunkArrayIndex] =
+                    odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions, &meshingStats);
+            }
             rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
@@ -2222,8 +2226,10 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
 
         for (const std::size_t chunkArrayIndex : uniqueRemeshChunkIndices) {
             odai::world::ChunkMeshingStats meshingStats{};
-            m_chunkLodMeshCache[chunkArrayIndex] =
-                odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions, &meshingStats);
+            if (!consumeExternalChunkMeshResult(chunkArrayIndex, meshingStats)) {
+                m_chunkLodMeshCache[chunkArrayIndex] =
+                    odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions, &meshingStats);
+            }
             rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],

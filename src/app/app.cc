@@ -155,6 +155,10 @@ constexpr double kSimulationFixedHz = 60.0;
 constexpr double kSimulationFixedStepSeconds = 1.0 / kSimulationFixedHz;
 constexpr double kFrameDeltaClampSeconds = 0.25;
 constexpr int kMaxSimulationStepsPerFrame = 8;
+// Off-thread chunk mesh jobs launched per frame. Meshing no longer costs
+// main-thread time, so this bounds worker occupancy and per-frame upload
+// size rather than remesh CPU (the old inline budget was 6).
+constexpr std::size_t kChunkMeshJobsPerFrame = 8;
 
 struct Aabb3f {
     float minX = 0.0f;
@@ -1425,6 +1429,29 @@ void App::update(float dt, float simulationAlpha) {
     m_renderer.setSpatialQueryStats(false, odai::world::SpatialQueryStats{}, 0u);
     m_renderCameraPose = cameraPose;
     updateUiOverlay(dt);
+    // Pump the off-thread chunk meshing pipeline: launch jobs for chunks
+    // dirtied since last frame (nearest first) and hand finished meshes to the
+    // renderer, which uploads them without running its inline mesher.
+    {
+        // The renderer's debug UI can switch meshing mode; mirror it so async
+        // meshes match what its own full-rebuild path would produce.
+        const odai::world::MeshingOptions rendererMeshingOptions = m_renderer.chunkMeshingOptions();
+        if (rendererMeshingOptions.mode != m_chunkMeshScheduler.meshingOptions().mode) {
+            m_chunkMeshScheduler.setMeshingOptions(rendererMeshingOptions);
+        }
+        const int cameraChunkX = static_cast<int>(
+            std::floor(m_camera.x / static_cast<float>(odai::world::Chunk::kSizeX)));
+        const int cameraChunkZ = static_cast<int>(
+            std::floor(m_camera.z / static_cast<float>(odai::world::Chunk::kSizeZ)));
+        m_chunkMeshScheduler.kickJobs(
+            m_world.chunkGrid(), cameraChunkX, cameraChunkZ, kChunkMeshJobsPerFrame);
+        std::vector<odai::world::ChunkMeshResult> readyMeshes =
+            m_chunkMeshScheduler.drainReady(m_world.chunkGrid());
+        if (!readyMeshes.empty() &&
+            !m_renderer.uploadChunkMeshes(m_world.chunkGrid(), std::move(readyMeshes))) {
+            VOX_LOGE("app") << "failed to queue off-thread chunk meshes for upload";
+        }
+    }
     m_renderer.renderFrame(
         m_world.chunkGrid(),
         m_simulation,
@@ -3262,12 +3289,23 @@ void App::refreshStreamingWindow(bool forceRendererUpload) {
     m_currentVisibleChunkMask.assign(m_world.chunkGrid().chunkCount(), 0u);
     m_directlyVisibleChunkMask.assign(m_world.chunkGrid().chunkCount(), 0u);
 
-    const bool uploadOk = streamingUpdate.requiresFullMeshUpload || forceRendererUpload
-        ? m_renderer.updateChunkMesh(m_world.chunkGrid())
-        : m_renderer.updateChunkMesh(
-            m_world.chunkGrid(),
-            std::span<const std::size_t>(streamingUpdate.residentChunkIndicesNeedingUpload)
-        );
+    bool uploadOk = true;
+    if (streamingUpdate.requiresFullMeshUpload || forceRendererUpload) {
+        uploadOk = m_renderer.updateChunkMesh(m_world.chunkGrid());
+    } else {
+        // Incremental refresh: dirty the scheduler instead of remeshing on the
+        // main thread; workers mesh the chunks and update() uploads results.
+        const std::vector<odai::world::Chunk>& chunks = m_world.chunkGrid().chunks();
+        for (const std::size_t chunkIndex : streamingUpdate.residentChunkIndicesNeedingUpload) {
+            if (chunkIndex >= chunks.size()) {
+                uploadOk = false;
+                break;
+            }
+            const odai::world::Chunk& chunk = chunks[chunkIndex];
+            m_chunkMeshScheduler.markDirty(
+                odai::world::ChunkMeshKey{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()});
+        }
+    }
     if (!uploadOk) {
         VOX_LOGE("app") << "streaming update failed to refresh resident chunk meshes";
         return;

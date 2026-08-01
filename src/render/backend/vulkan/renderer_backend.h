@@ -249,6 +249,13 @@ public:
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
+    // Accepts meshes built off-thread (world::ChunkMeshScheduler) and queues
+    // them for upload through the per-frame remesh path, skipping the inline
+    // mesher for those chunks.
+    bool uploadChunkMeshes(const odai::world::ChunkGrid& chunkGrid, std::vector<odai::world::ChunkMeshResult> results);
+    // Meshing mode the renderer's own (full-rebuild) path uses. Callers driving
+    // an off-thread mesher must mirror it so both paths agree.
+    [[nodiscard]] odai::world::MeshingOptions chunkMeshingOptions() const { return m_chunkMeshingOptions; }
     bool useSpatialPartitioningQueries() const;
     odai::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
@@ -421,6 +428,9 @@ private:
         const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo = nullptr
     );
     bool createChunkBuffers(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
+    // Moves a stored off-thread mesh result into the LOD cache for the given
+    // resident chunk index. Returns false when no result is stored for it.
+    bool consumeExternalChunkMeshResult(std::size_t chunkArrayIndex, odai::world::ChunkMeshingStats& outStats);
     bool createFrameResources();
     bool createGpuTimestampResources();
     bool createImGuiResources();
@@ -1244,6 +1254,9 @@ private:
     odai::world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;
     std::vector<ChunkResidentKey> m_pendingChunkRemeshKeys;
+    // Off-thread mesh results waiting to be consumed by the remesh path;
+    // keyed by chunk grid coordinates, replaced on newer arrival.
+    std::vector<odai::world::ChunkMeshResult> m_externalChunkMeshResults;
     uint32_t m_previewIndexCount = 0;
     uint32_t m_pipeIndexCount = 0;
     uint32_t m_transportIndexCount = 0;
