@@ -146,25 +146,32 @@ void RendererBackend::renderFrame(
     m_debugCameraFovDegrees = std::clamp(m_debugCameraFovDegrees, 20.0f, 120.0f);
     const float activeFovDegrees = m_debugCameraFovDegrees;
 
-    m_debugChunkCount = static_cast<std::uint32_t>(chunkGrid.chunks().size());
-    m_debugMacroCellUniformCount = 0;
-    m_debugMacroCellRefined4Count = 0;
-    m_debugMacroCellRefined1Count = 0;
-    for (const odai::world::Chunk& chunk : chunkGrid.chunks()) {
-        for (int my = 0; my < odai::world::Chunk::kMacroSizeY; ++my) {
-            for (int mz = 0; mz < odai::world::Chunk::kMacroSizeZ; ++mz) {
-                for (int mx = 0; mx < odai::world::Chunk::kMacroSizeX; ++mx) {
-                    const odai::world::Chunk::MacroCell cell = chunk.macroCellAt(mx, my, mz);
-                    switch (cell.resolution) {
-                    case odai::world::Chunk::CellResolution::Uniform:
-                        ++m_debugMacroCellUniformCount;
-                        break;
-                    case odai::world::Chunk::CellResolution::Refined4:
-                        ++m_debugMacroCellRefined4Count;
-                        break;
-                    case odai::world::Chunk::CellResolution::Refined1:
-                        ++m_debugMacroCellRefined1Count;
-                        break;
+    const std::uint32_t currentChunkCount = static_cast<std::uint32_t>(chunkGrid.chunks().size());
+    if (currentChunkCount != m_debugChunkCount) {
+        m_debugMacroCellStatsDirty = true;
+    }
+    m_debugChunkCount = currentChunkCount;
+    if (m_debugMacroCellStatsDirty) {
+        m_debugMacroCellStatsDirty = false;
+        m_debugMacroCellUniformCount = 0;
+        m_debugMacroCellRefined4Count = 0;
+        m_debugMacroCellRefined1Count = 0;
+        for (const odai::world::Chunk& chunk : chunkGrid.chunks()) {
+            for (int my = 0; my < odai::world::Chunk::kMacroSizeY; ++my) {
+                for (int mz = 0; mz < odai::world::Chunk::kMacroSizeZ; ++mz) {
+                    for (int mx = 0; mx < odai::world::Chunk::kMacroSizeX; ++mx) {
+                        const odai::world::Chunk::MacroCell cell = chunk.macroCellAt(mx, my, mz);
+                        switch (cell.resolution) {
+                        case odai::world::Chunk::CellResolution::Uniform:
+                            ++m_debugMacroCellUniformCount;
+                            break;
+                        case odai::world::Chunk::CellResolution::Refined4:
+                            ++m_debugMacroCellRefined4Count;
+                            break;
+                        case odai::world::Chunk::CellResolution::Refined1:
+                            ++m_debugMacroCellRefined1Count;
+                            break;
+                        }
                     }
                 }
             }

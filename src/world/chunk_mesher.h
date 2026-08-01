@@ -76,6 +76,14 @@ struct ChunkLodMeshes {
     std::array<ChunkMeshData, kChunkMeshLodCount> lodMeshes;
 };
 
+// A naive mesh emits exactly 4 vertices / 6 indices per exposed face, so
+// exposedFaceCount lets callers derive naive-equivalent geometry counts
+// without running the naive mesher a second time.
+struct ChunkMeshingStats {
+    std::size_t exposedFaceCount = 0;
+};
+
+ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk, MeshingOptions options, ChunkMeshingStats* outStats);
 ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk, MeshingOptions options = {});
 ChunkMeshData buildChunkMesh(const Chunk& chunk, MeshingOptions options = {});
 

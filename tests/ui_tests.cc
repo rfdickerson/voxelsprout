@@ -2006,16 +2006,16 @@ void testResourceStyleFormat() {
     // Register a couple of resource styles and verify lookup.
     registerResourceStyle("gold",  ResourceStyle{"gold",  UiColor{1.0f, 0.85f, 0.1f, 1.0f}});
     registerResourceStyle("food",  ResourceStyle{"food",  UiColor{0.4f, 0.9f, 0.4f, 1.0f}});
-    const ResourceStyle* g = resourceStyle("gold");
-    const ResourceStyle* f = resourceStyle("food");
-    expectTrue(g != nullptr, "registered resource is found");
-    expectTrue(f != nullptr, "second registered resource is found");
+    const std::optional<ResourceStyle> g = resourceStyle("gold");
+    const std::optional<ResourceStyle> f = resourceStyle("food");
+    expectTrue(g.has_value(), "registered resource is found");
+    expectTrue(f.has_value(), "second registered resource is found");
     expectTrue(std::string(g->iconName) == "gold", "gold icon key");
     expectTrue(g->color.a == 1.0f, "resource color is opaque");
     // Colors are distinct (sanity check).
     expectTrue(g->color.packAbgr8() != f->color.packAbgr8(), "resources have distinct colors");
-    // Unknown key returns nullptr.
-    expectTrue(resourceStyle("unknown_xyz") == nullptr, "unknown resource returns nullptr");
+    // Unknown key returns nullopt.
+    expectTrue(!resourceStyle("unknown_xyz").has_value(), "unknown resource returns nullopt");
 
     // Signed-delta formatting: '+' on positive, '-' carried, em dash on zero.
     expectTrue(resourceText(7)        == "+7",           "positive rate gets a leading +");

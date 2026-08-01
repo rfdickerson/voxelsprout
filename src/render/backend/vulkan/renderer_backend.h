@@ -1403,6 +1403,7 @@ private:
     std::uint32_t m_debugMacroCellUniformCount = 0;
     std::uint32_t m_debugMacroCellRefined4Count = 0;
     std::uint32_t m_debugMacroCellRefined1Count = 0;
+    bool m_debugMacroCellStatsDirty = true;
     std::uint32_t m_debugDrawnLod0Ranges = 0;
     std::uint32_t m_debugDrawnLod1Ranges = 0;
     std::uint32_t m_debugDrawnLod2Ranges = 0;

@@ -1825,6 +1825,7 @@ bool RendererBackend::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid) {
     }
     (void)chunkGrid;
     m_chunkMeshRebuildRequested = true;
+    m_debugMacroCellStatsDirty = true;
     m_pendingChunkRemeshKeys.clear();
     m_voxelGiWorldDirty = true;
     ++m_voxelGiWorldVersion;
@@ -1846,6 +1847,7 @@ bool RendererBackend::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, s
     if (m_chunkMeshRebuildRequested) {
         return true;
     }
+    m_debugMacroCellStatsDirty = true;
     const ChunkResidentKey remeshKey = chunkResidentKeyForChunk(chunkGrid.chunks()[chunkIndex]);
     if (std::find(m_pendingChunkRemeshKeys.begin(), m_pendingChunkRemeshKeys.end(), remeshKey) ==
         m_pendingChunkRemeshKeys.end()) {
@@ -1872,6 +1874,7 @@ bool RendererBackend::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, s
     if (m_chunkMeshRebuildRequested) {
         return true;
     }
+    m_debugMacroCellStatsDirty = true;
     for (const std::size_t chunkIndex : chunkIndices) {
         if (chunkIndex >= chunkGrid.chunks().size()) {
             return false;
@@ -2194,22 +2197,17 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
     const auto remeshStart = std::chrono::steady_clock::now();
     if (fullRemesh) {
         for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
+            odai::world::ChunkMeshingStats meshingStats{};
             m_chunkLodMeshCache[chunkArrayIndex] =
-                odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
+                odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions, &meshingStats);
             rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
                 remeshedActiveVertexCount,
                 remeshedActiveIndexCount
             );
-            if (m_chunkMeshingOptions.mode == odai::world::MeshingMode::Naive) {
-                remeshedNaiveVertexCount = remeshedActiveVertexCount;
-                remeshedNaiveIndexCount = remeshedActiveIndexCount;
-            } else {
-                const odai::world::ChunkLodMeshes naiveLodMeshes =
-                    odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], odai::world::MeshingOptions{odai::world::MeshingMode::Naive});
-                countMeshGeometry(naiveLodMeshes, remeshedNaiveVertexCount, remeshedNaiveIndexCount);
-            }
+            remeshedNaiveVertexCount += meshingStats.exposedFaceCount * 4u;
+            remeshedNaiveIndexCount += meshingStats.exposedFaceCount * 6u;
         }
         remeshedChunkCount = chunks.size();
         m_chunkLodMeshCacheValid = true;
@@ -2224,22 +2222,17 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
         }
 
         for (const std::size_t chunkArrayIndex : uniqueRemeshChunkIndices) {
+            odai::world::ChunkMeshingStats meshingStats{};
             m_chunkLodMeshCache[chunkArrayIndex] =
-                odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions);
+                odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions, &meshingStats);
             rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
                 remeshedActiveVertexCount,
                 remeshedActiveIndexCount
             );
-            if (m_chunkMeshingOptions.mode == odai::world::MeshingMode::Naive) {
-                remeshedNaiveVertexCount = remeshedActiveVertexCount;
-                remeshedNaiveIndexCount = remeshedActiveIndexCount;
-            } else {
-                const odai::world::ChunkLodMeshes naiveLodMeshes =
-                    odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], odai::world::MeshingOptions{odai::world::MeshingMode::Naive});
-                countMeshGeometry(naiveLodMeshes, remeshedNaiveVertexCount, remeshedNaiveIndexCount);
-            }
+            remeshedNaiveVertexCount += meshingStats.exposedFaceCount * 4u;
+            remeshedNaiveIndexCount += meshingStats.exposedFaceCount * 6u;
         }
         remeshedChunkCount = uniqueRemeshChunkIndices.size();
     }

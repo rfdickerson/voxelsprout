@@ -1151,7 +1151,14 @@ bool App::init() {
                 loadTerrainTextureWithMips, absPath));
         }
         for (std::size_t i = 0; i < uniqueLoads.size(); ++i) {
-            m_terrainTextures[uniqueLoads[i].first] = futures[i].get();
+            try {
+                m_terrainTextures[uniqueLoads[i].first] = futures[i].get();
+            } catch (const std::exception& e) {
+                // A failed load keeps its default-constructed slot; the terrain
+                // renders untextured rather than aborting init mid-join.
+                VOX_LOGE("app") << "terrain texture load failed for "
+                                << uniqueLoads[i].second.string() << ": " << e.what();
+            }
         }
 
         // Pass 3: copy alias slots (e.g. Forest → Grassland's loaded data).

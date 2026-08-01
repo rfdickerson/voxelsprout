@@ -63,16 +63,30 @@ std::string makeTimestamp() {
 }
 
 void writeLine(LogLevel level, std::string_view category, std::string_view message) {
-    std::lock_guard<std::mutex> lock(g_logWriteMutex);
-    std::ostream& out = (level == LogLevel::Error || level == LogLevel::Warn) ? std::cerr : std::cout;
-    out << "[" << makeTimestamp() << "]";
+    // Format outside the lock so the mutex only covers the actual stream write;
+    // worker threads logging concurrently should not serialize on formatting.
+    std::string line;
+    line.reserve(message.size() + category.size() + 32);
+    line += "[";
+    line += makeTimestamp();
+    line += "]";
     if (!category.empty()) {
-        out << "[" << category << "]";
+        line += "[";
+        line += category;
+        line += "]";
     }
     if (level != LogLevel::Info) {
-        out << "[" << levelName(level) << "]";
+        line += "[";
+        line += levelName(level);
+        line += "]";
     }
-    out << " " << message << "\n";
+    line += " ";
+    line += message;
+    line += "\n";
+
+    std::ostream& out = (level == LogLevel::Error || level == LogLevel::Warn) ? std::cerr : std::cout;
+    std::lock_guard<std::mutex> lock(g_logWriteMutex);
+    out << line;
 }
 
 std::string toLower(std::string value) {
@@ -125,8 +139,13 @@ void setLogLevel(LogLevel level) {
 }
 
 LogLevel logLevel() {
-    initializeLogLevelFromEnvironment();
-    return g_logLevel.load();
+    // Magic static: one-time env init with a plain-load fast path afterwards,
+    // instead of paying std::call_once on every shouldLog() check.
+    [[maybe_unused]] static const bool s_envInitialized = []() {
+        initializeLogLevelFromEnvironment();
+        return true;
+    }();
+    return g_logLevel.load(std::memory_order_relaxed);
 }
 
 bool shouldLog(LogLevel level) {
