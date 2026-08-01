@@ -243,6 +243,11 @@ private:
     void closeMainMenu();
     // Open or close the main menu depending on m_mainMenuOpen.
     void toggleMainMenu();
+    // Reveal/hide the settings modal (opened from the main menu's Settings button).
+    // Toggles reflect the live renderer/audio state; changes apply immediately and
+    // persist through the normal config save on shutdown.
+    void openSettings();
+    void closeSettings();
     // After a turn step: raise eureka/unlock toasts and era-transition banners for
     // any new player events, and advance m_lastEventCount / m_lastEraIndex.
     void fireTurnBanners();
@@ -501,6 +506,11 @@ private:
     odai::ui::RectTween m_mainMenuCardTween{};
     odai::ui::Sequence m_mainMenuBackdropSeq{};
     bool m_mainMenuOpen = false;
+    // Settings modal (full-screen dimmer + centered card), opened from the main
+    // menu. m_settingsShadowBtn is retained so the shadow-quality button can
+    // relabel itself as it cycles Auto -> Shadow Maps -> Ray-Traced.
+    odai::ui::Panel* m_settingsModal = nullptr;
+    odai::ui::Button* m_settingsShadowBtn = nullptr;
     // Bottom-center strategy minimap + its per-lens baked textures.
     odai::ui::MinimapPanel* m_minimap = nullptr;
     std::vector<odai::ui::UiTextureId> m_minimapTex;  // one texture per lens mode

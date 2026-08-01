@@ -21,6 +21,16 @@ public:
 
     std::function<void(bool)> onChange;
 
+    // Set the checked state and snap the thumb to the matching end position with
+    // no slide animation. Use when initializing a toggle to a known state so its
+    // thumb renders on the correct side immediately (assigning `checked` alone
+    // leaves the thumb parked at the off position until the first click).
+    void setChecked(bool on) {
+        checked = on;
+        thumbTween_.value = on ? 1.0f : 0.0f;
+        thumbTween_.target = thumbTween_.value;
+    }
+
     void onTick(float dt) override {
         thumbTween_.update(dt);
         tickChildren(dt);

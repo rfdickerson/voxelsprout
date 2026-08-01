@@ -35,6 +35,7 @@
 #include "ui/widgets/stat_badge.h"
 #include "ui/widgets/research_panel.h"
 #include "ui/widgets/toast.h"
+#include "ui/widgets/toggle.h"
 #include "ui/widgets/toolbar.h"
 #include "ui/widgets/window.h"
 #include "ui/widgets/event_tracker_panel.h"
@@ -241,6 +242,27 @@ const char* shadowModeConfigName(odai::render::ShadowMode mode) {
     case odai::render::ShadowMode::Auto: return "auto";
     }
     return "auto";
+}
+
+// Human-readable label for the settings-panel shadow-quality button.
+const char* shadowModeUiName(odai::render::ShadowMode mode) {
+    switch (mode) {
+    case odai::render::ShadowMode::ShadowMaps: return "Shadow Maps";
+    case odai::render::ShadowMode::RayTraced: return "Ray-Traced";
+    case odai::render::ShadowMode::Auto: return "Auto";
+    }
+    return "Auto";
+}
+
+// Advance to the next shadow mode in a stable cycle: Auto -> Shadow Maps ->
+// Ray-Traced -> Auto. Used by the settings-panel cycle button.
+odai::render::ShadowMode nextShadowMode(odai::render::ShadowMode mode) {
+    switch (mode) {
+    case odai::render::ShadowMode::Auto: return odai::render::ShadowMode::ShadowMaps;
+    case odai::render::ShadowMode::ShadowMaps: return odai::render::ShadowMode::RayTraced;
+    case odai::render::ShadowMode::RayTraced: return odai::render::ShadowMode::Auto;
+    }
+    return odai::render::ShadowMode::Auto;
 }
 
 bool parseShadowModeConfigValue(const std::string& value, odai::render::ShadowMode& outMode) {
@@ -1470,7 +1492,11 @@ void App::pollInput() {
 
     const bool escapeKeyDown = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     if (escapeKeyDown && !m_wasEscapeKeyDown) {
-        if (m_mainMenuOpen) {
+        if (m_settingsModal != nullptr && m_settingsModal->visible) {
+            // Back out of settings to the main menu, matching the Back button.
+            closeSettings();
+            openMainMenu();
+        } else if (m_mainMenuOpen) {
             closeMainMenu();
         } else {
             glfwSetWindowShouldClose(m_window, GLFW_TRUE);
@@ -5206,7 +5232,7 @@ void App::setupHud(float viewW, float viewH) {
         };
 
         makeMenuBtn("Resume Game", [this]() { closeMainMenu(); });
-        makeMenuBtn("Settings",    []() { /* TODO: settings panel */ });
+        makeMenuBtn("Settings",    [this]() { closeMainMenu(); openSettings(); });
         makeMenuBtn("New Game",    []() { /* TODO: new-game flow */ });
         makeMenuBtn("Quit Game",   [this]() { glfwSetWindowShouldClose(m_window, GLFW_TRUE); });
 
@@ -5214,6 +5240,149 @@ void App::setupHud(float viewW, float viewH) {
         m_mainMenuCard->setRect(m_mainMenuCardClosedRect);
         m_mainMenuCardTween.snap(m_mainMenuCardClosedRect);
         m_mainMenuModal = static_cast<odai::ui::Panel*>(root->addChild(std::move(dimmer)));
+    }
+
+    // Settings modal — full-screen dimmer + centered card, opened from the main
+    // menu's Settings button. Each control mirrors a live renderer/audio setting
+    // (which the normal shutdown save persists to odai.cfg). Hidden by default.
+    //
+    // Same "measure first, size second" pattern as the main menu above.
+    {
+        const float cardW    = 340.0f * s;
+        const float padTop   = 20.0f * s;
+        const float padBot   = 18.0f * s;
+        const float titleH   = 22.0f * s;
+        const float titleGap = 16.0f * s;
+        const float rowH     = 32.0f * s;
+        const float rowGap   = 12.0f * s;
+        const int   numRows  = 3;  // SSAO, Mute Audio, Shadows
+        const float backGap  = 18.0f * s;
+        const float backBtnH = 40.0f * s;
+        const float cardH = padTop
+                          + titleH + titleGap
+                          + numRows * rowH + (numRows - 1) * rowGap
+                          + backGap + backBtnH
+                          + padBot;
+        const float cardX = (viewW - cardW) * 0.5f;
+        const float cardY = (viewH - cardH) * 0.5f;
+
+        auto dimmer = std::make_unique<odai::ui::Panel>();
+        dimmer->setRect(odai::ui::UiRect::fromXYWH(0.0f, 0.0f, viewW, viewH));
+        dimmer->background = odai::ui::UiColor{0.0f, 0.0f, 0.0f, 0.62f};
+        dimmer->visible = false;
+        dimmer->opacity = 0.0f;
+
+        auto card = std::make_unique<odai::ui::Panel>();
+        card->setRect(odai::ui::UiRect::fromXYWH(cardX, cardY, cardW, cardH));
+        card->styleMotif(s, /*raised=*/true);
+
+        float cy = cardY + padTop;
+
+        auto title = std::make_unique<odai::ui::Label>(
+            fonts, "<b><color=#e2c879>Settings</color></b>");
+        title->align = odai::ui::UiTextAlign::Center;
+        title->setRect(odai::ui::UiRect::fromXYWH(cardX + 12.0f * s, cy, cardW - 24.0f * s, titleH));
+        card->addChild(std::move(title));
+        cy += titleH + titleGap;
+
+        const float rowInset  = 24.0f * s;
+        const float rowLabelW = cardW - 2.0f * rowInset;
+
+        // Left-aligned row label + a caller-provided control on the right edge.
+        auto addRowLabel = [&](const char* text) {
+            auto lbl = std::make_unique<odai::ui::Label>(fonts, text);
+            lbl->color = kCivParchment;
+            lbl->align = odai::ui::UiTextAlign::Left;
+            lbl->setRect(odai::ui::UiRect::fromXYWH(cardX + rowInset, cy, rowLabelW, rowH));
+            card->addChild(std::move(lbl));
+        };
+
+        // Row 1 — SSAO (screen-space ambient occlusion) on/off.
+        addRowLabel("Ambient Occlusion");
+        {
+            const float togW = 46.0f * s;
+            const float togH = 24.0f * s;
+            auto tog = std::make_unique<odai::ui::Toggle>();
+            tog->setChecked(m_renderer.isSsaoEnabled());
+            tog->setRect(odai::ui::UiRect::fromXYWH(
+                cardX + cardW - rowInset - togW, cy + (rowH - togH) * 0.5f, togW, togH));
+            tog->onChange = [this](bool on) {
+                m_renderer.setSsaoEnabled(on);
+                m_config.enableSsao = on;
+            };
+            card->addChild(std::move(tog));
+        }
+        cy += rowH + rowGap;
+
+        // Row 2 — mute all audio.
+        addRowLabel("Mute Audio");
+        {
+            const float togW = 46.0f * s;
+            const float togH = 24.0f * s;
+            auto tog = std::make_unique<odai::ui::Toggle>();
+            tog->setChecked(m_audio.muted());
+            tog->setRect(odai::ui::UiRect::fromXYWH(
+                cardX + cardW - rowInset - togW, cy + (rowH - togH) * 0.5f, togW, togH));
+            tog->onChange = [this](bool muted) {
+                m_audio.setMuted(muted);
+                m_config.audioMuted = muted;
+            };
+            card->addChild(std::move(tog));
+        }
+        cy += rowH + rowGap;
+
+        // Row 3 — shadow quality; a cycle button relabels itself each click.
+        addRowLabel("Shadows");
+        {
+            const float shadowBtnW = 130.0f * s;
+            const odai::render::ShadowMode mode = m_renderer.shadowSettings().mode;
+            auto btn = std::make_unique<odai::ui::Button>(
+                fonts.regular, shadowModeUiName(mode), [this]() {
+                    const odai::render::ShadowMode next =
+                        nextShadowMode(m_renderer.shadowSettings().mode);
+                    m_renderer.setShadowSettings(odai::render::ShadowSettings{next});
+                    m_config.shadowMode = next;
+                    if (m_settingsShadowBtn != nullptr) {
+                        m_settingsShadowBtn->setLabel(shadowModeUiName(next));
+                    }
+                });
+            btn->setRect(odai::ui::UiRect::fromXYWH(
+                cardX + cardW - rowInset - shadowBtnW, cy + (rowH - 28.0f * s) * 0.5f,
+                shadowBtnW, 28.0f * s));
+            btn->cornerRadiusPx    = 3.0f * s;
+            btn->colorNormal       = kCivBtnFill;
+            btn->colorHover        = kCivBtnHover;
+            btn->colorPressed      = kCivBtnPress;
+            btn->borderColor       = kCivBrass;
+            btn->borderThicknessPx = 1.5f * s;
+            btn->labelColor        = kCivParchment;
+            btn->showBevel         = false;
+            m_settingsShadowBtn = static_cast<odai::ui::Button*>(card->addChild(std::move(btn)));
+        }
+        cy += rowH + backGap;
+
+        // Back button — return to the main menu.
+        {
+            const float btnW = cardW - 48.0f * s;
+            const float btnX = cardX + (cardW - btnW) * 0.5f;
+            auto back = std::make_unique<odai::ui::Button>(
+                fonts.regular, "Back", [this]() { closeSettings(); openMainMenu(); });
+            back->setRect(odai::ui::UiRect::fromXYWH(btnX, cy, btnW, backBtnH));
+            back->cornerRadiusPx    = 3.0f * s;
+            back->colorNormal       = kCivBtnFill;
+            back->colorHover        = kCivBtnHover;
+            back->colorPressed      = kCivBtnPress;
+            back->borderColor       = kCivBrass;
+            back->borderThicknessPx = 1.5f * s;
+            back->labelColor        = kCivParchment;
+            back->showBevel         = false;
+            back->glowColor         = odai::ui::UiColor{0.886f, 0.784f, 0.475f, 0.35f};
+            back->glowSizePx        = 8.0f * s;
+            card->addChild(std::move(back));
+        }
+
+        dimmer->addChild(std::move(card));
+        m_settingsModal = static_cast<odai::ui::Panel*>(root->addChild(std::move(dimmer)));
     }
 
     m_uiContext.setRoot(std::move(root));
@@ -7056,6 +7225,18 @@ void App::toggleMainMenu() {
     } else {
         openMainMenu();
     }
+}
+
+void App::openSettings() {
+    if (m_settingsModal == nullptr) return;
+    m_settingsModal->visible = true;
+    m_settingsModal->opacity = 1.0f;
+}
+
+void App::closeSettings() {
+    if (m_settingsModal == nullptr) return;
+    m_settingsModal->visible = false;
+    m_settingsModal->opacity = 0.0f;
 }
 
 void App::fireTurnBanners() {

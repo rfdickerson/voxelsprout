@@ -401,6 +401,48 @@ void testToggleClick() {
     expectTrue(!dl.data().vertices.empty(), "Toggle: emits geometry");
 }
 
+void testToggleSetChecked() {
+    using namespace odai::ui;
+
+    // Horizontal centroid of the emitted geometry. The track rounded-rect is
+    // symmetric about the widget center in every case, so a shift in the centroid
+    // reflects where the thumb circle was drawn: right when on, left when off.
+    auto thumbCentroidX = [](const Toggle& t) {
+        UiDrawList dl;
+        dl.reset(UiVec2{400.0f, 200.0f});
+        t.draw(dl);
+        const auto& verts = dl.data().vertices;
+        double sum = 0.0;
+        for (const auto& v : verts) sum += v.posPx[0];
+        return verts.empty() ? 0.0 : sum / static_cast<double>(verts.size());
+    };
+
+    // Assigning `checked` directly leaves the thumb parked at the off (left) side
+    // until the first tick/click — the bug setChecked() exists to avoid.
+    Toggle parked;
+    parked.setRect(UiRect::fromXYWH(0.0f, 0.0f, 50.0f, 24.0f));
+    parked.checked = true;
+    const double parkedX = thumbCentroidX(parked);
+
+    // setChecked snaps the thumb to the on (right) side immediately, no tick needed.
+    Toggle snapped;
+    snapped.setRect(UiRect::fromXYWH(0.0f, 0.0f, 50.0f, 24.0f));
+    int changeCalls = 0;
+    snapped.onChange = [&](bool) { ++changeCalls; };
+    snapped.setChecked(true);
+    const double snappedX = thumbCentroidX(snapped);
+
+    expectTrue(snapped.checked, "Toggle: setChecked(true) sets checked");
+    expectTrue(changeCalls == 0, "Toggle: setChecked does not fire onChange");
+    expectTrue(snappedX > parkedX, "Toggle: setChecked(true) snaps thumb to the right");
+
+    // setChecked(false) snaps it back to the left with no animation.
+    snapped.setChecked(false);
+    const double offX = thumbCentroidX(snapped);
+    expectTrue(!snapped.checked, "Toggle: setChecked(false) clears checked");
+    expectTrue(offX < snappedX, "Toggle: setChecked(false) snaps thumb to the left");
+}
+
 void testTabBarSwitch() {
     using namespace odai::ui;
     Font font = makeMonospaceFont(8.0f);
@@ -2201,6 +2243,7 @@ int main() {
     testPanelOpacity();
     testSliderDrag();
     testToggleClick();
+    testToggleSetChecked();
     testTabBarSwitch();
     testDropdownSelect();
     testRadioButtonGroupExclusiveSelect();
