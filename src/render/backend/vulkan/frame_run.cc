@@ -129,16 +129,6 @@ void RendererBackend::renderFrame(
             (m_displayRefreshDurationNs * m_framePacingStats.cadenceDivisor) * 1.0e-6
         );
     }
-    auto shortWait = [&](float& bucketMs) {
-        const auto waitStartTime = std::chrono::steady_clock::now();
-        std::this_thread::sleep_for(std::chrono::microseconds(250));
-        std::this_thread::yield();
-        const float waitMs = static_cast<float>(
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStartTime).count()
-        );
-        bucketMs += waitMs;
-        cpuWaitMs += waitMs;
-    };
     if (!m_debugCameraFovInitialized) {
         m_debugCameraFovDegrees = camera.fovDegrees;
         m_debugCameraFovInitialized = true;
@@ -185,19 +175,35 @@ void RendererBackend::renderFrame(
     CoreFrameGraphOrderValidator coreFramePassOrderValidator(*coreFrameGraphPlan);
 
     collectCompletedBufferReleases();
-    const uint64_t completedTimelineValueBeforeFrame = completedTimelineValue();
+    uint64_t completedTimelineValueBeforeFrame = completedTimelineValue();
     m_framePacingStats.queuedFrames = countQueuedFrames(completedTimelineValueBeforeFrame);
-    if (shouldThrottleFrameStart(completedTimelineValueBeforeFrame, &cpuWaitFrameSlotMs)) {
+    if (shouldThrottleFrameStart(completedTimelineValueBeforeFrame)) {
+        // Too many frames queued: block on the oldest one instead of dropping
+        // this frame and re-spinning the main loop at sleep granularity.
+        const uint64_t oldestQueuedValue = oldestQueuedFrameTimelineValue(completedTimelineValueBeforeFrame);
+        (void)waitTimelineValue(oldestQueuedValue, frameWaitBudgetNs(), &cpuWaitFrameSlotMs);
         cpuWaitMs += cpuWaitFrameSlotMs;
         m_framePacingStats.cpuWaitFrameSlotMs = cpuWaitFrameSlotMs;
-        return;
+        completedTimelineValueBeforeFrame = completedTimelineValue();
+        m_framePacingStats.queuedFrames = countQueuedFrames(completedTimelineValueBeforeFrame);
+        if (shouldThrottleFrameStart(completedTimelineValueBeforeFrame)) {
+            return;
+        }
     }
 
     FrameResources& frame = m_frames[m_currentFrame];
     if (!isTimelineValueReached(m_frameTimelineValues[m_currentFrame])) {
-        static double lastStallLogTimeSeconds = 0.0;
-        const uint64_t completedValue = completedTimelineValue();
-        if (completedValue > 0 || m_frameTimelineValues[m_currentFrame] > 0) {
+        // Frame slot not retired yet: block on its timeline value. Only give up
+        // (and drop the frame) when the bounded wait times out, which keeps the
+        // device-loss/stall diagnostics reachable.
+        const float waitStartMs = cpuWaitFrameSlotMs;
+        const bool frameSlotReady =
+            waitTimelineValue(m_frameTimelineValues[m_currentFrame], frameWaitBudgetNs(), &cpuWaitFrameSlotMs);
+        cpuWaitMs += cpuWaitFrameSlotMs - waitStartMs;
+        m_framePacingStats.cpuWaitFrameSlotMs = cpuWaitFrameSlotMs;
+        if (!frameSlotReady) {
+            static double lastStallLogTimeSeconds = 0.0;
+            const uint64_t completedValue = completedTimelineValue();
             const uint64_t targetValue = m_frameTimelineValues[m_currentFrame];
             const uint64_t lag = (targetValue > completedValue) ? (targetValue - completedValue) : 0u;
             const double nowSeconds = glfwGetTime();
@@ -211,10 +217,8 @@ void RendererBackend::renderFrame(
                     << ", frameIndex=" << m_currentFrame;
                 lastStallLogTimeSeconds = nowSeconds;
             }
+            return;
         }
-        shortWait(cpuWaitFrameSlotMs);
-        m_framePacingStats.cpuWaitFrameSlotMs = cpuWaitFrameSlotMs;
-        return;
     }
     if (m_frameTimelineValues[m_currentFrame] > 0) {
         if (!readGpuTimestampResults(m_currentFrame)) {
@@ -222,17 +226,23 @@ void RendererBackend::renderFrame(
             ++m_framePacingStats.gpuTimestampSkippedFrames;
         }
     }
-    if (m_transferCommandBufferInFlightValue > 0) {
-        if (isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
-            m_transferCommandBufferInFlightValue = 0;
-            m_pendingTransferTimelineValue = 0;
-            collectCompletedBufferReleases();
-        } else {
-            shortWait(cpuWaitTransferMs);
+    // The arena for this frame slot is about to be reset; any transfer still
+    // reading staging data from it must finish first. Transfers staged from the
+    // other frame slot may keep flying.
+    for (TransferCommandSlot& transferSlot : m_transferCommandSlots) {
+        if (transferSlot.inFlightTimelineValue == 0 || transferSlot.stagingFrameIndex != m_currentFrame) {
+            continue;
+        }
+        if (!waitTimelineValue(transferSlot.inFlightTimelineValue, frameWaitBudgetNs(), &cpuWaitTransferMs)) {
+            cpuWaitMs += cpuWaitTransferMs;
             m_framePacingStats.cpuWaitTransferMs = cpuWaitTransferMs;
             return;
         }
+        transferSlot.inFlightTimelineValue = 0;
     }
+    cpuWaitMs += cpuWaitTransferMs;
+    m_framePacingStats.cpuWaitTransferMs = cpuWaitTransferMs;
+    collectCompletedBufferReleases();
     m_frameArena.beginFrame(m_currentFrame);
 
     if (!m_pendingChunkRemeshKeys.empty()) {
@@ -250,9 +260,8 @@ void RendererBackend::renderFrame(
     m_debugChunkPendingRemeshCount = static_cast<std::uint32_t>(m_pendingChunkRemeshKeys.size());
     m_debugChunkRemeshBatchCount = 0;
     if (m_chunkMeshRebuildRequested || !m_pendingChunkRemeshKeys.empty()) {
-        // Avoid CPU stalls when async transfer is still in flight.
-        if (m_transferCommandBufferInFlightValue == 0 ||
-            isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
+        // Avoid CPU stalls when every transfer command slot is still in flight.
+        if (hasFreeTransferSlot()) {
             std::vector<ChunkResidentKey> remeshBatchKeys;
             std::vector<std::size_t> resolvedRemeshIndices;
             if (!m_chunkMeshRebuildRequested) {
@@ -341,7 +350,7 @@ void RendererBackend::renderFrame(
     if (m_rtSceneDirty &&
         !m_chunkMeshRebuildRequested &&
         m_pendingChunkRemeshKeys.empty() &&
-        m_transferCommandBufferInFlightValue == 0) {
+        !anyTransferSlotInFlight()) {
         if (rayTracingRuntimeReady() && !rebuildRayTracingScene()) {
             VOX_LOGE("render") << "deferred chunk RT scene rebuild failed";
         }

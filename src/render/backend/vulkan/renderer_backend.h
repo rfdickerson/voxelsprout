@@ -370,6 +370,18 @@ private:
         VkSemaphore imageAvailable = VK_NULL_HANDLE;
     };
 
+    // One entry in the transfer command-buffer ring. A slot is free when
+    // inFlightTimelineValue is 0 or the render timeline has passed it.
+    // stagingFrameIndex records which frame-in-flight arena holds the staging
+    // data for the slot's submit: FrameArena::beginFrame(frameIndex) must not
+    // reset an arena a still-running transfer reads from.
+    struct TransferCommandSlot {
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        uint64_t inFlightTimelineValue = 0;
+        uint32_t stagingFrameIndex = 0;
+    };
+    static constexpr std::size_t kTransferCommandSlotCount = 3;
+
     bool createInstance();
     bool createSurface();
     bool pickPhysicalDevice();
@@ -573,7 +585,21 @@ private:
     bool isTimelineValueReached(uint64_t value) const;
     uint64_t completedTimelineValue() const;
     std::uint32_t countQueuedFrames(uint64_t completedValue) const;
-    bool shouldThrottleFrameStart(uint64_t completedValue, float* outCpuWaitMs) const;
+    bool shouldThrottleFrameStart(uint64_t completedValue) const;
+    // Blocks on the render timeline semaphore (vkWaitSemaphores) until `value`
+    // is reached or `timeoutNs` elapses. Returns true when the value was
+    // reached. Values of 0 (never submitted) return true immediately — waiting
+    // on them would deadlock until timeout. Elapsed time accrues to *outWaitMs.
+    bool waitTimelineValue(uint64_t value, uint64_t timeoutNs, float* outWaitMs);
+    // Smallest in-flight frame timeline value above completedValue, or 0 when
+    // no frame is queued.
+    uint64_t oldestQueuedFrameTimelineValue(uint64_t completedValue) const;
+    // Bounded wait budget for frame-slot / pacing waits: about two present
+    // intervals, falling back to 50 ms when the refresh rate is unknown.
+    uint64_t frameWaitBudgetNs() const;
+    TransferCommandSlot* acquireTransferCommandSlot(float* outWaitMs);
+    bool anyTransferSlotInFlight() const;
+    bool hasFreeTransferSlot() const;
     uint64_t computeDesiredPresentTimeNs(std::uint64_t nowNs) const;
     bool loadRayTracingFunctions();
     void loadHostImageCopyFunctions();
@@ -1266,14 +1292,13 @@ private:
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};
     VkCommandPool m_transferCommandPool = VK_NULL_HANDLE;
-    VkCommandBuffer m_transferCommandBuffer = VK_NULL_HANDLE;
+    std::array<TransferCommandSlot, kTransferCommandSlotCount> m_transferCommandSlots{};
     std::array<uint64_t, kMaxFramesInFlight> m_frameTimelineValues{};
     VkSemaphore m_renderTimelineSemaphore = VK_NULL_HANDLE;
     PFN_vkGetRefreshCycleDurationGOOGLE m_getRefreshCycleDurationGoogle = nullptr;
     PFN_vkGetPastPresentationTimingGOOGLE m_getPastPresentationTimingGoogle = nullptr;
     uint64_t m_pendingTransferTimelineValue = 0;
     uint64_t m_currentChunkReadyTimelineValue = 0;
-    uint64_t m_transferCommandBufferInFlightValue = 0;
     uint64_t m_lastGraphicsTimelineValue = 0;
     uint64_t m_nextTimelineValue = 1;
     uint32_t m_nextDisplayTimingPresentId = 1;

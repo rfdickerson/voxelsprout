@@ -1938,10 +1938,9 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
         m_rtDirtyChunkCount = 0;
 
         collectCompletedBufferReleases();
-        if (m_transferCommandBufferInFlightValue > 0 && !isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
+        if (anyTransferSlotInFlight()) {
             return false;
         }
-        m_transferCommandBufferInFlightValue = 0;
 
         if (m_chunkVertexBufferHandle != kInvalidBufferHandle) {
             if (m_lastGraphicsTimelineValue == 0) {
@@ -2491,16 +2490,6 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
     };
 
     collectCompletedBufferReleases();
-
-    if (m_transferCommandBufferInFlightValue > 0) {
-        if (!isTimelineValueReached(m_transferCommandBufferInFlightValue)) {
-            cleanupPendingAllocations();
-            rollbackChunkDrawState();
-            return false;
-        }
-    }
-    m_transferCommandBufferInFlightValue = 0;
-    collectCompletedBufferReleases();
     const uint64_t previousChunkReadyTimelineValue = m_currentChunkReadyTimelineValue;
     const bool hasChunkCopies = !combinedVertices.empty() && !combinedIndices.empty();
 
@@ -2598,10 +2587,18 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
             m_frameTimelineValues.end(),
             [](uint64_t value) { return value == 0; }
         );
+    TransferCommandSlot* transferSlot = nullptr;
     if (hasChunkCopies) {
-        const VkResult resetResult = vkResetCommandPool(m_device, m_transferCommandPool, 0);
+        transferSlot = acquireTransferCommandSlot(nullptr);
+        if (transferSlot == nullptr) {
+            VOX_LOGE("render") << "no transfer command slot available for chunk upload";
+            cleanupPendingAllocations();
+            rollbackChunkDrawState();
+            return false;
+        }
+        const VkResult resetResult = vkResetCommandBuffer(transferSlot->commandBuffer, 0);
         if (resetResult != VK_SUCCESS) {
-            logVkFailure("vkResetCommandPool(transfer)", resetResult);
+            logVkFailure("vkResetCommandBuffer(transfer)", resetResult);
             cleanupPendingAllocations();
             rollbackChunkDrawState();
             return false;
@@ -2610,7 +2607,7 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(m_transferCommandBuffer, &beginInfo) != VK_SUCCESS) {
+        if (vkBeginCommandBuffer(transferSlot->commandBuffer, &beginInfo) != VK_SUCCESS) {
             VOX_LOGE("render") << "vkBeginCommandBuffer (transfer) failed\n";
             cleanupPendingAllocations();
             rollbackChunkDrawState();
@@ -2625,7 +2622,7 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
             vertexCopy.srcOffset = chunkVertexUploadSliceOpt->offset;
             vertexCopy.size = vertexBufferSize;
             vkCmdCopyBuffer(
-                m_transferCommandBuffer,
+                transferSlot->commandBuffer,
                 m_bufferAllocator.getBuffer(chunkVertexUploadSliceOpt->buffer),
                 m_bufferAllocator.getBuffer(newChunkVertexBufferHandle),
                 1,
@@ -2636,7 +2633,7 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
             indexCopy.srcOffset = chunkIndexUploadSliceOpt->offset;
             indexCopy.size = indexBufferSize;
             vkCmdCopyBuffer(
-                m_transferCommandBuffer,
+                transferSlot->commandBuffer,
                 m_bufferAllocator.getBuffer(chunkIndexUploadSliceOpt->buffer),
                 m_bufferAllocator.getBuffer(newChunkIndexBufferHandle),
                 1,
@@ -2644,7 +2641,7 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
             );
         }
 
-        if (vkEndCommandBuffer(m_transferCommandBuffer) != VK_SUCCESS) {
+        if (vkEndCommandBuffer(transferSlot->commandBuffer) != VK_SUCCESS) {
             VOX_LOGE("render") << "vkEndCommandBuffer (transfer) failed\n";
             cleanupPendingAllocations();
             rollbackChunkDrawState();
@@ -2679,7 +2676,7 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
         transferSignalSemaphoreInfo.deviceIndex = 0;
         VkCommandBufferSubmitInfo transferCommandBufferInfo{};
         transferCommandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-        transferCommandBufferInfo.commandBuffer = m_transferCommandBuffer;
+        transferCommandBufferInfo.commandBuffer = transferSlot->commandBuffer;
         VkSubmitInfo2 transferSubmitInfo{};
         transferSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
         transferSubmitInfo.waitSemaphoreInfoCount = transferWaitCount;
@@ -2708,11 +2705,12 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
             }
             m_currentChunkReadyTimelineValue = 0;
             m_pendingTransferTimelineValue = 0;
-            m_transferCommandBufferInFlightValue = 0;
+            transferSlot->inFlightTimelineValue = 0;
         } else {
             m_currentChunkReadyTimelineValue = transferSignalValue;
-            m_pendingTransferTimelineValue = transferSignalValue;
-            m_transferCommandBufferInFlightValue = transferSignalValue;
+            m_pendingTransferTimelineValue = std::max(m_pendingTransferTimelineValue, transferSignalValue);
+            transferSlot->inFlightTimelineValue = transferSignalValue;
+            transferSlot->stagingFrameIndex = m_currentFrame;
         }
     }
 

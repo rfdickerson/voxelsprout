@@ -1463,7 +1463,10 @@ bool RendererBackend::createTimelineSemaphore() {
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;
-    m_transferCommandBufferInFlightValue = 0;
+    for (TransferCommandSlot& slot : m_transferCommandSlots) {
+        slot.inFlightTimelineValue = 0;
+        slot.stagingFrameIndex = 0;
+    }
     m_lastGraphicsTimelineValue = 0;
     // The canary consumed value 1; continue strictly above it.
     m_nextTimelineValue = 2;
@@ -1511,7 +1514,8 @@ bool RendererBackend::createUploadRingBuffer() {
 
 
 bool RendererBackend::createTransferResources() {
-    if (m_transferCommandPool != VK_NULL_HANDLE && m_transferCommandBuffer != VK_NULL_HANDLE) {
+    if (m_transferCommandPool != VK_NULL_HANDLE &&
+        m_transferCommandSlots.front().commandBuffer != VK_NULL_HANDLE) {
         return true;
     }
 
@@ -1531,24 +1535,30 @@ bool RendererBackend::createTransferResources() {
         "renderer.transfer.commandPool"
     );
 
+    std::array<VkCommandBuffer, kTransferCommandSlotCount> commandBuffers{};
     VkCommandBufferAllocateInfo allocateInfo{};
     allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocateInfo.commandPool = m_transferCommandPool;
     allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocateInfo.commandBufferCount = 1;
+    allocateInfo.commandBufferCount = static_cast<uint32_t>(kTransferCommandSlotCount);
 
-    const VkResult commandBufferResult = vkAllocateCommandBuffers(m_device, &allocateInfo, &m_transferCommandBuffer);
+    const VkResult commandBufferResult = vkAllocateCommandBuffers(m_device, &allocateInfo, commandBuffers.data());
     if (commandBufferResult != VK_SUCCESS) {
         logVkFailure("vkAllocateCommandBuffers(transfer)", commandBufferResult);
         vkDestroyCommandPool(m_device, m_transferCommandPool, nullptr);
         m_transferCommandPool = VK_NULL_HANDLE;
         return false;
     }
-    setObjectName(
-        VK_OBJECT_TYPE_COMMAND_BUFFER,
-        vkHandleToUint64(m_transferCommandBuffer),
-        "renderer.transfer.commandBuffer"
-    );
+    for (std::size_t slotIndex = 0; slotIndex < kTransferCommandSlotCount; ++slotIndex) {
+        m_transferCommandSlots[slotIndex] = TransferCommandSlot{commandBuffers[slotIndex], 0, 0};
+        const std::string commandBufferName =
+            "renderer.transfer.commandBuffer." + std::to_string(slotIndex);
+        setObjectName(
+            VK_OBJECT_TYPE_COMMAND_BUFFER,
+            vkHandleToUint64(commandBuffers[slotIndex]),
+            commandBufferName.c_str()
+        );
+    }
 
     return true;
 }
@@ -2094,7 +2104,7 @@ void RendererBackend::destroySwapchain() {
 
 
 void RendererBackend::destroyTransferResources() {
-    m_transferCommandBuffer = VK_NULL_HANDLE;
+    m_transferCommandSlots.fill(TransferCommandSlot{});
     if (m_transferCommandPool != VK_NULL_HANDLE) {
         vkDestroyCommandPool(m_device, m_transferCommandPool, nullptr);
         m_transferCommandPool = VK_NULL_HANDLE;
@@ -2286,7 +2296,10 @@ void RendererBackend::destroyChunkBuffers() {
     m_chunkIndexBufferHandle = kInvalidBufferHandle;
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;
-    m_transferCommandBufferInFlightValue = 0;
+    for (TransferCommandSlot& slot : m_transferCommandSlots) {
+        slot.inFlightTimelineValue = 0;
+        slot.stagingFrameIndex = 0;
+    }
 }
 
 
@@ -2551,7 +2564,10 @@ void RendererBackend::shutdown() {
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
     m_currentChunkReadyTimelineValue = 0;
-    m_transferCommandBufferInFlightValue = 0;
+    for (TransferCommandSlot& slot : m_transferCommandSlots) {
+        slot.inFlightTimelineValue = 0;
+        slot.stagingFrameIndex = 0;
+    }
     m_lastGraphicsTimelineValue = 0;
     m_nextTimelineValue = 1;
     m_getRefreshCycleDurationGoogle = nullptr;
