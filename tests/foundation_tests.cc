@@ -319,6 +319,48 @@ void testChunkMeshingModes() {
     }
 }
 
+// The renderer derives the debug "naive-equivalent" geometry counts from
+// ChunkMeshingStats::exposedFaceCount instead of running the naive mesher a
+// second time; this pins the 4-vertices/6-indices-per-face equivalence.
+void testChunkMeshingStats() {
+    using odai::world::Chunk;
+    using odai::world::ChunkMeshingStats;
+    using odai::world::MeshingMode;
+    using odai::world::MeshingOptions;
+    using odai::world::Voxel;
+    using odai::world::VoxelType;
+
+    const odai::world::Chunk procedural = odai::world::buildProceduralChunk(0, 0, 0);
+    Chunk slab(0, 0, 0);
+    for (int z = 0; z < Chunk::kSizeZ; ++z) {
+        for (int x = 0; x < Chunk::kSizeX; ++x) {
+            slab.setVoxel(x, 8, z, Voxel{VoxelType::Solid});
+        }
+    }
+    slab.setVoxel(5, 9, 5, Voxel{VoxelType::Solid});
+
+    for (const Chunk* chunk : {&procedural, static_cast<const Chunk*>(&slab)}) {
+        ChunkMeshingStats naiveStats{};
+        const odai::world::ChunkLodMeshes naive =
+            odai::world::buildChunkLodMeshes(*chunk, MeshingOptions{MeshingMode::Naive}, &naiveStats);
+        ChunkMeshingStats greedyStats{};
+        (void)odai::world::buildChunkLodMeshes(*chunk, MeshingOptions{MeshingMode::Greedy}, &greedyStats);
+
+        expectTrue(
+            greedyStats.exposedFaceCount == naiveStats.exposedFaceCount,
+            "Greedy and naive meshing agree on exposed face count"
+        );
+        expectTrue(
+            naiveStats.exposedFaceCount * 4u == naive.lodMeshes[0].vertices.size(),
+            "Exposed face count times 4 equals naive vertex count"
+        );
+        expectTrue(
+            naiveStats.exposedFaceCount * 6u == naive.lodMeshes[0].indices.size(),
+            "Exposed face count times 6 equals naive index count"
+        );
+    }
+}
+
 void testProceduralWorldGenerationTerrain() {
     const odai::world::Chunk center = odai::world::buildProceduralChunk(0, 0, 0);
     const odai::world::Chunk centerRepeat = odai::world::buildProceduralChunk(0, 0, 0);
@@ -576,6 +618,7 @@ int main() {
     testCsgCommands();
     testFrameArenaAliasUtilities();
     testChunkMeshingModes();
+    testChunkMeshingStats();
     testProceduralWorldGenerationTerrain();
     testClipmapIndex();
     testSimulationBeltCargoDeterminism();

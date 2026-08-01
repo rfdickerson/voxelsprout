@@ -988,6 +988,8 @@ void RendererBackend::buildMeshingDebugUi() {
             m_chunkLodMeshCacheValid = false;
             m_chunkMeshRebuildRequested = true;
             m_pendingChunkRemeshKeys.clear();
+            // Off-thread meshes built with the previous mode are now wrong.
+            m_externalChunkMeshResults.clear();
             VOX_LOGI("render") << "chunk meshing mode changed to "
                                << (nextMode == odai::world::MeshingMode::Greedy ? "Greedy" : "Naive")
                                << ", scheduling full remesh";

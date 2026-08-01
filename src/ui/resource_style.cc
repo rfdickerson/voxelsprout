@@ -24,11 +24,14 @@ void registerResourceStyle(std::string_view key, const ResourceStyle& style) {
     registry()[std::string(key)] = style;
 }
 
-const ResourceStyle* resourceStyle(std::string_view key) {
+std::optional<ResourceStyle> resourceStyle(std::string_view key) {
     std::lock_guard lock(registryMutex());
     auto& reg = registry();
     auto it = reg.find(std::string(key));
-    return (it != reg.end()) ? &it->second : nullptr;
+    if (it == reg.end()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 std::string resourceText(int value, bool signedDelta) {

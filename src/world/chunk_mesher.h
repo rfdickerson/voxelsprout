@@ -3,6 +3,7 @@
 #include "world/chunk_grid.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -76,6 +77,42 @@ struct ChunkLodMeshes {
     std::array<ChunkMeshData, kChunkMeshLodCount> lodMeshes;
 };
 
+// A naive mesh emits exactly 4 vertices / 6 indices per exposed face, so
+// exposedFaceCount lets callers derive naive-equivalent geometry counts
+// without running the naive mesher a second time.
+struct ChunkMeshingStats {
+    std::size_t exposedFaceCount = 0;
+};
+
+// Identifies a chunk by its grid coordinates, independent of its (unstable)
+// index in the resident chunk vector.
+struct ChunkMeshKey {
+    int x = 0;
+    int y = 0;
+    int z = 0;
+
+    [[nodiscard]] bool operator==(const ChunkMeshKey&) const = default;
+};
+
+struct ChunkMeshKeyHash {
+    std::size_t operator()(const ChunkMeshKey& key) const {
+        std::size_t h = static_cast<std::size_t>(key.x) * 73856093u;
+        h ^= static_cast<std::size_t>(key.y) * 19349663u;
+        h ^= static_cast<std::size_t>(key.z) * 83492791u;
+        return h;
+    }
+};
+
+// A finished off-thread mesh for one chunk, ready for GPU upload. generation
+// is the scheduler's staleness token (see world::ChunkMeshScheduler).
+struct ChunkMeshResult {
+    ChunkMeshKey key{};
+    std::uint64_t generation = 0;
+    ChunkLodMeshes meshes;
+    ChunkMeshingStats stats{};
+};
+
+ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk, MeshingOptions options, ChunkMeshingStats* outStats);
 ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk, MeshingOptions options = {});
 ChunkMeshData buildChunkMesh(const Chunk& chunk, MeshingOptions options = {});
 

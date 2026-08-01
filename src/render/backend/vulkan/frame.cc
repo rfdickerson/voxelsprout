@@ -16,15 +16,6 @@ namespace odai::render {
 
 namespace {
 
-float performShortPacingWait() {
-    const auto waitStart = std::chrono::steady_clock::now();
-    std::this_thread::sleep_for(std::chrono::microseconds(250));
-    std::this_thread::yield();
-    return static_cast<float>(
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count()
-    );
-}
-
 template <typename VkHandleT>
 uint64_t vkHandleToUint64(VkHandleT handle) {
     if constexpr (std::is_pointer_v<VkHandleT>) {
@@ -121,21 +112,57 @@ std::uint32_t RendererBackend::countQueuedFrames(uint64_t completedValue) const 
     return queuedFrames;
 }
 
-bool RendererBackend::shouldThrottleFrameStart(uint64_t completedValue, float* outCpuWaitMs) const {
+bool RendererBackend::shouldThrottleFrameStart(uint64_t completedValue) const {
     if (m_framePacingSettings.maxQueuedFrames >= kMaxFramesInFlight) {
         return false;
     }
-    const std::uint32_t queuedFrames = countQueuedFrames(completedValue);
-    if (queuedFrames < m_framePacingSettings.maxQueuedFrames) {
+    return countQueuedFrames(completedValue) >= m_framePacingSettings.maxQueuedFrames;
+}
+
+bool RendererBackend::waitTimelineValue(uint64_t value, uint64_t timeoutNs, float* outWaitMs) {
+    if (value == 0 || m_renderTimelineSemaphore == VK_NULL_HANDLE) {
+        return true;
+    }
+    const auto waitStart = std::chrono::steady_clock::now();
+    VkSemaphoreWaitInfo waitInfo{};
+    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    waitInfo.semaphoreCount = 1;
+    waitInfo.pSemaphores = &m_renderTimelineSemaphore;
+    waitInfo.pValues = &value;
+    const VkResult result = vkWaitSemaphores(m_device, &waitInfo, timeoutNs);
+    if (outWaitMs != nullptr) {
+        *outWaitMs += static_cast<float>(
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count()
+        );
+    }
+    if (result == VK_TIMEOUT) {
         return false;
     }
-
-    if (outCpuWaitMs != nullptr) {
-        *outCpuWaitMs += performShortPacingWait();
-    } else {
-        (void)performShortPacingWait();
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkWaitSemaphores(timeline)", result);
+        return false;
     }
     return true;
+}
+
+uint64_t RendererBackend::oldestQueuedFrameTimelineValue(uint64_t completedValue) const {
+    uint64_t oldestValue = 0;
+    for (uint64_t frameTimelineValue : m_frameTimelineValues) {
+        if (frameTimelineValue > completedValue &&
+            (oldestValue == 0 || frameTimelineValue < oldestValue)) {
+            oldestValue = frameTimelineValue;
+        }
+    }
+    return oldestValue;
+}
+
+uint64_t RendererBackend::frameWaitBudgetNs() const {
+    constexpr uint64_t kFallbackBudgetNs = 50'000'000;
+    if (m_displayRefreshDurationNs == 0) {
+        return kFallbackBudgetNs;
+    }
+    const uint64_t cadenceDivisor = std::max<uint64_t>(1, m_framePacingSettings.cadenceDivisor);
+    return 2 * m_displayRefreshDurationNs * cadenceDivisor;
 }
 
 void RendererBackend::resetDisplayTimingTracking() {
@@ -518,9 +545,58 @@ void RendererBackend::collectCompletedBufferReleases() {
     if (m_pendingTransferTimelineValue > 0 && m_pendingTransferTimelineValue <= completedValue) {
         m_pendingTransferTimelineValue = 0;
     }
-    if (m_transferCommandBufferInFlightValue > 0 && m_transferCommandBufferInFlightValue <= completedValue) {
-        m_transferCommandBufferInFlightValue = 0;
+    for (TransferCommandSlot& slot : m_transferCommandSlots) {
+        if (slot.inFlightTimelineValue > 0 && slot.inFlightTimelineValue <= completedValue) {
+            slot.inFlightTimelineValue = 0;
+        }
     }
+}
+
+bool RendererBackend::anyTransferSlotInFlight() const {
+    const uint64_t completedValue = completedTimelineValue();
+    for (const TransferCommandSlot& slot : m_transferCommandSlots) {
+        if (slot.inFlightTimelineValue > completedValue) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RendererBackend::hasFreeTransferSlot() const {
+    const uint64_t completedValue = completedTimelineValue();
+    for (const TransferCommandSlot& slot : m_transferCommandSlots) {
+        if (slot.inFlightTimelineValue <= completedValue) {
+            return true;
+        }
+    }
+    return false;
+}
+
+RendererBackend::TransferCommandSlot* RendererBackend::acquireTransferCommandSlot(float* outWaitMs) {
+    const uint64_t completedValue = completedTimelineValue();
+    TransferCommandSlot* oldestBusySlot = nullptr;
+    for (TransferCommandSlot& slot : m_transferCommandSlots) {
+        if (slot.commandBuffer == VK_NULL_HANDLE) {
+            continue;
+        }
+        if (slot.inFlightTimelineValue <= completedValue) {
+            slot.inFlightTimelineValue = 0;
+            return &slot;
+        }
+        if (oldestBusySlot == nullptr ||
+            slot.inFlightTimelineValue < oldestBusySlot->inFlightTimelineValue) {
+            oldestBusySlot = &slot;
+        }
+    }
+    if (oldestBusySlot == nullptr) {
+        return nullptr;
+    }
+    // All slots busy: block on the oldest submit rather than dropping the work.
+    if (!waitTimelineValue(oldestBusySlot->inFlightTimelineValue, frameWaitBudgetNs(), outWaitMs)) {
+        return nullptr;
+    }
+    oldestBusySlot->inFlightTimelineValue = 0;
+    return oldestBusySlot;
 }
 
 void RendererBackend::destroyFrameResources() {

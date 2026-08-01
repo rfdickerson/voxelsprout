@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
+find_package(Threads REQUIRED)
 option(ODAI_BUILD_APP "Build the main Vulkan toy application." ON)
 option(ODAI_BUILD_TOOLS "Build offline content tools." ON)
 option(ODAI_BUILD_EXAMPLES "Build standalone odai_ui SDK integration samples." OFF)
@@ -289,7 +290,6 @@ if(ODAI_MINIAUDIO_INCLUDE_DIR)
     target_compile_definitions(odai_audio PRIVATE ODAI_AUDIO_HAVE_MINIAUDIO)
     if(NOT WIN32 AND NOT APPLE)
         # miniaudio dlopen()s ALSA/PulseAudio at runtime; only threads + libdl to build.
-        find_package(Threads REQUIRED)
         target_link_libraries(odai_audio PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
     endif()
     message(STATUS "odai_audio: miniaudio backend enabled (${ODAI_MINIAUDIO_INCLUDE_DIR})")
@@ -424,7 +424,9 @@ if(ODAI_BUILD_APP)
         src/world/world.cc
         src/world/chunk_grid_worldgen.cc
         src/world/chunk_mesher.cc
+        src/world/chunk_mesh_scheduler.cc
         src/world/clipmap_index.cc
+        src/core/job_system.cc
     )
     set(ODAI_RENDER_BACKEND "VULKAN" CACHE STRING "Render backend to build. Supported values: VULKAN, DX12, METAL.")
     set_property(CACHE ODAI_RENDER_BACKEND PROPERTY STRINGS VULKAN DX12 METAL)
@@ -496,6 +498,8 @@ if(ODAI_BUILD_APP)
             src/render/backend/vulkan/pass_gi.cc
             src/render/backend/vulkan/shadow_culling.cc
             src/render/backend/vulkan/vma_usage.cc
+            # chunk_upload.cc scatters grass through the Vulkan-free world helper.
+            src/world/grass_scatter.cc
         )
         target_compile_definitions(odai PRIVATE ODAI_RENDER_BACKEND_VULKAN=1)
         target_compile_definitions(odai PRIVATE ODAI_HAS_VULKAN=1)
@@ -533,6 +537,7 @@ if(ODAI_BUILD_APP)
     endif()
 
     # UI libraries (Vulkan + VMA already found in the VULKAN block above)
+    target_link_libraries(odai PRIVATE Threads::Threads)
     target_link_libraries(odai PRIVATE odai_ui)
     target_link_libraries(odai PRIVATE odai_content)
     target_link_libraries(odai PRIVATE odai_script)
@@ -1197,6 +1202,35 @@ if(BUILD_TESTING)
     endif()
 
     add_test(NAME odai_foundation_tests COMMAND odai_foundation_tests)
+
+    add_executable(odai_job_system_tests
+        tests/job_system_tests.cc
+        src/core/job_system.cc
+    )
+    target_include_directories(odai_job_system_tests PRIVATE src)
+    target_link_libraries(odai_job_system_tests PRIVATE Threads::Threads)
+    if(MSVC)
+        target_compile_options(odai_job_system_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_job_system_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_job_system_tests COMMAND odai_job_system_tests)
+
+    add_executable(odai_chunk_mesh_scheduler_tests
+        tests/chunk_mesh_scheduler_tests.cc
+        src/core/job_system.cc
+        src/world/chunk_mesher.cc
+        src/world/chunk_mesh_scheduler.cc
+        src/world/grass_scatter.cc
+    )
+    target_include_directories(odai_chunk_mesh_scheduler_tests PRIVATE src)
+    target_link_libraries(odai_chunk_mesh_scheduler_tests PRIVATE Threads::Threads)
+    if(MSVC)
+        target_compile_options(odai_chunk_mesh_scheduler_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_chunk_mesh_scheduler_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_chunk_mesh_scheduler_tests COMMAND odai_chunk_mesh_scheduler_tests)
 
     add_executable(odai_strategy_map_tests
         tests/strategy_map_tests.cc

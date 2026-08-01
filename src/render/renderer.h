@@ -53,6 +53,12 @@ public:
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
+    // Queue meshes built off the render thread (world::ChunkMeshScheduler) for
+    // upload on the next frame; the renderer skips its inline mesher for them.
+    bool uploadChunkMeshes(const odai::world::ChunkGrid& chunkGrid, std::vector<odai::world::ChunkMeshResult> results);
+    // Meshing mode the renderer's own full-rebuild path uses; mirror it in any
+    // off-thread mesher so both paths produce the same geometry.
+    [[nodiscard]] odai::world::MeshingOptions chunkMeshingOptions() const;
     bool useSpatialPartitioningQueries() const;
     odai::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);

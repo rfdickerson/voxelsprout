@@ -2,6 +2,8 @@
 
 #include "content/mod_loader.h"
 
+#include <atomic>
+
 namespace odai::content {
 
 using odai::game::BuildableItem;
@@ -85,18 +87,19 @@ bool ContentDatabase::tileIsWorkable(TerrainType terrain) const {
 // --- process-wide active content -------------------------------------------
 
 namespace {
-const ContentDatabase* g_active = nullptr;
+std::atomic<const ContentDatabase*> g_active{nullptr};
 }  // namespace
 
 const ContentDatabase& activeContent() {
     // Lazily loaded base game; thread-safe static initialization. Built once on
     // first access so tools/tests/app need no explicit init step.
     static const ContentDatabase base = loadBaseContent();
-    return g_active != nullptr ? *g_active : base;
+    const ContentDatabase* active = g_active.load(std::memory_order_acquire);
+    return active != nullptr ? *active : base;
 }
 
 void setActiveContent(const ContentDatabase* db) {
-    g_active = db;
+    g_active.store(db, std::memory_order_release);
 }
 
 }  // namespace odai::content

@@ -416,7 +416,7 @@ bool appendGreedyFaceQuad(
     return true;
 }
 
-ChunkLodMeshes buildChunkLodMeshesGreedy(const Chunk& chunk) {
+ChunkLodMeshes buildChunkLodMeshesGreedy(const Chunk& chunk, ChunkMeshingStats* outStats) {
     ChunkLodMeshes meshes{};
     static_assert(Chunk::kSizeX <= 32 && Chunk::kSizeY <= 32 && Chunk::kSizeZ <= 32, "Packed position fields are 5-bit");
     ChunkMeshData& baseMesh = meshes.lodMeshes[0];
@@ -453,6 +453,9 @@ ChunkLodMeshes buildChunkLodMeshesGreedy(const Chunk& chunk) {
                     const std::uint16_t aoSignature = faceCornerAoSignature(chunk, x, y, z, faceId);
                     const std::size_t maskIndex = static_cast<std::size_t>(u + (v * uCount));
                     mask[maskIndex] = makeMaskKey(material, aoSignature, baseColorIndex);
+                    if (outStats != nullptr) {
+                        ++outStats->exposedFaceCount;
+                    }
                 }
             }
 
@@ -577,7 +580,7 @@ std::uint32_t PackedVoxelVertex::pack(
            ((lodLevel & kMask2) << kShiftLodLevel);
 }
 
-ChunkLodMeshes buildChunkLodMeshesNaive(const Chunk& chunk) {
+ChunkLodMeshes buildChunkLodMeshesNaive(const Chunk& chunk, ChunkMeshingStats* outStats) {
     ChunkLodMeshes meshes{};
     static_assert(Chunk::kSizeX <= 32 && Chunk::kSizeY <= 32 && Chunk::kSizeZ <= 32, "Packed position fields are 5-bit");
 
@@ -600,6 +603,9 @@ ChunkLodMeshes buildChunkLodMeshesNaive(const Chunk& chunk) {
                         continue;
                     }
                     appendVoxelFace(chunk, baseMesh, x, y, z, face.faceId, material, baseColorIndex, 0u);
+                    if (outStats != nullptr) {
+                        ++outStats->exposedFaceCount;
+                    }
                 }
             }
         }
@@ -608,14 +614,18 @@ ChunkLodMeshes buildChunkLodMeshesNaive(const Chunk& chunk) {
     return meshes;
 }
 
-ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk, MeshingOptions options) {
+ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk, MeshingOptions options, ChunkMeshingStats* outStats) {
     switch (options.mode) {
     case MeshingMode::Greedy:
-        return buildChunkLodMeshesGreedy(chunk);
+        return buildChunkLodMeshesGreedy(chunk, outStats);
     case MeshingMode::Naive:
     default:
-        return buildChunkLodMeshesNaive(chunk);
+        return buildChunkLodMeshesNaive(chunk, outStats);
     }
+}
+
+ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk, MeshingOptions options) {
+    return buildChunkLodMeshes(chunk, options, nullptr);
 }
 
 ChunkMeshData buildChunkMesh(const Chunk& chunk, MeshingOptions options) {

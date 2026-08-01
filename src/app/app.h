@@ -11,7 +11,9 @@
 #include "import/gpu_scene.h"
 #include "script/script_engine.h"
 #include "ui/animation.h"
+#include "core/job_system.h"
 #include "render/renderer.h"
+#include "world/chunk_mesh_scheduler.h"
 #include "sim/simulation.h"
 #include "ui/font.h"
 #include "ui/ui_context.h"
@@ -676,6 +678,11 @@ private:
     odai::world::World m_world;
     odai::world::ChunkClipmapIndex m_chunkClipmapIndex;
     odai::render::Renderer m_renderer;
+    // Worker pool + chunk meshing scheduler: chunk remeshes run off the main
+    // thread and land back here as ChunkMeshResults each frame (see update()).
+    odai::core::JobSystem m_jobSystem{
+        std::thread::hardware_concurrency() > 1 ? std::thread::hardware_concurrency() - 1 : 1u};
+    odai::world::ChunkMeshScheduler m_chunkMeshScheduler{m_jobSystem, odai::world::MeshingOptions{}};
 
     odai::audio::Audio m_audio;
     odai::audio::SoundHandle m_uiClickSfx;

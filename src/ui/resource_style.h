@@ -2,6 +2,7 @@
 
 #include "ui/ui_types.h"
 
+#include <optional>
 #include <string_view>
 #include <unordered_map>
 #include <string>
@@ -27,8 +28,10 @@ struct ResourceStyle {
 // Overwrites any previous entry for the same key.
 void registerResourceStyle(std::string_view key, const ResourceStyle& style);
 
-// Look up a resource key. Returns nullptr if the key has not been registered.
-const ResourceStyle* resourceStyle(std::string_view key);
+// Look up a resource key. Returns nullopt if the key has not been registered.
+// Returns by value: handing out a pointer into the registry would race with a
+// concurrent registerResourceStyle() overwriting the same key.
+std::optional<ResourceStyle> resourceStyle(std::string_view key);
 
 // Format a resource value for display.
 //   signedDelta = true  (per-turn rate):  "+7", "-3", or "—" for zero

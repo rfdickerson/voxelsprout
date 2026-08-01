@@ -80,6 +80,14 @@ bool Renderer::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::spa
     return m_backend->updateChunkMesh(chunkGrid, chunkIndices);
 }
 
+bool Renderer::uploadChunkMeshes(const odai::world::ChunkGrid& chunkGrid, std::vector<odai::world::ChunkMeshResult> results) {
+    return m_backend->uploadChunkMeshes(chunkGrid, std::move(results));
+}
+
+odai::world::MeshingOptions Renderer::chunkMeshingOptions() const {
+    return m_backend->chunkMeshingOptions();
+}
+
 bool Renderer::useSpatialPartitioningQueries() const {
     return m_backend->useSpatialPartitioningQueries();
 }

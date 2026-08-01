@@ -249,6 +249,13 @@ public:
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
     bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
+    // Accepts meshes built off-thread (world::ChunkMeshScheduler) and queues
+    // them for upload through the per-frame remesh path, skipping the inline
+    // mesher for those chunks.
+    bool uploadChunkMeshes(const odai::world::ChunkGrid& chunkGrid, std::vector<odai::world::ChunkMeshResult> results);
+    // Meshing mode the renderer's own (full-rebuild) path uses. Callers driving
+    // an off-thread mesher must mirror it so both paths agree.
+    [[nodiscard]] odai::world::MeshingOptions chunkMeshingOptions() const { return m_chunkMeshingOptions; }
     bool useSpatialPartitioningQueries() const;
     odai::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
@@ -370,6 +377,18 @@ private:
         VkSemaphore imageAvailable = VK_NULL_HANDLE;
     };
 
+    // One entry in the transfer command-buffer ring. A slot is free when
+    // inFlightTimelineValue is 0 or the render timeline has passed it.
+    // stagingFrameIndex records which frame-in-flight arena holds the staging
+    // data for the slot's submit: FrameArena::beginFrame(frameIndex) must not
+    // reset an arena a still-running transfer reads from.
+    struct TransferCommandSlot {
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        uint64_t inFlightTimelineValue = 0;
+        uint32_t stagingFrameIndex = 0;
+    };
+    static constexpr std::size_t kTransferCommandSlotCount = 3;
+
     bool createInstance();
     bool createSurface();
     bool pickPhysicalDevice();
@@ -409,6 +428,9 @@ private:
         const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo = nullptr
     );
     bool createChunkBuffers(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
+    // Moves a stored off-thread mesh result into the LOD cache for the given
+    // resident chunk index. Returns false when no result is stored for it.
+    bool consumeExternalChunkMeshResult(std::size_t chunkArrayIndex, odai::world::ChunkMeshingStats& outStats);
     bool createFrameResources();
     bool createGpuTimestampResources();
     bool createImGuiResources();
@@ -573,7 +595,21 @@ private:
     bool isTimelineValueReached(uint64_t value) const;
     uint64_t completedTimelineValue() const;
     std::uint32_t countQueuedFrames(uint64_t completedValue) const;
-    bool shouldThrottleFrameStart(uint64_t completedValue, float* outCpuWaitMs) const;
+    bool shouldThrottleFrameStart(uint64_t completedValue) const;
+    // Blocks on the render timeline semaphore (vkWaitSemaphores) until `value`
+    // is reached or `timeoutNs` elapses. Returns true when the value was
+    // reached. Values of 0 (never submitted) return true immediately — waiting
+    // on them would deadlock until timeout. Elapsed time accrues to *outWaitMs.
+    bool waitTimelineValue(uint64_t value, uint64_t timeoutNs, float* outWaitMs);
+    // Smallest in-flight frame timeline value above completedValue, or 0 when
+    // no frame is queued.
+    uint64_t oldestQueuedFrameTimelineValue(uint64_t completedValue) const;
+    // Bounded wait budget for frame-slot / pacing waits: about two present
+    // intervals, falling back to 50 ms when the refresh rate is unknown.
+    uint64_t frameWaitBudgetNs() const;
+    TransferCommandSlot* acquireTransferCommandSlot(float* outWaitMs);
+    bool anyTransferSlotInFlight() const;
+    bool hasFreeTransferSlot() const;
     uint64_t computeDesiredPresentTimeNs(std::uint64_t nowNs) const;
     bool loadRayTracingFunctions();
     void loadHostImageCopyFunctions();
@@ -1218,6 +1254,9 @@ private:
     odai::world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;
     std::vector<ChunkResidentKey> m_pendingChunkRemeshKeys;
+    // Off-thread mesh results waiting to be consumed by the remesh path;
+    // keyed by chunk grid coordinates, replaced on newer arrival.
+    std::vector<odai::world::ChunkMeshResult> m_externalChunkMeshResults;
     uint32_t m_previewIndexCount = 0;
     uint32_t m_pipeIndexCount = 0;
     uint32_t m_transportIndexCount = 0;
@@ -1266,14 +1305,13 @@ private:
 
     std::array<FrameResources, kMaxFramesInFlight> m_frames{};
     VkCommandPool m_transferCommandPool = VK_NULL_HANDLE;
-    VkCommandBuffer m_transferCommandBuffer = VK_NULL_HANDLE;
+    std::array<TransferCommandSlot, kTransferCommandSlotCount> m_transferCommandSlots{};
     std::array<uint64_t, kMaxFramesInFlight> m_frameTimelineValues{};
     VkSemaphore m_renderTimelineSemaphore = VK_NULL_HANDLE;
     PFN_vkGetRefreshCycleDurationGOOGLE m_getRefreshCycleDurationGoogle = nullptr;
     PFN_vkGetPastPresentationTimingGOOGLE m_getPastPresentationTimingGoogle = nullptr;
     uint64_t m_pendingTransferTimelineValue = 0;
     uint64_t m_currentChunkReadyTimelineValue = 0;
-    uint64_t m_transferCommandBufferInFlightValue = 0;
     uint64_t m_lastGraphicsTimelineValue = 0;
     uint64_t m_nextTimelineValue = 1;
     uint32_t m_nextDisplayTimingPresentId = 1;
@@ -1403,6 +1441,7 @@ private:
     std::uint32_t m_debugMacroCellUniformCount = 0;
     std::uint32_t m_debugMacroCellRefined4Count = 0;
     std::uint32_t m_debugMacroCellRefined1Count = 0;
+    bool m_debugMacroCellStatsDirty = true;
     std::uint32_t m_debugDrawnLod0Ranges = 0;
     std::uint32_t m_debugDrawnLod1Ranges = 0;
     std::uint32_t m_debugDrawnLod2Ranges = 0;
