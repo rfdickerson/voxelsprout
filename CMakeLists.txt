@@ -232,6 +232,7 @@ add_library(odai_ui STATIC
     # Renamed panels (genre-neutral names, data-agnostic, no game-type deps):
     src/ui/widgets/advisors_panel.cc
     src/ui/widgets/build_queue_panel.cc
+    src/ui/widgets/dialogue_panel.cc
     src/ui/widgets/event_tracker_panel.cc
     src/ui/widgets/faction_panel.cc
     src/ui/widgets/grid_picker_panel.cc
@@ -336,6 +337,28 @@ if(MSVC)
     target_compile_options(odai_content PRIVATE ${ODAI_WARN_FLAGS_MSVC})
 else()
     target_compile_options(odai_content PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# ---------------------------------------------------------------------------
+# odai_dialogue — branching dialogue trees (Dragon Age: Origins touchstone, see
+# docs/ROADMAP.md). Vulkan-free, game-free: conditions/effects run against the
+# abstract DialogueContext, not any specific game's state, so this links into
+# any game prototype without pulling in its data model.
+# ---------------------------------------------------------------------------
+add_library(odai_dialogue STATIC
+    src/dialogue/dialogue_io.cc
+    src/dialogue/dialogue_runtime.cc
+)
+target_include_directories(odai_dialogue PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(odai_dialogue PRIVATE nlohmann_json::nlohmann_json)
+target_compile_features(odai_dialogue PUBLIC cxx_std_20)
+if(MSVC)
+    target_compile_options(odai_dialogue PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+else()
+    target_compile_options(odai_dialogue PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -1470,6 +1493,19 @@ if(BUILD_TESTING)
         target_compile_options(odai_content_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_content_tests COMMAND odai_content_tests)
+
+    # Dialogue trees (Dragon Age touchstone): JSON loading, condition filtering,
+    # effect application, auto-continue chains, and dangling-reference/cycle
+    # guards. Pure CPU; no Vulkan, no game-state dependency.
+    add_executable(odai_dialogue_tests tests/dialogue_tests.cc)
+    target_include_directories(odai_dialogue_tests PRIVATE src)
+    target_link_libraries(odai_dialogue_tests PRIVATE odai_dialogue)
+    if(MSVC)
+        target_compile_options(odai_dialogue_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_dialogue_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_dialogue_tests COMMAND odai_dialogue_tests)
 
     # Lua scripting engine: event hooks fire with the right counts/order, and a
     # scripted run is deterministic (same seed+mod -> identical TurnSamples; a

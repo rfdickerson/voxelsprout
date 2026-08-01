@@ -119,8 +119,8 @@ This is the newest touchstone and, honestly, close to a blank page. The one thin
 |---|---|---|
 | MMO-style HUD chrome (unit frames, action bars, chat, inventory grid) | 🟡 | Exists as static mockup only (`games/swtor/swtor_app.cc`) — layout is reusable, none of it is wired to real state |
 | Skeletal animation / GPU skinning | ⬜ | Foundational blocker — see Units and Armies above; nothing renders animated characters today |
-| Branching dialogue system | ⬜ | Not implemented. Closest adjacent infrastructure: `src/ui/rich_text.h` (markup rendering) and `src/ui/document/ui_document.h` (data-bound UI) could host dialogue UI once a dialogue-tree data format and state machine exist |
-| Companion approval / relationship system | ⬜ | Not implemented anywhere |
+| Branching dialogue system | 🟡 | First slice landed: `src/dialogue/` (data format, `DialogueRuntime` state machine, JSON loader with non-fatal error reporting) + `ui::DialoguePanel` (`src/ui/widgets/dialogue_panel.h/.cc`), tested by `tests/dialogue_tests.cc` (`odai_dialogue_tests`). Not yet wired into any actual game/content beyond the test fixture tree, and not yet exercised through a real build (see verification note in the commit) |
+| Companion approval / relationship system | 🟡 | The runtime supports per-companion approval reads/deltas as a dialogue effect (`DialogueContext::approval`/`adjustApproval`, `DialogueCondition::minApproval`); no persistence, UI display, or companion roster concept exists outside the dialogue module itself |
 | Real-time-with-pause tactical party combat | ⬜ | Not implemented. Distinct from — and much smaller in scope than — the mass-battle rendering that's out of scope below (4–8 characters, not thousands) |
 | Origin-story branching narrative structure | ⬜ | Not implemented; would likely build on the same dialogue-tree infrastructure above |
 
