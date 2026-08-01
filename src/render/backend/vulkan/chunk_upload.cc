@@ -1156,7 +1156,8 @@ bool RendererBackend::uploadImportedSceneInternal(
         vertices.push_back(dstVertex);
     }
     indices.assign(uploadScene.packedIndices.begin(), uploadScene.packedIndices.end());
-    const bool importedSceneIsInterior = uploadScene.sourceTag == "morrowind_interior";
+    const bool importedSceneIsInterior =
+        odai::importer::importedSceneSourceTagIsInterior(uploadScene.sourceTag);
     const std::uint32_t sourceTerrainDrawCount = importedSceneIsInterior
         ? 0u
         : std::min<std::uint32_t>(

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -149,6 +150,14 @@ struct ImportedScene {
     float fogMapInvExtentX = 0.0f;
     float fogMapInvExtentZ = 0.0f;
 };
+
+// True when the scene's sourceTag marks it as an interior cell (no exterior
+// terrain/landscape draws). Cookers for different source games tag interiors
+// with their own "<game>_interior" sourceTag; this is the single place that
+// enumerates the recognized tags so terrain-draw classification stays
+// consistent across imported_scene.cc, the renderer upload path, and app-side
+// scene inspection.
+bool importedSceneSourceTagIsInterior(std::string_view sourceTag);
 
 bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& outputPath);
 bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& outScene);

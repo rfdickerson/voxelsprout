@@ -540,7 +540,7 @@ void buildImportedScenePageRanges(ImportedScene& scene, float pageSize) {
 
     // Mirror the renderer's terrain classification: exterior scenes treat the
     // leading one-draw-per-landscape-cell range as terrain, interiors have none.
-    const bool isInterior = scene.sourceTag == "morrowind_interior";
+    const bool isInterior = importedSceneSourceTagIsInterior(scene.sourceTag);
     const std::uint32_t landscapeCellCount = !scene.landscapeCells.empty()
         ? static_cast<std::uint32_t>(scene.landscapeCells.size())
         : scene.sourceLandscapeCellCount;
@@ -672,6 +672,10 @@ void buildImportedScenePageRanges(ImportedScene& scene, float pageSize) {
     scene.packedIndices = std::move(newIndices);
     scene.packedDraws = std::move(newDraws);
     scene.pageRanges = std::move(pages);
+}
+
+bool importedSceneSourceTagIsInterior(std::string_view sourceTag) {
+    return sourceTag == "morrowind_interior" || sourceTag == "fnv_interior";
 }
 
 const std::string& getImportedSceneLastError() {

@@ -1,7 +1,10 @@
 # Morrowind Engine Agent Config
 
 ## Project Focus
-This project is a custom C++20 / Vulkan engine for exploring and rendering Morrowind-style worlds.
+This project is a custom C++20 / Vulkan engine for exploring and rendering Morrowind-style worlds. Its offline import
+pipeline also now covers Fallout: New Vegas (a different Bethesda asset stack — see src/import/fnv/ and README.md),
+feeding the same renderer through the same ImportedScene format; the world-feel guidance below is still written
+against Morrowind and hasn't been generalized to Fallout's own regional identity.
 
 Priorities:
 - Preserve Morrowind-like world structure, scale, and readability
@@ -154,6 +157,11 @@ When uncertain:
 Morrowind Data Files
 - Windows: C:\GOG Games\Morrowind\Data Files
 - WSL: /mnt/c/GOG Games/Morrowind/Data Files
+
+Fallout: New Vegas Data Files
+- not yet recorded here — add the real install path once known; see
+  src/tools/newvegas_cooker_main.cc and README.md's "Fallout: New Vegas
+  Import Pipeline" section for the cooker this project now also supports
 
 OpenMW source tree
 - Windows: C:\Users\rfdic\OneDrive\Documents\GitHub\openmw

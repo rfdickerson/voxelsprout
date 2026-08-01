@@ -305,6 +305,18 @@ void testGpuSceneBuildFromImportedScene() {
     expectNear(runtime.transforms.worldMatrices[1][3], 32.0f, 1e-6f, "GPU scene runtime rebuild keeps translation");
 }
 
+void testImportedSceneSourceTagInteriorClassification() {
+    using odai::importer::importedSceneSourceTagIsInterior;
+    expectTrue(importedSceneSourceTagIsInterior("morrowind_interior"),
+               "Morrowind interior tag is classified as interior");
+    expectTrue(importedSceneSourceTagIsInterior("fnv_interior"),
+               "Fallout: New Vegas interior tag is classified as interior");
+    expectTrue(!importedSceneSourceTagIsInterior("morrowind_balmora"),
+               "Exterior scene tags are not classified as interior");
+    expectTrue(!importedSceneSourceTagIsInterior(""),
+               "Empty source tag is not classified as interior");
+}
+
 void testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain() {
     using odai::importer::GpuSceneAsset;
     using odai::importer::ImportedScene;
@@ -591,6 +603,7 @@ void testPageRangeBuildAndRoundTrip() {
 int main() {
     testImportedSceneSerialization();
     testGpuSceneBuildFromImportedScene();
+    testImportedSceneSourceTagInteriorClassification();
     testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain();
     testTextureFormatRoundTrip();
     testBlockCompressedAlphaCutoutDetection();
