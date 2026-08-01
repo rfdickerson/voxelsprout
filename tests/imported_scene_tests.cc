@@ -305,6 +305,18 @@ void testGpuSceneBuildFromImportedScene() {
     expectNear(runtime.transforms.worldMatrices[1][3], 32.0f, 1e-6f, "GPU scene runtime rebuild keeps translation");
 }
 
+void testImportedSceneSourceTagInteriorClassification() {
+    using odai::importer::importedSceneSourceTagIsInterior;
+    expectTrue(importedSceneSourceTagIsInterior("morrowind_interior"),
+               "Morrowind interior tag is classified as interior");
+    expectTrue(importedSceneSourceTagIsInterior("fnv_interior"),
+               "Fallout: New Vegas interior tag is classified as interior");
+    expectTrue(!importedSceneSourceTagIsInterior("morrowind_balmora"),
+               "Exterior scene tags are not classified as interior");
+    expectTrue(!importedSceneSourceTagIsInterior(""),
+               "Empty source tag is not classified as interior");
+}
+
 void testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain() {
     using odai::importer::GpuSceneAsset;
     using odai::importer::ImportedScene;
@@ -381,12 +393,221 @@ void testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain() {
         "Interior packed scene keeps placed mesh height");
 }
 
+void testTextureFormatRoundTrip() {
+    namespace fs = std::filesystem;
+    using odai::importer::ImportedScene;
+    using odai::importer::ImportedSceneTexture;
+    using odai::importer::TextureFormat;
+
+    ImportedScene scene{};
+    scene.sourceTag = "format_roundtrip";
+    ImportedSceneTexture texture{};
+    texture.sourcePath = "textures/tx_stone.dds";
+    texture.width = 4;
+    texture.height = 4;
+    texture.mipLevelCount = 1;
+    texture.format = TextureFormat::BC3;
+    texture.rgba8.assign(16u, 0xffu);  // one opaque BC3 block
+    scene.textures.push_back(texture);
+
+    const fs::path scenePath = fs::temp_directory_path() / "odai_imported_scene_format.bin";
+    expectTrue(odai::importer::saveImportedScene(scene, scenePath), "BC scene saves");
+
+    ImportedScene loaded{};
+    expectTrue(odai::importer::loadImportedScene(scenePath, loaded), "BC scene loads");
+    expectTrue(loaded.textures.size() == 1u, "BC scene texture count round-trips");
+    expectTrue(loaded.textures.front().format == TextureFormat::BC3,
+               "Texture format survives the save/load round trip");
+
+    ImportedScene runtimeLoaded{};
+    expectTrue(odai::importer::loadImportedSceneRuntime(scenePath, runtimeLoaded),
+               "BC scene loads via runtime loader");
+    expectTrue(runtimeLoaded.textures.front().format == TextureFormat::BC3,
+               "Texture format survives the runtime load path");
+
+    fs::remove(scenePath);
+}
+
+void testBlockCompressedAlphaCutoutDetection() {
+    using odai::importer::ImportedScene;
+    using odai::importer::ImportedSceneMesh;
+    using odai::importer::ImportedSceneMeshPart;
+    using odai::importer::ImportedSceneTexture;
+    using odai::importer::ImportedSceneVertex;
+    using odai::importer::TextureFormat;
+
+    // Texture 0: BC1 punch-through block (color0 <= color1, all indices 3).
+    ImportedSceneTexture bc1Cutout{};
+    bc1Cutout.sourcePath = "textures/tx_leaves.dds";
+    bc1Cutout.width = 4;
+    bc1Cutout.height = 4;
+    bc1Cutout.format = TextureFormat::BC1;
+    bc1Cutout.rgba8 = {0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff};
+
+    // Texture 1: BC3 block mixing fully transparent and fully opaque texels
+    // (alpha0=255 > alpha1=0, texel 0 selects alpha0, texel 1 selects alpha1).
+    ImportedSceneTexture bc3Cutout{};
+    bc3Cutout.sourcePath = "textures/tx_banner.dds";
+    bc3Cutout.width = 4;
+    bc3Cutout.height = 4;
+    bc3Cutout.format = TextureFormat::BC3;
+    bc3Cutout.rgba8 = {
+        0xff, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,  // alpha block
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00   // color block
+    };
+
+    // Texture 2: fully opaque BC3 block (both alpha endpoints 255).
+    ImportedSceneTexture bc3Opaque{};
+    bc3Opaque.sourcePath = "textures/tx_wall.dds";
+    bc3Opaque.width = 4;
+    bc3Opaque.height = 4;
+    bc3Opaque.format = TextureFormat::BC3;
+    bc3Opaque.rgba8.assign(16u, 0x00);
+    bc3Opaque.rgba8[0] = 0xff;
+    bc3Opaque.rgba8[1] = 0xff;
+
+    ImportedScene scene{};
+    scene.sourceTag = "bc_cutout";
+    scene.textures = {bc1Cutout, bc3Cutout, bc3Opaque};
+
+    ImportedSceneMesh mesh{};
+    mesh.name = "props";
+    mesh.vertices = {
+        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
+    };
+    mesh.indices = {0u, 1u, 2u, 0u, 1u, 2u, 0u, 1u, 2u};
+    mesh.parts = {
+        ImportedSceneMeshPart{0u, 3u, 0u, false},
+        ImportedSceneMeshPart{3u, 3u, 1u, false},
+        ImportedSceneMeshPart{6u, 3u, 2u, false}
+    };
+    scene.meshes.push_back(mesh);
+
+    odai::importer::ImportedSceneInstance instance{};
+    instance.meshIndex = 0u;
+    instance.transform[0] = 1.0f;
+    instance.transform[5] = 1.0f;
+    instance.transform[10] = 1.0f;
+    instance.transform[15] = 1.0f;
+    scene.instances.push_back(instance);
+
+    odai::importer::buildImportedScenePackedRenderData(scene);
+    expectTrue(scene.meshes.front().parts[0].alphaTest,
+               "BC1 punch-through texture is detected as alpha cutout");
+    expectTrue(scene.meshes.front().parts[1].alphaTest,
+               "BC3 texture with transparent texels is detected as alpha cutout");
+    expectTrue(!scene.meshes.front().parts[2].alphaTest,
+               "Fully opaque BC3 texture is not flagged as alpha cutout");
+}
+
+void testPageRangeBuildAndRoundTrip() {
+    namespace fs = std::filesystem;
+    using odai::importer::ImportedScene;
+    using odai::importer::ImportedScenePackedDraw;
+    using odai::importer::ImportedScenePackedVertex;
+
+    // Two Morrowind cells ~2.5 cells apart on X: terrain + one static in each.
+    // Draw order deliberately interleaves the cells for the statics so the
+    // builder has to reorder draws to make page members contiguous.
+    ImportedScene scene{};
+    scene.sourceTag = "morrowind_balmora";
+    scene.sourceLandscapeCellCount = 2u;
+
+    auto addTriangle = [&scene](float baseX) {
+        const std::uint32_t baseVertex = static_cast<std::uint32_t>(scene.packedVertices.size());
+        for (int corner = 0; corner < 3; ++corner) {
+            ImportedScenePackedVertex vertex{};
+            vertex.position[0] = baseX + static_cast<float>(corner) * 10.0f;
+            vertex.position[1] = 0.0f;
+            vertex.position[2] = static_cast<float>(corner % 2) * 10.0f;
+            scene.packedVertices.push_back(vertex);
+        }
+        const std::uint32_t firstIndex = static_cast<std::uint32_t>(scene.packedIndices.size());
+        scene.packedIndices.push_back(baseVertex);
+        scene.packedIndices.push_back(baseVertex + 1u);
+        scene.packedIndices.push_back(baseVertex + 2u);
+        scene.packedDraws.push_back(ImportedScenePackedDraw{firstIndex, 3u});
+    };
+
+    addTriangle(0.0f);      // draw 0: terrain, cell A
+    addTriangle(20000.0f);  // draw 1: terrain, cell B
+    addTriangle(20100.0f);  // draw 2: static, cell B
+    addTriangle(100.0f);    // draw 3: static, cell A
+
+    odai::importer::buildImportedScenePageRanges(scene);
+
+    expectTrue(scene.pageRanges.size() == 4u,
+               "Page builder emits one page per (terrain/static, cell) group");
+    expectTrue(scene.packedDraws.size() == 4u, "Page builder keeps every draw");
+    expectTrue(scene.packedIndices.size() == 12u, "Page builder keeps every index");
+    std::uint32_t coveredDraws = 0;
+    std::uint32_t terrainPageDraws = 0;
+    for (std::size_t pageIndex = 0; pageIndex < scene.pageRanges.size(); ++pageIndex) {
+        const auto& page = scene.pageRanges[pageIndex];
+        expectTrue(page.firstDraw == coveredDraws, "Pages cover contiguous draw ranges in order");
+        coveredDraws += page.drawCount;
+        terrainPageDraws += page.terrainDrawCount;
+    }
+    expectTrue(coveredDraws == 4u, "Pages cover every draw exactly once");
+    expectTrue(terrainPageDraws == 2u, "Pages record both terrain draws");
+    expectTrue(scene.pageRanges[0].terrainDrawCount == 1u && scene.pageRanges[1].terrainDrawCount == 1u,
+               "Terrain draws stay in the leading pages");
+    expectTrue(scene.pageRanges[2].terrainDrawCount == 0u && scene.pageRanges[3].terrainDrawCount == 0u,
+               "Static pages carry no terrain draws");
+
+    // After the reorder, draw 2 must be the cell-A static (x ~ 100), so both
+    // cell-A draws sit in the leading half of their groups.
+    const std::uint32_t staticAVertex = scene.packedIndices[scene.packedDraws[2].firstIndex];
+    expectNear(scene.packedVertices[staticAVertex].position[0], 100.0f, 1e-3f,
+               "Statics are reordered so same-cell draws are adjacent");
+    expectTrue(scene.pageRanges[3].boundsMin[0] >= 20000.0f - 1.0f,
+               "Page bounds contain only that page's geometry");
+    expectTrue(scene.pageRanges[1].boundsMax[0] >= 20020.0f - 1.0f,
+               "Terrain page bounds cover the cell's vertices");
+
+    // v17 round trip: pages survive save/load on both loaders.
+    const fs::path scenePath = fs::temp_directory_path() / "odai_imported_scene_pages.bin";
+    expectTrue(odai::importer::saveImportedScene(scene, scenePath), "Paged scene saves");
+    ImportedScene loaded{};
+    expectTrue(odai::importer::loadImportedScene(scenePath, loaded), "Paged scene loads");
+    expectTrue(loaded.pageRanges.size() == 4u, "Page ranges survive the save/load round trip");
+    expectTrue(loaded.pageRanges[3].firstDraw == scene.pageRanges[3].firstDraw &&
+               loaded.pageRanges[3].drawCount == scene.pageRanges[3].drawCount,
+               "Page draw ranges round-trip exactly");
+    ImportedScene runtimeLoaded{};
+    expectTrue(odai::importer::loadImportedSceneRuntime(scenePath, runtimeLoaded),
+               "Paged scene loads via runtime loader");
+    expectTrue(runtimeLoaded.pageRanges.size() == 4u, "Page ranges survive the runtime load path");
+
+    // A file saved without pages gets culling pages rebuilt at load time.
+    ImportedScene unpaged = scene;
+    unpaged.pageRanges.clear();
+    expectTrue(odai::importer::saveImportedScene(unpaged, scenePath), "Unpaged scene saves");
+    ImportedScene rebuilt{};
+    expectTrue(odai::importer::loadImportedScene(scenePath, rebuilt), "Unpaged scene loads");
+    expectTrue(!rebuilt.pageRanges.empty(), "Loader rebuilds culling pages for unpaged files");
+    std::uint32_t rebuiltCovered = 0;
+    for (const auto& page : rebuilt.pageRanges) {
+        rebuiltCovered += page.drawCount;
+    }
+    expectTrue(rebuiltCovered == static_cast<std::uint32_t>(rebuilt.packedDraws.size()),
+               "Rebuilt pages cover every draw");
+
+    fs::remove(scenePath);
+}
+
 }  // namespace
 
 int main() {
     testImportedSceneSerialization();
     testGpuSceneBuildFromImportedScene();
+    testImportedSceneSourceTagInteriorClassification();
     testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain();
+    testTextureFormatRoundTrip();
+    testBlockCompressedAlphaCutoutDetection();
+    testPageRangeBuildAndRoundTrip();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";

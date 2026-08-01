@@ -14,6 +14,9 @@ option(ODAI_BUILD_EXAMPLES "Build standalone odai_ui SDK integration samples." O
 # the vcpkg `stb` port in normal builds; ODAI_STB_INCLUDE_DIR overrides it for
 # headless checks without vcpkg.
 find_package(nlohmann_json CONFIG REQUIRED)
+# zlib: BSA archive/ESM record decompression for the Fallout: New Vegas
+# import pipeline (src/import/fnv/). The only place zlib is used directly.
+find_package(ZLIB REQUIRED)
 find_package(Stb QUIET)
 if(Stb_FOUND)
     set(ODAI_STB_INCLUDE_DIRS "${Stb_INCLUDE_DIR}")
@@ -1122,6 +1125,28 @@ if(ODAI_BUILD_TOOLS)
     else()
         target_compile_options(odai_theme_viewer PRIVATE -Wall -Wextra -Wpedantic)
     endif()
+
+    # New Vegas cooker — offline Fallout: New Vegas Data Files (.esm + .bsa +
+    # .nif) -> ImportedScene .bin, mirroring odai_strategy_map_gen's role for
+    # the hex map prototype. See src/tools/newvegas_cooker_main.cc for usage
+    # and src/import/fnv/ for the format readers (BSA/ESM/NIF).
+    #   odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --cell <EditorID>
+    #   odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --worldspace <EditorID> <x0> <z0> <x1> <z1>
+    add_executable(odai_newvegas_cooker
+        src/tools/newvegas_cooker_main.cc
+        src/import/fnv/bsa_archive.cc
+        src/import/fnv/esm_reader.cc
+        src/import/fnv/fallout_records.cc
+        src/import/fnv/nif_scene.cc
+        src/import/imported_scene.cc
+    )
+    target_include_directories(odai_newvegas_cooker PRIVATE src)
+    target_link_libraries(odai_newvegas_cooker PRIVATE ZLIB::ZLIB)
+    if(MSVC)
+        target_compile_options(odai_newvegas_cooker PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_newvegas_cooker PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
 if(BUILD_TESTING)
@@ -1162,6 +1187,26 @@ if(BUILD_TESTING)
     endif()
 
     add_test(NAME odai_imported_scene_tests COMMAND odai_imported_scene_tests)
+
+    # Fallout: New Vegas import pipeline — BSA archive reader, generic ESM
+    # record walker, typed record extraction, and the Gamebryo NIF geometry
+    # parser (src/import/fnv/). All synthetic-fixture tests: no real Fallout:
+    # New Vegas Data Files are available to test against in CI.
+    add_executable(odai_fnv_import_tests
+        tests/fnv_import_tests.cc
+        src/import/fnv/bsa_archive.cc
+        src/import/fnv/esm_reader.cc
+        src/import/fnv/fallout_records.cc
+        src/import/fnv/nif_scene.cc
+    )
+    target_include_directories(odai_fnv_import_tests PRIVATE src)
+    target_link_libraries(odai_fnv_import_tests PRIVATE ZLIB::ZLIB)
+    if(MSVC)
+        target_compile_options(odai_fnv_import_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_fnv_import_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_fnv_import_tests COMMAND odai_fnv_import_tests)
 
     add_executable(odai_foundation_tests
         tests/foundation_tests.cc

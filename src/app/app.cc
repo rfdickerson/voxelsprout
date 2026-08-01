@@ -2745,7 +2745,8 @@ void App::inspectImportedSceneFromCamera() const {
     }
 
     std::uint32_t drawCursor = 0u;
-    const bool importedSceneIsInterior = m_importedScene.sourceTag == "morrowind_interior";
+    const bool importedSceneIsInterior =
+        odai::importer::importedSceneSourceTagIsInterior(m_importedScene.sourceTag);
     const std::uint32_t terrainDrawCount = importedSceneIsInterior
         ? 0u
         : std::min<std::uint32_t>(

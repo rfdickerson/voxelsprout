@@ -99,6 +99,69 @@ Run the importer-focused test target:
 
 This currently validates imported-scene save/load round-tripping and terrain OBJ export.
 
+## Fallout: New Vegas Import Pipeline
+
+A second offline cooker, `odai_newvegas_cooker`, targets Fallout: New Vegas —
+a different Bethesda asset stack entirely (Gamebryo-era ESM record format,
+BSA v104 archives, NIF 20.2.0.7 meshes) despite the shared lineage with
+Morrowind. It writes the same `ImportedScene` `.bin` format as the Balmora
+cooker, so it needs no renderer changes either.
+
+Format readers live under `src/import/fnv/`:
+
+- `bsa_archive.{h,cc}` — BSA v104 archive reader (folder/file records, zlib
+  decompression).
+- `esm_reader.{h,cc}` — generic GRUP/record/subrecord walker for the
+  24-byte Fallout record header (compressed records, oversized `XXXX`
+  subrecords).
+- `fallout_records.{h,cc}` — typed extraction: `TES4`, `STAT`, `CELL`,
+  `WRLD`, `LAND` (heightmap), `REFR` (placed statics).
+- `nif_scene.{h,cc}` — minimal Gamebryo NIF reader: `NiNode` transform
+  hierarchy + `NiTriShape`/`NiTriShapeData` geometry.
+
+**Scope cuts, made explicitly:**
+- No texture extraction (`BSShaderPPLightingProperty`'s exact field layout
+  across FO3/FNV patch versions wasn't something this port could verify).
+  Static meshes and terrain both render via the engine's existing
+  hashed-color / height-based vertex-color fallback paths — no missing-DDS
+  crash, just untextured geometry.
+- No skinned/animated meshes, no collision, no interior-cell decal/portal
+  data.
+
+**Important — not validated against real game data.** This was built and
+tested entirely against hand-built synthetic fixtures (see
+`tests/fnv_import_tests.cc`) in an environment with no Fallout: New Vegas
+Data Files available. Every format reader has bounds-checked, fail-closed
+parsing (a misread block is dropped, not silently corrupted — see
+`nif_scene.h`'s design note), but byte-layout details like the VHGT height
+scale constant and the REFR Euler rotation order are best-effort guesses
+from public format documentation. Test against real Data Files before
+trusting cooked output, especially placed-object orientation and terrain
+elevation.
+
+### Usage
+
+```bash
+odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --cell <EditorID>
+odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> \
+    --worldspace <EditorID> <gridX0> <gridZ0> <gridX1> <gridZ1>
+```
+
+The cooker scans `<DataFilesPath>` for `*.bsa` archives automatically; loose
+files under `<DataFilesPath>/meshes/` take precedence over archived ones,
+matching Bethesda's own load order.
+
+### Tests
+
+```bash
+odai_fnv_import_tests
+```
+
+Covers BSA folder/file parsing and zlib inflate, ESM group/record/subrecord
+walking (including nested groups, oversized subrecords, and compressed
+records), typed CELL/WRLD/REFR/LAND extraction with worldspace/cell
+attribution, and NIF transform-hierarchy + geometry extraction.
+
 ## Current Workflow
 
 1. Build `odai_balmora_cooker`
