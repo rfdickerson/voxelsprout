@@ -35,6 +35,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
+    const VkBuffer skinnedActorVertexBuffer = inputs.skinnedActorVertexBuffer;
+    const VkBuffer skinnedActorIndexBuffer = inputs.skinnedActorIndexBuffer;
+    const std::span<const ImportedMeshDraw> skinnedActorMeshDraws = inputs.skinnedActorMeshDraws;
     const bool importedPageCullingEnabled = inputs.importedPageCullingEnabled;
 
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
@@ -222,6 +225,42 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                }
+                vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
+            }
+            // GPU-skinned actor (Dragon Age touchstone) -- same pipeline as the
+            // CPU-skinned block above (skinning_resources.cc's output buffer is
+            // laid out exactly like ImportedMeshVertex), but its own separate
+            // vertex/index buffer bind so the two slots never collide.
+            if (m_importedStaticShadowPipeline != VK_NULL_HANDLE &&
+                skinnedActorVertexBuffer != VK_NULL_HANDLE &&
+                skinnedActorIndexBuffer != VK_NULL_HANDLE &&
+                !skinnedActorMeshDraws.empty() &&
+                m_debugShowImportedStatics) {
+                vkCmdSetDepthBias(
+                    commandBuffer,
+                    -(constantBias * kImportedShadowConstantBiasScale),
+                    0.0f,
+                    -(slopeBias * kImportedShadowSlopeBiasScale));
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
+                bindGraphicsDescriptorBuffers(commandBuffer);
+                const VkBuffer skinnedVertexBuffers[1] = {skinnedActorVertexBuffer};
+                const VkDeviceSize skinnedVertexOffsets[1] = {0};
+                vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
+                vkCmdBindIndexBuffer(commandBuffer, skinnedActorIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                ChunkPushConstants skinnedPushConstants{};
+                skinnedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &skinnedPushConstants
+                );
+                for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                    countDrawCalls(m_debugDrawCallsShadow, 1);
+                    vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
                 }
                 vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
             }

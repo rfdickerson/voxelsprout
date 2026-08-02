@@ -379,7 +379,11 @@ private:
     static constexpr uint32_t kGpuTimestampQueryFrameEnd = 33;
     static constexpr uint32_t kGpuTimestampQueryUiStart = 34;
     static constexpr uint32_t kGpuTimestampQueryUiEnd = 35;
-    static constexpr uint32_t kGpuTimestampQueryCount = 36;
+    // Appended after the existing slots (rather than renumbering) to keep
+    // this a minimal diff.
+    static constexpr uint32_t kGpuTimestampQuerySkinningStart = 36;
+    static constexpr uint32_t kGpuTimestampQuerySkinningEnd = 37;
+    static constexpr uint32_t kGpuTimestampQueryCount = 38;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
 
     struct FrameResources {
@@ -826,6 +830,12 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
+        // GPU-skinned actor (separate slot from the CPU-skinned importedActor*
+        // fields above -- see skinning_resources.cc). Persistent device-local
+        // buffer, so no offset field is needed.
+        VkBuffer skinnedActorVertexBuffer = VK_NULL_HANDLE;
+        VkBuffer skinnedActorIndexBuffer = VK_NULL_HANDLE;
+        std::span<const ImportedMeshDraw> skinnedActorMeshDraws;
         bool importedPageCullingEnabled = false;
         std::array<std::span<const ImportedMeshDraw>, kShadowCascadeCount> importedMeshDrawsByCascade;
         std::array<std::uint32_t, kShadowCascadeCount> importedTerrainDrawCountsByCascade{};
@@ -854,6 +864,9 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
+        VkBuffer skinnedActorVertexBuffer = VK_NULL_HANDLE;
+        VkBuffer skinnedActorIndexBuffer = VK_NULL_HANDLE;
+        std::span<const ImportedMeshDraw> skinnedActorMeshDraws;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -879,6 +892,9 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
+        VkBuffer skinnedActorVertexBuffer = VK_NULL_HANDLE;
+        VkBuffer skinnedActorIndexBuffer = VK_NULL_HANDLE;
+        std::span<const ImportedMeshDraw> skinnedActorMeshDraws;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
         uint32_t transportInstanceCount = 0;
@@ -917,12 +933,16 @@ private:
     void recordSsaoPasses(
         const FrameExecutionContext& context
     );
+    // Uploads this frame's pending skinned-actor bone matrices (set via
+    // setSkinnedActorPose) through the FrameArena. Must be called after
+    // m_frameArena.beginFrame() for the current frame index and before
+    // recordSkinningPass -- see frame_run.cc.
+    void uploadSkinnedActorPoseForFrame();
     // Skinning compute pre-pass: resolves the bound skinned-mesh template's
     // rest-pose vertices against this frame's bone matrices into the
     // persistent output buffer, with an explicit barrier before any pass
     // reads it as a vertex buffer. No-op if no template has been uploaded, or
-    // m_skinningDebugBypass is set. NOT YET called from the frame recording
-    // sequence -- see the integration checklist in skinning_resources.cc.
+    // m_skinningDebugBypass is set.
     void recordSkinningPass(const FrameExecutionContext& context);
     void recordMainScenePass(const FrameExecutionContext& context, const MainPassInputs& inputs);
 
@@ -1112,6 +1132,10 @@ private:
     std::uint32_t m_skinningBoneCount = 0;
     std::vector<ImportedMeshDraw> m_skinningMeshDraws;
     bool m_skinningDebugBypass = false;
+    // Set by setSkinnedActorPose() (called before renderFrame()); consumed
+    // and uploaded by uploadSkinnedActorPoseForFrame() once this frame's
+    // FrameArena slot is actually active. See both functions' comments.
+    std::vector<odai::math::Matrix4> m_pendingSkinnedActorBoneMatrices;
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;

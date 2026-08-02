@@ -2,8 +2,8 @@
 
 // GPU skeletal skinning compute pre-pass (Dragon Age: Origins touchstone; see
 // docs/ROADMAP.md and skinning_resources.cc for the buffer/pipeline setup
-// this dispatches). NOT YET called from the frame's pass recording sequence
-// -- see skinning_resources.cc's integration checklist.
+// this dispatches). Called from frame_run.cc before recordShadowAtlasPass, so
+// its output is ready for all three consuming passes (shadow, prepass, main).
 namespace odai::render {
 
 #include "render/renderer_shared.h"
@@ -19,18 +19,27 @@ struct SkinningPushConstants {
 
 void RendererBackend::recordSkinningPass(const FrameExecutionContext& context) {
     VkCommandBuffer commandBuffer = context.commandBuffer;
+    VkQueryPool gpuTimestampQueryPool = context.gpuTimestampQueryPool;
 
     if (m_skinningPipeline == VK_NULL_HANDLE || !m_skinningBufferSet.valid() ||
         m_skinningVertexCount == 0 || m_skinningDebugBypass) {
         return;
     }
 
-    // TODO(skinning): write GPU timestamp query scope here once dedicated
-    // kGpuTimestampQuerySkinningStart/End indices are registered alongside
-    // the other passes' query slots (see frame_pass_ssao.cc for the
-    // writeGpuTimestampTop/Bottom pattern to copy) -- left unmeasured for now
-    // rather than guessing at query indices another pass may already own.
+    const auto writeGpuTimestampTop = [&](uint32_t queryIndex) {
+        if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
+            return;
+        }
+        vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_NONE, gpuTimestampQueryPool, queryIndex);
+    };
+    const auto writeGpuTimestampBottom = [&](uint32_t queryIndex) {
+        if (gpuTimestampQueryPool == VK_NULL_HANDLE) {
+            return;
+        }
+        vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, gpuTimestampQueryPool, queryIndex);
+    };
 
+    writeGpuTimestampTop(kGpuTimestampQuerySkinningStart);
     beginDebugLabel(commandBuffer, "Pass: Skinning", 0.30f, 0.22f, 0.36f, 1.0f);
 
     SkinningPushConstants pushConstants{};
@@ -66,6 +75,7 @@ void RendererBackend::recordSkinningPass(const FrameExecutionContext& context) {
     vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
 
     endDebugLabel(commandBuffer);
+    writeGpuTimestampBottom(kGpuTimestampQuerySkinningEnd);
 }
 
 }  // namespace odai::render

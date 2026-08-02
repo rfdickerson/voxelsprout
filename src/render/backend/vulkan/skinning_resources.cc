@@ -11,28 +11,14 @@
 
 // GPU skeletal skinning (Dragon Age: Origins touchstone; see
 // docs/ROADMAP.md's Party RPG / Narrative section, and skinning.comp.slang
-// for the compute shader this drives). This file is additive and
-// self-contained -- it does not modify any existing pass or draw path.
-//
-// INTEGRATION CHECKLIST (not done in this pass; needs a real Vulkan build to
-// finish safely -- see the commit message for why):
-//  1. Call createSkinningComputeResources()/destroySkinningComputeResources()
-//     from wherever createSsaoComputeResources()/destroySsaoComputeResources()
-//     are already called (device init / swapchain teardown).
-//  2. Call recordSkinningPass(context) from the frame's pass recording
-//     sequence (frame_run.cc), before whichever passes read the skinned
-//     output -- this slice only targets the main color pass (see #3).
-//  3. Add a dedicated field to MainPassInputs (e.g. skinnedActorVertexBuffer/
-//     IndexBuffer/MeshDraws, sourced from m_skinningOutputVertexBufferHandle/
-//     m_skinningIndexBufferHandle/m_skinningMeshDraws) and a third draw block
-//     in recordMainScenePass mirroring the existing "imported actors" block,
-//     using the same m_importedStaticPipeline/shader -- deliberately NOT
-//     reusing the CPU-skinned actor slot those already occupy, to avoid any
-//     risk of the two colliding in an app that uses both.
-//  4. Verify the bone-matrix row/column-major convention (see the VERIFY
-//     comments in setSkinnedActorPose below and in skinning.comp.slang).
-//  5. Register real GPU timestamp query indices for this pass (see the TODO
-//     in frame_pass_skinning.cc) instead of leaving it unmeasured.
+// for the compute shader this drives). Now wired into the actual frame
+// (createSkinningComputeResources/destroySkinningComputeResources from
+// init.cc, recordSkinningPass from frame_run.cc before the shadow/prepass/
+// main passes, uploadSkinnedActorPoseForFrame right after
+// m_frameArena.beginFrame -- see those files), and the bone-matrix upload now
+// transposes to match the camera-MVP path's established row/column-major
+// convention. Still unverified against a real Vulkan build (this sandbox has
+// neither vcpkg nor a GPU) -- see the Windows CI job for that signal.
 namespace odai::render {
 
 #include "render/renderer_shared.h"
@@ -410,13 +396,29 @@ bool RendererBackend::uploadSkinnedMeshTemplate(const ImportedSkinnedMeshTemplat
     return true;
 }
 
+// Public entry point (Renderer::setSkinnedActorPose), called by app code
+// *before* renderFrame() -- the natural "update game state, then render"
+// order. It must NOT touch the FrameArena directly: m_frameArena.beginFrame()
+// only runs once renderFrame() itself starts, so allocating here would write
+// into whatever frame-in-flight slot was active last frame, not this frame's.
+// This just stores the pose; uploadSkinnedActorPoseForFrame() (below) does
+// the actual per-frame upload, called from frame_run.cc right after
+// m_frameArena.beginFrame(m_currentFrame).
 void RendererBackend::setSkinnedActorPose(const ImportedSkinnedActorFrameData& pose) {
-    if (m_skinningVertexCount == 0 || pose.boneMatrices.empty() || !m_skinningBufferSet.valid()) {
+    m_pendingSkinnedActorBoneMatrices.assign(pose.boneMatrices.begin(), pose.boneMatrices.end());
+}
+
+// Called from frame_run.cc immediately after m_frameArena.beginFrame(), so
+// the FrameArena slice allocated here belongs to the frame recordSkinningPass
+// is about to record for.
+void RendererBackend::uploadSkinnedActorPoseForFrame() {
+    if (m_skinningVertexCount == 0 || m_pendingSkinnedActorBoneMatrices.empty() ||
+        !m_skinningBufferSet.valid()) {
         return;
     }
 
     const VkDeviceSize boneBufferSize =
-        static_cast<VkDeviceSize>(pose.boneMatrices.size() * sizeof(odai::math::Matrix4));
+        static_cast<VkDeviceSize>(m_pendingSkinnedActorBoneMatrices.size() * sizeof(odai::math::Matrix4));
     const std::optional<FrameArenaSlice> boneSlice =
         m_frameArena.allocateUpload(boneBufferSize, alignof(float), FrameArenaUploadKind::Unknown);
     if (!boneSlice.has_value() || boneSlice->mapped == nullptr) {
@@ -424,13 +426,15 @@ void RendererBackend::setSkinnedActorPose(const ImportedSkinnedActorFrameData& p
         return;
     }
 
-    // VERIFY BEFORE SHIPPING: skinning.comp.slang compiles
-    // -matrix-layout-column-major; odai::math::Matrix4 is row-major on the
-    // CPU (math/math.h). Copy verbatim only if the existing camera-MVP
-    // upload does the same (i.e. relies on Slang's column-major *read*
-    // interpretation rather than transposing on upload) -- mirror whichever
-    // convention that path actually uses instead of assuming this one.
-    std::memcpy(boneSlice->mapped, pose.boneMatrices.data(), static_cast<std::size_t>(boneBufferSize));
+    // skinning.comp.slang compiles -matrix-layout-column-major; the camera
+    // MVP path (frame_run.cc) always transposes odai::math::Matrix4
+    // (row-major) via renderer_shared.h's transpose() before uploading to a
+    // GPU float4x4 for exactly this reason -- mirror that here rather than
+    // copying verbatim.
+    auto* dstMatrices = static_cast<odai::math::Matrix4*>(boneSlice->mapped);
+    for (std::size_t i = 0; i < m_pendingSkinnedActorBoneMatrices.size(); ++i) {
+        dstMatrices[i] = transpose(m_pendingSkinnedActorBoneMatrices[i]);
+    }
 
     const VkDeviceAddress boneAddress =
         m_bufferAllocator.getDeviceAddress(boneSlice->buffer) + boneSlice->offset;
