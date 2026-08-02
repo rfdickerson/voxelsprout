@@ -192,7 +192,7 @@ This is the strongest area of the codebase relative to the wishlist — see `doc
 
 | Feature | Status | Notes |
 |---|---|---|
-| UI layout editor | ✅ | `src/tools/ui_editor/` — nested-document editor over the real `.ui.json` schema: drag/resize/snap, multi-select, align/distribute, clipboard, undo/redo, outliner, schema-driven inspector. Core is headless and tested (`odai_ui_editor_tests`); remaining gaps are the ImGui inspector and live theme preview — see `docs/EARLY_ACCESS_PLAN.md` Phase 2 |
+| UI layout editor | ✅ | `src/tools/ui_editor/` — nested-document editor over the real `.ui.json` schema: drag/resize/snap, multi-select, align/distribute, clipboard, undo/redo, outliner, schema-driven inspector, HSV + color-harmony picker with WCAG contrast scoring. Core is headless and tested (`odai_ui_editor_tests`); remaining gaps are the ImGui numeric/enum controls and live theme preview — see `docs/EARLY_ACCESS_PLAN.md` Phase 2 |
 | Live sim inspection | 🟡 | `ui/widgets/selection_inspector_panel.h` inspects selected entities; no broader debug console |
 | Hot reload (assets) | 🟡 | UI documents only; no shader/gameplay hot reload |
 | Render debug / GPU profiling | 🟡 | GPU timestamp queries exist (`init.cc`); no profiler UI |

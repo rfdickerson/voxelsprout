@@ -1,6 +1,7 @@
 #pragma once
 #include "engine/game_app.h"
 #include "render/renderer_types.h"
+#include "tools/ui_editor/editor_color.h"
 #include "tools/ui_editor/editor_document.h"
 #include "tools/ui_editor/editor_history.h"
 #include "tools/ui_editor/editor_ops.h"
@@ -29,6 +30,8 @@ struct EditorHit {
         SetBoolProp,    // delta != 0 -> true
         ClearProp,      // remove the property from the node entirely
         BeginTextEdit,  // focus this string-valued property for typing
+        TogglePicker,   // open/close the HSV + harmony picker for this property
+        SetHarmony,     // `delta` indexes allHarmonies()
         SelectNode,     // outliner row
         ReorderNode,    // move among siblings by `delta`
         DeleteNode,
@@ -82,6 +85,10 @@ private:
                      float& y);
     void drawColorRow(const char* label, const std::string& key, const ui::UiColor& current,
                       bool present, float x, float width, float& y);
+    // The expanded HSV square + hue/alpha bars, harmony schemes and WCAG readout
+    // for one color property. Only one is open at a time.
+    void drawColorPicker(const std::string& key, const ui::UiColor& current, float x, float width,
+                         float& y);
     void drawBoolRow(const char* label, const std::string& key, bool value, float x, float width,
                      float& y);
     void drawTextRow(const char* label, const std::string& key, const std::string& value, float x,
@@ -90,8 +97,23 @@ private:
     // ── Input ─────────────────────────────────────────────────────────────────
     void handleCanvasInput();
     void handlePanelClicks();
+    void handleColorDrag();
     void handleKeyboard();
     void applyHit(const EditorHit& hit);
+
+    // Records a hit region, dropping it when it falls outside the pane's content
+    // clip — otherwise a row scrolled under the pinned buttons would still be
+    // clickable where it isn't drawn.
+    void pushHit(const EditorHit& hit);
+
+    // ── Color ─────────────────────────────────────────────────────────────────
+    void setColorProperty(const std::string& key, const ui::UiColor& color, bool commitToHistory);
+
+    // What the given node's color sits on: the design surface with every
+    // ancestor's background composited down onto it. `includeOwnBackground`
+    // adds the node's own background too, which is what a foreground color
+    // (text, border, fill) is actually read against.
+    [[nodiscard]] ui::UiColor backdropFor(const NodePath& path, bool includeOwnBackground) const;
 
     // ── Editing operations ────────────────────────────────────────────────────
     void placeNode(float docX, float docY);
@@ -139,7 +161,23 @@ private:
     NodePath m_editingPath;
     bool m_editing = false;
 
+    // Expanded color picker. Open for at most one property of one node.
+    enum class ColorDrag { None, SaturationValue, Hue, Alpha };
+    std::string m_colorKey;   // empty when no picker is open
+    NodePath m_colorPath;     // the node the open picker belongs to
+    Harmony m_harmony = Harmony::Complementary;
+    ColorDrag m_colorDrag = ColorDrag::None;
+    // Sticky HSV for the open picker: dragging value to 0 (or saturation to 0)
+    // destroys hue in RGB, so the picker keeps its own copy and writes RGB from
+    // it. Re-seeded whenever the stored property stops matching it.
+    Hsv m_pickerHsv{};
+    ui::UiRect m_svRect{};
+    ui::UiRect m_hueRect{};
+    ui::UiRect m_alphaRect{};
+
     std::vector<EditorHit> m_hits;
+    ui::UiRect m_hitClip{};      // active content clip for pushHit()
+    bool m_hitClipActive = false;
 
     bool m_uiDirty = true;  // rebuild the toolbar/palette widget tree next tick
     int m_lastFbW = 0, m_lastFbH = 0;

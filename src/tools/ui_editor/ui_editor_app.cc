@@ -345,7 +345,7 @@ void UiEditorApp::drawOutlinerRow(const NodePath& path, int depth, float& y) {
     hit.rect = row;
     hit.action = EditorHit::Action::SelectNode;
     hit.path = path;
-    m_hits.push_back(hit);
+    pushHit(hit);
 
     y += kOutlinerRowH;
     const int count = m_doc.childCount(path);
@@ -404,7 +404,7 @@ void UiEditorApp::drawStepRow(const char* label, float value, EditorHit::Action 
         hit.action = action;
         hit.key = key;
         hit.delta = deltas[i];
-        m_hits.push_back(hit);
+        pushHit(hit);
         bx += bw + gap;
 
         if (i == 1) {
@@ -428,11 +428,44 @@ void UiEditorApp::drawStepRow(const char* label, float value, EditorHit::Action 
 
 void UiEditorApp::drawColorRow(const char* label, const std::string& key, const UiColor& current,
                                bool present, float x, float width, float& y) {
-    m_uiDrawList.addText(m_uiFont, label, {x + 10, y + 4}, kText);
-    y += m_uiFont.lineHeightPx() + 4.0f;
+    const bool open = (m_colorKey == key);
 
+    // Header: label, the live swatch (click to open the picker), and a clear.
+    m_uiDrawList.addText(m_uiFont, label, {x + 10, y + 4}, kText);
+
+    const UiRect swatch = UiRect::fromXYWH(x + 96.0f, y, 60.0f, 22.0f);
+    // Checker behind the swatch so a translucent color reads as translucent.
+    m_uiDrawList.addRectFilled(UiRect::fromXYWH(swatch.minX, swatch.minY, 30.0f, 22.0f),
+                               {0.30f, 0.30f, 0.34f, 1.0f});
+    m_uiDrawList.addRectFilled(UiRect::fromXYWH(swatch.minX + 30.0f, swatch.minY, 30.0f, 22.0f),
+                               {0.18f, 0.18f, 0.21f, 1.0f});
+    if (present) m_uiDrawList.addRoundRectFilled(swatch, current, 3.0f);
+    m_uiDrawList.addRoundRect(swatch, open ? kBlue : UiColor{0.32f, 0.34f, 0.42f, 0.85f}, 3.0f,
+                              open ? 2.0f : 1.0f);
+    if (!present) {
+        m_uiDrawList.addText(m_uiFont, "unset", {swatch.minX + 12.0f, swatch.minY + 3.0f}, kTextDim);
+    }
+    EditorHit openHit;
+    openHit.rect = swatch;
+    openHit.action = EditorHit::Action::TogglePicker;
+    openHit.key = key;
+    pushHit(openHit);
+
+    // "--" clears the property so the widget falls back to its own default.
+    const UiRect clear = UiRect::fromXYWH(x + width - 40.0f, y, 30.0f, 22.0f);
+    m_uiDrawList.addRoundRectFilled(clear, {0.10f, 0.12f, 0.17f, 0.90f}, 3.0f);
+    m_uiDrawList.addRoundRect(clear, present ? UiColor{0.3f, 0.3f, 0.4f, 0.6f} : kBlue, 3.0f, 1.0f);
+    m_uiDrawList.addText(m_uiFont, "--", {clear.minX + 9.0f, clear.minY + 3.0f}, kTextDim);
+    EditorHit clearHit;
+    clearHit.rect = clear;
+    clearHit.action = EditorHit::Action::ClearProp;
+    clearHit.key = key;
+    pushHit(clearHit);
+    y += 26.0f;
+
+    // Quick presets, always available so a one-click choice stays one click.
     float cx = x + 10.0f;
-    constexpr float sz = 22.0f;
+    constexpr float sz = 18.0f;
     for (int i = 0; i < kNumColorPresets; ++i) {
         const UiRect r = UiRect::fromXYWH(cx, y, sz, sz);
         m_uiDrawList.addRoundRectFilled(r, kColorPresets[i], 3.0f);
@@ -446,22 +479,177 @@ void UiEditorApp::drawColorRow(const char* label, const std::string& key, const 
         hit.action = EditorHit::Action::SetColorProp;
         hit.key = key;
         hit.colorValue = kColorPresets[i];
-        m_hits.push_back(hit);
-        cx += sz + 4.0f;
+        pushHit(hit);
+        cx += sz + 3.0f;
+    }
+    y += sz + 6.0f;
+
+    if (open) drawColorPicker(key, current, x, width, y);
+}
+
+// ─── HSV picker + harmony ────────────────────────────────────────────────────
+
+void UiEditorApp::drawColorPicker(const std::string& key, const UiColor& current, float x,
+                                  float width, float& y) {
+    // Keep the sticky HSV in step with the stored value. Dragging value to 0
+    // collapses RGB to black and would otherwise throw the hue away, so the
+    // picker only re-seeds when the property no longer matches what its own
+    // HSV would produce (an undo, a preset click, a harmony pick).
+    const UiColor fromPicker = hsvToRgb(m_pickerHsv, current.a);
+    if (std::fabs(fromPicker.r - current.r) > 0.004f ||
+        std::fabs(fromPicker.g - current.g) > 0.004f ||
+        std::fabs(fromPicker.b - current.b) > 0.004f) {
+        m_pickerHsv = rgbToHsv(current);
+    }
+    const Hsv hsv = m_pickerHsv;
+
+    constexpr float kSquareH = 104.0f;
+    constexpr float kBarW = 15.0f;
+    const float squareW = width - 20.0f - (kBarW + 6.0f) * 2.0f;
+
+    // ── Saturation/value square ──────────────────────────────────────────────
+    // Value scales RGB linearly, so each saturation column is exactly a vertical
+    // gradient from full value down to black: 32 strips, no per-pixel work.
+    m_svRect = UiRect::fromXYWH(x + 10.0f, y, squareW, kSquareH);
+    constexpr int kStrips = 32;
+    for (int i = 0; i < kStrips; ++i) {
+        const float s0 = static_cast<float>(i) / static_cast<float>(kStrips);
+        const float stripW = squareW / static_cast<float>(kStrips);
+        const UiColor top = hsvToRgb(Hsv{hsv.h, s0, 1.0f});
+        m_uiDrawList.addRectFilledVGradient(
+            UiRect::fromXYWH(m_svRect.minX + s0 * squareW, m_svRect.minY, stripW + 0.5f, kSquareH),
+            top, UiColor{0, 0, 0, 1});
+    }
+    m_uiDrawList.addRect(m_svRect, {0.32f, 0.34f, 0.42f, 0.85f}, 1.0f);
+    {
+        const float cx = m_svRect.minX + hsv.s * squareW;
+        const float cy = m_svRect.minY + (1.0f - hsv.v) * kSquareH;
+        m_uiDrawList.addCircle({cx, cy}, 5.0f, {0, 0, 0, 0.85f}, 3.0f);
+        m_uiDrawList.addCircle({cx, cy}, 5.0f, {1, 1, 1, 0.95f}, 1.5f);
     }
 
-    // "none" clears the property so the widget falls back to its own default.
-    const UiRect clear = UiRect::fromXYWH(x + width - 44.0f, y, 34.0f, sz);
-    m_uiDrawList.addRoundRectFilled(clear, {0.10f, 0.12f, 0.17f, 0.90f}, 3.0f);
-    m_uiDrawList.addRoundRect(clear, present ? UiColor{0.3f, 0.3f, 0.4f, 0.6f} : kBlue, 3.0f, 1.0f);
-    m_uiDrawList.addText(m_uiFont, "--", {clear.minX + 11.0f, clear.minY + 3.0f}, kTextDim);
-    EditorHit clearHit;
-    clearHit.rect = clear;
-    clearHit.action = EditorHit::Action::ClearProp;
-    clearHit.key = key;
-    m_hits.push_back(clearHit);
+    // ── Hue bar ──────────────────────────────────────────────────────────────
+    // Six exact gradient segments: between adjacent primaries, HSV hue at s=v=1
+    // is linear in RGB.
+    m_hueRect = UiRect::fromXYWH(m_svRect.maxX + 6.0f, y, kBarW, kSquareH);
+    for (int i = 0; i < 6; ++i) {
+        const float segH = kSquareH / 6.0f;
+        m_uiDrawList.addRectFilledVGradient(
+            UiRect::fromXYWH(m_hueRect.minX, m_hueRect.minY + static_cast<float>(i) * segH, kBarW,
+                             segH + 0.5f),
+            hsvToRgb(Hsv{static_cast<float>(i) * 60.0f, 1.0f, 1.0f}),
+            hsvToRgb(Hsv{static_cast<float>(i + 1) * 60.0f, 1.0f, 1.0f}));
+    }
+    m_uiDrawList.addRect(m_hueRect, {0.32f, 0.34f, 0.42f, 0.85f}, 1.0f);
+    {
+        const float hy = m_hueRect.minY + (hsv.h / 360.0f) * kSquareH;
+        m_uiDrawList.addRectFilled({m_hueRect.minX - 2.0f, hy - 1.5f, m_hueRect.maxX + 2.0f, hy + 1.5f},
+                                   {1, 1, 1, 0.95f});
+    }
 
-    y += sz + 8.0f;
+    // ── Alpha bar ────────────────────────────────────────────────────────────
+    m_alphaRect = UiRect::fromXYWH(m_hueRect.maxX + 6.0f, y, kBarW, kSquareH);
+    // Checker so full transparency is distinguishable from a dark color.
+    for (int i = 0; i < 8; ++i) {
+        m_uiDrawList.addRectFilled(
+            UiRect::fromXYWH(m_alphaRect.minX, m_alphaRect.minY + static_cast<float>(i) * (kSquareH / 8.0f),
+                             kBarW, kSquareH / 8.0f),
+            (i % 2 == 0) ? UiColor{0.30f, 0.30f, 0.34f, 1.0f} : UiColor{0.18f, 0.18f, 0.21f, 1.0f});
+    }
+    const UiColor opaque = hsvToRgb(hsv, 1.0f);
+    m_uiDrawList.addRectFilledVGradient(m_alphaRect, opaque, withAlpha(opaque, 0.0f));
+    m_uiDrawList.addRect(m_alphaRect, {0.32f, 0.34f, 0.42f, 0.85f}, 1.0f);
+    {
+        const float ay = m_alphaRect.minY + (1.0f - current.a) * kSquareH;
+        m_uiDrawList.addRectFilled(
+            {m_alphaRect.minX - 2.0f, ay - 1.5f, m_alphaRect.maxX + 2.0f, ay + 1.5f}, {1, 1, 1, 0.95f});
+    }
+    y += kSquareH + 6.0f;
+
+    // ── Numeric readout ──────────────────────────────────────────────────────
+    char buf[128];
+    const std::string hex = colorToHex(current);
+    std::snprintf(buf, sizeof(buf), "%s   H%.0f S%.0f V%.0f", hex.c_str(),
+                  static_cast<double>(hsv.h), static_cast<double>(hsv.s * 100.0f),
+                  static_cast<double>(hsv.v * 100.0f));
+    m_uiDrawList.addText(m_uiFont, buf, {x + 10.0f, y}, kGold);
+    y += m_uiFont.lineHeightPx() + 3.0f;
+
+    // ── WCAG contrast against what this color actually sits on ───────────────
+    const NodePath* primary = m_selection.primary();
+    if (primary && m_doc.isValid(*primary)) {
+        // "background" is read against its ancestors; every other color role is
+        // a foreground, read against this node's own background as well.
+        const bool isBackground = (key == "background");
+        const UiColor behind = backdropFor(*primary, !isBackground);
+        const UiColor effective = compositeOver(current, behind);
+        const float ratio = contrastRatio(effective, behind);
+        const std::string_view rating = contrastRating(ratio);
+        std::snprintf(buf, sizeof(buf), "contrast %.1f:1  %.*s", static_cast<double>(ratio),
+                      static_cast<int>(rating.size()), rating.data());
+        const UiColor ratingColor = ratio >= 4.5f  ? UiColor{0.45f, 0.85f, 0.50f, 1.0f}
+                                    : ratio >= 3.0f ? kGold
+                                                    : UiColor{0.90f, 0.45f, 0.42f, 1.0f};
+        m_uiDrawList.addText(m_uiFont, buf, {x + 10.0f, y}, ratingColor);
+
+        // Preview chip: this color as it will actually appear on that backdrop.
+        const UiRect chip = UiRect::fromXYWH(x + width - 52.0f, y, 42.0f, 16.0f);
+        m_uiDrawList.addRectFilled(chip, behind);
+        m_uiDrawList.addRectFilled(UiRect::fromXYWH(chip.minX + 3, chip.minY + 3, 36.0f, 10.0f),
+                                   effective);
+        m_uiDrawList.addRect(chip, {0.32f, 0.34f, 0.42f, 0.85f}, 1.0f);
+    }
+    y += m_uiFont.lineHeightPx() + 6.0f;
+
+    // ── Harmony scheme selector ──────────────────────────────────────────────
+    const std::vector<Harmony>& schemes = allHarmonies();
+    constexpr float kSchemeW = 64.0f, kSchemeH = 19.0f;
+    for (std::size_t i = 0; i < schemes.size(); ++i) {
+        const float col = static_cast<float>(i % 4);
+        const float row = static_cast<float>(i / 4);
+        const UiRect r = UiRect::fromXYWH(x + 10.0f + col * (kSchemeW + 3.0f),
+                                          y + row * (kSchemeH + 3.0f), kSchemeW, kSchemeH);
+        const bool active = (schemes[i] == m_harmony);
+        m_uiDrawList.addRoundRectFilled(
+            r, active ? UiColor{0.15f, 0.25f, 0.45f, 0.95f} : UiColor{0.10f, 0.12f, 0.17f, 0.90f},
+            3.0f);
+        m_uiDrawList.addRoundRect(r, active ? kBlue : UiColor{0.25f, 0.28f, 0.38f, 0.80f}, 3.0f,
+                                  active ? 1.5f : 1.0f);
+        const std::string name(harmonyName(schemes[i]));
+        const float lw = m_uiFont.measureText(name);
+        m_uiDrawList.addText(m_uiFont, name,
+                             {r.minX + (kSchemeW - lw) * 0.5f,
+                              r.minY + (kSchemeH - m_uiFont.lineHeightPx()) * 0.5f},
+                             active ? kBlue : kText);
+        EditorHit hit;
+        hit.rect = r;
+        hit.action = EditorHit::Action::SetHarmony;
+        hit.key = key;
+        hit.delta = static_cast<float>(i);
+        pushHit(hit);
+    }
+    y += (kSchemeH + 3.0f) * 2.0f + 4.0f;
+
+    // ── The scheme's colors, click to apply ──────────────────────────────────
+    const std::vector<UiColor> partners = harmonyColors(current, m_harmony);
+    const float swatchW = std::min(34.0f, (width - 20.0f) / static_cast<float>(partners.size()) - 3.0f);
+    float sx = x + 10.0f;
+    for (std::size_t i = 0; i < partners.size(); ++i) {
+        const UiRect r = UiRect::fromXYWH(sx, y, swatchW, 24.0f);
+        m_uiDrawList.addRoundRectFilled(r, partners[i], 3.0f);
+        // Index 0 is the base itself — mark it so the row reads as "you are here
+        // plus what goes with it".
+        m_uiDrawList.addRoundRect(r, i == 0 ? kBlue : UiColor{0.30f, 0.32f, 0.40f, 0.70f}, 3.0f,
+                                  i == 0 ? 2.0f : 1.0f);
+        EditorHit hit;
+        hit.rect = r;
+        hit.action = EditorHit::Action::SetColorProp;
+        hit.key = key;
+        hit.colorValue = partners[i];
+        pushHit(hit);
+        sx += swatchW + 3.0f;
+    }
+    y += 24.0f + 8.0f;
 }
 
 void UiEditorApp::drawBoolRow(const char* label, const std::string& key, bool value, float x,
@@ -487,7 +675,7 @@ void UiEditorApp::drawBoolRow(const char* label, const std::string& key, bool va
         hit.action = EditorHit::Action::SetBoolProp;
         hit.key = key;
         hit.delta = (i == 1) ? 1.0f : 0.0f;
-        m_hits.push_back(hit);
+        pushHit(hit);
     }
     y += 24.0f + 6.0f;
 }
@@ -517,7 +705,7 @@ void UiEditorApp::drawTextRow(const char* label, const std::string& key, const s
     hit.rect = field;
     hit.action = EditorHit::Action::BeginTextEdit;
     hit.key = key;
-    m_hits.push_back(hit);
+    pushHit(hit);
 
     y += 22.0f + 5.0f;
 }
@@ -533,6 +721,9 @@ void UiEditorApp::drawProperties() {
 
     float y = py + 34.0f;
     const NodePath* primary = m_selection.primary();
+
+    // The open picker belongs to one node; selecting another closes it.
+    if (!primary || m_colorPath != *primary) m_colorKey.clear();
 
     if (!primary || !m_doc.isValid(*primary)) {
         m_uiDrawList.addText(m_uiFont, "No node selected", {px + 10, y}, kTextDim);
@@ -564,6 +755,15 @@ void UiEditorApp::drawProperties() {
         y += m_uiFont.lineHeightPx() + 6.0f;
     }
 
+    // Everything from here down scrolls under the pinned reorder/delete buttons
+    // when the pane runs out of room, so it is clipped — and pushHit() drops any
+    // hit region that ends up outside the clip, so nothing stays clickable where
+    // it isn't drawn.
+    m_hitClip = UiRect{px, y - 4.0f, px + kPropsW,
+                       static_cast<float>(m_lastFbH) - kStatusH - 78.0f};
+    m_hitClipActive = true;
+    m_uiDrawList.pushClip(m_hitClip);
+
     drawTextRow("id", "id", m_doc.idOf(path), px, kPropsW, y);
 
     const UiRect rect = m_doc.absoluteRect(path);
@@ -577,11 +777,11 @@ void UiEditorApp::drawProperties() {
     drawStepRow("H", rect.height(), EditorHit::Action::StepRectH, "height", kPixelSteps, px,
                 kPropsW, y);
 
-    if (!desc || desc->props.empty()) return;
-    drawSectionLabel(type.c_str(), px, kPropsW, y);
-
     static constexpr float kFineSteps[4] = {-0.25f, -0.05f, 0.05f, 0.25f};
-    for (const PropDesc& prop : desc->props) {
+    static const std::vector<PropDesc> kNoProps;
+    const std::vector<PropDesc>& props = desc ? desc->props : kNoProps;
+    if (!props.empty()) drawSectionLabel(type.c_str(), px, kPropsW, y);
+    for (const PropDesc& prop : props) {
         const std::string key(prop.key);
         const std::string label(prop.label);
         switch (prop.kind) {
@@ -610,6 +810,9 @@ void UiEditorApp::drawProperties() {
         }
     }
 
+    m_uiDrawList.popClip();
+    m_hitClipActive = false;
+
     // Delete, pinned to the bottom of the pane.
     const float dy = static_cast<float>(m_lastFbH) - kStatusH - 44.0f;
     const UiRect del = UiRect::fromXYWH(px + 10, dy, kPropsW - 20.0f, 30.0f);
@@ -624,7 +827,7 @@ void UiEditorApp::drawProperties() {
     EditorHit delHit;
     delHit.rect = del;
     delHit.action = EditorHit::Action::DeleteNode;
-    m_hits.push_back(delHit);
+    pushHit(delHit);
 
     // Sibling reorder, just above Delete.
     const float ry = dy - 30.0f;
@@ -645,7 +848,7 @@ void UiEditorApp::drawProperties() {
         hit.action = EditorHit::Action::ReorderNode;
         hit.path = path;
         hit.delta = (i == 0) ? -1.0f : 1.0f;
-        m_hits.push_back(hit);
+        pushHit(hit);
     }
 }
 
@@ -952,6 +1155,40 @@ void UiEditorApp::doRedo() {
 
 // ─── Hit resolution ──────────────────────────────────────────────────────────
 
+void UiEditorApp::pushHit(const EditorHit& hit) {
+    if (m_hitClipActive && !UiRect::intersect(hit.rect, m_hitClip).valid()) return;
+    m_hits.push_back(hit);
+}
+
+void UiEditorApp::setColorProperty(const std::string& key, const UiColor& color,
+                                   bool commitToHistory) {
+    const NodePath* primary = m_selection.primary();
+    if (!primary || !m_doc.isValid(*primary)) return;
+    m_doc.setProperty(*primary, key, json(colorToHex(color)));
+    if (commitToHistory) m_history.commit(m_doc, "set " + key);
+}
+
+UiColor UiEditorApp::backdropFor(const NodePath& path, bool includeOwnBackground) const {
+    // Start from the editor's design surface and composite each ancestor's
+    // background down onto it, outermost first — that stack is what a color at
+    // this depth is actually seen against.
+    UiColor acc = kSurfaceBg;
+    const std::size_t depth = includeOwnBackground ? path.size() + 1 : path.size();
+    for (std::size_t i = 0; i < depth; ++i) {
+        const NodePath ancestor(path.begin(), path.begin() + static_cast<std::ptrdiff_t>(i));
+        const json* node = m_doc.nodeAt(ancestor);
+        if (!node || !node->contains("background")) continue;
+        const json& bg = node->at("background");
+        // A theme color token can't be resolved without a loaded theme; skip it
+        // rather than scoring the contrast against a made-up value.
+        if (!bg.is_string()) continue;
+        const std::string s = bg.get<std::string>();
+        if (s.empty() || s[0] != '#') continue;
+        acc = compositeOver(parseColorString(s, acc), acc);
+    }
+    return acc;
+}
+
 void UiEditorApp::applyHit(const EditorHit& hit) {
     const NodePath* primaryPtr = m_selection.primary();
     const NodePath primary = primaryPtr ? *primaryPtr : NodePath{};
@@ -1001,8 +1238,35 @@ void UiEditorApp::applyHit(const EditorHit& hit) {
         case EditorHit::Action::SetColorProp:
             if (!haveNode) break;
             m_doc.setProperty(primary, hit.key, json(colorToHex(hit.colorValue)));
+            // Re-seed the picker so the swatch that was clicked becomes the new
+            // base its harmony is generated from.
+            m_pickerHsv = rgbToHsv(hit.colorValue);
             m_history.commit(m_doc, "set " + hit.key);
             break;
+        case EditorHit::Action::TogglePicker: {
+            if (!haveNode) break;
+            if (m_colorKey == hit.key && m_colorPath == primary) {
+                m_colorKey.clear();
+                break;
+            }
+            m_colorKey = hit.key;
+            m_colorPath = primary;
+            const json* node = m_doc.nodeAt(primary);
+            m_pickerHsv = rgbToHsv(nodeColor(*node, hit.key.c_str(), UiColor{0.5f, 0.5f, 0.5f, 1}));
+            // Opening the picker on an unset property writes the current value
+            // so there is something to edit; "--" puts it back.
+            if (!node->contains(hit.key)) {
+                m_doc.setProperty(primary, hit.key, json(colorToHex(hsvToRgb(m_pickerHsv, 1.0f))));
+                m_history.commit(m_doc, "set " + hit.key);
+            }
+            break;
+        }
+        case EditorHit::Action::SetHarmony: {
+            const std::vector<Harmony>& schemes = allHarmonies();
+            const std::size_t index = static_cast<std::size_t>(hit.delta);
+            if (index < schemes.size()) m_harmony = schemes[index];
+            break;
+        }
         case EditorHit::Action::SetBoolProp:
             if (!haveNode) break;
             m_doc.setProperty(primary, hit.key, json(hit.delta > 0.5f));
@@ -1187,6 +1451,63 @@ void UiEditorApp::handlePanelClicks() {
     }
 }
 
+void UiEditorApp::handleColorDrag() {
+    const bool down = m_uiInput.button(UiMouseButton::Left).down;
+    const bool pressed = m_uiInput.button(UiMouseButton::Left).pressed;
+    const float mx = m_uiInput.mousePx.x;
+    const float my = m_uiInput.mousePx.y;
+
+    if (m_colorDrag != ColorDrag::None && !down) {
+        // One undo step per gesture, not per frame of the drag.
+        m_history.commit(m_doc, "set " + m_colorKey);
+        m_colorDrag = ColorDrag::None;
+        m_uiDirty = true;
+        return;
+    }
+
+    if (m_colorKey.empty()) return;
+
+    if (pressed && m_colorDrag == ColorDrag::None) {
+        if (m_svRect.contains(mx, my)) {
+            m_colorDrag = ColorDrag::SaturationValue;
+        } else if (m_hueRect.contains(mx, my)) {
+            m_colorDrag = ColorDrag::Hue;
+        } else if (m_alphaRect.contains(mx, my)) {
+            m_colorDrag = ColorDrag::Alpha;
+        }
+    }
+    if (m_colorDrag == ColorDrag::None || !down) return;
+
+    const NodePath* primary = m_selection.primary();
+    if (!primary || !m_doc.isValid(*primary)) {
+        m_colorDrag = ColorDrag::None;
+        return;
+    }
+    const json* node = m_doc.nodeAt(*primary);
+    float alpha = nodeColor(*node, m_colorKey.c_str(), UiColor{0, 0, 0, 1}).a;
+
+    auto frac = [](float value, float lo, float hi) {
+        if (hi <= lo) return 0.0f;
+        return std::clamp((value - lo) / (hi - lo), 0.0f, 1.0f);
+    };
+
+    switch (m_colorDrag) {
+        case ColorDrag::SaturationValue:
+            m_pickerHsv.s = frac(mx, m_svRect.minX, m_svRect.maxX);
+            m_pickerHsv.v = 1.0f - frac(my, m_svRect.minY, m_svRect.maxY);
+            break;
+        case ColorDrag::Hue:
+            m_pickerHsv.h = wrapHue(frac(my, m_hueRect.minY, m_hueRect.maxY) * 360.0f);
+            break;
+        case ColorDrag::Alpha:
+            alpha = 1.0f - frac(my, m_alphaRect.minY, m_alphaRect.maxY);
+            break;
+        case ColorDrag::None:
+            return;
+    }
+    setColorProperty(m_colorKey, hsvToRgb(m_pickerHsv, alpha), /*commitToHistory=*/false);
+}
+
 void UiEditorApp::handleKeyboard() {
     const bool ctrl = glfwGetKey(m_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
                       glfwGetKey(m_window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
@@ -1349,7 +1670,10 @@ void UiEditorApp::onTick(float dt) {
     }
 
     handleKeyboard();
-    handlePanelClicks();
+    // The picker's square/bars are continuous-drag targets rather than click
+    // regions, so they get first refusal on the press.
+    handleColorDrag();
+    if (m_colorDrag == ColorDrag::None) handlePanelClicks();
     handleCanvasInput();
 
     if (m_uiDirty) {

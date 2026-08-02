@@ -271,6 +271,7 @@ endif()
 # GLFW/Vulkan odai_ui_editor app and by odai_ui_editor_tests, which is why it is
 # a plain source list declared up here rather than inside the app-only block.
 set(ODAI_UI_EDITOR_CORE_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/tools/ui_editor/editor_color.cc
     ${CMAKE_SOURCE_DIR}/src/tools/ui_editor/editor_document.cc
     ${CMAKE_SOURCE_DIR}/src/tools/ui_editor/editor_history.cc
     ${CMAKE_SOURCE_DIR}/src/tools/ui_editor/editor_ops.cc
@@ -1636,7 +1637,8 @@ if(BUILD_TESTING)
     add_test(NAME odai_retro_widgets_tests COMMAND odai_retro_widgets_tests)
 
     # UI editor document core: real .ui.json schema authoring, layout/hit-test,
-    # undo/redo, snapping, align/distribute/clipboard. Headless — links odai_ui
+    # undo/redo, snapping, align/distribute/clipboard, HSV + color harmony +
+    # WCAG contrast. Headless — links odai_ui
     # plus the Vulkan-free half of src/tools/ui_editor/, and round-trips its
     # output through the production ui::UiDocumentLoader.
     add_executable(odai_ui_editor_tests

@@ -6,6 +6,7 @@
 // tree shape and the same rects the canvas showed. That is what stops the
 // editor from drifting into a parallel format again.
 
+#include "tools/ui_editor/editor_color.h"
 #include "tools/ui_editor/editor_document.h"
 #include "tools/ui_editor/editor_history.h"
 #include "tools/ui_editor/editor_ops.h"
@@ -701,6 +702,174 @@ void testSelectionPrune() {
     expectTrue(sel.size() == 1, "prune drops paths that no longer resolve");
 }
 
+// --------------------------------------------------------------------------
+// Color theory
+// --------------------------------------------------------------------------
+
+void expectColorNear(const ui::UiColor& actual, const ui::UiColor& expected, const char* message,
+                     float tol = 0.005f) {
+    if (std::fabs(actual.r - expected.r) > tol || std::fabs(actual.g - expected.g) > tol ||
+        std::fabs(actual.b - expected.b) > tol || std::fabs(actual.a - expected.a) > tol) {
+        std::cerr << "[ui editor test] FAIL: " << message << " (got " << actual.r << "," << actual.g
+                  << "," << actual.b << "," << actual.a << " expected " << expected.r << ","
+                  << expected.g << "," << expected.b << "," << expected.a << ")\n";
+        ++g_failures;
+    }
+}
+
+void testHsvKnownValues() {
+    const Hsv red = rgbToHsv(ui::UiColor{1, 0, 0, 1});
+    expectNear(red.h, 0.0f, "pure red hue");
+    expectNear(red.s, 1.0f, "pure red saturation");
+    expectNear(red.v, 1.0f, "pure red value");
+
+    const Hsv green = rgbToHsv(ui::UiColor{0, 1, 0, 1});
+    expectNear(green.h, 120.0f, "pure green hue");
+    const Hsv blue = rgbToHsv(ui::UiColor{0, 0, 1, 1});
+    expectNear(blue.h, 240.0f, "pure blue hue");
+
+    // Achromatic: saturation zero, hue reported as 0 rather than NaN.
+    const Hsv grey = rgbToHsv(ui::UiColor{0.5f, 0.5f, 0.5f, 1});
+    expectNear(grey.s, 0.0f, "grey has no saturation");
+    expectNear(grey.h, 0.0f, "grey hue is reported as zero, not NaN");
+    expectNear(grey.v, 0.5f, "grey value is its channel level");
+
+    const Hsv black = rgbToHsv(ui::UiColor{0, 0, 0, 1});
+    expectNear(black.s, 0.0f, "black has no saturation (no divide by zero)");
+    expectNear(black.v, 0.0f, "black value is zero");
+
+    expectColorNear(hsvToRgb(Hsv{120.0f, 1.0f, 1.0f}), ui::UiColor{0, 1, 0, 1}, "hsv->rgb green");
+    expectColorNear(hsvToRgb(Hsv{60.0f, 1.0f, 1.0f}), ui::UiColor{1, 1, 0, 1}, "hsv->rgb yellow");
+    expectColorNear(hsvToRgb(Hsv{0.0f, 0.0f, 0.75f}), ui::UiColor{0.75f, 0.75f, 0.75f, 1},
+                    "hsv->rgb grey");
+}
+
+void testHsvRoundTrip() {
+    const ui::UiColor samples[] = {
+        {0.85f, 0.72f, 0.38f, 1.00f}, {0.05f, 0.10f, 0.15f, 0.88f},
+        {0.20f, 0.60f, 1.00f, 0.50f}, {1.00f, 1.00f, 1.00f, 1.00f},
+        {0.00f, 0.00f, 0.00f, 1.00f}, {0.33f, 0.11f, 0.77f, 0.25f},
+    };
+    for (const ui::UiColor& c : samples) {
+        const Hsv hsv = rgbToHsv(c);
+        expectColorNear(hsvToRgb(hsv, c.a), c, "rgb -> hsv -> rgb round-trip");
+    }
+}
+
+void testWrapHue() {
+    expectNear(wrapHue(0.0f), 0.0f, "wrapHue(0)");
+    expectNear(wrapHue(360.0f), 0.0f, "wrapHue(360) wraps to 0");
+    expectNear(wrapHue(390.0f), 30.0f, "wrapHue past a full turn");
+    expectNear(wrapHue(-30.0f), 330.0f, "wrapHue of a negative angle");
+    expectNear(wrapHue(-390.0f), 330.0f, "wrapHue of more than a negative turn");
+}
+
+void testHarmonySchemes() {
+    // A saturated mid-value base so hue rotation is unambiguous.
+    const ui::UiColor base = hsvToRgb(Hsv{30.0f, 0.8f, 0.9f}, 0.75f);
+
+    auto hueOf = [](const ui::UiColor& c) { return rgbToHsv(c).h; };
+
+    const std::vector<ui::UiColor> comp = harmonyColors(base, Harmony::Complementary);
+    expectTrue(comp.size() == 2, "complementary yields two colors");
+    expectColorNear(comp[0], base, "index 0 is always the base color");
+    expectNear(hueOf(comp[1]), 210.0f, "complement sits opposite the base hue");
+
+    const std::vector<ui::UiColor> triad = harmonyColors(base, Harmony::Triad);
+    expectTrue(triad.size() == 3, "triad yields three colors");
+    expectNear(hueOf(triad[1]), 150.0f, "triad second hue is +120");
+    expectNear(hueOf(triad[2]), 270.0f, "triad third hue is +240");
+
+    const std::vector<ui::UiColor> split = harmonyColors(base, Harmony::SplitComplementary);
+    expectNear(hueOf(split[1]), 180.0f, "split-complement flanks the opposite hue below");
+    expectNear(hueOf(split[2]), 240.0f, "split-complement flanks the opposite hue above");
+
+    const std::vector<ui::UiColor> analogous = harmonyColors(base, Harmony::Analogous);
+    expectNear(hueOf(analogous[1]), 0.0f, "analogous neighbour 30 deg below");
+    expectNear(hueOf(analogous[2]), 60.0f, "analogous neighbour 30 deg above");
+
+    const std::vector<ui::UiColor> square = harmonyColors(base, Harmony::Square);
+    expectTrue(square.size() == 4, "square yields four colors");
+    expectNear(hueOf(square[2]), 210.0f, "square third hue is the complement");
+
+    // Hue rotation must preserve saturation, value and alpha, or the partners
+    // stop reading as the same palette.
+    const Hsv baseHsv = rgbToHsv(base);
+    for (const ui::UiColor& c : triad) {
+        const Hsv h = rgbToHsv(c);
+        expectNear(h.s, baseHsv.s, "rotated hue keeps the base saturation");
+        expectNear(h.v, baseHsv.v, "rotated hue keeps the base value");
+        expectNear(c.a, base.a, "rotated hue keeps the base alpha");
+    }
+
+    // The two ramps hold hue and sweep one axis instead.
+    const std::vector<ui::UiColor> mono = harmonyColors(base, Harmony::Monochromatic);
+    expectTrue(mono.size() == 6, "monochromatic yields the base plus a five-step ramp");
+    for (std::size_t i = 2; i < mono.size(); ++i) {
+        expectTrue(rgbToHsv(mono[i]).v > rgbToHsv(mono[i - 1]).v,
+                   "monochromatic ramp increases in value");
+    }
+    expectNear(rgbToHsv(mono[3]).h, baseHsv.h, "monochromatic ramp holds the hue");
+
+    const std::vector<ui::UiColor> shades = harmonyColors(base, Harmony::Shades);
+    for (std::size_t i = 2; i < shades.size(); ++i) {
+        expectTrue(rgbToHsv(shades[i]).s > rgbToHsv(shades[i - 1]).s,
+                   "shades ramp increases in saturation");
+    }
+    expectNear(rgbToHsv(shades[3]).v, baseHsv.v, "shades ramp holds the value");
+
+    // Every scheme must be named and non-empty, so the inspector can list them.
+    for (const Harmony h : allHarmonies()) {
+        expectTrue(!harmonyColors(base, h).empty(), "every scheme produces colors");
+        expectTrue(!harmonyName(h).empty(), "every scheme has a name");
+    }
+    expectTrue(allHarmonies().size() == 8, "all eight schemes are listed");
+}
+
+void testContrastRatio() {
+    const ui::UiColor white{1, 1, 1, 1};
+    const ui::UiColor black{0, 0, 0, 1};
+
+    expectNear(contrastRatio(white, black), 21.0f, "black on white is the 21:1 maximum", 0.02f);
+    expectNear(contrastRatio(white, white), 1.0f, "a color against itself is 1:1");
+    expectNear(contrastRatio(black, white), 21.0f, "contrast is symmetric", 0.02f);
+
+    expectNear(relativeLuminance(white), 1.0f, "white luminance is 1");
+    expectNear(relativeLuminance(black), 0.0f, "black luminance is 0");
+    // Mid grey #777777 sits near 0.18 relative luminance — the check that the
+    // piecewise sRGB decode is actually being applied rather than a raw value.
+    const float mid = relativeLuminance(ui::UiColor{0.4667f, 0.4667f, 0.4667f, 1.0f});
+    expectNear(mid, 0.1845f, "mid grey luminance uses the sRGB decode, not the raw channel", 0.01f);
+
+    expectEq(std::string(contrastRating(21.0f)), "AAA", "21:1 rates AAA");
+    expectEq(std::string(contrastRating(4.6f)), "AA", "4.6:1 rates AA");
+    expectEq(std::string(contrastRating(3.2f)), "AA Large", "3.2:1 rates AA Large");
+    expectEq(std::string(contrastRating(2.0f)), "fail", "2:1 fails");
+}
+
+void testCompositeOver() {
+    const ui::UiColor opaqueRed{1, 0, 0, 1};
+    const ui::UiColor white{1, 1, 1, 1};
+    expectColorNear(compositeOver(opaqueRed, white), opaqueRed, "an opaque source replaces the dst");
+
+    const ui::UiColor halfBlack{0, 0, 0, 0.5f};
+    expectColorNear(compositeOver(halfBlack, white), ui::UiColor{0.5f, 0.5f, 0.5f, 1.0f},
+                    "50% black over white is mid grey");
+
+    const ui::UiColor clear{0, 1, 0, 0};
+    expectColorNear(compositeOver(clear, white), white, "a fully transparent source is a no-op");
+
+    // A translucent light-grey label would score as high-contrast on its raw
+    // values, but composited onto its real backdrop it does not.
+    const ui::UiColor faintText{0.9f, 0.9f, 0.9f, 0.25f};
+    const ui::UiColor panel{0.85f, 0.85f, 0.85f, 1.0f};
+    const float raw = contrastRatio(faintText, panel);
+    const float composited = contrastRatio(compositeOver(faintText, panel), panel);
+    expectTrue(composited < raw + 0.001f,
+               "compositing never overstates a translucent color's contrast");
+    expectTrue(composited < 1.2f, "a faint label on a light panel scores as unreadable");
+}
+
 }  // namespace
 
 int main() {
@@ -726,6 +895,12 @@ int main() {
     testCopyPasteAndDuplicateFreshenIds();
     testReorderSiblings();
     testSelectionPrune();
+    testHsvKnownValues();
+    testHsvRoundTrip();
+    testWrapHue();
+    testHarmonySchemes();
+    testContrastRatio();
+    testCompositeOver();
 
     if (g_failures != 0) {
         std::cerr << "[ui editor test] " << g_failures << " failures\n";
