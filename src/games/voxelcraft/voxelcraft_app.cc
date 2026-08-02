@@ -40,8 +40,8 @@ float lerpWrappedDegrees(float fromDegrees, float toDegrees, float alpha) {
 }
 
 // Broad-phase view-frustum AABB (corner min/max, no exact per-plane test -- that's all
-// ChunkClipmapIndex::queryChunksIntersecting needs). Ported from the equivalent
-// (unwired/dead) helper in src/app/app.cc's buildCameraFrustum.
+// ChunkClipmapIndex::queryChunksIntersecting needs). This is the only surviving
+// frustum helper; src/app/app.cc's unwired buildCameraFrustum was deleted.
 odai::core::CellAabb computeFrustumBroadPhaseBounds(
     const odai::math::Vector3& eye,
     float yawDegrees,

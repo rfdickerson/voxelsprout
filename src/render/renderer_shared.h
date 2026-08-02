@@ -1168,23 +1168,6 @@ int floorDiv(int value, int divisor) {
     return q;
 }
 
-struct ChunkCoordKey {
-    int x = 0;
-    int y = 0;
-    int z = 0;
-
-    bool operator==(const ChunkCoordKey& rhs) const = default;
-};
-
-struct ChunkCoordKeyHash {
-    std::size_t operator()(const ChunkCoordKey& key) const noexcept {
-        std::size_t h = static_cast<std::size_t>(static_cast<std::uint32_t>(key.x));
-        h ^= static_cast<std::size_t>(static_cast<std::uint32_t>(key.y)) * 0x9E3779B1u;
-        h ^= static_cast<std::size_t>(static_cast<std::uint32_t>(key.z)) * 0x85EBCA77u;
-        return h;
-    }
-};
-
 template <typename VkHandleT>
 uint64_t vkHandleToUint64(VkHandleT handle) {
     if constexpr (std::is_pointer_v<VkHandleT>) {
