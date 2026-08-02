@@ -1453,6 +1453,17 @@ if(BUILD_TESTING)
 
     # BSP CSG toolkit + low-poly building primitives (procgen). Pure CPU;
     # no Vulkan, no UI.
+    add_executable(odai_core_types_tests
+        tests/core_types_tests.cc
+    )
+    target_include_directories(odai_core_types_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_core_types_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_core_types_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_core_types_tests COMMAND odai_core_types_tests)
+
     add_executable(odai_procgen_tests
         tests/procgen_tests.cc
         src/procgen/csg.cc
