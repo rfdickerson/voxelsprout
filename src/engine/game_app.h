@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/plugin.h"
 #include "render/renderer.h"
 #include "render/renderer_types.h"
 #include "sim/simulation.h"
@@ -104,6 +105,12 @@ protected:
     ui::UiContext  m_uiContext;
     ui::UiDrawList m_uiDrawList;
     ui::UiInput    m_uiInput;
+
+    // Register plugins from onInit(); GameApp::init() attaches them right
+    // after onInit() returns, run() ticks them every frame, and shutdown()
+    // detaches them right after onShutdown(). See engine/plugin.h for the
+    // onRender() caveat -- it is not fanned out automatically.
+    PluginRegistry m_plugins;
 
     std::vector<std::uint32_t> m_pendingTextInput;
     float  m_pendingScrollDelta = 0.0f;

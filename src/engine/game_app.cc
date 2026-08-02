@@ -101,6 +101,14 @@ bool GameApp::init(const char* title) {
         return false;
     }
 
+    if (!m_plugins.attachAll(*this)) {
+        m_renderer.shutdown();
+        glfwDestroyWindow(m_window);
+        m_window = nullptr;
+        glfwTerminate();
+        return false;
+    }
+
     return true;
 }
 
@@ -147,12 +155,14 @@ void GameApp::run() {
         m_uiContext.tick(dt);
 
         onTick(dt);
+        m_plugins.tickAll(*this, dt);
         onRender(dt);
     }
 }
 
 void GameApp::shutdown() {
     onShutdown();
+    m_plugins.detachAll(*this);
     m_renderer.shutdown();
     if (m_window) {
         glfwDestroyWindow(m_window);
