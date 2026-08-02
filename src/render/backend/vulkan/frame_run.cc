@@ -1911,8 +1911,6 @@ void RendererBackend::renderFrame(
     shadowPassInputs.importedActorIndexOffset =
         importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
     shadowPassInputs.importedActorMeshDraws = importedActorMeshDraws;
-    shadowPassInputs.skinnedActorVertexBuffer = m_bufferAllocator.getBuffer(m_skinningOutputVertexBufferHandle);
-    shadowPassInputs.skinnedActorIndexBuffer = m_bufferAllocator.getBuffer(m_skinningIndexBufferHandle);
     shadowPassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
     shadowPassInputs.importedPageCullingEnabled = importedPageCullingEnabled;
     if (importedPageCullingEnabled) {
@@ -2245,8 +2243,6 @@ void RendererBackend::renderFrame(
     prepassInputs.importedActorIndexOffset =
         importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
     prepassInputs.importedActorMeshDraws = importedActorMeshDraws;
-    prepassInputs.skinnedActorVertexBuffer = m_bufferAllocator.getBuffer(m_skinningOutputVertexBufferHandle);
-    prepassInputs.skinnedActorIndexBuffer = m_bufferAllocator.getBuffer(m_skinningIndexBufferHandle);
     prepassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
     prepassInputs.pipeInstanceCount = pipeInstanceCount;
     prepassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
@@ -2296,8 +2292,6 @@ void RendererBackend::renderFrame(
     mainPassInputs.importedActorIndexOffset =
         importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
     mainPassInputs.importedActorMeshDraws = importedActorMeshDraws;
-    mainPassInputs.skinnedActorVertexBuffer = m_bufferAllocator.getBuffer(m_skinningOutputVertexBufferHandle);
-    mainPassInputs.skinnedActorIndexBuffer = m_bufferAllocator.getBuffer(m_skinningIndexBufferHandle);
     mainPassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
     mainPassInputs.pipeInstanceCount = pipeInstanceCount;
     mainPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;

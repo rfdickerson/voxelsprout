@@ -147,8 +147,10 @@ inline bool intersectRayAabb(
     float tMax,
     float& outDistance
 ) {
-    float near = tMin;
-    float far = tMax;
+    // Not named near/far: those collide with the legacy near/far macros
+    // Windows SDK headers (windows.h) still define, breaking the MSVC build.
+    float nearDistance = tMin;
+    float farDistance = tMax;
 
     const float origin[3] = {ray.origin.x, ray.origin.y, ray.origin.z};
     const float direction[3] = {ray.direction.x, ray.direction.y, ray.direction.z};
@@ -170,14 +172,14 @@ inline bool intersectRayAabb(
         if (t0 > t1) {
             std::swap(t0, t1);
         }
-        near = std::max(near, t0);
-        far = std::min(far, t1);
-        if (near > far) {
+        nearDistance = std::max(nearDistance, t0);
+        farDistance = std::min(farDistance, t1);
+        if (nearDistance > farDistance) {
             return false;
         }
     }
 
-    outDistance = near;
+    outDistance = nearDistance;
     return true;
 }
 

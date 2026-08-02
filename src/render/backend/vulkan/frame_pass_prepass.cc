@@ -31,8 +31,6 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
-    const VkBuffer skinnedActorVertexBuffer = inputs.skinnedActorVertexBuffer;
-    const VkBuffer skinnedActorIndexBuffer = inputs.skinnedActorIndexBuffer;
     const std::span<const ImportedMeshDraw> skinnedActorMeshDraws = inputs.skinnedActorMeshDraws;
 
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
@@ -146,21 +144,34 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
             }
         }
-        // GPU-skinned actor (Dragon Age touchstone) -- same pipeline as the
-        // CPU-skinned block above, separate vertex/index buffer bind so the
-        // two slots never collide.
+        // GPU-skinned actors (Dragon Age touchstone) -- same pipeline as the
+        // CPU-skinned block above. Up to kMaxSkinnedInstances independent
+        // instance slots means each draw may come from a different
+        // vertex/index buffer, so bind is resolved per-draw rather than once
+        // for the whole span (see skinning_resources.cc).
         if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&
-            skinnedActorVertexBuffer != VK_NULL_HANDLE &&
-            skinnedActorIndexBuffer != VK_NULL_HANDLE &&
             !skinnedActorMeshDraws.empty() &&
             m_debugShowImportedStatics) {
-            const VkBuffer skinnedVertexBuffers[1] = {skinnedActorVertexBuffer};
-            const VkDeviceSize skinnedVertexOffsets[1] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticNormalDepthPipeline);
             bindGraphicsDescriptorBuffers(commandBuffer);
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, skinnedActorIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            VkBuffer boundSkinnedVertexBuffer = VK_NULL_HANDLE;
+            VkBuffer boundSkinnedIndexBuffer = VK_NULL_HANDLE;
             for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                const VkBuffer drawVertexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
+                const VkBuffer drawIndexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
+                if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
+                    continue;
+                }
+                if (drawVertexBuffer != boundSkinnedVertexBuffer) {
+                    const VkBuffer skinnedVertexBuffers[1] = {drawVertexBuffer};
+                    const VkDeviceSize skinnedVertexOffsets[1] = {0};
+                    vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
+                    boundSkinnedVertexBuffer = drawVertexBuffer;
+                }
+                if (drawIndexBuffer != boundSkinnedIndexBuffer) {
+                    vkCmdBindIndexBuffer(commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                    boundSkinnedIndexBuffer = drawIndexBuffer;
+                }
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
                 vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
             }

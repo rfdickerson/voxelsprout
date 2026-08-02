@@ -35,8 +35,6 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
-    const VkBuffer skinnedActorVertexBuffer = inputs.skinnedActorVertexBuffer;
-    const VkBuffer skinnedActorIndexBuffer = inputs.skinnedActorIndexBuffer;
     const std::span<const ImportedMeshDraw> skinnedActorMeshDraws = inputs.skinnedActorMeshDraws;
     const bool importedPageCullingEnabled = inputs.importedPageCullingEnabled;
 
@@ -228,13 +226,12 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 }
                 vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
             }
-            // GPU-skinned actor (Dragon Age touchstone) -- same pipeline as the
-            // CPU-skinned block above (skinning_resources.cc's output buffer is
-            // laid out exactly like ImportedMeshVertex), but its own separate
-            // vertex/index buffer bind so the two slots never collide.
+            // GPU-skinned actors (Dragon Age touchstone) -- same pipeline as the
+            // CPU-skinned block above (skinning_resources.cc's output buffers are
+            // laid out exactly like ImportedMeshVertex). Up to kMaxSkinnedInstances
+            // independent instance slots means each draw may come from a
+            // different vertex/index buffer, so bind is resolved per-draw.
             if (m_importedStaticShadowPipeline != VK_NULL_HANDLE &&
-                skinnedActorVertexBuffer != VK_NULL_HANDLE &&
-                skinnedActorIndexBuffer != VK_NULL_HANDLE &&
                 !skinnedActorMeshDraws.empty() &&
                 m_debugShowImportedStatics) {
                 vkCmdSetDepthBias(
@@ -244,10 +241,6 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     -(slopeBias * kImportedShadowSlopeBiasScale));
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
                 bindGraphicsDescriptorBuffers(commandBuffer);
-                const VkBuffer skinnedVertexBuffers[1] = {skinnedActorVertexBuffer};
-                const VkDeviceSize skinnedVertexOffsets[1] = {0};
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
-                vkCmdBindIndexBuffer(commandBuffer, skinnedActorIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
                 ChunkPushConstants skinnedPushConstants{};
                 skinnedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
                 vkCmdPushConstants(
@@ -258,7 +251,24 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     sizeof(ChunkPushConstants),
                     &skinnedPushConstants
                 );
+                VkBuffer boundSkinnedVertexBuffer = VK_NULL_HANDLE;
+                VkBuffer boundSkinnedIndexBuffer = VK_NULL_HANDLE;
                 for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                    const VkBuffer drawVertexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
+                    const VkBuffer drawIndexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
+                    if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
+                        continue;
+                    }
+                    if (drawVertexBuffer != boundSkinnedVertexBuffer) {
+                        const VkBuffer skinnedVertexBuffers[1] = {drawVertexBuffer};
+                        const VkDeviceSize skinnedVertexOffsets[1] = {0};
+                        vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
+                        boundSkinnedVertexBuffer = drawVertexBuffer;
+                    }
+                    if (drawIndexBuffer != boundSkinnedIndexBuffer) {
+                        vkCmdBindIndexBuffer(commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                        boundSkinnedIndexBuffer = drawIndexBuffer;
+                    }
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
                 }

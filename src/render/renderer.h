@@ -43,11 +43,13 @@ public:
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
     // GPU skeletal animation (Dragon Age: Origins touchstone, see
-    // docs/ROADMAP.md). Uploads a skinned mesh's rest-pose geometry once,
-    // device-local; pose it per-frame via setSkinnedActorPose without
-    // re-uploading geometry. First slice: one skinned instance at a time.
-    bool uploadSkinnedMeshTemplate(const ImportedSkinnedMeshTemplate& meshTemplate);
-    void setSkinnedActorPose(const ImportedSkinnedActorFrameData& pose);
+    // docs/ROADMAP.md). Uploads a skinned mesh's rest-pose geometry once per
+    // instance slot, device-local; pose it per-frame via setSkinnedActorPose
+    // without re-uploading geometry. instanceIndex must be < kMaxSkinnedInstances
+    // (see renderer_types.h) -- each slot is fully independent (own template,
+    // own pose, own draws), sized for a small party, not a mass-battle crowd.
+    bool uploadSkinnedMeshTemplate(std::uint32_t instanceIndex, const ImportedSkinnedMeshTemplate& meshTemplate);
+    void setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose);
     void setSkinningDebugBypass(bool bypass);
     // GPU-instanced, tessellated, height-displaced hex land surface (strategy map).
     // hexTerrainReady() reports whether the device created the pipeline (tessellation
