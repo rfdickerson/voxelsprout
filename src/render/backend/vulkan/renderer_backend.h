@@ -237,6 +237,19 @@ public:
     bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
+    // GPU skeletal animation (Dragon Age: Origins touchstone, see
+    // docs/ROADMAP.md). Uploads a skinned mesh's rest-pose geometry once,
+    // device-local; posed per-frame via setSkinnedActorPose without
+    // re-uploading geometry. First slice: one skinned instance at a time (see
+    // ImportedSkinnedActorFrameData). NOT YET wired into the main-pass draw
+    // loop -- see the integration checklist in skinning_resources.cc.
+    bool uploadSkinnedMeshTemplate(const ImportedSkinnedMeshTemplate& meshTemplate);
+    void setSkinnedActorPose(const ImportedSkinnedActorFrameData& pose);
+    // Debug bypass: when true, recordSkinningPass leaves the last-skinned (or
+    // rest-pose, if never skinned) output untouched instead of dispatching --
+    // matches the debug-toggle pattern already used elsewhere (see
+    // ChunkPushConstants' disable-textures/flat-shading bits).
+    void setSkinningDebugBypass(bool bypass) { m_skinningDebugBypass = bypass; }
     // GPU-instanced, tessellated, height-displaced hex land surface. Available only
     // when the device supports tessellation (hexTerrainReady()); the caller keeps the
     // flat imported-static land otherwise. setHexTerrainEnabled gates the draw at
@@ -406,6 +419,7 @@ private:
     bool createAutoExposureResources();
     bool createSunShaftResources();
     bool createSsaoComputeResources();
+    bool createSkinningComputeResources();
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
     bool createMagicaPipeline();
@@ -468,6 +482,7 @@ private:
     void destroyAutoExposureResources();
     void destroySunShaftResources();
     void destroySsaoComputeResources();
+    void destroySkinningComputeResources();
     void destroyFrameResources();
     void destroyChunkBuffers();
     void destroyMagicaBuffers();
@@ -902,6 +917,13 @@ private:
     void recordSsaoPasses(
         const FrameExecutionContext& context
     );
+    // Skinning compute pre-pass: resolves the bound skinned-mesh template's
+    // rest-pose vertices against this frame's bone matrices into the
+    // persistent output buffer, with an explicit barrier before any pass
+    // reads it as a vertex buffer. No-op if no template has been uploaded, or
+    // m_skinningDebugBypass is set. NOT YET called from the frame recording
+    // sequence -- see the integration checklist in skinning_resources.cc.
+    void recordSkinningPass(const FrameExecutionContext& context);
     void recordMainScenePass(const FrameExecutionContext& context, const MainPassInputs& inputs);
 
     GLFWwindow* m_window = nullptr;
@@ -1072,6 +1094,24 @@ private:
     VkDescriptorSetLayout m_ssaoBlurDescriptorSetLayout = VK_NULL_HANDLE;
     DescriptorBufferSet m_ssaoBlurBufferSet{};
     VkPipelineLayout m_ssaoBlurPipelineLayout = VK_NULL_HANDLE;
+    // Skinning compute pre-pass state (Dragon Age touchstone). Plain members
+    // rather than going through m_pipelineManager's reference-alias pattern
+    // used by the older compute passes above -- a reasonable follow-up to
+    // unify, not required for correctness.
+    VkDescriptorSetLayout m_skinningDescriptorSetLayout = VK_NULL_HANDLE;
+    DescriptorBufferSet m_skinningBufferSet{};
+    VkPipelineLayout m_skinningPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_skinningPipeline = VK_NULL_HANDLE;
+    // Rest-pose geometry + persistent skinned output, both device-local and
+    // uploaded/created once by uploadSkinnedMeshTemplate; only the bone-matrix
+    // binding (FrameArena-backed) changes per frame.
+    BufferHandle m_skinningRestPoseVertexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_skinningIndexBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_skinningOutputVertexBufferHandle = kInvalidBufferHandle;
+    std::uint32_t m_skinningVertexCount = 0;
+    std::uint32_t m_skinningBoneCount = 0;
+    std::vector<ImportedMeshDraw> m_skinningMeshDraws;
+    bool m_skinningDebugBypass = false;
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;

@@ -171,6 +171,7 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/auto_exposure_histogram.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/auto_exposure_update.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sun_shafts.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/skinning.comp.slang" compute)
     add_custom_target(slang_shaders DEPENDS ${SLANG_SHADER_OUTPUTS})
 else()
     message(STATUS "slangc not found; skipping Slang shader target")
@@ -337,6 +338,28 @@ if(MSVC)
     target_compile_options(odai_content PRIVATE ${ODAI_WARN_FLAGS_MSVC})
 else()
     target_compile_options(odai_content PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# ---------------------------------------------------------------------------
+# odai_anim — skeleton/animation-clip data model and CPU sampler (Dragon Age:
+# Origins touchstone, see docs/ROADMAP.md). Vulkan-free: produces flat
+# odai::math::Matrix4 skinning matrices; only src/render/ turns those into GPU
+# buffers.
+# ---------------------------------------------------------------------------
+add_library(odai_anim STATIC
+    src/anim/animation_sampler.cc
+    src/anim/skeleton_io.cc
+)
+target_include_directories(odai_anim PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(odai_anim PRIVATE nlohmann_json::nlohmann_json)
+target_compile_features(odai_anim PUBLIC cxx_std_20)
+if(MSVC)
+    target_compile_options(odai_anim PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+else()
+    target_compile_options(odai_anim PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -507,6 +530,7 @@ if(ODAI_BUILD_APP)
             src/render/backend/vulkan/frame_pass_shadow.cc
             src/render/backend/vulkan/frame_pass_prepass.cc
             src/render/backend/vulkan/frame_pass_ssao.cc
+            src/render/backend/vulkan/frame_pass_skinning.cc
             src/render/backend/vulkan/frame_pass_main.cc
             src/render/backend/vulkan/frame_chunks.cc
             src/render/backend/vulkan/frame_draws.cc
@@ -521,6 +545,7 @@ if(ODAI_BUILD_APP)
             src/render/backend/vulkan/pass_pipelines.cc
             src/render/backend/vulkan/swapchain_targets.cc
             src/render/backend/vulkan/post_compute.cc
+            src/render/backend/vulkan/skinning_resources.cc
             src/render/backend/vulkan/pass_gi.cc
             src/render/backend/vulkan/shadow_culling.cc
             src/render/backend/vulkan/vma_usage.cc
@@ -1506,6 +1531,19 @@ if(BUILD_TESTING)
         target_compile_options(odai_dialogue_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_dialogue_tests COMMAND odai_dialogue_tests)
+
+    # Skeleton/animation-clip sampler (Dragon Age touchstone): bind-pose
+    # sanity, hierarchy composition, keyframe interpolation, loop/clamp time
+    # handling, and JSON loading. Pure CPU; no Vulkan.
+    add_executable(odai_animation_tests tests/animation_tests.cc)
+    target_include_directories(odai_animation_tests PRIVATE src)
+    target_link_libraries(odai_animation_tests PRIVATE odai_anim)
+    if(MSVC)
+        target_compile_options(odai_animation_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_animation_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_animation_tests COMMAND odai_animation_tests)
 
     # Lua scripting engine: event hooks fire with the right counts/order, and a
     # scripted run is deterministic (same seed+mod -> identical TurnSamples; a

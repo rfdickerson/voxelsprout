@@ -1,6 +1,7 @@
 #pragma once
 
 #include "import/imported_scene.h"
+#include "math/math.h"
 
 #include <array>
 #include <cstddef>
@@ -129,6 +130,44 @@ struct ImportedActorFrameData {
     std::span<const odai::importer::ImportedScenePackedVertex> vertices;
     std::span<const std::uint32_t> indices;
     std::span<const odai::importer::ImportedScenePackedDraw> draws;
+};
+
+// A rest-pose (bind-pose) vertex for a GPU-skinned mesh (see docs/ROADMAP.md's
+// Party RPG / Narrative section). position/normal feed the skinning compute
+// pass; color/uv/textureIndex/flags pass through unchanged into the skinned
+// output, matching ImportedMeshVertex's layout exactly so the existing
+// imported_static.vert/frag.slang consume it with no changes. Up to 4 bone
+// influences per vertex.
+struct ImportedSkinnedMeshVertex {
+    float position[3] = {};
+    float normal[3] = {};
+    float color[3] = {};
+    float uv[2] = {};
+    std::uint32_t textureIndex = 0xffffffffu;
+    std::uint32_t flags = 0u;
+    std::uint16_t boneIndices[4] = {};
+    float boneWeights[4] = {};
+};
+
+// A one-time, device-local GPU-skinned mesh template: rest-pose geometry for
+// a skinned actor, uploaded once via Renderer::uploadSkinnedMeshTemplate. Posed
+// per-frame through ImportedSkinnedActorFrameData without re-uploading
+// geometry every frame.
+struct ImportedSkinnedMeshTemplate {
+    std::span<const ImportedSkinnedMeshVertex> vertices;
+    std::span<const std::uint32_t> indices;
+    std::span<const odai::importer::ImportedScenePackedDraw> draws;
+    std::uint32_t boneCount = 0;
+};
+
+// One frame's pose for a previously uploaded ImportedSkinnedMeshTemplate.
+// First slice: a single skinned instance per frame (one "skinning slot"),
+// matching how other singular per-frame GPU resources (auto-exposure state,
+// SSAO) already work in this renderer -- see docs/ROADMAP.md for the deferred
+// "multiple skinned instances" extension. boneMatrices.size() must equal the
+// bound template's boneCount.
+struct ImportedSkinnedActorFrameData {
+    std::span<const odai::math::Matrix4> boneMatrices;
 };
 
 enum class InventoryItemId : std::uint8_t {
