@@ -6,11 +6,11 @@
 
 **Core library is genuinely release-shaped already:** retained widget tree, JSON theming (`UiTheme`) with hot reload, rich text markup, vector icon pipeline, `Signal`/`SlotRegistry`, genre kits (`kits/strategy_4x_kit.h` etc.), CMake install/export (`find_package(odai_ui)` works), MIT license, versioned `0.1.0`.
 
-**Two dev tools exist but are prototypes, not release-ready:**
+**Two dev tools exist:**
 - `odai_theme_viewer` — terminal ANSI-swatch theme previewer with hot reload. Works, keep as-is.
-- `odai_ui_editor` ([src/tools/ui_editor/ui_editor_app.h](../src/tools/ui_editor/ui_editor_app.h)) — GLFW/Vulkan canvas with drag/resize/snap and a hand-drawn properties panel (`PropButton` step-buttons, not real inputs). It only knows a flat `DesignWidget` struct (bg/border/corner/shadow/label) — it doesn't speak the real `UiDocumentLoader` JSON schema (children, bindings, frames, nine-slice), doesn't preview through the actual `UiTheme`, has no undo, and links Dear ImGui without using it for the property panel.
+- `odai_ui_editor` ([src/tools/ui_editor/](../src/tools/ui_editor/)) — GLFW/Vulkan canvas editor. Its document core was rewritten (see Phase 2 below) and now authors the real `UiDocumentLoader` schema; what's still outstanding there is the Dear ImGui inspector and live theme preview.
 
-**Tweens** ([animation.h](../src/ui/animation.h)) are a single `Tween`/`ColorTween` pair: 4 basic easings, no sequencing/composition, no `onComplete`, scalar+color only (no rect/position), retarget-seam fix only applied to `ColorTween` not the base `Tween`, and no central per-frame tick — `UiContext::update` takes only input, not `dt`, so animated widgets (`Panel::update(dt)`, `ToastManager::update(dt)`) are ticked ad hoc by app code.
+**Tweens** ([animation.h](../src/ui/animation.h)) — **done**, see Phase 1 below.
 
 ## What "early access" should mean
 
@@ -20,7 +20,14 @@ Ship a smaller, honest core plus the two requested capabilities done well, rathe
 
 **Explicitly out of scope for EA** (state this up front to avoid scope creep and set expectations): full flex/grid auto-layout beyond the existing single-axis stacks, promoting every `Panel::styleX()` skin to theme-JSON-driven tokens, spring-physics tweens beyond one basic damped-spring easing, non-Windows/non-Vulkan backends.
 
-## Phase 1 — Tween rework (~1–2 weeks, do first)
+## Phase 1 — Tween rework — ✅ done
+
+All seven items landed: `Vec2Tween`/`RectTween`, the cubic/back/spring easings,
+`Sequence`, `Widget::onTick(dt)` driven from `UiContext`, and the retarget-seam fix
+on the base `Tween`. Covered by `odai_ui_tests` / `odai_animation_tests`.
+
+<details>
+<summary>Original item list</summary>
 
 1. Fix the retarget-seam in the base `Tween` itself (snapshot the eased value on `setTarget()` mid-flight, same trick `ColorTween::set()` already does) so every consumer gets seamless retargeting for free.
 2. Add `Vec2Tween`/`RectTween` alongside the existing scalar and color tweens — needed for window slide-ins / card pop-ins.
@@ -30,15 +37,25 @@ Ship a smaller, honest core plus the two requested capabilities done well, rathe
 6. Migrate the existing ad hoc tweens (`Panel::backgroundAnim`/`bgTopAnim`/`bgBotAnim`, `Toast::fadeTween`, the smart-turn-button glow pulse) onto the new primitives as the reference migration and regression check.
 7. Add `odai_ui_tests` coverage: retarget-seam correctness, sequence ordering/`onComplete` firing, centralized tick dispatch.
 
-## Phase 2 — Editor (~3–5 weeks, the headline EA feature)
+</details>
 
-1. Wire the already-linked Dear ImGui into `odai_ui_editor` for real inspector controls (color pickers, numeric drags, dropdowns) instead of the current hand-drawn step-buttons — probably the single biggest lever on "does this feel intuitive."
-2. Replace the flat `DesignWidget` model with real `UiDocumentLoader`-schema authoring (children/nesting, frame/nine-slice, binding expressions) so the editor round-trips the actual `.ui.json` format apps consume, not a parallel toy format.
-3. Live preview through the real `UiTheme` + `UiContext` + `odai_ui_vulkan` renderer, so the canvas shows the widget as it will actually render/theme — reuse the hot-reload plumbing that already exists.
-4. Undo/redo stack (currently absent — table stakes for "intuitive").
-5. Multi-select, align/distribute, copy/paste, keyboard nudge — standard editor expectations.
-6. Save/export straight to the same `.ui.json` consumed by `UiDocumentLoader::load`, with a round-trip test (author in editor → load in-game → matches).
-7. Acceptance test, not just a feature checklist: a 5-minute onboarding flow — open editor → open a sample theme → drop 3 widgets → wire an `on_click` slot → run in-game.
+## Phase 2 — Editor (the headline EA feature)
+
+1. 🟡 Wire the already-linked Dear ImGui into `odai_ui_editor` for real inspector controls instead of the current hand-drawn step-buttons. The inspector is now generated from the `TypeDesc`/`PropDesc` schema table in `editor_document.h`, so this is a swap of the control-drawing layer, not a rewrite of what it edits. **Color is done and does not need ImGui**: `PropKind::Color` opens a hand-drawn HSV square + hue/alpha bars with a classical harmony picker (complementary, split-complementary, analogous, triad, tetrad, square, and monochromatic/saturation ramps) and a live WCAG contrast score against the surface the color actually sits on — see [editor_color.h](../src/tools/ui_editor/editor_color.h). What still wants better controls is numeric drags and enum dropdowns.
+2. ✅ Replace the flat `DesignWidget` model with real `UiDocumentLoader`-schema authoring. `EditorDocument` ([editor_document.h](../src/tools/ui_editor/editor_document.h)) stores the JSON tree itself, so nesting, `"50%"` lengths, `frame` nine-slices, `on_click` slots, `{binding}` expressions and any app-specific field the editor has no inspector for all survive a load→save round-trip untouched.
+3. ⬜ Live preview through the real `UiTheme` + `UiContext` + `odai_ui_vulkan` renderer. The canvas today draws its own approximation from the node's properties; it does not resolve theme color tokens or nine-slice frames (a token like `"panel.bg"` renders as a neutral placeholder and round-trips unchanged).
+4. ✅ Undo/redo stack — `EditorHistory` ([editor_history.h](../src/tools/ui_editor/editor_history.h)), whole-document snapshots, one step per completed gesture.
+5. ✅ Multi-select, align/distribute, copy/paste, duplicate, keyboard nudge, sibling reorder — `Selection` and friends in [editor_ops.h](../src/tools/ui_editor/editor_ops.h).
+6. ✅ Save/export straight to the same `.ui.json` consumed by `UiDocumentLoader::load`, with a round-trip test. `odai_ui_editor_tests` authors a document, serializes it, instantiates it through the real `ui::UiDocumentLoader`, and asserts the resulting widget tree's ids, slot names and rects match the editor canvas — plus a test that opens the shipped `assets/ui/docs/city_panel.ui.json` and hands it back unchanged.
+7. 🟡 Acceptance test — the headless half is covered by the round-trip tests above. The 5-minute hands-on flow (open editor → drop widgets → wire an `on_click` slot → run in-game) still needs a real Vulkan run.
+
+> **Build caveat on the editor app itself.** The document core (`editor_document`,
+> `editor_history`, `editor_ops`, `editor_snap`) is headless and covered by
+> `odai_ui_editor_tests`. `ui_editor_app.cc` — the GLFW/Vulkan shell that drives
+> it — was ported to the new core on a machine with no Vulkan SDK and has only
+> been type-checked (`g++ -fsyntax-only`), never built or run. Verify it on a real
+> Vulkan build before relying on its behaviour; this is the same caveat `CLAUDE.md`
+> carries for `skinning_resources.cc`.
 
 ## Phase 3 — Packaging & docs polish (~1 week, can overlap Phase 2's tail)
 
@@ -56,4 +73,9 @@ Ship a smaller, honest core plus the two requested capabilities done well, rathe
 
 ## Sequencing note
 
-Do Phase 1 before Phase 2: the editor's live preview and any inspector-driven transitions (panel animating on selection, etc.) will want the improved tween primitives, and Phase 1 is the smaller, lower-risk piece to land and validate first.
+Phase 1 landed first, as planned — the editor's live preview and any
+inspector-driven transitions want the improved tween primitives.
+
+Within Phase 2, the remaining two items (ImGui inspector, live theme preview) both
+need a working Vulkan build to develop against, so they are the natural next step
+for whoever has one.

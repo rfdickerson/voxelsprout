@@ -76,7 +76,8 @@ All are plain executables with a hand-rolled `int main()` and inline assertions 
 | `odai_foundation_tests` | chunk grid, world gen, mesher |
 | `odai_job_system_tests` | `core/job_system` |
 | `odai_chunk_mesh_scheduler_tests` | async chunk-meshing scheduler |
-| `odai_ui_tests` | draw list, font metrics, rich text, widgets, bindings (headless) |
+| `odai_ui_tests` | draw list, font metrics, rich text, widgets, bindings, `.ui.json` document loader (headless) |
+| `odai_ui_editor_tests` | UI editor document core: `.ui.json` schema authoring, layout/hit-test, undo/redo, snapping, align/distribute/clipboard, HSV/color-harmony/WCAG-contrast math, plus a round-trip through the real `ui::UiDocumentLoader` (headless) |
 | `odai_retro_widgets_tests` | retro theme widget rendering |
 | `odai_svg_vector_tests` | SVG import, tessellation, `.odaivec` cache |
 | `odai_strategy_map_tests` | hex grid model, `.smap` serialization, mesher |

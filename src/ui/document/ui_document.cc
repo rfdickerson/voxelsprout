@@ -44,6 +44,11 @@ static UiColor parseHexColor(const std::string& hex, const UiColor& fallback) {
     return UiColor{r, g, b, a};
 }
 
+// Instantiates a node's "children" array into `parent`. Defined below; declared
+// here because instantiate() calls it once the parent's rect is assigned.
+static void buildChildren(const json& node, Widget& parent, const UiDocumentLoader& loader,
+                           const BindingContext& ctx);
+
 // --------------------------------------------------------------------------
 // UiDocumentLoader
 // --------------------------------------------------------------------------
@@ -52,8 +57,9 @@ UiDocumentLoader::UiDocumentLoader(const UiTheme& theme) : m_theme(theme) {
     registerBuiltins();
 }
 
-void UiDocumentLoader::registerType(std::string typeName, Factory factory) {
-    m_factories[std::move(typeName)] = std::move(factory);
+void UiDocumentLoader::registerType(std::string typeName, Factory factory,
+                                     bool loaderBuildsChildren) {
+    m_factories[std::move(typeName)] = TypeEntry{std::move(factory), loaderBuildsChildren};
 }
 
 // --------------------------------------------------------------------------
@@ -117,8 +123,10 @@ std::unique_ptr<Widget> UiDocumentLoader::instantiate(const json& node,
     // Custom factory?
     auto it = m_factories.find(type);
     std::unique_ptr<Widget> w;
+    bool buildChildrenHere = false;
     if (it != m_factories.end()) {
-        w = it->second(node, *this, ctx);
+        w = it->second.factory(node, *this, ctx);
+        buildChildrenHere = it->second.loaderBuildsChildren;
     } else {
         w = std::make_unique<Widget>();
     }
@@ -127,6 +135,12 @@ std::unique_ptr<Widget> UiDocumentLoader::instantiate(const json& node,
         if (node.contains("id"))       w->id       = node["id"].get<std::string>();
         if (node.contains("on_click")) w->slotName = node["on_click"].get<std::string>();
         else if (node.contains("on_change")) w->slotName = node["on_change"].get<std::string>();
+        // Children are built only now, with the parent's rect already assigned:
+        // resolveRect() offsets a child by its parent's origin and resolves any
+        // percentage length against the parent's span, so building them from
+        // inside the factory (before setRect) laid every child out against an
+        // empty rect.
+        if (buildChildrenHere) buildChildren(node, *w, *this, ctx);
     }
     return w;
 }
@@ -155,12 +169,11 @@ void UiDocumentLoader::registerBuiltins() {
         if (n.contains("borderColor"))  w->borderColor  = parseColor(n["borderColor"].get<std::string>(), w->borderColor);
         if (n.contains("labelColor"))   w->labelColor   = parseColor(n["labelColor"].get<std::string>(), w->labelColor);
         if (n.contains("cornerRadius")) w->cornerRadiusPx = n["cornerRadius"].get<float>();
-        buildChildren(n, *w, L, ctx);
         return w;
-    });
+    }, /*loaderBuildsChildren=*/true);
 
     // ---- Panel ----
-    registerType("Panel", [](const json& n, const UiDocumentLoader& L, const BindingContext& ctx) {
+    registerType("Panel", [](const json& n, const UiDocumentLoader& L, const BindingContext& /*ctx*/) {
         auto w = std::make_unique<Panel>();
         if (n.contains("background")) {
             const UiColor def = w->background;
@@ -174,9 +187,8 @@ void UiDocumentLoader::registerBuiltins() {
         if (n.contains("frame")) {
             w->nineSlice = L.theme().frame(n["frame"].get<std::string>());
         }
-        buildChildren(n, *w, L, ctx);
         return w;
-    });
+    }, /*loaderBuildsChildren=*/true);
 
     // ---- Label ----
     registerType("Label", [](const json& n, const UiDocumentLoader& L, const BindingContext& ctx) {
@@ -217,28 +229,25 @@ void UiDocumentLoader::registerBuiltins() {
     });
 
     // ---- HorizontalStack ----
-    registerType("HorizontalStack", [](const json& n, const UiDocumentLoader& L, const BindingContext& ctx) {
+    registerType("HorizontalStack", [](const json& n, const UiDocumentLoader& /*L*/, const BindingContext& /*ctx*/) {
         auto w = std::make_unique<HorizontalStack>();
         w->gap = n.value("gap", w->gap);
-        buildChildren(n, *w, L, ctx);
         return w;
-    });
+    }, /*loaderBuildsChildren=*/true);
 
     // ---- VerticalStack ----
-    registerType("VerticalStack", [](const json& n, const UiDocumentLoader& L, const BindingContext& ctx) {
+    registerType("VerticalStack", [](const json& n, const UiDocumentLoader& /*L*/, const BindingContext& /*ctx*/) {
         auto w = std::make_unique<VerticalStack>();
         w->gap = n.value("gap", w->gap);
-        buildChildren(n, *w, L, ctx);
         return w;
-    });
+    }, /*loaderBuildsChildren=*/true);
 
     // ---- ScrollView ----
-    registerType("ScrollView", [](const json& n, const UiDocumentLoader& L, const BindingContext& ctx) {
+    registerType("ScrollView", [](const json& n, const UiDocumentLoader& /*L*/, const BindingContext& /*ctx*/) {
         auto w = std::make_unique<ScrollView>();
         w->childGap = n.value("childGap", w->childGap);
-        buildChildren(n, *w, L, ctx);
         return w;
-    });
+    }, /*loaderBuildsChildren=*/true);
 
     // ---- Spacer ----
     registerType("Spacer", [](const json& /*n*/, const UiDocumentLoader&, const BindingContext&) {

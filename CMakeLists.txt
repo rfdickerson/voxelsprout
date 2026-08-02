@@ -265,6 +265,20 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# odai_ui_editor core — the Vulkan-free half of src/tools/ui_editor/
+# ---------------------------------------------------------------------------
+# Document model, undo history, snapping and editor operations. Shared by the
+# GLFW/Vulkan odai_ui_editor app and by odai_ui_editor_tests, which is why it is
+# a plain source list declared up here rather than inside the app-only block.
+set(ODAI_UI_EDITOR_CORE_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/tools/ui_editor/editor_color.cc
+    ${CMAKE_SOURCE_DIR}/src/tools/ui_editor/editor_document.cc
+    ${CMAKE_SOURCE_DIR}/src/tools/ui_editor/editor_history.cc
+    ${CMAKE_SOURCE_DIR}/src/tools/ui_editor/editor_ops.cc
+    ${CMAKE_SOURCE_DIR}/src/tools/ui_editor/editor_snap.cc
+)
+
+# ---------------------------------------------------------------------------
 # odai_audio — audio subsystem (miniaudio backend behind a PIMPL facade)
 # ---------------------------------------------------------------------------
 # Always built, even in headless tools/tests configs: the NullBackend has no
@@ -919,6 +933,7 @@ if(ODAI_BUILD_APP)
         add_executable(odai_ui_editor
             src/tools/ui_editor/ui_editor_main.cc
             src/tools/ui_editor/ui_editor_app.cc
+            ${ODAI_UI_EDITOR_CORE_SOURCES}
             src/engine/game_app.cc
             src/engine/plugin.cc
             src/import/dds.cc
@@ -1620,6 +1635,27 @@ if(BUILD_TESTING)
         target_compile_options(odai_retro_widgets_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_retro_widgets_tests COMMAND odai_retro_widgets_tests)
+
+    # UI editor document core: real .ui.json schema authoring, layout/hit-test,
+    # undo/redo, snapping, align/distribute/clipboard, HSV + color harmony +
+    # WCAG contrast. Headless — links odai_ui
+    # plus the Vulkan-free half of src/tools/ui_editor/, and round-trips its
+    # output through the production ui::UiDocumentLoader.
+    add_executable(odai_ui_editor_tests
+        tests/ui_editor_tests.cc
+        ${ODAI_UI_EDITOR_CORE_SOURCES}
+    )
+    target_include_directories(odai_ui_editor_tests PRIVATE src)
+    target_link_libraries(odai_ui_editor_tests PRIVATE odai_ui)
+    # Lets the suite open the engine's own shipped .ui.json sample.
+    target_compile_definitions(odai_ui_editor_tests PRIVATE
+        ODAI_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")
+    if(MSVC)
+        target_compile_options(odai_ui_editor_tests PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_ui_editor_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_ui_editor_tests COMMAND odai_ui_editor_tests)
 
     # Audio subsystem: headless NullBackend behavior (no device, no miniaudio).
     # Compiles only the facade + null backend so it builds/runs anywhere.

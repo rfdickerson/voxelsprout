@@ -11,6 +11,8 @@
 #include "ui/animation.h"
 #include "ui/cached_rich_text.h"
 #include "ui/document/ui_binding.h"
+#include "ui/document/ui_document.h"
+#include "ui/theme/ui_theme.h"
 #include "ui/font.h"
 #include "ui/icon_atlas.h"
 #include "ui/rich_text.h"
@@ -1186,6 +1188,52 @@ void testBindingContextResolve() {
                "BindingContext resolves {city.population} as float");
 }
 
+// A document child must be laid out against its parent's *resolved* rect: an
+// absolute child offset is relative to the parent's origin, and a percentage
+// length resolves against the parent's span. Building children from inside the
+// type factory (before instantiate() assigned the parent's rect) laid every
+// child out against an empty rect, so offsets came out screen-absolute and
+// percentages collapsed to zero.
+void testDocumentChildRectsResolveAgainstParent() {
+    using namespace odai::ui;
+    const char* doc = R"({
+      "type": "Panel", "id": "root", "x": 0, "y": 0, "width": 1000, "height": 800,
+      "children": [
+        { "type": "Panel", "id": "card", "x": 100, "y": 60, "width": 400, "height": 200,
+          "children": [
+            { "type": "Label", "id": "title", "x": 10, "y": 8, "width": 120, "height": 24 },
+            { "type": "Label", "id": "half",  "x": "50%", "y": 0, "width": "25%", "height": "10%" }
+          ]
+        }
+      ]
+    })";
+
+    UiTheme theme;  // no fonts baked: only layout is under test
+    const UiDocumentLoader loader(theme);
+    nlohmann::json parsed = nlohmann::json::parse(doc);
+    std::unique_ptr<Widget> root =
+        loader.instantiate(parsed, {}, UiRect{0.0f, 0.0f, 1000.0f, 800.0f});
+
+    expectTrue(root != nullptr && root->children().size() == 1, "root has one child");
+    if (!root || root->children().empty()) return;
+    const Widget& card = *root->children()[0];
+    expectTrue(card.children().size() == 2, "card has both children");
+    if (card.children().size() < 2) return;
+
+    expectNear(card.rect().minX, 100.0f, 0.01f, "card x");
+    expectNear(card.rect().width(), 400.0f, 0.01f, "card width");
+
+    const Widget& title = *card.children()[0];
+    expectNear(title.rect().minX, 110.0f, 0.01f, "child x is offset by the parent's origin");
+    expectNear(title.rect().minY, 68.0f, 0.01f, "child y is offset by the parent's origin");
+    expectNear(title.rect().width(), 120.0f, 0.01f, "child keeps its absolute width");
+
+    const Widget& half = *card.children()[1];
+    expectNear(half.rect().minX, 300.0f, 0.01f, "50% of a 400px parent, plus the parent's x");
+    expectNear(half.rect().width(), 100.0f, 0.01f, "25% of a 400px parent");
+    expectNear(half.rect().height(), 20.0f, 0.01f, "10% of a 200px parent");
+}
+
 void testHorizontalStackLayout() {
     using namespace odai::ui;
     Font font = makeMonospaceFont(8.0f);
@@ -2227,6 +2275,7 @@ int main() {
     testInlineIconParsing();
     testInlineIconLayout();
     testBindingContextResolve();
+    testDocumentChildRectsResolveAgainstParent();
     testHorizontalStackLayout();
     testVerticalStackLayout();
     testScrollViewLayout();

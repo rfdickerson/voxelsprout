@@ -43,10 +43,17 @@ public:
     explicit UiDocumentLoader(const UiTheme& theme);
 
     // Register a custom widget factory for a type name. Called before load().
+    //
+    // loaderBuildsChildren: when true, instantiate() builds the node's "children"
+    // itself, *after* the new widget's rect is assigned — which is the only order
+    // that gives children a real parent rect to resolve against. Leave it false
+    // (the default) for a factory that handles its own children by calling
+    // instantiate() recursively, so it keeps full control and the loader doesn't
+    // build them a second time.
     using Factory = std::function<std::unique_ptr<Widget>(const nlohmann::json&,
                                                           const UiDocumentLoader&,
                                                           const BindingContext&)>;
-    void registerType(std::string typeName, Factory factory);
+    void registerType(std::string typeName, Factory factory, bool loaderBuildsChildren = false);
 
     // Load a .ui.json file. Returns nullptr on parse or IO error.
     std::unique_ptr<Widget> load(const std::filesystem::path& path,
@@ -62,8 +69,13 @@ public:
     const UiTheme& theme() const { return m_theme; }
 
 private:
+    struct TypeEntry {
+        Factory factory;
+        bool loaderBuildsChildren = false;
+    };
+
     const UiTheme& m_theme;
-    std::unordered_map<std::string, Factory> m_factories;
+    std::unordered_map<std::string, TypeEntry> m_factories;
 
     void registerBuiltins();
 
