@@ -14,6 +14,9 @@ option(ODAI_BUILD_EXAMPLES "Build standalone odai_ui SDK integration samples." O
 # the vcpkg `stb` port in normal builds; ODAI_STB_INCLUDE_DIR overrides it for
 # headless checks without vcpkg.
 find_package(nlohmann_json CONFIG REQUIRED)
+# zlib: BSA archive/ESM record decompression for the Fallout: New Vegas
+# import pipeline (src/import/fnv/). The only place zlib is used directly.
+find_package(ZLIB REQUIRED)
 find_package(Stb QUIET)
 if(Stb_FOUND)
     set(ODAI_STB_INCLUDE_DIRS "${Stb_INCLUDE_DIR}")
@@ -168,6 +171,7 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/auto_exposure_histogram.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/auto_exposure_update.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/sun_shafts.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/skinning.comp.slang" compute)
     add_custom_target(slang_shaders DEPENDS ${SLANG_SHADER_OUTPUTS})
 else()
     message(STATUS "slangc not found; skipping Slang shader target")
@@ -229,6 +233,7 @@ add_library(odai_ui STATIC
     # Renamed panels (genre-neutral names, data-agnostic, no game-type deps):
     src/ui/widgets/advisors_panel.cc
     src/ui/widgets/build_queue_panel.cc
+    src/ui/widgets/dialogue_panel.cc
     src/ui/widgets/event_tracker_panel.cc
     src/ui/widgets/faction_panel.cc
     src/ui/widgets/grid_picker_panel.cc
@@ -333,6 +338,51 @@ if(MSVC)
     target_compile_options(odai_content PRIVATE ${ODAI_WARN_FLAGS_MSVC})
 else()
     target_compile_options(odai_content PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# ---------------------------------------------------------------------------
+# odai_anim — skeleton/animation-clip data model and CPU sampler (Dragon Age:
+# Origins touchstone, see docs/ROADMAP.md). Vulkan-free: produces flat
+# odai::math::Matrix4 skinning matrices; only src/render/ turns those into GPU
+# buffers.
+# ---------------------------------------------------------------------------
+add_library(odai_anim STATIC
+    src/anim/animation_sampler.cc
+    src/anim/skeleton_io.cc
+)
+target_include_directories(odai_anim PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(odai_anim PRIVATE nlohmann_json::nlohmann_json)
+target_compile_features(odai_anim PUBLIC cxx_std_20)
+if(MSVC)
+    target_compile_options(odai_anim PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+else()
+    target_compile_options(odai_anim PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# ---------------------------------------------------------------------------
+# odai_dialogue — branching dialogue trees (Dragon Age: Origins touchstone, see
+# docs/ROADMAP.md). Vulkan-free, game-free: conditions/effects run against the
+# abstract DialogueContext, not any specific game's state, so this links into
+# any game prototype without pulling in its data model.
+# ---------------------------------------------------------------------------
+add_library(odai_dialogue STATIC
+    src/dialogue/dialogue_io.cc
+    src/dialogue/dialogue_runtime.cc
+    src/dialogue/dialogue_state_io.cc
+)
+target_include_directories(odai_dialogue PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(odai_dialogue PRIVATE nlohmann_json::nlohmann_json)
+target_compile_features(odai_dialogue PUBLIC cxx_std_20)
+if(MSVC)
+    target_compile_options(odai_dialogue PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+else()
+    target_compile_options(odai_dialogue PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -481,6 +531,7 @@ if(ODAI_BUILD_APP)
             src/render/backend/vulkan/frame_pass_shadow.cc
             src/render/backend/vulkan/frame_pass_prepass.cc
             src/render/backend/vulkan/frame_pass_ssao.cc
+            src/render/backend/vulkan/frame_pass_skinning.cc
             src/render/backend/vulkan/frame_pass_main.cc
             src/render/backend/vulkan/frame_chunks.cc
             src/render/backend/vulkan/frame_draws.cc
@@ -495,6 +546,7 @@ if(ODAI_BUILD_APP)
             src/render/backend/vulkan/pass_pipelines.cc
             src/render/backend/vulkan/swapchain_targets.cc
             src/render/backend/vulkan/post_compute.cc
+            src/render/backend/vulkan/skinning_resources.cc
             src/render/backend/vulkan/pass_gi.cc
             src/render/backend/vulkan/shadow_culling.cc
             src/render/backend/vulkan/vma_usage.cc
@@ -810,6 +862,52 @@ if(ODAI_BUILD_APP)
         endif()
 
     # ---------------------------------------------------------------------------
+    # odai_game_voxelcraft — first-person voxel sandbox (Vulkan)
+    # ---------------------------------------------------------------------------
+        add_executable(odai_game_voxelcraft
+            src/games/voxelcraft/voxelcraft_main.cc
+            src/games/voxelcraft/voxelcraft_app.cc
+            src/games/voxelcraft/voxelcraft_player.cc
+            src/games/voxelcraft/voxelcraft_streaming.cc
+            src/engine/game_app.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_game_voxelcraft PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_game_voxelcraft PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_game_voxelcraft PRIVATE
+            odai_ui odai_ui_vulkan odai_audio
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_game_voxelcraft PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_game_voxelcraft PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_game_voxelcraft slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_game_voxelcraft PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_game_voxelcraft PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
+    # ---------------------------------------------------------------------------
     # odai_ui_editor — Drag-and-drop UI editor for artists (Vulkan)
     # ---------------------------------------------------------------------------
         add_executable(odai_ui_editor
@@ -1122,6 +1220,28 @@ if(ODAI_BUILD_TOOLS)
     else()
         target_compile_options(odai_theme_viewer PRIVATE -Wall -Wextra -Wpedantic)
     endif()
+
+    # New Vegas cooker — offline Fallout: New Vegas Data Files (.esm + .bsa +
+    # .nif) -> ImportedScene .bin, mirroring odai_strategy_map_gen's role for
+    # the hex map prototype. See src/tools/newvegas_cooker_main.cc for usage
+    # and src/import/fnv/ for the format readers (BSA/ESM/NIF).
+    #   odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --cell <EditorID>
+    #   odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --worldspace <EditorID> <x0> <z0> <x1> <z1>
+    add_executable(odai_newvegas_cooker
+        src/tools/newvegas_cooker_main.cc
+        src/import/fnv/bsa_archive.cc
+        src/import/fnv/esm_reader.cc
+        src/import/fnv/fallout_records.cc
+        src/import/fnv/nif_scene.cc
+        src/import/imported_scene.cc
+    )
+    target_include_directories(odai_newvegas_cooker PRIVATE src)
+    target_link_libraries(odai_newvegas_cooker PRIVATE ZLIB::ZLIB)
+    if(MSVC)
+        target_compile_options(odai_newvegas_cooker PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_newvegas_cooker PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
 if(BUILD_TESTING)
@@ -1163,13 +1283,36 @@ if(BUILD_TESTING)
 
     add_test(NAME odai_imported_scene_tests COMMAND odai_imported_scene_tests)
 
+    # Fallout: New Vegas import pipeline — BSA archive reader, generic ESM
+    # record walker, typed record extraction, and the Gamebryo NIF geometry
+    # parser (src/import/fnv/). All synthetic-fixture tests: no real Fallout:
+    # New Vegas Data Files are available to test against in CI.
+    add_executable(odai_fnv_import_tests
+        tests/fnv_import_tests.cc
+        src/import/fnv/bsa_archive.cc
+        src/import/fnv/esm_reader.cc
+        src/import/fnv/fallout_records.cc
+        src/import/fnv/nif_scene.cc
+    )
+    target_include_directories(odai_fnv_import_tests PRIVATE src)
+    target_link_libraries(odai_fnv_import_tests PRIVATE ZLIB::ZLIB)
+    if(MSVC)
+        target_compile_options(odai_fnv_import_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_fnv_import_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_fnv_import_tests COMMAND odai_fnv_import_tests)
+
     add_executable(odai_foundation_tests
         tests/foundation_tests.cc
         src/core/log.cc
+        src/world/world.cc
         src/world/chunk_grid_worldgen.cc
         src/world/magica_voxel.cc
         src/world/chunk_mesher.cc
         src/world/clipmap_index.cc
+        src/games/voxelcraft/voxelcraft_player.cc
+        src/games/voxelcraft/voxelcraft_streaming.cc
     )
     target_include_directories(odai_foundation_tests PRIVATE src)
 
@@ -1376,6 +1519,32 @@ if(BUILD_TESTING)
         target_compile_options(odai_content_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_content_tests COMMAND odai_content_tests)
+
+    # Dialogue trees (Dragon Age touchstone): JSON loading, condition filtering,
+    # effect application, auto-continue chains, and dangling-reference/cycle
+    # guards. Pure CPU; no Vulkan, no game-state dependency.
+    add_executable(odai_dialogue_tests tests/dialogue_tests.cc)
+    target_include_directories(odai_dialogue_tests PRIVATE src)
+    target_link_libraries(odai_dialogue_tests PRIVATE odai_dialogue)
+    if(MSVC)
+        target_compile_options(odai_dialogue_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_dialogue_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_dialogue_tests COMMAND odai_dialogue_tests)
+
+    # Skeleton/animation-clip sampler (Dragon Age touchstone): bind-pose
+    # sanity, hierarchy composition, keyframe interpolation, loop/clamp time
+    # handling, and JSON loading. Pure CPU; no Vulkan.
+    add_executable(odai_animation_tests tests/animation_tests.cc)
+    target_include_directories(odai_animation_tests PRIVATE src)
+    target_link_libraries(odai_animation_tests PRIVATE odai_anim)
+    if(MSVC)
+        target_compile_options(odai_animation_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_animation_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_animation_tests COMMAND odai_animation_tests)
 
     # Lua scripting engine: event hooks fire with the right counts/order, and a
     # scripted run is deterministic (same seed+mod -> identical TurnSamples; a

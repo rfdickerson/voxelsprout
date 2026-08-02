@@ -222,6 +222,15 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
+    // Creates the descriptor-set-layout/buffer-set/pipeline up front so
+    // they're ready before any uploadSkinnedMeshTemplate() call; that
+    // function's own call to this is then just a no-op check
+    // (skinning_resources.cc).
+    if (!runStep("createSkinningComputeResources", [&] { return createSkinningComputeResources(); })) {
+        VOX_LOGE("render") << "init failed at createSkinningComputeResources\n";
+        shutdown();
+        return false;
+    }
     if (!runStep("createSwapchain", [&] { return createSwapchain(); })) {
         VOX_LOGE("render") << "init failed at createSwapchain\n";
         shutdown();
@@ -2335,6 +2344,7 @@ void RendererBackend::shutdown() {
         destroyAutoExposureResources();
         destroySunShaftResources();
         destroySsaoComputeResources();
+        destroySkinningComputeResources();
         destroyChunkBuffers();
         destroyPipeline();
         destroyPipelineCache();

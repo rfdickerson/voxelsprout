@@ -1,13 +1,27 @@
 # Morrowind Engine Agent Config
 
 ## Project Focus
-This project is a custom C++20 / Vulkan engine for exploring and rendering Morrowind-style worlds.
+This project is a custom C++20 / Vulkan engine for exploring and rendering Morrowind-style worlds. Its offline import
+pipeline also now covers Fallout: New Vegas (a different Bethesda asset stack — see src/import/fnv/ and README.md),
+feeding the same renderer through the same ImportedScene format; the world-feel guidance below is still written
+against Morrowind and hasn't been generalized to Fallout's own regional identity.
 
 Priorities:
 - Preserve Morrowind-like world structure, scale, and readability
 - Keep code explicit, small, and debuggable
 - Support renderer experimentation without destabilizing the engine
 - Prefer practical implementation over generic engine architecture
+
+## Reference Touchstones
+
+Four games define what this project is actually building toward. Each maps to an existing area of the codebase — none are being cloned literally, but each names the specific feel/systems to chase:
+
+- **Morrowind** — open-world exploration, hand-placed regional identity, readable terrain and settlements (`src/world/`, `src/import/`). See the Morrowind-Specific Guidance below.
+- **Civilization VI** — turn-based hex-grid 4X strategy: yields, tech tree, borders, map modes/lenses, diplomacy (`src/game/`).
+- **SimCity (2013)** — agent-driven city simulation: RCI zoning, traffic congestion, land value, service coverage, data-layer overlays (`src/games/citybuilder/`, already explicitly modeled on it).
+- **Dragon Age: Origins** — party-based real-time-with-pause tactical combat, branching dialogue with consequences, companion relationships/approval. This is the least-built touchstone today — see `docs/ROADMAP.md`'s Party RPG / Narrative section.
+
+These are creative direction, not a mandate to merge four genres into one game — each pillar can keep developing largely on its own track. `docs/ROADMAP.md` tracks concrete status and priority per touchstone.
 
 This is not:
 - a generic engine framework
@@ -154,6 +168,11 @@ When uncertain:
 Morrowind Data Files
 - Windows: C:\GOG Games\Morrowind\Data Files
 - WSL: /mnt/c/GOG Games/Morrowind/Data Files
+
+Fallout: New Vegas Data Files
+- not yet recorded here — add the real install path once known; see
+  src/tools/newvegas_cooker_main.cc and README.md's "Fallout: New Vegas
+  Import Pipeline" section for the cooker this project now also supports
 
 OpenMW source tree
 - Windows: C:\Users\rfdic\OneDrive\Documents\GitHub\openmw

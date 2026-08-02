@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace odai::world {
@@ -323,6 +324,15 @@ bool World::setVoxelAtWorld(int worldX, int worldY, int worldZ, Voxel voxel) {
         updated = true;
     }
     return updated;
+}
+
+bool World::insertGeneratedChunk(const ChunkKey& key, Chunk chunk) {
+    if (m_chunkStorageIndexByKey.contains(key)) {
+        return false;
+    }
+    m_chunkStorageIndexByKey[key] = m_chunkStorage.size();
+    m_chunkStorage.push_back(std::move(chunk));
+    return true;
 }
 
 World::MagicaStampResult World::stampMagicaResources(std::span<const MagicaStampSpec> specs) {

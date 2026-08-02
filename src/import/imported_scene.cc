@@ -25,8 +25,16 @@ namespace odai::importer {
 namespace {
 
 constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
-constexpr std::uint32_t kImportedSceneVersion = 16u;
+// v16 -> v17: per-texture TextureFormat byte (BC data no longer reloads as
+// RGBA8) and a trailing pageRanges section (per-page frustum culling survives
+// the save/load round trip).
+constexpr std::uint32_t kImportedSceneVersion = 17u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
+constexpr std::uint8_t kImportedSceneMaxTextureFormat =
+    static_cast<std::uint8_t>(TextureFormat::BC7);
+
+// pageRanges are serialized as a raw array, so the layout must stay packed.
+static_assert(sizeof(ImportedScenePageRange) == 36u);
 constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
 
 std::string g_lastImportedSceneError;
@@ -85,24 +93,111 @@ PackedRenderColor packedTerrainColor(float height) {
     return color;
 }
 
-bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
-    const std::size_t basePixelCount = static_cast<std::size_t>(texture.width) * texture.height;
-    const std::size_t baseByteCount = basePixelCount * 4u;
-    if (texture.width == 0u || texture.height == 0u || texture.rgba8.size() < baseByteCount) {
+// BC1 blocks signal punch-through alpha with color0 <= color1; texel index 3
+// is then transparent black.
+bool bc1BlockHasTransparentTexel(const std::uint8_t* block) {
+    const std::uint16_t color0 = static_cast<std::uint16_t>(block[0] | (block[1] << 8));
+    const std::uint16_t color1 = static_cast<std::uint16_t>(block[2] | (block[3] << 8));
+    if (color0 > color1) {
         return false;
     }
-
-    bool sawTransparent = false;
-    bool sawVisible = false;
-    for (std::size_t pixelIndex = 0; pixelIndex < basePixelCount; ++pixelIndex) {
-        const std::uint8_t alpha = texture.rgba8[(pixelIndex * 4u) + 3u];
-        sawTransparent = sawTransparent || alpha < 250u;
-        sawVisible = sawVisible || alpha > 8u;
-        if (sawTransparent && sawVisible) {
-            return true;
+    for (int byteIndex = 4; byteIndex < 8; ++byteIndex) {
+        std::uint8_t bits = block[byteIndex];
+        for (int texel = 0; texel < 4; ++texel) {
+            if ((bits & 0x3u) == 0x3u) {
+                return true;
+            }
+            bits >>= 2;
         }
     }
     return false;
+}
+
+// Decodes the 8-byte BC3/BC5-style alpha block palette and folds each texel's
+// alpha into the transparent/visible presence flags.
+void bc3AlphaBlockPresence(const std::uint8_t* block, bool& sawTransparent, bool& sawVisible) {
+    const std::uint8_t alpha0 = block[0];
+    const std::uint8_t alpha1 = block[1];
+    std::uint8_t palette[8] = {alpha0, alpha1};
+    if (alpha0 > alpha1) {
+        for (int step = 1; step <= 6; ++step) {
+            palette[1 + step] = static_cast<std::uint8_t>(((7 - step) * alpha0 + step * alpha1) / 7);
+        }
+    } else {
+        for (int step = 1; step <= 4; ++step) {
+            palette[1 + step] = static_cast<std::uint8_t>(((5 - step) * alpha0 + step * alpha1) / 5);
+        }
+        palette[6] = 0u;
+        palette[7] = 255u;
+    }
+    std::uint64_t indexBits = 0;
+    for (int byteIndex = 0; byteIndex < 6; ++byteIndex) {
+        indexBits |= static_cast<std::uint64_t>(block[2 + byteIndex]) << (8 * byteIndex);
+    }
+    for (int texel = 0; texel < 16; ++texel) {
+        const std::uint8_t alpha = palette[(indexBits >> (3 * texel)) & 0x7u];
+        sawTransparent = sawTransparent || alpha < 250u;
+        sawVisible = sawVisible || alpha > 8u;
+    }
+}
+
+bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
+    if (texture.width == 0u || texture.height == 0u) {
+        return false;
+    }
+    const std::size_t baseBlockCount =
+        (static_cast<std::size_t>(texture.width) + 3u) / 4u *
+        ((static_cast<std::size_t>(texture.height) + 3u) / 4u);
+    switch (texture.format) {
+        case TextureFormat::RGBA8: {
+            const std::size_t basePixelCount = static_cast<std::size_t>(texture.width) * texture.height;
+            const std::size_t baseByteCount = basePixelCount * 4u;
+            if (texture.rgba8.size() < baseByteCount) {
+                return false;
+            }
+            bool sawTransparent = false;
+            bool sawVisible = false;
+            for (std::size_t pixelIndex = 0; pixelIndex < basePixelCount; ++pixelIndex) {
+                const std::uint8_t alpha = texture.rgba8[(pixelIndex * 4u) + 3u];
+                sawTransparent = sawTransparent || alpha < 250u;
+                sawVisible = sawVisible || alpha > 8u;
+                if (sawTransparent && sawVisible) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case TextureFormat::BC1: {
+            if (texture.rgba8.size() < baseBlockCount * 8u) {
+                return false;
+            }
+            for (std::size_t blockIndex = 0; blockIndex < baseBlockCount; ++blockIndex) {
+                if (bc1BlockHasTransparentTexel(texture.rgba8.data() + (blockIndex * 8u))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case TextureFormat::BC3: {
+            if (texture.rgba8.size() < baseBlockCount * 16u) {
+                return false;
+            }
+            bool sawTransparent = false;
+            bool sawVisible = false;
+            for (std::size_t blockIndex = 0; blockIndex < baseBlockCount; ++blockIndex) {
+                bc3AlphaBlockPresence(
+                    texture.rgba8.data() + (blockIndex * 16u), sawTransparent, sawVisible);
+                if (sawTransparent && sawVisible) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // BC4/BC5 carry no color alpha; BC7 alpha needs a full per-mode decode,
+        // so a BC7 cook that wants cutout must set the part flag explicitly.
+        default:
+            return false;
+    }
 }
 
 std::vector<bool> buildTextureAlphaCutoutMask(const std::vector<ImportedSceneTexture>& textures) {
@@ -436,6 +531,153 @@ void computeImportedSceneBoundsFromPackedData(ImportedScene& scene) {
     }
 }
 
+void buildImportedScenePageRanges(ImportedScene& scene, float pageSize) {
+    scene.pageRanges.clear();
+    const std::size_t drawCount = scene.packedDraws.size();
+    if (drawCount == 0u || pageSize <= 0.0f || scene.packedIndices.empty()) {
+        return;
+    }
+
+    // Mirror the renderer's terrain classification: exterior scenes treat the
+    // leading one-draw-per-landscape-cell range as terrain, interiors have none.
+    const bool isInterior = importedSceneSourceTagIsInterior(scene.sourceTag);
+    const std::uint32_t landscapeCellCount = !scene.landscapeCells.empty()
+        ? static_cast<std::uint32_t>(scene.landscapeCells.size())
+        : scene.sourceLandscapeCellCount;
+    const std::uint32_t terrainDrawCount = isInterior
+        ? 0u
+        : std::min<std::uint32_t>(landscapeCellCount, static_cast<std::uint32_t>(drawCount));
+
+    struct DrawPageInfo {
+        std::uint32_t drawIndex = 0;
+        std::int32_t cellX = 0;
+        std::int32_t cellZ = 0;
+        bool terrain = false;
+        bool hasBounds = false;
+        std::array<float, 3> boundsMin{
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max()};
+        std::array<float, 3> boundsMax{
+            std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::lowest()};
+    };
+
+    std::vector<DrawPageInfo> infos(drawCount);
+    for (std::size_t drawIndex = 0; drawIndex < drawCount; ++drawIndex) {
+        DrawPageInfo& info = infos[drawIndex];
+        info.drawIndex = static_cast<std::uint32_t>(drawIndex);
+        info.terrain = drawIndex < terrainDrawCount;
+        const ImportedScenePackedDraw& draw = scene.packedDraws[drawIndex];
+        const std::size_t firstIndex = std::min(
+            static_cast<std::size_t>(draw.firstIndex), scene.packedIndices.size());
+        const std::size_t lastIndex = std::min(
+            firstIndex + static_cast<std::size_t>(draw.indexCount), scene.packedIndices.size());
+        for (std::size_t indexOffset = firstIndex; indexOffset < lastIndex; ++indexOffset) {
+            const std::uint32_t vertexIndex = scene.packedIndices[indexOffset];
+            if (vertexIndex >= scene.packedVertices.size()) {
+                continue;
+            }
+            const ImportedScenePackedVertex& vertex = scene.packedVertices[vertexIndex];
+            for (int axis = 0; axis < 3; ++axis) {
+                info.boundsMin[axis] = std::min(info.boundsMin[axis], vertex.position[axis]);
+                info.boundsMax[axis] = std::max(info.boundsMax[axis], vertex.position[axis]);
+            }
+            info.hasBounds = true;
+        }
+        if (info.hasBounds) {
+            const float centerX = (info.boundsMin[0] + info.boundsMax[0]) * 0.5f;
+            const float centerZ = (info.boundsMin[2] + info.boundsMax[2]) * 0.5f;
+            info.cellX = static_cast<std::int32_t>(std::floor(centerX / pageSize));
+            info.cellZ = static_cast<std::int32_t>(std::floor(centerZ / pageSize));
+        }
+    }
+
+    // Terrain first (so the [0, terrainDrawCount) invariant survives), then by
+    // XZ tile so page members become contiguous. Terrain and statics never mix
+    // in one page. Stable ordering keeps output deterministic.
+    std::stable_sort(
+        infos.begin(),
+        infos.end(),
+        [](const DrawPageInfo& a, const DrawPageInfo& b) {
+            if (a.terrain != b.terrain) {
+                return a.terrain;
+            }
+            if (a.cellZ != b.cellZ) {
+                return a.cellZ < b.cellZ;
+            }
+            return a.cellX < b.cellX;
+        });
+
+    std::vector<std::uint32_t> newIndices;
+    newIndices.reserve(scene.packedIndices.size());
+    std::vector<ImportedScenePackedDraw> newDraws;
+    newDraws.reserve(drawCount);
+    std::vector<ImportedScenePageRange> pages;
+    bool pageHasBounds = false;
+    bool lastTerrain = false;
+    std::int32_t lastCellX = 0;
+    std::int32_t lastCellZ = 0;
+    for (const DrawPageInfo& info : infos) {
+        const ImportedScenePackedDraw& srcDraw = scene.packedDraws[info.drawIndex];
+        const std::size_t firstIndex = std::min(
+            static_cast<std::size_t>(srcDraw.firstIndex), scene.packedIndices.size());
+        const std::size_t lastIndex = std::min(
+            firstIndex + static_cast<std::size_t>(srcDraw.indexCount), scene.packedIndices.size());
+
+        ImportedScenePackedDraw dstDraw{};
+        dstDraw.firstIndex = static_cast<std::uint32_t>(newIndices.size());
+        dstDraw.indexCount = static_cast<std::uint32_t>(lastIndex - firstIndex);
+        newIndices.insert(
+            newIndices.end(),
+            scene.packedIndices.begin() + static_cast<std::ptrdiff_t>(firstIndex),
+            scene.packedIndices.begin() + static_cast<std::ptrdiff_t>(lastIndex));
+
+        const bool startNewPage = pages.empty() ||
+            lastTerrain != info.terrain ||
+            lastCellX != info.cellX ||
+            lastCellZ != info.cellZ;
+        lastTerrain = info.terrain;
+        lastCellX = info.cellX;
+        lastCellZ = info.cellZ;
+        if (startNewPage) {
+            ImportedScenePageRange page{};
+            page.firstDraw = static_cast<std::uint32_t>(newDraws.size());
+            pages.push_back(page);
+            pageHasBounds = false;
+        }
+        ImportedScenePageRange& page = pages.back();
+        ++page.drawCount;
+        if (info.terrain) {
+            ++page.terrainDrawCount;
+        }
+        if (info.hasBounds) {
+            if (!pageHasBounds) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    page.boundsMin[axis] = info.boundsMin[axis];
+                    page.boundsMax[axis] = info.boundsMax[axis];
+                }
+                pageHasBounds = true;
+            } else {
+                for (int axis = 0; axis < 3; ++axis) {
+                    page.boundsMin[axis] = std::min(page.boundsMin[axis], info.boundsMin[axis]);
+                    page.boundsMax[axis] = std::max(page.boundsMax[axis], info.boundsMax[axis]);
+                }
+            }
+        }
+        newDraws.push_back(dstDraw);
+    }
+
+    scene.packedIndices = std::move(newIndices);
+    scene.packedDraws = std::move(newDraws);
+    scene.pageRanges = std::move(pages);
+}
+
+bool importedSceneSourceTagIsInterior(std::string_view sourceTag) {
+    return sourceTag == "morrowind_interior" || sourceTag == "fnv_interior";
+}
+
 const std::string& getImportedSceneLastError() {
     return g_lastImportedSceneError;
 }
@@ -491,6 +733,7 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
         writeValue(output, texture.width);
         writeValue(output, texture.height);
         writeValue(output, texture.mipLevelCount);
+        writeValue(output, static_cast<std::uint8_t>(texture.format));
         const std::uint32_t rgbaSize = static_cast<std::uint32_t>(texture.rgba8.size());
         writeValue(output, rgbaSize);
         if (!texture.rgba8.empty()) {
@@ -583,6 +826,14 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
             static_cast<std::streamsize>(scene.packedDraws.size() * sizeof(ImportedScenePackedDraw)));
     }
 
+    const std::uint32_t pageRangeCount = static_cast<std::uint32_t>(scene.pageRanges.size());
+    writeValue(output, pageRangeCount);
+    if (!scene.pageRanges.empty()) {
+        output.write(
+            reinterpret_cast<const char*>(scene.pageRanges.data()),
+            static_cast<std::streamsize>(scene.pageRanges.size() * sizeof(ImportedScenePageRange)));
+    }
+
     if (!output.good()) {
         setLastImportedSceneError("Failed while writing output file: " + outputPath.string());
         return false;
@@ -665,6 +916,15 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
             !readValue(input, texture.height) ||
             !readValue(input, texture.mipLevelCount)) {
             return false;
+        }
+        if (version >= 17u) {
+            std::uint8_t formatValue = 0;
+            if (!readValue(input, formatValue) || formatValue > kImportedSceneMaxTextureFormat) {
+                setLastImportedSceneError(
+                    "Invalid texture format in imported scene file: " + inputPath.string());
+                return false;
+            }
+            texture.format = static_cast<TextureFormat>(formatValue);
         }
         std::uint32_t rgbaSize = 0;
         if (!readValue(input, rgbaSize)) {
@@ -790,6 +1050,24 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         buildImportedScenePackedRenderData(scene);
     }
 
+    if (version >= 17u) {
+        std::uint32_t pageRangeCount = 0;
+        if (!readValue(input, pageRangeCount)) {
+            return false;
+        }
+        scene.pageRanges.resize(pageRangeCount);
+        if (pageRangeCount != 0 &&
+            !readExact(input, scene.pageRanges.data(), scene.pageRanges.size() * sizeof(ImportedScenePageRange))) {
+            return false;
+        }
+    }
+    if (scene.pageRanges.empty() && scene.packedDraws.size() > 1u) {
+        // Pre-v17 cooks (and cooks that skipped paging) draw the whole scene
+        // every frame. Rebuild culling pages here so old files get per-page
+        // frustum culling without a recook.
+        buildImportedScenePageRanges(scene);
+    }
+
     applyTextureAlphaCutoutFlags(scene);
     outScene = std::move(scene);
     return true;
@@ -861,12 +1139,23 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
 
     scene.textures.resize(textureCount);
     for (ImportedSceneTexture& texture : scene.textures) {
-        std::uint32_t rgbaSize = 0;
         if (!readString(input, texture.sourcePath) ||
             !readValue(input, texture.width) ||
             !readValue(input, texture.height) ||
-            !readValue(input, texture.mipLevelCount) ||
-            !readValue(input, rgbaSize)) {
+            !readValue(input, texture.mipLevelCount)) {
+            return false;
+        }
+        if (version >= 17u) {
+            std::uint8_t formatValue = 0;
+            if (!readValue(input, formatValue) || formatValue > kImportedSceneMaxTextureFormat) {
+                setLastImportedSceneError(
+                    "Invalid texture format in imported scene file: " + inputPath.string());
+                return false;
+            }
+            texture.format = static_cast<TextureFormat>(formatValue);
+        }
+        std::uint32_t rgbaSize = 0;
+        if (!readValue(input, rgbaSize)) {
             return false;
         }
         texture.rgba8.resize(rgbaSize);
@@ -972,6 +1261,20 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
         (packedDrawCount != 0 &&
          !readExact(input, scene.packedDraws.data(), scene.packedDraws.size() * sizeof(ImportedScenePackedDraw)))) {
         return false;
+    }
+    if (version >= 17u) {
+        std::uint32_t pageRangeCount = 0;
+        if (!readValue(input, pageRangeCount)) {
+            return false;
+        }
+        scene.pageRanges.resize(pageRangeCount);
+        if (pageRangeCount != 0 &&
+            !readExact(input, scene.pageRanges.data(), scene.pageRanges.size() * sizeof(ImportedScenePageRange))) {
+            return false;
+        }
+    }
+    if (scene.pageRanges.empty() && scene.packedDraws.size() > 1u) {
+        buildImportedScenePageRanges(scene);
     }
     if (version < 3u) {
         computeImportedSceneBoundsFromPackedData(scene);

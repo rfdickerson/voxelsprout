@@ -38,12 +38,14 @@ ctest --test-dir cmake-build-release -R odai_ui_tests -V
 - `odai_ui_tests` — draw list, font metrics, rich text, widgets (headless, no Vulkan)
 - `odai_strategy_map_tests` — hex grid model, serialization, mesher
 - `odai_imported_scene_tests` — scene import/export round-trip
+- `odai_fnv_import_tests` — Fallout: New Vegas import pipeline: BSA archive reader, ESM record walker, typed record extraction, NIF geometry parser (synthetic fixtures only — see README's "Fallout: New Vegas Import Pipeline" section)
 - `odai_stability_gtests` — GTest suite covering frame graph, render math, sim network (requires GTest via vcpkg)
 
 **Content generation tools:**
 ```powershell
 cmake-build-release\odai_strategy_map_gen.exe          # generates strategy_map.smap + strategy_map_scene.bin
 cmake-build-release\odai_balmora_cooker.exe "C:\GOG Games\Morrowind\Data Files" balmora.bin
+cmake-build-release\odai_newvegas_cooker.exe "<Fallout New Vegas Data Files>" FalloutNV.esm fnv_scene.bin --cell <EditorID>
 ```
 
 **Run the app (strategy map mode):**
@@ -69,7 +71,7 @@ Read **`AGENTS.md`** first — it defines the project's non-negotiable rules (Vu
 app/      — lifecycle, input routing, per-frame coordination
 core/     — math, time, logging (VOX_LOGE/W/I/D/T macros), input state
 world/    — terrain, chunk grids, voxels, static placement
-import/   — Morrowind asset parsing (ESM, terrain, scene serialization)
+import/   — Bethesda asset parsing (Morrowind ESM/terrain, Fallout: New Vegas ESM/BSA/NIF in import/fnv/) + scene serialization
 game/     — strategy map model, hex grid, serialization, mesh building
 sim/      — factory simulation (pipes, belts, items)
 ui/       — Vulkan-free UI framework: draw list, font, rich text, widget tree
@@ -145,6 +147,7 @@ Ray-traced shadow/reflection variants compile the same `.slang` source with `-DO
 |---|---|
 | Morrowind Data Files (Windows) | `C:\GOG Games\Morrowind\Data Files` |
 | Morrowind Data Files (WSL) | `/mnt/c/GOG Games/Morrowind/Data Files` |
+| Fallout: New Vegas Data Files | not yet recorded — add the real path here once known; the cooker takes it as its first argument regardless |
 | OpenMW source (Windows) | `C:\Users\rfdic\OneDrive\Documents\GitHub\openmw` |
 | Build dir (Windows) | `cmake-build-release` |
 | Build dir (Linux) | `cmake-build-linux` |

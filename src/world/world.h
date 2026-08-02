@@ -83,6 +83,13 @@ public:
     [[nodiscard]] const ChunkStreamingStats& streamingStats() const;
     bool setVoxelAtWorld(int worldX, int worldY, int worldZ, Voxel voxel);
 
+    // Insert a chunk generated off the main thread (e.g. by an async streaming pipeline)
+    // directly into storage, without calling buildProceduralChunk. Returns false (no-op) if
+    // a chunk for this key is already stored. Callers still call
+    // updateStreamingWindowForWorldPosition() afterward to sync the resident grid -- its
+    // storage lookup naturally skips regeneration for keys already present.
+    bool insertGeneratedChunk(const ChunkKey& key, Chunk chunk);
+
     MagicaStampResult stampMagicaResources(std::span<const MagicaStampSpec> specs);
 
     ChunkGrid& chunkGrid();

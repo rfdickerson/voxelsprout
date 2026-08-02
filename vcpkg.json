@@ -19,7 +19,8 @@
     "sol2",
     "stb",
     "vulkan",
-    "vulkan-memory-allocator"
+    "vulkan-memory-allocator",
+    "zlib"
   ],
   "overrides": [
     {

@@ -5,6 +5,8 @@
 #include <vector>
 
 #include "core/grid3.h"
+#include "games/voxelcraft/voxelcraft_player.h"
+#include "games/voxelcraft/voxelcraft_streaming.h"
 #include "math/math.h"
 #include "sim/network_graph.h"
 #include "sim/network_procedural.h"
@@ -15,6 +17,7 @@
 #include "world/chunk_mesher.h"
 #include "world/magica_voxel.h"
 #include "world/csg.h"
+#include "world/world.h"
 
 namespace {
 
@@ -612,6 +615,69 @@ void testMagicaVoxelChunkedMeshing() {
 
 } // namespace
 
+void testVoxelCraftPlayerAndStreaming() {
+    using namespace odai::games::voxelcraft;
+
+    const Aabb3f near = makePlayerCollisionAabb(0.0f, 2.0f, 0.0f);
+    const Aabb3f overlapping = makePlayerCollisionAabb(0.1f, 2.0f, 0.0f);
+    const Aabb3f farAway = makePlayerCollisionAabb(100.0f, 2.0f, 0.0f);
+    expectTrue(near.maxX > near.minX && near.maxY > near.minY && near.maxZ > near.minZ,
+        "Player collision AABB has positive extent on every axis");
+    expectTrue(aabbOverlaps(near, overlapping), "Nearby player AABBs overlap");
+    expectTrue(!aabbOverlaps(near, farAway), "Distant player AABBs do not overlap");
+
+    // Deterministic single-chunk world: one solid voxel at (5, 5, 5), everything else empty.
+    // Radius 0 keeps exactly chunk (0,0,0) resident so the scenario stays fully controlled.
+    odai::world::World world;
+    world.setStreamingConfig(odai::world::World::ChunkStreamingConfig{0, 0});
+    odai::world::Chunk chunk(0, 0, 0);
+    chunk.setVoxel(5, 5, 5, odai::world::Voxel{odai::world::VoxelType::Stone});
+    world.insertGeneratedChunk(odai::world::World::ChunkKey{0, 0, 0}, chunk);
+    (void)world.updateStreamingWindowForWorldPosition(0.5f, 0.5f);
+    expectTrue(world.chunkGrid().chunkCount() == 1, "Single-chunk test world has exactly one resident chunk");
+
+    // Look straight down +X toward the solid voxel from just inside the chunk.
+    PlayerState player{};
+    player.x = 0.5f;
+    player.y = 5.5f;
+    player.z = 5.5f;
+    player.yawDegrees = 0.0f;
+    player.pitchDegrees = 0.0f;
+    const CameraRaycastResult ray = raycastFromCamera(player, world);
+    expectTrue(ray.hitSolid, "Raycast hits the solid test voxel");
+    expectTrue(ray.solidX == 5 && ray.solidY == 5 && ray.solidZ == 5, "Raycast hits the expected voxel cell");
+    expectTrue(ray.hasHitFaceNormal && ray.hitFaceNormalX == -1 && ray.hitFaceNormalY == 0 && ray.hitFaceNormalZ == 0,
+        "Raycast reports the -X face as hit");
+    expectTrue(ray.hasAdjacentEmpty && ray.adjacentEmptyX == 4 && ray.adjacentEmptyY == 5 && ray.adjacentEmptyZ == 5,
+        "Raycast reports the correct adjacent empty placement cell");
+
+    std::vector<std::size_t> dirty;
+    const bool placed =
+        applyVoxelEdit(world, 4, 5, 5, odai::world::Voxel{odai::world::VoxelType::Wood}, dirty);
+    expectTrue(placed, "applyVoxelEdit places a voxel into an empty cell");
+    expectTrue(!dirty.empty(), "applyVoxelEdit reports at least the edited chunk as dirty");
+    expectTrue(world.chunkGrid().chunks()[0].isSolid(4, 5, 5), "Placed voxel is solid in the resident chunk");
+
+    const bool placedAgainSameType =
+        applyVoxelEdit(world, 4, 5, 5, odai::world::Voxel{odai::world::VoxelType::Wood}, dirty);
+    expectTrue(!placedAgainSameType, "applyVoxelEdit is a no-op when the target already has that voxel type");
+
+    // computeDesiredChunkKeys: a radius-2 config plus the fixed prefetch margin yields a
+    // full square of chunkY == 0 keys centered on the containing chunk.
+    const odai::world::World::ChunkStreamingConfig config{2, 2};
+    const std::vector<odai::world::World::ChunkKey> desired = computeDesiredChunkKeys(config, 10.0f, -10.0f);
+    const int expectedSide = ((2 + kChunkPrefetchMarginChunks) * 2) + 1;
+    expectTrue(desired.size() == static_cast<std::size_t>(expectedSide * expectedSide),
+        "computeDesiredChunkKeys returns a full square of keys for the configured + prefetch radius");
+    bool allChunkYZero = true;
+    for (const odai::world::World::ChunkKey& key : desired) {
+        if (key.chunkY != 0) {
+            allChunkYZero = false;
+        }
+    }
+    expectTrue(allChunkYZero, "computeDesiredChunkKeys only requests chunkY == 0 (surface streaming)");
+}
+
 int main() {
     testGridPrimitives();
     testNetworkGraphAndProceduralUtilities();
@@ -624,6 +690,7 @@ int main() {
     testSimulationBeltCargoDeterminism();
     testMagicaVoxelMeshing();
     testMagicaVoxelChunkedMeshing();
+    testVoxelCraftPlayerAndStreaming();
 
     if (g_failures != 0) {
         std::cerr << "[foundation test] " << g_failures << " failures\n";

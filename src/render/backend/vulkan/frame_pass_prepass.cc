@@ -31,6 +31,9 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
+    const VkBuffer skinnedActorVertexBuffer = inputs.skinnedActorVertexBuffer;
+    const VkBuffer skinnedActorIndexBuffer = inputs.skinnedActorIndexBuffer;
+    const std::span<const ImportedMeshDraw> skinnedActorMeshDraws = inputs.skinnedActorMeshDraws;
 
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
@@ -141,6 +144,25 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
                 vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+            }
+        }
+        // GPU-skinned actor (Dragon Age touchstone) -- same pipeline as the
+        // CPU-skinned block above, separate vertex/index buffer bind so the
+        // two slots never collide.
+        if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&
+            skinnedActorVertexBuffer != VK_NULL_HANDLE &&
+            skinnedActorIndexBuffer != VK_NULL_HANDLE &&
+            !skinnedActorMeshDraws.empty() &&
+            m_debugShowImportedStatics) {
+            const VkBuffer skinnedVertexBuffers[1] = {skinnedActorVertexBuffer};
+            const VkDeviceSize skinnedVertexOffsets[1] = {0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticNormalDepthPipeline);
+            bindGraphicsDescriptorBuffers(commandBuffer);
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, skinnedActorIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                countDrawCalls(m_debugDrawCallsPrepass, 1);
+                vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
             }
         }
         // Transparent water samples this prepass to estimate the opaque scene below it.
