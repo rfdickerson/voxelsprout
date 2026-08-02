@@ -732,6 +732,124 @@ void testReachableTilesMapEdge() {
     expectTrue(!hasDuplicate, "reachable set has no duplicate tiles");
 }
 
+void testSightRadiusForUnit() {
+    using namespace odai::game;
+    Unit scout{};
+    scout.typeId = "scout";
+    Unit warrior{};
+    warrior.typeId = "warrior";
+    expectEqualInt(sightRadiusForUnit(scout), 3, "scouts see one hex farther");
+    expectEqualInt(sightRadiusForUnit(warrior), 2, "non-scout units use the default sight radius");
+}
+
+void testSupplyRouteEmptyWhenAlreadyInRange() {
+    using namespace odai::game;
+    StrategyMap map = makeFlatLandMap(6, 6);
+    map.settlements.push_back(Settlement{"Homebase", 3, 3, 1, /*owner=*/1});
+    GameState gs{};
+    // Adjacent to the settlement, so isNearFriendlySettlement is already true.
+    int nc = 0, nr = 0;
+    (void)tileNeighbor(map, 3, 3, 0, nc, nr);
+    const auto route = cheapestSupplyRoute(
+        map, gs, static_cast<std::uint32_t>(nc), static_cast<std::uint32_t>(nr), 1);
+    expectTrue(route.empty(), "a unit already in supply range needs no route drawn");
+}
+
+void testSupplyRouteEmptyWithNoSettlement() {
+    using namespace odai::game;
+    StrategyMap map = makeFlatLandMap(6, 6);  // no settlements at all
+    GameState gs{};
+    const auto route = cheapestSupplyRoute(map, gs, 2, 2, 1);
+    expectTrue(route.empty(), "no owned settlement means no route to draw");
+}
+
+void testSupplyRouteReachesNearestFriendlySettlement() {
+    using namespace odai::game;
+    StrategyMap map = makeFlatLandMap(11, 3);
+    // An enemy settlement sits much closer than the player's own -- the route must
+    // ignore it and reach the friendly one, even though it's farther away.
+    map.settlements.push_back(Settlement{"Rival Camp", 3, 1, 1, /*owner=*/2});
+    map.settlements.push_back(Settlement{"Homebase", 9, 1, 1, /*owner=*/1});
+    GameState gs{};
+    const auto route = cheapestSupplyRoute(map, gs, 1, 1, /*owner=*/1);
+    expectTrue(!route.empty(), "a route back to the friendly settlement exists");
+    if (!route.empty()) {
+        expectEqualU32(route.back()[0], 9u, "route ends at the friendly settlement's column");
+        expectEqualU32(route.back()[1], 1u, "route ends at the friendly settlement's row");
+        bool includesStart = false;
+        for (const auto& wp : route) {
+            if (wp[0] == 1u && wp[1] == 1u) includesStart = true;
+        }
+        expectTrue(!includesStart, "route excludes the unit's own tile");
+    }
+}
+
+void testSupplyRouteBlockedByWater() {
+    using namespace odai::game;
+    StrategyMap map = makeFlatLandMap(9, 6);
+    map.settlements.push_back(Settlement{"Homebase", 7, 2, 1, /*owner=*/1});
+    // A complete ocean wall (every row) between the unit and its only settlement.
+    for (std::uint32_t row = 0; row < map.height; ++row) {
+        map.at(4, row).terrain = TerrainType::Ocean;
+    }
+    GameState gs{};
+    const auto route = cheapestSupplyRoute(map, gs, 1, 2, /*owner=*/1);
+    expectTrue(route.empty(), "no route exists when a water wall fully isolates the settlement");
+}
+
+void testSupplyRoutePrefersRoads() {
+    using namespace odai::game;
+    StrategyMap map = makeFlatLandMap(10, 10);
+    // Walk a concrete hex-adjacent path from (2,2) via tileNeighbor (direction 0
+    // repeated) rather than assuming raw column/row arithmetic, since odd-r offset
+    // neighbor directions aren't uniform compass directions across row parities.
+    std::vector<std::array<std::uint32_t, 2>> pathTiles;
+    int col = 2;
+    int row = 2;
+    for (int step = 0; step < 4; ++step) {
+        int nc = 0;
+        int nr = 0;
+        const bool ok = tileNeighbor(map, col, row, 0, nc, nr);
+        expectTrue(ok, "test path stays within the map");
+        if (!ok) return;
+        pathTiles.push_back({static_cast<std::uint32_t>(nc), static_cast<std::uint32_t>(nr)});
+        col = nc;
+        row = nr;
+    }
+    map.settlements.push_back(
+        Settlement{"Homebase", pathTiles.back()[0], pathTiles.back()[1], 1, /*owner=*/1});
+
+    const auto totalCost = [&](const std::vector<std::array<std::uint32_t, 2>>& route) {
+        int cost = 0;
+        std::uint32_t prevCol = 2;
+        std::uint32_t prevRow = 2;
+        for (const auto& wp : route) {
+            cost += supplyCostForStep(map, prevCol, prevRow, wp[0], wp[1]);
+            prevCol = wp[0];
+            prevRow = wp[1];
+        }
+        return cost;
+    };
+
+    GameState gsNoRoad{};
+    const auto routeNoRoad = cheapestSupplyRoute(map, gsNoRoad, 2, 2, /*owner=*/1);
+    expectTrue(!routeNoRoad.empty(), "a route exists over open flat ground");
+    const int costNoRoad = totalCost(routeNoRoad);
+
+    // Pave the exact walked path; supplyCostForStep is 0 wherever either endpoint
+    // of a step has a road, so this path should now cost strictly less.
+    for (const auto& tile : pathTiles) {
+        map.at(tile[0], tile[1]).flags |= TileFlag_Road;
+    }
+    GameState gsRoad{};
+    const auto routeRoad = cheapestSupplyRoute(map, gsRoad, 2, 2, /*owner=*/1);
+    expectTrue(!routeRoad.empty(), "a route still exists once the path is paved");
+    const int costRoad = totalCost(routeRoad);
+
+    expectTrue(costRoad < costNoRoad,
+               "paving the cheapest route with roads lowers its cumulative supply cost");
+}
+
 // Map with a single friendly city at (3,3) for production/combat tests.
 odai::game::StrategyMap makeCityMap(std::uint32_t width, std::uint32_t height,
                                     std::uint32_t cityCol, std::uint32_t cityRow,
@@ -1145,6 +1263,12 @@ int main() {
     testReachableTilesWaterBlocksPassage();
     testReachableTilesOccupiedBlocksPassage();
     testReachableTilesMapEdge();
+    testSightRadiusForUnit();
+    testSupplyRouteEmptyWhenAlreadyInRange();
+    testSupplyRouteEmptyWithNoSettlement();
+    testSupplyRouteReachesNearestFriendlySettlement();
+    testSupplyRouteBlockedByWater();
+    testSupplyRoutePrefersRoads();
     testCityProducesUnitOnNeighbor();
     testProductionRequiresBuilding();
     testSmithyGrantsArmor();

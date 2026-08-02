@@ -839,12 +839,13 @@ static void recomputeFogOfWarVisibility(
         if (s.owner != playerOwner) continue;
         revealRadius(map, static_cast<int>(s.col), static_cast<int>(s.row), 4);
     }
-    // Units — radius 2 (scouts: 3).
+    // Units — radius from sightRadiusForUnit (2 normally, 3 for scouts), shared
+    // with the movement/LOS overlay code below so the two can't drift apart.
     for (const auto& u : units) {
         if (u.owner != playerOwner || !u.alive()) continue;
         if (!map.inBounds(static_cast<int>(u.col), static_cast<int>(u.row))) continue;
-        const int sight = (u.typeId == "scout") ? 3 : 2;
-        revealRadius(map, static_cast<int>(u.col), static_cast<int>(u.row), sight);
+        revealRadius(map, static_cast<int>(u.col), static_cast<int>(u.row),
+                    odai::game::sightRadiusForUnit(u));
     }
     // Observation forts — radius 5.
     for (std::uint32_t row = 0; row < map.height; ++row) {
@@ -5467,17 +5468,17 @@ void App::drawStrategyMapLabels(float fbW, float fbH, float dt) {
     }
     const odai::math::Matrix4 vp = proj * view;
 
-    // Movement-range overlay: a translucent hex wash over every tile the selected
-    // unit can reach this turn. Drawn first so banners/labels/route dots (below)
-    // composite on top of it. Projects the same way those do: world -> clip -> NDC
-    // -> pixel, skipping anything that lands behind the camera.
+    // Selected-unit overlays: a movement-range wash, a vision-radius ring, and (if
+    // out of supply range) a line back to the nearest friendly settlement. Drawn
+    // first so banners/labels/route dots (below) composite on top of them. All
+    // three project the same way those do: world -> clip -> NDC -> pixel, skipping
+    // anything that lands behind the camera.
     if (m_selectedUnitId != 0) {
         if (const odai::game::Unit* sel = m_gameState.findUnit(m_selectedUnitId)) {
             // Redundant with selectUnitAtHex's ownership check, but cheap and this
-            // is the one place a leak would actually show the AI's movement range.
-            if (sel->owner == m_playerOwner && sel->movementLeft > 0) {
-                const odai::ui::UiColor rangeFill{0.35f, 0.65f, 0.95f, 0.20f};
-                const std::uint32_t rangeRgba = rangeFill.packAbgr8();
+            // is the one place a leak would actually show the AI's movement range,
+            // vision, or supply state.
+            if (sel->owner == m_playerOwner) {
                 const auto projectToScreen = [&](const odai::math::Vector3& world,
                                                  odai::ui::UiVec2& outScreen) -> bool {
                     const odai::math::Vector4 clip =
@@ -5488,38 +5489,109 @@ void App::drawStrategyMapLabels(float fbW, float fbH, float dt) {
                     outScreen = {(ndcX + 1.0f) * 0.5f * fbW, (ndcY + 1.0f) * 0.5f * fbH};
                     return true;
                 };
-
-                const auto reach = odai::game::reachableTiles(
-                    m_strategyMap, m_gameState, sel->col, sel->row, sel->movementLeft);
-                for (const auto& tile : reach) {
+                // Projects one tile's center + 6 corners and fills it as a hex fan;
+                // false if any corner falls outside the view (degenerate fans skipped).
+                const auto drawHexFan = [&](std::uint32_t col, std::uint32_t row, std::uint32_t rgba) {
                     odai::ui::UiVec2 center;
-                    if (!projectToScreen(
-                            odai::game::tileCenterWorld(m_strategyMap, tile[0], tile[1]), center)) {
-                        continue;
+                    if (!projectToScreen(odai::game::tileCenterWorld(m_strategyMap, col, row), center)) {
+                        return;
                     }
                     odai::ui::UiVec2 corners[6];
                     bool allCornersVisible = true;
                     for (int corner = 0; corner < 6 && allCornersVisible; ++corner) {
                         allCornersVisible = projectToScreen(
-                            odai::game::tileCornerWorld(m_strategyMap, tile[0], tile[1], corner),
-                            corners[corner]);
+                            odai::game::tileCornerWorld(m_strategyMap, col, row, corner), corners[corner]);
                     }
                     if (!allCornersVisible) {
-                        continue;  // don't emit a degenerate fan for a tile at the view edge
+                        return;
                     }
-
                     odai::ui::UiVertex verts[7];
-                    verts[0] = odai::ui::UiVertex{{center.x, center.y}, {0.f, 0.f}, rangeRgba,
+                    verts[0] = odai::ui::UiVertex{{center.x, center.y}, {0.f, 0.f}, rgba,
                                                   static_cast<std::uint32_t>(odai::ui::UiDrawMode::SolidColor),
                                                   {}};
                     for (int corner = 0; corner < 6; ++corner) {
                         verts[corner + 1] = odai::ui::UiVertex{
-                            {corners[corner].x, corners[corner].y}, {0.f, 0.f}, rangeRgba,
+                            {corners[corner].x, corners[corner].y}, {0.f, 0.f}, rgba,
                             static_cast<std::uint32_t>(odai::ui::UiDrawMode::SolidColor), {}};
                     }
                     static constexpr std::uint32_t kHexFanIndices[18] = {
                         0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 1};
                     m_uiDrawList.addTriangleMesh(verts, 7, kHexFanIndices, 18);
+                };
+
+                // Movement range: a translucent hex wash over every tile reachable
+                // this turn.
+                if (sel->movementLeft > 0) {
+                    const std::uint32_t rangeRgba =
+                        odai::ui::UiColor{0.35f, 0.65f, 0.95f, 0.20f}.packAbgr8();
+                    const auto reach = odai::game::reachableTiles(
+                        m_strategyMap, m_gameState, sel->col, sel->row, sel->movementLeft);
+                    for (const auto& tile : reach) {
+                        drawHexFan(tile[0], tile[1], rangeRgba);
+                    }
+                }
+
+                // Vision radius: an outline (not a fill, so it doesn't visually fight
+                // with the movement wash above) around the tiles exactly at the edge
+                // of what the unit currently reveals. Shares sightRadiusForUnit with
+                // recomputeFogOfWarVisibility so this can never show a boundary that
+                // doesn't match what fog-of-war actually just revealed.
+                {
+                    const int sightRadius = odai::game::sightRadiusForUnit(*sel);
+                    const int c0 = std::max(0, static_cast<int>(sel->col) - sightRadius);
+                    const int c1 = std::min(static_cast<int>(m_strategyMap.width) - 1,
+                                            static_cast<int>(sel->col) + sightRadius);
+                    const int r0 = std::max(0, static_cast<int>(sel->row) - sightRadius);
+                    const int r1 = std::min(static_cast<int>(m_strategyMap.height) - 1,
+                                            static_cast<int>(sel->row) + sightRadius);
+                    const odai::ui::UiColor visionRingColor{0.45f, 0.90f, 0.55f, 0.55f};
+                    for (int r = r0; r <= r1; ++r) {
+                        for (int c = c0; c <= c1; ++c) {
+                            if (hexDistOddR(static_cast<int>(sel->col), static_cast<int>(sel->row), c, r) !=
+                                sightRadius) {
+                                continue;
+                            }
+                            odai::ui::UiVec2 corners[6];
+                            bool allVisible = true;
+                            for (int corner = 0; corner < 6 && allVisible; ++corner) {
+                                allVisible = projectToScreen(
+                                    odai::game::tileCornerWorld(m_strategyMap, static_cast<std::uint32_t>(c),
+                                                                static_cast<std::uint32_t>(r), corner),
+                                    corners[corner]);
+                            }
+                            if (!allVisible) {
+                                continue;
+                            }
+                            m_uiDrawList.addPolylineAA(corners, 6, visionRingColor, 2.0f, true);
+                        }
+                    }
+                }
+
+                // Supply line: if the unit has marched out of supply range, a line
+                // back to the nearest friendly settlement along the cheapest route.
+                {
+                    const auto supplyRoute = odai::game::cheapestSupplyRoute(
+                        m_strategyMap, m_gameState, sel->col, sel->row, sel->owner);
+                    if (!supplyRoute.empty()) {
+                        std::vector<odai::ui::UiVec2> linePts;
+                        linePts.reserve(supplyRoute.size() + 1);
+                        odai::ui::UiVec2 unitScreen;
+                        if (projectToScreen(odai::game::tileCenterWorld(m_strategyMap, sel->col, sel->row),
+                                            unitScreen)) {
+                            linePts.push_back(unitScreen);
+                        }
+                        for (const auto& wp : supplyRoute) {
+                            odai::ui::UiVec2 screen;
+                            if (projectToScreen(odai::game::tileCenterWorld(m_strategyMap, wp[0], wp[1]),
+                                                screen)) {
+                                linePts.push_back(screen);
+                            }
+                        }
+                        if (linePts.size() >= 2) {
+                            const odai::ui::UiColor supplyLineColor{0.95f, 0.55f, 0.20f, 0.85f};
+                            m_uiDrawList.addPolylineAA(linePts.data(), linePts.size(), supplyLineColor, 3.0f);
+                        }
+                    }
                 }
             }
         }
