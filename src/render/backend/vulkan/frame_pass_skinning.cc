@@ -54,7 +54,12 @@ void RendererBackend::recordSkinningPass(const FrameExecutionContext& context) {
     bool dispatchedAny = false;
     for (std::uint32_t i = 0; i < m_skinningActiveInstanceCount; ++i) {
         const SkinnedInstanceSlot& slot = m_skinningInstances[i];
-        if (slot.vertexCount == 0 || !slot.bufferSet.valid()) {
+        // pendingBoneMatrices.empty() also covers "template uploaded but
+        // setSkinnedActorPose never called yet for this slot" -- binding 1
+        // (bone matrices) is only ever written by uploadSkinnedActorPoseForFrame,
+        // which skips a slot with no pending pose, so dispatching here would
+        // read whatever garbage that descriptor region last held.
+        if (slot.vertexCount == 0 || !slot.bufferSet.valid() || slot.pendingBoneMatrices.empty()) {
             continue;
         }
 

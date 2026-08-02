@@ -182,6 +182,20 @@ void LegionApp::onTick(float dt) {
 
 void LegionApp::tickOneSide(std::span<Character> mine, std::span<Character> theirs, float dt) {
     for (Character& self : mine) {
+        const CombatState previousState = self.state;
+        // A clip's phase (breathing bob, attack windup/swing) is only meaningful
+        // within its own clip -- carrying animClock across a state transition
+        // would let Attack (duration 0.6s) inherit a large value accumulated
+        // while Walking and immediately fire several damage ticks in one frame
+        // (each += dt only removes one duration's worth). Reset on every
+        // transition instead.
+        const auto enterState = [&](CombatState next) {
+            if (previousState != next) {
+                self.animClock = 0.0f;
+            }
+            self.state = next;
+        };
+
         if (!self.alive) {
             self.deathSinkY = std::min(kDeathSinkMax, self.deathSinkY + (kDeathSinkSpeed * dt));
             self.state = CombatState::Dead;
@@ -206,7 +220,7 @@ void LegionApp::tickOneSide(std::span<Character> mine, std::span<Character> thei
         }
 
         if (self.targetIndex < 0) {
-            self.state = CombatState::Idle;
+            enterState(CombatState::Idle);
             self.animClock += dt;
             continue;
         }
@@ -220,7 +234,7 @@ void LegionApp::tickOneSide(std::span<Character> mine, std::span<Character> thei
         }
 
         if (distance > kEngageRange) {
-            self.state = CombatState::Walk;
+            enterState(CombatState::Walk);
             const Vector3 direction = toTarget * (1.0f / distance);
             const float step = std::min(kWalkSpeed * dt, distance - (kEngageRange * 0.9f));
             if (step > 0.0f) {
@@ -228,9 +242,11 @@ void LegionApp::tickOneSide(std::span<Character> mine, std::span<Character> thei
             }
             self.animClock += dt;
         } else {
-            self.state = CombatState::Attack;
+            enterState(CombatState::Attack);
             self.animClock += dt;
-            if (self.animClock >= m_attackClip.duration) {
+            // A loop (not a single if) so an unusually large dt still lands on
+            // exactly the right number of hits instead of under-counting.
+            while (self.animClock >= m_attackClip.duration && target.alive) {
                 self.animClock -= m_attackClip.duration;
                 target.hp = std::max(0.0f, target.hp - kAttackDamage);
                 if (target.hp <= 0.0f) {

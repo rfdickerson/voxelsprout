@@ -446,7 +446,18 @@ void RendererBackend::setSkinnedActorPose(std::uint32_t instanceIndex, const Imp
     if (instanceIndex >= kMaxSkinnedInstances) {
         return;
     }
-    m_skinningInstances[instanceIndex].pendingBoneMatrices.assign(pose.boneMatrices.begin(), pose.boneMatrices.end());
+    SkinnedInstanceSlot& slot = m_skinningInstances[instanceIndex];
+    // Reject a pose that doesn't match the slot's bound template -- both
+    // recordSkinningPass's push-constant boneCount and the descriptor range
+    // written below are sized from this data, so a mismatch here would
+    // otherwise become a GPU out-of-bounds read in the compute shader.
+    if (pose.boneMatrices.size() != slot.boneCount) {
+        VOX_LOGW("render") << "setSkinnedActorPose: instance " << instanceIndex << " pose has "
+                            << pose.boneMatrices.size() << " matrices, expected " << slot.boneCount
+                            << " -- ignoring";
+        return;
+    }
+    slot.pendingBoneMatrices.assign(pose.boneMatrices.begin(), pose.boneMatrices.end());
 }
 
 // Called from frame_run.cc immediately after m_frameArena.beginFrame(), so
