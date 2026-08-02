@@ -56,7 +56,8 @@ ctest --test-dir cmake-build-release -R odai_ui_tests -V
 
 **Test targets:**
 - `odai_foundation_tests` — chunk grid, world gen, mesher
-- `odai_ui_tests` — draw list, font metrics, rich text, widgets (headless, no Vulkan)
+- `odai_ui_tests` — draw list, font metrics, rich text, widgets, document loader (headless, no Vulkan)
+- `odai_ui_editor_tests` — UI editor document core: `.ui.json` schema authoring, layout/hit-test, undo/redo, snapping, align/distribute/clipboard, plus a round-trip through the real `ui::UiDocumentLoader` (headless)
 - `odai_strategy_map_tests` — hex grid model, serialization, mesher
 - `odai_imported_scene_tests` — scene import/export round-trip
 - `odai_fnv_import_tests` — Fallout: New Vegas import pipeline: BSA archive reader, ESM record walker, typed record extraction, NIF geometry parser (synthetic fixtures only — see README's "Fallout: New Vegas Import Pipeline" section)

@@ -1,34 +1,45 @@
 #pragma once
 #include "engine/game_app.h"
 #include "render/renderer_types.h"
+#include "tools/ui_editor/editor_document.h"
+#include "tools/ui_editor/editor_history.h"
+#include "tools/ui_editor/editor_ops.h"
+#include "tools/ui_editor/editor_snap.h"
 #include "ui/ui_types.h"
+
+#include <nlohmann/json.hpp>
 
 #include <string>
 #include <vector>
 
 namespace odai::tools::ui_editor {
 
-struct DesignWidget {
-    std::string type = "Panel";
-    std::string name;
-    float x = 80, y = 60, w = 200, h = 80;
-    ui::UiColor bg{0.05f, 0.10f, 0.15f, 0.88f};
-    ui::UiColor border{0.85f, 0.72f, 0.44f, 0.35f};
-    float borderW   = 1.0f;
-    float cornerR   = 0.0f;
-    bool  shadow    = false;
-    float shadowBlur= 8.0f;
-    std::string label;
-};
+// A click target the properties panel / outliner draws by hand into the draw
+// list. The panels are immediate-mode (no widget tree), so each frame they emit
+// geometry plus the hit regions that go with it, and onTick() resolves clicks
+// against the regions the *previous* frame emitted.
+struct EditorHit {
+    enum class Action {
+        StepRectX,      // move the node by `delta` px on X
+        StepRectY,
+        StepRectW,      // resize by `delta` px, keeping the top-left anchored
+        StepRectH,
+        StepFloatProp,  // numeric schema property, by `delta`
+        SetColorProp,
+        SetBoolProp,    // delta != 0 -> true
+        ClearProp,      // remove the property from the node entirely
+        BeginTextEdit,  // focus this string-valued property for typing
+        SelectNode,     // outliner row
+        ReorderNode,    // move among siblings by `delta`
+        DeleteNode,
+    };
 
-// Click target in the properties panel (drawn via draw list).
-struct PropButton {
-    ui::UiRect rect;
-    enum class Action { StepX, StepY, StepW, StepH,
-                        SetCorner, ToggleShadow, SetColor, Delete
-    } action{Action::StepX};
+    ui::UiRect rect{};
+    Action action = Action::SelectNode;
+    std::string key;              // JSON property key, for the property actions
     float delta = 0.0f;
     ui::UiColor colorValue{};
+    NodePath path;                // for the node actions
 };
 
 class UiEditorApp : public engine::GameApp {
@@ -36,75 +47,106 @@ protected:
     bool onInit() override;
     void onTick(float dt) override;
     void onRender(float dt) override;
+    bool wantsMinimalRendering() const override { return true; }
 
 private:
-    // ── Snap ──────────────────────────────────────────────────────────────────
-    struct SnapLine { bool horiz; float pos; };  // pos in canvas space
+    // ── Coordinate spaces ─────────────────────────────────────────────────────
+    // Document space is the design surface (the root node's own width/height).
+    // Canvas space is where that surface sits inside the centre pane on screen.
+    [[nodiscard]] ui::UiVec2 docToScreen(float x, float y) const;
+    [[nodiscard]] ui::UiVec2 screenToDoc(float x, float y) const;
+    [[nodiscard]] ui::UiRect docRectToScreen(const ui::UiRect& r) const;
+    void layoutPanes(int fbW, int fbH);
 
-    // Returns the snapped (x,y) for a widget and fills m_snapLines.
-    ui::UiVec2 applySnap(float wx, float wy, float ww, float wh, int excludeIdx);
+    // ── Canvas ────────────────────────────────────────────────────────────────
+    void drawCanvas();
+    void drawNode(const NodePath& path);
+    void drawSelectionOverlay();
+    void drawPlacementGhost();
 
-    // Snap a single value against 1-D targets; records a snap-line at the snapped
-    // feature position when a match is found within the threshold.
-    float snap1D(float val, float widgetSpan,
-                 const std::vector<float>& targets, float threshold,
-                 bool isHoriz, float gridSize, bool doGrid, bool doEdges);
+    // Handle index 0-7 under a document-space point, for the primary selection.
+    // Order: TL=0, TC=1, TR=2, MR=3, BR=4, BC=5, BL=6, ML=7. -1 when none.
+    [[nodiscard]] int hitTestHandle(float docX, float docY) const;
 
-    bool  m_snapGrid   = true;
-    float m_gridSnap   = 10.0f;
-    bool  m_snapEdges  = true;
-    float m_snapThresh = 8.0f;
+    // ── Panels ────────────────────────────────────────────────────────────────
+    void buildWidgetTree(int fbW, int fbH);
+    void drawOutliner();
+    void drawOutlinerRow(const NodePath& path, int depth, float& y);
+    void drawProperties();
+    void drawStatusBar(int fbW, int fbH);
 
-    std::vector<SnapLine> m_snapLines;
+    // Property-panel row helpers. Each appends geometry and its hit regions.
+    void drawSectionLabel(const char* label, float x, float width, float& y);
+    void drawStepRow(const char* label, float value, EditorHit::Action action,
+                     const std::string& key, const float (&deltas)[4], float x, float width,
+                     float& y);
+    void drawColorRow(const char* label, const std::string& key, const ui::UiColor& current,
+                      bool present, float x, float width, float& y);
+    void drawBoolRow(const char* label, const std::string& key, bool value, float x, float width,
+                     float& y);
+    void drawTextRow(const char* label, const std::string& key, const std::string& value, float x,
+                     float width, float& y);
 
-    // ── Resize ────────────────────────────────────────────────────────────────
-    // Returns handle index 0-7 under (cx,cy) in canvas space, or -1.
-    // Handle order: TL=0, TC=1, TR=2, MR=3, BR=4, BC=5, BL=6, ML=7
-    int hitTestHandle(float cx, float cy) const;
+    // ── Input ─────────────────────────────────────────────────────────────────
+    void handleCanvasInput();
+    void handlePanelClicks();
+    void handleKeyboard();
+    void applyHit(const EditorHit& hit);
 
-    bool  m_resizing      = false;
-    int   m_resizeHandle  = -1;
-    float m_resizeMX      = 0, m_resizeMY      = 0;  // mouse at resize start
-    float m_resizeOrigX   = 0, m_resizeOrigY   = 0;  // widget rect at resize start
-    float m_resizeOrigW   = 0, m_resizeOrigH   = 0;
+    // ── Editing operations ────────────────────────────────────────────────────
+    void placeNode(float docX, float docY);
+    void commitTextEdit();
+    void cancelTextEdit();
+    void doSave();
+    void doLoad();
+    void doUndo();
+    void doRedo();
 
-    // ── Drawing ───────────────────────────────────────────────────────────────
-    void setupWidgetTree(int fbW, int fbH);
-    void drawCanvas(int fbW, int fbH);
-    void drawDesignWidget(const DesignWidget& w, bool selected);
-    void drawPropertiesPanel(int fbW, int fbH);
-    void deleteSelected();
-
-    // ── JSON round-trip ───────────────────────────────────────────────────────
-    void saveJson(const std::string& path);
-    void loadJson(const std::string& path);
-
-    int  hitTestCanvas(float cx, float cy) const;
-    static float defaultW(const std::string& type);
-    static float defaultH(const std::string& type);
-    static ui::UiColor defaultBg(const std::string& type);
+    // Edge-triggered key helper: true only on the frame the key goes down.
+    bool keyPressed(int glfwKey);
 
     // ── State ─────────────────────────────────────────────────────────────────
-    std::vector<DesignWidget> m_widgets;
-    int  m_selected  = -1;
-    bool m_placing   = false;
+    EditorDocument m_doc;
+    Selection m_selection;
+    // Declared after m_doc so its default member initializer can seed from it.
+    EditorHistory m_history{m_doc};
+    SnapEngine m_snap;
+    SnapSettings m_snapSettings{};
+    std::vector<nlohmann::json> m_clipboard;
+
+    std::string m_documentPath;
+    std::string m_statusMessage;
+
+    // Pane rects, recomputed on resize.
+    float m_canvasX = 0, m_canvasY = 0, m_canvasW = 0, m_canvasH = 0;
+    float m_docOriginX = 0, m_docOriginY = 0;  // design surface offset inside the canvas
+    float m_docW = 1280, m_docH = 720;
+
+    // Placement
+    bool m_placing = false;
     std::string m_placeType;
 
-    bool  m_dragging = false;
-    float m_dragMX   = 0, m_dragMY = 0;
-    float m_dragWX   = 0, m_dragWY = 0;
+    // Drag / resize gestures
+    bool m_dragging = false;
+    bool m_resizing = false;
+    int m_resizeHandle = -1;
+    ui::UiVec2 m_gestureStartDoc{};
+    std::vector<ui::UiRect> m_gestureStartRects;  // parallel to m_selection.paths()
 
-    float m_canvasX = 0, m_canvasY = 0, m_canvasW = 0, m_canvasH = 0;
+    // Inline text editing in the properties panel.
+    std::string m_editingKey;
+    std::string m_editingBuffer;
+    NodePath m_editingPath;
+    bool m_editing = false;
 
-    std::vector<PropButton> m_propBtns;
+    std::vector<EditorHit> m_hits;
 
-    std::string m_loadedPath;
+    bool m_uiDirty = true;  // rebuild the toolbar/palette widget tree next tick
+    int m_lastFbW = 0, m_lastFbH = 0;
 
-    int  m_lastFbW       = 0, m_lastFbH = 0;
-    bool m_prevDeleteKey = false;
-    bool m_prevGKey      = false, m_prevSKey = false;
+    std::vector<int> m_prevKeyDown;  // edge detection, indexed by GLFW key code
 
     render::CameraPose m_camera{};
 };
 
-} // namespace odai::tools::ui_editor
+}  // namespace odai::tools::ui_editor
