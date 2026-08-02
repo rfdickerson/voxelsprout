@@ -47,10 +47,16 @@ struct Plane {
 };
 
 // Convex planar polygon; vertices wound CCW seen from the outward normal side.
+// The metallic/roughness pair is the flat per-face material, quantized into the
+// packed vertex flags by triangulate() (see mesh_emit.cc). The defaults are a
+// fully rough dielectric, which the shader treats as "no material" — so a
+// generator that never touches them renders exactly as it did before.
 struct Polygon {
     std::vector<Vector3> vertices;
     Plane plane;
     Color3 color;
+    float metallic = 0.0f;
+    float roughness = 1.0f;
 
     void flip();
 };
@@ -73,5 +79,6 @@ void translate(CsgMesh& mesh, const Vector3& offset);
 void scaleMesh(CsgMesh& mesh, const Vector3& factors);  // about the origin
 void rotateY(CsgMesh& mesh, float radiansAngle);        // about the origin
 void paint(CsgMesh& mesh, const Color3& color);
+void setMaterial(CsgMesh& mesh, float metallic, float roughness);
 
 }  // namespace odai::procgen

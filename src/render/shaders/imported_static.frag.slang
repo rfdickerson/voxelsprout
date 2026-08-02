@@ -1,5 +1,6 @@
 import camera_uniform;
 import chunk_push_constants;
+import pbr;
 import sh_lighting;
 
 [[vk::binding(0, 1)]]
@@ -25,8 +26,36 @@ Sampler3D<float4> voxelGiOccupancyVolume;
 RaytracingAccelerationStructure shadowScene;
 #endif
 
+// Mirrors the packed material layout in src/import/imported_scene.h; change
+// both together. Geometry cooked before materials existed has flags == 0, so
+// the PBR bit stays clear and shading falls back to the legacy diffuse chain.
 static const uint kImportedMaterialFlagAlphaTest = 1u;
+static const uint kImportedMaterialFlagPbr = 4u;
+static const uint kImportedMaterialRoughnessShift = 8u;
+static const uint kImportedMaterialMetallicShift = 16u;
+static const uint kImportedMaterialChannelMask = 0xffu;
 static const uint kInvalidImportedTextureIndex = 0xffffffffu;
+
+bool importedMaterialHasPbr(uint flags)
+{
+    return (flags & kImportedMaterialFlagPbr) != 0u;
+}
+
+PbrSurface unpackImportedMaterial(uint flags)
+{
+    PbrSurface surface;
+    surface.metallic = 0.0;
+    surface.roughness = 1.0;
+    if (!importedMaterialHasPbr(flags))
+    {
+        return surface;
+    }
+    surface.roughness =
+        float((flags >> kImportedMaterialRoughnessShift) & kImportedMaterialChannelMask) / 255.0;
+    surface.metallic =
+        float((flags >> kImportedMaterialMetallicShift) & kImportedMaterialChannelMask) / 255.0;
+    return surface;
+}
 
 struct FragmentInput
 {
@@ -271,7 +300,17 @@ float sampleRayTracedDirectionalShadow(float3 worldPosition, float3 normal, floa
 }
 #endif
 
-float3 evaluateImportedLocalLights(float3 worldPosition, float3 normal)
+// Diffuse contribution of the local point lights, and — for surfaces that opted
+// into a PBR material — their specular highlights accumulated into outSpecular.
+// Non-PBR surfaces pass applySpecular=false and get exactly the pre-PBR result.
+float3 evaluateImportedLocalLights(
+    float3 worldPosition,
+    float3 normal,
+    float3 viewDirection,
+    float3 albedo,
+    PbrSurface surface,
+    bool applySpecular,
+    inout float3 outSpecular)
 {
     const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
     const float globalIntensity = max(camera.importedLightConfig.y, 0.0);
@@ -315,7 +354,17 @@ float3 evaluateImportedLocalLights(float3 worldPosition, float3 normal)
             distanceToLight,
             ndotl);
 #endif
+        // Left exactly as it was pre-PBR, factoring included: this expression is
+        // the legacy path for every surface without a material, and a reassociation
+        // here would shift existing scenes by an ULP for no reason.
         lighting += colorIntensity.rgb * (colorIntensity.w * globalIntensity * ndotl * attenuation * visibility);
+        if (applySpecular)
+        {
+            const float3 radiance =
+                colorIntensity.rgb * (colorIntensity.w * globalIntensity * attenuation * visibility);
+            outSpecular +=
+                radiance * pbrDirectSpecular(surface, albedo, normal, viewDirection, lightDirection);
+        }
     }
     return lighting;
 }
@@ -517,18 +566,60 @@ float4 main(FragmentInput input) : SV_Target0
         const float intensity = clamp(log2(1.0 + (peak * 2.0)) / 4.0, 0.0, 1.0);
         return float4(hue * intensity, 1.0);
     }
+    const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
+    const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
+
+    // Metallic-roughness material, opt-in per vertex. Surfaces without the PBR
+    // flag decode to a rough dielectric and take the branch-free legacy path:
+    // specular stays zero, diffuse keeps its full weight, and the old fake-rim
+    // term is preserved. See docs/ROADMAP.md (Core Rendering / PBR).
+    const PbrSurface surface = unpackImportedMaterial(input.inFlags);
+    const bool usePbr = importedMaterialHasPbr(input.inFlags);
+
+    float3 specular = float3(0.0, 0.0, 0.0);
     const float3 importedLights =
-        evaluateImportedLocalLights(input.inWorldPosition, normal) * (interiorMode ? 1.25 : 1.0);
+        evaluateImportedLocalLights(
+            input.inWorldPosition,
+            normal,
+            viewDir,
+            albedo,
+            surface,
+            usePbr,
+            specular) *
+        (interiorMode ? 1.25 : 1.0);
     const float directShadowFactor = lerp(1.0, shadowVisibility, clamp(camera.sunColorShadow.w, 0.0, 1.0));
     const float3 direct =
         camera.sunColorShadow.xyz *
         (sunIntensity * wrappedNdotL * directShadowFactor * (interiorMode ? 0.24 : 0.62));
-    const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
-    const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
+    const float3 diffuseLight = (ambient * ambientOcclusion) + voxelGi + direct + importedLights;
+
+    if (usePbr)
+    {
+        // Sun specular uses the same radiance and shadow term the diffuse sun
+        // does, minus the wrapped-NdotL softening (that wrap is a diffuse
+        // stylization; a specular lobe wrapped past the terminator reads wrong).
+        const float3 sunRadiance =
+            camera.sunColorShadow.xyz *
+            (sunIntensity * directShadowFactor * (interiorMode ? 0.24 : 0.62));
+        specular += sunRadiance * pbrDirectSpecular(surface, albedo, normal, viewDir, -sunDirection);
+
+        // Ambient/GI specular so metals still read as metal with no analytic
+        // light on them. Fed by the same irradiance the diffuse term uses.
+        const float ndotv = saturate(dot(normal, viewDir));
+        specular += pbrAmbientSpecular(
+            surface,
+            albedo,
+            ((ambient * ambientOcclusion) + voxelGi),
+            ndotv);
+    }
+
     const float rim = pow(1.0 - saturate(dot(normal, viewDir)), 2.0);
+    // The rim term is a stand-in Fresnel for surfaces with no real material;
+    // PBR surfaces get a physical one from pbrFresnelSchlick instead.
+    const float rimWeight = usePbr ? 0.0 : (interiorMode ? 0.010 : 0.022);
     float3 shaded =
-        ((((ambient * ambientOcclusion) + voxelGi + direct + importedLights) * albedo) +
-         (float3(1.0, 0.98, 0.94) * (rim * (interiorMode ? 0.010 : 0.022))));
+        ((diffuseLight * albedo * pbrDiffuseScale(surface.metallic)) + specular +
+         (float3(1.0, 0.98, 0.94) * (rim * rimWeight)));
 
     // Fog-of-war visibility blend. Only applied when the fog map is active
     // (strategy map mode). The fog texture is a blurred per-tile R8 map where

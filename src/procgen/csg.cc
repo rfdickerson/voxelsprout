@@ -148,6 +148,8 @@ void splitPolygon(const Plane& splitter, const Polygon& polygon,
                 p.vertices = std::move(frontVerts);
                 p.plane = polygon.plane;
                 p.color = polygon.color;
+                p.metallic = polygon.metallic;
+                p.roughness = polygon.roughness;
                 front.push_back(std::move(p));
             }
             if (backVerts.size() >= 3 && polygonArea(backVerts) > kMinFragmentArea) {
@@ -155,6 +157,8 @@ void splitPolygon(const Plane& splitter, const Polygon& polygon,
                 p.vertices = std::move(backVerts);
                 p.plane = polygon.plane;
                 p.color = polygon.color;
+                p.metallic = polygon.metallic;
+                p.roughness = polygon.roughness;
                 back.push_back(std::move(p));
             }
             break;
@@ -355,6 +359,13 @@ void rotateY(CsgMesh& mesh, float radiansAngle) {
 void paint(CsgMesh& mesh, const Color3& color) {
     for (Polygon& p : mesh.polygons) {
         p.color = color;
+    }
+}
+
+void setMaterial(CsgMesh& mesh, float metallic, float roughness) {
+    for (Polygon& p : mesh.polygons) {
+        p.metallic = metallic;
+        p.roughness = roughness;
     }
 }
 

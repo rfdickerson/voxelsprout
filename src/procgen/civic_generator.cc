@@ -53,9 +53,16 @@ std::vector<std::array<float, 2>> ngonFootprint(float cx, float cz, float radius
 
 // Thin raised panel on the -Z (street) face — reads as a door/window without a
 // BSP subtract. The seam is enclosed by the wall behind it, so merge is safe.
+// Glazing is a smooth dielectric — the one civic surface where a specular lobe
+// reads at this scale. Everything else keeps the default rough dielectric.
+constexpr float kGlassMetallic = 0.0f;
+constexpr float kGlassRoughness = 0.09f;
+
 void addFrontPanel(CsgMesh& solid, float x0, float x1, float y0, float y1, float wallZ,
-                   const Color3& color) {
-    merge(solid, makeBox({x0, y0, wallZ - 0.022f}, {x1, y1, wallZ + 0.01f}, color));
+                   const Color3& color, float metallic = 0.0f, float roughness = 1.0f) {
+    CsgMesh panel = makeBox({x0, y0, wallZ - 0.022f}, {x1, y1, wallZ + 0.01f}, color);
+    setMaterial(panel, metallic, roughness);
+    merge(solid, panel);
 }
 
 // ── Police ───────────────────────────────────────────────────────────────────
@@ -74,7 +81,8 @@ CsgMesh buildPolice(float w, float d, Rng& rng) {
     const float cx = 0.5f * (x0 + x1);
     const float cw = rng.uniform(0.18f, 0.26f) * w;
     merge(solid, makeBox({cx - cw, 0.30f, z0 - 0.10f}, {cx + cw, 0.36f, z0 + 0.02f}, kPoliceBlue));
-    addFrontPanel(solid, cx - cw * 0.7f, cx + cw * 0.7f, 0.0f, 0.28f, z0, kGlass);
+    addFrontPanel(solid, cx - cw * 0.7f, cx + cw * 0.7f, 0.0f, 0.28f, z0, kGlass,
+                  kGlassMetallic, kGlassRoughness);
     // Antenna mast on a seeded corner.
     const bool eastMast = rng.chance(0.5f);
     const float mx = eastMast ? x1 - 0.10f * w : x0 + 0.10f * w;

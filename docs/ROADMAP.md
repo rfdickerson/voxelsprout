@@ -40,7 +40,7 @@ That said, a large chunk of the original wishlist assumes a different kind of en
 | Screen-space ambient occlusion | ✅ | `frame_pass_ssao.cc`, `ssao.comp.slang` |
 | HDR + tonemapping | ✅ | ACES filmic + auto-exposure histogram + bloom, `tone_map.frag.slang` |
 | Post-processing pipeline | ✅ | Tonemap + bloom + auto-exposure + sun shafts chain (`frame_run.cc`) |
-| PBR | 🟡 | Baked-GI + albedo + slope-tinted shading, not a metallic-roughness/BRDF model |
+| PBR | 🟡 | Cook-Torrance metallic-roughness specular (`pbr.slang`) layered onto the baked-GI diffuse chain, opt-in per vertex via packed material flags. Values are authored per face by the procgen generators; no metallic/roughness *textures* and no prefiltered radiance probe yet — see Asset Pipeline |
 | Volumetric fog | 🟡 | Analytic height-fog + 2D fog-of-war mask, not a froxel/raymarched volume |
 | Dynamic weather / day-night | 🟡 | Full sky/atmosphere + sun-position system exists; no rain/snow/cloud-density state |
 | Deferred / clustered forward rendering | ⬜ | Single forward pass, flat light list, no clustering |
@@ -73,10 +73,10 @@ That said, a large chunk of the original wishlist assumes a different kind of en
 | Fog of war | ✅ | Per-tile `TileVisibility` + blurred fog-map texture |
 | Roads / rivers | 🟡 | Tile flags exist and render; no trade-route rendering |
 | Terrain blending / biomes | 🟡 | 11 biome types with per-terrain color; adjacent-tile blending not confirmed |
-| Supply / logistics overlays | 🟡 | Supply simulation exists (`game/units.h`); no visual overlay |
-| Strategic map labels | ⬜ | Settlement names stored but not rendered as labels |
-| Line-of-sight visualization | ⬜ | Only binary fog-of-war state, no LOS cone/ray viz |
-| Movement range overlays | ⬜ | Pathfinding exists; no reachable-tile highlight rendering |
+| Supply / logistics overlays | ✅ | A line to the nearest friendly settlement when the selected unit has marched out of supply range, `App::drawStrategyMapLabels`; backed by `game::cheapestSupplyRoute` (multi-source Dijkstra over `supplyCostForStep`, `src/game/units.cc`) |
+| Strategic map labels | ✅ | Civ6-style city banners (owner color, tier chip, name) + floating unit HP/supply labels, `App::drawStrategyMapLabels` in `src/app/app.cc`, fog-of-war gated and cached |
+| Line-of-sight visualization | 🟡 | A ring around the selected unit's current vision-radius boundary, `App::drawStrategyMapLabels` + `game::sightRadiusForUnit`; still no *obstruction* — sight is an unobstructed `hexDistance <= radius` circle with no terrain/elevation blocking, so this shows the existing (crude) vision shape rather than a true line-of-sight raycast |
+| Movement range overlays | ✅ | Translucent per-tile hex wash for the selected unit's reachable set this turn, `App::drawStrategyMapLabels`; backed by `game::reachableTiles` (BFS, `src/game/units.cc`) |
 | Influence / control zones | ⬜ | Only binary tile ownership, no gradient influence map |
 | Heatmaps | ⬜ | Not implemented |
 
@@ -277,11 +277,11 @@ These wishlist items directly conflict with `CLAUDE.md`'s stated Non-goals and a
 
 This is a starting recommendation, not a commitment — sequencing is the user's call. Ordered roughly by (existing maturity + cost) across the four touchstones, cheapest/most-built first:
 
-**Tier 1 — Civ6 strategy-layer polish (near-term, high value, small/local).** The hex 4X layer already renders borders and fog of war and simulates supply/pathfinding, but gives the player no visual feedback loop for any of it:
-- Strategic map labels (settlement names already stored, just not drawn)
-- Movement-range overlay (reachability already computed by `findHexPath`)
-- Supply-line overlay (supply cost already simulated in `game/units.h`)
-- Line-of-sight visualization
+**Tier 1 — Civ6 strategy-layer polish (near-term, high value, small/local).** The hex 4X layer already renders borders and fog of war and simulates supply/pathfinding:
+- Strategic map labels — **done.** `App::drawStrategyMapLabels` (`src/app/app.cc`) draws Civ6-style city banners and floating unit HP/supply labels, fog-gated and cached.
+- Movement-range overlay — **done.** `game::reachableTiles` (`src/game/units.cc`) is a plain BFS bounded by `Unit::movementLeft` — not the same cost model as `findHexPath`'s `pathStepCost` (route-choice bias) or `supplyCostForStep` (provisions), since movement depletes by exactly 1 per hop regardless of terrain; `findHexPath`'s A* frontier is goal-directed and incomplete, so it couldn't be reused directly as the roadmap previously assumed. Rendered as a translucent per-tile hex wash in `drawStrategyMapLabels`. Fixed a related bug found along the way: `App::selectUnitAtHex` had no ownership check, so a player could select and issue move/attack orders through an enemy unit.
+- Supply-line overlay — **done.** `game::cheapestSupplyRoute` (`src/game/units.cc`) is multi-source Dijkstra seeded from every one of the owner's settlements at once (no single admissible heuristic exists across multiple goals, so this couldn't reuse `findHexPath`'s A* shape). `supplyCostForStep` is direction-dependent — only the step's *destination* terrain incurs the hills/mountains surcharge — so edges are relaxed with reversed arguments to price the unit's actual walking direction rather than the search's outward-from-settlement expansion direction; this asymmetry is easy to get backwards, worth double-checking if this function is ever touched. Empty (nothing drawn) when the unit is already in range. Rendered as a single line via `UiDrawList::addPolylineAA`, distinct in color from the movement-range wash and vision ring below.
+- Line-of-sight visualization — **done, scoped as a ring, not obstruction.** `game::sightRadiusForUnit` (`src/game/units.cc`) extracts what was previously hardcoded inline in `App::recomputeFogOfWarVisibility` (radius 2, scouts 3 — the scout bonus is a hardcoded typeId string match, not a `UnitStats` field, since no unit varies sight by content data today) so the fog computation and this overlay share one source of truth. The overlay draws an outline (not a fill, to avoid competing with the movement-range wash) around the selected unit's vision boundary. **Not implemented, and explicitly out of scope for this pass:** any actual obstruction — hills/forest blocking sight, elevation granting bonus range. Sight today, and in this overlay, is a flat unobstructed `hexDistance <= radius` circle; a real LOS raycast would be a simulation change (some currently-visible tiles would become hidden), not just a rendering addition, and needs its own design pass.
 
 **Tier 2 — SimCity city-sim depth.** `citybuilder` is already the most mature of the four touchstone prototypes; the remaining gaps are additive data layers, not new architecture:
 - Pollution/education/health-coverage heatmaps alongside the existing land-value overlay
@@ -293,7 +293,15 @@ This is a starting recommendation, not a commitment — sequencing is the user's
 - TAA (jitter + reprojection added into the existing frame graph)
 - Terrain splat-map blending (replacing/augmenting the current slope-based blend)
 - Shader hot reload for the Slang pipeline
-- Metallic-roughness PBR terms layered onto the existing baked-GI model
+- Metallic-roughness PBR terms layered onto the existing baked-GI model — **first slice done.**
+  `src/render/shaders/pbr.slang` (GGX + Smith + Schlick, analytic env BRDF) feeds
+  `imported_static.frag.slang`; materials ride in `ImportedScenePackedVertex::flags`
+  (layout in `src/import/imported_scene.h`) and are set per face by the CSG generators.
+  Remaining, in rough order: metallic/roughness *texture* maps (needs a second bindless
+  texture index per surface, so a packed-vertex format change), a prefiltered radiance
+  probe to replace the irradiance-as-reflection stand-in in `pbrAmbientSpecular`, and
+  extending materials to the mesh/part import path (`ImportedSceneMeshPart` carries no
+  material, so `gpu_scene.cc` drops to the default for cooked Bethesda geometry)
 - GPU-side (compute) frustum/occlusion culling, replacing the current CPU-computed path
 
 **Tier 4 — Dragon Age foundation (biggest lift, infrastructure before features).** Sequenced bottom-up; two pieces are now in progress:

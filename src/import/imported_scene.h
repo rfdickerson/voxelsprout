@@ -66,6 +66,75 @@ struct ImportedScenePackedVertex {
     std::uint32_t flags = 0u;
 };
 
+// ---------------------------------------------------------------------------
+// Packed material flags — the canonical layout for ImportedScenePackedVertex::flags
+// and ImportedSceneMeshPart-derived draw flags. Mirrored in
+// src/render/shaders/imported_static.frag.slang; change both together.
+//
+//   bit 0      alpha test
+//   bit 1      reserved — terrain slope blend (docs/stylized_low_poly.md §1)
+//   bit 2      PBR material present: bits 8..23 carry metallic/roughness
+//   bits 3-7   free
+//   bits 8-15  roughness, 8-bit quantized over [0,1]
+//   bits 16-23 metallic, 8-bit quantized over [0,1]
+//   bits 24-31 free
+//
+// packedVertices is written to disk as a raw struct blit with no per-field
+// version gate, so a zero `flags` must always keep meaning "legacy default".
+// Bit 2 is the opt-in that makes that work: scenes cooked before materials
+// existed decode as a fully rough dielectric and shade exactly as before.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u << 0;
+inline constexpr std::uint32_t kImportedSceneMaterialFlagTerrainSlopeBlend = 1u << 1;
+inline constexpr std::uint32_t kImportedSceneMaterialFlagPbr = 1u << 2;
+
+inline constexpr int kImportedSceneMaterialRoughnessShift = 8;
+inline constexpr int kImportedSceneMaterialMetallicShift = 16;
+inline constexpr std::uint32_t kImportedSceneMaterialChannelMask = 0xffu;
+
+// Metallic-roughness surface parameters. The defaults are the legacy response:
+// a fully rough dielectric, which the shader treats as "no PBR" and shades with
+// the pre-existing diffuse chain.
+struct ImportedSceneSurfaceMaterial {
+    float metallic = 0.0f;
+    float roughness = 1.0f;
+};
+
+inline bool importedSceneMaterialIsDefault(const ImportedSceneSurfaceMaterial& material) {
+    return material.metallic <= 0.0f && material.roughness >= 1.0f;
+}
+
+// Quantizes to the bit layout above. A default material packs to 0 — no opt-in
+// bit, no material bits — so authoring sites that never set a material leave
+// their geometry shading bit-for-bit as it did before PBR existed.
+inline std::uint32_t packImportedSceneMaterialFlags(const ImportedSceneSurfaceMaterial& material) {
+    if (importedSceneMaterialIsDefault(material)) {
+        return 0u;
+    }
+    const auto quantize = [](float value) -> std::uint32_t {
+        const float clamped = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+        return static_cast<std::uint32_t>((clamped * 255.0f) + 0.5f) & kImportedSceneMaterialChannelMask;
+    };
+    return kImportedSceneMaterialFlagPbr |
+           (quantize(material.roughness) << kImportedSceneMaterialRoughnessShift) |
+           (quantize(material.metallic) << kImportedSceneMaterialMetallicShift);
+}
+
+// Inverse of the above. Flags without the PBR bit decode to the legacy default
+// regardless of what the material bit ranges happen to hold.
+inline ImportedSceneSurfaceMaterial unpackImportedSceneMaterialFlags(std::uint32_t flags) {
+    if ((flags & kImportedSceneMaterialFlagPbr) == 0u) {
+        return ImportedSceneSurfaceMaterial{};
+    }
+    ImportedSceneSurfaceMaterial material;
+    material.roughness =
+        static_cast<float>((flags >> kImportedSceneMaterialRoughnessShift) & kImportedSceneMaterialChannelMask) /
+        255.0f;
+    material.metallic =
+        static_cast<float>((flags >> kImportedSceneMaterialMetallicShift) & kImportedSceneMaterialChannelMask) /
+        255.0f;
+    return material;
+}
+
 struct ImportedScenePackedDraw {
     std::uint32_t firstIndex = 0;
     std::uint32_t indexCount = 0;

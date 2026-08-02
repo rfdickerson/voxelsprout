@@ -89,6 +89,15 @@ const Color3 kSashGlass = fromRgbHex(0x39434E);      // dark Victorian panes
 const Color3 kRibbonGlass = fromRgbHex(0x3E6A78);    // deco teal
 const Color3 kFactoryGlass = fromRgbHex(0x4E6070);   // industrial multipane
 
+// Metallic-roughness materials for the facade details. Everything else on a
+// building stays the default rough dielectric and shades exactly as before —
+// glazing and metal trim are where a specular lobe actually reads at this
+// scale, and where its absence was most obviously wrong.
+constexpr float kGlassMetallic = 0.0f;    // glass is a dielectric, not a metal
+constexpr float kGlassRoughness = 0.09f;  // near-mirror: tight sun glint, sky reflection
+constexpr float kMullionMetallic = 0.90f;  // 1960s curtain walls: anodized aluminum
+constexpr float kMullionRoughness = 0.34f;
+
 enum class WindowStyle {
     kSash,     // 1890s: punched grid with a light sill under each window
     kRibbon,   // 1930s: continuous vertical strips between pilasters
@@ -97,11 +106,13 @@ enum class WindowStyle {
 };
 
 void addFacadeQuad(CsgMesh& mesh, int face, float u0, float u1, float y0, float y1, float wall,
-                   const Color3& color) {
+                   const Color3& color, float metallic = 0.0f, float roughness = 1.0f) {
     // face 0 = -Z, 1 = +Z, 2 = -X, 3 = +X; u runs along the face, wall is the
     // fixed coordinate already offset off the surface.
     Polygon p;
     p.color = color;
+    p.metallic = metallic;
+    p.roughness = roughness;
     const auto at = [&](float u, float y) -> Vector3 {
         return face < 2 ? Vector3{u, y, wall} : Vector3{wall, y, u};
     };
@@ -143,7 +154,7 @@ void addWindowsBox(CsgMesh& windows, float x0, float y0, float z0, float x1, flo
                         const float cu = fu0 + width * (static_cast<float>(col) + 0.5f) /
                                                    static_cast<float>(cols);
                         addFacadeQuad(windows, face, cu - winW * 0.5f, cu + winW * 0.5f, wy0,
-                                      wy0 + winH, wall, glass);
+                                      wy0 + winH, wall, glass, kGlassMetallic, kGlassRoughness);
                         addFacadeQuad(windows, face, cu - winW * 0.5f - 0.008f,
                                       cu + winW * 0.5f + 0.008f, wy0 - 0.012f, wy0, wall, trim);
                     }
@@ -157,7 +168,7 @@ void addWindowsBox(CsgMesh& windows, float x0, float y0, float z0, float x1, flo
                     const float cu = fu0 + width * (static_cast<float>(col) + 0.5f) /
                                                static_cast<float>(cols);
                     addFacadeQuad(windows, face, cu - stripW * 0.5f, cu + stripW * 0.5f, y0, y1,
-                                  wall, glass);
+                                  wall, glass, kGlassMetallic, kGlassRoughness);
                 }
                 break;
             }
@@ -166,7 +177,8 @@ void addWindowsBox(CsgMesh& windows, float x0, float y0, float z0, float x1, flo
                 for (int col = 1; col < cols; ++col) {
                     const float cu = fu0 + width * static_cast<float>(col) /
                                                static_cast<float>(cols);
-                    addFacadeQuad(windows, face, cu - 0.004f, cu + 0.004f, y0, y1, wall, trim);
+                    addFacadeQuad(windows, face, cu - 0.004f, cu + 0.004f, y0, y1, wall, trim,
+                                  kMullionMetallic, kMullionRoughness);
                 }
                 break;
             }
@@ -176,7 +188,8 @@ void addWindowsBox(CsgMesh& windows, float x0, float y0, float z0, float x1, flo
                 for (int r = 0; r < rows; ++r) {
                     const float wy0 = y0 + rowH * (static_cast<float>(r) + 0.35f);
                     addFacadeQuad(windows, face, fu0 + 0.02f, fu1 - 0.02f, wy0,
-                                  wy0 + std::min(0.055f, rowH * 0.42f), wall, glass);
+                                  wy0 + std::min(0.055f, rowH * 0.42f), wall, glass,
+                                  kGlassMetallic, kGlassRoughness);
                 }
                 break;
             }
