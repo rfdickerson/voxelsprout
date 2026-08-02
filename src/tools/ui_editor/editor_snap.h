@@ -8,7 +8,9 @@
 namespace odai::tools::ui_editor {
 
 // Alignment guides produced by a snap. `horizontal` means a horizontal guide
-// line (a shared Y), drawn across the canvas at `pos` in canvas space.
+// line (a shared Y), at `pos` in *document* space — the same coordinate space
+// as EditorDocument::absoluteRect(), not screen pixels. The caller (the app's
+// drawCanvas()) converts to screen space via docToScreen() before drawing.
 struct SnapLine {
     bool horizontal = false;
     float pos = 0.0f;
