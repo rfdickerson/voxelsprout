@@ -9,8 +9,10 @@
 #include <vk_mem_alloc.h>
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <vector>
 
@@ -53,6 +55,10 @@ struct OffscreenCapture::Impl {
     VkQueue queue = VK_NULL_HANDLE;
     std::uint32_t queueFamily = 0;
     VmaAllocator vmaAllocator = VK_NULL_HANDLE;
+    // Populated by pickHeadlessDevice() when VK_EXT_descriptor_buffer is
+    // available; left default (disabled) otherwise, in which case UiRenderer
+    // falls back to a classic descriptor pool/set.
+    UiRenderer::DescriptorBufferSupport descriptorBuffer{};
 
     VkImage colorImage = VK_NULL_HANDLE;
     VmaAllocation colorImageAllocation = VK_NULL_HANDLE;
@@ -106,6 +112,28 @@ struct OffscreenCapture::Impl {
 
 namespace {
 
+bool isDeviceExtensionAvailable(VkPhysicalDevice physicalDevice, const char* extensionName) {
+    if (physicalDevice == VK_NULL_HANDLE || extensionName == nullptr || extensionName[0] == '\0') {
+        return false;
+    }
+    std::uint32_t extensionCount = 0;
+    if (vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, nullptr) != VK_SUCCESS ||
+        extensionCount == 0) {
+        return false;
+    }
+    std::vector<VkExtensionProperties> extensionProperties(extensionCount);
+    if (vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount,
+                                              extensionProperties.data()) != VK_SUCCESS) {
+        return false;
+    }
+    for (const VkExtensionProperties& properties : extensionProperties) {
+        if (std::strcmp(properties.extensionName, extensionName) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool pickHeadlessDevice(OffscreenCapture::Impl& impl) {
     std::uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(impl.instance, &deviceCount, nullptr);
@@ -131,6 +159,7 @@ bool pickHeadlessDevice(OffscreenCapture::Impl& impl) {
         if (features12.descriptorBindingPartiallyBound != VK_TRUE) continue;
         if (features12.descriptorBindingSampledImageUpdateAfterBind != VK_TRUE) continue;
         if (features12.shaderSampledImageArrayNonUniformIndexing != VK_TRUE) continue;
+        if (features12.bufferDeviceAddress != VK_TRUE) continue;
 
         std::uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &queueFamilyCount, nullptr);
@@ -158,30 +187,85 @@ bool pickHeadlessDevice(OffscreenCapture::Impl& impl) {
     queueInfo.queueCount = 1;
     queueInfo.pQueuePriorities = &priority;
 
+    // Descriptor buffers are preferred when the driver has them, but not
+    // required: UiRenderer falls back to a classic descriptor pool/set when
+    // this stays disabled (e.g. Mesa lavapipe in headless CI).
+    const bool descriptorBufferExtension =
+        isDeviceExtensionAvailable(impl.physicalDevice, VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
+
     VkPhysicalDeviceVulkan12Features enable12{};
     enable12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     enable12.descriptorIndexing = VK_TRUE;
     enable12.descriptorBindingPartiallyBound = VK_TRUE;
     enable12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     enable12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    // Required by VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT (below) and by
+    // the descriptor buffer's VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT usage.
+    enable12.bufferDeviceAddress = VK_TRUE;
     VkPhysicalDeviceVulkan13Features enable13{};
     enable13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     enable13.dynamicRendering = VK_TRUE;
     enable13.pNext = &enable12;
+    VkPhysicalDeviceDescriptorBufferFeaturesEXT enableDescriptorBuffer{};
+    enableDescriptorBuffer.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT;
+    if (descriptorBufferExtension) {
+        enableDescriptorBuffer.descriptorBuffer = VK_TRUE;
+        enableDescriptorBuffer.pNext = &enable13;
+    }
     VkPhysicalDeviceFeatures2 enableFeatures2{};
     enableFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    enableFeatures2.pNext = &enable13;
+    enableFeatures2.pNext = descriptorBufferExtension
+                                ? static_cast<void*>(&enableDescriptorBuffer)
+                                : static_cast<void*>(&enable13);
+
+    std::vector<const char*> deviceExtensions;
+    if (descriptorBufferExtension) {
+        deviceExtensions.push_back(VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
+    }
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.pNext = &enableFeatures2;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueInfo;
+    deviceInfo.enabledExtensionCount = static_cast<std::uint32_t>(deviceExtensions.size());
+    deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
     if (vkCreateDevice(impl.physicalDevice, &deviceInfo, nullptr, &impl.device) != VK_SUCCESS) {
         std::fprintf(stderr, "[offscreen_capture] vkCreateDevice failed\n");
         return false;
     }
     vkGetDeviceQueue(impl.device, impl.queueFamily, 0, &impl.queue);
+
+    if (descriptorBufferExtension) {
+        auto& db = impl.descriptorBuffer;
+        db.getLayoutSize = reinterpret_cast<PFN_vkGetDescriptorSetLayoutSizeEXT>(
+            vkGetDeviceProcAddr(impl.device, "vkGetDescriptorSetLayoutSizeEXT"));
+        db.getBindingOffset = reinterpret_cast<PFN_vkGetDescriptorSetLayoutBindingOffsetEXT>(
+            vkGetDeviceProcAddr(impl.device, "vkGetDescriptorSetLayoutBindingOffsetEXT"));
+        db.getDescriptor = reinterpret_cast<PFN_vkGetDescriptorEXT>(
+            vkGetDeviceProcAddr(impl.device, "vkGetDescriptorEXT"));
+        db.cmdBindDescriptorBuffers = reinterpret_cast<PFN_vkCmdBindDescriptorBuffersEXT>(
+            vkGetDeviceProcAddr(impl.device, "vkCmdBindDescriptorBuffersEXT"));
+        db.cmdSetDescriptorBufferOffsets = reinterpret_cast<PFN_vkCmdSetDescriptorBufferOffsetsEXT>(
+            vkGetDeviceProcAddr(impl.device, "vkCmdSetDescriptorBufferOffsetsEXT"));
+        if (db.enabled()) {
+            VkPhysicalDeviceDescriptorBufferPropertiesEXT dbProperties{};
+            dbProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT;
+            VkPhysicalDeviceProperties2 properties2{};
+            properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            properties2.pNext = &dbProperties;
+            vkGetPhysicalDeviceProperties2(impl.physicalDevice, &properties2);
+            db.offsetAlignment = std::max<VkDeviceSize>(dbProperties.descriptorBufferOffsetAlignment, 1u);
+            db.combinedImageSamplerDescriptorSize = dbProperties.combinedImageSamplerDescriptorSize;
+            db.sampledImageDescriptorSize = dbProperties.sampledImageDescriptorSize;
+            db.samplerDescriptorSize = dbProperties.samplerDescriptorSize;
+            db.combinedImageSamplerSingleArray = dbProperties.combinedImageSamplerDescriptorSingleArray == VK_TRUE;
+        } else {
+            // Partial load (unexpected but possible on a nonconformant driver):
+            // leave the struct disabled so UiRenderer uses the classic fallback.
+            db = UiRenderer::DescriptorBufferSupport{};
+        }
+    }
     return true;
 }
 
@@ -227,6 +311,10 @@ bool OffscreenCapture::init(const Config& config) {
     }
 
     VmaAllocatorCreateInfo vmaInfo{};
+    // The device enables bufferDeviceAddress (above) so the descriptor buffer's
+    // VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT usage is valid; VMA needs this
+    // flag set to allow allocating such buffers at all.
+    vmaInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     vmaInfo.physicalDevice = impl.physicalDevice;
     vmaInfo.device = impl.device;
     vmaInfo.instance = impl.instance;
@@ -328,6 +416,7 @@ bool OffscreenCapture::init(const Config& config) {
     uiInfo.shaderDir = config.shaderDir.empty()
                            ? resolveRepoPath("src/render/shaders").string()
                            : config.shaderDir;
+    uiInfo.descriptorBuffer = impl.descriptorBuffer;
     if (!impl.uiRenderer.init(uiInfo)) {
         std::fprintf(stderr, "[offscreen_capture] UiRenderer::init failed (shaderDir=%s)\n",
                      uiInfo.shaderDir.c_str());

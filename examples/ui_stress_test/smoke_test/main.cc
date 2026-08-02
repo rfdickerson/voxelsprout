@@ -6,11 +6,56 @@
 
 #include "ui/odai_ui.h"
 
+#include <stb_image.h>
+
+#include <array>
+#include <cstddef>
 #include <cstdio>
 #include <memory>
+#include <string>
 
 using namespace odai::ui;
 using namespace odai::uistress;
+
+namespace {
+
+// The harness's implementation already links STB_IMAGE_IMPLEMENTATION via
+// odai_ui (src/ui/theme/ui_theme.cc), so this file only declares usage.
+bool capturedRealContent(const std::string& pngPath) {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* pixels = stbi_load(pngPath.c_str(), &width, &height, &channels, 4);
+    if (pixels == nullptr) {
+        std::fprintf(stderr, "failed to read back %s for content check\n", pngPath.c_str());
+        return false;
+    }
+    if (width < 61 || height < 61) {
+        std::fprintf(stderr, "captured image too small to content-check (%dx%d)\n", width, height);
+        stbi_image_free(pixels);
+        return false;
+    }
+
+    const auto pixelAt = [&](int x, int y) {
+        const unsigned char* p = pixels + (static_cast<std::size_t>(y) * width + x) * 4;
+        return std::array<unsigned char, 4>{p[0], p[1], p[2], p[3]};
+    };
+
+    // The card is drawn at (40,40)-(340,180) against a darker root background;
+    // a corner of the root panel and the card's own background should differ
+    // if the widget tree actually got rasterized rather than left blank.
+    const auto background = pixelAt(5, 5);
+    const auto cardInterior = pixelAt(60, 60);
+    stbi_image_free(pixels);
+
+    if (background == cardInterior) {
+        std::fprintf(stderr, "captured image looks blank: background and card pixels match\n");
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
 
 int main() {
     OffscreenCapture capture;
@@ -53,9 +98,13 @@ int main() {
     UiDrawList drawList;
     ctx.build(drawList);
 
-    const CaptureResult result = capture.captureToPng(drawList.data(), "harness_smoke_test.png");
+    const std::string outPngPath = "harness_smoke_test.png";
+    const CaptureResult result = capture.captureToPng(drawList.data(), outPngPath);
     if (!result.success) {
         std::fprintf(stderr, "capture failed\n");
+        return 1;
+    }
+    if (!capturedRealContent(outPngPath)) {
         return 1;
     }
     std::printf("capture OK: %u draw calls, %u commands, %u vertices, %u indices, %.3f ms submit->idle\n",
