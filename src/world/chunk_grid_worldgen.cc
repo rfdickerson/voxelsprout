@@ -1,5 +1,6 @@
 #include "world/chunk_grid.h"
 
+#include "core/hash.h"
 #include "core/log.h"
 
 #include <algorithm>
@@ -177,16 +178,10 @@ WarpedPoint warpTerrainDomain(float worldX, float worldZ) {
     return WarpedPoint{foldedX + localWarpX, foldedZ + localWarpZ};
 }
 
+// Thin alias so the many call sites below stay readable; the implementation is
+// shared with procgen::hash2d, which had a byte-identical copy.
 std::uint32_t hashCoords(int x, int z, std::uint32_t salt = 0u) {
-    std::uint32_t hash = static_cast<std::uint32_t>(x) * 0x9E3779B9u;
-    hash ^= static_cast<std::uint32_t>(z) * 0x85EBCA6Bu;
-    hash ^= salt * 0xC2B2AE35u;
-    hash ^= hash >> 16u;
-    hash *= 0x7FEB352Du;
-    hash ^= hash >> 15u;
-    hash *= 0x846CA68Bu;
-    hash ^= hash >> 16u;
-    return hash;
+    return odai::core::hashCoords2d(x, z, salt);
 }
 
 int floorDiv(int value, int divisor) {

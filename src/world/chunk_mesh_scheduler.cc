@@ -54,6 +54,13 @@ std::size_t ChunkMeshScheduler::kickJobs(
         return 0;
     }
 
+    // This sort is what makes meshing order independent of ChunkMeshKeyHash:
+    // the comparator below is a strict total order (distance, then x, then y,
+    // then z) and map keys are unique, so no two elements ever compare
+    // equivalent and std::sort's instability cannot leak the bucket order of
+    // m_entries into the result. Keep it a total order if you touch it --
+    // dropping a tiebreaker would make chunk streaming order depend on the
+    // hash function.
     std::sort(dirtyKeys.begin(), dirtyKeys.end(), [&](const ChunkMeshKey& a, const ChunkMeshKey& b) {
         const auto chebyshevDistance = [&](const ChunkMeshKey& key) {
             const int dx = std::abs(key.x - cameraChunkX);

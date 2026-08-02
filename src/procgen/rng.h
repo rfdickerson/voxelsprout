@@ -3,6 +3,8 @@
 #include <array>
 #include <cstdint>
 
+#include "core/hash.h"
+
 // Shared deterministic RNG for procedural generation. Same LCG constants the
 // citybuilder app uses for its ambient effects, so extracting it here keeps
 // every existing generator bit-exact per seed.
@@ -34,18 +36,11 @@ struct Rng {
     }
 };
 
-// Avalanche integer hash (same mix as the voxel worldgen's hashCoords); use
-// for position-keyed seeds where neighbouring inputs must decorrelate.
+// Avalanche integer hash; use for position-keyed seeds where neighbouring
+// inputs must decorrelate. The implementation now lives in core/hash.h, shared
+// with the voxel worldgen that had its own identical copy.
 inline std::uint32_t hash2d(int x, int z, std::uint32_t salt = 0u) {
-    std::uint32_t hash = static_cast<std::uint32_t>(x) * 0x9E3779B9u;
-    hash ^= static_cast<std::uint32_t>(z) * 0x85EBCA6Bu;
-    hash ^= salt * 0xC2B2AE35u;
-    hash ^= hash >> 16u;
-    hash *= 0x7FEB352Du;
-    hash ^= hash >> 15u;
-    hash *= 0x846CA68Bu;
-    hash ^= hash >> 16u;
-    return hash;
+    return odai::core::hashCoords2d(x, z, salt);
 }
 
 }  // namespace odai::procgen

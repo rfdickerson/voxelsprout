@@ -450,11 +450,7 @@ float computeRenderedPipeRadius(float baseRadius, bool hasBranchConnection) {
 }
 
 std::uint64_t pipeCellKey(const odai::core::Cell3i& cell) {
-    constexpr std::uint64_t kMask = (1ull << 21u) - 1ull;
-    const std::uint64_t x = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.x) & kMask);
-    const std::uint64_t y = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.y) & kMask);
-    const std::uint64_t z = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.z) & kMask);
-    return x | (y << 21u) | (z << 42u);
+    return odai::core::packCell21(cell);
 }
 
 std::vector<PipeEndpointState> buildPipeEndpointStates(
