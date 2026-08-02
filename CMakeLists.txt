@@ -589,12 +589,20 @@ if(ODAI_BUILD_APP)
         add_dependencies(odai slang_shaders)
     endif()
 
+    if(WIN32)
+        set(ODAI_RELEASE_PROFILE_VALUE "windows_runnable_rt_beta")
+    elseif(APPLE)
+        set(ODAI_RELEASE_PROFILE_VALUE "macos_runnable_rt_beta")
+    else()
+        set(ODAI_RELEASE_PROFILE_VALUE "linux_runnable_rt_beta")
+    endif()
+
     target_include_directories(odai PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
     target_compile_definitions(
         odai PRIVATE
         ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         ODAI_APP_VERSION=\"${PROJECT_VERSION}\"
-        ODAI_RELEASE_PROFILE=\"windows_runnable_rt_beta\"
+        ODAI_RELEASE_PROFILE=\"${ODAI_RELEASE_PROFILE_VALUE}\"
     )
 
     if(MSVC)

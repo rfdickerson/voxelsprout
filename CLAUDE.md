@@ -92,7 +92,7 @@ All are plain executables with a hand-rolled `int main()` and inline assertions 
 | `odai_core_types_tests` | `core/hash.h`, `core/lcg.h`, `core/ring_buffer.h`, `math/geometry.h` + math scalar helpers (golden vectors pin content-affecting hashes and RNG) |
 | `odai_stability_gtests` | GTest: frame graph, render math, shadow culling, sim network |
 
-CI (`.github/workflows/ci.yml`) runs Linux (full build including Vulkan on lavapipe, `slangc` installed, examples ON) and Windows (build + ctest; `slangc` is absent there, so shader targets are skipped at configure time).
+CI (`.github/workflows/ci.yml`) runs Linux only (full build including Vulkan on lavapipe, `slangc` installed, examples ON). Windows is a supported local dev target (see Build Commands above) but is not built in CI.
 
 ### Content generation tools (`ODAI_BUILD_TOOLS=ON`, all pure CPU)
 

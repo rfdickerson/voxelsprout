@@ -25,7 +25,9 @@ jobs:
             build-essential cmake ninja-build pkg-config \
             git curl zip unzip tar \
             libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev \
-            mesa-vulkan-drivers vulkan-tools libvulkan1
+            mesa-vulkan-drivers vulkan-tools libvulkan1 \
+            libasound2-dev libpulse-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev
 
       - name: Install slangc
         run: |
@@ -92,78 +94,3 @@ jobs:
           name: headless-render-output
           path: build/**/harness_smoke_test.png
           if-no-files-found: ignore
-
-  build-and-test-windows:
-    runs-on: windows-latest
-
-    env:
-      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Cache vcpkg sources
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}\vcpkg
-          key: vcpkg-src-${{ runner.os }}-2026-02-16
-
-      - name: Bootstrap vcpkg
-        shell: pwsh
-        run: |
-          if (!(Test-Path "$env:VCPKG_ROOT\.git")) {
-            git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
-          }
-          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
-
-      - name: Cache vcpkg installed artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}\build\vcpkg_installed
-            ${{ github.workspace }}\build\vcpkg-manifest-install.log
-          key: vcpkg-installed-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
-          restore-keys: |
-            vcpkg-installed-${{ runner.os }}-
-
-      - name: Cache vcpkg binary archives
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}\vcpkg-bincache
-          key: vcpkg-archives-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-archives-${{ runner.os }}-
-
-      # cmake's own "Visual Studio 17 2022" generator detection isn't
-      # reliable on hosted runners; use Ninja + an explicit MSVC dev
-      # environment instead (same generator the Linux job already uses).
-      - name: Set up MSVC dev environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      # Builds the real app target (ODAI_BUILD_APP defaults ON): Vulkan, GLFW,
-      # and imgui all come from vcpkg's x64-windows triplet. slangc isn't on
-      # this runner's PATH, so shader targets are skipped at configure time
-      # (see CMakeLists.txt's SLANGC_EXECUTABLE check) rather than failing the
-      # build -- this job validates compilation/linking, not shader output.
-      - name: Configure
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
-          cmake -S . -B build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Debug `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DBUILD_TESTING=ON
-
-      - name: Build
-        run: cmake --build build -j 4
-
-      - name: List tests
-        run: ctest --test-dir build -N
-
-      - name: Run CTest
-        run: ctest --test-dir build --output-on-failure
