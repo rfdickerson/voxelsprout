@@ -142,7 +142,6 @@ constexpr const char* kMagicaMonu2Path = "assets/magicka/monu2.vox";
 constexpr float kWorldAutosaveDelaySeconds = 0.75f;
 constexpr const char* kStrategyMapEnvVar = "ODAI_STRATEGY_MAP";
 constexpr float kImportedInspectRayMaxDistance = 4096.0f;
-constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
 
 constexpr float kDefaultPipeLength = 1.0f;
 constexpr float kDefaultPipeRadius = 0.45f;
@@ -2802,7 +2801,8 @@ void App::inspectImportedSceneFromCamera() const {
                     << ", dist=" << hit.distance
                     << ", pos=(" << hit.position.x << "," << hit.position.y << "," << hit.position.z << ")"
                     << ", texture=" << texturePath
-                    << ", alphaTest=" << (((hit.flags & kImportedSceneMaterialFlagAlphaTest) != 0u) ? "yes" : "no");
+                    << ", alphaTest="
+                    << (((hit.flags & odai::importer::kImportedSceneMaterialFlagAlphaTest) != 0u) ? "yes" : "no");
     if (hitInstance != nullptr) {
         VOX_LOGI("app") << "imported inspect source: refId=" << hitInstance->sourceId
                         << ", model=" << hitInstance->modelPath

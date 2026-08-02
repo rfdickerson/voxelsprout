@@ -223,6 +223,7 @@ Shaders use **Slang** (`.slang` → `.slang.spv` SPIR-V). Shared includes live i
 - `sh_lighting.slang` — spherical-harmonics GI evaluation
 - `voxel_decode.slang` — voxel color unpacking
 - `noise.slang` — shared noise functions
+- `pbr.slang` — metallic-roughness BRDF (GGX/Smith/Schlick + analytic env BRDF). Specular only: it layers onto the existing baked-GI diffuse chain rather than replacing it. Materials are opt-in per vertex through the packed flag bits defined in `src/import/imported_scene.h` — geometry without the PBR bit shades exactly as it did before
 
 Ray-traced shadow/reflection variants compile the same `.slang` source with `-DODAI_RT_SHADOWS=1` or `-DODAI_RT_REFLECTIONS=1`.
 

@@ -48,6 +48,11 @@ TriMesh triangulate(const CsgMesh& mesh) {
             continue;
         }
         assert(isConvex(polygon));
+        // Flat per-face material, quantized once per polygon. Packs to 0 for the
+        // default rough dielectric, so untouched generators emit the same bits
+        // they always did.
+        const std::uint32_t materialFlags = odai::importer::packImportedSceneMaterialFlags(
+            odai::importer::ImportedSceneSurfaceMaterial{polygon.metallic, polygon.roughness});
         const std::uint32_t base = static_cast<std::uint32_t>(out.vertices.size());
         for (const Vector3& v : polygon.vertices) {
             odai::importer::ImportedScenePackedVertex vertex;
@@ -60,6 +65,7 @@ TriMesh triangulate(const CsgMesh& mesh) {
             vertex.color[0] = polygon.color.r;
             vertex.color[1] = polygon.color.g;
             vertex.color[2] = polygon.color.b;
+            vertex.flags = materialFlags;
             out.vertices.push_back(vertex);
             expandBounds(out.boundsMin, out.boundsMax, v);
         }

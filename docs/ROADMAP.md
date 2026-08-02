@@ -40,7 +40,7 @@ That said, a large chunk of the original wishlist assumes a different kind of en
 | Screen-space ambient occlusion | ✅ | `frame_pass_ssao.cc`, `ssao.comp.slang` |
 | HDR + tonemapping | ✅ | ACES filmic + auto-exposure histogram + bloom, `tone_map.frag.slang` |
 | Post-processing pipeline | ✅ | Tonemap + bloom + auto-exposure + sun shafts chain (`frame_run.cc`) |
-| PBR | 🟡 | Baked-GI + albedo + slope-tinted shading, not a metallic-roughness/BRDF model |
+| PBR | 🟡 | Cook-Torrance metallic-roughness specular (`pbr.slang`) layered onto the baked-GI diffuse chain, opt-in per vertex via packed material flags. Values are authored per face by the procgen generators; no metallic/roughness *textures* and no prefiltered radiance probe yet — see Asset Pipeline |
 | Volumetric fog | 🟡 | Analytic height-fog + 2D fog-of-war mask, not a froxel/raymarched volume |
 | Dynamic weather / day-night | 🟡 | Full sky/atmosphere + sun-position system exists; no rain/snow/cloud-density state |
 | Deferred / clustered forward rendering | ⬜ | Single forward pass, flat light list, no clustering |
@@ -293,7 +293,15 @@ This is a starting recommendation, not a commitment — sequencing is the user's
 - TAA (jitter + reprojection added into the existing frame graph)
 - Terrain splat-map blending (replacing/augmenting the current slope-based blend)
 - Shader hot reload for the Slang pipeline
-- Metallic-roughness PBR terms layered onto the existing baked-GI model
+- Metallic-roughness PBR terms layered onto the existing baked-GI model — **first slice done.**
+  `src/render/shaders/pbr.slang` (GGX + Smith + Schlick, analytic env BRDF) feeds
+  `imported_static.frag.slang`; materials ride in `ImportedScenePackedVertex::flags`
+  (layout in `src/import/imported_scene.h`) and are set per face by the CSG generators.
+  Remaining, in rough order: metallic/roughness *texture* maps (needs a second bindless
+  texture index per surface, so a packed-vertex format change), a prefiltered radiance
+  probe to replace the irradiance-as-reflection stand-in in `pbrAmbientSpecular`, and
+  extending materials to the mesh/part import path (`ImportedSceneMeshPart` carries no
+  material, so `gpu_scene.cc` drops to the default for cooked Bethesda geometry)
 - GPU-side (compute) frustum/occlusion culling, replacing the current CPU-computed path
 
 **Tier 4 — Dragon Age foundation (biggest lift, infrastructure before features).** Sequenced bottom-up; two pieces are now in progress:
