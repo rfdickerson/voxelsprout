@@ -1,5 +1,6 @@
 #pragma once
 
+#include "math/geometry.h"
 #include "render/renderer_types.h"
 #include "world/voxel.h"
 #include "world/world.h"
@@ -44,17 +45,15 @@ constexpr float kGamepadLookDegreesPerSecond = 160.0f;
 constexpr float kBlockInteractMaxDistance = 6.0f;
 constexpr int kVoxelBreakClicksRequired = 2;
 
-struct Aabb3f {
-    float minX = 0.0f;
-    float maxX = 0.0f;
-    float minY = 0.0f;
-    float maxY = 0.0f;
-    float minZ = 0.0f;
-    float maxZ = 0.0f;
-};
+using odai::math::Aabb3f;
 
 [[nodiscard]] Aabb3f makePlayerCollisionAabb(float eyeX, float eyeY, float eyeZ);
-[[nodiscard]] bool aabbOverlaps(const Aabb3f& lhs, const Aabb3f& rhs);
+
+// Collision-flavoured overlap: math::aabbOverlaps with this game's
+// kCollisionEpsilon bound in, so boxes that merely touch do not collide.
+// Named distinctly because Aabb3f now lives in odai::math, which would make
+// an identically named two-argument overload ambiguous through ADL.
+[[nodiscard]] bool aabbCollides(const Aabb3f& lhs, const Aabb3f& rhs);
 
 // The player's camera/physics state. Named PlayerState (not CameraState) to avoid confusion
 // with render::CameraPose, the renderer-facing struct it's converted into for drawing.

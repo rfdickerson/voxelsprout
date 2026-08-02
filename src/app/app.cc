@@ -14,6 +14,7 @@
 #include "game/strategy_map_io.h"
 #include "game/strategy_map_mesh.h"
 #include "core/log.h"
+#include "math/geometry.h"
 #include "math/math.h"
 #include "sim/network_procedural.h"
 #include "ui/icon_atlas.h"
@@ -153,14 +154,7 @@ constexpr int kMaxSimulationStepsPerFrame = 8;
 // size rather than remesh CPU (the old inline budget was 6).
 constexpr std::size_t kChunkMeshJobsPerFrame = 8;
 
-struct Aabb3f {
-    float minX = 0.0f;
-    float maxX = 0.0f;
-    float minY = 0.0f;
-    float maxY = 0.0f;
-    float minZ = 0.0f;
-    float maxZ = 0.0f;
-};
+using odai::math::Aabb3f;
 
 Aabb3f makePlayerCollisionAabb(float eyeX, float eyeY, float eyeZ) {
     Aabb3f bounds{};
@@ -193,14 +187,11 @@ Aabb3f makeConveyorBeltAabb(const odai::sim::Belt& belt) {
     return bounds;
 }
 
-bool aabbOverlaps(const Aabb3f& lhs, const Aabb3f& rhs) {
-    return
-        lhs.maxX > (rhs.minX + kCollisionEpsilon) &&
-        lhs.minX < (rhs.maxX - kCollisionEpsilon) &&
-        lhs.maxY > (rhs.minY + kCollisionEpsilon) &&
-        lhs.minY < (rhs.maxY - kCollisionEpsilon) &&
-        lhs.maxZ > (rhs.minZ + kCollisionEpsilon) &&
-        lhs.minZ < (rhs.maxZ - kCollisionEpsilon);
+// math::aabbOverlaps with this file's kCollisionEpsilon bound in. Named
+// distinctly from the shared helper: Aabb3f is now odai::math::Aabb3f, so an
+// identically named two-argument overload would be ambiguous through ADL.
+bool aabbCollides(const Aabb3f& lhs, const Aabb3f& rhs) {
+    return odai::math::aabbOverlaps(lhs, rhs, kCollisionEpsilon);
 }
 
 const char* inventoryItemLabel(odai::render::InventoryItemId itemId) {
@@ -1977,7 +1968,7 @@ bool App::doesPlayerOverlapConveyorBelt(float eyeX, float eyeY, float eyeZ) cons
     const Aabb3f playerBounds = makePlayerCollisionAabb(eyeX, eyeY, eyeZ);
     for (const odai::sim::Belt& belt : m_simulation.belts()) {
         const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-        if (aabbOverlaps(playerBounds, beltBounds)) {
+        if (aabbCollides(playerBounds, beltBounds)) {
             return true;
         }
     }
@@ -2027,7 +2018,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMinX = std::min(blockingMinX, beltBounds.minX);
                 }
             }
@@ -2047,7 +2038,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMaxX = std::max(blockingMaxX, beltBounds.maxX);
                 }
             }
@@ -2093,7 +2084,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMinZ = std::min(blockingMinZ, beltBounds.minZ);
                 }
             }
@@ -2113,7 +2104,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMaxZ = std::max(blockingMaxZ, beltBounds.maxZ);
                 }
             }
@@ -2159,7 +2150,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMinY = std::min(blockingMinY, beltBounds.minY);
                 }
             }
@@ -2179,7 +2170,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMaxY = std::max(blockingMaxY, beltBounds.maxY);
                 }
             }
@@ -2500,6 +2491,7 @@ App::ImportedSceneInspectHit App::raycastImportedSceneFromCamera() const {
     }
     const odai::math::Vector3 rayOrigin =
         odai::math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
+    const odai::math::Ray pickRay{rayOrigin, rayDirection};
 
     const auto packedPosition = [](const odai::importer::ImportedScenePackedVertex& vertex) {
         return odai::math::Vector3{vertex.position[0], vertex.position[1], vertex.position[2]};
@@ -2525,29 +2517,12 @@ App::ImportedSceneInspectHit App::raycastImportedSceneFromCamera() const {
             const odai::math::Vector3 p0 = packedPosition(m_importedScene.packedVertices[i0]);
             const odai::math::Vector3 p1 = packedPosition(m_importedScene.packedVertices[i1]);
             const odai::math::Vector3 p2 = packedPosition(m_importedScene.packedVertices[i2]);
-            const odai::math::Vector3 edge1 = p1 - p0;
-            const odai::math::Vector3 edge2 = p2 - p0;
-            const odai::math::Vector3 pvec = odai::math::cross(rayDirection, edge2);
-            const float det = odai::math::dot(edge1, pvec);
-            if (std::fabs(det) <= kRayEpsilon) {
+            const odai::math::RayTriangleHit triangleHit =
+                odai::math::intersectRayTriangle(pickRay, p0, p1, p2, kRayEpsilon);
+            if (!triangleHit.hit || triangleHit.distance >= bestDistance) {
                 continue;
             }
-
-            const float invDet = 1.0f / det;
-            const odai::math::Vector3 tvec = rayOrigin - p0;
-            const float u = odai::math::dot(tvec, pvec) * invDet;
-            if (u < 0.0f || u > 1.0f) {
-                continue;
-            }
-            const odai::math::Vector3 qvec = odai::math::cross(tvec, edge1);
-            const float v = odai::math::dot(rayDirection, qvec) * invDet;
-            if (v < 0.0f || (u + v) > 1.0f) {
-                continue;
-            }
-            const float distance = odai::math::dot(edge2, qvec) * invDet;
-            if (distance <= kRayEpsilon || distance >= bestDistance) {
-                continue;
-            }
+            const float distance = triangleHit.distance;
 
             const odai::importer::ImportedScenePackedVertex& hitVertex = m_importedScene.packedVertices[i0];
             bestDistance = distance;

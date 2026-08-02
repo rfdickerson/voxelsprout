@@ -73,14 +73,8 @@ Aabb3f makePlayerCollisionAabb(float eyeX, float eyeY, float eyeZ) {
     return bounds;
 }
 
-bool aabbOverlaps(const Aabb3f& lhs, const Aabb3f& rhs) {
-    return
-        lhs.maxX > (rhs.minX + kCollisionEpsilon) &&
-        lhs.minX < (rhs.maxX - kCollisionEpsilon) &&
-        lhs.maxY > (rhs.minY + kCollisionEpsilon) &&
-        lhs.minY < (rhs.maxY - kCollisionEpsilon) &&
-        lhs.maxZ > (rhs.minZ + kCollisionEpsilon) &&
-        lhs.minZ < (rhs.maxZ - kCollisionEpsilon);
+bool aabbCollides(const Aabb3f& lhs, const Aabb3f& rhs) {
+    return odai::math::aabbOverlaps(lhs, rhs, kCollisionEpsilon);
 }
 
 bool isSolidWorldVoxel(const odai::world::World& world, int worldX, int worldY, int worldZ) {

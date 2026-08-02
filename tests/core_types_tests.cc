@@ -2,6 +2,7 @@
 #include "core/hash.h"
 #include "core/lcg.h"
 #include "core/ring_buffer.h"
+#include "math/geometry.h"
 #include "math/math.h"
 
 #include <cmath>
@@ -291,9 +292,100 @@ void testLcgIsBitExactWithTheReplacedInlineCopies() {
     expectTrue(odai::core::lcgNext(zero) == 1013904223u, "a zero seed still advances");
 }
 
+void testAabb() {
+    using odai::math::Aabb3f;
+    using odai::math::Vector3;
+
+    const Aabb3f unit = odai::math::makeAabbFromCenterExtents(Vector3{0.0f, 0.0f, 0.0f},
+                                                              Vector3{1.0f, 2.0f, 3.0f});
+    expectTrue(unit.minX == -1.0f && unit.maxX == 1.0f, "center/extents sets x");
+    expectTrue(unit.minY == -2.0f && unit.maxY == 2.0f, "center/extents sets y");
+    expectTrue(unit.minZ == -3.0f && unit.maxZ == 3.0f, "center/extents sets z");
+
+    // Corners in either order must produce the same box.
+    const Aabb3f a = odai::math::makeAabbFromCorners(Vector3{1.0f, 2.0f, 3.0f}, Vector3{-1.0f, 0.0f, 5.0f});
+    const Aabb3f b = odai::math::makeAabbFromCorners(Vector3{-1.0f, 0.0f, 5.0f}, Vector3{1.0f, 2.0f, 3.0f});
+    expectTrue(a == b, "makeAabbFromCorners is order-independent");
+    expectTrue(a.minZ == 3.0f && a.maxZ == 5.0f, "makeAabbFromCorners sorts each axis");
+
+    const Vector3 center = odai::math::aabbCenter(a);
+    expectTrue(center.x == 0.0f && center.y == 1.0f && center.z == 4.0f, "aabbCenter");
+
+    expectTrue(odai::math::aabbContainsPoint(unit, Vector3{0.0f, 0.0f, 0.0f}), "contains interior point");
+    expectTrue(odai::math::aabbContainsPoint(unit, Vector3{1.0f, 2.0f, 3.0f}), "contains corner point");
+    expectTrue(!odai::math::aabbContainsPoint(unit, Vector3{1.1f, 0.0f, 0.0f}), "excludes exterior point");
+
+    Aabb3f growing{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    odai::math::expandAabb(growing, Vector3{2.0f, -3.0f, 0.5f});
+    expectTrue(growing.maxX == 2.0f && growing.minY == -3.0f && growing.maxZ == 0.5f, "expandAabb grows both ways");
+
+    // Overlap, including the epsilon behavior both collision call sites rely on.
+    const Aabb3f left{0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f};
+    const Aabb3f right{0.5f, 1.5f, 0.0f, 1.0f, 0.0f, 1.0f};
+    const Aabb3f touching{1.0f, 2.0f, 0.0f, 1.0f, 0.0f, 1.0f};
+    expectTrue(odai::math::aabbOverlaps(left, right), "overlapping boxes overlap");
+    expectTrue(!odai::math::aabbOverlaps(left, touching), "exactly touching boxes do not overlap");
+    expectTrue(!odai::math::aabbOverlaps(left, touching, 0.001f), "touching boxes still miss with epsilon");
+    const Aabb3f barely{0.9995f, 2.0f, 0.0f, 1.0f, 0.0f, 1.0f};
+    expectTrue(odai::math::aabbOverlaps(left, barely), "a sliver of overlap counts at epsilon 0");
+    expectTrue(!odai::math::aabbOverlaps(left, barely, 0.001f), "epsilon suppresses a sub-epsilon overlap");
+}
+
+void testRayIntersection() {
+    using odai::math::Aabb3f;
+    using odai::math::Ray;
+    using odai::math::Vector3;
+
+    const Vector3 v0{0.0f, 0.0f, 0.0f};
+    const Vector3 v1{1.0f, 0.0f, 0.0f};
+    const Vector3 v2{0.0f, 1.0f, 0.0f};
+
+    const auto straightOn = odai::math::intersectRayTriangle(
+        Ray{Vector3{0.25f, 0.25f, -2.0f}, Vector3{0.0f, 0.0f, 1.0f}}, v0, v1, v2);
+    expectTrue(straightOn.hit, "ray through the triangle hits");
+    expectTrue(std::abs(straightOn.distance - 2.0f) < 1e-5f, "hit distance is correct");
+    expectTrue(std::abs(straightOn.u - 0.25f) < 1e-5f && std::abs(straightOn.v - 0.25f) < 1e-5f,
+               "barycentric weights are correct");
+
+    // Backfaces still hit: the original inline test was double-sided.
+    const auto fromBehind = odai::math::intersectRayTriangle(
+        Ray{Vector3{0.25f, 0.25f, 2.0f}, Vector3{0.0f, 0.0f, -1.0f}}, v0, v1, v2);
+    expectTrue(fromBehind.hit, "the test is double-sided, matching the code it replaced");
+
+    const auto outside = odai::math::intersectRayTriangle(
+        Ray{Vector3{0.9f, 0.9f, -2.0f}, Vector3{0.0f, 0.0f, 1.0f}}, v0, v1, v2);
+    expectTrue(!outside.hit, "a ray past the hypotenuse misses");
+
+    const auto parallel = odai::math::intersectRayTriangle(
+        Ray{Vector3{0.25f, 0.25f, 0.0f}, Vector3{1.0f, 0.0f, 0.0f}}, v0, v1, v2);
+    expectTrue(!parallel.hit, "a ray in the triangle's plane misses");
+
+    const auto behindOrigin = odai::math::intersectRayTriangle(
+        Ray{Vector3{0.25f, 0.25f, 2.0f}, Vector3{0.0f, 0.0f, 1.0f}}, v0, v1, v2);
+    expectTrue(!behindOrigin.hit, "a triangle behind the ray origin misses");
+
+    const Aabb3f box{0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f};
+    float distance = 0.0f;
+    expectTrue(odai::math::intersectRayAabb(
+                   Ray{Vector3{0.5f, 0.5f, -3.0f}, Vector3{0.0f, 0.0f, 1.0f}}, box, 0.0f, 100.0f, distance),
+               "ray into the box hits");
+    expectTrue(std::abs(distance - 3.0f) < 1e-5f, "box entry distance is correct");
+    expectTrue(!odai::math::intersectRayAabb(
+                   Ray{Vector3{5.0f, 5.0f, -3.0f}, Vector3{0.0f, 0.0f, 1.0f}}, box, 0.0f, 100.0f, distance),
+               "ray beside the box misses");
+    expectTrue(!odai::math::intersectRayAabb(
+                   Ray{Vector3{5.0f, 0.5f, 0.5f}, Vector3{0.0f, 0.0f, 1.0f}}, box, 0.0f, 100.0f, distance),
+               "ray parallel to a slab and outside it misses");
+    expectTrue(!odai::math::intersectRayAabb(
+                   Ray{Vector3{0.5f, 0.5f, -3.0f}, Vector3{0.0f, 0.0f, 1.0f}}, box, 0.0f, 1.0f, distance),
+               "tMax bounds the search");
+}
+
 }  // namespace
 
 int main() {
+    testAabb();
+    testRayIntersection();
     testLcgIsBitExactWithTheReplacedInlineCopies();
     testRingBuffer();
     testRingBufferPercentile();
