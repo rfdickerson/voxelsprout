@@ -371,6 +371,7 @@ endif()
 add_library(odai_dialogue STATIC
     src/dialogue/dialogue_io.cc
     src/dialogue/dialogue_runtime.cc
+    src/dialogue/dialogue_state_io.cc
 )
 target_include_directories(odai_dialogue PUBLIC
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>

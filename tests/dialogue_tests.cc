@@ -8,8 +8,10 @@
 #include "dialogue/dialogue_context.h"
 #include "dialogue/dialogue_io.h"
 #include "dialogue/dialogue_runtime.h"
+#include "dialogue/dialogue_state_io.h"
 #include "dialogue/dialogue_types.h"
 
+#include <filesystem>
 #include <iostream>
 #include <string>
 
@@ -182,6 +184,57 @@ void testAutoContinueChainSkipsNarrationOnlyNodes() {
     expectTrue(runtime.availableChoices().empty(), "the terminal node has no choices");
 }
 
+void testDialogueStateJsonRoundTrip() {
+    MapDialogueContext original;
+    original.setFlag("met_alistair", true);
+    original.setFlag("cleared_tower", false);
+    original.adjustApproval("alistair", 15);
+    original.adjustApproval("morrigan", -5);
+
+    const std::string json = saveDialogueStateToJson(original);
+
+    MapDialogueContext loaded;
+    const bool ok = loadDialogueStateFromJson(json, loaded);
+    expectTrue(ok, "loadDialogueStateFromJson reports success on well-formed input");
+    expectTrue(loaded.flag("met_alistair"), "round-tripped flag 'met_alistair' stayed true");
+    expectTrue(!loaded.flag("cleared_tower"), "round-tripped flag 'cleared_tower' stayed false");
+    expectTrue(loaded.approval("alistair") == 15, "round-tripped approval for 'alistair' survives");
+    expectTrue(loaded.approval("morrigan") == -5, "round-tripped approval for 'morrigan' survives");
+    expectTrue(loaded.approval("wynne") == 0, "a companion never touched defaults to zero approval");
+}
+
+void testDialogueStateFileRoundTrip() {
+    MapDialogueContext original;
+    original.setFlag("recruited_sten", true);
+    original.adjustApproval("sten", 8);
+
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "odai_dialogue_state_test.json";
+    const bool saved = saveDialogueState(original, path);
+    expectTrue(saved, "saveDialogueState writes the file successfully");
+
+    MapDialogueContext loaded;
+    const bool loadedOk = loadDialogueState(path, loaded);
+    expectTrue(loadedOk, "loadDialogueState reads back a file it just wrote");
+    expectTrue(loaded.flag("recruited_sten"), "file round-trip preserves flags");
+    expectTrue(loaded.approval("sten") == 8, "file round-trip preserves approval");
+
+    std::filesystem::remove(path);
+}
+
+void testDialogueStateMalformedJsonRecordsError() {
+    MapDialogueContext ctx;
+    const bool ok = loadDialogueStateFromJson("{ not valid json", ctx);
+    expectTrue(!ok, "loadDialogueStateFromJson rejects malformed JSON");
+    expectTrue(!getDialogueStateLastError().empty(), "a parse failure leaves a non-empty last-error message");
+}
+
+void testDialogueStateMissingFileRecordsError() {
+    MapDialogueContext ctx;
+    const bool ok = loadDialogueState("/nonexistent/odai_dialogue_state_missing.json", ctx);
+    expectTrue(!ok, "loadDialogueState reports failure for a path that doesn't exist");
+}
+
 void testCyclicAutoNextDoesNotHang() {
     // Built by hand (not via JSON) so the loader's reference validation
     // doesn't get in the way of testing the runtime's own hop-cap guard.
@@ -214,6 +267,10 @@ int main() {
     testFlagGatedChoiceUnlocksOnSecondVisit();
     testApprovalGatedChoice();
     testAutoContinueChainSkipsNarrationOnlyNodes();
+    testDialogueStateJsonRoundTrip();
+    testDialogueStateFileRoundTrip();
+    testDialogueStateMalformedJsonRecordsError();
+    testDialogueStateMissingFileRecordsError();
     testCyclicAutoNextDoesNotHang();
 
     if (g_failures != 0) {

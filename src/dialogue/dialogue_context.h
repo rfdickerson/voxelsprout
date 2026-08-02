@@ -38,6 +38,13 @@ public:
     void adjustApproval(const std::string& companionId, int delta) override {
         approval_[companionId] += delta;
     }
+    void setApproval(const std::string& companionId, int value) { approval_[companionId] = value; }
+
+    // Read-only iteration for persistence (dialogue_state_io.h) and any UI that
+    // wants to list every flag/companion touched so far rather than probing
+    // individual names.
+    [[nodiscard]] const std::unordered_map<std::string, bool>& flags() const { return flags_; }
+    [[nodiscard]] const std::unordered_map<std::string, int>& approvals() const { return approval_; }
 
 private:
     std::unordered_map<std::string, bool> flags_;
