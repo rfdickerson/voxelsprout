@@ -5,7 +5,7 @@ instead of re-exploring `src/engine/`, `src/render/`, `src/ui/` from scratch. If
 here looks stale (renamed function, moved file), trust the source over this doc and fix
 this file in the same change.
 
-See also: [`AGENTS.md`](../AGENTS.md) (project-wide rules), [`docs/UI_LIBRARY.md`](UI_LIBRARY.md)
+See also: [`CLAUDE.md`](../CLAUDE.md) (project-wide rules), [`docs/UI_LIBRARY.md`](UI_LIBRARY.md)
 (deep dive on the UI stack), [`docs/FrameArena.md`](FrameArena.md) (renderer internals, rarely
 needed for a game).
 
@@ -97,7 +97,7 @@ bool MyGameApp::onInit() {
 
 ## 3. Renderer facade — what a game actually calls (`src/render/renderer.h`)
 
-The renderer is a pImpl facade; **no Vulkan type ever appears here** (`AGENTS.md`: only
+The renderer is a pImpl facade; **no Vulkan type ever appears here** (`CLAUDE.md`: only
 `src/render/` may include Vulkan headers). A `GameApp` subclass only ever touches this
 subset directly (the rest is called by `GameApp` internals):
 
@@ -185,8 +185,8 @@ beyond a single styled run of text.
 
 ## 5. Input
 
-There's no input-mapping abstraction (deliberately, per `AGENTS.md`'s "avoid new
-abstraction layers"). Two channels:
+There's no input-mapping abstraction (deliberately — this project avoids new
+abstraction layers unless clearly justified). Two channels:
 
 - **Mouse** — via `m_uiInput` (`ui::UiInput`), populated each frame by `GameApp::run()`:
   `m_uiInput.mousePx`, `.mouseDeltaPx`, `.scrollDelta`, `.button(ui::UiMouseButton::Left)`
@@ -232,6 +232,7 @@ add_executable(odai_game_<name>
     src/games/<name>/<name>_main.cc
     src/games/<name>/<name>_app.cc
     src/engine/game_app.cc
+    src/engine/plugin.cc
     src/import/dds.cc
     src/import/gpu_scene.cc
     src/import/imported_scene.cc
@@ -276,7 +277,7 @@ never uploads 3D content — `Renderer::init` always constructs those systems un
 
 Build just the new target: `cmake --build cmake-build-release --target odai_game_<name> -j 4`.
 
-## 9. `AGENTS.md` constraints that bind new games
+## 9. Project constraints that bind new games
 
 - Only `src/render/` may include Vulkan headers; never let a `Vk*` type leak into
   `src/games/`.
@@ -284,5 +285,43 @@ Build just the new target: `cmake --build cmake-build-release --target odai_game
   one `GameApp` subclass, avoid inventing new abstraction layers (input mapping, ECS, etc.)
   unless asked.
 - Performance: no hidden allocations or unbounded growth in `onTick`/`onRender` hot paths.
-- World-feel/water/world-building rules in `AGENTS.md` apply only if the game touches
-  `world/` terrain content — irrelevant to a self-contained 2D mini-game.
+- World-feel/water/world-building conventions apply only if the game touches `world/`
+  terrain content — irrelevant to a self-contained 2D mini-game.
+
+## 10. Plugins — optional lifecycle extension points (`src/engine/plugin.h`)
+
+Most games need nothing here — a single `GameApp` subclass is still the default and
+correct shape for a self-contained mini-game. `PluginRegistry`/`IEnginePlugin` exist for
+the case where a piece of behavior should be *composed onto* a `GameApp` rather than
+written into its subclass — e.g. an optional debug overlay, a stats/telemetry collector,
+or (the case this was built for) something a `mods/` package wants to hook into a running
+game without the base game's `GameApp` subclass knowing about it. This is the engine's
+sanctioned extension seam; don't invent a second one (a signal bus, an event queue) for
+the same problem.
+
+Every `GameApp` owns a `PluginRegistry m_plugins` for free — nothing to add to your
+subclass. Register plugins during `onInit()`, before returning `true`:
+
+```cpp
+bool MyGameApp::onInit() {
+    // ... existing setup ...
+    m_plugins.add(std::make_unique<MyPlugin>());
+    return true;
+}
+```
+
+`IEnginePlugin` mirrors `GameApp`'s own hook shape (`onAttach`/`onTick`/`onRender`/
+`onDetach`), all defaulted to no-ops. `GameApp::init()` calls `attachAll()` right after
+your `onInit()` succeeds; `run()` calls `tickAll()` right after your own `onTick(dt)`
+every frame; `shutdown()` calls `detachAll()` right after your own `onShutdown()`.
+
+**`onRender` is the one hook that is *not* wired in automatically.** A game's `onRender()`
+ends by calling `submitFrame()`, which flushes the UI draw list and submits the frame —
+anything drawn after that point never reaches the GPU. If a plugin needs to draw, call
+`m_plugins.renderAll(*this, dt)` yourself from `onRender()`, after `beginFrameDraw()` and
+before `submitFrame()`.
+
+No dynamic loading (`dlopen`/DLL) is involved — a "plugin" here is a statically linked
+C++ class registered at startup, matching how this codebase already treats `IModHost`
+(`src/game/mod_host.h`) and `mods/base` content loading (`src/content/mod_loader.h`): compose
+behavior via a small registered interface, not via a build-time or runtime plugin loader.

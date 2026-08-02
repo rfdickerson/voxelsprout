@@ -4,7 +4,7 @@ This doc exists because a large feature wishlist for a "Modern Vulkan Strategy G
 
 ## What this repo actually is
 
-Per `AGENTS.md`, this project's direction is defined by four reference touchstones — not generic engine categories, but specific games whose feel/systems are the actual target:
+Per `CLAUDE.md`'s Reference Touchstones, this project's direction is defined by four reference touchstones — not generic engine categories, but specific games whose feel/systems are the actual target:
 
 | Touchstone | What it means here | Where it lives |
 |---|---|---|
@@ -13,7 +13,7 @@ Per `AGENTS.md`, this project's direction is defined by four reference touchston
 | **SimCity (2013)** | Agent-driven city sim: RCI zoning, traffic, land value, data overlays | `src/games/citybuilder/` |
 | **Dragon Age: Origins** | Party-based real-time-with-pause combat, branching dialogue, companion approval | greenfield — see below |
 
-`AGENTS.md` is also explicit about what this project is **not**: "a generic engine framework," "an ECS experiment," "an enterprise architecture exercise," or "a plugin-based platform." It prioritizes "practical implementation over generic engine architecture." Those are style constraints on *how* things get built, not a cap on *which genres* get pursued — chasing four different touchstones is fine as long as each is built the same explicit, flat-data, no-generic-framework way the rest of the codebase already is.
+`CLAUDE.md`'s Non-goals section is also explicit about what this project is **not**: a generic engine framework, an ECS experiment, an enterprise architecture exercise, or a dynamic-loading plugin/mod distribution platform. It prioritizes practical implementation over generic engine architecture. Those are style constraints on *how* things get built, not a cap on *which genres* get pursued — chasing four different touchstones is fine as long as each is built the same explicit, flat-data, no-generic-framework way the rest of the codebase already is. (Note: `CLAUDE.md` also documents a statically linked `IEnginePlugin`/`PluginRegistry` composition seam under "Engine plugins" — that's a compile-time extension point, not the dynamic-loading distribution platform this non-goals list rules out; see the Modding and Scripting section below.)
 
 That said, a large chunk of the original wishlist assumes a different kind of engine entirely — a real-time mass-battle RTS with netcode and a full scenario-editor suite — which lines up with none of the four touchstones above and stays out of scope (see below).
 
@@ -26,7 +26,7 @@ That said, a large chunk of the original wishlist assumes a different kind of en
 | ✅ | Done — exists and is in use today |
 | 🟡 | Partial — some of the mechanism exists, notable gaps remain |
 | ⬜ | Not started |
-| 🚫 | Out of scope — conflicts with `AGENTS.md`'s stated non-goals |
+| 🚫 | Out of scope — conflicts with this project's stated non-goals (`CLAUDE.md`; see also Out of scope below) |
 
 ## Status inventory
 
@@ -48,7 +48,7 @@ That said, a large chunk of the original wishlist assumes a different kind of en
 | MSAA | ⬜ | All pipelines pinned to `VK_SAMPLE_COUNT_1_BIT` |
 | Screen-space reflections | ⬜ | RT reflections exist instead as a gated shader variant (`-DODAI_RT_REFLECTIONS=1`) |
 | Shader hot reload | ⬜ | Shaders compile offline via `slangc` at build time only |
-| Render graph with automatic barrier sync | ⬜ | `frame_graph.{h,cc}` orders passes and validates order; barriers are hand-written per pass by design (`AGENTS.md`: "do not assume implicit barriers") |
+| Render graph with automatic barrier sync | ⬜ | `frame_graph.{h,cc}` orders passes and validates order; barriers are hand-written per pass by design (explicit-barriers convention — see Renderer internals in `CLAUDE.md`) |
 
 ### GPU-Driven Rendering
 
@@ -118,7 +118,7 @@ This is the newest touchstone and, honestly, close to a blank page. The one thin
 | Feature | Status | Notes |
 |---|---|---|
 | MMO-style HUD chrome (unit frames, action bars, chat, inventory grid) | 🟡 | Exists as static mockup only (`games/swtor/swtor_app.cc`) — layout is reusable, none of it is wired to real state |
-| Skeletal animation / GPU skinning | 🟡 | CPU side done and tested: `src/anim/` (`Skeleton`/`AnimationClip`, `AnimationSampler` hierarchy + lerp/slerp keyframe evaluation, JSON loader), `odai_animation_tests` all passing. GPU side is now wired into the actual frame: `recordSkinningPass` runs every frame before the shadow/prepass/main passes (`frame_run.cc`), each of those three passes has its own skinned-actor draw block reusing the existing `m_importedStaticPipeline` family (`frame_pass_shadow.cc`/`frame_pass_prepass.cc`/`frame_pass_main.cc`), `createSkinningComputeResources`/`destroySkinningComputeResources` are called from device init/shutdown (`init.cc`) alongside SSAO's, and it has real GPU timestamp query slots. Two real bugs caught and fixed while wiring this in: the bone-matrix upload was missing the `transpose()` step the camera-MVP path always does before a `-matrix-layout-column-major` shader reads it, and `setSkinnedActorPose` was calling into the FrameArena before `beginFrame()` had run for that frame (fixed by splitting it into a cheap setter + a `uploadSkinnedActorPoseForFrame()` step called right after `beginFrame()`). Still unverified against a real Vulkan build — no vcpkg/GPU in this sandbox; the Windows CI job is the next real compile signal. Correcting an earlier inaccuracy in this doc: NIF skin data is not "parsed but discarded" — nothing skin/bone/keyframe-related is parsed anywhere in `import/fnv/nif_scene.cc` today; that import work is still fully ahead (see Explicitly Deferred below). |
+| Skeletal animation / GPU skinning | 🟡 | CPU side done and tested: `src/anim/` (`Skeleton`/`AnimationClip`, `AnimationSampler` hierarchy + lerp/slerp keyframe evaluation, JSON loader), `odai_animation_tests` all passing. GPU side is now wired into the actual frame: `recordSkinningPass` runs every frame before the shadow/prepass/main passes (`frame_run.cc`), each of those three passes has its own skinned-actor draw block reusing the existing `m_importedStaticPipeline` family (`frame_pass_shadow.cc`/`frame_pass_prepass.cc`/`frame_pass_main.cc`), `createSkinningComputeResources`/`destroySkinningComputeResources` are called from device init/shutdown (`init.cc`) alongside SSAO's, and it has real GPU timestamp query slots. Two real bugs caught and fixed while wiring this in: the bone-matrix upload was missing the `transpose()` step the camera-MVP path always does before a `-matrix-layout-column-major` shader reads it, and `setSkinnedActorPose` was calling into the FrameArena before `beginFrame()` had run for that frame (fixed by splitting it into a cheap setter + a `uploadSkinnedActorPoseForFrame()` step called right after `beginFrame()`). The "Windows CI job is the next real compile signal" note above turned out to matter: the first real CI run caught a genuine compile bug — `frame_pass_skinning.cc` and `skinning_resources.cc` both pulled in `render/renderer_shared.h` without first including `<GLFW/glfw3.h>` and `sim/network_procedural.h` (every other `frame_pass_*.cc` does this before the shared-header include), leaving `neighborMask6`/`glfwGetFramebufferSize` undeclared. Fixed by matching the established include order; a fresh CI run is in flight to confirm. Still not fully verified end-to-end (frame output correctness, GPU timestamps actually populating) until that run is green and someone eyeballs a real frame. Correcting an earlier inaccuracy in this doc: NIF skin data is not "parsed but discarded" — nothing skin/bone/keyframe-related is parsed anywhere in `import/fnv/nif_scene.cc` today; that import work is still fully ahead (see Explicitly Deferred below). |
 | Branching dialogue system | 🟡 | First slice landed: `src/dialogue/` (data format, `DialogueRuntime` state machine, JSON loader with non-fatal error reporting) + `ui::DialoguePanel` (`src/ui/widgets/dialogue_panel.h/.cc`), tested by `tests/dialogue_tests.cc` (`odai_dialogue_tests`). Not yet wired into any actual game/content beyond the test fixture tree, and not yet exercised through a real build (see verification note in the commit) |
 | Companion approval / relationship system | 🟡 | The runtime supports per-companion approval reads/deltas as a dialogue effect (`DialogueContext::approval`/`adjustApproval`, `DialogueCondition::minApproval`); `MapDialogueContext` state (flags + approvals) now round-trips to/from JSON (`src/dialogue/dialogue_state_io.h/.cc`), closing the persistence gap — tested by `odai_dialogue_tests` (file and in-memory round-trip, malformed-input and missing-file error paths), compiled and run standalone in this sandbox (no vcpkg here to build the full test suite). No UI display or companion roster concept exists yet outside the dialogue module itself |
 | Real-time-with-pause tactical party combat | ⬜ | Not implemented. Distinct from — and much smaller in scope than — the mass-battle rendering that's out of scope below (4–8 characters, not thousands) |
@@ -148,7 +148,7 @@ Two different scales matter here and shouldn't be conflated: Civ6-scale strategi
 | Save-game serialization | 🟡 | Static `StrategyMap` serializes (`game/strategy_map_io.h`); live `GameState` (units, cities, empires, tech) does not |
 | Background/async AI processing | ⬜ | `stepTurn`/`stepAiUnits` run synchronously |
 | Snapshots / rollback | ⬜ | Not implemented |
-| Data-oriented ECS | 🚫 | Explicitly rejected by `AGENTS.md` ("not... an ECS experiment") |
+| Data-oriented ECS | 🚫 | Explicitly rejected — see `CLAUDE.md`'s Non-goals ("not... an ECS experiment") |
 
 ### AI and Navigation
 
@@ -199,7 +199,7 @@ This is the strongest area of the codebase relative to the wishlist — see `doc
 | World/terrain editor, scenario editor, faction/tech-tree/quest editors | ⬜ | World content is authored via offline cookers instead (`tools/strategy_map_gen_main.cc`, `tools/newvegas_cooker_main.cc`) — see note below |
 | Entity inspector, nav debugging, AI decision inspector, replay/timeline debugger | ⬜ | Not implemented |
 
-> A full in-engine editor suite (world sculpting, scenario/faction/tech-tree/quest editors) is a large, generic-tooling investment that cuts against `AGENTS.md`'s "prefer practical implementation over generic engine architecture." The offline-cooker approach already in use is the intentional tradeoff here, not a gap to urgently close.
+> A full in-engine editor suite (world sculpting, scenario/faction/tech-tree/quest editors) is a large, generic-tooling investment that cuts against `CLAUDE.md`'s Non-goals ("prefer practical implementation over generic engine architecture"). The offline-cooker approach already in use is the intentional tradeoff here, not a gap to urgently close.
 
 ### Asset Pipeline
 
@@ -244,13 +244,14 @@ This is the strongest area of the codebase relative to the wishlist — see `doc
 | Embedded scripting | ✅ | `src/script/` Lua integration hooking `game/mod_host.h` (`onTurnStart`, `onCityYields`, `onTechResearched`, etc.), tested (`tests/lua_hook_tests.cc`) |
 | Data-driven content | ✅ | `content/content_database.h` loads techs/buildings/units/leaders from JSON mods |
 | Mod dependency management | 🟡 | `content/mod_loader.h` resolves mod dirs; full load-order/dependency resolution flagged as future work in-repo |
-| Steam Workshop integration, sandboxed scripting hardening | ⬜ | Not implemented |
+| Engine plugin composition seam | 🟡 | `src/engine/plugin.h` (`IEnginePlugin`/`PluginRegistry`) lets a `GameApp` compose in optional lifecycle behavior (attach/tick/render/detach) without a dynamic loader — statically linked, same shape as `IModHost`/`mod_loader.h`. Wired into `GameApp::init/run/shutdown`, documented in `docs/GAME_API.md` §10 and `CLAUDE.md`. **Has zero implementations anywhere in the codebase yet and has never been built on a real Vulkan+GLFW target** — treat as an unproven interface, not a settled pattern, until a real plugin exists in a real game |
+| Steam Workshop integration, sandboxed scripting hardening | ⬜ | Not implemented — and Workshop-style dynamic-loading distribution is explicitly out of scope regardless (see `CLAUDE.md`'s Non-goals) |
 
 ### Performance and Scalability
 
 | Feature | Status | Notes |
 |---|---|---|
-| Reverse-depth, GPU timestamp measurement, explicit barriers | ✅ | Matches `AGENTS.md`'s Performance Rules directly |
+| Reverse-depth, GPU timestamp measurement, explicit barriers | ✅ | Matches this project's performance-first conventions directly (see the `performance-engineer` agent's performance contract) |
 | Chunk streaming, FrameArena transient memory | ✅ | `world/world.h`, `docs/FrameArena.md` |
 | Configurable quality presets, headless sim mode | ⬜ | Not confirmed |
 
@@ -264,13 +265,13 @@ This is the strongest area of the codebase relative to the wishlist — see `doc
 
 ## Out of scope
 
-These wishlist items directly conflict with `AGENTS.md`'s stated non-goals and are **not planned** unless the project's stated focus changes:
+These wishlist items directly conflict with `CLAUDE.md`'s stated Non-goals and are **not planned** unless the project's stated focus changes:
 
 - **Mass real-time battle rendering** (thousands of skinned/animated units, flocking, formation systems, battlefield VFX at RTS scale) — none of the four reference touchstones call for this. Do not confuse this with small-party (4–8 character) skeletal animation for the Dragon Age touchstone, which *is* in scope (see Party RPG / Narrative above) — the "no crowd-simulation stack" line is drawn at scale, not at "any animated characters at all."
-- **Data-oriented ECS** — explicitly rejected: "This is not... an ECS experiment."
+- **Data-oriented ECS** — explicitly rejected: "not... an ECS experiment."
 - **Lockstep/deterministic multiplayer netcode** — conflicts with "prefer practical implementation over generic engine architecture" and "not an enterprise architecture exercise"; no current pillar needs it.
 - **Full in-engine editor suite** (world sculpting, scenario editor, faction/diplomacy editor, tech-tree editor, quest editor) — conflicts with the same practical-over-generic principle; the existing offline-cooker content pipeline is the intentional alternative.
-- **Plugin/Workshop-style mod distribution platform** — conflicts with "not a plugin-based platform"; the existing JSON-mod + Lua-hook system already covers data/behavior modding without building a distribution platform.
+- **Dynamic-loading plugin/Workshop-style mod distribution platform** (`dlopen`/DLL loading, Steam Workshop-style discovery) — conflicts with `CLAUDE.md`'s "no dynamic-loading plugin/mod distribution platform" non-goal; the existing JSON-mod + Lua-hook system, plus the statically linked `IEnginePlugin`/`PluginRegistry` composition seam (see `CLAUDE.md`'s "Engine plugins"), already cover data/behavior/lifecycle composition without building a distribution platform.
 
 ## Prioritized next steps
 

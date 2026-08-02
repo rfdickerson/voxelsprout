@@ -2,6 +2,27 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Reference Touchstones
+
+Four games define what this project is actually building toward. Each maps to an existing area of the codebase — none are being cloned literally, but each names the specific feel/systems to chase:
+
+- **Morrowind** — open-world exploration, hand-placed regional identity, readable terrain and settlements (`src/world/`, `src/import/`).
+- **Civilization VI** — turn-based hex-grid 4X strategy: yields, tech tree, borders, map modes/lenses, diplomacy (`src/game/`).
+- **SimCity (2013)** — agent-driven city simulation: RCI zoning, traffic congestion, land value, service coverage, data-layer overlays (`src/games/citybuilder/`, already explicitly modeled on it).
+- **Dragon Age: Origins** — party-based real-time-with-pause tactical combat, branching dialogue with consequences, companion relationships/approval. This is the least-built touchstone today — see `docs/ROADMAP.md`'s Party RPG / Narrative section.
+
+These are creative direction, not a mandate to merge four genres into one game — each pillar can keep developing largely on its own track. `docs/ROADMAP.md` tracks concrete status and priority per touchstone.
+
+## Non-goals
+
+This project is not:
+- a generic engine framework
+- an ECS experiment
+- an enterprise architecture exercise
+- a dynamic-loading plugin/mod distribution platform (no `dlopen`/DLL loading, no Steam Workshop-style discovery)
+
+It prioritizes practical implementation over generic engine architecture, and explicit, hand-written control flow over generic frameworks (e.g. render passes never assume implicit barriers — see Renderer internals below). These are style constraints on *how* things get built, not a cap on *which* genres get pursued — see Reference Touchstones above. Note the "Engine plugins" pattern documented below is a statically linked, compile-time composition seam — a different thing than the distribution platform this list rules out.
+
 ## Build Commands
 
 **Windows (app + tools):**
@@ -63,12 +84,10 @@ Use `add_slang_shader_variant(..., -DODAI_RT_SHADOWS=1)` for define-based shader
 
 ## Architecture
 
-Read **`AGENTS.md`** first — it defines the project's non-negotiable rules (Vulkan encapsulation, one-way data flow, Morrowind world feel, performance expectations).
-
 ### Module boundaries
 
 ```
-app/      — lifecycle, input routing, per-frame coordination
+app/      — lifecycle, input routing, per-frame coordination (older Civ-style app; predates engine/)
 core/     — math, time, logging (VOX_LOGE/W/I/D/T macros), input state
 world/    — terrain, chunk grids, voxels, static placement
 import/   — Bethesda asset parsing (Morrowind ESM/terrain, Fallout: New Vegas ESM/BSA/NIF in import/fnv/) + scene serialization
@@ -76,6 +95,7 @@ game/     — strategy map model, hex grid, serialization, mesh building
 sim/      — factory simulation (pipes, belts, items)
 ui/       — Vulkan-free UI framework: draw list, font, rich text, widget tree
 render/   — public Renderer facade + everything Vulkan (only place that includes Vulkan headers)
+engine/   — GameApp lifecycle base + PluginRegistry; what src/games/* build on (see docs/GAME_API.md)
 tools/    — offline content generators (balmora cooker, map gen)
 tests/    — correctness tests; no Vulkan in test executables
 ```
@@ -116,6 +136,31 @@ The seam between `src/ui/` and the renderer is `Renderer::setUiDrawData(const ui
 - `render/backend/vulkan/ui_renderer.cc` is the only UI file touching Vulkan: owns the alpha-blend pipeline, per-texture descriptor sets, and per-frame geometry streaming
 
 Swapchain format is `B8G8R8A8_UNORM` (driver presents raw bytes, display interprets as sRGB). The UI fragment shader works in linear space and applies a manual `linearToSrgb` encode before output — matching the `pow(1/2.2)` the tonemapper applies for the 3-D pass. Vertex colors authored as sRGB hex are decoded to linear on entry so hex values are WYSIWYG. Color textures use `VK_FORMAT_R8G8B8A8_SRGB` image views so the sampler returns linear values.
+
+### Engine plugins (proposed pattern, unproven — read before citing this as settled)
+
+`GameApp` (`src/engine/game_app.h`) — the shared lifecycle base for `src/games/*` and
+several tools — owns a `PluginRegistry`. The intent is an extension point: a game
+registers `IEnginePlugin` implementations from its own `onInit()` to compose in optional
+behavior (a debug overlay, a stats collector, a `mods/`-driven hook) without `GameApp` or
+the base game needing to know about it. See `docs/GAME_API.md` §10 for the lifecycle
+contract and the one ordering caveat (`onRender` must be invoked manually from the game's
+own `onRender()`, after `beginFrameDraw()` and before `submitFrame()`).
+
+**As of the commit that added it, `IEnginePlugin` has zero implementations anywhere in
+this codebase** and has never been built against a real Vulkan+GLFW target (checked via
+`g++ -fsyntax-only` only). Do not treat this as a settled architectural decision or cite
+it as having superseded anything — that requires a real plugin, in a real game, on a real
+build, first. If you're reading this and no plugin exists yet, treat the interface as a
+draft: verify the shape still fits before building on it, and expect `GameApp`'s
+`protected` members (`m_renderer`, `m_uiContext`, etc.) may need new accessors before a
+plugin holding only `GameApp&` can actually do anything useful.
+
+No dynamic loading (`dlopen`/DLL) is involved anywhere in this engine — a "plugin" is a
+statically linked C++ class registered at startup, the same shape as the existing
+`IModHost` seam (`src/game/mod_host.h`) and `mods/base` content loading
+(`src/content/mod_loader.h`). Prefer composing through one of these three existing
+interfaces over inventing a fourth.
 
 ### Hex strategy map
 

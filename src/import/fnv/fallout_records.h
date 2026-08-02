@@ -12,8 +12,8 @@
 //
 // Coordinate/scale notes carried over from public Gamebryo landscape
 // documentation, NOT validated against a real .esm in this environment (no
-// Fallout: New Vegas Data Files available here — see AGENTS.md/README for
-// the local path convention once a user tests this against real data):
+// Fallout: New Vegas Data Files available here — see README for the local
+// path convention once a user tests this against real data):
 //   - Exterior cells are 4096 world units square.
 //   - LAND VHGT posts form a 33x33 grid at 128-unit spacing (32 gaps * 128 = 4096).
 //   - VHGT height deltas are accumulated in a fixed unit scale (kLandHeightScale);

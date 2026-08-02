@@ -636,6 +636,7 @@ if(ODAI_BUILD_APP)
             src/games/stellaris/stellaris_main.cc
             src/games/stellaris/stellaris_app.cc
             src/engine/game_app.cc
+            src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
@@ -684,6 +685,7 @@ if(ODAI_BUILD_APP)
             src/games/swtor/swtor_main.cc
             src/games/swtor/swtor_app.cc
             src/engine/game_app.cc
+            src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
@@ -729,6 +731,7 @@ if(ODAI_BUILD_APP)
             src/games/citybuilder/citybuilder_app.cc
             src/games/citybuilder/citybuilder_citizens.cc
             src/engine/game_app.cc
+            src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
@@ -780,6 +783,7 @@ if(ODAI_BUILD_APP)
             src/games/snake/snake_main.cc
             src/games/snake/snake_app.cc
             src/engine/game_app.cc
+            src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
@@ -824,6 +828,7 @@ if(ODAI_BUILD_APP)
             src/games/minesweeper/minesweeper_main.cc
             src/games/minesweeper/minesweeper_app.cc
             src/engine/game_app.cc
+            src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
@@ -870,6 +875,7 @@ if(ODAI_BUILD_APP)
             src/games/voxelcraft/voxelcraft_player.cc
             src/games/voxelcraft/voxelcraft_streaming.cc
             src/engine/game_app.cc
+            src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
@@ -914,6 +920,7 @@ if(ODAI_BUILD_APP)
             src/tools/ui_editor/ui_editor_main.cc
             src/tools/ui_editor/ui_editor_app.cc
             src/engine/game_app.cc
+            src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
@@ -959,6 +966,7 @@ if(ODAI_BUILD_APP)
             src/tools/retro_theme_demo/retro_theme_demo_app.cc
             src/tools/retro_theme_demo/retro_widgets.cc
             src/engine/game_app.cc
+            src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
@@ -1003,6 +1011,7 @@ if(ODAI_BUILD_APP)
             src/tools/tween_demo/tween_demo_main.cc
             src/tools/tween_demo/tween_demo_app.cc
             src/engine/game_app.cc
+            src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
@@ -1048,6 +1057,7 @@ if(ODAI_BUILD_APP)
             src/tools/design_system_demo/design_system_demo_main.cc
             src/tools/design_system_demo/design_system_demo_app.cc
             src/engine/game_app.cc
+            src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc

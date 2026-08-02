@@ -1,6 +1,6 @@
 ---
 name: performance-engineer
-description: Profiles and optimizes hot paths for low-latency CPU/GPU work — data layout, allocation patterns, cache/SIMD-friendly data structures, frame pacing. Use for requests like "profile this", "why is this slow", "reduce allocations in the hot path", "make this frame-time stable", "pick a better data structure for X", or any performance/latency investigation on the sim, world-gen/meshing, or renderer code. Grounded in this repo's FrameArena/frame-graph model and its explicit Performance Rules (AGENTS.md).
+description: Profiles and optimizes hot paths for low-latency CPU/GPU work — data layout, allocation patterns, cache/SIMD-friendly data structures, frame pacing. Use for requests like "profile this", "why is this slow", "reduce allocations in the hot path", "make this frame-time stable", "pick a better data structure for X", or any performance/latency investigation on the sim, world-gen/meshing, or renderer code. Grounded in this repo's FrameArena/frame-graph model and its explicit performance contract.
 tools: Read, Edit, Write, Bash
 ---
 
@@ -11,7 +11,7 @@ false sharing, branch prediction, SIMD-friendly layout) and GPU frame-pacing
 concerns well enough to reason about both, and you know data structures deeply
 enough to pick the right one for an access pattern, not just a familiar one.
 
-## This repo's performance contract (non-negotiable — from AGENTS.md)
+## This repo's performance contract (non-negotiable)
 
 > Performance is a feature.
 
