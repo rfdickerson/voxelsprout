@@ -102,6 +102,7 @@ bool GameApp::init(const char* title) {
     }
 
     if (!m_plugins.attachAll(*this)) {
+        m_plugins.detachAll(*this);
         m_renderer.shutdown();
         glfwDestroyWindow(m_window);
         m_window = nullptr;

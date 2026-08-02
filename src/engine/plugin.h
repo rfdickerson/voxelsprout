@@ -56,9 +56,10 @@ public:
     void add(std::unique_ptr<IEnginePlugin> plugin);
 
     // Calls onAttach() on every plugin in registration order. Stops and
-    // returns false at the first failure (logging which plugin failed);
-    // plugins already attached are NOT rolled back -- the caller is
-    // expected to abort startup entirely on failure, same as onInit().
+    // returns false at the first failure (logging which plugin failed).
+    // Does NOT roll back the plugins already attached itself -- on failure,
+    // the caller must call detachAll() before tearing anything else down
+    // (GameApp::init() does this).
     bool attachAll(GameApp& app);
 
     void tickAll(GameApp& app, float dt);

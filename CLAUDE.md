@@ -116,15 +116,24 @@ The seam between `src/ui/` and the renderer is `Renderer::setUiDrawData(const ui
 
 Swapchain format is `B8G8R8A8_UNORM` (driver presents raw bytes, display interprets as sRGB). The UI fragment shader works in linear space and applies a manual `linearToSrgb` encode before output — matching the `pow(1/2.2)` the tonemapper applies for the 3-D pass. Vertex colors authored as sRGB hex are decoded to linear on entry so hex values are WYSIWYG. Color textures use `VK_FORMAT_R8G8B8A8_SRGB` image views so the sampler returns linear values.
 
-### Engine plugins
+### Engine plugins (proposed pattern, unproven — read before citing this as settled)
 
 `GameApp` (`src/engine/game_app.h`) — the shared lifecycle base for `src/games/*` and
-several tools — owns a `PluginRegistry`. This is a deliberate, sanctioned extension point:
-a game registers `IEnginePlugin` implementations from its own `onInit()` to compose in
-optional behavior (a debug overlay, a stats collector, a `mods/`-driven hook) without
-`GameApp` or the base game needing to know about it. See `docs/GAME_API.md` §10 for the
-lifecycle contract and the one ordering caveat (`onRender` must be invoked manually from
-the game's own `onRender()`, after `beginFrameDraw()` and before `submitFrame()`).
+several tools — owns a `PluginRegistry`. The intent is an extension point: a game
+registers `IEnginePlugin` implementations from its own `onInit()` to compose in optional
+behavior (a debug overlay, a stats collector, a `mods/`-driven hook) without `GameApp` or
+the base game needing to know about it. See `docs/GAME_API.md` §10 for the lifecycle
+contract and the one ordering caveat (`onRender` must be invoked manually from the game's
+own `onRender()`, after `beginFrameDraw()` and before `submitFrame()`).
+
+**As of the commit that added it, `IEnginePlugin` has zero implementations anywhere in
+this codebase** and has never been built against a real Vulkan+GLFW target (checked via
+`g++ -fsyntax-only` only). Do not treat this as a settled architectural decision or cite
+it as having superseded anything — that requires a real plugin, in a real game, on a real
+build, first. If you're reading this and no plugin exists yet, treat the interface as a
+draft: verify the shape still fits before building on it, and expect `GameApp`'s
+`protected` members (`m_renderer`, `m_uiContext`, etc.) may need new accessors before a
+plugin holding only `GameApp&` can actually do anything useful.
 
 No dynamic loading (`dlopen`/DLL) is involved anywhere in this engine — a "plugin" is a
 statically linked C++ class registered at startup, the same shape as the existing
