@@ -74,9 +74,9 @@ That said, a large chunk of the original wishlist assumes a different kind of en
 | Roads / rivers | 🟡 | Tile flags exist and render; no trade-route rendering |
 | Terrain blending / biomes | 🟡 | 11 biome types with per-terrain color; adjacent-tile blending not confirmed |
 | Supply / logistics overlays | 🟡 | Supply simulation exists (`game/units.h`); no visual overlay |
-| Strategic map labels | ⬜ | Settlement names stored but not rendered as labels |
+| Strategic map labels | ✅ | Civ6-style city banners (owner color, tier chip, name) + floating unit HP/supply labels, `App::drawStrategyMapLabels` in `src/app/app.cc`, fog-of-war gated and cached |
 | Line-of-sight visualization | ⬜ | Only binary fog-of-war state, no LOS cone/ray viz |
-| Movement range overlays | ⬜ | Pathfinding exists; no reachable-tile highlight rendering |
+| Movement range overlays | ✅ | Translucent per-tile hex wash for the selected unit's reachable set this turn, `App::drawStrategyMapLabels`; backed by `game::reachableTiles` (BFS, `src/game/units.cc`) |
 | Influence / control zones | ⬜ | Only binary tile ownership, no gradient influence map |
 | Heatmaps | ⬜ | Not implemented |
 
@@ -277,10 +277,10 @@ These wishlist items directly conflict with `CLAUDE.md`'s stated Non-goals and a
 
 This is a starting recommendation, not a commitment — sequencing is the user's call. Ordered roughly by (existing maturity + cost) across the four touchstones, cheapest/most-built first:
 
-**Tier 1 — Civ6 strategy-layer polish (near-term, high value, small/local).** The hex 4X layer already renders borders and fog of war and simulates supply/pathfinding, but gives the player no visual feedback loop for any of it:
-- Strategic map labels (settlement names already stored, just not drawn)
-- Movement-range overlay (reachability already computed by `findHexPath`)
-- Supply-line overlay (supply cost already simulated in `game/units.h`)
+**Tier 1 — Civ6 strategy-layer polish (near-term, high value, small/local).** The hex 4X layer already renders borders and fog of war and simulates supply/pathfinding:
+- Strategic map labels — **done.** `App::drawStrategyMapLabels` (`src/app/app.cc`) draws Civ6-style city banners and floating unit HP/supply labels, fog-gated and cached.
+- Movement-range overlay — **done.** `game::reachableTiles` (`src/game/units.cc`) is a plain BFS bounded by `Unit::movementLeft` — not the same cost model as `findHexPath`'s `pathStepCost` (route-choice bias) or `supplyCostForStep` (provisions), since movement depletes by exactly 1 per hop regardless of terrain; `findHexPath`'s A* frontier is goal-directed and incomplete, so it couldn't be reused directly as the roadmap previously assumed. Rendered as a translucent per-tile hex wash in `drawStrategyMapLabels`. Fixed a related bug found along the way: `App::selectUnitAtHex` had no ownership check, so a player could select and issue move/attack orders through an enemy unit.
+- Supply-line overlay — deferred. Today "in supply" is only a binary 1-hex-radius check (`isNearFriendlySettlement`); there's no path/route concept to visualize yet, so this needs a design pass (e.g. cheapest route back to a friendly settlement via `supplyCostForStep`) before it can be drawn.
 - Line-of-sight visualization
 
 **Tier 2 — SimCity city-sim depth.** `citybuilder` is already the most mature of the four touchstone prototypes; the remaining gaps are additive data layers, not new architecture:

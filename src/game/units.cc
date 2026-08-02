@@ -289,6 +289,61 @@ std::vector<std::array<std::uint32_t, 2>> findHexPath(
     return path;
 }
 
+std::vector<std::array<std::uint32_t, 2>> reachableTiles(
+        const StrategyMap& map, const GameState& gs,
+        std::uint32_t startCol, std::uint32_t startRow, int movementLeft) {
+    std::vector<std::array<std::uint32_t, 2>> result;
+    if (movementLeft <= 0 || !map.inBounds(static_cast<int>(startCol), static_cast<int>(startRow))) {
+        return result;
+    }
+
+    const std::uint32_t W = map.width;
+    const std::size_t N = static_cast<std::size_t>(W) * static_cast<std::size_t>(map.height);
+    const auto idxOf = [W](std::uint32_t c, std::uint32_t r) {
+        return static_cast<std::size_t>(r) * static_cast<std::size_t>(W) + static_cast<std::size_t>(c);
+    };
+    const std::size_t startIdx = idxOf(startCol, startRow);
+
+    // -1 == unvisited; otherwise the hop count from the start, capped at movementLeft.
+    std::vector<int> depth(N, -1);
+    depth[startIdx] = 0;
+    std::queue<std::size_t> frontier;
+    frontier.push(startIdx);
+
+    while (!frontier.empty()) {
+        const std::size_t current = frontier.front();
+        frontier.pop();
+        if (depth[current] >= movementLeft) {
+            continue;  // at the movement cap; don't expand further from here
+        }
+        const int curCol = static_cast<int>(current % W);
+        const int curRow = static_cast<int>(current / W);
+        for (int dir = 0; dir < 6; ++dir) {
+            int nc = 0;
+            int nr = 0;
+            if (!tileNeighbor(map, curCol, curRow, dir, nc, nr)) {
+                continue;
+            }
+            const std::uint32_t ncu = static_cast<std::uint32_t>(nc);
+            const std::uint32_t nru = static_cast<std::uint32_t>(nr);
+            const std::size_t nIdx = idxOf(ncu, nru);
+            if (depth[nIdx] != -1) {
+                continue;  // already reached at an equal or shorter hop count
+            }
+            // Water and occupied tiles are never enqueued, so they're dead ends --
+            // nothing behind them gets marked reachable, matching moveUnitStep's
+            // "can't stand here, can't pass through here" rule.
+            if (terrainIsWater(map.at(ncu, nru).terrain) || gs.unitAt(ncu, nru) != nullptr) {
+                continue;
+            }
+            depth[nIdx] = depth[current] + 1;
+            result.push_back({ncu, nru});
+            frontier.push(nIdx);
+        }
+    }
+    return result;
+}
+
 void followPath(GameState& gs, const StrategyMap& map, Unit& unit) {
     while (!unit.path.empty() && unit.movementLeft > 0) {
         const std::array<std::uint32_t, 2> next = unit.path.front();

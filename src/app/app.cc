@@ -5467,6 +5467,64 @@ void App::drawStrategyMapLabels(float fbW, float fbH, float dt) {
     }
     const odai::math::Matrix4 vp = proj * view;
 
+    // Movement-range overlay: a translucent hex wash over every tile the selected
+    // unit can reach this turn. Drawn first so banners/labels/route dots (below)
+    // composite on top of it. Projects the same way those do: world -> clip -> NDC
+    // -> pixel, skipping anything that lands behind the camera.
+    if (m_selectedUnitId != 0) {
+        if (const odai::game::Unit* sel = m_gameState.findUnit(m_selectedUnitId)) {
+            // Redundant with selectUnitAtHex's ownership check, but cheap and this
+            // is the one place a leak would actually show the AI's movement range.
+            if (sel->owner == m_playerOwner && sel->movementLeft > 0) {
+                const odai::ui::UiColor rangeFill{0.35f, 0.65f, 0.95f, 0.20f};
+                const std::uint32_t rangeRgba = rangeFill.packAbgr8();
+                const auto projectToScreen = [&](const odai::math::Vector3& world,
+                                                 odai::ui::UiVec2& outScreen) -> bool {
+                    const odai::math::Vector4 clip =
+                        vp * odai::math::Vector4{world.x, world.y, world.z, 1.0f};
+                    if (clip.w <= 0.0f) return false;
+                    const float ndcX = clip.x / clip.w;
+                    const float ndcY = clip.y / clip.w;
+                    outScreen = {(ndcX + 1.0f) * 0.5f * fbW, (ndcY + 1.0f) * 0.5f * fbH};
+                    return true;
+                };
+
+                const auto reach = odai::game::reachableTiles(
+                    m_strategyMap, m_gameState, sel->col, sel->row, sel->movementLeft);
+                for (const auto& tile : reach) {
+                    odai::ui::UiVec2 center;
+                    if (!projectToScreen(
+                            odai::game::tileCenterWorld(m_strategyMap, tile[0], tile[1]), center)) {
+                        continue;
+                    }
+                    odai::ui::UiVec2 corners[6];
+                    bool allCornersVisible = true;
+                    for (int corner = 0; corner < 6 && allCornersVisible; ++corner) {
+                        allCornersVisible = projectToScreen(
+                            odai::game::tileCornerWorld(m_strategyMap, tile[0], tile[1], corner),
+                            corners[corner]);
+                    }
+                    if (!allCornersVisible) {
+                        continue;  // don't emit a degenerate fan for a tile at the view edge
+                    }
+
+                    odai::ui::UiVertex verts[7];
+                    verts[0] = odai::ui::UiVertex{{center.x, center.y}, {0.f, 0.f}, rangeRgba,
+                                                  static_cast<std::uint32_t>(odai::ui::UiDrawMode::SolidColor),
+                                                  {}};
+                    for (int corner = 0; corner < 6; ++corner) {
+                        verts[corner + 1] = odai::ui::UiVertex{
+                            {corners[corner].x, corners[corner].y}, {0.f, 0.f}, rangeRgba,
+                            static_cast<std::uint32_t>(odai::ui::UiDrawMode::SolidColor), {}};
+                    }
+                    static constexpr std::uint32_t kHexFanIndices[18] = {
+                        0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 1};
+                    m_uiDrawList.addTriangleMesh(verts, 7, kHexFanIndices, 18);
+                }
+            }
+        }
+    }
+
     const odai::ui::UiColor textColor{1.f, 0.95f, 0.82f, 1.f};
     const odai::ui::Font& font = m_uiFont;
     const float halfLineH = font.lineHeightPx() * 0.5f;
@@ -6581,12 +6639,15 @@ void App::selectUnitAtHex(int col, int row) {
         return;
     }
     odai::game::Unit* onTile = m_gameState.unitAt(static_cast<std::uint32_t>(col), static_cast<std::uint32_t>(row));
-    if (onTile != nullptr) {
+    // Only the player's own units are selectable: commitMoveAttackPreview() issues
+    // move/attack orders against whatever is selected with no further owner check,
+    // so selecting an enemy unit here would let the player command it directly.
+    if (onTile != nullptr && onTile->owner == m_playerOwner) {
         // Select the unit here (and drive the existing unit action bar).
         m_selectedUnitId = onTile->id;
         m_selectedUnitType = onTile->typeId;
     } else {
-        // Clicking empty ground clears the selection.
+        // Clicking empty ground -- or an enemy unit -- clears the selection.
         m_selectedUnitId = 0;
     }
 }

@@ -133,6 +133,17 @@ MoveResult moveUnitStep(GameState& gs, const StrategyMap& map, Unit& unit,
     std::uint32_t startCol, std::uint32_t startRow,
     std::uint32_t goalCol, std::uint32_t goalRow);
 
+// Every tile reachable from (startCol,startRow) within movementLeft hex hops, over
+// land tiles never passing through water or a tile occupied by another unit (an
+// occupied/water tile is a dead end, not just an excluded result -- it blocks the
+// tiles behind it too). Excludes the start tile itself. A plain BFS, not a weighted
+// search: unlike findHexPath's pathStepCost (road/rough terrain bias for route
+// choice) or supplyCostForStep (provisions drain), movementLeft depletes by exactly
+// 1 per hop regardless of terrain (see moveUnitStep), so every edge costs the same.
+[[nodiscard]] std::vector<std::array<std::uint32_t, 2>> reachableTiles(
+    const StrategyMap& map, const GameState& gs,
+    std::uint32_t startCol, std::uint32_t startRow, int movementLeft);
+
 // Advance a unit along its stored path while it has movement and each step is
 // legal. Stops (keeping the path) when movement runs out so the order resumes next
 // turn; clears the path if a step becomes blocked or on arrival.

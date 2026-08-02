@@ -3,7 +3,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <string>
+#include <utility>
 
 #include "game/strategy_hex_terrain.h"
 #include "game/strategy_map.h"
@@ -625,6 +627,111 @@ void testMoveOrderTraversesOverTurns() {
     }
 }
 
+void testReachableTilesOpenGround() {
+    using namespace odai::game;
+    StrategyMap map = makeFlatLandMap(11, 11);
+    GameState gs{};
+    // On an unobstructed hex grid, hop count == hex distance, so the reachable set
+    // at radius r is exactly the ring sum 3r(r+1): 6, 18, 36 for r=1,2,3.
+    const auto reach1 = reachableTiles(map, gs, 5, 5, 1);
+    const auto reach2 = reachableTiles(map, gs, 5, 5, 2);
+    const auto reach3 = reachableTiles(map, gs, 5, 5, 3);
+    expectEqualU32(static_cast<std::uint32_t>(reach1.size()), 6u, "movementLeft=1 reaches the 6 immediate neighbors");
+    expectEqualU32(static_cast<std::uint32_t>(reach2.size()), 18u, "movementLeft=2 reaches 18 tiles");
+    expectEqualU32(static_cast<std::uint32_t>(reach3.size()), 36u, "movementLeft=3 reaches 36 tiles");
+
+    bool includesStart = false;
+    bool anyTooFar = false;
+    for (const auto& tile : reach3) {
+        if (tile[0] == 5u && tile[1] == 5u) includesStart = true;
+        if (hexDistance(5, 5, static_cast<int>(tile[0]), static_cast<int>(tile[1])) > 3) anyTooFar = true;
+    }
+    expectTrue(!includesStart, "reachable set excludes the start tile");
+    expectTrue(!anyTooFar, "every reachable tile is within movementLeft hex distance");
+}
+
+void testReachableTilesZeroMovement() {
+    using namespace odai::game;
+    StrategyMap map = makeFlatLandMap(9, 9);
+    GameState gs{};
+    const auto reach = reachableTiles(map, gs, 4, 4, 0);
+    expectTrue(reach.empty(), "zero movement reaches nothing");
+}
+
+void testReachableTilesWaterBlocksPassage() {
+    using namespace odai::game;
+    StrategyMap map = makeFlatLandMap(9, 6);
+    // A complete ocean wall down column 4 (every row, no gap) fully separates the
+    // map; unlike testPathAvoidsWater's single-gap wall (which A* can detour
+    // through), this proves water is a dead end for the flood fill, not just an
+    // excluded destination -- nothing beyond it should ever be marked reachable,
+    // regardless of how much movement is available.
+    for (std::uint32_t row = 0; row < map.height; ++row) {
+        map.at(4, row).terrain = TerrainType::Ocean;
+    }
+    GameState gs{};
+    const auto reach = reachableTiles(map, gs, 1, 2, 6);
+    bool crossedWall = false;
+    bool reachedNearSide = false;
+    for (const auto& tile : reach) {
+        if (tile[0] >= 4u) crossedWall = true;
+        if (tile[0] == 3u) reachedNearSide = true;
+    }
+    expectTrue(!crossedWall, "a complete water wall blocks tiles on the far side entirely");
+    expectTrue(reachedNearSide, "tiles on the near side of the wall are still reachable (sanity check)");
+}
+
+void testReachableTilesOccupiedBlocksPassage() {
+    using namespace odai::game;
+    StrategyMap map = makeFlatLandMap(9, 6);
+    GameState gs{};
+    // A solid row of units (any owner -- moveUnitStep blocks entry regardless of
+    // who occupies a tile) across every row of column 4, hand-built rather than via
+    // spawnUnit() so this test needs no content-database lookup.
+    for (std::uint32_t row = 0; row < map.height; ++row) {
+        Unit blocker{};
+        blocker.id = 1000u + row;
+        blocker.col = 4;
+        blocker.row = row;
+        blocker.owner = 2;
+        gs.units.push_back(blocker);
+    }
+    const auto reach = reachableTiles(map, gs, 1, 2, 6);
+    bool crossedWall = false;
+    bool reachedNearSide = false;
+    for (const auto& tile : reach) {
+        if (tile[0] >= 4u) crossedWall = true;
+        if (tile[0] == 3u) reachedNearSide = true;
+    }
+    expectTrue(!crossedWall, "a solid row of occupied tiles blocks passage through, not just landing on");
+    expectTrue(reachedNearSide, "tiles on the near side of the blockade are still reachable (sanity check)");
+}
+
+void testReachableTilesMapEdge() {
+    using namespace odai::game;
+    StrategyMap map = makeFlatLandMap(5, 5);
+    GameState gs{};
+    const auto reach = reachableTiles(map, gs, 0, 0, 2);
+    bool outOfBounds = false;
+    bool includesStart = false;
+    for (const auto& tile : reach) {
+        if (!map.inBounds(static_cast<int>(tile[0]), static_cast<int>(tile[1]))) outOfBounds = true;
+        if (tile[0] == 0u && tile[1] == 0u) includesStart = true;
+    }
+    expectTrue(!outOfBounds, "every reachable tile is within map bounds");
+    expectTrue(!includesStart, "reachable set excludes the start tile at the corner too");
+    // A corner has fewer than 6 neighbors, so its 2-hop reachable set is smaller
+    // than the 18 an unobstructed interior tile reaches (testReachableTilesOpenGround).
+    expectTrue(reach.size() < 18u, "a map-corner start reaches fewer tiles than an open interior start");
+
+    std::set<std::pair<std::uint32_t, std::uint32_t>> seen;
+    bool hasDuplicate = false;
+    for (const auto& tile : reach) {
+        if (!seen.insert({tile[0], tile[1]}).second) hasDuplicate = true;
+    }
+    expectTrue(!hasDuplicate, "reachable set has no duplicate tiles");
+}
+
 // Map with a single friendly city at (3,3) for production/combat tests.
 odai::game::StrategyMap makeCityMap(std::uint32_t width, std::uint32_t height,
                                     std::uint32_t cityCol, std::uint32_t cityRow,
@@ -1033,6 +1140,11 @@ int main() {
     testPathAvoidsWater();
     testPathPrefersCheaperTerrain();
     testMoveOrderTraversesOverTurns();
+    testReachableTilesOpenGround();
+    testReachableTilesZeroMovement();
+    testReachableTilesWaterBlocksPassage();
+    testReachableTilesOccupiedBlocksPassage();
+    testReachableTilesMapEdge();
     testCityProducesUnitOnNeighbor();
     testProductionRequiresBuilding();
     testSmithyGrantsArmor();
