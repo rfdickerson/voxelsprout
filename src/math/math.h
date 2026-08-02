@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 
 namespace odai::math {
@@ -99,6 +100,32 @@ struct Vector4 {
     constexpr Vector4(float xIn, float yIn, float zIn, float wIn) : x(xIn), y(yIn), z(zIn), w(wIn) {}
     constexpr explicit Vector4(const Vector3& xyz, float wIn) : x(xyz.x), y(xyz.y), z(xyz.z), w(wIn) {}
 };
+
+struct Quaternion {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float w = 1.0f;
+
+    constexpr Quaternion() = default;
+    constexpr Quaternion(float xIn, float yIn, float zIn, float wIn) : x(xIn), y(yIn), z(zIn), w(wIn) {}
+};
+
+inline float dot(const Quaternion& a, const Quaternion& b) {
+    return (a.x * b.x) + (a.y * b.y) + (a.z * b.z) + (a.w * b.w);
+}
+
+inline float length(const Quaternion& q) {
+    return std::sqrt(dot(q, q));
+}
+
+inline Quaternion normalize(const Quaternion& q) {
+    const float len = length(q);
+    if (len <= 0.0f) {
+        return Quaternion{};
+    }
+    return Quaternion{q.x / len, q.y / len, q.z / len, q.w / len};
+}
 
 struct Matrix4 {
     // Row-major storage.
@@ -314,6 +341,53 @@ inline Vector3 transformPoint(const Matrix4& m, const Vector3& p) {
 inline Vector3 transformDirection(const Matrix4& m, const Vector3& d) {
     const Vector4 result = m * Vector4{d, 0.0f};
     return Vector3{result.x, result.y, result.z};
+}
+
+inline Matrix4 toMatrix(const Quaternion& q) {
+    const float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
+    const float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
+    const float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
+    Matrix4 result = Matrix4::identity();
+    result(0, 0) = 1.0f - (2.0f * (yy + zz));
+    result(0, 1) = 2.0f * (xy - wz);
+    result(0, 2) = 2.0f * (xz + wy);
+    result(1, 0) = 2.0f * (xy + wz);
+    result(1, 1) = 1.0f - (2.0f * (xx + zz));
+    result(1, 2) = 2.0f * (yz - wx);
+    result(2, 0) = 2.0f * (xz - wy);
+    result(2, 1) = 2.0f * (yz + wx);
+    result(2, 2) = 1.0f - (2.0f * (xx + yy));
+    return result;
+}
+
+// Shortest-path spherical interpolation between two unit quaternions. Falls
+// back to a normalized lerp when the inputs are nearly identical, where the
+// slerp formula's sin(halfTheta) denominator would be near zero.
+inline Quaternion slerp(const Quaternion& a, const Quaternion& b, float t) {
+    Quaternion to = b;
+    float cosHalfTheta = dot(a, b);
+    if (cosHalfTheta < 0.0f) {
+        to = Quaternion{-b.x, -b.y, -b.z, -b.w};
+        cosHalfTheta = -cosHalfTheta;
+    }
+    if (cosHalfTheta > 0.9995f) {
+        return normalize(Quaternion{
+            a.x + ((to.x - a.x) * t),
+            a.y + ((to.y - a.y) * t),
+            a.z + ((to.z - a.z) * t),
+            a.w + ((to.w - a.w) * t)
+        });
+    }
+    const float halfTheta = std::acos(std::clamp(cosHalfTheta, -1.0f, 1.0f));
+    const float sinHalfTheta = std::sin(halfTheta);
+    const float ratioA = std::sin((1.0f - t) * halfTheta) / sinHalfTheta;
+    const float ratioB = std::sin(t * halfTheta) / sinHalfTheta;
+    return Quaternion{
+        (a.x * ratioA) + (to.x * ratioB),
+        (a.y * ratioA) + (to.y * ratioB),
+        (a.z * ratioA) + (to.z * ratioB),
+        (a.w * ratioA) + (to.w * ratioB)
+    };
 }
 
 inline Matrix4 inverse(const Matrix4& matrix) {

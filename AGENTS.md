@@ -12,6 +12,17 @@ Priorities:
 - Support renderer experimentation without destabilizing the engine
 - Prefer practical implementation over generic engine architecture
 
+## Reference Touchstones
+
+Four games define what this project is actually building toward. Each maps to an existing area of the codebase — none are being cloned literally, but each names the specific feel/systems to chase:
+
+- **Morrowind** — open-world exploration, hand-placed regional identity, readable terrain and settlements (`src/world/`, `src/import/`). See the Morrowind-Specific Guidance below.
+- **Civilization VI** — turn-based hex-grid 4X strategy: yields, tech tree, borders, map modes/lenses, diplomacy (`src/game/`).
+- **SimCity (2013)** — agent-driven city simulation: RCI zoning, traffic congestion, land value, service coverage, data-layer overlays (`src/games/citybuilder/`, already explicitly modeled on it).
+- **Dragon Age: Origins** — party-based real-time-with-pause tactical combat, branching dialogue with consequences, companion relationships/approval. This is the least-built touchstone today — see `docs/ROADMAP.md`'s Party RPG / Narrative section.
+
+These are creative direction, not a mandate to merge four genres into one game — each pillar can keep developing largely on its own track. `docs/ROADMAP.md` tracks concrete status and priority per touchstone.
+
 This is not:
 - a generic engine framework
 - an ECS experiment

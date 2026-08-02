@@ -33,6 +33,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
+    const VkBuffer skinnedActorVertexBuffer = inputs.skinnedActorVertexBuffer;
+    const VkBuffer skinnedActorIndexBuffer = inputs.skinnedActorIndexBuffer;
+    const std::span<const ImportedMeshDraw> skinnedActorMeshDraws = inputs.skinnedActorMeshDraws;
     const bool renderingImportedScene = !importedMeshDraws.empty() || !importedActorMeshDraws.empty();
     const bool useRtMainShadows =
         m_shadowStats.activeMode == ShadowMode::RayTraced &&
@@ -279,6 +282,44 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
             countDrawCalls(m_debugDrawCallsMain, 1);
             vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+        }
+    }
+    // GPU-skinned actor (Dragon Age touchstone) -- same pipeline as the
+    // CPU-skinned block above (skinning_resources.cc's output buffer is laid
+    // out exactly like ImportedMeshVertex), but its own separate vertex/index
+    // buffer bind so the two slots never collide.
+    if (m_importedStaticPipeline != VK_NULL_HANDLE &&
+        skinnedActorVertexBuffer != VK_NULL_HANDLE &&
+        skinnedActorIndexBuffer != VK_NULL_HANDLE &&
+        !skinnedActorMeshDraws.empty() &&
+        m_debugShowImportedStatics) {
+        const VkBuffer skinnedVertexBuffers[1] = {skinnedActorVertexBuffer};
+        const VkDeviceSize skinnedVertexOffsets[1] = {0};
+        vkCmdBindPipeline(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                ? m_importedStaticPipelineRt
+                : m_importedStaticPipeline
+        );
+        bindGraphicsDescriptorBuffers(commandBuffer);
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
+        vkCmdBindIndexBuffer(commandBuffer, skinnedActorIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        ChunkPushConstants skinnedPushConstants{};
+        skinnedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
+        skinnedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
+        skinnedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
+        vkCmdPushConstants(
+            commandBuffer,
+            m_pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(ChunkPushConstants),
+            &skinnedPushConstants
+        );
+        for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
         }
     }
 

@@ -48,6 +48,18 @@ bool Renderer::uploadImportedScene(const odai::importer::ImportedScene& scene) {
     return m_backend->uploadImportedScene(scene);
 }
 
+bool Renderer::uploadSkinnedMeshTemplate(const ImportedSkinnedMeshTemplate& meshTemplate) {
+    return m_backend->uploadSkinnedMeshTemplate(meshTemplate);
+}
+
+void Renderer::setSkinnedActorPose(const ImportedSkinnedActorFrameData& pose) {
+    m_backend->setSkinnedActorPose(pose);
+}
+
+void Renderer::setSkinningDebugBypass(bool bypass) {
+    m_backend->setSkinningDebugBypass(bypass);
+}
+
 void Renderer::clearHexTerrain() {
     m_backend->clearHexTerrain();
 }
