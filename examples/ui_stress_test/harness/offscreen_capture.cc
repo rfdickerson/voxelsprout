@@ -159,6 +159,7 @@ bool pickHeadlessDevice(OffscreenCapture::Impl& impl) {
         if (features12.descriptorBindingPartiallyBound != VK_TRUE) continue;
         if (features12.descriptorBindingSampledImageUpdateAfterBind != VK_TRUE) continue;
         if (features12.shaderSampledImageArrayNonUniformIndexing != VK_TRUE) continue;
+        if (features12.bufferDeviceAddress != VK_TRUE) continue;
 
         std::uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &queueFamilyCount, nullptr);
@@ -198,6 +199,9 @@ bool pickHeadlessDevice(OffscreenCapture::Impl& impl) {
     enable12.descriptorBindingPartiallyBound = VK_TRUE;
     enable12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     enable12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    // Required by VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT (below) and by
+    // the descriptor buffer's VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT usage.
+    enable12.bufferDeviceAddress = VK_TRUE;
     VkPhysicalDeviceVulkan13Features enable13{};
     enable13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     enable13.dynamicRendering = VK_TRUE;
@@ -307,6 +311,10 @@ bool OffscreenCapture::init(const Config& config) {
     }
 
     VmaAllocatorCreateInfo vmaInfo{};
+    // The device enables bufferDeviceAddress (above) so the descriptor buffer's
+    // VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT usage is valid; VMA needs this
+    // flag set to allow allocating such buffers at all.
+    vmaInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     vmaInfo.physicalDevice = impl.physicalDevice;
     vmaInfo.device = impl.device;
     vmaInfo.instance = impl.instance;
