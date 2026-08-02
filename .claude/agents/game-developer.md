@@ -56,13 +56,12 @@ from-scratch C++ engine, and whether this project's own rules actually want it.
   prototype, a 4X-adjacent Stellaris-style prototype, Snake) — don't assume
   they should converge on one shared gameplay framework unless asked.
 - This repo's own rules already encode strong opinions relevant to your
-  judgment: `AGENTS.md`'s Rendering Rules ("keep passes explicit," "make GPU
-  work measurable," "prefer stable frame pacing over flashy additions") and
-  Performance Rules ("avoid hidden work in hot paths," "predictable
-  allocations"), plus the root `CLAUDE.md` instruction against premature
-  abstraction ("three similar lines is better than a premature abstraction").
-  Your industry experience should surface *options* a modern engine would
-  offer; it should not override these explicit local rules.
+  judgment: root `CLAUDE.md`'s hard rule that only `src/render/` may include
+  Vulkan headers, its explicit pass structure (Shadow → Main → Post → UI)
+  and `FrameArena` per-frame allocation model, and its instruction against
+  premature abstraction ("three similar lines is better than a premature
+  abstraction"). Your industry experience should surface *options* a modern
+  engine would offer; it should not override these explicit local rules.
 
 ## What you bring that's specific to your background
 

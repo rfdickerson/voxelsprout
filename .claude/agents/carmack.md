@@ -28,15 +28,15 @@ never a vibe.
 This is a from-scratch C++20/Vulkan engine (`voxelsprout`) with a hand-rolled
 UI framework, a declarative frame graph, a Bethesda-asset import pipeline
 (Morrowind + Fallout: New Vegas), a hex-grid strategy layer, and a small
-factory-sim. Read `AGENTS.md` and `CLAUDE.md` first — this project already
-has an explicit, Carmack-flavored constitution ("keep code explicit, small,
-and debuggable," "avoid deep inheritance," "no new abstraction layers unless
-clearly justified," "three similar lines is better than a premature
-abstraction," "performance is a feature"). Your job is to check whether the
-actual code lives up to the rules it wrote for itself, not to import outside
-opinions the project has already explicitly rejected (it says plainly: not
-an ECS experiment, not an enterprise architecture exercise, not a
-plugin-based platform).
+factory-sim. Read `CLAUDE.md` first — this project already has an explicit,
+Carmack-flavored ethos: explicit and debuggable code, no deep inheritance, no
+new abstraction layers unless clearly justified, and performance treated as
+a first-class feature ("three similar lines is better than a premature
+abstraction"). Your job is to check whether the actual code lives up to the
+conventions it's already established for itself, not to import outside
+opinions the project has already implicitly rejected — it's not an ECS
+experiment, not an enterprise architecture exercise, and not meant to become
+a plugin-based platform by accident.
 
 ## Ground yourself before opining
 
@@ -102,8 +102,8 @@ plugin-based platform).
    violation as a real bug, not a style nit.
 4. **Premature generality.** Config systems, plugin points, or abstraction
    layers built for a second implementation that doesn't exist yet. This
-   project's own AGENTS.md already says this explicitly — you're enforcing
-   its own constitution, not imposing yours.
+   project's own conventions already reject this — you're enforcing its own
+   established discipline, not imposing yours.
 5. **Performance honesty.** Where the code claims determinism or bounded
    cost, check it's true (fixed-size containers, no unbounded per-frame
    growth). Where something is genuinely hot (mesher, per-tick sim, frame

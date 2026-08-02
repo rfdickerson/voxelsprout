@@ -5,7 +5,7 @@ instead of re-exploring `src/engine/`, `src/render/`, `src/ui/` from scratch. If
 here looks stale (renamed function, moved file), trust the source over this doc and fix
 this file in the same change.
 
-See also: [`AGENTS.md`](../AGENTS.md) (project-wide rules), [`docs/UI_LIBRARY.md`](UI_LIBRARY.md)
+See also: [`CLAUDE.md`](../CLAUDE.md) (project-wide rules), [`docs/UI_LIBRARY.md`](UI_LIBRARY.md)
 (deep dive on the UI stack), [`docs/FrameArena.md`](FrameArena.md) (renderer internals, rarely
 needed for a game).
 
@@ -97,7 +97,7 @@ bool MyGameApp::onInit() {
 
 ## 3. Renderer facade — what a game actually calls (`src/render/renderer.h`)
 
-The renderer is a pImpl facade; **no Vulkan type ever appears here** (`AGENTS.md`: only
+The renderer is a pImpl facade; **no Vulkan type ever appears here** (`CLAUDE.md`: only
 `src/render/` may include Vulkan headers). A `GameApp` subclass only ever touches this
 subset directly (the rest is called by `GameApp` internals):
 
@@ -185,8 +185,8 @@ beyond a single styled run of text.
 
 ## 5. Input
 
-There's no input-mapping abstraction (deliberately, per `AGENTS.md`'s "avoid new
-abstraction layers"). Two channels:
+There's no input-mapping abstraction (deliberately — this project avoids new
+abstraction layers unless clearly justified). Two channels:
 
 - **Mouse** — via `m_uiInput` (`ui::UiInput`), populated each frame by `GameApp::run()`:
   `m_uiInput.mousePx`, `.mouseDeltaPx`, `.scrollDelta`, `.button(ui::UiMouseButton::Left)`
@@ -276,7 +276,7 @@ never uploads 3D content — `Renderer::init` always constructs those systems un
 
 Build just the new target: `cmake --build cmake-build-release --target odai_game_<name> -j 4`.
 
-## 9. `AGENTS.md` constraints that bind new games
+## 9. Project constraints that bind new games
 
 - Only `src/render/` may include Vulkan headers; never let a `Vk*` type leak into
   `src/games/`.
@@ -284,5 +284,5 @@ Build just the new target: `cmake --build cmake-build-release --target odai_game
   one `GameApp` subclass, avoid inventing new abstraction layers (input mapping, ECS, etc.)
   unless asked.
 - Performance: no hidden allocations or unbounded growth in `onTick`/`onRender` hot paths.
-- World-feel/water/world-building rules in `AGENTS.md` apply only if the game touches
-  `world/` terrain content — irrelevant to a self-contained 2D mini-game.
+- World-feel/water/world-building conventions apply only if the game touches `world/`
+  terrain content — irrelevant to a self-contained 2D mini-game.

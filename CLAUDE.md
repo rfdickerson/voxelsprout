@@ -63,8 +63,6 @@ Use `add_slang_shader_variant(..., -DODAI_RT_SHADOWS=1)` for define-based shader
 
 ## Architecture
 
-Read **`AGENTS.md`** first — it defines the project's non-negotiable rules (Vulkan encapsulation, one-way data flow, Morrowind world feel, performance expectations).
-
 ### Module boundaries
 
 ```

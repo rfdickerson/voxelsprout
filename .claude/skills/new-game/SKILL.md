@@ -89,7 +89,7 @@ how `wantsMinimalRendering()` or the CMake sources list behaves — add it to th
 the same change. It's meant to stay accurate across many future "build a new game"
 requests, not just this one.
 
-## Guardrails (from AGENTS.md — these bind every game)
+## Guardrails (project conventions — these bind every game)
 
 - Never include anything under `src/render/backend/vulkan/`, and never let a `Vk*` type
   appear in `src/games/<name>/` — only `src/render/` may touch Vulkan directly.

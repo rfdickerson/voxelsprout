@@ -35,7 +35,7 @@ coverage atlas, which is only crisp at (or near) its baked pixel height.
   lastCodepoint)`. If you change what's stored per glyph (e.g. distance scale/
   bias instead of raw coverage), bump the cache format/version so stale
   coverage-atlas caches don't get misread as SDF data.
-- Hard architecture rule (see root `CLAUDE.md` / `AGENTS.md`): **only
+- Hard architecture rule (see root `CLAUDE.md`): **only
   `src/render/` may include Vulkan headers.** Everything you do in `font.cc`,
   `ui_draw_list.h/.cc`, and the `.slang` shader source is Vulkan-free and stays
   that way. If wiring a new glyph mode all the way to pixels requires touching

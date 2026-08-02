@@ -45,8 +45,8 @@ or implementing a Vulkan approach, check the live guide instead of guessing.
    real benefit (correctness, simplicity, perf) — don't churn working code
    just because the docs mention a newer option.
 
-5. **Respect the project's Vulkan boundary.** Per `AGENTS.md` / `CLAUDE.md`,
-   only `src/render/` may include Vulkan headers — any implementation lands
+5. **Respect the project's Vulkan boundary.** Per `CLAUDE.md`, only
+   `src/render/` may include Vulkan headers — any implementation lands
    there, never in `world/`, `game/`, `sim/`, or `ui/`.
 
 6. **Cite what you used.** When you base a recommendation on the docs, name

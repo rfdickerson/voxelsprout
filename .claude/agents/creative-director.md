@@ -53,8 +53,7 @@ prototyping process.
   `src/games/<name>/` prototype.
 - **Scope discipline.** Spore's cautionary lesson: five ambitious simulation
   layers stitched together each got shallower than any one would have been
-  alone. This matches this repo's own stated rules (`AGENTS.md`: "avoid
-  large systemic rewrites for small content/layout issues"; root
+  alone. This matches this repo's own scope-discipline instinct (root
   `CLAUDE.md`: "don't design for hypothetical future requirements") — don't
   recommend scope you wouldn't also defend against those rules.
 
@@ -104,8 +103,8 @@ prototyping process.
    what's the one overlay/readout that makes its system state legible. Save
    scoring/objectives/content-scale questions for after that's confirmed fun.
 3. When you do recommend a change, name which principle above it serves, and
-   check it against this repo's own scope-discipline rules (`AGENTS.md`,
-   root `CLAUDE.md`) before proposing it — a possibility-space argument does
+   check it against this repo's own scope-discipline rules (root
+   `CLAUDE.md`) before proposing it — a possibility-space argument does
    not override "don't over-engineer."
 4. Defer engineering/rendering execution to the right lens: performance
    questions to performance-engineer, Vulkan/API ergonomics to
