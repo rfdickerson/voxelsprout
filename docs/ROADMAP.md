@@ -13,7 +13,7 @@ Per `CLAUDE.md`'s Reference Touchstones, this project's direction is defined by 
 | **SimCity (2013)** | Agent-driven city sim: RCI zoning, traffic, land value, data overlays | `src/games/citybuilder/` |
 | **Dragon Age: Origins** | Party-based real-time-with-pause combat, branching dialogue, companion approval | greenfield — see below |
 
-`CLAUDE.md`'s Non-goals section is also explicit about what this project is **not**: a generic engine framework, an ECS experiment, an enterprise architecture exercise, or a dynamic-loading plugin/mod distribution platform. It prioritizes practical implementation over generic engine architecture. Those are style constraints on *how* things get built, not a cap on *which genres* get pursued — chasing four different touchstones is fine as long as each is built the same explicit, flat-data, no-generic-framework way the rest of the codebase already is. (Note: `CLAUDE.md` also documents a statically linked `IEnginePlugin`/`PluginRegistry` composition seam under "Engine plugins" — that's a compile-time extension point, not the dynamic-loading distribution platform this non-goals list rules out; see the Modding and Scripting section below.)
+`CLAUDE.md`'s Non-goals section is also explicit about what this project is **not**: an ECS experiment, an enterprise architecture exercise, or a dynamic-loading plugin/mod distribution platform. It prioritizes explicit, hand-written control flow over implicit machinery. Those are style constraints on *how* things get built, not a cap on *which genres* get pursued — chasing four different touchstones is fine as long as each is built the same explicit, flat-data way the rest of the codebase already is. (Note: `CLAUDE.md` also documents a statically linked `IEnginePlugin`/`PluginRegistry` composition seam under "Engine plugins" — that's a compile-time extension point, not the dynamic-loading distribution platform this non-goals list rules out; see the Modding and Scripting section below.)
 
 That said, a large chunk of the original wishlist assumes a different kind of engine entirely — a real-time mass-battle RTS with netcode and a full scenario-editor suite — which lines up with none of the four touchstones above and stays out of scope (see below).
 
@@ -199,7 +199,7 @@ This is the strongest area of the codebase relative to the wishlist — see `doc
 | World/terrain editor, scenario editor, faction/tech-tree/quest editors | ⬜ | World content is authored via offline cookers instead (`tools/strategy_map_gen_main.cc`, `tools/newvegas_cooker_main.cc`) — see note below |
 | Entity inspector, nav debugging, AI decision inspector, replay/timeline debugger | ⬜ | Not implemented |
 
-> A full in-engine editor suite (world sculpting, scenario/faction/tech-tree/quest editors) is a large, generic-tooling investment that cuts against `CLAUDE.md`'s Non-goals ("prefer practical implementation over generic engine architecture"). The offline-cooker approach already in use is the intentional tradeoff here, not a gap to urgently close.
+> A full in-engine editor suite (world sculpting, scenario/faction/tech-tree/quest editors) is a large tooling investment with no current pillar driving it. The offline-cooker approach already in use is the intentional tradeoff here, not a gap to urgently close.
 
 ### Asset Pipeline
 
@@ -269,8 +269,8 @@ These wishlist items directly conflict with `CLAUDE.md`'s stated Non-goals and a
 
 - **Mass real-time battle rendering** (thousands of skinned/animated units, flocking, formation systems, battlefield VFX at RTS scale) — none of the four reference touchstones call for this. Do not confuse this with small-party (4–8 character) skeletal animation for the Dragon Age touchstone, which *is* in scope (see Party RPG / Narrative above) — the "no crowd-simulation stack" line is drawn at scale, not at "any animated characters at all."
 - **Data-oriented ECS** — explicitly rejected: "not... an ECS experiment."
-- **Lockstep/deterministic multiplayer netcode** — conflicts with "prefer practical implementation over generic engine architecture" and "not an enterprise architecture exercise"; no current pillar needs it.
-- **Full in-engine editor suite** (world sculpting, scenario editor, faction/diplomacy editor, tech-tree editor, quest editor) — conflicts with the same practical-over-generic principle; the existing offline-cooker content pipeline is the intentional alternative.
+- **Lockstep/deterministic multiplayer netcode** — conflicts with "not an enterprise architecture exercise"; no current pillar needs it.
+- **Full in-engine editor suite** (world sculpting, scenario editor, faction/diplomacy editor, tech-tree editor, quest editor) — a large tooling investment no current pillar is asking for; the existing offline-cooker content pipeline is the intentional alternative.
 - **Dynamic-loading plugin/Workshop-style mod distribution platform** (`dlopen`/DLL loading, Steam Workshop-style discovery) — conflicts with `CLAUDE.md`'s "no dynamic-loading plugin/mod distribution platform" non-goal; the existing JSON-mod + Lua-hook system, plus the statically linked `IEnginePlugin`/`PluginRegistry` composition seam (see `CLAUDE.md`'s "Engine plugins"), already cover data/behavior/lifecycle composition without building a distribution platform.
 
 ## Prioritized next steps

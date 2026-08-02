@@ -16,12 +16,11 @@ These are creative direction, not a mandate to merge four genres into one game �
 ## Non-goals
 
 This project is not:
-- a generic engine framework
 - an ECS experiment
 - an enterprise architecture exercise
 - a dynamic-loading plugin/mod distribution platform (no `dlopen`/DLL loading, no Steam Workshop-style discovery)
 
-It prioritizes practical implementation over generic engine architecture, and explicit, hand-written control flow over generic frameworks (e.g. render passes never assume implicit barriers — see Renderer internals below). These are style constraints on *how* things get built, not a cap on *which* genres get pursued — see Reference Touchstones above. Note the "Engine plugins" pattern documented below is a statically linked, compile-time composition seam — a different thing than the distribution platform this list rules out.
+It prioritizes explicit, hand-written control flow over implicit machinery (e.g. render passes never assume implicit barriers — see Renderer internals below). These are style constraints on *how* things get built, not a cap on *which* genres get pursued — see Reference Touchstones above. Note the "Engine plugins" pattern documented below is a statically linked, compile-time composition seam — a different thing than the distribution platform this list rules out.
 
 ## Build Commands
 
