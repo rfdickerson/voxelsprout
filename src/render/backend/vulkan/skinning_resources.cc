@@ -6,6 +6,7 @@
 #include "math/math.h"
 #include "sim/network_procedural.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -14,14 +15,17 @@
 
 // GPU skeletal skinning (Dragon Age: Origins touchstone; see
 // docs/ROADMAP.md's Party RPG / Narrative section, and skinning.comp.slang
-// for the compute shader this drives). Now wired into the actual frame
+// for the compute shader this drives). Wired into the actual frame
 // (createSkinningComputeResources/destroySkinningComputeResources from
 // init.cc, recordSkinningPass from frame_run.cc before the shadow/prepass/
 // main passes, uploadSkinnedActorPoseForFrame right after
-// m_frameArena.beginFrame -- see those files), and the bone-matrix upload now
+// m_frameArena.beginFrame -- see those files); the bone-matrix upload
 // transposes to match the camera-MVP path's established row/column-major
-// convention. Still unverified against a real Vulkan build (this sandbox has
-// neither vcpkg nor a GPU) -- see the Windows CI job for that signal.
+// convention. Supports up to kMaxSkinnedInstances (see renderer_types.h)
+// independent instance slots -- a small party, not a mass-battle crowd (see
+// docs/ROADMAP.md's explicit out-of-scope note). Still unverified against a
+// real Vulkan build (this sandbox has neither vcpkg nor a GPU) -- see the
+// Windows CI job for that signal.
 namespace odai::render {
 
 #include "render/renderer_shared.h"
@@ -56,6 +60,9 @@ struct GpuSkinnedVertexIn {
 }  // namespace
 
 bool RendererBackend::createSkinningComputeResources() {
+    // Shared across every instance slot: one shader, one binding layout, one
+    // pipeline. Per-slot buffers/descriptor-buffer-sets are created lazily in
+    // uploadSkinnedMeshTemplate instead.
     if (m_skinningDescriptorSetLayout == VK_NULL_HANDLE) {
         VkDescriptorSetLayoutBinding restPoseBinding{};
         restPoseBinding.binding = 0;
@@ -86,19 +93,6 @@ bool RendererBackend::createSkinningComputeResources() {
                 "renderer.descriptorSetLayout.skinning",
                 nullptr,
                 VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
-            )) {
-            destroySkinningComputeResources();
-            return false;
-        }
-    }
-
-    if (!m_skinningBufferSet.valid()) {
-        if (!createDescriptorBufferSet(
-                m_skinningDescriptorSetLayout,
-                kMaxFramesInFlight,
-                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT,
-                "renderer.descriptorBuffer.skinning",
-                m_skinningBufferSet
             )) {
             destroySkinningComputeResources();
             return false;
@@ -157,32 +151,49 @@ void RendererBackend::destroySkinningComputeResources() {
         vkDestroyPipelineLayout(m_device, m_skinningPipelineLayout, nullptr);
         m_skinningPipelineLayout = VK_NULL_HANDLE;
     }
-    destroyDescriptorBufferSet(m_skinningBufferSet);
+    // Matches the original single-slot teardown order: descriptor-buffer-sets
+    // (which only reference the layout at write time, not at destroy time)
+    // before the layout itself.
+    for (SkinnedInstanceSlot& slot : m_skinningInstances) {
+        destroyDescriptorBufferSet(slot.bufferSet);
+        m_bufferAllocator.destroyBuffer(slot.restPoseVertexBufferHandle);
+        slot.restPoseVertexBufferHandle = kInvalidBufferHandle;
+        m_bufferAllocator.destroyBuffer(slot.indexBufferHandle);
+        slot.indexBufferHandle = kInvalidBufferHandle;
+        m_bufferAllocator.destroyBuffer(slot.outputVertexBufferHandle);
+        slot.outputVertexBufferHandle = kInvalidBufferHandle;
+        slot.vertexCount = 0;
+        slot.boneCount = 0;
+        slot.meshDraws.clear();
+        slot.pendingBoneMatrices.clear();
+    }
     if (m_skinningDescriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_device, m_skinningDescriptorSetLayout, nullptr);
         m_skinningDescriptorSetLayout = VK_NULL_HANDLE;
     }
-    m_bufferAllocator.destroyBuffer(m_skinningRestPoseVertexBufferHandle);
-    m_skinningRestPoseVertexBufferHandle = kInvalidBufferHandle;
-    m_bufferAllocator.destroyBuffer(m_skinningIndexBufferHandle);
-    m_skinningIndexBufferHandle = kInvalidBufferHandle;
-    m_bufferAllocator.destroyBuffer(m_skinningOutputVertexBufferHandle);
-    m_skinningOutputVertexBufferHandle = kInvalidBufferHandle;
-    m_skinningVertexCount = 0;
-    m_skinningBoneCount = 0;
+    m_skinningActiveInstanceCount = 0;
     m_skinningMeshDraws.clear();
 }
 
-bool RendererBackend::uploadSkinnedMeshTemplate(const ImportedSkinnedMeshTemplate& meshTemplate) {
+bool RendererBackend::uploadSkinnedMeshTemplate(
+    std::uint32_t instanceIndex, const ImportedSkinnedMeshTemplate& meshTemplate
+) {
+    if (instanceIndex >= kMaxSkinnedInstances) {
+        VOX_LOGW("render") << "skinned mesh template upload skipped: instanceIndex "
+                            << instanceIndex << " >= kMaxSkinnedInstances";
+        return false;
+    }
     if (meshTemplate.vertices.empty() || meshTemplate.indices.empty() || meshTemplate.boneCount == 0) {
         VOX_LOGW("render") << "skinned mesh template upload skipped: empty geometry or zero bones";
         return false;
     }
-    // Creates the pipeline/descriptor-set-layout/buffer-set on first use;
-    // a no-op if already created (see the early-return above the shader load).
+    // Creates the shared pipeline/descriptor-set-layout on first use across
+    // any slot; a no-op if already created.
     if (!createSkinningComputeResources()) {
         return false;
     }
+
+    SkinnedInstanceSlot& slot = m_skinningInstances[instanceIndex];
 
     std::vector<GpuSkinnedVertexIn> gpuVertices(meshTemplate.vertices.size());
     for (std::size_t i = 0; i < meshTemplate.vertices.size(); ++i) {
@@ -326,6 +337,18 @@ bool RendererBackend::uploadSkinnedMeshTemplate(const ImportedSkinnedMeshTemplat
         return true;
     };
 
+    if (!slot.bufferSet.valid()) {
+        if (!createDescriptorBufferSet(
+                m_skinningDescriptorSetLayout,
+                kMaxFramesInFlight,
+                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT,
+                "renderer.descriptorBuffer.skinning",
+                slot.bufferSet
+            )) {
+            return false;
+        }
+    }
+
     BufferHandle newRestPoseHandle = kInvalidBufferHandle;
     if (!uploadDeviceLocalBuffer(
             gpuVertices.data(),
@@ -365,36 +388,48 @@ bool RendererBackend::uploadSkinnedMeshTemplate(const ImportedSkinnedMeshTemplat
 
     // Rest-pose (binding 0) and output (binding 2) buffers are stable across
     // frames -- write every region once here rather than every frame.
-    for (std::uint32_t region = 0; region < m_skinningBufferSet.regionCount; ++region) {
+    for (std::uint32_t region = 0; region < slot.bufferSet.regionCount; ++region) {
         writeDescriptorBufferStorage(
-            m_skinningBufferSet, region, descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 0),
+            slot.bufferSet, region, descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 0),
             m_bufferAllocator.getDeviceAddress(newRestPoseHandle),
             static_cast<VkDeviceSize>(gpuVertices.size() * sizeof(GpuSkinnedVertexIn)));
         writeDescriptorBufferStorage(
-            m_skinningBufferSet, region, descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 2),
+            slot.bufferSet, region, descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 2),
             m_bufferAllocator.getDeviceAddress(newOutputHandle),
             outputCreateDesc.size);
     }
 
-    m_bufferAllocator.destroyBuffer(m_skinningRestPoseVertexBufferHandle);
-    m_bufferAllocator.destroyBuffer(m_skinningIndexBufferHandle);
-    m_bufferAllocator.destroyBuffer(m_skinningOutputVertexBufferHandle);
+    m_bufferAllocator.destroyBuffer(slot.restPoseVertexBufferHandle);
+    m_bufferAllocator.destroyBuffer(slot.indexBufferHandle);
+    m_bufferAllocator.destroyBuffer(slot.outputVertexBufferHandle);
 
-    m_skinningRestPoseVertexBufferHandle = newRestPoseHandle;
-    m_skinningIndexBufferHandle = newIndexHandle;
-    m_skinningOutputVertexBufferHandle = newOutputHandle;
-    m_skinningVertexCount = static_cast<std::uint32_t>(gpuVertices.size());
-    m_skinningBoneCount = meshTemplate.boneCount;
+    slot.restPoseVertexBufferHandle = newRestPoseHandle;
+    slot.indexBufferHandle = newIndexHandle;
+    slot.outputVertexBufferHandle = newOutputHandle;
+    slot.vertexCount = static_cast<std::uint32_t>(gpuVertices.size());
+    slot.boneCount = meshTemplate.boneCount;
 
-    m_skinningMeshDraws.clear();
-    m_skinningMeshDraws.reserve(meshTemplate.draws.size());
+    slot.meshDraws.clear();
+    slot.meshDraws.reserve(meshTemplate.draws.size());
     for (const auto& draw : meshTemplate.draws) {
         ImportedMeshDraw meshDraw{};
-        meshDraw.vertexBufferHandle = m_skinningOutputVertexBufferHandle;
-        meshDraw.indexBufferHandle = m_skinningIndexBufferHandle;
+        meshDraw.vertexBufferHandle = slot.outputVertexBufferHandle;
+        meshDraw.indexBufferHandle = slot.indexBufferHandle;
         meshDraw.firstIndex = draw.firstIndex;
         meshDraw.indexCount = draw.indexCount;
-        m_skinningMeshDraws.push_back(meshDraw);
+        slot.meshDraws.push_back(meshDraw);
+    }
+
+    m_skinningActiveInstanceCount = std::max(m_skinningActiveInstanceCount, instanceIndex + 1u);
+
+    // Re-flatten every active instance slot's draws into one contiguous
+    // vector so frame_pass_shadow.cc/frame_pass_prepass.cc/frame_pass_main.cc/
+    // frame_run.cc keep consuming a single std::span<const ImportedMeshDraw>
+    // with no changes.
+    m_skinningMeshDraws.clear();
+    for (std::uint32_t i = 0; i < m_skinningActiveInstanceCount; ++i) {
+        const auto& draws = m_skinningInstances[i].meshDraws;
+        m_skinningMeshDraws.insert(m_skinningMeshDraws.end(), draws.begin(), draws.end());
     }
     return true;
 }
@@ -407,44 +442,50 @@ bool RendererBackend::uploadSkinnedMeshTemplate(const ImportedSkinnedMeshTemplat
 // This just stores the pose; uploadSkinnedActorPoseForFrame() (below) does
 // the actual per-frame upload, called from frame_run.cc right after
 // m_frameArena.beginFrame(m_currentFrame).
-void RendererBackend::setSkinnedActorPose(const ImportedSkinnedActorFrameData& pose) {
-    m_pendingSkinnedActorBoneMatrices.assign(pose.boneMatrices.begin(), pose.boneMatrices.end());
+void RendererBackend::setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose) {
+    if (instanceIndex >= kMaxSkinnedInstances) {
+        return;
+    }
+    m_skinningInstances[instanceIndex].pendingBoneMatrices.assign(pose.boneMatrices.begin(), pose.boneMatrices.end());
 }
 
 // Called from frame_run.cc immediately after m_frameArena.beginFrame(), so
 // the FrameArena slice allocated here belongs to the frame recordSkinningPass
 // is about to record for.
 void RendererBackend::uploadSkinnedActorPoseForFrame() {
-    if (m_skinningVertexCount == 0 || m_pendingSkinnedActorBoneMatrices.empty() ||
-        !m_skinningBufferSet.valid()) {
-        return;
-    }
+    for (std::uint32_t i = 0; i < m_skinningActiveInstanceCount; ++i) {
+        SkinnedInstanceSlot& slot = m_skinningInstances[i];
+        if (slot.vertexCount == 0 || slot.pendingBoneMatrices.empty() || !slot.bufferSet.valid()) {
+            continue;
+        }
 
-    const VkDeviceSize boneBufferSize =
-        static_cast<VkDeviceSize>(m_pendingSkinnedActorBoneMatrices.size() * sizeof(odai::math::Matrix4));
-    const std::optional<FrameArenaSlice> boneSlice =
-        m_frameArena.allocateUpload(boneBufferSize, alignof(float), FrameArenaUploadKind::Unknown);
-    if (!boneSlice.has_value() || boneSlice->mapped == nullptr) {
-        VOX_LOGW("render") << "skinning: bone matrix upload failed, skipping this frame's pose";
-        return;
-    }
+        const VkDeviceSize boneBufferSize =
+            static_cast<VkDeviceSize>(slot.pendingBoneMatrices.size() * sizeof(odai::math::Matrix4));
+        const std::optional<FrameArenaSlice> boneSlice =
+            m_frameArena.allocateUpload(boneBufferSize, alignof(float), FrameArenaUploadKind::Unknown);
+        if (!boneSlice.has_value() || boneSlice->mapped == nullptr) {
+            VOX_LOGW("render") << "skinning: bone matrix upload failed for instance " << i
+                                << ", skipping this frame's pose";
+            continue;
+        }
 
-    // skinning.comp.slang compiles -matrix-layout-column-major; the camera
-    // MVP path (frame_run.cc) always transposes odai::math::Matrix4
-    // (row-major) via renderer_shared.h's transpose() before uploading to a
-    // GPU float4x4 for exactly this reason -- mirror that here rather than
-    // copying verbatim.
-    auto* dstMatrices = static_cast<odai::math::Matrix4*>(boneSlice->mapped);
-    for (std::size_t i = 0; i < m_pendingSkinnedActorBoneMatrices.size(); ++i) {
-        dstMatrices[i] = transpose(m_pendingSkinnedActorBoneMatrices[i]);
-    }
+        // skinning.comp.slang compiles -matrix-layout-column-major; the camera
+        // MVP path (frame_run.cc) always transposes odai::math::Matrix4
+        // (row-major) via renderer_shared.h's transpose() before uploading to a
+        // GPU float4x4 for exactly this reason -- mirror that here rather than
+        // copying verbatim.
+        auto* dstMatrices = static_cast<odai::math::Matrix4*>(boneSlice->mapped);
+        for (std::size_t m = 0; m < slot.pendingBoneMatrices.size(); ++m) {
+            dstMatrices[m] = transpose(slot.pendingBoneMatrices[m]);
+        }
 
-    const VkDeviceAddress boneAddress =
-        m_bufferAllocator.getDeviceAddress(boneSlice->buffer) + boneSlice->offset;
-    writeDescriptorBufferStorage(
-        m_skinningBufferSet, m_currentFrame,
-        descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 1),
-        boneAddress, boneBufferSize);
+        const VkDeviceAddress boneAddress =
+            m_bufferAllocator.getDeviceAddress(boneSlice->buffer) + boneSlice->offset;
+        writeDescriptorBufferStorage(
+            slot.bufferSet, m_currentFrame,
+            descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 1),
+            boneAddress, boneBufferSize);
+    }
 }
 
 }  // namespace odai::render

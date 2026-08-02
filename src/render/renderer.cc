@@ -48,12 +48,12 @@ bool Renderer::uploadImportedScene(const odai::importer::ImportedScene& scene) {
     return m_backend->uploadImportedScene(scene);
 }
 
-bool Renderer::uploadSkinnedMeshTemplate(const ImportedSkinnedMeshTemplate& meshTemplate) {
-    return m_backend->uploadSkinnedMeshTemplate(meshTemplate);
+bool Renderer::uploadSkinnedMeshTemplate(std::uint32_t instanceIndex, const ImportedSkinnedMeshTemplate& meshTemplate) {
+    return m_backend->uploadSkinnedMeshTemplate(instanceIndex, meshTemplate);
 }
 
-void Renderer::setSkinnedActorPose(const ImportedSkinnedActorFrameData& pose) {
-    m_backend->setSkinnedActorPose(pose);
+void Renderer::setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose) {
+    m_backend->setSkinnedActorPose(instanceIndex, pose);
 }
 
 void Renderer::setSkinningDebugBypass(bool bypass) {
