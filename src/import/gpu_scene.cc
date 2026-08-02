@@ -22,7 +22,6 @@ namespace {
 constexpr std::uint32_t kGpuSceneComponentFlagTerrain = 1u << 0;
 constexpr std::uint32_t kGpuSceneComponentFlagStatic = 1u << 1;
 constexpr std::uint32_t kGpuSceneComponentFlagAlphaTest = 1u << 2;
-constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
 constexpr float kGpuScenePageSize = 4096.0f;
 
 struct Quaternion {

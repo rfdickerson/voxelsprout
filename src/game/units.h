@@ -107,6 +107,14 @@ struct GameState {
                                             std::uint32_t col, std::uint32_t row,
                                             std::uint8_t owner);
 
+// Hex radius a unit reveals fog-of-war within (see App::recomputeFogOfWarVisibility,
+// the sole caller of this today). Scouts see farther than other unit types; this is
+// a hardcoded unit-kind check rather than a UnitStats field because no unit type
+// currently varies sight by content data (see mods/base/data/units.json). Exposed
+// here rather than left inline in the caller so the fog computation and any
+// visualization of a unit's vision (e.g. a UI overlay) can't drift apart.
+[[nodiscard]] int sightRadiusForUnit(const Unit& unit);
+
 enum class MoveResult {
     Ok,
     NotAdjacent,
@@ -132,6 +140,37 @@ MoveResult moveUnitStep(GameState& gs, const StrategyMap& map, Unit& unit,
     const StrategyMap& map, const GameState& gs,
     std::uint32_t startCol, std::uint32_t startRow,
     std::uint32_t goalCol, std::uint32_t goalRow);
+
+// Every tile reachable from (startCol,startRow) within movementLeft hex hops, over
+// land tiles never passing through water or a tile occupied by another unit (an
+// occupied/water tile is a dead end, not just an excluded result -- it blocks the
+// tiles behind it too). Excludes the start tile itself. A plain BFS, not a weighted
+// search: unlike findHexPath's pathStepCost (road/rough terrain bias for route
+// choice) or supplyCostForStep (provisions drain), movementLeft depletes by exactly
+// 1 per hop regardless of terrain (see moveUnitStep), so every edge costs the same.
+[[nodiscard]] std::vector<std::array<std::uint32_t, 2>> reachableTiles(
+    const StrategyMap& map, const GameState& gs,
+    std::uint32_t startCol, std::uint32_t startRow, int movementLeft);
+
+// Cheapest route (by cumulative supplyCostForStep) from (unitCol,unitRow) back to
+// the nearest settlement owned by `owner`, over land tiles never passing through
+// water or a tile occupied by another unit. Returned path excludes the unit's own
+// tile and ends at the settlement, matching findHexPath's shape. Empty if the unit
+// is already in supply range (isNearFriendlySettlement), if `owner` has no
+// settlement, or if none is reachable.
+//
+// This is multi-source Dijkstra (nearest of all of owner's settlements), not a
+// reuse of findHexPath: with more than one goal there's no single admissible
+// heuristic to drive A* with, so a plain Dijkstra outward from every settlement at
+// once is both simpler and cheaper than running a point-to-point search per
+// settlement. It also can't reuse pathStepCost/reachableTiles' uniform cost --
+// supplyCostForStep is direction-dependent (only the destination tile's terrain
+// incurs the hills/mountains surcharge), so edges are relaxed with the reversed
+// argument order to get the cost of the unit's actual walking direction (toward
+// the settlement), not the direction this search expands in (outward from it).
+[[nodiscard]] std::vector<std::array<std::uint32_t, 2>> cheapestSupplyRoute(
+    const StrategyMap& map, const GameState& gs,
+    std::uint32_t unitCol, std::uint32_t unitRow, std::uint8_t owner);
 
 // Advance a unit along its stored path while it has movement and each step is
 // legal. Stops (keeping the path) when movement runs out so the order resumes next

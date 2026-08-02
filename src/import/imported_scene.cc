@@ -35,7 +35,6 @@ constexpr std::uint8_t kImportedSceneMaxTextureFormat =
 
 // pageRanges are serialized as a raw array, so the layout must stay packed.
 static_assert(sizeof(ImportedScenePageRange) == 36u);
-constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u;
 
 std::string g_lastImportedSceneError;
 

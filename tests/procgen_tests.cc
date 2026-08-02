@@ -235,6 +235,100 @@ void testTriangulateAndAppend() {
     expectTrue(scene.boundsMax[0] >= 13.0f - 1e-3f, "scene bounds expanded by appends");
 }
 
+// Packed metallic-roughness materials (src/import/imported_scene.h). The pack
+// helper's contract is load-bearing: `flags` is blitted to disk with no version
+// gate, so a default material must pack to exactly 0 or every scene cooked
+// before materials existed would decode as a mirror.
+void testMaterialFlagPacking() {
+    using odai::importer::ImportedSceneSurfaceMaterial;
+    using odai::importer::kImportedSceneMaterialFlagAlphaTest;
+    using odai::importer::kImportedSceneMaterialFlagPbr;
+    using odai::importer::packImportedSceneMaterialFlags;
+    using odai::importer::unpackImportedSceneMaterialFlags;
+
+    expectEqualU32(packImportedSceneMaterialFlags(ImportedSceneSurfaceMaterial{}), 0u,
+                   "default material packs to zero flags");
+    expectEqualU32(packImportedSceneMaterialFlags({0.0f, 1.0f}), 0u,
+                   "explicit rough dielectric packs to zero flags");
+
+    // Legacy geometry: no PBR bit set, so it must decode to the legacy default
+    // no matter what the unused bit ranges hold.
+    const auto legacy = unpackImportedSceneMaterialFlags(0u);
+    expectNear(legacy.metallic, 0.0f, 1e-6f, "zero flags decode to non-metal");
+    expectNear(legacy.roughness, 1.0f, 1e-6f, "zero flags decode to fully rough");
+    const auto alphaOnly = unpackImportedSceneMaterialFlags(kImportedSceneMaterialFlagAlphaTest);
+    expectNear(alphaOnly.roughness, 1.0f, 1e-6f, "alpha-test-only flags stay legacy default");
+    const auto stray = unpackImportedSceneMaterialFlags(0x00abcd00u);
+    expectNear(stray.metallic, 0.0f, 1e-6f, "material bits ignored without the PBR bit");
+    expectNear(stray.roughness, 1.0f, 1e-6f, "material bits ignored without the PBR bit");
+
+    // Round-trip within one 8-bit quantization step.
+    const float samples[] = {0.0f, 0.09f, 0.34f, 0.5f, 0.9f, 1.0f};
+    for (const float metallic : samples) {
+        for (const float roughness : samples) {
+            if (metallic <= 0.0f && roughness >= 1.0f) {
+                continue;  // the default, asserted above to pack to 0
+            }
+            const std::uint32_t packed = packImportedSceneMaterialFlags({metallic, roughness});
+            expectTrue((packed & kImportedSceneMaterialFlagPbr) != 0u,
+                       "non-default material sets the PBR opt-in bit");
+            expectTrue((packed & kImportedSceneMaterialFlagAlphaTest) == 0u,
+                       "material packing leaves the alpha-test bit alone");
+            const auto decoded = unpackImportedSceneMaterialFlags(packed);
+            expectNear(decoded.metallic, metallic, 1.0f / 255.0f, "metallic survives round-trip");
+            expectNear(decoded.roughness, roughness, 1.0f / 255.0f, "roughness survives round-trip");
+        }
+    }
+
+    // Out-of-range input clamps rather than wrapping into a neighboring field.
+    const std::uint32_t clamped = packImportedSceneMaterialFlags({4.0f, -2.0f});
+    const auto clampedBack = unpackImportedSceneMaterialFlags(clamped);
+    expectNear(clampedBack.metallic, 1.0f, 1e-6f, "metallic clamps to 1");
+    expectNear(clampedBack.roughness, 0.0f, 1e-6f, "roughness clamps to 0");
+
+    // Material coexists with the alpha-test bit rather than clobbering it.
+    const std::uint32_t combined =
+        packImportedSceneMaterialFlags({0.9f, 0.3f}) | kImportedSceneMaterialFlagAlphaTest;
+    expectTrue((combined & kImportedSceneMaterialFlagAlphaTest) != 0u,
+               "alpha-test bit survives alongside a material");
+    expectNear(unpackImportedSceneMaterialFlags(combined).metallic, 0.9f, 1.0f / 255.0f,
+               "metallic decodes with the alpha-test bit set");
+}
+
+// triangulate() must carry the per-face material into the packed vertex flags,
+// and csg boolean splits must not drop it (both split sites copy fields by hand).
+void testMaterialSurvivesCsgAndTriangulation() {
+    CsgMesh box = odai::procgen::makeBox({0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f}, kGrey);
+    odai::procgen::setMaterial(box, 0.9f, 0.3f);
+    const odai::procgen::TriMesh tri = odai::procgen::triangulate(box);
+    expectTrue(!tri.vertices.empty(), "material box triangulates");
+    for (const auto& v : tri.vertices) {
+        const auto material = odai::importer::unpackImportedSceneMaterialFlags(v.flags);
+        expectNear(material.metallic, 0.9f, 1.0f / 255.0f, "triangulate carries metallic");
+        expectNear(material.roughness, 0.3f, 1.0f / 255.0f, "triangulate carries roughness");
+    }
+
+    // Untouched geometry keeps emitting zero flags, so existing scenes are
+    // unchanged by the material plumbing.
+    const CsgMesh plain = odai::procgen::makeBox({0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f}, kGrey);
+    for (const auto& v : odai::procgen::triangulate(plain).vertices) {
+        expectEqualU32(v.flags, 0u, "default material emits zero vertex flags");
+    }
+
+    // A boolean that splits faces must preserve the material on both sides.
+    CsgMesh cutter = odai::procgen::makeBox({0.4f, -0.1f, -0.1f}, {1.1f, 0.5f, 1.1f}, kGrey);
+    odai::procgen::setMaterial(cutter, 0.9f, 0.3f);
+    const CsgMesh cut = odai::procgen::csgSubtract(box, cutter);
+    expectTrue(!cut.polygons.empty(), "subtract produced geometry");
+    bool allCarryMaterial = true;
+    for (const Polygon& p : cut.polygons) {
+        if (std::abs(p.metallic - 0.9f) > 1e-6f || std::abs(p.roughness - 0.3f) > 1e-6f) {
+            allCarryMaterial = false;
+        }
+    }
+    expectTrue(allCarryMaterial, "csgSubtract preserves per-face material across splits");
+}
+
 void testGeneratorDeterminism() {
     odai::procgen::BuildingDesc desc;
     desc.era = odai::procgen::Era::E1930s;
@@ -745,6 +839,8 @@ int main() {
     testDisjointOps();
     testCoplanarStackedUnion();
     testTriangulateAndAppend();
+    testMaterialFlagPacking();
+    testMaterialSurvivesCsgAndTriangulation();
     testGeneratorDeterminism();
     testAllEraGeneratorsValid();
     testWindowLod();

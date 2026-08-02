@@ -15,6 +15,8 @@ namespace {
 constexpr int kArcherScreenBonus = 2;  // ranged bonus when a melee friend is adjacent.
 constexpr int kSmithyArmor = 3;        // armor granted to units built with a Smithy.
 constexpr int kCityUnitCap = 4;        // demo: stop a city auto-producing past this.
+constexpr int kDefaultUnitSightRadius = 2;  // fog-of-war reveal radius, most unit types.
+constexpr int kScoutSightRadius = 3;        // scouts see one hex farther.
 
 // Route-planning cost of stepping onto `to` (independent of the provisions debit):
 // roads are cheapest so units hug the network, rough terrain is dear so paths bend
@@ -145,6 +147,10 @@ bool isNearFriendlySettlement(const StrategyMap& map,
         }
     }
     return false;
+}
+
+int sightRadiusForUnit(const Unit& unit) {
+    return unit.typeId == "scout" ? kScoutSightRadius : kDefaultUnitSightRadius;
 }
 
 MoveResult moveUnitStep(GameState& gs, const StrategyMap& map, Unit& unit,
@@ -287,6 +293,172 @@ std::vector<std::array<std::uint32_t, 2>> findHexPath(
     }
     std::reverse(path.begin(), path.end());
     return path;
+}
+
+std::vector<std::array<std::uint32_t, 2>> reachableTiles(
+        const StrategyMap& map, const GameState& gs,
+        std::uint32_t startCol, std::uint32_t startRow, int movementLeft) {
+    std::vector<std::array<std::uint32_t, 2>> result;
+    if (movementLeft <= 0 || !map.inBounds(static_cast<int>(startCol), static_cast<int>(startRow))) {
+        return result;
+    }
+
+    const std::uint32_t W = map.width;
+    const std::size_t N = static_cast<std::size_t>(W) * static_cast<std::size_t>(map.height);
+    const auto idxOf = [W](std::uint32_t c, std::uint32_t r) {
+        return static_cast<std::size_t>(r) * static_cast<std::size_t>(W) + static_cast<std::size_t>(c);
+    };
+    const std::size_t startIdx = idxOf(startCol, startRow);
+
+    // -1 == unvisited; otherwise the hop count from the start, capped at movementLeft.
+    std::vector<int> depth(N, -1);
+    depth[startIdx] = 0;
+    std::queue<std::size_t> frontier;
+    frontier.push(startIdx);
+
+    while (!frontier.empty()) {
+        const std::size_t current = frontier.front();
+        frontier.pop();
+        if (depth[current] >= movementLeft) {
+            continue;  // at the movement cap; don't expand further from here
+        }
+        const int curCol = static_cast<int>(current % W);
+        const int curRow = static_cast<int>(current / W);
+        for (int dir = 0; dir < 6; ++dir) {
+            int nc = 0;
+            int nr = 0;
+            if (!tileNeighbor(map, curCol, curRow, dir, nc, nr)) {
+                continue;
+            }
+            const std::uint32_t ncu = static_cast<std::uint32_t>(nc);
+            const std::uint32_t nru = static_cast<std::uint32_t>(nr);
+            const std::size_t nIdx = idxOf(ncu, nru);
+            if (depth[nIdx] != -1) {
+                continue;  // already reached at an equal or shorter hop count
+            }
+            // Water and occupied tiles are never enqueued, so they're dead ends --
+            // nothing behind them gets marked reachable, matching moveUnitStep's
+            // "can't stand here, can't pass through here" rule.
+            if (terrainIsWater(map.at(ncu, nru).terrain) || gs.unitAt(ncu, nru) != nullptr) {
+                continue;
+            }
+            depth[nIdx] = depth[current] + 1;
+            result.push_back({ncu, nru});
+            frontier.push(nIdx);
+        }
+    }
+    return result;
+}
+
+std::vector<std::array<std::uint32_t, 2>> cheapestSupplyRoute(
+        const StrategyMap& map, const GameState& gs,
+        std::uint32_t unitCol, std::uint32_t unitRow, std::uint8_t owner) {
+    std::vector<std::array<std::uint32_t, 2>> route;
+    if (!map.inBounds(static_cast<int>(unitCol), static_cast<int>(unitRow))) {
+        return route;
+    }
+    if (isNearFriendlySettlement(map, unitCol, unitRow, owner)) {
+        return route;  // already in supply range; nothing to draw
+    }
+
+    const std::uint32_t W = map.width;
+    const std::size_t N = static_cast<std::size_t>(W) * static_cast<std::size_t>(map.height);
+    const auto idxOf = [W](std::uint32_t c, std::uint32_t r) {
+        return static_cast<std::size_t>(r) * static_cast<std::size_t>(W) + static_cast<std::size_t>(c);
+    };
+    const std::size_t unitIdx = idxOf(unitCol, unitRow);
+
+    constexpr int kInf = std::numeric_limits<int>::max();
+    std::vector<int> gScore(N, kInf);
+    std::vector<std::size_t> cameFrom(N, N);  // N == no parent yet (this tile seeded the search).
+    std::vector<char> closed(N, 0);
+
+    // Multi-source Dijkstra: seed every one of owner's settlements at cost 0, so the
+    // first seed popped that reaches the unit's tile is, by construction, the
+    // nearest one.
+    using Node = std::pair<int, std::size_t>;
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> open;
+    for (const Settlement& settlement : map.settlements) {
+        if (settlement.owner != owner) {
+            continue;
+        }
+        if (!map.inBounds(static_cast<int>(settlement.col), static_cast<int>(settlement.row))) {
+            continue;
+        }
+        const std::size_t sIdx = idxOf(settlement.col, settlement.row);
+        if (gScore[sIdx] != 0) {  // skip re-seeding a tile two settlements happen to share
+            gScore[sIdx] = 0;
+            open.push({0, sIdx});
+        }
+    }
+    if (open.empty()) {
+        return route;  // owner has no settlement to route back to
+    }
+
+    bool found = false;
+    while (!open.empty()) {
+        const std::size_t current = open.top().second;
+        open.pop();
+        if (current == unitIdx) {
+            found = true;
+            break;
+        }
+        if (closed[current]) {
+            continue;  // stale heap entry
+        }
+        closed[current] = 1;
+
+        const int curCol = static_cast<int>(current % W);
+        const int curRow = static_cast<int>(current / W);
+        for (int dir = 0; dir < 6; ++dir) {
+            int nc = 0;
+            int nr = 0;
+            if (!tileNeighbor(map, curCol, curRow, dir, nc, nr)) {
+                continue;
+            }
+            const std::uint32_t ncu = static_cast<std::uint32_t>(nc);
+            const std::uint32_t nru = static_cast<std::uint32_t>(nr);
+            const std::size_t nIdx = idxOf(ncu, nru);
+            if (closed[nIdx] || terrainIsWater(map.at(ncu, nru).terrain)) {
+                continue;
+            }
+            // Dead end, not just excluded: mirrors reachableTiles/findHexPath -- a
+            // unit can't pass through a tile another unit occupies.
+            if (gs.unitAt(ncu, nru) != nullptr) {
+                continue;
+            }
+            // This search expands outward from the settlements (current -> neighbor),
+            // but the cost that matters is a unit walking the opposite direction
+            // (neighbor -> current, toward the settlement) -- supplyCostForStep only
+            // surcharges the step's *destination* terrain, so the arguments are
+            // reversed here to price that direction correctly.
+            const int stepCost = supplyCostForStep(
+                map, ncu, nru, static_cast<std::uint32_t>(curCol), static_cast<std::uint32_t>(curRow));
+            const int tentative = gScore[current] + stepCost;
+            if (tentative < gScore[nIdx]) {
+                gScore[nIdx] = tentative;
+                cameFrom[nIdx] = current;
+                open.push({tentative, nIdx});
+            }
+        }
+    }
+
+    if (!found) {
+        return route;  // no friendly settlement is reachable at all
+    }
+    // cameFrom already points from each tile toward the settlement that reached it
+    // first (this search ran settlement-outward), so walking it from the unit's
+    // tile is already in the right order -- unlike findHexPath's goal-to-start
+    // backtrace, no reversal is needed.
+    std::size_t node = cameFrom[unitIdx];
+    while (node != N) {
+        route.push_back({static_cast<std::uint32_t>(node % W), static_cast<std::uint32_t>(node / W)});
+        if (gScore[node] == 0) {
+            break;  // reached the settlement tile that seeded this chain
+        }
+        node = cameFrom[node];
+    }
+    return route;
 }
 
 void followPath(GameState& gs, const StrategyMap& map, Unit& unit) {
