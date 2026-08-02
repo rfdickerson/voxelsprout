@@ -1,5 +1,7 @@
 #include "games/stellaris/stellaris_app.h"
 
+#include "core/lcg.h"
+
 #include "ui/resource_style.h"
 #include "ui/widgets/panel.h"
 #include "ui/widgets/window.h"
@@ -57,7 +59,7 @@ static const int    kTechCosts[]   = { 80, 150, 250, 400, 700 };
 // LCG helpers
 // ---------------------------------------------------------------------------
 
-static uint32_t lcgStep(uint32_t& s) { return (s = s * 1664525u + 1013904223u); }
+static uint32_t lcgStep(uint32_t& s) { return odai::core::lcgNext(s); }
 static float    lcgFloat(uint32_t& s) {
     return static_cast<float>(lcgStep(s) >> 8) / static_cast<float>(1 << 24);
 }

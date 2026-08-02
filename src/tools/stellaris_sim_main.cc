@@ -11,6 +11,7 @@
 //   cmake-build-release\Debug\odai_stellaris_sim.exe [turns] [seed] [empires]
 //   cmake-build-release\Debug\odai_stellaris_sim.exe 200 42 4 --sweep 20
 
+#include "core/lcg.h"
 #include "ui/font.h"
 #include "ui/kits/strategy_4x_kit.h"
 #include "ui/resource_style.h"
@@ -156,7 +157,7 @@ static constexpr float kTraits[6][4] = {
 
 // ─── LCG helpers ─────────────────────────────────────────────────────────────
 
-std::uint32_t lcg(std::uint32_t& s) { return s = s * 1664525u + 1013904223u; }
+std::uint32_t lcg(std::uint32_t& s) { return odai::core::lcgNext(s); }
 
 int randi(std::uint32_t& s, int lo, int hi) {
     if (hi <= lo) return lo;

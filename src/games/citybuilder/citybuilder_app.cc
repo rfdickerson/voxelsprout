@@ -1,5 +1,6 @@
 #include "games/citybuilder/citybuilder_app.h"
 
+#include "core/lcg.h"
 #include "core/ring_buffer.h"
 #include "math/math.h"
 #include "procgen/city_terrain.h"
@@ -715,7 +716,7 @@ bool CityBuilderApp::onInit() {
 
 void CityBuilderApp::generateTerrain() {
     auto rnd = [&]() -> float {
-        m_rng = m_rng * 1664525u + 1013904223u;
+        odai::core::lcgNext(m_rng);
         return static_cast<float>((m_rng >> 8) & 0xFFFFu) / 65535.0f;
     };
 
@@ -1015,7 +1016,7 @@ void CityBuilderApp::spawnCitizenTrip() {
     v.outZ = static_cast<signed char>(static_cast<int>(next / kGridW) - fr);
     v.inX = v.outX;
     v.inZ = v.outZ;
-    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    odai::core::lcgNext(m_trafficRng);
     v.variant = static_cast<std::uint8_t>((m_trafficRng >> 8) % kCarVariants);
     v.speed = 1.1f + 0.3f * static_cast<float>((m_trafficRng >> 16) & 0xffu) / 255.0f;
     m_routedVehicles.push_back(std::move(v));
@@ -1139,7 +1140,7 @@ void CityBuilderApp::spawnSchoolBusRun() {
             }
             if (!residential) continue;
             ++found;
-            m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+            odai::core::lcgNext(m_trafficRng);
             const std::size_t slot = (m_trafficRng >> 8) % 3u;
             if (static_cast<int>((m_trafficRng >> 12) % static_cast<std::uint32_t>(found)) <= 2) {
                 stops[slot] = {static_cast<short>(c), static_cast<short>(r)};
@@ -1200,7 +1201,7 @@ void CityBuilderApp::spawnGarbageRun() {
             }
             if (!residential) continue;
             ++found;
-            m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+            odai::core::lcgNext(m_trafficRng);
             const std::size_t slot = (m_trafficRng >> 8) % 4u;
             if (static_cast<int>((m_trafficRng >> 12) % static_cast<std::uint32_t>(found)) <= 3) {
                 stops[slot] = {static_cast<short>(c), static_cast<short>(r)};
@@ -1645,7 +1646,7 @@ void CityBuilderApp::stepFire() {
         return std::min(1.0f, cov[static_cast<std::size_t>(r) * kGridW + c]);
     };
     const auto rnd01 = [&]() -> float {
-        m_rng = m_rng * 1664525u + 1013904223u;
+        odai::core::lcgNext(m_rng);
         return static_cast<float>((m_rng >> 8) & 0xFFFFFFu) / 16777216.0f;
     };
     const auto ignite = [&](int c, int r) {
@@ -2031,7 +2032,7 @@ void CityBuilderApp::onTick(float dt) {
         else if (hour >= 21.0f || hour < 5.5f) cadence = 0.35f;  // sleepy town
         m_tripTimer -= dt * cadence * (m_storyBoost > 1.0f ? 5.0f : 1.0f);
         if (m_tripTimer <= 0.0f) {
-            m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+            odai::core::lcgNext(m_trafficRng);
             m_tripTimer = 1.5f + 1.5f * static_cast<float>((m_trafficRng >> 8) & 0xffu) / 255.0f;
             spawnCitizenTrip();
         }
@@ -3451,7 +3452,7 @@ bool pickAgentExit(Agent& a, std::uint32_t& rngState, std::uint32_t straightPct,
         }
         return false;
     }
-    rngState = rngState * 1664525u + 1013904223u;
+    odai::core::lcgNext(rngState);
     const std::uint32_t roll = rngState >> 8;
     if (straightAvailable && roll % 100u < straightPct) {
         a.outX = a.inX;
@@ -3486,7 +3487,7 @@ void CityBuilderApp::respawnVehicle(Vehicle& v) {
                     if (inBounds(c + dc, r + dr)) dev += tile(c + dc, r + dr).develop;
             const float w = 0.3f + dev;
             totalW += w;
-            m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+            odai::core::lcgNext(m_trafficRng);
             const float roll = static_cast<float>((m_trafficRng >> 8) & 0xFFFFFFu) / 16777216.0f;
             if (roll <= w / totalW) {
                 pickC = static_cast<short>(c);
@@ -3497,7 +3498,7 @@ void CityBuilderApp::respawnVehicle(Vehicle& v) {
     v.cx = pickC;
     v.cr = pickR;
     v.t = 0.0f;
-    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    odai::core::lcgNext(m_trafficRng);
     v.variant = static_cast<std::uint8_t>((m_trafficRng >> 8) % kCarVariants);
     v.speed = 1.0f + 0.5f * static_cast<float>((m_trafficRng >> 16) & 0xffu) / 255.0f;
     v.inX = 1;
@@ -3548,7 +3549,7 @@ bool CityBuilderApp::pickExit(Vehicle& v) {
         weights[i] = w;
         totalW += w;
     }
-    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    odai::core::lcgNext(m_trafficRng);
     float roll = static_cast<float>((m_trafficRng >> 8) & 0xFFFFFFu) / 16777216.0f * totalW;
     int chosen = optionCount - 1;
     for (int i = 0; i < optionCount; ++i) {
@@ -3632,7 +3633,7 @@ void CityBuilderApp::respawnPedestrian(Pedestrian& p) {
         for (int c = 0; c < kGridW; ++c) {
             if (!walkable(c, r)) continue;
             ++found;
-            m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+            odai::core::lcgNext(m_trafficRng);
             if (static_cast<int>((m_trafficRng >> 8) % static_cast<std::uint32_t>(found)) == 0) {
                 pickC = static_cast<short>(c);
                 pickR = static_cast<short>(r);
@@ -3642,7 +3643,7 @@ void CityBuilderApp::respawnPedestrian(Pedestrian& p) {
     p.cx = pickC;
     p.cr = pickR;
     p.t = 0.0f;
-    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    odai::core::lcgNext(m_trafficRng);
     p.variant = static_cast<std::uint8_t>((m_trafficRng >> 8) % kPedVariants);
     p.speed = 0.15f + 0.10f * static_cast<float>((m_trafficRng >> 16) & 0xffu) / 255.0f;
     p.inX = 1;
@@ -3698,13 +3699,13 @@ void CityBuilderApp::respawnBoat(Boat& b) {
     // traffic only when a river meander clips them.
     b.cx = -1;
     if (m_riverPath.empty()) return;
-    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    odai::core::lcgNext(m_trafficRng);
     const auto& [pc, pr] = m_riverPath[(m_trafficRng >> 8) % m_riverPath.size()];
     if (!inBounds(pc, pr) || tile(pc, pr).terrain != Terrain::Water || tile(pc, pr).road) return;
     b.cx = pc;
     b.cr = pr;
     b.t = 0.0f;
-    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    odai::core::lcgNext(m_trafficRng);
     b.variant = static_cast<std::uint8_t>((m_trafficRng >> 8) % kBoatVariants);
     b.speed = 0.22f + 0.16f * static_cast<float>((m_trafficRng >> 16) & 0xffu) / 255.0f;
     b.bobPhase = static_cast<float>((m_trafficRng >> 4) & 0xffu) * 0.0246f;
@@ -3778,7 +3779,7 @@ void CityBuilderApp::respawnSim(Sim& s) {
                 }
             }
             totalW += w;
-            m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+            odai::core::lcgNext(m_trafficRng);
             const float roll = static_cast<float>((m_trafficRng >> 8) & 0xFFFFFFu) / 16777216.0f;
             if (roll <= w / totalW) {
                 pickC = static_cast<short>(c);
@@ -3789,7 +3790,7 @@ void CityBuilderApp::respawnSim(Sim& s) {
     s.cx = pickC;
     s.cr = pickR;
     s.t = 0.0f;
-    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    odai::core::lcgNext(m_trafficRng);
     s.variant = static_cast<std::uint8_t>((m_trafficRng >> 8) % kSimVariants);
     s.speed = 0.22f + 0.14f * static_cast<float>((m_trafficRng >> 16) & 0xffu) / 255.0f;
     s.phase = static_cast<float>((m_trafficRng >> 4) & 0xffu) * 0.0246f;
@@ -3856,7 +3857,7 @@ bool CityBuilderApp::pickSimExit(Sim& s) {
         weights[i] = w;
         totalW += w;
     }
-    m_trafficRng = m_trafficRng * 1664525u + 1013904223u;
+    odai::core::lcgNext(m_trafficRng);
     float roll = static_cast<float>((m_trafficRng >> 8) & 0xFFFFFFu) / 16777216.0f * totalW;
     int chosen = optionCount - 1;
     for (int i = 0; i < optionCount; ++i) {
@@ -4109,7 +4110,7 @@ constexpr int kMaxSnowDrops = 380;
 }  // namespace
 
 void CityBuilderApp::respawnDrop(WeatherDrop& d, bool atTop) {
-    m_weatherRng = m_weatherRng * 1664525u + 1013904223u;
+    odai::core::lcgNext(m_weatherRng);
     const std::uint32_t h = m_weatherRng >> 8;
     // Spawn box tracks the camera focus so precipitation always fills the view.
     const float span = m_camZoom * 1.25f + 4.0f;
@@ -4145,7 +4146,7 @@ void CityBuilderApp::updateWeather(float dt) {
 
     m_weatherTimer -= dt;
     if (m_weatherTimer <= 0.0f) {
-        m_weatherRng = m_weatherRng * 1664525u + 1013904223u;
+        odai::core::lcgNext(m_weatherRng);
         const std::uint32_t roll = (m_weatherRng >> 8) % 100u;
         std::uint32_t wetChance = 25u;
         switch (m_season) {
@@ -4222,7 +4223,7 @@ void CityBuilderApp::updateWeather(float dt) {
 // ─────────────────────────────────────────────────────────────────────────────
 void CityBuilderApp::updateSevereWeather(float dt) {
     const auto rnd01 = [&]() -> float {
-        m_weatherRng = m_weatherRng * 1664525u + 1013904223u;
+        odai::core::lcgNext(m_weatherRng);
         return static_cast<float>((m_weatherRng >> 8) & 0xFFFFFFu) / 16777216.0f;
     };
     // Ground heat at a world position: developed land (industry especially)
@@ -4320,7 +4321,7 @@ void CityBuilderApp::updateSevereWeather(float dt) {
 void CityBuilderApp::stepTornadoDamage() {
     if (m_tornadoes.empty()) return;
     const auto rnd01 = [&]() -> float {
-        m_rng = m_rng * 1664525u + 1013904223u;
+        odai::core::lcgNext(m_rng);
         return static_cast<float>((m_rng >> 8) & 0xFFFFFFu) / 16777216.0f;
     };
     for (const Tornado& tor : m_tornadoes) {

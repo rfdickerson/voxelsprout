@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "core/hash.h"
+#include "core/lcg.h"
 
 // Shared deterministic RNG for procedural generation. Same LCG constants the
 // citybuilder app uses for its ambient effects, so extracting it here keeps
@@ -15,10 +16,11 @@ struct Rng {
 
     explicit Rng(std::uint32_t seed) : state(seed ? seed : 1u) {}
 
-    std::uint32_t next() {
-        state = state * 1664525u + 1013904223u;
-        return state >> 8;
-    }
+    std::uint32_t next() { return odai::core::lcgNext24(state); }
+
+    // [0, 1) with 24 bits of resolution. Distinct from uniform(0, 1), which
+    // quantises to 16 bits; both forms are in use in the tree.
+    float unitFloat() { return static_cast<float>(next()) / static_cast<float>(1u << 24); }
 
     float uniform(float lo, float hi) {
         return lo + (hi - lo) * (static_cast<float>(next() & 0xffffu) / 65535.0f);

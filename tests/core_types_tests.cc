@@ -1,5 +1,6 @@
 #include "core/grid3.h"
 #include "core/hash.h"
+#include "core/lcg.h"
 #include "core/ring_buffer.h"
 #include "math/math.h"
 
@@ -256,9 +257,44 @@ void testPushBounded() {
     expectTrue(reference == migrated, "pushBounded matches the hand-rolled drop-oldest loop");
 }
 
+// Every generated world, .smap, citybuilder layout, and swtor inventory roll
+// depends on these exact outputs. The reference expression below is the
+// pre-migration step, copied verbatim from the 29 sites that had it inline.
+void testLcgIsBitExactWithTheReplacedInlineCopies() {
+    bool allMatch = true;
+    for (std::uint32_t seed : {1u, 0xC0FFEE17u, 0xDAEDBEEFu, 0xBAD5EEDu, 0xFFFFFFFFu}) {
+        std::uint32_t reference = seed;
+        std::uint32_t viaFreeFunction = seed;
+        odai::core::Lcg32 viaObject{seed};
+        for (int i = 0; i < 1000; ++i) {
+            reference = reference * 1664525u + 1013904223u;
+            allMatch = allMatch && odai::core::lcgNext(viaFreeFunction) == reference;
+            allMatch = allMatch && viaFreeFunction == reference;
+            allMatch = allMatch && viaObject.nextState() == reference;
+            allMatch = allMatch && viaObject.state() == reference;
+        }
+    }
+    expectTrue(allMatch, "lcgNext and Lcg32 reproduce the inline LCG step exactly");
+
+    std::uint32_t state = 12345u;
+    std::uint32_t shifted = 12345u;
+    bool topBitsMatch = true;
+    for (int i = 0; i < 1000; ++i) {
+        shifted = shifted * 1664525u + 1013904223u;
+        topBitsMatch = topBitsMatch && odai::core::lcgNext24(state) == (shifted >> 8);
+    }
+    expectTrue(topBitsMatch, "lcgNext24 returns the top 24 bits of the new state");
+
+    // A zero seed is a fixed point for this LCG only if the increment were 0;
+    // assert it still advances, since several call sites can seed from 0.
+    std::uint32_t zero = 0u;
+    expectTrue(odai::core::lcgNext(zero) == 1013904223u, "a zero seed still advances");
+}
+
 }  // namespace
 
 int main() {
+    testLcgIsBitExactWithTheReplacedInlineCopies();
     testRingBuffer();
     testRingBufferPercentile();
     testPushBounded();

@@ -1,5 +1,6 @@
 #include "games/swtor/swtor_app.h"
 
+#include "core/lcg.h"
 #include "core/ring_buffer.h"
 
 #define GLFW_INCLUDE_NONE
@@ -1042,7 +1043,7 @@ bool SwtorApp::onInit() {
 
     // Generate inventory deterministically
     uint32_t seed = 0xDAEDBEEFu;
-    auto lcg = [&]() -> uint32_t { return (seed = seed * 1664525u + 1013904223u); };
+    auto lcg = [&]() -> uint32_t { return odai::core::lcgNext(seed); };
     for (int i = 0; i < std::min(m_invCount, kInvCapacity); ++i) {
         m_inventory[i].type = static_cast<int>(lcg() % 8);
         float qr = (lcg() >> 8) / float(1 << 24);
