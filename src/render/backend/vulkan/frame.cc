@@ -55,37 +55,6 @@ void logVkFailure(const char* context, VkResult result) {
                        << vkResultName(result) << " (" << static_cast<int>(result) << ")";
 }
 
-template <std::size_t N>
-float percentileFromRingBuffer(
-    const std::array<float, N>& history,
-    std::uint32_t sampleCount,
-    std::uint32_t writeIndex,
-    float percentile
-) {
-    if (sampleCount == 0) {
-        return 0.0f;
-    }
-
-    const std::uint32_t clampedSampleCount = std::min(sampleCount, static_cast<std::uint32_t>(N));
-    std::array<float, N> scratch{};
-    for (std::uint32_t i = 0; i < clampedSampleCount; ++i) {
-        const std::uint32_t historyIndex =
-            (clampedSampleCount == static_cast<std::uint32_t>(N))
-                ? ((writeIndex + i) % static_cast<std::uint32_t>(N))
-                : i;
-        scratch[i] = history[historyIndex];
-    }
-
-    const float clampedPercentile = std::clamp(percentile, 0.0f, 1.0f);
-    const std::uint32_t targetIndex = static_cast<std::uint32_t>(
-        std::ceil(clampedPercentile * static_cast<float>(clampedSampleCount - 1u))
-    );
-    auto first = scratch.begin();
-    auto nth = first + targetIndex;
-    auto last = first + clampedSampleCount;
-    std::nth_element(first, nth, last);
-    return *nth;
-}
 
 } // namespace
 
@@ -350,11 +319,7 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuMainTimeMs = durationMs(kGpuTimestampQueryMainStart, kGpuTimestampQueryMainEnd);
     m_debugGpuPostTimeMs = durationMs(kGpuTimestampQueryPostStart, kGpuTimestampQueryPostEnd);
     m_debugGpuUiTimeMs = durationMs(kGpuTimestampQueryUiStart, kGpuTimestampQueryUiEnd);
-    m_debugGpuFrameTimingMsHistory[m_debugGpuFrameTimingMsHistoryWrite] = m_debugGpuFrameTimeMs;
-    m_debugGpuFrameTimingMsHistoryWrite =
-        (m_debugGpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
-    m_debugGpuFrameTimingMsHistoryCount =
-        std::min(m_debugGpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
+    m_debugGpuFrameTimingMsHistory.push(m_debugGpuFrameTimeMs);
     updateFrameTimingPercentiles();
     m_gpuTimestampQuerySubmitted[frameIndex] = false;
     return true;
@@ -420,11 +385,7 @@ void RendererBackend::updateDisplayTimingStats() {
                 (timing.actualPresentTime - m_lastDisplayTimingActualPresentTimeNs) * 1.0e-6
             );
             if (presentFrameMs > 0.0f) {
-                m_debugPresentedFrameTimingMsHistory[m_debugPresentedFrameTimingMsHistoryWrite] = presentFrameMs;
-                m_debugPresentedFrameTimingMsHistoryWrite =
-                    (m_debugPresentedFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
-                m_debugPresentedFrameTimingMsHistoryCount =
-                    std::min(m_debugPresentedFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
+                m_debugPresentedFrameTimingMsHistory.push(presentFrameMs);
                 m_debugPresentedFrameTimeMs = presentFrameMs;
                 m_debugPresentedFps = 1000.0f / presentFrameMs;
             }
@@ -454,62 +415,17 @@ void RendererBackend::updateDisplayTimingStats() {
 }
 
 void RendererBackend::updateFrameTimingPercentiles() {
-    m_debugCpuFrameP50Ms = percentileFromRingBuffer(
-        m_debugCpuFrameTotalMsHistory,
-        m_debugCpuFrameTimingMsHistoryCount,
-        m_debugCpuFrameTimingMsHistoryWrite,
-        0.50f
-    );
-    m_debugCpuFrameP95Ms = percentileFromRingBuffer(
-        m_debugCpuFrameTotalMsHistory,
-        m_debugCpuFrameTimingMsHistoryCount,
-        m_debugCpuFrameTimingMsHistoryWrite,
-        0.95f
-    );
-    m_debugCpuFrameP99Ms = percentileFromRingBuffer(
-        m_debugCpuFrameTotalMsHistory,
-        m_debugCpuFrameTimingMsHistoryCount,
-        m_debugCpuFrameTimingMsHistoryWrite,
-        0.99f
-    );
+    m_debugCpuFrameP50Ms = odai::core::percentile(m_debugCpuFrameTotalMsHistory, 0.50f);
+    m_debugCpuFrameP95Ms = odai::core::percentile(m_debugCpuFrameTotalMsHistory, 0.95f);
+    m_debugCpuFrameP99Ms = odai::core::percentile(m_debugCpuFrameTotalMsHistory, 0.99f);
 
-    m_debugGpuFrameP50Ms = percentileFromRingBuffer(
-        m_debugGpuFrameTimingMsHistory,
-        m_debugGpuFrameTimingMsHistoryCount,
-        m_debugGpuFrameTimingMsHistoryWrite,
-        0.50f
-    );
-    m_debugGpuFrameP95Ms = percentileFromRingBuffer(
-        m_debugGpuFrameTimingMsHistory,
-        m_debugGpuFrameTimingMsHistoryCount,
-        m_debugGpuFrameTimingMsHistoryWrite,
-        0.95f
-    );
-    m_debugGpuFrameP99Ms = percentileFromRingBuffer(
-        m_debugGpuFrameTimingMsHistory,
-        m_debugGpuFrameTimingMsHistoryCount,
-        m_debugGpuFrameTimingMsHistoryWrite,
-        0.99f
-    );
+    m_debugGpuFrameP50Ms = odai::core::percentile(m_debugGpuFrameTimingMsHistory, 0.50f);
+    m_debugGpuFrameP95Ms = odai::core::percentile(m_debugGpuFrameTimingMsHistory, 0.95f);
+    m_debugGpuFrameP99Ms = odai::core::percentile(m_debugGpuFrameTimingMsHistory, 0.99f);
 
-    m_debugPresentedFrameP50Ms = percentileFromRingBuffer(
-        m_debugPresentedFrameTimingMsHistory,
-        m_debugPresentedFrameTimingMsHistoryCount,
-        m_debugPresentedFrameTimingMsHistoryWrite,
-        0.50f
-    );
-    m_debugPresentedFrameP95Ms = percentileFromRingBuffer(
-        m_debugPresentedFrameTimingMsHistory,
-        m_debugPresentedFrameTimingMsHistoryCount,
-        m_debugPresentedFrameTimingMsHistoryWrite,
-        0.95f
-    );
-    m_debugPresentedFrameP99Ms = percentileFromRingBuffer(
-        m_debugPresentedFrameTimingMsHistory,
-        m_debugPresentedFrameTimingMsHistoryCount,
-        m_debugPresentedFrameTimingMsHistoryWrite,
-        0.99f
-    );
+    m_debugPresentedFrameP50Ms = odai::core::percentile(m_debugPresentedFrameTimingMsHistory, 0.50f);
+    m_debugPresentedFrameP95Ms = odai::core::percentile(m_debugPresentedFrameTimingMsHistory, 0.95f);
+    m_debugPresentedFrameP99Ms = odai::core::percentile(m_debugPresentedFrameTimingMsHistory, 0.99f);
 }
 
 void RendererBackend::scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue) {

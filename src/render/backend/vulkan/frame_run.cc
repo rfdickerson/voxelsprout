@@ -2949,13 +2949,9 @@ void RendererBackend::renderFrame(
     } else {
         m_debugCpuFrameEwmaMs += kCpuFrameEwmaAlpha * (m_debugFrameTimeMs - m_debugCpuFrameEwmaMs);
     }
-    m_debugCpuFrameTotalMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugFrameTimeMs;
-    m_debugCpuFrameWorkMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugCpuFrameWorkMs;
-    m_debugCpuFrameEwmaMsHistory[m_debugCpuFrameTimingMsHistoryWrite] = m_debugCpuFrameEwmaMs;
-    m_debugCpuFrameTimingMsHistoryWrite =
-        (m_debugCpuFrameTimingMsHistoryWrite + 1u) % kTimingHistorySampleCount;
-    m_debugCpuFrameTimingMsHistoryCount =
-        std::min(m_debugCpuFrameTimingMsHistoryCount + 1u, kTimingHistorySampleCount);
+    m_debugCpuFrameTotalMsHistory.push(m_debugFrameTimeMs);
+    m_debugCpuFrameWorkMsHistory.push(m_debugCpuFrameWorkMs);
+    m_debugCpuFrameEwmaMsHistory.push(m_debugCpuFrameEwmaMs);
     updateFrameTimingPercentiles();
 
     const FrameArenaStats& frameArenaStats = m_frameArena.activeStats();

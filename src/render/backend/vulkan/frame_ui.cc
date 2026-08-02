@@ -625,12 +625,10 @@ void RendererBackend::buildFrameStatsUi() {
     }
 
     if (ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (m_debugCpuFrameTimingMsHistoryCount > 0) {
-            const int cpuHistoryCount = static_cast<int>(m_debugCpuFrameTimingMsHistoryCount);
+        if (!m_debugCpuFrameWorkMsHistory.empty()) {
+            const int cpuHistoryCount = static_cast<int>(m_debugCpuFrameWorkMsHistory.size());
             const int cpuHistoryOffset =
-                (m_debugCpuFrameTimingMsHistoryCount == kTimingHistorySampleCount)
-                    ? static_cast<int>(m_debugCpuFrameTimingMsHistoryWrite)
-                    : 0;
+                static_cast<int>(m_debugCpuFrameWorkMsHistory.orderedStartIndex());
             ImGui::PlotLines(
                 "CPU Work (ms)",
                 m_debugCpuFrameWorkMsHistory.data(),
@@ -646,12 +644,10 @@ void RendererBackend::buildFrameStatsUi() {
         }
 
         if (m_gpuTimestampsSupported) {
-            if (m_debugGpuFrameTimingMsHistoryCount > 0) {
-                const int gpuHistoryCount = static_cast<int>(m_debugGpuFrameTimingMsHistoryCount);
+            if (!m_debugGpuFrameTimingMsHistory.empty()) {
+                const int gpuHistoryCount = static_cast<int>(m_debugGpuFrameTimingMsHistory.size());
                 const int gpuHistoryOffset =
-                    (m_debugGpuFrameTimingMsHistoryCount == kTimingHistorySampleCount)
-                        ? static_cast<int>(m_debugGpuFrameTimingMsHistoryWrite)
-                        : 0;
+                    static_cast<int>(m_debugGpuFrameTimingMsHistory.orderedStartIndex());
                 ImGui::PlotLines(
                     "GPU Frame (ms)",
                     m_debugGpuFrameTimingMsHistory.data(),
@@ -668,12 +664,10 @@ void RendererBackend::buildFrameStatsUi() {
         } else {
             ImGui::Text("GPU Frame (ms): unavailable");
         }
-        if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
-            const int presentHistoryCount = static_cast<int>(m_debugPresentedFrameTimingMsHistoryCount);
+        if (!m_debugPresentedFrameTimingMsHistory.empty()) {
+            const int presentHistoryCount = static_cast<int>(m_debugPresentedFrameTimingMsHistory.size());
             const int presentHistoryOffset =
-                (m_debugPresentedFrameTimingMsHistoryCount == kTimingHistorySampleCount)
-                    ? static_cast<int>(m_debugPresentedFrameTimingMsHistoryWrite)
-                    : 0;
+                static_cast<int>(m_debugPresentedFrameTimingMsHistory.orderedStartIndex());
             ImGui::PlotLines(
                 "Presented Frame (ms)",
                 m_debugPresentedFrameTimingMsHistory.data(),
@@ -728,7 +722,7 @@ void RendererBackend::buildFrameStatsUi() {
         } else {
             ImGui::Text("Frame GPU: n/a");
         }
-        if (m_debugPresentedFrameTimingMsHistoryCount > 0) {
+        if (!m_debugPresentedFrameTimingMsHistory.empty()) {
             ImGui::Text(
                 "Presented Frame (last/P50/P95/P99): %.2f / %.2f / %.2f / %.2f ms",
                 m_debugPresentedFrameTimeMs,

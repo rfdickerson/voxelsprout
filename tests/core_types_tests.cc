@@ -1,11 +1,13 @@
 #include "core/grid3.h"
 #include "core/hash.h"
+#include "core/ring_buffer.h"
 #include "math/math.h"
 
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -170,9 +172,96 @@ void testVector2() {
     expectTrue((-a) == Vector2{-3.0f, -4.0f}, "Vector2 negation");
 }
 
+void testRingBuffer() {
+    odai::core::RingBuffer<float, 4> ring;
+    expectTrue(ring.empty(), "a fresh ring is empty");
+    expectTrue(ring.size() == 0u, "a fresh ring has size 0");
+    expectTrue(!ring.full(), "a fresh ring is not full");
+    expectTrue(ring.orderedStartIndex() == 0u, "an unwrapped ring starts at 0");
+
+    ring.push(1.0f);
+    ring.push(2.0f);
+    expectTrue(ring.size() == 2u, "partial fill tracks size");
+    expectTrue(ring[0] == 1.0f && ring[1] == 2.0f, "partial fill reads oldest-first");
+    expectTrue(ring.orderedStartIndex() == 0u, "a partially filled ring still starts at 0");
+
+    ring.push(3.0f);
+    ring.push(4.0f);
+    expectTrue(ring.full() && ring.size() == 4u, "the ring reports full at capacity");
+    expectTrue(ring[0] == 1.0f && ring[3] == 4.0f, "a just-filled ring is still in order");
+
+    // Overwrite: 1 falls off, 5 becomes newest.
+    ring.push(5.0f);
+    expectTrue(ring.size() == 4u, "size saturates at capacity");
+    expectTrue(ring[0] == 2.0f, "the oldest sample is dropped on overflow");
+    expectTrue(ring[3] == 5.0f, "the newest sample lands last");
+    expectTrue(ring.orderedStartIndex() == ring.writeIndex(), "a wrapped ring starts at the write cursor");
+
+    ring.clear();
+    expectTrue(ring.empty() && ring.writeIndex() == 0u, "clear resets cursors");
+    expectTrue(ring.data()[0] == 0.0f, "clear zero-fills the storage");
+}
+
+void testRingBufferPercentile() {
+    odai::core::RingBuffer<float, 240> ring;
+    expectTrue(odai::core::percentile(ring, 0.5f) == 0.0f, "percentile of an empty ring is 0");
+
+    // A known ramp 1..100; nearest-rank with a ceil-based index.
+    for (int i = 1; i <= 100; ++i) {
+        ring.push(static_cast<float>(i));
+    }
+    expectTrue(odai::core::percentile(ring, 0.0f) == 1.0f, "p0 is the minimum");
+    expectTrue(odai::core::percentile(ring, 1.0f) == 100.0f, "p100 is the maximum");
+    expectTrue(odai::core::percentile(ring, 0.5f) == 51.0f, "p50 uses the ceil-based rank");
+
+    // Out-of-range percentiles clamp rather than reading out of bounds.
+    expectTrue(odai::core::percentile(ring, -1.0f) == 1.0f, "percentile clamps below 0");
+    expectTrue(odai::core::percentile(ring, 2.0f) == 100.0f, "percentile clamps above 1");
+
+    // Percentiles must be computed over the live window only, not stale slots.
+    odai::core::RingBuffer<float, 4> small;
+    for (float v : {100.0f, 100.0f, 100.0f, 100.0f, 1.0f, 1.0f, 1.0f, 1.0f}) {
+        small.push(v);
+    }
+    expectTrue(odai::core::percentile(small, 1.0f) == 1.0f, "overwritten samples leave the window");
+}
+
+void testPushBounded() {
+    std::vector<int> values;
+    for (int i = 0; i < 6; ++i) {
+        odai::core::pushBounded(values, i, 3u);
+    }
+    expectTrue(values.size() == 3u, "pushBounded caps the size");
+    expectTrue(values[0] == 3 && values[1] == 4 && values[2] == 5, "pushBounded drops from the front");
+
+    std::vector<int> capOne;
+    odai::core::pushBounded(capOne, 7, 1u);
+    odai::core::pushBounded(capOne, 8, 1u);
+    expectTrue(capOne.size() == 1u && capOne[0] == 8, "a cap of 1 keeps only the newest");
+
+    std::vector<int> capZero;
+    odai::core::pushBounded(capZero, 9, 0u);
+    expectTrue(capZero.empty(), "a cap of 0 keeps nothing");
+
+    // Matches the citybuilder/swtor idiom it replaced: push, then trim.
+    std::vector<int> reference;
+    std::vector<int> migrated;
+    for (int i = 0; i < 40; ++i) {
+        reference.push_back(i);
+        if (reference.size() > 14u) {
+            reference.erase(reference.begin());
+        }
+        odai::core::pushBounded(migrated, i, 14u);
+    }
+    expectTrue(reference == migrated, "pushBounded matches the hand-rolled drop-oldest loop");
+}
+
 }  // namespace
 
 int main() {
+    testRingBuffer();
+    testRingBufferPercentile();
+    testPushBounded();
     testScalarHelpersMatchTheImplementationsTheyReplaced();
     testVector2();
     testCoordinateHashGoldenVectors();

@@ -1,5 +1,6 @@
 #include "games/citybuilder/citybuilder_app.h"
 
+#include "core/ring_buffer.h"
 #include "math/math.h"
 #include "procgen/city_terrain.h"
 #include "procgen/civic_generator.h"
@@ -1491,9 +1492,8 @@ void CityBuilderApp::computeDesirability() {
 }
 
 void CityBuilderApp::pushHistory() {
-    auto push = [](std::vector<float>& v, float x) {
-        v.push_back(x);
-        if (static_cast<int>(v.size()) > kHistMax) v.erase(v.begin());
+    const auto push = [](std::vector<float>& v, float x) {
+        odai::core::pushBounded(v, x, static_cast<std::size_t>(kHistMax));
     };
     push(m_histPop, static_cast<float>(m_population));
     push(m_histMoney, static_cast<float>(m_money));
@@ -1778,7 +1778,6 @@ void CityBuilderApp::setTool(Tool t) {
 }
 
 void CityBuilderApp::addFx(float worldX, float worldZ, const UiColor& color, std::uint8_t kind) {
-    if (m_fx.size() >= kMaxFx) m_fx.erase(m_fx.begin());
     Fx fx;
     fx.x = worldX;
     fx.z = worldZ;
@@ -1787,7 +1786,7 @@ void CityBuilderApp::addFx(float worldX, float worldZ, const UiColor& color, std
     fx.g = color.g;
     fx.b = color.b;
     fx.kind = kind;
-    m_fx.push_back(fx);
+    odai::core::pushBounded(m_fx, fx, static_cast<std::size_t>(kMaxFx));
 }
 
 void CityBuilderApp::applyTool(int c, int r) {

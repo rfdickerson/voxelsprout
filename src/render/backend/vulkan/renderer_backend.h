@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/ring_buffer.h"
 #include "import/gpu_scene.h"
 #include "import/hex_terrain_data.h"
 #include "import/imported_scene.h"
@@ -1485,20 +1486,17 @@ private:
     bool m_voxelGiSurfaceLastLoggedRestirReady = false;
     bool m_voxelGiSurfaceLastLoggedValid = false;
     std::uint32_t m_debugDisplayTimingSampleCount = 0;
-    std::array<float, kTimingHistorySampleCount> m_debugCpuFrameTotalMsHistory{};
-    std::array<float, kTimingHistorySampleCount> m_debugCpuFrameWorkMsHistory{};
-    std::array<float, kTimingHistorySampleCount> m_debugCpuFrameEwmaMsHistory{};
-    std::uint32_t m_debugCpuFrameTimingMsHistoryWrite = 0;
-    std::uint32_t m_debugCpuFrameTimingMsHistoryCount = 0;
+    // Each ring carries its own cursor. The three CPU histories previously
+    // shared one write index; they are still pushed together every frame, so
+    // splitting them is behavior-preserving and removes a drift hazard.
+    odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugCpuFrameTotalMsHistory{};
+    odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugCpuFrameWorkMsHistory{};
+    odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugCpuFrameEwmaMsHistory{};
     float m_debugCpuFrameWorkMs = 0.0f;
     float m_debugCpuFrameEwmaMs = 0.0f;
     bool m_debugCpuFrameEwmaInitialized = false;
-    std::array<float, kTimingHistorySampleCount> m_debugGpuFrameTimingMsHistory{};
-    std::uint32_t m_debugGpuFrameTimingMsHistoryWrite = 0;
-    std::uint32_t m_debugGpuFrameTimingMsHistoryCount = 0;
-    std::array<float, kTimingHistorySampleCount> m_debugPresentedFrameTimingMsHistory{};
-    std::uint32_t m_debugPresentedFrameTimingMsHistoryWrite = 0;
-    std::uint32_t m_debugPresentedFrameTimingMsHistoryCount = 0;
+    odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugGpuFrameTimingMsHistory{};
+    odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugPresentedFrameTimingMsHistory{};
     float m_debugFps = 0.0f;
     std::uint32_t m_debugLatePresentCount = 0;
     std::uint32_t m_debugChunkCount = 0;
