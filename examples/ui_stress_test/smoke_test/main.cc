@@ -20,7 +20,7 @@ using namespace odai::uistress;
 namespace {
 
 // The harness's implementation already links STB_IMAGE_IMPLEMENTATION via
-// odai_ui (src/ui/vector/svg_document.cc), so this file only declares usage.
+// odai_ui (src/ui/theme/ui_theme.cc), so this file only declares usage.
 bool capturedRealContent(const std::string& pngPath) {
     int width = 0;
     int height = 0;
@@ -28,6 +28,11 @@ bool capturedRealContent(const std::string& pngPath) {
     unsigned char* pixels = stbi_load(pngPath.c_str(), &width, &height, &channels, 4);
     if (pixels == nullptr) {
         std::fprintf(stderr, "failed to read back %s for content check\n", pngPath.c_str());
+        return false;
+    }
+    if (width < 61 || height < 61) {
+        std::fprintf(stderr, "captured image too small to content-check (%dx%d)\n", width, height);
+        stbi_image_free(pixels);
         return false;
     }
 
