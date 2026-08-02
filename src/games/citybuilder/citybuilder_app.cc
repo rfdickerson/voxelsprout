@@ -330,6 +330,23 @@ UiColor heat(float d) {
     return d < 0.5f ? mix(lo, mid, d * 2.0f) : mix(mid, hi, (d - 0.5f) * 2.0f);
 }
 
+// Solar elevation (degrees above horizon) across the 24h civic clock. A
+// single cosine keeps the arc seamless with no piecewise sunrise/sunset
+// joins: solar noon (hour 12) at the peak, solar midnight (hour 0/24) at the
+// trough. kNoonElevationDeg/kMidnightElevationDeg were picked so hour 9 —
+// this diorama's original fixed "mid-morning" look — lands close to the
+// 38 deg elevation the shadow-length tuning in onInit was written against,
+// so daytime play still reads the way it always has; the new part is dusk,
+// dawn, and a dimmer, cooler-toned night.
+float sunElevationForHour(float hour) {
+    constexpr float kNoonElevationDeg = 46.0f;
+    constexpr float kMidnightElevationDeg = -24.0f;
+    const float mid = 0.5f * (kNoonElevationDeg + kMidnightElevationDeg);
+    const float amp = 0.5f * (kNoonElevationDeg - kMidnightElevationDeg);
+    const float phase = (hour - 12.0f) / 24.0f * 2.0f * 3.14159265f;  // 0 at solar noon
+    return mid + amp * std::cos(phase);
+}
+
 // Civic buildings are generated CSG meshes (see cachedCivic); the park keeps a
 // flat green slab under its centerpiece and trees.
 constexpr float kParkSlabHeight = 0.12f;
@@ -632,7 +649,9 @@ bool CityBuilderApp::onInit() {
     // sky model turns golden at lower elevations while the SH ambient stays
     // sky-blue, giving the warm-key / cool-fill contrast that look leans on)
     // at 38 deg elevation so buildings cast readable shadows ~1.3x their
-    // height, angled across the iso view rather than straight down it.
+    // height, angled across the iso view rather than straight down it. Just
+    // the initial value — onRender recomputes this every frame from the
+    // civic clock (sunElevationForHour) once the day actually gets moving.
     m_renderer.setSunAngles(50.0f, -38.0f);
     // GameApp::init() always calls setStrategyMapMode(true), which tunes SSAO
     // radius/bias for the hex strategy map's much larger, flatter scale
@@ -2268,11 +2287,17 @@ void CityBuilderApp::onRender(float /*dt*/) {
     drawWorldOverlay(lo);
     drawFlash(lo);
 
-    // Storm gloom: as a severe front rolls overhead the sun sinks toward the
-    // horizon, so the physical sky model golds and darkens the whole diorama —
-    // the light itself says the weather turned.
+    // Day/night: the sun's elevation now actually follows the civic clock
+    // that already drives rush hour, the school bus, and trash day — dawn,
+    // high sun, dusk, and a dim night all sweep through instead of the sky
+    // sitting frozen at one fixed mid-morning angle all game. Storm gloom
+    // layers on top of whatever the clock says: as a severe front rolls
+    // overhead the sun sinks further toward the horizon, so the physical sky
+    // model golds and darkens the whole diorama — the light itself says the
+    // weather turned.
     const float gloom = std::min(1.0f, m_stormSeverity * 1.3f) * m_weatherIntensity;
-    m_renderer.setSunAngles(50.0f, -38.0f + 16.0f * gloom);
+    const float sunElevation = sunElevationForHour(dayHour()) - 16.0f * gloom;
+    m_renderer.setSunAngles(50.0f, -sunElevation);
 
     // Tilt-shift depth of field completes the diorama read: the ground at the
     // focus point stays sharp and the frame's near/far edges melt away like a
