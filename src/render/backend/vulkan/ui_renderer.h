@@ -120,12 +120,19 @@ private:
     bool         m_geometryReady = false;
     VkSampler m_sampler = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_setLayout = VK_NULL_HANDLE;
+    // True when the texture array is backed by a descriptor buffer (below);
+    // false means it's a classic update-after-bind pool/set (m_descriptorPool /
+    // m_descriptorSet), used when VK_EXT_descriptor_buffer isn't available.
+    bool m_usingDescriptorBuffer = false;
     // Descriptor-buffer backing for the UI texture array (single region).
     BufferHandle m_descriptorBufferHandle = kInvalidBufferHandle;
     VkDeviceAddress m_descriptorBufferAddress = 0;
     std::uint8_t* m_descriptorBufferMapped = nullptr;
     VkBufferUsageFlags m_descriptorBufferUsage = 0;
     VkDeviceSize m_descriptorBindingOffset = 0;
+    // Classic descriptor pool/set fallback for the texture array.
+    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
     VkCommandPool m_uploadPool = VK_NULL_HANDLE;

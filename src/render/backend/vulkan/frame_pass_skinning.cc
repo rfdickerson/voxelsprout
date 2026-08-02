@@ -1,5 +1,9 @@
 #include "render/backend/vulkan/renderer_backend.h"
 
+#include <GLFW/glfw3.h>
+
+#include "sim/network_procedural.h"
+
 // GPU skeletal skinning compute pre-pass (Dragon Age: Origins touchstone; see
 // docs/ROADMAP.md and skinning_resources.cc for the buffer/pipeline setup
 // this dispatches). Called from frame_run.cc before recordShadowAtlasPass, so
