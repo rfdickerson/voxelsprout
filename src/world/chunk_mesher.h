@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/hash.h"
 #include "world/chunk_grid.h"
 
 #include <array>
@@ -96,10 +97,7 @@ struct ChunkMeshKey {
 
 struct ChunkMeshKeyHash {
     std::size_t operator()(const ChunkMeshKey& key) const {
-        std::size_t h = static_cast<std::size_t>(key.x) * 73856093u;
-        h ^= static_cast<std::size_t>(key.y) * 19349663u;
-        h ^= static_cast<std::size_t>(key.z) * 83492791u;
-        return h;
+        return odai::core::hashCell3(key.x, key.y, key.z);
     }
 };
 

@@ -450,11 +450,7 @@ float computeRenderedPipeRadius(float baseRadius, bool hasBranchConnection) {
 }
 
 std::uint64_t pipeCellKey(const odai::core::Cell3i& cell) {
-    constexpr std::uint64_t kMask = (1ull << 21u) - 1ull;
-    const std::uint64_t x = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.x) & kMask);
-    const std::uint64_t y = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.y) & kMask);
-    const std::uint64_t z = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.z) & kMask);
-    return x | (y << 21u) | (z << 42u);
+    return odai::core::packCell21(cell);
 }
 
 std::vector<PipeEndpointState> buildPipeEndpointStates(
@@ -614,7 +610,7 @@ bool chunkIntersectsShadowCascadeClip(
 }
 
 float saturate(float value) {
-    return std::clamp(value, 0.0f, 1.0f);
+    return odai::math::saturate(value);
 }
 
 float smoothStep(float edge0, float edge1, float x) {
@@ -1167,23 +1163,6 @@ int floorDiv(int value, int divisor) {
     }
     return q;
 }
-
-struct ChunkCoordKey {
-    int x = 0;
-    int y = 0;
-    int z = 0;
-
-    bool operator==(const ChunkCoordKey& rhs) const = default;
-};
-
-struct ChunkCoordKeyHash {
-    std::size_t operator()(const ChunkCoordKey& key) const noexcept {
-        std::size_t h = static_cast<std::size_t>(static_cast<std::uint32_t>(key.x));
-        h ^= static_cast<std::size_t>(static_cast<std::uint32_t>(key.y)) * 0x9E3779B1u;
-        h ^= static_cast<std::size_t>(static_cast<std::uint32_t>(key.z)) * 0x85EBCA77u;
-        return h;
-    }
-};
 
 template <typename VkHandleT>
 uint64_t vkHandleToUint64(VkHandleT handle) {

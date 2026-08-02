@@ -16,12 +16,11 @@ These are creative direction, not a mandate to merge four genres into one game �
 ## Non-goals
 
 This project is not:
-- a generic engine framework
 - an ECS experiment
 - an enterprise architecture exercise
 - a dynamic-loading plugin/mod distribution platform (no `dlopen`/DLL loading, no Steam Workshop-style discovery)
 
-It prioritizes practical implementation over generic engine architecture, and explicit, hand-written control flow over generic frameworks (e.g. render passes never assume implicit barriers — see Renderer internals below). These are style constraints on *how* things get built, not a cap on *which* genres get pursued — see Reference Touchstones above. Note the "Engine plugins" pattern documented below is a statically linked, compile-time composition seam — a different thing than the distribution platform this list rules out.
+It prioritizes explicit, hand-written control flow over implicit machinery (e.g. render passes never assume implicit barriers — see Renderer internals below). These are style constraints on *how* things get built, not a cap on *which* genres get pursued — see Reference Touchstones above. Note the "Engine plugins" pattern documented below is a statically linked, compile-time composition seam — a different thing than the distribution platform this list rules out.
 
 ## Build Commands
 
@@ -90,6 +89,7 @@ All are plain executables with a hand-rolled `int main()` and inline assertions 
 | `odai_lua_hook_tests`, `odai_city_script_tests` | Lua `IModHost` dispatch, citybuilder scripts |
 | `odai_imported_scene_tests` | scene import/export round-trip |
 | `odai_fnv_import_tests` | Fallout: New Vegas BSA/ESM/NIF readers (synthetic fixtures only — see README) |
+| `odai_core_types_tests` | `core/hash.h`, `core/lcg.h`, `core/ring_buffer.h`, `math/geometry.h` + math scalar helpers (golden vectors pin content-affecting hashes and RNG) |
 | `odai_stability_gtests` | GTest: frame graph, render math, shadow culling, sim network |
 
 CI (`.github/workflows/ci.yml`) runs Linux (full build including Vulkan on lavapipe, `slangc` installed, examples ON) and Windows (build + ctest; `slangc` is absent there, so shader targets are skipped at configure time).
@@ -130,8 +130,11 @@ Use `add_slang_shader_variant(..., -DODAI_RT_SHADOWS=1)` for define-based shader
 ### Module boundaries
 
 ```
-core/     — time, logging (VOX_LOGE/W/I/D/T macros), input state, job system, grid utils
-math/     — header-only vector/matrix/quaternion + noise
+core/     — time, logging (VOX_LOGE/W/I/D/T macros), input state, job system, grid utils,
+            shared containers/primitives: hash.h (spatial + coordinate hashes), lcg.h
+            (the project's one deterministic RNG), ring_buffer.h
+math/     — header-only vector/matrix/quaternion + noise + geometry.h (Aabb3f, Ray,
+            ray-triangle/ray-AABB intersection)
 world/    — terrain, chunk grids, voxels, meshing/scheduling, clipmap, grass scatter
 import/   — ImportedScene (de)serialization, DDS, GPU scene upload + import/fnv/ (Fallout: NV BSA/ESM/NIF)
 game/     — Civ-style 4X model: hex strategy map, economy, advisors, religion, great people, units, AI

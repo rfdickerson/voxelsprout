@@ -111,6 +111,18 @@ struct CellAabb {
     }
 };
 
+// Packs a cell into a single uint64 map key, 21 bits per axis (range
+// +/- 1,048,576). Coordinates outside that range alias silently; every caller
+// is a cell grid bounded well inside it. Used where a flat integer key is
+// wanted instead of a hashed struct key.
+inline constexpr std::uint64_t packCell21(const Cell3i& cell) {
+    constexpr std::uint64_t kMask = (1ull << 21u) - 1ull;
+    const std::uint64_t x = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.x) & kMask);
+    const std::uint64_t y = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.y) & kMask);
+    const std::uint64_t z = static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.z) & kMask);
+    return x | (y << 21u) | (z << 42u);
+}
+
 inline constexpr CellAabb intersectAabb(const CellAabb& lhs, const CellAabb& rhs) {
     if (!lhs.valid || lhs.empty() || !rhs.valid || rhs.empty()) {
         return CellAabb{};

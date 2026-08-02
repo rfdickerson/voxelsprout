@@ -1,5 +1,7 @@
 #include "script/script_core.h"
 
+#include "core/lcg.h"
+
 #include <algorithm>
 #include <iostream>
 #include <system_error>
@@ -46,12 +48,12 @@ void registerRngTable(sol::state& lua, std::uint32_t& state) {
     sol::table rng = lua.create_named_table("Rng");
     rng.set_function("int", [&state](int lo, int hi) -> int {
         if (hi < lo) std::swap(lo, hi);
-        state = state * 1664525u + 1013904223u;
+        odai::core::lcgNext(state);
         const std::uint32_t span = static_cast<std::uint32_t>(hi - lo) + 1u;
         return lo + static_cast<int>((state >> 16) % span);
     });
     rng.set_function("number", [&state]() -> double {
-        state = state * 1664525u + 1013904223u;
+        odai::core::lcgNext(state);
         return static_cast<double>(state >> 8) / static_cast<double>(1u << 24);
     });
 }

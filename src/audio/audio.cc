@@ -1,14 +1,11 @@
 #include "audio/audio.h"
 
 #include "audio/audio_backend.h"
+#include "math/math.h"
 
 namespace odai::audio {
 namespace {
-float clamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
-    return v;
-}
+float clamp01(float v) { return odai::math::saturate(v); }
 }  // namespace
 
 // Defined here (not in the header) so the inline-generated special members see a

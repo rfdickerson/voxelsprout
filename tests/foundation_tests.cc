@@ -623,8 +623,8 @@ void testVoxelCraftPlayerAndStreaming() {
     const Aabb3f farAway = makePlayerCollisionAabb(100.0f, 2.0f, 0.0f);
     expectTrue(near.maxX > near.minX && near.maxY > near.minY && near.maxZ > near.minZ,
         "Player collision AABB has positive extent on every axis");
-    expectTrue(aabbOverlaps(near, overlapping), "Nearby player AABBs overlap");
-    expectTrue(!aabbOverlaps(near, farAway), "Distant player AABBs do not overlap");
+    expectTrue(aabbCollides(near, overlapping), "Nearby player AABBs overlap");
+    expectTrue(!aabbCollides(near, farAway), "Distant player AABBs do not overlap");
 
     // Deterministic single-chunk world: one solid voxel at (5, 5, 5), everything else empty.
     // Radius 0 keeps exactly chunk (0,0,0) resident so the scenario stays fully controlled.

@@ -14,6 +14,7 @@
 #include "game/strategy_map_io.h"
 #include "game/strategy_map_mesh.h"
 #include "core/log.h"
+#include "math/geometry.h"
 #include "math/math.h"
 #include "sim/network_procedural.h"
 #include "ui/icon_atlas.h"
@@ -102,12 +103,6 @@ constexpr float kPitchMinDegrees = -89.0f;
 constexpr float kPitchMaxDegrees = 89.0f;
 [[maybe_unused]] constexpr float kVoxelSizeMeters = 0.25f;
 constexpr float kBlockInteractMaxDistance = 6.0f;
-constexpr float kRenderCullNearPlane = 0.1f;
-constexpr float kRenderCullFarPlane = 500.0f;
-constexpr float kRenderFrustumBoundsPadVoxels = 8.0f;
-constexpr float kRenderFrustumPlaneSlackVoxels = 2.5f;
-constexpr float kRenderFrustumKeepAlivePlaneSlackVoxels = 10.0f;
-constexpr std::uint8_t kSpatialQueryVisibilityGraceFrames = 2;
 constexpr float kRenderAspectFallback = 16.0f / 9.0f;
 // 1x voxel world scale: roughly Minecraft-like player proportions.
 constexpr float kPlayerHeightVoxels = 1.8f;
@@ -159,14 +154,7 @@ constexpr int kMaxSimulationStepsPerFrame = 8;
 // size rather than remesh CPU (the old inline budget was 6).
 constexpr std::size_t kChunkMeshJobsPerFrame = 8;
 
-struct Aabb3f {
-    float minX = 0.0f;
-    float maxX = 0.0f;
-    float minY = 0.0f;
-    float maxY = 0.0f;
-    float minZ = 0.0f;
-    float maxZ = 0.0f;
-};
+using odai::math::Aabb3f;
 
 Aabb3f makePlayerCollisionAabb(float eyeX, float eyeY, float eyeZ) {
     Aabb3f bounds{};
@@ -199,14 +187,11 @@ Aabb3f makeConveyorBeltAabb(const odai::sim::Belt& belt) {
     return bounds;
 }
 
-bool aabbOverlaps(const Aabb3f& lhs, const Aabb3f& rhs) {
-    return
-        lhs.maxX > (rhs.minX + kCollisionEpsilon) &&
-        lhs.minX < (rhs.maxX - kCollisionEpsilon) &&
-        lhs.maxY > (rhs.minY + kCollisionEpsilon) &&
-        lhs.minY < (rhs.maxY - kCollisionEpsilon) &&
-        lhs.maxZ > (rhs.minZ + kCollisionEpsilon) &&
-        lhs.minZ < (rhs.maxZ - kCollisionEpsilon);
+// math::aabbOverlaps with this file's kCollisionEpsilon bound in. Named
+// distinctly from the shared helper: Aabb3f is now odai::math::Aabb3f, so an
+// identically named two-argument overload would be ambiguous through ADL.
+bool aabbCollides(const Aabb3f& lhs, const Aabb3f& rhs) {
+    return odai::math::aabbOverlaps(lhs, rhs, kCollisionEpsilon);
 }
 
 const char* inventoryItemLabel(odai::render::InventoryItemId itemId) {
@@ -310,173 +295,6 @@ std::string trimConfigString(const std::string& value) {
         --end;
     }
     return value.substr(begin, end - begin);
-}
-
-struct FrustumPlane {
-    odai::math::Vector3 normal{};
-    float d = 0.0f;
-};
-
-struct CameraFrustum {
-    std::array<FrustumPlane, 6> planes{};
-    odai::core::CellAabb broadPhaseBounds{};
-    bool valid = false;
-};
-
-FrustumPlane makePlaneFromPointNormal(const odai::math::Vector3& point, const odai::math::Vector3& normal) {
-    const odai::math::Vector3 normalized = odai::math::normalize(normal);
-    FrustumPlane plane{};
-    plane.normal = normalized;
-    plane.d = -odai::math::dot(normalized, point);
-    return plane;
-}
-
-void orientPlaneTowardForward(FrustumPlane& plane, const odai::math::Vector3& forward) {
-    if (odai::math::dot(plane.normal, forward) < 0.0f) {
-        plane.normal = -plane.normal;
-        plane.d = -plane.d;
-    }
-}
-
-[[maybe_unused]] CameraFrustum buildCameraFrustum(
-    const odai::math::Vector3& eye,
-    float yawDegrees,
-    float pitchDegrees,
-    float fovDegrees,
-    float aspectRatio
-) {
-    CameraFrustum frustum{};
-    const float clampedAspect = std::max(aspectRatio, 0.1f);
-    const float clampedFovDegrees = std::clamp(fovDegrees, 20.0f, 120.0f);
-    const float yawRadians = odai::math::radians(yawDegrees);
-    const float pitchRadians = odai::math::radians(pitchDegrees);
-    const float cosPitch = std::cos(pitchRadians);
-    odai::math::Vector3 forward{
-        std::cos(yawRadians) * cosPitch,
-        std::sin(pitchRadians),
-        std::sin(yawRadians) * cosPitch
-    };
-    forward = odai::math::normalize(forward);
-    if (odai::math::lengthSquared(forward) <= 0.0001f) {
-        return frustum;
-    }
-
-    const odai::math::Vector3 worldUp{0.0f, 1.0f, 0.0f};
-    odai::math::Vector3 right = odai::math::normalize(odai::math::cross(forward, worldUp));
-    if (odai::math::lengthSquared(right) <= 0.0001f) {
-        right = odai::math::Vector3{1.0f, 0.0f, 0.0f};
-    }
-    odai::math::Vector3 up = odai::math::normalize(odai::math::cross(right, forward));
-    if (odai::math::lengthSquared(up) <= 0.0001f) {
-        up = worldUp;
-    }
-
-    const float halfFovY = odai::math::radians(clampedFovDegrees) * 0.5f;
-    const float tanHalfY = std::tan(halfFovY);
-    const float tanHalfX = tanHalfY * clampedAspect;
-    const float nearDistance = kRenderCullNearPlane;
-    const float farDistance = kRenderCullFarPlane;
-
-    const odai::math::Vector3 nearCenter = eye + (forward * nearDistance);
-    const odai::math::Vector3 farCenter = eye + (forward * farDistance);
-    const float nearHalfHeight = nearDistance * tanHalfY;
-    const float nearHalfWidth = nearDistance * tanHalfX;
-    const float farHalfHeight = farDistance * tanHalfY;
-    const float farHalfWidth = farDistance * tanHalfX;
-
-    const odai::math::Vector3 nearUp = up * nearHalfHeight;
-    const odai::math::Vector3 nearRight = right * nearHalfWidth;
-    const odai::math::Vector3 farUp = up * farHalfHeight;
-    const odai::math::Vector3 farRight = right * farHalfWidth;
-
-    const std::array<odai::math::Vector3, 8> corners = {
-        nearCenter + nearUp - nearRight,
-        nearCenter + nearUp + nearRight,
-        nearCenter - nearUp - nearRight,
-        nearCenter - nearUp + nearRight,
-        farCenter + farUp - farRight,
-        farCenter + farUp + farRight,
-        farCenter - farUp - farRight,
-        farCenter - farUp + farRight
-    };
-
-    float minX = corners[0].x;
-    float minY = corners[0].y;
-    float minZ = corners[0].z;
-    float maxX = corners[0].x;
-    float maxY = corners[0].y;
-    float maxZ = corners[0].z;
-    for (const odai::math::Vector3& corner : corners) {
-        minX = std::min(minX, corner.x);
-        minY = std::min(minY, corner.y);
-        minZ = std::min(minZ, corner.z);
-        maxX = std::max(maxX, corner.x);
-        maxY = std::max(maxY, corner.y);
-        maxZ = std::max(maxZ, corner.z);
-    }
-
-    odai::core::CellAabb broadPhaseBounds{};
-    broadPhaseBounds.valid = true;
-    broadPhaseBounds.minInclusive = odai::core::Cell3i{
-        static_cast<int>(std::floor(minX - kRenderFrustumBoundsPadVoxels)),
-        static_cast<int>(std::floor(minY - kRenderFrustumBoundsPadVoxels)),
-        static_cast<int>(std::floor(minZ - kRenderFrustumBoundsPadVoxels))
-    };
-    broadPhaseBounds.maxExclusive = odai::core::Cell3i{
-        static_cast<int>(std::floor(maxX + kRenderFrustumBoundsPadVoxels)) + 1,
-        static_cast<int>(std::floor(maxY + kRenderFrustumBoundsPadVoxels)) + 1,
-        static_cast<int>(std::floor(maxZ + kRenderFrustumBoundsPadVoxels)) + 1
-    };
-
-    const odai::math::Vector3 leftDir = odai::math::normalize(forward - (right * tanHalfX));
-    const odai::math::Vector3 rightDir = odai::math::normalize(forward + (right * tanHalfX));
-    const odai::math::Vector3 topDir = odai::math::normalize(forward + (up * tanHalfY));
-    const odai::math::Vector3 bottomDir = odai::math::normalize(forward - (up * tanHalfY));
-
-    std::array<FrustumPlane, 6> planes{};
-    planes[0] = makePlaneFromPointNormal(nearCenter, forward);
-    planes[1] = makePlaneFromPointNormal(farCenter, -forward);
-    planes[2] = makePlaneFromPointNormal(eye, odai::math::cross(up, leftDir));
-    planes[3] = makePlaneFromPointNormal(eye, odai::math::cross(rightDir, up));
-    planes[4] = makePlaneFromPointNormal(eye, odai::math::cross(topDir, right));
-    planes[5] = makePlaneFromPointNormal(eye, odai::math::cross(right, bottomDir));
-    orientPlaneTowardForward(planes[2], forward);
-    orientPlaneTowardForward(planes[3], forward);
-    orientPlaneTowardForward(planes[4], forward);
-    orientPlaneTowardForward(planes[5], forward);
-
-    frustum.planes = planes;
-    frustum.broadPhaseBounds = broadPhaseBounds;
-    frustum.valid = true;
-    return frustum;
-}
-
-[[maybe_unused]] bool chunkIntersectsFrustum(
-    const odai::world::Chunk& chunk,
-    const std::array<FrustumPlane, 6>& planes,
-    float planeSlack
-) {
-    const float minX = static_cast<float>(chunk.chunkX() * odai::world::Chunk::kSizeX);
-    const float minY = static_cast<float>(chunk.chunkY() * odai::world::Chunk::kSizeY);
-    const float minZ = static_cast<float>(chunk.chunkZ() * odai::world::Chunk::kSizeZ);
-    const float maxX = minX + static_cast<float>(odai::world::Chunk::kSizeX);
-    const float maxY = minY + static_cast<float>(odai::world::Chunk::kSizeY);
-    const float maxZ = minZ + static_cast<float>(odai::world::Chunk::kSizeZ);
-
-    for (const FrustumPlane& plane : planes) {
-        const float positiveX = (plane.normal.x >= 0.0f) ? maxX : minX;
-        const float positiveY = (plane.normal.y >= 0.0f) ? maxY : minY;
-        const float positiveZ = (plane.normal.z >= 0.0f) ? maxZ : minZ;
-        const float distance =
-            (plane.normal.x * positiveX) +
-            (plane.normal.y * positiveY) +
-            (plane.normal.z * positiveZ) +
-            plane.d;
-        if (distance < -planeSlack) {
-            return false;
-        }
-    }
-    return true;
 }
 
 void glfwErrorCallback(int errorCode, const char* description) {
@@ -2150,7 +1968,7 @@ bool App::doesPlayerOverlapConveyorBelt(float eyeX, float eyeY, float eyeZ) cons
     const Aabb3f playerBounds = makePlayerCollisionAabb(eyeX, eyeY, eyeZ);
     for (const odai::sim::Belt& belt : m_simulation.belts()) {
         const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-        if (aabbOverlaps(playerBounds, beltBounds)) {
+        if (aabbCollides(playerBounds, beltBounds)) {
             return true;
         }
     }
@@ -2200,7 +2018,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMinX = std::min(blockingMinX, beltBounds.minX);
                 }
             }
@@ -2220,7 +2038,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMaxX = std::max(blockingMaxX, beltBounds.maxX);
                 }
             }
@@ -2266,7 +2084,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMinZ = std::min(blockingMinZ, beltBounds.minZ);
                 }
             }
@@ -2286,7 +2104,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMaxZ = std::max(blockingMaxZ, beltBounds.maxZ);
                 }
             }
@@ -2332,7 +2150,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMinY = std::min(blockingMinY, beltBounds.minY);
                 }
             }
@@ -2352,7 +2170,7 @@ void App::resolvePlayerCollisions(float dt) {
             }
             for (const odai::sim::Belt& belt : m_simulation.belts()) {
                 const Aabb3f beltBounds = makeConveyorBeltAabb(belt);
-                if (aabbOverlaps(playerBounds, beltBounds)) {
+                if (aabbCollides(playerBounds, beltBounds)) {
                     blockingMaxY = std::max(blockingMaxY, beltBounds.maxY);
                 }
             }
@@ -2673,6 +2491,7 @@ App::ImportedSceneInspectHit App::raycastImportedSceneFromCamera() const {
     }
     const odai::math::Vector3 rayOrigin =
         odai::math::Vector3{m_camera.x, m_camera.y, m_camera.z} + (rayDirection * 0.02f);
+    const odai::math::Ray pickRay{rayOrigin, rayDirection};
 
     const auto packedPosition = [](const odai::importer::ImportedScenePackedVertex& vertex) {
         return odai::math::Vector3{vertex.position[0], vertex.position[1], vertex.position[2]};
@@ -2698,29 +2517,12 @@ App::ImportedSceneInspectHit App::raycastImportedSceneFromCamera() const {
             const odai::math::Vector3 p0 = packedPosition(m_importedScene.packedVertices[i0]);
             const odai::math::Vector3 p1 = packedPosition(m_importedScene.packedVertices[i1]);
             const odai::math::Vector3 p2 = packedPosition(m_importedScene.packedVertices[i2]);
-            const odai::math::Vector3 edge1 = p1 - p0;
-            const odai::math::Vector3 edge2 = p2 - p0;
-            const odai::math::Vector3 pvec = odai::math::cross(rayDirection, edge2);
-            const float det = odai::math::dot(edge1, pvec);
-            if (std::fabs(det) <= kRayEpsilon) {
+            const odai::math::RayTriangleHit triangleHit =
+                odai::math::intersectRayTriangle(pickRay, p0, p1, p2, kRayEpsilon);
+            if (!triangleHit.hit || triangleHit.distance >= bestDistance) {
                 continue;
             }
-
-            const float invDet = 1.0f / det;
-            const odai::math::Vector3 tvec = rayOrigin - p0;
-            const float u = odai::math::dot(tvec, pvec) * invDet;
-            if (u < 0.0f || u > 1.0f) {
-                continue;
-            }
-            const odai::math::Vector3 qvec = odai::math::cross(tvec, edge1);
-            const float v = odai::math::dot(rayDirection, qvec) * invDet;
-            if (v < 0.0f || (u + v) > 1.0f) {
-                continue;
-            }
-            const float distance = odai::math::dot(edge2, qvec) * invDet;
-            if (distance <= kRayEpsilon || distance >= bestDistance) {
-                continue;
-            }
+            const float distance = triangleHit.distance;
 
             const odai::importer::ImportedScenePackedVertex& hitVertex = m_importedScene.packedVertices[i0];
             bestDistance = distance;
@@ -3558,7 +3360,6 @@ std::vector<std::uint8_t> makeWindowFrameRgba(int size) {
     const float fillA = 0.93f;
     const float borderA = 1.0f;
 
-    const auto clamp01 = [](float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); };
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(size) * size * 4u, 0u);
     for (int y = 0; y < size; ++y) {
         for (int x = 0; x < size; ++x) {
@@ -3571,15 +3372,15 @@ std::vector<std::uint8_t> makeWindowFrameRgba(int size) {
             const float my = std::max(qy, 0.0f);
             const float d = std::sqrt(mx * mx + my * my) + std::min(std::max(qx, qy), 0.0f) - radius;
 
-            const float coverage = clamp01(0.5f - d);                      // 1 inside, 0 outside (1px AA).
-            const float borderAmt = clamp01((d + borderW + 0.5f) / borderW);  // 1 near edge, 0 deep inside.
+            const float coverage = odai::math::saturate(0.5f - d);                      // 1 inside, 0 outside (1px AA).
+            const float borderAmt = odai::math::saturate((d + borderW + 0.5f) / borderW);  // 1 near edge, 0 deep inside.
 
             const float r = fill[0] + (border[0] - fill[0]) * borderAmt;
             const float g = fill[1] + (border[1] - fill[1]) * borderAmt;
             const float b = fill[2] + (border[2] - fill[2]) * borderAmt;
             const float a = (fillA + (borderA - fillA) * borderAmt) * coverage;
 
-            const auto byte = [&](float v) { return static_cast<std::uint8_t>(clamp01(v) * 255.0f + 0.5f); };
+            const auto byte = [](float v) { return static_cast<std::uint8_t>(odai::math::saturate(v) * 255.0f + 0.5f); };
             const std::size_t i = (static_cast<std::size_t>(y) * size + x) * 4u;
             pixels[i + 0] = byte(r);
             pixels[i + 1] = byte(g);

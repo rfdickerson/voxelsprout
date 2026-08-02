@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/game_app.h"
+#include "core/lcg.h"
 #include "render/renderer_types.h"
 #include "ui/ui_types.h"
 
@@ -64,7 +65,7 @@ private:
     [[nodiscard]] const Cell& cell(int c, int r) const {
         return m_cells[static_cast<std::size_t>(r) * m_cols + c];
     }
-    std::uint32_t rng() { return (m_rng = m_rng * 1664525u + 1013904223u); }
+    std::uint32_t rng() { return odai::core::lcgNext(m_rng); }
 
     // ── Drawing ──────────────────────────────────────────────────────────────
     void drawToolbarBg(float fw, float s);

@@ -1,5 +1,6 @@
 #pragma once
 #include "engine/game_app.h"
+#include "core/lcg.h"
 #include "render/renderer_types.h"
 #include <deque>
 #include <utility>
@@ -21,7 +22,7 @@ private:
     void resetGame();
     void step();
     void spawnFood();
-    uint32_t rng() { return (m_rng = m_rng * 1664525u + 1013904223u); }
+    uint32_t rng() { return odai::core::lcgNext(m_rng); }
     float moveInterval() const { return std::max(0.07f, 0.20f - (m_level - 1) * 0.013f); }
 
     void drawBoard  (float bx, float by, float cellSz, float s);

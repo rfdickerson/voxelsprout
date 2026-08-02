@@ -1,6 +1,8 @@
 #include "game/game_sim.h"
 
 #include "content/content_database.h"
+#include "core/hash.h"
+#include "math/math.h"
 #include "game/buildable.h"
 #include "game/great_people.h"
 #include "game/mod_host.h"
@@ -22,18 +24,16 @@ namespace {
 // wonder effects likewise live in data (leaders.json, buildings.json).
 
 // --- map generation noise (compact port of the strategy_map_gen tool) -------
+// Thin alias; the implementation is shared with the strategy_map_gen tool,
+// which had a byte-identical copy. Distinct from procgen::hash2d --
+// existing .smap files depend on this exact mix.
 std::uint32_t hashCoords(std::int32_t x, std::int32_t y, std::uint32_t seed) {
-    std::uint32_t h = seed + 0x9E3779B9u;
-    h ^= static_cast<std::uint32_t>(x) * 0x85EBCA77u;
-    h = (h ^ (h >> 15)) * 0xC2B2AE3Du;
-    h ^= static_cast<std::uint32_t>(y) * 0x27D4EB2Fu;
-    h = (h ^ (h >> 13)) * 0x165667B1u;
-    return h ^ (h >> 16);
+    return odai::core::hashCoordsSeeded(x, y, seed);
 }
 float hashFloat(std::int32_t x, std::int32_t y, std::uint32_t seed) {
     return static_cast<float>(hashCoords(x, y, seed) & 0xFFFFFFu) / static_cast<float>(0x1000000u);
 }
-float smoothstep(float t) { return t * t * (3.0f - (2.0f * t)); }
+float smoothstep(float t) { return odai::math::smoothstepUnit(t); }
 float valueNoise(float x, float y, std::uint32_t seed) {
     const float fx = std::floor(x);
     const float fy = std::floor(y);

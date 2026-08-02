@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/hash.h"
 #include "world/chunk_grid.h"
 
 #include <array>
@@ -22,10 +23,7 @@ public:
 
     struct ChunkKeyHash {
         [[nodiscard]] std::size_t operator()(const ChunkKey& key) const noexcept {
-            const std::size_t hx = std::hash<int>{}(key.chunkX);
-            const std::size_t hy = std::hash<int>{}(key.chunkY);
-            const std::size_t hz = std::hash<int>{}(key.chunkZ);
-            return hx ^ (hy << 1u) ^ (hz << 2u);
+            return odai::core::hashCell3(key.chunkX, key.chunkY, key.chunkZ);
         }
     };
 

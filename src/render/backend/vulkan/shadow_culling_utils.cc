@@ -1,20 +1,10 @@
 #include "render/backend/vulkan/shadow_culling_utils.h"
 
-#include <tuple>
 #include <unordered_map>
 
-namespace odai::render {
+#include "core/hash.h"
 
-namespace {
-struct ChunkCoordHash {
-    std::size_t operator()(const std::tuple<int, int, int>& key) const noexcept {
-        const std::size_t hx = std::hash<int>{}(std::get<0>(key));
-        const std::size_t hy = std::hash<int>{}(std::get<1>(key));
-        const std::size_t hz = std::hash<int>{}(std::get<2>(key));
-        return hx ^ (hy << 1u) ^ (hz << 2u);
-    }
-};
-} // namespace
+namespace odai::render {
 
 std::vector<std::uint8_t> buildShadowCandidateMask(
     std::span<const odai::world::Chunk> chunks,
@@ -27,18 +17,18 @@ std::vector<std::uint8_t> buildShadowCandidateMask(
     }
 
     shadowCandidateMask.assign(chunks.size(), 0u);
-    std::unordered_map<std::tuple<int, int, int>, std::size_t, ChunkCoordHash> chunkIndexByCoord;
+    std::unordered_map<odai::core::Cell3i, std::size_t, odai::core::Cell3Hash> chunkIndexByCoord;
     chunkIndexByCoord.reserve(chunks.size() * 2u);
     for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
         const odai::world::Chunk& chunk = chunks[chunkArrayIndex];
         chunkIndexByCoord.emplace(
-            std::tuple<int, int, int>{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()},
+            odai::core::Cell3i{chunk.chunkX(), chunk.chunkY(), chunk.chunkZ()},
             chunkArrayIndex
         );
     }
 
     const auto markCandidateChunk = [&](int chunkX, int chunkY, int chunkZ) {
-        const auto it = chunkIndexByCoord.find(std::tuple<int, int, int>{chunkX, chunkY, chunkZ});
+        const auto it = chunkIndexByCoord.find(odai::core::Cell3i{chunkX, chunkY, chunkZ});
         if (it != chunkIndexByCoord.end()) {
             shadowCandidateMask[it->second] = 1u;
         }

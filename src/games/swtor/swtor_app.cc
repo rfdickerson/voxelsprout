@@ -1,5 +1,8 @@
 #include "games/swtor/swtor_app.h"
 
+#include "core/lcg.h"
+#include "core/ring_buffer.h"
+
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <stb_image.h>
@@ -56,6 +59,8 @@ static const struct { const char* ch; const char* from; const char* msg; } kChat
     {"Ops",      "OperationLead",   "Watch red circles - spread!"},
 };
 static constexpr int kNumChatMsgs = 8;
+// Chat scrollback the HUD keeps; older lines drop off the top.
+static constexpr std::size_t kChatLogMaxLines = 14;
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 void SwtorApp::drawPanelBg(float x, float y, float w, float h, float s, float radius) {
@@ -1038,7 +1043,7 @@ bool SwtorApp::onInit() {
 
     // Generate inventory deterministically
     uint32_t seed = 0xDAEDBEEFu;
-    auto lcg = [&]() -> uint32_t { return (seed = seed * 1664525u + 1013904223u); };
+    auto lcg = [&]() -> uint32_t { return odai::core::lcgNext(seed); };
     for (int i = 0; i < std::min(m_invCount, kInvCapacity); ++i) {
         m_inventory[i].type = static_cast<int>(lcg() % 8);
         float qr = (lcg() >> 8) / float(1 << 24);
@@ -1079,8 +1084,7 @@ void SwtorApp::onTick(float dt) {
     if (m_chatTimer > 3.8f) {
         m_chatTimer = 0.0f;
         const auto& src = kChatMsgs[m_nextChat % kNumChatMsgs];
-        m_chatLog.push_back({src.ch, src.from, src.msg});
-        if (m_chatLog.size() > 14) m_chatLog.erase(m_chatLog.begin());
+        odai::core::pushBounded(m_chatLog, ChatMsg{src.ch, src.from, src.msg}, kChatLogMaxLines);
         ++m_nextChat;
     }
 
@@ -1109,8 +1113,7 @@ void SwtorApp::onTick(float dt) {
 
     bool enterDown = (glfwGetKey(m_window, GLFW_KEY_ENTER) == GLFW_PRESS);
     if (enterDown && !m_prevEnter && !m_chatInput.empty()) {
-        m_chatLog.push_back({"General", "You", m_chatInput});
-        if (m_chatLog.size() > 14) m_chatLog.erase(m_chatLog.begin());
+        odai::core::pushBounded(m_chatLog, ChatMsg{"General", "You", m_chatInput}, kChatLogMaxLines);
         m_chatInput.clear();
     }
     m_prevEnter = enterDown;
