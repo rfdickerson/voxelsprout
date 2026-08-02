@@ -23,7 +23,7 @@ This matches project constraints:
 
 ## Data Structures
 
-### ChunkSpatialIndex (implemented foundation)
+### ChunkSpatialIndex (NOT IMPLEMENTED - design sketch only)
 - Input: `ChunkGrid::chunks()`
 - Stored:
   - chunk AABBs (world-cell aligned)
@@ -85,10 +85,21 @@ Track in debug UI:
 - Keep deterministic ordering of results to avoid flicker and non-reproducible debugging.
 
 ## Current Status
-- Added foundational `ChunkSpatialIndex` subsystem:
-  - `src/world/spatial_index.h`
-- Rebuilt at app world load/regenerate:
-  - `src/app/app.cc`
 
-Renderer still uses existing visibility loop for now. Next step is Phase 1 integration.
+**This document describes a design that was never built.** An earlier version of
+this section claimed `ChunkSpatialIndex` was an implemented foundation living in
+`src/world/spatial_index.h`; that file contains only the `SpatialQueryStats`
+counter struct, and no such type exists anywhere in the tree. `DynamicSpatialGrid`
+was never written either.
+
+What actually shipped instead is `ChunkClipmapIndex`
+(`src/world/clipmap_index.{h,cc}`) -- a camera-centred toroidal clipmap, not a
+tree. Its broad phase, `queryChunksIntersecting`, is a linear scan over
+`m_chunkBounds`. Scene picking (`App::raycastImportedSceneFromCamera`) is likewise
+a brute-force walk over every triangle of every draw.
+
+So the acceleration-structure work below is still entirely ahead, and the sections
+above should be read as a design sketch rather than a description of the code.
+`math/geometry.h` now provides the `Aabb3f`/`Ray`/`intersectRayAabb` primitives a
+BVH would be built on.
 
