@@ -96,11 +96,11 @@ bool UiRenderer::init(const InitInfo& info) {
 
     // One update-after-bind descriptor array for every UI texture. Texture slots
     // are stored in vertex mode bits, so changing icons/fonts does not split a
-    // clip batch or bind a descriptor set per draw.
-    if (!m_info.descriptorBuffer.enabled()) {
-        VOX_LOGE("ui") << "UI renderer requires descriptor buffers (VK_EXT_descriptor_buffer)";
-        return false;
-    }
+    // clip batch or bind a descriptor set per draw. Prefer a descriptor buffer
+    // (VK_EXT_descriptor_buffer) when the renderer provides one; fall back to a
+    // classic update-after-bind pool/set on drivers that lack the extension
+    // (e.g. Mesa lavapipe in headless CI, which has no real GPU to test on).
+    m_usingDescriptorBuffer = m_info.descriptorBuffer.enabled();
 
     VkDescriptorSetLayoutBinding binding{};
     binding.binding = 0;
@@ -108,15 +108,22 @@ bool UiRenderer::init(const InitInfo& info) {
     binding.descriptorCount = m_maxTextureCount;
     binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     // Descriptor buffers don't use UPDATE_AFTER_BIND (writes go straight to mapped
-    // memory); partially-bound stays so unwritten slots are simply never sampled.
-    const VkDescriptorBindingFlags bindingFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    // memory); the classic path needs it explicitly so slots can be written after
+    // the set is allocated. Partially-bound stays either way so unwritten slots
+    // are simply never sampled.
+    VkDescriptorBindingFlags bindingFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    if (!m_usingDescriptorBuffer) {
+        bindingFlags |= VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+    }
     VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
     bindingFlagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
     bindingFlagsInfo.bindingCount = 1;
     bindingFlagsInfo.pBindingFlags = &bindingFlags;
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
+    layoutInfo.flags = m_usingDescriptorBuffer
+                            ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+                            : VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
     layoutInfo.bindingCount = 1;
     layoutInfo.pBindings = &binding;
     layoutInfo.pNext = &bindingFlagsInfo;
@@ -125,33 +132,58 @@ bool UiRenderer::init(const InitInfo& info) {
         return false;
     }
 
-    // Allocate a mapped, device-addressable descriptor buffer sized for the set.
-    const auto& db = m_info.descriptorBuffer;
-    VkDeviceSize layoutSize = 0;
-    db.getLayoutSize(m_info.device, m_setLayout, &layoutSize);
-    m_descriptorBindingOffset = 0;
-    db.getBindingOffset(m_info.device, m_setLayout, 0, &m_descriptorBindingOffset);
-    m_descriptorBufferUsage =
-        VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
-        VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT;
-    BufferCreateDesc descriptorBufferDesc{};
-    descriptorBufferDesc.size = std::max<VkDeviceSize>(layoutSize, 1u);
-    descriptorBufferDesc.usage = m_descriptorBufferUsage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-    descriptorBufferDesc.memoryProperties =
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    m_descriptorBufferHandle = m_info.bufferAllocator->createBuffer(descriptorBufferDesc);
-    if (m_descriptorBufferHandle == kInvalidBufferHandle) {
-        VOX_LOGE("ui") << "failed to create UI descriptor buffer";
-        return false;
+    if (m_usingDescriptorBuffer) {
+        // Allocate a mapped, device-addressable descriptor buffer sized for the set.
+        const auto& db = m_info.descriptorBuffer;
+        VkDeviceSize layoutSize = 0;
+        db.getLayoutSize(m_info.device, m_setLayout, &layoutSize);
+        m_descriptorBindingOffset = 0;
+        db.getBindingOffset(m_info.device, m_setLayout, 0, &m_descriptorBindingOffset);
+        m_descriptorBufferUsage =
+            VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+            VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT;
+        BufferCreateDesc descriptorBufferDesc{};
+        descriptorBufferDesc.size = std::max<VkDeviceSize>(layoutSize, 1u);
+        descriptorBufferDesc.usage = m_descriptorBufferUsage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        descriptorBufferDesc.memoryProperties =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        m_descriptorBufferHandle = m_info.bufferAllocator->createBuffer(descriptorBufferDesc);
+        if (m_descriptorBufferHandle == kInvalidBufferHandle) {
+            VOX_LOGE("ui") << "failed to create UI descriptor buffer";
+            return false;
+        }
+        m_descriptorBufferMapped = static_cast<std::uint8_t*>(
+            m_info.bufferAllocator->mapBuffer(m_descriptorBufferHandle, 0, descriptorBufferDesc.size));
+        m_descriptorBufferAddress = m_info.bufferAllocator->getDeviceAddress(m_descriptorBufferHandle);
+        if (m_descriptorBufferMapped == nullptr || m_descriptorBufferAddress == 0) {
+            VOX_LOGE("ui") << "failed to map UI descriptor buffer";
+            return false;
+        }
+        std::memset(m_descriptorBufferMapped, 0, static_cast<size_t>(descriptorBufferDesc.size));
+    } else {
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSize.descriptorCount = m_maxTextureCount;
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+        poolInfo.maxSets = 1;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+        if (vkCreateDescriptorPool(m_info.device, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
+            VOX_LOGE("ui") << "failed to create UI descriptor pool";
+            return false;
+        }
+        VkDescriptorSetAllocateInfo setAllocInfo{};
+        setAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        setAllocInfo.descriptorPool = m_descriptorPool;
+        setAllocInfo.descriptorSetCount = 1;
+        setAllocInfo.pSetLayouts = &m_setLayout;
+        if (vkAllocateDescriptorSets(m_info.device, &setAllocInfo, &m_descriptorSet) != VK_SUCCESS) {
+            VOX_LOGE("ui") << "failed to allocate UI descriptor set";
+            return false;
+        }
     }
-    m_descriptorBufferMapped = static_cast<std::uint8_t*>(
-        m_info.bufferAllocator->mapBuffer(m_descriptorBufferHandle, 0, descriptorBufferDesc.size));
-    m_descriptorBufferAddress = m_info.bufferAllocator->getDeviceAddress(m_descriptorBufferHandle);
-    if (m_descriptorBufferMapped == nullptr || m_descriptorBufferAddress == 0) {
-        VOX_LOGE("ui") << "failed to map UI descriptor buffer";
-        return false;
-    }
-    std::memset(m_descriptorBufferMapped, 0, static_cast<size_t>(descriptorBufferDesc.size));
 
     // Transient command pool for one-time texture uploads.
     VkCommandPoolCreateInfo cmdPoolInfo{};
@@ -290,7 +322,7 @@ bool UiRenderer::createPipeline() {
 
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipelineInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
+    pipelineInfo.flags = m_usingDescriptorBuffer ? VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT : 0;
     pipelineInfo.pNext = &renderingInfo;
     pipelineInfo.stageCount = static_cast<std::uint32_t>(stages.size());
     pipelineInfo.pStages = stages.data();
@@ -490,14 +522,31 @@ void UiRenderer::collectCompletedUploads() {
 }
 
 bool UiRenderer::writeTextureDescriptor(odai::ui::UiTextureId slot, VkImageView view) {
-    if (slot >= m_maxTextureCount || m_descriptorBufferMapped == nullptr || view == VK_NULL_HANDLE) {
+    if (slot >= m_maxTextureCount || view == VK_NULL_HANDLE) {
         return false;
     }
-    const auto& db = m_info.descriptorBuffer;
     VkDescriptorImageInfo imageInfo{};
     imageInfo.sampler = m_sampler;
     imageInfo.imageView = view;
     imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    if (!m_usingDescriptorBuffer) {
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = m_descriptorSet;
+        write.dstBinding = 0;
+        write.dstArrayElement = slot;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &imageInfo;
+        vkUpdateDescriptorSets(m_info.device, 1, &write, 0, nullptr);
+        return true;
+    }
+    if (m_descriptorBufferMapped == nullptr) {
+        return false;
+    }
+
+    const auto& db = m_info.descriptorBuffer;
     VkDescriptorGetInfoEXT getInfo{};
     getInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT;
     getInfo.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -810,16 +859,21 @@ void UiRenderer::record(VkCommandBuffer cmd, std::uint32_t /*frameIndex*/,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
     vkCmdBindVertexBuffers(cmd, 0, 1, &m_uploadedVertexBuffer, &m_uploadedVertexOffset);
     vkCmdBindIndexBuffer(cmd, m_uploadedIndexBuffer, m_uploadedIndexOffset, VK_INDEX_TYPE_UINT32);
-    const auto& db = m_info.descriptorBuffer;
-    VkDescriptorBufferBindingInfoEXT descriptorBufferBinding{};
-    descriptorBufferBinding.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_BUFFER_BINDING_INFO_EXT;
-    descriptorBufferBinding.address = m_descriptorBufferAddress;
-    descriptorBufferBinding.usage = m_descriptorBufferUsage;
-    db.cmdBindDescriptorBuffers(cmd, 1, &descriptorBufferBinding);
-    const std::uint32_t bufferIndex = 0;
-    const VkDeviceSize setOffset = 0;
-    db.cmdSetDescriptorBufferOffsets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
-                                     0, 1, &bufferIndex, &setOffset);
+    if (m_usingDescriptorBuffer) {
+        const auto& db = m_info.descriptorBuffer;
+        VkDescriptorBufferBindingInfoEXT descriptorBufferBinding{};
+        descriptorBufferBinding.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_BUFFER_BINDING_INFO_EXT;
+        descriptorBufferBinding.address = m_descriptorBufferAddress;
+        descriptorBufferBinding.usage = m_descriptorBufferUsage;
+        db.cmdBindDescriptorBuffers(cmd, 1, &descriptorBufferBinding);
+        const std::uint32_t bufferIndex = 0;
+        const VkDeviceSize setOffset = 0;
+        db.cmdSetDescriptorBufferOffsets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
+                                         0, 1, &bufferIndex, &setOffset);
+    } else {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1,
+                                &m_descriptorSet, 0, nullptr);
+    }
 
     VkViewport viewport{};
     viewport.width = static_cast<float>(extent.width);
@@ -886,6 +940,7 @@ void UiRenderer::shutdown() {
         m_info.bufferAllocator->unmapBuffer(m_descriptorBufferHandle);
         m_info.bufferAllocator->destroyBuffer(m_descriptorBufferHandle);
     }
+    if (m_descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_info.device, m_descriptorPool, nullptr);
     if (m_setLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_info.device, m_setLayout, nullptr);
     if (m_uploadPool != VK_NULL_HANDLE) vkDestroyCommandPool(m_info.device, m_uploadPool, nullptr);
     if (m_sampler != VK_NULL_HANDLE) vkDestroySampler(m_info.device, m_sampler, nullptr);
@@ -894,6 +949,9 @@ void UiRenderer::shutdown() {
     m_descriptorBufferHandle = kInvalidBufferHandle;
     m_descriptorBufferMapped = nullptr;
     m_descriptorBufferAddress = 0;
+    m_descriptorPool = VK_NULL_HANDLE;
+    m_descriptorSet = VK_NULL_HANDLE;
+    m_usingDescriptorBuffer = false;
     m_setLayout = VK_NULL_HANDLE;
     m_uploadPool = VK_NULL_HANDLE;
     m_sampler = VK_NULL_HANDLE;
