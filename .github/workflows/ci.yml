@@ -113,6 +113,14 @@ jobs:
           restore-keys: |
             vcpkg-archives-${{ runner.os }}-
 
+      # cmake's own "Visual Studio 17 2022" generator detection isn't
+      # reliable on hosted runners; use Ninja + an explicit MSVC dev
+      # environment instead (same generator the Linux job already uses).
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       # Builds the real app target (ODAI_BUILD_APP defaults ON): Vulkan, GLFW,
       # and imgui all come from vcpkg's x64-windows triplet. slangc isn't on
       # this runner's PATH, so shader targets are skipped at configure time
@@ -122,17 +130,17 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
-          cmake -S . -B build `
-            -G "Visual Studio 17 2022" -A x64 `
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Debug `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DBUILD_TESTING=ON
 
       - name: Build
-        run: cmake --build build --config Debug -j 4
+        run: cmake --build build -j 4
 
       - name: List tests
-        run: ctest --test-dir build -C Debug -N
+        run: ctest --test-dir build -N
 
       - name: Run CTest
-        run: ctest --test-dir build -C Debug --output-on-failure
+        run: ctest --test-dir build --output-on-failure
