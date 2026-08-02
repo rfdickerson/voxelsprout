@@ -1436,6 +1436,12 @@ void CityBuilderApp::recomputeStats() {
 void CityBuilderApp::computeDesirability() {
     std::array<float, static_cast<std::size_t>(kGridW) * kGridH> amenity{};
     std::array<float, static_cast<std::size_t>(kGridW) * kGridH> nuisance{};
+    // Split out three of the above sources into their own fields so the data
+    // overlays can show one cause in isolation instead of the folded score
+    // land value already mixes together.
+    std::array<float, static_cast<std::size_t>(kGridW) * kGridH> pollution{};
+    std::array<float, static_cast<std::size_t>(kGridW) * kGridH> eduCoverage{};
+    std::array<float, static_cast<std::size_t>(kGridW) * kGridH> healthCoverage{};
 
     auto splat = [&](std::array<float, static_cast<std::size_t>(kGridW) * kGridH>& field,
                      int c, int r, int radius, float peak) {
@@ -1458,9 +1464,17 @@ void CityBuilderApp::computeDesirability() {
             if (t.bldgOrigin) {
                 const InfluenceSpec inf = buildingInfluence(t.building);
                 if (inf.radius > 0) splat(inf.nuisance ? nuisance : amenity, c, r, inf.radius, inf.peak);
+                if (t.building == Building::School || t.building == Building::Library) {
+                    splat(eduCoverage, c, r, inf.radius, inf.peak);
+                } else if (t.building == Building::Clinic) {
+                    splat(healthCoverage, c, r, inf.radius, inf.peak);
+                } else if (t.building == Building::Power) {
+                    splat(pollution, c, r, inf.radius, inf.peak);  // smokestack haze
+                }
             }
             if (t.zone == Zone::Industrial && t.develop > kDevEps) {
                 splat(nuisance, c, r, 4, 0.16f * t.develop);  // pollution / heavy traffic
+                splat(pollution, c, r, 4, 0.16f * t.develop);
             }
             if (t.charred) {
                 splat(nuisance, c, r, kCharNuisanceRadius, kCharNuisancePeak);  // burnt-out blight
@@ -1470,6 +1484,7 @@ void CityBuilderApp::computeDesirability() {
                 // traffic begets falling land value, the classic feedback loop.
                 const float over = std::min(1.0f, (t.trafficLoad - kCongestionStart) / 2.5f);
                 splat(nuisance, c, r, kCongestionNuisanceRadius, kCongestionNuisancePeak * over);
+                splat(pollution, c, r, kCongestionNuisanceRadius, kCongestionNuisancePeak * over);
             }
         }
     }
@@ -1488,6 +1503,9 @@ void CityBuilderApp::computeDesirability() {
                 score = 0.42f + amenity[i] - 0.85f * nuisance[i];
             }
             t.desirability = clamp01(score);
+            t.pollution = clamp01(pollution[i]);
+            t.eduCoverage = clamp01(eduCoverage[i]);
+            t.healthCoverage = clamp01(healthCoverage[i]);
         }
     }
 }
@@ -1969,7 +1987,13 @@ void CityBuilderApp::onTick(float dt) {
 
     if (edgeDown(GLFW_KEY_SPACE)) m_paused = !m_paused;
     if (edgeDown(GLFW_KEY_G)) m_reportsOpen = !m_reportsOpen;
-    if (edgeDown(GLFW_KEY_L)) { m_showLandValue = !m_showLandValue; m_sceneDirty = true; }
+    if (edgeDown(GLFW_KEY_L)) {
+        // Cycle through the data layers: off -> land value -> pollution ->
+        // education -> health -> off.
+        m_dataOverlay = static_cast<DataOverlay>(
+            (static_cast<int>(m_dataOverlay) + 1) % static_cast<int>(DataOverlay::Count));
+        m_sceneDirty = true;
+    }
     // Debug: N skips a month — handy for eyeballing season transitions.
     if (edgeDown(GLFW_KEY_N)) stepMonth();
 
@@ -2392,12 +2416,22 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                 builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1}, wc);
                 if (!bridge) continue;  // a road on water carries on into the road branch
             } else {
-                // Ground: land-value heat map when toggled, otherwise grass
-                // tinted by the baked scenicPhase jitter so a block reads as
-                // organic.
-                if (m_showLandValue) {
+                // Ground: a data-layer heat map when one is toggled on,
+                // otherwise grass tinted by the baked scenicPhase jitter so a
+                // block reads as organic. Every layer shares the same
+                // red->green ramp (good/high reads green) so switching
+                // between them never asks the eye to relearn the scale.
+                if (m_dataOverlay != DataOverlay::None) {
+                    float v = 0.5f;
+                    switch (m_dataOverlay) {
+                        case DataOverlay::LandValue: v = t.desirability; break;
+                        case DataOverlay::Pollution: v = 1.0f - t.pollution; break;
+                        case DataOverlay::Education: v = t.eduCoverage; break;
+                        case DataOverlay::Health:    v = t.healthCoverage; break;
+                        default: break;
+                    }
                     builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1},
-                                    heat(t.desirability));
+                                    heat(v));
                 } else {
                     builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1},
                                     seasonalGrass(mix(kGrassAlt, kGrass, t.scenicPhase)));
@@ -5342,8 +5376,22 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
         }
     }
 
-    // Land-value legend: a red→green gradient key so the overlay reads at a glance.
-    if (m_showLandValue) {
+    // Data-layer legend: a red→green gradient key so whichever overlay is
+    // active reads at a glance. Title and end labels change per layer; the
+    // ramp itself (and its direction: green is always "good") stays fixed.
+    if (m_dataOverlay != DataOverlay::None) {
+        const char* title = "Land Value";
+        const char* loLabel = "poor";
+        const char* hiLabel = "prime";
+        switch (m_dataOverlay) {
+            case DataOverlay::Pollution:
+                title = "Pollution"; loLabel = "polluted"; hiLabel = "clean"; break;
+            case DataOverlay::Education:
+                title = "Education"; loLabel = "none"; hiLabel = "full"; break;
+            case DataOverlay::Health:
+                title = "Health Care"; loLabel = "none"; hiLabel = "full"; break;
+            default: break;
+        }
         const float lw = 168.0f * s, lh = 12.0f * s;
         const float lx = lo.map.minX + 14.0f * s;
         const float ly = lo.map.minY + 32.0f * s;
@@ -5351,7 +5399,7 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
                                              lh + 44.0f * s);
         m_uiDrawList.addRoundRectFilled(chip, withA(kPanel, 0.92f), kRadiusCtl * s);
         m_uiDrawList.addRoundRect(chip, kEdge, kRadiusCtl * s, s);
-        textLeft(m_uiFontBold, "Land Value", lx, ly - 12.0f * s, kText);
+        textLeft(m_uiFontBold, title, lx, ly - 12.0f * s, kText);
         const int seg = 24;
         for (int i = 0; i < seg; ++i) {
             const float f0 = static_cast<float>(i) / seg;
@@ -5359,8 +5407,8 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
                 UiRect::fromXYWH(lx + f0 * lw, ly, lw / seg + 1.0f, lh), heat(f0));
         }
         m_uiDrawList.addRect(UiRect::fromXYWH(lx, ly, lw, lh), kEdge, s);
-        textLeft(m_uiFont, "poor", lx, ly + lh + 9.0f * s, kTextDim);
-        textRight(m_uiFont, "prime", lx + lw, ly + lh + 9.0f * s, kTextDim);
+        textLeft(m_uiFont, loLabel, lx, ly + lh + 9.0f * s, kTextDim);
+        textRight(m_uiFont, hiLabel, lx + lw, ly + lh + 9.0f * s, kTextDim);
     }
 }
 
@@ -5692,11 +5740,26 @@ void CityBuilderApp::drawControls(const Layout& lo) {
 
     // Right cluster, anchored off the panel edge with the same 8px pad.
     const UiRect reportsBtn = UiRect::fromXYWH(r.maxX - pad - 88.0f * s, by, 88.0f * s, bh);
-    const UiRect lvBtn = UiRect::fromXYWH(reportsBtn.minX - 8.0f * s - 108.0f * s, by,
-                                          108.0f * s, bh);
-    if (uiButton(lvBtn, "Land Value", m_showLandValue, kAccent)) {
-        m_showLandValue = !m_showLandValue;
-        m_sceneDirty = true;
+
+    // Data-layer toggles: four mutually-exclusive buttons, one per overlay.
+    // Clicking the already-active one turns the overlay back off.
+    struct OverlayBtn { DataOverlay mode; const char* label; float w; };
+    static constexpr std::array<OverlayBtn, 4> kOverlayBtns{{
+        {DataOverlay::LandValue, "Land", 52.0f},
+        {DataOverlay::Pollution, "Poll", 52.0f},
+        {DataOverlay::Education, "Edu", 44.0f},
+        {DataOverlay::Health, "Health", 64.0f},
+    }};
+    float overlayGroupW = 4.0f * s * (static_cast<float>(kOverlayBtns.size()) - 1.0f);
+    for (const OverlayBtn& b : kOverlayBtns) overlayGroupW += b.w * s;
+    float ox = reportsBtn.minX - 8.0f * s - overlayGroupW;
+    for (const OverlayBtn& b : kOverlayBtns) {
+        const UiRect btn = UiRect::fromXYWH(ox, by, b.w * s, bh);
+        if (uiButton(btn, b.label, m_dataOverlay == b.mode, kAccent)) {
+            m_dataOverlay = (m_dataOverlay == b.mode) ? DataOverlay::None : b.mode;
+            m_sceneDirty = true;
+        }
+        ox += b.w * s + 4.0f * s;
     }
 
     if (uiButton(reportsBtn, "Reports", m_reportsOpen, kGold)) {

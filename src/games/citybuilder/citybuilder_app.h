@@ -30,8 +30,10 @@
 // camera — the same "CPU state -> ImportedScene -> Renderer::uploadImportedScene"
 // path the hex strategy map uses, so no new Vulkan code is needed. Chrome
 // (top bar, palette, controls, minimap, reports) and thin per-frame overlays
-// (hover outline, stalled-tile tooltip, land-value legend) stay in the 2-D
-// UI draw list, composited over the 3-D frame in the UI pass.
+// (hover outline, stalled-tile tooltip, data-layer legend) stay in the 2-D
+// UI draw list, composited over the 3-D frame in the UI pass. Ground tiles
+// can additionally recolor into one of four data layers (land value,
+// pollution, education coverage, health coverage) — see DataOverlay.
 namespace odai::games::citybuilder {
 
 enum class Terrain : std::uint8_t { Grass, Water };
@@ -52,6 +54,9 @@ struct Tile {
     bool  poweredRoad = false;   // road tile carrying power from a plant (drives pole/wire art)
     bool  nearRoad = false;      // within reach of a road (required to develop)
     float desirability = 0.5f;   // 0..1 spatial land value; modulates growth target
+    float pollution = 0.0f;      // 0..1 industrial/traffic/power-plant nuisance, for the overlay
+    float eduCoverage = 0.0f;    // 0..1 school/library reach, for the overlay
+    float healthCoverage = 0.0f; // 0..1 clinic reach, for the overlay
     float scenicPhase = 0.0f;    // per-tile jitter so a block doesn't look uniform
     float zoneAge = 0.0f;        // real seconds connected+vacant since zoned (listing period)
     float trafficLoad = 0.0f;    // EMA of car occupancy on this road tile (congestion)
@@ -75,6 +80,10 @@ public:
     };
 
     enum class Metric : int { Population, Treasury, Education, Health, Happiness, Count };
+
+    // Ground data-layer overlays, alongside the original land-value view.
+    // Mutually exclusive: selecting one replaces whichever was showing.
+    enum class DataOverlay : int { None, LandValue, Pollution, Education, Health, Count };
 
 protected:
     bool onInit() override;
@@ -499,7 +508,7 @@ private:
     // Reports start closed: the first thing a new mayor should see is their
     // city, not a chart floating over it (G or the Reports button opens it).
     bool   m_reportsOpen = false;
-    bool   m_showLandValue = false;        // toggle the desirability data overlay
+    DataOverlay m_dataOverlay = DataOverlay::None;  // active ground data-layer overlay
     Metric m_metric = Metric::Population;
 
     float       m_flashTimer = 0.0f;
