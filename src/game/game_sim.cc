@@ -2,6 +2,7 @@
 
 #include "content/content_database.h"
 #include "core/hash.h"
+#include "math/math.h"
 #include "game/buildable.h"
 #include "game/great_people.h"
 #include "game/mod_host.h"
@@ -32,7 +33,7 @@ std::uint32_t hashCoords(std::int32_t x, std::int32_t y, std::uint32_t seed) {
 float hashFloat(std::int32_t x, std::int32_t y, std::uint32_t seed) {
     return static_cast<float>(hashCoords(x, y, seed) & 0xFFFFFFu) / static_cast<float>(0x1000000u);
 }
-float smoothstep(float t) { return t * t * (3.0f - (2.0f * t)); }
+float smoothstep(float t) { return odai::math::smoothstepUnit(t); }
 float valueNoise(float x, float y, std::uint32_t seed) {
     const float fx = std::floor(x);
     const float fy = std::floor(y);

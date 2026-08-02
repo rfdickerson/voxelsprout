@@ -1,6 +1,8 @@
 #include "core/grid3.h"
 #include "core/hash.h"
+#include "math/math.h"
 
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <unordered_set>
@@ -116,9 +118,63 @@ void testMixersAvalanche() {
     expectTrue(differingBits > 16, "mix64 avalanches adjacent inputs across many bits");
 }
 
+void testScalarHelpersMatchTheImplementationsTheyReplaced() {
+    using odai::math::lerp;
+    using odai::math::saturate;
+    using odai::math::smoothstepUnit;
+
+    expectTrue(saturate(-0.5f) == 0.0f, "saturate clamps below zero");
+    expectTrue(saturate(1.5f) == 1.0f, "saturate clamps above one");
+    expectTrue(saturate(0.25f) == 0.25f, "saturate passes through the unit range");
+
+    // The four call sites this replaced used three spellings of the same
+    // thing; assert they still agree bit-for-bit across the range.
+    bool allAgree = true;
+    for (int i = -3000; i <= 3000; ++i) {
+        const float v = static_cast<float>(i) * 0.001f;
+        const float ternary = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+        const float branch = (v < 0.0f) ? 0.0f : ((v > 1.0f) ? 1.0f : v);
+        allAgree = allAgree && saturate(v) == ternary && saturate(v) == branch;
+        allAgree = allAgree && smoothstepUnit(v) == v * v * (3.0f - (2.0f * v));
+    }
+    expectTrue(allAgree, "saturate/smoothstepUnit match the replaced bodies bit-for-bit");
+
+    expectTrue(lerp(2.0f, 4.0f, 0.0f) == 2.0f, "lerp at t=0");
+    expectTrue(lerp(2.0f, 4.0f, 1.0f) == 4.0f, "lerp at t=1");
+    expectTrue(lerp(2.0f, 4.0f, 0.5f) == 3.0f, "lerp at midpoint");
+    expectTrue(lerp(2.0f, 4.0f, 2.0f) == 6.0f, "lerp extrapolates (not clamped)");
+
+    const odai::math::Vector3 a{0.0f, 1.0f, 2.0f};
+    const odai::math::Vector3 b{4.0f, 5.0f, 6.0f};
+    const odai::math::Vector3 mid = lerp(a, b, 0.5f);
+    expectTrue(mid.x == 2.0f && mid.y == 3.0f && mid.z == 4.0f, "Vector3 lerp is component-wise");
+}
+
+void testVector2() {
+    using odai::math::Vector2;
+    constexpr Vector2 a{3.0f, 4.0f};
+    expectTrue(odai::math::lengthSquared(a) == 25.0f, "Vector2 lengthSquared");
+    expectTrue(odai::math::length(a) == 5.0f, "Vector2 length");
+    expectTrue(odai::math::dot(a, Vector2{1.0f, 0.0f}) == 3.0f, "Vector2 dot");
+
+    const Vector2 unit = odai::math::normalize(a);
+    expectTrue(std::abs(odai::math::length(unit) - 1.0f) < 1e-6f, "Vector2 normalize yields unit length");
+
+    const Vector2 zero = odai::math::normalize(Vector2{0.0f, 0.0f});
+    expectTrue(zero == Vector2{0.0f, 0.0f}, "Vector2 normalize of zero stays zero (no NaN)");
+
+    expectTrue((a + Vector2{1.0f, 1.0f}) == Vector2{4.0f, 5.0f}, "Vector2 addition");
+    expectTrue((a - Vector2{1.0f, 1.0f}) == Vector2{2.0f, 3.0f}, "Vector2 subtraction");
+    expectTrue((a * 2.0f) == Vector2{6.0f, 8.0f}, "Vector2 scalar multiply");
+    expectTrue((2.0f * a) == Vector2{6.0f, 8.0f}, "Vector2 scalar multiply is commutative");
+    expectTrue((-a) == Vector2{-3.0f, -4.0f}, "Vector2 negation");
+}
+
 }  // namespace
 
 int main() {
+    testScalarHelpersMatchTheImplementationsTheyReplaced();
+    testVector2();
     testCoordinateHashGoldenVectors();
     testPackCell21GoldenVectors();
     testCell3HashSpreadsAxisAlignedCells();

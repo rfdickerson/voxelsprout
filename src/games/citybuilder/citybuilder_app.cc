@@ -312,8 +312,8 @@ const char* buildingTag(Building b) {
     }
 }
 
-float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
-float lerpf(float a, float b, float t) { return a + (b - a) * t; }
+float clamp01(float v) { return odai::math::saturate(v); }
+float lerpf(float a, float b, float t) { return odai::math::lerp(a, b, t); }
 
 UiColor mix(const UiColor& a, const UiColor& b, float t) {
     return {lerpf(a.r, b.r, t), lerpf(a.g, b.g, t), lerpf(a.b, b.b, t), lerpf(a.a, b.a, t)};

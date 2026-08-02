@@ -4,6 +4,7 @@
 // directly via ODAI_IMPORTED_SCENE.
 
 #include "core/hash.h"
+#include "math/math.h"
 #include "game/strategy_map.h"
 #include "game/strategy_map_io.h"
 #include "game/strategy_map_mesh.h"
@@ -34,9 +35,7 @@ float hashFloat(std::int32_t x, std::int32_t y, std::uint32_t seed) {
     return static_cast<float>(hashCoords(x, y, seed) & 0xFFFFFFu) / static_cast<float>(0x1000000u);
 }
 
-float smoothstep(float t) {
-    return t * t * (3.0f - (2.0f * t));
-}
+float smoothstep(float t) { return odai::math::smoothstepUnit(t); }
 
 // Bilinearly-interpolated value noise at a continuous grid position.
 float valueNoise(float x, float y, std::uint32_t seed) {

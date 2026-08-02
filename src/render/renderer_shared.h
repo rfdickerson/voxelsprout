@@ -610,7 +610,7 @@ bool chunkIntersectsShadowCascadeClip(
 }
 
 float saturate(float value) {
-    return std::clamp(value, 0.0f, 1.0f);
+    return odai::math::saturate(value);
 }
 
 float smoothStep(float edge0, float edge1, float x) {

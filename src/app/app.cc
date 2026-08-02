@@ -3385,7 +3385,6 @@ std::vector<std::uint8_t> makeWindowFrameRgba(int size) {
     const float fillA = 0.93f;
     const float borderA = 1.0f;
 
-    const auto clamp01 = [](float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); };
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(size) * size * 4u, 0u);
     for (int y = 0; y < size; ++y) {
         for (int x = 0; x < size; ++x) {
@@ -3398,15 +3397,15 @@ std::vector<std::uint8_t> makeWindowFrameRgba(int size) {
             const float my = std::max(qy, 0.0f);
             const float d = std::sqrt(mx * mx + my * my) + std::min(std::max(qx, qy), 0.0f) - radius;
 
-            const float coverage = clamp01(0.5f - d);                      // 1 inside, 0 outside (1px AA).
-            const float borderAmt = clamp01((d + borderW + 0.5f) / borderW);  // 1 near edge, 0 deep inside.
+            const float coverage = odai::math::saturate(0.5f - d);                      // 1 inside, 0 outside (1px AA).
+            const float borderAmt = odai::math::saturate((d + borderW + 0.5f) / borderW);  // 1 near edge, 0 deep inside.
 
             const float r = fill[0] + (border[0] - fill[0]) * borderAmt;
             const float g = fill[1] + (border[1] - fill[1]) * borderAmt;
             const float b = fill[2] + (border[2] - fill[2]) * borderAmt;
             const float a = (fillA + (borderA - fillA) * borderAmt) * coverage;
 
-            const auto byte = [&](float v) { return static_cast<std::uint8_t>(clamp01(v) * 255.0f + 0.5f); };
+            const auto byte = [](float v) { return static_cast<std::uint8_t>(odai::math::saturate(v) * 255.0f + 0.5f); };
             const std::size_t i = (static_cast<std::size_t>(y) * size + x) * 4u;
             pixels[i + 0] = byte(r);
             pixels[i + 1] = byte(g);

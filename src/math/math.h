@@ -15,6 +15,63 @@ inline float degrees(float radiansValue) {
     return radiansValue * (180.0f / kPi);
 }
 
+// Clamp to [0, 1]. Matches the clamp01/saturate helpers that were duplicated
+// across app, audio, citybuilder, and the renderer.
+inline constexpr float saturate(float value) {
+    return value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+}
+
+inline constexpr float lerp(float a, float b, float t) {
+    return a + ((b - a) * t);
+}
+
+// Hermite ease on an already-normalized t. Deliberately *not* the two-edge
+// smoothstep(edge0, edge1, x): the two two-edge implementations in this tree
+// (render/renderer_shared.h and world/chunk_grid_worldgen.cc) disagree when
+// edge1 < edge0, so unifying them would silently change one of them.
+inline constexpr float smoothstepUnit(float t) {
+    return t * t * (3.0f - (2.0f * t));
+}
+
+struct Vector2 {
+    float x = 0.0f;
+    float y = 0.0f;
+
+    constexpr bool operator==(const Vector2&) const = default;
+
+    constexpr Vector2 operator+(const Vector2& rhs) const { return Vector2{x + rhs.x, y + rhs.y}; }
+    constexpr Vector2 operator-(const Vector2& rhs) const { return Vector2{x - rhs.x, y - rhs.y}; }
+    constexpr Vector2 operator-() const { return Vector2{-x, -y}; }
+    constexpr Vector2 operator*(float scalar) const { return Vector2{x * scalar, y * scalar}; }
+
+    constexpr Vector2& operator+=(const Vector2& rhs) { x += rhs.x; y += rhs.y; return *this; }
+    constexpr Vector2& operator-=(const Vector2& rhs) { x -= rhs.x; y -= rhs.y; return *this; }
+};
+
+inline constexpr Vector2 operator*(float scalar, const Vector2& v) {
+    return v * scalar;
+}
+
+inline constexpr float dot(const Vector2& a, const Vector2& b) {
+    return (a.x * b.x) + (a.y * b.y);
+}
+
+inline constexpr float lengthSquared(const Vector2& v) {
+    return dot(v, v);
+}
+
+inline float length(const Vector2& v) {
+    return std::sqrt(lengthSquared(v));
+}
+
+inline Vector2 normalize(const Vector2& v) {
+    const float len = length(v);
+    if (len <= 0.0f) {
+        return Vector2{0.0f, 0.0f};
+    }
+    return Vector2{v.x / len, v.y / len};
+}
+
 struct Vector3 {
     float x = 0.0f;
     float y = 0.0f;
@@ -80,6 +137,13 @@ inline float lengthSquared(const Vector3& v) {
 
 inline float length(const Vector3& v) {
     return std::sqrt(lengthSquared(v));
+}
+
+// Component-wise a + (b - a) * t, matching the scalar lerp above. Note this is
+// not the same rounding as render/renderer_shared.h's lerpVec3, which uses the
+// precise form a * (1 - t) + b * t; that one is left alone deliberately.
+inline constexpr Vector3 lerp(const Vector3& a, const Vector3& b, float t) {
+    return Vector3{lerp(a.x, b.x, t), lerp(a.y, b.y, t), lerp(a.z, b.z, t)};
 }
 
 inline Vector3 normalize(const Vector3& v) {
