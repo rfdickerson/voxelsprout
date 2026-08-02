@@ -161,14 +161,20 @@ struct ImportedSkinnedMeshTemplate {
 };
 
 // One frame's pose for a previously uploaded ImportedSkinnedMeshTemplate.
-// First slice: a single skinned instance per frame (one "skinning slot"),
-// matching how other singular per-frame GPU resources (auto-exposure state,
-// SSAO) already work in this renderer -- see docs/ROADMAP.md for the deferred
-// "multiple skinned instances" extension. boneMatrices.size() must equal the
-// bound template's boneCount.
+// boneMatrices.size() must equal that instance slot's bound template's
+// boneCount.
 struct ImportedSkinnedActorFrameData {
     std::span<const odai::math::Matrix4> boneMatrices;
 };
+
+// Skinning supports a small, fixed number of independent instance slots --
+// enough for a Dragon Age: Origins-style small party (4-8 characters on
+// screen at once), not an RTS mass-battle crowd system. See docs/ROADMAP.md's
+// explicit out-of-scope note on thousands-of-units rendering. Each slot has
+// its own rest-pose template, pose, and draws via
+// Renderer::uploadSkinnedMeshTemplate(instanceIndex, ...) /
+// Renderer::setSkinnedActorPose(instanceIndex, ...).
+inline constexpr std::uint32_t kMaxSkinnedInstances = 8;
 
 enum class InventoryItemId : std::uint8_t {
     Empty = 0,

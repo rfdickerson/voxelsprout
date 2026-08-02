@@ -260,6 +260,7 @@ mutation skips topology-dirty invalidation.
 | `src/games/snake/` | Immediate-mode | not overridden (`false`) | Minimal real-time game loop, ~370 lines. |
 | `src/games/citybuilder/` | Fully immediate-mode, no widget tree | not overridden | Large from-scratch UI surface: grid/zoning economy, charts, minimap, hand-rolled buttons — good reference for heavy custom `UiDrawList` usage without any widget tree. |
 | `src/games/stellaris/`, `src/games/swtor/` | Immediate-mode | — | Larger genre-specific examples (4X, RPG-ish) if citybuilder/minesweeper don't cover your case. |
+| `src/games/legion/` | Immediate-mode HUD + `ImportedScene` ground + GPU-skinned actors | not overridden | Only example calling `Renderer::uploadSkinnedMeshTemplate`/`setSkinnedActorPose` (multi-instance skinning, up to `kMaxSkinnedInstances`) — start here for any game with skeletally animated characters. Procedural rig/mesh authoring (`anim/biped_rig.h`, `procgen/humanoid_generator.h`) since there's no character-import pipeline yet. |
 
 ## 9. CMake registration
 

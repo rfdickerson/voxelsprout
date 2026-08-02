@@ -239,13 +239,13 @@ public:
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
     // GPU skeletal animation (Dragon Age: Origins touchstone, see
-    // docs/ROADMAP.md). Uploads a skinned mesh's rest-pose geometry once,
-    // device-local; posed per-frame via setSkinnedActorPose without
-    // re-uploading geometry. First slice: one skinned instance at a time (see
-    // ImportedSkinnedActorFrameData). NOT YET wired into the main-pass draw
-    // loop -- see the integration checklist in skinning_resources.cc.
-    bool uploadSkinnedMeshTemplate(const ImportedSkinnedMeshTemplate& meshTemplate);
-    void setSkinnedActorPose(const ImportedSkinnedActorFrameData& pose);
+    // docs/ROADMAP.md). Uploads a skinned mesh's rest-pose geometry once per
+    // instance slot, device-local; posed per-frame via setSkinnedActorPose
+    // without re-uploading geometry. instanceIndex must be < kMaxSkinnedInstances;
+    // each slot owns its own template/pose/draws (see the SkinnedInstanceSlot
+    // array below) -- sized for a small party, not a mass-battle crowd.
+    bool uploadSkinnedMeshTemplate(std::uint32_t instanceIndex, const ImportedSkinnedMeshTemplate& meshTemplate);
+    void setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose);
     // Debug bypass: when true, recordSkinningPass leaves the last-skinned (or
     // rest-pose, if never skinned) output untouched instead of dispatching --
     // matches the debug-toggle pattern already used elsewhere (see
@@ -831,11 +831,12 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
-        // GPU-skinned actor (separate slot from the CPU-skinned importedActor*
-        // fields above -- see skinning_resources.cc). Persistent device-local
-        // buffer, so no offset field is needed.
-        VkBuffer skinnedActorVertexBuffer = VK_NULL_HANDLE;
-        VkBuffer skinnedActorIndexBuffer = VK_NULL_HANDLE;
+        // GPU-skinned actors (separate slots from the CPU-skinned importedActor*
+        // fields above -- see skinning_resources.cc). Dragon Age touchstone.
+        // Up to kMaxSkinnedInstances independent instance slots, each with its
+        // own vertex/index buffer -- draws carry their own
+        // vertexBufferHandle/indexBufferHandle (see ImportedMeshDraw), resolved
+        // and bound per-draw rather than via one shared buffer pair.
         std::span<const ImportedMeshDraw> skinnedActorMeshDraws;
         bool importedPageCullingEnabled = false;
         std::array<std::span<const ImportedMeshDraw>, kShadowCascadeCount> importedMeshDrawsByCascade;
@@ -865,8 +866,11 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
-        VkBuffer skinnedActorVertexBuffer = VK_NULL_HANDLE;
-        VkBuffer skinnedActorIndexBuffer = VK_NULL_HANDLE;
+        // GPU-skinned actors (Dragon Age touchstone; see skinning_resources.cc).
+        // Up to kMaxSkinnedInstances independent instance slots, each with its
+        // own vertex/index buffer -- draws carry their own
+        // vertexBufferHandle/indexBufferHandle (see ImportedMeshDraw), resolved
+        // and bound per-draw rather than via one shared buffer pair.
         std::span<const ImportedMeshDraw> skinnedActorMeshDraws;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
@@ -893,8 +897,11 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
-        VkBuffer skinnedActorVertexBuffer = VK_NULL_HANDLE;
-        VkBuffer skinnedActorIndexBuffer = VK_NULL_HANDLE;
+        // GPU-skinned actors (Dragon Age touchstone; see skinning_resources.cc).
+        // Up to kMaxSkinnedInstances independent instance slots, each with its
+        // own vertex/index buffer -- draws carry their own
+        // vertexBufferHandle/indexBufferHandle (see ImportedMeshDraw), resolved
+        // and bound per-draw rather than via one shared buffer pair.
         std::span<const ImportedMeshDraw> skinnedActorMeshDraws;
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
@@ -1119,24 +1126,42 @@ private:
     // rather than going through m_pipelineManager's reference-alias pattern
     // used by the older compute passes above -- a reasonable follow-up to
     // unify, not required for correctness.
+    // Pipeline/pipeline-layout/descriptor-set-layout are shared across every
+    // instance slot (same shader, same binding layout); only the per-slot
+    // buffers/descriptor-buffer-set/draws/pending-pose differ.
     VkDescriptorSetLayout m_skinningDescriptorSetLayout = VK_NULL_HANDLE;
-    DescriptorBufferSet m_skinningBufferSet{};
     VkPipelineLayout m_skinningPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_skinningPipeline = VK_NULL_HANDLE;
-    // Rest-pose geometry + persistent skinned output, both device-local and
-    // uploaded/created once by uploadSkinnedMeshTemplate; only the bone-matrix
-    // binding (FrameArena-backed) changes per frame.
-    BufferHandle m_skinningRestPoseVertexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_skinningIndexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_skinningOutputVertexBufferHandle = kInvalidBufferHandle;
-    std::uint32_t m_skinningVertexCount = 0;
-    std::uint32_t m_skinningBoneCount = 0;
-    std::vector<ImportedMeshDraw> m_skinningMeshDraws;
+    // One independent skinned actor: its own rest-pose geometry + persistent
+    // skinned output (both device-local, uploaded/created once by
+    // uploadSkinnedMeshTemplate) and its own descriptor-buffer-set region per
+    // frame-in-flight; only the bone-matrix binding (FrameArena-backed)
+    // changes per frame. Up to kMaxSkinnedInstances slots, enough for a small
+    // party (see docs/ROADMAP.md's out-of-scope note on mass-battle crowds).
+    struct SkinnedInstanceSlot {
+        DescriptorBufferSet bufferSet{};
+        BufferHandle restPoseVertexBufferHandle = kInvalidBufferHandle;
+        BufferHandle indexBufferHandle = kInvalidBufferHandle;
+        BufferHandle outputVertexBufferHandle = kInvalidBufferHandle;
+        std::uint32_t vertexCount = 0;
+        std::uint32_t boneCount = 0;
+        std::vector<ImportedMeshDraw> meshDraws;
+        // Set by setSkinnedActorPose() (called before renderFrame()); consumed
+        // and uploaded by uploadSkinnedActorPoseForFrame() once this frame's
+        // FrameArena slot is actually active. See both functions' comments.
+        std::vector<odai::math::Matrix4> pendingBoneMatrices;
+    };
+    std::array<SkinnedInstanceSlot, kMaxSkinnedInstances> m_skinningInstances{};
+    // One past the highest instanceIndex ever uploaded via
+    // uploadSkinnedMeshTemplate; recordSkinningPass/uploadSkinnedActorPoseForFrame
+    // only iterate [0, m_skinningActiveInstanceCount).
+    std::uint32_t m_skinningActiveInstanceCount = 0;
     bool m_skinningDebugBypass = false;
-    // Set by setSkinnedActorPose() (called before renderFrame()); consumed
-    // and uploaded by uploadSkinnedActorPoseForFrame() once this frame's
-    // FrameArena slot is actually active. See both functions' comments.
-    std::vector<odai::math::Matrix4> m_pendingSkinnedActorBoneMatrices;
+    // Flattened draws across every active instance slot, rebuilt whenever a
+    // slot's template changes -- kept as a single vector (rather than each
+    // consuming frame_pass_*.cc looping over m_skinningInstances itself) so
+    // those three call sites and frame_run.cc need no changes at all.
+    std::vector<ImportedMeshDraw> m_skinningMeshDraws;
     VmaAllocator m_vmaAllocator = VK_NULL_HANDLE;
     VmaAllocation m_shadowDepthAllocation = VK_NULL_HANDLE;
     VmaAllocation m_diffuseTextureAllocation = VK_NULL_HANDLE;
