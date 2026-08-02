@@ -27,8 +27,19 @@ public:
     MusicHandle loadMusic(const std::filesystem::path& /*file*/) override { return {}; }
 
     void playSound(SoundHandle /*clip*/) override {}
-    void startAmbient(SoundHandle /*loop*/, float /*fadeSeconds*/) override {}
-    void stopAmbient(float /*fadeSeconds*/) override {}
+    void playSoundAt(SoundHandle /*clip*/, const odai::math::Vector3& /*position*/,
+                     const AttenuationParams& /*attenuation*/) override {}
+
+    AmbientHandle startAmbient(SoundHandle /*loop*/, float /*fadeSeconds*/) override { return {}; }
+    AmbientHandle startAmbientAt(SoundHandle /*loop*/, const odai::math::Vector3& /*position*/,
+                                 const AttenuationParams& /*attenuation*/, float /*fadeSeconds*/) override {
+        return {};
+    }
+    void stopAmbient(AmbientHandle /*handle*/, float /*fadeSeconds*/) override {}
+    void setAmbientPosition(AmbientHandle /*handle*/, const odai::math::Vector3& /*position*/) override {}
+
+    void setListenerTransform(const ListenerTransform& /*listener*/) override {}
+
     void playMusic(MusicHandle /*track*/, float /*fadeSeconds*/, bool /*loop*/) override {}
     void stopMusic(float /*fadeSeconds*/) override {}
 

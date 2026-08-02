@@ -44,9 +44,25 @@ public:
     // Streamed from disk; for long music tracks. Invalid on failure.
     [[nodiscard]] MusicHandle loadMusic(const std::filesystem::path& file);
 
-    void playSound(SoundHandle clip);                                 // fire-and-forget one-shot
-    void startAmbient(SoundHandle loop, float fadeSeconds = 1.0f);    // one ambient bed at a time
-    void stopAmbient(float fadeSeconds = 1.0f);
+    void playSound(SoundHandle clip);                                            // fire-and-forget one-shot
+    void playSoundAt(SoundHandle clip, const odai::math::Vector3& position,       // spatialized one-shot
+                     const AttenuationParams& attenuation = {});
+
+    // Ambient loops occupy one of a fixed set of concurrent slots (see kMaxAmbientSlots
+    // in audio_types.h) — a torch, a river, and a wind bed can all run at once. startAmbient
+    // starts a global (unpositioned) bed; startAmbientAt starts one distance-attenuated
+    // against the listener. Both crossfade in on their own; stopAmbient crossfades one out.
+    [[nodiscard]] AmbientHandle startAmbient(SoundHandle loop, float fadeSeconds = 1.0f);
+    [[nodiscard]] AmbientHandle startAmbientAt(SoundHandle loop, const odai::math::Vector3& position,
+                                               const AttenuationParams& attenuation = {},
+                                               float fadeSeconds = 1.0f);
+    void stopAmbient(AmbientHandle handle, float fadeSeconds = 1.0f);
+    void setAmbientPosition(AmbientHandle handle, const odai::math::Vector3& position);
+
+    // Updates the 3D listener (typically the player/camera) that playSoundAt and positional
+    // ambient loops are attenuated against. Call once per frame from game code.
+    void setListenerTransform(const ListenerTransform& listener);
+
     void playMusic(MusicHandle track, float fadeSeconds = 2.0f, bool loop = true);  // crossfades
     void stopMusic(float fadeSeconds = 2.0f);
 

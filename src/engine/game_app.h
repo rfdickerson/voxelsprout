@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio/audio.h"
 #include "engine/plugin.h"
 #include "render/renderer.h"
 #include "render/renderer_types.h"
@@ -42,6 +43,12 @@ protected:
     // Override to return true in tools that draw nothing but the 2D UI overlay.
     // Checked in init() before the renderer is initialized. Default: false.
     virtual bool wantsMinimalRendering() const { return false; }
+
+    // Initial audio volumes/mute state, passed to Audio::init() in init() before onInit()
+    // runs. Default is AudioConfig{}'s built-in defaults (see audio/audio_types.h). Override
+    // if a game wants different starting volumes; there is no persisted GameApp-level config
+    // file today (unlike src/app/App's odai.cfg), so this is the explicit seam for that.
+    virtual audio::AudioConfig audioConfig() const { return audio::AudioConfig{}; }
 
     // Voxel chunk content for a game that renders real world/ terrain (as opposed to an
     // ImportedScene or pure 2D/UI content). Pass a pointer to submitFrame() when the game
@@ -95,6 +102,7 @@ protected:
 
     GLFWwindow*    m_window = nullptr;
     render::Renderer m_renderer;
+    audio::Audio      m_audio;
 
     ui::Font    m_uiFont;
     ui::Font    m_uiFontBold;

@@ -45,12 +45,30 @@ void Audio::playSound(SoundHandle clip) {
     if (m_backend) m_backend->playSound(clip);
 }
 
-void Audio::startAmbient(SoundHandle loop, float fadeSeconds) {
-    if (m_backend) m_backend->startAmbient(loop, fadeSeconds);
+void Audio::playSoundAt(SoundHandle clip, const odai::math::Vector3& position,
+                        const AttenuationParams& attenuation) {
+    if (m_backend) m_backend->playSoundAt(clip, position, attenuation);
 }
 
-void Audio::stopAmbient(float fadeSeconds) {
-    if (m_backend) m_backend->stopAmbient(fadeSeconds);
+AmbientHandle Audio::startAmbient(SoundHandle loop, float fadeSeconds) {
+    return m_backend ? m_backend->startAmbient(loop, fadeSeconds) : AmbientHandle{};
+}
+
+AmbientHandle Audio::startAmbientAt(SoundHandle loop, const odai::math::Vector3& position,
+                                    const AttenuationParams& attenuation, float fadeSeconds) {
+    return m_backend ? m_backend->startAmbientAt(loop, position, attenuation, fadeSeconds) : AmbientHandle{};
+}
+
+void Audio::stopAmbient(AmbientHandle handle, float fadeSeconds) {
+    if (m_backend) m_backend->stopAmbient(handle, fadeSeconds);
+}
+
+void Audio::setAmbientPosition(AmbientHandle handle, const odai::math::Vector3& position) {
+    if (m_backend) m_backend->setAmbientPosition(handle, position);
+}
+
+void Audio::setListenerTransform(const ListenerTransform& listener) {
+    if (m_backend) m_backend->setListenerTransform(listener);
 }
 
 void Audio::playMusic(MusicHandle track, float fadeSeconds, bool loop) {

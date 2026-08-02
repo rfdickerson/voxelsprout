@@ -1,6 +1,7 @@
 #include "audio/audio_backend.h"
 
 #include "core/log.h"
+#include "math/math.h"
 
 #include <miniaudio.h>
 
@@ -16,10 +17,16 @@
 //     engine endpoint volume.
 //   - playSound  -> ma_engine_play_sound (engine owns + reaps each instance, so
 //     overlapping one-shots like rapid UI clicks just work).
-//   - startAmbient/playMusic -> persistent ma_sound with a fade-in; the previous
-//     one is faded out and retired (crossfade). Music streams from disk.
-// miniaudio mixes and applies fades on its own device thread; update(dt) only
-// reaps faded-out sounds we own so they don't leak.
+//   - playSoundAt -> a transient owned ma_sound with 3D spatialization enabled,
+//     reaped once ma_sound_at_end() reports it finished.
+//   - startAmbient/startAmbientAt -> a persistent ma_sound with a fade-in in one
+//     of a fixed set of ambient slots (torch + river + wind bed, etc. can all be
+//     active at once); startAmbientAt additionally enables spatialization/
+//     distance attenuation. playMusic uses the same fade-in pattern for a single
+//     current track. In every case the previous occupant of a slot is faded out
+//     and retired (crossfade), never hard-stopped. Music streams from disk.
+// miniaudio mixes/spatializes and applies fades on its own device thread;
+// update(dt) only reaps faded-out/finished sounds we own so they don't leak.
 namespace odai::audio {
 namespace {
 
@@ -28,6 +35,19 @@ int volumeIndex(SoundCategory c) { return static_cast<int>(c); }
 ma_uint64 fadeMs(float seconds) {
     if (seconds <= 0.0f) return 0;
     return static_cast<ma_uint64>(seconds * 1000.0f);
+}
+
+// Packs a slot index (0-based) and a generation counter into one handle id so a
+// handle from a since-reused slot is detected as stale rather than silently
+// touching the wrong sound. id 0 (slotIndex+1 == 0) is reserved for "invalid".
+std::uint32_t packAmbientHandle(int slotIndex, std::uint32_t generation) {
+    return (generation << 16) | static_cast<std::uint32_t>(slotIndex + 1);
+}
+int ambientHandleSlotIndex(AmbientHandle handle) {
+    return static_cast<int>(handle.id & 0xFFFFu) - 1;
+}
+std::uint32_t ambientHandleGeneration(AmbientHandle handle) {
+    return handle.id >> 16;
 }
 
 class MiniaudioBackend final : public AudioBackend {
@@ -41,8 +61,17 @@ public:
     MusicHandle loadMusic(const std::filesystem::path& file) override;
 
     void playSound(SoundHandle clip) override;
-    void startAmbient(SoundHandle loop, float fadeSeconds) override;
-    void stopAmbient(float fadeSeconds) override;
+    void playSoundAt(SoundHandle clip, const odai::math::Vector3& position,
+                     const AttenuationParams& attenuation) override;
+
+    AmbientHandle startAmbient(SoundHandle loop, float fadeSeconds) override;
+    AmbientHandle startAmbientAt(SoundHandle loop, const odai::math::Vector3& position,
+                                 const AttenuationParams& attenuation, float fadeSeconds) override;
+    void stopAmbient(AmbientHandle handle, float fadeSeconds) override;
+    void setAmbientPosition(AmbientHandle handle, const odai::math::Vector3& position) override;
+
+    void setListenerTransform(const ListenerTransform& listener) override;
+
     void playMusic(MusicHandle track, float fadeSeconds, bool loop) override;
     void stopMusic(float fadeSeconds) override;
 
@@ -61,6 +90,13 @@ private:
     std::unique_ptr<ma_sound> createSound(const std::string& path, SoundCategory category,
                                           ma_uint32 flags, bool loop, float fadeSeconds);
     void retire(std::unique_ptr<ma_sound> sound, float fadeSeconds);
+    void applyPositional(ma_sound& sound, const odai::math::Vector3& position,
+                         const AttenuationParams& attenuation);
+    AmbientHandle startAmbientSlot(SoundHandle loop, bool positional, const odai::math::Vector3& position,
+                                   const AttenuationParams& attenuation, float fadeSeconds);
+    // Returns nullptr if the handle is invalid, stale (slot reused since issue), or inactive.
+    struct AmbientSlot;
+    AmbientSlot* resolveAmbientSlot(AmbientHandle handle);
 
     struct SoundDef {
         std::string path;
@@ -69,6 +105,12 @@ private:
     struct FadingSound {
         std::unique_ptr<ma_sound> sound;
         float remaining = 0.0f;
+    };
+    struct AmbientSlot {
+        std::unique_ptr<ma_sound> sound;
+        bool positional = false;
+        bool active = false;
+        std::uint32_t generation = 0;
     };
 
     ma_engine m_engine{};
@@ -84,7 +126,8 @@ private:
     std::vector<SoundDef> m_sounds;  // SFX + ambient clips, addressed by SoundHandle
     std::vector<SoundDef> m_music;   // streamed tracks, addressed by MusicHandle
 
-    std::unique_ptr<ma_sound> m_ambient;
+    std::array<AmbientSlot, kMaxAmbientSlots> m_ambientSlots{};   // torch + river + wind bed, etc.
+    std::vector<std::unique_ptr<ma_sound>> m_positionalOneShots;  // playSoundAt instances, reaped in update()
     std::unique_ptr<ma_sound> m_musicCurrent;
     std::vector<FadingSound> m_fading;  // sounds fading out, reaped in update()
 };
@@ -120,7 +163,12 @@ std::unique_ptr<AudioBackend> MiniaudioBackend::create(const AudioConfig& cfg) {
 MiniaudioBackend::~MiniaudioBackend() {
     // Uninit sounds before groups before the engine so nothing references a
     // destroyed parent while the device thread is still being torn down.
-    if (m_ambient) ma_sound_uninit(m_ambient.get());
+    for (AmbientSlot& slot : m_ambientSlots) {
+        if (slot.sound) ma_sound_uninit(slot.sound.get());
+    }
+    for (std::unique_ptr<ma_sound>& sound : m_positionalOneShots) {
+        if (sound) ma_sound_uninit(sound.get());
+    }
     if (m_musicCurrent) ma_sound_uninit(m_musicCurrent.get());
     for (FadingSound& f : m_fading) {
         if (f.sound) ma_sound_uninit(f.sound.get());
@@ -183,6 +231,14 @@ void MiniaudioBackend::update(float dt) {
             ++it;
         }
     }
+    for (auto it = m_positionalOneShots.begin(); it != m_positionalOneShots.end();) {
+        if (*it && ma_sound_at_end(it->get())) {
+            ma_sound_uninit(it->get());
+            it = m_positionalOneShots.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 SoundHandle MiniaudioBackend::loadSound(const std::filesystem::path& file, SoundCategory category) {
@@ -213,15 +269,97 @@ void MiniaudioBackend::playSound(SoundHandle clip) {
     ma_engine_play_sound(&m_engine, def.path.c_str(), groupFor(def.category));
 }
 
-void MiniaudioBackend::startAmbient(SoundHandle loop, float fadeSeconds) {
-    if (!loop.valid() || loop.id > m_sounds.size()) return;
-    if (m_ambient) retire(std::move(m_ambient), fadeSeconds);
-    const SoundDef& def = m_sounds[loop.id - 1];
-    m_ambient = createSound(def.path, SoundCategory::Ambient, MA_SOUND_FLAG_DECODE, /*loop=*/true, fadeSeconds);
+void MiniaudioBackend::applyPositional(ma_sound& sound, const odai::math::Vector3& position,
+                                       const AttenuationParams& attenuation) {
+    ma_sound_set_spatialization_enabled(&sound, MA_TRUE);
+    ma_sound_set_position(&sound, position.x, position.y, position.z);
+    ma_sound_set_attenuation_model(&sound, ma_attenuation_model_linear);
+    ma_sound_set_min_distance(&sound, attenuation.minDistance);
+    ma_sound_set_max_distance(&sound, attenuation.maxDistance);
+    ma_sound_set_rolloff(&sound, attenuation.rolloff);
 }
 
-void MiniaudioBackend::stopAmbient(float fadeSeconds) {
-    if (m_ambient) retire(std::move(m_ambient), fadeSeconds);
+void MiniaudioBackend::playSoundAt(SoundHandle clip, const odai::math::Vector3& position,
+                                   const AttenuationParams& attenuation) {
+    if (!clip.valid() || clip.id > m_sounds.size()) return;
+    const SoundDef& def = m_sounds[clip.id - 1];
+    std::unique_ptr<ma_sound> sound =
+        createSound(def.path, def.category, MA_SOUND_FLAG_DECODE, /*loop=*/false, /*fadeSeconds=*/0.0f);
+    if (!sound) return;
+    applyPositional(*sound, position, attenuation);
+    m_positionalOneShots.push_back(std::move(sound));
+}
+
+MiniaudioBackend::AmbientSlot* MiniaudioBackend::resolveAmbientSlot(AmbientHandle handle) {
+    if (!handle.valid()) return nullptr;
+    const int index = ambientHandleSlotIndex(handle);
+    if (index < 0 || index >= kMaxAmbientSlots) return nullptr;
+    AmbientSlot& slot = m_ambientSlots[static_cast<std::size_t>(index)];
+    if (!slot.active || slot.generation != ambientHandleGeneration(handle)) return nullptr;
+    return &slot;
+}
+
+AmbientHandle MiniaudioBackend::startAmbientSlot(SoundHandle loop, bool positional,
+                                                 const odai::math::Vector3& position,
+                                                 const AttenuationParams& attenuation, float fadeSeconds) {
+    if (!loop.valid() || loop.id > m_sounds.size()) return {};
+
+    int freeIndex = -1;
+    for (int i = 0; i < kMaxAmbientSlots; ++i) {
+        if (!m_ambientSlots[static_cast<std::size_t>(i)].active) {
+            freeIndex = i;
+            break;
+        }
+    }
+    if (freeIndex < 0) {
+        VOX_LOGW("audio") << "no free ambient slot (max " << kMaxAmbientSlots << "); dropping start request";
+        return {};
+    }
+
+    const SoundDef& def = m_sounds[loop.id - 1];
+    std::unique_ptr<ma_sound> sound =
+        createSound(def.path, def.category, MA_SOUND_FLAG_DECODE, /*loop=*/true, fadeSeconds);
+    if (!sound) return {};
+    if (positional) {
+        applyPositional(*sound, position, attenuation);
+    } else {
+        ma_sound_set_spatialization_enabled(sound.get(), MA_FALSE);
+    }
+
+    AmbientSlot& slot = m_ambientSlots[static_cast<std::size_t>(freeIndex)];
+    slot.sound = std::move(sound);
+    slot.positional = positional;
+    slot.active = true;
+    ++slot.generation;
+    return AmbientHandle{packAmbientHandle(freeIndex, slot.generation)};
+}
+
+AmbientHandle MiniaudioBackend::startAmbient(SoundHandle loop, float fadeSeconds) {
+    return startAmbientSlot(loop, /*positional=*/false, odai::math::Vector3{}, AttenuationParams{}, fadeSeconds);
+}
+
+AmbientHandle MiniaudioBackend::startAmbientAt(SoundHandle loop, const odai::math::Vector3& position,
+                                               const AttenuationParams& attenuation, float fadeSeconds) {
+    return startAmbientSlot(loop, /*positional=*/true, position, attenuation, fadeSeconds);
+}
+
+void MiniaudioBackend::stopAmbient(AmbientHandle handle, float fadeSeconds) {
+    AmbientSlot* slot = resolveAmbientSlot(handle);
+    if (!slot) return;
+    slot->active = false;
+    retire(std::move(slot->sound), fadeSeconds);
+}
+
+void MiniaudioBackend::setAmbientPosition(AmbientHandle handle, const odai::math::Vector3& position) {
+    AmbientSlot* slot = resolveAmbientSlot(handle);
+    if (!slot || !slot->positional || !slot->sound) return;
+    ma_sound_set_position(slot->sound.get(), position.x, position.y, position.z);
+}
+
+void MiniaudioBackend::setListenerTransform(const ListenerTransform& listener) {
+    ma_engine_listener_set_position(&m_engine, 0, listener.position.x, listener.position.y, listener.position.z);
+    ma_engine_listener_set_direction(&m_engine, 0, listener.forward.x, listener.forward.y, listener.forward.z);
+    ma_engine_listener_set_world_up(&m_engine, 0, listener.up.x, listener.up.y, listener.up.z);
 }
 
 void MiniaudioBackend::playMusic(MusicHandle track, float fadeSeconds, bool loop) {

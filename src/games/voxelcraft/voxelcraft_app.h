@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio/audio_types.h"
 #include "engine/game_app.h"
 #include "games/voxelcraft/voxelcraft_player.h"
 #include "games/voxelcraft/voxelcraft_streaming.h"
@@ -32,6 +33,7 @@ private:
     void updateHotbarAndInventoryInput();
     void updateBlockInteraction();
     void tickAutosave(float dt);
+    void tickFootstepAudio(float dxHorizontal, float dzHorizontal);
     void saveWorld();
     void drawHud();
 
@@ -63,6 +65,19 @@ private:
     bool m_wasInventoryKeyDown = false;
     bool m_wasSaveKeyDown = false;
     std::uint32_t m_hotbarKeyPrevMask = 0;
+
+    // Ambient loops, started once in onInit() at fixed world positions -- see
+    // docs/GAME_API.md §4 for the Audio facade this pulls from.
+    odai::audio::SoundHandle   m_ambientTorchSound;
+    odai::audio::SoundHandle   m_ambientRiverSound;
+    odai::audio::SoundHandle   m_ambientWindSound;
+    odai::audio::AmbientHandle m_ambientTorchHandle;
+    odai::audio::AmbientHandle m_ambientRiverHandle;
+    odai::audio::AmbientHandle m_ambientWindHandle;
+
+    odai::audio::SoundHandle m_sfxFootstep;
+    odai::audio::SoundHandle m_sfxBlockBreak;
+    float m_footstepDistanceAccumulator = 0.0f;  // horizontal voxels moved since the last footstep
 };
 
 } // namespace odai::games::voxelcraft

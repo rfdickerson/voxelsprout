@@ -38,6 +38,10 @@ protected:
     // Minesweeper returns true; CityBuilder does not override it (defaults false, so it
     // pays for pipelines it never uses — prefer true for a fresh 2D game).
 
+    virtual audio::AudioConfig audioConfig() const { return audio::AudioConfig{}; }
+    // Initial volumes/mute state passed to Audio::init(); defaults to AudioConfig{}'s
+    // built-in defaults. See §4.
+
     bool loadFonts(regularPath, boldPath, italicPath, numericPath,
                    bodySize = 18.0f, numericSize = 16.0f);
     static std::string resolveAssetPath(const std::string& relativePath);
@@ -50,6 +54,7 @@ protected:
     // Available to subclasses:
     GLFWwindow*       m_window;
     render::Renderer  m_renderer;
+    audio::Audio      m_audio;              // init/update/shutdown already wired; see §4
     ui::Font          m_uiFont, m_uiFontBold, m_uiFontItalic, m_uiFontNumeric;
     ui::FontSet       m_uiFonts;
     ui::UiContext     m_uiContext;
@@ -59,7 +64,8 @@ protected:
 ```
 
 `run()` drives the loop: poll GLFW events → sample mouse/scroll/text into `m_uiInput` →
-`m_uiContext.update(m_uiInput)` + `.tick(dt)` → `onTick(dt)` → `onRender(dt)`.
+`m_uiContext.update(m_uiInput)` + `.tick(dt)` → `onTick(dt)` → `m_audio.update(dt)` →
+`onRender(dt)`.
 
 `submitFrame()` appends the retained widget tree's geometry onto whatever you already drew
 into `m_uiDrawList`, draws the custom OS-cursor replacement on top (automatic — never call
@@ -90,7 +96,7 @@ bool MyGameApp::onInit() {
         return false;
     }
     resetGame();
-    // Optional: build a retained widget tree here (see §4).
+    // Optional: build a retained widget tree here (see §5).
     return true;
 }
 ```
@@ -118,7 +124,42 @@ unless your game renders actual world geometry, in which case read `world/` and
 
 **Never** include anything under `src/render/backend/vulkan/` from game code.
 
-## 4. UI framework (`src/ui/*`)
+## 4. Audio facade — what a game actually calls (`src/audio/audio.h`)
+
+`GameApp` owns `m_audio` (`audio::Audio`) directly — init/update/shutdown are already
+wired into the base class lifecycle (`init()` brings it up right after the renderer and
+before `onInit()` runs; `run()` pumps it once per frame after `onTick()`; `shutdown()`
+tears it down before the renderer). A subclass never calls those three itself — only the
+content-facing API below, typically from `onInit()` (load + start ambient/music) and
+`onTick()`/`onRender()` (one-shots, listener updates):
+
+- `m_audio.loadSound(path, category)` / `loadMusic(path)` — decode a short SFX/ambient
+  clip or register a streamed music track; both return an invalid handle (never a crash)
+  if the file is missing, so it's safe to reference assets that don't exist yet.
+- `m_audio.playSound(clip)` — fire-and-forget one-shot (UI clicks, non-positional cues).
+- `m_audio.playSoundAt(clip, position, attenuation = {})` — spatialized one-shot (footsteps,
+  impacts), distance-attenuated against the current listener transform.
+- `m_audio.startAmbient(loop, fadeSeconds = 1.0f)` / `startAmbientAt(loop, position,
+  attenuation = {}, fadeSeconds = 1.0f)` — start a global (unpositioned, e.g. wind) or
+  positional (e.g. torch, river) ambient loop; both return an `AmbientHandle` for a slot in
+  a fixed pool of `kMaxAmbientSlots` (`audio/audio_types.h`) — several can run concurrently.
+  `stopAmbient(handle, fadeSeconds)` crossfades one out; `setAmbientPosition(handle,
+  position)` moves a positional loop (e.g. it's attached to a moving object).
+- `m_audio.setListenerTransform(listener)` — call once per frame with the player/camera
+  position (+ optional forward/up) so positional SFX/ambient loops attenuate correctly; see
+  VoxelCraft's `onRender()` for a worked example building this from an interpolated camera pose.
+- `m_audio.playMusic(track, fadeSeconds = 2.0f, loop = true)` / `stopMusic(fadeSeconds)` —
+  crossfades to/from a single current music track.
+- `m_audio.setMasterVolume`/`setCategoryVolume(category, v)`/`categoryVolume(category)`/
+  `setMuted`/`muted()` — the four buses are `SoundCategory::{Master,Music,Ambient,Ui}`.
+
+Override `audioConfig()` (defaults to `AudioConfig{}`) if a game wants different starting
+volumes — there's no persisted GameApp-level settings file yet (unlike `src/app/App`'s
+`odai.cfg`), so this is the seam until one exists. On a machine with no audio device, or a
+build without the miniaudio backend, every call above becomes a safe no-op — always call
+`loadSound`/`startAmbient*` unconditionally rather than gating on `deviceActive()`.
+
+## 5. UI framework (`src/ui/*`)
 
 Two ways to put pixels on screen, freely mixable:
 
@@ -183,7 +224,7 @@ beyond a single styled run of text.
   Motif, Classic Mac, Flat Retro, RetroOS) skinning real interactive widgets.
 - `odai_tween_demo` (`src/tools/tween_demo/`) — animation/easing gallery.
 
-## 5. Input
+## 6. Input
 
 There's no input-mapping abstraction (deliberately — this project avoids new
 abstraction layers unless clearly justified). Two channels:
@@ -201,7 +242,7 @@ abstraction layers unless clearly justified). Two channels:
 Ignore `core::InputState` (`src/core/input.h`) — it's explicitly-commented placeholder
 scaffolding used only by the legacy `app::App`, not wired into `GameApp` at all.
 
-## 6. Reusable simulation (`src/sim/simulation.h`) — optional
+## 7. Reusable simulation (`src/sim/simulation.h`) — optional
 
 Renderer/UI-agnostic factory-sim primitives: conveyor `Belt`s, `Pipe`s, rail `Track`s,
 and `BeltCargo` (fixed-point position + flood-style advance). `GameApp` owns an always-empty
@@ -211,7 +252,7 @@ real `sim::Simulation`, call `.update(dt)` from `onTick()`, and pass it through 
 Mutate belts via `addBelt()`/`removeBeltAt()`, not the raw `belts()` vector directly — direct
 mutation skips topology-dirty invalidation.
 
-## 7. Reference implementations — which one to copy
+## 8. Reference implementations — which one to copy
 
 | Game | Rendering model | wantsMinimalRendering | Best example of |
 |---|---|---|---|
@@ -221,7 +262,7 @@ mutation skips topology-dirty invalidation.
 | `src/games/stellaris/`, `src/games/swtor/` | Immediate-mode | — | Larger genre-specific examples (4X, RPG-ish) if citybuilder/minesweeper don't cover your case. |
 | `src/games/legion/` | Immediate-mode HUD + `ImportedScene` ground + GPU-skinned actors | not overridden | Only example calling `Renderer::uploadSkinnedMeshTemplate`/`setSkinnedActorPose` (multi-instance skinning, up to `kMaxSkinnedInstances`) — start here for any game with skeletally animated characters. Procedural rig/mesh authoring (`anim/biped_rig.h`, `procgen/humanoid_generator.h`) since there's no character-import pipeline yet. |
 
-## 8. CMake registration
+## 9. CMake registration
 
 Add a new `add_executable` block next to the other `odai_game_*` targets in
 `CMakeLists.txt` (roughly lines 630-800, inside the
@@ -278,7 +319,7 @@ never uploads 3D content — `Renderer::init` always constructs those systems un
 
 Build just the new target: `cmake --build cmake-build-release --target odai_game_<name> -j 4`.
 
-## 9. Project constraints that bind new games
+## 10. Project constraints that bind new games
 
 - Only `src/render/` may include Vulkan headers; never let a `Vk*` type leak into
   `src/games/`.
@@ -289,7 +330,7 @@ Build just the new target: `cmake --build cmake-build-release --target odai_game
 - World-feel/water/world-building conventions apply only if the game touches `world/`
   terrain content — irrelevant to a self-contained 2D mini-game.
 
-## 10. Plugins — optional lifecycle extension points (`src/engine/plugin.h`)
+## 11. Plugins — optional lifecycle extension points (`src/engine/plugin.h`)
 
 Most games need nothing here — a single `GameApp` subclass is still the default and
 correct shape for a self-contained mini-game. `PluginRegistry`/`IEnginePlugin` exist for

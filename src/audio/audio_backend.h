@@ -22,8 +22,19 @@ public:
     virtual MusicHandle loadMusic(const std::filesystem::path& file) = 0;
 
     virtual void playSound(SoundHandle clip) = 0;
-    virtual void startAmbient(SoundHandle loop, float fadeSeconds) = 0;
-    virtual void stopAmbient(float fadeSeconds) = 0;
+    virtual void playSoundAt(SoundHandle clip, const odai::math::Vector3& position,
+                             const AttenuationParams& attenuation) = 0;
+
+    // Global (unpositioned) ambient bed — e.g. a wind loop, unaffected by listener position.
+    [[nodiscard]] virtual AmbientHandle startAmbient(SoundHandle loop, float fadeSeconds) = 0;
+    // Positional ambient bed — distance-attenuated against the listener (torch, river, ...).
+    [[nodiscard]] virtual AmbientHandle startAmbientAt(SoundHandle loop, const odai::math::Vector3& position,
+                                                       const AttenuationParams& attenuation, float fadeSeconds) = 0;
+    virtual void stopAmbient(AmbientHandle handle, float fadeSeconds) = 0;
+    virtual void setAmbientPosition(AmbientHandle handle, const odai::math::Vector3& position) = 0;
+
+    virtual void setListenerTransform(const ListenerTransform& listener) = 0;
+
     virtual void playMusic(MusicHandle track, float fadeSeconds, bool loop) = 0;
     virtual void stopMusic(float fadeSeconds) = 0;
 
