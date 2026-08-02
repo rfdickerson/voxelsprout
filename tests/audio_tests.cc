@@ -2,6 +2,7 @@
 #include <iostream>
 
 #include "audio/audio.h"
+#include "math/math.h"
 
 // These tests link only the facade + NullBackend (ODAI_AUDIO_HAVE_MINIAUDIO is
 // not defined for this target), so they run with no audio device on any
@@ -52,9 +53,10 @@ void testPlayCallsAreNoOps() {
     // Neither invalid nor (synthetic) valid handles may crash on the null backend.
     audio.playSound(SoundHandle{});
     audio.playSound(SoundHandle{42});
-    audio.startAmbient(SoundHandle{}, 1.0f);
-    audio.startAmbient(SoundHandle{7}, 0.5f);
-    audio.stopAmbient(1.0f);
+    const AmbientHandle a1 = audio.startAmbient(SoundHandle{}, 1.0f);
+    const AmbientHandle a2 = audio.startAmbient(SoundHandle{7}, 0.5f);
+    audio.stopAmbient(a1, 1.0f);
+    audio.stopAmbient(a2, 1.0f);
     audio.playMusic(MusicHandle{}, 2.0f, true);
     audio.playMusic(MusicHandle{3}, 2.0f, false);
     audio.stopMusic(0.0f);
@@ -103,6 +105,63 @@ void testConfigSeedsState() {
     expectTrue(audio.muted(), "init seeds muted state");
 }
 
+void testListenerTransformDoesNotCrash() {
+    using namespace odai::audio;
+    Audio audio;
+    audio.init(AudioConfig{});
+    audio.setListenerTransform(ListenerTransform{});  // default (zero position, -Z forward)
+    audio.setListenerTransform(ListenerTransform{
+        odai::math::Vector3{12.0f, 5.0f, -3.0f},
+        odai::math::Vector3{1.0f, 0.0f, 0.0f},
+        odai::math::Vector3{0.0f, 1.0f, 0.0f}});
+    expectTrue(true, "setListenerTransform does not crash on the null backend");
+}
+
+void testPlaySoundAtIsNoOp() {
+    using namespace odai::audio;
+    Audio audio;
+    audio.init(AudioConfig{});
+    audio.playSoundAt(SoundHandle{}, odai::math::Vector3{}, AttenuationParams{});
+    audio.playSoundAt(SoundHandle{9}, odai::math::Vector3{1.0f, 2.0f, 3.0f}, AttenuationParams{2.0f, 20.0f, 1.5f});
+    expectTrue(true, "playSoundAt does not crash on the null backend");
+}
+
+void testAmbientSlotsAlwaysInvalidOnNullBackend() {
+    using namespace odai::audio;
+    Audio audio;
+    audio.init(AudioConfig{});
+    const AmbientHandle global = audio.startAmbient(SoundHandle{5}, 1.0f);
+    const AmbientHandle positional = audio.startAmbientAt(
+        SoundHandle{6}, odai::math::Vector3{1.0f, 1.0f, 1.0f}, AttenuationParams{}, 1.0f);
+    expectTrue(!global.valid(), "startAmbient on the null backend always yields an invalid handle");
+    expectTrue(!positional.valid(), "startAmbientAt on the null backend always yields an invalid handle");
+}
+
+void testAmbientStopAndRepositionAreNoOps() {
+    using namespace odai::audio;
+    Audio audio;
+    audio.init(AudioConfig{});
+    audio.stopAmbient(AmbientHandle{}, 1.0f);
+    audio.stopAmbient(AmbientHandle{3}, 0.5f);  // synthetic, non-issued handle
+    audio.setAmbientPosition(AmbientHandle{}, odai::math::Vector3{});
+    audio.setAmbientPosition(AmbientHandle{3}, odai::math::Vector3{4.0f, 4.0f, 4.0f});
+    expectTrue(true, "stopAmbient/setAmbientPosition do not crash on invalid or synthetic handles");
+}
+
+void testManyConcurrentAmbientStartsStayIndependent() {
+    using namespace odai::audio;
+    Audio audio;
+    audio.init(AudioConfig{});
+    // Exercise well past kMaxAmbientSlots worth of concurrent starts; the null backend does
+    // no real slot bookkeeping, so every one must independently no-op.
+    for (int i = 0; i < kMaxAmbientSlots + 2; ++i) {
+        const AmbientHandle handle = audio.startAmbientAt(
+            SoundHandle{static_cast<std::uint32_t>(i + 1)},
+            odai::math::Vector3{static_cast<float>(i), 0.0f, 0.0f}, AttenuationParams{}, 0.5f);
+        expectTrue(!handle.valid(), "each concurrent ambient start on the null backend is independently invalid");
+    }
+}
+
 void testCallsAfterShutdownAreSafe() {
     using namespace odai::audio;
     Audio audio;
@@ -126,6 +185,11 @@ int main() {
     testMuteToggles();
     testConfigSeedsState();
     testCallsAfterShutdownAreSafe();
+    testListenerTransformDoesNotCrash();
+    testPlaySoundAtIsNoOp();
+    testAmbientSlotsAlwaysInvalidOnNullBackend();
+    testAmbientStopAndRepositionAreNoOps();
+    testManyConcurrentAmbientStartsStayIndependent();
 
     if (g_failures != 0) {
         std::cerr << "[audio test] " << g_failures << " failures\n";

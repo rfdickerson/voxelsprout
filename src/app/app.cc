@@ -1112,7 +1112,7 @@ bool App::init() {
     m_menuMusic = m_audio.loadMusic(resolveAssetPath("assets/audio/music/theme_01.mp3"));
     m_uiContext.setClickFeedback([this]() { m_audio.playSound(m_uiClickSfx); });
     if (m_menuMusic.valid()) m_audio.playMusic(m_menuMusic, 2.0f, /*loop=*/true);
-    if (m_ambientLoop.valid()) m_audio.startAmbient(m_ambientLoop, 1.5f);
+    if (m_ambientLoop.valid()) m_ambientHandle = m_audio.startAmbient(m_ambientLoop, 1.5f);
 
     VOX_LOGI("app") << "init complete in " << elapsedMs(initStart) << " ms";
     return true;

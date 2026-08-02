@@ -93,7 +93,10 @@ bool GameApp::init(const char* title) {
         return false;
     }
 
+    m_audio.init(audioConfig());
+
     if (!onInit()) {
+        m_audio.shutdown();
         m_renderer.shutdown();
         glfwDestroyWindow(m_window);
         m_window = nullptr;
@@ -103,6 +106,7 @@ bool GameApp::init(const char* title) {
 
     if (!m_plugins.attachAll(*this)) {
         m_plugins.detachAll(*this);
+        m_audio.shutdown();
         m_renderer.shutdown();
         glfwDestroyWindow(m_window);
         m_window = nullptr;
@@ -157,6 +161,7 @@ void GameApp::run() {
 
         onTick(dt);
         m_plugins.tickAll(*this, dt);
+        m_audio.update(dt);
         onRender(dt);
     }
 }
@@ -164,6 +169,7 @@ void GameApp::run() {
 void GameApp::shutdown() {
     onShutdown();
     m_plugins.detachAll(*this);
+    m_audio.shutdown();
     m_renderer.shutdown();
     if (m_window) {
         glfwDestroyWindow(m_window);

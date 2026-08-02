@@ -23,6 +23,7 @@ constexpr float kRenderAspectFallback = 16.0f / 9.0f;
 constexpr float kFrustumCullPadVoxels = 8.0f;
 constexpr float kFrustumNearDistance = 0.1f;
 constexpr float kFrustumFarDistance = 400.0f;
+constexpr float kFootstepStrideVoxels = 1.6f;
 
 float wrapDegreesSigned(float degrees) {
     float wrapped = std::fmod(degrees, 360.0f);
@@ -39,6 +40,18 @@ float lerpWrappedDegrees(float fromDegrees, float toDegrees, float alpha) {
     return wrapDegreesSigned(fromDegrees + (delta * alpha));
 }
 
+// Shared by the frustum broad-phase bounds below and the per-frame audio listener update.
+odai::math::Vector3 cameraForwardVector(float yawDegrees, float pitchDegrees) {
+    const float yawRadians = odai::math::radians(yawDegrees);
+    const float pitchRadians = odai::math::radians(pitchDegrees);
+    const float cosPitch = std::cos(pitchRadians);
+    return odai::math::normalize(odai::math::Vector3{
+        std::cos(yawRadians) * cosPitch,
+        std::sin(pitchRadians),
+        std::sin(yawRadians) * cosPitch
+    });
+}
+
 // Broad-phase view-frustum AABB (corner min/max, no exact per-plane test -- that's all
 // ChunkClipmapIndex::queryChunksIntersecting needs). This is the only surviving
 // frustum helper; src/app/app.cc's unwired buildCameraFrustum was deleted.
@@ -52,15 +65,7 @@ odai::core::CellAabb computeFrustumBroadPhaseBounds(
     odai::core::CellAabb bounds{};
     const float clampedAspect = std::max(aspectRatio, 0.1f);
     const float clampedFovDegrees = std::clamp(fovDegrees, 20.0f, 120.0f);
-    const float yawRadians = odai::math::radians(yawDegrees);
-    const float pitchRadians = odai::math::radians(pitchDegrees);
-    const float cosPitch = std::cos(pitchRadians);
-    odai::math::Vector3 forward{
-        std::cos(yawRadians) * cosPitch,
-        std::sin(pitchRadians),
-        std::sin(yawRadians) * cosPitch
-    };
-    forward = odai::math::normalize(forward);
+    const odai::math::Vector3 forward = cameraForwardVector(yawDegrees, pitchDegrees);
     if (odai::math::lengthSquared(forward) <= 0.0001f) {
         return bounds;
     }
@@ -149,6 +154,30 @@ bool VoxelCraftApp::onInit() {
     m_world.loadOrInitialize(m_worldPath, &loadResult);
     VOX_LOGI("voxelcraft") << (loadResult.loadedFromFile ? "loaded world " : "generating fresh world ")
                            << m_worldPath.string();
+
+    // Demo environmental audio: two positional ambient beds (torch, river) plus one global
+    // wind bed, all started once here and left running for the session -- distance
+    // attenuation comes entirely from the per-frame listener update in onRender(), not from
+    // any zone/proximity system. Missing asset files (assets/audio/ doesn't ship real clips
+    // yet) leave every handle invalid, so these calls simply no-op until content is supplied.
+    m_ambientTorchSound = m_audio.loadSound(
+        resolveAssetPath("assets/audio/ambient/torch_crackle.wav"), odai::audio::SoundCategory::Ambient);
+    m_ambientRiverSound = m_audio.loadSound(
+        resolveAssetPath("assets/audio/ambient/river.wav"), odai::audio::SoundCategory::Ambient);
+    m_ambientWindSound = m_audio.loadSound(
+        resolveAssetPath("assets/audio/ambient/wind.wav"), odai::audio::SoundCategory::Ambient);
+    m_sfxFootstep = m_audio.loadSound(
+        resolveAssetPath("assets/audio/sfx/footstep.wav"), odai::audio::SoundCategory::Ambient);
+    m_sfxBlockBreak = m_audio.loadSound(
+        resolveAssetPath("assets/audio/sfx/block_break.wav"), odai::audio::SoundCategory::Ambient);
+
+    m_ambientTorchHandle = m_audio.startAmbientAt(
+        m_ambientTorchSound, odai::math::Vector3{8.0f, 11.0f, 8.0f},
+        odai::audio::AttenuationParams{1.0f, 12.0f, 1.0f});
+    m_ambientRiverHandle = m_audio.startAmbientAt(
+        m_ambientRiverSound, odai::math::Vector3{30.0f, 9.0f, -10.0f},
+        odai::audio::AttenuationParams{2.0f, 40.0f, 1.0f});
+    m_ambientWindHandle = m_audio.startAmbient(m_ambientWindSound, /*fadeSeconds=*/2.0f);
 
     m_streamingPipeline.start();
     refreshStreamingWindow(true);
@@ -295,7 +324,18 @@ void VoxelCraftApp::updateBlockInteraction() {
     bool edited = false;
 
     if (m_uiInput.button(odai::ui::UiMouseButton::Left).pressed) {
-        edited = tryRemoveVoxelFromCameraRay(m_world, m_player, m_breakProgress, dirtyChunkIndices) || edited;
+        // tryRemoveVoxelFromCameraRay resets m_breakProgress on success and doesn't hand the
+        // broken block's position back, so raycast once more here (cheap voxel DDA) purely to
+        // get a position for the break SFX.
+        const CameraRaycastResult raycast = raycastFromCamera(m_player, m_world);
+        const bool removed = tryRemoveVoxelFromCameraRay(m_world, m_player, m_breakProgress, dirtyChunkIndices);
+        if (removed && raycast.hitSolid) {
+            m_audio.playSoundAt(m_sfxBlockBreak, odai::math::Vector3{
+                static_cast<float>(raycast.solidX) + 0.5f,
+                static_cast<float>(raycast.solidY) + 0.5f,
+                static_cast<float>(raycast.solidZ) + 0.5f});
+        }
+        edited = removed || edited;
     }
     if (m_uiInput.button(odai::ui::UiMouseButton::Right).pressed) {
         edited = tryPlaceVoxelFromCameraRay(
@@ -316,6 +356,18 @@ void VoxelCraftApp::tickAutosave(float dt) {
     if (m_worldAutosaveElapsedSeconds >= kWorldAutosaveDelaySeconds) {
         saveWorld();
     }
+}
+
+void VoxelCraftApp::tickFootstepAudio(float dxHorizontal, float dzHorizontal) {
+    if (!m_player.onGround) {
+        return;
+    }
+    m_footstepDistanceAccumulator += std::sqrt((dxHorizontal * dxHorizontal) + (dzHorizontal * dzHorizontal));
+    if (m_footstepDistanceAccumulator < kFootstepStrideVoxels) {
+        return;
+    }
+    m_footstepDistanceAccumulator = 0.0f;
+    m_audio.playSoundAt(m_sfxFootstep, odai::math::Vector3{m_player.x, m_player.y, m_player.z});
 }
 
 void VoxelCraftApp::saveWorld() {
@@ -400,6 +452,7 @@ void VoxelCraftApp::onTick(float dt) {
         pendingMouseDeltaX = 0.0f;
         pendingMouseDeltaY = 0.0f;
         updatePlayer(m_player, m_pendingInput, m_world, static_cast<float>(kSimulationFixedStepSeconds));
+        tickFootstepAudio(m_player.x - m_playerPrevious.x, m_player.z - m_playerPrevious.z);
         m_simAccumulatorSeconds -= kSimulationFixedStepSeconds;
         ++stepCount;
     }
@@ -453,6 +506,11 @@ void VoxelCraftApp::onRender(float dt) {
     const float alpha = static_cast<float>(
         std::clamp(m_simAccumulatorSeconds / kSimulationFixedStepSeconds, 0.0, 1.0));
     const render::CameraPose camera = interpolatedCameraPose(alpha);
+
+    odai::audio::ListenerTransform listener{};
+    listener.position = odai::math::Vector3{camera.x, camera.y, camera.z};
+    listener.forward = cameraForwardVector(camera.yawDegrees, camera.pitchDegrees);
+    m_audio.setListenerTransform(listener);
 
     int fbW = 0, fbH = 0;
     framebufferSize(fbW, fbH);

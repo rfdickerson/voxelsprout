@@ -688,6 +688,7 @@ private:
     odai::audio::SoundHandle m_uiClickSfx;
     odai::audio::SoundHandle m_endTurnSfx;
     odai::audio::SoundHandle m_ambientLoop;
+    odai::audio::AmbientHandle m_ambientHandle;
     odai::audio::MusicHandle m_menuMusic;
     bool m_importedSceneDemoEnabled = false;
     bool m_importedShowTerrain = true;
