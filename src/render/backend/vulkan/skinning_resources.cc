@@ -1,7 +1,10 @@
 #include "render/backend/vulkan/renderer_backend.h"
 
+#include <GLFW/glfw3.h>
+
 #include "core/log.h"
 #include "math/math.h"
+#include "sim/network_procedural.h"
 
 #include <array>
 #include <cstddef>
