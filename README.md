@@ -196,6 +196,8 @@ pipeline, which already provides an angled camera and free-fly pan/zoom/orbit.
 
 ### Build
 
+Windows (PowerShell):
+
 ```powershell
 cmake -S . -B cmake-build-release
 cmake --build cmake-build-release --target odai_strategy_map_gen
@@ -203,10 +205,26 @@ cmake --build cmake-build-release --target odai_strategy_map_tests
 cmake --build cmake-build-release --target odai            # the runtime viewer
 ```
 
-Tools and tests also build on Linux/WSL2 with `-DODAI_BUILD_TOOLS=ON
--DBUILD_TESTING=ON` (see the tool-only build above).
+Linux/WSL2 (bash), matching CI — needs the full Vulkan build, not the
+tools-only config, to build the `odai` viewer target:
+
+```bash
+cmake -S . -B cmake-build-linux -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+  -DVCPKG_TARGET_TRIPLET=x64-linux
+cmake --build cmake-build-linux --target odai_strategy_map_gen -j
+cmake --build cmake-build-linux --target odai_strategy_map_tests -j
+cmake --build cmake-build-linux --target odai -j            # the runtime viewer
+```
+
+Tools and tests alone also build on Linux/WSL2 with `-DODAI_BUILD_TOOLS=ON
+-DBUILD_TESTING=ON` (see the tool-only build above), but that config skips
+the Vulkan-backed `odai` viewer.
 
 ### Generate and view a map
+
+Windows (PowerShell):
 
 ```powershell
 # 1. Generate a sample hex map: writes strategy_map.smap and strategy_map_scene.bin
@@ -219,6 +237,18 @@ $env:ODAI_STRATEGY_MAP = "strategy_map.smap"
 cmake-build-release\odai.exe
 ```
 
+Linux/WSL2 (bash):
+
+```bash
+# 1. Generate a sample hex map: writes strategy_map.smap and strategy_map_scene.bin
+#    Optional args: <smap> <bin> <width> <height> <seed>
+cmake-build-linux/odai_strategy_map_gen
+
+# 2. Run the viewer. The app loads strategy_map.smap from the working directory,
+#    or set ODAI_STRATEGY_MAP to an explicit path.
+ODAI_STRATEGY_MAP="strategy_map.smap" cmake-build-linux/odai
+```
+
 Camera controls reuse the imported-scene fly camera: `WASD` to pan, mouse to
 orbit/look, `Space` to rise and `Shift` to descend (altitude "zoom"), and `Ctrl`
 to move faster.
@@ -229,10 +259,20 @@ strategy-map support compiled in.
 
 ### Tests
 
+Windows (PowerShell):
+
 ```powershell
 cmake-build-release\odai_strategy_map_tests.exe
 # or via CTest:
 ctest --test-dir cmake-build-release -R odai_strategy_map_tests
+```
+
+Linux/WSL2 (bash):
+
+```bash
+cmake-build-linux/odai_strategy_map_tests
+# or via CTest:
+ctest --test-dir cmake-build-linux -R odai_strategy_map_tests
 ```
 
 Covers hex indexing/bounds, neighbor symmetry, hex geometry (corner distance and

@@ -25,7 +25,8 @@ jobs:
             build-essential cmake ninja-build pkg-config \
             git curl zip unzip tar \
             libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev \
-            mesa-vulkan-drivers vulkan-tools libvulkan1
+            mesa-vulkan-drivers vulkan-tools libvulkan1 \
+            libasound2-dev libpulse-dev
 
       - name: Install slangc
         run: |
