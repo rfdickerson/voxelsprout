@@ -26,7 +26,8 @@ jobs:
             git curl zip unzip tar \
             libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev \
             mesa-vulkan-drivers vulkan-tools libvulkan1 \
-            libasound2-dev libpulse-dev
+            libasound2-dev libpulse-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev
 
       - name: Install slangc
         run: |
