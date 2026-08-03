@@ -89,7 +89,8 @@ All are plain executables with a hand-rolled `int main()` and inline assertions 
 | `odai_lua_hook_tests`, `odai_city_script_tests` | Lua `IModHost` dispatch, citybuilder scripts |
 | `odai_imported_scene_tests` | scene import/export round-trip |
 | `odai_fnv_import_tests` | Fallout: New Vegas BSA/ESM/NIF readers (synthetic fixtures only — see README) |
-| `odai_core_types_tests` | `core/hash.h`, `core/lcg.h`, `core/ring_buffer.h`, `math/geometry.h` + math scalar helpers (golden vectors pin content-affecting hashes and RNG) |
+| `odai_core_types_tests` | `core/hash.h`, `core/lcg.h`, `core/ring_buffer.h`, `core/frame_profiler.h`, `math/geometry.h` + math scalar helpers (golden vectors pin content-affecting hashes and RNG) |
+| `odai_engine_stats_tests` | `engine/game_frame_stats.h` CPU timing zones: accumulate-then-commit, nested-zone accounting, fps derivation |
 | `odai_stability_gtests` | GTest: frame graph, render math, shadow culling, sim network |
 
 CI (`.github/workflows/ci.yml`) runs Linux only (full build including Vulkan on lavapipe, `slangc` installed, examples ON). Windows is a supported local dev target (see Build Commands above) but is not built in CI.
@@ -116,7 +117,7 @@ cmake-build-release\odai.exe
 cmake-build-release\odai_game_citybuilder.exe   # also _snake, _minesweeper, _stellaris, _swtor, _voxelcraft
 ```
 
-Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
+Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
 
 **Shaders** compile automatically when `slangc` is on PATH; if it isn't, shader targets are skipped rather than failing the configure. Outputs are `.slang.spv` next to the source. Manual compile:
 ```bash
@@ -132,7 +133,8 @@ Use `add_slang_shader_variant(..., -DODAI_RT_SHADOWS=1)` for define-based shader
 ```
 core/     — time, logging (VOX_LOGE/W/I/D/T macros), input state, job system, grid utils,
             shared containers/primitives: hash.h (spatial + coordinate hashes), lcg.h
-            (the project's one deterministic RNG), ring_buffer.h
+            (the project's one deterministic RNG), ring_buffer.h, frame_profiler.h
+            (Stopwatch/ScopedTimerMs/TimingChannel — CPU timing primitives)
 math/     — header-only vector/matrix/quaternion + noise + geometry.h (Aabb3f, Ray,
             ray-triangle/ray-AABB intersection)
 world/    — terrain, chunk grids, voxels, meshing/scheduling, clipmap, grass scatter

@@ -1536,6 +1536,19 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME odai_core_types_tests COMMAND odai_core_types_tests)
 
+    # GameApp CPU timing zones (engine/game_frame_stats.h). Header-only and
+    # Vulkan-free, so the zone bookkeeping is testable without a window.
+    add_executable(odai_engine_stats_tests
+        tests/engine_frame_stats_tests.cc
+    )
+    target_include_directories(odai_engine_stats_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_engine_stats_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_engine_stats_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_engine_stats_tests COMMAND odai_engine_stats_tests)
+
     add_executable(odai_procgen_tests
         tests/procgen_tests.cc
         src/procgen/csg.cc
