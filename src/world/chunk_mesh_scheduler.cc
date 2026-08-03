@@ -1,5 +1,7 @@
 #include "world/chunk_mesh_scheduler.h"
 
+#include "core/frame_profiler.h"
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
@@ -88,8 +90,10 @@ std::size_t ChunkMeshScheduler::kickJobs(
         }
         const Chunk* residentChunk = findResidentChunk(grid, key);
         if (residentChunk == nullptr) {
-            // Evicted while dirty: forget it rather than meshing a ghost.
+            // Evicted while dirty: forget it rather than meshing a ghost. No
+            // worker time was spent, so this is not charged as waste.
             m_entries.erase(key);
+            ++m_stats.droppedDirtyBeforeKick;
             continue;
         }
 
@@ -103,7 +107,12 @@ std::size_t ChunkMeshScheduler::kickJobs(
             ChunkMeshResult result;
             result.key = key;
             result.generation = generation;
+            // Timed on the worker and carried in the result, so drainReady can
+            // charge it to accepted or wasted without touching shared state
+            // here (m_stats stays main-thread only).
+            core::Stopwatch buildWatch;
             result.meshes = buildChunkLodMeshes(snapshot, options, &result.stats);
+            result.buildMs = buildWatch.elapsedMs();
             {
                 std::lock_guard<std::mutex> lock(m_readyMutex);
                 m_readyQueue.push_back(std::move(result));
@@ -111,6 +120,7 @@ std::size_t ChunkMeshScheduler::kickJobs(
         });
         ++launchedJobCount;
     }
+    m_stats.jobsLaunched += launchedJobCount;
     return launchedJobCount;
 }
 
@@ -129,18 +139,27 @@ std::vector<ChunkMeshResult> ChunkMeshScheduler::drainReady(const ChunkGrid& gri
     for (ChunkMeshResult& result : completed) {
         const auto entryIt = m_entries.find(result.key);
         if (entryIt == m_entries.end()) {
+            ++m_stats.discardedUntracked;
+            m_stats.meshMsWasted += result.buildMs;
             continue;
         }
         if (entryIt->second.generation != result.generation) {
             // Edited (or options changed) while meshing: markDirty already set
             // the state back to Dirty, so the chunk is re-kicked next frame.
+            // The work just done is thrown away -- charge it as waste.
+            ++m_stats.discardedStale;
+            m_stats.meshMsWasted += result.buildMs;
             continue;
         }
         if (findResidentChunk(grid, result.key) == nullptr) {
             m_entries.erase(entryIt);
+            ++m_stats.discardedEvicted;
+            m_stats.meshMsWasted += result.buildMs;
             continue;
         }
         entryIt->second.state = ChunkMeshState::Clean;
+        ++m_stats.resultsAccepted;
+        m_stats.meshMsAccepted += result.buildMs;
         current.push_back(std::move(result));
     }
     return current;

@@ -155,6 +155,71 @@ void testEvictedChunkDropped() {
     expectTrue(scheduler.dirtyCount() == 0, "evicted dirty chunk is forgotten");
 }
 
+// The scheduler can finish a mesh and then throw it away. These counters are
+// the only way that shows up as anything other than "the frame looks busy".
+void testWastedWorkAccounting() {
+    odai::core::JobSystem jobs(0);
+    odai::world::ChunkMeshScheduler scheduler(jobs, odai::world::MeshingOptions{});
+
+    odai::world::ChunkGrid grid = makeGrid({makeSlabChunk(0, 0, 0, 7)});
+    const odai::world::ChunkMeshKey key = keyFor(grid.chunks()[0]);
+
+    expectTrue(scheduler.stats().jobsLaunched == 0u, "a fresh scheduler has launched nothing");
+    expectTrue(scheduler.stats().wastedFraction() == 0.0f, "no work means no wasted fraction");
+
+    // A clean accept: launched, delivered, charged to accepted.
+    scheduler.markDirty(key);
+    scheduler.kickJobs(grid, 0, 0, 8);
+    expectTrue(scheduler.stats().jobsLaunched == 1u, "kickJobs counts the launch");
+    expectTrue(scheduler.drainReady(grid).size() == 1u, "the result is delivered");
+    expectTrue(scheduler.stats().resultsAccepted == 1u, "an accepted result is counted");
+    expectTrue(scheduler.stats().discardedTotal() == 0u, "nothing was discarded yet");
+
+    // Edit-during-mesh: the finished mesh is thrown away and charged as waste.
+    scheduler.markDirty(key);
+    scheduler.kickJobs(grid, 0, 0, 8);
+    scheduler.markDirty(key);
+    expectTrue(scheduler.drainReady(grid).empty(), "the stale result is discarded");
+    expectTrue(scheduler.stats().discardedStale == 1u, "a stale discard is attributed to staleness");
+    expectTrue(scheduler.stats().discardedTotal() == 1u, "exactly one discard so far");
+    expectTrue(scheduler.stats().resultsAccepted == 1u, "a discard is not counted as accepted");
+
+    // Timings are wall-clock, so assert the accounting relationship rather than
+    // any particular duration: every completed job lands in exactly one bucket.
+    const auto& s = scheduler.stats();
+    expectTrue(s.meshMsAccepted >= 0.0f && s.meshMsWasted >= 0.0f, "mesh timings are non-negative");
+    expectTrue(s.wastedFraction() >= 0.0f && s.wastedFraction() <= 1.0f, "wasted fraction is a ratio");
+
+    scheduler.resetStats();
+    expectTrue(scheduler.stats().jobsLaunched == 0u, "resetStats clears the counters");
+    expectTrue(scheduler.stats().discardedTotal() == 0u, "resetStats clears the discards");
+}
+
+// Eviction has two shapes and they must not be conflated: one burned worker
+// time, the other never launched a job at all.
+void testEvictionWasteIsSeparatedFromDroppedDirty() {
+    odai::core::JobSystem jobs(0);
+    odai::world::ChunkMeshScheduler scheduler(jobs, odai::world::MeshingOptions{});
+
+    odai::world::ChunkGrid grid = makeGrid({makeSlabChunk(0, 0, 0, 7), makeSlabChunk(1, 0, 0, 9)});
+    scheduler.markDirty(keyFor(grid.chunks()[0]));
+    scheduler.markDirty(keyFor(grid.chunks()[1]));
+    scheduler.kickJobs(grid, 0, 0, 8);
+
+    // (1,0,0) meshed, then streamed out before the drain: worker time burned.
+    odai::world::ChunkGrid shrunkGrid = makeGrid({makeSlabChunk(0, 0, 0, 7)});
+    expectTrue(scheduler.drainReady(shrunkGrid).size() == 1u, "the resident result survives");
+    expectTrue(scheduler.stats().discardedEvicted == 1u, "an evicted in-flight mesh is charged as waste");
+    expectTrue(scheduler.stats().droppedDirtyBeforeKick == 0u, "nothing was dropped before a kick yet");
+
+    // A chunk that streams out while still Dirty never reaches a worker, so it
+    // must not inflate the waste numbers.
+    scheduler.markDirty(odai::world::ChunkMeshKey{5, 0, 5});
+    expectTrue(scheduler.kickJobs(shrunkGrid, 0, 0, 8) == 0, "evicted dirty chunk launches no job");
+    expectTrue(scheduler.stats().droppedDirtyBeforeKick == 1u, "dropped-before-kick is counted separately");
+    expectTrue(scheduler.stats().discardedEvicted == 1u, "dropping before a kick adds no eviction waste");
+}
+
 void testNearestFirstKickOrderAndBudget() {
     odai::core::JobSystem jobs(0);
     odai::world::ChunkMeshScheduler scheduler(jobs, odai::world::MeshingOptions{});
@@ -247,6 +312,8 @@ int main() {
     testStaleGenerationDiscarded();
     testMeshingOptionsChangeInvalidatesInFlight();
     testEvictedChunkDropped();
+    testWastedWorkAccounting();
+    testEvictionWasteIsSeparatedFromDroppedDirty();
     testNearestFirstKickOrderAndBudget();
     testGrassDeterminism();
     testThreadedStress();

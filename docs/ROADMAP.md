@@ -257,7 +257,9 @@ This is the strongest area of the codebase relative to the wishlist — see `doc
 | Chunk streaming, FrameArena transient memory | ✅ | `world/world.h`, `docs/FrameArena.md` |
 | Configurable quality presets, headless sim mode | ⬜ | Not confirmed |
 | Optimized build configuration | ✅ | `RelWithDebInfo`/`Release` presets, opt-in `ODAI_ENABLE_LTO` and `ODAI_ENABLE_NATIVE_ARCH`, and a non-optimized default no longer possible by accident (`CMakeLists.txt`) — measured 8x on worldgen and meshing vs Debug, see `CLAUDE.md` |
-| Perf regression gate in CI | ⬜ | CI still builds Debug only and times nothing; `odai_civ_sim`/`odai_stellaris_sim` `--sweep` measure balance, not wall clock |
+| Headless CPU benchmark | ✅ | `--sweep N` on `odai_civ_sim`/`odai_stellaris_sim` reports turns/sec and per-match p95 alongside the balance metrics (`src/tools/sim_bench.h`); deterministic across build types |
+| Meshing wasted-work visibility | ✅ | `ChunkMeshScheduler::stats()` counts meshes built then discarded (edited or evicted mid-flight) and the worker ms they burned — a high `wastedFraction()` means fix scheduling policy, not the mesher |
+| Perf regression gate in CI | ⬜ | CI still builds Debug only and asserts nothing; the benchmark above is the missing input, but shared runners are noisy — record and trend before gating |
 
 ### Platform Support
 

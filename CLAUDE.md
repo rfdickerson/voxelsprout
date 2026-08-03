@@ -130,14 +130,16 @@ CI (`.github/workflows/ci.yml`) runs Linux only (full build including Vulkan on 
 
 ```powershell
 odai_strategy_map_gen [smap] [bin] [w] [h] [seed]   # writes strategy_map.smap + strategy_map_scene.bin
-odai_civ_sim        [turns] [seed] [empires] [--quiet|--sweep N]   # headless 4X playtest metrics
-odai_stellaris_sim  [turns] [seed] [empires] [--quiet|--sweep N]   # headless space-4X playtest metrics
+odai_civ_sim        [turns] [seed] [empires] [--quiet|--sweep N]   # headless 4X playtest metrics + CPU benchmark
+odai_stellaris_sim  [turns] [seed] [empires] [--quiet|--sweep N]   # headless space-4X playtest metrics + CPU benchmark
 odai_dds_bundler    <file.png>... | --dir <dir>     # offline PNG -> BC3 .dds sidecars
 odai_svg_bundler    <file.svg>... | --dir <dir> [--sizes 16,32,64]  # SVG -> .odaivec cache
 odai_theme_viewer                                   # terminal theme-token dump with hot reload
 odai_newvegas_cooker <DataFiles> <Plugin.esm> <out.bin> --cell <EditorID>
 odai_newvegas_cooker <DataFiles> <Plugin.esm> <out.bin> --worldspace <EditorID> <x0> <z0> <x1> <z1>
 ```
+
+**`--sweep N` is the CPU regression harness.** Both sim tools replay N deterministic seeded matches headlessly and now report wall clock alongside the balance metrics — mean/median/p95 per match, µs per turn, and turns/sec (`src/tools/sim_bench.h`). Balance output is unchanged and stays bit-identical across build types, so one command answers both "did the game get less fun" and "did the turn loop get slower". Measured with `--sweep 8`: **28203 turns/sec** at `-O3 -DNDEBUG` vs **4879** at `-O0` (5.8x) — the report prints a warning when `NDEBUG` is absent for exactly that reason.
 
 **Stale README warning:** `README.md` still documents a Morrowind `odai_balmora_cooker` plus ESM/LAND/LTEX extraction. **Neither the target nor any Morrowind import code exists in the tree** — `src/import/` holds only the shared `ImportedScene`/DDS/GPU-scene code plus `import/fnv/`. Trust the source and this file over that part of the README.
 
@@ -169,6 +171,8 @@ core/     — time, logging (VOX_LOGE/W/I/D/T macros), input state, job system, 
 math/     — header-only vector/matrix/quaternion + noise + geometry.h (Aabb3f, Ray,
             ray-triangle/ray-AABB intersection)
 world/    — terrain, chunk grids, voxels, meshing/scheduling, clipmap, grass scatter
+            (ChunkMeshScheduler::stats() reports wasted-work counters: meshes built
+             then discarded because the chunk was edited or evicted mid-flight)
 import/   — ImportedScene (de)serialization, DDS, GPU scene upload + import/fnv/ (Fallout: NV BSA/ESM/NIF)
 game/     — Civ-style 4X model: hex strategy map, economy, advisors, religion, great people, units, AI
 sim/      — header-only factory simulation (pipes, belts, tracks, network graph)

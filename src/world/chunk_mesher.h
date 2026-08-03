@@ -108,6 +108,10 @@ struct ChunkMeshResult {
     std::uint64_t generation = 0;
     ChunkLodMeshes meshes;
     ChunkMeshingStats stats{};
+    // Wall-clock the worker spent building this mesh. Set by the scheduler, not
+    // by buildChunkLodMeshes. Exists so a result the scheduler later throws away
+    // can be charged as wasted worker time rather than vanishing silently.
+    float buildMs = 0.0f;
 };
 
 ChunkLodMeshes buildChunkLodMeshes(const Chunk& chunk, MeshingOptions options, ChunkMeshingStats* outStats);

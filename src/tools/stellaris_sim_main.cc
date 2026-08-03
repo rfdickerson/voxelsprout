@@ -12,6 +12,7 @@
 //   cmake-build-release\Debug\odai_stellaris_sim.exe 200 42 4 --sweep 20
 
 #include "core/lcg.h"
+#include "tools/sim_bench.h"
 #include "ui/font.h"
 #include "ui/kits/strategy_4x_kit.h"
 #include "ui/resource_style.h"
@@ -657,11 +658,19 @@ int main(int argc, char** argv) {
                   << " turns x " << empires << " empires ====\n";
         std::vector<MatchSummary> all;
         std::map<std::string, int> wins;
+        odai::tools::SimBench bench;
         for (int s = 0; s < sweep; ++s) {
+            odai::core::Stopwatch watch;
             Galaxy g = makeGalaxy(seed + static_cast<std::uint32_t>(s) * 2654435761u, empires, 40);
+            bench.addWorldgenMs(watch.lapMs());
+
             std::vector<Sample> samples;
             samples.reserve(static_cast<std::size_t>(turns));
             for (int t = 0; t < turns; ++t) stepGalaxy(g, samples);
+            // Timed before analyze(): the balance pass is harness work, not
+            // simulation, and folding it in would flatter the turn throughput.
+            bench.addMatchMs(watch.lapMs());
+
             MatchSummary m = analyze(g, samples);
             all.push_back(m);
             ++wins[m.winnerName];
@@ -685,6 +694,7 @@ int main(int argc, char** argv) {
         std::cout << "wins by empire      :";
         for (const auto& kv : wins) std::cout << "  " << kv.first << "=" << kv.second;
         std::cout << "\n";
+        bench.report(std::cout, turns);
         return 0;
     }
 

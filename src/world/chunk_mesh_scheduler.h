@@ -32,6 +32,42 @@ enum class ChunkMeshState : std::uint8_t {
     Meshing = 2
 };
 
+// Throughput and wasted-work counters, cumulative since construction or the
+// last resetStats().
+//
+// The scheduler can finish meshing a chunk and then throw the result away: the
+// chunk was edited mid-mesh (generation bumped), or it left the resident window
+// before the worker finished. That is real worker time spent on output nobody
+// ever sees, and without these counters it is invisible -- the frame just looks
+// busy. A high wastedFraction() means the fix is scheduling policy (kick fewer
+// jobs, kick them later, coalesce edits), not a faster mesher.
+struct ChunkMeshSchedulerStats {
+    std::uint64_t jobsLaunched = 0;
+    std::uint64_t resultsAccepted = 0;
+    // Edited, or meshing options changed, while the mesh was in flight.
+    std::uint64_t discardedStale = 0;
+    // Chunk left the resident window while the mesh was in flight.
+    std::uint64_t discardedEvicted = 0;
+    // Entry disappeared entirely before the result came back.
+    std::uint64_t discardedUntracked = 0;
+    // Evicted while still Dirty: dropped before a job was ever launched, so it
+    // cost no worker time. Tracked separately for exactly that reason.
+    std::uint64_t droppedDirtyBeforeKick = 0;
+
+    float meshMsAccepted = 0.0f;
+    float meshMsWasted = 0.0f;
+
+    [[nodiscard]] std::uint64_t discardedTotal() const {
+        return discardedStale + discardedEvicted + discardedUntracked;
+    }
+
+    // Share of completed worker time that produced nothing usable, in [0, 1].
+    [[nodiscard]] float wastedFraction() const {
+        const float total = meshMsAccepted + meshMsWasted;
+        return total > 0.0f ? (meshMsWasted / total) : 0.0f;
+    }
+};
+
 class ChunkMeshScheduler {
 public:
     ChunkMeshScheduler(core::JobSystem& jobs, MeshingOptions options);
@@ -62,6 +98,11 @@ public:
     [[nodiscard]] std::size_t dirtyCount() const;
     [[nodiscard]] std::size_t meshingCount() const;
 
+    // Main thread only, like the rest of the class: every counter is updated in
+    // kickJobs()/drainReady(), never on a worker.
+    [[nodiscard]] const ChunkMeshSchedulerStats& stats() const { return m_stats; }
+    void resetStats() { m_stats = ChunkMeshSchedulerStats{}; }
+
 private:
     struct Entry {
         ChunkMeshState state = ChunkMeshState::Clean;
@@ -70,6 +111,7 @@ private:
 
     core::JobSystem& m_jobs;
     MeshingOptions m_options;
+    ChunkMeshSchedulerStats m_stats{};
     // Main-thread only.
     std::unordered_map<ChunkMeshKey, Entry, ChunkMeshKeyHash> m_entries;
     // Worker -> main-thread handoff.
