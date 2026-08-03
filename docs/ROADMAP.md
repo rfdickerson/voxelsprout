@@ -256,6 +256,8 @@ This is the strongest area of the codebase relative to the wishlist — see `doc
 | Reverse-depth, GPU timestamp measurement, explicit barriers | ✅ | Matches this project's performance-first conventions directly (see the `performance-engineer` agent's performance contract) |
 | Chunk streaming, FrameArena transient memory | ✅ | `world/world.h`, `docs/FrameArena.md` |
 | Configurable quality presets, headless sim mode | ⬜ | Not confirmed |
+| Optimized build configuration | ✅ | `RelWithDebInfo`/`Release` presets, opt-in `ODAI_ENABLE_LTO` and `ODAI_ENABLE_NATIVE_ARCH`, and a non-optimized default no longer possible by accident (`CMakeLists.txt`) — measured 8x on worldgen and meshing vs Debug, see `CLAUDE.md` |
+| Perf regression gate in CI | ⬜ | CI still builds Debug only and times nothing; `odai_civ_sim`/`odai_stellaris_sim` `--sweep` measure balance, not wall clock |
 
 ### Platform Support
 

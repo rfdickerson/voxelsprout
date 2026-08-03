@@ -52,7 +52,38 @@ cmake -S . -B cmake-build-linux \
 cmake --build cmake-build-linux -j 4
 ```
 
-CMake options: `ODAI_BUILD_APP` (ON), `ODAI_BUILD_TOOLS` (ON), `ODAI_BUILD_EXAMPLES` (OFF), `ODAI_RENDER_BACKEND` (`VULKAN`; `DX12`/`METAL` are declared but unimplemented). `CMakePresets.json` provides `default` and `vcpkg` Ninja presets. Every app/game/demo target sits behind `if(ODAI_BUILD_APP)` *and* the `VULKAN` backend guard.
+CMake options: `ODAI_BUILD_APP` (ON), `ODAI_BUILD_TOOLS` (ON), `ODAI_BUILD_EXAMPLES` (OFF), `ODAI_RENDER_BACKEND` (`VULKAN`; `DX12`/`METAL` are declared but unimplemented). Every app/game/demo target sits behind `if(ODAI_BUILD_APP)` *and* the `VULKAN` backend guard.
+
+### Optimized builds — required before believing any perf number
+
+**Never profile a Debug build.** Measured on this tree (64 procedural chunks, gcc 13, best of 3):
+
+| | worldgen | chunk meshing |
+|---|---|---|
+| `Debug` (`-O0 -g`) | 16255 ms | 617 ms |
+| `RelWithDebInfo` (`-O2 -g`) | 6551 ms | 85 ms |
+| `Release` (`-O3`) | 2041 ms | 75 ms |
+
+That's **8x** on worldgen and **8x** on meshing between Debug and Release — a Debug measurement is not a measurement. Note worldgen is a further 3.2x from `-O2` to `-O3` (the noise loops vectorize), so use `Release` when the number is the point and `RelWithDebInfo` when you also need readable stacks.
+
+Presets (`CMakePresets.json`) — the three original presets are Debug and unchanged:
+
+| Preset | Build type |
+|---|---|
+| `default`, `vcpkg`, `linux-vcpkg` | `Debug` |
+| `vcpkg-relwithdebinfo`, `linux-vcpkg-relwithdebinfo` | `RelWithDebInfo` — **use this to profile** |
+| `vcpkg-release`, `linux-vcpkg-release` | `Release` |
+
+```bash
+cmake --preset linux-vcpkg-relwithdebinfo && cmake --build --preset linux-vcpkg-relwithdebinfo
+```
+
+Optimization level comes from `CMAKE_BUILD_TYPE` — no `-O` flags are hardcoded. Two opt-in switches a plain build type does not turn on:
+
+- **`ODAI_ENABLE_LTO`** (OFF) — interprocedural optimization for optimized configs only; costs link time. Falls back with a warning if the toolchain can't do it.
+- **`ODAI_ENABLE_NATIVE_ARCH`** (OFF) — `-march=native` / `/arch:AVX2`. **Local profiling only.** Wider SIMD and FMA contraction change floating-point results, and this project pins content-affecting hashes and RNG with golden vectors because worldgen output must reproduce; the binary may also fault outright on an older CPU. `-ffast-math` is never enabled anywhere, deliberately.
+
+If `CMAKE_BUILD_TYPE` is unset on a single-config generator it now defaults to `RelWithDebInfo` (an empty build type means no `-O` *and* no `-g`). Passing a build type explicitly always wins — the Debug presets above are unaffected.
 
 **Build a single target:**
 ```powershell

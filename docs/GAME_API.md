@@ -264,6 +264,11 @@ no per-game code. Zones are defined in `src/engine/game_frame_stats.h`:
 | `  submit` | `Renderer::renderFrame` — **nested inside `render`** |
 | `FRAME` | the whole loop iteration |
 
+> **Build optimized before reading any of this.** A Debug build is ~8x slower on
+> real work in this tree, so its numbers describe the compiler, not your code.
+> Use the `vcpkg-relwithdebinfo` / `linux-vcpkg-relwithdebinfo` preset — see
+> "Optimized builds" in `CLAUDE.md`.
+
 **Overlay:** press **F3** in any game, or set `ODAI_PERF_OVERLAY=1` to start with it up.
 It shows last/avg/p99 per zone, a proportional bar, an `other` row for unattributed time,
 and the renderer's own CPU wait buckets so a CPU spike can be told apart from a frame
