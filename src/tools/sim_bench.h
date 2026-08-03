@@ -3,6 +3,7 @@
 #include "core/frame_profiler.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <iomanip>
 #include <ostream>
@@ -38,7 +39,12 @@ public:
         const double worldgenTotal = sum(m_worldgenMs);
         const double matches = static_cast<double>(m_matchMs.size());
         const double totalTurns = matches * static_cast<double>(turnsPerMatch);
-        const double wallSeconds = (matchTotal + worldgenTotal) / 1000.0;
+        // Throughput deliberately excludes worldgen -- turns/sec should describe
+        // the turn loop, not world construction. Both the rate and the duration
+        // printed beside it use this same figure so the reader can divide one by
+        // the other and land back on the other; worldgen is reported on its own
+        // line instead of being folded in silently.
+        const double matchSeconds = matchTotal / 1000.0;
 
         const std::ios_base::fmtflags saved = out.flags();
         const std::streamsize savedPrecision = out.precision();
@@ -49,22 +55,25 @@ public:
         // absence means Debug. Measured on this harness: ~5.8x slower.
         out << "  WARNING: built without NDEBUG (assertions live) -- for a CMake build\n"
                "           that means Debug, and these numbers measure the compiler more\n"
-               "           than the simulation. Rebuild with the vcpkg-release preset.\n";
+               "           than the simulation. Rebuild with an optimized preset\n"
+               "           (linux-vcpkg-release on Linux, vcpkg-release otherwise).\n";
 #endif
         out << std::fixed << std::setprecision(2);
         if (!m_worldgenMs.empty()) {
             out << "  worldgen   : mean " << (worldgenTotal / static_cast<double>(m_worldgenMs.size()))
-                << " ms\n";
+                << " ms   total " << std::setprecision(3) << (worldgenTotal / 1000.0)
+                << " s (excluded from throughput)\n"
+                << std::setprecision(2);
         }
         out << "  match      : mean " << (matchTotal / matches)
             << " ms   median " << percentile(m_matchMs, 0.50f)
             << "   p95 " << percentile(m_matchMs, 0.95f)
             << "   max " << percentile(m_matchMs, 1.0f) << "\n";
         out << "  turn       : mean " << ((matchTotal * 1000.0) / totalTurns) << " us\n";
-        out << "  throughput : " << std::setprecision(0) << (totalTurns / (matchTotal / 1000.0))
+        out << "  throughput : " << std::setprecision(0) << (totalTurns / matchSeconds)
             << " turns/sec   (" << m_matchMs.size() << " matches x " << turnsPerMatch
             // Three decimals so a fast sweep reads "0.002 s" instead of "0.00 s".
-            << " turns in " << std::setprecision(3) << wallSeconds << " s)\n";
+            << " turns in " << std::setprecision(3) << matchSeconds << " s)\n";
 
         out.flags(saved);
         out.precision(savedPrecision);
