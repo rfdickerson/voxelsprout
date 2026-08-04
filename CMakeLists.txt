@@ -10,6 +10,76 @@ option(ODAI_BUILD_APP "Build the main Vulkan toy application." ON)
 option(ODAI_BUILD_TOOLS "Build offline content tools." ON)
 option(ODAI_BUILD_EXAMPLES "Build standalone odai_ui SDK integration samples." OFF)
 
+# ---------------------------------------------------------------------------
+# Optimized builds
+#
+# Optimization level itself comes from CMAKE_BUILD_TYPE -- this project does not
+# hardcode -O flags, so `Release` and `RelWithDebInfo` behave the way every
+# other CMake project does. What lives here is (a) refusing to silently produce
+# an unoptimized *and* undebuggable binary when no build type is given, and
+# (b) two opt-in switches that a plain build type does not turn on.
+#
+# Use RelWithDebInfo for profiling: optimized code with symbols, so the F3
+# overlay (engine/game_frame_stats.h) and GPU timestamps report numbers that
+# mean something while stacks are still readable. A Debug measurement is not a
+# measurement -- docs/devlog.md records Debug-vs-Release worth ~7s -> <1s on
+# world decode alone.
+# ---------------------------------------------------------------------------
+get_property(ODAI_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT ODAI_IS_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
+    # An empty CMAKE_BUILD_TYPE means no -O and no -g: the worst of both. Pick
+    # the profiling-friendly default rather than leaving it unset.
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
+        "Build type: Debug, Release, RelWithDebInfo, or MinSizeRel." FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+        Debug Release RelWithDebInfo MinSizeRel)
+    message(STATUS "odai: CMAKE_BUILD_TYPE was unset, defaulting to RelWithDebInfo")
+endif()
+
+option(ODAI_ENABLE_LTO
+    "Link-time / interprocedural optimization in optimized build types. Slower links." OFF)
+option(ODAI_ENABLE_NATIVE_ARCH
+    "Tune codegen for THIS machine's CPU (-march=native / /arch:AVX2). Non-portable." OFF)
+
+if(ODAI_ENABLE_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT ODAI_IPO_SUPPORTED OUTPUT ODAI_IPO_ERROR LANGUAGES CXX)
+    if(ODAI_IPO_SUPPORTED)
+        # Per-config rather than the blanket CMAKE_INTERPROCEDURAL_OPTIMIZATION:
+        # LTO in a Debug build costs link time and buys nothing.
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ON)
+        message(STATUS "odai: LTO enabled for optimized build types")
+    else()
+        message(WARNING "odai: ODAI_ENABLE_LTO requested but unsupported: ${ODAI_IPO_ERROR}")
+    endif()
+endif()
+
+if(ODAI_ENABLE_NATIVE_ARCH)
+    # Deliberately NOT default-on, and deliberately no -ffast-math anywhere:
+    # wider SIMD and FMA contraction change floating-point results, and this
+    # project pins content-affecting hashes and RNG with golden vectors
+    # (tests/core_types_tests.cc) because worldgen output has to reproduce.
+    # Binaries built this way may also crash outright on an older CPU. Turn it
+    # on for a local profiling run, not for anything you ship or share.
+    include(CheckCXXCompilerFlag)
+    if(MSVC)
+        set(ODAI_NATIVE_ARCH_FLAG "/arch:AVX2")
+    else()
+        set(ODAI_NATIVE_ARCH_FLAG "-march=native")
+    endif()
+    check_cxx_compiler_flag("${ODAI_NATIVE_ARCH_FLAG}" ODAI_NATIVE_ARCH_FLAG_OK)
+    if(ODAI_NATIVE_ARCH_FLAG_OK)
+        add_compile_options(
+            "$<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:${ODAI_NATIVE_ARCH_FLAG}>")
+        message(STATUS "odai: native-arch codegen enabled (${ODAI_NATIVE_ARCH_FLAG}) "
+                       "-- non-portable binary, float results may shift")
+    else()
+        message(WARNING "odai: ${ODAI_NATIVE_ARCH_FLAG} rejected by the compiler; ignoring")
+    endif()
+endif()
+
 # stb (stb_truetype.h, stb_rect_pack.h) for the UI font rasterizer. Provided by
 # the vcpkg `stb` port in normal builds; ODAI_STB_INCLUDE_DIR overrides it for
 # headless checks without vcpkg.
@@ -1535,6 +1605,19 @@ if(BUILD_TESTING)
         target_compile_options(odai_core_types_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_core_types_tests COMMAND odai_core_types_tests)
+
+    # GameApp CPU timing zones (engine/game_frame_stats.h). Header-only and
+    # Vulkan-free, so the zone bookkeeping is testable without a window.
+    add_executable(odai_engine_stats_tests
+        tests/engine_frame_stats_tests.cc
+    )
+    target_include_directories(odai_engine_stats_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_engine_stats_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_engine_stats_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_engine_stats_tests COMMAND odai_engine_stats_tests)
 
     add_executable(odai_procgen_tests
         tests/procgen_tests.cc

@@ -52,7 +52,38 @@ cmake -S . -B cmake-build-linux \
 cmake --build cmake-build-linux -j 4
 ```
 
-CMake options: `ODAI_BUILD_APP` (ON), `ODAI_BUILD_TOOLS` (ON), `ODAI_BUILD_EXAMPLES` (OFF), `ODAI_RENDER_BACKEND` (`VULKAN`; `DX12`/`METAL` are declared but unimplemented). `CMakePresets.json` provides `default` and `vcpkg` Ninja presets. Every app/game/demo target sits behind `if(ODAI_BUILD_APP)` *and* the `VULKAN` backend guard.
+CMake options: `ODAI_BUILD_APP` (ON), `ODAI_BUILD_TOOLS` (ON), `ODAI_BUILD_EXAMPLES` (OFF), `ODAI_RENDER_BACKEND` (`VULKAN`; `DX12`/`METAL` are declared but unimplemented). Every app/game/demo target sits behind `if(ODAI_BUILD_APP)` *and* the `VULKAN` backend guard.
+
+### Optimized builds — required before believing any perf number
+
+**Never profile a Debug build.** Measured on this tree (64 procedural chunks, gcc 13, best of 3):
+
+| | worldgen | chunk meshing |
+|---|---|---|
+| `Debug` (`-O0 -g`) | 16255 ms | 617 ms |
+| `RelWithDebInfo` (`-O2 -g`) | 6551 ms | 85 ms |
+| `Release` (`-O3`) | 2041 ms | 75 ms |
+
+That's **8x** on worldgen and **8x** on meshing between Debug and Release — a Debug measurement is not a measurement. Note worldgen is a further 3.2x from `-O2` to `-O3` (the noise loops vectorize), so use `Release` when the number is the point and `RelWithDebInfo` when you also need readable stacks.
+
+Presets (`CMakePresets.json`) — the three original presets are Debug and unchanged:
+
+| Preset | Build type |
+|---|---|
+| `default`, `vcpkg`, `linux-vcpkg` | `Debug` |
+| `vcpkg-relwithdebinfo`, `linux-vcpkg-relwithdebinfo` | `RelWithDebInfo` — **use this to profile** |
+| `vcpkg-release`, `linux-vcpkg-release` | `Release` |
+
+```bash
+cmake --preset linux-vcpkg-relwithdebinfo && cmake --build --preset linux-vcpkg-relwithdebinfo
+```
+
+Optimization level comes from `CMAKE_BUILD_TYPE` — no `-O` flags are hardcoded. Two opt-in switches a plain build type does not turn on:
+
+- **`ODAI_ENABLE_LTO`** (OFF) — interprocedural optimization for optimized configs only; costs link time. Falls back with a warning if the toolchain can't do it.
+- **`ODAI_ENABLE_NATIVE_ARCH`** (OFF) — `-march=native` / `/arch:AVX2`. **Local profiling only.** Wider SIMD and FMA contraction change floating-point results, and this project pins content-affecting hashes and RNG with golden vectors because worldgen output must reproduce; the binary may also fault outright on an older CPU. `-ffast-math` is never enabled anywhere, deliberately.
+
+If `CMAKE_BUILD_TYPE` is unset on a single-config generator it now defaults to `RelWithDebInfo` (an empty build type means no `-O` *and* no `-g`). Passing a build type explicitly always wins — the Debug presets above are unaffected.
 
 **Build a single target:**
 ```powershell
@@ -89,7 +120,8 @@ All are plain executables with a hand-rolled `int main()` and inline assertions 
 | `odai_lua_hook_tests`, `odai_city_script_tests` | Lua `IModHost` dispatch, citybuilder scripts |
 | `odai_imported_scene_tests` | scene import/export round-trip |
 | `odai_fnv_import_tests` | Fallout: New Vegas BSA/ESM/NIF readers (synthetic fixtures only — see README) |
-| `odai_core_types_tests` | `core/hash.h`, `core/lcg.h`, `core/ring_buffer.h`, `math/geometry.h` + math scalar helpers (golden vectors pin content-affecting hashes and RNG) |
+| `odai_core_types_tests` | `core/hash.h`, `core/lcg.h`, `core/ring_buffer.h`, `core/frame_profiler.h`, `math/geometry.h` + math scalar helpers (golden vectors pin content-affecting hashes and RNG) |
+| `odai_engine_stats_tests` | `engine/game_frame_stats.h` CPU timing zones: accumulate-then-commit, nested-zone accounting, fps derivation |
 | `odai_stability_gtests` | GTest: frame graph, render math, shadow culling, sim network |
 
 CI (`.github/workflows/ci.yml`) runs Linux only (full build including Vulkan on lavapipe, `slangc` installed, examples ON). Windows is a supported local dev target (see Build Commands above) but is not built in CI.
@@ -98,14 +130,16 @@ CI (`.github/workflows/ci.yml`) runs Linux only (full build including Vulkan on 
 
 ```powershell
 odai_strategy_map_gen [smap] [bin] [w] [h] [seed]   # writes strategy_map.smap + strategy_map_scene.bin
-odai_civ_sim        [turns] [seed] [empires] [--quiet|--sweep N]   # headless 4X playtest metrics
-odai_stellaris_sim  [turns] [seed] [empires] [--quiet|--sweep N]   # headless space-4X playtest metrics
+odai_civ_sim        [turns] [seed] [empires] [--quiet|--sweep N]   # headless 4X playtest metrics + CPU benchmark
+odai_stellaris_sim  [turns] [seed] [empires] [--quiet|--sweep N]   # headless space-4X playtest metrics + CPU benchmark
 odai_dds_bundler    <file.png>... | --dir <dir>     # offline PNG -> BC3 .dds sidecars
 odai_svg_bundler    <file.svg>... | --dir <dir> [--sizes 16,32,64]  # SVG -> .odaivec cache
 odai_theme_viewer                                   # terminal theme-token dump with hot reload
 odai_newvegas_cooker <DataFiles> <Plugin.esm> <out.bin> --cell <EditorID>
 odai_newvegas_cooker <DataFiles> <Plugin.esm> <out.bin> --worldspace <EditorID> <x0> <z0> <x1> <z1>
 ```
+
+**`--sweep N` is the CPU regression harness.** Both sim tools replay N deterministic seeded matches headlessly and now report wall clock alongside the balance metrics — mean/median/p95 per match, µs per turn, and turns/sec (`src/tools/sim_bench.h`). Balance output is unchanged and stays bit-identical across build types, so one command answers both "did the game get less fun" and "did the turn loop get slower". Measured with `--sweep 8`: **28203 turns/sec** at `-O3 -DNDEBUG` vs **4879** at `-O0` (5.8x) — the report prints a warning when `NDEBUG` is absent for exactly that reason.
 
 **Stale README warning:** `README.md` still documents a Morrowind `odai_balmora_cooker` plus ESM/LAND/LTEX extraction. **Neither the target nor any Morrowind import code exists in the tree** — `src/import/` holds only the shared `ImportedScene`/DDS/GPU-scene code plus `import/fnv/`. Trust the source and this file over that part of the README.
 
@@ -116,7 +150,7 @@ cmake-build-release\odai.exe
 cmake-build-release\odai_game_citybuilder.exe   # also _snake, _minesweeper, _stellaris, _swtor, _voxelcraft
 ```
 
-Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
+Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
 
 **Shaders** compile automatically when `slangc` is on PATH; if it isn't, shader targets are skipped rather than failing the configure. Outputs are `.slang.spv` next to the source. Manual compile:
 ```bash
@@ -132,10 +166,13 @@ Use `add_slang_shader_variant(..., -DODAI_RT_SHADOWS=1)` for define-based shader
 ```
 core/     — time, logging (VOX_LOGE/W/I/D/T macros), input state, job system, grid utils,
             shared containers/primitives: hash.h (spatial + coordinate hashes), lcg.h
-            (the project's one deterministic RNG), ring_buffer.h
+            (the project's one deterministic RNG), ring_buffer.h, frame_profiler.h
+            (Stopwatch/ScopedTimerMs/TimingChannel — CPU timing primitives)
 math/     — header-only vector/matrix/quaternion + noise + geometry.h (Aabb3f, Ray,
             ray-triangle/ray-AABB intersection)
 world/    — terrain, chunk grids, voxels, meshing/scheduling, clipmap, grass scatter
+            (ChunkMeshScheduler::stats() reports wasted-work counters: meshes built
+             then discarded because the chunk was edited or evicted mid-flight)
 import/   — ImportedScene (de)serialization, DDS, GPU scene upload + import/fnv/ (Fallout: NV BSA/ESM/NIF)
 game/     — Civ-style 4X model: hex strategy map, economy, advisors, religion, great people, units, AI
 sim/      — header-only factory simulation (pipes, belts, tracks, network graph)

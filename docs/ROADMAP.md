@@ -195,7 +195,9 @@ This is the strongest area of the codebase relative to the wishlist — see `doc
 | UI layout editor | ✅ | `src/tools/ui_editor/` — nested-document editor over the real `.ui.json` schema: drag/resize/snap, multi-select, align/distribute, clipboard, undo/redo, outliner, schema-driven inspector, HSV + color-harmony picker with WCAG contrast scoring. Core is headless and tested (`odai_ui_editor_tests`); remaining gaps are the ImGui numeric/enum controls and live theme preview — see `docs/EARLY_ACCESS_PLAN.md` Phase 2 |
 | Live sim inspection | 🟡 | `ui/widgets/selection_inspector_panel.h` inspects selected entities; no broader debug console |
 | Hot reload (assets) | 🟡 | UI documents only; no shader/gameplay hot reload |
-| Render debug / GPU profiling | 🟡 | GPU timestamp queries exist (`init.cc`); no profiler UI |
+| Render debug / GPU profiling | ✅ | GPU timestamp queries across 18 named passes (`init.cc`, `frame.cc`) with P50/P95/P99, surfaced in the ImGui "Performance" panel (`frame_ui.cc`) |
+| CPU profiling (games) | ✅ | `GameApp::run()` times 9 loop zones for all seven games (`engine/game_frame_stats.h`); F3 overlay / `ODAI_PERF_OVERLAY`, readable via `frameProfiler()` — see `docs/GAME_API.md` §6.5 |
+| CPU profiling (`app::App` lineage) | ⬜ | The older Civ-style app has startup + UI-build timing only; its loop has no per-zone breakdown |
 | World/terrain editor, scenario editor, faction/tech-tree/quest editors | ⬜ | World content is authored via offline cookers instead (`tools/strategy_map_gen_main.cc`, `tools/newvegas_cooker_main.cc`) — see note below |
 | Entity inspector, nav debugging, AI decision inspector, replay/timeline debugger | ⬜ | Not implemented |
 
@@ -254,6 +256,10 @@ This is the strongest area of the codebase relative to the wishlist — see `doc
 | Reverse-depth, GPU timestamp measurement, explicit barriers | ✅ | Matches this project's performance-first conventions directly (see the `performance-engineer` agent's performance contract) |
 | Chunk streaming, FrameArena transient memory | ✅ | `world/world.h`, `docs/FrameArena.md` |
 | Configurable quality presets, headless sim mode | ⬜ | Not confirmed |
+| Optimized build configuration | ✅ | `RelWithDebInfo`/`Release` presets, opt-in `ODAI_ENABLE_LTO` and `ODAI_ENABLE_NATIVE_ARCH`, and a non-optimized default no longer possible by accident (`CMakeLists.txt`) — measured 8x on worldgen and meshing vs Debug, see `CLAUDE.md` |
+| Headless CPU benchmark | ✅ | `--sweep N` on `odai_civ_sim`/`odai_stellaris_sim` reports turns/sec and per-match p95 alongside the balance metrics (`src/tools/sim_bench.h`); deterministic across build types |
+| Meshing wasted-work visibility | ✅ | `ChunkMeshScheduler::stats()` counts meshes built then discarded (edited or evicted mid-flight) and the worker ms they burned — a high `wastedFraction()` means fix scheduling policy, not the mesher |
+| Perf regression gate in CI | ⬜ | CI still builds Debug only and asserts nothing; the benchmark above is the missing input, but shared runners are noisy — record and trend before gating |
 
 ### Platform Support
 

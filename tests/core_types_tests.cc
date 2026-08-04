@@ -1,3 +1,4 @@
+#include "core/frame_profiler.h"
 #include "core/grid3.h"
 #include "core/hash.h"
 #include "core/lcg.h"
@@ -228,6 +229,62 @@ void testRingBufferPercentile() {
     expectTrue(odai::core::percentile(small, 1.0f) == 1.0f, "overwritten samples leave the window");
 }
 
+void testTimingChannel() {
+    odai::core::TimingChannel<4> channel;
+    expectTrue(channel.sampleCount() == 0u, "a fresh channel has no samples");
+    expectTrue(channel.lastMs() == 0.0f, "a fresh channel reports 0 last");
+    expectTrue(channel.maxMs() == 0.0f, "a fresh channel reports 0 max");
+    expectTrue(channel.p95Ms() == 0.0f, "percentile of an empty channel is 0");
+
+    // The first sample seeds the EWMA outright instead of easing up from 0,
+    // otherwise every zone under-reports for its first ~20 frames.
+    channel.push(10.0f);
+    expectTrue(channel.lastMs() == 10.0f, "last tracks the newest sample");
+    expectTrue(channel.ewmaMs() == 10.0f, "the first sample seeds the EWMA");
+
+    // Second sample onward blends at kEwmaAlpha: 0.1*20 + 0.9*10 == 11.
+    channel.push(20.0f);
+    expectTrue(std::fabs(channel.ewmaMs() - 11.0f) < 1e-4f, "the EWMA blends at kEwmaAlpha");
+    expectTrue(channel.lastMs() == 20.0f, "last follows the newest sample");
+    expectTrue(channel.maxMs() == 20.0f, "max tracks the worst retained sample");
+
+    // The window is bounded: old spikes must age out of max/percentiles.
+    for (int i = 0; i < 4; ++i) {
+        channel.push(1.0f);
+    }
+    expectTrue(channel.sampleCount() == 4u, "the channel window stays at capacity");
+    expectTrue(channel.maxMs() == 1.0f, "an aged-out spike leaves the max");
+    expectTrue(channel.p99Ms() == 1.0f, "an aged-out spike leaves the percentiles");
+
+    channel.clear();
+    expectTrue(channel.sampleCount() == 0u, "clear empties the window");
+    expectTrue(channel.ewmaMs() == 0.0f, "clear resets the EWMA");
+}
+
+void testScopedTimerAccumulates() {
+    // The zone accumulator must sum repeat visits within one frame rather than
+    // reporting only the last one -- GameApp::submitFrame can be called more
+    // than once per frame by a game that draws in several passes.
+    float sink = 0.0f;
+    {
+        odai::core::ScopedTimerMs first(sink);
+    }
+    const float afterFirst = sink;
+    {
+        odai::core::ScopedTimerMs second(sink);
+    }
+    expectTrue(afterFirst >= 0.0f, "a scoped timer records a non-negative span");
+    expectTrue(sink >= afterFirst, "a second scope adds to the sink instead of replacing it");
+
+    // Stopwatch::lapMs resets against the same clock read it reports, so
+    // chained laps cannot lose time between them.
+    odai::core::Stopwatch watch;
+    const float firstLap = watch.lapMs();
+    const float secondLap = watch.lapMs();
+    expectTrue(firstLap >= 0.0f && secondLap >= 0.0f, "laps are non-negative");
+    expectTrue(watch.elapsedMs() >= 0.0f, "elapsedMs is non-negative after a lap");
+}
+
 void testPushBounded() {
     std::vector<int> values;
     for (int i = 0; i < 6; ++i) {
@@ -389,6 +446,8 @@ int main() {
     testLcgIsBitExactWithTheReplacedInlineCopies();
     testRingBuffer();
     testRingBufferPercentile();
+    testTimingChannel();
+    testScopedTimerAccumulates();
     testPushBounded();
     testScalarHelpersMatchTheImplementationsTheyReplaced();
     testVector2();

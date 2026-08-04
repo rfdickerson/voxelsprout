@@ -37,6 +37,67 @@
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-linux"
       }
+    },
+    {
+      "name": "vcpkg-relwithdebinfo",
+      "displayName": "vcpkg Optimized + Symbols (Ninja) -- use this to profile",
+      "description": "Optimized build that keeps debug symbols. The right preset for reading the F3 CPU overlay, GPU timestamps, or any perf number: a Debug measurement is not a measurement.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-relwithdebinfo",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "BUILD_TESTING": "ON",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+      }
+    },
+    {
+      "name": "vcpkg-release",
+      "displayName": "vcpkg Release (Ninja)",
+      "description": "Fully optimized, no debug symbols. Add -DODAI_ENABLE_LTO=ON for link-time optimization.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "ON",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+      }
+    },
+    {
+      "name": "linux-vcpkg-relwithdebinfo",
+      "displayName": "Linux vcpkg Optimized + Symbols (Ninja) -- use this to profile",
+      "description": "Linux counterpart of vcpkg-relwithdebinfo, with examples on to match CI's target set.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-linux-relwithdebinfo",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "BUILD_TESTING": "ON",
+        "ODAI_BUILD_EXAMPLES": "ON",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
+    },
+    {
+      "name": "linux-vcpkg-release",
+      "displayName": "Linux vcpkg Release (Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-linux-release",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "ON",
+        "ODAI_BUILD_EXAMPLES": "ON",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
     }
   ],
   "buildPresets": [
@@ -51,6 +112,22 @@
     {
       "name": "linux-vcpkg",
       "configurePreset": "linux-vcpkg"
+    },
+    {
+      "name": "vcpkg-relwithdebinfo",
+      "configurePreset": "vcpkg-relwithdebinfo"
+    },
+    {
+      "name": "vcpkg-release",
+      "configurePreset": "vcpkg-release"
+    },
+    {
+      "name": "linux-vcpkg-relwithdebinfo",
+      "configurePreset": "linux-vcpkg-relwithdebinfo"
+    },
+    {
+      "name": "linux-vcpkg-release",
+      "configurePreset": "linux-vcpkg-release"
     }
   ]
 }

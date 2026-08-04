@@ -242,6 +242,60 @@ abstraction layers unless clearly justified). Two channels:
 Ignore `core::InputState` (`src/core/input.h`) — it's explicitly-commented placeholder
 scaffolding used only by the legacy `app::App`, not wired into `GameApp` at all.
 
+### Reserved key: F3
+
+`GameApp::run()` consumes **F3** for the built-in CPU timing overlay (see §6.5). Don't
+bind it in a game.
+
+## 6.5. CPU frame profiling — free for every game
+
+`GameApp::run()` times its own loop every frame, so every game gets a CPU breakdown with
+no per-game code. Zones are defined in `src/engine/game_frame_stats.h`:
+
+| Zone | Covers |
+|---|---|
+| `poll` | `glfwPollEvents` + per-frame input sampling |
+| `ui update` | `UiContext::setViewport/update/tick` |
+| `tick` | your `onTick(dt)` |
+| `plugins` | `PluginRegistry::tickAll` |
+| `audio` | `Audio::update` |
+| `render` | your `onRender(dt)`, in full |
+| `  ui build` | `UiContext::buildAppend` + cursor — **nested inside `render`** |
+| `  submit` | `Renderer::renderFrame` — **nested inside `render`** |
+| `FRAME` | the whole loop iteration |
+
+> **Build optimized before reading any of this.** A Debug build is ~8x slower on
+> real work in this tree, so its numbers describe the compiler, not your code.
+> Use the `vcpkg-relwithdebinfo` / `linux-vcpkg-relwithdebinfo` preset — see
+> "Optimized builds" in `CLAUDE.md`.
+
+**Overlay:** press **F3** in any game, or set `ODAI_PERF_OVERLAY=1` to start with it up.
+It shows last/avg/p99 per zone, a proportional bar, an `other` row for unattributed time,
+and the renderer's own CPU wait buckets so a CPU spike can be told apart from a frame
+merely spent blocked on the GPU or the presenter.
+
+**Reading it in code** — for a game's own HUD, or from a plugin:
+
+```cpp
+const auto& prof = frameProfiler();                      // GameApp accessor
+const float tickMs = prof.channel(GameZone::Tick).ewmaMs();
+const float worst  = prof.channel(GameZone::Tick).p99Ms();
+```
+
+`ui build` and `submit` are counted inside `render` — skip them when summing, or use
+`gameZoneIsNested(zone)`. `unattributedMs()` already does this and is what the `other`
+row reports; if `other` is large, the cost is somewhere `run()` doesn't yet measure.
+
+Percentiles are computed **on demand**, not cached per frame — calling `p99Ms()` copies
+and partially sorts the 240-sample window, so don't call it in a hot loop. `lastMs()` and
+`ewmaMs()` are free.
+
+To time something *inside* your own `onTick`/`onRender`, use the same primitives directly
+(`src/core/frame_profiler.h`): `core::ScopedTimerMs zone(myFloat);` accumulates a scope's
+duration into a float you own, and `core::TimingChannel<N>` gives it the same
+last/avg/percentile window. Don't add zones to `GameZone` — that set is deliberately
+closed to the shared loop.
+
 ## 7. Reusable simulation (`src/sim/simulation.h`) — optional
 
 Renderer/UI-agnostic factory-sim primitives: conveyor `Belt`s, `Pipe`s, rail `Track`s,

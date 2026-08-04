@@ -8,9 +8,14 @@
 //   g++ -std=c++20 -I src src/game/strategy_map.cc src/game/economy.cc \
 //       src/game/game_sim.cc src/tools/civ_sim_main.cc -o civ_sim
 // Usage: civ_sim [turns] [seed] [empires] [--quiet]
+//
+// --sweep N also reports wall-clock throughput (turns/sec, per-match p95), which
+// makes this the project's CPU regression harness as well as its balance one.
+// Build optimized before reading those numbers -- see CLAUDE.md.
 
 #include "game/economy.h"
 #include "game/game_sim.h"
+#include "tools/sim_bench.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -133,13 +138,23 @@ int main(int argc, char** argv) {
                   << empires << " empires ====\n";
         std::vector<MatchSummary> all;
         std::map<std::string, int> winsByPersonality;
+        odai::tools::SimBench bench;
         for (int s = 0; s < sweep; ++s) {
             WorldConfig cfg{};
             cfg.seed = seed + static_cast<std::uint32_t>(s) * 2654435761u;
             cfg.empireCount = empires;
+
+            odai::core::Stopwatch watch;
             World w = makeWorld(cfg);
+            bench.addWorldgenMs(watch.lapMs());
+
             std::vector<TurnSample> samples;
+            samples.reserve(static_cast<std::size_t>(turns));
             for (int t = 0; t < turns; ++t) stepTurn(w, samples);
+            // Timed before analyze(): the balance pass is harness work, not
+            // simulation, and folding it in would flatter the turn throughput.
+            bench.addMatchMs(watch.lapMs());
+
             MatchSummary m = analyze(w, samples, turns);
             all.push_back(m);
             winsByPersonality[m.winnerPersonality]++;
@@ -169,6 +184,7 @@ int main(int argc, char** argv) {
         std::cout << "wins by personality   :";
         for (const auto& kv : winsByPersonality) std::cout << " " << kv.first << "=" << kv.second;
         std::cout << "\n";
+        bench.report(std::cout, turns);
         return 0;
     }
 

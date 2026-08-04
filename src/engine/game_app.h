@@ -1,6 +1,7 @@
 #pragma once
 
 #include "audio/audio.h"
+#include "engine/game_frame_stats.h"
 #include "engine/plugin.h"
 #include "render/renderer.h"
 #include "render/renderer_types.h"
@@ -31,6 +32,16 @@ public:
     bool init(const char* title = "odai");
     void run();
     void shutdown();
+
+    // Per-zone CPU timings for the loop in run(). Populated every frame for
+    // every game; read it from a plugin, a game's own HUD, or the built-in
+    // overlay (F3). See engine/game_frame_stats.h for the zone set.
+    [[nodiscard]] const GameFrameProfiler& frameProfiler() const { return m_frameProfiler; }
+
+    // Built-in CPU timing overlay, toggled at runtime with F3. Starts visible
+    // when ODAI_PERF_OVERLAY is set to something other than "0".
+    void setPerfOverlayVisible(bool visible) { m_perfOverlayVisible = visible; }
+    [[nodiscard]] bool isPerfOverlayVisible() const { return m_perfOverlayVisible; }
 
 protected:
     virtual bool onInit() = 0;
@@ -127,8 +138,16 @@ protected:
     bool   m_hasMouseSample = false;
 
 private:
+    // Draws the F3 overlay onto m_uiDrawList. Called from submitFrame() after
+    // the widget tree is flushed so it sits above game UI.
+    void drawPerfOverlay();
+
     world::ChunkGrid  m_emptyGrid;
     sim::Simulation   m_emptySimulation;
+
+    GameFrameProfiler m_frameProfiler;
+    bool m_perfOverlayVisible = false;
+    bool m_perfOverlayKeyPrev = false;
 };
 
 } // namespace odai::engine
