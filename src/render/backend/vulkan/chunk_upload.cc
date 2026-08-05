@@ -2155,32 +2155,19 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
     const int residentCenterChunkX = (minChunkX + maxChunkX) / 2;
     const int residentCenterChunkZ = (minChunkZ + maxChunkZ) / 2;
 
+    // Grass billboard scatter is disabled: the billboards read as invisible from the
+    // camera while their shadow casters smeared dark streaks across the ground, and the
+    // feature is not wanted for the voxel game. Leaving the cache empty means
+    // m_grassBillboardInstanceCount stays 0, so the (now removed) draws have nothing to
+    // submit and no instance buffer is allocated. world::buildGrassInstances and its
+    // tests are untouched -- re-enable by dropping this early return.
     auto rebuildGrassInstancesForChunk = [&](std::size_t chunkArrayIndex) {
-        if (chunkArrayIndex >= chunks.size()) {
-            return;
-        }
-        static_assert(
-            sizeof(odai::world::GrassInstance) == sizeof(GrassBillboardInstance),
-            "world::GrassInstance must match the renderer's per-instance vertex layout"
-        );
-        std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
-        odai::world::GrassScatterParams grassParams{};
-        grassParams.residentCenterChunkX = residentCenterChunkX;
-        grassParams.residentCenterChunkZ = residentCenterChunkZ;
-        grassParams.activeRadius = kGrassActiveChunkRadius;
-        grassParams.retainedRadius = kGrassRetainedChunkRadius;
-        grassParams.previouslyActive = !grassInstances.empty();
-        const std::vector<odai::world::GrassInstance> builtInstances =
-            odai::world::buildGrassInstances(chunks[chunkArrayIndex], grassParams);
-        grassInstances.resize(builtInstances.size());
-        if (!builtInstances.empty()) {
-            std::memcpy(
-                grassInstances.data(),
-                builtInstances.data(),
-                builtInstances.size() * sizeof(GrassBillboardInstance)
-            );
+        if (chunkArrayIndex < m_chunkGrassInstanceCache.size()) {
+            m_chunkGrassInstanceCache[chunkArrayIndex].clear();
         }
     };
+    (void)residentCenterChunkX;
+    (void)residentCenterChunkZ;
 
     std::size_t remeshedChunkCount = 0;
     std::size_t remeshedActiveVertexCount = 0;
