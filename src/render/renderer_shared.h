@@ -16,11 +16,16 @@ constexpr std::array<const char*, 1> kValidationLayers = {"VK_LAYER_KHRONOS_vali
 // Promoted-to-core features (timelineSemaphore/1.2, synchronization2/1.3,
 // dynamicRendering/1.3, maintenance4/1.3) are enabled via VkPhysicalDeviceVulkan1xFeatures
 // chains in init.cc and do not need extension strings at 1.4+.
-constexpr std::array<const char*, 3> kDeviceExtensions = {
+constexpr std::array<const char*, 2> kDeviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,
-    VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME,
 };
+// VK_EXT_memory_priority is a residency *hint* to the allocator, not something
+// any pass depends on: VMA drops the priority plumbing and allocates normally
+// without it. Requiring it disqualified otherwise-capable hardware (Mesa's Intel
+// driver does not expose it), so it is probed per candidate and enabled only
+// where present -- same treatment as descriptor buffer and ray tracing.
+constexpr const char* kOptionalMemoryPriorityExtension = VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME;
 constexpr uint32_t kBindlessTargetTextureCapacity = 1024;
 constexpr uint32_t kBindlessMinTextureCapacity = 64;
 constexpr uint32_t kBindlessReservedSampledDescriptors = 16;

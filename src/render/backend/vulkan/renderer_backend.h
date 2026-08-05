@@ -1244,6 +1244,10 @@ private:
     bool m_supportsDisplayTiming = false;
     bool m_hasDisplayTimingExtension = false;
     bool m_enableDisplayTiming = false;
+    // VK_EXT_memory_priority: optional allocator residency hint. Off on drivers
+    // that do not expose it (Mesa's Intel driver), which changes nothing a pass
+    // can observe -- see kOptionalMemoryPriorityExtension in renderer_shared.h.
+    bool m_supportsMemoryPriority = false;
     FramePacingSettings m_framePacingSettings{};
     FramePacingStats m_framePacingStats{};
     ShadowSettings m_shadowSettings{};
