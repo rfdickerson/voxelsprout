@@ -143,9 +143,21 @@ void GameApp::run() {
 
             int fbW = 0, fbH = 0;
             glfwGetFramebufferSize(m_window, &fbW, &fbH);
+            int winW = 0, winH = 0;
+            glfwGetWindowSize(m_window, &winW, &winH);
 
             double mx = 0.0, my = 0.0;
             glfwGetCursorPos(m_window, &mx, &my);
+            // glfwGetCursorPos reports window coordinates, but the UI viewport
+            // set below -- and every widget rect measured against it -- is in
+            // framebuffer pixels. The two are equal only at 1x scale. On a
+            // fractional/HiDPI display (1.5x: 1280x720 window, 1920x1080
+            // framebuffer) an unscaled cursor tops out at 2/3 of the viewport,
+            // so the bottom and right of the UI cannot be reached at all.
+            if (winW > 0 && winH > 0) {
+                mx *= static_cast<double>(fbW) / static_cast<double>(winW);
+                my *= static_cast<double>(fbH) / static_cast<double>(winH);
+            }
 
             m_uiInput.beginFrame();
             m_uiInput.mousePx = {static_cast<float>(mx), static_cast<float>(my)};
