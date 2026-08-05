@@ -159,7 +159,14 @@ struct alignas(16) SunShaftPushConstants {
     uint32_t _pad0 = 0u;
 };
 
-struct alignas(16) SsaoComputePushConstants {
+// No alignas here: it would pad sizeof to 16 and declare a 16-byte push
+// constant range, while ssao.comp.slang declares exactly two uints and the
+// dispatch in frame_pass_ssao.cc pushes 8 bytes. The upper half would then be
+// permanently undefined -- harmless only because nothing reads it, and
+// BestPractices-PushConstants flags it on every dispatch. The structs above
+// reach a 16-byte multiple through explicit _pad fields instead, which is why
+// they can carry alignas without the size drifting from what is pushed.
+struct SsaoComputePushConstants {
     uint32_t width = 1u;
     uint32_t height = 1u;
 };
