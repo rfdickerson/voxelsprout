@@ -113,7 +113,15 @@ endif()
 
 # Optional Slang shader compilation (to SPIR-V for Vulkan).
 # Produces .slang.spv files next to the source shaders.
-find_program(SLANGC_EXECUTABLE NAMES slangc)
+# The Vulkan SDK ships slangc, so prefer it when VULKAN_SDK is set (HINTS are
+# searched ahead of PATH) and fall back to any slangc on PATH otherwise. Both
+# layouts are covered: VULKAN_SDK pointing at the arch dir or at the SDK root.
+find_program(SLANGC_EXECUTABLE
+    NAMES slangc
+    HINTS
+        "$ENV{VULKAN_SDK}/bin"
+        "$ENV{VULKAN_SDK}/x86_64/bin"
+)
 if(SLANGC_EXECUTABLE)
     set(SLANG_SHARED_INCLUDES
         "${CMAKE_SOURCE_DIR}/src/render/shaders/camera_uniform.slang"
