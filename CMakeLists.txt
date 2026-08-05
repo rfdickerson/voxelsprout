@@ -481,6 +481,13 @@ endif()
 find_package(Lua REQUIRED)
 find_package(sol2 CONFIG REQUIRED)
 
+# Newer sol2 packages export only the namespaced target; older ones also export
+# a bare `sol2`. Without this, a bare `sol2` silently degrades to a `-lsol2`
+# link flag and fails at link time.
+if(NOT TARGET sol2 AND TARGET sol2::sol2)
+    add_library(sol2 ALIAS sol2::sol2)
+endif()
+
 # Game-agnostic Lua plumbing (sandbox, sorted script loading, Rng/Log tables)
 # shared by every script host: the 4X ScriptHost below and the citybuilder's
 # CityScriptHost. No game types.
