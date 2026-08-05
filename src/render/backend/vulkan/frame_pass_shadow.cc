@@ -24,8 +24,13 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
     CoreFrameGraphOrderValidator& coreFramePassOrderValidator = *context.frameOrderValidator;
     const CoreFrameGraphPlan& coreFrameGraphPlan = *context.frameGraphPlan;
-    // Legacy voxel/magica/pipe shadow inputs remain on ShadowPassInputs but are no longer
-    // consumed here — those shadow-caster draws were removed (prior voxel/factory game).
+    // Voxel chunk shadow inputs: consumed by the per-cascade caster draw below
+    // (VoxelCraft). The magica/pipe inputs remain unconsumed here.
+    const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
+    const std::optional<FrameArenaSlice>& shadowChunkInstanceSliceOpt = *inputs.shadowChunkInstanceSliceOpt;
+    const VkBuffer shadowChunkInstanceBuffer = inputs.shadowChunkInstanceBuffer;
+    const VkBuffer chunkVertexBuffer = inputs.chunkVertexBuffer;
+    const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
@@ -140,8 +145,38 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
             // Reverse-Z uses GREATER depth tests, so flip bias sign.
             vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
 
-            // (removed) voxel chunk + magica model shadow-caster draws — legacy from the
-            // prior voxel/factory game.
+            // Voxel chunk shadow casters for this cascade. Skipped entirely when a game
+            // has no voxel chunks (no per-cascade indirect commands are produced).
+            // (Magica model shadow casters remain removed.)
+            if (m_shadowPipeline != VK_NULL_HANDLE &&
+                frameChunkDrawData.canDrawShadowChunksIndirectByCascade[cascadeIndex] &&
+                shadowChunkInstanceSliceOpt.has_value() &&
+                shadowChunkInstanceBuffer != VK_NULL_HANDLE &&
+                chunkVertexBuffer != VK_NULL_HANDLE &&
+                chunkIndexBuffer != VK_NULL_HANDLE) {
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
+                bindGraphicsDescriptorBuffers(commandBuffer);
+                const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, shadowChunkInstanceBuffer};
+                const VkDeviceSize voxelVertexOffsets[2] = {0, shadowChunkInstanceSliceOpt->offset};
+                vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
+                vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                // cascadeData[0] selects the light matrix for this cascade in the shadow
+                // vertex shader; chunk offsets ride the instance buffer.
+                ChunkPushConstants chunkPushConstants{};
+                chunkPushConstants.cascadeData[0] = cascadeF;
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &chunkPushConstants
+                );
+                drawIndirectShadowChunkRanges(
+                    commandBuffer, m_debugDrawCallsShadow, cascadeIndex, frameChunkDrawData);
+            }
+
             const std::span<const ImportedMeshDraw> cascadeImportedMeshDraws =
                 importedPageCullingEnabled ? inputs.importedMeshDrawsByCascade[cascadeIndex] : importedMeshDraws;
             const std::uint32_t cascadeImportedTerrainDrawCount =
@@ -277,50 +312,10 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
 
             // (removed) pipe / belt / transport shadow-caster draws — legacy factory sim.
 
-            const uint32_t grassShadowCascadeCount = static_cast<uint32_t>(std::clamp(
-                m_shadowDebugSettings.grassShadowCascadeCount,
-                0,
-                static_cast<int>(kShadowCascadeCount)
-            ));
-            if (cascadeIndex < grassShadowCascadeCount &&
-                m_grassBillboardShadowPipeline != VK_NULL_HANDLE &&
-                m_grassBillboardIndexCount > 0 &&
-                m_grassBillboardInstanceCount > 0 &&
-                m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-                const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
-                const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
-                const VkBuffer grassInstanceBuffer = m_bufferAllocator.getBuffer(m_grassBillboardInstanceBufferHandle);
-                if (grassVertexBuffer != VK_NULL_HANDLE &&
-                    grassIndexBuffer != VK_NULL_HANDLE &&
-                    grassInstanceBuffer != VK_NULL_HANDLE) {
-                    const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
-                    const VkDeviceSize vertexOffsets[2] = {0, 0};
-                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardShadowPipeline);
-                    bindGraphicsDescriptorBuffers(commandBuffer);
-                    vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-                    vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                    ChunkPushConstants grassShadowPushConstants{};
-                    grassShadowPushConstants.chunkOffset[0] = 0.0f;
-                    grassShadowPushConstants.chunkOffset[1] = 0.0f;
-                    grassShadowPushConstants.chunkOffset[2] = 0.0f;
-                    grassShadowPushConstants.chunkOffset[3] = 0.0f;
-                    grassShadowPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                    grassShadowPushConstants.cascadeData[1] = 0.0f;
-                    grassShadowPushConstants.cascadeData[2] = 0.0f;
-                    grassShadowPushConstants.cascadeData[3] = 0.0f;
-                    vkCmdPushConstants(
-                        commandBuffer,
-                        m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0,
-                        sizeof(ChunkPushConstants),
-                        &grassShadowPushConstants
-                    );
-                    countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
-                }
-            }
+            // (removed) grass billboard shadow-caster draw. Each quad's alpha test read a
+            // minified mip of a mostly-transparent sprite, passed the cutoff, and cast a
+            // solid rectangle -- dark streaks over the ground with no visible occluder.
+            // Grass is no longer scattered at all (see chunk_upload.cc).
             vkCmdEndRendering(commandBuffer);
         }
     }

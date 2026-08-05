@@ -2988,13 +2988,16 @@ bool RendererBackend::createGraphicsPipeline() {
         vkHandleToUint64(m_previewFaceOutlinePipeline),
         "pipeline.preview.faceOutline"
     );
-    // Legacy voxel world/shadow + voxel-edit preview + pipe-shadow pipelines (prior
-    // voxel/factory game) are bound by no render pass anymore. Free the freshly built
-    // handles and null the members so nothing can bind them; the strategy map renders via
-    // the hex/imported/sky/tonemap path. (The creation code itself stays in this shared
-    // builder — removing it is a separate, larger refactor.)
-    for (VkPipeline* deadPipeline : {&m_pipeline, &m_pipelineRt, &m_shadowPipeline,
-                                     &m_pipeShadowPipeline, &m_previewAddPipeline,
+    // The voxel world + voxel shadow pipelines (m_pipeline / m_pipelineRt /
+    // m_shadowPipeline) are NOT dead: src/games/voxelcraft draws voxel chunks through
+    // them. They were listed here when the strategy map was the only consumer, which
+    // destroyed them immediately after creation and left VoxelCraft rendering nothing but
+    // sky. Games without voxel chunks never bind them -- prepareFrameChunkDrawData yields
+    // no indirect commands, so the draw is skipped on its own.
+    //
+    // The pipe-shadow and voxel-edit preview pipelines below genuinely have no caller
+    // left; their draw sites are still removed from the main and shadow passes.
+    for (VkPipeline* deadPipeline : {&m_pipeShadowPipeline, &m_previewAddPipeline,
                                      &m_previewRemovePipeline, &m_previewFaceOutlinePipeline}) {
         if (*deadPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, *deadPipeline, nullptr);
