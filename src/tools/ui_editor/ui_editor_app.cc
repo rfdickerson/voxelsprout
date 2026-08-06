@@ -1,5 +1,6 @@
 #include "tools/ui_editor/ui_editor_app.h"
 
+#include "core/log.h"
 #include "ui/widgets/button.h"
 #include "ui/widgets/panel.h"
 #include "ui/widget.h"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 
 namespace odai::tools::ui_editor {
@@ -20,12 +22,19 @@ using namespace ui;
 using json = nlohmann::json;
 
 // ─── Layout constants ────────────────────────────────────────────────────────
+// Logical pixels at 100 % DPI. Read them through the scaled accessors below —
+// never straight into the draw list, which works in framebuffer pixels.
 static constexpr float kPaletteW = 200.0f;
 static constexpr float kPropsW = 296.0f;
 static constexpr float kToolbarH = 46.0f;
 static constexpr float kStatusH = 24.0f;
 static constexpr float kPaletteRowH = 30.0f;
 static constexpr float kOutlinerRowH = 20.0f;
+
+// Body text size in logical pixels; the atlas is baked at this times the DPI
+// scale so glyphs stay crisp instead of being magnified.
+static constexpr float kBodyFontPx = 16.0f;
+static constexpr float kNumericFontPx = 15.0f;
 
 // ─── Colours ─────────────────────────────────────────────────────────────────
 static constexpr UiColor kEditorBg{0.100f, 0.102f, 0.110f, 1.000f};
@@ -59,12 +68,22 @@ static constexpr const char* kDefaultDocument = "assets/ui/docs/city_panel.ui.js
 
 static UiColor withAlpha(const UiColor& c, float a) { return UiColor{c.r, c.g, c.b, a}; }
 
+// ─── Scaled pane dimensions ──────────────────────────────────────────────────
+
+float UiEditorApp::paletteW() const { return scaled(kPaletteW); }
+float UiEditorApp::propsW() const { return scaled(kPropsW); }
+float UiEditorApp::toolbarH() const { return scaled(kToolbarH); }
+float UiEditorApp::statusH() const { return scaled(kStatusH); }
+float UiEditorApp::paletteRowH() const { return scaled(kPaletteRowH); }
+float UiEditorApp::outlinerRowH() const { return scaled(kOutlinerRowH); }
+
 // Bottom edge of the palette section of the left column. The palette is a real
 // widget-tree Panel (so its buttons get hover states) and the outliner below it
 // is drawn immediate-mode; the Panel must stop here or it would be flushed over
 // the outliner, since the widget tree is appended to the draw list last.
-static float paletteBottom() {
-    return kToolbarH + 26.0f + kPaletteRowH * static_cast<float>(widgetTypes().size()) + 6.0f;
+float UiEditorApp::paletteBottom() const {
+    return toolbarH() + scaled(26.0f) +
+           paletteRowH() * static_cast<float>(widgetTypes().size()) + scaled(6.0f);
 }
 
 // Reads a node property as a color. Theme tokens ("panel.bg") are not resolvable
@@ -92,23 +111,25 @@ static std::string nodeString(const json& node, const char* key) {
 // ─── Coordinate spaces ───────────────────────────────────────────────────────
 
 UiVec2 UiEditorApp::docToScreen(float x, float y) const {
-    return {m_canvasX + m_docOriginX + x, m_canvasY + m_docOriginY + y};
+    return {m_canvasX + m_docOriginX + x * m_viewScale,
+            m_canvasY + m_docOriginY + y * m_viewScale};
 }
 
 UiVec2 UiEditorApp::screenToDoc(float x, float y) const {
-    return {x - m_canvasX - m_docOriginX, y - m_canvasY - m_docOriginY};
+    return {(x - m_canvasX - m_docOriginX) / m_viewScale,
+            (y - m_canvasY - m_docOriginY) / m_viewScale};
 }
 
 UiRect UiEditorApp::docRectToScreen(const UiRect& r) const {
     const UiVec2 tl = docToScreen(r.minX, r.minY);
-    return UiRect::fromXYWH(tl.x, tl.y, r.width(), r.height());
+    return UiRect::fromXYWH(tl.x, tl.y, r.width() * m_viewScale, r.height() * m_viewScale);
 }
 
 void UiEditorApp::layoutPanes(int fbW, int fbH) {
-    m_canvasX = kPaletteW;
-    m_canvasY = kToolbarH;
-    m_canvasW = std::max(1.0f, static_cast<float>(fbW) - kPaletteW - kPropsW);
-    m_canvasH = std::max(1.0f, static_cast<float>(fbH) - kToolbarH - kStatusH);
+    m_canvasX = paletteW();
+    m_canvasY = toolbarH();
+    m_canvasW = std::max(1.0f, static_cast<float>(fbW) - paletteW() - propsW());
+    m_canvasH = std::max(1.0f, static_cast<float>(fbH) - toolbarH() - statusH());
 
     // The design surface is whatever the root node declares. Centre it in the
     // canvas pane when it fits; pin it to the top-left when it doesn't, so the
@@ -118,8 +139,16 @@ void UiEditorApp::layoutPanes(int fbW, int fbH) {
     m_docH = std::max(1.0f, nodeFloat(root, "height", 720.0f));
     m_doc.setViewport(UiRect::fromXYWH(0.0f, 0.0f, m_docW, m_docH));
 
-    m_docOriginX = std::max(0.0f, (m_canvasW - m_docW) * 0.5f);
-    m_docOriginY = std::max(0.0f, (m_canvasH - m_docH) * 0.5f);
+    // Preview the surface at the display's own scale, which is what the running
+    // game would draw it at. Back that off when it no longer fits the pane: the
+    // canvas cannot pan, so an oversized surface is worse than a shrunken one.
+    const float margin = scaled(12.0f);
+    const float fit = std::min((m_canvasW - margin * 2.0f) / m_docW,
+                               (m_canvasH - margin * 2.0f) / m_docH);
+    m_viewScale = std::clamp(std::min(m_scale, fit), 0.1f, m_scale);
+
+    m_docOriginX = std::max(0.0f, (m_canvasW - m_docW * m_viewScale) * 0.5f);
+    m_docOriginY = std::max(0.0f, (m_canvasH - m_docH * m_viewScale) * 0.5f);
 }
 
 // ─── Canvas ──────────────────────────────────────────────────────────────────
@@ -131,7 +160,10 @@ void UiEditorApp::drawNode(const NodePath& path) {
     const std::string type = m_doc.typeOf(path);
     const TypeDesc* desc = findWidgetType(type);
     const UiRect r = docRectToScreen(m_doc.absoluteRect(path));
-    const float radius = nodeFloat(*node, "cornerRadius", 0.0f);
+    // Authored properties are in document units; the canvas draws them at the
+    // view scale so a node reads the same as its rect.
+    const float radius = nodeFloat(*node, "cornerRadius", 0.0f) * m_viewScale;
+    const float hair = std::max(1.0f, m_viewScale);
 
     // Body. An unknown type (an app-registered custom factory) gets a neutral
     // placeholder rather than being hidden.
@@ -142,24 +174,26 @@ void UiEditorApp::drawNode(const NodePath& path) {
     if (type != "Spacer") {
         if (radius > 0.5f) {
             m_uiDrawList.addRoundRectFilled(r, bg, radius);
-            m_uiDrawList.addRoundRect(r, border, radius, 1.0f);
+            m_uiDrawList.addRoundRect(r, border, radius, hair);
         } else {
             m_uiDrawList.addRectFilled(r, bg);
-            m_uiDrawList.addRect(r, border, 1.0f);
+            m_uiDrawList.addRect(r, border, hair);
         }
     } else {
         // A Spacer draws nothing at runtime; show it as an outline only.
-        m_uiDrawList.addRect(r, withAlpha(accent, 0.5f), 1.0f);
+        m_uiDrawList.addRect(r, withAlpha(accent, 0.5f), hair);
     }
 
     // Type-specific affordances so the canvas reads as a layout, not a box list.
     if (type == "ProgressBar") {
         const float v = std::clamp(nodeFloat(*node, "value", 0.5f), 0.0f, 1.0f);
         const UiColor fg = nodeColor(*node, "foreground", UiColor{0.18f, 0.78f, 0.32f, 1.0f});
-        if (r.width() > 4.0f && r.height() > 4.0f && v > 0.0f) {
+        const float inset = 2.0f * m_viewScale;
+        if (r.width() > inset * 2.0f && r.height() > inset * 2.0f && v > 0.0f) {
             m_uiDrawList.addRoundRectFilled(
-                UiRect::fromXYWH(r.minX + 2, r.minY + 2, (r.width() - 4) * v, r.height() - 4), fg,
-                2.0f);
+                UiRect::fromXYWH(r.minX + inset, r.minY + inset, (r.width() - inset * 2.0f) * v,
+                                 r.height() - inset * 2.0f),
+                fg, 2.0f * m_viewScale);
         }
     } else if (type == "Image") {
         const UiColor tint = nodeColor(*node, "tint", UiColor{1, 1, 1, 1});
@@ -167,12 +201,14 @@ void UiEditorApp::drawNode(const NodePath& path) {
         m_uiDrawList.addCircleFilled({(r.minX + r.maxX) * 0.5f, (r.minY + r.maxY) * 0.5f},
                                      std::max(2.0f, pad), withAlpha(tint, 0.7f));
     } else if (type == "Repeater") {
-        const float itemH = std::max(4.0f, nodeFloat(*node, "itemHeight", 28.0f));
-        const float itemGap = nodeFloat(*node, "itemGap", 4.0f);
-        float y = r.minY + 4;
-        while (y + itemH < r.maxY - 2) {
-            m_uiDrawList.addRectFilled(UiRect::fromXYWH(r.minX + 4, y, r.width() - 8, itemH),
-                                       withAlpha(accent, 0.18f));
+        const float itemH = std::max(4.0f, nodeFloat(*node, "itemHeight", 28.0f)) * m_viewScale;
+        const float itemGap = nodeFloat(*node, "itemGap", 4.0f) * m_viewScale;
+        const float pad = 4.0f * m_viewScale;
+        float y = r.minY + pad;
+        while (y + itemH < r.maxY - pad * 0.5f) {
+            m_uiDrawList.addRectFilled(
+                UiRect::fromXYWH(r.minX + pad, y, r.width() - pad * 2.0f, itemH),
+                withAlpha(accent, 0.18f));
             y += itemH + itemGap;
         }
     }
@@ -187,7 +223,7 @@ void UiEditorApp::drawNode(const NodePath& path) {
 
         const float tw = m_uiFonts.regular->measureText(caption);
         const float lh = m_uiFonts.regular->lineHeightPx();
-        if (tw < r.width() - 6.0f && lh < r.height() - 2.0f) {
+        if (tw < r.width() - scaled(6.0f) && lh < r.height() - scaled(2.0f)) {
             m_uiDrawList.addText(*m_uiFonts.regular, caption,
                                  {r.minX + (r.width() - tw) * 0.5f,
                                   r.minY + (r.height() - lh) * 0.5f},
@@ -199,9 +235,9 @@ void UiEditorApp::drawNode(const NodePath& path) {
     // A stack/scroll container repositions its children at runtime, so the rect
     // the editor shows for them is the authored one, not where they will land.
     // Tag the container so that is visible rather than a silent lie.
-    if (desc && desc->laysOutChildren && m_uiFonts.regular && r.width() > 46.0f) {
-        m_uiDrawList.addText(*m_uiFonts.regular, "auto", {r.minX + 3.0f, r.minY + 1.0f},
-                             kManagedTag);
+    if (desc && desc->laysOutChildren && m_uiFonts.regular && r.width() > scaled(46.0f)) {
+        m_uiDrawList.addText(*m_uiFonts.regular, "auto",
+                             {r.minX + scaled(3.0f), r.minY + scaled(1.0f)}, kManagedTag);
     }
 
     // Children, clipped to the container like the runtime would.
@@ -218,15 +254,22 @@ void UiEditorApp::drawNode(const NodePath& path) {
 }
 
 void UiEditorApp::drawSelectionOverlay() {
+    // Selection chrome is editor furniture, not document content: it tracks the
+    // display scale so the outline stays the same physical weight whatever the
+    // canvas is zoomed to.
+    const float pad = scaled(2.0f);
+    const float outerPad = scaled(4.0f);
     for (const NodePath& path : m_selection.paths()) {
         if (!m_doc.isValid(path)) continue;
         const UiRect r = docRectToScreen(m_doc.absoluteRect(path));
         const bool primary = (m_selection.primary() && *m_selection.primary() == path);
-        m_uiDrawList.addRect(UiRect{r.minX - 2, r.minY - 2, r.maxX + 2, r.maxY + 2},
-                             primary ? kBlue : withAlpha(kBlue, 0.45f), primary ? 2.0f : 1.0f);
+        m_uiDrawList.addRect(UiRect{r.minX - pad, r.minY - pad, r.maxX + pad, r.maxY + pad},
+                             primary ? kBlue : withAlpha(kBlue, 0.45f),
+                             primary ? scaled(2.0f) : scaled(1.0f));
         if (m_doc.parentControlsLayout(path)) {
-            m_uiDrawList.addRect(UiRect{r.minX - 4, r.minY - 4, r.maxX + 4, r.maxY + 4},
-                                 withAlpha(kManagedTag, 0.5f), 1.0f);
+            m_uiDrawList.addRect(
+                UiRect{r.minX - outerPad, r.minY - outerPad, r.maxX + outerPad, r.maxY + outerPad},
+                withAlpha(kManagedTag, 0.5f), scaled(1.0f));
         }
     }
 
@@ -240,11 +283,11 @@ void UiEditorApp::drawSelectionOverlay() {
     const UiVec2 handles[8] = {{r.minX, r.minY}, {mx, r.minY},     {r.maxX, r.minY},
                                {r.maxX, my},     {r.maxX, r.maxY}, {mx, r.maxY},
                                {r.minX, r.maxY}, {r.minX, my}};
-    constexpr float hs = 6.0f;
+    const float hs = scaled(6.0f);
     for (const UiVec2& h : handles) {
         const UiRect hr = UiRect::fromXYWH(h.x - hs * 0.5f, h.y - hs * 0.5f, hs, hs);
         m_uiDrawList.addRectFilled(hr, {0.0f, 0.0f, 0.0f, 1.0f});
-        m_uiDrawList.addRect(hr, kBlue, 1.5f);
+        m_uiDrawList.addRect(hr, kBlue, scaled(1.5f));
     }
 }
 
@@ -257,7 +300,7 @@ void UiEditorApp::drawPlacementGhost() {
     const float gh = desc->defaultHeight;
     const UiRect ghost = docRectToScreen(UiRect::fromXYWH(d.x - gw * 0.5f, d.y - gh * 0.5f, gw, gh));
     m_uiDrawList.addRectFilled(ghost, withAlpha(desc->accent, 0.20f));
-    m_uiDrawList.addRect(ghost, withAlpha(desc->accent, 0.75f), 1.5f);
+    m_uiDrawList.addRect(ghost, withAlpha(desc->accent, 0.75f), scaled(1.5f));
 }
 
 void UiEditorApp::drawCanvas() {
@@ -269,17 +312,24 @@ void UiEditorApp::drawCanvas() {
     const UiRect surface = docRectToScreen(UiRect::fromXYWH(0, 0, m_docW, m_docH));
     m_uiDrawList.addRectFilled(surface, kSurfaceBg);
 
+    // Grid lines are spaced in document units but drawn one framebuffer pixel
+    // wide (at least). Minor lines are dropped once they crowd closer than a few
+    // pixels — below that they read as a flat wash rather than a grid.
     const float step = std::max(2.0f, m_snapSettings.gridSize);
+    const float lineW = std::max(1.0f, scaled(0.5f));
+    const bool minorVisible = step * m_viewScale >= scaled(3.0f);
     for (float gx = 0; gx <= m_docW; gx += step) {
         const bool major = std::fmod(gx, step * 10.0f) < 0.5f;
-        const float sx = surface.minX + gx;
-        m_uiDrawList.addRectFilled({sx, surface.minY, sx + 0.5f, surface.maxY},
+        if (!major && !minorVisible) continue;
+        const float sx = surface.minX + gx * m_viewScale;
+        m_uiDrawList.addRectFilled({sx, surface.minY, sx + lineW, surface.maxY},
                                    major ? kGridMajor : kGridLine);
     }
     for (float gy = 0; gy <= m_docH; gy += step) {
         const bool major = std::fmod(gy, step * 10.0f) < 0.5f;
-        const float sy = surface.minY + gy;
-        m_uiDrawList.addRectFilled({surface.minX, sy, surface.maxX, sy + 0.5f},
+        if (!major && !minorVisible) continue;
+        const float sy = surface.minY + gy * m_viewScale;
+        m_uiDrawList.addRectFilled({surface.minX, sy, surface.maxX, sy + lineW},
                                    major ? kGridMajor : kGridLine);
     }
 
@@ -287,13 +337,16 @@ void UiEditorApp::drawCanvas() {
     const int count = m_doc.childCount({});
     for (int i = 0; i < count; ++i) drawNode(NodePath{i});
 
+    const float snapHalfW = std::max(0.75f, scaled(0.75f));
     for (const SnapLine& line : m_snap.lines()) {
         if (line.horizontal) {
             const float sy = docToScreen(0.0f, line.pos).y;
-            m_uiDrawList.addRectFilled({pane.minX, sy - 0.75f, pane.maxX, sy + 0.75f}, kSnapLine);
+            m_uiDrawList.addRectFilled({pane.minX, sy - snapHalfW, pane.maxX, sy + snapHalfW},
+                                       kSnapLine);
         } else {
             const float sx = docToScreen(line.pos, 0.0f).x;
-            m_uiDrawList.addRectFilled({sx - 0.75f, pane.minY, sx + 0.75f, pane.maxY}, kSnapLine);
+            m_uiDrawList.addRectFilled({sx - snapHalfW, pane.minY, sx + snapHalfW, pane.maxY},
+                                       kSnapLine);
         }
     }
 
@@ -311,7 +364,9 @@ int UiEditorApp::hitTestHandle(float docX, float docY) const {
     const UiVec2 handles[8] = {{r.minX, r.minY}, {mx, r.minY},     {r.maxX, r.minY},
                                {r.maxX, my},     {r.maxX, r.maxY}, {mx, r.maxY},
                                {r.minX, r.maxY}, {r.minX, my}};
-    constexpr float kR = 7.0f;
+    // The grab radius is a physical target, so it is expressed on screen and
+    // converted back into document units the handle positions are measured in.
+    const float kR = scaled(7.0f) / m_viewScale;
     for (int i = 0; i < 8; ++i) {
         const float dx = docX - handles[i].x;
         const float dy = docY - handles[i].y;
@@ -323,11 +378,12 @@ int UiEditorApp::hitTestHandle(float docX, float docY) const {
 // ─── Outliner ────────────────────────────────────────────────────────────────
 
 void UiEditorApp::drawOutlinerRow(const NodePath& path, int depth, float& y) {
-    const float paneBottom = static_cast<float>(m_lastFbH) - kStatusH;
-    if (y > paneBottom - kOutlinerRowH) return;
+    const float rowH = outlinerRowH();
+    const float paneBottom = static_cast<float>(m_lastFbH) - statusH();
+    if (y > paneBottom - rowH) return;
 
     const bool selected = m_selection.contains(path);
-    const UiRect row = UiRect::fromXYWH(0.0f, y, kPaletteW, kOutlinerRowH);
+    const UiRect row = UiRect::fromXYWH(0.0f, y, paletteW(), rowH);
     if (selected) m_uiDrawList.addRectFilled(row, {0.14f, 0.22f, 0.36f, 0.90f});
 
     const std::string type = m_doc.typeOf(path);
@@ -336,10 +392,14 @@ void UiEditorApp::drawOutlinerRow(const NodePath& path, int depth, float& y) {
     std::string label = type;
     if (!id.empty()) label += "  " + id;
 
-    const float indent = 6.0f + static_cast<float>(depth) * 10.0f;
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(indent - 4.0f, y + 7.0f, 3.0f, 3.0f),
-                               desc ? desc->accent : kTextDim);
-    m_uiDrawList.addText(m_uiFont, label, {indent + 4.0f, y + 2.0f}, selected ? kBlue : kText);
+    const float indent = scaled(6.0f) + static_cast<float>(depth) * scaled(10.0f);
+    const float dot = scaled(3.0f);
+    m_uiDrawList.addRectFilled(
+        UiRect::fromXYWH(indent - scaled(4.0f), y + (rowH - dot) * 0.5f, dot, dot),
+        desc ? desc->accent : kTextDim);
+    m_uiDrawList.addText(m_uiFont, label,
+                         {indent + scaled(4.0f), y + (rowH - m_uiFont.lineHeightPx()) * 0.5f},
+                         selected ? kBlue : kText);
 
     EditorHit hit;
     hit.rect = row;
@@ -347,7 +407,7 @@ void UiEditorApp::drawOutlinerRow(const NodePath& path, int depth, float& y) {
     hit.path = path;
     pushHit(hit);
 
-    y += kOutlinerRowH;
+    y += rowH;
     const int count = m_doc.childCount(path);
     for (int i = 0; i < count; ++i) {
         NodePath child = path;
@@ -358,15 +418,19 @@ void UiEditorApp::drawOutlinerRow(const NodePath& path, int depth, float& y) {
 
 void UiEditorApp::drawOutliner() {
     const float top = paletteBottom();
-    const float bottom = static_cast<float>(m_lastFbH) - kStatusH;
-    if (bottom - top < kOutlinerRowH) return;
+    const float bottom = static_cast<float>(m_lastFbH) - statusH();
+    if (bottom - top < outlinerRowH()) return;
 
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(0, top, kPaletteW, 22.0f),
+    const float headerH = scaled(22.0f);
+    m_uiDrawList.addRectFilled(UiRect::fromXYWH(0, top, paletteW(), headerH),
                                {0.09f, 0.10f, 0.14f, 1.0f});
-    m_uiDrawList.addText(m_uiFont, "DOCUMENT", {8.0f, top + 3.0f}, {0.50f, 0.55f, 0.72f, 1.0f});
+    m_uiDrawList.addText(m_uiFont, "DOCUMENT",
+                         {scaled(8.0f), top + (headerH - m_uiFont.lineHeightPx()) * 0.5f},
+                         {0.50f, 0.55f, 0.72f, 1.0f});
 
-    m_uiDrawList.pushClip(UiRect::fromXYWH(0, top + 22.0f, kPaletteW, bottom - top - 22.0f));
-    float y = top + 24.0f;
+    m_uiDrawList.pushClip(
+        UiRect::fromXYWH(0, top + headerH, paletteW(), bottom - top - headerH));
+    float y = top + headerH + scaled(2.0f);
     drawOutlinerRow(NodePath{}, 0, y);
     m_uiDrawList.popClip();
 }
@@ -374,26 +438,30 @@ void UiEditorApp::drawOutliner() {
 // ─── Properties panel ────────────────────────────────────────────────────────
 
 void UiEditorApp::drawSectionLabel(const char* label, float x, float width, float& y) {
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(x + 6, y, width - 12, 1), {0.2f, 0.22f, 0.30f, 0.7f});
-    y += 5.0f;
-    m_uiDrawList.addText(m_uiFont, label, {x + 10, y}, kTextDim);
-    y += m_uiFont.lineHeightPx() + 4.0f;
+    m_uiDrawList.addRectFilled(
+        UiRect::fromXYWH(x + scaled(6.0f), y, width - scaled(12.0f), std::max(1.0f, scaled(1.0f))),
+        {0.2f, 0.22f, 0.30f, 0.7f});
+    y += scaled(5.0f);
+    m_uiDrawList.addText(m_uiFont, label, {x + scaled(10.0f), y}, kTextDim);
+    y += m_uiFont.lineHeightPx() + scaled(4.0f);
 }
 
 void UiEditorApp::drawStepRow(const char* label, float value, EditorHit::Action action,
                               const std::string& key, const float (&deltas)[4], float x,
                               float width, float& y) {
     (void)width;
-    m_uiDrawList.addText(m_uiFont, label, {x + 10, y + 4}, kText);
+    const float bw = scaled(30.0f), bh = scaled(22.0f), gap = scaled(2.0f);
+    const float valueW = scaled(52.0f);
+    m_uiDrawList.addText(m_uiFont, label,
+                         {x + scaled(10.0f), y + (bh - m_uiFont.lineHeightPx()) * 0.5f}, kText);
 
-    float bx = x + 78.0f;
-    constexpr float bw = 30.0f, bh = 22.0f, gap = 2.0f;
+    float bx = x + scaled(78.0f);
     const char* labels[4] = {"<<", "<", ">", ">>"};
     char buf[32];
     for (int i = 0; i < 4; ++i) {
         const UiRect r = UiRect::fromXYWH(bx, y, bw, bh);
-        m_uiDrawList.addRoundRectFilled(r, {0.10f, 0.12f, 0.17f, 0.90f}, 2.0f);
-        m_uiDrawList.addRoundRect(r, {0.25f, 0.28f, 0.38f, 0.80f}, 2.0f, 1.0f);
+        m_uiDrawList.addRoundRectFilled(r, {0.10f, 0.12f, 0.17f, 0.90f}, scaled(2.0f));
+        m_uiDrawList.addRoundRect(r, {0.25f, 0.28f, 0.38f, 0.80f}, scaled(2.0f), scaled(1.0f));
         const float lw = m_uiFont.measureText(labels[i]);
         m_uiDrawList.addText(m_uiFont, labels[i],
                              {r.minX + (bw - lw) * 0.5f,
@@ -408,42 +476,47 @@ void UiEditorApp::drawStepRow(const char* label, float value, EditorHit::Action 
         bx += bw + gap;
 
         if (i == 1) {
-            const UiRect vr = UiRect::fromXYWH(bx, y, 52.0f, bh);
+            const UiRect vr = UiRect::fromXYWH(bx, y, valueW, bh);
             if (std::fabs(value) < 100.0f && std::fabs(value - std::round(value)) > 0.005f) {
                 std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(value));
             } else {
                 std::snprintf(buf, sizeof(buf), "%.0f", static_cast<double>(value));
             }
-            m_uiDrawList.addRoundRectFilled(vr, {0.12f, 0.13f, 0.16f, 0.9f}, 2.0f);
+            m_uiDrawList.addRoundRectFilled(vr, {0.12f, 0.13f, 0.16f, 0.9f}, scaled(2.0f));
             const float vw = m_uiFont.measureText(buf);
             m_uiDrawList.addText(m_uiFont, buf,
-                                 {vr.minX + (52.0f - vw) * 0.5f,
+                                 {vr.minX + (valueW - vw) * 0.5f,
                                   vr.minY + (bh - m_uiFont.lineHeightPx()) * 0.5f},
                                  kGold);
-            bx += 52.0f + gap;
+            bx += valueW + gap;
         }
     }
-    y += bh + 5.0f;
+    y += bh + scaled(5.0f);
 }
 
 void UiEditorApp::drawColorRow(const char* label, const std::string& key, const UiColor& current,
                                bool present, float x, float width, float& y) {
     const bool open = (m_colorKey == key);
+    const float rowH = scaled(22.0f);
+    const float textY = y + (rowH - m_uiFont.lineHeightPx()) * 0.5f;
 
     // Header: label, the live swatch (click to open the picker), and a clear.
-    m_uiDrawList.addText(m_uiFont, label, {x + 10, y + 4}, kText);
+    m_uiDrawList.addText(m_uiFont, label, {x + scaled(10.0f), textY}, kText);
 
-    const UiRect swatch = UiRect::fromXYWH(x + 96.0f, y, 60.0f, 22.0f);
+    const float swatchW = scaled(60.0f);
+    const UiRect swatch = UiRect::fromXYWH(x + scaled(96.0f), y, swatchW, rowH);
     // Checker behind the swatch so a translucent color reads as translucent.
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(swatch.minX, swatch.minY, 30.0f, 22.0f),
-                               {0.30f, 0.30f, 0.34f, 1.0f});
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(swatch.minX + 30.0f, swatch.minY, 30.0f, 22.0f),
-                               {0.18f, 0.18f, 0.21f, 1.0f});
-    if (present) m_uiDrawList.addRoundRectFilled(swatch, current, 3.0f);
-    m_uiDrawList.addRoundRect(swatch, open ? kBlue : UiColor{0.32f, 0.34f, 0.42f, 0.85f}, 3.0f,
-                              open ? 2.0f : 1.0f);
+    m_uiDrawList.addRectFilled(
+        UiRect::fromXYWH(swatch.minX, swatch.minY, swatchW * 0.5f, rowH),
+        {0.30f, 0.30f, 0.34f, 1.0f});
+    m_uiDrawList.addRectFilled(
+        UiRect::fromXYWH(swatch.minX + swatchW * 0.5f, swatch.minY, swatchW * 0.5f, rowH),
+        {0.18f, 0.18f, 0.21f, 1.0f});
+    if (present) m_uiDrawList.addRoundRectFilled(swatch, current, scaled(3.0f));
+    m_uiDrawList.addRoundRect(swatch, open ? kBlue : UiColor{0.32f, 0.34f, 0.42f, 0.85f},
+                              scaled(3.0f), open ? scaled(2.0f) : scaled(1.0f));
     if (!present) {
-        m_uiDrawList.addText(m_uiFont, "unset", {swatch.minX + 12.0f, swatch.minY + 3.0f}, kTextDim);
+        m_uiDrawList.addText(m_uiFont, "unset", {swatch.minX + scaled(12.0f), textY}, kTextDim);
     }
     EditorHit openHit;
     openHit.rect = swatch;
@@ -452,37 +525,38 @@ void UiEditorApp::drawColorRow(const char* label, const std::string& key, const 
     pushHit(openHit);
 
     // "--" clears the property so the widget falls back to its own default.
-    const UiRect clear = UiRect::fromXYWH(x + width - 40.0f, y, 30.0f, 22.0f);
-    m_uiDrawList.addRoundRectFilled(clear, {0.10f, 0.12f, 0.17f, 0.90f}, 3.0f);
-    m_uiDrawList.addRoundRect(clear, present ? UiColor{0.3f, 0.3f, 0.4f, 0.6f} : kBlue, 3.0f, 1.0f);
-    m_uiDrawList.addText(m_uiFont, "--", {clear.minX + 9.0f, clear.minY + 3.0f}, kTextDim);
+    const UiRect clear = UiRect::fromXYWH(x + width - scaled(40.0f), y, scaled(30.0f), rowH);
+    m_uiDrawList.addRoundRectFilled(clear, {0.10f, 0.12f, 0.17f, 0.90f}, scaled(3.0f));
+    m_uiDrawList.addRoundRect(clear, present ? UiColor{0.3f, 0.3f, 0.4f, 0.6f} : kBlue,
+                              scaled(3.0f), scaled(1.0f));
+    m_uiDrawList.addText(m_uiFont, "--", {clear.minX + scaled(9.0f), textY}, kTextDim);
     EditorHit clearHit;
     clearHit.rect = clear;
     clearHit.action = EditorHit::Action::ClearProp;
     clearHit.key = key;
     pushHit(clearHit);
-    y += 26.0f;
+    y += scaled(26.0f);
 
     // Quick presets, always available so a one-click choice stays one click.
-    float cx = x + 10.0f;
-    constexpr float sz = 18.0f;
+    float cx = x + scaled(10.0f);
+    const float sz = scaled(18.0f);
     for (int i = 0; i < kNumColorPresets; ++i) {
         const UiRect r = UiRect::fromXYWH(cx, y, sz, sz);
-        m_uiDrawList.addRoundRectFilled(r, kColorPresets[i], 3.0f);
+        m_uiDrawList.addRoundRectFilled(r, kColorPresets[i], scaled(3.0f));
         const bool active = present && std::fabs(current.r - kColorPresets[i].r) < 0.01f &&
                             std::fabs(current.g - kColorPresets[i].g) < 0.01f &&
                             std::fabs(current.b - kColorPresets[i].b) < 0.01f;
-        m_uiDrawList.addRoundRect(r, active ? kBlue : UiColor{0.3f, 0.3f, 0.4f, 0.5f}, 3.0f,
-                                  active ? 2.0f : 1.0f);
+        m_uiDrawList.addRoundRect(r, active ? kBlue : UiColor{0.3f, 0.3f, 0.4f, 0.5f}, scaled(3.0f),
+                                  active ? scaled(2.0f) : scaled(1.0f));
         EditorHit hit;
         hit.rect = r;
         hit.action = EditorHit::Action::SetColorProp;
         hit.key = key;
         hit.colorValue = kColorPresets[i];
         pushHit(hit);
-        cx += sz + 3.0f;
+        cx += sz + scaled(3.0f);
     }
-    y += sz + 6.0f;
+    y += sz + scaled(6.0f);
 
     if (open) drawColorPicker(key, current, x, width, y);
 }
@@ -503,14 +577,14 @@ void UiEditorApp::drawColorPicker(const std::string& key, const UiColor& current
     }
     const Hsv hsv = m_pickerHsv;
 
-    constexpr float kSquareH = 104.0f;
-    constexpr float kBarW = 15.0f;
-    const float squareW = width - 20.0f - (kBarW + 6.0f) * 2.0f;
+    const float kSquareH = scaled(104.0f);
+    const float kBarW = scaled(15.0f);
+    const float squareW = width - scaled(20.0f) - (kBarW + scaled(6.0f)) * 2.0f;
 
     // ── Saturation/value square ──────────────────────────────────────────────
     // Value scales RGB linearly, so each saturation column is exactly a vertical
     // gradient from full value down to black: 32 strips, no per-pixel work.
-    m_svRect = UiRect::fromXYWH(x + 10.0f, y, squareW, kSquareH);
+    m_svRect = UiRect::fromXYWH(x + scaled(10.0f), y, squareW, kSquareH);
     constexpr int kStrips = 32;
     for (int i = 0; i < kStrips; ++i) {
         const float s0 = static_cast<float>(i) / static_cast<float>(kStrips);
@@ -520,18 +594,18 @@ void UiEditorApp::drawColorPicker(const std::string& key, const UiColor& current
             UiRect::fromXYWH(m_svRect.minX + s0 * squareW, m_svRect.minY, stripW + 0.5f, kSquareH),
             top, UiColor{0, 0, 0, 1});
     }
-    m_uiDrawList.addRect(m_svRect, {0.32f, 0.34f, 0.42f, 0.85f}, 1.0f);
+    m_uiDrawList.addRect(m_svRect, {0.32f, 0.34f, 0.42f, 0.85f}, scaled(1.0f));
     {
         const float cx = m_svRect.minX + hsv.s * squareW;
         const float cy = m_svRect.minY + (1.0f - hsv.v) * kSquareH;
-        m_uiDrawList.addCircle({cx, cy}, 5.0f, {0, 0, 0, 0.85f}, 3.0f);
-        m_uiDrawList.addCircle({cx, cy}, 5.0f, {1, 1, 1, 0.95f}, 1.5f);
+        m_uiDrawList.addCircle({cx, cy}, scaled(5.0f), {0, 0, 0, 0.85f}, scaled(3.0f));
+        m_uiDrawList.addCircle({cx, cy}, scaled(5.0f), {1, 1, 1, 0.95f}, scaled(1.5f));
     }
 
     // ── Hue bar ──────────────────────────────────────────────────────────────
     // Six exact gradient segments: between adjacent primaries, HSV hue at s=v=1
     // is linear in RGB.
-    m_hueRect = UiRect::fromXYWH(m_svRect.maxX + 6.0f, y, kBarW, kSquareH);
+    m_hueRect = UiRect::fromXYWH(m_svRect.maxX + scaled(6.0f), y, kBarW, kSquareH);
     for (int i = 0; i < 6; ++i) {
         const float segH = kSquareH / 6.0f;
         m_uiDrawList.addRectFilledVGradient(
@@ -540,15 +614,16 @@ void UiEditorApp::drawColorPicker(const std::string& key, const UiColor& current
             hsvToRgb(Hsv{static_cast<float>(i) * 60.0f, 1.0f, 1.0f}),
             hsvToRgb(Hsv{static_cast<float>(i + 1) * 60.0f, 1.0f, 1.0f}));
     }
-    m_uiDrawList.addRect(m_hueRect, {0.32f, 0.34f, 0.42f, 0.85f}, 1.0f);
+    m_uiDrawList.addRect(m_hueRect, {0.32f, 0.34f, 0.42f, 0.85f}, scaled(1.0f));
     {
         const float hy = m_hueRect.minY + (hsv.h / 360.0f) * kSquareH;
-        m_uiDrawList.addRectFilled({m_hueRect.minX - 2.0f, hy - 1.5f, m_hueRect.maxX + 2.0f, hy + 1.5f},
+        m_uiDrawList.addRectFilled({m_hueRect.minX - scaled(2.0f), hy - scaled(1.5f),
+                                    m_hueRect.maxX + scaled(2.0f), hy + scaled(1.5f)},
                                    {1, 1, 1, 0.95f});
     }
 
     // ── Alpha bar ────────────────────────────────────────────────────────────
-    m_alphaRect = UiRect::fromXYWH(m_hueRect.maxX + 6.0f, y, kBarW, kSquareH);
+    m_alphaRect = UiRect::fromXYWH(m_hueRect.maxX + scaled(6.0f), y, kBarW, kSquareH);
     // Checker so full transparency is distinguishable from a dark color.
     for (int i = 0; i < 8; ++i) {
         m_uiDrawList.addRectFilled(
@@ -558,13 +633,14 @@ void UiEditorApp::drawColorPicker(const std::string& key, const UiColor& current
     }
     const UiColor opaque = hsvToRgb(hsv, 1.0f);
     m_uiDrawList.addRectFilledVGradient(m_alphaRect, opaque, withAlpha(opaque, 0.0f));
-    m_uiDrawList.addRect(m_alphaRect, {0.32f, 0.34f, 0.42f, 0.85f}, 1.0f);
+    m_uiDrawList.addRect(m_alphaRect, {0.32f, 0.34f, 0.42f, 0.85f}, scaled(1.0f));
     {
         const float ay = m_alphaRect.minY + (1.0f - current.a) * kSquareH;
-        m_uiDrawList.addRectFilled(
-            {m_alphaRect.minX - 2.0f, ay - 1.5f, m_alphaRect.maxX + 2.0f, ay + 1.5f}, {1, 1, 1, 0.95f});
+        m_uiDrawList.addRectFilled({m_alphaRect.minX - scaled(2.0f), ay - scaled(1.5f),
+                                    m_alphaRect.maxX + scaled(2.0f), ay + scaled(1.5f)},
+                                   {1, 1, 1, 0.95f});
     }
-    y += kSquareH + 6.0f;
+    y += kSquareH + scaled(6.0f);
 
     // ── Numeric readout ──────────────────────────────────────────────────────
     char buf[128];
@@ -572,8 +648,8 @@ void UiEditorApp::drawColorPicker(const std::string& key, const UiColor& current
     std::snprintf(buf, sizeof(buf), "%s   H%.0f S%.0f V%.0f", hex.c_str(),
                   static_cast<double>(hsv.h), static_cast<double>(hsv.s * 100.0f),
                   static_cast<double>(hsv.v * 100.0f));
-    m_uiDrawList.addText(m_uiFont, buf, {x + 10.0f, y}, kGold);
-    y += m_uiFont.lineHeightPx() + 3.0f;
+    m_uiDrawList.addText(m_uiFont, buf, {x + scaled(10.0f), y}, kGold);
+    y += m_uiFont.lineHeightPx() + scaled(3.0f);
 
     // ── WCAG contrast against what this color actually sits on ───────────────
     const NodePath* primary = m_selection.primary();
@@ -590,31 +666,35 @@ void UiEditorApp::drawColorPicker(const std::string& key, const UiColor& current
         const UiColor ratingColor = ratio >= 4.5f  ? UiColor{0.45f, 0.85f, 0.50f, 1.0f}
                                     : ratio >= 3.0f ? kGold
                                                     : UiColor{0.90f, 0.45f, 0.42f, 1.0f};
-        m_uiDrawList.addText(m_uiFont, buf, {x + 10.0f, y}, ratingColor);
+        m_uiDrawList.addText(m_uiFont, buf, {x + scaled(10.0f), y}, ratingColor);
 
         // Preview chip: this color as it will actually appear on that backdrop.
-        const UiRect chip = UiRect::fromXYWH(x + width - 52.0f, y, 42.0f, 16.0f);
+        const UiRect chip = UiRect::fromXYWH(x + width - scaled(52.0f), y, scaled(42.0f),
+                                             scaled(16.0f));
         m_uiDrawList.addRectFilled(chip, behind);
-        m_uiDrawList.addRectFilled(UiRect::fromXYWH(chip.minX + 3, chip.minY + 3, 36.0f, 10.0f),
+        m_uiDrawList.addRectFilled(UiRect::fromXYWH(chip.minX + scaled(3.0f),
+                                                    chip.minY + scaled(3.0f), scaled(36.0f),
+                                                    scaled(10.0f)),
                                    effective);
-        m_uiDrawList.addRect(chip, {0.32f, 0.34f, 0.42f, 0.85f}, 1.0f);
+        m_uiDrawList.addRect(chip, {0.32f, 0.34f, 0.42f, 0.85f}, scaled(1.0f));
     }
-    y += m_uiFont.lineHeightPx() + 6.0f;
+    y += m_uiFont.lineHeightPx() + scaled(6.0f);
 
     // ── Harmony scheme selector ──────────────────────────────────────────────
     const std::vector<Harmony>& schemes = allHarmonies();
-    constexpr float kSchemeW = 64.0f, kSchemeH = 19.0f;
+    const float kSchemeW = scaled(64.0f), kSchemeH = scaled(19.0f);
+    const float schemeGap = scaled(3.0f);
     for (std::size_t i = 0; i < schemes.size(); ++i) {
         const float col = static_cast<float>(i % 4);
         const float row = static_cast<float>(i / 4);
-        const UiRect r = UiRect::fromXYWH(x + 10.0f + col * (kSchemeW + 3.0f),
-                                          y + row * (kSchemeH + 3.0f), kSchemeW, kSchemeH);
+        const UiRect r = UiRect::fromXYWH(x + scaled(10.0f) + col * (kSchemeW + schemeGap),
+                                          y + row * (kSchemeH + schemeGap), kSchemeW, kSchemeH);
         const bool active = (schemes[i] == m_harmony);
         m_uiDrawList.addRoundRectFilled(
             r, active ? UiColor{0.15f, 0.25f, 0.45f, 0.95f} : UiColor{0.10f, 0.12f, 0.17f, 0.90f},
-            3.0f);
-        m_uiDrawList.addRoundRect(r, active ? kBlue : UiColor{0.25f, 0.28f, 0.38f, 0.80f}, 3.0f,
-                                  active ? 1.5f : 1.0f);
+            scaled(3.0f));
+        m_uiDrawList.addRoundRect(r, active ? kBlue : UiColor{0.25f, 0.28f, 0.38f, 0.80f},
+                                  scaled(3.0f), active ? scaled(1.5f) : scaled(1.0f));
         const std::string name(harmonyName(schemes[i]));
         const float lw = m_uiFont.measureText(name);
         m_uiDrawList.addText(m_uiFont, name,
@@ -628,47 +708,53 @@ void UiEditorApp::drawColorPicker(const std::string& key, const UiColor& current
         hit.delta = static_cast<float>(i);
         pushHit(hit);
     }
-    y += (kSchemeH + 3.0f) * 2.0f + 4.0f;
+    y += (kSchemeH + schemeGap) * 2.0f + scaled(4.0f);
 
     // ── The scheme's colors, click to apply ──────────────────────────────────
     const std::vector<UiColor> partners = harmonyColors(current, m_harmony);
-    const float swatchW = std::min(34.0f, (width - 20.0f) / static_cast<float>(partners.size()) - 3.0f);
-    float sx = x + 10.0f;
+    const float partnerH = scaled(24.0f);
+    const float swatchW = std::min(scaled(34.0f), (width - scaled(20.0f)) /
+                                                          static_cast<float>(partners.size()) -
+                                                      scaled(3.0f));
+    float sx = x + scaled(10.0f);
     for (std::size_t i = 0; i < partners.size(); ++i) {
-        const UiRect r = UiRect::fromXYWH(sx, y, swatchW, 24.0f);
-        m_uiDrawList.addRoundRectFilled(r, partners[i], 3.0f);
+        const UiRect r = UiRect::fromXYWH(sx, y, swatchW, partnerH);
+        m_uiDrawList.addRoundRectFilled(r, partners[i], scaled(3.0f));
         // Index 0 is the base itself — mark it so the row reads as "you are here
         // plus what goes with it".
-        m_uiDrawList.addRoundRect(r, i == 0 ? kBlue : UiColor{0.30f, 0.32f, 0.40f, 0.70f}, 3.0f,
-                                  i == 0 ? 2.0f : 1.0f);
+        m_uiDrawList.addRoundRect(r, i == 0 ? kBlue : UiColor{0.30f, 0.32f, 0.40f, 0.70f},
+                                  scaled(3.0f), i == 0 ? scaled(2.0f) : scaled(1.0f));
         EditorHit hit;
         hit.rect = r;
         hit.action = EditorHit::Action::SetColorProp;
         hit.key = key;
         hit.colorValue = partners[i];
         pushHit(hit);
-        sx += swatchW + 3.0f;
+        sx += swatchW + scaled(3.0f);
     }
-    y += 24.0f + 8.0f;
+    y += partnerH + scaled(8.0f);
 }
 
 void UiEditorApp::drawBoolRow(const char* label, const std::string& key, bool value, float x,
                               float width, float& y) {
     (void)width;
-    m_uiDrawList.addText(m_uiFont, label, {x + 10, y + 5}, kText);
+    const float btnW = scaled(58.0f), btnH = scaled(24.0f);
+    m_uiDrawList.addText(m_uiFont, label,
+                         {x + scaled(10.0f), y + (btnH - m_uiFont.lineHeightPx()) * 0.5f}, kText);
     const char* labels[2] = {"Off", "On"};
     for (int i = 0; i < 2; ++i) {
         const bool active = (value == (i == 1));
-        const UiRect r = UiRect::fromXYWH(x + 100.0f + static_cast<float>(i) * 62.0f, y, 58.0f, 24.0f);
+        const UiRect r = UiRect::fromXYWH(
+            x + scaled(100.0f) + static_cast<float>(i) * scaled(62.0f), y, btnW, btnH);
         m_uiDrawList.addRoundRectFilled(
             r, active ? UiColor{0.15f, 0.25f, 0.45f, 0.95f} : UiColor{0.10f, 0.12f, 0.17f, 0.90f},
-            4.0f);
-        m_uiDrawList.addRoundRect(r, active ? kBlue : UiColor{0.25f, 0.28f, 0.38f, 0.80f}, 4.0f,
-                                  active ? 1.5f : 1.0f);
+            scaled(4.0f));
+        m_uiDrawList.addRoundRect(r, active ? kBlue : UiColor{0.25f, 0.28f, 0.38f, 0.80f},
+                                  scaled(4.0f), active ? scaled(1.5f) : scaled(1.0f));
         const float lw = m_uiFont.measureText(labels[i]);
         m_uiDrawList.addText(m_uiFont, labels[i],
-                             {r.minX + (58.0f - lw) * 0.5f,
-                              r.minY + (24.0f - m_uiFont.lineHeightPx()) * 0.5f},
+                             {r.minX + (btnW - lw) * 0.5f,
+                              r.minY + (btnH - m_uiFont.lineHeightPx()) * 0.5f},
                              active ? kBlue : kText);
         EditorHit hit;
         hit.rect = r;
@@ -677,27 +763,30 @@ void UiEditorApp::drawBoolRow(const char* label, const std::string& key, bool va
         hit.delta = (i == 1) ? 1.0f : 0.0f;
         pushHit(hit);
     }
-    y += 24.0f + 6.0f;
+    y += btnH + scaled(6.0f);
 }
 
 void UiEditorApp::drawTextRow(const char* label, const std::string& key, const std::string& value,
                               float x, float width, float& y) {
-    m_uiDrawList.addText(m_uiFont, label, {x + 10, y + 4}, kText);
-    const UiRect field = UiRect::fromXYWH(x + 78.0f, y, width - 88.0f, 22.0f);
+    const float fieldH = scaled(22.0f);
+    const float textY = y + (fieldH - m_uiFont.lineHeightPx()) * 0.5f;
+    m_uiDrawList.addText(m_uiFont, label, {x + scaled(10.0f), textY}, kText);
+    const UiRect field =
+        UiRect::fromXYWH(x + scaled(78.0f), y, width - scaled(88.0f), fieldH);
     const bool editing = m_editing && m_editingKey == key;
 
-    m_uiDrawList.addRoundRectFilled(field, {0.12f, 0.13f, 0.16f, 0.95f}, 2.0f);
-    m_uiDrawList.addRoundRect(field, editing ? kBlue : UiColor{0.25f, 0.28f, 0.38f, 0.70f}, 2.0f,
-                              editing ? 1.5f : 1.0f);
+    m_uiDrawList.addRoundRectFilled(field, {0.12f, 0.13f, 0.16f, 0.95f}, scaled(2.0f));
+    m_uiDrawList.addRoundRect(field, editing ? kBlue : UiColor{0.25f, 0.28f, 0.38f, 0.70f},
+                              scaled(2.0f), editing ? scaled(1.5f) : scaled(1.0f));
 
     std::string shown = editing ? m_editingBuffer : value;
     // Trim from the left so the caret end of a long string stays visible.
-    while (!shown.empty() && m_uiFont.measureText(shown) > field.width() - 12.0f) {
+    while (!shown.empty() && m_uiFont.measureText(shown) > field.width() - scaled(12.0f)) {
         shown.erase(shown.begin());
     }
     if (editing) shown += "_";
     m_uiDrawList.pushClip(field);
-    m_uiDrawList.addText(m_uiFont, shown, {field.minX + 5.0f, field.minY + 3.0f},
+    m_uiDrawList.addText(m_uiFont, shown, {field.minX + scaled(5.0f), textY},
                          editing ? kGold : (value.empty() ? kTextDim : kText));
     m_uiDrawList.popClip();
 
@@ -707,30 +796,37 @@ void UiEditorApp::drawTextRow(const char* label, const std::string& key, const s
     hit.key = key;
     pushHit(hit);
 
-    y += 22.0f + 5.0f;
+    y += fieldH + scaled(5.0f);
 }
 
 void UiEditorApp::drawProperties() {
-    const float px = static_cast<float>(m_lastFbW) - kPropsW;
-    const float py = kToolbarH;
-    const float ph = static_cast<float>(m_lastFbH) - kToolbarH - kStatusH;
+    const float paneW = propsW();
+    const float px = static_cast<float>(m_lastFbW) - paneW;
+    const float py = toolbarH();
+    const float ph = static_cast<float>(m_lastFbH) - toolbarH() - statusH();
+    const float headerH = scaled(26.0f);
 
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(px, py, kPropsW, ph), kPanelBg);
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(px, py, kPropsW, 26.0f), {0.09f, 0.10f, 0.14f, 1.0f});
-    m_uiDrawList.addText(m_uiFontBold, "PROPERTIES", {px + 10, py + 5}, kGold);
+    m_uiDrawList.addRectFilled(UiRect::fromXYWH(px, py, paneW, ph), kPanelBg);
+    m_uiDrawList.addRectFilled(UiRect::fromXYWH(px, py, paneW, headerH),
+                               {0.09f, 0.10f, 0.14f, 1.0f});
+    m_uiDrawList.addText(m_uiFontBold, "PROPERTIES",
+                         {px + scaled(10.0f), py + (headerH - m_uiFontBold.lineHeightPx()) * 0.5f},
+                         kGold);
 
-    float y = py + 34.0f;
+    float y = py + headerH + scaled(8.0f);
     const NodePath* primary = m_selection.primary();
 
     // The open picker belongs to one node; selecting another closes it.
     if (!primary || m_colorPath != *primary) m_colorKey.clear();
 
     if (!primary || !m_doc.isValid(*primary)) {
-        m_uiDrawList.addText(m_uiFont, "No node selected", {px + 10, y}, kTextDim);
-        y += m_uiFont.lineHeightPx() + 14.0f;
-        m_uiDrawList.addText(m_uiFont, "Click a palette type, then", {px + 10, y}, kTextDim);
-        y += m_uiFont.lineHeightPx() + 2.0f;
-        m_uiDrawList.addText(m_uiFont, "click the canvas to place it.", {px + 10, y}, kTextDim);
+        m_uiDrawList.addText(m_uiFont, "No node selected", {px + scaled(10.0f), y}, kTextDim);
+        y += m_uiFont.lineHeightPx() + scaled(14.0f);
+        m_uiDrawList.addText(m_uiFont, "Click a palette type, then", {px + scaled(10.0f), y},
+                             kTextDim);
+        y += m_uiFont.lineHeightPx() + scaled(2.0f);
+        m_uiDrawList.addText(m_uiFont, "click the canvas to place it.", {px + scaled(10.0f), y},
+                             kTextDim);
         return;
     }
 
@@ -741,46 +837,46 @@ void UiEditorApp::drawProperties() {
 
     char buf[160];
     std::snprintf(buf, sizeof(buf), "%s%s", type.c_str(), desc ? "" : "  (unknown type)");
-    m_uiDrawList.addText(m_uiFontBold, buf, {px + 10, y}, kText);
-    y += m_uiFontBold.lineHeightPx() + 6.0f;
+    m_uiDrawList.addText(m_uiFontBold, buf, {px + scaled(10.0f), y}, kText);
+    y += m_uiFontBold.lineHeightPx() + scaled(6.0f);
 
     if (m_selection.size() > 1) {
         std::snprintf(buf, sizeof(buf), "%d nodes selected", static_cast<int>(m_selection.size()));
-        m_uiDrawList.addText(m_uiFont, buf, {px + 10, y}, kBlue);
-        y += m_uiFont.lineHeightPx() + 6.0f;
+        m_uiDrawList.addText(m_uiFont, buf, {px + scaled(10.0f), y}, kBlue);
+        y += m_uiFont.lineHeightPx() + scaled(6.0f);
     }
     if (m_doc.parentControlsLayout(path)) {
-        m_uiDrawList.addText(m_uiFont, "position set by parent at runtime", {px + 10, y},
+        m_uiDrawList.addText(m_uiFont, "position set by parent at runtime", {px + scaled(10.0f), y},
                              kManagedTag);
-        y += m_uiFont.lineHeightPx() + 6.0f;
+        y += m_uiFont.lineHeightPx() + scaled(6.0f);
     }
 
     // Everything from here down scrolls under the pinned reorder/delete buttons
     // when the pane runs out of room, so it is clipped — and pushHit() drops any
     // hit region that ends up outside the clip, so nothing stays clickable where
     // it isn't drawn.
-    m_hitClip = UiRect{px, y - 4.0f, px + kPropsW,
-                       static_cast<float>(m_lastFbH) - kStatusH - 78.0f};
+    m_hitClip = UiRect{px, y - scaled(4.0f), px + paneW,
+                       static_cast<float>(m_lastFbH) - statusH() - scaled(78.0f)};
     m_hitClipActive = true;
     m_uiDrawList.pushClip(m_hitClip);
 
-    drawTextRow("id", "id", m_doc.idOf(path), px, kPropsW, y);
+    drawTextRow("id", "id", m_doc.idOf(path), px, paneW, y);
 
     const UiRect rect = m_doc.absoluteRect(path);
     static constexpr float kPixelSteps[4] = {-10.0f, -1.0f, 1.0f, 10.0f};
-    drawSectionLabel("Position", px, kPropsW, y);
-    drawStepRow("X", rect.minX, EditorHit::Action::StepRectX, "x", kPixelSteps, px, kPropsW, y);
-    drawStepRow("Y", rect.minY, EditorHit::Action::StepRectY, "y", kPixelSteps, px, kPropsW, y);
-    drawSectionLabel("Size", px, kPropsW, y);
-    drawStepRow("W", rect.width(), EditorHit::Action::StepRectW, "width", kPixelSteps, px, kPropsW,
+    drawSectionLabel("Position", px, paneW, y);
+    drawStepRow("X", rect.minX, EditorHit::Action::StepRectX, "x", kPixelSteps, px, paneW, y);
+    drawStepRow("Y", rect.minY, EditorHit::Action::StepRectY, "y", kPixelSteps, px, paneW, y);
+    drawSectionLabel("Size", px, paneW, y);
+    drawStepRow("W", rect.width(), EditorHit::Action::StepRectW, "width", kPixelSteps, px, paneW,
                 y);
     drawStepRow("H", rect.height(), EditorHit::Action::StepRectH, "height", kPixelSteps, px,
-                kPropsW, y);
+                paneW, y);
 
     static constexpr float kFineSteps[4] = {-0.25f, -0.05f, 0.05f, 0.25f};
     static const std::vector<PropDesc> kNoProps;
     const std::vector<PropDesc>& props = desc ? desc->props : kNoProps;
-    if (!props.empty()) drawSectionLabel(type.c_str(), px, kPropsW, y);
+    if (!props.empty()) drawSectionLabel(type.c_str(), px, paneW, y);
     for (const PropDesc& prop : props) {
         const std::string key(prop.key);
         const std::string label(prop.label);
@@ -790,22 +886,22 @@ void UiEditorApp::drawProperties() {
                 const bool fine = (prop.max > prop.min) && (prop.max - prop.min) <= 2.0f;
                 drawStepRow(label.c_str(), nodeFloat(*node, key.c_str(), 0.0f),
                             EditorHit::Action::StepFloatProp, key, fine ? kFineSteps : kPixelSteps,
-                            px, kPropsW, y);
+                            px, paneW, y);
                 break;
             }
             case PropKind::Bool:
-                drawBoolRow(label.c_str(), key, node->value(key, false), px, kPropsW, y);
+                drawBoolRow(label.c_str(), key, node->value(key, false), px, paneW, y);
                 break;
             case PropKind::Color:
                 drawColorRow(label.c_str(), key,
                              nodeColor(*node, key.c_str(), UiColor{0, 0, 0, 0}),
-                             node->contains(key), px, kPropsW, y);
+                             node->contains(key), px, paneW, y);
                 break;
             case PropKind::String:
             case PropKind::Text:
             case PropKind::Frame:
             case PropKind::Slot:
-                drawTextRow(label.c_str(), key, nodeString(*node, key.c_str()), px, kPropsW, y);
+                drawTextRow(label.c_str(), key, nodeString(*node, key.c_str()), px, paneW, y);
                 break;
         }
     }
@@ -814,15 +910,16 @@ void UiEditorApp::drawProperties() {
     m_hitClipActive = false;
 
     // Delete, pinned to the bottom of the pane.
-    const float dy = static_cast<float>(m_lastFbH) - kStatusH - 44.0f;
-    const UiRect del = UiRect::fromXYWH(px + 10, dy, kPropsW - 20.0f, 30.0f);
-    m_uiDrawList.addRoundRectFilled(del, {0.25f, 0.06f, 0.06f, 0.90f}, 5.0f);
-    m_uiDrawList.addRoundRect(del, kDeleteRed, 5.0f, 1.5f);
+    const float delH = scaled(30.0f);
+    const float dy = static_cast<float>(m_lastFbH) - statusH() - scaled(44.0f);
+    const UiRect del = UiRect::fromXYWH(px + scaled(10.0f), dy, paneW - scaled(20.0f), delH);
+    m_uiDrawList.addRoundRectFilled(del, {0.25f, 0.06f, 0.06f, 0.90f}, scaled(5.0f));
+    m_uiDrawList.addRoundRect(del, kDeleteRed, scaled(5.0f), scaled(1.5f));
     const char* delLabel = "Delete Selection";
     const float dlw = m_uiFontBold.measureText(delLabel);
     m_uiDrawList.addText(m_uiFontBold, delLabel,
                          {del.minX + (del.width() - dlw) * 0.5f,
-                          del.minY + (30.0f - m_uiFontBold.lineHeightPx()) * 0.5f},
+                          del.minY + (delH - m_uiFontBold.lineHeightPx()) * 0.5f},
                          {1.0f, 0.55f, 0.50f, 1.0f});
     EditorHit delHit;
     delHit.rect = del;
@@ -830,18 +927,20 @@ void UiEditorApp::drawProperties() {
     pushHit(delHit);
 
     // Sibling reorder, just above Delete.
-    const float ry = dy - 30.0f;
+    const float orderH = scaled(24.0f);
+    const float ry = dy - scaled(30.0f);
     const char* orderLabels[2] = {"Send back", "Bring front"};
     for (int i = 0; i < 2; ++i) {
-        const UiRect r =
-            UiRect::fromXYWH(px + 10.0f + static_cast<float>(i) * ((kPropsW - 20.0f) * 0.5f + 2.0f),
-                             ry, (kPropsW - 24.0f) * 0.5f, 24.0f);
-        m_uiDrawList.addRoundRectFilled(r, {0.10f, 0.12f, 0.17f, 0.90f}, 3.0f);
-        m_uiDrawList.addRoundRect(r, {0.25f, 0.28f, 0.38f, 0.80f}, 3.0f, 1.0f);
+        const UiRect r = UiRect::fromXYWH(
+            px + scaled(10.0f) +
+                static_cast<float>(i) * ((paneW - scaled(20.0f)) * 0.5f + scaled(2.0f)),
+            ry, (paneW - scaled(24.0f)) * 0.5f, orderH);
+        m_uiDrawList.addRoundRectFilled(r, {0.10f, 0.12f, 0.17f, 0.90f}, scaled(3.0f));
+        m_uiDrawList.addRoundRect(r, {0.25f, 0.28f, 0.38f, 0.80f}, scaled(3.0f), scaled(1.0f));
         const float lw = m_uiFont.measureText(orderLabels[i]);
         m_uiDrawList.addText(m_uiFont, orderLabels[i],
                              {r.minX + (r.width() - lw) * 0.5f,
-                              r.minY + (24.0f - m_uiFont.lineHeightPx()) * 0.5f},
+                              r.minY + (orderH - m_uiFont.lineHeightPx()) * 0.5f},
                              kText);
         EditorHit hit;
         hit.rect = r;
@@ -862,9 +961,11 @@ void UiEditorApp::buildWidgetTree(int fbW, int fbH) {
     auto toolbar = std::make_unique<Panel>();
     toolbar->background = {0.068f, 0.072f, 0.088f, 0.98f};
     toolbar->borderColor = {0.13f, 0.14f, 0.18f, 1.0f};
-    toolbar->borderThicknessPx = 1.0f;
-    toolbar->setRect(UiRect::fromXYWH(0, 0, static_cast<float>(fbW), kToolbarH));
+    toolbar->borderThicknessPx = scaled(1.0f);
+    toolbar->setRect(UiRect::fromXYWH(0, 0, static_cast<float>(fbW), toolbarH()));
 
+    // Geometry passed to flatButton is in logical pixels; it scales on the way
+    // into the widget rect so the call sites below stay readable.
     auto flatButton = [&](Panel& parent, float bx, float by, float bw, float bh,
                           const std::string& label, bool active, const UiColor& accent,
                           std::function<void()> fn) {
@@ -877,9 +978,9 @@ void UiEditorApp::buildWidgetTree(int fbW, int fbH) {
         btn->borderColor = withAlpha(accent, active ? 0.85f : 0.40f);
         btn->labelColor = active ? accent : kText;
         btn->glowColor = accent;
-        btn->glowSizePx = active ? 6.0f : 0.0f;
-        btn->cornerRadiusPx = 3.0f;
-        btn->setRect(UiRect::fromXYWH(bx, by, bw, bh));
+        btn->glowSizePx = active ? scaled(6.0f) : 0.0f;
+        btn->cornerRadiusPx = scaled(3.0f);
+        btn->setRect(UiRect::fromXYWH(scaled(bx), scaled(by), scaled(bw), scaled(bh)));
         parent.addChild(std::move(btn));
     };
 
@@ -892,7 +993,8 @@ void UiEditorApp::buildWidgetTree(int fbW, int fbH) {
         title->borderColor = {0, 0, 0, 0};
         title->glowSizePx = 0.0f;
         title->labelColor = kGold;
-        title->setRect(UiRect::fromXYWH(10, 6, 150, 34));
+        title->setRect(
+            UiRect::fromXYWH(scaled(10.0f), scaled(6.0f), scaled(150.0f), scaled(34.0f)));
         toolbar->addChild(std::move(title));
     }
 
@@ -951,8 +1053,9 @@ void UiEditorApp::buildWidgetTree(int fbW, int fbH) {
                    m_uiDirty = true;
                });
 
-    // Save/Load pinned to the right of the toolbar.
-    const float ioX = static_cast<float>(fbW) - 176.0f;
+    // Save/Load pinned to the right of the toolbar (logical units, like every
+    // other coordinate handed to flatButton).
+    const float ioX = static_cast<float>(fbW) / m_scale - 176.0f;
     flatButton(*toolbar, ioX, 7, 80, 32, "Save", false, {0.50f, 0.75f, 1.00f, 1.0f},
                [this]() { doSave(); });
     flatButton(*toolbar, ioX + 84.0f, 7, 80, 32, "Load", false, {0.50f, 0.75f, 1.00f, 1.0f},
@@ -964,8 +1067,9 @@ void UiEditorApp::buildWidgetTree(int fbW, int fbH) {
     auto palette = std::make_unique<Panel>();
     palette->background = kPanelBg;
     palette->borderColor = kPanelBord;
-    palette->borderThicknessPx = 1.0f;
-    palette->setRect(UiRect::fromXYWH(0, kToolbarH, kPaletteW, paletteBottom() - kToolbarH));
+    palette->borderThicknessPx = scaled(1.0f);
+    palette->setRect(
+        UiRect::fromXYWH(0, toolbarH(), paletteW(), paletteBottom() - toolbarH()));
 
     {
         auto header = std::make_unique<Button>(&m_uiFont, "WIDGET PALETTE", []() {});
@@ -975,7 +1079,7 @@ void UiEditorApp::buildWidgetTree(int fbW, int fbH) {
         header->borderColor = {0, 0, 0, 0};
         header->glowSizePx = 0.0f;
         header->labelColor = {0.50f, 0.55f, 0.72f, 1.0f};
-        header->setRect(UiRect::fromXYWH(0, kToolbarH, kPaletteW, 22.0f));
+        header->setRect(UiRect::fromXYWH(0, toolbarH(), paletteW(), scaled(22.0f)));
         palette->addChild(std::move(header));
     }
 
@@ -998,26 +1102,32 @@ void UiEditorApp::buildWidgetTree(int fbW, int fbH) {
 }
 
 void UiEditorApp::drawStatusBar(int fbW, int fbH) {
-    const float y = static_cast<float>(fbH) - kStatusH;
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(0, y, static_cast<float>(fbW), kStatusH),
+    const float barH = statusH();
+    const float y = static_cast<float>(fbH) - barH;
+    const float textY = y + (barH - m_uiFont.lineHeightPx()) * 0.5f;
+    m_uiDrawList.addRectFilled(UiRect::fromXYWH(0, y, static_cast<float>(fbW), barH),
                                {0.075f, 0.078f, 0.095f, 1.0f});
-    m_uiDrawList.addRectFilled(UiRect::fromXYWH(0, y, static_cast<float>(fbW), 1.0f),
-                               {0.16f, 0.17f, 0.22f, 1.0f});
+    m_uiDrawList.addRectFilled(
+        UiRect::fromXYWH(0, y, static_cast<float>(fbW), std::max(1.0f, scaled(1.0f))),
+        {0.16f, 0.17f, 0.22f, 1.0f});
 
     const std::string path = m_documentPath.empty() ? std::string("(unsaved)") : m_documentPath;
-    m_uiDrawList.addText(m_uiFont, path, {8.0f, y + 3.0f}, kTextDim);
+    m_uiDrawList.addText(m_uiFont, path, {scaled(8.0f), textY}, kTextDim);
 
     if (!m_statusMessage.empty()) {
         const float w = m_uiFont.measureText(m_statusMessage);
         m_uiDrawList.addText(m_uiFont, m_statusMessage,
-                             {(static_cast<float>(fbW) - w) * 0.5f, y + 3.0f}, kGold);
+                             {(static_cast<float>(fbW) - w) * 0.5f, textY}, kGold);
     }
 
-    char buf[160];
-    std::snprintf(buf, sizeof(buf), "%d selected  |  Ctrl+Z undo  C/V/D clipboard  arrows nudge",
-                  static_cast<int>(m_selection.size()));
+    char buf[192];
+    std::snprintf(buf, sizeof(buf),
+                  "%d selected  |  %.0f%% view  |  Ctrl+Z undo  C/V/D clipboard  arrows nudge",
+                  static_cast<int>(m_selection.size()),
+                  static_cast<double>(m_viewScale * 100.0f));
     const float w = m_uiFont.measureText(buf);
-    m_uiDrawList.addText(m_uiFont, buf, {static_cast<float>(fbW) - w - 8.0f, y + 3.0f}, kTextDim);
+    m_uiDrawList.addText(m_uiFont, buf, {static_cast<float>(fbW) - w - scaled(8.0f), textY},
+                         kTextDim);
 }
 
 // ─── Editing operations ──────────────────────────────────────────────────────
@@ -1613,10 +1723,35 @@ void UiEditorApp::handleKeyboard() {
 // ─── Lifecycle ───────────────────────────────────────────────────────────────
 
 bool UiEditorApp::onInit() {
+    // DPI scale, resolved once: the atlases below are baked at this size and are
+    // never re-baked, so moving the window to a differently-scaled monitor keeps
+    // the scale it started with. glfwGetWindowContentScale is the OS-reported
+    // factor; the framebuffer-to-window pixel ratio is the same number on the
+    // configurations that report it, and covers the ones that don't (the same
+    // cross-check src/app/app.cc makes).
+    {
+        int fbW = 0, fbH = 0, winW = 0, winH = 0;
+        framebufferSize(fbW, fbH);
+        glfwGetWindowSize(m_window, &winW, &winH);
+        const float pixelRatio =
+            (winW > 0) ? static_cast<float>(fbW) / static_cast<float>(winW) : 1.0f;
+        m_scale = std::max({1.0f, contentScale(), pixelRatio});
+        // Escape hatch for desktops whose scale factor GLFW cannot see (some X11
+        // and remote-display setups report 1.0 at any DPI).
+        if (const char* env = std::getenv("ODAI_UI_SCALE")) {
+            const float forced = std::strtof(env, nullptr);
+            if (forced > 0.25f && forced < 8.0f) m_scale = forced;
+        }
+        m_viewScale = m_scale;
+        VOX_LOGI("ui_editor") << "DPI scale " << m_scale << " (framebuffer " << fbW << "x" << fbH
+                              << ", window " << winW << "x" << winH << ")";
+    }
+
     if (!loadFonts(resolveAssetPath("assets/fonts/Inter-Regular.ttf"),
                    resolveAssetPath("assets/fonts/Inter-Bold.ttf"),
                    resolveAssetPath("assets/fonts/Inter-Italic.ttf"),
-                   resolveAssetPath("assets/fonts/Inter-Regular.ttf"), 16.0f, 15.0f)) {
+                   resolveAssetPath("assets/fonts/Inter-Regular.ttf"),
+                   std::round(scaled(kBodyFontPx)), std::round(scaled(kNumericFontPx)))) {
         return false;
     }
 
@@ -1696,7 +1831,8 @@ void UiEditorApp::onRender(float dt) {
     m_uiDrawList.addRectFilled(
         UiRect::fromXYWH(0, 0, static_cast<float>(fbW), static_cast<float>(fbH)), kEditorBg);
     m_uiDrawList.addRectFilled(
-        UiRect::fromXYWH(0, kToolbarH, kPaletteW, static_cast<float>(fbH) - kToolbarH), kPanelBg);
+        UiRect::fromXYWH(0, toolbarH(), paletteW(), static_cast<float>(fbH) - toolbarH()),
+        kPanelBg);
 
     drawCanvas();
 
@@ -1707,10 +1843,11 @@ void UiEditorApp::onRender(float dt) {
 
     const float fW = static_cast<float>(fbW);
     const float fH = static_cast<float>(fbH);
-    m_uiDrawList.addRectFilled({kPaletteW - 1, kToolbarH, kPaletteW, fH}, {0.16f, 0.17f, 0.22f, 1.0f});
-    m_uiDrawList.addRectFilled({fW - kPropsW, kToolbarH, fW - kPropsW + 1.0f, fH},
-                               {0.16f, 0.17f, 0.22f, 1.0f});
-    m_uiDrawList.addRectFilled({0.0f, kToolbarH - 1.0f, fW, kToolbarH}, {0.16f, 0.17f, 0.22f, 1.0f});
+    const float rule = std::max(1.0f, scaled(1.0f));
+    const UiColor ruleColor{0.16f, 0.17f, 0.22f, 1.0f};
+    m_uiDrawList.addRectFilled({paletteW() - rule, toolbarH(), paletteW(), fH}, ruleColor);
+    m_uiDrawList.addRectFilled({fW - propsW(), toolbarH(), fW - propsW() + rule, fH}, ruleColor);
+    m_uiDrawList.addRectFilled({0.0f, toolbarH() - rule, fW, toolbarH()}, ruleColor);
 
     drawStatusBar(fbW, fbH);
 
