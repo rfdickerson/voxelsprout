@@ -7,6 +7,9 @@ import sh_lighting;
 [[vk::binding(4, 0)]]
 Sampler2DShadow shadowMap;
 
+[[vk::binding(7, 0)]]
+Sampler2D<float4> ssaoBlurTexture;
+
 [[vk::binding(9, 0)]]
 Sampler3D<float4> voxelGiVolume;
 
@@ -717,8 +720,25 @@ float3 selectAmbient(float3 normal, float vertexAo)
     return evaluateAmbient(ShHemisphereVertexAoAmbientPolicy(), normal, vertexAo);
 }
 
+// Screen-space AO is baked at half resolution (see ao.ssaoBlur in swapchain_targets.cc);
+// mirrors sampleSsaoAmbientFactor() in imported_static.frag.slang so both world shaders
+// derive the same full-res-normalized UV from SV_Position without an extra uniform.
+float sampleSsaoAmbientFactor(float4 screenPosition)
+{
+    uint texW = 0u;
+    uint texH = 0u;
+    ssaoBlurTexture.GetDimensions(texW, texH);
+    const float2 fullResolutionExtent = float2(float(max(texW, 1u)), float(max(texH, 1u))) * 2.0;
+    const float2 ssaoUv = clamp(screenPosition.xy / fullResolutionExtent, float2(0.0, 0.0), float2(1.0, 1.0));
+    const float ssaoRaw = clamp(ssaoBlurTexture.SampleLevel(ssaoUv, 0.0).x, 0.0, 1.0);
+    const float ssaoIntensity = clamp(camera.shadowConfig2.z, 0.0, 2.0);
+    const float ssaoEnable = step(0.5, camera.shadowVoxelGridSize.w);
+    return lerp(1.0, pow(max(ssaoRaw, 0.001), ssaoIntensity), ssaoEnable);
+}
+
 struct FragmentInput
 {
+    float4 inScreenPosition : SV_Position;
     nointerpolation uint inFace : TEXCOORD0;
     nointerpolation uint inMaterial : TEXCOORD1;
     float3 inWorldPosition : TEXCOORD2;
@@ -823,6 +843,12 @@ float4 main(FragmentInput input) : SV_Target0
     const float directScale = 1.10;
     const float temporaryAmbientBoost = 2.00;
     ambient *= temporaryAmbientBoost;
+    // Screen-space AO, scoped to ambient only so sunlit faces stay clean rather than
+    // muddying under a halo -- the same scoping imported_static.frag.slang uses. This
+    // stacks with the mesher's per-vertex AO (inVertexAo, already folded into `ambient`
+    // via selectAmbient): that one is exact at block corners but blind to anything
+    // outside the chunk, which is precisely what the screen-space term adds.
+    ambient *= sampleSsaoAmbientFactor(input.inScreenPosition);
     float3 lighting = ((ambient + voxelGi) * indirectScale) + ((directSun * directShadowFactor) * directScale);
     // Post-GI ambient fill: stable because this is shading-only and never re-injected into the GI volume.
     const float3 shFillBase = selectAmbient(normal, 1.0) * kSkyCoolTint;

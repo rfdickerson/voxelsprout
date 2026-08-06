@@ -229,7 +229,21 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard_normaldepth.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_normaldepth.frag.slang" fragment)
+    # Ambient occlusion: one source, three estimators. ODAI_AO_MODE picks which
+    # estimateVisibility() compiles in, so each pipeline's sample loop is branch-free.
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang" compute)
+    add_slang_shader_variant(
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang"
+        compute
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/ssao_hbao.comp.slang.spv"
+        -DODAI_AO_MODE=1
+    )
+    add_slang_shader_variant(
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang"
+        compute
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/ssao_gtao.comp.slang.spv"
+        -DODAI_AO_MODE=2
+    )
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao_blur.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_occupancy.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface.comp.slang" compute)

@@ -387,6 +387,27 @@ void RendererBackend::buildFrameStatsUi() {
         ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
         ImGui::SliderFloat("Sun Disk Intensity", &m_skyDebugSettings.sunDiskIntensity, 300.0f, 2200.0f, "%.0f");
         ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");
+        if (ImGui::TreeNodeEx("Ambient Occlusion", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Order matches AoMode's enumerators; Off skips both AO dispatches.
+            static const char* kAoModeNames[] = {"Off", "SSAO", "HBAO", "GTAO"};
+            int aoMode = static_cast<int>(m_shadowDebugSettings.aoMode);
+            if (ImGui::Combo("Mode", &aoMode, kAoModeNames, IM_ARRAYSIZE(kAoModeNames))) {
+                m_shadowDebugSettings.aoMode = static_cast<AoMode>(aoMode);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "SSAO: hemisphere point sampling (cheapest)\n"
+                    "HBAO: horizon-based, catches contact darkening\n"
+                    "GTAO: ground-truth cosine-weighted visibility (default)");
+            }
+            // Radius is in world units, so the useful range depends entirely on the
+            // scale of the geometry -- block-sized voxels want a far smaller radius
+            // than the strategy map's terrain.
+            ImGui::SliderFloat("AO Radius", &m_shadowDebugSettings.ssaoRadius, 0.25f, 64.0f, "%.2f");
+            ImGui::SliderFloat("AO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 4.0f, "%.3f");
+            ImGui::SliderFloat("AO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 2.0f, "%.2f");
+            ImGui::TreePop();
+        }
         ImGui::Checkbox("Shadow Occluder Culling", &m_shadowDebugSettings.enableOccluderCulling);
         ImGui::SliderFloat("PCF Radius", &m_shadowDebugSettings.pcfRadius, 1.0f, 3.0f, "%.2f");
         ImGui::SliderFloat("Cascade Blend Min", &m_shadowDebugSettings.cascadeBlendMin, 1.0f, 20.0f, "%.2f");

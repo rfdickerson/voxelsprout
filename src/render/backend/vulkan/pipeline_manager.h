@@ -28,7 +28,11 @@ public:
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipelineRt = VK_NULL_HANDLE;
     VkPipeline importedStaticShadowPipeline = VK_NULL_HANDLE;
+    // One pipeline per AO estimator (see ODAI_AO_MODE in ssao.comp.slang). All three
+    // share the ssao pipeline layout and descriptor set -- only the shader differs.
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
+    VkPipeline ssaoHbaoPipeline = VK_NULL_HANDLE;
+    VkPipeline ssaoGtaoPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     VkPipeline previewAddPipeline = VK_NULL_HANDLE;
     VkPipeline previewRemovePipeline = VK_NULL_HANDLE;
@@ -49,6 +53,14 @@ public:
         if (ssaoBlurPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, ssaoBlurPipeline, nullptr);
             ssaoBlurPipeline = VK_NULL_HANDLE;
+        }
+        if (ssaoGtaoPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, ssaoGtaoPipeline, nullptr);
+            ssaoGtaoPipeline = VK_NULL_HANDLE;
+        }
+        if (ssaoHbaoPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, ssaoHbaoPipeline, nullptr);
+            ssaoHbaoPipeline = VK_NULL_HANDLE;
         }
         if (ssaoPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, ssaoPipeline, nullptr);

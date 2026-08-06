@@ -87,6 +87,11 @@ struct ChunkResidentKey {
 
 class RendererBackend {
 public:
+    // Ambient-occlusion estimator. Each maps to its own compute pipeline built from
+    // ssao.comp.slang with a different ODAI_AO_MODE (see CMakeLists.txt), so the
+    // sample loop carries no uniform branch.
+    enum class AoMode : int { Off = 0, Ssao = 1, Hbao = 2, Gtao = 3 };
+
     struct ShadowDebugSettings {
         float casterConstantBiasBase = 1.1f;
         float casterConstantBiasCascadeScale = 0.9f;
@@ -111,6 +116,10 @@ public:
         float ssaoRadius = 24.0f;
         float ssaoBias = 1.25f;
         float ssaoIntensity = 0.85f;
+        // Which estimator the AO pass dispatches. Off skips both the AO and blur
+        // dispatches and clears the enable flag the world shaders read, so the term
+        // costs nothing rather than being computed and multiplied by one.
+        AoMode aoMode = AoMode::Gtao;
     };
 
     struct SkyDebugSettings {
@@ -1192,6 +1201,8 @@ private:
     VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
     VkPipeline& m_magicaPipelineRt = m_pipelineManager.magicaPipelineRt;
     VkPipeline& m_ssaoPipeline = m_pipelineManager.ssaoPipeline;
+    VkPipeline& m_ssaoHbaoPipeline = m_pipelineManager.ssaoHbaoPipeline;
+    VkPipeline& m_ssaoGtaoPipeline = m_pipelineManager.ssaoGtaoPipeline;
     VkPipeline& m_ssaoBlurPipeline = m_pipelineManager.ssaoBlurPipeline;
     VkPipeline& m_previewAddPipeline = m_pipelineManager.previewAddPipeline;
     VkPipeline& m_previewRemovePipeline = m_pipelineManager.previewRemovePipeline;

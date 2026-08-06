@@ -543,6 +543,8 @@ void RendererBackend::destroySunShaftResources() {
 
 bool RendererBackend::createSsaoComputeResources() {
     constexpr const char* kSsaoShaderPath = "../src/render/shaders/ssao.comp.slang.spv";
+    constexpr const char* kSsaoHbaoShaderPath = "../src/render/shaders/ssao_hbao.comp.slang.spv";
+    constexpr const char* kSsaoGtaoShaderPath = "../src/render/shaders/ssao_gtao.comp.slang.spv";
     constexpr const char* kSsaoBlurShaderPath = "../src/render/shaders/ssao_blur.comp.slang.spv";
 
     if (m_ssaoDescriptorSetLayout == VK_NULL_HANDLE) {
@@ -651,13 +653,27 @@ bool RendererBackend::createSsaoComputeResources() {
         }
     }
 
-    std::array<VkShaderModule, 2> shaderModules = {
+    std::array<VkShaderModule, 4> shaderModules = {
+        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE
     };
     VkShaderModule& ssaoShaderModule = shaderModules[0];
     VkShaderModule& ssaoBlurShaderModule = shaderModules[1];
+    VkShaderModule& ssaoHbaoShaderModule = shaderModules[2];
+    VkShaderModule& ssaoGtaoShaderModule = shaderModules[3];
     if (!createShaderModuleFromFile(m_device, kSsaoShaderPath, "ssao.comp", ssaoShaderModule)) {
+        destroyShaderModules(m_device, shaderModules);
+        destroySsaoComputeResources();
+        return false;
+    }
+    if (!createShaderModuleFromFile(m_device, kSsaoHbaoShaderPath, "ssao_hbao.comp", ssaoHbaoShaderModule)) {
+        destroyShaderModules(m_device, shaderModules);
+        destroySsaoComputeResources();
+        return false;
+    }
+    if (!createShaderModuleFromFile(m_device, kSsaoGtaoShaderPath, "ssao_gtao.comp", ssaoGtaoShaderModule)) {
         destroyShaderModules(m_device, shaderModules);
         destroySsaoComputeResources();
         return false;
@@ -691,6 +707,33 @@ bool RendererBackend::createSsaoComputeResources() {
             m_ssaoPipeline,
             "vkCreateComputePipelines(ssao)",
             "pipeline.ssao",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+        )) {
+        destroyShaderModules(m_device, shaderModules);
+        destroySsaoComputeResources();
+        return false;
+    }
+
+    // HBAO and GTAO share the SSAO layout and descriptor set; only the shader differs,
+    // so they are three pipelines over one binding model rather than three passes.
+    if (!createComputePipeline(
+            m_ssaoPipelineLayout,
+            ssaoHbaoShaderModule,
+            m_ssaoHbaoPipeline,
+            "vkCreateComputePipelines(ssaoHbao)",
+            "pipeline.ssao.hbao",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+        )) {
+        destroyShaderModules(m_device, shaderModules);
+        destroySsaoComputeResources();
+        return false;
+    }
+    if (!createComputePipeline(
+            m_ssaoPipelineLayout,
+            ssaoGtaoShaderModule,
+            m_ssaoGtaoPipeline,
+            "vkCreateComputePipelines(ssaoGtao)",
+            "pipeline.ssao.gtao",
             VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
         )) {
         destroyShaderModules(m_device, shaderModules);
