@@ -1476,12 +1476,12 @@ bool RendererBackend::createAoPipelines() {
         vkHandleToUint64(m_importedWaterNormalDepthPipeline),
         "pipeline.prepass.importedWaterNormalDepth"
     );
-    // Legacy voxel + pipe normal-depth prepass pipelines (prior game) are bound by no
-    // pass anymore; free the freshly built handles and null the members.
-    if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_voxelNormalDepthPipeline, nullptr);
-        m_voxelNormalDepthPipeline = VK_NULL_HANDLE;
-    }
+    // The voxel normal-depth pipeline is live again: it is what puts VoxelCraft's
+    // chunks into the AO input buffer. Without it the prepass only ever saw imported
+    // statics and skinned actors, so ambient occlusion had nothing to occlude against
+    // anywhere the world is made of voxels.
+    //
+    // The pipe normal-depth pipeline stays dead -- legacy factory sim, no caller.
     if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeNormalDepthPipeline, nullptr);
         m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
