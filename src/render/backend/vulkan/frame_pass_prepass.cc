@@ -19,7 +19,6 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkExtent2D aoExtent = context.aoExtent;
     const VkViewport& aoViewport = context.aoViewport;
     const VkRect2D& aoScissor = context.aoScissor;
-    const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
     // Legacy voxel/magica/pipe prepass inputs remain on PrepassInputs but are no longer
     // consumed here — those normal-depth draws were removed (prior voxel/factory game).
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
@@ -180,26 +179,11 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     }
 
     // (removed) pipe / belt / transport normal-depth prepass draws — legacy factory sim.
-    if (m_grassBillboardNormalDepthPipeline != VK_NULL_HANDLE &&
-        m_grassBillboardIndexCount > 0 &&
-        m_grassBillboardInstanceCount > 0 &&
-        m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-        const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
-        const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
-        const VkBuffer grassInstanceBuffer = m_bufferAllocator.getBuffer(m_grassBillboardInstanceBufferHandle);
-        if (grassVertexBuffer != VK_NULL_HANDLE &&
-            grassIndexBuffer != VK_NULL_HANDLE &&
-            grassInstanceBuffer != VK_NULL_HANDLE) {
-            const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
-            const VkDeviceSize vertexOffsets[2] = {0, 0};
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardNormalDepthPipeline);
-            bindGraphicsDescriptorBuffers(commandBuffer);
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            countDrawCalls(m_debugDrawCallsPrepass, 1);
-            vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
-        }
-    }
+
+    // (removed) grass billboard normal-depth prepass draw. This outlived the main and
+    // shadow draws by one commit: with the scatter gone it was inert (zero instances),
+    // but had instances returned it would have written normal/depth for geometry the
+    // main pass no longer shades, feeding SSAO an occluder with no surface.
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);

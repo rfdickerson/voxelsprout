@@ -353,7 +353,7 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
 }
 
 bool RendererBackend::validateReleaseRuntimeAssets() {
-    constexpr std::array<RuntimeAssetSpec, 26> kRuntimeAssetSpecs = {{
+    constexpr std::array<RuntimeAssetSpec, 21> kRuntimeAssetSpecs = {{
         {"../src/render/shaders/voxel_packed.vert.slang.spv", "world vertex shader", true},
         {"../src/render/shaders/voxel_packed.frag.slang.spv", "world fragment shader", true},
         {"../src/render/shaders/terrain_heightmap.vert.slang.spv", "terrain heightmap vertex shader", true},
@@ -368,13 +368,9 @@ bool RendererBackend::validateReleaseRuntimeAssets() {
         {"../src/render/shaders/tone_map.frag.slang.spv", "tonemap fragment shader", true},
         {"../src/render/shaders/shadow_depth.vert.slang.spv", "shadow vertex shader", true},
         {"../src/render/shaders/pipe_shadow.vert.slang.spv", "pipe shadow vertex shader", true},
-        {"../src/render/shaders/grass_billboard_shadow.vert.slang.spv", "grass shadow vertex shader", true},
-        {"../src/render/shaders/grass_billboard_shadow.frag.slang.spv", "grass shadow fragment shader", true},
         {"../src/render/shaders/pipe_instanced.vert.slang.spv", "pipe vertex shader", true},
         {"../src/render/shaders/pipe_instanced.frag.slang.spv", "pipe fragment shader", true},
-        {"../src/render/shaders/grass_billboard.vert.slang.spv", "grass vertex shader", true},
-        {"../src/render/shaders/grass_billboard.frag.slang.spv", "grass fragment shader", true},
-        {"../src/render/shaders/grass_billboard_normaldepth.frag.slang.spv", "grass normal-depth shader", true},
+        // (removed) the five grass_billboard* shaders — no pipeline compiles them any more.
         {"../src/render/shaders/imported_water_normaldepth.frag.slang.spv", "imported water normal-depth shader", true},
         {"../src/render/shaders/pipe_normaldepth.frag.slang.spv", "pipe normal-depth shader", true},
         {"../src/render/shaders/voxel_normaldepth.frag.slang.spv", "voxel normal-depth shader", true},
@@ -1603,9 +1599,7 @@ bool RendererBackend::createPipeBuffers() {
     if (m_pipeVertexBufferHandle != kInvalidBufferHandle &&
         m_pipeIndexBufferHandle != kInvalidBufferHandle &&
         m_transportVertexBufferHandle != kInvalidBufferHandle &&
-        m_transportIndexBufferHandle != kInvalidBufferHandle &&
-        m_grassBillboardVertexBufferHandle != kInvalidBufferHandle &&
-        m_grassBillboardIndexBufferHandle != kInvalidBufferHandle) {
+        m_transportIndexBufferHandle != kInvalidBufferHandle) {
         return true;
     }
 
@@ -1673,62 +1667,8 @@ bool RendererBackend::createPipeBuffers() {
         return false;
     }
 
-    if (m_grassBillboardVertexBufferHandle == kInvalidBufferHandle ||
-        m_grassBillboardIndexBufferHandle == kInvalidBufferHandle) {
-        constexpr std::array<GrassBillboardVertex, 8> kGrassBillboardVertices = {{
-            // Plane 0 (X axis).
-            GrassBillboardVertex{{-0.38f, 0.0f}, {0.0f, 1.0f}, 0.0f},
-            GrassBillboardVertex{{ 0.38f, 0.0f}, {1.0f, 1.0f}, 0.0f},
-            GrassBillboardVertex{{-0.38f, 0.88f}, {0.0f, 0.0f}, 0.0f},
-            GrassBillboardVertex{{ 0.38f, 0.88f}, {1.0f, 0.0f}, 0.0f},
-            // Plane 1 (Z axis).
-            GrassBillboardVertex{{-0.38f, 0.0f}, {0.0f, 1.0f}, 1.0f},
-            GrassBillboardVertex{{ 0.38f, 0.0f}, {1.0f, 1.0f}, 1.0f},
-            GrassBillboardVertex{{-0.38f, 0.88f}, {0.0f, 0.0f}, 1.0f},
-            GrassBillboardVertex{{ 0.38f, 0.88f}, {1.0f, 0.0f}, 1.0f},
-        }};
-        constexpr std::array<std::uint32_t, 12> kGrassBillboardIndices = {{
-            0u, 1u, 2u, 2u, 1u, 3u,
-            4u, 5u, 6u, 6u, 5u, 7u
-        }};
-
-        BufferCreateDesc grassVertexCreateDesc{};
-        grassVertexCreateDesc.size = static_cast<VkDeviceSize>(kGrassBillboardVertices.size() * sizeof(GrassBillboardVertex));
-        grassVertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        grassVertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        grassVertexCreateDesc.initialData = kGrassBillboardVertices.data();
-        m_grassBillboardVertexBufferHandle = m_bufferAllocator.createBuffer(grassVertexCreateDesc);
-        if (m_grassBillboardVertexBufferHandle == kInvalidBufferHandle) {
-            VOX_LOGE("render") << "grass billboard vertex buffer allocation failed\n";
-            return false;
-        }
-        {
-            const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
-            if (grassVertexBuffer != VK_NULL_HANDLE) {
-                setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(grassVertexBuffer), "mesh.grassBillboard.vertex");
-            }
-        }
-
-        BufferCreateDesc grassIndexCreateDesc{};
-        grassIndexCreateDesc.size = static_cast<VkDeviceSize>(kGrassBillboardIndices.size() * sizeof(std::uint32_t));
-        grassIndexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-        grassIndexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        grassIndexCreateDesc.initialData = kGrassBillboardIndices.data();
-        m_grassBillboardIndexBufferHandle = m_bufferAllocator.createBuffer(grassIndexCreateDesc);
-        if (m_grassBillboardIndexBufferHandle == kInvalidBufferHandle) {
-            VOX_LOGE("render") << "grass billboard index buffer allocation failed\n";
-            m_bufferAllocator.destroyBuffer(m_grassBillboardVertexBufferHandle);
-            m_grassBillboardVertexBufferHandle = kInvalidBufferHandle;
-            return false;
-        }
-        {
-            const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
-            if (grassIndexBuffer != VK_NULL_HANDLE) {
-                setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(grassIndexBuffer), "mesh.grassBillboard.index");
-            }
-        }
-        m_grassBillboardIndexCount = static_cast<uint32_t>(kGrassBillboardIndices.size());
-    }
+    // (removed) the shared grass billboard quad (8 verts / 12 indices). Nothing
+    // scatters instances or binds a grass pipeline any more.
 
     m_pipeIndexCount = static_cast<uint32_t>(pipeMesh.indices.size());
     m_transportIndexCount = static_cast<uint32_t>(transportMesh.indices.size());
@@ -2269,15 +2209,6 @@ void RendererBackend::destroyImportedBuffers() {
 
 
 void RendererBackend::destroyPipeBuffers() {
-    if (m_grassBillboardIndexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_grassBillboardIndexBufferHandle);
-        m_grassBillboardIndexBufferHandle = kInvalidBufferHandle;
-    }
-    if (m_grassBillboardVertexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_grassBillboardVertexBufferHandle);
-        m_grassBillboardVertexBufferHandle = kInvalidBufferHandle;
-    }
-    m_grassBillboardIndexCount = 0;
 
     if (m_transportIndexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_transportIndexBufferHandle);
@@ -2318,13 +2249,7 @@ void RendererBackend::destroyChunkBuffers() {
 
     m_chunkDrawRanges.clear();
     m_chunkLodMeshCache.clear();
-    m_chunkGrassInstanceCache.clear();
     m_chunkLodMeshCacheValid = false;
-    if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_grassBillboardInstanceBufferHandle);
-        m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
-    }
-    m_grassBillboardInstanceCount = 0;
     m_bufferAllocator.destroyBuffer(m_chunkVertexBufferHandle);
     m_chunkVertexBufferHandle = kInvalidBufferHandle;
     m_bufferAllocator.destroyBuffer(m_chunkIndexBufferHandle);

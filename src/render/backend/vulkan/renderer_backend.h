@@ -106,7 +106,6 @@ public:
         float pcfRadius = 1.0f;
         int rtShadowSampleCount = 8;
         float rtSunAngularRadiusDegrees = 0.18f;
-        int grassShadowCascadeCount = 1;
         bool enableOccluderCulling = true;
 
         float ssaoRadius = 24.0f;
@@ -339,8 +338,6 @@ private:
     static constexpr uint32_t kMaxFramesInFlight = 2;
     static constexpr uint32_t kShadowCascadeCount = 4;
     static constexpr uint32_t kShadowAtlasSize = 8192;
-    static constexpr int kGrassActiveChunkRadius = 1;
-    static constexpr int kGrassRetainedChunkRadius = 2;
     static constexpr int kRtActiveChunkRadius = 1;
     static constexpr int kRtRetainedChunkRadius = 2;
     static constexpr std::size_t kChunkRemeshBudgetPerFrame = 6;
@@ -777,17 +774,6 @@ private:
         uint32_t chunkIndirectDrawCount = 0;
     };
 
-    struct GrassBillboardVertex {
-        float corner[2];
-        float uv[2];
-        float plane;
-    };
-
-    struct GrassBillboardInstance {
-        float worldPosYaw[4];
-        float colorTint[4];
-    };
-
     struct MagicaMeshDraw {
         BufferHandle vertexBufferHandle = kInvalidBufferHandle;
         BufferHandle indexBufferHandle = kInvalidBufferHandle;
@@ -1190,15 +1176,12 @@ private:
     VkPipeline& m_hexTerrainPipeline = m_pipelineManager.hexTerrainPipeline;
     VkPipeline& m_shadowPipeline = m_pipelineManager.shadowPipeline;
     VkPipeline& m_pipeShadowPipeline = m_pipelineManager.pipeShadowPipeline;
-    VkPipeline& m_grassBillboardShadowPipeline = m_pipelineManager.grassBillboardShadowPipeline;
     VkPipeline& m_skyboxPipeline = m_pipelineManager.skyboxPipeline;
     VkPipeline& m_skyCloudPipeline = m_pipelineManager.skyCloudPipeline;
     VkPipeline& m_tonemapPipeline = m_pipelineManager.tonemapPipeline;
     VkPipeline& m_pipePipeline = m_pipelineManager.pipePipeline;
-    VkPipeline& m_grassBillboardPipeline = m_pipelineManager.grassBillboardPipeline;
     VkPipeline& m_voxelNormalDepthPipeline = m_pipelineManager.voxelNormalDepthPipeline;
     VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
-    VkPipeline& m_grassBillboardNormalDepthPipeline = m_pipelineManager.grassBillboardNormalDepthPipeline;
     VkPipeline& m_importedStaticPipeline = m_pipelineManager.importedStaticPipeline;
     VkPipeline& m_importedStaticPipelineRt = m_pipelineManager.importedStaticPipelineRt;
     VkPipeline& m_importedWaterPipeline = m_pipelineManager.importedWaterPipeline;
@@ -1305,9 +1288,6 @@ private:
     BufferHandle m_pipeIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_transportVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_transportIndexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_grassBillboardVertexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_grassBillboardIndexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_hexBaseVertexBufferHandle = kInvalidBufferHandle;
@@ -1321,7 +1301,6 @@ private:
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     std::vector<ChunkResidentKey> m_chunkResidentKeys;
     std::vector<odai::world::ChunkLodMeshes> m_chunkLodMeshCache;
-    std::vector<std::vector<GrassBillboardInstance>> m_chunkGrassInstanceCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
     std::vector<ImportedMeshDraw> m_importedMeshDraws;
     std::vector<ImportedScenePageDrawRange> m_importedPageDrawRanges;
@@ -1354,8 +1333,6 @@ private:
     uint32_t m_previewIndexCount = 0;
     uint32_t m_pipeIndexCount = 0;
     uint32_t m_transportIndexCount = 0;
-    uint32_t m_grassBillboardIndexCount = 0;
-    uint32_t m_grassBillboardInstanceCount = 0;
     uint32_t m_importedIndexCount = 0;
     uint32_t m_hexIndexCount = 0;
     uint32_t m_hexInstanceCount = 0;
