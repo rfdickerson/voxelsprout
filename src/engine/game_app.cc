@@ -233,7 +233,8 @@ bool GameApp::loadFonts(const std::string& regularPath,
                         const std::string& boldPath,
                         const std::string& italicPath,
                         const std::string& numericPath,
-                        float bodySize, float numericSize) {
+                        float bodySize, float numericSize, float captionSize,
+                        float displaySize) {
     if (!m_uiFont.loadFromFile(regularPath, bodySize)    ||
         !m_uiFontBold.loadFromFile(boldPath, bodySize)   ||
         !m_uiFontItalic.loadFromFile(italicPath, bodySize) ||
@@ -257,6 +258,19 @@ bool GameApp::loadFonts(const std::string& regularPath,
     m_uiFontBold.setTextureId(boldTex);
     m_uiFontItalic.setTextureId(italicTex);
     m_uiFontNumeric.setTextureId(numTex);
+
+    // Optional type-scale steps. A failed bake is not fatal: the game falls back
+    // to body size for that step, which loses hierarchy but never the text.
+    if (captionSize > 0.0f && m_uiFontCaption.loadFromFile(regularPath, captionSize)) {
+        m_uiFontCaption.setTextureId(m_renderer.registerUiFontAtlas(
+            m_uiFontCaption.atlasPixels().data(), m_uiFontCaption.atlasWidth(),
+            m_uiFontCaption.atlasHeight()));
+    }
+    if (displaySize > 0.0f && m_uiFontDisplay.loadFromFile(boldPath, displaySize)) {
+        m_uiFontDisplay.setTextureId(m_renderer.registerUiFontAtlas(
+            m_uiFontDisplay.atlasPixels().data(), m_uiFontDisplay.atlasWidth(),
+            m_uiFontDisplay.atlasHeight()));
+    }
 
     m_uiFonts.regular = &m_uiFont;
     m_uiFonts.bold    = &m_uiFontBold;

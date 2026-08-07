@@ -73,12 +73,21 @@ protected:
 
     // Load four font faces from disk and register their atlases with the renderer.
     // Call from onInit() after the renderer is up.
+    //
+    // captionSize and displaySize are the optional ends of a game's type scale
+    // (see m_uiFontCaption / m_uiFontDisplay). Each is baked only when > 0, so a
+    // game pays for exactly the steps it uses -- a size is a whole packed atlas
+    // here, not a free CSS number, which is why the scale is a short explicit
+    // list rather than a continuum. Sizes should come from one modular ratio:
+    // at ratio 1.2 off a 15px body that is 12 / 15 / 18 / 22.
     bool loadFonts(const std::string& regularPath,
                    const std::string& boldPath,
                    const std::string& italicPath,
                    const std::string& numericPath,
                    float bodySize    = 18.0f,
-                   float numericSize = 16.0f);
+                   float numericSize = 16.0f,
+                   float captionSize = 0.0f,
+                   float displaySize = 0.0f);
 
     // Resolve a relative asset path (e.g. "assets/fonts/Inter.ttf") to an
     // absolute path. Searches ODAI_PROJECT_SOURCE_DIR first, then walks up from CWD.
@@ -119,6 +128,15 @@ protected:
     ui::Font    m_uiFontBold;
     ui::Font    m_uiFontItalic;
     ui::Font    m_uiFontNumeric;
+    // Optional outer steps of the type scale, baked only if loadFonts() was
+    // given a non-zero size for them (valid() is false otherwise). Caption is
+    // the regular face one step down -- field labels, legend ends, unit
+    // suffixes; display is the bold face one or two steps up -- the one or two
+    // numbers per screen the player actually scans for. They are deliberately
+    // NOT in m_uiFonts: rich_text mixes its faces on a shared baseline, so an
+    // off-size face there would break inline leading.
+    ui::Font    m_uiFontCaption;
+    ui::Font    m_uiFontDisplay;
     ui::FontSet m_uiFonts{};
 
     ui::UiContext  m_uiContext;

@@ -16,6 +16,7 @@
 #include "ui/font.h"
 #include "ui/icon_atlas.h"
 #include "ui/rich_text.h"
+#include "ui/color_scale.h"
 #include "ui/ui_context.h"
 #include "ui/ui_cursor.h"
 #include "ui/ui_draw_list.h"
@@ -829,6 +830,52 @@ void testLineChartDraw() {
     dl.reset(UiVec2{400.0f, 300.0f});
     chart.draw(dl);
     expectTrue(!dl.data().vertices.empty(), "LineChart: emits geometry for two series");
+}
+
+// The property that makes a sequential scale usable at all: perceived
+// lightness must increase with the value, so the ranking survives greyscale
+// and colour-vision deficiency. A diverging red->amber->green ramp — the
+// obvious hand-rolled choice — fails this at its midpoint, which is exactly
+// the bug this header exists to prevent, so it is worth an assertion rather
+// than an eyeball.
+void testColorScalesAreLuminanceMonotonic() {
+    const std::pair<const char*, odai::ui::ColorScale> scales[] = {
+        {"viridis", odai::ui::kViridis},       {"magma", odai::ui::kMagma},
+        {"amber", odai::ui::kAmber},           {"teal", odai::ui::kTeal},
+        {"violet", odai::ui::kViolet},         {"chartreuse", odai::ui::kChartreuse},
+        {"ember", odai::ui::kEmber},
+    };
+    for (const auto& [name, scale] : scales) {
+        expectTrue(!scale.empty(), name);
+        // Asserted in L*, not in linear luminance: linear Y is compressed at
+        // the dark end, so a correctly-spaced scale shows a hair of ΔY between
+        // its darkest stops while being ~15 L* apart. 8 L* is a deliberately
+        // loose floor — several times the ~2-3 L* JND, and comfortably under
+        // the 13 L* the tightest scale here actually achieves.
+        for (std::size_t i = 1; i < scale.stops.size(); ++i) {
+            const float prev = odai::ui::lstar(scale.stops[i - 1]);
+            const float cur = odai::ui::lstar(scale.stops[i]);
+            expectTrue(cur > prev + 8.0f, name);
+        }
+    }
+}
+
+void testColorScaleClassifyAndSample() {
+    using namespace odai::ui;
+    // classify() bands [0,1) into equal classes and clamps outside it.
+    expectTrue(kMagma.classify(-1.0f) == 0, "classify clamps below");
+    expectTrue(kMagma.classify(0.0f) == 0, "classify floor");
+    expectTrue(kMagma.classify(0.5f) == 2, "classify midpoint");
+    expectTrue(kMagma.classify(1.0f) == 4, "classify clamps at top");
+    expectTrue(kMagma.classify(99.0f) == 4, "classify clamps above");
+    // sample() hits the endpoints exactly and stays inside the gamut between.
+    expectNear(kMagma.sample(0.0f).r, UiColor::fromRgbHex(scales::kMagma[0]).r, 0.001f,
+               "sample(0) is the first stop");
+    expectNear(kMagma.sample(1.0f).b, UiColor::fromRgbHex(scales::kMagma[4]).b, 0.001f,
+               "sample(1) is the last stop");
+    const UiColor mid = kMagma.sample(0.5f);
+    expectTrue(mid.r >= 0.0f && mid.r <= 1.0f && mid.g >= 0.0f && mid.g <= 1.0f,
+               "sample stays in gamut");
 }
 
 void testStatBadgeDraw() {
@@ -2306,6 +2353,8 @@ int main() {
     testToastManager();
     testLineChartDraw();
     testStatBadgeDraw();
+    testColorScalesAreLuminanceMonotonic();
+    testColorScaleClassifyAndSample();
 
     if (g_failures != 0) {
         std::cerr << "[ui test] " << g_failures << " failures\n";
