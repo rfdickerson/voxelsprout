@@ -17,7 +17,31 @@ struct ImportedSceneVertex {
     float position[3] = {};
     float normal[3] = {};
     float uv[2] = {};
+    // Authored vertex tint, multiplied into the diffuse texture by the shader
+    // when kImportedSceneMaterialFlagVertexColorTint is set on the vertex.
+    // White is neutral, so geometry that never sets it shades unchanged --
+    // which is also what scenes cooked before file version 19 decode to.
+    //
+    // The FNV importer fills this from LAND's VCLR: the per-post terrain tint
+    // carrying baked ambient and the regional palette, which is what makes the
+    // Mojave read sunbleached instead of like a generic lit texture.
+    float color[3] = {1.0f, 1.0f, 1.0f};
+    // Terrain layer blending. Up to kImportedSceneMaxTerrainLayers textures
+    // blended over the one named by the mesh part, each with a per-vertex
+    // weight -- this is Fallout's ATXT/VTXT, which is what draws roads, gravel
+    // and the transitions between ground types. kImportedSceneNoTerrainLayer
+    // means the slot is unused; a weight of 0 means the layer is absent here.
+    //
+    // Per-vertex rather than a splat texture because it is lossless: VTXT
+    // defines opacity per landscape post and the cooked terrain mesh keeps one
+    // vertex per post, so the resolutions already match exactly.
+    std::uint32_t layerTextureIndex[3] = {
+        0xffffffffu, 0xffffffffu, 0xffffffffu};
+    float layerWeight[3] = {};
 };
+
+inline constexpr int kImportedSceneMaxTerrainLayers = 3;
+inline constexpr std::uint32_t kImportedSceneNoTerrainLayer = 0xffffffffu;
 
 struct ImportedSceneMeshPart {
     std::uint32_t firstIndex = 0;
@@ -50,6 +74,11 @@ enum class TextureFormat : std::uint8_t {
     BC4   = 3,  // ATI1 — 8 bytes per block (single channel)
     BC5   = 4,  // ATI2 — 16 bytes per block (dual channel)
     BC7   = 5,  // 16 bytes per block (high-quality RGBA)
+    // Appended, NOT inserted in numeric order next to BC1/BC3. This value is
+    // serialized as a uint8 and bounded by kImportedSceneMaxTextureFormat;
+    // renumbering the existing entries would silently reinterpret every
+    // already-cooked scene's textures as the wrong format.
+    BC2   = 6,  // DXT3 — 16 bytes per block (RGBA, 4-bit explicit alpha)
 };
 
 struct ImportedSceneTexture {
@@ -68,7 +97,28 @@ struct ImportedScenePackedVertex {
     float uv[2] = {};
     std::uint32_t textureIndex = 0xffffffffu;
     std::uint32_t flags = 0u;
+    // Terrain layer blend, mirroring ImportedSceneVertex's. Indices stay a full
+    // uint32 each rather than being bit-packed because the renderer remaps them
+    // to bindless slots, and those run past what 10 bits would hold
+    // (kBindlessTargetTextureCapacity is 1024 on top of the static entries).
+    // Weights are quantized to 8 bits, which is well past what landscape alpha
+    // needs and keeps this to one extra word.
+    std::uint32_t layerTextureIndex[3] = {
+        0xffffffffu, 0xffffffffu, 0xffffffffu};
+    std::uint32_t layerWeights = 0u;  // 3x 8-bit, layer 0 in the low byte
 };
+
+// Quantization for ImportedScenePackedVertex::layerWeights. Byte n holds layer
+// n's weight over [0,1]; mirrored in imported_static.frag.slang.
+inline constexpr std::uint32_t packImportedSceneTerrainLayerWeights(const float weights[3]) {
+    std::uint32_t packed = 0u;
+    for (int layer = 0; layer < 3; ++layer) {
+        const float clamped = weights[layer] < 0.0f ? 0.0f : (weights[layer] > 1.0f ? 1.0f : weights[layer]);
+        const std::uint32_t quantized = static_cast<std::uint32_t>((clamped * 255.0f) + 0.5f);
+        packed |= (quantized & 0xffu) << (layer * 8);
+    }
+    return packed;
+}
 
 // ---------------------------------------------------------------------------
 // Packed material flags — the canonical layout for ImportedScenePackedVertex::flags
@@ -78,7 +128,9 @@ struct ImportedScenePackedVertex {
 //   bit 0      alpha test
 //   bit 1      reserved — terrain slope blend (docs/stylized_low_poly.md §1)
 //   bit 2      PBR material present: bits 8..23 carry metallic/roughness
-//   bits 3-7   free
+//   bit 3      modulate the diffuse texture by the vertex colour
+//   bit 4      terrain layer blend: layerTextureIndex/layerWeights are live
+//   bits 5-7   free
 //   bits 8-15  roughness, 8-bit quantized over [0,1]
 //   bits 16-23 metallic, 8-bit quantized over [0,1]
 //   bits 24-31 free
@@ -90,6 +142,16 @@ struct ImportedScenePackedVertex {
 inline constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u << 0;
 inline constexpr std::uint32_t kImportedSceneMaterialFlagTerrainSlopeBlend = 1u << 1;
 inline constexpr std::uint32_t kImportedSceneMaterialFlagPbr = 1u << 2;
+// Opt-in for the same reason bit 2 is: untextured geometry has always used the
+// vertex colour AS its albedo, and textured geometry has always ignored it. This
+// bit adds a third case -- textured, and tinted by a colour that means something
+// -- without changing how anything already cooked shades. Only set it where the
+// colour is authored data, never where it is a synthesized fallback.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagVertexColorTint = 1u << 3;
+// Opt-in for the same reason: without it, every scene cooked before terrain
+// layers existed would have the shader reading layer slots that were never
+// written. Set only where the cooker actually filled them.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagTerrainLayers = 1u << 4;
 
 inline constexpr int kImportedSceneMaterialRoughnessShift = 8;
 inline constexpr int kImportedSceneMaterialMetallicShift = 16;

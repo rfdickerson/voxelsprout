@@ -94,10 +94,37 @@ public:
     // the hardware/driver capability probe already determined at init() time; it
     // can never force RT on where it isn't supported. Call any time after init().
     void setRayTracingEnabled(bool enabled);
+    // App-level opt-out of the voxel GI dispatch sequence (occupancy, sky exposure,
+    // surface/ReSTIR, inject, propagate). Like setRayTracingEnabled this can only opt
+    // further out, never force GI on where the device can't run it. On by default.
+    //
+    // The GI volume is 64 world units wide and follows the camera, so any world at a
+    // much larger scale gets no contribution from it while still paying for every
+    // dispatch — imported Bethesda scenes run ~70 units/metre, which puts the whole
+    // volume under a metre across. Turn it off for those. Call any time after init().
+    // Histogram-driven eye adaptation, off by default. With it off the scene
+    // renders at a fixed exposure, so content whose light levels differ from
+    // that baseline comes out uniformly too dark or too bright. Worth enabling
+    // for any scene with a wide dynamic range or a day/night cycle.
+    void setAutoExposureEnabled(bool enabled);
+    [[nodiscard]] bool isAutoExposureEnabled() const;
+    void setVoxelGiEnabled(bool enabled);
+    [[nodiscard]] bool isVoxelGiEnabled() const;
+    // App-level opt-out of the sun shaft pass (a 20-tap radial march per pixel at AO
+    // resolution). On by default; when off the shaft texture reads as black and the
+    // main pass is otherwise unchanged. Call any time after init().
+    void setSunShaftsEnabled(bool enabled);
+    [[nodiscard]] bool isSunShaftsEnabled() const;
     // Opt-in UI-only rendering for showcase/tooling executables. Skips building the
     // 3D scene pipelines (pipe/imported/sky-cloud/water/grass, SSAO, hex terrain)
     // those tools cannot use. Must be called BEFORE init(); off by default.
     void setMinimalRenderMode(bool enabled);
+    // Writes the last presented frame to a binary PPM (convert with e.g.
+    // `ffmpeg -i shot.ppm shot.png`). Diagnostic, not a feature: it stalls the
+    // device, so call it once rather than per frame. false if nothing has been
+    // presented yet. See frame_capture.cc for why this lives in the engine
+    // instead of relying on an external screenshot tool.
+    bool captureFrameToFile(const std::string& outputPath);
     void setGameplayUiState(const GameplayUiState& state);
     // Hand the renderer the UI geometry to draw over the scene this frame.
     void setUiDrawData(const odai::ui::UiDrawData& drawData);

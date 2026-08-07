@@ -262,6 +262,33 @@ public:
     void setRayTracingEnabled(bool enabled) {
         m_rayTracingRuntimeEnabled = enabled && m_rayTracingHardwareCapable;
     }
+    // App-level opt-out of the voxel GI dispatch sequence (occupancy, sky
+    // exposure, surface/ReSTIR, inject, propagate). Like setRayTracingEnabled
+    // this only opts further out: it is ANDed with m_voxelGiComputeAvailable,
+    // the capability flag init already clears on hardware without the compute
+    // path, so "GI off" is a state the frame recording has always handled.
+    //
+    // Worth reaching for whenever the world is much larger than the GI volume.
+    // The grid is kVoxelGiGridResolution * kVoxelGiCellSize = 64 world units
+    // wide and follows the camera, so at Bethesda scale (~70 units/metre) it
+    // covers under a metre and sampleImportedVoxelGi returns black for nearly
+    // every pixel -- the dispatches still run at full cost for no visible
+    // contribution.
+    // Histogram-driven eye adaptation. Off by default and, until now, reachable
+    // only from the debug UI -- so every game shipped with a fixed exposure and
+    // the compute resources built but never dispatched. A scene whose light
+    // levels do not happen to match that fixed exposure renders uniformly too
+    // dark or too bright with no way for the app to say otherwise.
+    void setAutoExposureEnabled(bool enabled) { m_skyDebugSettings.autoExposureEnabled = enabled; }
+    [[nodiscard]] bool isAutoExposureEnabled() const { return m_skyDebugSettings.autoExposureEnabled; }
+    void setVoxelGiEnabled(bool enabled) { m_voxelGiRequested = enabled; }
+    [[nodiscard]] bool isVoxelGiEnabled() const { return m_voxelGiRequested; }
+    // App-level opt-out of the sun shaft compute pass (a 20-tap radial march per
+    // pixel at AO resolution). ANDed with m_sunShaftComputeAvailable; when off,
+    // the existing else branch in recordFrame clears the shaft image to black
+    // and leaves it SHADER_READ_ONLY_OPTIMAL, so the main pass samples zero.
+    void setSunShaftsEnabled(bool enabled) { m_sunShaftsRequested = enabled; }
+    [[nodiscard]] bool isSunShaftsEnabled() const { return m_sunShaftsRequested; }
     // Opt-in "UI-only" mode for showcase/tooling executables (e.g. the design
     // system demo) that draw nothing but the 2D UI overlay. When enabled, init()
     // and recreateSwapchain() skip building the pipelines those tools structurally
@@ -270,6 +297,11 @@ public:
     // the tessellated hex-terrain pipeline. The UI/skybox/tonemap/present path is
     // untouched. Must be set BEFORE init(); persists across swapchain recreation.
     void setMinimalRenderMode(bool enabled) { m_minimalRenderMode = enabled; }
+    // Writes the last presented swapchain image to a binary PPM. Diagnostic
+    // only, and one-shot: everything it allocates is torn down before it
+    // returns. See frame_capture.cc for why this exists rather than relying on
+    // an external screenshot tool.
+    bool captureLastFrameToFile(const std::string& outputPath);
     bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
@@ -388,7 +420,11 @@ public:
 private:
     static constexpr uint32_t kMaxFramesInFlight = 2;
     static constexpr uint32_t kShadowCascadeCount = 4;
-    static constexpr uint32_t kShadowAtlasSize = 8192;
+    // Mirrors renderer_shared.h's kShadowAtlasSize and must match it, along with
+    // the kShadowAtlasRects / kShadowCascadeResolution layout there. This copy is
+    // the one the atlas image allocation uses; that one normalizes the sampling
+    // UV rects. See the comment beside them before changing either.
+    static constexpr uint32_t kShadowAtlasSize = 4096;
     static constexpr int kRtActiveChunkRadius = 1;
     static constexpr int kRtRetainedChunkRadius = 2;
     static constexpr std::size_t kChunkRemeshBudgetPerFrame = 6;
@@ -758,6 +794,13 @@ private:
         float uv[2];
         std::uint32_t textureIndex = 0xffffffffu;
         std::uint32_t flags = 0u;
+        // Terrain layer blend (Fallout ATXT/VTXT). These are BINDLESS SLOTS, not
+        // scene texture indices -- uploadImportedScene remaps them the same way
+        // it remaps textureIndex. Live only when the vertex carries
+        // kImportedSceneMaterialFlagTerrainLayers.
+        std::uint32_t layerTextureIndex[3] = {
+            0xffffffffu, 0xffffffffu, 0xffffffffu};
+        std::uint32_t layerWeights = 0u;
     };
 
     struct ImportedWaterVertex {
@@ -1032,6 +1075,9 @@ private:
     // Future render-graph integration can manage this as a backend target.
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkFormat m_swapchainFormat = VK_FORMAT_UNDEFINED;
+    // Swapchain index of the most recent successful present, so a capture knows
+    // which image actually holds the frame the user is looking at.
+    uint32_t m_lastPresentedImageIndex = UINT32_MAX;
     VkExtent2D m_swapchainExtent{};
     VkExtent2D m_aoExtent{};
     VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
@@ -1108,6 +1154,8 @@ private:
     VkSampler m_voxelGiSampler = VK_NULL_HANDLE;
     bool m_voxelGiInitialized = false;
     bool m_voxelGiComputeAvailable = false;
+    // App-level request (setVoxelGiEnabled); ANDed with the capability flag above.
+    bool m_voxelGiRequested = true;
     bool m_voxelGiSkyExposureInitialized = false;
     VkImage m_voxelGiOccupancyImage = VK_NULL_HANDLE;
     VkImageView m_voxelGiOccupancyImageView = VK_NULL_HANDLE;
@@ -1163,6 +1211,8 @@ private:
     bool m_autoExposureHistoryValid = false;
     uint64_t m_autoExposureUpdateFrameIndex = 0u;
     bool m_sunShaftComputeAvailable = false;
+    // App-level request (setSunShaftsEnabled); ANDed with the capability flag above.
+    bool m_sunShaftsRequested = true;
     bool m_sunShaftShaderAvailable = false;
     VkDescriptorSetLayout m_autoExposureDescriptorSetLayout = VK_NULL_HANDLE;
     DescriptorBufferSet m_autoExposureBufferSet{};

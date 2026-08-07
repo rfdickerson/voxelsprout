@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <zlib.h>
@@ -19,7 +20,9 @@ namespace {
 
 int g_failures = 0;
 
-void expectTrue(bool condition, const char* message) {
+// string_view rather than const char* so callers can build a message with a
+// run-label suffix (the BSA test runs twice, once per archive-flag shape).
+void expectTrue(bool condition, std::string_view message) {
     if (!condition) {
         std::cerr << "[fnv import test] FAIL: " << message << '\n';
         ++g_failures;
@@ -47,6 +50,15 @@ void appendBString(std::vector<std::uint8_t>& buffer, const std::string& text) {
     const std::string withNul = text + '\0';
     buffer.push_back(static_cast<std::uint8_t>(withNul.size()));
     buffer.insert(buffer.end(), withNul.begin(), withNul.end());
+}
+
+// The embedded file name in a data block (archive flag 0x100) is length-
+// prefixed but NOT NUL-terminated, unlike the folder-name BString above.
+// Verified against retail Fallout - Textures.bsa, whose first data block
+// opens with 0x33 followed by exactly 51 path characters.
+void appendEmbeddedName(std::vector<std::uint8_t>& buffer, const std::string& text) {
+    buffer.push_back(static_cast<std::uint8_t>(text.size()));
+    buffer.insert(buffer.end(), text.begin(), text.end());
 }
 
 void appendNulTerminated(std::vector<std::uint8_t>& buffer, const std::string& text) {
@@ -83,13 +95,24 @@ struct TestFileRecord {
 // documented in bsa_archive.h so the test validates the reader's own
 // understanding of folder/file record offsets and the name block, not just
 // that encode(decode(x)) == x for an arbitrary internal representation.
+//
+// Two retail conventions this fixture deliberately reproduces, because an
+// earlier version of it did not and so could never have caught the reader
+// bugs they hid (both were found only by running against a real install):
+//   - Folder-record offsets are biased by totalFileNameLength.
+//   - When `embedFileNames` is set (archive flag 0x100, which both retail
+//     texture archives use), every data block opens with a BString holding
+//     the file's full virtual path, and those bytes count toward the file
+//     record's size.
 std::vector<std::uint8_t> buildSyntheticBsa(
     const std::string& uncompressedContent,
-    const std::string& compressedContent
+    const std::string& compressedContent,
+    bool embedFileNames = false
 ) {
     constexpr std::uint32_t kFlagHasFolderNames = 0x1u;
     constexpr std::uint32_t kFlagHasFileNames = 0x2u;
     constexpr std::uint32_t kFlagCompressedArchive = 0x4u;
+    constexpr std::uint32_t kFlagEmbedFileNames = 0x100u;
     constexpr std::uint32_t kFileCompressionToggleBit = 0x40000000u;
 
     const std::string folderA = "meshes\\x";
@@ -113,7 +136,8 @@ std::vector<std::uint8_t> buildSyntheticBsa(
     header.magic = 0x00415342u;
     header.version = 104u;
     header.folderRecordOffset = sizeof(TestBsaHeader);
-    header.archiveFlags = kFlagHasFolderNames | kFlagHasFileNames | kFlagCompressedArchive;
+    header.archiveFlags = kFlagHasFolderNames | kFlagHasFileNames | kFlagCompressedArchive |
+        (embedFileNames ? kFlagEmbedFileNames : 0u);
     header.folderCount = 2u;
     header.fileCount = 2u;
     header.totalFolderNameLength = static_cast<std::uint32_t>(folderA.size() + folderB.size() + 2u);
@@ -130,26 +154,36 @@ std::vector<std::uint8_t> buildSyntheticBsa(
     const std::size_t fileNameBlockOffset = folderBRecordOffset + folderBBlockSize;
     const std::size_t fileDataOffset = fileNameBlockOffset + totalFileNameLength;
 
+    // Embedded names, when present, prefix each data block and are counted in
+    // the file record's size.
+    const std::string embeddedA = folderA + "\\" + fileA;
+    const std::string embeddedB = folderB + "\\" + fileB;
+    const std::size_t embeddedABytes = embedFileNames ? 1u + embeddedA.size() : 0u;
+    const std::size_t embeddedBBytes = embedFileNames ? 1u + embeddedB.size() : 0u;
+
     // fileA: uncompressed (toggled off default-compressed archive -> stored
     // raw). fileB: compressed, stored as [uint32 originalSize][zlib bytes].
     const std::size_t fileAOffset = fileDataOffset;
-    const std::size_t fileASize = uncompressedContent.size();
+    const std::size_t fileASize = embeddedABytes + uncompressedContent.size();
     const std::size_t fileBOffset = fileAOffset + fileASize;
-    const std::size_t fileBSizeOnDisk = sizeof(std::uint32_t) + compressedBytes.size();
+    const std::size_t fileBSizeOnDisk = embeddedBBytes + sizeof(std::uint32_t) + compressedBytes.size();
 
     std::vector<std::uint8_t> out;
     appendPod(out, header);
 
+    // Retail archives bias folder-record offsets by totalFileNameLength; the
+    // reader is expected to subtract it back off. Writing the unbiased value
+    // here is what let the reader's missing subtraction go unnoticed.
     TestFolderRecord folderRecA{};
     folderRecA.nameHash = 0x1111ull;
     folderRecA.fileCount = 1u;
-    folderRecA.offset = static_cast<std::uint32_t>(folderARecordOffset);
+    folderRecA.offset = static_cast<std::uint32_t>(folderARecordOffset + totalFileNameLength);
     appendPod(out, folderRecA);
 
     TestFolderRecord folderRecB{};
     folderRecB.nameHash = 0x2222ull;
     folderRecB.fileCount = 1u;
-    folderRecB.offset = static_cast<std::uint32_t>(folderBRecordOffset);
+    folderRecB.offset = static_cast<std::uint32_t>(folderBRecordOffset + totalFileNameLength);
     appendPod(out, folderRecB);
 
     appendBString(out, folderA);
@@ -169,7 +203,14 @@ std::vector<std::uint8_t> buildSyntheticBsa(
     appendNulTerminated(out, fileA);
     appendNulTerminated(out, fileB);
 
+    if (embedFileNames) {
+        appendEmbeddedName(out, embeddedA);
+    }
     out.insert(out.end(), uncompressedContent.begin(), uncompressedContent.end());
+
+    if (embedFileNames) {
+        appendEmbeddedName(out, embeddedB);
+    }
     appendPod(out, static_cast<std::uint32_t>(compressedContent.size()));
     out.insert(out.end(), compressedBytes.begin(), compressedBytes.end());
 
@@ -249,6 +290,18 @@ std::vector<std::uint8_t> zlibCompress(const std::vector<std::uint8_t>& data) {
     compress2(out.data(), &bound, data.empty() ? nullptr : data.data(), static_cast<uLong>(data.size()), Z_BEST_COMPRESSION);
     out.resize(bound);
     return out;
+}
+
+// Corrupts the trailing adler32 of a zlib stream, leaving the deflate payload
+// intact. Reproduces the one damaged record in retail FalloutNV.esm (a LAND,
+// formID 0x150FC0): every declared byte decodes correctly but the checksum
+// does not verify. zlib's uncompress() rejects the whole call for this, which
+// used to abort the entire plugin walk over a single bad record.
+std::vector<std::uint8_t> corruptZlibChecksum(std::vector<std::uint8_t> stream) {
+    if (stream.size() >= 4u) {
+        stream[stream.size() - 1u] ^= 0xFFu;
+    }
+    return stream;
 }
 
 void testEsmReaderWalksGroupsRecordsAndSubrecords() {
@@ -417,6 +470,19 @@ std::vector<std::uint8_t> buildVnmlPayload() {
     return out;
 }
 
+// VCLR: one unsigned RGB triple per post. Uses a distinct value per channel so
+// a channel swap or an off-by-one stride shows up as a wrong colour rather than
+// passing by symmetry.
+std::vector<std::uint8_t> buildVclrPayload() {
+    std::vector<std::uint8_t> out;
+    for (int i = 0; i < odai::importer::fnv::kLandVertexCount; ++i) {
+        out.push_back(255);
+        out.push_back(128);
+        out.push_back(64);
+    }
+    return out;
+}
+
 void testFalloutRecordExtraction() {
     namespace fs = std::filesystem;
     using namespace odai::importer::fnv;
@@ -449,14 +515,51 @@ void testFalloutRecordExtraction() {
     btxtPayload.push_back(0u);  // pad
     appendPod(btxtPayload, static_cast<std::uint16_t>(0));  // layer
 
+    const auto vclrPayload = buildVclrPayload();
+
+    // Two ATXT/VTXT layers, deliberately emitted with the HIGHER layer index
+    // first so the parser's sort is doing real work rather than preserving
+    // subrecord order by luck.
+    constexpr std::uint32_t kLayerTextureFormIdHigh = 0x00004100u;
+    constexpr std::uint32_t kLayerTextureFormIdLow = 0x00004200u;
+    const auto buildAtxtPayload = [](std::uint32_t formId, std::uint8_t quadrant, std::uint16_t layerIndex) {
+        std::vector<std::uint8_t> out;
+        appendPod(out, formId);
+        out.push_back(quadrant);
+        out.push_back(0u);  // pad
+        appendPod(out, layerIndex);
+        return out;
+    };
+    // Opacity 1.0 at quadrant post 0, 0.25 at post 5.
+    const auto buildVtxtPayload = []() {
+        std::vector<std::uint8_t> out;
+        appendPod(out, static_cast<std::uint16_t>(0));
+        appendPod(out, static_cast<std::uint16_t>(0));
+        appendPod(out, 1.0f);
+        appendPod(out, static_cast<std::uint16_t>(5));
+        appendPod(out, static_cast<std::uint16_t>(0));
+        appendPod(out, 0.25f);
+        return out;
+    };
+
     const auto landSubrecords = [&] {
         std::vector<std::uint8_t> out;
         const auto vhgt = buildSubrecord("VHGT", vhgtPayload);
         const auto vnml = buildSubrecord("VNML", vnmlPayload);
+        const auto vclr = buildSubrecord("VCLR", vclrPayload);
         const auto btxt = buildSubrecord("BTXT", btxtPayload);
+        const auto atxtHigh = buildSubrecord("ATXT", buildAtxtPayload(kLayerTextureFormIdHigh, 0u, 1u));
+        const auto vtxtHigh = buildSubrecord("VTXT", buildVtxtPayload());
+        const auto atxtLow = buildSubrecord("ATXT", buildAtxtPayload(kLayerTextureFormIdLow, 0u, 0u));
+        const auto vtxtLow = buildSubrecord("VTXT", buildVtxtPayload());
         out.insert(out.end(), vhgt.begin(), vhgt.end());
         out.insert(out.end(), vnml.begin(), vnml.end());
+        out.insert(out.end(), vclr.begin(), vclr.end());
         out.insert(out.end(), btxt.begin(), btxt.end());
+        out.insert(out.end(), atxtHigh.begin(), atxtHigh.end());
+        out.insert(out.end(), vtxtHigh.begin(), vtxtHigh.end());
+        out.insert(out.end(), atxtLow.begin(), atxtLow.end());
+        out.insert(out.end(), vtxtLow.begin(), vtxtLow.end());
         return out;
     }();
     constexpr std::uint32_t kLandFormId = 0x00003000u;
@@ -624,16 +727,61 @@ void testFalloutRecordExtraction() {
                intCell->references.front().scale == 1.0f,
                "Interior REFR without XSCL defaults to scale 1.0");
 
-    expectTrue(extCell != nullptr && extCell->land.has_value(), "Exterior cell owns its LAND record");
-    if (extCell != nullptr && extCell->land.has_value()) {
+    expectTrue(extCell != nullptr && extCell->land != nullptr, "Exterior cell owns its LAND record");
+    if (extCell != nullptr && extCell->land != nullptr) {
         const FalloutLandRecord& land = *extCell->land;
         expectTrue(land.quadrantBaseTextureFormId[0] == kBaseTextureFormId,
                    "LAND BTXT base texture formID round-trips for quadrant 0");
 
+        // VCLR decodes unsigned to [0,1] — 255/128/64, not the signed mapping
+        // VNML uses. Checking all three channels on a post other than the first
+        // catches a channel swap and a wrong stride, both of which leave post 0
+        // looking correct.
+        expectTrue(land.hasColors, "LAND VCLR sets hasColors");
+        bool vclrMatches = land.hasColors;
+        for (int i = 0; i < kLandVertexCount && vclrMatches; ++i) {
+            vclrMatches =
+                std::fabs(land.colors[(i * 3) + 0] - 1.0f) < 1e-4f &&
+                std::fabs(land.colors[(i * 3) + 1] - (128.0f / 255.0f)) < 1e-4f &&
+                std::fabs(land.colors[(i * 3) + 2] - (64.0f / 255.0f)) < 1e-4f;
+        }
+        expectTrue(vclrMatches, "LAND VCLR decodes to unsigned [0,1] RGB at every post");
+
+        // ATXT/VTXT: two layers, emitted high-index-first, so a correct parse
+        // reorders them and pairs each VTXT with the ATXT that preceded it.
+        expectTrue(land.textureLayers.size() == 2, "LAND parses both ATXT layers");
+        if (land.textureLayers.size() == 2) {
+            expectTrue(land.textureLayers[0].layerIndex == 0u &&
+                       land.textureLayers[0].textureFormId == kLayerTextureFormIdLow,
+                       "ATXT layers sort by layer index, not subrecord order");
+            expectTrue(land.textureLayers[1].layerIndex == 1u &&
+                       land.textureLayers[1].textureFormId == kLayerTextureFormIdHigh,
+                       "the higher ATXT layer index sorts last");
+            expectTrue(land.textureLayers[0].quadrant == 0u, "ATXT quadrant round-trips");
+            bool opacityMatches = true;
+            for (const auto& layer : land.textureLayers) {
+                opacityMatches = opacityMatches &&
+                    std::fabs(layer.opacity[0] - 1.0f) < 1e-4f &&
+                    std::fabs(layer.opacity[5] - 0.25f) < 1e-4f &&
+                    // Every post VTXT did not mention stays fully transparent.
+                    std::fabs(layer.opacity[1]) < 1e-4f &&
+                    std::fabs(layer.opacity[kLandQuadrantVertexCount - 1]) < 1e-4f;
+            }
+            expectTrue(opacityMatches, "VTXT opacity lands on the posts it names and nowhere else");
+        }
+
+        // Fixture is a base offset of 100 with a single +4 delta at row 10,
+        // col 20. kLandHeightScale multiplies the accumulated total including
+        // the offset, so the flat posts are 100*8 = 800 and the raised ones
+        // are (100+4)*8 = 832 — NOT 100 and 100+4*8, which is what this
+        // expected while the decoder scaled only the deltas. That error put
+        // every object in the game a median of 7566 units above its terrain.
+        constexpr float kFlatHeight = 100.0f * kLandHeightScale;
+        constexpr float kRaisedHeight = 104.0f * kLandHeightScale;
         bool heightsMatchExpected = true;
         for (int row = 0; row < kLandGridSize && heightsMatchExpected; ++row) {
             for (int col = 0; col < kLandGridSize; ++col) {
-                const float expected = (row == 10 && col >= 20) ? 132.0f : 100.0f;
+                const float expected = (row == 10 && col >= 20) ? kRaisedHeight : kFlatHeight;
                 if (std::fabs(land.heights[(row * kLandGridSize) + col] - expected) > 1e-3f) {
                     heightsMatchExpected = false;
                     break;
@@ -642,7 +790,7 @@ void testFalloutRecordExtraction() {
         }
         expectTrue(heightsMatchExpected,
                    "VHGT height decode: a single mid-row delta only raises that row from its column onward, "
-                   "leaving every other post at the base offset");
+                   "leaving every other post at the base offset, with the scale applied to the total");
         expectTrue(land.hasNormals && land.normals[2] > 0.99f,
                    "VNML normal decode produces a normalized up-facing normal for straight-up input");
     }
@@ -669,7 +817,12 @@ void appendAvObjectPrefix(
     appendPod(out, static_cast<std::int32_t>(-1));  // nameRef
     appendPod(out, static_cast<std::uint32_t>(0));  // numExtraData
     appendPod(out, static_cast<std::int32_t>(-1));  // controllerRef
-    appendPod(out, static_cast<std::uint16_t>(0));  // flags
+    // NiAVObject::flags is a uint at userVersion2 > 26, and this fixture
+    // declares 34 (what Fallout: New Vegas writes). Emitting a ushort here —
+    // as this did — shifts the whole rest of the block by two bytes, which is
+    // exactly the mismatch that made every retail node fail to parse while
+    // this test still passed.
+    appendPod(out, static_cast<std::uint32_t>(0));  // flags
     for (float v : translation) appendPod(out, v);
     for (float v : rotation) appendPod(out, v);
     appendPod(out, scale);
@@ -703,7 +856,14 @@ void testNifParserExtractsTransformedGeometry() {
     for (const auto& v : localVerts) {
         for (float f : v) appendPod(triShapeDataBlock, f);
     }
-    appendPod(triShapeDataBlock, static_cast<std::uint16_t>(0x0001u));  // vectorFlags: hasNormals, no tangents, 0 UV sets
+    // vectorFlags is Bethesda's BSVectorFlags: bit 0 is a BOOLEAN "has UV"
+    // (one set), bit 12 means tangents follow. It is NOT a 0-5 bit count, and
+    // whether normals are present is the separate bool byte below, not bit 0.
+    // 0x0001 is the retail-dominant shape, so this fixture now exercises the
+    // UV read rather than skipping it — the earlier fixture wrote 0x0000 and
+    // left that path, the one that had the bug, entirely untested.
+    appendPod(triShapeDataBlock, static_cast<std::uint16_t>(0x0001u));
+    appendPod(triShapeDataBlock, static_cast<std::uint8_t>(1));  // hasNormals
     for (int i = 0; i < 3; ++i) {
         appendPod(triShapeDataBlock, 0.0f);
         appendPod(triShapeDataBlock, 0.0f);
@@ -714,6 +874,10 @@ void testNifParserExtractsTransformedGeometry() {
     appendPod(triShapeDataBlock, 0.0f);
     appendPod(triShapeDataBlock, 1.0f);                            // bounding sphere radius
     appendPod(triShapeDataBlock, static_cast<std::uint8_t>(0));    // hasVertexColors
+    // UV set 0, one (u, v) per vertex — present because vectorFlags bit 0 is set.
+    appendPod(triShapeDataBlock, 0.25f); appendPod(triShapeDataBlock, 0.5f);
+    appendPod(triShapeDataBlock, 0.75f); appendPod(triShapeDataBlock, 0.5f);
+    appendPod(triShapeDataBlock, 0.25f); appendPod(triShapeDataBlock, 1.0f);
     appendPod(triShapeDataBlock, static_cast<std::uint16_t>(0));   // consistencyType
     appendPod(triShapeDataBlock, static_cast<std::int32_t>(-1));   // additionalDataRef
     appendPod(triShapeDataBlock, static_cast<std::uint16_t>(1));   // numTriangles
@@ -722,6 +886,11 @@ void testNifParserExtractsTransformedGeometry() {
     appendPod(triShapeDataBlock, static_cast<std::uint16_t>(0));
     appendPod(triShapeDataBlock, static_cast<std::uint16_t>(1));
     appendPod(triShapeDataBlock, static_cast<std::uint16_t>(2));
+    // Trailing `Num Match Groups`. Retail NiTriShapeData always carries at
+    // least this u16; a fixture that stops after the triangles is shorter than
+    // any real block, and the parser's end-of-block consistency check rightly
+    // rejects it.
+    appendPod(triShapeDataBlock, static_cast<std::uint16_t>(0));
 
     std::vector<std::uint8_t> fileBytes;
     const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
@@ -781,15 +950,131 @@ void testNifParserExtractsTransformedGeometry() {
             shape.triangleIndices.size() == 3u && shape.triangleIndices[0] == 0u &&
             shape.triangleIndices[1] == 1u && shape.triangleIndices[2] == 2u,
             "Triangle indices round-trip");
+
+        expectTrue(shape.uvs.size() == 6u, "UV set 0 is extracted when BSVectorFlags bit 0 is set");
+        if (shape.uvs.size() == 6u) {
+            expectNear(shape.uvs[0], 0.25f, 1e-5f, "UV 0 u");
+            expectNear(shape.uvs[1], 0.5f, 1e-5f, "UV 0 v");
+            expectNear(shape.uvs[4], 0.25f, 1e-5f, "UV 2 u");
+            expectNear(shape.uvs[5], 1.0f, 1e-5f, "UV 2 v");
+        }
     }
 }
 
-void testBsaArchiveReadsFoldersAndFiles() {
+// onRecordHeader must be able to reject a record before its body is touched.
+// The load-bearing case is a compressed record: if the skip happened after
+// decompression it would save nothing, so this fixture makes the skipped
+// record's payload deliberately un-inflatable. A walk that succeeds proves
+// the body was never read.
+void testEsmReaderSkipsRecordsByHeader() {
     namespace fs = std::filesystem;
+    constexpr std::uint32_t kRecordFlagCompressed = 0x00040000u;
+
+    const auto keptRecord =
+        buildRecord("STAT", 0x00000001u, 0u, buildSubrecord("EDID", stringPayload("Kept")));
+
+    // Claims 4096 decompressed bytes but carries garbage where the zlib
+    // stream should be. Inflating this would fail the whole walk.
+    std::vector<std::uint8_t> poisonData;
+    appendPod(poisonData, static_cast<std::uint32_t>(4096));
+    for (int i = 0; i < 64; ++i) {
+        poisonData.push_back(static_cast<std::uint8_t>(0xA5u));
+    }
+    const auto skippedRecord = buildRecord("LAND", 0x00000002u, kRecordFlagCompressed, poisonData);
+
+    std::vector<std::uint8_t> content;
+    content.insert(content.end(), keptRecord.begin(), keptRecord.end());
+    content.insert(content.end(), skippedRecord.begin(), skippedRecord.end());
+    const auto group = buildGroup("STAT", 0, content);
+
+    const fs::path esmPath = fs::temp_directory_path() / "odai_fnv_skip_test.esm";
+    {
+        std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(group.data()), static_cast<std::streamsize>(group.size()));
+    }
+
+    odai::importer::fnv::EsmReader reader;
+    expectTrue(reader.open(esmPath), "ESM for the header-skip test opens");
+
+    std::vector<std::string> seenTypes;
+    std::vector<std::string> offeredTypes;
+    odai::importer::fnv::EsmReader::Visitor visitor;
+    visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+        offeredTypes.emplace_back(header.type);
+        return header.type != "LAND";
+    };
+    visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+        seenTypes.push_back(record.type);
+    };
+
+    expectTrue(reader.walk(visitor), "Walk succeeds without inflating the record its filter rejected");
+    expectTrue(offeredTypes.size() == 2u, "Both record headers are offered to the filter");
+    expectTrue(seenTypes.size() == 1u && seenTypes[0] == "STAT",
+               "Only the accepted record is materialized");
+
+    fs::remove(esmPath);
+}
+
+// A compressed record whose deflate stream is intact but whose adler32
+// trailer is damaged must still be read, and must be counted rather than
+// silently accepted. Retail FalloutNV.esm contains exactly one such record;
+// treating it as fatal aborted the whole 245 MB walk over one bad byte.
+void testEsmReaderToleratesCorruptChecksum() {
+    namespace fs = std::filesystem;
+    constexpr std::uint32_t kRecordFlagCompressed = 0x00040000u;
+
+    const auto innerSubrecords = buildSubrecord("EDID", stringPayload("DamagedChecksum"));
+    const auto goodStream = zlibCompress(innerSubrecords);
+    const auto damagedStream = corruptZlibChecksum(goodStream);
+    expectTrue(damagedStream != goodStream, "Fixture actually damaged the zlib trailer");
+
+    std::vector<std::uint8_t> recordData;
+    appendPod(recordData, static_cast<std::uint32_t>(innerSubrecords.size()));
+    recordData.insert(recordData.end(), damagedStream.begin(), damagedStream.end());
+
+    const auto record = buildRecord("LAND", 0x00150FC0u, kRecordFlagCompressed, recordData);
+    const auto group = buildGroup("LAND", 0, record);
+
+    const fs::path esmPath = fs::temp_directory_path() / "odai_fnv_checksum_test.esm";
+    {
+        std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(group.data()), static_cast<std::streamsize>(group.size()));
+    }
+
+    odai::importer::fnv::EsmReader reader;
+    expectTrue(reader.open(esmPath), "ESM with a damaged checksum opens");
+
+    std::vector<std::string> editorIds;
+    odai::importer::fnv::EsmReader::Visitor visitor;
+    visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& view) {
+        for (const auto& subrecord : view.subrecords) {
+            if (subrecord.type == "EDID") {
+                editorIds.emplace_back(reinterpret_cast<const char*>(subrecord.data));
+            }
+        }
+    };
+
+    expectTrue(reader.walk(visitor), "Walk survives a record with a damaged zlib trailer");
+    expectTrue(editorIds.size() == 1u && editorIds[0] == "DamagedChecksum",
+               "Damaged-trailer record still decodes its full declared payload");
+    expectTrue(reader.toleratedChecksumFailures() == 1u,
+               "Damaged trailer is counted as tolerated, not silently ignored");
+
+    fs::remove(esmPath);
+}
+
+// Run against both retail archive shapes: Fallout - Meshes.bsa (flags 0x87,
+// no embedded names) and Fallout - Textures.bsa (flags 0x107, embedded names).
+// The embedded-name variant is the one that silently returned garbage before
+// the reader handled flag 0x100, so both must be covered.
+void testBsaArchiveReadsFoldersAndFiles(bool embedFileNames) {
+    namespace fs = std::filesystem;
+    const std::string label = embedFileNames ? " [embedded names]" : " [plain]";
     const std::string uncompressedContent = "NIF-DATA-PLACEHOLDER";
     const std::string compressedContent(4096, 'T');  // long, repetitive: compresses well
 
-    const std::vector<std::uint8_t> archiveBytes = buildSyntheticBsa(uncompressedContent, compressedContent);
+    const std::vector<std::uint8_t> archiveBytes =
+        buildSyntheticBsa(uncompressedContent, compressedContent, embedFileNames);
     const fs::path archivePath = fs::temp_directory_path() / "odai_fnv_test.bsa";
     {
         std::ofstream out(archivePath, std::ios::binary | std::ios::trunc);
@@ -797,31 +1082,32 @@ void testBsaArchiveReadsFoldersAndFiles() {
     }
 
     odai::importer::fnv::BsaArchive archive;
-    expectTrue(archive.open(archivePath), "Synthetic BSA archive opens");
-    expectTrue(archive.files().size() == 2u, "Synthetic BSA archive exposes both files");
+    expectTrue(archive.open(archivePath), "Synthetic BSA archive opens" + label);
+    expectTrue(archive.files().size() == 2u, "Synthetic BSA archive exposes both files" + label);
 
     const auto* meshEntry = archive.find("meshes\\x\\ex_wall_01.nif");
-    expectTrue(meshEntry != nullptr, "BSA lookup finds the mesh entry by virtual path");
-    expectTrue(meshEntry != nullptr && !meshEntry->compressed, "Uncompressed entry is not marked compressed");
+    expectTrue(meshEntry != nullptr, "BSA lookup finds the mesh entry by virtual path" + label);
+    expectTrue(meshEntry != nullptr && !meshEntry->compressed, "Uncompressed entry is not marked compressed" + label);
 
     const auto* meshEntryMixedCase = archive.find("Meshes/X/EX_WALL_01.NIF");
-    expectTrue(meshEntryMixedCase != nullptr, "BSA lookup is case-insensitive and slash-normalized");
+    expectTrue(meshEntryMixedCase != nullptr, "BSA lookup is case-insensitive and slash-normalized" + label);
 
     std::vector<std::uint8_t> meshBytes;
-    expectTrue(meshEntry != nullptr && archive.extract(*meshEntry, meshBytes), "Uncompressed entry extracts");
+    expectTrue(meshEntry != nullptr && archive.extract(*meshEntry, meshBytes), "Uncompressed entry extracts" + label);
     expectTrue(
         std::string(meshBytes.begin(), meshBytes.end()) == uncompressedContent,
-        "Uncompressed entry bytes match the source content");
+        "Uncompressed entry bytes match the source content" + label);
 
     const auto* textureEntry = archive.find("textures\\x\\tx_wall_01.dds");
-    expectTrue(textureEntry != nullptr, "BSA lookup finds the texture entry by virtual path");
-    expectTrue(textureEntry != nullptr && textureEntry->compressed, "Compressed entry is marked compressed");
+    expectTrue(textureEntry != nullptr, "BSA lookup finds the texture entry by virtual path" + label);
+    expectTrue(textureEntry != nullptr && textureEntry->compressed, "Compressed entry is marked compressed" + label);
 
     std::vector<std::uint8_t> textureBytes;
-    expectTrue(textureEntry != nullptr && archive.extract(*textureEntry, textureBytes), "Compressed entry inflates");
+    expectTrue(textureEntry != nullptr && archive.extract(*textureEntry, textureBytes),
+               "Compressed entry inflates" + label);
     expectTrue(
         std::string(textureBytes.begin(), textureBytes.end()) == compressedContent,
-        "Inflated entry bytes match the original content");
+        "Inflated entry bytes match the original content" + label);
 
     fs::remove(archivePath);
 }
@@ -829,8 +1115,11 @@ void testBsaArchiveReadsFoldersAndFiles() {
 }  // namespace
 
 int main() {
-    testBsaArchiveReadsFoldersAndFiles();
+    testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
+    testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
     testEsmReaderWalksGroupsRecordsAndSubrecords();
+    testEsmReaderToleratesCorruptChecksum();
+    testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();
     testNifParserExtractsTransformedGeometry();
 

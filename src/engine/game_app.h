@@ -55,6 +55,26 @@ protected:
     // Checked in init() before the renderer is initialized. Default: false.
     virtual bool wantsMinimalRendering() const { return false; }
 
+    // Opt out of the renderer's strategy-map tuning preset.
+    //
+    // init() applies setStrategyMapMode(true) before renderer init, and that
+    // preset does three things a non-strategy game may not want: it pins the
+    // ambient-occlusion radius/bias/intensity to values scaled for a hex map
+    // (7 world units of AO reach), it disables the ray-tracing runtime
+    // outright, and it forces voxel GI onto its legacy path. Those are the
+    // right defaults for the 4X/city games this class was built for, and
+    // actively wrong for a game whose world is at Bethesda scale (~70 units
+    // per metre), where a 7-unit AO radius is 10 cm and the estimator
+    // early-outs to "unoccluded" across the whole frame.
+    //
+    // Defaults to true so every existing game keeps its current behavior; a
+    // game that wants the untuned renderer overrides this to false and sets
+    // its own AO tuning in onInit(). Checked in init() before renderer init,
+    // because setStrategyMapMode's ray-tracing effect cannot be undone later:
+    // the RT shader variants and acceleration structures are skipped at
+    // pipeline-creation time.
+    virtual bool wantsStrategyMapTuning() const { return true; }
+
     // Initial audio volumes/mute state, passed to Audio::init() in init() before onInit()
     // runs. Default is AudioConfig{}'s built-in defaults (see audio/audio_types.h). Override
     // if a game wants different starting volumes; there is no persisted GameApp-level config

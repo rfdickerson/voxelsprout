@@ -97,6 +97,7 @@ std::uint32_t blockBytesForImportedFormat(odai::importer::TextureFormat format) 
     switch (format) {
         case odai::importer::TextureFormat::BC1:
         case odai::importer::TextureFormat::BC4: return 8u;
+        case odai::importer::TextureFormat::BC2:
         case odai::importer::TextureFormat::BC3:
         case odai::importer::TextureFormat::BC5:
         case odai::importer::TextureFormat::BC7: return 16u;
@@ -112,6 +113,7 @@ VkFormat vkFormatForImportedTexture(odai::importer::TextureFormat format) {
         // and terrain renders as washed-out pastel. BC4/BC5 are data (single/dual
         // channel — e.g. the water normal map) and must stay UNORM/linear.
         case odai::importer::TextureFormat::BC1: return VK_FORMAT_BC1_RGB_SRGB_BLOCK;
+        case odai::importer::TextureFormat::BC2: return VK_FORMAT_BC2_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC3: return VK_FORMAT_BC3_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC4: return VK_FORMAT_BC4_UNORM_BLOCK;
         case odai::importer::TextureFormat::BC5: return VK_FORMAT_BC5_UNORM_BLOCK;
@@ -1153,6 +1155,19 @@ bool RendererBackend::uploadImportedSceneInternal(
         } else {
             dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
         }
+        // Terrain layer slots need the same scene-index -> bindless-slot remap
+        // as textureIndex above. An unmapped layer becomes the invalid slot and
+        // the shader skips it, rather than sampling whatever descriptor happens
+        // to sit at the unremapped index.
+        for (std::size_t layer = 0;
+             layer < std::size(dstVertex.layerTextureIndex);
+             ++layer) {
+            const std::uint32_t sourceIndex = srcVertex.layerTextureIndex[layer];
+            dstVertex.layerTextureIndex[layer] = sourceIndex < importedTextureSlots.size()
+                ? importedTextureSlots[sourceIndex]
+                : std::numeric_limits<std::uint32_t>::max();
+        }
+        dstVertex.layerWeights = srcVertex.layerWeights;
         vertices.push_back(dstVertex);
     }
     indices.assign(uploadScene.packedIndices.begin(), uploadScene.packedIndices.end());

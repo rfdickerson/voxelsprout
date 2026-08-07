@@ -120,6 +120,34 @@ void Renderer::setRayTracingEnabled(bool enabled) {
     m_backend->setRayTracingEnabled(enabled);
 }
 
+bool Renderer::captureFrameToFile(const std::string& outputPath) {
+    return m_backend->captureLastFrameToFile(outputPath);
+}
+
+void Renderer::setAutoExposureEnabled(bool enabled) {
+    m_backend->setAutoExposureEnabled(enabled);
+}
+
+bool Renderer::isAutoExposureEnabled() const {
+    return m_backend->isAutoExposureEnabled();
+}
+
+void Renderer::setVoxelGiEnabled(bool enabled) {
+    m_backend->setVoxelGiEnabled(enabled);
+}
+
+bool Renderer::isVoxelGiEnabled() const {
+    return m_backend->isVoxelGiEnabled();
+}
+
+void Renderer::setSunShaftsEnabled(bool enabled) {
+    m_backend->setSunShaftsEnabled(enabled);
+}
+
+bool Renderer::isSunShaftsEnabled() const {
+    return m_backend->isSunShaftsEnabled();
+}
+
 void Renderer::setMinimalRenderMode(bool enabled) {
     m_backend->setMinimalRenderMode(enabled);
 }

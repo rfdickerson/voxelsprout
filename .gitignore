@@ -72,3 +72,9 @@ assets/mods
 
 # Scratch directory
 /tmp/
+
+# Cooked Fallout: New Vegas scenes. Derived from local game data by
+# odai_newvegas_cooker in seconds, and 100-400 MB each -- strategy_map_scene.bin
+# is tracked because it is small and generated from data in this repo; these are
+# neither.
+/goodsprings*.bin

@@ -31,17 +31,41 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v17 -> v18: a trailing named material library. Appended and version-gated, so
 // v15-v17 files load with an empty table; their vertices have material index 0
 // in flag bits 24-31 and take the legacy per-vertex path, rendering unchanged.
-constexpr std::uint32_t kImportedSceneVersion = 18u;
+// v18 -> v19: ImportedSceneVertex gained a colour. This one is NOT appended, it
+// widens a struct that is read back as a raw array blit, so v15-v18 files need
+// their vertices read in the old 8-float layout and expanded (readSceneMeshes
+// does this). Their colour defaults to white and no vertex carries the tint
+// flag, so they shade exactly as before.
+// v19 -> v20: terrain layer blending (Fallout ATXT/VTXT). BOTH vertex structs
+// widened again -- ImportedSceneVertex by 3 layer indices and 3 weights,
+// ImportedScenePackedVertex by 3 indices and a packed weight word -- so both
+// raw-blit arrays need their own legacy expansion, in three places: the full
+// loader reads meshes and packed vertices, the runtime loader skips meshes and
+// reads packed vertices.
+constexpr std::uint32_t kImportedSceneVersion = 20u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
+// The pre-v19 ImportedSceneVertex: position[3], normal[3], uv[2].
+constexpr std::size_t kImportedSceneVertexFloatsV18 = 8;
+// The v19 ImportedSceneVertex: the above plus color[3].
+constexpr std::size_t kImportedSceneVertexFloatsV19 = 11;
+// The pre-v20 ImportedScenePackedVertex: position[3], normal[3], color[3],
+// uv[2], then textureIndex and flags as two more 4-byte words.
+constexpr std::size_t kImportedScenePackedVertexWordsV19 = 13;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
-    static_cast<std::uint8_t>(TextureFormat::BC7);
+    static_cast<std::uint8_t>(TextureFormat::BC2);
 
 // pageRanges are serialized as a raw array, so the layout must stay packed.
 static_assert(sizeof(ImportedScenePageRange) == 36u);
-// packedVertices is blitted to disk field-for-field with no version gate, so a
-// size change silently reinterprets every existing file. Nothing caught that
-// before; this does.
-static_assert(sizeof(ImportedScenePackedVertex) == 52u);
+// packedVertices is blitted to disk field-for-field, so a size change silently
+// reinterprets every existing file. There IS a version gate now
+// (readPackedVertexArray), but this assert stays: it is what forces whoever
+// widens the struct to go and add the next legacy branch, rather than shipping
+// a reader that quietly mis-strides. Was 52 through v19; v20 added three layer
+// texture indices and a packed weight word.
+static_assert(sizeof(ImportedScenePackedVertex) == 68u);
+// The pre-v20 width readPackedVertexArray expands from must stay in step with
+// the layout it decodes field by field.
+static_assert(kImportedScenePackedVertexWordsV19 * sizeof(std::uint32_t) == 52u);
 
 // Materials are NOT raw-blitted -- ImportedSceneMaterial holds a std::string --
 // so they are written field by field. Both loaders must stay in step with this.
@@ -190,6 +214,30 @@ bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
             }
             return false;
         }
+        case TextureFormat::BC2: {
+            // BC2 stores 16 explicit 4-bit alpha values in the first 8 bytes
+            // of each 16-byte block, so this needs no decode at all.
+            if (texture.rgba8.size() < baseBlockCount * 16u) {
+                return false;
+            }
+            bool sawTransparent = false;
+            bool sawVisible = false;
+            for (std::size_t blockIndex = 0; blockIndex < baseBlockCount; ++blockIndex) {
+                const std::uint8_t* alphaBytes = texture.rgba8.data() + (blockIndex * 16u);
+                for (std::size_t byteIndex = 0; byteIndex < 8u; ++byteIndex) {
+                    const std::uint8_t packed = alphaBytes[byteIndex];
+                    for (const std::uint8_t nibble : {static_cast<std::uint8_t>(packed & 0x0Fu),
+                                                      static_cast<std::uint8_t>(packed >> 4u)}) {
+                        sawTransparent = sawTransparent || nibble < 15u;
+                        sawVisible = sawVisible || nibble > 0u;
+                    }
+                }
+                if (sawTransparent && sawVisible) {
+                    return true;
+                }
+            }
+            return false;
+        }
         case TextureFormat::BC3: {
             if (texture.rgba8.size() < baseBlockCount * 16u) {
                 return false;
@@ -328,6 +376,109 @@ bool readString(std::istream& input, std::string& out) {
     }
     out.resize(size);
     return size == 0 || readExact(input, out.data(), size);
+}
+
+// --- Legacy vertex layouts -------------------------------------------------
+//
+// Both vertex structs are stored as raw array blits, so every widening of one
+// leaves older files with a narrower stride on disk. These keep the "how wide
+// was it in version N" answer in one place: the readers below expand, and
+// legacyPackedVertexStride is also what the runtime loader uses to SKIP the
+// mesh block. Getting a stride wrong does not error, it desyncs every section
+// after the array, so all three sites go through here.
+
+std::size_t legacyMeshVertexStride(std::uint32_t version) {
+    if (version >= 20u) {
+        return sizeof(ImportedSceneVertex);
+    }
+    if (version >= 19u) {
+        return kImportedSceneVertexFloatsV19 * sizeof(float);
+    }
+    return kImportedSceneVertexFloatsV18 * sizeof(float);
+}
+
+std::size_t legacyPackedVertexStride(std::uint32_t version) {
+    if (version >= 20u) {
+        return sizeof(ImportedScenePackedVertex);
+    }
+    return kImportedScenePackedVertexWordsV19 * sizeof(std::uint32_t);
+}
+
+bool readMeshVertexArray(
+    std::istream& input,
+    std::uint32_t version,
+    std::vector<ImportedSceneVertex>& out
+) {
+    if (out.empty()) {
+        return true;
+    }
+    if (version >= 20u) {
+        return readExact(input, out.data(), out.size() * sizeof(ImportedSceneVertex));
+    }
+    const std::size_t floatsPerVertex = legacyMeshVertexStride(version) / sizeof(float);
+    std::vector<float> legacy(out.size() * floatsPerVertex);
+    if (!readExact(input, legacy.data(), legacy.size() * sizeof(float))) {
+        return false;
+    }
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const float* src = legacy.data() + (i * floatsPerVertex);
+        ImportedSceneVertex& dst = out[i];
+        dst.position[0] = src[0];
+        dst.position[1] = src[1];
+        dst.position[2] = src[2];
+        dst.normal[0] = src[3];
+        dst.normal[1] = src[4];
+        dst.normal[2] = src[5];
+        dst.uv[0] = src[6];
+        dst.uv[1] = src[7];
+        if (floatsPerVertex >= kImportedSceneVertexFloatsV19) {
+            dst.color[0] = src[8];
+            dst.color[1] = src[9];
+            dst.color[2] = src[10];
+        }
+        // Layer slots keep the constructor's "no layer" defaults; no pre-v20
+        // vertex carries kImportedSceneMaterialFlagTerrainLayers, so nothing
+        // reads them.
+    }
+    return true;
+}
+
+bool readPackedVertexArray(
+    std::istream& input,
+    std::uint32_t version,
+    std::vector<ImportedScenePackedVertex>& out
+) {
+    if (out.empty()) {
+        return true;
+    }
+    if (version >= 20u) {
+        return readExact(input, out.data(), out.size() * sizeof(ImportedScenePackedVertex));
+    }
+    // 11 floats then 2 uints; read as words and reinterpret the float half.
+    std::vector<std::uint32_t> legacy(out.size() * kImportedScenePackedVertexWordsV19);
+    if (!readExact(input, legacy.data(), legacy.size() * sizeof(std::uint32_t))) {
+        return false;
+    }
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const std::uint32_t* src = legacy.data() + (i * kImportedScenePackedVertexWordsV19);
+        float floats[11];
+        std::memcpy(floats, src, sizeof(floats));
+        ImportedScenePackedVertex& dst = out[i];
+        dst.position[0] = floats[0];
+        dst.position[1] = floats[1];
+        dst.position[2] = floats[2];
+        dst.normal[0] = floats[3];
+        dst.normal[1] = floats[4];
+        dst.normal[2] = floats[5];
+        dst.color[0] = floats[6];
+        dst.color[1] = floats[7];
+        dst.color[2] = floats[8];
+        dst.uv[0] = floats[9];
+        dst.uv[1] = floats[10];
+        dst.textureIndex = src[11];
+        dst.flags = src[12];
+    }
+    return true;
 }
 
 bool skipString(std::istream& input) {
@@ -516,7 +667,17 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                             srcVertex.normal[1],
                             srcVertex.normal[2]
                         });
-                        const PackedRenderColor color = packedTerrainColor(srcVertex.position[1]);
+                        // An authored vertex colour tints the texture; the
+                        // height ramp is only a stand-in for geometry that has
+                        // none, and it is not something to multiply a real
+                        // texture by -- it would stripe the terrain by altitude.
+                        const bool hasAuthoredColor =
+                            srcVertex.color[0] != 1.0f ||
+                            srcVertex.color[1] != 1.0f ||
+                            srcVertex.color[2] != 1.0f;
+                        const PackedRenderColor color = hasAuthoredColor
+                            ? PackedRenderColor{srcVertex.color[0], srcVertex.color[1], srcVertex.color[2]}
+                            : packedTerrainColor(srcVertex.position[1]);
                         dstVertex.position[0] = srcVertex.position[0];
                         dstVertex.position[1] = srcVertex.position[1];
                         dstVertex.position[2] = srcVertex.position[2];
@@ -529,7 +690,27 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                         dstVertex.uv[0] = srcVertex.uv[0];
                         dstVertex.uv[1] = srcVertex.uv[1];
                         dstVertex.textureIndex = part.textureIndex;
-                        dstVertex.flags = 0u;
+                        dstVertex.flags = hasAuthoredColor
+                            ? kImportedSceneMaterialFlagVertexColorTint
+                            : 0u;
+                        // Terrain layers ride through untouched; the flag opts
+                        // in only when a layer is actually present, so a scene
+                        // whose cooker never filled these reads exactly as
+                        // before.
+                        bool hasTerrainLayer = false;
+                        float layerWeights[3] = {};
+                        for (int layer = 0; layer < kImportedSceneMaxTerrainLayers; ++layer) {
+                            dstVertex.layerTextureIndex[layer] = srcVertex.layerTextureIndex[layer];
+                            layerWeights[layer] = srcVertex.layerWeight[layer];
+                            if (srcVertex.layerTextureIndex[layer] != kImportedSceneNoTerrainLayer &&
+                                srcVertex.layerWeight[layer] > 0.0f) {
+                                hasTerrainLayer = true;
+                            }
+                        }
+                        dstVertex.layerWeights = packImportedSceneTerrainLayerWeights(layerWeights);
+                        if (hasTerrainLayer) {
+                            dstVertex.flags |= kImportedSceneMaterialFlagTerrainLayers;
+                        }
                         remappedIndex = static_cast<std::uint32_t>(scene.packedVertices.size());
                         scene.packedVertices.push_back(dstVertex);
                         expandBounds(dstVertex);
@@ -1017,8 +1198,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         mesh.vertices.resize(vertexCount);
         mesh.indices.resize(indexCount);
         mesh.parts.resize(partCount);
-        if (vertexCount != 0 &&
-            !readExact(input, mesh.vertices.data(), mesh.vertices.size() * sizeof(ImportedSceneVertex))) {
+        if (!readMeshVertexArray(input, version, mesh.vertices)) {
             return false;
         }
         if (indexCount != 0 &&
@@ -1101,8 +1281,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         scene.packedVertices.resize(packedVertexCount);
         scene.packedIndices.resize(packedIndexCount);
         scene.packedDraws.resize(packedDrawCount);
-        if (packedVertexCount != 0 &&
-            !readExact(input, scene.packedVertices.data(), scene.packedVertices.size() * sizeof(ImportedScenePackedVertex))) {
+        if (!readPackedVertexArray(input, version, scene.packedVertices)) {
             return false;
         }
         if (packedIndexCount != 0 &&
@@ -1249,7 +1428,11 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
             !readValue(input, partCount)) {
             return false;
         }
-        const std::size_t vertexBytes = static_cast<std::size_t>(vertexCount) * sizeof(ImportedSceneVertex);
+        // Must track the on-disk width, not sizeof(ImportedSceneVertex): v19
+        // added a colour and v20 the terrain layers, so using the in-memory size
+        // here would over-skip on older files and desync every section after.
+        const std::size_t vertexBytes =
+            static_cast<std::size_t>(vertexCount) * legacyMeshVertexStride(version);
         const std::size_t indexBytes = static_cast<std::size_t>(indexCount) * sizeof(std::uint32_t);
         const std::size_t partBytes = static_cast<std::size_t>(partCount) * sizeof(ImportedSceneMeshPart);
         if ((vertexBytes != 0 && !skipExact(input, vertexBytes)) ||
@@ -1328,9 +1511,10 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     scene.packedVertices.resize(packedVertexCount);
     scene.packedIndices.resize(packedIndexCount);
     scene.packedDraws.resize(packedDrawCount);
-    if ((packedVertexCount != 0 &&
-         !readExact(input, scene.packedVertices.data(), scene.packedVertices.size() * sizeof(ImportedScenePackedVertex))) ||
-        (packedIndexCount != 0 &&
+    if (!readPackedVertexArray(input, version, scene.packedVertices)) {
+        return false;
+    }
+    if ((packedIndexCount != 0 &&
          !readExact(input, scene.packedIndices.data(), scene.packedIndices.size() * sizeof(std::uint32_t))) ||
         (packedDrawCount != 0 &&
          !readExact(input, scene.packedDraws.data(), scene.packedDraws.size() * sizeof(ImportedScenePackedDraw)))) {

@@ -739,8 +739,297 @@ void testImportedSceneRaycast() {
 
 }  // namespace
 
+// v19 added a colour to ImportedSceneVertex, widening a struct that both loaders
+// handle as a raw array: the full loader blits it, and the runtime loader SKIPS
+// it by computing vertexCount * sizeof(ImportedSceneVertex). Get the stride
+// wrong on an older file and nothing errors -- the mesh block is mis-sized and
+// every section after it is read from the wrong offset.
+//
+// Rather than hand-roll a fixture (which would only prove the test author and
+// the loader share a misunderstanding), this saves a real scene and rewrites the
+// bytes: version 19 -> 18, and each 11-float vertex down to the old 8. The rest
+// of the file is copied verbatim, so the sections after the mesh block are
+// genuinely the ones the writer produced.
+void testPreV19VertexLayoutCompatibility() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer;
+
+    // No textures and no instances, so the packed block lands immediately after
+    // the mesh block on disk — which is what lets this rewrite both arrays and
+    // then use the packed data as proof the mesh block was sized right.
+    ImportedScene scene{};
+    scene.sourceTag = "v18_compat";
+
+    ImportedSceneMesh mesh{};
+    mesh.name = "terrain";
+    mesh.vertices = {
+        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{4.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{0.0f, 0.0f, 4.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
+    };
+    mesh.indices = {0u, 1u, 2u};
+    mesh.parts = {ImportedSceneMeshPart{0u, 3u, 0xffffffffu, false}};
+    scene.meshes.push_back(mesh);
+
+    buildImportedScenePackedRenderData(scene);
+    expectTrue(!scene.packedVertices.empty(), "downgrade fixture has packed vertices to check");
+
+    const fs::path v19Path = fs::temp_directory_path() / "odai_v19_source.bin";
+    const fs::path v18Path = fs::temp_directory_path() / "odai_v18_compat.bin";
+    expectTrue(saveImportedScene(scene, v19Path), "v19 scene saves for the downgrade fixture");
+
+    std::vector<std::uint8_t> bytes;
+    {
+        std::ifstream input(v19Path, std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
+    expectTrue(!bytes.empty(), "downgrade fixture source is non-empty");
+
+    // Header: magic, version, sourceTag string, 10 counts, two float[3] bounds.
+    // Then 0 textures, then the mesh block: name, three counts, vertices.
+    std::size_t cursor = sizeof(std::uint32_t) * 2;
+    const std::uint32_t tagLength = *reinterpret_cast<const std::uint32_t*>(bytes.data() + cursor);
+    cursor += sizeof(std::uint32_t) + tagLength;
+    cursor += sizeof(std::uint32_t) * 10;
+    cursor += sizeof(float) * 6;
+    const std::uint32_t meshNameLength = *reinterpret_cast<const std::uint32_t*>(bytes.data() + cursor);
+    cursor += sizeof(std::uint32_t) + meshNameLength;
+    const std::uint32_t vertexCount = *reinterpret_cast<const std::uint32_t*>(bytes.data() + cursor);
+    const std::uint32_t indexCount = *reinterpret_cast<const std::uint32_t*>(bytes.data() + cursor + 4);
+    const std::uint32_t partCount = *reinterpret_cast<const std::uint32_t*>(bytes.data() + cursor + 8);
+    cursor += sizeof(std::uint32_t) * 3;
+    expectTrue(vertexCount == 3u, "downgrade fixture locates the mesh vertex block");
+
+    const std::size_t vertexBlockBegin = cursor;
+    const std::size_t currentVertexBytes = vertexCount * sizeof(ImportedSceneVertex);
+
+    std::vector<std::uint8_t> downgraded(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(vertexBlockBegin));
+    *reinterpret_cast<std::uint32_t*>(downgraded.data() + sizeof(std::uint32_t)) = 18u;
+    for (std::uint32_t i = 0; i < vertexCount; ++i) {
+        const auto* vertex = reinterpret_cast<const ImportedSceneVertex*>(
+            bytes.data() + vertexBlockBegin + (i * sizeof(ImportedSceneVertex)));
+        const float legacy[8] = {
+            vertex->position[0], vertex->position[1], vertex->position[2],
+            vertex->normal[0], vertex->normal[1], vertex->normal[2],
+            vertex->uv[0], vertex->uv[1]
+        };
+        const auto* raw = reinterpret_cast<const std::uint8_t*>(legacy);
+        downgraded.insert(downgraded.end(), raw, raw + sizeof(legacy));
+    }
+    // Everything between the mesh vertices and the packed vertices is copied as
+    // is: indices, parts, then (all empty here) instances, landscape, water,
+    // lights, unresolved refs.
+    const std::size_t tailBegin = vertexBlockBegin + currentVertexBytes;
+    const std::size_t packedBlockBegin = tailBegin +
+        (static_cast<std::size_t>(indexCount) * sizeof(std::uint32_t)) +
+        (static_cast<std::size_t>(partCount) * sizeof(ImportedSceneMeshPart));
+    expectTrue(packedBlockBegin < bytes.size(), "downgrade fixture locates the packed vertex block");
+    downgraded.insert(
+        downgraded.end(),
+        bytes.begin() + static_cast<std::ptrdiff_t>(tailBegin),
+        bytes.begin() + static_cast<std::ptrdiff_t>(packedBlockBegin));
+
+    // Packed vertices were 52 bytes through v19; v20 appended three layer
+    // indices and the weight word.
+    for (const ImportedScenePackedVertex& packed : scene.packedVertices) {
+        float head[11] = {
+            packed.position[0], packed.position[1], packed.position[2],
+            packed.normal[0], packed.normal[1], packed.normal[2],
+            packed.color[0], packed.color[1], packed.color[2],
+            packed.uv[0], packed.uv[1]
+        };
+        const auto* headBytes = reinterpret_cast<const std::uint8_t*>(head);
+        downgraded.insert(downgraded.end(), headBytes, headBytes + sizeof(head));
+        const std::uint32_t tail[2] = {packed.textureIndex, packed.flags};
+        const auto* tailBytes = reinterpret_cast<const std::uint8_t*>(tail);
+        downgraded.insert(downgraded.end(), tailBytes, tailBytes + sizeof(tail));
+    }
+    downgraded.insert(
+        downgraded.end(),
+        bytes.begin() + static_cast<std::ptrdiff_t>(
+            packedBlockBegin + (scene.packedVertices.size() * sizeof(ImportedScenePackedVertex))),
+        bytes.end());
+    {
+        std::ofstream output(v18Path, std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(downgraded.data()),
+                     static_cast<std::streamsize>(downgraded.size()));
+    }
+
+    ImportedScene loaded{};
+    expectTrue(loadImportedScene(v18Path, loaded), "v18 file loads");
+    expectTrue(loaded.sourceFileVersion == 18u, "v18 file reports its own version");
+    expectTrue(loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3,
+               "v18 mesh vertices survive the narrower on-disk layout");
+    if (loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3) {
+        const ImportedSceneVertex& second = loaded.meshes[0].vertices[1];
+        expectNear(second.position[0], 4.0f, 1e-5f, "v18 vertex position expands correctly");
+        expectNear(second.uv[0], 1.0f, 1e-5f, "v18 vertex uv expands correctly");
+        expectNear(second.color[0], 1.0f, 1e-5f, "v18 vertex colour defaults to white (r)");
+        expectNear(second.color[1], 1.0f, 1e-5f, "v18 vertex colour defaults to white (g)");
+        expectNear(second.color[2], 1.0f, 1e-5f, "v18 vertex colour defaults to white (b)");
+        expectTrue(second.layerTextureIndex[0] == kImportedSceneNoTerrainLayer,
+                   "v18 vertex has no terrain layers");
+    }
+    // The packed block sits after the mesh block, so reading it back correctly
+    // is what proves the mesh block was sized right — and it exercises the
+    // packed array's own legacy stride at the same time.
+    expectTrue(loaded.packedVertices.size() == scene.packedVertices.size(),
+               "v18 packed vertex count survives the mesh block");
+    if (loaded.packedVertices.size() == scene.packedVertices.size() && !loaded.packedVertices.empty()) {
+        const ImportedScenePackedVertex& expected = scene.packedVertices[1];
+        const ImportedScenePackedVertex& actual = loaded.packedVertices[1];
+        expectNear(actual.position[0], expected.position[0], 1e-5f, "v18 packed position expands correctly");
+        expectNear(actual.uv[0], expected.uv[0], 1e-5f, "v18 packed uv expands correctly");
+        expectTrue(actual.textureIndex == expected.textureIndex, "v18 packed texture index expands correctly");
+        expectTrue(actual.layerTextureIndex[0] == kImportedSceneNoTerrainLayer,
+                   "v18 packed vertex has no terrain layers");
+        expectTrue(actual.layerWeights == 0u, "v18 packed vertex has zero layer weights");
+        expectTrue((actual.flags & kImportedSceneMaterialFlagTerrainLayers) == 0u,
+                   "v18 packed vertex does not claim terrain layers");
+    }
+
+    // Same file through the runtime loader, which skips meshes by computed size
+    // rather than reading them — the other half of the stride bug. It keeps only
+    // the packed stream (meshes and instances are skipped by design), so that is
+    // what proves it resumed at the right offset.
+    ImportedScene runtimeLoaded{};
+    expectTrue(loadImportedSceneRuntime(v18Path, runtimeLoaded), "v18 file loads through the runtime loader");
+    expectTrue(runtimeLoaded.packedVertices.size() == scene.packedVertices.size(),
+               "runtime loader skips the v18 mesh block by the on-disk stride");
+    expectTrue(runtimeLoaded.packedDraws.size() == scene.packedDraws.size(),
+               "runtime loader reads v18 packed draws from the right offset");
+
+    std::error_code cleanupError;
+    fs::remove(v19Path, cleanupError);
+    fs::remove(v18Path, cleanupError);
+}
+
+// Authored vertex colour must reach the packed stream AND opt into the tint bit;
+// synthesized fallback colours must not set it, or every cooked scene without
+// VCLR would start multiplying its textures by a height ramp.
+void testVertexColorTintFlag() {
+    using namespace odai::importer;
+
+    ImportedScene scene{};
+    scene.sourceTag = "fnv_exterior";
+
+    ImportedSceneMesh mesh{};
+    mesh.name = "terrain";
+    mesh.vertices = {
+        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, {0.5f, 0.25f, 0.125f}},
+        ImportedSceneVertex{{4.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, {0.5f, 0.25f, 0.125f}},
+        ImportedSceneVertex{{0.0f, 0.0f, 4.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}, {0.5f, 0.25f, 0.125f}}
+    };
+    mesh.indices = {0u, 1u, 2u};
+    mesh.parts = {ImportedSceneMeshPart{0u, 3u, 0u, false}};
+    scene.meshes.push_back(mesh);
+    scene.landscapeCells.resize(1);
+
+    buildImportedScenePackedRenderData(scene);
+    expectTrue(!scene.packedVertices.empty(), "tinted terrain packs vertices");
+    if (!scene.packedVertices.empty()) {
+        const ImportedScenePackedVertex& packed = scene.packedVertices[0];
+        expectNear(packed.color[0], 0.5f, 1e-5f, "authored vertex colour reaches the packed stream");
+        expectNear(packed.color[2], 0.125f, 1e-5f, "authored vertex colour keeps its blue channel");
+        expectTrue((packed.flags & kImportedSceneMaterialFlagVertexColorTint) != 0u,
+                   "authored vertex colour sets the tint flag");
+    }
+
+    // Same geometry with the default white: the fallback ramp applies and the
+    // bit stays clear, so the shader leaves those textures alone.
+    ImportedScene untinted{};
+    untinted.sourceTag = "fnv_exterior";
+    ImportedSceneMesh plainMesh = mesh;
+    for (ImportedSceneVertex& vertex : plainMesh.vertices) {
+        vertex.color[0] = 1.0f;
+        vertex.color[1] = 1.0f;
+        vertex.color[2] = 1.0f;
+    }
+    untinted.meshes.push_back(plainMesh);
+    untinted.landscapeCells.resize(1);
+    buildImportedScenePackedRenderData(untinted);
+    expectTrue(!untinted.packedVertices.empty(), "untinted terrain packs vertices");
+    if (!untinted.packedVertices.empty()) {
+        expectTrue((untinted.packedVertices[0].flags & kImportedSceneMaterialFlagVertexColorTint) == 0u,
+                   "white vertex colour does not set the tint flag");
+    }
+}
+
+// Terrain layers must survive packing with their weights quantized but their
+// ordering and identity intact, and must opt in via the flag exactly when a
+// layer is actually present.
+void testTerrainLayerPacking() {
+    using namespace odai::importer;
+
+    ImportedScene scene{};
+    scene.sourceTag = "fnv_exterior";
+
+    ImportedSceneMesh mesh{};
+    mesh.name = "terrain";
+    ImportedSceneVertex layered{};
+    layered.position[0] = 1.0f;
+    layered.layerTextureIndex[0] = 7u;
+    layered.layerWeight[0] = 1.0f;
+    layered.layerTextureIndex[1] = 9u;
+    layered.layerWeight[1] = 0.5f;
+    ImportedSceneVertex plain{};
+    plain.position[0] = 2.0f;
+
+    mesh.vertices = {layered, layered, plain};
+    mesh.indices = {0u, 1u, 2u};
+    mesh.parts = {ImportedSceneMeshPart{0u, 3u, 0u, false}};
+    scene.meshes.push_back(mesh);
+    scene.landscapeCells.resize(1);
+
+    buildImportedScenePackedRenderData(scene);
+    expectTrue(scene.packedVertices.size() == 3, "layered terrain packs one vertex per source vertex");
+    if (scene.packedVertices.size() != 3) {
+        return;
+    }
+
+    const ImportedScenePackedVertex& packedLayered = scene.packedVertices[0];
+    expectTrue((packedLayered.flags & kImportedSceneMaterialFlagTerrainLayers) != 0u,
+               "a vertex with a layer sets the terrain layer flag");
+    expectTrue(packedLayered.layerTextureIndex[0] == 7u, "layer 0 texture index survives packing");
+    expectTrue(packedLayered.layerTextureIndex[1] == 9u, "layer 1 texture index survives packing");
+    expectTrue(packedLayered.layerTextureIndex[2] == kImportedSceneNoTerrainLayer,
+               "unused layer slot stays empty");
+    // 8-bit quantization: 1.0 -> 255, 0.5 -> 128 (round-half-up).
+    expectTrue((packedLayered.layerWeights & 0xffu) == 255u, "layer 0 weight quantizes to full");
+    expectTrue(((packedLayered.layerWeights >> 8) & 0xffu) == 128u, "layer 1 weight quantizes to half");
+    expectTrue(((packedLayered.layerWeights >> 16) & 0xffu) == 0u, "unused layer weight is zero");
+
+    const ImportedScenePackedVertex& packedPlain = scene.packedVertices[2];
+    expectTrue((packedPlain.flags & kImportedSceneMaterialFlagTerrainLayers) == 0u,
+               "a vertex with no layers does not set the terrain layer flag");
+
+    // And the whole thing round-trips at the current version.
+    namespace fs = std::filesystem;
+    const fs::path path = fs::temp_directory_path() / "odai_terrain_layers.bin";
+    expectTrue(saveImportedScene(scene, path), "layered scene saves");
+    ImportedScene loaded{};
+    expectTrue(loadImportedScene(path, loaded), "layered scene loads");
+    if (loaded.packedVertices.size() == 3) {
+        expectTrue(loaded.packedVertices[0].layerTextureIndex[1] == 9u,
+                   "layer texture index round-trips through the file");
+        expectTrue(loaded.packedVertices[0].layerWeights == packedLayered.layerWeights,
+                   "packed layer weights round-trip through the file");
+    }
+    expectTrue(loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3,
+               "layered mesh vertices round-trip");
+    if (loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3) {
+        expectNear(loaded.meshes[0].vertices[0].layerWeight[1], 0.5f, 1e-5f,
+                   "source layer weight round-trips unquantized");
+    }
+    std::error_code cleanupError;
+    fs::remove(path, cleanupError);
+}
+
 int main() {
     testImportedSceneSerialization();
+    testPreV19VertexLayoutCompatibility();
+    testVertexColorTintFlag();
+    testTerrainLayerPacking();
     testGpuSceneBuildFromImportedScene();
     testImportedSceneSourceTagInteriorClassification();
     testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain();

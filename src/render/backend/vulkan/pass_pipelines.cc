@@ -641,7 +641,10 @@ bool RendererBackend::createPipePipeline() {
     importedBindings[0].stride = sizeof(ImportedMeshVertex);
     importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedAttributes[6]{};
+    // Locations 6-9: terrain layer blend (Fallout ATXT/VTXT). Three bindless
+    // slots plus one packed weight word; inert unless the vertex carries
+    // kImportedSceneMaterialFlagTerrainLayers.
+    VkVertexInputAttributeDescription importedAttributes[10]{};
     importedAttributes[0].location = 0;
     importedAttributes[0].binding = 0;
     importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -666,12 +669,23 @@ bool RendererBackend::createPipePipeline() {
     importedAttributes[5].binding = 0;
     importedAttributes[5].format = VK_FORMAT_R32_UINT;
     importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+    for (uint32_t layer = 0; layer < 3; ++layer) {
+        importedAttributes[6 + layer].location = 6 + layer;
+        importedAttributes[6 + layer].binding = 0;
+        importedAttributes[6 + layer].format = VK_FORMAT_R32_UINT;
+        importedAttributes[6 + layer].offset = static_cast<uint32_t>(
+            offsetof(ImportedMeshVertex, layerTextureIndex) + (layer * sizeof(std::uint32_t)));
+    }
+    importedAttributes[9].location = 9;
+    importedAttributes[9].binding = 0;
+    importedAttributes[9].format = VK_FORMAT_R32_UINT;
+    importedAttributes[9].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
 
     VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
     importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
-    importedVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 10;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
     VkGraphicsPipelineCreateInfo importedPipelineCreateInfo = pipelineCreateInfo;
@@ -1334,7 +1348,10 @@ bool RendererBackend::createAoPipelines() {
     importedBindings[0].stride = sizeof(ImportedMeshVertex);
     importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedAttributes[6]{};
+    // Locations 6-9: terrain layer blend (Fallout ATXT/VTXT). Three bindless
+    // slots plus one packed weight word; inert unless the vertex carries
+    // kImportedSceneMaterialFlagTerrainLayers.
+    VkVertexInputAttributeDescription importedAttributes[10]{};
     importedAttributes[0].location = 0;
     importedAttributes[0].binding = 0;
     importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -1359,12 +1376,23 @@ bool RendererBackend::createAoPipelines() {
     importedAttributes[5].binding = 0;
     importedAttributes[5].format = VK_FORMAT_R32_UINT;
     importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+    for (uint32_t layer = 0; layer < 3; ++layer) {
+        importedAttributes[6 + layer].location = 6 + layer;
+        importedAttributes[6 + layer].binding = 0;
+        importedAttributes[6 + layer].format = VK_FORMAT_R32_UINT;
+        importedAttributes[6 + layer].offset = static_cast<uint32_t>(
+            offsetof(ImportedMeshVertex, layerTextureIndex) + (layer * sizeof(std::uint32_t)));
+    }
+    importedAttributes[9].location = 9;
+    importedAttributes[9].binding = 0;
+    importedAttributes[9].format = VK_FORMAT_R32_UINT;
+    importedAttributes[9].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
 
     VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
     importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
-    importedVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 10;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
     pipelineCreateInfo.pStages = importedNormalDepthStageInfos;

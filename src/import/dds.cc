@@ -20,12 +20,14 @@ constexpr std::uint32_t kDdsCaps1Mip   = 0x400000u;
 constexpr std::uint32_t kDdsCaps1Cmplx = 0x8u;
 
 constexpr std::uint32_t kFourCCDxt1    = 0x31545844u; // "DXT1"
+constexpr std::uint32_t kFourCCDxt3    = 0x33545844u; // "DXT3"
 constexpr std::uint32_t kFourCCDxt5    = 0x35545844u; // "DXT5"
 constexpr std::uint32_t kFourCCAti1    = 0x31495441u; // "ATI1"
 constexpr std::uint32_t kFourCCAti2    = 0x32495441u; // "ATI2"
 constexpr std::uint32_t kFourCCDx10    = 0x30315844u; // "DX10"
 
 constexpr std::uint32_t kDxgiBC1Unorm  = 71u;
+constexpr std::uint32_t kDxgiBC2Unorm  = 74u;
 constexpr std::uint32_t kDxgiBC3Unorm  = 77u;
 constexpr std::uint32_t kDxgiBC4Unorm  = 80u;
 constexpr std::uint32_t kDxgiBC5Unorm  = 83u;
@@ -80,6 +82,7 @@ std::uint32_t ddsBlockBytes(TextureFormat format) {
     switch (format) {
         case TextureFormat::BC1:
         case TextureFormat::BC4: return 8u;
+        case TextureFormat::BC2:
         case TextureFormat::BC3:
         case TextureFormat::BC5:
         case TextureFormat::BC7: return 16u;
@@ -87,23 +90,19 @@ std::uint32_t ddsBlockBytes(TextureFormat format) {
     }
 }
 
-bool loadDds(const std::filesystem::path& path, ImportedSceneTexture& out) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) return false;
-    const auto fileSize = static_cast<std::size_t>(f.tellg());
+bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, ImportedSceneTexture& out) {
+    if (bytes == nullptr) return false;
+    const std::size_t fileSize = byteCount;
     if (fileSize < 4u + sizeof(DdsHeader)) return false;
-    f.seekg(0);
-
-    std::vector<std::uint8_t> data(fileSize);
-    if (!f.read(reinterpret_cast<char*>(data.data()),
-                static_cast<std::streamsize>(fileSize))) return false;
+    // Aliased so the body below reads exactly as it did when it owned a vector.
+    const std::uint8_t* const data = bytes;
 
     std::uint32_t magic = 0;
-    std::memcpy(&magic, data.data(), 4u);
+    std::memcpy(&magic, data, 4u);
     if (magic != kDdsMagic) return false;
 
     DdsHeader hdr{};
-    std::memcpy(&hdr, data.data() + 4u, sizeof(DdsHeader));
+    std::memcpy(&hdr, data + 4u, sizeof(DdsHeader));
     if (hdr.size != 124u || hdr.width == 0u || hdr.height == 0u) return false;
     if (!(hdr.ddspf.flags & kDdpfFourCC)) return false; // uncompressed not supported
 
@@ -112,16 +111,18 @@ bool loadDds(const std::filesystem::path& path, ImportedSceneTexture& out) {
 
     const std::uint32_t fcc = hdr.ddspf.fourCC;
     if      (fcc == kFourCCDxt1) { fmt = TextureFormat::BC1; }
+    else if (fcc == kFourCCDxt3) { fmt = TextureFormat::BC2; }
     else if (fcc == kFourCCDxt5) { fmt = TextureFormat::BC3; }
     else if (fcc == kFourCCAti1) { fmt = TextureFormat::BC4; }
     else if (fcc == kFourCCAti2) { fmt = TextureFormat::BC5; }
     else if (fcc == kFourCCDx10) {
         if (fileSize < dataOffset + sizeof(DdsHeaderDxt10)) return false;
         DdsHeaderDxt10 dx10{};
-        std::memcpy(&dx10, data.data() + dataOffset, sizeof(DdsHeaderDxt10));
+        std::memcpy(&dx10, data + dataOffset, sizeof(DdsHeaderDxt10));
         dataOffset += sizeof(DdsHeaderDxt10);
         switch (dx10.dxgiFormat) {
             case kDxgiBC1Unorm:                     fmt = TextureFormat::BC1; break;
+            case kDxgiBC2Unorm:                     fmt = TextureFormat::BC2; break;
             case kDxgiBC3Unorm:                     fmt = TextureFormat::BC3; break;
             case kDxgiBC4Unorm:                     fmt = TextureFormat::BC4; break;
             case kDxgiBC5Unorm:                     fmt = TextureFormat::BC5; break;
@@ -145,14 +146,49 @@ bool loadDds(const std::filesystem::path& path, ImportedSceneTexture& out) {
     }
     if (fileSize < dataOffset + chainBytes) return false;
 
-    out.sourcePath    = path.string();
     out.width         = hdr.width;
     out.height        = hdr.height;
     out.mipLevelCount = mipCount;
     out.format        = fmt;
-    out.rgba8.assign(data.begin() + static_cast<std::ptrdiff_t>(dataOffset),
-                     data.begin() + static_cast<std::ptrdiff_t>(dataOffset + chainBytes));
+    out.rgba8.assign(data + dataOffset, data + dataOffset + chainBytes);
     return true;
+}
+
+bool loadDds(const std::filesystem::path& path, ImportedSceneTexture& out) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const auto fileSize = static_cast<std::size_t>(f.tellg());
+    f.seekg(0);
+    std::vector<std::uint8_t> data(fileSize);
+    if (fileSize != 0 &&
+        !f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(fileSize))) {
+        return false;
+    }
+    if (!loadDdsFromMemory(data.data(), data.size(), out)) return false;
+    out.sourcePath = path.string();
+    return true;
+}
+
+void dropDdsMipLevels(ImportedSceneTexture& tex, std::uint32_t maxDimension) {
+    const std::uint32_t bpb = ddsBlockBytes(tex.format);
+    if (bpb == 0u || maxDimension == 0u || tex.mipLevelCount <= 1u) {
+        return;
+    }
+    std::size_t dropBytes = 0;
+    while (tex.mipLevelCount > 1u && (tex.width > maxDimension || tex.height > maxDimension)) {
+        const std::size_t levelBytes = static_cast<std::size_t>(std::max(1u, (tex.width + 3u) / 4u)) *
+            std::max(1u, (tex.height + 3u) / 4u) * bpb;
+        if (dropBytes + levelBytes >= tex.rgba8.size()) {
+            break;  // never drop the whole chain
+        }
+        dropBytes += levelBytes;
+        tex.width = std::max(1u, tex.width >> 1u);
+        tex.height = std::max(1u, tex.height >> 1u);
+        --tex.mipLevelCount;
+    }
+    if (dropBytes != 0u) {
+        tex.rgba8.erase(tex.rgba8.begin(), tex.rgba8.begin() + static_cast<std::ptrdiff_t>(dropBytes));
+    }
 }
 
 bool writeDds(const std::filesystem::path& path,
@@ -170,6 +206,7 @@ bool writeDds(const std::filesystem::path& path,
     } else {
         switch (format) {
             case TextureFormat::BC1: fourCC = kFourCCDxt1; break;
+            case TextureFormat::BC2: fourCC = kFourCCDxt3; break;
             case TextureFormat::BC3: fourCC = kFourCCDxt5; break;
             case TextureFormat::BC4: fourCC = kFourCCAti1; break;
             case TextureFormat::BC5: fourCC = kFourCCAti2; break;

@@ -55,19 +55,27 @@ constexpr uint32_t kBindlessTextureIndexFogMap = 10;
 constexpr uint32_t kBindlessTextureStaticCount = 11;
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr uint32_t kImportedLocalLightCapacity = 64;
-constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {4096u, 2048u, 2048u, 1024u};
+// The three shadow-atlas constants below are one layout expressed three ways and
+// must be edited together: kShadowCascadeResolution feeds the texel-snapping math
+// (frame_run.cc), kShadowAtlasRects places each cascade in the atlas and derives
+// the sampling UV rects, and kShadowAtlasSize is the atlas dimension the rects are
+// normalized against. A fourth mirror lives outside this header:
+// renderer_backend.h's private kShadowAtlasSize, which is what the image
+// allocation actually uses (class scope wins inside member functions). If these
+// disagree, cascades sample the wrong atlas region instead of failing loudly.
+constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {2048u, 1024u, 1024u, 512u};
 struct ShadowAtlasRect {
     uint32_t x;
     uint32_t y;
     uint32_t size;
 };
 constexpr std::array<ShadowAtlasRect, kShadowCascadeCount> kShadowAtlasRects = {
-    ShadowAtlasRect{0u, 0u, 4096u},
-    ShadowAtlasRect{4096u, 0u, 2048u},
-    ShadowAtlasRect{6144u, 0u, 2048u},
-    ShadowAtlasRect{4096u, 2048u, 1024u}
+    ShadowAtlasRect{0u, 0u, 2048u},
+    ShadowAtlasRect{2048u, 0u, 1024u},
+    ShadowAtlasRect{3072u, 0u, 1024u},
+    ShadowAtlasRect{2048u, 1024u, 512u}
 };
-constexpr uint32_t kShadowAtlasSize = 8192u;
+constexpr uint32_t kShadowAtlasSize = 4096u;
 constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
 constexpr uint32_t kVoxelGiPropagationIterations = 8u;

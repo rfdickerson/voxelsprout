@@ -18,6 +18,9 @@ constexpr std::uint32_t kBsaVersionFo3Fnv = 104u;
 constexpr std::uint32_t kFlagHasFolderNames = 0x1u;
 constexpr std::uint32_t kFlagHasFileNames = 0x2u;
 constexpr std::uint32_t kFlagCompressedArchive = 0x4u;
+// Each file's data block is prefixed by a BString holding its full virtual
+// path. Set on both retail texture archives (archiveFlags 0x107).
+constexpr std::uint32_t kFlagEmbedFileNames = 0x100u;
 // Per-file size field: bit 30 toggles this file's compression relative to the
 // archive-wide default set by kFlagCompressedArchive.
 constexpr std::uint32_t kFileCompressionToggleBit = 0x40000000u;
@@ -108,11 +111,26 @@ bool readNulTerminated(std::istream& input, std::string& out) {
 
 }  // namespace
 
+bool peekBsaContentFlags(const std::filesystem::path& path, std::uint32_t& outFileFlags) {
+    outFileFlags = 0;
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return false;
+    }
+    BsaHeader header{};
+    if (!readValue(input, header) || header.magic != kBsaMagic || header.version != kBsaVersionFo3Fnv) {
+        return false;
+    }
+    outFileFlags = header.fileFlags;
+    return true;
+}
+
 bool BsaArchive::open(const std::filesystem::path& path) {
     m_lastError.clear();
     m_files.clear();
     m_pathIndex.clear();
     m_path = path;
+    m_archiveFlags = 0;
 
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -131,6 +149,8 @@ bool BsaArchive::open(const std::filesystem::path& path) {
         return false;
     }
 
+    m_archiveFlags = header.archiveFlags;
+    m_fileFlags = header.fileFlags;
     const bool hasFolderNames = (header.archiveFlags & kFlagHasFolderNames) != 0u;
     const bool hasFileNames = (header.archiveFlags & kFlagHasFileNames) != 0u;
     const bool defaultCompressed = (header.archiveFlags & kFlagCompressedArchive) != 0u;
@@ -152,7 +172,17 @@ bool BsaArchive::open(const std::filesystem::path& path) {
     pending.reserve(header.fileCount);
 
     for (const BsaFolderRecord& folder : folders) {
-        input.seekg(static_cast<std::streamoff>(folder.offset), std::ios::beg);
+        // Folder-record offsets are biased by totalFileNameLength (see the
+        // layout notes in bsa_archive.h). Compute in 64-bit signed so a
+        // malformed archive underflows into a detectable negative rather than
+        // wrapping to a huge unsigned seek.
+        const std::int64_t folderBlockOffset =
+            static_cast<std::int64_t>(folder.offset) - static_cast<std::int64_t>(header.totalFileNameLength);
+        if (folderBlockOffset < 0) {
+            m_lastError = "BSA folder record offset underflows the file-name-length bias: " + path.string();
+            return false;
+        }
+        input.seekg(static_cast<std::streamoff>(folderBlockOffset), std::ios::beg);
         std::string folderName;
         if (hasFolderNames && !readBString(input, folderName)) {
             m_lastError = "Truncated BSA folder name: " + path.string();
@@ -170,6 +200,20 @@ bool BsaArchive::open(const std::filesystem::path& path) {
     }
 
     if (hasFileNames) {
+        // Seek the file-name block explicitly rather than relying on wherever
+        // the folder walk above happened to leave the stream. The two agree
+        // for retail archives (verified against Meshes/Textures/Update/Voices1),
+        // but only because folder blocks happen to be contiguous and in table
+        // order — a layout the format does not actually guarantee.
+        // totalFolderNameLength counts the name bytes and their NULs but not
+        // the per-folder BString length byte, hence the `+ folderCount`.
+        const std::uint64_t nameBlockOffset =
+            static_cast<std::uint64_t>(header.folderRecordOffset) +
+            (static_cast<std::uint64_t>(header.folderCount) * sizeof(BsaFolderRecord)) +
+            header.totalFolderNameLength + header.folderCount +
+            (static_cast<std::uint64_t>(header.fileCount) * sizeof(BsaRawFileRecord));
+        input.seekg(static_cast<std::streamoff>(nameBlockOffset), std::ios::beg);
+
         for (PendingFile& file : pending) {
             std::string fileName;
             if (!readNulTerminated(input, fileName)) {
@@ -228,22 +272,47 @@ bool BsaArchive::extract(const BsaFileEntry& entry, std::vector<std::uint8_t>& o
     }
     input.seekg(static_cast<std::streamoff>(entry.dataOffset), std::ios::beg);
 
+    // When kFlagEmbedFileNames is set the block opens with a BString holding
+    // the file's full virtual path, ahead of both the compressed-size prefix
+    // and the payload. Its bytes are counted in the file record's size, so
+    // they come off the remaining budget. Both retail texture archives set
+    // this; reading past it is what made every texture extraction garbage.
+    std::uint32_t remainingSize = entry.sizeOnDisk;
+    if ((m_archiveFlags & kFlagEmbedFileNames) != 0u) {
+        std::uint8_t embeddedNameLength = 0;
+        if (!readValue(input, embeddedNameLength)) {
+            m_lastError = "Truncated embedded BSA file name: " + entry.virtualPath;
+            return false;
+        }
+        const std::uint32_t embeddedBytes = 1u + embeddedNameLength;
+        if (remainingSize < embeddedBytes) {
+            m_lastError = "Embedded BSA file name overruns the entry size: " + entry.virtualPath;
+            return false;
+        }
+        input.seekg(static_cast<std::streamoff>(embeddedNameLength), std::ios::cur);
+        remainingSize -= embeddedBytes;
+    }
+
     if (!entry.compressed) {
-        outBytes.resize(entry.sizeOnDisk);
-        if (entry.sizeOnDisk != 0 &&
-            !input.read(reinterpret_cast<char*>(outBytes.data()), static_cast<std::streamsize>(entry.sizeOnDisk))) {
+        outBytes.resize(remainingSize);
+        if (remainingSize != 0 &&
+            !input.read(reinterpret_cast<char*>(outBytes.data()), static_cast<std::streamsize>(remainingSize))) {
             m_lastError = "Truncated BSA file data: " + entry.virtualPath;
             return false;
         }
         return true;
     }
 
-    std::uint32_t originalSize = 0;
-    if (!readValue(input, originalSize) || entry.sizeOnDisk < sizeof(originalSize)) {
+    if (remainingSize < sizeof(std::uint32_t)) {
         m_lastError = "Truncated compressed BSA entry header: " + entry.virtualPath;
         return false;
     }
-    const std::uint32_t compressedSize = entry.sizeOnDisk - static_cast<std::uint32_t>(sizeof(originalSize));
+    std::uint32_t originalSize = 0;
+    if (!readValue(input, originalSize)) {
+        m_lastError = "Truncated compressed BSA entry header: " + entry.virtualPath;
+        return false;
+    }
+    const std::uint32_t compressedSize = remainingSize - static_cast<std::uint32_t>(sizeof(originalSize));
     std::vector<std::uint8_t> compressed(compressedSize);
     if (compressedSize != 0 &&
         !input.read(reinterpret_cast<char*>(compressed.data()), static_cast<std::streamsize>(compressedSize))) {

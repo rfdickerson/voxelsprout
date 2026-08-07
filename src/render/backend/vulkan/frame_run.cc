@@ -1342,6 +1342,7 @@ void RendererBackend::renderFrame(
     };
 
     if (voxelGiNeedsOccupancyUpload &&
+        m_voxelGiRequested &&
         m_voxelGiComputeAvailable &&
         m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
         m_voxelGiOccupancyImageView != VK_NULL_HANDLE) {
@@ -1944,7 +1945,8 @@ void RendererBackend::renderFrame(
         !voxelGiNeedsOccupancyUpload ||
         voxelGiOccupancyDispatchZ > 0u ||
         voxelGiOccupancyClearThisFrame;
-    if (m_voxelGiComputeAvailable &&
+    if (m_voxelGiRequested &&
+        m_voxelGiComputeAvailable &&
         m_voxelGiOccupancyPipeline != VK_NULL_HANDLE &&
         m_voxelGiSkyExposurePipeline != VK_NULL_HANDLE &&
         m_voxelGiSurfacePipeline != VK_NULL_HANDLE &&
@@ -2118,16 +2120,20 @@ void RendererBackend::renderFrame(
         writeGpuTimestampTop(kGpuTimestampQueryGiPropagateStart);
         writeGpuTimestampBottom(kGpuTimestampQueryGiPropagateEnd);
     }
+    // The app-level opt-out (setVoxelGiEnabled) folds in here as well as at the
+    // dispatch gates above, so the state reported below is what actually ran
+    // rather than what the hardware could have run.
+    const bool voxelGiComputeActive = m_voxelGiRequested && m_voxelGiComputeAvailable;
     const bool voxelGiRtSurfaceRequested = m_voxelGiDebugSettings.surfaceMode != VoxelGiSurfaceMode::Legacy;
     const bool voxelGiRtSurfaceCanRun =
-        m_voxelGiComputeAvailable &&
+        voxelGiComputeActive &&
         voxelGiRtSurfaceRequested &&
         m_rayTracingRuntimeEnabled &&
         m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE &&
         m_rtTlas.handle != VK_NULL_HANDLE;
     const bool voxelGiRestirRequested = m_voxelGiDebugSettings.surfaceMode == VoxelGiSurfaceMode::RestirSurface;
     const bool voxelGiRestirCanRun =
-        m_voxelGiComputeAvailable &&
+        voxelGiComputeActive &&
         voxelGiRestirRequested &&
         m_rayTracingRuntimeEnabled &&
         m_voxelGiRestirReady &&
@@ -2141,7 +2147,7 @@ void RendererBackend::renderFrame(
     }
     const char* voxelGiSurfaceFallbackReason = voxelGiSurfaceFallbackReasonName(
         m_voxelGiDebugSettings.surfaceMode,
-        m_voxelGiComputeAvailable,
+        voxelGiComputeActive,
         voxelGiRtSurfaceCanRun,
         voxelGiRestirCanRun,
         m_rtTlas.handle != VK_NULL_HANDLE
@@ -2156,7 +2162,7 @@ void RendererBackend::renderFrame(
                            << ", active=" << voxelGiSurfaceModeName(activeVoxelGiSurfaceMode)
                            << ", fallback=" << (activeVoxelGiSurfaceMode != m_voxelGiDebugSettings.surfaceMode ? "yes" : "no")
                            << ", reason=" << voxelGiSurfaceFallbackReason
-                           << ", compute=" << (m_voxelGiComputeAvailable ? "yes" : "no")
+                           << ", compute=" << (voxelGiComputeActive ? "yes" : "no")
                            << ", rtReady=" << (voxelGiRtSurfaceCanRun ? "yes" : "no")
                            << ", restirReady=" << (voxelGiRestirCanRun ? "yes" : "no")
                            << ", tlas=" << (m_rtTlas.handle != VK_NULL_HANDLE ? "yes" : "no")
@@ -2590,7 +2596,8 @@ void RendererBackend::renderFrame(
         wroteSunShaftTimestamps = true;
         writeGpuTimestampTop(kGpuTimestampQuerySunShaftStart);
         const bool sunShaftInitialized = m_sunShaftImageInitialized[aoFrameIndex];
-        if (m_sunShaftComputeAvailable &&
+        if (m_sunShaftsRequested &&
+            m_sunShaftComputeAvailable &&
             m_sunShaftPipelineLayout != VK_NULL_HANDLE &&
             m_sunShaftPipeline != VK_NULL_HANDLE &&
             m_sunShaftBufferSet.valid()) {
@@ -2894,6 +2901,9 @@ void RendererBackend::renderFrame(
 
     const auto presentStartTime = std::chrono::steady_clock::now();
     const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
+    if (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR) {
+        m_lastPresentedImageIndex = imageIndex;
+    }
     const float presentWaitMs = static_cast<float>(
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - presentStartTime).count()
     );

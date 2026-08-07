@@ -22,6 +22,8 @@
 //     — double check placed-object orientation against a known in-game
 //     reference the first time this runs against real Data Files.
 
+#include "core/frame_profiler.h"
+#include "import/dds.h"
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/fallout_records.h"
 #include "import/fnv/nif_scene.h"
@@ -35,6 +37,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <functional>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -57,10 +60,22 @@ struct Vec3 {
     float z = 0.0f;
 };
 
-// Bethesda's Gamebryo world space is Z-up; this engine (matching its
-// Morrowind import path) is Y-up.
+// Bethesda's Gamebryo space is right-handed Z-up (X east, Y north, Z up);
+// this engine is Y-up. The conversion is a -90 degree rotation about X:
+//
+//     (x, y, z)_bethesda -> (x, z, -y)_engine
+//
+// The negation matters. Plain (x, z, y) — what this used to do — swaps two
+// axes, which is a reflection (determinant -1), not a rotation: it mirrors the
+// entire world and inverts every triangle's winding, so back faces get drawn
+// and front faces get culled. Determinant of the map below is +1.
+//
+// This same matrix is applied to model-space NIF vertices via the instance
+// transform (see makeEngineInstanceRotation), because Gamebryo *model* space
+// is Z-up too — the two must use one convention or every object lands rotated
+// 90 degrees relative to the world it sits in.
 Vec3 bethesdaToEngine(float x, float y, float z) {
-    return Vec3{x, z, y};
+    return Vec3{x, z, -y};
 }
 
 struct Mat3 {
@@ -108,22 +123,41 @@ Mat3 multiply(const Mat3& a, const Mat3& b) {
     return out;
 }
 
-// Remaps a Bethesda-space (Z-up) rotation matrix into this engine's Y-up
-// space via the similarity transform for a Y<->Z axis swap: engineR[r][c] =
-// bethR[perm(r)][perm(c)] with perm = {0:0, 1:2, 2:1}.
-Mat3 remapRotationToEngineSpace(const Mat3& beth) {
-    constexpr int perm[3] = {0, 2, 1};
+// Composes the rotation an instance's transform needs, given that its mesh
+// vertices stay in raw Bethesda model space.
+//
+// The full chain for a vertex is engine = M * (T * R * S) * v_model, so the
+// instance's 3x3 is M * R (and its translation is M * t, via
+// bethesdaToEngine). Note the single M: this is NOT the similarity transform
+// M * R * transpose(M), which is what you would want if the vertices had
+// already been converted to engine space. Mixing the two — a similarity
+// transform applied to un-converted model-space vertices — is what previously
+// left every placed object rotated 90 degrees about X and mirrored.
+//
+//   M = [1  0  0]      so M * R takes rows (R0, R2, -R1).
+//       [0  0  1]
+//       [0 -1  0]
+Mat3 makeEngineInstanceRotation(const Mat3& beth) {
     Mat3 out{};
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            out.m[(r * 3) + c] = beth.m[(perm[r] * 3) + perm[c]];
-        }
+    for (int c = 0; c < 3; ++c) {
+        out.m[(0 * 3) + c] = beth.m[(0 * 3) + c];
+        out.m[(1 * 3) + c] = beth.m[(2 * 3) + c];
+        out.m[(2 * 3) + c] = -beth.m[(1 * 3) + c];
     }
     return out;
 }
 
-// REFR rotation order: Bethesda applies X, then Y, then Z (R = Rz*Ry*Rx).
-// Not verified against a real plugin in this environment — see file header.
+// REFR rotation order: Bethesda applies X, then Y, then Z (R = Rz*Ry*Rx),
+// with the angles used as stored (not negated).
+//
+// The angle sign is settled: `odai_newvegas_probe --rotations FalloutNV.esm
+// GSDocMitchellHouse` scores every candidate convention by how much the cell's
+// modular pieces interpenetrate once placed, and positive angles beat negated
+// ones by 1.6x (5.9e7 vs 9.6e7). The order is not separated by that test —
+// ZYX, YZX and ZXY land within 0.5% of each other — so this keeps ZYX, which
+// is both the documented convention and the best of the tied group. If a
+// specific asset ever looks wrong about a diagonal axis, that near-tie is the
+// place to look.
 Mat3 eulerToMatrixBethesdaOrder(float rx, float ry, float rz) {
     return multiply(rotationZ(rz), multiply(rotationY(ry), rotationX(rx)));
 }
@@ -142,6 +176,23 @@ void writeTransform(
     instance.transform[15] = 1.0f;
 }
 
+std::string toLowerAsciiCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+// Canonical form of a texture path: backslashes, and the "textures\" prefix
+// present exactly once. Both are needed because the two sources disagree —
+// NIF BSShaderTextureSet paths carry the prefix, LTEX diffuse paths do not.
+//
+// Used for the dedup cache key AND the archive lookup, deliberately. Keying
+// the cache on the raw path while the lookup added a prefix meant the same
+// file stored under both spellings counted as two textures: 5 byte-identical
+// duplicates in a 441-cell cook, each burning a bindless slot.
+std::string normalizeTexturePath(const std::string& path);
+
 std::string normalizeModelPath(std::string path) {
     for (char& c : path) {
         if (c == '/') {
@@ -149,6 +200,14 @@ std::string normalizeModelPath(std::string path) {
         }
     }
     return path;
+}
+
+std::string normalizeTexturePath(const std::string& path) {
+    std::string normalized = normalizeModelPath(path);
+    if (toLowerAsciiCopy(normalized).rfind("textures\\", 0) != 0) {
+        normalized = "textures\\" + normalized;
+    }
+    return normalized;
 }
 
 // Bethesda paths are backslash-separated regardless of host OS. On POSIX,
@@ -182,16 +241,101 @@ class AssetResolver {
 public:
     explicit AssetResolver(std::filesystem::path dataFilesPath) : m_dataFilesPath(std::move(dataFilesPath)) {
         std::error_code listError;
+        std::vector<std::filesystem::path> archivePaths;
         for (const auto& entry : std::filesystem::directory_iterator(m_dataFilesPath, listError)) {
-            if (entry.is_regular_file() && entry.path().extension() == ".bsa") {
-                odai::importer::fnv::BsaArchive archive;
-                if (archive.open(entry.path())) {
-                    m_archives.push_back(std::move(archive));
-                } else {
-                    std::cerr << "warning: failed to open BSA archive " << entry.path() << "\n";
+            if (entry.is_regular_file() && toLowerAsciiCopy(entry.path().extension().string()) == ".bsa") {
+                archivePaths.push_back(entry.path());
+            }
+        }
+        // Sort into Fallout's own load order, and search LAST match wins.
+        //
+        // directory_iterator yields readdir order, which is filesystem state,
+        // not load order — so which archive won a name varied by machine, and
+        // Update.bsa (the shipped patch archive) generally lost. It overrides
+        // 36 meshes and 2 textures that also exist in the base archives: the
+        // Novac motel and bungalows, the McCarran wall set, the NCR guard
+        // towers, the Hoover Dam observation deck. All of those were resolving
+        // to their stale pre-patch versions.
+        //
+        // Rank: base archives (0) < Update.bsa (1) < DLC archives (2), and
+        // alphabetical within a rank so the result is reproducible.
+        auto loadOrderRank = [](const std::filesystem::path& path) {
+            const std::string name = toLowerAsciiCopy(path.filename().string());
+            if (name.rfind("fallout - ", 0) == 0) {
+                return 0;
+            }
+            if (name == "update.bsa") {
+                return 1;
+            }
+            return 2;  // DeadMoney, HonestHearts, OldWorldBlues, LonesomeRoad, packs
+        };
+        std::sort(
+            archivePaths.begin(), archivePaths.end(),
+            [&](const std::filesystem::path& a, const std::filesystem::path& b) {
+                const int rankA = loadOrderRank(a);
+                const int rankB = loadOrderRank(b);
+                if (rankA != rankB) {
+                    return rankA < rankB;
+                }
+                return toLowerAsciiCopy(a.filename().string()) < toLowerAsciiCopy(b.filename().string());
+            });
+
+        for (const auto& archivePath : archivePaths) {
+            const std::filesystem::directory_entry entry(archivePath);
+
+            // Opening an archive costs a std::string and a hash-map entry per
+            // file. "Fallout - Sound.bsa" and "Fallout - Voices1.bsa" hold
+            // 111982 files between them and cannot contain a mesh or texture,
+            // so indexing them was ~85% of this cooker's runtime. Check the
+            // header's content flags first and skip archives that declare
+            // nothing but audio — a conservative test, so an archive with any
+            // non-audio content is still opened.
+            constexpr std::uint32_t kAudioOnly =
+                odai::importer::fnv::kBsaContentSounds | odai::importer::fnv::kBsaContentVoices;
+            std::uint32_t contentFlags = 0;
+            if (odai::importer::fnv::peekBsaContentFlags(entry.path(), contentFlags) && contentFlags != 0u &&
+                (contentFlags & ~kAudioOnly) == 0u) {
+                continue;
+            }
+
+            odai::importer::fnv::BsaArchive archive;
+            if (archive.open(entry.path())) {
+                m_archives.push_back(std::move(archive));
+            } else {
+                std::cerr << "warning: failed to open BSA archive " << entry.path() << "\n";
+            }
+        }
+    }
+
+    // Resolves a texture path as stored in a BSShaderTextureSet. Those paths
+    // usually already start with "textures\", but not always, so the prefix is
+    // added only when missing.
+    bool resolveTexture(const std::string& texturePath, std::vector<std::uint8_t>& outBytes) {
+        const std::string normalized = normalizeTexturePath(texturePath);
+        const std::filesystem::path loosePath = joinBackslashPath(m_dataFilesPath, normalized);
+        std::error_code existsError;
+        if (std::filesystem::exists(loosePath, existsError)) {
+            std::ifstream input(loosePath, std::ios::binary | std::ios::ate);
+            if (input) {
+                const auto size = static_cast<std::size_t>(input.tellg());
+                input.seekg(0);
+                outBytes.resize(size);
+                if (size == 0 ||
+                    input.read(reinterpret_cast<char*>(outBytes.data()), static_cast<std::streamsize>(size))) {
+                    return true;
                 }
             }
         }
+        // Reverse: the archive list is in load order, so the last archive
+        // holding a name is the one the game would use.
+        for (auto it = m_archives.rbegin(); it != m_archives.rend(); ++it) {
+            if (const auto* entry = it->find(normalized)) {
+                if (it->extract(*entry, outBytes)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     bool resolveMesh(const std::string& modelPath, std::vector<std::uint8_t>& outBytes) {
@@ -209,9 +353,12 @@ public:
             }
         }
         const std::string virtualPath = "meshes\\" + normalized;
-        for (odai::importer::fnv::BsaArchive& archive : m_archives) {
-            const auto* entry = archive.find(virtualPath);
-            if (entry != nullptr && archive.extract(*entry, outBytes)) {
+        // Reverse: m_archives is in load order, so the last archive holding a
+        // name is the one the game would use. Update.bsa overrides 36 base-game
+        // meshes and must win.
+        for (auto it = m_archives.rbegin(); it != m_archives.rend(); ++it) {
+            const auto* entry = it->find(virtualPath);
+            if (entry != nullptr && it->extract(*entry, outBytes)) {
                 return true;
             }
         }
@@ -241,65 +388,261 @@ void printUsage() {
 // vertices already in final engine world space (terrain is not instanced —
 // see the cooker's file-header note on how buildImportedScenePackedRenderData
 // treats scene.meshes[0] when named "terrain").
-void appendTerrainCell(
-    ImportedSceneMesh& terrainMesh, const odai::importer::fnv::FalloutCellRecord& cell
+// Sentinel meaning "no texture, shade from vertex color". NOTE this is NOT
+// ImportedSceneMeshPart's default, which is 0 — a real, valid texture index.
+// Terrain relied on that default plus an empty texture table; once the cook
+// started emitting textures, index 0 became a real mesh texture and every
+// terrain post sampled one corner texel of it, which is why the ground went
+// black. Always set this explicitly.
+constexpr std::uint32_t kNoTextureIndex = 0xffffffffu;
+
+// Per-post blend weights for the ATXT/VTXT layers covering one cell.
+//
+// A post on a quadrant boundary (col or row 16) is shared by two quadrants, and
+// the centre post by all four -- the cooked mesh keeps one vertex per post, so
+// those vertices have to reconcile layers from every quadrant they touch. Taking
+// the max weight per texture is what makes the seam disappear: a layer that runs
+// up to the boundary from one side keeps its opacity there instead of being
+// halved by a quadrant that never mentioned it.
+struct TerrainLayerCandidate {
+    std::uint32_t textureIndex = kNoTextureIndex;
+    float weight = 0.0f;
+    // ATXT's declared stacking order. Carried through selection because the
+    // shader composites slot 0, then 1, then 2, and a lerp chain is not
+    // commutative -- blending the same two layers in the other order gives a
+    // different colour. Selecting the strongest layers by weight and then
+    // storing them in weight order silently reordered the stack.
+    std::uint16_t layerIndex = 0;
+};
+
+void accumulateLayerWeight(
+    std::vector<TerrainLayerCandidate>& candidates,
+    std::uint32_t textureIndex,
+    float weight,
+    std::uint16_t layerIndex
 ) {
-    if (!cell.land.has_value()) {
+    if (textureIndex == kNoTextureIndex || weight <= 0.0f) {
+        return;
+    }
+    for (auto& candidate : candidates) {
+        if (candidate.textureIndex == textureIndex) {
+            candidate.weight = std::max(candidate.weight, weight);
+            candidate.layerIndex = std::min(candidate.layerIndex, layerIndex);
+            return;
+        }
+    }
+    candidates.push_back(TerrainLayerCandidate{textureIndex, weight, layerIndex});
+}
+
+// True when the shape is a flat sheet: its thinnest axis is negligible compared
+// to its own footprint.
+//
+// The test is RELATIVE, not exact. Exact equality was the obvious choice and it
+// was wrong -- NVPoster10's decal quad spans y = -0.399997 to -0.399992, flat to
+// any purpose that matters but not bit-identical, so it slipped through and kept
+// rendering as a grey sheet. An absolute epsilon is no better: it would mean
+// something different for a doorframe than for a building.
+//
+// A ratio separates the two cases cleanly. Decal quads come out around 1e-7;
+// genuinely thin real geometry does not come close -- a 20-unit-thick wall
+// panel 600 units across is 3.3e-2, five orders of magnitude away.
+bool shapeIsPlanar(const odai::importer::fnv::NifShape& shape) {
+    if (shape.positions.size() < 9u) {
+        return false;  // fewer than 3 vertices: not a surface worth judging
+    }
+    float boundsMin[3] = {shape.positions[0], shape.positions[1], shape.positions[2]};
+    float boundsMax[3] = {shape.positions[0], shape.positions[1], shape.positions[2]};
+    for (std::size_t v = 0; (v * 3u) + 2u < shape.positions.size(); ++v) {
+        for (int axis = 0; axis < 3; ++axis) {
+            const float value = shape.positions[(v * 3u) + static_cast<std::size_t>(axis)];
+            boundsMin[axis] = std::min(boundsMin[axis], value);
+            boundsMax[axis] = std::max(boundsMax[axis], value);
+        }
+    }
+    float thinnest = std::numeric_limits<float>::max();
+    float largest = 0.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+        const float extent = boundsMax[axis] - boundsMin[axis];
+        thinnest = std::min(thinnest, extent);
+        largest = std::max(largest, extent);
+    }
+    if (largest <= 0.0f) {
+        return false;  // degenerate point/line, not a sheet
+    }
+    constexpr float kPlanarRatio = 1e-4f;
+    return (thinnest / largest) < kPlanarRatio;
+}
+
+void appendTerrainCell(
+    ImportedSceneMesh& terrainMesh,
+    const odai::importer::fnv::FalloutCellRecord& cell,
+    const std::function<std::uint32_t(std::uint32_t)>& resolveLandTexture,
+    const std::function<std::uint32_t(std::uint32_t)>& resolveLandTextureExact,
+    std::size_t& outDroppedLayerCount
+) {
+    if (cell.land == nullptr) {
         return;
     }
     const odai::importer::fnv::FalloutLandRecord& land = *cell.land;
     using odai::importer::fnv::kExteriorCellSize;
     using odai::importer::fnv::kLandGridSize;
     using odai::importer::fnv::kLandPostSpacing;
+    using odai::importer::fnv::kLandQuadrantGridSize;
+    using odai::importer::fnv::kLandTextureTilesPerCell;
 
     const float cellOriginX = static_cast<float>(cell.gridX) * kExteriorCellSize;
     const float cellOriginZ = static_cast<float>(cell.gridZ) * kExteriorCellSize;
 
-    const std::uint32_t baseVertex = static_cast<std::uint32_t>(terrainMesh.vertices.size());
-    for (int row = 0; row < kLandGridSize; ++row) {
-        for (int col = 0; col < kLandGridSize; ++col) {
-            const int postIndex = (row * kLandGridSize) + col;
-            const float bethesdaX = cellOriginX + (static_cast<float>(col) * kLandPostSpacing);
-            const float bethesdaY = cellOriginZ + (static_cast<float>(row) * kLandPostSpacing);
-            const float bethesdaZ = land.hasHeights ? land.heights[postIndex] : 0.0f;
-            const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
+    // One vertex block per quadrant rather than one shared 33x33 block per cell.
+    //
+    // Layers are declared PER QUADRANT by ATXT, so every post in a quadrant
+    // shares one layer stack and only the opacity varies across it. Choosing the
+    // stack per vertex instead -- picking each post's own strongest three --
+    // broke that: neighbouring posts selected different subsets, and because the
+    // shader carries layer texture indices as `nointerpolation`, each triangle
+    // shaded with its provoking vertex's set while the weights interpolated from
+    // all three. Wherever the selection changed, the blend jumped instead of
+    // ramping, which is what drew hard square patches across the terrain.
+    //
+    // Per-quadrant vertices cost 4*17*17 = 1156 posts per cell against 1089
+    // shared (+6%), and buy the property that matters: within a quadrant the
+    // layer set is constant, so only the interpolating weights vary.
+    for (int quadrant = 0; quadrant < 4; ++quadrant) {
+        const int colBegin = ((quadrant & 1) != 0) ? (kLandGridSize - 1) / 2 : 0;
+        const int rowBegin = ((quadrant & 2) != 0) ? (kLandGridSize - 1) / 2 : 0;
 
-            ImportedSceneVertex vertex{};
-            vertex.position[0] = world.x;
-            vertex.position[1] = world.y;
-            vertex.position[2] = world.z;
-            if (land.hasNormals) {
-                const Vec3 normal = bethesdaToEngine(
-                    land.normals[(postIndex * 3) + 0], land.normals[(postIndex * 3) + 1], land.normals[(postIndex * 3) + 2]);
-                vertex.normal[0] = normal.x;
-                vertex.normal[1] = normal.y;
-                vertex.normal[2] = normal.z;
-            } else {
-                vertex.normal[1] = 1.0f;
+        // This quadrant's layer stack, chosen once. Selection is by PEAK opacity
+        // across the quadrant so a layer that is strong anywhere survives the
+        // budget, then restored to ATXT order because the shader's lerp chain is
+        // not commutative.
+        struct QuadrantLayer {
+            const odai::importer::fnv::FalloutLandTextureLayer* layer = nullptr;
+            std::uint32_t textureIndex = kNoTextureIndex;
+            float peakOpacity = 0.0f;
+        };
+        std::vector<QuadrantLayer> quadrantLayers;
+        for (const auto& layer : land.textureLayers) {
+            if (layer.quadrant != static_cast<std::uint8_t>(quadrant)) {
+                continue;
             }
-            terrainMesh.vertices.push_back(vertex);
+            // Exact, not the dominant-texture fallback: that fallback gives an
+            // untextured BASE something plausible. Substituting it for a layer
+            // would paint the region's commonest ground on top of itself.
+            const std::uint32_t textureIndex = resolveLandTextureExact(layer.textureFormId);
+            if (textureIndex == kNoTextureIndex) {
+                continue;
+            }
+            float peakOpacity = 0.0f;
+            for (const float opacity : layer.opacity) {
+                peakOpacity = std::max(peakOpacity, opacity);
+            }
+            if (peakOpacity <= 0.0f) {
+                continue;
+            }
+            quadrantLayers.push_back(QuadrantLayer{&layer, textureIndex, peakOpacity});
         }
-    }
+        if (quadrantLayers.size() > static_cast<std::size_t>(odai::importer::kImportedSceneMaxTerrainLayers)) {
+            std::stable_sort(
+                quadrantLayers.begin(), quadrantLayers.end(),
+                [](const QuadrantLayer& a, const QuadrantLayer& b) {
+                    return a.peakOpacity != b.peakOpacity ? (a.peakOpacity > b.peakOpacity)
+                                                          : (a.textureIndex < b.textureIndex);
+                });
+            outDroppedLayerCount +=
+                quadrantLayers.size() - static_cast<std::size_t>(odai::importer::kImportedSceneMaxTerrainLayers);
+            quadrantLayers.resize(static_cast<std::size_t>(odai::importer::kImportedSceneMaxTerrainLayers));
+        }
+        std::stable_sort(
+            quadrantLayers.begin(), quadrantLayers.end(),
+            [](const QuadrantLayer& a, const QuadrantLayer& b) {
+                return a.layer->layerIndex < b.layer->layerIndex;
+            });
 
-    const std::uint32_t firstIndex = static_cast<std::uint32_t>(terrainMesh.indices.size());
-    for (int row = 0; row < kLandGridSize - 1; ++row) {
-        for (int col = 0; col < kLandGridSize - 1; ++col) {
-            const std::uint32_t i00 = baseVertex + static_cast<std::uint32_t>((row * kLandGridSize) + col);
-            const std::uint32_t i10 = i00 + 1u;
-            const std::uint32_t i01 = i00 + static_cast<std::uint32_t>(kLandGridSize);
-            const std::uint32_t i11 = i01 + 1u;
-            terrainMesh.indices.push_back(i00);
-            terrainMesh.indices.push_back(i01);
-            terrainMesh.indices.push_back(i11);
-            terrainMesh.indices.push_back(i00);
-            terrainMesh.indices.push_back(i11);
-            terrainMesh.indices.push_back(i10);
+        const std::uint32_t quadrantBaseVertex = static_cast<std::uint32_t>(terrainMesh.vertices.size());
+        for (int quadrantRow = 0; quadrantRow < kLandQuadrantGridSize; ++quadrantRow) {
+            for (int quadrantCol = 0; quadrantCol < kLandQuadrantGridSize; ++quadrantCol) {
+                const int row = rowBegin + quadrantRow;
+                const int col = colBegin + quadrantCol;
+                const int postIndex = (row * kLandGridSize) + col;
+                const float bethesdaX = cellOriginX + (static_cast<float>(col) * kLandPostSpacing);
+                const float bethesdaY = cellOriginZ + (static_cast<float>(row) * kLandPostSpacing);
+                const float bethesdaZ = land.hasHeights ? land.heights[postIndex] : 0.0f;
+                const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
+
+                ImportedSceneVertex vertex{};
+                vertex.position[0] = world.x;
+                vertex.position[1] = world.y;
+                vertex.position[2] = world.z;
+                // UVs stay keyed to the CELL, not the quadrant, so the base
+                // texture tiles continuously across a quadrant boundary instead
+                // of restarting at every seam.
+                vertex.uv[0] = (static_cast<float>(col) / static_cast<float>(kLandGridSize - 1)) *
+                    kLandTextureTilesPerCell;
+                vertex.uv[1] = (static_cast<float>(row) / static_cast<float>(kLandGridSize - 1)) *
+                    kLandTextureTilesPerCell;
+                if (land.hasNormals) {
+                    const Vec3 normal = bethesdaToEngine(
+                        land.normals[(postIndex * 3) + 0],
+                        land.normals[(postIndex * 3) + 1],
+                        land.normals[(postIndex * 3) + 2]);
+                    vertex.normal[0] = normal.x;
+                    vertex.normal[1] = normal.y;
+                    vertex.normal[2] = normal.z;
+                } else {
+                    vertex.normal[1] = 1.0f;
+                }
+                // VCLR is a colour, not a direction: no basis change, unlike the
+                // normals above. Cells without it keep the vertex's white
+                // default, which leaves their texture untinted.
+                if (land.hasColors) {
+                    vertex.color[0] = land.colors[(postIndex * 3) + 0];
+                    vertex.color[1] = land.colors[(postIndex * 3) + 1];
+                    vertex.color[2] = land.colors[(postIndex * 3) + 2];
+                }
+
+                const int quadrantPost = (quadrantRow * kLandQuadrantGridSize) + quadrantCol;
+                for (std::size_t slot = 0; slot < quadrantLayers.size(); ++slot) {
+                    vertex.layerTextureIndex[slot] = quadrantLayers[slot].textureIndex;
+                    vertex.layerWeight[slot] = quadrantLayers[slot].layer->opacity[quadrantPost];
+                }
+                terrainMesh.vertices.push_back(vertex);
+            }
         }
+
+        const std::uint32_t quadrantFirstIndex = static_cast<std::uint32_t>(terrainMesh.indices.size());
+        for (int quadrantRow = 0; quadrantRow < kLandQuadrantGridSize - 1; ++quadrantRow) {
+            for (int quadrantCol = 0; quadrantCol < kLandQuadrantGridSize - 1; ++quadrantCol) {
+                const std::uint32_t i00 = quadrantBaseVertex +
+                    static_cast<std::uint32_t>((quadrantRow * kLandQuadrantGridSize) + quadrantCol);
+                const std::uint32_t i10 = i00 + 1u;
+                const std::uint32_t i01 = i00 + static_cast<std::uint32_t>(kLandQuadrantGridSize);
+                const std::uint32_t i11 = i01 + 1u;
+                // Winding note: the grid is laid out so that increasing `col`
+                // moves +X in engine space but increasing `row` moves -Z,
+                // because bethesdaToEngine negates Y. That row reversal flips
+                // the sense of the quad, so the indices are emitted in the order
+                // that leaves the surface normal pointing +Y (up).
+                //
+                // Getting this backwards is not subtle to spot and easy to
+                // misread as a lighting bug: the terrain vanishes when viewed
+                // from above and is solid when viewed from underneath.
+                terrainMesh.indices.push_back(i00);
+                terrainMesh.indices.push_back(i11);
+                terrainMesh.indices.push_back(i01);
+                terrainMesh.indices.push_back(i00);
+                terrainMesh.indices.push_back(i10);
+                terrainMesh.indices.push_back(i11);
+            }
+        }
+        const std::uint32_t quadrantIndexCount =
+            static_cast<std::uint32_t>(terrainMesh.indices.size()) - quadrantFirstIndex;
+        if (quadrantIndexCount == 0u) {
+            continue;
+        }
+        const std::uint32_t textureIndex = resolveLandTexture(land.quadrantBaseTextureFormId[quadrant]);
+        terrainMesh.parts.push_back(
+            ImportedSceneMeshPart{quadrantFirstIndex, quadrantIndexCount, textureIndex, false});
     }
-    const std::uint32_t indexCount = static_cast<std::uint32_t>(terrainMesh.indices.size()) - firstIndex;
-    // Texture index 0 with an empty scene.textures[] safely degrades to the
-    // height-based vertex-color fallback at upload time — see file header.
-    terrainMesh.parts.push_back(ImportedSceneMeshPart{firstIndex, indexCount, 0u, false});
 }
 
 }  // namespace
@@ -334,12 +677,65 @@ int main(int argc, char** argv) {
     }
 
     const std::filesystem::path esmPath = dataFilesPath / pluginName;
+    // Phase timings. This is a content tool whose cost is dominated by data
+    // volume, so where the time goes should be visible without a profiler.
+    odai::core::Stopwatch phaseTimer;
+    float extractMs = 0.0f;
+    float resolverMs = 0.0f;
+
     odai::importer::fnv::FalloutSceneData scene;
     std::string extractError;
-    if (!odai::importer::fnv::extractFalloutScene(esmPath, scene, extractError)) {
+
+    // Materialize only the cells this cook actually selects. Every other
+    // cell's REFR and LAND records are rejected from the record-header
+    // callback, so they are never decompressed or parsed — which for a single
+    // interior cell skips all 29363 LAND records in the plugin.
+    //
+    // These predicates must stay in step with the selection loops below; they
+    // answer the same question, just early enough to save the work.
+    odai::importer::fnv::FalloutExtractFilter filter;
+    if (targetCellEditorId.has_value()) {
+        filter.wantCellContents = [&](const odai::importer::fnv::FalloutCellRecord& cell) {
+            return cell.isInterior && cell.editorId == *targetCellEditorId;
+        };
+        // Interior cells never live under a worldspace, so the walk can seek
+        // straight past every world-children group — which is most of the file.
+        filter.wantWorldspace = [](std::uint32_t) { return false; };
+    } else {
+        filter.wantCellContents = [&](const odai::importer::fnv::FalloutCellRecord& cell) {
+            if (cell.isInterior || !cell.hasGridCoords) {
+                return false;
+            }
+            if (cell.gridX < gridX0 || cell.gridX > gridX1 || cell.gridZ < gridZ0 || cell.gridZ > gridZ1) {
+                return false;
+            }
+            // Resolved against what has been parsed so far, which is safe: a
+            // worldspace's WRLD record always precedes its world-children group.
+            for (const auto& ws : scene.worldspaces) {
+                if (ws.editorId == *targetWorldspaceEditorId) {
+                    return cell.worldspaceFormId == ws.formId;
+                }
+            }
+            return false;
+        };
+        // Skip every other worldspace's children outright. Same lookup as
+        // above, and safe for the same reason: a WRLD record precedes its
+        // world-children group.
+        filter.wantWorldspace = [&](std::uint32_t worldspaceFormId) {
+            for (const auto& ws : scene.worldspaces) {
+                if (ws.editorId == *targetWorldspaceEditorId) {
+                    return worldspaceFormId == ws.formId;
+                }
+            }
+            return false;
+        };
+    }
+
+    if (!odai::importer::fnv::extractFalloutScene(esmPath, filter, scene, extractError)) {
         std::cerr << "Failed to extract plugin data: " << extractError << "\n";
         return 1;
     }
+    extractMs = phaseTimer.lapMs();
     std::cout << "Extracted " << scene.statics.size() << " statics, " << scene.worldspaces.size()
               << " worldspaces, " << scene.cells.size() << " cells from " << esmPath << "\n";
 
@@ -387,21 +783,190 @@ int main(int argc, char** argv) {
     ImportedScene outScene;
     outScene.sourceTag = anyInterior ? "fnv_interior" : "fnv_exterior";
 
+    // Terrain is built after the resolver/texture cache below exist, because
+    // each quadrant needs its landscape texture resolved. Placeholder mesh 0
+    // keeps the "meshes[0] is terrain" invariant that
+    // buildImportedScenePackedRenderData relies on.
+    const std::size_t terrainMeshIndex = outScene.meshes.size();
     if (!anyInterior) {
         ImportedSceneMesh terrainMesh;
         terrainMesh.name = "terrain";
-        for (const auto* cell : selectedCells) {
-            appendTerrainCell(terrainMesh, *cell);
-        }
-        outScene.sourceLandscapeCellCount = static_cast<std::uint32_t>(terrainMesh.parts.size());
         outScene.meshes.push_back(std::move(terrainMesh));
     }
 
+    phaseTimer.restart();
     AssetResolver resolver(dataFilesPath);
+    resolverMs = phaseTimer.lapMs();
     std::unordered_map<std::uint32_t, std::uint32_t> meshIndexByStaticFormId;  // formId -> outScene.meshes index
     std::unordered_set<std::uint32_t> failedStatics;
+    std::size_t untexturedShapeCount = 0;
+    std::size_t totalShapeCount = 0;
+    std::size_t shapesWithNoTexturePath = 0;
+    std::unordered_set<std::string> unresolvedTexturePaths;
+    std::unordered_set<std::string> untexturedModelPaths;
+    std::size_t shadowDecalShapesSkipped = 0;
+    std::size_t extremeUvShapeCount = 0;
+    std::size_t editorMarkerModelsSkipped = 0;
+    std::size_t untexturedShapesGivenModelTexture = 0;
+    std::unordered_set<std::string> extremeUvModelPaths;
     std::uint32_t skippedGeometryShapes = 0;
     std::uint32_t placedInstances = 0;
+
+    // Texture table, deduplicated by lowercased virtual path so a wall texture
+    // shared by fifty meshes is decoded and uploaded once.
+    std::unordered_map<std::string, std::uint32_t> textureIndexByPath;
+    std::unordered_set<std::string> failedTextures;
+    // The renderer's bindless table is finite and silently truncates past its
+    // limit, which would show up as a handful of arbitrary meshes losing their
+    // textures. Track the count and say something instead.
+    constexpr std::size_t kTextureBudget = 1000u;
+    constexpr std::uint32_t maxTextureSize = 512u;
+    bool warnedTextureBudget = false;
+
+    auto resolveTextureIndex = [&](const std::string& texturePath) -> std::uint32_t {
+        if (texturePath.empty()) {
+            return kNoTextureIndex;
+        }
+        const std::string key = toLowerAsciiCopy(normalizeTexturePath(texturePath));
+        if (const auto it = textureIndexByPath.find(key); it != textureIndexByPath.end()) {
+            return it->second;
+        }
+        if (failedTextures.count(key) != 0u) {
+            return kNoTextureIndex;
+        }
+        if (outScene.textures.size() >= kTextureBudget) {
+            if (!warnedTextureBudget) {
+                std::cerr << "warning: texture budget of " << kTextureBudget
+                          << " reached; further textures will fall back to flat color. "
+                             "Cook a smaller region.\n";
+                warnedTextureBudget = true;
+            }
+            return kNoTextureIndex;
+        }
+        std::vector<std::uint8_t> ddsBytes;
+        if (!resolver.resolveTexture(texturePath, ddsBytes)) {
+            failedTextures.insert(key);
+            return kNoTextureIndex;
+        }
+        odai::importer::ImportedSceneTexture texture;
+        if (!odai::importer::loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), texture)) {
+            failedTextures.insert(key);
+            return kNoTextureIndex;
+        }
+        // Fallout ships 1024-square diffuse maps; a whole region of them at
+        // full resolution is gigabytes of VRAM for detail no one sees from
+        // outdoors. Drop the top mips — for block-compressed data that is a
+        // pointer bump, not a resample.
+        odai::importer::dropDdsMipLevels(texture, maxTextureSize);
+        texture.sourcePath = key;
+        const auto index = static_cast<std::uint32_t>(outScene.textures.size());
+        outScene.textures.push_back(std::move(texture));
+        textureIndexByPath.emplace(key, index);
+        return index;
+    };
+
+    // Now that textures can be resolved, fill the terrain mesh reserved above.
+    if (!anyInterior && terrainMeshIndex < outScene.meshes.size()) {
+        std::unordered_map<std::uint32_t, const odai::importer::fnv::FalloutLandTextureRecord*> landTexturesByFormId;
+        for (const auto& landTexture : scene.landTextures) {
+            landTexturesByFormId[landTexture.formId] = &landTexture;
+        }
+        // A LAND quadrant with no BTXT is not "no texture" -- it means the base
+        // layer is the worldspace default, which lives outside the LAND record.
+        // Treating it as untextured left 44% of terrain vertices shading from
+        // vertex colour, which is what made the ground read as fragmented
+        // patchwork with the wrong colours: the packed fallback for terrain is a
+        // synthetic height ramp (packedTerrainColor in imported_scene.cc), not
+        // anything Fallout ever shaded with.
+        //
+        // Without parsing the worldspace default, the closest honest stand-in is
+        // the texture the cooked region itself uses most: on a Mojave grid that
+        // is the dominant desert ground, which is what those quadrants are.
+        std::unordered_map<std::uint32_t, std::size_t> landTextureUseCount;
+        for (const auto* cell : selectedCells) {
+            if (cell->land == nullptr) {
+                continue;
+            }
+            for (std::uint32_t quadrantFormId : cell->land->quadrantBaseTextureFormId) {
+                if (quadrantFormId != 0u && landTexturesByFormId.count(quadrantFormId) != 0u) {
+                    ++landTextureUseCount[quadrantFormId];
+                }
+            }
+        }
+        std::uint32_t dominantLandTextureFormId = 0u;
+        std::size_t dominantUseCount = 0;
+        for (const auto& [formId, count] : landTextureUseCount) {
+            // Ties broken by formID so a given cook is reproducible; iteration
+            // order of an unordered_map is not.
+            if (count > dominantUseCount ||
+                (count == dominantUseCount && formId < dominantLandTextureFormId)) {
+                dominantLandTextureFormId = formId;
+                dominantUseCount = count;
+            }
+        }
+
+        auto resolveLandTextureExact = [&](std::uint32_t landTextureFormId) -> std::uint32_t {
+            const auto it = landTexturesByFormId.find(landTextureFormId);
+            if (it == landTexturesByFormId.end()) {
+                return kNoTextureIndex;
+            }
+            return resolveTextureIndex(it->second->diffuseTexturePath);
+        };
+        const std::uint32_t fallbackLandTexture = dominantLandTextureFormId != 0u
+            ? resolveLandTextureExact(dominantLandTextureFormId)
+            : kNoTextureIndex;
+        if (fallbackLandTexture != kNoTextureIndex) {
+            const auto dominantIt = landTexturesByFormId.find(dominantLandTextureFormId);
+            std::cout << "Untextured land quadrants fall back to the region's most common texture ("
+                      << dominantUseCount << " uses): \""
+                      << (dominantIt != landTexturesByFormId.end()
+                              ? dominantIt->second->diffuseTexturePath
+                              : std::string("<unknown>"))
+                      << "\"\n";
+        } else {
+            std::cout << "warning: no usable land textures; untextured quadrants will shade from vertex colour.\n";
+        }
+        auto resolveLandTexture = [&](std::uint32_t landTextureFormId) -> std::uint32_t {
+            const std::uint32_t exact = resolveLandTextureExact(landTextureFormId);
+            return exact != kNoTextureIndex ? exact : fallbackLandTexture;
+        };
+        ImportedSceneMesh& terrainMesh = outScene.meshes[terrainMeshIndex];
+        std::size_t droppedLayerCount = 0;
+        std::size_t totalLayerCount = 0;
+        for (const auto* cell : selectedCells) {
+            if (cell->land != nullptr) {
+                totalLayerCount += cell->land->textureLayers.size();
+            }
+            appendTerrainCell(
+                terrainMesh, *cell, resolveLandTexture, resolveLandTextureExact, droppedLayerCount);
+        }
+        std::cout << "Terrain texture layers: " << totalLayerCount << " ATXT/VTXT layers across "
+                  << selectedCells.size() << " cell(s)\n";
+        if (droppedLayerCount != 0) {
+            // Not silent: a post covered by more layers than a vertex can hold
+            // loses the weakest ones, and that is a visible difference from the
+            // game rather than a rounding detail.
+            std::cout << "warning: dropped " << droppedLayerCount
+                      << " per-vertex layer contribution(s) beyond the "
+                      << odai::importer::kImportedSceneMaxTerrainLayers << "-layer budget\n";
+        }
+
+        // One landscapeCells entry per emitted terrain PART, not per cell —
+        // terrain is split into four quadrant parts so each can carry its own
+        // BTXT landscape texture, and each part becomes one draw.
+        //
+        // This is load-bearing, not bookkeeping. sourceLandscapeCellCount is
+        // DERIVED: saveImportedScene persists landscapeCells.size() and
+        // loadImportedScene overwrites sourceLandscapeCellCount from it. The
+        // renderer requires terrain to occupy the leading [0, terrainDrawCount)
+        // draws, and loadImportedScene re-runs buildImportedScenePageRanges to
+        // enforce that — so if this count disagrees with the real terrain draw
+        // count, terrain draws get sorted out of that range and shaded as
+        // ordinary static geometry.
+        outScene.landscapeCells.clear();
+        outScene.landscapeCells.resize(terrainMesh.parts.size());
+        outScene.sourceLandscapeCellCount = static_cast<std::uint32_t>(outScene.landscapeCells.size());
+    }
 
     for (const auto* cell : selectedCells) {
         for (const auto& ref : cell->references) {
@@ -421,6 +986,23 @@ int main(int argc, char** argv) {
                     failedStatics.insert(ref.baseFormId);
                     continue;
                 }
+                // Editor markers are level-design furniture, not world geometry:
+                // the GECK draws them, the game does not. marker_radiation.nif is
+                // one shape whose UVs are a single constant point, so it has no
+                // sensible texture and never had one -- it was rendering as a
+                // grey slab in mid-air.
+                const std::string lowerModelPath = toLowerAsciiCopy(statIt->second->modelPath);
+                const std::size_t lastSlash = lowerModelPath.find_last_of('\\');
+                const std::string modelBaseName = lastSlash == std::string::npos
+                    ? lowerModelPath
+                    : lowerModelPath.substr(lastSlash + 1u);
+                if (modelBaseName.rfind("marker_", 0) == 0 ||
+                    lowerModelPath.find("\\markers\\") != std::string::npos) {
+                    ++editorMarkerModelsSkipped;
+                    failedStatics.insert(ref.baseFormId);
+                    continue;
+                }
+
                 odai::importer::fnv::NifModel nifModel;
                 std::string nifError;
                 if (!odai::importer::fnv::parseNifStaticMesh(nifBytes, nifModel, nifError) || nifModel.shapes.empty()) {
@@ -430,15 +1012,61 @@ int main(int argc, char** argv) {
                 }
                 skippedGeometryShapes += nifModel.skippedShapeCount;
 
+                // A model's own most-used texture, for sub-shapes that carry no
+                // diffuse of their own. Same reasoning as the land-quadrant
+                // fallback: a 53-vertex piece of OTBldgDesCorner04 sitting among
+                // six shapes that all use the building's wall texture wants that
+                // texture, not a hash of the model path -- which now reads as
+                // flat grey, since the slope tint applies to untextured surfaces.
+                std::unordered_map<std::uint32_t, std::size_t> modelTextureUse;
+                for (const auto& shape : nifModel.shapes) {
+                    const std::uint32_t shapeTexture = resolveTextureIndex(shape.diffuseTexturePath);
+                    if (shapeTexture != kNoTextureIndex) {
+                        ++modelTextureUse[shapeTexture];
+                    }
+                }
+                std::uint32_t modelDominantTexture = kNoTextureIndex;
+                std::size_t modelDominantUse = 0;
+                for (const auto& [textureIndex, useCount] : modelTextureUse) {
+                    // Ties broken by index so a cook stays reproducible.
+                    if (useCount > modelDominantUse ||
+                        (useCount == modelDominantUse && textureIndex < modelDominantTexture)) {
+                        modelDominantTexture = textureIndex;
+                        modelDominantUse = useCount;
+                    }
+                }
+
                 ImportedSceneMesh mesh;
                 mesh.name = statIt->second->editorId.empty() ? statIt->second->modelPath : statIt->second->editorId;
                 for (const auto& shape : nifModel.shapes) {
+                    // Drop baked shadow decals.
+                    //
+                    // Bethesda models carry a flat quad at the base, spanning the
+                    // model's own footprint, holding a pre-baked ground shadow
+                    // that the game alpha-blends onto the terrain. It is
+                    // recognisable without guessing at names: untextured (its
+                    // shader property is not one that names a diffuse through a
+                    // texture set) AND perfectly planar -- every vertex sharing
+                    // one coordinate on some axis, which no real piece of
+                    // building geometry does.
+                    //
+                    // Keeping them was the "duplicate object, one textured and
+                    // one grey" artifact: with no texture they take the
+                    // per-model hashed colour, and with no alpha blending on the
+                    // static path they draw as an opaque grey sheet lying across
+                    // the real geometry and the ground.
+                    if (shape.diffuseTexturePath.empty() && shapeIsPlanar(shape)) {
+                        ++shadowDecalShapesSkipped;
+                        continue;
+                    }
                     const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
+                    const std::uint32_t partFirstIndex = static_cast<std::uint32_t>(mesh.indices.size());
                     for (std::size_t v = 0; v * 3u < shape.positions.size(); ++v) {
                         ImportedSceneVertex vertex{};
-                        // NIF model-space is already Y-up in this engine's convention
-                        // (Gamebryo meshes are authored per-model, not world-space
-                        // Z-up) — no axis swap here, only for placement/terrain data.
+                        // Kept in raw Bethesda model space (Z-up) on purpose: the
+                        // Z-up -> Y-up conversion is folded into the instance
+                        // transform by makeEngineInstanceRotation, so it happens
+                        // once per instance instead of once per vertex.
                         vertex.position[0] = shape.positions[v * 3u];
                         vertex.position[1] = shape.positions[(v * 3u) + 1];
                         vertex.position[2] = shape.positions[(v * 3u) + 2];
@@ -447,10 +1075,116 @@ int main(int argc, char** argv) {
                             vertex.normal[1] = shape.normals[(v * 3u) + 1];
                             vertex.normal[2] = shape.normals[(v * 3u) + 2];
                         }
+                        if ((v * 2u) + 1u < shape.uvs.size()) {
+                            vertex.uv[0] = shape.uvs[v * 2u];
+                            vertex.uv[1] = shape.uvs[(v * 2u) + 1u];
+                        }
                         mesh.vertices.push_back(vertex);
                     }
                     for (const std::uint32_t index : shape.triangleIndices) {
                         mesh.indices.push_back(baseVertex + index);
+                    }
+                    // One part per shape. Without these the mesh has no parts
+                    // at all and every surface falls back to the per-model
+                    // hashed color, which is why cooked scenes used to look
+                    // like flat pastel blocks.
+                    const auto partIndexCount =
+                        static_cast<std::uint32_t>(mesh.indices.size()) - partFirstIndex;
+                    if (partIndexCount != 0u) {
+                        ImportedSceneMeshPart part{};
+                        part.firstIndex = partFirstIndex;
+                        part.indexCount = partIndexCount;
+                        part.textureIndex = resolveTextureIndex(shape.diffuseTexturePath);
+                        if (part.textureIndex == kNoTextureIndex &&
+                            modelDominantTexture != kNoTextureIndex) {
+                            part.textureIndex = modelDominantTexture;
+                            ++untexturedShapesGivenModelTexture;
+                        }
+                        part.alphaTest = shape.alphaTest;
+                        // A shape with no diffuse texture is not an error the
+                        // resolver reports -- it silently shades from the
+                        // per-model hashed colour, which reads as flat grey-brown
+                        // patches on an otherwise textured model. Count them so
+                        // "half the rock is grey" is a number rather than a
+                        // guess.
+                        // Extreme UVs only matter if a triangle that actually
+                        // covers pixels has a huge UV span across it: that is what
+                        // drives the mip selector to the smallest level and makes
+                        // the surface shade as one flat colour.
+                        //
+                        // Measured per TRIANGLE, not per shape. Retail meshes carry
+                        // degenerate stitching vertices whose UVs are junk -- the
+                        // same pair repeated exactly, interleaved with sane ones --
+                        // and a zero-area triangle emits no fragments, so its UVs
+                        // cannot smear anything. Reporting per shape counted those
+                        // and cried wolf.
+                        for (std::size_t tri = 0; (tri * 3u) + 2u < shape.triangleIndices.size(); ++tri) {
+                            const std::uint32_t ia = shape.triangleIndices[tri * 3u];
+                            const std::uint32_t ib = shape.triangleIndices[(tri * 3u) + 1u];
+                            const std::uint32_t ic = shape.triangleIndices[(tri * 3u) + 2u];
+                            if ((static_cast<std::size_t>(ic) * 3u) + 2u >= shape.positions.size() ||
+                                (static_cast<std::size_t>(ic) * 2u) + 1u >= shape.uvs.size()) {
+                                continue;
+                            }
+                            const auto position = [&](std::uint32_t vi, int axis) {
+                                return shape.positions[(static_cast<std::size_t>(vi) * 3u) +
+                                                       static_cast<std::size_t>(axis)];
+                            };
+                            const float e0[3] = {position(ib, 0) - position(ia, 0),
+                                                 position(ib, 1) - position(ia, 1),
+                                                 position(ib, 2) - position(ia, 2)};
+                            const float e1[3] = {position(ic, 0) - position(ia, 0),
+                                                 position(ic, 1) - position(ia, 1),
+                                                 position(ic, 2) - position(ia, 2)};
+                            const float cx = (e0[1] * e1[2]) - (e0[2] * e1[1]);
+                            const float cy = (e0[2] * e1[0]) - (e0[0] * e1[2]);
+                            const float cz = (e0[0] * e1[1]) - (e0[1] * e1[0]);
+                            const float doubleArea = std::sqrt((cx * cx) + (cy * cy) + (cz * cz));
+                            if (doubleArea <= 1e-3f) {
+                                continue;  // degenerate: rasterizes to nothing
+                            }
+                            float uvMin[2] = {0.0f, 0.0f};
+                            float uvMax[2] = {0.0f, 0.0f};
+                            for (int corner = 0; corner < 3; ++corner) {
+                                const std::uint32_t vi = shape.triangleIndices[(tri * 3u) +
+                                                                              static_cast<std::size_t>(corner)];
+                                for (int c = 0; c < 2; ++c) {
+                                    const float value =
+                                        shape.uvs[(static_cast<std::size_t>(vi) * 2u) +
+                                                  static_cast<std::size_t>(c)];
+                                    if (corner == 0) {
+                                        uvMin[c] = value;
+                                        uvMax[c] = value;
+                                    } else {
+                                        uvMin[c] = std::min(uvMin[c], value);
+                                        uvMax[c] = std::max(uvMax[c], value);
+                                    }
+                                }
+                            }
+                            const float uvSpan =
+                                std::max(uvMax[0] - uvMin[0], uvMax[1] - uvMin[1]);
+                            if (uvSpan > 64.0f) {
+                                ++extremeUvShapeCount;
+                                extremeUvModelPaths.insert(
+                                    toLowerAsciiCopy(statIt->second->modelPath) +
+                                    "  (worst triangle UV span " +
+                                    std::to_string(static_cast<int>(uvSpan)) + ")");
+                                break;
+                            }
+                        }
+                        if (part.textureIndex == kNoTextureIndex) {
+                            ++untexturedShapeCount;
+                            if (shape.diffuseTexturePath.empty()) {
+                                ++shapesWithNoTexturePath;
+                                untexturedModelPaths.insert(
+                                    toLowerAsciiCopy(statIt->second->modelPath));
+                            } else {
+                                unresolvedTexturePaths.insert(
+                                    toLowerAsciiCopy(shape.diffuseTexturePath));
+                            }
+                        }
+                        ++totalShapeCount;
+                        mesh.parts.push_back(part);
                     }
                 }
                 if (mesh.vertices.empty()) {
@@ -469,7 +1203,7 @@ int main(int argc, char** argv) {
             const Vec3 worldPos = bethesdaToEngine(ref.position[0], ref.position[1], ref.position[2]);
             const Mat3 bethRotation = eulerToMatrixBethesdaOrder(
                 ref.rotationRadians[0], ref.rotationRadians[1], ref.rotationRadians[2]);
-            const Mat3 engineRotation = remapRotationToEngineSpace(bethRotation);
+            const Mat3 engineRotation = makeEngineInstanceRotation(bethRotation);
             writeTransform(instance, worldPos, engineRotation, ref.scale);
             outScene.instances.push_back(instance);
             ++placedInstances;
@@ -481,14 +1215,63 @@ int main(int argc, char** argv) {
                   << " mesh shape(s) had unreadable NiTriShapeData and were dropped (see nif_scene.h).\n";
     }
     std::cout << "Placed " << placedInstances << " instance(s) across " << outScene.meshes.size() << " mesh(es).\n";
+    if (extremeUvShapeCount != 0) {
+        std::cout << "Shapes whose visible triangles span >64 texture tiles (they shade flat): "
+                  << extremeUvShapeCount << " across " << extremeUvModelPaths.size() << " model(s)\n";
+    }
+    {
+        std::size_t shown = 0;
+        for (const std::string& path : extremeUvModelPaths) {
+            std::cout << "  " << path << "\n";
+            if (++shown >= 12) {
+                std::cout << "  ... and " << (extremeUvModelPaths.size() - shown) << " more\n";
+                break;
+            }
+        }
+    }
+    std::cout << "Skipped " << editorMarkerModelsSkipped << " editor-marker model(s); "
+              << untexturedShapesGivenModelTexture
+              << " untextured shape(s) fell back to their model's own texture\n";
+    std::cout << "Skipped " << shadowDecalShapesSkipped
+              << " flat untextured shape(s) as baked shadow decals\n";
+    std::cout << "Static shapes: " << totalShapeCount << ", untextured " << untexturedShapeCount
+              << " (" << shapesWithNoTexturePath << " with no diffuse path, "
+              << unresolvedTexturePaths.size() << " distinct path(s) that failed to resolve)\n";
+    if (!untexturedModelPaths.empty()) {
+        std::size_t shownModels = 0;
+        for (const std::string& path : untexturedModelPaths) {
+            std::cout << "  shape with no diffuse path in: " << path << "\n";
+            if (++shownModels >= 12) {
+                std::cout << "  ... and " << (untexturedModelPaths.size() - shownModels) << " more model(s)\n";
+                break;
+            }
+        }
+    }
+    if (!unresolvedTexturePaths.empty()) {
+        std::size_t shown = 0;
+        for (const std::string& path : unresolvedTexturePaths) {
+            std::cout << "  unresolved texture: " << path << "\n";
+            if (++shown >= 10) {
+                std::cout << "  ... and " << (unresolvedTexturePaths.size() - shown) << " more\n";
+                break;
+            }
+        }
+    }
+    const float meshMs = phaseTimer.lapMs();
 
     odai::importer::buildImportedScenePackedRenderData(outScene);
     odai::importer::buildImportedScenePageRanges(outScene);
+    const float packMs = phaseTimer.lapMs();
 
     if (!odai::importer::saveImportedScene(outScene, outputPath)) {
         std::cerr << "Failed to save output scene: " << odai::importer::getImportedSceneLastError() << "\n";
         return 1;
     }
+    const float writeMs = phaseTimer.lapMs();
+
     std::cout << "Wrote " << outputPath << "\n";
+    std::cout << "Timings: extract " << extractMs << " ms, archives " << resolverMs << " ms, meshes " << meshMs
+              << " ms, pack " << packMs << " ms, write " << writeMs << " ms (total "
+              << (extractMs + resolverMs + meshMs + packMs + writeMs) << " ms)\n";
     return 0;
 }

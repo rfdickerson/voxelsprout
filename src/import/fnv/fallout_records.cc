@@ -1,7 +1,9 @@
 #include "import/fnv/fallout_records.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 namespace odai::importer::fnv {
@@ -114,15 +116,27 @@ void decodeLandHeights(const std::uint8_t* vhgtData, FalloutLandRecord& land) {
     const float baseOffset = readF32(vhgtData);
     const auto* deltas = reinterpret_cast<const std::int8_t*>(vhgtData + 4);
 
+    // The height scale multiplies the accumulated total INCLUDING the VHGT
+    // offset, not just the deltas: height = (offset + sum(deltas)) * 8. So
+    // accumulate in raw units and scale once on store.
+    //
+    // Scaling only the deltas (what this did before) leaves the whole cell
+    // displaced by 7 * offset. Measured against real data: across 3531 placed
+    // references in the Goodsprings area, the old formula put every object a
+    // median of 7566 units — about 108 m — above the terrain, with 0% of them
+    // resting on it; this one gives a median of -2.0 units with 96.1% sitting
+    // within [-200, +600] of the ground beneath them. Objects sitting on the
+    // terrain they were authored against is the check, and it is what the
+    // cell-edge continuity test could not see, being scale-invariant.
     float rowStart = baseOffset;
     for (int row = 0; row < kLandGridSize; ++row) {
         float current = rowStart;
         for (int col = 0; col < kLandGridSize; ++col) {
             const std::int8_t delta = deltas[(row * kLandGridSize) + col];
             if (!(row == 0 && col == 0)) {
-                current += static_cast<float>(delta) * kLandHeightScale;
+                current += static_cast<float>(delta);
             }
-            land.heights[(row * kLandGridSize) + col] = current;
+            land.heights[(row * kLandGridSize) + col] = current * kLandHeightScale;
             if (col == 0) {
                 rowStart = current;
             }
@@ -154,33 +168,125 @@ void decodeLandNormals(const std::uint8_t* vnmlData, FalloutLandRecord& land) {
     land.hasNormals = true;
 }
 
+// VCLR is one unsigned RGB triple per post, same row-major order as VHGT/VNML.
+// Unlike VNML these are unsigned: 255 is neutral (leave the texture alone), not
+// a signed component, so they scale straight to [0,1] rather than [-1,1].
+void decodeLandColors(const std::uint8_t* vclrData, FalloutLandRecord& land) {
+    for (int i = 0; i < kLandVertexCount * 3; ++i) {
+        land.colors[i] = static_cast<float>(vclrData[i]) / 255.0f;
+    }
+    land.hasColors = true;
+}
+
+// TXST holds a texture set; TX00 is its diffuse slot. Collected separately
+// because an LTEX only names the TXST by formID, and the TXST may appear
+// either before or after it in the file.
+void parseTextureSetRecord(const EsmRecordView& record, std::unordered_map<std::uint32_t, std::string>& outPaths) {
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "TX00" && sub.size > 0u) {
+            outPaths[record.formId] = subrecordString(sub);
+            return;
+        }
+    }
+}
+
+void parseLandTextureRecord(const EsmRecordView& record, FalloutSceneData& outScene) {
+    FalloutLandTextureRecord landTexture{};
+    landTexture.formId = record.formId;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "EDID") {
+            landTexture.editorId = subrecordString(sub);
+        } else if (sub.type == "TNAM" && sub.size >= 4u) {
+            landTexture.textureSetFormId = readU32(sub.data);
+        }
+    }
+    outScene.landTextures.push_back(std::move(landTexture));
+}
+
 void parseLandRecord(const EsmRecordView& record, FalloutCellRecord* currentCell) {
     if (currentCell == nullptr) {
         return;
     }
-    FalloutLandRecord land{};
-    land.cellFormId = currentCell->formId;
+    // Built directly in its final heap home so the ~17 KB record is never
+    // copied: previously this filled a stack temporary and then copied it into
+    // the cell.
+    auto land = std::make_unique<FalloutLandRecord>();
+    land->cellFormId = currentCell->formId;
     for (const EsmSubrecordView& sub : record.subrecords) {
         if (sub.type == "VHGT" && sub.size >= 4u + kLandVertexCount) {
-            decodeLandHeights(sub.data, land);
+            decodeLandHeights(sub.data, *land);
         } else if (sub.type == "VNML" && sub.size >= static_cast<std::uint32_t>(kLandVertexCount * 3)) {
-            decodeLandNormals(sub.data, land);
+            decodeLandNormals(sub.data, *land);
+        } else if (sub.type == "VCLR" && sub.size >= static_cast<std::uint32_t>(kLandVertexCount * 3)) {
+            decodeLandColors(sub.data, *land);
         } else if (sub.type == "BTXT" && sub.size >= 8u) {
             const std::uint32_t textureFormId = readU32(sub.data);
             const std::uint8_t quadrant = sub.data[4];
             if (quadrant < 4u) {
-                land.quadrantBaseTextureFormId[quadrant] = textureFormId;
+                land->quadrantBaseTextureFormId[quadrant] = textureFormId;
+            }
+        } else if (sub.type == "ATXT" && sub.size >= 8u) {
+            // ATXT opens a layer; the VTXT that follows fills its opacity map.
+            // Same 8-byte shape as BTXT: formID, quadrant, pad, then a u16 that
+            // is the layer index here rather than BTXT's unused field.
+            FalloutLandTextureLayer layer{};
+            layer.textureFormId = readU32(sub.data);
+            layer.quadrant = sub.data[4];
+            layer.layerIndex = static_cast<std::uint16_t>(sub.data[6] | (sub.data[7] << 8));
+            if (layer.quadrant < 4u) {
+                land->textureLayers.push_back(layer);
+            }
+        } else if (sub.type == "VTXT" && sub.size >= 8u) {
+            // Applies to the most recent ATXT. A VTXT with no ATXT before it is
+            // malformed; skip rather than guessing which layer it belongs to.
+            if (land->textureLayers.empty()) {
+                continue;
+            }
+            FalloutLandTextureLayer& layer = land->textureLayers.back();
+            // 8-byte entries: u16 post position, u16 unused, float opacity.
+            const std::uint32_t entryCount = sub.size / 8u;
+            for (std::uint32_t entry = 0; entry < entryCount; ++entry) {
+                const std::uint8_t* entryData = sub.data + (static_cast<std::size_t>(entry) * 8u);
+                const std::uint16_t position =
+                    static_cast<std::uint16_t>(entryData[0] | (entryData[1] << 8));
+                if (position >= static_cast<std::uint16_t>(kLandQuadrantVertexCount)) {
+                    continue;
+                }
+                float opacity = 0.0f;
+                std::memcpy(&opacity, entryData + 4, sizeof(float));
+                if (!std::isfinite(opacity)) {
+                    continue;
+                }
+                layer.opacity[position] = std::clamp(opacity, 0.0f, 1.0f);
             }
         }
     }
-    if (land.hasHeights) {
-        currentCell->land = land;
+    // ATXT's layer index is authoritative for blend order, and subrecord order
+    // is not guaranteed to match it. stable_sort so layers that declare the same
+    // index keep the order the file listed them in.
+    std::stable_sort(
+        land->textureLayers.begin(),
+        land->textureLayers.end(),
+        [](const FalloutLandTextureLayer& a, const FalloutLandTextureLayer& b) {
+            return a.layerIndex < b.layerIndex;
+        });
+    if (land->hasHeights) {
+        currentCell->land = std::move(land);
     }
 }
 
 }  // namespace
 
 bool extractFalloutScene(const std::filesystem::path& esmPath, FalloutSceneData& outScene, std::string& outError) {
+    return extractFalloutScene(esmPath, FalloutExtractFilter{}, outScene, outError);
+}
+
+bool extractFalloutScene(
+    const std::filesystem::path& esmPath,
+    const FalloutExtractFilter& filter,
+    FalloutSceneData& outScene,
+    std::string& outError
+) {
     outScene = FalloutSceneData{};
     EsmReader reader;
     if (!reader.open(esmPath)) {
@@ -188,30 +294,73 @@ bool extractFalloutScene(const std::filesystem::path& esmPath, FalloutSceneData&
         return false;
     }
 
+    // TXST diffuse paths, resolved into landTextures after the walk since an
+    // LTEX may be parsed before the TXST it names.
+    std::unordered_map<std::uint32_t, std::string> textureSetPaths;
+
     std::vector<std::uint32_t> worldspaceStack;
     // Index (not formID) into outScene.cells, re-resolved to a pointer on
     // every lookup so it stays valid across the vector's own reallocations
     // as later cells are pushed — O(1) instead of a per-record linear scan.
     std::size_t currentCellIndex = 0;
     bool hasCurrentCell = false;
+    // Whether the filter accepted the cell we are currently inside. When it
+    // did not, that cell's LAND and REFR records are rejected from the header
+    // callback and never decompressed or parsed at all.
+    bool wantCurrentCellContents = true;
 
     auto findCurrentCell = [&]() -> FalloutCellRecord* {
         return hasCurrentCell ? &outScene.cells[currentCellIndex] : nullptr;
     };
 
     EsmReader::Visitor visitor{};
+    if (filter.wantCellContents) {
+        visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
+            if (header.type == "LAND" || header.type == "REFR") {
+                return wantCurrentCellContents;
+            }
+            return true;
+        };
+    }
     visitor.onGroupEnter = [&](const EsmGroupView& group) {
+        constexpr std::int32_t kTopLevelGroup = 0;
         constexpr std::int32_t kWorldChildrenGroup = 1;
+
+        // A top-level group's label is the record type it contains. This
+        // function extracts exactly five types, so every other top group —
+        // DIAL, INFO, NAVM, SCPT, PACK, SOUN and the rest, which together are
+        // most of the record count — can be seeked past without being read.
+        // Unconditional rather than caller-controlled: parsing them would
+        // produce nothing either way.
+        if (group.groupType == kTopLevelGroup && group.rawLabel.size() == 4u) {
+            if (group.rawLabel != "STAT" && group.rawLabel != "WRLD" && group.rawLabel != "CELL" &&
+                group.rawLabel != "LTEX" && group.rawLabel != "TXST") {
+                return false;
+            }
+        }
+
         if (group.groupType == kWorldChildrenGroup && group.rawLabel.size() == 4u) {
             std::uint32_t formId = 0;
             std::memcpy(&formId, group.rawLabel.data(), 4u);
+            if (filter.wantWorldspace && !filter.wantWorldspace(formId)) {
+                // Refuse before pushing: onGroupExit still fires for a skipped
+                // group, and it must not pop a worldspace we never pushed.
+                return false;
+            }
             worldspaceStack.push_back(formId);
         }
         return true;
     };
     visitor.onGroupExit = [&](const EsmGroupView& group) {
         constexpr std::int32_t kWorldChildrenGroup = 1;
-        if (group.groupType == kWorldChildrenGroup && !worldspaceStack.empty()) {
+        if (group.groupType != kWorldChildrenGroup || worldspaceStack.empty() || group.rawLabel.size() != 4u) {
+            return;
+        }
+        // onGroupExit also fires for groups onGroupEnter refused, which were
+        // never pushed. Pop only when the top actually is this group.
+        std::uint32_t formId = 0;
+        std::memcpy(&formId, group.rawLabel.data(), 4u);
+        if (worldspaceStack.back() == formId) {
             worldspaceStack.pop_back();
         }
     };
@@ -219,12 +368,18 @@ bool extractFalloutScene(const std::filesystem::path& esmPath, FalloutSceneData&
         const std::uint32_t currentWorldspace = worldspaceStack.empty() ? 0u : worldspaceStack.back();
         if (record.type == "STAT") {
             parseStatRecord(record, outScene);
+        } else if (record.type == "LTEX") {
+            parseLandTextureRecord(record, outScene);
+        } else if (record.type == "TXST") {
+            parseTextureSetRecord(record, textureSetPaths);
         } else if (record.type == "WRLD") {
             parseWorldspaceRecord(record, outScene);
         } else if (record.type == "CELL") {
             parseCellRecord(record, currentWorldspace, outScene);
             currentCellIndex = outScene.cells.size() - 1u;
             hasCurrentCell = true;
+            wantCurrentCellContents =
+                !filter.wantCellContents || filter.wantCellContents(outScene.cells[currentCellIndex]);
         } else if (record.type == "REFR") {
             parseReferenceRecord(record, findCurrentCell());
         } else if (record.type == "LAND") {
@@ -235,6 +390,13 @@ bool extractFalloutScene(const std::filesystem::path& esmPath, FalloutSceneData&
     if (!reader.walk(visitor)) {
         outError = reader.lastError();
         return false;
+    }
+
+    for (FalloutLandTextureRecord& landTexture : outScene.landTextures) {
+        const auto it = textureSetPaths.find(landTexture.textureSetFormId);
+        if (it != textureSetPaths.end()) {
+            landTexture.diffuseTexturePath = it->second;
+        }
     }
     return true;
 }

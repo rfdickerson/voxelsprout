@@ -641,6 +641,7 @@ if(ODAI_BUILD_APP)
         list(APPEND RENDER_BACKEND_SOURCES
             src/render/backend/vulkan/device.cc
             src/render/backend/vulkan/frame.cc
+            src/render/backend/vulkan/frame_capture.cc
             src/render/backend/vulkan/frame_run.cc
             src/render/backend/vulkan/frame_graph_core.cc
             src/render/backend/vulkan/frame_graph_runtime.cc
@@ -911,6 +912,10 @@ if(ODAI_BUILD_APP)
     # skirmish (Dragon Age: Origins touchstone, Vulkan). First game exercising
     # the multi-instance GPU skinning pipeline end to end.
     # ---------------------------------------------------------------------------
+        # Free-roam viewer for cooked Fallout: New Vegas scenes. Needs a full
+        # GameApp (not odai_material_editor, which is minimal-rendering) to show
+        # sun, sky, shadows and ambient occlusion.
+        #   odai_game_newvegas --scene <cooked.bin>
         add_executable(odai_game_legion
             src/games/legion/legion_main.cc
             src/games/legion/legion_app.cc
@@ -954,6 +959,50 @@ if(ODAI_BUILD_APP)
         else()
             target_compile_options(odai_game_legion PRIVATE -Wall -Wextra -Wpedantic)
         endif()
+
+        add_executable(odai_game_newvegas
+            src/games/newvegas/newvegas_main.cc
+            src/games/newvegas/newvegas_app.cc
+            src/engine/game_app.cc
+            src/engine/plugin.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_game_newvegas PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_game_newvegas PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_game_newvegas PRIVATE
+            odai_ui odai_ui_vulkan odai_audio
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_game_newvegas PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_game_newvegas PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_game_newvegas slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_game_newvegas PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_game_newvegas PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
 
     # ---------------------------------------------------------------------------
     # odai_game_snake — Snake / Nibbles (Vulkan)
@@ -1474,6 +1523,7 @@ if(ODAI_BUILD_TOOLS)
     #   odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --worldspace <EditorID> <x0> <z0> <x1> <z1>
     add_executable(odai_newvegas_cooker
         src/tools/newvegas_cooker_main.cc
+        src/import/dds.cc
         src/import/fnv/bsa_archive.cc
         src/import/fnv/esm_reader.cc
         src/import/fnv/fallout_records.cc
@@ -1487,6 +1537,31 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_newvegas_cooker PRIVATE ${ODAI_WARN_FLAGS_MSVC})
     else()
         target_compile_options(odai_newvegas_cooker PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    # New Vegas probe — real-data harness for the BSA/ESM/NIF readers.
+    # odai_fnv_import_tests is synthetic-fixture-only by design, so it cannot
+    # catch a wrong assumption about the retail format; this is the tool that
+    # can. Deliberately NOT registered with add_test: it needs an installed
+    # copy of the game.
+    #   odai_newvegas_probe <DataFilesPath> --archives | --nifs [limit] |
+    #                                       --nif <path> | --plugin <Plugin.esm>
+    add_executable(odai_newvegas_probe
+        src/tools/newvegas_probe_main.cc
+        src/import/dds.cc
+        src/import/imported_scene.cc
+        src/import/imported_scene_query.cc
+        src/import/fnv/bsa_archive.cc
+        src/import/fnv/esm_reader.cc
+        src/import/fnv/fallout_records.cc
+        src/import/fnv/nif_scene.cc
+    )
+    target_include_directories(odai_newvegas_probe PRIVATE src)
+    target_link_libraries(odai_newvegas_probe PRIVATE ZLIB::ZLIB)
+    if(MSVC)
+        target_compile_options(odai_newvegas_probe PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_newvegas_probe PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
 

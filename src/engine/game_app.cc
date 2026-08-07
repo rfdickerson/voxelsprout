@@ -51,15 +51,30 @@ bool GameApp::init(const char* title) {
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
 
-    int winW = 1920, winH = 1080;
+    // Windowed at a fixed default rather than maximized to the monitor. Maximizing
+    // on a 4K display gave a ~3840x2038 swapchain, and every full-resolution pass
+    // (HDR scene at 4x MSAA, SSAO, sun shafts, ReSTIR surface GI) scales with it —
+    // enough to blow past the driver's hang-check timeout on an integrated GPU and
+    // take a VK_ERROR_DEVICE_LOST. Override with ODAI_WINDOW_SIZE=WxH.
+    int winW = 1600, winH = 900;
+    if (const char* sizeEnv = std::getenv("ODAI_WINDOW_SIZE")) {
+        int envW = 0, envH = 0;
+        if (std::sscanf(sizeEnv, "%dx%d", &envW, &envH) == 2 && envW > 0 && envH > 0) {
+            winW = envW;
+            winH = envH;
+        } else {
+            VOX_LOGW("engine") << "ignoring malformed ODAI_WINDOW_SIZE=\"" << sizeEnv
+                               << "\" (expected WxH, e.g. 1600x900)";
+        }
+    }
+    // Never open larger than the monitor's logical (content-scaled) size.
     if (GLFWmonitor* mon = glfwGetPrimaryMonitor()) {
         float xs = 1.0f, ys = 1.0f;
         glfwGetMonitorContentScale(mon, &xs, &ys);
         if (const GLFWvidmode* mode = glfwGetVideoMode(mon)) {
-            winW = static_cast<int>(std::round(mode->width  / std::max(xs, 1.0f)));
-            winH = static_cast<int>(std::round(mode->height / std::max(ys, 1.0f)));
+            winW = std::min(winW, static_cast<int>(std::round(mode->width  / std::max(xs, 1.0f))));
+            winH = std::min(winH, static_cast<int>(std::round(mode->height / std::max(ys, 1.0f))));
         }
     }
 
@@ -83,7 +98,7 @@ bool GameApp::init(const char* title) {
             self->m_pendingScrollDelta += static_cast<float>(dy);
     });
 
-    m_renderer.setStrategyMapMode(true);
+    m_renderer.setStrategyMapMode(wantsStrategyMapTuning());
     if (wantsMinimalRendering()) {
         m_renderer.setMinimalRenderMode(true);
     }

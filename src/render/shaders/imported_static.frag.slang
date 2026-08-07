@@ -31,6 +31,8 @@ RaytracingAccelerationStructure shadowScene;
 // the PBR bit stays clear and shading falls back to the legacy diffuse chain.
 static const uint kImportedMaterialFlagAlphaTest = 1u;
 static const uint kImportedMaterialFlagPbr = 4u;
+static const uint kImportedMaterialFlagVertexColorTint = 8u;
+static const uint kImportedMaterialFlagTerrainLayers = 16u;
 static const uint kImportedMaterialRoughnessShift = 8u;
 static const uint kImportedMaterialMetallicShift = 16u;
 static const uint kImportedMaterialChannelMask = 0xffu;
@@ -116,6 +118,8 @@ struct FragmentInput
     float2 inUv : TEXCOORD3;
     nointerpolation uint inTextureIndex : TEXCOORD4;
     nointerpolation uint inFlags : TEXCOORD5;
+    nointerpolation uint3 inLayerTextures : TEXCOORD6;
+    float3 inLayerWeights : TEXCOORD7;
 };
 
 // Screen-space AO is baked at half resolution (see ao.ssaoBlur in swapchain_targets.cc);
@@ -146,15 +150,55 @@ float4 sampleImportedAlbedo(FragmentInput input)
     {
         discard;
     }
+    // Fallout's landscape is a base texture per quadrant with additional layers
+    // alpha-blended over it (ATXT/VTXT) -- roads, gravel, and the transitions
+    // between ground types. Without this the terrain is one flat texture per
+    // 2048-unit quadrant with a hard seam at every quadrant boundary.
+    //
+    // Layers composite in order, each a straight lerp by its own weight, which
+    // is what the game's own layer stack does. The weights are independent
+    // opacities, NOT a partition of unity, so they must not be normalized: a
+    // post where two layers are both fully opaque means the later one wins, not
+    // that they are each half strength.
+    if ((input.inFlags & kImportedMaterialFlagTerrainLayers) != 0u)
+    {
+        for (uint layer = 0u; layer < 3u; ++layer)
+        {
+            const uint layerTexture = input.inLayerTextures[layer];
+            const float layerWeight = saturate(input.inLayerWeights[layer]);
+            if (layerTexture == kInvalidImportedTextureIndex || layerWeight <= 0.0)
+            {
+                continue;
+            }
+            const float4 layerSample = bindlessTextures[layerTexture].Sample(input.inUv);
+            sampled = float4(lerp(sampled.rgb, layerSample.rgb, layerWeight), sampled.a);
+        }
+    }
     if (disableTextures)
     {
         return float4(input.inColor, 1.0);
     }
-    // Tint the texture toward the vertex color (terrain palette for terrain tiles,
-    // material color for imported meshes). Matches the blend the hex terrain shader
-    // used so terrain types remain identifiable under the texture detail.
-    const float3 tinted = lerp(sampled.rgb, sampled.rgb * input.inColor * 1.6, 0.25);
-    return float4(tinted, sampled.a);
+    // Vertex color modulates a textured surface only where the cooker says the
+    // color is authored data (kImportedSceneMaterialFlagVertexColorTint). For
+    // Fallout terrain that is LAND's VCLR: the baked ambient and regional
+    // palette the game itself shades landscape with.
+    //
+    // The bit is what makes this safe to do unconditionally. This used to blend
+    // 25% toward `sampled.rgb * inColor * 1.6` for *everything* textured, back
+    // when the only colors reaching here were
+    // buildImportedScenePackedRenderData's fallbacks — a hash of the model path
+    // for instanced statics, a height ramp for terrain. Both are noise, both
+    // biased dark with blue lowest, which is what made cooked scenes read dark,
+    // warm and over-saturated with a per-model hue cast. Those fallbacks still
+    // exist and still must not tint anything; they just no longer set the bit.
+    //
+    // Untextured geometry is unaffected either way: it returns inColor as its
+    // albedo at the early-out above.
+    if ((input.inFlags & kImportedMaterialFlagVertexColorTint) != 0u)
+    {
+        return float4(sampled.rgb * input.inColor, sampled.a);
+    }
+    return sampled;
 }
 
 float3 sampleImportedVoxelGi(float3 worldPosition, float3 normal)
@@ -552,8 +596,27 @@ float4 main(FragmentInput input) : SV_Target0
     const bool usePbr = importedMaterialHasPbr(input.inFlags);
 
     float3 albedo = albedoFull.rgb * materialTint;
-    albedo = lerp(albedo, float3(0.40, 0.39, 0.36), smoothstep(0.35, 0.66, slope) * 0.6);
-    albedo = lerp(albedo, float3(0.52, 0.51, 0.47), smoothstep(0.66, 0.92, slope) * 0.5);
+    // Stylized slope tint (docs/stylized_low_poly.md): steep faces blend toward
+    // flat rock greys so untextured low-poly terrain reads as cliff rather than
+    // as a coloured ramp.
+    //
+    // Applied ONLY to untextured surfaces. It used to run unconditionally, which
+    // meant it overwrote real albedo on anything sloped: on a cooked Fallout
+    // scene a rock face measured (97,91,90) and a Joshua tree trunk (164,169,166)
+    // -- near-perfectly neutral grey -- while the flat ground beside them kept
+    // its warm (74,72,50). That is the whole "grey materials instead of textures"
+    // symptom, and it is this lerp, not the texture pipeline.
+    //
+    // Gating on textured-ness rather than on
+    // kImportedSceneMaterialFlagTerrainSlopeBlend keeps every existing scene
+    // pixel-identical: the geometry this was authored for (the hex strategy map,
+    // procedural low-poly) is untextured and still gets it. The reserved flag is
+    // the right control if a TEXTURED surface ever wants the effect too.
+    if (input.inTextureIndex == kInvalidImportedTextureIndex)
+    {
+        albedo = lerp(albedo, float3(0.40, 0.39, 0.36), smoothstep(0.35, 0.66, slope) * 0.6);
+        albedo = lerp(albedo, float3(0.52, 0.51, 0.47), smoothstep(0.66, 0.92, slope) * 0.5);
+    }
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
     const float3 shNormalIrradiance = evaluateShIrradiance(normal);
