@@ -10,6 +10,12 @@ namespace odai::importer::fnv {
 
 namespace {
 
+std::uint16_t readU16(const std::uint8_t* bytes) {
+    std::uint16_t value = 0;
+    std::memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
 std::uint32_t readU32(const std::uint8_t* bytes) {
     std::uint32_t value = 0;
     std::memcpy(&value, bytes, sizeof(value));
@@ -117,6 +123,104 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
     if (hasData && ref.baseFormId != 0u) {
         currentCell->references.push_back(ref);
     }
+}
+
+// NAVM. Layout measured from FalloutNV.esm, not taken from documentation:
+//
+//   DATA  u32 cellFormId, u32 vertexCount, u32 triangleCount, then fields this
+//         reader does not use.
+//   NVVX  vertexCount * 3 floats, Bethesda space.
+//   NVTR  triangleCount * 16 bytes: 3 u16 vertex indices, 3 u16 neighbouring
+//         triangle indices (0xFFFF = border), u16 flags, u16 cover.
+//   NVDP  8 bytes each: u32 door reference formID, u16 triangle index, u16 pad.
+//
+// The counts are cross-checked against the subrecord sizes rather than trusted:
+// a DATA that disagrees with its own NVVX/NVTR means the layout assumption is
+// wrong, and silently reading a wrong number of triangles would produce a
+// plausible mesh with garbage adjacency. Mismatches drop the record.
+void parseNavMeshRecord(const EsmRecordView& record, FalloutCellRecord* currentCell) {
+    if (currentCell == nullptr) {
+        return;
+    }
+    constexpr std::size_t kNavMeshVertexBytes = 12u;
+    constexpr std::size_t kNavMeshTriangleBytes = 16u;
+    constexpr std::size_t kNavMeshDoorPortalBytes = 8u;
+
+    FalloutNavMeshRecord navMesh{};
+    navMesh.formId = record.formId;
+    std::uint32_t declaredVertexCount = 0;
+    std::uint32_t declaredTriangleCount = 0;
+    const EsmSubrecordView* vertexData = nullptr;
+    const EsmSubrecordView* triangleData = nullptr;
+    const EsmSubrecordView* doorPortalData = nullptr;
+
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "DATA" && sub.size >= 12u) {
+            navMesh.cellFormId = readU32(sub.data);
+            declaredVertexCount = readU32(sub.data + 4);
+            declaredTriangleCount = readU32(sub.data + 8);
+        } else if (sub.type == "NVVX") {
+            vertexData = &sub;
+        } else if (sub.type == "NVTR") {
+            triangleData = &sub;
+        } else if (sub.type == "NVDP") {
+            doorPortalData = &sub;
+        }
+    }
+    if (vertexData == nullptr || triangleData == nullptr) {
+        return;
+    }
+    if (vertexData->size != declaredVertexCount * kNavMeshVertexBytes ||
+        triangleData->size != declaredTriangleCount * kNavMeshTriangleBytes) {
+        return;  // DATA disagrees with the arrays it describes
+    }
+
+    navMesh.vertices.resize(static_cast<std::size_t>(declaredVertexCount) * 3u);
+    for (std::uint32_t i = 0; i < declaredVertexCount * 3u; ++i) {
+        navMesh.vertices[i] = readF32(vertexData->data + (static_cast<std::size_t>(i) * 4u));
+    }
+
+    navMesh.triangles.resize(declaredTriangleCount);
+    for (std::uint32_t i = 0; i < declaredTriangleCount; ++i) {
+        const std::uint8_t* entry = triangleData->data + (static_cast<std::size_t>(i) * kNavMeshTriangleBytes);
+        FalloutNavMeshTriangle& triangle = navMesh.triangles[i];
+        bool indicesValid = true;
+        for (int corner = 0; corner < 3; ++corner) {
+            triangle.vertex[corner] = readU16(entry + (corner * 2));
+            if (triangle.vertex[corner] >= declaredVertexCount) {
+                indicesValid = false;
+            }
+        }
+        for (int edge = 0; edge < 3; ++edge) {
+            const std::uint16_t neighbour = readU16(entry + 6 + (edge * 2));
+            // Anything out of range becomes a border rather than a wild index:
+            // a neighbour link is dereferenced during pathfinding, so a bad one
+            // is a crash rather than a cosmetic fault.
+            triangle.neighbour[edge] =
+                (neighbour < declaredTriangleCount) ? neighbour : kNavMeshNoNeighbour;
+        }
+        triangle.flags = readU16(entry + 12);
+        triangle.coverFlags = readU16(entry + 14);
+        if (!indicesValid) {
+            return;  // a triangle indexing past its own vertex array is not salvageable
+        }
+    }
+
+    if (doorPortalData != nullptr) {
+        const std::size_t portalCount = doorPortalData->size / kNavMeshDoorPortalBytes;
+        navMesh.doorPortals.reserve(portalCount);
+        for (std::size_t i = 0; i < portalCount; ++i) {
+            const std::uint8_t* entry = doorPortalData->data + (i * kNavMeshDoorPortalBytes);
+            FalloutNavMeshDoorPortal portal{};
+            portal.doorRefFormId = readU32(entry);
+            portal.triangleIndex = readU16(entry + 4);
+            if (portal.triangleIndex < declaredTriangleCount) {
+                navMesh.doorPortals.push_back(portal);
+            }
+        }
+    }
+
+    currentCell->navMeshes.push_back(std::move(navMesh));
 }
 
 // Reconstructs the 33x33 absolute height grid from VHGT's delta encoding:
@@ -335,7 +439,8 @@ bool extractFalloutScene(
         if (header.type == "REFR" && hasCurrentCell) {
             outScene.cellIndexByReferenceFormId.emplace(header.formId, currentCellIndex);
         }
-        if (filter.wantCellContents && (header.type == "LAND" || header.type == "REFR")) {
+        if (filter.wantCellContents &&
+            (header.type == "LAND" || header.type == "REFR" || header.type == "NAVM")) {
             return wantCurrentCellContents;
         }
         return true;
@@ -402,6 +507,8 @@ bool extractFalloutScene(
             parseReferenceRecord(record, findCurrentCell());
         } else if (record.type == "LAND") {
             parseLandRecord(record, findCurrentCell());
+        } else if (record.type == "NAVM") {
+            parseNavMeshRecord(record, findCurrentCell());
         }
     };
 

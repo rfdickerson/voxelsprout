@@ -116,6 +116,45 @@ struct FalloutLandRecord {
     std::vector<FalloutLandTextureLayer> textureLayers;
 };
 
+// One navmesh triangle: three vertex indices, then the index of the triangle
+// sharing each edge (kNavMeshNoNeighbour where the edge is a border). The
+// adjacency IS the pathfinding graph -- no neighbour search is needed, which is
+// the whole reason to use the authored navmesh rather than deriving one.
+constexpr std::uint16_t kNavMeshNoNeighbour = 0xffffu;
+
+struct FalloutNavMeshTriangle {
+    std::uint16_t vertex[3] = {};
+    std::uint16_t neighbour[3] = {kNavMeshNoNeighbour, kNavMeshNoNeighbour, kNavMeshNoNeighbour};
+    std::uint16_t flags = 0;
+    std::uint16_t coverFlags = 0;
+};
+
+// A door this navmesh connects to, by the door reference's formID. Pairs with
+// the teleport doors the cooker already emits: this is which triangle an NPC
+// must stand on to use one.
+struct FalloutNavMeshDoorPortal {
+    std::uint32_t doorRefFormId = 0;
+    std::uint16_t triangleIndex = 0;
+};
+
+// NAVM: Fallout's authored navigation mesh for one cell.
+//
+// The layout below was derived from real records rather than documentation --
+// every format in this importer that was reasoned out instead of measured has
+// been wrong at least once. DATA's second and third words are the vertex and
+// triangle counts, and the check is exact: NVVX is always 12 bytes per vertex
+// and NVTR always 16 per triangle, verified against records of 687/746 (8244
+// and 11936 bytes) and 28/26 (336 and 416).
+struct FalloutNavMeshRecord {
+    std::uint32_t formId = 0;
+    std::uint32_t cellFormId = 0;
+    // Vertices in Bethesda space (Z-up), like every other position this reader
+    // produces. Converting is the consumer's job.
+    std::vector<float> vertices;  // xyz per vertex
+    std::vector<FalloutNavMeshTriangle> triangles;
+    std::vector<FalloutNavMeshDoorPortal> doorPortals;
+};
+
 struct FalloutCellRecord {
     std::uint32_t formId = 0;
     std::string editorId;
@@ -132,6 +171,8 @@ struct FalloutCellRecord {
     // have no LAND at all. It also made `cells` vector growth memcpy 17.5 KB
     // per element instead of moving a pointer. Null when the cell has no LAND.
     std::unique_ptr<FalloutLandRecord> land;
+    // NAVM records for this cell. Usually one, but a cell can carry several.
+    std::vector<FalloutNavMeshRecord> navMeshes;
 };
 
 // A landscape texture. LAND's BTXT/ATXT subrecords name one of these by

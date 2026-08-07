@@ -1381,6 +1381,28 @@ int cookOne(
             }
         }
     }
+    {
+        std::size_t navMeshCount = 0, navTriangles = 0, navVertices = 0, navPortals = 0, navBorderEdges = 0;
+        for (const auto* cell : selectedCells) {
+            for (const auto& navMesh : cell->navMeshes) {
+                ++navMeshCount;
+                navVertices += navMesh.vertices.size() / 3u;
+                navTriangles += navMesh.triangles.size();
+                navPortals += navMesh.doorPortals.size();
+                for (const auto& tri : navMesh.triangles) {
+                    for (int e = 0; e < 3; ++e) {
+                        if (tri.neighbour[e] == odai::importer::fnv::kNavMeshNoNeighbour) ++navBorderEdges;
+                    }
+                }
+            }
+        }
+        if (navMeshCount != 0) {
+            std::cout << "Navmesh: " << navMeshCount << " NAVM, " << navVertices << " verts, "
+                      << navTriangles << " tris, " << navPortals << " door portal(s), "
+                      << navBorderEdges << " border edges ("
+                      << (navTriangles == 0 ? 0 : (navBorderEdges * 100) / (navTriangles * 3)) << "% of edges)\n";
+        }
+    }
     if (!outScene.doors.empty()) {
         std::cout << "Doors: " << outScene.doors.size() << " teleport(s) into "
                   << doorTargetCellSet.size() << " interior cell(s)\n";

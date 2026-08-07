@@ -565,6 +565,63 @@ void testFalloutRecordExtraction() {
     constexpr std::uint32_t kLandFormId = 0x00003000u;
     const auto landRecord = buildRecord("LAND", kLandFormId, 0u, landSubrecords);
 
+    // --- NAVM: a 4-vertex, 2-triangle navmesh sharing one interior edge. ---
+    //
+    // Deliberately asymmetric: triangle 0 links its edge 1 to triangle 1, and
+    // triangle 1 links its edge 2 back. A parser that assumed a fixed edge
+    // ordering, or that read the neighbour block at the wrong offset, would
+    // still produce two triangles -- only the adjacency would be wrong, and the
+    // adjacency is the entire point of using the authored mesh.
+    constexpr std::uint32_t kNavMeshFormId = 0x00005000u;
+    constexpr std::uint32_t kNavDoorRefFormId = 0x00005100u;
+    std::vector<std::uint8_t> navDataPayload;
+    appendPod(navDataPayload, static_cast<std::uint32_t>(0x00002000u));  // the exterior CELL below
+    appendPod(navDataPayload, static_cast<std::uint32_t>(4));   // vertex count
+    appendPod(navDataPayload, static_cast<std::uint32_t>(2));   // triangle count
+    appendPod(navDataPayload, static_cast<std::uint32_t>(0));
+    appendPod(navDataPayload, static_cast<std::uint32_t>(0));
+    appendPod(navDataPayload, static_cast<std::uint32_t>(0));
+
+    std::vector<std::uint8_t> navVertexPayload;
+    const float navVertices[4][3] = {
+        {0.0f, 0.0f, 10.0f}, {128.0f, 0.0f, 10.0f}, {128.0f, 128.0f, 10.0f}, {0.0f, 128.0f, 10.0f}};
+    for (const auto& vertex : navVertices) {
+        appendPod(navVertexPayload, vertex[0]);
+        appendPod(navVertexPayload, vertex[1]);
+        appendPod(navVertexPayload, vertex[2]);
+    }
+
+    const auto appendNavTriangle = [](std::vector<std::uint8_t>& out,
+                                      std::uint16_t v0, std::uint16_t v1, std::uint16_t v2,
+                                      std::uint16_t n0, std::uint16_t n1, std::uint16_t n2,
+                                      std::uint16_t flags, std::uint16_t cover) {
+        appendPod(out, v0); appendPod(out, v1); appendPod(out, v2);
+        appendPod(out, n0); appendPod(out, n1); appendPod(out, n2);
+        appendPod(out, flags); appendPod(out, cover);
+    };
+    std::vector<std::uint8_t> navTrianglePayload;
+    appendNavTriangle(navTrianglePayload, 0, 1, 2, 0xffffu, 1u, 0xffffu, 0x0800u, 0u);
+    // Neighbour 9 is out of range for a 2-triangle mesh and must be clamped to
+    // "border": a wild index is dereferenced during pathfinding.
+    appendNavTriangle(navTrianglePayload, 0, 2, 3, 0xffffu, 0xffffu, 9u, 0u, 0u);
+
+    std::vector<std::uint8_t> navPortalPayload;
+    appendPod(navPortalPayload, kNavDoorRefFormId);
+    appendPod(navPortalPayload, static_cast<std::uint16_t>(1));
+    appendPod(navPortalPayload, static_cast<std::uint16_t>(0));
+
+    const auto navSubrecords = [&] {
+        std::vector<std::uint8_t> out;
+        for (const auto& sub : {buildSubrecord("DATA", navDataPayload),
+                                buildSubrecord("NVVX", navVertexPayload),
+                                buildSubrecord("NVTR", navTrianglePayload),
+                                buildSubrecord("NVDP", navPortalPayload)}) {
+            out.insert(out.end(), sub.begin(), sub.end());
+        }
+        return out;
+    }();
+    const auto navMeshRecord = buildRecord("NAVM", kNavMeshFormId, 0u, navSubrecords);
+
     // --- REFR placing the static in the exterior cell. ---
     std::vector<std::uint8_t> refData;
     appendPod(refData, 512.0f);   // posX
@@ -611,6 +668,7 @@ void testFalloutRecordExtraction() {
 
     std::vector<std::uint8_t> tempChildrenContent;
     tempChildrenContent.insert(tempChildrenContent.end(), landRecord.begin(), landRecord.end());
+    tempChildrenContent.insert(tempChildrenContent.end(), navMeshRecord.begin(), navMeshRecord.end());
     tempChildrenContent.insert(tempChildrenContent.end(), refRecord.begin(), refRecord.end());
     char extCellLabel[4];
     std::memcpy(extCellLabel, &kExtCellFormId, 4);
@@ -746,6 +804,34 @@ void testFalloutRecordExtraction() {
                 std::fabs(land.colors[(i * 3) + 2] - (64.0f / 255.0f)) < 1e-4f;
         }
         expectTrue(vclrMatches, "LAND VCLR decodes to unsigned [0,1] RGB at every post");
+
+        // --- NAVM ---
+        expectTrue(extCell->navMeshes.size() == 1, "exterior cell owns its NAVM record");
+        if (extCell->navMeshes.size() == 1) {
+            const FalloutNavMeshRecord& navMesh = extCell->navMeshes.front();
+            expectTrue(navMesh.vertices.size() == 12u, "NAVM decodes 4 vertices (3 floats each)");
+            expectTrue(navMesh.triangles.size() == 2u, "NAVM decodes 2 triangles");
+            if (navMesh.vertices.size() == 12u) {
+                expectTrue(std::fabs(navMesh.vertices[3] - 128.0f) < 1e-4f &&
+                           std::fabs(navMesh.vertices[5] - 10.0f) < 1e-4f,
+                           "NAVM vertices keep Bethesda-space xyz order");
+            }
+            if (navMesh.triangles.size() == 2u) {
+                const FalloutNavMeshTriangle& first = navMesh.triangles[0];
+                expectTrue(first.vertex[0] == 0 && first.vertex[1] == 1 && first.vertex[2] == 2,
+                           "NAVM triangle vertex indices round-trip");
+                expectTrue(first.neighbour[0] == kNavMeshNoNeighbour && first.neighbour[1] == 1 &&
+                               first.neighbour[2] == kNavMeshNoNeighbour,
+                           "NAVM adjacency is read per edge, not reordered");
+                expectTrue(first.flags == 0x0800u, "NAVM triangle flags round-trip");
+                expectTrue(navMesh.triangles[1].neighbour[2] == kNavMeshNoNeighbour,
+                           "NAVM neighbour index past the triangle count clamps to border");
+            }
+            expectTrue(navMesh.doorPortals.size() == 1 &&
+                           navMesh.doorPortals[0].doorRefFormId == kNavDoorRefFormId &&
+                           navMesh.doorPortals[0].triangleIndex == 1u,
+                       "NAVM door portal names its door reference and triangle");
+        }
 
         // ATXT/VTXT: two layers, emitted high-index-first, so a correct parse
         // reorders them and pairs each VTXT with the ATXT that preceded it.

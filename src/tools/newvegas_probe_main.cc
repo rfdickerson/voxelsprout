@@ -381,6 +381,55 @@ int listCells(const std::filesystem::path& esmPath, const std::string& filter) {
     return 0;
 }
 
+// NAVM raw dump. The navmesh layout is being derived from real records rather
+// than from memory: every format guess in this importer that was reasoned from
+// documentation instead of bytes has been wrong at least once (the NIF vector
+// flags, the shader property offsets, the byte-misaligned texture refs). This
+// prints subrecord sizes and the leading words of NVNM so the structure can be
+// read off actual data.
+int probeNavmesh(const std::filesystem::path& pluginPath, std::size_t limit) {
+    odai::importer::fnv::EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+    std::size_t seen = 0;
+    std::map<std::string, std::size_t> subrecordCounts;
+    odai::importer::fnv::EsmReader::Visitor visitor;
+    visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+        if (record.type != "NAVM") {
+            return;
+        }
+        for (const auto& sub : record.subrecords) {
+            ++subrecordCounts[std::string(sub.type)];
+        }
+        if (seen++ >= limit) {
+            return;
+        }
+        std::cout << "NAVM formId=0x" << std::hex << record.formId << std::dec << "\n";
+        for (const auto& sub : record.subrecords) {
+            std::cout << "  " << sub.type << " size=" << sub.size;
+            const std::size_t words = std::min<std::size_t>(sub.size / 4u, 12u);
+            std::cout << "  words:";
+            for (std::size_t w = 0; w < words; ++w) {
+                std::uint32_t value = 0;
+                std::memcpy(&value, sub.data + (w * 4u), 4u);
+                std::cout << " " << value;
+            }
+            std::cout << "\n";
+        }
+    };
+    if (!reader.walk(visitor)) {
+        std::cout << "walk failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+    std::cout << "NAVM subrecord census:\n";
+    for (const auto& [type, count] : subrecordCounts) {
+        std::cout << "  " << count << "x " << type << "\n";
+    }
+    return 0;
+}
+
 int probePlugin(const std::filesystem::path& pluginPath) {
     odai::importer::fnv::EsmReader reader;
     if (!reader.open(pluginPath)) {
@@ -802,6 +851,7 @@ void printUsage() {
               << "  odai_newvegas_probe <DataFilesPath> --nifblocks <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --plugin <Plugin.esm>\n"
               << "  odai_newvegas_probe <DataFilesPath> --cells <Plugin.esm> [filter]\n"
+              << "  odai_newvegas_probe <DataFilesPath> --navm <Plugin.esm> [dumpCount]\n"
               << "  odai_newvegas_probe <DataFilesPath> --rotations <Plugin.esm> <CellEditorID>\n"
               << "  odai_newvegas_probe <anyDir> --scene <cooked.bin>\n";
 }
@@ -836,6 +886,9 @@ int main(int argc, char** argv) {
     }
     if (mode == "--plugin" && argc >= 4) {
         return probePlugin(dataPath / argv[3]);
+    }
+    if (mode == "--navm" && argc >= 4) {
+        return probeNavmesh(dataPath / argv[3], argc >= 5 ? static_cast<std::size_t>(std::atoi(argv[4])) : 2u);
     }
     if (mode == "--cells" && argc >= 4) {
         return listCells(dataPath / argv[3], argc >= 5 ? argv[4] : "");
