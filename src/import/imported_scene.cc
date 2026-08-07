@@ -42,7 +42,10 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // raw-blit arrays need their own legacy expansion, in three places: the full
 // loader reads meshes and packed vertices, the runtime loader skips meshes and
 // reads packed vertices.
-constexpr std::uint32_t kImportedSceneVersion = 20u;
+// v20 -> v21: the terrain layer budget went from 3 slots to 4, widening BOTH
+// vertex structs again. Same treatment as before -- every raw-blit read site is
+// version-gated, and the v20 expansion below reads the narrower layout.
+constexpr std::uint32_t kImportedSceneVersion = 21u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
 // The pre-v19 ImportedSceneVertex: position[3], normal[3], uv[2].
 constexpr std::size_t kImportedSceneVertexFloatsV18 = 8;
@@ -51,6 +54,12 @@ constexpr std::size_t kImportedSceneVertexFloatsV19 = 11;
 // The pre-v20 ImportedScenePackedVertex: position[3], normal[3], color[3],
 // uv[2], then textureIndex and flags as two more 4-byte words.
 constexpr std::size_t kImportedScenePackedVertexWordsV19 = 13;
+// The v20 layouts, before the fourth layer slot: ImportedSceneVertex was 11
+// floats plus 3 layer indices plus 3 weights; ImportedScenePackedVertex was the
+// v19 13 words plus 3 indices and one packed weight word.
+constexpr std::size_t kImportedSceneVertexFloatsV20 = 17;
+constexpr std::size_t kImportedScenePackedVertexWordsV20 = 17;
+constexpr int kImportedSceneMaxTerrainLayersV20 = 3;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
     static_cast<std::uint8_t>(TextureFormat::BC2);
 
@@ -62,10 +71,12 @@ static_assert(sizeof(ImportedScenePageRange) == 36u);
 // widens the struct to go and add the next legacy branch, rather than shipping
 // a reader that quietly mis-strides. Was 52 through v19; v20 added three layer
 // texture indices and a packed weight word.
-static_assert(sizeof(ImportedScenePackedVertex) == 68u);
+static_assert(sizeof(ImportedScenePackedVertex) == 72u);
 // The pre-v20 width readPackedVertexArray expands from must stay in step with
 // the layout it decodes field by field.
 static_assert(kImportedScenePackedVertexWordsV19 * sizeof(std::uint32_t) == 52u);
+static_assert(kImportedScenePackedVertexWordsV20 * sizeof(std::uint32_t) == 68u);
+static_assert(kImportedSceneVertexFloatsV20 * sizeof(float) == 68u);
 
 // Materials are NOT raw-blitted -- ImportedSceneMaterial holds a std::string --
 // so they are written field by field. Both loaders must stay in step with this.
@@ -388,8 +399,11 @@ bool readString(std::istream& input, std::string& out) {
 // after the array, so all three sites go through here.
 
 std::size_t legacyMeshVertexStride(std::uint32_t version) {
-    if (version >= 20u) {
+    if (version >= 21u) {
         return sizeof(ImportedSceneVertex);
+    }
+    if (version >= 20u) {
+        return kImportedSceneVertexFloatsV20 * sizeof(float);
     }
     if (version >= 19u) {
         return kImportedSceneVertexFloatsV19 * sizeof(float);
@@ -398,8 +412,11 @@ std::size_t legacyMeshVertexStride(std::uint32_t version) {
 }
 
 std::size_t legacyPackedVertexStride(std::uint32_t version) {
-    if (version >= 20u) {
+    if (version >= 21u) {
         return sizeof(ImportedScenePackedVertex);
+    }
+    if (version >= 20u) {
+        return kImportedScenePackedVertexWordsV20 * sizeof(std::uint32_t);
     }
     return kImportedScenePackedVertexWordsV19 * sizeof(std::uint32_t);
 }
@@ -412,7 +429,7 @@ bool readMeshVertexArray(
     if (out.empty()) {
         return true;
     }
-    if (version >= 20u) {
+    if (version >= 21u) {
         return readExact(input, out.data(), out.size() * sizeof(ImportedSceneVertex));
     }
     const std::size_t floatsPerVertex = legacyMeshVertexStride(version) / sizeof(float);
@@ -436,9 +453,16 @@ bool readMeshVertexArray(
             dst.color[1] = src[9];
             dst.color[2] = src[10];
         }
-        // Layer slots keep the constructor's "no layer" defaults; no pre-v20
-        // vertex carries kImportedSceneMaterialFlagTerrainLayers, so nothing
-        // reads them.
+        if (floatsPerVertex >= kImportedSceneVertexFloatsV20) {
+            // v20 stored 3 layer indices (as uint32 bit patterns in the float
+            // array) followed by 3 weights. Pre-v20 has none, and those keep the
+            // constructor's "no layer" defaults -- no such vertex carries
+            // kImportedSceneMaterialFlagTerrainLayers, so nothing reads them.
+            for (int layer = 0; layer < kImportedSceneMaxTerrainLayersV20; ++layer) {
+                std::memcpy(&dst.layerTextureIndex[layer], &src[11 + layer], sizeof(std::uint32_t));
+                dst.layerWeight[layer] = src[14 + layer];
+            }
+        }
     }
     return true;
 }
@@ -451,16 +475,17 @@ bool readPackedVertexArray(
     if (out.empty()) {
         return true;
     }
-    if (version >= 20u) {
+    if (version >= 21u) {
         return readExact(input, out.data(), out.size() * sizeof(ImportedScenePackedVertex));
     }
-    // 11 floats then 2 uints; read as words and reinterpret the float half.
-    std::vector<std::uint32_t> legacy(out.size() * kImportedScenePackedVertexWordsV19);
+    const std::size_t wordsPerVertex = legacyPackedVertexStride(version) / sizeof(std::uint32_t);
+    // 11 floats then 2 uints, plus (v20) 3 layer indices and a weight word.
+    std::vector<std::uint32_t> legacy(out.size() * wordsPerVertex);
     if (!readExact(input, legacy.data(), legacy.size() * sizeof(std::uint32_t))) {
         return false;
     }
     for (std::size_t i = 0; i < out.size(); ++i) {
-        const std::uint32_t* src = legacy.data() + (i * kImportedScenePackedVertexWordsV19);
+        const std::uint32_t* src = legacy.data() + (i * wordsPerVertex);
         float floats[11];
         std::memcpy(floats, src, sizeof(floats));
         ImportedScenePackedVertex& dst = out[i];
@@ -477,6 +502,12 @@ bool readPackedVertexArray(
         dst.uv[1] = floats[10];
         dst.textureIndex = src[11];
         dst.flags = src[12];
+        if (wordsPerVertex >= kImportedScenePackedVertexWordsV20) {
+            for (int layer = 0; layer < kImportedSceneMaxTerrainLayersV20; ++layer) {
+                dst.layerTextureIndex[layer] = src[13 + layer];
+            }
+            dst.layerWeights = src[16];
+        }
     }
     return true;
 }
@@ -698,7 +729,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                         // whose cooker never filled these reads exactly as
                         // before.
                         bool hasTerrainLayer = false;
-                        float layerWeights[3] = {};
+                        float layerWeights[kImportedSceneMaxTerrainLayers] = {};
                         for (int layer = 0; layer < kImportedSceneMaxTerrainLayers; ++layer) {
                             dstVertex.layerTextureIndex[layer] = srcVertex.layerTextureIndex[layer];
                             layerWeights[layer] = srcVertex.layerWeight[layer];

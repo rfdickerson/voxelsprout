@@ -798,8 +798,8 @@ private:
         // scene texture indices -- uploadImportedScene remaps them the same way
         // it remaps textureIndex. Live only when the vertex carries
         // kImportedSceneMaterialFlagTerrainLayers.
-        std::uint32_t layerTextureIndex[3] = {
-            0xffffffffu, 0xffffffffu, 0xffffffffu};
+        std::uint32_t layerTextureIndex[4] = {
+            0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
         std::uint32_t layerWeights = 0u;
     };
 

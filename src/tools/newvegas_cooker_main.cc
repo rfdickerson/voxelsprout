@@ -996,7 +996,13 @@ int main(int argc, char** argv) {
                 const std::string modelBaseName = lastSlash == std::string::npos
                     ? lowerModelPath
                     : lowerModelPath.substr(lastSlash + 1u);
-                if (modelBaseName.rfind("marker_", 0) == 0 ||
+                // "marker" with no underscore required: FNV ships both
+                // marker_radiation.nif and markerxheading.nif. The root-level
+                // check keeps the rule tight -- editor markers live at the top of
+                // meshes\, so a model in a content directory whose name happens to
+                // start with those six letters is not caught.
+                const bool isRootLevelModel = lastSlash == std::string::npos;
+                if ((isRootLevelModel && modelBaseName.rfind("marker", 0) == 0) ||
                     lowerModelPath.find("\\markers\\") != std::string::npos) {
                     ++editorMarkerModelsSkipped;
                     failedStatics.insert(ref.baseFormId);

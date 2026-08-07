@@ -118,8 +118,8 @@ struct FragmentInput
     float2 inUv : TEXCOORD3;
     nointerpolation uint inTextureIndex : TEXCOORD4;
     nointerpolation uint inFlags : TEXCOORD5;
-    nointerpolation uint3 inLayerTextures : TEXCOORD6;
-    float3 inLayerWeights : TEXCOORD7;
+    nointerpolation uint4 inLayerTextures : TEXCOORD6;
+    float4 inLayerWeights : TEXCOORD7;
 };
 
 // Screen-space AO is baked at half resolution (see ao.ssaoBlur in swapchain_targets.cc);
@@ -162,7 +162,7 @@ float4 sampleImportedAlbedo(FragmentInput input)
     // that they are each half strength.
     if ((input.inFlags & kImportedMaterialFlagTerrainLayers) != 0u)
     {
-        for (uint layer = 0u; layer < 3u; ++layer)
+        for (uint layer = 0u; layer < 4u; ++layer)
         {
             const uint layerTexture = input.inLayerTextures[layer];
             const float layerWeight = saturate(input.inLayerWeights[layer]);

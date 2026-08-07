@@ -345,6 +345,42 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
     return 1;
 }
 
+// Interior cell EditorIDs, which is what odai_newvegas_cooker --cell takes.
+// Without this the flag was unusable: the only way to learn a valid ID was
+// FNVEdit or the GECK, even though the extractor already parses every one of
+// them. An optional substring filters the list, since a retail plugin has
+// hundreds.
+int listCells(const std::filesystem::path& esmPath, const std::string& filter) {
+    odai::importer::fnv::FalloutSceneData scene;
+    std::string error;
+    odai::importer::fnv::FalloutExtractFilter extractFilter{};
+    if (!odai::importer::fnv::extractFalloutScene(esmPath, extractFilter, scene, error)) {
+        std::cout << "Extract FAILED: " << error << "\n";
+        return 1;
+    }
+    const std::string loweredFilter = toLowerAscii(filter);
+    std::size_t interiorCount = 0;
+    std::size_t shown = 0;
+    for (const auto& cell : scene.cells) {
+        if (!cell.isInterior || cell.editorId.empty()) {
+            continue;
+        }
+        ++interiorCount;
+        if (!loweredFilter.empty() &&
+            toLowerAscii(cell.editorId).find(loweredFilter) == std::string::npos) {
+            continue;
+        }
+        std::cout << "  " << cell.editorId << "  (" << cell.references.size() << " refs)\n";
+        ++shown;
+    }
+    std::cout << "Interior cells with an EditorID: " << interiorCount;
+    if (!loweredFilter.empty()) {
+        std::cout << ", " << shown << " matching \"" << filter << "\"";
+    }
+    std::cout << "\n";
+    return 0;
+}
+
 int probePlugin(const std::filesystem::path& pluginPath) {
     odai::importer::fnv::EsmReader reader;
     if (!reader.open(pluginPath)) {
@@ -765,6 +801,7 @@ void printUsage() {
               << "  odai_newvegas_probe <DataFilesPath> --nif <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --nifblocks <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --plugin <Plugin.esm>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --cells <Plugin.esm> [filter]\n"
               << "  odai_newvegas_probe <DataFilesPath> --rotations <Plugin.esm> <CellEditorID>\n"
               << "  odai_newvegas_probe <anyDir> --scene <cooked.bin>\n";
 }
@@ -799,6 +836,9 @@ int main(int argc, char** argv) {
     }
     if (mode == "--plugin" && argc >= 4) {
         return probePlugin(dataPath / argv[3]);
+    }
+    if (mode == "--cells" && argc >= 4) {
+        return listCells(dataPath / argv[3], argc >= 5 ? argv[4] : "");
     }
     if (mode == "--scene" && argc >= 4) {
         return probeScene(argv[3]);

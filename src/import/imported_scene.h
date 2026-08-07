@@ -35,12 +35,16 @@ struct ImportedSceneVertex {
     // Per-vertex rather than a splat texture because it is lossless: VTXT
     // defines opacity per landscape post and the cooked terrain mesh keeps one
     // vertex per post, so the resolutions already match exactly.
-    std::uint32_t layerTextureIndex[3] = {
-        0xffffffffu, 0xffffffffu, 0xffffffffu};
-    float layerWeight[3] = {};
+    std::uint32_t layerTextureIndex[4] = {
+        0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
+    float layerWeight[4] = {};
 };
 
-inline constexpr int kImportedSceneMaxTerrainLayers = 3;
+// Four rather than three: at three, a 169-cell Mojave cook dropped 535 layer
+// contributions on quadrants declaring more layers than a vertex could hold.
+// Each extra slot costs 8 bytes per packed vertex (one index plus one weight
+// byte), which is the whole reason this is a fixed budget and not a list.
+inline constexpr int kImportedSceneMaxTerrainLayers = 4;
 inline constexpr std::uint32_t kImportedSceneNoTerrainLayer = 0xffffffffu;
 
 struct ImportedSceneMeshPart {
@@ -103,16 +107,17 @@ struct ImportedScenePackedVertex {
     // (kBindlessTargetTextureCapacity is 1024 on top of the static entries).
     // Weights are quantized to 8 bits, which is well past what landscape alpha
     // needs and keeps this to one extra word.
-    std::uint32_t layerTextureIndex[3] = {
-        0xffffffffu, 0xffffffffu, 0xffffffffu};
-    std::uint32_t layerWeights = 0u;  // 3x 8-bit, layer 0 in the low byte
+    std::uint32_t layerTextureIndex[4] = {
+        0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
+    std::uint32_t layerWeights = 0u;  // 4x 8-bit, layer 0 in the low byte
 };
 
 // Quantization for ImportedScenePackedVertex::layerWeights. Byte n holds layer
-// n's weight over [0,1]; mirrored in imported_static.frag.slang.
-inline constexpr std::uint32_t packImportedSceneTerrainLayerWeights(const float weights[3]) {
+// n's weight over [0,1] -- four layers exactly fills the word; mirrored in
+// imported_static.frag.slang.
+inline constexpr std::uint32_t packImportedSceneTerrainLayerWeights(const float weights[4]) {
     std::uint32_t packed = 0u;
-    for (int layer = 0; layer < 3; ++layer) {
+    for (int layer = 0; layer < kImportedSceneMaxTerrainLayers; ++layer) {
         const float clamped = weights[layer] < 0.0f ? 0.0f : (weights[layer] > 1.0f ? 1.0f : weights[layer]);
         const std::uint32_t quantized = static_cast<std::uint32_t>((clamped * 255.0f) + 0.5f);
         packed |= (quantized & 0xffu) << (layer * 8);
