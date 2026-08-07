@@ -297,6 +297,12 @@ public:
     // the tessellated hex-terrain pipeline. The UI/skybox/tonemap/present path is
     // untouched. Must be set BEFORE init(); persists across swapchain recreation.
     void setMinimalRenderMode(bool enabled) { m_minimalRenderMode = enabled; }
+    // MSAA sample count. Must be set BEFORE init(): it sizes the HDR/depth
+    // attachments and is baked into every graphics pipeline. Clamped to what
+    // the device supports at init. 4x was hardcoded, which is a lot of shading
+    // to spend on an integrated GPU at a large window size -- 1x is a straight
+    // ~2x cut to main-pass cost.
+    void setRequestedMsaaSamples(uint32_t samples) { m_requestedMsaaSamples = samples; }
     // Writes the last presented swapchain image to a binary PPM. Diagnostic
     // only, and one-shot: everything it allocates is torn down before it
     // returns. See frame_capture.cc for why this exists rather than relying on
@@ -424,7 +430,7 @@ private:
     // the kShadowAtlasRects / kShadowCascadeResolution layout there. This copy is
     // the one the atlas image allocation uses; that one normalizes the sampling
     // UV rects. See the comment beside them before changing either.
-    static constexpr uint32_t kShadowAtlasSize = 4096;
+    static constexpr uint32_t kShadowAtlasSize = 8192;
     static constexpr int kRtActiveChunkRadius = 1;
     static constexpr int kRtRetainedChunkRadius = 2;
     static constexpr std::size_t kChunkRemeshBudgetPerFrame = 6;
@@ -939,6 +945,13 @@ private:
     };
 
     struct PrepassInputs {
+        // False when nothing this frame will read the normal-depth buffer, in
+        // which case the pass still runs (so its attachments keep their expected
+        // layout) but draws nothing. The buffer feeds exactly three consumers --
+        // SSAO, sun shafts and imported water refraction -- and a scene with all
+        // three off was re-rendering its entire geometry every frame for a
+        // texture nothing sampled.
+        bool normalDepthNeeded = true;
         const FrameChunkDrawData* frameChunkDrawData = nullptr;
         const std::optional<FrameArenaSlice>* chunkInstanceSliceOpt = nullptr;
         VkBuffer chunkInstanceBuffer = VK_NULL_HANDLE;
@@ -1282,6 +1295,7 @@ private:
     // while presentation may still be waiting on it.
     std::vector<VkSemaphore> m_renderFinishedSemaphores;
     VkSampleCountFlagBits m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
+    uint32_t m_requestedMsaaSamples = 4u;
     VkFormat m_hdrColorFormat = VK_FORMAT_UNDEFINED;
 
     // Pipeline and descriptor lifetimes are owned by focused managers.

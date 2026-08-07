@@ -148,6 +148,10 @@ bool Renderer::isSunShaftsEnabled() const {
     return m_backend->isSunShaftsEnabled();
 }
 
+void Renderer::setMsaaSamples(std::uint32_t samples) {
+    m_backend->setRequestedMsaaSamples(samples);
+}
+
 void Renderer::setMinimalRenderMode(bool enabled) {
     m_backend->setMinimalRenderMode(enabled);
 }

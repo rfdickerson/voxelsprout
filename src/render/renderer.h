@@ -119,6 +119,11 @@ public:
     // 3D scene pipelines (pipe/imported/sky-cloud/water/grass, SSAO, hex terrain)
     // those tools cannot use. Must be called BEFORE init(); off by default.
     void setMinimalRenderMode(bool enabled);
+    // MSAA sample count (1, 2, 4, 8), clamped to device support. Must be called
+    // BEFORE init(): it sizes the render targets and is baked into every
+    // pipeline. 4 is the default. On a fill-rate-bound device this is the
+    // cheapest large reduction in main-pass cost available.
+    void setMsaaSamples(std::uint32_t samples);
     // Writes the last presented frame to a binary PPM (convert with e.g.
     // `ffmpeg -i shot.ppm shot.png`). Diagnostic, not a feature: it stalls the
     // device, so call it once rather than per frame. false if nothing has been

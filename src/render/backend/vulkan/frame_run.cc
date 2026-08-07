@@ -2256,6 +2256,14 @@ void RendererBackend::renderFrame(
     prepassInputs.transportInstanceSliceOpt = &transportInstanceSliceOpt;
     prepassInputs.beltCargoInstanceCount = beltCargoInstanceCount;
     prepassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
+    // Exactly the three consumers of the normal-depth buffer. Sun shafts and
+    // water are checked against what will actually run, not what is merely
+    // compiled in, so a scene with AO off, shafts off and no water skips a full
+    // re-render of its geometry every frame.
+    prepassInputs.normalDepthNeeded =
+        m_debugEnableSsao ||
+        (m_sunShaftsRequested && m_sunShaftComputeAvailable) ||
+        m_importedWaterIndexCount > 0u;
     recordNormalDepthPrepass(frameExecutionContext, prepassInputs);
 
     if (m_debugEnableSsao) {

@@ -846,7 +846,22 @@ bool RendererBackend::pickPhysicalDevice() {
         m_ssaoFormat = selected.ssaoFormat;
         m_desktopCapabilityProbe = selected.capabilityProbe;
         m_rayTracingCapabilityProbe = selected.rayTracingProbe;
-        m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
+        // Requested count, clamped to the device's colour+depth intersection.
+        // Never silently upgrades: an app asking for 1x gets 1x.
+        {
+            const VkSampleCountFlags supported =
+                selected.properties.limits.framebufferColorSampleCounts &
+                selected.properties.limits.framebufferDepthSampleCounts;
+            const uint32_t requested = m_requestedMsaaSamples;
+            VkSampleCountFlagBits chosen = VK_SAMPLE_COUNT_1_BIT;
+            for (const auto candidate : {VK_SAMPLE_COUNT_8_BIT, VK_SAMPLE_COUNT_4_BIT, VK_SAMPLE_COUNT_2_BIT}) {
+                if (static_cast<uint32_t>(candidate) <= requested && (supported & candidate) != 0u) {
+                    chosen = candidate;
+                    break;
+                }
+            }
+            m_colorSampleCount = chosen;
+        }
 
         VOX_LOGI("render") << "selected GPU: " << selected.properties.deviceName
                            << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex

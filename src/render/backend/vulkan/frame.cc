@@ -2,6 +2,8 @@
 
 #include "core/log.h"
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -319,6 +321,27 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuMainTimeMs = durationMs(kGpuTimestampQueryMainStart, kGpuTimestampQueryMainEnd);
     m_debugGpuPostTimeMs = durationMs(kGpuTimestampQueryPostStart, kGpuTimestampQueryPostEnd);
     m_debugGpuUiTimeMs = durationMs(kGpuTimestampQueryUiStart, kGpuTimestampQueryUiEnd);
+    // Per-pass GPU breakdown. Everything above was already measured and then
+    // kept private, so "why is the frame 17 ms" could only be answered by
+    // disabling passes one at a time and re-measuring. ODAI_GPU_TIMINGS prints
+    // it directly.
+    if (std::getenv("ODAI_GPU_TIMINGS") != nullptr) {
+        static std::uint64_t s_timingLogFrame = 0;
+        if ((s_timingLogFrame++ % 60u) == 0u) {
+            VOX_LOGI("render")
+                << "GPU ms: frame=" << m_debugGpuFrameTimeMs
+                << " shadow=" << m_debugGpuShadowTimeMs
+                << " prepass=" << m_debugGpuPrepassTimeMs
+                << " ssao=" << m_debugGpuSsaoTimeMs
+                << " ssaoBlur=" << m_debugGpuSsaoBlurTimeMs
+                << " main=" << m_debugGpuMainTimeMs
+                << " post=" << m_debugGpuPostTimeMs
+                << " ui=" << m_debugGpuUiTimeMs
+                << " autoExposure=" << m_debugGpuAutoExposureTimeMs
+                << " sunShaft=" << m_debugGpuSunShaftTimeMs
+                << " giOccupancy=" << m_debugGpuGiOccupancyTimeMs;
+        }
+    }
     m_debugGpuFrameTimingMsHistory.push(m_debugGpuFrameTimeMs);
     updateFrameTimingPercentiles();
     m_gpuTimestampQuerySubmitted[frameIndex] = false;

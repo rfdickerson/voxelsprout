@@ -107,6 +107,15 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &aoScissor);
 
+    // Begin/clear/end even when nothing needs the result: the attachments must
+    // still end the frame in the layout the descriptor set was written for, and
+    // clearing is a fraction of the cost of re-rendering the scene.
+    if (!inputs.normalDepthNeeded) {
+        vkCmdEndRendering(commandBuffer);
+        writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);
+        return;
+    }
+
     // Voxel chunks (VoxelCraft). This is what gives ambient occlusion something to
     // occlude against in a voxel world — without it the AO input buffer holds only
     // imported statics and skinned actors, and every AO mode reads flat where the

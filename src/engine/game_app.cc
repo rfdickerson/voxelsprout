@@ -102,6 +102,20 @@ bool GameApp::init(const char* title) {
     if (wantsMinimalRendering()) {
         m_renderer.setMinimalRenderMode(true);
     }
+    // MSAA before init: the sample count sizes the render targets and is baked
+    // into every pipeline, so it cannot be changed afterwards. ODAI_MSAA lets a
+    // fill-rate-bound machine trade edge quality for frame time without a
+    // rebuild -- on an integrated GPU at a large window this is the single
+    // largest lever on main-pass cost.
+    if (const char* msaaEnv = std::getenv("ODAI_MSAA")) {
+        const int samples = std::atoi(msaaEnv);
+        if (samples == 1 || samples == 2 || samples == 4 || samples == 8) {
+            m_renderer.setMsaaSamples(static_cast<std::uint32_t>(samples));
+            VOX_LOGI("engine") << "ODAI_MSAA: requesting " << samples << "x MSAA";
+        } else {
+            VOX_LOGW("engine") << "ignoring ODAI_MSAA=\"" << msaaEnv << "\" (expected 1, 2, 4 or 8)";
+        }
+    }
     if (!m_renderer.init(m_window, m_emptyGrid)) {
         VOX_LOGE("engine") << "renderer init failed";
         glfwDestroyWindow(m_window);
