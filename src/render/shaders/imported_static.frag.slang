@@ -138,6 +138,52 @@ float sampleSsaoAmbientFactor(float4 screenPosition)
     return lerp(1.0, pow(max(ssaoRaw, 0.001), ssaoIntensity), ssaoEnable);
 }
 
+// Aerial perspective: distance haze, so a landscape reads as deep instead of
+// flat.
+//
+// Not a fog constant. Extinction is wavelength-dependent (blue survives least,
+// so distant terrain shifts toward the sky) and the inscattered light warms
+// toward the sun, which is what makes a hill lit from behind glow at its edge.
+// Both fall straight out of the same sun colour and sky strengths the skybox
+// shades with, so the horizon and the terrain in front of it agree instead of
+// meeting at a visible seam.
+//
+// Exterior only: an interior has no kilometres of air between the surface and
+// the eye, and applying it there washes rooms out at their far wall.
+float3 applyAerialPerspective(float3 shaded, float3 worldPosition, float3 viewDirection)
+{
+    // Distance at which roughly 1/e of the surface's own colour survives. ~15000
+    // Bethesda units is a little over 200 m: far enough that near geometry is
+    // untouched, close enough that the far ridges of a cooked region sit back.
+    const float kAerialEFoldDistance = 15000.0;
+    const float3 cameraPosition = camera.shadowVoxelGridSize.xyz;
+    const float viewDistance = length(worldPosition - cameraPosition);
+    const float3 toSun = -normalize(camera.sunDirectionIntensity.xyz);
+
+    // Blue extinguishes least, so it dominates what comes back from the air.
+    const float3 extinctionPerUnit =
+        float3(1.35, 1.12, 0.85) / kAerialEFoldDistance;
+    const float3 transmittance = exp(-viewDistance * extinctionPerUnit);
+
+    // Forward scattering: looking toward the sun through air brightens and warms
+    // it. pow(,6) keeps the effect close to the sun rather than tinting the
+    // whole sky.
+    const float sunAlignment = saturate(dot(viewDirection, toSun));
+    const float3 skyInscatter = float3(0.40, 0.56, 0.82);
+    const float3 sunInscatter = float3(1.00, 0.86, 0.66);
+    const float3 inscatterColor =
+        lerp(skyInscatter, sunInscatter, pow(sunAlignment, 6.0) * 0.85);
+
+    // Scaled by the sun's own colour and the sky's rayleigh strength so dusk
+    // haze goes warm and night haze goes dark, instead of staying daylight blue.
+    const float skyStrength = max(camera.skyConfig0.x, 0.01);
+    const float sunLuminance = dot(camera.sunColorShadow.xyz, float3(0.30, 0.59, 0.11));
+    const float3 inscatter =
+        inscatterColor * (skyStrength * 0.42) * max(sunLuminance, 0.03);
+
+    return (shaded * transmittance) + (inscatter * (float3(1.0, 1.0, 1.0) - transmittance));
+}
+
 float4 sampleImportedAlbedo(FragmentInput input)
 {
     const bool disableTextures = chunkPc.cascadeData.z > 0.5;
@@ -789,6 +835,11 @@ float4 main(FragmentInput input) : SV_Target0
     float3 shaded =
         ((diffuseLight * albedo * pbrDiffuseScale(surface.metallic)) + specular +
          (float3(1.0, 0.98, 0.94) * (rim * rimWeight)) + materialEmissive);
+
+    if (!interiorMode)
+    {
+        shaded = applyAerialPerspective(shaded, input.inWorldPosition, -viewDir);
+    }
 
     // Fog-of-war visibility blend. Only applied when the fog map is active
     // (strategy map mode). The fog texture is a blurred per-tile R8 map where

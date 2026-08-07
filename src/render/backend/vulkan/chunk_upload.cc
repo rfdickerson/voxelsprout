@@ -450,6 +450,14 @@ void RendererBackend::clearGpuScene() {
         }
         m_fogMapEnabled = false;
     }
+    if (m_importedShadowVertexBufferHandle != kInvalidBufferHandle) {
+        if (m_lastGraphicsTimelineValue == 0) {
+            m_bufferAllocator.destroyBuffer(m_importedShadowVertexBufferHandle);
+        } else {
+            scheduleBufferRelease(m_importedShadowVertexBufferHandle, m_lastGraphicsTimelineValue);
+        }
+        m_importedShadowVertexBufferHandle = kInvalidBufferHandle;
+    }
     if (m_importedVertexBufferHandle != kInvalidBufferHandle) {
         if (m_lastGraphicsTimelineValue == 0) {
             m_bufferAllocator.destroyBuffer(m_importedVertexBufferHandle);
@@ -1481,6 +1489,32 @@ bool RendererBackend::uploadImportedSceneInternal(
         return false;
     }
 
+    // Compact shadow stream: the same vertices with only what the cascades read.
+    std::vector<ImportedShadowVertex> shadowVertices;
+    shadowVertices.reserve(vertices.size());
+    for (const ImportedMeshVertex& vertex : vertices) {
+        ImportedShadowVertex shadowVertex{};
+        shadowVertex.position[0] = vertex.position[0];
+        shadowVertex.position[1] = vertex.position[1];
+        shadowVertex.position[2] = vertex.position[2];
+        shadowVertex.uv[0] = vertex.uv[0];
+        shadowVertex.uv[1] = vertex.uv[1];
+        shadowVertex.textureIndex = vertex.textureIndex;
+        shadowVertex.flags = vertex.flags;
+        shadowVertices.push_back(shadowVertex);
+    }
+    BufferHandle newShadowVertexHandle = kInvalidBufferHandle;
+    if (!shadowVertices.empty() &&
+        !uploadDeviceLocalBuffer(
+            shadowVertices.data(),
+            static_cast<VkDeviceSize>(shadowVertices.size() * sizeof(ImportedShadowVertex)),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            "imported scene shadow vertex",
+            newShadowVertexHandle)) {
+        m_bufferAllocator.destroyBuffer(newVertexHandle);
+        return false;
+    }
+
     BufferHandle newIndexHandle = kInvalidBufferHandle;
     if (!uploadDeviceLocalBuffer(
             indices.data(),
@@ -1489,10 +1523,14 @@ bool RendererBackend::uploadImportedSceneInternal(
             "imported scene index",
             newIndexHandle)) {
         m_bufferAllocator.destroyBuffer(newVertexHandle);
+        if (newShadowVertexHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(newShadowVertexHandle);
+        }
         return false;
     }
 
     m_importedVertexBufferHandle = newVertexHandle;
+    m_importedShadowVertexBufferHandle = newShadowVertexHandle;
     m_importedIndexBufferHandle = newIndexHandle;
     m_importedIndexCount = static_cast<std::uint32_t>(indices.size());
     m_importedTerrainDrawCount = std::min<std::uint32_t>(mergedTerrainDrawCount, static_cast<std::uint32_t>(draws.size()));

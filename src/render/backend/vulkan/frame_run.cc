@@ -1941,6 +1941,10 @@ void RendererBackend::renderFrame(
     shadowPassInputs.canDrawMagica = canDrawMagica;
     shadowPassInputs.readyMagicaDraws = readyMagicaDraws;
     shadowPassInputs.importedVertexBuffer = importedVertexBuffer;
+    shadowPassInputs.importedShadowVertexBuffer =
+        m_importedShadowVertexBufferHandle != kInvalidBufferHandle
+            ? m_bufferAllocator.getBuffer(m_importedShadowVertexBufferHandle)
+            : VK_NULL_HANDLE;
     shadowPassInputs.importedIndexBuffer = importedIndexBuffer;
     shadowPassInputs.importedMeshDraws = m_importedMeshDraws;
     shadowPassInputs.importedTerrainDrawCount = m_importedTerrainDrawCount;

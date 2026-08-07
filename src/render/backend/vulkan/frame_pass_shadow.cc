@@ -195,9 +195,22 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     -(constantBias * kImportedShadowConstantBiasScale),
                     0.0f,
                     -(slopeBias * kImportedShadowSlopeBiasScale));
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
+                // Prefer the 28-byte stream. Same shaders and same draws; the
+                // cascades read position plus the alpha-test fields and nothing
+                // else, so the full 72-byte stride was wasting most of every
+                // cache line, four times per frame. Falls back to the full
+                // vertex if the compact pipeline or buffer is unavailable.
+                const bool useCompactShadowStream =
+                    m_importedStaticShadowCompactPipeline != VK_NULL_HANDLE &&
+                    inputs.importedShadowVertexBuffer != VK_NULL_HANDLE;
+                vkCmdBindPipeline(
+                    commandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    useCompactShadowStream ? m_importedStaticShadowCompactPipeline
+                                           : m_importedStaticShadowPipeline);
                 bindGraphicsDescriptorBuffers(commandBuffer);
-                const VkBuffer importedVertexBuffers[1] = {importedVertexBuffer};
+                const VkBuffer importedVertexBuffers[1] = {
+                    useCompactShadowStream ? inputs.importedShadowVertexBuffer : importedVertexBuffer};
                 const VkDeviceSize importedVertexOffsets[1] = {0};
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);

@@ -2315,37 +2315,62 @@ bool RendererBackend::createGraphicsPipeline() {
     importedShadowBindings[0].stride = sizeof(ImportedMeshVertex);
     importedShadowBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedShadowAttributes[6]{};
+    // Locations 1 and 2 (normal, colour) are gone: imported_static_shadow.vert
+    // no longer declares them, because this pass writes depth and alpha-tests
+    // and reads nothing else.
+    VkVertexInputAttributeDescription importedShadowAttributes[4]{};
     importedShadowAttributes[0].location = 0;
     importedShadowAttributes[0].binding = 0;
     importedShadowAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     importedShadowAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, position));
-    importedShadowAttributes[1].location = 1;
+    importedShadowAttributes[1].location = 3;
     importedShadowAttributes[1].binding = 0;
-    importedShadowAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, normal));
-    importedShadowAttributes[2].location = 2;
+    importedShadowAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+    importedShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, uv));
+    importedShadowAttributes[2].location = 4;
     importedShadowAttributes[2].binding = 0;
-    importedShadowAttributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, color));
-    importedShadowAttributes[3].location = 3;
+    importedShadowAttributes[2].format = VK_FORMAT_R32_UINT;
+    importedShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, textureIndex));
+    importedShadowAttributes[3].location = 5;
     importedShadowAttributes[3].binding = 0;
-    importedShadowAttributes[3].format = VK_FORMAT_R32G32_SFLOAT;
-    importedShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, uv));
-    importedShadowAttributes[4].location = 4;
-    importedShadowAttributes[4].binding = 0;
-    importedShadowAttributes[4].format = VK_FORMAT_R32_UINT;
-    importedShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, textureIndex));
-    importedShadowAttributes[5].location = 5;
-    importedShadowAttributes[5].binding = 0;
-    importedShadowAttributes[5].format = VK_FORMAT_R32_UINT;
-    importedShadowAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+    importedShadowAttributes[3].format = VK_FORMAT_R32_UINT;
+    importedShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+
+    // Identical attributes against the 28-byte stream. Same shaders, same
+    // locations; only the stride and offsets differ.
+    VkVertexInputBindingDescription importedShadowCompactBindings[1]{};
+    importedShadowCompactBindings[0].binding = 0;
+    importedShadowCompactBindings[0].stride = sizeof(ImportedShadowVertex);
+    importedShadowCompactBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription importedShadowCompactAttributes[4]{};
+    importedShadowCompactAttributes[0].location = 0;
+    importedShadowCompactAttributes[0].binding = 0;
+    importedShadowCompactAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedShadowCompactAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedShadowVertex, position));
+    importedShadowCompactAttributes[1].location = 3;
+    importedShadowCompactAttributes[1].binding = 0;
+    importedShadowCompactAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+    importedShadowCompactAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedShadowVertex, uv));
+    importedShadowCompactAttributes[2].location = 4;
+    importedShadowCompactAttributes[2].binding = 0;
+    importedShadowCompactAttributes[2].format = VK_FORMAT_R32_UINT;
+    importedShadowCompactAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedShadowVertex, textureIndex));
+    importedShadowCompactAttributes[3].location = 5;
+    importedShadowCompactAttributes[3].binding = 0;
+    importedShadowCompactAttributes[3].format = VK_FORMAT_R32_UINT;
+    importedShadowCompactAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedShadowVertex, flags));
+    VkPipelineVertexInputStateCreateInfo importedShadowCompactVertexInputInfo{};
+    importedShadowCompactVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    importedShadowCompactVertexInputInfo.vertexBindingDescriptionCount = 1;
+    importedShadowCompactVertexInputInfo.pVertexBindingDescriptions = importedShadowCompactBindings;
+    importedShadowCompactVertexInputInfo.vertexAttributeDescriptionCount = 4;
+    importedShadowCompactVertexInputInfo.pVertexAttributeDescriptions = importedShadowCompactAttributes;
 
     VkPipelineVertexInputStateCreateInfo importedShadowVertexInputInfo{};
     importedShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedShadowVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedShadowVertexInputInfo.pVertexBindingDescriptions = importedShadowBindings;
-    importedShadowVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedShadowVertexInputInfo.vertexAttributeDescriptionCount = 4;
     importedShadowVertexInputInfo.pVertexAttributeDescriptions = importedShadowAttributes;
 
     VkGraphicsPipelineCreateInfo importedShadowPipelineCreateInfo = shadowPipelineCreateInfo;
@@ -2362,6 +2387,27 @@ bool RendererBackend::createGraphicsPipeline() {
         nullptr,
         &importedStaticShadowPipeline
     );
+    VkGraphicsPipelineCreateInfo importedShadowCompactPipelineCreateInfo = importedShadowPipelineCreateInfo;
+    importedShadowCompactPipelineCreateInfo.pVertexInputState = &importedShadowCompactVertexInputInfo;
+    VkPipeline importedStaticShadowCompactPipeline = VK_NULL_HANDLE;
+    const VkResult importedShadowCompactResult = vkCreateGraphicsPipelines(
+        m_device,
+        m_pipelineCache,
+        1,
+        &importedShadowCompactPipelineCreateInfo,
+        nullptr,
+        &importedStaticShadowCompactPipeline
+    );
+    if (importedShadowCompactResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(importedStaticShadowCompact)", importedShadowCompactResult);
+        if (importedStaticShadowCompactPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticShadowCompactPipeline, nullptr);
+            importedStaticShadowCompactPipeline = VK_NULL_HANDLE;
+        }
+        // Not fatal: the shadow pass falls back to the full-stride pipeline.
+    }
+    m_importedStaticShadowCompactPipeline = importedStaticShadowCompactPipeline;
+
     destroyShaderModules(m_device, importedShadowShaderModules);
     if (importedShadowPipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);

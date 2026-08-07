@@ -28,6 +28,8 @@ public:
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipelineRt = VK_NULL_HANDLE;
     VkPipeline importedStaticShadowPipeline = VK_NULL_HANDLE;
+    // Same shaders, 28-byte compact vertex stream instead of the full vertex.
+    VkPipeline importedStaticShadowCompactPipeline = VK_NULL_HANDLE;
     // One pipeline per AO estimator (see ODAI_AO_MODE in ssao.comp.slang). All three
     // share the ssao pipeline layout and descriptor set -- only the shader differs.
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
@@ -101,6 +103,10 @@ public:
         if (pipeShadowPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, pipeShadowPipeline, nullptr);
             pipeShadowPipeline = VK_NULL_HANDLE;
+        }
+        if (importedStaticShadowCompactPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticShadowCompactPipeline, nullptr);
+            importedStaticShadowCompactPipeline = VK_NULL_HANDLE;
         }
         if (importedStaticShadowPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticShadowPipeline, nullptr);

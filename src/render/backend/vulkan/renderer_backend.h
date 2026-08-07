@@ -793,6 +793,27 @@ private:
         float extensions[4];
     };
 
+    // Compact vertex stream for the shadow cascades.
+    //
+    // The shadow pass reads position plus what alpha testing needs (uv, texture
+    // index, flags) -- 28 bytes -- but was fetching the full 72-byte
+    // ImportedMeshVertex stride, about 17% cache-line utilisation, four times
+    // per frame across the cascades. Measured at 5.0 ms doing nothing but depth.
+    //
+    // This DUPLICATES those fields rather than partitioning the vertex, which
+    // costs 28 bytes per vertex of extra storage (~92 MB on a 3.3M-vertex
+    // region). The alternative -- splitting ImportedMeshVertex into three
+    // streams that sum to 72 -- avoids the duplication but changes the vertex
+    // layout of the main pass, the normal-depth prepass and the skinned-actor
+    // path as well. That is the better end state; this is the part that pays for
+    // itself against a measurement.
+    struct ImportedShadowVertex {
+        float position[3];
+        float uv[2];
+        std::uint32_t textureIndex = 0xffffffffu;
+        std::uint32_t flags = 0u;
+    };
+
     struct ImportedMeshVertex {
         float position[3];
         float normal[3];
@@ -918,6 +939,8 @@ private:
         bool canDrawMagica = false;
         std::span<const ReadyMagicaDraw> readyMagicaDraws;
         VkBuffer importedVertexBuffer = VK_NULL_HANDLE;
+        // 28-byte compact stream; null falls back to importedVertexBuffer.
+        VkBuffer importedShadowVertexBuffer = VK_NULL_HANDLE;
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
         std::uint32_t importedTerrainDrawCount = 0;
@@ -1324,6 +1347,11 @@ private:
     VkPipeline& m_importedStaticNormalDepthPipeline = m_pipelineManager.importedStaticNormalDepthPipeline;
     VkPipeline& m_importedWaterNormalDepthPipeline = m_pipelineManager.importedWaterNormalDepthPipeline;
     VkPipeline& m_importedStaticShadowPipeline = m_pipelineManager.importedStaticShadowPipeline;
+    // Same shaders as above, differing only in vertex input: it reads the
+    // 28-byte shadow stream. The original stays for the skinned-actor shadow
+    // draws, which have no compact stream of their own.
+    VkPipeline& m_importedStaticShadowCompactPipeline =
+        m_pipelineManager.importedStaticShadowCompactPipeline;
     VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
     VkPipeline& m_magicaPipelineRt = m_pipelineManager.magicaPipelineRt;
     VkPipeline& m_ssaoPipeline = m_pipelineManager.ssaoPipeline;
@@ -1426,6 +1454,8 @@ private:
     BufferHandle m_transportVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_transportIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedVertexBufferHandle = kInvalidBufferHandle;
+    // 28-byte stream the shadow cascades bind instead of the full vertex.
+    BufferHandle m_importedShadowVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_hexBaseVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_hexBaseIndexBufferHandle = kInvalidBufferHandle;
