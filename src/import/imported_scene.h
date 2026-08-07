@@ -61,6 +61,27 @@ struct ImportedSceneMesh {
     std::vector<ImportedSceneMeshPart> parts;
 };
 
+// A teleport door: stand near it, look at it, and it takes you to another
+// cooked scene. Position is in this scene's space; arrival position/rotation
+// are in the TARGET scene's space, straight from Fallout's XTEL.
+//
+// The target is named by cell EditorID rather than by file path, so a scene
+// stays valid however the cooked .bin files are laid out on disk -- the loader
+// applies whatever naming convention the cooker used (see
+// importedSceneInteriorFileName).
+struct ImportedSceneDoor {
+    float position[3] = {};
+    float arrivalPosition[3] = {};
+    float arrivalYawDegrees = 0.0f;
+    std::string targetCellEditorId;
+};
+
+// Where a cooked interior lives relative to its exterior scene. One convention,
+// stated once, so the cooker that writes the files and the app that opens them
+// cannot drift: "<exterior stem>_<CellEditorID>.bin", beside the exterior.
+[[nodiscard]] std::string importedSceneInteriorFileName(
+    const std::string& exteriorStem, const std::string& cellEditorId);
+
 struct ImportedSceneInstance {
     std::uint32_t meshIndex = 0;
     float transform[16] = {};
@@ -304,6 +325,7 @@ struct ImportedScene {
     std::vector<ImportedSceneLandscapeCell> landscapeCells;
     std::vector<ImportedSceneWaterPatch> waterPatches;
     std::vector<ImportedSceneLight> lights;
+    std::vector<ImportedSceneDoor> doors;
     std::vector<ImportedSceneCellRef> unresolvedRefs;
     std::vector<ImportedScenePackedVertex> packedVertices;
     std::vector<std::uint32_t> packedIndices;

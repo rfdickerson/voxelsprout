@@ -126,6 +126,172 @@ bool NewVegasApp::groundHeightAt(float x, float z, float& outHeight) const {
     return true;
 }
 
+bool NewVegasApp::loadScene(
+    const std::filesystem::path& path, const float* arrivalPosition, const float* arrivalYawDegrees
+) {
+    // Local, not a member: uploadImportedScene deep-copies the whole scene, so
+    // keeping a second copy alive for the process lifetime costs ~100 MB of
+    // resident memory that nothing ever reads again.
+    //
+    // The full loader, NOT loadImportedSceneRuntime. The runtime one keeps only
+    // the packed stream: it skips the mesh block outright and reads instances
+    // just to discard them. Both are needed here and neither failure is visible
+    // -- the containers come back empty rather than erroring -- so with the
+    // runtime loader the ground height field is never built (camera stays in fly
+    // mode) and the town centroid finds nothing (spawn falls back to the middle
+    // of the map).
+    importer::ImportedScene scene;
+    if (!importer::loadImportedScene(path, scene)) {
+        VOX_LOGE("newvegas") << "failed to load scene '" << path.string()
+                             << "': " << importer::getImportedSceneLastError();
+        return false;
+    }
+    VOX_LOGI("newvegas") << "loaded " << path.string() << " (" << scene.packedVertices.size()
+                         << " vertices, " << scene.textures.size() << " textures, "
+                         << scene.doors.size() << " doors)";
+
+    if (!m_renderer.uploadImportedScene(scene)) {
+        VOX_LOGE("newvegas") << "failed to upload scene to the renderer";
+        return false;
+    }
+    const bool interior = importer::importedSceneSourceTagIsInterior(scene.sourceTag);
+    m_renderer.setImportedSceneInteriorMode(interior);
+    m_doors = scene.doors;
+
+    buildGroundHeightField(scene);
+
+    // Spawn standing in Goodsprings rather than hovering over the map.
+    //
+    // The previous spawn put the camera at boundsMax[1] — above the highest peak
+    // in the cooked region — pitched 35 degrees down. That framed the terrain but
+    // left no horizon on screen at all, which is why the sky appeared to be
+    // missing: the skybox draws with VK_COMPARE_OP_EQUAL against a reversed-Z
+    // depth buffer, so it fills exactly the pixels no geometry covered, and from
+    // up there geometry covered all of them.
+    //
+    // The anchor is the centroid of the town's own architecture rather than a
+    // hand-entered coordinate, so it stays right if the cooked grid moves. Note
+    // this lands you in the middle of Goodsprings by the houses, not on Doc
+    // Mitchell's doorstep specifically -- picking out that one building needs its
+    // formID from the GECK, which is not something the cooked scene records.
+    float spawnX = (scene.boundsMin[0] + scene.boundsMax[0]) * 0.5f;
+    float spawnZ = (scene.boundsMin[2] + scene.boundsMax[2]) * 0.5f;
+    double townX = 0.0;
+    double townZ = 0.0;
+    std::size_t townCount = 0;
+    for (const importer::ImportedSceneInstance& instance : scene.instances) {
+        std::string path = instance.modelPath;
+        std::transform(path.begin(), path.end(), path.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (path.find("goodsprings") == std::string::npos) {
+            continue;
+        }
+        // Row-major 4x4 with translation in the last COLUMN: the cooker's
+        // writeTransform puts it at 3/7/11, not the 12/13/14 a column-major
+        // layout would use. Reading 12/14 gets the bottom row, which is all
+        // zeroes here, so the centroid silently collapses to the origin.
+        townX += static_cast<double>(instance.transform[3]);
+        townZ += static_cast<double>(instance.transform[11]);
+        ++townCount;
+    }
+    if (townCount > 0) {
+        spawnX = static_cast<float>(townX / static_cast<double>(townCount));
+        spawnZ = static_cast<float>(townZ / static_cast<double>(townCount));
+        VOX_LOGI("newvegas") << "spawning at the centroid of " << townCount
+                             << " Goodsprings placements";
+    } else {
+        VOX_LOGW("newvegas") << "no Goodsprings placements in this scene; spawning at scene centre";
+    }
+    m_cameraX = spawnX;
+    m_cameraZ = spawnZ;
+    float groundHeight = 0.0f;
+    if (groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) {
+        m_cameraY = groundHeight + kEyeHeightUnits;
+    } else {
+        m_cameraY = scene.boundsMax[1] + kEyeHeightUnits;
+        VOX_LOGW("newvegas") << "spawn point is off the terrain grid; starting in fly mode";
+        m_walkMode = false;
+    }
+    // Level, so the horizon -- and therefore the sky -- is on screen. The
+    // override has to come after this, not before: the spawn pitch is assigned
+    // here, so an earlier override would be silently discarded.
+    m_pitchDegrees = 0.0f;
+    if (const char* pitchEnv = std::getenv("ODAI_FNV_PITCH")) {
+        m_pitchDegrees = static_cast<float>(std::atof(pitchEnv));
+    }
+
+
+    // An arrival transform from a door wins over the spawn heuristics above.
+    if (arrivalPosition != nullptr) {
+        m_cameraX = arrivalPosition[0];
+        m_cameraZ = arrivalPosition[2];
+        float groundHeight = 0.0f;
+        // Fallout's arrival Y is the floor the player stands on, so lift it to
+        // eye height. Prefer the terrain lattice where there is one -- an
+        // interior has no LAND, and there the authored height is all we have.
+        if (groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) {
+            m_cameraY = groundHeight + kEyeHeightUnits;
+        } else {
+            m_cameraY = arrivalPosition[1] + kEyeHeightUnits;
+            m_walkMode = false;
+        }
+        if (arrivalYawDegrees != nullptr) {
+            m_yawDegrees = *arrivalYawDegrees;
+        }
+        m_pitchDegrees = 0.0f;
+    }
+    return true;
+}
+
+int NewVegasApp::findUsableDoor() const {
+    // Near, and roughly in front. Both matter: a doorway you have walked past
+    // should not keep offering itself, and Fallout's doors come in pairs close
+    // enough that distance alone picks the wrong one.
+    constexpr float kMaxDoorDistance = 260.0f;   // ~3.7 m at Bethesda scale
+    constexpr float kMinFacingDot = 0.35f;
+    const float yawRadians = m_yawDegrees * (kPi / 180.0f);
+    const float forwardX = std::cos(yawRadians);
+    const float forwardZ = std::sin(yawRadians);
+    int best = -1;
+    float bestDistanceSquared = kMaxDoorDistance * kMaxDoorDistance;
+    for (std::size_t i = 0; i < m_doors.size(); ++i) {
+        const float dx = m_doors[i].position[0] - m_cameraX;
+        const float dz = m_doors[i].position[2] - m_cameraZ;
+        const float dy = m_doors[i].position[1] - m_cameraY;
+        const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
+        if (distanceSquared > bestDistanceSquared) {
+            continue;
+        }
+        const float horizontal = std::sqrt((dx * dx) + (dz * dz));
+        if (horizontal > 1e-3f && (((dx / horizontal) * forwardX) + ((dz / horizontal) * forwardZ)) < kMinFacingDot) {
+            continue;
+        }
+        best = static_cast<int>(i);
+        bestDistanceSquared = distanceSquared;
+    }
+    return best;
+}
+
+void NewVegasApp::useDoor(const importer::ImportedSceneDoor& door) {
+    // An empty target cell means the exterior this interior was cooked beside;
+    // both spellings go through importedSceneInteriorFileName so the cooker's
+    // naming convention lives in exactly one place.
+    const std::filesystem::path target = door.targetCellEditorId.empty()
+        ? (m_sceneDirectory / (m_exteriorStem + ".bin"))
+        : (m_sceneDirectory /
+           importer::importedSceneInteriorFileName(m_exteriorStem, door.targetCellEditorId));
+    if (!std::filesystem::exists(target)) {
+        VOX_LOGW("newvegas") << "door leads to " << target.filename().string()
+                             << ", which is not cooked; re-run the cooker with --with-interiors";
+        return;
+    }
+    const float arrivalYaw = door.arrivalYawDegrees;
+    if (!loadScene(target, door.arrivalPosition, &arrivalYaw)) {
+        VOX_LOGE("newvegas") << "failed to walk through the door into " << target.filename().string();
+    }
+}
+
 bool NewVegasApp::onInit() {
     // Without this the font atlas is empty, so every addText() emits zero
     // quads and GameApp::drawPerfOverlay bails outright — the HUD and F3 both
@@ -160,22 +326,11 @@ bool NewVegasApp::onInit() {
     // mode) and the town centroid finds nothing (spawn falls back to the middle
     // of the map). This costs the mesh + instance arrays for the duration of
     // onInit, which is the price of knowing where the ground and the town are.
-    importer::ImportedScene scene;
-    if (!importer::loadImportedScene(std::filesystem::path(m_scenePath), scene)) {
-        VOX_LOGE("newvegas") << "failed to load scene '" << m_scenePath
-                             << "': " << importer::getImportedSceneLastError();
+    m_sceneDirectory = std::filesystem::path(m_scenePath).parent_path();
+    m_exteriorStem = std::filesystem::path(m_scenePath).stem().string();
+    if (!loadScene(std::filesystem::path(m_scenePath), nullptr, nullptr)) {
         return false;
     }
-    VOX_LOGI("newvegas") << "loaded " << m_scenePath << " (" << scene.packedVertices.size() << " vertices, "
-                         << scene.textures.size() << " textures, " << scene.lights.size() << " lights)";
-
-    if (!m_renderer.uploadImportedScene(scene)) {
-        VOX_LOGE("newvegas") << "failed to upload scene to the renderer";
-        return false;
-    }
-    const bool interior = importer::importedSceneSourceTagIsInterior(scene.sourceTag);
-    m_renderer.setImportedSceneInteriorMode(interior);
-
     // Sun plus cascaded shadow maps, and nothing the original game didn't have.
     // Fallout: New Vegas lit its world with a directional sun, shadow maps and
     // baked ambient — no global illumination, no ray tracing, no screen-space AO,
@@ -242,69 +397,6 @@ bool NewVegasApp::onInit() {
         }
     }
     applyTimeOfDay();
-
-    buildGroundHeightField(scene);
-
-    // Spawn standing in Goodsprings rather than hovering over the map.
-    //
-    // The previous spawn put the camera at boundsMax[1] — above the highest peak
-    // in the cooked region — pitched 35 degrees down. That framed the terrain but
-    // left no horizon on screen at all, which is why the sky appeared to be
-    // missing: the skybox draws with VK_COMPARE_OP_EQUAL against a reversed-Z
-    // depth buffer, so it fills exactly the pixels no geometry covered, and from
-    // up there geometry covered all of them.
-    //
-    // The anchor is the centroid of the town's own architecture rather than a
-    // hand-entered coordinate, so it stays right if the cooked grid moves. Note
-    // this lands you in the middle of Goodsprings by the houses, not on Doc
-    // Mitchell's doorstep specifically -- picking out that one building needs its
-    // formID from the GECK, which is not something the cooked scene records.
-    float spawnX = (scene.boundsMin[0] + scene.boundsMax[0]) * 0.5f;
-    float spawnZ = (scene.boundsMin[2] + scene.boundsMax[2]) * 0.5f;
-    double townX = 0.0;
-    double townZ = 0.0;
-    std::size_t townCount = 0;
-    for (const importer::ImportedSceneInstance& instance : scene.instances) {
-        std::string path = instance.modelPath;
-        std::transform(path.begin(), path.end(), path.begin(), [](unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-        });
-        if (path.find("goodsprings") == std::string::npos) {
-            continue;
-        }
-        // Row-major 4x4 with translation in the last COLUMN: the cooker's
-        // writeTransform puts it at 3/7/11, not the 12/13/14 a column-major
-        // layout would use. Reading 12/14 gets the bottom row, which is all
-        // zeroes here, so the centroid silently collapses to the origin.
-        townX += static_cast<double>(instance.transform[3]);
-        townZ += static_cast<double>(instance.transform[11]);
-        ++townCount;
-    }
-    if (townCount > 0) {
-        spawnX = static_cast<float>(townX / static_cast<double>(townCount));
-        spawnZ = static_cast<float>(townZ / static_cast<double>(townCount));
-        VOX_LOGI("newvegas") << "spawning at the centroid of " << townCount
-                             << " Goodsprings placements";
-    } else {
-        VOX_LOGW("newvegas") << "no Goodsprings placements in this scene; spawning at scene centre";
-    }
-    m_cameraX = spawnX;
-    m_cameraZ = spawnZ;
-    float groundHeight = 0.0f;
-    if (groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) {
-        m_cameraY = groundHeight + kEyeHeightUnits;
-    } else {
-        m_cameraY = scene.boundsMax[1] + kEyeHeightUnits;
-        VOX_LOGW("newvegas") << "spawn point is off the terrain grid; starting in fly mode";
-        m_walkMode = false;
-    }
-    // Level, so the horizon -- and therefore the sky -- is on screen. The
-    // override has to come after this, not before: the spawn pitch is assigned
-    // here, so an earlier override would be silently discarded.
-    m_pitchDegrees = 0.0f;
-    if (const char* pitchEnv = std::getenv("ODAI_FNV_PITCH")) {
-        m_pitchDegrees = static_cast<float>(std::atof(pitchEnv));
-    }
 
     setMouseCaptured(true);
     return true;
@@ -445,6 +537,17 @@ void NewVegasApp::onTick(float deltaSeconds) {
     }
     m_pauseLatch = pausePressed;
 
+    // Edge-latched: holding E must not re-trigger on the door you arrive next
+    // to, which is always within range of the one you just came through.
+    const bool doorPressed = keyDown(m_window, GLFW_KEY_E);
+    if (doorPressed && !m_doorKeyLatch) {
+        const int doorIndex = findUsableDoor();
+        if (doorIndex >= 0) {
+            useDoor(m_doors[static_cast<std::size_t>(doorIndex)]);
+        }
+    }
+    m_doorKeyLatch = doorPressed;
+
     const bool walkPressed = keyDown(m_window, GLFW_KEY_F);
     if (walkPressed && !m_walkModeLatch) {
         m_walkMode = !m_walkMode;
@@ -472,6 +575,24 @@ void NewVegasApp::drawHud() {
         text, sizeof(text),
         "New Vegas  |  %02d:%02d %s  |  pos %.0f %.0f %.0f  |  [ ] time   P cycle   Tab cursor",
         hours, minutes, m_dayCyclePaused ? "(paused)" : "(running)", m_cameraX, m_cameraY, m_cameraZ);
+    // Door prompt, centred low on screen where an interaction prompt belongs
+    // rather than buried in the status line.
+    const int usableDoor = findUsableDoor();
+    if (usableDoor >= 0) {
+        const importer::ImportedSceneDoor& door = m_doors[static_cast<std::size_t>(usableDoor)];
+        char prompt[192];
+        std::snprintf(prompt, sizeof(prompt), "[E]  %s",
+                      door.targetCellEditorId.empty() ? "Exit" : door.targetCellEditorId.c_str());
+        const float promptScale = contentScale();
+        const float promptWidth = m_uiFont.measureText(prompt);
+        int screenWidth = 0;
+        int screenHeight = 0;
+        framebufferSize(screenWidth, screenHeight);
+        ui::UiVec2 promptPosition{};
+        promptPosition.x = (static_cast<float>(screenWidth) - promptWidth) * 0.5f;
+        promptPosition.y = static_cast<float>(screenHeight) - (96.0f * promptScale);
+        m_uiDrawList.addText(m_uiFont, prompt, promptPosition, ui::UiColor{1.0f, 0.94f, 0.72f, 1.0f});
+    }
     const float margin = 16.0f * contentScale();
     m_uiDrawList.addText(m_uiFont, text, ui::UiVec2{margin, margin}, ui::UiColor{0.91f, 0.85f, 0.69f, 1.0f});
 }

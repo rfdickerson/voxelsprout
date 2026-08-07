@@ -15,6 +15,7 @@
 //   Space             jump (walk mode) / ascend (fly mode)
 //   Ctrl              descend (fly mode)
 //   Shift             sprint
+//   E                 enter/exit through the door you are facing
 //   F                 toggle walk / fly
 //   [ / ]             step time of day back / forward
 //   P                 pause the day cycle
@@ -24,6 +25,7 @@
 #include "engine/game_app.h"
 #include "import/imported_scene.h"
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -58,11 +60,27 @@ private:
     // Flattens the cooked terrain mesh into a regular height lattice so the
     // camera can be ground-clamped without a per-frame ray cast.
     void buildGroundHeightField(const importer::ImportedScene& scene);
+    // Loads a cooked scene and takes the camera to `arrival` when given, or to
+    // the Goodsprings placements otherwise. Re-entrant: this is what walking
+    // through a door calls.
+    bool loadScene(const std::filesystem::path& path, const float* arrivalPosition, const float* arrivalYawDegrees);
+    // Nearest door the camera is close to and facing, or -1. Also what the HUD
+    // prompt reads.
+    [[nodiscard]] int findUsableDoor() const;
+    void useDoor(const importer::ImportedSceneDoor& door);
     // Bilinear ground height at a world XZ. false outside the cooked terrain or
     // over a lattice hole, in which case outHeight is untouched.
     [[nodiscard]] bool groundHeightAt(float x, float z, float& outHeight) const;
 
     std::string m_scenePath;
+    // Doors in the loaded scene, plus what is needed to find their targets:
+    // interiors are cooked beside the exterior as "<stem>_<CellEditorID>.bin"
+    // (importedSceneInteriorFileName), and a door with an empty target cell is
+    // the way back to "<stem>.bin".
+    std::vector<importer::ImportedSceneDoor> m_doors;
+    std::filesystem::path m_sceneDirectory;
+    std::string m_exteriorStem;
+    bool m_doorKeyLatch = false;
     // Screenshot-and-quit mode; empty path means normal interactive running.
     std::string m_screenshotPath;
     int m_screenshotWarmupFrames = 8;

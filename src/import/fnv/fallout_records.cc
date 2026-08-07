@@ -101,6 +101,17 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
             hasData = true;
         } else if (sub.type == "XSCL" && sub.size >= 4u) {
             ref.scale = readF32(sub.data);
+        } else if (sub.type == "XTEL" && sub.size >= 28u) {
+            // formID of the destination door reference, then the arrival
+            // position and rotation in that door's cell.
+            ref.hasTeleport = true;
+            ref.teleportTargetRefFormId = readU32(sub.data);
+            ref.teleportPosition[0] = readF32(sub.data + 4);
+            ref.teleportPosition[1] = readF32(sub.data + 8);
+            ref.teleportPosition[2] = readF32(sub.data + 12);
+            ref.teleportRotationRadians[0] = readF32(sub.data + 16);
+            ref.teleportRotationRadians[1] = readF32(sub.data + 20);
+            ref.teleportRotationRadians[2] = readF32(sub.data + 24);
         }
     }
     if (hasData && ref.baseFormId != 0u) {
@@ -314,14 +325,21 @@ bool extractFalloutScene(
     };
 
     EsmReader::Visitor visitor{};
-    if (filter.wantCellContents) {
-        visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
-            if (header.type == "LAND" || header.type == "REFR") {
-                return wantCurrentCellContents;
-            }
-            return true;
-        };
-    }
+    // Runs for every record whether or not its contents are wanted, which is
+    // what makes the door index affordable: a teleport's XTEL names the door
+    // reference on the far side and nothing about which cell that is, so the
+    // mapping has to cover references in cells this cook never parses. Reading
+    // it from the header costs a hash insert per REFR instead of a full
+    // subrecord walk.
+    visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
+        if (header.type == "REFR" && hasCurrentCell) {
+            outScene.cellIndexByReferenceFormId.emplace(header.formId, currentCellIndex);
+        }
+        if (filter.wantCellContents && (header.type == "LAND" || header.type == "REFR")) {
+            return wantCurrentCellContents;
+        }
+        return true;
+    };
     visitor.onGroupEnter = [&](const EsmGroupView& group) {
         constexpr std::int32_t kTopLevelGroup = 0;
         constexpr std::int32_t kWorldChildrenGroup = 1;

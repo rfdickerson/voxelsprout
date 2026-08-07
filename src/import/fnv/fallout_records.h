@@ -25,6 +25,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "import/fnv/esm_reader.h"
@@ -63,6 +64,15 @@ struct FalloutPlacedReference {
     float position[3] = {};        // DATA, world units
     float rotationRadians[3] = {};  // DATA
     float scale = 1.0f;             // XSCL, defaults to 1 when absent
+    // XTEL: this reference is a teleport door. The target is another REFR (the
+    // door on the far side), and the position/rotation are where the player
+    // arrives -- expressed in the TARGET cell's space, not this one. Resolving
+    // which cell that is means looking the target reference up globally, which
+    // is what FalloutSceneData::cellIndexByReferenceFormId exists for.
+    bool hasTeleport = false;
+    std::uint32_t teleportTargetRefFormId = 0;
+    float teleportPosition[3] = {};
+    float teleportRotationRadians[3] = {};
 };
 
 // One ATXT/VTXT pair: a landscape texture blended over a quadrant's base, with
@@ -146,6 +156,10 @@ struct FalloutWorldspaceRecord {
 struct FalloutSceneData {
     std::vector<FalloutStaticRecord> statics;
     std::vector<FalloutLandTextureRecord> landTextures;  // LTEX, already resolved through TXST
+    // Every placed reference's owning cell, by the reference's own formID. A
+    // door's XTEL names its counterpart reference and nothing else -- the cell
+    // it stands in is only discoverable by looking it up here.
+    std::unordered_map<std::uint32_t, std::size_t> cellIndexByReferenceFormId;
     std::vector<FalloutWorldspaceRecord> worldspaces;
     std::vector<FalloutCellRecord> cells;
 };

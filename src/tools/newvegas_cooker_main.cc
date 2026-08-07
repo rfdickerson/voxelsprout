@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -647,35 +648,29 @@ void appendTerrainCell(
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    if (argc < 5) {
-        printUsage();
-        return 1;
-    }
-    const std::filesystem::path dataFilesPath = argv[1];
-    const std::filesystem::path pluginName = argv[2];
-    const std::filesystem::path outputPath = argv[3];
-    const std::string mode = argv[4];
+namespace {
 
-    std::optional<std::string> targetCellEditorId;
-    std::optional<std::string> targetWorldspaceEditorId;
-    std::int32_t gridX0 = 0, gridZ0 = 0, gridX1 = 0, gridZ1 = 0;
-
-    if (mode == "--cell" && argc >= 6) {
-        targetCellEditorId = argv[5];
-    } else if (mode == "--worldspace" && argc >= 10) {
-        targetWorldspaceEditorId = argv[5];
-        gridX0 = std::atoi(argv[6]);
-        gridZ0 = std::atoi(argv[7]);
-        gridX1 = std::atoi(argv[8]);
-        gridZ1 = std::atoi(argv[9]);
-        if (gridX0 > gridX1) std::swap(gridX0, gridX1);
-        if (gridZ0 > gridZ1) std::swap(gridZ0, gridZ1);
-    } else {
-        printUsage();
-        return 1;
-    }
-
+// One cook: extract, select cells, build, write. Factored out of main so the
+// same path can produce an exterior region and then each interior a door in it
+// leads to, without the caller reaching into any of it.
+//
+// Re-extracting per interior rather than sharing one pass is deliberate. The
+// interior filter rejects every worldspace outright, so a second extraction
+// costs ~65 ms against the ~250 ms a worldspace pass takes -- cheaper than
+// keeping every interior cell's references resident through the exterior build
+// just in case a door points at them.
+int cookOne(
+    const std::filesystem::path& dataFilesPath,
+    const std::filesystem::path& pluginName,
+    const std::filesystem::path& outputPath,
+    const std::optional<std::string>& targetCellEditorId,
+    const std::optional<std::string>& targetWorldspaceEditorId,
+    std::int32_t gridX0,
+    std::int32_t gridZ0,
+    std::int32_t gridX1,
+    std::int32_t gridZ1,
+    std::vector<std::string>* outDoorTargetCells
+) {
     const std::filesystem::path esmPath = dataFilesPath / pluginName;
     // Phase timings. This is a content tool whose cost is dominated by data
     // volume, so where the time goes should be visible without a profiler.
@@ -703,7 +698,22 @@ int main(int argc, char** argv) {
         filter.wantWorldspace = [](std::uint32_t) { return false; };
     } else {
         filter.wantCellContents = [&](const odai::importer::fnv::FalloutCellRecord& cell) {
-            if (cell.isInterior || !cell.hasGridCoords) {
+            if (cell.isInterior) {
+                return false;
+            }
+            // The worldspace's PERSISTENT cell is where teleport doors live --
+            // every door into an interior is a persistent reference, not a
+            // per-cell temporary one. FalloutNV.esm stores it with XCLC (0,0)
+            // rather than omitting the coordinates, so a region that does not
+            // happen to contain the origin skipped it: that is why an exterior
+            // cook reported 6307 references and zero teleports. Its contents
+            // span the whole worldspace and are clipped by position below.
+            if (!cell.hasGridCoords || (cell.gridX == 0 && cell.gridZ == 0)) {
+                for (const auto& ws : scene.worldspaces) {
+                    if (ws.editorId == *targetWorldspaceEditorId) {
+                        return cell.worldspaceFormId == ws.formId;
+                    }
+                }
                 return false;
             }
             if (cell.gridX < gridX0 || cell.gridX > gridX1 || cell.gridZ < gridZ0 || cell.gridZ > gridZ1) {
@@ -1269,6 +1279,117 @@ int main(int argc, char** argv) {
     odai::importer::buildImportedScenePageRanges(outScene);
     const float packMs = phaseTimer.lapMs();
 
+    // Teleport doors. XTEL names the door reference on the far side and gives
+    // the arrival transform, but not which cell that reference lives in --
+    // cellIndexByReferenceFormId, built from every REFR header during
+    // extraction, is what resolves it.
+    //
+    // A door whose target is not an interior with an EditorID is dropped: the
+    // file naming convention is keyed on that ID, so a target without one
+    // cannot be cooked or found again.
+    const bool targetCellIsInteriorCook = targetCellEditorId.has_value();
+    std::unordered_set<std::string> doorTargetCellSet;
+    // The persistent cell spans the whole worldspace, so its doors are clipped
+    // to the cooked grid by position -- otherwise a region cook would drag in
+    // every interior in the Mojave.
+    std::vector<const odai::importer::fnv::FalloutCellRecord*> doorSourceCells = selectedCells;
+    const float regionMinX = static_cast<float>(gridX0) * odai::importer::fnv::kExteriorCellSize;
+    const float regionMaxX = static_cast<float>(gridX1 + 1) * odai::importer::fnv::kExteriorCellSize;
+    const float regionMinY = static_cast<float>(gridZ0) * odai::importer::fnv::kExteriorCellSize;
+    const float regionMaxY = static_cast<float>(gridZ1 + 1) * odai::importer::fnv::kExteriorCellSize;
+    std::unordered_set<const odai::importer::fnv::FalloutCellRecord*> persistentSources;
+    if (targetWorldspaceEditorId.has_value()) {
+        for (const auto& cell : scene.cells) {
+            const bool isOriginCell = cell.hasGridCoords && cell.gridX == 0 && cell.gridZ == 0;
+            if (cell.isInterior || cell.references.empty()) {
+                continue;
+            }
+            if ((!cell.hasGridCoords || isOriginCell) &&
+                std::find(selectedCells.begin(), selectedCells.end(), &cell) == selectedCells.end()) {
+                doorSourceCells.push_back(&cell);
+                persistentSources.insert(&cell);
+            }
+        }
+    }
+    for (const auto* cell : doorSourceCells) {
+        const bool clipToRegion = persistentSources.count(cell) != 0u;
+        for (const auto& ref : cell->references) {
+            if (clipToRegion &&
+                (ref.position[0] < regionMinX || ref.position[0] > regionMaxX ||
+                 ref.position[1] < regionMinY || ref.position[1] > regionMaxY)) {
+                continue;
+            }
+            if (!ref.hasTeleport || ref.teleportTargetRefFormId == 0u) {
+                continue;
+            }
+            const auto targetIt = scene.cellIndexByReferenceFormId.find(ref.teleportTargetRefFormId);
+            const bool targetResolved = targetIt != scene.cellIndexByReferenceFormId.end() &&
+                targetIt->second < scene.cells.size();
+            if (!targetResolved) {
+                // An interior cook walks every interior but skips worldspace
+                // groups outright, so an unresolved target can only be a
+                // reference in a worldspace -- which is the door back out. That
+                // is the exit, and dropping it made every interior a one-way
+                // trip. For an exterior cook there is no such inference: an
+                // unresolved target there is genuinely unknown.
+                if (!targetCellIsInteriorCook) {
+                    continue;
+                }
+                odai::importer::ImportedSceneDoor exitDoor{};
+                const Vec3 exitWorld = bethesdaToEngine(ref.position[0], ref.position[1], ref.position[2]);
+                exitDoor.position[0] = exitWorld.x;
+                exitDoor.position[1] = exitWorld.y;
+                exitDoor.position[2] = exitWorld.z;
+                const Vec3 exitArrival = bethesdaToEngine(
+                    ref.teleportPosition[0], ref.teleportPosition[1], ref.teleportPosition[2]);
+                exitDoor.arrivalPosition[0] = exitArrival.x;
+                exitDoor.arrivalPosition[1] = exitArrival.y;
+                exitDoor.arrivalPosition[2] = exitArrival.z;
+                exitDoor.arrivalYawDegrees =
+                    -ref.teleportRotationRadians[2] * (180.0f / 3.14159265358979323846f);
+                outScene.doors.push_back(std::move(exitDoor));
+                continue;
+            }
+            const auto& targetCell = scene.cells[targetIt->second];
+            // An EXTERIOR target is the way back out. It gets an empty
+            // targetCellEditorId, which the loader reads as "the exterior scene
+            // this interior was cooked beside" -- exterior cells have no useful
+            // EditorID to name a file with, and without this an interior would
+            // be a one-way trip.
+            if (targetCell.isInterior && targetCell.editorId.empty()) {
+                continue;
+            }
+            odai::importer::ImportedSceneDoor door{};
+            const Vec3 doorWorld = bethesdaToEngine(ref.position[0], ref.position[1], ref.position[2]);
+            door.position[0] = doorWorld.x;
+            door.position[1] = doorWorld.y;
+            door.position[2] = doorWorld.z;
+            const Vec3 arrivalWorld = bethesdaToEngine(
+                ref.teleportPosition[0], ref.teleportPosition[1], ref.teleportPosition[2]);
+            door.arrivalPosition[0] = arrivalWorld.x;
+            door.arrivalPosition[1] = arrivalWorld.y;
+            door.arrivalPosition[2] = arrivalWorld.z;
+            // Bethesda's Z rotation is the compass heading; the engine camera's
+            // yaw is measured in the XZ plane from +X, and bethesdaToEngine maps
+            // Bethesda +Y (north) onto engine -Z. Negating converts between them.
+            door.arrivalYawDegrees =
+                -ref.teleportRotationRadians[2] * (180.0f / 3.14159265358979323846f);
+            door.targetCellEditorId = targetCell.isInterior ? targetCell.editorId : std::string();
+            outScene.doors.push_back(std::move(door));
+            if (targetCell.isInterior) {
+                doorTargetCellSet.insert(targetCell.editorId);
+            }
+        }
+    }
+    if (!outScene.doors.empty()) {
+        std::cout << "Doors: " << outScene.doors.size() << " teleport(s) into "
+                  << doorTargetCellSet.size() << " interior cell(s)\n";
+    }
+    if (outDoorTargetCells != nullptr) {
+        outDoorTargetCells->assign(doorTargetCellSet.begin(), doorTargetCellSet.end());
+        std::sort(outDoorTargetCells->begin(), outDoorTargetCells->end());
+    }
+
     if (!odai::importer::saveImportedScene(outScene, outputPath)) {
         std::cerr << "Failed to save output scene: " << odai::importer::getImportedSceneLastError() << "\n";
         return 1;
@@ -1279,5 +1400,72 @@ int main(int argc, char** argv) {
     std::cout << "Timings: extract " << extractMs << " ms, archives " << resolverMs << " ms, meshes " << meshMs
               << " ms, pack " << packMs << " ms, write " << writeMs << " ms (total "
               << (extractMs + resolverMs + meshMs + packMs + writeMs) << " ms)\n";
+    return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 5) {
+        printUsage();
+        return 1;
+    }
+    const std::filesystem::path dataFilesPath = argv[1];
+    const std::filesystem::path pluginName = argv[2];
+    const std::filesystem::path outputPath = argv[3];
+    const std::string mode = argv[4];
+
+    std::optional<std::string> targetCellEditorId;
+    std::optional<std::string> targetWorldspaceEditorId;
+    std::int32_t gridX0 = 0, gridZ0 = 0, gridX1 = 0, gridZ1 = 0;
+    bool withInteriors = false;
+
+    if (mode == "--cell" && argc >= 6) {
+        targetCellEditorId = argv[5];
+    } else if (mode == "--worldspace" && argc >= 10) {
+        targetWorldspaceEditorId = argv[5];
+        gridX0 = std::atoi(argv[6]);
+        gridZ0 = std::atoi(argv[7]);
+        gridX1 = std::atoi(argv[8]);
+        gridZ1 = std::atoi(argv[9]);
+        if (gridX0 > gridX1) std::swap(gridX0, gridX1);
+        if (gridZ0 > gridZ1) std::swap(gridZ0, gridZ1);
+    } else {
+        printUsage();
+        return 1;
+    }
+    for (int i = 5; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--with-interiors") == 0) {
+            withInteriors = true;
+        }
+    }
+
+    std::vector<std::string> doorTargetCells;
+    const int result = cookOne(
+        dataFilesPath, pluginName, outputPath, targetCellEditorId, targetWorldspaceEditorId,
+        gridX0, gridZ0, gridX1, gridZ1, withInteriors ? &doorTargetCells : nullptr);
+    if (result != 0 || !withInteriors) {
+        return result;
+    }
+
+    // Every interior a door in the region opens onto, beside the exterior and
+    // named by the one convention importedSceneInteriorFileName owns. Failing
+    // to cook one is reported and skipped rather than fatal: a door into a cell
+    // this plugin does not define should not lose the region that does.
+    const std::string exteriorStem = outputPath.stem().string();
+    const std::filesystem::path outputDirectory = outputPath.parent_path();
+    std::size_t cooked = 0;
+    for (const std::string& cellEditorId : doorTargetCells) {
+        const std::filesystem::path interiorPath =
+            outputDirectory / odai::importer::importedSceneInteriorFileName(exteriorStem, cellEditorId);
+        std::cout << "\n=== interior: " << cellEditorId << " -> " << interiorPath.filename().string() << "\n";
+        if (cookOne(dataFilesPath, pluginName, interiorPath, cellEditorId, std::nullopt,
+                    0, 0, 0, 0, nullptr) == 0) {
+            ++cooked;
+        } else {
+            std::cerr << "warning: could not cook interior " << cellEditorId << "\n";
+        }
+    }
+    std::cout << "\nCooked " << cooked << " of " << doorTargetCells.size() << " reachable interior(s).\n";
     return 0;
 }

@@ -45,7 +45,10 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v20 -> v21: the terrain layer budget went from 3 slots to 4, widening BOTH
 // vertex structs again. Same treatment as before -- every raw-blit read site is
 // version-gated, and the v20 expansion below reads the narrower layout.
-constexpr std::uint32_t kImportedSceneVersion = 21u;
+// v21 -> v22: a trailing doors section. Appended and version-gated, so v15-v21
+// files load with no doors and behave exactly as before -- unlike the vertex
+// widenings above, this one touches no existing bytes.
+constexpr std::uint32_t kImportedSceneVersion = 22u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
 // The pre-v19 ImportedSceneVertex: position[3], normal[3], uv[2].
 constexpr std::size_t kImportedSceneVertexFloatsV18 = 8;
@@ -82,6 +85,8 @@ static_assert(kImportedSceneVertexFloatsV20 * sizeof(float) == 68u);
 // so they are written field by field. Both loaders must stay in step with this.
 bool readString(std::istream& input, std::string& out);
 void writeSceneMaterials(std::ostream& output, const std::vector<ImportedSceneMaterial>& materials);
+void writeSceneDoors(std::ostream& output, const std::vector<ImportedSceneDoor>& doors);
+bool readSceneDoors(std::istream& input, std::vector<ImportedSceneDoor>& out);
 bool readSceneMaterials(std::istream& input, std::vector<ImportedSceneMaterial>& out);
 
 std::string g_lastImportedSceneError;
@@ -376,6 +381,35 @@ bool readSceneMaterials(std::istream& input, std::vector<ImportedSceneMaterial>&
     // consumer already treats index 0 as "no library material".
     if (!out.empty() && !out[0].name.empty()) {
         out[0] = ImportedSceneMaterial{};
+    }
+    return true;
+}
+
+// Doors are written field by field, not blitted: ImportedSceneDoor holds a
+// std::string. Same treatment materials already get.
+void writeSceneDoors(std::ostream& output, const std::vector<ImportedSceneDoor>& doors) {
+    writeValue(output, static_cast<std::uint32_t>(doors.size()));
+    for (const ImportedSceneDoor& door : doors) {
+        output.write(reinterpret_cast<const char*>(door.position), sizeof(door.position));
+        output.write(reinterpret_cast<const char*>(door.arrivalPosition), sizeof(door.arrivalPosition));
+        writeValue(output, door.arrivalYawDegrees);
+        writeString(output, door.targetCellEditorId);
+    }
+}
+
+bool readSceneDoors(std::istream& input, std::vector<ImportedSceneDoor>& out) {
+    std::uint32_t count = 0;
+    if (!readValue(input, count)) {
+        return false;
+    }
+    out.resize(count);
+    for (ImportedSceneDoor& door : out) {
+        if (!readExact(input, door.position, sizeof(door.position)) ||
+            !readExact(input, door.arrivalPosition, sizeof(door.arrivalPosition)) ||
+            !readValue(input, door.arrivalYawDegrees) ||
+            !readString(input, door.targetCellEditorId)) {
+            return false;
+        }
     }
     return true;
 }
@@ -953,6 +987,12 @@ bool importedSceneSourceTagIsInterior(std::string_view sourceTag) {
     return sourceTag == "morrowind_interior" || sourceTag == "fnv_interior";
 }
 
+std::string importedSceneInteriorFileName(
+    const std::string& exteriorStem, const std::string& cellEditorId
+) {
+    return exteriorStem + "_" + cellEditorId + ".bin";
+}
+
 const std::string& getImportedSceneLastError() {
     return g_lastImportedSceneError;
 }
@@ -1112,6 +1152,7 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
     // v18: named material library. Last section, so older readers that stop
     // after pageRanges are unaffected by its presence.
     writeSceneMaterials(output, scene.materials);
+    writeSceneDoors(output, scene.doors);
 
     if (!output.good()) {
         setLastImportedSceneError("Failed while writing output file: " + outputPath.string());
@@ -1351,6 +1392,11 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
     if (version >= 18u && !readSceneMaterials(input, scene.materials)) {
         return false;
     }
+    // After materials, matching the write order in saveImportedScene.
+    if (version >= 22u && !readSceneDoors(input, scene.doors)) {
+        setLastImportedSceneError("Failed to read imported scene doors: " + inputPath.string());
+        return false;
+    }
 
     applyTextureAlphaCutoutFlags(scene);
     outScene = std::move(scene);
@@ -1567,6 +1613,11 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     }
     // v18 material library -- see the note in loadImportedScene().
     if (version >= 18u && !readSceneMaterials(input, scene.materials)) {
+        return false;
+    }
+    // After materials, matching the write order in saveImportedScene.
+    if (version >= 22u && !readSceneDoors(input, scene.doors)) {
+        setLastImportedSceneError("Failed to read imported scene doors: " + inputPath.string());
         return false;
     }
     if (version < 3u) {
