@@ -103,11 +103,11 @@ This is further along than the original wishlist survey suggested — that surve
 |---|---|---|
 | RCI zoning | ✅ | `Zone` enum (Residential/Commercial/Industrial), `citybuilder_app.h` |
 | Traffic simulation | ✅ | Per-tile `trafficLoad` congestion EMA + destination-routed citizen trips (`citybuilder_app.h`, `citybuilder_citizens.h::rollTrip`) |
-| Land value / desirability overlay | ✅ | Toggleable data overlay, `m_showLandValue` in `citybuilder_app.h` |
+| Land value / desirability overlay | ✅ | One of the selectable data layers, `m_dataLayer` in `citybuilder_app.h` |
 | Named-citizen roster with schedules | ✅ | Homes/workplaces/spouses/traits, commute-aware trip rolling (`citybuilder_citizens.h`) |
 | Moddable "tabloid" story system | ✅ | Lua-driven story templates/weights (`games/citybuilder/script/city_script.h`) so narrative text is data, not hardcoded |
-| Emergency services (traffic-aware dispatch) | 🟡 | Siren-speed unit exists (`citybuilder_app.h`); full coverage-radius service modeling not confirmed |
-| Population/economy/pollution heatmaps | 🟡 | Land-value overlay exists; other data layers from the original wishlist (pollution, education, health coverage) not confirmed present |
+| Emergency services (traffic-aware dispatch) | ✅ | Siren-speed unit (`citybuilder_app.h`) plus coverage-radius modeling: one `buildingInfluence` ring per building feeds both the land-value splat and the Education/Health/Safety coverage fields (`citybuilder_fields.h`) |
+| Population/economy/pollution heatmaps | ✅ | Five selectable data layers — land value, pollution, education, health, safety — table-driven off `dataLayerDesc` so the chips, legend and tile wash share one source (`citybuilder_fields.h`) |
 | Regional play (multiple connected cities) | ⬜ | Not implemented — single city/map only |
 | Modular building growth stages (SimCity 2013's signature) | 🟡 | Zoning + citizen growth exist; whether buildings visually grow through density tiers wasn't confirmed without a deeper read |
 

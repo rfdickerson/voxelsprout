@@ -25,6 +25,32 @@ std::uint32_t packTile(short c, short r) {
            static_cast<std::uint16_t>(r);
 }
 
+// Squared distance at which a job is half as attractive as one next door.
+constexpr float kCommuteHalfDistSq = 64.0f;  // ~8 tiles
+
+// Distance-weighted workplace pick — a gravity model, same weighted-reservoir
+// shape as the home-site pick below.
+//
+// This used to be a uniform draw across every destination on the map, which
+// made a citizen's commute independent of the player's layout: you could not
+// zone your way to a shorter trip, so the congestion the player watched was
+// noise rather than a readout of their own decisions. Weight falls off with
+// squared distance, so nearby jobs dominate without the far ones ever becoming
+// impossible — cities do have long-distance commuters.
+const Destination* pickWorkplace(const std::vector<Destination>& destinations, int homeC,
+                                 int homeR, odai::procgen::Rng& rng) {
+    const Destination* pick = nullptr;
+    float total = 0.0f;
+    for (const Destination& d : destinations) {
+        const float dc = static_cast<float>(d.c - homeC);
+        const float dr = static_cast<float>(d.r - homeR);
+        const float w = kCommuteHalfDistSq / (kCommuteHalfDistSq + dc * dc + dr * dr);
+        total += w;
+        if (rng.uniform(0.0f, total) <= w) pick = &d;
+    }
+    return pick;
+}
+
 }  // namespace
 
 void CitizenSim::configure(odai::citybuilder::CityScriptHost* script, std::uint32_t worldSeed,
@@ -169,10 +195,11 @@ void CitizenSim::reconcileMonthly(const ReconcileInput& in) {
             cz.workC = cz.workR = -1;
             continue;
         }
-        const Destination& d =
-            destinations[m_rng.next() % static_cast<std::uint32_t>(destinations.size())];
-        cz.workC = d.c;
-        cz.workR = d.r;
+        const Destination* d = pickWorkplace(destinations, cz.homeC, cz.homeR, m_rng);
+        if (d != nullptr) {
+            cz.workC = d->c;
+            cz.workR = d->r;
+        }
     }
 
     // ── Spawn toward the census-derived target. ──────────────────────────────
@@ -203,10 +230,11 @@ void CitizenSim::reconcileMonthly(const ReconcileInput& in) {
         if (traitRng.chance(0.25f)) cz.traits |= kTraitNightOwl;
         if (traitRng.chance(0.30f)) cz.traits |= kTraitGossip;
         if (!destinations.empty()) {
-            const Destination& d =
-                destinations[m_rng.next() % static_cast<std::uint32_t>(destinations.size())];
-            cz.workC = d.c;
-            cz.workR = d.r;
+            const Destination* d = pickWorkplace(destinations, cz.homeC, cz.homeR, m_rng);
+            if (d != nullptr) {
+                cz.workC = d->c;
+                cz.workR = d->r;
+            }
         }
         // Marriage: pair with an existing single citizen; couples share a name.
         if (m_rng.chance(0.4f)) {

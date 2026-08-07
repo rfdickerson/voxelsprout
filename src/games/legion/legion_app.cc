@@ -111,19 +111,54 @@ bool LegionApp::onInit() {
 }
 
 void LegionApp::uploadCharacterMeshes() {
+    // Metallic-roughness materials, opt-in per color group. This is the engine's
+    // first real PBR material: before it, kImportedSceneMaterialFlagPbr was set
+    // by nothing, so pbr.slang shaded nothing anywhere. The legionary's bronze
+    // trim is the demonstration -- the raider's leather is deliberately left
+    // dielectric so the same geometry under the same light shows the difference
+    // between a metal and a non-metal rather than just "everything got shinier".
+    //
+    // Metals have no diffuse lobe (pbrDiffuseScale), so their whole response is
+    // the specular term; the albedo below becomes the F0 reflectance tint rather
+    // than a diffuse color. 0.72/0.55/0.22 is already in the right neighbourhood
+    // for bronze's measured normal-incidence reflectance.
     procgen::HumanoidMeshColors legionaryColors{};
     legionaryColors.torso = Vector3{0.55f, 0.08f, 0.08f};    // red tunic
     legionaryColors.limbs = Vector3{0.85f, 0.68f, 0.52f};    // skin
     legionaryColors.accent = Vector3{0.72f, 0.55f, 0.22f};   // bronze trim
+
+    // Roughness 0.35 is campaign-worn bronze rather than parade polish, and it is
+    // the one number here that wants a human's eye on real hardware. The body is
+    // built from 6-segment cylinders (kCylinderSegmentsLimb), so adjacent facet
+    // normals sit 60 deg apart and the half-vector sweeps 30 deg between them,
+    // while a GGX lobe at this roughness is only ~4.6 deg wide at half-peak. The
+    // highlight therefore lands on one facet at a time and steps between them as a
+    // character turns. On this project's flat-shaded stylized geometry that hard
+    // step is arguably the right read (docs/stylized_low_poly.md wants facets that
+    // catch light), but if it reads as flicker under animation the fix is more
+    // cylinder segments on the accent group, not a rougher metal -- the lobe would
+    // have to reach roughness ~0.75 to span two facets, and by then the surface has
+    // lost 37% of its energy to shadowing and stops reading as metal at all.
+    procgen::HumanoidMeshMaterials legionaryMaterials{};
+    legionaryMaterials.torso = {0.0f, 0.85f};   // wool: dielectric, near-fully rough
+    legionaryMaterials.limbs = {0.0f, 0.75f};   // skin: dielectric, rough
+    legionaryMaterials.accent = {1.0f, 0.35f};  // bronze: metal, campaign-worn polish
 
     procgen::HumanoidMeshColors raiderColors{};
     raiderColors.torso = Vector3{0.30f, 0.32f, 0.34f};   // grey furs
     raiderColors.limbs = Vector3{0.75f, 0.60f, 0.46f};   // skin
     raiderColors.accent = Vector3{0.18f, 0.14f, 0.10f};  // dark leather
 
+    procgen::HumanoidMeshMaterials raiderMaterials{};
+    raiderMaterials.torso = {0.0f, 0.95f};   // fur: dielectric, fully rough
+    raiderMaterials.limbs = {0.0f, 0.75f};   // skin: same as the legionary's
+    raiderMaterials.accent = {0.0f, 0.55f};  // leather: dielectric, mid-gloss
+
     const auto uploadVariant = [&](const procgen::HumanoidMeshColors& colors,
+                                    const procgen::HumanoidMeshMaterials& materials,
                                     std::uint32_t firstSlot, std::uint32_t count) {
-        const procgen::HumanoidSkinnedMesh mesh = procgen::buildHumanoidSkinnedMesh(m_skeleton, colors);
+        const procgen::HumanoidSkinnedMesh mesh =
+            procgen::buildHumanoidSkinnedMesh(m_skeleton, colors, materials);
         const std::vector<ImportedScenePackedDraw> draws = {
             ImportedScenePackedDraw{0u, static_cast<std::uint32_t>(mesh.indices.size())}
         };
@@ -137,8 +172,9 @@ void LegionApp::uploadCharacterMeshes() {
         }
     };
 
-    uploadVariant(legionaryColors, 0u, static_cast<std::uint32_t>(kPartySize));
-    uploadVariant(raiderColors, static_cast<std::uint32_t>(kPartySize), static_cast<std::uint32_t>(kEnemySize));
+    uploadVariant(legionaryColors, legionaryMaterials, 0u, static_cast<std::uint32_t>(kPartySize));
+    uploadVariant(raiderColors, raiderMaterials,
+                  static_cast<std::uint32_t>(kPartySize), static_cast<std::uint32_t>(kEnemySize));
 }
 
 void LegionApp::resetBattle() {

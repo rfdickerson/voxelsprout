@@ -335,7 +335,25 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float randomAngle = interleavedGradientNoise(float2(dispatchThreadId.xy)) * 6.2831853;
 
     const float radius = clamp(camera.shadowConfig2.x, 0.25, 128.0);
+
+    // Bias is in this estimator's own units (the CPU picks which of the three it
+    // sends -- see ShadowDebugSettings::activeAoBias). Clamp per variant, because
+    // the domains do not overlap and an out-of-domain value fails silently rather
+    // than looking wrong: it produces a smooth, plausible gradient that has nothing
+    // to do with the geometry.
+#if ODAI_AO_MODE == ODAI_AO_MODE_SSAO
+    // View-space depth offset in world units; the useful range scales with the scene.
     const float bias = clamp(camera.shadowConfig2.y, 0.0, 8.0);
+#elif ODAI_AO_MODE == ODAI_AO_MODE_HBAO
+    // Subtracted from a sine in [-1, 1]. Past ~0.5 no sample can ever clear the
+    // horizon floor and the pass returns 1 everywhere.
+    const float bias = clamp(camera.shadowConfig2.y, 0.0, 0.5);
+#else
+    // Horizon clamp in radians. As it approaches pi/2 the two clamps saturate
+    // unconditionally, every marched sample is discarded, and visibility collapses
+    // to a function of the view/normal angle alone.
+    const float bias = clamp(camera.shadowConfig2.y, 0.0, 0.4);
+#endif
 
     const float visibility =
         estimateVisibility(uv, screenSize, centerViewPos, centerNormal, randomAngle, radius, bias);

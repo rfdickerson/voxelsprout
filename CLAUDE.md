@@ -99,47 +99,17 @@ ctest --test-dir cmake-build-release -N                    # list registered tes
 
 ### Test targets
 
-All are plain executables with a hand-rolled `int main()` and inline assertions — **no test framework** — except `odai_stability_gtests`, the one GTest suite (skipped with a `message(STATUS)` if GTest isn't found for your triplet). No test executable links Vulkan; the only headless-Vulkan check is the offscreen-capture smoke test under `examples/ui_stress_test/`, built when `ODAI_BUILD_EXAMPLES=ON`.
+All are plain executables with a hand-rolled `int main()` and inline assertions — **no test framework** — except `odai_stability_gtests`, the one GTest suite (skipped with a `message(STATUS)` if GTest isn't found for your triplet). No test executable links Vulkan; the only headless-Vulkan check is the offscreen-capture smoke test under `examples/ui_stress_test/`, built when `ODAI_BUILD_EXAMPLES=ON`. `ctest -N` lists the full set; the sources in `tests/` map onto the target names.
 
-| Target | Covers |
-|---|---|
-| `odai_foundation_tests` | chunk grid, world gen, mesher |
-| `odai_job_system_tests` | `core/job_system` |
-| `odai_chunk_mesh_scheduler_tests` | async chunk-meshing scheduler |
-| `odai_ui_tests` | draw list, font metrics, rich text, widgets, bindings, `.ui.json` document loader (headless) |
-| `odai_ui_editor_tests` | UI editor document core: `.ui.json` schema authoring, layout/hit-test, undo/redo, snapping, align/distribute/clipboard, HSV/color-harmony/WCAG-contrast math, plus a round-trip through the real `ui::UiDocumentLoader` (headless) |
-| `odai_retro_widgets_tests` | retro theme widget rendering |
-| `odai_svg_vector_tests` | SVG import, tessellation, `.odaivec` cache |
-| `odai_strategy_map_tests` | hex grid model, `.smap` serialization, mesher |
-| `odai_economy_tests`, `odai_advisor_tests`, `odai_great_people_tests` | `src/game/` 4X systems |
-| `odai_procgen_tests` | building/civic generators, CSG, primitives |
-| `odai_content_tests` | `mods/base` JSON content database + load order |
-| `odai_dialogue_tests` | dialogue graph runtime + state serialization |
-| `odai_animation_tests` | skeleton hierarchy, clip sampling |
-| `odai_audio_tests` | audio facade against the null backend |
-| `odai_lua_hook_tests`, `odai_city_script_tests` | Lua `IModHost` dispatch, citybuilder scripts |
-| `odai_imported_scene_tests` | scene import/export round-trip |
-| `odai_fnv_import_tests` | Fallout: New Vegas BSA/ESM/NIF readers (synthetic fixtures only — see README) |
-| `odai_core_types_tests` | `core/hash.h`, `core/lcg.h`, `core/ring_buffer.h`, `core/frame_profiler.h`, `math/geometry.h` + math scalar helpers (golden vectors pin content-affecting hashes and RNG) |
-| `odai_engine_stats_tests` | `engine/game_frame_stats.h` CPU timing zones: accumulate-then-commit, nested-zone accounting, fps derivation |
-| `odai_stability_gtests` | GTest: frame graph, render math, shadow culling, sim network |
+Three suites carry contracts the source alone won't tell you: `odai_core_types_tests` pins content-affecting hashes and RNG with **golden vectors** (worldgen output must reproduce), `odai_fnv_import_tests` runs on **synthetic fixtures only** — never real game data — and `odai_content_tests` covers `mods/base` load order, not just parsing.
 
 CI (`.github/workflows/ci.yml`) runs Linux only (full build including Vulkan on lavapipe, `slangc` installed, examples ON). Windows is a supported local dev target (see Build Commands above) but is not built in CI.
 
-### Content generation tools (`ODAI_BUILD_TOOLS=ON`, all pure CPU)
+### Content generation tools
 
-```powershell
-odai_strategy_map_gen [smap] [bin] [w] [h] [seed]   # writes strategy_map.smap + strategy_map_scene.bin
-odai_civ_sim        [turns] [seed] [empires] [--quiet|--sweep N]   # headless 4X playtest metrics + CPU benchmark
-odai_stellaris_sim  [turns] [seed] [empires] [--quiet|--sweep N]   # headless space-4X playtest metrics + CPU benchmark
-odai_dds_bundler    <file.png>... | --dir <dir>     # offline PNG -> BC3 .dds sidecars
-odai_svg_bundler    <file.svg>... | --dir <dir> [--sizes 16,32,64]  # SVG -> .odaivec cache
-odai_theme_viewer                                   # terminal theme-token dump with hot reload
-odai_newvegas_cooker <DataFiles> <Plugin.esm> <out.bin> --cell <EditorID>
-odai_newvegas_cooker <DataFiles> <Plugin.esm> <out.bin> --worldspace <EditorID> <x0> <z0> <x1> <z1>
-```
-
-**`--sweep N` is the CPU regression harness.** Both sim tools replay N deterministic seeded matches headlessly and now report wall clock alongside the balance metrics — mean/median/p95 per match, µs per turn, and turns/sec (`src/tools/sim_bench.h`). Balance output is unchanged and stays bit-identical across build types, so one command answers both "did the game get less fun" and "did the turn loop get slower". Measured with `--sweep 8`: **28203 turns/sec** at `-O3 -DNDEBUG` vs **4879** at `-O0` (5.8x) — the report prints a warning when `NDEBUG` is absent for exactly that reason.
+The offline generators and headless sim harnesses (`ODAI_BUILD_TOOLS=ON`, all pure CPU) are
+documented in the `.claude/skills/content-tools` skill — including `--sweep N`, the CPU
+regression harness for the turn loop.
 
 **Stale README warning:** `README.md` still documents a Morrowind `odai_balmora_cooker` plus ESM/LAND/LTEX extraction. **Neither the target nor any Morrowind import code exists in the tree** — `src/import/` holds only the shared `ImportedScene`/DDS/GPU-scene code plus `import/fnv/`. Trust the source and this file over that part of the README.
 
@@ -257,13 +227,8 @@ No dynamic loading (`dlopen`/DLL) is involved anywhere — a "plugin" here is a 
 
 ### Shader system
 
-Shaders use **Slang** (`.slang` → `.slang.spv` SPIR-V). Shared includes live in `src/render/shaders/`:
-- `camera_uniform.slang` — MVP, inverse matrices, FOV, near/far planes
-- `chunk_push_constants.slang` — per-draw chunk offset and LOD
-- `fullscreen_triangle.slang` — clip-space triangle for post passes
-- `sh_lighting.slang` — spherical-harmonics GI evaluation
-- `voxel_decode.slang` — voxel color unpacking
-- `noise.slang` — shared noise functions
+Shaders use **Slang** (`.slang` → `.slang.spv` SPIR-V). Shared includes live in `src/render/shaders/`. One of them has a contract worth stating up front:
+
 - `pbr.slang` — metallic-roughness BRDF (GGX/Smith/Schlick + analytic env BRDF). Specular only: it layers onto the existing baked-GI diffuse chain rather than replacing it. Materials are opt-in per vertex through the packed flag bits defined in `src/import/imported_scene.h` — geometry without the PBR bit shades exactly as it did before
 
 Ray-traced shadow/reflection variants compile the same `.slang` source with `-DODAI_RT_SHADOWS=1` or `-DODAI_RT_REFLECTIONS=1`.
@@ -276,7 +241,6 @@ Ray-traced shadow/reflection variants compile the same `.slang` source with `-DO
 - Private members: `m_camelCase` prefix
 - Module-scoped constants: `k` prefix — `kMaxFramesInFlight`, `kUiNoTexture`
 - Source files: `.cc` (not `.cpp`)
-- Warnings: every target compiles with `-Wall -Wextra -Wpedantic` (GCC/Clang) or `${ODAI_WARN_FLAGS_MSVC}`. `.clang-tidy` enables `bugprone/cppcoreguidelines/modernize/performance/readability/portability`, with magic-number and trailing-return-type checks disabled.
 
 ## Docs index
 
@@ -290,6 +254,10 @@ Ray-traced shadow/reflection variants compile the same `.slang` source with `-DO
 | `docs/bloom.md`, `voxel_gi.md`, `shadow_occluder.md`, `spatial_partitioning_plan.md`, `stylized_low_poly.md`, `minecraft_clone_modernization.md` | Per-feature rendering/design notes |
 
 The `.claude/skills/new-game` skill scaffolds a new `src/games/<name>/` target; `.claude/skills/vulkan-docs` checks current Vulkan practice before touching `render/backend/vulkan/`.
+
+## Review agents (`.claude/agents/`)
+
+Nine subagents, each carrying a distinct lens grounded in this codebase rather than generic advice. They are review/advice specialists — pick the one whose lens matches the question rather than asking the same question of several. Most can edit; `jonas` is read-only by design. Each agent's own `description:` states its lens and when to reach for it.
 
 ## Local Paths
 

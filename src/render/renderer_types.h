@@ -59,6 +59,23 @@ enum class ShadowMode : std::uint8_t {
     Auto = 2,
 };
 
+// Screen-space ambient-occlusion estimator. Each maps to its own compute pipeline
+// built from ssao.comp.slang with a different ODAI_AO_MODE, so the sample loop
+// carries no uniform branch. Off dispatches neither the AO nor the blur pass and
+// leaves the world shaders' ambient factor at 1.
+//
+// Ssao is the original normal-oriented hemisphere point sampler and the cheapest.
+// Hbao (Bavoil 2008) marches horizons and catches contact darkening a point
+// sampler misses. Gtao (Jimenez 2016) does the same horizon search through the
+// correct cosine-weighted visibility integral, so it converges on ray-traced AO;
+// it is the default and the right pick unless you are budget-bound.
+enum class AoMode : std::uint8_t {
+    Off = 0,
+    Ssao = 1,
+    Hbao = 2,
+    Gtao = 3,
+};
+
 enum class VoxelGiSurfaceMode : std::uint8_t {
     Legacy = 0,
     RtSurface = 1,

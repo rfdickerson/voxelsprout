@@ -430,6 +430,7 @@ add_library(odai_content STATIC
     src/content/content_database.cc
     src/content/content_loader.cc
     src/content/content_paths.cc
+    src/content/material_library.cc
     src/content/mod_loader.cc
 )
 target_include_directories(odai_content PUBLIC
@@ -582,6 +583,7 @@ if(ODAI_BUILD_APP)
         src/import/dds.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
         src/render/frame_graph.cc
         src/render/renderer.cc
         src/world/magica_voxel.cc
@@ -762,6 +764,7 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -811,6 +814,7 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -851,12 +855,16 @@ if(ODAI_BUILD_APP)
         add_executable(odai_game_citybuilder
             src/games/citybuilder/citybuilder_main.cc
             src/games/citybuilder/citybuilder_app.cc
+            src/core/file_watch.cc
             src/games/citybuilder/citybuilder_citizens.cc
+            src/games/citybuilder/citybuilder_fields.cc
+            src/games/citybuilder/citybuilder_save.cc
             src/engine/game_app.cc
             src/engine/plugin.cc
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/procgen/csg.cc
             src/procgen/primitives.cc
             src/procgen/mesh_emit.cc
@@ -881,7 +889,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_game_citybuilder PRIVATE
-            odai_ui odai_ui_vulkan odai_audio odai_city_script
+            odai_ui odai_ui_vulkan odai_audio odai_city_script odai_content
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -911,6 +919,7 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/procgen/humanoid_generator.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
@@ -957,6 +966,7 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -1002,6 +1012,7 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -1049,6 +1060,7 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -1095,6 +1107,7 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -1141,6 +1154,7 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -1186,6 +1200,7 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -1232,6 +1247,7 @@ if(ODAI_BUILD_APP)
             src/import/dds.cc
             src/import/gpu_scene.cc
             src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
             src/world/world.cc
@@ -1264,6 +1280,53 @@ if(ODAI_BUILD_APP)
             target_compile_options(odai_design_system_demo PRIVATE ${ODAI_WARN_FLAGS_MSVC})
         else()
             target_compile_options(odai_design_system_demo PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+        add_executable(odai_material_editor
+            src/tools/material_editor/material_editor_main.cc
+            src/tools/material_editor/material_editor_app.cc
+            src/core/file_watch.cc
+            src/procgen/csg.cc
+            src/procgen/primitives.cc
+            src/procgen/mesh_emit.cc
+            src/procgen/building_generator.cc
+            src/engine/game_app.cc
+            src/engine/plugin.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_material_editor PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_material_editor PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_material_editor PRIVATE
+            odai_ui odai_ui_vulkan odai_audio odai_content
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_material_editor PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_material_editor PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_material_editor slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_material_editor PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_material_editor PRIVATE -Wall -Wextra -Wpedantic)
         endif()
     endif()
 endif()
@@ -1316,6 +1379,7 @@ if(ODAI_BUILD_TOOLS)
         src/game/strategy_map_mesh.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
         src/tools/strategy_map_gen_main.cc
     )
     target_include_directories(odai_strategy_map_gen PRIVATE src)
@@ -1415,6 +1479,7 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
         src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
     )
     target_include_directories(odai_newvegas_cooker PRIVATE src)
     target_link_libraries(odai_newvegas_cooker PRIVATE ZLIB::ZLIB)
@@ -1431,6 +1496,7 @@ if(BUILD_TESTING)
         src/import/dds.cc
         src/import/gpu_scene.cc
         src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
     )
     target_include_directories(odai_imported_scene_tests PRIVATE src)
 
@@ -1725,6 +1791,20 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME odai_content_tests COMMAND odai_content_tests)
 
+    add_executable(odai_material_library_tests
+        tests/material_library_tests.cc
+        src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
+    )
+    target_include_directories(odai_material_library_tests PRIVATE src)
+    target_link_libraries(odai_material_library_tests PRIVATE odai_content ZLIB::ZLIB)
+    if(MSVC)
+        target_compile_options(odai_material_library_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_material_library_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_material_library_tests COMMAND odai_material_library_tests)
+
     # Dialogue trees (Dragon Age touchstone): JSON loading, condition filtering,
     # effect application, auto-continue chains, and dangling-reference/cycle
     # guards. Pure CPU; no Vulkan, no game-state dependency.
@@ -1751,6 +1831,27 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME odai_animation_tests COMMAND odai_animation_tests)
 
+    # PBR materials: the metallic-roughness flag packing, the humanoid generator's
+    # per-color-group material assignment (and that leaving it unset is a no-op),
+    # and a C++ transcription of src/render/shaders/pbr.slang checked against
+    # reference values -- the GGX normalization identity, Schlick's endpoints, and
+    # an energy-conservation bound that pins the diffuse-convention pi scale.
+    # Pure CPU; no Vulkan.
+    add_executable(odai_pbr_material_tests
+        tests/pbr_material_tests.cc
+        src/procgen/humanoid_generator.cc
+        src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
+    )
+    target_include_directories(odai_pbr_material_tests PRIVATE src)
+    target_link_libraries(odai_pbr_material_tests PRIVATE odai_anim ZLIB::ZLIB)
+    if(MSVC)
+        target_compile_options(odai_pbr_material_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_pbr_material_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_pbr_material_tests COMMAND odai_pbr_material_tests)
+
     # Lua scripting engine: event hooks fire with the right counts/order, and a
     # scripted run is deterministic (same seed+mod -> identical TurnSamples; a
     # no-op mod matches a NullModHost run). Links odai_script (Lua).
@@ -1776,6 +1877,21 @@ if(BUILD_TESTING)
     target_include_directories(odai_city_script_tests PRIVATE src)
     target_link_libraries(odai_city_script_tests PRIVATE odai_city_script)
     add_test(NAME odai_city_script_tests COMMAND odai_city_script_tests)
+
+    # Citybuilder spatial fields: influence/coverage tables, the disc splat and
+    # the population-weighted mean. No Vulkan, no GameApp — the whole point of
+    # keeping this math out of citybuilder_app.cc is that it tests headlessly.
+    add_executable(odai_city_fields_tests
+        tests/city_fields_tests.cc
+        src/games/citybuilder/citybuilder_fields.cc
+    )
+    target_include_directories(odai_city_fields_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_city_fields_tests PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_city_fields_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_city_fields_tests COMMAND odai_city_fields_tests)
 
     add_executable(odai_ui_tests tests/ui_tests.cc)
     target_link_libraries(odai_ui_tests PRIVATE odai_ui)

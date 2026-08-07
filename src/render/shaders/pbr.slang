@@ -20,6 +20,28 @@ public struct PbrSurface
     public float roughness;
 };
 
+// Unit conversion between a physically normalized BRDF and this engine's diffuse
+// convention. Derivation, because getting this backwards is silent and costly:
+//
+// The rendering equation gives Lo = f(l,v) * E_perp * cos(theta_l) for one
+// analytic light. For Lambert, f = albedo/pi, so Lo_diff = (albedo/pi)*E*cos.
+// Every diffuse path in this engine instead computes `albedo * E * cos` -- the
+// 1/pi is folded into the light intensities and the exposure, and every scale
+// factor downstream was tuned against that. pbrDirectSpecular() returns a
+// correctly normalized D*V*F*NdotL, so against that diffuse it is exactly pi
+// times too dim: a metal, which trades all of its diffuse for specular via
+// pbrDiffuseScale(), renders ~3x dark. Callers of pbrDirectSpecular multiply by
+// this to put the two in the same units.
+//
+// This does NOT apply to pbrAmbientSpecular(). Its split-sum second factor is a
+// hemispherical *reflectance*, not a BRDF, so it wants prefiltered radiance --
+// and the caller hands it evaluateShIrradiance(), which is an irradiance
+// (E = pi*L for a uniform environment; the Lambert convolution in
+// renderer_shared.h bakes the A_0 = pi in). That accidental pi already lands the
+// ambient specular on the same convention as the ambient diffuse beside it.
+// Scaling it again would make it pi times too bright. See tests/pbr_material_tests.cc.
+public static const float kPbrDiffuseConventionScale = 3.14159265;
+
 // Dielectrics reflect ~4% at normal incidence; metals tint their reflection
 // with the base color and have no diffuse lobe of their own.
 public float3 pbrSpecularF0(float3 albedo, float metallic)
@@ -41,12 +63,26 @@ public float pbrPerceptualToAlpha(float roughness)
     return clamped * clamped;
 }
 
-// Trowbridge-Reitz / GGX normal distribution.
+// Trowbridge-Reitz / GGX normal distribution. Normalized so that
+// integral of D(h)*cos(theta_h) dw_h == 1 over the hemisphere; tests/pbr_material_tests.cc
+// checks that identity directly, which is what caught the denominator epsilon below.
+//
+// That epsilon guards a genuine 0/0 when alpha == 0, but it must not bite for any
+// alpha the caller can actually produce. At the peak (ndoth == 1) the denominator
+// is pi*a2*a2, so a clamp of E starts truncating the lobe once a2 < sqrt(E/pi).
+// The old value of 1e-7 put that threshold at a2 < 1.784e-4, i.e. alpha < 0.0134,
+// i.e. perceptual roughness < 0.1156 -- well inside the range a polished material
+// uses, and pbrPerceptualToAlpha's floor of 0.045 sits far below it. At that floor
+// the clamp capped D's peak at 41 instead of 77700 and the lobe kept 4.5% of its
+// energy, so smooth metals reflected ~1/22 of what they should on top of the
+// separate 1/pi convention deficit. 1e-30 is still nowhere near fp32's denormal
+// range (~1e-38) yet is orders of magnitude below the smallest real denominator
+// (pi*a2*a2 = 5.3e-11 at the roughness floor), so it only ever catches alpha == 0.
 public float pbrDistributionGgx(float ndoth, float alpha)
 {
     const float a2 = alpha * alpha;
     const float d = ((ndoth * ndoth) * (a2 - 1.0)) + 1.0;
-    return a2 / max(3.14159265 * d * d, 1e-7);
+    return a2 / max(3.14159265 * d * d, 1e-30);
 }
 
 // Smith height-correlated visibility, already divided by the 4*NdotL*NdotV

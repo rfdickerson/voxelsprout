@@ -113,6 +113,25 @@ public:
     [[nodiscard]] const std::vector<Citizen>& roster() const { return m_roster; }
     std::deque<TickerItem>& ticker() { return m_ticker; }
 
+    // Explicit save seam, rather than making the serializer a friend. The RNG
+    // state and the counter travel with the roster on purpose: restore the
+    // people without them and the reloaded city drifts out of step with the
+    // story stream that made those people interesting.
+    struct SaveState {
+        std::uint32_t rngState = 0;
+        std::uint32_t citizenCounter = 0;
+        std::vector<Citizen> roster;
+    };
+    [[nodiscard]] SaveState saveState() const {
+        return SaveState{m_rng.state, m_citizenCounter, m_roster};
+    }
+    void restoreState(SaveState state) {
+        m_rng.state = state.rngState != 0 ? state.rngState : 1u;
+        m_citizenCounter = state.citizenCounter;
+        m_roster = std::move(state.roster);
+        m_ticker.clear();  // headlines are ephemeral; a loaded city starts quiet
+    }
+
 private:
     void pushTicker(std::string text, TickerKind kind, short c, short r);
     // All tags currently true for a citizen ("fit", "married", "affair", ...).

@@ -404,7 +404,24 @@ void RendererBackend::buildFrameStatsUi() {
             // scale of the geometry -- block-sized voxels want a far smaller radius
             // than the strategy map's terrain.
             ImGui::SliderFloat("AO Radius", &m_shadowDebugSettings.ssaoRadius, 0.25f, 64.0f, "%.2f");
-            ImGui::SliderFloat("AO Bias", &m_shadowDebugSettings.ssaoBias, 0.0f, 4.0f, "%.3f");
+            // Bias units differ per estimator, so the slider follows the mode rather
+            // than pretending one number and one range serve all three. Ranges match
+            // the shader's per-variant clamps.
+            switch (m_shadowDebugSettings.aoMode) {
+                case AoMode::Hbao:
+                    ImGui::SliderFloat("AO Bias (sine)", &m_shadowDebugSettings.hbaoBias,
+                                       0.0f, 0.5f, "%.3f");
+                    break;
+                case AoMode::Gtao:
+                    ImGui::SliderFloat("AO Bias (radians)", &m_shadowDebugSettings.gtaoBias,
+                                       0.0f, 0.4f, "%.3f");
+                    break;
+                case AoMode::Ssao:
+                case AoMode::Off:
+                    ImGui::SliderFloat("AO Bias (depth)", &m_shadowDebugSettings.ssaoBias,
+                                       0.0f, 4.0f, "%.3f");
+                    break;
+            }
             ImGui::SliderFloat("AO Intensity", &m_shadowDebugSettings.ssaoIntensity, 0.0f, 2.0f, "%.2f");
             ImGui::TreePop();
         }

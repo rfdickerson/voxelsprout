@@ -1,5 +1,9 @@
 #include "games/citybuilder/citybuilder_app.h"
 
+#include "games/citybuilder/citybuilder_save.h"
+
+#include "content/material_library.h"
+
 #include "core/lcg.h"
 #include "core/ring_buffer.h"
 #include "math/math.h"
@@ -106,7 +110,19 @@ constexpr int   kHistMax       = 180;
 // or fast a simulated month is tuned to run — the once-a-month economic
 // heartbeat (kMonthInterval) is a separate knob from "how long until this
 // specific lot finds a buyer."
-constexpr float kZoneListingSeconds = 12.0f;
+constexpr float kZoneListingSeconds = 4.0f;
+constexpr const char* kQuickSavePath = "city_quicksave.bin";  // F5 / F9
+constexpr const char* kMaterialLibraryPath = "assets/materials/library.json";
+
+// Named material library slots. Slot 0 is the reserved sentinel (see
+// import/imported_material.h), so authorable entries start at 1. These are
+// seeded in onInit() with the same coefficients building_generator would have
+// used inline, so enabling the library changes nothing until someone edits it.
+constexpr std::uint32_t kMaterialGlass = 1u;
+constexpr std::uint32_t kMaterialMullion = 2u;
+constexpr std::uint32_t kMaterialWall = 3u;
+constexpr std::uint32_t kMaterialRoof = 4u;
+constexpr std::uint32_t kMaterialCount = 5u;
 
 // The civic day/week clock. Deliberately separate from the economic month:
 // one theatrical day lasts a real minute at 1x, so the whole weekly routine
@@ -129,7 +145,12 @@ constexpr float kCamMaxZoom  = 70.0f;
 // The systemic feel of the city lives in these numbers — balance by turning
 // them while playing, not by editing formulas inline.
 constexpr int   kPowerRadius          = 9;       // a plant's direct glow, roads or not
-constexpr int   kFireProtectRadius    = 6;       // fire dept coverage splat (also its amenity ring)
+// Census yield per point of `develop` on a zoned tile. kResidentsPerDevel also
+// weights the citywide coverage averages, so a district's stats count for as
+// much as it houses.
+constexpr float kResidentsPerDevel    = 34.0f;
+constexpr float kComJobsPerDevel      = 30.0f;
+constexpr float kIndJobsPerDevel      = 26.0f;
 constexpr float kFireBaseChance       = 0.0001f; // per developed tile per month
 constexpr float kFireIndustrialMul    = 3.0f;    // industry burns easiest
 constexpr float kFireOldEraMul        = 2.0f;    // 1890s wood/brick (low develop) is tinder
@@ -159,6 +180,29 @@ constexpr float kCongestionDecay      = 0.25f;   // per-second EMA decay of traf
 constexpr int   kCongestionNuisanceRadius = 2;   // jammed arterials hurt frontage land value
 constexpr float kCongestionNuisancePeak   = 0.12f;
 constexpr float kConstructionDev      = 0.7f;    // develop below this renders as a building site
+constexpr float kGroundbreakDev       = 0.55f;   // fraction of kConstructionDev a lot starts at
+constexpr float kGrowthRate           = 0.34f;   // monthly lerp toward the demand-set target
+// Each service gets a distinct mechanical job, so eight municipal buildings
+// stop being one building with eight roof colours. Police suppress ignition,
+// schools/libraries raise what the land is allowed to become, clinics fight
+// smog (see kHealthPollutionPenalty), fire houses already suppress and
+// extinguish (kFireCoverageCut).
+constexpr float kArsonPoliceCut       = 0.55f;   // ignition cut at full police coverage
+constexpr float kDensityCeilBase      = 1.4f;    // develop ceiling with no schooling at all
+constexpr float kDensityCeilEduFull   = 0.60f;   // education coverage that unlocks full density
+// Demand feedback. Without these, happiness is a number the city computes and
+// then ignores, which makes every service building a reskin of every other one
+// and leaves land value the only loop the player can actually push on. Growth
+// reads LAST month's happiness (the eased update runs after demand is set) —
+// the lag is correct anyway: people move to a town's reputation, not its
+// instantaneous census.
+constexpr float kDemandNeutralHappy   = 50.0f;   // happiness that neither helps nor hurts
+constexpr float kDemandHappyWeight    = 0.30f;   // residential demand swing, full mood range
+constexpr float kDemandComHappyScale  = 0.5f;    // shops care, but less than residents
+// Pollution earns its overlay: smog where people actually live drags public
+// health down, so siting industry downwind of housing is a real decision and
+// the Pollution layer predicts something instead of just describing it.
+constexpr float kHealthPollutionPenalty = 0.55f; // coverage lost at full population-weighted smog
 constexpr int   kMaxSims              = 96;      // pedestrian cap
 constexpr int   kSimsBase             = 6;       // walkers even in a hamlet
 constexpr int   kPopPerSim            = 22;      // one walker per this many residents
@@ -179,9 +223,15 @@ constexpr float kStormSeverityThreshold   = 0.35f;  // above: thunderstorm (wind
 constexpr float kTornadoSeverityThreshold = 0.55f;  // above: the storm carries a funnel
 constexpr float kLightningChance      = 0.40f;   // per-month strike odds scale at severity 1
 constexpr float kTornadoRadius        = 1.6f;    // damage radius, tiles
-constexpr float kTornadoDamageRate    = 0.9f;    // develop stripped per month at intensity 1
-constexpr float kTornadoIgniteChance  = 0.15f;   // downed lines: rubble catches fire
-constexpr float kTornadoWreckChance   = 0.45f;   // municipal building flattened per month in core
+// Damage is continuous, in sim time, because the funnel MOVES in sim time:
+// at kTornadoSpeed it crosses its own 3.2-tile core in ~2.9 s, so a per-month
+// pass (kMonthInterval apart) would let it travel 66 tiles on a 56-tile map
+// without touching anything. These are per-second rates at intensity 1 and
+// falloff 1; the "does a tile get hit" question is answered by dwell time.
+constexpr float kTornadoDamageRate    = 1.4f;    // develop stripped per second
+constexpr float kTornadoIgniteChance  = 0.10f;   // downed lines spark, per second
+constexpr float kTornadoWreckChance   = 0.30f;   // municipal flattened per second in core
+constexpr float kTornadoTossChance    = 0.90f;   // car thrown from the core, per second
 constexpr float kTornadoDecay         = 0.012f;  // intensity lost per second, baseline
 constexpr float kTornadoCoolGroundDecay = 0.05f; // extra decay over water/parks/open land
 constexpr float kTornadoSpeed         = 1.1f;    // ground speed, tiles per second
@@ -258,6 +308,35 @@ const char* seasonName(procgen::Season s) {
 
 using Tool = CityBuilderApp::Tool;
 
+// The palette, top to bottom: the single source of truth for the tool order,
+// walked by the layout solver, the hit-test and the drawing pass alike. An
+// entry is either a section header or a tool row, never both — the tool field
+// on a header row is ignored.
+struct PaletteEntry {
+    const char* header;  // nullptr for a tool row
+    Tool        tool;
+};
+constexpr PaletteEntry kPaletteOrder[] = {
+    {"DANGER", Tool::Bulldoze},
+    {nullptr, Tool::Bulldoze},
+    {nullptr, Tool::Match},
+    {"ZONES", Tool::ZoneR},
+    {nullptr, Tool::ZoneR},
+    {nullptr, Tool::ZoneC},
+    {nullptr, Tool::ZoneI},
+    {"NETWORK", Tool::Road},
+    {nullptr, Tool::Road},
+    {"SERVICES", Tool::Police},
+    {nullptr, Tool::Police},
+    {nullptr, Tool::Fire},
+    {nullptr, Tool::Clinic},
+    {nullptr, Tool::School},
+    {nullptr, Tool::Park},
+    {nullptr, Tool::Library},
+    {nullptr, Tool::Amphitheater},
+    {nullptr, Tool::Power},
+};
+
 bool isPaintTool(Tool t) {
     return t == Tool::Bulldoze || t == Tool::Road || t == Tool::ZoneR ||
            t == Tool::ZoneC || t == Tool::ZoneI;
@@ -322,13 +401,17 @@ UiColor mix(const UiColor& a, const UiColor& b, float t) {
 }
 UiColor withA(const UiColor& c, float a) { return {c.r, c.g, c.b, a}; }
 
-// Red → amber → green ramp for the land-value overlay (0 = poor, 1 = prime).
-UiColor heat(float d) {
-    const UiColor lo  = UiColor::fromRgbHex(0xD64B3E);
-    const UiColor mid = UiColor::fromRgbHex(0xE7C24A);
-    const UiColor hi  = UiColor::fromRgbHex(0x46C46B);
-    return d < 0.5f ? mix(lo, mid, d * 2.0f) : mix(mid, hi, (d - 0.5f) * 2.0f);
+// Choropleth swatch for a normalized field value on the active layer. Quantized
+// to kDataLayerClasses rather than interpolated: see DataLayerDesc.
+UiColor dataSwatch(const DataLayerDesc& d, float v) {
+    return UiColor::fromRgbHex(d.ramp[dataLayerClass(clamp01(v))]);
 }
+
+// Water carries no data, so while a layer is up it drops to neutral slate: the
+// only chroma on the map is then the scale itself (figure/ground). Alternating
+// pair keeps the existing checker so the shoreline still reads.
+constexpr UiColor kDataWater    = UiColor::fromRgbHex(0x394047);
+constexpr UiColor kDataWaterAlt = UiColor::fromRgbHex(0x333A41);
 
 // Civic buildings are generated CSG meshes (see cachedCivic); the park keeps a
 // flat green slab under its centerpiece and trees.
@@ -460,30 +543,6 @@ procgen::TriMesh buildSnowmanMesh(std::uint32_t variant) {
     return m;
 }
 
-// Spatial influence each municipal building splats into the desirability
-// fields (computeDesirability) — shared with the placement-time ring preview
-// in drawWorldOverlay so what the player is shown is exactly what the sim
-// uses. radius 0 = no influence.
-struct InfluenceSpec {
-    int   radius = 0;
-    float peak = 0.0f;
-    bool  nuisance = false;
-};
-
-constexpr InfluenceSpec buildingInfluence(Building b) {
-    switch (b) {
-        case Building::Park:         return {5, 0.55f, false};
-        case Building::Police:       return {6, 0.28f, false};
-        case Building::Fire:         return {kFireProtectRadius, 0.24f, false};
-        case Building::Clinic:       return {6, 0.24f, false};
-        case Building::School:       return {6, 0.30f, false};
-        case Building::Library:      return {5, 0.26f, false};
-        case Building::Amphitheater: return {7, 0.50f, false};  // culture draw
-        case Building::Power:        return {5, 0.45f, true};   // dirty neighbour
-        default:                     return {};
-    }
-}
-
 // Accumulates flat-shaded packed geometry into an ImportedScene — the same
 // "MeshBuilder" pattern strategy_map_mesh.cc uses to feed the renderer's
 // packed vertex-color path (textureIndex left at its 0xFFFFFFFF default, so
@@ -587,11 +646,41 @@ std::string readEnv(const char* name) {
 // ─────────────────────────────────────────────────────────────────────────────
 bool CityBuilderApp::onInit() {
     const float s = contentScale();
+
+    // Seed the named material library with exactly the coefficients
+    // building_generator used inline before it existed, so turning the library
+    // on is a no-op visually. From here a coefficient edit is a 32-byte write
+    // that never touches geometry -- see Renderer::setImportedMaterial.
+    m_materials.assign(kMaterialCount, importer::ImportedSceneMaterial{});
+    m_materials[kMaterialGlass].name = "facade_glass";
+    m_materials[kMaterialGlass].metallic = procgen::kBuildingGlassMetallic;
+    m_materials[kMaterialGlass].roughness = procgen::kBuildingGlassRoughness;
+    m_materials[kMaterialMullion].name = "facade_mullion";
+    m_materials[kMaterialMullion].metallic = procgen::kBuildingMullionMetallic;
+    m_materials[kMaterialMullion].roughness = procgen::kBuildingMullionRoughness;
+    // Wall and roof had no coefficients before -- they were the default rough
+    // dielectric -- so these seed values ARE the previous look until edited.
+    m_materials[kMaterialWall].name = "building_wall";
+    m_materials[kMaterialWall].roughness = 1.0f;
+    m_materials[kMaterialRoof].name = "building_roof";
+    m_materials[kMaterialRoof].roughness = 1.0f;
+    reloadMaterialLibrary();  // overlay the on-disk library, if there is one
+    m_renderer.setImportedMaterialTable(m_materials);
+    // Edit assets/materials/library.json with the game running and the change
+    // lands on the next frame.
+    m_materialWatch.watch(resolveAssetPath(kMaterialLibraryPath),
+                          [this] { reloadMaterialLibrary(); });
+
+    // Modular type scale, ratio 1.2 off a 15px body: 12 caption / 15 body /
+    // 18 display. Four baked atlases, not a continuum — every size costs a pack.
+    // The HUD had exactly one size before, which left weight and colour doing
+    // all the hierarchy work and made a stat label as loud as its own value.
     if (!loadFonts(resolveAssetPath("assets/fonts/Inter-Regular.ttf"),
                    resolveAssetPath("assets/fonts/Inter-Bold.ttf"),
                    resolveAssetPath("assets/fonts/Inter-Italic.ttf"),
                    resolveAssetPath("assets/fonts/JetBrainsMono-Regular.ttf"),
-                   std::round(15.0f * s), std::round(15.0f * s))) {
+                   std::round(15.0f * s), std::round(18.0f * s),
+                   std::round(12.0f * s), std::round(18.0f * s))) {
         return false;
     }
 
@@ -634,13 +723,25 @@ bool CityBuilderApp::onInit() {
     // at 38 deg elevation so buildings cast readable shadows ~1.3x their
     // height, angled across the iso view rather than straight down it.
     m_renderer.setSunAngles(50.0f, -38.0f);
-    // GameApp::init() always calls setStrategyMapMode(true), which tunes SSAO
-    // radius/bias for the hex strategy map's much larger, flatter scale
-    // (radius=7, bias=6). At this world's kTileWorldSize=1 with ~1-3 unit
-    // building heights, that bias is larger than any real depth step in the
-    // scene, so occlusion can never trigger. Re-tune for this scale: a
-    // ~1.5-tile radius reads as soft contact shading between buildings.
+    // GameApp::init() always calls setStrategyMapMode(true), which tunes AO for the
+    // hex strategy map's much larger, flatter scale (radius=7, SSAO bias=6). The
+    // radius is what matters here: at this world's kTileWorldSize=1 with ~1-3 unit
+    // building heights, a 7-unit radius reaches across whole blocks. A ~1.5-tile
+    // radius reads as soft contact shading between buildings instead.
+    //
+    // The bias argument sets the SSAO depth offset only — 6 world units is larger
+    // than any real depth step at this scale, so the point sampler could never
+    // trigger. GTAO (selected below) takes its horizon clamp from its own default,
+    // in radians; the two are not interchangeable and no longer share a field.
     m_renderer.setAmbientOcclusionTuning(1.6f, 0.06f, 0.95f);
+    // Ground-truth AO over the original hemisphere sampler. A city of flat-shaded
+    // boxes on a flat plane is the case that separates them: the point sampler
+    // only darkens where enough samples land inside geometry, which on a hard
+    // wall-to-ground junction is a soft smudge, while GTAO's horizon integral
+    // resolves the crease itself — and creases are most of what reads as "model
+    // city" here. Picked explicitly rather than left to the backend default so
+    // the diorama look doesn't silently change if that default moves.
+    m_renderer.setAmbientOcclusionMode(render::AoMode::Gtao);
 
     // Lua content host (names, story templates, need schedules, tuning config).
     // Loads mods/citybuilder/scripts; a broken or missing script falls back to
@@ -1287,7 +1388,121 @@ void CityBuilderApp::updateSchedule(float dt) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Simulation
 // ─────────────────────────────────────────────────────────────────────────────
+// Applies the on-disk material library over the built-in defaults, matching by
+// NAME rather than by position.
+//
+// Matching by name is what makes hot reload safe: the material index is baked
+// into vertex flag bits 24-31, and those cannot be updated without re-extruding
+// the whole scene. So a reorder in the JSON must not renumber anything — it
+// would silently repaint every surface in the city. A name that is not one of
+// ours is ignored rather than appended, for the same reason.
+//
+// A broken file keeps the last good values and reports; it never blanks the
+// city, matching the convention that script errors are recorded rather than
+// thrown into the sim.
+void CityBuilderApp::reloadMaterialLibrary() {
+    const auto result = content::loadMaterialLibraryFromFile(resolveAssetPath(kMaterialLibraryPath));
+    if (!result.ok()) {
+        VOX_LOGW("citybuilder") << "material library: " << result.errors.front();
+        flash("Material library error - kept last good values.");
+        if (result.materials.size() <= 1) {
+            return;  // nothing usable in it at all
+        }
+    }
+    int applied = 0;
+    for (std::size_t slot = 1; slot < m_materials.size(); ++slot) {
+        const std::uint32_t found =
+            content::findMaterialIndex(result.materials, m_materials[slot].name);
+        if (found == 0u) {
+            continue;
+        }
+        // Keep our slot number; take only the coefficients.
+        const std::string name = m_materials[slot].name;
+        m_materials[slot] = result.materials[found];
+        m_materials[slot].name = name;
+        m_renderer.setImportedMaterial(static_cast<std::uint32_t>(slot), m_materials[slot]);
+        ++applied;
+    }
+    if (applied > 0) {
+        VOX_LOGI("citybuilder") << "material library: applied " << applied << " material(s)";
+    }
+}
+
+// Parceling: group contiguous same-zone tiles into rectangular plots (1x1 up to
+// 3x2, weighted per zone — industry runs biggest) so blocks read as varied city
+// lots instead of a stamp of identical squares. Deterministic greedy row-major
+// scan, a pure function of the zone/terrain/road/building map.
+//
+// This lives in the simulation, not in buildCityScene where it started, because
+// its output is not presentation: nameAnchor() reads m_tilePlots, which decides
+// business names, which rebuildDestinations() feeds to the citizen sim as
+// workplace identity. While the parceler ran inside the mesher, a citizen's
+// destination category depended on when the *renderer* last re-extruded the
+// city — a 1.2 s cooldown away — and on the first stepMonth() (before any scene
+// build) every tile still named itself. That is the one place this project's
+// "world state never flows back from the renderer" rule was broken, and the
+// const-plus-mutable pair on buildCityScene is exactly what hid it.
+void CityBuilderApp::recomputeParcels() {
+    m_tilePlots.fill(PlotInfo{});
+    // A tile is claimed once its plot record has an origin, so m_tilePlots is
+    // its own occupancy map — no parallel index array needed.
+    const auto parcelable = [&](int c, int r, Zone z) {
+        if (!inBounds(c, r)) return false;
+        const Tile& pt = tile(c, r);
+        return pt.terrain == Terrain::Grass && pt.zone == z && !pt.road &&
+               pt.building == Building::None && pt.fireTicks == 0 && !pt.charred &&
+               m_tilePlots[static_cast<std::size_t>(r) * kGridW + c].c < 0;
+    };
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            const Tile& t = tile(c, r);
+            if (t.zone == Zone::None || !parcelable(c, r, t.zone)) continue;
+            const std::uint32_t roll = tileHash(c, r, 0x9107C0DEu) % 100u;
+            int pw = 1, pd = 1;
+            if (t.zone == Zone::Industrial) {
+                if (roll >= 15 && roll < 40) { pw = 2; pd = 1; }
+                else if (roll < 60) { pw = 1; pd = 2; }
+                else if (roll < 80) { pw = 2; pd = 2; }
+                else if (roll < 92) { pw = 3; pd = 2; }
+                else if (roll >= 92) { pw = 2; pd = 3; }
+            } else if (t.zone == Zone::Commercial) {
+                if (roll >= 30 && roll < 55) { pw = 2; pd = 1; }
+                else if (roll < 75) { pw = 1; pd = 2; }
+                else if (roll < 92) { pw = 2; pd = 2; }
+                else if (roll >= 92) { pw = 3; pd = 2; }
+            } else {
+                if (roll >= 45 && roll < 68) { pw = 2; pd = 1; }
+                else if (roll < 88) { pw = 1; pd = 2; }
+                else if (roll >= 88) { pw = 2; pd = 2; }
+            }
+            const auto rectOk = [&](int w, int d) {
+                for (int dr = 0; dr < d; ++dr)
+                    for (int dc = 0; dc < w; ++dc)
+                        if ((dr != 0 || dc != 0) && !parcelable(c + dc, r + dr, t.zone))
+                            return false;
+                return true;
+            };
+            while (!rectOk(pw, pd)) {
+                if (pw >= pd && pw > 1) --pw;
+                else if (pd > 1) --pd;
+                else break;  // 1x1 always fits (only the origin, already checked)
+            }
+            for (int dr = 0; dr < pd; ++dr) {
+                for (int dc = 0; dc < pw; ++dc) {
+                    m_tilePlots[static_cast<std::size_t>(r + dr) * kGridW + (c + dc)] =
+                        PlotInfo{static_cast<short>(c), static_cast<short>(r),
+                                 static_cast<std::uint8_t>(pw), static_cast<std::uint8_t>(pd)};
+                }
+            }
+        }
+    }
+}
+
 void CityBuilderApp::recomputeStats() {
+    // Parcel layout is an input to the naming layer, which stepMonth() feeds to
+    // the citizen sim — so it has to be current before the census runs, and it
+    // is derived from the same grid this function is about to walk.
+    recomputeParcels();
     // Pass 1: clear coverage flags.
     for (Tile& t : m_tiles) { t.powered = false; t.poweredRoad = false; t.nearRoad = false; }
 
@@ -1328,16 +1543,16 @@ void CityBuilderApp::recomputeStats() {
                             if (inBounds(c + dc, r + dr)) tile(c + dc, r + dr).powered = true;
                 }
             }
-            if (t.zone == Zone::Residential) residents += t.develop * 34.0f;
-            else if (t.zone == Zone::Commercial) comJobs += t.develop * 30.0f;
-            else if (t.zone == Zone::Industrial) indJobs += t.develop * 26.0f;
+            if (t.zone == Zone::Residential) residents += t.develop * kResidentsPerDevel;
+            else if (t.zone == Zone::Commercial) comJobs += t.develop * kComJobsPerDevel;
+            else if (t.zone == Zone::Industrial) indJobs += t.develop * kIndJobsPerDevel;
         }
     }
     const float jobs = comJobs + indJobs;
     // The city's heat island: dense industry and power plants warm the local
-    // atmosphere (indJobs is develop x 26, so this is the develop sum). Severe
-    // weather reads this — the player's own zoning helps brew its storms.
-    m_cityHeat = indJobs / 26.0f + static_cast<float>(m_numPower) * 3.0f;
+    // atmosphere (indJobs is scaled develop, so this recovers the develop sum).
+    // Severe weather reads this — the player's own zoning helps brew its storms.
+    m_cityHeat = indJobs / kIndJobsPerDevel + static_cast<float>(m_numPower) * 3.0f;
 
     // Pass 2.5: power grid. A plant's direct glow (above) only reaches a fixed
     // radius, which stranded any zone built further out even when it was
@@ -1399,21 +1614,46 @@ void CityBuilderApp::recomputeStats() {
     m_population = static_cast<int>(std::lround(residents));
     m_jobs       = static_cast<int>(std::lround(jobs));
 
-    // Demand: residents want jobs, businesses want customers/workers. A small
-    // baseline keeps a fresh city growing.
-    m_resDemand = clamp01(0.34f + (jobs - residents) / 1600.0f);
-    m_comDemand = clamp01(0.30f + (residents * 0.55f - comJobs) / 1300.0f);
+    // Demand: residents want jobs, businesses want customers/workers, and both
+    // care how the city is to live in. A small baseline keeps a fresh city
+    // growing. The mood term is what makes schools, clinics, police, parks and
+    // a working power grid buy growth rather than just tint a chart — see
+    // kDemandHappyWeight. Industry is deliberately left out: factories do not
+    // care about the amphitheatre.
+    const float mood = (m_happiness - kDemandNeutralHappy) / kDemandNeutralHappy;
+    m_resDemand = clamp01(0.34f + (jobs - residents) / 1600.0f +
+                          kDemandHappyWeight * mood);
+    m_comDemand = clamp01(0.30f + (residents * 0.55f - comJobs) / 1300.0f +
+                          kDemandHappyWeight * kDemandComHappyScale * mood);
     m_indDemand = clamp01(0.27f + (residents * 0.50f - indJobs) / 1300.0f);
 
+    // Spatial fields first: the citywide quality stats are averages over them.
+    computeFields();
+
     const float pop = std::max(residents, 1.0f);
-    const float eduTarget    = clamp01((m_numSchool * 700.0f + m_numLibrary * 380.0f) / pop) * 100.0f;
-    const float healthTarget = clamp01(m_numClinic * 900.0f / pop) * 100.0f;
-    const float safety       = clamp01((m_numPolice + m_numFire) * 650.0f / pop);
     const float parkCov      = clamp01(m_numPark * 450.0f / pop);
     const float cultureCov   = clamp01(m_numAmphitheater * 600.0f / pop);
 
-    m_education = lerpf(m_education, eduTarget, m_statEase);
-    m_health    = lerpf(m_health, healthTarget, m_statEase);
+    // Education / Health / Safety are what the *residents* actually get, not
+    // how many buildings the city owns: each is the service-coverage field
+    // averaged over where people live. Building a school across the river from
+    // every house now reads as the miss it is. With nobody housed yet there is
+    // no average to take, so the stats hold their starting values instead of
+    // reporting a coverage of zero.
+    const auto covered = [&](Service s) {
+        return populationWeightedMean(m_coverage[static_cast<std::size_t>(s)], m_popWeight);
+    };
+    const float safety = residents > 0.0f ? covered(Service::Safety) : 0.0f;
+    if (residents > 0.0f) {
+        m_education = lerpf(m_education, covered(Service::Education) * 100.0f, m_statEase);
+        // Clinics raise health; smog where people live lowers it. Both are
+        // population-weighted, so a clinic across the river and a smokestack
+        // across the river both read as the misses they are.
+        const float smog = populationWeightedMean(m_pollution, m_popWeight);
+        const float healthTarget =
+            clamp01(covered(Service::Health) - kHealthPollutionPenalty * smog);
+        m_health = lerpf(m_health, healthTarget * 100.0f, m_statEase);
+    }
 
     float happyTarget = 46.0f + 0.15f * m_education + 0.15f * m_health +
                         20.0f * parkCov + 12.0f * safety + 14.0f * cultureCov +
@@ -1423,44 +1663,53 @@ void CityBuilderApp::recomputeStats() {
                                        static_cast<float>(m_charredTiles) * 0.4f);
     happyTarget = std::clamp(happyTarget, 0.0f, 100.0f);
     m_happiness = lerpf(m_happiness, happyTarget, m_statEase);
-
-    computeDesirability();
 }
 
-// Per-tile land value: scatter "amenity" (nice) and "nuisance" (bad) influence
-// from things already modelled here — parks, service coverage and waterfront lift
-// desirability; power plants and developed industry drag it down. The growth step
-// reads this so WHERE you zone finally matters, and the overlay makes it readable.
-// This is the SimCity move: turn an invisible spatial pressure into a field the
-// player can see, reason about, and set their own goals against.
-void CityBuilderApp::computeDesirability() {
-    std::array<float, static_cast<std::size_t>(kGridW) * kGridH> amenity{};
-    std::array<float, static_cast<std::size_t>(kGridW) * kGridH> nuisance{};
+// Per-tile spatial fields: scatter "amenity" (nice) and "nuisance" (bad)
+// influence from things already modelled here — parks, service coverage and
+// waterfront lift desirability; power plants and developed industry drag it
+// down. The growth step reads land value so WHERE you zone finally matters, and
+// the data-layer overlay makes it readable. This is the SimCity move: turn an
+// invisible spatial pressure into a field the player can see, reason about, and
+// set their own goals against.
+//
+// The same pass fills the fields that only get read rather than fed back:
+// pollution (the subset of nuisance that is actually emissions), the three
+// service-coverage fields the citywide stats average, and the per-tile
+// population weight those averages are taken against.
+void CityBuilderApp::computeFields() {
+    Field amenity{};
+    Field nuisance{};
+    m_pollution.fill(0.0f);
+    m_popWeight.fill(0.0f);
+    for (Field& f : m_coverage) f.fill(0.0f);
 
-    auto splat = [&](std::array<float, static_cast<std::size_t>(kGridW) * kGridH>& field,
-                     int c, int r, int radius, float peak) {
-        for (int dr = -radius; dr <= radius; ++dr) {
-            for (int dc = -radius; dc <= radius; ++dc) {
-                if (!inBounds(c + dc, r + dr)) continue;
-                const float d = std::sqrt(static_cast<float>(dc * dc + dr * dr));
-                if (d > radius) continue;
-                const float w = 1.0f - d / static_cast<float>(radius);  // linear falloff
-                field[static_cast<std::size_t>(r + dr) * kGridW + (c + dc)] += peak * w;
-            }
-        }
+    const auto splat = [](Field& field, int c, int r, int radius, float peak) {
+        splatDisc(field, kGridW, kGridH, c, r, radius, peak);
     };
 
-    // Scatter influence from every source into the two fields.
+    // Scatter influence from every source into the fields.
     for (int r = 0; r < kGridH; ++r) {
         for (int c = 0; c < kGridW; ++c) {
             const Tile& t = tile(c, r);
             if (t.terrain == Terrain::Water) splat(amenity, c, r, 3, 0.10f);  // scenic waterfront
             if (t.bldgOrigin) {
                 const InfluenceSpec inf = buildingInfluence(t.building);
-                if (inf.radius > 0) splat(inf.nuisance ? nuisance : amenity, c, r, inf.radius, inf.peak);
+                if (inf.radius > 0) {
+                    splat(inf.nuisance ? nuisance : amenity, c, r, inf.radius, inf.peak);
+                    if (inf.nuisance) splat(m_pollution, c, r, inf.radius, inf.peak);
+                }
+                // Service reach: the same ring the amenity splat and the
+                // placement preview draw, but peaking at 1.0 — fully served at
+                // the door, nothing at all out at the radius.
+                const Service svc = buildingService(t.building);
+                if (svc != Service::Count) {
+                    splat(m_coverage[static_cast<std::size_t>(svc)], c, r, inf.radius, 1.0f);
+                }
             }
             if (t.zone == Zone::Industrial && t.develop > kDevEps) {
                 splat(nuisance, c, r, 4, 0.16f * t.develop);  // pollution / heavy traffic
+                splat(m_pollution, c, r, 4, 0.16f * t.develop);
             }
             if (t.charred) {
                 splat(nuisance, c, r, kCharNuisanceRadius, kCharNuisancePeak);  // burnt-out blight
@@ -1470,9 +1719,20 @@ void CityBuilderApp::computeDesirability() {
                 // traffic begets falling land value, the classic feedback loop.
                 const float over = std::min(1.0f, (t.trafficLoad - kCongestionStart) / 2.5f);
                 splat(nuisance, c, r, kCongestionNuisanceRadius, kCongestionNuisancePeak * over);
+                splat(m_pollution, c, r, kCongestionNuisanceRadius, kCongestionNuisancePeak * over);
+            }
+            if (t.zone == Zone::Residential) {
+                m_popWeight[static_cast<std::size_t>(r) * kGridW + c] =
+                    t.develop * kResidentsPerDevel;  // same census recomputeStats sums
             }
         }
     }
+
+    // Overlapping sources add, so the read-only fields need a ceiling before
+    // anything treats them as a 0..1 fraction.
+    for (float& v : m_pollution) v = std::min(1.0f, v);
+    for (Field& f : m_coverage)
+        for (float& v : f) v = std::min(1.0f, v);
 
     // Fold the fields into a per-tile score. Homes and shops crave amenities and
     // flee nuisances; industry mostly ignores scenery and tolerates its own kind,
@@ -1540,8 +1800,27 @@ void CityBuilderApp::stepMonth() {
                     // is neutral (multiplier 1.0), prime land overshoots (clamped to
                     // full build-out), and poor land stagnates even in a hot market.
                     const float desMul = 0.4f + 1.2f * t.desirability;
-                    const float target = std::min(3.0f, dem * 3.0f * desMul);
-                    t.develop += (target - t.develop) * 0.16f;
+                    // A school doesn't nudge a number, it raises what the land
+                    // is allowed to become: local education coverage sets the
+                    // density ceiling, so the tall tiers only appear where the
+                    // city actually schooled the neighbourhood.
+                    const std::size_t ci = static_cast<std::size_t>(r) * kGridW + c;
+                    const float edu = m_coverage[static_cast<std::size_t>(Service::Education)][ci];
+                    const float ceiling =
+                        kDensityCeilBase + (3.0f - kDensityCeilBase) *
+                                               clamp01(edu / kDensityCeilEduFull);
+                    const float target = std::min(ceiling, dem * 3.0f * desMul);
+                    // Groundbreaking: a lot that has just cleared its listing
+                    // jumps straight to a visible construction site rather than
+                    // lerping up from nothing. Zoning is the player's signature
+                    // verb and it has to answer inside their attention span —
+                    // the old curve put the first finished building ~4 real
+                    // minutes out, so the rise animation and the milestone
+                    // confetti were craft almost nobody ever saw.
+                    if (t.develop <= kDevEps && target > kDevEps) {
+                        t.develop = std::min(target, kConstructionDev * kGroundbreakDev);
+                    }
+                    t.develop += (target - t.develop) * kGrowthRate;
                 }
             } else {
                 t.develop += (0.0f - t.develop) * 0.10f;  // decay toward abandonment
@@ -1563,7 +1842,6 @@ void CityBuilderApp::stepMonth() {
         }
     }
 
-    stepTornadoDamage();
     stepFire();
 
     // Post-growth census, easing the city quality stats toward their targets.
@@ -1623,27 +1901,37 @@ void CityBuilderApp::stepMonth() {
 // Fire is the mechanic that couples the whole board: ignition odds read the
 // building era, zone, season, and weather; spread reads density; suppression
 // reads fire-dept coverage; and the charred aftermath feeds back into land
-// value (computeDesirability). Runs once per simulated month from stepMonth.
+// value (computeFields). Runs once per simulated month from stepMonth.
 void CityBuilderApp::stepFire() {
-    // Fire-dept coverage field, same linear-falloff splat as computeDesirability.
-    std::array<float, static_cast<std::size_t>(kGridW) * kGridH> cov{};
+    // Fire-dept coverage. Not m_coverage[Safety] — that one merges police in,
+    // and police don't put fires out; this is the fire houses alone, over the
+    // same reach their amenity ring uses.
+    Field cov{};
     for (int r = 0; r < kGridH; ++r) {
         for (int c = 0; c < kGridW; ++c) {
             const Tile& t = tile(c, r);
             if (!t.bldgOrigin || t.building != Building::Fire) continue;
-            for (int dr = -kFireProtectRadius; dr <= kFireProtectRadius; ++dr) {
-                for (int dc = -kFireProtectRadius; dc <= kFireProtectRadius; ++dc) {
-                    if (!inBounds(c + dc, r + dr)) continue;
-                    const float d = std::sqrt(static_cast<float>(dc * dc + dr * dr));
-                    if (d > kFireProtectRadius) continue;
-                    cov[static_cast<std::size_t>(r + dr) * kGridW + (c + dc)] +=
-                        1.0f - d / static_cast<float>(kFireProtectRadius);
-                }
-            }
+            splatDisc(cov, kGridW, kGridH, c, r, kFireProtectRadius, 1.0f);
         }
     }
     const auto covAt = [&](int c, int r) {
         return std::min(1.0f, cov[static_cast<std::size_t>(r) * kGridW + c]);
+    };
+    // Police coverage, built the same way and for the same reason cov is: a
+    // fire house does not deter arson, and m_coverage[Safety] merges the two.
+    // This is what gives a Police Dept a mechanical job that isn't "a park
+    // that costs more" — it suppresses ignitions rather than extinguishing.
+    Field pol{};
+    for (int r = 0; r < kGridH; ++r) {
+        for (int c = 0; c < kGridW; ++c) {
+            const Tile& t = tile(c, r);
+            if (!t.bldgOrigin || t.building != Building::Police) continue;
+            splatDisc(pol, kGridW, kGridH, c, r, buildingInfluence(Building::Police).radius,
+                      1.0f);
+        }
+    }
+    const auto polAt = [&](int c, int r) {
+        return std::min(1.0f, pol[static_cast<std::size_t>(r) * kGridW + c]);
     };
     const auto rnd01 = [&]() -> float {
         odai::core::lcgNext(m_rng);
@@ -1729,6 +2017,7 @@ void CityBuilderApp::stepFire() {
             if (drySummer) chance *= kFireDrySummerMul;
             chance *= 1.0f - 0.8f * wet;
             chance *= 1.0f - kFireCoverageCut * covAt(c, r);
+            chance *= 1.0f - kArsonPoliceCut * polAt(c, r);  // patrolled blocks burn less
             if (rnd01() < chance) {
                 ignite(c, r);
                 ++newIgnitions;
@@ -1951,6 +2240,19 @@ void CityBuilderApp::onTick(float dt) {
     if (m_flashTimer > 0.0f) m_flashTimer -= dt;
     if (m_moneyFlashTimer > 0.0f) m_moneyFlashTimer -= dt;
     if (m_sceneRebuildCooldown > 0.0f) m_sceneRebuildCooldown -= dt;
+    m_materialWatch.tick();  // hot-reload assets/materials/library.json
+
+    // Layout is a pure function of framebuffer size and DPI, both available
+    // here, so it is computed once in the tick phase and cached for onRender.
+    // That is what lets pointer input live in this function at all: everything
+    // that maps a mouse pixel onto the world needs a Layout, and while Layout
+    // was built in onRender the whole input path had to live in the draw phase
+    // — which meant clicks mutated the grid, charged money and started fires
+    // from inside rendering, a frame late. No engine does that on purpose.
+    int fbW = 0, fbH = 0;
+    framebufferSize(fbW, fbH);
+    if (fbW <= 0 || fbH <= 0) return;
+    m_layout = computeLayout();
 
     if (edgeDown(GLFW_KEY_X)) setTool(Tool::Bulldoze);
     if (edgeDown(GLFW_KEY_1)) setTool(Tool::ZoneR);
@@ -1969,7 +2271,9 @@ void CityBuilderApp::onTick(float dt) {
 
     if (edgeDown(GLFW_KEY_SPACE)) m_paused = !m_paused;
     if (edgeDown(GLFW_KEY_G)) m_reportsOpen = !m_reportsOpen;
-    if (edgeDown(GLFW_KEY_L)) { m_showLandValue = !m_showLandValue; m_sceneDirty = true; }
+    // L cycles the data map: Off -> Land Value -> ... -> Safety -> Off. The
+    // first press still lands on Land Value, which is what L has always meant.
+    if (edgeDown(GLFW_KEY_L)) setDataLayer(nextDataLayer(m_dataLayer));
     // Debug: N skips a month — handy for eyeballing season transitions.
     if (edgeDown(GLFW_KEY_N)) stepMonth();
 
@@ -1981,6 +2285,89 @@ void CityBuilderApp::onTick(float dt) {
         if (m_reportsOpen) m_reportsOpen = false;
         else glfwSetWindowShouldClose(m_window, GLFW_TRUE);
     }
+
+    // Live material tuning: [ and ] walk the glazing roughness. This is the
+    // proof that the material path is genuinely live -- it re-uploads nothing,
+    // touches no vertex, and does not mark the scene dirty. Watch the sun glint
+    // on the glass tighten and spread while frame time stays flat.
+    if (edgeDown(GLFW_KEY_LEFT_BRACKET) || edgeDown(GLFW_KEY_RIGHT_BRACKET)) {
+        const float step = edgeDown(GLFW_KEY_RIGHT_BRACKET) ? 0.05f : -0.05f;
+        auto& glass = m_materials[kMaterialGlass];
+        glass.roughness = std::clamp(glass.roughness + step, 0.02f, 1.0f);
+        m_renderer.setImportedMaterial(kMaterialGlass, glass);
+        char msg[64];
+        std::snprintf(msg, sizeof(msg), "glass roughness %.2f", glass.roughness);
+        flash(msg);
+    }
+
+    // Quick save / quick load. A failed save must never take the game down, so
+    // both report through flash() and leave the running city untouched.
+    if (edgeDown(GLFW_KEY_F5)) {
+        flash(saveCity(*this, kQuickSavePath) ? "City saved." : lastSaveError().c_str());
+    }
+    if (edgeDown(GLFW_KEY_F9)) {
+        if (loadCity(*this, kQuickSavePath)) {
+            m_camInit = false;  // re-frame on the loaded city's site
+            flash("City loaded.");
+        } else {
+            flash(lastSaveError().c_str());
+        }
+    }
+
+    // ── Pointer input, ahead of the simulation step below. ───────────────────
+    if (!m_camInit) {
+        // Open on the seeded city, not the grid centre — the terrain generator
+        // may have anchored the starter town anywhere on the map.
+        m_camFocusX = (static_cast<float>(m_siteC) + 0.5f) * kTileWorldSize;
+        m_camFocusZ = (static_cast<float>(m_siteR) + 0.5f) * kTileWorldSize;
+        m_camZoom   = kGridW * kTileWorldSize * 0.95f;  // conservative: fits the whole grid
+        m_camYawDeg = 45.0f;                             // classic diagonal city-builder view
+        m_camInit = true;
+    }
+
+    const bool tickerVisible =
+        !m_citizens.ticker().empty() && m_citizens.ticker().back().age < 12.0f;
+    m_mouseOverUi = m_layout.topBar.contains(m_uiInput.mousePx) ||
+                    m_layout.palette.contains(m_uiInput.mousePx) ||
+                    m_layout.controls.contains(m_uiInput.mousePx) ||
+                    m_layout.minimap.contains(m_uiInput.mousePx) ||
+                    dataPanelRect(m_layout).contains(m_uiInput.mousePx) ||
+                    (tickerVisible && m_layout.ticker.contains(m_uiInput.mousePx)) ||
+                    (m_reportsOpen && m_layout.reports.contains(m_uiInput.mousePx));
+
+    handleCamera(m_layout);
+
+    // Hover tile: cast the mouse pixel onto the ground plane (y=0) and floor
+    // into grid coordinates — the 3-D analogue of the old pixel/tilePx divide.
+    m_hoverC = m_hoverR = -1;
+    if (!m_mouseOverUi) {
+        float gx = 0.0f, gz = 0.0f;
+        if (screenToGroundXZ(m_uiInput.mousePx, m_layout, gx, gz)) {
+            const int c = static_cast<int>(std::floor(gx / kTileWorldSize));
+            const int r = static_cast<int>(std::floor(gz / kTileWorldSize));
+            if (inBounds(c, r)) { m_hoverC = c; m_hoverR = r; }
+        }
+    }
+
+    handlePaletteInput(m_layout);
+    handleMapPaint(m_layout);
+
+    // Zoom LOD: swap in the windowed building meshes when the camera is close
+    // enough to read facades. Hysteresis (24 in / 30 out) keeps the scene from
+    // re-extruding while the player hovers near the threshold.
+    const int wantDetail = m_camZoom < (m_lodDetail == 1 ? 30.0f : 24.0f) ? 1 : 0;
+    if (wantDetail != m_lodDetail) {
+        m_lodDetail = wantDetail;
+        m_sceneDirty = true;
+    }
+
+    // Parcels are simulation state derived from the grid, so they get refreshed
+    // in the sim phase — here, after this frame's edits and ahead of onRender —
+    // and buildCityScene only ever reads them. Any grid mutation raises one of
+    // these flags, and the pass is idempotent and cheap (~0.14 ms at 56²), so
+    // an occasional redundant run (a season flip, say) is not worth a
+    // finer-grained dirty bit.
+    if (m_sceneDirty || m_growthDirty) recomputeParcels();
 
     if (!m_paused) {
         // Zone "listing" clock: real time, not simulated months, so it stays a
@@ -2157,9 +2544,33 @@ void CityBuilderApp::handleMapPaint(const Layout& /*lo*/) {
         return;
     }
 
-    if (m_mouseOverUi || m_hoverC < 0) return;
+    if (m_mouseOverUi || m_hoverC < 0) {
+        // Settle a drag that ended off-grid or over the palette, so releasing
+        // the button anywhere still lands the final rebuild.
+        if (m_paintDragging && !m_uiInput.button(UiMouseButton::Left).down) {
+            m_paintDragging = false;
+            m_sceneDirty = true;
+        }
+        return;
+    }
     if (isPaintTool(m_tool)) {
-        if (m_uiInput.button(UiMouseButton::Left).down) applyTool(m_hoverC, m_hoverR);
+        if (m_uiInput.button(UiMouseButton::Left).down) {
+            applyTool(m_hoverC, m_hoverR);
+            // Coalesce the drag. Road is freeform paint, so a one-second drag
+            // touches a tile per frame and each one would otherwise re-extrude
+            // and re-upload the entire city — measured ~5.8 ms of assembly plus
+            // a ~35 MiB upload, per tile. Demote to the same cadence gate that
+            // growth already uses so the road still materialises in chunks
+            // while dragging, then force one final rebuild on release.
+            if (m_sceneDirty) {
+                m_sceneDirty = false;
+                m_growthDirty = true;
+            }
+            m_paintDragging = true;
+        } else if (m_paintDragging) {
+            m_paintDragging = false;
+            m_sceneDirty = true;
+        }
     } else {
         if (m_uiInput.button(UiMouseButton::Left).pressed) applyTool(m_hoverC, m_hoverR);
     }
@@ -2173,51 +2584,9 @@ void CityBuilderApp::onRender(float /*dt*/) {
     framebufferSize(fbW, fbH);
     if (fbW <= 0 || fbH <= 0) return;
 
-    const Layout lo = computeLayout();
-
-    if (!m_camInit) {
-        // Open on the seeded city, not the grid centre — the terrain generator
-        // may have anchored the starter town anywhere on the map.
-        m_camFocusX = (static_cast<float>(m_siteC) + 0.5f) * kTileWorldSize;
-        m_camFocusZ = (static_cast<float>(m_siteR) + 0.5f) * kTileWorldSize;
-        m_camZoom   = kGridW * kTileWorldSize * 0.95f;  // conservative: fits the whole grid
-        m_camYawDeg = 45.0f;                             // classic diagonal city-builder view
-        m_camInit = true;
-    }
-
-    const bool tickerVisible =
-        !m_citizens.ticker().empty() && m_citizens.ticker().back().age < 12.0f;
-    m_mouseOverUi = lo.topBar.contains(m_uiInput.mousePx) ||
-                    lo.palette.contains(m_uiInput.mousePx) ||
-                    lo.controls.contains(m_uiInput.mousePx) ||
-                    lo.minimap.contains(m_uiInput.mousePx) ||
-                    (tickerVisible && lo.ticker.contains(m_uiInput.mousePx)) ||
-                    (m_reportsOpen && lo.reports.contains(m_uiInput.mousePx));
-
-    handleCamera(lo);
-
-    // Hover tile: cast the mouse pixel onto the ground plane (y=0) and floor
-    // into grid coordinates — the 3-D analogue of the old pixel/tilePx divide.
-    m_hoverC = m_hoverR = -1;
-    if (!m_mouseOverUi) {
-        float gx = 0.0f, gz = 0.0f;
-        if (screenToGroundXZ(m_uiInput.mousePx, lo, gx, gz)) {
-            const int c = static_cast<int>(std::floor(gx / kTileWorldSize));
-            const int r = static_cast<int>(std::floor(gz / kTileWorldSize));
-            if (inBounds(c, r)) { m_hoverC = c; m_hoverR = r; }
-        }
-    }
-
-    handleMapPaint(lo);
-
-    // Zoom LOD: swap in the windowed building meshes when the camera is close
-    // enough to read facades. Hysteresis (24 in / 30 out) keeps the scene from
-    // re-extruding while the player hovers near the threshold.
-    const int wantDetail = m_camZoom < (m_lodDetail == 1 ? 30.0f : 24.0f) ? 1 : 0;
-    if (wantDetail != m_lodDetail) {
-        m_lodDetail = wantDetail;
-        m_sceneDirty = true;
-    }
+    // Layout, camera, hover and every tool edit were resolved in onTick; from
+    // here this function only reads state and draws.
+    const Layout& lo = m_layout;
 
     // Growth-driven rebuilds are cadence-limited (see m_sceneRebuildCooldown);
     // player edits set m_sceneDirty directly and skip the wait.
@@ -2230,6 +2599,11 @@ void CityBuilderApp::onRender(float /*dt*/) {
     // The 3-D scene is a GPU buffer upload, not a per-frame draw call: only
     // rebuild it when a tile actually changed (see the m_sceneDirty sites).
     if (m_sceneDirty) {
+        // The data wash is baked into the ground quads, so a rebuild has to see
+        // current fields. The sim only refreshes them on the month tick, which
+        // is far too slow to feel responsive: drop a school with the Education
+        // layer up and its ring should appear under the cursor, not next April.
+        if (m_dataLayer != DataLayer::None) computeFields();
         m_renderer.uploadImportedScene(buildCityScene());
         m_sceneDirty = false;
     }
@@ -2268,6 +2642,16 @@ ImportedScene CityBuilderApp::buildCityScene() const {
     scene.sourceTag = "citybuilder";
     scene.boundsMin[0] = scene.boundsMin[1] = scene.boundsMin[2] = std::numeric_limits<float>::max();
     scene.boundsMax[0] = scene.boundsMax[1] = scene.boundsMax[2] = std::numeric_limits<float>::lowest();
+    // A fully built 56x56 city emits ~700k packed vertices (~35 MiB). Growing
+    // into that from empty costs ~20 reallocations plus first-touch page faults
+    // on every rebuild — and rebuilds happen on every painted road tile. Size
+    // the buffers from the last rebuild (+12% headroom for a growing city) so
+    // the common case is a single allocation. Measured, fully built 56x56 at
+    // LOD1: 23.9 ms -> 5.8 ms of assembly time.
+    if (m_lastSceneVertexCount > 0) {
+        scene.packedVertices.reserve(m_lastSceneVertexCount + m_lastSceneVertexCount / 8);
+        scene.packedIndices.reserve(m_lastSceneIndexCount + m_lastSceneIndexCount / 8);
+    }
     CityMeshBuilder builder(scene);
     const float ts = kTileWorldSize;
 
@@ -2309,54 +2693,23 @@ ImportedScene CityBuilderApp::buildCityScene() const {
         float desirability = 0.5f;
         bool powered = false;
     };
+    // The parcel *layout* is simulation state, computed by recomputeParcels()
+    // (see the note there on why it does not live in here any more). All this
+    // pass does is read the layout back and average each plot's member tiles
+    // into the presentation values the mesher needs.
     std::vector<Plot> plots;
     std::vector<short> plotIndex(static_cast<std::size_t>(kGridW) * kGridH, -1);
-    m_tilePlots.fill(PlotInfo{});  // persistent per-tile plot record for the tooltip
-    const auto parcelable = [&](int c, int r, Zone z) {
-        if (!inBounds(c, r)) return false;
-        const Tile& pt = tile(c, r);
-        return pt.terrain == Terrain::Grass && pt.zone == z && !pt.road &&
-               pt.building == Building::None && pt.fireTicks == 0 && !pt.charred &&
-               plotIndex[static_cast<std::size_t>(r) * kGridW + c] < 0;
-    };
     for (int r = 0; r < kGridH; ++r) {
         for (int c = 0; c < kGridW; ++c) {
-            const Tile& t = tile(c, r);
-            if (!parcelable(c, r, t.zone) || t.zone == Zone::None) continue;
-            const std::uint32_t roll = tileHash(c, r, 0x9107C0DEu) % 100u;
-            int pw = 1, pd = 1;
-            if (t.zone == Zone::Industrial) {
-                if (roll >= 15 && roll < 40) { pw = 2; pd = 1; }
-                else if (roll < 60) { pw = 1; pd = 2; }
-                else if (roll < 80) { pw = 2; pd = 2; }
-                else if (roll < 92) { pw = 3; pd = 2; }
-                else if (roll >= 92) { pw = 2; pd = 3; }
-            } else if (t.zone == Zone::Commercial) {
-                if (roll >= 30 && roll < 55) { pw = 2; pd = 1; }
-                else if (roll < 75) { pw = 1; pd = 2; }
-                else if (roll < 92) { pw = 2; pd = 2; }
-                else if (roll >= 92) { pw = 3; pd = 2; }
-            } else {
-                if (roll >= 45 && roll < 68) { pw = 2; pd = 1; }
-                else if (roll < 88) { pw = 1; pd = 2; }
-                else if (roll >= 88) { pw = 2; pd = 2; }
-            }
-            const auto rectOk = [&](int w, int d) {
-                for (int dr = 0; dr < d; ++dr)
-                    for (int dc = 0; dc < w; ++dc)
-                        if ((dr != 0 || dc != 0) && !parcelable(c + dc, r + dr, t.zone)) return false;
-                return true;
-            };
-            while (!rectOk(pw, pd)) {
-                if (pw >= pd && pw > 1) --pw;
-                else if (pd > 1) --pd;
-                else break;  // 1x1 always fits (only the origin, already checked)
-            }
+            const std::size_t oi = static_cast<std::size_t>(r) * kGridW + c;
+            const PlotInfo& info = m_tilePlots[oi];
+            if (info.c != c || info.r != r) continue;  // members, not the origin
+            const int pw = info.w, pd = info.d;
             Plot plot;
             plot.c = static_cast<short>(c);
             plot.r = static_cast<short>(r);
-            plot.w = static_cast<std::uint8_t>(pw);
-            plot.d = static_cast<std::uint8_t>(pd);
+            plot.w = info.w;
+            plot.d = info.d;
             int poweredCount = 0;
             float devSum = 0.0f, desSum = 0.0f;
             for (int dr = 0; dr < pd; ++dr) {
@@ -2364,9 +2717,6 @@ ImportedScene CityBuilderApp::buildCityScene() const {
                     const Tile& member = tile(c + dc, r + dr);
                     const std::size_t mi = static_cast<std::size_t>(r + dr) * kGridW + (c + dc);
                     plotIndex[mi] = static_cast<short>(plots.size());
-                    m_tilePlots[mi] = PlotInfo{static_cast<short>(c), static_cast<short>(r),
-                                               static_cast<std::uint8_t>(pw),
-                                               static_cast<std::uint8_t>(pd)};
                     devSum += member.develop;
                     desSum += member.desirability;
                     if (member.powered) ++poweredCount;
@@ -2389,15 +2739,21 @@ ImportedScene CityBuilderApp::buildCityScene() const {
             if (t.terrain == Terrain::Water) {
                 UiColor wc = ((c + r) & 1) ? kWater : kWaterAlt;
                 if (winter) wc = mix(wc, UiColor::fromRgbHex(0xA8C4D4), 0.55f);
+                // Data map up: water is not part of the scale, so it goes
+                // achromatic instead of competing with the ramp for hue.
+                if (m_dataLayer != DataLayer::None) {
+                    wc = ((c + r) & 1) ? kDataWater : kDataWaterAlt;
+                }
                 builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1}, wc);
                 if (!bridge) continue;  // a road on water carries on into the road branch
             } else {
-                // Ground: land-value heat map when toggled, otherwise grass
-                // tinted by the baked scenicPhase jitter so a block reads as
-                // organic.
-                if (m_showLandValue) {
+                // Ground: the active data layer's heat map when one is up,
+                // otherwise grass tinted by the baked scenicPhase jitter so a
+                // block reads as organic.
+                if (m_dataLayer != DataLayer::None) {
                     builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1},
-                                    heat(t.desirability));
+                                    dataSwatch(dataLayerDesc(m_dataLayer),
+                                               dataLayerValue(c, r)));
                 } else {
                     builder.addQuad({x0, 0.0f, z0}, {x1, 0.0f, z0}, {x1, 0.0f, z1}, {x0, 0.0f, z1},
                                     seasonalGrass(mix(kGrassAlt, kGrass, t.scenicPhase)));
@@ -3255,6 +3611,10 @@ ImportedScene CityBuilderApp::buildCityScene() const {
         scene.packedDraws.push_back(
             ImportedScenePackedDraw{0, static_cast<std::uint32_t>(scene.packedIndices.size())});
     }
+    // Remember the size so the next rebuild allocates once instead of growing
+    // through ~20 reallocations of a 25-35 MiB buffer (see the reserve above).
+    m_lastSceneVertexCount = scene.packedVertices.size();
+    m_lastSceneIndexCount = scene.packedIndices.size();
     return scene;
 }
 
@@ -3289,6 +3649,13 @@ const procgen::TriMesh& CityBuilderApp::cachedBuilding(procgen::BuildingKind kin
     desc.lotWidth = swapDims ? lotD : lotW;
     desc.lotDepth = swapDims ? lotW : lotD;
     desc.detail = m_lodDetail;
+    // Facade glazing and metal trim resolve through the named material library
+    // uploaded in onInit(), so their coefficients can be edited live without
+    // re-extruding or re-uploading a single vertex.
+    desc.glassMaterial = kMaterialGlass;
+    desc.mullionMaterial = kMaterialMullion;
+    desc.wallMaterial = kMaterialWall;
+    desc.roofMaterial = kMaterialRoof;
     // Seed off the detail-independent bits so both LOD tiers of one building
     // draw the same massing (the window pass is the only difference).
     desc.seed = (key & ~2u) * 0x9E3779B9u;
@@ -3578,7 +3945,7 @@ void CityBuilderApp::updateVehicles(float dt) {
 
     // trafficLoad is an exponential moving average of car-seconds spent on
     // each road tile: cars deposit dt below, the whole field decays here.
-    // computeDesirability reads it as a nuisance source on jammed roads.
+    // computeFields reads it as a nuisance source on jammed roads.
     const float decay = 1.0f - kCongestionDecay * dt;
     for (Tile& t : m_tiles) t.trafficLoad *= decay;
 
@@ -4309,20 +4676,31 @@ void CityBuilderApp::updateSevereWeather(float dt) {
         if (m_weather != Weather::Rain || m_weatherIntensity < 0.4f) decay *= 3.0f;
         tor.intensity -= decay * dt;
     }
+    // Damage on the same clock as the motion above, so the funnel carves a
+    // continuous scar instead of punching one crater per month boundary.
+    stepTornadoDamage(dt);
+
     std::erase_if(m_tornadoes, [](const Tornado& tor) { return tor.intensity <= 0.15f; });
 }
 
-// Monthly damage pass, run from stepMonth beside stepFire so destruction lives
-// in the sim timebase. Everything downstream reuses existing loops: stripped
-// develop, charred rubble (nuisance splat, happiness drag, self-clear,
-// rebuild), fire ignition from downed lines, and the municipal cascades
-// (losing the power plant browns out the grid via recomputeStats; losing a
-// fire station weakens the response to the fires the storm itself starts).
-void CityBuilderApp::stepTornadoDamage() {
-    if (m_tornadoes.empty()) return;
+// Continuous damage pass, run from updateSevereWeather on the same sim clock
+// that moves the funnel, so the wreckage is a PATH the player watches being
+// drawn rather than a single dot wherever the month boundary happened to land.
+// Everything downstream reuses existing loops: stripped develop, charred rubble
+// (nuisance splat, happiness drag, self-clear, rebuild), fire ignition from
+// downed lines, and the municipal cascades (losing the power plant browns out
+// the grid via recomputeStats; losing a fire station weakens the response to
+// the fires the storm itself starts).
+//
+// Deliberately draws from m_weatherRng, not m_rng: this runs per frame, and
+// advancing the sim RNG per frame would make the monthly sim stream depend on
+// frame rate. The weather RNG is already frame-driven, so it stays honest.
+void CityBuilderApp::stepTornadoDamage(float dt) {
+    if (m_tornadoes.empty() || dt <= 0.0f) return;
+    bool touched = false;
     const auto rnd01 = [&]() -> float {
-        odai::core::lcgNext(m_rng);
-        return static_cast<float>((m_rng >> 8) & 0xFFFFFFu) / 16777216.0f;
+        odai::core::lcgNext(m_weatherRng);
+        return static_cast<float>((m_weatherRng >> 8) & 0xFFFFFFu) / 16777216.0f;
     };
     for (const Tornado& tor : m_tornadoes) {
         const int c0 = std::max(0, static_cast<int>(std::floor(tor.x - kTornadoRadius)));
@@ -4338,8 +4716,9 @@ void CityBuilderApp::stepTornadoDamage() {
                 Tile& t = tile(c, r);
                 if (t.zone != Zone::None && t.develop > 0.0f) {
                     const bool wasBuilt = t.develop > kDevEps;
-                    t.develop = std::max(0.0f, t.develop -
-                                                   kTornadoDamageRate * tor.intensity * falloff);
+                    t.develop = std::max(0.0f, t.develop - kTornadoDamageRate *
+                                                              tor.intensity * falloff * dt);
+                    touched = true;
                     if (wasBuilt && t.develop <= kDevEps) {
                         t.develop = 0.0f;
                         t.charred = true;   // from here it IS fire rubble — same loop
@@ -4347,11 +4726,11 @@ void CityBuilderApp::stepTornadoDamage() {
                         t.fireTicks = 0;
                     }
                     if (wasBuilt && !t.charred && t.fireTicks == 0 &&
-                        rnd01() < kTornadoIgniteChance * tor.intensity * falloff) {
+                        rnd01() < kTornadoIgniteChance * tor.intensity * falloff * dt) {
                         t.fireTicks = kFireBurnMonths;  // downed lines spark
                     }
                 } else if (t.building != Building::None && falloff > 0.4f &&
-                           rnd01() < kTornadoWreckChance * tor.intensity) {
+                           rnd01() < kTornadoWreckChance * tor.intensity * dt) {
                     // Municipal building flattened: clear the footprint (no
                     // refund) and leave it charred. The knock-on effects —
                     // brown-outs, weakened services — fall out of the census.
@@ -4373,21 +4752,28 @@ void CityBuilderApp::stepTornadoDamage() {
                         }
                     }
                     m_sceneDirty = true;  // rare, and a landmark just vanished
+                    touched = true;
                 }
             }
         }
         // Cars caught in the core get tossed — respawn elsewhere with a puff.
+        // Rate-limited like everything else here: without the dt roll a car
+        // sitting in the core would be re-thrown every single frame.
         for (Vehicle& v : m_vehicles) {
             if (v.cx < 0) continue;
             const float dx = (v.cx + 0.5f) - tor.x, dz = (v.cr + 0.5f) - tor.z;
-            if (dx * dx + dz * dz < kTornadoRadius * kTornadoRadius) {
+            if (dx * dx + dz * dz < kTornadoRadius * kTornadoRadius &&
+                rnd01() < kTornadoTossChance * tor.intensity * dt) {
                 addFx((v.cx + 0.5f) * kTileWorldSize, (v.cr + 0.5f) * kTileWorldSize,
                       UiColor::fromRgbHex(0x9AA0A8), 1);
                 respawnVehicle(v);
             }
         }
     }
-    m_growthDirty = true;  // rubble trail catches up on the next cooldown tick
+    // Only nudge the rebuild when the funnel actually bit something — this runs
+    // every frame now, and an unconditional dirty flag would pin the scene
+    // rebuild at its 1.2 s cooldown for the whole life of the storm.
+    if (touched) m_growthDirty = true;
 }
 
 render::ImportedActorFrameData CityBuilderApp::buildActorFrameData() {
@@ -5342,26 +5728,118 @@ void CityBuilderApp::drawWorldOverlay(const Layout& lo) {
         }
     }
 
-    // Land-value legend: a red→green gradient key so the overlay reads at a glance.
-    if (m_showLandValue) {
-        const float lw = 168.0f * s, lh = 12.0f * s;
-        const float lx = lo.map.minX + 14.0f * s;
-        const float ly = lo.map.minY + 32.0f * s;
-        const UiRect chip = UiRect::fromXYWH(lx - 8.0f * s, ly - 24.0f * s, lw + 16.0f * s,
-                                             lh + 44.0f * s);
-        m_uiDrawList.addRoundRectFilled(chip, withA(kPanel, 0.92f), kRadiusCtl * s);
-        m_uiDrawList.addRoundRect(chip, kEdge, kRadiusCtl * s, s);
-        textLeft(m_uiFontBold, "Land Value", lx, ly - 12.0f * s, kText);
-        const int seg = 24;
-        for (int i = 0; i < seg; ++i) {
-            const float f0 = static_cast<float>(i) / seg;
-            m_uiDrawList.addRectFilled(
-                UiRect::fromXYWH(lx + f0 * lw, ly, lw / seg + 1.0f, lh), heat(f0));
-        }
-        m_uiDrawList.addRect(UiRect::fromXYWH(lx, ly, lw, lh), kEdge, s);
-        textLeft(m_uiFont, "poor", lx, ly + lh + 9.0f * s, kTextDim);
-        textRight(m_uiFont, "prime", lx + lw, ly + lh + 9.0f * s, kTextDim);
+    drawDataPanel(lo);
+}
+
+// ── Data map ────────────────────────────────────────────────────────────────
+// A layer chip per field plus the gradient key for whichever one is washing the
+// map. Geometry constants are shared by dataPanelRect() — which the input pass
+// calls earlier in the same frame, to keep clicks off the tiles behind it — and
+// drawDataPanel(), so the clickable area can never drift from the drawn one.
+// Every value is a multiple of 4 at 1x, on the same spacing grid the rest of
+// the HUD uses (4/8/12/16/24) — the previous 10/22/26 mix was the one-off
+// padding that made this panel sit off the app's rhythm.
+namespace {
+constexpr float kDataPad     = 12.0f;   // all in unscaled px; multiply by lo.s
+constexpr float kDataTitleH  = 20.0f;
+constexpr float kDataChipH   = 24.0f;   // also the 24px minimum comfortable hit target
+constexpr float kDataChipGap = 4.0f;
+constexpr float kDataLegendH = 12.0f;
+constexpr float kDataLabelH  = 20.0f;
+constexpr int   kDataChips   = static_cast<int>(DataLayer::Count) - 1;  // None gets no chip
+}  // namespace
+
+UiRect CityBuilderApp::dataPanelRect(const Layout& lo) const {
+    const float s = lo.s;
+    float chipW = 120.0f * s;
+    for (int i = 1; i < static_cast<int>(DataLayer::Count); ++i) {
+        chipW = std::max(chipW, m_uiFont.measureText(dataLayerDesc(static_cast<DataLayer>(i)).name) +
+                                    24.0f * s);
     }
+    float h = (kDataPad * 2.0f + kDataTitleH) * s + kDataChips * kDataChipH * s +
+              (kDataChips - 1) * kDataChipGap * s;
+    if (m_dataLayer != DataLayer::None) {
+        h += (kDataChipGap + kDataLegendH + kDataLabelH) * s;
+    }
+    return UiRect::fromXYWH(lo.map.minX + 12.0f * s, lo.map.minY + 12.0f * s,
+                            chipW + kDataPad * 2.0f * s, h);
+}
+
+void CityBuilderApp::drawDataPanel(const Layout& lo) {
+    const float s = lo.s;
+    const UiRect panel = dataPanelRect(lo);
+    m_uiDrawList.addRoundRectFilled(panel, withA(kPanel, 0.92f), kRadiusCtl * s);
+    m_uiDrawList.addRoundRect(panel, kEdge, kRadiusCtl * s, s);
+
+    const float x = panel.minX + kDataPad * s;
+    const float w = panel.width() - kDataPad * 2.0f * s;
+    float y = panel.minY + kDataPad * s;
+    // A static section label is the lowest-priority thing in this panel — the
+    // chips are the content. Faint, not dim, so it sits a step below them.
+    textLeft(m_uiFontBold, "Data Map", x, y + kDataTitleH * 0.5f * s, kTextFaint);
+    y += kDataTitleH * s;
+
+    for (int i = 1; i < static_cast<int>(DataLayer::Count); ++i) {
+        const auto layer = static_cast<DataLayer>(i);
+        const bool on = m_dataLayer == layer;
+        // Clicking the live chip clears the wash: one click in, one click out.
+        if (uiButton(UiRect::fromXYWH(x, y, w, kDataChipH * s), dataLayerDesc(layer).name, on,
+                     kAccent, &m_uiFont)) {
+            setDataLayer(on ? DataLayer::None : layer);
+        }
+        y += (kDataChipH + kDataChipGap) * s;
+    }
+
+    if (m_dataLayer == DataLayer::None) return;
+
+    // Banded key: one swatch per map class, not a smooth gradient. The legend
+    // is then not an analogy for the wash, it IS the wash — a player can match
+    // a tile to a swatch by eye, which a continuous gradient never allows.
+    // Always low → high left to right; no layer inverts (see DataLayerDesc).
+    const DataLayerDesc& desc = dataLayerDesc(m_dataLayer);
+    const float lh = kDataLegendH * s;
+    const float sw = w / static_cast<float>(kDataLayerClasses);
+    for (int i = 0; i < kDataLayerClasses; ++i) {
+        m_uiDrawList.addRectFilled(
+            UiRect::fromXYWH(x + static_cast<float>(i) * sw, y, sw + 1.0f, lh),
+            UiColor::fromRgbHex(desc.ramp[i]));
+    }
+    m_uiDrawList.addRect(UiRect::fromXYWH(x, y, w, lh), kEdge, s);
+    textLeft(m_uiFont, desc.lowLabel, x, y + lh + 8.0f * s, kTextDim);
+    textRight(m_uiFont, desc.highLabel, x + w, y + lh + 8.0f * s, kTextDim);
+}
+
+float CityBuilderApp::dataLayerValue(int c, int r) const {
+    const std::size_t i = static_cast<std::size_t>(r) * kGridW + c;
+    float v = 0.0f;
+    switch (m_dataLayer) {
+        case DataLayer::LandValue: v = tile(c, r).desirability; break;
+        case DataLayer::Pollution: v = m_pollution[i]; break;
+        case DataLayer::Education:
+            v = m_coverage[static_cast<std::size_t>(Service::Education)][i];
+            break;
+        case DataLayer::Health:
+            v = m_coverage[static_cast<std::size_t>(Service::Health)][i];
+            break;
+        case DataLayer::Safety:
+            v = m_coverage[static_cast<std::size_t>(Service::Safety)][i];
+            break;
+        case DataLayer::Traffic:
+            // Normalised against the load where a road first reads as jammed,
+            // so the top class means "congested", not "busiest tile on the map".
+            v = clamp01(tile(c, r).trafficLoad / kCongestionStart);
+            break;
+        default: return 0.0f;
+    }
+    // Returned raw: the ramp itself is never inverted, so a tile's class always
+    // answers "how much of the thing the chip names is here".
+    return v;
+}
+
+void CityBuilderApp::setDataLayer(DataLayer layer) {
+    if (m_dataLayer == layer) return;
+    m_dataLayer = layer;
+    m_sceneDirty = true;  // the wash is baked into the uploaded ground quads
 }
 
 void CityBuilderApp::drawTopBar(const Layout& lo) {
@@ -5371,12 +5849,22 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
                                       lo.topBar.maxY}, kEdge);
     const float cy = lo.topBar.minY + lo.topBar.height() * 0.5f;
 
-    textLeft(m_uiFontBold, m_cityName, 16.0f * s, cy - 9.0f * s, kText);
+    // Type scale in this bar, loudest first: display 18 bold for the alert and
+    // for every stat value (the numbers the player scans), body 15 bold for the
+    // city name, caption 12 for the labels that merely name those numbers.
+    // Falls back to the body faces if a step failed to bake.
+    const ui::Font& cap  = m_uiFontCaption.valid() ? m_uiFontCaption : m_uiFont;
+    const ui::Font& disp = m_uiFontDisplay.valid() ? m_uiFontDisplay : m_uiFontBold;
+
+    // Identity block. Deliberately the quietest thing here: the city's name and
+    // date never change what the player does next, so they get position (first
+    // in the reading order) but not weight or size.
+    textLeft(m_uiFontBold, m_cityName, 16.0f * s, cy - 10.0f * s, kText);
     std::string date = std::string(kMonths[m_month]) + " · Year " + std::to_string(m_year) +
                        " · " + seasonName(m_season);
     if (m_weather == Weather::Rain) date += " · Rain";
     else if (m_weather == Weather::Snow) date += " · Snow";
-    textLeft(m_uiFont, date, 16.0f * s, cy + 9.0f * s, kTextDim);
+    textLeft(cap, date, 16.0f * s, cy + 9.0f * s, kTextFaint);
 
     // Severe-weather alert beside the title: the watch states surface the
     // atmosphere's charge BEFORE anything happens, so a tornado always feels
@@ -5397,15 +5885,17 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
     const float titleW = m_uiFontBold.measureText("OdaiCity");
     float identityW = titleW;
     if (alert) {
-        textLeft(m_uiFontBold, alert, 16.0f * s + titleW + 12.0f * s, cy - 9.0f * s, alertCol);
-        identityW = titleW + 12.0f * s + m_uiFontBold.measureText(alert);
+        // The one thing allowed to out-shout the treasury, and only while it is
+        // on screen: display size plus an alarm colour, so it wins on two axes.
+        textLeft(disp, alert, 16.0f * s + titleW + 12.0f * s, cy - 10.0f * s, alertCol);
+        identityW = titleW + 12.0f * s + disp.measureText(alert);
     }
 
     // RCI demand meter geometry (drawn last, right-anchored) — needed up front
     // so chips know where they must stop.
     const float barW = 14.0f * s, stepX = 22.0f * s, barH = 22.0f * s;
     const float rciX = lo.topBar.maxX - 16.0f * s - (stepX * 2.0f + barW);
-    const float chipLimit = rciX - 12.0f * s - m_uiFont.measureText("Demand") - 20.0f * s;
+    const float chipLimit = rciX - 12.0f * s - cap.measureText("Demand") - 20.0f * s;
 
     // Stat chips: label over value. Each slot is as wide as its content
     // demands, rounded up to a 24px step so the row only reflows when a value
@@ -5413,20 +5903,25 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
     // raw widths every frame would make the whole row wobble). Chips that
     // would collide with the demand meter are dropped, rightmost first.
     const float slotStep = 24.0f * s;
-    float x = 16.0f * s + std::max(identityW, m_uiFont.measureText(date)) + 28.0f * s;
+    float x = 16.0f * s + std::max(identityW, cap.measureText(date)) + 28.0f * s;
     x = std::ceil(x / slotStep) * slotStep;
 
+    // Label at caption size sitting high, value at display size below it: a
+    // 1.5x size ratio plus the dim/bright colour step means the eye lands on the
+    // number and reads the word only when it needs to. Baselines are pushed
+    // apart to cy-13/cy+9 because an 18px value is taller ink than the 15px one
+    // it replaces and would otherwise touch its own label.
     auto chip = [&](std::string_view label, std::string_view value, const UiColor& col,
                     std::string_view note = {}, const UiColor& noteCol = kTextDim) {
         const float valueW = m_uiFontNumeric.measureText(value);
-        const float noteW = note.empty() ? 0.0f : 8.0f * s + m_uiFont.measureText(note);
-        float w = std::max(m_uiFont.measureText(label), valueW + noteW) + slotStep;
+        const float noteW = note.empty() ? 0.0f : 8.0f * s + cap.measureText(note);
+        float w = std::max(cap.measureText(label), valueW + noteW) + slotStep;
         w = std::ceil(w / slotStep) * slotStep;
         if (x + w > chipLimit) return;
-        textLeft(m_uiFont, label, x, cy - 9.0f * s, kTextDim);
+        textLeft(cap, label, x, cy - 13.0f * s, kTextDim);
         textLeft(m_uiFontNumeric, value, x, cy + 9.0f * s, col);
         if (!note.empty()) {
-            textLeft(m_uiFont, note, x + valueW + 8.0f * s, cy + 9.0f * s, noteCol);
+            textLeft(cap, note, x + valueW + 8.0f * s, cy + 9.0f * s, noteCol);
         }
         x += w;
     };
@@ -5458,7 +5953,7 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
     // RCI demand bars, caption on the shared centre line. Bars + letters are
     // budgeted to stay inside the bar's height (the old layout centred the
     // R/C/I letters at cy+25, pushing their ink past the bar's bottom edge).
-    textRight(m_uiFont, "Demand", rciX - 12.0f * s, cy, kTextDim);
+    textRight(cap, "Demand", rciX - 12.0f * s, cy, kTextDim);
     const float base = lo.topBar.maxY - 18.0f * s;
     const float dem[3] = {m_resDemand, m_comDemand, m_indDemand};
     const UiColor demc[3] = {kZoneR, kZoneC, kZoneI};
@@ -5479,12 +5974,14 @@ void CityBuilderApp::drawTopBar(const Layout& lo) {
     }
 }
 
-void CityBuilderApp::drawPalette(const Layout& lo) {
+// Palette geometry, solved once and shared by the drawing pass and the input
+// pass so the rect a tool is drawn in is exactly the rect that selects it.
+// Extracted when input moved to onTick: drawPalette used to hit-test and call
+// setTool() from inside a draw function, which is why this needed to be a
+// function of the Layout alone rather than a side effect of rendering.
+CityBuilderApp::PaletteLayout CityBuilderApp::computePaletteLayout(const Layout& lo) const {
+    PaletteLayout pl;
     const float s = lo.s;
-    m_uiDrawList.addRectFilled(lo.palette, kPanel);
-    m_uiDrawList.addRectFilled(UiRect{lo.palette.maxX - 1.0f, lo.palette.minY, lo.palette.maxX,
-                                      lo.palette.maxY}, kEdge);
-
     const float padX = 10.0f * s;
     const float btnW = lo.palette.width() - padX * 2.0f;
 
@@ -5505,24 +6002,61 @@ void CityBuilderApp::drawPalette(const Layout& lo) {
                         ? 0.0f
                         : std::clamp((comfyH - availH) / std::max(1.0f, comfyH - tightH),
                                      0.0f, 1.0f);
-    const float btnH = lerpf(40.0f, 28.0f, t) * s;
-    const float gap  = lerpf(6.0f, 4.0f, t) * s;
-    const float hdrH = lerpf(24.0f, 18.0f, t) * s;
-    const bool  twoLine = btnH >= 34.0f * s;
+    pl.btnH = lerpf(40.0f, 28.0f, t) * s;
+    pl.gap  = lerpf(6.0f, 4.0f, t) * s;
+    pl.hdrH = lerpf(24.0f, 18.0f, t) * s;
+    pl.twoLine = pl.btnH >= 34.0f * s;
+    pl.padX = padX;
 
     float y = lo.palette.minY + 10.0f * s;
+    for (const PaletteEntry& e : kPaletteOrder) {
+        if (e.header != nullptr) {
+            pl.headerY[static_cast<std::size_t>(&e - kPaletteOrder)] = y;
+            y += pl.hdrH;
+            continue;
+        }
+        pl.rows[static_cast<std::size_t>(e.tool)] =
+            UiRect::fromXYWH(lo.palette.minX + padX, y, btnW, pl.btnH);
+        y += pl.btnH + pl.gap;
+    }
+    return pl;
+}
 
-    auto header = [&](const char* label) {
+// Palette hit-test, run from onTick. Selecting a tool is input, not drawing.
+void CityBuilderApp::handlePaletteInput(const Layout& lo) {
+    if (!m_uiInput.button(UiMouseButton::Left).pressed) return;
+    const PaletteLayout pl = computePaletteLayout(lo);
+    for (const PaletteEntry& e : kPaletteOrder) {
+        if (e.header != nullptr) continue;
+        if (pl.rows[static_cast<std::size_t>(e.tool)].contains(m_uiInput.mousePx)) {
+            setTool(e.tool);
+            return;
+        }
+    }
+}
+
+void CityBuilderApp::drawPalette(const Layout& lo) {
+    const float s = lo.s;
+    m_uiDrawList.addRectFilled(lo.palette, kPanel);
+    m_uiDrawList.addRectFilled(UiRect{lo.palette.maxX - 1.0f, lo.palette.minY, lo.palette.maxX,
+                                      lo.palette.maxY}, kEdge);
+
+    const PaletteLayout pl = computePaletteLayout(lo);
+    const float padX = pl.padX;
+    const float btnH = pl.btnH;
+    const bool  twoLine = pl.twoLine;
+
+    auto header = [&](std::size_t slot, const char* label) {
         // The label sits at the bottom of its band, tight against the rows it
         // names — proximity, not size, carries the grouping; the faint colour
         // keeps it a step below the tool names in the hierarchy.
-        textLeft(m_uiFontBold, label, lo.palette.minX + padX, y + hdrH - 9.0f * s, kTextFaint);
-        y += hdrH;
+        textLeft(m_uiFontBold, label, lo.palette.minX + padX,
+                 pl.headerY[slot] + pl.hdrH - 9.0f * s, kTextFaint);
     };
 
     auto toolRow = [&](Tool tool) {
         const ToolMeta& m = kTools[static_cast<int>(tool)];
-        const UiRect r = UiRect::fromXYWH(lo.palette.minX + padX, y, btnW, btnH);
+        const UiRect r = pl.rows[static_cast<std::size_t>(tool)];
         const bool hover = r.contains(m_uiInput.mousePx);
         const bool active = m_tool == tool;
         const UiColor bg = active ? mix(kBtn, m.color, 0.32f) : (hover ? kBtnHover : kBtn);
@@ -5569,28 +6103,13 @@ void CityBuilderApp::drawPalette(const Layout& lo) {
             }
         }
 
-        if (hover && m_uiInput.button(UiMouseButton::Left).pressed) setTool(tool);
-        y += btnH + gap;
     };
 
-    header("DANGER");
-    toolRow(Tool::Bulldoze);
-    toolRow(Tool::Match);
-    header("ZONES");
-    toolRow(Tool::ZoneR);
-    toolRow(Tool::ZoneC);
-    toolRow(Tool::ZoneI);
-    header("NETWORK");
-    toolRow(Tool::Road);
-    header("SERVICES");
-    toolRow(Tool::Police);
-    toolRow(Tool::Fire);
-    toolRow(Tool::Clinic);
-    toolRow(Tool::School);
-    toolRow(Tool::Park);
-    toolRow(Tool::Library);
-    toolRow(Tool::Amphitheater);
-    toolRow(Tool::Power);
+    // Same single source of order the layout and hit-test walk.
+    for (const PaletteEntry& e : kPaletteOrder) {
+        if (e.header != nullptr) header(static_cast<std::size_t>(&e - kPaletteOrder), e.header);
+        else toolRow(e.tool);
+    }
 }
 
 void CityBuilderApp::drawControls(const Layout& lo) {
@@ -5690,15 +6209,9 @@ void CityBuilderApp::drawControls(const Layout& lo) {
     // (R/C/I demand now reads from the bars in the top bar — no need to
     // duplicate a numeric snapshot down here too.)
 
-    // Right cluster, anchored off the panel edge with the same 8px pad.
+    // Right cluster, anchored off the panel edge with the same 8px pad. (The
+    // data layers moved to their own panel over the map — see drawDataPanel.)
     const UiRect reportsBtn = UiRect::fromXYWH(r.maxX - pad - 88.0f * s, by, 88.0f * s, bh);
-    const UiRect lvBtn = UiRect::fromXYWH(reportsBtn.minX - 8.0f * s - 108.0f * s, by,
-                                          108.0f * s, bh);
-    if (uiButton(lvBtn, "Land Value", m_showLandValue, kAccent)) {
-        m_showLandValue = !m_showLandValue;
-        m_sceneDirty = true;
-    }
-
     if (uiButton(reportsBtn, "Reports", m_reportsOpen, kGold)) {
         m_reportsOpen = !m_reportsOpen;
     }
