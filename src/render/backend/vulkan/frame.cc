@@ -271,7 +271,20 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         return false;
     }
 
-    std::array<std::uint64_t, kGpuTimestampQueryCount> timestamps{};
+    // Per-query availability, NOT a plain bulk read.
+    //
+    // Without WITH_AVAILABILITY, vkGetQueryPoolResults reports VK_NOT_READY for
+    // the WHOLE range if any single query in it is unwritten -- and most of
+    // these are conditional. A frame with voxel GI, SSAO and sun shafts turned
+    // off never writes their queries, so the entire readback failed every frame
+    // and every pass timing read zero. Availability makes a skipped pass mean
+    // "this pass did not run", which is the truth, instead of poisoning the
+    // other 30 measurements.
+    struct TimestampResult {
+        std::uint64_t ticks = 0;
+        std::uint64_t available = 0;
+    };
+    std::array<TimestampResult, kGpuTimestampQueryCount> timestamps{};
     const VkResult result = vkGetQueryPoolResults(
         m_device,
         queryPool,
@@ -279,14 +292,17 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         kGpuTimestampQueryCount,
         sizeof(timestamps),
         timestamps.data(),
-        sizeof(std::uint64_t),
-        VK_QUERY_RESULT_64_BIT
+        sizeof(TimestampResult),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT
     );
-    if (result == VK_NOT_READY) {
+    if (result != VK_SUCCESS && result != VK_NOT_READY) {
+        logVkFailure("vkGetQueryPoolResults(gpuTimestamps)", result);
         return false;
     }
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkGetQueryPoolResults(gpuTimestamps)", result);
+    // The frame's own start/end bracket every pass, so if those two are not
+    // ready the submission is genuinely still in flight and nothing is usable.
+    if (timestamps[kGpuTimestampQueryFrameStart].available == 0u ||
+        timestamps[kGpuTimestampQueryFrameEnd].available == 0u) {
         return false;
     }
 
@@ -294,8 +310,11 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         if (startIndex >= kGpuTimestampQueryCount || endIndex >= kGpuTimestampQueryCount) {
             return 0.0f;
         }
-        const std::uint64_t startTicks = timestamps[startIndex];
-        const std::uint64_t endTicks = timestamps[endIndex];
+        if (timestamps[startIndex].available == 0u || timestamps[endIndex].available == 0u) {
+            return 0.0f;  // pass did not run this frame
+        }
+        const std::uint64_t startTicks = timestamps[startIndex].ticks;
+        const std::uint64_t endTicks = timestamps[endIndex].ticks;
         if (endTicks <= startTicks) {
             return 0.0f;
         }
